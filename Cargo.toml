@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/agg-witness",
+  "crates/agg-pcs-config",
+  "crates/agg-piop",
+  "crates/agg-keccak",
+  "crates/agg-bridge",
+  "crates/agg-cli",
+  "crates/agg-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Same profiles as Aerie: dev builds keep the heavy dependency graph optimized.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.ci]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+
+[workspace.dependencies]
+# Internal crates.
+agg-witness = { path = "crates/agg-witness" }
+agg-pcs-config = { path = "crates/agg-pcs-config" }
+agg-piop = { path = "crates/agg-piop" }
+agg-keccak = { path = "crates/agg-keccak" }
+agg-bridge = { path = "crates/agg-bridge" }
+
+# Aerie (a16z/aerie) at rev 49b6c21. Path crates inside the git repo resolve
+# through Aerie's own workspace, so its pins of Akita/Jolt/Spongefish apply.
+aerie-falcon = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536196f53618823ffdf0e899", default-features = false, features = ["internals"] }
+aerie-prover = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536196f53618823ffdf0e899", default-features = false, features = ["internals"] }
+aerie-pcs-config = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536196f53618823ffdf0e899" }
+aerie-keccak = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536196f53618823ffdf0e899" }
+aerie-simd = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536196f53618823ffdf0e899" }
+
+# Akita and its jolt-field revision, pinned exactly as Aerie 49b6c21 pins them.
+akita-algebra = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-challenges = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-config = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["dev-protocol"] }
+akita-error = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-params = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-pcs = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false }
+akita-sumcheck = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-transcript = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["transcript-blake2b"] }
+akita-types = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
+akita-verifier = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["transcript-blake2b"] }
+jolt-field = { git = "https://github.com/a16z/jolt", rev = "c7c2d08d5bb0c7c80501f29f723e595af7fcff3c", default-features = false, features = ["solinas"] }
+jolt-poly = { git = "https://github.com/a16z/jolt", rev = "c7c2d08d5bb0c7c80501f29f723e595af7fcff3c", default-features = false }
+spongefish = { git = "https://github.com/arkworks-rs/spongefish", rev = "ef9741346a150039427d9e0c02d6b2d73e93ec81", default-features = false, features = ["blake2", "sha3"] }
+
+# Flock (succinctlabs/flock) at rev 83f963e (HEAD circuit language).
+flock-core = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-prover = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-field = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+
+# ML-DSA (RustCrypto) for key generation and signing; sha3 for reference SHAKE.
+ml-dsa = "=0.1.1"
+sha3 = "0.10.9"
+rayon = "1.10"

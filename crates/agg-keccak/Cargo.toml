@@ -1,0 +1,24 @@
+[package]
+name = "agg-keccak"
+description = "Flock Keccak gate port, sponge union circuit, bridge slot and segment driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Opt-in AVX-512 paths. aerie-keccak is runtime-dispatched; Flock's GF(2^128)
+# AVX-512/VPCLMULQDQ kernels are compile-time (`target_feature`) and need the
+# RUSTFLAGS that scripts/bench.sh AVX512=1 sets in a separate target dir.
+avx512 = []
+
+[dependencies]
+aerie-keccak = { workspace = true }
+flock-core = { workspace = true }
+flock-field = { workspace = true }
+flock-prover = { workspace = true }
+sha3 = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

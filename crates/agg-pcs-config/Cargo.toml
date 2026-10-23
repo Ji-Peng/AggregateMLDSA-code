@@ -1,0 +1,18 @@
+[package]
+name = "agg-pcs-config"
+description = "Akita commitment presets, fold-schedule catalogs and the two-round commit driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aerie-pcs-config = { workspace = true }
+akita-challenges = { workspace = true }
+akita-config = { workspace = true }
+akita-error = { workspace = true }
+akita-params = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,4 @@
+# No `target-cpu=native` and no `target-feature` flags here: the default build
+# must not rely on SIMD (AGENTS.md). AVX-512 builds go through the `avx512`
+# cargo feature plus scripts/bench.sh AVX512=1 (separate target dir).
+[build]

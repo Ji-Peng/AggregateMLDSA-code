@@ -1,0 +1,22 @@
+[package]
+name = "agg-cli"
+description = "Prove/verify command-line tools, wire format, record binding and caches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agg"
+path = "src/main.rs"
+
+[dependencies]
+agg-witness = { workspace = true }
+agg-pcs-config = { workspace = true }
+agg-piop = { workspace = true }
+agg-keccak = { workspace = true }
+agg-bridge = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

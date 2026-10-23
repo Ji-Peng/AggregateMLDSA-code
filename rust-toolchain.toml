@@ -1,0 +1,5 @@
+# Stable toolchain. Aerie pins 1.95 (its rust-version); any newer stable works.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
