@@ -127,6 +127,7 @@ dependencies = [
  "agg-witness",
  "flock-field",
  "jolt-field",
+ "rayon",
  "sha3 0.10.9",
 ]
 
@@ -181,19 +182,24 @@ dependencies = [
  "aerie-falcon",
  "aerie-prover",
  "aerie-simd",
+ "agg-bridge",
  "agg-pcs-config",
+ "agg-piop",
  "agg-witness",
  "akita-algebra",
  "akita-config",
  "akita-error",
  "akita-params",
  "akita-pcs",
+ "akita-serialization",
  "akita-sumcheck",
  "akita-transcript",
  "akita-types",
  "akita-verifier",
  "jolt-field",
  "jolt-poly",
+ "rayon",
+ "sha3 0.10.9",
  "spongefish",
 ]
 

@@ -175,3 +175,178 @@ is what allows that order: the bridge slot's witness (copies of the w1Encode wor
 not depend on `sd`, so it is committed with the Keccak slot before event 2. Because
 `fs_sigma` is drawn after `sd`, the Flock transcript already depends on `sd` through its
 seed; the digest is what binds the relation itself.
+
+## P1. Manifest part of event 0 (spec Section 10)
+
+Spec: event 0 carries "the four group descriptors with catalog row ids", the digit layout
+id and the bridge parameters, without a byte encoding.
+
+Code (`agg_piop::manifest::CommitmentManifest::binding_bytes`, `docs/piop.md` Section 2):
+a fixed little-endian encoding of the wire version, parameter set, relation flag, `N`,
+`N*`, digit layout id 0, then per group its role, round, PCS family, logical and physical
+variable counts, polynomial count and one alphabet byte per polynomial, then one catalog
+row id, then `(J_t, m_t, k_t)`. Only the grouped row id
+(`mldsa-44-mode-a-batch-<N*>-level3-final`) is bound, not one id per group: Akita keys the
+precommitted groups' scalar rows by their layouts, which the per-group fields already bind,
+and the grouped row determines the final profile and the opening schedule. The public-record
+digest and the Flock profile id are added by the transcript stage.
+
+## P2. No divisibility projection (spec Section 6, Appendix B.1)
+
+The implementation task asked for Aerie's projection `Pi_res` on the virtual residual
+with its stage-1 linkage. The spec (Section 6, decision B.1) replaces it by the committed
+quotient `v` and the field identity `Delta = 0` tested inside the stage-3 ring instance at
+`r^(2)`, because an ML-DSA residual projection wraps modulo `p`. The code follows the spec:
+there is no projection seed, Rice section, reverse map or stage-1 projection instance;
+Aerie's `projection/` is not used. The quotient's range (`v` digits, Section 4.3) is what
+lifts `Delta = 0` to (3.1).
+
+## P3. No grinding in this stage (spec Section 10)
+
+Spec: "Encodings, the per-limb `K` sampler, LEB128 work nonces and the scheduled grinding
+are Aerie's; the work plan per admitted shape is an obligation of `agg-pcs-config`."
+
+Code (`agg_piop::transcript`): every challenge event is registered at difficulty zero and
+no nonce is emitted or checked; the transcript has no work stream. The samplers and
+encodings are Aerie's. Why: `agg-pcs-config` publishes no grinding plan yet; adding
+Aerie's nonce mechanics changes the wire format (nonce bytes next to the challenges),
+which is not frozen (wire version 0). To add: a `PiopGrindingPlan` per shape, a difficulty
+per registry challenge, Aerie's `search_grinding_nonce`/`apply_work` in the prover and
+verifier states, and the nonce stream in `AggregateProof`.
+
+## P4. Bridge matrices and the Keccak side are hooks (spec Sections 8, 9.1, 10, 11)
+
+Spec: the verifier derives `M_1, M_2, M_3` from `sd` (Section 9.1) and verifies the Flock
+sub-proofs against `mu_i, c~_i, Y_sigma` and the circuit digest (Section 11 step 3).
+
+Code: `prover::BridgeDerivation::matrices(sd)` and `prover::KeccakSide` /
+`verifier::KeccakVerifier` are trait hooks, so the wire format and the event order do not
+change when `agg-keccak` (Flock sub-proofs, milestone M3) is plugged in; the transcript
+events 2, 3, 5 and 6 are always present with `S` atoms.
+
+- Matrices: `prover::SeededMatrices` is the derivation of Section 9.1
+  (`agg_bridge::seed::derive_matrices`; `BridgeDerivation::seed_derived` is true for it
+  only). Choices the spec leaves open: the `LE64(t)` of the hash input is the level number
+  `t = 1, 2, 3`; a column's rows are stored in the order drawn; the XOF is read in 64-byte
+  chunks (the word stream is the same). A known-answer test (column 0 of each level for
+  `sd = 0^32`) was cross-checked against an independent pure-Python cSHAKE256. Cost: the
+  2 x 2^19 + 49,152 columns take one Keccak-f each after a shared prefix state, and the
+  matrices take 62 MB in each of prover and verifier. Measured on this machine (release,
+  2026-10-24, one test process, not a benchmark): median 150 ms over 7 derivations on 7
+  threads (134 to 215 ms), 0.94 s on one thread. This is a fixed verifier cost (step
+  `matrices`) that the estimates of spec Section 11 do not list; at small `N` it dominates
+  mode-B verification. Reducing it needs a spec change (fewer XOF calls per column), not
+  made here.
+- Test stand-ins: `prover::FixedMatrices` (caller-supplied matrices whatever the seed),
+  `prover::NoKeccak` and `verifier::NoKeccakVerifier` (empty Flock items, Flock profile 0)
+  exist only in unit tests and with the crate feature `test-hooks`, which the integration
+  tests enable through a self dev-dependency (`agg_piop::test_hooks_enabled()`). The
+  prover, verifier and benchmark builds do not have them.
+- Configuration policy (`verifier::check_configuration`, run before the proof is read;
+  `VerifyError::Configuration`): the `KeccakVerifier` declares its Flock profile
+  (`KeccakVerifier::profile`) and must match the requested one; mode A (profiles `Fast`,
+  `LaBinius`) requires `seed_derived()`, in every build, because with matrices known
+  before `G_main` and the Flock commitments are fixed the bound of Section 9.4 does not
+  apply; profile 0 (no Keccak argument, `c~_i` not tied to the committed bits) is refused
+  unless the test hooks are compiled in. `prover::prove` refuses mode A over unseeded
+  matrices as well (completeness only).
+
+What remains open is planned, not a defect of the PIOP: there is no Flock
+`KeccakVerifier` yet (milestone M3, `agg-keccak` bridge slot and segment driver, K6, K7).
+Until it exists the only accepting production configuration is mode B
+(`mode_b::verify_mode_b` with `SeededMatrices`), which is sound through its own checks
+(P9). Mode A becomes available by passing the Flock verifier (profile `Fast` or
+`LaBinius`) with `SeededMatrices`; the policy refuses any other bridge.
+
+## P5. Public-record binding tree and instance digest (spec Sections 2, 10)
+
+Spec: Aerie's 16-KiB-leaf cSHAKE256 tree under `agg-mldsa/v1/public-records-binding`.
+
+Code (`agg_piop::binding`): the stream `LE64(N) || (pk || LE64(|M|) || M || c~)*` is cut into
+16-KiB blocks, leaf `i = cSHAKE256(block_i, 32)` under `agg-mldsa/v1/record-leaf`, root
+`cSHAKE256(LE64(blocks) || leaves, 32)` under the binding customization. Aerie's own
+implementation hashes FN-DSA `hpk` values and salts and is not reusable for ML-DSA
+records; this tree keeps its block size and customization scheme. The instance digest of
+the Spongefish domain separator is `cSHAKE256(LE64(len) || record, 32)` under
+`agg-mldsa/v1/instance`, as Aerie's `instance::digest`.
+
+## P6. Transcript event framing (spec Section 10)
+
+Spec: one event each for the round-2 commitments (event 4), the Flock seeds (event 5) and
+the final vectors with the Flock proofs (event 6).
+
+Code: event 4 is three registry events (`commit/level1`, `commit/level2`,
+`commit/level3`, one per group, as Aerie absorbs its groups); event 5 is one squeeze of
+`32 S` bytes; event 6 is two events, the `512 S` bytes of `Y_sigma` (bits packed least
+significant first) and the `S` Flock proofs each framed by `LE64` length; event 2 frames
+the `S` Flock commitments the same way. Every challenge still follows the previous absorb
+and the order of Section 10 is unchanged; only the registry granularity differs.
+
+## P7. Instance orders left open by the spec (Sections 7.3 to 7.5)
+
+Fixed in `docs/piop.md` Section 7: stage 2 lists all `leaf16` pairs (lo before hi, digit
+order), then `leaf8[u_4], leaf8[v_6]`, then the 13 `leaf4` instances in digit order; stage 3
+lists the 62 reductions in the order of spec 7.5 item 3 with `t`-major `(t, k)` order for
+the carry digits; stage 1 as listed in 7.3. The pre-stage, terminal and `kappa1` claim
+vectors are in the orders of `agg_piop::claims`.
+
+## P8. Stage-3 ring instance as two prover groups (spec Section 7.5)
+
+Spec: the ring instance (7.6) has two sums, one weighted by `w_A` in order `(j', s, i)`
+and one by `eq(r^(2), .)` in order `(j, rho, i)`.
+
+Code: both are on the main domain with the same variable order and the same `gamma^(3)_0`;
+the prover evaluates them as two kernel groups (a weight-lane group and the `eq(r^(2))`
+group that also holds the links and the `b_t` reductions) and the verifier as the sum of
+the two terminal terms. The round messages are the sum of the two groups' messages, so
+the wire format is that of one instance.
+
+## P9. Mode B: the public bits as the Keccak side (spec Sections 10, 11, 14)
+
+Spec: milestone M2 runs "the algebraic PIOP end to end with the bridge tables but `b`
+published in the clear (mode B)"; the wire format, the transcript and the verifier of
+Sections 10 and 11 describe mode A (Flock commitments and sub-proofs at events 2 and 6).
+
+Code (`agg_piop::mode_b`, `docs/piop.md` Section 12):
+
+- The event-2 item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)` (768 bytes,
+  FIPS 204 Algorithm 28) of the segment's live records; the event-6 proof items are empty;
+  event 0 carries Flock profile id 3 (`FlockProfile::PublicBits`). The public bits are thus
+  absorbed before `sd` and before every sum-check challenge, like the Flock commitment they
+  replace, and the wire format and the event order are those of mode A.
+- The verifier side (`PublicBitsVerifier`) replaces the Flock verification of Section 11
+  step 3 by native checks: 768 bytes per live record; every 6-bit value below 44 (3.2);
+  `c~_i = SHAKE256(mu_i || w1Encode(w_1'_i), 32)` (3.3, 7 Keccak-f per record); and the
+  projection predicate `Y_sigma = M_3 M_2 M_1 b'` over GF(2) for the public bits `b'` (the
+  equation the Flock bridge slot proves in mode A).
+- After stage 3 it also checks `b_t(r^(3)) = b'_t(r^(3))` for `t < 6`: the committed bits'
+  terminal claims, which the Akita opening authenticates, against the multilinear
+  extensions of the public bit tables (`KeccakVerifier::check_bits`, 1,024 additions in `K`
+  per record). The spec has no such step.
+
+Why the extra check: the projection binds the committed bits to the public ones only
+through seed-derived matrices (Section 9.4). With matrices the prover knows in advance
+(the test stand-in `FixedMatrices`, P4), a prover can commit bits other than the public
+ones with the same parities and absorb the change of `w_1'` in `u` (test
+`committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check`: with two equal
+`M_1` columns every PIOP check and the projection pass). The direct check binds the bits
+with error `d_main / |K|` (Schwartz-Zippel; the public bits are fixed before `r^(3)`)
+whatever the matrices. It costs about 1 ms at `N = 1,024`. With `SeededMatrices`, the
+derivation of mode-B prover and verifier builds (P4), the projection binds on its own up to
+`2^-144.6`; the direct check is kept as a second, matrix-independent binding.
+
+## P10. Verifier step 6 as two streamed loops (spec Section 11)
+
+Spec: "Stream `A_i` ..., inverse-NTT, and accumulate `T(r^(2))` and `w_A(r^(3))` in one
+pass over `A_i` by absorbing the stage-3 rounds first and deferring the terminal checks."
+
+Code (`agg_piop::public_stream::StreamedPublic::pass`, `stage3::verify_streamed`): the
+stage-3 rounds are replayed with the ring claim `T(r^(2))` set to zero; since compressed
+rounds make the final claim affine in the initial claim with slope `prod_k r^(3)_k`, the
+deferred term `gamma_ring T(r^(2)) prod_k r^(3)_k` is added once `r^(3)` is known. The pass
+is two parallel loops after that point, one over the records (`T_i` recomputed from the
+sparse `c_i`, `T(r^(2))`) and one over the distinct keys (`A` expanded or taken from the
+cache, its `k l` products with `Lambda`, weighted by `sum_i eq(r2_sig, i) eq(r3_sig, i)`
+over the key's records). Neither `A_i` nor `T_i` is stored for the batch. Why two loops:
+`T_i` depends on the record, `A` only on the key, so the key loop expands each shared key
+once and the record loop stays balanced when many records share a key.

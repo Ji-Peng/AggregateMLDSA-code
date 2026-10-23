@@ -19,7 +19,7 @@ recorded in `docs/deviations.md`.
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
 Other files: `docs/` (spec, spec checks, `pcs-config.md` for the Akita preset and
-catalog status and regeneration, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
+catalog status and regeneration, `piop.md` for the PIOP tables and commitments, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
 ## Pinned revisions
@@ -64,6 +64,7 @@ taskset -c 0,1,3-15 cargo build --release --workspace
 scripts/test.sh                 # = taskset -c 0,1,3-15 cargo test --workspace
 scripts/test.sh --release       # for heavy tests
 scripts/bench.sh                # local calibration benches (agg-bench)
+scripts/bench.sh --bench mode_b -- 256 512 1024   # mode-B prove/verify/RSS/size (docs/piop.md 13)
 AVX512=1 scripts/bench.sh       # opt-in AVX-512 build in target/avx512
 ./target/release/agg            # CLI skeleton
 ```

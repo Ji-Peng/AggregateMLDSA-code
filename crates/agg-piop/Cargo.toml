@@ -14,10 +14,17 @@ parallel = ["aerie-falcon/parallel", "aerie-prover/parallel"]
 # with a scalar fallback whatever this flag says; the flag gates our own
 # AVX-512 kernels (none yet) and is what scripts/bench.sh AVX512=1 turns on.
 avx512 = []
+# Test stand-ins that make the verifier unsound outside tests (docs/deviations.md P4):
+# `prover::FixedMatrices` (matrices that ignore the bridge seed), `prover::NoKeccak` and
+# `verifier::NoKeccakVerifier` (Flock profile 0, no Keccak argument). Without this
+# feature these types do not exist and the verifier refuses Flock profile 0. Never
+# enable it in a prover, verifier or benchmark build.
+test-hooks = []
 
 [dependencies]
 agg-witness = { workspace = true }
 agg-pcs-config = { workspace = true }
+agg-bridge = { workspace = true }
 aerie-falcon = { workspace = true }
 aerie-prover = { workspace = true }
 aerie-simd = { workspace = true }
@@ -26,6 +33,7 @@ akita-config = { workspace = true }
 akita-error = { workspace = true }
 akita-params = { workspace = true }
 akita-pcs = { workspace = true }
+akita-serialization = { workspace = true }
 akita-sumcheck = { workspace = true }
 akita-transcript = { workspace = true }
 akita-types = { workspace = true }
@@ -33,6 +41,12 @@ akita-verifier = { workspace = true }
 jolt-field = { workspace = true }
 jolt-poly = { workspace = true }
 spongefish = { workspace = true }
+rayon = { workspace = true }
+sha3 = { workspace = true }
+
+[dev-dependencies]
+# The integration tests (tests/*.rs) use the stand-ins of the `test-hooks` feature.
+agg-piop = { path = ".", features = ["test-hooks"] }
 
 [lints.rust]
 unsafe_code = "forbid"

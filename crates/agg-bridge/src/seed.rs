@@ -1,5 +1,284 @@
-//! Bridge seed to the GF(2) and Fp matrices (spec Section 9).
+//! Bridge seed to the three bridge matrices (spec Section 9.1).
+//!
+//! Column `zeta` of `M_t` (`t` = 1, 2, 3, the level number) is a `k_t`-subset of the
+//! `m_t = 2^{e_t}` rows (`e_t` = 13, 13, 12): read 16-bit little-endian words from
+//! `cSHAKE256(sd || LE64(t) || LE64(zeta), *, "", "agg-mldsa/v1/bridge")`, keep the low
+//! `e_t` bits of each word, skip a row already chosen for the column, and stop after `k_t`
+//! distinct rows. Rows are stored in the order drawn. Prover and verifier both derive the
+//! matrices from the transcript's `sd` (event 3); neither transmits them.
 
-// Skeleton: filled in at the milestone listed in docs/spec.md Section 14.
+use agg_witness::bridge::{BridgeMatrices, SparseMatrix, J1, J2, J3, K1, K2, K3, M1, M2, M3};
+use rayon::prelude::*;
+use sha3::digest::{ExtendableOutput, Update, XofReader};
+use sha3::{CShake256, CShake256Core};
+
 /// Module name, used by smoke tests.
 pub const NAME: &str = "agg-bridge seed";
+
+/// cSHAKE256 customization string `S` of the derivation (the function name `N` is empty).
+pub const BRIDGE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/bridge";
+
+/// Length of the bridge seed `sd` (spec Section 10, event 3).
+pub const SEED_BYTES: usize = 32;
+
+/// Shape of one bridge matrix: level number, rows `2^rows_log2`, columns, column weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Level {
+    /// The level number `t` absorbed into the hash input (1, 2 or 3).
+    pub t: u64,
+    /// `log2 m_t`: the number of low bits kept from each 16-bit word.
+    pub rows_log2: u32,
+    /// `J_t`.
+    pub cols: usize,
+    /// `k_t`.
+    pub k: usize,
+}
+
+/// The three levels of spec Section 1.
+pub const LEVELS: [Level; 3] = [
+    Level {
+        t: 1,
+        rows_log2: M1.trailing_zeros(),
+        cols: J1,
+        k: K1,
+    },
+    Level {
+        t: 2,
+        rows_log2: M2.trailing_zeros(),
+        cols: J2,
+        k: K2,
+    },
+    Level {
+        t: 3,
+        rows_log2: M3.trailing_zeros(),
+        cols: J3,
+        k: K3,
+    },
+];
+
+const _: () = {
+    assert!(M1.is_power_of_two() && M2.is_power_of_two() && M3.is_power_of_two());
+    assert!(M1 <= 1 << 16 && M2 <= 1 << 16 && M3 <= 1 << 16);
+};
+
+impl Level {
+    /// `m_t`.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        1 << self.rows_log2
+    }
+}
+
+/// The cSHAKE256 state after the `bytepad(encode_string(N) || encode_string(S))` prefix,
+/// cloned once per column.
+#[must_use]
+pub fn prefix_state() -> CShake256 {
+    CShake256::from_core(CShake256Core::new(BRIDGE_CUSTOMIZATION))
+}
+
+/// The hash input of column `zeta` of level `t`: `sd || LE64(t) || LE64(zeta)`.
+#[must_use]
+pub fn column_input(sd: &[u8; SEED_BYTES], t: u64, zeta: u64) -> [u8; SEED_BYTES + 16] {
+    let mut input = [0_u8; SEED_BYTES + 16];
+    input[..SEED_BYTES].copy_from_slice(sd);
+    input[SEED_BYTES..SEED_BYTES + 8].copy_from_slice(&t.to_le_bytes());
+    input[SEED_BYTES + 8..].copy_from_slice(&zeta.to_le_bytes());
+    input
+}
+
+/// Fill `out` (length `k_t`) with the rows of column `zeta` of `level`.
+pub fn derive_column_into(
+    prefix: &CShake256,
+    sd: &[u8; SEED_BYTES],
+    level: &Level,
+    zeta: usize,
+    out: &mut [u32],
+) {
+    assert_eq!(out.len(), level.k, "one row per unit of column weight");
+    assert!(level.k <= level.rows(), "column weight above the row count");
+    let mut hash = prefix.clone();
+    hash.update(&column_input(sd, level.t, zeta as u64));
+    let mut reader = hash.finalize_xof();
+    let mask = (1_u32 << level.rows_log2) - 1;
+    // 32 words per squeeze: k_t <= 18 distinct rows almost always fit in the first one.
+    let mut buffer = [0_u8; 64];
+    let mut filled = 0;
+    while filled < out.len() {
+        reader.read(&mut buffer);
+        for word in buffer.as_chunks::<2>().0 {
+            let row = u32::from(u16::from_le_bytes(*word)) & mask;
+            if !out[..filled].contains(&row) {
+                out[filled] = row;
+                filled += 1;
+                if filled == out.len() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// The rows of column `zeta` of `level` (a fresh prefix state; [`derive_matrix`] shares one).
+#[must_use]
+pub fn derive_column(sd: &[u8; SEED_BYTES], level: &Level, zeta: usize) -> Vec<u32> {
+    let mut out = vec![0_u32; level.k];
+    derive_column_into(&prefix_state(), sd, level, zeta, &mut out);
+    out
+}
+
+/// `M_t` of `sd` (columns derived in parallel).
+#[must_use]
+pub fn derive_matrix(sd: &[u8; SEED_BYTES], level: &Level) -> SparseMatrix {
+    let prefix = prefix_state();
+    let mut entries = vec![0_u32; level.cols * level.k];
+    entries
+        .par_chunks_mut(level.k)
+        .enumerate()
+        .for_each(|(zeta, column)| derive_column_into(&prefix, sd, level, zeta, column));
+    SparseMatrix {
+        rows: level.rows(),
+        cols: level.cols,
+        k: level.k,
+        entries,
+    }
+}
+
+/// `M_1, M_2, M_3` of `sd` (spec Section 9.1).
+#[must_use]
+pub fn derive_matrices(sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
+    let [l1, l2, l3] = LEVELS;
+    BridgeMatrices {
+        m1: derive_matrix(sd, &l1),
+        m2: derive_matrix(sd, &l2),
+        m3: derive_matrix(sd, &l3),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reading rule of spec 9.1 written out independently: a fresh cSHAKE256 per
+    /// column, the input assembled byte by byte, one 16-bit word per read.
+    fn reference_column(sd: &[u8; SEED_BYTES], level: &Level, zeta: usize) -> (Vec<u32>, bool) {
+        let mut hash = CShake256::from_core(CShake256Core::new(b"agg-mldsa/v1/bridge"));
+        let mut input = sd.to_vec();
+        input.extend_from_slice(&level.t.to_le_bytes());
+        input.extend_from_slice(&(zeta as u64).to_le_bytes());
+        hash.update(&input);
+        let mut reader = hash.finalize_xof();
+        let mut rows = Vec::new();
+        let mut skipped = false;
+        while rows.len() < level.k {
+            let mut word = [0_u8; 2];
+            reader.read(&mut word);
+            let row = u32::from(u16::from_le_bytes(word)) % level.rows() as u32;
+            if rows.contains(&row) {
+                skipped = true;
+            } else {
+                rows.push(row);
+            }
+        }
+        (rows, skipped)
+    }
+
+    fn seed(byte: u8) -> [u8; SEED_BYTES] {
+        std::array::from_fn(|i| byte.wrapping_add(i as u8))
+    }
+
+    #[test]
+    fn levels_are_those_of_spec_section_1() {
+        let shape = |l: &Level| (l.t, l.rows(), l.cols, l.k);
+        assert_eq!(shape(&LEVELS[0]), (1, 1 << 13, 1 << 19, 14));
+        assert_eq!(shape(&LEVELS[1]), (2, 1 << 13, 1 << 19, 14));
+        assert_eq!(shape(&LEVELS[2]), (3, 1 << 12, 49_152, 18));
+        assert_eq!(column_input(&[9; 32], 3, 0x0102).len(), 48);
+        assert_eq!(
+            &column_input(&[9; 32], 3, 0x0102)[32..42],
+            &[3, 0, 0, 0, 0, 0, 0, 0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn derived_matrices_have_spec_shapes_valid_columns_and_capped_row_weights() {
+        let matrices = derive_matrices(&seed(7));
+        assert!(matrices.has_spec_shapes());
+        assert!(matrices.row_weights_ok());
+        for m in [&matrices.m1, &matrices.m2, &matrices.m3] {
+            // The validated constructor rejects an out-of-range or repeated row.
+            let _ = SparseMatrix::new(m.rows, m.cols, m.k, m.entries.clone());
+        }
+        assert_eq!(matrices, derive_matrices(&seed(7)), "deterministic");
+    }
+
+    #[test]
+    fn columns_follow_the_spec_reading_rule_including_skips() {
+        let sd = seed(0x40);
+        for level in &LEVELS {
+            let matrix = derive_matrix(&sd, level);
+            for zeta in [0, 1, 2, level.cols / 2, level.cols - 1] {
+                let (rows, _) = reference_column(&sd, level, zeta);
+                assert_eq!(
+                    matrix.column(zeta),
+                    rows.as_slice(),
+                    "level {} column {zeta}",
+                    level.t
+                );
+                assert_eq!(derive_column(&sd, level, zeta), rows);
+            }
+            // A column whose word stream repeats a row before k distinct rows are drawn.
+            let zeta = (0..4096)
+                .find(|&z| reference_column(&sd, level, z).1)
+                .expect("a repeated row within 4,096 columns");
+            assert_eq!(
+                matrix.column(zeta),
+                reference_column(&sd, level, zeta).0.as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn matrices_depend_on_the_seed_the_level_and_the_column() {
+        let (a, b) = (seed(1), seed(2));
+        let level = &LEVELS[2];
+        assert_ne!(derive_matrix(&a, level), derive_matrix(&b, level));
+        let mut flipped = a;
+        flipped[31] ^= 0x80;
+        assert_ne!(
+            derive_column(&a, level, 5),
+            derive_column(&flipped, level, 5)
+        );
+        assert_ne!(
+            derive_column(&a, &LEVELS[0], 5),
+            derive_column(&a, &LEVELS[1], 5)
+        );
+        assert_ne!(derive_column(&a, level, 5), derive_column(&a, level, 6));
+    }
+
+    /// Column 0 of each level for `sd = 0^32`, cross-checked against an independent
+    /// pure-Python cSHAKE256 (SP 800-185, its Keccak core checked against `hashlib`'s
+    /// SHAKE256).
+    #[test]
+    fn known_answer_column_zero_of_the_zero_seed() {
+        let expected: [&[u32]; 3] = [
+            &[
+                4516, 2580, 7365, 5576, 2775, 600, 2684, 2272, 932, 441, 2024, 3960, 2214, 3567,
+            ],
+            &[
+                5512, 6607, 8140, 6871, 5828, 3468, 1342, 7690, 8055, 6394, 4124, 2618, 2409, 1437,
+            ],
+            &[
+                3302, 2338, 1930, 1108, 2917, 2227, 2349, 1568, 1612, 2738, 677, 2458, 3679, 3815,
+                1722, 2430, 2369, 143,
+            ],
+        ];
+        for (level, rows) in LEVELS.iter().zip(expected) {
+            assert_eq!(
+                derive_column(&[0; SEED_BYTES], level, 0),
+                rows,
+                "level {}",
+                level.t
+            );
+        }
+    }
+}

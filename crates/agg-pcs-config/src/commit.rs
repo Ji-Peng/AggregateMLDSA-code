@@ -237,6 +237,26 @@ impl PcsProver {
             evaluations.resize(1 << physical_vars, BaseField::zero());
             polynomials.push(DensePoly::from_field_evals(physical_vars, evaluations)?);
         }
+        self.commit_polynomials(group, polynomials)
+    }
+
+    /// Commit one group from already materialized physical polynomials
+    /// (`2^physical_vars` evaluations each, zero-extended, in the group's
+    /// polynomial order), transcript-free. The caller is responsible for the
+    /// value range; Akita enforces the preset's admission bound and the
+    /// profile check below rejects a wrong shape.
+    pub fn commit_polynomials(
+        &self,
+        group: Group,
+        polynomials: Vec<DensePoly<BaseField>>,
+    ) -> Result<GroupCommitment, CommitError> {
+        if polynomials.len() != group.num_polynomials() {
+            return Err(CommitError::PolynomialCount {
+                group,
+                expected: group.num_polynomials(),
+                actual: polynomials.len(),
+            });
+        }
         let source = self.backend.import_source(polynomials)?;
         let context = if group.is_final() {
             GroupContext::scheduler_with_precommitted_groups(&self.precommitted)

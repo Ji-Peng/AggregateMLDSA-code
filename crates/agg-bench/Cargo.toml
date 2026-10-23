@@ -19,5 +19,10 @@ agg-keccak = { workspace = true }
 name = "skeleton"
 harness = false
 
+# Mode-B prove/verify benchmark (criterion-free): see benches/mode_b.rs.
+[[bench]]
+name = "mode_b"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
