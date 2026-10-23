@@ -1,10 +1,26 @@
 //! Keccak argument for the witness-dependent SHAKE256 call of ML-DSA verification
 //! (docs/spec.md Section 8; Section 14, milestone M3). Built on Flock HEAD.
+//! Design, costs and measurements: `docs/keccak.md`.
+//!
+//! - [`keccak`]: Keccak-f[1600] on lanes, `phi = pi o rho o theta` and its transpose.
+//! - [`gate`]: the chi-only gate (chains of permutations with absorptions), its rows,
+//!   lincheck walker and Flock registry type.
+//! - [`sponge`]: the SHAKE256 gate for `c~ = H(mu || w1Encode)`.
+//! - [`witness`]: batch-major packing into a Flock union slot.
+//! - [`prover`]: prove/verify of a sub-batch (Ligerito `Fast` or `Secure`), proof bytes.
+
+// Index loops mirror the (x, y, z) bit arithmetic of FIPS 202.
+#![allow(clippy::needless_range_loop)]
 
 pub mod bridge_slot;
+#[cfg(test)]
+mod dsl_ref;
 pub mod gate;
+pub mod keccak;
+pub mod prover;
 pub mod segment;
 pub mod sponge;
+pub mod witness;
 
 pub use aerie_keccak;
 pub use flock_core;

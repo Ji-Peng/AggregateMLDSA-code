@@ -146,9 +146,12 @@ name = "agg-keccak"
 version = "0.1.0"
 dependencies = [
  "aerie-keccak",
+ "bincode",
  "flock-core",
  "flock-field",
  "flock-prover",
+ "keccak 0.1.6",
+ "rayon",
  "sha3 0.10.9",
 ]
 
@@ -161,6 +164,14 @@ dependencies = [
  "akita-config",
  "akita-error",
  "akita-params",
+ "akita-pcs",
+ "akita-planner",
+ "akita-schedules",
+ "akita-serialization",
+ "akita-types",
+ "akita-verifier",
+ "jolt-field",
+ "serde_json",
 ]
 
 [[package]]
@@ -191,6 +202,7 @@ name = "agg-witness"
 version = "0.1.0"
 dependencies = [
  "ml-dsa",
+ "rayon",
  "sha3 0.10.9",
 ]
 
@@ -302,6 +314,19 @@ dependencies = [
  "jolt-field",
  "rayon",
  "tracing",
+]
+
+[[package]]
+name = "akita-planner"
+version = "0.1.0"
+source = "git+https://github.com/LayerZero-Labs/akita.git?rev=e023b6a46143f7b23199ccecb2684192baf7b640#e023b6a46143f7b23199ccecb2684192baf7b640"
+dependencies = [
+ "akita-challenges",
+ "akita-config",
+ "akita-error",
+ "akita-params",
+ "akita-schedules",
+ "libm",
 ]
 
 [[package]]
@@ -874,6 +899,12 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "lock_api"

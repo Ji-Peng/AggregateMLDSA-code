@@ -1,3 +1,223 @@
-//! Work plan: per-group sizes and schedule selection for a batch size.
+//! Work plan of one batch: padded size, group shapes and the catalog
+//! selection, derived from the record count and the generated catalog alone
+//! ("verifier-derivable; never prover-supplied", as in Aerie).
 
-// Skeleton: filled in at the milestone listed in docs/spec.md Section 14.
+use akita_config::SetupRequirements;
+use akita_error::AkitaError;
+use akita_params::{GroupCommitPhaseParams, OpeningScheduleSelection, ScheduleLookupKey};
+
+use crate::catalogs::{BatchLayout, Group, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2};
+use crate::preset::{AggFp64SignedWidth4, BaseField};
+
+/// Largest record count of this wire version (`N <= 2^15`).
+pub const MAX_RECORDS: usize = 1 << MAX_D_SIG;
+
+/// Why a record count has no work plan.
+#[derive(Debug)]
+pub enum PlanError {
+    /// `N = 0`.
+    NoRecords,
+    /// `N > 2^15` (spec Section 1: the verifier MUST reject).
+    TooManyRecords(usize),
+    /// The padded size `2^d_sig` has no checked-in catalog rows.
+    NotInCatalog {
+        /// `log2 N*`.
+        d_sig: usize,
+    },
+    /// Akita rejected the catalog lookup or setup sizing.
+    Akita(AkitaError),
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRecords => write!(f, "a batch needs at least one record"),
+            Self::TooManyRecords(n) => write!(f, "{n} records exceed the maximum {MAX_RECORDS}"),
+            Self::NotInCatalog { d_sig } => {
+                write!(f, "batch size 2^{d_sig} has no generated catalog rows")
+            }
+            Self::Akita(error) => write!(f, "akita: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+impl From<AkitaError> for PlanError {
+    fn from(error: AkitaError) -> Self {
+        Self::Akita(error)
+    }
+}
+
+/// `N* = max(next_power_of_two(N), 8)` and `d_sig = log2 N*` (spec Section 1).
+pub fn padded_size(records: usize) -> Result<(usize, usize), PlanError> {
+    if records == 0 {
+        return Err(PlanError::NoRecords);
+    }
+    if records > MAX_RECORDS {
+        return Err(PlanError::TooManyRecords(records));
+    }
+    let padded = records.next_power_of_two().max(1 << MIN_D_SIG);
+    Ok((padded, padded.trailing_zeros() as usize))
+}
+
+/// Shapes and catalog profiles of one batch.
+#[derive(Clone, Debug)]
+pub struct WorkPlan {
+    /// Live records `N`.
+    pub records: usize,
+    /// `N*`.
+    pub padded: usize,
+    /// The ordered four-group layout.
+    pub layout: BatchLayout,
+    /// Producer profiles of the precommitted groups `G_main, G_1, G_2`.
+    pub precommitted: Vec<GroupCommitPhaseParams>,
+    /// Profile of the final group `G_3`, from the grouped catalog row.
+    pub final_profile: GroupCommitPhaseParams,
+    /// The public schedule selection of the batched opening.
+    pub selection: OpeningScheduleSelection,
+}
+
+impl WorkPlan {
+    /// The plan for `records` live records.
+    pub fn for_records(records: usize) -> Result<Self, PlanError> {
+        let (padded, d_sig) = padded_size(records)?;
+        let layout = BatchLayout::new(d_sig).expect("d_sig within the wire range");
+        if !layout.in_catalog() {
+            return Err(PlanError::NotInCatalog { d_sig });
+        }
+        let precommitted = layout
+            .precommitted()
+            .iter()
+            .map(|&group| AggFp64SignedWidth4::commitment_profile(group))
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = ScheduleLookupKey {
+            final_group: layout.final_group(),
+            precommitteds: precommitted.clone(),
+        };
+        let row = AggFp64SignedWidth4::catalog()?.resolve_key(&key)?;
+        Ok(Self {
+            records,
+            padded,
+            layout,
+            precommitted,
+            final_profile: row.profiles().final_group,
+            selection: row.selection(),
+        })
+    }
+
+    /// `log2 N*`.
+    #[must_use]
+    pub const fn d_sig(&self) -> usize {
+        self.layout.d_sig
+    }
+
+    /// Number of `2^13`-signature segments `S`.
+    #[must_use]
+    pub const fn segments(&self) -> usize {
+        1 << self.d_sig().saturating_sub(D_SEG_MAX)
+    }
+
+    /// Logical variables of `group` (its domain).
+    #[must_use]
+    pub const fn logical_vars(&self, group: Group) -> usize {
+        group.logical_vars(self.d_sig())
+    }
+
+    /// Logical cells per polynomial of `group`.
+    #[must_use]
+    pub const fn logical_cells(&self, group: Group) -> usize {
+        1 << self.logical_vars(group)
+    }
+
+    /// Committed (physical) variables of `group`.
+    #[must_use]
+    pub const fn physical_vars(&self, group: Group) -> usize {
+        group.physical_vars(self.d_sig())
+    }
+
+    /// Trailing zero pad variables between the logical and physical tables.
+    #[must_use]
+    pub const fn pad_vars(&self, group: Group) -> usize {
+        self.physical_vars(group) - self.logical_vars(group)
+    }
+
+    /// The commitment profile of `group`.
+    #[must_use]
+    pub fn profile(&self, group: Group) -> &GroupCommitPhaseParams {
+        if group.is_final() {
+            &self.final_profile
+        } else {
+            &self.precommitted[group.index()]
+        }
+    }
+
+    /// The catalog lookup key of the grouped row.
+    #[must_use]
+    pub fn schedule_key(&self) -> ScheduleLookupKey {
+        ScheduleLookupKey {
+            final_group: self.layout.final_group(),
+            precommitteds: self.precommitted.clone(),
+        }
+    }
+
+    /// Akita setup sized for this batch (largest group, all 67 polynomials).
+    pub fn setup_requirements(&self) -> Result<SetupRequirements<BaseField>, AkitaError> {
+        SetupRequirements::from_catalog(
+            AggFp64SignedWidth4::catalog()?,
+            self.layout.max_physical_vars().max(PCS_MIN_CELLS_LOG2),
+            self.layout.total_polynomials(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn padded_sizes() {
+        assert_eq!(padded_size(1).unwrap(), (8, 3));
+        assert_eq!(padded_size(8).unwrap(), (8, 3));
+        assert_eq!(padded_size(9).unwrap(), (16, 4));
+        assert_eq!(padded_size(1000).unwrap(), (1024, 10));
+        assert_eq!(padded_size(MAX_RECORDS).unwrap(), (MAX_RECORDS, 15));
+        assert!(matches!(padded_size(0), Err(PlanError::NoRecords)));
+        assert!(matches!(
+            padded_size(MAX_RECORDS + 1),
+            Err(PlanError::TooManyRecords(_))
+        ));
+    }
+
+    #[cfg(feature = "schedules")]
+    #[test]
+    fn plans_exist_for_every_catalog_size() {
+        for &d_sig in crate::catalogs::CATALOG_D_SIG {
+            for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
+                let plan = WorkPlan::for_records(records).expect("catalog plan");
+                assert_eq!(plan.d_sig(), d_sig);
+                for group in Group::ALL {
+                    assert_eq!(plan.profile(group).group, group.layout(d_sig));
+                    assert_eq!(
+                        plan.logical_vars(group) + plan.pad_vars(group),
+                        plan.physical_vars(group)
+                    );
+                }
+                assert_eq!(plan.segments(), 1 << d_sig.saturating_sub(13));
+            }
+        }
+        // Every padded size of the wire version has rows.
+        assert_eq!(
+            crate::catalogs::CATALOG_D_SIG,
+            (MIN_D_SIG..=MAX_D_SIG).collect::<Vec<_>>().as_slice()
+        );
+        assert!(matches!(
+            WorkPlan::for_records(0),
+            Err(PlanError::NoRecords)
+        ));
+        assert!(matches!(
+            WorkPlan::for_records(MAX_RECORDS + 1),
+            Err(PlanError::TooManyRecords(_))
+        ));
+    }
+}

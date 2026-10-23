@@ -18,7 +18,8 @@ recorded in `docs/deviations.md`.
 | `crates/agg-cli` | bin `agg` + lib | prove/verify, wire format, record binding, caches | M2/M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
-Other files: `docs/` (spec and spec checks), `scripts/test.sh`, `scripts/bench.sh`,
+Other files: `docs/` (spec, spec checks, `pcs-config.md` for the Akita preset and
+catalog status and regeneration, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
 ## Pinned revisions
