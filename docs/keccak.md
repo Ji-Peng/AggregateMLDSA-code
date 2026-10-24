@@ -709,9 +709,9 @@ depths, and by the NUMBER of openings: two per tied part, whatever its size.
 Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CPU 2 not used,
 `crypto_bench off` not run, shared with another agent's jobs. CLMUL build
 (`RUSTFLAGS="-C target-feature=+pclmulqdq"`, `--features agg-keccak/avx512,agg-piop/avx512`,
-`target/clmul`) of `e1e26e0` plus the uncommitted changes of this stage (spans, K17, `Slim8`;
-the default profile switch to `Slim` came after the runs and does not touch the measured
-code). Medians of 5 runs after 1 warmup; RSS is `VmHWM`, the maximum over all runs.
+`target/clmul`) of `e1e26e0` plus the then-uncommitted changes of this stage (spans, K17,
+`Slim8`), committed as `710bd6b` together with the default switch to `Slim` and formatting,
+which came after the runs and do not change the measured code. Medians of 5 runs after 1 warmup; RSS is `VmHWM`, the maximum over all runs.
 
 Mode A, `agg bench --count N --warmup 1 --reps 5 --flock-profile P` (second series, profiles
 in the order `slim8, slim, fast`, load average 4.1 to 7.4 including the runs' own 7 threads;
