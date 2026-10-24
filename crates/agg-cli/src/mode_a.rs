@@ -15,22 +15,28 @@
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions,
 //! spec Section 1) is split into parts of `2^{d_part}` record positions, `d_part =
 //! min(part_log2, d_seg)` (default [`DEFAULT_PART_LOG2`]); each part with live records is
-//! one tied part (`agg_keccak::tied`, deviation K11): a Flock sponge instance of its records
-//! and a Flock bridge instance proving the part's share `Y_{sigma, s} = M^{(sigma)} b'_s`,
-//! tied by evaluation claims. The shares XOR to `Y_sigma` (the last share is implied), which
-//! the F_p side proves for the committed bits `b` (`docs/deviations.md` K10). The event-2
-//! and event-6 items are those of [`crate::wire`] (two caps and two proofs per part). Part
-//! `s` seeds its Flock challengers with [`part_seed`]`(fs_sigma, s)`.
+//! one tied part (`agg_keccak::tied`, deviations K11, K13): a Flock sponge instance of its
+//! records and a Flock bridge union (level-1 rows and one levels-2-3 row) proving the part's
+//! share `Y_{sigma, s} = M^{(sigma)} b'_s`, tied by evaluation claims. The shares XOR to
+//! `Y_sigma` (the last share is implied), which the F_p side proves for the committed bits
+//! `b` (`docs/deviations.md` K10). The event-2 item carries one cap per part (the sponge
+//! instance's; the bridge union depends on `sd` and its cap travels in the part's proof), the
+//! event-6 item one proof per part ([`crate::wire`]). Part `s` seeds its Flock challengers
+//! with [`part_seed`]`(fs_sigma, s)`.
 //!
-//! Memory: the parts are committed one after the other at event 2 and only their
-//! commitments are kept; at event 6 each part's witness is rebuilt from the records (the
-//! Flock provers commit again internally, K7), proven and dropped, so at most one part's
-//! Flock buffers are alive. The PIOP tables are `i8` columns (`agg_piop::source_tables`).
+//! Memory: the parts are committed one after the other at event 2; each keeps its
+//! commitment and, by default, the sponge commitment's Flock prover data (its Reed-Solomon
+//! codeword and Merkle tree, deviation K14), so that event 6 opens it without committing
+//! again; [`Aggregator::keep_commit_data`]`(false)` drops it and Flock commits a second time
+//! (K7). The witness buffers are dropped after event 2 and rebuilt from the records at event
+//! 6, proven and dropped, so at most one part's Flock buffers are alive. The PIOP tables are
+//! `i8` columns (`agg_piop::source_tables`).
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agg_keccak::flock_union::CommitData;
 use agg_keccak::gate::ChainGate;
 use agg_keccak::prover::{KeccakProof, Profile};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord};
@@ -134,10 +140,10 @@ impl SegmentParts {
     }
 }
 
-/// Builds the Flock witness (sponge slot buffers and bridge block) of one part from its
-/// records; the honest builder is `TiedPart::honest_parts`. Called at event 2 and
-/// again at event 6, so it must be deterministic. Arguments: the part's context, `sigma`,
-/// the part index, the part's records.
+/// Builds the Flock witness (sponge slot buffers and the part's lane-major input bits, the
+/// bridge union's source) of one part from its records; the honest builder is
+/// `TiedPart::honest_parts`. Called at event 2 and again at event 6, so it must be
+/// deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
 pub type PartWitness<'a> =
     &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
 
@@ -152,6 +158,8 @@ pub struct PartProveLog {
     pub records: usize,
     /// Event 2: context, witness and commitment.
     pub commit: Duration,
+    /// Heap bytes of the kept commit data (codeword and Merkle tree; 0 when not kept).
+    pub kept_bytes: usize,
     /// Event 6: witness rebuilt, share, Flock proof.
     pub prove: Duration,
     /// Proof bytes.
@@ -165,6 +173,7 @@ pub struct FlockProver<'g, 'h> {
     records: Vec<SpongeRecord>,
     part_log2: u32,
     witness: Option<PartWitness<'h>>,
+    keep_commit_data: bool,
     state: Mutex<ProverState<'g>>,
 }
 
@@ -172,6 +181,7 @@ struct PartState<'g> {
     seg: TiedPart<'g>,
     range: Range<usize>,
     commitment: TiedCommitment,
+    commit_data: Option<CommitData>,
 }
 
 #[derive(Default)]
@@ -204,8 +214,17 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             records,
             part_log2,
             witness,
+            keep_commit_data: true,
             state: Mutex::new(ProverState::default()),
         }
+    }
+
+    /// Keep each part's sponge commit data from event 2 to event 6 (default; K14), or drop it
+    /// and let Flock commit again at event 6 (K7).
+    #[must_use]
+    pub fn keep_commit_data(mut self, keep: bool) -> Self {
+        self.keep_commit_data = keep;
+        self
     }
 
     /// Per-part wall times and proof sizes (after [`KeccakSide::prove`]).
@@ -244,23 +263,28 @@ impl KeccakSide for FlockProver<'_, '_> {
                 let records = &self.records[range.clone()];
                 let seg =
                     TiedPart::new_part(self.gate, records.len(), plan.d_part, s, KECCAK_PROFILE);
-                let (sponge, bridge_z) = self.build(&seg, sigma, s, records);
-                // The committed buffers are dropped here and rebuilt at event 6.
-                let commitment = seg
-                    .commit_parts(sponge, bridge_z, records)
-                    .commitment()
-                    .clone();
+                let (sponge, bits) = self.build(&seg, sigma, s, records);
+                // The committed buffers are dropped here and rebuilt at event 6; the commit
+                // data (codeword, Merkle tree) is kept unless configured otherwise (K14).
+                let mut committed = seg.commit_parts(sponge, bits, records);
+                let commitment = committed.commitment().clone();
+                let commit_data = committed
+                    .take_commit_data()
+                    .filter(|_| self.keep_commit_data);
+                drop(committed);
                 state.log.push(PartProveLog {
                     sigma,
                     part: s,
                     records: records.len(),
                     commit: start.elapsed(),
+                    kept_bytes: commit_data.as_ref().map_or(0, CommitData::heap_bytes),
                     ..PartProveLog::default()
                 });
                 parts.push(PartState {
                     seg,
                     range,
                     commitment,
+                    commit_data,
                 });
             }
             items.push(
@@ -286,7 +310,6 @@ impl KeccakSide for FlockProver<'_, '_> {
         let segments = std::mem::take(&mut state.segments);
         assert_eq!(segments.len(), seeds.len(), "one seed per segment");
         assert_eq!(segments.len(), final_vectors.len(), "one Y per segment");
-        let matrices = Arc::new(matrices.clone());
         let mut entry = 0;
         let mut items = Vec::with_capacity(segments.len());
         for (sigma, parts) in segments.into_iter().enumerate() {
@@ -299,12 +322,12 @@ impl KeccakSide for FlockProver<'_, '_> {
             for (s, part) in parts.into_iter().enumerate() {
                 let start = Instant::now();
                 let records = &self.records[part.range.clone()];
-                let (sponge, bridge_z) = self.build(&part.seg, sigma, s, records);
-                let committed = part
-                    .seg
-                    .reattach(sponge, bridge_z, records, part.commitment);
+                let (sponge, bits) = self.build(&part.seg, sigma, s, records);
+                let committed =
+                    part.seg
+                        .reattach(sponge, bits, records, part.commitment, part.commit_data);
                 let share = if s + 1 < count {
-                    let own = part.seg.final_vector(&committed, &matrices);
+                    let own = part.seg.final_vector(&committed, matrices);
                     item.shares.push(pack_final_vector(&own));
                     acc.iter_mut().zip(&own).for_each(|(a, b)| *a ^= b);
                     own
@@ -317,7 +340,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                 let proof = part.seg.prove_with_final_vector(
                     committed,
                     *bridge_seed,
-                    matrices.clone(),
+                    matrices,
                     share,
                     &part_seed(&seeds[sigma], s),
                 );
@@ -365,7 +388,6 @@ pub enum SegmentRejection {
 /// The verifier's Keccak side of mode A (module docs).
 pub struct FlockVerifier<'g> {
     gate: &'g ChainGate,
-    matrices: Mutex<Option<([u8; 32], Arc<BridgeMatrices>)>>,
     log: Mutex<Vec<PartVerifyLog>>,
     rejection: Mutex<Option<(usize, SegmentRejection)>>,
 }
@@ -376,7 +398,6 @@ impl<'g> FlockVerifier<'g> {
     pub fn new(gate: &'g ChainGate) -> Self {
         Self {
             gate,
-            matrices: Mutex::new(None),
             log: Mutex::new(Vec::new()),
             rejection: Mutex::new(None),
         }
@@ -392,18 +413,6 @@ impl<'g> FlockVerifier<'g> {
     #[must_use]
     pub fn rejection(&self) -> Option<(usize, SegmentRejection)> {
         self.rejection.lock().expect("rejection").clone()
-    }
-
-    fn matrices_for(&self, sd: &[u8; 32], matrices: &BridgeMatrices) -> Arc<BridgeMatrices> {
-        let mut cached = self.matrices.lock().expect("matrices");
-        match &*cached {
-            Some((seed, m)) if seed == sd => m.clone(),
-            _ => {
-                let m = Arc::new(matrices.clone());
-                *cached = Some((*sd, m.clone()));
-                m
-            }
-        }
     }
 
     fn reject(&self, sigma: usize, why: SegmentRejection) -> bool {
@@ -465,7 +474,6 @@ impl KeccakVerifier for FlockVerifier<'_> {
         for share in &shares {
             last.iter_mut().zip(share).for_each(|(a, b)| *a ^= b);
         }
-        let matrices = self.matrices_for(segment.bridge_seed, segment.matrices);
         for s in 0..count {
             let range = plan.local(s);
             let start = Instant::now();
@@ -482,7 +490,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 &segment.c_tilde[range.clone()],
                 &commitment,
                 *segment.bridge_seed,
-                matrices.clone(),
+                segment.matrices,
                 share,
                 &part_seed(segment.seed, s),
                 &KeccakProof {
@@ -651,13 +659,15 @@ impl std::fmt::Display for ProveReport {
         for p in &self.parts {
             writeln!(
                 f,
-                "  Flock part ({}, {}): {} records, commit {:.1} ms, prove {:.1} ms, {} B",
+                "  Flock part ({}, {}): {} records, commit {:.1} ms, prove {:.1} ms, {} B, \
+                 kept commit data {:.1} MiB",
                 p.sigma,
                 p.part,
                 p.records,
                 ms(p.commit),
                 ms(p.prove),
-                p.proof_bytes
+                p.proof_bytes,
+                p.kept_bytes as f64 / (1 << 20) as f64
             )?;
         }
         writeln!(f, "aggregate, N = {}:", self.records)?;
@@ -767,16 +777,31 @@ pub fn sponge_records(
 pub struct Aggregator {
     gate: ChainGate,
     config: AggregatorConfig,
+    keep_commit_data: bool,
 }
 
 impl Aggregator {
-    /// An aggregator with the given configuration.
+    /// An aggregator with the given configuration. It keeps each Flock part's sponge commit
+    /// data from event 2 to event 6 (K14) unless the environment variable
+    /// `AGG_FLOCK_RECOMMIT` is set (a measurement knob) or [`Self::keep_commit_data`] says
+    /// otherwise.
     #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         Self {
             gate: sponge_gate(),
             config,
+            keep_commit_data: std::env::var_os("AGG_FLOCK_RECOMMIT").is_none(),
         }
+    }
+
+    /// Keep the Flock parts' sponge commit data between events 2 and 6 (`true`, K14: about
+    /// the size of the sponge instance's codeword and Merkle tree per part, measured in
+    /// `ref/notes/bench-local.md`) or commit again at event 6 (`false`, K7: one more Ligerito
+    /// commit per part).
+    #[must_use]
+    pub fn keep_commit_data(mut self, keep: bool) -> Self {
+        self.keep_commit_data = keep;
+        self
     }
 
     /// The configuration.
@@ -861,7 +886,8 @@ impl Aggregator {
             flock_records,
             self.config.part_log2,
             hooks.flock_witness,
-        );
+        )
+        .keep_commit_data(self.keep_commit_data);
         let recording = RecordingMatrices::default();
         let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
             let matrices = recording.0.lock().expect("matrices").clone();

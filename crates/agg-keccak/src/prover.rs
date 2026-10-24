@@ -69,14 +69,19 @@ pub(crate) fn codec() -> impl bincode::Options {
         .reject_trailing_bytes()
 }
 
-/// Ligerito profile of the Flock sub-proofs.
+/// Ligerito profile of the Flock sub-proofs (Flock's own accounting,
+/// `flock_core::pcs::ligerito::LigeritoProfile`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Profile {
-    /// Flock's `Fast` (rate 1/2), the engineering baseline.
+    /// Flock's `Fast`: rate 1/2, Johnson list-decoding regime with out-of-domain binding,
+    /// 16-bit query proof of work, 128 bits work-normalized. The engineering baseline.
     #[default]
     Fast,
-    /// Flock's `Secure`.
+    /// Flock's `Secure`: rate 1/2, unique-decoding regime, 120-bit soundness.
     Secure,
+    /// Flock's `Slim`: rate 1/4 with the accounting of `Fast` (128 bits work-normalized);
+    /// about half the opening bytes for about twice the level-0 encoding work.
+    Slim,
 }
 
 impl Profile {
@@ -84,13 +89,29 @@ impl Profile {
         match self {
             Self::Fast => LigeritoProfile::Fast,
             Self::Secure => LigeritoProfile::Secure,
+            Self::Slim => LigeritoProfile::Slim,
         }
     }
 
-    pub(crate) fn id(self) -> u8 {
+    /// The profile byte of the proof headers: 0 `Fast`, 1 `Secure`, 3 `Slim` (2 is reserved
+    /// for LaBinius).
+    #[must_use]
+    pub fn id(self) -> u8 {
         match self {
             Self::Fast => 0,
             Self::Secure => 1,
+            Self::Slim => 3,
+        }
+    }
+
+    /// The profile of a header byte.
+    #[must_use]
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Self::Fast),
+            1 => Some(Self::Secure),
+            3 => Some(Self::Slim),
+            _ => None,
         }
     }
 }

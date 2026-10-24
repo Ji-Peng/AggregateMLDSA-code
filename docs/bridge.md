@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | normative for milestones M2 (F_p side, `agg-bridge`, `agg-piop`) and M3 (Flock side, `agg-keccak` bridge slot); resolves the open items of `ref/notes/improvements-bridge.md` Section 5 and `docs/spec.md` Sections 8, 9 |
 | Source of truth | `docs/spec.md` (Sections 1, 4, 5, 7, 8, 9, 10). This document only fixes what the spec leaves open; a conflict is a bug here. Deviations go to `docs/deviations.md` |
-| Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `carry`, `weights`, `final_vector`, `gf2_walker`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/bridge_slot.rs`, `segment.rs` (M3 skeletons) |
+| Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `carry`, `weights`, `final_vector`, `gf2_walker`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/bridge_union.rs`, `tied.rs`, `flock_union.rs` (the mode-A Flock side, Sections 5a, 5b), `bridge_slot.rs`, `segment.rs` (the one-row slot and two-type union of Section 5, reference) |
 | Counts | exact numbers are products of the shape constants and exact binomials (`math.comb`); every number marked "estimate" is unmeasured |
 
 Problem. The 6,144 w1Encode bits of every signature are committed twice: as the Boolean columns $`b_0..b_5`$ of $`G_{\rm main}`$ (Akita, $`\mathbb F_p`$) and as the `Input` words of the sponge gate (Flock, GF(2)). The bridge proves $`b=b'`$ with a chain of three seeded sparse parity maps $`M_1,M_2,M_3`$: both sides prove $`Y_\sigma=M_3M_2M_1(\cdot)`$ for the same public 4,096-bit vector per segment, the $`\mathbb F_p`$ side over the integers with committed carries, the Flock side as GF(2)-linear rows. Soundness rests only on column independence (Section 7), not on code distance.
@@ -111,7 +111,10 @@ This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`
 Status: normative for M3 as implemented in `crates/agg-keccak/src/tied.rs` and
 `flock_union.rs` (deviation K11); it replaces the two-type union of Section 5 as the mode-A
 Flock argument. Section 5 stays the specification of the bridge slot itself (its block
-layout, rows, walker, binding and the `Y` coefficient of K8), which is unchanged.
+layout, rows, walker, binding and the `Y` coefficient of K8). Since tied-part proof version 2
+the bridge instance is the bridge union of Section 5b (deviation K13): the sponge instance,
+its claims, the public check and the shares below stay as they are; the bridge-side regions,
+points, commitment order and costs of this section describe proof version 1.
 
 **Why.** The two-type union pays for the bridge slot three times (docs/keccak.md Section 8):
 Flock's wiring argument costs one cell-slot, one gather claim and 16 proof bytes per copied
@@ -203,7 +206,191 @@ proof per part, independent of `n` up to the sumcheck round counts.
 its length); the event-6 proof is `AGGKCT || version || profile || n || d || framed sponge
 proof || framed bridge proof`, each inner proof the bincode of Flock's
 `R1csProofMergedLigerito` followed by its claim values (`flock_union::UnionProof`). The
-segment items of `agg_cli::wire` carry them unchanged (item version 2).
+segment items of `agg_cli::wire` carry them unchanged (item version 2). This is proof
+version 1; since version 2 the event-2 item holds the sponge cap alone and the bridge
+union's cap is inside the proof (Section 5b, item version 3).
+
+## 5b. The bridge union: the factored bridge instance of a tied part
+
+Status: normative for M3 as implemented in `crates/agg-keccak/src/bridge_union.rs`,
+`flock_union.rs` (multi-type unions) and `tied.rs` (tied-part proof version 2; deviations
+K13, K14). It replaces the one-row bridge slot as the bridge instance of the tied part of
+Section 5a. Unchanged from Section 5a: the sponge instance, its three claims and the public
+table check, the lane groups, the part seeds, the shares and their XOR (K10). Section 5
+remains the specification of the one-row slot (the reference implementation `bridge_slot.rs`,
+`segment.rs`).
+
+**Why** (`docs/keccak.md` Section 10). Every cost of the one-row slot is linear in its
+`2^(13 + d)` columns: the walker reads `7.2 x 10^8` matrix entries per fold at a full
+segment, its `eq`, `xi` and comb vectors are 1 GiB each, and the verifier's lincheck
+discharge, the only non-succinct Flock cost, measured 0.26 / 0.50 / 1.43 s at `d = 10 / 11 /
+13`. Smaller bridge parts do not help (the walker entries and vector lengths of the parts add
+up to the same totals, and each part adds about 300 KB of proof). What helps is a layout whose
+per-block matrices are small: Flock's lincheck is per block (`A = I (x) A_0`), and level 1 of
+the composite applies the same `M_1` to every (lane, level-1 block); the bridge relation is
+therefore split over two Flock types of one union, with the level-1 parities `y1`, the
+composite's intermediate vector, committed between them.
+
+**Types** (production shape; `L = min(2^(10 + d), J_1)` positions per level-1 block,
+`blocks = 2^max(0, d - 9)` blocks per lane, `G = blocks * m_1` parities per lane; local
+in-block index `zeta`, `M_1` column `zeta1_base + zeta` with `zeta1_base = offset mod J_1`, `M_2`
+column `rho_1 + m_1 (first_block + beta)`, as in `agg_bridge::gf2_walker`):
+
+| Type | Rows (count) | Columns | Rows of `A_0`, `B_0` (`C = I`) |
+| --- | --- | --- | --- |
+| level 1 (`Level1Layout`, `Level1Slot`) | row `j = beta + blocks t` for lane `t < 6`, block `beta` (`6 blocks` live; rows of lanes 6, 7 and beyond are dummy) | `[0, L)` the block's input bits; `L` the constant; `y1_base + rho_1`, `y1_base = L + 8192`, the parities (64 aligned words); `useful_bits = L + 16,384` | inputs `z_c * one = z_c` on all `L` columns (the same in every row: padded positions are tied to the sponge's zeros, not forced by rows); `one * one = one`; `(sum_zeta M_1[rho_1, zeta1_base + zeta] z_zeta) * one = z_{y1(rho_1)}`; empty rows elsewhere |
+| levels 2-3 (`TopLayout`, `TopSlot`) | one live row | `c(t, beta, rho_1) = rho_1 + 8192 beta + G t`, `t < 6` (the level-1 rows' parities concatenated in row order); `6 G` the constant; `y_o = 6 G + 4096 + o`, `o < 4096`, the output columns (32 aligned words); `useful_bits = 6 G + 8192` | inputs `z_c * one = z_c`; `one * one = one`; `(sum_c (M_3 M_2)[o, c] z_c + Y_o one) * one = z_{y_o}` with `(M_3 M_2)[o, (t, beta, rho_1)] = sum_{rho_2} M_3[o, t + 6 rho_2] M_2[rho_2, rho_1 + 8192 (first_block + beta)]` and the share `Y` a coefficient (K8); empty rows elsewhere |
+
+Both types carry empty matrix stubs and a constant pin (K2); the relations are bound by
+`Level1Slot::digest` (label `agg-keccak/v2/bridge-level1`, `sd`, the shape, `lane_len`, offset,
+blocks, `L`, `k_log`, `useful_bits`, constant column, parity base) and `TopSlot::digest`
+(label `agg-keccak/v2/bridge-top`, `sd`, the shape, `lane_len`, offset, blocks, `G`, `k_log`,
+`useful_bits`, constant column, output base, `Y`). Walkers (`LincheckCircuit`; `fold_split`
+and `fold_alpha_batched` from one pass):
+
+```text
+level 1:     v[rho_1] = eq[y1_base + rho_1]
+             xi_A[c]  = eq[c] + sum_{rho_1 in S_1(zeta1_base + c)} v[rho_1]        (c < L)
+             xi_A[one] = eq[one];  xi_B[one] = eq[one] + sum_{c < L} eq[c] + sum_rho1 v[rho_1]
+levels 2-3:  v3[o] = eq[y_o];  v2[t + 6 rho_2] = sum_{o in S_3(t + 6 rho_2)} v3[o]
+             xi_A[c(t, beta, rho_1)] = eq[c] + sum_{rho_2 in S_2(rho_1 + 8192 (first + beta))} v2[t + 6 rho_2]
+             xi_A[one] = eq[one] + sum_o Y_o v3[o];  xi_B[one] = eq[one] + sum_{c < 6G} eq[c] + sum_o v3[o]
+```
+
+Per fold the two walkers read `14 L + 14 * 6 G + 18 * 49,152` matrix entries (`1.9 x 10^7`
+at a full segment, against `7.2 x 10^8` for the one-row slot), over `eq` tables of
+`2^k_log` entries (`2^20`, 16 MiB, at a full segment).
+
+**Union.** `Registry::new([level 1, levels 2-3], nu)` with counts `[6 blocks, 1]` and the
+uniform row capacity `nu = max(3 + log2(blocks), 3, 21 - max k_log)`, so that `M = nu + max
+k_log + 1 >= 22` (Flock's dense floor). Flock sorts the slots by `k_log` descending (stable):
+at `d <= 4` the levels-2-3 type is slot 0, from `d = 5` on level 1 is (at `d = 5` and `d = 13`
+both have the same `k_log` and level 1 stays first); the code looks the slots up
+(`flock_union::UnionGeometry::slot`). The level-1 type is never full height (6 of every 8
+rows), so Flock's block-first opening is never selected. Exact sizes (`BridgeUnion::cost`;
+"one-row slot" is Section 5's instance at the same `d`):
+
+| `d` | blocks | `k_log` level 1 / levels 2-3 | `nu` | `M` | live rows | committed words | dense `m` | walker entries per fold | one-row slot: `k_b`, `M_b`, words, walker entries |
+| ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 3 | 1 | 15 / 16 | 5 | 22 | 6 + 1 | 1,600 | 22 | 1,687,552 | 16, 22, 417, 2,260,992 |
+| 6 | 1 | 17 / 16 | 4 | 22 | 6 + 1 | 4,288 | 22 | 2,490,368 | 19, 22, 3,105, 7,077,888 |
+| 8 | 1 | 19 / 16 | 3 | 23 | 6 + 1 | 13,504 | 22 | 5,242,880 | 21, 24, 12,321, 23,592,960 |
+| 9 | 1 | 20 / 16 | 3 | 24 | 6 + 1 | 25,792 | 22 | 8,912,896 | 22, 25, 24,609, 45,613,056 |
+| 10 | 2 | 20 / 17 | 4 | 25 | 12 + 1 | 51,520 | 23 | 9,601,024 | 23, 26, 49,185, 90,341,376 |
+| 11 | 4 | 20 / 18 | 5 | 26 | 24 + 1 | 102,976 | 24 | 10,977,280 | 24, 27, 98,337, 179,798,016 |
+| 13 | 16 | 20 / 20 | 7 | 28 | 96 + 1 | 411,712 | 26 | 19,234,816 | 26, 29, 393,249, 716,537,856 |
+
+**Commitment order (the change against the design note of `docs/keccak.md` Section 10).** The
+parities `y1 = M_1 b'` depend on `sd`, so the union cannot be committed at event 2 (the design
+note of Section 10 had it there, which is impossible). The part's event-2 item is the sponge
+instance's cap alone (`TiedCommitment`); the bridge union is built, committed and proven at
+event 6 (`TiedPart::prove_with_blocks`): blocks of the part's bits under the matrices of
+`sd`, then its Ligerito cap, which the proof carries (framed, before the two inner proofs).
+The tie challenges are derived after both caps: `TieChallenges::derive` absorbs, under
+`agg-mldsa/v2/tie`, `fs`, `d`, `nu_s`, `log2(blocks)`, the sponge cap and the bridge union's
+cap (each length-framed), then squeezes `rho_w` (3), `rho_i` (`d`), `rho_t` (2), `rho_t'` (1),
+`rho_r` (`nu_s`), `rho_c` (3), `rho_beta` (`log2(blocks)`), `rho_y` (6), `rho_o` (5). The
+bridge union's challenger: `agg-mldsa/v1/keccak`, `fs`, the label `agg-keccak/v2/tied-bridge-
+union`, both digests, the tie-geometry digest, then Flock's statement binding (registry
+digest, counts, cap). Committing after `sd` costs nothing in the bridge bound: everything
+the union holds is forced by `b'`, which the sponge cap fixed at event 2 (below).
+
+**Claims** (packed-direct claims of the union's merged opening; `lane_bits(h)` is `[rho_t0,
+rho_t1, 0]` for lanes 0..3 and `[rho_t', 0, 1]` for lanes 4, 5; record `i = i_lo + 2^9 beta`,
+`lo = min(d, 9)`; each point is `[rows (nu) | the type's word columns (k_log - 7) | its slot
+prefix as 0/1 constants]`, `UnionGeometry::region_point`):
+
+| Claim | Rows | Word columns | Verifier's check |
+| --- | --- | --- | --- |
+| `v_in_h` (level-1 inputs) | `[rho_i[lo..d] (beta) / lane_bits(h) / 0]` | `[rho_w / rho_i[0..lo] / 0]` | `v_in_h = eq(rho_i[nu_s..d], 0) v_s_h` (tie 1, against the sponge's `P_s_h` of Section 5a) |
+| `v_y1_h` (level-1 parities) | `[rho_beta / lane_bits(h) / 0]` | `[rho_y / bits of (L / 8192 + 1)]` | `v_top_h = v_y1_h` (tie 2) |
+| `v_top_h` (levels-2-3 inputs) | 0 | `[rho_y / rho_beta / lane_bits(h) / 0]` | as above |
+| `v_out` (output columns) | 0 | `[rho_o / bits of (6 G / 4096 + 1)]` | `v_out = 0` |
+
+Error names (`KeccakError::Tie`): `bridge copy of lanes 0..3`, `bridge copy of lanes 4, 5`
+(tie 1, the names of Section 5a), `level-1 parities of lanes 0..3`, `level-1 parities of
+lanes 4, 5` (tie 2), `levels-2-3 output columns`, and `public words` (Section 5a).
+
+**The output columns need their own claim.** A row with `C = I` only defines its output
+column: the levels-2-3 rows say `z_{y_o} = (M_3 M_2 z_in)_o + Y_o`, which holds for any `Y` if
+the prover chooses `z_y` accordingly. The claim `v_out = 0` pins `z_y = 0`, so the rows say
+`M_3 M_2 z_in = Y`. (The one-row slot of Section 5 has the same rows without such a claim. It
+is sound because its block, the `y_o` columns included, is committed at event 2, before `sd`
+and `Y`: the rows then give `Y = M b' + z_y` with `z_y` fixed before `sd`, the F_p side gives
+`Y = M b`, so `M delta = z_y` for `(delta, z_y)` fixed before `sd`; `delta = 0` forces `z_y = 0`,
+and for `delta != 0` either `M_2 M_1 delta = 0` (bounded by Section 7) or `Pr[M_3 y_2 = z_y] <=
+1 / binom(m_3, k_3) = 2^-163.4` for the fixed nonzero `y_2`, conditioning on all but one of
+its involved `M_3` columns. A union committed after `sd` has no such protection, hence the
+claim.)
+
+**Soundness.** Flock's knowledge soundness gives the committed word vectors `z_s` (sponge,
+event 2) and `z_u` (the union, absorbed before the tie challenges) satisfying their rows and
+the claimed evaluations. In `z_u`: the constant is 1 on the live rows and 0 on the dummy rows
+(Flock's count-derived pin); every live level-1 row has `y1 = M_1 x(t, beta)` for its inputs
+`x` (its parity rows); the levels-2-3 row has `Y = M_3 M_2 z_in` (its composite rows and
+`v_out = 0`, error `5 / 2^128`). Tie 1: `f_in(rho)` and `f_s(rho)` are the multilinear
+extensions, in the same `d + 5` free coordinates `(i, w, t)` of a lane group, of the level-1
+inputs and of the sponge inputs over the part's `2^d` record positions (the sponge's dummy rows
+are zero: their constant is 0, so their input rows force zero; the level-1 positions of
+records beyond the live ones are compared with those zeros); a differing bit survives with
+probability at most `(d + 5) / 2^128` per lane group. Tie 2: `f_y1(rho)` and `f_top(rho)` are
+the extensions, in the `log2(blocks) + 9` free coordinates `(beta, t, rho_1 word)`, of the
+level-1 parities and of their copies; error `(log2(blocks) + 9) / 2^128` per lane group. The
+lane groups cover lanes 0 to 5 and every live level-1 row; rows of lanes 6, 7 are dummy and
+their would-be copies are the constant and output columns, which the groups never address.
+Hence `Y_share = M_3 M_2 M_1 b'_part` over GF(2) with the segment's matrices, where `b'` is the
+sponge's input, fixed at event 2 before `sd`; the shares XOR to `Y_sigma` (K10) and the bound
+(9.3) of Section 7 is unchanged. Per part the tie error is `2 (d + 5) / 2^128 + 2
+(log2(blocks) + 9) / 2^128 + 5 / 2^128 + (nu_s + 3) / 2^128` (the last term the public claim of
+Section 5a), `83 / 2^128 = 2^-121.6` at a full segment, inside `epsilon_Flock`. The challenges are
+Fiat-Shamir outputs of a transcript that contains both caps (and, through `fs`, events 0 to 5),
+so a prover that re-derives them `Q` times multiplies these terms by `Q` (the usual ROM loss,
+as for Flock's own challenges). Replay: the two instances have distinct challenger labels and
+digests (sponge: gate and public digests; union: both relation digests with `sd`, the part's
+offset and `Y`), and the tie-geometry digest covers `d`, the part index, `n`, both row
+capacities, word coordinates, block widths and blocks.
+
+**Witness and costs.** The part's lane-major input bits (`TiedPart::honest_parts`, the same
+vector the mode-A hooks tamper) are the only `sd`-free bridge data; at event 6 the prover
+forms the level-1 rows and their parities (`Level1Layout::parities`: the six lanes of a
+position as one byte mask, 14 byte-XORs per nonzero position, parallel over blocks and
+position chunks), the levels-2-3 block and the share (`TopLayout::parities`), packs both types
+(`3 x 2^(nu + k_log - 7)` words each), assembles the union buffers (`3 x 2^(M - 7)` words, 32
+MiB each at a full segment), commits once and proves. The row values `a` of the level-1 rows
+are recomputed from the committed rows' own inputs, so a tampered parity breaks its row.
+Measurements: `docs/keccak.md` Section 11 and `ref/notes/bench-local.md`.
+
+**Wire.** Event 2: per part `TiedCommitment` = `LE32(len) || sponge cap`. Event 6: per part
+`AGGKCT || 2 || profile || LE32(n) || d || LE32(len) || bridge union cap || LE32(len) ||
+sponge proof || LE32(len) || bridge union proof`, each inner proof a `flock_union::UnionProof`
+(bincode of Flock's `R1csProofMergedLigerito`, then its claim values: 3 for the sponge, 7 for
+the union). The segment items of `agg_cli::wire` frame them unchanged (item version 3).
+
+**Tests.** `bridge_union` (unit): layouts and union geometry at the toy shape and `d = 3, 8,
+9, 10, 13`; honest rows satisfy `a & b = z`, and a flipped parity, input, zero column, `Y`
+bit, output column or visible copy breaks a row; both walkers are adjoint to their row
+evaluators (toy, and a production part of `d = 10` at index 1: two blocks and an offset) and
+`fold_split` equals two alpha folds; both walkers equal Flock's `SparseMatrixCircuit` on the
+explicitly lowered rows (both types on the toy shape, level 1 of a production part of `d = 3`
+at index 5, whose `zeta1_base` is nonzero); the digests bind `sd`, the layout and `Y`; the
+honest share equals `gf2_walker::composite` and the region points evaluate their regions; a
+Flock proof of the toy union (two boolean types, `M = 22`) verifies, the precomputed
+commitment gives the same proof, and a wrong share or a broken parity row is rejected.
+`tied` (unit): the tie identities hold on honest regions at `(n, d) = (5, 3), (9, 6), (3, 5),
+(3, 10)` and a flipped input or copy breaks exactly its lane group; the points' shape.
+`tests/tied.rs` (release): round trips at 5, 64, 256, 512 and 1,024 records with `Y` equal to
+the F_p walk; a flipped `Y` bit, another `sd`, a wrong `c~` or `mu`, another `fs`, flipped proof
+bytes (in the bridge cap, the sponge proof and the union's proof) and the union's cap in place
+of the event-2 cap are rejected; at 64 records (and, for the block-dependent cases, at 1,024
+records in the second level-1 block) a level-1 input copy flipped (tie 1, `bridge copy of
+lanes 0..3`), a parity copy flipped (tie 2, `level-1 parities of lanes 4, 5`), a level-1 parity
+flipped in its row (Flock), a stale share against tampered copies (Flock), a wrong share with
+the output columns set to absorb it (`levels-2-3 output columns`), both copies flipped with a
+stale `c~` (`public words`) and a sponge input with a stale chi witness (Flock); the proof made
+with the kept commit data equals the one made by committing again; a segment of 20 records in
+three parts with kept commit data whose shares XOR to the segment's `Y`. The mode-A tests of
+`agg-cli` run unchanged on the new part (the hook that flips a bit of the part's input bits
+fails tie 1).
 
 ## 6. The final public vector
 
@@ -256,5 +443,5 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 1. Composite rows in one bridge slot per segment, parities not materialized on the Flock side (spec B.13). Alternative kept in reserve: reveal $`y^{(2)}`$ (6 KB per segment) and drop level 3; it saves nothing in walker work, since level 1 dominates.
 2. Padded records are forced to zero by empty rows, not left free; the parity rows range over all record positions of the slot so that the composite relation depends on $`\mathsf{sd}`$ and $`d_{\rm seg}`$ only, and the walker is count-independent except for the identity rows.
 3. Matrices are derived once and shared, not regenerated inside the fold (one Keccak-f per column would cost 1 s per fold on one core).
-4. The verifier's bridge-slot fold ($`7\times10^8`$ additions and a $`2^{26}`$ `eq` table per segment) is the largest unmeasured verifier cost; if it exceeds the budget, the candidates are a smaller $`k_1`$ (12: $`2^{-136.5}`$ per level, 14% fewer nonzeros) or a Flock entry that lets the verifier skip the fold by delegating it to the prover with a sum-check, which does not exist at `83f963e`.
+4. The verifier's bridge-slot fold ($`7\times10^8`$ additions and a $`2^{26}`$ `eq` table per segment) was the largest verifier cost of the Keccak side: measured 1.43 s per segment on the cloud machine and 1.87 s locally at the full-segment geometry. Resolved by the bridge union of Section 5b (walkers of $`1.9\times10^7`$ entries over $`2^{20}`$-entry tables): about 70 ms per segment locally (`docs/keccak.md` Section 11). Remaining candidates if needed: a smaller $`k_1`$ (12: $`2^{-136.5}`$ per level, 14% fewer nonzeros) or a Flock entry that delegates the fold to the prover with a sum-check, which does not exist at `83f963e`.
 5. Derivation cost 0.94 s single-threaded (P4) and $`J_2=2^{19}`$ padding: candidates for wire version 1 (Section 3), not adopted.

@@ -1,5 +1,5 @@
-//! Single-type boolean Flock union proofs with the caller's evaluation claims
-//! (docs/keccak.md Section 9; docs/bridge.md Section 5a; deviation K11).
+//! Boolean Flock union proofs with the caller's evaluation claims (docs/keccak.md
+//! Sections 9 and 11; docs/bridge.md Sections 5a and 5b; deviations K11, K13, K14).
 //!
 //! Flock 83f963e ties committed words to each other and to public words only through its
 //! wiring argument, whose cost is one cell-slot (one gather claim, 16 proof bytes, one
@@ -11,8 +11,9 @@
 //! class), but no prove entry lets a caller add its own. This module is that entry: the
 //! boolean-only union pipeline of `flock_prover::prover::prove_fast_ligerito_union`
 //! (statement binding, zerocheck, union-column lincheck, merged opening) composed from
-//! Flock's public building blocks for a registry of ONE boolean type, plus the caller's
-//! packed-direct claims; [`UnionGeometry::verify`] mirrors
+//! Flock's public building blocks for a registry of one or more boolean types (the sponge
+//! instance has one; the bridge union of [`crate::bridge_union`] has two), plus the
+//! caller's packed-direct claims; [`UnionGeometry::verify`] mirrors
 //! `flock_core::verifier::verify_ligerito_union` step by step and returns the claimed
 //! values for the caller's own checks. The transcript uses Flock's labels in Flock's order
 //! (`flock-mixed-v1`, `flock-zerocheck-v0`, `flock-lincheck-v0`, `flock-merged-open-v1`); the
@@ -21,10 +22,16 @@
 //! verifier (never prover messages).
 //!
 //! A claim point has `M - 7` coordinates over the padded word address space, rows low:
-//! word column `c` of row `j` is address `(c << nu) + j`, so the point is `[row coordinates
-//! (nu) | column coordinates (k_log - 7)]`, least significant first. A point whose
-//! coordinates are exact 0/1 outside a set of free coordinates evaluates the multilinear
-//! extension of the words of that aligned region alone ([`eval_packed`]).
+//! word column `c` of row `j` of a slot is address `(prefix << (nu + k_log - 7)) | (c <<
+//! nu) | j`, so the point is `[row coordinates (nu) | column coordinates (k_log - 7) |
+//! slot prefix (M - nu - k_log)]`, least significant first
+//! ([`UnionGeometry::region_point`]). A point whose coordinates are exact 0/1 outside a set
+//! of free coordinates evaluates the multilinear extension of the words of that aligned
+//! region alone ([`eval_packed`]).
+//!
+//! Commit, then prove (deviations K7, K14): [`UnionGeometry::commit_data`] computes the
+//! Ligerito commitment and keeps Flock's prover data (codeword and Merkle tree), which
+//! [`UnionGeometry::prove`] then opens without committing a second time.
 //!
 //! Proof bytes ([`UnionProof::to_bytes`]): bincode of Flock's `R1csProofMergedLigerito`
 //! (zerocheck, lincheck, merged opening) framed by its length, then the claim values, 16
@@ -37,10 +44,11 @@ use flock_core::{
     pcs::{
         commit, commit_lane_major, ligerito::embedded_initial_k_or_default, open_batch_merged,
         rectangular_prefix_columns, ring_switch::s_hat_v_from_z_vec, verify_batch_merged,
-        Commitment, DirectEqInd, PackedDirectClaim, PackedDirectClaimRef, PcsParams, LOG_PACKING,
+        Commitment, DirectEqInd, PackedDirectClaim, PackedDirectClaimRef, PcsParams, ProverData,
+        LOG_PACKING,
     },
     proof::{R1csProofMergedLigerito, ZClaim},
-    schedule::{Registry, TableType},
+    schedule::{Registry, Slot, TableType},
     union::{SlotWitness, UnionInstance},
     verifier::FlockVerifyError,
     zerocheck,
@@ -72,7 +80,7 @@ fn x_full(point: &QuirkyPoint) -> Vec<F128> {
     v
 }
 
-/// A proof of one single-type union with the caller's claims.
+/// A proof of one union with the caller's claims.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnionProof {
     /// Flock's zerocheck, lincheck and merged opening.
@@ -100,6 +108,19 @@ impl UnionProof {
             out.extend_from_slice(&v.hi.to_le_bytes());
         }
         out
+    }
+
+    /// Serialized bytes of the zerocheck, the lincheck, the merged opening and the claim
+    /// values (the framing adds 4 bytes).
+    #[must_use]
+    pub fn size_breakdown(&self) -> [usize; 4] {
+        let size = "serializable proof component";
+        [
+            codec().serialized_size(&self.flock.zerocheck).expect(size) as usize,
+            codec().serialized_size(&self.flock.lincheck).expect(size) as usize,
+            codec().serialized_size(&self.flock.pcs_open).expect(size) as usize,
+            16 * self.values.len(),
+        ]
     }
 
     /// Parse a proof that must carry exactly `claims` values.
@@ -162,11 +183,43 @@ pub fn eval_packed(z: &[F128], point: &[F128], nu: usize) -> F128 {
         .reduce(|| F128::ZERO, |p, q| p + q)
 }
 
-/// The registry, counts and PCS parameters of one single-type boolean union: the geometry
-/// prover and verifier derive from the type and the declared count.
+/// A commitment computed ahead of the proof together with Flock's prover data (the
+/// Reed-Solomon codeword and Merkle tree of the dense stack), so that
+/// [`UnionGeometry::prove`] opens it without committing a second time (deviation K14; the
+/// Ligerito commit is deterministic, so the data is exactly what the prover would
+/// recompute). The caller keeps it from event 2 to event 6.
+pub struct CommitData {
+    commitment: Commitment,
+    prover_data: ProverData,
+}
+
+impl CommitData {
+    /// The event-2 bytes (the Ligerito level-0 cap).
+    #[must_use]
+    pub fn commitment(&self) -> KeccakCommitment {
+        KeccakCommitment::from_flock(&self.commitment)
+    }
+
+    /// Heap bytes held (codeword and Merkle tree).
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(self.prover_data.codeword.as_slice())
+            + std::mem::size_of_val(self.prover_data.merkle_tree.as_slice())
+    }
+}
+
+/// The registry, counts and PCS parameters of a boolean union of one or more types: the
+/// geometry prover and verifier derive from the types and the declared counts.
+///
+/// Types and their per-type inputs (slot buffers, circuits, counts) are given in the
+/// CALLER's order; Flock's registry sorts its slots by `k_log` descending (stable), and
+/// this struct maps between the two ([`Self::slot`]), so callers never assume a slot order.
 pub struct UnionGeometry {
     registry: Registry,
-    n: usize,
+    /// Registry slot of each caller type.
+    slot_of: Vec<usize>,
+    /// Declared rows per registry slot (slot order).
+    counts: Vec<usize>,
     pcs_params: PcsParams,
 }
 
@@ -177,9 +230,50 @@ impl UnionGeometry {
     /// If `n` is zero or exceeds the capacity.
     #[must_use]
     pub fn new(ty: TableType, n: usize, nu: usize, profile: Profile) -> Self {
-        assert!(n >= 1 && n <= 1 << nu, "1 <= n <= 2^nu");
-        let registry = Registry::new(vec![ty], nu);
-        let union = UnionInstance::new(&registry, vec![n]);
+        Self::new_multi(vec![ty], vec![n], nu, profile)
+    }
+
+    /// A registry of the boolean `types` (caller order) with the uniform row capacity
+    /// `2^nu` and `counts[i]` declared rows of type `i`.
+    ///
+    /// # Panics
+    /// If the lengths differ, a count is zero or exceeds the capacity, or a type is not
+    /// boolean.
+    #[must_use]
+    pub fn new_multi(
+        types: Vec<TableType>,
+        counts: Vec<usize>,
+        nu: usize,
+        profile: Profile,
+    ) -> Self {
+        assert_eq!(types.len(), counts.len(), "one count per type");
+        assert!(
+            counts.iter().all(|&n| n >= 1 && n <= 1 << nu),
+            "1 <= n_t <= 2^nu"
+        );
+        assert!(types.iter().all(|t| !t.is_element()), "boolean types only");
+        // Flock's registry order: k_log descending, stable (Registry::new).
+        let mut order: Vec<usize> = (0..types.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(types[i].k_log));
+        let mut slot_of = vec![0; types.len()];
+        for (s, &i) in order.iter().enumerate() {
+            slot_of[i] = s;
+        }
+        let shapes: Vec<(usize, usize, Option<usize>)> = types
+            .iter()
+            .map(|t| (t.k_log, t.useful_bits, t.const_pin))
+            .collect();
+        let registry = Registry::new(types, nu);
+        for (i, &s) in slot_of.iter().enumerate() {
+            let ty = &registry.types()[s];
+            assert_eq!(
+                (ty.k_log, ty.useful_bits, ty.const_pin),
+                shapes[i],
+                "registry slot order"
+            );
+        }
+        let counts: Vec<usize> = order.iter().map(|&i| counts[i]).collect();
+        let union = UnionInstance::new(&registry, counts.clone());
         let lp = profile.ligerito();
         let m = union.dense_m();
         let batch = embedded_initial_k_or_default(m, lp);
@@ -193,21 +287,34 @@ impl UnionGeometry {
         };
         Self {
             registry,
-            n,
+            slot_of,
+            counts,
             pcs_params,
         }
     }
 
-    /// The union instance (registry and count).
+    /// The union instance (registry and counts).
     #[must_use]
     pub fn union(&self) -> UnionInstance<'_> {
-        UnionInstance::new(&self.registry, vec![self.n])
+        UnionInstance::new(&self.registry, self.counts.clone())
     }
 
-    /// Declared rows.
+    /// Number of types.
     #[must_use]
-    pub fn count(&self) -> usize {
-        self.n
+    pub fn types(&self) -> usize {
+        self.slot_of.len()
+    }
+
+    /// The registry slot of caller type `i` (offset, prefix and prefix bits).
+    #[must_use]
+    pub fn slot(&self, i: usize) -> Slot {
+        self.registry.slots()[self.slot_of[i]]
+    }
+
+    /// Declared rows of caller type `i`.
+    #[must_use]
+    pub fn count(&self, i: usize) -> usize {
+        self.counts[self.slot_of[i]]
     }
 
     /// Row capacity `log2`.
@@ -216,13 +323,13 @@ impl UnionGeometry {
         self.registry.nu()
     }
 
-    /// The type's block width `log2`.
+    /// Block width `log2` of caller type `i`.
     #[must_use]
-    pub fn k_log(&self) -> usize {
-        self.registry.types()[0].k_log
+    pub fn k_log(&self, i: usize) -> usize {
+        self.registry.types()[self.slot_of[i]].k_log
     }
 
-    /// Address-space variables `M = nu + k_log`.
+    /// Address-space variables `M` (`nu + k_log` for one type).
     #[must_use]
     pub fn m_total(&self) -> usize {
         self.registry.m_total()
@@ -234,10 +341,47 @@ impl UnionGeometry {
         self.pcs_params.m
     }
 
+    /// Committed 128-bit words (the dense stack before power-of-two padding).
+    #[must_use]
+    pub fn dense_words(&self) -> usize {
+        self.union().dense_words()
+    }
+
     /// Coordinates of a claim point (`M - 7`, the padded word variables).
     #[must_use]
     pub fn word_vars(&self) -> usize {
         self.m_total() - 7
+    }
+
+    /// The claim point on caller type `i`'s region: `rows` on the `nu` row coordinates and
+    /// `cols` on the type's `k_log - 7` word-column coordinates (both zero-extended), then
+    /// the slot prefix as 0/1 constants. Word column `c` of row `j` of the slot is the
+    /// padded word `(prefix << (nu + k_log - 7)) | (c << nu) | j`.
+    ///
+    /// # Panics
+    /// If `rows` or `cols` is too long.
+    #[must_use]
+    pub fn region_point(&self, i: usize, rows: &[F128], cols: &[F128]) -> Vec<F128> {
+        let (nu, k) = (self.nu(), self.k_log(i) - 7);
+        assert!(
+            rows.len() <= nu && cols.len() <= k,
+            "region point coordinates"
+        );
+        let slot = self.slot(i);
+        let mut p = Vec::with_capacity(self.word_vars());
+        p.extend_from_slice(rows);
+        p.resize(nu, F128::ZERO);
+        p.extend_from_slice(cols);
+        p.resize(nu + k, F128::ZERO);
+        for b in 0..slot.prefix_bits {
+            p.push(if (slot.prefix >> b) & 1 == 1 {
+                F128::ONE
+            } else {
+                F128::ZERO
+            });
+        }
+        debug_assert_eq!(p.len(), self.word_vars());
+        p
     }
 
     /// Bytes of the commitment (the Ligerito level-0 cap).
@@ -246,14 +390,14 @@ impl UnionGeometry {
         CAP_NODE_BYTES << self.pcs_params.level_zero_cap_depth()
     }
 
-    /// Flock's dense stack of the padded slot buffer `z` (declared rows of the used
+    /// Flock's dense stack of the padded union buffer `z` (declared rows of the used
     /// columns), or `None` when the compaction is the identity.
     fn compact(&self, union: &UnionInstance<'_>, z: &[F128]) -> Option<Vec<F128>> {
-        assert_eq!(z.len(), union.packed_len(), "slot buffer length");
+        assert_eq!(z.len(), union.packed_len(), "union buffer length");
         (!union.compaction_is_identity()).then(|| union.compact_witness(z))
     }
 
-    fn commit_stack(&self, q: &[F128]) -> (Commitment, flock_core::pcs::ProverData) {
+    fn commit_stack(&self, q: &[F128]) -> (Commitment, ProverData) {
         if self.pcs_params.num_lanes.is_some() {
             commit_lane_major(q, &self.pcs_params)
         } else {
@@ -261,28 +405,72 @@ impl UnionGeometry {
         }
     }
 
-    /// Flock's commitment to the padded slot buffer `z` (event 2, before any seed): the
-    /// same map [`Self::prove`] applies, so the prover can check the caps agree (K7).
-    #[must_use]
-    pub fn commit(&self, z: &[F128]) -> KeccakCommitment {
-        let union = self.union();
-        let q = self.compact(&union, z);
-        let (commitment, _) = self.commit_stack(q.as_deref().unwrap_or(z));
-        KeccakCommitment::from_flock(&commitment)
+    /// Whether the registry is one slot spanning the address space (Flock's zero-copy
+    /// passthrough: the slot buffer IS the union buffer).
+    fn single(&self) -> bool {
+        self.registry.num_types() == 1 && self.registry.slots()[0].m_slot == self.m_total()
     }
 
-    /// Prove the slot's rows under `circuit` and the claims `(point, value)` with the
-    /// challenger `ch` (already seeded and bound to the caller's statement). Returns the
-    /// proof and the commitment Flock bound.
+    /// The padded union `z` of per-type slot buffers (caller order): each slot's words at
+    /// its aligned offset, zero elsewhere (single spanning slot: `None`, use it as is).
+    fn scatter_z(&self, slot_zs: &[&[F128]]) -> Option<Vec<F128>> {
+        assert_eq!(slot_zs.len(), self.types(), "one slot buffer per type");
+        for (i, z) in slot_zs.iter().enumerate() {
+            let words = 1usize << (self.slot(i).m_slot - 7);
+            assert_eq!(z.len(), words, "slot buffer length of type {i}");
+        }
+        if self.single() {
+            return None;
+        }
+        let mut out = vec![F128::ZERO; self.union().packed_len()];
+        for (i, z) in slot_zs.iter().enumerate() {
+            let start = self.slot(i).offset >> 7;
+            out[start..start + z.len()]
+                .par_chunks_mut(1 << 12)
+                .zip(z.par_chunks(1 << 12))
+                .for_each(|(o, s)| o.copy_from_slice(s));
+        }
+        Some(out)
+    }
+
+    /// Flock's commitment to the per-type slot buffers `z` (caller order) with its prover
+    /// data (event 2, before any seed): the map [`Self::prove`] applies, so a proof may
+    /// open it without committing again (K14).
+    #[must_use]
+    pub fn commit_data(&self, slot_zs: &[&[F128]]) -> CommitData {
+        let scattered = self.scatter_z(slot_zs);
+        let z = scattered.as_deref().unwrap_or(slot_zs[0]);
+        let union = self.union();
+        let q = self.compact(&union, z);
+        let (commitment, prover_data) = self.commit_stack(q.as_deref().unwrap_or(z));
+        CommitData {
+            commitment,
+            prover_data,
+        }
+    }
+
+    /// The commitment alone (see [`Self::commit_data`]).
+    #[must_use]
+    pub fn commit(&self, slot_zs: &[&[F128]]) -> KeccakCommitment {
+        self.commit_data(slot_zs).commitment()
+    }
+
+    /// Prove the slots' rows under `circuits` (caller order, one per type) with the
+    /// packed-direct claims at `points`, whose values the prover computes from the
+    /// assembled union buffer, with the challenger `ch` (already seeded and bound to the
+    /// caller's statement). With `pre` the commitment of event 2 is opened as is (K14);
+    /// otherwise Flock commits here. Returns the proof and the commitment Flock bound.
     ///
     /// # Panics
-    /// If a buffer or a point has the wrong length.
+    /// If a buffer, a circuit or a point has the wrong shape, or `pre` was made for other
+    /// PCS parameters.
     pub fn prove<Ch: Challenger>(
         &self,
-        buffers: SlotBuffers,
-        circuit: &dyn LincheckCircuit,
-        claims: &[(Vec<F128>, F128)],
+        buffers: Vec<SlotBuffers>,
+        circuits: &[&dyn LincheckCircuit],
+        points: &[Vec<F128>],
         ch: &mut Ch,
+        pre: Option<CommitData>,
     ) -> (UnionProof, KeccakCommitment) {
         let union = self.union();
         assert_eq!(
@@ -290,22 +478,64 @@ impl UnionGeometry {
             union.dense_m(),
             "PCS parameters of this union"
         );
+        assert_eq!(buffers.len(), self.types(), "one buffer set per type");
+        assert_eq!(circuits.len(), self.types(), "one circuit per type");
         let lig_config = self
             .pcs_params
             .ligerito_prover_config()
             .expect("Ligerito prover config for dense_m >= 22");
-        let SlotBuffers { z, a, b, stripe } = buffers;
+        // Caller order to slot order.
+        let mut by_slot: Vec<Option<(SlotBuffers, &dyn LincheckCircuit)>> =
+            (0..self.types()).map(|_| None).collect();
+        for (i, (buf, &circuit)) in buffers.into_iter().zip(circuits).enumerate() {
+            by_slot[self.slot_of[i]] = Some((buf, circuit));
+        }
+        let mut witnesses = Vec::with_capacity(self.types());
+        let mut stripes = Vec::with_capacity(self.types());
+        let mut slot_circuits = Vec::with_capacity(self.types());
+        for entry in by_slot {
+            let (SlotBuffers { z, a, b, stripe }, circuit) = entry.expect("every slot");
+            witnesses.push(SlotWitness {
+                z_packed: z,
+                a_packed: a,
+                b_packed: b,
+            });
+            stripes.push(stripe);
+            slot_circuits.push(circuit);
+        }
         // Single slot spanning the union: a passthrough, no copy.
-        let (z, a, b) = union.assemble_witness(vec![SlotWitness {
-            z_packed: z,
-            a_packed: a,
-            b_packed: b,
-        }]);
+        let (z, a, b) = union.assemble_witness(witnesses);
+        let nu = union.n_log();
+        let word_vars = self.word_vars();
+        let packed_direct: Vec<PackedDirectClaim> = points
+            .iter()
+            .map(|point| {
+                assert_eq!(point.len(), word_vars, "claim point length");
+                PackedDirectClaim {
+                    point: point.clone(),
+                    value: eval_packed(&z, point, nu),
+                    eq_ind: DirectEqInd::EqPoint(point.clone()),
+                }
+            })
+            .collect();
+        let values: Vec<F128> = packed_direct.iter().map(|c| c.value).collect();
         let q_owned = self.compact(&union, &z);
-        let (commitment, prover_data) = self.commit_stack(q_owned.as_deref().unwrap_or(&z));
+        let (commitment, prover_data) = match pre {
+            Some(CommitData {
+                commitment,
+                prover_data,
+            }) => {
+                assert!(
+                    commitment.params == self.pcs_params,
+                    "precomputed commitment of other PCS parameters"
+                );
+                (commitment, prover_data)
+            }
+            None => self.commit_stack(q_owned.as_deref().unwrap_or(&z)),
+        };
         union.bind_statement(ch, &commitment);
 
-        // Zerocheck over the padded address space (`M_bool = M`: one boolean type), run-list
+        // Zerocheck over the padded address space (`M_bool = M`: boolean types only), run-list
         // gated on the declared rows; `c` aliases `z` (`C = I`).
         let m = union.m_bool();
         let bool_padding = union.boolean_padding_spec();
@@ -324,11 +554,16 @@ impl UnionGeometry {
         let x_ab = union
             .x_ab_from_multilinear_values(SkipPoint::Phi8(zc_claim.z), &zc_claim.mlv_challenges);
 
-        // Union-column lincheck over the one slot (byte-identical to the single-table one).
-        let slots = [UnionLincheckSlot {
-            z_lincheck: &stripe,
-            circuit,
-        }];
+        // Union-column lincheck over the slots in registry order (one slot: byte-identical to
+        // the single-table lincheck).
+        let slots: Vec<UnionLincheckSlot<'_>> = stripes
+            .iter()
+            .zip(&slot_circuits)
+            .map(|(stripe, &circuit)| UnionLincheckSlot {
+                z_lincheck: stripe,
+                circuit,
+            })
+            .collect();
         let (lc_proof, lc_claim, z_vec_pre) = lincheck::prove_union_capture_z_vec_with_grinding(
             &union,
             &slots,
@@ -348,7 +583,6 @@ impl UnionGeometry {
             point: union.c_claim_point(SkipPoint::Phi8(zc_claim.z), &zc_claim.r_rest),
             value: zc_claim.c_eval,
         };
-        let nu = union.n_log();
         let s_hat_v_ab = (m - nu >= LOG_PACKING)
             .then(|| s_hat_v_from_z_vec(&z_vec_pre, &lc_claim.r_inner_rest[1..]));
         let heights = union.jagged_heights();
@@ -358,25 +592,13 @@ impl UnionGeometry {
             assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
             lincheck::union_bitbank_fold(&union, &slots, &zc_claim.r_rest[1..1 + nu])
         });
-        drop(stripe);
+        drop(slots);
+        drop(stripes);
         let pre: [Option<&[F128]>; 2] = [s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
         let banks: [Option<&[F128]>; 2] = match &bank_c {
             Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())],
             None => [None, None],
         };
-        let word_vars = self.word_vars();
-        let packed_direct: Vec<PackedDirectClaim> = claims
-            .iter()
-            .map(|(point, value)| {
-                assert_eq!(point.len(), word_vars, "claim point length");
-                PackedDirectClaim {
-                    point: point.clone(),
-                    value: *value,
-                    eq_ind: DirectEqInd::EqPoint(point.clone()),
-                }
-            })
-            .collect();
-        let values: Vec<F128> = claims.iter().map(|(_, v)| *v).collect();
         let x_fulls = [x_full(&ab.point), x_full(&c.point)];
         let x_refs: [&[F128]; 2] = [&x_fulls[0], &x_fulls[1]];
         let padding = union.padding_spec();
@@ -428,20 +650,22 @@ impl UnionGeometry {
         )
     }
 
-    /// Verify a proof against the commitment of event 2, the circuit and the claim
-    /// `points` (recomputed by the caller), with a challenger in the prover's state.
-    /// Returns the claimed values, which the caller checks against its own expectations.
+    /// Verify a proof against the commitment of event 2, the circuits (caller order) and
+    /// the claim `points` (recomputed by the caller), with a challenger in the prover's
+    /// state. Returns the claimed values, which the caller checks against its own
+    /// expectations.
     ///
     /// # Errors
     /// On a malformed commitment or claim list, or a Flock rejection.
     pub fn verify<Ch: Challenger>(
         &self,
-        circuit: &dyn LincheckCircuit,
+        circuits: &[&dyn LincheckCircuit],
         commitment: &KeccakCommitment,
         proof: &UnionProof,
         points: &[Vec<F128>],
         ch: &mut Ch,
     ) -> Result<Vec<F128>, KeccakError> {
+        assert_eq!(circuits.len(), self.types(), "one circuit per type");
         let cap = commitment.as_bytes();
         if cap.len() != self.commitment_len() {
             return Err(KeccakError::Malformed("commitment length"));
@@ -467,12 +691,15 @@ impl UnionGeometry {
         )
         .map_err(|e| KeccakError::Flock(FlockVerifyError::Zerocheck(e)))?;
         let x_ab = union.x_ab_from_multilinear_values(SkipPoint::Phi8(zc.z), &zc.mlv_challenges);
-        let circuits: [&dyn LincheckCircuit; 1] = [circuit];
-        // Replays the rounds and discharges the matrix work (the circuit's fold at the
-        // verifier's eq table) on the caller's thread pool.
+        let mut slot_circuits: Vec<&dyn LincheckCircuit> = circuits.to_vec();
+        for (i, &circuit) in circuits.iter().enumerate() {
+            slot_circuits[self.slot_of[i]] = circuit;
+        }
+        // Replays the rounds and discharges the matrix work (the circuits' folds at the
+        // verifier's eq tables) on the caller's thread pool.
         let lc = lincheck::verify_union_with_grinding(
             &union,
-            &circuits,
+            &slot_circuits,
             &x_ab,
             zc.a_eval,
             zc.b_eval,

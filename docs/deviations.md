@@ -169,6 +169,10 @@ Section 6). The slot buffers of all `S` sub-batches stay in memory from event 2 
 8 GiB at `N = 2^15`; a driver may keep only `z` and rebuild the rest). Removing the second
 commit needs a Flock entry that takes the commitment and its `ProverData`.
 
+Superseded for the tied part of the mode-A driver by K14: the commitment is computed once and
+its prover data kept from event 2 to event 6; the paragraphs above remain true of the
+standalone sponge path (`GateBatch`, `SpongeProver`).
+
 The bridge slot (`bridge_slot.rs`) and the segment driver (`segment.rs`) follow the same
 split: `BridgedSegment::commit` commits the sponge rows and the bridge copies (neither
 depends on `sd`) before event 2; `prove` takes `sd`, its matrices and `fs_sigma`. The
@@ -566,6 +570,11 @@ claim, a sponge input bit flipped with the stale chi witness fails Flock's spong
 flipped share, another seed, another `fs`, a flipped proof byte and swapped caps are
 rejected; parts' shares XOR to the segment's `Y` as in K10.
 
+Since tied-part proof version 2 the bridge instance is the two-type bridge union of K13
+(level-1 rows and one levels-2-3 row, committed at event 6), the event-2 item of a part is
+the sponge cap alone, and the sponge commitment is computed once (K14); the sponge instance,
+its claims, the public check, the lane-group tie and its error names are unchanged.
+
 ## K12. Vendored `flock-core` with a prover-only opening patch (spec Section 8; AGENTS.md dependency rule)
 
 AGENTS.md: dependencies are pinned git revisions (Flock `83f963e`, recorded in `README.md`).
@@ -590,6 +599,70 @@ bytes are unchanged, and proofs made with the vendored crate verify with upstrea
 (and the other way round). The vendored copy is a project decision to confirm (upstreaming
 the patch, or a fork, would remove it); until then `vendor/flock-core/PATCH.md` is the
 record of the revision and the diff.
+
+## K13. Two-type bridge union as the bridge instance of a tied part (spec Section 8; docs/bridge.md Sections 5, 5b)
+
+Spec and docs/bridge.md Section 5: one bridge slot per segment, one block whose rows prove
+`Y_sigma = M_3 M_2 M_1 b'`, intermediate parities not materialized; K11: that slot as its own
+one-row Flock instance of the tied part, committed at event 2.
+
+Code (`agg_keccak::bridge_union`, `tied`, tied-part proof version 2; mode-A item version 3):
+the bridge instance is a Flock union of two boolean types. Level 1: one row per (lane,
+level-1 block) of the part (`6 x 2^max(0, d - 9)` live rows) whose `A_0` is `M_1` itself,
+committing the block's input bits and its level-1 parities `y1 = M_1 b'(t, beta)`. Levels 2-3:
+one row whose inputs are the parities of all level-1 rows and whose rows are `(sum_c (M_3
+M_2)[o, c] z_c + Y_o one) * one = z_{y_o}` (`Y` a coefficient, K8). Ties, as packed-direct
+claims in the union's merged opening: the level-1 inputs against the sponge's lane groups
+(tie 1, the error names of K11), the parities against their copies (tie 2), and the output
+columns `z_y` against zero. docs/bridge.md Section 5b has the layouts, points, checks and the
+soundness argument.
+
+Two changes against the design note that proposed this (`docs/keccak.md` Section 10 and its
+handoff): (1) the parities depend on `sd`, so the union cannot be committed at event 2; it is
+committed at event 6, its cap travels in the part's proof, the event-2 item of a part is the
+sponge cap alone, and the tie challenges are derived from `fs` and both caps (the union's
+content is forced by the sponge's `b'`, fixed at event 2, so the bridge bound (9.3) is
+unchanged); (2) a row with `C = I` only defines its output column, so a union committed after
+`sd` needs the claim `z_y = 0` (the output region moved to the aligned base `6 G + 4096`); the
+one-row slot of K8 did without it only because its `z_y` was fixed before `sd` (docs/bridge.md
+Section 5b gives the argument for both).
+
+Why: the profile of `docs/keccak.md` Section 10. Every cost of the one-row slot was linear in
+its `2^(13 + d)` columns: `7.2 x 10^8` walker entries per fold and 1 GiB vectors at a full
+segment, and a verifier discharge of 0.26 / 0.50 / 1.43 s at `d = 10 / 11 / 13`. The union
+reads `1.9 x 10^7` entries over `2^20`-entry tables at a full segment (`M = 28`, 97 live rows,
+411,712 committed words). Measured (`docs/keccak.md` Section 11, CLMUL build, 7 threads,
+medians of 5): at 2,048 records the mode-A prover takes 4.80 s instead of 6.59 s (Flock part
+1.90 s instead of 3.70 s, the bridge instance about 0.23 s instead of 1.73 s), the verifier
+0.30 s instead of 0.75 s uncached (Flock part 63 ms instead of 505 ms), the prover's peak RSS
+1.94 GiB instead of 3.10 GiB; the aggregate is 7,781 bytes (0.9%) larger (the union's cap
+moved from event 2 into the proof, and a slightly larger opening). A part with the
+full-segment bridge geometry (`d = 13`, 8 live records) proves in 0.45 s instead of 6.77 s
+and verifies in 83 ms instead of 1.87 s, with 0.8 GiB instead of 6.1 GiB peak.
+
+## K14. The Flock commitment computed once (updates K7)
+
+K7: Flock 83f963e's prover has no entry that takes a precomputed commitment, so the event-2
+commitment was computed twice, before event 2 and again inside Flock's prover.
+
+Code: `flock_union::UnionGeometry::commit_data` returns Flock's `Commitment` with its
+`ProverData` (the Reed-Solomon codeword and the Merkle tree); `UnionGeometry::prove(...,
+pre: Some(data))` opens that commitment without committing again (the Ligerito commit is
+deterministic, so the data is what the prover would recompute; tests show byte-identical
+proofs with and without it). `TiedCommitted` keeps the sponge instance's data;
+`agg_cli::mode_a` keeps it per part from event 2 to event 6 (default;
+`Aggregator::keep_commit_data(false)` or the environment variable `AGG_FLOCK_RECOMMIT`
+restores the K7 behaviour), while the witness buffers are still dropped after event 2 and
+rebuilt at event 6. The bridge union is committed once, at event 6 (K13). The standalone
+sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
+
+Cost (`docs/keccak.md` Section 11): the kept data is the sponge instance's codeword and Merkle
+tree, 19 / 52 / 84 / 152 MiB at 256 / 512 / 1,024 / 2,048 records with `Fast` (twice that
+with `Slim`; extrapolated about 0.6 GiB per full segment, 2.4 GiB at `N = 2^15`, not
+measured); it is the data the sponge proof would rebuild at event 6, so the prover's peak is
+unchanged (1,942 MiB kept, 1,959 MiB recommitted at 2,048 records). Saved: one Ligerito commit
+per part, 217 ms of the Flock part at 2,048 records (1,901 against 2,118 ms) and 58 ms at
+1,024.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

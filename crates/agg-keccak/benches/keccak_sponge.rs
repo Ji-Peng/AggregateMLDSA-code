@@ -101,6 +101,7 @@ fn main() {
     let reps = env_usize("AGG_KECCAK_REPS", 5).max(1);
     let profile = match std::env::var("AGG_KECCAK_PROFILE").as_deref() {
         Ok("secure") => Profile::Secure,
+        Ok("slim") => Profile::Slim,
         _ => Profile::Fast,
     };
     let params = KeccakParams {

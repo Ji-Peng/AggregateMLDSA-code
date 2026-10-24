@@ -1,5 +1,5 @@
 //! Mode-A segment items of the aggregate wire format (spec Section 10, events 2 and 6;
-//! `docs/deviations.md` K10).
+//! `docs/deviations.md` K10, K11, K13).
 //!
 //! The aggregate itself is `agg_piop::wire::AggregateProof`: header (version, flags, `N`),
 //! the `32 N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, 8 to 11 and the Akita
@@ -9,10 +9,12 @@
 //!
 //! - event 2, [`SegmentCommitments`]: `version (u8) || d_part (u8) || parts (LE32)`, then
 //!   per part `LE32(len) || commitment`, the part's `agg_keccak::tied::TiedCommitment` bytes
-//!   (the Ligerito level-0 caps of its sponge and bridge instances, K7, K11);
+//!   (the framed Ligerito level-0 cap of its sponge instance, K7, K11; the bridge union's
+//!   cap depends on `sd` and is part of the proof, K13);
 //! - event 6, [`SegmentProofs`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
 //!   bytes each (4,096 bits packed least significant first, like `Y_sigma`), then per part
-//!   `LE32(len) || tied-part proof` (the sponge and bridge proofs). The last part's share is
+//!   `LE32(len) || tied-part proof` (the bridge union's cap, the sponge proof and the bridge
+//!   union's proof, `agg_keccak::tied`, proof version 2). The last part's share is
 //!   not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by construction.
 //!
 //! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
@@ -20,9 +22,10 @@
 
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
-/// Version byte of the segment items (2: the tied parts of deviation K11, two Flock caps
-/// and two Flock proofs per part).
-pub const ITEM_VERSION: u8 = 2;
+/// Version byte of the segment items (3: the tied parts of deviation K13, one Flock cap per
+/// part at event 2 and one tied-part proof, holding the bridge union's cap, per part at event
+/// 6; version 2 carried the one-row bridge slot's cap at event 2).
+pub const ITEM_VERSION: u8 = 3;
 
 /// A malformed segment item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

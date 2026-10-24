@@ -35,9 +35,11 @@ Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` reco
 `DEFAULT_PART_LOG2 = 13`: the whole segment is one part since the tied part of K11 removed
 the cost that forced parts of 512 in Section 4; the `agg` usage text still says 9). Each part
 is a tied part (`agg_keccak::tied`): a Flock sponge instance of its records and a Flock
-bridge instance of its share, two caps at event 2 and two proofs at event 6. At most one
-part's Flock buffers are alive: parts are committed one by one at event 2 (only the caps
-are kept) and rebuilt, proven and dropped one by one at event 6.
+bridge union of its share (`docs/keccak.md` Section 11): the sponge cap at event 2, and at
+event 6 the bridge union (its cap in the part's proof, since it depends on `sd`) and the
+proofs. At most one part's Flock buffers are alive: parts are committed one by one at event
+2 (the cap and, by default, the sponge commit data are kept, K14) and rebuilt, proven and
+dropped one by one at event 6.
 
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
