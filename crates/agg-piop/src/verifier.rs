@@ -174,7 +174,7 @@ pub fn configuration_policy(
         return Err(ConfigurationError::ProfileMismatch { requested, keccak });
     }
     match requested {
-        FlockProfile::Fast | FlockProfile::LaBinius if !seed_derived => {
+        _ if requested.is_mode_a() && !seed_derived => {
             Err(ConfigurationError::UnseededMatrices(requested))
         }
         FlockProfile::None if !hooks => Err(ConfigurationError::NoKeccakArgument),
@@ -691,11 +691,12 @@ mod tests {
     use crate::prover::{FixedMatrices, SeededMatrices};
     use agg_witness::bridge::BridgeMatrices;
 
-    const PROFILES: [FlockProfile; 4] = [
+    const PROFILES: [FlockProfile; 5] = [
         FlockProfile::None,
         FlockProfile::Fast,
         FlockProfile::LaBinius,
         FlockProfile::PublicBits,
+        FlockProfile::Slim,
     ];
 
     #[test]
@@ -761,7 +762,7 @@ mod tests {
     #[test]
     fn verify_refuses_fixed_matrices_in_mode_a_and_mismatched_profiles_before_parsing() {
         let fixed = FixedMatrices(BridgeMatrices::random_for_tests(9));
-        for profile in [FlockProfile::Fast, FlockProfile::LaBinius] {
+        for profile in [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::LaBinius] {
             assert_eq!(
                 refused(&fixed, &AcceptAll(profile), profile),
                 Some(ConfigurationError::UnseededMatrices(profile))

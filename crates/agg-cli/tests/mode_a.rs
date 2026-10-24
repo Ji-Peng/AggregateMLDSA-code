@@ -1,10 +1,11 @@
 //! Mode A end to end (spec Sections 10, 11, 13): the aggregator on real ML-DSA-44 records
 //! and the verifier on `(pk_i, M_i)` and the aggregate.
 //!
-//! - Round trips at 64, 256 (two Flock parts) and 512 signatures: the aggregate size per
-//!   part, the prover's and the verifier's step costs (uncached and cached keys) are printed
-//!   (`--nocapture`), the cached and uncached paths agree, and the persistent key cache
-//!   round-trips.
+//! - Round trips at 64, 256 (two Flock parts) and 512 signatures under each mode-A Flock
+//!   profile (`Fast`, `Slim`): the aggregate size per part, the prover's and the verifier's
+//!   step costs (uncached and cached keys) are printed (`--nocapture`), the cached and
+//!   uncached paths agree, the persistent key cache round-trips, the verifier reads the
+//!   profile from the aggregate and a verifier pinned to the other profile rejects it.
 //! - Corrupted aggregates (`corrupted_aggregates_are_rejected`): every byte region of the
 //!   wire format, the mode-A segment items (part size, part count, shares, part proofs,
 //!   commitments), the records (order, message, key, count) and the configuration.
@@ -21,7 +22,7 @@ use std::time::Instant;
 use agg_cli::cache;
 use agg_cli::mode_a::{
     AggregateError, AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig,
-    SegmentRejection, VerifyCostReport, DEFAULT_PART_LOG2,
+    SegmentRejection, VerifyCostReport, DEFAULT_PART_LOG2, FLOCK_PROFILE,
 };
 use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
@@ -81,12 +82,29 @@ fn peak_mib() -> f64 {
     agg_cli::rss::peak_kib().map_or(0.0, |k| k as f64 / 1024.0)
 }
 
-/// An honest round trip: aggregate, check the `c~_i` list and the size report, verify
-/// uncached, then with an in-memory and a persisted key cache.
-fn round_trip(n_own: usize, n_shared: usize, seed: u64, part_log2: u32, parts: usize) {
+/// The other mode-A Flock profile.
+fn other(profile: FlockProfile) -> FlockProfile {
+    if profile == FlockProfile::Fast {
+        FlockProfile::Slim
+    } else {
+        FlockProfile::Fast
+    }
+}
+
+/// An honest round trip under `profile`: aggregate, check the `c~_i` list and the size
+/// report, verify uncached, then with an in-memory and a persisted key cache; a verifier
+/// pinned to the other profile rejects the aggregate at the item's profile byte.
+fn round_trip(
+    n_own: usize,
+    n_shared: usize,
+    seed: u64,
+    part_log2: u32,
+    parts: usize,
+    profile: FlockProfile,
+) {
     let records = records(seed, n_own, n_shared);
     let n = records.len();
-    let aggregator = Aggregator::new(AggregatorConfig { part_log2 });
+    let aggregator = Aggregator::new(AggregatorConfig { part_log2, profile });
     let start = Instant::now();
     let aggregate = aggregator.aggregate(&signed(&records)).expect("aggregate");
     eprintln!(
@@ -116,6 +134,8 @@ fn round_trip(n_own: usize, n_shared: usize, seed: u64, part_log2: u32, parts: u
     );
     let items = SegmentCommitments::from_bytes(&aggregate.proof.flock_commitments[0]).unwrap();
     assert_eq!(items.commitments.len(), parts);
+    assert_eq!(items.profile, profile as u8);
+    assert_eq!(aggregate.report.profile, profile);
     assert_eq!(
         items.d_part,
         part_log2.min(n.next_power_of_two().max(8).trailing_zeros())
@@ -125,6 +145,7 @@ fn round_trip(n_own: usize, n_shared: usize, seed: u64, part_log2: u32, parts: u
     let statements = statements(&records);
     let uncached = verifier.verify(&statements, &aggregate.bytes, None);
     eprintln!("{uncached}");
+    assert_eq!(uncached.profile, profile, "the profile read from the aggregate");
     let verified = uncached.report.outcome.as_ref().expect("honest aggregate");
     let distinct = {
         let mut keys: Vec<&[u8]> = records.iter().map(|r| r.pk.as_slice()).collect();
@@ -170,6 +191,19 @@ fn round_trip(n_own: usize, n_shared: usize, seed: u64, part_log2: u32, parts: u
         cached.total().as_secs_f64() * 1e3,
         peak_mib()
     );
+    // Pinned verifiers: the aggregate's own profile accepts, the other one rejects at the
+    // profile byte of the event-2 item (before any Flock work).
+    let pinned = AggregateVerifier::new().require(profile);
+    assert!(pinned.verify(&statements, &aggregate.bytes, None).accepted());
+    let wrong = AggregateVerifier::new()
+        .require(other(profile))
+        .verify(&statements, &aggregate.bytes, None);
+    expect_rejected("verifier pinned to the other profile", &wrong, keccak);
+    assert!(matches!(
+        wrong.rejection,
+        Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
+    ));
+    assert!(wrong.parts.is_empty(), "no Flock part was run");
 }
 
 #[test]
@@ -178,7 +212,16 @@ fn round_trip(n_own: usize, n_shared: usize, seed: u64, part_log2: u32, parts: u
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_64_signatures() {
-    on_large_stack(|| round_trip(48, 16, 0xa064, DEFAULT_PART_LOG2, 1));
+    on_large_stack(|| round_trip(48, 16, 0xa064, DEFAULT_PART_LOG2, 1, FlockProfile::Fast));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn round_trip_at_64_signatures_slim() {
+    on_large_stack(|| round_trip(48, 16, 0xb064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim));
 }
 
 #[test]
@@ -187,7 +230,16 @@ fn round_trip_at_64_signatures() {
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts() {
-    on_large_stack(|| round_trip(200, 56, 0xa256, 7, 2));
+    on_large_stack(|| round_trip(200, 56, 0xa256, 7, 2, FlockProfile::Fast));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
+    on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
 }
 
 #[test]
@@ -196,7 +248,16 @@ fn round_trip_at_256_signatures_in_two_flock_parts() {
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_512_signatures() {
-    on_large_stack(|| round_trip(400, 112, 0xa512, DEFAULT_PART_LOG2, 1));
+    on_large_stack(|| round_trip(400, 112, 0xa512, DEFAULT_PART_LOG2, 1, FlockProfile::Fast));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn round_trip_at_512_signatures_slim() {
+    on_large_stack(|| round_trip(400, 112, 0xb512, DEFAULT_PART_LOG2, 1, FlockProfile::Slim));
 }
 
 /// Expect a rejection matching `check`, print it.
@@ -241,7 +302,7 @@ struct Lenient<'g>(agg_cli::mode_a::FlockVerifier<'g>);
 
 impl agg_piop::verifier::KeccakVerifier for Lenient<'_> {
     fn profile(&self) -> FlockProfile {
-        FlockProfile::Fast
+        agg_piop::verifier::KeccakVerifier::profile(&self.0)
     }
 
     fn verify(&self, segment: &agg_piop::verifier::SegmentContext<'_>) -> bool {
@@ -260,7 +321,7 @@ fn corrupted_aggregates_are_rejected() {
     on_large_stack(|| {
         // 20 records in Flock parts of 8 (8, 8 and 4 live records).
         let records = records(0xc020, 14, 6);
-        let aggregate = Aggregator::new(AggregatorConfig { part_log2: 3 })
+        let aggregate = Aggregator::new(AggregatorConfig::with_part_log2(3))
             .aggregate(&signed(&records))
             .expect("aggregate");
         let honest = aggregate.proof.clone();
@@ -306,7 +367,17 @@ fn corrupted_aggregates_are_rejected() {
         let p = with_items(&honest, |c, _| c.commitments[1][7] ^= 0x20);
         expect_rejected("byte of part 1's commitment", &verify(&p), keccak);
 
-        // The segment items' structure.
+        // The segment items' structure. The profile byte: another mode-A profile makes the
+        // verifier run under it, against the profile event 0 bound; an unknown id is refused.
+        let p = with_items(&honest, |c, _| c.profile = other(FLOCK_PROFILE) as u8);
+        expect_rejected("profile byte of the item", &verify(&p), |_| true);
+        let p = with_items(&honest, |c, _| c.profile = FlockProfile::PublicBits as u8);
+        let r = verify(&p);
+        expect_rejected("profile byte 3 (mode B)", &r, keccak);
+        assert!(matches!(
+            r.rejection,
+            Some((0, SegmentRejection::Item(ItemError::Profile(3))))
+        ));
         let p = with_items(&honest, |c, _| c.d_part = 4);
         let r = verify(&p);
         expect_rejected("part size 2^4", &r, keccak);
@@ -610,7 +681,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &bytes,
             &SeededMatrices,
             &lenient,
-            FlockProfile::Fast,
+            FLOCK_PROFILE,
             None,
         );
         let error = outcome.outcome.expect_err("the range identity");

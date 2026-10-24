@@ -6,13 +6,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use agg_piop::binding::FlockProfile;
 use agg_piop::public_data::KeyCache;
 use agg_witness::gen;
 use rayon::prelude::*;
 
 use crate::mode_a::{
     size_lines, AggregateVerifier, Aggregator, AggregatorConfig, ProveReport, SignedRecord,
-    DEFAULT_PART_LOG2,
+    DEFAULT_PART_LOG2, FLOCK_PROFILE,
 };
 use crate::record::{self, KeyEntry, RecordEntry};
 use crate::{cache, rss};
@@ -27,14 +28,17 @@ commands:
   sign-batch --keys KEYS --count N [--seed S] [--msg-len L] --out RECORDS
       N signed records (pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
-  aggregate --records RECORDS --out AGGREGATE [--part-log2 D]
+  aggregate --records RECORDS --out AGGREGATE [--part-log2 D] [--flock-profile P]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
-      Flock parts of 2^D record positions (default 13, one tied part per segment).
-  verify --records RECORDS --aggregate AGGREGATE [--cache CACHE]
-      Verify the aggregate for the records' (pk, M) (signatures are ignored). With
-      --cache, expanded keys are read from and added to the cache file. Exit status 0 on
-      accept, 1 on reject.
+      Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
+      profile P = fast or slim (Ligerito rate 1/2 or 1/4, both 128-bit in Flock's
+      accounting; default: the build's FLOCK_PROFILE).
+  verify --records RECORDS --aggregate AGGREGATE [--cache CACHE] [--flock-profile P]
+      Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
+      Flock profile its items name (or only under P). With --cache, expanded keys are read
+      from and added to the cache file. Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
+        [--flock-profile P]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
@@ -116,11 +120,28 @@ impl Options {
         }
     }
 
+    /// `--name fast|slim`: a mode-A Flock profile.
+    fn flock_profile(&mut self, name: &str) -> Result<Option<FlockProfile>, String> {
+        self.take(name)
+            .map(|v| parse_flock_profile(&v).ok_or_else(|| format!("--{name}: fast or slim, not {v:?}")))
+            .transpose()
+    }
+
     fn finish(self) -> Result<(), String> {
         match self.0.keys().next() {
             Some(name) => Err(format!("unknown option --{name}")),
             None => Ok(()),
         }
+    }
+}
+
+/// A mode-A Flock profile by name: `fast` or `slim`.
+#[must_use]
+pub fn parse_flock_profile(name: &str) -> Option<FlockProfile> {
+    match name {
+        "fast" => Some(FlockProfile::Fast),
+        "slim" => Some(FlockProfile::Slim),
+        _ => None,
     }
 }
 
@@ -253,8 +274,9 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let records = record::read_records(&opts.path("records")?)?;
     let out = opts.path("out")?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
+    let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     opts.finish()?;
-    let aggregator = Aggregator::new(AggregatorConfig { part_log2 });
+    let aggregator = Aggregator::new(AggregatorConfig { part_log2, profile });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
     println!("{}", aggregate.report);
@@ -266,6 +288,7 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let records = record::read_records(&opts.path("records")?)?;
     let bytes = std::fs::read(opts.path("aggregate")?)?;
     let cache_path = opts.take("cache").map(PathBuf::from);
+    let require = opts.flock_profile("flock-profile")?;
     opts.finish()?;
     let mut key_cache = match &cache_path {
         Some(p) => Some(cache::load(p)?),
@@ -273,7 +296,10 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     };
     let before = key_cache.as_ref().map_or(0, KeyCache::len);
     let (report, key_cache) = run_large(move || {
-        let verifier = AggregateVerifier::new();
+        let verifier = match require {
+            Some(p) => AggregateVerifier::new().require(p),
+            None => AggregateVerifier::new(),
+        };
         let report = verifier.verify(&statements(&records), &bytes, key_cache.as_mut());
         (report, key_cache)
     });
@@ -388,7 +414,7 @@ pub fn bench_records(
     let prove = proves[median_index(&prove_times)].clone();
     drop(proves);
     let reset = rss::reset_peak();
-    let verifier = AggregateVerifier::new();
+    let verifier = AggregateVerifier::new().require(config.profile);
     let statements = statements(records);
     let mut uncached_report = String::new();
     let verify_uncached = timed_runs(warmup, reps, || {
@@ -434,6 +460,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let warmup: usize = opts.number("warmup", Some(DEFAULT_WARMUP))?;
     let reps: usize = opts.number("reps", Some(DEFAULT_REPS))?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
+    let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     opts.finish()?;
     if n_keys == 0 || count == 0 {
         return Err("--count and --keys must be positive".into());
@@ -446,7 +473,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let records = sign_records(&keys, count, seed, None);
     let generated = start.elapsed();
     let result = run_large(move || {
-        bench_records(&records, AggregatorConfig { part_log2 }, warmup, reps)
+        bench_records(&records, AggregatorConfig { part_log2, profile }, warmup, reps)
     })?;
     let mib = |k: Option<u64>| {
         k.map_or_else(
@@ -456,7 +483,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
+        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
         n_keys.min(count),
         std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
@@ -554,6 +581,12 @@ mod tests {
         assert!(Options::parse(&strings(&["--a", "1", "--a", "2"])).is_err());
         let o = Options::parse(&strings(&["--bogus", "1"])).unwrap();
         assert!(o.finish().is_err());
+        let mut o = Options::parse(&strings(&["--flock-profile", "slim"])).unwrap();
+        assert_eq!(o.flock_profile("flock-profile"), Ok(Some(FlockProfile::Slim)));
+        assert_eq!(o.flock_profile("flock-profile"), Ok(None));
+        let mut o = Options::parse(&strings(&["--flock-profile", "secure"])).unwrap();
+        assert!(o.flock_profile("flock-profile").is_err());
+        assert_eq!(parse_flock_profile("fast"), Some(FlockProfile::Fast));
         assert_eq!(
             median(&[
                 Duration::from_millis(3),

@@ -7,8 +7,9 @@
 //! byte strings defined here, because a segment's Flock argument is split into parts of
 //! `2^{d_part}` records (sub-batches), each with its own Flock commitment and proof:
 //!
-//! - event 2, [`SegmentCommitments`]: `version (u8) || d_part (u8) || parts (LE32)`, then
-//!   per part `LE32(len) || commitment`, the part's `agg_keccak::tied::TiedCommitment` bytes
+//! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || parts
+//!   (LE32)`, then per part `LE32(len) || commitment`, the part's
+//!   `agg_keccak::tied::TiedCommitment` bytes
 //!   (the framed Ligerito level-0 cap of its sponge instance, K7, K11; the bridge union's
 //!   cap depends on `sd` and is part of the proof, K13);
 //! - event 6, [`SegmentProofs`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
@@ -19,13 +20,20 @@
 //!
 //! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
 //! event 6 before `tau`), so `d_part`, the commitments, the shares and the proofs are bound.
+//! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at event 0
+//! (1 `Fast`, 4 `Slim`): the verifier reads it to select its Flock parameters
+//! ([`flock_profile`]) and runs the transcript with it, so an aggregate whose items name
+//! another profile than event 0 fails at event 0's replay, and a segment item whose profile
+//! differs from the verifier's is rejected ([`ItemError::Profile`]).
 
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
-/// Version byte of the segment items (3: the tied parts of deviation K13, one Flock cap per
-/// part at event 2 and one tied-part proof, holding the bridge union's cap, per part at event
-/// 6; version 2 carried the one-row bridge slot's cap at event 2).
-pub const ITEM_VERSION: u8 = 3;
+/// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
+/// runs `Fast` or `Slim`; version 3 had the same tied parts of deviation K13 under `Fast`
+/// only: one Flock cap per part at event 2 and one tied-part proof, holding the bridge
+/// union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap at
+/// event 2).
+pub const ITEM_VERSION: u8 = 4;
 
 /// A malformed segment item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +53,8 @@ pub enum ItemError {
     },
     /// `d_part` outside the admitted range.
     PartSize(u8),
+    /// The item names another Flock profile than the verifier's (or an unknown one).
+    Profile(u8),
 }
 
 impl std::fmt::Display for ItemError {
@@ -95,9 +105,12 @@ fn put_framed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// The event-2 item of one segment: the part size and one Flock commitment per part.
+/// The event-2 item of one segment: the Flock profile, the part size and one Flock
+/// commitment per part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentCommitments {
+    /// The `agg_piop::binding::FlockProfile` id of the parts (bound at event 0).
+    pub profile: u8,
     /// `log2` of the record positions per part.
     pub d_part: u32,
     /// The parts' Flock commitments, in part order.
@@ -110,6 +123,7 @@ impl SegmentCommitments {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = vec![
             ITEM_VERSION,
+            self.profile,
             u8::try_from(self.d_part).expect("d_part < 256"),
         ];
         out.extend_from_slice(
@@ -133,6 +147,7 @@ impl SegmentCommitments {
         if version != ITEM_VERSION {
             return Err(ItemError::Version(version));
         }
+        let profile = r.take(1)?[0];
         let d_part = u32::from(r.take(1)?[0]);
         let parts = r.u32()?;
         // Each part needs at least its 4-byte length: refuse absurd counts before allocating.
@@ -144,10 +159,23 @@ impl SegmentCommitments {
             .collect::<Result<Vec<_>, _>>()?;
         r.finish()?;
         Ok(Self {
+            profile,
             d_part,
             commitments,
         })
     }
+}
+
+/// The Flock profile id named by the event-2 items of an aggregate (`items` are the `S`
+/// items of `agg_piop::wire::AggregateProof::flock_commitments`): the profile of the first
+/// item that parses, or `None` when none does (the verifier then rejects the aggregate under
+/// its default profile).
+#[must_use]
+pub fn flock_profile(items: &[Vec<u8>]) -> Option<u8> {
+    items
+        .iter()
+        .find_map(|item| SegmentCommitments::from_bytes(item).ok())
+        .map(|c| c.profile)
 }
 
 /// The event-6 proof item of one segment: the shares of all parts but the last, and one
@@ -206,11 +234,15 @@ mod tests {
     #[test]
     fn segment_items_round_trip_and_malformed_items_are_rejected() {
         let c = SegmentCommitments {
+            profile: 4,
             d_part: 10,
             commitments: vec![vec![1; 40], vec![], vec![2, 3]],
         };
         let bytes = c.to_bytes();
-        assert_eq!(bytes.len(), 2 + 4 + 3 * 4 + 42);
+        assert_eq!(bytes.len(), 3 + 4 + 3 * 4 + 42);
+        assert_eq!(&bytes[..3], &[ITEM_VERSION, 4, 10]);
+        assert_eq!(flock_profile(&[vec![9], bytes.clone()]), Some(4));
+        assert_eq!(flock_profile(&[vec![9]]), None);
         assert_eq!(SegmentCommitments::from_bytes(&bytes), Ok(c.clone()));
         assert_eq!(
             SegmentCommitments::from_bytes(&bytes[..bytes.len() - 1]),
@@ -229,7 +261,7 @@ mod tests {
             Err(ItemError::Version(9))
         );
         let mut huge = bytes;
-        huge[2..6].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge[3..7].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             SegmentCommitments::from_bytes(&huge),
             Err(ItemError::Truncated)
@@ -240,6 +272,7 @@ mod tests {
         );
         // An empty segment: no parts.
         let empty = SegmentCommitments {
+            profile: 1,
             d_part: 3,
             commitments: Vec::new(),
         };

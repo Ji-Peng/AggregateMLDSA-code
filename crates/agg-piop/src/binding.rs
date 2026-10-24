@@ -30,6 +30,9 @@ pub enum FlockProfile {
     LaBinius = 2,
     /// Mode B: the `w_1'` bits in the clear as the event-2 items (`crate::mode_b`).
     PublicBits = 3,
+    /// Ligerito `Slim` (rate 1/4, Flock's 128-bit work-normalized accounting as `Fast`):
+    /// about two thirds of the `Fast` Flock bytes for about twice the level-0 encoding work.
+    Slim = 4,
 }
 
 impl FlockProfile {
@@ -41,15 +44,17 @@ impl FlockProfile {
             1 => Some(Self::Fast),
             2 => Some(Self::LaBinius),
             3 => Some(Self::PublicBits),
+            4 => Some(Self::Slim),
             _ => None,
         }
     }
 
-    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast` or `LaBinius`), whose
-    /// tie to the committed bits is the parity bridge with seed-derived matrices (spec 9.4).
+    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim` or
+    /// `LaBinius`), whose tie to the committed bits is the parity bridge with seed-derived
+    /// matrices (spec 9.4).
     #[must_use]
     pub const fn is_mode_a(self) -> bool {
-        matches!(self, Self::Fast | Self::LaBinius)
+        matches!(self, Self::Fast | Self::Slim | Self::LaBinius)
     }
 }
 
@@ -127,10 +132,14 @@ mod tests {
         assert_eq!(*record.last().unwrap(), 0);
         assert_eq!(FlockProfile::from_id(2), Some(FlockProfile::LaBinius));
         assert_eq!(FlockProfile::from_id(3), Some(FlockProfile::PublicBits));
-        assert_eq!(FlockProfile::from_id(4), None);
-        let mode_a: Vec<u8> = (0..4)
+        assert_eq!(FlockProfile::from_id(4), Some(FlockProfile::Slim));
+        assert_eq!(FlockProfile::from_id(5), None);
+        let mode_a: Vec<u8> = (0..5)
             .filter(|&id| FlockProfile::from_id(id).unwrap().is_mode_a())
             .collect();
-        assert_eq!(mode_a, [1, 2]);
+        assert_eq!(mode_a, [1, 2, 4]);
+        for id in 0..5 {
+            assert_eq!(FlockProfile::from_id(id).unwrap() as u8, id);
+        }
     }
 }

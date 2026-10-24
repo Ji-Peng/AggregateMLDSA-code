@@ -5,7 +5,8 @@
 //! the cost of every step.
 //!
 //! Transcript (spec Section 10, one Spongefish stream run by `agg_piop::prover`): event 0
-//! instance (record digest over `(pk_i, M_i, c~_i)`, Flock profile `Fast`), event 1 the
+//! instance (record digest over `(pk_i, M_i, c~_i)`, the Flock profile: `Fast` or `Slim`,
+//! [`AggregatorConfig::profile`]), event 1 the
 //! round-1 Akita commitment `G_main`, event 2 the Flock commitments, event 3 the bridge seed
 //! `sd`, event 4 the round-2 Akita commitments, event 5 the Flock seeds `fs_sigma`, event 6
 //! the final vectors `Y_sigma` and the Flock proofs, events 7 to 11 the three sum-check
@@ -61,10 +62,26 @@ use sha3::{Digest, Sha3_256};
 
 use crate::wire::{SegmentCommitments, SegmentProofs};
 
-/// The Flock profile of mode A in this build (event 0).
+/// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]).
 pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
-/// The Ligerito profile of the Flock sub-proofs.
-pub const KECCAK_PROFILE: Profile = Profile::Fast;
+/// The Flock profiles of mode A: Ligerito `Fast` and `Slim`, both 128 bits work-normalized in
+/// Flock's accounting (docs/keccak.md Section 12).
+pub const MODE_A_PROFILES: [FlockProfile; 2] = [FlockProfile::Fast, FlockProfile::Slim];
+
+/// The Ligerito profile of the Flock sub-proofs of a mode-A Flock profile.
+#[must_use]
+pub const fn keccak_profile(profile: FlockProfile) -> Option<Profile> {
+    match profile {
+        FlockProfile::Fast => Some(Profile::Fast),
+        FlockProfile::Slim => Some(Profile::Slim),
+        _ => None,
+    }
+}
+
+/// The Ligerito profile of a mode-A Flock profile (panics on another profile).
+fn ligerito_of(profile: FlockProfile) -> Profile {
+    keccak_profile(profile).expect("a mode-A Flock profile (Fast or Slim)")
+}
 /// Default `log2` of the record positions per Flock part. With the tied part (K11) a part
 /// of `2^d` records costs a sponge instance of `2^(d + 19)` bits and a bridge instance whose
 /// block is `2^(13 + d)` bits; the whole segment (`d = 13`) is the target on the cloud
@@ -168,6 +185,7 @@ pub struct PartProveLog {
 /// The prover's Keccak side of mode A (module docs).
 pub struct FlockProver<'g, 'h> {
     gate: &'g ChainGate,
+    profile: FlockProfile,
     geometry: Geometry,
     records: Vec<SpongeRecord>,
     part_log2: u32,
@@ -209,6 +227,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         );
         Self {
             gate,
+            profile: FLOCK_PROFILE,
             geometry,
             records,
             part_log2,
@@ -216,6 +235,18 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             keep_commit_data: true,
             state: Mutex::new(ProverState::default()),
         }
+    }
+
+    /// Prove under the mode-A Flock profile `profile` ([`MODE_A_PROFILES`]; default
+    /// [`FLOCK_PROFILE`]).
+    ///
+    /// # Panics
+    /// If `profile` is not a mode-A profile.
+    #[must_use]
+    pub fn profile(mut self, profile: FlockProfile) -> Self {
+        ligerito_of(profile);
+        self.profile = profile;
+        self
     }
 
     /// Keep each part's sponge commit data from event 2 to event 6 (default; K14), or drop it
@@ -260,8 +291,13 @@ impl KeccakSide for FlockProver<'_, '_> {
                 let start = Instant::now();
                 let range = plan.global(s);
                 let records = &self.records[range.clone()];
-                let seg =
-                    TiedPart::new_part(self.gate, records.len(), plan.d_part, s, KECCAK_PROFILE);
+                let seg = TiedPart::new_part(
+                    self.gate,
+                    records.len(),
+                    plan.d_part,
+                    s,
+                    ligerito_of(self.profile),
+                );
                 let (sponge, bits) = self.build(&seg, sigma, s, records);
                 // The committed buffers are dropped here and rebuilt at event 6; the commit
                 // data (codeword, Merkle tree) is kept unless configured otherwise (K14).
@@ -288,6 +324,7 @@ impl KeccakSide for FlockProver<'_, '_> {
             }
             items.push(
                 SegmentCommitments {
+                    profile: self.profile as u8,
                     d_part: plan.d_part,
                     commitments: parts.iter().map(|p| p.commitment.to_bytes()).collect(),
                 }
@@ -387,16 +424,29 @@ pub enum SegmentRejection {
 /// The verifier's Keccak side of mode A (module docs).
 pub struct FlockVerifier<'g> {
     gate: &'g ChainGate,
+    profile: FlockProfile,
     log: Mutex<Vec<PartVerifyLog>>,
     rejection: Mutex<Option<(usize, SegmentRejection)>>,
 }
 
 impl<'g> FlockVerifier<'g> {
-    /// The verifier side over the sponge gate `gate`.
+    /// The verifier side over the sponge gate `gate` under the default profile
+    /// [`FLOCK_PROFILE`].
     #[must_use]
     pub fn new(gate: &'g ChainGate) -> Self {
+        Self::with_profile(gate, FLOCK_PROFILE)
+    }
+
+    /// The verifier side under the mode-A Flock profile `profile` ([`MODE_A_PROFILES`]).
+    ///
+    /// # Panics
+    /// If `profile` is not a mode-A profile.
+    #[must_use]
+    pub fn with_profile(gate: &'g ChainGate, profile: FlockProfile) -> Self {
+        ligerito_of(profile);
         Self {
             gate,
+            profile,
             log: Mutex::new(Vec::new()),
             rejection: Mutex::new(None),
         }
@@ -422,7 +472,7 @@ impl<'g> FlockVerifier<'g> {
 
 impl KeccakVerifier for FlockVerifier<'_> {
     fn profile(&self) -> FlockProfile {
-        FLOCK_PROFILE
+        self.profile
     }
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
@@ -436,6 +486,12 @@ impl KeccakVerifier for FlockVerifier<'_> {
             Ok(c) => c,
             Err(e) => return self.reject(sigma, SegmentRejection::Item(e)),
         };
+        if commitments.profile != self.profile as u8 {
+            return self.reject(
+                sigma,
+                SegmentRejection::Item(crate::wire::ItemError::Profile(commitments.profile)),
+            );
+        }
         let d_part = commitments.d_part;
         if d_part < MIN_PART_LOG2 || d_part > segment.geometry.d_seg() {
             return self.reject(
@@ -476,7 +532,13 @@ impl KeccakVerifier for FlockVerifier<'_> {
         for s in 0..count {
             let range = plan.local(s);
             let start = Instant::now();
-            let seg = TiedPart::new_part(self.gate, range.len(), d_part, s, KECCAK_PROFILE);
+            let seg = TiedPart::new_part(
+                self.gate,
+                range.len(),
+                d_part,
+                s,
+                ligerito_of(self.profile),
+            );
             let setup = start.elapsed();
             let commitment = match TiedCommitment::from_bytes(&commitments.commitments[s]) {
                 Ok(c) => c,
@@ -521,12 +583,26 @@ pub struct AggregatorConfig {
     /// Requested `log2` of the record positions per Flock part (clamped per segment to
     /// `[MIN_PART_LOG2, d_seg]`).
     pub part_log2: u32,
+    /// The Flock profile ([`MODE_A_PROFILES`], bound at event 0).
+    pub profile: FlockProfile,
 }
 
 impl Default for AggregatorConfig {
     fn default() -> Self {
         Self {
             part_log2: DEFAULT_PART_LOG2,
+            profile: FLOCK_PROFILE,
+        }
+    }
+}
+
+impl AggregatorConfig {
+    /// Parts of `2^{part_log2}` record positions under the default profile.
+    #[must_use]
+    pub fn with_part_log2(part_log2: u32) -> Self {
+        Self {
+            part_log2,
+            ..Self::default()
         }
     }
 }
@@ -542,6 +618,8 @@ pub enum AggregateError {
     Signature(usize, String),
     /// The prover failed.
     Prove(ProveError),
+    /// The configured Flock profile is not a mode-A profile.
+    Profile(FlockProfile),
 }
 
 impl std::fmt::Display for AggregateError {
@@ -551,6 +629,7 @@ impl std::fmt::Display for AggregateError {
             Self::Malformed(i, what) => write!(f, "record {i}: {what}"),
             Self::Signature(i, why) => write!(f, "record {i}: signature rejected ({why})"),
             Self::Prove(e) => write!(f, "prover: {e}"),
+            Self::Profile(p) => write!(f, "Flock profile {p:?} is not a mode-A profile"),
         }
     }
 }
@@ -573,6 +652,8 @@ impl From<ProveError> for AggregateError {
 pub struct ProveReport {
     /// Live records `N`.
     pub records: usize,
+    /// The Flock profile (event 0).
+    pub profile: FlockProfile,
     /// The public instance: key expansion (`ExpandA`, inverse NTTs), `tr`, `mu`, `c`, `T`.
     pub instance: Duration,
     /// The PIOP prover's steps (`tables` is the strict witness derivation and `G_main`;
@@ -638,7 +719,7 @@ impl std::fmt::Display for ProveReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let t = &self.timings;
-        writeln!(f, "prover, N = {}:", self.records)?;
+        writeln!(f, "prover, N = {}, Flock profile {:?}:", self.records, self.profile)?;
         for (name, d) in [
             ("instance (ExpandA, mu, c, T)", self.instance),
             ("witness and G_main tables", t.tables),
@@ -835,6 +916,10 @@ impl Aggregator {
         if n == 0 || n > 1 << 15 {
             return Err(AggregateError::Count(n));
         }
+        let profile = self.config.profile;
+        if keccak_profile(profile).is_none() {
+            return Err(AggregateError::Profile(profile));
+        }
         for (i, (pk, _, sig)) in records.iter().enumerate() {
             if pk.len() != PK_BYTES {
                 return Err(AggregateError::Malformed(i, "public key length"));
@@ -888,6 +973,7 @@ impl Aggregator {
             self.config.part_log2,
             hooks.flock_witness,
         )
+        .profile(profile)
         .keep_commit_data(self.keep_commit_data);
         let recording = RecordingMatrices::default();
         let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
@@ -912,7 +998,7 @@ impl Aggregator {
                 main,
                 &recording,
                 &side,
-                FLOCK_PROFILE,
+                profile,
                 &prove_hooks,
             )?
         } else {
@@ -922,7 +1008,7 @@ impl Aggregator {
                 main,
                 &SeededMatrices,
                 &side,
-                FLOCK_PROFILE,
+                profile,
                 &prove_hooks,
             )?
         };
@@ -933,6 +1019,7 @@ impl Aggregator {
         debug_assert_eq!(size.total(), bytes.len());
         let report = ProveReport {
             records: n,
+            profile,
             instance: instance_time,
             timings: output.timings,
             flock_records: flock_time,
@@ -954,6 +1041,11 @@ impl Aggregator {
 pub struct VerifyCostReport {
     /// Accept (`Ok`) or the first failing check, with the PIOP verifier's step timings.
     pub report: VerifyReport,
+    /// The Flock profile the aggregate was verified under.
+    pub profile: FlockProfile,
+    /// Reading the profile from the aggregate's event-2 items (a parse of the aggregate,
+    /// outside the PIOP verifier's steps; zero when the profile was given).
+    pub profile_probe: Duration,
     /// Per Flock part (in verification order; a rejected run stops at the failing part).
     pub parts: Vec<PartVerifyLog>,
     /// The segment and reason when the Keccak side rejected.
@@ -989,10 +1081,18 @@ impl std::fmt::Display for VerifyCostReport {
         };
         writeln!(
             f,
-            "verifier, N = {}, {} keys, aggregate {} B: {verdict}",
+            "verifier, N = {}, {} keys, aggregate {} B, Flock profile {:?}: {verdict}",
             self.records,
             if self.cached { "cached" } else { "uncached" },
-            self.aggregate_bytes
+            self.aggregate_bytes,
+            self.profile
+        )?;
+        writeln!(
+            f,
+            "  {:<16} {:<32} {:>10.2} ms",
+            "profile",
+            "Flock profile from the items",
+            ms(self.profile_probe)
         )?;
         let labels = [
             ("parse", "parse, manifest, PCS verifier"),
@@ -1040,9 +1140,13 @@ impl std::fmt::Display for VerifyCostReport {
     }
 }
 
-/// The mode-A verifier (holds the sponge gate, built once).
+/// The mode-A verifier (holds the sponge gate, built once). It verifies an aggregate under
+/// the Flock profile its event-2 items name when that is a mode-A profile
+/// ([`MODE_A_PROFILES`]; the transcript binds the profile at event 0, so the items cannot name
+/// another one than the prover bound), or under the profile fixed by [`Self::require`].
 pub struct AggregateVerifier {
     gate: ChainGate,
+    require: Option<FlockProfile>,
 }
 
 impl Default for AggregateVerifier {
@@ -1057,7 +1161,33 @@ impl AggregateVerifier {
     pub fn new() -> Self {
         Self {
             gate: sponge_gate(),
+            require: None,
         }
+    }
+
+    /// Verify under `profile` only (an aggregate under another profile is rejected).
+    ///
+    /// # Panics
+    /// If `profile` is not a mode-A profile.
+    #[must_use]
+    pub fn require(mut self, profile: FlockProfile) -> Self {
+        ligerito_of(profile);
+        self.require = Some(profile);
+        self
+    }
+
+    /// The profile to verify `aggregate` under: the required one, else the mode-A profile its
+    /// event-2 items name, else the default (an unparsable aggregate is rejected later).
+    fn profile_of(&self, aggregate: &[u8]) -> FlockProfile {
+        if let Some(p) = self.require {
+            return p;
+        }
+        AggregateProof::from_bytes(aggregate)
+            .ok()
+            .and_then(|proof| crate::wire::flock_profile(&proof.flock_commitments))
+            .and_then(FlockProfile::from_id)
+            .filter(|p| MODE_A_PROFILES.contains(p))
+            .unwrap_or(FLOCK_PROFILE)
     }
 
     /// Verify `aggregate` for the records `(pk_i, M_i)`. The verifier computes `tr_i`, `mu_i`,
@@ -1069,18 +1199,27 @@ impl AggregateVerifier {
         aggregate: &[u8],
         cache: Option<&mut KeyCache>,
     ) -> VerifyCostReport {
-        let keccak = FlockVerifier::new(&self.gate);
+        let probe = Instant::now();
+        let profile = self.profile_of(aggregate);
+        let profile_probe = if self.require.is_some() {
+            Duration::ZERO
+        } else {
+            probe.elapsed()
+        };
+        let keccak = FlockVerifier::with_profile(&self.gate, profile);
         let cached = cache.is_some();
         let report = verify_timed(
             statements,
             aggregate,
             &SeededMatrices,
             &keccak,
-            FLOCK_PROFILE,
+            profile,
             cache,
         );
         VerifyCostReport {
             report,
+            profile,
+            profile_probe,
             parts: keccak.log(),
             rejection: keccak.rejection(),
             records: statements.len(),
@@ -1144,6 +1283,7 @@ mod tests {
         let matrices = BridgeMatrices::random_for_tests(3);
         let item = |d_part: u32, commitments: Vec<Vec<u8>>| {
             SegmentCommitments {
+                profile: FLOCK_PROFILE as u8,
                 d_part,
                 commitments,
             }
