@@ -543,7 +543,38 @@ impl<'g> BridgedSegment<'g> {
     #[must_use]
     pub fn new(gate: &'g ChainGate, n: usize, d_seg: u32, profile: Profile) -> Self {
         assert!(n >= 1 && n <= 1 << d_seg, "1 <= n <= 2^d_seg");
-        let layout = SlotLayout::production(d_seg, n);
+        Self::with_layout(gate, n, d_seg, SlotLayout::production(d_seg, n), profile)
+    }
+
+    /// The context of part `index` of a segment split into parts of `2^{d_part}` record
+    /// positions, with `n` live records (the part's first `n` positions; segment records
+    /// `2^{d_part} index ..`). Its bridge slot proves the part's share
+    /// `Y_{sigma, index} = M^{(sigma)} b'_{index}` of the segment's final vector (the parts'
+    /// shares XOR to `Y_sigma`; deviation K10). Part 0 of `2^{d_seg}` positions is
+    /// [`Self::new`].
+    ///
+    /// # Panics
+    /// If `n == 0`, `n > 2^{d_part}`, `d_part > 13` or the part lies outside the segment.
+    #[must_use]
+    pub fn new_part(
+        gate: &'g ChainGate,
+        n: usize,
+        d_part: u32,
+        index: usize,
+        profile: Profile,
+    ) -> Self {
+        assert!(n >= 1 && n <= 1 << d_part, "1 <= n <= 2^d_part");
+        let layout = SlotLayout::production_part(d_part, index, n);
+        Self::with_layout(gate, n, d_part, layout, profile)
+    }
+
+    fn with_layout(
+        gate: &'g ChainGate,
+        n: usize,
+        d_seg: u32,
+        layout: SlotLayout,
+        profile: Profile,
+    ) -> Self {
         let sponge_type = bridged_sponge_type(gate);
         let bridge_type = layout.table_type();
         let nu = capacity_log(n, gate.layout().k_log);
@@ -712,6 +743,52 @@ impl<'g> BridgedSegment<'g> {
     pub fn commit(&self, records: &[SpongeRecord]) -> BridgedCommitted {
         let (sponge, bridge_z) = self.honest_parts(records);
         self.commit_parts(sponge, bridge_z, records)
+    }
+
+    /// Rebuild a committed segment from its parts and the commitment computed earlier by
+    /// [`Self::commit_parts`] on the same parts, without committing again. A driver that
+    /// drops the slot buffers between event 2 and event 6 (to bound memory) rebuilds them
+    /// here; Flock's prover commits inside [`Self::prove_with_final_vector`] anyway, and that
+    /// method panics if the cap differs from `commitment`.
+    #[must_use]
+    pub fn reattach(
+        &self,
+        sponge: SlotBuffers,
+        bridge_z: Vec<u64>,
+        records: &[SpongeRecord],
+        commitment: KeccakCommitment,
+    ) -> BridgedCommitted {
+        assert_eq!(records.len(), self.n, "one record per live position");
+        assert_eq!(
+            bridge_z.len(),
+            self.layout.useful_words(),
+            "bridge block length"
+        );
+        assert_eq!(
+            commitment.as_bytes().len(),
+            self.ctx.commitment_len(),
+            "commitment length"
+        );
+        let c_tilde: Vec<[u8; CTILDE_BYTES]> = records.iter().map(SpongeRecord::c_tilde).collect();
+        let public = records
+            .iter()
+            .zip(&c_tilde)
+            .flat_map(|(r, c)| sponge_public_words(&r.mu, c))
+            .collect();
+        BridgedCommitted {
+            n: self.n,
+            sponge,
+            bridge_z,
+            public,
+            c_tilde,
+            commitment,
+        }
+    }
+
+    /// Bytes of the event-2 commitment of this context.
+    #[must_use]
+    pub fn commitment_len(&self) -> usize {
+        self.ctx.commitment_len()
     }
 
     /// The honest `Y_sigma = M_3 M_2 M_1 b'` of a committed segment under the matrices of `sd`.

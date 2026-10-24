@@ -140,6 +140,8 @@ dependencies = [
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",
+ "rayon",
+ "sha3 0.10.9",
 ]
 
 [[package]]

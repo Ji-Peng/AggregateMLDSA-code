@@ -1,6 +1,6 @@
 [package]
 name = "agg-cli"
-description = "Prove/verify command-line tools, wire format, record binding and caches."
+description = "Mode-A aggregator and verifier, the agg command-line tool, batch files and key cache."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,8 @@ agg-pcs-config = { workspace = true }
 agg-piop = { workspace = true }
 agg-keccak = { workspace = true }
 agg-bridge = { workspace = true }
+sha3 = { workspace = true }
+rayon = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

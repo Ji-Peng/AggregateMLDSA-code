@@ -225,7 +225,10 @@ unaffected: at 64 records `M = 27`, `mu = 19`. `UnionContext::commit` in `segmen
 materializes the padded `z` (fine at test sizes; a production commit must gather the
 dense stack directly).
 
-Remedy (proposal, not implemented): split a segment into Flock sub-batches of `2^{d_f}`
+Status: the remedy below is implemented as K10 (Flock parts of `2^{d_part}` records, default
+`d_part = 9`); the mode-A driver (`agg_cli::mode_a`) never builds a full-segment union.
+
+Remedy (proposal at the time): split a segment into Flock sub-batches of `2^{d_f}`
 records, each with its own bridge slot proving the partial vector
 `Y_{sigma,s} = M^{(sigma)} b'_s` over the sub-batch's columns, and let the verifier check
 `XOR_s Y_{sigma,s} = Y_sigma` (the map is linear and the matrices are the same seeded ones,
@@ -458,3 +461,80 @@ with the Flock sub-proof checked inside the PIOP verifier, and one flipped `w1En
 fails exactly the side that holds it (F_p side: stage-1 terminal with the Flock sub-proof
 accepted; Flock side: the sub-proof rejected with the F_p side accepting, the rejection due
 to the bridge rows alone). The adapters stay in the test until the mode-A driver exists.
+
+## K10. Flock parts within a segment (spec Sections 1, 8, 10; resolves K9)
+
+Spec: "A segment is both one Keccak sub-batch ... and one parity-bridge chain"; one Flock
+commitment (event 2) and one Flock proof (event 6) per segment, the bridge slot proving
+`Y_sigma = M_3 M_2 M_1 b'` over the whole segment.
+
+Code (`agg_cli::mode_a`, `agg_keccak::segment::BridgedSegment::new_part`,
+`agg_bridge::gf2_walker::SegmentLayout::part`): the parity-bridge chain stays one per segment
+(the F_p side, `Y_sigma` and the matrices are unchanged), but the segment's Flock argument is
+split into parts of `2^{d_part}` record positions, `d_part = min(part_log2, d_seg)` with
+`part_log2` chosen by the prover (default 9, `docs/cli.md` Section 4) and `3 <= d_part`. Part `s` holds the
+segment's records `[2^{d_part} s, 2^{d_part} (s + 1))` that are live; parts without live
+records do not exist (an all-padded segment has none, and the verifier then requires
+`Y_sigma = 0`). Each part is one Flock union proof of its sponges and of a bridge slot whose
+layout is the segment's restricted to the part (`SegmentLayout::part`: local position `p` is
+segment position `2^{10 + d_part} s + p`, so its level-1 block, in-block index and level-2
+input are the segment's). The slot proves the part's share
+`Y_{sigma, s} = M^{(sigma)} b'_s`; by linearity over GF(2) the shares XOR to
+`M^{(sigma)} b' = Y_sigma`, so the bound of spec 9.4 is unchanged (the difference `b XOR b'`
+and the matrices are those of the whole segment).
+
+Wire (`agg_cli::wire`): the event-2 item of a segment is `version || d_part || LE32(parts)`
+followed by the framed part commitments; the event-6 proof item is the packed shares of all
+parts but the last (512 bytes each) followed by the framed part proofs. The last share is
+`Y_sigma` XOR the others, so the XOR identity holds by construction. Both items are
+absorbed where the spec absorbs the single Flock commitment and proof, so `d_part`, the
+commitments, the shares and the proofs are bound in the PIOP transcript. Part `s` seeds its
+challenger with `SHA3-256(len || "agg-mldsa/v1/flock-part-seed" || fs_sigma || LE64(s))`, and
+`BridgeSlot::digest` now covers the part offset (and the share), so a part proof does not
+verify at another index. The verifier rejects `d_part` outside `[3, d_seg]` and a part count
+other than `ceil(live / 2^{d_part})`. Its Flock work grows with the number of parts (and so
+with the proof size); a floor on `d_part` per `N` is a possible later policy.
+
+Why: K9. A Flock registry gives every type the same `2^nu` rows, so the bridged union of
+`2^d` records has about `2^{13 + 2d}` bits; at a full segment that is `2^40` bits (128 GiB
+per buffer). Parts of `2^{d_part}` records cost `2^{13 - d_part}` Flock proofs per full
+segment. Measured locally (`docs/cli.md` Section 4, default build): a part of 128, 256 and
+512 records takes 3.2, 5.5 and 11.5 GiB prover peak RSS and 408, 522 and 676 KB of proof,
+at about the same time per record. At `N = 2^15` that is (estimate from these sizes) 43 MB
+of Flock proofs at `d_part = 9` and 67 MB at `d_part = 8`; `d_part = 10` (about 23 GiB per
+part, extrapolated) is for the cloud machine to calibrate. With `d_part = d_seg`
+(every local batch at the default) a segment has exactly one part, as in the spec, except
+for the part seed and the item framing.
+
+Memory: the driver commits the parts one after the other at event 2 and keeps only their
+commitments; at event 6 it rebuilds each part's witness from the records
+(`BridgedSegment::reattach`, no second commitment: Flock's prover commits internally, K7,
+and the cap is checked against the absorbed one), proves, and drops it. This removes the
+K7 cost of keeping all slot buffers from event 2 to event 6, for one witness rebuild per
+part (cheap next to the proof).
+
+## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
+
+Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
+
+- The aggregator takes `(pk_i, M_i, signature_i)`; `c~_i` is the first 32 bytes of the
+  signature, and every signature is verified strictly while its witness is derived
+  (`agg_witness::derive`, FIPS 204 Algorithm 8), so an invalid one is refused with its
+  index before anything is committed. The Flock side's records are `mu_i` and the
+  `w1Encode` of the committed bits (`agg_piop::mode_b::w1_encodings`), so the two bit
+  copies agree by construction.
+- The aggregate is the `agg_piop::wire::AggregateProof` byte string: header, the `c~_i` list,
+  then the proof blob (Akita commitments, the mode-A segment items of K10, `Y_sigma`, PIOP
+  rounds and claims, the Akita opening). There is no projection seed in the transcript
+  (P2); the ordering is that of spec Section 10.
+- The verifier takes `(pk_i, M_i)` and the aggregate and recomputes `tr_i`, `mu_i`,
+  `c_i = SampleInBall(c~_i)`, `T_i` and the `ExpandA` data (`agg_piop::verifier`, P10). The
+  optional key cache is `agg_piop::public_data::KeyCache` in memory (a hash map keyed by the
+  encoded key) and, on disk, `agg_cli::cache` (entries addressed by `SHA3-256(pk)`, holding
+  `pk`, `tr` and `A`; `t1` is re-decoded from `pk` on load). The spec's "cached" verifier
+  number of Section 11 is the run with every key in the cache.
+- Cost report: the PIOP verifier's 14 steps (`VerifyTimings`), per Flock part the context
+  setup and verification time, and the keys expanded in the run.
+- Empty segments (possible for `N` in `(2^14, 2^14 + 2^13]`) have no Flock part and require
+  `Y_sigma = 0`; this path is unit-tested on the item level only, since batches above
+  `2^13` records do not run on the development machine.

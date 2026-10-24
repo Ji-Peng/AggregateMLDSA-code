@@ -404,3 +404,89 @@ fn bridged_segment_shapes() {
     assert_eq!(cost.copy_wires, 4_800);
     assert_eq!(cost.bridge_committed_words, (6 << 17) / 128 + 1 + 32);
 }
+
+/// A segment split into Flock parts (deviation K10): 20 live records (`d_seg = 5`) in parts
+/// of 8 record positions (`d_part = 3`; 8, 8 and 4 live records). Each part commits before
+/// the seed, proves its share `Y_{sigma, s}` of the segment's final vector, and the shares
+/// XOR to the F_p side's `Y_sigma` of the whole segment. The slot buffers are dropped after
+/// the commitment and rebuilt for the proof (`reattach`). A share proven under another
+/// part's index, two swapped shares, and a part proven against the whole segment's `Y` are
+/// rejected.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+fn segment_parts_prove_shares_that_xor_to_the_segment_vector() {
+    let gate = sponge::sponge_gate();
+    let (n, d_part) = (20_usize, 3_u32);
+    let mut rng = Rng::new(0xA875);
+    let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+    let parts: Vec<(usize, std::ops::Range<usize>)> = (0..n.div_ceil(8))
+        .map(|s| (s, 8 * s..(8 * s + 8).min(n)))
+        .collect();
+    let segs: Vec<BridgedSegment<'_>> = parts
+        .iter()
+        .map(|(s, r)| BridgedSegment::new_part(&gate, r.len(), d_part, *s, Profile::Fast))
+        .collect();
+    assert_eq!(segs[2].layout().live_records(), 4);
+    assert_eq!(segs[1].layout().segment.offset, 1 << 13);
+    // Event 2: commit every part, keep only the commitments.
+    let commitments: Vec<KeccakCommitment> = segs
+        .iter()
+        .zip(&parts)
+        .map(|(seg, (_, r))| seg.commit(&records[r.clone()]).commitment().clone())
+        .collect();
+    let mut h = Sha3_256::new();
+    for c in &commitments {
+        h.update(c.as_bytes());
+    }
+    let sd: [u8; 32] = h.finalize().into();
+    let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd));
+    // The F_p side's Y of the whole segment (main-domain walk of agg-witness).
+    let geom = Geometry::new(n).unwrap();
+    let lanes = main_domain_lanes(&records, geom.main_len());
+    let b: [&[i8]; 6] = std::array::from_fn(|t| lanes[t].as_slice());
+    let y_segment = gf2_composite(&geom, &b, &mats);
+    // Event 6: rebuild each part, prove its share; the last share is Y XOR the others.
+    let rebuild = |k: usize| {
+        let r = parts[k].1.clone();
+        let (sponge, bridge_z) = segs[k].honest_parts(&records[r.clone()]);
+        segs[k].reattach(sponge, bridge_z, &records[r], commitments[k].clone())
+    };
+    let fs = |k: usize| -> [u8; 32] { std::array::from_fn(|i| (i + 7 * k) as u8) };
+    let mut shares = Vec::new();
+    let mut acc = vec![0_u8; 4096];
+    for k in 0..parts.len() {
+        let committed = rebuild(k);
+        let own = segs[k].final_vector(&committed, &mats);
+        let share = if k + 1 < parts.len() {
+            own.clone()
+        } else {
+            acc.iter().zip(&y_segment).map(|(a, y)| a ^ y).collect()
+        };
+        assert_eq!(share, own, "honest shares XOR to the segment's Y");
+        acc.iter_mut().zip(&share).for_each(|(a, s)| *a ^= s);
+        let proof =
+            segs[k].prove_with_final_vector(committed, sd, mats.clone(), share.clone(), &fs(k));
+        shares.push((share, proof));
+    }
+    assert_eq!(acc, y_segment);
+    let statement = |k: usize| {
+        let r = parts[k].1.clone();
+        let mu: Vec<[u8; 64]> = records[r.clone()].iter().map(|x| x.mu).collect();
+        let c: Vec<[u8; 32]> = records[r].iter().map(SpongeRecord::c_tilde).collect();
+        (mu, c)
+    };
+    let verify = |seg: &BridgedSegment<'_>, k: usize, y: &[u8], proof| {
+        let (mu, c) = statement(k);
+        seg.verify(&mu, &c, &commitments[k], sd, mats.clone(), y, &fs(k), proof)
+    };
+    for k in 0..parts.len() {
+        verify(&segs[k], k, &shares[k].0, &shares[k].1).expect("honest part");
+    }
+    // Part 1's proof checked as part 0 (same live count, another offset): rejected.
+    assert!(verify(&segs[0], 1, &shares[1].0, &shares[1].1).is_err());
+    // Swapped shares of parts 0 and 1 (their XOR is unchanged): both rejected.
+    assert!(verify(&segs[0], 0, &shares[1].0, &shares[0].1).is_err());
+    assert!(verify(&segs[1], 1, &shares[0].0, &shares[1].1).is_err());
+    // A part checked against the whole segment's Y: rejected.
+    assert!(verify(&segs[2], 2, &y_segment, &shares[2].1).is_err());
+}

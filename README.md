@@ -15,11 +15,11 @@ recorded in `docs/deviations.md`.
 | `crates/agg-piop` | lib | stages 1-3, range leaves and links, weight tables, verifier, Akita openings | M2 |
 | `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, soundness constants | M2 |
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, segment driver | M3 |
-| `crates/agg-cli` | bin `agg` + lib | prove/verify, wire format, record binding, caches | M2/M3 |
+| `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` | M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
 Other files: `docs/` (spec, spec checks, `pcs-config.md` for the Akita preset and
-catalog status and regeneration, `piop.md` for the PIOP tables and commitments, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
+catalog status and regeneration, `piop.md` for the PIOP tables and commitments, `cli.md` for mode A end to end and the `agg` tool, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
 ## Pinned revisions
@@ -66,7 +66,7 @@ scripts/test.sh --release       # for heavy tests
 scripts/bench.sh                # local calibration benches (agg-bench)
 scripts/bench.sh --bench mode_b -- 256 512 1024   # mode-B prove/verify/RSS/size (docs/piop.md 13)
 AVX512=1 scripts/bench.sh       # opt-in AVX-512 build in target/avx512
-./target/release/agg            # CLI skeleton
+./target/release/agg            # mode-A tool: keygen-batch, sign-batch, aggregate, verify, bench (docs/cli.md)
 ```
 
 If the stable toolchain from `rust-toolchain.toml` is not what rustup resolves, set

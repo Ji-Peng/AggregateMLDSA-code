@@ -79,6 +79,21 @@ impl SlotLayout {
         Self::new(SegmentLayout::production(d_seg), RECORD_POSITIONS * live)
     }
 
+    /// The production slot of part `index` of a segment split into parts of `2^{d_part}`
+    /// record positions, with `live` live records in the part (`Lambda = 2^{10 + d_part}`,
+    /// local record `i` is segment record `2^{d_part} index + i`; deviation K10).
+    ///
+    /// # Panics
+    /// If `live > 2^{d_part}`, `d_part > 13` or the part lies outside the segment.
+    #[must_use]
+    pub fn production_part(d_part: u32, index: usize, live: usize) -> Self {
+        assert!(live <= 1 << d_part, "more live records than the part holds");
+        Self::new(
+            SegmentLayout::production_part(d_part, index),
+            RECORD_POSITIONS * live,
+        )
+    }
+
     /// The shape.
     #[must_use]
     pub fn shape(&self) -> &Shape {
@@ -319,8 +334,9 @@ impl BridgeSlot {
     }
 
     /// SHA3-256 of the relation: label, `sd`, the shape (`(J_t, used, m_t, k_t)`, lanes,
-    /// `B_1`), the layout (`Lambda`, live positions, `k_log`, useful bits, constant column,
-    /// first composite row) and `Y` packed (docs/bridge.md Section 5, Binding).
+    /// `B_1`), the layout (`Lambda`, the part offset, live positions, `k_log`, useful bits,
+    /// constant column, first composite row) and `Y` packed (docs/bridge.md Section 5,
+    /// Binding; the offset distinguishes the parts of a sub-batched segment, K10).
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let lay = &self.layout;
@@ -340,6 +356,7 @@ impl BridgeSlot {
         put(&mut h, shape.lanes);
         put(&mut h, shape.blocks1);
         put(&mut h, lay.segment.lane_len);
+        put(&mut h, lay.segment.offset);
         put(&mut h, lay.live_len);
         put(&mut h, lay.k_log());
         put(&mut h, lay.useful_bits());

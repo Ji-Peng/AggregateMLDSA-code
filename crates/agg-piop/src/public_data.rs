@@ -139,6 +139,11 @@ impl KeyCache {
     pub fn insert(&mut self, key: Arc<VerifierKey>) {
         self.keys.entry(key.pk.clone()).or_insert(key);
     }
+
+    /// The cached expansions, in no particular order (to persist the cache).
+    pub fn entries(&self) -> impl Iterator<Item = &Arc<VerifierKey>> {
+        self.keys.values()
+    }
 }
 
 /// Public data of one live record.

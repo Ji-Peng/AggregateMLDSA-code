@@ -10,6 +10,12 @@
 //! shape and `lane_len = 2^{10 + d_seg}` this is the slot layout of docs/bridge.md Section 2
 //! (`p = j + 256 rho + 1024 i_seg`) and the main-domain layout of `agg_witness::bridge`.
 //!
+//! A layout may also be one part of a segment split into parts of `lane_len` positions
+//! ([`SegmentLayout::part`], Flock sub-batches): local position `p` is then segment position
+//! `offset + p`, so its level-1 block and in-block index, and its level-2 input, are those
+//! of the segment position. The composite is linear, so the parts' outputs XOR to the
+//! segment's.
+//!
 //! [`composite`] is the forward XOR walk (what the honest prover publishes as `Y_sigma`),
 //! [`transpose_into`] the factored transpose that the Flock bridge slot's `LincheckCircuit`
 //! uses (characteristic 2: the GF(2) and `GF(2^128)` products agree), and
@@ -29,6 +35,11 @@ pub struct SegmentLayout {
     pub shape: Shape,
     /// Input positions per lane (a power of two, `64 <= lane_len <= B_1 J_1`).
     pub lane_len: usize,
+    /// Position of the layout's first input within the segment's lane: `0` for a whole
+    /// segment, `index * lane_len` for part `index` of a segment split into parts of
+    /// `lane_len` positions (sub-batches, `docs/deviations.md` K10). Local position `p` is
+    /// segment position `offset + p`.
+    pub offset: usize,
 }
 
 impl SegmentLayout {
@@ -47,7 +58,57 @@ impl SegmentLayout {
             lane_len <= shape.segment_input_bits(),
             "a segment holds at most B_1 J_1 positions per lane"
         );
-        Self { shape, lane_len }
+        Self {
+            shape,
+            lane_len,
+            offset: 0,
+        }
+    }
+
+    /// Part `index` of a segment split into parts of `lane_len` positions per lane: local
+    /// position `p` is segment position `index * lane_len + p`. The parts of a segment tile
+    /// it, and the composite is linear, so the segment's `Y` is the XOR of the parts' `Y`.
+    ///
+    /// # Panics
+    /// As [`Self::new`], or if the part lies outside the segment.
+    #[must_use]
+    pub fn part(shape: Shape, lane_len: usize, index: usize) -> Self {
+        let whole = Self::new(shape, lane_len);
+        let offset = index
+            .checked_mul(lane_len)
+            .filter(|&o| o + lane_len <= shape.segment_input_bits())
+            .expect("the part lies inside the segment");
+        Self { offset, ..whole }
+    }
+
+    /// The production layout of part `index` of a segment split into parts of
+    /// `2^{d_part}` records (`lane_len = 2^{10 + d_part}`).
+    ///
+    /// # Panics
+    /// If `d_part > 13` or the part lies outside the segment.
+    #[must_use]
+    pub fn production_part(d_part: u32, index: usize) -> Self {
+        assert!(d_part <= 13, "a segment has at most 2^13 records");
+        Self::part(Shape::PRODUCTION, 1 << (10 + d_part), index)
+    }
+
+    /// Segment-level index of the layout's first level-1 block.
+    #[must_use]
+    pub fn first_block(&self) -> usize {
+        self.offset / self.shape.levels[0].cols
+    }
+
+    /// In-block index `zeta_1` of local position 0 (nonzero only for a part shorter than a
+    /// level-1 block).
+    #[must_use]
+    pub fn zeta1_base(&self) -> usize {
+        self.offset % self.shape.levels[0].cols
+    }
+
+    /// First level-2 input `zeta_2` of the layout (`m_1 * first_block`).
+    #[must_use]
+    pub fn zeta2_base(&self) -> usize {
+        self.first_block() * self.shape.levels[0].rows
     }
 
     /// The production layout of a segment of `2^{d_seg}` records (`lane_len = 2^{10 + d_seg}`).
@@ -129,6 +190,7 @@ fn bit(words: &[u64], c: usize) -> u8 {
 fn level1_masks(layout: &SegmentLayout, m1: &SparseMatrix, bits: &[u64]) -> Vec<Vec<u8>> {
     let lanes = layout.lanes();
     let (blen, j1, rows) = (layout.block_len(), m1.cols, m1.rows);
+    let zeta1_base = layout.zeta1_base();
     (0..layout.blocks())
         .into_par_iter()
         .map(|beta| {
@@ -152,7 +214,7 @@ fn level1_masks(layout: &SegmentLayout, m1: &SparseMatrix, bits: &[u64]) -> Vec<
                         .iter()
                         .enumerate()
                         .fold(0_u8, |m, (t, x)| m | ((((x >> z) & 1) as u8) << t));
-                    for &r in m1.column(64 * w + z) {
+                    for &r in m1.column(zeta1_base + 64 * w + z) {
                         out[r as usize] ^= mask;
                     }
                 }
@@ -175,11 +237,12 @@ pub fn composite(layout: &SegmentLayout, mats: &BridgeMatrices, bits: &[u64]) ->
     let lanes = layout.lanes();
     let rows1 = mats.m1.rows;
     let y1 = level1_masks(layout, &mats.m1, bits);
+    let first = layout.first_block();
     let mut y2 = vec![0_u8; mats.m2.rows];
     for (beta, block) in y1.iter().enumerate() {
         for (rho1, &mask) in block.iter().enumerate() {
             if mask != 0 {
-                for &r in mats.m2.column(rho1 + rows1 * beta) {
+                for &r in mats.m2.column(rho1 + rows1 * (first + beta)) {
                     y2[r as usize] ^= mask;
                 }
             }
@@ -229,21 +292,22 @@ pub fn transpose_into(
         .map(|zeta3| gather(&mats.m3, zeta3, |r| v3[r]))
         .collect();
     // Level 2: v1[t][zeta_2] over the zeta_2 present.
-    let z2 = layout.zeta2_len();
+    let (z2, z2_base) = (layout.zeta2_len(), layout.zeta2_base());
     let v1: Vec<F128> = (0..lanes * z2)
         .into_par_iter()
         .map(|i| {
             let (t, zeta2) = (i / z2, i % z2);
-            gather(&mats.m2, zeta2, |r| v2[t + lanes * r])
+            gather(&mats.m2, z2_base + zeta2, |r| v2[t + lanes * r])
         })
         .collect();
     // Level 1, one chunk per (lane, block).
     let (blen, blocks, rows1) = (layout.block_len(), layout.blocks(), mats.m1.rows);
+    let zeta1_base = layout.zeta1_base();
     out.par_chunks_mut(blen).enumerate().for_each(|(g, chunk)| {
         let (t, beta) = (g / blocks, g % blocks);
         let v = &v1[t * z2 + rows1 * beta..t * z2 + rows1 * (beta + 1)];
         for (zeta1, o) in chunk.iter_mut().enumerate() {
-            *o = gather(&mats.m1, zeta1, |r| v[r]);
+            *o = gather(&mats.m1, zeta1_base + zeta1, |r| v[r]);
         }
     });
 }
@@ -264,12 +328,13 @@ fn level2_images(layout: &SegmentLayout, mats: &BridgeMatrices) -> Vec<Vec<u64>>
         layout.zeta2_len(),
         mats.m3.rows.div_ceil(64),
     );
+    let z2_base = layout.zeta2_base();
     (0..lanes * z2)
         .into_par_iter()
         .map(|i| {
             let (t, zeta2) = (i / z2, i % z2);
             let mut image = vec![0_u64; w3];
-            for &rho2 in mats.m2.column(zeta2) {
+            for &rho2 in mats.m2.column(z2_base + zeta2) {
                 for &r in mats.m3.column(t + lanes * rho2 as usize) {
                     image[r as usize / 64] ^= 1 << (r % 64);
                 }
@@ -291,7 +356,7 @@ fn column_from_images(
     let (j1, rows1, z2) = (mats.m1.cols, mats.m1.rows, layout.zeta2_len());
     let (beta, zeta1) = (p / j1, p % j1);
     out.fill(0);
-    for &rho1 in mats.m1.column(zeta1) {
+    for &rho1 in mats.m1.column(layout.zeta1_base() + zeta1) {
         for (o, x) in out
             .iter_mut()
             .zip(&images[t * z2 + rho1 as usize + rows1 * beta])
@@ -498,6 +563,87 @@ mod tests {
             missed += usize::from(y == y2);
         }
         assert!(missed <= 16, "{missed} vanishing toy columns");
+    }
+
+    /// Pack lane `t`, positions `[from, from + len)` of a lane-major bit vector with lanes of
+    /// `lane_len` positions into a lane-major vector with lanes of `len` positions.
+    fn slice_lanes(
+        bits: &[u64],
+        lanes: usize,
+        lane_len: usize,
+        from: usize,
+        len: usize,
+    ) -> Vec<u64> {
+        let mut out = vec![0_u64; lanes * len / 64];
+        for t in 0..lanes {
+            for p in 0..len {
+                let c = t * lane_len + from + p;
+                if bit(bits, c) == 1 {
+                    let d = t * len + p;
+                    out[d / 64] |= 1 << (d % 64);
+                }
+            }
+        }
+        out
+    }
+
+    /// Parts tile a segment: their composites XOR to the segment's composite and their
+    /// transposes are the segment transpose's columns (toy shape at every part length, and
+    /// production parts shorter than, equal to and longer than a level-1 block).
+    #[test]
+    fn parts_xor_to_the_segment_and_transpose_to_its_columns() {
+        let check = |whole: SegmentLayout, part_len: usize, mats: &BridgeMatrices, seed: u64| {
+            let mut rng = SplitMix64::new(seed);
+            let lanes = whole.lanes();
+            let bits = random_bits(&mut rng, whole.input_bits());
+            let y = composite(&whole, mats, &bits);
+            let v3: Vec<F128> = (0..whole.output_bits())
+                .map(|_| random_f128(&mut rng))
+                .collect();
+            let full_t = transpose(&whole, mats, &v3);
+            let parts = whole.lane_len / part_len;
+            let mut acc = vec![0_u8; y.len()];
+            for index in 0..parts {
+                let part = SegmentLayout::part(whole.shape, part_len, index);
+                assert_eq!(part.offset, index * part_len);
+                let local = slice_lanes(&bits, lanes, whole.lane_len, index * part_len, part_len);
+                for (a, b) in acc.iter_mut().zip(composite(&part, mats, &local)) {
+                    *a ^= b;
+                }
+                let part_t = transpose(&part, mats, &v3);
+                for t in 0..lanes {
+                    for p in (0..part_len).step_by(7) {
+                        assert_eq!(
+                            part_t[part.column(t, p)],
+                            full_t[whole.column(t, index * part_len + p)],
+                            "part {index} lane {t} position {p}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(acc, y, "parts of {part_len} positions");
+        };
+        let toy = derive_matrices_for(&Shape::TOY, &seed(11));
+        let whole = SegmentLayout::new(Shape::TOY, 1 << 12);
+        for part_len in [1 << 12, 1 << 11, 1 << 10, 1 << 8, 1 << 6] {
+            check(whole, part_len, &toy, part_len as u64);
+        }
+        let production = derive_matrices_for(&Shape::PRODUCTION, &seed(12));
+        // d_seg = 6 in parts of 8 records (inside one level-1 block, zeta_1 offsets).
+        check(SegmentLayout::production(6), 1 << 13, &production, 21);
+        // d_seg = 10 in parts of 512 records (one level-1 block each, block offsets).
+        check(SegmentLayout::production(10), 1 << 19, &production, 22);
+        assert_eq!(
+            SegmentLayout::production_part(9, 1),
+            SegmentLayout::part(Shape::PRODUCTION, 1 << 19, 1)
+        );
+        let p = SegmentLayout::production_part(3, 70);
+        assert_eq!(
+            (p.first_block(), p.zeta1_base(), p.zeta2_base()),
+            (1, 6 << 13, 1 << 13)
+        );
+        assert_eq!(SegmentLayout::production(5).offset, 0);
+        assert!(std::panic::catch_unwind(|| SegmentLayout::production_part(13, 1)).is_err());
     }
 
     /// The slot layout agrees with the production main-domain walk of `agg-witness` at one
