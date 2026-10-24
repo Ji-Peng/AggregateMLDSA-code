@@ -5,8 +5,8 @@
 //! the cost of every step.
 //!
 //! Transcript (spec Section 10, one Spongefish stream run by `agg_piop::prover`): event 0
-//! instance (record digest over `(pk_i, M_i, c~_i)`, the Flock profile: `Fast` or `Slim`,
-//! [`AggregatorConfig::profile`]), event 1 the
+//! instance (record digest over `(pk_i, M_i, c~_i)`, the Flock profile: `Fast`, `Slim` or
+//! `Slim8`, [`AggregatorConfig::profile`]), event 1 the
 //! round-1 Akita commitment `G_main`, event 2 the Flock commitments, event 3 the bridge seed
 //! `sd`, event 4 the round-2 Akita commitments, event 5 the Flock seeds `fs_sigma`, event 6
 //! the final vectors `Y_sigma` and the Flock proofs, events 7 to 11 the three sum-check
@@ -79,6 +79,10 @@ pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Slim;
 /// work-normalized in Flock's accounting (docs/keccak.md Section 12).
 pub const MODE_A_PROFILES: [FlockProfile; 3] =
     [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8];
+/// The mode-A Flock profiles accepted by a default verifier: Ligerito `Fast` and `Slim`.
+/// `Slim8` is opt-in via [`AggregateVerifier::require`] or `--flock-profile slim8`.
+pub const DEFAULT_ACCEPTED_PROFILES: [FlockProfile; 2] =
+    [FlockProfile::Fast, FlockProfile::Slim];
 
 /// The Ligerito profile of the Flock sub-proofs of a mode-A Flock profile.
 #[must_use]
@@ -1402,9 +1406,10 @@ impl std::fmt::Display for VerifyCostReport {
 }
 
 /// The mode-A verifier (holds the sponge gate, built once). It verifies an aggregate under
-/// the Flock profile its event-2 items name when that is a mode-A profile
-/// ([`MODE_A_PROFILES`]; the transcript binds the profile at event 0, so the items cannot name
-/// another one than the prover bound), or under the profile fixed by [`Self::require`].
+/// the Flock profile its event-2 items name when that is a default-accepted mode-A profile
+/// ([`DEFAULT_ACCEPTED_PROFILES`]: `Fast` or `Slim`; the transcript binds the profile at
+/// event 0, so the items cannot name another one than the prover bound), or under the profile
+/// fixed by [`Self::require`] (which also admits `Slim8`).
 pub struct AggregateVerifier {
     gate: ChainGate,
     require: Option<FlockProfile>,
@@ -1437,8 +1442,8 @@ impl AggregateVerifier {
         self
     }
 
-    /// The profile to verify `aggregate` under: the required one, else the mode-A profile its
-    /// event-2 items name, else the default (an unparsable aggregate is rejected later).
+    /// The profile to verify `aggregate` under: the required one, else the default-accepted
+    /// profile its event-2 items name, else the default (an unparsable aggregate is rejected later).
     fn profile_of(&self, aggregate: &[u8]) -> FlockProfile {
         if let Some(p) = self.require {
             return p;
@@ -1447,7 +1452,7 @@ impl AggregateVerifier {
             .ok()
             .and_then(|proof| crate::wire::flock_profile(&proof.flock_commitments))
             .and_then(FlockProfile::from_id)
-            .filter(|p| MODE_A_PROFILES.contains(p))
+            .filter(|p| DEFAULT_ACCEPTED_PROFILES.contains(p))
             .unwrap_or(FLOCK_PROFILE)
     }
 

@@ -27,7 +27,7 @@
 //! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
 //! event 6 before `tau`), so `d_part`, the commitments, the shares and the proofs are bound.
 //! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at event 0
-//! (1 `Fast`, 4 `Slim`): the verifier reads it to select its Flock parameters
+//! (1 `Fast`, 4 `Slim`, 5 `Slim8`): the verifier reads it to select its Flock parameters
 //! ([`flock_profile`]) and runs the transcript with it, so an aggregate whose items name
 //! another profile than event 0 fails at event 0's replay, and a segment item whose profile
 //! differs from the verifier's is rejected ([`ItemError::Profile`]).
@@ -35,7 +35,7 @@
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
 /// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
-/// runs `Fast` or `Slim`, and the span of its part, K16; the part proofs are tied-part proofs
+/// runs `Fast`, `Slim` or `Slim8`, and the span of its part, K16; the part proofs are tied-part proofs
 /// of version 3; version 3 had the tied parts of deviation K13 under `Fast` only, one per
 /// segment or part: one Flock cap per part at event 2 and one tied-part proof, holding the
 /// bridge union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap

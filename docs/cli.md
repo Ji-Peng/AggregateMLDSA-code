@@ -1,8 +1,8 @@
 # Mode A end to end and the `agg` tool (spec Sections 10, 11, 14; milestone M3)
 
 Crate `agg-cli`: library `agg_cli` (aggregator, verifier, wire items, key cache, batch
-files) and binary `agg`. Deviations: K10 (Flock parts within a segment), K15 (the Flock
-profile, `Fast` or `Slim`), K16 (one span over all segments), K17 and A1 (driver choices) in
+files) and binary `agg`. Deviations: K10 (Flock parts within a segment), K15, K18 (the Flock
+profiles `Fast`, `Slim` and `Slim8`), K16 (one span over all segments), K17 and A1 (driver choices) in
 `docs/deviations.md`.
 
 ## 1. Aggregator and verifier

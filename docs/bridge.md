@@ -346,8 +346,9 @@ Section 5a), `83 / 2^128 = 2^-121.6` at a full segment, inside `epsilon_Flock`. 
 Fiat-Shamir outputs of a transcript that contains both caps (and, through `fs`, events 0 to 5),
 so a prover that re-derives them `Q` times multiplies these terms by `Q` (the usual ROM loss,
 as for Flock's own challenges). Replay: the two instances have distinct challenger labels and
-digests (sponge: gate and public digests; union: both relation digests with `sd`, the part's
-offset and `Y`), and the tie-geometry digest covers `d`, the part index, `n`, both row
+digests (sponge: gate and public digests; union: both relation digests with `sd` and the part's
+offset; `Y` is bound through the final-vector digest in the tie challenges, not the relation
+digests), and the tie-geometry digest covers `d`, the part index, `n`, both row
 capacities, word coordinates, block widths and blocks.
 
 **Witness and costs.** The part's lane-major input bits (`TiedPart::honest_parts`, the same
@@ -452,8 +453,12 @@ the matrices of `sd` and `b'` the sponge's input fixed at event 2 before `sd`; f
 one segment the shares XOR to `Y_sigma` (K10) as before. The bound (9.3) of Section 7 is
 unchanged; the tie error per tied part is `2 (d + span_log + 5) + 2 (log2(blocks) + span_log +
 9) + (5 + span_log) + (nu_s + 3)` over `2^128`: `95 / 2^128 = 2^-121.4` for a span of four
-full segments (`d = 13`, 16 blocks, `span_log = 2`, `nu_s = 15`), inside `epsilon_Flock`, with
-the usual factor `Q` for re-derived challenges (Section 5b). Replay: the tie-geometry digest
+full segments (`d = 13`, 16 blocks, `span_log = 2`, `nu_s = 15`), giving about 121.4
+work-normalized bits (which dominates the Keccak side and falls short of the project's
+128-bit ROM target, though improving on the v2 per-part total of ~119.6 bits; raising it
+above 128 bits would require e.g. repeating the tie checks at two independent points,
+sampling tie challenges in a larger field, or grinding ~7 bits on tie-challenge derivation),
+with the usual factor `Q` for re-derived challenges (Section 5b). Replay: the tie-geometry digest
 covers `S` and `span_log`, the proof header `S`; the span's Flock seed in mode A is
 `SHA3-256(len || "agg-mldsa/v1/flock-span-seed" || LE64(S) || fs_0 || .. || fs_{S-1})`, a
 function of event 5 that differs from every part seed.

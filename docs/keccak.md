@@ -123,14 +123,14 @@ Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit
 - Fiat-Shamir: `FsChallenger::new("agg-mldsa/v1/keccak")`, absorb the 32-byte seed `fs`
   (spec event 5) and the gate digest, then `prove_fast_ligerito_union_circuit` binds
   registry, counts, commitment, circuit digest and public words.
-- PCS: Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding) or `Slim` (rate 1/4),
-  `Profile::{Fast, Secure, Slim}` with header bytes 0, 1, 3 (2 is reserved for LaBinius);
-  Flock's documented accounting: `Fast` and `Slim` 128 bits work-normalized with 16-bit query
-  proof of work, `Secure` 120 bits. Bytes and times of the three on a tied part: Section 11;
-  mode A binds `Fast` or `Slim` (K15, Section 12).
+- PCS: Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding), `Slim` (rate 1/4), or
+  `Slim8` (rate 1/8, K18), `Profile::{Fast, Secure, Slim, Slim8}` with header bytes 0, 1, 3, 4
+  (2 is reserved for LaBinius); Flock's documented accounting: `Fast`, `Slim` and `Slim8` 128
+  bits work-normalized with 16-bit query proof of work, `Secure` 120 bits. Bytes and times on a
+  tied part: Section 11; mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
 - Commitment bytes (`KeccakCommitment::as_bytes`): the Ligerito level-0 Merkle cap, `2^c`
-  nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; 128 nodes, 4,096 bytes, for
-  every sub-batch size tested), the bytes Flock's `bind_statement` absorbs.
+  nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; Fast: 128 nodes, 4,096 bytes;
+  Slim and Slim8: 64 nodes, 2,048 bytes), the bytes Flock's `bind_statement` absorbs.
 - Proof bytes (format version 2): `AGGKCK`, version, profile id, `n` (LE32), then bincode
   of `R1csProofCircuitMerged`; the commitment is not repeated.
 
@@ -762,12 +762,13 @@ bits 2.9 ms, 22 bits 5.8 ms, 24 bits 12.6 ms.
 Estimates below come from a proof-size model of Ligerito (query counts from Flock's formulas,
 the level shapes of its configs, cap depth `floor(log2 Q)`, rows, paths, caps, final block and
 sum-check messages, plus the measured 16 to 19 KB per instance outside Ligerito); it is within
-1.2% of every measured instance above and reproduces the cloud's 775,017 B per full-segment
-`Fast` part (model 775,046 B). Session scratchpad `est/` (not committed).
+1.2% of every measured instance above (for the pre-K17 full-segment `Fast` part with level-0 caps,
+the model predicts 783.2 KB against the cloud's measured 775,017 B, +1.06%; with caps stripped
+post-K17 it predicts 775,046 B against ~766.8 KB). Session scratchpad `est/` (not committed).
 
 - **(1) `Slim`**: measured above, 36% fewer Flock bytes than `Fast` at 2,048 records (30% fewer
-  aggregate bytes) for 3% more prover time (119 ms: more commit time, 1.4x), the same verifier
-  time and twice the kept commit data. Adopted as the default.
+  aggregate bytes) for 3% more prover time (119 ms: commit time 1.23x in mode A, 1.36x in the
+  standalone tied part), the same verifier time and twice the kept commit data. Adopted as the default.
 - **(2) One batched opening across the sponge instance and the bridge union** of a part: not
   possible within Flock's accounting. The two are committed at different events (the union
   depends on `sd`), as polynomials of different sizes; Flock's Ligerito opens one commitment,
@@ -779,9 +780,10 @@ sum-check messages, plus the measured 16 to 19 KB per instance outside Ligerito)
 - **(3) Query PoW and the rate.** Raising the query PoW from 16 to 20 / 22 / 24 bits removes
   about 3.5 / 5 / 7% of the queries per level (each bit is one bit of the work-normalized query
   term): estimated 13 / 20 / 27 KB less per 2,048-record `Slim` part (3 to 6%) and 16 / 24 /
-  32 KB less for a 32K span (0.5 / 0.7 / 1.0 bytes per signature), for 8 to 12 grinds of 2.9 /
-  5.8 / 12.6 ms each. Not implemented (it is a new parameter set like `Slim8`, for a smaller
-  gain). The rate is the larger lever: `Slim8` (implemented) cuts a part by another 21% for
+  32 KB less for a 32K span (0.5 / 0.7 / 1.0 bytes per signature), for 8 to 12 grinds of
+  expected ~4.2 / ~8.4 / ~18 ms each (measured medians of 5 samples: 2.9 / 5.8 / 12.6 ms; the
+  geometric mean is ~1.44x the median). Not implemented (it is a new parameter set like `Slim8`,
+  for a smaller gain). The rate is the larger lever: `Slim8` (implemented) cuts a part by another 21% for
   10% more prover time at 2,048 records (commit 1.4x `Slim`'s, 2x the kept data). The row
   width is another: Flock's `initial_k = 4` at `m = 28` shows what narrow level-0 rows give
   (the union of four segments is smaller than one segment's); a parameter set with smaller
@@ -807,17 +809,21 @@ sum-check messages, plus the measured 16 to 19 KB per instance outside Ligerito)
 
 | Option | Per-segment parts (4 x 8,192) | One span |
 | --- | ---: | ---: |
-| Fast (the cloud run, measured: 94.6) | 94.6 | 22.7 |
+| Fast (pre-K17 cloud run 94.6, post-K17 ~93.6) | 94.6 (pre-K17) | 22.7 |
 | Slim | 62.3 | 16.0 |
 | Slim8 | 50.2 | 13.3 |
 | Slim with 24-bit query PoW | 58.4 | 15.0 |
 | LaBinius openings (extrapolation, Section 12.4) | - | about 6.6 |
 
 With the default (`Slim`, span) the Flock side would be about 16 bytes per signature at 32K
-instead of 94.6, the aggregate about 51 instead of 129.4 bytes per signature (the other
-components as measured on the cloud). Prover time: the same instances as the four parts, minus
-three openings' fixed costs; verifier time: one sponge-instance check plus one union discharge
-(about 80 ms locally) instead of four parts (4 x 69 ms on the cloud).
+instead of 94.6 (pre-K17 cloud run), the aggregate about 51 instead of 129.4 bytes per signature
+(the other components as measured on the cloud). Prover time and memory: in a local sample at
+`S = 2` (`count = 8193`, 7 threads), the span path took ~7% more prove time (Flock parts 9,513
+ms vs 8,881 ms) and ~15% more peak memory (+1.2 GiB, 9,325 MiB vs 8,093 MiB) than
+`--flock-span off`, while cutting proof bytes by 37% (513 KB vs 821 KB) and halving verify time
+(87 ms vs 175 ms); at 32K the exact prove time and memory remain to be measured on the cloud.
+Verifier time: one sponge-instance check plus one union discharge (about 80 ms locally) instead
+of four parts (4 x 69 ms on the cloud).
 
 ### 12.6 Decisions and open points
 

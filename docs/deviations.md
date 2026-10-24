@@ -710,9 +710,9 @@ work, every component of its accounting strictly above 128 bits
 (`vendor/flock-core/src/pcs/ligerito.rs`, `LigeritoSecurityConfig::validate`); it halves the
 level-0 queries (119 instead of 244), so a tied part's proof is 33 to 37% smaller
 (`docs/keccak.md` Section 11) for about twice the level-0 encoding and twice the kept commit
-data (K14). Measurements and the default: `docs/keccak.md` Section 12. The verifier accepts
-either profile because both meet the same documented level; `Secure` (120 bits) is not a
-mode-A profile.
+data (K14). Measurements and the default: `docs/keccak.md` Section 12. By default the verifier
+accepts either `Fast` or `Slim` because both meet the same documented level in upstream Flock;
+`Slim8` (K18) is an opt-in mode-A profile; `Secure` (120 bits) is not a mode-A profile.
 
 ## K16. Spans: one tied part over all segments; the final vectors as the output claim (spec Sections 8, 9, 10; docs/bridge.md Section 5c)
 

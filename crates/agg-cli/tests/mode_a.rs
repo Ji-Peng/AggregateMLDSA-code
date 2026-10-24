@@ -145,8 +145,24 @@ fn round_trip(
         part_log2.min(n.next_power_of_two().max(8).trailing_zeros())
     );
 
-    let verifier = AggregateVerifier::new();
     let statements = statements(&records);
+    if profile == FlockProfile::Slim8 {
+        // A default verifier only accepts Fast and Slim; Slim8 requires opt-in via require().
+        let default_verifier = AggregateVerifier::new();
+        let rejected = default_verifier.verify(&statements, &aggregate.bytes, None);
+        assert!(!rejected.accepted(), "default verifier must reject Slim8 without opt-in");
+        assert!(matches!(
+            rejected.rejection,
+            Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == FlockProfile::Slim8 as u8
+        ));
+        assert!(rejected.parts.is_empty(), "no Flock part run on rejected Slim8");
+    }
+
+    let verifier = if profile == FlockProfile::Slim8 {
+        AggregateVerifier::new().require(FlockProfile::Slim8)
+    } else {
+        AggregateVerifier::new()
+    };
     let uncached = verifier.verify(&statements, &aggregate.bytes, None);
     eprintln!("{uncached}");
     assert_eq!(uncached.profile, profile, "the profile read from the aggregate");

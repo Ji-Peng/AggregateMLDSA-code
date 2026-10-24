@@ -1830,6 +1830,20 @@ mod tests {
                 + 32,
             "the cap's bytes are saved"
         );
+        // A proof that carries its level-0 cap (e.g. serialized with its cap intact) is
+        // rejected on parse (K17).
+        let raw_with_cap = crate::prover::codec().serialize(&proof.flock).unwrap();
+        let mut malformed_with_cap = Vec::new();
+        malformed_with_cap.extend_from_slice(&(raw_with_cap.len() as u32).to_le_bytes());
+        malformed_with_cap.extend_from_slice(&raw_with_cap);
+        for v in &proof.values {
+            malformed_with_cap.extend_from_slice(&v.lo.to_le_bytes());
+            malformed_with_cap.extend_from_slice(&v.hi.to_le_bytes());
+        }
+        assert!(matches!(
+            crate::flock_union::UnionProof::from_bytes(&malformed_with_cap, 2),
+            Err(crate::prover::KeccakError::Malformed("union proof carries its level-0 cap"))
+        ));
         verify(&cap, &parsed, &y).expect("parsed toy union");
         let mut other = cap.as_bytes().to_vec();
         other[5] ^= 1;
