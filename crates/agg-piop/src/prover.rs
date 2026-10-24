@@ -418,8 +418,18 @@ pub fn prove_with_tables(
     timings.prestage = clock.lap();
 
     // Stages 1 to 3.
+    let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+    let weights_clock = Instant::now();
     let mut prover_tables = ProverTables::new(tables, &matrices);
+    let parity_time = weights_clock.elapsed();
     prover_tables.set_tau(&matrices, &points.tau);
+    if trace {
+        eprintln!(
+            "weights: parity1 tables {:.1} ms, w_2/w_3 {:.1} ms",
+            parity_time.as_secs_f64() * 1e3,
+            (weights_clock.elapsed() - parity_time).as_secs_f64() * 1e3
+        );
+    }
     let (stage1_proof, stage1) = if hooks.unchecked {
         stage1::prove_unchecked(manifest, &prover_tables, &points, &prestage, y_at_tau3, &mut transcript)?
     } else {
@@ -427,7 +437,11 @@ pub fn prove_with_tables(
     };
     points.r1 = stage1.point.clone();
     timings.stage1 = clock.lap();
+    let weights_clock = Instant::now();
     prover_tables.set_r1(&matrices, &points.r1);
+    if trace {
+        eprintln!("weights: w_1 {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
+    }
     let (stage2_proof, stage2) = if hooks.unchecked {
         stage2::prove_unchecked(manifest, &prover_tables, &points, &stage1, &mut transcript)?
     } else {
@@ -435,7 +449,11 @@ pub fn prove_with_tables(
     };
     points.r2 = stage2.point.clone();
     timings.stage2 = clock.lap();
+    let weights_clock = Instant::now();
     prover_tables.set_r2(&public, &points.r2);
+    if trace {
+        eprintln!("weights: w_A {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
+    }
     let (stage3_proof, stage3) = if hooks.unchecked {
         stage3::prove_unchecked(
             manifest,

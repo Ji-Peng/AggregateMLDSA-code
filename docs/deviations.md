@@ -616,3 +616,25 @@ Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
 - Empty segments (possible for `N` in `(2^14, 2^14 + 2^13]`) have no Flock part and require
   `Y_sigma = 0`; this path is unit-tested on the item level only, since batches above
   `2^13` records do not run on the development machine.
+
+## P12. Prover kernel: compiled plans, bucketed first rounds, lookup folds (spec Section 7)
+
+Spec: the stages are ordinary batched sum-checks whose round polynomials are defined by
+the instance tables of Sections 7.3 to 7.5; nothing is said about how the prover
+evaluates them.
+
+Code (`agg_piop::kernel`, `docs/piop.md` Sections 6 and 16.2): the prover compiles the
+gamma-weighted terms of a group into per-lane polynomials, weighted affine forms and
+bilinear products; in the first active round of a group whose lanes are coded byte
+columns (cells in a span of at most 16 values) it buckets the equality weights by the
+pair pattern of each column and evaluates every piece once per pattern, and in round 1
+by quartet patterns when the pair count is at least four times the pattern space; the
+first fold of a coded lane is a 256-entry lookup. The round polynomials, the proof bytes
+and the verifier are unchanged (the tests compare the bucketed and generic paths and the
+definition on random tables, and every prover/verifier round trip is unchanged). Why:
+the per-pair, per-term evaluation in `K` was 2.6 to 3.2 s of the 4 s non-Flock prover at
+`N = 1,024` (profile in `docs/piop.md` Section 15); the rework follows Aerie's kernels
+(`CodedSource`, pattern buckets, `BUCKET_MIN_RATIO`). The committed layout is not
+changed: `docs/piop.md` Section 16.1 records why the quotient `v`, wider Akita digits
+and merged Boolean lanes do not reduce the element count without weakening relation H
+or adding a lookup argument.

@@ -323,22 +323,48 @@ fn prove_stage_with<'a>(
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut messages = Vec::with_capacity(rounds);
     let mut point = Vec::with_capacity(rounds);
+    let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+    // Per group: (message time, bind time) summed over rounds; per round: total.
+    let mut group_times = vec![(0_f64, 0_f64); groups.len()];
+    let mut round_times = Vec::with_capacity(rounds);
     for round in 0..rounds {
+        let round_start = std::time::Instant::now();
         let mut message = vec![E::zero(); spec.degree];
-        for group in &mut groups {
+        for (g, group) in groups.iter_mut().enumerate() {
+            let start = std::time::Instant::now();
             for (slot, value) in message.iter_mut().zip(group.round_message(round)) {
                 *slot += value;
             }
+            group_times[g].0 += start.elapsed().as_secs_f64();
         }
         let (message_site, challenge_site) = round_sites(spec.stage, round);
         transcript.absorb_extensions(&message_site, &message)?;
         let challenge = transcript.challenge_extensions(&challenge_site, 1)?[0];
         claim = evaluate_compressed(&message, claim, challenge);
-        for group in &mut groups {
+        for (g, group) in groups.iter_mut().enumerate() {
+            let start = std::time::Instant::now();
             group.bind(round, challenge);
+            group_times[g].1 += start.elapsed().as_secs_f64();
         }
+        round_times.push(round_start.elapsed().as_secs_f64());
         messages.push(message);
         point.push(challenge);
+    }
+    if trace {
+        eprintln!("stage {} trace ({} rounds, degree {}):", spec.stage, rounds, spec.degree);
+        for (g, group) in spec.groups.iter().enumerate() {
+            eprintln!(
+                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, message {:8.1} ms, bind {:8.1} ms",
+                group.domain,
+                group.eq,
+                group.lanes.len(),
+                group.instances.len(),
+                group_times[g].0 * 1e3,
+                group_times[g].1 * 1e3
+            );
+        }
+        let per_round: Vec<String> = round_times.iter().map(|t| format!("{:.0}", t * 1e3)).collect();
+        eprintln!("  rounds (ms): {}", per_round.join(" "));
     }
     let group_claims = groups.iter().fold(E::zero(), |acc, g| acc + g.claim());
     if check && group_claims != claim {
