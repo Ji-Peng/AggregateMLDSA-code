@@ -138,6 +138,14 @@ transcript-free, and proves one batched opening of all four groups
 setup from the public seed alone (as Aerie's `FalconVerifierSetup::new`) and verifies
 with profiles and selection taken from the work plan, never from the proof.
 
+The PIOP prover drives these calls through `agg_piop::pcs::TableCommitter` (`docs/piop.md`
+Section 3): since the kernel rework of `docs/piop.md` Section 18 it commits `G_1`, `G_2` and
+`G_3` concurrently (each commit is transcript-free, and the final group is committed
+against the plan's precommitted profiles, not against the other two commitments), runs the
+`G_main` commitment concurrently with the Keccak side's commitments, and opens with the
+claims it already holds (the stage-3 terminal values) instead of evaluating the 67 tables
+again. The driver in this crate is unchanged; the proof bytes are identical.
+
 Test `tests/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
 alphabet (balanced digits of the listed bases, Booleans for `b_t` and `y^(2)_t`; padded
 signatures carry the digits of zero), random claims in `K` at logical points, round 1,

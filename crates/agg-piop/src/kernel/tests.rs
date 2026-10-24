@@ -1,0 +1,652 @@
+//! Kernel tests: every evaluation path against an independent reference (the round
+//! polynomial from its definition, evaluated at `d + 1` points over full equality tables and
+//! interpolated), bit for bit, on random tables with every `Term` kind.
+
+use super::*;
+use super::plan::PolyKind;
+use crate::range::{hi_map, lo_map, square_map};
+use crate::test_support::{field, point};
+use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table, evaluate_mle};
+use agg_witness::gen::SplitMix64;
+
+fn digits(rng: &mut SplitMix64, len: usize) -> Vec<i8> {
+    (0..len).map(|_| rng.below(16) as i8 - 8).collect()
+}
+
+fn bits(rng: &mut SplitMix64, len: usize) -> Vec<i8> {
+    (0..len).map(|_| rng.below(2) as i8).collect()
+}
+
+fn summand(instances: &[GroupInstance], values: &[E]) -> E {
+    instances.iter().fold(E::zero(), |s, instance| {
+        s + instance.gamma
+            * instance
+                .terms
+                .iter()
+                .fold(E::zero(), |t, term| t + term.evaluate(values))
+    })
+}
+
+/// The direct sum of a group over the Boolean domain.
+fn direct_sum(lanes: &[Lane<'_>], instances: &[GroupInstance], eq_point: Option<&[E]>) -> E {
+    let len = lanes[0].len();
+    let weights = eq_point.map(eq_table);
+    (0..len).fold(E::zero(), |acc, x| {
+        let values: Vec<E> = lanes.iter().map(|lane| lane.value(x)).collect();
+        acc + summand(instances, &values) * weights.as_ref().map_or(E::one(), |w| w[x])
+    })
+}
+
+/// The reference prover: full `K` tables, the round polynomial `g(X)` at `X = 0..=d` from
+/// the definition (`eq` of the bound, current and remaining variables in full), interpolated
+/// and compressed. Returns the messages and the terminal lane values.
+fn reference(
+    lanes: &[Lane<'_>],
+    instances: &[GroupInstance],
+    eq_point: Option<&[E]>,
+    rounds: usize,
+    degree: usize,
+    challenges: &[E],
+) -> (Vec<Vec<E>>, Vec<E>) {
+    let vars = lanes[0].len().trailing_zeros() as usize;
+    let inactive = rounds - vars;
+    let mut tables: Vec<Vec<E>> = lanes
+        .iter()
+        .map(|lane| (0..lane.len()).map(|i| lane.value(i)).collect())
+        .collect();
+    let mut claim = direct_sum(lanes, instances, eq_point);
+    let mut messages = Vec::new();
+    let mut scalar = E::one();
+    for round in 0..rounds {
+        let message = if round < inactive {
+            inactive_message(claim, degree)
+        } else {
+            let j = round - inactive;
+            let half = tables[0].len() / 2;
+            let rest = eq_point.map(|tau| eq_table(&tau[j + 1..]));
+            let lift = inverse_power_of_two(inactive);
+            let evals: Vec<E> = (0..=degree as u64)
+                .map(|x| {
+                    let xf = E::from_u64(x);
+                    let mut sum = E::zero();
+                    for k in 0..half {
+                        let values: Vec<E> = tables
+                            .iter()
+                            .map(|t| t[2 * k] + xf * (t[2 * k + 1] - t[2 * k]))
+                            .collect();
+                        sum += summand(instances, &values) * rest.as_ref().map_or(E::one(), |w| w[k]);
+                    }
+                    let current = eq_point.map_or(E::one(), |tau| {
+                        (E::one() - tau[j]) * (E::one() - xf) + tau[j] * xf
+                    });
+                    sum * current * scalar * lift
+                })
+                .collect();
+            compress(UnivariatePoly::from_evals(&evals).coefficients(), degree)
+        };
+        let r = challenges[round];
+        claim = evaluate_compressed(&message, claim, r);
+        if round >= inactive {
+            let j = round - inactive;
+            if let Some(tau) = eq_point {
+                scalar *= (E::one() - tau[j]) * (E::one() - r) + tau[j] * r;
+            }
+            for t in &mut tables {
+                *t = (0..t.len() / 2).map(|k| t[2 * k] + r * (t[2 * k + 1] - t[2 * k])).collect();
+            }
+        }
+        messages.push(message);
+    }
+    (messages, tables.iter().map(|t| t[0]).collect())
+}
+
+/// Run a group through its rounds with the given challenges, checking the running claim
+/// and the terminal equation. Returns the messages and the terminal values.
+fn run(
+    mut group: Group<'_>,
+    instances: &[GroupInstance],
+    rounds: usize,
+    degree: usize,
+    eq_point: Option<&[E]>,
+    mut claim: E,
+    challenges: &[E],
+) -> (Vec<Vec<E>>, Vec<E>) {
+    if group.inactive_rounds() > 0 {
+        assert_eq!(group.claim(), claim, "direct claim of a lifted group");
+    }
+    let mut messages = Vec::new();
+    for (round, &r) in challenges.iter().enumerate().take(rounds) {
+        let message = group.round_message(round);
+        assert_eq!(message.len(), degree);
+        assert_eq!(group.claim(), claim, "round {round}");
+        claim = evaluate_compressed(&message, claim, r);
+        group.bind(round, r);
+        assert_eq!(group.claim(), claim);
+        messages.push(message);
+    }
+    let values = group.terminal_values();
+    let local = &challenges[group.inactive_rounds()..rounds];
+    let eq_factor = eq_point.map_or(E::one(), |p| eq_evaluation(p, local));
+    let expected = expected_terminal(instances, &values, eq_factor, group.inactive_rounds());
+    assert_eq!(claim, expected, "terminal equation");
+    (messages, values)
+}
+
+/// Every evaluation strategy of the kernel.
+fn policies() -> Vec<(&'static str, Policy)> {
+    vec![
+        ("auto", AUTO),
+        ("generic (no coding)", Policy { coding: false, ..AUTO }),
+        ("coded, per item", Policy { buckets: false, ..AUTO }),
+        ("bivariate forced", Policy { bivariate: Choice::Force, ..AUTO }),
+        ("pair masses only", Policy { bivariate: Choice::Forbid, ..AUTO }),
+        ("quartet tables forced", Policy { quartet_lut: Choice::Force, bivariate: Choice::Force, ..AUTO }),
+        ("quartet tables, no Taylor", Policy { quartet_lut: Choice::Force, taylor: false, ..AUTO }),
+        ("pair fold at level 2", Policy { quartet_lut: Choice::Forbid, ..AUTO }),
+        ("without the claim recovery", Policy { recover: false, ..AUTO }),
+        ("quartet tables without the claim recovery", Policy { recover: false, quartet_lut: Choice::Force, ..AUTO }),
+    ]
+}
+
+/// Check every strategy against the reference: identical messages and terminal values,
+/// terminal values equal to the multilinear extensions at the local point.
+fn check_all_paths(
+    lanes: &[Lane<'_>],
+    instances: &[GroupInstance],
+    eq_point: Option<&[E]>,
+    rounds: usize,
+    degree: usize,
+    seed: u64,
+) {
+    let mut rng = SplitMix64::new(seed);
+    let challenges = point(&mut rng, rounds);
+    let (expected_messages, expected_values) = reference(lanes, instances, eq_point, rounds, degree, &challenges);
+    let claim = direct_sum(lanes, instances, eq_point);
+    let vars = lanes[0].len().trailing_zeros() as usize;
+    for (name, policy) in policies() {
+        let group = Group::with_policy(lanes.to_vec(), instances.to_vec(), eq_point, rounds, degree, policy).unwrap();
+        let (messages, values) = run(group, instances, rounds, degree, eq_point, claim, &challenges);
+        assert_eq!(messages, expected_messages, "messages, {name}");
+        assert_eq!(values, expected_values, "terminal values, {name}");
+    }
+    let local = &challenges[rounds - vars..];
+    for (lane, value) in lanes.iter().zip(&expected_values) {
+        let table: Vec<E> = (0..lane.len()).map(|i| lane.value(i)).collect();
+        assert_eq!(*value, evaluate_mle(&table, local));
+    }
+}
+
+fn instance(rng: &mut SplitMix64, terms: Vec<Term>) -> GroupInstance {
+    GroupInstance {
+        gamma: field(rng),
+        terms,
+    }
+}
+
+/// An equality group with every bucketable term kind: Booleans and the bit-range identity
+/// on four bit columns, both leaves on one digit's square, the `A^lo A^hi` product, links,
+/// reductions, a base-4 leaf on a five-class column and a weightless affine form.
+fn eq_fixture(rng: &mut SplitMix64, vars: usize) -> Vec<Vec<i8>> {
+    let mut cells: Vec<Vec<i8>> = (0..4).map(|_| bits(rng, 1 << vars)).collect();
+    cells.push(digits(rng, 1 << vars));
+    cells.push(digits(rng, 1 << vars));
+    // Values in [-2, 2]: five classes, pattern spaces that are not powers of two.
+    cells.push((0..1 << vars).map(|_| rng.below(5) as i8 - 2).collect());
+    cells
+}
+
+fn eq_lanes(cells: &[Vec<i8>]) -> Vec<Lane<'_>> {
+    vec![
+        Lane::column(&cells[0]),              // 0: b_2
+        Lane::column(&cells[1]),              // 1: b_3
+        Lane::column(&cells[2]),              // 2: b_4
+        Lane::column(&cells[3]),              // 3: b_5
+        Lane::mapped(&cells[4], square_map()), // 4: P of digit A
+        Lane::mapped(&cells[4], lo_map()),    // 5: A^lo of digit A
+        Lane::mapped(&cells[4], hi_map()),    // 6: A^hi of digit A
+        Lane::mapped(&cells[5], square_map()), // 7: P of digit B
+        Lane::column(&cells[5]),              // 8: digit B
+        Lane::mapped(&cells[6], square_map()), // 9: P of a base-4 digit
+    ]
+}
+
+fn eq_instances(rng: &mut SplitMix64) -> Vec<GroupInstance> {
+    vec![
+        instance(rng, vec![Term::Bool(0)]),
+        instance(rng, vec![Term::Bool(1)]),
+        instance(rng, vec![Term::Bool(2), Term::Bool(3)]),
+        instance(rng, vec![Term::RangeW1([3, 2, 1, 0])]),
+        instance(rng, vec![Term::Leaf(4, LeafPoly::Q8)]),
+        instance(rng, vec![Term::Leaf(4, LeafPoly::Q16Hi)]),
+        instance(rng, vec![Term::Product(vec![5, 6])]),
+        instance(rng, vec![Term::Leaf(7, LeafPoly::Q8)]),
+        instance(rng, vec![Term::Link(8)]),
+        instance(rng, vec![Term::Product(vec![8])]),
+        instance(rng, vec![Term::Leaf(9, LeafPoly::Q4)]),
+        instance(
+            rng,
+            vec![Term::Affine {
+                weight: None,
+                lanes: vec![(0, -190_464), (8, 16), (1, 4096)],
+                constant: 34_952,
+            }],
+        ),
+        instance(rng, vec![Term::Product(vec![1])]),
+    ]
+}
+
+#[test]
+fn every_path_matches_the_reference_on_an_equality_group_with_every_term_kind() {
+    let mut rng = SplitMix64::new(11);
+    for vars in [9, 10] {
+        let cells = eq_fixture(&mut rng, vars);
+        let lanes = eq_lanes(&cells);
+        let instances = eq_instances(&mut rng);
+        for (rounds, degree) in [(vars, 5), (vars + 2, 5), (vars, 6)] {
+            let tau = point(&mut rng, vars);
+            check_all_paths(&lanes, &instances, Some(&tau), rounds, degree, 100 + rounds as u64);
+            let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), rounds, degree).unwrap();
+            assert!(group.is_bucketed());
+            // Every lane is coded: bits (2 classes), the digit square / leaf maps (8), the
+            // digit B under its square and the identity (16), the base-4 square (3).
+            let classes: Vec<usize> = group.columns.iter().map(|c| c.classes).collect();
+            assert_eq!(classes, vec![2, 2, 2, 2, 8, 16, 3]);
+            assert!(group.direct_source.polys.is_empty() && group.direct_source.generic.is_empty());
+        }
+    }
+}
+
+#[test]
+fn the_two_round_prefix_applies_when_the_quartets_dwarf_the_pattern_space() {
+    let mut rng = SplitMix64::new(12);
+    let vars = 16;
+    let cells: Vec<Vec<i8>> = vec![digits(&mut rng, 1 << vars), bits(&mut rng, 1 << vars)];
+    let lanes = vec![Lane::mapped(&cells[0], square_map()), Lane::column(&cells[1])];
+    let instances = vec![
+        instance(&mut rng, vec![Term::Leaf(0, LeafPoly::Q8), Term::Leaf(0, LeafPoly::Q16Hi)]),
+        instance(&mut rng, vec![Term::Bool(1)]),
+    ];
+    let tau = point(&mut rng, vars);
+    let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, 5).unwrap();
+    // 2^14 quartets >= 4 * 8^4.
+    assert!(group.bivariate());
+    check_all_paths(&lanes, &instances, Some(&tau), vars, 5, 7);
+    // An identity-mapped digit has 16^4 quartet patterns: pair masses only at this size.
+    let lanes = vec![Lane::column(&cells[0])];
+    let instances = vec![instance(&mut rng, vec![Term::Link(0)])];
+    let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, 3).unwrap();
+    assert!(!group.bivariate());
+    check_all_paths(&lanes, &instances, Some(&tau), vars, 3, 8);
+}
+
+#[test]
+fn weight_groups_match_the_reference() {
+    let mut rng = SplitMix64::new(13);
+    let vars = 9;
+    let weight_a = point(&mut rng, 1 << vars);
+    let weight_b = point(&mut rng, 1 << vars);
+    let bit_cells: Vec<Vec<i8>> = (0..2).map(|_| bits(&mut rng, 1 << vars)).collect();
+    let digit_cells: Vec<Vec<i8>> = (0..3).map(|_| digits(&mut rng, 1 << vars)).collect();
+    let ints: Vec<i32> = (0..1 << vars).map(|_| rng.below(2000) as i32 - 1000).collect();
+    let folded: Vec<E> = point(&mut rng, 1 << vars);
+    let lanes = vec![
+        Lane::Source(Source::Field(&weight_a)),
+        Lane::Source(Source::Field(&weight_b)),
+        Lane::column(&bit_cells[0]),
+        Lane::column(&bit_cells[1]),
+        Lane::column(&digit_cells[0]),
+        Lane::column(&digit_cells[1]),
+        Lane::mapped(&digit_cells[2], square_map()),
+        Lane::Source(Source::Ints(&ints)),
+        Lane::Folded(folded),
+    ];
+    let instances = vec![
+        instance(&mut rng, vec![Term::Product(vec![0, 2])]),
+        instance(&mut rng, vec![Term::Product(vec![0, 3])]),
+        instance(&mut rng, vec![Term::Product(vec![3, 1])]),
+        instance(
+            &mut rng,
+            vec![Term::Affine {
+                weight: Some(0),
+                lanes: vec![(4, 1), (5, 16), (6, 256), (7, -3)],
+                constant: -2056,
+            }],
+        ),
+        instance(&mut rng, vec![Term::Product(vec![1, 8])]),
+        instance(&mut rng, vec![Term::Bool(2)]),
+        instance(&mut rng, vec![Term::Product(vec![8])]),
+    ];
+    for rounds in [vars, vars + 1] {
+        check_all_paths(&lanes, &instances, None, rounds, 2, 30 + rounds as u64);
+    }
+    let group = Group::new(lanes, instances, None, vars, 2).unwrap();
+    // The weighted sums absorb the coefficients of the lanes they alone read.
+    assert_eq!(group.plan.folded.weighted.len(), 2);
+    for &(l, c) in &group.plan.folded.weighted[0].lanes {
+        assert_eq!(c == E::one(), (4..=7).contains(&l), "lane {l}");
+    }
+}
+
+#[test]
+fn wide_cells_ints_and_cross_column_products_take_the_per_item_path() {
+    let mut rng = SplitMix64::new(14);
+    let vars = 8;
+    let mut wide = digits(&mut rng, 1 << vars);
+    wide[5] = 9; // a tampered digit outside [-8, 7]: 17 classes under the identity
+    let narrow = digits(&mut rng, 1 << vars);
+    let other = digits(&mut rng, 1 << vars);
+    let ints: Vec<i32> = (0..1 << vars).map(|_| rng.below(2000) as i32).collect();
+    let tau = point(&mut rng, vars);
+    let lanes = vec![
+        Lane::column(&wide),
+        Lane::mapped(&wide, square_map()),
+        Lane::column(&narrow),
+        Lane::Source(Source::Ints(&ints)),
+        Lane::column(&other),
+    ];
+    let instances = vec![
+        instance(&mut rng, vec![Term::Link(0)]),
+        instance(&mut rng, vec![Term::Leaf(1, LeafPoly::Q8)]),
+        instance(&mut rng, vec![Term::Link(2)]),
+        instance(&mut rng, vec![Term::Bool(3)]),
+        instance(&mut rng, vec![Term::Product(vec![2, 4])]),
+        instance(&mut rng, vec![Term::Product(vec![0, 2, 4])]),
+    ];
+    let group = Group::new(lanes.clone(), instances.clone(), Some(&tau), vars, 5).unwrap();
+    assert_eq!(group.lane_column, vec![None, None, Some(0), None, Some(1)]);
+    // Only the link of the narrow column is bucketed.
+    assert_eq!(group.segments.len(), 1);
+    check_all_paths(&lanes, &instances, Some(&tau), vars, 5, 40);
+    check_all_paths(&lanes, &instances, Some(&tau), vars + 3, 5, 41);
+}
+
+#[test]
+fn domains_of_one_to_four_variables_and_lifted_groups() {
+    let mut rng = SplitMix64::new(15);
+    for vars in 0..=4 {
+        let cells = eq_fixture(&mut rng, vars);
+        let lanes = eq_lanes(&cells);
+        let instances = eq_instances(&mut rng);
+        let tau = point(&mut rng, vars);
+        for extra in [0, 2] {
+            if vars + extra == 0 {
+                continue;
+            }
+            if vars > 0 {
+                check_all_paths(&lanes, &instances, Some(&tau), vars + extra, 5, 50 + vars as u64);
+            }
+            check_all_paths(&lanes, &instances, None, vars + extra, 4, 60 + vars as u64);
+        }
+    }
+}
+
+#[test]
+fn quartet_and_taylor_tables_reproduce_the_folded_lanes() {
+    let mut rng = SplitMix64::new(16);
+    let vars = 12;
+    let cells = eq_fixture(&mut rng, vars);
+    let lanes = eq_lanes(&cells);
+    let instances = eq_instances(&mut rng);
+    let tau = point(&mut rng, vars);
+    let policy = Policy { quartet_lut: Choice::Force, ..AUTO };
+    let mut group = Group::with_policy(lanes.clone(), instances, Some(&tau), vars, 5, policy).unwrap();
+    let (r0, r1) = (field(&mut rng), field(&mut rng));
+    group.round_message(0);
+    group.bind(0, r0);
+    group.round_message(1);
+    group.bind(1, r1);
+    let inverse = group.plan.inverse_scales();
+    for (l, lane) in lanes.iter().enumerate() {
+        let once: Vec<E> = (0..lane.len() / 2).map(|k| lane.value(2 * k) + r0 * (lane.value(2 * k + 1) - lane.value(2 * k))).collect();
+        let twice: Vec<E> = (0..once.len() / 2).map(|k| once[2 * k] + r1 * (once[2 * k + 1] - once[2 * k])).collect();
+        assert!(matches!(group.states[l], State::Quartet(_)), "lane {l} is a quartet table");
+        for (k, &v) in twice.iter().enumerate() {
+            assert_eq!(group.value_at(l, k) * inverse[l], v, "lane {l} cell {k}");
+        }
+    }
+    // Taylor tables: every degree >= 2 polynomial of a quartet lane, at every entry.
+    assert!(!group.taylor.is_empty());
+    for taylor in &group.taylor {
+        let State::Quartet(lut) = &group.states[taylor.lane] else { unreachable!() };
+        let kind = &group.plan.folded.polys.iter().find(|(l, _)| *l == taylor.lane).unwrap().1;
+        let c = kind.coefficients();
+        for (e, &v) in lut.iter().enumerate().step_by(97) {
+            let (d, x) = (field(&mut rng), field(&mut rng));
+            let t = &taylor.lines[e].0[..taylor.degree];
+            let direct = c.iter().rev().fold(E::zero(), |acc, &k| acc * (v + x * d) + k);
+            let shifted = t.iter().rev().fold(E::zero(), |acc, &k| acc * (x * d) + k) * (x * d) + taylor.kind.value(v);
+            assert_eq!(direct, shifted);
+        }
+    }
+}
+
+#[test]
+fn compressed_messages_round_trip_and_rejections() {
+    let mut rng = SplitMix64::new(3);
+    let full = point(&mut rng, 5);
+    let claim = full.iter().fold(E::zero(), |s, &c| s + c) + full[0];
+    let message = compress(&full, 4);
+    assert_eq!(message.len(), 4);
+    let x = field(&mut rng);
+    let direct = full.iter().rev().fold(E::zero(), |acc, &c| acc * x + c);
+    assert_eq!(evaluate_compressed(&message, claim, x), direct);
+    assert_eq!(
+        inactive_message(claim, 3),
+        vec![claim * inverse_power_of_two(1), E::zero(), E::zero()]
+    );
+    assert_eq!(inverse_power_of_two(3) * E::from_u64(8), E::one());
+    assert!(Group::new(vec![], vec![], None, 3, 2).is_err());
+    let cells = vec![0_i8; 8];
+    let lanes = vec![Lane::column(&cells)];
+    let too_high = vec![GroupInstance {
+        gamma: E::one(),
+        terms: vec![Term::Bool(0)],
+    }];
+    assert!(Group::new(lanes.clone(), too_high.clone(), None, 3, 1).is_err());
+    assert!(Group::new(lanes.clone(), too_high, None, 2, 3).is_err());
+    let missing = vec![GroupInstance {
+        gamma: E::one(),
+        terms: vec![Term::Product(vec![0, 1])],
+    }];
+    assert!(Group::new(lanes, missing, None, 3, 3).is_err());
+}
+
+#[test]
+fn leaf_polynomials_vanish_exactly_on_the_alphabets() {
+    for z in -128_i64..=127 {
+        let p = E::from_i64(z * (z + 1));
+        let in4 = (-2..=1).contains(&z);
+        let in8 = (-4..=3).contains(&z);
+        let in16 = (-8..=7).contains(&z);
+        assert_eq!(LeafPoly::Q4.evaluate(p) == E::zero(), in4);
+        assert_eq!(LeafPoly::Q8.evaluate(p) == E::zero(), in8);
+        let q16 = LeafPoly::Q8.evaluate(p) * LeafPoly::Q16Hi.evaluate(p);
+        assert_eq!(q16 == E::zero(), in16);
+    }
+    assert_eq!(LeafPoly::of_base(16), [LeafPoly::Q8, LeafPoly::Q16Hi]);
+    assert_eq!(Term::Leaf(0, LeafPoly::Q16Hi).degree(), 4);
+    assert_eq!(IDENTITY_MAP[0xFF], -1);
+    assert_eq!(IDENTITY_MAP[7], 7);
+}
+
+#[test]
+fn leaf_coefficients_expand_the_root_products() {
+    assert_eq!(LeafPoly::Q4.coefficients(), vec![0, -2, 1]);
+    assert_eq!(LeafPoly::Q8.coefficients(), vec![0, -144, 108, -20, 1]);
+    for poly in [LeafPoly::Q4, LeafPoly::Q8, LeafPoly::Q16Hi] {
+        let coefficients = poly.coefficients();
+        assert_eq!(coefficients.len(), poly.degree() + 1);
+        for p in [-3_i64, 0, 2, 7, 56, 1000] {
+            let pf = E::from_i64(p);
+            let horner = coefficients
+                .iter()
+                .rev()
+                .fold(E::zero(), |acc, &c| acc * pf + E::from_i64(c));
+            assert_eq!(horner, poly.evaluate(pf));
+        }
+    }
+}
+
+#[test]
+fn compiled_pieces_evaluate_every_term_in_coefficient_form() {
+    let mut rng = SplitMix64::new(17);
+    let lanes = 8;
+    let instances = vec![
+        instance(&mut rng, vec![Term::Bool(0), Term::Link(1)]),
+        instance(&mut rng, vec![Term::Leaf(2, LeafPoly::Q8), Term::Leaf(2, LeafPoly::Q16Hi)]),
+        instance(&mut rng, vec![Term::Leaf(3, LeafPoly::Q4)]),
+        instance(&mut rng, vec![Term::Product(vec![0, 4]), Term::Product(vec![1, 2, 3])]),
+        instance(&mut rng, vec![Term::RangeW1([0, 1, 4, 5])]),
+        instance(&mut rng, vec![Term::Affine { weight: Some(5), lanes: vec![(0, 3), (4, -7)], constant: 9 }]),
+        instance(&mut rng, vec![Term::Affine { weight: None, lanes: vec![(1, 5)], constant: -4 }]),
+        instance(&mut rng, vec![Term::Product(vec![6]), Term::Product(vec![7, 0])]),
+    ];
+    let is_field = vec![false, false, false, false, false, true, false, false];
+    let plan = Plan::compile(lanes, &instances, &is_field);
+    let a = point(&mut rng, lanes);
+    let d = point(&mut rng, lanes);
+    let out = plan.source.evaluate(&a, &d, 6, false);
+    for x in [0_u64, 1, 2, 5, 77] {
+        let xf = E::from_u64(x);
+        let values: Vec<E> = a.iter().zip(&d).map(|(&a, &d)| a + xf * d).collect();
+        let at_x = out.iter().rev().fold(E::zero(), |acc, &c| acc * xf + c) + plan.constant;
+        assert_eq!(at_x, summand(&instances, &values), "X = {x}");
+    }
+    // The folded phase reads scaled lanes.
+    let scaled_a: Vec<E> = a.iter().zip(&plan.scales).map(|(&v, &s)| v * s).collect();
+    let scaled_d: Vec<E> = d.iter().zip(&plan.scales).map(|(&v, &s)| v * s).collect();
+    let folded = plan.folded.evaluate(&scaled_a, &scaled_d, 6, false);
+    assert_eq!(folded, out);
+    assert_ne!(plan.scales[6], E::one());
+    assert_ne!(plan.scales[7], E::one());
+    // The dense pieces read translated lanes; the upper form drops the constant only.
+    let quartic = vec![
+        instance(&mut rng, vec![Term::Leaf(0, LeafPoly::Q8), Term::Leaf(0, LeafPoly::Q16Hi)]),
+        instance(&mut rng, vec![Term::Leaf(1, LeafPoly::Q8)]),
+        instance(&mut rng, vec![Term::Link(2), Term::Bool(3)]),
+    ];
+    let plan = Plan::compile(4, &quartic, &[false; 4]);
+    assert!(plan.dense.polys.iter().filter(|(_, k)| matches!(k, PolyKind::Depressed { .. })).count() == 2);
+    assert!(!plan.shifts[0].is_zero() && plan.shifts[2].is_zero());
+    let shifted: Vec<E> = a.iter().zip(&plan.shifts).map(|(&v, &s)| v - s).collect();
+    let expected = plan.folded.evaluate(&a[..4], &d[..4], 5, false);
+    let dense = plan.dense.evaluate(&shifted, &d[..4], 5, false);
+    assert_eq!(dense, expected);
+    let upper = plan.dense.evaluate(&shifted, &d[..4], 5, true);
+    assert!(upper[0].is_zero());
+    assert_eq!(upper[1..], expected[1..]);
+    let all = Plan::compile(lanes, &instances, &is_field);
+    let upper = all.source.evaluate(&a, &d, 6, true);
+    assert!(upper[0].is_zero());
+    assert_eq!(upper[1..], out[1..]);
+    // Bilinear products with and without a coefficient, both forms.
+    let mut bilinear = Pieces::default();
+    bilinear.bilinear.push(plan::Bilinear { c: E::one(), a: 0, b: 1 });
+    bilinear.bilinear.push(plan::Bilinear { c: field(&mut rng), a: 2, b: 3 });
+    let full = bilinear.evaluate(&a, &d, 3, false);
+    let upper = bilinear.evaluate(&a, &d, 3, true);
+    assert_eq!(upper[1..], full[1..]);
+    let x = field(&mut rng);
+    let at = |l: usize| a[l] + x * d[l];
+    assert_eq!(
+        full[0] + x * full[1] + x * x * full[2],
+        at(0) * at(1) + bilinear.bilinear[1].c * at(2) * at(3)
+    );
+}
+
+/// Per-round wall times of stage-like groups at `AGG_PROFILE_VARS` variables (default 21,
+/// the main domain at `N = 2,048`); minimum of three runs. Run with
+/// `cargo test --release -p agg-piop --lib profile_stage_groups -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn profile_stage_groups() {
+    let vars: usize = std::env::var("AGG_PROFILE_VARS").ok().and_then(|v| v.parse().ok()).unwrap_or(21);
+    let mut rng = SplitMix64::new(5);
+    let len = 1 << vars;
+    let bit_cells: Vec<Vec<i8>> = (0..6).map(|_| bits(&mut rng, len)).collect();
+    let digit_cells: Vec<Vec<i8>> = (0..17).map(|_| digits(&mut rng, len)).collect();
+    let weight: Vec<E> = point(&mut rng, len);
+    let tau = point(&mut rng, vars);
+    let gamma = |rng: &mut SplitMix64| field(rng);
+    // Stage 1 main: bits (Booleans, range) and 14 (lo, hi) products.
+    let mut s1_lanes: Vec<Lane<'_>> = bit_cells.iter().map(|c| Lane::column(c)).collect();
+    let mut s1: Vec<GroupInstance> = (0..6).map(|t| GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Bool(t)] }).collect();
+    s1.push(GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::RangeW1([5, 4, 3, 2])] });
+    for cells in &digit_cells[..14] {
+        let lo = s1_lanes.len();
+        s1_lanes.push(Lane::mapped(cells, lo_map()));
+        s1_lanes.push(Lane::mapped(cells, hi_map()));
+        s1.push(GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Product(vec![lo, lo + 1])] });
+    }
+    // Stage 2 main: 17 digit squares with their leaves.
+    let s2_lanes: Vec<Lane<'_>> = digit_cells.iter().map(|c| Lane::mapped(c, square_map())).collect();
+    let mut s2 = Vec::new();
+    for l in 0..17 {
+        s2.push(GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Leaf(l, LeafPoly::Q8)] });
+        if l < 14 {
+            s2.push(GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Leaf(l, LeafPoly::Q16Hi)] });
+        }
+    }
+    // Stage 2 weight group: w_1 times the six bits.
+    let mut w1_lanes = vec![Lane::Source(Source::Field(&weight))];
+    w1_lanes.extend(bit_cells.iter().map(|c| Lane::column(c)));
+    let w1: Vec<GroupInstance> = (0..6).map(|t| GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Product(vec![0, 1 + t])] }).collect();
+    // Stage 3 main: ring residual, 17 links, 6 reductions.
+    let mut s3_lanes: Vec<Lane<'_>> = bit_cells.iter().map(|c| Lane::column(c)).collect();
+    s3_lanes.extend(digit_cells.iter().map(|c| Lane::column(c)));
+    let residual: Vec<(usize, i64)> = (0..18).map(|l| (l, (l as i64 + 3) * 1000 - 7)).collect();
+    let mut s3 = vec![GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Affine { weight: None, lanes: residual, constant: 12345 }] }];
+    s3.extend((6..23).map(|l| GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Link(l)] }));
+    s3.extend((0..6).map(|t| GroupInstance { gamma: gamma(&mut rng), terms: vec![Term::Product(vec![t])] }));
+    // Stage 3 weight group: w_A times the recomposed z.
+    let mut wa_lanes = vec![Lane::Source(Source::Field(&weight))];
+    wa_lanes.extend(digit_cells[..5].iter().map(|c| Lane::column(c)));
+    let wa = vec![GroupInstance {
+        gamma: gamma(&mut rng),
+        terms: vec![Term::Affine { weight: Some(0), lanes: (1..6).map(|l| (l, 1 << (4 * (l - 1)))).collect(), constant: 7 }],
+    }];
+    let challenges = point(&mut rng, vars);
+    let cases: Vec<(&str, &[Lane<'_>], &[GroupInstance], bool, usize)> = vec![
+        ("stage 1 main eq(tau)", &s1_lanes, &s1, true, 4),
+        ("stage 2 main eq(r1)", &s2_lanes, &s2, true, 5),
+        ("stage 2 main w_1", &w1_lanes, &w1, false, 5),
+        ("stage 3 main eq(r2)", &s3_lanes, &s3, true, 3),
+        ("stage 3 main w_A", &wa_lanes, &wa, false, 3),
+    ];
+    for (name, lanes, instances, with_eq, degree) in cases {
+        let mut best: Vec<(f64, f64)> = vec![(f64::MAX, f64::MAX); vars];
+        let mut setup = f64::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let policy = match std::env::var("AGG_PROFILE_POLICY").as_deref() {
+                Ok("no-taylor") => Policy { taylor: false, ..AUTO },
+                Ok("pair-fold") => Policy { quartet_lut: Choice::Forbid, ..AUTO },
+                Ok("no-bivariate") => Policy { bivariate: Choice::Forbid, ..AUTO },
+                Ok("generic") => Policy { coding: false, ..AUTO },
+                _ => AUTO,
+            };
+            let mut group = Group::with_policy(lanes.to_vec(), instances.to_vec(), with_eq.then_some(&tau[..]), vars, degree, policy).unwrap();
+            setup = setup.min(start.elapsed().as_secs_f64());
+            for (round, &r) in challenges.iter().enumerate() {
+                let start = std::time::Instant::now();
+                group.round_message(round);
+                let message = start.elapsed().as_secs_f64();
+                let start = std::time::Instant::now();
+                group.bind(round, r);
+                let bind = start.elapsed().as_secs_f64();
+                best[round].0 = best[round].0.min(message);
+                best[round].1 = best[round].1.min(bind);
+            }
+        }
+        let total: f64 = best.iter().map(|(m, b)| m + b).sum::<f64>() + setup;
+        let rounds: Vec<String> = best.iter().take(8).map(|(m, b)| format!("{:.1}+{:.1}", m * 1e3, b * 1e3)).collect();
+        let tail: f64 = best.iter().skip(8).map(|(m, b)| m + b).sum();
+        eprintln!(
+            "{name:24} total {:7.1} ms: new {:.1}, rounds (message+bind) {} tail {:.1}",
+            total * 1e3,
+            setup * 1e3,
+            rounds.join(" "),
+            tail * 1e3
+        );
+    }
+}

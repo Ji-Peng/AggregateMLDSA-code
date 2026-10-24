@@ -19,7 +19,8 @@
 //! own keys and `S` (default `N / 32`) under three shared keys; the bridge matrices are
 //! derived from the bridge seed as in spec 9.1 (`SeededMatrices`), so prover and verifier
 //! times include the derivation (verifier step `matrices`). Times are medians over the timed
-//! runs.
+//! runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
+//! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds).
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -236,6 +237,12 @@ fn run_prover(options: &Options, n: usize) {
     let output = last.expect("one run");
     let bytes = output.proof.to_bytes();
     let size = output.proof.size();
+    // `AGG_PROOF_OUT=<dir>`: keep the aggregate for a byte-identity check across builds.
+    if let Some(dir) = std::env::var_os("AGG_PROOF_OUT") {
+        let path = std::path::Path::new(&dir).join(format!("mode_b-{n}.bin"));
+        std::fs::write(&path, &bytes).expect("write the aggregate");
+        println!("  aggregate written to {}", path.display());
+    }
     println!(
         "  N = {n}: {} records under own keys, {} under 3 shared keys; generation {:.2} s",
         n - options.shared_for(n),

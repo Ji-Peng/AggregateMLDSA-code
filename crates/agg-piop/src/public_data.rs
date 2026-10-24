@@ -23,7 +23,7 @@ use agg_witness::native::{ctr_q, mu, pk_decode, sample_in_ball, tr, Challenge};
 use agg_witness::ntt::NttPrime;
 use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, D, D_POS, K, L, N, TR_BYTES};
-use jolt_field::{One, Ring, Zero};
+use jolt_field::{Fold, One, Ring, Zero};
 use rayon::prelude::*;
 
 use crate::OpeningField as E;
@@ -352,30 +352,47 @@ impl PublicData {
     }
 }
 
-/// `w^(t) (X) = (f_t(0) + f_t(1) X) w^(t+1)(X^2)`: returns `a * eq(r, .)` in
-/// `K[X]/(X^D + 1)` for `D = a.len() = 2^|r|` by the recurrence (8.7).
-fn eq_negacyclic_product(a: &[E], r: &[E]) -> Vec<E> {
+/// `w^(t) (X) = (f_t(0) + f_t(1) X) w^(t+1)(X^2)`: replaces `a` by `a * eq(r, .)` in
+/// `K[X]/(X^D + 1)` for `D = a.len() = 2^|r|` by the recurrence (8.7), in place, with a
+/// scratch buffer of the same length (no allocation). With `f_t(0) = 1 - r_t` each output
+/// of a butterfly is one product: `f0 a0 + f1 rot = a0 + r (rot - a0)`,
+/// `f1 a0 + f0 a1 = a1 + r (a0 - a1)`.
+fn eq_negacyclic_product(a: &mut [E], r: &[E], scratch: &mut [E]) {
     let size = a.len();
     if size == 1 {
-        return vec![a[0]];
+        return;
     }
-    let (f0, f1) = (E::one() - r[0], r[0]);
+    // `x + r (y - x)` is a fold by `r` (jolt-field's precomputed fold context).
+    let context = E::precompute(r[0]);
     let half = size / 2;
-    let mut even = Vec::with_capacity(half);
-    let mut odd = Vec::with_capacity(half);
+    let (even, odd) = scratch[..size].split_at_mut(half);
     for k in 0..half {
         let (a0, a1) = (a[2 * k], a[2 * k + 1]);
         // rot(A_1) = Y A_1 mod (Y^{D/2} + 1).
         let rotated = if k == 0 { -a[size - 1] } else { a[2 * k - 1] };
-        even.push(f0 * a0 + f1 * rotated);
-        odd.push(f1 * a0 + f0 * a1);
+        even[k] = E::fold_one(&context, a0, rotated);
+        odd[k] = E::fold_one(&context, a1, a0);
     }
-    let even = eq_negacyclic_product(&even, &r[1..]);
-    let odd = eq_negacyclic_product(&odd, &r[1..]);
-    even.into_iter()
-        .zip(odd)
-        .flat_map(|(e, o)| [e, o])
-        .collect()
+    let (low, high) = a.split_at_mut(half);
+    eq_negacyclic_product(even, &r[1..], low);
+    eq_negacyclic_product(odd, &r[1..], high);
+    for k in 0..half {
+        a[2 * k] = scratch[k];
+        a[2 * k + 1] = scratch[half + k];
+    }
+}
+
+/// [`negacyclic_kernel`] into `out` (`out.len() = a.len()`), with a scratch buffer of at
+/// least that length (no allocation).
+pub fn negacyclic_kernel_into(a: &[E], r_coef: &[E], out: &mut [E], scratch: &mut [E]) {
+    let n = a.len();
+    assert_eq!(n, 1 << r_coef.len(), "a has 2^|r| coefficients");
+    assert!(out.len() == n && scratch.len() >= n, "buffers of the polynomial's length");
+    out[0] = a[0];
+    for j in 1..n {
+        out[j] = -a[n - j];
+    }
+    eq_negacyclic_product(out, r_coef, scratch);
 }
 
 /// `K_{a, r}[j'] = sum_{a'} a[a'] (-1)^{floor((a' + j') / n)} eq(r, (a' + j') mod n)`
@@ -384,12 +401,10 @@ fn eq_negacyclic_product(a: &[E], r: &[E]) -> Vec<E> {
 /// `a^dagger[j] = -a[n - j]` by the factorized transform (8.5) to (8.7), `O(n log n)`.
 #[must_use]
 pub fn negacyclic_kernel(a: &[E], r_coef: &[E]) -> Vec<E> {
-    let n = a.len();
-    assert_eq!(n, 1 << r_coef.len(), "a has 2^|r| coefficients");
-    let mut adjoint = Vec::with_capacity(n);
-    adjoint.push(a[0]);
-    adjoint.extend((1..n).map(|j| -a[n - j]));
-    eq_negacyclic_product(&adjoint, r_coef)
+    let mut out = vec![E::zero(); a.len()];
+    let mut scratch = vec![E::zero(); a.len()];
+    negacyclic_kernel_into(a, r_coef, &mut out, &mut scratch);
+    out
 }
 
 /// `Lambda_a = sum_j eq(right, j) (-1)^{floor((a + j) / n)} eq(left, (a + j) mod n)`

@@ -218,20 +218,26 @@ impl TableCommitter {
         self.commit(GroupRole::Main, main.columns())
     }
 
-    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2`, then the final group `G_3`.
+    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2` and the final group `G_3`.
+    /// The three commits are independent (the final group is committed against the
+    /// precommitted profiles of the work plan, not against the other two commitments), so
+    /// they run in parallel; an Akita commit is memory bound and does not use every thread
+    /// on its own. The caller absorbs them in wire order.
     pub fn commit_round2(
         &self,
         bridge: &BridgeGroupTables,
     ) -> Result<[GroupCommitment; 3], PcsError> {
-        Ok([
-            self.commit(GroupRole::Level1, bridge.group(GroupRole::Level1))?,
-            self.commit(GroupRole::Level2, bridge.group(GroupRole::Level2))?,
-            self.commit(GroupRole::Level3, bridge.group(GroupRole::Level3))?,
-        ])
+        let commit = |role: GroupRole| self.commit(role, bridge.group(role));
+        let (level1, (level2, level3)) = rayon::join(
+            || commit(GroupRole::Level1),
+            || rayon::join(|| commit(GroupRole::Level2), || commit(GroupRole::Level3)),
+        );
+        Ok([level1?, level2?, level3?])
     }
 
     /// The batched opening of all four groups at `points` under the 32-byte PIOP session
-    /// digest; returns the proof and the claims it authenticates.
+    /// digest; returns the proof and the claims it authenticates (evaluated from the
+    /// tables, one streaming pass per polynomial).
     pub fn open(
         &self,
         commitments: [GroupCommitment; GROUP_COUNT],
@@ -240,8 +246,24 @@ impl TableCommitter {
         session: &[u8; 32],
     ) -> Result<(Vec<u8>, [GroupClaim; GROUP_COUNT]), PcsError> {
         let claims = opening_claims(tables, points)?;
-        let proof = self.prover.open(commitments, &claims, session)?;
+        let proof = self.open_claims(commitments, &claims, session)?;
         Ok((proof, claims))
+    }
+
+    /// The batched opening of all four groups for claims the caller already holds (the
+    /// prover's stage-3 terminal values, which equal the table evaluations).
+    pub fn open_claims(
+        &self,
+        commitments: [GroupCommitment; GROUP_COUNT],
+        claims: &[GroupClaim; GROUP_COUNT],
+        session: &[u8; 32],
+    ) -> Result<Vec<u8>, PcsError> {
+        for (group, claim) in self.manifest.groups().iter().zip(claims) {
+            if claim.point.len() != group.logical_vars {
+                return Err(PcsError::PointShape(group.role));
+            }
+        }
+        Ok(self.prover.open(commitments, claims, session)?)
     }
 
     /// The verifier derived from this prover's setup.

@@ -5,7 +5,10 @@
 mod common;
 
 use agg_piop::binding::FlockProfile;
-use agg_piop::prover::{prove, FixedMatrices, NoKeccak, ProveError, ProverInputs};
+use agg_piop::opening::opening_claims;
+use agg_piop::pcs::opening_claims as evaluate_claims;
+use agg_piop::prover::{main_tables, prove, FixedMatrices, NoKeccak, ProveError, ProverInputs};
+use agg_piop::source_tables::{BridgeGroupTables, SourceTables};
 use agg_piop::public_data::KeyCache;
 use agg_piop::verifier::{verify, ConfigurationError, NoKeccakVerifier, VerifyError};
 use agg_piop::wire::AggregateProof;
@@ -63,6 +66,21 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         assert_eq!(AggregateProof::from_bytes(&bytes).unwrap(), output.proof);
         assert_eq!(output.flock_seeds.len(), 1);
         assert_eq!(output.proof.stage1.rounds.len(), 18);
+        // The opening takes its claims from the stage-3 terminal values; they are the
+        // evaluations of the committed tables at the group points.
+        {
+            let (manifest, main) = main_tables(&prover_inputs).unwrap();
+            let matrices = BridgeMatrices::random_for_tests(0xe2e);
+            let bridge_tables = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
+            let tables = SourceTables {
+                manifest: &manifest,
+                main: &main,
+                bridge: &bridge_tables,
+            };
+            let claims = opening_claims(&manifest, &output.points.1, &output.proof.stage3.claims).unwrap();
+            let points = claims.clone().map(|c| c.point);
+            assert_eq!(evaluate_claims(tables, &points).unwrap(), claims);
+        }
 
         let public: Vec<(&[u8], &[u8])> = records
             .iter()

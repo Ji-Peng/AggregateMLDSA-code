@@ -26,11 +26,11 @@ use agg_bridge::{weights as bridge, Domains, Shape};
 use agg_witness::bridge::SparseMatrix;
 use agg_witness::padding::Geometry;
 use agg_witness::params::{D_COEF, D_POS, K, L, N, W1_BITS};
-use jolt_field::{Ring, Zero};
+use jolt_field::{ExtField, Ring, Zero};
 use rayon::prelude::*;
 
-use crate::public_data::{eq_correlation, negacyclic_kernel, PublicData};
-use crate::OpeningField as E;
+use crate::public_data::{eq_correlation, negacyclic_kernel_into, PublicData};
+use crate::{BaseField, OpeningField as E};
 
 /// Row variables of levels 1 and 2 (`m_1 = m_2 = 2^13`).
 pub const RHO12_VARS: usize = 13;
@@ -109,21 +109,30 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     let geom = public.geometry();
     assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
     let coef = &r2[..D_COEF as usize];
-    let row = &r2[D_COEF as usize..D_POS as usize];
+    let row = eq_table(&r2[D_COEF as usize..D_POS as usize]);
+    assert_eq!(row.len(), K, "two row coordinates");
     let eq_sig = eq_table(&r2[D_POS as usize..]);
     let positions = 1_usize << D_POS;
-    let mut table = vec![E::zero(); geom.main_len()];
+    let mut table: Vec<E> = rayon::iter::repeat_n(E::zero(), geom.main_len()).collect();
     table
         .par_chunks_mut(positions)
         .take(geom.n)
         .enumerate()
         .for_each(|(i, chunk)| {
-            let combined = public.a_row_combination(i, row);
-            for (s, poly) in combined.iter().enumerate() {
-                let kernel = negacyclic_kernel(poly, coef);
-                for (j, value) in kernel.into_iter().enumerate() {
-                    chunk[j + N * s] = eq_sig[i] * value;
+            // The kernel is linear in its polynomial: scale the row weights by eq(sig, i)
+            // once, combine the integer rows of A with base-field products, and transform
+            // each column into the table without allocating.
+            let weights: [E; K] = std::array::from_fn(|rho| eq_sig[i] * row[rho]);
+            let a = public.a(i);
+            let mut combined = [E::zero(); N];
+            let mut scratch = [E::zero(); N];
+            for (s, out) in chunk.chunks_exact_mut(N).take(L).enumerate() {
+                for (j, slot) in combined.iter_mut().enumerate() {
+                    *slot = (0..K).fold(E::zero(), |sum, rho| {
+                        sum + weights[rho].mul_base(BaseField::from_i64(i64::from(a[rho][s][j])))
+                    });
                 }
+                negacyclic_kernel_into(&combined, coef, out, &mut scratch);
             }
         });
     table

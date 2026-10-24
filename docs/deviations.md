@@ -690,24 +690,45 @@ Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
   `Y_sigma = 0`; this path is unit-tested on the item level only, since batches above
   `2^13` records do not run on the development machine.
 
-## P12. Prover kernel: compiled plans, bucketed first rounds, lookup folds (spec Section 7)
+## P12. Prover kernel: compiled plans, coded rounds, dense tables from the third fold (spec Section 7)
 
 Spec: the stages are ordinary batched sum-checks whose round polynomials are defined by
 the instance tables of Sections 7.3 to 7.5; nothing is said about how the prover
 evaluates them.
 
-Code (`agg_piop::kernel`, `docs/piop.md` Sections 6 and 16.2): the prover compiles the
-gamma-weighted terms of a group into per-lane polynomials, weighted affine forms and
-bilinear products; in the first active round of a group whose lanes are coded byte
-columns (cells in a span of at most 16 values) it buckets the equality weights by the
-pair pattern of each column and evaluates every piece once per pattern, and in round 1
-by quartet patterns when the pair count is at least four times the pattern space; the
-first fold of a coded lane is a 256-entry lookup. The round polynomials, the proof bytes
-and the verifier are unchanged (the tests compare the bucketed and generic paths and the
-definition on random tables, and every prover/verifier round trip is unchanged). Why:
-the per-pair, per-term evaluation in `K` was 2.6 to 3.2 s of the 4 s non-Flock prover at
-`N = 1,024` (profile in `docs/piop.md` Section 15); the rework follows Aerie's kernels
-(`CodedSource`, pattern buckets, `BUCKET_MIN_RATIO`). The committed layout is not
-changed: `docs/piop.md` Section 16.1 records why the quotient `v`, wider Akita digits
-and merged Boolean lanes do not reduce the element count without weakening relation H
-or adding a lookup argument.
+Code (`agg_piop::kernel`, `docs/piop.md` Sections 6, 16.2 and 18): the prover compiles the
+gamma-weighted terms of a group into per-lane polynomials, bilinear products, weighted sums
+and residual terms, evaluated in coefficient form. An `i8` column whose present cells fall
+into at most 16 classes under the maps of its lanes is coded (one byte per pair of cells);
+pieces on coded lanes are bucketed by cell patterns. In the first active round one pass
+accumulates quartet masses with the round-1 equality weights and serves rounds 0 and 1
+(Aerie's bivariate prefix) when the quartets outnumber the pattern space four times, else
+pair masses; coded lanes are pair tables after the first fold and quartet tables (with
+Taylor tables of their polynomials) or pair tables with the second challenge after the
+second; every lane is materialized in one row-major `K` table after the third fold. From
+the second active round on, the constant coefficient of the inner polynomial is recovered
+from the running claim, which is the group's own exact sum. The parities `y^(1)` are `i8`
+tables when every value fits. The opening takes its claims from the stage-3 terminal values
+instead of evaluating the 67 tables again; the round-1 commitment runs concurrently with
+the Keccak side's commitments, and the three round-2 commitments concurrently with each
+other (all transcript-free, absorbed in event order).
+
+Why it is sound and the proof unchanged: every round message is the same polynomial as
+before, computed in a different order over `K` (bucketing and moments are distributivity of
+the weights over equal summands; Taylor coefficients, the depressed quartic and the claim
+recovery are exact identities in the field; unreduced sums are exact), so the messages, the
+terminal values, the opening claims and therefore every proof byte are identical
+(aggregates compared byte for byte against `7ed4a32` at 256, 512, 1,024 and 2,048 records
+in mode B and at 256 and 1,024 records in mode A). The verifier is untouched. The kernel
+tests compare every strategy (generic, coded per item, pair or quartet masses, quartet or
+pair-fold tables, with or without Taylor tables and claim recovery) bit for bit against an
+independent reference (the round polynomial from its definition over full equality tables),
+on random tables with every `Term` kind, wide cells, `i32` lanes and domains of 0 to 4
+variables. The claim recovery uses only the prover's own running claim (computed from the
+group's tables in its first active round, or directly for a lifted group), never a claimed
+sum, so a tampered witness under the test-only unchecked provers still yields the true
+polynomials of its tables. Why: stages 1-3 were 1.82 s of the 2.73 s mode-B prover at
+`N = 2,048` (`7ed4a32`, same session); they are 0.65 s now (`docs/piop.md` Section 18.3). The committed layout
+is not changed: `docs/piop.md` Section 16.1 records why the quotient `v`, wider Akita
+digits and merged Boolean lanes do not reduce the element count without weakening relation
+H or adding a lookup argument.

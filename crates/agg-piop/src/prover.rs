@@ -187,7 +187,7 @@ pub struct ProveTimings {
     pub tables: Duration,
     /// Akita setup from the work plan.
     pub setup: Duration,
-    /// Event 1: the round-1 commitment.
+    /// Event 1: the round-1 commitment (concurrent with the event-2 commitments).
     pub round1: Duration,
     /// Events 2 and 6: the Keccak side (commitments and proofs).
     pub keccak: Duration,
@@ -297,7 +297,7 @@ fn check_bridge(bridge: &impl BridgeDerivation, flock: FlockProfile) -> Result<(
 pub fn prove(
     inputs: &ProverInputs<'_>,
     bridge: &impl BridgeDerivation,
-    keccak: &impl KeccakSide,
+    keccak: &(impl KeccakSide + Sync),
     flock: FlockProfile,
 ) -> Result<ProverOutput, ProveError> {
     check_bridge(bridge, flock)?;
@@ -337,7 +337,7 @@ pub fn prove_with_tables(
     manifest: &CommitmentManifest,
     main: &MainTables,
     bridge: &impl BridgeDerivation,
-    keccak: &impl KeccakSide,
+    keccak: &(impl KeccakSide + Sync),
     flock: FlockProfile,
     hooks: &ProveHooks<'_>,
 ) -> Result<ProverOutput, ProveError> {
@@ -358,11 +358,23 @@ pub fn prove_with_tables(
     let digest = public_records_binding(inputs.records);
     let record = instance_record(manifest, &digest, flock);
     let mut transcript = Transcript::new(manifest, &record)?;
-    let round1 = committer.commit_round1(main)?;
+    // The round-1 commitment and the Flock commitments depend only on the witness, so they
+    // run concurrently (both are memory bound and leave threads idle on their own); the
+    // transcript absorbs them in event order afterwards. Each step's time is its own
+    // closure's, so in mode A the two overlap in wall time.
+    let ((round1, round1_time), (flock_commitments, keccak_time)) = rayon::join(
+        || {
+            let start = Instant::now();
+            (committer.commit_round1(main), start.elapsed())
+        },
+        || {
+            let start = Instant::now();
+            (keccak.commitments(segments), start.elapsed())
+        },
+    );
+    let round1 = round1?;
     let main_commitment = round1.serialized()?;
     transcript.absorb(commitment_site(GroupRole::Main), 1, &main_commitment)?;
-    timings.round1 = clock.lap();
-    let flock_commitments = keccak.commitments(segments);
     if flock_commitments.len() != segments {
         return Err(ProveError::Internal("one Flock commitment per segment".into()));
     }
@@ -371,7 +383,9 @@ pub fn prove_with_tables(
         .challenge_bytes(BRIDGE_SEED_SITE, 1)?
         .try_into()
         .expect("32 bytes");
-    timings.keccak = clock.lap();
+    clock.lap();
+    timings.round1 = round1_time;
+    timings.keccak = keccak_time;
 
     // Events 4 to 6: round-2 commitments, Flock seeds, final vectors and Flock proofs.
     let matrices = bridge.matrices(&bridge_seed);
@@ -484,17 +498,20 @@ pub fn prove_with_tables(
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
     let claims = opening_claims(manifest, &stage3.point, &stage3.claims)?;
-    let group_points = claims.clone().map(|c| c.point);
+    // The stage-3 terminal values are the multilinear extensions of the committed tables at
+    // the group points (the kernel's terminal values; `tests/prove_verify.rs` checks them
+    // against the table evaluations), so the opening takes them directly instead of
+    // evaluating every table again.
+    debug_assert!(
+        crate::pcs::opening_claims(tables, &claims.clone().map(|c| c.point))
+            .is_ok_and(|recomputed| recomputed == claims),
+        "stage-3 terminal values differ from the table evaluations"
+    );
     let commitments: [GroupCommitment; 4] = {
         let [l1, l2, l3] = round2;
         [round1, l1, l2, l3]
     };
-    let (opening, recomputed) = committer.open(commitments, tables, &group_points, &session)?;
-    if recomputed.iter().zip(&claims).any(|(a, b)| a.values != b.values) {
-        return Err(ProveError::Internal(
-            "stage-3 terminal values differ from the table evaluations".into(),
-        ));
-    }
+    let opening = committer.open_claims(commitments, &claims, &session)?;
     timings.opening = clock.lap();
     let proof = AggregateProof {
         records: n,

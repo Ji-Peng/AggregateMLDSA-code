@@ -12,16 +12,16 @@ part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `
 | --- | --- | --- | --- |
 | `manifest` | `CommitmentManifest`: the four groups (role, round, family, logical and physical variables, polynomial order and alphabets), digit columns, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
 | `source_tables` | `MainTables` (round 1, `G_main`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3` and public `Y`, from `agg_bridge::parity` and `agg_bridge::carry` at `Shape::PRODUCTION`), `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
-| `pcs` | `group_polynomials`, `TableCommitter` (two rounds, batched opening), `opening_claims`, `suffix_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
-| `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
+| `pcs` | `group_polynomials`, `TableCommitter` (two rounds, round 2 committed concurrently, batched opening from given claims `open_claims` or table evaluations `open`), `opening_claims`, `suffix_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
+| `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` and the allocation-free `negacyclic_kernel_into` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
 | `virtual_polys` | `w_1'`, (4.1) compositions, ring residual, `y^(1)` parities, `P_Z, A^lo, A^hi`, `MainValues`/`CarryValues` | 4.3, 5 | |
-| `kernel` | `Source`/`Lane` (narrow tables lifted at the first fold), `Term` (summand shapes), `Group` (one local domain, optional split equality factor, gamma-weighted instances), compressed messages, lifted inactive rounds | 7.1 | `aerie-prover/src/protocol/kernels/`, `algebra.rs` |
+| `kernel` (`kernel/`: `mod.rs`, `plan.rs`, `coded.rs`, `field.rs`, `tests.rs`) | `Source`/`Lane` (the narrow input tables), `Term` (summand shapes), `Group` (one local domain, optional split equality factor, gamma-weighted instances; coded columns, pattern masses, pair/quartet/Taylor tables, one dense table from the third fold), compressed messages, lifted inactive rounds | 7.1 | `aerie-prover/src/protocol/kernels/`, `algebra.rs` |
 | `range` | digit maps `z -> z(z+1)`, `Q_16^lo(P)`, `Q_16^hi(P)`; the digit orders | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
 | `stage` | `StageSpec` (declarative instance table: groups, lanes, equality points, gamma indices), `prove_stage`, `replay_stage`, `check_terminal` | 7.1 | `aerie-falcon/src/protocol/stage.rs` |
 | `stage1`, `stage2`, `stage3` | the instance tables of Section 7.3 to 7.5, claimed sums, terminal claims, `prove`/`verify` | 7.3-7.5 | `stage1.rs`, `stage2.rs`, `stage3.rs` of both Aerie crates |
 | `weights` | `w_1, w_2, w_{3,t}` tables and verifier evaluations (wrappers of `agg_bridge::weights` at the production shape); `w_A` table and (7.10) | 7.6 | `ring/functional.rs`, `stage1/projection_link.rs` |
 | `claims` | the claim vectors between stages and their wire order | 7.2-7.5 | |
-| `tables` | `ProverTables`: borrowed `i8` columns, `y^(1)` as `i32`, the weight tables when known; `LaneId -> Lane` | 7 | |
+| `tables` | `ProverTables`: borrowed `i8` columns, `y^(1)` as `Parity1` (`i8` when every value fits, else `i32`), the weight tables when known; `LaneId -> Lane` | 7 | |
 | `transcript` | Spongefish `Blake2b512` stream, event registry, samplers, `pcs_session` | 10 | `aerie-falcon/src/protocol/transcript.rs` |
 | `binding` | public-record digest (16-KiB-leaf cSHAKE256 tree), instance record of event 0 | 2, 10 | `public_records_binding.rs` |
 | `wire` | `AggregateProof`, byte format, packed final vectors | 10 | `wire.rs` |
@@ -68,10 +68,14 @@ cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-binding
 2. `TableCommitter::new(manifest)`: work plan from the catalog, `manifest.matches_plan`,
    seed-derived Akita setup. `commit_round1` gives the event-1 commitment.
 3. After the bridge seed: `BridgeGroupTables::build(manifest, main, matrices)` (honest abort
-   on a row weight above the cap), `commit_round2` gives `G_1, G_2, G_3` (event 4).
-4. After stage 3: `open(commitments, tables, points, session)` evaluates the 67 claims at
-   the four suffix points of `r^(3)` and proves one batched opening; the prover checks that
-   these equal its stage-3 terminal values. `verifier_for(manifest)` verifies from the
+   on a row weight above the cap), `commit_round2` gives `G_1, G_2, G_3` (event 4); the three
+   commits run concurrently (each is transcript-free and the final group is committed
+   against the plan's precommitted profiles), the prover absorbs them in wire order.
+4. After stage 3: `open_claims(commitments, claims, session)` proves one batched opening of
+   the 67 claims at the four suffix points of `r^(3)`, with the claims taken from the
+   stage-3 terminal values (the multilinear extensions of the committed tables; a debug
+   assertion and `tests/prove_verify.rs` compare them with `opening_claims`, which evaluates
+   every table again; `open` still does that). `verifier_for(manifest)` verifies from the
    setup seed alone; `opening::parse_commitment` reads a commitment with the coefficient
    count of the plan's profile, never from the proof.
 
@@ -117,43 +121,82 @@ from `g(0) + g(1)` of round 0 otherwise); the stage driver checks the sum of the
 claims against the gamma-weighted claimed sums at the end (prover self-check; the
 test-only `prove_unchecked` paths skip it so tampered witnesses reach the verifier).
 
-How a round is evaluated (Section 16.2; all paths compute the same polynomial, so the
-proof bytes do not depend on them):
+How a round is evaluated (Sections 16.2 and 18; all paths compute the same polynomial, so
+the proof bytes do not depend on them; `kernel/mod.rs` holds the schedule, `kernel/plan.rs`
+the compiled pieces, `kernel/coded.rs` the codes and pattern masses, `kernel/field.rs` the
+field helpers):
 
 - *Compiled plan.* `Group::new` compiles the gamma-weighted terms into one polynomial per
-  lane in `K[v]` (every single-lane term on that lane: `Bool`, `Link`, `Leaf`, one-lane
-  `Product`, the lanes and constant of a weightless `Affine`), weighted affine forms
-  `w (sum c_l v_l + c)` with `K` coefficients, bilinear products `c v_a v_b`, and the
-  residual generic terms (`RangeW1`). A lane read only by a linear polynomial, or only as
-  one factor of one bilinear product, absorbs its coefficient at its first fold (the
-  terminal values are unscaled before they are reported).
-- *Coded columns.* Distinct `i8` sources (by pointer) whose cells lie in a span of at most
-  16 values are *coded*; a pair of cells has one of `span^2` patterns, a quartet one of
-  `span^4` (codes padded to a power of two). The honest tables are all coded (digits in
-  `[-8, 7]`, bits); a tampered cell such as 9 widens the span past 16 and the column
-  falls back to the generic path, as do `Ints` lanes (the `y^(1)` parities).
-- *Bucketed rounds.* If every piece of the plan reads coded lanes only (a `K` weight lane
-  may appear as the weight of an affine form or one factor of a bilinear product), the
-  first active round sums the equality weights, or the weight lane's values at every
-  interpolation point, into one bucket per pattern and column (one `K` addition per pair
-  per column, one `K` multiplication per pair for the equality weight) and evaluates every
-  piece once per pattern; multi-column generic terms use a joint pattern of at most
-  `2^12` entries. Round 1 does the same on quartet patterns when the pair count is at
-  least `BUCKET_MIN_RATIO = 4` times the largest pattern space (65,536 for a digit
-  column), i.e. from `N = 1,024` on; the per-pattern work is parallel over columns.
-- *Folds.* The first fold of a coded lane is a 256-entry lookup table (`Lane::Lookup`,
-  no storage per cell); the second materializes a `K` table of a quarter of the domain.
-  (A quartet lookup after the second fold was measured slower in round 2 than the
-  streamed table and is not used.) Other lanes fold as before.
+  lane (every single-lane term: `Bool`, `Link`, `Leaf`, one-lane `Product`, the lanes of a
+  weightless `Affine`; constants go to one per-cell constant), bilinear products
+  `c v_a v_b`, weighted sums `w (sum c_l v_l + c)` (every `Affine` with a weight and every
+  product of a field lane with another lane, merged per weight lane), and the residual
+  generic terms (`RangeW1`, products of three lanes). Everything is evaluated in coefficient
+  form at `v = a + X d` (Taylor coefficients `P^(i)(a) / i!` times `d^i`). A lane read only
+  by its linear polynomial, by one bilinear product or once in one weighted sum absorbs its
+  coefficient at its first fold (the terminal values are unscaled before they are
+  reported).
+- *Coded columns.* The `i8` lanes over one column (by pointer) code the column by the
+  classes of its present cells under the tuple of their maps, if there are at most 16: 8 for a
+  digit read through `z (z + 1)` (`P_Z`, `A^lo`, `A^hi`), 16 for a digit under the identity
+  (the stage-3 links), 2 for a bit, and one byte of pair code per pair of cells
+  (`class(2k) n + class(2k + 1)`). A tampered cell (for example a digit 9 under the identity:
+  17 classes) and the `i32` parity fallback leave a lane uncoded. Pieces on coded lanes are
+  *bucketed*: per column (polynomials, same-column products), or per set of columns for a
+  generic term whose joint pair space is at most `2^12` (`RangeW1` on four bit columns: 256);
+  the other pieces (weighted sums, uncoded lanes, cross-column digit products) are *direct*
+  and evaluated per item.
+- *Level 0* (first active round). If the group has at least two active rounds and the
+  quartets outnumber the largest quartet space by `BUCKET_MIN_RATIO = 4` (`4 * 8^4` for an
+  8-class column: from `N = 1,024` on the main domain; `4 * 16^4`: from 1,024 for the
+  stage-3 links), one pass accumulates per segment the *quartet masses* (the round-1
+  equality weight `eq(tau_{2..}, q)`, or one without an equality factor, per quartet
+  pattern); round 0 is `sum_p (l_0 H_0[p] + l_1 H_1[p]) F(p)` over the pair patterns with the
+  two marginals `H_0, H_1` and `l_0 = 1 - tau_1`, `l_1 = tau_1` (Aerie's bivariate prefix),
+  and the masses are kept for round 1. Otherwise pair masses with the round-0 weights.
+  Narrow segment sets (at most `2^16` entries in all) accumulate in one table per item chunk
+  (Aerie's `chunked_bucket_sums`); wide ones (the 16-class stage-3 columns, 17 MiB) one table
+  per segment, each task owning whole segments with the item weights computed once. Direct
+  pieces run one pass over the pairs; weighted sums read per-byte tables `c_l map_l[byte]`
+  of their byte lanes (additions, no products).
+- *Bind 0.* Coded lanes become pair tables (`n^2` entries, scaled; no storage per cell);
+  uncoded lanes are folded into `K` tables.
+- *Level 1.* With quartet masses, every quartet pattern once with the pair tables of its
+  two pairs; for a column read only by single-lane polynomials, by moments
+  `m_j[left] = sum_right M[left, right] L[right]^j` and the Taylor coefficients at
+  `L[left]` (one unreduced product per pattern and power). Direct pieces, and every piece
+  without masses, per item.
+- *Bind 1.* Coded lanes of columns with at most 4,096 quartet patterns (8 classes) become
+  quartet tables (when the octets outnumber the patterns), with Taylor tables of their
+  polynomials of degree 2 to 4 (coefficients 1 to 4 per entry, one 64-byte line); the
+  others keep the pair table and the second challenge.
+- *Level 2.* Per item: quartet tables (two reads per lane), Taylor tables (seven products
+  for a quartic), or the pair table folded on the fly.
+- *Bind 2.* Every lane is written into one row-major `K` table at an eighth of the domain
+  (row blocks filled lane by lane, after a parallel first touch); a quartic lane read only
+  by its polynomial is stored translated by `s = -c_3 / (4 c_4)` (Aerie's depressed
+  quartic: nine products per lane and pair instead of fourteen).
+- *Dense rounds* (level 3 on): per pair over the table; folds in place (Aerie's
+  `fold_rows_in_place`).
+- *Arithmetic.* From level 1 on, the constant coefficient of the inner polynomial is not
+  evaluated but recovered from the running claim, which is the group's own exact sum
+  (`claim / lift = scalar q(0) + l(1) (q(1) - q(0))`; `scalar` the equality factor's running
+  scalar, 2 without one). The last product of every coefficient is accumulated unreduced
+  (`mul_unreduced`), each item's coefficients are reduced once and contracted with the split
+  equality tables unreduced (Aerie's `sum_split_coefficients`). Products use a branch-free
+  `K` multiplication (`kernel::field::fm`, about 20% faster than `*` here).
 - `AGG_STAGE_TRACE=1` prints per group the message and fold time summed over the rounds,
   the per-round wall time, and the weight-table build times (`stage::prove_stage`,
   `prover::prove_with_tables`).
 
 Memory at `N = 2^15` (estimates, 16 bytes per `K` element): the first `K` tables appear
-after the second fold at a quarter of the domain, so stage 1's main-domain group holds
-`34 * 2^23 * 16 B = 4.6 GB`, stage 2 `(17 + 7) * 2^23 * 16 B = 3.2 GB`, stage 3
-`35 * 2^23 * 16 B = 4.7 GB` (half the former figures); the weight tables `w_1`, `w_A`
-are `512 MB` each. The bridge domains are at most `2^19` cells.
+after the third fold at an eighth of the domain, so stage 1's main-domain group holds
+`34 * 2^22 * 16 B = 2.3 GB` (one row-major table), stage 2 `17 * 2^22 * 16 B = 1.1 GB`,
+stage 3 `23 * 2^22 * 16 B = 1.5 GB` (half the figures of `50fc538`); before that the coded
+lanes cost one byte of pair code per pair of cells and group (`2^24` bytes per column at
+32K), the quartet masses at most `17 * 1 MiB` (stage 3) and the quartet and Taylor tables
+`80 KiB` per lane. The weight tables `w_1`, `w_A` are `512 MB` each. The bridge domains are at
+most `2^19` cells.
 
 ## 7. Stage table
 
@@ -283,7 +326,9 @@ PIOP and opening, framing included.
 
 `prover::prove(inputs, bridge, keccak, flock)` derives every witness (strict FIPS 204
 verification, `main_tables`) and calls `prove_with_tables`, which runs events 0 to 12:
-round-1 commitment, the Keccak commitments (`KeccakSide::commitments`), the bridge seed, the
+round-1 commitment and the Keccak commitments (`KeccakSide::commitments`) concurrently
+(`rayon::join`; `keccak` is `KeccakSide + Sync`; absorbed in event order, and each step's time
+is its own closure's, so the two overlap in wall time), the bridge seed, the
 matrices (`BridgeDerivation::matrices(sd)`, a `Cow` so fixed matrices are not copied),
 round 2, the Flock seeds, the final vectors and Flock proofs (`KeccakSide::prove`), `tau`,
 the pre-stage claims, the three stages with the weight tables built between them
@@ -419,6 +464,25 @@ build; the 1,024-signature round trip is ignored in debug builds):
   honest segment and rejecting a non-empty proof, a short item, a flipped bit (hash),
   `w_1' >= 44`, a changed `Y` bit (projection) and a changed `c~`; `check_bits` with a
   changed claim.
+- kernel (`src/kernel/tests.rs`, `coded.rs`, `field.rs`; Section 18): every evaluation
+  strategy (automatic; no coding; coded per item; quartet masses forced; pair masses only;
+  quartet tables forced, with and without Taylor tables; pair fold at level 2; without the
+  claim recovery, also with quartet tables) against an independent reference (full `K`
+  tables, the round polynomial from its definition at `d + 1` points over full equality
+  tables, interpolated), bit for bit in every message and terminal value and with the
+  terminal equation, on an equality group with every `Term` kind (Booleans, `RangeW1`, both
+  leaves of a digit, `A^lo A^hi`, links, reductions, a base-4 leaf on a five-class column, a
+  weightless affine form), a weight group (field, `i32` and materialized lanes, weighted
+  sums, a field-field product), a group with a tampered wide column, an `i32` lane and
+  cross-column products, the two-round prefix at `2^16` cells, and domains of 0 to 4
+  variables with and without lifted rounds; classes of digit columns under the square, leaf
+  and identity maps (8, 8, 16, and 17 for a tampered 9: not coded); pattern masses against
+  the serial sums in both accumulation layouts; quartet and Taylor tables against the folded
+  lanes and the shifted polynomial; the compiled pieces (source, folded, depressed, upper
+  coefficients) against the terms; the fast product against `*` on boundary and random
+  inputs; split and plain unreduced sums against nested sums; Taylor shifts; narrow and wide
+  parity tables (`tables.rs`). `profile_stage_groups` (ignored) prints per-round times of
+  stage-like groups (`AGG_PROFILE_VARS`, `AGG_PROFILE_POLICY`).
 - `tests/stages.rs` (256 signatures, 200 own keys, 56 on 3 shared keys): every stage-1 and
   stage-2 zero-check sums to zero and every level, `def_y1` and link claimed sum equals an
   independent dense evaluation (equality tables materialized, weights from their table
@@ -431,8 +495,10 @@ build; the 1,024-signature round trip is ignored in debug builds):
   changed level-1 carry digit, a flipped level-2 parity and a flipped `Y` bit fail at
   stage 1; base-4 and base-8 digits outside their alphabets pass stage 1 and fail at
   stage 2.
-- `tests/prove_verify.rs`: a full prover run at 256 signatures; the blob round-trips and
-  verifies from `(pk, M)` with and without cached keys; a shorter or reordered record
+- `tests/prove_verify.rs`: a full prover run at 256 signatures; the opening claims taken
+  from the stage-3 terminal values equal the evaluations of the committed tables at the
+  group points; the blob round-trips and verifies from `(pk, M)` with and without cached
+  keys; a shorter or reordered record
   list, a changed `c~`, other bridge matrices, another Flock profile, a changed round
   message (rejected at stage 2), a changed opening claim (stage 3), a changed pre-stage
   claim, a corrupted opening byte, a truncated commitment, a non-empty Keccak payload in
@@ -621,6 +687,9 @@ it by 16 and is the next step if measurements justify it (Section 17).
 
 ## 17. Measurements of the kernel rework
 
+(First step, `50fc538`. The second step, codes through three rounds and a dense table from
+the third fold, is Section 18; its measurements are in Section 18.3.)
+
 Same machine and build as Section 15 (7 threads, CLMUL build), tree `a735dff` plus the
 rework; full tables in `ref/notes/bench-local.md` (last section). Every aggregate is
 byte-identical to the one before the rework and verifies with the unchanged verifier.
@@ -652,3 +721,356 @@ the geometric tail of the later rounds; a third compact round would need Aerie's
 quartet-LUT approach with a cache-resident layout (the straightforward 1 MiB-per-lane
 lookup was slower, see the table). The `G_main` commitment (138 ms) and the opening
 (325 ms) are now a third of the non-Flock prover at `N = 1,024`.
+
+## 18. Kernel rework, second step: codes through three rounds (2026-10-24)
+
+Prover only: every message, terminal value and proof byte is unchanged (aggregates
+byte-identical to `7ed4a32` at 256 to 2,048 records, Section 18.3), so the transcript, the
+wire format (version 0) and the verifier are untouched.
+
+**Public API changes** (for code that uses `kernel` or the prover; all inside `agg-piop`):
+
+- `src/kernel.rs` is now the directory `src/kernel/` (`mod.rs` with the public items,
+  `plan.rs`, `coded.rs`, `field.rs`, `tests.rs`). Unchanged public items: `Source`,
+  `Lane::{column, mapped, len, is_empty, value, fold, terminal}`, `Lane::Source`,
+  `Lane::Folded`, `Term`, `LeafPoly`, `GroupInstance`, `Group::{new, claim, round_message,
+  bind, terminal_values, inactive_rounds, is_bucketed}`, `compress`, `evaluate_compressed`,
+  `inactive_message`, `inverse_power_of_two`, `expected_terminal`, `digit_map`,
+  `IDENTITY_MAP`. Removed: `Lane::Lookup` (it held a crate-private `Column` and could not be
+  built outside the kernel); `Lane` is now the input type only, the compact states live in
+  `Group`.
+- `tables::ProverTables::parity1` is a `tables::Parity1` (`Narrow([Vec<i8>; 6])` when every
+  parity fits an `i8`, as for an honest witness, `Wide([Vec<i32>; 6])` otherwise, with
+  `lane(t)` and `value(t, index)`) instead of `[Vec<i32>; 6]`.
+- `prover::prove` and `prover::prove_with_tables` take `keccak: &(impl KeccakSide + Sync)`
+  (every implementation in the workspace already is: `PublicBits`, `NoKeccak`,
+  `agg-cli`'s `FlockProver`, which holds its state in a `Mutex`).
+- `pcs::TableCommitter::open_claims(commitments, claims, session)`; `open` is kept.
+- `public_data::negacyclic_kernel_into(a, r, out, scratch)` (no allocation).
+
+### 18.1 What was implemented (handoff items)
+
+1. *Coding by lane maps* (item 1) as designed: classes of the present cells under the tuple
+   of the maps of the lanes on the column, at most 16; one byte of pair code per pair.
+2. *Pieces* (item 2): bucketed per column or joint column set; direct otherwise. Weighted
+   sums replace the keyed buckets (`Piece::Weighted`, `WeightConstant` are gone): every
+   `Affine` with a weight and every product of a field lane with another lane is one form
+   `w (sum c_l v_l + c)` per weight lane; in the first round its byte lanes are read through
+   per-byte tables `c_l map_l[byte]` (additions only), later its lanes absorb their
+   coefficients at the first fold. The virtual `Int` lane of the design was not needed: with
+   the per-byte tables and the absorbed coefficients the `w_A` and `w_1` groups cost about
+   seven products per pair at every level (synthetic profile below: 33 and 36 ms at
+   `2^21`, against 110 and 128 ms of message and fold time in the `50fc538` trace at
+   2,048).
+3. *Lane states* (item 3): `Source -> Pair -> Quartet | PairFold -> Dense`, plus `Table` for
+   uncoded lanes; `terminal_values` reads any state (domains of 0 to 3 variables end in a
+   compact state).
+4. *Rounds* (item 4): quartet masses with `remaining_eq_tables_after(1)` serve rounds 0 and 1;
+   level 2 reads quartet tables with Taylor tables. Departures: see 18.2.
+5. *Coefficient form* (item 5) everywhere, and two further reductions of the arithmetic: the
+   constant coefficient is recovered from the running claim from the second active round
+   on, and the last product of each coefficient is accumulated unreduced.
+6. *Narrow parities* (item 6) as designed (`tables::Parity1`); the stage-1 `D_1` group is now
+   bucketed.
+7. *Faster `K` product* (item 7): `kernel::field::fm`, four `64 x 64` products and two
+   branch-free reductions (`2^64 = 59`, `2^128 = 3481` modulo `p`); 7.4 ns against 9.4 ns for
+   `*` in a throughput loop on this machine (Aerie's `opening_field_ops::mul`: 7.7 ns), equal
+   to `*` on boundary and random inputs (`fast_product_matches_the_field_product`).
+8. *Opening and commitments*: (2a) the opening takes its claims from the stage-3 terminal
+   values (`TableCommitter::open_claims`; the recomputation is a debug assertion and a check
+   in `tests/prove_verify.rs`); (2b) `rayon::join` of the round-1 commitment and
+   `KeccakSide::commitments`, no change to `agg-cli` needed; (2c) the round-2 groups are
+   committed concurrently; (2d) no planner change (Section 16 of the handoff).
+9. *Weight table `w_A`* (not in the handoff; it was 73 ms of stage 3 at 2,048 after the
+   kernel work): the negacyclic transform of `ring_weight_table` is allocation-free (it
+   allocated two vectors per recursion node, about 2,000 per record) with one fold product
+   per butterfly output, the row weights are scaled by `eq(r2_sig, i)` once per record and
+   combined with the integer rows of `A` by base-field products: 73 to 36 ms at 2,048
+   (single traced runs).
+
+### 18.2 Where the implementation departs from the design, with the measured alternatives
+
+Synthetic stage-like groups at `2^21` cells (the main domain at `N = 2,048`;
+`kernel::tests::profile_stage_groups`, 7 threads, minimum of 3 runs, load average 1 to 3),
+total ms for the stage-1, stage-2 and stage-3 main equality groups:
+
+| Variant | Stage 1 | Stage 2 | Stage 3 |
+| --- | ---: | ---: | ---: |
+| first complete version (dense table filled by a serial `vec!`, Taylor tables with the constant) | 275 | 353 | 261 |
+| dense table filled in parallel row by row | 170 | 199 | 179 |
+| Taylor tables without the constant, claim recovery, dense table filled in lane-major row blocks | 145 | 175 | 165 |
+| unreduced accumulation of the last products | 132 | 156 | 154 |
+| level-1 patterns without divisions, wide masses with shared item weights, moments for polynomial-only columns | 128 | 149 | 132 |
+
+Measured and rejected (kept out of the code):
+
+- *Quartet tables for 16-class columns*: the stage-3 links (identity map) have `16^4`
+  quartet patterns, 1 MiB per lane; level 2 keeps the pair table and folds by the second
+  challenge on the fly. For 8-class columns the quartet table wins (one profile run, stage-2
+  level 2: 58 ms with quartet and Taylor tables, 86 ms with quartet tables only, 96 ms with
+  the pair fold).
+- *Dense table by one indexed parallel collect* (row-major, multiply-shift division by the
+  lane count, no zero fill): 49.5 ms for the stage-1 materialization against 31.6 ms for
+  lane-major row blocks after a parallel first touch, because each row touches every lane's
+  quartet table.
+- *Level 2 segment by segment over blocks of 256 items* (so each segment's tables stay in
+  cache): stage 1, 2, 3 level 2 at 33, 42, 42 ms against 25, 40, 36 ms item by item.
+- *Deferring the materialization to the fourth fold*: estimated from the single-thread
+  profile (bind 2 at 23 ns per cell, quartet reads plus two folds per lane and pair in
+  round 3) to save about 10 ms on stage 1 and to cost on stage 3 (pair-fold lanes); not
+  implemented.
+
+The bivariate prefix does apply to the 16-class stage-3 group from `N = 1,024` on (`2^18`
+quartets against `4 * 16^4`), contrary to the handoff's estimate (from 2,048); its masses are
+17 tables of 1 MiB accumulated one table per task (no replication), and round 1 reads them
+by moments (2.5 ms instead of 12 ms at `2^21`).
+
+### 18.3 Measurements
+
+This machine, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CLMUL build
+(`RUSTFLAGS="-C target-feature=+pclmulqdq" CARGO_TARGET_DIR=target/clmul`; the CLI with
+`--features agg-keccak/avx512,agg-piop/avx512`), 2026-10-24 16:53 to 16:56. "Before" is the
+binary of `7ed4a32` built at the start of this work (PIOP code of `50fc538`), "after" the
+tree with this section's changes; the two ran back to back, before first, medians of 5 timed
+runs after 1 warmup. Load average 2.8 at the start and 5.1 to 5.6 during the runs (the runs'
+own 7 threads included; no other job was visible). Every mode-B aggregate (256 to 2,048
+records) and the mode-A aggregates of 256 and 1,024 records (`agg aggregate`, same records)
+are byte-identical before and after.
+
+Mode B (`cargo bench -p agg-bench --bench mode_b -- 256 512 1024 2048 --warmup 1 --reps 5`),
+prover steps of the median run, ms:
+
+| `N` | Prove before / after | Stage 1 | Stage 2 | Stage 3 | Stages per signature | Opening | Round 1 (`G_main`) | Round 2 | Prover peak RSS (MiB) |
+| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 | 0.880 / 0.601 s | 104.0 / 44.5 | 213.1 / 60.7 | 120.5 / 56.7 | 1.71 / 0.63 ms | 218.6 / 220.2 | 36.5 / 36.1 | 161.4 / 155.8 | 294 / 302 |
+| 512 | 1.245 / 0.761 s | 177.9 / 72.5 | 319.7 / 82.5 | 208.4 / 90.9 | 1.38 / 0.48 ms | 255.2 / 242.2 | 67.8 / 67.5 | 170.0 / 155.9 | 437 / 449 |
+| 1,024 | 1.770 / 1.038 s | 276.6 / 99.6 | 440.6 / 127.0 | 340.9 / 152.1 | 1.03 / 0.37 ms | 306.8 / 272.8 | 138.2 / 135.2 | 181.5 / 163.3 | 809 / 668 |
+| 2,048 | 2.734 / 1.495 s | 442.1 / 176.9 | 776.3 / 229.1 | 601.0 / 244.5 | 0.89 / 0.32 ms | 383.0 / 311.3 | 182.4 / 192.1 | 180.1 / 173.2 | 1,343 / 1,125 |
+
+Stages 1-3 are 2.7x, 2.9x, 2.8x and 2.8x faster (256 to 2,048); the prover 1.46x to 1.83x. The
+opening is 19% faster at 2,048 (the 67 table evaluations are gone, 2a) and unchanged at 256,
+where Akita's `batched_prove` dominates. Round 2 is mostly the seeded matrices (P4); its
+concurrent commits save 6 to 18 ms. Verification is unchanged (174 / 183 / 213 / 260 ms
+uncached before, 173 / 196 / 201 / 256 ms after). The prover's peak falls at 1,024 and 2,048
+because the first `K` tables are an eighth of the domain instead of a quarter.
+
+Per round, one traced run after one warmup (`AGG_STAGE_TRACE=1`, prover child), ms, round 0
+first:
+
+| `N`, stage | Before (`50fc538` profile, Handoff) | After |
+| --- | --- | --- |
+| 1,024, stage 1 | `10 92 59 25 16 9 13 8 15 8 4 2 1 1` | `7 1 31 11 6 4 3 4 5 3 2 1 0` |
+| 1,024, stage 2 | `17 116 118 61 37 19 13 12 31 16 8 4 2 1 1` | `16 5 32 17 11 7 4 7 8 5 2 1 1` |
+| 1,024, stage 3 | `22 143 57 32 16 9 10 9 17 8 4 2 1 1` | `15 5 40 12 7 5 3 5 6 4 2 1 0` |
+| 2,048, stage 1 | `21 140 113 48 28 17 19 11 8 15 8 4 2 1 1` | `13 1 58 19 10 6 4 4 5 5 3 2 1` |
+| 2,048, stage 2 | `34 162 226 115 62 30 22 22 15 31 16 8 4 2 1 1` | `20 7 61 34 20 10 7 8 6 9 5 2 1 1` |
+| 2,048, stage 3 | `42 198 112 66 36 17 13 13 8 17 9 4 2 1 1` | `28 8 83 24 12 8 6 5 6 6 4 2 1` |
+
+Round 1 now costs 1 to 8 ms (quartet masses from round 0); round 2 (level 2 and the
+materialization at bind 2) is the largest round of every stage, then the first dense round.
+Per group at 2,048 (message / bind summed over the rounds, before -> after, ms): stage 1
+main `eq(tau)` 272 / 124 -> 66 / 56, `D_1 eq(tau)` (now coded parities) 19 / 3 -> 4 / 2;
+stage 2 main `eq(r^(1))` 516 / 49 -> 112 / 30, main `w_1` 78 / 32 -> 18 / 15; stage 3 main
+`eq(r^(2))` 244 / 64 -> 76 / 44, main `w_A` 110 / 18 -> 20 / 18, main `eq(r^(1))` 23 / 29 ->
+11 / 10. Weight tables at 2,048: `w_A` 77 -> 33 ms (item 9), `w_1` 9 -> 8 ms, parities
+(`agg_bridge::parity`, not this crate) 19 -> 20 ms.
+
+Mode A (`agg bench --count 1024 --warmup 1 --reps 5`): prove 3.140 -> 2.374 s (min 3.115 ->
+2.361 s); stages 258 / 449 / 361 -> 100 / 129 / 141 ms; opening 309 -> 297 ms; the `G_main`
+commitment (137 -> 183 ms) now runs concurrently with the Flock commitment (183 -> 249 ms,
+both slower when they share the cores), and the listed steps add up to 171 ms more than the
+total, the overlap; Flock parts 1.300 -> 1.375 s (commit included), everything else 1.840 ->
+0.999 s; verify 272 / 243 -> 283 / 263 ms (verifier unchanged; noise); prover peak RSS 1,699
+-> 1,672 MiB; aggregate 717,641 B before and after.
+
+Against the goals: stages 1-3 are 2.8x faster at 1,024 and 2,048 (target about 2x), 0.32 ms
+per signature at 2,048 on 7 threads. At 32K this extrapolates to about 10 s of stages on this
+machine and, with the cloud-to-local ratio of the `50fc538` runs (13.4 s measured against
+29 s extrapolated), about 5 s on the cloud VM (estimates, not measured; Aerie's stages take
+0.60 s there). Per committed element that is about 6.5 ns on the cloud VM at 32K
+(estimate) against Aerie's 12 ns.
+
+## Handoff (2026-10-24)
+
+State of the working tree: clean at `50fc538`; nothing was edited yet (the baseline
+build in `target/clmul` is current, the workspace tests of `50fc538` pass as recorded in
+Section 14). Everything below is the profile taken for the next kernel step, the design
+decided from it, and the implementation order. Raw logs are in the session scratchpad
+only (`bench/baseline-*.log`, `bench/trace-baseline.log`).
+
+### Done: profile of `50fc538` (CLMUL build, 7 threads, load average 0.7 to 3.7)
+
+Mode B, `cargo bench -p agg-bench --bench mode_b -- N --warmup 1 --reps 5`
+(`RUSTFLAGS="-C target-feature=+pclmulqdq" CARGO_TARGET_DIR=target/clmul`,
+`RAYON_NUM_THREADS=7`), medians of 5, prover steps in ms:
+
+| `N` | Prove | tables | round 1 (`G_main`) | round 2 (matrices etc.) | stage 1 | stage 2 | stage 3 | opening |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 0.903 s | 20 | 36 | 158 | 105 | 204 | 125 | 249 |
+| 512 | 1.272 s | 45 | 72 | 199 | 165 | 337 | 188 | 257 |
+| 1,024 | 1.833 s | 77 | 137 | 189 | 257 | 450 | 359 | 356 |
+| 2,048 | 2.824 s | 159 | 189 | 186 | 445 | 753 | 665 | 413 |
+
+Round 2 is the seeded matrix derivation (P4, about 150 ms, not a PIOP cost). The
+`AGG_STAGE_TRACE=1` output of the mode-B bench is swallowed by the driver (`Command::output`
+captures the prover child's stderr); run the prover child directly:
+`target/clmul/release/deps/mode_b-<hash> --prover-child N --warmup 0 --prove-runs 1
+--verify-runs 1 --shared N/32`. Per round at `N = 2,048` (ms, round 0 first):
+stage 1 `21 140 113 48 28 17 19 11 8 15 8 4 2 1 1`, stage 2 `34 162 226 115 62 30 22 22 15
+31 16 8 4 2 1 1`, stage 3 `42 198 112 66 36 17 13 13 8 17 9 4 2 1 1`; at 1,024: stage 1
+`10 92 59 25 16 9 13 8 15 8 4 2 1 1`, stage 2 `17 116 118 61 37 19 13 12 31 16 8 4 2 1 1`,
+stage 3 `22 143 57 32 16 9 10 9 17 8 4 2 1 1`. Per group at 2,048 (message / bind, ms):
+stage 1 main `eq(tau)` 268 / 124, `D_1 eq(tau)` (generic: `Ints` parity lanes) 19 / 3;
+stage 2 main `eq(r1)` 536 / 45, main `w_1` 80 / 32; stage 3 main `eq(r2)` 246 / 71, main
+`w_A` 108 / 18, main `eq(r1)` 28 / 30; bridge-domain groups 1 to 15 ms each.
+
+Reading: round 1 (quartet buckets, 65,536 patterns per digit column under the raw
+coding) is the largest or second-largest round in every stage. Its cost is not the
+arithmetic (about 15 ms of per-pattern work) but the bucket tables: `bucketed_evaluations`
+builds one `Sums` of 14 x 65,536 x 16 B = 14.7 MB per rayon split and `reduce(zeroed,
+add)` zeroes and adds a fresh table per split (about 16 tables = 235 MB memset + 118 MB
+adds at 2,048). Round 2 (first generic round over the materialized `K` lanes at a quarter
+of the domain) costs 17 lanes x 5 points x 4 Horner multiplications = 340 `K`
+multiplications per pair in stage 2 (3.5 us per pair), plus the materializing fold at the
+end of round 1 (34 lanes x 2^19 x 16 B = 285 MB written in stage 1). The dense tail from
+round 3 on is 160 / 330 / 190 ms per stage at 2,048, i.e. as large as rounds 0-2 together
+after the prefix below is in place. Per committed element the stages cost 17 ns at 32K
+(13.4 s / (32,768 x 23,552)) against Aerie's 12 ns (0.60 s / (32,768 x 1,536)): the
+remaining gap to Aerie's absolute figure is mostly the 15x element count of the layout
+(Section 16.1), so the realistic kernel target is about 2x on stages 1-3.
+
+### Design (prover only; every path computes the same polynomials, proof bytes unchanged)
+
+Aerie's kernels (`aerie-prover/src/protocol/kernels/{quartic,product,range_source}_kernel.rs`,
+`kernel_common.rs`) keep the `i8` sources through three active rounds: round 0 buckets
+quartet masses with the round-1 equality weights and serves rounds 0 and 1 from them
+("bivariate prefix"), round 2 reads a quartet lookup table (folded values of every
+quartet pattern) and expands the terms with Taylor coefficients, and only the third bind
+materializes `K` lanes at an eighth of the domain. Pattern spaces use the range image
+`z(z + 1)` (8 classes for a base-16 digit). The plan for `kernel::Group`:
+
+1. *Column coding by lane maps.* A column's code is the class of its cell under the tuple
+   of the maps of the bucketable lanes reading it (`lo_map`, `hi_map`, `square_map` all
+   factor through `z(z+1)`, so stages 1 and 2 get 8 codes per digit column, bits 2; stage
+   3's links read the identity map, 16 codes). `Column { cells, code: [u8; 256], reps:
+   Vec<i8>, pair_bits }`; a column with more than 16 classes is not coded. Coding must be
+   by lane *map value*, never by the composed polynomial: `v(v+1)` at the pair `(3, -4)`
+   and at `(3, 3)` are different polynomials in the round variable.
+2. *Pieces.* Compile as now into per-lane polynomials, same-column bilinears, joint generic
+   terms (bucketable when all their lanes are coded) and *direct* pieces evaluated per
+   item at every level: every `Term::Affine` becomes `gamma [* w] *` a virtual integer
+   lane `Lane::Int { parts: (column, map, i64 coefficient), constant, challenges }` (value
+   at level `a` = fold of `2^a` consecutive `i64` cell values by the stored challenges,
+   `E::mul_base` for the first level); bilinears with a `Field` weight lane or across two
+   columns, and polynomials on non-coded lanes, are direct as well. Keyed buckets
+   (`Piece::Weighted`, `WeightConstant`) disappear: the `w_A * z` and `w_1 * b_t` pieces
+   cost about 7 `K` multiplications per pair directly and no bucket memory. A group is
+   never "all generic" any more; only its direct pieces take the per-item pass.
+3. *Lane states.* `Source -> Lookup {pair LUT, n^2} -> Quartet {quartet LUT, 2^(2 pair_bits)}
+   -> Folded` (materialized at 1/8 of the domain). LUTs carry the first-fold scale, as now;
+   `Int` lanes are not scaled. `terminal()` works in any state (domains of 1 or 2
+   variables end as `Lookup`/`Quartet`).
+4. *Rounds.* Level 0: if `quartets >= BUCKET_MIN_RATIO * max pattern space` (and at least
+   two active rounds) accumulate quartet masses per pure column and joint term with the
+   round-1 equality tables (`GruenSplitEq::remaining_eq_tables_after(1)`, exists at Akita
+   `e023b6a`), using Aerie's `chunked_bucket_sums` shape (exactly `min(threads, items /
+   width)` contiguous chunks, one table each, block-parallel reduction), and derive the
+   round-0 polynomial as `l0 * sum_q M_q F(pair p0 of q) + l1 * sum_q M_q F(pair p1 of q)`
+   with `l0 = 1 - tau_1, l1 = tau_1` (`tau_1` = the local eq point's second coordinate;
+   both 1 for weight groups); keep the masses. Level 1: from the kept masses with the pair
+   LUT values (`F(lut[p0] + X (lut[p1] - lut[p0]))`), no pass over the data. Otherwise
+   pair masses at level 0 (as today) and per-item at level 1. Level 2: one pass over
+   octets; each coded lane's `(left, right)` are two quartet-LUT reads; lane polynomials
+   of degree >= 2 on columns with at most 4,096 quartet patterns use a Taylor table built
+   at the second bind (`(d + 1)` coefficients per LUT entry, so a lane costs `2d - 1`
+   multiplications per octet instead of `d * points`), larger ones the shift below.
+   Levels >= 3: per pair over `Folded` lanes.
+5. *Coefficient form everywhere.* Pieces return the coefficient vector of the inner
+   polynomial `q(X)` (a small fixed-size `Poly`) instead of evaluations at `points`
+   points; a lane polynomial of degree `d` at `u + delta X` by Taylor shift (synthetic
+   division, `d(d+1)/2` multiplications, then `delta` powers): 14-17 for `d = 4` against
+   20, 5-6 for `d = 2` against 6; bilinears 3-4; joint terms by `Poly` arithmetic. The
+   message is `UnivariatePoly::new(coefficients)` then `gruen_mul` as now (exact, so
+   identical to `from_evals`). `direct_claim` of lifted groups uses `q(0) + q(1)` from the
+   same coefficients and caches the level-0 result so the first active round does not
+   repeat the pass.
+6. *Parity lanes as `i8`.* `ProverTables::parity1` becomes narrow (`Vec<i8>`) when every
+   value fits, else the `i32` fallback (`Source::Ints`, uncoded, direct). Then the stage-1
+   `D_1 eq(tau)` group (30 lanes, generic today) is bucketable; it matters at 32K
+   (`D_1 = 2^19`). Public type change of `tables.rs`; note it here when done.
+7. Optional: a faster `K` multiplication (Aerie's `opening_field_ops::mul`, 4 `u128`
+   products and two `reduce130` steps; `pub(crate)` in Aerie, so copy it and test against
+   `*` on random inputs; `Prime64Offset59::solinas_reduce` and `to_limbs` are public in
+   jolt-field `c7c2d08`).
+
+Memory: quartet masses per chunk = sum over pure columns of `2^(2 pair_bits) * 16 B`
+(stage 2 main: 17 x 64 KB; stage 3 main: 17 x 1 MiB, 125 MB over 7 chunks; the bivariate
+threshold `quartets >= 4 * 65,536` holds from `N = 2,048` on for the stage-3 group), the
+quartet LUTs 1 MiB per 16-code lane, and the materialized lanes at 1/8 of the domain
+(stage 1 at 32K: 2.3 GB instead of 4.6).
+
+Expected (estimates from the per-round costs above, at `N = 2,048`): stage 1 about 200 ms
+(from 445), stage 2 about 350 (from 753), stage 3 about 250 (from 665); the dense tail
+then dominates, where only fewer multiplications per lane (item 5, Aerie's unreduced
+`sum_split_coefficients` accumulation) remain.
+
+Goal (2), commit and opening (`G_main` 189 ms, opening 413 ms at 2,048): (a) the opening
+recomputes the 67 claims with `evaluate_signed_table` (one streaming pass per column,
+about 50-70 ms at 2,048 on 7 threads) although they equal the stage-3 terminal values the
+prover already has and checks against; take the claims from `stage3.claims` and keep the
+recomputation as a debug assertion or test; (b) in mode A, run `commit_round1` and
+`keccak.commitments(segments)` under `rayon::join` (both precede `sd`; absorb in event
+order afterwards; Aerie commits its groups in a parallel fan-out because an Akita commit
+is memory-bound and does not scale across threads); (c) `commit_round2` can commit `G_1,
+G_2, G_3` in parallel (the final group needs only the plan's profiles); (d) the catalog
+rows are planned under `policy_of::<Cfg>()` (proof-size objective, `akita-config`); there
+is no prover-time objective to switch to, and the opening's 200 ms fixed part at 256
+records is Akita's `batched_prove`, so no planner change is proposed. None of (a)-(c)
+changes a byte of the proof.
+
+### Next steps, in order
+
+1. Rewrite the internals of `crates/agg-piop/src/kernel.rs` per the design (keep the
+   public items `Source`, `Lane` constructors, `Term`, `LeafPoly`, `GroupInstance`,
+   `Group::{new, claim, round_message, bind, terminal_values, inactive_rounds,
+   is_bucketed}`, `compress`, `evaluate_compressed`, `inactive_message`,
+   `inverse_power_of_two`, `expected_terminal`, `digit_map`, `IDENTITY_MAP`; `Lane::Lookup`
+   changes shape and gains `Quartet`/`Int` variants, used only inside the kernel). Adapt
+   the kernel tests and add: coding classes (8 per digit column under `lo`/`hi`/`square`
+   maps, 16 under the identity), bivariate masses vs generic path vs definition on random
+   tables with every `Term` kind (bit-exact messages and terminals), quartet-LUT and
+   octet rounds vs generic, `Int` lanes vs the affine `Term`, Taylor tables vs the shift,
+   domains of 1, 2 and 3 variables, the `i32` parity fallback, the wide-cell fallback.
+2. `tables.rs`: narrow parity tables (item 6); `prover.rs`: opening claims from stage 3
+   (2a), `rayon::join` of round 1 and the Keccak commitments (2b); `pcs.rs`/`commit.rs`:
+   parallel round 2 (2c).
+3. `taskset -c 0,1,3-15 cargo test --release --workspace` (RUSTUP_TOOLCHAIN=stable), then
+   confirm byte-identical aggregates against `50fc538` (the mode-B bench prints the sizes;
+   `tests/mode_b.rs` and `tests/prove_verify.rs` verify with the unchanged verifier).
+4. Measure: mode B at 256, 512, 1,024, 2,048 (`--warmup 1 --reps 5`) and the prover child
+   with `AGG_STAGE_TRACE=1` at 1,024 and 2,048; mode A at 1,024 (`target/clmul/release/agg
+   bench --count 1024 --warmup 1 --reps 5`, built with `--features
+   agg-keccak/avx512,agg-piop/avx512` as in bench-local.md); report the load average.
+5. Docs: update Sections 6 and 17 of this file (round schedule, memory, measured per-round
+   table), `docs/deviations.md` P12 (extend, no new wire change), `docs/pcs-config.md`
+   Section 5 if the commit driver changes, append a section to `ref/notes/bench-local.md`
+   and update the PIOP items of `ref/notes/status.md` (Section 3 row and open problem 4).
+
+### Progress (kernel rework, second agent; updated after each step)
+
+- Step 1 (kernel): done; `src/kernel/` per Section 18 (API notes there). Kernel tests compare
+  every strategy against an independent reference bit for bit.
+- Step 2: done; `tables::Parity1` (item 6), opening claims from stage 3 (2a), `rayon::join` of
+  the round-1 and Keccak commitments (2b, no `agg-cli` edit needed), concurrent round-2
+  commits (2c), no planner change (2d); plus the allocation-free `w_A` table (Section 18.1
+  item 9).
+- Step 3: done. `taskset -c 0,1,3-15 cargo test --release --workspace`: 261 passed, 0 failed,
+  10 ignored (`agg-piop` 88 and 3); mode-B aggregates at 256 to 2,048 and mode-A aggregates
+  at 256 and 1,024 records byte-identical to `7ed4a32`.
+- Step 4: done (Section 18.3; `ref/notes/bench-local.md`, last section).
+- Step 5: done (Sections 1, 3, 6, 11, 14, 17, 18; deviations P12; pcs-config Section 5;
+  bench-local.md; the PIOP items of status.md).
+- Open: the 32K cloud run of this step; the third active round and the materialization at
+  the third fold are the largest rounds (deferring the materialization one fold is the
+  next candidate, Section 18.2); `agg_bridge::parity` (20 ms at 2,048) and the matrices
+  (P4, about 150 ms) are outside this crate.

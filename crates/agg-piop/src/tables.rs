@@ -1,10 +1,11 @@
 //! The prover's narrow tables and the lanes the stages read from them.
 //!
 //! [`ProverTables`] borrows the committed `i8` columns of both rounds, materializes the
-//! level-1 parities `y^(1)_t` (small integers on `D_1`) and holds the public weight tables
-//! once they are known (`w_2, w_{3,t}` after `tau`; `w_1` after `r^(1)`; `w_A` after
-//! `r^(2)`). Every [`LaneId`] resolves to a [`Lane`] over the narrow source; the stage
-//! drivers lift to `K` only inside the first fold.
+//! level-1 parities `y^(1)_t` (`i8` when every value fits, as for an honest witness whose
+//! parities are bits; `i32` otherwise) and holds the public weight tables once they are
+//! known (`w_2, w_{3,t}` after `tau`; `w_1` after `r^(1)`; `w_A` after `r^(2)`). Every
+//! [`LaneId`] resolves to a [`Lane`] over the narrow source; the stage drivers lift to `K`
+//! only inside the kernel's compact rounds.
 
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::params::W1_BITS;
@@ -19,12 +20,59 @@ use crate::virtual_polys::parity1_tables;
 use crate::weights::{level1_weight_table, level2_weight_table, level3_weight_tables, ring_weight_table};
 use crate::OpeningField as E;
 
+/// The level-1 parities `y^(1)_t` on `D_1`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Parity1 {
+    /// Every value fits an `i8` (the honest parities are bits): coded byte lanes.
+    Narrow([Vec<i8>; W1_BITS]),
+    /// Some value does not fit an `i8` (a tampered witness): `i32` lanes.
+    Wide([Vec<i32>; W1_BITS]),
+}
+
+impl Parity1 {
+    /// The narrow tables when every value of `tables` fits an `i8`, else the wide ones.
+    #[must_use]
+    pub fn from_values(tables: [Vec<i64>; W1_BITS]) -> Self {
+        if tables
+            .iter()
+            .all(|table| table.iter().all(|&y| i8::try_from(y).is_ok()))
+        {
+            Self::Narrow(tables.map(|table| table.into_iter().map(|y| y as i8).collect()))
+        } else {
+            Self::Wide(tables.map(|table| {
+                table
+                    .into_iter()
+                    .map(|y| i32::try_from(y).expect("parity fits i32"))
+                    .collect()
+            }))
+        }
+    }
+
+    /// The lane of `y^(1)_t`.
+    #[must_use]
+    pub fn lane(&self, t: usize) -> Lane<'_> {
+        match self {
+            Self::Narrow(tables) => Lane::column(&tables[t]),
+            Self::Wide(tables) => Lane::Source(Source::Ints(&tables[t])),
+        }
+    }
+
+    /// The value of `y^(1)_t` at `index`.
+    #[must_use]
+    pub fn value(&self, t: usize, index: usize) -> i64 {
+        match self {
+            Self::Narrow(tables) => i64::from(tables[t][index]),
+            Self::Wide(tables) => i64::from(tables[t][index]),
+        }
+    }
+}
+
 /// The prover's tables.
 pub struct ProverTables<'a> {
     /// Both rounds' committed columns.
     pub tables: SourceTables<'a>,
     /// `y^(1)_t` on `D_1`.
-    pub parity1: [Vec<i32>; W1_BITS],
+    pub parity1: Parity1,
     /// `w_1` on the main domain (after `r^(1)`).
     pub w1: Option<Vec<E>>,
     /// `w_2` on `D_1` (after `tau`).
@@ -39,13 +87,7 @@ impl<'a> ProverTables<'a> {
     /// Materialize the parities of the committed bits under the bridge matrices.
     #[must_use]
     pub fn new(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
-        let parities = parity1_tables(tables, &matrices.m1);
-        let parity1 = parities.map(|table| {
-            table
-                .into_iter()
-                .map(|y| i32::try_from(y).expect("parity fits i32"))
-                .collect()
-        });
+        let parity1 = Parity1::from_values(parity1_tables(tables, &matrices.m1));
         Self {
             tables,
             parity1,
@@ -89,7 +131,7 @@ impl<'a> ProverTables<'a> {
             LaneId::DigitSquare(c) => Lane::mapped(column(c), square_map()),
             LaneId::DigitLo(c) => Lane::mapped(column(c), lo_map()),
             LaneId::DigitHi(c) => Lane::mapped(column(c), hi_map()),
-            LaneId::Parity1(t) => Lane::Source(Source::Ints(&self.parity1[usize::from(t)])),
+            LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
             LaneId::Weight(WeightId::Level1) => {
                 Lane::Source(Source::Field(self.w1.as_deref().expect("w_1 after r^(1)")))
             }
@@ -101,6 +143,36 @@ impl<'a> ProverTables<'a> {
             )),
             LaneId::Weight(WeightId::Ring) => {
                 Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)")))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jolt_field::Ring;
+
+    #[test]
+    fn parities_are_narrow_when_every_value_fits_and_wide_otherwise() {
+        let bits: [Vec<i64>; W1_BITS] =
+            std::array::from_fn(|t| (0..64).map(|i| ((i + t) % 2) as i64).collect());
+        let narrow = Parity1::from_values(bits.clone());
+        assert!(matches!(narrow, Parity1::Narrow(_)));
+        assert!(matches!(narrow.lane(3), Lane::Source(Source::Bytes { .. })));
+        let mut tampered = bits.clone();
+        tampered[2][7] = 300;
+        let wide = Parity1::from_values(tampered);
+        assert!(matches!(wide, Parity1::Wide(_)));
+        assert!(matches!(wide.lane(2), Lane::Source(Source::Ints(_))));
+        assert_eq!(wide.value(2, 7), 300);
+        for (t, table) in bits.iter().enumerate() {
+            for (i, &y) in table.iter().enumerate() {
+                assert_eq!(narrow.value(t, i), y);
+                assert_eq!(narrow.lane(t).value(i), E::from_i64(y));
+                if (t, i) != (2, 7) {
+                    assert_eq!(wide.lane(t).value(i), E::from_i64(y));
+                }
             }
         }
     }
