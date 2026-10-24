@@ -21,6 +21,7 @@
 pub mod binding;
 pub mod claims;
 pub mod kernel;
+pub mod lookup;
 pub mod manifest;
 pub mod mode_b;
 pub mod opening;

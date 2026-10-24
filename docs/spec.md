@@ -471,6 +471,29 @@ M1: witness, presets, catalogs, unit tests. M2: algebraic PIOP end to end with t
 12. **Two Akita commitment rounds** (Section 10): round 1 before $`\mathsf{sd}`$, round 2 (the seed-dependent carries and parities) after it, under one contract (Akita 4.6).
 13. **Composite GF(2) rows** (Section 8): Flock's lincheck is per block and its witness precedes the statement binding, so one bridge slot per segment proves $`M_3M_2M_1b'=Y_\sigma`$ directly.
 
+## Appendix C. Lookup range layout L16 (proposal, not normative)
+
+Status: PROPOSAL pending integration and a PCS catalog; nothing in Sections 1 to 14 changes until it is adopted. Design, soundness, costs and the standalone prototype (`crates/agg-piop/src/lookup.rs`): `docs/lookup.md`.
+
+**Layout.** Per position 12 committed columns instead of 23: $`z+2^{17}=z_{\rm lo}+2^{16}z_{\rm hi}`$, $`u+2^{18}=u_{\rm lo}+2^{16}u_{\rm hi}`$, $`v+2^{31}=v_{\rm lo}+2^{16}v_{\rm hi}`$ and $`b_0,\ldots,b_5`$. The four 16-bit values and every bridge carry ($`\kappa^{(1)}_t,\kappa^{(2)}_t,\kappa^{(3)}`$, one column each) are looked up in the single table $`T_{16}=[0,2^{16})`$; $`z_{\rm hi}\in[0,4)`$ and $`u_{\rm hi}\in[0,8)`$ keep the base-4 and base-8 leaves and links of Section 4.3. Stored values are balanced ($`Z_{\rm lo}=z_{\rm lo}-2^{15}`$ and likewise for $`u_{\rm lo},v_{\rm lo},v_{\rm hi}`$; $`Z_{\rm hi}=z_{\rm hi}-2`$, $`U_{\rm hi}=u_{\rm hi}-4`$), so (4.1) reads $`X=X_{\rm lo}+2^{16}X_{\rm hi}+2^{15}`$ for $`X\in\{z,u,v\}`$. Proven ranges: $`z\in[-2^{17},2^{17})`$, $`u\in[-2^{18},2^{18})`$ (relation $`\mathrm H(2^{17},2^{18})`$ unchanged), $`v\in[-2^{31},2^{31})`$ (enough for (6.1): $`|\Delta^{\mathbb Z}|\lt2^{54.1}\lt p/2`$), carries in $`[0,2^{16})`$ (enough for (9.2), `docs/bridge.md` Section 4). Committed elements per signature at $`N=2^{15}`$: 12,288 main, 96 on $`D_1`$, 12 on $`D_2`$, 0.5 on $`D_3`$, 14 multiplicity digits: 12,410.5 (was 23,865).
+
+**Argument.** LogUp (ePrint 2022/1530, Lemma 5) with the GKR fractional sum-check (ePrint 2023/1284): after the commitments of all looked-up columns and of the multiplicity column $`m`$ of $`T_{16}`$ (seven balanced base-16 digit polynomials, width 4, no alphabet check), the verifier samples $`X_1,X_2\in K`$ and checks $`\sum_i1/(X_j-g_i)=\sum_tm(t)/(X_j-t)`$ for $`j=1,2`$ through top-aligned fraction trees: one batched degree-3 sum-check per layer, $`\sum_{s=2}^{D}(s-1)`$ rounds with $`D=d_{\rm main}+2`$. Final claims: one evaluation of each stacked lane, reduced to $`r^{(3)}`$ by four new stage-3 instances, and $`m`$ at its own point (its own Akita group). The lookup sessions run as a new stage before stage 1.
+
+**Ledger rows (Section 12.1), at $`d_{\rm main}=25`$:**
+
+| Component | Term |
+| --- | --- |
+| LogUp identity, two independent challenges | $`\bigl((L+2^{16}-1)/(|K|-2^{16})\bigr)^2\approx2^{-201.9}`$, $`L=138{,}690{,}560`$ looked-up cells |
+| (one challenge, for comparison) | $`\approx2^{-101.0}`$; needs a 28-bit work nonce, above Akita's 25-bit cap |
+| GKR sessions (rounds, batching, merges) | $`(3D(D-1)/2+2(D-1)+1)/|K|=1{,}106/|K|`$ |
+| Zero-checks at $`\tau`$ | $`19\,d_{\rm main}/|K|`$ (the 40 `b16_prod` removed) |
+| Range leaves and links | $`4\,d_{\rm main}/|K|`$ (2 leaves, 2 links) |
+| Linear identities | $`(13+1+6+1+41)\,d_{\rm main}/|K|`$ (25 carry-digit reductions removed, 4 lookup reductions added) |
+
+The field terms then sum to $`3{,}534/|K|\lt2^{-116.2}`$ (was $`7{,}603/|K|`$). Extraction: every looked-up cell is an entry of $`T_{16}`$ as an integer, and (4.1) gives the ranges above. The multiplicities need no range (Lemma 5 holds for any $`m\in\mathbb F_p`$ when $`p\gt L`$).
+
+**Open before adoption:** a signed width-16 Akita preset and catalog rows for the split groups (width-16 and width-4 groups on the main domain, $`G_m`$ on $`2^{16}`$ cells); the choice between two challenges and a work nonce; the measured end-to-end cost (`docs/lookup.md` Section 4).
+
 ## Review responses (2026-10-24)
 
 Findings of the first review and their resolution; none is rebutted in substance.
