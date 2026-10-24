@@ -17,6 +17,7 @@ use agg_bridge::{seed::derive_matrices_for, shape::Shape};
 use agg_keccak::prover::{KeccakCommitment, KeccakError, KeccakProof, Profile};
 use agg_keccak::{
     bridge_slot::pack_y,
+    flock_union::UnionProof,
     sponge::{self, SpongeRecord, W1_INPUT_BASE},
     tied::{TiedCommitment, TiedPart},
     witness::pack_slot,
@@ -96,7 +97,7 @@ struct Run {
     sd: [u8; 32],
     mats: Arc<BridgeMatrices>,
     fs: [u8; 32],
-    y: Vec<u8>,
+    ys: Vec<Vec<u8>>,
     proof: KeccakProof,
 }
 
@@ -110,7 +111,15 @@ struct Ctx<'g> {
 
 impl Ctx<'_> {
     fn verify(&self, r: &Run) -> Result<(), KeccakError> {
-        self.verify_with(r, &self.mu, &self.c_tilde, &r.commitment, r.sd, &r.y, &r.fs)
+        self.verify_with(
+            r,
+            &self.mu,
+            &self.c_tilde,
+            &r.commitment,
+            r.sd,
+            &r.ys,
+            &r.fs,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -121,7 +130,7 @@ impl Ctx<'_> {
         c: &[[u8; 32]],
         com: &TiedCommitment,
         sd: [u8; 32],
-        y: &[u8],
+        ys: &[Vec<u8>],
         fs: &[u8; 32],
     ) -> Result<(), KeccakError> {
         let mats = if sd == r.sd {
@@ -129,17 +138,20 @@ impl Ctx<'_> {
         } else {
             Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd))
         };
-        self.part.verify(mu, c, com, sd, &mats, y, fs, &r.proof)
+        self.part.verify(mu, c, com, sd, &mats, ys, fs, &r.proof)
     }
 
     /// Commit `sponge` and `bits` (event 2), derive `sd` and `fs` from the commitment, and
-    /// prove with the honest blocks changed by `tamper` and the chosen share.
+    /// prove with the honest blocks changed by `tamper` and the chosen share. With `refill`
+    /// the levels-2-3 output columns are recomputed from the (tampered) inputs, so the
+    /// composite rows hold; otherwise they keep the honest blocks' values.
     fn run(
         &self,
         sponge: agg_keccak::witness::SlotBuffers,
         bits: Vec<u64>,
         tamper: &dyn Fn(&mut agg_keccak::bridge_union::BridgeBlocks),
         share: Share,
+        refill: bool,
     ) -> Run {
         let committed = self.part.commit_parts(sponge, bits, &self.records);
         let commitment = committed.commitment().clone();
@@ -149,6 +161,9 @@ impl Ctx<'_> {
         let honest = self.part.honest_blocks(&committed, &mats);
         let mut blocks = honest.clone();
         tamper(&mut blocks);
+        if refill {
+            self.part.bridge().fill_outputs(&mats, &mut blocks);
+        }
         let source = if matches!(share, Share::Stale) {
             &honest
         } else {
@@ -160,13 +175,13 @@ impl Ctx<'_> {
         }
         let proof = self
             .part
-            .prove_with_blocks(committed, sd, &mats, blocks, y.clone(), &fs);
+            .prove_with_blocks(committed, sd, &mats, blocks, vec![y.clone()], &fs);
         Run {
             commitment,
             sd,
             mats,
             fs,
-            y,
+            ys: vec![y],
             proof,
         }
     }
@@ -217,7 +232,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         sd,
         mats: mats.clone(),
         fs,
-        y: out.final_vector.clone(),
+        ys: out.final_vectors.clone(),
         proof: out.proof.clone(),
     };
     let t3 = Instant::now();
@@ -229,19 +244,19 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let lanes = main_domain_lanes(&ctx.records, geom.main_len());
     let b: [&[i8]; 6] = std::array::from_fn(|t| lanes[t].as_slice());
     assert_eq!(
-        out.final_vector,
-        gf2_composite(&geom, &b, &mats),
+        out.final_vectors,
+        [gf2_composite(&geom, &b, &mats)],
         "Y of both sides"
     );
-    assert_eq!(pack_y(&out.final_vector).len(), 512);
+    assert_eq!(pack_y(&out.final_vectors[0]).len(), 512);
 
     let cost = part.cost();
-    // Proof layout: header (13), then framed bridge cap, sponge proof, bridge union proof.
+    // Proof layout: header (14), then framed bridge cap, sponge proof, bridge union proof.
     let framed =
         |at: usize| u32::from_le_bytes(out.proof.bytes[at..at + 4].try_into().unwrap()) as usize;
-    let cap_len = framed(13);
-    let sponge_len = framed(17 + cap_len);
-    let bridge_len = framed(21 + cap_len + sponge_len);
+    let cap_len = framed(14);
+    let sponge_len = framed(18 + cap_len);
+    let bridge_len = framed(22 + cap_len + sponge_len);
     let parse = |at: usize, len: usize, claims: usize| {
         agg_keccak::flock_union::UnionProof::from_bytes(&out.proof.bytes[at..at + len], claims)
             .unwrap()
@@ -250,8 +265,8 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     eprintln!(
         "  proof bytes n = {n}: bridge cap {cap_len}, sponge proof {sponge_len} (zerocheck, \
          lincheck, opening, values {:?}), bridge union proof {bridge_len} ({:?})",
-        parse(21 + cap_len, sponge_len, 3),
-        parse(25 + cap_len + sponge_len, bridge_len, 7)
+        parse(22 + cap_len, sponge_len, 3),
+        parse(26 + cap_len + sponge_len, bridge_len, 7)
     );
     eprintln!(
         "tied part n = {n} (d {d}): sponge nu {} M {} dense m {} ({} committed words); bridge \
@@ -280,31 +295,32 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     // A flipped Y bit; another seed; a wrong c~; a wrong mu; another fs; a flipped proof
     // byte (in the bridge cap, in the sponge proof, at the end of the bridge proof).
     let (mu, c) = (&ctx.mu, &ctx.c_tilde);
-    let mut bad = out.final_vector.clone();
-    bad[4095] ^= 1;
+    let mut bad = out.final_vectors.clone();
+    bad[0][4095] ^= 1;
+    assert!(matches!(
+        ctx.verify_with(&run, mu, c, &commitment, sd, &bad, &fs),
+        Err(KeccakError::Flock(_) | KeccakError::Tie(_))
+    ));
     assert!(ctx
-        .verify_with(&run, mu, c, &commitment, sd, &bad, &fs)
-        .is_err());
-    assert!(ctx
-        .verify_with(&run, mu, c, &commitment, [0xA5; 32], &run.y, &fs)
+        .verify_with(&run, mu, c, &commitment, [0xA5; 32], &run.ys, &fs)
         .is_err());
     // A wrong c~ or mu changes the public digest the sponge challenger absorbs, so Flock's
     // transcript already rejects (the public claim would, too).
     let mut bad_c = c.clone();
     bad_c[n - 1][0] ^= 1;
     assert!(ctx
-        .verify_with(&run, mu, &bad_c, &commitment, sd, &run.y, &fs)
+        .verify_with(&run, mu, &bad_c, &commitment, sd, &run.ys, &fs)
         .is_err());
     let mut bad_mu = mu.clone();
     bad_mu[0][63] ^= 0x80;
     assert!(ctx
-        .verify_with(&run, &bad_mu, c, &commitment, sd, &run.y, &fs)
+        .verify_with(&run, &bad_mu, c, &commitment, sd, &run.ys, &fs)
         .is_err());
     assert!(ctx
-        .verify_with(&run, mu, c, &commitment, sd, &run.y, &[0x3C; 32])
+        .verify_with(&run, mu, c, &commitment, sd, &run.ys, &[0x3C; 32])
         .is_err());
     for at in [
-        13 + 4 + 100,
+        14 + 4 + 100,
         run.proof.bytes.len() / 2,
         run.proof.bytes.len() - 20,
     ] {
@@ -319,11 +335,11 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     // The bridge union's cap (from the proof) in place of the event-2 sponge cap.
     let cap_len = part.bridge().geometry().commitment_len();
     let swapped = TiedCommitment {
-        sponge: KeccakCommitment::from_bytes(run.proof.bytes[17..17 + cap_len].to_vec()),
+        sponge: KeccakCommitment::from_bytes(run.proof.bytes[18..18 + cap_len].to_vec()),
     };
     assert_ne!(swapped, commitment);
     assert!(ctx
-        .verify_with(&run, mu, c, &swapped, sd, &run.y, &fs)
+        .verify_with(&run, mu, c, &swapped, sd, &run.ys, &fs)
         .is_err());
 
     if tamper == Tamper::None {
@@ -352,7 +368,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let (sponge_buf, mut bits) = part.honest_parts(&ctx.records);
     let col = part.segment().column(3, 1024 * (n - 1) + 77);
     bits[col / 64] ^= 1 << (col % 64);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven);
+    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
     expect(&r, "level-1 input copy", &|e| {
         matches!(e, KeccakError::Tie("bridge copy of lanes 0..3"))
     });
@@ -362,10 +378,10 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let blocks = part.bridge().level1().blocks();
     let flip_copy = move |b: &mut agg_keccak::bridge_union::BridgeBlocks| {
         let c = top.input_col(5, blocks - 1, 1234);
-        b.top[c / 64] ^= 1 << (c % 64);
+        b.tops[0][c / 64] ^= 1 << (c % 64);
     };
     let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &flip_copy, Share::OfProven);
+    let r = ctx.run(sponge_buf, bits, &flip_copy, Share::OfProven, true);
     expect(&r, "parity copy", &|e| {
         matches!(e, KeccakError::Tie("level-1 parities of lanes 4, 5"))
     });
@@ -378,25 +394,33 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
             b.rows[level1.row(2, 0)][c / 64] ^= 1 << (c % 64);
         };
         let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-        let r = ctx.run(sponge_buf, bits, &flip_parity, Share::OfProven);
+        let r = ctx.run(sponge_buf, bits, &flip_parity, Share::OfProven, true);
         expect(&r, "level-1 parity", &|e| {
             matches!(e, KeccakError::Flock(_))
         });
-        // A share of the honest blocks against tampered copies: the levels-2-3 rows fail.
+        // A share of the honest blocks against tampered copies, the output columns of the
+        // honest blocks: the levels-2-3 rows fail.
         let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-        let r = ctx.run(sponge_buf, bits, &flip_copy, Share::Stale);
+        let r = ctx.run(sponge_buf, bits, &flip_copy, Share::Stale, false);
         expect(&r, "stale share", &|e| matches!(e, KeccakError::Flock(_)));
     }
-    // A wrong share whose difference is absorbed by the committed output columns (the
-    // levels-2-3 rows only define them): every row holds, the output claim fails.
+    // A wrong share with honest rows (the output columns hold M_3 M_2 y1): the output claim
+    // against the table of the shares fails.
+    let (sponge_buf, bits) = part.honest_parts(&ctx.records);
+    let r = ctx.run(sponge_buf, bits, &honest, Share::Flipped(777), true);
+    expect(&r, "wrong share, honest rows", &|e| {
+        matches!(e, KeccakError::Tie("levels-2-3 output columns"))
+    });
+    // The output column set to the wrong share (rows no longer hold): Flock rejects the
+    // levels-2-3 rows.
     let flip_out = move |b: &mut agg_keccak::bridge_union::BridgeBlocks| {
         let c = top.y_col(777);
-        b.top[c / 64] ^= 1 << (c % 64);
+        b.tops[0][c / 64] ^= 1 << (c % 64);
     };
     let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &flip_out, Share::Flipped(777));
-    expect(&r, "wrong share, output columns set", &|e| {
-        matches!(e, KeccakError::Tie("levels-2-3 output columns"))
+    let r = ctx.run(sponge_buf, bits, &flip_out, Share::Flipped(777), false);
+    expect(&r, "wrong share, output column set", &|e| {
+        matches!(e, KeccakError::Flock(_))
     });
     if !full {
         return;
@@ -407,7 +431,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let mut tampered = ctx.records.clone();
     tampered[0].w1_encode[100] ^= 0x10;
     let (sponge_buf, bits) = part.honest_parts(&tampered);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven);
+    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
     expect(&r, "both copies, stale c~", &|e| {
         matches!(e, KeccakError::Tie("public words"))
     });
@@ -424,7 +448,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         gate.apply_ab(zz, a, b);
     });
     let (_, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven);
+    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
     expect(&r, "sponge input, stale chi", &|e| {
         matches!(e, KeccakError::Flock(_))
     });
@@ -436,7 +460,7 @@ fn run_clone(r: &Run) -> Run {
         sd: r.sd,
         mats: r.mats.clone(),
         fs: r.fs,
-        y: r.y.clone(),
+        ys: r.ys.clone(),
         proof: r.proof.clone(),
     }
 }
@@ -471,6 +495,133 @@ fn tied_part_round_trips_256_and_512() {
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
 fn tied_part_round_trip_1024_two_blocks() {
     tied_round_trip(1024, 0x1024, Tamper::Blocks);
+}
+
+/// A span of `segments` segments of `2^d` record positions filled in order by `n` records,
+/// proven as one tied part (proof version 3, docs/bridge.md Section 5c, deviation K16): each
+/// `Y_sigma` equals the F_p side's walk of its segment's records (zero for an empty
+/// segment); swapped or flipped final vectors, a wrong share with honest rows (the output
+/// claim), a level-1 input copy flipped in segment 1 only (tie 1), another segment count and
+/// another record count are rejected.
+fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
+    let gate = sponge::sponge_gate();
+    let part = TiedPart::new_span(&gate, n, d, 0, segments, Profile::Fast);
+    let mut rng = Rng::new(rng_seed);
+    let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+    let (mu, c_tilde) = statement(&records);
+    let committed = part.commit(&records);
+    let commitment = committed.commitment().clone();
+    let sd = seed_after(&commitment);
+    let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd));
+    let fs = fs_after(&commitment, &sd);
+    let t0 = Instant::now();
+    let out = part.prove(committed, sd, &mats, &fs);
+    let t_prove = t0.elapsed();
+    let t1 = Instant::now();
+    let verify = |ys: &[Vec<u8>], proof: &KeccakProof| {
+        part.verify(&mu, &c_tilde, &commitment, sd, &mats, ys, &fs, proof)
+    };
+    verify(&out.final_vectors, &out.proof).expect("honest span");
+    eprintln!(
+        "span of {segments} segments (d {d}, n {n}): prove {t_prove:.2?}, verify {:.2?}, \
+         proof {} B, sponge nu {}, bridge rows {:?}",
+        t1.elapsed(),
+        out.proof.bytes.len(),
+        part.nu(),
+        part.cost().bridge.rows
+    );
+    // Y of every segment against the F_p side's main-domain walk of its records.
+    let geom = Geometry::new(1 << d).unwrap();
+    assert_eq!(geom.d_seg(), d);
+    assert_eq!(out.final_vectors.len(), segments);
+    for (sigma, y) in out.final_vectors.iter().enumerate() {
+        let r = (sigma << d).min(n)..((sigma + 1) << d).min(n);
+        assert_eq!(part.live(sigma), r.len());
+        let lanes = main_domain_lanes(&records[r.clone()], geom.main_len());
+        let b: [&[i8]; 6] = std::array::from_fn(|t| lanes[t].as_slice());
+        assert_eq!(*y, gf2_composite(&geom, &b, &mats), "Y of segment {sigma}");
+        if r.is_empty() {
+            assert!(y.iter().all(|&x| x == 0));
+        }
+    }
+    // Final vectors: a flipped bit of segment 1 and the vectors of segments 0, 1 swapped.
+    let mut bad = out.final_vectors.clone();
+    bad[1][100] ^= 1;
+    assert!(verify(&bad, &out.proof).is_err(), "flipped Y_1 bit");
+    let mut swapped = out.final_vectors.clone();
+    swapped.swap(0, 1);
+    assert_ne!(swapped, out.final_vectors);
+    assert!(verify(&swapped, &out.proof).is_err(), "swapped Y_0, Y_1");
+    assert!(matches!(
+        verify(&out.final_vectors[..segments - 1], &out.proof),
+        Err(KeccakError::Statement("final vector"))
+    ));
+    // A wrong share of segment 1 with honest rows: the output claim fails.
+    let committed = part.commit(&records);
+    let blocks = part.honest_blocks(&committed, &mats);
+    let mut wrong = out.final_vectors.clone();
+    wrong[1][2049] ^= 1;
+    let proof = part.prove_with_blocks(committed, sd, &mats, blocks, wrong.clone(), &fs);
+    assert!(matches!(
+        verify(&wrong, &proof),
+        Err(KeccakError::Tie("levels-2-3 output columns"))
+    ));
+    // A level-1 input copy flipped in segment 1 only (lane 1, its first record), the shares
+    // of the tampered copies: tie 1 of lanes 0..3 fails.
+    let (sponge_buf, mut bits) = part.honest_parts(&records);
+    let words = part.segment().input_bits() / 64;
+    let col = 64 * words + part.segment().column(1, 33);
+    bits[col / 64] ^= 1 << (col % 64);
+    let committed = part.commit_parts(sponge_buf, bits, &records);
+    let commitment2 = committed.commitment().clone();
+    assert_eq!(commitment2, commitment, "the sponge is honest");
+    let ys = part.final_vectors(&committed, &mats);
+    assert_ne!(ys[1], out.final_vectors[1]);
+    let proof = part.prove_with_final_vectors(committed, sd, &mats, ys.clone(), &fs);
+    assert!(matches!(
+        verify(&ys, &proof),
+        Err(KeccakError::Tie("bridge copy of lanes 0..3"))
+    ));
+    // The proof checked as a span of another segment count or record count.
+    let fewer = TiedPart::new_span(&gate, n, d, 0, segments + 1, Profile::Fast);
+    let mut more_ys = out.final_vectors.clone();
+    more_ys.push(vec![0; 4096]);
+    assert!(fewer
+        .verify(
+            &mu,
+            &c_tilde,
+            &commitment,
+            sd,
+            &mats,
+            &more_ys,
+            &fs,
+            &out.proof
+        )
+        .is_err());
+    let short = TiedPart::new_span(&gate, n - 1, d, 0, segments, Profile::Fast);
+    assert!(matches!(
+        short.verify(
+            &mu,
+            &c_tilde,
+            &commitment,
+            sd,
+            &mats,
+            &out.final_vectors,
+            &fs,
+            &out.proof
+        ),
+        Err(KeccakError::Statement("record count"))
+    ));
+}
+
+/// Spans: three segments of 8 positions (8, 8, 3 records), three with the last empty (8, 8,
+/// 0; a fourth segment of the union is always empty), two segments of 64 (64, 6).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+fn tied_spans_round_trip() {
+    tied_span_round_trip(19, 3, 3, 0x5A19);
+    tied_span_round_trip(16, 3, 3, 0x5A16);
+    tied_span_round_trip(70, 6, 2, 0x5A70);
 }
 
 /// Statement checks that need no proof.
@@ -524,7 +675,7 @@ fn tied_part_shapes() {
             },
             [0; 32],
             &derive_matrices_for(&Shape::PRODUCTION, &[0; 32]),
-            &[0; 4096],
+            &[vec![0; 4096]],
             &[0; 32],
             &KeccakProof {
                 bytes: b"AGGKCTxx".to_vec()
@@ -592,7 +743,7 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
             commitments[k].clone(),
             kept[k].take(),
         );
-        let own = segs[k].final_vector(&committed, &mats);
+        let own = segs[k].final_vectors(&committed, &mats).remove(0);
         let share = if k + 1 < parts.len() {
             own.clone()
         } else {
@@ -600,13 +751,23 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
         };
         assert_eq!(share, own, "honest shares XOR to the segment's Y");
         acc.iter_mut().zip(&share).for_each(|(a, s)| *a ^= s);
-        let proof = segs[k].prove_with_final_vector(committed, sd, &mats, share.clone(), &fs(k));
+        let proof =
+            segs[k].prove_with_final_vectors(committed, sd, &mats, vec![share.clone()], &fs(k));
         shares.push((share, proof));
     }
     assert_eq!(acc, y_segment);
     let verify = |seg: &TiedPart<'_>, k: usize, y: &[u8], proof| {
         let (mu, c) = statement(&records[parts[k].1.clone()]);
-        seg.verify(&mu, &c, &commitments[k], sd, &mats, y, &fs(k), proof)
+        seg.verify(
+            &mu,
+            &c,
+            &commitments[k],
+            sd,
+            &mats,
+            &[y.to_vec()],
+            &fs(k),
+            proof,
+        )
     };
     for k in 0..parts.len() {
         verify(&segs[k], k, &shares[k].0, &shares[k].1).expect("honest part");
@@ -639,13 +800,20 @@ fn tied_part_profiles_bytes_and_times() {
             .map(|s| s.trim().to_string())
             .collect()
     };
-    let sizes: Vec<(usize, u32)> = list("AGG_TIED_SIZES", "256,512,1024,2048")
+    // `n`, `n@d` or `n@d/S` (a span of S segments of 2^d positions filled in order by n
+    // records; `8@13/4` is the bridge union of a 32K batch with a small sponge instance).
+    let sizes: Vec<(usize, u32, usize)> = list("AGG_TIED_SIZES", "256,512,1024,2048")
         .iter()
-        .map(|s| match s.split_once('@') {
-            Some((n, d)) => (n.parse().unwrap(), d.parse().unwrap()),
-            None => {
-                let n: usize = s.parse().unwrap();
-                (n, TiedPart::d_seg_for(n))
+        .map(|s| {
+            let (s, segments) = s
+                .split_once('/')
+                .map_or((s.as_str(), 1), |(a, b)| (a, b.parse().unwrap()));
+            match s.split_once('@') {
+                Some((n, d)) => (n.parse().unwrap(), d.parse().unwrap(), segments),
+                None => {
+                    let n: usize = s.parse().unwrap();
+                    (n, TiedPart::d_seg_for(n), segments)
+                }
             }
         })
         .collect();
@@ -662,7 +830,7 @@ fn tied_part_profiles_bytes_and_times() {
         "| Records (d) | Profile | Commit (ms) | Prove (ms) | Verify (ms) | Proof (B) | of which \
          bridge cap / sponge / bridge union | Commitment (B) | Kept commit data (MiB) |"
     );
-    for &(n, d) in &sizes {
+    for &(n, d, segments) in &sizes {
         let mut rng = Rng::new(n as u64);
         let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
         let (mu, c_tilde) = statement(&records);
@@ -670,10 +838,11 @@ fn tied_part_profiles_bytes_and_times() {
             let profile = match name.as_str() {
                 "fast" => Profile::Fast,
                 "slim" => Profile::Slim,
+                "slim8" => Profile::Slim8,
                 "secure" => Profile::Secure,
                 other => panic!("unknown profile {other}"),
             };
-            let part = TiedPart::new(&gate, n, d, profile);
+            let part = TiedPart::new_span(&gate, n, d, 0, segments, profile);
             let (mut t_commit, mut t_prove, mut t_verify) = (vec![], vec![], vec![]);
             let mut last = None;
             for rep in 0..=reps {
@@ -694,7 +863,7 @@ fn tied_part_profiles_bytes_and_times() {
                     &commitment,
                     sd,
                     &mats,
-                    &out.final_vector,
+                    &out.final_vectors,
                     &fs,
                     &out.proof,
                 )
@@ -714,11 +883,16 @@ fn tied_part_profiles_bytes_and_times() {
                 .map_or(0, |d| d.heap_bytes());
             let b = &out.proof.bytes;
             let framed = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
-            let cap = framed(13);
-            let sponge_len = framed(17 + cap);
-            let bridge_len = framed(21 + cap + sponge_len);
+            let cap = framed(14);
+            let sponge_len = framed(18 + cap);
+            let bridge_len = framed(22 + cap + sponge_len);
             eprintln!(
-                "| {n} ({d}) | {name} | {:.1} | {:.1} | {:.1} | {} | {} / {} / {} | {} | {:.1} |",
+                "| {n} ({d}{}) | {name} | {:.1} | {:.1} | {:.1} | {} | {} / {} / {} | {} | {:.1} |",
+                if segments > 1 {
+                    format!(", {segments} segments")
+                } else {
+                    String::new()
+                },
                 median(t_commit),
                 median(t_prove),
                 median(t_verify),
@@ -729,6 +903,64 @@ fn tied_part_profiles_bytes_and_times() {
                 commitment.to_bytes().len(),
                 kept as f64 / f64::from(1 << 20)
             );
+            if std::env::var_os("AGG_TIED_BREAKDOWN").is_some() {
+                let sponge_at = 22 + cap;
+                let bridge_at = 26 + cap + sponge_len;
+                for (label, at, len, claims) in [
+                    ("sponge", sponge_at, sponge_len, 3),
+                    ("bridge union", bridge_at, bridge_len, 7),
+                ] {
+                    let up = UnionProof::from_bytes(&b[at..at + len], claims).unwrap();
+                    let [zc, lc, open, values] = up.size_breakdown();
+                    eprintln!(
+                        "  {label}: zerocheck {zc} B, lincheck {lc} B, opening {open} B, values \
+                         {values} B; Ligerito inner {} B:",
+                        up.flock.pcs_open.inner.ligerito.size_bytes()
+                    );
+                    up.flock.pcs_open.inner.ligerito.print_size_breakdown();
+                }
+            }
         }
+    }
+}
+
+/// Measurement (ignored; `--ignored --nocapture`): the prover cost of Ligerito's query
+/// proof of work at `AGG_GRIND_BITS` (default `16,20,22,24`) bits with Flock's challenger
+/// (the fused BLAKE3 PoW and squeeze its Ligerito levels use, parallel on the rayon pool),
+/// median of `AGG_TIED_REPS` (default 5) grinds from distinct transcript states, for the
+/// grinding-versus-queries trade of docs/keccak.md Section 12.
+#[test]
+#[ignore = "measurement; run with --release --ignored --nocapture"]
+fn ligerito_query_grinding_cost() {
+    use flock_core::challenger::{Challenger, FsChallenger};
+    let bits: Vec<u32> = std::env::var("AGG_GRIND_BITS")
+        .unwrap_or_else(|_| "16,20,22,24".to_string())
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
+    let reps: usize = std::env::var("AGG_TIED_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    for b in bits {
+        let mut times: Vec<f64> = (0..reps)
+            .map(|rep| {
+                let mut ch = FsChallenger::new(b"agg-keccak/test/grind");
+                ch.observe_bytes(&[b as u8, rep as u8]);
+                let t = Instant::now();
+                let (nonce, words) = ch.grind_pow_and_sample_f128_vec(b, 119);
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                assert_eq!(words.len(), 119);
+                std::hint::black_box(nonce);
+                ms
+            })
+            .collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "query PoW {b} bits: median {:.2} ms (min {:.2}, max {:.2}) over {reps} grinds",
+            times[reps / 2],
+            times[0],
+            times[reps - 1]
+        );
     }
 }

@@ -33,6 +33,10 @@ pub enum FlockProfile {
     /// Ligerito `Slim` (rate 1/4, Flock's 128-bit work-normalized accounting as `Fast`):
     /// about two thirds of the `Fast` Flock bytes for about twice the level-0 encoding work.
     Slim = 4,
+    /// Ligerito `Slim8` (rate 1/8 at level 0 with `Slim`'s accounting, a parameter set the
+    /// vendored Flock core derives and validates with its own analysis; `agg-keccak`
+    /// deviation K18).
+    Slim8 = 5,
 }
 
 impl FlockProfile {
@@ -45,16 +49,17 @@ impl FlockProfile {
             2 => Some(Self::LaBinius),
             3 => Some(Self::PublicBits),
             4 => Some(Self::Slim),
+            5 => Some(Self::Slim8),
             _ => None,
         }
     }
 
-    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim` or
+    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim`, `Slim8` or
     /// `LaBinius`), whose tie to the committed bits is the parity bridge with seed-derived
     /// matrices (spec 9.4).
     #[must_use]
     pub const fn is_mode_a(self) -> bool {
-        matches!(self, Self::Fast | Self::Slim | Self::LaBinius)
+        matches!(self, Self::Fast | Self::Slim | Self::Slim8 | Self::LaBinius)
     }
 }
 
@@ -133,12 +138,13 @@ mod tests {
         assert_eq!(FlockProfile::from_id(2), Some(FlockProfile::LaBinius));
         assert_eq!(FlockProfile::from_id(3), Some(FlockProfile::PublicBits));
         assert_eq!(FlockProfile::from_id(4), Some(FlockProfile::Slim));
-        assert_eq!(FlockProfile::from_id(5), None);
-        let mode_a: Vec<u8> = (0..5)
+        assert_eq!(FlockProfile::from_id(5), Some(FlockProfile::Slim8));
+        assert_eq!(FlockProfile::from_id(6), None);
+        let mode_a: Vec<u8> = (0..6)
             .filter(|&id| FlockProfile::from_id(id).unwrap().is_mode_a())
             .collect();
-        assert_eq!(mode_a, [1, 2, 4]);
-        for id in 0..5 {
+        assert_eq!(mode_a, [1, 2, 4, 5]);
+        for id in 0..6 {
             assert_eq!(FlockProfile::from_id(id).unwrap() as u8, id);
         }
     }

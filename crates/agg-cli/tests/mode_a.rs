@@ -2,7 +2,7 @@
 //! and the verifier on `(pk_i, M_i)` and the aggregate.
 //!
 //! - Round trips at 64, 256 (two Flock parts) and 512 signatures under each mode-A Flock
-//!   profile (`Fast`, `Slim`): the aggregate size per part, the prover's and the verifier's
+//!   profile (`Fast`, `Slim`, `Slim8`): the aggregate size per part, the prover's and the verifier's
 //!   step costs (uncached and cached keys) are printed (`--nocapture`), the cached and
 //!   uncached paths agree, the persistent key cache round-trips, the verifier reads the
 //!   profile from the aggregate and a verifier pinned to the other profile rejects it.
@@ -82,7 +82,7 @@ fn peak_mib() -> f64 {
     agg_cli::rss::peak_kib().map_or(0.0, |k| k as f64 / 1024.0)
 }
 
-/// The other mode-A Flock profile.
+/// Another mode-A Flock profile.
 fn other(profile: FlockProfile) -> FlockProfile {
     if profile == FlockProfile::Fast {
         FlockProfile::Slim
@@ -104,7 +104,11 @@ fn round_trip(
 ) {
     let records = records(seed, n_own, n_shared);
     let n = records.len();
-    let aggregator = Aggregator::new(AggregatorConfig { part_log2, profile });
+    let aggregator = Aggregator::new(AggregatorConfig {
+        part_log2,
+        profile,
+        ..AggregatorConfig::default()
+    });
     let start = Instant::now();
     let aggregate = aggregator.aggregate(&signed(&records)).expect("aggregate");
     eprintln!(
@@ -258,6 +262,19 @@ fn round_trip_at_512_signatures() {
 )]
 fn round_trip_at_512_signatures_slim() {
     on_large_stack(|| round_trip(400, 112, 0xb512, DEFAULT_PART_LOG2, 1, FlockProfile::Slim));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn round_trips_at_64_256_and_512_signatures_slim8() {
+    on_large_stack(|| {
+        round_trip(48, 16, 0xc064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim8);
+        round_trip(200, 56, 0xc256, 7, 2, FlockProfile::Slim8);
+        round_trip(400, 112, 0xc512, DEFAULT_PART_LOG2, 1, FlockProfile::Slim8);
+    });
 }
 
 /// Expect a rejection matching `check`, print it.

@@ -392,6 +392,92 @@ three parts with kept commit data whose shares XOR to the segment's `Y`. The mod
 `agg-cli` run unchanged on the new part (the hook that flips a bit of the part's input bits
 fails tie 1).
 
+## 5c. Spans: one tied part over several segments; the final vectors as the output claim
+
+Status: normative for tied-part proof version 3 (`crates/agg-keccak/src/bridge_union.rs`,
+`tied.rs`; deviation K16; mode A: `agg_cli::mode_a`, segment items of version 4). It changes
+two things of Section 5b and keeps everything else (types, rows, walkers, the sponge
+instance, the lane groups, the claim count 3 + 7, the error names).
+
+**The output claim carries `Y`.** In every tied part the levels-2-3 rows are proven with a
+zero coefficient (`TopSlot` with `Y = 0`), so they say `z_{y_o} = (M_3 M_2 z_in)_o`, and the
+honest prover writes `M_3 M_2 y1` (the share) into the output columns
+(`BridgeUnion::fill_outputs`). The output claim `v_out` at `P_out = [rows rho_sigma | words
+[rho_o | the output region's base]]` is checked against `Yhat(rho_o, rho_sigma) = sum_sigma
+eq(rho_sigma, sigma) sum_{w < 32} eq(rho_o, w) Y_sigma[w]`, the multilinear extension of the
+public table of final vectors in the word layout of the output columns (word `w` of `Y_sigma`
+is bits `128 w .. 128 w + 127`, low 64 bits first; `Y_sigma = 0` for the segments `S..2^span_log`
+of the union), which the verifier computes (`TiedPart::output_value`). The table's digest
+`SHA3-256(len || "agg-keccak/v3/tied-final-vectors" || LE64(S) || packed Y_0 .. Y_{S-1})` is
+absorbed by the tie challenges (with `span_log`) before `rho`. For a part of one segment the
+table is its share (K10); for a span it is `(Y_0, .., Y_{S-1})`.
+
+**Spans.** A tied part may cover `S` consecutive segments that share its part geometry
+(`d`, part index `p`): `TiedPart::new_span(gate, n, d, p, S, profile)`, `n <= 2^d S` records in
+segment order (record `i` of segment `sigma` is record `2^d sigma + i` of the span, so only
+the last segments may be partial or empty). Mode A uses it for every batch of more than one
+segment in whole-segment parts (`d = 13`, `p = 0`, `S` = all segments of the batch, empty
+trailing ones included). With `span_log = ceil(log2 S)`:
+
+| Instance | Rows | Change against Section 5b |
+| --- | --- | --- |
+| sponge | the span's `n` records, row `2^d sigma + i` | `nu_s = capacity_log(n, 19)` over all records |
+| bridge union, level 1 | `sigma + 2^span_log (beta + blocks t)`, `2^span_log 6 blocks` rows, all live | the same layout and `M_1` per row (`zeta1_base` is the part's); segments `>= S` are zero rows |
+| bridge union, levels 2-3 | row `sigma`, `2^span_log` rows, all live | the same layout and `M_3 M_2` per row (`first_block` is the part's) |
+
+The union's row capacity is `nu = max(span_log + 3 + log2(blocks), 3, 21 - max k_log)`.
+`TieChallenges::derive` absorbs `span_log` and the final-vector digest and squeezes
+`rho_sigma` (`span_log` coordinates) after the coordinates of Section 5b. The points: the
+sponge rows are the first `nu_s` of the record coordinates `rho_i || rho_sigma` (zero above);
+the level-1 points (inputs, parities) have rows `[rho_sigma | beta | lane_bits(h)]`; the
+levels-2-3 points (copies, outputs) have rows `[rho_sigma]`. The tie-1 factor is
+`eq(rho[nu_s..], 0)` over `rho = rho_i || rho_sigma`. Proof bytes (version 3): `AGGKCT || 3 ||
+profile || LE32(n) || d || S || LE32(len) || bridge union cap || LE32(len) || sponge proof ||
+LE32(len) || bridge union proof`, the inner proofs without the Ligerito level-0 cap (K17).
+
+**Soundness.** As Section 5b with the segment index as a free coordinate. Flock's knowledge
+soundness gives `z_s` (event 2) and `z_u` (absorbed before the tie challenges) satisfying
+their rows and the claimed values. In `z_u` every live level-1 row has `y1 = M_1 x(sigma, t,
+beta)` and every levels-2-3 row `sigma` has `z_y(sigma) = M_3 M_2 z_in(sigma)`. Tie 1: `f_in`
+and `f_s` are the multilinear extensions, in the `d + span_log + 5` free coordinates `(i,
+sigma, w, t)` of a lane group, of the level-1 inputs and of the sponge inputs over the span's
+`2^(d + span_log)` record positions (the sponge rows `>= n` are zero, so the level-1 inputs of
+missing records and segments are compared with zeros); a differing bit survives with
+probability at most `(d + span_log + 5) / 2^128`. Tie 2: `(log2(blocks) + span_log + 9) /
+2^128` per lane group, over `(beta, sigma, t, word)`. Outputs: `z_y` and the table `Y` are two
+fixed word vectors (the table by its digest, absorbed before `rho`; `z_y` by the union's cap);
+if they differ, `v_out = Yhat(rho)` holds with probability at most `(5 + span_log) / 2^128`.
+Hence `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) for every segment `sigma` of the span, with
+the matrices of `sd` and `b'` the sponge's input fixed at event 2 before `sd`; for a part of
+one segment the shares XOR to `Y_sigma` (K10) as before. The bound (9.3) of Section 7 is
+unchanged; the tie error per tied part is `2 (d + span_log + 5) + 2 (log2(blocks) + span_log +
+9) + (5 + span_log) + (nu_s + 3)` over `2^128`: `95 / 2^128 = 2^-121.4` for a span of four
+full segments (`d = 13`, 16 blocks, `span_log = 2`, `nu_s = 15`), inside `epsilon_Flock`, with
+the usual factor `Q` for re-derived challenges (Section 5b). Replay: the tie-geometry digest
+covers `S` and `span_log`, the proof header `S`; the span's Flock seed in mode A is
+`SHA3-256(len || "agg-mldsa/v1/flock-span-seed" || LE64(S) || fs_0 || .. || fs_{S-1})`, a
+function of event 5 that differs from every part seed.
+
+**Costs.** A span's sponge instance and bridge union are the per-segment instances stacked:
+the same rows, walker entries and committed words in total, one commitment and one opening
+each instead of `S` of each; the Ligerito openings grow by about one level per doubling of
+the committed words (`docs/keccak.md` Section 12).
+
+**Tests.** `bridge_union`: a span of three segments at `d = 3` (a fourth union segment
+empty) and of two at `d = 10` (two blocks) has the documented rows and capacity, its shares
+are the segments' composites (zero for the empty segment), segment 1's rows are the
+single-segment rows of its bits, and the region points at a Boolean segment coordinate
+evaluate that segment's regions. `tied` (unit): the tie identities, including the output value
+against the table, on honest regions for spans `(n, d, S) = (12, 3, 2), (19, 3, 3), (70, 6, 2)`
+and the parts of Section 5b, a flipped input or parity copy of the last segment breaks
+exactly its lane group, the points of a span of three full segments. `tests/tied.rs`: spans
+of `(19, 3, 3)`, `(16, 3, 3)` (last segment empty) and `(70, 6, 2)` round-trip with each
+`Y_sigma` equal to the F_p side's walk of its segment; a flipped bit of `Y_1`, `Y_0` and `Y_1`
+swapped, a missing `Y`, a wrong share with honest rows (`levels-2-3 output columns`), an input
+copy flipped in segment 1 only (`bridge copy of lanes 0..3`), another segment count and another
+record count are rejected; the tampering cases of Section 5b run on version 3 (a wrong share
+with honest rows fails the output claim, the output columns set to it break the rows).
+
 ## 6. The final public vector
 
 $`Y_\sigma\in\{0,1\}^{4096}`$ per segment, 512 bytes, bit $`\rho_3`$ at byte $`\rho_3\gg3`$, bit position $`\rho_3\bmod8`$ (least significant first, deviation P6), absorbed at event 6 before the Flock proofs and before $`\tau`$. The same bytes are: the `Out` words of the bridge slot (public words of the Flock statement), the public table $`Y(\rho_3,\sigma)`$ of the PIOP whose extension $`Y(\tau_3)`$ the verifier evaluates in step 4 of spec Section 11, and the right-hand side of the level-3 identity. Proof cost $`512S`$ bytes (2 KB at $`N=2^{15}`$). A verifier MUST reject a proof whose event-6 item has a length other than $`512S`$.

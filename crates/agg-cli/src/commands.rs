@@ -29,16 +29,19 @@ commands:
       N signed records (pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
   aggregate --records RECORDS --out AGGREGATE [--part-log2 D] [--flock-profile P]
+            [--flock-span on|off]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
       Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
-      profile P = fast or slim (Ligerito rate 1/2 or 1/4, both 128-bit in Flock's
-      accounting; default: the build's FLOCK_PROFILE).
+      profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
+      Flock's accounting; default: the build's FLOCK_PROFILE); with --flock-span on (default) a
+      batch of more than one segment in whole-segment parts is one tied part over all
+      segments.
   verify --records RECORDS --aggregate AGGREGATE [--cache CACHE] [--flock-profile P]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
       Flock profile its items name (or only under P). With --cache, expanded keys are read
       from and added to the cache file. Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
-        [--flock-profile P]
+        [--flock-profile P] [--flock-span on|off]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
@@ -120,11 +123,24 @@ impl Options {
         }
     }
 
-    /// `--name fast|slim`: a mode-A Flock profile.
+    /// `--name fast|slim|slim8`: a mode-A Flock profile.
     fn flock_profile(&mut self, name: &str) -> Result<Option<FlockProfile>, String> {
         self.take(name)
-            .map(|v| parse_flock_profile(&v).ok_or_else(|| format!("--{name}: fast or slim, not {v:?}")))
+            .map(|v| {
+                parse_flock_profile(&v)
+                    .ok_or_else(|| format!("--{name}: fast, slim or slim8, not {v:?}"))
+            })
             .transpose()
+    }
+
+    /// `--name on|off`, `default` when absent.
+    fn switch(&mut self, name: &str, default: bool) -> Result<bool, String> {
+        match self.take(name).as_deref() {
+            None => Ok(default),
+            Some("on") => Ok(true),
+            Some("off") => Ok(false),
+            Some(v) => Err(format!("--{name}: on or off, not {v:?}")),
+        }
     }
 
     fn finish(self) -> Result<(), String> {
@@ -135,12 +151,13 @@ impl Options {
     }
 }
 
-/// A mode-A Flock profile by name: `fast` or `slim`.
+/// A mode-A Flock profile by name: `fast`, `slim` or `slim8`.
 #[must_use]
 pub fn parse_flock_profile(name: &str) -> Option<FlockProfile> {
     match name {
         "fast" => Some(FlockProfile::Fast),
         "slim" => Some(FlockProfile::Slim),
+        "slim8" => Some(FlockProfile::Slim8),
         _ => None,
     }
 }
@@ -275,8 +292,13 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let out = opts.path("out")?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
+    let span = opts.switch("flock-span", true)?;
     opts.finish()?;
-    let aggregator = Aggregator::new(AggregatorConfig { part_log2, profile });
+    let aggregator = Aggregator::new(AggregatorConfig {
+        part_log2,
+        profile,
+        span,
+    });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
     println!("{}", aggregate.report);
@@ -461,6 +483,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let reps: usize = opts.number("reps", Some(DEFAULT_REPS))?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
+    let span = opts.switch("flock-span", true)?;
     opts.finish()?;
     if n_keys == 0 || count == 0 {
         return Err("--count and --keys must be positive".into());
@@ -473,7 +496,16 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let records = sign_records(&keys, count, seed, None);
     let generated = start.elapsed();
     let result = run_large(move || {
-        bench_records(&records, AggregatorConfig { part_log2, profile }, warmup, reps)
+        bench_records(
+            &records,
+            AggregatorConfig {
+                part_log2,
+                profile,
+                span,
+            },
+            warmup,
+            reps,
+        )
     })?;
     let mib = |k: Option<u64>| {
         k.map_or_else(
@@ -483,7 +515,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
+        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
         n_keys.min(count),
         std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
@@ -587,6 +619,11 @@ mod tests {
         let mut o = Options::parse(&strings(&["--flock-profile", "secure"])).unwrap();
         assert!(o.flock_profile("flock-profile").is_err());
         assert_eq!(parse_flock_profile("fast"), Some(FlockProfile::Fast));
+        assert_eq!(parse_flock_profile("slim8"), Some(FlockProfile::Slim8));
+        let mut o = Options::parse(&strings(&["--flock-span", "off", "--x", "maybe"])).unwrap();
+        assert_eq!(o.switch("flock-span", true), Ok(false));
+        assert_eq!(o.switch("flock-span", true), Ok(true));
+        assert!(o.switch("x", true).is_err());
         assert_eq!(
             median(&[
                 Duration::from_millis(3),

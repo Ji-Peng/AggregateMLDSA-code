@@ -1,8 +1,9 @@
 # Mode A end to end and the `agg` tool (spec Sections 10, 11, 14; milestone M3)
 
 Crate `agg-cli`: library `agg_cli` (aggregator, verifier, wire items, key cache, batch
-files) and binary `agg`. Deviations: K10 (Flock parts within a segment) and A1 (driver
-choices) in `docs/deviations.md`.
+files) and binary `agg`. Deviations: K10 (Flock parts within a segment), K15 (the Flock
+profile, `Fast` or `Slim`), K16 (one span over all segments), K17 and A1 (driver choices) in
+`docs/deviations.md`.
 
 ## 1. Aggregator and verifier
 
@@ -18,7 +19,8 @@ the byte size of every part of the aggregate). Steps:
    its index) and the round-1 tables `G_main` built (`i8` columns).
 3. The PIOP prover `agg_piop::prover::prove_with_tables` runs the one transcript of spec
    Section 10 with the seed-derived matrices (`SeededMatrices`) and the Flock side
-   `FlockProver` (Flock profile `Fast`): event 1 `G_main`, event 2 the parts' Flock
+   `FlockProver` (Flock profile `AggregatorConfig::profile`: `Slim` by default, `Fast` or
+   `Slim8`; bound at event 0, K15, K18): event 1 `G_main`, event 2 the parts' Flock
    commitments, event 3 `sd`, event 4 `G_1, G_2, G_3`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares and proofs, events 7 to 11 the stages, event 12 the opening. There
    is no projection seed (deviation P2).
@@ -28,7 +30,10 @@ the byte size of every part of the aggregate). Steps:
 `agg_piop::verifier::VerifyTimings`, per Flock part the setup and verification time, and the
 keys expanded in the run. The verifier computes `tr_i, mu_i, c_i, T_i` and the `ExpandA`
 data itself; `cache: Option<&mut KeyCache>` skips the expansion of cached keys and adds
-new ones, so the uncached and cached numbers of spec Section 11 are two calls.
+new ones, so the uncached and cached numbers of spec Section 11 are two calls. The Flock
+profile is the mode-A profile the aggregate's event-2 items name (a parse of the aggregate,
+step `profile` of the report), or the one fixed by `AggregateVerifier::require`; the
+transcript binds it at event 0 (K15).
 
 Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` record positions,
 `d_part = clamp(part_log2, 3, d_seg)`, `part_log2` from `AggregatorConfig` (default
@@ -40,6 +45,13 @@ event 6 the bridge union (its cap in the part's proof, since it depends on `sd`)
 proofs. At most one part's Flock buffers are alive: parts are committed one by one at event
 2 (the cap and, by default, the sponge commit data are kept, K14) and rebuilt, proven and
 dropped one by one at event 6.
+
+Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
+parts are whole segments is one tied part over all segments (one sponge instance of all `N`
+records, one bridge union proving every `Y_sigma`); segment 0's items carry its cap and proof,
+the others are covered (`agg_cli::wire`, span byte 0), and the verifier checks the span at the
+last segment. Batches of at most `2^13` records (every local batch) have one segment and are
+unchanged by it.
 
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
@@ -58,10 +70,16 @@ Flock witness per part, and the stale round-2 tables of the joint bridge test.
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch --keys keys.bin --count 256 --seed 1 --out records.bin
-taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9]
-taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9]
+taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off]
+taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off]
 ```
+
+`--flock-profile` selects the Ligerito profile of the Flock parts (`fast`: rate 1/2, `slim`:
+rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work-normalized in
+Flock's accounting; default `slim`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
+12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. `--flock-span off` proves every segment
+on its own (K10 parts) instead of one span over all segments (K16).
 
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows
@@ -80,19 +98,26 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
 
 `taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/{mode_a,cli}.rs`):
 
-- unit: part tiling of every segment (also with an all-padded trailing segment), part seeds,
-  an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the segment items,
-  the Flock records of honest tables equal `w1Encode`, the batch files, the key cache file;
+- unit: part tiling of every segment (also with an all-padded trailing segment), part seeds
+  and span seeds, an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the
+  span glue of the verifier on a four-segment geometry without proofs (segment 0 opens the
+  span, segments 1 to 3 are covered, the last one verifies it; spans over fewer segments,
+  covered items with commitments or proofs, per-segment or second span items inside a span
+  rejected), the segment items (profile and span bytes), the options `--flock-profile` and
+  `--flock-span`, the Flock records of honest tables equal `w1Encode`, the batch files, the
+  key cache file;
 - round trips at 64 (one part), 256 (two parts of 128) and 512 (one part) signatures with
-  own and shared keys: the `c~_i` list, the size report, the uncached and cached verifier
-  (in memory and through the cache file) agree;
+  own and shared keys under each profile (`Fast`, `Slim`, `Slim8`): the `c~_i` list, the size report,
+  the uncached and cached verifier (in memory and through the cache file) agree, the
+  verifier reads the profile from the aggregate, and a verifier pinned to the other profile
+  rejects the item's profile byte before any Flock work;
 - corrupted aggregates (20 records, parts of 8, 8, 4): `c~_i`, `Y_sigma`, a share, swapped
   shares, swapped part proofs, a part-proof byte, a part-commitment byte, the part size
   (too large, too small), a dropped part, a truncated item, a pre-stage claim, stage-1, -2
   and -3 rounds, a stage-3 claim, the opening, the `G_main` commitment, reordered round-2
   commitments, swapped records, another message, another key, a missing record, truncated
-  and trailing bytes, the wire version, a Flock verifier under another profile, the mode-B
-  checks under profile 3;
+  and trailing bytes, the wire version, the item's profile byte (another mode-A profile; the
+  mode-B id 3), a Flock verifier under another profile, the mode-B checks under profile 3;
 - tampered witnesses through the aggregator (12 records): a `z` and a `v` digit (stage 3),
   a committed bit flipped (Flock part) and the same with stale round-2 tables (stage 1), a
   bit of value 2 (stage 1), `w_1' = 44` in the committed bits (Flock part) and in both copies

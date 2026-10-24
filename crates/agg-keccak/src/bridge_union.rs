@@ -39,6 +39,17 @@
 //!
 //! Layouts are generic over [`Shape`] (the toy shape has one lane and `m_1 = 64`); the tie
 //! points need the production shape's six lanes and `m_1` a multiple of 128.
+//!
+//! **Spans** (tied-part proof version 3, docs/bridge.md Section 5c, deviation K16). A union
+//! may cover `2^span_log` segments that share the part geometry (`d`, part index; in mode A
+//! whole segments of `2^13` records): the level-1 row of segment `sigma`, lane `t`, block
+//! `beta` is `sigma + 2^span_log (beta + blocks t)` and the levels-2-3 row of segment `sigma`
+//! is row `sigma`. Every row of both types is live (`2^span_log * lanes * blocks` and
+//! `2^span_log`); segments without records are all-zero rows (constant 1). The tied part
+//! proves the relations with a zero coefficient (`Y = 0` in [`TopSlot`]), so the composite rows
+//! say `z_{y_o} = (M_3 M_2 z_in)_o`, and pins the output columns of row `sigma` to the public
+//! `Y_sigma` with the output claim (its value is the multilinear extension of the `Y` table,
+//! computed by the verifier).
 
 use agg_bridge::gf2_walker::SegmentLayout;
 use agg_bridge::shape::Shape;
@@ -863,15 +874,15 @@ impl LincheckCircuit for TopSlot<'_> {
     }
 }
 
-/// The committed blocks of a bridge union: the level-1 rows and the levels-2-3 block.
+/// The committed blocks of a bridge union: the level-1 rows and the levels-2-3 blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeBlocks {
-    /// Level-1 rows in row order (`Level1Layout::useful_words` u64 words each): the block's
-    /// input bits, the constant, the level-1 parities.
+    /// Level-1 rows in union row order ([`BridgeUnion::row`]; `Level1Layout::useful_words`
+    /// u64 words each): the block's input bits, the constant, the level-1 parities.
     pub rows: Vec<Vec<u64>>,
-    /// The levels-2-3 block (`TopLayout::useful_words` words): the rows' parities
-    /// concatenated, the constant, zeros.
-    pub top: Vec<u64>,
+    /// The levels-2-3 blocks, one per segment of the span (`TopLayout::useful_words` words
+    /// each): the segment's rows' parities concatenated, the constant, zeros.
+    pub tops: Vec<Vec<u64>>,
 }
 
 /// Sizes of a bridge union.
@@ -894,10 +905,12 @@ pub struct BridgeUnionCost {
     pub walker_entries: u64,
 }
 
-/// The bridge union of one part (module docs): layouts, union geometry, tie points.
+/// The bridge union of one part, or of the same part of `2^span_log` segments (module docs):
+/// layouts, union geometry, tie points.
 pub struct BridgeUnion {
     l1: Level1Layout,
     top: TopLayout,
+    span_log: usize,
     geometry: UnionGeometry,
 }
 
@@ -907,22 +920,36 @@ impl BridgeUnion {
     /// Caller index of the levels-2-3 type.
     pub const TOP: usize = 1;
 
-    /// The bridge union of the part `segment`: row capacity `2^nu`, `nu = max(rows_log, 3,
-    /// 21 - max k_log)`, so that `M = nu + max k_log + 1 >= 22` (Flock's dense floor).
+    /// The bridge union of the part `segment` (one segment).
     #[must_use]
     pub fn new(segment: SegmentLayout, profile: Profile) -> Self {
+        Self::new_span(segment, 0, profile)
+    }
+
+    /// The bridge union of the part `segment` in each of `2^span_log` segments: row capacity
+    /// `2^nu`, `nu = max(span_log + rows_log, 3, 21 - max k_log)`, so that `M = nu + max k_log
+    /// + 1 >= 22` (Flock's dense floor).
+    #[must_use]
+    pub fn new_span(segment: SegmentLayout, span_log: usize, profile: Profile) -> Self {
         let l1 = Level1Layout::new(segment);
         let top = TopLayout::new(segment);
         let k_max = l1.k_log().max(top.k_log());
-        let nu = l1.rows_log().max(3).max((MIN_M - 1).saturating_sub(k_max));
+        let nu = (span_log + l1.rows_log())
+            .max(3)
+            .max((MIN_M - 1).saturating_sub(k_max));
         let geometry = UnionGeometry::new_multi(
             vec![l1.table_type(), top.table_type()],
-            vec![l1.rows(), 1],
+            vec![l1.rows() << span_log, 1 << span_log],
             nu,
             profile,
         );
         assert_eq!(geometry.m_total(), nu + k_max + 1, "two-slot address space");
-        Self { l1, top, geometry }
+        Self {
+            l1,
+            top,
+            span_log,
+            geometry,
+        }
     }
 
     /// The production bridge union of part `index` of a segment split into parts of
@@ -933,8 +960,35 @@ impl BridgeUnion {
     /// lies outside the segment.
     #[must_use]
     pub fn production_part(d: u32, index: usize, profile: Profile) -> Self {
+        Self::production_span(d, index, 0, profile)
+    }
+
+    /// [`Self::production_part`] in each of `2^span_log` segments.
+    ///
+    /// # Panics
+    /// As [`Self::production_part`].
+    #[must_use]
+    pub fn production_span(d: u32, index: usize, span_log: usize, profile: Profile) -> Self {
         assert!(d >= 3, "a part of at least 8 record positions");
-        Self::new(SegmentLayout::production_part(d, index), profile)
+        Self::new_span(SegmentLayout::production_part(d, index), span_log, profile)
+    }
+
+    /// `log2` of the segments the union covers.
+    #[must_use]
+    pub fn span_log(&self) -> usize {
+        self.span_log
+    }
+
+    /// Segments the union covers (`2^span_log`, rows of the levels-2-3 type).
+    #[must_use]
+    pub fn span(&self) -> usize {
+        1 << self.span_log
+    }
+
+    /// Union row of segment `sigma`, lane `t`, block `beta` of the level-1 type.
+    #[must_use]
+    pub fn row(&self, sigma: usize, t: usize, beta: usize) -> usize {
+        sigma + (self.l1.row(t, beta) << self.span_log)
     }
 
     #[must_use]
@@ -966,7 +1020,7 @@ impl BridgeUnion {
         BridgeUnionCost {
             nu: self.geometry.nu(),
             k_log: [self.l1.k_log(), self.top.k_log()],
-            rows: [self.l1.rows(), 1],
+            rows: [self.l1.rows() << self.span_log, self.span()],
             m: self.geometry.m_total(),
             dense_m: self.geometry.dense_m(),
             committed_words: self.geometry.dense_words(),
@@ -976,36 +1030,88 @@ impl BridgeUnion {
         }
     }
 
-    /// The honest blocks of the part's lane-major packed input bits (`input_bits / 64`
-    /// words): level-1 rows with `y1 = M_1 b'(t, beta)`, the levels-2-3 block of the
-    /// parities.
+    /// The honest blocks of the lane-major packed input bits of `S <= 2^span_log` segments
+    /// (`S * input_bits / 64` words, segment-major; segments `S..2^span_log` are zero): the
+    /// level-1 rows with `y1 = M_1 b'(sigma, t, beta)` in union row order, one levels-2-3
+    /// block of the parities per segment.
     ///
     /// # Panics
     /// If `bits` has the wrong length or the matrices another shape.
     #[must_use]
     pub fn honest_blocks(&self, matrices: &BridgeMatrices, bits: &[u64]) -> BridgeBlocks {
         let seg = self.segment();
-        assert_eq!(bits.len(), seg.input_bits() / 64, "packed input length");
+        let seg_words = seg.input_bits() / 64;
+        let segments = bits.len() / seg_words;
+        assert!(
+            bits.len() == segments * seg_words && (1..=self.span()).contains(&segments),
+            "packed input length: 1 to 2^span_log segments"
+        );
         assert!(seg.shape.matches(matrices), "matrices of another shape");
         let l1 = &self.l1;
-        let parities = l1.parities(&matrices.m1, &|t, beta| &bits[l1.input_words(t, beta)]);
-        let rows: Vec<Vec<u64>> = parities
-            .par_iter()
-            .enumerate()
-            .map(|(j, p)| {
-                let (t, beta) = (j / l1.blocks(), j % l1.blocks());
-                l1.row_block(&bits[l1.input_words(t, beta)], p)
-            })
-            .collect();
-        let refs: Vec<&[u64]> = parities.iter().map(Vec::as_slice).collect();
-        let top = self.top.block(&refs);
-        BridgeBlocks { rows, top }
+        let zero_inputs = vec![0_u64; l1.block_len() / 64];
+        let zero_parities = vec![0_u64; l1.m1() / 64];
+        let mut rows = vec![Vec::new(); l1.rows() << self.span_log];
+        let mut tops = Vec::with_capacity(self.span());
+        for sigma in 0..self.span() {
+            let b = (sigma < segments).then(|| &bits[sigma * seg_words..(sigma + 1) * seg_words]);
+            let input = |t: usize, beta: usize| -> &[u64] {
+                b.map_or(&zero_inputs[..], |b| &b[l1.input_words(t, beta)])
+            };
+            let parities = match b {
+                Some(_) => l1.parities(&matrices.m1, &input),
+                None => vec![zero_parities.clone(); l1.rows()],
+            };
+            let own: Vec<Vec<u64>> = parities
+                .par_iter()
+                .enumerate()
+                .map(|(j, p)| {
+                    let (t, beta) = (j / l1.blocks(), j % l1.blocks());
+                    l1.row_block(input(t, beta), p)
+                })
+                .collect();
+            for (j, row) in own.into_iter().enumerate() {
+                rows[sigma + (j << self.span_log)] = row;
+            }
+            let refs: Vec<&[u64]> = parities.iter().map(Vec::as_slice).collect();
+            tops.push(self.top.block(&refs));
+        }
+        BridgeBlocks { rows, tops }
     }
 
-    /// The share `Y = M_3 M_2 y1` of the blocks' levels-2-3 inputs.
+    /// Set every levels-2-3 block's output columns to the composite of its inputs, `z_{y_o}
+    /// = (M_3 M_2 z_in)_o` (the segment's share): the honest output columns of the
+    /// zero-coefficient relation of a span (module docs). [`Self::honest_blocks`] leaves them
+    /// zero, the honest columns of the relation with `Y` as a coefficient.
+    pub fn fill_outputs(&self, matrices: &BridgeMatrices, blocks: &mut BridgeBlocks) {
+        let top = &self.top;
+        for block in &mut blocks.tops {
+            let y = top.parities(matrices, block);
+            for (o, &b) in y.iter().enumerate() {
+                let c = top.y_col(o);
+                block[c / 64] = (block[c / 64] & !(1 << (c % 64))) | (u64::from(b) << (c % 64));
+            }
+        }
+    }
+
+    /// The share `Y = M_3 M_2 y1` of the blocks' levels-2-3 inputs (one segment).
+    ///
+    /// # Panics
+    /// If the union covers more than one segment.
     #[must_use]
     pub fn share(&self, matrices: &BridgeMatrices, blocks: &BridgeBlocks) -> Vec<u8> {
-        self.top.parities(matrices, &blocks.top)
+        assert_eq!(self.span(), 1, "one segment");
+        self.top.parities(matrices, &blocks.tops[0])
+    }
+
+    /// The final vectors `Y_sigma = M_3 M_2 y1_sigma` of every segment of the span
+    /// (`2^span_log` of them; zero for segments without bits).
+    #[must_use]
+    pub fn shares(&self, matrices: &BridgeMatrices, blocks: &BridgeBlocks) -> Vec<Vec<u8>> {
+        blocks
+            .tops
+            .iter()
+            .map(|top| self.top.parities(matrices, top))
+            .collect()
     }
 
     /// The two relations for `sd`, its matrices and the share `y`.
@@ -1036,72 +1142,106 @@ impl BridgeUnion {
         slots: Option<(&Level1Slot<'_>, &TopSlot<'_>)>,
     ) -> Vec<SlotBuffers> {
         let (l1, top) = (&self.l1, &self.top);
-        assert_eq!(blocks.rows.len(), l1.rows(), "one block per level-1 row");
-        assert!(blocks.rows.iter().all(|r| r.len() == l1.useful_words()));
+        let (span, span_log) = (self.span(), self.span_log);
         assert_eq!(
-            blocks.top.len(),
-            top.useful_words(),
+            blocks.rows.len(),
+            l1.rows() << span_log,
+            "one block per level-1 row"
+        );
+        assert!(blocks.rows.iter().all(|r| r.len() == l1.useful_words()));
+        assert_eq!(blocks.tops.len(), span, "one levels-2-3 block per segment");
+        assert!(
+            blocks.tops.iter().all(|t| t.len() == top.useful_words()),
             "levels-2-3 block length"
         );
         let nu = self.geometry.nu();
         let n_in = l1.block_len() / 64;
-        let parities = slots.map(|(s1, _)| {
-            l1.parities(&s1.matrices().m1, &|t, beta| {
-                &blocks.rows[l1.row(t, beta)][..n_in]
-            })
+        // Per segment, the parities of the committed rows' own inputs (row order of the
+        // segment, `beta + blocks t`).
+        let parities: Option<Vec<Vec<Vec<u64>>>> = slots.map(|(s1, _)| {
+            (0..span)
+                .map(|sigma| {
+                    l1.parities(&s1.matrices().m1, &|t, beta| {
+                        &blocks.rows[self.row(sigma, t, beta)][..n_in]
+                    })
+                })
+                .collect()
         });
-        let b1 = pack_rows(l1.k_log(), l1.useful_bits(), nu, l1.rows(), |j, z, a, b| {
-            z.copy_from_slice(&blocks.rows[j]);
-            if let (Some((s1, _)), Some(p)) = (slots, &parities) {
-                s1.apply_ab_with(z, &p[j], a, b);
-            }
-        });
-        let b2 = pack_rows(top.k_log(), top.useful_bits(), nu, 1, |_, z, a, b| {
-            z.copy_from_slice(&blocks.top);
-            if let Some((_, s2)) = slots {
-                s2.apply_ab(z, a, b);
-            }
-        });
+        let b1 = pack_rows(
+            l1.k_log(),
+            l1.useful_bits(),
+            nu,
+            l1.rows() << span_log,
+            |j, z, a, b| {
+                z.copy_from_slice(&blocks.rows[j]);
+                if let (Some((s1, _)), Some(p)) = (slots, &parities) {
+                    s1.apply_ab_with(z, &p[j % span][j >> span_log], a, b);
+                }
+            },
+        );
+        let b2 = pack_rows(
+            top.k_log(),
+            top.useful_bits(),
+            nu,
+            span,
+            |sigma, z, a, b| {
+                z.copy_from_slice(&blocks.tops[sigma]);
+                if let Some((_, s2)) = slots {
+                    s2.apply_ab(z, a, b);
+                }
+            },
+        );
         vec![b1, b2]
     }
 
-    fn lane_coords(&self, lane: &[F128]) {
+    fn lane_coords(&self, sigma: &[F128], lane: &[F128]) {
         assert_eq!(
             lane.len(),
             self.l1.lane_log(),
             "one coordinate per lane-index bit"
         );
+        assert_eq!(
+            sigma.len(),
+            self.span_log,
+            "one coordinate per segment-index bit"
+        );
     }
 
-    /// Claim point on the level-1 inputs: rows `[beta (blocks_log) | lane (lane_log) | 0]`,
-    /// word columns `cols` (`log2(L / 128)` coordinates over the block's input words; for
-    /// the production layout `[w (3) | i mod 2^9 (min(d, 9))]`).
+    /// Claim point on the level-1 inputs: rows `[sigma (span_log) | beta (blocks_log) | lane
+    /// (lane_log) | 0]`, word columns `cols` (`log2(L / 128)` coordinates over the block's
+    /// input words; for the production layout `[w (3) | i mod 2^9 (min(d, 9))]`).
     #[must_use]
-    pub fn input_point(&self, beta: &[F128], lane: &[F128], cols: &[F128]) -> Vec<F128> {
+    pub fn input_point(
+        &self,
+        sigma: &[F128],
+        beta: &[F128],
+        lane: &[F128],
+        cols: &[F128],
+    ) -> Vec<F128> {
         assert_eq!(beta.len(), self.l1.blocks_log());
-        self.lane_coords(lane);
+        self.lane_coords(sigma, lane);
         assert_eq!(
             cols.len(),
             log2_ceil(self.l1.block_len() / 128),
             "one coordinate per input-word bit"
         );
-        let rows: Vec<F128> = beta.iter().chain(lane).copied().collect();
+        let rows: Vec<F128> = sigma.iter().chain(beta).chain(lane).copied().collect();
         self.geometry.region_point(Self::LEVEL1, &rows, cols)
     }
 
-    /// Claim point on the level-1 parities: rows `[beta | lane | 0]`, word columns `[y
-    /// (log2(m_1 / 128)) | the parity region's word base above them, as 0/1 constants]`.
+    /// Claim point on the level-1 parities: rows `[sigma | beta | lane | 0]`, word columns
+    /// `[y (log2(m_1 / 128)) | the parity region's word base above them, as 0/1 constants]`.
     ///
     /// # Panics
     /// If `m_1` is not a multiple of 128.
     #[must_use]
-    pub fn y1_point(&self, beta: &[F128], lane: &[F128], y: &[F128]) -> Vec<F128> {
+    pub fn y1_point(&self, sigma: &[F128], beta: &[F128], lane: &[F128], y: &[F128]) -> Vec<F128> {
         let m1 = self.l1.m1();
         assert!(m1.is_multiple_of(128), "parity words need m_1 % 128 == 0");
         let y_log = log2_ceil(m1 / 128);
         assert_eq!(y.len(), y_log);
         assert_eq!(beta.len(), self.l1.blocks_log());
-        self.lane_coords(lane);
+        self.lane_coords(sigma, lane);
         let base = (self.l1.y1_base() / 128) >> y_log;
         let k = self.l1.k_log() - 7;
         let mut cols = y.to_vec();
@@ -1112,20 +1252,26 @@ impl BridgeUnion {
                 F128::ZERO
             });
         }
-        let rows: Vec<F128> = beta.iter().chain(lane).copied().collect();
+        let rows: Vec<F128> = sigma.iter().chain(beta).chain(lane).copied().collect();
         self.geometry.region_point(Self::LEVEL1, &rows, &cols)
     }
 
-    /// Claim point on the levels-2-3 output columns `y_o` (value 0 for every valid proof):
-    /// row 0, word columns `[o (log2(m_3 / 128)) | the region's word base above them]`.
+    /// Claim point on the levels-2-3 output columns `y_o` (value: the multilinear extension
+    /// of the public `Y` table at the point): rows `[sigma]`, word columns `[o (log2(m_3 /
+    /// 128)) | the region's word base above them]`.
     ///
     /// # Panics
-    /// If `o` has the wrong length.
+    /// If `o` or `sigma` has the wrong length.
     #[must_use]
-    pub fn output_point(&self, o: &[F128]) -> Vec<F128> {
+    pub fn output_point(&self, sigma: &[F128], o: &[F128]) -> Vec<F128> {
         let m3 = self.top.segment.output_bits();
         let o_log = log2_ceil(m3.div_ceil(128));
         assert_eq!(o.len(), o_log, "one coordinate per output-word bit");
+        assert_eq!(
+            sigma.len(),
+            self.span_log,
+            "one coordinate per segment-index bit"
+        );
         let base = (self.top.y_base() / 128) >> o_log;
         let k = self.top.k_log() - 7;
         let mut cols = o.to_vec();
@@ -1136,20 +1282,20 @@ impl BridgeUnion {
                 F128::ZERO
             });
         }
-        self.geometry.region_point(Self::TOP, &[], &cols)
+        self.geometry.region_point(Self::TOP, sigma, &cols)
     }
 
-    /// Claim point on the levels-2-3 inputs: row 0, word columns `[y | beta | lane | 0]`
-    /// (input word `y + (m_1 / 128) beta + (G / 128) t`).
+    /// Claim point on the levels-2-3 inputs: rows `[sigma]`, word columns `[y | beta | lane |
+    /// 0]` (input word `y + (m_1 / 128) beta + (G / 128) t`).
     #[must_use]
-    pub fn top_point(&self, y: &[F128], beta: &[F128], lane: &[F128]) -> Vec<F128> {
+    pub fn top_point(&self, sigma: &[F128], y: &[F128], beta: &[F128], lane: &[F128]) -> Vec<F128> {
         let m1 = self.l1.m1();
         assert!(m1.is_multiple_of(128), "parity words need m_1 % 128 == 0");
         assert_eq!(y.len(), log2_ceil(m1 / 128));
         assert_eq!(beta.len(), self.l1.blocks_log());
-        self.lane_coords(lane);
+        self.lane_coords(sigma, lane);
         let cols: Vec<F128> = y.iter().chain(beta).chain(lane).copied().collect();
-        self.geometry.region_point(Self::TOP, &[], &cols)
+        self.geometry.region_point(Self::TOP, sigma, &cols)
     }
 }
 
@@ -1159,6 +1305,7 @@ mod tests {
     use crate::flock_union::eval_packed;
     use agg_bridge::gf2_walker;
     use agg_bridge::seed::derive_matrices_for;
+    use bincode::Options as _;
     use flock_core::challenger::{Challenger, FsChallenger};
     use flock_core::lincheck::SparseMatrixCircuit;
     use flock_core::test_rng::Rng;
@@ -1251,7 +1398,7 @@ mod tests {
         for r in &blocks.rows {
             assert!(ok1(r));
         }
-        assert!(ok2(&s2, &blocks.top));
+        assert!(ok2(&s2, &blocks.tops[0]));
         let l1 = *bu.level1();
         let flip = |v: &[u64], c: usize| {
             let mut v = v.to_vec();
@@ -1266,13 +1413,13 @@ mod tests {
         let mut wrong = y.clone();
         wrong[3] ^= 1;
         let (_, bad) = bu.slots(sd(3), &mats, wrong);
-        assert!(!ok2(&bad, &blocks.top));
+        assert!(!ok2(&bad, &blocks.tops[0]));
         let top = *bu.top();
         let c = (0..top.input_bits())
-            .find(|&c| top.parities(&mats, &flip(&blocks.top, c)) != y)
+            .find(|&c| top.parities(&mats, &flip(&blocks.tops[0], c)) != y)
             .expect("a visible column");
-        assert!(!ok2(&s2, &flip(&blocks.top, c)));
-        assert!(!ok2(&s2, &flip(&blocks.top, top.y_col(2))));
+        assert!(!ok2(&s2, &flip(&blocks.tops[0], c)));
+        assert!(!ok2(&s2, &flip(&blocks.tops[0], top.y_col(2))));
     }
 
     /// A row evaluator `(z, a, b)`.
@@ -1512,13 +1659,13 @@ mod tests {
             let mut lane = rand(&mut rng, 3);
             lane[2] = F128::ZERO;
             let y = rand(&mut rng, 6);
-            let v_y1 = eval_packed(&union_z, &bu.y1_point(&beta, &lane, &y), nu);
-            let v_top = eval_packed(&union_z, &bu.top_point(&y, &beta, &lane), nu);
+            let v_y1 = eval_packed(&union_z, &bu.y1_point(&[], &beta, &lane, &y), nu);
+            let v_top = eval_packed(&union_z, &bu.top_point(&[], &y, &beta, &lane), nu);
             assert_eq!(v_y1, v_top, "parity copies (d {d})");
             assert_ne!(v_y1, F128::ZERO);
             // A flipped parity copy breaks the identity.
             let mut bad = blocks.clone();
-            bad.top[0] ^= 1;
+            bad.tops[0][0] ^= 1;
             let bufs = bu.buffers(&bad, None);
             let zs: Vec<&[F128]> = bufs.iter().map(|b| b.z.as_slice()).collect();
             let bad_z = scatter_for_test(bu.geometry(), &zs);
@@ -1526,13 +1673,97 @@ mod tests {
             let y0 = [F128::ZERO; 6];
             let beta0 = vec![F128::ZERO; bu.level1().blocks_log()];
             assert_ne!(
-                eval_packed(&bad_z, &bu.y1_point(&beta0, &lane0, &y0), nu),
-                eval_packed(&bad_z, &bu.top_point(&y0, &beta0, &lane0), nu)
+                eval_packed(&bad_z, &bu.y1_point(&[], &beta0, &lane0, &y0), nu),
+                eval_packed(&bad_z, &bu.top_point(&[], &y0, &beta0, &lane0), nu)
             );
             // The input region: word w of record 0, lane 0 is bits word 2 w, 2 w + 1.
             let cols = vec![F128::ZERO; bu.level1().block_len().trailing_zeros() as usize - 7];
-            let v_in = eval_packed(&union_z, &bu.input_point(&beta0, &lane0, &cols), nu);
+            let v_in = eval_packed(&union_z, &bu.input_point(&[], &beta0, &lane0, &cols), nu);
             assert_eq!(v_in, F128::new(bits[0], bits[1]));
+        }
+    }
+
+    /// A span of three segments (two coordinates, the fourth segment zero) at `d = 3` and of
+    /// two at `d = 10` (two blocks): the rows of segment `sigma` are `sigma + 2^span_log j`,
+    /// the shares are the segments' composites, and the region points with a segment
+    /// coordinate evaluate the segment's regions (parity copies agree, inputs and outputs
+    /// are the segment's own).
+    #[test]
+    fn spans_of_segments_share_the_layout_and_address_each_segment() {
+        let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd(13)));
+        let mut rng = Rng::new(13);
+        for (d, segments, span_log) in [(3u32, 3usize, 2usize), (10, 2, 1)] {
+            let bu = BridgeUnion::production_span(d, 0, span_log, Profile::Fast);
+            let one = BridgeUnion::production_part(d, 0, Profile::Fast);
+            assert_eq!(bu.span(), 1 << span_log);
+            let c = bu.cost();
+            assert_eq!(c.rows, [one.cost().rows[0] << span_log, 1 << span_log]);
+            assert_eq!(
+                c.nu,
+                (one.level1().rows_log() + span_log).max(one.cost().nu)
+            );
+            let seg = *bu.segment();
+            let per: Vec<Vec<u64>> = (0..segments).map(|_| random_bits(&seg, &mut rng)).collect();
+            let bits: Vec<u64> = per.concat();
+            let blocks = bu.honest_blocks(&mats, &bits);
+            let shares = bu.shares(&mats, &blocks);
+            assert_eq!(shares.len(), 1 << span_log);
+            for (sigma, share) in shares.iter().enumerate() {
+                let want = if sigma < segments {
+                    gf2_walker::composite(&seg, &mats, &per[sigma])
+                } else {
+                    vec![0; 4096]
+                };
+                assert_eq!(*share, want, "d {d}, segment {sigma}");
+            }
+            // Rows of segment 1 are the single-segment rows of its bits.
+            let single = one.honest_blocks(&mats, &per[1]);
+            let l1 = bu.level1();
+            for t in 0..6 {
+                for beta in 0..l1.blocks() {
+                    assert_eq!(
+                        blocks.rows[bu.row(1, t, beta)],
+                        single.rows[l1.row(t, beta)]
+                    );
+                }
+            }
+            assert_eq!(blocks.tops[1], single.tops[0]);
+            // Region points at a Boolean segment coordinate: segment 1.
+            let bufs = bu.buffers(&blocks, None);
+            let zs: Vec<&[F128]> = bufs.iter().map(|b| b.z.as_slice()).collect();
+            let union_z = scatter_for_test(bu.geometry(), &zs);
+            let nu = bu.geometry().nu();
+            let mut sigma = vec![F128::ZERO; span_log];
+            sigma[0] = F128::ONE;
+            let rand = |rng: &mut Rng, k: usize| -> Vec<F128> {
+                (0..k).map(|_| random_f128(rng)).collect()
+            };
+            let beta = rand(&mut rng, l1.blocks_log());
+            let lane = [random_f128(&mut rng), F128::ZERO, F128::ONE];
+            let y = rand(&mut rng, 6);
+            let v_y1 = eval_packed(&union_z, &bu.y1_point(&sigma, &beta, &lane, &y), nu);
+            let v_top = eval_packed(&union_z, &bu.top_point(&sigma, &y, &beta, &lane), nu);
+            assert_eq!(v_y1, v_top);
+            let sbufs = one.buffers(&single, None);
+            let szs: Vec<&[F128]> = sbufs.iter().map(|b| b.z.as_slice()).collect();
+            let single_z = scatter_for_test(one.geometry(), &szs);
+            let snu = one.geometry().nu();
+            assert_eq!(
+                v_y1,
+                eval_packed(&single_z, &one.y1_point(&[], &beta, &lane, &y), snu)
+            );
+            let cols = rand(&mut rng, l1.block_len().trailing_zeros() as usize - 7);
+            assert_eq!(
+                eval_packed(&union_z, &bu.input_point(&sigma, &beta, &lane, &cols), nu),
+                eval_packed(&single_z, &one.input_point(&[], &beta, &lane, &cols), snu)
+            );
+            // The output region of the honest blocks is zero (Y is the claim, not a column).
+            let o = rand(&mut rng, 5);
+            let rs = rand(&mut rng, span_log);
+            assert_eq!(
+                eval_packed(&union_z, &bu.output_point(&rs, &o), nu),
+                F128::ZERO
+            );
         }
     }
 
@@ -1585,6 +1816,25 @@ mod tests {
         };
         let (proof, cap) = prove(&blocks, &y, false);
         verify(&cap, &proof, &y).expect("honest toy union");
+        // The serialized proof leaves out the level-0 cap (the commitment); the parsed proof
+        // verifies against the commitment and not against another one.
+        let bytes = proof.to_bytes();
+        let parsed = crate::flock_union::UnionProof::from_bytes(&bytes, 2).expect("parse");
+        assert!(parsed.flock.pcs_open.inner.ligerito.initial_cap.is_empty());
+        assert!(!proof.flock.pcs_open.inner.ligerito.initial_cap.is_empty());
+        assert_eq!(
+            bytes.len() + cap.as_bytes().len(),
+            4 + crate::prover::codec()
+                .serialized_size(&proof.flock)
+                .unwrap() as usize
+                + 32,
+            "the cap's bytes are saved"
+        );
+        verify(&cap, &parsed, &y).expect("parsed toy union");
+        let mut other = cap.as_bytes().to_vec();
+        other[5] ^= 1;
+        let other = crate::prover::KeccakCommitment::from_bytes(other);
+        assert!(verify(&other, &parsed, &y).is_err());
         // The precomputed commitment gives the same proof (K14).
         let (again, cap2) = prove(&blocks, &y, true);
         assert_eq!((again, cap2.clone()), (proof.clone(), cap.clone()));

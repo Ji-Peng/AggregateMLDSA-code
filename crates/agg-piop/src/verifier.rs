@@ -691,12 +691,13 @@ mod tests {
     use crate::prover::{FixedMatrices, SeededMatrices};
     use agg_witness::bridge::BridgeMatrices;
 
-    const PROFILES: [FlockProfile; 5] = [
+    const PROFILES: [FlockProfile; 6] = [
         FlockProfile::None,
         FlockProfile::Fast,
         FlockProfile::LaBinius,
         FlockProfile::PublicBits,
         FlockProfile::Slim,
+        FlockProfile::Slim8,
     ];
 
     #[test]
@@ -762,7 +763,12 @@ mod tests {
     #[test]
     fn verify_refuses_fixed_matrices_in_mode_a_and_mismatched_profiles_before_parsing() {
         let fixed = FixedMatrices(BridgeMatrices::random_for_tests(9));
-        for profile in [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::LaBinius] {
+        for profile in [
+            FlockProfile::Fast,
+            FlockProfile::Slim,
+            FlockProfile::Slim8,
+            FlockProfile::LaBinius,
+        ] {
             assert_eq!(
                 refused(&fixed, &AcceptAll(profile), profile),
                 Some(ConfigurationError::UnseededMatrices(profile))

@@ -25,6 +25,15 @@
 //! event-6 item one proof per part ([`crate::wire`]). Part `s` seeds its Flock challengers
 //! with [`part_seed`]`(fs_sigma, s)`.
 //!
+//! Span (deviation K16, [`AggregatorConfig::span`], the default): a batch of more than one
+//! segment whose parts are whole segments is proven by ONE tied part over all its segments
+//! (`agg_keccak::tied::TiedPart::new_span`): one sponge instance of all `N` records and one
+//! bridge union whose levels-2-3 rows prove every `Y_sigma`, so the Flock openings are paid
+//! once per batch instead of once per segment. Segment 0's items carry the span's cap and
+//! proof, the other segments' items say "covered by segment 0" ([`crate::wire`]); the
+//! verifier checks the span when it reaches the last segment, seeded by
+//! [`span_seed`]`(fs_0, .., fs_{S-1})`.
+//!
 //! Memory: the parts are committed one after the other at event 2; each keeps its
 //! commitment and, by default, the sponge commitment's Flock prover data (its Reed-Solomon
 //! codeword and Merkle tree, deviation K14), so that event 6 opens it without committing
@@ -62,11 +71,14 @@ use sha3::{Digest, Sha3_256};
 
 use crate::wire::{SegmentCommitments, SegmentProofs};
 
-/// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]).
-pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
-/// The Flock profiles of mode A: Ligerito `Fast` and `Slim`, both 128 bits work-normalized in
-/// Flock's accounting (docs/keccak.md Section 12).
-pub const MODE_A_PROFILES: [FlockProfile; 2] = [FlockProfile::Fast, FlockProfile::Slim];
+/// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]): Ligerito
+/// `Slim`, 36% fewer Flock bytes than `Fast` for 3% more prover time at 2,048 records
+/// (docs/keccak.md Section 12).
+pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Slim;
+/// The Flock profiles of mode A: Ligerito `Fast`, `Slim` and `Slim8`, all 128 bits
+/// work-normalized in Flock's accounting (docs/keccak.md Section 12).
+pub const MODE_A_PROFILES: [FlockProfile; 3] =
+    [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8];
 
 /// The Ligerito profile of the Flock sub-proofs of a mode-A Flock profile.
 #[must_use]
@@ -74,13 +86,14 @@ pub const fn keccak_profile(profile: FlockProfile) -> Option<Profile> {
     match profile {
         FlockProfile::Fast => Some(Profile::Fast),
         FlockProfile::Slim => Some(Profile::Slim),
+        FlockProfile::Slim8 => Some(Profile::Slim8),
         _ => None,
     }
 }
 
 /// The Ligerito profile of a mode-A Flock profile (panics on another profile).
 fn ligerito_of(profile: FlockProfile) -> Profile {
-    keccak_profile(profile).expect("a mode-A Flock profile (Fast or Slim)")
+    keccak_profile(profile).expect("a mode-A Flock profile (Fast, Slim or Slim8)")
 }
 /// Default `log2` of the record positions per Flock part. With the tied part (K11) a part
 /// of `2^d` records costs a sponge instance of `2^(d + 19)` bits and a bridge instance whose
@@ -94,6 +107,8 @@ pub const MIN_PART_LOG2: u32 = 3;
 pub const SEGMENT_LOG2: u32 = 13;
 /// Label of the per-part Flock seed.
 pub const PART_SEED_LABEL: &[u8] = b"agg-mldsa/v1/flock-part-seed";
+/// Label of the Flock seed of a span over all segments.
+pub const SPAN_SEED_LABEL: &[u8] = b"agg-mldsa/v1/flock-span-seed";
 /// Bits of a final vector or share.
 const Y_BITS: usize = 4096;
 
@@ -107,6 +122,27 @@ pub fn part_seed(fs: &[u8; 32], part: usize) -> [u8; 32] {
     h.update(fs);
     h.update((part as u64).to_le_bytes());
     h.finalize().into()
+}
+
+/// The Flock challenger seed of a span over the segments whose seeds are `fs` (event 5):
+/// `SHA3-256(label || LE64(S) || fs_0 || .. || fs_{S-1})`.
+#[must_use]
+pub fn span_seed(fs: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update((SPAN_SEED_LABEL.len() as u64).to_le_bytes());
+    h.update(SPAN_SEED_LABEL);
+    h.update((fs.len() as u64).to_le_bytes());
+    for f in fs {
+        h.update(f);
+    }
+    h.finalize().into()
+}
+
+/// Whether a batch is proven by one span over all its segments: more than one segment, whole
+/// segments as parts, and the span option on.
+#[must_use]
+pub fn spans_segments(geometry: &Geometry, part_log2: u32, span: bool) -> bool {
+    span && geometry.segments() >= 2 && SegmentParts::plan(geometry, 0, part_log2).d_part == geometry.d_seg()
 }
 
 /// The split of one segment's live records into Flock parts.
@@ -186,6 +222,7 @@ pub struct PartProveLog {
 pub struct FlockProver<'g, 'h> {
     gate: &'g ChainGate,
     profile: FlockProfile,
+    span: bool,
     geometry: Geometry,
     records: Vec<SpongeRecord>,
     part_log2: u32,
@@ -204,6 +241,8 @@ struct PartState<'g> {
 #[derive(Default)]
 struct ProverState<'g> {
     segments: Vec<Vec<PartState<'g>>>,
+    /// The span over all segments, when the batch is proven as one (module docs).
+    span: Option<PartState<'g>>,
     log: Vec<PartProveLog>,
 }
 
@@ -228,6 +267,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         Self {
             gate,
             profile: FLOCK_PROFILE,
+            span: true,
             geometry,
             records,
             part_log2,
@@ -246,6 +286,14 @@ impl<'g, 'h> FlockProver<'g, 'h> {
     pub fn profile(mut self, profile: FlockProfile) -> Self {
         ligerito_of(profile);
         self.profile = profile;
+        self
+    }
+
+    /// Prove a batch of more than one segment as one span when its parts are whole segments
+    /// (default; module docs), or every segment on its own.
+    #[must_use]
+    pub fn span(mut self, span: bool) -> Self {
+        self.span = span;
         self
     }
 
@@ -275,6 +323,93 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             None => seg.honest_parts(records),
         }
     }
+
+    /// Event 2 of a span: one tied part over all `segments` (module docs); segment 0's item
+    /// holds its cap, the others are covered.
+    fn commit_span(&self, state: &mut ProverState<'g>, segments: usize) -> Vec<Vec<u8>> {
+        let start = Instant::now();
+        let d = self.geometry.d_seg();
+        let n = self.records.len();
+        let seg = TiedPart::new_span(self.gate, n, d, 0, segments, ligerito_of(self.profile));
+        let (sponge, bits) = self.build(&seg, 0, 0, &self.records);
+        let mut committed = seg.commit_parts(sponge, bits, &self.records);
+        let commitment = committed.commitment().clone();
+        let commit_data = committed
+            .take_commit_data()
+            .filter(|_| self.keep_commit_data);
+        drop(committed);
+        state.log.push(PartProveLog {
+            sigma: 0,
+            part: 0,
+            records: n,
+            commit: start.elapsed(),
+            kept_bytes: commit_data.as_ref().map_or(0, CommitData::heap_bytes),
+            ..PartProveLog::default()
+        });
+        let item = |span: u8, commitments: Vec<Vec<u8>>| {
+            SegmentCommitments {
+                profile: self.profile as u8,
+                d_part: d,
+                span,
+                commitments,
+            }
+            .to_bytes()
+        };
+        let mut items = vec![item(
+            u8::try_from(segments).expect("at most 255 segments"),
+            vec![commitment.to_bytes()],
+        )];
+        items.extend((1..segments).map(|_| item(0, Vec::new())));
+        state.span = Some(PartState {
+            seg,
+            range: 0..n,
+            commitment,
+            commit_data,
+        });
+        items
+    }
+
+    /// Event 6 of a span: the proof of every `Y_sigma` in segment 0's item, empty items for
+    /// the covered segments.
+    fn prove_span(
+        &self,
+        state: &mut ProverState<'g>,
+        part: PartState<'g>,
+        bridge_seed: &[u8; 32],
+        matrices: &BridgeMatrices,
+        seeds: &[[u8; 32]],
+        final_vectors: &[Vec<u8>],
+    ) -> Vec<Vec<u8>> {
+        let start = Instant::now();
+        let segments = part.seg.segments();
+        assert_eq!(seeds.len(), segments, "one seed per segment");
+        assert_eq!(final_vectors.len(), segments, "one Y per segment");
+        let (sponge, bits) = self.build(&part.seg, 0, 0, &self.records);
+        let committed =
+            part.seg
+                .reattach(sponge, bits, &self.records, part.commitment, part.commit_data);
+        let proof = part.seg.prove_with_final_vectors(
+            committed,
+            *bridge_seed,
+            matrices,
+            final_vectors.to_vec(),
+            &span_seed(seeds),
+        );
+        let log = &mut state.log[0];
+        log.prove = start.elapsed();
+        log.proof_bytes = proof.bytes.len();
+        let empty = SegmentProofs {
+            shares: Vec::new(),
+            proofs: Vec::new(),
+        };
+        let mut items = vec![SegmentProofs {
+            shares: Vec::new(),
+            proofs: vec![proof.bytes],
+        }
+        .to_bytes()];
+        items.extend((1..segments).map(|_| empty.to_bytes()));
+        items
+    }
 }
 
 impl KeccakSide for FlockProver<'_, '_> {
@@ -282,7 +417,11 @@ impl KeccakSide for FlockProver<'_, '_> {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
         let mut state = self.state.lock().expect("state");
         state.segments.clear();
+        state.span = None;
         state.log.clear();
+        if spans_segments(&self.geometry, self.part_log2, self.span) {
+            return self.commit_span(&mut state, segments);
+        }
         let mut items = Vec::with_capacity(segments);
         for sigma in 0..segments {
             let plan = SegmentParts::plan(&self.geometry, sigma, self.part_log2);
@@ -326,6 +465,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                 SegmentCommitments {
                     profile: self.profile as u8,
                     d_part: plan.d_part,
+                    span: 1,
                     commitments: parts.iter().map(|p| p.commitment.to_bytes()).collect(),
                 }
                 .to_bytes(),
@@ -343,6 +483,9 @@ impl KeccakSide for FlockProver<'_, '_> {
         final_vectors: &[Vec<u8>],
     ) -> Vec<Vec<u8>> {
         let mut state = self.state.lock().expect("state");
+        if let Some(span) = state.span.take() {
+            return self.prove_span(&mut state, span, bridge_seed, matrices, seeds, final_vectors);
+        }
         let segments = std::mem::take(&mut state.segments);
         assert_eq!(segments.len(), seeds.len(), "one seed per segment");
         assert_eq!(segments.len(), final_vectors.len(), "one Y per segment");
@@ -363,7 +506,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                     part.seg
                         .reattach(sponge, bits, records, part.commitment, part.commit_data);
                 let share = if s + 1 < count {
-                    let own = part.seg.final_vector(&committed, matrices);
+                    let own = part.seg.final_vectors(&committed, matrices).remove(0);
                     item.shares.push(pack_final_vector(&own));
                     acc.iter_mut().zip(&own).for_each(|(a, b)| *a ^= b);
                     own
@@ -373,11 +516,11 @@ impl KeccakSide for FlockProver<'_, '_> {
                         .map(|(a, y)| a ^ y)
                         .collect()
                 };
-                let proof = part.seg.prove_with_final_vector(
+                let proof = part.seg.prove_with_final_vectors(
                     committed,
                     *bridge_seed,
                     matrices,
-                    share,
+                    vec![share],
                     &part_seed(&seeds[sigma], s),
                 );
                 let log = &mut state.log[entry];
@@ -427,6 +570,20 @@ pub struct FlockVerifier<'g> {
     profile: FlockProfile,
     log: Mutex<Vec<PartVerifyLog>>,
     rejection: Mutex<Option<(usize, SegmentRejection)>>,
+    span: Mutex<Option<SpanStash>>,
+}
+
+/// What a span's verification needs from the segments it covers, gathered segment by
+/// segment until the last one (module docs).
+struct SpanStash {
+    segments: usize,
+    d_part: u32,
+    commitment: Vec<u8>,
+    proof: Vec<u8>,
+    mu: Vec<[u8; 64]>,
+    c_tilde: Vec<[u8; C_TILDE_BYTES]>,
+    final_vectors: Vec<Vec<u8>>,
+    seeds: Vec<[u8; 32]>,
 }
 
 impl<'g> FlockVerifier<'g> {
@@ -449,6 +606,7 @@ impl<'g> FlockVerifier<'g> {
             profile,
             log: Mutex::new(Vec::new()),
             rejection: Mutex::new(None),
+            span: Mutex::new(None),
         }
     }
 
@@ -468,6 +626,100 @@ impl<'g> FlockVerifier<'g> {
         *self.rejection.lock().expect("rejection") = Some((sigma, why));
         false
     }
+
+    /// Segment `sigma` of a span (`commitments.span != 1`): segment 0 opens it with the
+    /// span's cap and proof, every later segment is covered (no commitment, an empty proof
+    /// item) and adds its statement, `Y_sigma` and seed; the last one verifies the span.
+    fn verify_span(&self, segment: &SegmentContext<'_>, commitments: &SegmentCommitments) -> bool {
+        use crate::wire::ItemError;
+        let sigma = segment.sigma;
+        let total = segment.geometry.segments();
+        let mut stash = self.span.lock().expect("span");
+        if sigma == 0 {
+            let span = usize::from(commitments.span);
+            if span != total
+                || total < 2
+                || commitments.d_part != segment.geometry.d_seg()
+                || commitments.commitments.len() != 1
+            {
+                return self.reject(sigma, SegmentRejection::Item(ItemError::Span(commitments.span)));
+            }
+            let proofs = match SegmentProofs::from_bytes(segment.proof, 1) {
+                Ok(p) => p,
+                Err(e) => return self.reject(sigma, SegmentRejection::Item(e)),
+            };
+            *stash = Some(SpanStash {
+                segments: total,
+                d_part: commitments.d_part,
+                commitment: commitments.commitments[0].clone(),
+                proof: proofs.proofs[0].clone(),
+                mu: Vec::new(),
+                c_tilde: Vec::new(),
+                final_vectors: Vec::new(),
+                seeds: Vec::new(),
+            });
+        } else {
+            let covered = commitments.span == 0
+                && commitments.commitments.is_empty()
+                && stash
+                    .as_ref()
+                    .is_some_and(|st| st.d_part == commitments.d_part && st.seeds.len() == sigma);
+            if !covered {
+                return self.reject(sigma, SegmentRejection::Item(ItemError::Span(commitments.span)));
+            }
+            if let Err(e) = SegmentProofs::from_bytes(segment.proof, 0) {
+                return self.reject(sigma, SegmentRejection::Item(e));
+            }
+        }
+        let st = stash.as_mut().expect("an open span");
+        st.mu.extend_from_slice(segment.mu);
+        st.c_tilde.extend_from_slice(segment.c_tilde);
+        st.final_vectors.push(segment.final_vector.to_vec());
+        st.seeds.push(*segment.seed);
+        if sigma + 1 < st.segments {
+            return true;
+        }
+        let st = stash.take().expect("an open span");
+        drop(stash);
+        let start = Instant::now();
+        let n = st.mu.len();
+        if n == 0 {
+            return self.reject(sigma, SegmentRejection::EmptySegment);
+        }
+        let seg = TiedPart::new_span(
+            self.gate,
+            n,
+            st.d_part,
+            0,
+            st.segments,
+            ligerito_of(self.profile),
+        );
+        let setup = start.elapsed();
+        let outcome = TiedCommitment::from_bytes(&st.commitment).and_then(|commitment| {
+            seg.verify(
+                &st.mu,
+                &st.c_tilde,
+                &commitment,
+                *segment.bridge_seed,
+                segment.matrices,
+                &st.final_vectors,
+                &span_seed(&st.seeds),
+                &KeccakProof { bytes: st.proof },
+            )
+        });
+        self.log.lock().expect("log").push(PartVerifyLog {
+            sigma: 0,
+            part: 0,
+            records: n,
+            setup,
+            verify: start.elapsed() - setup,
+            accepted: outcome.is_ok(),
+        });
+        match outcome {
+            Ok(()) => true,
+            Err(e) => self.reject(sigma, SegmentRejection::Part(0, e.to_string())),
+        }
+    }
 }
 
 impl KeccakVerifier for FlockVerifier<'_> {
@@ -480,6 +732,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
         if sigma == 0 {
             self.log.lock().expect("log").clear();
             *self.rejection.lock().expect("rejection") = None;
+            *self.span.lock().expect("span") = None;
         }
         let live = segment.mu.len();
         let commitments = match SegmentCommitments::from_bytes(segment.commitment) {
@@ -491,6 +744,9 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 sigma,
                 SegmentRejection::Item(crate::wire::ItemError::Profile(commitments.profile)),
             );
+        }
+        if commitments.span != 1 || self.span.lock().expect("span").is_some() {
+            return self.verify_span(segment, &commitments);
         }
         let d_part = commitments.d_part;
         if d_part < MIN_PART_LOG2 || d_part > segment.geometry.d_seg() {
@@ -552,7 +808,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 &commitment,
                 *segment.bridge_seed,
                 segment.matrices,
-                share,
+                std::slice::from_ref(share),
                 &part_seed(segment.seed, s),
                 &KeccakProof {
                     bytes: proofs.proofs[s].clone(),
@@ -585,6 +841,9 @@ pub struct AggregatorConfig {
     pub part_log2: u32,
     /// The Flock profile ([`MODE_A_PROFILES`], bound at event 0).
     pub profile: FlockProfile,
+    /// Prove a batch of more than one segment as one span over all segments when the parts
+    /// are whole segments (module docs, deviation K16; default on).
+    pub span: bool,
 }
 
 impl Default for AggregatorConfig {
@@ -592,6 +851,7 @@ impl Default for AggregatorConfig {
         Self {
             part_log2: DEFAULT_PART_LOG2,
             profile: FLOCK_PROFILE,
+            span: true,
         }
     }
 }
@@ -974,6 +1234,7 @@ impl Aggregator {
             hooks.flock_witness,
         )
         .profile(profile)
+        .span(self.config.span)
         .keep_commit_data(self.keep_commit_data);
         let recording = RecordingMatrices::default();
         let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
@@ -1285,6 +1546,7 @@ mod tests {
             SegmentCommitments {
                 profile: FLOCK_PROFILE as u8,
                 d_part,
+                span: 1,
                 commitments,
             }
             .to_bytes()
@@ -1344,6 +1606,100 @@ mod tests {
         assert!(verifier.log().is_empty(), "no Flock part was run");
     }
 
+    /// The span glue of the verifier (deviation K16) on the geometry of `N = 2^14 + 1` (four
+    /// segments, the last empty), without proofs: segment 0's item opens a span over all four
+    /// segments, segments 1 to 3 are covered and add their statements, and the last one runs
+    /// the span's verification (garbage proof bytes here: rejected as part 0 at segment 3,
+    /// with all `N` records). A span over fewer segments, a covered item at segment 0, a
+    /// covered item with a commitment, a per-segment item inside a span, a second span item
+    /// and a covered segment with a proof are rejected.
+    #[test]
+    fn span_items_open_gather_and_close_at_the_last_segment() {
+        let gate = sponge_gate();
+        let verifier = FlockVerifier::new(&gate);
+        let geometry = Geometry::new((1 << 14) + 1).unwrap();
+        assert_eq!(geometry.segments(), 4);
+        assert!(spans_segments(&geometry, DEFAULT_PART_LOG2, true));
+        assert!(!spans_segments(&geometry, DEFAULT_PART_LOG2, false));
+        assert!(!spans_segments(&geometry, 12, true));
+        assert!(!spans_segments(&Geometry::new(8192).unwrap(), DEFAULT_PART_LOG2, true));
+        let matrices = BridgeMatrices::random_for_tests(3);
+        let item = |span: u8, commitments: Vec<Vec<u8>>| {
+            SegmentCommitments {
+                profile: FLOCK_PROFILE as u8,
+                d_part: 13,
+                span,
+                commitments,
+            }
+            .to_bytes()
+        };
+        let open = item(4, vec![vec![0; 8]]);
+        let open_proof = SegmentProofs {
+            shares: Vec::new(),
+            proofs: vec![vec![1, 2, 3]],
+        }
+        .to_bytes();
+        let covered = item(0, Vec::new());
+        let zero = vec![0_u8; Y_BITS];
+        let mu = vec![[0_u8; 64]; 1 << 13];
+        let c_tilde = vec![[0_u8; C_TILDE_BYTES]; 1 << 13];
+        let live = [1 << 13, 1 << 13, 1, 0];
+        let check = |sigma: usize, commitment: &[u8], proof: &[u8]| {
+            verifier.verify(&SegmentContext {
+                sigma,
+                geometry,
+                commitment,
+                seed: &[sigma as u8; 32],
+                bridge_seed: &[0; 32],
+                mu: &mu[..live[sigma]],
+                c_tilde: &c_tilde[..live[sigma]],
+                final_vector: &zero,
+                proof,
+                matrices: &matrices,
+            })
+        };
+        let span_rejection = |b: u8| {
+            matches!(
+                verifier.rejection(),
+                Some((_, SegmentRejection::Item(crate::wire::ItemError::Span(x)))) if x == b
+            )
+        };
+        assert!(check(0, &open, &open_proof));
+        assert!(check(1, &covered, &[]));
+        assert!(check(2, &covered, &[]));
+        assert!(verifier.log().is_empty(), "nothing verified before the last segment");
+        assert!(!check(3, &covered, &[]));
+        assert!(matches!(
+            verifier.rejection(),
+            Some((3, SegmentRejection::Part(0, _)))
+        ));
+        let log = verifier.log();
+        assert_eq!((log.len(), log[0].records), (1, (1 << 14) + 1));
+        // A span over three of the four segments; a covered item at segment 0.
+        assert!(!check(0, &item(3, vec![vec![0; 8]]), &open_proof));
+        assert!(span_rejection(3));
+        assert!(!check(0, &covered, &[]));
+        assert!(span_rejection(0));
+        // Inside an open span: a covered item with a commitment, a per-segment item, a second
+        // span item, a covered segment with a proof.
+        for (bad, proof, b) in [
+            (item(0, vec![vec![1]]), Vec::new(), Some(0)),
+            (item(1, Vec::new()), Vec::new(), Some(1)),
+            (open.clone(), Vec::new(), Some(4)),
+            (covered.clone(), vec![0, 0, 0, 0], None),
+        ] {
+            assert!(check(0, &open, &open_proof));
+            assert!(!check(1, &bad, &proof));
+            match b {
+                Some(b) => assert!(span_rejection(b)),
+                None => assert!(matches!(
+                    verifier.rejection(),
+                    Some((1, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
+                )),
+            }
+        }
+    }
+
     /// The Flock records of honest tables are `mu_i` and `w1Encode(w_1'_i)`, which hash to the
     /// published `c~_i`.
     #[test]
@@ -1369,5 +1725,10 @@ mod tests {
         assert_ne!(a, part_seed(&[1; 32], 1));
         assert_ne!(a, part_seed(&[2; 32], 0));
         assert_eq!(a, part_seed(&[1; 32], 0));
+        // The span seed depends on every segment seed and their order.
+        let s = span_seed(&[[1; 32], [2; 32]]);
+        assert_ne!(s, span_seed(&[[2; 32], [1; 32]]));
+        assert_ne!(s, span_seed(&[[1; 32], [2; 32], [0; 32]]));
+        assert_ne!(s, part_seed(&[1; 32], 0));
     }
 }

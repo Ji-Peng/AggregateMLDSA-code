@@ -120,6 +120,12 @@ pub enum LigeritoProfile {
     /// envelope's fixed point was iterated against). Frozen, like `Fast100`.
     Slim100,
     Secure,
+    /// agg-mldsa addition (vendor/flock-core/PATCH.md): `Slim`'s accounting (strict 128-bit
+    /// Johnson components with two-point OOD binding, 16-bit query PoW, the +2/level ladder)
+    /// at L0 rate 1/8, so the ladder runs 3, 5, 7, ...: about two thirds of `Slim`'s L0
+    /// queries for twice its L0 encoding. Derived by [`LigeritoSecurityConfig::derive_profile`]
+    /// and checked by `validate()` exactly as the shipped profiles.
+    Slim8,
 }
 
 impl LigeritoProfile {
@@ -128,6 +134,7 @@ impl LigeritoProfile {
         match self {
             Self::Fast100 | Self::Fast | Self::Secure => 1,
             Self::Slim100 | Self::Slim => 2,
+            Self::Slim8 => 3,
         }
     }
     /// Historical profile-local target. Strict Fast/Slim configs retain the
@@ -137,7 +144,7 @@ impl LigeritoProfile {
     /// query floor.
     pub fn security_bits(self) -> usize {
         match self {
-            Self::Fast100 | Self::Fast | Self::Slim100 | Self::Slim => 100,
+            Self::Fast100 | Self::Fast | Self::Slim100 | Self::Slim | Self::Slim8 => 100,
             Self::Secure => 120,
         }
     }
@@ -148,6 +155,7 @@ impl LigeritoProfile {
             Self::Slim => "slim",
             Self::Slim100 => "slim100",
             Self::Secure => "secure",
+            Self::Slim8 => "slim8",
         }
     }
 }
@@ -536,6 +544,8 @@ macro_rules! profile_configs {
                  include_str!(concat!("../../configs/ligerito/m", $m, "_slim100.toml"))),
                 (($m, LigeritoProfile::Secure),
                  include_str!(concat!("../../configs/ligerito/m", $m, "_secure.toml"))),
+                (($m, LigeritoProfile::Slim8),
+                 include_str!(concat!("../../configs/ligerito/m", $m, "_slim8.toml"))),
             )+
         ]
     };
@@ -1254,7 +1264,7 @@ impl LigeritoSecurityConfig {
     fn validate_profile(&self, profile: LigeritoProfile) -> Result<(), String> {
         let expected = match profile {
             LigeritoProfile::Secure => "f256_split_no_row_union_over_ben_sasson_2025_cor_1_4",
-            LigeritoProfile::Fast | LigeritoProfile::Slim => {
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
                 "f256_split_johnson_two_point_ood_query128_c3_algebraic_row_union_over_bchks25_thm_4_6"
             }
             LigeritoProfile::Fast100 | LigeritoProfile::Slim100 => {
@@ -1767,7 +1777,7 @@ impl LigeritoSecurityConfig {
         // 2026-08-27 consolidation; still < 3 folds, so codewords keep
         // shrinking). Fast100/Slim100/Secure keep the shipped +1/level.
         let rate_gain = match profile {
-            LigeritoProfile::Slim | LigeritoProfile::Fast => 2,
+            LigeritoProfile::Slim | LigeritoProfile::Fast | LigeritoProfile::Slim8 => 2,
             _ => 1,
         };
         Self::derive_profile_ladder(m, profile, 3, rate_gain)
@@ -1798,11 +1808,16 @@ impl LigeritoSecurityConfig {
         // took the `Fast` name in the 2026-08-27 consolidation. Fast100 stays
         // grind-free: it is the frozen historical cost point.
         let query_grind: usize = match profile {
-            LigeritoProfile::Slim100 | LigeritoProfile::Slim | LigeritoProfile::Fast => 16,
+            LigeritoProfile::Slim100
+            | LigeritoProfile::Slim
+            | LigeritoProfile::Fast
+            | LigeritoProfile::Slim8 => 16,
             LigeritoProfile::Fast100 | LigeritoProfile::Secure => 0,
         };
         let query_target_bits = match profile {
-            LigeritoProfile::Fast | LigeritoProfile::Slim => LIST_DECODING_QUERY_TARGET_BITS,
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
+                LIST_DECODING_QUERY_TARGET_BITS
+            }
             // Fast100 IS Fast at the pre-list-decoding cost point: the
             // query term targets the profile's own 100 bits, reproducing
             // the schedule shipped before the strict-128 milestone.
@@ -1836,14 +1851,16 @@ impl LigeritoSecurityConfig {
                 LigeritoProfile::Fast100
                 | LigeritoProfile::Fast
                 | LigeritoProfile::Slim100
-                | LigeritoProfile::Slim,
+                | LigeritoProfile::Slim
+                | LigeritoProfile::Slim8,
             ) => 5usize,
             (
                 28,
                 LigeritoProfile::Fast100
                 | LigeritoProfile::Fast
                 | LigeritoProfile::Slim100
-                | LigeritoProfile::Slim,
+                | LigeritoProfile::Slim
+                | LigeritoProfile::Slim8,
             ) => 4usize,
             _ => 6usize,
         };
@@ -1858,7 +1875,8 @@ impl LigeritoSecurityConfig {
                 LigeritoProfile::Fast100
                 | LigeritoProfile::Fast
                 | LigeritoProfile::Slim100
-                | LigeritoProfile::Slim => paper_per_query_bits(rate, JOHNSON_ETA),
+                | LigeritoProfile::Slim
+                | LigeritoProfile::Slim8 => paper_per_query_bits(rate, JOHNSON_ETA),
             }
         };
 
@@ -1904,7 +1922,8 @@ impl LigeritoSecurityConfig {
                 LigeritoProfile::Fast100
                 | LigeritoProfile::Fast
                 | LigeritoProfile::Slim100
-                | LigeritoProfile::Slim => paper_per_query_bits(rate, JOHNSON_ETA),
+                | LigeritoProfile::Slim
+                | LigeritoProfile::Slim8 => paper_per_query_bits(rate, JOHNSON_ETA),
             };
             let queries = strict_query_count(query_target_bits, query_grind, per_q);
             if queries > (1usize << (cols + rate)) {
@@ -1934,7 +1953,8 @@ impl LigeritoSecurityConfig {
                 LigeritoProfile::Fast100
                 | LigeritoProfile::Fast
                 | LigeritoProfile::Slim100
-                | LigeritoProfile::Slim => {
+                | LigeritoProfile::Slim
+                | LigeritoProfile::Slim8 => {
                     let eps_pg =
                         FOLD_FIELD_LOG_Q - paper_johnson_log_a(rate, JOHNSON_ETA, cols, ilv);
                     let mu = cols + ilv;
@@ -2002,7 +2022,7 @@ impl LigeritoSecurityConfig {
 
         let analysis_version = match profile {
             LigeritoProfile::Secure => "f256_split_no_row_union_over_ben_sasson_2025_cor_1_4",
-            LigeritoProfile::Fast | LigeritoProfile::Slim => {
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
                 "f256_split_johnson_two_point_ood_query128_c3_algebraic_row_union_over_bchks25_thm_4_6"
             }
             // Same analysis as Fast; only the query term's target differs

@@ -687,6 +687,110 @@ unchanged (1,942 MiB kept, 1,959 MiB recommitted at 2,048 records). Saved: one L
 per part, 217 ms of the Flock part at 2,048 records (1,901 against 2,118 ms) and 58 ms at
 1,024.
 
+## K15. Ligerito `Slim` in mode A; the profile in the segment item (spec Sections 8, 10)
+
+Spec Section 10: event 0 binds the Flock profile; Section 8: Ligerito `Fast` as the
+engineering baseline. K11 to K14 ran mode A under `Fast` only
+(`agg_piop::binding::FlockProfile` had `Fast = 1`).
+
+Code: `FlockProfile::Slim = 4` (a mode-A profile: `is_mode_a`, so the configuration policy
+of `agg_piop::verifier` requires the seed-derived matrices for it as for `Fast`);
+`agg_cli::mode_a::AggregatorConfig::profile` and the CLI option `--flock-profile fast|slim`
+choose it, `agg_cli::mode_a::keccak_profile` maps it to `agg_keccak::prover::Profile::Slim`
+(the proof header's profile byte 3). The event-2 segment item carries the profile id
+(`agg_cli::wire::SegmentCommitments::profile`, item version 4); the verifier
+(`AggregateVerifier`) runs under the mode-A profile the items name (or the one fixed by
+`require`, CLI `verify --flock-profile`), the transcript binds it at event 0, and an item
+naming another profile than the verifier's is rejected before any Flock work
+(`ItemError::Profile`).
+
+Why: Flock documents `Slim` (rate 1/4) at the same level as `Fast`: 128 bits
+work-normalized in the Johnson regime with out-of-domain binding and a 16-bit query proof of
+work, every component of its accounting strictly above 128 bits
+(`vendor/flock-core/src/pcs/ligerito.rs`, `LigeritoSecurityConfig::validate`); it halves the
+level-0 queries (119 instead of 244), so a tied part's proof is 33 to 37% smaller
+(`docs/keccak.md` Section 11) for about twice the level-0 encoding and twice the kept commit
+data (K14). Measurements and the default: `docs/keccak.md` Section 12. The verifier accepts
+either profile because both meet the same documented level; `Secure` (120 bits) is not a
+mode-A profile.
+
+## K16. Spans: one tied part over all segments; the final vectors as the output claim (spec Sections 8, 9, 10; docs/bridge.md Section 5c)
+
+Spec and K10, K11, K13: one Flock argument per segment (at least one tied part per segment),
+the bridge union's levels-2-3 row proving the part's share with `Y` a coefficient of its
+composite rows (K8) and its output columns pinned to zero by a claim.
+
+Code (`agg_keccak::bridge_union::BridgeUnion::new_span`, `agg_keccak::tied::TiedPart::new_span`,
+tied-part proof version 3; `agg_cli::mode_a`, `AggregatorConfig::span`, CLI `--flock-span
+on|off`, default on): a batch of `S >= 2` segments whose parts are whole segments
+(`d_part = d_seg = 13`) is proven by ONE tied part over all segments: one sponge instance of
+all `N` records (record `i` of segment `sigma` is row `2^13 sigma + i`) and one bridge union
+covering `2^ceil(log2 S)` segments (level-1 row `sigma + 2^span_log (beta + blocks t)`,
+levels-2-3 row `sigma`; segments without records are zero rows). Every tie point gains the
+segment coordinates `rho_sigma`. In every tied part (also `S = 1`) the levels-2-3 rows are
+proven with a zero coefficient, so their output columns hold `M_3 M_2 y1`, and the output
+claim's value is the multilinear extension of the public table of the final vectors (the
+share for a part of one segment, the `Y_sigma` for a span), computed by the verifier; the
+table's digest is absorbed before the tie challenges. Wire: segment 0's event-2 item has
+span byte `S` and the span's cap, its event-6 item the span's proof (no shares); the items
+of segments `1..S` have span byte 0, no commitment and an empty proof item; the verifier
+gathers the segments' statements, `Y_sigma` and seeds and checks the span at the last
+segment, seeded by `span_seed(fs_0, .., fs_{S-1})`. docs/bridge.md Section 5c has the
+layout, points, checks and the soundness argument.
+
+Why: every tied part pays two Ligerito openings (about 300 KB each with `Fast`, 200 KB with
+`Slim`) whatever its size, so at `N = 2^15` four parts pay eight; a span pays two, of
+polynomials four times larger, whose openings grow by a few levels only (`docs/keccak.md`
+Section 12: Flock bytes per signature at `N = 2^15` from 94.6 measured with `Fast` parts to
+about 16 with a `Slim` span, an estimate). The output claim replaces the `Y` coefficient
+because the rows of one levels-2-3 type share one `A_0`, so different `Y_sigma` per row
+cannot be coefficients. Prover and verifier work are the sums of the parts' (the instances
+are linear in their rows); the prover's peak memory is that of one instance of all `N`
+records (to be measured on the cloud machine). Local tests cover spans at the tied-part level
+(`d = 3, 6`, two and three segments, an empty segment); mode A has more than one segment only
+above `2^13` records, so the span path of `agg_cli::mode_a` is covered locally by the item
+logic without proofs (`span_items_open_gather_and_close_at_the_last_segment`) and awaits the
+cloud run.
+
+## K17. The Ligerito level-0 cap is not serialized (docs/keccak.md Sections 4, 12)
+
+Flock's `LigeritoProof` carries `initial_cap`, the level-0 Merkle cap, which is the
+commitment itself (the event-2 cap of the sponge instance, the framed cap of the bridge
+union); Flock's verifier rejects a proof whose `initial_cap` differs from the commitment's.
+
+Code: `agg_keccak::flock_union::UnionProof::to_bytes` serializes the proof with an empty
+`initial_cap`, `from_bytes` refuses a proof that carries one, and `UnionGeometry::verify` puts
+the commitment's cap in its place before Flock's verifier runs. Prover, transcript and
+verification are otherwise unchanged: an accepted proof is exactly one whose cap equals the
+commitment's, so substituting it accepts the same proofs.
+
+Why: the cap was sent twice, 4,096 bytes (`Fast`) or 2,048 bytes (`Slim`) per Flock
+instance, two instances per tied part.
+
+## K18. A rate-1/8 Ligerito parameter set, `Slim8`, in the vendored Flock core (spec Section 8; updates K12)
+
+K12: the vendored `flock-core` differs from Flock `83f963e` by a prover-only patch; Flock
+ships the Ligerito profiles `Fast` (rate 1/2), `Slim` (rate 1/4) and `Secure`, plus two
+100-bit compatibility profiles.
+
+Code (`vendor/flock-core/PATCH.md` Section 2; `agg_keccak::prover::Profile::Slim8`, header
+byte 4; `agg_piop::binding::FlockProfile::Slim8 = 5`, a mode-A profile; CLI `--flock-profile
+slim8`): a sixth Ligerito profile with `Slim`'s accounting at level-0 rate 1/8, its ladder
+3, 5, 7, ... (+2 per level as `Fast` and `Slim`), 16-bit query PoW, the same `initial_k`
+rule. Its configs are produced by Flock's own `derive_profile` and checked by `validate()`
+(every Johnson component strictly above 128 bits: query term `Q log2(1/(1 - gamma)) + 16`,
+proximity gap over F256, two-point OOD binding, the algebraic terms of the Flock paper's
+Appendix C.3); the generator asserts that the same derivation reproduces the shipped `Slim`
+configs byte for byte. The five shipped profiles are unchanged.
+
+Why: the level-0 queries dominate the opening (`docs/keccak.md` Section 12): rate 1/8 needs
+79 instead of `Slim`'s 119 (per-query `log2(1/(1 - gamma))` 1.42 instead of 0.94 bits at
+`gamma = 1 - sqrt(rho) - 0.02`), and the next levels 48, 35, ... instead of 60, 41, ..., for
+twice `Slim`'s level-0 encoding (four times `Fast`'s) and twice its kept commit data (K14).
+It is a parameter set of the documented analysis, not a profile Flock ships: proofs under it
+verify with this vendored copy (or upstream with the same configs). Measurements and the
+choice of the default: `docs/keccak.md` Section 12.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):

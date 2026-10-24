@@ -35,7 +35,10 @@
 //!
 //! Proof bytes ([`UnionProof::to_bytes`]): bincode of Flock's `R1csProofMergedLigerito`
 //! (zerocheck, lincheck, merged opening) framed by its length, then the claim values, 16
-//! bytes each (little-endian `lo`, `hi`).
+//! bytes each (little-endian `lo`, `hi`). The Ligerito proof's level-0 cap is not sent: it
+//! is the commitment the verifier already holds (event 2, or the framed cap of the bridge
+//! union), and Flock's verifier rejects any other cap, so [`UnionGeometry::verify`] puts the
+//! commitment's cap in its place (deviation K17).
 
 use bincode::Options as _;
 use flock_core::{
@@ -90,11 +93,11 @@ pub struct UnionProof {
 }
 
 impl UnionProof {
-    /// Serialize (module docs).
+    /// Serialize (module docs): the level-0 cap of the Ligerito proof is left out.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let payload = codec()
-            .serialize(&self.flock)
+            .serialize(&Self::without_cap(&self.flock))
             .expect("serializing a proof cannot fail");
         let mut out = Vec::with_capacity(4 + payload.len() + 16 * self.values.len());
         out.extend_from_slice(
@@ -110,15 +113,28 @@ impl UnionProof {
         out
     }
 
-    /// Serialized bytes of the zerocheck, the lincheck, the merged opening and the claim
-    /// values (the framing adds 4 bytes).
+    /// The proof with the Ligerito proof's level-0 cap removed (the serialized form).
+    fn without_cap(
+        flock: &R1csProofMergedLigerito,
+    ) -> std::borrow::Cow<'_, R1csProofMergedLigerito> {
+        if flock.pcs_open.inner.ligerito.initial_cap.is_empty() {
+            return std::borrow::Cow::Borrowed(flock);
+        }
+        let mut out = flock.clone();
+        out.pcs_open.inner.ligerito.initial_cap = Vec::new();
+        std::borrow::Cow::Owned(out)
+    }
+
+    /// Serialized bytes of the zerocheck, the lincheck, the merged opening (without the
+    /// level-0 cap) and the claim values (the framing adds 4 bytes).
     #[must_use]
     pub fn size_breakdown(&self) -> [usize; 4] {
         let size = "serializable proof component";
+        let flock = Self::without_cap(&self.flock);
         [
-            codec().serialized_size(&self.flock.zerocheck).expect(size) as usize,
-            codec().serialized_size(&self.flock.lincheck).expect(size) as usize,
-            codec().serialized_size(&self.flock.pcs_open).expect(size) as usize,
+            codec().serialized_size(&flock.zerocheck).expect(size) as usize,
+            codec().serialized_size(&flock.lincheck).expect(size) as usize,
+            codec().serialized_size(&flock.pcs_open).expect(size) as usize,
             16 * self.values.len(),
         ]
     }
@@ -140,6 +156,9 @@ impl UnionProof {
         let flock: R1csProofMergedLigerito = codec()
             .deserialize(&rest[..len])
             .map_err(|_| malformed("union proof payload"))?;
+        if !flock.pcs_open.inner.ligerito.initial_cap.is_empty() {
+            return Err(malformed("union proof carries its level-0 cap"));
+        }
         let values = rest[len..]
             .as_chunks::<16>()
             .0
@@ -681,6 +700,17 @@ impl UnionGeometry {
             cap: cap.as_chunks::<CAP_NODE_BYTES>().0.to_vec(),
             params: self.pcs_params.clone(),
         };
+        // The serialized proof leaves out the Ligerito level-0 cap (module docs): Flock's
+        // verifier compares it with the commitment's, so the commitment's cap is put in its
+        // place (a proof whose cap differed would be rejected there).
+        let mut opening = proof.flock.pcs_open.clone();
+        if opening.inner.ligerito.initial_cap.is_empty() {
+            opening
+                .inner
+                .ligerito
+                .initial_cap
+                .clone_from(&commitment.cap);
+        }
         let union = self.union();
         union.bind_statement(ch, &commitment);
         let zc = zerocheck::verify_with_grinding(
@@ -737,7 +767,7 @@ impl UnionGeometry {
             &pd,
             &union.jagged_heights(),
             union.n_log(),
-            &proof.flock.pcs_open,
+            &opening,
             &lig_v,
             self.pcs_params.opening_grinding(),
             ch,
@@ -797,6 +827,8 @@ mod tests {
 
     #[test]
     fn union_proof_bytes_round_trip_and_reject_bad_lengths() {
+        // Malformed framing (the round trip of a real proof, without its level-0 cap, is in
+        // `bridge_union::tests::toy_bridge_union_round_trip`).
         let bytes = [7u8, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7];
         assert!(matches!(
             UnionProof::from_bytes(&bytes, 0),

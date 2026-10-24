@@ -82,6 +82,10 @@ pub enum Profile {
     /// Flock's `Slim`: rate 1/4 with the accounting of `Fast` (128 bits work-normalized);
     /// about half the opening bytes for about twice the level-0 encoding work.
     Slim,
+    /// `Slim8` of the vendored Flock core (deviation K18): rate 1/8 at level 0 with `Slim`'s
+    /// accounting, derived and validated by Flock's own `derive_profile`/`validate`; about
+    /// two thirds of `Slim`'s level-0 queries for twice its level-0 encoding work.
+    Slim8,
 }
 
 impl Profile {
@@ -90,17 +94,19 @@ impl Profile {
             Self::Fast => LigeritoProfile::Fast,
             Self::Secure => LigeritoProfile::Secure,
             Self::Slim => LigeritoProfile::Slim,
+            Self::Slim8 => LigeritoProfile::Slim8,
         }
     }
 
-    /// The profile byte of the proof headers: 0 `Fast`, 1 `Secure`, 3 `Slim` (2 is reserved
-    /// for LaBinius).
+    /// The profile byte of the proof headers: 0 `Fast`, 1 `Secure`, 3 `Slim`, 4 `Slim8` (2 is
+    /// reserved for LaBinius).
     #[must_use]
     pub fn id(self) -> u8 {
         match self {
             Self::Fast => 0,
             Self::Secure => 1,
             Self::Slim => 3,
+            Self::Slim8 => 4,
         }
     }
 
@@ -111,6 +117,7 @@ impl Profile {
             0 => Some(Self::Fast),
             1 => Some(Self::Secure),
             3 => Some(Self::Slim),
+            4 => Some(Self::Slim8),
             _ => None,
         }
     }

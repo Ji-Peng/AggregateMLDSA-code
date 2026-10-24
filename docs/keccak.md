@@ -3,11 +3,12 @@
 `crates/agg-keccak` proves, for a batch of signatures, the witness-dependent hash of
 ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock HEAD
 (`succinctlabs/flock` `83f963e`, vendored `flock-core`, K12) and its Ligerito PCS. Deviations
-from the spec are listed in `docs/deviations.md` (entries K1 to K14). Sections 1 to 6
+from the spec are listed in `docs/deviations.md` (entries K1 to K17). Sections 1 to 6
 describe the sponge gate and the standalone sponge proof, Section 7 the bridge slot and the
 first (two-type union) segment, Sections 8 to 11 the tied part that mode A uses: Section 9
 its API, Section 11 the current bridge instance (the two-type bridge union) and its
-measurements.
+measurements, Section 12 the Flock bytes: the `Slim` profile in mode A, spans over all
+segments (tied-part proof version 3), the level-0 cap, and the options measured or estimated.
 
 ## 1. The chi-only Keccak-f gate
 
@@ -125,7 +126,8 @@ Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit
 - PCS: Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding) or `Slim` (rate 1/4),
   `Profile::{Fast, Secure, Slim}` with header bytes 0, 1, 3 (2 is reserved for LaBinius);
   Flock's documented accounting: `Fast` and `Slim` 128 bits work-normalized with 16-bit query
-  proof of work, `Secure` 120 bits. Bytes and times of the three on a tied part: Section 11.
+  proof of work, `Secure` 120 bits. Bytes and times of the three on a tied part: Section 11;
+  mode A binds `Fast` or `Slim` (K15, Section 12).
 - Commitment bytes (`KeccakCommitment::as_bytes`): the Ligerito level-0 Merkle cap, `2^c`
   nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; 128 nodes, 4,096 bytes, for
   every sub-batch size tested), the bytes Flock's `bind_statement` absorbs.
@@ -402,7 +404,12 @@ end of this section).
   against its table of `(mu_i, c~_i, 1, 0)`, the level-1 inputs against the sponge's lane
   groups (times `eq(rho_i[nu_s..d], 0)`), the level-1 parities against their copies, and the
   levels-2-3 output columns against zero. Proof bytes (version 2): `AGGKCT`, version,
-  profile, `n`, `d`, then the framed bridge-union cap, sponge proof and union proof.
+  profile, `n`, `d`, then the framed bridge-union cap, sponge proof and union proof. Since
+  version 3 (K16, docs/bridge.md Section 5c) a tied part may span several segments
+  (`TiedPart::new_span`), the output columns hold `M_3 M_2 y1` and are checked against the
+  table of final vectors (`final_vectors`, `prove_with_final_vectors`, `verify(.., ys, ..)`
+  take one vector per segment of the span), the header has a segment count, and the inner
+  proofs omit the Ligerito level-0 cap (K17).
   Challengers: `fs`, a label per instance (`agg-keccak/v2/tied-sponge`,
   `agg-keccak/v2/tied-bridge-union`), the gate digest and a digest of the statement words
   (sponge) or the two relation digests (union), and a digest of the tie geometry, then
@@ -648,6 +655,178 @@ part) by lattice commitments of about 86 KB per `2^18`-element witness with recu
 (`ref/notes/bench-cloud.md`), with the relation and the ties unchanged.
 
 Raw logs: session scratchpad `bench/`, `bench2/` (not committed).
+
+## 12. Flock bytes: `Slim` in mode A, spans, the level-0 cap, `Slim8` (2026-10-24)
+
+Goal: the fewest Flock bytes per signature at Flock's documented 128-bit level (Ligerito in
+the Johnson regime with two-point out-of-domain binding, every component of
+`LigeritoSecurityConfig::validate` strictly above 128 bits, the query term work-normalized
+with its proof of work), at a stated prover and verifier cost. Deviations K15 to K18.
+
+### 12.1 Where the bytes are
+
+A tied part's proof is the bridge union's cap, the sponge instance's proof and the bridge
+union's proof; each instance proof is a zerocheck (about 3 KB), a lincheck (1.7 KB), the
+claim values and Flock's merged opening, which is a ring-switch and Frobenius layer (13 to 15
+KB) around one Ligerito proof. The Ligerito proof is almost everything: per level, `Q`
+queried rows of the interleaved codeword (`lanes x 16` bytes at level 0, `2^4 x 16` above) and
+their Merkle paths (`log2(codeword) - cap` siblings of 32 bytes), plus the caps, the final
+block and the sum-check messages. Breakdown (`tests/tied.rs`, `AGG_TIED_BREAKDOWN=1`; bytes are
+deterministic):
+
+| Instance (records, `m`) | Profile | Level-0 rows | Level-0 paths | Levels 1+ rows / paths | Ligerito | Instance proof |
+| --- | --- | --- | --- | --- | ---: | ---: |
+| sponge (2,048, `m` 30) | Fast | 244 x 34 lanes: 129.6 KB | 83.9 KB (11 siblings) | 47.8 / 63.7 KB | 340,912 B | 361,556 B |
+| sponge (2,048, `m` 30) | Slim | 119 x 34: 63.2 KB | 48.3 KB (13) | 40.0 / 60.1 KB | 223,856 B | 243,252 B |
+| bridge union (2,048, `m` 24) | Fast | 244 x 51: 194.4 KB | 38.1 KB (5) | 31.8 / 19.8 KB | 296,608 B | 315,804 B |
+| bridge union (2,048, `m` 24) | Slim | 119 x 51: 94.8 KB | 26.0 KB (7) | 25.2 / 20.8 KB | 175,536 B | 193,524 B |
+| bridge union of four segments (`8@13/4`, `m` 28, `initial_k` 4) | Slim8 | 79 x 13: 16.0 KB | 34.6 KB (14) | 34.2 / 56.4 KB | 151,168 B | 169,972 B |
+
+(The Ligerito column is the proof's `size_bytes` without the level-0 cap, which the
+serialized proof no longer carries, K17.) So the bytes are set by the level-0 query count (rate and the 16-bit
+query PoW), the level-0 row width (`lanes = ceil(words / 2^(m - 7 - initial_k))`), the path
+depths, and by the NUMBER of openings: two per tied part, whatever its size.
+
+### 12.2 What was implemented
+
+1. **`Slim` in mode A** (K15): `FlockProfile::Slim = 4`, bound at event 0, named in the
+   event-2 item (item version 4), `--flock-profile`. Default of mode A since this stage.
+2. **Spans** (K16, docs/bridge.md Section 5c, tied-part proof version 3): a batch of `S >= 2`
+   segments is ONE tied part (one sponge instance of all records, one bridge union of all
+   segments), so it pays two openings instead of `2 S`. Every tied part now checks the output
+   columns against the public table of final vectors (the coefficient form cannot carry a
+   different `Y` per row). `--flock-span on|off`, default on. At `N <= 2^13` (one segment) a
+   span is the part of version 2 with the output claim moved.
+3. **The level-0 cap is not sent twice** (K17): 4,096 B (`Fast`) or 2,048 B (`Slim`) per
+   instance.
+4. **`Slim8`** (K18): a rate-1/8 Ligerito parameter set derived by Flock's own
+   `derive_profile` and checked by its `validate()` (79 level-0 queries instead of 119),
+   in the vendored core; `--flock-profile slim8`. Not the default: it is not a profile Flock
+   ships (a project decision, below).
+
+### 12.3 Measurements
+
+Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CPU 2 not used,
+`crypto_bench off` not run, shared with another agent's jobs. CLMUL build
+(`RUSTFLAGS="-C target-feature=+pclmulqdq"`, `--features agg-keccak/avx512,agg-piop/avx512`,
+`target/clmul`) of `e1e26e0` plus the uncommitted changes of this stage (spans, K17, `Slim8`;
+the default profile switch to `Slim` came after the runs and does not touch the measured
+code). Medians of 5 runs after 1 warmup; RSS is `VmHWM`, the maximum over all runs.
+
+Mode A, `agg bench --count N --warmup 1 --reps 5 --flock-profile P` (second series, profiles
+in the order `slim8, slim, fast`, load average 4.1 to 7.4 including the runs' own 7 threads;
+a first series at load 6.9 to 14.9 gave the same bytes and noisier times):
+
+| N | Profile | Prove | Flock part: commit + prove | Verify uncached / cached | Prover / verifier RSS | Aggregate (B/sig) | Flock proof + commitment (B/sig) |
+| ---: | --- | ---: | --- | --- | --- | --- | --- |
+| 1,024 | Fast | 2,624.4 ms | 275.7 + 1,228.8 ms | 291.4 / 270.8 ms | 1,689 / 955 MiB | 709,395 (692.8) | 602,314 + 4,120 (592.2) |
+| 1,024 | Slim | 2,801.2 ms | 415.7 + 1,297.1 ms | 296.6 / 264.5 ms | 1,767 / 1,091 MiB | 503,588 (491.8) | 398,514 + 2,072 (391.2) |
+| 1,024 | Slim8 | 3,081.9 ms | 506.6 + 1,439.1 ms | 318.5 / 286.9 ms | 2,015 / 1,233 MiB | 424,441 (414.5) | 319,402 + 2,072 (313.9) |
+| 2,048 | Fast | 4,016.0 ms | 539.2 + 1,746.3 ms | 337.0 / 290.4 ms | 1,966 / 1,247 MiB | 821,539 (401.1) | 681,490 + 4,120 (334.8) |
+| 2,048 | Slim | 4,135.0 ms | 663.5 + 1,816.8 ms | 390.7 / 313.7 ms | 2,171 / 1,298 MiB | 576,894 (281.7) | 438,858 + 2,072 (215.3) |
+| 2,048 | Slim8 | 4,546.1 ms | 916.4 + 1,920.0 ms | 339.9 / 276.8 ms | 2,474 / 1,649 MiB | 485,073 (236.9) | 347,010 + 2,072 (170.4) |
+
+Against the tree before this stage (`4247f61`, Fast): 717,641 B at 1,024 records (cloud and
+local), 829,736 B at 2,048; the `Fast` rows are 8,246 and 8,197 B smaller: 8,189 B in the
+Flock items (the two level-0 caps, K17, less three new header bytes), the rest the Akita
+opening, whose size varies by a few bytes with the transcript. Kept commit data (K14): 84 / 168 / 336 MiB at
+1,024 and 152 / 304 / 608 MiB at 2,048 (Fast / Slim / Slim8).
+
+Tied parts alone (`tests/tied.rs`, `tied_part_profiles_bytes_and_times`, `AGG_TIED_REPS=5`,
+medians of 5 after 1 warmup, load 8.6 to 10.5; prove includes the bridge union's blocks and
+commitment; peak RSS of the whole test process 3.5 GiB); `8@13` is a part of 8 live records at
+`d = 13` (the full-segment bridge union, a small sponge instance) and `8@13/4` a span of four
+full-segment geometries with the 8 records in segment 0 (the bridge union of a 32K batch):
+
+| Part | Profile | Commit | Prove | Verify | Proof (cap / sponge / union) | Event-2 cap | Kept data |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| 2,048 (`d` 11) | Fast | 338.3 ms | 1,569.5 ms | 62.6 ms | 681,482 B (4,096 / 361,556 / 315,804) | 4,100 B | 152 MiB |
+| 2,048 (`d` 11) | Slim | 460.4 ms | 1,557.4 ms | 61.3 ms | 438,850 B (2,048 / 243,252 / 193,524) | 2,052 B | 304 MiB |
+| 2,048 (`d` 11) | Slim8 | 778.7 ms | 1,812.6 ms | 64.0 ms | 347,002 B (2,048 / 196,732 / 148,196) | 2,052 B | 608 MiB |
+| `8@13` | Fast | 5.1 ms | 471.4 ms | 87.7 ms | 585,338 B (4,096 / 224,252 / 356,964) | 4,100 B | 0.6 MiB |
+| `8@13` | Slim | 6.7 ms | 456.9 ms | 81.3 ms | 372,386 B (2,048 / 145,636 / 224,676) | 2,052 B | 1.2 MiB |
+| `8@13` | Slim8 | 5.3 ms | 530.4 ms | 81.9 ms | 292,490 B (2,048 / 114,900 / 175,516) | 2,052 B | 2.4 MiB |
+| `8@13/4` | Fast | 5.4 ms | 1,823.9 ms | 83.0 ms | 507,730 B (4,096 / 224,252 / 279,356) | 4,100 B | 0.6 MiB |
+| `8@13/4` | Slim | 7.1 ms | 1,994.1 ms | 81.6 ms | 350,762 B (2,048 / 145,636 / 203,052) | 2,052 B | 1.2 MiB |
+| `8@13/4` | Slim8 | 5.7 ms | 2,179.5 ms | 82.8 ms | 286,946 B (2,048 / 114,900 / 169,972) | 2,052 B | 2.4 MiB |
+
+The four-segment bridge union proves in about four times the single segment's time but
+verifies in the same 80 ms (its walkers run once per type over the block, whatever the row
+count) and its proof is SMALLER than one segment's (`m = 28`, where Flock's configs use
+`initial_k = 4`: 13 level-0 lanes instead of 51). Query PoW (`ligerito_query_grinding_cost`,
+Flock's fused BLAKE3 grind on the 7-thread pool, medians of 5 grinds): 16 bits 0.22 ms, 20
+bits 2.9 ms, 22 bits 5.8 ms, 24 bits 12.6 ms.
+
+### 12.4 Options, measured or estimated
+
+Estimates below come from a proof-size model of Ligerito (query counts from Flock's formulas,
+the level shapes of its configs, cap depth `floor(log2 Q)`, rows, paths, caps, final block and
+sum-check messages, plus the measured 16 to 19 KB per instance outside Ligerito); it is within
+1.2% of every measured instance above and reproduces the cloud's 775,017 B per full-segment
+`Fast` part (model 775,046 B). Session scratchpad `est/` (not committed).
+
+- **(1) `Slim`**: measured above, 36% fewer Flock bytes than `Fast` at 2,048 records (30% fewer
+  aggregate bytes) for 3% more prover time (119 ms: more commit time, 1.4x), the same verifier
+  time and twice the kept commit data. Adopted as the default.
+- **(2) One batched opening across the sponge instance and the bridge union** of a part: not
+  possible within Flock's accounting. The two are committed at different events (the union
+  depends on `sd`), as polynomials of different sizes; Flock's Ligerito opens one commitment,
+  and a batched opening of two codewords would need its own proximity analysis. What it could
+  save is one tail (levels 1+ and the merged-opening layer, about 45 KB of the union at 2,048
+  records with `Slim`). Across the parts of all segments the schedule does allow merging (all
+  sponge instances are committed at event 2, all unions at event 6): that is the span, which
+  merges them into one commitment each and needs no new analysis.
+- **(3) Query PoW and the rate.** Raising the query PoW from 16 to 20 / 22 / 24 bits removes
+  about 3.5 / 5 / 7% of the queries per level (each bit is one bit of the work-normalized query
+  term): estimated 13 / 20 / 27 KB less per 2,048-record `Slim` part (3 to 6%) and 16 / 24 /
+  32 KB less for a 32K span (0.5 / 0.7 / 1.0 bytes per signature), for 8 to 12 grinds of 2.9 /
+  5.8 / 12.6 ms each. Not implemented (it is a new parameter set like `Slim8`, for a smaller
+  gain). The rate is the larger lever: `Slim8` (implemented) cuts a part by another 21% for
+  10% more prover time at 2,048 records (commit 1.4x `Slim`'s, 2x the kept data). The row
+  width is another: Flock's `initial_k = 4` at `m = 28` shows what narrow level-0 rows give
+  (the union of four segments is smaller than one segment's); a parameter set with smaller
+  `initial_k` everywhere would trade larger level-1 commitments (prover time) for narrower
+  rows, not explored further.
+- **(4) Part size**: the span (implemented) makes the part the whole batch. Prover and
+  verifier work are the stacked instances' (measured locally for the union: 4x prove, 1x
+  verify); the prover's peak memory is one sponge instance of all `N` records, about four
+  times a segment's Flock buffers and kept data (estimate at 32K with `Slim`: about 5 GiB of
+  kept commit data, 6 GiB of union buffers for the sponge instance, on top of the PIOP's
+  tables; to be measured on the cloud machine; the 128 GB VM is far from it).
+- **(5) LaBinius** (estimate only, not integrated): it would replace the two Ligerito
+  openings of a span (about 400 KB at 32K with `Slim`) by two lattice commitment openings.
+  The only LaBinius proof size we measured with recursion is the whole binius64 Keccak proof
+  of 3,495 permutations, 86.3 KB (bench-cloud.md); if an opening of our `2^33`-bit sponge stack
+  stays near that size, a 32K span would be about 2 x 86 KB plus the 40 KB of zerocheck,
+  lincheck and ring-switch layers, about 6.6 bytes per signature (an unverified
+  extrapolation). It changes the PCS layer only (commitment at event 2, the opening at event
+  6, the ring switch to LaBinius's field, K14's kept data), not the relation, the ties or the
+  bridge.
+
+### 12.5 Flock bytes per signature at `N = 2^15` (estimates from the model, not measured)
+
+| Option | Per-segment parts (4 x 8,192) | One span |
+| --- | ---: | ---: |
+| Fast (the cloud run, measured: 94.6) | 94.6 | 22.7 |
+| Slim | 62.3 | 16.0 |
+| Slim8 | 50.2 | 13.3 |
+| Slim with 24-bit query PoW | 58.4 | 15.0 |
+| LaBinius openings (extrapolation, Section 12.4) | - | about 6.6 |
+
+With the default (`Slim`, span) the Flock side would be about 16 bytes per signature at 32K
+instead of 94.6, the aggregate about 51 instead of 129.4 bytes per signature (the other
+components as measured on the cloud). Prover time: the same instances as the four parts, minus
+three openings' fixed costs; verifier time: one sponge-instance check plus one union discharge
+(about 80 ms locally) instead of four parts (4 x 69 ms on the cloud).
+
+### 12.6 Decisions and open points
+
+- Default `Slim`, span on. `Slim8` is ready behind `--flock-profile slim8` (another 17% at
+  32K, estimate); making it the default is a project decision: it is a parameter set derived
+  and validated with Flock's analysis but not one Flock ships, so its proofs verify only with
+  the vendored core (or upstream given the same configs).
+- The span path of mode A runs only above `2^13` records: tested at the tied-part level and
+  on the item level, to be run on the cloud machine (32K: bytes, time, peak memory).
 
 ## Handoff (2026-10-24)
 

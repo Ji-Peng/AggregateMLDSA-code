@@ -7,8 +7,8 @@
 //! byte strings defined here, because a segment's Flock argument is split into parts of
 //! `2^{d_part}` records (sub-batches), each with its own Flock commitment and proof:
 //!
-//! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || parts
-//!   (LE32)`, then per part `LE32(len) || commitment`, the part's
+//! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || span
+//!   (u8) || parts (LE32)`, then per part `LE32(len) || commitment`, the part's
 //!   `agg_keccak::tied::TiedCommitment` bytes
 //!   (the framed Ligerito level-0 cap of its sponge instance, K7, K11; the bridge union's
 //!   cap depends on `sd` and is part of the proof, K13);
@@ -17,6 +17,12 @@
 //!   `LE32(len) || tied-part proof` (the bridge union's cap, the sponge proof and the bridge
 //!   union's proof, `agg_keccak::tied`, proof version 2). The last part's share is
 //!   not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by construction.
+//!
+//! The span byte (deviation K16) is 1 for a segment proven on its own (the layout above);
+//! `S >= 2` in segment 0's item of a batch of `S` segments proven as ONE tied part over all
+//! of them (one part, `d_part = d_seg`: its cap at event 2 and its proof, of every
+//! `Y_sigma`, at event 6, without shares); 0 in the items of segments `1..S` of such a batch
+//! (no commitment, an empty event-6 item: covered by segment 0's span).
 //!
 //! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
 //! event 6 before `tau`), so `d_part`, the commitments, the shares and the proofs are bound.
@@ -29,10 +35,11 @@
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
 /// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
-/// runs `Fast` or `Slim`; version 3 had the same tied parts of deviation K13 under `Fast`
-/// only: one Flock cap per part at event 2 and one tied-part proof, holding the bridge
-/// union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap at
-/// event 2).
+/// runs `Fast` or `Slim`, and the span of its part, K16; the part proofs are tied-part proofs
+/// of version 3; version 3 had the tied parts of deviation K13 under `Fast` only, one per
+/// segment or part: one Flock cap per part at event 2 and one tied-part proof, holding the
+/// bridge union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap
+/// at event 2).
 pub const ITEM_VERSION: u8 = 4;
 
 /// A malformed segment item.
@@ -55,6 +62,9 @@ pub enum ItemError {
     PartSize(u8),
     /// The item names another Flock profile than the verifier's (or an unknown one).
     Profile(u8),
+    /// The span byte does not fit the batch (a span over other than all segments, a covered
+    /// segment without an open span, or a span with other than one whole-segment part).
+    Span(u8),
 }
 
 impl std::fmt::Display for ItemError {
@@ -113,6 +123,9 @@ pub struct SegmentCommitments {
     pub profile: u8,
     /// `log2` of the record positions per part.
     pub d_part: u32,
+    /// Segments covered by the item's parts: 1 (this segment), `S` (segment 0 of a span over
+    /// all `S` segments) or 0 (covered by segment 0's span).
+    pub span: u8,
     /// The parts' Flock commitments, in part order.
     pub commitments: Vec<Vec<u8>>,
 }
@@ -125,6 +138,7 @@ impl SegmentCommitments {
             ITEM_VERSION,
             self.profile,
             u8::try_from(self.d_part).expect("d_part < 256"),
+            self.span,
         ];
         out.extend_from_slice(
             &u32::try_from(self.commitments.len())
@@ -149,6 +163,7 @@ impl SegmentCommitments {
         }
         let profile = r.take(1)?[0];
         let d_part = u32::from(r.take(1)?[0]);
+        let span = r.take(1)?[0];
         let parts = r.u32()?;
         // Each part needs at least its 4-byte length: refuse absurd counts before allocating.
         if parts > bytes.len() / 4 {
@@ -161,6 +176,7 @@ impl SegmentCommitments {
         Ok(Self {
             profile,
             d_part,
+            span,
             commitments,
         })
     }
@@ -236,11 +252,12 @@ mod tests {
         let c = SegmentCommitments {
             profile: 4,
             d_part: 10,
+            span: 1,
             commitments: vec![vec![1; 40], vec![], vec![2, 3]],
         };
         let bytes = c.to_bytes();
-        assert_eq!(bytes.len(), 3 + 4 + 3 * 4 + 42);
-        assert_eq!(&bytes[..3], &[ITEM_VERSION, 4, 10]);
+        assert_eq!(bytes.len(), 4 + 4 + 3 * 4 + 42);
+        assert_eq!(&bytes[..4], &[ITEM_VERSION, 4, 10, 1]);
         assert_eq!(flock_profile(&[vec![9], bytes.clone()]), Some(4));
         assert_eq!(flock_profile(&[vec![9]]), None);
         assert_eq!(SegmentCommitments::from_bytes(&bytes), Ok(c.clone()));
@@ -261,7 +278,7 @@ mod tests {
             Err(ItemError::Version(9))
         );
         let mut huge = bytes;
-        huge[3..7].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             SegmentCommitments::from_bytes(&huge),
             Err(ItemError::Truncated)
@@ -274,6 +291,7 @@ mod tests {
         let empty = SegmentCommitments {
             profile: 1,
             d_part: 3,
+            span: 0,
             commitments: Vec::new(),
         };
         assert_eq!(SegmentCommitments::from_bytes(&empty.to_bytes()), Ok(empty));
