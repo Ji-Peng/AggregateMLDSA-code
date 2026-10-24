@@ -6,14 +6,20 @@
 //!
 //! ```text
 //! taskset -c 0,1,3-15 cargo bench -p agg-bench --bench mode_b -- [N ...]
-//!     [--prove-runs R] [--verify-runs V] [--shared S]
+//!     [--warmup W] [--reps R] [--prove-runs R] [--verify-runs V] [--shared S]
 //! ```
+//!
+//! Protocol: `W` warmup runs (default 1, discarded), then `R` timed runs (default 5),
+//! medians reported, for the prover and for each verifier mode. `--prove-runs` and
+//! `--verify-runs` (older flags) set the timed runs of one role only. Peak RSS is the
+//! maximum over all runs, warmup included.
 //!
 //! Every size runs in its own prover process, which hands the proof to its own verifier
 //! process over a pipe, so each peak RSS belongs to one role. Records: `N - S` under their
 //! own keys and `S` (default `N / 32`) under three shared keys; the bridge matrices are
 //! derived from the bridge seed as in spec 9.1 (`SeededMatrices`), so prover and verifier
-//! times include the derivation (verifier step `matrices`). Times are medians over the runs.
+//! times include the derivation (verifier step `matrices`). Times are medians over the timed
+//! runs.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -31,6 +37,7 @@ const SEED: u64 = 0x00b0_0b0b;
 
 struct Options {
     sizes: Vec<usize>,
+    warmup: usize,
     prove_runs: usize,
     verify_runs: usize,
     shared: Option<usize>,
@@ -47,8 +54,9 @@ enum Role {
 fn parse_options() -> Options {
     let mut options = Options {
         sizes: Vec::new(),
-        prove_runs: 3,
-        verify_runs: 7,
+        warmup: 1,
+        prove_runs: 5,
+        verify_runs: 5,
         shared: None,
         role: Role::Driver,
     };
@@ -60,6 +68,12 @@ fn parse_options() -> Options {
                 .unwrap_or_else(|| panic!("{name} takes a number"))
         };
         match arg.as_str() {
+            "--warmup" => options.warmup = value("--warmup"),
+            "--reps" => {
+                let reps = value("--reps").max(1);
+                options.prove_runs = reps;
+                options.verify_runs = reps;
+            }
             "--prove-runs" => options.prove_runs = value("--prove-runs").max(1),
             "--verify-runs" => options.verify_runs = value("--verify-runs").max(1),
             "--shared" => options.shared = Some(value("--shared")),
@@ -83,6 +97,8 @@ impl Options {
 
     fn child_args(&self, n: usize) -> Vec<String> {
         vec![
+            "--warmup".into(),
+            self.warmup.to_string(),
             "--prove-runs".into(),
             self.prove_runs.to_string(),
             "--verify-runs".into(),
@@ -142,32 +158,38 @@ fn run_verifier(options: &Options, n: usize) {
     let reset = reset_peak();
     let base = rss_kib().unwrap_or(0);
     let mut uncached = Vec::new();
-    for _ in 0..options.verify_runs {
+    for run in 0..options.warmup + options.verify_runs {
         let report = verify_mode_b(&public, &bytes, &bridge, None);
         assert!(report.accepted(), "verify: {:?}", report.outcome);
-        uncached.push(report.timings);
+        if run >= options.warmup {
+            uncached.push(report.timings);
+        }
     }
     let peak_uncached = peak_rss_kib().unwrap_or(0);
     let mut cache = KeyCache::default();
     assert!(verify_mode_b(&public, &bytes, &bridge, Some(&mut cache)).accepted());
     let mut cached = Vec::new();
-    for _ in 0..options.verify_runs {
+    for run in 0..options.warmup + options.verify_runs {
         let report = verify_mode_b(&public, &bytes, &bridge, Some(&mut cache));
         let verified = report.outcome.expect("verify with cached keys");
         assert_eq!(verified.expanded_keys, 0);
-        cached.push(report.timings);
+        if run >= options.warmup {
+            cached.push(report.timings);
+        }
     }
     let peak_cached = peak_rss_kib().unwrap_or(0);
     let uncached = median_steps(&uncached);
     let cached = median_steps(&cached);
     println!(
-        "  verifier uncached (ms, medians of {}): {}",
+        "  verifier uncached (ms, medians of {}, {} warmup): {}",
         options.verify_runs,
+        options.warmup,
         steps_line(&uncached)
     );
     println!(
-        "  verifier cached keys (ms, medians of {}): {}",
+        "  verifier cached keys (ms, medians of {}, {} warmup): {}",
         options.verify_runs,
+        options.warmup,
         steps_line(&cached)
     );
     println!(
@@ -192,8 +214,9 @@ fn run_prover(options: &Options, n: usize) {
     let reset = reset_peak();
     let base = rss_kib().unwrap_or(0);
     let mut times = Vec::new();
+    let mut steps = Vec::new();
     let mut last = None;
-    for _ in 0..options.prove_runs {
+    for run in 0..options.warmup + options.prove_runs {
         let output = prove_mode_b(
             &ProverInputs {
                 instance: &instance,
@@ -203,7 +226,10 @@ fn run_prover(options: &Options, n: usize) {
             &bridge,
         )
         .expect("prove");
-        times.push(output.timings.total);
+        if run >= options.warmup {
+            times.push(output.timings.total);
+            steps.push(output.timings.to_string());
+        }
         last = Some(output);
     }
     let prover_peak = peak_rss_kib().unwrap_or(0);
@@ -216,7 +242,20 @@ fn run_prover(options: &Options, n: usize) {
         options.shared_for(n),
         generation.as_secs_f64()
     );
-    println!("  prover steps (ms, last run): {}", output.timings);
+    let median_run = {
+        let mut order: Vec<usize> = (0..times.len()).collect();
+        order.sort_by_key(|&i| times[i]);
+        order[(times.len() - 1) / 2]
+    };
+    println!(
+        "  prover steps (ms, median run of {}, {} warmup): {}",
+        options.prove_runs, options.warmup, steps[median_run]
+    );
+    println!(
+        "  prove (s): median {:.3}, min {:.3}",
+        median_duration(&times).unwrap_or_default().as_secs_f64(),
+        times.iter().min().copied().unwrap_or_default().as_secs_f64()
+    );
     println!(
         "  aggregate {} B = header {} + c~ {} + public bits {} + Akita commitments {} + final vectors {} \
          + Keccak proofs {} + PIOP {} + opening {}",
@@ -283,9 +322,10 @@ fn main() {
     }
     println!("mode-B benchmark, git {}", git_revision());
     println!(
-        "{}, threads {}, prove runs {}, verify runs {}",
+        "{}, threads {}, warmup {}, prove runs {}, verify runs {} (medians over the timed runs)",
         agg_bench::build_info(),
         std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
+        options.warmup,
         options.prove_runs,
         options.verify_runs
     );

@@ -55,13 +55,18 @@ taskset -c 0,1,3-15 $A keygen-batch --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch --keys keys.bin --count 256 --seed 1 --out records.bin
 taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9]
 taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--reps 3] [--part-log2 9]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9]
 ```
 
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
-reject, 2 on a usage or file error. `bench` generates the records in memory, aggregates
-once, verifies `reps` times uncached and `reps` times with every key cached, and prints the
-step reports, the medians, the prover's and the verifier's peak RSS (`VmHWM`, reset in
+reject, 2 on a usage or file error. `bench` generates the records in memory and follows
+the benchmark protocol: `--warmup W` runs (default 1, discarded), then `--reps R` timed runs
+(default 5), for each of prove, verify uncached and verify with every key cached (after one
+extra run that fills the cache); all three verify the aggregate of a timed prover run. It
+prints the step report of the median prover run (with its Flock-parts / everything-else
+split) and of the last verifier runs, the median and the min prove time, the verify
+medians, all marked "(median of R, W warmup)", the prover's and the verifier's peak RSS
+over all runs (`VmHWM`, reset in
 between through `/proc/self/clear_refs`, which affects only the process's own accounting)
 and the aggregate bytes per signature with the size of every part. Benchmarks proper run on
 CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks.

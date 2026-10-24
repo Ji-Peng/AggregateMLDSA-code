@@ -162,7 +162,8 @@ segment. A single sub-batch may hold any `n` up to that (the bench proves 1,170 
 ## 6. Measurements
 
 Bench `benches/keccak_sponge.rs` (harness-free; `AGG_KECCAK_N`, `AGG_KECCAK_PROFILE`,
-`AGG_KECCAK_REPS`): random `(mu, w1Encode)` records, one proof, medians of 3 repetitions.
+`AGG_KECCAK_WARMUP` (default 1), `AGG_KECCAK_REPS` (default 5)): random `(mu, w1Encode)` records, one proof,
+medians of 5 timed repetitions after 1 discarded warmup run.
 "prove" includes witness generation and packing; peak heap is Flock's counting allocator
 (the `PeakAlloc` of Flock's `blake3_proof`/`sha2_proof` benches) over one prove; VmHWM is
 the process peak RSS. Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`), turbo and

@@ -1,9 +1,10 @@
 //! Batched SHAKE256 sponge proof benchmark (spec Section 8).
 //!
 //! Default: 1,170 records = 8,190 Keccak-f permutations (about 2^13) in one
-//! Flock proof, Fast profile, 3 repetitions, medians reported.
+//! Flock proof, Fast profile, 1 warmup run (discarded) and 5 timed repetitions,
+//! medians of the timed runs reported.
 //! Environment: `AGG_KECCAK_N` (records), `AGG_KECCAK_PROFILE` (`fast` or
-//! `secure`), `AGG_KECCAK_REPS`. Peak heap comes from Flock's counting
+//! `secure`), `AGG_KECCAK_WARMUP` (default 1), `AGG_KECCAK_REPS` (default 5). Peak heap comes from Flock's counting
 //! allocator (as in Flock's `blake3_proof`/`sha2_proof` benches); `VmHWM` is the
 //! process peak RSS. Run pinned: `taskset -c 0,1,3-15 cargo bench -p agg-keccak`.
 #![allow(unsafe_code)]
@@ -96,7 +97,8 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 fn main() {
     let n = env_usize("AGG_KECCAK_N", 1170);
-    let reps = env_usize("AGG_KECCAK_REPS", 3).max(1);
+    let warmup = env_usize("AGG_KECCAK_WARMUP", 1);
+    let reps = env_usize("AGG_KECCAK_REPS", 5).max(1);
     let profile = match std::env::var("AGG_KECCAK_PROFILE").as_deref() {
         Ok("secure") => Profile::Secure,
         _ => Profile::Fast,
@@ -142,7 +144,7 @@ fn main() {
     let (mut t_wit, mut t_commit, mut t_prove, mut t_verify, mut peaks) =
         (vec![], vec![], vec![], vec![], vec![]);
     let (mut size, mut c_size) = (0, 0);
-    for rep in 0..reps {
+    for run in 0..warmup + reps {
         reset_peak();
         let base = CUR.load(Ordering::Relaxed);
         let t0 = Instant::now();
@@ -166,11 +168,19 @@ fn main() {
         let c = (tc - t1).as_secs_f64();
         let p = (t2 - t0).as_secs_f64();
         let v = (t3 - t2).as_secs_f64();
+        let label = if run < warmup {
+            format!("warmup {run}")
+        } else {
+            format!("rep {}", run - warmup)
+        };
         println!(
-            "rep {rep}: witness {w:.3} s, commit {c:.3} s, prove (incl. witness and commit) {p:.3} s, verify {:.1} ms, peak heap {:.1} MiB",
+            "{label}: witness {w:.3} s, commit {c:.3} s, prove (incl. witness and commit) {p:.3} s, verify {:.1} ms, peak heap {:.1} MiB",
             v * 1e3,
             mib(peak)
         );
+        if run < warmup {
+            continue;
+        }
         t_wit.push(w);
         t_commit.push(c);
         t_prove.push(p);
@@ -178,7 +188,7 @@ fn main() {
         peaks.push(mib(peak));
     }
     println!(
-        "median over {reps}: witness {:.3} s, commit {:.3} s, prove {:.3} s ({:.0} perm/s), verify {:.1} ms, peak heap {:.1} MiB ({:.1} KiB/perm), proof {} bytes ({:.1} KiB), commitment {} bytes",
+        "median over {reps} ({warmup} warmup): witness {:.3} s, commit {:.3} s, prove {:.3} s ({:.0} perm/s), verify {:.1} ms, peak heap {:.1} MiB ({:.1} KiB/perm), proof {} bytes ({:.1} KiB), commitment {} bytes",
         median(&mut t_wit),
         median(&mut t_commit),
         median(&mut t_prove.clone()),

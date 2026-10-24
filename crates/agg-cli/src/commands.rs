@@ -34,11 +34,12 @@ commands:
       Verify the aggregate for the records' (pk, M) (signatures are ignored). With
       --cache, expanded keys are read from and added to the cache file. Exit status 0 on
       accept, 1 on reject.
-  bench --count N [--keys K] [--seed S] [--reps R] [--part-log2 D]
-      Generate N records over K keys (default N), aggregate once, verify R times uncached
-      and R times with cached keys (default 3); print medians, peak RSS of the prover and
-      of the verifier, and the aggregate size per signature. Set AGG_GIT_REV to print the
-      revision.";
+  bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
+      Generate N records over K keys (default N); aggregate W + R times, verify W + R times
+      uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
+      R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
+      prover and of the verifier (max over all runs), and the aggregate size per
+      signature. Set AGG_GIT_REV to print the revision.";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,16 +292,25 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     Ok(if report.accepted() { 0 } else { 1 })
 }
 
+/// Default warmup runs of `bench` (discarded).
+pub const DEFAULT_WARMUP: usize = 1;
+/// Default timed runs of `bench`.
+pub const DEFAULT_REPS: usize = 5;
+
 /// Results of the `bench` subcommand.
 #[derive(Clone, Debug)]
 pub struct BenchResult {
-    /// The prover's report.
+    /// Warmup runs per measurement (discarded).
+    pub warmup: usize,
+    /// The prover's report of the median timed run.
     pub prove: ProveReport,
-    /// Prover peak RSS (KiB), if measurable.
+    /// Prover wall times of the timed runs.
+    pub prove_times: Vec<Duration>,
+    /// Prover peak RSS (KiB) over all prover runs (warmup included), if measurable.
     pub prove_peak_kib: Option<u64>,
-    /// Verifier wall times without a key cache.
+    /// Verifier wall times without a key cache (timed runs).
     pub verify_uncached: Vec<Duration>,
-    /// Verifier wall times with every key cached.
+    /// Verifier wall times with every key cached (timed runs).
     pub verify_cached: Vec<Duration>,
     /// Verifier peak RSS (KiB) over all verifier runs, if measurable.
     pub verify_peak_kib: Option<u64>,
@@ -324,58 +334,90 @@ pub fn median(samples: &[Duration]) -> Duration {
     }
 }
 
-/// Aggregate `records` once and verify the aggregate `reps` times uncached and `reps` times
-/// with cached keys.
+/// Index of the median sample (the lower middle one for an even count).
+#[must_use]
+pub fn median_index(samples: &[Duration]) -> usize {
+    assert!(!samples.is_empty(), "a non-empty sample");
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by_key(|&i| samples[i]);
+    order[(samples.len() - 1) / 2]
+}
+
+/// Run `run` `warmup + reps` times and return the results of the last `reps` runs (the
+/// warmup runs are discarded). Stops at the first error.
+///
+/// # Errors
+/// The first error of `run`.
+pub fn timed_runs<T, E>(
+    warmup: usize,
+    reps: usize,
+    mut run: impl FnMut() -> Result<T, E>,
+) -> Result<Vec<T>, E> {
+    for _ in 0..warmup {
+        run()?;
+    }
+    (0..reps).map(|_| run()).collect()
+}
+
+/// Aggregate `records` `warmup + reps` times, then verify the aggregate of a timed run
+/// `warmup + reps` times uncached and `warmup + reps` times with cached keys (after one
+/// extra run that fills the cache); warmup runs are discarded. `reps` is at least 1.
 ///
 /// # Errors
 /// On an aggregator failure or a rejected aggregate.
 pub fn bench_records(
     records: &[RecordEntry],
     config: AggregatorConfig,
+    warmup: usize,
     reps: usize,
 ) -> Result<BenchResult, String> {
     let reps = reps.max(1);
     let aggregator = Aggregator::new(config);
+    let signed = signed(records);
     let reset = rss::reset_peak();
-    let aggregate = aggregator
-        .aggregate(&signed(records))
-        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let proves = timed_runs(warmup, reps, || {
+        let aggregate = aggregator.aggregate(&signed).map_err(|e| e.to_string())?;
+        // Every run's aggregate has the same size; keep the latest (a timed run's at the end).
+        bytes = aggregate.bytes;
+        Ok::<_, String>(aggregate.report)
+    })?;
     let prove_peak_kib = rss::peak_kib().filter(|_| reset);
     drop(aggregator);
-    let bytes = aggregate.bytes.clone();
-    let prove = aggregate.report.clone();
-    drop(aggregate);
+    let prove_times: Vec<Duration> = proves.iter().map(|r| r.total).collect();
+    let prove = proves[median_index(&prove_times)].clone();
+    drop(proves);
     let reset = rss::reset_peak();
     let verifier = AggregateVerifier::new();
     let statements = statements(records);
-    let mut verify_uncached = Vec::with_capacity(reps);
     let mut uncached_report = String::new();
-    for _ in 0..reps {
+    let verify_uncached = timed_runs(warmup, reps, || {
         let report = verifier.verify(&statements, &bytes, None);
         if !report.accepted() {
             return Err(format!("the honest aggregate was rejected:\n{report}"));
         }
-        verify_uncached.push(report.total());
         uncached_report = report.to_string();
-    }
+        Ok(report.total())
+    })?;
     let mut key_cache = KeyCache::default();
-    let warm = verifier.verify(&statements, &bytes, Some(&mut key_cache));
-    if !warm.accepted() {
-        return Err(format!("the honest aggregate was rejected:\n{warm}"));
+    let fill = verifier.verify(&statements, &bytes, Some(&mut key_cache));
+    if !fill.accepted() {
+        return Err(format!("the honest aggregate was rejected:\n{fill}"));
     }
-    let mut verify_cached = Vec::with_capacity(reps);
     let mut cached_report = String::new();
-    for _ in 0..reps {
+    let verify_cached = timed_runs(warmup, reps, || {
         let report = verifier.verify(&statements, &bytes, Some(&mut key_cache));
         if !report.accepted() {
             return Err(format!("the honest aggregate was rejected:\n{report}"));
         }
-        verify_cached.push(report.total());
         cached_report = report.to_string();
-    }
+        Ok(report.total())
+    })?;
     let verify_peak_kib = rss::peak_kib().filter(|_| reset);
     Ok(BenchResult {
+        warmup,
         prove,
+        prove_times,
         prove_peak_kib,
         verify_uncached,
         verify_cached,
@@ -389,25 +431,32 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let count: usize = opts.number("count", None)?;
     let n_keys: usize = opts.number("keys", Some(count))?;
     let seed: u64 = opts.number("seed", Some(1))?;
-    let reps: usize = opts.number("reps", Some(3))?;
+    let warmup: usize = opts.number("warmup", Some(DEFAULT_WARMUP))?;
+    let reps: usize = opts.number("reps", Some(DEFAULT_REPS))?;
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
     opts.finish()?;
     if n_keys == 0 || count == 0 {
         return Err("--count and --keys must be positive".into());
     }
+    if reps == 0 {
+        return Err("--reps must be positive".into());
+    }
     let start = Instant::now();
     let keys = generate_keys(n_keys.min(count), seed);
     let records = sign_records(&keys, count, seed, None);
     let generated = start.elapsed();
-    let result = run_large(move || bench_records(&records, AggregatorConfig { part_log2 }, reps))?;
+    let result = run_large(move || {
+        bench_records(&records, AggregatorConfig { part_log2 }, warmup, reps)
+    })?;
     let mib = |k: Option<u64>| {
         k.map_or_else(
             || "n/a".to_string(),
             |k| format!("{:.0} MiB", k as f64 / 1024.0),
         )
     };
+    let protocol = format!("median of {reps}, {warmup} warmup");
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
+        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
         n_keys.min(count),
         std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
@@ -417,30 +466,38 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         "record generation {:.1} ms (not part of the measurements)",
         ms(generated)
     );
+    println!("median prover run ({protocol}):");
     println!("{}", result.prove);
+    println!("last uncached verifier run:");
     println!("{}", result.uncached_report);
+    println!("last cached verifier run:");
     println!("{}", result.cached_report);
+    let flock = result.prove.timings.keccak;
     println!("summary:");
     println!(
-        "  prove                    {:>10.1} ms (one run)",
-        ms(result.prove.total)
+        "  prove                    {:>10.1} ms ({protocol}; min {:.1} ms)",
+        ms(median(&result.prove_times)),
+        ms(*result.prove_times.iter().min().expect("reps >= 1"))
     );
     println!(
-        "  verify, uncached keys    {:>10.1} ms (median of {})",
-        ms(median(&result.verify_uncached)),
-        result.verify_uncached.len()
+        "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
+        ms(flock),
+        ms(result.prove.total.saturating_sub(flock))
     );
     println!(
-        "  verify, cached keys      {:>10.1} ms (median of {})",
-        ms(median(&result.verify_cached)),
-        result.verify_cached.len()
+        "  verify, uncached keys    {:>10.1} ms ({protocol})",
+        ms(median(&result.verify_uncached))
     );
     println!(
-        "  prover peak RSS          {:>13}",
+        "  verify, cached keys      {:>10.1} ms ({protocol})",
+        ms(median(&result.verify_cached))
+    );
+    println!(
+        "  prover peak RSS          {:>13} (max over all runs)",
         mib(result.prove_peak_kib)
     );
     println!(
-        "  verifier peak RSS        {:>13}",
+        "  verifier peak RSS        {:>13} (max over all runs)",
         mib(result.verify_peak_kib)
     );
     println!(
@@ -509,6 +566,40 @@ mod tests {
             median(&[Duration::from_millis(4), Duration::from_millis(2)]),
             Duration::from_millis(3)
         );
+    }
+
+    #[test]
+    fn bench_options_default_to_one_warmup_and_five_reps() {
+        let mut o = Options::parse(&strings(&["--count", "4"])).unwrap();
+        assert_eq!(o.number("warmup", Some(DEFAULT_WARMUP)), Ok(1usize));
+        assert_eq!(o.number("reps", Some(DEFAULT_REPS)), Ok(5usize));
+        let mut o = Options::parse(&strings(&["--warmup", "0", "--reps", "2"])).unwrap();
+        assert_eq!(o.number("warmup", Some(DEFAULT_WARMUP)), Ok(0usize));
+        assert_eq!(o.number("reps", Some(DEFAULT_REPS)), Ok(2usize));
+        assert!(o.finish().is_ok());
+    }
+
+    #[test]
+    fn warmup_runs_are_excluded() {
+        let ms = Duration::from_millis;
+        // Runs 0 and 1 are warmup; only runs 2..=6 are kept.
+        let mut calls = 0u64;
+        let kept = timed_runs(2, 5, || {
+            calls += 1;
+            Ok::<_, ()>(calls)
+        })
+        .unwrap();
+        assert_eq!(calls, 7);
+        assert_eq!(kept, vec![3, 4, 5, 6, 7]);
+        // A slow warmup run does not reach the median.
+        let mut samples = vec![ms(1000), ms(5), ms(3), ms(4)].into_iter();
+        let kept = timed_runs(1, 3, || Ok::<_, ()>(samples.next().unwrap())).unwrap();
+        assert_eq!(kept, vec![ms(5), ms(3), ms(4)]);
+        assert_eq!(median(&kept), ms(4));
+        assert_eq!(kept[median_index(&kept)], ms(4));
+        assert_eq!(median_index(&[ms(4), ms(2), ms(9), ms(1)]), 1);
+        assert_eq!(timed_runs(0, 0, || Err::<(), _>("never")), Ok(vec![]));
+        assert_eq!(timed_runs(1, 3, || Err::<(), _>("fail")), Err("fail"));
     }
 
     #[test]
