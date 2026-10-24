@@ -508,8 +508,10 @@ worker, under a timeout: the regression test of the round-1 deadlock, deviation 
 ### State
 
 Branch `lookup-integration` of the code repository (worktree
-`/home/jipeng/code/aggmldsa-wt/lookup`, base `main` at `4247f61`), not merged into `main`;
-a later agent merges it with the Flock branch. Everything of Section 6 is implemented:
+`/home/jipeng/code/aggmldsa-wt/lookup`, base `main` at `4247f61`), merged into `main` by
+fast-forward after the review fixes (one-thread commit deadlock, deviation P12; test and
+ledger wording); the Flock branch `flock-bytes` is not merged yet and rebases onto it.
+Everything of Section 6 is implemented:
 the width-16 preset and both catalogs (all 13 batch sizes), the six groups, the L16 tables,
 the lookup in the PIOP transcript, the stage changes, the verifier, wire version 1, the
 normative ledger (spec Section 12.1), deviations L1 to L7 and D2. The base-16 digit path is
