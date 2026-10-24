@@ -8,19 +8,21 @@
 //! `2^{d_part}` records (sub-batches), each with its own Flock commitment and proof:
 //!
 //! - event 2, [`SegmentCommitments`]: `version (u8) || d_part (u8) || parts (LE32)`, then
-//!   per part `LE32(len) || commitment` (the Ligerito level-0 cap, K7);
+//!   per part `LE32(len) || commitment`, the part's `agg_keccak::tied::TiedCommitment` bytes
+//!   (the Ligerito level-0 caps of its sponge and bridge instances, K7, K11);
 //! - event 6, [`SegmentProofs`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
 //!   bytes each (4,096 bits packed least significant first, like `Y_sigma`), then per part
-//!   `LE32(len) || Flock proof`. The last part's share is not sent: it is `Y_sigma` XOR the
-//!   others, so the shares XOR to `Y_sigma` by construction.
+//!   `LE32(len) || tied-part proof` (the sponge and bridge proofs). The last part's share is
+//!   not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by construction.
 //!
 //! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
 //! event 6 before `tau`), so `d_part`, the commitments, the shares and the proofs are bound.
 
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
-/// Version byte of the segment items.
-pub const ITEM_VERSION: u8 = 1;
+/// Version byte of the segment items (2: the tied parts of deviation K11, two Flock caps
+/// and two Flock proofs per part).
+pub const ITEM_VERSION: u8 = 2;
 
 /// A malformed segment item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,5 +1,7 @@
-//! Segment driver: one Flock proof per segment covering the segment's SHAKE256 sponges and
-//! its bridge slot (spec Sections 1, 8 and 10; docs/bridge.md Section 5).
+//! Legacy segment driver (superseded by [`crate::tied`] for mode A, deviation K11; kept as
+//! the reference two-type union and for the toy-shape slot tests): one Flock proof per
+//! segment covering the segment's SHAKE256 sponges and its bridge slot (spec Sections 1, 8
+//! and 10; docs/bridge.md Section 5).
 //!
 //! The sub-batch is a two-type union: `n` instances of the sponge gate (one per live record,
 //! [`crate::sponge`]) and one instance of the bridge type ([`crate::bridge_slot`]). The
@@ -47,7 +49,7 @@ use crate::{
         Profile, CAP_NODE_BYTES, DOMAIN,
     },
     sponge::{SpongeRecord, CTILDE_BYTES, MU_BYTES, W1_INPUT_BASE},
-    witness::{pack_rows, pack_slot, SlotBuffers},
+    witness::{pack_slot, SlotBuffers},
 };
 
 /// Magic prefix of a bridged segment proof.
@@ -261,18 +263,7 @@ fn bridge_buffers(
     z: &[u64],
     slot: Option<&BridgeSlot>,
 ) -> SlotBuffers {
-    pack_rows(
-        layout.k_log(),
-        layout.useful_bits(),
-        nu,
-        1,
-        |_, zb, ab, bb| {
-            zb.copy_from_slice(z);
-            if let Some(slot) = slot {
-                slot.apply_ab(z, ab, bb);
-            }
-        },
-    )
+    crate::bridge_slot::slot_buffers(layout, nu, z, slot)
 }
 
 /// Proof kind byte of a standalone bridge slot.
@@ -417,16 +408,16 @@ fn bridged_sponge_type(gate: &ChainGate) -> TableType {
     let spec = gate.spec();
     assert!(
         spec.input_fields.len() == 2
-            && spec.input_fields[0].public
-            && !spec.input_fields[1].public
-            && spec.input_fields[1].bits == 6 * 1024,
-        "the bridged sponge gate has fields mu (public) and w1Encode (private, 6,144 bits)"
+            && !spec.input_fields[0].public
+            && spec.input_fields[0].bits == 6 * 1024
+            && spec.input_fields[1].public,
+        "the bridged sponge gate has fields w1Encode (private, 6,144 bits) and mu (public)"
     );
     let lay = gate.layout();
-    let mut schema: Vec<IoWord> = (0..spec.input_fields[0].bits.div_ceil(128))
-        .map(|w| IoWord::input(lay.field_base[0] / 128 + w))
+    let mut schema: Vec<IoWord> = (0..spec.input_fields[1].bits.div_ceil(128))
+        .map(|w| IoWord::input(lay.field_base[1] / 128 + w))
         .collect();
-    schema.extend((0..48).map(|w| IoWord::input(lay.field_base[1] / 128 + w)));
+    schema.extend((0..48).map(|w| IoWord::input(lay.field_base[0] / 128 + w)));
     schema.extend((0..gate.output_words()).map(|w| IoWord::output(lay.output_base / 128 + w)));
     TableType {
         io_schema: schema,

@@ -231,6 +231,35 @@ impl SlotLayout {
     }
 }
 
+/// The bridge slot's packed Flock buffers (row capacity `2^nu`, one live row) for a
+/// committed block `z` (`useful_words` u64 words): `z` and the lincheck stripe always, the
+/// row values `a`, `b` under `slot` when given (`None` before the seed exists: the
+/// commitment needs `z` only).
+///
+/// # Panics
+/// If `z` has the wrong length or `nu < 3`.
+#[must_use]
+pub fn slot_buffers(
+    layout: &SlotLayout,
+    nu: usize,
+    z: &[u64],
+    slot: Option<&BridgeSlot>,
+) -> crate::witness::SlotBuffers {
+    assert_eq!(z.len(), layout.useful_words(), "block length");
+    crate::witness::pack_rows(
+        layout.k_log(),
+        layout.useful_bits(),
+        nu,
+        1,
+        |_, zb, ab, bb| {
+            zb.copy_from_slice(z);
+            if let Some(slot) = slot {
+                slot.apply_ab(z, ab, bb);
+            }
+        },
+    )
+}
+
 /// The bridge relation of one segment: layout, the matrices of `sd`, and the public `Y`.
 #[derive(Clone)]
 pub struct BridgeSlot {

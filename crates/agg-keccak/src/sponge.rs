@@ -17,8 +17,14 @@
 //!
 //! Input column order of the w1Encode bits is `(t, j, rho)`, lane `t` outermost:
 //! column `1024 t + 256 rho + j` holds `b_t(j, rho)`, stream bit
-//! `1536 rho + 6 j + t` of w1Encode (FIPS 204 Algorithms 16 and 28). Each lane
-//! is 8 aligned 128-bit words (the bridge slot copies these 48 words).
+//! `1536 rho + 6 j + t` of w1Encode (FIPS 204 Algorithms 16 and 28). The w1Encode
+//! field comes first in the block, so lane `t` is the 8 aligned 128-bit words
+//! `8 t .. 8 t + 8` and the 48 words form the aligned word subcubes `0..32` and
+//! `32..48`; mu follows at words 48..51, `c~` at 52..53, the constant at word 54,
+//! word 55 is zero and the chi words start at word 56, so words 48..56 are the
+//! public region (mu, `c~`, the constant, zero). The tied part (`crate::tied`)
+//! ties these regions to the bridge instance and to the public words by
+//! evaluation claims; the word constants below name the layout.
 
 use flock_field::F128;
 use sha3::{
@@ -41,8 +47,26 @@ pub const W1_BITS: usize = 8 * W1_BYTES;
 pub const CTILDE_BYTES: usize = 32;
 /// Permutations per sponge.
 pub const N_PERMS: usize = 7;
-/// Global input index of the first w1Encode bit (mu occupies `[0, 512)`).
-pub const W1_INPUT_BASE: usize = 8 * MU_BYTES;
+/// Global input index of the first w1Encode bit (the w1Encode field comes first).
+pub const W1_INPUT_BASE: usize = 0;
+/// Global input index of the first mu bit (after the 6,144 w1Encode bits).
+pub const MU_INPUT_BASE: usize = W1_BITS;
+/// Gate input bits per record (w1Encode then mu).
+pub const INPUT_BITS: usize = W1_BITS + 8 * MU_BYTES;
+/// Word column of the first w1Encode word (lane `t` at words `8 t .. 8 t + 8`).
+pub const W1_WORD_BASE: usize = 0;
+/// Word column of the first mu word (4 words).
+pub const MU_WORD_BASE: usize = 48;
+/// Word column of the first `c~` word (2 words).
+pub const CTILDE_WORD_BASE: usize = 52;
+/// Word column of the constant-one column (bit 0 of the word).
+pub const CONST_WORD: usize = 54;
+/// First word of the public region `[48, 56)`: mu, `c~`, the constant, one zero word.
+pub const PUBLIC_WORD_BASE: usize = 48;
+/// `log2` of the public region's width in words.
+pub const PUBLIC_WORDS_LOG2: usize = 3;
+/// First chi word column.
+pub const CHI_WORD_BASE: usize = 56;
 
 /// One signature's sponge input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,13 +87,15 @@ impl SpongeRecord {
         out
     }
 
-    /// Packed gate input bits: mu bits `[0, 512)`, then the w1Encode bits in
-    /// `(t, j, rho)` column order.
+    /// Packed gate input bits: the w1Encode bits in `(t, j, rho)` column order at
+    /// `[W1_INPUT_BASE, W1_INPUT_BASE + 6144)`, then the mu bits at `[MU_INPUT_BASE,
+    /// MU_INPUT_BASE + 512)`.
     #[must_use]
     pub fn input_bits(&self) -> Vec<u64> {
-        let mut words = vec![0u64; (W1_INPUT_BASE + W1_BITS) / 64];
+        let mut words = vec![0u64; INPUT_BITS / 64];
         for (i, &byte) in self.mu.iter().enumerate() {
-            words[i / 8] |= u64::from(byte) << (8 * (i % 8));
+            let bit = MU_INPUT_BASE + 8 * i;
+            words[bit / 64] |= u64::from(byte) << (bit % 64);
         }
         for q in 0..W1_BITS {
             if (self.w1_encode[q / 8] >> (q % 8)) & 1 == 1 {
@@ -99,7 +125,7 @@ pub fn absorb_map() -> Vec<Vec<(u16, Absorb)>> {
     let mut perms = Vec::with_capacity(N_PERMS);
     // P1: mu then w1Encode bytes 0..71.
     let mut p1: Vec<(u16, Absorb)> = (0..8 * MU_BYTES)
-        .map(|i| (i as u16, Absorb::Input(i as u32)))
+        .map(|i| (i as u16, Absorb::Input((MU_INPUT_BASE + i) as u32)))
         .collect();
     p1.extend((8 * MU_BYTES..8 * RATE_BYTES).map(|s| (s as u16, w1(s - 8 * MU_BYTES))));
     perms.push(p1);
@@ -134,14 +160,14 @@ pub fn sponge_spec_rounds(n_rounds: usize) -> ChainSpec {
         n_rounds,
         input_fields: vec![
             InputField {
-                name: "mu",
-                bits: 8 * MU_BYTES,
-                public: true,
-            },
-            InputField {
                 name: "w1encode",
                 bits: W1_BITS,
                 public: false,
+            },
+            InputField {
+                name: "mu",
+                bits: 8 * MU_BYTES,
+                public: true,
             },
         ],
         absorbs: absorb_map(),
@@ -228,6 +254,48 @@ mod tests {
             }
             assert_eq!(got, rec.c_tilde());
         }
+    }
+
+    /// The block layout the tied part relies on (module docs): w1Encode words 0..47 (lane
+    /// `t` at `8 t`), mu at 48..51, `c~` at 52..53, the constant at word 54, chi from word 56.
+    #[test]
+    fn layout_words_are_as_documented() {
+        let gate = sponge_gate();
+        let lay = gate.layout();
+        assert_eq!(lay.k_log, 19);
+        assert_eq!(lay.field_base, vec![128 * W1_WORD_BASE, 128 * MU_WORD_BASE]);
+        assert_eq!(lay.field_offset, vec![W1_INPUT_BASE, MU_INPUT_BASE]);
+        assert_eq!(lay.output_base, 128 * CTILDE_WORD_BASE);
+        assert_eq!(lay.const_col, 128 * CONST_WORD);
+        assert_eq!(lay.t_base, 2 * CHI_WORD_BASE);
+        assert_eq!(lay.useful_bits, 64 * (2 * CHI_WORD_BASE + 7 * 24 * 25));
+        assert_eq!(lay.useful_bits, 275_968);
+        assert_eq!(PUBLIC_WORD_BASE + (1 << PUBLIC_WORDS_LOG2), CHI_WORD_BASE);
+        assert_eq!(MU_WORD_BASE, PUBLIC_WORD_BASE);
+        for t in 0..6 {
+            for p in [0, 1, 255, 1023] {
+                assert_eq!(lay.input_col(W1_INPUT_BASE + 1024 * t + p), 1024 * t + p);
+            }
+        }
+        for i in [0, 7, 511] {
+            assert_eq!(lay.input_col(MU_INPUT_BASE + i), 128 * MU_WORD_BASE + i);
+        }
+        // The public words of a record are its mu and c~ words, in that order.
+        let rec = random_record(&mut Rng::new(3));
+        let w = lay.useful_words();
+        let mut z = vec![0u64; w];
+        gate.honest_z(&rec.input_bits(), &mut z);
+        let word = |c: usize| F128::new(z[2 * c], z[2 * c + 1]);
+        let mu_words = bytes_to_words(&rec.mu);
+        let ct_words = bytes_to_words(&rec.c_tilde());
+        for k in 0..4 {
+            assert_eq!(word(MU_WORD_BASE + k), mu_words[k]);
+        }
+        for k in 0..2 {
+            assert_eq!(word(CTILDE_WORD_BASE + k), ct_words[k]);
+        }
+        assert_eq!(word(CONST_WORD), F128::ONE);
+        assert_eq!(word(CONST_WORD + 1), F128::ZERO);
     }
 
     #[test]

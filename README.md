@@ -14,7 +14,7 @@ recorded in `docs/deviations.md`.
 | `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset, four-group catalogs, two-round commit driver, work plan | M1 |
 | `crates/agg-piop` | lib | stages 1-3, range leaves and links, weight tables, verifier, Akita openings | M2 |
 | `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, soundness constants | M2 |
-| `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, segment driver | M3 |
+| `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, tied parts (sponge and bridge instances tied by evaluation claims, `flock_union`, `tied`), legacy segment driver | M3 |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` | M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
@@ -33,7 +33,7 @@ and was seeded from Aerie's lockfile so shared transitive crates match Aerie's.
 | Akita (`akita-*`) | https://github.com/LayerZero-Labs/akita | `e023b6a46143f7b23199ccecb2684192baf7b640` (the rev Aerie 49b6c21 pins; `akita-config` with `dev-protocol`, transcripts with `transcript-blake2b`) |
 | Jolt (`jolt-field` with `solinas`, `jolt-poly`) | https://github.com/a16z/jolt | `c7c2d08d5bb0c7c80501f29f723e595af7fcff3c` (as Aerie) |
 | Spongefish | https://github.com/arkworks-rs/spongefish | `ef9741346a150039427d9e0c02d6b2d73e93ec81` (as Aerie) |
-| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language) |
+| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch of `vendor/flock-core/PATCH.md` (`docs/deviations.md` K12), applied through `[patch]` in `Cargo.toml` |
 | `ml-dsa` (RustCrypto) | crates.io | `=0.1.1` (key generation and signing) |
 | `sha3` | crates.io | `0.10.9` (reference SHAKE) |
 

@@ -29,7 +29,7 @@ commands:
       messages are derived from S (length L, or pseudo-random in [0, 160)).
   aggregate --records RECORDS --out AGGREGATE [--part-log2 D]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
-      Flock parts of 2^D record positions (default 9).
+      Flock parts of 2^D record positions (default 13, one tied part per segment).
   verify --records RECORDS --aggregate AGGREGATE [--cache CACHE]
       Verify the aggregate for the records' (pk, M) (signatures are ignored). With
       --cache, expanded keys are read from and added to the cache file. Exit status 0 on

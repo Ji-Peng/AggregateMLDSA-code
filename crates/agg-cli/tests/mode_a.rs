@@ -688,7 +688,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             },
             &keccak,
         );
-        let slot_only = move |seg: &agg_keccak::segment::BridgedSegment<'_>,
+        let slot_only = move |seg: &agg_keccak::tied::TiedPart<'_>,
                               _: usize,
                               _: usize,
                               recs: &[SpongeRecord]| {
@@ -706,7 +706,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &keccak,
         );
         let gate_ref = &gate;
-        let sponge_only = move |seg: &agg_keccak::segment::BridgedSegment<'_>,
+        let sponge_only = move |seg: &agg_keccak::tied::TiedPart<'_>,
                                 _: usize,
                                 _: usize,
                                 recs: &[SpongeRecord]| {

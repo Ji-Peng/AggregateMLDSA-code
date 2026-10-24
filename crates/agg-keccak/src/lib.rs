@@ -11,7 +11,11 @@
 //! - [`bridge_slot`]: the bridge type, whose seeded rows prove `Y_sigma = M_3 M_2 M_1 b'`
 //!   with a factored `LincheckCircuit` walker (docs/bridge.md Section 5).
 //! - [`segment`]: the bridged segment (sponge rows and bridge slot in one union proof,
-//!   committed before the bridge seed) and the standalone bridge slot proof.
+//!   committed before the bridge seed) and the standalone bridge slot proof; superseded
+//!   by [`tied`] for mode A (kept for the toy-shape slot tests and as the reference).
+//! - [`flock_union`]: single-type Flock union proofs with the caller's evaluation claims.
+//! - [`tied`]: the tied part, a sponge instance and a bridge instance tied by evaluation
+//!   claims (docs/keccak.md Section 9), the mode-A Flock argument of one part.
 
 // Index loops mirror the (x, y, z) bit arithmetic of FIPS 202.
 #![allow(clippy::needless_range_loop)]
@@ -19,11 +23,13 @@
 pub mod bridge_slot;
 #[cfg(test)]
 mod dsl_ref;
+pub mod flock_union;
 pub mod gate;
 pub mod keccak;
 pub mod prover;
 pub mod segment;
 pub mod sponge;
+pub mod tied;
 pub mod witness;
 
 pub use aerie_keccak;

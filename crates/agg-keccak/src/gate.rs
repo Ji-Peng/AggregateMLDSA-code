@@ -121,6 +121,7 @@ pub struct GateLayout {
     /// The constant-one column.
     pub const_col: usize,
     /// u64 index of the first chi word: `t_m,r` lane `L` is u64 `t_base + (m R + r) 25 + L`.
+    /// A multiple of 16 (the chi words start at an 8-word boundary).
     pub t_base: usize,
     /// Columns `[0, useful_bits)` carry data.
     pub useful_bits: usize,
@@ -141,7 +142,12 @@ impl GateLayout {
         let output_base = col;
         col += spec.outputs.len().div_ceil(128) * 128;
         let const_col = col;
-        let t_base = const_col / 64 + 1;
+        // The chi words start at the next 8-word (1,024-bit) boundary after the constant,
+        // so the non-chi columns `[0, 64 t_base)` are whole 8-word blocks and a gate's
+        // inputs, outputs and constant can be addressed as aligned word subcubes (the
+        // tied part's evaluation claims, `crate::tied`, docs/keccak.md Section 9).
+        let chi_col = (const_col / 128 + 1).next_multiple_of(8) * 128;
+        let t_base = chi_col / 64;
         let useful_bits = 64 * (t_base + spec.n_perms() * spec.n_rounds * N_LANES);
         let k_log = useful_bits.next_power_of_two().trailing_zeros() as usize;
         Self {

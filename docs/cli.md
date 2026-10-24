@@ -30,11 +30,14 @@ keys expanded in the run. The verifier computes `tr_i, mu_i, c_i, T_i` and the `
 data itself; `cache: Option<&mut KeyCache>` skips the expansion of cached keys and adds
 new ones, so the uncached and cached numbers of spec Section 11 are two calls.
 
-Flock parts (K10): segment `sigma` is split into parts of `2^{d_part}` record positions,
+Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` record positions,
 `d_part = clamp(part_log2, 3, d_seg)`, `part_log2` from `AggregatorConfig` (default
-`DEFAULT_PART_LOG2 = 9`, chosen from Section 4). At most one part's Flock buffers are
-alive: parts are committed one by one at event 2 (only the commitments are kept) and
-rebuilt, proven and dropped one by one at event 6.
+`DEFAULT_PART_LOG2 = 13`: the whole segment is one part since the tied part of K11 removed
+the cost that forced parts of 512 in Section 4; the `agg` usage text still says 9). Each part
+is a tied part (`agg_keccak::tied`): a Flock sponge instance of its records and a Flock
+bridge instance of its share, two caps at event 2 and two proofs at event 6. At most one
+part's Flock buffers are alive: parts are committed one by one at event 2 (only the caps
+are kept) and rebuilt, proven and dropped one by one at event 6.
 
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
@@ -102,6 +105,11 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
   a filled cache file, on other messages), usage errors, `bench`.
 
 ## 4. Local measurements
+
+Superseded for the current code by `ref/notes/bench-local.md` ("Mode A with tied parts"):
+with the tied part of K11 and the Flock patch of K12, a batch of up to 2,048 records is one
+part, and the part sizes below no longer apply. The table is kept as the record of the
+two-type unions that motivated the change.
 
 Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`), turbo and hyper-threading off,
 default build (no CLMUL, so Flock's GF(2^128) arithmetic is software; `docs/keccak.md`

@@ -1,0 +1,56 @@
+# Vendored copy of flock-core from succinctlabs/flock at rev
+# 83f963e8ede6d9a85ec4762b0c018943b6f6542b with ONE prover-side patch (see PATCH.md):
+# the merged opening's per-column fold-table bake is skipped for short columns. The
+# workspace-inherited fields of the upstream manifest are inlined here; the sibling
+# Flock crates stay the pinned git dependencies of the root Cargo.toml.
+[package]
+name = "flock-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Succinct Labs", "Benedikt Bunz", "William Wang"]
+description = "Protocol library and verifier for the Flock R1CS-over-GF(2) PIOP (vendored, patched)."
+publish = false
+
+[features]
+hash-count = ["flock-merkle/hash-count", "flock-transcript/hash-count"]
+mul-count = ["flock-field/mul-count"]
+unsound-challenger = ["flock-transcript/unsound-challenger"]
+
+[dependencies]
+flock-field = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-merkle = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-transcript = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-hash = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-multilinear = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+flock-parallel = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b" }
+rayon = "1.10"
+sha2 = { version = "0.10", features = ["asm"] }
+rand_core = "0.9"
+blake3 = "1.5"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+toml = "0.8"
+
+[dev-dependencies]
+serde_json = "1"
+flock-transcript = { git = "https://github.com/succinctlabs/flock", rev = "83f963e8ede6d9a85ec4762b0c018943b6f6542b", features = ["unsound-challenger"] }
+
+[lints.clippy]
+needless_range_loop = "allow"
+explicit_counter_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+identity_op = "allow"
+erasing_op = "allow"
+manual_memcpy = "allow"
+assertions_on_constants = "allow"
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+unusual_byte_groupings = "allow"
+wildcard_imports = "deny"
+
+# Upstream builds flock-core as a git dependency, whose warnings Cargo hides; as a path
+# dependency its dead-code warnings (kernels unused on this target) would show up.
+[lints.rust]
+dead_code = "allow"

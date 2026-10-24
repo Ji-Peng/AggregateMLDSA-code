@@ -62,8 +62,8 @@ Code (`agg_keccak::sponge`): one gate instance (one A_0 block, `k_log = 19`) hol
 record's whole sponge, the 7 chi-only permutations chained by virtual XOR expressions;
 the Flock union has one row per record (capacity 2^13 at a full segment, 57,344
 permutations). Committed per record: 1 constant + 512 `mu` + 6,144 w1Encode + 256 `c~` +
-268,800 chi bits = 275,713 (useful 275,776 of 2^19; the dense-stack commitment stores only
-the 2,155 used words per row). Dummy rows are identically zero (Flock's count-derived
+268,800 chi bits = 275,713 (useful 275,968 of 2^19 since K11, 275,776 before; the dense-stack
+commitment stores only the 2,156 used words per row). Dummy rows are identically zero (Flock's count-derived
 constant pin), not "a fixed all-zero permutation instance". Copy constraints are used for
 the public words only.
 
@@ -119,7 +119,7 @@ selects its block-first opening, whose cost is fixed by the 2,155 used columns (
 with CLMUL at any `n`, 26 s without). A function of `n`, so prover and verifier agree;
 at a full 2^13-record segment the block-first path is kept.
 
-## K6. Bridge words wired only in the bridged segment
+## K6. Bridge words wired only in the bridged segment (legacy path; see K11)
 
 Spec Section 8: the bridge slot copies "every live record's 48 w1Encode words".
 
@@ -225,8 +225,9 @@ unaffected: at 64 records `M = 27`, `mu = 19`. `UnionContext::commit` in `segmen
 materializes the padded `z` (fine at test sizes; a production commit must gather the
 dense stack directly).
 
-Status: the remedy below is implemented as K10 (Flock parts of `2^{d_part}` records, default
-`d_part = 9`); the mode-A driver (`agg_cli::mode_a`) never builds a full-segment union.
+Status: the remedy below was implemented as K10 (Flock parts of `2^{d_part}` records, then
+default `d_part = 9`); K11 removes the cause (the bridge slot has its own instance) and the
+default part is the whole segment again.
 
 Remedy (proposal at the time): split a segment into Flock sub-batches of `2^{d_f}`
 records, each with its own bridge slot proving the partial vector
@@ -512,6 +513,83 @@ commitments; at event 6 it rebuilds each part's witness from the records
 and the cap is checked against the absorbed one), proves, and drops it. This removes the
 K7 cost of keeping all slot buffers from event 2 to event 6, for one witness rebuild per
 part (cheap next to the proof).
+
+## K11. Tied parts: two Flock instances per part, tied by evaluation claims (spec Section 8; docs/bridge.md Sections 5, 5a)
+
+Spec and docs/bridge.md Section 5: one Flock union proof per segment holding the sponge
+slots and the bridge slot, the bridge slot's bit copies "tied to the records' `Input` words
+by Flock's word-level copy constraints".
+
+Code (`agg_keccak::tied`, `agg_keccak::flock_union`; the mode-A driver `agg_cli::mode_a`): a
+part is two single-type Flock proofs, the sponge instance (its records' gates, row capacity
+`capacity_log(n, 19)`, K5) and the bridge instance (the bridge slot of K8 alone, one live row
+of `2^max(3, 22 - k_b)`), and the copies are tied by evaluation claims on the two committed
+polynomials at a point derived from the part's Flock seed (five packed-direct claims carried
+by Flock's merged opening: the public region of the sponge block against the verifier's
+table of `(mu_i, c~_i, 1, 0)`, and the two lane groups of the w1Encode words against the same
+groups of the bridge block). Neither proof has a circuit, a wiring argument or public words;
+the statement words are bound by a digest in the challenger. docs/bridge.md Section 5a has
+the layout, the points, the checks and the soundness argument (`(d + 5) / 2^128` per claim,
+the point fixed after both commitments).
+
+To make the lane groups aligned word subcubes, the sponge gate's block puts the w1Encode
+field first (words 0..47, lane `t` at `8 t`), then mu (48..51), `c~` (52..53), the constant
+(word 54) and the chi words from word 56 (`GateLayout` aligns the chi words to an 8-word
+boundary): 275,968 useful bits per record instead of 275,776 (2,156 committed words instead
+of 2,155), and 42,496 instead of 41,792 for the single-permutation gate. `W1_INPUT_BASE` is 0
+and `MU_INPUT_BASE` 6,144 in the packed gate inputs.
+
+Why: the profile of docs/keccak.md Section 8. Flock's copy constraints cost one cell-slot,
+one gather claim and 16 proof bytes per schema word of a type, and a one-row bridge slot
+has one schema word per copied word: 768 proof bytes and about 1.4 ms of opening time per
+signature at 512 records, 25 MB of gather values at `N = 2^15`; and the uniform row capacity
+gave the bridge slot `2^(k_b + nu)` bits of address space, `2^(2 d + 14)` per part, which is
+what capped parts at `2^9` records (K9, K10). Neither can be reduced inside the wiring
+argument (a cross-record linear relation needs its inputs in one block). With the tie, the
+bridge instance's cost no longer depends on the sponge rows and a part may be the whole
+segment (`DEFAULT_PART_LOG2 = 13`; every local batch is one part).
+
+Flock entry: `flock_union::UnionGeometry::{prove, verify}` compose Flock's public building
+blocks (`bind_statement`, `zerocheck::prove_packed_padded_capture_s_hat_v_c_with_grinding`,
+`lincheck::prove_union_capture_z_vec_with_grinding`, `pcs::open_batch_merged` and their
+verifiers) in the order of `flock_prover::prover::prove_fast_ligerito_union`, for one
+boolean type, plus the caller's claims; Flock 83f963e is unmodified. The one `unsafe` of
+`agg-keccak` (a byte view of the `F128` buffers for the zerocheck, as Flock's own prover
+does) lives there. The two-type union of `segment::BridgedSegment` is kept as the reference
+and for the toy-shape slot tests; the mode-A driver and its wire items (version 2) use the
+tied part.
+
+Test-plan differences (docs/bridge.md Section 9 item 6): the tampering cases run on the tied
+part (`tests/tied.rs`) with the tie's error names: a bit flipped in the bridge copy only
+fails the lane-group tie, a bit flipped in both copies with the stale `c~` fails the public
+claim, a sponge input bit flipped with the stale chi witness fails Flock's sponge rows; a
+flipped share, another seed, another `fs`, a flipped proof byte and swapped caps are
+rejected; parts' shares XOR to the segment's `Y` as in K10.
+
+## K12. Vendored `flock-core` with a prover-only opening patch (spec Section 8; AGENTS.md dependency rule)
+
+AGENTS.md: dependencies are pinned git revisions (Flock `83f963e`, recorded in `README.md`).
+
+Code: `vendor/flock-core` is a verbatim copy of `crates/flock-core` at that revision with
+one change in `pcs/jagged.rs::build_merged_weight_and_prime` (`vendor/flock-core/PATCH.md`),
+wired in by `[patch."https://github.com/succinctlabs/flock"]` in the root `Cargo.toml`; the
+other Flock crates stay the pinned git dependencies. The change: the merged opening bakes a
+16 x 256-entry fold table (64 KB, 4,096 fold evaluations) per used word column for every
+ring-switched claim, whatever the column's height; the patch evaluates the claim per slot
+(`phi(eq_col[c] r)`, one multiply and one lookup) when the stack averages fewer than 64 live
+rows per used column. Flock's own shapes (hundreds of rows per column) are unaffected.
+
+Why: the bridge instance of K11 is one row of `48 x 2^d + 33` word columns (49,185 at
+`d = 10`, 393,249 at a full segment). Measured (`ref/notes/bench-local.md`): the bake took
+3.4 s and 6.4 GiB of the bridge instance's 4.2 s and 7.8 GiB at 1,024 records, and would
+take 51 GiB at a full segment; Flock's block-first transport (about `128^2` field
+operations per column) is no alternative for a wide one-row stack. The patch is exact and
+prover-only: `x -> phi(eq_col[c] x)` is F_2-linear, so the baked byte decomposition and the
+direct evaluation give the same weight vector bit for bit, the transcript and the proof
+bytes are unchanged, and proofs made with the vendored crate verify with upstream Flock
+(and the other way round). The vendored copy is a project decision to confirm (upstreaming
+the patch, or a fork, would remove it); until then `vendor/flock-core/PATCH.md` is the
+record of the revision and the diff.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

@@ -104,6 +104,9 @@ pub enum KeccakError {
     Statement(&'static str),
     /// Flock rejected the proof.
     Flock(FlockVerifyError),
+    /// A tie between two instances failed (`crate::tied`): the named claim's value does
+    /// not match the other instance's or the verifier's table.
+    Tie(&'static str),
 }
 
 impl fmt::Display for KeccakError {
@@ -112,6 +115,7 @@ impl fmt::Display for KeccakError {
             Self::Malformed(m) => write!(f, "malformed proof: {m}"),
             Self::Statement(m) => write!(f, "bad statement: {m}"),
             Self::Flock(e) => write!(f, "flock verifier rejected: {e:?}"),
+            Self::Tie(m) => write!(f, "tie claim mismatch: {m}"),
         }
     }
 }
@@ -766,15 +770,23 @@ mod tests {
     /// `GateBatch::commit` reproduces the commitment Flock's own prover binds,
     /// under both compaction arms (identity at a full-height 2^11 stack,
     /// gathered below it) and both commit arms (lane-major when the dense
-    /// stack leaves whole lanes empty; plain at n = 100, where 327 * 100
-    /// words nearly fill the 2^15-word floor).
+    /// stack leaves whole lanes empty; plain at the first `n` whose `332 n`
+    /// words fill every lane of the committed stack).
     #[test]
     #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
     fn commit_matches_flock_prover_commitment() {
         let gate = ChainGate::new(ChainSpec::permutation());
         let (mut identity, mut gathered) = (false, false);
         let (mut lane_major, mut plain) = (false, false);
-        for n in [5usize, 64, 100, 2048] {
+        let full_lanes = (2..1024)
+            .find(|&n| {
+                GateBatch::new(&gate, n, Profile::Fast)
+                    .pcs_params
+                    .num_lanes
+                    .is_none()
+            })
+            .expect("some count fills every lane");
+        for n in [5usize, 64, full_lanes, 2048] {
             let batch = GateBatch::new(&gate, n, Profile::Fast);
             let union = UnionInstance::new(&batch.registry, vec![n]);
             if union.compaction_is_identity() {

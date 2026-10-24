@@ -15,15 +15,16 @@
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions,
 //! spec Section 1) is split into parts of `2^{d_part}` record positions, `d_part =
 //! min(part_log2, d_seg)` (default [`DEFAULT_PART_LOG2`]); each part with live records is
-//! one Flock union proof of its sponges and of a bridge slot proving the part's share
-//! `Y_{sigma, s} = M^{(sigma)} b'_s`. The shares XOR to `Y_sigma` (the last share is
-//! implied), which the F_p side proves for the committed bits `b` (`docs/deviations.md`
-//! K10). The event-2 and event-6 items are those of [`crate::wire`]. Part `s` seeds its
-//! Flock challenger with [`part_seed`]`(fs_sigma, s)`.
+//! one tied part (`agg_keccak::tied`, deviation K11): a Flock sponge instance of its records
+//! and a Flock bridge instance proving the part's share `Y_{sigma, s} = M^{(sigma)} b'_s`,
+//! tied by evaluation claims. The shares XOR to `Y_sigma` (the last share is implied), which
+//! the F_p side proves for the committed bits `b` (`docs/deviations.md` K10). The event-2
+//! and event-6 items are those of [`crate::wire`] (two caps and two proofs per part). Part
+//! `s` seeds its Flock challengers with [`part_seed`]`(fs_sigma, s)`.
 //!
 //! Memory: the parts are committed one after the other at event 2 and only their
 //! commitments are kept; at event 6 each part's witness is rebuilt from the records (the
-//! Flock prover commits again internally, K7), proven and dropped, so at most one part's
+//! Flock provers commit again internally, K7), proven and dropped, so at most one part's
 //! Flock buffers are alive. The PIOP tables are `i8` columns (`agg_piop::source_tables`).
 
 use std::ops::Range;
@@ -31,9 +32,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agg_keccak::gate::ChainGate;
-use agg_keccak::prover::{KeccakCommitment, KeccakProof, Profile};
-use agg_keccak::segment::BridgedSegment;
+use agg_keccak::prover::{KeccakProof, Profile};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord};
+use agg_keccak::tied::{TiedCommitment, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::CommitmentManifest;
@@ -59,11 +60,12 @@ use crate::wire::{SegmentCommitments, SegmentProofs};
 pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
 /// The Ligerito profile of the Flock sub-proofs.
 pub const KECCAK_PROFILE: Profile = Profile::Fast;
-/// Default `log2` of the record positions per Flock part: 512 records, whose part (bridge
-/// slot `k_log = 22`) measured 11.5 GiB peak RSS and 676 KB of proof locally; 256 records
-/// take 5.5 GiB and 522 KB, 128 records 3.2 GiB and 408 KB (`docs/cli.md` Section 4;
-/// deviation K10). The cloud run should calibrate 10.
-pub const DEFAULT_PART_LOG2: u32 = 9;
+/// Default `log2` of the record positions per Flock part. With the tied part (K11) a part
+/// of `2^d` records costs a sponge instance of `2^(d + 19)` bits and a bridge instance whose
+/// block is `2^(13 + d)` bits; the whole segment (`d = 13`) is the target on the cloud
+/// machine, and every local batch (at most 2,048 records) is one part under this default
+/// (`docs/cli.md` Section 4, `ref/notes/bench-local.md`).
+pub const DEFAULT_PART_LOG2: u32 = 13;
 /// Smallest admitted part (`2^3` records, the smallest segment).
 pub const MIN_PART_LOG2: u32 = 3;
 /// Record positions per segment (`log2`, spec Section 1).
@@ -133,11 +135,11 @@ impl SegmentParts {
 }
 
 /// Builds the Flock witness (sponge slot buffers and bridge block) of one part from its
-/// records; the honest builder is `BridgedSegment::honest_parts`. Called at event 2 and
+/// records; the honest builder is `TiedPart::honest_parts`. Called at event 2 and
 /// again at event 6, so it must be deterministic. Arguments: the part's context, `sigma`,
 /// the part index, the part's records.
-pub type PartWitness<'a> = &'a (dyn Fn(&BridgedSegment<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>)
-         + Sync);
+pub type PartWitness<'a> =
+    &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
 
 /// Wall time and size of one Flock part on the prover side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -167,9 +169,9 @@ pub struct FlockProver<'g, 'h> {
 }
 
 struct PartState<'g> {
-    seg: BridgedSegment<'g>,
+    seg: TiedPart<'g>,
     range: Range<usize>,
-    commitment: KeccakCommitment,
+    commitment: TiedCommitment,
 }
 
 #[derive(Default)]
@@ -214,7 +216,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
 
     fn build(
         &self,
-        seg: &BridgedSegment<'_>,
+        seg: &TiedPart<'_>,
         sigma: usize,
         part: usize,
         records: &[SpongeRecord],
@@ -240,13 +242,8 @@ impl KeccakSide for FlockProver<'_, '_> {
                 let start = Instant::now();
                 let range = plan.global(s);
                 let records = &self.records[range.clone()];
-                let seg = BridgedSegment::new_part(
-                    self.gate,
-                    records.len(),
-                    plan.d_part,
-                    s,
-                    KECCAK_PROFILE,
-                );
+                let seg =
+                    TiedPart::new_part(self.gate, records.len(), plan.d_part, s, KECCAK_PROFILE);
                 let (sponge, bridge_z) = self.build(&seg, sigma, s, records);
                 // The committed buffers are dropped here and rebuilt at event 6.
                 let commitment = seg
@@ -269,10 +266,7 @@ impl KeccakSide for FlockProver<'_, '_> {
             items.push(
                 SegmentCommitments {
                     d_part: plan.d_part,
-                    commitments: parts
-                        .iter()
-                        .map(|p| p.commitment.as_bytes().to_vec())
-                        .collect(),
+                    commitments: parts.iter().map(|p| p.commitment.to_bytes()).collect(),
                 }
                 .to_bytes(),
             );
@@ -475,14 +469,18 @@ impl KeccakVerifier for FlockVerifier<'_> {
         for s in 0..count {
             let range = plan.local(s);
             let start = Instant::now();
-            let seg = BridgedSegment::new_part(self.gate, range.len(), d_part, s, KECCAK_PROFILE);
+            let seg = TiedPart::new_part(self.gate, range.len(), d_part, s, KECCAK_PROFILE);
             let setup = start.elapsed();
+            let commitment = match TiedCommitment::from_bytes(&commitments.commitments[s]) {
+                Ok(c) => c,
+                Err(e) => return self.reject(sigma, SegmentRejection::Part(s, e.to_string())),
+            };
             // Parts 0 .. count - 1 carry their share; the last one's is implied.
             let share = shares.get(s).unwrap_or(&last);
             let outcome = seg.verify(
                 &segment.mu[range.clone()],
                 &segment.c_tilde[range.clone()],
-                &KeccakCommitment::from_bytes(commitments.commitments[s].clone()),
+                &commitment,
                 *segment.bridge_seed,
                 matrices.clone(),
                 share,

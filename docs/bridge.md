@@ -106,6 +106,105 @@ This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`
 
 **Binding.** The registry type carries empty matrix stubs (Flock's walker convention, deviation K2), so the relation is bound by `BridgeSlot::digest` = SHA3-256 of (`agg-keccak/v1/bridge-slot`, $`\mathsf{sd}`$, $`(J_t,m_t,k_t)_{t\le3}`$, $`d_{\rm seg}`$, the live count, $`k_{\log}`$, `useful_bits`, the constant column, the $`Y`$ base), absorbed into the Flock challenger after $`\mathsf{fs}_\sigma`$ and the sponge digest (deviation K4) and before Flock's own statement binding, which covers the registry, the counts, the commitment and the public words $`(\mu_i,\tilde c_i)_{i}`$, $`Y_\sigma`$. The driver order per segment (`segment.rs`): commit the two-type union (event 2) $`\to`$ receive $`\mathsf{sd}`$, derive matrices, compute parities $`\to`$ receive $`\mathsf{fs}_\sigma`$ $`\to`$ build rows, bind, prove $`\to`$ emit $`Y_\sigma`$ and the proof (event 6).
 
+## 5a. The tied part: two Flock instances per part, tied by evaluation claims
+
+Status: normative for M3 as implemented in `crates/agg-keccak/src/tied.rs` and
+`flock_union.rs` (deviation K11); it replaces the two-type union of Section 5 as the mode-A
+Flock argument. Section 5 stays the specification of the bridge slot itself (its block
+layout, rows, walker, binding and the `Y` coefficient of K8), which is unchanged.
+
+**Why.** The two-type union pays for the bridge slot three times (docs/keccak.md Section 8):
+Flock's wiring argument costs one cell-slot, one gather claim and 16 proof bytes per copied
+word (768 bytes per signature, 73% of the prover time in the opening), the uniform row
+capacity makes the one-row bridge slot `2^(k_b + nu)` bits of address space (3 GiB of
+buffers at 512 records, 128 GiB at a full segment), and the bridge walker itself. The first
+two are removed by giving the bridge slot its own Flock instance and replacing the word
+copies by evaluation claims.
+
+**Instances.** Part `s` of a segment (`2^d` record positions, `n` live records) is proven by
+two single-type Flock proofs, each a boolean zerocheck, a union-column lincheck and a merged
+Ligerito opening over a registry of one type (`flock_union::UnionGeometry`, the pipeline of
+Flock's `prove_fast_ligerito_union` composed from its public building blocks, with extra
+packed-direct claims in the opening):
+
+| Instance | Type | Rows | Address space | Claims in the opening |
+| --- | --- | --- | --- | --- |
+| sponge | the sponge gate (docs/keccak.md Section 2), `k_log = 19` | `n` live of `2^nu_s`, `nu_s = capacity_log(n, 19)` | `M_s = nu_s + 19` | the two class claims and `v_pub`, `v_s0`, `v_s1` |
+| bridge | the bridge slot of Section 5, `k_b = 13 + d` | 1 live of `2^nu_b`, `nu_b = max(3, 22 - k_b)` | `M_b = nu_b + k_b` | the two class claims and `v_b0`, `v_b1` |
+
+Nothing is wired: there is no circuit, no wiring argument and no public segment in either
+proof. The sponge instance's statement words `(mu_i, c~_i)` are bound by a digest in the
+challenger and proven by the claim `v_pub`.
+
+**Regions.** Flock commits a slot BatchMajor: word column `c` of row `j` is the padded word
+`(c << nu) + j`, and an evaluation claim is on the multilinear extension of the padded word
+vector (one `F_{2^128}` element per 128-bit word) at a point of `M - 7` coordinates, rows
+low. The sponge block has the w1Encode field first (docs/keccak.md Section 2): lane `t` of a
+record is the eight words `8 t + w`, so lanes 0..3 are the word columns `[0, 32)` and lanes
+4, 5 the columns `[32, 48)`, two aligned subcubes of the column index `[w (3 bits) | t |
+high bits]`; mu, `c~`, the constant (bit 0 of word 54) and a zero word are the public region
+`[48, 56)`. In the bridge block lane `t` of record `i` is the eight words `t 2^(3 + d) + 8 i
++ w`, so the same two lane groups are the subcubes `[w (3) | i (d) | t | high]`. With the
+challenges `rho = (rho_w, rho_i, rho_t, rho_t', rho_r, rho_c)` (3, `d`, 2, 1, `nu_s`, 3
+coordinates, `tied::TieChallenges::derive`, a cSHAKE-style Flock challenger over the part's
+seed `fs`, `d` and `nu_s`) the five points are
+
+```text
+P_pub = [rho_r (nu_s) | rho_c (3) | 0 1 1 | 0 ...]                       (sponge, columns 48..55)
+P_s0  = [rho_i[0..min(nu_s, d)], 0 ... (nu_s) | rho_w | rho_t (2) | 0 | 0 ...]   (sponge, lanes 0..3)
+P_s1  = [same rows | rho_w | rho_t' | 0 | 1 | 0 ...]                      (sponge, lanes 4, 5)
+P_b0  = [0 (nu_b) | rho_w | rho_i (d) | rho_t (2) | 0]                    (bridge, lanes 0..3)
+P_b1  = [0 (nu_b) | rho_w | rho_i (d) | rho_t' | 0 | 1]                   (bridge, lanes 4, 5)
+```
+
+and the prover's values are the honest evaluations (`flock_union::eval_packed`, the region's
+words times the eq tensor; 32 words per record on either side).
+
+**Checks.** After both Flock proofs verify, the verifier checks
+`v_pub = sum_{j < n} eq(rho_r, j) sum_{c8 < 8} eq(rho_c, c8) P[j][c8]` with `P[j] = (mu_j
+words, c~_j words, 1, 0)`, and `v_bh = eq(rho_i[nu_s..d], 0) v_sh` for both lane groups,
+where the factor `prod_k (1 + rho_i[k])` over the coordinates `k >= nu_s` is 1 unless the
+sponge instance has fewer row coordinates than the part has record positions (a part with
+few live records): the sponge's records `>= 2^nu_s` do not exist and the bridge's are padded
+zeros.
+
+**Soundness.** Let `z_s`, `z_b` be the committed word vectors (Flock's knowledge soundness
+gives them). Restricted to a lane group, `f_s(rho) = sum_{i, t, w} eq(rho_i, i) eq(rho_t, t)
+eq(rho_w, w) z_s[i; t, w]` (with `z_s[i] = 0` for `i >= 2^nu_s`) and `f_b(rho) = sum eq(...)
+z_b[t, i, w]` are the multilinear extensions, in the same `d + 5` free coordinates, of the
+sponge inputs and of the bridge copies over the part's `2^d` record positions (the sponge's
+dummy rows are zero by Flock's witness contract and the bridge's padded positions are forced
+zero by their empty rows, Section 5). If any bit differs, `f_b - eq(rho_i[nu_s..], 0) f_s`
+is a nonzero multilinear polynomial and vanishes at `rho` with probability at most `(d +
+5) / 2^128 <= 2^-123.8` (Schwartz-Zippel); `rho` is derived from `fs`, drawn at event 5
+after both commitments were absorbed at event 2, so the vectors are fixed before `rho`. The
+public claim is the same argument with `nu_s + 3` coordinates against the verifier's own
+table, and it also pins the constant column to 1 on live rows and 0 on dummy rows (Flock's
+count-derived constant pin requires exactly that). Hence the sponge instance's `b'` (the
+bits its gates hash) equals the bridge instance's copies, whose rows prove the part's share
+`Y_{sigma, s} = M^{(sigma)} b'_s` with `sd` and `Y_{sigma, s}` bound as in Section 5 and K8;
+the shares XOR to `Y_sigma` (K10) and the bound (9.3) of Section 7 is unchanged, with an
+additional `4 (d + 5) / 2^128` per part for the ties, inside `epsilon_Flock`. The two
+proofs share `fs` but have distinct challenger labels and digests (the gate digest and the
+public digest; the slot digest), so neither can be replayed as the other.
+
+**Costs** (exact sizes; measurements in `ref/notes/bench-local.md`). Sponge instance: the
+sponge-only union of docs/keccak.md Section 4 plus three claims (one `eq` tensor of `2^nu_s`
+and three of 8 or 32 entries). Bridge instance: `3 x 2^(k_b + nu_b - 7)` words of padded
+buffers and a `2^(k_b + nu_b - 3)`-byte stripe (64 MiB each at a full segment), the walker's
+`eq`, `xi_A`, `xi_B` and comb vectors of `2^k_b` field elements (1 GiB each at `k_b = 26`),
+a zerocheck over `M_b` run-list gated to the live row, and a Ligerito opening of a
+`2^(k_b - 7)`-word dense stack. Verifier: the lincheck's matrix discharge runs the walker
+once at its own `2^k_b` `eq` table (Section 10 item 4, now the only non-succinct cost of
+the Keccak side) and the opening is succinct. Proof: one sponge-only proof plus one bridge
+proof per part, independent of `n` up to the sumcheck round counts.
+
+**Wire.** The event-2 item of a part is `tied::TiedCommitment` (both caps, each framed by
+its length); the event-6 proof is `AGGKCT || version || profile || n || d || framed sponge
+proof || framed bridge proof`, each inner proof the bincode of Flock's
+`R1csProofMergedLigerito` followed by its claim values (`flock_union::UnionProof`). The
+segment items of `agg_cli::wire` carry them unchanged (item version 2).
+
 ## 6. The final public vector
 
 $`Y_\sigma\in\{0,1\}^{4096}`$ per segment, 512 bytes, bit $`\rho_3`$ at byte $`\rho_3\gg3`$, bit position $`\rho_3\bmod8`$ (least significant first, deviation P6), absorbed at event 6 before the Flock proofs and before $`\tau`$. The same bytes are: the `Out` words of the bridge slot (public words of the Flock statement), the public table $`Y(\rho_3,\sigma)`$ of the PIOP whose extension $`Y(\tau_3)`$ the verifier evaluates in step 4 of spec Section 11, and the right-hand side of the level-3 identity. Proof cost $`512S`$ bytes (2 KB at $`N=2^{15}`$). A verifier MUST reject a proof whose event-6 item has a length other than $`512S`$.
