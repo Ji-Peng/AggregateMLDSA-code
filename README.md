@@ -80,10 +80,19 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
 - Aerie's kernels (`aerie-simd`, `aerie-keccak`) are runtime-dispatched with a scalar
   fallback, independent of our flags; the selected ceiling is reported by
   `agg_piop::aerie_simd_backend()` and printed by every benchmark.
-- Flock's GF(2^128) AVX-512/VPCLMULQDQ kernels are compile-time (`target_feature`);
-  `AVX512=1 scripts/bench.sh` sets `-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`
-  in a separate target dir (`target/avx512`). A bare `+avx512f,...` feature list made rustc
-  1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
+- Flock's GF(2^128) kernels are compile-time (`target_feature`). The recommended opt-in
+  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq`, target dir
+  `target/clmul`): only Flock's carry-less path changes; Akita, Jolt and Aerie keep the
+  baseline codegen. Measured 2026-10-24 (bench-local.md): mode A proves 13x and verifies
+  14x faster than the default build at N = 1,024; the Keccak bench alone reaches about
+  83% of the throughput of the full AVX-512 build.
+- `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,
+  `target/avx512`) is broken for everything that commits with Akita: with x86-64-v4 Akita's
+  compile-time `avx512bw` path (`akita-cpu-backend/src/sources/poly_helpers/windowed_accum.rs`)
+  makes its prover self-check fail ("relation session final claim disagrees with its folded
+  oracle"), on this i7-11700K and on a Zen 5 VM; `AKITA_SCALAR_NTT=1` does not help,
+  `x86-64-v3` passes. Use it only for the Keccak-only bench. A bare `+avx512f,...` feature
+  list made rustc 1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
 - Our own AVX-512 kernels (none yet) go behind `#[cfg(feature = "avx512")]`.
 
 ## Machine rules (see ../AGENTS.md)
