@@ -1117,10 +1117,14 @@ digits, `0x90` for a looked-up column, `0x50` for a multiplicity digit, 0 for a 
 the grouped row id `mldsa-44-l16-batch-<N*>-mult-final`, the bridge shape, then the lookup
 layout (2 challenges; table width 16; per stack column count, variables, table and shift).
 Commit flow: `TableCommitter::commit_round1` commits `G_main16` and `G_main4` concurrently
-(the pair runs concurrently with the Keccak side's commitments), `commit_round2` the four
-round-2 groups concurrently, each commit on its own scoped OS thread
-(`pcs::concurrent_commits`: Akita's lazily built NTT slots sit behind a `OnceLock` whose
-initializer runs rayon loops, so commits joined as rayon jobs can deadlock; deviation P12); `open_claims` opens the 31 stage-3 claims at the suffixes of
+(the pair runs on the calling thread while the Keccak side's commitments run on a scoped OS
+thread, `pcs::overlap`), `commit_round2` the four round-2 groups concurrently, each commit on
+its own scoped OS thread (`pcs::concurrent_commits`: Akita's lazily built NTT slots sit
+behind a `OnceLock` whose initializer runs rayon loops, so commits joined as rayon jobs can
+deadlock; deviation P12). No rayon worker waits on those threads: on a worker, or with a
+one-thread pool, the commits run one after another on the calling thread (a worker blocked
+on its commit threads hung the one-thread prover in round 1; `tests/single_thread.rs`);
+`open_claims` opens the 31 stage-3 claims at the suffixes of
 `r^(3)` and the 7 digit claims at `pi_m` (`pcs::group_points`).
 
 ### 19.3 The lookup (event 7) and the stages

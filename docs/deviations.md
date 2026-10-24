@@ -739,7 +739,15 @@ round-1 commits and the four round-2 commits run concurrently on scoped OS threa
 (`pcs::concurrent_commits`), not as rayon jobs: Akita builds its NTT slots lazily inside
 `OnceLock::get_or_init` with rayon-parallel loops, and two commits joined on the pool can
 deadlock when the initializing worker steals the other commit, which re-enters the same
-`OnceLock` (observed once, in the default-build `agg-cli` tampering test).
+`OnceLock` (observed once, in the default-build `agg-cli` tampering test). No rayon worker
+blocks on those OS threads: the round-1 commits used to run inside a `rayon::join` with the
+Keccak side's commitments, so a worker waited for its commit threads while their Akita loops
+needed a worker, and with a one-thread pool (`taskset -c 2`, `RAYON_NUM_THREADS=1`) the
+prover hung in round 1. Now `pcs::overlap` runs the round-1 commits on the calling thread and
+the Keccak side on a scoped OS thread, and `pcs::concurrent_commits` commits one group after
+another on the calling thread when that thread is a rayon worker or the pool has one thread
+(one commit at a time cannot re-enter a `OnceLock`); `tests/single_thread.rs` proves and
+verifies a batch with a one-thread pool, from a plain thread and from a pool worker.
 
 Why it is sound and the proof unchanged: every round message is the same polynomial as
 before, computed in a different order over `K` (bucketing and moments are distributivity of

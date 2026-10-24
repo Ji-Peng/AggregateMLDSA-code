@@ -177,8 +177,26 @@ pub fn opening_claims(
 }
 
 /// Stack size of a commit thread (Akita's commit runs on it, its parallel loops on the
-/// rayon pool).
+/// rayon pool) and of the thread [`overlap`] starts.
 const COMMIT_THREAD_STACK: usize = 64 << 20;
+
+/// Whether concurrent work must run on the calling thread instead of extra OS threads.
+///
+/// A rayon worker must never block on an OS thread: work that thread hands to the pool may
+/// need the very worker that waits for it, so with one thread (`taskset -c 2`,
+/// `RAYON_NUM_THREADS=1`) the pool deadlocks, and with more it loses a worker for the whole
+/// wait. A caller outside the pool whose pool has one thread gains nothing from extra
+/// threads either.
+fn on_calling_thread() -> bool {
+    rayon::current_thread_index().is_some() || rayon::current_num_threads() <= 1
+}
+
+/// Join an OS thread, re-raising its panic on the caller.
+fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
 
 /// Run Akita commits concurrently, each on its own scoped OS thread, never as rayon jobs.
 ///
@@ -187,10 +205,15 @@ const COMMIT_THREAD_STACK: usize = 64 << 20;
 /// on the rayon pool can deadlock there: the worker that initializes a slot steals the other
 /// commit while it waits for its own loop, and that commit re-enters the same `OnceLock` on
 /// the same thread. A commit on a plain OS thread blocks on the `OnceLock` instead, and its
-/// parallel loops still run on the pool.
+/// parallel loops still run on the pool. On a rayon worker, or with a one-thread pool, the
+/// commits run one after another on the calling thread ([`on_calling_thread`]); one commit
+/// at a time cannot re-enter a `OnceLock` (deviation P12).
 fn concurrent_commits<const K: usize>(
     commits: [&(dyn Fn() -> Result<GroupCommitment, PcsError> + Sync); K],
 ) -> [Result<GroupCommitment, PcsError>; K] {
+    if on_calling_thread() {
+        return commits.map(|commit| commit());
+    }
     std::thread::scope(|scope| {
         let handles = commits.map(|commit| {
             std::thread::Builder::new()
@@ -199,7 +222,41 @@ fn concurrent_commits<const K: usize>(
                 .spawn_scoped(scope, commit)
                 .expect("spawn a commit thread")
         });
-        handles.map(|handle| handle.join().expect("commit thread"))
+        handles.map(join_os_thread)
+    })
+}
+
+/// Run `first` on the calling thread and `second` concurrently with it; return both
+/// results.
+///
+/// The prover overlaps its round-1 Akita commits with the Keccak side's commitments. As a
+/// rayon job the commit side would block a worker on its commit threads
+/// ([`concurrent_commits`]), so outside the pool `second` gets a scoped OS thread and
+/// `first` (with its commit threads) stays on the caller. On a rayon worker this is
+/// `rayon::join` (the commits inside then run one after another); with a one-thread pool
+/// the two run one after another on the caller (deviation P12).
+pub(crate) fn overlap<A, B>(
+    first: impl FnOnce() -> A + Send,
+    second: impl FnOnce() -> B + Send,
+) -> (A, B)
+where
+    A: Send,
+    B: Send,
+{
+    if rayon::current_thread_index().is_some() {
+        return rayon::join(first, second);
+    }
+    if on_calling_thread() {
+        return (first(), second());
+    }
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("agg-overlap".into())
+            .stack_size(COMMIT_THREAD_STACK)
+            .spawn_scoped(scope, second)
+            .expect("spawn an overlap thread");
+        let a = first();
+        (a, join_os_thread(handle))
     })
 }
 
@@ -260,7 +317,8 @@ impl TableCommitter {
     }
 
     /// Round 1 (event 1, before the bridge seed): `G_main16` and `G_main4`, concurrently
-    /// (each commit is transcript-free; see [`concurrent_commits`]).
+    /// (each commit is transcript-free; see [`concurrent_commits`]). Call it from outside
+    /// the rayon pool to get the concurrency; on a worker the two commit in turn.
     pub fn commit_round1(&self, main: &MainTables) -> Result<[GroupCommitment; 2], PcsError> {
         let narrow: Vec<Cells<'_>> = main.columns().iter().map(|c| Cells::Narrow(c)).collect();
         let wide = main.wide_columns();

@@ -7,8 +7,8 @@
 mod common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
-use agg_piop::lookup::{LookupError, Table};
-use agg_piop::manifest::{stack_columns, Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT};
+use agg_piop::lookup::LookupError;
+use agg_piop::manifest::{stack_columns, Column, GroupRole, LOOKUP_SHIFT};
 use agg_piop::prover::PiopProof;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
 use agg_piop::stage::{suffix, StageError};
@@ -18,7 +18,7 @@ use agg_piop::OpeningField as E;
 use agg_witness::padding::main_index;
 use agg_witness::params::W1_BITS;
 use common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
-use jolt_field::{Ring, Zero};
+use jolt_field::Ring;
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
@@ -364,11 +364,30 @@ fn values_valid_only_for_another_range_are_rejected() {
         bridge.carries_mut(1)[cell] += LOOKUP_SHIFT;
         bridge.recount(manifest, &batch.main).expect("in the table");
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(1));
-        // The prototype's cross-table case: a value of [0, 2^8) booked under T_16 against
-        // the multiplicities of T_8 is not a valid lookup (lookup.rs unit test
-        // `two_tables_verify_and_a_cross_table_value_is_rejected`); here the one table is
-        // T_16 and every stored value outside [-2^15, 2^15) is rejected above.
-        assert_eq!(Table::T16.len(), 1 << 16);
+        // A low part valid only for the wider range [0, 2^17): U_lo + 2^16 with U_hi - 1
+        // and V_lo + 2^16 with V_hi - 1 keep u and v (4.1), U_hi in its base-8 alphabet
+        // and V_hi in T_16, so the leaves and the ring identity hold; only the lookup sees
+        // the looked-up value in [2^16, 2^17). (The prototype's cross-table case, a T_8
+        // value booked under T_16, is the lookup.rs unit test
+        // `two_tables_verify_and_a_cross_table_value_is_rejected`; layout L16 has one
+        // table.)
+        for (lo, hi, room) in [
+            (Column::U_LO, Column::U_HI, -4_i64),
+            (Column::V_LO, Column::V_HI, -i64::from(LOOKUP_SHIFT)),
+        ] {
+            let x = cell_with(&batch, hi, |v| v > room);
+            let mut main = batch.main.clone();
+            *main.wide_cell_mut(manifest, lo, x) += 1 << 16;
+            if hi == Column::V_HI {
+                *main.wide_cell_mut(manifest, hi, x) -= 1;
+            } else {
+                main.columns_mut()[manifest.locate(hi).1][x] -= 1;
+            }
+            let f = main.column(manifest, lo).value(x) + i64::from(LOOKUP_SHIFT);
+            assert!((1 << 16..1 << 17).contains(&f), "{}: looked-up value {f}", lo.name());
+            let bridge = lenient(&batch, &main, batch.bridge.clone());
+            assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0), "{}", lo.name());
+        }
     });
 }
 
@@ -438,7 +457,6 @@ fn tampered_bridge_tables_fail_in_stage_one() {
         let mut bridge = batch.bridge.clone();
         bridge.public_y_mut()[11] ^= 1;
         check("Y bit", bridge);
-        assert_eq!(E::zero(), E::zero());
     });
 }
 
@@ -449,6 +467,5 @@ fn padded_batch_of_ten_records_round_trips() {
         assert_eq!(batch.manifest.padded_records(), 16);
         let (proof, _) = prove_tables(&batch, batch.tables(), false).expect("honest prover");
         check_honest(&batch, &proof);
-        let _ = CommitmentManifest::for_batch(10).unwrap();
     });
 }

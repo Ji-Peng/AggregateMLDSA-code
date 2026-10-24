@@ -168,7 +168,9 @@ Section 12.1. `L` = looked-up cells (padding included), `M = 2^16`, `D = D_max`.
 | Removed: 40 `b16_prod`, 93 leaves, 53 links, 25 carry-digit reductions | `-211 d_main/|K|` | | | `-5,275/|K|` |
 
 `L` is `4 2^d_main + 8 |D_1| + 8 |D_2| + |D_3|`: 4,395,008, 34,672,640 and 138,690,560;
-`D = d_main + 2` (the main stack). Lemma 5 needs `char F_p = p > L` (by a factor of
+`D = D_max = max(d_main + 2, 16)` (`LookupShape::max_depth`): the main stack, except at
+`N* = 8` (`d_main = 13`), where the 16-variable table tree is the deepest and the GKR term
+is `391/|K|` (`344/|K|` with `d_main + 2`). Lemma 5 needs `char F_p = p > L` (by a factor of
 `2^36`) and pairwise distinct table entries; it holds for *any* `m in F_p`, so the multiplicities need
 no range proof and their seven Akita digits no alphabet check. The GKR term follows
 Proposition 1 of LogUp-GKR with independent coefficients per claim (one `1/|K|` per
@@ -215,7 +217,7 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 | --- | ---: | --- | ---: | --- |
 | one `X` | `(L + M - 1)/|K| = 2^-101.0` | 1 | 22,896 | below the 128-bit ledger |
 | (i) one `X` and a 28-bit work nonce | `2^-129.0` (difficulty 28) | `+27.6 s` nonce search on 7 threads (Section 4.4), about 7x the second challenge | 22,896 + nonce | above Akita's 25-bit cap; no nonce format here (deviation P3) |
-| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.46x (1,024) to 1.54x (8,192) of the lookup prover (prototype, Section 4.2); integrated figures in Section 4.5 | 28,784 | no grinding needed |
+| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.46x (1,024) to 1.54x (8,192) of the lookup prover (prototype, Section 4.2); integrated figures in Section 4.5 | 28,784 | the identity term needs no grinding; the GKR rounds still need grinding to Aerie's schedule (P3): the lookup is at about `2^-117.9` before grinding (`1,106/|K|`) |
 | (iii) `X` in `F_{p^4}` (trees over the degree-4 extension, challenges of the sessions in `K`) | `(L + M - 1)/p^4 = 2^-229` | every tree node and lane product in `F_{p^4}`: 3 `K`-multiplications per product (Karatsuba) plus a constant, about 3x the arithmetic of one challenge, i.e. 2x that of (ii); a kernel field change | about 2x of one `X` (every layer value and message in `F_{p^4}`) | rejected: dearer than (ii) |
 | (iv) tighter counting (bound `deg N` by the distinct out-of-table values) | none: an adversary can make every `f_i` distinct, `deg N = L + M - 1` is reachable | 0 | 22,896 | no improvement in the worst case |
 | (v) the conjugate `X^p` as a second point | none: `N` has coefficients in `F_p`, so `N(X) = 0` implies `N(X^p) = 0` | 0 | 22,896 | no information |
@@ -223,9 +225,13 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 | (vii) split the lookups into `k` parts with their own multiplicities | `(L + k M - 1)/|K|` for the union of the parts | `k` multiplicity columns | more | worse |
 | (viii) a 25-bit nonce (Akita's cap) | `2^-126.0` at `2^15`; 128 bits only while `L + M < 2^25`, i.e. up to `N = 2^12` (`2^-128.9`) | about 3.4 s on 7 threads (`2^25` previews at 102.9 ns, Section 4.4) | 22,896 + nonce | not 128 bits at `2^13` and above; needs the nonce format anyway |
 
-The only remedies that reach 128 bits at `N = 2^15` are (i), (ii) and (iii); (ii) is the
-cheapest of the three by the measurements of Section 4 and needs neither grinding nor a
-kernel field change. Implementation-level savings that keep the soundness of (ii) and are
+The only remedies that bring the identity term to 128 bits at `N = 2^15` are (i), (ii)
+and (iii); (ii) is the cheapest of the three by the measurements of Section 4 and needs
+neither grinding for that term nor a kernel field change. This is not 128 bits for the
+lookup: its GKR sessions are `1,106/|K| ~ 2^-117.9` at `2^15` and each degree-3 round is
+`3/|K| ~ 2^-126.4`, above `2^-128`, so the lookup, like the other field terms
+(`3,534/|K| < 2^-116.2` in all), reaches `2^-128` per site only with grinding to Aerie's
+schedule, which is not implemented (deviation P3, spec 12.1). Implementation-level savings that keep the soundness of (ii) and are
 not done yet: build both tree sets in one pass over the stacked lanes (the leaves are read
 once, the two `(p, q)` pairs per node stored side by side), and recompute the bottom layer
 in session `D - 1` instead of storing it (Section 4.3). Both change only the prover.
@@ -392,7 +398,9 @@ interleaved with `4247f61`, medians of 5 after 1 warmup, load average 6.1 to 8.7
 
 Mode A at 1,024 / 2,048: prove 2.629 -> 2.555 s and 3.957 -> 4.109 s (the Flock part is the
 same code), verify 306 -> 283 and 392 -> 346 ms uncached, 700.8 -> 718.9 and 405.1 -> 415.4 B
-per signature. The layout halves the committed cells and makes the main-domain commitments
+per signature. The aggregate without the public bits grows by 16.2, 18.8, 18.5 and 21.1 KB at 256, 512,
+1,024 and 2,048 (mode A: 18.5 and 21.1 KB at 1,024 and 2,048): the lookup proof minus the
+shorter stage claims. The layout halves the committed cells and makes the main-domain commitments
 2 to 3x faster, but with the kernel of `docs/piop.md` Section 18 the old range machinery cost
 only about 0.2 ms per signature, so the lookup (0.28 ms per signature) makes the prover
 break-even at 256 to 1,024 and 6% slower at 2,048 locally; the estimate of Section 4.2
@@ -481,9 +489,17 @@ multiplicity-digit claims and a truncated session; swapped stage-3 column claims
 at stage 3; a value valid only for another range (`Z_hi = 2`, valid for `U_hi`; `U_hi = 4,
 -5`; a carry stored unshifted, valid in `T_16` but meaning `kappa + 2^15`; a padding slot
 holding a table entry) rejected at the leaf, the bridge identity or the stack reduction;
-every old witness tampering at its stage), `tests/mode_b.rs` (round trips at 64, 256, 1,024;
-end-to-end tampering including a wrong multiplicity and a 16-bit value outside the width-16
-interval), `tests/prove_verify.rs`, `tests/bridge.rs`, `tests/source_tables.rs`,
+a low part valid only for the wider range `[0, 2^17)` (`U_lo + 2^16` with `U_hi - 1`,
+`V_lo + 2^16` with `V_hi - 1`: `u`, `v` unchanged) rejected by the lookup; every old witness
+tampering at its stage), `tests/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
+tampering including a wrong multiplicity; a stored 16-bit value outside the width-16
+interval is refused by Akita's commit, so the prover fails and no aggregate exists: the
+verifier's rejection of a looked-up value outside `T_16` is tested only at the PIOP level,
+in `tests/stages.rs`, without commitments and opening; an end-to-end test would need a
+commit path that skips Akita's admission bound), `tests/single_thread.rs` (a whole prover
+and verifier run with a one-thread rayon pool, called from a plain thread and from a pool
+worker, under a timeout: the regression test of the round-1 deadlock, deviation P12),
+`tests/prove_verify.rs`, `tests/bridge.rs`, `tests/source_tables.rs`,
 `tests/virtual_checker.rs` (the L16 tables against the integer relation), `tests/commit_open.rs`;
 `agg-cli` `tests/mode_a.rs` (mode A round trips and tampering).
 

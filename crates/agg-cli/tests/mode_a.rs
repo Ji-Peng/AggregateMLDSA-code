@@ -29,7 +29,7 @@ use agg_keccak::witness::pack_slot;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{Column, CommitmentManifest, GroupRole};
 use agg_piop::mode_b::PublicBitsVerifier;
-use agg_piop::prover::SeededMatrices;
+use agg_piop::prover::{ProveError, SeededMatrices};
 use agg_piop::public_data::KeyCache;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables};
 use agg_piop::stage::StageError;
@@ -616,19 +616,22 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         let error = outcome.outcome.expect_err("the range identity");
         eprintln!("w1' = 44, both copies, Flock verdict ignored: rejected with {error}");
         assert!(at_stage(1)(&error), "{error:?}");
-        // A 16-bit value outside T_16: the honest multiplicity count and the width-16
-        // commitment cannot hold it (the PIOP-level rejection is agg-piop tests/stages.rs).
-        match aggregator.aggregate_with(
+        // A 16-bit value outside T_16 (stored 2^15): Akita refuses to commit it (the
+        // width-16 coefficient bound is the balanced 16-bit interval), so no aggregate
+        // exists to verify; the verifier's rejection of a looked-up value outside T_16 is
+        // tested at the PIOP level (agg-piop tests/stages.rs, without commitments).
+        let Err(error) = aggregator.aggregate_with(
             &signed,
             &main(&|m, t| *t.wide_cell_mut(m, Column::U_LO, main_index(17, 2, 5)) = 1 << 15),
-        ) {
-            Err(e) => eprintln!("u_lo = 2^15: the prover fails ({e})"),
-            Ok(aggregate) => expect_rejected(
-                "u_lo = 2^15",
-                &verifier.verify(&public, &aggregate.bytes, None),
-                |e| matches!(e, VerifyError::Lookup(_)),
-            ),
-        }
+        ) else {
+            panic!("Akita refuses a stored value outside the width-16 interval");
+        };
+        eprintln!("u_lo = 2^15: the prover fails ({error})");
+        assert!(
+            matches!(error, AggregateError::Prove(ProveError::Pcs(_)))
+                && error.to_string().contains("exceeds the scheduled coefficient bound"),
+            "{error}"
+        );
         // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
         run(
             "base-4 digit",

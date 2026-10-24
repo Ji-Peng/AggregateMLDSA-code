@@ -440,18 +440,21 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             }
         });
         expect("w1' = 44", &w44, &|e| matches!(e, VerifyError::Keccak(0)));
-        // A 16-bit value outside [-2^15, 2^15) (looked-up value 2^16): the width-16
-        // commitment cannot hold it (the PIOP-level rejection by the lookup is in
-        // tests/stages.rs).
+        // A 16-bit value outside [-2^15, 2^15) (looked-up value 2^16): Akita refuses to
+        // commit it, because the width-16 coefficient bound is the balanced 16-bit
+        // interval, so no aggregate exists to verify. The verifier's rejection of a
+        // looked-up value outside T_16 is tested at the PIOP level (tests/stages.rs,
+        // without commitments): a cheating prover's commitment to such a value is bound
+        // only by the lookup, not by this admission check (spec Section 12.2).
         let wide = tampered(&|m| *m.wide_cell_mut(&manifest, Column::U_LO, x) = LOOKUP_SHIFT);
-        match prove_tampered(&fixture, &bridge, &wide, None) {
-            Err(error) => eprintln!("u_lo = 2^15: the prover fails ({error})"),
-            Ok(bytes) => {
-                let error = rejected(verify(&bytes));
-                eprintln!("u_lo = 2^15: rejected with {error}");
-                assert!(matches!(error, VerifyError::Lookup(_)), "{error:?}");
-            }
-        }
+        let error = prove_tampered(&fixture, &bridge, &wide, None)
+            .expect_err("Akita refuses a stored value outside the width-16 interval");
+        eprintln!("u_lo = 2^15: the prover fails ({error})");
+        assert!(
+            error.starts_with("pcs: commit: akita:")
+                && error.contains("exceeds the scheduled coefficient bound"),
+            "{error}"
+        );
         // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
         expect(
             "base-4 digit",

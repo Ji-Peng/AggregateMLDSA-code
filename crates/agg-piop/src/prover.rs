@@ -562,8 +562,10 @@ pub fn prove_with_tables(
     // The round-1 commitments and the Flock commitments depend only on the witness, so they
     // run concurrently (both are memory bound and leave threads idle on their own); the
     // transcript absorbs them in event order afterwards. Each step's time is its own
-    // closure's, so in mode A the two overlap in wall time.
-    let ((round1, round1_time), (flock_commitments, keccak_time)) = rayon::join(
+    // closure's, so in mode A the two overlap in wall time. `overlap`, not `rayon::join`:
+    // the commit side must not run on a rayon worker that then blocks on its commit threads
+    // (one-thread pools deadlocked; deviation P12).
+    let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
         || {
             let start = Instant::now();
             (committer.commit_round1(main), start.elapsed())
