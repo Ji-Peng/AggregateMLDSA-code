@@ -20,7 +20,7 @@ use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::PreStageClaims;
 use crate::manifest::{CommitmentManifest, GroupRole};
 use crate::opening::opening_claims;
-use crate::pcs::{evaluate_column, PcsError, TableCommitter};
+use crate::pcs::{PcsError, TableCommitter};
 use crate::public_data::PublicData;
 use crate::source_tables::{BridgeGroupTables, MainTables, SourceTableError, SourceTables};
 use crate::stage::{suffix, Points, StageError};
@@ -80,8 +80,16 @@ pub trait KeccakSide {
     /// The `S` Flock commitments, before the bridge seed.
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>>;
     /// The `S` Flock proofs, after the challenger seeds `fs_sigma` and with the final
-    /// vectors `Y_sigma` known.
-    fn prove(&self, seeds: &[[u8; 32]], final_vectors: &[Vec<u8>]) -> Vec<Vec<u8>>;
+    /// vectors `Y_sigma` known. `bridge_seed` is `sd` (event 3) and `matrices` its
+    /// `M_1, M_2, M_3`: the bridge slot's rows are generated from them and its circuit
+    /// digest binds `sd` (docs/bridge.md Section 5, `docs/deviations.md` P11).
+    fn prove(
+        &self,
+        bridge_seed: &[u8; 32],
+        matrices: &BridgeMatrices,
+        seeds: &[[u8; 32]],
+        final_vectors: &[Vec<u8>],
+    ) -> Vec<Vec<u8>>;
 }
 
 /// No Keccak argument (Flock profile 0): empty commitments and proofs, so `c~_i` is not
@@ -96,7 +104,13 @@ impl KeccakSide for NoKeccak {
         vec![Vec::new(); segments]
     }
 
-    fn prove(&self, seeds: &[[u8; 32]], _final_vectors: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn prove(
+        &self,
+        _bridge_seed: &[u8; 32],
+        _matrices: &BridgeMatrices,
+        seeds: &[[u8; 32]],
+        _final_vectors: &[Vec<u8>],
+    ) -> Vec<Vec<u8>> {
         vec![Vec::new(); seeds.len()]
     }
 }
@@ -378,7 +392,7 @@ pub fn prove_with_tables(
     let final_vectors: Vec<[u8; 512]> = final_bits.iter().map(|bits| pack_final_vector(bits)).collect();
     transcript.absorb(FINAL_VECTORS_SITE, segments, &final_vectors.concat())?;
     timings.round2 = clock.lap();
-    let flock_proofs = keccak.prove(&flock_seeds, &final_bits);
+    let flock_proofs = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits);
     if flock_proofs.len() != segments {
         return Err(ProveError::Internal("one Flock proof per segment".into()));
     }
@@ -397,9 +411,8 @@ pub fn prove_with_tables(
     };
     let prestage = PreStageClaims::evaluate(manifest, tables, &points.tau);
     transcript.absorb_extensions(PRESTAGE_SITE, &prestage.to_vec())?;
-    let y_table: Vec<i8> = bridge_tables.public_y().iter().map(|&b| b as i8).collect();
-    let y_at_tau3 = evaluate_column(
-        &y_table,
+    let y_at_tau3 = agg_bridge::final_vector::evaluate(
+        bridge_tables.public_y(),
         &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
     );
     timings.prestage = clock.lap();

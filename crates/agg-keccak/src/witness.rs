@@ -42,11 +42,25 @@ where
     F: Fn(usize, &mut [u64], &mut [u64], &mut [u64]) + Sync,
 {
     let lay = gate.layout();
+    pack_rows(lay.k_log, lay.useful_bits, nu, n, rows)
+}
+
+/// [`pack_slot`] for any block geometry: `n <= 2^nu` instances of a type with block width
+/// `2^k_log` whose columns `[0, useful_bits)` carry data. `rows(j, z, a, b)` writes instance
+/// `j` into zeroed slices of `ceil(useful_bits / 64)` words.
+///
+/// # Panics
+/// If `n > 2^nu`, `nu < 3`, `k_log < 7` or `useful_bits > 2^k_log`.
+pub fn pack_rows<F>(k_log: usize, useful_bits: usize, nu: usize, n: usize, rows: F) -> SlotBuffers
+where
+    F: Fn(usize, &mut [u64], &mut [u64], &mut [u64]) + Sync,
+{
     assert!(nu >= 3, "Flock's lincheck stripe needs at least 8 rows");
     assert!(n <= 1 << nu, "count exceeds the row capacity");
-    let k = 1usize << lay.k_log;
-    let w = lay.useful_words();
-    let useful_chunks = lay.useful_bits.div_ceil(128);
+    assert!(k_log >= 7 && useful_bits <= 1 << k_log, "block geometry");
+    let k = 1usize << k_log;
+    let w = useful_bits.div_ceil(64);
+    let useful_chunks = useful_bits.div_ceil(128);
     let len = (k / 128) << nu;
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
     let mut a: Vec<F128> = alloc_zeroed_vec(len);

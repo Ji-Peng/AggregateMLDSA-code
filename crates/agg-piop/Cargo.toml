@@ -47,6 +47,8 @@ sha3 = { workspace = true }
 [dev-dependencies]
 # The integration tests (tests/*.rs) use the stand-ins of the `test-hooks` feature.
 agg-piop = { path = ".", features = ["test-hooks"] }
+# The joint bridge test (tests/joint_bridge.rs) runs the Flock side of mode A.
+agg-keccak = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -8,6 +8,10 @@
 //! - [`sponge`]: the SHAKE256 gate for `c~ = H(mu || w1Encode)`.
 //! - [`witness`]: batch-major packing into a Flock union slot.
 //! - [`prover`]: prove/verify of a sub-batch (Ligerito `Fast` or `Secure`), proof bytes.
+//! - [`bridge_slot`]: the bridge type, whose seeded rows prove `Y_sigma = M_3 M_2 M_1 b'`
+//!   with a factored `LincheckCircuit` walker (docs/bridge.md Section 5).
+//! - [`segment`]: the bridged segment (sponge rows and bridge slot in one union proof,
+//!   committed before the bridge seed) and the standalone bridge slot proof.
 
 // Index loops mirror the (x, y, z) bit arithmetic of FIPS 202.
 #![allow(clippy::needless_range_loop)]

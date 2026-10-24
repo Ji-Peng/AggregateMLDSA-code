@@ -124,7 +124,13 @@ impl KeccakSide for PublicBits {
         self.segments.clone()
     }
 
-    fn prove(&self, seeds: &[[u8; 32]], _final_vectors: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn prove(
+        &self,
+        _bridge_seed: &[u8; 32],
+        _matrices: &BridgeMatrices,
+        seeds: &[[u8; 32]],
+        _final_vectors: &[Vec<u8>],
+    ) -> Vec<Vec<u8>> {
         vec![Vec::new(); seeds.len()]
     }
 }
@@ -502,6 +508,7 @@ mod tests {
                 geometry,
                 commitment,
                 seed: &[0; 32],
+                bridge_seed: &[0; 32],
                 mu: &mu,
                 c_tilde,
                 final_vector,

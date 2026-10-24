@@ -304,23 +304,20 @@ impl AggregateProof {
     }
 }
 
-/// Pack 4,096 bits (one byte each) into 512 bytes, least significant bit first.
+/// Pack 4,096 bits (one byte each) into 512 bytes, least significant bit first
+/// (`agg_bridge::final_vector::pack`).
 #[must_use]
 pub fn pack_final_vector(bits: &[u8]) -> [u8; FINAL_VECTOR_BYTES] {
     assert_eq!(bits.len(), 8 * FINAL_VECTOR_BYTES, "4,096 bits");
-    let mut out = [0_u8; FINAL_VECTOR_BYTES];
-    for (i, &bit) in bits.iter().enumerate() {
-        out[i / 8] |= (bit & 1) << (i % 8);
-    }
-    out
+    agg_bridge::final_vector::pack(bits)
+        .try_into()
+        .expect("512 bytes")
 }
 
-/// Unpack 512 bytes into 4,096 bits (one byte each).
+/// Unpack 512 bytes into 4,096 bits (one byte each; `agg_bridge::final_vector::unpack`).
 #[must_use]
 pub fn unpack_final_vector(packed: &[u8; FINAL_VECTOR_BYTES]) -> Vec<u8> {
-    (0..8 * FINAL_VECTOR_BYTES)
-        .map(|i| (packed[i / 8] >> (i % 8)) & 1)
-        .collect()
+    agg_bridge::final_vector::unpack(packed)
 }
 
 #[cfg(test)]

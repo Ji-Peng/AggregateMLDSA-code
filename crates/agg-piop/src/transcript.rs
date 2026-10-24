@@ -38,8 +38,9 @@ pub const STAGE_TERMINALS: [usize; 3] = [98, 61, 67];
 pub const PRESTAGE_CLAIMS: usize = 26;
 /// Level-1 carry digit claims before stage 2 (spec Section 7.4).
 pub const KAPPA1_CLAIMS: usize = 18;
-/// Bytes of one packed final vector `Y_sigma`.
-pub const FINAL_VECTOR_BYTES: usize = 512;
+/// Bytes of one packed final vector `Y_sigma` (512, `agg_bridge::final_vector`).
+pub const FINAL_VECTOR_BYTES: usize =
+    agg_bridge::final_vector::segment_bytes(&agg_bridge::Shape::PRODUCTION);
 
 pub const INSTANCE_SITE: &str = "agg-mldsa/v1/instance";
 pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";

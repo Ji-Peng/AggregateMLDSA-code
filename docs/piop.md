@@ -11,7 +11,7 @@ part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `
 | Module | Content | Spec | Aerie counterpart |
 | --- | --- | --- | --- |
 | `manifest` | `CommitmentManifest`: the four groups (role, round, family, logical and physical variables, polynomial order and alphabets), digit columns, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
-| `source_tables` | `MainTables` (round 1, `G_main`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3` and public `Y`), `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
+| `source_tables` | `MainTables` (round 1, `G_main`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3` and public `Y`, from `agg_bridge::parity` and `agg_bridge::carry` at `Shape::PRODUCTION`), `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
 | `pcs` | `group_polynomials`, `TableCommitter` (two rounds, batched opening), `opening_claims`, `suffix_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
 | `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
 | `virtual_polys` | `w_1'`, (4.1) compositions, ring residual, `y^(1)` parities, `P_Z, A^lo, A^hi`, `MainValues`/`CarryValues` | 4.3, 5 | |
@@ -19,7 +19,7 @@ part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `
 | `range` | digit maps `z -> z(z+1)`, `Q_16^lo(P)`, `Q_16^hi(P)`; the digit orders | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
 | `stage` | `StageSpec` (declarative instance table: groups, lanes, equality points, gamma indices), `prove_stage`, `replay_stage`, `check_terminal` | 7.1 | `aerie-falcon/src/protocol/stage.rs` |
 | `stage1`, `stage2`, `stage3` | the instance tables of Section 7.3 to 7.5, claimed sums, terminal claims, `prove`/`verify` | 7.3-7.5 | `stage1.rs`, `stage2.rs`, `stage3.rs` of both Aerie crates |
-| `weights` | `w_1, w_2, w_{3,t}` tables and verifier evaluations; `w_A` table and (7.10) | 7.6 | `ring/functional.rs`, `stage1/projection_link.rs` |
+| `weights` | `w_1, w_2, w_{3,t}` tables and verifier evaluations (wrappers of `agg_bridge::weights` at the production shape); `w_A` table and (7.10) | 7.6 | `ring/functional.rs`, `stage1/projection_link.rs` |
 | `claims` | the claim vectors between stages and their wire order | 7.2-7.5 | |
 | `tables` | `ProverTables`: borrowed `i8` columns, `y^(1)` as `i32`, the weight tables when known; `LaneId -> Lane` | 7 | |
 | `transcript` | Spongefish `Blake2b512` stream, event registry, samplers, `pcs_session` | 10 | `aerie-falcon/src/protocol/transcript.rs` |
@@ -274,7 +274,7 @@ change the honest round-2 tables before they are committed.
 | `public_data` | 2 | `StreamedPublic::prepare`: `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest |
 | `transcript` | 3 | events 0 to 6: commitments parsed (coefficient counts from the plan) and absorbed, `sd`, `fs_sigma`, final vectors, Keccak-side proofs |
 | `matrices` | 3 | `BridgeDerivation::matrices(sd)`; `SeededMatrices` derives them as in spec 9.1 (`agg_bridge::seed`) |
-| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `mu_i`, `c~_i`, `Y_sigma`, proof item, matrices) |
+| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, proof item, matrices; deviation P11) |
 | `prestage` | 4 | `tau`, pre-stage claims, `Y(tau_3)` |
 | `stage1`, `stage2` | 5, 6 | rounds and terminal checks; `w_2, w_3` at `r^(1)`, `w_1` at `r^(2)` (bridge weights, Section 8) |
 | `stage3_rounds` | 6 | `stage3::verify_streamed`: gamma, rounds, terminal claims, with the ring claim `T(r^(2))` deferred (deviation P10) |
@@ -427,6 +427,15 @@ build; the 1,024-signature round trip is ignored in debug builds):
   `b_0` at two positions and moves `u` by `-/+ 2 gamma_2`; every PIOP check, the projection
   and the opening pass, `verify_mode_b` rejects with `VerifyError::Bits`, and the same
   aggregate is accepted by a verifier without the bit check (deviation P9).
+- `tests/bridge.rs` (the Fp side of the bridge, `docs/bridge.md` Section 9 item 7): a full
+  prover run at 256 signatures with `SeededMatrices` verifies; the round-2 tables built through
+  `agg_bridge` equal the `agg-witness` reference, satisfy `agg_bridge::parity::check`, and the
+  published `Y` equals both GF(2) composites; the verifier's bridge weights at `r^(1)` (`w_2`,
+  `w_{3,t}`, `stage1::BridgeWeightsAt`) and at `r^(2)` (`w_1`) equal the extensions of the
+  prover's weight tables at the transcript's points. Tampering through the full prover (48
+  records, `FixedMatrices`, unchecked stages): a flipped `Y` bit, a flipped level-2 parity, a
+  level-1 and a level-3 carry digit, and a flipped committed bit under the stale round-2
+  tables are each rejected at the stage-1 terminal.
 - `tests/commit_open.rs`, `tests/virtual_checker.rs`, `tests/source_tables.rs` as in part 1.
 
 `agg-bench` (`taskset -c 0,1,3-15 cargo test -p agg-bench --release`, 3 tests): medians,

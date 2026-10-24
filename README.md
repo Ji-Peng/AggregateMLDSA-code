@@ -13,7 +13,7 @@ recorded in `docs/deviations.md`.
 | `crates/agg-witness` | lib | ML-DSA-44 native verify, key expansion, (z,u,v,b) derivation, CRT product, table builders, padding | M1 |
 | `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset, four-group catalogs, two-round commit driver, work plan | M1 |
 | `crates/agg-piop` | lib | stages 1-3, range leaves and links, weight tables, verifier, Akita openings | M2 |
-| `crates/agg-bridge` | lib | seed to matrices, Fp parity and carry-digit tables, GF(2) composite walker, soundness constants | M2 |
+| `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, soundness constants | M2 |
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, segment driver | M3 |
 | `crates/agg-cli` | bin `agg` + lib | prove/verify, wire format, record binding, caches | M2/M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |

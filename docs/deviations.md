@@ -119,13 +119,17 @@ selects its block-first opening, whose cost is fixed by the 2,155 used columns (
 with CLMUL at any `n`, 26 s without). A function of `n`, so prover and verifier agree;
 at a full 2^13-record segment the block-first path is kept.
 
-## K6. Bridge words not yet wireable
+## K6. Bridge words wired only in the bridged segment
 
 Spec Section 8: the bridge slot copies "every live record's 48 w1Encode words".
 
-Code: the 48 words sit at aligned word columns 4..51 of the sponge gate, but the IO
-schema lists only `mu` and `c~`. The bridge-slot stage adds the 48 words as `In` schema
-words (after `mu`); the schema is digest-visible, so that changes the circuit digest.
+Code: the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) keeps the IO schema
+`mu`, `c~` and its digests. The bridged segment (`segment::BridgedSegment`) registers the
+sponge type with the 48 w1Encode words (aligned word columns 4..51) added as `In` schema
+words after `mu`, schema `[mu (4), w1Encode (48), c~ (2)]` (digest-visible through Flock's
+registry digest), and wires word `4 + 8t + w` of record `i` to the bridge slot's word
+`(Lambda t + 1024 i) / 128 + w`: `48 n` wire classes of two `In` cells each, no bit
+permutation (docs/bridge.md Section 2).
 
 ## K7. Commit, then prove; the Flock commitment travels at event 2 only (spec Sections 8, 10)
 
@@ -165,16 +169,71 @@ Section 6). The slot buffers of all `S` sub-batches stay in memory from event 2 
 8 GiB at `N = 2^15`; a driver may keep only `z` and rebuild the rest). Removing the second
 commit needs a Flock entry that takes the commitment and its `ProverData`.
 
-Still open, and planned rather than a defect of this stage: the bridge slot
-(`bridge_slot.rs`) and the segment driver (`segment.rs`) are skeletons for the bridge-slot
-stage of M3 (spec Section 14; K6). The Section 8 requirements stand: the bridge type's
-relation depends on `sd`, so its digest (covering `sd` and `(J_t, m_t, k_t)`) is absorbed
-into the Flock challenger next to the gate digest (the registry digest covers only the
-matrix stubs, K2), and `Y_sigma` is a public input wired like `mu` and `c~`. The split API
-is what allows that order: the bridge slot's witness (copies of the w1Encode words) does
-not depend on `sd`, so it is committed with the Keccak slot before event 2. Because
+The bridge slot (`bridge_slot.rs`) and the segment driver (`segment.rs`) follow the same
+split: `BridgedSegment::commit` commits the sponge rows and the bridge copies (neither
+depends on `sd`) before event 2; `prove` takes `sd`, its matrices and `fs_sigma`. The
+bridge type's relation depends on `sd` and `Y_sigma`, so its digest (`BridgeSlot::digest`:
+`sd`, the shape, the layout, `Y_sigma`) is absorbed into the Flock challenger after
+`fs_sigma` and the sponge gate digest (the registry digest covers only the matrix stubs,
+K2). `Y_sigma` is a coefficient of the relation, not a wired public word (K8). Because
 `fs_sigma` is drawn after `sd`, the Flock transcript already depends on `sd` through its
 seed; the digest is what binds the relation itself.
+
+## K8. `Y_sigma` as a coefficient of the bridge rows, not a committed word (docs/bridge.md Section 5)
+
+docs/bridge.md Section 5: columns `6 Lambda + 128 + rho_3` hold `Y_sigma[rho_3]` as committed
+`Out` schema words wired to public words, with rows `(sum_c M[rho_3, c] z_c) * 1 = z_Y`; and
+the slot's "witness is copies of the bits, so it is committed before sd".
+
+Code (`agg_keccak::bridge_slot`): the two requirements contradict each other, since
+`Y_sigma` is a function of `sd` and a committed `Y` column would make the event-2
+commitment depend on `sd`. The columns `y_o = lanes Lambda + 128 + o` are committed zeros,
+and row `y_o` is `(sum_c M[o, c] z_c + Y_o z_one) * z_one = z_{y_o}`: `Y_o` enters `A_0` as
+the coefficient of the constant column (pinned to 1 by Flock). On an honest block these
+rows have `a = 0`, `b = 1`, so the bridge witness (the bit copies, the constant, zeros) and
+even its `a`, `b` buffers are independent of `sd` and `Y`. The type has no `Out` words; the
+Flock public words are `[mu_i, c~_i]` only. Binding: the verifier rebuilds the relation from
+its own `sd`, matrices and `Y_sigma` (another `Y` changes `xi_A` at the constant column by
+`sum_o (Y_o + Y'_o) eq[y_o]`, so the lincheck fails), and `BridgeSlot::digest` covers `Y`.
+The walker of docs/bridge.md Section 5 is unchanged except `xi_A[one] += sum_o Y_o eq[y_o]`.
+The Y rows lie inside `useful_bits` (committed zero columns), so Flock's dead-region
+gating never skips them. Tests (`tests/bridge.rs`): a flipped `Y` bit, another seed, a
+flipped committed bit with the stale `Y`, a bit flipped in the slot copy only, a bit flipped
+in both copies with the stale `c~` are rejected, at the toy and the production shape.
+
+Test-plan differences (docs/bridge.md Section 9 item 6): the comparison with Flock's
+`SparseMatrixCircuit` on explicitly lowered rows runs on the toy slot and on a production
+slot of one record (`d_seg = 0`: 4,096 dense composite rows over 6,144 columns), not at
+`d_seg = 3` (about `10^8` entries, 800 MB as Flock's `Vec<Vec<usize>>`); the bridged proofs
+run at `d_seg = 3` (5 live records, 3 padded) and `d_seg = 6` (64 records), not 7; "a stale
+parity row" has no counterpart because no parity is committed (the nearest case, a stale
+`Y` for a flipped committed bit, is tested).
+
+## K9. Full-segment bridged union under Flock's uniform row capacity (risk, open)
+
+Not in the spec. A Flock registry gives every type the same `2^nu` rows. At a full segment
+(`n = 2^13`, `nu = 13`) the bridge type's `k_log = 26` makes its slot `2^39` bits, so the
+union has `M = 40` variables: Flock's prover allocates the padded buffers `z`, `a`, `b` with
+`2^33` words each (128 GiB each, zero-filled on the prebuilt-slot path this code uses, and
+the bridge slot's own buffers are `2^32` words; only the dense commitment is
+count-proportional), and the
+wiring argument's cell space is `2^nu` cells per schema word, `393,216 + 54` words, so
+`mu = 13 + 19 = 32` (`2^32` cells, and the verifier's `s_sigma` discharge is `O(2^mu)`).
+The design of docs/bridge.md Section 5 (B.13) therefore does not fit 64 to 128 GB at a full
+segment with Flock `83f963e` (estimate from the formulas above; not run). Local sizes are
+unaffected: at 64 records `M = 27`, `mu = 19`. `UnionContext::commit` in `segment.rs` also
+materializes the padded `z` (fine at test sizes; a production commit must gather the
+dense stack directly).
+
+Remedy (proposal, not implemented): split a segment into Flock sub-batches of `2^{d_f}`
+records, each with its own bridge slot proving the partial vector
+`Y_{sigma,s} = M^{(sigma)} b'_s` over the sub-batch's columns, and let the verifier check
+`XOR_s Y_{sigma,s} = Y_sigma` (the map is linear and the matrices are the same seeded ones,
+so the bound of docs/bridge.md Section 7 is unchanged; the walker only needs an offset of
+the level-1 block index). At `d_f = 10` the bridge slot is `2^33` bits (1 GiB per buffer)
+and `mu` about 26, at the price of 8 Flock proofs per segment instead of one (estimate:
+proof bytes times 8 for the Keccak side). The alternative is a Flock change (per-type row
+capacity). A decision is needed before the cloud run.
 
 ## P1. Manifest part of event 0 (spec Section 10)
 
@@ -252,7 +311,9 @@ events 2, 3, 5 and 6 are always present with `S` atoms.
   matrices as well (completeness only).
 
 What remains open is planned, not a defect of the PIOP: there is no Flock
-`KeccakVerifier` yet (milestone M3, `agg-keccak` bridge slot and segment driver, K6, K7).
+`KeccakVerifier` in a library crate yet (milestone M3, `agg-keccak` bridge slot and segment
+driver, K6, K7); the joint test `agg-piop/tests/joint_bridge.rs` wires one up for a single
+segment (P11).
 Until it exists the only accepting production configuration is mode B
 (`mode_b::verify_mode_b` with `SeededMatrices`), which is sound through its own checks
 (P9). Mode A becomes available by passing the Flock verifier (profile `Fast` or
@@ -350,3 +411,50 @@ cache, its `k l` products with `Lambda`, weighted by `sum_i eq(r2_sig, i) eq(r3_
 over the key's records). Neither `A_i` nor `T_i` is stored for the batch. Why two loops:
 `T_i` depends on the record, `A` only on the key, so the key loop expands each shared key
 once and the record loop stays balanced when many records share a key.
+
+## B1. Fp side of the bridge: choices left open by docs/bridge.md (Sections 1, 3, 4)
+
+Code (`agg_bridge::{shape, parity, carry, weights, final_vector, soundness}`, used by
+`agg_piop` at `Shape::PRODUCTION`):
+
+- Toy-shape carry digits (tests only; `docs/bridge.md` gives the ranges, not the digits):
+  unsigned bases `(8, 8)`, `(8, 4)`, `(4, 4)` for `[0, 63]`, `[0, 31]`, `[0, 15]`
+  (`shape::TOY_CARRY{1,2,3}_DIGITS`). `Shape::validate` requires every level's digit range to
+  be exactly `[0, floor(W_t / 2)]`.
+- Honest-abort row weights (`Shape::row_weights_ok`) count the used columns only
+  (`J_2^used = 2^17` at level 2), the weights that bound the level sums.
+  `agg_witness::bridge::BridgeMatrices::row_weights_ok` counts all `2^19` columns of `M_2`;
+  both accept every matrix whose all-column weights are within the caps (production means
+  896, 224, 216 against 2,047, 2,047, 511), so no honest run differs.
+- Carries are the quotient columns `floor(s / 2)` of the integer row sums `s`
+  (`parity::split`), parities `s mod 2`; `carry::group_tables` refuses a carry outside its
+  range instead of committing an out-of-alphabet top digit (the honest prover never has one).
+- The verifier evaluates the stage-1 bridge weights `w_2(r^(1)_1)` and `w_{3,t}(r^(1)_2)`
+  once per stage (`stage1::BridgeWeightsAt`), not once per lane; values unchanged.
+- `agg_witness::bridge::compute` and `gf2_composite` stay as the independent production
+  reference; the tests compare `agg-bridge` against them.
+
+## P11. The Keccak hooks carry the bridge seed (spec Sections 8, 10, 11; docs/bridge.md Section 5)
+
+Spec: the bridge slot's circuit digest MUST cover `sd`, and the Flock rows are generated
+from `M_1, M_2, M_3` of `sd` (Section 8 driver: "receive `sd` and `fs_sigma`, derive the
+bridge rows, bind the statement").
+
+Mismatch found by the joint bridge test: `prover::KeccakSide::prove` received only the
+Flock seeds `fs_sigma` and the final vectors, and `verifier::SegmentContext` only `fs_sigma`
+and the matrices, so a Flock side plugged into the PIOP could not bind the transcript's
+`sd` into `BridgeSlot::digest` (`agg-keccak` takes `sd` explicitly in
+`BridgedSegment::prove`/`verify`) and would have had to re-derive the matrices.
+
+Code: `KeccakSide::prove(bridge_seed, matrices, seeds, final_vectors)` and
+`SegmentContext::bridge_seed` pass the transcript's `sd` (event 3) and its matrices to the
+Keccak side. Wire format, transcript and the mode-B and profile-0 sides are unchanged
+(they ignore both). Test: `agg-piop/tests/joint_bridge.rs` (release, 64 and 256 real
+ML-DSA-44 signatures, one segment) runs the F_p side and the Flock side (`BridgedSegment`,
+profile `Fast`) in one transcript through test adapters of these hooks; both final vectors
+equal a direct sparse GF(2) computation from the derived `w_1'`, the bit orders of `w_1'`,
+`w1Encode` and the committed `b_t` agree (no ordering fix was needed), the aggregate verifies
+with the Flock sub-proof checked inside the PIOP verifier, and one flipped `w1Encode` bit
+fails exactly the side that holds it (F_p side: stage-1 terminal with the Flock sub-proof
+accepted; Flock side: the sub-proof rejected with the F_p side accepting, the rejection due
+to the bridge rows alone). The adapters stay in the test until the mode-A driver exists.

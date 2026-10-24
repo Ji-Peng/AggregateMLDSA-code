@@ -40,7 +40,7 @@ use akita_types::Commitment;
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::manifest::{Column, CommitmentManifest, GroupRole, GROUP_COUNT};
 use crate::opening::{opening_claims, parse_commitment};
-use crate::pcs::{evaluate_column, verifier_for, PcsError};
+use crate::pcs::{verifier_for, PcsError};
 use crate::prover::BridgeDerivation;
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
@@ -62,6 +62,9 @@ pub struct SegmentContext<'a> {
     pub commitment: &'a [u8],
     /// The challenger seed `fs_sigma` (event 5).
     pub seed: &'a [u8; 32],
+    /// The bridge seed `sd` (event 3), which the bridge slot's circuit digest binds
+    /// (docs/bridge.md Section 5, `docs/deviations.md` P11).
+    pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
     pub mu: &'a [[u8; TR_BYTES]],
     /// `c~_i` of the segment's live records.
@@ -470,7 +473,8 @@ fn run(
     transcript.absorb_items(FLOCK_PROOFS_SITE, &proof.flock_proofs)?;
     timings.transcript += clock.lap();
     let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
-    let mut y_table: Vec<i8> = Vec::with_capacity(4096 * segments);
+    // The public table Y on D_3 (Y_sigma[rho_3] at rho_3 + 2^12 sigma), docs/bridge.md 6.
+    let mut y_table: Vec<u8> = Vec::with_capacity(4096 * segments);
     #[allow(clippy::needless_range_loop)]
     for sigma in 0..segments {
         let bits = unpack_final_vector(&proof.final_vectors[sigma]);
@@ -482,6 +486,7 @@ fn run(
             geometry,
             commitment: &proof.flock_commitments[sigma],
             seed: &flock_seeds[sigma],
+            bridge_seed: &bridge_seed,
             mu: &mu[live.clone()],
             c_tilde: &proof.c_tilde[live],
             final_vector: &bits,
@@ -491,7 +496,7 @@ fn run(
         if !keccak.verify(&segment) {
             return Err(VerifyError::Keccak(sigma));
         }
-        y_table.extend(bits.iter().map(|&b| b as i8));
+        y_table.extend_from_slice(&bits);
     }
     timings.keccak = clock.lap();
 
@@ -501,7 +506,7 @@ fn run(
         ..Points::default()
     };
     transcript.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
-    let y_at_tau3 = evaluate_column(
+    let y_at_tau3 = agg_bridge::final_vector::evaluate(
         &y_table,
         &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
     );

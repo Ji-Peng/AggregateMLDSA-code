@@ -7,10 +7,12 @@
 //! distinct rows. Rows are stored in the order drawn. Prover and verifier both derive the
 //! matrices from the transcript's `sd` (event 3); neither transmits them.
 
-use agg_witness::bridge::{BridgeMatrices, SparseMatrix, J1, J2, J3, K1, K2, K3, M1, M2, M3};
+use agg_witness::bridge::{BridgeMatrices, SparseMatrix, M1, M2, M3};
 use rayon::prelude::*;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{CShake256, CShake256Core};
+
+use crate::shape::Shape;
 
 /// Module name, used by smoke tests.
 pub const NAME: &str = "agg-bridge seed";
@@ -34,26 +36,11 @@ pub struct Level {
     pub k: usize,
 }
 
-/// The three levels of spec Section 1.
+/// The three levels of spec Section 1 (`Shape::PRODUCTION`).
 pub const LEVELS: [Level; 3] = [
-    Level {
-        t: 1,
-        rows_log2: M1.trailing_zeros(),
-        cols: J1,
-        k: K1,
-    },
-    Level {
-        t: 2,
-        rows_log2: M2.trailing_zeros(),
-        cols: J2,
-        k: K2,
-    },
-    Level {
-        t: 3,
-        rows_log2: M3.trailing_zeros(),
-        cols: J3,
-        k: K3,
-    },
+    Shape::PRODUCTION.levels[0].seed_level(),
+    Shape::PRODUCTION.levels[1].seed_level(),
+    Shape::PRODUCTION.levels[2].seed_level(),
 ];
 
 const _: () = {
@@ -146,7 +133,15 @@ pub fn derive_matrix(sd: &[u8; SEED_BYTES], level: &Level) -> SparseMatrix {
 /// `M_1, M_2, M_3` of `sd` (spec Section 9.1).
 #[must_use]
 pub fn derive_matrices(sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
-    let [l1, l2, l3] = LEVELS;
+    derive_matrices_for(&Shape::PRODUCTION, sd)
+}
+
+/// `M_1, M_2, M_3` of `sd` for any shape (the toy shape in tests). Every column of every
+/// level is derived, including the unused level-2 columns of the production shape, so the
+/// production matrices are exactly those of spec Section 9.1.
+#[must_use]
+pub fn derive_matrices_for(shape: &Shape, sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
+    let [l1, l2, l3] = shape.levels.map(|level| level.seed_level());
     BridgeMatrices {
         m1: derive_matrix(sd, &l1),
         m2: derive_matrix(sd, &l2),
@@ -253,6 +248,26 @@ mod tests {
             derive_column(&a, &LEVELS[1], 5)
         );
         assert_ne!(derive_column(&a, level, 5), derive_column(&a, level, 6));
+    }
+
+    #[test]
+    fn toy_matrices_follow_the_same_rule_with_the_toy_row_masks() {
+        let sd = seed(0x11);
+        let toy = derive_matrices_for(&Shape::TOY, &sd);
+        assert!(Shape::TOY.matches(&toy));
+        assert!(!Shape::PRODUCTION.matches(&toy));
+        for (level, m) in Shape::TOY.levels.iter().zip([&toy.m1, &toy.m2, &toy.m3]) {
+            let level = level.seed_level();
+            let _ = SparseMatrix::new(m.rows, m.cols, m.k, m.entries.clone());
+            for zeta in [0, 1, level.cols - 1] {
+                assert_eq!(
+                    m.column(zeta),
+                    reference_column(&sd, &level, zeta).0.as_slice()
+                );
+            }
+        }
+        assert_eq!(toy, derive_matrices_for(&Shape::TOY, &sd), "deterministic");
+        assert_eq!(LEVELS[1], Shape::PRODUCTION.levels[1].seed_level());
     }
 
     /// Column 0 of each level for `sd = 0^32`, cross-checked against an independent

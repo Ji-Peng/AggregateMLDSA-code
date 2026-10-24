@@ -11,7 +11,6 @@
 
 use agg_pcs_config::catalogs::{BatchLayout, Group};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
-use agg_witness::bridge::{J1, J2, J3, K1, K2, K3, M1, M2, M3};
 use agg_witness::digits::{
     Alphabet, DigitLayout, KAPPA12_DIGITS, KAPPA3_DIGITS, U_DIGITS, V_DIGITS, Z_DIGITS,
 };
@@ -411,10 +410,11 @@ impl CommitmentManifest {
         }
         bytes.extend_from_slice(&(self.catalog_row.len() as u16).to_le_bytes());
         bytes.extend_from_slice(self.catalog_row.as_bytes());
-        for (j, m, k) in [(J1, M1, K1), (J2, M2, K2), (J3, M3, K3)] {
-            bytes.extend_from_slice(&(j as u64).to_le_bytes());
-            bytes.extend_from_slice(&(m as u64).to_le_bytes());
-            bytes.push(k as u8);
+        // The bridge shape (J_t, m_t, k_t); wire version 0 admits the production shape only.
+        for level in &agg_bridge::Shape::PRODUCTION.levels {
+            bytes.extend_from_slice(&(level.cols as u64).to_le_bytes());
+            bytes.extend_from_slice(&(level.rows as u64).to_le_bytes());
+            bytes.push(level.k as u8);
         }
         bytes
     }
@@ -528,6 +528,14 @@ mod tests {
         );
         let row = manifest.catalog_row().len();
         assert_eq!(bytes.len(), expected.len() + 4 * 6 + 67 + 2 + row + 3 * 17);
+        // The bridge shape of spec Section 1, last: (J_t, m_t, k_t) per level.
+        let mut shape = Vec::new();
+        for (j, m, k) in [(1_u64 << 19, 1_u64 << 13, 14_u8), (1 << 19, 1 << 13, 14), (49_152, 4096, 18)] {
+            shape.extend_from_slice(&j.to_le_bytes());
+            shape.extend_from_slice(&m.to_le_bytes());
+            shape.push(k);
+        }
+        assert_eq!(&bytes[bytes.len() - 51..], shape.as_slice());
         // Live count, padded count and the catalog row all enter the binding.
         let full = CommitmentManifest::for_batch(256).unwrap();
         assert_ne!(full.binding_bytes(), bytes);

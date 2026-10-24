@@ -13,13 +13,17 @@
 //! have zero weight. The verifier evaluates it at a terminal `r` as
 //! `eq(pi_beta, r_beta) sum_zeta eq(r_zeta, zeta) c_t(zeta)`.
 //!
+//! The bridge weights are `agg_bridge::weights` at the production shape (shared with any
+//! other consumer of the bridge); this module fixes the PIOP's point conventions.
+//!
 //! Ring weight (7.9): `w_A(j', s, i) = eq(r_sig, i) K_{A~_{i,s}, r_coef}[j']` with
 //! `A~_{i,s} = sum_rho eq(r_row, rho) A_i[rho, s]`, by Aerie's factorized negacyclic
 //! transform once per `(i, s)`; the verifier evaluates (7.10) by streaming over the
 //! expanded keys with the correlation vector `Lambda` of `(r^(2)_coef, r^(3)_coef)`.
 
-use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table};
-use agg_witness::bridge::{SparseMatrix, J1, M2, ZETA2_USED};
+use aerie_falcon::protocol::algebra::eq_table;
+use agg_bridge::{weights as bridge, Domains, Shape};
+use agg_witness::bridge::SparseMatrix;
 use agg_witness::padding::Geometry;
 use agg_witness::params::{D_COEF, D_POS, K, L, N, W1_BITS};
 use jolt_field::{Ring, Zero};
@@ -37,57 +41,23 @@ pub const ZETA1_VARS: usize = 19;
 /// Variables of the used level-2 in-block index (`2^17`).
 pub const ZETA2_VARS: usize = 17;
 
+/// The production bridge domains of a batch (`agg_bridge::Shape::PRODUCTION`).
+#[must_use]
+pub fn bridge_domains(geom: &Geometry) -> Domains {
+    Shape::PRODUCTION.domains(geom.main_len())
+}
+
 /// `c[zeta] = sum_{rho in column zeta} eq_rows[rho]` for the first `cols` columns.
 #[must_use]
 pub fn column_sums(matrix: &SparseMatrix, eq_rows: &[E], cols: usize) -> Vec<E> {
-    assert_eq!(eq_rows.len(), matrix.rows, "one weight per row");
-    assert!(cols <= matrix.cols, "columns within the matrix");
-    (0..cols)
-        .into_par_iter()
-        .map(|zeta| {
-            matrix
-                .column(zeta)
-                .iter()
-                .fold(E::zero(), |acc, &row| acc + eq_rows[row as usize])
-        })
-        .collect()
-}
-
-/// `sum_zeta eq(point, zeta) c[zeta]` over the first `c.len()` points of `2^|point|`.
-fn eq_dot(point: &[E], c: &[E]) -> E {
-    let weights = eq_table(point);
-    assert!(c.len() <= weights.len());
-    weights
-        .par_iter()
-        .zip(c)
-        .map(|(&w, &v)| w * v)
-        .reduce(E::zero, |a, b| a + b)
-}
-
-/// Combine an in-block vector `c` (indexed by the low `zeta_vars` bits) with the block
-/// factor `eq_blocks` (indexed by the high bits) into a table of `len` cells.
-fn block_product(c: &[E], zeta_vars: usize, eq_blocks: &[E], len: usize) -> Vec<E> {
-    let mask = (1_usize << zeta_vars) - 1;
-    (0..len)
-        .into_par_iter()
-        .map(|x| {
-            let zeta = x & mask;
-            if zeta < c.len() {
-                c[zeta] * eq_blocks[x >> zeta_vars]
-            } else {
-                E::zero()
-            }
-        })
-        .collect()
+    bridge::column_weights(matrix, eq_rows, cols)
 }
 
 /// `w_1` on the main domain for the point `p1` on `D_1` (spec (7.5)).
 #[must_use]
 pub fn level1_weight_table(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> Vec<E> {
     assert_eq!(p1.len(), geom.d1() as usize, "a D_1 point");
-    let len = geom.main_len();
-    let c1 = column_sums(m1, &eq_table(&p1[..RHO12_VARS]), len.min(J1));
-    block_product(&c1, ZETA1_VARS, &eq_table(&p1[RHO12_VARS..]), len)
+    bridge::level1_table(&Shape::PRODUCTION, &bridge_domains(geom), m1, p1)
 }
 
 /// `w_1(r)` at a main-domain point `r`.
@@ -95,18 +65,14 @@ pub fn level1_weight_table(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> Vec<
 pub fn level1_weight_at(geom: &Geometry, m1: &SparseMatrix, p1: &[E], r: &[E]) -> E {
     assert_eq!(p1.len(), geom.d1() as usize, "a D_1 point");
     assert_eq!(r.len(), geom.d_main() as usize, "a main-domain point");
-    let zeta_vars = r.len().min(ZETA1_VARS);
-    let c1 = column_sums(m1, &eq_table(&p1[..RHO12_VARS]), 1 << zeta_vars);
-    eq_evaluation(&p1[RHO12_VARS..], &r[zeta_vars..]) * eq_dot(&r[..zeta_vars], &c1)
+    bridge::level1_at(&Shape::PRODUCTION, &bridge_domains(geom), m1, p1, r)
 }
 
 /// `w_2` on `D_1` for the point `p2` on `D_2` (spec (7.2)).
 #[must_use]
 pub fn level2_weight_table(geom: &Geometry, m2: &SparseMatrix, p2: &[E]) -> Vec<E> {
     assert_eq!(p2.len(), geom.d2() as usize, "a D_2 point");
-    let len = 1_usize << geom.d1();
-    let c2 = column_sums(m2, &eq_table(&p2[..RHO12_VARS]), len.min(ZETA2_USED));
-    block_product(&c2, ZETA2_VARS, &eq_table(&p2[RHO12_VARS..]), len)
+    bridge::level2_table(&Shape::PRODUCTION, &bridge_domains(geom), m2, p2)
 }
 
 /// `w_2(q)` at a `D_1` point `q`.
@@ -114,24 +80,16 @@ pub fn level2_weight_table(geom: &Geometry, m2: &SparseMatrix, p2: &[E]) -> Vec<
 pub fn level2_weight_at(geom: &Geometry, m2: &SparseMatrix, p2: &[E], q: &[E]) -> E {
     assert_eq!(p2.len(), geom.d2() as usize, "a D_2 point");
     assert_eq!(q.len(), geom.d1() as usize, "a D_1 point");
-    let zeta_vars = q.len().min(ZETA2_VARS);
-    let c2 = column_sums(m2, &eq_table(&p2[..RHO12_VARS]), 1 << zeta_vars);
-    eq_evaluation(&p2[RHO12_VARS..], &q[zeta_vars..]) * eq_dot(&q[..zeta_vars], &c2)
+    bridge::level2_at(&Shape::PRODUCTION, &bridge_domains(geom), m2, p2, q)
 }
 
 /// `w_{3,t}` on `D_2`, one table per lane, for the point `p3` on `D_3` (spec (7.3)).
 #[must_use]
 pub fn level3_weight_tables(geom: &Geometry, m3: &SparseMatrix, p3: &[E]) -> [Vec<E>; W1_BITS] {
     assert_eq!(p3.len(), geom.d3() as usize, "a D_3 point");
-    let len = 1_usize << geom.d2();
-    let c3 = column_sums(m3, &eq_table(&p3[..RHO3_VARS]), m3.cols);
-    let eq_sigma = eq_table(&p3[RHO3_VARS..]);
-    std::array::from_fn(|t| {
-        (0..len)
-            .into_par_iter()
-            .map(|x| c3[t + W1_BITS * (x & (M2 - 1))] * eq_sigma[x >> RHO12_VARS])
-            .collect()
-    })
+    bridge::level3_tables(&Shape::PRODUCTION, &bridge_domains(geom), m3, p3)
+        .try_into()
+        .expect("six lanes")
 }
 
 /// `w_{3,t}(q)` at a `D_2` point `q`, for every lane `t`.
@@ -139,17 +97,9 @@ pub fn level3_weight_tables(geom: &Geometry, m3: &SparseMatrix, p3: &[E]) -> [Ve
 pub fn level3_weights_at(geom: &Geometry, m3: &SparseMatrix, p3: &[E], q: &[E]) -> [E; W1_BITS] {
     assert_eq!(p3.len(), geom.d3() as usize, "a D_3 point");
     assert_eq!(q.len(), geom.d2() as usize, "a D_2 point");
-    let c3 = column_sums(m3, &eq_table(&p3[..RHO3_VARS]), m3.cols);
-    let sigma = eq_evaluation(&p3[RHO3_VARS..], &q[RHO12_VARS..]);
-    let eq_rho2 = eq_table(&q[..RHO12_VARS]);
-    std::array::from_fn(|t| {
-        let inner = eq_rho2
-            .par_iter()
-            .enumerate()
-            .map(|(rho2, &w)| w * c3[t + W1_BITS * rho2])
-            .reduce(E::zero, |a, b| a + b);
-        sigma * inner
-    })
+    bridge::level3_at(&Shape::PRODUCTION, &bridge_domains(geom), m3, p3, q)
+        .try_into()
+        .expect("six lanes")
 }
 
 /// The ring weight `w_A(j', s, i)` on the main domain in order `(j', s, i)` for the point
@@ -216,7 +166,7 @@ mod tests {
     use super::*;
     use crate::test_support::{boolean_point, point};
     use aerie_falcon::protocol::algebra::evaluate_mle;
-    use agg_witness::bridge::{BridgeMatrices, M1, M3};
+    use agg_witness::bridge::{BridgeMatrices, J1, M1, M2, M3, ZETA2_USED};
     use agg_witness::crt::az_integer;
     use agg_witness::gen::{self, SplitMix64};
     use agg_witness::instance::PublicInstance;

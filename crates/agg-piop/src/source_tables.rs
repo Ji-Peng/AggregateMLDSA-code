@@ -7,14 +7,16 @@
 //!   `agg_witness::tables::BatchTables` of relation H. Padded rows carry the canonical
 //!   encoding of the zero witness (digits `-b/2`, top signed digit 0, zero bits).
 //! * [`BridgeGroupTables`], round 2: `G_1, G_2, G_3` (carry digits and level-2 parities) and
-//!   the public `Y`, computed by `agg_witness::bridge` from the committed bits and the
-//!   seed-derived matrices. The honest prover aborts on a row weight above the cap.
+//!   the public `Y`, computed by `agg_bridge::parity` (sums, parities, quotient columns) and
+//!   `agg_bridge::carry` (carry digits) at the production shape from the committed bits and
+//!   the seed-derived matrices. The honest prover aborts on a row weight above the cap.
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
 //! PIOP proves every alphabet (Section 4.3).
 
-use agg_witness::bridge::{self, BridgeError, BridgeMatrices, BridgeTables, M3};
+use agg_bridge::{carry, parity, Shape};
+use agg_witness::bridge::{BridgeError, BridgeMatrices, BridgeTables, M3};
 use agg_witness::instance::PublicInstance;
 use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
@@ -227,9 +229,11 @@ impl BridgeGroupTables {
         main: &MainTables,
         matrices: &BridgeMatrices,
     ) -> Result<Self, SourceTableError> {
-        let witness = bridge::compute(&main.geometry(), &main.bit_lanes(manifest), matrices)
+        let shape = Shape::PRODUCTION;
+        let witness = parity::compute(&shape, &main.bit_lanes(manifest), matrices)
             .map_err(SourceTableError::Bridge)?;
-        let tables = BridgeTables::from_witness(&witness).map_err(SourceTableError::Encode)?;
+        let tables = carry::group_tables(&shape, &witness)
+            .map_err(|_| SourceTableError::Encode("carry outside its digit range"))?;
         Self::from_tables(manifest, tables)
     }
 

@@ -9,16 +9,17 @@
 //!   The verifier forms them from opened values ([`MainValues`], [`CarryValues`]);
 //! * Boolean-domain materializations used by the prover and the tests: `w_1'`, the
 //!   residual `Delta = (A z) - T - 2 gamma_2 w_1' - u - q v`, the level-1 parities
-//!   `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t - 2 kappa^(1)_t` (spec (7.5); a placeholder
-//!   until `agg-bridge` derives `M_1` from the seed: any [`SparseMatrix`] of the spec shape is
-//!   accepted), and the digit tables `P_Z = Z (Z + 1)`, `A_Z^lo = Q_16^lo(P_Z)`,
+//!   `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t - 2 kappa^(1)_t` (spec (7.5); the sums are
+//!   `agg_bridge::parity::level1_sums` at the production shape, for any [`SparseMatrix`] of
+//!   that shape), and the digit tables `P_Z = Z (Z + 1)`, `A_Z^lo = Q_16^lo(P_Z)`,
 //!   `A_Z^hi = Q_16^hi(P_Z)` with the leaf predicates of spec Section 4.3.
 //!
 //! `y^(1)_t` is not affine in committed evaluations at a non-Boolean point: its value there
 //! is a claim reduced by the `def_y1` sum-check, whose claimed sum is
 //! [`parity1_claimed_sum`].
 
-use agg_witness::bridge::{level1_sums, SparseMatrix};
+use agg_bridge::{parity::level1_sums, Shape};
+use agg_witness::bridge::SparseMatrix;
 use agg_witness::crt::az_integer;
 use agg_witness::digits::DigitLayout;
 use agg_witness::instance::PublicInstance;
@@ -159,8 +160,7 @@ pub fn residual_table(
 /// honest value is the GF(2) parity of the level-1 row, `{0, 1}`.
 #[must_use]
 pub fn parity1_tables(tables: SourceTables<'_>, m1: &SparseMatrix) -> [Vec<i64>; W1_BITS] {
-    let geom = tables.main.geometry();
-    let sums = level1_sums(&geom, &tables.main.bit_lanes(tables.manifest), m1);
+    let sums = level1_sums(&Shape::PRODUCTION, &tables.main.bit_lanes(tables.manifest), m1);
     let layout = DigitValue::Kappa1(0).layout();
     let mut out: [Vec<i64>; W1_BITS] = Default::default();
     for (t, (sum, slot)) in sums.into_iter().zip(out.iter_mut()).enumerate() {

@@ -147,6 +147,8 @@ name = "agg-keccak"
 version = "0.1.0"
 dependencies = [
  "aerie-keccak",
+ "agg-bridge",
+ "agg-witness",
  "bincode",
  "flock-core",
  "flock-field",
@@ -183,6 +185,7 @@ dependencies = [
  "aerie-prover",
  "aerie-simd",
  "agg-bridge",
+ "agg-keccak",
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",

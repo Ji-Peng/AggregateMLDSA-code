@@ -53,16 +53,16 @@ use crate::{
 /// Transcript domain of every Keccak sub-proof.
 pub const DOMAIN: &[u8] = b"agg-mldsa/v1/keccak";
 /// Magic prefix of serialized proofs.
-const MAGIC: &[u8; 6] = b"AGGKCK";
+pub(crate) const MAGIC: &[u8; 6] = b"AGGKCK";
 /// Serialization version (2: the commitment travels separately, see [`KeccakCommitment`]).
 const VERSION: u8 = 2;
 /// Bytes of one Merkle cap node (`flock_merkle::Hash`).
-const CAP_NODE_BYTES: usize = 32;
+pub(crate) const CAP_NODE_BYTES: usize = 32;
 /// Upper bound on a decoded proof payload (Flock's own bundle limit).
 const MAX_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Fixed-width little-endian bincode, bounded, no trailing bytes.
-fn codec() -> impl bincode::Options {
+pub(crate) fn codec() -> impl bincode::Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(MAX_PROOF_BYTES)
@@ -80,14 +80,14 @@ pub enum Profile {
 }
 
 impl Profile {
-    fn ligerito(self) -> LigeritoProfile {
+    pub(crate) fn ligerito(self) -> LigeritoProfile {
         match self {
             Self::Fast => LigeritoProfile::Fast,
             Self::Secure => LigeritoProfile::Secure,
         }
     }
 
-    fn id(self) -> u8 {
+    pub(crate) fn id(self) -> u8 {
         match self {
             Self::Fast => 0,
             Self::Secure => 1,
@@ -150,7 +150,7 @@ impl KeccakCommitment {
         &self.bytes
     }
 
-    fn from_flock(c: &Commitment) -> Self {
+    pub(crate) fn from_flock(c: &Commitment) -> Self {
         Self {
             bytes: c.cap.as_flattened().to_vec(),
         }

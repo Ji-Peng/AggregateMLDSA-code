@@ -3,7 +3,7 @@
 `crates/agg-keccak` proves, for a batch of signatures, the witness-dependent hash of
 ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock HEAD
 (`succinctlabs/flock` `83f963e`) and its Ligerito PCS. Deviations from the spec are
-listed in `docs/deviations.md` (entries K1 to K6).
+listed in `docs/deviations.md` (entries K1 to K9).
 
 ## 1. The chi-only Keccak-f gate
 
@@ -215,3 +215,71 @@ Observations:
 - Full segments (2^13 records, 57,344 permutations, 2.3e9 committed bits) are for
   the cloud machine; extrapolation from the table, not measured: about 7 s with CLMUL
   and 7 GB peak.
+
+## 7. Bridge slot and bridged segment (docs/bridge.md Section 5)
+
+Module `bridge_slot` (`SlotLayout`, `BridgeSlot`) and `segment` (`BridgeBatch`,
+`BridgedSegment`); the GF(2) walks are `agg_bridge::gf2_walker` (generic over
+`agg_bridge::shape::Shape`, so the toy shape `L = 2^12` and the production shape share the
+code). Deviations: K6 (the 48 w1Encode words in the sponge schema), K8 (`Y_sigma` as a
+coefficient of the rows), K9 (full-segment scaling).
+
+- Layout of the bridge type (one live row): input columns `c = p + Lambda t` (`Lambda =
+  2^{10 + d_seg}`, `p = j + 256 rho + 1024 i_seg`), the constant at `6 Lambda`, the composite
+  rows at `6 Lambda + 128 + o`, `o < 4,096` (committed zeros), `k_log = 13 + d_seg`. Rows:
+  live input `z_c * 1 = z_c`; padded input and every other column empty (forced zero);
+  composite row `(sum_c M[o, c] z_c + Y_o z_one) * z_one = z_{y_o}`.
+- `LincheckCircuit`: `comb = alpha xi_A + xi_B` with `xi_A` on the inputs the walker
+  `M_1^T M_2^T M_3^T eq_Y` (`gf2_walker::transpose_into`, parallel over lanes and level-1
+  blocks) plus the identity rows, `xi_A[one] = eq[one] + sum_o Y_o eq[y_o]`,
+  `xi_B[one] = eq[one] + sum_live eq[c] + sum_o eq[y_o]`; `fold_split` from the same walk;
+  `const_pin_col = 6 Lambda`. The matrices are derived once from `sd`
+  (`agg_bridge::seed::derive_matrices_for`) and shared (`Arc<BridgeMatrices>`).
+- `BridgedSegment`: the two-type union of `n` sponge rows (bridged schema, K6) and one bridge
+  row; `48 n` copy wires plus the `mu`, `c~` public wires. `commit(records)` (event 2, no
+  seed), `final_vector(committed, matrices)` (`Y_sigma`, forward XOR walk),
+  `prove(committed, sd, matrices, fs)` (challenger: domain, `fs`, sponge gate digest,
+  `BridgeSlot::digest`), `verify(mu, c~, commitment, sd, matrices, Y, fs, proof)`. Proof
+  format `AGGKCB` version 1 (kind byte 2, `n`, `d_seg`). `BridgeBatch` proves a bridge slot
+  alone (kind 1), used for the toy shape.
+- Cost (`BridgedSegment::cost`, exact counts): the bridge adds the factored nonzeros
+  `14 * 6 Lambda + 14 * 6 * 8192 * ceil(Lambda / 2^19) + 18 * 49,152` that the walker
+  touches, plus `3 * 6 * 1024 n + 3 + 2 * 4096 + |Y|` identity, constant and composite-row
+  `B`, `C` entries; the flattened composite (never built) is reported by
+  `gf2_walker::composite_nonzeros`. Measurements: below.
+
+Tests (`--release`): `agg_bridge::gf2_walker` (toy composite and transpose against the
+dense product `M_3 M_2 M_1`, 16 by 4,096; the transpose is the adjoint of the forward walk
+on toy and production layouts; single flips change `Y` exactly when their composite column
+is nonzero; the slot layout at `d_seg = 6` agrees with `agg_witness::bridge::gf2_composite`
+on the main domain); `bridge_slot` (layout constants, honest rows satisfy `a & b = z` and
+tampered blocks or `Y` break a row, the walker is the transpose of the row evaluator, equals
+Flock's `SparseMatrixCircuit` fold on the explicitly lowered rows of the toy and of a
+one-record production slot, `fold_split` agrees with two alpha folds, the digest binds `sd`,
+the layout and `Y`); `tests/bridge.rs` (toy slot proven alone against a direct GF(2)
+product, with a flipped `Y` bit, another seed, a malformed `Y` and a flipped committed bit
+with the stale `Y` rejected; bridged segments at 5 records (`d_seg = 3`, padded positions)
+and 64 records (`d_seg = 6`) round-trip with `Y` equal to the F_p side's walk, and reject a
+flipped `Y` bit, another seed, a wrong `c~`, a bit flipped in the slot copy only (copy
+constraint) and a bit flipped in both copies with the stale `c~` (sponge)).
+
+Measurements at 64 records (`tests/bridge.rs`, `sponge_with_bridge_rows_round_trip_64`,
+`--nocapture`; default build without CLMUL, 7 threads on `taskset -c 0,1,3-15`, revision
+`3b56965` plus the uncommitted changes of this stage, 2026-10-24, single runs, not a CPU-2
+benchmark):
+
+| | Sponge sub-proof alone | Bridged segment (sponges + bridge slot) |
+| --- | ---: | ---: |
+| union `M` / dense `m` | 26 / 25 | 27 / 25 |
+| committed 128-bit words | 137,920 | 137,920 + 3,105 |
+| structural nonzeros | 163,827,904 (2,559,811 per record) | + 7,077,888 factored bridge rows + 1,189,955 identity/constant/`B`,`C` (+5.05%) |
+| flattened bridge composite (never built) | | 657,057,514 entries of `A_0` (4.0 times the sponge's structural count) |
+| copy wires | 384 public | 384 public + 3,072 slot copies |
+| prove (both commits included) | 6.71 s | 1.62 s commit + 9.15 s prove |
+| verify | 0.52 s | 1.64 s |
+| proof bytes (plus the 4,096-byte commitment) | 284,294 | 343,584 |
+
+Matrix derivation from `sd` took 0.14 s (production shape, 7 threads). At 5 records
+(`d_seg = 3`) the bridge adds 2,363,427 nonzeros (18.5% of the 12.8M sponge nonzeros); the
+factored count grows with `Lambda`, the identity count with the live records. Full segments
+are blocked by K9 in this form.

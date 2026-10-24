@@ -184,8 +184,8 @@ pub fn claimed_sums(prestage: &PreStageClaims, y_at_tau3: E) -> Vec<E> {
         let kappa2 = prestage.kappa2_value(t);
         claims[gamma_level2(t)] = prestage.y2[t] + kappa2 + kappa2;
     }
-    let kappa3 = prestage.kappa3_value();
-    claims[GAMMA_LEVEL3] = y_at_tau3 + kappa3 + kappa3;
+    claims[GAMMA_LEVEL3] =
+        agg_bridge::final_vector::level3_claimed_sum(y_at_tau3, prestage.kappa3_value());
     claims
 }
 
@@ -253,18 +253,33 @@ fn prove_with(
     ))
 }
 
+/// The verifier's bridge weights at the stage-1 terminal `r^(1)`: `w_2(r^(1)_1)` for the
+/// point `tau_2` and `w_{3,t}(r^(1)_2)` for `tau_3` (docs/bridge.md Section 4), each one
+/// `c_t` build and one sparse contraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BridgeWeightsAt {
+    /// `w_2(r^(1)_1)`.
+    pub level2: E,
+    /// `w_{3,t}(r^(1)_2)`, per lane.
+    pub level3: [E; W1_BITS],
+}
+
+impl BridgeWeightsAt {
+    /// Evaluate both weights at the stage-1 terminal point `r1` (a main-domain point).
+    #[must_use]
+    pub fn evaluate(manifest: &CommitmentManifest, geom: &Geometry, matrices: &BridgeMatrices, tau: &[E], r1: &[E]) -> Self {
+        let vars = |role| manifest.group(role).logical_vars;
+        let (tau2, tau3) = (suffix(tau, vars(GroupRole::Level2)), suffix(tau, vars(GroupRole::Level3)));
+        let (r1_1, r1_2) = (suffix(r1, vars(GroupRole::Level1)), suffix(r1, vars(GroupRole::Level2)));
+        Self {
+            level2: level2_weight_at(geom, &matrices.m2, &tau2, &r1_1),
+            level3: level3_weights_at(geom, &matrices.m3, &tau3, &r1_2),
+        }
+    }
+}
+
 /// The verifier's value of a stage-1 lane at the terminal.
-#[allow(clippy::too_many_arguments)]
-fn resolve(
-    manifest: &CommitmentManifest,
-    geom: &Geometry,
-    matrices: &BridgeMatrices,
-    tau: &[E],
-    point: &[E],
-    claims: &Stage1Claims,
-    products: &[(Column, usize)],
-    id: LaneId,
-) -> E {
+fn resolve(weights: &BridgeWeightsAt, claims: &Stage1Claims, products: &[(Column, usize)], id: LaneId) -> E {
     match id {
         LaneId::Parity1(t) => claims.y1[usize::from(t)],
         LaneId::Column(Column::Parity2(t)) => claims.y2[usize::from(t)],
@@ -277,16 +292,8 @@ fn resolve(
                 .expect("a base-16 digit");
             claims.products[k][usize::from(matches!(id, LaneId::DigitHi(_)))]
         }
-        LaneId::Weight(WeightId::Level2) => {
-            let tau2 = suffix(tau, manifest.group(GroupRole::Level2).logical_vars);
-            let r1_1 = suffix(point, manifest.group(GroupRole::Level1).logical_vars);
-            level2_weight_at(geom, &matrices.m2, &tau2, &r1_1)
-        }
-        LaneId::Weight(WeightId::Level3(t)) => {
-            let tau3 = suffix(tau, manifest.group(GroupRole::Level3).logical_vars);
-            let r1_2 = suffix(point, manifest.group(GroupRole::Level2).logical_vars);
-            level3_weights_at(geom, &matrices.m3, &tau3, &r1_2)[usize::from(t)]
-        }
+        LaneId::Weight(WeightId::Level2) => weights.level2,
+        LaneId::Weight(WeightId::Level3(t)) => weights.level3[usize::from(t)],
         other => panic!("{other:?} is not a stage-1 lane"),
     }
 }
@@ -314,17 +321,9 @@ pub fn verify(
         .enumerate()
         .map(|(k, d)| (d.column, k))
         .collect();
+    let weights = BridgeWeightsAt::evaluate(manifest, &geom, matrices, &points.tau, &replay.point);
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(
-            manifest,
-            &geom,
-            matrices,
-            &points.tau,
-            &replay.point,
-            &proof.claims,
-            &products,
-            id,
-        )
+        resolve(&weights, &proof.claims, &products, id)
     })?;
     Ok(Stage1Output {
         point: replay.point,
