@@ -1,16 +1,19 @@
-//! Two-round commit driver and the batched opening of the four groups
+//! Two-round commit driver and the batched opening of the six groups
 //! (spec Sections 4.1 and 10).
 //!
-//! Round 1 commits `G_main` before the bridge seed; round 2 commits `G_1`,
-//! `G_2` and, last, the final group `G_3` against the precommitted profiles
+//! Round 1 commits `G_main16` and `G_main4` before the bridge seed; round 2 commits
+//! `G_1`, `G_2`, `G_3` and, last, the final group `G_m` against the precommitted profiles
 //! of the work plan. Every commit is transcript-free (the caller absorbs the
 //! serialized commitments in event order), so the two rounds share one
-//! commitment contract and one batched Akita opening (Akita Section 4.6).
+//! commitment contract and one batched Akita opening (Akita Section 4.6). Each group is
+//! committed under its own family's catalog (width 4 or width 16); the opening and its
+//! verifier run under the final group's width-4 catalog, whose grouped row carries the
+//! precommitted width-16 profiles (Akita freezes the source bound per group).
 //!
-//! Tables are logical: `2^logical_vars` cells per polynomial with values in
-//! `[-8, 7]`, index bits least significant first. A table below the PCS floor
-//! is zero-extended with trailing pad variables, and its opening point is
-//! extended with zeros, so the physical opening equals the logical claim.
+//! Tables are logical: `2^logical_vars` cells per polynomial with values in the family's
+//! interval (`[-8, 7]` or `[-2^15, 2^15 - 1]`), index bits least significant first. A
+//! table below the PCS floor is zero-extended with trailing pad variables, and its opening
+//! point is extended with zeros, so the physical opening equals the logical claim.
 
 use std::sync::Arc;
 
@@ -29,14 +32,9 @@ use akita_types::{
 use akita_verifier::AkitaVerifier;
 use jolt_field::{ExtField, Ring, Zero};
 
-use crate::catalogs::Group;
-use crate::preset::{AggFp64SignedWidth4 as Cfg, BaseField, OpeningField};
+use crate::catalogs::{Family, Group, GROUP_COUNT};
+use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4 as Cfg, BaseField, OpeningField};
 use crate::work_plan::WorkPlan;
-
-/// Smallest and largest committed value (signed width 4).
-pub const MIN_VALUE: i8 = -8;
-/// Largest committed value.
-pub const MAX_VALUE: i8 = 7;
 
 /// Commit or opening failure.
 #[derive(Debug)]
@@ -59,7 +57,7 @@ pub enum CommitError {
         /// Received cells.
         actual: usize,
     },
-    /// A value lies outside `[-8, 7]`.
+    /// A value lies outside the group's family interval.
     ValueOutOfRange {
         /// The group.
         group: Group,
@@ -68,7 +66,7 @@ pub enum CommitError {
         /// Cell index.
         cell: usize,
         /// The value.
-        value: i8,
+        value: i64,
     },
     /// An opening claim has the wrong point length or value count.
     ClaimShape(Group),
@@ -100,7 +98,9 @@ impl std::fmt::Display for CommitError {
                 value,
             } => write!(
                 f,
-                "{group:?}: polynomial {polynomial} cell {cell} holds {value} outside [-8, 7]"
+                "{group:?}: polynomial {polynomial} cell {cell} holds {value} outside [{}, {}]",
+                group.family().min_value(),
+                group.family().max_value()
             ),
             Self::ClaimShape(group) => write!(f, "{group:?}: opening claim has the wrong shape"),
             Self::Akita(error) => write!(f, "akita: {error}"),
@@ -196,10 +196,10 @@ impl PcsProver {
     }
 
     /// Commit one group's logical tables (transcript-free).
-    pub fn commit_group(
+    pub fn commit_group<T: Copy + Into<i64>>(
         &self,
         group: Group,
-        tables: &[Vec<i8>],
+        tables: &[Vec<T>],
     ) -> Result<GroupCommitment, CommitError> {
         if tables.len() != group.num_polynomials() {
             return Err(CommitError::PolynomialCount {
@@ -219,20 +219,21 @@ impl PcsProver {
                     actual: table.len(),
                 });
             }
+            let (min, max) = (group.family().min_value(), group.family().max_value());
             if let Some(cell) = table
                 .iter()
-                .position(|v| !(MIN_VALUE..=MAX_VALUE).contains(v))
+                .position(|&v| !(min..=max).contains(&v.into()))
             {
                 return Err(CommitError::ValueOutOfRange {
                     group,
                     polynomial,
                     cell,
-                    value: table[cell],
+                    value: table[cell].into(),
                 });
             }
             let mut evaluations: Vec<BaseField> = table
                 .iter()
-                .map(|&v| BaseField::from_i64(i64::from(v)))
+                .map(|&v| BaseField::from_i64(v.into()))
                 .collect();
             evaluations.resize(1 << physical_vars, BaseField::zero());
             polynomials.push(DensePoly::from_field_evals(physical_vars, evaluations)?);
@@ -263,7 +264,12 @@ impl PcsProver {
         } else {
             GroupContext::scheduler_without_precommitted_groups()
         };
-        let output = self.backend.commit(Cfg::catalog()?, &source, context)?;
+        let output = match group.family() {
+            Family::Width4 => self.backend.commit(Cfg::catalog()?, &source, context)?,
+            Family::Width16 => self
+                .backend
+                .commit(AggFp64SignedWidth16::catalog()?, &source, context)?,
+        };
         if output.committed_group.profile != *self.plan.profile(group) {
             return Err(AkitaError::InvalidSetup(format!(
                 "{group:?} committed under a profile other than the work plan's"
@@ -277,35 +283,16 @@ impl PcsProver {
         })
     }
 
-    /// Round 1 (before the bridge seed): `G_main`.
-    pub fn commit_round1(&self, main: &[Vec<i8>]) -> Result<GroupCommitment, CommitError> {
-        self.commit_group(Group::Main, main)
-    }
-
-    /// Round 2 (after the bridge seed): `G_1`, `G_2`, then the final group `G_3`.
-    pub fn commit_round2(
-        &self,
-        level1: &[Vec<i8>],
-        level2: &[Vec<i8>],
-        level3: &[Vec<i8>],
-    ) -> Result<[GroupCommitment; 3], CommitError> {
-        Ok([
-            self.commit_group(Group::Level1, level1)?,
-            self.commit_group(Group::Level2, level2)?,
-            self.commit_group(Group::Level3, level3)?,
-        ])
-    }
-
-    /// Prove the batched opening of all four groups, in wire order, under the
+    /// Prove the batched opening of all six groups, in wire order, under the
     /// 32-byte PIOP session digest.
     pub fn open(
         &self,
-        commitments: [GroupCommitment; 4],
-        claims: &[GroupClaim; 4],
+        commitments: [GroupCommitment; GROUP_COUNT],
+        claims: &[GroupClaim; GROUP_COUNT],
         session: &[u8; 32],
     ) -> Result<Vec<u8>, CommitError> {
-        let mut groups = Vec::with_capacity(4);
-        let mut handles = Vec::with_capacity(4);
+        let mut groups = Vec::with_capacity(GROUP_COUNT);
+        let mut handles = Vec::with_capacity(GROUP_COUNT);
         for (commitment, (group, claim)) in
             commitments.into_iter().zip(Group::ALL.iter().zip(claims))
         {
@@ -392,12 +379,12 @@ impl PcsVerifier {
         &self.plan
     }
 
-    /// Verify the batched opening of the four groups. Group profiles and the
+    /// Verify the batched opening of the six groups. Group profiles and the
     /// schedule selection come from the work plan, never from the proof.
     pub fn verify(
         &self,
-        commitments: &[Commitment<BaseField>; 4],
-        claims: &[GroupClaim; 4],
+        commitments: &[Commitment<BaseField>; GROUP_COUNT],
+        claims: &[GroupClaim; GROUP_COUNT],
         proof: &[u8],
         session: &[u8; 32],
     ) -> Result<(), CommitError> {
@@ -408,7 +395,7 @@ impl PcsVerifier {
                 CommittedGroup::new(*self.plan.profile(group), commitment.clone())
             })
             .collect();
-        let mut points = Vec::with_capacity(4);
+        let mut points = Vec::with_capacity(GROUP_COUNT);
         for (&group, claim) in Group::ALL.iter().zip(claims) {
             points.push(physical_point(&self.plan, group, claim)?);
         }
@@ -431,22 +418,23 @@ impl PcsVerifier {
 /// Multilinear extension of a signed table at `point` (least significant
 /// variable first), the value a claim on that table must carry.
 #[must_use]
-pub fn evaluate_signed_table(table: &[i8], point: &[OpeningField]) -> OpeningField {
+pub fn evaluate_signed_table<T: Copy + Into<i64>>(table: &[T], point: &[OpeningField]) -> OpeningField {
     assert_eq!(
         table.len(),
         1 << point.len(),
         "table length must be 2^|point|"
     );
     let Some((&first, rest)) = point.split_first() else {
-        return OpeningField::lift_base(BaseField::from_i64(i64::from(table[0])));
+        return OpeningField::lift_base(BaseField::from_i64(table[0].into()));
     };
     let mut layer: Vec<OpeningField> = table
         .as_chunks::<2>()
         .0
         .iter()
         .map(|&[low, high]| {
-            let lifted = OpeningField::lift_base(BaseField::from_i64(i64::from(low)));
-            lifted + first.mul_base(BaseField::from_i64(i64::from(high) - i64::from(low)))
+            let (low, high): (i64, i64) = (low.into(), high.into());
+            let lifted = OpeningField::lift_base(BaseField::from_i64(low));
+            lifted + first.mul_base(BaseField::from_i64(high - low))
         })
         .collect();
     for &coordinate in rest {

@@ -1,15 +1,16 @@
-//! Round-1 and round-2 tables of real ML-DSA-44 batches commit through agg-pcs-config and
-//! open in one batched Akita proof (spec Sections 4, 7.5 and 10; Section 13 PCS item).
+//! Round-1 and round-2 tables of real ML-DSA-44 batches (lookup layout L16: two main
+//! groups of widths 16 and 4, three width-16 bridge groups and the width-4 multiplicity
+//! group) commit through agg-pcs-config and open in one batched Akita proof (spec Sections
+//! 4, 7.5 and 10; Section 13 PCS item).
 
 mod common;
 
-use agg_piop::manifest::{DigitValue, GroupRole};
-use agg_piop::pcs::{suffix_points, verifier_for, TableCommitter};
+use agg_piop::manifest::{Column, DigitValue, GroupRole, CARRY16_DIGITS};
+use agg_piop::pcs::{group_points, verifier_for, TableCommitter};
+use agg_piop::source_tables::Cells;
 use agg_piop::virtual_polys::{compose_table, w1_table, CarryValues, MainValues};
 use agg_piop::{BaseField, OpeningField};
-use agg_witness::check::{check, CheckOptions};
 use agg_witness::gen::SplitMix64;
-use agg_witness::tables::{BatchTables, Layout};
 use common::{mle_i64, point, Batch};
 use jolt_field::{ExtField, Ring};
 
@@ -26,29 +27,27 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 /// of the composed tables at the opening points.
 fn check_virtual_claims(
     batch: &Batch,
-    points: &[Vec<OpeningField>; 4],
+    points: &[Vec<OpeningField>; 6],
     values: &[Vec<OpeningField>],
 ) {
     let manifest = &batch.manifest;
     let tables = batch.tables();
-    let main = MainValues::from_evaluations(manifest, &values[0]);
+    assert_eq!(points[0], points[1], "both main groups at one point");
+    let main = MainValues::from_claims(|column: Column| {
+        let (role, position) = manifest.locate(column);
+        values[role.index()][position]
+    });
     let composed = |value: DigitValue| compose_table(&value.layout(), &tables.digits(value));
     assert_eq!(main.z, mle_i64(&composed(DigitValue::Z), &points[0]));
     assert_eq!(main.u, mle_i64(&composed(DigitValue::U), &points[0]));
     assert_eq!(main.v, mle_i64(&composed(DigitValue::V), &points[0]));
     let w1 = w1_table(&batch.main.bit_lanes(manifest));
     assert_eq!(main.w1, mle_i64(&w1, &points[0]));
-    for (role, kappa) in [
-        (
-            GroupRole::Level1,
-            (0..6).map(DigitValue::Kappa1).collect::<Vec<_>>(),
-        ),
-        (GroupRole::Level2, (0..6).map(DigitValue::Kappa2).collect()),
-        (GroupRole::Level3, vec![DigitValue::Kappa3]),
-    ] {
+    for (role, level, lanes) in [(GroupRole::Level1, 1, 6), (GroupRole::Level2, 2, 6), (GroupRole::Level3, 3, 1)] {
         let carries = CarryValues::from_evaluations(manifest, role, &values[role.index()]);
-        for (claimed, value) in carries.kappa.iter().zip(kappa) {
-            assert_eq!(*claimed, mle_i64(&composed(value), &points[role.index()]));
+        for (t, claimed) in carries.kappa.iter().enumerate().take(lanes) {
+            let kappa = compose_table(&CARRY16_DIGITS, &[tables.column(Column::carry(level, t as u8))]);
+            assert_eq!(*claimed, mle_i64(&kappa, &points[role.index()]));
         }
         assert_eq!(
             carries.parity.len(),
@@ -61,50 +60,41 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
     let batch = Batch::build(common::records(seed, n_own, n_shared), seed);
     let manifest = batch.manifest.clone();
 
-    // The committed tables are exactly the ones the integer checker accepts.
-    let witness_tables = BatchTables {
-        layout: Layout::H,
-        geom: batch.main.geometry(),
-        columns: batch.main.columns().to_vec(),
-    };
-    let bridge_tables = batch.bridge.to_witness_tables();
-    let report = check(
-        &batch.instance,
-        &witness_tables,
-        Some((&batch.matrices, &bridge_tables)),
-        CheckOptions::default(),
-    );
-    assert!(report.is_ok(), "{:?}", report.failures);
-
     let committer = TableCommitter::new(manifest.clone()).expect("setup");
     // Round 1 (event 1) before the bridge seed, round 2 (event 4) after it.
-    let main = committer.commit_round1(&batch.main).expect("round 1");
-    let [level1, level2, level3] = committer.commit_round2(&batch.bridge).expect("round 2");
-    let again = committer.commit_round1(&batch.main).expect("round 1 again");
+    let [main16, main] = committer.commit_round1(&batch.main).expect("round 1");
+    let [level1, level2, level3, mult] = committer.commit_round2(&batch.bridge).expect("round 2");
+    let [_, again] = committer.commit_round1(&batch.main).expect("round 1 again");
     assert_eq!(
         main.serialized().unwrap(),
         again.serialized().unwrap(),
         "the event-1 payload is deterministic"
     );
-    let commitments = [&main, &level1, &level2, &level3].map(|c| c.commitment().clone());
-    for group in [&main, &level1, &level2, &level3] {
+    let groups = [&main16, &main, &level1, &level2, &level3, &mult];
+    let commitments = groups.map(|c| c.commitment().clone());
+    for group in groups {
         assert!(!group.serialized().unwrap().is_empty());
     }
+    // The multiplicity digits are width-4 cells.
+    assert!(matches!(batch.tables().group(GroupRole::Mult)[0], Cells::Narrow(_)));
 
     let mut rng = SplitMix64::new(seed ^ 0xC0FFEE);
     let points = if suffix {
         let r3 = point(&mut rng, manifest.d_main());
-        suffix_points(&manifest, &r3).unwrap()
+        let pi_m = point(&mut rng, 16);
+        group_points(&manifest, &r3, &pi_m).unwrap()
     } else {
-        manifest
+        let mut points = manifest
             .groups()
             .clone()
-            .map(|group| point(&mut rng, group.logical_vars))
+            .map(|group| point(&mut rng, group.logical_vars));
+        points[1] = points[0].clone();
+        points
     };
     let session = [0x3c; 32];
     let (proof, claims) = committer
         .open(
-            [main, level1, level2, level3],
+            [main16, main, level1, level2, level3, mult],
             batch.tables(),
             &points,
             &session,
@@ -116,7 +106,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         claims.iter().map(|c| c.values.len()).sum::<usize>(),
         proof.len()
     );
-    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 67);
+    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 38);
     let values: Vec<Vec<OpeningField>> = claims.iter().map(|c| c.values.clone()).collect();
     check_virtual_claims(&batch, &points, &values);
 
@@ -132,7 +122,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         .expect("prover-derived verifier accepts");
 
     // A changed claim, a changed session and swapped commitments are rejected.
-    for group in 0..4 {
+    for group in 0..6 {
         let mut wrong = claims.clone();
         wrong[group].values[0] += OpeningField::lift_base(BaseField::from_u64(1));
         assert!(verifier

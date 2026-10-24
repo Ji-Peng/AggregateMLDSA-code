@@ -15,6 +15,7 @@ use agg_piop::wire::AggregateProof;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
+use jolt_field::Ring;
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
@@ -57,8 +58,9 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         let prove_time = start.elapsed();
         let bytes = output.proof.to_bytes();
         eprintln!(
-            "N = 256: proof {} bytes (PIOP {} bytes, opening {} bytes), prover {:.2?}",
+            "N = 256: proof {} bytes (lookup {} bytes, PIOP {} bytes, opening {} bytes), prover {:.2?}",
             bytes.len(),
+            output.proof.lookup_bytes(),
             output.proof.piop_bytes(),
             output.proof.opening.len(),
             prove_time
@@ -77,7 +79,14 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
                 main: &main,
                 bridge: &bridge_tables,
             };
-            let claims = opening_claims(&manifest, &output.points.1, &output.proof.stage3.claims).unwrap();
+            let claims = opening_claims(
+                &manifest,
+                &output.points.1,
+                &output.proof.stage3.claims,
+                &output.pi_m,
+                &output.proof.multiplicities,
+            )
+            .unwrap();
             let points = claims.clone().map(|c| c.point);
             assert_eq!(evaluate_claims(tables, &points).unwrap(), claims);
         }
@@ -131,6 +140,30 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             verify(&public, &bytes, &other, &NoKeccakVerifier, FlockProfile::None, None),
             Err(VerifyError::Stage(_))
         ));
+        // A changed lookup message (a GKR round) or layer-1 value: the lookup.
+        let mut lookup = output.proof.clone();
+        lookup.lookup.sessions[4].rounds[1][0] += agg_piop::OpeningField::from_u64(1);
+        assert!(matches!(
+            verify(&public, &lookup.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
+            Err(VerifyError::Lookup(_))
+        ));
+        let mut layer = output.proof.clone();
+        layer.lookup.layer1[0][3] += agg_piop::OpeningField::from_u64(1);
+        assert!(matches!(
+            verify(&public, &layer.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
+            Err(VerifyError::Lookup(_))
+        ));
+        // A changed multiplicity-digit claim, compensated so that the digits still compose
+        // to m(pi_m): the lookup's own check passes; the claims are absorbed, so the honest
+        // stage proofs no longer match the transcript (and the Akita opening of G_m would
+        // reject the claims in any case).
+        let mut digits = output.proof.clone();
+        digits.multiplicities.0[0] += agg_piop::OpeningField::from_u64(16);
+        digits.multiplicities.0[1] -= agg_piop::OpeningField::from_u64(1);
+        assert!(matches!(
+            verify(&public, &digits.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
+            Err(VerifyError::Stage(_) | VerifyError::Opening(_))
+        ));
         // The no-Keccak stand-in cannot verify a mode-A profile (refused before parsing).
         assert!(matches!(
             verify(&public, &bytes, &bridge, &NoKeccakVerifier, FlockProfile::Fast, None),
@@ -145,13 +178,13 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             Err(VerifyError::Stage(agg_piop::stage::StageError::Terminal(2)))
         ));
         let mut claim = output.proof.clone();
-        claim.stage3.claims.0[40] = claim.stage3.claims.0[41];
+        claim.stage3.claims.0[20] = claim.stage3.claims.0[21];
         assert!(matches!(
             verify(&public, &claim.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
             Err(VerifyError::Stage(agg_piop::stage::StageError::Terminal(3)))
         ));
         let mut prestage = output.proof.clone();
-        prestage.prestage.y2[0] = prestage.prestage.y2[1] + prestage.prestage.kappa3[0];
+        prestage.prestage.y2[0] = prestage.prestage.y2[1] + prestage.prestage.kappa3;
         assert!(verify(&public, &prestage.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None).is_err());
         let mut opening = output.proof.clone();
         let last = opening.opening.len() - 1;

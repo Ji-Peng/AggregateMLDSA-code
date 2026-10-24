@@ -1,5 +1,12 @@
 # PIOP (`agg-piop`): tables, commitments, sum-check stages, transcript and wire format
 
+**Wire version 1 (lookup layout L16, 2026-10-24):** the range mechanism is the lookup into
+`T_16` (`docs/lookup.md`). Section 19 is the current description of the groups, the event-0
+bytes, the commit flow, the lookup, the stage tables, the transcript and the wire format;
+Sections 2, 3, 7, 9 and 10 below describe wire version 0 (the base-16 digit layout, code
+`4247f61`) where Section 19 does not replace them, and Sections 13 to 18 are measurements and
+kernel work on that layout.
+
 Part 1 (prover-side tables, commitments, public data, virtual evaluators; spec Sections
 2, 4, 5, 7.6), part 2 (the three sum-check stages, the weight tables, the transcript,
 the proof wire format, the prover and verifier drivers; spec Sections 6, 7, 10, 11) and
@@ -16,7 +23,8 @@ part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `
 | `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` and the allocation-free `negacyclic_kernel_into` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
 | `virtual_polys` | `w_1'`, (4.1) compositions, ring residual, `y^(1)` parities, `P_Z, A^lo, A^hi`, `MainValues`/`CarryValues` | 4.3, 5 | |
 | `kernel` (`kernel/`: `mod.rs`, `plan.rs`, `coded.rs`, `field.rs`, `tests.rs`) | `Source`/`Lane` (the narrow input tables), `Term` (summand shapes), `Group` (one local domain, optional split equality factor, gamma-weighted instances; coded columns, pattern masses, pair/quartet/Taylor tables, one dense table from the third fold), compressed messages, lifted inactive rounds | 7.1 | `aerie-prover/src/protocol/kernels/`, `algebra.rs` |
-| `range` | digit maps `z -> z(z+1)`, `Q_16^lo(P)`, `Q_16^hi(P)`; the digit orders | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
+| `lookup` | LogUp-GKR range argument: stacks, multiplicities and their digits, fraction trees, sessions on the kernel, `prove_in`/`verify_in` on a `LookupTranscript` (Section 19) | 4.3, 7.0 | |
+| `range` | the digit map `z -> z(z+1)`; the two leaf-checked digits `Z_hi`, `U_hi` | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
 | `stage` | `StageSpec` (declarative instance table: groups, lanes, equality points, gamma indices), `prove_stage`, `replay_stage`, `check_terminal` | 7.1 | `aerie-falcon/src/protocol/stage.rs` |
 | `stage1`, `stage2`, `stage3` | the instance tables of Section 7.3 to 7.5, claimed sums, terminal claims, `prove`/`verify` | 7.3-7.5 | `stage1.rs`, `stage2.rs`, `stage3.rs` of both Aerie crates |
 | `weights` | `w_1, w_2, w_{3,t}` tables and verifier evaluations (wrappers of `agg_bridge::weights` at the production shape); `w_A` table and (7.10) | 7.6 | `ring/functional.rs`, `stage1/projection_link.rs` |
@@ -1074,3 +1082,106 @@ changes a byte of the proof.
   the third fold are the largest rounds (deferring the materialization one fold is the
   next candidate, Section 18.2); `agg_bridge::parity` (20 ms at 2,048) and the matrices
   (P4, about 150 ms) are outside this crate.
+
+## 19. Lookup layout L16 (wire version 1, 2026-10-24)
+
+Branch `lookup-integration` (base `4247f61`). `docs/lookup.md` has the argument, the
+soundness and the remedies for the identity term; `docs/deviations.md` L1 to L7 and D2 the
+departures; `docs/spec.md` Sections 4, 7, 10 to 12 the normative text.
+
+### 19.1 Groups and tables
+
+| Group | Columns (manifest order) | Width | Storage | Round |
+| --- | --- | ---: | --- | ---: |
+| `G_main16` | `Z_lo, U_lo, V_lo, V_hi` | 16 | one stacked `i32` lane (`MainTables::wide`), column `c` at `c 2^d_main` | 1 |
+| `G_main4` | `Z_hi, U_hi, b_0..b_5` | 4 | `i8` columns (`MainTables::columns`) | 1 |
+| `G_1` | `kappa1_0..5` (stored `K = kappa - 2^15`) | 16 | stacked `i32`, 8 slots, slots 6, 7 hold `-2^15` | 2 |
+| `G_2` | `y2_0..5`, `kappa2_0..5` | 16 | `i8` parities, stacked `i32` carries | 2 |
+| `G_3` | `kappa3` | 16 | `i32` | 2 |
+| `G_m` | `m_0..m_6` (digits of the multiplicities of `T_16`) | 4 | `i8` | 2 |
+
+`source_tables::Cells` reads a column of either width (`Narrow(&[i8])`, `Wide(&[i32])`);
+`Cells::lane` gives a coded byte lane or an `Ints` lane. `MainTables::build` derives every
+witness (strict) and encodes `z + 2^17 = z_lo + 2^16 z_hi` (stored `Z_lo = z_lo - 2^15`,
+`Z_hi = z_hi - 2`), likewise `u` (top base 8) and `v` (two 16-bit halves); padded rows hold
+the digits of zero. `BridgeGroupTables::build` adds the balanced carries, the parities and
+`Y` of `agg_bridge::parity::compute` and the multiplicities of every looked-up cell of both
+rounds (`recount`, `lookup::multiplicities`), with their digits. `agg-witness` and
+`agg-bridge` are unchanged.
+
+### 19.2 Event-0 bytes and commit flow
+
+`CommitmentManifest::binding_bytes`: wire version 1, digit layout id 1, six groups (role,
+round, family byte 0/1, variables, polynomial count, alphabet codes: 4 and 8 for the leaf
+digits, `0x90` for a looked-up column, `0x50` for a multiplicity digit, 0 for a Boolean),
+the grouped row id `mldsa-44-l16-batch-<N*>-mult-final`, the bridge shape, then the lookup
+layout (2 challenges; table width 16; per stack column count, variables, table and shift).
+Commit flow: `TableCommitter::commit_round1` commits `G_main16` and `G_main4` concurrently
+(the pair runs concurrently with the Keccak side's commitments), `commit_round2` the four
+round-2 groups concurrently, each commit on its own scoped OS thread
+(`pcs::concurrent_commits`: Akita's lazily built NTT slots sit behind a `OnceLock` whose
+initializer runs rayon loops, so commits joined as rayon jobs can deadlock; deviation P12); `open_claims` opens the 31 stage-3 claims at the suffixes of
+`r^(3)` and the 7 digit claims at `pi_m` (`pcs::group_points`).
+
+### 19.3 The lookup (event 7) and the stages
+
+Shape (`CommitmentManifest::lookup_shape`): stacks `[Z_lo | U_lo | V_lo | V_hi]` (depth
+`d_main + 2`), `kappa1` (8 slots, `d_1 + 3`), `kappa2` (8 slots, `d_2 + 3`), `kappa3`
+(`d_3`); table `T_16`; challenges `X_1, X_2`; storage shift `2^15` (leaves
+`1 / ((X - 2^15) - stored)`). `prover::prove_piop` runs `lookup::prove_in` on the PIOP
+transcript, sends the seven digit claims `m_k(pi_m)`, then `tau`, the pre-stage claims and
+the stages; `verifier::verify_piop` mirrors it (`VerifyError::Lookup` for the lookup and
+the digit check). Lookup proof elements: 1,015 + 312 = 1,327 at `N = 1,024` with two
+challenges (21,232 B), 1,799 at `2^15` (28,784 B), plus 112 B of digit claims.
+
+Stage 1 (degree 4, `gamma^(1) in K^26`, point `tau`): `bool_y1[t]` (0..6), `level2[t]`
+(6..12), `level3` (12), `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25); groups:
+main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`}, `D_1`
+{`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
+`b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
+
+Stage 2 (degree 5, `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
+`K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf8[U_hi]` (7)
+(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}). Terminal (8): `b_t(r2)`, `P_Z(r2)`.
+
+Stage 3 (degree 3, `gamma^(3) in K^44`, point `r^(2)`):
+
+| Instance | Gamma | Domain | Equality / weight | Summand |
+| --- | ---: | --- | --- | --- |
+| `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A (Z_lo + 2^16 Z_hi + 2^15) - eq (2 gamma_2 w_1' + u + q v)` |
+| `link[Z_hi]`, `link[U_hi]` | 1, 2 | main | `eq(r2, .)` | `Z (Z + 1)` |
+| `b_t` from `r1`, from `r2` | 3..9, 9..15 | main | `eq(r1)`, `eq(r2)` | `b_t` |
+| `y2_t` from `tau_2`, from `r1_2` | 15..21, 21..27 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
+| `K2_t` from `tau_2` | 27..33 | `D_2` | `eq(tau_2)` | `K2_t` |
+| `K3` from `tau_3` | 33 | `D_3` | `eq(tau_3)` | `K3` |
+| `K1_t` from `r1_1` | 34..40 | `D_1` | `eq(r1_1)` | `K1_t` |
+| stack `j` | 40 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
+
+Groups: main `eq(r2)` {`U_lo, V_lo, V_hi, Z_hi, U_hi`, 6 bits}, main {`w_A`, `Z_lo`,
+`Z_hi`}, main `eq(r1)` {6 bits}, `D_1` `eq(r1_1)` {6 `K1`}, `D_2` `eq(tau_2)` {6 `y2`, 6
+`K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, and one `eq(pi_j,low)` group per
+stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity groups at
+`r^(3)`, manifest order.
+
+### 19.4 Transcript and wire
+
+Registry (`transcript::Registry`): instance; `commit/main16`, `commit/main`; Flock
+commitments; seed; `commit/level1..3`, `commit/mult`; Flock seeds; final vectors; Flock
+proofs; `lookup/x` (2), `lookup/layer1` (40), `lookup/mu/1`; per session `s = 2 .. D`:
+`lookup/gamma/s` (2 per active tree), `lookup/round/s/k` (3) and `lookup/r/s/k`,
+`lookup/terminals/s` (4 per continuing tree), `lookup/leaves/s` (2 per ending stack or
+table), `lookup/mu/s`; `lookup/multiplicities` (7); `tau`; pre-stage (13); stage 1
+(`gamma` 26, rounds, terminal 18); `stage2/kappa1` (6), stage 2 (8, rounds, 8); stage 3 (44,
+rounds, 31); PCS session. Wire (`wire::AggregateProof`, version 1): header, `c~`, the
+`G_main16` and `G_main4` commitments (framed), the Flock items, the four round-2 commitments,
+`Y_sigma`, the Flock proofs, the lookup (layer-1 values, then per session the rounds, the
+terminals and the leaves), the 7 digit claims, the pre-stage claims, the stages, the
+opening. `ProofSize::lookup` is the lookup part. Every count follows from `N`.
+
+### 19.5 Tests
+
+`cargo test -p agg-piop --release` (67 unit tests, 28 integration tests in 8 files): the
+integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP level in
+`tests/stages.rs`; mode-B round trips at 64, 256 and 1,024; end-to-end tampering in
+`tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
+`ref/notes/bench-local.md` (lookup integration) and `docs/lookup.md` Section 4.5.

@@ -56,7 +56,6 @@ use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::{InstanceError, PublicInstance};
 use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, K, N, PK_BYTES, SIG_BYTES, W1_ENCODE_BYTES};
-use agg_witness::tables::BuildError;
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
@@ -561,7 +560,7 @@ impl std::error::Error for AggregateError {}
 impl From<ProveError> for AggregateError {
     fn from(e: ProveError) -> Self {
         match e {
-            ProveError::Tables(SourceTableError::Build(BuildError::Derive(i, why))) => {
+            ProveError::Tables(SourceTableError::Derive(i, why)) => {
                 Self::Signature(i, format!("{why:?}"))
             }
             other => Self::Prove(other),
@@ -615,6 +614,7 @@ pub fn size_lines(size: &ProofSize, records: usize) -> String {
         ("Flock commitments", size.keccak_commitments),
         ("final vectors", size.final_vectors),
         ("Flock proofs and shares", size.keccak_proofs),
+        ("lookup (T_16)", size.lookup),
         ("PIOP rounds and claims", size.piop),
         ("Akita opening", size.opening),
     ];
@@ -644,14 +644,15 @@ impl std::fmt::Display for ProveReport {
             ("witness and G_main tables", t.tables),
             ("Flock records", self.flock_records),
             ("Akita setup", t.setup),
-            ("event 1: G_main commitment", t.round1),
+            ("event 1: G_main16, G_main4 commits", t.round1),
             ("events 2, 6: Flock parts", t.keccak),
             ("events 3-5: matrices, round 2", t.round2),
-            ("events 7, 8: tau, pre-stage", t.prestage),
+            ("event 7: lookup into T_16", t.lookup),
+            ("events 8, 9: tau, pre-stage", t.prestage),
             ("stage 1", t.stage1),
             ("stage 2", t.stage2),
             ("stage 3", t.stage3),
-            ("event 12: Akita opening", t.opening),
+            ("event 13: Akita opening", t.opening),
         ] {
             writeln!(f, "  {name:<32} {:>10.1} ms", ms(d))?;
         }
@@ -999,6 +1000,7 @@ impl std::fmt::Display for VerifyCostReport {
             ("transcript", "events 0-6 replay"),
             ("matrices", "bridge matrices from sd"),
             ("keccak", "Flock parts"),
+            ("lookup", "lookup into T_16"),
             ("prestage", "tau, Y(tau_3), pre-stage"),
             ("stage1", "stage 1"),
             ("stage2", "stage 2"),

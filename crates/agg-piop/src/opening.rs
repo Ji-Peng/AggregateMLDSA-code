@@ -1,5 +1,6 @@
-//! The Akita opening of the four groups at `r^(3)` and its suffixes (spec Sections 7.5
-//! and 10, event 12), and the parsing of the commitments absorbed at events 1 and 4.
+//! The Akita opening of the six groups (spec Sections 7.5 and 10, event 13): five groups at
+//! `r^(3)` and its suffixes, `G_m` at the lookup's table point; and the parsing of the
+//! commitments absorbed at events 1 and 4.
 
 use agg_pcs_config::commit::GroupClaim;
 use agg_pcs_config::work_plan::WorkPlan;
@@ -7,21 +8,28 @@ use akita_params::CompressionChainPlan;
 use akita_serialization::{AkitaDeserialize, Compress, Validate};
 use akita_types::Commitment;
 
-use crate::claims::Stage3Claims;
+use crate::claims::{MultiplicityClaims, Stage3Claims};
 use crate::manifest::{CommitmentManifest, GroupRole, GROUP_COUNT};
-use crate::pcs::{suffix_points, PcsError};
+use crate::pcs::{group_points, PcsError};
 use crate::{BaseField, OpeningField as E};
 
-/// The opening claims of the 67 polynomials at the group points induced by `r3`.
+/// The opening claims of the 38 polynomials: the 31 stage-3 claims at the group points
+/// induced by `r3`, the multiplicity digits at the table point `pi_m`.
 pub fn opening_claims(
     manifest: &CommitmentManifest,
     r3: &[E],
     claims: &Stage3Claims,
+    pi_m: &[E],
+    multiplicities: &MultiplicityClaims,
 ) -> Result<[GroupClaim; GROUP_COUNT], PcsError> {
-    let points = suffix_points(manifest, r3)?;
+    let points = group_points(manifest, r3, pi_m)?;
     Ok(GroupRole::ALL.map(|role| GroupClaim {
         point: points[role.index()].clone(),
-        values: claims.group(manifest, role).to_vec(),
+        values: if role == GroupRole::Mult {
+            multiplicities.0.to_vec()
+        } else {
+            claims.group(manifest, role).to_vec()
+        },
     }))
 }
 

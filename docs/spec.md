@@ -5,10 +5,10 @@
 | Field | Value |
 | --- | --- |
 | Status | normative draft for milestone 1; no implementation yet |
-| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relaxed relation H, wire version 0 (unfrozen) |
+| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relaxed relation H, wire version 1 (unfrozen; lookup layout L16, `docs/lookup.md`) |
 | Base system | Aerie `49b6c21` (Akita pin `e023b6a`), Flock HEAD `83f963e` circuit language, retired Keccak encoder `c2d0c24` as reference |
 | Variants | H-exact and S1+S2 layouts are feature flags (Appendix A) |
-| Last reviewed | 2026-10-24, revision 2 (see Review responses) |
+| Last reviewed | 2026-10-24, revision 3: the lookup layout L16 (former Appendix C) is normative in Sections 4 to 7 and 10 to 12; the base-16 digit layout of wire version 0 is retired (`docs/deviations.md` L1) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Aerie conventions (Akita groups, local variable orders, lifting of small instances, Spongefish transcript, grinding) are adopted by reference to `aerie/specs/falcon.md`; this document restates only what differs. Deviations made during implementation go to `docs/deviations.md`. Design questions decided while writing are in Appendix B.
 
@@ -80,7 +80,7 @@ For every live $`i`$, the witness is $`z_i\in\mathbb Z^{\ell\times256}`$, $`u_i\
 \qquad(3.3)
 ```
 
-The honest relation is $`\mathrm H(B_z,B_u)`$. The proven relation is $`\mathrm H(\bar B_z,\bar B_u)`$ with $`(\bar B_z,\bar B_u)=(2^{17},2^{18})`$, the ranges proven inside the PIOP by the digit decompositions of $`z`$ and $`u`$ (Section 4.3); Akita widths play no part in them. No bound on $`v`$ is part of H: (3.1) is an integer equation, and $`v`$ is determined by the other terms. The proof nevertheless range-checks $`v`$ to $`\lvert v\rvert\lt2^{26}`$, because the field identity of Section 6 lifts to (3.1) only for a bounded quotient.
+The honest relation is $`\mathrm H(B_z,B_u)`$. The proven relation is $`\mathrm H(\bar B_z,\bar B_u)`$ with $`(\bar B_z,\bar B_u)=(2^{17},2^{18})`$, the ranges proven inside the PIOP by the decompositions of $`z`$ and $`u`$ into a 16-bit low part, looked up in $`T_{16}=[0,2^{16})`$, and a small top digit with a leaf (Section 4.3); Akita widths play no part in them. No bound on $`v`$ is part of H: (3.1) is an integer equation, and $`v`$ is determined by the other terms. The proof nevertheless range-checks $`v`$ to $`v\in[-2^{31},2^{31})`$, because the field identity of Section 6 lifts to (3.1) only for a bounded quotient.
 
 $`w_1'\in[0,44)`$ is equivalent, for Boolean $`b_t`$, to
 
@@ -117,44 +117,42 @@ The standard proof has $`\zeta=\max(\gamma_1-\beta,\,2\gamma_2+1+2^{d-1}\tau)=35
 
 ### 4.1 Committed tables
 
-Every committed table is one Akita polynomial of signed width 4 (Aerie's `Fp64SignedWidth4` preset, one inner digit); polynomials with the same domain form one group with one opening point (Section 7.5). The width sizes the honest producer and the PCS parameters only; it is not a range proof (Akita Remark 10.41, falcon.md Section 5). Every range below is proven inside the PIOP by the digits of Section 4.3; $`z,u,v,\kappa^{(\cdot)}`$ are virtual (Section 5).
+Lookup layout L16 (`docs/lookup.md`). Every committed table is one Akita polynomial of signed width 4 (Aerie's `Fp64SignedWidth4` parameters, one balanced base-16 inner digit) or signed width 16 (the same parameters with `log_commit_bound` 16 and one balanced base-$`2^{16}`$ inner digit, `docs/pcs-config.md`); polynomials with the same domain and width form one group with one opening point (Section 7.5). The width sizes the honest producer and the PCS parameters only; it is not a range proof (Akita Remark 10.41, falcon.md Section 5). Every range below is proven inside the PIOP (Section 4.3); $`z,u,v,\kappa^{(\cdot)}`$ are virtual (Section 5).
 
-| Group | Polynomials | Domain (variables) | Honest values | Meaning | Round |
-| --- | --- | --- | --- | --- | ---: |
-| $`G_{\rm main}`$ | $`z_0,\ldots,z_4(j,s,i)`$ | main, $`d_{\rm main}`$ | bases $`16,16,16,16,4`$ | digits of the response $`z`$ | 1 |
-| | $`u_0,\ldots,u_4(j,\rho,i)`$ | main | bases $`16,16,16,16,8`$ | digits of the UseHint residual $`u`$ | 1 |
-| | $`v_0,\ldots,v_6(j,\rho,i)`$ | main | bases $`16^6,8`$ | digits of the ring quotient $`v`$ (3.1) | 1 |
-| | $`b_0,\ldots,b_5(j,\rho,i)`$ | main | $`\{0,1\}`$ | w1Encode bits, bit $`t`$ of $`w_1'[\rho]_j`$ | 1 |
-| $`G_1`$ | $`\kappa^{(1)}_{t,0},\kappa^{(1)}_{t,1},\kappa^{(1)}_{t,2}`$, $`t\lt6`$ | $`D_1`$, $`d_1`$ | bases $`16,16,4`$ | digits of the level-1 carries | 2 |
-| $`G_2`$ | $`y^{(2)}_t`$; $`\kappa^{(2)}_{t,0},\kappa^{(2)}_{t,1},\kappa^{(2)}_{t,2}`$, $`t\lt6`$ | $`D_2`$, $`d_2`$ | $`\{0,1\}`$; bases $`16,16,4`$ | level-2 parities; digits of the level-2 carries | 2 |
-| $`G_3`$ | $`\kappa^{(3)}_0,\kappa^{(3)}_1`$ | $`D_3`$, $`d_3`$ | bases $`16,16`$ | digits of the level-3 carries | 2 |
+| Group | Polynomials | Domain (variables) | Width | Honest stored values | Meaning | Round |
+| --- | --- | --- | ---: | --- | --- | ---: |
+| $`G_{\rm main16}`$ | $`Z_{\rm lo},U_{\rm lo},V_{\rm lo},V_{\rm hi}`$ | main, $`d_{\rm main}`$ | 16 | $`[-2^{15},2^{15})`$ | the 16-bit parts of $`z,u,v`$, stored as $`x-2^{15}`$ | 1 |
+| $`G_{\rm main4}`$ | $`Z_{\rm hi}`$, $`U_{\rm hi}`$, $`b_0,\ldots,b_5`$ | main | 4 | base 4, base 8, $`\{0,1\}`$ | the top digits of $`z,u`$; the w1Encode bits | 1 |
+| $`G_1`$ | $`K^{(1)}_t`$, $`t\lt6`$ | $`D_1`$, $`d_1`$ | 16 | $`[-2^{15},2^{15})`$ | the level-1 carries, $`K=\kappa-2^{15}`$ | 2 |
+| $`G_2`$ | $`y^{(2)}_t`$; $`K^{(2)}_t`$, $`t\lt6`$ | $`D_2`$, $`d_2`$ | 16 | $`\{0,1\}`$; $`[-2^{15},2^{15})`$ | level-2 parities; level-2 carries | 2 |
+| $`G_3`$ | $`K^{(3)}`$ | $`D_3`$, $`d_3`$ | 16 | $`[-2^{15},2^{15})`$ | the level-3 carry | 2 |
+| $`G_m`$ | $`m_0,\ldots,m_6`$ | $`2^{16}`$ cells | 4 | base 16 | the balanced base-16 digits of the multiplicity column $`m`$ of $`T_{16}`$ | 2 |
 
-A digit of base $`b`$ takes values in the balanced alphabet $`[-b/2,b/2-1]`$; bases are listed from the least significant digit. Per signature: $`1024\cdot(5+5+7+6)=23{,}552`$ main-domain elements (76 bits per position) plus, at $`N=2^{15}`$, 288 level-1, 24 level-2 and 1 level-3 elements: 23,865 committed elements (Aerie Falcon-512: 2,567), each one Akita inner digit. The former full-width layout needed about 12 inner digits per position, so the range proofs roughly double the PCS work (memory per `risks.md` R4: about 0.5 MB per signature, estimate). Round 1 is committed before the bridge seed, round 2 after it (Section 10). All four group descriptors are bound in event 0, so both rounds share one commitment contract and one batched opening: Akita Section 4.6 admits commitments formed before their batch is known under a common certified root alphabet, and Aerie's per-group `commit_group` is transcript-free except for the final group, here $`G_3`$, which commits against the precommitted profiles. Group and polynomial order on the wire and in the catalog key is the table order. Every physical table is zero-extended to at least $`2^{13}`$ cells (Akita `PCS_MIN_CELLS_LOG2`).
+Per signature: $`1024\cdot12=12{,}288`$ main-domain elements (was 23,552) plus, at $`N=2^{15}`$, 96 level-1, 12 level-2, 0.5 level-3 and 14 multiplicity elements: 12,410.5 committed elements (was 23,865), each one Akita inner digit. Round 1 is committed before the bridge seed, round 2 after it (Section 10); $`m`$ counts the carries, which exist only after the seed, so $`G_m`$ is a round-2 group. All six group descriptors are bound in event 0, so both rounds share one commitment contract and one batched opening: Akita Section 4.6 admits commitments formed before their batch is known under a common certified root alphabet, Akita freezes each group's source bound in its own profile (so the two widths share one batch), and Aerie's per-group `commit_group` is transcript-free except for the final group, here $`G_m`$, which commits against the precommitted profiles. Group and polynomial order on the wire and in the catalog key is the table order. Every physical table is zero-extended to at least $`2^{13}`$ cells (Akita `PCS_MIN_CELLS_LOG2`).
 
 ### 4.2 Padded rows
 
-For $`i\ge N`$ every value is zero: $`z=u=v=b_t=0`$, so $`w_1'=0`$ and (3.1) holds with $`A_i=T_i=0`$. Padded bridge positions are zero bits, padded carries and parities are zero. By (4.1) the digits of zero are $`-b_k/2`$ (0 for the top digit of a signed value); padded digits are thus nonzero and MUST NOT be required to be zero (Aerie 3.4). The Keccak side contains live records only.
+For $`i\ge N`$ every value is zero: $`z=u=v=b_t=0`$, so $`w_1'=0`$ and (3.1) holds with $`A_i=T_i=0`$. Padded bridge positions are zero bits, padded carries and parities are zero. By (4.1) the digits of zero are $`Z_{\rm lo}=U_{\rm lo}=V_{\rm lo}=-2^{15}`$, $`Z_{\rm hi}=U_{\rm hi}=V_{\rm hi}=0`$ and $`K=-2^{15}`$ for a carry; padded cells are thus nonzero and MUST NOT be required to be zero (Aerie 3.4). The padding slots of the lookup stacks (Section 4.3) hold $`-2^{15}`$ (looked-up value 0). The Keccak side contains live records only.
 
-### 4.3 Range proofs by digit decomposition
+### 4.3 Range proofs: the lookup into $`T_{16}`$ and two leaves
 
-A value $`X`$ with digits $`Z_0,\ldots,Z_{m-1}`$ of bases $`b_0,\ldots,b_{m-1}`$ (Section 4.1) is the virtual table
+A value $`X`$ with digits $`Z_0,\ldots,Z_{m-1}`$ of bases $`b_0,\ldots,b_{m-1}`$ is the virtual table
 ```math
 X=\sum_{k\lt m}W_kZ_k+C_X,\qquad W_k=\prod_{l\lt k}b_l,\qquad C_X=\sum_{k\lt m}W_k\tfrac{b_k}{2}-\epsilon_X\tfrac{B}{2},\qquad B=\prod_{k\lt m}b_k,
 \qquad(4.1)
 ```
-with $`\epsilon_X=1`$ for a signed and $`0`$ for an unsigned value. When every $`Z_k`$ lies in its balanced alphabet, (4.1) is a bijection onto $`[-B/2,B/2-1]`$ or $`[0,B-1]`$ (checked by enumeration in `spec_checks.py`):
+with $`\epsilon_X=1`$ for a signed and $`0`$ for an unsigned value. When every $`Z_k`$ lies in its balanced alphabet $`[-b_k/2,b_k/2-1]`$, (4.1) is a bijection onto $`[-B/2,B/2-1]`$ or $`[0,B-1]`$:
 
-| Value | Bases | Range proven | $`C_X`$ |
-| --- | --- | --- | ---: |
-| $`z`$ | $`16,16,16,16,4`$ | $`[-2^{17},2^{17}-1]`$, so $`\bar B_z=2^{17}`$ | 34,952 |
-| $`u`$ | $`16,16,16,16,8`$ | $`[-2^{18},2^{18}-1]`$, so $`\bar B_u=2^{18}`$ | 34,952 |
-| $`v`$ | $`16^6,8`$ | $`[-2^{26},2^{26}-1]`$ | 8,947,848 |
-| $`\kappa^{(1)}_t,\kappa^{(2)}_t`$ | $`16,16,4`$ | $`[0,1023]`$ | 648 |
-| $`\kappa^{(3)}`$ | $`16,16`$ | $`[0,255]`$ | 136 |
+| Value | Bases | Range proven | $`C_X`$ | Mechanism |
+| --- | --- | --- | ---: | --- |
+| $`z`$ | $`2^{16},4`$ | $`[-2^{17},2^{17}-1]`$, so $`\bar B_z=2^{17}`$ | $`2^{15}`$ | $`Z_{\rm lo}`$ looked up; $`Z_{\rm hi}`$ leaf `leaf4` and link |
+| $`u`$ | $`2^{16},8`$ | $`[-2^{18},2^{18}-1]`$, so $`\bar B_u=2^{18}`$ | $`2^{15}`$ | $`U_{\rm lo}`$ looked up; $`U_{\rm hi}`$ leaf `leaf8` and link |
+| $`v`$ | $`2^{16},2^{16}`$ | $`[-2^{31},2^{31}-1]`$ | $`2^{15}`$ | both looked up |
+| $`\kappa^{(1)}_t,\kappa^{(2)}_t,\kappa^{(3)}`$ | $`2^{16}`$ (unsigned) | $`[0,2^{16}-1]`$ | $`2^{15}`$ | looked up |
 
-Each digit alphabet is proven as in Aerie Sections 3.3 and 7.2 to 7.4. For a digit $`Z`$ the folded table $`P_Z(x)=Z(x)(Z(x)+1)`$ (virtual, extended separately) satisfies $`Q_b(P_Z)=0`$ on the Boolean domain exactly when $`Z\in[-b/2,b/2-1]`$, with $`Q_4(P)=P(P-2)`$, $`Q_8(P)=P(P-2)(P-6)(P-12)`$ and $`Q_{16}=Q_{16}^{\rm lo}Q_{16}^{\rm hi}`$, $`Q_{16}^{\rm lo}=Q_8`$, $`Q_{16}^{\rm hi}(P)=(P-20)(P-30)(P-42)(P-56)`$ (Aerie (3.7), (3.8)); exactness holds over $`\mathbb F_p`$ because $`Z(Z+1)=t`$ has at most two roots. A base-16 digit carries the virtual Boolean tables $`A_Z^{\rm lo},A_Z^{\rm hi}`$ (Section 5). The checks are `b16_prod` (stage 1), `leaf` (stage 2) and `link` (stage 3) of Section 7. There are 40 base-16 digits (14 on the main domain, 12 on $`D_1`$, 12 on $`D_2`$, 2 on $`D_3`$), 2 base-8 digits ($`u_4,v_6`$) and 13 base-4 digits ($`z_4`$ and the top carry digits of levels 1 and 2): 55 digits.
+So $`z=Z_{\rm lo}+2^{16}Z_{\rm hi}+2^{15}`$, likewise $`u,v`$, and $`\kappa=K+2^{15}`$. Every base-$`2^{16}`$ digit (stored $`S`$, looked-up value $`f=S+2^{15}`$) is proven in $`T_{16}`$ by one LogUp identity (Haböck, ePrint 2022/1530, Lemma 5) with the GKR fractional sum-check (Papini and Haböck, ePrint 2023/1284) over four *stacks* (Section 7.0): $`[Z_{\rm lo}\mid U_{\rm lo}\mid V_{\rm lo}\mid V_{\rm hi}]`$ on the main domain, $`K^{(1)}_{0..5}`$ in 8 slots on $`D_1`$, $`K^{(2)}_{0..5}`$ in 8 slots on $`D_2`$, $`K^{(3)}`$ on $`D_3`$ (missing slots are public, stored $`-2^{15}`$), against the multiplicity column $`m`$ of $`T_{16}`$, at two independent challenges $`X_1,X_2\in K`$. One table and one identity: tables MUST NOT be merged by integer offsets (a committed value is an arbitrary $`\mathbb F_p`$ element and would match a foreign entry; `docs/lookup.md` Section 1). $`m`$ needs no range proof: Lemma 5 holds for any $`m\in\mathbb F_p^{T_{16}}`$ because $`p`$ exceeds the number of looked-up cells. The two small digits keep Aerie's leaf predicates: for a digit $`Z`$ the folded table $`P_Z(x)=Z(x)(Z(x)+1)`$ (virtual, extended separately) satisfies $`Q_b(P_Z)=0`$ on the Boolean domain exactly when $`Z\in[-b/2,b/2-1]`$, with $`Q_4(P)=P(P-2)`$ and $`Q_8(P)=P(P-2)(P-6)(P-12)`$ (Aerie (3.7)); exactness holds over $`\mathbb F_p`$ because $`Z(Z+1)=t`$ has at most two roots. The checks are `leaf4`, `leaf8` (stage 2) and `link` (stage 3) of Section 7.
 
-Catalog rows bind nothing for a malicious prover (Aerie `falcon-pcs-extraction.md` Section 2), and the source inner basis is capped at 16 at the pinned revision (`PROOF_OPTIMIZED_INNER_LOG_BASIS_MAX`), so no 17-bit single-digit row exists either. The verifier MUST reject a digit layout other than the table above. Base-32 digits would save three main-domain columns; not adopted.
+The verifier MUST reject a digit layout other than this one (digit layout id 1) and a lookup layout (stacks, table width, challenge count, storage shift) other than the one above. The base-16 digit layout of wire version 0 (55 digits with `b16_prod`, 95 leaves and 55 links) is retired.
 
 ## 5. Virtual polynomials
 
@@ -168,40 +166,44 @@ All virtual tables are defined on Boolean points and extended multilinearly as t
 | $`y^{(1)}_t(\rho_1,\beta)`$ | $`D_1`$ | $`\sum_{\zeta}M_1[\rho_1,\zeta]\,b_t(\zeta,\beta)-2\kappa^{(1)}_t(\rho_1,\beta)`$ | $`\{0,1\}`$ |
 | $`Y(\rho_3,\sigma)`$ | $`D_3`$ | public $`Y_\sigma[\rho_3]`$ | $`\{0,1\}`$ |
 | $`z,u,v,\kappa^{(1)}_t,\kappa^{(2)}_t,\kappa^{(3)}`$ | own domain | (4.1) from their digits | Section 4.3 |
-| $`P_Z`$; $`A_Z^{\rm lo},A_Z^{\rm hi}`$ | domain of $`Z`$ | $`Z(Z+1)`$; $`Q_{16}^{\rm lo}(P_Z),Q_{16}^{\rm hi}(P_Z)`$ | $`\{0,2,\ldots,56\}`$; one of them 0 |
+| $`P_Z`$ for $`Z\in\{Z_{\rm hi},U_{\rm hi}\}`$ | main | $`Z(Z+1)`$ | $`\{0,2\}`$, $`\{0,2,6,12\}`$ |
 
-$`y^{(1)}_t`$ is an integer identity in the committed $`b_t`$ and the digits of $`\kappa^{(1)}_t`$: the sum has at most 2,047 terms (row weight bound, Section 9.2) and $`\kappa^{(1)}_t\in[0,1023]`$ (Section 4.3), so the $`\mathbb F_p`$ definition agrees with the integer one. Affine combinations of opened values ($`z,u,v,\kappa`$ by (4.1), $`w_1'(r)`$, $`y^{(1)}_t(r)`$ through its defining sum-check) are evaluated by the verifier from the opened components.
+$`y^{(1)}_t`$ is an integer identity in the committed $`b_t`$ and $`K^{(1)}_t`$: the sum has at most 2,047 terms (row weight bound, Section 9.2) and $`\kappa^{(1)}_t\in[0,2^{16})`$ (Section 4.3), so the $`\mathbb F_p`$ definition agrees with the integer one. Affine combinations of opened values ($`z,u,v,\kappa`$ by (4.1), $`w_1'(r)`$, $`y^{(1)}_t(r)`$ through its defining sum-check) are evaluated by the verifier from the opened components.
 
 ## 6. Residual: committed quotient instead of the divisibility projection
 
 Aerie proves $`q\mid\Delta`$ with a seeded projection $`\Pi_{\rm res}:\mathbb F_p^{nN^\star}\to\mathbb F_p^{31}`$ (cores with entries uniform in $`[-12,12]`$) whose integer outputs must stay below $`p/2`$. For ML-DSA the residual without the $`qv`$ term, $`\Delta_0=(Az)-T-2\gamma_2w_1'-u`$, has honest coefficients of root-mean-square size about $`2^{42.4}`$ (worst case $`\lt2^{49}`$ by (3.4')), so an honest output has standard deviation about $`2^{68.4}`$ at $`nN^\star=2^{25}`$ and wraps modulo $`p`$ ($`p/2\approx2^{63}`$) with probability close to one: the field is too small for the Falcon-style projection of an ML-DSA residual, whose entries are $`2^{18}`$ times larger than Falcon's.
 
-Therefore this protocol commits the quotient $`v`$ through its digits (Section 4) and proves (3.1) as the field identity $`\Delta=0`$ on the Boolean domain. Lifting: under the ranges proven in Section 4.3, $`\lvert(Az)\rvert\le2^{10}\cdot2^{22}\cdot2^{17}=2^{49}`$, $`\lvert T\rvert\lt2^{29}`$, $`2\gamma_2w_1'\lt2^{24}`$, $`\lvert u\rvert\le2^{18}`$ and $`\lvert qv\rvert\lt2^{23}\cdot2^{26}=2^{49}`$, so
+Therefore this protocol commits the quotient $`v`$ through its digits (Section 4) and proves (3.1) as the field identity $`\Delta=0`$ on the Boolean domain. Lifting: under the ranges proven in Section 4.3, $`\lvert(Az)\rvert\le2^{10}\cdot2^{22}\cdot2^{17}=2^{49}`$, $`\lvert T\rvert\lt2^{29}`$, $`2\gamma_2w_1'\lt2^{24}`$, $`\lvert u\rvert\le2^{18}`$ and $`\lvert qv\rvert\lt2^{23}\cdot2^{31}=2^{54}`$, so
 ```math
-\lvert\Delta^{\mathbb Z}\rvert\lt2^{51}\lt p/2,
+\lvert\Delta^{\mathbb Z}\rvert\lt2^{49}+2^{29}+2^{24}+2^{18}+2^{54}\lt2^{54.1}\lt p/2,
 \qquad(6.1)
 ```
-and $`\Delta=0`$ in $`\mathbb F_p`$ implies $`\Delta^{\mathbb Z}=0`$ over the integers, which is (3.1). The range proof of $`v`$ is what gives the identity content: $`q`$ is invertible modulo $`p`$, so an unbounded $`v=q^{-1}\Delta_0\bmod p`$ would satisfy $`\Delta=0`$ for every $`z,u,w_1'`$. Any $`\lvert v\rvert\lt(p/2-2^{50})/q\approx2^{40}`$ would do; the digits prove $`2^{26}`$, the honest width. The cost is seven digit columns per position. The identity is tested at the single point $`r^{(2)}`$ inside the stage-3 instance (7.6).
+and $`\Delta=0`$ in $`\mathbb F_p`$ implies $`\Delta^{\mathbb Z}=0`$ over the integers, which is (3.1). The range proof of $`v`$ is what gives the identity content: $`q`$ is invertible modulo $`p`$, so an unbounded $`v=q^{-1}\Delta_0\bmod p`$ would satisfy $`\Delta=0`$ for every $`z,u,w_1'`$. Any $`\lvert v\rvert\lt(p/2-2^{50})/q\approx2^{40}`$ would do; the two looked-up halves prove $`[-2^{31},2^{31})`$ (the honest width is $`2^{26}`$). The cost is two 16-bit columns per position. The identity is tested at the single point $`r^{(2)}`$ inside the stage-3 instance (7.6).
 
-No norm projection is needed: H has only infinity-norm bounds, each proven per coordinate by the digits of Section 4.3 or by (3.4).
+No norm projection is needed: H has only infinity-norm bounds, each proven per coordinate by the lookup and the leaves of Section 4.3 or by (3.4).
 
 ## 7. The sum-check stages
 
+### 7.0 The lookup (event 7)
+
+After both commitment rounds, the bridge seed and the Keccak side (Section 10), the verifier samples $`X_1,X_2\in K`$ (one vector challenge). For each $`X_j`$ and each of the four stacks of Section 4.3 (stored lane $`g`$ of $`2^{D_s}`$ cells, $`D_s`$ the stack's variables plus $`\log_2`$ of its slot count) and the table, a binary fraction tree of projective pairs $`(p,q)`$ is formed: stack leaves $`(1,(X_j-2^{15})-g)`$, table leaves $`(m(t),X_j-t)`$, node $`y`$ of layer $`k`$ with children $`y`$ and $`y+2^k`$ of layer $`k+1`$, $`p=p_0q_1+p_1q_0`$, $`q=q_0q_1`$. Session 1: the prover sends $`p_1(0),p_1(1),q_1(0),q_1(1)`$ of every tree; the verifier forms the roots, checks per challenge $`\sum_{\rm stacks}p/q=p_T/q_T`$ with every root denominator nonzero, and samples $`\mu_1`$. Session $`s=2,\ldots,D`$, $`D=d_{\rm main}+2`$ the deepest tree: one batched sum-check of $`s-1`$ rounds and degree 3 over every tree of depth $`\ge s`$ (coefficients $`\gamma`$, two per tree), reducing the layer-$`(s-1)`$ claims at the common point to layer $`s`$; the prover sends $`P_0,P_1,Q_0,Q_1`$ at the round point $`\rho`$ per tree of depth $`\gt s`$ and the two leaf-lane values per stack or table ending at $`s`$ (shared by both challenges, whose leaf terms are merged into one instance set); the verifier checks the terminal, samples $`\mu_s`$ and continues at $`(\rho,\mu_s)`$. Each stack leaves one claim on its stored lane at a point $`\pi_j=(\pi_{j,\rm low},\pi_{j,\rm top})`$, the table one claim $`m(\pi_m)`$, $`\pi_m\in K^{16}`$. The prover then sends the seven digit claims $`m_k(\pi_m)`$; the verifier checks $`\sum_k16^km_k(\pi_m)=m(\pi_m)`$, and $`G_m`$ is opened at $`\pi_m`$. The stack claims are reduced to $`r^{(3)}`$ in stage 3 (7.7). Details, counts and costs: `docs/lookup.md` Sections 1 and 4.
+
 ### 7.1 Overview
 
-After both commitment rounds and the bridge seed (Section 10), the verifier samples one point $`\tau\in K^{d_{\rm main}}`$; $`\tau_t`$ denotes its last $`d_t`$ coordinates ($`t=1,2,3`$). Three batched sum-checks follow, each of $`d_{\rm main}`$ rounds with terminal point $`r^{(s)}`$, $`s=1,2,3`$; $`r^{(s)}_t`$ is the suffix of $`r^{(s)}`$ for domain $`D_t`$, and for a table $`Z`$ on $`D_t`$ the points $`\tau_Z,r^{(s)}_Z`$ denote these suffixes. Instances on smaller domains are inactive in the leading rounds and lifted by $`2^{-(d_{\rm main}-d_{\rm loc})}`$ exactly as in Aerie 7.1; every instance uses its own canonical variable order (Section 1) and the stage batches instances with independent coefficients $`\gamma^{(s)}`$ in the listed order. Ordinary compressed rounds send $`\deg`$ elements (Aerie 10.3, omitting the linear coefficient).
+After both commitment rounds, the bridge seed and the lookup (Sections 7.0, 10), the verifier samples one point $`\tau\in K^{d_{\rm main}}`$; $`\tau_t`$ denotes its last $`d_t`$ coordinates ($`t=1,2,3`$). Three batched sum-checks follow, each of $`d_{\rm main}`$ rounds with terminal point $`r^{(s)}`$, $`s=1,2,3`$; $`r^{(s)}_t`$ is the suffix of $`r^{(s)}`$ for domain $`D_t`$, and for a table $`Z`$ on $`D_t`$ the points $`\tau_Z,r^{(s)}_Z`$ denote these suffixes. Instances on smaller domains are inactive in the leading rounds and lifted by $`2^{-(d_{\rm main}-d_{\rm loc})}`$ exactly as in Aerie 7.1; every instance uses its own canonical variable order (Section 1) and the stage batches instances with independent coefficients $`\gamma^{(s)}`$ in the listed order. Ordinary compressed rounds send $`\deg`$ elements (Aerie 10.3, omitting the linear coefficient).
 
 | Stage | Instances | Max individual degree | Terminal claims |
 | --- | --- | ---: | --- |
-| 1 | 66: bridge Booleanity and levels 2, 3; w1Encode Booleanity and range; 40 `b16_prod` | 4 | $`y^{(1)}_t(r^{(1)}_1)`$ (virtual), $`y^{(2)}_t(r^{(1)}_2)`$, $`b_t(r^{(1)})`$, $`A_Z^{\rm lo},A_Z^{\rm hi}(r^{(1)}_Z)`$ |
-| 2 | 101: level-1 definition; 95 range leaves | 5 | $`b_t(r^{(2)})`$, $`P_Z(r^{(2)}_Z)`$ |
-| 3 | 118: ring identity and functional; 55 range links; 62 evaluation reductions | 3 | the 67 committed tables at $`r^{(3)}`$ and its suffixes |
+| 1 | 26: bridge Booleanity and levels 2, 3; w1Encode Booleanity and range | 4 | $`y^{(1)}_t(r^{(1)}_1)`$ (virtual), $`y^{(2)}_t(r^{(1)}_2)`$, $`b_t(r^{(1)})`$ (18) |
+| 2 | 8: level-1 definition; 2 range leaves | 5 | $`b_t(r^{(2)})`$, $`P_Z(r^{(2)})`$ for $`Z_{\rm hi},U_{\rm hi}`$ (8) |
+| 3 | 44: ring identity and functional; 2 range links; 37 evaluation reductions; 4 lookup-stack reductions | 3 | the 31 committed tables of $`G_{\rm main16},G_{\rm main4},G_1,G_2,G_3`$ at $`r^{(3)}`$ and its suffixes |
 
-Every committed table is opened once, at the stage-3 terminal of its domain; earlier claims are reduced to $`r^{(3)}`$ in stage 3. The ring identity (3.1) is tested at the single point $`r^{(2)}`$ inside the stage-3 instance (7.6).
+Every committed table except the multiplicity digits is opened once, at the stage-3 terminal of its domain; earlier claims (including the lookup's stack claims) are reduced to $`r^{(3)}`$ in stage 3. The multiplicity digits are opened at $`\pi_m`$. The ring identity (3.1) is tested at the single point $`r^{(2)}`$ inside the stage-3 instance (7.6).
 
 ### 7.2 Pre-stage claims
 
-Before $`\gamma^{(1)}`$ the prover sends the 26 evaluations $`y^{(2)}_t(\tau_2)`$, $`\kappa^{(2)}_{t,k}(\tau_2)`$ for $`t\lt6`$, $`k\lt3`$, and $`\kappa^{(3)}_k(\tau_3)`$, $`k\lt2`$; the verifier forms $`\kappa^{(2)}_t(\tau_2)`$ and $`\kappa^{(3)}(\tau_3)`$ by (4.1). The verifier computes $`Y(\tau_3)=\sum_{\rho_3,\sigma}\mathrm{eq}(\tau_3,(\rho_3,\sigma))Y_\sigma[\rho_3]`$ from the public final vectors ($`4096S`$ terms).
+Before $`\gamma^{(1)}`$ the prover sends the 13 evaluations $`y^{(2)}_t(\tau_2)`$, $`K^{(2)}_t(\tau_2)`$ for $`t\lt6`$, and $`K^{(3)}(\tau_3)`$; the verifier forms $`\kappa^{(2)}_t(\tau_2)`$ and $`\kappa^{(3)}(\tau_3)`$ by (4.1) ($`\kappa=K+2^{15}`$). The verifier computes $`Y(\tau_3)=\sum_{\rho_3,\sigma}\mathrm{eq}(\tau_3,(\rho_3,\sigma))Y_\sigma[\rho_3]`$ from the public final vectors ($`4096S`$ terms).
 
 ### 7.3 Stage 1 (degree 4)
 
@@ -235,13 +237,12 @@ with $`c_3(t,\rho_2)=\sum_{\rho_3}M_3[\rho_3,(t,\rho_2)]\,\mathrm{eq}(\tau_{3,\r
 0=\sum_x\mathrm{eq}(\tau,x)\,b_5(x)\bigl(b_4(x)+b_3(x)b_2(x)\bigr).
 \qquad(7.4)
 ```
-7. `b16_prod[Z]` for the 40 base-16 digits in the order of Section 4.1, on the domain of $`Z`$, degree 3 (Aerie (7.2)): $`0=\sum_x\mathrm{eq}(\tau_Z,x)A_Z^{\rm lo}(x)A_Z^{\rm hi}(x)`$.
 
-Terminal: the prover sends $`y^{(1)}_t(r^{(1)}_1)`$ (six virtual claims, materialized on $`D_1`$ by integer parities), $`y^{(2)}_t(r^{(1)}_2)`$, $`b_t(r^{(1)})`$ and the 80 values $`A_Z^{\rm lo},A_Z^{\rm hi}(r^{(1)}_Z)`$; the verifier checks the batched terminal with the equality factors, $`w_2(r^{(1)}_1)`$ and $`w_{3,t}(r^{(1)}_2)`$ (Section 7.6).
+Terminal: the prover sends $`y^{(1)}_t(r^{(1)}_1)`$ (six virtual claims, materialized on $`D_1`$ by integer parities), $`y^{(2)}_t(r^{(1)}_2)`$ and $`b_t(r^{(1)})`$; the verifier checks the batched terminal with the equality factors, $`w_2(r^{(1)}_1)`$ and $`w_{3,t}(r^{(1)}_2)`$ (Section 7.6).
 
 ### 7.4 Stage 2 (degree 5)
 
-Before $`\gamma^{(2)}`$ the prover sends the 18 values $`\kappa^{(1)}_{t,k}(r^{(1)}_1)`$ and the verifier forms $`\kappa^{(1)}_t(r^{(1)}_1)`$ by (4.1). Instances:
+Before $`\gamma^{(2)}`$ the prover sends the 6 values $`K^{(1)}_t(r^{(1)}_1)`$ and the verifier forms $`\kappa^{(1)}_t(r^{(1)}_1)`$ by (4.1). Instances:
 
 1. `def_y1[t]`, main domain:
 ```math
@@ -251,27 +252,32 @@ w_1(j,\rho,i)=\mathrm{eq}(r^{(1)}_{1,\beta},\beta_1(i))\,c_1(j,\rho,i_{\rm lo}),
 \qquad(7.5)
 ```
 $`c_1(\zeta_1)=\sum_{\rho_1}M_1[\rho_1,\zeta_1]\,\mathrm{eq}(r^{(1)}_{1,\rho},\rho_1)`$, $`\beta_1(i)=(i_{\rm mid},\sigma)`$.
-2. `leaf16[Z,lo]`, `leaf16[Z,hi]` for every base-16 digit, degree 5 (Aerie (7.5)): $`A_Z^{b}(r^{(1)}_Z)=\sum_x\mathrm{eq}(r^{(1)}_Z,x)\,Q_{16}^{b}(P_Z(x))`$, $`b\in\{\mathrm{lo},\mathrm{hi}\}`$.
-3. `leaf8[Z]` for $`Z\in\{u_4,v_6\}`$, degree 5, and `leaf4[Z]` for the 13 base-4 digits, degree 3: $`0=\sum_x\mathrm{eq}(r^{(1)}_Z,x)\,Q_b(P_Z(x))`$.
+2. `leaf4[Z_hi]`, degree 3, and `leaf8[U_hi]`, degree 5: $`0=\sum_x\mathrm{eq}(r^{(1)},x)\,Q_b(P_Z(x))`$.
 
-Terminal claims $`b_t(r^{(2)})`$ and $`P_Z(r^{(2)}_Z)`$ for the 55 digits; the verifier evaluates $`Q_b`$ on the claimed $`P_Z`$ values and the equality factors.
+Terminal claims $`b_t(r^{(2)})`$ and $`P_Z(r^{(2)})`$ for the 2 digits; the verifier evaluates $`Q_b`$ on the claimed $`P_Z`$ values and the equality factors.
 
 ### 7.5 Stage 3 (degree 3) and the opening
 
 Instances, in $`\gamma^{(3)}`$ order:
 
-1. `ring`, degree 2, the first sum in order $`(j',s,i)`$ and the second in order $`(j,\rho,i)`$:
+1. `ring`, degree 2, the first sum in order $`(j',s,i)`$ and the second in order $`(j,\rho,i)`$, with $`z,u,v`$ the (4.1) combinations of their two digits:
 ```math
 T(r^{(2)})=\sum_{j',s,i}w_A(j',s,i)\,z(j',s,i)-\sum_{j,\rho,i}\mathrm{eq}\bigl(r^{(2)},(j,\rho,i)\bigr)\bigl(2\gamma_2w_1'+u+qv\bigr)(j,\rho,i),
 \qquad(7.6)
 ```
 with $`w_A`$ from Section 7.6 and $`T(r^{(2)})=\sum_{j,\rho,i}\mathrm{eq}(r^{(2)},(j,\rho,i))T(j,\rho,i)`$ ($`k\cdot256`$ multiply-adds per live record). Equation (7.6) is $`\sum_x\mathrm{eq}(r^{(2)},x)\Delta(x)=0`$ with $`(Az)`$ pulled back through $`A`$; the tables were fixed before $`r^{(2)}`$, so a nonzero $`\Delta`$ passes with probability at most $`d_{\rm main}/|K|`$.
-2. `link[Z]` for the 55 digits, degree 3 (Aerie (7.8)): $`P_Z(r^{(2)}_Z)=\sum_x\mathrm{eq}(r^{(2)}_Z,x)\,Z(x)(Z(x)+1)`$.
-3. Evaluation reductions $`f(\pi)=\sum_x\mathrm{eq}(\pi,x)f(x)`$, degree 2: $`b_t`$ from $`r^{(1)}`$ and from $`r^{(2)}`$; $`y^{(2)}_t`$ from $`\tau_2`$ and from $`r^{(1)}_2`$; $`\kappa^{(2)}_{t,k}`$ from $`\tau_2`$; $`\kappa^{(3)}_k`$ from $`\tau_3`$; $`\kappa^{(1)}_{t,k}`$ from $`r^{(1)}_1`$ (62 instances).
+2. `link[Z]` for $`Z_{\rm hi},U_{\rm hi}`$, degree 3 (Aerie (7.8)): $`P_Z(r^{(2)})=\sum_x\mathrm{eq}(r^{(2)},x)\,Z(x)(Z(x)+1)`$.
+3. Evaluation reductions $`f(\pi)=\sum_x\mathrm{eq}(\pi,x)f(x)`$, degree 2: $`b_t`$ from $`r^{(1)}`$ and from $`r^{(2)}`$; $`y^{(2)}_t`$ from $`\tau_2`$ and from $`r^{(1)}_2`$; $`K^{(2)}_t`$ from $`\tau_2`$; $`K^{(3)}`$ from $`\tau_3`$; $`K^{(1)}_t`$ from $`r^{(1)}_1`$ (37 instances).
+4. Lookup-stack reductions, one per stack $`j`$ with columns $`f_{j,c}`$ (stored) and the stack claim $`(\pi_j,g_j)`$ of Section 7.0, degree 2:
+```math
+g_j+2^{15}\sum_{c\ge{\rm cols}_j}\mathrm{eq}(\pi_{j,\rm top},c)=\sum_x\mathrm{eq}(\pi_{j,\rm low},x)\sum_{c\lt{\rm cols}_j}\mathrm{eq}(\pi_{j,\rm top},c)\,f_{j,c}(x),
+\qquad(7.7)
+```
+the left side removing the public padding slots (stored $`-2^{15}`$).
 
-Terminal: the 67 committed values at $`r^{(3)}`$ and its suffixes; the verifier forms (4.1), $`w_1'`$, $`w_A(r^{(3)})`$, the equality factors and $`Z(Z+1)`$ per link, and checks the batched terminal.
+Terminal: the 31 committed values at $`r^{(3)}`$ and its suffixes; the verifier forms (4.1), $`w_1'`$, $`w_A(r^{(3)})`$, the equality factors (of $`r^{(1)},r^{(2)},\tau`$ and the four $`\pi_{j,\rm low}`$) and $`Z(Z+1)`$ per link, and checks the batched terminal.
 
-One Akita opening authenticates the 67 evaluations at the four group points. No committed polynomial carries a claim at a second point.
+One Akita opening authenticates the 31 evaluations at the five group points of $`r^{(3)}`$ and the 7 multiplicity-digit claims at $`\pi_m`$. No committed polynomial carries a claim at a second point.
 
 ### 7.6 Public weight tables
 
@@ -344,11 +350,11 @@ $`\mathbb F_p`$ side, over the integers (Section 5 for $`y^{(1)}`$, committed $`
 \sum_{t,\rho_2}M_3[\rho_3,(t,\rho_2)]\,y^{(2)}_t=Y_\sigma[\rho_3]+2\kappa^{(3)},
 \qquad(9.2)
 ```
-with $`y^{(1)}_t,y^{(2)}_t,b_t\in\{0,1\}`$ enforced by (7.1), `bool_y2`, `bool_b`, and every carry in $`[0,1023]`$ or $`[0,255]`$ by its digits (Section 4.3). Each $`\mathbb F_p`$ equation then has both sides below $`2^{12}`$, so it holds over $`\mathbb Z`$ and the Boolean left-hand quantity is the GF(2) parity. Without the carry ranges the identities would be vacuous: 2 is invertible modulo $`p`$, so an unbounded carry fits either parity. Hence the $`\mathbb F_p`$ side proves $`Y_\sigma=M_3M_2M_1\,b`$ over GF(2) per segment and the Flock side the same for $`b'`$. The row weight of $`M_1,M_2`$ is at most 2,047 and of $`M_3`$ at most 511 with probability above $`1-2^{-400}`$; the honest prover MUST abort if a row weight exceeds 2,047 (levels 1, 2) or 511 (level 3), the carry ranges of Section 4.3 (completeness only).
+with $`y^{(1)}_t,y^{(2)}_t,b_t\in\{0,1\}`$ enforced by (7.1), `bool_y2`, `bool_b`, and every carry in $`[0,2^{16})`$ by the lookup into $`T_{16}`$ (Section 4.3). Each $`\mathbb F_p`$ equation then has both sides below $`2^{18}`$ (left at most 2,047 or 3,066 by the row weights, right at most $`1+2^{17}`$), so it holds over $`\mathbb Z`$ and the Boolean left-hand quantity is the GF(2) parity (any carry range below $`(p-W_t)/2`$ would do, `docs/bridge.md` Section 4). Without the carry ranges the identities would be vacuous: 2 is invertible modulo $`p`$, so an unbounded carry fits either parity. Hence the $`\mathbb F_p`$ side proves $`Y_\sigma=M_3M_2M_1\,b`$ over GF(2) per segment and the Flock side the same for $`b'`$. The row weight of $`M_1,M_2`$ is at most 2,047 and of $`M_3`$ at most 511 with probability above $`1-2^{-400}`$; the honest prover MUST abort if a row weight exceeds 2,047 (levels 1, 2) or 511 (level 3), the carry ranges of Section 4.3 (completeness only).
 
 ### 9.3 Stage placement and costs
 
-Levels 2 and 3 and all Booleanity checks are in stage 1, the level-1 definition in stage 2, the carry range checks in stages 1 to 3 with the other digits, and the evaluation reductions in stage 3 (Section 7). Costs at $`N=2^{15}`$: committed carry digits $`9{,}437{,}184+589{,}824+32{,}768`$ and parities $`196{,}608`$ (1.3% of the algebraic tables); GF(2) nonzeros $`\approx2.9\times10^9`$ (also the prover's bit operations for parities and carries); final vectors $`512S=2{,}048`$ bytes; verifier Section 7.6.
+Levels 2 and 3 and all Booleanity checks are in stage 1, the level-1 definition in stage 2, the carry range checks in the lookup (event 7), and the evaluation reductions in stage 3 (Section 7). Costs at $`N=2^{15}`$: committed carries $`3{,}145{,}728+196{,}608+16{,}384`$ (one column per carry) and parities $`196{,}608`$ (0.9% of the committed cells); GF(2) nonzeros $`\approx2.9\times10^9`$ (also the prover's bit operations for parities and carries); final vectors $`512S=2{,}048`$ bytes; verifier Section 7.6.
 
 ### 9.4 Soundness
 
@@ -365,31 +371,32 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 
 | # | Event | Payload |
 | --- | ---: | --- |
-| 0 | instance | wire version LE16, parameter-set byte 0x44, feature flags (H / H-exact / S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (Section 4.3), the four group descriptors with catalog row ids, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$ |
-| 1 | absorb | round-1 Akita commitment $`G_{\rm main}`$ (native encoding) |
+| 0 | instance | wire version LE16 (1), parameter-set byte 0x44, feature flags (H / H-exact / S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (1, Section 4.3), the six group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks) |
+| 1 | absorb | round-1 Akita commitments $`G_{\rm main16}`$, $`G_{\rm main4}`$ (native encoding) |
 | 2 | absorb | $`S`$ Flock commitments (Ligerito roots or LaBinius commitments), segment order |
 | 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling |
-| 4 | absorb | round-2 Akita commitments $`G_1,G_2,G_3`$ in group order |
+| 4 | absorb | round-2 Akita commitments $`G_1,G_2,G_3,G_m`$ in group order |
 | 5 | challenge | $`\mathsf{fs}_\sigma`$: 32 bytes per segment, the challenger seed of the Flock sub-proof $`\sigma`$ (its challenger is initialized with $`\mathsf{fs}_\sigma`$) |
 | 6 | absorb | $`Y_0,\ldots,Y_{S-1}`$ (512 bytes each), then the $`S`$ Flock proof byte strings, each framed by `B()` |
-| 7 | challenge | $`\tau\in K^{d_{\rm main}}`$ |
-| 8 | absorb | 26 pre-stage claims (7.2) |
-| 9 | challenge | $`\gamma^{(1)}\in K^{66}`$; then the stage-1 rounds of 4 elements each and the 98 stage-1 claims |
-| 10 | absorb/challenge | 18 claims $`\kappa^{(1)}_{t,k}(r^{(1)}_1)`$; $`\gamma^{(2)}\in K^{101}`$; stage-2 rounds of 5 elements; 61 stage-2 claims |
-| 11 | challenge | $`\gamma^{(3)}\in K^{118}`$; stage-3 rounds of 3 elements; the 67 opening claims |
-| 12 | PCS | Akita native stream seeded by the 32-byte PIOP session digest, as Aerie 12.3 |
+| 7 | challenge/absorb | the lookup (7.0): $`X_1,X_2\in K`$; the layer-1 values (4 per tree); $`\mu_1`$; per session $`s=2,\ldots,D`$: $`\gamma`$ (2 per active tree), $`s-1`$ rounds of 3 elements and their challenges, the terminals (4 per continuing tree), the leaves (2 per ending stack or table), $`\mu_s`$; then the 7 claims $`m_k(\pi_m)`$ |
+| 8 | challenge | $`\tau\in K^{d_{\rm main}}`$ |
+| 9 | absorb | 13 pre-stage claims (7.2) |
+| 10 | challenge | $`\gamma^{(1)}\in K^{26}`$; then the stage-1 rounds of 4 elements each and the 18 stage-1 claims |
+| 11 | absorb/challenge | 6 claims $`K^{(1)}_t(r^{(1)}_1)`$; $`\gamma^{(2)}\in K^{8}`$; stage-2 rounds of 5 elements; 8 stage-2 claims |
+| 12 | challenge | $`\gamma^{(3)}\in K^{44}`$; stage-3 rounds of 3 elements; the 31 stage-3 opening claims |
+| 13 | PCS | Akita native stream seeded by the 32-byte PIOP session digest, as Aerie 12.3 |
 
-Every challenge is drawn after the previous absorb. The bridge seed follows the round-1 and Flock commitments (events 1, 2), so $`b`$ and $`b'`$ are fixed before $`\mathsf{sd}`$, and precedes the round-2 commitments (event 4), whose carries and parities are functions of $`\mathsf{sd}`$, and every sum-check challenge. Proof layout: header (version, flags, $`N`$), the $`32N`$ bytes of $`\tilde c_i`$, then events 1, 2, 4, 6, 8 to 11 payloads in order, then the Akita opening. Size at $`N=2^{15}`$: $`32N`$ bytes of hashes; PIOP $`\approx(4+5+3)\cdot25\cdot16+270\cdot16\approx9.1`$ KB; Akita opening about 65 KB (Aerie's ledger scaled, estimate); Flock sub-proofs $`4\times0.5`$ MB (dominant until wrapped or replaced by LaBinius).
+Every challenge is drawn after the previous absorb. The bridge seed follows the round-1 and Flock commitments (events 1, 2), so $`b`$ and $`b'`$ are fixed before $`\mathsf{sd}`$, and precedes the round-2 commitments (event 4), whose carries, parities and multiplicities are functions of $`\mathsf{sd}`$, and every sum-check challenge. The lookup challenges $`X_1,X_2`$ follow every commitment, so every looked-up cell and $`m`$ are fixed before them. Proof layout: header (version 1, flags, $`N`$), the $`32N`$ bytes of $`\tilde c_i`$, then events 1, 2, 4, 6, 7, 9 to 12 payloads in order, then the Akita opening. Size at $`N=2^{15}`$: $`32N`$ bytes of hashes; lookup 1,799 elements plus 7 digit claims, 28,896 B (`docs/lookup.md` Section 1); stages $`(4+5+3)\cdot25\cdot16+76\cdot16=6{,}016`$ B; Akita opening about 65 KB (planner estimate 65,282 B); Flock sub-proofs $`4\times0.5`$ MB (dominant until wrapped or replaced by LaBinius).
 
 ## 11. Verifier algorithm and cost
 
 1. Parse the header; reject an unknown version, $`N\gt2^{15}`$, or a group descriptor, digit layout or catalog row other than those of Section 4. Compute $`N^\star`$, $`S`$, the domains.
 2. Per live record: `pkDecode`, $`\mathsf{tr}_i,\mu_i,c_i,T_i`$ (Section 2); keep $`\mu_i`$ and $`c_i`$. Bind the public records.
 3. Replay events 0 to 6: absorb the round-1 and Flock commitments, derive $`\mathsf{sd}`$ and $`M_1,M_2,M_3`$, absorb the round-2 commitments, derive $`\mathsf{fs}_\sigma`$; verify each Flock sub-proof against its public inputs ($`\mu_i`$, $`\tilde c_i`$, $`Y_\sigma`$) and the circuit digest recomputed from $`\mathsf{sd}`$.
-4. Sample $`\tau`$; compute $`Y(\tau_3)`$; absorb the pre-stage claims; compute $`c_2,c_3`$ for $`(\tau_2,\tau_3)`$.
+4. Verify the lookup (7.0): sample $`X_1,X_2`$, check both root identities and every session, check $`\sum_k16^km_k(\pi_m)=m(\pi_m)`$; keep the stack claims for (7.7). Sample $`\tau`$; compute $`Y(\tau_3)`$; absorb the pre-stage claims; compute $`c_2,c_3`$ for $`(\tau_2,\tau_3)`$.
 5. Verify stage 1; at the terminal evaluate $`w_2(r^{(1)}_1)`$, $`w_{3,t}(r^{(1)}_2)`$ and the equality factors. Compute $`c_1`$ for $`r^{(1)}_1`$.
 6. Verify stage 2; at the terminal evaluate $`w_1(r^{(2)})`$, $`Q_b`$ on the claimed $`P_Z`$ values and the equality factors. Stream $`\hat A_i`$ (expand or load from cache), inverse-NTT, and accumulate $`T(r^{(2)})`$ and $`w_A(r^{(3)})`$ in one pass over $`A_i`$ by absorbing the stage-3 rounds first and deferring the terminal checks.
-7. Verify stage 3: form $`z,u,v,w_1'`$ and the carries at $`r^{(3)}`$ by (4.1), check the batched terminal of (7.6), the links and the reductions. Verify the Akita opening of the 67 claims at the four points. Accept only if every check passes.
+7. Verify stage 3: form $`z,u,v,w_1'`$ and the carries at $`r^{(3)}`$ by (4.1), check the batched terminal of (7.6), the links, the reductions and the stack reductions (7.7). Verify the Akita opening of the 38 claims at the six group points. Accept only if every check passes.
 
 Cost at $`N=2^{15}`$, single core (misc memo 2.4, estimates): Keccak-f $`92N`$ (0.8 s) uncached, $`2N`$ cached; inverse NTTs $`16N`$ (0.5 s) uncached; $`T_i`$ (0.1 s); $`T(r^{(2)})`$ and $`w_A(r^{(3)})`$ $`5N\cdot1024`$ multiply-adds (0.2 s); bridge weights $`\approx1.6\times10^7`$ $`K`$-additions; $`S`$ Flock verifications (40 ms); PIOP rounds and the Akita opening (tens of ms). Totals about 1.7 s uncached and 0.4 s with cached $`A_i,\mathsf{tr}_i`$; both are reported.
 
@@ -397,24 +404,28 @@ Cost at $`N=2^{15}`$, single core (misc memo 2.4, estimates): Keccak-f $`92N`$ (
 
 ### 12.1 Knowledge soundness ledger
 
-Errors are per transcript, union-bounded, before grinding; $`|K|=p^2\approx2^{128}`$.
+Errors are per transcript, union-bounded, before grinding; $`|K|=p^2\approx2^{128}`$. $`L`$ is the number of looked-up cells (padding slots included), $`L=4\cdot2^{d_{\rm main}}+8\cdot2^{d_1}+8\cdot2^{d_2}+2^{d_3}`$ (138,690,560 at $`N=2^{15}`$, 4,395,008 at $`N=1{,}024`$), $`M=2^{16}`$, $`D=d_{\rm main}+2`$ the deepest fraction tree.
 
-| Component | Term |
-| --- | --- |
-| Stage sum-checks, degrees (4, 5, 3) | $`12\,d_{\rm main}/|K|`$ |
-| Zero-checks at $`\tau`$ (19 Booleanity and range instances, 40 `b16_prod`) | $`\le59\,d_{\rm main}/|K|`$ |
-| Range leaves at $`r^{(1)}`$ (95) and links at $`r^{(2)}`$ (55) | $`\le150\,d_{\rm main}/|K|`$ |
-| Linear identities at a point: levels 2, 3 at $`\tau`$; level 1 at $`r^{(1)}_1`$; ring at $`r^{(2)}`$; 62 reductions | $`\le(13+1+6+1+62)\,d_{\rm main}/|K|`$ |
-| Batching coefficients $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ | $`3/|K|`$ |
-| Bridge (9.3) | $`2^{-144.6}`$ |
-| Akita extraction, binding, catalog terms | by Akita's ledger for the four-group catalog |
-| Flock knowledge soundness, per segment | by profile (`Fast`: 128-bit work-normalized; LaBinius: 128-bit) |
+| Component | Term | at $`N=2^{15}`$ ($`d_{\rm main}=25`$) |
+| --- | --- | ---: |
+| LogUp identity, two independent challenges $`X_1,X_2`$ (Lemma below) | $`\bigl((L+M-1)/|K|\bigr)^2`$ | $`2^{-201.9}`$ |
+| GKR sessions of the lookup: rounds $`3(s-1)`$, one $`\gamma`$ vector and one merge $`\mu_s`$ per session $`s=2..D`$, and $`\mu_1`$ | $`\bigl(3D(D-1)/2+2(D-1)+1\bigr)/|K|`$ | $`1{,}106/|K|`$ |
+| Stage sum-checks, degrees (4, 5, 3) | $`12\,d_{\rm main}/|K|`$ | $`300/|K|`$ |
+| Zero-checks at $`\tau`$ (19 Booleanity and range instances) | $`\le19\,d_{\rm main}/|K|`$ | $`475/|K|`$ |
+| Range leaves at $`r^{(1)}`$ (2) and links at $`r^{(2)}`$ (2) | $`\le4\,d_{\rm main}/|K|`$ | $`100/|K|`$ |
+| Linear identities at a point: levels 2, 3 at $`\tau`$; level 1 at $`r^{(1)}_1`$; ring at $`r^{(2)}`$; 37 reductions; 4 stack reductions (7.7) | $`\le(13+1+6+1+41)\,d_{\rm main}/|K|`$ | $`1{,}550/|K|`$ |
+| Batching coefficients $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ | $`3/|K|`$ | $`3/|K|`$ |
+| Bridge (9.3) | $`2^{-144.6}`$ | $`2^{-144.6}`$ |
+| Akita extraction, binding, catalog terms | by Akita's ledger for the six-group catalog rows | |
+| Flock knowledge soundness, per segment | by profile (`Fast`: 128-bit work-normalized; LaBinius: 128-bit) | |
 
-At $`d_{\rm main}=25`$ the field terms sum to at most $`7{,}603/|K|\lt2^{-115}`$; grinding every site to Aerie's schedule brings each to $`2^{-128}`$. Point reuse ($`\tau`$ for all zero-checks, $`r^{(1)}`$ for the leaves, $`r^{(2)}`$ for the links and the ring identity) is sound because every tested table is committed before the point is sampled (Aerie 9.6).
+**Lemma (lookup identity).** Let the committed looked-up values be $`f_1,\ldots,f_L\in\mathbb F_p`$ ($`f=S+2^{15}`$ for a stored cell $`S`$; the padding slots are public, $`f=0`$) and $`m\in\mathbb F_p^{T_{16}}`$, all fixed by the commitments before $`X_1,X_2`$. If some $`f_i\notin T_{16}`$, then $`R(X)=\sum_i1/(X-f_i)-\sum_{t\in T_{16}}m(t)/(X-t)\ne0`$: the coefficient of $`1/(X-f_i)`$ is a count in $`[1,L]`$, nonzero in $`\mathbb F_p`$ since $`p\gt L`$ (LogUp Lemma 5, any $`m`$). Its numerator $`N`$ over $`\prod_{a\in S}(X-a)`$, $`S=\{f_i\}\cup T_{16}`$, is nonzero of degree at most $`L+M-1`$, and a challenge passes the root check (all root denominators nonzero, so $`X\notin S`$) only if $`N(X)=0`$. For independent uniform $`X_1,X_2`$, $`\Pr[N(X_1)=N(X_2)=0]\le((L+M-1)/|K|)^2`$. Otherwise some tree set's true root violates its identity, the prover's layer-1 values for it are false, and the batched GKR sessions accept a false claim only with the GKR term (Proposition 1 of LogUp-GKR with independent coefficients per claim; the second tree set adds claims, not sessions). With one challenge the identity term would be $`2^{-101.0}`$ at $`N=2^{15}`$ ($`2^{-105.9}`$ at 1,024), which no remedy cheaper than the second challenge brings to $`2^{-128}`$ (`docs/lookup.md` Section 2.1: a 28-bit work nonce costs about 7 times the second challenge and exceeds Akita's 25-bit cap; an $`\mathbb F_{p^4}`$ challenge triples the tree arithmetic).
+
+At $`d_{\rm main}=25`$ the field terms other than the identity sum to at most $`3{,}534/|K|\lt2^{-116.2}`$ (was $`7{,}603/|K|`$ with the base-16 digits); grinding every site to Aerie's schedule brings each to $`2^{-128}`$ (not implemented, `docs/deviations.md` P3). The identity term is $`2^{-201.9}`$ without grinding. Point reuse ($`\tau`$ for all zero-checks, $`r^{(1)}`$ for the leaves, $`r^{(2)}`$ for the links and the ring identity, the stack points $`\pi_j`$ for their reductions) is sound because every tested table is committed before the point is sampled (Aerie 9.6).
 
 ### 12.2 Extraction
 
-From an accepting transcript the Akita extractor yields the 67 committed tables as $`\mathbb F_p`$ values with no range guarantee (Akita Remark 10.41). The PIOP ledger then gives, except with the field terms above: every digit in its alphabet (`b16_prod`, leaves, links), hence $`z,u,v`$ and all carries in the ranges of Section 4.3 by (4.1), which is (3.2) with $`(\bar B_z,\bar B_u)=(2^{17},2^{18})`$; $`b_t,y^{(2)}_t\in\{0,1\}`$ and (3.4) on every live position; (9.2) over $`\mathbb Z`$; $`\Delta=0`$ in $`\mathbb F_p`$, hence (3.1) over $`\mathbb Z`$ by (6.1). The Flock extractor yields bits $`b'`$ with $`\tilde c_i=\mathrm{SHAKE256}(\mu_i\Vert b'_i)`$ and $`Y_\sigma=M_3M_2M_1b'`$; the bridge gives $`b=b'`$ except with (9.3). Hence every live record satisfies $`\mathrm H(\bar B_z,\bar B_u)`$. Domain separation between the Keccak argument's SHAKE256 and the public-record binding rests on the distinct cSHAKE customizations and on $`\mu_i`$ being a hash output (random-oracle modeling as in Aerie 2.3).
+From an accepting transcript the Akita extractor yields the 38 committed tables as $`\mathbb F_p`$ values with no range guarantee (Akita Remark 10.41). The PIOP ledger then gives, except with the terms above: every looked-up cell is an integer entry of $`T_{16}`$, i.e. $`Z_{\rm lo},U_{\rm lo},V_{\rm lo},V_{\rm hi},K^{(1)}_t,K^{(2)}_t,K^{(3)}\in[-2^{15},2^{15})`$ (the lookup), and $`Z_{\rm hi}\in[-2,1]`$, $`U_{\rm hi}\in[-4,3]`$ (leaves, links); hence by (4.1) $`z\in[-2^{17},2^{17})`$, $`u\in[-2^{18},2^{18})`$, $`v\in[-2^{31},2^{31})`$ and every carry in $`[0,2^{16})`$, which is (3.2) with $`(\bar B_z,\bar B_u)=(2^{17},2^{18})`$; $`b_t,y^{(2)}_t\in\{0,1\}`$ and (3.4) on every live position; (9.2) over $`\mathbb Z`$; $`\Delta=0`$ in $`\mathbb F_p`$, hence (3.1) over $`\mathbb Z`$ by (6.1). The multiplicities are unconstrained and need not be. The Flock extractor yields bits $`b'`$ with $`\tilde c_i=\mathrm{SHAKE256}(\mu_i\Vert b'_i)`$ and $`Y_\sigma=M_3M_2M_1b'`$; the bridge gives $`b=b'`$ except with (9.3). Hence every live record satisfies $`\mathrm H(\bar B_z,\bar B_u)`$. Domain separation between the Keccak argument's SHAKE256 and the public-record binding rests on the distinct cSHAKE customizations and on $`\mu_i`$ being a hash output (random-oracle modeling as in Aerie 2.3).
 
 ### 12.3 Aggregate unforgeability
 
@@ -424,13 +435,14 @@ Game: the adversary gets honest keys and a signing oracle and outputs a verifyin
 
 Unit tests (per crate, `cargo test --release` where heavy; batch sizes at most 1K signatures and $`2^{14}`$ permutations on the development machine):
 
-- Parameters: every constant of Section 1 recomputed from FIPS 204 values; (3.4) by enumeration over $`[0,64)`$; the UseHint residual maximum 190,465 by enumeration over $`\mathbb Z_q\times\{0,1\}`$; $`B_v`$ and (3.4'), (6.1) with exact integer arithmetic; the digit bijections (4.1) and the exactness of $`Q_4,Q_8,Q_{16}`$ by enumeration (`spec_checks.py` items 8 to 10).
+- Parameters: every constant of Section 1 recomputed from FIPS 204 values; (3.4) by enumeration over $`[0,64)`$; the UseHint residual maximum 190,465 by enumeration over $`\mathbb Z_q\times\{0,1\}`$; $`B_v`$ and (3.4'), (6.1) with exact integer arithmetic; the digit bijections (4.1) and the exactness of $`Q_4,Q_8`$ by enumeration (`spec_checks.py` items 8 to 10); the L16 layouts (4.1) at their range boundaries (`manifest::tests`).
+- Lookup (`agg-piop` `lookup`, `tests/stages.rs`): fraction-tree roots against direct sums; honest layouts at one and two challenges; the claims against the extensions of the stacked lanes, the columns and $`m`$; every out-of-table cell (above $`2^{16}`$, negative, a carry, a padding slot), a wrong multiplicity, a tampered layer-1 value, round message, terminal or leaf, swapped digit claims and a value valid only for another range rejected.
 - Witness (`agg-witness`): against a FIPS 204 reference implementation on random and edge-case signatures (Decompose edge residue $`-\gamma_2`$, hints at both signs, $`\lVert z\rVert_\infty=B_z`$): native verify, derived $`(z,u,v,b)`$ and their digits satisfying (3.1) to (3.3) and (4.1) over $`\mathbb Z`$, $`(Az)`$ by CRT against schoolbook, padded rows at the canonical digits of zero.
 - Identities, one positive and one negative test each: (7.1) to (7.6), `bool_y2`, `bool_b`, every leaf, link and reduction; the negative test flips one witness value (a non-Boolean bit, $`w_1'=44`$, a digit outside its alphabet, a carry of the wrong parity, $`v=q^{-1}\Delta_0`$ for a wrong $`z`$, a changed $`Y_\sigma`$ bit) and MUST fail at the stated stage.
 - Weights: $`w_A`$ against a direct negacyclic reference at random $`K`$ points for every $`(\rho,s)`$; $`\Lambda`$ trie against (7.8); $`w_1,w_2,w_3`$ against dense matrix transposes at $`J`$ reduced to $`2^{10}`$; zero weights on padded positions.
 - Bridge (`agg-bridge`): seed derivation determinism and distinct column streams; column weight exactly $`k_t`$; parities and carries against a GF(2) reference; (9.2) lifting with carries at the range boundary; the composite walker against $`M_3M_2M_1`$ materialized at $`J`$ reduced to $`2^{10}`$; the small-parameter error $`1/\binom{m}{k}`$ measured empirically at $`(m,k)=(64,3)`$ against weight-2 differences.
 - Keccak (`agg-keccak`): sponge chain against a SHAKE256 reference for 1, 7 and 9 blocks; bit order, public $`\mu`$, fixed padding, published $`\tilde c`$; the bridge slot at $`k_{\log}`$ 16 and 20 (8 and 128 records) proves and verifies and rejects a flipped $`Y_\sigma`$ bit or a bit changed in one copy only; a sub-batch of $`2^{14}`$ permutations proves and verifies; $`k_{\log}=26`$ is measured on the cloud machine.
-- PCS config (`agg-pcs-config`): the width-4 preset admits every digit alphabet and the padded digits; catalog rows exist for the four-group layouts at $`d_{\rm sig}\in[3,15]`$; a two-round commit ($`G_{\rm main}`$, then $`G_1,G_2,G_3`$) opens in one batch and verifies.
+- PCS config (`agg-pcs-config`): the width-4 preset admits the small digits, the bits, the multiplicity digits and the padded digits, the width-16 preset certifies exactly $`[-2^{15},2^{15})`$; catalog rows exist for the six-group layouts at $`d_{\rm sig}\in[3,15]`$ in both families; a two-round commit ($`G_{\rm main16},G_{\rm main4}`$, then $`G_1,G_2,G_3,G_m`$) opens in one batch and verifies.
 - Transcript: event order, a reordered or truncated proof is rejected, pinned proof digests for $`N\in\{8,256\}`$.
 
 End-to-end: honest aggregates at $`N=256`$ and $`N=1{,}024`$ verify; each of the negative mutations above, applied to one record, is rejected; a wrong $`\tilde c_i`$ is rejected; cached and uncached verifier paths agree.
@@ -440,8 +452,8 @@ End-to-end: honest aggregates at $`N=256`$ and $`N=1{,}024`$ verify; each of the
 | Crate | Content | Milestone |
 | --- | --- | --- |
 | `agg-witness` | ML-DSA-44 native verify, key expansion, $`(z,u,v,b)`$ derivation, CRT product, table builders, padding | M1 |
-| `agg-pcs-config` | Aerie's `Fp64SignedWidth4` preset, catalogs for the four-group layouts at $`d_{\rm sig}\in[3,15]`$, two-round commit driver, work plan | M1 (long lead, start first) |
-| `agg-piop` | stages 1 to 3 with the range leaves and links, weight tables, verifier, Akita opening of the four groups | M2 |
+| `agg-pcs-config` | the width-4 (Aerie's `Fp64SignedWidth4` parameters) and width-16 presets, catalogs for the six-group layouts at $`d_{\rm sig}\in[3,15]`$, two-round commit driver, work plan | M1 (long lead, start first) |
+| `agg-piop` | the lookup into $`T_{16}`$, stages 1 to 3 with the two leaves and links, weight tables, verifier, Akita opening of the six groups | M2 |
 | `agg-bridge` | seed to matrices, $`\mathbb F_p`$ parity and carry-digit tables, GF(2) composite walker, soundness constants | M2 |
 | `agg-keccak` | Flock HEAD Keccak gate port, sponge union circuit, bridge slot type with the factored `LincheckCircuit`, segment driver | M3 |
 | `agg-cli` | prove/verify binaries, wire format, record binding, caches | M2 (mode B: bits public, no Keccak), M3 (mode A) |
@@ -461,7 +473,7 @@ M1: witness, presets, catalogs, unit tests. M2: algebraic PIOP end to end with t
 2. **Ring identity tested at one point** (7.5). With the quotient committed, (3.1) is linear in multilinear tables; the stage-3 instance (7.6) at $`r^{(2)}`$ suffices, so $`r^{(2)}`$ doubles as Aerie's $`r_\Pi`$ and the weight pass runs between stages 2 and 3.
 3. **Ranges by PIOP digit proofs, not by Akita** (4.3). The first draft read Akita's certified fold alphabets (Remark 10.24) as a source range guarantee; there is none (Remark 10.41). Every range is now a digit decomposition with Aerie's leaf predicates, which also makes $`(2^{17},2^{18})`$ exact.
 4. **Segments** (Section 1): one bridge chain per $`2^{13}`$-signature segment, aligned with the Keccak sub-batches, since a GF(2) sub-proof constrains only its own bits; level 2 is padded to $`2^{19}`$ positions.
-5. **Carry ranges by digits** (9.2). Without a carry bound the parity identities are vacuous (2 is invertible modulo $`p`$); each carry is now three digit columns (two at level 3), since the memo's lookup is unavailable (risks R5).
+5. **Carry ranges by digits** (9.2). Without a carry bound the parity identities are vacuous (2 is invertible modulo $`p`$); each carry is now three digit columns (two at level 3), since the memo's lookup is unavailable (risks R5). Revision 3: one 16-bit column per carry, looked up in $`T_{16}`$ (LogUp-GKR needs no sparse commitment, so R5 does not apply).
 6. **Six lanes**: six bit polynomials rather than one table with a padded lane index (avoids 25% padding).
 7. **Booleans in the width-4 profile** (4.1): one inner digit either way.
 8. **Bit-range identity** as one degree-4 instance (7.4).
@@ -471,28 +483,9 @@ M1: witness, presets, catalogs, unit tests. M2: algebraic PIOP end to end with t
 12. **Two Akita commitment rounds** (Section 10): round 1 before $`\mathsf{sd}`$, round 2 (the seed-dependent carries and parities) after it, under one contract (Akita 4.6).
 13. **Composite GF(2) rows** (Section 8): Flock's lincheck is per block and its witness precedes the statement binding, so one bridge slot per segment proves $`M_3M_2M_1b'=Y_\sigma`$ directly.
 
-## Appendix C. Lookup range layout L16 (proposal, not normative)
+## Appendix C. Lookup range layout L16 (adopted)
 
-Status: PROPOSAL pending integration and a PCS catalog; nothing in Sections 1 to 14 changes until it is adopted. Design, soundness, costs and the standalone prototype (`crates/agg-piop/src/lookup.rs`): `docs/lookup.md`.
-
-**Layout.** Per position 12 committed columns instead of 23: $`z+2^{17}=z_{\rm lo}+2^{16}z_{\rm hi}`$, $`u+2^{18}=u_{\rm lo}+2^{16}u_{\rm hi}`$, $`v+2^{31}=v_{\rm lo}+2^{16}v_{\rm hi}`$ and $`b_0,\ldots,b_5`$. The four 16-bit values and every bridge carry ($`\kappa^{(1)}_t,\kappa^{(2)}_t,\kappa^{(3)}`$, one column each) are looked up in the single table $`T_{16}=[0,2^{16})`$; $`z_{\rm hi}\in[0,4)`$ and $`u_{\rm hi}\in[0,8)`$ keep the base-4 and base-8 leaves and links of Section 4.3. Stored values are balanced ($`Z_{\rm lo}=z_{\rm lo}-2^{15}`$ and likewise for $`u_{\rm lo},v_{\rm lo},v_{\rm hi}`$; $`Z_{\rm hi}=z_{\rm hi}-2`$, $`U_{\rm hi}=u_{\rm hi}-4`$), so (4.1) reads $`X=X_{\rm lo}+2^{16}X_{\rm hi}+2^{15}`$ for $`X\in\{z,u,v\}`$. Proven ranges: $`z\in[-2^{17},2^{17})`$, $`u\in[-2^{18},2^{18})`$ (relation $`\mathrm H(2^{17},2^{18})`$ unchanged), $`v\in[-2^{31},2^{31})`$ (enough for (6.1): $`|\Delta^{\mathbb Z}|\lt2^{54.1}\lt p/2`$), carries in $`[0,2^{16})`$ (enough for (9.2), `docs/bridge.md` Section 4). Committed elements per signature at $`N=2^{15}`$: 12,288 main, 96 on $`D_1`$, 12 on $`D_2`$, 0.5 on $`D_3`$, 14 multiplicity digits: 12,410.5 (was 23,865).
-
-**Argument.** LogUp (ePrint 2022/1530, Lemma 5) with the GKR fractional sum-check (ePrint 2023/1284): after the commitments of all looked-up columns and of the multiplicity column $`m`$ of $`T_{16}`$ (seven balanced base-16 digit polynomials, width 4, no alphabet check), the verifier samples $`X_1,X_2\in K`$ and checks $`\sum_i1/(X_j-g_i)=\sum_tm(t)/(X_j-t)`$ for $`j=1,2`$ through top-aligned fraction trees: one batched degree-3 sum-check per layer, $`\sum_{s=2}^{D}(s-1)`$ rounds with $`D=d_{\rm main}+2`$. Final claims: one evaluation of each stacked lane, reduced to $`r^{(3)}`$ by four new stage-3 instances, and $`m`$ at its own point (its own Akita group). The lookup sessions run as a new stage before stage 1.
-
-**Ledger rows (Section 12.1), at $`d_{\rm main}=25`$:**
-
-| Component | Term |
-| --- | --- |
-| LogUp identity, two independent challenges | $`\bigl((L+2^{16}-1)/(|K|-2^{16})\bigr)^2\approx2^{-201.9}`$, $`L=138{,}690{,}560`$ looked-up cells |
-| (one challenge, for comparison) | $`\approx2^{-101.0}`$; needs a 28-bit work nonce, above Akita's 25-bit cap |
-| GKR sessions (rounds, batching, merges) | $`(3D(D-1)/2+2(D-1)+1)/|K|=1{,}106/|K|`$ |
-| Zero-checks at $`\tau`$ | $`19\,d_{\rm main}/|K|`$ (the 40 `b16_prod` removed) |
-| Range leaves and links | $`4\,d_{\rm main}/|K|`$ (2 leaves, 2 links) |
-| Linear identities | $`(13+1+6+1+41)\,d_{\rm main}/|K|`$ (25 carry-digit reductions removed, 4 lookup reductions added) |
-
-The field terms then sum to $`3{,}534/|K|\lt2^{-116.2}`$ (was $`7{,}603/|K|`$). Extraction: every looked-up cell is an entry of $`T_{16}`$ as an integer, and (4.1) gives the ranges above. The multiplicities need no range (Lemma 5 holds for any $`m\in\mathbb F_p`$ when $`p\gt L`$).
-
-**Open before adoption:** a signed width-16 Akita preset and catalog rows for the split groups (width-16 and width-4 groups on the main domain, $`G_m`$ on $`2^{16}`$ cells); the choice between two challenges and a work nonce; the measured end-to-end cost (`docs/lookup.md` Section 4).
+The proposal of this appendix (revision 2) is normative since revision 3: layout in Sections 4.1 and 4.3, the lookup in Section 7.0, the stages in Sections 7.3 to 7.5, events in Section 10, the ledger in Section 12.1 (two independent challenges), extraction in Section 12.2. Design, soundness, the comparison of remedies for the identity term, costs and the module: `docs/lookup.md`; departures: `docs/deviations.md` L1 to L7 and D2.
 
 ## Review responses (2026-10-24)
 

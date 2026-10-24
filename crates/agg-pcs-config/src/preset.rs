@@ -1,4 +1,6 @@
-//! The width-4 Akita commitment preset of every committed table (spec Section 4.1).
+//! The two Akita commitment presets of the committed tables (spec Section 4.1): signed
+//! width 4 (bits, small digits, multiplicity digits) and signed width 16 (the 16-bit lookup
+//! columns and the carries).
 //!
 //! [`AggFp64SignedWidth4`] repeats Aerie's `Fp64SignedWidth4` parameters
 //! exactly: fp64 field `Prime64Offset59` with `Ext2` challenges, SIS profile
@@ -124,6 +126,101 @@ impl CommitmentConfig for AggFp64SignedWidth4 {
 
     fn schedule_family_name() -> &'static str {
         WIDTH4_FAMILY
+    }
+}
+
+/// Signed commit bound of the width-16 preset, in bits (`[-2^15, 2^15 - 1]`).
+pub const WIDTH16_LOG_COMMIT_BOUND: u32 = 16;
+/// Inner (A/source) log-basis range of the width-16 preset (see `docs/pcs-config.md`
+/// Section 2: the planner's choice within it is recorded per catalog row).
+pub const WIDTH16_INNER_BASIS_RANGE: (u32, u32) = (16, 16);
+/// Schedule family name of the width-16 preset.
+pub const WIDTH16_FAMILY: &str = "agg_mldsa_fp64_signed_width16";
+
+/// Fp64 preset for signed width-16 sources in `[-2^15, 2^15 - 1]`, with its own catalog:
+/// the balanced 16-bit lookup columns `Z_lo, U_lo, V_lo, V_hi`, the carries and the
+/// level-2 parities (`docs/lookup.md` Section 1). Every parameter except the commit bound,
+/// the inner-basis range and the family name is the width-4 preset's.
+///
+/// Like the width-4 preset, the bound is enforced at commitment admission only (Akita
+/// Remark 10.41); the ranges are proven by the lookup into `T_16`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AggFp64SignedWidth16;
+
+impl AggFp64SignedWidth16 {
+    /// Load and audit the generated schedule catalog once.
+    pub fn catalog() -> Result<&'static TrustedScheduleCatalog<Self>, AkitaError> {
+        #[cfg(feature = "schedules")]
+        {
+            static CATALOG: std::sync::OnceLock<
+                Result<TrustedScheduleCatalog<AggFp64SignedWidth16>, AkitaError>,
+            > = std::sync::OnceLock::new();
+            CATALOG
+                .get_or_init(|| {
+                    TrustedScheduleCatalog::from_artifact_bytes(crate::catalogs::WIDTH16_ARTIFACT)
+                })
+                .as_ref()
+                .map_err(|error| AkitaError::InvalidSetup(error.to_string()))
+        }
+        #[cfg(not(feature = "schedules"))]
+        {
+            Err(AkitaError::InvalidSetup(
+                "agg-pcs-config schedule catalogs are disabled; enable the `schedules` \
+                 feature outside offline regeneration"
+                    .to_owned(),
+            ))
+        }
+    }
+
+    /// The scalar producer profile of `layout` (a precommitted width-16 group).
+    pub fn commitment_profile(
+        layout: PolynomialGroupLayout,
+    ) -> Result<GroupCommitPhaseParams, AkitaError> {
+        Ok(Self::catalog()?
+            .resolve_key(&ScheduleLookupKey::single(layout))?
+            .profiles()
+            .final_group)
+    }
+}
+
+impl CommitmentConfig for AggFp64SignedWidth16 {
+    type Field = Field;
+    type ExtField = ExtensionField;
+
+    const RING_DIMENSION_SCHEDULE: RingDimensionSchedule = Dense::RING_DIMENSION_SCHEDULE;
+
+    fn decomposition() -> DecompositionParams {
+        DecompositionParams {
+            log_basis: OPENING_LOG_BASIS,
+            log_commit_bound: WIDTH16_LOG_COMMIT_BOUND,
+            log_open_bound: Some(LOG_OPEN_BOUND),
+        }
+    }
+
+    fn ring_challenge_config(
+        d: usize,
+    ) -> Result<akita_challenges::SparseChallengeConfig, AkitaError> {
+        Dense::ring_challenge_config(d)
+    }
+
+    fn sis_modulus_profile() -> SisModulusProfileId {
+        SisModulusProfileId::Q64Offset59
+    }
+
+    fn opening_basis_range() -> (u32, u32) {
+        OPENING_BASIS_RANGE
+    }
+
+    fn inner_basis_range() -> (u32, u32) {
+        WIDTH16_INNER_BASIS_RANGE
+    }
+
+    fn committed_source_class() -> CommittedSourceClass {
+        CommittedSourceClass::BalancedSignedDigit
+    }
+
+    fn schedule_family_name() -> &'static str {
+        WIDTH16_FAMILY
     }
 }
 
@@ -263,6 +360,56 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The width-16 preset differs from the width-4 one in the commit bound, the inner
+    /// range and the family only, and its certified interval is exactly the balanced
+    /// 16-bit interval of the lookup columns (`docs/lookup.md` Section 1).
+    #[test]
+    fn width16_preset_certifies_the_balanced_sixteen_bit_interval() {
+        let (w4, w16) = (
+            AggFp64SignedWidth4::decomposition(),
+            AggFp64SignedWidth16::decomposition(),
+        );
+        assert_eq!((w4.log_basis, w4.log_open_bound), (w16.log_basis, w16.log_open_bound));
+        assert_eq!(w16.log_commit_bound, 16);
+        assert_eq!(
+            AggFp64SignedWidth16::opening_basis_range(),
+            AggFp64SignedWidth4::opening_basis_range()
+        );
+        assert_eq!(
+            AggFp64SignedWidth16::sis_modulus_profile(),
+            AggFp64SignedWidth4::sis_modulus_profile()
+        );
+        assert_eq!(
+            AggFp64SignedWidth16::RING_DIMENSION_SCHEDULE,
+            AggFp64SignedWidth4::RING_DIMENSION_SCHEDULE
+        );
+        assert_ne!(
+            AggFp64SignedWidth16::schedule_family_name(),
+            AggFp64SignedWidth4::schedule_family_name()
+        );
+        w16.validate().expect("valid decomposition");
+        let contract = AggFp64SignedWidth16::committed_source_contract().expect("contract");
+        let (lo, hi) = WIDTH16_INNER_BASIS_RANGE;
+        for log_basis in lo..=hi {
+            let digits = akita_params::sis::num_digits_inner_for_bound(
+                DecompositionParams { log_basis, ..w16 },
+                16,
+            );
+            let (negative, positive) = contract.accepted_bounds(log_basis, digits);
+            assert_eq!(
+                (
+                    -i128::try_from(negative.expect("bounded")).unwrap(),
+                    i128::try_from(positive.expect("bounded")).unwrap()
+                ),
+                (-(1 << 15), (1 << 15) - 1),
+                "log basis {log_basis}, {digits} digit(s)"
+            );
+        }
+        // Every option of the range is one Akita admits for width 16 exactly.
+        let admissible = admissible_inner_digits(16).unwrap();
+        assert!((lo..=hi).all(|b| admissible.iter().any(|o| o.log_basis == b)));
     }
 
     /// Akita admissibility of raw signed widths (risks.md R1): one inner digit

@@ -27,7 +27,7 @@ use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
 use agg_keccak::witness::pack_slot;
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole};
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole};
 use agg_piop::mode_b::PublicBitsVerifier;
 use agg_piop::prover::SeededMatrices;
 use agg_piop::public_data::KeyCache;
@@ -355,8 +355,11 @@ fn corrupted_aggregates_are_rejected() {
 
         // PIOP and opening.
         let mut p = honest.clone();
-        p.prestage.kappa3[1] = p.prestage.kappa3[0];
+        p.prestage.kappa3 = p.prestage.kappa2[0];
         expect_rejected("pre-stage claim", &verify(&p), at_stage(1));
+        let mut p = honest.clone();
+        p.lookup.sessions[4].rounds[2][0] = p.lookup.sessions[4].rounds[2][1];
+        expect_rejected("lookup round", &verify(&p), |e| matches!(e, VerifyError::Lookup(_)));
         let mut p = honest.clone();
         p.stage1.rounds[2][0] = p.stage1.rounds[2][1];
         expect_rejected("stage-1 round", &verify(&p), at_stage(1));
@@ -466,7 +469,7 @@ fn corrupted_aggregates_are_rejected() {
     });
 }
 
-/// Mutable access to one `G_main` cell.
+/// Mutable access to one `G_main4` cell.
 fn cell<'a>(
     manifest: &CommitmentManifest,
     main: &'a mut MainTables,
@@ -476,10 +479,6 @@ fn cell<'a>(
     let (role, position) = manifest.locate(column);
     assert_eq!(role, GroupRole::Main);
     &mut main.columns_mut()[position][x]
-}
-
-fn digit(value: DigitValue, digit: u8) -> Column {
-    Column::Digit { value, digit }
 }
 
 /// Bit `1536 rho + 6 j + t` of a `w1Encode` string (FIPS 204 Algorithms 16, 28).
@@ -524,20 +523,21 @@ fn tampered_witnesses_are_rejected_end_to_end() {
                 ..AggregateHooks::default()
             };
 
-        // A z digit or a v digit changed inside its alphabet: the ring identity (stage 3).
+        // A 16-bit z or v column changed inside T_16 (the round-2 multiplicities are
+        // recounted): the ring identity (stage 3).
         run(
-            "z digit",
+            "z_lo",
             &main(&|m, t| {
-                let c = cell(m, t, digit(DigitValue::Z, 0), main_index(17, 2, 5));
-                *c = if *c < 7 { *c + 1 } else { *c - 1 };
+                let c = t.wide_cell_mut(m, Column::Z_LO, main_index(17, 2, 5));
+                *c = if *c < (1 << 15) - 1 { *c + 1 } else { *c - 1 };
             }),
             &at_stage(3),
         );
         run(
-            "v digit",
+            "v_lo",
             &main(&|m, t| {
-                let c = cell(m, t, digit(DigitValue::V, 0), main_index(17, 2, 5));
-                *c = if *c < 7 { *c + 1 } else { *c - 1 };
+                let c = t.wide_cell_mut(m, Column::V_LO, main_index(17, 2, 5));
+                *c = if *c < (1 << 15) - 1 { *c + 1 } else { *c - 1 };
             }),
             &at_stage(3),
         );
@@ -616,31 +616,32 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         let error = outcome.outcome.expect_err("the range identity");
         eprintln!("w1' = 44, both copies, Flock verdict ignored: rejected with {error}");
         assert!(at_stage(1)(&error), "{error:?}");
-        // A base-16 digit outside its alphabet: the width-4 commitment cannot hold 9.
+        // A 16-bit value outside T_16: the honest multiplicity count and the width-16
+        // commitment cannot hold it (the PIOP-level rejection is agg-piop tests/stages.rs).
         match aggregator.aggregate_with(
             &signed,
-            &main(&|m, t| *cell(m, t, digit(DigitValue::U, 1), main_index(17, 2, 5)) = 9),
+            &main(&|m, t| *t.wide_cell_mut(m, Column::U_LO, main_index(17, 2, 5)) = 1 << 15),
         ) {
-            Err(e) => eprintln!("base-16 digit 9: the prover's commitment fails ({e})"),
+            Err(e) => eprintln!("u_lo = 2^15: the prover fails ({e})"),
             Ok(aggregate) => expect_rejected(
-                "base-16 digit 9",
+                "u_lo = 2^15",
                 &verifier.verify(&public, &aggregate.bytes, None),
-                at_stage(1),
+                |e| matches!(e, VerifyError::Lookup(_)),
             ),
         }
         // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
         run(
             "base-4 digit",
-            &main(&|m, t| *cell(m, t, digit(DigitValue::Z, 4), main_index(17, 2, 5)) = 3),
+            &main(&|m, t| *cell(m, t, Column::Z_HI, main_index(17, 2, 5)) = 3),
             &at_stage(2),
         );
         run(
             "base-8 digit",
-            &main(&|m, t| *cell(m, t, digit(DigitValue::U, 4), main_index(17, 2, 5)) = -6),
+            &main(&|m, t| *cell(m, t, Column::U_HI, main_index(17, 2, 5)) = -6),
             &at_stage(2),
         );
 
-        // Round-2 tampering: a level-1 carry digit, a level-2 parity, a final-vector bit.
+        // Round-2 tampering: a level-1 carry, a level-2 parity, a final-vector bit.
         let bridge = |f: &'static (dyn Fn(&CommitmentManifest, &mut BridgeGroupTables) + Sync)| {
             AggregateHooks {
                 tamper_bridge: Some(f),
@@ -648,29 +649,29 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             }
         };
         run(
-            "level-1 carry digit",
+            "level-1 carry",
             &bridge(&|_, b| {
-                let column = &mut b.group_mut(GroupRole::Level1)[0];
-                column[3] = if column[3] < 7 {
-                    column[3] + 1
-                } else {
-                    column[3] - 1
-                };
+                let carries = b.carries_mut(1);
+                let old = carries[3];
+                let new = if old < (1 << 15) - 1 { old + 1 } else { old - 1 };
+                carries[3] = new;
+                // The carry stays in T_16 and the multiplicities follow it, so only the
+                // bridge identities object.
+                let mut m = b.multiplicity().to_vec();
+                m[(old + (1 << 15)) as usize] -= 1;
+                m[(new + (1 << 15)) as usize] += 1;
+                b.set_multiplicity(m);
             }),
             &at_stage(1),
         );
         run(
             "level-2 parity",
-            &bridge(&|_, b| b.group_mut(GroupRole::Level2)[2][5] ^= 1),
+            &bridge(&|_, b| b.parities_mut()[2][5] ^= 1),
             &at_stage(1),
         );
         run(
             "final-vector bit",
-            &bridge(&|m, b| {
-                let mut tables = b.to_witness_tables();
-                tables.y[11] ^= 1;
-                *b = BridgeGroupTables::from_tables(m, tables).unwrap();
-            }),
+            &bridge(&|_, b| b.public_y_mut()[11] ^= 1),
             &keccak,
         );
 

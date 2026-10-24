@@ -343,7 +343,6 @@ pub fn verify_mode_b(
 mod tests {
     use super::*;
     use crate::manifest::Column;
-    use crate::pcs::evaluate_column;
     use crate::test_support::point;
     use agg_witness::bridge::{gf2_composite, M2 as ROWS2, ZETA2_USED};
     use agg_witness::gen::{self, SplitMix64};
@@ -464,7 +463,7 @@ mod tests {
         let mut rng = SplitMix64::new(0x62);
         let r = point(&mut rng, geometry.d_main() as usize);
         let expected: [E; W1_BITS] = std::array::from_fn(|t| {
-            evaluate_column(f.main.column(&f.manifest, Column::W1Bit(t as u8)), &r)
+            f.main.column(&f.manifest, Column::W1Bit(t as u8)).evaluate(&r)
         });
         assert_eq!(
             public_bit_evaluations(&geometry, bits.segments(), &r),

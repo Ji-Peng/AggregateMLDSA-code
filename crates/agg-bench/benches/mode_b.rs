@@ -265,7 +265,7 @@ fn run_prover(options: &Options, n: usize) {
     );
     println!(
         "  aggregate {} B = header {} + c~ {} + public bits {} + Akita commitments {} + final vectors {} \
-         + Keccak proofs {} + PIOP {} + opening {}",
+         + Keccak proofs {} + lookup {} + PIOP {} + opening {}",
         bytes.len(),
         size.header,
         size.c_tilde,
@@ -273,8 +273,18 @@ fn run_prover(options: &Options, n: usize) {
         size.akita_commitments,
         size.final_vectors,
         size.keccak_proofs,
+        size.lookup,
         size.piop,
         size.opening
+    );
+    let manifest = agg_piop::manifest::CommitmentManifest::for_batch(n).expect("manifest");
+    #[allow(clippy::cast_precision_loss)]
+    let per_signature = manifest.total_logical_cells() as f64 / n as f64;
+    println!(
+        "  committed cells: {} in {} polynomials ({:.1} per signature)",
+        manifest.total_logical_cells(),
+        manifest.total_polynomials(),
+        per_signature
     );
     drop(output);
     let mut child = Command::new(std::env::current_exe().expect("own path"))

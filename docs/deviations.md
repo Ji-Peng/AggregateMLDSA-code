@@ -19,6 +19,25 @@ name. Aerie's catalog `aerie_fp64_signed_width4` holds Falcon layouts only, so o
 four-group layouts need their own catalog, `agg_mldsa_fp64_signed_width4`
 (`crates/agg-pcs-config/src/schedules/`). The family name enters the catalog digest
 that event 0 binds; the protocol is otherwise unchanged. See `docs/pcs-config.md`.
+Since wire version 1 (lookup layout L16, entry L1) this catalog holds the scalar rows of
+`G_main4` and the grouped rows of the six-group batches; the width-16 groups have their
+own family (D2).
+
+## D2. Second catalog family for the width-16 preset (spec Section 4.1, L16)
+
+Spec (Section 4.1, L16): the 16-bit lookup columns, the carries and the level-2 parities are
+committed under a signed width-16 preset.
+
+Code: `agg_pcs_config::preset::AggFp64SignedWidth16`: the width-4 preset's parameters
+except `log_commit_bound 16` (`[-2^15, 2^15 - 1]`), the inner (A/source) basis range
+`(16, 16)` (one balanced base-`2^16` digit, entry L3) and the family name
+`agg_mldsa_fp64_signed_width16`, whose catalog holds the scalar rows of `G_main16`, `G_1`,
+`G_2`, `G_3`. A unit test checks that the certified interval (Akita's accepted bounds of the
+digit geometry) is exactly the declared one. The grouped rows stay in the width-4 catalog,
+the family of the final group `G_m`: Akita freezes the source bound into each group's own
+profile, so a mixed-bound batch is keyed by the precommitted profiles of either family
+(Akita's fp128 test `bounded_dense_precommit_with_onehot_final_group` exercises the same
+path), and the width-4 catalog's rows also size the setup for the width-16 commits.
 
 ## W1. S1+S2 column count (spec Appendix A)
 
@@ -249,11 +268,14 @@ Spec: event 0 carries "the four group descriptors with catalog row ids", the dig
 id and the bridge parameters, without a byte encoding.
 
 Code (`agg_piop::manifest::CommitmentManifest::binding_bytes`, `docs/piop.md` Section 2):
-a fixed little-endian encoding of the wire version, parameter set, relation flag, `N`,
-`N*`, digit layout id 0, then per group its role, round, PCS family, logical and physical
-variable counts, polynomial count and one alphabet byte per polynomial, then one catalog
-row id, then `(J_t, m_t, k_t)`. Only the grouped row id
-(`mldsa-44-mode-a-batch-<N*>-level3-final`) is bound, not one id per group: Akita keys the
+a fixed little-endian encoding of the wire version (1), parameter set, relation flag, `N`,
+`N*`, digit layout id (1 = L16), then per group (six) its role, round, PCS family (0 width 4,
+1 width 16), logical and physical variable counts, polynomial count and one alphabet byte per
+polynomial (4 or 8 for a leaf-checked digit, `0x90` for a column looked up in `T_16`,
+`0x50` for a multiplicity digit, 0 for a Boolean), then one catalog row id, then
+`(J_t, m_t, k_t)`, then the lookup layout (challenge count, table widths, per stack the
+column count, variables, table and storage shift). Only the grouped row id
+(`mldsa-44-l16-batch-<N*>-mult-final`) is bound, not one id per group: Akita keys the
 precommitted groups' scalar rows by their layouts, which the per-group fields already bind,
 and the grouped row determines the final profile and the opening schedule. The public-record
 digest and the Flock profile id are added by the transcript stage.
@@ -344,8 +366,9 @@ the Spongefish domain separator is `cSHAKE256(LE64(len) || record, 32)` under
 Spec: one event each for the round-2 commitments (event 4), the Flock seeds (event 5) and
 the final vectors with the Flock proofs (event 6).
 
-Code: event 4 is three registry events (`commit/level1`, `commit/level2`,
-`commit/level3`, one per group, as Aerie absorbs its groups); event 5 is one squeeze of
+Code: event 1 is two registry events (`commit/main16`, `commit/main`) and event 4 four
+(`commit/level1`, `commit/level2`, `commit/level3`, `commit/mult`), one per group, as
+Aerie absorbs its groups; event 5 is one squeeze of
 `32 S` bytes; event 6 is two events, the `512 S` bytes of `Y_sigma` (bits packed least
 significant first) and the `S` Flock proofs each framed by `LE64` length; event 2 frames
 the `S` Flock commitments the same way. Every challenge still follows the previous absorb
@@ -353,11 +376,11 @@ and the order of Section 10 is unchanged; only the registry granularity differs.
 
 ## P7. Instance orders left open by the spec (Sections 7.3 to 7.5)
 
-Fixed in `docs/piop.md` Section 7: stage 2 lists all `leaf16` pairs (lo before hi, digit
-order), then `leaf8[u_4], leaf8[v_6]`, then the 13 `leaf4` instances in digit order; stage 3
-lists the 62 reductions in the order of spec 7.5 item 3 with `t`-major `(t, k)` order for
-the carry digits; stage 1 as listed in 7.3. The pre-stage, terminal and `kappa1` claim
-vectors are in the orders of `agg_piop::claims`.
+Fixed in `docs/piop.md` Section 7 (lookup layout L16): stage 2 lists `def_y1[t]`, then
+`leaf4[Z_hi]`, `leaf8[U_hi]`; stage 3 lists the ring, the two links, the 37 evaluation
+reductions in the order of spec 7.5 item 3, then the four lookup-stack reductions (stack
+order of Section 4.3); stage 1 as listed in 7.3. The pre-stage, terminal, `kappa1` and
+multiplicity claim vectors are in the orders of `agg_piop::claims`.
 
 ## P8. Stage-3 ring instance as two prover groups (spec Section 7.5)
 
@@ -711,7 +734,12 @@ from the running claim, which is the group's own exact sum. The parities `y^(1)`
 tables when every value fits. The opening takes its claims from the stage-3 terminal values
 instead of evaluating the 67 tables again; the round-1 commitment runs concurrently with
 the Keccak side's commitments, and the three round-2 commitments concurrently with each
-other (all transcript-free, absorbed in event order).
+other (all transcript-free, absorbed in event order). Since the lookup layout (L4) the two
+round-1 commits and the four round-2 commits run concurrently on scoped OS threads
+(`pcs::concurrent_commits`), not as rayon jobs: Akita builds its NTT slots lazily inside
+`OnceLock::get_or_init` with rayon-parallel loops, and two commits joined on the pool can
+deadlock when the initializing worker steals the other commit, which re-enters the same
+`OnceLock` (observed once, in the default-build `agg-cli` tampering test).
 
 Why it is sound and the proof unchanged: every round message is the same polynomial as
 before, computed in a different order over `K` (bucketing and moments are distributivity of
@@ -732,3 +760,84 @@ polynomials of its tables. Why: stages 1-3 were 1.82 s of the 2.73 s mode-B prov
 is not changed: `docs/piop.md` Section 16.1 records why the quotient `v`, wider Akita
 digits and merged Boolean lanes do not reduce the element count without weakening relation
 H or adding a lookup argument.
+
+## L1. Lookup layout L16 adopted; the base-16 digit path removed (spec Sections 4 to 7, 10 to 12; was Appendix C)
+
+Spec (wire version 0): 23 committed columns per position (`z`, `u`, `v` in base-16 digits,
+the six bits) and 40 base-16 digits on the bridge domains, ranged by `b16_prod` (stage 1),
+95 leaves (stage 2) and 55 links (stage 3).
+
+Code (wire version 1, `docs/lookup.md`): the lookup layout L16 of former Appendix C, now
+normative in spec Sections 4, 7, 10, 11 and 12: 12 committed columns per position, every
+16-bit value and every carry looked up in `T_16 = [0, 2^16)` by LogUp-GKR with two
+independent challenges, `Z_hi` and `U_hi` kept on a base-4 and a base-8 leaf. The base-16
+digit layout is removed, not kept behind a configuration switch. Why: a switch would have
+duplicated the manifest, the three stage tables, the claim vectors, the transcript
+registry, the wire format, the verifier and the catalogs (the four-group width-4 rows next
+to the six-group two-family rows), so every protocol file would carry two layouts; the
+measurements (`ref/notes/bench-local.md`, lookup integration) show no batch size at which
+the base-16 layout is cheaper. The old layout stays reproducible at code `4247f61` (the
+"before" of every comparison); its wire version 0 is refused by the parser.
+
+## L2. Carries stored balanced like every looked-up column (docs/lookup.md Section 1)
+
+`docs/lookup.md` Section 1 (proposal) stored the carries as they are (`0 <= kappa <= 1023`
+honestly). Code: every looked-up column, carries included, stores `K = f - 2^15` and is
+looked up as `f = K + 2^15` (`manifest::LOOKUP_SHIFT`; the carry layout is one unsigned
+base-`2^16` digit, `kappa = K + 2^15`); the padding slots of the carry stacks hold `-2^15`
+(looked-up value 0). Why: one storage shift for all four stacks gives one leaf formula
+`1 / ((X - 2^15) - K)` and one stage-3 stack claim, and makes the width-16 admission interval
+`[-2^15, 2^15)` coincide with `T_16` for every looked-up column (as-is storage would admit
+negative carries that only the lookup rejects). Soundness is unchanged: the lookup proves
+`K + 2^15 in [0, 2^16)` for every cell, the range of `docs/lookup.md` Section 2.
+
+## L3. One forced balanced base-`2^16` inner digit for the width-16 preset (docs/pcs-config.md Section 2)
+
+`docs/lookup.md` Section 6 left open whether the width-16 preset should take Dense's
+cost-optimal inner digits or one forced base-`2^16` digit. Planner probe
+(`width16_inner_probe`, 2026-10-24): at `(18, 4)` and `(20, 4)` Dense's search (`3..=16`)
+selects two base-`2^9` digits, a forced `(16, 16)` one digit and a forced `(8, 8)` three,
+with the same estimated opening proof (60,877 B and 61,707 B). Code: inner range `(16, 16)`,
+the fewest inner digits (12 per position in all), hence the least commit work for the same
+estimated proof bytes.
+
+## L4. Six groups, two families, `G_m` as Akita's final group (spec Section 4.1)
+
+`docs/lookup.md` Section 6 item 1 left the group split of `D_2` and the final group open.
+Code: `G_main16` (width 16), `G_main4` (width 4), `G_1`, `G_2` (parities and carries in one
+width-16 group), `G_3` (width 16), `G_m` (width 4) in this wire order; `G_m` is the final
+group (committed against the five precommitted profiles), so the grouped rows
+(`mldsa-44-l16-batch-<N*>-mult-final`) live in the width-4 catalog (D2). The multiplicity
+column is committed in round 2: it counts the carries, which exist only after the bridge
+seed. Both main groups are opened at `r^(3)`, `G_m` at the lookup's table point `pi_m`.
+
+## L5. Lookup events between the Keccak side and `tau`; the PIOP split (spec Section 10)
+
+Code: the lookup is event 7, after the last commitment (round 2, event 4) and the Keccak
+side (events 5, 6) and before `tau`: sites `agg-mldsa/v1/lookup/x` (two challenges, one
+vector), `.../layer1`, `.../mu/1`, then per session `s = 2 .. D` `.../gamma/s`,
+`.../round/s/k` and `.../r/s/k`, `.../terminals/s`, `.../leaves/s`, `.../mu/s`, and
+`.../multiplicities` (the seven digit claims). Every count follows from `N` through the
+manifest's lookup shape, so the registry stays fixed per batch. The PIOP part (events 7 to
+12) is `prover::prove_piop` / `verifier::verify_piop`, which the full drivers and the
+PIOP-level tests share. Why the lookup before `tau`: it depends only on the commitments and
+`X`, and its claims are reduced in stage 3 like every other claim.
+
+## L6. Stage-3 stack reductions as scaled instance parts (spec Section 7.5)
+
+The stack reduction of stack `j` has `K` coefficients `w_{j,c} = eq(pi_top, c)`. Code: one
+gamma index per stack and one instance part per column with the public scale
+`stage::InstanceSpec::scale = w_{j,c}` (the batched coefficient is `gamma_j w_{j,c}`), each
+a linear term on its column, in an equality group at the stack's low point
+(`stage::EqPoint::Lookup(j)`). The claimed sum is the stacked claim minus the public
+padding (`lookup::StackShape::column_claim`). The kernel absorbs the scale in the linear
+lane polynomial; the verifier evaluates the same parts.
+
+## L7. Multiplicity digits claimed after the lookup (docs/lookup.md Section 1)
+
+The lookup leaves one claim `m(pi_m)` on the multiplicity column, which is committed as
+seven balanced base-16 digits. Code: the prover sends `m_k(pi_m)`, `k < 7`, right after the
+lookup (`claims::MultiplicityClaims`, 112 bytes); the verifier checks
+`sum_k 16^k m_k(pi_m) = m(pi_m)` (`VerifyError::Lookup`) and the opening authenticates the
+seven claims of `G_m` at `pi_m`. No range check of the digits: Lemma 5 of LogUp holds for any
+`m` in `F_p` (`docs/lookup.md` Section 2).

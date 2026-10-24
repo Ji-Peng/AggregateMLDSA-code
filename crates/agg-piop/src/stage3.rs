@@ -1,24 +1,31 @@
 //! Stage 3 (spec Section 7.5, degree 3): the ring identity (7.6) with `(A z)` pulled back
-//! through the public matrices, the 55 range links, and the 62 evaluation reductions to
-//! `r^(3)`.
+//! through the public matrices, the two range links, the evaluation reductions to
+//! `r^(3)`, and the four lookup-stack reductions (lookup layout L16, `docs/lookup.md`
+//! Section 6 item 4).
 //!
-//! `gamma^(3)` order: `ring` (0), `link[Z]` (1..56) in digit order, then the reductions:
-//! `b_t` from `r^(1)` (56..62), `b_t` from `r^(2)` (62..68), `y^(2)_t` from `tau_2`
-//! (68..74), `y^(2)_t` from `r^(1)_2` (74..80), `kappa^(2)_{t,k}` from `tau_2` (80..98,
-//! `t`-major), `kappa^(3)_k` from `tau_3` (98..100), `kappa^(1)_{t,k}` from `r^(1)_1`
-//! (100..118).
+//! `gamma^(3)` order: `ring` (0), `link[Z_hi]` (1), `link[U_hi]` (2), then the reductions:
+//! `b_t` from `r^(1)` (3..9), `b_t` from `r^(2)` (9..15), `y^(2)_t` from `tau_2` (15..21),
+//! `y^(2)_t` from `r^(1)_2` (21..27), `K^(2)_t` from `tau_2` (27..33), `K^(3)` from
+//! `tau_3` (33), `K^(1)_t` from `r^(1)_1` (34..40), and the lookup stacks `j = 0..4`
+//! (40..44): `sum_x eq(pi_j, x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >=
+//! cols} w_{j,c}` with `w_{j,c} = eq(pi_top, c)` (`StackShape::column_claim`), one part
+//! per column with scale `w_{j,c}`.
 //!
 //! The ring instance is one instance with two summands on two groups: `w_A z` (weight
 //! lane, no equality factor) and `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)` (equality
-//! group of `r^(2)`), both affine in the committed digits and bits.
+//! group of `r^(2)`), both affine in the committed columns: `z = Z_lo + 2^16 Z_hi + 2^15`,
+//! `u = U_lo + 2^16 U_hi + 2^15`, `v = V_lo + 2^16 V_hi + 2^15`.
 
-use agg_witness::digits::{U_DIGITS, V_DIGITS, Z_DIGITS};
 use agg_witness::params::{GAMMA2, Q, W1_BITS};
 use jolt_field::{One, Zero};
 
 use crate::claims::{Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
 use crate::kernel::Term;
-use crate::manifest::{Column, CommitmentManifest, DigitValue, GroupRole};
+use crate::lookup::LookupClaims;
+use crate::manifest::{
+    stack_columns, Column, CommitmentManifest, GroupRole, STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
+    Z16_DIGITS,
+};
 use crate::public_data::PublicData;
 use crate::range::digits;
 use crate::stage::{
@@ -36,10 +43,12 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 3;
 /// Message degree.
 pub const DEGREE: usize = 3;
+/// Leaf-checked digits (links).
+pub const LINKS: usize = 2;
+/// Lookup stacks (reductions).
+pub const STACKS: usize = 4;
 /// Batching coefficients.
-pub const GAMMA_COUNT: usize = 118;
-/// Digits (links).
-pub const LINKS: usize = 55;
+pub const GAMMA_COUNT: usize = 1 + LINKS + 4 * W1_BITS + W1_BITS + 1 + W1_BITS + STACKS;
 
 /// Gamma index of `ring`.
 pub const GAMMA_RING: usize = 0;
@@ -68,20 +77,22 @@ pub const fn gamma_y2_tau(t: usize) -> usize {
 pub const fn gamma_y2_r1(t: usize) -> usize {
     1 + LINKS + 3 * W1_BITS + t
 }
-/// Gamma index of the reduction of `kappa^(2)_{t,k}` from `tau_2`.
+/// Gamma index of the reduction of `K^(2)_t` from `tau_2`.
 #[must_use]
-pub const fn gamma_kappa2_tau(t: usize, k: usize) -> usize {
-    1 + LINKS + 4 * W1_BITS + 3 * t + k
+pub const fn gamma_kappa2_tau(t: usize) -> usize {
+    1 + LINKS + 4 * W1_BITS + t
 }
-/// Gamma index of the reduction of `kappa^(3)_k` from `tau_3`.
+/// Gamma index of the reduction of `K^(3)` from `tau_3`.
+pub const GAMMA_KAPPA3_TAU: usize = 1 + LINKS + 5 * W1_BITS;
+/// Gamma index of the reduction of `K^(1)_t` from `r^(1)_1`.
 #[must_use]
-pub const fn gamma_kappa3_tau(k: usize) -> usize {
-    1 + LINKS + 7 * W1_BITS + k
+pub const fn gamma_kappa1_r1(t: usize) -> usize {
+    2 + LINKS + 5 * W1_BITS + t
 }
-/// Gamma index of the reduction of `kappa^(1)_{t,k}` from `r^(1)_1`.
+/// Gamma index of the reduction of lookup stack `j`.
 #[must_use]
-pub const fn gamma_kappa1_r1(t: usize, k: usize) -> usize {
-    1 + LINKS + 7 * W1_BITS + 2 + 3 * t + k
+pub const fn gamma_stack(j: usize) -> usize {
+    2 + LINKS + 6 * W1_BITS + j
 }
 
 /// The stage-3 proof.
@@ -89,7 +100,7 @@ pub const fn gamma_kappa1_r1(t: usize, k: usize) -> usize {
 pub struct Stage3Proof {
     /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
-    /// The 67 opening claims at `r^(3)` and its suffixes.
+    /// The 31 opening claims at `r^(3)` and its suffixes.
     pub claims: Stage3Claims,
 }
 
@@ -102,94 +113,104 @@ pub struct Stage3Output {
     pub claims: Stage3Claims,
 }
 
-fn digit_columns(value: DigitValue) -> Vec<Column> {
-    (0..value.layout().len() as u8)
-        .map(|digit| Column::Digit { value, digit })
+/// The column weights `eq(pi_top, c)` of every lookup stack's real columns (the scales of
+/// the stack reductions), from the lookup's stack claims.
+#[must_use]
+pub fn stack_weights(manifest: &CommitmentManifest, lookup: &LookupClaims) -> Vec<Vec<E>> {
+    let shape = manifest.lookup_shape();
+    shape
+        .stacks
+        .iter()
+        .zip(&lookup.stacks)
+        .map(|(stack, (point, _))| stack.column_weights(point))
         .collect()
 }
 
-fn kappa_columns(values: impl Iterator<Item = DigitValue>) -> Vec<LaneId> {
-    values
-        .flat_map(|value| digit_columns(value).into_iter().map(LaneId::Column))
-        .collect()
+/// The stack reduction's claimed sums and the low points (the equality points of the stack
+/// groups), from the lookup's stack claims.
+#[must_use]
+pub fn stack_reductions(manifest: &CommitmentManifest, lookup: &LookupClaims) -> (Vec<E>, Vec<Vec<E>>) {
+    let shape = manifest.lookup_shape();
+    shape
+        .stacks
+        .iter()
+        .zip(&lookup.stacks)
+        .map(|(stack, (point, value))| (stack.column_claim(point, *value), point[..stack.vars].to_vec()))
+        .unzip()
 }
 
 fn reductions(lanes: &[LaneId], gamma: impl Fn(usize) -> usize) -> Vec<InstanceSpec> {
     (0..lanes.len())
-        .map(|l| InstanceSpec {
-            gamma: gamma(l),
-            terms: vec![Term::Product(vec![l])],
-        })
+        .map(|l| InstanceSpec::new(gamma(l), vec![Term::Product(vec![l])]))
         .collect()
 }
 
-/// The instance table.
+fn column_lanes(columns: &[Column]) -> Vec<LaneId> {
+    columns.iter().map(|&c| LaneId::Column(c)).collect()
+}
+
+/// The instance table; `weights[j]` are the column weights of lookup stack `j`
+/// ([`stack_weights`]).
 #[must_use]
-pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
+#[allow(clippy::too_many_lines)]
+pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
+    assert_eq!(weights.len(), STACKS, "one weight vector per lookup stack");
     let lanes = 0..W1_BITS;
     let all = digits(manifest);
     let mut groups = Vec::new();
 
-    // Main domain, eq(r^(2)): the ring's committed part, the 17 main links and the b_t
-    // reductions from r^(2). Lane index = position in G_main.
-    let main = manifest.group(GroupRole::Main);
-    let position = |column: Column| main.position(column).expect("a G_main column");
-    let mut ring_b = Vec::new();
-    for t in 0..W1_BITS {
-        ring_b.push((position(Column::W1Bit(t as u8)), -((2 * GAMMA2) << t)));
-    }
-    for (&weight, column) in U_DIGITS.weights().iter().zip(digit_columns(DigitValue::U)) {
-        ring_b.push((position(column), -weight));
-    }
-    for (&weight, column) in V_DIGITS.weights().iter().zip(digit_columns(DigitValue::V)) {
-        ring_b.push((position(column), -(Q * weight)));
-    }
-    let mut instances = vec![InstanceSpec {
-        gamma: GAMMA_RING,
-        terms: vec![Term::Affine {
+    // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1'), the two links and the
+    // b_t reductions from r^(2).
+    let mut main_columns = vec![Column::U_LO, Column::V_LO, Column::V_HI, Column::Z_HI, Column::U_HI];
+    main_columns.extend(lanes.clone().map(|t| Column::W1Bit(t as u8)));
+    let position = |column: Column| main_columns.iter().position(|&c| c == column).expect("lane");
+    let [u_weights, v_weights] = [U16_DIGITS.weights(), V16_DIGITS.weights()];
+    let mut ring_b: Vec<(usize, i64)> = (0..W1_BITS)
+        .map(|t| (position(Column::W1Bit(t as u8)), -((2 * GAMMA2) << t)))
+        .collect();
+    ring_b.push((position(Column::U_LO), -u_weights[0]));
+    ring_b.push((position(Column::U_HI), -u_weights[1]));
+    ring_b.push((position(Column::V_LO), -(Q * v_weights[0])));
+    ring_b.push((position(Column::V_HI), -(Q * v_weights[1])));
+    let mut instances = vec![InstanceSpec::new(
+        GAMMA_RING,
+        vec![Term::Affine {
             weight: None,
             lanes: ring_b,
-            constant: -(U_DIGITS.constant() + Q * V_DIGITS.constant()),
+            constant: -(U16_DIGITS.constant() + Q * V16_DIGITS.constant()),
         }],
-    }];
-    for (k, digit) in all.iter().enumerate().filter(|(_, d)| d.group == GroupRole::Main) {
-        instances.push(InstanceSpec {
-            gamma: gamma_link(k),
-            terms: vec![Term::Link(digit.position)],
-        });
+    )];
+    for (k, digit) in all.iter().enumerate() {
+        instances.push(InstanceSpec::new(gamma_link(k), vec![Term::Link(position(digit.column))]));
     }
-    instances.extend(lanes.clone().map(|t| InstanceSpec {
-        gamma: gamma_b_r2(t),
-        terms: vec![Term::Product(vec![position(Column::W1Bit(t as u8))])],
+    instances.extend(lanes.clone().map(|t| {
+        InstanceSpec::new(gamma_b_r2(t), vec![Term::Product(vec![position(Column::W1Bit(t as u8))])])
     }));
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R2,
-        lanes: main.columns.iter().map(|&c| LaneId::Column(c)).collect(),
+        lanes: column_lanes(&main_columns),
         instances,
     });
 
-    // Main domain, no equality factor: w_A times the recomposed z.
-    let z_lanes: Vec<(usize, i64)> = Z_DIGITS
-        .weights()
-        .iter()
-        .enumerate()
-        .map(|(k, &weight)| (1 + k, weight))
-        .collect();
+    // Main domain, no equality factor: w_A times z = Z_lo + 2^16 Z_hi + 2^15.
+    let z_weights = Z16_DIGITS.weights();
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::None,
-        lanes: std::iter::once(LaneId::Weight(WeightId::Ring))
-            .chain(digit_columns(DigitValue::Z).into_iter().map(LaneId::Column))
-            .collect(),
-        instances: vec![InstanceSpec {
-            gamma: GAMMA_RING,
-            terms: vec![Term::Affine {
+        lanes: vec![
+            LaneId::Weight(WeightId::Ring),
+            LaneId::Column(Column::Z_LO),
+            LaneId::Column(Column::Z_HI),
+        ],
+        instances: vec![InstanceSpec::new(
+            GAMMA_RING,
+            vec![Term::Affine {
                 weight: Some(0),
-                lanes: z_lanes,
-                constant: Z_DIGITS.constant(),
+                lanes: vec![(1, z_weights[0]), (2, z_weights[1])],
+                constant: Z16_DIGITS.constant(),
             }],
-        }],
+        )],
     });
 
     // Main domain, eq(r^(1)): b_t reductions from r^(1).
@@ -204,45 +225,17 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         lanes: bits,
     });
 
-    // D_1: links at r^(2)_1 and reductions from r^(1)_1 of the kappa^(1) digits.
-    let kappa1 = kappa_columns((0..W1_BITS as u8).map(DigitValue::Kappa1));
-    let links = |domain: GroupRole, lane_ids: &[LaneId]| -> Vec<InstanceSpec> {
-        all.iter()
-            .enumerate()
-            .filter(|(_, d)| d.group == domain)
-            .map(|(k, d)| InstanceSpec {
-                gamma: gamma_link(k),
-                terms: vec![Term::Link(
-                    lane_ids
-                        .iter()
-                        .position(|&l| l == LaneId::Column(d.column))
-                        .expect("digit lane"),
-                )],
-            })
-            .collect()
-    };
-    groups.push(GroupSpec {
-        domain: GroupRole::Level1,
-        eq: EqPoint::R2,
-        instances: links(GroupRole::Level1, &kappa1),
-        lanes: kappa1.clone(),
-    });
+    // D_1, eq(r^(1)_1): K^(1)_t reductions.
+    let kappa1 = column_lanes(&stack_columns(1));
     groups.push(GroupSpec {
         domain: GroupRole::Level1,
         eq: EqPoint::R1,
-        instances: reductions(&kappa1, |l| gamma_kappa1_r1(l / 3, l % 3)),
+        instances: reductions(&kappa1, gamma_kappa1_r1),
         lanes: kappa1,
     });
 
-    // D_2: links of the kappa^(2) digits at r^(2)_2; reductions of y^(2) and kappa^(2)
-    // from tau_2; reductions of y^(2) from r^(1)_2.
-    let kappa2 = kappa_columns((0..W1_BITS as u8).map(DigitValue::Kappa2));
-    groups.push(GroupSpec {
-        domain: GroupRole::Level2,
-        eq: EqPoint::R2,
-        instances: links(GroupRole::Level2, &kappa2),
-        lanes: kappa2.clone(),
-    });
+    // D_2, eq(tau_2): y^(2)_t and K^(2)_t reductions; eq(r^(1)_2): y^(2)_t.
+    let kappa2 = column_lanes(&stack_columns(2));
     let y2: Vec<LaneId> = lanes
         .clone()
         .map(|t| LaneId::Column(Column::Parity2(t as u8)))
@@ -250,10 +243,10 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     let mut tau2_lanes = y2.clone();
     tau2_lanes.extend_from_slice(&kappa2);
     let mut tau2_instances = reductions(&y2, gamma_y2_tau);
-    tau2_instances.extend((0..kappa2.len()).map(|l| InstanceSpec {
-        gamma: gamma_kappa2_tau(l / 3, l % 3),
-        terms: vec![Term::Product(vec![W1_BITS + l])],
-    }));
+    tau2_instances.extend(
+        (0..kappa2.len())
+            .map(|l| InstanceSpec::new(gamma_kappa2_tau(l), vec![Term::Product(vec![W1_BITS + l])])),
+    );
     groups.push(GroupSpec {
         domain: GroupRole::Level2,
         eq: EqPoint::Tau,
@@ -267,20 +260,35 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         lanes: y2,
     });
 
-    // D_3: links at r^(2)_3 and reductions from tau_3 of the kappa^(3) digits.
-    let kappa3 = kappa_columns(std::iter::once(DigitValue::Kappa3));
-    groups.push(GroupSpec {
-        domain: GroupRole::Level3,
-        eq: EqPoint::R2,
-        instances: links(GroupRole::Level3, &kappa3),
-        lanes: kappa3.clone(),
-    });
+    // D_3, eq(tau_3): K^(3).
+    let kappa3 = column_lanes(&stack_columns(3));
     groups.push(GroupSpec {
         domain: GroupRole::Level3,
         eq: EqPoint::Tau,
-        instances: reductions(&kappa3, gamma_kappa3_tau),
+        instances: reductions(&kappa3, |_| GAMMA_KAPPA3_TAU),
         lanes: kappa3,
     });
+
+    // The lookup stacks: one equality group per stack at its low point, one part per column
+    // with the column weight as scale.
+    for (j, stack_weights) in weights.iter().enumerate() {
+        let columns = stack_columns(j);
+        assert_eq!(stack_weights.len(), columns.len(), "one weight per stack column");
+        groups.push(GroupSpec {
+            domain: STACK_DOMAINS[j],
+            eq: EqPoint::Lookup(j),
+            lanes: column_lanes(&columns),
+            instances: stack_weights
+                .iter()
+                .enumerate()
+                .map(|(c, &scale)| InstanceSpec {
+                    gamma: gamma_stack(j),
+                    scale,
+                    terms: vec![Term::Product(vec![c])],
+                })
+                .collect(),
+        });
+    }
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
@@ -289,7 +297,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order.
+/// The claimed sums in gamma order; `stacks[j]` is stack `j`'s column claim
+/// ([`stack_reductions`]).
 #[must_use]
 pub fn claimed_sums(
     t_at_r2: E,
@@ -297,6 +306,7 @@ pub fn claimed_sums(
     stage1: &Stage1Claims,
     kappa1: &Kappa1Claims,
     stage2: &Stage2Claims,
+    stacks: &[E],
 ) -> Vec<E> {
     let mut claims = vec![E::zero(); GAMMA_COUNT];
     claims[GAMMA_RING] = t_at_r2;
@@ -308,18 +318,37 @@ pub fn claimed_sums(
         claims[gamma_b_r2(t)] = stage2.b[t];
         claims[gamma_y2_tau(t)] = prestage.y2[t];
         claims[gamma_y2_r1(t)] = stage1.y2[t];
-        for k in 0..3 {
-            claims[gamma_kappa2_tau(t, k)] = prestage.kappa2[t][k];
-            claims[gamma_kappa1_r1(t, k)] = kappa1.0[t][k];
-        }
+        claims[gamma_kappa2_tau(t)] = prestage.kappa2[t];
+        claims[gamma_kappa1_r1(t)] = kappa1.0[t];
     }
-    for k in 0..2 {
-        claims[gamma_kappa3_tau(k)] = prestage.kappa3[k];
+    claims[GAMMA_KAPPA3_TAU] = prestage.kappa3;
+    for (j, &claim) in stacks.iter().enumerate() {
+        claims[gamma_stack(j)] = claim;
     }
     claims
 }
 
-/// Prove stage 3. `points` holds `tau, r^(1), r^(2)`; `tables` holds `w_A`.
+/// The lookup inputs of stage 3: the stack weights, the stack claims and the low points.
+#[derive(Clone, Debug)]
+pub struct LookupInputs {
+    /// `w_{j,c}` per stack.
+    pub weights: Vec<Vec<E>>,
+    /// The column claim of each stack.
+    pub claims: Vec<E>,
+}
+
+impl LookupInputs {
+    /// From the lookup's claims; also returns the low points for [`Points::lookup`].
+    #[must_use]
+    pub fn new(manifest: &CommitmentManifest, lookup: &LookupClaims) -> (Self, Vec<Vec<E>>) {
+        let weights = stack_weights(manifest, lookup);
+        let (claims, points) = stack_reductions(manifest, lookup);
+        (Self { weights, claims }, points)
+    }
+}
+
+/// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
+/// `tables` holds `w_A`.
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     manifest: &CommitmentManifest,
@@ -329,9 +358,10 @@ pub fn prove(
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
     stage2: &Stage2Output,
+    lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, public, points, prestage, stage1, stage2, transcript, true)
+    prove_with(manifest, tables, public, points, prestage, stage1, stage2, lookup, transcript, true)
 }
 
 /// [`prove`] without the prover's claim self-check (tests).
@@ -345,9 +375,10 @@ pub fn prove_unchecked(
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
     stage2: &Stage2Output,
+    lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, public, points, prestage, stage1, stage2, transcript, false)
+    prove_with(manifest, tables, public, points, prestage, stage1, stage2, lookup, transcript, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,10 +390,11 @@ fn prove_with(
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
     stage2: &Stage2Output,
+    lookup: &LookupInputs,
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    let spec = spec(manifest);
+    let spec = spec(manifest, &lookup.weights);
     let t_at_r2 = public.t_evaluation(&stage2.point);
     let claims = claimed_sums(
         t_at_r2,
@@ -370,6 +402,7 @@ fn prove_with(
         &stage1.claims,
         &stage2.kappa1,
         &stage2.claims,
+        &lookup.claims,
     );
     let run = if check {
         prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
@@ -379,6 +412,7 @@ fn prove_with(
     let values: Vec<E> = manifest
         .groups()
         .iter()
+        .filter(|group| group.role != GroupRole::Mult)
         .flat_map(|group| group.columns.iter().map(|&c| run.value(&spec, LaneId::Column(c))))
         .collect();
     let claims = Stage3Claims(values);
@@ -405,6 +439,7 @@ pub fn verify(
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
     stage2: &Stage2Output,
+    lookup: &LookupInputs,
     proof: &Stage3Proof,
     transcript: &mut Transcript,
 ) -> Result<Stage3Output, StageError> {
@@ -414,6 +449,7 @@ pub fn verify(
         prestage,
         stage1,
         stage2,
+        lookup,
         proof,
         transcript,
         |r2, r3| (public.t_evaluation(r2), ring_weight_at(public, r2, r3)),
@@ -434,17 +470,19 @@ pub fn verify_streamed(
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
     stage2: &Stage2Output,
+    lookup: &LookupInputs,
     proof: &Stage3Proof,
     transcript: &mut Transcript,
     public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
 ) -> Result<Stage3Output, StageError> {
-    let spec = spec(manifest);
+    let spec = spec(manifest, &lookup.weights);
     let claims = claimed_sums(
         E::zero(),
         prestage,
         &stage1.claims,
         &stage2.kappa1,
         &stage2.claims,
+        &lookup.claims,
     );
     let mut replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     if proof.claims.0.len() != Stage3Claims::LEN {
@@ -489,12 +527,18 @@ mod tests {
     }
 
     #[test]
-    fn stage_three_has_one_hundred_and_eighteen_instances_in_spec_order() {
+    fn stage_three_has_forty_four_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
-        let spec = spec(&manifest);
+        let mut rng = SplitMix64::new(3);
+        let weights: Vec<Vec<E>> = (0..STACKS)
+            .map(|j| point(&mut rng, stack_columns(j).len()))
+            .collect();
+        let spec = spec(&manifest, &weights);
         spec.validate().unwrap();
-        assert_eq!(spec.groups.len(), 10);
-        // The ring instance spans two groups; every other gamma index appears once.
+        assert_eq!(GAMMA_COUNT, 44);
+        assert_eq!(spec.groups.len(), 7 + STACKS);
+        // The ring instance spans two groups and each stack reduction one part per column;
+        // every other gamma index appears once.
         let mut counts = vec![0; GAMMA_COUNT];
         for group in &spec.groups {
             for instance in &group.instances {
@@ -502,9 +546,14 @@ mod tests {
             }
         }
         assert_eq!(counts[GAMMA_RING], 2);
-        assert!(counts[1..].iter().all(|&c| c == 1));
-        assert_eq!(gamma_kappa1_r1(5, 2), 117);
-        assert_eq!(gamma_kappa3_tau(0), 98);
+        assert_eq!(
+            (0..STACKS).map(|j| counts[gamma_stack(j)]).collect::<Vec<_>>(),
+            [4, 6, 6, 1]
+        );
+        assert!(counts[1..gamma_stack(0)].iter().all(|&c| c == 1));
+        assert_eq!(gamma_kappa1_r1(5), 39);
+        assert_eq!(GAMMA_KAPPA3_TAU, 33);
+        assert_eq!(gamma_stack(3), 43);
         for group in &spec.groups {
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {
@@ -513,10 +562,15 @@ mod tests {
                 }
             }
         }
-        // Every committed column is read at r^(3).
+        // Every committed column but the multiplicity digits is read at r^(3).
         for group in manifest.groups() {
             for &column in &group.columns {
-                assert!(spec.lane_ids().contains(&LaneId::Column(column)));
+                assert_eq!(
+                    spec.lane_ids().contains(&LaneId::Column(column)),
+                    group.role != GroupRole::Mult,
+                    "{}",
+                    column.name()
+                );
             }
         }
     }

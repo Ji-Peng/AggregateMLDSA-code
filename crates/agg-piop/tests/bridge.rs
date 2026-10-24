@@ -25,7 +25,7 @@ use agg_piop::weights::{
 };
 use agg_piop::wire::{unpack_final_vector, AggregateProof};
 use agg_piop::OpeningField as E;
-use agg_witness::bridge::{self as reference, BridgeMatrices, BridgeTables};
+use agg_witness::bridge::{self as reference, BridgeMatrices};
 use agg_witness::gen::Record;
 use agg_witness::instance::PublicInstance;
 use agg_witness::padding::Geometry;
@@ -159,10 +159,13 @@ fn bridge_identities_in_the_256_signature_run_with_seed_derived_matrices() {
         // identities hold at every Boolean point, and the published Y is the GF(2) composite.
         let tables = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
         let expected = reference::compute(&geom, &lanes, &matrices).unwrap();
-        assert_eq!(
-            tables.to_witness_tables(),
-            BridgeTables::from_witness(&expected).unwrap()
-        );
+        assert_eq!(tables.carry_values(&manifest, 1), expected.kappa1.to_vec());
+        assert_eq!(tables.carry_values(&manifest, 2), expected.kappa2.to_vec());
+        assert_eq!(tables.carry_values(&manifest, 3), vec![expected.kappa3.clone()]);
+        for (ours, theirs) in tables.parities().iter().zip(&expected.y2) {
+            assert!(ours.iter().zip(theirs).all(|(&a, &b)| i64::from(a) == b));
+        }
+        assert!(tables.public_y().iter().zip(&expected.y).all(|(&a, &b)| i64::from(a) == b));
         let witness = parity::compute(&Shape::PRODUCTION, &lanes, &matrices).unwrap();
         parity::check(&Shape::PRODUCTION, &lanes, &matrices, &witness).unwrap();
         let proof = AggregateProof::from_bytes(&bytes).unwrap();
@@ -239,25 +242,21 @@ fn bridge_tampering_is_rejected_at_stage_one() {
         assert_eq!(run(&main, None), None);
 
         // A flipped final-vector bit, committed through the transcript: level3 (7.3) breaks.
-        let flip_y: BridgeTamper<'_> = &|manifest, tables| {
-            let mut witness = tables.to_witness_tables();
-            witness.y[11] ^= 1;
-            *tables = BridgeGroupTables::from_tables(manifest, witness).unwrap();
-        };
+        let flip_y: BridgeTamper<'_> = &|_, tables| tables.public_y_mut()[11] ^= 1;
         assert_eq!(run(&main, Some(flip_y)), Some(1));
         // A flipped level-2 parity: level2 (7.2) and level3 break.
-        let flip_y2: BridgeTamper<'_> = &|_, tables| tables.group_mut(GroupRole::Level2)[2][5] ^= 1;
+        let flip_y2: BridgeTamper<'_> = &|_, tables| tables.parities_mut()[2][5] ^= 1;
         assert_eq!(run(&main, Some(flip_y2)), Some(1));
-        // A level-1 carry digit moved within its alphabet: y^(1) leaves {0, 1} (bool_y1).
-        let carry1: BridgeTamper<'_> = &|_, tables| {
-            let cell = &mut tables.group_mut(GroupRole::Level1)[0][3];
-            *cell = if *cell < 7 { *cell + 1 } else { *cell - 1 };
+        // A level-1 carry moved inside T_16 (m recounted): y^(1) leaves {0, 1} (bool_y1).
+        let carry1: BridgeTamper<'_> = &|manifest, tables| {
+            tables.carries_mut(1)[3] += 1;
+            tables.recount(manifest, &main).unwrap();
         };
         assert_eq!(run(&main, Some(carry1)), Some(1));
-        // A level-3 carry digit moved within its alphabet: level3 breaks.
-        let carry3: BridgeTamper<'_> = &|_, tables| {
-            let cell = &mut tables.group_mut(GroupRole::Level3)[1][0];
-            *cell = if *cell < 7 { *cell + 1 } else { *cell - 1 };
+        // A level-3 carry moved inside T_16: level3 breaks.
+        let carry3: BridgeTamper<'_> = &|manifest, tables| {
+            tables.carries_mut(3)[0] += 1;
+            tables.recount(manifest, &main).unwrap();
         };
         assert_eq!(run(&main, Some(carry3)), Some(1));
         // A committed bit flipped in G_main under the stale honest round-2 tables: the level-1

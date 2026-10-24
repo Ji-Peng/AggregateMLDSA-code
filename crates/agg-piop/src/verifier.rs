@@ -9,16 +9,17 @@
 //! | --- | --- | --- |
 //! | `parse` | 1 | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
 //! | `public_data` | 2 | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
-//! | `transcript` | 3 | events 0 to 6: commitments parsed and absorbed, `sd`, `fs_sigma` |
+//! | `transcript` | 3 | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma` |
 //! | `matrices` | 3 | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) is spec 9.1) |
 //! | `keccak` | 3 | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks) |
+//! | `lookup` | 4 | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
 //! | `prestage` | 4 | `tau`, `Y(tau_3)`, pre-stage claims |
 //! | `stage1`, `stage2` | 5, 6 | rounds and terminal checks with `w_2, w_3, w_1` and the leaf predicates |
 //! | `stage3_rounds` | 6 | stage-3 rounds and terminal claims, ring claim deferred |
 //! | `public_pass` | 6 | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | 7 | the batched stage-3 terminal check |
 //! | `bits` | 7 | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
-//! | `opening` | 7 | the batched Akita opening of the 67 claims |
+//! | `opening` | 7 | the batched Akita opening of the 38 claims |
 //!
 //! Before step 1 the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
@@ -38,16 +39,19 @@ use agg_witness::params::{C_TILDE_BYTES, TR_BYTES, W1_BITS};
 use akita_types::Commitment;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
+use crate::lookup::{verify_in, LookupError};
 use crate::manifest::{Column, CommitmentManifest, GroupRole, GROUP_COUNT};
 use crate::opening::{opening_claims, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
-use crate::prover::BridgeDerivation;
+use crate::prover::{BridgeDerivation, PiopProof};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
+use crate::stage3::{LookupInputs, Stage3Output};
 use crate::transcript::{
     commitment_site, Transcript, TranscriptError, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE,
-    FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE, PRESTAGE_SITE, TAU_SITE,
+    FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE, MULTIPLICITY_SITE, PRESTAGE_SITE,
+    TAU_SITE,
 };
 use crate::wire::{unpack_final_vector, AggregateProof, WireError};
 use crate::{stage1, stage2, stage3, BaseField, OpeningField as E};
@@ -209,6 +213,9 @@ pub enum VerifyError {
     Transcript(TranscriptError),
     /// The Keccak side of a segment was rejected.
     Keccak(usize),
+    /// The lookup into `T_16` was rejected (root identity, a session, a shape, or the
+    /// multiplicity digits disagree with the table claim).
+    Lookup(LookupError),
     /// A stage was rejected.
     Stage(StageError),
     /// The committed bits differ from the Keccak side's bits at `r^(3)`.
@@ -227,6 +234,7 @@ impl std::fmt::Display for VerifyError {
             Self::Commitment(g) => write!(f, "{g:?}: commitment bytes are malformed"),
             Self::Transcript(e) => write!(f, "transcript: {e}"),
             Self::Keccak(s) => write!(f, "keccak side of segment {s} rejected"),
+            Self::Lookup(e) => write!(f, "lookup: {e}"),
             Self::Stage(e) => write!(f, "{e}"),
             Self::Bits => write!(f, "committed bits differ from the public bits"),
             Self::Opening(e) => write!(f, "opening: {e}"),
@@ -249,6 +257,11 @@ impl From<TranscriptError> for VerifyError {
 impl From<StageError> for VerifyError {
     fn from(e: StageError) -> Self {
         Self::Stage(e)
+    }
+}
+impl From<LookupError> for VerifyError {
+    fn from(e: LookupError) -> Self {
+        Self::Lookup(e)
     }
 }
 
@@ -279,6 +292,8 @@ pub struct VerifyTimings {
     pub matrices: Duration,
     /// The Keccak side per segment.
     pub keccak: Duration,
+    /// The lookup and the multiplicity-digit claims.
+    pub lookup: Duration,
     /// `tau`, `Y(tau_3)`, pre-stage claims.
     pub prestage: Duration,
     /// Stage 1.
@@ -304,13 +319,14 @@ pub struct VerifyTimings {
 impl VerifyTimings {
     /// `(name, duration)` per step, in order.
     #[must_use]
-    pub fn steps(&self) -> [(&'static str, Duration); 14] {
+    pub fn steps(&self) -> [(&'static str, Duration); 15] {
         [
             ("parse", self.parse),
             ("public_data", self.public_data),
             ("transcript", self.transcript),
             ("matrices", self.matrices),
             ("keccak", self.keccak),
+            ("lookup", self.lookup),
             ("prestage", self.prestage),
             ("stage1", self.stage1),
             ("stage2", self.stage2),
@@ -443,10 +459,15 @@ fn run(
     let record = instance_record(&manifest, &digest, flock);
     let mut transcript = Transcript::new(&manifest, &record)?;
     let mut commitments: Vec<Commitment<BaseField>> = Vec::with_capacity(GROUP_COUNT);
-    let main_commitment = parse_commitment(plan, GroupRole::Main, &proof.main_commitment)
-        .map_err(|_| VerifyError::Commitment(GroupRole::Main))?;
-    transcript.absorb(commitment_site(GroupRole::Main), 1, &proof.main_commitment)?;
-    commitments.push(main_commitment);
+    for (role, bytes) in [
+        (GroupRole::Main16, &proof.main16_commitment),
+        (GroupRole::Main, &proof.main_commitment),
+    ] {
+        let commitment =
+            parse_commitment(plan, role, bytes).map_err(|_| VerifyError::Commitment(role))?;
+        transcript.absorb(commitment_site(role), 1, bytes)?;
+        commitments.push(commitment);
+    }
     transcript.absorb_items(FLOCK_COMMIT_SITE, &proof.flock_commitments)?;
     let bridge_seed: [u8; 32] = transcript
         .challenge_bytes(BRIDGE_SEED_SITE, 1)?
@@ -455,7 +476,7 @@ fn run(
     timings.transcript = clock.lap();
     let matrices = bridge.matrices(&bridge_seed);
     timings.matrices = clock.lap();
-    for (role, bytes) in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3]
+    for (role, bytes) in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult]
         .into_iter()
         .zip(&proof.bridge_commitments)
     {
@@ -500,51 +521,25 @@ fn run(
     }
     timings.keccak = clock.lap();
 
-    // Step 4: tau, the pre-stage claims, Y(tau_3).
-    let mut points = Points {
-        tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
-        ..Points::default()
+    // Steps 4 to 7: the lookup, tau, the pre-stage claims and the stages; the public pass
+    // runs inside stage 3 once r^(3) is known.
+    let piop = PiopProof {
+        lookup: proof.lookup.clone(),
+        multiplicities: proof.multiplicities.clone(),
+        prestage: proof.prestage.clone(),
+        stage1: proof.stage1.clone(),
+        stage2: proof.stage2.clone(),
+        stage3: proof.stage3.clone(),
     };
-    transcript.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
-    let y_at_tau3 = agg_bridge::final_vector::evaluate(
-        &y_table,
-        &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
-    );
-    timings.prestage = clock.lap();
-
-    // Steps 5 to 7: the stages; the public pass runs inside stage 3 once r^(3) is known.
-    let stage1 = stage1::verify(
-        &manifest,
-        &matrices,
-        &points,
-        &proof.prestage,
-        y_at_tau3,
-        &proof.stage1,
-        &mut transcript,
-    )?;
-    points.r1 = stage1.point.clone();
-    timings.stage1 = clock.lap();
-    let stage2 = stage2::verify(
-        &manifest,
-        &matrices,
-        &points,
-        &stage1,
-        &proof.stage2,
-        &mut transcript,
-    )?;
-    points.r2 = stage2.point.clone();
-    timings.stage2 = clock.lap();
-    let stage3_start = Instant::now();
     let mut pass_window = None;
     let mut pass_result = None;
-    let stage3 = stage3::verify_streamed(
+    let verified = verify_piop(
         &manifest,
-        &points,
-        &proof.prestage,
-        &stage1,
-        &stage2,
-        &proof.stage3,
+        &matrices,
+        &y_table,
+        &piop,
         &mut transcript,
+        timings,
         |r2, r3| {
             let started = Instant::now();
             let pass = public.pass(r2, r3, cache);
@@ -553,18 +548,17 @@ fn run(
             (pass.t_at_r2, pass.ring_weight)
         },
     );
-    let stage3_end = Instant::now();
-    clock.0 = stage3_end;
+    clock.0 = verified.stage3_end;
     match (pass_window, pass_result) {
         (Some((started, finished)), Some(pass)) => {
-            timings.stage3_rounds = started - stage3_start;
+            timings.stage3_rounds = started - verified.stage3_start;
             timings.public_t = pass.t_time;
             timings.public_a = pass.a_time;
-            timings.stage3_terminal = stage3_end - finished;
+            timings.stage3_terminal = verified.stage3_end - finished;
         }
-        _ => timings.stage3_rounds = stage3_end - stage3_start,
+        _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
     }
-    let stage3 = stage3?;
+    let (_, stage3, pi_m) = verified.outcome?;
     let expanded_keys = pass_result.map_or(0, |pass| pass.expanded);
 
     // The Keccak side's check of the committed bits at r^(3).
@@ -582,10 +576,16 @@ fn run(
     // Event 12: the opening.
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
-    let claims: [GroupClaim; GROUP_COUNT] =
-        opening_claims(&manifest, &stage3.point, &stage3.claims).map_err(VerifyError::Opening)?;
+    let claims: [GroupClaim; GROUP_COUNT] = opening_claims(
+        &manifest,
+        &stage3.point,
+        &stage3.claims,
+        &pi_m,
+        &proof.multiplicities,
+    )
+    .map_err(VerifyError::Opening)?;
     let commitments: [Commitment<BaseField>; GROUP_COUNT] =
-        commitments.try_into().expect("four commitments");
+        commitments.try_into().expect("six commitments");
     pcs.verify(&commitments, &claims, &proof.opening, &session)
         .map_err(|e| VerifyError::Opening(PcsError::Commit(e)))?;
     timings.opening = clock.lap();
@@ -595,6 +595,94 @@ fn run(
         session,
         expanded_keys,
     })
+}
+
+/// What [`verify_piop`] returns: the outcome (`(tau, r^(1), r^(2), lookup points)`, the
+/// stage-3 output and the table point `pi_m`) and the stage-3 window for the timings.
+pub struct PiopVerified {
+    /// Accept with the points and claims, or the first failing check.
+    pub outcome: Result<(Points, Stage3Output, Vec<E>), VerifyError>,
+    /// When stage 3 started.
+    pub stage3_start: Instant,
+    /// When stage 3 ended.
+    pub stage3_end: Instant,
+}
+
+/// Verify the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6:
+/// the lookup (`lookup::verify_in`, the claims on the stacked lanes and on `m`), the
+/// multiplicity-digit claims (`sum_k 16^k m_k(pi_m) = m(pi_m)`), `tau`, the pre-stage claims
+/// with `Y(tau_3)` from `y_table`, and stages 1 to 3 with the public pass deferred
+/// (`public_pass(r^(2), r^(3)) = (T(r^(2)), w_A(r^(3)))`). The stage-3 claims and the
+/// digit claims are then the opening claims; the caller verifies the opening.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_piop(
+    manifest: &CommitmentManifest,
+    matrices: &BridgeMatrices,
+    y_table: &[u8],
+    proof: &PiopProof,
+    transcript: &mut Transcript,
+    timings: &mut VerifyTimings,
+    public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
+) -> PiopVerified {
+    let mut clock = Lap(Instant::now());
+    let mut stage3_start = clock.0;
+    let outcome = (|| {
+        // The lookup and the digits of m.
+        let lookup = verify_in(&manifest.lookup_shape(), &proof.lookup, transcript)?;
+        transcript.absorb_extensions(MULTIPLICITY_SITE, &proof.multiplicities.0)?;
+        let (pi_m, m_at_pi) = lookup.multiplicities[0].clone();
+        if proof.multiplicities.compose() != m_at_pi {
+            return Err(VerifyError::Lookup(LookupError::Terminal(0)));
+        }
+        let (lookup_inputs, stack_points) = LookupInputs::new(manifest, &lookup);
+        timings.lookup = clock.lap();
+
+        // tau, the pre-stage claims, Y(tau_3).
+        let mut points = Points {
+            tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
+            lookup: stack_points,
+            ..Points::default()
+        };
+        transcript.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
+        let y_at_tau3 = agg_bridge::final_vector::evaluate(
+            y_table,
+            &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
+        );
+        timings.prestage = clock.lap();
+
+        let stage1 = stage1::verify(
+            manifest,
+            matrices,
+            &points,
+            &proof.prestage,
+            y_at_tau3,
+            &proof.stage1,
+            transcript,
+        )?;
+        points.r1 = stage1.point.clone();
+        timings.stage1 = clock.lap();
+        let stage2 = stage2::verify(manifest, matrices, &points, &stage1, &proof.stage2, transcript)?;
+        points.r2 = stage2.point.clone();
+        timings.stage2 = clock.lap();
+        stage3_start = clock.0;
+        let stage3 = stage3::verify_streamed(
+            manifest,
+            &points,
+            &proof.prestage,
+            &stage1,
+            &stage2,
+            &lookup_inputs,
+            &proof.stage3,
+            transcript,
+            public_pass,
+        )?;
+        Ok((points, stage3, pi_m))
+    })();
+    PiopVerified {
+        outcome,
+        stage3_start,
+        stage3_end: Instant::now(),
+    }
 }
 
 #[cfg(test)]

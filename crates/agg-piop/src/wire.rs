@@ -1,11 +1,15 @@
-//! Proof wire format (spec Section 10): header (version, flags, `N`), the `32N` bytes of
-//! `c~_i`, then the payloads of events 1, 2, 4, 6, 8 to 11 in order, then the Akita
-//! opening. Variable-length items carry a `LE32` length; field elements use the
-//! canonical atom encoding of the transcript; the round counts follow from `N`.
+//! Proof wire format (spec Section 10, wire version 1): header (version, flags, `N`), the
+//! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, the lookup (event 7) and
+//! the stages (events 9 to 12) in order, then the Akita opening. Variable-length items carry
+//! a `LE32` length; field elements use the canonical atom encoding of the transcript; the
+//! round and session counts follow from `N`.
 
 use agg_witness::params::C_TILDE_BYTES;
 
-use crate::claims::{Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
+use crate::claims::{
+    Kappa1Claims, MultiplicityClaims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims,
+};
+use crate::lookup::{LookupProof, LookupShape, SessionProof, DEGREE as LOOKUP_DEGREE};
 use crate::manifest::{CommitmentManifest, RELATION_H, WIRE_VERSION};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
@@ -47,17 +51,23 @@ pub struct AggregateProof {
     pub records: usize,
     /// `c~_i` per live record.
     pub c_tilde: Vec<[u8; C_TILDE_BYTES]>,
-    /// Event 1: the round-1 Akita commitment (`G_main`).
+    /// Event 1: the round-1 Akita commitment of `G_main16`.
+    pub main16_commitment: Vec<u8>,
+    /// Event 1: the round-1 Akita commitment of `G_main4`.
     pub main_commitment: Vec<u8>,
     /// Event 2: `S` Flock commitments.
     pub flock_commitments: Vec<Vec<u8>>,
-    /// Event 4: the round-2 Akita commitments (`G_1, G_2, G_3`).
-    pub bridge_commitments: [Vec<u8>; 3],
+    /// Event 4: the round-2 Akita commitments (`G_1, G_2, G_3, G_m`).
+    pub bridge_commitments: [Vec<u8>; 4],
     /// Event 6: `Y_sigma`, 4,096 bits packed least significant first.
     pub final_vectors: Vec<[u8; FINAL_VECTOR_BYTES]>,
     /// Event 6: `S` Flock proof byte strings.
     pub flock_proofs: Vec<Vec<u8>>,
-    /// Event 8.
+    /// Event 7: the lookup (layer 1 and the sessions).
+    pub lookup: LookupProof,
+    /// Event 7: the multiplicity-digit claims at the table point.
+    pub multiplicities: MultiplicityClaims,
+    /// Event 9.
     pub prestage: PreStageClaims,
     /// Event 9.
     pub stage1: Stage1Proof,
@@ -135,6 +145,7 @@ impl AggregateProof {
         for c in &self.c_tilde {
             w.bytes(c);
         }
+        w.framed(&self.main16_commitment);
         w.framed(&self.main_commitment);
         w.bytes(&(self.flock_commitments.len() as u32).to_le_bytes());
         for item in &self.flock_commitments {
@@ -149,6 +160,15 @@ impl AggregateProof {
         for item in &self.flock_proofs {
             w.framed(item);
         }
+        for layer in &self.lookup.layer1 {
+            w.elements(layer);
+        }
+        for session in &self.lookup.sessions {
+            w.rounds(&session.rounds);
+            w.elements(&session.terminals.concat());
+            w.elements(&session.leaves.concat());
+        }
+        w.elements(&self.multiplicities.0);
         w.elements(&self.prestage.to_vec());
         w.rounds(&self.stage1.rounds);
         w.elements(&self.stage1.claims.to_vec());
@@ -183,6 +203,7 @@ impl AggregateProof {
         let c_tilde = (0..records)
             .map(|_| r.array::<C_TILDE_BYTES>())
             .collect::<Result<Vec<_>, _>>()?;
+        let main16_commitment = r.framed()?;
         let main_commitment = r.framed()?;
         let count = u32::from_le_bytes(r.array()?) as usize;
         if count != segments {
@@ -191,13 +212,16 @@ impl AggregateProof {
         let flock_commitments = (0..segments)
             .map(|_| r.framed())
             .collect::<Result<Vec<_>, _>>()?;
-        let bridge_commitments = [r.framed()?, r.framed()?, r.framed()?];
+        let bridge_commitments = [r.framed()?, r.framed()?, r.framed()?, r.framed()?];
         let final_vectors = (0..segments)
             .map(|_| r.array::<FINAL_VECTOR_BYTES>())
             .collect::<Result<Vec<_>, _>>()?;
         let flock_proofs = (0..segments)
             .map(|_| r.framed())
             .collect::<Result<Vec<_>, _>>()?;
+        let lookup = read_lookup(&mut r, &manifest.lookup_shape())?;
+        let multiplicities = MultiplicityClaims::from_slice(&r.elements(MultiplicityClaims::LEN)?)
+            .ok_or(WireError::Shape("multiplicity claims"))?;
         let prestage = PreStageClaims::from_slice(&r.elements(PreStageClaims::LEN)?)
             .ok_or(WireError::Shape("pre-stage claims"))?;
         let stage1 = Stage1Proof {
@@ -224,11 +248,14 @@ impl AggregateProof {
         Ok(Self {
             records,
             c_tilde,
+            main16_commitment,
             main_commitment,
             flock_commitments,
             bridge_commitments,
             final_vectors,
             flock_proofs,
+            lookup,
+            multiplicities,
             prestage,
             stage1,
             stage2,
@@ -237,7 +264,14 @@ impl AggregateProof {
         })
     }
 
-    /// The PIOP part of the proof in bytes (events 8 to 11).
+    /// The lookup part of the proof in bytes (event 7: layer 1, the sessions and the
+    /// multiplicity-digit claims).
+    #[must_use]
+    pub fn lookup_bytes(&self) -> usize {
+        self.lookup.byte_len() + 16 * MultiplicityClaims::LEN
+    }
+
+    /// The PIOP part of the proof in bytes (events 9 to 12, without the lookup).
     #[must_use]
     pub fn piop_bytes(&self) -> usize {
         let rounds = self.stage1.rounds.len();
@@ -257,7 +291,7 @@ pub struct ProofSize {
     pub header: usize,
     /// The `32 N` bytes of `c~_i`.
     pub c_tilde: usize,
-    /// Events 1 and 4: the four Akita commitments.
+    /// Events 1 and 4: the six Akita commitments.
     pub akita_commitments: usize,
     /// Event 2: the Keccak-side items (Flock commitments; mode B: the public bits).
     pub keccak_commitments: usize,
@@ -265,7 +299,9 @@ pub struct ProofSize {
     pub final_vectors: usize,
     /// Event 6: the Keccak-side proofs.
     pub keccak_proofs: usize,
-    /// Events 8 to 11: claims and round messages.
+    /// Event 7: the lookup and the multiplicity claims.
+    pub lookup: usize,
+    /// Events 9 to 12: claims and round messages.
     pub piop: usize,
     /// Event 12: the Akita opening.
     pub opening: usize,
@@ -281,6 +317,7 @@ impl ProofSize {
             + self.keccak_commitments
             + self.final_vectors
             + self.keccak_proofs
+            + self.lookup
             + self.piop
             + self.opening
     }
@@ -294,14 +331,38 @@ impl AggregateProof {
         ProofSize {
             header: 2 + 1 + 8,
             c_tilde: C_TILDE_BYTES * self.c_tilde.len(),
-            akita_commitments: 4 + self.main_commitment.len() + framed(&self.bridge_commitments),
+            akita_commitments: 8
+                + self.main16_commitment.len()
+                + self.main_commitment.len()
+                + framed(&self.bridge_commitments),
             keccak_commitments: 4 + framed(&self.flock_commitments),
             final_vectors: FINAL_VECTOR_BYTES * self.final_vectors.len(),
             keccak_proofs: framed(&self.flock_proofs),
+            lookup: self.lookup_bytes(),
             piop: self.piop_bytes(),
             opening: 4 + self.opening.len(),
         }
     }
+}
+
+fn chunks<const M: usize>(values: &[E]) -> Vec<[E; M]> {
+    values.as_chunks::<M>().0.to_vec()
+}
+
+/// The lookup proof of `shape`: `4` layer-1 values per tree, then per session the rounds,
+/// the terminals and the leaves.
+fn read_lookup(r: &mut Reader<'_>, shape: &LookupShape) -> Result<LookupProof, WireError> {
+    let layer1 = chunks::<4>(&r.elements(4 * shape.tree_count())?);
+    let mut sessions = Vec::new();
+    for s in 2..=shape.max_depth() {
+        let (_, continuing, ending) = shape.session_counts(s);
+        sessions.push(SessionProof {
+            rounds: r.rounds(s - 1, LOOKUP_DEGREE)?,
+            terminals: chunks::<4>(&r.elements(4 * continuing)?),
+            leaves: chunks::<2>(&r.elements(2 * ending)?),
+        });
+    }
+    Ok(LookupProof { layer1, sessions })
 }
 
 /// Pack 4,096 bits (one byte each) into 512 bytes, least significant bit first
@@ -326,6 +387,23 @@ mod tests {
     use crate::test_support::point;
     use agg_witness::gen::SplitMix64;
 
+    fn sample_lookup(shape: &LookupShape, rng: &mut SplitMix64) -> LookupProof {
+        let four = |rng: &mut SplitMix64, n: usize| chunks::<4>(&point(rng, 4 * n));
+        LookupProof {
+            layer1: four(rng, shape.tree_count()),
+            sessions: (2..=shape.max_depth())
+                .map(|s| {
+                    let (_, continuing, ending) = shape.session_counts(s);
+                    SessionProof {
+                        rounds: (0..s - 1).map(|_| point(rng, LOOKUP_DEGREE)).collect(),
+                        terminals: four(rng, continuing),
+                        leaves: chunks::<2>(&point(rng, 2 * ending)),
+                    }
+                })
+                .collect(),
+        }
+    }
+
     fn sample_proof(records: usize, rng: &mut SplitMix64) -> AggregateProof {
         let manifest = CommitmentManifest::for_batch(records).unwrap();
         let rounds = manifest.d_main();
@@ -336,11 +414,14 @@ mod tests {
         AggregateProof {
             records,
             c_tilde: (0..records).map(|i| [i as u8; 32]).collect(),
+            main16_commitment: vec![1, 2],
             main_commitment: vec![1, 2, 3],
             flock_commitments: vec![vec![4; 10]; segments],
-            bridge_commitments: [vec![5], vec![], vec![6, 7]],
+            bridge_commitments: [vec![5], vec![], vec![6, 7], vec![8]],
             final_vectors: vec![[8; 512]; segments],
             flock_proofs: vec![vec![]; segments],
+            lookup: sample_lookup(&manifest.lookup_shape(), rng),
+            multiplicities: MultiplicityClaims::from_slice(&point(rng, MultiplicityClaims::LEN)).unwrap(),
             prestage: PreStageClaims::from_slice(&point(rng, PreStageClaims::LEN)).unwrap(),
             stage1: Stage1Proof {
                 rounds: rounds_of(4, rng),
@@ -369,7 +450,9 @@ mod tests {
             let size = proof.size();
             assert_eq!(size.total(), bytes.len());
             assert_eq!((size.c_tilde, size.piop), (32 * records, proof.piop_bytes()));
-            assert_eq!(proof.piop_bytes(), 16 * (26 + 98 + 18 + 61 + 67 + 12 * proof.stage1.rounds.len()));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 31 + 12 * proof.stage1.rounds.len()));
+            let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();
+            assert_eq!(size.lookup, 16 * (shape.proof_elements() + 7));
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
             let mut trailing = bytes.clone();
             trailing.push(0);
@@ -377,14 +460,17 @@ mod tests {
             let mut version = bytes.clone();
             version[0] = 9;
             assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(9)));
+            // The retired wire version 0 is refused.
+            version[0] = 0;
+            assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(0)));
             let mut flags = bytes.clone();
             flags[2] = 1;
             assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(1)));
             let mut n = bytes.clone();
             n[3..11].copy_from_slice(&0_u64.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&n), Err(WireError::Records(0)));
-            // A non-canonical limb in the pre-stage claims.
-            let offset = 11 + 32 * records + 4 + 3 + 4 + 4 + 10 + 4 + 1 + 4 + 4 + 2 + 512 + 4;
+            // A non-canonical limb in the first lookup element.
+            let offset = 11 + 32 * records + (4 + 2) + (4 + 3) + 4 + 4 + 10 + (4 + 1) + 4 + (4 + 2) + (4 + 1) + 512 + 4;
             let mut limb = bytes.clone();
             limb[offset..offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&limb), Err(WireError::Encoding));

@@ -20,13 +20,6 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    /// A value of the group's honest alphabet: Booleans for the bit and
-    /// parity columns, balanced digits otherwise (every one inside `[-8, 7]`).
-    pub fn digit(&mut self, base: i64) -> i8 {
-        let value = (self.next() % base as u64) as i64 - base / 2;
-        i8::try_from(value).expect("small digit")
-    }
-
     pub fn field(&mut self) -> OpeningField {
         OpeningField::from_base_slice(&[
             BaseField::from_u64(self.next()),
@@ -35,30 +28,33 @@ impl Rng {
     }
 }
 
-/// Digit bases of each group's polynomials, spec Section 4.1 (`0` marks a
-/// Boolean column).
+/// The honest alphabet of each group's polynomials (spec Section 4.1, lookup layout L16):
+/// `0` marks a Boolean column, `b > 0` a balanced base-`b` digit, so a 16-bit lookup column
+/// is base `2^16`, a multiplicity digit base 16.
 pub fn bases(group: Group) -> Vec<i64> {
+    let wide = 1 << 16;
     match group {
-        Group::Main => [
-            16, 16, 16, 16, 4, 16, 16, 16, 16, 8, 16, 16, 16, 16, 16, 16, 8, 0, 0, 0, 0, 0, 0,
-        ]
-        .to_vec(),
-        Group::Level1 => [16, 16, 4].repeat(6),
+        Group::Main16 => vec![wide; 4],
+        Group::Main => [4, 8, 0, 0, 0, 0, 0, 0].to_vec(),
+        Group::Level1 => vec![wide; 6],
         Group::Level2 => {
             let mut bases = vec![0; 6];
-            bases.extend([16, 16, 4].repeat(6));
+            bases.extend([wide; 6]);
             bases
         }
-        Group::Level3 => vec![16, 16],
+        Group::Level3 => vec![wide],
+        Group::Mult => vec![16; 7],
     }
 }
 
-/// Dummy tables of one group; the rows of padded signatures (`i >= live`) are
-/// the canonical digits of zero, `-b/2`, and zero bits (spec Section 4.2).
-pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i8>> {
+/// Dummy tables of one group; the rows of padded signatures (`i >= live`) are the
+/// canonical digits of zero (`-2^15` for the 16-bit columns, `0` for the top digits and
+/// bits; spec Section 4.2).
+pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i32>> {
     let cells = plan.logical_cells(group);
     let bases = bases(group);
     assert_eq!(bases.len(), group.num_polynomials());
+    let main = matches!(group, Group::Main16 | Group::Main);
     bases
         .iter()
         .map(|&base| {
@@ -66,12 +62,13 @@ pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i8>
                 .map(|cell| {
                     // Main-domain index order is (j, rho or s, i): the
                     // signature index is the top d_sig bits.
-                    let padded = group == Group::Main && (cell >> 10) >= plan.records;
+                    let padded = main && (cell >> 10) >= plan.records;
                     match (base, padded) {
                         (0, true) => 0,
-                        (0, false) => (rng.next() & 1) as i8,
-                        (_, true) => i8::try_from(-base / 2).unwrap(),
-                        (_, false) => rng.digit(base),
+                        (0, false) => (rng.next() & 1) as i32,
+                        (65_536, true) => -32_768,
+                        (_, true) => 0,
+                        (_, false) => (rng.next() % base as u64) as i32 - (base / 2) as i32,
                     }
                 })
                 .collect()
@@ -79,9 +76,15 @@ pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i8>
         .collect()
 }
 
-pub fn claims(plan: &WorkPlan, tables: &[Vec<Vec<i8>>; 4], rng: &mut Rng) -> [GroupClaim; 4] {
+pub fn claims(plan: &WorkPlan, tables: &[Vec<Vec<i32>>; 6], rng: &mut Rng) -> [GroupClaim; 6] {
+    // Both main groups share one point (the stage-3 terminal), as in the protocol.
+    let main_point: Vec<OpeningField> = (0..plan.logical_vars(Group::Main)).map(|_| rng.field()).collect();
     Group::ALL.map(|group| {
-        let point: Vec<OpeningField> = (0..plan.logical_vars(group)).map(|_| rng.field()).collect();
+        let point: Vec<OpeningField> = if matches!(group, Group::Main16 | Group::Main) {
+            main_point.clone()
+        } else {
+            (0..plan.logical_vars(group)).map(|_| rng.field()).collect()
+        };
         let values = tables[group.index()]
             .iter()
             .map(|table| evaluate_signed_table(table, &point))

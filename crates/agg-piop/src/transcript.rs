@@ -19,6 +19,7 @@ use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{CShake256, CShake256Core};
 use spongefish::{DomainSeparator, DuplexSpongeInterface, Encoding, VerifierState, WithoutInstance};
 
+use crate::lookup::{LookupError, LookupSite, LookupTranscript, DEGREE as LOOKUP_DEGREE};
 use crate::manifest::{CommitmentManifest, GroupRole};
 use crate::{BaseField, OpeningField};
 
@@ -30,14 +31,16 @@ pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
 /// Stage message degrees (spec Section 7.1).
 pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
-/// Batching coefficients per stage (spec Section 7).
-pub const STAGE_GAMMAS: [usize; 3] = [66, 101, 118];
+/// Batching coefficients per stage (spec Section 7, lookup layout L16).
+pub const STAGE_GAMMAS: [usize; 3] = [26, 8, 44];
 /// Terminal claims per stage.
-pub const STAGE_TERMINALS: [usize; 3] = [98, 61, 67];
+pub const STAGE_TERMINALS: [usize; 3] = [18, 8, 31];
 /// Pre-stage claims (spec Section 7.2).
-pub const PRESTAGE_CLAIMS: usize = 26;
-/// Level-1 carry digit claims before stage 2 (spec Section 7.4).
-pub const KAPPA1_CLAIMS: usize = 18;
+pub const PRESTAGE_CLAIMS: usize = 13;
+/// Level-1 carry claims before stage 2 (spec Section 7.4).
+pub const KAPPA1_CLAIMS: usize = 6;
+/// Multiplicity-digit claims after the lookup.
+pub const MULTIPLICITY_CLAIMS: usize = agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
 /// Bytes of one packed final vector `Y_sigma` (512, `agg_bridge::final_vector`).
 pub const FINAL_VECTOR_BYTES: usize =
     agg_bridge::final_vector::segment_bytes(&agg_bridge::Shape::PRODUCTION);
@@ -51,6 +54,9 @@ pub const FLOCK_PROOFS_SITE: &str = "agg-mldsa/v1/flock/proofs";
 pub const TAU_SITE: &str = "agg-mldsa/v1/tau";
 pub const PRESTAGE_SITE: &str = "agg-mldsa/v1/prestage/claims";
 pub const KAPPA1_SITE: &str = "agg-mldsa/v1/stage2/kappa1";
+pub const MULTIPLICITY_SITE: &str = "agg-mldsa/v1/lookup/multiplicities";
+/// Prefix of the lookup sites (`agg-mldsa/v1/lookup/<LookupSite::label>`).
+pub const LOOKUP_PREFIX: &str = "agg-mldsa/v1/lookup/";
 pub const PCS_SESSION_SITE: &str = "agg-mldsa/v1/pcs/session";
 
 const PUBLIC_KIND: u8 = 0;
@@ -73,11 +79,19 @@ const fn protocol_tag() -> [u8; 64] {
 #[must_use]
 pub const fn commitment_site(role: GroupRole) -> &'static str {
     match role {
+        GroupRole::Main16 => "agg-mldsa/v1/commit/main16",
         GroupRole::Main => "agg-mldsa/v1/commit/main",
         GroupRole::Level1 => "agg-mldsa/v1/commit/level1",
         GroupRole::Level2 => "agg-mldsa/v1/commit/level2",
         GroupRole::Level3 => "agg-mldsa/v1/commit/level3",
+        GroupRole::Mult => "agg-mldsa/v1/commit/mult",
     }
+}
+
+/// The PIOP transcript site of a lookup event.
+#[must_use]
+pub fn lookup_site(site: LookupSite) -> String {
+    format!("{LOOKUP_PREFIX}{}", site.label())
 }
 
 /// The gamma site of a stage (`1..=3`).
@@ -164,7 +178,7 @@ impl Registry {
     pub fn new(manifest: &CommitmentManifest) -> Self {
         let rounds = manifest.d_main();
         let segments = manifest.segments();
-        let mut events = Vec::with_capacity(24 + 6 * rounds);
+        let mut events = Vec::with_capacity(32 + 6 * rounds + 4 * rounds * rounds);
         let mut absorb = |site: &str, kind: u8, atoms: usize, size: PayloadSize| {
             events.push(RegistryEvent {
                 site: site.to_owned(),
@@ -173,16 +187,14 @@ impl Registry {
                 size,
             });
         };
+        let elements = |count: usize| PayloadSize::Exact(16 * count);
         absorb(INSTANCE_SITE, PUBLIC_KIND, 1, PayloadSize::Variable);
-        absorb(
-            commitment_site(GroupRole::Main),
-            PROOF_KIND,
-            1,
-            PayloadSize::Variable,
-        );
+        for role in [GroupRole::Main16, GroupRole::Main] {
+            absorb(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
+        }
         absorb(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         absorb(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3] {
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
             absorb(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
         absorb(
@@ -198,6 +210,28 @@ impl Registry {
             PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
         );
         absorb(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        // The lookup (docs/lookup.md Section 1): X, layer 1, mu_1, the sessions, then the
+        // multiplicity-digit claims.
+        let shape = manifest.lookup_shape();
+        let challenges = shape.challenges;
+        let mut lookup = |site: LookupSite, kind: u8, atoms: usize| {
+            absorb(&lookup_site(site), kind, atoms, elements(atoms));
+        };
+        lookup(LookupSite::X, CHALLENGE_KIND, challenges);
+        lookup(LookupSite::Layer1, PROOF_KIND, 4 * shape.tree_count());
+        lookup(LookupSite::Mu(1), CHALLENGE_KIND, 1);
+        for s in 2..=shape.max_depth() {
+            let (active, continuing, ending) = shape.session_counts(s);
+            lookup(LookupSite::Gamma(s), CHALLENGE_KIND, 2 * active);
+            for round in 0..s - 1 {
+                lookup(LookupSite::Round(s, round), PROOF_KIND, LOOKUP_DEGREE);
+                lookup(LookupSite::RoundChallenge(s, round), CHALLENGE_KIND, 1);
+            }
+            lookup(LookupSite::Terminals(s), PROOF_KIND, 4 * continuing);
+            lookup(LookupSite::Leaves(s), PROOF_KIND, 2 * ending);
+            lookup(LookupSite::Mu(s), CHALLENGE_KIND, 1);
+        }
+        absorb(MULTIPLICITY_SITE, PROOF_KIND, MULTIPLICITY_CLAIMS, elements(MULTIPLICITY_CLAIMS));
         absorb(TAU_SITE, CHALLENGE_KIND, rounds, PayloadSize::Exact(16 * rounds));
         absorb(
             PRESTAGE_SITE,
@@ -473,6 +507,18 @@ impl Transcript {
     }
 }
 
+impl LookupTranscript for Transcript {
+    fn absorb(&mut self, site: LookupSite, values: &[OpeningField]) -> Result<(), LookupError> {
+        self.absorb_extensions(&lookup_site(site), values)
+            .map_err(|e| LookupError::Transcript(e.to_string()))
+    }
+
+    fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<OpeningField>, LookupError> {
+        self.challenge_extensions(&lookup_site(site), count)
+            .map_err(|e| LookupError::Transcript(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,43 +528,74 @@ mod tests {
         CommitmentManifest::for_batch(100).unwrap()
     }
 
+    /// The events before the lookup: instance, two round-1 commitments, Flock commitments,
+    /// seed, four round-2 commitments, Flock seeds, final vectors, Flock proofs.
+    const LEADING: usize = 12;
+
+    fn lookup_events(manifest: &CommitmentManifest) -> usize {
+        let shape = manifest.lookup_shape();
+        3 + (2..=shape.max_depth()).map(|s| 4 + 2 * (s - 1)).sum::<usize>() + 1
+    }
+
     #[test]
     fn registry_has_the_spec_event_order() {
-        let registry = Registry::new(&manifest());
+        let manifest = manifest();
+        let registry = Registry::new(&manifest);
         let rounds = 17;
-        // 12 leading events, the kappa1 absorb, three stages of gamma + rounds + terminal, the PCS export.
-        assert_eq!(registry.len(), 12 + 1 + 3 * (2 + 2 * rounds) + 1);
+        let lookup = lookup_events(&manifest);
+        // Leading events, the lookup, tau and the pre-stage claims, the kappa1 absorb,
+        // three stages of gamma + rounds + terminal, the PCS export.
+        assert_eq!(
+            registry.len(),
+            LEADING + lookup + 2 + 1 + 3 * (2 + 2 * rounds) + 1
+        );
         let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
         assert_eq!(
-            &sites[..12],
+            &sites[..LEADING + 2],
             &[
                 INSTANCE_SITE,
+                "agg-mldsa/v1/commit/main16",
                 "agg-mldsa/v1/commit/main",
                 FLOCK_COMMIT_SITE,
                 BRIDGE_SEED_SITE,
                 "agg-mldsa/v1/commit/level1",
                 "agg-mldsa/v1/commit/level2",
                 "agg-mldsa/v1/commit/level3",
+                "agg-mldsa/v1/commit/mult",
                 FLOCK_SEEDS_SITE,
                 FINAL_VECTORS_SITE,
                 FLOCK_PROOFS_SITE,
-                TAU_SITE,
-                PRESTAGE_SITE,
+                "agg-mldsa/v1/lookup/x",
+                "agg-mldsa/v1/lookup/layer1",
             ]
         );
-        assert_eq!(sites[12], "agg-mldsa/v1/stage1/gamma");
-        assert_eq!(sites[13], "agg-mldsa/v1/stage1/round/0/message");
-        assert_eq!(sites[12 + 1 + 2 * rounds], "agg-mldsa/v1/stage1/terminal");
-        assert_eq!(sites[12 + 2 + 2 * rounds], KAPPA1_SITE);
+        let after = LEADING + lookup;
+        assert_eq!(sites[after - 1], MULTIPLICITY_SITE);
+        assert_eq!(&sites[after..after + 2], &[TAU_SITE, PRESTAGE_SITE]);
+        assert_eq!(sites[after + 2], "agg-mldsa/v1/stage1/gamma");
+        assert_eq!(sites[after + 3], "agg-mldsa/v1/stage1/round/0/message");
+        assert_eq!(sites[after + 3 + 2 * rounds], "agg-mldsa/v1/stage1/terminal");
+        assert_eq!(sites[after + 4 + 2 * rounds], KAPPA1_SITE);
         assert_eq!(sites[registry.len() - 1], PCS_SESSION_SITE);
         let kinds: Vec<u8> = registry.events.iter().map(|e| e.kind).collect();
-        assert_eq!(&kinds[..4], &[0, 1, 1, 2]);
-        assert_eq!(registry.events[3].size, PayloadSize::Exact(32));
-        assert_eq!(registry.events[7].atoms, 1, "one segment at N = 100");
-        assert_eq!(registry.events[10].atoms, rounds);
+        assert_eq!(&kinds[..5], &[0, 1, 1, 1, 2]);
+        assert_eq!(registry.events[4].size, PayloadSize::Exact(32));
+        assert_eq!(registry.events[9].atoms, 1, "one segment at N = 100");
+        // Two lookup challenges, 4 layer-1 values per tree (2 x (4 stacks + 1 table)).
+        assert_eq!(registry.events[LEADING].atoms, 2);
+        assert_eq!(registry.events[LEADING + 1].atoms, 40);
+        assert_eq!(registry.events[after].atoms, rounds);
         let full = Registry::new(&CommitmentManifest::for_batch(1 << 15).unwrap());
-        assert_eq!(full.events[7].size, PayloadSize::Exact(128));
-        assert_eq!(full.events[8].size, PayloadSize::Exact(4 * 512));
+        assert_eq!(full.events[9].size, PayloadSize::Exact(128));
+        assert_eq!(full.events[10].size, PayloadSize::Exact(4 * 512));
+    }
+
+    /// Absorb events 1 to 3 with dummy payloads.
+    fn to_seed(t: &mut Transcript, commitment: &[u8]) -> Vec<u8> {
+        t.absorb(commitment_site(GroupRole::Main16), 1, commitment).unwrap();
+        t.absorb(commitment_site(GroupRole::Main), 1, &[1]).unwrap();
+        t.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).unwrap();
+        t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap()
     }
 
     #[test]
@@ -526,21 +603,26 @@ mod tests {
         let manifest = manifest();
         let record = manifest.binding_bytes();
         let mut t = Transcript::new(&manifest, &record).unwrap();
-        // Skipping the main commitment is an order fault; a wrong seed size a shape fault.
+        // Skipping the main commitments is an order fault; a wrong seed size a shape fault.
         assert!(matches!(
             t.absorb_items(FLOCK_COMMIT_SITE, &[]),
             Err(TranscriptError::EventOrder { index: 1, .. })
         ));
-        t.absorb(commitment_site(GroupRole::Main), 1, &[1, 2, 3])
+        t.absorb(commitment_site(GroupRole::Main16), 1, &[1, 2, 3])
             .unwrap();
+        assert!(matches!(
+            t.absorb_items(FLOCK_COMMIT_SITE, &[]),
+            Err(TranscriptError::EventOrder { index: 2, .. })
+        ));
+        t.absorb(commitment_site(GroupRole::Main), 1, &[4]).unwrap();
         t.absorb_items(FLOCK_COMMIT_SITE, &[vec![9; 4]]).unwrap();
         assert!(matches!(
             t.challenge_bytes(BRIDGE_SEED_SITE, 2),
-            Err(TranscriptError::EventShape { index: 3 })
+            Err(TranscriptError::EventShape { index: 4 })
         ));
         let seed = t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
         assert_eq!(seed.len(), 32);
-        assert!(t.require_next(4).is_ok());
+        assert!(t.require_next(5).is_ok());
         assert!(t.ensure_complete().is_err());
     }
 
@@ -550,10 +632,7 @@ mod tests {
         let record = manifest.binding_bytes();
         let run = |record: &[u8], commitment: &[u8]| {
             let mut t = Transcript::new(&manifest, record).unwrap();
-            t.absorb(commitment_site(GroupRole::Main), 1, commitment)
-                .unwrap();
-            t.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).unwrap();
-            t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap()
+            to_seed(&mut t, commitment)
         };
         let base = run(&record, &[7; 40]);
         assert_eq!(base, run(&record, &[7; 40]));
@@ -577,17 +656,17 @@ mod tests {
         bad[..8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decode_extensions(&bad).is_none());
         let mut t = Transcript::new(&manifest(), &[1, 2]).unwrap();
-        t.absorb(commitment_site(GroupRole::Main), 1, &[0]).unwrap();
-        t.absorb_items(FLOCK_COMMIT_SITE, &[vec![]]).unwrap();
-        t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3] {
+        to_seed(&mut t, &[0]);
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
             t.absorb(commitment_site(role), 1, &[0]).unwrap();
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
         t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]).unwrap();
-        let tau = t.challenge_extensions(TAU_SITE, 17).unwrap();
-        assert_eq!(tau.len(), 17);
-        assert!(tau.iter().all(|c| *c != OpeningField::from_u64(0)));
+        // The lookup's challenges come first: tau out of order is refused.
+        assert!(t.challenge_extensions(TAU_SITE, 17).is_err());
+        let x = LookupTranscript::challenges(&mut t, LookupSite::X, 2).unwrap();
+        assert_eq!(x.len(), 2);
+        assert!(x.iter().all(|c| *c != OpeningField::from_u64(0)));
     }
 }

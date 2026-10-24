@@ -1,53 +1,26 @@
-//! The virtual-table evaluators agree with the integer checker of agg-witness on the Boolean
-//! domain, for honest tables and for single-cell mutations (spec Sections 4.3, 5, 7).
+//! The L16 tables and the virtual-table evaluators agree with the integer relation on the
+//! Boolean domain (spec Sections 3, 4.1, 5 and 9.2 with the lookup layout L16): the
+//! recomposed `z, u, v` equal the derived witnesses, the ring residual vanishes, the bridge
+//! identities hold over the integers with the balanced carries, and single-cell mutations
+//! move exactly the expected entries.
 
 mod common;
 
-use agg_piop::manifest::{Column, DigitValue, GroupRole};
-use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
-use agg_piop::virtual_polys::{
-    compose_table, digit_tables, leaf, parity1_tables, residual_table, w1_table, MainValues,
-};
+use agg_bridge::parity::{check, ParityWitness};
+use agg_bridge::Shape;
+use agg_piop::manifest::{Column, DigitValue, GroupRole, LOOKUP_SHIFT};
+use agg_piop::source_tables::{BridgeGroupTables, Cells, MainTables, SourceTables};
+use agg_piop::virtual_polys::{compose_table, parity1_tables, residual_table, w1_table};
 use agg_piop::OpeningField;
-use agg_witness::bridge;
-use agg_witness::check::{check, digit_virtual, CheckOptions, CheckReport, Identity};
+use agg_witness::derive::derive;
 use agg_witness::padding::main_index;
-use agg_witness::params::{GAMMA2, K, L, N, Q};
-use agg_witness::tables::{BatchTables, Layout};
-use common::{boolean_point, Batch};
-use jolt_field::{Ring, Zero};
+use agg_witness::params::{K, L, N};
+use common::Batch;
+use jolt_field::Zero;
 
-fn lift(value: i64) -> OpeningField {
-    OpeningField::from_i64(value)
-}
-
-fn run_checker(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables) -> CheckReport {
-    let tables = BatchTables {
-        layout: Layout::H,
-        geom: main.geometry(),
-        columns: main.columns().to_vec(),
-    };
-    let bridge_tables = bridge.to_witness_tables();
-    check(
-        &batch.instance,
-        &tables,
-        Some((&batch.matrices, &bridge_tables)),
-        CheckOptions {
-            completeness: false,
-        },
-    )
-}
-
-/// Indices of the listed failures of one identity (and column name, if given).
-fn failures(report: &CheckReport, identity: Identity, what: Option<&str>) -> Vec<usize> {
-    let mut indices: Vec<usize> = report
-        .failures
-        .iter()
-        .filter(|f| f.identity == identity && what.is_none_or(|w| f.what == w))
-        .map(|f| f.index)
-        .collect();
-    indices.sort_unstable();
-    indices
+fn small_batch() -> Batch {
+    // 50 live records pad to N* = 64.
+    Batch::build(common::records(0x51, 40, 10), 0x51)
 }
 
 fn nonzero(table: &[OpeningField]) -> Vec<usize> {
@@ -56,251 +29,110 @@ fn nonzero(table: &[OpeningField]) -> Vec<usize> {
         .collect()
 }
 
-fn small_batch() -> Batch {
-    // 50 live records pad to N* = 64.
-    Batch::build(common::records(0x51, 40, 10), 0x51)
-}
-
-#[test]
-fn honest_virtual_tables_agree_with_the_checker() {
-    let batch = small_batch();
-    let manifest = &batch.manifest;
-    let report = run_checker(&batch, &batch.main, &batch.bridge);
-    assert!(report.is_ok(), "{:?}", report.failures);
-    let tables = batch.tables();
-
-    // w1', z, u, v against the checker's recomposed record values, on every row.
-    let witness = BatchTables {
-        layout: Layout::H,
-        geom: batch.main.geometry(),
-        columns: batch.main.columns().to_vec(),
-    };
-    let composed = |value: DigitValue| compose_table(&value.layout(), &tables.digits(value));
-    let (z, u, v) = (
-        composed(DigitValue::Z),
-        composed(DigitValue::U),
-        composed(DigitValue::V),
-    );
-    let w1 = w1_table(&batch.main.bit_lanes(manifest));
-    let d_main = manifest.d_main();
-    for i in 0..witness.geom.n_star {
-        let values = witness.record_values(i);
-        for rho in 0..K {
-            for j in 0..N {
-                let x = main_index(j, rho, i);
-                assert_eq!(w1[x], values.w1[rho][j]);
-                assert_eq!(u[x], values.u[rho][j]);
-                assert_eq!(v[x], values.v[rho][j]);
-            }
-        }
-        for s in 0..L {
-            for j in 0..N {
-                assert_eq!(z[main_index(j, s, i)], values.z[s][j]);
-            }
-        }
-        // The verifier's affine evaluators at a Boolean point read the same values.
-        let x = main_index(17 * i % N, i % K, i);
-        let point = boolean_point(x, d_main);
-        let opened: Vec<OpeningField> = batch
-            .main
-            .columns()
-            .iter()
-            .map(|column| common::mle_i8(column, &point))
-            .collect();
-        let at = MainValues::from_evaluations(manifest, &opened);
-        assert_eq!(
-            (at.z, at.u, at.v, at.w1),
-            (lift(z[x]), lift(u[x]), lift(v[x]), lift(w1[x]))
-        );
-    }
-
-    // The ring residual vanishes on the whole Boolean domain.
-    let delta = residual_table(manifest, &batch.instance, &batch.main);
-    assert!(nonzero(&delta).is_empty());
-
-    // y^(1) equals the honest integer parities of agg-witness and is Boolean.
-    let parities = parity1_tables(tables, &batch.matrices.m1);
-    let honest = bridge::compute(
-        &batch.main.geometry(),
-        &batch.main.bit_lanes(manifest),
-        &batch.matrices,
-    )
-    .unwrap();
-    assert_eq!(parities, honest.y1);
-    assert!(parities.iter().flatten().all(|&y| y == 0 || y == 1));
-
-    // Digit tables of all 55 digits equal the checker's materialization; leaves vanish.
-    let digits = manifest.digit_columns();
-    assert_eq!(digits.len(), 55);
-    for (_, _, column) in digits {
-        let base = column.base().unwrap();
-        let cells = tables.column(column);
-        let ours = digit_tables(cells, base);
-        let reference = digit_virtual(cells, base);
-        for x in 0..cells.len() {
-            assert_eq!(ours.p[x], OpeningField::from_i128(reference.p[x]));
-            assert_eq!(
-                leaf(base, ours.p[x]),
-                OpeningField::zero(),
-                "{}",
-                column.name()
-            );
-            if base == 16 {
-                assert_eq!(
-                    ours.a_lo[x],
-                    OpeningField::from_i128(reference.a_lo[x].unwrap())
-                );
-                assert_eq!(
-                    ours.a_hi[x],
-                    OpeningField::from_i128(reference.a_hi[x].unwrap())
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn residual_agrees_with_the_checker_under_mutations() {
-    let batch = small_batch();
-    let manifest = &batch.manifest;
-    let position = |column: Column| manifest.locate(column).1;
-
-    // A quotient digit: Delta = -q W_0 delta at exactly that position.
-    let mut main = batch.main.clone();
-    let v0 = position(Column::Digit {
-        value: DigitValue::V,
-        digit: 0,
-    });
-    let x = main_index(200, 3, 7);
-    let step: i8 = if main.columns()[v0][x] < 7 { 1 } else { -1 };
-    main.columns_mut()[v0][x] += step;
-    let delta = residual_table(manifest, &batch.instance, &main);
-    let report = run_checker(&batch, &main, &batch.bridge);
-    assert_eq!(nonzero(&delta), vec![x]);
-    assert_eq!(failures(&report, Identity::Ring, None), vec![x]);
-    assert_eq!(delta[x], lift(-Q * i64::from(step)));
-
-    // A response digit: (A z) changes along a whole negacyclic row of A_i.
-    let mut main = batch.main.clone();
-    let z0 = position(Column::Digit {
-        value: DigitValue::Z,
-        digit: 0,
-    });
-    let (j0, s0, i0) = (5, 2, 3);
-    let cell = main_index(j0, s0, i0);
-    let step: i8 = if main.columns()[z0][cell] < 7 { 1 } else { -1 };
-    main.columns_mut()[z0][cell] += step;
-    let delta = residual_table(manifest, &batch.instance, &main);
-    let report = run_checker(&batch, &main, &batch.bridge);
-    let changed = nonzero(&delta);
-    assert_eq!(changed.len(), report.counts[&Identity::Ring]);
-    let listed = failures(&report, Identity::Ring, None);
-    assert!(!listed.is_empty() && listed.iter().all(|x| changed.contains(x)));
-    let a = &batch.instance.records[i0].key.a;
-    for (j, rho) in [(0, 0), (4, 1), (5, 2), (255, 3)] {
-        let coefficient = if j >= j0 {
-            i64::from(a[rho][s0][j - j0])
-        } else {
-            -i64::from(a[rho][s0][j + N - j0])
-        };
-        assert_eq!(
-            delta[main_index(j, rho, i0)],
-            lift(coefficient * i64::from(step))
-        );
-    }
-
-    // A w1Encode bit: Delta = -2 gamma_2 2^t at that position.
-    let mut main = batch.main.clone();
-    let b1 = position(Column::W1Bit(1));
-    let x = main_index(9, 1, 11);
-    let old = main.columns()[b1][x];
-    main.columns_mut()[b1][x] = 1 - old;
-    let delta = residual_table(manifest, &batch.instance, &main);
-    let report = run_checker(&batch, &main, &batch.bridge);
-    assert_eq!(nonzero(&delta), vec![x]);
-    assert_eq!(failures(&report, Identity::Ring, None), vec![x]);
-    assert_eq!(delta[x], lift(-2 * GAMMA2 * 2 * (1 - 2 * i64::from(old))));
-}
-
-#[test]
-fn parities_and_digit_leaves_agree_with_the_checker_under_mutations() {
-    let batch = small_batch();
-    let manifest = &batch.manifest;
-
-    // A level-1 carry digit: y^(1)_t = sum - 2 kappa leaves {0, 1} exactly where the checker's
-    // bool_y1 fails.
-    let lane = 4_u8;
-    let mut bridge = batch.bridge.clone();
-    let (role, k0) = manifest.locate(Column::Digit {
-        value: DigitValue::Kappa1(lane),
-        digit: 0,
-    });
-    assert_eq!(role, GroupRole::Level1);
-    let mutated = [3_usize, 4000, 8191];
-    for &index in &mutated {
-        let cells = &mut bridge.group_mut(GroupRole::Level1)[k0];
-        cells[index] += if cells[index] < 7 { 1 } else { -1 };
-    }
+fn parity_witness(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables) -> ParityWitness {
     let tables = SourceTables {
-        manifest,
-        main: &batch.main,
-        bridge: &bridge,
+        manifest: &batch.manifest,
+        main,
+        bridge,
     };
-    let parities = parity1_tables(tables, &batch.matrices.m1);
-    let report = run_checker(&batch, &batch.main, &bridge);
-    let non_boolean: Vec<usize> = (0..parities[usize::from(lane)].len())
-        .filter(|&x| !matches!(parities[usize::from(lane)][x], 0 | 1))
-        .collect();
-    assert_eq!(non_boolean, mutated);
-    assert_eq!(
-        failures(&report, Identity::BoolY1, Some(&format!("y1_{lane}"))),
-        mutated
-    );
-    for (t, lane_table) in parities.iter().enumerate() {
-        if t != usize::from(lane) {
-            assert!(lane_table.iter().all(|&y| y == 0 || y == 1));
+    let widen = |cells: &[i8]| cells.iter().map(|&c| i64::from(c)).collect::<Vec<i64>>();
+    ParityWitness {
+        y1: parity1_tables(tables, &batch.matrices.m1).to_vec(),
+        kappa1: bridge.carry_values(&batch.manifest, 1),
+        y2: bridge.parities().iter().map(|p| widen(p)).collect(),
+        kappa2: bridge.carry_values(&batch.manifest, 2),
+        y: bridge.public_y().iter().map(|&b| i64::from(b)).collect(),
+        kappa3: bridge.carry_values(&batch.manifest, 3).remove(0),
+    }
+}
+
+#[test]
+fn honest_l16_tables_satisfy_the_integer_relation() {
+    let batch = small_batch();
+    let manifest = &batch.manifest;
+    // z, u, v recomposed from the two L16 digits equal the derived witnesses; padded rows
+    // recompose to zero.
+    for i in 0..manifest.padded_records() {
+        let (z, u, v) = batch.main.record_values(manifest, i);
+        if i < manifest.records() {
+            let record = &batch.instance.records[i];
+            let witness = derive(&record.key, &record.mu, &batch.records[i].sig).expect("valid");
+            assert_eq!(z, witness.z, "record {i}");
+            assert_eq!(u, witness.u);
+            assert_eq!(v, witness.v);
+        } else {
+            assert_eq!(z, [[0; N]; L]);
+            assert_eq!((u, v), ([[0; N]; K], [[0; N]; K]));
         }
     }
-
-    // Digits outside their alphabets: the leaf (or the base-16 product) is nonzero exactly
-    // where the checker reports b16_prod or leaf4.
-    let mut main = batch.main.clone();
-    let z1 = manifest
-        .locate(Column::Digit {
-            value: DigitValue::Z,
-            digit: 1,
-        })
-        .1;
-    let bad = [
-        main_index(0, 0, 0),
-        main_index(77, 3, 49),
-        main_index(255, 1, 60),
-    ];
-    for &x in &bad {
-        main.columns_mut()[z1][x] = 8;
+    // The ring residual vanishes on the whole domain.
+    let residual = residual_table(manifest, &batch.instance, &batch.main);
+    assert!(nonzero(&residual).is_empty());
+    // The (4.1) tables of z and the stored digits: z = Z_lo + 2^16 Z_hi + 2^15.
+    let tables = batch.tables();
+    let z = compose_table(&DigitValue::Z.layout(), &tables.digits(DigitValue::Z));
+    let (z_lo, z_hi) = (tables.column(Column::Z_LO), tables.column(Column::Z_HI));
+    for x in [0, 1, 1023, 4096 + 17] {
+        assert_eq!(z[x], z_lo.value(x) + (z_hi.value(x) << 16) + i64::from(LOOKUP_SHIFT));
     }
-    let mut bridge = batch.bridge.clone();
-    let top = Column::Digit {
-        value: DigitValue::Kappa2(2),
-        digit: 2,
-    };
-    let (_, k2) = manifest.locate(top);
-    bridge.group_mut(GroupRole::Level2)[k2][100] = -3;
-    let report = run_checker(&batch, &main, &batch.bridge);
-    let ours = digit_tables(&main.columns()[z1], 16);
-    let product_nonzero: Vec<usize> = (0..ours.p.len())
-        .filter(|&x| ours.a_lo[x] * ours.a_hi[x] != OpeningField::zero())
-        .collect();
-    assert_eq!(product_nonzero, bad);
-    assert_eq!(failures(&report, Identity::B16Prod, Some("z_1")), bad);
-    let leaves = digit_tables(&bridge.group(GroupRole::Level2)[k2], 4);
-    let leaf_nonzero: Vec<usize> = (0..leaves.p.len())
-        .filter(|&x| leaf(4, leaves.p[x]) != OpeningField::zero())
-        .collect();
-    assert_eq!(leaf_nonzero, vec![100]);
-    let report = run_checker(&batch, &batch.main, &bridge);
-    assert_eq!(
-        failures(&report, Identity::Leaf4, Some(&top.name())),
-        vec![100]
+    // The bridge identities over the integers, with kappa = K + 2^15.
+    let witness = parity_witness(&batch, &batch.main, &batch.bridge);
+    let lanes = batch.main.bit_lanes(manifest);
+    check(&Shape::PRODUCTION, &lanes, &batch.matrices, &witness).expect("bridge identities");
+    assert!(witness.y1.iter().flatten().all(|&y| y == 0 || y == 1));
+    // Every carry is small (honest range [0, 1023]) and the padding slots look up 0.
+    for level in 1..=3 {
+        assert!(batch
+            .bridge
+            .carry_values(manifest, level)
+            .iter()
+            .flatten()
+            .all(|&k| (0..1024).contains(&k)));
+        let cells = manifest.group(agg_piop::manifest::STACK_DOMAINS[level]).logical_cells();
+        let stacked = batch.bridge.carries(level);
+        let real = if level == 3 { 1 } else { 6 };
+        assert!(stacked[real * cells..].iter().all(|&k| k == -LOOKUP_SHIFT));
+    }
+    // w_1' from the bits is in [0, 44).
+    assert!(w1_table(&lanes).iter().all(|&w| (0..44).contains(&w)));
+}
+
+#[test]
+fn single_cell_mutations_move_the_expected_entries() {
+    let batch = small_batch();
+    let manifest = &batch.manifest;
+    let x = main_index(5, 1, 3);
+    // V_lo + 1 moves the residual by -q at x only.
+    let mut main = batch.main.clone();
+    *main.wide_cell_mut(manifest, Column::V_LO, x) += 1;
+    let residual = residual_table(manifest, &batch.instance, &main);
+    assert_eq!(nonzero(&residual), vec![x]);
+    // Z_lo + 1 moves (A z) on the record's whole row block (a negacyclic product).
+    let mut main = batch.main.clone();
+    let x = main_index(9, 2, 4);
+    *main.wide_cell_mut(manifest, Column::Z_LO, x) += 1;
+    let moved = nonzero(&residual_table(manifest, &batch.instance, &main));
+    assert!(!moved.is_empty());
+    assert!(moved.iter().all(|&y| y >> 10 == 4), "only record 4 changes");
+    // A flipped bit breaks the level-1 identity of the stale round-2 tables.
+    let mut main = batch.main.clone();
+    let (role, b1) = manifest.locate(Column::W1Bit(1));
+    assert_eq!(role, GroupRole::Main);
+    main.columns_mut()[b1][x] ^= 1;
+    let stale = parity_witness(&batch, &main, &batch.bridge);
+    let lanes = main.bit_lanes(manifest);
+    let y1 = &stale.y1;
+    assert!(
+        y1.iter().flatten().any(|&y| y != 0 && y != 1),
+        "a level-1 parity leaves {{0, 1}}"
     );
+    let _ = check(&Shape::PRODUCTION, &lanes, &batch.matrices, &stale);
+    // A carry + 1 moves y1 by -2 in that cell.
+    let mut bridge = batch.bridge.clone();
+    bridge.carries_mut(1)[7] += 1;
+    let moved = parity_witness(&batch, &batch.main, &bridge);
+    let honest = parity_witness(&batch, &batch.main, &batch.bridge);
+    assert_eq!(moved.y1[0][7], honest.y1[0][7] - 2);
+    // The wide cells read back as committed.
+    assert!(matches!(batch.tables().column(Column::V_HI), Cells::Wide(_)));
 }

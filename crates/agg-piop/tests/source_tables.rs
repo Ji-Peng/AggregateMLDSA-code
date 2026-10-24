@@ -1,128 +1,157 @@
-//! Source-table construction checks shapes and honest alphabets against the manifest, the
-//! honest bridge builder aborts on heavy rows, and the committer rejects malformed tables
-//! before Akita.
+//! Source-table construction checks shapes and honest alphabets against the manifest
+//! (lookup layout L16), the honest bridge builder aborts on heavy rows and counts the
+//! multiplicities of `T_16`, and the committer rejects malformed tables before Akita.
 
 mod common;
 
-use agg_pcs_config::commit::CommitError;
-use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole};
+use agg_piop::lookup::compose_multiplicity;
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT};
 use agg_piop::pcs::{PcsError, TableCommitter};
-use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
-use agg_witness::bridge::{BridgeError, BridgeMatrices, BridgeTables, SparseMatrix};
+use agg_piop::source_tables::{BridgeGroupTables, Cells, MainTables, RecordValues, SourceTableError};
+use agg_witness::bridge::{BridgeError, BridgeMatrices, SparseMatrix};
+use agg_witness::derive::derive;
 use agg_witness::instance::PublicInstance;
-use agg_witness::tables::{BatchTables, Layout};
 
-fn batch_tables(records: &[agg_witness::gen::Record]) -> (PublicInstance, BatchTables) {
+fn instance_and_main(records: &[agg_witness::gen::Record], manifest: &CommitmentManifest) -> (PublicInstance, MainTables) {
     let instance = PublicInstance::from_records(records).unwrap();
     let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
-    let tables = BatchTables::build(Layout::H, &instance, &signatures).unwrap();
-    (instance, tables)
+    let main = MainTables::build(manifest, &instance, &signatures).unwrap();
+    (instance, main)
 }
 
 #[test]
-fn main_tables_reject_wrong_shapes_and_alphabets() {
+fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
     let records = common::records(0x77, 15, 5);
-    let (_, tables) = batch_tables(&records);
     let manifest = CommitmentManifest::for_batch(20).unwrap();
-    let main = MainTables::from_batch(&manifest, tables.clone()).expect("honest tables");
-    assert_eq!(main.columns().len(), 23);
+    let (instance, main) = instance_and_main(&records, &manifest);
+    assert_eq!(main.columns().len(), 8);
+    assert_eq!(main.wide().len(), 4 * (32 << 10));
     assert_eq!(main.geometry().n_star, 32);
-
+    // Padded rows hold the digits of zero: Z_lo = U_lo = V_lo = -2^15, the rest 0.
+    let padded = 25 << 10;
+    for column in [Column::Z_LO, Column::U_LO, Column::V_LO] {
+        assert_eq!(main.column(&manifest, column).value(padded), -i64::from(LOOKUP_SHIFT));
+    }
+    for column in [Column::V_HI, Column::Z_HI, Column::U_HI, Column::W1Bit(0)] {
+        assert_eq!(main.column(&manifest, column).value(padded), 0);
+    }
+    // The same tables from the derived values.
+    let values: Vec<RecordValues> = instance
+        .records
+        .iter()
+        .zip(&records)
+        .map(|(record, signed)| {
+            let w = derive(&record.key, &record.mu, &signed.sig).unwrap();
+            RecordValues {
+                z: w.z,
+                u: w.u,
+                v: w.v,
+                w1: w.w1,
+            }
+        })
+        .collect();
+    assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
     // Same N* but another live count.
     let other = CommitmentManifest::for_batch(21).unwrap();
     assert_eq!(
-        MainTables::from_batch(&other, tables.clone()).unwrap_err(),
+        MainTables::from_values(&other, &values).unwrap_err(),
         SourceTableError::Records {
             expected: 21,
             actual: 20
         }
     );
-    // A z digit outside [-8, 7], a non-Boolean bit, a base-4 top digit outside [-2, 1].
-    let z0 = manifest
-        .locate(Column::Digit {
-            value: DigitValue::Z,
-            digit: 0,
-        })
-        .1;
+    // A value outside its L16 range is an honest abort.
+    let mut wide = values.clone();
+    wide[3].z[1][7] = 1 << 17;
+    assert!(matches!(
+        MainTables::from_values(&manifest, &wide),
+        Err(SourceTableError::Encode(_))
+    ));
+    let mut huge = values;
+    huge[0].v[0][0] = -(1 << 31) - 1;
+    assert!(matches!(
+        MainTables::from_values(&manifest, &huge),
+        Err(SourceTableError::Encode(_))
+    ));
+    // A non-Boolean bit, a base-4 top digit outside [-2, 1], a 16-bit column outside
+    // [-2^15, 2^15): the self-check names the group, column and cell.
     let b3 = manifest.locate(Column::W1Bit(3)).1;
-    let z4 = manifest
-        .locate(Column::Digit {
-            value: DigitValue::Z,
-            digit: 4,
-        })
-        .1;
-    for (column, cell, value) in [(z0, 1234, 8_i8), (b3, 77, 2), (z4, 5, 2)] {
-        let mut bad = tables.clone();
-        bad.columns[column][cell] = value;
+    let z_hi = manifest.locate(Column::Z_HI).1;
+    for (column, cell, value) in [(b3, 77, 2_i8), (z_hi, 5, 2)] {
+        let mut bad = main.clone();
+        bad.columns_mut()[column][cell] = value;
         assert_eq!(
-            MainTables::from_batch(&manifest, bad).unwrap_err(),
+            bad.validate(&manifest).unwrap_err(),
             SourceTableError::Alphabet {
                 group: GroupRole::Main,
                 column,
                 cell,
-                value
+                value: i64::from(value)
             }
         );
     }
-    let mut short = tables.clone();
-    short.columns.pop();
-    assert!(matches!(
-        MainTables::from_batch(&manifest, short),
-        Err(SourceTableError::ColumnCount {
-            expected: 23,
-            actual: 22,
-            ..
-        })
-    ));
-    let mut truncated = tables;
-    truncated.columns[4].pop();
-    assert!(matches!(
-        MainTables::from_batch(&manifest, truncated),
-        Err(SourceTableError::ColumnLength { column: 4, .. })
-    ));
+    let mut bad = main;
+    *bad.wide_cell_mut(&manifest, Column::U_LO, 99) = LOOKUP_SHIFT;
+    assert_eq!(
+        bad.validate(&manifest).unwrap_err(),
+        SourceTableError::Alphabet {
+            group: GroupRole::Main16,
+            column: 1,
+            cell: 99,
+            value: i64::from(LOOKUP_SHIFT)
+        }
+    );
 }
 
 #[test]
-fn bridge_tables_check_shapes_and_abort_on_heavy_rows() {
+fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
     let records = common::records(0x78, 12, 4);
-    let (_, tables) = batch_tables(&records);
     let manifest = CommitmentManifest::for_batch(16).unwrap();
-    let main = MainTables::from_batch(&manifest, tables).unwrap();
+    let (_, main) = instance_and_main(&records, &manifest);
     let mut matrices = BridgeMatrices::random_for_tests(0x78);
     let honest = BridgeGroupTables::build(&manifest, &main, &matrices).expect("honest bridge");
     assert_eq!(honest.public_y().len(), 1 << 12);
     assert_eq!(honest.segment_y(0), honest.public_y());
-    let witness: BridgeTables = honest.to_witness_tables();
+    // m counts every looked-up cell, padding slots included, and its digits compose to it.
+    let shape = manifest.lookup_shape();
+    let m = honest.multiplicity();
+    assert_eq!(m.len(), 1 << 16);
+    assert_eq!(m.iter().map(|&c| i64::from(c)).sum::<i64>(), shape.lookups(0) as i64);
+    let digits: Vec<Vec<i8>> = honest
+        .group(&manifest, GroupRole::Mult)
+        .iter()
+        .map(|cells: &Cells<'_>| cells.narrow().to_vec())
+        .collect();
+    assert_eq!(digits.len(), 7);
     assert_eq!(
-        BridgeGroupTables::from_tables(&manifest, witness.clone()).unwrap(),
-        honest
+        compose_multiplicity(&digits),
+        m.iter().map(|&c| i64::from(c)).collect::<Vec<_>>()
     );
-
-    let mut bad_y = witness.clone();
-    bad_y.y[9] = 2;
+    // The 16-bit carry groups and the parities.
+    assert_eq!(honest.group(&manifest, GroupRole::Level1).len(), 6);
+    assert_eq!(honest.group(&manifest, GroupRole::Level2).len(), 12);
+    assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 1);
+    honest.validate(&manifest).unwrap();
+    let mut bad_y = honest.clone();
+    bad_y.public_y_mut()[9] = 2;
+    assert_eq!(bad_y.validate(&manifest).unwrap_err(), SourceTableError::PublicY);
+    let mut bad_parity = honest.clone();
+    bad_parity.parities_mut()[0][3] = -1;
     assert_eq!(
-        BridgeGroupTables::from_tables(&manifest, bad_y).unwrap_err(),
-        SourceTableError::PublicY
-    );
-    let mut bad_g3 = witness.clone();
-    bad_g3.g3.pop();
-    assert!(matches!(
-        BridgeGroupTables::from_tables(&manifest, bad_g3),
-        Err(SourceTableError::ColumnCount {
-            group: GroupRole::Level3,
-            ..
-        })
-    ));
-    let mut bad_parity = witness;
-    bad_parity.g2[0][3] = -1;
-    assert!(matches!(
-        BridgeGroupTables::from_tables(&manifest, bad_parity),
-        Err(SourceTableError::Alphabet {
+        bad_parity.validate(&manifest).unwrap_err(),
+        SourceTableError::Alphabet {
             group: GroupRole::Level2,
             column: 0,
             cell: 3,
             value: -1
-        })
+        }
+    );
+    // An out-of-table carry: the honest recount aborts.
+    let mut bad_carry = honest;
+    bad_carry.carries_mut(2)[0] = LOOKUP_SHIFT;
+    assert!(matches!(
+        bad_carry.recount(&manifest, &main),
+        Err(SourceTableError::Lookup(_))
     ));
 
     // Row 0 of M_3 in 600 columns: weight above 511, the honest prover aborts (Section 9.2).
@@ -144,14 +173,13 @@ fn bridge_tables_check_shapes_and_abort_on_heavy_rows() {
 #[test]
 fn committer_rejects_malformed_tables_before_akita() {
     let records = common::records(0x79, 8, 0);
-    let (_, tables) = batch_tables(&records);
     let manifest = CommitmentManifest::for_batch(8).unwrap();
     let committer = TableCommitter::new(manifest.clone()).expect("setup");
-    let mut main = MainTables::from_batch(&manifest, tables).unwrap();
+    let (_, mut main) = instance_and_main(&records, &manifest);
     main.columns_mut()[7].truncate(100);
     assert!(matches!(
         committer.commit_round1(&main),
-        Err(PcsError::Commit(CommitError::TableLength {
+        Err(PcsError::Commit(agg_pcs_config::commit::CommitError::TableLength {
             group: GroupRole::Main,
             actual: 100,
             ..

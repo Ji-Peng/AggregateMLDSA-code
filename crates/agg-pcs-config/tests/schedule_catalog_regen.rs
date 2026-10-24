@@ -1,12 +1,16 @@
-//! Offline generation of the `agg_mldsa_fp64_signed_width4` schedule catalog.
+//! Offline generation of the `agg_mldsa_fp64_signed_width4` and
+//! `agg_mldsa_fp64_signed_width16` schedule catalogs (lookup layout L16).
 //!
 //! Adapted from Aerie's `aerie-pcs-config/tests/schedule_catalog_regen.rs`
 //! (rev 49b6c21): the same `akita_planner` entry points (`find_schedule`,
 //! `EmitSpec`, `render_schedule_artifact_outputs_with_validation`) and the same
 //! row construction (a scalar row per precommitted layout, whose root profile is
 //! the group's producer profile, and one grouped row per batch size keyed by
-//! the final group and the ordered precommitted profiles). Only the key lists
-//! differ: they come from `agg_pcs_config::catalogs` (spec Section 4.1).
+//! the final group and the ordered precommitted profiles). The key lists come from
+//! `agg_pcs_config::catalogs` (spec Section 4.1). Two families: the width-16 catalog holds
+//! the scalar rows of `G_main16, G_1, G_2, G_3`; the width-4 catalog holds the scalar
+//! rows of `G_main4` and the grouped rows (final group `G_m`), whose precommitted
+//! producers are taken from the scalar row of their own family.
 //!
 //! Incremental update, one batch size at a time (keeps checked-in rows,
 //! plans only missing ones, saves after every planned row):
@@ -27,8 +31,10 @@
 //! `-- --ignored --exact verify_rows`. `AKITA_SCHEDULE_GEN_JOBS` bounds the
 //! planner workers (default 3; the search is memory bound).
 
-use agg_pcs_config::catalogs::{scalar_layouts, BatchLayout, CATALOG_D_SIG};
-use agg_pcs_config::preset::{AggFp64SignedWidth4 as Cfg, WIDTH4_FAMILY};
+use agg_pcs_config::catalogs::{scalar_layouts, BatchLayout, Family, CATALOG_D_SIG};
+use agg_pcs_config::preset::{
+    AggFp64SignedWidth16 as W16, AggFp64SignedWidth4 as Cfg, WIDTH16_FAMILY, WIDTH4_FAMILY,
+};
 use akita_config::{policy_of, CommitmentConfig, TrustedScheduleCatalog, ValidatedScheduleCatalog};
 use akita_params::{
     CommittedGroupBatchProfile, FoldSchedule, FoldScheduleEstimate, GroupCommitPhaseParams,
@@ -44,14 +50,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
+type Rows = Vec<(CommittedGroupBatchProfile, FoldSchedule)>;
+
 fn output_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("schedules")
 }
 
-fn artifact_path() -> PathBuf {
-    output_dir().join(format!("{WIDTH4_FAMILY}.aks"))
+const fn family_name(family: Family) -> &'static str {
+    match family {
+        Family::Width4 => WIDTH4_FAMILY,
+        Family::Width16 => WIDTH16_FAMILY,
+    }
+}
+
+fn artifact_path(family: Family) -> PathBuf {
+    output_dir().join(format!("{}.aks", family_name(family)))
 }
 
 /// Batch sizes requested by the environment (`AGG_CATALOG_D_SIG=8,10`),
@@ -75,28 +90,40 @@ fn batch(d_sig: usize) -> BatchLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Planner entry points (copied from Aerie's harness).
+// Planner entry points (copied from Aerie's harness, generic over the family).
 
-/// Pure DP regeneration of one scalar row.
-fn regen(key: PolynomialGroupLayout) -> Result<FoldSchedule, akita_error::AkitaError> {
+/// Pure DP regeneration of one scalar row of the family `C`.
+fn regen_scalar<C: CommitmentConfig>(
+    key: PolynomialGroupLayout,
+) -> Result<FoldSchedule, akita_error::AkitaError> {
     let key = ScheduleLookupKey::single(key);
     let planned = find_schedule(
         &key,
-        Cfg::committed_source_contract()?,
+        C::committed_source_contract()?,
         &[],
-        &policy_of::<Cfg>(),
-        Cfg::ring_challenge_config,
+        &policy_of::<C>(),
+        C::ring_challenge_config,
     )?;
     planned.schedule.validate_structure()?;
     assert_eq!(
         estimate_json(&planned.estimate),
-        expanded_estimate_json(&key, &planned.schedule),
+        expanded_estimate_json::<C>(&key, &planned.schedule),
         "planner estimate must match expanded schedule sizing for {key:?}",
     );
     Ok(planned.schedule)
 }
 
-/// Pure DP regeneration of one grouped row.
+fn regen(
+    family: Family,
+    key: PolynomialGroupLayout,
+) -> Result<FoldSchedule, akita_error::AkitaError> {
+    match family {
+        Family::Width4 => regen_scalar::<Cfg>(key),
+        Family::Width16 => regen_scalar::<W16>(key),
+    }
+}
+
+/// Pure DP regeneration of one grouped row (final group `G_m`, width-4 family).
 #[allow(clippy::needless_pass_by_value)]
 fn regen_group_batch(
     request: GroupedGenerationRequest,
@@ -112,7 +139,7 @@ fn regen_group_batch(
     planned.schedule.validate_structure()?;
     assert_eq!(
         estimate_json(&planned.estimate),
-        expanded_estimate_json(&key, &planned.schedule),
+        expanded_estimate_json::<Cfg>(&key, &planned.schedule),
         "planner estimate must match expanded schedule sizing for {key:?}",
     );
     eprintln!(
@@ -133,74 +160,86 @@ fn estimate_json(estimate: &FoldScheduleEstimate) -> serde_json::Value {
 }
 
 /// Reprice a schedule with Akita's own byte and setup sizing rules.
-fn expanded_estimate_json(key: &ScheduleLookupKey, schedule: &FoldSchedule) -> serde_json::Value {
+fn expanded_estimate_json<C: CommitmentConfig>(
+    key: &ScheduleLookupKey,
+    schedule: &FoldSchedule,
+) -> serde_json::Value {
     serde_json::json!({
         "estimated_proof_payload_bytes": akita_schedules::expanded_schedule_proof_estimate_bytes(
-            key, schedule, &policy_of::<Cfg>(),
+            key, schedule, &policy_of::<C>(),
         ).expect("expanded proof estimate"),
         "estimated_num_setup_field_elements": akita_params::setup_matrix_capacity_for_schedule(schedule)
             .expect("expanded setup capacity").num_field_elements,
     })
 }
 
-/// Session cache of exact scalar DP results (Aerie's `SCALAR_PREPLANS`).
-static SCALAR_PREPLANS: Mutex<Vec<(PolynomialGroupLayout, FoldSchedule)>> = Mutex::new(Vec::new());
+/// Session cache of exact scalar DP results (Aerie's `SCALAR_PREPLANS`), per family.
+static SCALAR_PREPLANS: Mutex<Vec<(Family, PolynomialGroupLayout, FoldSchedule)>> =
+    Mutex::new(Vec::new());
 
-fn cached_scalar(key: PolynomialGroupLayout) -> Option<FoldSchedule> {
+fn cached_scalar(family: Family, key: PolynomialGroupLayout) -> Option<FoldSchedule> {
     SCALAR_PREPLANS
         .lock()
         .expect("scalar preplan cache poisoned")
         .iter()
-        .find(|(cached, _)| *cached == key)
-        .map(|(_, schedule)| schedule.clone())
+        .find(|(f, cached, _)| *f == family && *cached == key)
+        .map(|(_, _, schedule)| schedule.clone())
 }
 
-fn cache_scalar(key: PolynomialGroupLayout, schedule: FoldSchedule) {
+fn cache_scalar(family: Family, key: PolynomialGroupLayout, schedule: FoldSchedule) {
     let mut cache = SCALAR_PREPLANS
         .lock()
         .expect("scalar preplan cache poisoned");
-    if !cache.iter().any(|(cached, _)| *cached == key) {
-        cache.push((key, schedule));
+    if !cache.iter().any(|(f, cached, _)| *f == family && *cached == key) {
+        cache.push((family, key, schedule));
     }
 }
 
-fn preplanned_scalar(key: PolynomialGroupLayout) -> Result<FoldSchedule, akita_error::AkitaError> {
-    if let Some(schedule) = cached_scalar(key) {
+fn preplanned_scalar(
+    family: Family,
+    key: PolynomialGroupLayout,
+) -> Result<FoldSchedule, akita_error::AkitaError> {
+    if let Some(schedule) = cached_scalar(family, key) {
         return Ok(schedule);
     }
     let started = Instant::now();
-    eprintln!("preplanning scalar {key:?}");
-    let schedule = regen(key)?;
-    eprintln!("planned scalar {key:?} in {:.1?}", started.elapsed());
-    cache_scalar(key, schedule.clone());
+    eprintln!("preplanning scalar {family:?} {key:?}");
+    let schedule = regen(family, key)?;
+    eprintln!("planned scalar {family:?} {key:?} in {:.1?}", started.elapsed());
+    cache_scalar(family, key, schedule.clone());
     Ok(schedule)
 }
 
 fn preplanned_scalar_for(
+    family: Family,
     keys: &[PolynomialGroupLayout],
 ) -> Vec<(PolynomialGroupLayout, FoldSchedule)> {
     keys.iter()
-        .filter_map(|&key| cached_scalar(key).map(|schedule| (key, schedule)))
+        .filter_map(|&key| cached_scalar(family, key).map(|schedule| (key, schedule)))
         .collect()
 }
 
-/// A precommitted producer derived from its complete scalar row.
-fn precommitted_producer(layout: PolynomialGroupLayout) -> PrecommittedProducer {
-    let schedule = preplanned_scalar(layout).unwrap_or_else(|error| {
-        panic!("precommit profile planning failed for {layout:?}: {error}")
+/// A precommitted producer derived from its complete scalar row in its own family.
+fn precommitted_producer(family: Family, layout: PolynomialGroupLayout) -> PrecommittedProducer {
+    let schedule = preplanned_scalar(family, layout).unwrap_or_else(|error| {
+        panic!("precommit profile planning failed for {family:?} {layout:?}: {error}")
     });
     let profile = GroupCommitPhaseParams::try_from_params(layout, &schedule.root.params)
         .expect("scalar derived precommit profile");
-    PrecommittedProducer::from_config::<Cfg>(profile).expect("precommitted producer")
+    match family {
+        Family::Width4 => PrecommittedProducer::from_config::<Cfg>(profile),
+        Family::Width16 => PrecommittedProducer::from_config::<W16>(profile),
+    }
+    .expect("precommitted producer")
 }
 
 fn grouped_request(layout: &BatchLayout) -> GroupedGenerationRequest {
     GroupedGenerationRequest::new(
         layout.final_group(),
         layout
-            .precommitted()
-            .iter()
-            .map(|&group| precommitted_producer(group))
+            .precommitted_groups()
+            .into_iter()
+            .map(|(group, shape)| precommitted_producer(group.family(), shape))
             .collect(),
     )
 }
@@ -219,12 +258,12 @@ fn rendered_profiles(
     })
 }
 
-fn write_catalog(rows: Vec<(CommittedGroupBatchProfile, FoldSchedule)>, destination: &Path) {
+fn write_catalog<C: CommitmentConfig>(rows: Rows, destination: &Path) {
     let catalog = ValidatedScheduleCatalog::try_new(
-        Cfg::schedule_family_name(),
+        C::schedule_family_name(),
         rows,
-        &policy_of::<Cfg>(),
-        Cfg::ring_challenge_config,
+        &policy_of::<C>(),
+        C::ring_challenge_config,
     )
     .expect("validate catalog");
     std::fs::write(
@@ -235,24 +274,31 @@ fn write_catalog(rows: Vec<(CommittedGroupBatchProfile, FoldSchedule)>, destinat
     eprintln!("wrote {} ({} rows)", destination.display(), catalog.len());
 }
 
-fn rows_of(catalog: &ValidatedScheduleCatalog) -> Vec<(CommittedGroupBatchProfile, FoldSchedule)> {
+fn rows_of<C: CommitmentConfig>(catalog: &TrustedScheduleCatalog<C>) -> Rows {
     catalog
         .rows()
         .map(|row| (row.profiles().clone(), row.schedule().clone()))
         .collect()
 }
 
-/// The artifact on disk, if any (read directly, so this works with the
+/// The artifact of `C` on disk, if any (read directly, so this works with the
 /// `schedules` feature off).
-fn on_disk_catalog() -> Option<TrustedScheduleCatalog<Cfg>> {
-    let bytes = std::fs::read(artifact_path()).ok()?;
+fn on_disk_catalog<C: CommitmentConfig>(family: Family) -> Option<TrustedScheduleCatalog<C>> {
+    let bytes = std::fs::read(artifact_path(family)).ok()?;
     Some(TrustedScheduleCatalog::from_artifact_bytes(&bytes).expect("load on-disk catalog"))
 }
 
-fn seed_scalar_preplans(catalog: &ValidatedScheduleCatalog) {
-    for row in catalog.rows() {
-        if row.profiles().precommitteds.is_empty() {
-            cache_scalar(row.profiles().final_group.group, row.schedule().clone());
+fn on_disk_rows(family: Family) -> Option<Rows> {
+    match family {
+        Family::Width4 => on_disk_catalog::<Cfg>(family).map(|c| rows_of(&c)),
+        Family::Width16 => on_disk_catalog::<W16>(family).map(|c| rows_of(&c)),
+    }
+}
+
+fn seed_scalar_preplans(family: Family, rows: &Rows) {
+    for (profiles, schedule) in rows {
+        if profiles.precommitteds.is_empty() {
+            cache_scalar(family, profiles.final_group.group, schedule.clone());
         }
     }
 }
@@ -264,30 +310,34 @@ fn row_key(profiles: &CommittedGroupBatchProfile) -> ScheduleLookupKey {
     }
 }
 
-/// Whether a catalog row belongs to one of the batch sizes `d_sigs`.
-fn row_is_requested(profiles: &CommittedGroupBatchProfile, d_sigs: &[usize]) -> bool {
+/// Whether a catalog row of `family` belongs to one of the batch sizes `d_sigs`.
+fn row_is_requested(family: Family, profiles: &CommittedGroupBatchProfile, d_sigs: &[usize]) -> bool {
     if profiles.precommitteds.is_empty() {
-        return scalar_layouts(d_sigs).contains(&profiles.final_group.group);
+        return scalar_layouts(d_sigs, family).contains(&profiles.final_group.group);
     }
-    d_sigs.iter().any(|&d_sig| {
-        let layout = batch(d_sig);
-        profiles.final_group.group == layout.final_group()
-            && profiles
-                .precommitteds
-                .iter()
-                .map(|profile| profile.group)
-                .eq(layout.precommitted().iter().copied())
-    })
+    family == Family::Width4
+        && d_sigs.iter().any(|&d_sig| {
+            let layout = batch(d_sig);
+            profiles.final_group.group == layout.final_group()
+                && profiles
+                    .precommitteds
+                    .iter()
+                    .map(|profile| profile.group)
+                    .eq(layout.precommitted().iter().copied())
+        })
 }
 
-fn save(rows: &[(CommittedGroupBatchProfile, FoldSchedule)]) {
-    write_catalog(rows.to_vec(), &artifact_path());
+fn save(family: Family, rows: &Rows) {
+    match family {
+        Family::Width4 => write_catalog::<Cfg>(rows.clone(), &artifact_path(family)),
+        Family::Width16 => write_catalog::<W16>(rows.clone(), &artifact_path(family)),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Offline tests (ignored by default).
 
-/// Plan the rows of `AGG_CATALOG_D_SIG` that the on-disk catalog lacks, keep
+/// Plan the rows of `AGG_CATALOG_D_SIG` that the on-disk catalogs lack, keep
 /// every on-disk row of `CATALOG_D_SIG` or `AGG_CATALOG_D_SIG`, drop the rest,
 /// and save after every planned row (so a run killed by a time cap keeps
 /// what it finished).
@@ -302,46 +352,51 @@ fn update_catalog_rows() {
         .collect();
     keep.sort_unstable();
     keep.dedup();
-    let mut rows = Vec::new();
-    if let Some(catalog) = on_disk_catalog() {
-        seed_scalar_preplans(&catalog);
-        for row in rows_of(&catalog) {
-            if row_is_requested(&row.0, &keep) {
-                rows.push(row);
-            } else {
-                eprintln!("pruned row: final {:?}", row.0.final_group.group);
+    let mut rows: [Rows; 2] = [Vec::new(), Vec::new()];
+    for (slot, family) in rows.iter_mut().zip(Family::ALL) {
+        if let Some(on_disk) = on_disk_rows(family) {
+            seed_scalar_preplans(family, &on_disk);
+            for row in on_disk {
+                if row_is_requested(family, &row.0, &keep) {
+                    slot.push(row);
+                } else {
+                    eprintln!("pruned {family:?} row: final {:?}", row.0.final_group.group);
+                }
             }
         }
     }
     for d_sig in d_sigs {
         let layout = batch(d_sig);
         let started = Instant::now();
-        let missing: Vec<PolynomialGroupLayout> = layout
-            .precommitted()
-            .iter()
-            .copied()
-            .filter(|&group| {
-                !rows.iter().any(|(profiles, _)| {
-                    profiles.precommitteds.is_empty() && profiles.final_group.group == group
+        for (slot, family) in rows.iter_mut().zip(Family::ALL) {
+            let missing: Vec<PolynomialGroupLayout> = layout
+                .precommitted_groups()
+                .into_iter()
+                .filter(|(group, _)| group.family() == family)
+                .map(|(_, shape)| shape)
+                .filter(|&shape| {
+                    !slot.iter().any(|(profiles, _)| {
+                        profiles.precommitteds.is_empty() && profiles.final_group.group == shape
+                    })
                 })
+                .collect();
+            let workers = offline_planning_worker_count(missing.len());
+            let planned = bounded_parallel_filter_map(&missing, workers, |&shape| {
+                let schedule = preplanned_scalar(family, shape)
+                    .map_err(|error| format!("scalar planning failed for {shape:?}: {error}"))?;
+                Ok(Some((shape, schedule)))
             })
-            .collect();
-        let workers = offline_planning_worker_count(missing.len());
-        let planned = bounded_parallel_filter_map(&missing, workers, |&group| {
-            let schedule = preplanned_scalar(group)
-                .map_err(|error| format!("scalar planning failed for {group:?}: {error}"))?;
-            Ok(Some((group, schedule)))
-        })
-        .expect("plan scalar rows");
-        for (group, schedule) in planned {
-            let key = ScheduleLookupKey::single(group);
-            let profiles = rendered_profiles(&key, &schedule).expect("scalar profile");
-            rows.push((profiles, schedule));
-            save(&rows);
+            .expect("plan scalar rows");
+            for (shape, schedule) in planned {
+                let key = ScheduleLookupKey::single(shape);
+                let profiles = rendered_profiles(&key, &schedule).expect("scalar profile");
+                slot.push((profiles, schedule));
+                save(family, slot);
+            }
         }
         let request = grouped_request(&layout);
         let key = request.key();
-        if !rows.iter().any(|(profiles, _)| row_key(profiles) == key) {
+        if !rows[0].iter().any(|(profiles, _)| row_key(profiles) == key) {
             let grouped_started = Instant::now();
             let schedule = regen_group_batch(request).expect("grouped planning");
             eprintln!(
@@ -350,8 +405,8 @@ fn update_catalog_rows() {
                 grouped_started.elapsed()
             );
             let profiles = rendered_profiles(&key, &schedule).expect("grouped profile");
-            rows.push((profiles, schedule));
-            save(&rows);
+            rows[0].push((profiles, schedule));
+            save(Family::Width4, &rows[0]);
         }
         eprintln!(
             "d_sig {d_sig} ({}): all rows ready in {:.1?}",
@@ -359,22 +414,27 @@ fn update_catalog_rows() {
             started.elapsed()
         );
     }
-    save(&rows);
+    for (slot, family) in rows.iter().zip(Family::ALL) {
+        save(family, slot);
+    }
 }
 
 /// Full regeneration of `CATALOG_D_SIG` through Akita's emit pipeline, as in
-/// Aerie's `regenerate`.
+/// Aerie's `regenerate`: one emit spec per family, the grouped rows in the width-4 one.
 #[test]
 #[ignore = "offline DP regeneration; rewrites src/schedules/"]
 fn regenerate() {
-    let keys = scalar_layouts(CATALOG_D_SIG);
-    let workers = offline_planning_worker_count(keys.len());
-    eprintln!(
-        "preplanning {} scalar rows with {workers} workers",
-        keys.len()
-    );
-    bounded_parallel_filter_map(&keys, workers, |&key| {
-        preplanned_scalar(key)
+    let keys4 = scalar_layouts(CATALOG_D_SIG, Family::Width4);
+    let keys16 = scalar_layouts(CATALOG_D_SIG, Family::Width16);
+    let all: Vec<(Family, PolynomialGroupLayout)> = keys4
+        .iter()
+        .map(|&key| (Family::Width4, key))
+        .chain(keys16.iter().map(|&key| (Family::Width16, key)))
+        .collect();
+    let workers = offline_planning_worker_count(all.len());
+    eprintln!("preplanning {} scalar rows with {workers} workers", all.len());
+    bounded_parallel_filter_map(&all, workers, |&(family, key)| {
+        preplanned_scalar(family, key)
             .map(|_| Some(()))
             .map_err(|error| format!("scalar preplanning failed for {key:?}: {error}"))
     })
@@ -383,20 +443,32 @@ fn regenerate() {
         .iter()
         .map(|&d_sig| grouped_request(&batch(d_sig)))
         .collect();
-    let spec = EmitSpec {
+    let spec4 = EmitSpec {
         family_name: WIDTH4_FAMILY,
         policy: policy_of::<Cfg>(),
         source_contract: Cfg::committed_source_contract().expect("width-4 source contract"),
-        preplanned_scalar: preplanned_scalar_for(&keys),
-        keys,
+        preplanned_scalar: preplanned_scalar_for(Family::Width4, &keys4),
+        keys: keys4,
         grouped_requests,
         output_dir: output_dir(),
-        regen,
+        regen: regen_scalar::<Cfg>,
         regen_group_batch,
         ring_challenge_config: <Cfg as CommitmentConfig>::ring_challenge_config,
     };
+    let spec16 = EmitSpec {
+        family_name: WIDTH16_FAMILY,
+        policy: policy_of::<W16>(),
+        source_contract: W16::committed_source_contract().expect("width-16 source contract"),
+        preplanned_scalar: preplanned_scalar_for(Family::Width16, &keys16),
+        keys: keys16,
+        grouped_requests: Vec::new(),
+        output_dir: output_dir(),
+        regen: regen_scalar::<W16>,
+        regen_group_batch,
+        ring_challenge_config: <W16 as CommitmentConfig>::ring_challenge_config,
+    };
     let outputs = render_schedule_artifact_outputs_with_validation(
-        &[spec],
+        &[spec4, spec16],
         MaterializationDiagnostics { row_progress: true },
         |_, _| Ok(()),
     )
@@ -412,26 +484,38 @@ fn regenerate() {
 #[test]
 #[ignore = "offline DP drift check; set AGG_CATALOG_D_SIG"]
 fn verify_rows() {
-    let catalog = on_disk_catalog().expect("on-disk catalog");
     let d_sigs = requested_d_sigs();
     let mut drift = Vec::new();
-    for group in scalar_layouts(&d_sigs) {
-        let key = ScheduleLookupKey::single(group);
-        let fresh = regen(group).expect("fresh scalar planning");
-        let row = catalog.resolve_key(&key).expect("checked-in scalar row");
-        if serde_json::to_vec(row.schedule()).unwrap() != serde_json::to_vec(&fresh).unwrap() {
-            drift.push(format!("scalar {group:?}"));
+    let on_disk: Vec<Rows> = Family::ALL
+        .iter()
+        .map(|&family| on_disk_rows(family).expect("on-disk catalog"))
+        .collect();
+    for (family, rows) in Family::ALL.into_iter().zip(&on_disk) {
+        for group in scalar_layouts(&d_sigs, family) {
+            let fresh = regen(family, group).expect("fresh scalar planning");
+            let row = rows
+                .iter()
+                .find(|(profiles, _)| {
+                    profiles.precommitteds.is_empty() && profiles.final_group.group == group
+                })
+                .expect("checked-in scalar row");
+            if serde_json::to_vec(&row.1).unwrap() != serde_json::to_vec(&fresh).unwrap() {
+                drift.push(format!("scalar {family:?} {group:?}"));
+            }
         }
+        seed_scalar_preplans(family, rows);
     }
-    seed_scalar_preplans(&catalog);
     for d_sig in d_sigs {
         let request = grouped_request(&batch(d_sig));
         let key = request.key();
         let fresh = regen_group_batch(request).expect("fresh grouped planning");
-        let row = catalog.resolve_key(&key).expect("checked-in grouped row");
+        let row = on_disk[0]
+            .iter()
+            .find(|(profiles, _)| row_key(profiles) == key)
+            .expect("checked-in grouped row");
         let profiles = rendered_profiles(&key, &fresh).expect("profiles");
-        if serde_json::to_vec(row.schedule()).unwrap() != serde_json::to_vec(&fresh).unwrap()
-            || serde_json::to_vec(row.profiles()).unwrap() != serde_json::to_vec(&profiles).unwrap()
+        if serde_json::to_vec(&row.1).unwrap() != serde_json::to_vec(&fresh).unwrap()
+            || serde_json::to_vec(&row.0).unwrap() != serde_json::to_vec(&profiles).unwrap()
         {
             drift.push(format!("grouped d_sig {d_sig}"));
         }
@@ -537,37 +621,119 @@ fn width_admissibility_probe() {
     }
 }
 
+/// A planning-only preset of signed width 16 with the inner-basis range `[LO, HI]`.
+#[derive(Clone, Copy, Debug, Default)]
+struct Width16Probe<const LO: u32, const HI: u32>;
+
+impl<const LO: u32, const HI: u32> CommitmentConfig for Width16Probe<LO, HI> {
+    type Field = <Cfg as CommitmentConfig>::Field;
+    type ExtField = <Cfg as CommitmentConfig>::ExtField;
+    const RING_DIMENSION_SCHEDULE: akita_config::RingDimensionSchedule =
+        <Cfg as CommitmentConfig>::RING_DIMENSION_SCHEDULE;
+    fn decomposition() -> akita_params::DecompositionParams {
+        akita_params::DecompositionParams {
+            log_commit_bound: 16,
+            ..Cfg::decomposition()
+        }
+    }
+    fn ring_challenge_config(
+        d: usize,
+    ) -> Result<akita_challenges::SparseChallengeConfig, akita_error::AkitaError> {
+        Cfg::ring_challenge_config(d)
+    }
+    fn sis_modulus_profile() -> akita_params::SisModulusProfileId {
+        Cfg::sis_modulus_profile()
+    }
+    fn opening_basis_range() -> (u32, u32) {
+        Cfg::opening_basis_range()
+    }
+    fn inner_basis_range() -> (u32, u32) {
+        (LO, HI)
+    }
+    fn committed_source_class() -> akita_params::sis::CommittedSourceClass {
+        Cfg::committed_source_class()
+    }
+    fn schedule_family_name() -> &'static str {
+        "agg_mldsa_width16_probe"
+    }
+}
+
+fn probe16<const LO: u32, const HI: u32>(layout: PolynomialGroupLayout) {
+    let key = ScheduleLookupKey::single(layout);
+    let started = Instant::now();
+    match find_schedule(
+        &key,
+        Width16Probe::<LO, HI>::committed_source_contract().expect("contract"),
+        &[],
+        &policy_of::<Width16Probe<LO, HI>>(),
+        Width16Probe::<LO, HI>::ring_challenge_config,
+    ) {
+        Ok(planned) => {
+            let profile =
+                GroupCommitPhaseParams::try_from_params(layout, &planned.schedule.root.params)
+                    .expect("profile");
+            eprintln!(
+                "width 16, inner range {LO}..={HI} at {layout:?}: inner log basis {}, {} digit(s), est. proof {} B, setup {} elements, planned in {:.1?}",
+                profile.inner.digits.log_basis,
+                profile.inner.digits.num_digits,
+                planned.estimate.estimated_proof_payload_bytes().expect("bytes"),
+                planned.estimate.estimated_num_setup_field_elements,
+                started.elapsed()
+            );
+        }
+        Err(error) => eprintln!("width 16, inner range {LO}..={HI} at {layout:?}: {error}"),
+    }
+}
+
+/// Which inner digits the planner selects for the width-16 lookup columns
+/// (docs/lookup.md Section 6 item 1): Dense's search (3..=16) against one forced
+/// balanced base-2^16 digit, at the main-domain layouts of 256 and 1,024 signatures.
+#[test]
+#[ignore = "offline planner probe (minutes)"]
+fn width16_inner_probe() {
+    for layout in [PolynomialGroupLayout::new(18, 4), PolynomialGroupLayout::new(20, 4)] {
+        probe16::<3, 16>(layout);
+        probe16::<16, 16>(layout);
+        probe16::<8, 8>(layout);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cheap checks of the checked-in artifact (run by `cargo test`).
 
 #[cfg(feature = "schedules")]
-fn requested_keys() -> Vec<ScheduleLookupKey> {
-    let mut keys: Vec<ScheduleLookupKey> = scalar_layouts(CATALOG_D_SIG)
+fn requested_keys() -> (Vec<ScheduleLookupKey>, Vec<ScheduleLookupKey>) {
+    let mut keys4: Vec<ScheduleLookupKey> = scalar_layouts(CATALOG_D_SIG, Family::Width4)
+        .into_iter()
+        .map(ScheduleLookupKey::single)
+        .collect();
+    let keys16: Vec<ScheduleLookupKey> = scalar_layouts(CATALOG_D_SIG, Family::Width16)
         .into_iter()
         .map(ScheduleLookupKey::single)
         .collect();
     for &d_sig in CATALOG_D_SIG {
         let layout = batch(d_sig);
-        keys.push(ScheduleLookupKey {
+        keys4.push(ScheduleLookupKey {
             final_group: layout.final_group(),
             precommitteds: layout
-                .precommitted()
-                .iter()
-                .map(|&group| Cfg::commitment_profile(group).expect("scalar producer row"))
+                .precommitted_groups()
+                .into_iter()
+                .map(|(group, shape)| {
+                    agg_pcs_config::work_plan::commitment_profile(group.family(), shape)
+                        .expect("scalar producer row")
+                })
                 .collect(),
         });
     }
-    keys
+    (keys4, keys16)
 }
 
-/// The artifact holds exactly the requested rows, every group commits with
-/// one balanced base-16 inner digit, no row needs a setup prefix, and the
-/// re-audited rows re-encode to the checked-in bytes.
 #[cfg(feature = "schedules")]
-#[test]
-fn checked_in_catalog_holds_exactly_the_requested_rows() {
-    let catalog = Cfg::catalog().expect("checked-in catalog");
-    let keys = requested_keys();
+fn check_catalog<C: CommitmentConfig>(
+    catalog: &TrustedScheduleCatalog<C>,
+    family: Family,
+    keys: &[ScheduleLookupKey],
+) {
     for (index, key) in keys.iter().enumerate() {
         assert!(
             !keys[..index].contains(key),
@@ -580,21 +746,25 @@ fn checked_in_catalog_holds_exactly_the_requested_rows() {
     assert_eq!(
         keys.len(),
         catalog.len(),
-        "catalog contains unrequested rows"
+        "{family:?} catalog contains unrequested rows"
     );
+    let expected = match family {
+        Family::Width4 => (4, 1),
+        Family::Width16 => (16, 1),
+    };
     for row in catalog.rows() {
-        let profiles = row.profiles();
-        for profile in std::iter::once(&profiles.final_group).chain(&profiles.precommitteds) {
-            assert_eq!(
-                (
-                    profile.inner.digits.log_basis,
-                    profile.inner.digits.num_digits
-                ),
-                (4, 1),
-                "group {:?}",
-                profile.group
-            );
-        }
+        // The row's own (final or scalar) group commits with one balanced inner digit of
+        // its family; the precommitted profiles of grouped rows are checked by the caller.
+        let profile = &row.profiles().final_group;
+        assert_eq!(
+            (
+                profile.inner.digits.log_basis,
+                profile.inner.digits.num_digits
+            ),
+            expected,
+            "{family:?} group {:?}",
+            profile.group
+        );
         let schedule = row.schedule();
         for fold in std::iter::once(&schedule.root).chain(&schedule.recursive_folds) {
             assert!(fold.params.setup_prefix().is_none());
@@ -605,12 +775,38 @@ fn checked_in_catalog_holds_exactly_the_requested_rows() {
         }
     }
     let audited = ValidatedScheduleCatalog::try_new(
-        Cfg::schedule_family_name(),
+        C::schedule_family_name(),
         rows_of(catalog),
-        &policy_of::<Cfg>(),
-        Cfg::ring_challenge_config,
+        &policy_of::<C>(),
+        C::ring_challenge_config,
     )
     .expect("re-audit rows");
-    let on_disk = std::fs::read(artifact_path()).expect("artifact");
+    let on_disk = std::fs::read(artifact_path(family)).expect("artifact");
     assert_eq!(audited.to_artifact_bytes().expect("encode"), on_disk);
+}
+
+/// Both artifacts hold exactly the requested rows, every group commits with one
+/// balanced inner digit (base 16 at width 4, base `2^16` at width 16), every grouped
+/// row carries the five precommitted profiles in wire order, no row needs a setup
+/// prefix, and the re-audited rows re-encode to the checked-in bytes.
+#[cfg(feature = "schedules")]
+#[test]
+fn checked_in_catalog_holds_exactly_the_requested_rows() {
+    let (keys4, keys16) = requested_keys();
+    check_catalog(Cfg::catalog().expect("width-4 catalog"), Family::Width4, &keys4);
+    check_catalog(W16::catalog().expect("width-16 catalog"), Family::Width16, &keys16);
+    for &d_sig in CATALOG_D_SIG {
+        let layout = batch(d_sig);
+        for ((group, _), profile) in layout
+            .precommitted_groups()
+            .into_iter()
+            .zip(&keys4[keys4.len() - CATALOG_D_SIG.len() + (d_sig - CATALOG_D_SIG[0])].precommitteds)
+        {
+            let digits = (profile.inner.digits.log_basis, profile.inner.digits.num_digits);
+            match group.family() {
+                Family::Width4 => assert_eq!(digits, (4, 1), "{group:?} at d_sig {d_sig}"),
+                Family::Width16 => assert_eq!(digits, (16, 1), "{group:?} at d_sig {d_sig}"),
+            }
+        }
+    }
 }

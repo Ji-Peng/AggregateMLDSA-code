@@ -1,13 +1,15 @@
-//! Akita commitments of the four groups and their batched opening (spec Sections 4.1, 7.5,
-//! 10 events 1, 4 and 12).
+//! Akita commitments of the six groups and their batched opening (spec Sections 4.1, 7.5,
+//! 10 events 1, 4 and 13; lookup layout L16).
 //!
-//! Mirrors `aerie-prover/src/protocol/pcs/group.rs`: narrow signed tables stay `i8` until
-//! commitment, and each polynomial is materialized polynomial-major, zero-extended to the
-//! physical (PCS floor) length, through a 256-entry field lookup table. Commitments go
-//! through `agg_pcs_config::commit::PcsProver` (round 1 `G_main`; round 2 `G_1`, `G_2`, then
-//! the final group `G_3`), each call transcript-free; the caller absorbs
-//! [`GroupCommitment::serialized`] in event order. One batched opening covers the 67 claims
-//! at the four group points.
+//! Mirrors `aerie-prover/src/protocol/pcs/group.rs`: narrow signed tables stay `i8` (or
+//! `i32` for the 16-bit lookup columns) until commitment, and each polynomial is
+//! materialized polynomial-major, zero-extended to the physical (PCS floor) length.
+//! Commitments go through `agg_pcs_config::commit::PcsProver` (round 1 `G_main16` and
+//! `G_main4`; round 2 `G_1`, `G_2`, `G_3`, then the final group `G_m`), each call
+//! transcript-free and under its group's family; the caller absorbs
+//! [`GroupCommitment::serialized`] in event order. One batched opening covers the 38
+//! claims: 31 at the suffixes of `r^(3)` and the 7 multiplicity digits at the lookup's
+//! table point.
 
 use std::sync::OnceLock;
 
@@ -21,7 +23,7 @@ use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::manifest::{CommitmentManifest, GroupRole, GROUP_COUNT};
-use crate::source_tables::{BridgeGroupTables, MainTables, SourceTables};
+use crate::source_tables::{BridgeGroupTables, Cells, MainTables, SourceTables};
 use crate::{BaseField, OpeningField};
 
 /// Cells converted per parallel task.
@@ -79,11 +81,11 @@ fn i8_field_values() -> &'static [BaseField; 256] {
     })
 }
 
-/// Materialize one Akita polynomial per logical `i8` table, in group order, each
-/// zero-extended to `2^physical_vars` evaluations (index bits least significant first, so
-/// the pad variables are trailing).
+/// Materialize one Akita polynomial per logical table (`i8` or `i32` cells), in group
+/// order, each zero-extended to `2^physical_vars` evaluations (index bits least significant
+/// first, so the pad variables are trailing).
 pub fn group_polynomials(
-    columns: &[Vec<i8>],
+    columns: &[Cells<'_>],
     physical_vars: usize,
 ) -> Result<Vec<DensePoly<BaseField>>, AkitaError> {
     let physical_len = 1_usize << physical_vars;
@@ -98,14 +100,24 @@ pub fn group_polynomials(
                 });
             }
             let mut evaluations = vec![BaseField::zero(); physical_len];
-            evaluations[..cells.len()]
-                .par_chunks_mut(FIELD_CONVERSION_CHUNK)
-                .zip(cells.par_chunks(FIELD_CONVERSION_CHUNK))
-                .for_each(|(output, input)| {
-                    for (value, &cell) in output.iter_mut().zip(input) {
-                        *value = values[usize::from(cell as u8)];
-                    }
-                });
+            match cells {
+                Cells::Narrow(cells) => evaluations[..cells.len()]
+                    .par_chunks_mut(FIELD_CONVERSION_CHUNK)
+                    .zip(cells.par_chunks(FIELD_CONVERSION_CHUNK))
+                    .for_each(|(output, input)| {
+                        for (value, &cell) in output.iter_mut().zip(input) {
+                            *value = values[usize::from(cell as u8)];
+                        }
+                    }),
+                Cells::Wide(cells) => evaluations[..cells.len()]
+                    .par_chunks_mut(FIELD_CONVERSION_CHUNK)
+                    .zip(cells.par_chunks(FIELD_CONVERSION_CHUNK))
+                    .for_each(|(output, input)| {
+                        for (value, &cell) in output.iter_mut().zip(input) {
+                            *value = BaseField::from_i64(i64::from(cell));
+                        }
+                    }),
+            }
             DensePoly::from_field_evals(physical_vars, evaluations)
         })
         .collect()
@@ -118,19 +130,26 @@ pub fn evaluate_column(cells: &[i8], point: &[OpeningField]) -> OpeningField {
     evaluate_signed_table(cells, point)
 }
 
-/// The group points induced by one main-domain point: `G_main` at the full point, `G_t` at
-/// its last `d_t` coordinates (spec Section 7.1, suffixes).
-pub fn suffix_points(
+/// The group points: every group but `G_m` at the suffix of the main-domain point `r3`
+/// (spec Section 7.1), `G_m` at the lookup's table point `pi_m`.
+pub fn group_points(
     manifest: &CommitmentManifest,
-    point: &[OpeningField],
+    r3: &[OpeningField],
+    pi_m: &[OpeningField],
 ) -> Result<[Vec<OpeningField>; GROUP_COUNT], PcsError> {
-    if point.len() != manifest.d_main() {
+    if r3.len() != manifest.d_main() {
         return Err(PcsError::PointShape(GroupRole::Main));
     }
-    Ok(manifest
-        .groups()
-        .clone()
-        .map(|group| point[point.len() - group.logical_vars..].to_vec()))
+    if pi_m.len() != manifest.group(GroupRole::Mult).logical_vars {
+        return Err(PcsError::PointShape(GroupRole::Mult));
+    }
+    Ok(manifest.groups().clone().map(|group| {
+        if group.role == GroupRole::Mult {
+            pi_m.to_vec()
+        } else {
+            r3[r3.len() - group.logical_vars..].to_vec()
+        }
+    }))
 }
 
 /// The opening claims of every committed polynomial at its group's logical point.
@@ -148,13 +167,40 @@ pub fn opening_claims(
         let values = tables
             .group(role)
             .par_iter()
-            .map(|cells| evaluate_column(cells, point))
+            .map(|cells| cells.evaluate(point))
             .collect();
         GroupClaim {
             point: point.clone(),
             values,
         }
     }))
+}
+
+/// Stack size of a commit thread (Akita's commit runs on it, its parallel loops on the
+/// rayon pool).
+const COMMIT_THREAD_STACK: usize = 64 << 20;
+
+/// Run Akita commits concurrently, each on its own scoped OS thread, never as rayon jobs.
+///
+/// Akita's CPU backend builds its NTT slots lazily inside `OnceLock::get_or_init` with
+/// rayon-parallel loops (`akita-cpu-backend` `arithmetic/prepared.rs`). Two commits joined
+/// on the rayon pool can deadlock there: the worker that initializes a slot steals the other
+/// commit while it waits for its own loop, and that commit re-enters the same `OnceLock` on
+/// the same thread. A commit on a plain OS thread blocks on the `OnceLock` instead, and its
+/// parallel loops still run on the pool.
+fn concurrent_commits<const K: usize>(
+    commits: [&(dyn Fn() -> Result<GroupCommitment, PcsError> + Sync); K],
+) -> [Result<GroupCommitment, PcsError>; K] {
+    std::thread::scope(|scope| {
+        let handles = commits.map(|commit| {
+            std::thread::Builder::new()
+                .name("akita-commit".into())
+                .stack_size(COMMIT_THREAD_STACK)
+                .spawn_scoped(scope, commit)
+                .expect("spawn a commit thread")
+        });
+        handles.map(|handle| handle.join().expect("commit thread"))
+    })
 }
 
 /// The prover side: the manifest, its work plan and the Akita prover setup.
@@ -188,7 +234,7 @@ impl TableCommitter {
         &self.prover
     }
 
-    fn commit(&self, role: GroupRole, columns: &[Vec<i8>]) -> Result<GroupCommitment, PcsError> {
+    fn commit(&self, role: GroupRole, columns: &[Cells<'_>]) -> Result<GroupCommitment, PcsError> {
         let descriptor = self.manifest.group(role);
         if columns.len() != descriptor.polynomial_count() {
             return Err(CommitError::PolynomialCount {
@@ -213,29 +259,35 @@ impl TableCommitter {
         Ok(self.prover.commit_polynomials(role, polynomials)?)
     }
 
-    /// Round 1 (event 1, before the bridge seed): `G_main`.
-    pub fn commit_round1(&self, main: &MainTables) -> Result<GroupCommitment, PcsError> {
-        self.commit(GroupRole::Main, main.columns())
+    /// Round 1 (event 1, before the bridge seed): `G_main16` and `G_main4`, concurrently
+    /// (each commit is transcript-free; see [`concurrent_commits`]).
+    pub fn commit_round1(&self, main: &MainTables) -> Result<[GroupCommitment; 2], PcsError> {
+        let narrow: Vec<Cells<'_>> = main.columns().iter().map(|c| Cells::Narrow(c)).collect();
+        let wide = main.wide_columns();
+        let [wide, narrow] = concurrent_commits([
+            &|| self.commit(GroupRole::Main16, &wide),
+            &|| self.commit(GroupRole::Main, &narrow),
+        ]);
+        Ok([wide?, narrow?])
     }
 
-    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2` and the final group `G_3`.
-    /// The three commits are independent (the final group is committed against the
-    /// precommitted profiles of the work plan, not against the other two commitments), so
-    /// they run in parallel; an Akita commit is memory bound and does not use every thread
-    /// on its own. The caller absorbs them in wire order.
-    pub fn commit_round2(
-        &self,
-        bridge: &BridgeGroupTables,
-    ) -> Result<[GroupCommitment; 3], PcsError> {
-        let commit = |role: GroupRole| self.commit(role, bridge.group(role));
-        let (level1, (level2, level3)) = rayon::join(
-            || commit(GroupRole::Level1),
-            || rayon::join(|| commit(GroupRole::Level2), || commit(GroupRole::Level3)),
-        );
-        Ok([level1?, level2?, level3?])
+    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2`, `G_3` and the final group
+    /// `G_m`. The four commits are independent (the final group is committed against the
+    /// precommitted profiles of the work plan, not against the other commitments), so they
+    /// run in parallel; an Akita commit is memory bound and does not use every thread on
+    /// its own. The caller absorbs them in wire order.
+    pub fn commit_round2(&self, bridge: &BridgeGroupTables) -> Result<[GroupCommitment; 4], PcsError> {
+        let commit = |role: GroupRole| self.commit(role, &bridge.group(&self.manifest, role));
+        let [level1, level2, level3, mult] = concurrent_commits([
+            &|| commit(GroupRole::Level1),
+            &|| commit(GroupRole::Level2),
+            &|| commit(GroupRole::Level3),
+            &|| commit(GroupRole::Mult),
+        ]);
+        Ok([level1?, level2?, level3?, mult?])
     }
 
-    /// The batched opening of all four groups at `points` under the 32-byte PIOP session
+    /// The batched opening of all six groups at `points` under the 32-byte PIOP session
     /// digest; returns the proof and the claims it authenticates (evaluated from the
     /// tables, one streaming pass per polynomial).
     pub fn open(
@@ -250,8 +302,9 @@ impl TableCommitter {
         Ok((proof, claims))
     }
 
-    /// The batched opening of all four groups for claims the caller already holds (the
-    /// prover's stage-3 terminal values, which equal the table evaluations).
+    /// The batched opening of all six groups for claims the caller already holds (the
+    /// prover's stage-3 terminal values and multiplicity-digit claims, which equal the
+    /// table evaluations).
     pub fn open_claims(
         &self,
         commitments: [GroupCommitment; GROUP_COUNT],
@@ -288,33 +341,39 @@ mod tests {
 
     #[test]
     fn group_polynomials_zero_extend_and_convert_exactly() {
-        let columns = vec![
-            (0..4096).map(|i| (i % 16) as i8 - 8).collect::<Vec<i8>>(),
-            vec![1; 4096],
-        ];
+        let narrow: Vec<i8> = (0..4096).map(|i| (i % 16) as i8 - 8).collect();
+        let wide: Vec<i32> = (0..4096).map(|i| (i * 17) % 65_536 - 32_768).collect();
+        let ones = vec![1_i8; 4096];
+        let columns = [Cells::Narrow(&narrow), Cells::Wide(&wide), Cells::Narrow(&ones)];
         let polynomials = group_polynomials(&columns, 13).unwrap();
-        assert_eq!(polynomials.len(), 2);
+        assert_eq!(polynomials.len(), 3);
         for (poly, cells) in polynomials.iter().zip(&columns) {
             let coeffs = poly.field_coeffs();
             assert!(coeffs.len() >= 1 << 13);
             for (index, coeff) in coeffs.iter().enumerate() {
-                let expected = cells.get(index).map_or(0, |&c| i64::from(c));
+                let expected = if index < cells.len() { cells.value(index) } else { 0 };
                 assert_eq!(*coeff, BaseField::from_i64(expected), "cell {index}");
             }
         }
-        assert!(group_polynomials(&[vec![0; 1 << 14]], 13).is_err());
+        let long = vec![0_i8; 1 << 14];
+        assert!(group_polynomials(&[Cells::Narrow(&long)], 13).is_err());
     }
 
     #[test]
-    fn suffix_points_follow_the_group_domains() {
+    fn group_points_follow_the_group_domains() {
         let manifest = CommitmentManifest::for_batch(1 << 15).unwrap();
         let point: Vec<OpeningField> = (0..25)
             .map(|i| OpeningField::lift_base(BaseField::from_u64(i)))
             .collect();
-        let points = suffix_points(&manifest, &point).unwrap();
+        let pi_m: Vec<OpeningField> = (100..116)
+            .map(|i| OpeningField::lift_base(BaseField::from_u64(i)))
+            .collect();
+        let points = group_points(&manifest, &point, &pi_m).unwrap();
         let lengths = points.each_ref().map(Vec::len);
-        assert_eq!(lengths, [25, 19, 15, 14]);
-        assert_eq!(points[3][0], point[11]);
-        assert!(suffix_points(&manifest, &point[1..]).is_err());
+        assert_eq!(lengths, [25, 25, 19, 15, 14, 16]);
+        assert_eq!(points[4][0], point[11]);
+        assert_eq!(points[5], pi_m);
+        assert!(group_points(&manifest, &point[1..], &pi_m).is_err());
+        assert!(group_points(&manifest, &point, &pi_m[1..]).is_err());
     }
 }

@@ -31,9 +31,17 @@
 //! `X`-dependence of the leaf terms is folded into the instance coefficients, so one
 //! bottom group serves every challenge `X` at the cost of one.
 //!
-//! The Fiat-Shamir transcript is a local SHAKE256 sponge (`Fs`): the PIOP transcript of
-//! `transcript.rs` has a fixed event registry that a standalone prototype must not extend.
+//! Fiat-Shamir runs through [`LookupTranscript`]: the integrated protocol drives the PIOP
+//! transcript (`transcript.rs`, the lookup events of its registry, [`prove_in`] and
+//! [`verify_in`]); the standalone [`prove`] and [`verify`] use a local SHAKE256 sponge
+//! (`Fs`) bound to the layout and a caller binding.
+//!
+//! A stack may store its cells shifted: the looked-up value is `f = stored + shift` (the
+//! L16 columns are stored balanced, `shift = 2^15`). The leaves are then
+//! `1 / ((X - shift) - stored)`, the multiplicities count `f`, and the final claim is on the
+//! stored lane (so it is a claim on the committed columns as they are).
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
@@ -83,6 +91,8 @@ pub enum LookupError {
     Terminal(usize),
     /// A kernel error.
     Kernel(String),
+    /// The transcript rejected an event.
+    Transcript(String),
 }
 
 impl std::fmt::Display for LookupError {
@@ -97,6 +107,7 @@ impl std::fmt::Display for LookupError {
             }
             Self::Terminal(session) => write!(f, "session {session} terminal check failed"),
             Self::Kernel(what) => write!(f, "kernel: {what}"),
+            Self::Transcript(what) => write!(f, "transcript: {what}"),
         }
     }
 }
@@ -172,6 +183,8 @@ pub struct StackShape {
     pub vars: usize,
     /// The table the stack is looked up in.
     pub table: usize,
+    /// The storage shift: the looked-up value of a stored cell `s` is `s + shift`.
+    pub shift: i32,
 }
 
 impl StackShape {
@@ -193,12 +206,35 @@ impl StackShape {
         1 << self.depth()
     }
 
+    /// The stored value of a padding slot: `-shift`, so that its looked-up value is 0.
+    #[must_use]
+    pub const fn padding(self) -> i32 {
+        -self.shift
+    }
+
     /// The weights `eq(point_top, c)` of the real columns in a stacked evaluation:
-    /// `g(point) = sum_c weight_c f_c(point_low)` (the zero padding contributes nothing).
+    /// `g(point) = sum_c weight_c f_c(point_low) + padding sum_{c >= columns} eq(point_top, c)`
+    /// (zero padding contributes nothing when the shift is zero).
     #[must_use]
     pub fn column_weights(self, point: &[E]) -> Vec<E> {
+        self.slot_weights(point)[..self.columns].to_vec()
+    }
+
+    /// The column claim of a stacked claim `(point, value)` once the padding slots are
+    /// removed: `sum_{c < columns} weight_c f_c(point_low) = value - padding sum_{c >=
+    /// columns} eq(point_top, c)`.
+    #[must_use]
+    pub fn column_claim(self, point: &[E], value: E) -> E {
+        let padding: E = self.slot_weights(point)[self.columns..]
+            .iter()
+            .fold(E::zero(), |acc, &w| acc + w);
+        value - padding.mul_i64(i64::from(self.padding()))
+    }
+
+    /// `eq(point_top, c)` for every slot `c`.
+    fn slot_weights(self, point: &[E]) -> Vec<E> {
         let top = &point[self.vars..];
-        (0..self.columns)
+        (0..self.slots())
             .map(|c| {
                 top.iter().enumerate().fold(E::one(), |acc, (bit, &coordinate)| {
                     if (c >> bit) & 1 == 1 {
@@ -214,18 +250,31 @@ impl StackShape {
 
 /// Committed columns of one domain looked up in one table, stacked.
 #[derive(Clone, Debug)]
-pub struct LookupStack {
+pub struct LookupStack<'a> {
     shape: StackShape,
-    stacked: Vec<i32>,
+    stacked: Cow<'a, [i32]>,
 }
 
-impl LookupStack {
+impl<'a> LookupStack<'a> {
     /// Stack `columns` (each of `2^vars` looked-up values) for lookups in table `table`;
     /// missing column slots are zero.
     ///
     /// # Errors
     /// On an empty stack or columns of different or non-power-of-two lengths.
-    pub fn new(columns: &[&[i32]], table: usize) -> Result<Self, LookupError> {
+    pub fn new(columns: &[&[i32]], table: usize) -> Result<LookupStack<'static>, LookupError> {
+        LookupStack::with_shift(columns, table, 0)
+    }
+
+    /// Stack stored `columns` whose looked-up values are `stored + shift`; missing column
+    /// slots hold `-shift` (looked-up value 0).
+    ///
+    /// # Errors
+    /// On an empty stack or columns of different or non-power-of-two lengths.
+    pub fn with_shift(
+        columns: &[&[i32]],
+        table: usize,
+        shift: i32,
+    ) -> Result<LookupStack<'static>, LookupError> {
         let first = columns
             .first()
             .ok_or_else(|| LookupError::Shape("a stack needs a column".into()))?;
@@ -237,13 +286,32 @@ impl LookupStack {
             columns: columns.len(),
             vars: cells.trailing_zeros() as usize,
             table,
+            shift,
         };
-        let mut stacked = vec![0_i32; shape.leaves()];
+        let mut stacked = vec![shape.padding(); shape.leaves()];
         stacked
             .par_chunks_mut(cells)
             .zip(columns.par_iter())
             .for_each(|(slot, column)| slot.copy_from_slice(column));
-        Ok(Self { shape, stacked })
+        Ok(LookupStack {
+            shape,
+            stacked: Cow::Owned(stacked),
+        })
+    }
+
+    /// A stack over an already stacked lane (column `c` at cells `c 2^vars ..`, the
+    /// padding slots holding `shape.padding()`), borrowed.
+    ///
+    /// # Errors
+    /// When the lane length is not `shape.leaves()`.
+    pub fn borrowed(shape: StackShape, stacked: &'a [i32]) -> Result<Self, LookupError> {
+        if stacked.len() != shape.leaves() {
+            return Err(LookupError::Shape("stacked lane of the wrong length".into()));
+        }
+        Ok(Self {
+            shape,
+            stacked: Cow::Borrowed(stacked),
+        })
     }
 
     /// The public shape.
@@ -261,7 +329,7 @@ impl LookupStack {
     /// Mutable stacked lane (tests: tampering).
     #[doc(hidden)]
     pub fn stacked_mut(&mut self) -> &mut [i32] {
-        &mut self.stacked
+        self.stacked.to_mut()
     }
 }
 
@@ -271,7 +339,7 @@ impl LookupStack {
 /// # Errors
 /// [`LookupError::OutOfTable`] when a cell is not an entry of its table (honest abort),
 /// [`LookupError::Shape`] on a missing table or a count above `i32::MAX`.
-pub fn multiplicities(stacks: &[LookupStack], tables: &[Table]) -> Result<Vec<Vec<i32>>, LookupError> {
+pub fn multiplicities(stacks: &[LookupStack<'_>], tables: &[Table]) -> Result<Vec<Vec<i32>>, LookupError> {
     const CHUNK: usize = 1 << 16;
     let mut totals: Vec<Vec<u64>> = tables.iter().map(|t| vec![0; t.len()]).collect();
     for (s, stack) in stacks.iter().enumerate() {
@@ -279,6 +347,7 @@ pub fn multiplicities(stacks: &[LookupStack], tables: &[Table]) -> Result<Vec<Ve
             .get(stack.shape.table)
             .ok_or_else(|| LookupError::Shape(format!("stack {s} names a missing table")))?;
         let len = table.len();
+        let shift = stack.shape.shift;
         let counts = stack
             .stacked
             .par_chunks(CHUNK)
@@ -286,8 +355,9 @@ pub fn multiplicities(stacks: &[LookupStack], tables: &[Table]) -> Result<Vec<Ve
             .try_fold(
                 || vec![0_u64; len],
                 |mut acc, (chunk, cells)| {
-                    for (offset, &value) in cells.iter().enumerate() {
-                        if !table.contains(value) {
+                    for (offset, &stored) in cells.iter().enumerate() {
+                        let value = stored.wrapping_add(shift);
+                        if !table.contains(value) || stored.checked_add(shift).is_none() {
                             return Err(LookupError::OutOfTable {
                                 stack: s,
                                 index: chunk * CHUNK + offset,
@@ -387,7 +457,7 @@ pub struct LookupShape {
 impl LookupShape {
     /// The shape of `stacks` and `tables` under `challenges` challenges.
     #[must_use]
-    pub fn of(stacks: &[LookupStack], tables: &[Table], challenges: usize) -> Self {
+    pub fn of(stacks: &[LookupStack<'_>], tables: &[Table], challenges: usize) -> Self {
         Self {
             stacks: stacks.iter().map(LookupStack::shape).collect(),
             tables: tables.to_vec(),
@@ -427,8 +497,23 @@ impl LookupShape {
         self.stacks.len() + self.tables.len()
     }
 
-    fn tree_count(&self) -> usize {
+    /// Trees: one per stack and table, per challenge.
+    #[must_use]
+    pub fn tree_count(&self) -> usize {
         self.challenges * self.per_challenge()
+    }
+
+    /// The event counts of session `s >= 2`: trees of depth `>= s` (two batching
+    /// coefficients each), trees of depth `> s` (four terminal values each) and the stacks
+    /// and tables of depth `s` (two leaf values each).
+    #[must_use]
+    pub fn session_counts(&self, s: usize) -> (usize, usize, usize) {
+        let ids = 0..self.tree_count();
+        let active = ids.clone().filter(|&id| self.tree_depth(id) >= s).count();
+        let continuing = ids.filter(|&id| self.tree_depth(id) > s).count();
+        let ending = self.stacks.iter().filter(|st| st.depth() == s).count()
+            + self.tables.iter().filter(|t| t.width as usize == s).count();
+        (active, continuing, ending)
     }
 
     /// Tree `id`: its challenge index and kind (challenge-major, stacks then tables).
@@ -498,6 +583,7 @@ impl LookupShape {
             for value in [stack.columns, stack.vars, stack.table] {
                 out.extend_from_slice(&(value as u64).to_le_bytes());
             }
+            out.extend_from_slice(&i64::from(stack.shift).to_le_bytes());
         }
         out.extend_from_slice(&(self.tables.len() as u64).to_le_bytes());
         for table in &self.tables {
@@ -511,7 +597,60 @@ impl LookupShape {
 // Fiat-Shamir.
 // ---------------------------------------------------------------------------------------
 
-/// The prototype's transcript: SHAKE256 over framed, labelled absorptions; a challenge
+/// The events of a lookup in transcript order (`docs/piop.md` Section 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupSite {
+    /// The challenges `X_1 .. X_c` (one vector challenge).
+    X,
+    /// The layer-1 values of every tree.
+    Layer1,
+    /// `mu_s` after session `s` (`mu_1` after the layer-1 values).
+    Mu(usize),
+    /// The batching coefficients of session `s`.
+    Gamma(usize),
+    /// Round `round` of session `s`: the message.
+    Round(usize, usize),
+    /// Round `round` of session `s`: the challenge.
+    RoundChallenge(usize, usize),
+    /// The layer terminals of session `s`.
+    Terminals(usize),
+    /// The leaf values of session `s`.
+    Leaves(usize),
+}
+
+impl LookupSite {
+    /// The label of the site (also the PIOP transcript site under `agg-mldsa/v1/lookup/`).
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::X => "x".to_owned(),
+            Self::Layer1 => "layer1".to_owned(),
+            Self::Mu(s) => format!("mu/{s}"),
+            Self::Gamma(s) => format!("gamma/{s}"),
+            Self::Round(s, round) => format!("round/{s}/{round}"),
+            Self::RoundChallenge(s, round) => format!("r/{s}/{round}"),
+            Self::Terminals(s) => format!("terminals/{s}"),
+            Self::Leaves(s) => format!("leaves/{s}"),
+        }
+    }
+}
+
+/// The Fiat-Shamir interface of a lookup: absorb proof values, sample challenges in `K`.
+pub trait LookupTranscript {
+    /// Absorb `values` at `site`.
+    ///
+    /// # Errors
+    /// When the transcript refuses the event.
+    fn absorb(&mut self, site: LookupSite, values: &[E]) -> Result<(), LookupError>;
+
+    /// Sample `count` challenges at `site`.
+    ///
+    /// # Errors
+    /// When the transcript refuses the event.
+    fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<E>, LookupError>;
+}
+
+/// The standalone transcript: SHAKE256 over framed, labelled absorptions; a challenge
 /// squeezes from a clone of the state and absorbs what it squeezed.
 #[derive(Clone)]
 struct Fs {
@@ -535,15 +674,18 @@ impl Fs {
         self.state.update(&(bytes.len() as u64).to_le_bytes());
         self.state.update(bytes);
     }
+}
 
-    fn absorb(&mut self, label: &str, values: &[E]) {
-        self.frame(label.as_bytes(), &encode_extensions(values));
+impl LookupTranscript for Fs {
+    fn absorb(&mut self, site: LookupSite, values: &[E]) -> Result<(), LookupError> {
+        self.frame(site.label().as_bytes(), &encode_extensions(values));
+        Ok(())
     }
 
     /// `count` elements of `K`, each limb rejection-sampled from eight bytes as in
     /// `Transcript::sample_base`.
-    fn challenges(&mut self, label: &str, count: usize) -> Vec<E> {
-        self.frame(label.as_bytes(), &(count as u64).to_le_bytes());
+    fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<E>, LookupError> {
+        self.frame(site.label().as_bytes(), &(count as u64).to_le_bytes());
         let mut reader = self.state.clone().finalize_xof();
         let mut base = || loop {
             let mut candidate = [0_u8; 8];
@@ -560,12 +702,12 @@ impl Fs {
             })
             .collect();
         self.frame(b"squeezed", &encode_extensions(&out));
-        out
+        Ok(out)
     }
+}
 
-    fn challenge(&mut self, label: &str) -> E {
-        self.challenges(label, 1)[0]
-    }
+fn one(transcript: &mut impl LookupTranscript, site: LookupSite) -> Result<E, LookupError> {
+    Ok(transcript.challenges(site, 1)?[0])
 }
 
 // ---------------------------------------------------------------------------------------
@@ -607,7 +749,7 @@ fn parent(child: &Layer) -> Layer {
 }
 
 /// The layer above the leaves `(1, X - g)` of a stacked lane: `p = (X - g_0) + (X - g_1)`,
-/// `q = (X - g_0)(X - g_1)`.
+/// `q = (X - g_0)(X - g_1)` (`x` is the challenge minus the stack's storage shift).
 fn stack_bottom(stacked: &[i32], x: E) -> Layer {
     let half = stacked.len() / 2;
     build_nodes(half, |y| {
@@ -757,17 +899,18 @@ fn session_plan(shape: &LookupShape, s: usize, xs: &[E], active: &[usize], gamma
     let per_x = |kind: TreeKind| -> Vec<(E, E, E)> {
         (0..shape.challenges)
             .map(|x| {
-                let local = match kind {
-                    TreeKind::Stack(j) => j,
-                    TreeKind::Table(t) => shape.stacks.len() + t,
+                let (local, shift) = match kind {
+                    TreeKind::Stack(j) => (j, shape.stacks[j].shift),
+                    TreeKind::Table(t) => (shape.stacks.len() + t, 0),
                 };
                 let (gp, gq) = gamma_of(x * shape.per_challenge() + local);
-                (xs[x], gp, gq)
+                (xs[x] - E::from_i64(i64::from(shift)), gp, gq)
             })
             .collect()
     };
     for &j in &ending_stacks {
-        // q = (X - v0)(X - v1) = X^2 - X (v0 + v1) + v0 v1; p = 2 X - v0 - v1.
+        // With X' = X - shift on the stored lanes v:
+        // q = (X' - v0)(X' - v1) = X'^2 - X' (v0 + v1) + v0 v1; p = 2 X' - v0 - v1.
         let (mut constant, mut linear, mut bilinear) = (E::zero(), E::zero(), E::zero());
         for (x, gp, gq) in per_x(TreeKind::Stack(j)) {
             constant += gq * x * x + (gp + gp) * x;
@@ -928,35 +1071,55 @@ pub struct LookupOutput {
 /// On a bad layout, a kernel error, or when the prover's own tables fail the root
 /// identity or a session self-check (a dishonest witness).
 pub fn prove(
-    stacks: &[LookupStack],
+    stacks: &[LookupStack<'_>],
     tables: &[Table],
     multiplicities: &[Vec<i32>],
     challenges: usize,
     binding: &[u8],
 ) -> Result<LookupOutput, LookupError> {
-    prove_with(stacks, tables, multiplicities, challenges, binding, true)
+    let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
+    prove_with(stacks, tables, multiplicities, challenges, &mut fs, true)
+}
+
+/// [`prove`] inside a caller's transcript (the PIOP transcript of the integrated
+/// protocol, which has bound the commitments before the challenges `X`). `check` runs
+/// the prover's self-checks (root identity, session claims); tests pass `false` to hand a
+/// dishonest witness to the verifier.
+///
+/// # Errors
+/// As [`prove`], or when the transcript refuses an event.
+pub fn prove_in(
+    stacks: &[LookupStack<'_>],
+    tables: &[Table],
+    multiplicities: &[Vec<i32>],
+    challenges: usize,
+    transcript: &mut impl LookupTranscript,
+    check: bool,
+) -> Result<LookupOutput, LookupError> {
+    prove_with(stacks, tables, multiplicities, challenges, transcript, check)
 }
 
 /// [`prove`] without the prover's self-checks, so tests can hand a dishonest witness to
 /// the verifier.
 #[doc(hidden)]
 pub fn prove_unchecked(
-    stacks: &[LookupStack],
+    stacks: &[LookupStack<'_>],
     tables: &[Table],
     multiplicities: &[Vec<i32>],
     challenges: usize,
     binding: &[u8],
 ) -> Result<LookupOutput, LookupError> {
-    prove_with(stacks, tables, multiplicities, challenges, binding, false)
+    let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
+    prove_with(stacks, tables, multiplicities, challenges, &mut fs, false)
 }
 
 #[allow(clippy::too_many_lines)]
 fn prove_with(
-    stacks: &[LookupStack],
+    stacks: &[LookupStack<'_>],
     tables: &[Table],
     multiplicities: &[Vec<i32>],
     challenges: usize,
-    binding: &[u8],
+    fs: &mut impl LookupTranscript,
     check: bool,
 ) -> Result<LookupOutput, LookupError> {
     let start = Instant::now();
@@ -968,15 +1131,17 @@ fn prove_with(
         return Err(LookupError::Shape("one multiplicity column per table entry".into()));
     }
     let index_halves: Vec<(Vec<i32>, Vec<i32>)> = tables.iter().map(|t| t.index_halves()).collect();
-    let mut fs = Fs::new(&shape, binding);
-    let xs = fs.challenges("x", challenges);
+    let xs = fs.challenges(LookupSite::X, challenges)?;
 
     let build = Instant::now();
     let mut trees: Vec<FractionTree> = (0..shape.tree_count())
         .map(|id| {
             let (x, kind) = shape.tree(id);
             let bottom = match kind {
-                TreeKind::Stack(j) => stack_bottom(&stacks[j].stacked, xs[x]),
+                TreeKind::Stack(j) => stack_bottom(
+                    &stacks[j].stacked,
+                    xs[x] - E::from_i64(i64::from(stacks[j].shape.shift)),
+                ),
                 TreeKind::Table(t) => table_bottom(&multiplicities[t], xs[x]),
             };
             FractionTree::from_bottom(bottom)
@@ -993,8 +1158,8 @@ fn prove_with(
     if check {
         check_roots(&shape, &layer1)?;
     }
-    fs.absorb("layer1", &layer1.concat());
-    let mu = fs.challenge("mu/1");
+    fs.absorb(LookupSite::Layer1, &layer1.concat())?;
+    let mu = one(fs, LookupSite::Mu(1))?;
     let mut point = vec![mu];
     // Claims (p, q) on layer `s - 1` at `point`, per tree with depth >= s.
     let mut claims: Vec<(E, E)> = layer1
@@ -1008,7 +1173,7 @@ fn prove_with(
     for s in 2..=shape.max_depth() {
         let session_start = Instant::now();
         let active: Vec<usize> = (0..shape.tree_count()).filter(|&id| shape.tree_depth(id) >= s).collect();
-        let gammas = fs.challenges(&format!("gamma/{s}"), 2 * active.len());
+        let gammas = fs.challenges(LookupSite::Gamma(s), 2 * active.len())?;
         let mut claim = E::zero();
         for (i, &id) in active.iter().enumerate() {
             claim += gammas[2 * i] * claims[id].0 + gammas[2 * i + 1] * claims[id].1;
@@ -1056,8 +1221,8 @@ fn prove_with(
                     *slot += value;
                 }
             }
-            fs.absorb(&format!("round/{s}/{round}"), &message);
-            let challenge = fs.challenge(&format!("r/{s}/{round}"));
+            fs.absorb(LookupSite::Round(s, round), &message)?;
+            let challenge = one(fs, LookupSite::RoundChallenge(s, round))?;
             claim = evaluate_compressed(&message, claim, challenge);
             for group in &mut groups {
                 group.bind(round, challenge);
@@ -1080,9 +1245,9 @@ fn prove_with(
             }
         }
         drop(groups);
-        fs.absorb(&format!("terminals/{s}"), &terminals.concat());
-        fs.absorb(&format!("leaves/{s}"), &leaves.concat());
-        let mu = fs.challenge(&format!("mu/{s}"));
+        fs.absorb(LookupSite::Terminals(s), &terminals.concat())?;
+        fs.absorb(LookupSite::Leaves(s), &leaves.concat())?;
+        let mu = one(fs, LookupSite::Mu(s))?;
         for (&id, &[p0, p1, q0, q1]) in plan.continuing.iter().zip(&terminals) {
             claims[id] = (line(p0, p1, mu), line(q0, q1, mu));
         }
@@ -1132,16 +1297,29 @@ fn prove_with(
 /// # Panics
 /// Never: the leaf counts are checked against the layout before they are read.
 pub fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Result<LookupClaims, LookupError> {
+    let mut fs = Fs::new(shape, binding);
+    verify_in(shape, proof, &mut fs)
+}
+
+/// [`verify`] inside a caller's transcript (the PIOP transcript of the integrated
+/// protocol).
+///
+/// # Errors
+/// As [`verify`], or when the transcript refuses an event.
+pub fn verify_in(
+    shape: &LookupShape,
+    proof: &LookupProof,
+    fs: &mut impl LookupTranscript,
+) -> Result<LookupClaims, LookupError> {
     shape.validate()?;
     let max_depth = shape.max_depth();
     if proof.layer1.len() != shape.tree_count() || proof.sessions.len() + 1 != max_depth {
         return Err(LookupError::Shape("tree or session count".into()));
     }
-    let mut fs = Fs::new(shape, binding);
-    let xs = fs.challenges("x", shape.challenges);
+    let xs = fs.challenges(LookupSite::X, shape.challenges)?;
     check_roots(shape, &proof.layer1)?;
-    fs.absorb("layer1", &proof.layer1.concat());
-    let mu = fs.challenge("mu/1");
+    fs.absorb(LookupSite::Layer1, &proof.layer1.concat())?;
+    let mu = one(fs, LookupSite::Mu(1))?;
     let mut point = vec![mu];
     let mut claims: Vec<(E, E)> = proof
         .layer1
@@ -1152,7 +1330,7 @@ pub fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Resul
     let mut table_claims: Vec<Option<(Vec<E>, E)>> = vec![None; shape.tables.len()];
     for (s, session) in (2..=max_depth).zip(&proof.sessions) {
         let active: Vec<usize> = (0..shape.tree_count()).filter(|&id| shape.tree_depth(id) >= s).collect();
-        let gammas = fs.challenges(&format!("gamma/{s}"), 2 * active.len());
+        let gammas = fs.challenges(LookupSite::Gamma(s), 2 * active.len())?;
         let plan = session_plan(shape, s, &xs, &active, &gammas);
         if session.rounds.len() != s - 1
             || session.rounds.iter().any(|m| m.len() != DEGREE)
@@ -1167,8 +1345,8 @@ pub fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Resul
         }
         let mut rho = Vec::with_capacity(s);
         for (round, message) in session.rounds.iter().enumerate() {
-            fs.absorb(&format!("round/{s}/{round}"), message);
-            let challenge = fs.challenge(&format!("r/{s}/{round}"));
+            fs.absorb(LookupSite::Round(s, round), message)?;
+            let challenge = one(fs, LookupSite::RoundChallenge(s, round))?;
             claim = evaluate_compressed(message, claim, challenge);
             rho.push(challenge);
         }
@@ -1191,9 +1369,9 @@ pub fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Resul
         if expected != claim {
             return Err(LookupError::Terminal(s));
         }
-        fs.absorb(&format!("terminals/{s}"), &session.terminals.concat());
-        fs.absorb(&format!("leaves/{s}"), &session.leaves.concat());
-        let mu = fs.challenge(&format!("mu/{s}"));
+        fs.absorb(LookupSite::Terminals(s), &session.terminals.concat())?;
+        fs.absorb(LookupSite::Leaves(s), &session.leaves.concat())?;
+        let mu = one(fs, LookupSite::Mu(s))?;
         for (&id, &[p0, p1, q0, q1]) in plan.continuing.iter().zip(&session.terminals) {
             claims[id] = (line(p0, p1, mu), line(q0, q1, mu));
         }
@@ -1234,7 +1412,7 @@ mod tests {
 
     /// The L16 main-domain stack `[z_lo | u_lo | v_lo | v_hi]` with honest-looking values
     /// (the encoder of `docs/lookup.md` Section 1: `z + 2^17`, `u + 2^18`, `v + 2^31`).
-    fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack {
+    fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
         let mut columns: Vec<Vec<i32>> = (0..4).map(|_| Vec::with_capacity(cells)).collect();
         for _ in 0..cells {
@@ -1252,7 +1430,7 @@ mod tests {
     }
 
     /// Six carry-like columns (padded to 8 slots) and one single-column stack.
-    fn carry_stacks(rng: &mut SplitMix64, vars: usize) -> Vec<LookupStack> {
+    fn carry_stacks(rng: &mut SplitMix64, vars: usize) -> Vec<LookupStack<'static>> {
         let six: Vec<Vec<i32>> = (0..6).map(|_| column(rng, vars, 1024)).collect();
         let refs: Vec<&[i32]> = six.iter().map(Vec::as_slice).collect();
         let one = column(rng, vars - 2, 256);
@@ -1427,7 +1605,7 @@ mod tests {
     /// The L16 lookups of `n` signatures: the main stack `[z_lo | u_lo | v_lo | v_hi]` on
     /// `d_main = 10 + d_sig` variables and the carry stacks `kappa^(1)` (6 columns on
     /// `D_1`), `kappa^(2)` (6 on `D_2`), `kappa^(3)` (1 on `D_3`), all in `T_16`.
-    fn layout(rng: &mut SplitMix64, n: usize) -> Vec<LookupStack> {
+    fn layout(rng: &mut SplitMix64, n: usize) -> Vec<LookupStack<'static>> {
         let d_sig = n.next_power_of_two().max(8).trailing_zeros() as usize;
         let d1 = 13 + d_sig.saturating_sub(9);
         let d2 = 13 + d_sig.saturating_sub(13);

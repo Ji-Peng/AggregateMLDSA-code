@@ -1,6 +1,7 @@
 //! The prover's narrow tables and the lanes the stages read from them.
 //!
-//! [`ProverTables`] borrows the committed `i8` columns of both rounds, materializes the
+//! [`ProverTables`] borrows the committed columns of both rounds (`i8` width-4 columns and
+//! the `i32` lookup columns, read as `Ints` lanes), materializes the
 //! level-1 parities `y^(1)_t` (`i8` when every value fits, as for an honest witness whose
 //! parities are bits; `i32` otherwise) and holds the public weight tables once they are
 //! known (`w_2, w_{3,t}` after `tau`; `w_1` after `r^(1)`; `w_A` after `r^(2)`). Every
@@ -13,7 +14,7 @@ use agg_witness::params::W1_BITS;
 use crate::kernel::{Lane, Source};
 use crate::manifest::Column;
 use crate::public_data::PublicData;
-use crate::range::{hi_map, lo_map, square_map};
+use crate::range::square_map;
 use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
 use crate::virtual_polys::parity1_tables;
@@ -127,10 +128,8 @@ impl<'a> ProverTables<'a> {
     pub fn lane(&self, id: LaneId) -> Lane<'_> {
         let column = |c: Column| self.tables.column(c);
         match id {
-            LaneId::Column(c) => Lane::column(column(c)),
-            LaneId::DigitSquare(c) => Lane::mapped(column(c), square_map()),
-            LaneId::DigitLo(c) => Lane::mapped(column(c), lo_map()),
-            LaneId::DigitHi(c) => Lane::mapped(column(c), hi_map()),
+            LaneId::Column(c) => column(c).lane(),
+            LaneId::DigitSquare(c) => Lane::mapped(column(c).narrow(), square_map()),
             LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
             LaneId::Weight(WeightId::Level1) => {
                 Lane::Source(Source::Field(self.w1.as_deref().expect("w_1 after r^(1)")))

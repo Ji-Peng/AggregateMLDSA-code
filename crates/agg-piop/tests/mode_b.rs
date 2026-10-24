@@ -1,5 +1,6 @@
-//! Mode B end to end (spec Sections 11, 13, 14): `prove_mode_b` / `verify_mode_b` round
-//! trips at 256 and 1,024 signatures with the seed-derived matrices of spec 9.1
+//! Mode B end to end (spec Sections 11, 13, 14; lookup layout L16): `prove_mode_b` /
+//! `verify_mode_b` round trips at 64, 256 and 1,024 signatures with the seed-derived
+//! matrices of spec 9.1
 //! (`SeededMatrices`), the proof size and the verifier's step timings printed, corrupted
 //! aggregates rejected, and every witness tampering of `tests/stages.rs` pushed through the
 //! full prover (unchecked stages) and rejected by the verifier.
@@ -8,7 +9,7 @@
 mod common;
 
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole};
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT, U16_DIGITS};
 use agg_piop::mode_b::{prove_mode_b, public_bits, verify_mode_b, PublicBits, PublicBitsVerifier};
 use agg_piop::prover::{
     main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, FixedMatrices, ProveHooks,
@@ -23,7 +24,6 @@ use agg_piop::verifier::{
 };
 use agg_bridge::seed::derive_matrices;
 use agg_witness::bridge::{BridgeMatrices, J1, K1};
-use agg_witness::digits::U_DIGITS;
 use agg_witness::gen::Record;
 use agg_witness::instance::PublicInstance;
 use agg_witness::native::commitment_hash;
@@ -113,7 +113,7 @@ fn round_trip(
     assert_eq!(size.total(), bytes.len());
     eprintln!(
         "N = {n}: aggregate {} bytes = header {} + c~ {} + public bits {} + Akita commitments {} \
-         + final vectors {} + Keccak proofs {} + PIOP {} + opening {}",
+         + final vectors {} + Keccak proofs {} + lookup {} + PIOP {} + opening {}",
         bytes.len(),
         size.header,
         size.c_tilde,
@@ -121,6 +121,7 @@ fn round_trip(
         size.akita_commitments,
         size.final_vectors,
         size.keccak_proofs,
+        size.lookup,
         size.piop,
         size.opening
     );
@@ -205,8 +206,11 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         ));
 
         // PIOP and opening corruptions.
+        let mut lookup = output.proof.clone();
+        lookup.lookup.sessions[6].rounds[3][2] = lookup.lookup.sessions[6].rounds[3][0];
+        assert!(matches!(rejected(verify(&lookup)), VerifyError::Lookup(_)));
         let mut prestage = output.proof.clone();
-        prestage.prestage.kappa3[1] = prestage.prestage.kappa3[0];
+        prestage.prestage.kappa3 = prestage.prestage.kappa2[0];
         assert!(matches!(
             rejected(verify(&prestage)),
             VerifyError::Stage(StageError::Terminal(1))
@@ -305,6 +309,13 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
 }
 
 #[test]
+fn mode_b_round_trip_at_64_signatures() {
+    on_large_stack(|| {
+        let _ = round_trip(60, 4, 0xb064);
+    });
+}
+
+#[test]
 #[cfg_attr(debug_assertions, ignore = "1,024 signatures: run with --release")]
 fn mode_b_round_trip_at_1024_signatures() {
     on_large_stack(|| {
@@ -345,7 +356,7 @@ fn prove_tampered(
     .map_err(|e| e.to_string())
 }
 
-/// Mutable access to one `G_main` cell.
+/// Mutable access to one `G_main4` cell.
 fn cell<'a>(
     manifest: &CommitmentManifest,
     main: &'a mut MainTables,
@@ -355,10 +366,6 @@ fn cell<'a>(
     let (role, position) = manifest.locate(column);
     assert_eq!(role, GroupRole::Main);
     &mut main.columns_mut()[position][x]
-}
-
-fn digit(value: DigitValue, digit: u8) -> Column {
-    Column::Digit { value, digit }
 }
 
 #[test]
@@ -389,7 +396,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             f(&mut main);
             main
         };
-        let step = |d: i8| if d < 7 { d + 1 } else { d - 1 };
+        let step = |d: i32| if d < LOOKUP_SHIFT - 1 { d + 1 } else { d - 1 };
         let expect = |label: &str, main: &MainTables, check: &dyn Fn(&VerifyError) -> bool| {
             let bytes = prove_tampered(&fixture, &bridge, main, None).expect(label);
             let error = rejected(verify(&bytes));
@@ -398,23 +405,17 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         };
         let at_stage = |s: usize| move |e: &VerifyError| matches!(e, VerifyError::Stage(StageError::Terminal(t)) if *t == s);
 
-        // A z digit or a v digit changed inside its alphabet: the ring identity (stage 3).
-        expect(
-            "z digit",
-            &tampered(&|m| {
-                *cell(&manifest, m, digit(DigitValue::Z, 0), x) =
-                    step(*cell(&manifest, m, digit(DigitValue::Z, 0), x))
-            }),
-            &at_stage(3),
-        );
-        expect(
-            "v digit",
-            &tampered(&|m| {
-                *cell(&manifest, m, digit(DigitValue::V, 0), x) =
-                    step(*cell(&manifest, m, digit(DigitValue::V, 0), x))
-            }),
-            &at_stage(3),
-        );
+        // A 16-bit column changed inside the table: the ring identity (stage 3).
+        for column in [Column::Z_LO, Column::V_LO] {
+            expect(
+                &column.name(),
+                &tampered(&|m| {
+                    let cell = m.wide_cell_mut(&manifest, column, x);
+                    *cell = step(*cell);
+                }),
+                &at_stage(3),
+            );
+        }
         // A committed bit flipped: committed and public bits differ, so the bridge final
         // vector no longer matches the projection of the public bits.
         expect(
@@ -432,36 +433,39 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             &tampered(&|m| *cell(&manifest, m, Column::W1Bit(1), even) = 2),
             &at_stage(1),
         );
-        // w1' = 44 in the committed bits only: the projection; in both copies: the range.
+        // w1' = 44 in the committed bits only: the projection.
         let w44 = tampered(&|m| {
             for (t, bit) in [0, 0, 1, 1, 0, 1].into_iter().enumerate() {
                 *cell(&manifest, m, Column::W1Bit(t as u8), x) = bit;
             }
         });
         expect("w1' = 44", &w44, &|e| matches!(e, VerifyError::Keccak(0)));
-        // A base-16 digit outside its alphabet: the width-4 commitment cannot hold 9.
-        let wide = tampered(&|m| *cell(&manifest, m, digit(DigitValue::U, 1), x) = 9);
+        // A 16-bit value outside [-2^15, 2^15) (looked-up value 2^16): the width-16
+        // commitment cannot hold it (the PIOP-level rejection by the lookup is in
+        // tests/stages.rs).
+        let wide = tampered(&|m| *m.wide_cell_mut(&manifest, Column::U_LO, x) = LOOKUP_SHIFT);
         match prove_tampered(&fixture, &bridge, &wide, None) {
-            Err(error) => eprintln!("base-16 digit 9: the prover's commitment fails ({error})"),
+            Err(error) => eprintln!("u_lo = 2^15: the prover fails ({error})"),
             Ok(bytes) => {
                 let error = rejected(verify(&bytes));
-                eprintln!("base-16 digit 9: rejected with {error}");
-                assert!(at_stage(1)(&error), "{error:?}");
+                eprintln!("u_lo = 2^15: rejected with {error}");
+                assert!(matches!(error, VerifyError::Lookup(_)), "{error:?}");
             }
         }
         // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
         expect(
             "base-4 digit",
-            &tampered(&|m| *cell(&manifest, m, digit(DigitValue::Z, 4), x) = 3),
+            &tampered(&|m| *cell(&manifest, m, Column::Z_HI, x) = 3),
             &at_stage(2),
         );
         expect(
             "base-8 digit",
-            &tampered(&|m| *cell(&manifest, m, digit(DigitValue::U, 4), x) = -6),
+            &tampered(&|m| *cell(&manifest, m, Column::U_HI, x) = -6),
             &at_stage(2),
         );
 
-        // Round-2 tampering: a level-1 carry digit, a level-2 parity, a final-vector bit.
+        // Round-2 tampering: a level-1 carry (m recounted), a level-2 parity, a
+        // final-vector bit.
         let run_bridge = |label: &str,
                           tamper: &dyn Fn(&CommitmentManifest, &mut BridgeGroupTables),
                           check: &dyn Fn(&VerifyError) -> bool| {
@@ -471,26 +475,33 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             assert!(check(&error), "{label}: {error:?}");
         };
         run_bridge(
-            "level-1 carry digit",
-            &|_, b| {
-                let column = &mut b.group_mut(GroupRole::Level1)[0];
-                column[3] = step(column[3]);
+            "level-1 carry",
+            &|m, b| {
+                let carries = b.carries_mut(1);
+                carries[3] = step(carries[3]);
+                b.recount(m, &honest).unwrap();
             },
             &at_stage(1),
         );
         run_bridge(
             "level-2 parity",
-            &|_, b| b.group_mut(GroupRole::Level2)[2][5] ^= 1,
+            &|_, b| b.parities_mut()[2][5] ^= 1,
             &at_stage(1),
         );
         run_bridge(
             "final-vector bit",
-            &|m, b| {
-                let mut tables = b.to_witness_tables();
-                tables.y[11] ^= 1;
-                *b = BridgeGroupTables::from_tables(m, tables).unwrap();
-            },
+            &|_, b| b.public_y_mut()[11] ^= 1,
             &|e| matches!(e, VerifyError::Keccak(0)),
+        );
+        // A wrong multiplicity: the lookup.
+        run_bridge(
+            "multiplicity",
+            &|_, b| {
+                let mut m = b.multiplicity().to_vec();
+                m[7] += 1;
+                b.set_multiplicity(m);
+            },
+            &|e| matches!(e, VerifyError::Lookup(_)),
         );
     });
 }
@@ -541,13 +552,9 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
             signatures: &signatures,
         })
         .unwrap();
-        let read =
-            |m: &MainTables, column: Column, x: usize| m.columns()[manifest.locate(column).1][x];
+        let read = |m: &MainTables, column: Column, x: usize| m.column(&manifest, column).value(x);
         let u_at = |m: &MainTables, x: usize| {
-            let digits: Vec<i64> = (0..5)
-                .map(|k| i64::from(read(m, digit(DigitValue::U, k), x)))
-                .collect();
-            U_DIGITS.compose(&digits)
+            U16_DIGITS.compose(&[read(m, Column::U_LO, x), read(m, Column::U_HI, x)])
         };
         // Two positions of record 3 whose u can absorb -2 gamma_2 (w1' bit 0 flipped).
         let shifted = |x: usize| {
@@ -568,9 +575,9 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
         let mut tampered = honest.clone();
         for &(x, u) in &positions {
             *cell(&manifest, &mut tampered, Column::W1Bit(0), x) ^= 1;
-            for (k, d) in U_DIGITS.decompose(u).into_iter().enumerate() {
-                *cell(&manifest, &mut tampered, digit(DigitValue::U, k as u8), x) = d as i8;
-            }
+            let digits = U16_DIGITS.decompose(u);
+            *tampered.wide_cell_mut(&manifest, Column::U_LO, x) = digits[0] as i32;
+            *cell(&manifest, &mut tampered, Column::U_HI, x) = digits[1] as i8;
         }
         let mut matrices = BridgeMatrices::random_for_tests(0x5c);
         let (z1, z2) = (positions[0].0 & (J1 - 1), positions[1].0 & (J1 - 1));

@@ -1,9 +1,8 @@
-//! Stage 2 (spec Section 7.4, degree 5): the level-1 definition (7.5) and the 95 range
-//! leaves on the virtual tables `P_Z`.
+//! Stage 2 (spec Section 7.4, degree 5): the level-1 definition (7.5) and the two range
+//! leaves of the small digits on the virtual tables `P_Z` (lookup layout L16: every other
+//! range is the lookup into `T_16`).
 //!
-//! `gamma^(2)` order: `def_y1[t]` (0..6), `leaf16[Z, lo], leaf16[Z, hi]` per base-16
-//! digit (6..86, lo before hi, digit order of spec Section 4.1), `leaf8[Z]` for `u_4, v_6`
-//! (86, 87), `leaf4[Z]` for the 13 base-4 digits (88..101) in digit order.
+//! `gamma^(2)` order: `def_y1[t]` (0..6), `leaf4[Z_hi]` (6), `leaf8[U_hi]` (7).
 
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
@@ -13,7 +12,7 @@ use jolt_field::Zero;
 use crate::claims::{Kappa1Claims, Stage1Claims, Stage2Claims};
 use crate::kernel::{LeafPoly, Term};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
-use crate::range::{base16_digits, digits, digits_of_base, Digit};
+use crate::range::{digits, Digit};
 use crate::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
@@ -29,33 +28,23 @@ pub const STAGE: usize = 2;
 /// Message degree.
 pub const DEGREE: usize = 5;
 /// Batching coefficients.
-pub const GAMMA_COUNT: usize = 101;
+pub const GAMMA_COUNT: usize = W1_BITS + 2;
 
 /// Gamma index of `def_y1[t]`.
 #[must_use]
 pub const fn gamma_def_y1(t: usize) -> usize {
     t
 }
-/// Gamma indices `(lo, hi)` of the leaves of the `k`-th base-16 digit.
+/// Gamma index of the leaf of the `k`-th leaf-checked digit (`Z_hi`, then `U_hi`).
 #[must_use]
-pub const fn gamma_leaf16(k: usize) -> (usize, usize) {
-    (W1_BITS + 2 * k, W1_BITS + 2 * k + 1)
-}
-/// Gamma index of the `k`-th base-8 leaf.
-#[must_use]
-pub const fn gamma_leaf8(k: usize) -> usize {
-    W1_BITS + 80 + k
-}
-/// Gamma index of the `k`-th base-4 leaf.
-#[must_use]
-pub const fn gamma_leaf4(k: usize) -> usize {
-    W1_BITS + 82 + k
+pub const fn gamma_leaf(k: usize) -> usize {
+    W1_BITS + k
 }
 
 /// The stage-2 proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Proof {
-    /// The 18 claims `kappa^(1)_{t,k}(r^(1)_1)` sent before `gamma^(2)`.
+    /// The 6 claims `K^(1)_t(r^(1)_1)` sent before `gamma^(2)`.
     pub kappa1: Kappa1Claims,
     /// Compressed degree-5 messages (5 elements each).
     pub rounds: Vec<Vec<E>>,
@@ -74,17 +63,12 @@ pub struct Stage2Output {
     pub claims: Stage2Claims,
 }
 
-/// The leaf instances of a digit, as `(gamma, polynomial)`.
-fn leaves(digit: &Digit, base16: &[Digit], base8: &[Digit], base4: &[Digit]) -> Vec<(usize, LeafPoly)> {
-    let index = |list: &[Digit]| list.iter().position(|d| d == digit).expect("digit listed");
+/// The leaf polynomial of a leaf-checked digit.
+fn leaf_poly(digit: &Digit) -> LeafPoly {
     match digit.base {
-        16 => {
-            let (lo, hi) = gamma_leaf16(index(base16));
-            vec![(lo, LeafPoly::Q8), (hi, LeafPoly::Q16Hi)]
-        }
-        8 => vec![(gamma_leaf8(index(base8)), LeafPoly::Q8)],
-        4 => vec![(gamma_leaf4(index(base4)), LeafPoly::Q4)],
-        other => panic!("unsupported base {other}"),
+        8 => LeafPoly::Q8,
+        4 => LeafPoly::Q4,
+        other => panic!("unsupported leaf base {other}"),
     }
 }
 
@@ -93,9 +77,6 @@ fn leaves(digit: &Digit, base16: &[Digit], base8: &[Digit], base4: &[Digit]) -> 
 pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     let lanes = 0..W1_BITS;
     let all = digits(manifest);
-    let base16 = base16_digits(manifest);
-    let base8 = digits_of_base(manifest, 8);
-    let base4 = digits_of_base(manifest, 4);
     let mut groups = Vec::new();
     // def_y1[t] on the main domain with the weight w_1.
     groups.push(GroupSpec {
@@ -105,33 +86,20 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .chain(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8))))
             .collect(),
         instances: lanes
-            .map(|t| InstanceSpec {
-                gamma: gamma_def_y1(t),
-                terms: vec![Term::Product(vec![0, 1 + t])],
-            })
+            .map(|t| InstanceSpec::new(gamma_def_y1(t), vec![Term::Product(vec![0, 1 + t])]))
             .collect(),
     });
-    // The leaves, one equality group per domain.
-    for domain in GroupRole::ALL {
-        let mut lane_ids = Vec::new();
-        let mut instances = Vec::new();
-        for digit in all.iter().filter(|d| d.group == domain) {
-            let lane = lane_ids.len();
-            lane_ids.push(LaneId::DigitSquare(digit.column));
-            for (gamma, poly) in leaves(digit, &base16, &base8, &base4) {
-                instances.push(InstanceSpec {
-                    gamma,
-                    terms: vec![Term::Leaf(lane, poly)],
-                });
-            }
-        }
-        groups.push(GroupSpec {
-            domain,
-            eq: EqPoint::R1,
-            lanes: lane_ids,
-            instances,
-        });
-    }
+    // The two leaves on the main domain.
+    groups.push(GroupSpec {
+        domain: GroupRole::Main,
+        eq: EqPoint::R1,
+        lanes: all.iter().map(|d| LaneId::DigitSquare(d.column)).collect(),
+        instances: all
+            .iter()
+            .enumerate()
+            .map(|(k, digit)| InstanceSpec::new(gamma_leaf(k), vec![Term::Leaf(k, leaf_poly(digit))]))
+            .collect(),
+    });
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
@@ -140,19 +108,13 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: (7.5) for `def_y1`, the stage-1 products for the
-/// base-16 leaves, zero for the base-8 and base-4 leaves.
+/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the two leaves.
 #[must_use]
 pub fn claimed_sums(stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); GAMMA_COUNT];
     for t in 0..W1_BITS {
         let kappa = kappa1.value(t);
         claims[gamma_def_y1(t)] = stage1.y1[t] + kappa + kappa;
-    }
-    for (k, pair) in stage1.products.iter().enumerate() {
-        let (lo, hi) = gamma_leaf16(k);
-        claims[lo] = pair[0];
-        claims[hi] = pair[1];
     }
     claims
 }
@@ -200,10 +162,10 @@ fn prove_with(
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {
         b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8)))),
-        squares: digits(manifest)
-            .iter()
-            .map(|d| value(LaneId::DigitSquare(d.column)))
-            .collect(),
+        squares: {
+            let all = digits(manifest);
+            [0, 1].map(|k| value(LaneId::DigitSquare(all[k].column)))
+        },
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -234,9 +196,6 @@ pub fn verify(
     let claims = claimed_sums(&stage1.claims, &proof.kappa1);
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     let all = digits(manifest);
-    if proof.claims.squares.len() != all.len() {
-        return Err(StageError::Shape("stage 2 squares".into()));
-    }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
     let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
     let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
@@ -263,38 +222,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_two_has_one_hundred_and_one_instances_in_spec_order() {
+    fn stage_two_has_eight_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(spec.groups.len(), 5);
+        assert_eq!(spec.groups.len(), 2);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 101);
-        assert_eq!(gamma_leaf16(39), (84, 85));
-        assert_eq!(gamma_leaf8(1), 87);
-        assert_eq!(gamma_leaf4(12), 100);
-        // u_4 is the first base-8 leaf, z_4 the first base-4 leaf.
-        let main = &spec.groups[1];
-        let u4 = main.lane(LaneId::DigitSquare(Column::Digit {
-            value: crate::manifest::DigitValue::U,
-            digit: 4,
-        }));
-        let leaf8 = main
-            .instances
-            .iter()
-            .find(|i| i.gamma == gamma_leaf8(0))
-            .unwrap();
-        assert_eq!(leaf8.terms, vec![Term::Leaf(u4, LeafPoly::Q8)]);
-        let z4 = main.lane(LaneId::DigitSquare(Column::Digit {
-            value: crate::manifest::DigitValue::Z,
-            digit: 4,
-        }));
-        let leaf4 = main
-            .instances
-            .iter()
-            .find(|i| i.gamma == gamma_leaf4(0))
-            .unwrap();
-        assert_eq!(leaf4.terms, vec![Term::Leaf(z4, LeafPoly::Q4)]);
+        assert_eq!(instances, 8);
+        let leaves = &spec.groups[1];
+        let z_hi = leaves.lane(LaneId::DigitSquare(Column::Z_HI));
+        let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
+        assert_eq!(leaves.instances[0].gamma, gamma_leaf(0));
+        assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(z_hi, LeafPoly::Q4)]);
+        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q8)]);
         for group in &spec.groups {
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {

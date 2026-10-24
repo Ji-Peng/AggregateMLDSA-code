@@ -34,11 +34,7 @@ pub enum WeightId {
 pub enum LaneId {
     /// A committed polynomial.
     Column(Column),
-    /// `A_Z^lo = Q_16^lo(P_Z)` of a base-16 digit (virtual).
-    DigitLo(Column),
-    /// `A_Z^hi = Q_16^hi(P_Z)` of a base-16 digit (virtual).
-    DigitHi(Column),
-    /// `P_Z = Z (Z + 1)` of a digit (virtual).
+    /// `P_Z = Z (Z + 1)` of a leaf-checked digit (virtual; `Z_hi`, `U_hi`).
     DigitSquare(Column),
     /// `y^(1)_t` on `D_1` (virtual, spec Section 5).
     Parity1(u8),
@@ -51,9 +47,7 @@ impl LaneId {
     #[must_use]
     pub fn domain(self) -> GroupRole {
         match self {
-            Self::Column(c) | Self::DigitLo(c) | Self::DigitHi(c) | Self::DigitSquare(c) => {
-                c.group()
-            }
+            Self::Column(c) | Self::DigitSquare(c) => c.domain(),
             Self::Parity1(_) => GroupRole::Level1,
             Self::Weight(WeightId::Level1 | WeightId::Ring) => GroupRole::Main,
             Self::Weight(WeightId::Level2) => GroupRole::Level1,
@@ -73,15 +67,35 @@ pub enum EqPoint {
     R1,
     /// `r^(2)`.
     R2,
+    /// The low coordinates of the final point of lookup stack `j` (`docs/lookup.md`
+    /// Section 1), on the stack's domain.
+    Lookup(usize),
 }
 
-/// One instance: its position in the stage's `gamma` vector and its summands.
+/// One instance (or one part of an instance): its position in the stage's `gamma` vector,
+/// a public scale in `K` and its summands. The batched coefficient is `gamma * scale`; an
+/// instance with `K` coefficients (a lookup stack reduction with the column weights
+/// `eq(pi_top, c)`) is one part per coefficient on the same gamma index.
 #[derive(Clone, Debug)]
 pub struct InstanceSpec {
     /// Index into `gamma`.
     pub gamma: usize,
+    /// The public scale of this part (one for an ordinary instance).
+    pub scale: E,
     /// The summands.
     pub terms: Vec<Term>,
+}
+
+impl InstanceSpec {
+    /// An instance with scale one.
+    #[must_use]
+    pub fn new(gamma: usize, terms: Vec<Term>) -> Self {
+        Self {
+            gamma,
+            scale: E::one(),
+            terms,
+        }
+    }
 }
 
 /// The instances batched on one local domain with one shared equality point.
@@ -169,6 +183,9 @@ pub struct Points {
     pub r1: Vec<E>,
     /// `r^(2)`, after stage 2.
     pub r2: Vec<E>,
+    /// The low coordinates of every lookup stack's final point (after the lookup), each
+    /// on its stack's domain.
+    pub lookup: Vec<Vec<E>>,
 }
 
 /// The last `vars` coordinates of a main-domain point.
@@ -187,6 +204,11 @@ impl Points {
             EqPoint::Tau => &self.tau,
             EqPoint::R1 => &self.r1,
             EqPoint::R2 => &self.r2,
+            EqPoint::Lookup(stack) => {
+                let point = &self.lookup[stack];
+                assert_eq!(point.len(), vars, "a stack point on its domain");
+                return Some(point.clone());
+            }
         };
         assert_eq!(full.len(), manifest.d_main(), "a main-domain point");
         Some(suffix(full, vars))
@@ -310,7 +332,7 @@ fn prove_stage_with<'a>(
             .instances
             .iter()
             .map(|instance| GroupInstance {
-                gamma: gammas[instance.gamma],
+                gamma: gammas[instance.gamma] * instance.scale,
                 terms: instance.terms.clone(),
             })
             .collect();
@@ -448,7 +470,7 @@ pub fn check_terminal(
             .instances
             .iter()
             .map(|instance| GroupInstance {
-                gamma: replay.gammas[instance.gamma],
+                gamma: replay.gammas[instance.gamma] * instance.scale,
                 terms: instance.terms.clone(),
             })
             .collect();

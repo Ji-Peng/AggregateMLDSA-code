@@ -6,8 +6,23 @@ use akita_config::SetupRequirements;
 use akita_error::AkitaError;
 use akita_params::{GroupCommitPhaseParams, OpeningScheduleSelection, ScheduleLookupKey};
 
-use crate::catalogs::{BatchLayout, Group, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2};
-use crate::preset::{AggFp64SignedWidth4, BaseField};
+use akita_params::PolynomialGroupLayout;
+
+use crate::catalogs::{
+    BatchLayout, Family, Group, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
+};
+use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4, BaseField};
+
+/// The scalar producer profile of `layout` in the catalog of `family`.
+pub fn commitment_profile(
+    family: Family,
+    layout: PolynomialGroupLayout,
+) -> Result<GroupCommitPhaseParams, AkitaError> {
+    match family {
+        Family::Width4 => AggFp64SignedWidth4::commitment_profile(layout),
+        Family::Width16 => AggFp64SignedWidth16::commitment_profile(layout),
+    }
+}
 
 /// Largest record count of this wire version (`N <= 2^15`).
 pub const MAX_RECORDS: usize = 1 << MAX_D_SIG;
@@ -68,11 +83,12 @@ pub struct WorkPlan {
     pub records: usize,
     /// `N*`.
     pub padded: usize,
-    /// The ordered four-group layout.
+    /// The ordered six-group layout.
     pub layout: BatchLayout,
-    /// Producer profiles of the precommitted groups `G_main, G_1, G_2`.
+    /// Producer profiles of the precommitted groups `G_main16, G_main4, G_1, G_2, G_3`,
+    /// each from the scalar row of its family's catalog.
     pub precommitted: Vec<GroupCommitPhaseParams>,
-    /// Profile of the final group `G_3`, from the grouped catalog row.
+    /// Profile of the final group `G_m`, from the grouped row of the width-4 catalog.
     pub final_profile: GroupCommitPhaseParams,
     /// The public schedule selection of the batched opening.
     pub selection: OpeningScheduleSelection,
@@ -87,9 +103,9 @@ impl WorkPlan {
             return Err(PlanError::NotInCatalog { d_sig });
         }
         let precommitted = layout
-            .precommitted()
-            .iter()
-            .map(|&group| AggFp64SignedWidth4::commitment_profile(group))
+            .precommitted_groups()
+            .into_iter()
+            .map(|(group, shape)| commitment_profile(group.family(), shape))
             .collect::<Result<Vec<_>, _>>()?;
         let key = ScheduleLookupKey {
             final_group: layout.final_group(),
@@ -161,7 +177,9 @@ impl WorkPlan {
         }
     }
 
-    /// Akita setup sized for this batch (largest group, all 67 polynomials).
+    /// Akita setup sized for this batch (largest group, all 38 polynomials). The final
+    /// family's catalog carries every precommitted profile of its grouped rows, so its
+    /// requirements cover the width-16 commits too (Akita's mixed-bound batches).
     pub fn setup_requirements(&self) -> Result<SetupRequirements<BaseField>, AkitaError> {
         SetupRequirements::from_catalog(
             AggFp64SignedWidth4::catalog()?,
@@ -207,6 +225,8 @@ mod tests {
             }
         }
         // Every padded size of the wire version has rows.
+        let plan = WorkPlan::for_records(1000).expect("plan");
+        assert_eq!(plan.precommitted.len(), crate::catalogs::GROUP_COUNT - 1);
         assert_eq!(
             crate::catalogs::CATALOG_D_SIG,
             (MIN_D_SIG..=MAX_D_SIG).collect::<Vec<_>>().as_slice()

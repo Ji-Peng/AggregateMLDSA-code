@@ -1,18 +1,18 @@
-//! Virtual polynomials (spec Section 5).
+//! Virtual polynomials (spec Section 5, lookup layout L16).
 //!
 //! Every virtual table is defined on Boolean points and extended multilinearly as a table.
 //! Two kinds of evaluator live here:
 //!
 //! * affine evaluators, valid at any point because the table is an affine combination of
-//!   committed tables: `w_1' = sum_t 2^t b_t`, the digit compositions (4.1) of
-//!   `z, u, v, kappa`, and the high part `2 gamma_2 w_1' + u + q v` of the ring residual.
+//!   committed tables: `w_1' = sum_t 2^t b_t`, the compositions (4.1) of `z, u, v` from
+//!   their two L16 digits (`X = X_lo + 2^16 X_hi + 2^15`) and of the carries
+//!   (`kappa = K + 2^15`), and the high part `2 gamma_2 w_1' + u + q v` of the ring residual.
 //!   The verifier forms them from opened values ([`MainValues`], [`CarryValues`]);
 //! * Boolean-domain materializations used by the prover and the tests: `w_1'`, the
 //!   residual `Delta = (A z) - T - 2 gamma_2 w_1' - u - q v`, the level-1 parities
 //!   `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t - 2 kappa^(1)_t` (spec (7.5); the sums are
 //!   `agg_bridge::parity::level1_sums` at the production shape, for any [`SparseMatrix`] of
-//!   that shape), and the digit tables `P_Z = Z (Z + 1)`, `A_Z^lo = Q_16^lo(P_Z)`,
-//!   `A_Z^hi = Q_16^hi(P_Z)` with the leaf predicates of spec Section 4.3.
+//!   that shape), and the leaf tables `P_Z = Z (Z + 1)` of the two small digits.
 //!
 //! `y^(1)_t` is not affine in committed evaluations at a non-Boolean point: its value there
 //! is a claim reduced by the `def_y1` sum-check, whose claimed sum is
@@ -28,8 +28,8 @@ use agg_witness::params::{GAMMA2, L, N, POSITIONS, Q, W1_BITS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::manifest::{Column, CommitmentManifest, DigitValue, GroupRole};
-use crate::source_tables::{MainTables, SourceTables};
+use crate::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
+use crate::source_tables::{Cells, MainTables, SourceTables};
 use crate::OpeningField as E;
 
 /// `w_1' = sum_{t < 6} 2^t b_t` from the six bit evaluations (any point).
@@ -64,7 +64,7 @@ pub fn compose_digits(layout: &DigitLayout, digits: &[E]) -> E {
 
 /// (4.1) on the Boolean domain, over the integers.
 #[must_use]
-pub fn compose_table(layout: &DigitLayout, digits: &[&[i8]]) -> Vec<i64> {
+pub fn compose_table(layout: &DigitLayout, digits: &[Cells<'_>]) -> Vec<i64> {
     assert_eq!(digits.len(), layout.len(), "one table per digit");
     let weights = layout.weights();
     let constant = layout.constant();
@@ -74,9 +74,7 @@ pub fn compose_table(layout: &DigitLayout, digits: &[&[i8]]) -> Vec<i64> {
             digits
                 .iter()
                 .zip(&weights)
-                .fold(constant, |sum, (column, &weight)| {
-                    sum + weight * i64::from(column[x])
-                })
+                .fold(constant, |sum, (column, &weight)| sum + weight * column.value(x))
         })
         .collect()
 }
@@ -105,18 +103,11 @@ pub fn residual_table(
     instance: &PublicInstance,
     main: &MainTables,
 ) -> Vec<E> {
-    let z = compose_table(
-        &DigitValue::Z.layout(),
-        &main.digits(manifest, DigitValue::Z),
-    );
-    let u = compose_table(
-        &DigitValue::U.layout(),
-        &main.digits(manifest, DigitValue::U),
-    );
-    let v = compose_table(
-        &DigitValue::V.layout(),
-        &main.digits(manifest, DigitValue::V),
-    );
+    let compose = |value: DigitValue| {
+        let digits = [0, 1].map(|digit| main.column(manifest, Column::Digit { value, digit }));
+        compose_table(&value.layout(), &digits)
+    };
+    let (z, u, v) = (compose(DigitValue::Z), compose(DigitValue::U), compose(DigitValue::V));
     let w1 = w1_table(&main.bit_lanes(manifest));
     let geom = main.geometry();
     let mut out = vec![E::zero(); geom.main_len()];
@@ -156,15 +147,15 @@ pub fn residual_table(
 }
 
 /// `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t(zeta, beta) - 2 kappa^(1)_t(rho_1, beta)` on the
-/// Boolean domain `D_1`, over the integers, per lane (spec Section 5, (7.5)). The
-/// honest value is the GF(2) parity of the level-1 row, `{0, 1}`.
+/// Boolean domain `D_1`, over the integers, per lane (spec Section 5, (7.5)), with
+/// `kappa^(1)_t = K^(1)_t + 2^15` from the committed balanced carries. The honest value is
+/// the GF(2) parity of the level-1 row, `{0, 1}`.
 #[must_use]
 pub fn parity1_tables(tables: SourceTables<'_>, m1: &SparseMatrix) -> [Vec<i64>; W1_BITS] {
     let sums = level1_sums(&Shape::PRODUCTION, &tables.main.bit_lanes(tables.manifest), m1);
-    let layout = DigitValue::Kappa1(0).layout();
     let mut out: [Vec<i64>; W1_BITS] = Default::default();
     for (t, (sum, slot)) in sums.into_iter().zip(out.iter_mut()).enumerate() {
-        let kappa = compose_table(&layout, &tables.digits(DigitValue::Kappa1(t as u8)));
+        let kappa = compose_table(&CARRY16_DIGITS, &[tables.column(Column::carry(1, t as u8))]);
         *slot = sum.iter().zip(&kappa).map(|(s, k)| s - 2 * k).collect();
     }
     out
@@ -176,7 +167,7 @@ pub fn parity1_claimed_sum(y1: E, kappa1: E) -> E {
     y1 + kappa1 + kappa1
 }
 
-/// `P_Z = Z (Z + 1)`.
+/// `P_Z = Z (Z + 1)` at a point value.
 #[must_use]
 pub fn digit_square(z: E) -> E {
     z * (z + E::from_i64(1))
@@ -188,61 +179,22 @@ fn shifted_product(p: E, roots: &[i64]) -> E {
         .fold(E::from_i64(1), |acc, &root| acc * (p - E::from_i64(root)))
 }
 
-/// `Q_16^lo(P) = Q_8(P) = P (P - 2)(P - 6)(P - 12)`.
-#[must_use]
-pub fn q16_lo(p: E) -> E {
-    shifted_product(p, &[0, 2, 6, 12])
-}
-
-/// `Q_16^hi(P) = (P - 20)(P - 30)(P - 42)(P - 56)`.
-#[must_use]
-pub fn q16_hi(p: E) -> E {
-    shifted_product(p, &[20, 30, 42, 56])
-}
-
-/// The leaf predicate `Q_b` of a digit of base `b` (spec Section 4.3): `Q_4(P) = P (P - 2)`,
-/// `Q_8(P) = Q_16^lo(P)`, `Q_16 = Q_16^lo Q_16^hi`. It vanishes at `P_Z` exactly when `Z` lies in
-/// the balanced alphabet.
+/// The leaf predicate `Q_b(P)` of a base-4 or base-8 digit (spec Section 4.3): zero on
+/// `P = Z (Z + 1)` exactly when `Z` is in the balanced alphabet.
+///
+/// # Panics
+/// For another base.
 #[must_use]
 pub fn leaf(base: u32, p: E) -> E {
     match base {
         4 => shifted_product(p, &[0, 2]),
-        8 => q16_lo(p),
-        16 => q16_lo(p) * q16_hi(p),
-        _ => panic!("unsupported digit base {base}"),
+        8 => shifted_product(p, &[0, 2, 6, 12]),
+        _ => panic!("leaf-checked digits have base 4 or 8, not {base}"),
     }
 }
 
-/// The virtual tables of one committed digit on its Boolean domain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DigitTables {
-    /// `P_Z = Z (Z + 1)`.
-    pub p: Vec<E>,
-    /// `A_Z^lo = Q_16^lo(P_Z)` (base 16 only, else empty).
-    pub a_lo: Vec<E>,
-    /// `A_Z^hi = Q_16^hi(P_Z)` (base 16 only, else empty).
-    pub a_hi: Vec<E>,
-}
-
-/// Materialize `P_Z` and, for base 16, `A_Z^lo, A_Z^hi` (stages 1 and 2).
-#[must_use]
-pub fn digit_tables(cells: &[i8], base: u32) -> DigitTables {
-    let p: Vec<E> = cells
-        .par_iter()
-        .map(|&z| digit_square(E::from_i64(i64::from(z))))
-        .collect();
-    let (a_lo, a_hi) = if base == 16 {
-        (
-            p.par_iter().map(|&value| q16_lo(value)).collect(),
-            p.par_iter().map(|&value| q16_hi(value)).collect(),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    DigitTables { p, a_lo, a_hi }
-}
-
-/// The values the verifier forms from the 23 opened `G_main` evaluations (any point).
+/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve
+/// main-domain polynomials (`G_main16` then `G_main4`, manifest order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MainValues {
     /// `z` by (4.1).
@@ -251,28 +203,18 @@ pub struct MainValues {
     pub u: E,
     /// `v` by (4.1).
     pub v: E,
-    /// `w_1'` from the bits.
+    /// `w_1'`.
     pub w1: E,
 }
 
 impl MainValues {
-    /// From the evaluations of `G_main` in manifest order.
+    /// From the claims `value(column)` of the main-domain columns.
     #[must_use]
-    pub fn from_evaluations(manifest: &CommitmentManifest, values: &[E]) -> Self {
-        let group = manifest.group(GroupRole::Main);
-        assert_eq!(
-            values.len(),
-            group.polynomial_count(),
-            "23 G_main evaluations"
-        );
-        let compose = |value: DigitValue| {
-            let digits: Vec<E> = (0..value.layout().len() as u8)
-                .map(|digit| values[group.position(Column::Digit { value, digit }).unwrap()])
-                .collect();
-            compose_digits(&value.layout(), &digits)
+    pub fn from_claims(value: impl Fn(Column) -> E) -> Self {
+        let compose = |digit: DigitValue| {
+            compose_digits(&digit.layout(), &[0, 1].map(|d| value(Column::Digit { value: digit, digit: d })))
         };
-        let bits: [E; W1_BITS] =
-            std::array::from_fn(|t| values[group.position(Column::W1Bit(t as u8)).unwrap()]);
+        let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
         Self {
             z: compose(DigitValue::Z),
             u: compose(DigitValue::U),
@@ -288,52 +230,44 @@ impl MainValues {
     }
 }
 
-/// The carries the verifier forms from opened (or pre-stage) digit evaluations of one
-/// round-2 group (any point).
+/// The carries (and the level-2 parities) of a round-2 group from its evaluations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarryValues {
-    /// `kappa^(1)_t`, `kappa^(2)_t` per lane, or the single `kappa^(3)`.
+    /// `kappa^(l)_t` by (4.1) (`K + 2^15`), per lane (one for level 3).
     pub kappa: Vec<E>,
-    /// `y^(2)_t` (level 2 only, else empty).
+    /// `y^(2)_t` (level 2 only).
     pub parity: Vec<E>,
 }
 
 impl CarryValues {
-    /// From the evaluations of `role` (a round-2 group) in manifest order.
+    /// From the evaluations of the polynomials of `role` (manifest order).
+    ///
+    /// # Panics
+    /// For a main-domain or multiplicity group, or a wrong value count.
     #[must_use]
     pub fn from_evaluations(manifest: &CommitmentManifest, role: GroupRole, values: &[E]) -> Self {
         let group = manifest.group(role);
-        assert_eq!(
-            values.len(),
-            group.polynomial_count(),
-            "one evaluation per polynomial"
-        );
-        let compose = |value: DigitValue| {
-            let digits: Vec<E> = (0..value.layout().len() as u8)
-                .map(|digit| values[group.position(Column::Digit { value, digit }).unwrap()])
-                .collect();
-            compose_digits(&value.layout(), &digits)
+        assert_eq!(values.len(), group.polynomial_count(), "one evaluation per polynomial");
+        let carry = |level: u8, t: u8| {
+            compose_digits(&CARRY16_DIGITS, &[values[group.position(Column::carry(level, t)).unwrap()]])
         };
         let lanes = 0..W1_BITS as u8;
         match role {
             GroupRole::Level1 => Self {
-                kappa: lanes.map(|t| compose(DigitValue::Kappa1(t))).collect(),
+                kappa: lanes.map(|t| carry(1, t)).collect(),
                 parity: Vec::new(),
             },
             GroupRole::Level2 => Self {
-                kappa: lanes
-                    .clone()
-                    .map(|t| compose(DigitValue::Kappa2(t)))
-                    .collect(),
+                kappa: lanes.clone().map(|t| carry(2, t)).collect(),
                 parity: lanes
                     .map(|t| values[group.position(Column::Parity2(t)).unwrap()])
                     .collect(),
             },
             GroupRole::Level3 => Self {
-                kappa: vec![compose(DigitValue::Kappa3)],
+                kappa: vec![carry(3, 0)],
                 parity: Vec::new(),
             },
-            GroupRole::Main => panic!("G_main holds no carries"),
+            other => panic!("{other:?} holds no carries"),
         }
     }
 }
@@ -341,17 +275,8 @@ impl CarryValues {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agg_witness::check::digit_virtual;
     use agg_witness::digits::{leaf_vanishes, p_of, Alphabet};
     use agg_witness::gen::SplitMix64;
-
-    const LAYOUTS: [DigitValue; 5] = [
-        DigitValue::Z,
-        DigitValue::U,
-        DigitValue::V,
-        DigitValue::Kappa1(0),
-        DigitValue::Kappa3,
-    ];
 
     fn lift(value: i64) -> E {
         E::from_i64(value)
@@ -371,38 +296,36 @@ mod tests {
     }
 
     #[test]
-    fn digit_composition_matches_the_witness_layouts() {
+    fn digit_composition_matches_the_l16_layouts() {
         let mut rng = SplitMix64::new(4);
-        for value in LAYOUTS {
+        for value in [DigitValue::Z, DigitValue::U, DigitValue::V] {
             let layout = value.layout();
-            let columns: Vec<Vec<i8>> = (0..layout.len())
-                .map(|k| {
-                    let alphabet = layout.alphabet(k);
-                    (0..64)
-                        .map(|_| {
-                            let width = (alphabet.max() - alphabet.min() + 1) as u64;
-                            (alphabet.min() + rng.below(width) as i64) as i8
-                        })
-                        .collect()
+            let (lo, hi): (Vec<i32>, Vec<i8>) = (0..64)
+                .map(|_| {
+                    let a = layout.alphabet(0);
+                    let b = layout.alphabet(1);
+                    let pick = |rng: &mut SplitMix64, min: i64, max: i64| min + rng.below((max - min + 1) as u64) as i64;
+                    let lo = pick(&mut rng, a.min(), a.max());
+                    let hi = pick(&mut rng, b.min(), b.max().min(127)).max(-128);
+                    (lo as i32, hi as i8)
                 })
-                .collect();
-            let refs: Vec<&[i8]> = columns.iter().map(Vec::as_slice).collect();
-            let table = compose_table(&layout, &refs);
+                .unzip();
+            let hi_wide: Vec<i32> = hi.iter().map(|&h| i32::from(h)).collect();
+            let table = compose_table(&layout, &[Cells::Wide(&lo), Cells::Wide(&hi_wide)]);
             for x in 0..64 {
-                let digits: Vec<i64> = columns.iter().map(|c| i64::from(c[x])).collect();
+                let digits = [i64::from(lo[x]), i64::from(hi[x])];
                 assert_eq!(table[x], layout.compose(&digits));
-                let lifted: Vec<E> = digits.iter().map(|&d| lift(d)).collect();
-                assert_eq!(compose_digits(&layout, &lifted), lift(table[x]));
+                assert_eq!(compose_digits(&layout, &digits.map(lift)), lift(table[x]));
                 let (min, max) = layout.range();
                 assert!((min..=max).contains(&table[x]));
             }
-        }
-        // The digits of zero (padded rows) compose to zero.
-        for value in [DigitValue::Z, DigitValue::U, DigitValue::V] {
-            let layout = value.layout();
+            // The digits of zero (padded rows) compose to zero.
             let zero: Vec<E> = layout.decompose(0).into_iter().map(lift).collect();
             assert_eq!(compose_digits(&layout, &zero), E::zero());
         }
+        // A carry: kappa = K + 2^15.
+        assert_eq!(compose_digits(&CARRY16_DIGITS, &[lift(-(1 << 15))]), E::zero());
+        assert_eq!(compose_digits(&CARRY16_DIGITS, &[lift(1000 - (1 << 15))]), lift(1000));
     }
 
     #[test]
@@ -410,30 +333,11 @@ mod tests {
         for z in i64::from(i8::MIN)..=i64::from(i8::MAX) {
             let p = digit_square(lift(z));
             assert_eq!(p, E::from_i128(p_of(z)));
-            for base in [4_u32, 8, 16] {
+            for base in [4_u32, 8] {
                 let inside = Alphabet::Balanced(base).contains(z);
                 assert_eq!(leaf(base, p) == E::zero(), inside, "base {base} digit {z}");
                 assert_eq!(leaf_vanishes(base, p_of(z)), inside);
             }
-            let product_zero = q16_lo(p) * q16_hi(p) == E::zero();
-            assert_eq!(product_zero, Alphabet::Balanced(16).contains(z));
-        }
-    }
-
-    #[test]
-    fn digit_tables_match_the_checker_materialization() {
-        let cells: Vec<i8> = (i8::MIN..=i8::MAX).collect();
-        for base in [4_u32, 8, 16] {
-            let ours = digit_tables(&cells, base);
-            let reference = digit_virtual(&cells, base);
-            for x in 0..cells.len() {
-                assert_eq!(ours.p[x], E::from_i128(reference.p[x]));
-                if base == 16 {
-                    assert_eq!(ours.a_lo[x], E::from_i128(reference.a_lo[x].unwrap()));
-                    assert_eq!(ours.a_hi[x], E::from_i128(reference.a_hi[x].unwrap()));
-                }
-            }
-            assert_eq!(ours.a_lo.is_empty(), base != 16);
         }
     }
 

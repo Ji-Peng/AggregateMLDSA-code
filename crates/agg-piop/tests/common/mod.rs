@@ -2,8 +2,19 @@
 #![allow(dead_code)]
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
-use agg_piop::manifest::CommitmentManifest;
+use agg_piop::lookup::Table;
+use agg_piop::manifest::{CommitmentManifest, GroupRole, LOOKUP_SHIFT};
+use agg_piop::prover::{prove_piop, PiopProof, PiopRun, ProveError};
+use agg_piop::public_data::PublicData;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
+use agg_piop::stage::Points;
+use agg_piop::stage3::Stage3Output;
+use agg_piop::transcript::{
+    commitment_site, Transcript, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE,
+    FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE,
+};
+use agg_piop::verifier::{verify_piop, VerifyError, VerifyTimings};
+use agg_piop::weights::ring_weight_at;
 use agg_piop::{BaseField, OpeningField};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::gen::{self, Record, SplitMix64};
@@ -82,4 +93,71 @@ impl Batch {
             bridge: &self.bridge,
         }
     }
+}
+
+/// A transcript driven through events 0 to 6 with fixed dummy payloads, for isolated
+/// PIOP tests (prover and verifier replay the same prefix).
+pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {
+    let segments = manifest.segments();
+    let mut t = Transcript::new(manifest, &manifest.binding_bytes()).unwrap();
+    t.absorb(commitment_site(GroupRole::Main16), 1, &[1]).unwrap();
+    t.absorb(commitment_site(GroupRole::Main), 1, &[1]).unwrap();
+    t.absorb_items(FLOCK_COMMIT_SITE, &vec![vec![]; segments]).unwrap();
+    t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
+    for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        t.absorb(commitment_site(role), 1, &[2]).unwrap();
+    }
+    t.challenge_bytes(FLOCK_SEEDS_SITE, segments).unwrap();
+    t.absorb(FINAL_VECTORS_SITE, segments, &vec![0; 512 * segments]).unwrap();
+    t.absorb_items(FLOCK_PROOFS_SITE, &vec![vec![]; segments]).unwrap();
+    t
+}
+
+/// The PIOP part (lookup and stages) of `tables`, honest (`unchecked = false`) or with the
+/// prover's self-checks skipped.
+pub fn prove_tables(
+    batch: &Batch,
+    tables: SourceTables<'_>,
+    unchecked: bool,
+) -> Result<(PiopProof, PiopRun), ProveError> {
+    let public = PublicData::from_instance(&batch.instance);
+    let mut transcript = transcript_after_commitments(&batch.manifest);
+    prove_piop(&batch.manifest, tables, &batch.matrices, &public, &mut transcript, unchecked)
+}
+
+/// Verify the PIOP part against the public `Y` of `y_table` (the opening is not run: the
+/// caller compares the returned claims with the tables).
+pub fn verify_tables(
+    batch: &Batch,
+    y_table: &[u8],
+    proof: &PiopProof,
+) -> Result<(Points, Stage3Output, Vec<OpeningField>), VerifyError> {
+    let public = PublicData::from_instance(&batch.instance);
+    let mut transcript = transcript_after_commitments(&batch.manifest);
+    let mut timings = VerifyTimings::default();
+    verify_piop(
+        &batch.manifest,
+        &batch.matrices,
+        y_table,
+        proof,
+        &mut transcript,
+        &mut timings,
+        |r2, r3| (public.t_evaluation(r2), ring_weight_at(&public, r2, r3)),
+    )
+    .outcome
+}
+
+/// The multiplicities of `T_16` over the in-table looked-up cells only (a cheating
+/// prover's best count when a cell is out of the table).
+pub fn lenient_multiplicities(tables: SourceTables<'_>) -> Vec<i32> {
+    let mut m = vec![0_i32; Table::T16.len()];
+    for stack in tables.lookup_stacks().unwrap() {
+        for &stored in stack.stacked() {
+            let f = i64::from(stored) + i64::from(LOOKUP_SHIFT);
+            if (0..1 << 16).contains(&f) {
+                m[f as usize] += 1;
+            }
+        }
+    }
+    m
 }

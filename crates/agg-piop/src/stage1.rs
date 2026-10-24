@@ -1,9 +1,9 @@
 //! Stage 1 (spec Section 7.3, degree 4): bridge Booleanity and levels 2 and 3, w1Encode
-//! Booleanity and the bit-range identity (7.4), and the 40 `b16_prod` products.
+//! Booleanity and the bit-range identity (7.4). The 40 `b16_prod` products of the base-16
+//! layout are gone: the lookup into `T_16` proves those ranges (`docs/lookup.md`).
 //!
 //! `gamma^(1)` order: `bool_y1[t]` (0..6), `level2[t]` (6..12), `level3` (12),
-//! `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25), `b16_prod[Z]` (26..66) in
-//! the digit order of spec Section 4.1.
+//! `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25).
 
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
@@ -13,7 +13,6 @@ use jolt_field::Zero;
 use crate::claims::{PreStageClaims, Stage1Claims};
 use crate::kernel::Term;
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
-use crate::range::base16_digits;
 use crate::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
@@ -28,7 +27,7 @@ pub const STAGE: usize = 1;
 /// Message degree.
 pub const DEGREE: usize = 4;
 /// Batching coefficients.
-pub const GAMMA_COUNT: usize = 66;
+pub const GAMMA_COUNT: usize = 26;
 
 /// Gamma index of `bool_y1[t]`.
 #[must_use]
@@ -54,13 +53,8 @@ pub const fn gamma_bool_b(t: usize) -> usize {
 }
 /// Gamma index of `range_w1`.
 pub const GAMMA_RANGE_W1: usize = 4 * W1_BITS + 1;
-/// Gamma index of `b16_prod[k]` for the `k`-th base-16 digit.
-#[must_use]
-pub const fn gamma_b16_prod(k: usize) -> usize {
-    4 * W1_BITS + 2 + k
-}
 
-/// The stage-1 proof: the round messages and the 98 terminal claims.
+/// The stage-1 proof: the round messages and the 18 terminal claims.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Proof {
     /// Compressed degree-4 messages (4 elements each).
@@ -81,52 +75,42 @@ pub struct Stage1Output {
 /// The instance table.
 #[must_use]
 pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
+    let _ = manifest;
     let lanes = 0..W1_BITS;
-    let base16 = base16_digits(manifest);
     let mut groups = Vec::new();
-    // One equality group per domain, holding the Booleanity checks and the products.
-    for domain in GroupRole::ALL {
+    // One equality group per domain, holding the Booleanity checks.
+    for domain in [GroupRole::Main, GroupRole::Level1, GroupRole::Level2] {
         let mut lane_ids = Vec::new();
         let mut instances = Vec::new();
         match domain {
             GroupRole::Main => {
                 lane_ids.extend(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8))));
-                instances.extend(lanes.clone().map(|t| InstanceSpec {
-                    gamma: gamma_bool_b(t),
-                    terms: vec![Term::Bool(t)],
-                }));
-                instances.push(InstanceSpec {
-                    gamma: GAMMA_RANGE_W1,
-                    terms: vec![Term::RangeW1([5, 4, 3, 2])],
-                });
+                instances.extend(
+                    lanes
+                        .clone()
+                        .map(|t| InstanceSpec::new(gamma_bool_b(t), vec![Term::Bool(t)])),
+                );
+                instances.push(InstanceSpec::new(
+                    GAMMA_RANGE_W1,
+                    vec![Term::RangeW1([5, 4, 3, 2])],
+                ));
             }
             GroupRole::Level1 => {
                 lane_ids.extend(lanes.clone().map(|t| LaneId::Parity1(t as u8)));
-                instances.extend(lanes.clone().map(|t| InstanceSpec {
-                    gamma: gamma_bool_y1(t),
-                    terms: vec![Term::Bool(t)],
-                }));
+                instances.extend(
+                    lanes
+                        .clone()
+                        .map(|t| InstanceSpec::new(gamma_bool_y1(t), vec![Term::Bool(t)])),
+                );
             }
-            GroupRole::Level2 => {
+            _ => {
                 lane_ids.extend(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))));
-                instances.extend(lanes.clone().map(|t| InstanceSpec {
-                    gamma: gamma_bool_y2(t),
-                    terms: vec![Term::Bool(t)],
-                }));
+                instances.extend(
+                    lanes
+                        .clone()
+                        .map(|t| InstanceSpec::new(gamma_bool_y2(t), vec![Term::Bool(t)])),
+                );
             }
-            GroupRole::Level3 => {}
-        }
-        for (k, digit) in base16.iter().enumerate() {
-            if digit.group != domain {
-                continue;
-            }
-            let lo = lane_ids.len();
-            lane_ids.push(LaneId::DigitLo(digit.column));
-            lane_ids.push(LaneId::DigitHi(digit.column));
-            instances.push(InstanceSpec {
-                gamma: gamma_b16_prod(k),
-                terms: vec![Term::Product(vec![lo, lo + 1])],
-            });
         }
         groups.push(GroupSpec {
             domain,
@@ -144,10 +128,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .collect(),
         instances: lanes
             .clone()
-            .map(|t| InstanceSpec {
-                gamma: gamma_level2(t),
-                terms: vec![Term::Product(vec![0, 1 + t])],
-            })
+            .map(|t| InstanceSpec::new(gamma_level2(t), vec![Term::Product(vec![0, 1 + t])]))
             .collect(),
     });
     // level3 on D_2 summed over the six lanes with the weights w_{3,t}.
@@ -159,13 +140,13 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .map(|t| LaneId::Weight(WeightId::Level3(t as u8)))
             .chain(lanes.clone().map(|t| LaneId::Column(Column::Parity2(t as u8))))
             .collect(),
-        instances: vec![InstanceSpec {
-            gamma: GAMMA_LEVEL3,
-            terms: lanes
+        instances: vec![InstanceSpec::new(
+            GAMMA_LEVEL3,
+            lanes
                 .clone()
                 .map(|t| Term::Product(vec![t, W1_BITS + t]))
                 .collect(),
-        }],
+        )],
     });
     StageSpec {
         stage: STAGE,
@@ -235,10 +216,6 @@ fn prove_with(
         y1: std::array::from_fn(|t| value(LaneId::Parity1(t as u8))),
         y2: std::array::from_fn(|t| value(LaneId::Column(Column::Parity2(t as u8)))),
         b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8)))),
-        products: base16_digits(manifest)
-            .iter()
-            .map(|d| [value(LaneId::DigitLo(d.column)), value(LaneId::DigitHi(d.column))])
-            .collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -279,19 +256,11 @@ impl BridgeWeightsAt {
 }
 
 /// The verifier's value of a stage-1 lane at the terminal.
-fn resolve(weights: &BridgeWeightsAt, claims: &Stage1Claims, products: &[(Column, usize)], id: LaneId) -> E {
+fn resolve(weights: &BridgeWeightsAt, claims: &Stage1Claims, id: LaneId) -> E {
     match id {
         LaneId::Parity1(t) => claims.y1[usize::from(t)],
         LaneId::Column(Column::Parity2(t)) => claims.y2[usize::from(t)],
         LaneId::Column(Column::W1Bit(t)) => claims.b[usize::from(t)],
-        LaneId::DigitLo(c) | LaneId::DigitHi(c) => {
-            let k = products
-                .iter()
-                .find(|(column, _)| *column == c)
-                .map(|(_, k)| *k)
-                .expect("a base-16 digit");
-            claims.products[k][usize::from(matches!(id, LaneId::DigitHi(_)))]
-        }
         LaneId::Weight(WeightId::Level2) => weights.level2,
         LaneId::Weight(WeightId::Level3(t)) => weights.level3[usize::from(t)],
         other => panic!("{other:?} is not a stage-1 lane"),
@@ -311,19 +280,11 @@ pub fn verify(
     let spec = spec(manifest);
     let claims = claimed_sums(prestage, y_at_tau3);
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
-    if proof.claims.products.len() != 40 {
-        return Err(StageError::Shape("stage 1 products".into()));
-    }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
     let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
-    let products: Vec<(Column, usize)> = base16_digits(manifest)
-        .iter()
-        .enumerate()
-        .map(|(k, d)| (d.column, k))
-        .collect();
     let weights = BridgeWeightsAt::evaluate(manifest, &geom, matrices, &points.tau, &replay.point);
     check_terminal(&spec, manifest, points, &replay, |id| {
-        resolve(&weights, &proof.claims, &products, id)
+        resolve(&weights, &proof.claims, id)
     })?;
     Ok(Stage1Output {
         point: replay.point,
@@ -336,15 +297,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_one_has_sixty_six_instances_in_spec_order() {
+    fn stage_one_has_twenty_six_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(spec.gamma_count, 66);
-        assert_eq!(spec.groups.len(), 6);
+        assert_eq!(spec.gamma_count, 26);
+        assert_eq!(spec.groups.len(), 5);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 66);
-        assert_eq!(gamma_b16_prod(39), 65);
+        assert_eq!(instances, 26);
         assert_eq!(GAMMA_RANGE_W1, 25);
         // Every term fits the degree with its equality factor.
         for group in &spec.groups {
@@ -355,6 +315,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(spec.lane_ids().len(), 6 + 6 + 6 + 80 + 1 + 6);
+        assert_eq!(spec.lane_ids().len(), 6 + 6 + 6 + 1 + 6);
     }
 }
