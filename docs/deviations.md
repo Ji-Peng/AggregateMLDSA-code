@@ -632,7 +632,8 @@ enables them under `target-cpu=native`, which our builds cannot use (AGENTS.md; 
 `x86-64-v4` breaks Akita), and the portable kernels were the top of the Flock profile
 (`ref/notes/plan-128bit-speed.md` 2.3). Exact: same field values on every path, so the proof
 bytes are unchanged (byte-identical aggregates; per-path tests listed in `PATCH.md`).
-`FLOCK_SIMD=portable|gfni` caps the level for A/B runs.
+`FLOCK_SIMD=portable|gfni` caps the level for A/B runs. The merged opening's block
+statistics have an AVX-512 path of the same kind (`PATCH.md` Section 4).
 
 ## K13. Two-type bridge union as the bridge instance of a tied part (spec Section 8; docs/bridge.md Sections 5, 5b)
 

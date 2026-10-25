@@ -116,7 +116,7 @@ pub(crate) mod x86 {
     use core::arch::x86_64::{
         __m128i, __m512i, _mm_extract_epi64, _mm_xor_si128,
         _mm512_bslli_epi128, _mm512_clmulepi64_epi128,
-        _mm512_extracti32x4_epi32, _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_xor_si512,
+        _mm512_extracti32x4_epi32, _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_storeu_si512, _mm512_xor_si512,
     };
 
     use crate::field::{F128, F256Unreduced};
@@ -185,6 +185,75 @@ pub(crate) mod x86 {
         let l2 = _mm512_extracti32x4_epi32::<2>(v);
         let l3 = _mm512_extracti32x4_epi32::<3>(v);
         _mm_xor_si128(_mm_xor_si128(l0, l1), _mm_xor_si128(l2, l3))
+    }
+
+    /// Broadcast one `F128` to the four lanes.
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) fn f128x4_splat(a: F128) -> __m512i {
+        _mm512_set_epi64(
+            a.hi as i64,
+            a.lo as i64,
+            a.hi as i64,
+            a.lo as i64,
+            a.hi as i64,
+            a.lo as i64,
+            a.hi as i64,
+            a.lo as i64,
+        )
+    }
+
+    /// Store four `F128`.
+    ///
+    /// # Safety
+    /// `p` points to four writable `F128`; `avx512f` available.
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn f128x4_storeu(p: *mut F128, v: __m512i) {
+        // SAFETY: caller guarantees four writable F128 at p.
+        unsafe { _mm512_storeu_si512(p as *mut __m512i, v) }
+    }
+
+    /// Lane-wise deferred-reduction accumulator: lane `i` holds the unreduced sum of
+    /// the products accumulated in lane `i`; [`Self::reduce`] reduces each lane (the
+    /// same operation sequence as [`ghash_mul_x4`], applied to the sums; reduction is
+    /// F_2-linear, so this equals the sum of the reduced products).
+    #[derive(Clone, Copy)]
+    pub(crate) struct LaneAccX4 {
+        lo: __m512i,
+        mid: __m512i,
+        hi: __m512i,
+    }
+
+    impl LaneAccX4 {
+        #[inline]
+        #[target_feature(enable = "avx512f")]
+        pub(crate) fn zero() -> Self {
+            let z = _mm512_setzero_si512();
+            Self {
+                lo: z,
+                mid: z,
+                hi: z,
+            }
+        }
+
+        #[inline]
+        #[target_feature(enable = "avx512f,vpclmulqdq")]
+        pub(crate) fn mul_acc(&mut self, x: __m512i, y: __m512i) {
+            self.lo = _mm512_xor_si512(self.lo, _mm512_clmulepi64_epi128::<0x00>(x, y));
+            self.hi = _mm512_xor_si512(self.hi, _mm512_clmulepi64_epi128::<0x11>(x, y));
+            let m = _mm512_xor_si512(
+                _mm512_clmulepi64_epi128::<0x01>(x, y),
+                _mm512_clmulepi64_epi128::<0x10>(x, y),
+            );
+            self.mid = _mm512_xor_si512(self.mid, m);
+        }
+
+        #[inline]
+        #[target_feature(enable = "avx512f,vpclmulqdq")]
+        pub(crate) fn reduce(self) -> __m512i {
+            gf2_128_reduce_x4(self.lo, gf2_128_reduce_x4(self.mid, self.hi))
+        }
     }
 
     /// Four-lane unreduced GF(2^128) product accumulator, as `flock-field`'s `WideGhashX4`.

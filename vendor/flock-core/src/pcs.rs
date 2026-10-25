@@ -69,6 +69,8 @@ use crate::{
     scratch::{give_f128, take_f128},
     zerocheck::PaddingSpec,
 };
+#[cfg(target_arch = "x86_64")]
+mod block_stats_x86;
 pub mod commit;
 pub mod jagged;
 pub mod ligerito;
@@ -1643,7 +1645,8 @@ fn block_first_phase<Ch: Challenger>(
     trace: bool,
 ) -> (Vec<F128>, Vec<F128>) {
     use rayon::prelude::{
-        IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut,
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+        ParallelSliceMut,
     };
     const NB: usize = 1 << LOG_PACKING;
     let t = std::time::Instant::now();
@@ -1667,7 +1670,52 @@ fn block_first_phase<Ch: Challenger>(
 
     // Rank-1 terms on the block cube.
     let mut terms: Vec<(Vec<F128>, Vec<F128>)> = Vec::new();
+    // agg-mldsa patch (PATCH.md Section 4): AVX-512 block statistics, chosen at run
+    // time; the same terms in the same order as the portable loop below.
+    #[cfg(target_arch = "x86_64")]
+    let simd = crate::simd::has(crate::simd::AVX512_CLMUL);
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd = false;
     for cl in rs {
+        #[cfg(target_arch = "x86_64")]
+        if simd {
+            let z0 = cl.z_col[0];
+            let z_hi = &cl.z_col[1..];
+            let js: Vec<usize> = (0..NB).filter(|&j| cl.coeffs[j] != F128::ZERO).collect();
+            let s_c: Vec<Vec<Vec<F128>>> = (0..2)
+                .map(|c0| {
+                    let kappa = if c0 == 0 { F128::ONE + z0 } else { z0 };
+                    // SAFETY: AVX512_CLMUL checked at run time (it implies sse4.1 on
+                    // every AVX-512 CPU; the kernel only uses sse4.1 lane extracts).
+                    unsafe { block_stats_x86::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw) }
+                })
+                .collect();
+            let a_j: Vec<[Vec<F128>; 2]> = js
+                .par_iter()
+                .map(|&j| {
+                    let zj: Vec<F128> = z_hi.iter().map(|&z| frob(z, j)).collect();
+                    let eq_hi = crate::lincheck::build_eq_table(&zj);
+                    core::array::from_fn(|c0| {
+                        let live = live_e(c0);
+                        (0..n_e)
+                            .map(|e| {
+                                if e < live {
+                                    cl.coeffs[j] * eq_hi[e]
+                                } else {
+                                    F128::ZERO
+                                }
+                            })
+                            .collect()
+                    })
+                })
+                .collect();
+            let mut s_iter: Vec<_> = s_c.into_iter().map(Vec::into_iter).collect();
+            for [a0, a1] in a_j {
+                terms.push((a0, s_iter[0].next().expect("one s per term")));
+                terms.push((a1, s_iter[1].next().expect("one s per term")));
+            }
+            continue;
+        }
         let z0 = cl.z_col[0];
         let z_hi = &cl.z_col[1..];
         let per_j: Vec<(Vec<F128>, Vec<F128>)> = (0..NB)
@@ -1712,6 +1760,13 @@ fn block_first_phase<Ch: Challenger>(
             .into_par_iter()
             .map(|c| {
                 if c < live_cols {
+                    #[cfg(target_arch = "x86_64")]
+                    if simd {
+                        // SAFETY: AVX512_CLMUL checked at run time (see above).
+                        return unsafe {
+                            block_stats_x86::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
+                        };
+                    }
                     q[c * n_rows..(c + 1) * n_rows]
                         .iter()
                         .zip(&eq_row)

@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Three changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Four changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -93,3 +93,18 @@ To regenerate: re-apply the call-site edits listed in the table (each replaces a
 before the portable call), drop the `cfg(target_feature)` gates of the x86 kernel modules
 and items (keep `cfg(target_arch = "x86_64")`), point their GHASH imports at `simd::x86`,
 and copy `src/simd.rs`.
+
+## 4. Prover-only: AVX-512 block statistics of the merged opening (agg-mldsa deviation K12)
+
+`pcs.rs::block_first_phase` computes, per ring-switched claim, term `j` (128 of them)
+and block `e`, `S_j[e] = frob(kappa * sum_b pw[b][kinv_j] * bank[e][b], j)`: one scalar
+multiply per `(j, e, b)` and `j` scalar squarings, plus a dot product per column for the
+scalar claim groups. At 8,192 records (516 terms x 2,048 blocks) this was about 1 s of
+the sponge opening. `src/pcs/block_stats_x86.rs` computes the same values when
+`simd::has(AVX512_CLMUL)`: the inner products four terms at a time with lane-wise
+deferred reduction (`simd::x86::LaneAccX4`; reduction is F_2-linear, so the reduced
+sum equals the sum of reduced products), `kappa` and the squarings with `ghash_mul_x4`
+across four blocks (field-identical to the scalar multiply), the dot products with
+`WideGhashX4`. The terms are pushed in the portable order. Measured locally (CLMUL build,
+3 threads, load 6-7): block statistics 800-1,000 ms -> 77-95 ms at 8,192 records;
+aggregates unchanged. Test: `pcs::block_stats_x86::tests::kernels_match_portable`.
