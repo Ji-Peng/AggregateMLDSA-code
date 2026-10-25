@@ -401,10 +401,24 @@ fn check_lookup_shape(manifest: &CommitmentManifest, shape: &LookupShape) -> Res
 /// and the Keccak side (events 0 to 6). `unchecked` skips the honest prover's self-checks
 /// (lookup root identity and session claims, stage claimed sums) so that tests can hand a
 /// tampered witness to the verifier.
-#[allow(clippy::too_many_lines)]
 pub fn prove_piop(
     manifest: &CommitmentManifest,
     tables: SourceTables<'_>,
+    matrices: &BridgeMatrices,
+    public: &PublicData,
+    transcript: &mut Transcript,
+    unchecked: bool,
+) -> Result<(PiopProof, PiopRun), ProveError> {
+    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked)
+}
+
+/// [`prove_piop`] with the challenge-independent prover tables (the parities `y^(1)`)
+/// built beforehand, e.g. while the Flock span is proven (prover only).
+#[allow(clippy::too_many_lines)]
+fn prove_piop_with<'a>(
+    manifest: &CommitmentManifest,
+    tables: SourceTables<'a>,
+    prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
     public: &PublicData,
     transcript: &mut Transcript,
@@ -462,7 +476,7 @@ pub fn prove_piop(
 
     // Stages 1 to 3.
     let weights_clock = Instant::now();
-    let mut prover_tables = ProverTables::new(tables, matrices);
+    let mut prover_tables = prebuilt.unwrap_or_else(|| ProverTables::new(tables, matrices));
     let parity_time = weights_clock.elapsed();
     prover_tables.set_tau(matrices, &points.tau);
     if trace {
@@ -611,7 +625,17 @@ pub fn prove_with_tables(
     let final_vectors: Vec<[u8; 512]> = final_bits.iter().map(|bits| pack_final_vector(bits)).collect();
     transcript.absorb(FINAL_VECTORS_SITE, segments, &final_vectors.concat())?;
     timings.round2 = clock.lap();
-    let flock_proofs = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits);
+    let tables = SourceTables {
+        manifest,
+        main,
+        bridge: &bridge_tables,
+    };
+    // The parity tables of the stages need no challenge: they are built while the Flock
+    // span is proven, which leaves cores idle (prover only; the transcript is unchanged).
+    let (flock_proofs, prover_tables) = crate::pcs::overlap(
+        || keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits),
+        || ProverTables::new(tables, &matrices),
+    );
     if flock_proofs.len() != segments {
         return Err(ProveError::Internal("one Flock proof per segment".into()));
     }
@@ -619,12 +643,15 @@ pub fn prove_with_tables(
     timings.keccak += clock.lap();
 
     // Events 7 to 12: the lookup, the pre-stage claims and the stages.
-    let tables = SourceTables {
+    let (piop, run) = prove_piop_with(
         manifest,
-        main,
-        bridge: &bridge_tables,
-    };
-    let (piop, run) = prove_piop(manifest, tables, &matrices, &public, &mut transcript, hooks.unchecked)?;
+        tables,
+        Some(prover_tables),
+        &matrices,
+        &public,
+        &mut transcript,
+        hooks.unchecked,
+    )?;
     clock.lap();
     timings.lookup = run.lookup;
     timings.prestage = run.prestage;
