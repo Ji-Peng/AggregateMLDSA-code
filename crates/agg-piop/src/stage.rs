@@ -9,7 +9,7 @@
 //! verifier to claimed evaluations, so both sides evaluate the same [`Term`]s.
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
-use jolt_field::{One, Zero};
+use jolt_field::{One, Ring, Zero};
 
 use crate::kernel::{evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
@@ -326,7 +326,11 @@ fn prove_stage_with<'a>(
     let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
     let rounds = manifest.d_main();
     let mut groups = Vec::with_capacity(spec.groups.len());
+    // The spec group of every prover group, and the construction time per spec group.
+    let mut owner = Vec::with_capacity(spec.groups.len());
+    let mut build_times = vec![0_f64; spec.groups.len()];
     for (g, group) in spec.groups.iter().enumerate() {
+        let build = std::time::Instant::now();
         let lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
         let instances: Vec<GroupInstance> = group
             .instances
@@ -339,18 +343,27 @@ fn prove_stage_with<'a>(
         let eq_point = points.eq_point(group.eq, manifest, group.domain);
         if let Some(linear) = linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds) {
             groups.push(StageGroup::Linear(linear));
+            owner.push(g);
+            build_times[g] = build.elapsed().as_secs_f64();
             continue;
         }
+        let (instances, linear) = split_linear(&lanes, instances, eq_point.as_deref(), rounds);
         groups.push(StageGroup::Generic(
             Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
         ));
+        owner.push(g);
+        if let Some(linear) = linear {
+            groups.push(StageGroup::Extra(linear));
+            owner.push(g);
+        }
+        build_times[g] = build.elapsed().as_secs_f64();
     }
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut messages = Vec::with_capacity(rounds);
     let mut point = Vec::with_capacity(rounds);
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
     // Per group: (message time, bind time) summed over rounds; per round: total.
-    let mut group_times = vec![(0_f64, 0_f64); groups.len()];
+    let mut group_times = vec![(0_f64, 0_f64); spec.groups.len()];
     let mut round_times = Vec::with_capacity(rounds);
     for round in 0..rounds {
         let round_start = std::time::Instant::now();
@@ -360,7 +373,7 @@ fn prove_stage_with<'a>(
             for (slot, value) in message.iter_mut().zip(group.round_message(round)) {
                 *slot += value;
             }
-            group_times[g].0 += start.elapsed().as_secs_f64();
+            group_times[owner[g]].0 += start.elapsed().as_secs_f64();
         }
         let (message_site, challenge_site) = round_sites(spec.stage, round);
         transcript.absorb_extensions(&message_site, &message)?;
@@ -369,7 +382,7 @@ fn prove_stage_with<'a>(
         for (g, group) in groups.iter_mut().enumerate() {
             let start = std::time::Instant::now();
             group.bind(round, challenge);
-            group_times[g].1 += start.elapsed().as_secs_f64();
+            group_times[owner[g]].1 += start.elapsed().as_secs_f64();
         }
         round_times.push(round_start.elapsed().as_secs_f64());
         messages.push(message);
@@ -379,11 +392,12 @@ fn prove_stage_with<'a>(
         eprintln!("stage {} trace ({} rounds, degree {}):", spec.stage, rounds, spec.degree);
         for (g, group) in spec.groups.iter().enumerate() {
             eprintln!(
-                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, message {:8.1} ms, bind {:8.1} ms",
+                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms",
                 group.domain,
                 group.eq,
                 group.lanes.len(),
                 group.instances.len(),
+                build_times[g] * 1e3,
                 group_times[g].0 * 1e3,
                 group_times[g].1 * 1e3
             );
@@ -395,6 +409,8 @@ fn prove_stage_with<'a>(
     if check && (group_claims != claim || groups.iter().any(|g| !g.consistent())) {
         return Err(StageError::Terminal(spec.stage));
     }
+    // The extra linear groups split off a generic group carry no lanes of their own.
+    groups.retain(|g| !matches!(g, StageGroup::Extra(_)));
     let mut lane_values: Vec<Option<Vec<E>>> = groups.iter().map(StageGroup::terminal_values).collect();
     // A linear group's lanes are read by another group at the same point (`linear_group`).
     for g in 0..groups.len() {
@@ -431,41 +447,43 @@ fn prove_stage_with<'a>(
 enum StageGroup<'a> {
     Generic(Group<'a>),
     Linear(LinearIntGroup<'a>),
+    /// The linear integer part split off the preceding generic group ([`split_linear`]).
+    Extra(LinearIntGroup<'a>),
 }
 
 impl StageGroup<'_> {
     fn round_message(&mut self, round: usize) -> Vec<E> {
         match self {
             Self::Generic(g) => g.round_message(round),
-            Self::Linear(g) => g.round_message(round),
+            Self::Linear(g) | Self::Extra(g) => g.round_message(round),
         }
     }
 
     fn bind(&mut self, round: usize, challenge: E) {
         match self {
             Self::Generic(g) => g.bind(round, challenge),
-            Self::Linear(g) => g.bind(round, challenge),
+            Self::Linear(g) | Self::Extra(g) => g.bind(round, challenge),
         }
     }
 
     fn claim(&self) -> E {
         match self {
             Self::Generic(g) => g.claim(),
-            Self::Linear(g) => g.claim(),
+            Self::Linear(g) | Self::Extra(g) => g.claim(),
         }
     }
 
     fn consistent(&self) -> bool {
         match self {
             Self::Generic(_) => true,
-            Self::Linear(g) => g.terminal_consistent(),
+            Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
         }
     }
 
     fn terminal_values(&self) -> Option<Vec<E>> {
         match self {
             Self::Generic(g) => Some(g.terminal_values()),
-            Self::Linear(_) => None,
+            Self::Linear(_) | Self::Extra(_) => None,
         }
     }
 }
@@ -510,6 +528,95 @@ fn linear_group<'a>(
         return None;
     }
     LinearIntGroup::new(cells, coefficients, point)
+}
+
+/// Split the linear terms on integer lanes off an equality group on the full domain: a
+/// lane that is an `Ints` table and read only by single-lane products or unweighted affine
+/// sums moves its terms (with their coefficients) to one [`LinearIntGroup`]; the lane stays
+/// in the generic group, unread, so that the group still folds it and yields its terminal
+/// value (prover only; the sum of the two groups' messages is the original group's).
+fn split_linear<'a>(
+    lanes: &[Lane<'a>],
+    instances: Vec<GroupInstance>,
+    eq_point: Option<&[E]>,
+    rounds: usize,
+) -> (Vec<GroupInstance>, Option<LinearIntGroup<'a>>) {
+    let Some(point) = eq_point.filter(|p| p.len() == rounds && rounds > 0) else {
+        return (instances, None);
+    };
+    // Lanes read anywhere outside a linear position are not candidates.
+    let mut candidate: Vec<bool> = lanes
+        .iter()
+        .map(|lane| matches!(lane, Lane::Source(Source::Ints(_))))
+        .collect();
+    for instance in &instances {
+        for term in &instance.terms {
+            match term {
+                Term::Product(read) if read.len() == 1 => {}
+                Term::Affine { weight: None, .. } => {}
+                other => {
+                    for l in other.lanes() {
+                        candidate[l] = false;
+                    }
+                }
+            }
+        }
+    }
+    if !candidate.iter().any(|&c| c) {
+        return (instances, None);
+    }
+    let mut coefficients = vec![E::zero(); lanes.len()];
+    let instances: Vec<GroupInstance> = instances
+        .into_iter()
+        .map(|instance| {
+            let gamma = instance.gamma;
+            let terms = instance
+                .terms
+                .into_iter()
+                .filter_map(|term| match term {
+                    Term::Product(read) if read.len() == 1 && candidate[read[0]] => {
+                        coefficients[read[0]] += gamma;
+                        None
+                    }
+                    Term::Affine {
+                        weight: None,
+                        lanes: affine,
+                        constant,
+                    } => {
+                        let kept: Vec<(usize, i64)> = affine
+                            .into_iter()
+                            .filter(|&(l, c)| {
+                                if candidate[l] {
+                                    coefficients[l] += gamma.mul_i64(c);
+                                }
+                                !candidate[l]
+                            })
+                            .collect();
+                        (!kept.is_empty() || constant != 0).then_some(Term::Affine {
+                            weight: None,
+                            lanes: kept,
+                            constant,
+                        })
+                    }
+                    other => Some(other),
+                })
+                .collect();
+            GroupInstance { gamma, terms }
+        })
+        .collect();
+    let (cells, coefficients): (Vec<&'a [i32]>, Vec<E>) = lanes
+        .iter()
+        .zip(coefficients)
+        .zip(&candidate)
+        .filter(|(_, &c)| c)
+        .map(|((lane, coefficient), _)| match lane {
+            Lane::Source(Source::Ints(cells)) => (*cells, coefficient),
+            _ => unreachable!("candidates are integer lanes"),
+        })
+        .unzip();
+    let linear = LinearIntGroup::new(cells, coefficients, point);
+    // `new` refuses only lanes of the wrong length, which `Group::new` then reports.
+    (instances, linear)
 }
 
 /// True when a group spec has the shape [`linear_group`] may take (single-lane products

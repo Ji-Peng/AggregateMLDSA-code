@@ -143,11 +143,11 @@ impl Source<'_> {
             Self::Bytes { cells, map } => {
                 let low = map[cells[2 * k] as u8 as usize];
                 let high = map[cells[2 * k + 1] as u8 as usize];
-                E::from_i64(low) + fm(challenge, E::from_i64(high - low))
+                E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Ints(cells) => {
                 let (low, high) = (i64::from(cells[2 * k]), i64::from(cells[2 * k + 1]));
-                E::from_i64(low) + fm(challenge, E::from_i64(high - low))
+                E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Field(cells) => fold(&context, cells[2 * k], cells[2 * k + 1]),
         };

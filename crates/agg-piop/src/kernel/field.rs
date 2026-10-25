@@ -54,22 +54,18 @@ pub(crate) fn fm(lhs: E, rhs: E) -> E {
     )
 }
 
-/// `x k` for a signed integer `|k| < 2^63`: two `64 x 64` products and two reductions
-/// (half of [`fm`]); equal to `x * E::from_i64(k)` (test `integer_product_matches`).
+/// `x k` for a signed integer `|k| < p`: `k` is taken modulo `p` as a `u64` (branch free:
+/// the signs of balanced digits are random), two `64 x 64` products and two reductions (half
+/// of [`fm`]); equal to `x * E::from_i64(k)` (test `integer_product_matches`).
 #[inline(always)]
 pub(crate) fn fmi(x: E, k: i64) -> E {
-    let u = k.unsigned_abs();
-    let a = u128::from(x.c0().to_canonical_u64()) * u128::from(u);
-    let b = u128::from(x.c1().to_canonical_u64()) * u128::from(u);
-    let product = E::new(
+    let u = u128::from((k as u64).wrapping_add(((k >> 63) as u64) & P));
+    let a = u128::from(x.c0().to_canonical_u64()) * u;
+    let b = u128::from(x.c1().to_canonical_u64()) * u;
+    E::new(
         F::from_u64(reduce3(a as u64, (a >> 64) as u64, 0)),
         F::from_u64(reduce3(b as u64, (b >> 64) as u64, 0)),
-    );
-    if k < 0 {
-        -product
-    } else {
-        product
-    }
+    )
 }
 
 /// `acc += w k` without reduction for a signed integer `|k| < p`: `k` is taken modulo `p`
@@ -326,7 +322,7 @@ mod tests {
     #[test]
     fn integer_product_matches() {
         let mut rng = SplitMix64::new(91);
-        for k in [0_i64, 1, -1, 59, -59, i64::MAX, -i64::MAX, 1 << 62, -(1 << 62), 123_456_789_012_345] {
+        for k in [0_i64, 1, -1, 59, -59, i64::MAX, -i64::MAX + 60, 1 << 62, -(1 << 62), 123_456_789_012_345] {
             let x = field(&mut rng);
             assert_eq!(fmi(x, k), x * E::from_i64(k), "k = {k}");
         }

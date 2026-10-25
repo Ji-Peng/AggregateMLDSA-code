@@ -831,11 +831,13 @@ impl Level0 for LinearSource<'_> {
     /// `g = sum_l c_l f_l` on every cell (four products per cell at the L16 stacks, half
     /// of what the first round and the first fold would cost on the integer lanes).
     fn initial_table(&self) -> Option<Vec<E>> {
+        // Unreduced products, one reduction per cell.
         let cell = |i: usize| {
-            self.lanes
-                .iter()
-                .zip(&self.coefficients)
-                .fold(E::zero(), |acc, (lane, &c)| acc + fmi(c, i64::from(lane[i])))
+            let mut acc = Acc::zero();
+            for (lane, &c) in self.lanes.iter().zip(&self.coefficients) {
+                mad_int(&mut acc, c, i64::from(lane[i]));
+            }
+            E::reduce_product(acc)
         };
         let rows = self.rows();
         Some(if rows >= MIN_PARALLEL_ITEMS {
