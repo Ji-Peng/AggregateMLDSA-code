@@ -992,8 +992,11 @@ impl<'g> TiedPart<'g> {
         let (_, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap);
         // The sponge instance (three claims, event-2 commitment reused, K14) and the bridge
         // union (seven claims) have independent challengers (both seeded from `fs` and
-        // the tie), so the two proofs run side by side on the rayon pool; each proof is
-        // the same as when they ran one after the other.
+        // the tie), so the two proofs may run side by side on the rayon pool; each proof
+        // is the same either way. Serial by default: locally (3 threads, 8,192 records)
+        // side by side saved about 2% of the prove time but raised the peak RSS by about
+        // 0.5 GiB (+8%), and the 32K run is close to its RSS budget.
+        // `AGG_TIED_CONCURRENT` (any value) turns it on for an A/B on a larger machine.
         let sponge_points = points.sponge_points();
         let bridge_points = points.bridge_points();
         let prove_sponge = || {
@@ -1009,15 +1012,14 @@ impl<'g> TiedPart<'g> {
             let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()]);
             let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
             let out = g.prove(buffers, &circuits, &bridge_points, &mut ch, Some(bridge_data));
-            trace("bridge union proven (side by side)", &start);
+            trace("bridge union proof done", &start);
             out
         };
-        // `AGG_TIED_SERIAL` (any value) runs them one after the other (A/B timing).
         let ((sponge_proof, cap), (bridge_proof, bridge_cap_again)) =
-            if std::env::var_os("AGG_TIED_SERIAL").is_some() {
-                (prove_sponge(), prove_bridge())
-            } else {
+            if std::env::var_os("AGG_TIED_CONCURRENT").is_some() {
                 rayon::join(prove_sponge, prove_bridge)
+            } else {
+                (prove_sponge(), prove_bridge())
             };
         assert!(
             cap == absorbed.sponge,
