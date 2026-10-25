@@ -515,15 +515,16 @@ fn every_stage_tampering_is_rejected_end_to_end() {
                 && error.contains("exceeds the scheduled coefficient bound"),
             "{error}"
         );
-        // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
+        // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = 3
+        // is in relaxed H's base-8 alphabet, not in H-u's base-6 one).
         expect(
             "base-4 digit",
             &tampered(&|m| *cell(&manifest, m, Column::Z_HI, x) = 3),
             &at_stage(2),
         );
         expect(
-            "base-8 digit",
-            &tampered(&|m| *cell(&manifest, m, Column::U_HI, x) = -6),
+            "base-6 digit",
+            &tampered(&|m| *cell(&manifest, m, Column::U_HI, x) = 3),
             &at_stage(2),
         );
 
@@ -652,7 +653,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
                 -1
             };
             let u = u_at(&honest, x) - 2 * GAMMA2 * delta;
-            (-(1 << 18)..(1 << 18)).contains(&u).then_some(u)
+            (-190_465..=190_465).contains(&u).then_some(u)
         };
         let positions: Vec<(usize, i64)> = (0..1024)
             .map(|p| main_index(p % 256, p / 256, 3))

@@ -20,7 +20,7 @@ fn take<const M: usize>(values: &[E], offset: &mut usize) -> [E; M] {
 /// A carry `kappa = K + 2^15` from the claim on its balanced column `K`.
 #[must_use]
 pub fn carry_value(stored: E) -> E {
-    compose_digits(&CARRY16_DIGITS, &[stored])
+    compose_digits(&agg_witness::digits::ValueForm::Radix(CARRY16_DIGITS), &[stored])
 }
 
 /// The 13 pre-stage claims (spec Section 7.2): `y^(2)_t(tau_2)`, `K^(2)_t(tau_2)`,

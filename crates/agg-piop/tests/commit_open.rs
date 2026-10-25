@@ -46,7 +46,7 @@ fn check_virtual_claims(
     for (role, level, lanes) in [(GroupRole::Level1, 1, 6), (GroupRole::Level2, 2, 6), (GroupRole::Level3, 3, 1)] {
         let carries = CarryValues::from_evaluations(manifest, role, &values[role.index()]);
         for (t, claimed) in carries.kappa.iter().enumerate().take(lanes) {
-            let kappa = compose_table(&CARRY16_DIGITS, &[tables.column(Column::carry(level, t as u8))]);
+            let kappa = compose_table(&agg_witness::digits::ValueForm::Radix(CARRY16_DIGITS), &[tables.column(Column::carry(level, t as u8))]);
             assert_eq!(*claimed, mle_i64(&kappa, &points[role.index()]));
         }
         assert_eq!(

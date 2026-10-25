@@ -1,8 +1,10 @@
-//! Stage 2 (spec Section 7.4, degree 5): the level-1 definition (7.5) and the two range
-//! leaves of the small digits on the virtual tables `P_Z` (lookup layout L16: every other
-//! range is the lookup into `T_16`).
+//! Stage 2 (spec Section 7.4, degree 4 in relation H-u): the level-1 definition (7.5) and the
+//! two range leaves of the small digits on the virtual tables `P_Z` (lookup layout L16: every
+//! other range is the lookup into `T_16`).
 //!
-//! `gamma^(2)` order: `def_y1[t]` (0..6), `leaf4[Z_hi]` (6), `leaf8[U_hi]` (7).
+//! `gamma^(2)` order: `def_y1[t]` (0..6), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7). The leaf of the
+//! six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree `1 + 3 = 4`; relaxed H's
+//! `leaf8` had degree 5.
 
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
@@ -25,8 +27,8 @@ use crate::OpeningField as E;
 
 /// Stage number.
 pub const STAGE: usize = 2;
-/// Message degree.
-pub const DEGREE: usize = 5;
+/// Message degree (`leaf6[U_hi]`: the `eq` factor times `Q_6(P_Z)`).
+pub const DEGREE: usize = 4;
 /// Batching coefficients.
 pub const GAMMA_COUNT: usize = W1_BITS + 2;
 
@@ -46,7 +48,7 @@ pub const fn gamma_leaf(k: usize) -> usize {
 pub struct Stage2Proof {
     /// The 6 claims `K^(1)_t(r^(1)_1)` sent before `gamma^(2)`.
     pub kappa1: Kappa1Claims,
-    /// Compressed degree-5 messages (5 elements each).
+    /// Compressed degree-4 messages (4 elements each).
     pub rounds: Vec<Vec<E>>,
     /// Terminal claims.
     pub claims: Stage2Claims,
@@ -66,7 +68,7 @@ pub struct Stage2Output {
 /// The leaf polynomial of a leaf-checked digit.
 fn leaf_poly(digit: &Digit) -> LeafPoly {
     match digit.base {
-        8 => LeafPoly::Q8,
+        6 => LeafPoly::Q6,
         4 => LeafPoly::Q4,
         other => panic!("unsupported leaf base {other}"),
     }
@@ -234,14 +236,19 @@ mod tests {
         let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
         assert_eq!(leaves.instances[0].gamma, gamma_leaf(0));
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(z_hi, LeafPoly::Q4)]);
-        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q8)]);
+        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
+        let mut max = 0;
         for group in &spec.groups {
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {
                 for term in &instance.terms {
                     assert!(term.degree() + inner <= DEGREE);
+                    max = max.max(term.degree() + inner);
                 }
             }
         }
+        // The degree is tight: leaf6[U_hi] reaches it.
+        assert_eq!(max, DEGREE);
+        assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
     }
 }

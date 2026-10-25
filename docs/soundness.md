@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); implemented in step 2 (branch `pow-128`): PIOP wire version 2 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 4 (`agg_keccak::tied`, deviation K20), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`) |
-| Applies to | mode A and mode B, ML-DSA-44, relation H, lookup layout L16; PIOP wire version 2 and tied-part proof version 4 (both introduced by this document) |
+| Applies to | mode A and mode B, ML-DSA-44, relation H-u (the default since 2026-10-25, `docs/h-exact.md` step A; it replaced relaxed H), lookup layout L16; PIOP wire version 3 (version 2 of this document with the H-u stage-2 degree 4) and tied-part proof version 4 (introduced by this document) |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10 |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
@@ -18,7 +18,8 @@ the pinned code; estimates are marked.
 1. **PIOP sites.** At `N* = 2^15` the transcript draws 484 field challenges in `K`
    (`|K| = p^2`, `p = 2^64 - 59`): the lookup vector `X = (X_1, X_2)`, 27 merges `mu_s`,
    26 GKR batching vectors, 351 GKR rounds of degree 3, `tau`, `gamma^(1..3)` and
-   `3 x 25` stage rounds of degrees 4, 5, 3. With the assigned bounds of Section 3 every
+   `3 x 25` stage rounds of degrees 4, 4, 3 (relation H-u; relaxed H had 4, 5, 3 and the
+   same difficulties, since `bit_length(4) = bit_length(5)`). With the assigned bounds of Section 3 every
    site except `X` needs work: 483 nonces of 8 to 13 bits, 4,444 bits = **556 bytes** in
    one packed stream, about 2,718 predicate evaluations of expected honest work
    (about 2 ms serial at the measured 724 ns per Blake2b predicate, estimate).
@@ -55,8 +56,8 @@ the pinned code; estimates are marked.
    Flock's packed-direct claims absorb values only and assume transcript-derived points.
    Tied-part proof version 4 MUST bind a tie digest into both challengers (Section 4.5).
 6. **Tighter accounting.** Round-by-round (first false claim, Aerie Lemma C.1) gives the
-   union-bound ledger `1,434/|K| = 2^-117.5` at `2^15` instead of spec 12.1's
-   `3,534/|K| = 2^-116.2`: reductions, zero-checks and linear identities ride on the stage
+   union-bound ledger `1,409/|K| = 2^-117.5` at `2^15` instead of spec 12.1's
+   `3,509/|K| = 2^-116.2` (relaxed H: `1,434` and `3,534`): reductions, zero-checks and linear identities ride on the stage
    sum-checks and on one `tau` site (Section 5). With the schedule every address weighs
    at most `2^-128`, and the theorem of Section 7 follows Aerie Eq. (18).
 
@@ -151,7 +152,7 @@ trees; `D = max(d_main + 2, 16)`; `L = 4 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3`,
 | `lookup.round` (4) | `D (D - 1)/2` | 3 | `3/|K|` | 2 | 9 | 351 sites |
 | `tau` (5) | 1 | `d_main` | `d_main/|K|` | `bit_length(d_main)` | `g + 7` | 25: `g = 5` |
 | `stage.gamma` (6) | 3 | 1 | `26, 8, 44 / |K|` | 5, 4, 6 | 12, 11, 13 | |
-| `stage.round` (7) | `3 d_main` | 4, 5, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
+| `stage.round` (7) | `3 d_main` | 4, 4, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
 
 Totals per `N*` are in Section 10 (from 194 nonces / 227 bytes at `N* = 8` to 483 /
 556 bytes at `2^15`). The largest PIOP difficulty is 6 bits (`gamma^(3)`), far below
@@ -202,8 +203,9 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   coordinates of `tau`; `nu = d_main` (Aerie Lemma C.1, "the point tau"). The pre-stage
   claims sent after `tau` are pending evaluation claims, reduced in stage 3.
 * `gamma^(s)` (26, 8, 44 coefficients): `nu = 1` as in 3.3.
-* stage rounds: `nu` = the round polynomial's degree, 4, 5, 3 (`STAGE_DEGREES`; the `eq`
-  factor is included: `range_w1` has degree 4, `leaf8` degree 5, `link` degree 3).
+* stage rounds: `nu` = the round polynomial's degree, 4, 4, 3 (`STAGE_DEGREES`; the `eq`
+  factor is included: `range_w1` has degree 4, `leaf6` of the H-u digit `U_hi` degree 4
+  (`leaf4` degree 3), `link` degree 3).
 * identities tested at a point drawn by the preceding stage (the leaves at `r^(1)`, the
   ring identity and the links at `r^(2)`): while the earlier stage draws the point, the
   identity is the pending claim "the partially substituted `sum_x eq(r, x) phi(x)` is the
@@ -498,9 +500,10 @@ Section 3.6's (with the list factors), at `X` Section 3.2's.
 
 Before work, the round-by-round union bound (sum of `nu_t/|F_t|`, which is also the
 interactive soundness error of the PIOP, plus the `X` and `sd` terms `2^-201.9` and about
-`2^-139`) is `(12 d_main + d_main + 3 + GKR)/|K|`:
-`999/|K| = 2^-118.0` at `2^10`, `1,251/|K| = 2^-117.7` at `2^13`, `1,434/|K| = 2^-117.5`
-at `2^15`, against spec 12.1's `2,679`, `3,183`, `3,534` over `|K|`. This is still not
+`2^-139`) is `(11 d_main + d_main + 3 + GKR)/|K|` (the stage degrees sum to 11 in H-u):
+`979/|K| = 2^-118.1` at `2^10`, `1,228/|K| = 2^-117.7` at `2^13`, `1,409/|K| = 2^-117.5`
+at `2^15`, against spec 12.1's `2,659`, `3,160`, `3,509` over `|K|` (relaxed H, stage degrees
+summing to 12: `999`, `1,251`, `1,434` and `2,679`, `3,183`, `3,534`). This is still not
 128 bits; the schedule makes every site `<= 2^-128` per address, which is the statement of
 Section 7.
 
@@ -596,8 +599,8 @@ predicate evaluations.
 ## 7. Theorem (128-bit knowledge soundness, classical ROM)
 
 **Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` or `Slim` with the fix of
-4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 4 (4.5), PIOP wire version 2
-with the plan of Section 6, at most two tied parts per segment (3.5), and Akita's plan for
+4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 4 (4.5), PIOP wire version 3
+(relation H-u) with the plan of Section 6, at most two tied parts per segment (3.5), and Akita's plan for
 the selected catalog row. Assume in addition:
 
 * **(H1, open 6)** every fold group of the 13 grouped Akita rows draws its sparse fold
@@ -613,7 +616,7 @@ the theorem unconditionally. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 1, every nonce probe
 included) there is an extractor of expected cost polynomial in that of `P` (Aerie
 Theorem 5.9: at most `(Q_wrap + 2) K_hat` runs) that returns the original execution and,
-whenever the verifier accepts, a witness of relation H for every live record, except with
+whenever the verifier accepts, a witness of relation H-u for every live record, except with
 probability at most
 
 ```text
@@ -641,7 +644,7 @@ supply them inside the Keccak side; Akita's plan inside the opening. (4) Every a
 weighs at most `2^-128` (Section 3, the script's assertion `max weight <= 2^-128`; Flock
 with 4.3/4.4; Akita by its plan and, under H1, its 128-bit sparse-challenge floor), so Aerie
 Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <= 2^-128`. (5) The extracted
-objects satisfy relation H by spec 12.2 (lookup, leaves, bridge with `b = b'`, Keccak by
+objects satisfy relation H-u by spec 12.2 (lookup, leaves, bridge with `b = b'`, Keccak by
 Flock's relation).
 
 *What is not proved here.* Step (3)'s composition with a second, straight-line extractor
@@ -731,24 +734,30 @@ records in mode A and mode B.
 
 ## 10. Script output summary (`python3 -I docs/scripts/pow_plan.py`, 2026-10-25)
 
+Relation H-u (stage degrees 4, 4, 3). Against relaxed H (4, 5, 3) only the ledger column and
+the stage-2 round class move: every difficulty, nonce width, total, byte count and plan
+digest below is unchanged (`bit_length(4) = bit_length(5) = 3`; the script asserts it), and
+the relation is bound by the event-0 manifest bytes (wire version 3, `G_main4` alphabet code
+6 for `U_hi`), not by the plan.
+
 PIOP sites per `N*` (`bits` = packed-stream bits, `work` = `sum 2^g`, ledger = round-by-round
 sum before work):
 
 ```text
 d_sig  N*      d_main  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)
-    3       8      13  16       167936        -220.3    195     194  1811    227           1364    0.99  2^-128.30  563/|K| = 2^-118.9
-    4      16      14  16       200704        -220.0    198     197  1841    231           1400    1.01  2^-128.19  576/|K| = 2^-118.8
-    5      32      15  17       266240        -219.3    219     218  2032    254           1494    1.08  2^-128.09  639/|K| = 2^-118.7
-    6      64      16  18       397312        -218.4    241     240  2233    280           1608    1.16  2^-128.42  705/|K| = 2^-118.5
-    7     128      17  19       659456        -217.1    264     263  2442    306           1710    1.24  2^-128.42  774/|K| = 2^-118.4
-    8     256      18  20      1183744        -215.5    288     287  2660    333           1816    1.31  2^-128.42  846/|K| = 2^-118.3
-    9     512      19  21      2232320        -213.7    313     312  2887    361           1926    1.39  2^-128.42  921/|K| = 2^-118.2
-   10    1024      20  22      4395008        -211.8    339     338  3124    391           2048    1.48  2^-128.42  999/|K| = 2^-118.0
-   11    2048      21  23      8720384        -209.9    366     365  3370    422           2174    1.57  2^-128.42  1080/|K| = 2^-117.9
-   12    4096      22  24     17371136        -207.9    394     393  3625    454           2304    1.67  2^-128.42  1164/|K| = 2^-117.8
-   13    8192      23  25     34672640        -205.9    423     422  3889    487           2438    1.77  2^-128.42  1251/|K| = 2^-117.7
-   14   16384      24  26     69345280        -203.9    453     452  4162    521           2576    1.87  2^-128.42  1341/|K| = 2^-117.6
-   15   32768      25  27    138690560        -201.9    484     483  4444    556           2718    1.97  2^-128.36  1434/|K| = 2^-117.5
+    3       8      13  16       167936        -220.3    195     194  1811    227           1364    0.99  2^-128.30  550/|K| = 2^-118.9
+    4      16      14  16       200704        -220.0    198     197  1841    231           1400    1.01  2^-128.19  562/|K| = 2^-118.9
+    5      32      15  17       266240        -219.3    219     218  2032    254           1494    1.08  2^-128.09  624/|K| = 2^-118.7
+    6      64      16  18       397312        -218.4    241     240  2233    280           1608    1.16  2^-128.42  689/|K| = 2^-118.6
+    7     128      17  19       659456        -217.1    264     263  2442    306           1710    1.24  2^-128.42  757/|K| = 2^-118.4
+    8     256      18  20      1183744        -215.5    288     287  2660    333           1816    1.31  2^-128.42  828/|K| = 2^-118.3
+    9     512      19  21      2232320        -213.7    313     312  2887    361           1926    1.39  2^-128.42  902/|K| = 2^-118.2
+   10    1024      20  22      4395008        -211.8    339     338  3124    391           2048    1.48  2^-128.42  979/|K| = 2^-118.1
+   11    2048      21  23      8720384        -209.9    366     365  3370    422           2174    1.57  2^-128.42  1059/|K| = 2^-118.0
+   12    4096      22  24     17371136        -207.9    394     393  3625    454           2304    1.67  2^-128.42  1142/|K| = 2^-117.8
+   13    8192      23  25     34672640        -205.9    423     422  3889    487           2438    1.77  2^-128.42  1228/|K| = 2^-117.7
+   14   16384      24  26     69345280        -203.9    453     452  4162    521           2576    1.87  2^-128.42  1317/|K| = 2^-117.6
+   15   32768      25  27    138690560        -201.9    484     483  4444    556           2718    1.97  2^-128.36  1409/|K| = 2^-117.5
 ```
 
 Tie site, full parts (`n = 2^d S`), selected rows (the script prints every `d = 3..13`):
@@ -784,7 +793,7 @@ Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2
 2^-139.00 / 2^-138.51`; span off at four segments `2^-137.51 / 2^-137.00 / 2^-136.51`; two
 parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` (three
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Old ledger vs
-round-by-round at `2^15`: `3,534/|K| = 2^-116.2` vs `1,434/|K| = 2^-117.5` (stages 300,
+round-by-round at `2^15`: `3,509/|K| = 2^-116.2` vs `1,409/|K| = 2^-117.5` (stages 275,
 `tau` 25, gammas 3, GKR 1,106). Honest failure per site `<= 2^-184.7`, per proof
 `<= 2^-174.8` (951 capped searches: PIOP, 8 tie, 459 Akita; Section 6.5).
 

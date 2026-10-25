@@ -27,11 +27,13 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
     assert_eq!(main.columns().len(), 8);
     assert_eq!(main.wide().len(), 4 * (32 << 10));
     assert_eq!(main.geometry().n_star, 32);
-    // Padded rows hold the digits of zero: Z_lo = U_lo = V_lo = -2^15, the rest 0.
+    // Padded rows hold the digits of zero: Z_lo = V_lo = -2^15, U_lo = -31,540 (relation
+    // H-u: B_ulo = 1,228, H_u = 3), the rest 0.
     let padded = 25 << 10;
-    for column in [Column::Z_LO, Column::U_LO, Column::V_LO] {
+    for column in [Column::Z_LO, Column::V_LO] {
         assert_eq!(main.column(&manifest, column).value(padded), -i64::from(LOOKUP_SHIFT));
     }
+    assert_eq!(main.column(&manifest, Column::U_LO).value(padded), -31_540);
     for column in [Column::V_HI, Column::Z_HI, Column::U_HI, Column::W1Bit(0)] {
         assert_eq!(main.column(&manifest, column).value(padded), 0);
     }
@@ -67,17 +69,28 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
         MainTables::from_values(&manifest, &wide),
         Err(SourceTableError::Encode(_))
     ));
+    // Relation H-u: u = +-190,465 encodes, +-190,466 is an honest abort.
+    for (u, ok) in [(190_465, true), (-190_465, true), (190_466, false), (-190_466, false)] {
+        let mut edge = values.clone();
+        edge[2].u[3][9] = u;
+        let built = MainTables::from_values(&manifest, &edge);
+        assert_eq!(built.is_ok(), ok, "u = {u}");
+        if let Ok(tables) = built {
+            assert_eq!(tables.record_values(&manifest, 2).1[3][9], u);
+        }
+    }
     let mut huge = values;
     huge[0].v[0][0] = -(1 << 31) - 1;
     assert!(matches!(
         MainTables::from_values(&manifest, &huge),
         Err(SourceTableError::Encode(_))
     ));
-    // A non-Boolean bit, a base-4 top digit outside [-2, 1], a 16-bit column outside
-    // [-2^15, 2^15): the self-check names the group, column and cell.
+    // A non-Boolean bit, a base-4 top digit outside [-2, 1], a base-6 digit outside [-3, 2],
+    // a 16-bit column outside [-2^15, 2^15): the self-check names the group, column and cell.
     let b3 = manifest.locate(Column::W1Bit(3)).1;
     let z_hi = manifest.locate(Column::Z_HI).1;
-    for (column, cell, value) in [(b3, 77, 2_i8), (z_hi, 5, 2)] {
+    let u_hi = manifest.locate(Column::U_HI).1;
+    for (column, cell, value) in [(b3, 77, 2_i8), (z_hi, 5, 2), (u_hi, 6, 3), (u_hi, 7, -4)] {
         let mut bad = main.clone();
         bad.columns_mut()[column][cell] = value;
         assert_eq!(

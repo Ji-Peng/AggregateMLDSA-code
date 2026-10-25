@@ -36,7 +36,9 @@ TARGET = 128
 SLACK = 7  # nonce width = g + 7 (Aerie C.1, Akita (146))
 M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
-STAGE_DEGREES = (4, 5, 3)
+# Relation H-u (default since 2026-10-25, docs/h-exact.md step A): stage 2 holds leaf4[Z_hi]
+# (degree 3) and leaf6[U_hi] (degree 4), so its rounds have degree 4 (relaxed H: 5, leaf8).
+STAGE_DEGREES = (4, 4, 3)
 STAGE_GAMMAS = (26, 8, 44)
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
@@ -268,12 +270,13 @@ def print_summary(args) -> None:
         geo = geometry(d_sig)
         dm, D = geo["d_main"], geo["D"]
         gkr = 3 * D * (D - 1) // 2 + 2 * (D - 1) + 1
-        old = 12 * dm + 19 * dm + 4 * dm + 62 * dm + 3 + gkr
-        new = 12 * dm + dm + 3 + gkr
+        deg = sum(STAGE_DEGREES)
+        old = deg * dm + 19 * dm + 4 * dm + 62 * dm + 3 + gkr
+        new = deg * dm + dm + 3 + gkr
         print(
             f"N* = 2^{d_sig}: spec 12.1 {old}/|K| = 2^{math.log2(Fraction(old, K)):.1f};"
             f" round-by-round sum {new}/|K| = 2^{math.log2(Fraction(new, K)):.1f}"
-            f" (stages {12 * dm}, tau {dm}, gammas 3, GKR {gkr})"
+            f" (stages {deg * dm}, tau {dm}, gammas 3, GKR {gkr})"
         )
     print()
     theta = Fraction(1, math.comb(8192, 14)) * 2 + Fraction(1, math.comb(4096, 18))
@@ -382,6 +385,9 @@ def print_details(d_sig: int) -> None:
 
 
 def self_check() -> None:
+    # Relation H-u: the stage-2 degree drops from 5 to 4 but bit_length(4) = bit_length(5), so
+    # every difficulty, the nonce stream and the plan digests equal relaxed H's.
+    assert grind_bits(4, K) == grind_bits(5, K) == 3
     # Aerie's grind_bits(L) = bit_length(L) for |K| sites (crates/aerie-falcon/src/protocol/grinding.rs).
     for nu, want in ((1, 1), (3, 2), (8, 4), (16, 5), (25, 5), (44, 6)):
         assert grind_bits(nu, K) == want, (nu, grind_bits(nu, K))

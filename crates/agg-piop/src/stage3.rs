@@ -14,7 +14,7 @@
 //! The ring instance is one instance with two summands on two groups: `w_A z` (weight
 //! lane, no equality factor) and `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)` (equality
 //! group of `r^(2)`), both affine in the committed columns: `z = Z_lo + 2^16 Z_hi + 2^15`,
-//! `u = U_lo + 2^16 U_hi + 2^15`, `v = V_lo + 2^16 V_hi + 2^15`.
+//! `u = U_lo + 63,079 U_hi + 31,540` (relation H-u), `v = V_lo + 2^16 V_hi + 2^15`.
 
 use agg_witness::params::{GAMMA2, Q, W1_BITS};
 use jolt_field::{One, Zero};

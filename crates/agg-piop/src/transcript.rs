@@ -39,8 +39,8 @@ pub const PIOP_PROTOCOL_TAG: [u8; 64] = protocol_tag();
 pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 /// cSHAKE256 customization of the instance digest.
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
-/// Stage message degrees (spec Section 7.1).
-pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
+/// Stage message degrees (spec Section 7.1; relation H-u: stage 2 has degree 4).
+pub const STAGE_DEGREES: [usize; 3] = [4, 4, 3];
 /// Batching coefficients per stage (spec Section 7, lookup layout L16).
 pub const STAGE_GAMMAS: [usize; 3] = [26, 8, 44];
 /// Terminal claims per stage.

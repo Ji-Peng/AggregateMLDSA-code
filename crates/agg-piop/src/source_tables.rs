@@ -7,9 +7,11 @@
 //! * [`MainTables`], round 1: `G_main16` (`Z_lo, U_lo, V_lo, V_hi`, stored balanced as
 //!   `i32` cells in one stacked lane, column `c` at cells `c 2^d_main ..`) and `G_main4`
 //!   (`Z_hi, U_hi, b_0..b_5`, `i8` cells), from `z + 2^17 = z_lo + 2^16 z_hi`,
-//!   `u + 2^18 = u_lo + 2^16 u_hi`, `v + 2^31 = v_lo + 2^16 v_hi` with the stored values
-//!   `Z_lo = z_lo - 2^15`, `Z_hi = z_hi - 2` and likewise (spec (4.1) with the L16 bases).
-//!   Padded rows carry the digits of zero (`Z_lo = U_lo = V_lo = -2^15`, the rest 0).
+//!   `v + 2^31 = v_lo + 2^16 v_hi` with the stored values `Z_lo = z_lo - 2^15`,
+//!   `Z_hi = z_hi - 2` and likewise (spec (4.1) with the L16 bases), and relation H-u's
+//!   `u + 190,465 = B_ulo + 63,079 H_u` (`H_u = min(floor((u + 190,465) / 63,079), 5)`) stored
+//!   as `U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`. Padded rows carry the digits of zero
+//!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0).
 //! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
 //!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
@@ -34,8 +36,9 @@ use crate::kernel::{Lane, Source};
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
     stack_columns, Column, CommitmentManifest, DigitValue, GroupDescriptor, GroupRole,
-    LOOKUP_SHIFT, STACK_DOMAINS, U16_DIGITS, V16_DIGITS, Z16_DIGITS,
+    LOOKUP_SHIFT, STACK_DOMAINS,
 };
+use agg_witness::digits::ValueForm;
 use crate::OpeningField as E;
 
 /// A failure while building or checking the committed tables.
@@ -257,7 +260,7 @@ struct RecordBlock {
     narrow: Vec<i8>,
 }
 
-fn split_into(value: i64, layout: agg_witness::digits::DigitLayout, what: &'static str) -> Result<[i64; 2], SourceTableError> {
+fn split_into(value: i64, layout: ValueForm, what: &'static str) -> Result<[i64; 2], SourceTableError> {
     let digits = layout.decompose(value);
     if !layout.in_alphabets(&digits) {
         return Err(SourceTableError::Encode(what));
@@ -272,14 +275,14 @@ fn encode_record(values: &RecordValues) -> Result<RecordBlock, SourceTableError>
         for j in 0..N {
             let pos = j + N * row;
             // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
-            let [z_lo, z_hi] = split_into(values.z[row][j], Z16_DIGITS, "z outside [-2^17, 2^17)")?;
-            let [u_lo, u_hi] = split_into(values.u[row][j], U16_DIGITS, "u outside [-2^18, 2^18)")?;
-            let [v_lo, v_hi] = split_into(values.v[row][j], V16_DIGITS, "v outside [-2^31, 2^31)")?;
+            let [z_lo, z_hi] = split_into(values.z[row][j], DigitValue::Z.layout(), "z outside [-2^17, 2^17)")?;
+            let [u_lo, u_hi] = split_into(values.u[row][j], DigitValue::U.layout(), "u outside [-190,465, 190,465]")?;
+            let [v_lo, v_hi] = split_into(values.v[row][j], DigitValue::V.layout(), "v outside [-2^31, 2^31)")?;
             for (c, value) in [z_lo, u_lo, v_lo, v_hi].into_iter().enumerate() {
                 wide[c * POSITIONS + pos] = i32::try_from(value).expect("16-bit digit");
             }
             narrow[pos] = i8::try_from(z_hi).expect("base-4 digit");
-            narrow[POSITIONS + pos] = i8::try_from(u_hi).expect("base-8 digit");
+            narrow[POSITIONS + pos] = i8::try_from(u_hi).expect("base-6 digit");
             let w1 = values.w1[row][j];
             if w1 >= 64 {
                 return Err(SourceTableError::Encode("w1' above six bits"));
@@ -434,8 +437,8 @@ impl MainTables {
     #[must_use]
     pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
         let at = |column: Column, pos: usize| self.column(manifest, column).value(i * POSITIONS + pos);
-        let compose = |layout: agg_witness::digits::DigitLayout, lo: Column, hi: Column, pos: usize| {
-            layout.compose(&[at(lo, pos), at(hi, pos)])
+        let compose = |value: DigitValue, lo: Column, hi: Column, pos: usize| {
+            value.layout().compose(&[at(lo, pos), at(hi, pos)])
         };
         let mut z = [[0; N]; L];
         let mut u = [[0; N]; K];
@@ -443,9 +446,9 @@ impl MainTables {
         for row in 0..K {
             for j in 0..N {
                 let pos = j + N * row;
-                z[row][j] = compose(Z16_DIGITS, Column::Z_LO, Column::Z_HI, pos);
-                u[row][j] = compose(U16_DIGITS, Column::U_LO, Column::U_HI, pos);
-                v[row][j] = compose(V16_DIGITS, Column::V_LO, Column::V_HI, pos);
+                z[row][j] = compose(DigitValue::Z, Column::Z_LO, Column::Z_HI, pos);
+                u[row][j] = compose(DigitValue::U, Column::U_LO, Column::U_HI, pos);
+                v[row][j] = compose(DigitValue::V, Column::V_LO, Column::V_HI, pos);
             }
         }
         (z, u, v)

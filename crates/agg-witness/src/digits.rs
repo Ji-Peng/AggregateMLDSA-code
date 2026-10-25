@@ -351,6 +351,106 @@ impl StepLayout {
     }
 }
 
+/// A value committed through digits: a mixed-radix layout (4.1) or a step form. The PIOP
+/// (`agg_piop::manifest::DigitValue::layout`) uses it to treat both alike: the value is
+/// always `sum W_k Z_k + C_X` over the committed digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueForm {
+    /// Mixed-radix digits (4.1).
+    Radix(DigitLayout),
+    /// Low digits plus one stepped top digit.
+    Step(StepLayout),
+}
+
+impl ValueForm {
+    /// Number of committed digits.
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Radix(l) => l.len(),
+            Self::Step(l) => l.len(),
+        }
+    }
+
+    /// Always false.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Base of committed digit k (its balanced alphabet is [-b/2, b/2 - 1]).
+    pub fn base(&self, k: usize) -> u32 {
+        match self {
+            Self::Radix(l) => l.bases[k],
+            Self::Step(l) if k < l.low.len() => l.low.bases[k],
+            Self::Step(l) => l.top_base,
+        }
+    }
+
+    /// Alphabet of committed digit k.
+    pub fn alphabet(&self, k: usize) -> Alphabet {
+        Alphabet::Balanced(self.base(k))
+    }
+
+    /// Weights W_k.
+    pub fn weights(&self) -> Vec<i64> {
+        match self {
+            Self::Radix(l) => l.weights(),
+            Self::Step(l) => l.weights(),
+        }
+    }
+
+    /// C_X.
+    pub fn constant(&self) -> i64 {
+        match self {
+            Self::Radix(l) => l.constant(),
+            Self::Step(l) => l.constant(),
+        }
+    }
+
+    /// Proven range [lo, hi].
+    pub fn range(&self) -> (i64, i64) {
+        match self {
+            Self::Radix(l) => l.range(),
+            Self::Step(l) => l.range(),
+        }
+    }
+
+    /// Canonical digits (a digit leaves its alphabet outside the range).
+    pub fn decompose(&self, x: i64) -> Vec<i64> {
+        match self {
+            Self::Radix(l) => l.decompose(x),
+            Self::Step(l) => l.decompose(x),
+        }
+    }
+
+    /// X = sum W_k Z_k + C_X.
+    pub fn compose(&self, digits: &[i64]) -> i64 {
+        match self {
+            Self::Radix(l) => l.compose(digits),
+            Self::Step(l) => l.compose(digits),
+        }
+    }
+
+    /// True when every digit lies in its alphabet.
+    pub fn in_alphabets(&self, digits: &[i64]) -> bool {
+        match self {
+            Self::Radix(l) => l.in_alphabets(digits),
+            Self::Step(l) => l.in_alphabets(digits),
+        }
+    }
+}
+
+impl From<DigitLayout> for ValueForm {
+    fn from(l: DigitLayout) -> Self {
+        Self::Radix(l)
+    }
+}
+
+impl From<StepLayout> for ValueForm {
+    fn from(l: StepLayout) -> Self {
+        Self::Step(l)
+    }
+}
+
 /// u in relation H-u: u = B_ulo + 63,079 H_u - 190,465 with B_ulo in [0, 2^16) (four base-16
 /// digits) and H_u in [0, 6) (one base-6 digit), exact range [-B_u, B_u] since
 /// 5 * 63,079 + 2^16 = 2 B_u + 1.
