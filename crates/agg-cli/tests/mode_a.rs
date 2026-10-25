@@ -105,11 +105,26 @@ fn round_trip(
     parts: usize,
     profile: FlockProfile,
 ) {
+    round_trip_as(Relation::Hu, n_own, n_shared, seed, part_log2, parts, profile);
+}
+
+/// [`round_trip`] under `relation`; a verifier of the other relation rejects the aggregate
+/// before event 0 (`docs/h-exact.md` 1.3).
+fn round_trip_as(
+    relation: Relation,
+    n_own: usize,
+    n_shared: usize,
+    seed: u64,
+    part_log2: u32,
+    parts: usize,
+    profile: FlockProfile,
+) {
     let records = records(seed, n_own, n_shared);
     let n = records.len();
     let aggregator = Aggregator::new(AggregatorConfig {
         part_log2,
         profile,
+        relation,
         ..AggregatorConfig::default()
     });
     let start = Instant::now();
@@ -143,6 +158,7 @@ fn round_trip(
     assert_eq!(items.commitments.len(), parts);
     assert_eq!(items.profile, profile as u8);
     assert_eq!(aggregate.report.profile, profile);
+    assert_eq!((aggregate.report.relation, aggregate.proof.relation), (relation, relation));
     assert_eq!(
         items.d_part,
         part_log2.min(n.next_power_of_two().max(8).trailing_zeros())
@@ -151,7 +167,7 @@ fn round_trip(
     let statements = statements(&records);
     if profile == FlockProfile::Slim8 {
         // A default verifier only accepts Fast and Slim; Slim8 requires opt-in via require().
-        let default_verifier = AggregateVerifier::new();
+        let default_verifier = AggregateVerifier::new().relation(relation);
         let rejected = default_verifier.verify(&statements, &aggregate.bytes, None);
         assert!(!rejected.accepted(), "default verifier must reject Slim8 without opt-in");
         assert!(matches!(
@@ -165,10 +181,12 @@ fn round_trip(
         AggregateVerifier::new().require(FlockProfile::Slim8)
     } else {
         AggregateVerifier::new()
-    };
+    }
+    .relation(relation);
     let uncached = verifier.verify(&statements, &aggregate.bytes, None);
     eprintln!("{uncached}");
     assert_eq!(uncached.profile, profile, "the profile read from the aggregate");
+    assert_eq!(uncached.relation, relation);
     let verified = uncached.report.outcome.as_ref().expect("honest aggregate");
     let distinct = {
         let mut keys: Vec<&[u8]> = records.iter().map(|r| r.pk.as_slice()).collect();
@@ -216,10 +234,20 @@ fn round_trip(
     );
     // Pinned verifiers: the aggregate's own profile accepts, the other one rejects at the
     // profile byte of the event-2 item (before any Flock work).
-    let pinned = AggregateVerifier::new().require(profile);
+    let pinned = AggregateVerifier::new().require(profile).relation(relation);
     assert!(pinned.verify(&statements, &aggregate.bytes, None).accepted());
+    let other_relation = match relation {
+        Relation::Hu => Relation::HExact,
+        Relation::HExact => Relation::Hu,
+    };
+    let crossed = pinned.relation(other_relation).verify(&statements, &aggregate.bytes, None);
+    assert!(
+        matches!(rejected(&crossed), VerifyError::Relation { expected, found } if *expected == other_relation && *found == relation),
+        "{crossed}"
+    );
     let wrong = AggregateVerifier::new()
         .require(other(profile))
+        .relation(relation)
         .verify(&statements, &aggregate.bytes, None);
     expect_rejected("verifier pinned to the other profile", &wrong, keccak);
     assert!(matches!(
@@ -263,6 +291,18 @@ fn round_trip_at_256_signatures_in_two_flock_parts() {
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn h_exact_round_trips_at_64_and_256_signatures_slim() {
+    on_large_stack(|| {
+        round_trip_as(Relation::HExact, 48, 16, 0xe064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim);
+        round_trip_as(Relation::HExact, 200, 56, 0xe256, 7, 2, FlockProfile::Slim);
+    });
 }
 
 #[test]

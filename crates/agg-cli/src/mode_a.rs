@@ -998,6 +998,9 @@ pub struct AggregatorConfig {
     /// Prove a batch of more than one segment as one span over all segments when the parts
     /// are whole segments (module docs, deviation K16; default on).
     pub span: bool,
+    /// The relation to prove (`docs/h-exact.md` Section 1; default H-u). The Keccak side
+    /// does not depend on it.
+    pub relation: Relation,
 }
 
 impl Default for AggregatorConfig {
@@ -1006,6 +1009,7 @@ impl Default for AggregatorConfig {
             part_log2: DEFAULT_PART_LOG2,
             profile: FLOCK_PROFILE,
             span: true,
+            relation: Relation::Hu,
         }
     }
 }
@@ -1068,6 +1072,8 @@ pub struct ProveReport {
     pub records: usize,
     /// The Flock profile (event 0).
     pub profile: FlockProfile,
+    /// The relation proven (event 0 and the proof header).
+    pub relation: Relation,
     /// The public instance: key expansion (`ExpandA`, inverse NTTs), `tr`, `mu`, `c`, `T`.
     pub instance: Duration,
     /// The PIOP prover's steps (`tables` is the strict witness derivation and `G_main`;
@@ -1134,7 +1140,11 @@ impl std::fmt::Display for ProveReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let t = &self.timings;
-        writeln!(f, "prover, N = {}, Flock profile {:?}:", self.records, self.profile)?;
+        writeln!(
+            f,
+            "prover, N = {}, Flock profile {:?}, relation {}:",
+            self.records, self.profile, self.relation
+        )?;
         for (name, d) in [
             ("instance (ExpandA, mu, c, T)", self.instance),
             ("witness and G_main tables", t.tables),
@@ -1360,7 +1370,7 @@ impl Aggregator {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
-            relation: Relation::Hu,
+            relation: self.config.relation,
         };
         let clock = Instant::now();
         let (manifest, honest) = main_tables(&prover_inputs)?;
@@ -1442,6 +1452,7 @@ impl Aggregator {
         let size = output.proof.size();
         debug_assert_eq!(size.total(), bytes.len());
         let report = ProveReport {
+            relation: self.config.relation,
             records: n,
             profile,
             instance: instance_time,
@@ -1467,6 +1478,8 @@ pub struct VerifyCostReport {
     pub report: VerifyReport,
     /// The Flock profile the aggregate was verified under.
     pub profile: FlockProfile,
+    /// The relation the aggregate was verified under (the verifier's, never the proof's).
+    pub relation: Relation,
     /// Reading the profile from the aggregate's event-2 items (a parse of the aggregate,
     /// outside the PIOP verifier's steps; zero when the profile was given).
     pub profile_probe: Duration,
@@ -1505,11 +1518,12 @@ impl std::fmt::Display for VerifyCostReport {
         };
         writeln!(
             f,
-            "verifier, N = {}, {} keys, aggregate {} B, Flock profile {:?}: {verdict}",
+            "verifier, N = {}, {} keys, aggregate {} B, Flock profile {:?}, relation {}: {verdict}",
             self.records,
             if self.cached { "cached" } else { "uncached" },
             self.aggregate_bytes,
-            self.profile
+            self.profile,
+            self.relation
         )?;
         writeln!(
             f,
@@ -1572,6 +1586,7 @@ impl std::fmt::Display for VerifyCostReport {
 pub struct AggregateVerifier {
     gate: ChainGate,
     require: Option<FlockProfile>,
+    relation: Relation,
 }
 
 impl Default for AggregateVerifier {
@@ -1587,7 +1602,16 @@ impl AggregateVerifier {
         Self {
             gate: sponge_gate(),
             require: None,
+            relation: Relation::Hu,
         }
+    }
+
+    /// Verify under `relation` (default H-u). The relation is the verifier's choice: an
+    /// aggregate whose header names another relation is rejected (`docs/h-exact.md` 1.3).
+    #[must_use]
+    pub const fn relation(mut self, relation: Relation) -> Self {
+        self.relation = relation;
+        self
     }
 
     /// Verify under `profile` only (an aggregate under another profile is rejected).
@@ -1639,12 +1663,13 @@ impl AggregateVerifier {
             &SeededMatrices,
             &keccak,
             profile,
-            Relation::Hu,
+            self.relation,
             cache,
         );
         VerifyCostReport {
             report,
             profile,
+            relation: self.relation,
             profile_probe,
             parts: keccak.log(),
             rejection: keccak.rejection(),

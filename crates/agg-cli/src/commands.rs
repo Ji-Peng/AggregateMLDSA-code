@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agg_piop::binding::FlockProfile;
+use agg_piop::manifest::Relation;
 use agg_piop::public_data::KeyCache;
 use agg_witness::gen;
 use rayon::prelude::*;
@@ -29,19 +30,22 @@ commands:
       N signed records (pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
   aggregate --records RECORDS --out AGGREGATE [--part-log2 D] [--flock-profile P]
-            [--flock-span on|off]
+            [--flock-span on|off] [--relation R]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
       Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
       Flock's accounting; default: the build's FLOCK_PROFILE); with --flock-span on (default) a
       batch of more than one segment in whole-segment parts is one tied part over all
-      segments.
+      segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465) or h-exact
+      (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465).
   verify --records RECORDS --aggregate AGGREGATE [--cache CACHE] [--flock-profile P]
+         [--relation R]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
-      Flock profile its items name (or only under P). With --cache, expanded keys are read
+      Flock profile its items name (or only under P) and under relation R (default h-u; an
+      aggregate of another relation is rejected). With --cache, expanded keys are read
       from and added to the cache file. Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
-        [--flock-profile P] [--flock-span on|off]
+        [--flock-profile P] [--flock-span on|off] [--relation R]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
@@ -131,6 +135,14 @@ impl Options {
                     .ok_or_else(|| format!("--{name}: fast, slim or slim8, not {v:?}"))
             })
             .transpose()
+    }
+
+    /// `--name h-u|h-exact`: the relation, H-u when absent.
+    fn relation(&mut self, name: &str) -> Result<Relation, String> {
+        match self.take(name) {
+            None => Ok(Relation::Hu),
+            Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-u or h-exact, not {v:?}")),
+        }
     }
 
     /// `--name on|off`, `default` when absent.
@@ -293,11 +305,13 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     let span = opts.switch("flock-span", true)?;
+    let relation = opts.relation("relation")?;
     opts.finish()?;
     let aggregator = Aggregator::new(AggregatorConfig {
         part_log2,
         profile,
         span,
+        relation,
     });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
@@ -311,6 +325,7 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(opts.path("aggregate")?)?;
     let cache_path = opts.take("cache").map(PathBuf::from);
     let require = opts.flock_profile("flock-profile")?;
+    let relation = opts.relation("relation")?;
     opts.finish()?;
     let mut key_cache = match &cache_path {
         Some(p) => Some(cache::load(p)?),
@@ -321,7 +336,8 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         let verifier = match require {
             Some(p) => AggregateVerifier::new().require(p),
             None => AggregateVerifier::new(),
-        };
+        }
+        .relation(relation);
         let report = verifier.verify(&statements(&records), &bytes, key_cache.as_mut());
         (report, key_cache)
     });
@@ -436,7 +452,9 @@ pub fn bench_records(
     let prove = proves[median_index(&prove_times)].clone();
     drop(proves);
     let reset = rss::reset_peak();
-    let verifier = AggregateVerifier::new().require(config.profile);
+    let verifier = AggregateVerifier::new()
+        .require(config.profile)
+        .relation(config.relation);
     let statements = statements(records);
     let mut uncached_report = String::new();
     let verify_uncached = timed_runs(warmup, reps, || {
@@ -484,6 +502,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let part_log2: u32 = opts.number("part-log2", Some(DEFAULT_PART_LOG2))?;
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     let span = opts.switch("flock-span", true)?;
+    let relation = opts.relation("relation")?;
     opts.finish()?;
     if n_keys == 0 || count == 0 {
         return Err("--count and --keys must be positive".into());
@@ -502,6 +521,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
                 part_log2,
                 profile,
                 span,
+                relation,
             },
             warmup,
             reps,
@@ -515,7 +535,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
+        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
         n_keys.min(count),
         std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
@@ -620,6 +640,11 @@ mod tests {
         assert!(o.flock_profile("flock-profile").is_err());
         assert_eq!(parse_flock_profile("fast"), Some(FlockProfile::Fast));
         assert_eq!(parse_flock_profile("slim8"), Some(FlockProfile::Slim8));
+        let mut o = Options::parse(&strings(&["--relation", "h-exact"])).unwrap();
+        assert_eq!(o.relation("relation"), Ok(Relation::HExact));
+        assert_eq!(o.relation("relation"), Ok(Relation::Hu));
+        let mut o = Options::parse(&strings(&["--relation", "fips"])).unwrap();
+        assert!(o.relation("relation").is_err());
         let mut o = Options::parse(&strings(&["--flock-span", "off", "--x", "maybe"])).unwrap();
         assert_eq!(o.switch("flock-span", true), Ok(false));
         assert_eq!(o.switch("flock-span", true), Ok(true));

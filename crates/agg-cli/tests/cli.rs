@@ -138,6 +138,39 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains(": reject"), "{out}");
 
+    // Relation H-exact (docs/h-exact.md 1.3): aggregate and verify with --relation h-exact;
+    // the default (H-u) verifier and an H-u aggregate verified as H-exact are rejected.
+    assert!(out.contains("relation H-u"), "{out}");
+    let exact = dir.join("exact.agg");
+    let (code, out) = agg(&[
+        "aggregate",
+        "--records",
+        s(&recs),
+        "--out",
+        s(&exact),
+        "--relation",
+        "h-exact",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("relation H-exact"), "{out}");
+    let verify_as = |file: &std::path::Path, relation: Option<&str>| {
+        let mut args = vec!["verify", "--records", s(&recs), "--aggregate", s(file)];
+        if let Some(r) = relation {
+            args.extend(["--relation", r]);
+        }
+        agg(&args)
+    };
+    let (code, out) = verify_as(&exact, Some("h-exact"));
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("relation H-exact: accept"), "{out}");
+    let (code, out) = verify_as(&exact, None);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("the proof claims relation H-exact, the verifier expects H-u"), "{out}");
+    let (code, out) = verify_as(&aggregate, Some("h-exact"));
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("the proof claims relation H-u, the verifier expects H-exact"), "{out}");
+    assert_eq!(verify_as(&aggregate, Some("fips")).0, 2);
+
     // Usage errors.
     assert_eq!(agg(&["prove"]).0, 2);
     assert_eq!(agg(&[]).0, 2);
