@@ -3,7 +3,7 @@
 `crates/agg-keccak` proves, for a batch of signatures, the witness-dependent hash of
 ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock HEAD
 (`succinctlabs/flock` `83f963e`, vendored `flock-core`, K12) and its Ligerito PCS. Deviations
-from the spec are listed in `docs/deviations.md` (entries K1 to K17). Sections 1 to 6
+from the spec are listed in `docs/deviations.md` (entries K1 to K20). Sections 1 to 6
 describe the sponge gate and the standalone sponge proof, Section 7 the bridge slot and the
 first (two-type union) segment, Sections 8 to 11 the tied part that mode A uses: Section 9
 its API, Section 11 the current bridge instance (the two-type bridge union) and its
@@ -409,7 +409,12 @@ end of this section).
   (`TiedPart::new_span`), the output columns hold `M_3 M_2 y1` and are checked against the
   table of final vectors (`final_vectors`, `prove_with_final_vectors`, `verify(.., ys, ..)`
   take one vector per segment of the span), the header has a segment count, and the inner
-  proofs omit the Ligerito level-0 cap (K17).
+  proofs omit the Ligerito level-0 cap (K17). Since version 4 (K20, docs/bridge.md Section
+  5c, docs/soundness.md 3.6 and 4.5) the tie challenger grinds `TiedPart::tie_bits` (16 to
+  18 bits at a full segment, the Johnson lists of both commitments priced in), the header
+  carries the tie nonce (`LE32`, after the segment count), and both instance challengers
+  absorb a 32-byte tie binding squeezed after the tie coordinates. The vendored Flock core
+  prices the level-0 list at its own outer sites (K19).
   Challengers: `fs`, a label per instance (`agg-keccak/v2/tied-sponge`,
   `agg-keccak/v2/tied-bridge-union`), the gate digest and a digest of the statement words
   (sponge) or the two relation digests (union), and a digest of the tie geometry, then

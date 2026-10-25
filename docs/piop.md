@@ -315,16 +315,26 @@ Elements of `K` are rejection-sampled per 64-bit limb from eight squeezed bytes.
 | 11 | `agg-mldsa/v1/stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 118; ; 67 | |
 | 12 | `agg-mldsa/v1/pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone |
 
-Every challenge is at grinding difficulty zero in this stage (deviation P3).
+Grinding (wire version 2, `docs/soundness.md` Section 6): every field-challenge event
+carries a difficulty from Aerie's assigned bounds (`Registry::work_sites`: `X` 0, a merge 1, a
+GKR batching vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the
+stage batching vectors 5, 4, 6, the stage rounds 3, 3, 2). With `g > 0` the transcript absorbs
+`LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose low `g` bits must be
+zero and then the challenge; the prover searches the smallest passing nonce and packs it into
+the work stream (`Transcript::new`, `work_stream`), the verifier reads and checks it
+(`Transcript::replay`, `TranscriptError::Work`), the stream's exact length and zero padding
+checked up front and its exhaustion at `ensure_complete`. The seeds and the PCS export carry
+no work. The plan (`pow::PowPlan`: the Keccak side's tie sites, then these sites) is hashed
+into the instance record of event 0 (`binding::instance_record`).
 
 ## 10. Wire format (`wire::AggregateProof`)
 
-`LE16` version 0, `u8` flags (0 = H), `LE64 N`; `32 N` bytes `c~`; event 1 framed
+`LE16` version 2, `u8` flags (0 = H), `LE64 N`; `32 N` bytes `c~`; event 1 framed
 (`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: three framed items;
 event 6: `512 S` bytes then `S` framed items; events 8 to 11 as raw atom encodings of
 16 bytes per element (26 pre-stage claims; `4 d_main` stage-1 round elements and 98
 claims; 18 `kappa1` claims, `5 d_main` round elements and 61 claims; `3 d_main` round
-elements and 67 claims); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and rejects
+elements and 67 claims); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and rejects
 non-canonical limbs. PIOP bytes: `16 (270 + 12 d_main)` = 7,776 at `N = 256`, 8,640 at
 `N = 2^15`. `AggregateProof::size()` (`ProofSize`) splits the serialized length into header,
 `c~`, Akita commitments, Keccak-side items (event 2), final vectors, Keccak-side proofs,

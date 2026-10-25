@@ -2,12 +2,12 @@
 
 | Field | Value |
 | --- | --- |
-| Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); not implemented yet |
+| Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); implemented in step 2 (branch `pow-128`): PIOP wire version 2 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 4 (`agg_keccak::tied`, deviation K20), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 3, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`) |
 | Applies to | mode A and mode B, ML-DSA-44, relation H, lookup layout L16; PIOP wire version 2 and tied-part proof version 4 (both introduced by this document) |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10 |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version |
+| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -334,6 +334,12 @@ fix of Section 4.3 only widens existing ones.
 * Consequence for step 2: no change in `agg-pcs-config`; the implementation SHOULD add a
   test that pins the per-row Akita plan digests (regression guard against a catalog or
   Akita change), and the docs MUST stop saying the opening has no grinding plan.
+* Implemented: `crates/agg-pcs-config/tests/akita_grinding.rs` derives the plan of every
+  grouped row for the opening layout of its six root groups
+  (`OpeningClaimsLayout::from_root_groups`), checks the table of Section 3.7 (sites, `sum g`,
+  max `g`, `sum 2^g`, nonce bits of all runs) and pins the 13 full digests (`225708cb...` at
+  `d_sig` 3 to `4f5a6026...` at 15). `ref/notes/status.md` (top-level repository) still says
+  the opening has no grinding plan; it is outside the code repository.
 
 ### 4.2 Flock: what the documented 128-bit level covers
 
@@ -389,6 +395,15 @@ proof version byte SHOULD be added) so that old proofs are rejected cleanly. Bef
 patching, the finding SHOULD be raised with the Flock authors (they may have an argument
 for the outer sites that their audit document does not state; Section 11, open 1). Until
 then, the paper MUST NOT claim 128 bits for the Keccak side.
+
+Implemented in step 2 (`vendor/flock-core/PATCH.md` Section 3, deviation K19): the policies
+take `list = ceil(L_max)` = 36, 50, 71 (an integer upper bound of `L_max` = 35.36, 50, 70.71),
+`bits = floor(log2(nu list)) + 1`; for every site above this gives exactly the bits listed
+(rounds 7 / 7 / 8, `alpha`/`beta`/claim batch 6 / 6 / 7, ring switch 8 / 9 / 9, zerocheck skip
+13 / 13 / 14, lincheck skip `k + 6 / k + 6 / k + 7`, zerocheck initial 11 / 11 / 12 at `m = 30`),
+checked by `agg_keccak::prover::tests::flock_outer_sites_carry_the_level0_list`. The
+multipoint batch and rounds get the same factor; the AG-basis skip points (not on our path)
+keep upstream's bits. Raising the finding upstream is still open.
 
 ### 4.4 Flock: `Slim8`'s transport claim batch
 
@@ -738,7 +753,8 @@ change with it.
    prover-only, upstream incompatibility) or first ask the Flock authors whether the
    outer sites have an argument that avoids the list factor? Recommendation: raise it
    upstream and patch our vendored core in step 2 under a new profile/proof version; the
-   cost is negligible.
+   cost is negligible. Step 2: patched (K19; old mode-A proofs are refused by the
+   tied-part proof version 4); raising it upstream remains open.
 2. **Tie difficulty.** 15 to 18 bits with the list factors (Section 3.6) instead of 7.
    An alternative that avoids the lists would bind each instance's level-0 list before the
    tie: two explicit OOD samples per instance (one alone binds only to about 113 bits at

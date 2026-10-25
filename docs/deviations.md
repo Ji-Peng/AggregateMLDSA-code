@@ -290,18 +290,27 @@ there is no projection seed, Rice section, reverse map or stage-1 projection ins
 Aerie's `projection/` is not used. The quotient's range (`v` digits, Section 4.3) is what
 lifts `Delta = 0` to (3.1).
 
-## P3. No grinding in this stage (spec Section 10)
+## P3. Grinding (resolved in wire version 2, spec Sections 10 and 12.1)
 
-Spec: "Encodings, the per-limb `K` sampler, LEB128 work nonces and the scheduled grinding
-are Aerie's; the work plan per admitted shape is an obligation of `agg-pcs-config`."
+Spec: "the scheduled grinding [is] Aerie's; the work plan per admitted shape is an
+obligation of `agg-pcs-config`."
 
-Code (`agg_piop::transcript`): every challenge event is registered at difficulty zero and
-no nonce is emitted or checked; the transcript has no work stream. The samplers and
-encodings are Aerie's. Why: `agg-pcs-config` publishes no grinding plan yet; adding
-Aerie's nonce mechanics changes the wire format (nonce bytes next to the challenges),
-which is not frozen (wire version 0). To add: a `PiopGrindingPlan` per shape, a difficulty
-per registry challenge, Aerie's `search_grinding_nonce`/`apply_work` in the prover and
-verifier states, and the nonce stream in `AggregateProof`.
+Code since wire version 2 (`docs/soundness.md`, normative): every PIOP field-challenge site
+has a difficulty from Aerie's assigned bounds (`agg_piop::transcript::Registry`,
+`agg_bridge::pow::grind_bits_k`); the transcript absorbs `LE32(nonce)`, checks the low `g`
+bits of a 32-byte predicate with Akita's `grinding_predicate_accepts` and squeezes the
+challenge after it; the nonces travel in one packed stream (`AggregateProof::work`, 227 to
+556 bytes); the plan (tie sites, then PIOP sites) is bound in event 0 by its SHA3-256 digest
+(`agg_piop::pow::PowPlan`). The tie challenges of a tied part grind 16 to 18 bits on the tie
+challenger (tied-part proof version 4). Akita's opening already ran its own plan
+(`akita_config::transcript_instance_descriptor`, pinned by
+`agg-pcs-config/tests/akita_grinding.rs`). Remaining differences from Aerie, all narrower
+than before: (1) the nonce is a fixed-width field of a packed stream, not a LEB128 atom in a
+Spongefish argument string (our PIOP has no argument string; the stream's width per site is
+public, so the encoding is canonical); (2) the plan is a function of `N*`, the Flock profile
+and the tied-part geometry rather than a per-shape table in `agg-pcs-config`; (3) the seeds
+`sd`, `fs_sigma` and the PCS export carry no work (their bad sets are below `2^-128`,
+`docs/soundness.md` Section 3.5).
 
 ## P4. Bridge matrices and the Keccak side are hooks (spec Sections 8, 9.1, 10, 11)
 
@@ -598,7 +607,7 @@ Since tied-part proof version 2 the bridge instance is the two-type bridge union
 the sponge cap alone, and the sponge commitment is computed once (K14); the sponge instance,
 its claims, the public check, the lane-group tie and its error names are unchanged.
 
-## K12. Vendored `flock-core` with a prover-only opening patch (spec Section 8; AGENTS.md dependency rule)
+## K12. Vendored `flock-core` with a prover-only opening patch (spec Section 8; AGENTS.md dependency rule; see K19 for the verifier-visible list-aware schedule)
 
 AGENTS.md: dependencies are pinned git revisions (Flock `83f963e`, recorded in `README.md`).
 
@@ -790,6 +799,53 @@ twice `Slim`'s level-0 encoding (four times `Fast`'s) and twice its kept commit 
 It is a parameter set of the documented analysis, not a profile Flock ships: proofs under it
 verify with this vendored copy (or upstream with the same configs). Measurements and the
 choice of the default: `docs/keccak.md` Section 12.
+
+## K19. List-aware work at Flock's outer sites in the vendored core (spec 12.1; docs/soundness.md 4.3, 4.4; updates K12, K18)
+
+Flock `83f963e`: under `Fast`, `Slim` (and our `Slim8`) every outer challenge of a Flock
+proof (zerocheck initial and skip points and rounds, lincheck `alpha`, `beta`, rounds and
+skip point, the ring-switch point, the transport claim batch, the merged rounds, the
+multipoint batch and rounds) carries a nonce sized for its numerator alone, except the
+transport claim batch, which prices the level-0 Johnson list with 6 bits. These challenges
+are drawn before Ligerito's level-0 two-point binding, and the Flock paper's own accounting
+(Appendix A "Security", Remark 11) multiplies each by the list size `L_max`, which leaves them
+at about 122 to 124 work-normalized bits (`docs/soundness.md` Section 4.3); `Slim8`'s
+claim batch reached 127.86 bits (4.4).
+
+Code (`vendor/flock-core/PATCH.md` Section 3): `LigeritoProfile::l0_list_factor` =
+`ceil(L_max)` = 36, 50, 71 for `Fast`, `Slim`, `Slim8` (`eta = 0.02`); the policies
+`ZerocheckGrinding`, `LincheckGrinding`, `OpeningGrinding` and `MultipointGrinding` gain
+`per_challenge_128_listed(list)`, which grinds `floor(log2(numerator * list)) + 1` bits at
+every outer site (claim batch at least the former 6), and `PcsParams::{zerocheck,
+lincheck, opening}_grinding` select them for the three Johnson profiles (`Secure`, unique
+decoding, keeps upstream's schedule). Per profile `Fast / Slim / Slim8`: rounds 7 / 7 / 8,
+`alpha`, `beta` and the claim batch 6 / 6 / 7, ring switch 8 / 9 / 9, zerocheck skip 13 / 13
+/ 14, lincheck skip `k + 6 / k + 6 / k + 7` bits. The AG-basis skip points (not on our code
+path) keep upstream's bits. No byte changes (Flock nonces are 8-byte words).
+
+Consequence: the transcript validity rule of the Flock verifier changes, so the vendored
+core is no longer prover-only: our Flock proofs do not verify with upstream `83f963e` and
+upstream's do not verify here (mode A rejects the old format anyway: tied-part proof version
+4, K20). The finding should be raised with the Flock authors, who may have an argument for
+the outer sites that their audit document does not state; if so this patch can be dropped.
+
+## K20. Tie work and the tie binding (tied-part proof version 4; docs/soundness.md 3.6, 4.5, 6.3)
+
+docs/bridge.md 5c (version 3): the tie challenges `rho` were drawn without work, with the
+bound `95 / 2^128` at a span of four segments, and the two instance challengers absorbed
+neither the union's cap (the sponge instance) nor the final-vector digest.
+
+Code (`agg_keccak::tied`, version 4): the tie bound carries the Johnson-list sizes of both
+Ligerito commitments (the level-0 binding happens inside the openings, after `rho`):
+`[2 L^2 (d + s + 5) + 2 L (log2 blocks + s + 9) + L (5 + s) + L (nu_s + 3)] / 2^128`
+(`agg_bridge::pow::tie_numerator`), so the tie challenger grinds 16 / 17 / 18 bits (`Fast` /
+`Slim` / `Slim8`) at a full segment or span with Flock's `grind_pow` before the first
+coordinate; the nonce (below `2^(g + 7)`) travels as `LE32` in the proof header. After the
+coordinates the tie challenger squeezes a 32-byte tie binding that both instance
+challengers absorb (label `agg-keccak/v4/tie-binding`) before Flock binds its statement.
+The difficulty is a function of the part's public geometry (`TiedPart::plan_tie_bits`), so
+the plan of event 0 names it before the part exists. Cost: about `2^17` BLAKE3 evaluations
+and 4 bytes per tied part.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

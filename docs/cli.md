@@ -77,7 +77,8 @@ AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--ke
 
 `--flock-profile` selects the Ligerito profile of the Flock parts (`fast`: rate 1/2, `slim`:
 rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work-normalized in
-Flock's accounting; default `slim`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
+Flock's accounting, with the level-0 list priced at the outer sites (K19) and at the tie
+(K20); default `slim`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
 12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. `--flock-span off` proves every segment
 on its own (K10 parts) instead of one span over all segments (K16).
 

@@ -1056,6 +1056,7 @@ pub fn size_lines(size: &ProofSize, records: usize) -> String {
         ("Flock proofs and shares", size.keccak_proofs),
         ("lookup (T_16)", size.lookup),
         ("PIOP rounds and claims", size.piop),
+        ("PIOP work nonces", size.work),
         ("Akita opening", size.opening),
     ];
     let mut out = String::new();
