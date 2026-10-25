@@ -122,6 +122,18 @@ pub fn derive(
     derive_inner(key, mu, sig, true)
 }
 
+/// [`derive`] with the public `T = c t1 2^d` already computed for the challenge `c_tilde`
+/// (the instance's); it is used when the signature's `c~` is that one, else recomputed.
+pub fn derive_with_t(
+    key: &ExpandedKey,
+    mu: &[u8; TR_BYTES],
+    sig: &[u8],
+    c_tilde: &[u8; C_TILDE_BYTES],
+    t: &VecK,
+) -> Result<SigWitness, DeriveError> {
+    derive_core(key, mu, sig, true, Some((c_tilde, t)))
+}
+
 /// Derivation without the hash and norm checks of Algorithm 8 (only decoding must succeed).
 /// Used to show that the checker, not the derivation, rejects a bad signature.
 pub fn derive_unchecked(
@@ -138,6 +150,16 @@ fn derive_inner(
     sig: &[u8],
     strict: bool,
 ) -> Result<SigWitness, DeriveError> {
+    derive_core(key, mu, sig, strict, None)
+}
+
+fn derive_core(
+    key: &ExpandedKey,
+    mu: &[u8; TR_BYTES],
+    sig: &[u8],
+    strict: bool,
+    known_t: Option<(&[u8; C_TILDE_BYTES], &VecK)>,
+) -> Result<SigWitness, DeriveError> {
     let trace = verify_internal_trace(key, mu, sig)?;
     if strict {
         if !trace.z_norm_ok {
@@ -148,7 +170,10 @@ fn derive_inner(
         }
     }
     let z = trace.sig.z;
-    let t = public_t(&trace.c, &key.t1);
+    let t = match known_t {
+        Some((c_tilde, t)) if *c_tilde == trace.sig.c_tilde => *t,
+        _ => public_t(&trace.c, &key.t1),
+    };
     let az_wide = az_integer(key, &z);
     let mut az = [[0i64; N]; K];
     let mut w = [[0i64; N]; K];

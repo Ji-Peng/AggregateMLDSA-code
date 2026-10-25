@@ -147,14 +147,14 @@ pub fn public_t(c: &Challenge, t1: &[[u16; N]; K]) -> VecK {
         for &pos in &c.positions {
             let p = usize::from(pos);
             let sign = i64::from(c.coeffs[p]);
-            for m in 0..N {
-                let v = sign * i64::from(t1[r][m]);
-                let k = p + m;
-                if k < N {
-                    out[r][k] += v;
-                } else {
-                    out[r][k - N] -= v;
-                }
+            // x^p t1: coefficients m < N - p land at p + m, the others wrap negated to
+            // m + p - N (two straight loops, which vectorize, instead of a branch per m).
+            let (low, high) = t1[r].split_at(N - p);
+            for (slot, &x) in out[r][p..].iter_mut().zip(low) {
+                *slot += sign * i64::from(x);
+            }
+            for (slot, &x) in out[r][..p].iter_mut().zip(high) {
+                *slot -= sign * i64::from(x);
             }
         }
         for x in out[r].iter_mut() {

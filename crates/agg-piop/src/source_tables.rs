@@ -23,7 +23,7 @@
 
 use agg_bridge::{parity, Shape};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
-use agg_witness::derive::{derive, DeriveError};
+use agg_witness::derive::{derive_with_t, DeriveError};
 use agg_witness::instance::PublicInstance;
 use agg_witness::native::{VecK, VecL};
 use agg_witness::padding::{main_index, Geometry, GeometryError};
@@ -362,7 +362,8 @@ impl MainTables {
             .zip(signatures.par_iter())
             .enumerate()
             .map(|(i, (record, signature))| {
-                let witness = derive(&record.key, &record.mu, signature)
+                // The instance computed T for this c~ already.
+                let witness = derive_with_t(&record.key, &record.mu, signature, &record.c_tilde, &record.t)
                     .map_err(|e| SourceTableError::Derive(i, e))?;
                 encode_record(&RecordValues {
                     z: witness.z,
