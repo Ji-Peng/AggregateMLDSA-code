@@ -98,6 +98,17 @@ impl Profile {
         }
     }
 
+    /// `floor(L_max)`, the Johnson-list size of a level-0 Ligerito commitment
+    /// (`docs/soundness.md` Section 3.6; Flock Eq. (10) at `eta = 0.02`): 35, 50, 70 for
+    /// `Fast`, `Slim`, `Slim8` (rates 1/2, 1/4, 1/8); 1 for the unique-decoding `Secure`.
+    #[must_use]
+    pub fn list_size(self) -> u64 {
+        match self {
+            Self::Secure => 1,
+            _ => agg_bridge::pow::list_size(self.ligerito().log_inv_rate() as u32),
+        }
+    }
+
     /// The profile byte of the proof headers: 0 `Fast`, 1 `Secure`, 3 `Slim`, 4 `Slim8` (2 is
     /// reserved for LaBinius).
     #[must_use]

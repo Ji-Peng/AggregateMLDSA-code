@@ -12,7 +12,8 @@
 //!   verifier's terminal evaluations (spec 7.6), over any `jolt_field::Ring`;
 //! * [`final_vector`]: the packed `Y_sigma`, its length check and `Y(tau_3)`;
 //! * [`gf2_walker`]: the GF(2) side, `M_3 M_2 M_1 b'` and its transpose (Flock bridge slot);
-//! * [`soundness`]: `sum_t 1 / binom(m_t, k_t)` and the grinding margin.
+//! * [`soundness`]: `sum_t 1 / binom(m_t, k_t)` and the grinding margin;
+//! * [`pow`]: the proof-of-work difficulties of the 128-bit schedule (`docs/soundness.md`).
 //!
 //! `agg-piop` uses these modules for the production shape; `agg-witness::bridge` keeps its own
 //! production-only computation as an independent reference.
@@ -21,6 +22,7 @@ pub mod carry;
 pub mod final_vector;
 pub mod gf2_walker;
 pub mod parity;
+pub mod pow;
 pub mod seed;
 pub mod shape;
 pub mod soundness;

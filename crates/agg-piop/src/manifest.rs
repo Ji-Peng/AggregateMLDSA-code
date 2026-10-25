@@ -26,8 +26,10 @@ pub type GroupRole = Group;
 /// PCS preset family of a group (`agg_pcs_config::catalogs::Family`).
 pub type PcsFamily = Family;
 
-/// Wire version of this protocol (spec Status: version 1, the lookup layout L16).
-pub const WIRE_VERSION: u16 = 1;
+/// Wire version of this protocol (spec Status: version 2, the lookup layout L16 with the
+/// proof-of-work schedule of `docs/soundness.md`: the plan digest in event 0 and the packed
+/// PIOP nonce stream; version 1 had no work).
+pub const WIRE_VERSION: u16 = 2;
 /// Parameter-set byte of ML-DSA-44 (spec Section 10, event 0).
 pub const PARAMETER_SET: u8 = 0x44;
 /// Identifier of the digit layout of spec Section 4.3: 1 is the lookup layout L16 (the
@@ -705,7 +707,7 @@ mod tests {
     fn binding_bytes_are_pinned_and_separate_batches() {
         let manifest = CommitmentManifest::for_batch(200).unwrap();
         let bytes = manifest.binding_bytes();
-        let mut expected = vec![1, 0, 0x44, 0];
+        let mut expected = vec![2, 0, 0x44, 0];
         expected.extend_from_slice(&200_u64.to_le_bytes());
         expected.extend_from_slice(&256_u64.to_le_bytes());
         expected.extend_from_slice(&[1, 6]);

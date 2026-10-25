@@ -26,6 +26,7 @@ pub mod manifest;
 pub mod mode_b;
 pub mod opening;
 pub mod pcs;
+pub mod pow;
 pub mod prover;
 pub mod public_data;
 pub mod public_stream;

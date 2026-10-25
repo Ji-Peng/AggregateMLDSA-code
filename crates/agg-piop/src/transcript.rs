@@ -10,10 +10,19 @@
 //! `K`. The ordered registry rejects a missing, extra or out-of-order event before it
 //! reaches the sponge. Prover and verifier run the same state machine.
 //!
-//! Grinding: the spec adopts Aerie's scheduled grinding; this stage registers every
-//! challenge at difficulty zero (recorded in `docs/deviations.md`).
+//! Grinding (wire version 2, `docs/soundness.md` Section 6.1): every field-challenge event
+//! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
+//! public message `LE32(v)`; the 32-byte predicate squeezed next must have its low `g` bits
+//! zero (Akita's `grinding_predicate_accepts`), and the challenge is squeezed after it from
+//! the same stream. The prover searches `v = 0, 1, ..` and records the winner in the packed
+//! nonce stream ([`crate::pow::WorkWriter`]); the verifier reads and checks it
+//! ([`crate::pow::WorkReader`]). The seeds `sd`, `fs_sigma` and the PCS export carry no work
+//! (`docs/soundness.md` Section 3.5).
 
-use akita_transcript::TranscriptSponge;
+use std::num::NonZeroU8;
+
+use agg_bridge::pow::grind_bits_k;
+use akita_transcript::{grinding_predicate_accepts, TranscriptSponge, GRINDING_PREDICATE_LEN};
 use jolt_field::{CanonicalEncoding, ExtField};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{CShake256, CShake256Core};
@@ -21,6 +30,7 @@ use spongefish::{DomainSeparator, DuplexSpongeInterface, Encoding, VerifierState
 
 use crate::lookup::{LookupError, LookupSite, LookupTranscript, DEGREE as LOOKUP_DEGREE};
 use crate::manifest::{CommitmentManifest, GroupRole};
+use crate::pow::{SiteClass, WorkReader, WorkSite, WorkStreamError, WorkWriter};
 use crate::{BaseField, OpeningField};
 
 /// Spongefish protocol tag, zero-padded to 64 bytes.
@@ -135,6 +145,19 @@ pub enum TranscriptError {
         /// Registry index.
         index: usize,
     },
+    /// A work nonce fails its predicate.
+    Work {
+        /// Registry index of the challenge event.
+        index: usize,
+    },
+    /// The honest nonce search exhausted `2^(g + 7)` candidates (probability below
+    /// `2^-184` per site).
+    WorkExhausted {
+        /// Registry index of the challenge event.
+        index: usize,
+    },
+    /// The packed nonce stream is malformed.
+    WorkStream(WorkStreamError),
 }
 
 impl std::fmt::Display for TranscriptError {
@@ -145,6 +168,11 @@ impl std::fmt::Display for TranscriptError {
             }
             Self::EventShape { index } => write!(f, "transcript event {index}: wrong shape"),
             Self::Incomplete { index } => write!(f, "transcript ended before event {index}"),
+            Self::Work { index } => write!(f, "transcript event {index}: work nonce rejected"),
+            Self::WorkExhausted { index } => {
+                write!(f, "transcript event {index}: nonce search exhausted")
+            }
+            Self::WorkStream(e) => write!(f, "nonce stream: {e:?}"),
         }
     }
 }
@@ -164,6 +192,36 @@ struct RegistryEvent {
     kind: u8,
     atoms: usize,
     size: PayloadSize,
+    /// The protected site of a field-challenge event (`docs/soundness.md` Section 3.1).
+    work: Option<WorkSite>,
+}
+
+/// Event list under construction.
+struct Builder(Vec<RegistryEvent>);
+
+impl Builder {
+    fn push(&mut self, site: &str, kind: u8, atoms: usize, size: PayloadSize) {
+        self.0.push(RegistryEvent {
+            site: site.to_owned(),
+            kind,
+            atoms,
+            size,
+            work: None,
+        });
+    }
+
+    /// A field-challenge event of `atoms` elements of `K`, protected as site `(class, i, j)`
+    /// with assigned bound `numerator / |K|` (`None`: the joint-bound site `X`, no work).
+    fn challenge(&mut self, site: &str, atoms: usize, class: SiteClass, i: usize, j: usize, numerator: Option<u64>) {
+        self.push(site, CHALLENGE_KIND, atoms, PayloadSize::Exact(16 * atoms));
+        let index = |v: usize| u16::try_from(v).expect("site index below 2^16");
+        self.0.last_mut().expect("pushed").work = Some(WorkSite {
+            class,
+            i: index(i),
+            j: index(j),
+            bits: numerator.map_or(0, grind_bits_k),
+        });
+    }
 }
 
 /// The ordered event list of one batch (spec Section 10).
@@ -173,67 +231,77 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry of `manifest`.
+    /// The registry of `manifest`, with the difficulty of every field-challenge site
+    /// (`docs/soundness.md` Section 3.1: Aerie's assigned bounds, a vector of `l`
+    /// coefficients `l / |K|`, a round its degree over `|K|`, a merge `1 / |K|`, the point
+    /// `tau` `d_main / |K|`; `X` carries none, its joint bound is `((L + M - 1) / |K|)^2`).
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
         let rounds = manifest.d_main();
         let segments = manifest.segments();
-        let mut events = Vec::with_capacity(32 + 6 * rounds + 4 * rounds * rounds);
-        let mut absorb = |site: &str, kind: u8, atoms: usize, size: PayloadSize| {
-            events.push(RegistryEvent {
-                site: site.to_owned(),
-                kind,
-                atoms,
-                size,
-            });
-        };
+        let mut b = Builder(Vec::with_capacity(32 + 6 * rounds + 4 * rounds * rounds));
         let elements = |count: usize| PayloadSize::Exact(16 * count);
-        absorb(INSTANCE_SITE, PUBLIC_KIND, 1, PayloadSize::Variable);
+        let count = |n: usize| Some(n as u64);
+        b.push(INSTANCE_SITE, PUBLIC_KIND, 1, PayloadSize::Variable);
         for role in [GroupRole::Main16, GroupRole::Main] {
-            absorb(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
+            b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
-        absorb(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
-        absorb(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
+        b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
         for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
-            absorb(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
+            b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
-        absorb(
+        b.push(
             FLOCK_SEEDS_SITE,
             CHALLENGE_KIND,
             segments,
             PayloadSize::Exact(32 * segments),
         );
-        absorb(
+        b.push(
             FINAL_VECTORS_SITE,
             PROOF_KIND,
             segments,
             PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
         );
-        absorb(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         // The lookup (docs/lookup.md Section 1): X, layer 1, mu_1, the sessions, then the
         // multiplicity-digit claims.
         let shape = manifest.lookup_shape();
         let challenges = shape.challenges;
-        let mut lookup = |site: LookupSite, kind: u8, atoms: usize| {
-            absorb(&lookup_site(site), kind, atoms, elements(atoms));
+        let proof = |b: &mut Builder, site: LookupSite, atoms: usize| {
+            b.push(&lookup_site(site), PROOF_KIND, atoms, elements(atoms));
         };
-        lookup(LookupSite::X, CHALLENGE_KIND, challenges);
-        lookup(LookupSite::Layer1, PROOF_KIND, 4 * shape.tree_count());
-        lookup(LookupSite::Mu(1), CHALLENGE_KIND, 1);
+        b.challenge(&lookup_site(LookupSite::X), challenges, SiteClass::LookupX, 0, 0, None);
+        proof(&mut b, LookupSite::Layer1, 4 * shape.tree_count());
+        b.challenge(&lookup_site(LookupSite::Mu(1)), 1, SiteClass::LookupMu, 1, 0, count(1));
         for s in 2..=shape.max_depth() {
             let (active, continuing, ending) = shape.session_counts(s);
-            lookup(LookupSite::Gamma(s), CHALLENGE_KIND, 2 * active);
+            b.challenge(
+                &lookup_site(LookupSite::Gamma(s)),
+                2 * active,
+                SiteClass::LookupGamma,
+                s,
+                0,
+                count(2 * active),
+            );
             for round in 0..s - 1 {
-                lookup(LookupSite::Round(s, round), PROOF_KIND, LOOKUP_DEGREE);
-                lookup(LookupSite::RoundChallenge(s, round), CHALLENGE_KIND, 1);
+                proof(&mut b, LookupSite::Round(s, round), LOOKUP_DEGREE);
+                b.challenge(
+                    &lookup_site(LookupSite::RoundChallenge(s, round)),
+                    1,
+                    SiteClass::LookupRound,
+                    s,
+                    round,
+                    count(LOOKUP_DEGREE),
+                );
             }
-            lookup(LookupSite::Terminals(s), PROOF_KIND, 4 * continuing);
-            lookup(LookupSite::Leaves(s), PROOF_KIND, 2 * ending);
-            lookup(LookupSite::Mu(s), CHALLENGE_KIND, 1);
+            proof(&mut b, LookupSite::Terminals(s), 4 * continuing);
+            proof(&mut b, LookupSite::Leaves(s), 2 * ending);
+            b.challenge(&lookup_site(LookupSite::Mu(s)), 1, SiteClass::LookupMu, s, 0, count(1));
         }
-        absorb(MULTIPLICITY_SITE, PROOF_KIND, MULTIPLICITY_CLAIMS, elements(MULTIPLICITY_CLAIMS));
-        absorb(TAU_SITE, CHALLENGE_KIND, rounds, PayloadSize::Exact(16 * rounds));
-        absorb(
+        b.push(MULTIPLICITY_SITE, PROOF_KIND, MULTIPLICITY_CLAIMS, elements(MULTIPLICITY_CLAIMS));
+        b.challenge(TAU_SITE, rounds, SiteClass::Tau, 0, 0, count(rounds));
+        b.push(
             PRESTAGE_SITE,
             PROOF_KIND,
             PRESTAGE_CLAIMS,
@@ -241,7 +309,7 @@ impl Registry {
         );
         for stage in 1..=3 {
             if stage == 2 {
-                absorb(
+                b.push(
                     KAPPA1_SITE,
                     PROOF_KIND,
                     KAPPA1_CLAIMS,
@@ -249,28 +317,34 @@ impl Registry {
                 );
             }
             let gammas = STAGE_GAMMAS[stage - 1];
-            absorb(
-                &gamma_site(stage),
-                CHALLENGE_KIND,
-                gammas,
-                PayloadSize::Exact(16 * gammas),
-            );
+            b.challenge(&gamma_site(stage), gammas, SiteClass::StageGamma, stage, 0, count(gammas));
             let width = STAGE_DEGREES[stage - 1];
             for round in 0..rounds {
                 let (message, challenge) = round_sites(stage, round);
-                absorb(&message, PROOF_KIND, width, PayloadSize::Exact(16 * width));
-                absorb(&challenge, CHALLENGE_KIND, 1, PayloadSize::Exact(16));
+                b.push(&message, PROOF_KIND, width, PayloadSize::Exact(16 * width));
+                b.challenge(&challenge, 1, SiteClass::StageRound, stage, round, count(width));
             }
             let terminals = STAGE_TERMINALS[stage - 1];
-            absorb(
+            b.push(
                 &terminal_site(stage),
                 PROOF_KIND,
                 terminals,
                 PayloadSize::Exact(16 * terminals),
             );
         }
-        absorb(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
-        Self { events }
+        b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
+        Self { events: b.0 }
+    }
+
+    /// The protected field-challenge sites in event order (the PIOP part of the plan).
+    pub fn work_sites(&self) -> impl Iterator<Item = WorkSite> + '_ {
+        self.events.iter().filter_map(|e| e.work)
+    }
+
+    /// Bits of the packed PIOP nonce stream.
+    #[must_use]
+    pub fn work_bits(&self) -> usize {
+        self.work_sites().map(|w| usize::from(w.nonce_bits())).sum()
     }
 
     /// Number of events.
@@ -366,11 +440,56 @@ pub struct Transcript {
     state: VerifierState<'static, TranscriptSponge>,
     registry: Registry,
     next: usize,
+    work: Work,
+}
+
+/// The nonce stream: written by the prover's search, read by the verifier.
+enum Work {
+    Search(WorkWriter),
+    Replay(WorkReader),
+}
+
+/// The sponge after absorbing `LE32(nonce)` and the predicate squeezed from it.
+fn preview(sponge: &TranscriptSponge, nonce: u32) -> (TranscriptSponge, [u8; GRINDING_PREDICATE_LEN]) {
+    let mut sponge = sponge.clone();
+    sponge.absorb(&nonce.to_le_bytes());
+    let mut predicate = [0; GRINDING_PREDICATE_LEN];
+    sponge.squeeze(&mut predicate);
+    (sponge, predicate)
+}
+
+/// Bytes of the packed PIOP nonce stream of `manifest` (`docs/soundness.md` Section 6.2).
+#[must_use]
+pub fn work_bytes(manifest: &CommitmentManifest) -> usize {
+    Registry::new(manifest).work_bits().div_ceil(8)
 }
 
 impl Transcript {
-    /// Initialize the stream from the canonical instance record and absorb event 0.
+    /// The prover's stream: initialize from the canonical instance record and absorb
+    /// event 0; the work nonces are searched and recorded ([`Self::work_stream`]).
     pub fn new(manifest: &CommitmentManifest, record: &[u8]) -> Result<Self, TranscriptError> {
+        Self::with_work(manifest, record, Work::Search(WorkWriter::default()))
+    }
+
+    /// The verifier's stream: as [`Self::new`], the work nonces read from `work` (exact
+    /// length and zero padding checked here, every nonce consumed at
+    /// [`Self::ensure_complete`]).
+    pub fn replay(
+        manifest: &CommitmentManifest,
+        record: &[u8],
+        work: &[u8],
+    ) -> Result<Self, TranscriptError> {
+        let registry = Registry::new(manifest);
+        let reader =
+            WorkReader::new(work, registry.work_bits()).map_err(TranscriptError::WorkStream)?;
+        Self::with_work(manifest, record, Work::Replay(reader))
+    }
+
+    fn with_work(
+        manifest: &CommitmentManifest,
+        record: &[u8],
+        work: Work,
+    ) -> Result<Self, TranscriptError> {
         let digest = instance_digest(record);
         let instance = LengthPrefixedBytes(&digest);
         let domain = DomainSeparator::<WithoutInstance>::new(PIOP_PROTOCOL_TAG)
@@ -381,9 +500,54 @@ impl Transcript {
             state,
             registry: Registry::new(manifest),
             next: 0,
+            work,
         };
         this.absorb_kind(PUBLIC_KIND, INSTANCE_SITE, 1, record)?;
         Ok(this)
+    }
+
+    /// The prover's packed nonce stream so far (padding bits zero).
+    ///
+    /// # Panics
+    /// On a verifier's stream.
+    #[must_use]
+    pub fn work_stream(&self) -> Vec<u8> {
+        match &self.work {
+            Work::Search(writer) => writer.clone().finish(),
+            Work::Replay(_) => panic!("the verifier's transcript records no nonces"),
+        }
+    }
+
+    /// The work of site `site` at registry event `index` (`docs/soundness.md` Section 6.1).
+    fn grind(&mut self, index: usize, site: WorkSite) -> Result<(), TranscriptError> {
+        let Some(bits) = NonZeroU8::new(site.bits) else {
+            return Ok(());
+        };
+        let width = site.nonce_bits();
+        let sponge = &self.state.duplex_sponge_state;
+        let (next, nonce) = match &mut self.work {
+            Work::Search(writer) => {
+                let found = (0..1_u64 << width).find_map(|candidate| {
+                    let nonce = u32::try_from(candidate).expect("nonce below 2^32");
+                    let (next, predicate) = preview(sponge, nonce);
+                    grinding_predicate_accepts(&predicate, bits).then_some((next, nonce))
+                });
+                let (next, nonce) = found.ok_or(TranscriptError::WorkExhausted { index })?;
+                writer.push(nonce, width);
+                (next, nonce)
+            }
+            Work::Replay(reader) => {
+                let nonce = reader.read(width).map_err(TranscriptError::WorkStream)?;
+                let (next, predicate) = preview(sponge, nonce);
+                if !grinding_predicate_accepts(&predicate, bits) {
+                    return Err(TranscriptError::Work { index });
+                }
+                (next, nonce)
+            }
+        };
+        debug_assert!(u64::from(nonce) < 1 << width);
+        self.state.duplex_sponge_state = next;
+        Ok(())
     }
 
     fn take(
@@ -392,7 +556,7 @@ impl Transcript {
         kind: u8,
         atoms: usize,
         payload_bytes: usize,
-    ) -> Result<(), TranscriptError> {
+    ) -> Result<usize, TranscriptError> {
         let index = self.next;
         let Some(expected) = self.registry.events.get(index) else {
             return Err(TranscriptError::Incomplete { index });
@@ -411,7 +575,7 @@ impl Transcript {
             return Err(TranscriptError::EventShape { index });
         }
         self.next += 1;
-        Ok(())
+        Ok(index)
     }
 
     fn absorb_kind(
@@ -465,7 +629,10 @@ impl Transcript {
         site: &str,
         count: usize,
     ) -> Result<Vec<OpeningField>, TranscriptError> {
-        self.take(site, CHALLENGE_KIND, count, 16 * count)?;
+        let index = self.take(site, CHALLENGE_KIND, count, 16 * count)?;
+        if let Some(work) = self.registry.events[index].work {
+            self.grind(index, work)?;
+        }
         Ok((0..count)
             .map(|_| {
                 let c0 = self.sample_base();
@@ -501,9 +668,14 @@ impl Transcript {
         Ok(())
     }
 
-    /// Confirm every registered event ran.
+    /// Confirm every registered event ran (and, on the verifier's stream, that every
+    /// nonce was read).
     pub fn ensure_complete(&self) -> Result<(), TranscriptError> {
-        self.require_next(self.registry.len())
+        self.require_next(self.registry.len())?;
+        match &self.work {
+            Work::Search(_) => Ok(()),
+            Work::Replay(reader) => reader.finish().map_err(TranscriptError::WorkStream),
+        }
     }
 }
 
@@ -640,6 +812,105 @@ mod tests {
         let mut other = record.clone();
         other[0] ^= 1;
         assert_ne!(base, run(&other, &[7; 40]));
+    }
+
+    /// Events 1 to 6 with dummy payloads.
+    fn to_lookup(t: &mut Transcript) {
+        to_seed(t, &[0]);
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+            t.absorb(commitment_site(role), 1, &[0]).unwrap();
+        }
+        t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
+        t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
+        t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]).unwrap();
+    }
+
+    #[test]
+    fn registry_difficulties_follow_the_soundness_doc() {
+        // docs/soundness.md 3.1 at N = 100 (N* = 128): d_main = 17.
+        let registry = Registry::new(&manifest());
+        let sites: Vec<WorkSite> = registry.work_sites().collect();
+        assert_eq!(sites.len(), 264);
+        assert_eq!((sites[0].class, sites[0].bits), (SiteClass::LookupX, 0));
+        assert_eq!((sites[1].class, sites[1].i, sites[1].bits), (SiteClass::LookupMu, 1, 1));
+        // Session 2: all ten trees active, 20 coefficients, 5 bits; one round of 2 bits.
+        assert_eq!((sites[2].class, sites[2].i, sites[2].bits), (SiteClass::LookupGamma, 2, 5));
+        assert_eq!((sites[3].class, sites[3].i, sites[3].j, sites[3].bits), (SiteClass::LookupRound, 2, 0, 2));
+        let tau = sites.iter().find(|s| s.class == SiteClass::Tau).unwrap();
+        assert_eq!(tau.bits, 5);
+        let gammas: Vec<u8> = sites.iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
+        assert_eq!(gammas, [5, 4, 6]);
+        for (stage, bits) in [(1, 3), (2, 3), (3, 2)] {
+            let rounds: Vec<&WorkSite> = sites
+                .iter()
+                .filter(|s| s.class == SiteClass::StageRound && s.i == stage)
+                .collect();
+            assert_eq!(rounds.len(), 17);
+            assert!(rounds.iter().all(|s| s.bits == bits));
+            assert_eq!(rounds[16].j, 16);
+        }
+        // 2,442 stream bits at N* = 2^7 (docs/soundness.md Section 10).
+        assert_eq!(registry.work_bits(), 2442);
+        assert_eq!(work_bytes(&manifest()), 306);
+        // The challenge field is K = F_{p^2} with p = 2^64 - 59, as the difficulties assume.
+        assert_eq!(BaseField::from_u64(agg_bridge::pow::P), BaseField::from_u64(0));
+    }
+
+    #[test]
+    fn work_nonces_are_searched_recorded_and_checked() {
+        let manifest = manifest();
+        let record = manifest.binding_bytes();
+        // The prover through X and mu_1 (1 bit of work, a nonce of 8 bits).
+        let mut prover = Transcript::new(&manifest, &record).unwrap();
+        to_lookup(&mut prover);
+        let x = LookupTranscript::challenges(&mut prover, LookupSite::X, 2).unwrap();
+        prover.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40]).unwrap();
+        let mu = LookupTranscript::challenges(&mut prover, LookupSite::Mu(1), 1).unwrap();
+        let stream = prover.work_stream();
+        assert_eq!(stream.len(), 1, "X carries no nonce, mu_1 one of 8 bits");
+        let nonce = stream[0];
+        // A full-length stream for the replay (the remaining nonces zero).
+        let full = |first: u8| {
+            let mut bytes = vec![0; work_bytes(&manifest)];
+            bytes[0] = first;
+            bytes
+        };
+        let replay = |first: u8| -> Result<(Vec<OpeningField>, Vec<OpeningField>), TranscriptError> {
+            let mut t = Transcript::replay(&manifest, &record, &full(first))?;
+            to_lookup(&mut t);
+            let x = t.challenge_extensions(&lookup_site(LookupSite::X), 2)?;
+            t.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40])?;
+            let mu = t.challenge_extensions(&lookup_site(LookupSite::Mu(1)), 1)?;
+            Ok((x, mu))
+        };
+        assert_eq!(replay(nonce).unwrap(), (x.clone(), mu));
+        // The prover's nonce is the smallest passing one: every smaller one fails.
+        let mu_index = LEADING + 2;
+        for wrong in 0..nonce {
+            assert_eq!(replay(wrong), Err(TranscriptError::Work { index: mu_index }));
+        }
+        // The stream's length and padding are exact.
+        let bytes = full(nonce);
+        let short = &bytes[..bytes.len() - 1];
+        assert!(matches!(
+            Transcript::replay(&manifest, &record, short),
+            Err(TranscriptError::WorkStream(WorkStreamError::Length))
+        ));
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(matches!(
+            Transcript::replay(&manifest, &record, &long),
+            Err(TranscriptError::WorkStream(WorkStreamError::Length))
+        ));
+        let mut padded = bytes.clone();
+        *padded.last_mut().unwrap() |= 0x80; // 2,442 bits: the last 6 bits are padding
+        assert!(matches!(
+            Transcript::replay(&manifest, &record, &padded),
+            Err(TranscriptError::WorkStream(WorkStreamError::Padding))
+        ));
+        // An unread nonce fails the completeness check.
+        let t = Transcript::replay(&manifest, &record, &bytes).unwrap();
+        assert!(t.ensure_complete().is_err());
     }
 
     #[test]

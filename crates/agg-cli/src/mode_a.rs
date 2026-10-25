@@ -54,6 +54,7 @@ use agg_keccak::tied::{TiedCommitment, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::CommitmentManifest;
+use agg_piop::pow::KeccakPlan;
 use agg_piop::prover::{
     main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
     ProveHooks, ProveTimings, ProverInputs, SeededMatrices,
@@ -147,6 +148,46 @@ pub fn span_seed(fs: &[[u8; 32]]) -> [u8; 32] {
 #[must_use]
 pub fn spans_segments(geometry: &Geometry, part_log2: u32, span: bool) -> bool {
     span && geometry.segments() >= 2 && SegmentParts::plan(geometry, 0, part_log2).d_part == geometry.d_seg()
+}
+
+/// The Keccak side's part of the proof-of-work plan of a mode-A batch (docs/soundness.md
+/// 6.4): one tie site for a span (`S` = the segments), else one per part with live records
+/// of every segment in order (`S` = 1), each with the difficulty of its public geometry
+/// ([`TiedPart::plan_tie_bits`]).
+///
+/// # Panics
+/// If `profile` is not a mode-A profile.
+#[must_use]
+pub fn keccak_plan(
+    gate: &ChainGate,
+    geometry: &Geometry,
+    part_log2: u32,
+    span: bool,
+    profile: FlockProfile,
+) -> KeccakPlan {
+    let ligerito = ligerito_of(profile);
+    let segments = geometry.segments();
+    if spans_segments(geometry, part_log2, span) {
+        let d = geometry.d_seg();
+        return KeccakPlan {
+            span: u8::try_from(segments).expect("at most 255 segments"),
+            d_part: d as u8,
+            tie_bits: vec![TiedPart::plan_tie_bits(gate, geometry.n, d, segments, ligerito)],
+        };
+    }
+    let d_part = SegmentParts::plan(geometry, 0, part_log2).d_part;
+    let tie_bits = (0..segments)
+        .flat_map(|sigma| {
+            let plan = SegmentParts::plan(geometry, sigma, part_log2);
+            (0..plan.count()).map(move |s| plan.local(s).len())
+        })
+        .map(|n| TiedPart::plan_tie_bits(gate, n, d_part, 1, ligerito))
+        .collect();
+    KeccakPlan {
+        span: 1,
+        d_part: d_part as u8,
+        tie_bits,
+    }
 }
 
 /// The split of one segment's live records into Flock parts.
@@ -417,6 +458,12 @@ impl<'g, 'h> FlockProver<'g, 'h> {
 }
 
 impl KeccakSide for FlockProver<'_, '_> {
+    /// One tie site per tied part (docs/soundness.md 6.4, [`keccak_plan`]).
+    fn plan(&self, segments: usize) -> KeccakPlan {
+        assert_eq!(segments, self.geometry.segments(), "segments of the batch");
+        keccak_plan(self.gate, &self.geometry, self.part_log2, self.span, self.profile)
+    }
+
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>> {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
         let mut state = self.state.lock().expect("state");
@@ -729,6 +776,54 @@ impl<'g> FlockVerifier<'g> {
 impl KeccakVerifier for FlockVerifier<'_> {
     fn profile(&self) -> FlockProfile {
         self.profile
+    }
+
+    /// The tie sites of the tied parts the event-2 items name (docs/soundness.md 6.4): one for
+    /// a span (segment 0's item opens it), else one per part with live records of every
+    /// segment; `None` on an item that does not parse or names an inadmissible geometry
+    /// (the per-segment checks of [`Self::verify`] reject it as well).
+    fn plan(&self, geometry: &Geometry, commitments: &[Vec<u8>]) -> Option<KeccakPlan> {
+        let profile = ligerito_of(self.profile);
+        let items: Vec<SegmentCommitments> = commitments
+            .iter()
+            .map(|c| SegmentCommitments::from_bytes(c).ok())
+            .collect::<Option<_>>()?;
+        let first = items.first()?;
+        if first.span != 1 {
+            let segments = usize::from(first.span);
+            if segments != geometry.segments() || segments < 2 || first.d_part != geometry.d_seg() {
+                return None;
+            }
+            return Some(KeccakPlan {
+                span: first.span,
+                d_part: first.d_part as u8,
+                tie_bits: vec![TiedPart::plan_tie_bits(self.gate, geometry.n, first.d_part, segments, profile)],
+            });
+        }
+        let d_part = first.d_part;
+        if d_part < MIN_PART_LOG2 || d_part > geometry.d_seg() {
+            return None;
+        }
+        let mut tie_bits = Vec::new();
+        for (sigma, item) in items.iter().enumerate() {
+            if item.span != 1 || item.d_part != d_part {
+                return None;
+            }
+            let plan = SegmentParts {
+                sigma,
+                first: 0,
+                live: geometry.live_in_segment(sigma),
+                d_part,
+            };
+            tie_bits.extend(
+                (0..plan.count()).map(|s| TiedPart::plan_tie_bits(self.gate, plan.local(s).len(), d_part, 1, profile)),
+            );
+        }
+        Some(KeccakPlan {
+            span: 1,
+            d_part: d_part as u8,
+            tie_bits,
+        })
     }
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
@@ -1722,6 +1817,34 @@ mod tests {
             assert_eq!(f.mu, r.mu);
             assert_eq!(f.c_tilde(), r.c_tilde);
         }
+    }
+
+    #[test]
+    fn plan_digests_reproduce_the_soundness_doc_vectors() {
+        // docs/soundness.md Section 10 (python3 -I docs/scripts/pow_plan.py), N = N*, default
+        // part size: the plan of the code's own Keccak side and PIOP registry.
+        use agg_piop::pow::PowPlan;
+        let gate = sponge_gate();
+        let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        for (d_sig, profile, span, want) in [
+            (3, FlockProfile::Slim, true, "1d9b37d94b1b32c19fae1312ac52d5da937824e6b8253585c00a3ccd67d1fd32"),
+            (10, FlockProfile::Slim, true, "2d289df145671419fe780abaa2542b28870ce0349ac8cd82ccd9da6a5b091a5b"),
+            (13, FlockProfile::Slim, true, "86581fc1f62e7dfa20d85d03868821a6cc83296e78c9d3e2fcdedaa6d2449e73"),
+            (15, FlockProfile::Fast, true, "57f65044067580b0234487193ebfd49e29093d40423f528600b804db6d90e156"),
+            (15, FlockProfile::Slim, true, "df9161a54a441de0e4065c8129aa9f956f4146427bd3336e59639e0cfdf2e38c"),
+            (15, FlockProfile::Slim, false, "5f69f20374997a0b0a025cf853549d98152025a4ebf946c84a55235c03c70ac0"),
+            (15, FlockProfile::Slim8, true, "902578ff518bcb5adfb672be263e13286e32226d2cdfb8853066b89250f64795"),
+        ] {
+            let n = 1 << d_sig;
+            let geometry = Geometry::new(n).unwrap();
+            let keccak = keccak_plan(&gate, &geometry, DEFAULT_PART_LOG2, span, profile);
+            let manifest = CommitmentManifest::for_batch(n).unwrap();
+            let plan = PowPlan::new(&manifest, profile, &keccak);
+            assert_eq!(hex(plan.digest()), want, "2^{d_sig} {profile:?} span {span}");
+        }
+        // Parts of 2^7 at N = 256: two tie sites of 16 bits (d = 7, nu_s = 8, Slim).
+        let keccak = keccak_plan(&gate, &Geometry::new(256).unwrap(), 7, true, FlockProfile::Slim);
+        assert_eq!((keccak.span, keccak.d_part, keccak.tie_bits), (1, 7, vec![16, 16]));
     }
 
     #[test]

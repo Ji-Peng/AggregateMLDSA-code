@@ -24,6 +24,7 @@ use crate::lookup::{prove_in, LookupError, LookupProof, LookupShape, Table};
 use crate::manifest::{CommitmentManifest, GroupRole, LOOKUP_CHALLENGES};
 use crate::opening::opening_claims;
 use crate::pcs::{PcsError, TableCommitter};
+use crate::pow::{KeccakPlan, PowPlan};
 use crate::public_data::PublicData;
 use crate::source_tables::{BridgeGroupTables, MainTables, SourceTableError, SourceTables};
 use crate::stage::{suffix, Points, StageError};
@@ -84,6 +85,13 @@ impl BridgeDerivation for FixedMatrices {
 
 /// The Keccak argument's two transcript contributions (spec Section 10, events 2 and 6).
 pub trait KeccakSide {
+    /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites,
+    /// `docs/soundness.md` Section 6.4), a function of the public batch geometry, needed
+    /// before event 0. The default (no tied parts) fits a side without Flock sub-proofs.
+    fn plan(&self, _segments: usize) -> KeccakPlan {
+        KeccakPlan::default()
+    }
+
     /// The `S` Flock commitments, before the bridge seed.
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>>;
     /// The `S` Flock proofs, after the challenger seeds `fs_sigma` and with the final
@@ -555,9 +563,11 @@ pub fn prove_with_tables(
     let committer = TableCommitter::new(manifest.clone())?;
     timings.setup = clock.lap();
 
-    // Events 0 to 3: instance, round-1 commitments, Flock commitments, bridge seed.
+    // Events 0 to 3: instance (with the proof-of-work plan's digest, docs/soundness.md 6.4),
+    // round-1 commitments, Flock commitments, bridge seed.
     let digest = public_records_binding(inputs.records);
-    let record = instance_record(manifest, &digest, flock);
+    let plan = PowPlan::new(manifest, flock, &keccak.plan(segments));
+    let record = instance_record(manifest, &digest, flock, &plan.digest());
     let mut transcript = Transcript::new(manifest, &record)?;
     // The round-1 commitments and the Flock commitments depend only on the witness, so they
     // run concurrently (both are memory bound and leave threads idle on their own); the
@@ -635,6 +645,7 @@ pub fn prove_with_tables(
     // Event 13: the opening.
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
+    let work = transcript.work_stream();
     let claims = opening_claims(manifest, &run.r3, &piop.stage3.claims, &run.pi_m, &piop.multiplicities)?;
     // The stage-3 terminal values are the multilinear extensions of the committed tables at
     // the group points (the kernel's terminal values; `tests/prove_verify.rs` checks them
@@ -667,6 +678,7 @@ pub fn prove_with_tables(
         stage1: piop.stage1,
         stage2: piop.stage2,
         stage3: piop.stage3,
+        work,
         opening,
     };
     timings.total = total.elapsed();

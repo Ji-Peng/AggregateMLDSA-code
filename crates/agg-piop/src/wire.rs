@@ -1,6 +1,8 @@
-//! Proof wire format (spec Section 10, wire version 1): header (version, flags, `N`), the
+//! Proof wire format (spec Section 10, wire version 2): header (version, flags, `N`), the
 //! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, the lookup (event 7) and
-//! the stages (events 9 to 12) in order, then the Akita opening. Variable-length items carry
+//! the stages (events 9 to 12) in order, the packed PIOP nonce stream
+//! (`docs/soundness.md` Section 6.2, its exact length a function of `N`), then the Akita
+//! opening. Variable-length items carry
 //! a `LE32` length; field elements use the canonical atom encoding of the transcript; the
 //! round and session counts follow from `N`.
 
@@ -14,7 +16,9 @@ use crate::manifest::{CommitmentManifest, RELATION_H, WIRE_VERSION};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::Stage3Proof;
-use crate::transcript::{decode_extensions, encode_extensions, FINAL_VECTOR_BYTES, STAGE_DEGREES};
+use crate::transcript::{
+    decode_extensions, encode_extensions, work_bytes, FINAL_VECTOR_BYTES, STAGE_DEGREES,
+};
 use crate::OpeningField as E;
 
 /// A malformed proof.
@@ -75,6 +79,8 @@ pub struct AggregateProof {
     pub stage2: Stage2Proof,
     /// Event 11.
     pub stage3: Stage3Proof,
+    /// The packed PIOP work nonces in plan order (`docs/soundness.md` Section 6.2).
+    pub work: Vec<u8>,
     /// Event 12: the Akita opening.
     pub opening: Vec<u8>,
 }
@@ -177,6 +183,7 @@ impl AggregateProof {
         w.elements(&self.stage2.claims.to_vec());
         w.rounds(&self.stage3.rounds);
         w.elements(&self.stage3.claims.0);
+        w.bytes(&self.work);
         w.framed(&self.opening);
         w.0
     }
@@ -241,6 +248,7 @@ impl AggregateProof {
             claims: Stage3Claims::from_slice(&r.elements(Stage3Claims::LEN)?)
                 .ok_or(WireError::Shape("stage 3 claims"))?,
         };
+        let work = r.take(work_bytes(&manifest))?.to_vec();
         let opening = r.framed()?;
         if r.at != bytes.len() {
             return Err(WireError::Trailing);
@@ -260,6 +268,7 @@ impl AggregateProof {
             stage1,
             stage2,
             stage3,
+            work,
             opening,
         })
     }
@@ -303,6 +312,8 @@ pub struct ProofSize {
     pub lookup: usize,
     /// Events 9 to 12: claims and round messages.
     pub piop: usize,
+    /// The packed PIOP work nonces.
+    pub work: usize,
     /// Event 12: the Akita opening.
     pub opening: usize,
 }
@@ -319,6 +330,7 @@ impl ProofSize {
             + self.keccak_proofs
             + self.lookup
             + self.piop
+            + self.work
             + self.opening
     }
 }
@@ -340,6 +352,7 @@ impl AggregateProof {
             keccak_proofs: framed(&self.flock_proofs),
             lookup: self.lookup_bytes(),
             piop: self.piop_bytes(),
+            work: self.work.len(),
             opening: 4 + self.opening.len(),
         }
     }
@@ -436,6 +449,7 @@ mod tests {
                 rounds: rounds_of(3, rng),
                 claims: Stage3Claims(point(rng, Stage3Claims::LEN)),
             },
+            work: (0..work_bytes(&manifest)).map(|i| i as u8).collect(),
             opening: vec![9; 100],
         }
     }
@@ -460,9 +474,14 @@ mod tests {
             let mut version = bytes.clone();
             version[0] = 9;
             assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(9)));
-            // The retired wire version 0 is refused.
-            version[0] = 0;
-            assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(0)));
+            // The retired wire versions 0 and 1 (no work nonces) are refused.
+            for old in [0, 1] {
+                version[0] = old;
+                assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(u16::from(old))));
+            }
+            // The nonce stream has the plan's exact length (docs/soundness.md Section 6.2).
+            assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
+            assert!(size.work >= 227);
             let mut flags = bytes.clone();
             flags[2] = 1;
             assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(1)));

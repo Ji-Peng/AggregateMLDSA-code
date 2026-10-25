@@ -43,6 +43,7 @@ use crate::lookup::{verify_in, LookupError};
 use crate::manifest::{Column, CommitmentManifest, GroupRole, GROUP_COUNT};
 use crate::opening::{opening_claims, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
+use crate::pow::{KeccakPlan, PowPlan};
 use crate::prover::{BridgeDerivation, PiopProof};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
@@ -98,6 +99,14 @@ pub trait KeccakVerifier {
     /// The Flock profile this side verifies (bound in event 0). [`verify`] refuses to run
     /// with a different requested profile.
     fn profile(&self) -> FlockProfile;
+
+    /// The Keccak side's part of the proof-of-work plan (`docs/soundness.md` Section 6.4)
+    /// from the batch geometry and the `S` event-2 items (the tied parts' geometry), before
+    /// event 0; `None` refuses the items. The default (no tied parts) fits a side without
+    /// Flock sub-proofs.
+    fn plan(&self, _geometry: &Geometry, _commitments: &[Vec<u8>]) -> Option<KeccakPlan> {
+        Some(KeccakPlan::default())
+    }
 
     /// Verify segment `sigma`: the sub-proof against its commitment, challenger seed,
     /// public inputs and final vector.
@@ -211,6 +220,8 @@ pub enum VerifyError {
     Commitment(GroupRole),
     /// Transcript replay fault.
     Transcript(TranscriptError),
+    /// The Keccak side refused the event-2 items while deriving the proof-of-work plan.
+    Plan,
     /// The Keccak side of a segment was rejected.
     Keccak(usize),
     /// The lookup into `T_16` was rejected (root identity, a session, a shape, or the
@@ -233,6 +244,7 @@ impl std::fmt::Display for VerifyError {
             Self::PublicKey(i) => write!(f, "public key {i} is malformed"),
             Self::Commitment(g) => write!(f, "{g:?}: commitment bytes are malformed"),
             Self::Transcript(e) => write!(f, "transcript: {e}"),
+            Self::Plan => write!(f, "keccak items refused while deriving the proof-of-work plan"),
             Self::Keccak(s) => write!(f, "keccak side of segment {s} rejected"),
             Self::Lookup(e) => write!(f, "lookup: {e}"),
             Self::Stage(e) => write!(f, "{e}"),
@@ -455,9 +467,14 @@ fn run(
     let digest = public_records_binding(&inputs);
     timings.public_data = clock.lap();
 
-    // Step 3: events 0 to 6.
-    let record = instance_record(&manifest, &digest, flock);
-    let mut transcript = Transcript::new(&manifest, &record)?;
+    // Step 3: events 0 to 6; event 0 binds the proof-of-work plan, derived from the public
+    // geometry and the tied parts named by the event-2 items (docs/soundness.md 6.4).
+    let keccak_plan = keccak
+        .plan(&geometry, &proof.flock_commitments)
+        .ok_or(VerifyError::Plan)?;
+    let pow_plan = PowPlan::new(&manifest, flock, &keccak_plan);
+    let record = instance_record(&manifest, &digest, flock, &pow_plan.digest());
+    let mut transcript = Transcript::replay(&manifest, &record, &proof.work)?;
     let mut commitments: Vec<Commitment<BaseField>> = Vec::with_capacity(GROUP_COUNT);
     for (role, bytes) in [
         (GroupRole::Main16, &proof.main16_commitment),
