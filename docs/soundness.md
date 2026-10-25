@@ -619,6 +619,24 @@ estimate); the claim is 128 bits per query, Aerie's notion.
 | Plan digest in event 0 | 0 (absorbed, not sent) | one SHA3-256 |
 | **Total added** | **560 B = 0.017 B/sig** (51.0 B/sig unchanged at one decimal) | well under 0.1 s (estimate) against 23.7 s |
 
+**Measured (local, direction only, 2026-10-25).** `agg bench --count 1024 --keys 16
+--warmup 1 --reps 5`, CLMUL build (`RUSTFLAGS=-C target-feature=+pclmulqdq`, separate target
+dir), `RAYON_NUM_THREADS=3`, `taskset -c 0,1,3-15`, shared machine (load average 5.2 to 5.8),
+the three binaries run back to back, `Slim`, one tied part:
+
+| Binary | Commit | Prove (median of 5) | Flock parts | Aggregate | PIOP nonce stream |
+| --- | --- | ---: | ---: | ---: | ---: |
+| before | `7e635a6` (code `be398d8`) | 4,035.1 ms | 2,189.2 ms | 522,076 B | none |
+| PIOP and tie work, no Flock fix | `a5f23da` | 4,134.4 ms | 2,203.9 ms | 522,435 B | 391 B |
+| all of step 2 (with K19) | `ed966a6` | 4,081.7 ms | 2,184.7 ms | 522,465 B | 391 B |
+
+Bytes: +391 B nonce stream and +4 B tie nonce, as Section 10 predicts (395 B at `2^10`); the
+Akita opening varies by a few bytes between runs (inline LEB128 nonces). Prover time: the
+differences (+1.2% and +2.5%) are inside the run-to-run spread on this shared machine (the
+minimum of each set: 3,898, 4,025, 4,000 ms), consistent with the estimated few milliseconds
+of hashing; the Flock fix adds no measurable time. Verify medians 442 / 434 / 425 ms
+(uncached keys).
+
 Span off at `2^15`: four tie nonces (572 B in all). The plan's earlier estimate (about
 500 nonces, about 1 KB, under 10 ms) holds for the PIOP; the tie site is 10 bits harder
 than the plan assumed because of the list factor.
