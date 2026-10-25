@@ -31,6 +31,7 @@
 //!    c. Else: commit f^{i+2}, open f^{i+1}, induce next basis, glue.
 
 use core::{mem::size_of, slice::from_raw_parts};
+use crate::challenger::CanonicalPow;
 use std::{
     collections::HashMap,
     env::var,
@@ -4563,7 +4564,7 @@ fn verify_and_sample_queries<Ch: Challenger>(
     count: usize,
     sched: &LevelSchedule,
 ) -> Option<Vec<usize>> {
-    let words = challenger.verify_pow_and_sample_f128_vec(nonce, bits, count)?;
+    let words = challenger.verify_pow_and_sample_f128_vec_canonical(nonce, bits, count)?;
     Some(queries_from_words(block_len, count, sched, &words))
 }
 

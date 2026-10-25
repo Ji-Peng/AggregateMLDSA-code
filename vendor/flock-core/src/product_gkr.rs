@@ -77,6 +77,7 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
+use crate::challenger::CanonicalPow;
 
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
@@ -1925,7 +1926,7 @@ fn verify_batched_core<C: Challenger>(
         if bits != 0 {
             let nonce = proof.grinding_nonces[nonce_idx];
             nonce_idx += 1;
-            ch.verify_pow_and_sample_f128(nonce, bits)
+            ch.verify_pow_and_sample_f128_canonical(nonce, bits)
                 .ok_or(ProductGkrError::InvalidGrinding)
         } else {
             Ok(ch.sample_f128())

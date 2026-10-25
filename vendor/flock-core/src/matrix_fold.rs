@@ -58,6 +58,7 @@
 //! round binds the LOW remaining variable.
 
 use std::collections::BTreeMap;
+use crate::challenger::CanonicalPow;
 
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut,
@@ -301,7 +302,7 @@ fn replay_rounds<Ch: Challenger>(
         ch.observe_f128(qinf);
         let r = if round_bits != 0 {
             let r = ch
-                .verify_pow_and_sample_f128(proof_nonces[*nonce_idx], round_bits)
+                .verify_pow_and_sample_f128_canonical(proof_nonces[*nonce_idx], round_bits)
                 .ok_or(FoldError::InvalidGrinding)?;
             *nonce_idx += 1;
             r
@@ -354,7 +355,7 @@ fn verify_grind_sample_vec_n<Ch: Challenger>(
 ) -> Result<Vec<F128>, FoldError> {
     if bits != 0 {
         let challenges = ch
-            .verify_pow_and_sample_f128_vec(nonces[*nonce_idx], bits, n)
+            .verify_pow_and_sample_f128_vec_canonical(nonces[*nonce_idx], bits, n)
             .ok_or(FoldError::InvalidGrinding)?;
         *nonce_idx += 1;
         Ok(challenges)

@@ -615,8 +615,10 @@ coordinate: `nonce = grind_pow(g_tie)` on the tie challenger (Flock's
 || 0^24` with `g_tie` leading zero bits, nonce absorbed as `LE64`), then the coordinates, then the
 tie digest of 4.5. The honest search MUST stop at `2^(g_tie + 7)` candidates (Flock's
 `grind_pow` searches upward from 0 and returns the smallest passing nonce; if that nonce is
-`>= 2^(g_tie + 7)`, the prover aborts). The nonce travels in the tied-part proof header as
-`LE32`; the verifier rejects a value `>= 2^(g_tie + 7)`.
+`>= 2^(g_tie + 7)`, the prover stops with `KeccakError::Work`, which mode A returns as
+`ProveError::Keccak`). The nonce travels in the tied-part proof header as `LE32`; the verifier
+rejects a value `>= 2^(g_tie + 7)`. Flock's own nonces get the same width rule in the
+vendored verifier (`vendor/flock-core/PATCH.md` Section 6, deviation K19).
 
 ### 6.4 The plan and its digest
 
@@ -649,12 +651,18 @@ The prover tries `v = 0, 1, ...` and takes the first passing value, at most `2^(
 candidates (deterministic proofs). A site fails with probability
 `(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.7`. The capped searches of a proof are the
 PIOP sites (at most 484), the tie sites (one per tied part: at most `2 S <= 8` with the
-two-part cap of 3.5) and Akita's capped transcript searches (459 at `2^15`); Flock's
-outer-site searches are uncapped and cannot fail. The completeness error is therefore at
-most `(484 + 8 + 459) 2^-184.7 < 2^-174.8`. A tie search that exhausts its allowance
-stops the tied-part prover with a panic (an assert in `TieChallenges::derive`, probability
-below `2^-184.7` per part), not with an error value. Expected work per site `2^g`
-predicate evaluations.
+two-part cap of 3.5), Akita's capped transcript searches (459 at `2^15`) and, since the
+vendored Flock verifier rejects nonces of `g + 7` or more bits (`vendor/flock-core/PATCH.md`
+Section 6), every Flock site with work: Flock's prover still searches upward without a cap,
+so a smallest passing nonce of `2^(g + 7)` or more yields a proof that the verifier refuses,
+with the same probability per site. Flock has fewer than `2^10` sites with work per tied part
+(estimate from the round counts: two instances, each a zerocheck, a lincheck, the opening's
+ring switch, claim batch and merged rounds, and at most six Ligerito levels with two batches
+and one query nonce each, at `m <= 45` variables), so at most `2^13` for eight parts. The
+completeness error is therefore at most `(484 + 8 + 459 + 2^13) 2^-184.7 < 2^-171.5`
+(the Flock count an estimate; without it `< 2^-174.8`). A tie search that exhausts its
+allowance returns `KeccakError::Work` (no panic). Expected work per site `2^g` predicate
+evaluations.
 
 ## 7. Theorem (128-bit knowledge soundness, classical ROM)
 
@@ -848,7 +856,8 @@ parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` 
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Old ledger vs
 round-by-round at `2^15`: `3,534/|K| = 2^-116.2` vs `1,434/|K| = 2^-117.5` (stages 300,
 `tau` 25, gammas 3, GKR 1,106). Honest failure per site `<= 2^-184.7`, per proof
-`<= 2^-174.8` (951 capped searches: PIOP, 8 tie, 459 Akita; Section 6.5).
+`<= 2^-174.8` (951 capped searches: PIOP, 8 tie, 459 Akita; with the Flock sites of the
+canonical nonce width `< 2^-171.5`, Section 6.5).
 
 Totals with the tie nonce (`N = N*`): `2^10` 395 B (0.386 B/sig), `2^13` 491 B
 (0.060 B/sig), `2^15` 560 B (0.017 B/sig) with the span, 572 B with span off.

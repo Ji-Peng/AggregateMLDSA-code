@@ -146,6 +146,9 @@ pub enum KeccakError {
     /// A tie between two instances failed (`crate::tied`): the named claim's value does
     /// not match the other instance's or the verifier's table.
     Tie(&'static str),
+    /// The prover's proof-of-work search exhausted its allowance of `2^(g + 7)` candidates
+    /// (probability below `2^-184.7` per site, docs/soundness.md 6.5).
+    Work(&'static str),
 }
 
 impl fmt::Display for KeccakError {
@@ -155,6 +158,7 @@ impl fmt::Display for KeccakError {
             Self::Statement(m) => write!(f, "bad statement: {m}"),
             Self::Flock(e) => write!(f, "flock verifier rejected: {e:?}"),
             Self::Tie(m) => write!(f, "tie claim mismatch: {m}"),
+            Self::Work(m) => write!(f, "proof-of-work allowance exhausted: {m}"),
         }
     }
 }

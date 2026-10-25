@@ -130,8 +130,8 @@ impl KeccakSide for PublicBits {
         _matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         _final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>> {
-        vec![Vec::new(); seeds.len()]
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
+        Ok(vec![Vec::new(); seeds.len()])
     }
 }
 

@@ -842,6 +842,13 @@ upstream's do not verify here (mode A rejects the old format anyway: tied-part p
 4, K20). The finding should be raised with the Flock authors, who may have an argument for
 the outer sites that their audit document does not state; if so this patch can be dropped.
 
+Canonical nonce width (2026-10-25, `vendor/flock-core/PATCH.md` Section 6): the vendored
+verifier also rejects a Flock work nonce of `g + 7` or more bits at a site of `g > 0` bits (and
+a nonzero nonce at a site without work), as Akita and Aerie do and as our PIOP and tie nonces
+do (`docs/soundness.md` 6.1 to 6.3). Upstream accepts any passing `u64`. Honest proofs are
+unchanged except when Flock's smallest passing nonce is `2^(g + 7)` or more (probability at
+most `2^-184.7` per site), which is now a completeness failure (`docs/soundness.md` 6.5).
+
 Known malleability: Flock's `verify_pow` (`flock-transcript` `83f963e`, `challenger.rs`)
 accepts any `u64` nonce that passes the predicate, with no `g + 7` width bound, so the Flock
 nonces inside a proof are not canonical (unlike the PIOP stream and the tie nonce, which are
@@ -875,6 +882,12 @@ fine, `L^3 theta = 2^-127.7` (`Slim`) is not. The prover clamps `part_log2` into
 range, and the verifier refuses a smaller `d_part` while deriving the plan of event 0
 (`VerifyError::Plan`). Before this rule `agg aggregate --part-log2 3` on 48 records built six
 parts in one segment and verified.
+
+Exhausted tie search (2026-10-25): if Flock's smallest passing tie nonce is `2^(g + 7)` or more
+(probability below `2^-184.7` per part), `TieChallenges::derive` returns
+`KeccakError::Work` instead of panicking; `TiedPart::{tie, prove, prove_with_blocks,
+prove_with_final_vectors}` return it and mode A's Keccak side maps it to
+`ProveError::Keccak` (`agg_piop::prover::KeccakSide::prove` now returns a `Result`).
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

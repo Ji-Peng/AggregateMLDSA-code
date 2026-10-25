@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Five changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Six changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -135,8 +135,38 @@ rounds `bits(2 list)` and batch `bits((K - 1) list)`. `per_challenge_128()` is
 schedules for `Fast`, `Slim` and `Slim8` (`Secure`, unique decoding, and the `*100` profiles
 are unchanged). The AG-basis skip points keep upstream's bits (not used by agg-mldsa). The
 proof bytes do not change (nonces are 8-byte words); the transcript validity rule does, so
-proofs made with this copy do not verify with upstream and vice versa. This is the one
-verifier-visible protocol change of the vendored copy; it should be dropped if the Flock
-authors give an argument for the outer sites without the list factor.
+proofs made with this copy do not verify with upstream and vice versa. Together with
+Section 6 this is the verifier-visible protocol change of the vendored copy; it should be
+dropped if the Flock authors give an argument for the outer sites without the list factor.
 
 To regenerate: re-apply the listed schedules of this section in the files named above.
+
+## 6. Verifier-visible: canonical nonce width (agg-mldsa deviation K19, `docs/soundness.md` 6.5)
+
+`src/challenger.rs` (`POW_NONCE_SLACK_BITS`, `pow_nonce_is_canonical`, the extension trait
+`CanonicalPow`) and every verifier call site of a proof-of-work check (39 sites in
+`zerocheck.rs`, `zerocheck/ag_skip.rs`, `lincheck.rs`, `lincheck/union.rs`, `pcs.rs`,
+`pcs/ring_switch.rs`, `pcs/jagged.rs`, `pcs/ligerito.rs`, `pcs/ligerito/extension.rs`,
+`matrix_fold.rs`, `product_gkr.rs` and `element_r1cs/{zerocheck, lincheck, union}.rs`).
+
+Why: upstream's verifier accepts any `u64` nonce that passes the predicate, so the nonce of a
+`g`-bit site has no fixed width and a proof has many valid nonce variants. Akita and Aerie fix
+the width at `g + 7` bits (Akita `GRINDING_NONCE_SLACK_BITS`, Aerie C.1) and their verifiers
+reject anything else; our PIOP and tie nonces follow them (`docs/soundness.md` 6.1 to 6.3).
+
+The change: the verifier calls `verify_pow_canonical`, `verify_pow_and_sample_f128_canonical`
+and `verify_pow_and_sample_f128_vec_canonical`, which run the challenger's own check
+(absorbing the nonce exactly as before, so the transcript is unchanged) and additionally
+reject a nonce of `g + 7` or more bits (`g > 0`) or a nonzero nonce at a site without work.
+The prover is unchanged: Flock's `grind_pow` returns the smallest passing nonce, which is at
+least `2^(g + 7)` with probability `(1 - 2^-g)^(2^(g + 7)) <= e^-128 = 2^-184.7` per site; such
+a proof is refused (a completeness event, counted in `docs/soundness.md` 6.5). Upstream's own
+tests that search for a failing nonce with `verify_pow` (`pcs/ring_switch.rs`,
+`pcs/jagged.rs`) and the `RoundGrindProver` forwarding impl (`zerocheck/ag_skip.rs`) keep the
+plain check. Unit tests: `challenger::tests::{canonical_width_is_bits_plus_seven,
+wide_passing_nonces_are_rejected}`.
+
+To regenerate: copy the additions of `src/challenger.rs`, then in every other file replace
+`.verify_pow(`, `.verify_pow_and_sample_f128(` and `.verify_pow_and_sample_f128_vec(` by their
+`_canonical` forms outside the three places named above and add
+`use crate::challenger::CanonicalPow;`.

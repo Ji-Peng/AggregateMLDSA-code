@@ -30,6 +30,7 @@
 //!   leaves as a packed-direct claim with no lincheck term.
 
 use std::mem::{replace, take};
+use crate::challenger::CanonicalPow;
 
 use rayon::{
     current_num_threads,
@@ -492,7 +493,7 @@ pub fn verify_with_label_and_grinding<C: Challenger>(
     let mut nonce_idx = 0;
     let tau = if let Some(bits) = grinding.initial_bits(m_words) {
         let tau = ch
-            .verify_pow_and_sample_f128_vec(proof.grinding_nonces[nonce_idx], bits, m_words)
+            .verify_pow_and_sample_f128_vec_canonical(proof.grinding_nonces[nonce_idx], bits, m_words)
             .ok_or(ElementZerocheckError::InvalidGrindingNonce { which: "initial" })?;
         nonce_idx += 1;
         tau
@@ -515,7 +516,7 @@ pub fn verify_with_label_and_grinding<C: Challenger>(
         ch.observe_f128(g_inf);
         let rho = if let Some(bits) = grinding.round_bits() {
             let rho = ch
-                .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+                .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
                 .ok_or(ElementZerocheckError::InvalidGrindingNonce { which: "round" })?;
             nonce_idx += 1;
             rho

@@ -20,6 +20,7 @@ use std::{
     mem::swap,
     sync::atomic::{AtomicBool, Ordering},
 };
+use crate::challenger::CanonicalPow;
 
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
@@ -2082,7 +2083,7 @@ pub fn verify_with_grinding<C: Challenger>(
         Some(bits) => {
             let nonce = nonces.next().ok_or(AgVerifyError::InvalidGrindingNonce)?;
             challenger
-                .verify_pow_and_sample_f128_vec(nonce, bits, m - K_SKIP - N_INNER)
+                .verify_pow_and_sample_f128_vec_canonical(nonce, bits, m - K_SKIP - N_INNER)
                 .ok_or(AgVerifyError::InvalidGrindingNonce)?
         }
         None => challenger.sample_f128_vec(m - K_SKIP - N_INNER),
@@ -2118,7 +2119,7 @@ pub fn verify_with_grinding<C: Challenger>(
             Some(bits) => {
                 let nonce = nonces.next().ok_or(AgVerifyError::InvalidGrindingNonce)?;
                 challenger
-                    .verify_pow_and_sample_f128(nonce, bits)
+                    .verify_pow_and_sample_f128_canonical(nonce, bits)
                     .ok_or(AgVerifyError::InvalidGrindingNonce)?
             }
             None => challenger.sample_f128(),
