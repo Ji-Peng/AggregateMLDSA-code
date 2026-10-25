@@ -36,6 +36,7 @@
 
 mod coded;
 mod field;
+mod layer;
 mod plan;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,8 @@ use jolt_field::{Field, Fold, One, Ring, Unreduced, Zero};
 use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
+pub(crate) use self::field::fmi;
+pub use self::layer::{IntPairGroup, LayerGroup, LayerTree};
 use self::coded::{code_column, masses, Column, ItemWeights, SegmentShape};
 use self::field::{fm, fold, lift, mad, plain_sum, split_sum, Acc, MIN_PARALLEL_ITEMS};
 use self::plan::{Pieces, Plan};

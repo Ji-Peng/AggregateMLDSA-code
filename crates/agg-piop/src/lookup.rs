@@ -50,7 +50,10 @@ use rayon::prelude::*;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 
-use crate::kernel::{evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, Source, Term};
+use crate::kernel::{
+    evaluate_compressed, expected_terminal, fmi, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
+    Term,
+};
 use crate::transcript::encode_extensions;
 use crate::{BaseField, OpeningField as E};
 
@@ -769,6 +772,190 @@ fn table_bottom(m: &[i32], x: E) -> Layer {
     })
 }
 
+/// The largest spread `max - min` of a stack's stored values for which it runs the integer
+/// path of session `depth - 1` ([`SymLanes`]): recentered to `|v - c| <= 2^15`, the lanes
+/// `|a + b| <= 2^16` and `|a b| <= 2^30` fit `i32` and `e_4 <= 2^60` fits `i64`.
+const SYM_SPREAD: i64 = 1 << 16;
+
+/// Session `depth - 1` of a stack from its leaf integers (prover only).
+///
+/// Node `w` of layer `depth - 1` has the leaves `a = v(w) - c`, `b = v(w + 2^(depth-1)) - c`
+/// (recentered by the stack's centre `c`), so with `X' = X - shift - c`, `p = 2 X' - S` and
+/// `q = X'^2 - X' S + M` for `S = a + b`, `M = a b`. The session's lanes `P_c, Q_c` (`c`
+/// the top bit of the node) are affine in the integer lanes `S_c, M_c`, which are shared by
+/// every challenge, so one group of four `Ints` lanes replaces the four field lanes per
+/// challenge, and the layer `depth - 1` is never stored (the trees start at layer
+/// `depth - 2`, built from four leaves per node).
+struct SymLanes {
+    /// The centre `c` subtracted from every stored value.
+    center: i32,
+    /// `S_0, S_1, M_0, M_1`, each of `2^(depth - 2)` cells.
+    lanes: [Vec<i32>; 4],
+}
+
+impl SymLanes {
+    /// `None` when the stack is shallower than 3 or its values spread over more than
+    /// [`SYM_SPREAD`] (only a dishonest witness; it then takes the stored-layer path).
+    fn of(stacked: &[i32]) -> Option<Self> {
+        let depth = stacked.len().trailing_zeros() as usize;
+        if depth < 3 {
+            return None;
+        }
+        let (min, max) = stacked
+            .par_iter()
+            .fold(|| (i32::MAX, i32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+            .reduce(|| (i32::MAX, i32::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+        if i64::from(max) - i64::from(min) > SYM_SPREAD {
+            return None;
+        }
+        let center = i32::try_from((i64::from(min) + i64::from(max)) / 2).expect("between two i32");
+        let quarter = stacked.len() / 4;
+        let lane = |c: usize, product: bool| -> Vec<i32> {
+            let cell = |y: usize| {
+                let a = stacked[y + c * quarter] - center;
+                let b = stacked[y + c * quarter + 2 * quarter] - center;
+                if product { a * b } else { a + b }
+            };
+            if quarter >= PARALLEL_NODES {
+                (0..quarter).into_par_iter().map(cell).collect()
+            } else {
+                (0..quarter).map(cell).collect()
+            }
+        };
+        Some(Self {
+            center,
+            lanes: [lane(0, false), lane(1, false), lane(0, true), lane(1, true)],
+        })
+    }
+
+    /// The coefficients `[c, c_s, c_m, c_k, c_mm]` of the group of four lanes (`S_0 = 0,
+    /// S_1 = 1, M_0 = 2, M_1 = 3`, `kernel::IntPairGroup`) for
+    /// the trees `(X', gamma_p, gamma_q)` of the stack: `sum_X gamma_p (P_0 Q_1 + P_1 Q_0) +
+    /// gamma_q Q_0 Q_1` with `P_0 Q_1 + P_1 Q_0 = 4X^3 - 3X^2 (S_0 + S_1) + 2X (M_0 + M_1) +
+    /// 2X S_0 S_1 - (S_0 M_1 + S_1 M_0)` and `Q_0 Q_1 = X^4 - X^3 (S_0 + S_1) + X^2 (M_0 +
+    /// M_1) + X^2 S_0 S_1 - X (S_0 M_1 + S_1 M_0) + M_0 M_1`.
+    fn coefficients(trees: &[(E, E, E)]) -> [E; 5] {
+        let (mut constant, mut sum_s, mut sum_m, mut cross, mut mm) =
+            (E::zero(), E::zero(), E::zero(), E::zero(), E::zero());
+        for &(x, gp, gq) in trees {
+            let x2 = x * x;
+            let x3 = x2 * x;
+            constant += (gp + gp + gp + gp) * x3 + gq * x3 * x;
+            sum_s -= (gp + gp + gp) * x2 + gq * x3;
+            sum_m += (gp + gp) * x + gq * x2;
+            cross -= gp + gq * x;
+            mm += gq;
+        }
+        [constant, sum_s, sum_m, cross, mm]
+    }
+
+    /// [`Self::coefficients`] as kernel instances (the generic fallback).
+    fn instances([constant, sum_s, sum_m, cross, mm]: [E; 5]) -> Vec<GroupInstance> {
+        vec![
+            GroupInstance {
+                gamma: constant,
+                terms: vec![affine(&[], 1)],
+            },
+            GroupInstance {
+                gamma: sum_s,
+                terms: vec![affine(&[0, 1], 0)],
+            },
+            // The coefficient of M_0 + M_1 and of S_0 S_1 is the same.
+            GroupInstance {
+                gamma: sum_m,
+                terms: vec![affine(&[2, 3], 0), Term::Product(vec![0, 1])],
+            },
+            GroupInstance {
+                gamma: cross,
+                terms: vec![Term::Product(vec![0, 3]), Term::Product(vec![1, 2])],
+            },
+            GroupInstance {
+                gamma: mm,
+                terms: vec![Term::Product(vec![2, 3])],
+            },
+        ]
+    }
+
+    /// `P_0, P_1, Q_0, Q_1` at a point from `S_0, S_1, M_0, M_1` there.
+    fn terminal(values: &[E], x: E) -> [E; 4] {
+        let (s0, s1, m0, m1) = (values[0], values[1], values[2], values[3]);
+        let two_x = x + x;
+        [two_x - s0, two_x - s1, x * (x - s0) + m0, x * (x - s1) + m1]
+    }
+}
+
+/// Layer `depth - 2` of a stack for every challenge in one pass over the leaves: node `z`
+/// has the leaves `v(z + j 2^(depth-2)) - c`, `j = 0..4` (`c` the centre of [`SymLanes`]);
+/// with their elementary symmetric polynomials `e_1 .. e_4` (exact in `i64` within
+/// [`SYM_SPREAD`]), `q = X'^4 - e_1 X'^3 + e_2 X'^2 - e_3 X' + e_4` and `p = dq/dX' =
+/// 4 X'^3 - 3 e_1 X'^2 + 2 e_2 X' - e_3` (`X' = X - shift - c`), the same values as two
+/// levels of [`stack_bottom`] and [`parent`].
+fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
+    let quarter = stacked.len() / 4;
+    let powers: Vec<[E; 4]> = xs
+        .iter()
+        .map(|&x| {
+            let x2 = x * x;
+            let x3 = x2 * x;
+            [x, x2, x3, x3 * x]
+        })
+        .collect();
+    let node = |z: usize, out: &mut [(E, E)]| {
+        let v = |j: usize| i64::from(stacked[z + j * quarter]) - i64::from(center);
+        // Children A = (v0, v2), B = (v1, v3) of layer depth - 1.
+        let (sa, ma) = (v(0) + v(2), v(0) * v(2));
+        let (sb, mb) = (v(1) + v(3), v(1) * v(3));
+        let e1 = sa + sb;
+        let e2 = ma + mb + sa * sb;
+        let e3 = sa * mb + sb * ma;
+        let e4 = ma * mb;
+        for (slot, &[x, x2, x3, x4]) in out.iter_mut().zip(&powers) {
+            let q = x4 - fmi(x3, e1) + fmi(x2, e2) - fmi(x, e3) + E::from_i64(e4);
+            let p = (x3 + x3 + x3 + x3) - fmi(x2, 3 * e1) + fmi(x, 2 * e2) - E::from_i64(e3);
+            *slot = (p, q);
+        }
+    };
+    let challenges = xs.len();
+    let zeros = || -> Vec<E> {
+        if quarter >= PARALLEL_NODES {
+            rayon::iter::repeat_n(E::zero(), quarter).collect()
+        } else {
+            vec![E::zero(); quarter]
+        }
+    };
+    let mut layers: Vec<Layer> = (0..challenges).map(|_| Layer { p: zeros(), q: zeros() }).collect();
+    // Blocks of nodes: every output lane split at the same boundaries.
+    const BLOCK: usize = 1 << 10;
+    let mut blocks: Vec<Vec<&mut [E]>> = Vec::new();
+    for layer in &mut layers {
+        for lane in [&mut layer.p, &mut layer.q] {
+            for (b, chunk) in lane.chunks_mut(BLOCK).enumerate() {
+                if blocks.len() <= b {
+                    blocks.push(Vec::with_capacity(2 * challenges));
+                }
+                blocks[b].push(chunk);
+            }
+        }
+    }
+    let fill = |(b, mut lanes): (usize, Vec<&mut [E]>)| {
+        let mut values = vec![(E::zero(), E::zero()); challenges];
+        let count = lanes[0].len();
+        for i in 0..count {
+            node(b * BLOCK + i, &mut values);
+            for (pair, &(p, q)) in lanes.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
+                pair[0][i] = p;
+                pair[1][i] = q;
+            }
+        }
+    };
+    if quarter >= PARALLEL_NODES {
+        blocks.into_par_iter().enumerate().for_each(fill);
+    } else {
+        blocks.into_iter().enumerate().for_each(fill);
+    }
+    layers
+}
+
 /// The stored layers `0 .. depth - 1` of one tree (the leaves are read from the columns).
 #[derive(Debug, Default)]
 struct FractionTree {
@@ -781,6 +968,18 @@ impl FractionTree {
         let mut layers = vec![Layer::default(); depth];
         layers[depth - 1] = bottom;
         for k in (0..depth - 1).rev() {
+            layers[k] = parent(&layers[k + 1]);
+        }
+        Self { layers }
+    }
+
+    /// A tree of `depth` layers whose stored bottom is `bottom` (layer `log2 |bottom|`,
+    /// above the leaves by more than one layer): the layers below it are not stored.
+    fn from_upper(bottom: Layer, depth: usize) -> Self {
+        let top = bottom.len().trailing_zeros() as usize;
+        let mut layers = vec![Layer::default(); depth];
+        layers[top] = bottom;
+        for k in (0..top).rev() {
             layers[k] = parent(&layers[k + 1]);
         }
         Self { layers }
@@ -977,6 +1176,83 @@ fn session_plan(shape: &LookupShape, s: usize, xs: &[E], active: &[usize], gamma
     }
 }
 
+/// The layer instances of the `i`-th tree of a stored-layer group (lanes `4 i ..`).
+fn layer_instances(i: usize, (gp, gq): (E, E)) -> [GroupInstance; 2] {
+    let (p0, p1, q0, q1) = (4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3);
+    [
+        GroupInstance {
+            gamma: gp,
+            terms: vec![Term::Product(vec![p0, q1]), Term::Product(vec![p1, q0])],
+        },
+        GroupInstance {
+            gamma: gq,
+            terms: vec![Term::Product(vec![q0, q1])],
+        },
+    ]
+}
+
+/// What the prover's group of a session yields at its terminal (prover only: the
+/// verifier's groups are those of [`session_plan`]; the round messages are sums over
+/// groups, so any split of the instances gives the same messages).
+enum Role {
+    /// `P_0, P_1, Q_0, Q_1` of these trees, in order.
+    Trees(Vec<usize>),
+    /// `S_0, S_1, M_0, M_1` of a stack shared by these trees `(id, X')`.
+    Sym(Vec<(usize, E)>),
+    /// The two leaf-lane values of an ending stack or table.
+    Leaves,
+}
+
+/// A prover group: the generic kernel or a dedicated path (`kernel::layer`).
+#[allow(clippy::large_enum_variant)]
+enum SessionGroup<'a> {
+    Generic(Group<'a>),
+    Layer(LayerGroup<'a>),
+    Pair(IntPairGroup<'a>),
+}
+
+impl SessionGroup<'_> {
+    fn round_message(&mut self, round: usize) -> Vec<E> {
+        match self {
+            Self::Generic(g) => g.round_message(round),
+            Self::Layer(g) => g.round_message(round),
+            Self::Pair(g) => g.round_message(round),
+        }
+    }
+
+    fn bind(&mut self, round: usize, challenge: E) {
+        match self {
+            Self::Generic(g) => g.bind(round, challenge),
+            Self::Layer(g) => g.bind(round, challenge),
+            Self::Pair(g) => g.bind(round, challenge),
+        }
+    }
+
+    fn claim(&self) -> E {
+        match self {
+            Self::Generic(g) => g.claim(),
+            Self::Layer(g) => g.claim(),
+            Self::Pair(g) => g.claim(),
+        }
+    }
+
+    fn consistent(&self) -> bool {
+        match self {
+            Self::Generic(_) => true,
+            Self::Layer(g) => g.terminal_consistent(),
+            Self::Pair(g) => g.terminal_consistent(),
+        }
+    }
+
+    fn terminal_values(&self) -> Vec<E> {
+        match self {
+            Self::Generic(g) => g.terminal_values(),
+            Self::Layer(g) => g.terminal_values(),
+            Self::Pair(g) => g.terminal_values(),
+        }
+    }
+}
+
 fn line(at_zero: E, at_one: E, mu: E) -> E {
     at_zero + mu * (at_one - at_zero)
 }
@@ -1078,7 +1354,7 @@ pub fn prove(
     binding: &[u8],
 ) -> Result<LookupOutput, LookupError> {
     let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
-    prove_with(stacks, tables, multiplicities, challenges, &mut fs, true)
+    prove_with(stacks, tables, multiplicities, challenges, &mut fs, true, true)
 }
 
 /// [`prove`] inside a caller's transcript (the PIOP transcript of the integrated
@@ -1096,7 +1372,7 @@ pub fn prove_in(
     transcript: &mut impl LookupTranscript,
     check: bool,
 ) -> Result<LookupOutput, LookupError> {
-    prove_with(stacks, tables, multiplicities, challenges, transcript, check)
+    prove_with(stacks, tables, multiplicities, challenges, transcript, check, true)
 }
 
 /// [`prove`] without the prover's self-checks, so tests can hand a dishonest witness to
@@ -1110,7 +1386,7 @@ pub fn prove_unchecked(
     binding: &[u8],
 ) -> Result<LookupOutput, LookupError> {
     let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
-    prove_with(stacks, tables, multiplicities, challenges, &mut fs, false)
+    prove_with(stacks, tables, multiplicities, challenges, &mut fs, false, true)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1121,6 +1397,7 @@ fn prove_with(
     challenges: usize,
     fs: &mut impl LookupTranscript,
     check: bool,
+    dedicated: bool,
 ) -> Result<LookupOutput, LookupError> {
     let start = Instant::now();
     let shape = LookupShape::of(stacks, tables, challenges);
@@ -1134,19 +1411,41 @@ fn prove_with(
     let xs = fs.challenges(LookupSite::X, challenges)?;
 
     let build = Instant::now();
+    // The integer path of session `depth - 1` per stack (prover only, `SymLanes`).
+    let sym: Vec<Option<SymLanes>> = if dedicated {
+        stacks.iter().map(|stack| SymLanes::of(&stack.stacked)).collect()
+    } else {
+        stacks.iter().map(|_| None).collect()
+    };
+    let shifted = |j: usize, x: usize| xs[x] - E::from_i64(i64::from(stacks[j].shape.shift));
+    // `X - shift - c` for an integer-path stack of centre `c`.
+    let centred = |j: usize, x: usize| {
+        shifted(j, x) - E::from_i64(i64::from(sym[j].as_ref().map_or(0, |lanes| lanes.center)))
+    };
+    // Layer `depth - 2` of every challenge in one pass over the leaves of a stack.
+    let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
+        .map(|j| {
+            if let Some(lanes) = &sym[j] {
+                let xs_j: Vec<E> = (0..challenges).map(|x| centred(j, x)).collect();
+                stack_upper_bottoms(&stacks[j].stacked, lanes.center, &xs_j)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
     let mut trees: Vec<FractionTree> = (0..shape.tree_count())
         .map(|id| {
             let (x, kind) = shape.tree(id);
-            let bottom = match kind {
-                TreeKind::Stack(j) => stack_bottom(
-                    &stacks[j].stacked,
-                    xs[x] - E::from_i64(i64::from(stacks[j].shape.shift)),
-                ),
-                TreeKind::Table(t) => table_bottom(&multiplicities[t], xs[x]),
-            };
-            FractionTree::from_bottom(bottom)
+            match kind {
+                TreeKind::Stack(j) if sym[j].is_some() => {
+                    FractionTree::from_upper(std::mem::take(&mut uppers[j][x]), stacks[j].shape.depth())
+                }
+                TreeKind::Stack(j) => FractionTree::from_bottom(stack_bottom(&stacks[j].stacked, shifted(j, x))),
+                TreeKind::Table(t) => FractionTree::from_bottom(table_bottom(&multiplicities[t], xs[x])),
+            }
         })
         .collect();
+    drop(uppers);
     let mut stats = ProveStats {
         trees: build.elapsed().as_secs_f64(),
         layer_bytes: trees.iter().map(FractionTree::bytes).sum(),
@@ -1180,43 +1479,132 @@ fn prove_with(
         }
         let plan = session_plan(&shape, s, &xs, &active, &gammas);
         let half = 1_usize << (s - 1);
-        let mut groups = Vec::with_capacity(plan.groups.len());
+        let gamma_of = |id: usize| {
+            let i = active.binary_search(&id).expect("an active tree");
+            (gammas[2 * i], gammas[2 * i + 1])
+        };
+        let mut groups: Vec<(Role, SessionGroup<'_>)> = Vec::with_capacity(plan.groups.len());
         for (kind, instances) in &plan.groups {
-            let lanes: Vec<Lane<'_>> = match kind {
-                GroupKind::Layer(ids) => ids
-                    .iter()
-                    .flat_map(|&id| {
-                        let layer = &trees[id].layers[s];
-                        let (p0, p1) = layer.p.split_at(half);
-                        let (q0, q1) = layer.q.split_at(half);
-                        [p0, p1, q0, q1].map(|cells| Lane::Source(Source::Field(cells)))
-                    })
-                    .collect(),
+            match kind {
+                GroupKind::Layer(ids) => {
+                    // Trees whose layer `s` is the one above their leaves run on the stack's
+                    // integer lanes; the others on their stored layer.
+                    let mut stored = Vec::new();
+                    let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
+                    for &id in ids {
+                        let (x, tree_kind) = shape.tree(id);
+                        match tree_kind {
+                            TreeKind::Stack(j) if sym[j].is_some() && stacks[j].shape.depth() == s + 1 => {
+                                let (gp, gq) = gamma_of(id);
+                                by_stack[j].push((id, centred(j, x), gp, gq));
+                            }
+                            _ => stored.push(id),
+                        }
+                    }
+                    for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+                        let sym_lanes = &sym[j].as_ref().expect("an integer-path stack").lanes;
+                        let trees_x: Vec<(E, E, E)> = list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
+                        let coefficients = SymLanes::coefficients(&trees_x);
+                        let [s0, s1, m0, m1] = sym_lanes.each_ref().map(Vec::as_slice);
+                        let group = match IntPairGroup::new([s0, s1], Some([m0, m1]), coefficients, &point) {
+                            Some(group) => SessionGroup::Pair(group),
+                            None => {
+                                let lanes = sym_lanes.iter().map(|lane| Lane::Source(Source::Ints(lane))).collect();
+                                SessionGroup::Generic(
+                                    Group::new(lanes, SymLanes::instances(coefficients), Some(&point), s - 1, DEGREE)
+                                        .map_err(LookupError::Kernel)?,
+                                )
+                            }
+                        };
+                        groups.push((Role::Sym(list.iter().map(|&(id, x, _, _)| (id, x)).collect()), group));
+                    }
+                    if stored.is_empty() {
+                        continue;
+                    }
+                    let dedicated_group = if dedicated {
+                        let layer_trees = stored
+                            .iter()
+                            .map(|&id| {
+                                let layer = &trees[id].layers[s];
+                                let (gamma_p, gamma_q) = gamma_of(id);
+                                LayerTree {
+                                    p: &layer.p,
+                                    q: &layer.q,
+                                    gamma_p,
+                                    gamma_q,
+                                }
+                            })
+                            .collect();
+                        LayerGroup::new(layer_trees, &point)
+                    } else {
+                        None
+                    };
+                    let group = match dedicated_group {
+                        Some(group) => SessionGroup::Layer(group),
+                        None => {
+                            let lanes: Vec<Lane<'_>> = stored
+                                .iter()
+                                .flat_map(|&id| {
+                                    let layer = &trees[id].layers[s];
+                                    let (p0, p1) = layer.p.split_at(half);
+                                    let (q0, q1) = layer.q.split_at(half);
+                                    [p0, p1, q0, q1].map(|cells| Lane::Source(Source::Field(cells)))
+                                })
+                                .collect();
+                            let instances = stored
+                                .iter()
+                                .enumerate()
+                                .flat_map(|(i, &id)| layer_instances(i, gamma_of(id)))
+                                .collect();
+                            SessionGroup::Generic(
+                                Group::new(lanes, instances, Some(&point), s - 1, DEGREE)
+                                    .map_err(LookupError::Kernel)?,
+                            )
+                        }
+                    };
+                    groups.push((Role::Trees(stored), group));
+                }
                 GroupKind::Stack(j) => {
                     let (v0, v1) = stacks[*j].stacked.split_at(half);
-                    vec![Lane::Source(Source::Ints(v0)), Lane::Source(Source::Ints(v1))]
+                    // The plan's instances: constant, linear on v_0 + v_1, bilinear v_0 v_1.
+                    let pair = if dedicated && instances.len() == 3 {
+                        let c = [instances[0].gamma, instances[1].gamma, instances[2].gamma, E::zero(), E::zero()];
+                        IntPairGroup::new([v0, v1], None, c, &point)
+                    } else {
+                        None
+                    };
+                    let group = match pair {
+                        Some(group) => SessionGroup::Pair(group),
+                        None => {
+                            let lanes = vec![Lane::Source(Source::Ints(v0)), Lane::Source(Source::Ints(v1))];
+                            SessionGroup::Generic(
+                                Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
+                                    .map_err(LookupError::Kernel)?,
+                            )
+                        }
+                    };
+                    groups.push((Role::Leaves, group));
                 }
                 GroupKind::Table(t) => {
                     let (m0, m1) = multiplicities[*t].split_at(half);
                     let (t0, t1) = &index_halves[*t];
-                    vec![
+                    let lanes = vec![
                         Lane::Source(Source::Ints(m0)),
                         Lane::Source(Source::Ints(m1)),
                         Lane::Source(Source::Ints(t0)),
                         Lane::Source(Source::Ints(t1)),
-                    ]
+                    ];
+                    let group = Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
+                        .map_err(LookupError::Kernel)?;
+                    groups.push((Role::Leaves, SessionGroup::Generic(group)));
                 }
-            };
-            groups.push(
-                Group::new(lanes, instances.clone(), Some(&point), s - 1, DEGREE)
-                    .map_err(LookupError::Kernel)?,
-            );
+            }
         }
         let mut rounds = Vec::with_capacity(s - 1);
         let mut rho = Vec::with_capacity(s - 1);
         for round in 0..s - 1 {
             let mut message = vec![E::zero(); DEGREE];
-            for group in &mut groups {
+            for (_, group) in &mut groups {
                 for (slot, value) in message.iter_mut().zip(group.round_message(round)) {
                     *slot += value;
                 }
@@ -1224,27 +1612,42 @@ fn prove_with(
             fs.absorb(LookupSite::Round(s, round), &message)?;
             let challenge = one(fs, LookupSite::RoundChallenge(s, round))?;
             claim = evaluate_compressed(&message, claim, challenge);
-            for group in &mut groups {
+            for (_, group) in &mut groups {
                 group.bind(round, challenge);
             }
             rounds.push(message);
             rho.push(challenge);
         }
-        if check && groups.iter().fold(E::zero(), |acc, g| acc + g.claim()) != claim {
+        if check
+            && (groups.iter().fold(E::zero(), |acc, (_, g)| acc + g.claim()) != claim
+                || groups.iter().any(|(_, g)| !g.consistent()))
+        {
             return Err(LookupError::Terminal(s));
         }
-        let mut terminals = Vec::with_capacity(plan.continuing.len());
+        let mut by_tree: Vec<Option<[E; 4]>> = vec![None; shape.tree_count()];
         let mut leaves = Vec::new();
-        for ((kind, _), group) in plan.groups.iter().zip(&groups) {
+        for (role, group) in &groups {
             let values = group.terminal_values();
-            match kind {
-                GroupKind::Layer(_) => {
-                    terminals.extend(values.as_chunks::<4>().0.iter().copied());
+            match role {
+                Role::Trees(ids) => {
+                    for (&id, chunk) in ids.iter().zip(values.as_chunks::<4>().0) {
+                        by_tree[id] = Some(*chunk);
+                    }
                 }
-                GroupKind::Stack(_) | GroupKind::Table(_) => leaves.push([values[0], values[1]]),
+                Role::Sym(list) => {
+                    for &(id, x) in list {
+                        by_tree[id] = Some(SymLanes::terminal(&values, x));
+                    }
+                }
+                Role::Leaves => leaves.push([values[0], values[1]]),
             }
         }
         drop(groups);
+        let terminals: Vec<[E; 4]> = plan
+            .continuing
+            .iter()
+            .map(|&id| by_tree[id].expect("every continuing tree has terminal values"))
+            .collect();
         fs.absorb(LookupSite::Terminals(s), &terminals.concat())?;
         fs.absorb(LookupSite::Leaves(s), &leaves.concat())?;
         let mu = one(fs, LookupSite::Mu(s))?;
@@ -1472,6 +1875,48 @@ mod tests {
         output
     }
 
+    /// The dedicated prover paths (the integer lanes of session `depth - 1`, the layer
+    /// group of `kernel::layer`, the one-pass layer `depth - 2`) give the same proof and
+    /// claims as the generic kernel on the stored layers, byte for byte.
+    #[test]
+    fn dedicated_paths_match_the_generic_kernel() {
+        let compare = |stacks: &[LookupStack], tables: &[Table], challenges: usize| {
+            let m = multiplicities(stacks, tables).expect("honest");
+            let shape = LookupShape::of(stacks, tables, challenges);
+            let run = |dedicated: bool| {
+                let mut fs = Fs::new(&shape, b"compare");
+                prove_with(stacks, tables, &m, challenges, &mut fs, true, dedicated).expect("prove")
+            };
+            let (fast, reference) = (run(true), run(false));
+            assert_eq!(fast.proof, reference.proof, "proof, {challenges} challenges");
+            assert_eq!(fast.claims, reference.claims);
+            assert!(fast.stats.layer_bytes < reference.stats.layer_bytes);
+            assert_eq!(verify(&shape, &fast.proof, b"compare").expect("verify"), fast.claims);
+        };
+        let mut rng = SplitMix64::new(4242);
+        for vars in [1, 2, 6, 9] {
+            let mut stacks = vec![main_stack(&mut rng, vars)];
+            stacks.extend(carry_stacks(&mut rng, vars + 3));
+            for challenges in [1, 2, 3] {
+                compare(&stacks, &[Table::T16], challenges);
+            }
+        }
+        // Balanced storage (shift 2^15) as in the integrated protocol, a stack of depth 3
+        // and one of depth 2 (no integer path), a small table.
+        let balanced: Vec<Vec<i32>> = (0..3)
+            .map(|_| column(&mut rng, 8, 1 << 16).iter().map(|v| v - (1 << 15)).collect())
+            .collect();
+        let refs: Vec<&[i32]> = balanced.iter().map(Vec::as_slice).collect();
+        let tiny = column(&mut rng, 2, 256);
+        let small = column(&mut rng, 2, 256);
+        let stacks = vec![
+            LookupStack::with_shift(&refs, 0, 1 << 15).expect("stack"),
+            LookupStack::new(&[&tiny, &small], 1).expect("stack"),
+            LookupStack::new(&[&tiny], 1).expect("stack"),
+        ];
+        compare(&stacks, &[Table::T16, Table::new(8)], 2);
+    }
+
     #[test]
     fn tree_root_is_the_fractional_sum() {
         let mut rng = SplitMix64::new(1);
@@ -1625,7 +2070,8 @@ mod tests {
 
     /// `AGG_LOOKUP_SIGS=1024,8192 RUSTUP_TOOLCHAIN=stable taskset -c 0,1,3-15 cargo test -p
     /// agg-piop --release --lib lookup::tests::timing -- --ignored --nocapture`
-    /// (default sizes 1,024 and 8,192; 7 threads; warmup plus five timed runs, medians).
+    /// (default sizes 1,024 and 8,192; `RAYON_NUM_THREADS` threads, default 7; challenge counts
+    /// `AGG_LOOKUP_CHALLENGES`, default `1,2`; warmup plus five timed runs, medians).
     #[test]
     #[ignore = "timing: run with --release --ignored --nocapture"]
     #[allow(clippy::cast_precision_loss)]
@@ -1634,7 +2080,12 @@ mod tests {
             |_| vec![1024, 8192],
             |list| list.split(',').map(|s| s.trim().parse().expect("a size")).collect(),
         );
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(7).build().expect("pool");
+        let threads = std::env::var("RAYON_NUM_THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(7);
+        let counts: Vec<usize> = std::env::var("AGG_LOOKUP_CHALLENGES").map_or_else(
+            |_| vec![1, 2],
+            |list| list.split(',').map(|s| s.trim().parse().expect("a count")).collect(),
+        );
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
         pool.install(|| {
             for n in sizes {
                 let mut rng = SplitMix64::new(n as u64);
@@ -1650,47 +2101,62 @@ mod tests {
                     m_time * 1e3,
                     LookupShape::of(&stacks, &tables, 1).identity_error_log2(0)
                 );
-                for challenges in [1, 2] {
+                // AGG_LOOKUP_AB=1: the generic-kernel reference and the dedicated paths,
+                // alternating run by run (the same load for both).
+                let variants: &[bool] = if std::env::var("AGG_LOOKUP_AB").is_ok() { &[false, true] } else { &[true] };
+                for &challenges in &counts {
                     let shape = LookupShape::of(&stacks, &tables, challenges);
-                    let (mut trees, mut sessions, mut bottom, mut upper, mut total, mut verify_time) =
-                        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                    let mut last = None;
+                    // Per variant: trees, sessions, bottom, next, total, verify.
+                    let mut series: Vec<[Vec<f64>; 6]> = variants.iter().map(|_| Default::default()).collect();
+                    let mut last: Vec<Option<LookupOutput>> = variants.iter().map(|_| None).collect();
                     for run in 0..6 {
-                        let output = prove(&stacks, &tables, &m, challenges, b"timing").expect("prove");
-                        let start = Instant::now();
-                        let claims = verify(&shape, &output.proof, b"timing").expect("verify");
-                        let verified = start.elapsed().as_secs_f64();
-                        assert_eq!(claims, output.claims);
-                        if run > 0 {
-                            let stats = &output.stats;
-                            trees.push(stats.trees);
-                            sessions.push(stats.sessions.iter().sum::<f64>());
-                            // Session s is stats.sessions[s - 2]; the main stack ends at its depth.
-                            bottom.push(stats.sessions[main_depth - 2]);
-                            upper.push(stats.sessions[main_depth - 3]);
-                            total.push(stats.total);
-                            verify_time.push(verified);
+                        for (v, &dedicated) in variants.iter().enumerate() {
+                            let mut fs = Fs::new(&shape, b"timing");
+                            let output = prove_with(&stacks, &tables, &m, challenges, &mut fs, true, dedicated)
+                                .expect("prove");
+                            let start = Instant::now();
+                            let claims = verify(&shape, &output.proof, b"timing").expect("verify");
+                            let verified = start.elapsed().as_secs_f64();
+                            assert_eq!(claims, output.claims);
+                            if run > 0 {
+                                let stats = &output.stats;
+                                // Session s is stats.sessions[s - 2]; the main stack ends at its depth.
+                                for (slot, value) in series[v].iter_mut().zip([
+                                    stats.trees,
+                                    stats.sessions.iter().sum::<f64>(),
+                                    stats.sessions[main_depth - 2],
+                                    stats.sessions[main_depth - 3],
+                                    stats.total,
+                                    verified,
+                                ]) {
+                                    slot.push(value);
+                                }
+                            }
+                            last[v] = Some(output);
                         }
-                        last = Some(output);
                     }
-                    let output = last.expect("runs");
-                    let per_sig = |t: f64| t * 1e6 / n as f64;
-                    let total_ms = median(&mut total) * 1e3;
-                    println!(
-                        "  X x{challenges}: prove {total_ms:.1} ms ({:.1} us/sig): trees {:.1}, sessions {:.1} (bottom {:.1}, next {:.1}); verify {:.2} ms; proof {} B; layers {:.0} MiB; peak RSS {:.0} MiB",
-                        per_sig(total_ms / 1e3),
-                        median(&mut trees) * 1e3,
-                        median(&mut sessions) * 1e3,
-                        median(&mut bottom) * 1e3,
-                        median(&mut upper) * 1e3,
-                        median(&mut verify_time) * 1e3,
-                        output.proof.byte_len(),
-                        output.stats.layer_bytes as f64 / f64::from(1 << 20),
-                        peak_rss_mib(),
-                    );
-                    let per_session: Vec<String> =
-                        output.stats.sessions.iter().map(|t| format!("{:.1}", t * 1e3)).collect();
-                    println!("    sessions 2.. (ms, last run): {}", per_session.join(" "));
+                    for (v, &dedicated) in variants.iter().enumerate() {
+                        let output = last[v].take().expect("runs");
+                        let [trees, sessions, bottom, upper, total, verify_time] = &mut series[v];
+                        let per_sig = |t: f64| t * 1e6 / n as f64;
+                        let total_ms = median(total) * 1e3;
+                        println!(
+                            "  X x{challenges} {}: prove {total_ms:.1} ms ({:.1} us/sig): trees {:.1}, sessions {:.1} (bottom {:.1}, next {:.1}); verify {:.2} ms; proof {} B; layers {:.0} MiB; peak RSS {:.0} MiB",
+                            if dedicated { "dedicated" } else { "generic" },
+                            per_sig(total_ms / 1e3),
+                            median(trees) * 1e3,
+                            median(sessions) * 1e3,
+                            median(bottom) * 1e3,
+                            median(upper) * 1e3,
+                            median(verify_time) * 1e3,
+                            output.proof.byte_len(),
+                            output.stats.layer_bytes as f64 / f64::from(1 << 20),
+                            peak_rss_mib(),
+                        );
+                        let per_session: Vec<String> =
+                            output.stats.sessions.iter().map(|t| format!("{:.1}", t * 1e3)).collect();
+                        println!("    sessions 2.. (ms, last run): {}", per_session.join(" "));
+                    }
                 }
             }
         });
