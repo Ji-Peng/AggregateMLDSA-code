@@ -52,6 +52,12 @@ constants are `C = 2^15`). Padded rows hold the digits of zero: `Z_lo = U_lo = V
 `Z_hi = U_hi = V_hi = 0`; padded carries are `K = -2^15`, and so are the padding slots of
 the carry stacks (looked-up value 0).
 
+Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
+is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
+`z_lo` (stored `S_zlo = B_zlo - 2^15`, column `bz_lo`) and the bits `B_zhi`, `a_z` proven by
+two Booleanity zero-checks in stage 3, so the four stacks, `L` and every lookup site are the
+same; only the honest multiplicities move (padded cells look up 65,457 instead of 0).
+
 Two deviations from the first design (Handoff, "superseded"), both forced by soundness:
 
 1. *No offset-tagged shared table.* The first design merged `T_16` and `T_11` into one

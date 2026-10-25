@@ -1201,6 +1201,27 @@ integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP lev
 `tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
 `ref/notes/bench-local.md` (lookup integration) and `docs/lookup.md` Section 4.5.
 
+### 19.6 Relation H-exact (`docs/h-exact.md` step B, 2026-10-25)
+
+The relation (`manifest::Relation`, byte 0 H-u, byte 1 H-exact) is a field of the manifest
+and selects, through it, everything below; the verifier takes it from its caller
+(`verifier::verify(..., relation, ...)`, `VerifyError::Relation` on a header mismatch).
+Under H-exact: `G_main16` = `bz_lo, U_lo, V_lo, V_hi` (`bz_lo` = `S_zlo` in the slot of
+`Z_lo`, so the main lookup stack is unchanged), `G_main4` = `bz_hi, U_hi, b_0..b_5, a_z` (9
+polynomials, codes `[0, 6, 0, 0, 0, 0, 0, 0, 0]`), `z = S_zlo + 2^16 B_zhi + 130,915 a_z -
+98,225` (`DigitValue::Zx`, `ValueForm::BitSlack`), the catalog row
+`mldsa-44-l16x-batch-<N*>-mult-final`. Stage 2: `def_y1[t]` (0..6), `leaf6[U_hi]` (6);
+`gamma^(2) in K^7`, degree 4, terminal 7. Stage 3: `ring` (0, the `w_A` group reads `bz_lo,
+bz_hi, a_z` with weights `1, 2^16, 130,915` and constant `-98,225`), `link[U_hi]` (1),
+`bool[bz_hi]` (2), `bool[a_z]` (3) (`Term::Bool` in the main `eq(r2)` group, claim 0), then
+the reductions from 4 (`stage3::Gammas`); `gamma^(3) in K^45`, terminal 32. Registry: stage 2
+(7, rounds of 4, 7), stage 3 (45, rounds of 3, 32); the proof-of-work plan follows (stage-2
+batching `g = 3`). Encoder: `source_tables::Encoder` resolves the slot of every digit of
+`z, u, v` and of the bits from the manifest; `a_z = [z >= 79]`; padded rows `(bz_lo, bz_hi,
+a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tamperings,
+synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
+rejection), unit tests of the manifest, claims, stage specs, wire and plan.
+
 ## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
 
 Plan Part 2, Section 2.2 (`ref/notes/plan-128bit-speed.md`): lookup, stage 3, instance and

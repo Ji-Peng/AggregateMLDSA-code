@@ -1060,3 +1060,41 @@ default layout (`Layout::H`, id 0) follows: `u_0..u_3` base 16 (`B_ulo`), `u_4` 
 (`docs/witness.md`). Why the default changed: H-u dominates relaxed H in security (ML-DSA-44's
 own SelfTargetMSIS instance, core-SVP 123.5 instead of 119.7, `ref/notes/msis-estimate.md`)
 and in cost (no extra column, cheaper stage 2).
+
+## L9. Relation H-exact as a runtime relation: exact `z` by a bit-slack form, one six-valued `u` digit, Booleanity at `r^(2)` (spec Sections 3.1, 4.1, 4.3, 7.4, 7.5, 10, 12; Appendix A; `docs/h-exact.md` step B)
+
+Spec (Appendix A before revision 6): H-exact behind a feature flag with `z = 130,915 a_z +
+b_z - 130,993` and `u = 118,787 a_u + b_u - 190,465`, i.e. two Boolean columns `a_z, a_u`
+checked in stage 1 and a base-4 digit of `b_u` on `leaf4` (+2,048 committed elements per
+signature). Code (decision 2026-10-25, design X1 of `docs/h-exact.md`): a runtime relation
+(`manifest::Relation::HExact`, relation byte 1, bound in the proof header and byte 3 of
+event 0) next to the default H-u, so one binary proves and verifies both results:
+
+* `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (`DigitValue::Zx`, columns `bz_lo`, `bz_hi`,
+  `a_z`): `S_zlo` takes the slot of `Z_lo` in `G_main16` and in the main lookup stack, `B_zhi`
+  the slot of `Z_hi`, `a_z` is appended to `G_main4` after `b_5` (9 polynomials; the bits keep
+  positions 2..7); `u` keeps H-u's one six-valued digit (L8) instead of `a_u` plus a base-4
+  digit, so H-exact costs one column (+1,024 elements per signature), not two.
+* The Booleanity of `bz_hi` and `a_z` is proven by two zero-checks at `r^(2)` in stage 3
+  (`Term::Bool` in the `eq(r^(2))` main group, claim 0) instead of stage 1 at `tau`: both
+  columns are opened at `r^(3)` anyway, so no evaluation reduction is added. Sound because
+  both are committed in round 1, before `r^(2)` (the argument of the links and the ring
+  identity at `r^(2)`, `docs/soundness.md` 3.4).
+* Counts follow the relation (`stage2::gamma_count`, `stage3::Gammas`, `Stage2Claims::len`,
+  `Stage3Claims::len`, `transcript::stage_gammas`): batching vectors (26, 7, 45), terminal
+  claims (18, 7, 32), stage degrees (4, 4, 3) as for H-u. The proof-of-work plan differs only
+  at the stage-2 batching site (`g = 3`), so the plan encoding needs no relation field; the
+  H-exact digests differ from H-u's anyway (`docs/soundness.md` 10.1).
+* The catalogs are keyed by `(d_sig, relation)`: 13 scalar `G_main4` rows at `(13..25, 9)` and
+  13 grouped rows `mldsa-44-l16x-batch-<N*>-mult-final` in the width-4 artifact; H-u's rows
+  and the width-16 artifact are byte-identical (`docs/pcs-config.md`).
+* The verifier takes the relation from its caller (`verifier::verify(..., relation, ...)`,
+  `AggregateVerifier::relation`, `agg verify --relation`) and rejects a header that names
+  another relation before event 0 (`VerifyError::Relation`), as `docs/h-exact.md` 1.3
+  requires (there called `RelationPolicy::Exactly`; a plain `Relation` argument is the same
+  policy). No wire-version bump beyond L8's version 3: H-u proofs are byte-identical.
+
+Why: the 2026-10-25 decision record names two results (H-u and H-exact); a runtime relation
+lets one build benchmark both back to back, and X1 is the cheaper layout where the prover
+spends its time (`docs/h-exact.md` Appendix X). The witness crate's base-16 H-exact layout
+(feature `h-exact`, `Layout::HExact`) is unchanged and serves only as a cross-check.

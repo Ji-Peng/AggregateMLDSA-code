@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); implemented in step 2 (branch `pow-128`): PIOP wire version 2 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 4 (`agg_keccak::tied`, deviation K20), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`) |
-| Applies to | mode A and mode B, ML-DSA-44, relation H-u (the default since 2026-10-25, `docs/h-exact.md` step A; it replaced relaxed H), lookup layout L16; PIOP wire version 3 (version 2 of this document with the H-u stage-2 degree 4) and tied-part proof version 4 (introduced by this document) |
+| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default since 2026-10-25, `docs/h-exact.md` step A; it replaced relaxed H) and H-exact (relation byte 1, step B; Section 10.1), lookup layout L16; PIOP wire version 3 (version 2 of this document with the H-u stage-2 degree 4) and tied-part proof version 4 (introduced by this document) |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10 |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
@@ -151,7 +151,7 @@ trees; `D = max(d_main + 2, 16)`; `L = 4 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3`,
 | `lookup.gamma` (3) | `D - 1` | 1 | `2 active_s / |K|` | `bit_length(2 active_s)` | `g + 7` | 20, 16, 12, 8, 4 coefficients: `g` = 5, 5, 4, 4, 3 (13, 2, 2, 4, 5 sites) |
 | `lookup.round` (4) | `D (D - 1)/2` | 3 | `3/|K|` | 2 | 9 | 351 sites |
 | `tau` (5) | 1 | `d_main` | `d_main/|K|` | `bit_length(d_main)` | `g + 7` | 25: `g = 5` |
-| `stage.gamma` (6) | 3 | 1 | `26, 8, 44 / |K|` | 5, 4, 6 | 12, 11, 13 | |
+| `stage.gamma` (6) | 3 | 1 | `26, 8, 44 / |K|` (H-exact: `26, 7, 45`) | 5, 4, 6 (H-exact: 5, 3, 6) | 12, 11, 13 (H-exact: 12, 10, 13) | |
 | `stage.round` (7) | `3 d_main` | 4, 4, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
 
 Totals per `N*` are in Section 10 (from 194 nonces / 227 bytes at `N* = 8` to 483 /
@@ -202,7 +202,7 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   `sum_x eq(tau_t, x) phi(x)` is a nonzero multilinear polynomial in at most `d_main`
   coordinates of `tau`; `nu = d_main` (Aerie Lemma C.1, "the point tau"). The pre-stage
   claims sent after `tau` are pending evaluation claims, reduced in stage 3.
-* `gamma^(s)` (26, 8, 44 coefficients): `nu = 1` as in 3.3.
+* `gamma^(s)` (26, 8, 44 coefficients; 26, 7, 45 under H-exact): `nu = 1` as in 3.3.
 * stage rounds: `nu` = the round polynomial's degree, 4, 4, 3 (`STAGE_DEGREES`; the `eq`
   factor is included: `range_w1` has degree 4, `leaf6` of the H-u digit `U_hi` degree 4
   (`leaf4` degree 3), `link` degree 3).
@@ -316,6 +316,12 @@ to 25 (`g` = 5); evaluation batch loss 38 (`g` = 6); 119 stage-1 rounds of loss 
 of loss 3, 119 stage-2 rounds of loss 3, 52 physical-L2 rounds of loss 5, 89
 extension-opening rounds of loss 2; the rest loss 1 to 7. These nonces are already in the
 measured opening (62,974 B at 32K, `ref/notes/bench-cloud.md` Phase 7).
+
+The 13 H-exact grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`, `G_main4` at 9
+polynomials, 39 claims in the evaluation batch, `docs/h-exact.md` 2.3) have the same plan
+summaries as the table above at `d_sig` 3 to 14; at `d_sig` 15: 459 sites, `sum g` 1,135,
+max `g` 12, expected work 8,336, nonce bits 4,432. Their digests are pinned next to H-u's
+(`agg-pcs-config/tests/akita_grinding.rs`, `akita_plans_of_the_h_exact_rows_are_pinned`).
 
 ### 3.8 Flock internal sites (inherited; audit in 4.2 to 4.4)
 
@@ -734,6 +740,8 @@ records in mode A and mode B.
 
 ## 10. Script output summary (`python3 -I docs/scripts/pow_plan.py`, 2026-10-25)
 
+(Relation H-exact: Section 10.1.)
+
 Relation H-u (stage degrees 4, 4, 3). Against relaxed H (4, 5, 3) only the ledger column and
 the stage-2 round class move: every difficulty, nonce width, total, byte count and plan
 digest below is unchanged (`bit_length(4) = bit_length(5) = 3`; the script asserts it), and
@@ -819,6 +827,45 @@ N* = 2^15 slim8  span on  902578ff518bcb5adfb672be263e13286e32226d2cdfb8853066b8
 The digests depend on the tie difficulties of Section 3.6 and the Flock profile; if the
 decision of Section 11 (open 1 or 2) changes a difficulty, the script and these anchors
 change with it.
+
+### 10.1 Relation H-exact (`python3 -I docs/scripts/pow_plan.py --relation h-exact`)
+
+Relation H-exact (`docs/h-exact.md` step B, relation byte 1) has the same stage degrees
+(4, 4, 3) and the batching vectors `gamma^(1..3)` of 26, 7, 45 coefficients: stage 2 holds
+`def_y1[t]` and one `leaf6[D_u]` (the Boolean `B_zhi` needs no leaf), stage 3 one link and
+the two Booleanity zero-checks `bool[B_zhi]`, `bool[a_z]` at `r^(2)`. The zero-checks add no
+site: they are identities tested at a point drawn by the preceding stage (3.4), pending
+during the stage-2 rounds, and enter through `gamma^(3)`. So the only difficulty that moves
+is the stage-2 batching site, `g = bit_length(7) = 3` (10-bit nonce) instead of 4 (11 bits);
+`gamma^(3)` keeps `g = 6` (45 < 64), and the round-by-round ledger is H-u's (it depends on
+the stage degrees only). The plan encoding (6.4) has no relation field: the relation is
+bound by the manifest bytes of the same event 0 (byte 3 and the `G_main4` descriptor), and
+the stage-2 entry already makes every H-exact digest differ from H-u's.
+
+```text
+d_sig  N*      sites  nonces  bits  bytes  work(sum 2^g)  ledger(before work)
+    3       8    195     194  1810    227           1356  550/|K| = 2^-118.9
+   10    1024    339     338  3123    391           2040  979/|K| = 2^-118.1
+   13    8192    423     422  3888    486           2430  1228/|K| = 2^-117.7
+   15   32768    484     483  4443    556           2710  1409/|K| = 2^-117.5
+```
+
+The maximum site weight is the same as H-u's (`2^-128.36` at `2^15`, `2^-128.42` from `2^6`
+to `2^14`). Plan digests (`N = N*`, default part size; pinned by
+`agg_piop::pow::tests::h_exact_plans_reproduce_docs_h_exact_section_3_7`):
+
+```text
+H-exact  N* = 2^3   modeB          c9dd30a002089fff68b1653faddb2ac860e093f771eb3eeaaf03e60152e54c85
+H-exact  N* = 2^3   slim span on   8f69f49792afc311cf43042df023b98706f92bdaecb1c3ac837690e92995e983
+H-exact  N* = 2^10  modeB          750a40c19877ba6bda8c7ddee36866239b6338f7caa84109880662a33d64a1d8
+H-exact  N* = 2^10  slim span on   82ffd38abe14e463ad41cc9ad209e07d5143f28067bb3696f2c445aad2c05c8f
+H-exact  N* = 2^15  modeB          e4b1dffc21351ca615ace27500406a1990609ccb6cc07e13c6da50c18a416046
+H-exact  N* = 2^15  slim span on   14666dea14ede0ddea3f5cc34d50e8d746021c034941d060a6c2d08af8960d41
+```
+
+The theorem of Section 7 holds verbatim for H-exact with "relation H-u" replaced by
+"relation H-exact" and Akita's plan of the H-exact grouped row (4.1); spec 12.2 gives the
+extraction of the exact bounds.
 
 ## 11. Open questions
 

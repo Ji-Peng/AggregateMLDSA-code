@@ -95,3 +95,22 @@ print("+-190,466 unreachable:", (Bu+1) not in reach and -(Bu+1) not in reach)
 sols=[c for c in range(2,17) if (2*Bu+1-2**16)%(c-1)==0 and (2*Bu+1-2**16)//(c-1)<=2**16]
 print("single-digit bases c<=16:",sols)
 print("zeta' H-u",max(2**17,Bu+2**(d-1)*tau),"zeta",max(g1-beta,2*g2+1+2**(d-1)*tau))
+# (13) relation H-exact (docs/h-exact.md 2.1, step B): z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z,
+# B_zlo in [0,2^16), B_zhi, a_z bits; stored S_zlo = B_zlo - 2^15, so z = S_zlo + 2^16 B_zhi
+# + 130,915 a_z - 98,225. Exact reachable set, constant, canonical choice a_z = [z >= 79],
+# padding, edges, the canonical encoding of 130,994, no single small digit for z, zeta'.
+Bz=g1-beta-1; Sz=130915
+reach=set()
+for a in range(2):
+    for h in range(2):
+        reach.update(range(Sz*a+2**16*h-Bz, Sz*a+2**16*h+2**16-Bz))
+print("H-exact z blocks cover exactly [-B_z,B_z]:", reach==set(range(-Bz,Bz+1)), "S_z+2^17=2B_z+1:", Sz+2**17==2*Bz+1)
+Cz=2**15-Bz
+def enc_z(z):
+    w=z+Bz; a=int(w>=2**17); b=w-Sz*a; h=min(max(b//2**16,0),1); return (b-2**16*h-2**15, h, a)
+ok=all(s+2**16*h+Sz*a+Cz==z and -2**15<=s<2**15 and a==int(z>=79) for z in range(-Bz,Bz+1) for (s,h,a) in [enc_z(z)])
+print("C_z",Cz,"(-98,225)","canonical round trip",ok,"padding",enc_z(0),"edges",enc_z(Bz),enc_z(-Bz),"130,994 ->",enc_z(Bz+1))
+print("+-130,994 unreachable:", (Bz+1) not in reach and -(Bz+1) not in reach)
+sols=[c for c in range(2,200) if (2*Bz+1-2**16)%(c-1)==0 and (2*Bz+1-2**16)//(c-1)<=2**16]
+print("single-digit bases c<200 for z:",sols)
+print("zeta' H-exact",max(Bz,Bu+2**(d-1)*tau))

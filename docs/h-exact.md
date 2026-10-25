@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | design; step A (relation H-u as the default, open question 1 answered (a)) implemented on branch `h-exact` (wire version 3, deviation L8); step B (H-exact, relation byte 1) not yet |
+| Status | implemented on branch `h-exact`: step A (relation H-u as the default, open question 1 answered (a); wire version 3, deviation L8) and step B (H-exact, relation byte 1, deviation L9; Section 9) |
 | Applies to | ML-DSA-44, lookup layout L16, modes A and B, PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`) |
 | Base | code `be398d8` (main); layered on branches `pow-128` (`406245a`), `piop-speed` (`7476508`), `flock-speed` (`baf9e46`) |
 | Replaces | spec Appendix A, paragraph "H-exact" (which `ref/notes/msis-estimate.md` calls "spec Section 15"; there is no Section 15) |
-| Last reviewed | 2026-10-25, first version; step A notes added (Section 8) |
+| Last reviewed | 2026-10-25, first version; step A notes added (Section 8); step B notes added (Section 9) |
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
 "estimate" were computed for this document with exact integer arithmetic (Section 4.4 lists
@@ -721,6 +721,62 @@ the default relation. Implemented on branch `h-exact` (on top of main `1fef53d`,
   zero-checks, `G_main4` at 9 polynomials and the catalog rows of 2.3, and makes the stage
   degrees, gamma and claim counts manifest-driven (they are constants for the single
   relation of step A).
+
+## 9. Step B as implemented (relation H-exact)
+
+Implemented on branch `h-exact` on top of step A, layout X1 as designed (Sections 1 to 4);
+the decisions below fill in or depart from Section 6.1.
+
+* **Relation type.** `Relation { Hu = 0, HExact = 1 }` lives in `agg_pcs_config::catalogs`
+  (the lowest crate both use, 6.1 item 3) and is re-exported by `agg_piop::manifest`; it
+  also parses the command-line spelling (`h-u`, `h-exact`). Step A's name `Hu` is kept for
+  relation byte 0 (the design's `H`).
+* **Columns.** H-exact's `z` is a value of its own, `DigitValue::Zx` with the columns `bz_lo`
+  (`S_zlo`), `bz_hi` (`B_zhi`), `a_z` and the value form `ValueForm::BitSlack` (agg-witness
+  `BitSlackLayout`, `Z_BIT_SLACK`), instead of new column kinds `BzLo, BzHi, Az`; `u` keeps
+  step A's `U_lo`/`U_hi` (the design's `S_ulo`/`D_u`). So `Column::alphabet` stays a function
+  of the column, and only `group_columns`, `stack_columns`, `leaf_digits` and the new
+  `bool_digits` depend on the relation. `a_z` follows the bits (positions 2..7 unchanged).
+* **Counts.** `STAGE_DEGREES` stays a constant ((4, 4, 3) for both relations); the gamma and
+  claim counts come from the manifest (`stage2::gamma_count`, `stage3::Gammas`,
+  `Stage2Claims::len`, `Stage3Claims::len`, `transcript::stage_gammas`/`stage_terminals`),
+  and the wire reads the claim vectors with the manifest's lengths. The proof-of-work plan
+  follows the registry, so it needed no change; `pow_plan.py --relation h-exact` prints the
+  H-exact tables and its self-check asserts the totals and two anchors of 3.7.
+* **Verifier policy.** `verifier::verify` and `verify_timed` take the expected relation as
+  an argument (the design's `RelationPolicy::Exactly`) and return `VerifyError::Relation`
+  for a header that names another one, before event 0; the manifest, hence event 0, the
+  catalog row and the plan, comes from the argument. `ProverInputs::relation` selects the
+  prover's relation; `agg aggregate|verify|bench --relation h-u|h-exact` (default `h-u`;
+  the design's `h`) set them in the CLI, whose reports print the relation.
+* **Catalogs.** As 2.3: 26 new width-4 rows, generated in 1,617 s (`docs/pcs-config.md`
+  Section 4); the H-u rows and the width-16 artifact are unchanged; the harness keeps every
+  row of `catalog_batches()` (both relations) and takes `AGG_CATALOG_RELATION`. The planner's
+  opening estimates of the H-exact rows equal H-u's; measured at `N = 1,024` the H-exact
+  opening is 16 B longer (61,010 against 60,994 B).
+* **Tests** (6.2 to 6.4). Mode B: H-exact round trips at 1, 64 and 256 records with the
+  protocol-level negatives (cross-relation verification, a rewritten or unknown relation
+  byte, a wrong stage-2 gamma nonce of 10 bits). Mode A: H-exact at 64 and 256 (Slim, one
+  and two Flock parts) and the CLI round trip. PIOP level (`tests/h_exact.rs`): honest
+  round trip with every claim equal to its table, the pointwise identities, the tamperings
+  of the 6.4 table (stage 3 for `a_z = 2`, `B_zhi = 2, -1`; stage 2 for `D_u = 3, -4`; the
+  lookup for `S_zlo = 2^15`, `S_ulo = -2^15 - 1`), non-Boolean digits that keep both `z` and
+  the looked-up cell (`(a_z, B_zhi)` from `(0, 0)` to `(-1, 2)`, `S_zlo - 157`), which only the
+  Booleanity zero-checks reject, and the value-boundary table with synthetic statements:
+  instead of a test-only `PublicData` constructor, the test moves the public `T` of the
+  record so that (3.1) holds over the integers (`T' = T + A (z' - z)` from the exact CRT
+  product, or `T' = T - (u' - u)`), at the PIOP level where the verifier takes `T` from the
+  instance. All rows of the table behave as stated (H-u accepts `z = 130,994` and `131,000`).
+  Cross-check with the witness crate (6.3): the values decoded from the H-exact tables equal
+  the derived ones, the H-u tables' values and the base-16 `Z_EXACT` form's (`a_z` agrees);
+  the feature-gated `agg_witness::check` with `Layout::HExact` is exercised by the witness
+  crate's own tests (`--features h-exact`), not from `agg-piop`.
+* **Measured at `N = 1,024`** (CLMUL build, Slim, 1 warmup + 1 rep, a shared machine, sanity
+  only, `docs/cli.md` Section 4): aggregate 522,154 B against H-u's 522,138 B; PIOP bytes
+  4,736 B and work nonces 391 B for both; prove 2.98 s against 2.90 s.
+* **Not done.** `agg-bench`'s mode-B harness still proves H-u only (6.1 item 23);
+  `ref/notes/status.md`, `ref/notes/msis-estimate.md` and the paper are outside the code
+  repository; the 32K cloud measurement of both relations is the next cloud run.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 

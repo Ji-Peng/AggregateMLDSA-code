@@ -5,6 +5,7 @@ Run (isolated mode, standard library only):
 
     python3 -I docs/scripts/pow_plan.py              # summary tables (committed in the doc)
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
+    python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md 3.7)
 
 What it computes, with exact integer arithmetic:
 
@@ -38,8 +39,11 @@ M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
 # Relation H-u (default since 2026-10-25, docs/h-exact.md step A): stage 2 holds leaf4[Z_hi]
 # (degree 3) and leaf6[U_hi] (degree 4), so its rounds have degree 4 (relaxed H: 5, leaf8).
+# Relation H-exact (step B): stage 2 holds leaf6[U_hi] only (7 coefficients, g = 3), stage 3
+# one link and two Booleanity zero-checks (45 coefficients, g = 6); the degrees are the same.
 STAGE_DEGREES = (4, 4, 3)
-STAGE_GAMMAS = (26, 8, 44)
+RELATION_GAMMAS = {"h-u": (26, 8, 44), "h-exact": (26, 7, 45)}
+STAGE_GAMMAS = RELATION_GAMMAS["h-u"]
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
 RECT_MIN_ROWS_LOG = 11
@@ -247,6 +251,8 @@ def fmt_e(cls, nu, num) -> str:
 
 
 def print_summary(args) -> None:
+    print(f"== Relation {args.relation}: STAGE_DEGREES = {STAGE_DEGREES}, STAGE_GAMMAS = {STAGE_GAMMAS} ==")
+    print()
     print("== PIOP sites per N* (mode A and mode B; registry order) ==")
     print("d_sig  N*      d_main  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)")
     for d_sig in range(3, 16):
@@ -384,6 +390,17 @@ def print_details(d_sig: int) -> None:
         idx += 1
 
 
+def with_gammas(gammas: tuple, f):
+    """Evaluate f() with STAGE_GAMMAS set to gammas."""
+    global STAGE_GAMMAS
+    saved = STAGE_GAMMAS
+    STAGE_GAMMAS = gammas
+    try:
+        return f()
+    finally:
+        STAGE_GAMMAS = saved
+
+
 def self_check() -> None:
     # Relation H-u: the stage-2 degree drops from 5 to 4 but bit_length(4) = bit_length(5), so
     # every difficulty, the nonce stream and the plan digests equal relaxed H's.
@@ -410,13 +427,31 @@ def self_check() -> None:
     assert [list_size(r) for r in (1, 2, 3)] == [35, 50, 70]
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
+    # Relation H-exact (docs/h-exact.md 3.7): the stage-2 batching site has g = 3 (7
+    # coefficients) instead of 4, so one stream bit and 8 units of work fewer; gamma^(3) keeps
+    # g = 6 (45 < 64); the totals and the Slim/span-on and mode-B digests at 2^15.
+    assert grind_bits(7, K) == 3 and grind_bits(8, K) == 4 and grind_bits(45, K) == grind_bits(44, K) == 6
+    exact = RELATION_GAMMAS["h-exact"]
+    for d_sig, bits, work in ((3, 1810, 1356), (10, 3123, 2040), (13, 3888, 2430), (15, 4443, 2710)):
+        s = with_gammas(exact, lambda: summarize(piop_sites(geometry(d_sig))))
+        assert (s["bits"], s["work"]) == (bits, work), (d_sig, s)
+    g15 = geometry(15)
+    digest = with_gammas(exact, lambda: plan_digest(g15, piop_sites(g15), [], "modeB", 0, 0))
+    assert digest.startswith("e4b1dffc"), digest
+    digest = with_gammas(exact, lambda: plan_digest(
+        g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
+    assert digest.startswith("14666dea"), digest
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--details", type=int, metavar="D_SIG", help="print every site of N* = 2^D_SIG")
+    parser.add_argument("--relation", choices=sorted(RELATION_GAMMAS), default="h-u",
+                        help="the relation whose stage batching vectors to use (default h-u)")
     args = parser.parse_args()
     self_check()
+    global STAGE_GAMMAS
+    STAGE_GAMMAS = RELATION_GAMMAS[args.relation]
     if args.details is not None:
         print_details(args.details)
     else:
