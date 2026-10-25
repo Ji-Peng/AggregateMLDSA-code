@@ -63,6 +63,10 @@ CLASS_ID = {
 }
 
 
+# Akita's capped transcript proof-of-work searches at 2^15 (soundness.md 3.7).
+AKITA_SITES_2_15 = 459
+
+
 def grind_bits(num: int, den: int) -> int:
     """Least g >= 0 with 2^128 * num / den <= 2^g (Aerie Eq. (17), exact)."""
     if num <= 0:
@@ -143,7 +147,8 @@ def tie_terms(d: int, span_log: int, nu_s: int, profile: str) -> dict:
     pub = nu_s + 3  # sponge public region vs the verifier's table
     plain = 2 * tie1 + 2 * tie2 + out + pub
     listed = 2 * ls * lu * tie1 + 2 * lu * tie2 + lu * out + ls * pub
-    tight = max(ls * lu * tie1, lu * tie2, lu * out, ls * pub)
+    # union over list pairs: tie2 and out depend only on g, pub only on f (soundness.md 3.6)
+    tight = ls * lu * tie1 + lu * max(tie2, out) + ls * pub
     g = grind_bits(listed, F2_128)
     return {
         "d": d,
@@ -277,6 +282,13 @@ def print_summary(args) -> None:
         ls = list_size(L0_RATE[prof])
         e = theta * ls
         print(f"{prof:<6} theta = 2^{math.log2(theta):.2f}, times L_s = {ls}: 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
+        # sum over segment checks of L_s^(parts in the segment) theta (soundness.md 3.5);
+        # mode A admits at most two parts per segment.
+        rows = (("span off, 4 segments x 1 part", 4 * ls), ("1 segment x 2 parts", ls * ls),
+                ("4 segments x 2 parts", 4 * ls * ls), ("1 segment x 3 parts (refused)", ls ** 3))
+        for label, mult in rows:
+            e = theta * mult
+            print(f"       {label:<31} 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
     print()
     print("== Tie site of one tied part (GF(2^128), docs/bridge.md 5c), full parts n = 2^d S ==")
     print("profile  d   S  nu_s  terms(tie1,tie2,out,pub)  plain  g_plain  list  listed    g   nonce  tight(RBR)  g_tight")
@@ -344,10 +356,12 @@ def print_summary(args) -> None:
                 print(f"N* = 2^{d_sig:<2} {prof:<6} span {'on ' if span else 'off'} {plan_digest(geo, sites, ties, prof, S, geo['d_seg'])}")
     print()
     # Honest completeness: per site (1 - 2^-g)^(2^(g+7)) <= exp(-2^7).
-    worst = max(len(piop_sites(geometry(d))) for d in range(3, 16)) + 4
+    # Capped searches: PIOP sites, tie sites (at most 2 parts x 4 segments), Akita's 459.
+    worst = max(len(piop_sites(geometry(d))) for d in range(3, 16)) + 8 + AKITA_SITES_2_15
     print(
         f"Honest failure: per site <= exp(-128) = 2^{-128 / math.log(2):.1f};"
-        f" at most {worst} sites per proof: <= 2^{math.log2(worst) - 128 / math.log(2):.1f}"
+        f" at most {worst} capped searches per proof (PIOP + 8 tie + {AKITA_SITES_2_15} Akita):"
+        f" <= 2^{math.log2(worst) - 128 / math.log(2):.1f}"
     )
 
 

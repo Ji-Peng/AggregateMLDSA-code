@@ -15,7 +15,8 @@
 //!
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions,
 //! spec Section 1) is split into parts of `2^{d_part}` record positions, `d_part =
-//! min(part_log2, d_seg)` (default [`DEFAULT_PART_LOG2`]); each part with live records is
+//! clamp(part_log2, min_part_log2, d_seg)` (default [`DEFAULT_PART_LOG2`]; at most two parts
+//! per segment, [`MAX_PARTS_LOG2`]); each part with live records is
 //! one tied part (`agg_keccak::tied`, deviations K11, K13): a Flock sponge instance of its
 //! records and a Flock bridge union (level-1 rows and one levels-2-3 row) proving the part's
 //! share `Y_{sigma, s} = M^{(sigma)} b'_s`, tied by evaluation claims. The shares XOR to
@@ -108,6 +109,18 @@ fn ligerito_of(profile: FlockProfile) -> Profile {
 pub const DEFAULT_PART_LOG2: u32 = 13;
 /// Smallest admitted part (`2^3` records, the smallest segment).
 pub const MIN_PART_LOG2: u32 = 3;
+/// `log2` of the most tied parts one segment may hold: at most two, so `d_part >= d_seg - 1`
+/// (docs/soundness.md 3.5). Each part's sponge commitment is bound only to its Johnson list
+/// when `sd` is drawn, so `sd`'s bad set is a union over the product of the segment's `P`
+/// lists, `L^P theta`; `P <= 2` keeps it below `2^-128` for every mode-A profile.
+pub const MAX_PARTS_LOG2: u32 = 1;
+
+/// The smallest admitted `d_part` of a batch: `max(MIN_PART_LOG2, d_seg - MAX_PARTS_LOG2)`
+/// (at most two tied parts per segment, [`MAX_PARTS_LOG2`]).
+#[must_use]
+pub fn min_part_log2(geometry: &Geometry) -> u32 {
+    geometry.d_seg().saturating_sub(MAX_PARTS_LOG2).max(MIN_PART_LOG2)
+}
 /// Record positions per segment (`log2`, spec Section 1).
 pub const SEGMENT_LOG2: u32 = 13;
 /// Label of the per-part Flock seed.
@@ -147,7 +160,12 @@ pub fn span_seed(fs: &[[u8; 32]]) -> [u8; 32] {
 /// segments as parts, and the span option on.
 #[must_use]
 pub fn spans_segments(geometry: &Geometry, part_log2: u32, span: bool) -> bool {
-    span && geometry.segments() >= 2 && SegmentParts::plan(geometry, 0, part_log2).d_part == geometry.d_seg()
+    spans_with_floor(geometry, part_log2, span, min_part_log2(geometry))
+}
+
+fn spans_with_floor(geometry: &Geometry, part_log2: u32, span: bool, floor: u32) -> bool {
+    span && geometry.segments() >= 2
+        && SegmentParts::plan_with_floor(geometry, 0, part_log2, floor).d_part == geometry.d_seg()
 }
 
 /// The Keccak side's part of the proof-of-work plan of a mode-A batch (docs/soundness.md
@@ -165,9 +183,20 @@ pub fn keccak_plan(
     span: bool,
     profile: FlockProfile,
 ) -> KeccakPlan {
+    keccak_plan_with_floor(gate, geometry, part_log2, span, profile, min_part_log2(geometry))
+}
+
+fn keccak_plan_with_floor(
+    gate: &ChainGate,
+    geometry: &Geometry,
+    part_log2: u32,
+    span: bool,
+    profile: FlockProfile,
+    floor: u32,
+) -> KeccakPlan {
     let ligerito = ligerito_of(profile);
     let segments = geometry.segments();
-    if spans_segments(geometry, part_log2, span) {
+    if spans_with_floor(geometry, part_log2, span, floor) {
         let d = geometry.d_seg();
         return KeccakPlan {
             span: u8::try_from(segments).expect("at most 255 segments"),
@@ -175,10 +204,10 @@ pub fn keccak_plan(
             tie_bits: vec![TiedPart::plan_tie_bits(gate, geometry.n, d, segments, ligerito)],
         };
     }
-    let d_part = SegmentParts::plan(geometry, 0, part_log2).d_part;
+    let d_part = SegmentParts::plan_with_floor(geometry, 0, part_log2, floor).d_part;
     let tie_bits = (0..segments)
         .flat_map(|sigma| {
-            let plan = SegmentParts::plan(geometry, sigma, part_log2);
+            let plan = SegmentParts::plan_with_floor(geometry, sigma, part_log2, floor);
             (0..plan.count()).map(move |s| plan.local(s).len())
         })
         .map(|n| TiedPart::plan_tie_bits(gate, n, d_part, 1, ligerito))
@@ -205,14 +234,20 @@ pub struct SegmentParts {
 
 impl SegmentParts {
     /// The parts of segment `sigma` for a requested part size `2^{part_log2}` (clamped to
-    /// `[MIN_PART_LOG2, d_seg]`).
+    /// `[min_part_log2, d_seg]`, so at most two parts per segment, [`MAX_PARTS_LOG2`]).
     #[must_use]
     pub fn plan(geometry: &Geometry, sigma: usize, part_log2: u32) -> Self {
+        Self::plan_with_floor(geometry, sigma, part_log2, min_part_log2(geometry))
+    }
+
+    /// [`Self::plan`] clamped to `[floor, d_seg]` instead (test hook: lets a prover build an
+    /// inadmissible split that the verifier must refuse).
+    fn plan_with_floor(geometry: &Geometry, sigma: usize, part_log2: u32, floor: u32) -> Self {
         Self {
             sigma,
             first: (sigma << SEGMENT_LOG2).min(geometry.n),
             live: geometry.live_in_segment(sigma),
-            d_part: part_log2.clamp(MIN_PART_LOG2, geometry.d_seg()),
+            d_part: part_log2.clamp(floor.max(MIN_PART_LOG2), geometry.d_seg()),
         }
     }
 
@@ -271,6 +306,8 @@ pub struct FlockProver<'g, 'h> {
     geometry: Geometry,
     records: Vec<SpongeRecord>,
     part_log2: u32,
+    /// Smallest `d_part` the prover uses (`min_part_log2` unless a test lowers it).
+    part_floor: u32,
     witness: Option<PartWitness<'h>>,
     keep_commit_data: bool,
     state: Mutex<ProverState<'g>>,
@@ -316,6 +353,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             geometry,
             records,
             part_log2,
+            part_floor: min_part_log2(&geometry),
             witness,
             keep_commit_data: true,
             state: Mutex::new(ProverState::default()),
@@ -339,6 +377,15 @@ impl<'g, 'h> FlockProver<'g, 'h> {
     #[must_use]
     pub fn span(mut self, span: bool) -> Self {
         self.span = span;
+        self
+    }
+
+    /// Lower the smallest `d_part` the prover uses below the admitted `min_part_log2` (test
+    /// hook: an aggregate with more than two parts per segment, which verifiers refuse).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn part_floor(mut self, floor: u32) -> Self {
+        self.part_floor = floor;
         self
     }
 
@@ -461,7 +508,14 @@ impl KeccakSide for FlockProver<'_, '_> {
     /// One tie site per tied part (docs/soundness.md 6.4, [`keccak_plan`]).
     fn plan(&self, segments: usize) -> KeccakPlan {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
-        keccak_plan(self.gate, &self.geometry, self.part_log2, self.span, self.profile)
+        keccak_plan_with_floor(
+            self.gate,
+            &self.geometry,
+            self.part_log2,
+            self.span,
+            self.profile,
+            self.part_floor,
+        )
     }
 
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>> {
@@ -470,12 +524,13 @@ impl KeccakSide for FlockProver<'_, '_> {
         state.segments.clear();
         state.span = None;
         state.log.clear();
-        if spans_segments(&self.geometry, self.part_log2, self.span) {
+        if spans_with_floor(&self.geometry, self.part_log2, self.span, self.part_floor) {
             return self.commit_span(&mut state, segments);
         }
         let mut items = Vec::with_capacity(segments);
         for sigma in 0..segments {
-            let plan = SegmentParts::plan(&self.geometry, sigma, self.part_log2);
+            let plan =
+                SegmentParts::plan_with_floor(&self.geometry, sigma, self.part_log2, self.part_floor);
             let mut parts = Vec::with_capacity(plan.count());
             for s in 0..plan.count() {
                 let start = Instant::now();
@@ -801,7 +856,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
             });
         }
         let d_part = first.d_part;
-        if d_part < MIN_PART_LOG2 || d_part > geometry.d_seg() {
+        if d_part < min_part_log2(geometry) || d_part > geometry.d_seg() {
             return None;
         }
         let mut tie_bits = Vec::new();
@@ -848,7 +903,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
             return self.verify_span(segment, &commitments);
         }
         let d_part = commitments.d_part;
-        if d_part < MIN_PART_LOG2 || d_part > segment.geometry.d_seg() {
+        if d_part < min_part_log2(&segment.geometry) || d_part > segment.geometry.d_seg() {
             return self.reject(
                 sigma,
                 SegmentRejection::Item(crate::wire::ItemError::PartSize(d_part as u8)),
@@ -936,7 +991,7 @@ pub type SignedRecord<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AggregatorConfig {
     /// Requested `log2` of the record positions per Flock part (clamped per segment to
-    /// `[MIN_PART_LOG2, d_seg]`).
+    /// `[min_part_log2, d_seg]`: at most two parts per segment, [`MAX_PARTS_LOG2`]).
     pub part_log2: u32,
     /// The Flock profile ([`MODE_A_PROFILES`], bound at event 0).
     pub profile: FlockProfile,
@@ -1160,6 +1215,9 @@ pub struct AggregateHooks<'a> {
     /// transcript's matrices while `G_main` holds the tampered bits (the F_p-side flip of the
     /// joint bridge test). Replaces `tamper_bridge`.
     pub stale_bridge: bool,
+    /// Let the prover split segments into parts below the admitted `min_part_log2` (more
+    /// than two parts per segment), which verifiers must refuse.
+    pub part_floor: Option<u32>,
 }
 
 /// The derivation of spec 9.1 that keeps the last matrices it derived (test hooks only).
@@ -1336,6 +1394,10 @@ impl Aggregator {
         .profile(profile)
         .span(self.config.span)
         .keep_commit_data(self.keep_commit_data);
+        let side = match hooks.part_floor {
+            Some(floor) => side.part_floor(floor),
+            None => side,
+        };
         let recording = RecordingMatrices::default();
         let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
             let matrices = recording.0.lock().expect("matrices").clone();
@@ -1613,8 +1675,9 @@ mod tests {
                 assert!(plan.d_part >= MIN_PART_LOG2 && plan.d_part <= geometry.d_seg());
                 assert_eq!(
                     plan.d_part,
-                    part_log2.clamp(MIN_PART_LOG2, geometry.d_seg())
+                    part_log2.clamp(min_part_log2(&geometry), geometry.d_seg())
                 );
+                assert!(plan.count() <= 1 << MAX_PARTS_LOG2, "at most two parts");
                 let mut next = plan.first;
                 for s in 0..plan.count() {
                     let r = plan.global(s);
@@ -1669,7 +1732,7 @@ mod tests {
                 matrices: &matrices,
             })
         };
-        let empty = item(10, Vec::new());
+        let empty = item(12, Vec::new());
         assert!(check(&empty, &zero, &[]));
         assert!(verifier.rejection().is_none());
         assert!(!check(&empty, &one, &[]));
@@ -1682,7 +1745,7 @@ mod tests {
             verifier.rejection(),
             Some((3, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
         ));
-        assert!(!check(&item(10, vec![vec![1]]), &zero, &[]));
+        assert!(!check(&item(12, vec![vec![1]]), &zero, &[]));
         assert!(matches!(
             verifier.rejection(),
             Some((
@@ -1693,7 +1756,8 @@ mod tests {
                 })
             ))
         ));
-        for d_part in [2, 14] {
+        // At most two parts per segment: `d_part >= d_seg - 1 = 12`.
+        for d_part in [2, 3, 10, 11, 14] {
             assert!(!check(&item(d_part, Vec::new()), &zero, &[]));
             assert!(matches!(
                 verifier.rejection(),

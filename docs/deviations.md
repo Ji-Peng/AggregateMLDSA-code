@@ -529,7 +529,8 @@ commitments, the shares and the proofs are bound in the PIOP transcript. Part `s
 challenger with `SHA3-256(len || "agg-mldsa/v1/flock-part-seed" || fs_sigma || LE64(s))`, and
 `BridgeSlot::digest` now covers the part offset (and the share), so a part proof does not
 verify at another index. The verifier rejects `d_part` outside `[3, d_seg]` and a part count
-other than `ceil(live / 2^{d_part})`. Its Flock work grows with the number of parts (and so
+other than `ceil(live / 2^{d_part})`. (Since the proof-of-work schedule the admitted range is
+`[max(3, d_seg - 1), d_seg]`, at most two parts per segment: `docs/soundness.md` 3.5, K20.) Its Flock work grows with the number of parts (and so
 with the proof size); a floor on `d_part` per `N` is a possible later policy.
 
 Why: K9. A Flock registry gives every type the same `2^nu` rows, so the bridged union of
@@ -829,6 +830,13 @@ upstream's do not verify here (mode A rejects the old format anyway: tied-part p
 4, K20). The finding should be raised with the Flock authors, who may have an argument for
 the outer sites that their audit document does not state; if so this patch can be dropped.
 
+Known malleability: Flock's `verify_pow` (`flock-transcript` `83f963e`, `challenger.rs`)
+accepts any `u64` nonce that passes the predicate, with no `g + 7` width bound, so the Flock
+nonces inside a proof are not canonical (unlike the PIOP stream and the tie nonce, which are
+bounded to `2^(g + 7)`). Another passing nonce gives another valid proof of the same
+statement. Akita Proposition 10.3 does not need the bound, so soundness is unaffected; we do
+not patch it (a bound in the vendored verifier would make the proofs canonical).
+
 ## K20. Tie work and the tie binding (tied-part proof version 4; docs/soundness.md 3.6, 4.5, 6.3)
 
 docs/bridge.md 5c (version 3): the tie challenges `rho` were drawn without work, with the
@@ -846,6 +854,15 @@ challengers absorb (label `agg-keccak/v4/tie-binding`) before Flock binds its st
 The difficulty is a function of the part's public geometry (`TiedPart::plan_tie_bits`), so
 the plan of event 0 names it before the part exists. Cost: about `2^17` BLAKE3 evaluations
 and 4 bytes per tied part.
+
+Parts per segment (mode A, `agg_cli::mode_a::MAX_PARTS_LOG2`): at most two tied parts per
+segment, `d_part >= max(3, d_seg - 1)`. The bridge seed `sd` is drawn while each part's
+sponge commitment is bound only to its Johnson list, so with `P` parts in a segment its bad
+set is a union over `L^P` list tuples (`docs/soundness.md` 3.5): `L^2 theta <= 2^-132.4` is
+fine, `L^3 theta = 2^-127.7` (`Slim`) is not. The prover clamps `part_log2` into the admitted
+range, and the verifier refuses a smaller `d_part` while deriving the plan of event 0
+(`VerifyError::Plan`). Before this rule `agg aggregate --part-log2 3` on 48 records built six
+parts in one segment and verified.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

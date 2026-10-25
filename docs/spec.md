@@ -429,8 +429,8 @@ address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Propositio
 | $`\tau\in K^{d_{\rm main}}`$ (all 19 zero-checks and the linear identities at $`\tau`$) | 1 | $`d_{\rm main}`$ | $`d_{\rm main}/|K|`$ | 5 | 12 |
 | stage batching $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ (26, 8, 44 coefficients) | 3 | 1 | $`26,8,44`$ over $`|K|`$ | 5, 4, 6 | 12, 11, 13 |
 | stage rounds, degrees 4, 5, 3 (the leaves, links, ring identity, 37 reductions and 4 stack reductions ride on them) | $`3\cdot25`$ | 4, 5, 3 | degree over $`|K|`$ | 3, 3, 2 | 10, 10, 9 |
-| bridge seed $`\mathsf{sd}`$ (9.4) over the sponge commitment's Johnson list | 1 | | $`L_s\cdot2^{-144.64}=2^{-139.0}`$ (`Slim`) | 0 | 0 |
-| Flock tie site of a tied part, GF($`2^{128}`$), with the list sizes $`L_s=L_u`$ (35, 50, 70) | 1 (span) | max of the four identities | $`[2L^2(d+s+5)+2L(\log_2b+s+9)+L(5+s)+L(\nu_s+3)]/2^{128}`$ | 16 / 17 / 18 (`Fast`/`Slim`/`Slim8`, full segment or span) | $`g+7`$ |
+| bridge seed $`\mathsf{sd}`$ (9.4) over the sponge commitments' Johnson lists: $`\sum_\sigma L_s^{P_\sigma}\theta`$, $`P_\sigma\le2`$ parts per segment | 1 | | span on $`L_s\theta=2^{-139.0}`$, span off $`4L_s\theta=2^{-137.0}`$, worst admitted $`4L_s^2\theta=2^{-131.4}`$ (`Slim`) | 0 | 0 |
+| Flock tie site of a tied part, GF($`2^{128}`$), with the list sizes $`L_s=L_u`$ (35, 50, 70) | 1 (span) | $`L_sL_u(d+s+5)+L_u\max(\log_2b+s+9,5+s)+L_s(\nu_s+3)`$ (union over list pairs) | $`[2L^2(d+s+5)+2L(\log_2b+s+9)+L(5+s)+L(\nu_s+3)]/2^{128}`$ | 16 / 17 / 18 (`Fast`/`Slim`/`Slim8`, full segment or span) | $`g+7`$ |
 | Akita opening sites | 459 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
 | Flock internal sites | | Flock's | Flock's per-site schedule; outer sites with the level-0 list factor (PATCH.md 3) | | 8-byte words (already in the Flock proofs) |
 
@@ -441,7 +441,9 @@ field terms is $`(12d_{\rm main}+d_{\rm main}+3+{\rm GKR})/|K|=1{,}434/|K|=2^{-1
 $`2^{15}`$ (999/|K| at $`2^{10}`$); the former per-instance ledger charged every reduction,
 zero-check and linear identity its own $`d_{\rm main}/|K|`$ and summed to $`3{,}534/|K|`$
 (`docs/soundness.md` Section 5). The plan (tie sites, then the PIOP sites in registry order)
-is bound in event 0 by its SHA3-256 digest (Section 10). Not covered by the schedule: the
+is bound in event 0 by its SHA3-256 digest (Section 10). Mode A admits at most two tied parts
+per segment ($`d_{\rm part}\ge d_{\rm seg}-1`$; `docs/soundness.md` 3.5), so the $`\mathsf{sd}`$
+union stays below $`2^{-128}`$. Not covered by the schedule: the
 composition of Akita's extractor with Flock's list-decoding extractor (a written proof is an
 obligation of the review and the paper, `docs/soundness.md` Section 7) and the $`Q=0`$ term
 $`(R_f+R_{\rm coord}+R_F)2^{-128}`$ (about $`2^{-117}`$, the claim is 128 bits per query as in Aerie).

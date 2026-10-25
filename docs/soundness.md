@@ -7,7 +7,7 @@
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10 |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11) |
+| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -217,10 +217,27 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
 ### 3.5 Seed sites and exports (no work)
 
 * `sd` (event 3): bad set "`M_3 M_2 M_1 delta = 0` for the fixed `delta = b xor b'`"
-  (spec 9.4), mass `theta = 2^-144.64`. Because `b'` is fixed only up to the sponge
-  commitment's Johnson list (Section 3.6), the bad set is the union over that list:
-  `L_s theta = 2^-139.51 / 2^-139.00 / 2^-138.51` (`Fast` / `Slim` / `Slim8`). Below
-  `2^-128`: no nonce (Aerie: "the projection seed requires no work").
+  (spec 9.4), mass `theta = 2^-144.64` per segment check. Because each part's `b'_s` is
+  fixed only up to its sponge commitment's Johnson list (Section 3.6), and `Y_sigma` is
+  checked once per segment against the XOR of the segment's `P_sigma` part shares, the bad
+  set of segment `sigma` is a union over the product of its `P_sigma` lists, and the
+  segments' bad sets add: `sum_sigma L_s^(P_sigma) theta`. A span is one part over all
+  segments (one list, one `theta` per segment row, still a union over one list). Mode A
+  MUST admit at most two tied parts per segment (`d_part >= d_seg - 1`, code
+  `mode_a::MAX_PARTS_LOG2`; verifiers refuse a smaller `d_part` while deriving the plan of
+  event 0). The resulting values, with `S <= 4` segments at `2^15`:
+
+  | Layout | Bound | `Fast` | `Slim` | `Slim8` |
+  | --- | --- | --- | --- | --- |
+  | span on, or one segment with one part | `L_s theta` | `2^-139.51` | `2^-139.00` | `2^-138.51` |
+  | span off, `S = 4` segments, one part each | `S L_s theta` | `2^-137.51` | `2^-137.00` | `2^-136.51` |
+  | one segment, two parts | `L_s^2 theta` | `2^-134.38` | `2^-133.35` | `2^-132.38` |
+  | `S = 4` segments, two parts each | `S L_s^2 theta` | `2^-132.38` | `2^-131.35` | `2^-130.38` |
+
+  All are below `2^-128`: no nonce (Aerie: "the projection seed requires no work"). Without
+  the two-part cap the bound would be `L_s^P theta` for `P` parts in one segment, which
+  exceeds `2^-128` from `P = 3` under `Slim` (`2^-127.7`) and is vacuous at the
+  `2^(d_seg - 3)` parts a segment could otherwise hold (review of `pow-128`, finding 1).
 * `fs_sigma` (event 5), the span seed, the PCS session digest (event 13): seeds of
   sub-protocol oracles. They have no bad set of their own; the sites they seed are
   counted where they occur.
@@ -250,8 +267,12 @@ evaluates to zero, so the bad set is the union over the lists: `L_s L_u` pairs f
 `L = floor(1/(2 eta sqrt(rho_0)))` (Flock Eq. (10), `eta = 0.02`, level-0 rate
 `rho_0 = 2^-r`): `L = 35, 50, 70` for `Fast, Slim, Slim8` (`r = 1, 2, 3`).
 
-* `nu_tie` (round-by-round, first false identity) `= max(L_s L_u (d + span_log + 5),
-  L_u (log2 blocks + span_log + 9), L_u (5 + span_log), L_s (nu_s + 3))`.
+* `nu_tie` (round-by-round, first false identity, unioned over the list pairs) `=
+  L_s L_u (d + span_log + 5) + L_u max(log2 blocks + span_log + 9, 5 + span_log) +
+  L_s (nu_s + 3)`. A single maximum over the four identities is not a bad-set bound:
+  different list pairs `(f, g)` can have different first false identities; tie 2 and the
+  outputs depend only on the union element `g`, the public words only on the sponge element
+  `f`, so the union over pairs adds one term per object type.
 * Assigned (normative) `e_tie = [2 L_s L_u (d + span_log + 5) + 2 L_u (log2 blocks +
   span_log + 9) + L_u (5 + span_log) + L_s (nu_s + 3)] / 2^128`.
 * `g_tie = ceil(log2(2^128 e_tie))`; nonce `g_tie + 7` bits.
@@ -502,9 +523,14 @@ At a PIOP challenge event with `g > 0` (prover and verifier run the same state m
    squeezed from the same sponge afterwards: predicate and challenge are disjoint,
    consecutive parts of one output stream at one address (Aerie C.1: "the stream's first
    `g_t` bits must be zero; disjoint later bits generate the challenge"), which realizes
-   the joint experiment of Akita Proposition 10.3 without a separate address. The address
-   is unique per site because the registry fixes the event sequence and event 0 binds the
-   plan digest; no extra label is absorbed (as Aerie, registry metadata is not absorbed).
+   the joint experiment of Akita Proposition 10.3 without a separate address. No site
+   label is absorbed (Aerie C.1 does include labels in the hash input; we do not need
+   them): the contexts stay distinct because (i) the registry, hence the event sequence,
+   is fixed by the manifest bound in event 0 together with the plan digest, (ii) every
+   payload absorbed right before a nonce has a length fixed by the registry, and (iii) the
+   variable-length items (event-2 and event-6 Flock items, the `c~` list) are framed with
+   their lengths. The absorbed prefixes are therefore injective in the transcript, which is
+   the hypothesis of Akita Proposition 10.3.
 4. Sites with `g = 0` (only `X`) absorb nothing and squeeze no predicate.
 
 ### 6.2 The packed nonce stream
@@ -558,15 +584,32 @@ part in `nu_s`; the vectors use full batches.)
 
 The prover tries `v = 0, 1, ...` and takes the first passing value, at most `2^(g + 7)`
 candidates (deterministic proofs). A site fails with probability
-`(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.7`; with at most 488 sites per proof the
-completeness error is below `2^-175.7`. Expected work per site `2^g` predicate
-evaluations.
+`(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.7`. The capped searches of a proof are the
+PIOP sites (at most 484), the tie sites (one per tied part: at most `2 S <= 8` with the
+two-part cap of 3.5) and Akita's capped transcript searches (459 at `2^15`); Flock's
+outer-site searches are uncapped and cannot fail. The completeness error is therefore at
+most `(484 + 8 + 459) 2^-184.7 < 2^-174.8`. A tie search that exhausts its allowance
+stops the tied-part prover with a panic (an assert in `TieChallenges::derive`, probability
+below `2^-184.7` per part), not with an error value. Expected work per site `2^g`
+predicate evaluations.
 
 ## 7. Theorem (128-bit knowledge soundness, classical ROM)
 
 **Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` or `Slim` with the fix of
 4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 4 (4.5), PIOP wire version 2
-with the plan of Section 6, and Akita's plan for the selected catalog row. For every
+with the plan of Section 6, at most two tied parts per segment (3.5), and Akita's plan for
+the selected catalog row. Assume in addition:
+
+* **(H1, open 6)** every fold group of the 13 grouped Akita rows draws its sparse fold
+  challenges from a family whose accepted support is at least `2^128` after rejection
+  (`PRODUCTION_FOLD_CHALLENGE_LADDER` support floor `>= 128` bits); not yet checked per
+  row in this repository;
+* **(H2, open 3)** Akita's Theorem 10.45 composes with a second, straight-line
+  list-decoding extractor for the Flock vectors inside the application segment (step (3)
+  below); the argument is not yet written.
+
+Until H1 and H2 are discharged the paper MUST state them as hypotheses and MUST NOT claim
+the theorem unconditionally. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 1, every nonce probe
 included) there is an extractor of expected cost polynomial in that of `P` (Aerie
 Theorem 5.9: at most `(Q_wrap + 2) K_hat` runs) that returns the original execution and,
@@ -596,14 +639,14 @@ round-1 polynomials and the sponge list, with Lemma S supplying the bits and bad
 Definition 10.16 (vii) at every PIOP and tie site; Flock's validated per-site bounds
 supply them inside the Keccak side; Akita's plan inside the opening. (4) Every address
 weighs at most `2^-128` (Section 3, the script's assertion `max weight <= 2^-128`; Flock
-with 4.3/4.4; Akita by its plan and its 128-bit sparse-challenge floor), so Aerie
+with 4.3/4.4; Akita by its plan and, under H1, its 128-bit sparse-challenge floor), so Aerie
 Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <= 2^-128`. (5) The extracted
 objects satisfy relation H by spec 12.2 (lookup, leaves, bridge with `b = b'`, Keccak by
 Flock's relation).
 
 *What is not proved here.* Step (3)'s composition with a second, straight-line extractor
-inside the application segment (the Flock vectors) is the obligation of step 3 (review)
-and of the paper; Flock's own MCA, OOD and query bounds are taken from Flock; Akita's
+inside the application segment (the Flock vectors) is hypothesis H2, the obligation of
+step 3 (review) and of the paper; the per-row support floor is hypothesis H1; Flock's own MCA, OOD and query bounds are taken from Flock; Akita's
 Module-SIS estimates exclude the extractor's run count as in Aerie. As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
@@ -712,15 +755,15 @@ Tie site, full parts (`n = 2^d S`), selected rows (the script prints every `d = 
 
 ```text
 profile  d   S  nu_s  terms(tie1,tie2,out,pub)  plain  g_plain  list  listed    g   nonce  tight(RBR)  g_tight
-fast     3   1     4  (8, 9, 5, 7)                 46        6    35    20650   15     22        9800       14
-fast    13   1    13  (18, 13, 5, 16)              83        7    35    45745   16     23       22050       15
-fast    13   4    15  (20, 15, 7, 18)              95        7    35    50925   16     23       24500       15
-slim     3   1     4  (8, 9, 5, 7)                 46        6    50    41500   16     23       20000       15
-slim    10   1    11  (15, 10, 5, 14)              69        7    50    76950   17     24       37500       16
-slim    13   1    13  (18, 13, 5, 16)              83        7    50    92350   17     24       45000       16
-slim    13   2    14  (19, 14, 6, 17)              89        7    50    97550   17     24       47500       16
-slim    13   4    15  (20, 15, 7, 18)              95        7    50   102750   17     24       50000       16
-slim8   13   4    15  (20, 15, 7, 18)              95        7    70   199850   18     25       98000       17
+fast     3   1     4  (8, 9, 5, 7)                 46        6    35    20650   15     22       10360       14
+fast    13   1    13  (18, 13, 5, 16)              83        7    35    45745   16     23       23065       15
+fast    13   4    15  (20, 15, 7, 18)              95        7    35    50925   16     23       25655       15
+slim     3   1     4  (8, 9, 5, 7)                 46        6    50    41500   16     23       20800       15
+slim    10   1    11  (15, 10, 5, 14)              69        7    50    76950   17     24       38700       16
+slim    13   1    13  (18, 13, 5, 16)              83        7    50    92350   17     24       46450       16
+slim    13   2    14  (19, 14, 6, 17)              89        7    50    97550   17     24       49050       16
+slim    13   4    15  (20, 15, 7, 18)              95        7    50   102750   17     24       51650       16
+slim8   13   4    15  (20, 15, 7, 18)              95        7    70   199850   18     25      100310       17
 ```
 
 Flock outer sites under the paper's list accounting (bits = `128 + bits - log2(nu L_max)`):
@@ -737,10 +780,13 @@ transport claim batch      128.86   128.36   127.86
 merged-sumcheck round      123.86   123.36   122.86
 ```
 
-Seed `sd` with the sponge list: `2^-139.51 / 2^-139.00 / 2^-138.51`, `g = 0`. Old ledger vs
+Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2^-139.51 /
+2^-139.00 / 2^-138.51`; span off at four segments `2^-137.51 / 2^-137.00 / 2^-136.51`; two
+parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` (three
+parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Old ledger vs
 round-by-round at `2^15`: `3,534/|K| = 2^-116.2` vs `1,434/|K| = 2^-117.5` (stages 300,
 `tau` 25, gammas 3, GKR 1,106). Honest failure per site `<= 2^-184.7`, per proof
-`<= 2^-175.7`.
+`<= 2^-174.8` (951 capped searches: PIOP, 8 tie, 459 Akita; Section 6.5).
 
 Totals with the tie nonce (`N = N*`): `2^10` 395 B (0.386 B/sig), `2^13` 491 B
 (0.060 B/sig), `2^15` 560 B (0.017 B/sig) with the span, 572 B with span off.
@@ -781,7 +827,7 @@ change with it.
    recommended.
 3. **Composition proof.** The theorem's step (3), Akita Theorem 10.45 with a second,
    straight-line (list-decoding) extractor inside the application segment, needs a written
-   proof (step 3 review, paper appendix).
+   proof (step 3 review, paper appendix). Stated as hypothesis H2 of Section 7.
 4. **`R_F`** (Flock sites read by the verifier) is not counted exactly here; it enters only
    the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tie site; its Keccak side is
@@ -789,4 +835,5 @@ change with it.
 6. **Akita sparse folds.** Akita enforces a 128-bit floor on every fold-challenge family
    (`MIN_FOLD_CHALLENGE_ENTROPY_BITS = 128`); Aerie's spec script additionally checks the
    accepted (post-rejection) supports of its rows. The same check for our 13 grouped rows
-   is not done here and SHOULD be added with the Akita plan-digest test (4.1).
+   is not done here and SHOULD be added with the Akita plan-digest test (4.1). Stated as
+   hypothesis H1 of Section 7.

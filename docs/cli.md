@@ -36,7 +36,8 @@ step `profile` of the report), or the one fixed by `AggregateVerifier::require`;
 transcript binds it at event 0 (K15).
 
 Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` record positions,
-`d_part = clamp(part_log2, 3, d_seg)`, `part_log2` from `AggregatorConfig` (default
+`d_part = clamp(part_log2, max(3, d_seg - 1), d_seg)` (at most two parts per segment,
+`docs/soundness.md` 3.5), `part_log2` from `AggregatorConfig` (default
 `DEFAULT_PART_LOG2 = 13`: the whole segment is one part since the tied part of K11 removed
 the cost that forced parts of 512 in Section 4; the `agg` usage text still says 9). Each part
 is a tied part (`agg_keccak::tied`): a Flock sponge instance of its records and a Flock
