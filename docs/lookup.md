@@ -1,4 +1,4 @@
-# Lookup-based range argument for the ML-DSA-44 aggregator (integrated, wire version 1)
+# Lookup-based range argument for the ML-DSA-44 aggregator (integrated in wire version 1, unchanged in version 3)
 
 Status: integrated (branch `lookup-integration`, 2026-10-24). The lookup into `T_16` is
 the range mechanism of relation H in mode A and mode B: `crates/agg-piop/src/lookup.rs`

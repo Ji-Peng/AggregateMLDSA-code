@@ -2,7 +2,9 @@
 
 Akita commitment presets, generated fold-schedule catalogs, work plan and two-round
 commit driver for the six witness groups of spec Section 4.1 (lookup layout L16,
-`docs/lookup.md`; wire version 1). Akita and Aerie pins as in `README.md` (Akita
+`docs/lookup.md`; introduced with wire version 1, unchanged in the current PIOP wire
+version 3, which adds the relation byte: H-u rows `mldsa-44-l16-*`, H-exact rows
+`mldsa-44-l16x-*`). Akita and Aerie pins as in `README.md` (Akita
 `e023b6a`, the revision Aerie `49b6c21` pins, with the `dev-protocol` feature the
 catalogs are priced for).
 

@@ -6,20 +6,35 @@ with a Flock-based argument for the witness-dependent SHAKE256 call.
 The protocol source of truth is [`docs/spec.md`](docs/spec.md); deviations from it are
 recorded in `docs/deviations.md`.
 
+Status (`main`, 2026-10-25): ML-DSA-44, mode A (public `c~`) and mode B (public bits),
+PIOP wire version 3. Two relations, selected by `--relation` and bound in event 0:
+**H-u** (default; `z` in `[-2^17, 2^17)`, `|u| <= 190,465`, SelfTargetMSIS bound
+`zeta' = 350,209`) and **H-exact** (also `|z| <= 130,993`, FIPS 204's bounds; one more
+committed column). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work
+schedule ([`docs/soundness.md`](docs/soundness.md): census, schedule, the 128-bit theorem
+and its composition proof, conditional on the stated assumptions (F) and (K)). Latest
+cloud check at 32K: `ref/notes/bench-cloud.md` in the top-level repository.
+
 ## Layout
 
 | Crate | Kind | Content (spec Section 14) | Milestone |
 | --- | --- | --- | --- |
-| `crates/agg-witness` | lib | ML-DSA-44 native verify, key expansion, (z,u,v,b) derivation, CRT product, table builders, padding | M1 |
-| `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset and the width-16 preset `AggFp64SignedWidth16`, six-group catalogs in two families, two-round commit driver, work plan | M1 |
-| `crates/agg-piop` | lib | the LogUp-GKR lookup into `T_16` (layout L16, `docs/lookup.md`), stages 1-3, the two remaining range leaves and links, weight tables, verifier, Akita openings | M2 |
+| `crates/agg-witness` | lib | ML-DSA-44 native verify, key expansion, (z,u,v,b) derivation, digit forms of H-u and H-exact, CRT product, table builders, padding, relation checker | M1 |
+| `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset and the width-16 preset `AggFp64SignedWidth16`, six-group catalogs in two families for both relations (`Relation`), two-round commit driver, work plan | M1 |
+| `crates/agg-piop` | lib | the LogUp-GKR lookup into `T_16` (layout L16, `docs/lookup.md`), stages 1-3, the two remaining range leaves and links, weight tables, the proof-of-work schedule (`pow`), verifier, Akita openings | M2 |
 | `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, soundness constants | M2 |
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, tied parts (sponge and bridge instances tied by evaluation claims, `flock_union`, `tied`; spans over several segments, K16), legacy segment driver; `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs | M3 |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` | M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
-Other files: `docs/` (spec, spec checks, `pcs-config.md` for the Akita preset and
-catalog status and regeneration, `piop.md` for the PIOP tables and commitments, `lookup.md` for the range lookup, `cli.md` for mode A end to end and the `agg` tool, `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
+Other files: `docs/` (`spec.md` and `scripts/spec_checks.py`; `soundness.md` with
+`scripts/pow_plan.py` and `scripts/fold_support.py` for the proof-of-work schedule and the
+theorem; `h-exact.md` for relations H-u and H-exact; `witness.md`; `pcs-config.md` for the
+Akita presets, catalog status and regeneration; `piop.md` for the PIOP tables and
+commitments; `lookup.md` for the range lookup; `bridge.md` and `keccak.md` for the parity
+bridge and the Flock side; `cli.md` for mode A end to end and the `agg` tool;
+`perf.md` for the local prover profile and the speed levers (direction only);
+`deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
 ## Pinned revisions
@@ -53,7 +68,7 @@ come along too (and can be added directly if needed).
 | `aerie-keccak` | yes | runtime-dispatched batched SHAKE256 (`shake256_64_batch`, etc.) |
 | `aerie-simd` | yes | runtime ISA ceiling `Backend::selected()`; `backend-override` is test-only upstream |
 
-Aerie's test-only features (`honest-vectors`, `test-fixtures`, `backend-override`) are
+Aerie's test-only features (`honest-vectors`, `test-fixtures`, `backend-override`)
 exist upstream but are not enabled here (not yet tried as git features).
 
 ## Build and test

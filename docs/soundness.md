@@ -37,8 +37,8 @@ the pinned code; estimates are marked.
    proof-of-work is unconditional in `batched_prove`/`batched_verify`; our six-group
    catalogs already run it: 459 protected sites at `2^15`, targets up to 12 bits
    (ring-switch `alpha`, loss 4,095), plan digest bound in Akita's instance descriptor.
-   Nothing needs to be turned on; `status.md`'s "no grinding plan" is wrong for the
-   opening and right only for the PIOP.
+   Nothing needs to be turned on; `status.md`'s former "no grinding plan" was wrong for
+   the opening and right only for the PIOP (status.md corrected on 2026-10-25).
 4. **Flock.** Flock's strict `Fast`/`Slim` level is not a query-only claim: every outer
    challenge (zerocheck, lincheck, ring switch, transport batch, merged sum-check) has a
    per-challenge nonce and every Ligerito component is validated strictly above 128 bits.
@@ -376,8 +376,8 @@ fix of Section 4.3 only widens existing ones.
   grouped row for the opening layout of its six root groups
   (`OpeningClaimsLayout::from_root_groups`), checks the table of Section 3.7 (sites, `sum g`,
   max `g`, `sum 2^g`, nonce bits of all runs) and pins the 13 full digests (`225708cb...` at
-  `d_sig` 3 to `4f5a6026...` at 15). `ref/notes/status.md` (top-level repository) still says
-  the opening has no grinding plan; it is outside the code repository.
+  `d_sig` 3 to `4f5a6026...` at 15). `ref/notes/status.md` (top-level repository) was
+  corrected on 2026-10-25.
 
 ### 4.2 Flock: what the documented 128-bit level covers
 
@@ -1346,7 +1346,7 @@ coordinates `<= 2^-128.088` (4.6). This is the bound of Section 7.
 
 **Corollary 12.5 (mode B).** Fix `N <= 2^15`, mode B (Flock profile id 3, deviation P9:
 the `w1Encode` strings of each segment's live records are the event-2 items, absorbed before
-`sd`; the event-6 proof items are empty), PIOP wire version 2 with the plan of Section 6
+`sd`; the event-6 proof items are empty), PIOP wire version 3 with the plan of Section 6
 (profile id 3, no tie site) and Akita's plan for the selected row. Then the statement of
 Section 7 holds for mode B without assumption (F) and without the terms `eps_fs`,
 `eps_merkle` and `R_F`, with the same extractor bound otherwise. *Proof.* The structure of

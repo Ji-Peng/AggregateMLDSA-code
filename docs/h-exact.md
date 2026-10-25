@@ -2,8 +2,8 @@
 
 | Field | Value |
 | --- | --- |
-| Status | implemented on branch `h-exact`: step A (relation H-u as the default, open question 1 answered (a); wire version 3, deviation L8) and step B (H-exact, relation byte 1, deviation L9; Section 9) |
-| Applies to | ML-DSA-44, lookup layout L16, modes A and B, PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`) |
+| Status | merged into `main` at `8da7538` (2026-10-25); implemented on branch `h-exact`: step A (relation H-u as the default, open question 1 answered (a); wire version 3, deviation L8) and step B (H-exact, relation byte 1, deviation L9; Section 9) |
+| Applies to | ML-DSA-44, lookup layout L16, modes A and B; written against PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`), implemented as wire version 3 |
 | Base | code `be398d8` (main); layered on branches `pow-128` (`406245a`), `piop-speed` (`7476508`), `flock-speed` (`baf9e46`) |
 | Replaces | spec Appendix A, paragraph "H-exact" (which `ref/notes/msis-estimate.md` calls "spec Section 15"; there is no Section 15) |
 | Last reviewed | 2026-10-25, first version; step A notes added (Section 8); step B notes added (Section 9) |
