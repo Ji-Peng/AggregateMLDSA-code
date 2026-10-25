@@ -101,12 +101,10 @@ impl PcsParams {
     /// bounds. Ligerito derives its own schedule from the selected profile.
     pub fn zerocheck_grinding(&self) -> ZerocheckGrinding {
         match self.profile {
-            LigeritoProfile::Fast
-            | LigeritoProfile::Slim
-            | LigeritoProfile::Slim8
-            | LigeritoProfile::Secure => {
-                ZerocheckGrinding::per_challenge_128()
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
+                ZerocheckGrinding::per_challenge_128_listed(self.profile.l0_list_factor())
             }
+            LigeritoProfile::Secure => ZerocheckGrinding::per_challenge_128(),
             LigeritoProfile::Fast100 | LigeritoProfile::Slim100 => ZerocheckGrinding::disabled(),
         }
     }
@@ -119,12 +117,10 @@ impl PcsParams {
     /// profiles retain their legacy transcript shape.
     pub fn lincheck_grinding(&self) -> LincheckGrinding {
         match self.profile {
-            LigeritoProfile::Fast
-            | LigeritoProfile::Slim
-            | LigeritoProfile::Slim8
-            | LigeritoProfile::Secure => {
-                LincheckGrinding::per_challenge_128()
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
+                LincheckGrinding::per_challenge_128_listed(self.profile.l0_list_factor())
             }
+            LigeritoProfile::Secure => LincheckGrinding::per_challenge_128(),
             LigeritoProfile::Fast100 | LigeritoProfile::Slim100 => LincheckGrinding::disabled(),
         }
     }
@@ -150,12 +146,10 @@ impl PcsParams {
     /// jagged reductions rather than the proximity protocol.
     pub fn opening_grinding(&self) -> OpeningGrinding {
         match self.profile {
-            LigeritoProfile::Fast
-            | LigeritoProfile::Slim
-            | LigeritoProfile::Slim8
-            | LigeritoProfile::Secure => {
-                OpeningGrinding::per_challenge_128()
+            LigeritoProfile::Fast | LigeritoProfile::Slim | LigeritoProfile::Slim8 => {
+                OpeningGrinding::per_challenge_128_listed(self.profile.l0_list_factor())
             }
+            LigeritoProfile::Secure => OpeningGrinding::per_challenge_128(),
             LigeritoProfile::Fast100 | LigeritoProfile::Slim100 => OpeningGrinding::disabled(),
         }
     }

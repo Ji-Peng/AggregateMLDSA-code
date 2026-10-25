@@ -5,10 +5,10 @@
 | Field | Value |
 | --- | --- |
 | Status | normative draft for milestone 1; no implementation yet |
-| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relaxed relation H, wire version 1 (unfrozen; lookup layout L16, `docs/lookup.md`) |
+| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relaxed relation H, wire version 2 (unfrozen; lookup layout L16, `docs/lookup.md`; the proof-of-work schedule of `docs/soundness.md`) |
 | Base system | Aerie `49b6c21` (Akita pin `e023b6a`), Flock HEAD `83f963e` circuit language, retired Keccak encoder `c2d0c24` as reference |
 | Variants | H-exact and S1+S2 layouts are feature flags (Appendix A) |
-| Last reviewed | 2026-10-24, revision 3: the lookup layout L16 (former Appendix C) is normative in Sections 4 to 7 and 10 to 12; the base-16 digit layout of wire version 0 is retired (`docs/deviations.md` L1) |
+| Last reviewed | 2026-10-25, revision 4: wire version 2, the per-site ledger and the proof-of-work schedule of `docs/soundness.md` in Sections 10 and 12.1 (deviation P3 resolved); 2026-10-24, revision 3: the lookup layout L16 (former Appendix C) is normative in Sections 4 to 7 and 10 to 12; the base-16 digit layout of wire version 0 is retired (`docs/deviations.md` L1) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Aerie conventions (Akita groups, local variable orders, lifting of small instances, Spongefish transcript, grinding) are adopted by reference to `aerie/specs/falcon.md`; this document restates only what differs. Deviations made during implementation go to `docs/deviations.md`. Design questions decided while writing are in Appendix B.
 
@@ -367,11 +367,11 @@ Grinding on $`\mathsf{sd}`$ multiplies the first term by the number of seed deri
 
 ## 10. Transcript and wire format
 
-Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2b` (64 bytes, zero-padded), session `B("agg-mldsa/v1")`, instance digest from the canonical instance record. Encodings, the per-limb $`K`$ sampler, LEB128 work nonces and the scheduled grinding are Aerie's; the work plan per admitted shape is an obligation of `agg-pcs-config`. Ordered events:
+Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2b` (64 bytes, zero-padded), session `B("agg-mldsa/v1")`, instance digest from the canonical instance record. Encodings and the per-limb $`K`$ sampler are Aerie's. Scheduled grinding (wire version 2, `docs/soundness.md` Section 6): every field-challenge event of difficulty $`g>0`$ (12.1) absorbs a nonce $`v\lt2^{g+7}`$ as the public message `LE32(v)`, squeezes a 32-byte predicate whose low $`g`$ bits must be zero (Akita's bit order), then squeezes the challenge; the PIOP nonces travel in one packed stream (below), the tie nonces in the tied-part proofs, Akita's inline in the opening (Akita's own plan, bound in its instance descriptor). Ordered events:
 
 | # | Event | Payload |
 | --- | ---: | --- |
-| 0 | instance | wire version LE16 (1), parameter-set byte 0x44, feature flags (H / H-exact / S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (1, Section 4.3), the six group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks) |
+| 0 | instance | wire version LE16 (2), parameter-set byte 0x44, feature flags (H / H-exact / S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (1, Section 4.3), the six group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
 | 1 | absorb | round-1 Akita commitments $`G_{\rm main16}`$, $`G_{\rm main4}`$ (native encoding) |
 | 2 | absorb | $`S`$ Flock commitments (Ligerito roots or LaBinius commitments), segment order |
 | 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling |
@@ -386,7 +386,7 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 | 12 | challenge | $`\gamma^{(3)}\in K^{44}`$; stage-3 rounds of 3 elements; the 31 stage-3 opening claims |
 | 13 | PCS | Akita native stream seeded by the 32-byte PIOP session digest, as Aerie 12.3 |
 
-Every challenge is drawn after the previous absorb. The bridge seed follows the round-1 and Flock commitments (events 1, 2), so $`b`$ and $`b'`$ are fixed before $`\mathsf{sd}`$, and precedes the round-2 commitments (event 4), whose carries, parities and multiplicities are functions of $`\mathsf{sd}`$, and every sum-check challenge. The lookup challenges $`X_1,X_2`$ follow every commitment, so every looked-up cell and $`m`$ are fixed before them. Proof layout: header (version 1, flags, $`N`$), the $`32N`$ bytes of $`\tilde c_i`$, then events 1, 2, 4, 6, 7, 9 to 12 payloads in order, then the Akita opening. Size at $`N=2^{15}`$: $`32N`$ bytes of hashes; lookup 1,799 elements plus 7 digit claims, 28,896 B (`docs/lookup.md` Section 1); stages $`(4+5+3)\cdot25\cdot16+76\cdot16=6{,}016`$ B; Akita opening about 65 KB (planner estimate 65,282 B); Flock sub-proofs $`4\times0.5`$ MB (dominant until wrapped or replaced by LaBinius).
+Every challenge is drawn after the previous absorb. The bridge seed follows the round-1 and Flock commitments (events 1, 2), so $`b`$ and $`b'`$ are fixed before $`\mathsf{sd}`$, and precedes the round-2 commitments (event 4), whose carries, parities and multiplicities are functions of $`\mathsf{sd}`$, and every sum-check challenge. The lookup challenges $`X_1,X_2`$ follow every commitment, so every looked-up cell and $`m`$ are fixed before them. Proof layout: header (version 2, flags, $`N`$), the $`32N`$ bytes of $`\tilde c_i`$, then events 1, 2, 4, 6, 7, 9 to 12 payloads in order, the packed PIOP nonce stream (nonce $`i`$ in $`g_i+7`$ bits, little-endian bit order, exactly $`\lceil\sum_i(g_i+7)/8\rceil`$ bytes with zero padding: 556 B at $`2^{15}`$), then the Akita opening. Size at $`N=2^{15}`$: $`32N`$ bytes of hashes; lookup 1,799 elements plus 7 digit claims, 28,896 B (`docs/lookup.md` Section 1); stages $`(4+5+3)\cdot25\cdot16+76\cdot16=6{,}016`$ B; Akita opening about 65 KB (planner estimate 65,282 B); Flock sub-proofs $`4\times0.5`$ MB (dominant until wrapped or replaced by LaBinius).
 
 ## 11. Verifier algorithm and cost
 
@@ -404,24 +404,55 @@ Cost at $`N=2^{15}`$, single core (misc memo 2.4, estimates): Keccak-f $`92N`$ (
 
 ### 12.1 Knowledge soundness ledger
 
-Errors are per transcript, union-bounded, before grinding; $`|K|=p^2\approx2^{128}`$. $`L`$ is the number of looked-up cells (padding slots included), $`L=4\cdot2^{d_{\rm main}}+8\cdot2^{d_1}+8\cdot2^{d_2}+2^{d_3}`$ (138,690,560 at $`N=2^{15}`$, 4,395,008 at $`N=1{,}024`$), $`M=2^{16}`$, $`D=\max(d_{\rm main}+2,16)`$ the deepest fraction tree (7.0; 27 at $`N=2^{15}`$; at $`N^\star=8`$, $`d_{\rm main}=13`$, the $`T_{16}`$ tree is the deepest, $`D=16`$ and the GKR term is $`391/|K|`$, not the $`344/|K|`$ of $`d_{\rm main}+2`$).
+Normative analysis: `docs/soundness.md` (site census, round-by-round accounting, the
+proof-of-work schedule and the theorem); implemented in wire version 2 (`agg_piop::pow`,
+`agg_piop::transcript`; tied-part proof version 4 in `agg_keccak::tied`). $`|K|=p^2`$,
+$`p=2^{64}-59`$. $`L`$ is the number of looked-up cells (padding slots included),
+$`L=4\cdot2^{d_{\rm main}}+8\cdot2^{d_1}+8\cdot2^{d_2}+2^{d_3}`$ (138,690,560 at $`N=2^{15}`$,
+4,395,008 at $`N=1{,}024`$), $`M=2^{16}`$, $`D=\max(d_{\rm main}+2,16)`$ the deepest fraction
+tree (7.0; 27 at $`N=2^{15}`$; 16 at $`N^\star=8`$).
 
-| Component | Term | at $`N=2^{15}`$ ($`d_{\rm main}=25`$) |
-| --- | --- | ---: |
-| LogUp identity, two independent challenges $`X_1,X_2`$ (Lemma below) | $`\bigl((L+M-1)/|K|\bigr)^2`$ | $`2^{-201.9}`$ |
-| GKR sessions of the lookup: rounds $`3(s-1)`$, one $`\gamma`$ vector and one merge $`\mu_s`$ per session $`s=2..D`$, and $`\mu_1`$ | $`\bigl(3D(D-1)/2+2(D-1)+1\bigr)/|K|`$ | $`1{,}106/|K|`$ |
-| Stage sum-checks, degrees (4, 5, 3) | $`12\,d_{\rm main}/|K|`$ | $`300/|K|`$ |
-| Zero-checks at $`\tau`$ (19 Booleanity and range instances) | $`\le19\,d_{\rm main}/|K|`$ | $`475/|K|`$ |
-| Range leaves at $`r^{(1)}`$ (2) and links at $`r^{(2)}`$ (2) | $`\le4\,d_{\rm main}/|K|`$ | $`100/|K|`$ |
-| Linear identities at a point: levels 2, 3 at $`\tau`$; level 1 at $`r^{(1)}_1`$; ring at $`r^{(2)}`$; 37 reductions; 4 stack reductions (7.7) | $`\le(13+1+6+1+41)\,d_{\rm main}/|K|`$ | $`1{,}550/|K|`$ |
-| Batching coefficients $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ | $`3/|K|`$ | $`3/|K|`$ |
-| Bridge (9.3) | $`2^{-144.6}`$ | $`2^{-144.6}`$ |
-| Akita extraction, binding, catalog terms | by Akita's ledger for the six-group catalog rows | |
-| Flock knowledge soundness, per segment | by profile (`Fast`: 128-bit work-normalized; LaBinius: 128-bit) | |
+Every challenge site $`t`$ has a round-by-round numerator $`\nu_t`$ (its bad set has mass at
+most $`\nu_t/|F_t|`$ given the first false pending claim, Aerie Lemma C.1), an assigned bound
+$`e_t\ge\nu_t/|F_t|`$ (Aerie C.4: a vector of $`l`$ coefficients $`l/|F|`$, a round its degree,
+a merge $`1/|F|`$), and the difficulty $`g_t=\min\{g\ge0:2^{128}e_t\le2^g\}`$ computed with the
+exact field size ($`g=\mathrm{bit\_length}(n)`$ for $`e_t=n/|K|`$, $`\lceil\log_2n\rceil`$ for
+$`n/2^{128}`$). A site with $`g_t>0`$ is preceded by a work nonce of $`g_t+7`$ bits; every
+address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Proposition 10.3).
+
+| Site class | Count at $`2^{15}`$ | $`\nu_t`$ | Assigned $`e_t`$ | $`g_t`$ | Nonce bits |
+| --- | ---: | --- | --- | ---: | ---: |
+| lookup $`X=(X_1,X_2)`$, one vector site (Lemma below) | 1 | joint | $`((L+M-1)/|K|)^2=2^{-201.9}`$ | 0 | 0 |
+| lookup merges $`\mu_1..\mu_D`$ | 27 | 1 | $`1/|K|`$ | 1 | 8 |
+| GKR batching vectors $`\gamma_s`$ ($`2\cdot`$active trees coefficients) | 26 | 1 | $`20,16,12,8,4`$ over $`|K|`$ | 5, 5, 4, 4, 3 | 12, 12, 11, 11, 10 |
+| GKR rounds (degree 3) | 351 | 3 | $`3/|K|`$ | 2 | 9 |
+| $`\tau\in K^{d_{\rm main}}`$ (all 19 zero-checks and the linear identities at $`\tau`$) | 1 | $`d_{\rm main}`$ | $`d_{\rm main}/|K|`$ | 5 | 12 |
+| stage batching $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ (26, 8, 44 coefficients) | 3 | 1 | $`26,8,44`$ over $`|K|`$ | 5, 4, 6 | 12, 11, 13 |
+| stage rounds, degrees 4, 5, 3 (the leaves, links, ring identity, 37 reductions and 4 stack reductions ride on them) | $`3\cdot25`$ | 4, 5, 3 | degree over $`|K|`$ | 3, 3, 2 | 10, 10, 9 |
+| bridge seed $`\mathsf{sd}`$ (9.4) over the sponge commitments' Johnson lists: $`\sum_\sigma L_s^{P_\sigma}\theta`$, $`P_\sigma\le2`$ parts per segment | 1 | | span on $`L_s\theta=2^{-139.0}`$, span off $`4L_s\theta=2^{-137.0}`$, worst admitted $`4L_s^2\theta=2^{-131.4}`$ (`Slim`) | 0 | 0 |
+| Flock tie site of a tied part, GF($`2^{128}`$), with the list sizes $`L_s=L_u`$ (35, 50, 70) | 1 (span) | $`L_sL_u(d+s+5)+L_u\max(\log_2b+s+9,5+s)+L_s(\nu_s+3)`$ (union over list pairs) | $`[2L^2(d+s+5)+2L(\log_2b+s+9)+L(5+s)+L(\nu_s+3)]/2^{128}`$ | 16 / 17 / 18 (`Fast`/`Slim`/`Slim8`, full segment or span) | $`g+7`$ |
+| Akita opening sites | 459 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
+| Flock internal sites | | Flock's | Flock's per-site schedule; outer sites with the level-0 list factor (PATCH.md 5) | | 8-byte words (already in the Flock proofs) |
+
+At $`N^\star=2^{15}`$ the PIOP plan has 484 sites and 483 nonces, 4,444 bits in one packed
+stream of 556 bytes (227 bytes at $`N^\star=8`$, 391 at $`2^{10}`$); the expected honest work is
+$`\sum2^{g_t}=2{,}718`$ predicate evaluations. Before work the round-by-round sum of the PIOP
+field terms is $`(12d_{\rm main}+d_{\rm main}+3+{\rm GKR})/|K|=1{,}434/|K|=2^{-117.5}`$ at
+$`2^{15}`$ (999/|K| at $`2^{10}`$); the former per-instance ledger charged every reduction,
+zero-check and linear identity its own $`d_{\rm main}/|K|`$ and summed to $`3{,}534/|K|`$
+(`docs/soundness.md` Section 5). The plan (tie sites, then the PIOP sites in registry order)
+is bound in event 0 by its SHA3-256 digest (Section 10). Mode A admits at most two tied parts
+per segment ($`d_{\rm part}\ge d_{\rm seg}-1`$; `docs/soundness.md` 3.5), so the $`\mathsf{sd}`$
+union stays below $`2^{-128}`$. Not covered by the schedule: the
+composition of Akita's extractor with Flock's list-decoding extractor (a written proof is an
+obligation of the review and the paper, `docs/soundness.md` Section 7) and the $`Q=0`$ term
+$`(R_f+R_{\rm coord}+R_F)2^{-128}`$ (about $`2^{-117}`$, the claim is 128 bits per query as in Aerie).
 
 **Lemma (lookup identity).** Let the committed looked-up values be $`f_1,\ldots,f_L\in\mathbb F_p`$ ($`f=S+2^{15}`$ for a stored cell $`S`$; the padding slots are public, $`f=0`$) and $`m\in\mathbb F_p^{T_{16}}`$, all fixed by the commitments before $`X_1,X_2`$. If some $`f_i\notin T_{16}`$, then $`R(X)=\sum_i1/(X-f_i)-\sum_{t\in T_{16}}m(t)/(X-t)\ne0`$: the coefficient of $`1/(X-f_i)`$ is a count in $`[1,L]`$, nonzero in $`\mathbb F_p`$ since $`p\gt L`$ (LogUp Lemma 5, any $`m`$). Its numerator $`N`$ over $`\prod_{a\in S}(X-a)`$, $`S=\{f_i\}\cup T_{16}`$, is nonzero of degree at most $`L+M-1`$, and a challenge passes the root check (all root denominators nonzero, so $`X\notin S`$) only if $`N(X)=0`$. For independent uniform $`X_1,X_2`$, $`\Pr[N(X_1)=N(X_2)=0]\le((L+M-1)/|K|)^2`$. Otherwise some tree set's true root violates its identity, the prover's layer-1 values for it are false, and the batched GKR sessions accept a false claim only with the GKR term (Proposition 1 of LogUp-GKR with independent coefficients per claim; the second tree set adds claims, not sessions). With one challenge the identity term would be $`2^{-101.0}`$ at $`N=2^{15}`$ ($`2^{-105.9}`$ at 1,024), which no remedy cheaper than the second challenge brings to $`2^{-128}`$ (`docs/lookup.md` Section 2.1: a 28-bit work nonce costs about 7 times the second challenge and exceeds Akita's 25-bit cap; an $`\mathbb F_{p^4}`$ challenge triples the tree arithmetic).
 
-At $`d_{\rm main}=25`$ the field terms other than the identity sum to at most $`3{,}534/|K|\lt2^{-116.2}`$ (was $`7{,}603/|K|`$ with the base-16 digits); grinding every site to Aerie's schedule brings each to $`2^{-128}`$ (not implemented, `docs/deviations.md` P3). The identity term is $`2^{-201.9}`$ without grinding; the lookup as a whole is not: its GKR sessions contribute $`1{,}106/|K|\approx2^{-117.9}`$ at $`N=2^{15}`$, and each of their degree-3 rounds $`3/|K|\approx2^{-126.4}`$, so the lookup, like every other field term, reaches $`2^{-128}`$ per site only with grinding. Neither the lookup nor the protocol is at 128 bits before grinding. Point reuse ($`\tau`$ for all zero-checks, $`r^{(1)}`$ for the leaves, $`r^{(2)}`$ for the links and the ring identity, the stack points $`\pi_j`$ for their reductions) is sound because every tested table is committed before the point is sampled (Aerie 9.6).
+With the schedule every field site above weighs at most $`2^{-128}`$ per address (the
+identity term $`2^{-201.9}`$ needs no work; the lookup's GKR rounds, each $`3/|K|\approx2^{-126.4}`$
+before work, get 2 bits). Point reuse ($`\tau`$ for all zero-checks, $`r^{(1)}`$ for the leaves, $`r^{(2)}`$ for the links and the ring identity, the stack points $`\pi_j`$ for their reductions) is sound because every tested table is committed before the point is sampled (Aerie 9.6).
 
 ### 12.2 Extraction
 

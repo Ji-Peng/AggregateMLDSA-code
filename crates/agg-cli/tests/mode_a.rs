@@ -1,14 +1,15 @@
 //! Mode A end to end (spec Sections 10, 11, 13): the aggregator on real ML-DSA-44 records
 //! and the verifier on `(pk_i, M_i)` and the aggregate.
 //!
-//! - Round trips at 64, 256 (two Flock parts) and 512 signatures under each mode-A Flock
+//! - Round trips at 64, 256 (two Flock parts), 512 and (`Slim`) 1,024 signatures under each mode-A Flock
 //!   profile (`Fast`, `Slim`, `Slim8`): the aggregate size per part, the prover's and the verifier's
 //!   step costs (uncached and cached keys) are printed (`--nocapture`), the cached and
 //!   uncached paths agree, the persistent key cache round-trips, the verifier reads the
 //!   profile from the aggregate and a verifier pinned to the other profile rejects it.
 //! - Corrupted aggregates (`corrupted_aggregates_are_rejected`): every byte region of the
 //!   wire format, the mode-A segment items (part size, part count, shares, part proofs,
-//!   commitments), the records (order, message, key, count) and the configuration.
+//!   commitments), the tie nonce and the tied-part proof version, the PIOP work nonces, a
+//!   plan-digest mismatch, the records (order, message, key, count) and the configuration.
 //! - Tampered witnesses (`tampered_witnesses_are_rejected_end_to_end`): every witness
 //!   tampering of the earlier stages (`agg-piop/tests/mode_b.rs`, `tests/joint_bridge.rs`,
 //!   `agg-keccak/tests/{proofs,bridge}.rs`) pushed through the mode-A aggregator (stages
@@ -26,6 +27,7 @@ use agg_cli::mode_a::{
 };
 use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
+use agg_keccak::tied;
 use agg_keccak::witness::pack_slot;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{Column, CommitmentManifest, GroupRole};
@@ -34,6 +36,7 @@ use agg_piop::prover::{ProveError, SeededMatrices};
 use agg_piop::public_data::KeyCache;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables};
 use agg_piop::stage::StageError;
+use agg_piop::transcript::TranscriptError;
 use agg_piop::verifier::{verify_timed, ConfigurationError, VerifyError};
 use agg_piop::wire::AggregateProof;
 use agg_witness::gen::{self, Record};
@@ -267,6 +270,15 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     debug_assertions,
     ignore = "Flock and Akita proofs: run with --release"
 )]
+fn round_trip_at_1024_signatures_slim() {
+    on_large_stack(|| round_trip(800, 224, 0xb400, DEFAULT_PART_LOG2, 1, FlockProfile::Slim));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
 fn round_trip_at_512_signatures() {
     on_large_stack(|| round_trip(400, 112, 0xa512, DEFAULT_PART_LOG2, 1, FlockProfile::Fast));
 }
@@ -311,6 +323,19 @@ fn at_stage(s: usize) -> impl Fn(&VerifyError) -> bool {
     move |e| matches!(e, VerifyError::Stage(StageError::Terminal(t)) if *t == s)
 }
 
+/// A corrupted absorbed message: rejected at the terminal check of stage `s`, or earlier at
+/// the next challenge's work nonce, whose predicate depends on the message.
+fn at_stage_or_work(s: usize) -> impl Fn(&VerifyError) -> bool {
+    move |e| {
+        at_stage(s)(e)
+            || matches!(
+                e,
+                VerifyError::Stage(StageError::Transcript(TranscriptError::Work { .. }))
+                    | VerifyError::Transcript(TranscriptError::Work { .. })
+            )
+    }
+}
+
 fn keccak(e: &VerifyError) -> bool {
     matches!(e, VerifyError::Keccak(0))
 }
@@ -338,9 +363,41 @@ impl agg_piop::verifier::KeccakVerifier for Lenient<'_> {
         agg_piop::verifier::KeccakVerifier::profile(&self.0)
     }
 
+    fn plan(
+        &self,
+        geometry: &agg_witness::padding::Geometry,
+        commitments: &[Vec<u8>],
+    ) -> Option<agg_piop::pow::KeccakPlan> {
+        self.0.plan(geometry, commitments)
+    }
+
     fn verify(&self, segment: &agg_piop::verifier::SegmentContext<'_>) -> bool {
         let _ = self.0.verify(segment);
         true
+    }
+}
+
+/// The mode-A verifier with every tie difficulty of its plan raised by one (a plan-digest
+/// mismatch in event 0).
+struct OtherPlan<'g>(agg_cli::mode_a::FlockVerifier<'g>);
+
+impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
+    fn profile(&self) -> FlockProfile {
+        agg_piop::verifier::KeccakVerifier::profile(&self.0)
+    }
+
+    fn plan(
+        &self,
+        geometry: &agg_witness::padding::Geometry,
+        commitments: &[Vec<u8>],
+    ) -> Option<agg_piop::pow::KeccakPlan> {
+        let mut plan = self.0.plan(geometry, commitments)?;
+        plan.tie_bits.iter_mut().for_each(|g| *g += 1);
+        Some(plan)
+    }
+
+    fn verify(&self, segment: &agg_piop::verifier::SegmentContext<'_>) -> bool {
+        self.0.verify(segment)
     }
 }
 
@@ -352,7 +409,8 @@ impl agg_piop::verifier::KeccakVerifier for Lenient<'_> {
 #[allow(clippy::too_many_lines)]
 fn corrupted_aggregates_are_rejected() {
     on_large_stack(|| {
-        // 20 records in Flock parts of 8 (8, 8 and 4 live records).
+        // 20 records (d_seg = 5) in Flock parts of 16 (16 and 4 live records): the most parts
+        // a segment may hold (two, `d_part >= d_seg - 1`).
         let records = records(0xc020, 14, 6);
         let aggregate = Aggregator::new(AggregatorConfig::with_part_log2(3))
             .aggregate(&signed(&records))
@@ -363,7 +421,7 @@ fn corrupted_aggregates_are_rejected() {
         let verifier = AggregateVerifier::new();
         let honest_report = verifier.verify(&public, &bytes, None);
         assert!(honest_report.accepted(), "{honest_report}");
-        assert_eq!(honest_report.parts.len(), 3);
+        assert_eq!(honest_report.parts.len(), 2);
         let verify = |proof: &AggregateProof| verifier.verify(&public, &proof.to_bytes(), None);
         let part = |k: usize| move |r: &VerifyCostReport| matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == k);
 
@@ -377,26 +435,22 @@ fn corrupted_aggregates_are_rejected() {
         p.final_vectors[0][100] ^= 4;
         let r = verify(&p);
         expect_rejected("Y_sigma bit", &r, keccak);
-        assert!(part(2)(&r), "the implied last share is wrong");
+        assert!(part(1)(&r), "the implied last share is wrong");
         let p = with_items(&honest, |_, p| p.shares[0][3] ^= 1);
         let r = verify(&p);
         expect_rejected("share of part 0", &r, keccak);
-        assert!(part(0)(&r));
-        let p = with_items(&honest, |_, p| p.shares.swap(0, 1));
-        let r = verify(&p);
-        expect_rejected("shares of parts 0 and 1 swapped", &r, keccak);
         assert!(part(0)(&r));
 
         // The part proofs and commitments.
         let p = with_items(&honest, |_, p| p.proofs.swap(0, 1));
         expect_rejected("proofs of parts 0 and 1 swapped", &verify(&p), keccak);
         let p = with_items(&honest, |_, p| {
-            let mid = p.proofs[2].len() / 2;
-            p.proofs[2][mid] ^= 0x10;
+            let mid = p.proofs[1].len() / 2;
+            p.proofs[1][mid] ^= 0x10;
         });
         let r = verify(&p);
-        expect_rejected("byte of part 2's proof", &r, keccak);
-        assert!(part(2)(&r));
+        expect_rejected("byte of part 1's proof", &r, keccak);
+        assert!(part(1)(&r));
         let p = with_items(&honest, |c, _| c.commitments[1][7] ^= 0x20);
         expect_rejected("byte of part 1's commitment", &verify(&p), keccak);
 
@@ -411,26 +465,25 @@ fn corrupted_aggregates_are_rejected() {
             r.rejection,
             Some((0, SegmentRejection::Item(ItemError::Profile(3))))
         ));
-        let p = with_items(&honest, |c, _| c.d_part = 4);
+        let p = with_items(&honest, |c, _| c.d_part = 5);
         let r = verify(&p);
-        expect_rejected("part size 2^4", &r, keccak);
+        expect_rejected("part size 2^5", &r, keccak);
         assert!(matches!(
             r.rejection,
             Some((
                 0,
                 SegmentRejection::Item(ItemError::Parts {
-                    expected: 2,
-                    actual: 3
+                    expected: 1,
+                    actual: 2
                 })
             ))
         ));
+        // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
+        // is refused while the plan of event 0 is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
-        let r = verify(&p);
-        expect_rejected("part size 2^2", &r, keccak);
-        assert!(matches!(
-            r.rejection,
-            Some((0, SegmentRejection::Item(ItemError::PartSize(2))))
-        ));
+        expect_rejected("part size 2^2", &verify(&p), |e| matches!(e, VerifyError::Plan));
+        let p = with_items(&honest, |c, _| c.d_part = 3);
+        expect_rejected("part size 2^3", &verify(&p), |e| matches!(e, VerifyError::Plan));
         let p = with_items(&honest, |c, p| {
             c.commitments.pop();
             p.proofs.pop();
@@ -443,8 +496,8 @@ fn corrupted_aggregates_are_rejected() {
             Some((
                 0,
                 SegmentRejection::Item(ItemError::Parts {
-                    expected: 3,
-                    actual: 2
+                    expected: 2,
+                    actual: 1
                 })
             ))
         ));
@@ -457,22 +510,72 @@ fn corrupted_aggregates_are_rejected() {
             Some((0, SegmentRejection::Item(ItemError::Truncated)))
         ));
 
+        // The tie work and binding (tied-part proof version 4, docs/soundness.md 4.5, 6.3):
+        // part 1's tie nonce one below the honest (smallest passing) one, or of 24 bits (Slim
+        // at d = 4 has 16 bits of work, a 23-bit nonce), fails the predicate; a version-3
+        // proof is refused.
+        let nonce_of = |bytes: &[u8]| {
+            u32::from_le_bytes(bytes[tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].try_into().unwrap())
+        };
+        let set_nonce = |v: u32| {
+            with_items(&honest, move |_, p| {
+                p.proofs[1][tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].copy_from_slice(&v.to_le_bytes());
+            })
+        };
+        let honest_nonce = {
+            let c = SegmentCommitments::from_bytes(&honest.flock_commitments[0]).unwrap();
+            let p = SegmentProofs::from_bytes(&honest.flock_proofs[0], c.commitments.len()).unwrap();
+            assert_eq!(p.proofs[1][6], tied::VERSION);
+            nonce_of(&p.proofs[1])
+        };
+        assert!(honest_nonce < 1 << 23);
+        let tie_rejected = |r: &VerifyCostReport| {
+            matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("tie nonce"))
+        };
+        if honest_nonce > 0 {
+            let r = verify(&set_nonce(honest_nonce - 1));
+            expect_rejected("tie nonce below the honest one", &r, keccak);
+            assert!(tie_rejected(&r));
+        }
+        let r = verify(&set_nonce(honest_nonce + (1 << 23)));
+        expect_rejected("tie nonce of 24 bits", &r, keccak);
+        assert!(tie_rejected(&r));
+        let r = verify(&with_items(&honest, |_, p| p.proofs[1][6] = 3));
+        expect_rejected("tied-part proof version 3", &r, keccak);
+        assert!(matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("version")));
+        // The PIOP work nonces: a changed byte of the stream is rejected.
+        let mut p = honest.clone();
+        p.work[0] ^= 0x01;
+        expect_rejected("PIOP work nonce", &verify(&p), |_| true);
+        // Event 0 binds the plan: a verifier whose plan names other tie difficulties derives
+        // another transcript (here sd, so the bridge union's matrices differ).
+        let gate = sponge_gate();
+        let other_plan = verify_timed(
+            &public,
+            &bytes,
+            &SeededMatrices,
+            &OtherPlan(agg_cli::mode_a::FlockVerifier::new(&gate)),
+            FLOCK_PROFILE,
+            None,
+        );
+        assert!(matches!(other_plan.outcome, Err(VerifyError::Keccak(0))));
+
         // PIOP and opening.
         let mut p = honest.clone();
         p.prestage.kappa3 = p.prestage.kappa2[0];
-        expect_rejected("pre-stage claim", &verify(&p), at_stage(1));
+        expect_rejected("pre-stage claim", &verify(&p), at_stage_or_work(1));
         let mut p = honest.clone();
         p.lookup.sessions[4].rounds[2][0] = p.lookup.sessions[4].rounds[2][1];
         expect_rejected("lookup round", &verify(&p), |e| matches!(e, VerifyError::Lookup(_)));
         let mut p = honest.clone();
         p.stage1.rounds[2][0] = p.stage1.rounds[2][1];
-        expect_rejected("stage-1 round", &verify(&p), at_stage(1));
+        expect_rejected("stage-1 round", &verify(&p), at_stage_or_work(1));
         let mut p = honest.clone();
         p.stage2.rounds[3][1] = p.stage2.rounds[3][0];
-        expect_rejected("stage-2 round", &verify(&p), at_stage(2));
+        expect_rejected("stage-2 round", &verify(&p), at_stage_or_work(2));
         let mut p = honest.clone();
         p.stage3.rounds[0][0] = p.stage3.rounds[0][1];
-        expect_rejected("stage-3 round", &verify(&p), at_stage(3));
+        expect_rejected("stage-3 round", &verify(&p), at_stage_or_work(3));
         let mut p = honest.clone();
         p.stage3.claims.0[20] = p.stage3.claims.0[21];
         expect_rejected("stage-3 claim", &verify(&p), at_stage(3));
@@ -570,6 +673,32 @@ fn corrupted_aggregates_are_rejected() {
         assert!(matches!(mode_b.outcome, Err(VerifyError::Keccak(0))));
         // The honest aggregate still verifies after all this.
         assert!(verifier.verify(&public, &bytes, None).accepted());
+    });
+}
+
+/// More than two tied parts in a segment (docs/soundness.md 3.5): an honest prover that
+/// splits 20 records (d_seg = 5) into parts of 8 (three parts) builds an aggregate that every
+/// verifier refuses, because `sd`'s bad set would be a union over three Johnson lists.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn three_parts_in_a_segment_are_refused() {
+    on_large_stack(|| {
+        let records = records(0xc320, 14, 6);
+        let hooks = AggregateHooks {
+            part_floor: Some(3),
+            ..AggregateHooks::default()
+        };
+        let aggregate = Aggregator::new(AggregatorConfig::with_part_log2(3))
+            .aggregate_with(&signed(&records), &hooks)
+            .expect("aggregate");
+        let items = SegmentCommitments::from_bytes(&aggregate.proof.flock_commitments[0]).unwrap();
+        assert_eq!((items.d_part, items.commitments.len()), (3, 3));
+        let report = AggregateVerifier::new().verify(&statements(&records), &aggregate.bytes, None);
+        expect_rejected("three parts in segment 0", &report, |e| matches!(e, VerifyError::Plan));
+        assert!(report.parts.is_empty(), "no Flock part was run");
     });
 }
 

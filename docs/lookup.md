@@ -216,8 +216,8 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 | Remedy | Identity error at `N = 2^15` | Extra prover cost (one challenge = 1) | Proof bytes at `2^15` | Status |
 | --- | ---: | --- | ---: | --- |
 | one `X` | `(L + M - 1)/|K| = 2^-101.0` | 1 | 22,896 | below the 128-bit ledger |
-| (i) one `X` and a 28-bit work nonce | `2^-129.0` (difficulty 28) | `+27.6 s` nonce search on 7 threads (Section 4.4), about 7x the second challenge | 22,896 + nonce | above Akita's 25-bit cap; no nonce format here (deviation P3) |
-| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.46x (1,024) to 1.54x (8,192) of the lookup prover (prototype, Section 4.2); integrated figures in Section 4.5 | 28,784 | the identity term needs no grinding; the GKR rounds still need grinding to Aerie's schedule (P3): the lookup is at about `2^-117.9` before grinding (`1,106/|K|`) |
+| (i) one `X` and a 28-bit work nonce | `2^-129.0` (difficulty 28) | `+27.6 s` nonce search on 7 threads (Section 4.4), about 7x the second challenge | 22,896 + nonce | above Akita's 25-bit cap (the nonce format of wire version 2 caps targets at 25 bits) |
+| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.46x (1,024) to 1.54x (8,192) of the lookup prover (prototype, Section 4.2); integrated figures in Section 4.5 | 28,784 | the identity term needs no grinding; the GKR rounds are ground to Aerie's schedule in wire version 2 (`docs/soundness.md`); before grinding the lookup is at about `2^-117.9` (`1,106/|K|`) |
 | (iii) `X` in `F_{p^4}` (trees over the degree-4 extension, challenges of the sessions in `K`) | `(L + M - 1)/p^4 = 2^-229` | every tree node and lane product in `F_{p^4}`: 3 `K`-multiplications per product (Karatsuba) plus a constant, about 3x the arithmetic of one challenge, i.e. 2x that of (ii); a kernel field change | about 2x of one `X` (every layer value and message in `F_{p^4}`) | rejected: dearer than (ii) |
 | (iv) tighter counting (bound `deg N` by the distinct out-of-table values) | none: an adversary can make every `f_i` distinct, `deg N = L + M - 1` is reachable | 0 | 22,896 | no improvement in the worst case |
 | (v) the conjugate `X^p` as a second point | none: `N` has coefficients in `F_p`, so `N(X) = 0` implies `N(X^p) = 0` | 0 | 22,896 | no information |
@@ -231,7 +231,8 @@ neither grinding for that term nor a kernel field change. This is not 128 bits f
 lookup: its GKR sessions are `1,106/|K| ~ 2^-117.9` at `2^15` and each degree-3 round is
 `3/|K| ~ 2^-126.4`, above `2^-128`, so the lookup, like the other field terms
 (`3,534/|K| < 2^-116.2` in all), reaches `2^-128` per site only with grinding to Aerie's
-schedule, which is not implemented (deviation P3, spec 12.1). Implementation-level savings that keep the soundness of (ii) and are
+schedule, implemented in wire version 2 (`docs/soundness.md`: 2 bits per GKR round, a merge 1
+bit, a batching vector `bit_length(2 active)`; deviation P3 resolved). Implementation-level savings that keep the soundness of (ii) and are
 not done yet: build both tree sets in one pass over the stacked lanes (the leaves are read
 once, the two `(p, q)` pairs per node stored side by side), and recompute the bottom layer
 in session `D - 1` instead of storing it (Section 4.3). Both change only the prover.
@@ -604,7 +605,8 @@ removed (L1). `agg-witness` and `agg-bridge` are unchanged; in `agg-cli` only
    the bottom session and the stage-3 `Ints` columns. Remaining levers with estimates are at
    the end of Section 4.6.
 2. `N = 8,192` and `2^15` on the cloud VM (only extrapolated here, Section 4.5).
-3. Grinding for the remaining field terms (`2^-116.2` before grinding, deviation P3).
+3. Grinding for the remaining field terms (`2^-116.2` before grinding): done in wire
+   version 2 (`docs/soundness.md`, deviation P3 resolved).
 4. The spec's ledger counts each reduction instance as a `d_main/|K|` linear identity
    (conservative, inherited from revision 2); a tighter accounting would credit the
-   reductions to the stage sum-checks.
+   reductions to the stage sum-checks (done: `docs/soundness.md` Section 5, spec 12.1).

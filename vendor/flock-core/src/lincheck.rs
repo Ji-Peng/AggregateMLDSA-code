@@ -584,12 +584,24 @@ pub struct LincheckProof {
 ///
 /// The same policy applies to the single-table and union-column linchecks;
 /// the union simply has one β site for every pinned Boolean table.
+///
+/// agg-mldsa patch (vendor/flock-core/PATCH.md, section 5): with the level-0
+/// Johnson-list factor `list` ([`Self::per_challenge_128_listed`]) every
+/// numerator above is multiplied by `list` (the lincheck challenges precede
+/// Ligerito's level-0 binding, Flock paper Appendix A, Remark 11); `list = 1`
+/// is upstream's schedule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LincheckGrinding {
     alpha_bits: Option<u32>,
     beta_bits: Option<u32>,
     multilinear_round_bits: Option<u32>,
     skip_bits: bool,
+    list: usize,
+}
+
+/// `floor(log2(numerator)) + 1`: the strict bits for `numerator / 2^128`.
+const fn listed_bits(numerator: usize) -> u32 {
+    usize::BITS - numerator.leading_zeros()
 }
 
 impl LincheckGrinding {
@@ -600,16 +612,28 @@ impl LincheckGrinding {
             beta_bits: None,
             multilinear_round_bits: None,
             skip_bits: false,
+            list: 1,
         }
     }
 
     /// Per-challenge schedule with strict 128-bit work-normalized bounds.
     pub const fn per_challenge_128() -> Self {
+        Self::per_challenge_128_listed(1)
+    }
+
+    /// [`Self::per_challenge_128`] with every numerator multiplied by the
+    /// level-0 list factor `list >= 1` (agg-mldsa patch): `bits_for(list)` for
+    /// `alpha` and each `beta`, `bits_for(2 list)` per round,
+    /// `bits_for((2^k_skip - 1) list)` for the skip point. At `list = 1` these
+    /// are upstream's 1, 1, 2 and `k_skip` bits.
+    pub const fn per_challenge_128_listed(list: usize) -> Self {
+        assert!(list >= 1);
         Self {
-            alpha_bits: Some(1),
-            beta_bits: Some(1),
-            multilinear_round_bits: Some(2),
+            alpha_bits: Some(listed_bits(list)),
+            beta_bits: Some(listed_bits(list)),
+            multilinear_round_bits: Some(listed_bits(2 * list)),
             skip_bits: true,
+            list,
         }
     }
 
@@ -628,9 +652,11 @@ impl LincheckGrinding {
     /// The φ8 skip polynomial has degree `2^k_skip - 1`; zero variables
     /// means it is constant and needs no grinding.
     pub fn skip_bits(self, k_skip: usize) -> Option<u32> {
+        // (2^k - 1) * list; at list = 1 this is upstream's k bits.
         self.skip_bits
             .then_some(k_skip as u32)
             .filter(|&bits| bits != 0)
+            .map(|k| listed_bits(((1usize << k) - 1) * self.list))
     }
 
     /// Explicit PoW bits for the AG-basis final skip point's FUSED nonce. The

@@ -15,8 +15,10 @@ use agg_piop::prover::{
     main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, FixedMatrices, ProveHooks,
     ProverInputs, ProverOutput, SeededMatrices,
 };
+use agg_piop::pow::{KeccakPlan, PowPlan, SiteClass, WorkStreamError};
 use agg_piop::public_data::KeyCache;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables};
+use agg_piop::transcript::TranscriptError;
 use agg_piop::stage::StageError;
 use agg_piop::verifier::{
     verify_timed, BitsContext, ConfigurationError, KeccakVerifier, SegmentContext, VerifyError,
@@ -27,7 +29,7 @@ use agg_witness::bridge::{BridgeMatrices, J1, K1};
 use agg_witness::gen::Record;
 use agg_witness::instance::PublicInstance;
 use agg_witness::native::commitment_hash;
-use agg_witness::padding::main_index;
+use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, GAMMA2};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
@@ -209,29 +211,31 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let mut lookup = output.proof.clone();
         lookup.lookup.sessions[6].rounds[3][2] = lookup.lookup.sessions[6].rounds[3][0];
         assert!(matches!(rejected(verify(&lookup)), VerifyError::Lookup(_)));
+        // A changed absorbed message changes the next challenge's work predicate, so the
+        // verifier may reject at the next nonce instead of the terminal check.
         let mut prestage = output.proof.clone();
         prestage.prestage.kappa3 = prestage.prestage.kappa2[0];
         assert!(matches!(
             rejected(verify(&prestage)),
-            VerifyError::Stage(StageError::Terminal(1))
+            VerifyError::Stage(StageError::Terminal(1)) | VerifyError::Stage(StageError::Transcript(TranscriptError::Work { .. }))
         ));
         let mut round = output.proof.clone();
         round.stage2.rounds[3][1] = round.stage2.rounds[3][0];
         assert!(matches!(
             rejected(verify(&round)),
-            VerifyError::Stage(StageError::Terminal(2))
+            VerifyError::Stage(StageError::Terminal(2)) | VerifyError::Stage(StageError::Transcript(TranscriptError::Work { .. }))
         ));
         let mut stage3 = output.proof.clone();
         stage3.stage3.rounds[0][0] = stage3.stage3.rounds[0][1];
         assert!(matches!(
             rejected(verify(&stage3)),
-            VerifyError::Stage(StageError::Terminal(3))
+            VerifyError::Stage(StageError::Terminal(3)) | VerifyError::Stage(StageError::Transcript(TranscriptError::Work { .. }))
         ));
         let mut claim = output.proof.clone();
         claim.stage3.claims.0[20] = claim.stage3.claims.0[21];
         assert!(matches!(
             rejected(verify(&claim)),
-            VerifyError::Stage(StageError::Terminal(3))
+            VerifyError::Stage(StageError::Terminal(3)) | VerifyError::Stage(StageError::Transcript(TranscriptError::Work { .. }))
         ));
         let mut opening = output.proof.clone();
         let last = opening.opening.len() - 1;
@@ -240,6 +244,62 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             rejected(verify(&opening)),
             VerifyError::Opening(_)
         ));
+
+        // Work nonces (docs/soundness.md Sections 6.1, 6.2): a changed nonce at one site of
+        // every class is rejected (the prover's nonce is the smallest passing one, so a
+        // smaller one fails the predicate; from 0 the next one changes the challenge).
+        let manifest = CommitmentManifest::for_batch(256).unwrap();
+        let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+        assert_eq!(output.proof.work.len(), plan.work_bits().div_ceil(8));
+        assert_eq!(output.proof.size().work, 333, "2,660 bits at N* = 2^8");
+        let mut offset = 0;
+        let mut seen = std::collections::HashSet::new();
+        for site in plan.sites() {
+            let width = usize::from(site.nonce_bits());
+            let first_of_kind = match site.class {
+                SiteClass::StageRound | SiteClass::StageGamma => seen.insert((site.class, site.i)),
+                class => seen.insert((class, 0)),
+            };
+            if width > 0 && first_of_kind {
+                let read = |bytes: &[u8]| (0..width).fold(0_u32, |v, k| {
+                    let at = offset + k;
+                    v | (u32::from(bytes[at / 8] >> (at % 8) & 1) << k)
+                });
+                let honest = read(&output.proof.work);
+                let wrong = if honest > 0 { honest - 1 } else { 1 };
+                let mut tampered = output.proof.clone();
+                for k in 0..width {
+                    let at = offset + k;
+                    tampered.work[at / 8] &= !(1 << (at % 8));
+                    tampered.work[at / 8] |= (((wrong >> k) & 1) as u8) << (at % 8);
+                }
+                assert_eq!(read(&tampered.work), wrong);
+                let err = rejected(verify(&tampered));
+                if honest > 0 {
+                    // The predicate fails at the site itself.
+                    assert!(format!("{err}").contains("work nonce rejected"), "{site:?}: {err}");
+                }
+            }
+            offset += width;
+        }
+        assert_eq!(offset, plan.work_bits());
+        assert_eq!(seen.len(), 4 + 3 + 3 + 1, "every class (X has no nonce)");
+        // The stream's padding bits are zero and its length exact.
+        let mut padded = output.proof.clone();
+        *padded.work.last_mut().unwrap() |= 0x80;
+        assert!(matches!(
+            rejected(verify(&padded)),
+            VerifyError::Transcript(TranscriptError::WorkStream(WorkStreamError::Padding))
+        ));
+        let mut short = output.proof.clone();
+        short.work.pop();
+        assert!(matches!(rejected(verify(&short)), VerifyError::Wire(_)));
+        let mut long = output.proof.clone();
+        long.work.push(0);
+        assert!(matches!(rejected(verify(&long)), VerifyError::Wire(_)));
+        // Event 0 binds the plan: a verifier whose plan has a tie site derives another sd.
+        let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, None);
+        assert!(matches!(rejected(other_plan), VerifyError::Keccak(0)));
 
         // Records, profile and framing.
         let mut swapped = public.clone();
@@ -536,6 +596,31 @@ impl KeccakVerifier for ProjectionOnly {
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
         PublicBitsVerifier.verify(segment)
+    }
+}
+
+/// Mode B's verifier with a plan that names one tie site (a plan-digest mismatch).
+struct WithTie;
+
+impl KeccakVerifier for WithTie {
+    fn profile(&self) -> FlockProfile {
+        FlockProfile::PublicBits
+    }
+
+    fn plan(&self, _geometry: &Geometry, _commitments: &[Vec<u8>]) -> Option<KeccakPlan> {
+        Some(KeccakPlan {
+            span: 0,
+            d_part: 0,
+            tie_bits: vec![17],
+        })
+    }
+
+    fn verify(&self, segment: &SegmentContext<'_>) -> bool {
+        PublicBitsVerifier.verify(segment)
+    }
+
+    fn check_bits(&self, bits: &BitsContext<'_>) -> bool {
+        PublicBitsVerifier.check_bits(bits)
     }
 }
 

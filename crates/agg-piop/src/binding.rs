@@ -4,8 +4,9 @@
 //! 16-KiB-leaf cSHAKE256 tree: leaf `i` is `cSHAKE256(block_i, 32)` under
 //! `agg-mldsa/v1/record-leaf`, the root `cSHAKE256(LE64(blocks) || leaves, 32)` under
 //! `agg-mldsa/v1/public-records-binding`. The instance record is the manifest binding
-//! bytes of event 0 (`docs/piop.md` Section 2) followed by this digest and the Flock
-//! profile id.
+//! bytes of event 0 (`docs/piop.md` Section 2) followed by this digest, the Flock
+//! profile id and (wire version 2) the 32-byte proof-of-work plan digest
+//! ([`crate::pow::PowPlan::digest`], `docs/soundness.md` Section 6.4).
 
 use agg_witness::params::C_TILDE_BYTES;
 use rayon::prelude::*;
@@ -95,16 +96,19 @@ pub fn public_records_binding(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -
         .expect("32 bytes")
 }
 
-/// The canonical instance record of event 0.
+/// The canonical instance record of event 0: the manifest bytes, the public-record digest,
+/// the Flock profile id and the plan digest.
 #[must_use]
 pub fn instance_record(
     manifest: &CommitmentManifest,
     record_digest: &[u8; 32],
     flock: FlockProfile,
+    plan_digest: &[u8; 32],
 ) -> Vec<u8> {
     let mut record = manifest.binding_bytes();
     record.extend_from_slice(record_digest);
     record.push(flock as u8);
+    record.extend_from_slice(plan_digest);
     record
 }
 
@@ -132,9 +136,10 @@ mod tests {
         let digest = public_records_binding(&many);
         assert_ne!(digest, one);
         let manifest = CommitmentManifest::for_batch(13).unwrap();
-        let record = instance_record(&manifest, &digest, FlockProfile::None);
-        assert_eq!(record.len(), manifest.binding_bytes().len() + 33);
-        assert_eq!(*record.last().unwrap(), 0);
+        let record = instance_record(&manifest, &digest, FlockProfile::None, &[7; 32]);
+        assert_eq!(record.len(), manifest.binding_bytes().len() + 65);
+        assert_eq!(record[record.len() - 33], 0);
+        assert_eq!(record[record.len() - 32..], [7; 32]);
         assert_eq!(FlockProfile::from_id(2), Some(FlockProfile::LaBinius));
         assert_eq!(FlockProfile::from_id(3), Some(FlockProfile::PublicBits));
         assert_eq!(FlockProfile::from_id(4), Some(FlockProfile::Slim));

@@ -58,8 +58,20 @@
 //! segments `S..2^span_log`), computed by the verifier, and the table's digest is absorbed
 //! before the tie challenges. For `S = 1` this is the tied part of version 2 with `Y` moved
 //! from a coefficient of the composite rows to the output claim.
+//!
+//! Work and binding (proof version 4, `docs/soundness.md` Sections 3.6, 4.5 and 6.3). The
+//! tie challenges are drawn while both Ligerito commitments are bound only to their Johnson
+//! lists, so the tie site's bound carries the list sizes ([`agg_bridge::pow::tie_numerator`])
+//! and the tie challenger grinds `g_tie` bits ([`TiedPart::tie_bits`], 16 to 18 bits at a
+//! full segment) before the first coordinate: Flock's `grind_pow` (BLAKE3 of the state
+//! digest and `LE64(nonce)`, `g_tie` leading zero bits), the nonce below `2^(g_tie + 7)`,
+//! carried as `LE32` in the proof header. After the coordinates the tie challenger squeezes
+//! a 32-byte tie binding ([`TieChallenges::binding`]), which both instance challengers
+//! absorb before Flock binds its statement: the sponge instance's challenges then depend on
+//! the union's cap and the final vectors, from which its claim points are derived.
 
 use agg_bridge::gf2_walker::SegmentLayout;
+use agg_bridge::pow::{nonce_bits, TieGeometry};
 use flock_core::{
     challenger::{Challenger, FsChallenger},
     lincheck::{build_eq_table, LincheckCircuit},
@@ -88,11 +100,16 @@ use crate::{
 
 /// Magic prefix of a tied-part proof.
 pub const MAGIC: &[u8; 6] = b"AGGKCT";
-/// Serialization version (3: spans of segments and the final vectors as the output claim,
-/// K16; 2: the bridge union of K13, its cap inside the proof).
-const VERSION: u8 = 3;
-/// Header: magic, version, profile, `n` (LE32), `d`, segments.
-const HEADER: usize = 6 + 1 + 1 + 4 + 1 + 1;
+/// Serialization version (4: the tie nonce in the header and the tie binding absorbed by
+/// both instances, docs/soundness.md 4.5 and 6.3; 3: spans of segments and the final
+/// vectors as the output claim, K16; 2: the bridge union of K13, its cap inside the proof).
+pub const VERSION: u8 = 4;
+/// Header: magic, version, profile, `n` (LE32), `d`, segments, tie nonce (LE32).
+const HEADER: usize = 6 + 1 + 1 + 4 + 1 + 1 + 4;
+/// Offset of the tie nonce in the header.
+pub const NONCE_OFFSET: usize = 14;
+/// Label under which both instance challengers absorb the tie binding.
+const TIE_BINDING_LABEL: &[u8] = b"agg-keccak/v4/tie-binding";
 /// Digest label of the public table of final vectors.
 const Y_TABLE_LABEL: &[u8] = b"agg-keccak/v3/tied-final-vectors";
 /// Domain of the tie challenges.
@@ -182,14 +199,32 @@ pub struct TieChallenges {
     pub rho_o: [F128; OUTPUT_WORDS_LOG2],
     /// The segment within the span (`span_log` coordinates).
     pub rho_sigma: Vec<F128>,
+    /// The tie site's work nonce (0 without work).
+    pub nonce: u32,
+    /// The tie binding squeezed after the coordinates, absorbed by both instances.
+    pub binding: [u8; 32],
+}
+
+/// The tie site's work: the prover grinds, the verifier checks a nonce from the proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TieWork {
+    /// Search the smallest passing nonce (Flock's `grind_pow`).
+    Grind,
+    /// Check this nonce.
+    Check(u32),
 }
 
 impl TieChallenges {
     /// Derive from `fs` for a part of `2^d` record positions and `2^blocks_log` level-1
     /// blocks per lane in each of `2^span_log` segments, a sponge instance of `2^nu_s` rows,
     /// the digest of the final vectors (fixed before the proof, [`TiedPart::y_digest`]), the
-    /// sponge's event-2 cap and the bridge union's cap.
-    #[must_use]
+    /// sponge's event-2 cap and the bridge union's cap, after `bits` of work.
+    ///
+    /// # Errors
+    /// [`TieWork::Check`] with a nonce of `g + 7` or more bits or one failing the predicate.
+    ///
+    /// # Panics
+    /// If the prover's search exceeds `2^(g + 7)` candidates (probability below `2^-184`).
     #[allow(clippy::too_many_arguments)]
     pub fn derive(
         fs: &[u8; 32],
@@ -200,7 +235,9 @@ impl TieChallenges {
         y_digest: &[u8; 32],
         sponge_cap: &KeccakCommitment,
         bridge_cap: &KeccakCommitment,
-    ) -> Self {
+        bits: u8,
+        work: TieWork,
+    ) -> Result<Self, KeccakError> {
         let mut ch = FsChallenger::new(TIE_DOMAIN);
         ch.observe_bytes(fs);
         ch.observe_bytes(&u64::from(d).to_le_bytes());
@@ -210,6 +247,28 @@ impl TieChallenges {
         ch.observe_bytes(y_digest);
         put_framed(&mut ch, sponge_cap.as_bytes());
         put_framed(&mut ch, bridge_cap.as_bytes());
+        let limit = 1_u64 << nonce_bits(bits);
+        let nonce = match (bits, work) {
+            (0, TieWork::Grind) => 0,
+            (0, TieWork::Check(nonce)) => {
+                if nonce != 0 {
+                    return Err(KeccakError::Tie("tie nonce without work"));
+                }
+                0
+            }
+            (_, TieWork::Grind) => {
+                let nonce = ch.grind_pow(u32::from(bits));
+                assert!(nonce < limit, "tie nonce search exceeded 2^(g + 7) candidates");
+                u32::try_from(nonce).expect("below 2^32")
+            }
+            (_, TieWork::Check(nonce)) => {
+                if u64::from(nonce) >= limit || !ch.verify_pow(u64::from(nonce), u32::from(bits))
+                {
+                    return Err(KeccakError::Tie("tie nonce"));
+                }
+                nonce
+            }
+        };
         let w = ch.sample_f128_vec(3);
         let rho_i = ch.sample_f128_vec(d as usize);
         let t = ch.sample_f128_vec(2);
@@ -220,7 +279,12 @@ impl TieChallenges {
         let y = ch.sample_f128_vec(6);
         let o = ch.sample_f128_vec(OUTPUT_WORDS_LOG2);
         let rho_sigma = ch.sample_f128_vec(span_log);
-        Self {
+        let mut binding = [0_u8; 32];
+        for (chunk, word) in binding.chunks_exact_mut(16).zip(ch.sample_f128_vec(2)) {
+            chunk[..8].copy_from_slice(&word.lo.to_le_bytes());
+            chunk[8..].copy_from_slice(&word.hi.to_le_bytes());
+        }
+        Ok(Self {
             rho_w: [w[0], w[1], w[2]],
             rho_i,
             rho_t: [t[0], t[1]],
@@ -231,7 +295,9 @@ impl TieChallenges {
             rho_y: std::array::from_fn(|k| y[k]),
             rho_o: std::array::from_fn(|k| o[k]),
             rho_sigma,
-        }
+            nonce,
+            binding,
+        })
     }
 
     /// The record coordinates of the span, `rho_i || rho_sigma` (the sponge row index of
@@ -573,7 +639,7 @@ impl<'g> TiedPart<'g> {
         );
         let nu_s = capacity_log(n, gate.layout().k_log);
         let sponge = UnionGeometry::new(gate.table_type(), n, nu_s, profile);
-        Self {
+        let part = Self {
             gate,
             n,
             d,
@@ -582,7 +648,51 @@ impl<'g> TiedPart<'g> {
             profile,
             sponge,
             bridge,
+        };
+        assert_eq!(
+            part.tie_geometry(),
+            Self::plan_geometry(gate, n, d, segments),
+            "the plan's tie geometry is the part's"
+        );
+        part
+    }
+
+    /// The tie geometry of a part of `n` records, `2^d` positions per segment and `segments`
+    /// segments, from the public numbers alone (the proof-of-work plan of event 0 needs it
+    /// before the part exists; [`Self::new_span`] checks it against the part's own).
+    #[must_use]
+    pub fn plan_geometry(gate: &ChainGate, n: usize, d: u32, segments: usize) -> TieGeometry {
+        TieGeometry {
+            d: d as usize,
+            span_log: segments.next_power_of_two().trailing_zeros() as usize,
+            blocks_log: (d as usize).saturating_sub(BLOCK_RECORDS_LOG2),
+            nu_s: capacity_log(n, gate.layout().k_log),
         }
+    }
+
+    /// The tie site's difficulty of a part from the public numbers (as
+    /// [`Self::plan_geometry`]) under `profile`.
+    #[must_use]
+    pub fn plan_tie_bits(gate: &ChainGate, n: usize, d: u32, segments: usize, profile: Profile) -> u8 {
+        agg_bridge::pow::tie_bits(profile.list_size(), &Self::plan_geometry(gate, n, d, segments))
+    }
+
+    /// The part's tie geometry.
+    #[must_use]
+    pub fn tie_geometry(&self) -> TieGeometry {
+        TieGeometry {
+            d: self.d as usize,
+            span_log: self.bridge.span_log(),
+            blocks_log: self.bridge.level1().blocks_log(),
+            nu_s: self.sponge.nu(),
+        }
+    }
+
+    /// The tie site's difficulty `g_tie` (`docs/soundness.md` Section 3.6): the list-weighted
+    /// numerator of the four tie identities over `2^128`.
+    #[must_use]
+    pub fn tie_bits(&self) -> u8 {
+        agg_bridge::pow::tie_bits(self.profile.list_size(), &self.tie_geometry())
     }
 
     /// Segments of the span (1 for a part of one segment).
@@ -680,7 +790,7 @@ impl<'g> TiedPart<'g> {
     }
 
     /// The tie challenges and points of this part for the Flock seed `fs`, the digest of
-    /// the final vectors and the two commitments.
+    /// the final vectors and the two commitments, the prover grinding the tie nonce.
     #[must_use]
     pub fn tie(
         &self,
@@ -689,6 +799,22 @@ impl<'g> TiedPart<'g> {
         sponge_cap: &KeccakCommitment,
         bridge_cap: &KeccakCommitment,
     ) -> (TieChallenges, TiePoints) {
+        self.tie_with(fs, y_digest, sponge_cap, bridge_cap, TieWork::Grind)
+            .expect("the prover's tie work")
+    }
+
+    /// [`Self::tie`] with the given tie work (the verifier checks the proof's nonce).
+    ///
+    /// # Errors
+    /// On a rejected tie nonce.
+    pub fn tie_with(
+        &self,
+        fs: &[u8; 32],
+        y_digest: &[u8; 32],
+        sponge_cap: &KeccakCommitment,
+        bridge_cap: &KeccakCommitment,
+        work: TieWork,
+    ) -> Result<(TieChallenges, TiePoints), KeccakError> {
         let ch = TieChallenges::derive(
             fs,
             self.d,
@@ -698,7 +824,9 @@ impl<'g> TiedPart<'g> {
             y_digest,
             sponge_cap,
             bridge_cap,
-        );
+            self.tie_bits(),
+            work,
+        )?;
         let points = TiePoints::new(
             &ch,
             self.d,
@@ -706,7 +834,7 @@ impl<'g> TiedPart<'g> {
             self.sponge.word_vars(),
             &self.bridge,
         );
-        (ch, points)
+        Ok((ch, points))
     }
 
     /// Digest of the tie geometry (bound into both challengers): `d`, the part index, the
@@ -747,23 +875,27 @@ impl<'g> TiedPart<'g> {
         h.finalize().into()
     }
 
-    fn sponge_challenger(&self, fs: &[u8; 32], public: &[F128]) -> FsChallenger {
+    fn sponge_challenger(&self, fs: &[u8; 32], public: &[F128], binding: &[u8; 32]) -> FsChallenger {
         let mut ch = FsChallenger::new(DOMAIN);
         ch.observe_bytes(fs);
         ch.observe_label(SPONGE_LABEL);
         ch.observe_bytes(&self.gate.digest());
         ch.observe_bytes(&Self::public_digest(public));
         ch.observe_bytes(&self.tie_digest());
+        ch.observe_label(TIE_BINDING_LABEL);
+        put_framed(&mut ch, binding);
         ch
     }
 
-    fn bridge_challenger(&self, fs: &[u8; 32], digests: [[u8; 32]; 2]) -> FsChallenger {
+    fn bridge_challenger(&self, fs: &[u8; 32], digests: [[u8; 32]; 2], binding: &[u8; 32]) -> FsChallenger {
         let mut ch = FsChallenger::new(DOMAIN);
         ch.observe_bytes(fs);
         ch.observe_label(BRIDGE_LABEL);
         ch.observe_bytes(&digests[0]);
         ch.observe_bytes(&digests[1]);
         ch.observe_bytes(&self.tie_digest());
+        ch.observe_label(TIE_BINDING_LABEL);
+        put_framed(&mut ch, binding);
         ch
     }
 
@@ -989,18 +1121,19 @@ impl<'g> TiedPart<'g> {
         let bridge_data = g.commit_data(&[&buffers[0].z, &buffers[1].z]);
         let bridge_cap = bridge_data.commitment();
         trace("bridge rows and commitment", &start);
-        let (_, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap);
+        let (tie, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap);
+        trace("tie work", &start);
         // The sponge instance (three claims, event-2 commitment reused, K14) and the bridge
         // union (seven claims) have independent challengers (both seeded from `fs` and
-        // the tie), so the two proofs may run side by side on the rayon pool; each proof
-        // is the same either way. Serial by default: locally (3 threads, 8,192 records)
-        // side by side saved about 2% of the prove time but raised the peak RSS by about
-        // 0.5 GiB (+8%), and the 32K run is close to its RSS budget.
+        // the tie binding), so the two proofs may run side by side on the rayon pool; each
+        // proof is the same either way. Serial by default: locally (3 threads, 8,192
+        // records) side by side saved about 2% of the prove time but raised the peak RSS by
+        // about 0.5 GiB (+8%), and the 32K run is close to its RSS budget.
         // `AGG_TIED_CONCURRENT` (any value) turns it on for an A/B on a larger machine.
         let sponge_points = points.sponge_points();
         let bridge_points = points.bridge_points();
         let prove_sponge = || {
-            let mut ch = self.sponge_challenger(fs, &public);
+            let mut ch = self.sponge_challenger(fs, &public, &tie.binding);
             let gate: [&dyn LincheckCircuit; 1] = [self.gate];
             let out = self
                 .sponge
@@ -1009,7 +1142,7 @@ impl<'g> TiedPart<'g> {
             out
         };
         let prove_bridge = || {
-            let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()]);
+            let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()], &tie.binding);
             let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
             let out = g.prove(buffers, &circuits, &bridge_points, &mut ch, Some(bridge_data));
             trace("bridge union proof done", &start);
@@ -1027,7 +1160,7 @@ impl<'g> TiedPart<'g> {
         );
         debug_assert!(bridge_cap_again == bridge_cap);
         trace("bridge union proven", &start);
-        self.encode(&bridge_cap, &sponge_proof, &bridge_proof)
+        self.encode(tie.nonce, &bridge_cap, &sponge_proof, &bridge_proof)
     }
 
     /// Compute the shares from the committed bits and prove (the honest prover).
@@ -1051,6 +1184,7 @@ impl<'g> TiedPart<'g> {
 
     fn encode(
         &self,
+        nonce: u32,
         bridge_cap: &KeccakCommitment,
         sponge: &UnionProof,
         bridge: &UnionProof,
@@ -1064,6 +1198,7 @@ impl<'g> TiedPart<'g> {
         bytes.extend_from_slice(&(self.n as u32).to_le_bytes());
         bytes.push(self.d as u8);
         bytes.push(u8::try_from(self.segments).expect("at most 255 segments"));
+        bytes.extend_from_slice(&nonce.to_le_bytes());
         for part in [cap, &s, &b] {
             bytes.extend_from_slice(
                 &u32::try_from(part.len())
@@ -1078,7 +1213,7 @@ impl<'g> TiedPart<'g> {
     fn decode(
         &self,
         proof: &KeccakProof,
-    ) -> Result<(KeccakCommitment, UnionProof, UnionProof), KeccakError> {
+    ) -> Result<(u32, KeccakCommitment, UnionProof, UnionProof), KeccakError> {
         let b = &proof.bytes;
         if b.len() < HEADER || &b[..6] != MAGIC {
             return Err(KeccakError::Malformed("magic"));
@@ -1095,6 +1230,7 @@ impl<'g> TiedPart<'g> {
         {
             return Err(KeccakError::Malformed("instance count"));
         }
+        let nonce = u32::from_le_bytes(b[NONCE_OFFSET..HEADER].try_into().expect("4 bytes"));
         let mut at = HEADER;
         let mut framed = || -> Result<&[u8], KeccakError> {
             let len = b.get(at..at + 4).ok_or(KeccakError::Malformed("framing"))?;
@@ -1116,6 +1252,7 @@ impl<'g> TiedPart<'g> {
             return Err(KeccakError::Malformed("bridge commitment length"));
         }
         Ok((
+            nonce,
             KeccakCommitment::from_bytes(cap.to_vec()),
             UnionProof::from_bytes(s, SPONGE_CLAIMS)?,
             UnionProof::from_bytes(br, BRIDGE_CLAIMS)?,
@@ -1199,15 +1336,21 @@ impl<'g> TiedPart<'g> {
             return Err(KeccakError::Statement("bridge matrices"));
         }
         let start = std::time::Instant::now();
-        let (bridge_cap, sponge_proof, bridge_proof) = self.decode(proof)?;
+        let (nonce, bridge_cap, sponge_proof, bridge_proof) = self.decode(proof)?;
         let public: Vec<F128> = mu
             .iter()
             .zip(c_tilde)
             .flat_map(|(m, c)| sponge_public_words(m, c))
             .collect();
-        let (chal, points) = self.tie(fs, &Self::y_digest(ys), &commitment.sponge, &bridge_cap);
+        let (chal, points) = self.tie_with(
+            fs,
+            &Self::y_digest(ys),
+            &commitment.sponge,
+            &bridge_cap,
+            TieWork::Check(nonce),
+        )?;
         // The sponge instance.
-        let mut ch = self.sponge_challenger(fs, &public);
+        let mut ch = self.sponge_challenger(fs, &public, &chal.binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         let v_s = self.sponge.verify(
             &gate,
@@ -1222,7 +1365,7 @@ impl<'g> TiedPart<'g> {
         trace("verify: sponge instance", &start);
         // The bridge union (zero coefficient; the output claim carries the shares).
         let (s1, s2) = self.bridge.slots(sd, matrices, vec![0; m3]);
-        let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()]);
+        let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()], &chal.binding);
         let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
         let v_b = self.bridge.geometry().verify(
             &circuits,
@@ -1471,10 +1614,28 @@ mod tests {
         // Another seed, another cap, another table of final vectors or another span gives
         // other challenges.
         let other = KeccakCommitment::from_bytes(vec![3; 32]);
+        let bits = part.tie_bits();
+        let derive_with = |fs: &[u8; 32], span_log, yd: &[u8; 32], a, b, work| {
+            TieChallenges::derive(fs, 3, 3, 0, span_log, yd, a, b, bits, work)
+        };
         let derive = |fs: &[u8; 32], span_log, yd: &[u8; 32], a, b| {
-            TieChallenges::derive(fs, 3, 3, 0, span_log, yd, a, b)
+            derive_with(fs, span_log, yd, a, b, TieWork::Grind).unwrap()
         };
         assert_eq!(derive(&[1; 32], 0, &yd, &caps.0, &caps.1), chal);
+        // Work (docs/soundness.md 3.6, 6.3): Fast at d = 3, nu_s = 3 is 20,615 / 2^128, so 15
+        // bits and a nonce below 2^22. The prover's nonce is the smallest passing one, so
+        // every smaller nonce fails; a nonce of 22 bits or more is refused before hashing.
+        assert_eq!(bits, 15);
+        assert_eq!(bits, TiedPart::plan_tie_bits(&gate, 5, 3, 1, Profile::Fast));
+        assert!(u64::from(chal.nonce) < 1 << 22);
+        let check = |nonce| derive_with(&[1; 32], 0, &yd, &caps.0, &caps.1, TieWork::Check(nonce));
+        assert_eq!(check(chal.nonce).unwrap(), chal);
+        for wrong in 0..chal.nonce.min(16) {
+            assert!(matches!(check(wrong), Err(KeccakError::Tie("tie nonce"))));
+        }
+        assert!(matches!(check(chal.nonce + (1 << 22)), Err(KeccakError::Tie("tie nonce"))));
+        // The binding depends on every input of the tie challenger.
+        assert_ne!(derive(&[1; 32], 0, &yd, &caps.0, &other).binding, chal.binding);
         assert_ne!(derive(&[2; 32], 0, &yd, &caps.0, &caps.1), chal);
         assert_ne!(derive(&[1; 32], 0, &yd, &caps.0, &other), chal);
         assert_ne!(derive(&[1; 32], 0, &yd, &other, &caps.1), chal);
@@ -1511,6 +1672,24 @@ mod tests {
         assert_eq!(&p4.bridge_copies[1][..2], &c4.rho_sigma[..]);
         assert_eq!(&p4.bridge_outputs[..2], &c4.rho_sigma[..]);
         assert_eq!(c4.row_factor(15), F128::ONE);
+    }
+
+    #[test]
+    fn tie_difficulty_follows_the_profile_lists() {
+        // docs/soundness.md Sections 3.6 and 10: a full segment 45,745 / 92,350 / 179,690 and
+        // a span of four full segments 50,925 / 102,750 / 199,850 over 2^128.
+        let gate = sponge_gate();
+        let profiles = [Profile::Fast, Profile::Slim, Profile::Slim8];
+        assert_eq!(profiles.map(Profile::list_size), [35, 50, 70]);
+        assert_eq!(Profile::Secure.list_size(), 1);
+        for (n, segments) in [(1 << 13, 1), (1 << 15, 4)] {
+            let bits = profiles.map(|p| TiedPart::plan_tie_bits(&gate, n, 13, segments, p));
+            assert_eq!(bits, [16, 17, 18], "n = {n}");
+        }
+        assert_eq!(TiedPart::plan_tie_bits(&gate, 8, 3, 1, Profile::Slim), 16);
+        let span = TiedPart::new_span(&gate, 3 << 13, 13, 0, 3, Profile::Slim);
+        assert_eq!(span.tie_geometry(), TiedPart::plan_geometry(&gate, 3 << 13, 13, 3));
+        assert_eq!(span.tie_bits(), 17);
     }
 
     #[test]

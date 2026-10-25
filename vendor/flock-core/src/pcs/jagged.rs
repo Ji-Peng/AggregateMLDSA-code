@@ -2914,6 +2914,9 @@ pub struct MultipointGrinding {
     pub gamma_bits: u32,
     pub round_bits: u32,
     pub anchor_round_bits: u32,
+    /// agg-mldsa patch (PATCH.md section 5): the level-0 Johnson-list factor
+    /// multiplying the gamma numerator (1: upstream).
+    pub list: usize,
 }
 
 impl MultipointGrinding {
@@ -2922,14 +2925,26 @@ impl MultipointGrinding {
             gamma_bits: 0,
             round_bits: 0,
             anchor_round_bits: 0,
+            list: 1,
         }
     }
 
     pub const fn per_challenge_128() -> Self {
+        Self::per_challenge_128_listed(1)
+    }
+
+    /// [`Self::per_challenge_128`] with the numerators multiplied by the level-0
+    /// list factor `list >= 1` (agg-mldsa patch): the quadratic rounds grind
+    /// `bits_for(2 list)` bits (upstream: 2), the gamma batch
+    /// `bits_for((K - 1) list)`.
+    pub const fn per_challenge_128_listed(list: usize) -> Self {
+        assert!(list >= 1);
+        let rounds = usize::BITS - (2 * list).leading_zeros();
         Self {
             gamma_bits: 1,
-            round_bits: 2,
-            anchor_round_bits: 2,
+            round_bits: rounds,
+            anchor_round_bits: rounds,
+            list,
         }
     }
 
@@ -2947,7 +2962,10 @@ impl MultipointGrinding {
             .and_then(|n| n.checked_add(n_groups))
             .and_then(|k| k.checked_sub(1))
             .expect("multipoint batch size must be nonzero and fit usize");
-        self.gamma_bits.max(grinding_bits_for_degree(degree))
+        let listed = degree
+            .checked_mul(self.list)
+            .expect("multipoint batch size times the list fits usize");
+        self.gamma_bits.max(grinding_bits_for_degree(listed))
     }
 }
 

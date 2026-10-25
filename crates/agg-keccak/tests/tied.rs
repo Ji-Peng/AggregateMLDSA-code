@@ -251,12 +251,14 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     assert_eq!(pack_y(&out.final_vectors[0]).len(), 512);
 
     let cost = part.cost();
-    // Proof layout: header (14), then framed bridge cap, sponge proof, bridge union proof.
+    // Proof layout (version 4): header (18, the tie nonce last), then framed bridge cap,
+    // sponge proof, bridge union proof.
     let framed =
         |at: usize| u32::from_le_bytes(out.proof.bytes[at..at + 4].try_into().unwrap()) as usize;
-    let cap_len = framed(14);
-    let sponge_len = framed(18 + cap_len);
-    let bridge_len = framed(22 + cap_len + sponge_len);
+    let h = 18;
+    let cap_len = framed(h);
+    let sponge_len = framed(h + 4 + cap_len);
+    let bridge_len = framed(h + 8 + cap_len + sponge_len);
     let parse = |at: usize, len: usize, claims: usize| {
         agg_keccak::flock_union::UnionProof::from_bytes(&out.proof.bytes[at..at + len], claims)
             .unwrap()
@@ -265,8 +267,8 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     eprintln!(
         "  proof bytes n = {n}: bridge cap {cap_len}, sponge proof {sponge_len} (zerocheck, \
          lincheck, opening, values {:?}), bridge union proof {bridge_len} ({:?})",
-        parse(22 + cap_len, sponge_len, 3),
-        parse(26 + cap_len + sponge_len, bridge_len, 7)
+        parse(h + 8 + cap_len, sponge_len, 3),
+        parse(h + 12 + cap_len + sponge_len, bridge_len, 7)
     );
     eprintln!(
         "tied part n = {n} (d {d}): sponge nu {} M {} dense m {} ({} committed words); bridge \
@@ -319,8 +321,11 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     assert!(ctx
         .verify_with(&run, mu, c, &commitment, sd, &run.ys, &[0x3C; 32])
         .is_err());
+    // The tie nonce (header bytes 14..18) and bytes of the cap and the inner proofs.
     for at in [
-        14 + 4 + 100,
+        14,
+        17,
+        18 + 4 + 100,
         run.proof.bytes.len() / 2,
         run.proof.bytes.len() - 20,
     ] {
@@ -335,7 +340,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     // The bridge union's cap (from the proof) in place of the event-2 sponge cap.
     let cap_len = part.bridge().geometry().commitment_len();
     let swapped = TiedCommitment {
-        sponge: KeccakCommitment::from_bytes(run.proof.bytes[18..18 + cap_len].to_vec()),
+        sponge: KeccakCommitment::from_bytes(run.proof.bytes[22..22 + cap_len].to_vec()),
     };
     assert_ne!(swapped, commitment);
     assert!(ctx

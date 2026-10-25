@@ -396,7 +396,9 @@ fails tie 1).
 ## 5c. Spans: one tied part over several segments; the final vectors as the output claim
 
 Status: normative for tied-part proof version 3 (`crates/agg-keccak/src/bridge_union.rs`,
-`tied.rs`; deviation K16; mode A: `agg_cli::mode_a`, segment items of version 4). It changes
+`tied.rs`; deviation K16; mode A: `agg_cli::mode_a`, segment items of version 4), with the
+tie work and the tie binding of version 4 (end of this section; deviation K20,
+`docs/soundness.md` Sections 3.6, 4.5, 6.3). It changes
 two things of Section 5b and keeps everything else (types, rows, walkers, the sponge
 instance, the lane groups, the claim count 3 + 7, the error names).
 
@@ -432,9 +434,10 @@ The union's row capacity is `nu = max(span_log + 3 + log2(blocks), 3, 21 - max k
 sponge rows are the first `nu_s` of the record coordinates `rho_i || rho_sigma` (zero above);
 the level-1 points (inputs, parities) have rows `[rho_sigma | beta | lane_bits(h)]`; the
 levels-2-3 points (copies, outputs) have rows `[rho_sigma]`. The tie-1 factor is
-`eq(rho[nu_s..], 0)` over `rho = rho_i || rho_sigma`. Proof bytes (version 3): `AGGKCT || 3 ||
-profile || LE32(n) || d || S || LE32(len) || bridge union cap || LE32(len) || sponge proof ||
-LE32(len) || bridge union proof`, the inner proofs without the Ligerito level-0 cap (K17).
+`eq(rho[nu_s..], 0)` over `rho = rho_i || rho_sigma`. Proof bytes (version 4): `AGGKCT || 4 ||
+profile || LE32(n) || d || S || LE32(tie nonce) || LE32(len) || bridge union cap || LE32(len) ||
+sponge proof || LE32(len) || bridge union proof`, the inner proofs without the Ligerito
+level-0 cap (K17); version 3 had no tie nonce.
 
 **Soundness.** As Section 5b with the segment index as a free coordinate. Flock's knowledge
 soundness gives `z_s` (event 2) and `z_u` (absorbed before the tie challenges) satisfying
@@ -452,16 +455,36 @@ Hence `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) for every segment `sigma` of t
 the matrices of `sd` and `b'` the sponge's input fixed at event 2 before `sd`; for a part of
 one segment the shares XOR to `Y_sigma` (K10) as before. The bound (9.3) of Section 7 is
 unchanged; the tie error per tied part is `2 (d + span_log + 5) + 2 (log2(blocks) + span_log +
-9) + (5 + span_log) + (nu_s + 3)` over `2^128`: `95 / 2^128 = 2^-121.4` for a span of four
-full segments (`d = 13`, 16 blocks, `span_log = 2`, `nu_s = 15`), giving about 121.4
-work-normalized bits (which dominates the Keccak side and falls short of the project's
-128-bit ROM target, though improving on the v2 per-part total of ~119.6 bits; raising it
-above 128 bits would require e.g. repeating the tie checks at two independent points,
-sampling tie challenges in a larger field, or grinding ~7 bits on tie-challenge derivation),
-with the usual factor `Q` for re-derived challenges (Section 5b). Replay: the tie-geometry digest
+9) + (5 + span_log) + (nu_s + 3)` over `2^128` for fixed committed vectors: `95 / 2^128 =
+2^-121.4` for a span of four full segments (`d = 13`, 16 blocks, `span_log = 2`, `nu_s = 15`).
+That count omits the Johnson lists: at the time of `rho` each Ligerito commitment is bound
+only to its level-0 list (the two-point binding happens inside its opening), so the bad set is
+the union over the lists, and version 4 grinds it (below). Replay: the tie-geometry digest
 covers `S` and `span_log`, the proof header `S`; the span's Flock seed in mode A is
 `SHA3-256(len || "agg-mldsa/v1/flock-span-seed" || LE64(S) || fs_0 || .. || fs_{S-1})`, a
 function of event 5 that differs from every part seed.
+
+**Work and binding (version 4).** With list sizes `L_s = L_u = L` (35, 50, 70 for `Fast`,
+`Slim`, `Slim8`: `floor(1 / (2 eta sqrt(rho_0)))`, `eta = 0.02`) the tie site's assigned bound
+is `[2 L^2 (d + span_log + 5) + 2 L (log2(blocks) + span_log + 9) + L (5 + span_log) + L (nu_s +
+3)] / 2^128` (tie 1 pairs elements of both lists, tie 2 and the outputs range over the union's
+list, the public words over the sponge's; `agg_bridge::pow::tie_numerator`): 102,750 / 2^128
+for `Slim` at four full segments, 92,350 at one. The tie challenger grinds `g_tie = ceil(log2
+numerator)` bits before the first coordinate (`TieChallenges::derive`, Flock's `grind_pow`:
+BLAKE3 of the state digest and `LE64(nonce)` with `g_tie` leading zero bits, then the nonce
+absorbed): 16 / 17 / 18 bits (`Fast` / `Slim` / `Slim8`) at a full segment or a span, 14 to 16
+at small parts (`TiedPart::tie_bits`, `docs/soundness.md` Section 10). The prover takes the
+smallest passing nonce and aborts above `2^(g_tie + 7)` candidates (probability below
+`2^-184`); the verifier rejects a nonce of `g_tie + 7` or more bits or one failing the
+predicate (`tie claim mismatch: tie nonce`). Every address of the tie site then weighs at most
+`2^-128`. After the coordinates the tie challenger squeezes a 32-byte tie binding which both
+instance challengers absorb (label `agg-keccak/v4/tie-binding`, framed) before Flock binds its
+statement: the claim points of both instances are derived from the union's cap, the final
+vectors and the sponge cap, so Flock's merged opening, which absorbs claim values only, now
+draws its batching coefficients after the points are fixed (`docs/soundness.md` 4.5). The
+difficulty depends only on the public geometry `(profile, d, S, n)`
+(`TiedPart::plan_tie_bits`), so the proof-of-work plan bound in event 0 names it. Cost: about
+`2^17` BLAKE3 evaluations (Flock's parallel search) and 4 bytes per tied part.
 
 **Costs.** A span's sponge instance and bridge union are the per-segment instances stacked:
 the same rows, walker entries and committed words in total, one commitment and one opening
@@ -503,7 +526,7 @@ The bound is independent of $`J_t`$, of the row weights and of the number of blo
 \varepsilon_{\rm bridge}\le2^{-144.64}+\varepsilon_{\rm PIOP}+\varepsilon_{\rm Flock}+\varepsilon_{\rm bind},
 ```
 
-where $`\varepsilon_{\rm PIOP}`$ collects the bridge instances' field terms (12 Booleanity zero-checks and 7 linear identities at $`\tau`$, 6 level-1 identities at $`r^{(1)}_1`$, the carry-digit leaves and links, 50 reductions: each at most $`d_{\rm main}/|K|`$, spec 12.1), $`\varepsilon_{\rm Flock}`$ is the sub-proof's knowledge error per profile and $`\varepsilon_{\rm bind}`$ the Akita and Ligerito (or LaBinius) binding errors. Grinding: an adversary who re-derives $`\mathsf{sd}`$ $`Q`$ times (fresh events 1 or 2) multiplies the first term by $`Q`$; the 16.6-bit margin above $`2^{-128}`$ allows $`Q\le2^{16}`$ without a proof-of-work nonce, and the seed site MAY be ground under Aerie's schedule (deviation P3: not yet). Extraction: the Akita extractor gives $`b`$, the Flock extractor gives $`b'`$ with $`\tilde c_i=\mathrm{SHAKE256}(\mu_i\Vert b'_i)`$; the bridge identifies them, so the Keccak statement holds for the bits that satisfy the ring identity (spec 12.2). For the toy shape the same formula gives $`2^{-10.75}`$, and the spec's Section 13 test measures $`1/\binom{64}{3}=1/41{,}664`$ empirically at $`(m,k)=(64,3)`$ on weight-2 differences.
+where $`\varepsilon_{\rm PIOP}`$ collects the bridge instances' field terms (12 Booleanity zero-checks and 7 linear identities at $`\tau`$, 6 level-1 identities at $`r^{(1)}_1`$, the carry-digit leaves and links, 50 reductions: each at most $`d_{\rm main}/|K|`$, spec 12.1), $`\varepsilon_{\rm Flock}`$ is the sub-proof's knowledge error per profile and $`\varepsilon_{\rm bind}`$ the Akita and Ligerito (or LaBinius) binding errors. Grinding: an adversary who re-derives $`\mathsf{sd}`$ $`Q`$ times (fresh events 1 or 2) multiplies the first term by $`Q`$; the 16.6-bit margin above $`2^{-128}`$ allows $`Q\le2^{16}`$ without a proof-of-work nonce, so the seed site carries no work in the schedule of `docs/soundness.md` (Section 3.5: over the sponge commitment's Johnson list the bound is $`L_s\cdot2^{-144.64}=2^{-139.0}`$ for `Slim`). Extraction: the Akita extractor gives $`b`$, the Flock extractor gives $`b'`$ with $`\tilde c_i=\mathrm{SHAKE256}(\mu_i\Vert b'_i)`$; the bridge identifies them, so the Keccak statement holds for the bits that satisfy the ring identity (spec 12.2). For the toy shape the same formula gives $`2^{-10.75}`$, and the spec's Section 13 test measures $`1/\binom{64}{3}=1/41{,}664`$ empirically at $`(m,k)=(64,3)`$ on weight-2 differences.
 
 ## 8. Worked example (one lane, two levels, $`L=16`$)
 
