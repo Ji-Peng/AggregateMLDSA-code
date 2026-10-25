@@ -1038,3 +1038,25 @@ lookup (`claims::MultiplicityClaims`, 112 bytes); the verifier checks
 `sum_k 16^k m_k(pi_m) = m(pi_m)` (`VerifyError::Lookup`) and the opening authenticates the
 seven claims of `G_m` at `pi_m`. No range check of the digits: Lemma 5 of LogUp holds for any
 `m` in `F_p` (`docs/lookup.md` Section 2).
+
+## L8. Relation H-u replaces relaxed H; `u` by one six-valued digit (spec Sections 3, 4.3, 7.4, 10, 12; Appendix A; `docs/h-exact.md` step A)
+
+Spec (revision 4, wire version 2): the relaxed relation H with `(bar B_z, bar B_u) = (2^17,
+2^18)`, `u = U_lo + 2^16 U_hi + 2^15` with a base-8 `U_hi` on `leaf8` (degree 5), so
+`zeta' = 421,888`; Appendix A's H-exact `u` form `118,787 a_u + b_u - 190,465` needs two small
+columns. Code (wire version 3, decision 2026-10-25): relation H-u, `z` unchanged and `u =
+U_lo + 63,079 U_hi + 31,540` with `U_lo` looked up (`B_ulo = U_lo + 2^15`) and `U_hi = H_u - 3
+in [-3, 2]` on `leaf6` (`Q_6 = P (P - 2)(P - 6)`, degree 4), which covers exactly `[-190,465,
+190,465]` because `5 * 63,079 + 2^16 = 2 B_u + 1`; hence `zeta' = zeta = 350,209`. The relaxed
+`u` path is removed, not kept behind a flag (as for L1: a flag would duplicate the stage-2
+degree, the leaf and the encoder for a dominated variant). Same columns, groups, alphabets'
+widths and catalog rows; event 0 changes only in the version (3), the relation byte (0 =
+H-u, `manifest::Relation`; 1 is reserved for H-exact, step B) and the alphabet code of
+`U_hi` (8 -> 6). Stage 2 drops from degree 5 to 4 (16 B per round less: 5,616 B of stage
+messages and claims at `2^15` instead of 6,016); every proof-of-work difficulty and plan
+digest is unchanged (`bit_length(4) = bit_length(5)`), the round-by-round ledger falls from
+`1,434/|K|` to `1,409/|K|` at `2^15` (`docs/soundness.md` Section 10). The witness crate's
+default layout (`Layout::H`, id 0) follows: `u_0..u_3` base 16 (`B_ulo`), `u_4` base 6
+(`docs/witness.md`). Why the default changed: H-u dominates relaxed H in security (ML-DSA-44's
+own SelfTargetMSIS instance, core-SVP 123.5 instead of 119.7, `ref/notes/msis-estimate.md`)
+and in cost (no extra column, cheaper stage 2).

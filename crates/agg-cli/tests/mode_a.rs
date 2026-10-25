@@ -865,15 +865,16 @@ fn tampered_witnesses_are_rejected_end_to_end() {
                 && error.to_string().contains("exceeds the scheduled coefficient bound"),
             "{error}"
         );
-        // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
+        // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = -4
+        // is in relaxed H's base-8 alphabet, not in relation H-u's base-6 one).
         run(
             "base-4 digit",
             &main(&|m, t| *cell(m, t, Column::Z_HI, main_index(17, 2, 5)) = 3),
             &at_stage(2),
         );
         run(
-            "base-8 digit",
-            &main(&|m, t| *cell(m, t, Column::U_HI, main_index(17, 2, 5)) = -6),
+            "base-6 digit",
+            &main(&|m, t| *cell(m, t, Column::U_HI, main_index(17, 2, 5)) = -4),
             &at_stage(2),
         );
 

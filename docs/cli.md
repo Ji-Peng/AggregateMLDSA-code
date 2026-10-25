@@ -124,7 +124,7 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
   a committed bit flipped (Flock part) and the same with stale round-2 tables (stage 1), a
   bit of value 2 (stage 1), `w_1' = 44` in the committed bits (Flock part) and in both copies
   (Flock part; stage 1 with the Flock verdict ignored), a base-16 digit 9 (the Akita
-  commitment refuses it), base-4 and base-8 digits (stage 2), a level-1 carry digit and a
+  commitment refuses it), base-4 and base-6 digits (stage 2), a level-1 carry digit and a
   level-2 parity (stage 1), a final-vector bit (Flock part), and on the Flock side a bit
   flipped in both copies, in the bridge slot copy only, and in the sponge input with the stale
   chi witness (Flock part);

@@ -32,7 +32,7 @@ deviation D2).
 
 A width is a producer admission bound, not a range proof (Akita Remark 10.41): every range
 is proven by the PIOP (the lookup into `T_16` for the 16-bit columns and the carries, the
-base-4 and base-8 leaves for `Z_hi` and `U_hi`). The stored balanced lookup columns
+base-4 and base-6 leaves for `Z_hi` and `U_hi`). The stored balanced lookup columns
 (`f - 2^15`, deviation L2) make the width-16 admission interval coincide with `T_16`, so
 every value the honest producer can commit is an entry of the table; the extractor still
 yields arbitrary `F_p` values, which the lookup bounds. The multiplicity digits need no
@@ -173,7 +173,7 @@ opens with the claims it already holds (the stage-3 terminal values and the mult
 digit claims).
 
 Test `tests/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
-alphabet (16-bit balanced values, the base-4 and base-8 digits, Booleans, multiplicity
+alphabet (16-bit balanced values, the base-4 and base-8 digits (relaxed H; H-u's base 6 lies inside), Booleans, multiplicity
 digits; padded signatures carry the digits of zero), random claims in `K` at logical points
 (both main groups at one point), both rounds, one batched opening, verification by the
 seed-only and the prover-derived verifier, and rejection of a changed claim value, a

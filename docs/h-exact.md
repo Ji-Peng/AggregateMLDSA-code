@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | design, docs only; nothing implemented. Implementation starts after `pow-128` is merged (AGENTS.md, decisions 2026-10-25) |
+| Status | design; step A (relation H-u as the default, open question 1 answered (a)) implemented on branch `h-exact` (wire version 3, deviation L8); step B (H-exact, relation byte 1) not yet |
 | Applies to | ML-DSA-44, lookup layout L16, modes A and B, PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`) |
 | Base | code `be398d8` (main); layered on branches `pow-128` (`406245a`), `piop-speed` (`7476508`), `flock-speed` (`baf9e46`) |
 | Replaces | spec Appendix A, paragraph "H-exact" (which `ref/notes/msis-estimate.md` calls "spec Section 15"; there is no Section 15) |
-| Last reviewed | 2026-10-25, first version |
+| Last reviewed | 2026-10-25, first version; step A notes added (Section 8) |
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
 "estimate" were computed for this document with exact integer arithmetic (Section 4.4 lists
@@ -690,6 +690,37 @@ Catalog: `checked_in_catalog_holds_exactly_the_requested_rows` with both relatio
 7. **ML-DSA-65/87.** The same construction applies with their `gamma_1, gamma_2, beta`: for
    each set, search the single-digit `u` form (`(c - 1) A = 2 B_u + 1 - 2^16`, `A <= 2^16`,
    even `c`) and the `z` slack; not done here.
+
+## 8. Step A as implemented (relation H-u)
+
+The user's decision of 2026-10-25 answered open question 1 with option (a): H-u replaces H as
+the default relation. Implemented on branch `h-exact` (on top of main `1fef53d`, which merged
+`pow-128`, `piop-speed` and `flock-speed`):
+
+* Relation byte 0 now means H-u (`agg_piop::manifest::Relation::Hu`, `RELATION_HU`; byte 1 =
+  `RELATION_H_EXACT` is reserved and refused until step B). It is bound in the proof
+  header's flags byte and in byte 3 of the event-0 manifest bytes as Section 1.3 says; the
+  manifest carries the relation (`CommitmentManifest::for_relation`), and `for_batch` is the
+  H-u default. Unlike Section 1.3's "no wire-version bump" (written for adding H-exact next to
+  an unchanged H), the meaning of relation byte 0 changed, so `WIRE_VERSION` is 3 and a
+  version-2 (relaxed H) proof is refused by its header.
+* `u = U_lo + 63,079 U_hi + 31,540` (the form of 2.1 with H's slot names: `U_lo` is `S_ulo`,
+  `U_hi` is `D_u`), `leaf6` with `Q_6`, `G_main4` alphabet codes `[4, 6, 0, 0, 0, 0, 0, 0]`,
+  catalog rows unchanged (no new rows, as 7.1 predicted), stage degrees (4, 4, 3), gammas
+  (26, 8, 44), stage-2 rounds of 4 elements, PIOP stage bytes 5,616 at `2^15` (4,736 at
+  `N = 1,024`, measured in the mode-A sanity run).
+* Proof of work, re-checked against the merged `docs/soundness.md` and `pow_plan.py`: with
+  `STAGE_DEGREES = (4, 4, 3)` and `STAGE_GAMMAS = (26, 8, 44)` every difficulty, nonce width,
+  total (4,444 bits / 556 bytes / 2,718 work at `2^15`) and plan digest equals relaxed H's
+  (`bit_length(4) = bit_length(5)`; the script asserts it), and the round-by-round ledger is
+  `1,409/|K|` at `2^15` (`979` at `2^10`). The H-exact figures of 3.7 (4,443 bits, 2,710 work,
+  `1,409/|K|`, the six provisional anchors) reproduce exactly with the merged script and
+  `STAGE_GAMMAS = (26, 7, 45)`, so step B's schedule stands as written.
+* Step B starts from this layout: `S_ulo`/`D_u` are already `U_lo`/`U_hi`, `Q_6` and `leaf6`
+  exist; it adds `B_zhi` (the role of `Z_hi` with alphabet `{0, 1}`), `a_z`, the Booleanity
+  zero-checks, `G_main4` at 9 polynomials and the catalog rows of 2.3, and makes the stage
+  degrees, gamma and claim counts manifest-driven (they are constants for the single
+  relation of step A).
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 
