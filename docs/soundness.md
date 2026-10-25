@@ -7,7 +7,7 @@
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7) ; 2026-10-25 (branch `pow-close`): H1 discharged (4.6) |
+| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7); 2026-10-25 (branch `pow-close`): H1 discharged (4.6), the composition proof (Section 12, H2 under assumptions (F), (K)), canonical Flock nonce width and the tie-search error (6.3, 6.5) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -59,6 +59,12 @@ the pinned code; estimates are marked.
    `3,534/|K| = 2^-116.2`: reductions, zero-checks and linear identities ride on the stage
    sum-checks and on one `tau` site (Section 5). With the schedule every address weighs
    at most `2^-128`, and the theorem of Section 7 follows Aerie Eq. (18).
+7. **Composition (Section 12) and fold supports (4.6).** The theorem's two hypotheses are
+   settled: every fold-challenge family of both catalogs has at least `2^128.0881` accepted
+   challenges (H1, test `akita_fold_support.rs`), and the composition with the Flock
+   commitments is proved (H2) with checkpoints at `sd` and `X`, no second extractor, under
+   two stated assumptions: Flock's documented round-by-round analysis (F) and the
+   correctness of the Keccak and bridge circuits (K).
 
 ## 1. Model and method
 
@@ -234,7 +240,10 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   | one segment, two parts | `L_s^2 theta` | `2^-134.38` | `2^-133.35` | `2^-132.38` |
   | `S = 4` segments, two parts each | `S L_s^2 theta` | `2^-132.38` | `2^-131.35` | `2^-130.38` |
 
-  All are below `2^-128`: no nonce (Aerie: "the projection seed requires no work"). Without
+  All are below `2^-128`: no nonce (Aerie: "the projection seed requires no work"). The
+  composition proof (12.4) works over a fixed bridge expansion oracle, so it uses the seed
+  density `theta' = 2 theta` of Lemma 12.4, and it charges only the first false segment:
+  `max_sigma L_s^(P_sigma) theta' <= 2^-131.38` (`Slim8`, two parts), still no nonce. Without
   the two-part cap the bound would be `L_s^P theta` for `P` parts in one segment, which
   exceeds `2^-128` from `P = 3` under `Slim` (`2^-127.7`) and is vacuous at the
   `2^(d_seg - 3)` parts a segment could otherwise hold (review of `pow-128`, finding 1).
@@ -522,15 +531,14 @@ alters a family fails it.
 ## 5. Tighter accounting (round-by-round), with the argument
 
 **Lemma S (checks of fixed objects).** Fix the 38 Akita polynomials `f` (values in `F_p`
-on their Boolean domains) and the Flock word vectors up to their level-0 lists, and a
-statement. For every challenge input `u` of a PIOP site from `sd` to the PCS export or of
-a tie site, let
+on their Boolean domains) and a statement. For every challenge input `u` of a PIOP site from
+`X` (event 7) to the PCS export, let
 `D(u) = 1` iff a verifier check determined by `u` fails or a pending claim is false,
-where the pending claims are: at `sd`, "`(f, z)` is a witness of relation H for the
-statement" (with `b = b'`); after the Keccak side, the relation identities of `f`
-(Sections 4 to 6, (9.2) with the absorbed `Y_sigma`); after each site, the claims listed
+where the pending claims are: at `X`, the relation identities of `f` (Sections 4 to 6, (9.2)
+with the absorbed `Y_sigma`; `R_PIOP` of Section 12.2); after each site, the claims listed
 in Section 3 (layer claims, stack and table leaf claims, stage input claims, terminal
-evaluation claims). Then for every site `t` of Section 3 and every input `u` with
+evaluation claims). (The sites before `X`, i.e. `sd`, `fs`, the tie sites and Flock's, are
+treated in Section 12.4 with the round-1 polynomials and the Flock words' Johnson lists.) Then for every site `t` of Section 3 and every input `u` with
 `D(u) = 1`, there is a set `Bad_t(u)`, determined by `u` and the fixed objects, such that
 an answer outside `Bad_t(u)` leaves `D = 1` at every next input, and
 `Pr[Bad_t(u)] <= 2^-g_t nu_t / |F_t|` including the predicate (Akita Remark 10.18).
@@ -540,8 +548,8 @@ Sections 3.2 to 3.6 give the polynomial whose zero set it is and its degree. Eve
 not acted on by the site stays false. A false claim never needs two sites at once: a
 batching vector turns any false input claim of a stage into one false batched claim, the
 stage rounds then act on that single claim, and the terminal check is exact. This is
-Aerie Lemma C.1 with our instances; at `sd` the bad set is Section 3.5's, at the tie site
-Section 3.6's (with the list factors), at `X` Section 3.2's.
+Aerie Lemma C.1 with our instances; at `X` the bad set is Section 3.2's. (At `sd` and at
+the tie sites the bad sets are those of Section 12.4, built on Sections 3.5 and 3.6.)
 
 **Consequences.**
 
@@ -669,55 +677,64 @@ evaluations.
 **Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` or `Slim` with the fix of
 4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 4 (4.5), PIOP wire version 2
 with the plan of Section 6, at most two tied parts per segment (3.5), and Akita's plan for
-the selected catalog row. Assume in addition:
+the selected catalog row. The two former hypotheses are settled:
 
 * **(H1, discharged in 4.6)** every fold group of every row of both catalogs draws its
   sparse fold challenges from a family whose accepted support is at least `2^128` after
   rejection (smallest `2^128.0881`; test `agg-pcs-config/tests/akita_fold_support.rs`);
-* **(H2, open 3)** Akita's Theorem 10.45 composes with a second, straight-line
-  list-decoding extractor for the Flock vectors inside the application segment (step (3)
-  below); the argument is not yet written.
+* **(H2, proved in Section 12 under (F) and (K))** the composition of Akita's extractor with
+  the Flock commitments: no second extractor is needed (the extractor returns Akita's
+  round-1 sources; the Ligerito words are fixed straight-line by the Merkle expansion and
+  enter only the round-by-round bits through their Johnson lists), with a checkpoint at `sd`
+  (round-1 candidate) and one at `X` (all six groups), and Lemma 12.3 for the parallel
+  Flock transcripts.
 
-Until H2 is discharged the paper MUST state it as a hypothesis and MUST NOT claim
-the theorem unconditionally. For every
-prover `P` making at most `Q` oracle queries (all oracles of Section 1, every nonce probe
-included) there is an extractor of expected cost polynomial in that of `P` (Aerie
-Theorem 5.9: at most `(Q_wrap + 2) K_hat` runs) that returns the original execution and,
+The theorem is conditional on the assumptions of Section 12.5: **(F)** Flock's documented
+round-by-round analysis of its instances (per-site bounds as validated by its configs, the
+list factor at the outer sites by K19, its work composition) and **(K)** the correctness of
+the sponge and bridge-union circuits. The paper MUST state (F) and (K) as assumptions and
+MUST NOT claim the theorem without them. For every
+prover `P` making at most `Q` oracle queries (all oracles of Section 12.1, every nonce probe
+included) there is an extractor of expected cost polynomial in that of `P` (at most
+`(Q_wrap + 2) 4 Tree0_ck(sch)` runs, Section 12.6) that returns the original execution and,
 whenever the verifier accepts, a witness of relation H for every live record, except with
 probability at most
 
 ```text
-eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + delta_samp
-           + eps_merkle + sum_I Adv^MSIS_I(T_I)
+eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + eps_fs
+           + eps_merkle + delta_X + delta_samp + sum_I Adv^MSIS_I(T_I)
 ```
 
 where `R_f` is the number of field sites of the PIOP and of Akita read by the verifier
 (484 + 459 at `2^15`, plus the seeds and the tie sites), `R_coord` Akita's sparse fold coordinates read by
 the verifier, `R_F` the Flock sites read by the verifier (both instances, outer and
 Ligerito, queries included), `eps_bind, eps_pk, eps_dig` the hashed-entry terms of Aerie
-Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock seeds,
-span seed, tie digests), `delta_samp = 0` for the exact samplers, `eps_merkle` the
-collision term of the Ligerito Merkle trees and BLAKE3 transcript hashing, and the
-Module-SIS terms those of Akita Lemma 10.20 for the schedule's occurrences.
+Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock part and
+span seeds, final-vector digests, tie bindings, Flock statement digests, the BLAKE3 chaining
+of Flock's challenger), `eps_fs` the Flock-seed term of Lemma 12.1, `eps_merkle` the
+Ligerito Merkle term of Lemma 12.2, `delta_X < 2^-(2^110)` the seed-density term of Lemma
+12.4, `delta_samp = 0` for the exact samplers, and the Module-SIS terms those of Akita
+Lemma 10.20 for the schedule's occurrences.
 
-*Proof sketch.* (1) Hashed entries replaced by their preimages (Akita Lemma 10.47):
-`eps_bind + eps_pk + eps_dig`. (2) Ligerito commitments are extracted straight-line from
-the Merkle queries (up to `eps_merkle`); the level-0 lists are fixed when the caps are
-output (events 2 and 6), before every site that refers to them. (3) Akita's Theorem 10.45
-with the application segment starting at the checkpoint `sd`, whose candidate is the
-round-1 polynomials and the sponge list, with Lemma S supplying the bits and bad sets of
-Definition 10.16 (vii) at every PIOP and tie site; Flock's validated per-site bounds
-supply them inside the Keccak side; Akita's plan inside the opening. (4) Every address
-weighs at most `2^-128` (Section 3, the script's assertion `max weight <= 2^-128`; Flock
-with 4.3/4.4; Akita by its plan and by the accepted sparse-challenge supports of 4.6), so Aerie
-Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <= 2^-128`. (5) The extracted
-objects satisfy relation H by spec 12.2 (lookup, leaves, bridge with `b = b'`, Keccak by
-Flock's relation).
+*Proof (Section 12).* (1) Hashed entries, the Flock seeds and the Ligerito caps are expanded
+(Akita Lemma 10.47, Lemmas 12.1, 12.2): `eps_bind + eps_pk + eps_dig + eps_fs + eps_merkle`.
+(2) A checkpoint structure for the expanded protocol (12.2): checkpoints at `sd` (candidate
+the round-1 sources, test relation H) and at `X` (candidate all six groups, test the PIOP
+relation), Akita's opening suffix (Proposition 10.44) after the root fold, and Lemma 12.3 for
+the tied parts' own challengers. (3) Item (vii) of Akita Definition 10.16: Lemma S and the
+evaluation batch on the segment of `X` (12.3); the bridge seed with the sponge lists, the
+tie sites with the list factors and Flock's per-site bounds under (F) on the segment of `sd`
+(12.4), with Lemma 12.4 for the seed. (4) Every address weighs at most `2^-128` (Section 3,
+the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; Flock with 4.3/4.4
+under (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
+Akita Theorem 10.17 with Aerie Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <=
+2^-128`. (5) The witness map returns the round-1 tables, which satisfy relation H by the
+test at `sd`.
 
-*What is not proved here.* Step (3)'s composition with a second, straight-line extractor
-inside the application segment (the Flock vectors) is hypothesis H2, the obligation of
-step 3 (review) and of the paper; the per-row support floor (former hypothesis H1) is checked in 4.6; Flock's own MCA, OOD and query bounds are taken from Flock; Akita's
-Module-SIS estimates exclude the extractor's run count as in Aerie. As in Aerie, the term
+*What is not proved here* (Section 12.7): assumption (F), which the Flock paper presents
+as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17 and should be checked
+by a reviewer of Akita's proof; `R_F` is not counted exactly; Akita's Module-SIS estimates
+exclude the extractor's run count as in Aerie. As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
 
@@ -896,9 +913,11 @@ change with it.
    `L = 50`, by Flock's `paper_ood_bits`), i.e. extra MLE evaluations of both committed
    vectors and a Flock transcript change. Grinding costs about a millisecond and is
    recommended.
-3. **Composition proof.** The theorem's step (3), Akita Theorem 10.45 with a second,
-   straight-line (list-decoding) extractor inside the application segment, needs a written
-   proof (step 3 review, paper appendix). Stated as hypothesis H2 of Section 7.
+3. **Composition proof (written, Section 12).** No second extractor is needed; the proof
+   uses checkpoints at `sd` and `X`, the Merkle expansion and Lemma 12.3 for the parallel
+   Flock transcripts. It rests on assumptions (F) (Flock's round-by-round analysis, a sketch
+   in the Flock paper) and (K) (circuit correctness), and Lemma 12.3 extends Akita's Theorem
+   10.17; these three items remain for the review and the paper.
 4. **`R_F`** (Flock sites read by the verifier) is not counted exactly here; it enters only
    the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tie site; its Keccak side is
@@ -906,3 +925,349 @@ change with it.
 6. **Akita sparse folds (resolved, 4.6).** The accepted (post-rejection) supports of every
    row of both catalogs are checked by `agg-pcs-config/tests/akita_fold_support.rs`: all at
    least `2^128.0881`. Hypothesis H1 of Section 7 is discharged.
+
+## 12. Composition proof (hypothesis H2)
+
+This section proves the theorem of Section 7 from Akita's checkpoint extraction (Akita
+Definition 10.16, Theorem 10.17), its opening suffix (Proposition 10.44) and the arguments
+of its Theorem 10.45, in the style of Aerie Section C. Akita's Theorem 10.45 cannot be applied
+verbatim, for three reasons: the round-2 root commitments (event 4) are sent after the first
+application challenge `sd`; the Flock words are committed by Merkle caps, not by Akita; and
+the tied parts run on their own challengers, in parallel, so their challenge inputs do not
+encode the complete preceding transcript. Sections 12.1 to 12.4 build a checkpoint
+structure for the expanded protocol that handles all three, 12.5 lists exactly what is
+assumed, 12.6 states the bound, and 12.7 lists what is not proved.
+
+The key observation is that no second extractor runs. Relation H constrains the round-1
+polynomials alone ((3.3) is a SHAKE256 computation on their bits `b`), so the extractor
+returns Akita's round-1 sources and never decodes a Flock word. The Ligerito words enter only
+the analysis: they are fixed straight-line by the Merkle expansion (Lemma 12.2), and the
+round-by-round bits quantify over their Johnson lists. Every test of the structure is a
+polynomial-time function of Akita candidates.
+
+### 12.1 Oracles and the expanded protocol
+
+Oracles (classical ROM, Section 1): the PIOP duplex `H_P` (Spongefish `Blake2b512`), the Flock
+challengers `H_F` (BLAKE3 `FsChallenger`: per tied part the tie challenger and the two instance
+challengers, distinct labels), Akita's native stream and coordinate streams `H_A` (SHAKE, ideal
+XOF as Akita 10.1), the bridge expansion `H_X` (cSHAKE256 `agg-mldsa/v1/bridge`, spec 9.1), the
+setup oracle, the hashed-entry oracles (public-records tree, plan digest, PCS session digest,
+part and span seeds, final-vector digests `y_digest`, tie bindings, Flock statement digests,
+the BLAKE3 chaining inside `FsChallenger`), and the Ligerito Merkle hash `H_M` (BLAKE3, 256-bit
+nodes, caps). `Pi_H` is the real protocol. The expanded protocol `Pi` differs in three ways:
+
+1. every hashed entry is sent in full (Akita Lemma 10.47; error `eps_hash = eps_bind + eps_pk
+   + eps_dig`, Aerie Definition 5.8, with the entries listed above);
+2. every `H_F` input that contains a Flock seed `fs_sigma` (through the part or span seed)
+   contains instead the PIOP input of the `fs` site, i.e. the complete PIOP prefix through
+   event 5 (Lemma 12.1);
+3. every Ligerito Merkle cap (level 0 and every recursive level of every instance) is replaced
+   by the committed word, and every authentication path by a read of that word (Lemma 12.2).
+
+In `Pi` every challenge address of a part encodes the PIOP prefix through `fs`, and every
+committed Flock word, hence its Johnson list `Lambda(C) = Lambda_gamma(C)` at the profile's
+level-0 radius (`|Lambda| <= L = 35, 50, 70`, Flock Eq. (10)), is a function of the
+transcript.
+
+**Lemma 12.1 (the Flock seed as a compressed prefix).** A prover for `Pi_H` (after item 1)
+converts into a prover for the protocol with item 2 that runs it once, outputs the same
+statement and makes no more challenge queries, such that the first accepts while the second
+rejects with probability at most `eps_fs = (S Q_5)^2 / 2^257 + S^2 Q_F Q_5 / 2^256`, where `Q_5`
+counts the PIOP queries at `fs`-site inputs, `Q_F` the `H_F` queries and `S <= 4` the seeds per
+answer (a span seed contains `S` of them).
+
+*Proof.* The proof of Akita Lemma 10.47 with the 32-byte `fs` chunks of the `fs`-site answers
+in the role of digests of their PIOP input: the converted prover forwards an `H_F` query with
+the chunk replaced by the PIOP input that produced it, and answers a query whose chunk was
+never produced by a fresh local answer. Its bad events are two `fs`-site answers with a common
+chunk and an `H_F` query (or the output) containing a chunk that an `fs`-site answer produces
+only later; without them the forwarded queries are injective and the verifier of the second
+protocol reads the same answers. The count gives `eps_fs`.
+
+**Lemma 12.2 (Merkle expansion).** A prover `P'` for the protocol with items 1 and 2
+converts into a prover `P` for `Pi` that runs `P'` once, outputs the same statement and makes
+no more challenge queries, such that `P'` is accepted while `P` is rejected with probability
+at most `eps_merkle = (Q_M choose 2) / 2^256 + Q_M V_M / 2^256`, where `Q_M` counts the `H_M`
+queries of `P'` and of the verifier on its output and `V_M` the node positions they contain.
+
+*Proof.* The straight-line Merkle extraction of BCS16 in the form of Akita Lemma 10.47. `P`
+records the `H_M` queries of `P'`; for each cap it rebuilds the tree top-down from the
+recorded preimages and sets every leaf it cannot reach to zero; it forwards each challenge
+query with every cap replaced by the rebuilt word, and answers a query containing a cap it
+cannot rebuild by a fresh local answer. Without a collision of `H_M` and without a fresh `H_M`
+output equal to a node already used, every authentication path that the verifier of `P'`
+accepts consists of recorded queries, so each opened leaf equals the rebuilt word at that
+position, and the verifier of `Pi`, which reads the word, sees the same values and the same
+challenges. A zero-filled position is never opened without a bad event. The two bad events
+have the stated probabilities.
+
+### 12.2 The checkpoint structure
+
+**Stages** of `Pi` in transcript order, with their types in the sense of Akita Definition
+10.16 (`E` extraction, `H` checkpoint, `N` plain):
+
+| Stages | Oracle | Type |
+| --- | --- | --- |
+| `sd` (event 3) | `H_P` | `H`: checkpoint `l_1` |
+| `fs` (event 5) | `H_P` | `N` |
+| per tied part `p`, in segment and part order: the tie site; the sponge instance's Flock sites; the union's Flock sites | `H_F` | `N` |
+| `X` (event 7) | `H_P` | `H`: checkpoint `l_2` |
+| the PIOP sites after `X` (Section 3.1), then Akita's evaluation batch of the 38 claims (the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`) | `H_P`, `H_A` | `N` |
+| the opening suffix from the root fold challenge (Akita Proposition 10.44): fold challenges, ring-switch `alpha` of every nonterminal level, the rest | `H_A` | `E` (indexed), `H`, `N` |
+
+The segment of `l_1` runs from `sd` to the last stage before `X`; the segment of `l_2` from `X`
+to the last stage before the root fold challenge, whose input is `xi_f`. Every plain stage lies
+in one segment.
+
+**Projected addresses.** In this linear order the stages of part `p` follow those of part
+`p - 1`, but the input of a part's site (its address) encodes the PIOP prefix through `fs`
+(item 2) and part `p`'s own messages only, and the two instances of a part encode the tie
+binding, not each other's messages. Akita's framework assumes that a stage input encodes the
+complete preceding transcript. Lemma 12.3 removes that assumption for plain stages.
+
+**Lemma 12.3 (projected addresses).** Take a checkpoint structure whose plain stages `j` read
+their answer at an address `pi_j(xi)` of the stage input `xi` (the complete linear prefix)
+such that (a) `pi_j(xi)` encodes the input of the checkpoint whose segment contains `j`, and
+(b) `Bad_j(xi; w)` depends on `xi` only through `pi_j(xi)`; items (i) to (viii) of Definition
+10.16 hold with `D` evaluated on stage inputs. Then Theorem 10.17 holds, each queried address
+of stage `j` weighing `eps_j`.
+
+*Proof.* Akita's proof (Appendix E.2) touches the inputs of plain stages only in Claims 1 and
+2. Claim 1's path argument is a statement about `D` on the stage inputs of the output
+transcript and does not change: some stage `j` of the segment has `D(xi_j; w) = 1` and the
+answer `K(pi_j(xi_j))` in `Bad_j(xi_j; w)`. For the probability, sample the table lazily by
+address: when `A` first queries an address `a` of stage `j` in `Sub(i)`, the history, `c` and
+the fixed `w` determine `a` and, by (b), the set `Bad_j(a; w)`, while `K(a)` is fresh; a union
+bound over the queried addresses gives Claim 1 with `N_{i,j}` counting addresses (at most the
+count of inputs). By (a) every address lies in exactly one `Sub(i)`, which is Claim 2.
+Extraction stages and checkpoints keep inputs that encode the complete prefix (the Akita
+stream is seeded by the PCS session digest, which binds every Flock byte absorbed at event 6;
+`sd` and `X` are PIOP sites), so the rest of the proof is unchanged.
+
+The parts' sites satisfy (a) by item 2, and (b) by the bad sets of 12.4, which are defined
+from the part's own data.
+
+**Candidates, tests, binding, witness.** Every certificate below the root fold is a
+first-stage certificate `y` of Proposition 10.44: a prefix through `xi_f` passing every check
+it determines, with a root weak opening `omega_y` of the six groups; all stages between `l_1`,
+`l_2` and the root fold are plain, so the certificate sets there are this set.
+
+* `l_1 = sd`: `Cand(y) = sigma_1(y)`, the source projections of the round-1 groups `G_main16`,
+  `G_main4` in `omega_y`, decoding to `f_1 = Dec(sigma_1)`; `Good_{l_1}(y) = H(f_1)`, relation H
+  ((3.1) to (3.3) with the proven bounds of spec 3.1 and 12.2) on every live record. Binding: two
+  certificates with the same input at `sd` have the same round-1 commitments, so different
+  projections give a kernel vector (Akita Corollary 10.25).
+* `l_2 = X`: `Cand(y) = sigma(y) = Src(omega_y)`, all six groups, `f = Dec(sigma)`;
+  `Good_{l_2}(y) = R_PIOP(f; xi_X(y))`, the conjunction of the Boolean-domain identities the
+  PIOP proves from `X` on: lookup membership of every looked-up cell and the leaves (4.3), the
+  digit reconstructions (4.1), (6.1) with the range of `v`, Booleanity and (3.4), and (9.2)
+  with the `M_t` of `sd` and the `Y_sigma` of `xi_X`. Binding: Corollary 10.25 (both rounds'
+  commitments are in `xi_X`).
+* `Wit(y) = f_1` on the original domains, i.e. `(z_i, u_i, v_i, b_i)` by (4.1).
+
+All maps are polynomial time. Spec 12.2 gives `R_PIOP(f; xi_X) => A_1(f_1)` and `M^(sigma)
+b_sigma(f_1) = Y_sigma` over GF(2) for every segment, where `A_1(f_1)` is relation H without
+(3.3) ((3.1), (3.2), `w_1' in [0, 44)`, Boolean `b`) and `M^(sigma) = M_3 M_2 M_1` (spec 9.2).
+The tree size is `K = 2^2 Tree0_ck(sch)` (two application checkpoints; Aerie has one). The
+structure depends on the batch geometry bound in event 0 (`N`, the profile, the tied-part
+geometry through the plan digest, 6.4), as Akita Remark 10.19 permits; every admitted geometry
+has `rho <= 2^-128`, so the bound holds with `R_f`, `R_coord`, `R_F` and the tree size
+maximized over them.
+
+### 12.3 The segment of `X` (PIOP and the evaluation batch)
+
+For a fixed `sigma` put `D(xi; sigma) = 1` iff a check determined by `xi` fails or a pending
+claim is false, with the pending claims of Lemma S (Section 5), starting from `R_PIOP(f;
+xi_X)` at `X`. Item (vii)(a) holds by definition. Item (vii)(b) is Lemma S for the PIOP
+sites; at Akita's evaluation batch a false claim `v_k != f_k(z_k)` makes the batched equation
+false outside one hyperplane of the 38 independent coefficients (mass `1/|K|`, Akita Remark
+10.43; assigned `38/|K|`, `g = 6`). Item (vii)(c): at `xi_f` the only pending claim is the root
+row `sum_k eta_k v_k = sum_k eta_k f_k(z_k)` (Akita (202)), which a certificate's weak opening
+satisfies (Proposition 10.44, witness step), as in Aerie Lemma C.1 (ii).
+
+### 12.4 The segment of `sd` (the bridge seed, the tie sites and Flock)
+
+Fix `sigma_1` and `f_1 = Dec(sigma_1)`. For a tied part `p` with records in the segments
+`P^-1(p)`, let `C_s^p` be its sponge word (event 2, in the input of `sd`) and `C_u^p` its union
+word (in its proof). For codewords `z in Lambda(C_s^p)`, `z' in Lambda(C_u^p)` (decoded to
+witnesses):
+
+* `Spg_p(z)`: the sponge registry's rows and Flock's witness contract hold (dummy rows zero,
+  the constant pin); `Pub_p(z)`: the public region equals the verifier's table `(mu_i, c~_i,
+  1, 0)` on live rows. By assumption (K) of 12.5, `Spg_p(z) and Pub_p(z)` give `c~_i =
+  SHAKE256(mu_i || w1Encode(b'_i(z)))` for every live record `i` of `p`, `b'(z)` the input bits;
+* `Uni_p(z')`: the union's rows hold (level-1 rows with `M_1` of `sd`, levels-2-3 rows with
+  `M_3 M_2` and zero coefficient), so by (K) its outputs are `M_3 M_2 M_1` of its level-1
+  inputs, per segment;
+* `Tie_p(z, z')`: the level-1 inputs of `z'` are `b'(z)` (zero on padded positions), the
+  parity copies equal the parities, the outputs equal the part's final-vector table `Y^_p`
+  (its share, or the `S` vectors of a span);
+* `Val_p(z, z') = Spg_p(z) and Pub_p(z) and Uni_p(z') and Tie_p(z, z')`; it implies
+  `M^(sigma) b'_{p,sigma}(z) = Y^_{p,sigma}` for every segment `sigma` of `p`.
+
+**Pending claims** at a stage input `xi` of the segment (each present once the data it names
+is in `xi`):
+
+* `C1`: `A_1(f_1)`;
+* `C2_sigma` (between `sd` and the messages of event 6): there are `z_p in Lambda(C_s^p)`
+  for the parts `p` of segment `sigma` with `Spg_p(z_p) and Pub_p(z_p)` for all `p` and
+  `M^(sigma) (b_sigma(f_1) xor b'_sigma(z)) = 0`, `b'_sigma(z)` the segment's bits assembled
+  from the parts;
+* after `Y_sigma` and the shares (event 6, first in the linear order): `C3_sigma`:
+  `M^(sigma) b_sigma(f_1) = Y_sigma`; and per part `C4_p`: some `z in Lambda(C_s^p)` and some
+  union witness `z'` satisfy `Val_p(z, z')`, where `z'` ranges over `Lambda(C_u^p)` once the
+  union word is in `xi` (sending it can only turn a false `C4_p` into a false one: every
+  codeword of the list decodes to a union witness);
+* after the tie site of `p`: `C4_p` is replaced by the pair claim `C5_p`: some `(z, z') in
+  Lambda(C_s^p) x Lambda(C_u^p)` satisfies all tested identities at `rho` (tie 1 and tie 2 for
+  both lane groups, the outputs against `Y^_p(rho)`, the public words against the table;
+  write `V_p(z, z'; rho)`), and neither `z` fails the sponge instance nor `z'` the union in
+  the sense of (F): the instance's registry rows and witness contract, its internal pending
+  claims so far, and its packed-direct claims (`z(P_pub) = v_pub`, `z(P_s_h) = v_s_h`; the
+  union's seven) once their values are in `xi`. The points are fixed in each instance's
+  transcript by the tie binding (4.5).
+
+`D(xi; sigma_1) = 1` iff a check determined by `xi` fails or a pending claim is false; at the
+input of `sd` the one pending claim is `H(f_1)`. At `xi_X`, `D = 1` iff a check fails, `C1` is
+false or some `C3_sigma` is false (every Flock part is verified before `X`, so its outcome is a
+check determined by `xi_X`).
+
+**Item (vii)(a)** holds by definition. **Item (vii)(c):** a certificate in `Y_X` passes the
+test `R_PIOP(f; xi_X)`, which implies `C1` and every `C3_sigma` (12.2), and its prefix passes
+every check, so `D(xi_X; sigma_1) = 0`. **Item (vii)(b)**, stage by stage (a stage that does not
+act on the first false claim gets the empty set):
+
+* `sd`. If `C1` is false it stays false. Otherwise (3.3) fails for a live record `i*` of a
+  segment `sigma*`. Let `Bad_sd` be the set of seeds for which some tuple `(z_p)_p` over the
+  lists of the parts of `sigma*` has `Spg_p(z_p) and Pub_p(z_p)` for all `p` and
+  `M^(sigma*) delta(z) = 0`, `delta(z) = b_sigma*(f_1) xor b'_sigma*(z)`. For such a tuple,
+  (K) gives `c~_i* = SHAKE256(mu_i* || w1Encode(b'_i*(z)))` while (3.3) fails for
+  `b_i*(f_1)`, and w1Encode is the bit packing of spec 8, so `delta(z) != 0`. On the event of
+  Lemma 12.4 at most a fraction `theta' = 2 theta` of the seeds kill a fixed nonzero `delta`,
+  so `Pr[Bad_sd] <= L^(P_sigma*) theta'`: `L^2 theta' = 2^-133.38 / 2^-132.35 / 2^-131.38`
+  (`Fast` / `Slim` / `Slim8`, two parts in `sigma*`), `L theta' = 2^-138.51 / 2^-138.00 /
+  2^-137.51` with one part or a span. Only the first false segment is charged; the sums over
+  segments of Section 3.5 are a conservative superset. Outside `Bad_sd`, `C2_sigma*` is false.
+* `fs`. No bad set: `D` stays 1 for every answer and every message of event 6. If `C1` or a
+  check fails, it persists. Otherwise `C2_sigma*` is false. If `M^(sigma*) b_sigma*(f_1) !=
+  Y_sigma*`, `C3_sigma*` is false. Otherwise, if every part `p` of `sigma*` had `C4_p` with
+  witnesses `(z_p, z'_p)`, then `M^(sigma*) b'_{p,sigma*}(z_p) = Y^_{p,sigma*}` for each `p`;
+  the shares XOR to `Y_sigma*` (the verifier derives the last share from `Y_sigma*`; a span's
+  table is `Y` itself), the parts' records partition the segment and `M^(sigma*)` is GF(2)
+  linear, so `M^(sigma*) b'_sigma*(z) = Y_sigma* = M^(sigma*) b_sigma*(f_1)`, which makes
+  `C2_sigma*` true. Hence some `C4_p` is false.
+* The tie site of part `p` (address: the part's tie-challenger input, with `C_s^p`, `C_u^p`,
+  `y_digest`, the geometry and the nonce). If `C4_p` is false, let `Bad_tie` be the set of
+  `rho` for which some pair `(z, z')` with `Spg_p(z) and Uni_p(z')` but not `(Pub_p(z) and
+  Tie_p(z, z'))` satisfies all tested identities at `rho` (tie 1 for both lane groups, tie 2
+  for both lane groups, the outputs against `Y^_p(rho)`, the public words against the table).
+  For such a pair the first false identity is a nonzero multilinear polynomial in its free
+  coordinates, and all identities holding at `rho` forces it to vanish there; the union over
+  the pairs is the numerator `nu_tie` of Section 3.6, and with the work bits (Akita Remark
+  10.18, Proposition 10.3 under (F)(iv)) the address weighs at most `2^-g_tie nu_tie / 2^128
+  <= 2^-128`. Outside `Bad_tie`, a pair with `Spg_p(z) and Uni_p(z')` and `V_p(z, z'; rho)`
+  would have `Pub_p(z) and Tie_p(z, z')`, hence `Val_p`, which `C4_p` excludes; so every pair
+  fails `Spg_p` or `Uni_p` (and then its codeword fails its instance from the first site on)
+  or fails `V_p`, and `C5_p` is false.
+* A Flock site `t` of the sponge instance of part `p` (the union's likewise): its bad set is
+  Flock's set `B_t` of answers after which some codeword of `Lambda(C_s^p)` that fails the
+  instance at the address stops failing ((F)(ii); determined by the address; weight at most
+  `2^-128` with the scheduled work, K19). If `C5_p` is false and the answer avoids `B_t`,
+  every pair still fails: a failed `V_p` depends only on `(z, z', rho)`, a failing `z` keeps
+  failing, the union's codewords are untouched, and a message never revives a codeword
+  ((F)(ii)). If both instances' verifiers accept, (F)(iii) gives codewords `z*`, `z'*` that do
+  not fail, so their packed values are the sent ones, and the verifier's value checks
+  (`v_in_h = eq v_s_h`, `v_top_h = v_y1_h`, `v_out = Y^_p(rho)`, `v_pub` = table) then give
+  `V_p(z*, z'*; rho)`, i.e. `C5_p`. So a false `C5_p` at the end of the part makes a Flock
+  verifier or a value check reject, which is a check determined by every later input.
+
+This gives item (vii) for `l_1`, with Lemma 12.3's (a) and (b) for the part sites.
+
+**Lemma 12.4 (uniform seed density).** Except with probability `delta_X < 2^-(2^110)` over
+`H_X`, every nonzero `delta` in the level-1 input space of a segment (`J = 6 * 16 * 2^19 =
+3 * 2^24` bits; smaller segments embed with zeros) has `M^(sigma)(sd) delta = 0` for at most a
+fraction `theta' = 2 theta = 2^-143.64` of the 256-bit seeds.
+
+*Proof.* As Aerie Lemma C.2. The expansion inputs `(sd, t, zeta)` are injectively framed, so
+distinct seeds give independent matrix families, each with `Pr[M_3 M_2 M_1 delta = 0] <= theta =
+2^-144.64` (spec 9.4; columns uniform `k_t`-subsets, which the derivation of spec 9.1 produces
+exactly). For a fixed `delta` the number of killing seeds is a sum of `2^256` independent
+indicators of mean at most `mu = 2^256 theta = 2^111.36`, so it exceeds `2 mu` with probability
+at most `exp(-mu / 3)` (Chernoff). A union over the `2^(3 * 2^24)` vectors gives `delta_X <=
+2^(3 * 2^24) exp(-2^111.36 / 3) < 2^-(2^110)`. The event holds for all `delta` at once,
+including those that depend on `H_X`.
+
+### 12.5 What is assumed (exactly)
+
+* **(F) Flock's documented analysis, per list element.** For each instance of the vendored
+  `flock-core` under `Fast`, `Slim` (or `Slim8`) with K19, in `Pi`, with level-0 word `C`:
+  (i) there is, for every codeword `z in Lambda(C)` and every instance-local input, a bit "`z`
+  fails" (a pending claim of the instance is false for `z`), which at the instance's first
+  site is set iff `z` violates the registry rows or the witness contract, and which a
+  packed-direct claim sets once its value is sent and differs from `z`'s evaluation; (ii)
+  every Flock site `t` has a set `B_t`, determined by its address, of mass at most `eps_t`
+  with `2^-g_t eps_t <= 2^-128`, such that outside `B_t` every failing codeword still fails at
+  the next input, and no prover message unsets the bit:
+  the outer sites with the level-0 list factor (Flock Appendix A, "Security", as patched by
+  K19), the Ligerito sites (MCA, two-point OOD binding, claim and consistency batches, fold
+  sum-checks, recursive commitments, query consistency with 16-bit query work) as validated by
+  `LigeritoSecurityConfig::validate` for the shipped configs (Flock Appendix C.3, Section 4.2);
+  (iii) if the instance's verifier accepts, some codeword of `Lambda(C)` does not fail at the
+  end; (iv) Flock's work composition (predicate BLAKE3 of `state || LE64(nonce) || 0^24`, then the
+  nonce absorbed and the challenge squeezed) meets Proposition 10.3: distinct contexts give
+  distinct, independent predicate/challenge outputs. This is Flock's own 128-bit claim in the
+  per-element form that its union bounds over the list prove (Flock Appendix C.3 states the
+  invariant for every list element and multiplies each step by `L_max`); the Flock paper
+  presents the analysis as a sketch, and we do not re-derive it.
+* **(K) Circuit correctness.** Every assignment satisfying the sponge gate's rows (`docs/
+  keccak.md` Sections 1, 2: each chi output is forced by its own row, the linear layers, the
+  absorption and the chain are XOR expressions) computes SHAKE256 on its input bits; every
+  assignment satisfying the bridge union's rows computes `M_1` per block and `M_3 M_2` on the
+  copies with the part's column offsets, i.e. `M^(sigma)` of the part's bits zero-extended to
+  its segment (`docs/bridge.md` 5b). A property of fixed circuits, established by
+  construction and by the crates' tests, not proved here.
+* **(R) Random oracles** as listed in 12.1 (Aerie's modeling of Spongefish, Flock's of BLAKE3,
+  Akita's ideal XOF; the BLAKE3 uses for Merkle nodes, challenger chaining and work
+  predicates are independent oracles by their input formats, as Flock assumes), the setup as
+  in Aerie C.1 (`Delta_setup = 0` for the exact rejection-
+  sampled setup stream of the pinned Akita revision, which Aerie `49b6c21` shares with us).
+* **(A) Akita** at `e023b6a`: Proposition 10.44, Lemma 10.42, Corollaries 10.25 and 10.32,
+  Lemmas 10.2 and 10.20, the extraction-admissibility of our schedules (Definition 9.2 (i) to
+  (iii); the rows pass Akita's schedule audit when the catalogs load, the tree-size condition
+  is not tabulated here, see 12.7), and Theorem 10.17, here with Lemma 12.3.
+
+Discharged in this repository: the PIOP round-by-round bad sets (Lemma S), the `sd`, tie and
+evaluation-batch bad sets above, the work schedule (Sections 3, 6, 10), the fold-challenge
+supports (4.6), Lemmas 12.1 to 12.4.
+
+### 12.6 The bound
+
+Let `P` make `Q` queries (every oracle of 12.1, nonce probes included; `Q_wrap = Q + V_ver`
+after the conversions of Lemmas 10.47, 12.1, 12.2, as Aerie C.5). Theorem 10.17 with Lemma
+12.3, the structure of 12.2 to 12.4, `Good` the event of Lemma 12.4, and the setup,
+extraction and Module-SIS steps of the proof of Akita Theorem 10.45 give an extractor that runs
+`P` at most `(Q_wrap + 2) 4 Tree0_ck(sch)` times in expectation and fails on an accepting
+execution with probability at most
+
+```text
+eps_hash + eps_fs + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] + sum_I Adv^MSIS_I(B_I)
+```
+
+with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
+<= 2^-128`: PIOP sites `<= 2^-128.09` (Section 10, max weight), tie sites `<= 2^-128` (3.6), `sd <=
+2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
+coordinates `<= 2^-128.088` (4.6). This is the bound of Section 7.
+
+### 12.7 What is not proved here
+
+1. Assumption (F): the round-by-round soundness of list-decoded Ligerito with Flock's merged
+   opening and packed-direct claims, with the per-site errors that Flock's configs validate.
+   The Flock paper sketches it (Appendices A and C.3); a complete proof is not available to us.
+   The paper MUST present the theorem as conditional on (F).
+2. Assumption (K), the correctness of the two fixed circuits.
+3. Lemma 12.3 extends Akita's Theorem 10.17; its proof above modifies Claims 1 and 2 of
+   Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof.
+4. `R_F` is not counted exactly (open 4); the `Q = 0` term stays about `2^-117` (estimate).
+5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
+   C.4 tabulates its `K`); it bounds the running time only, not the error.
+6. The classical ROM only, as Aerie and Akita.
