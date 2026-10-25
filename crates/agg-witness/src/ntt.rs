@@ -2,8 +2,9 @@
 //!
 //! The FIPS instance is `NttPrime::fips()` (q = 8,380,417, zeta = 1753). The same butterfly
 //! network works for any prime P < 2^31 with a primitive 512th root of unity; the CRT product
-//! of `crate::crt` uses a second such prime. Arithmetic is plain `u64` with `%` reduction; this
-//! is reference code, not a constant-time or vectorized implementation.
+//! of `crate::crt` uses a second such prime. Arithmetic is `u64` with a Barrett reduction of the
+//! products (below `2^62`) and conditional subtractions for the sums (exact; the `%` division
+//! made the NTTs the bulk of the instance and witness time); not constant time, not vectorized.
 
 use crate::params::{N, N_INV_Q, Q, ZETA};
 use std::sync::OnceLock;
@@ -17,6 +18,8 @@ pub struct NttPrime {
     pub zetas: [u64; N],
     /// 256^{-1} mod p.
     pub n_inv: u64,
+    /// The Barrett constant `floor(2^64 / p)`.
+    barrett: u64,
 }
 
 /// BitRev8 (FIPS 204 Algorithm 43).
@@ -52,7 +55,43 @@ impl NttPrime {
             *z = pow_mod(zeta, u64::from(bitrev8(k as u8)), p);
         }
         let n_inv = pow_mod(256, p - 2, p);
-        Self { p, zetas, n_inv }
+        let barrett = u64::try_from((1_u128 << 64) / u128::from(p)).expect("p > 1");
+        Self {
+            p,
+            zetas,
+            n_inv,
+            barrett,
+        }
+    }
+
+    /// `x mod p` for any `x < 2^64` (Barrett: the quotient estimate is short by at most
+    /// one, so one conditional subtraction).
+    #[inline(always)]
+    pub fn reduce_u64(&self, x: u64) -> u64 {
+        let quotient = ((u128::from(x) * u128::from(self.barrett)) >> 64) as u64;
+        let r = x - quotient * self.p;
+        // Branch free: `r - p` wraps above `r` when `r < p`.
+        r.min(r.wrapping_sub(self.p))
+    }
+
+    /// `a b mod p` for `a, b < p`.
+    #[inline(always)]
+    pub fn mul_mod(&self, a: u64, b: u64) -> u64 {
+        self.reduce_u64(a * b)
+    }
+
+    /// `a + b mod p` for `a, b < p`.
+    #[inline(always)]
+    pub fn add_mod(&self, a: u64, b: u64) -> u64 {
+        let s = a + b;
+        s.min(s.wrapping_sub(self.p))
+    }
+
+    /// `a - b mod p` for `a, b < p`.
+    #[inline(always)]
+    pub fn sub_mod(&self, a: u64, b: u64) -> u64 {
+        let d = a.wrapping_sub(b);
+        d.min(d.wrapping_add(self.p))
     }
 
     /// The FIPS 204 instance (q, zeta = 1753).
@@ -68,12 +107,16 @@ impl NttPrime {
     /// Reduces a signed integer into [0, p).
     #[inline]
     pub fn reduce(&self, x: i64) -> u64 {
-        x.rem_euclid(self.p as i64) as u64
+        let r = self.reduce_u64(x.unsigned_abs());
+        if x >= 0 || r == 0 {
+            r
+        } else {
+            self.p - r
+        }
     }
 
     /// NTT (FIPS 204 Algorithm 41); input and output coefficients in [0, p).
     pub fn ntt(&self, w: &[u64; N]) -> [u64; N] {
-        let p = self.p;
         let mut a = *w;
         let mut m = 0usize;
         let mut len = 128usize;
@@ -83,9 +126,9 @@ impl NttPrime {
                 m += 1;
                 let z = self.zetas[m];
                 for j in start..start + len {
-                    let t = z * a[j + len] % p;
-                    a[j + len] = (a[j] + p - t) % p;
-                    a[j] = (a[j] + t) % p;
+                    let t = self.mul_mod(z, a[j + len]);
+                    a[j + len] = self.sub_mod(a[j], t);
+                    a[j] = self.add_mod(a[j], t);
                 }
                 start += 2 * len;
             }
@@ -96,7 +139,6 @@ impl NttPrime {
 
     /// Inverse NTT (FIPS 204 Algorithm 42); input and output coefficients in [0, p).
     pub fn intt(&self, w_hat: &[u64; N]) -> [u64; N] {
-        let p = self.p;
         let mut a = *w_hat;
         let mut m = 256usize;
         let mut len = 1usize;
@@ -104,19 +146,18 @@ impl NttPrime {
             let mut start = 0usize;
             while start < N {
                 m -= 1;
-                let z = p - self.zetas[m];
+                let z = self.p - self.zetas[m];
                 for j in start..start + len {
                     let t = a[j];
-                    a[j] = (t + a[j + len]) % p;
-                    a[j + len] = (t + p - a[j + len]) % p;
-                    a[j + len] = z * a[j + len] % p;
+                    a[j] = self.add_mod(t, a[j + len]);
+                    a[j + len] = self.mul_mod(z, self.sub_mod(t, a[j + len]));
                 }
                 start += 2 * len;
             }
             len *= 2;
         }
         for x in a.iter_mut() {
-            *x = self.n_inv * *x % p;
+            *x = self.mul_mod(self.n_inv, *x);
         }
         a
     }
@@ -125,7 +166,7 @@ impl NttPrime {
     pub fn pointwise(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         let mut c = [0u64; N];
         for i in 0..N {
-            c[i] = a[i] * b[i] % self.p;
+            c[i] = self.mul_mod(a[i], b[i]);
         }
         c
     }
@@ -191,6 +232,67 @@ mod tests {
             let c = t.intt(&t.pointwise(&t.ntt(&a), &t.ntt(&b)));
             assert_eq!(c, negacyclic_schoolbook_mod(&a, &b, t.p));
         }
+    }
+
+    #[test]
+    fn barrett_reduction_matches_the_remainder() {
+        let mut rng = SplitMix64::new(13);
+        for t in [NttPrime::fips(), crate::crt::prime2()] {
+            for x in [0_u64, 1, t.p - 1, t.p, t.p + 1, u64::MAX, u64::MAX - 1, 1 << 63] {
+                assert_eq!(t.reduce_u64(x), x % t.p);
+            }
+            for _ in 0..10_000 {
+                let x = rng.next_u64();
+                assert_eq!(t.reduce_u64(x), x % t.p);
+                let y = rng.next_u64() as i64;
+                assert_eq!(t.reduce(y), y.rem_euclid(t.p as i64) as u64);
+                let (a, b) = (x % t.p, rng.next_u64() % t.p);
+                assert_eq!(t.mul_mod(a, b), a * b % t.p);
+                assert_eq!(t.add_mod(a, b), (a + b) % t.p);
+                assert_eq!(t.sub_mod(a, b), (a + t.p - b) % t.p);
+            }
+            assert_eq!(t.reduce(i64::MIN), i64::MIN.rem_euclid(t.p as i64) as u64);
+        }
+    }
+
+    /// `RUSTUP_TOOLCHAIN=stable taskset -c 0,1,3-15 cargo test -p agg-witness --release --lib
+    /// ntt::tests::ntt_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing"]
+    fn ntt_timing() {
+        let t = NttPrime::fips();
+        let mut rng = SplitMix64::new(5);
+        let mut a = [0u64; N];
+        for x in a.iter_mut() {
+            *x = rng.next_u64() % t.p;
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..20_000 {
+            a = t.intt(&t.ntt(&a));
+        }
+        println!("ntt + intt: {:.2} us", start.elapsed().as_secs_f64() * 1e6 / 20_000.0);
+        // The `%` butterflies of the reference code, for comparison.
+        let p = t.p;
+        let start = std::time::Instant::now();
+        for _ in 0..20_000 {
+            let (mut m, mut len) = (0, 128);
+            while len >= 1 {
+                let mut start = 0;
+                while start < N {
+                    m += 1;
+                    let z = t.zetas[m];
+                    for j in start..start + len {
+                        let u = z * a[j + len] % p;
+                        a[j + len] = (a[j] + p - u) % p;
+                        a[j] = (a[j] + u) % p;
+                    }
+                    start += 2 * len;
+                }
+                len /= 2;
+            }
+        }
+        println!("ntt with %: {:.2} us", start.elapsed().as_secs_f64() * 1e6 / 20_000.0);
+        assert!(a.iter().all(|&x| x < t.p));
     }
 
     #[test]

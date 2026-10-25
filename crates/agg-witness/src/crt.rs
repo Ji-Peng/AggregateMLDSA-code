@@ -61,8 +61,8 @@ pub fn az_crt(key: &ExpandedKey, z: &VecL) -> VecK {
             let a1 = fips.pointwise(&key.a_hat[r][s], &z1[s]);
             let a2 = p2.pointwise(&key.a_hat_p2[r][s], &z2[s]);
             for j in 0..N {
-                acc1[j] = (acc1[j] + a1[j]) % fips.p;
-                acc2[j] = (acc2[j] + a2[j]) % p2.p;
+                acc1[j] = fips.add_mod(acc1[j], a1[j]);
+                acc2[j] = p2.add_mod(acc2[j], a2[j]);
             }
         }
         let x1 = fips.intt(&acc1);
