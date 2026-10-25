@@ -4,6 +4,7 @@
 
 mod common;
 
+use agg_piop::transcript::TranscriptError;
 use agg_piop::binding::FlockProfile;
 use agg_piop::opening::opening_claims;
 use agg_piop::pcs::opening_claims as evaluate_claims;
@@ -155,14 +156,14 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         ));
         // A changed multiplicity-digit claim, compensated so that the digits still compose
         // to m(pi_m): the lookup's own check passes; the claims are absorbed, so the honest
-        // stage proofs no longer match the transcript (and the Akita opening of G_m would
-        // reject the claims in any case).
+        // stage proofs no longer match the transcript: the next challenge's work nonce
+        // (tau) fails (and the Akita opening of G_m would reject the claims in any case).
         let mut digits = output.proof.clone();
         digits.multiplicities.0[0] += agg_piop::OpeningField::from_u64(16);
         digits.multiplicities.0[1] -= agg_piop::OpeningField::from_u64(1);
         assert!(matches!(
             verify(&public, &digits.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
-            Err(VerifyError::Stage(_) | VerifyError::Opening(_))
+            Err(VerifyError::Transcript(TranscriptError::Work { .. }) | VerifyError::Stage(_) | VerifyError::Opening(_))
         ));
         // The no-Keccak stand-in cannot verify a mode-A profile (refused before parsing).
         assert!(matches!(
@@ -170,12 +171,16 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             Err(VerifyError::Configuration(ConfigurationError::ProfileMismatch { .. }))
         ));
 
-        // A changed round message, terminal claim, pre-stage claim or opening byte.
+        // A changed round message (rejected at the next round's work nonce or the terminal),
+        // terminal claim, pre-stage claim or opening byte.
         let mut round = output.proof.clone();
         round.stage2.rounds[5][2] = round.stage2.rounds[5][0];
         assert!(matches!(
             verify(&public, &round.to_bytes(), &bridge, &NoKeccakVerifier, FlockProfile::None, None),
-            Err(VerifyError::Stage(agg_piop::stage::StageError::Terminal(2)))
+            Err(VerifyError::Stage(
+                agg_piop::stage::StageError::Terminal(2)
+                    | agg_piop::stage::StageError::Transcript(TranscriptError::Work { .. })
+            ))
         ));
         let mut claim = output.proof.clone();
         claim.stage3.claims.0[20] = claim.stage3.claims.0[21];
