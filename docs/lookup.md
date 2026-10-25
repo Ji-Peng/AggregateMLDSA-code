@@ -33,7 +33,7 @@ except the two small top digits, which keep the cheap coded leaf path:
 | Value | Decomposition | Proven range | Columns per position | Range mechanism |
 | --- | --- | --- | ---: | --- |
 | `z` | `z + 2^17 = z_lo + 2^16 z_hi` | `z_lo in [0, 2^16)`, `z_hi in [0, 4)`, so `z in [-2^17, 2^17)` | 2 | lookup; `leaf4` + `link` |
-| `u` | `u + 2^18 = u_lo + 2^16 u_hi` | `u_hi in [0, 8)`, so `u in [-2^18, 2^18)` | 2 | lookup; `leaf8` + `link` |
+| `u` | `u + 190,465 = u_lo + 63,079 u_hi` (relation H-u, deviation L8; relaxed H had `u + 2^18 = u_lo + 2^16 u_hi`, `u_hi in [0, 8)`) | `u_lo in [0, 2^16)`, `u_hi in [0, 6)`, so `u in [-190,465, 190,465]` exactly | 2 | lookup; `leaf6` + `link` |
 | `v` | `v + 2^31 = v_lo + 2^16 v_hi` | both in `[0, 2^16)`, so `v in [-2^31, 2^31)` | 2 | two lookups |
 | `b_0..b_5` | bits | Boolean, `w_1' < 44` | 6 | unchanged (`bool_b`, `range_w1`) |
 | `kappa^(1)_t, kappa^(2)_t` | one column each (was 3) | `[0, 2^16)` | per lane, on `D_1, D_2` | lookup |
@@ -41,7 +41,7 @@ except the two small top digits, which keep the cheap coded leaf path:
 
 Committed values are stored balanced so that the honest producer fits a signed width-16
 Akita preset: `Z_lo = z_lo - 2^15`, `U_lo = u_lo - 2^15`, `V_lo = v_lo - 2^15`,
-`V_hi = v_hi - 2^15`, `Z_hi = z_hi - 2` (base 4), `U_hi = u_hi - 4` (base 8), and the carries
+`V_hi = v_hi - 2^15`, `Z_hi = z_hi - 2` (base 4), `U_hi = u_hi - 3` (base 6), and the carries
 `K = kappa - 2^15` (integrated code; the first version of this section stored the carries
 as they are, `docs/deviations.md` L2). Every looked-up value is the affine shift
 `f = stored + 2^15`, so a claim on the stored lane is a claim on the committed column; the
@@ -51,6 +51,12 @@ tree leaves are `1 / ((X - 2^15) - stored)`. Spec (4.1) holds with bases `(2^16,
 constants are `C = 2^15`). Padded rows hold the digits of zero: `Z_lo = U_lo = V_lo = -2^15`,
 `Z_hi = U_hi = V_hi = 0`; padded carries are `K = -2^15`, and so are the padding slots of
 the carry stacks (looked-up value 0).
+
+Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
+is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
+`z_lo` (stored `S_zlo = B_zlo - 2^15`, column `bz_lo`) and the bits `B_zhi`, `a_z` proven by
+two Booleanity zero-checks in stage 3, so the four stacks, `L` and every lookup site are the
+same; only the honest multiplicities move (padded cells look up 65,457 instead of 0).
 
 Two deviations from the first design (Handoff, "superseded"), both forced by soundness:
 
@@ -240,9 +246,10 @@ in session `D - 1` instead of storing it (Section 4.3). Both change only the pro
 **Extraction** (spec 12.2 with L16). Akita yields `F_p` values for every committed column
 (Remark 10.41). Except with the terms above: every looked-up cell is an entry of `T_16`,
 so `Z_lo + 2^15, U_lo + 2^15, V_lo + 2^15, V_hi + 2^15, kappa in [0, 2^16)` as integers;
-`leaf4`/`link` and `leaf8`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-4, 3]`; by (4.1),
-`z in [-2^17, 2^17)`, `u in [-2^18, 2^18)` (relation `H(2^17, 2^18)` unchanged, so
-`zeta'` of spec (3.5) is unchanged) and `v in [-2^31, 2^31)`, enough for (6.1); every
+`leaf4`/`link` and `leaf6`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`; by (4.1) and
+spec (4.2), `z in [-2^17, 2^17)`, `u in [-190,465, 190,465]` (relation H-u, `zeta' = zeta =
+350,209`; the first version of this section kept relaxed H's `u in [-2^18, 2^18)`) and
+`v in [-2^31, 2^31)`, enough for (6.1); every
 carry is an integer in `[0, 2^16)`, enough for (9.2) (`docs/bridge.md` Section 4).
 `m` is unconstrained and need not be constrained.
 

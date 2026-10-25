@@ -433,6 +433,52 @@ mod tests {
     }
 
     #[test]
+    fn h_exact_plans_reproduce_docs_h_exact_section_3_7() {
+        use crate::manifest::Relation;
+        // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g); one bit and 8 units of work
+        // fewer than H-u (the stage-2 gamma site: 7 coefficients, g = 3, nonce 10 bits).
+        for (d_sig, sites, nonces, bits, bytes, work) in [
+            (3, 195, 194, 1810, 227, 1356),
+            (10, 339, 338, 3123, 391, 2040),
+            (13, 423, 422, 3888, 486, 2430),
+            (15, 484, 483, 4443, 556, 2710),
+        ] {
+            let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
+            let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+            assert_eq!(plan.sites().len(), sites, "2^{d_sig}");
+            assert_eq!(plan.sites().iter().filter(|s| s.bits > 0).count(), nonces);
+            assert_eq!(plan.work_bits(), bits);
+            assert_eq!(plan.work_bits().div_ceil(8), bytes);
+            assert_eq!(plan.expected_work(), work);
+            let gamma2 = plan
+                .sites()
+                .iter()
+                .find(|s| s.class == SiteClass::StageGamma && s.i == 2)
+                .unwrap();
+            assert_eq!((gamma2.bits, gamma2.nonce_bits()), (3, 10));
+        }
+        // The provisional anchors of docs/h-exact.md 3.7 (mode B = PublicBits; Slim, span on).
+        for (d_sig, profile, want) in [
+            (3, FlockProfile::PublicBits, "c9dd30a002089fff68b1653faddb2ac860e093f771eb3eeaaf03e60152e54c85"),
+            (3, FlockProfile::Slim, "8f69f49792afc311cf43042df023b98706f92bdaecb1c3ac837690e92995e983"),
+            (10, FlockProfile::PublicBits, "750a40c19877ba6bda8c7ddee36866239b6338f7caa84109880662a33d64a1d8"),
+            (10, FlockProfile::Slim, "82ffd38abe14e463ad41cc9ad209e07d5143f28067bb3696f2c445aad2c05c8f"),
+            (15, FlockProfile::PublicBits, "e4b1dffc21351ca615ace27500406a1990609ccb6cc07e13c6da50c18a416046"),
+            (15, FlockProfile::Slim, "14666dea14ede0ddea3f5cc34d50e8d746021c034941d060a6c2d08af8960d41"),
+        ] {
+            let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
+            let keccak = match profile {
+                FlockProfile::Slim => mode_a(d_sig, 2, true),
+                _ => KeccakPlan::default(),
+            };
+            let digest = hex(&PowPlan::new(&manifest, profile, &keccak).digest());
+            assert_eq!(digest, want, "H-exact N* = 2^{d_sig} {profile:?}");
+            let hu = CommitmentManifest::for_batch(1 << d_sig).unwrap();
+            assert_ne!(hex(&PowPlan::new(&hu, profile, &keccak).digest()), want);
+        }
+    }
+
+    #[test]
     fn plan_digest_depends_on_profile_span_and_ties() {
         let manifest = CommitmentManifest::for_batch(1000).unwrap();
         let base = KeccakPlan {

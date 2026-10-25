@@ -39,12 +39,30 @@ pub const PIOP_PROTOCOL_TAG: [u8; 64] = protocol_tag();
 pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 /// cSHAKE256 customization of the instance digest.
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
-/// Stage message degrees (spec Section 7.1).
-pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
-/// Batching coefficients per stage (spec Section 7, lookup layout L16).
-pub const STAGE_GAMMAS: [usize; 3] = [26, 8, 44];
-/// Terminal claims per stage.
-pub const STAGE_TERMINALS: [usize; 3] = [18, 8, 31];
+/// Stage message degrees (spec Section 7.1): the same in relations H-u and H-exact (stage 2
+/// has degree 4 in both, `docs/h-exact.md` 3.5).
+pub const STAGE_DEGREES: [usize; 3] = [4, 4, 3];
+
+/// Batching coefficients per stage (spec Section 7, lookup layout L16): `(26, 8, 44)` under
+/// H-u, `(26, 7, 45)` under H-exact (`docs/h-exact.md` 3.5).
+#[must_use]
+pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
+    [
+        crate::stage1::GAMMA_COUNT,
+        crate::stage2::gamma_count(manifest),
+        crate::stage3::gamma_count(manifest),
+    ]
+}
+
+/// Terminal claims per stage: `(18, 8, 31)` under H-u, `(18, 7, 32)` under H-exact.
+#[must_use]
+pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
+    [
+        crate::claims::Stage1Claims::LEN,
+        crate::claims::Stage2Claims::len(manifest),
+        crate::claims::Stage3Claims::len(manifest),
+    ]
+}
 /// Pre-stage claims (spec Section 7.2).
 pub const PRESTAGE_CLAIMS: usize = 13;
 /// Level-1 carry claims before stage 2 (spec Section 7.4).
@@ -307,6 +325,7 @@ impl Registry {
             PRESTAGE_CLAIMS,
             PayloadSize::Exact(16 * PRESTAGE_CLAIMS),
         );
+        let (stage_gammas, stage_terminals) = (stage_gammas(manifest), stage_terminals(manifest));
         for stage in 1..=3 {
             if stage == 2 {
                 b.push(
@@ -316,7 +335,7 @@ impl Registry {
                     PayloadSize::Exact(16 * KAPPA1_CLAIMS),
                 );
             }
-            let gammas = STAGE_GAMMAS[stage - 1];
+            let gammas = stage_gammas[stage - 1];
             b.challenge(&gamma_site(stage), gammas, SiteClass::StageGamma, stage, 0, count(gammas));
             let width = STAGE_DEGREES[stage - 1];
             for round in 0..rounds {
@@ -324,7 +343,7 @@ impl Registry {
                 b.push(&message, PROOF_KIND, width, PayloadSize::Exact(16 * width));
                 b.challenge(&challenge, 1, SiteClass::StageRound, stage, round, count(width));
             }
-            let terminals = STAGE_TERMINALS[stage - 1];
+            let terminals = stage_terminals[stage - 1];
             b.push(
                 &terminal_site(stage),
                 PROOF_KIND,
@@ -852,6 +871,22 @@ mod tests {
         // 2,442 stream bits at N* = 2^7 (docs/soundness.md Section 10).
         assert_eq!(registry.work_bits(), 2442);
         assert_eq!(work_bytes(&manifest()), 306);
+        // H-exact (docs/h-exact.md 3.7): gamma^(2) has 7 coefficients (g = 3), gamma^(3) 45
+        // (g = 6), the rounds keep their difficulties; one stream bit fewer.
+        let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
+        assert_eq!(stage_gammas(&exact), [26, 7, 45]);
+        assert_eq!(stage_terminals(&exact), [18, 7, 32]);
+        assert_eq!(stage_gammas(&manifest()), [26, 8, 44]);
+        assert_eq!(stage_terminals(&manifest()), [18, 8, 31]);
+        let exact_registry = Registry::new(&exact);
+        let gammas: Vec<u8> = exact_registry
+            .work_sites()
+            .filter(|s| s.class == SiteClass::StageGamma)
+            .map(|s| s.bits)
+            .collect();
+        assert_eq!(gammas, [5, 3, 6]);
+        assert_eq!(exact_registry.work_bits(), 2441);
+        assert_eq!(work_bytes(&exact), 306);
         // The challenge field is K = F_{p^2} with p = 2^64 - 59, as the difficulties assume.
         assert_eq!(BaseField::from_u64(agg_bridge::pow::P), BaseField::from_u64(0));
     }

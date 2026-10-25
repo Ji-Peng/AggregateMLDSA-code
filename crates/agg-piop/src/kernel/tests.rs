@@ -456,9 +456,11 @@ fn leaf_polynomials_vanish_exactly_on_the_alphabets() {
     for z in -128_i64..=127 {
         let p = E::from_i64(z * (z + 1));
         let in4 = (-2..=1).contains(&z);
+        let in6 = (-3..=2).contains(&z);
         let in8 = (-4..=3).contains(&z);
         let in16 = (-8..=7).contains(&z);
         assert_eq!(LeafPoly::Q4.evaluate(p) == E::zero(), in4);
+        assert_eq!(LeafPoly::Q6.evaluate(p) == E::zero(), in6);
         assert_eq!(LeafPoly::Q8.evaluate(p) == E::zero(), in8);
         let q16 = LeafPoly::Q8.evaluate(p) * LeafPoly::Q16Hi.evaluate(p);
         assert_eq!(q16 == E::zero(), in16);
@@ -472,8 +474,10 @@ fn leaf_polynomials_vanish_exactly_on_the_alphabets() {
 #[test]
 fn leaf_coefficients_expand_the_root_products() {
     assert_eq!(LeafPoly::Q4.coefficients(), vec![0, -2, 1]);
+    assert_eq!(LeafPoly::Q6.coefficients(), vec![0, 12, -8, 1]);
     assert_eq!(LeafPoly::Q8.coefficients(), vec![0, -144, 108, -20, 1]);
-    for poly in [LeafPoly::Q4, LeafPoly::Q8, LeafPoly::Q16Hi] {
+    assert_eq!(LeafPoly::of_base(6), [LeafPoly::Q6]);
+    for poly in [LeafPoly::Q4, LeafPoly::Q6, LeafPoly::Q8, LeafPoly::Q16Hi] {
         let coefficients = poly.coefficients();
         assert_eq!(coefficients.len(), poly.degree() + 1);
         for p in [-3_i64, 0, 2, 7, 56, 1000] {
@@ -495,6 +499,7 @@ fn compiled_pieces_evaluate_every_term_in_coefficient_form() {
         instance(&mut rng, vec![Term::Bool(0), Term::Link(1)]),
         instance(&mut rng, vec![Term::Leaf(2, LeafPoly::Q8), Term::Leaf(2, LeafPoly::Q16Hi)]),
         instance(&mut rng, vec![Term::Leaf(3, LeafPoly::Q4)]),
+        instance(&mut rng, vec![Term::Leaf(4, LeafPoly::Q6)]),
         instance(&mut rng, vec![Term::Product(vec![0, 4]), Term::Product(vec![1, 2, 3])]),
         instance(&mut rng, vec![Term::RangeW1([0, 1, 4, 5])]),
         instance(&mut rng, vec![Term::Affine { weight: Some(5), lanes: vec![(0, 3), (4, -7)], constant: 9 }]),

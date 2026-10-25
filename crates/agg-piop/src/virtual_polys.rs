@@ -5,7 +5,9 @@
 //!
 //! * affine evaluators, valid at any point because the table is an affine combination of
 //!   committed tables: `w_1' = sum_t 2^t b_t`, the compositions (4.1) of `z, u, v` from
-//!   their two L16 digits (`X = X_lo + 2^16 X_hi + 2^15`) and of the carries
+//!   their L16 digits (`X = X_lo + 2^16 X_hi + 2^15` for `z, v`; the step form
+//!   `u = U_lo + 63,079 U_hi + 31,540`; relation H-exact's bit-slack form
+//!   `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225`) and of the carries
 //!   (`kappa = K + 2^15`), and the high part `2 gamma_2 w_1' + u + q v` of the ring residual.
 //!   The verifier forms them from opened values ([`MainValues`], [`CarryValues`]);
 //! * Boolean-domain materializations used by the prover and the tests: `w_1'`, the
@@ -21,14 +23,14 @@
 use agg_bridge::{parity::level1_sums, Shape};
 use agg_witness::bridge::SparseMatrix;
 use agg_witness::crt::az_integer;
-use agg_witness::digits::DigitLayout;
+use agg_witness::digits::ValueForm;
 use agg_witness::instance::PublicInstance;
 use agg_witness::padding::main_index;
 use agg_witness::params::{GAMMA2, L, N, POSITIONS, Q, W1_BITS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
+use crate::manifest::{value_columns, Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
 use crate::source_tables::{Cells, MainTables, SourceTables};
 use crate::OpeningField as E;
 
@@ -51,7 +53,7 @@ pub fn w1_table(lanes: &[&[i8]; W1_BITS]) -> Vec<i64> {
 
 /// (4.1): `X = sum_k W_k Z_k + C_X` from the digit evaluations (any point).
 #[must_use]
-pub fn compose_digits(layout: &DigitLayout, digits: &[E]) -> E {
+pub fn compose_digits(layout: &ValueForm, digits: &[E]) -> E {
     assert_eq!(digits.len(), layout.len(), "one evaluation per digit");
     layout
         .weights()
@@ -64,7 +66,7 @@ pub fn compose_digits(layout: &DigitLayout, digits: &[E]) -> E {
 
 /// (4.1) on the Boolean domain, over the integers.
 #[must_use]
-pub fn compose_table(layout: &DigitLayout, digits: &[Cells<'_>]) -> Vec<i64> {
+pub fn compose_table(layout: &ValueForm, digits: &[Cells<'_>]) -> Vec<i64> {
     assert_eq!(digits.len(), layout.len(), "one table per digit");
     let weights = layout.weights();
     let constant = layout.constant();
@@ -104,10 +106,10 @@ pub fn residual_table(
     main: &MainTables,
 ) -> Vec<E> {
     let compose = |value: DigitValue| {
-        let digits = [0, 1].map(|digit| main.column(manifest, Column::Digit { value, digit }));
+        let digits: Vec<Cells<'_>> = value_columns(value).into_iter().map(|c| main.column(manifest, c)).collect();
         compose_table(&value.layout(), &digits)
     };
-    let (z, u, v) = (compose(DigitValue::Z), compose(DigitValue::U), compose(DigitValue::V));
+    let (z, u, v) = (compose(manifest.z_value()), compose(DigitValue::U), compose(DigitValue::V));
     let w1 = w1_table(&main.bit_lanes(manifest));
     let geom = main.geometry();
     let mut out = vec![E::zero(); geom.main_len()];
@@ -155,7 +157,7 @@ pub fn parity1_tables(tables: SourceTables<'_>, m1: &SparseMatrix) -> [Vec<i64>;
     let sums = level1_sums(&Shape::PRODUCTION, &tables.main.bit_lanes(tables.manifest), m1);
     let mut out: [Vec<i64>; W1_BITS] = Default::default();
     for (t, (sum, slot)) in sums.into_iter().zip(out.iter_mut()).enumerate() {
-        let kappa = compose_table(&CARRY16_DIGITS, &[tables.column(Column::carry(1, t as u8))]);
+        let kappa = compose_table(&ValueForm::Radix(CARRY16_DIGITS), &[tables.column(Column::carry(1, t as u8))]);
         *slot = sum.iter().zip(&kappa).map(|(s, k)| s - 2 * k).collect();
     }
     out
@@ -179,7 +181,7 @@ fn shifted_product(p: E, roots: &[i64]) -> E {
         .fold(E::from_i64(1), |acc, &root| acc * (p - E::from_i64(root)))
 }
 
-/// The leaf predicate `Q_b(P)` of a base-4 or base-8 digit (spec Section 4.3): zero on
+/// The leaf predicate `Q_b(P)` of a base-4 or base-6 digit (spec Section 4.3): zero on
 /// `P = Z (Z + 1)` exactly when `Z` is in the balanced alphabet.
 ///
 /// # Panics
@@ -188,13 +190,13 @@ fn shifted_product(p: E, roots: &[i64]) -> E {
 pub fn leaf(base: u32, p: E) -> E {
     match base {
         4 => shifted_product(p, &[0, 2]),
-        8 => shifted_product(p, &[0, 2, 6, 12]),
-        _ => panic!("leaf-checked digits have base 4 or 8, not {base}"),
+        6 => shifted_product(p, &[0, 2, 6]),
+        _ => panic!("leaf-checked digits have base 4 or 6, not {base}"),
     }
 }
 
-/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve
-/// main-domain polynomials (`G_main16` then `G_main4`, manifest order).
+/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve (H-u)
+/// or thirteen (H-exact) main-domain polynomials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MainValues {
     /// `z` by (4.1).
@@ -208,15 +210,16 @@ pub struct MainValues {
 }
 
 impl MainValues {
-    /// From the claims `value(column)` of the main-domain columns.
+    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation.
     #[must_use]
-    pub fn from_claims(value: impl Fn(Column) -> E) -> Self {
+    pub fn from_claims(manifest: &CommitmentManifest, value: impl Fn(Column) -> E) -> Self {
         let compose = |digit: DigitValue| {
-            compose_digits(&digit.layout(), &[0, 1].map(|d| value(Column::Digit { value: digit, digit: d })))
+            let digits: Vec<E> = value_columns(digit).into_iter().map(&value).collect();
+            compose_digits(&digit.layout(), &digits)
         };
         let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
         Self {
-            z: compose(DigitValue::Z),
+            z: compose(manifest.z_value()),
             u: compose(DigitValue::U),
             v: compose(DigitValue::V),
             w1: w1_from_bits(&bits),
@@ -249,7 +252,7 @@ impl CarryValues {
         let group = manifest.group(role);
         assert_eq!(values.len(), group.polynomial_count(), "one evaluation per polynomial");
         let carry = |level: u8, t: u8| {
-            compose_digits(&CARRY16_DIGITS, &[values[group.position(Column::carry(level, t)).unwrap()]])
+            compose_digits(&ValueForm::Radix(CARRY16_DIGITS), &[values[group.position(Column::carry(level, t)).unwrap()]])
         };
         let lanes = 0..W1_BITS as u8;
         match role {
@@ -324,8 +327,23 @@ mod tests {
             assert_eq!(compose_digits(&layout, &zero), E::zero());
         }
         // A carry: kappa = K + 2^15.
-        assert_eq!(compose_digits(&CARRY16_DIGITS, &[lift(-(1 << 15))]), E::zero());
-        assert_eq!(compose_digits(&CARRY16_DIGITS, &[lift(1000 - (1 << 15))]), lift(1000));
+        let carry = ValueForm::Radix(CARRY16_DIGITS);
+        assert_eq!(compose_digits(&carry, &[lift(-(1 << 15))]), E::zero());
+        assert_eq!(compose_digits(&carry, &[lift(1000 - (1 << 15))]), lift(1000));
+    }
+
+    #[test]
+    fn h_exact_z_composes_from_three_digits() {
+        let form = DigitValue::Zx.layout();
+        for z in [-130_993_i64, -1, 0, 78, 79, 130_993] {
+            let digits = form.decompose(z);
+            assert!(form.in_alphabets(&digits));
+            let lifted: Vec<E> = digits.iter().map(|&d| lift(d)).collect();
+            assert_eq!(compose_digits(&form, &lifted), lift(z));
+            let cells: Vec<Vec<i32>> = digits.iter().map(|&d| vec![d as i32]).collect();
+            let tables: Vec<Cells<'_>> = cells.iter().map(|c| Cells::Wide(c)).collect();
+            assert_eq!(compose_table(&form, &tables), vec![z]);
+        }
     }
 
     #[test]
@@ -333,7 +351,7 @@ mod tests {
         for z in i64::from(i8::MIN)..=i64::from(i8::MAX) {
             let p = digit_square(lift(z));
             assert_eq!(p, E::from_i128(p_of(z)));
-            for base in [4_u32, 8] {
+            for base in [4_u32, 6] {
                 let inside = Alphabet::Balanced(base).contains(z);
                 assert_eq!(leaf(base, p) == E::zero(), inside, "base {base} digit {z}");
                 assert_eq!(leaf_vanishes(base, p_of(z)), inside);

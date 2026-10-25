@@ -1113,7 +1113,8 @@ departures; `docs/spec.md` Sections 4, 7, 10 to 12 the normative text.
 `source_tables::Cells` reads a column of either width (`Narrow(&[i8])`, `Wide(&[i32])`);
 `Cells::lane` gives a coded byte lane or an `Ints` lane. `MainTables::build` derives every
 witness (strict) and encodes `z + 2^17 = z_lo + 2^16 z_hi` (stored `Z_lo = z_lo - 2^15`,
-`Z_hi = z_hi - 2`), likewise `u` (top base 8) and `v` (two 16-bit halves); padded rows hold
+`Z_hi = z_hi - 2`), `u` by relation H-u's step form (`U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`
+in base 6, spec (4.2)) and `v` (two 16-bit halves); padded rows hold
 the digits of zero. `BridgeGroupTables::build` adds the balanced carries, the parities and
 `Y` of `agg_bridge::parity::compute` and the multiplicities of every looked-up cell of both
 rounds (`recount`, `lookup::multiplicities`), with their digits. `agg-witness` and
@@ -1154,8 +1155,8 @@ main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`},
 {`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
 `b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
 
-Stage 2 (degree 5, `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
-`K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf8[U_hi]` (7)
+Stage 2 (degree 4 in relation H-u, 5 in relaxed H; `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
+`K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7)
 (main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}). Terminal (8): `b_t(r2)`, `P_Z(r2)`.
 
 Stage 3 (degree 3, `gamma^(3) in K^44`, point `r^(2)`):
@@ -1199,6 +1200,27 @@ integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP lev
 `tests/stages.rs`; mode-B round trips at 64, 256 and 1,024; end-to-end tampering in
 `tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
 `ref/notes/bench-local.md` (lookup integration) and `docs/lookup.md` Section 4.5.
+
+### 19.6 Relation H-exact (`docs/h-exact.md` step B, 2026-10-25)
+
+The relation (`manifest::Relation`, byte 0 H-u, byte 1 H-exact) is a field of the manifest
+and selects, through it, everything below; the verifier takes it from its caller
+(`verifier::verify(..., relation, ...)`, `VerifyError::Relation` on a header mismatch).
+Under H-exact: `G_main16` = `bz_lo, U_lo, V_lo, V_hi` (`bz_lo` = `S_zlo` in the slot of
+`Z_lo`, so the main lookup stack is unchanged), `G_main4` = `bz_hi, U_hi, b_0..b_5, a_z` (9
+polynomials, codes `[0, 6, 0, 0, 0, 0, 0, 0, 0]`), `z = S_zlo + 2^16 B_zhi + 130,915 a_z -
+98,225` (`DigitValue::Zx`, `ValueForm::BitSlack`), the catalog row
+`mldsa-44-l16x-batch-<N*>-mult-final`. Stage 2: `def_y1[t]` (0..6), `leaf6[U_hi]` (6);
+`gamma^(2) in K^7`, degree 4, terminal 7. Stage 3: `ring` (0, the `w_A` group reads `bz_lo,
+bz_hi, a_z` with weights `1, 2^16, 130,915` and constant `-98,225`), `link[U_hi]` (1),
+`bool[bz_hi]` (2), `bool[a_z]` (3) (`Term::Bool` in the main `eq(r2)` group, claim 0), then
+the reductions from 4 (`stage3::Gammas`); `gamma^(3) in K^45`, terminal 32. Registry: stage 2
+(7, rounds of 4, 7), stage 3 (45, rounds of 3, 32); the proof-of-work plan follows (stage-2
+batching `g = 3`). Encoder: `source_tables::Encoder` resolves the slot of every digit of
+`z, u, v` and of the bits from the manifest; `a_z = [z >= 79]`; padded rows `(bz_lo, bz_hi,
+a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tamperings,
+synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
+rejection), unit tests of the manifest, claims, stage specs, wire and plan.
 
 ## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
 

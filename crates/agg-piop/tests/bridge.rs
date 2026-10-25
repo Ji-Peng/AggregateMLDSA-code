@@ -11,7 +11,7 @@ use agg_bridge::seed::derive_matrices;
 use agg_bridge::{gf2_walker, parity, weights as bridge_weights, Shape};
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::Column;
-use agg_piop::manifest::{CommitmentManifest, GroupRole};
+use agg_piop::manifest::{CommitmentManifest, GroupRole, Relation};
 use agg_piop::prover::{
     main_tables, prove, prove_with_tables, BridgeDerivation, BridgeTamper, FixedMatrices, NoKeccak,
     ProveHooks, ProverInputs, SeededMatrices,
@@ -89,6 +89,7 @@ impl Fixture {
             bridge,
             &NoKeccakVerifier,
             FlockProfile::None,
+            Relation::Hu,
             None,
         )
         .map(|_| ())
@@ -107,6 +108,7 @@ impl Fixture {
             instance: &self.instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         };
         let manifest = CommitmentManifest::for_batch(self.records.len()).unwrap();
         let hooks = ProveHooks {
@@ -138,6 +140,7 @@ fn bridge_identities_in_the_256_signature_run_with_seed_derived_matrices() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         };
         let output = prove(
             &prover_inputs,
@@ -227,6 +230,7 @@ fn bridge_tampering_is_rejected_at_stage_one() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         };
         let (manifest, main) = main_tables(&prover_inputs).unwrap();
         // Matrices fixed in advance (test stand-in), so that a hook can rebuild stale tables.

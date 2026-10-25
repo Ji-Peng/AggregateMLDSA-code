@@ -269,7 +269,7 @@ pub struct TableCommitter {
 impl TableCommitter {
     /// Plan the batch of `manifest` and allocate the seed-derived setup.
     pub fn new(manifest: CommitmentManifest) -> Result<Self, PcsError> {
-        let plan = WorkPlan::for_records(manifest.records())?;
+        let plan = WorkPlan::for_records(manifest.records(), manifest.relation())?;
         if !manifest.matches_plan(&plan) {
             return Err(PcsError::ManifestMismatch);
         }
@@ -385,7 +385,7 @@ impl TableCommitter {
 
 /// The verifier of the batched opening, built from the public setup seed alone.
 pub fn verifier_for(manifest: &CommitmentManifest) -> Result<PcsVerifier, PcsError> {
-    let plan = WorkPlan::for_records(manifest.records())?;
+    let plan = WorkPlan::for_records(manifest.records(), manifest.relation())?;
     if !manifest.matches_plan(&plan) {
         return Err(PcsError::ManifestMismatch);
     }

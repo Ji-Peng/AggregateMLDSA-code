@@ -1,11 +1,11 @@
 //! Range proofs of the two small digits (spec Section 4.3, lookup layout L16): the per-cell
 //! map of the virtual table `P_Z = Z (Z + 1)` and the order of the leaf and link instances
-//! of `Z_hi` (base 4) and `U_hi` (base 8). Every other range is the lookup into `T_16`
+//! of `Z_hi` (base 4) and `U_hi` (base 6, relation H-u). Every other range is the lookup into `T_16`
 //! (`lookup`, `docs/lookup.md`).
 //!
 //! The map is exact over the integers for every `i8` cell, so the lifted table equals the
 //! polynomial of the lifted digit; the leaf predicates are the [`crate::kernel::LeafPoly`]s
-//! `Q_4`, `Q_8` of Aerie (3.7).
+//! `Q_4`, `Q_6` of Aerie (3.7) (`Q_6 = Q_8` without its last root).
 
 use std::sync::OnceLock;
 
@@ -46,7 +46,7 @@ pub struct Digit {
     pub position: usize,
     /// The column.
     pub column: Column,
-    /// The base (4 or 8).
+    /// The base (4 or 6).
     pub base: u32,
 }
 
@@ -95,7 +95,7 @@ mod tests {
             shape,
             [
                 ("z_hi".to_owned(), 4, GroupRole::Main, 0),
-                ("u_hi".to_owned(), 8, GroupRole::Main, 1)
+                ("u_hi".to_owned(), 6, GroupRole::Main, 1)
             ]
         );
     }

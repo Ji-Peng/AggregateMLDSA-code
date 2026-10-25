@@ -1826,7 +1826,8 @@ mod tests {
     }
 
     /// The L16 main-domain stack `[z_lo | u_lo | v_lo | v_hi]` with honest-looking values
-    /// (the encoder of `docs/lookup.md` Section 1: `z + 2^17`, `u + 2^18`, `v + 2^31`).
+    /// (the encoder of `docs/lookup.md` Section 1: `z + 2^17`, `v + 2^31`; relation H-u's
+    /// `B_ulo = u + 190,465 - 63,079 H_u`).
     fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
         let mut columns: Vec<Vec<i32>> = (0..4).map(|_| Vec::with_capacity(cells)).collect();
@@ -1834,9 +1835,10 @@ mod tests {
             let z = rng.below(2 * 130_993 + 1).cast_signed() - 130_993;
             let u = rng.below(2 * 190_465 + 1).cast_signed() - 190_465;
             let v = rng.below(2 * 67_068_447 + 1).cast_signed() - 67_068_447;
-            let (zs, us, vs) = (z + (1 << 17), u + (1 << 18), v + (1 << 31));
-            assert!((zs >> 16) < 4 && (us >> 16) < 8 && (vs >> 16) < 1 << 16);
-            for (c, value) in [zs & 0xffff, us & 0xffff, vs & 0xffff, vs >> 16].into_iter().enumerate() {
+            let (zs, vs) = (z + (1 << 17), v + (1 << 31));
+            let ulo = crate::manifest::U16_DIGITS.decompose(u)[0] + (1 << 15);
+            assert!((zs >> 16) < 4 && (0..1 << 16).contains(&ulo) && (vs >> 16) < 1 << 16);
+            for (c, value) in [zs & 0xffff, ulo, vs & 0xffff, vs >> 16].into_iter().enumerate() {
                 columns[c].push(i32::try_from(value).expect("16 bits"));
             }
         }

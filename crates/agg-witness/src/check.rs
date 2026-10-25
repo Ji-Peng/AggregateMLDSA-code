@@ -7,7 +7,8 @@
 //! * stage 1: `bool_b`, `range_w1` (7.4), `b16_prod` for every base-16 digit, `bool_y1` (7.1)
 //!   with y^(1) defined by (7.5), `level2` (7.2), `level3` (7.3), `bool_y2`;
 //! * stage 2: `def_y1` (7.5, the definition used by `bool_y1`), `leaf16` lo/hi (the virtual
-//!   tables A^lo, A^hi equal Q_16^b(P_Z)), `leaf8`, `leaf4` (and `leaf2` for H-exact's base-2 digit);
+//!   tables A^lo, A^hi equal Q_16^b(P_Z)), `leaf8`, `leaf6` (the top u digit of H-u), `leaf4`
+//!   (and `leaf2` for H-exact's base-2 digit);
 //! * stage 3: `ring` (7.6), i.e. (3.1) at every position with A, T zero on padded rows, and
 //!   `link` (P_Z = Z(Z + 1)); the evaluation reductions are identities f = f pointwise;
 //! * Section 3.3 / 8: c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32) per live record through the
@@ -17,7 +18,7 @@
 //!   canonical zero encoding (Section 4.2) and live values meet the honest bounds B_z, B_u, B_v.
 //!
 //! A committed column of the wrong alphabet fails the identity of its stage (`b16_prod` for
-//! base 16, the leaf for bases 8, 4, 2, the Booleanity check otherwise).
+//! base 16, the leaf for bases 8, 6, 4, 2, the Booleanity check otherwise).
 
 use crate::bridge::{self, BridgeMatrices, BridgeTables};
 use crate::crt::az_integer;
@@ -71,6 +72,8 @@ pub enum Identity {
     Leaf16,
     /// `leaf8`: Q_8(P_Z) = 0.
     Leaf8,
+    /// `leaf6`: Q_6(P_Z) = 0 (top digit of u in relation H-u).
+    Leaf6,
     /// `leaf4`: Q_4(P_Z) = 0.
     Leaf4,
     /// Base-2 leaf of H-exact's top b_z digit: P_Z = 0.
@@ -110,7 +113,7 @@ impl Identity {
         match self {
             Shape => Stage::Shape,
             BoolB | RangeW1 | B16Prod | BoolY1 | Level2 | Level3 | BoolY2 => Stage::One,
-            Leaf16 | Leaf8 | Leaf4 | Leaf2 => Stage::Two,
+            Leaf16 | Leaf8 | Leaf6 | Leaf4 | Leaf2 => Stage::Two,
             Ring | Link => Stage::Three,
             CommitmentHash | Gf2Bridge => Stage::Keccak,
             BoolSlack | SignSquare | EdgeProducts | TernaryG | GSign | HintWeight
@@ -223,7 +226,7 @@ pub fn digit_virtual(col: &[i8], base: u32) -> DigitVirtual {
 }
 
 /// Checks one digit column with its (prover-supplied) virtual tables: `link`, `leaf16`,
-/// `b16_prod`, `leaf8`, `leaf4`, `leaf2`.
+/// `b16_prod`, `leaf8`, `leaf6`, `leaf4`, `leaf2`.
 pub fn check_digit_column(
     rep: &mut CheckReport,
     name: &str,
@@ -262,10 +265,11 @@ pub fn check_digit_column(
                     );
                 }
             }
-            8 | 4 | 2 => {
+            8 | 6 | 4 | 2 => {
                 if !leaf_vanishes(base, p) {
                     let id = match base {
                         8 => Identity::Leaf8,
+                        6 => Identity::Leaf6,
                         4 => Identity::Leaf4,
                         _ => Identity::Leaf2,
                     };

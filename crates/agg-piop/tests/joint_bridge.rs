@@ -29,7 +29,7 @@ use agg_keccak::prover::{KeccakCommitment, KeccakProof, Profile, SpongeProver};
 use agg_keccak::segment::{BridgedCommitted, BridgedSegment};
 use agg_keccak::sponge::SpongeRecord;
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{Column, CommitmentManifest};
+use agg_piop::manifest::{Column, CommitmentManifest, Relation};
 use agg_piop::prover::{
     main_tables, prove, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
     ProveHooks,
@@ -273,6 +273,7 @@ impl Fixture {
             &SeededMatrices,
             keccak,
             FlockProfile::Fast,
+            Relation::Hu,
             None,
         )
         .map(|_| ())
@@ -368,6 +369,7 @@ fn joint_bridge(n: usize, seed: u64) {
         instance: &f.instance,
         records: &inputs,
         signatures: &signatures,
+        relation: Relation::Hu,
     };
     let (manifest, main): (CommitmentManifest, MainTables) =
         main_tables(&prover_inputs).expect("round-1 tables");

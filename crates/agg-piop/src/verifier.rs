@@ -40,7 +40,7 @@ use akita_types::Commitment;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::lookup::{verify_in, LookupError};
-use crate::manifest::{Column, CommitmentManifest, GroupRole, GROUP_COUNT};
+use crate::manifest::{Column, CommitmentManifest, GroupRole, Relation, GROUP_COUNT};
 use crate::opening::{opening_claims, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
 use crate::pow::{KeccakPlan, PowPlan};
@@ -212,6 +212,15 @@ pub enum VerifyError {
     Configuration(ConfigurationError),
     /// Malformed proof bytes.
     Wire(WireError),
+    /// The proof's relation byte differs from the relation the caller expects (checked
+    /// before event 0; `docs/h-exact.md` 1.3: a proof of a weaker relation is no proof of
+    /// the stronger one, and the relation is never trusted from the proof).
+    Relation {
+        /// The caller's relation.
+        expected: Relation,
+        /// The proof header's relation.
+        found: Relation,
+    },
     /// The record list does not match the proof's `N`.
     RecordCount,
     /// A public key failed to decode.
@@ -240,6 +249,9 @@ impl std::fmt::Display for VerifyError {
         match self {
             Self::Configuration(e) => write!(f, "configuration: {e}"),
             Self::Wire(e) => write!(f, "wire: {e}"),
+            Self::Relation { expected, found } => {
+                write!(f, "the proof claims relation {found}, the verifier expects {expected}")
+            }
             Self::RecordCount => write!(f, "record count differs from the proof"),
             Self::PublicKey(i) => write!(f, "public key {i} is malformed"),
             Self::Commitment(g) => write!(f, "{g:?}: commitment bytes are malformed"),
@@ -378,17 +390,20 @@ impl VerifyReport {
     }
 }
 
-/// Verify `proof_bytes` for the records `(pk_i, M_i)`; the `c~_i` come from the proof. An
-/// unsound configuration ([`check_configuration`]) is refused before the proof is read.
+/// Verify `proof_bytes` for the records `(pk_i, M_i)` under `relation`, the relation the
+/// caller expects (never read from the proof: a proof whose header names another relation
+/// is rejected before event 0); the `c~_i` come from the proof. An unsound configuration
+/// ([`check_configuration`]) is refused before the proof is read.
 pub fn verify(
     records: &[(&[u8], &[u8])],
     proof_bytes: &[u8],
     bridge: &impl BridgeDerivation,
     keccak: &impl KeccakVerifier,
     flock: FlockProfile,
+    relation: Relation,
     cache: Option<&mut KeyCache>,
 ) -> Result<VerifiedAggregate, VerifyError> {
-    verify_timed(records, proof_bytes, bridge, keccak, flock, cache).outcome
+    verify_timed(records, proof_bytes, bridge, keccak, flock, relation, cache).outcome
 }
 
 /// [`verify`] with the wall time of every step.
@@ -398,6 +413,7 @@ pub fn verify_timed(
     bridge: &impl BridgeDerivation,
     keccak: &impl KeccakVerifier,
     flock: FlockProfile,
+    relation: Relation,
     cache: Option<&mut KeyCache>,
 ) -> VerifyReport {
     let start = Instant::now();
@@ -408,6 +424,7 @@ pub fn verify_timed(
         bridge,
         keccak,
         flock,
+        relation,
         cache,
         &mut timings,
     );
@@ -427,27 +444,35 @@ impl Lap {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run(
     records: &[(&[u8], &[u8])],
     proof_bytes: &[u8],
     bridge: &impl BridgeDerivation,
     keccak: &impl KeccakVerifier,
     flock: FlockProfile,
+    relation: Relation,
     cache: Option<&mut KeyCache>,
     timings: &mut VerifyTimings,
 ) -> Result<VerifiedAggregate, VerifyError> {
     check_configuration(bridge, keccak, flock).map_err(VerifyError::Configuration)?;
     let mut clock = Lap(Instant::now());
 
-    // Step 1: parse.
+    // Step 1: parse; the header's relation must be the caller's (docs/h-exact.md 1.3), and
+    // the manifest (event 0, the catalog row, the plan) comes from the caller's relation.
     let proof = AggregateProof::from_bytes(proof_bytes)?;
+    if proof.relation != relation {
+        return Err(VerifyError::Relation {
+            expected: relation,
+            found: proof.relation,
+        });
+    }
     let n = proof.records;
     if records.len() != n || proof.c_tilde.len() != n {
         return Err(VerifyError::RecordCount);
     }
-    let manifest =
-        CommitmentManifest::for_batch(n).map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
+    let manifest = CommitmentManifest::for_relation(n, relation)
+        .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
     let segments = manifest.segments();
     let pcs = verifier_for(&manifest).map_err(VerifyError::Opening)?;
     let plan = pcs.plan();
@@ -770,7 +795,7 @@ mod tests {
         flock: FlockProfile,
     ) -> Option<ConfigurationError> {
         // Garbage proof bytes: a configuration that passes fails at the wire parse.
-        match verify(&[], &[0xff; 16], bridge, keccak, flock, None) {
+        match verify(&[], &[0xff; 16], bridge, keccak, flock, Relation::Hu, None) {
             Err(VerifyError::Configuration(e)) => Some(e),
             Err(VerifyError::Wire(_)) => None,
             other => panic!("unexpected outcome {other:?}"),
@@ -806,7 +831,7 @@ mod tests {
         assert_eq!(refused(&fixed, &public_bits, FlockProfile::PublicBits), None);
         assert_eq!(refused(&SeededMatrices, &public_bits, FlockProfile::PublicBits), None);
         let fast = AcceptAll(FlockProfile::Fast);
-        let report = verify_timed(&[], &[], &fixed, &fast, FlockProfile::Fast, None);
+        let report = verify_timed(&[], &[], &fixed, &fast, FlockProfile::Fast, Relation::Hu, None);
         assert!(matches!(report.outcome, Err(VerifyError::Configuration(_))));
         assert_eq!(report.timings.parse, Duration::ZERO, "refused before step 1");
     }

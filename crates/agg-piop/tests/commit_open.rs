@@ -33,12 +33,12 @@ fn check_virtual_claims(
     let manifest = &batch.manifest;
     let tables = batch.tables();
     assert_eq!(points[0], points[1], "both main groups at one point");
-    let main = MainValues::from_claims(|column: Column| {
+    let main = MainValues::from_claims(manifest, |column: Column| {
         let (role, position) = manifest.locate(column);
         values[role.index()][position]
     });
     let composed = |value: DigitValue| compose_table(&value.layout(), &tables.digits(value));
-    assert_eq!(main.z, mle_i64(&composed(DigitValue::Z), &points[0]));
+    assert_eq!(main.z, mle_i64(&composed(manifest.z_value()), &points[0]));
     assert_eq!(main.u, mle_i64(&composed(DigitValue::U), &points[0]));
     assert_eq!(main.v, mle_i64(&composed(DigitValue::V), &points[0]));
     let w1 = w1_table(&batch.main.bit_lanes(manifest));
@@ -46,7 +46,7 @@ fn check_virtual_claims(
     for (role, level, lanes) in [(GroupRole::Level1, 1, 6), (GroupRole::Level2, 2, 6), (GroupRole::Level3, 3, 1)] {
         let carries = CarryValues::from_evaluations(manifest, role, &values[role.index()]);
         for (t, claimed) in carries.kappa.iter().enumerate().take(lanes) {
-            let kappa = compose_table(&CARRY16_DIGITS, &[tables.column(Column::carry(level, t as u8))]);
+            let kappa = compose_table(&agg_witness::digits::ValueForm::Radix(CARRY16_DIGITS), &[tables.column(Column::carry(level, t as u8))]);
             assert_eq!(*claimed, mle_i64(&kappa, &points[role.index()]));
         }
         assert_eq!(

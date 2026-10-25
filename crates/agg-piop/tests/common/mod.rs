@@ -3,7 +3,7 @@
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::Table;
-use agg_piop::manifest::{CommitmentManifest, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{CommitmentManifest, GroupRole, Relation, LOOKUP_SHIFT};
 use agg_piop::prover::{prove_piop, PiopProof, PiopRun, ProveError};
 use agg_piop::public_data::PublicData;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
@@ -70,8 +70,13 @@ pub struct Batch {
 
 impl Batch {
     pub fn build(records: Vec<Record>, seed: u64) -> Self {
+        Self::build_as(Relation::Hu, records, seed)
+    }
+
+    /// [`Batch::build`] under `relation`.
+    pub fn build_as(relation: Relation, records: Vec<Record>, seed: u64) -> Self {
         let instance = PublicInstance::from_records(&records).expect("instance");
-        let manifest = CommitmentManifest::for_batch(records.len()).expect("manifest");
+        let manifest = CommitmentManifest::for_relation(records.len(), relation).expect("manifest");
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
         let main = MainTables::build(&manifest, &instance, &signatures).expect("round 1 tables");
         let matrices = BridgeMatrices::random_for_tests(seed);

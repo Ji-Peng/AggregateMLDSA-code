@@ -8,7 +8,7 @@ mod common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::LookupError;
-use agg_piop::manifest::{stack_columns, Column, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{Column, GroupRole, LOOKUP_SHIFT};
 use agg_piop::prover::PiopProof;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
 use agg_piop::stage::{suffix, StageError};
@@ -116,7 +116,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
     // The stack reductions: sum_c w_c f_c(pi_low) at the low points of the stacks.
     for (j, low) in points.lookup.iter().enumerate() {
         assert_eq!(low.len(), shape.stacks[j].vars);
-        let columns = stack_columns(j);
+        let columns = manifest.stack_columns(j);
         assert!(columns.iter().all(|c| tables.column(*c).len() == 1 << low.len()));
     }
     // Stage 1 terminal: y^(1) (virtual), y^(2), b at r^(1); stage 2: b and P_Z at r^(2).
@@ -133,7 +133,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
         assert_eq!(proof.stage1.claims.b[t], bit.evaluate(&points.r1));
         assert_eq!(proof.stage2.claims.b[t], bit.evaluate(&points.r2));
     }
-    for (k, column) in [Column::Z_HI, Column::U_HI].into_iter().enumerate() {
+    for (k, column) in manifest.leaf_digits().into_iter().enumerate() {
         let square: Vec<i64> = tables.column(column).to_i64().iter().map(|&z| z * (z + 1)).collect();
         assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &points.r2));
     }
@@ -343,14 +343,15 @@ fn values_valid_only_for_another_range_are_rejected() {
     on_large_stack(|| {
         let batch = small_batch();
         let manifest = &batch.manifest;
-        // Z_hi = 2 is in U_hi's base-8 alphabet but not in Z_hi's base-4 one: the leaf.
+        // Z_hi = 2 is in U_hi's base-6 alphabet but not in Z_hi's base-4 one: the leaf.
         let mut main = batch.main.clone();
         let (_, z_hi) = manifest.locate(Column::Z_HI);
         main.columns_mut()[z_hi][main_index(3, 1, 4)] = 2;
         let bridge = rebuilt(&batch, &main);
         assert_eq!(rejecting_place(&batch, &main, &bridge), Some(2));
-        // U_hi = 4 and U_hi = -5 are outside the base-8 alphabet.
-        for value in [4_i8, -5] {
+        // U_hi = 3 and U_hi = -4 are in relaxed H's base-8 alphabet but outside H-u's
+        // base-6 one [-3, 2]: leaf6 (stage 2).
+        for value in [3_i8, -4] {
             let mut main = batch.main.clone();
             let (_, u_hi) = manifest.locate(Column::U_HI);
             main.columns_mut()[u_hi][main_index(9, 2, 7)] = value;
@@ -364,20 +365,25 @@ fn values_valid_only_for_another_range_are_rejected() {
         bridge.carries_mut(1)[cell] += LOOKUP_SHIFT;
         bridge.recount(manifest, &batch.main).expect("in the table");
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(1));
-        // A low part valid only for the wider range [0, 2^17): U_lo + 2^16 with U_hi - 1
-        // and V_lo + 2^16 with V_hi - 1 keep u and v (4.1), U_hi in its base-8 alphabet
-        // and V_hi in T_16, so the leaves and the ring identity hold; only the lookup sees
-        // the looked-up value in [2^16, 2^17). (The prototype's cross-table case, a T_8
-        // value booked under T_16, is the lookup.rs unit test
-        // `two_tables_verify_and_a_cross_table_value_is_rejected`; layout L16 has one
+        // A low part valid only for a wider range: U_lo + 63,079 with U_hi - 1 keeps u
+        // (relation H-u's step form) and V_lo + 2^16 with V_hi - 1 keeps v (4.1), U_hi in
+        // its base-6 alphabet and V_hi in T_16, so the leaves and the ring identity hold;
+        // when the looked-up value lands in [2^16, 2^17) only the lookup sees it. (The
+        // prototype's cross-table case, a T_8 value booked under T_16, is the lookup.rs unit
+        // test `two_tables_verify_and_a_cross_table_value_is_rejected`; layout L16 has one
         // table.)
-        for (lo, hi, room) in [
-            (Column::U_LO, Column::U_HI, -4_i64),
-            (Column::V_LO, Column::V_HI, -i64::from(LOOKUP_SHIFT)),
+        let u_cells = batch.main.column(manifest, Column::U_LO);
+        let u_hi_cells = batch.main.column(manifest, Column::U_HI);
+        let u_cell = (0..1024 * 50)
+            .map(|p| main_index(p % 256, (p / 256) % 4, p / 1024))
+            .find(|&x| u_hi_cells.value(x) > -3 && u_cells.value(x) + i64::from(LOOKUP_SHIFT) + 63_079 >= 1 << 16)
+            .expect("a matching cell");
+        for (lo, hi, x, step) in [
+            (Column::U_LO, Column::U_HI, u_cell, 63_079_i32),
+            (Column::V_LO, Column::V_HI, cell_with(&batch, Column::V_HI, |v| v > -i64::from(LOOKUP_SHIFT)), 1 << 16),
         ] {
-            let x = cell_with(&batch, hi, |v| v > room);
             let mut main = batch.main.clone();
-            *main.wide_cell_mut(manifest, lo, x) += 1 << 16;
+            *main.wide_cell_mut(manifest, lo, x) += step;
             if hi == Column::V_HI {
                 *main.wide_cell_mut(manifest, hi, x) -= 1;
             } else {

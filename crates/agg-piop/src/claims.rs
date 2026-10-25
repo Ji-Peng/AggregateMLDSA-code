@@ -5,7 +5,7 @@ use agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
 use agg_witness::params::W1_BITS;
 use jolt_field::{Ring, Zero};
 
-use crate::manifest::{Column, CommitmentManifest, GroupRole, CARRY16_DIGITS, STAGE3_POLYNOMIALS};
+use crate::manifest::{Column, CommitmentManifest, GroupRole, CARRY16_DIGITS};
 use crate::source_tables::SourceTables;
 use crate::stage::suffix;
 use crate::virtual_polys::compose_digits;
@@ -20,7 +20,7 @@ fn take<const M: usize>(values: &[E], offset: &mut usize) -> [E; M] {
 /// A carry `kappa = K + 2^15` from the claim on its balanced column `K`.
 #[must_use]
 pub fn carry_value(stored: E) -> E {
-    compose_digits(&CARRY16_DIGITS, &[stored])
+    compose_digits(&agg_witness::digits::ValueForm::Radix(CARRY16_DIGITS), &[stored])
 }
 
 /// The 13 pre-stage claims (spec Section 7.2): `y^(2)_t(tau_2)`, `K^(2)_t(tau_2)`,
@@ -168,52 +168,59 @@ impl Stage1Claims {
     }
 }
 
-/// The 8 stage-2 terminal claims (spec Section 7.4): `b_t(r^(2))` and `P_Z(r^(2))` for
-/// `Z_hi`, `U_hi`.
+/// The stage-2 terminal claims (spec Section 7.4): `b_t(r^(2))` and `P_Z(r^(2))` for each
+/// leaf-checked digit (`Z_hi`, `U_hi` under H-u: 8 claims; `U_hi` under H-exact: 7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
     /// `b_t(r^(2))`.
     pub b: [E; W1_BITS],
-    /// `P_Z(r^(2))` for `Z_hi`, `U_hi`.
-    pub squares: [E; 2],
+    /// `P_Z(r^(2))` per leaf-checked digit, in the order of `manifest.leaf_digits()`.
+    pub squares: Vec<E>,
 }
 
 impl Stage2Claims {
-    /// Wire length.
-    pub const LEN: usize = W1_BITS + 2;
+    /// Wire length under `manifest`'s relation.
+    #[must_use]
+    pub fn len(manifest: &CommitmentManifest) -> usize {
+        W1_BITS + manifest.leaf_digits().len()
+    }
 
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(Self::LEN);
+        let mut out = Vec::with_capacity(W1_BITS + self.squares.len());
         out.extend_from_slice(&self.b);
         out.extend_from_slice(&self.squares);
         out
     }
 
-    /// Parse the wire order.
+    /// Parse the wire order (length [`Stage2Claims::len`]).
     #[must_use]
-    pub fn from_slice(values: &[E]) -> Option<Self> {
-        if values.len() != Self::LEN {
+    pub fn from_slice(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
+        if values.len() != Self::len(manifest) {
             return None;
         }
         let mut offset = 0;
         Some(Self {
             b: take(values, &mut offset),
-            squares: take(values, &mut offset),
+            squares: values[offset..].to_vec(),
         })
     }
 }
 
-/// The 31 stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3`
-/// at `r^(3)` restricted to its group, in manifest order (group by group). `G_m` is opened
-/// at the lookup's table point instead ([`MultiplicityClaims`]).
+/// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3` at
+/// `r^(3)` restricted to its group, in manifest order (group by group): 31 under H-u, 32
+/// under H-exact. `G_m` is opened at the lookup's table point instead
+/// ([`MultiplicityClaims`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage3Claims(pub Vec<E>);
 
 impl Stage3Claims {
-    /// Wire length.
-    pub const LEN: usize = STAGE3_POLYNOMIALS;
+    /// Wire length under `manifest`'s relation.
+    #[must_use]
+    pub fn len(manifest: &CommitmentManifest) -> usize {
+        manifest.stage3_polynomials()
+    }
 
     /// Offset of a group's values.
     #[must_use]
@@ -238,10 +245,10 @@ impl Stage3Claims {
         &self.0[offset..offset + manifest.group(role).polynomial_count()]
     }
 
-    /// Parse the wire order.
+    /// Parse the wire order (length [`Stage3Claims::len`]).
     #[must_use]
-    pub fn from_slice(values: &[E]) -> Option<Self> {
-        (values.len() == Self::LEN).then(|| Self(values.to_vec()))
+    pub fn from_slice(manifest: &CommitmentManifest, values: &[E]) -> Option<Self> {
+        (values.len() == Self::len(manifest)).then(|| Self(values.to_vec()))
     }
 }
 
@@ -287,15 +294,27 @@ mod tests {
         assert_eq!(Kappa1Claims::from_slice(&k1.to_vec()), Some(k1.clone()));
         let s1 = Stage1Claims::from_slice(&point(&mut rng, Stage1Claims::LEN)).unwrap();
         assert_eq!(Stage1Claims::from_slice(&s1.to_vec()), Some(s1.clone()));
-        let s2 = Stage2Claims::from_slice(&point(&mut rng, Stage2Claims::LEN)).unwrap();
-        assert_eq!(Stage2Claims::from_slice(&s2.to_vec()), Some(s2.clone()));
         let manifest = CommitmentManifest::for_batch(8).unwrap();
-        let s3 = Stage3Claims::from_slice(&point(&mut rng, 31)).unwrap();
+        let exact = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
+        assert_eq!((Stage2Claims::len(&manifest), Stage2Claims::len(&exact)), (8, 7));
+        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (31, 32));
+        for m in [&manifest, &exact] {
+            let s2 = Stage2Claims::from_slice(m, &point(&mut rng, Stage2Claims::len(m))).unwrap();
+            assert_eq!(Stage2Claims::from_slice(m, &s2.to_vec()), Some(s2.clone()));
+        }
+        assert!(Stage2Claims::from_slice(&exact, &point(&mut rng, 8)).is_none());
+        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 31)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 18);
         assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[30..]);
         assert_eq!(s3.column(&manifest, Column::Parity2(1)), s3.0[19]);
         assert_eq!(s3.column(&manifest, Column::W1Bit(0)), s3.0[6]);
-        assert!(Stage3Claims::from_slice(&s3.0[..30]).is_none());
+        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..30]).is_none());
+        // H-exact: a_z is the last main-domain claim, every later group moves by one.
+        let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 32)).unwrap();
+        assert_eq!(Stage3Claims::group_offset(&exact, GroupRole::Level2), 19);
+        assert_eq!(x3.column(&exact, Column::A_Z), x3.0[12]);
+        assert_eq!(x3.column(&exact, Column::W1Bit(0)), x3.0[6]);
+        assert!(Stage3Claims::from_slice(&exact, &x3.0[..31]).is_none());
         let digits = MultiplicityClaims([3, -2, 0, 1, 0, 0, 7].map(E::from_i64));
         assert_eq!(digits.compose(), E::from_i64(3 - 32 + 4096 + 7 * (1 << 24)));
         assert_eq!(carry_value(E::from_i64(-(1 << 15))), E::from_i64(0));

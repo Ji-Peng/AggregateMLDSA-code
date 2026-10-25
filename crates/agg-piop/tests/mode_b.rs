@@ -9,7 +9,7 @@
 mod common;
 
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT, U16_DIGITS};
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, Relation, LOOKUP_SHIFT, U16_DIGITS};
 use agg_piop::mode_b::{prove_mode_b, public_bits, verify_mode_b, PublicBits, PublicBitsVerifier};
 use agg_piop::prover::{
     main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, FixedMatrices, ProveHooks,
@@ -41,17 +41,26 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
         .expect("test thread");
 }
 
-/// The honest inputs of a batch.
+/// The honest inputs of a batch and the relation to prove.
 struct Fixture {
     records: Vec<Record>,
     instance: PublicInstance,
+    relation: Relation,
 }
 
 impl Fixture {
     fn new(seed: u64, own: usize, shared: usize) -> Self {
+        Self::with_relation(Relation::Hu, seed, own, shared)
+    }
+
+    fn with_relation(relation: Relation, seed: u64, own: usize, shared: usize) -> Self {
         let records = common::records(seed, own, shared);
         let instance = PublicInstance::from_records(&records).expect("instance");
-        Self { records, instance }
+        Self {
+            records,
+            instance,
+            relation,
+        }
     }
 
     fn inputs(&self) -> Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> {
@@ -84,6 +93,7 @@ impl Fixture {
                 instance: &self.instance,
                 records: &inputs,
                 signatures: &signatures,
+                relation: self.relation,
             },
             bridge,
         )
@@ -106,7 +116,17 @@ fn round_trip(
     n_shared: usize,
     seed: u64,
 ) -> (Fixture, SeededMatrices, ProverOutput, Vec<u8>) {
-    let fixture = Fixture::new(seed, n_own, n_shared);
+    round_trip_as(Relation::Hu, n_own, n_shared, seed)
+}
+
+/// [`round_trip`] under `relation`.
+fn round_trip_as(
+    relation: Relation,
+    n_own: usize,
+    n_shared: usize,
+    seed: u64,
+) -> (Fixture, SeededMatrices, ProverOutput, Vec<u8>) {
+    let fixture = Fixture::with_relation(relation, seed, n_own, n_shared);
     let n = n_own + n_shared;
     let bridge = SeededMatrices;
     let output = fixture.prove(&bridge);
@@ -114,8 +134,8 @@ fn round_trip(
     let size = output.proof.size();
     assert_eq!(size.total(), bytes.len());
     eprintln!(
-        "N = {n}: aggregate {} bytes = header {} + c~ {} + public bits {} + Akita commitments {} \
-         + final vectors {} + Keccak proofs {} + lookup {} + PIOP {} + opening {}",
+        "N = {n}, {relation}: aggregate {} bytes = header {} + c~ {} + public bits {} + Akita \
+         commitments {} + final vectors {} + Keccak proofs {} + lookup {} + PIOP {} + opening {}",
         bytes.len(),
         size.header,
         size.c_tilde,
@@ -139,14 +159,16 @@ fn round_trip(
     assert!(public_bits(&output.proof, n).is_none());
 
     let public = fixture.public();
-    let uncached = verify_mode_b(&public, &bytes, &bridge, None);
+    assert_eq!(output.proof.relation, relation);
+    assert_eq!(bytes[2], relation.id());
+    let uncached = verify_mode_b(&public, &bytes, &bridge, relation, None);
     report_line(&format!("N = {n}: verifier uncached"), &uncached);
     let verified = uncached.outcome.expect("verify");
     assert_eq!(verified.records, n);
     assert_eq!(verified.bridge_seed, output.bridge_seed);
     assert_eq!(verified.session, output.session);
     let mut cache = KeyCache::default();
-    let first = verify_mode_b(&public, &bytes, &bridge, Some(&mut cache));
+    let first = verify_mode_b(&public, &bytes, &bridge, relation, Some(&mut cache));
     assert_eq!(
         first
             .outcome
@@ -154,7 +176,7 @@ fn round_trip(
             .expanded_keys,
         verified.expanded_keys
     );
-    let cached = verify_mode_b(&public, &bytes, &bridge, Some(&mut cache));
+    let cached = verify_mode_b(&public, &bytes, &bridge, relation, Some(&mut cache));
     report_line(&format!("N = {n}: verifier cached keys"), &cached);
     assert_eq!(
         cached
@@ -177,7 +199,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let (fixture, bridge, output, bytes) = round_trip(200, 56, 0xb256);
         let public = fixture.public();
         let verify = |proof: &agg_piop::wire::AggregateProof| {
-            verify_mode_b(&public, &proof.to_bytes(), &bridge, None)
+            verify_mode_b(&public, &proof.to_bytes(), &bridge, Relation::Hu, None)
         };
 
         // The public bits: a flipped bit breaks the hash, a value of 44 or more the range.
@@ -298,15 +320,15 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         long.work.push(0);
         assert!(matches!(rejected(verify(&long)), VerifyError::Wire(_)));
         // Event 0 binds the plan: a verifier whose plan has a tie site derives another sd.
-        let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, None);
+        let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, Relation::Hu, None);
         assert!(matches!(rejected(other_plan), VerifyError::Keccak(0)));
 
         // Records, profile and framing.
         let mut swapped = public.clone();
         swapped.swap(10, 11);
-        assert!(!verify_mode_b(&swapped, &bytes, &bridge, None).accepted());
+        assert!(!verify_mode_b(&swapped, &bytes, &bridge, Relation::Hu, None).accepted());
         assert!(matches!(
-            rejected(verify_mode_b(&public[1..], &bytes, &bridge, None)),
+            rejected(verify_mode_b(&public[1..], &bytes, &bridge, Relation::Hu, None)),
             VerifyError::RecordCount
         ));
         // Event 0 binds the profile: under profile 0 the transcript, hence sd and the
@@ -318,6 +340,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             &bridge,
             &AsProfile(FlockProfile::None),
             FlockProfile::None,
+            Relation::Hu,
             None,
         );
         assert!(matches!(rejected(other_profile), VerifyError::Keccak(0)));
@@ -328,6 +351,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             &bridge,
             &PublicBitsVerifier,
             FlockProfile::None,
+            Relation::Hu,
             None,
         );
         assert!(matches!(
@@ -337,23 +361,23 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
 
         // The matrices are those of the transcript's sd: the same matrices as a fixed
         // stand-in verify, the matrices of any other seed (or test matrices) do not.
-        let verified_seed = verify_mode_b(&public, &bytes, &bridge, None)
+        let verified_seed = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None)
             .outcome
             .expect("verify")
             .bridge_seed;
         assert_eq!(verified_seed, output.bridge_seed);
         let same = FixedMatrices(derive_matrices(&output.bridge_seed));
-        assert!(verify_mode_b(&public, &bytes, &same, None).accepted());
+        assert!(verify_mode_b(&public, &bytes, &same, Relation::Hu, None).accepted());
         let mut other_seed = output.bridge_seed;
         other_seed[0] ^= 1;
         let other_seed = FixedMatrices(derive_matrices(&other_seed));
         assert!(matches!(
-            rejected(verify_mode_b(&public, &bytes, &other_seed, None)),
+            rejected(verify_mode_b(&public, &bytes, &other_seed, Relation::Hu, None)),
             VerifyError::Keccak(0)
         ));
         let other = FixedMatrices(BridgeMatrices::random_for_tests(0x99));
         assert!(matches!(
-            rejected(verify_mode_b(&public, &bytes, &other, None)),
+            rejected(verify_mode_b(&public, &bytes, &other, Relation::Hu, None)),
             VerifyError::Keccak(0)
         ));
         assert!(matches!(
@@ -361,6 +385,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
                 &public,
                 &bytes[..bytes.len() - 1],
                 &bridge,
+                Relation::Hu,
                 None
             )),
             VerifyError::Wire(_)
@@ -372,6 +397,79 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
 fn mode_b_round_trip_at_64_signatures() {
     on_large_stack(|| {
         let _ = round_trip(60, 4, 0xb064);
+    });
+}
+
+/// Relation H-exact (`docs/h-exact.md` 6.2 and 6.4, protocol level): honest round trips at
+/// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
+/// proof verified as H-u and an H-u proof verified as H-exact are rejected before event 0,
+/// a rewritten relation byte fails, and an unknown relation byte is malformed.
+#[test]
+fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
+    on_large_stack(|| {
+        let _ = round_trip_as(Relation::HExact, 1, 0, 0xe001);
+        let _ = round_trip_as(Relation::HExact, 60, 4, 0xe064);
+        let (fixture, bridge, output, bytes) = round_trip_as(Relation::HExact, 200, 56, 0xe256);
+        let public = fixture.public();
+        assert_eq!(output.proof.stage2.claims.squares.len(), 1);
+        assert_eq!(output.proof.stage3.claims.0.len(), 32);
+        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 76 claims.
+        assert_eq!(output.proof.size().piop, 16 * (76 + 11 * 18));
+        let as_hu = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
+        assert!(matches!(
+            rejected(as_hu),
+            VerifyError::Relation {
+                expected: Relation::Hu,
+                found: Relation::HExact
+            }
+        ));
+        // The H-exact header rewritten to H-u: verified as H-u the transcript (event 0,
+        // the catalog row, the plan) differs; verified as H-exact the flag mismatches.
+        let mut rewritten = bytes.clone();
+        rewritten[2] = Relation::Hu.id();
+        assert!(!verify_mode_b(&public, &rewritten, &bridge, Relation::Hu, None).accepted());
+        assert!(matches!(
+            rejected(verify_mode_b(&public, &rewritten, &bridge, Relation::HExact, None)),
+            VerifyError::Relation { .. }
+        ));
+        for flag in [2_u8, 3] {
+            let mut unknown = bytes.clone();
+            unknown[2] = flag;
+            assert!(matches!(
+                rejected(verify_mode_b(&public, &unknown, &bridge, Relation::HExact, None)),
+                VerifyError::Wire(_)
+            ));
+        }
+        // An H-u proof of the same records verified as H-exact, and rewritten to H-exact.
+        let hu = Fixture::new(0xe256, 200, 56).prove(&bridge);
+        let hu_bytes = hu.proof.to_bytes();
+        assert!(verify_mode_b(&public, &hu_bytes, &bridge, Relation::Hu, None).accepted());
+        assert!(matches!(
+            rejected(verify_mode_b(&public, &hu_bytes, &bridge, Relation::HExact, None)),
+            VerifyError::Relation {
+                expected: Relation::HExact,
+                found: Relation::Hu
+            }
+        ));
+        let mut promoted = hu_bytes.clone();
+        promoted[2] = Relation::HExact.id();
+        assert!(!verify_mode_b(&public, &promoted, &bridge, Relation::HExact, None).accepted());
+        // A wrong nonce at the stage-2 gamma site (10 bits under H-exact) is rejected.
+        let manifest = CommitmentManifest::for_relation(256, Relation::HExact).unwrap();
+        let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+        let mut offset = 0;
+        for site in plan.sites() {
+            if site.class == SiteClass::StageGamma && site.i == 2 {
+                assert_eq!((site.bits, site.nonce_bits()), (3, 10));
+                let mut wrong = output.proof.clone();
+                wrong.work[offset / 8] ^= 1 << (offset % 8);
+                assert!(!verify_mode_b(&public, &wrong.to_bytes(), &bridge, Relation::HExact, None)
+                    .accepted());
+                break;
+            }
+            offset += usize::from(site.nonce_bits());
+        }
+        assert!(offset > 0, "the stage-2 gamma site is in the plan");
     });
 }
 
@@ -396,6 +494,7 @@ fn prove_tampered(
         instance: &fixture.instance,
         records: &inputs,
         signatures: &signatures,
+        relation: fixture.relation,
     };
     let (manifest, honest) = main_tables(&prover_inputs).map_err(|e| e.to_string())?;
     let side = PublicBits::from_tables(&manifest, &honest);
@@ -440,10 +539,11 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         })
         .unwrap();
         let public = fixture.public();
-        let verify = |bytes: &[u8]| verify_mode_b(&public, bytes, &bridge, None);
+        let verify = |bytes: &[u8]| verify_mode_b(&public, bytes, &bridge, Relation::Hu, None);
         let honest_bytes = prove_tampered(&fixture, &bridge, &honest, None).unwrap();
         assert!(
             verify(&honest_bytes).accepted(),
@@ -515,15 +615,16 @@ fn every_stage_tampering_is_rejected_end_to_end() {
                 && error.contains("exceeds the scheduled coefficient bound"),
             "{error}"
         );
-        // Base-4 and base-8 digits outside their alphabets: the leaves of stage 2.
+        // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = 3
+        // is in relaxed H's base-8 alphabet, not in H-u's base-6 one).
         expect(
             "base-4 digit",
             &tampered(&|m| *cell(&manifest, m, Column::Z_HI, x) = 3),
             &at_stage(2),
         );
         expect(
-            "base-8 digit",
-            &tampered(&|m| *cell(&manifest, m, Column::U_HI, x) = -6),
+            "base-6 digit",
+            &tampered(&|m| *cell(&manifest, m, Column::U_HI, x) = 3),
             &at_stage(2),
         );
 
@@ -638,6 +739,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
             instance: &fixture.instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         })
         .unwrap();
         let read = |m: &MainTables, column: Column, x: usize| m.column(&manifest, column).value(x);
@@ -652,7 +754,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
                 -1
             };
             let u = u_at(&honest, x) - 2 * GAMMA2 * delta;
-            (-(1 << 18)..(1 << 18)).contains(&u).then_some(u)
+            (-190_465..=190_465).contains(&u).then_some(u)
         };
         let positions: Vec<(usize, i64)> = (0..1024)
             .map(|p| main_index(p % 256, p / 256, 3))
@@ -675,7 +777,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
 
         let bytes = prove_tampered(&fixture, &bridge, &tampered, None).expect("prove");
         let public = fixture.public();
-        let report = verify_mode_b(&public, &bytes, &bridge, None);
+        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
         assert!(
             matches!(report.outcome, Err(VerifyError::Bits)),
             "{:?}",
@@ -687,6 +789,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
             &bridge,
             &ProjectionOnly,
             FlockProfile::PublicBits,
+            Relation::Hu,
             None,
         );
         assert!(

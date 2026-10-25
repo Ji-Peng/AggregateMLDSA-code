@@ -2,10 +2,12 @@
 //!
 //! This module builds G_main, the round-1 group of spec Section 4.1: per main-domain position
 //! (j, rho or s, i) the digits of z, u, v and the six w1Encode bits, in the table order
-//! z_0..z_4, u_0..u_4, v_0..v_6, b_0..b_5. Padded rows (i >= N) hold the canonical encoding of
+//! z_0..z_4, u_0..u_4, v_0..v_6, b_0..b_5 (relation H-u: u_0..u_3 the base-16 digits of B_ulo,
+//! u_4 the base-6 top digit H_u - 3). Padded rows (i >= N) hold the canonical encoding of
 //! the all-zero witness (spec Section 4.2). The seed-dependent groups G_1, G_2, G_3 are built
-//! from `crate::bridge::BridgeTables`. Behind features: the H-exact layout (`h-exact`) and the
-//! S1+S2 layout (`fips`), spec Appendix A; their column orders are fixed in docs/witness.md.
+//! from `crate::bridge::BridgeTables`. Behind features: the H-exact layout (`h-exact`, relation
+//! H-exact of spec 4.3: z by the bit-slack form, u as in H-u) and the S1+S2 layout (`fips`,
+//! spec Appendix A); their column orders are fixed in docs/witness.md.
 //!
 //! Every committed value is a digit, a bit, a sign or a ternary value, so columns are `i8`.
 
@@ -20,9 +22,12 @@ use rayon::prelude::*;
 /// Relation layout (spec Section 4 and Appendix A).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layout {
-    /// Relation H (default): z, u, v digits and the six bits; 23 columns.
+    /// Relation H-u (default): z, u, v digits and the six bits; 23 columns. z is relaxed to
+    /// [-2^17, 2^17), u is exact (`digits::U_STEP`).
     H,
-    /// H-exact: z and u by slack digits; 25 columns.
+    /// Relation H-exact (spec 4.3, normative): z exact by the bit-slack form
+    /// (`digits::Z_BIT_SLACK16`: bz_0..bz_3, bz_hi, az), u as in H-u (`digits::U_STEP`);
+    /// 24 columns.
     #[cfg(feature = "h-exact")]
     HExact,
     /// S1+S2 (`relation = fips`): FIPS-faithful layout; 29 main and 3 per-signature columns.
@@ -61,7 +66,7 @@ impl Layout {
     /// Display name.
     pub fn name(self) -> &'static str {
         match self {
-            Layout::H => "H",
+            Layout::H => "H-u",
             #[cfg(feature = "h-exact")]
             Layout::HExact => "H-exact",
             #[cfg(feature = "fips")]
@@ -69,21 +74,36 @@ impl Layout {
         }
     }
 
-    /// Digits of z: (4.1) layout for H, the b_z digits of the slack form otherwise.
-    pub fn z_digits(self) -> DigitLayout {
+    /// Number of committed z digits (the slack bits included for H-exact; a_z excluded for
+    /// S1+S2, whose a_z column is separate).
+    pub fn z_digit_count(self) -> usize {
         match self {
-            Layout::H => Z_DIGITS,
-            #[allow(unreachable_patterns)]
-            _ => BZ_DIGITS,
+            Layout::H => Z_DIGITS.len(),
+            #[cfg(feature = "h-exact")]
+            Layout::HExact => Z_BIT_SLACK16.len(),
+            #[cfg(feature = "fips")]
+            Layout::Fips => BZ_DIGITS.len(),
         }
     }
 
-    /// Digits of u, if the layout commits u.
-    pub fn u_digits(self) -> Option<DigitLayout> {
+    /// True for relation H-exact.
+    pub fn is_h_exact(self) -> bool {
+        #[cfg(feature = "h-exact")]
+        {
+            self == Layout::HExact
+        }
+        #[cfg(not(feature = "h-exact"))]
+        {
+            false
+        }
+    }
+
+    /// Number of committed u digits (the b_u digits for H-exact), if the layout commits u.
+    pub fn u_digit_count(self) -> Option<usize> {
         match self {
-            Layout::H => Some(U_DIGITS),
+            Layout::H => Some(U_STEP.len()),
             #[cfg(feature = "h-exact")]
-            Layout::HExact => Some(BU_DIGITS),
+            Layout::HExact => Some(U_STEP.len()),
             #[cfg(feature = "fips")]
             Layout::Fips => None,
         }
@@ -193,14 +213,22 @@ impl ColumnMap {
         match layout {
             Layout::H => {
                 m.z = m.push_digits("z", Z_DIGITS, Main);
-                m.u = Some(m.push_digits("u", U_DIGITS, Main));
+                let first = m.specs.len();
+                for k in 0..U_STEP.len() {
+                    m.push(format!("u_{k}"), U_STEP.alphabet(k), Main);
+                }
+                m.u = Some(first);
             }
             #[cfg(feature = "h-exact")]
             Layout::HExact => {
-                m.z = m.push_digits("bz", BZ_DIGITS, Main);
+                m.z = m.push_digits("bz", ZLO_DIGITS, Main);
+                m.push("bz_hi".into(), Alphabet::Bool, Main);
                 m.az = Some(m.push("az".into(), Alphabet::Bool, Main));
-                m.u = Some(m.push_digits("bu", BU_DIGITS, Main));
-                m.au = Some(m.push("au".into(), Alphabet::Bool, Main));
+                let first = m.specs.len();
+                for k in 0..U_STEP.len() {
+                    m.push(format!("u_{k}"), U_STEP.alphabet(k), Main);
+                }
+                m.u = Some(first);
             }
             #[cfg(feature = "fips")]
             Layout::Fips => {
@@ -394,6 +422,13 @@ fn encode_record(
         for j in 0..N {
             let pos = j + N * s;
             let zv = vals.z[s][j];
+            if layout.is_h_exact() {
+                // bz_0..bz_3, bz_hi, az are contiguous.
+                for (k, d) in Z_BIT_SLACK16.decompose(zv).into_iter().enumerate() {
+                    put(map.z + k, pos, d, "z bit-slack digit")?;
+                }
+                continue;
+            }
             match map.az {
                 None => {
                     for (k, d) in Z_DIGITS.decompose(zv).into_iter().enumerate() {
@@ -417,7 +452,7 @@ fn encode_record(
                 let uv = vals.u[rho][j];
                 match map.au {
                     None => {
-                        for (k, d) in U_DIGITS.decompose(uv).into_iter().enumerate() {
+                        for (k, d) in U_STEP.decompose(uv).into_iter().enumerate() {
                             put(u0 + k, pos, d, "u digit")?;
                         }
                     }
@@ -592,8 +627,9 @@ impl BatchTables {
         for s in 0..L {
             for j in 0..N {
                 let pos = j + N * s;
-                let zd = digits(map.z, self.layout.z_digits().len(), pos);
+                let zd = digits(map.z, self.layout.z_digit_count(), pos);
                 r.z[s][j] = match map.az {
+                    _ if self.layout.is_h_exact() => Z_BIT_SLACK16.compose(&zd),
                     None => Z_DIGITS.compose(&zd),
                     Some(az) => Z_EXACT.compose(at(az, pos), &zd),
                 };
@@ -602,10 +638,10 @@ impl BatchTables {
         for rho in 0..K {
             for j in 0..N {
                 let pos = j + N * rho;
-                if let (Some(u0), Some(ul)) = (map.u, self.layout.u_digits()) {
-                    let ud = digits(u0, ul.len(), pos);
+                if let (Some(u0), Some(ul)) = (map.u, self.layout.u_digit_count()) {
+                    let ud = digits(u0, ul, pos);
                     r.u[rho][j] = match map.au {
-                        None => U_DIGITS.compose(&ud),
+                        None => U_STEP.compose(&ud),
                         Some(au) => U_EXACT.compose(at(au, pos), &ud),
                     };
                 }

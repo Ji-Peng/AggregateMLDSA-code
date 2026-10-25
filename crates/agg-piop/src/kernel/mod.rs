@@ -242,6 +242,8 @@ impl<'a> Lane<'a> {
 pub enum LeafPoly {
     /// `Q_4(P) = P (P - 2)`.
     Q4,
+    /// `Q_6(P) = P (P - 2)(P - 6)`: the six-valued digit `[-3, 2]` (relation H-u's `U_hi`).
+    Q6,
     /// `Q_8(P) = Q_16^lo(P) = P (P - 2)(P - 6)(P - 12)`.
     Q8,
     /// `Q_16^hi(P) = (P - 20)(P - 30)(P - 42)(P - 56)`.
@@ -254,6 +256,7 @@ impl LeafPoly {
     pub const fn roots(self) -> &'static [i64] {
         match self {
             Self::Q4 => &[0, 2],
+            Self::Q6 => &[0, 2, 6],
             Self::Q8 => &[0, 2, 6, 12],
             Self::Q16Hi => &[20, 30, 42, 56],
         }
@@ -289,11 +292,12 @@ impl LeafPoly {
         coefficients
     }
 
-    /// The leaf of a digit base: `Q_4`, `Q_8`, or both halves of `Q_16` (lo then hi).
+    /// The leaf of a digit base: `Q_4`, `Q_6`, `Q_8`, or both halves of `Q_16` (lo then hi).
     #[must_use]
     pub fn of_base(base: u32) -> Vec<Self> {
         match base {
             4 => vec![Self::Q4],
+            6 => vec![Self::Q6],
             8 => vec![Self::Q8],
             16 => vec![Self::Q8, Self::Q16Hi],
             _ => panic!("unsupported digit base {base}"),

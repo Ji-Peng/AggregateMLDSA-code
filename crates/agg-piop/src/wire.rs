@@ -1,10 +1,13 @@
-//! Proof wire format (spec Section 10, wire version 2): header (version, flags, `N`), the
+//! Proof wire format (spec Section 10, wire version 3): header (version, flags = relation
+//! byte, `N`), the
 //! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, the lookup (event 7) and
 //! the stages (events 9 to 12) in order, the packed PIOP nonce stream
 //! (`docs/soundness.md` Section 6.2, its exact length a function of `N`), then the Akita
 //! opening. Variable-length items carry
 //! a `LE32` length; field elements use the canonical atom encoding of the transcript; the
-//! round and session counts follow from `N`.
+//! round and session counts follow from `N`, the stage-2 and stage-3 claim counts from the
+//! relation (`docs/h-exact.md` 3.5). The parser reads the relation from the header; a
+//! verifier MUST compare it with the relation it expects before using the proof.
 
 use agg_witness::params::C_TILDE_BYTES;
 
@@ -12,7 +15,7 @@ use crate::claims::{
     Kappa1Claims, MultiplicityClaims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims,
 };
 use crate::lookup::{LookupProof, LookupShape, SessionProof, DEGREE as LOOKUP_DEGREE};
-use crate::manifest::{CommitmentManifest, RELATION_H, WIRE_VERSION};
+use crate::manifest::{CommitmentManifest, Relation, WIRE_VERSION};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::Stage3Proof;
@@ -26,7 +29,7 @@ use crate::OpeningField as E;
 pub enum WireError {
     /// Unknown wire version.
     Version(u16),
-    /// Unknown feature flags.
+    /// Unknown feature flags (relation byte).
     Flags(u8),
     /// `N` outside `1..=2^15`.
     Records(u64),
@@ -51,6 +54,8 @@ impl std::error::Error for WireError {}
 /// The aggregate proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggregateProof {
+    /// The relation the proof claims (the header's flags byte).
+    pub relation: Relation,
     /// Live records `N`.
     pub records: usize,
     /// `c~_i` per live record.
@@ -146,7 +151,7 @@ impl AggregateProof {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer(Vec::new());
         w.bytes(&WIRE_VERSION.to_le_bytes());
-        w.bytes(&[RELATION_H]);
+        w.bytes(&[self.relation.id()]);
         w.bytes(&(self.records as u64).to_le_bytes());
         for c in &self.c_tilde {
             w.bytes(c);
@@ -196,13 +201,11 @@ impl AggregateProof {
             return Err(WireError::Version(version));
         }
         let flags = r.array::<1>()?[0];
-        if flags != RELATION_H {
-            return Err(WireError::Flags(flags));
-        }
+        let relation = Relation::from_id(flags).ok_or(WireError::Flags(flags))?;
         let records = u64::from_le_bytes(r.array()?);
         let manifest = usize::try_from(records)
             .ok()
-            .and_then(|n| CommitmentManifest::for_batch(n).ok())
+            .and_then(|n| CommitmentManifest::for_relation(n, relation).ok())
             .ok_or(WireError::Records(records))?;
         let records = manifest.records();
         let segments = manifest.segments();
@@ -240,12 +243,12 @@ impl AggregateProof {
             kappa1: Kappa1Claims::from_slice(&r.elements(Kappa1Claims::LEN)?)
                 .ok_or(WireError::Shape("kappa1 claims"))?,
             rounds: r.rounds(rounds, STAGE_DEGREES[1])?,
-            claims: Stage2Claims::from_slice(&r.elements(Stage2Claims::LEN)?)
+            claims: Stage2Claims::from_slice(&manifest, &r.elements(Stage2Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 2 claims"))?,
         };
         let stage3 = Stage3Proof {
             rounds: r.rounds(rounds, STAGE_DEGREES[2])?,
-            claims: Stage3Claims::from_slice(&r.elements(Stage3Claims::LEN)?)
+            claims: Stage3Claims::from_slice(&manifest, &r.elements(Stage3Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 3 claims"))?,
         };
         let work = r.take(work_bytes(&manifest))?.to_vec();
@@ -254,6 +257,7 @@ impl AggregateProof {
             return Err(WireError::Trailing);
         }
         Ok(Self {
+            relation,
             records,
             c_tilde,
             main16_commitment,
@@ -287,8 +291,8 @@ impl AggregateProof {
         16 * (PreStageClaims::LEN
             + Stage1Claims::LEN
             + Kappa1Claims::LEN
-            + Stage2Claims::LEN
-            + Stage3Claims::LEN
+            + self.stage2.claims.to_vec().len()
+            + self.stage3.claims.0.len()
             + rounds * (STAGE_DEGREES[0] + STAGE_DEGREES[1] + STAGE_DEGREES[2]))
     }
 }
@@ -418,13 +422,18 @@ mod tests {
     }
 
     fn sample_proof(records: usize, rng: &mut SplitMix64) -> AggregateProof {
-        let manifest = CommitmentManifest::for_batch(records).unwrap();
+        sample_proof_of(Relation::Hu, records, rng)
+    }
+
+    fn sample_proof_of(relation: Relation, records: usize, rng: &mut SplitMix64) -> AggregateProof {
+        let manifest = CommitmentManifest::for_relation(records, relation).unwrap();
         let rounds = manifest.d_main();
         let segments = manifest.segments();
         let rounds_of = |degree: usize, rng: &mut SplitMix64| {
             (0..rounds).map(|_| point(rng, degree)).collect::<Vec<_>>()
         };
         AggregateProof {
+            relation,
             records,
             c_tilde: (0..records).map(|i| [i as u8; 32]).collect(),
             main16_commitment: vec![1, 2],
@@ -442,12 +451,13 @@ mod tests {
             },
             stage2: Stage2Proof {
                 kappa1: Kappa1Claims::from_slice(&point(rng, Kappa1Claims::LEN)).unwrap(),
-                rounds: rounds_of(5, rng),
-                claims: Stage2Claims::from_slice(&point(rng, Stage2Claims::LEN)).unwrap(),
+                rounds: rounds_of(STAGE_DEGREES[1], rng),
+                claims: Stage2Claims::from_slice(&manifest, &point(rng, Stage2Claims::len(&manifest)))
+                    .unwrap(),
             },
             stage3: Stage3Proof {
                 rounds: rounds_of(3, rng),
-                claims: Stage3Claims(point(rng, Stage3Claims::LEN)),
+                claims: Stage3Claims(point(rng, Stage3Claims::len(&manifest))),
             },
             work: (0..work_bytes(&manifest)).map(|i| i as u8).collect(),
             opening: vec![9; 100],
@@ -464,7 +474,8 @@ mod tests {
             let size = proof.size();
             assert_eq!(size.total(), bytes.len());
             assert_eq!((size.c_tilde, size.piop), (32 * records, proof.piop_bytes()));
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 31 + 12 * proof.stage1.rounds.len()));
+            // Relation H-u: stage degrees 4, 4, 3 (11 elements per round).
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 31 + 11 * proof.stage1.rounds.len()));
             let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();
             assert_eq!(size.lookup, 16 * (shape.proof_elements() + 7));
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
@@ -474,17 +485,31 @@ mod tests {
             let mut version = bytes.clone();
             version[0] = 9;
             assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(9)));
-            // The retired wire versions 0 and 1 (no work nonces) are refused.
-            for old in [0, 1] {
+            // The retired wire versions 0 and 1 (no work nonces) and 2 (relaxed relation H)
+            // are refused.
+            for old in [0, 1, 2] {
                 version[0] = old;
                 assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(u16::from(old))));
             }
             // The nonce stream has the plan's exact length (docs/soundness.md Section 6.2).
             assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
             assert!(size.work >= 227);
-            let mut flags = bytes.clone();
-            flags[2] = 1;
-            assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(1)));
+            // Relation byte: 0 (H-u) and 1 (H-exact); 2 and above are unknown. The parser
+            // reads the relation from the header (H-u and H-exact proofs have equally many
+            // stage claims, 8 + 31 = 7 + 32, so a rewritten flag may still parse; the
+            // verifier compares it with the relation it expects).
+            assert_eq!(bytes[2], 0);
+            let mut rewritten = bytes.clone();
+            rewritten[2] = 1;
+            if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
+                assert_eq!(parsed.relation, Relation::HExact);
+                assert_ne!(parsed, proof);
+            }
+            for flag in [2_u8, 3, 0xFF] {
+                let mut flags = bytes.clone();
+                flags[2] = flag;
+                assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(flag)));
+            }
             let mut n = bytes.clone();
             n[3..11].copy_from_slice(&0_u64.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&n), Err(WireError::Records(0)));
@@ -503,6 +528,29 @@ mod tests {
             AggregateProof::from_bytes(&too_many),
             Err(WireError::Records((1 << 15) + 1))
         );
+    }
+
+    #[test]
+    fn h_exact_proofs_round_trip_with_their_claim_counts() {
+        let mut rng = SplitMix64::new(78);
+        for records in [1, 100, 1000] {
+            let proof = sample_proof_of(Relation::HExact, records, &mut rng);
+            let bytes = proof.to_bytes();
+            assert_eq!(bytes[2], 1);
+            let parsed = AggregateProof::from_bytes(&bytes).unwrap();
+            assert_eq!(parsed, proof);
+            assert_eq!(parsed.relation, Relation::HExact);
+            assert_eq!(parsed.stage2.claims.squares.len(), 1);
+            assert_eq!(parsed.stage3.claims.0.len(), 32);
+            // docs/h-exact.md 3.5: 13 + 18 + 6 + 7 + 32 claims and 11 elements per round.
+            let rounds = proof.stage1.rounds.len();
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 7 + 32 + 11 * rounds));
+            assert_eq!(proof.size().total(), bytes.len());
+            // A truncated proof is rejected.
+            assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
+        }
+        // At 2^15 the stage messages and claims take 5,616 bytes (25 rounds).
+        assert_eq!(16 * (13 + 18 + 6 + 7 + 32 + 11 * 25), 5_616);
     }
 
     #[test]

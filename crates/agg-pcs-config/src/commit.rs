@@ -158,7 +158,7 @@ fn physical_point(
     claim: &GroupClaim,
 ) -> Result<Vec<OpeningField>, CommitError> {
     if claim.point.len() != plan.logical_vars(group)
-        || claim.values.len() != group.num_polynomials()
+        || claim.values.len() != plan.num_polynomials(group)
     {
         return Err(CommitError::ClaimShape(group));
     }
@@ -201,10 +201,10 @@ impl PcsProver {
         group: Group,
         tables: &[Vec<T>],
     ) -> Result<GroupCommitment, CommitError> {
-        if tables.len() != group.num_polynomials() {
+        if tables.len() != self.plan.num_polynomials(group) {
             return Err(CommitError::PolynomialCount {
                 group,
-                expected: group.num_polynomials(),
+                expected: self.plan.num_polynomials(group),
                 actual: tables.len(),
             });
         }
@@ -251,10 +251,10 @@ impl PcsProver {
         group: Group,
         polynomials: Vec<DensePoly<BaseField>>,
     ) -> Result<GroupCommitment, CommitError> {
-        if polynomials.len() != group.num_polynomials() {
+        if polynomials.len() != self.plan.num_polynomials(group) {
             return Err(CommitError::PolynomialCount {
                 group,
-                expected: group.num_polynomials(),
+                expected: self.plan.num_polynomials(group),
                 actual: polynomials.len(),
             });
         }

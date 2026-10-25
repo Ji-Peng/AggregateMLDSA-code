@@ -71,10 +71,20 @@ Flock witness per part, and the stale round-2 tables of the joint bridge test.
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch --keys keys.bin --count 256 --seed 1 --out records.bin
-taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off]
-taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off]
+taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact]
+taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact]
 ```
+
+`--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
+`h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
+(relation byte 1: the FIPS 204 bounds `|z| <= 130,993`, `|u| <= 190,465`, one more
+committed column). `aggregate` and `bench` prove the chosen relation
+(`AggregatorConfig::relation`); `verify` verifies under the chosen relation
+(`AggregateVerifier::relation`) and rejects an aggregate whose header names another one
+("the proof claims relation H-exact, the verifier expects H-u"), so verifying an H-exact
+aggregate needs `--relation h-exact`. The prover and verifier reports and the `bench`
+header print the relation. The Keccak side does not depend on it.
 
 `--flock-profile` selects the Ligerito profile of the Flock parts (`fast`: rate 1/2, `slim`:
 rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work-normalized in
@@ -105,14 +115,18 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
   span glue of the verifier on a four-segment geometry without proofs (segment 0 opens the
   span, segments 1 to 3 are covered, the last one verifies it; spans over fewer segments,
   covered items with commitments or proofs, per-segment or second span items inside a span
-  rejected), the segment items (profile and span bytes), the options `--flock-profile` and
-  `--flock-span`, the Flock records of honest tables equal `w1Encode`, the batch files, the
+  rejected), the segment items (profile and span bytes), the options `--flock-profile`,
+  `--flock-span` and `--relation`, the Flock records of honest tables equal `w1Encode`, the batch files, the
   key cache file;
 - round trips at 64 (one part), 256 (two parts of 128) and 512 (one part) signatures with
   own and shared keys under each profile (`Fast`, `Slim`, `Slim8`): the `c~_i` list, the size report,
   the uncached and cached verifier (in memory and through the cache file) agree, the
   verifier reads the profile from the aggregate, and a verifier pinned to the other profile
   rejects the item's profile byte before any Flock work;
+- relation H-exact: round trips at 64 (one part) and 256 (two parts) signatures under
+  `Slim` with `AggregatorConfig::relation = HExact`; a verifier of the other relation
+  rejects the aggregate before event 0 (`VerifyError::Relation`); the binary aggregates and
+  verifies with `--relation h-exact` and rejects the cross-relation cases;
 - corrupted aggregates (20 records, parts of 8, 8, 4): `c~_i`, `Y_sigma`, a share, swapped
   shares, swapped part proofs, a part-proof byte, a part-commitment byte, the part size
   (too large, too small), a dropped part, a truncated item, a pre-stage claim, stage-1, -2
@@ -124,7 +138,7 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
   a committed bit flipped (Flock part) and the same with stale round-2 tables (stage 1), a
   bit of value 2 (stage 1), `w_1' = 44` in the committed bits (Flock part) and in both copies
   (Flock part; stage 1 with the Flock verdict ignored), a base-16 digit 9 (the Akita
-  commitment refuses it), base-4 and base-8 digits (stage 2), a level-1 carry digit and a
+  commitment refuses it), base-4 and base-6 digits (stage 2), a level-1 carry digit and a
   level-2 parity (stage 1), a final-vector bit (Flock part), and on the Flock side a bit
   flipped in both copies, in the bridge slot copy only, and in the sponge input with the stale
   chi witness (Flock part);
@@ -134,6 +148,19 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
   a filled cache file, on other messages), usage errors, `bench`.
 
 ## 4. Local measurements
+
+Relation sanity runs (2026-10-25, revision `f526097`, CLMUL build `RUSTFLAGS="-C
+target-feature=+pclmulqdq"`, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
+span on, CPUs 0,1,3-15 with `RAYON_NUM_THREADS=3` while a catalog generation ran with 3
+workers: single noisy runs, not benchmarks):
+
+| Relation | Aggregate | PIOP rounds and claims | Work nonces | Akita opening | Prove | Stage 2 / stage 3 | Verify uncached / cached |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| H-u | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
+| H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
+
+Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
+with `16 (76 + 11 d_main)` at `d_main = 20` for both relations (8 + 31 and 7 + 32 claims).
 
 Superseded for the current code by `ref/notes/bench-local.md` ("Mode A with tied parts"):
 with the tied part of K11 and the Flock patch of K12, a batch of up to 2,048 records is one

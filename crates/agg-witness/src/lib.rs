@@ -5,7 +5,8 @@
 //! `tables::BatchTables` (G_main columns, Section 4) -> `check::check` (every identity of
 //! Section 7 over the integers). `native` is an independent FIPS 204 verifier, `keccak` the
 //! sponge of Section 8, `bridge` the integer side of the parity bridge (Section 9).
-//! Feature `h-exact` adds the H-exact layout, feature `fips` the S1+S2 layout (Appendix A).
+//! Feature `h-exact` adds the H-exact layout (spec 4.3), feature `fips` the S1+S2 layout
+//! (Appendix A).
 //! Bounds enforced are listed in docs/witness.md.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.

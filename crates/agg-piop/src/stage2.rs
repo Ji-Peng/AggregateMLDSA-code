@@ -1,8 +1,12 @@
-//! Stage 2 (spec Section 7.4, degree 5): the level-1 definition (7.5) and the two range
-//! leaves of the small digits on the virtual tables `P_Z` (lookup layout L16: every other
-//! range is the lookup into `T_16`).
+//! Stage 2 (spec Section 7.4, degree 4 in relations H-u and H-exact): the level-1 definition
+//! (7.5) and the range leaves of the small digits on the virtual tables `P_Z` (lookup layout
+//! L16: every other range is the lookup into `T_16` or, for the Boolean digits of H-exact, a
+//! zero-check in stage 3).
 //!
-//! `gamma^(2)` order: `def_y1[t]` (0..6), `leaf4[Z_hi]` (6), `leaf8[U_hi]` (7).
+//! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-u has
+//! `leaf4[Z_hi]` (6) and `leaf6[U_hi]` (7), H-exact `leaf6[U_hi]` (6) only (`docs/h-exact.md`
+//! 3.3). The leaf of the six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree
+//! `1 + 3 = 4` in both relations; relaxed H's `leaf8` had degree 5.
 
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
@@ -25,17 +29,20 @@ use crate::OpeningField as E;
 
 /// Stage number.
 pub const STAGE: usize = 2;
-/// Message degree.
-pub const DEGREE: usize = 5;
-/// Batching coefficients.
-pub const GAMMA_COUNT: usize = W1_BITS + 2;
+/// Message degree (`leaf6[U_hi]`: the `eq` factor times `Q_6(P_Z)`).
+pub const DEGREE: usize = 4;
+/// Batching coefficients: 8 under H-u, 7 under H-exact.
+#[must_use]
+pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
+    W1_BITS + manifest.leaf_digits().len()
+}
 
 /// Gamma index of `def_y1[t]`.
 #[must_use]
 pub const fn gamma_def_y1(t: usize) -> usize {
     t
 }
-/// Gamma index of the leaf of the `k`-th leaf-checked digit (`Z_hi`, then `U_hi`).
+/// Gamma index of the leaf of the `k`-th leaf-checked digit (`manifest.leaf_digits()`).
 #[must_use]
 pub const fn gamma_leaf(k: usize) -> usize {
     W1_BITS + k
@@ -46,7 +53,7 @@ pub const fn gamma_leaf(k: usize) -> usize {
 pub struct Stage2Proof {
     /// The 6 claims `K^(1)_t(r^(1)_1)` sent before `gamma^(2)`.
     pub kappa1: Kappa1Claims,
-    /// Compressed degree-5 messages (5 elements each).
+    /// Compressed degree-4 messages (4 elements each).
     pub rounds: Vec<Vec<E>>,
     /// Terminal claims.
     pub claims: Stage2Claims,
@@ -66,7 +73,7 @@ pub struct Stage2Output {
 /// The leaf polynomial of a leaf-checked digit.
 fn leaf_poly(digit: &Digit) -> LeafPoly {
     match digit.base {
-        8 => LeafPoly::Q8,
+        6 => LeafPoly::Q6,
         4 => LeafPoly::Q4,
         other => panic!("unsupported leaf base {other}"),
     }
@@ -89,7 +96,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .map(|t| InstanceSpec::new(gamma_def_y1(t), vec![Term::Product(vec![0, 1 + t])]))
             .collect(),
     });
-    // The two leaves on the main domain.
+    // The leaves on the main domain.
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R1,
@@ -103,15 +110,15 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
-        gamma_count: GAMMA_COUNT,
+        gamma_count: gamma_count(manifest),
         groups,
     }
 }
 
-/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the two leaves.
+/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the leaves.
 #[must_use]
-pub fn claimed_sums(stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
-    let mut claims = vec![E::zero(); GAMMA_COUNT];
+pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
+    let mut claims = vec![E::zero(); gamma_count(manifest)];
     for t in 0..W1_BITS {
         let kappa = kappa1.value(t);
         claims[gamma_def_y1(t)] = stage1.y1[t] + kappa + kappa;
@@ -153,7 +160,7 @@ fn prove_with(
     let kappa1 = Kappa1Claims::evaluate(manifest, tables.tables, &stage1.point);
     transcript.absorb_extensions(KAPPA1_SITE, &kappa1.to_vec())?;
     let spec = spec(manifest);
-    let claims = claimed_sums(&stage1.claims, &kappa1);
+    let claims = claimed_sums(manifest, &stage1.claims, &kappa1);
     let run = if check {
         prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
     } else {
@@ -162,10 +169,10 @@ fn prove_with(
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {
         b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8)))),
-        squares: {
-            let all = digits(manifest);
-            [0, 1].map(|k| value(LaneId::DigitSquare(all[k].column)))
-        },
+        squares: digits(manifest)
+            .iter()
+            .map(|digit| value(LaneId::DigitSquare(digit.column)))
+            .collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -193,9 +200,12 @@ pub fn verify(
 ) -> Result<Stage2Output, StageError> {
     transcript.absorb_extensions(KAPPA1_SITE, &proof.kappa1.to_vec())?;
     let spec = spec(manifest);
-    let claims = claimed_sums(&stage1.claims, &proof.kappa1);
+    let claims = claimed_sums(manifest, &stage1.claims, &proof.kappa1);
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     let all = digits(manifest);
+    if proof.claims.squares.len() != all.len() {
+        return Err(StageError::Shape("stage 2 claims".into()));
+    }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
     let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
     let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
@@ -222,6 +232,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn h_exact_stage_two_has_seven_instances_and_one_leaf6() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
+        let spec = spec(&manifest);
+        spec.validate().unwrap();
+        assert_eq!(gamma_count(&manifest), 7);
+        let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
+        assert_eq!(instances, 7);
+        let leaves = &spec.groups[1];
+        let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
+        assert_eq!(leaves.instances.len(), 1);
+        assert_eq!(leaves.instances[0].gamma, 6);
+        assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
+        assert_eq!(spec.degree, DEGREE);
+    }
+
+    #[test]
     fn stage_two_has_eight_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let spec = spec(&manifest);
@@ -234,14 +260,19 @@ mod tests {
         let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
         assert_eq!(leaves.instances[0].gamma, gamma_leaf(0));
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(z_hi, LeafPoly::Q4)]);
-        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q8)]);
+        assert_eq!(leaves.instances[1].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
+        let mut max = 0;
         for group in &spec.groups {
             let inner = usize::from(group.eq != EqPoint::None);
             for instance in &group.instances {
                 for term in &instance.terms {
                     assert!(term.degree() + inner <= DEGREE);
+                    max = max.max(term.degree() + inner);
                 }
             }
         }
+        // The degree is tight: leaf6[U_hi] reaches it.
+        assert_eq!(max, DEGREE);
+        assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
     }
 }

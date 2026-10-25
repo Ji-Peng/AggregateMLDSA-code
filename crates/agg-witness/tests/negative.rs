@@ -125,9 +125,18 @@ fn table_mutations_fail_at_the_stated_stage() {
     let rep = rep_of(&inst, &t);
     assert_rejected(&rep, Identity::B16Prod);
     assert_eq!(rep.first_stage(), Some(Stage::One));
-    // Base-8 digit (u_4) outside [-4, 3]: leaf8, stage 2.
+    // Base-6 digit (u_4, H-u) outside [-3, 2]: leaf6, stage 2 (3 and -4 are in the old
+    // base-8 alphabet).
+    for value in [3, -4] {
+        let mut t = base.clone();
+        t.columns[map.u.unwrap() + 4][x] = value;
+        let rep = rep_of(&inst, &t);
+        assert_rejected(&rep, Identity::Leaf6);
+        assert_eq!(rep.first_stage(), Some(Stage::Two));
+    }
+    // Base-8 digit (v_6) outside [-4, 3]: leaf8, stage 2.
     let mut t = base.clone();
-    t.columns[map.u.unwrap() + 4][x] = 4;
+    t.columns[map.v + 6][x] = 4;
     let rep = rep_of(&inst, &t);
     assert_rejected(&rep, Identity::Leaf8);
     assert_eq!(rep.first_stage(), Some(Stage::Two));
@@ -168,6 +177,59 @@ fn table_mutations_fail_at_the_stated_stage() {
     let mut t = base.clone();
     t.columns.pop();
     assert_rejected(&rep_of(&inst, &t), Identity::Shape);
+}
+
+/// Relation H-u makes u exact: u = +-190,465 = +-B_u has digits in their alphabets, while
+/// +-190,466 cannot be encoded without a digit outside its alphabet (a base-16 digit of B_ulo,
+/// caught by b16_prod, or the base-6 top digit, caught by leaf6).
+#[test]
+fn u_slack_boundaries_of_relation_h_u() {
+    use agg_witness::digits::U_STEP;
+    use agg_witness::tables::RecordValues;
+    let records = gen::records(311, 2);
+    let inst = PublicInstance::from_records(&records).unwrap();
+    let wits = common::witnesses(&inst, &records);
+    let (rho, j) = (2usize, 5usize);
+    let x = main_index(j, rho, 1);
+    let with_u = |u: i64| {
+        let mut vals: Vec<RecordValues> = wits
+            .iter()
+            .map(|w| RecordValues::from_witness(Layout::H, w))
+            .collect();
+        vals[1].u[rho][j] = u;
+        BatchTables::from_values(Layout::H, &vals).unwrap()
+    };
+    let range_ids = [Identity::B16Prod, Identity::Leaf6];
+    for u in [B_U, -B_U] {
+        let t = with_u(u);
+        assert_eq!(t.record_values(1).u[rho][j], u);
+        let rep = rep_of(&inst, &t);
+        // The value changed, so the ring identity fails, but no range identity does.
+        assert!(range_ids.iter().all(|&id| !rep.failed(id)), "{u}: {:?}", rep.counts);
+        assert!(!rep.failed(Identity::HonestBound));
+    }
+    for (u, id) in [(B_U + 1, Identity::B16Prod), (-B_U - 1, Identity::B16Prod)] {
+        let t = with_u(u);
+        assert_eq!(t.record_values(1).u[rho][j], u);
+        assert_rejected(&rep_of(&inst, &t), id);
+    }
+    // The other encodings of +-190,466: top digit out of [-3, 2] with B_ulo in [0, 2^16).
+    let map = with_u(0).map();
+    let u0 = map.u.unwrap();
+    for (u, top) in [(B_U + 1, 3i64), (-B_U - 1, -4)] {
+        let low = u + B_U - STEP_U * (top + 3);
+        assert!((0..1 << 16).contains(&low), "{low}");
+        let mut t = with_u(0);
+        let digits = U_STEP.low.decompose(low);
+        for (k, d) in digits.iter().enumerate() {
+            t.columns[u0 + k][x] = *d as i8;
+        }
+        t.columns[u0 + 4][x] = top as i8;
+        assert_eq!(t.record_values(1).u[rho][j], u);
+        let rep = rep_of(&inst, &t);
+        assert_rejected(&rep, Identity::Leaf6);
+        assert!(!rep.failed(Identity::B16Prod));
+    }
 }
 
 #[test]
@@ -320,22 +382,35 @@ fn hint_reencoding_rejects_unreachable_w1() {
 #[cfg(feature = "h-exact")]
 #[test]
 fn h_exact_mutations() {
+    // Relation H-exact (spec 4.3): bz_0..bz_3 (base 16), bz_hi, az, then u as in H-u.
     let (inst, base) = honest(Layout::HExact);
     let map = base.map();
+    assert_eq!(map.len(), 24);
+    assert_eq!(map.specs[map.z + 4].name, "bz_hi");
+    assert_eq!(map.az, Some(map.z + 5));
+    assert_eq!(map.au, None);
     let x = main_index(9, 1, 2);
     let mut t = base.clone();
     t.columns[map.az.unwrap()][x] = 2;
     assert_rejected(&rep_of(&inst, &t), Identity::BoolSlack);
-    // Flipping a valid slack bit moves z by 130,915: ring fails (and b_z may leave its range).
     let mut t = base.clone();
-    t.columns[map.au.unwrap()][x] ^= 1;
-    assert_rejected(&rep_of(&inst, &t), Identity::Ring);
-    // Base-2 top digit of b_z outside {-1, 0}: leaf2, stage 2.
+    t.columns[map.z + 4][x] = -1;
+    assert_rejected(&rep_of(&inst, &t), Identity::BoolSlack);
+    // Flipping a valid slack bit moves z by 130,915 (a_z) or 2^16 (B_zhi): ring fails.
+    for c in [map.z + 4, map.az.unwrap()] {
+        let mut t = base.clone();
+        t.columns[c][x] ^= 1;
+        assert_rejected(&rep_of(&inst, &t), Identity::Ring);
+    }
+    // A base-16 digit of B_zlo outside [-8, 7]: b16_prod, stage 1.
     let mut t = base.clone();
-    t.columns[map.z + 4][x] = 1;
+    t.columns[map.z][x] = 8;
+    assert_rejected(&rep_of(&inst, &t), Identity::B16Prod);
+    // The base-6 top digit of u outside [-3, 2]: leaf6, stage 2.
+    let mut t = base.clone();
+    t.columns[map.u.unwrap() + 4][x] = 3;
     let rep = rep_of(&inst, &t);
-    assert_rejected(&rep, Identity::Leaf2);
-    assert_eq!(rep.first_stage(), Some(Stage::Two));
+    assert_rejected(&rep, Identity::Leaf6);
 }
 
 #[cfg(feature = "fips")]

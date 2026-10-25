@@ -32,7 +32,7 @@ deviation D2).
 
 A width is a producer admission bound, not a range proof (Akita Remark 10.41): every range
 is proven by the PIOP (the lookup into `T_16` for the 16-bit columns and the carries, the
-base-4 and base-8 leaves for `Z_hi` and `U_hi`). The stored balanced lookup columns
+base-4 and base-6 leaves for `Z_hi` and `U_hi`). The stored balanced lookup columns
 (`f - 2^15`, deviation L2) make the width-16 admission interval coincide with `T_16`, so
 every value the honest producer can commit is an entry of the table; the extractor still
 yields arbitrary `F_p` values, which the lookup bounds. The multiplicity digits need no
@@ -109,16 +109,20 @@ table point.
 
 ## 4. Catalog status
 
-All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15` (`CATALOG_D_SIG`),
-are ready; none is pending. Two artifacts:
+All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for both
+relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact; rows are keyed by
+`(d_sig, relation)`, `catalogs::catalog_batches`); none is pending. Two artifacts:
 
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks` (222,320 bytes):
   25 scalar producer rows, `G_main16` at 13..=25 variables, `G_1` at 13..=19, `G_2` at
   13..=15, `G_3` at 13..=14;
-- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks` (331,178 bytes):
-  13 scalar producer rows (`G_main4` at 13..=25 variables) and 13 grouped rows, one per
-  batch size, named `mldsa-44-l16-batch-<N*>-mult-final`, each keyed by `G_m = (16, 7)` and
-  the five precommitted profiles in wire order (two families).
+- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks` (661,869 bytes;
+  331,178 before H-exact): per relation 13 scalar producer rows (`G_main4` at 13..=25
+  variables with 8 polynomials for H-u, 9 for H-exact) and 13 grouped rows, one per batch
+  size, named `mldsa-44-l16-batch-<N*>-mult-final` (H-u) and
+  `mldsa-44-l16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
+  five precommitted profiles in wire order (two families). The width-16 rows are shared:
+  H-exact changes only `G_main4` (`docs/h-exact.md` 2.2).
 
 Every width-4 group uses one balanced base-16 inner digit and every width-16 group one
 balanced base-`2^16` digit; no row needs a setup prefix (checked by
@@ -147,7 +151,23 @@ planner's estimates for the grouped row.
 | 14 | 172.8 | 64,958 | 1,802,240 | 64,958 |
 | 15 | 792.5 | 65,282 | 2,658,304 | 64,958 |
 
-Total 2,666 s (44 minutes). The estimated opening proof is at most 2.4% larger than the
+Total 2,666 s (44 minutes).
+
+H-exact rows (2026-10-25, `update_catalog_rows` with `AGG_CATALOG_RELATION=h-exact`, in a
+separate worktree with its own target directory, 3 scalar workers, `taskset -c
+0,1,3-15`, a shared machine): `d_sig` 3 to 10 in 732 s, 11 to 15 in 885 s, 1,617 s (27
+minutes) for the 26 rows, within the 20 to 35 minutes estimated in `docs/h-exact.md` 2.3.
+The planner's opening estimate of every H-exact grouped row equals the H-u row's (61,707 B
+at `d_sig` 3 to 8, 63,197, 63,273, 64,573, 64,692, 64,842, 64,958 and 65,282 B at 9 to 15);
+the setup sizes differ slightly (563,200 field elements at `d_sig` 9 to 11, 794,112,
+912,384, 1,892,352 and 2,838,528 at 12 to 15). Measured at `N = 1,024`: H-exact's Akita
+opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/cli.md` Section 4). The
+Akita grinding plans of the H-exact rows are pinned in `tests/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
+plan digests (`e9ec8b52...`). This is benign and closes the open item: Akita's
+`GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs, not
+the layout; the two rows draw identical site lists; the layout is bound separately through the
+schedule key, the row name and the instance descriptor, and all 52 width-4 catalog schedules
+hash differently. The estimated opening proof is at most 2.4% larger than the
 base-16 layout's (`d_sig` 9: +2.4%, 11: +2.1%, otherwise below 0.6%): the opening is
 dominated by the folding schedule, not by the number of committed polynomials, and the
 sixth group adds a little. The measured openings are in `ref/notes/bench-local.md`.
@@ -173,7 +193,7 @@ opens with the claims it already holds (the stage-3 terminal values and the mult
 digit claims).
 
 Test `tests/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
-alphabet (16-bit balanced values, the base-4 and base-8 digits, Booleans, multiplicity
+alphabet (16-bit balanced values, the base-4 and base-8 digits (relaxed H; H-u's base 6 lies inside), Booleans, multiplicity
 digits; padded signatures carry the digits of zero), random claims in `K` at logical points
 (both main groups at one point), both rounds, one batched opening, verification by the
 seed-only and the prover-derived verifier, and rejection of a changed claim value, a
@@ -192,10 +212,12 @@ catalog) with each precommitted producer taken from its family
 feature off, off CPU 2:
 
 ```sh
-# plan only missing rows of one or more batch sizes (keeps the others; saves after each row)
-AGG_CATALOG_D_SIG=15 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release \
-    --no-default-features --test schedule_catalog_regen -- --ignored --exact update_catalog_rows --nocapture
-# full regeneration of every row of CATALOG_D_SIG from scratch (Aerie's `regenerate`, two emit specs)
+# plan only missing rows of one or more batch sizes (keeps the others, of both relations;
+# saves after each row); AGG_CATALOG_RELATION = h-u, h-exact or all (default)
+AGG_CATALOG_D_SIG=15 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
+    -p agg-pcs-config --release --no-default-features --test schedule_catalog_regen \
+    -- --ignored --exact update_catalog_rows --nocapture
+# full regeneration of every row of catalog_batches() from scratch (Aerie's `regenerate`, two emit specs)
 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
     --test schedule_catalog_regen -- --ignored --exact regenerate --nocapture
 # drift check: re-plan the rows of the listed sizes and compare bytes with the artifacts
@@ -209,9 +231,11 @@ taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features
 ```
 
 `AKITA_SCHEDULE_GEN_JOBS` bounds the parallel scalar planners (default 3; the search
-is memory bound). To add or change a layout: edit `Group`/`CATALOG_D_SIG` in
-`src/catalogs.rs`, run `update_catalog_rows` for the new sizes (it prunes the rows of
-layouts no longer requested), then `cargo test -p agg-pcs-config` (the default-feature
+is memory bound). To add or change a layout: edit `Group`/`Relation`/`CATALOG_D_SIG`/
+`CATALOG_D_SIG_H_EXACT` in `src/catalogs.rs`, run `update_catalog_rows` for the new batches
+(it keeps every row of `catalog_batches()` and of the requested batches and prunes the
+rest, so a new batch size is requested through the environment first and added to the
+constant once its rows exist), then `cargo test -p agg-pcs-config` (the default-feature
 test `checked_in_catalog_holds_exactly_the_requested_rows` fails on any missing or extra
 row and re-encodes both artifacts byte for byte). A change of the Akita pin requires a
 full `regenerate`.

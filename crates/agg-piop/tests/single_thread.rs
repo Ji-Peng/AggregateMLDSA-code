@@ -12,6 +12,7 @@ use std::sync::mpsc;
 use std::sync::Once;
 use std::time::Duration;
 
+use agg_piop::manifest::Relation;
 use agg_piop::binding::FlockProfile;
 use agg_piop::prover::{prove, FixedMatrices, NoKeccak, ProverInputs};
 use agg_piop::verifier::{verify, NoKeccakVerifier};
@@ -54,6 +55,7 @@ fn prove_and_verify_ten(seed: u64) {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         },
         &bridge,
         &NoKeccak,
@@ -70,6 +72,7 @@ fn prove_and_verify_ten(seed: u64) {
         &bridge,
         &NoKeccakVerifier,
         FlockProfile::None,
+        Relation::Hu,
         None,
     )
     .expect("verify");

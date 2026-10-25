@@ -1,7 +1,7 @@
 //! Hypothesis H1 of `docs/soundness.md` Section 7, discharged (Section 4.6 there): every
-//! sparse fold challenge of every row of both generated catalogs (the 13 grouped width-4
-//! rows, the width-4 scalar rows of `G_main4` and the width-16 scalar rows of `G_main16`,
-//! `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support, after the sampler's
+//! sparse fold challenge of every row of both generated catalogs (the 26 grouped width-4
+//! rows of relations H-u and H-exact, the width-4 scalar rows of `G_main4` and the width-16
+//! scalar rows of `G_main16`, `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support, after the sampler's
 //! rejection, is at least `2^128`.
 //!
 //! For every level (root, recursive folds, terminal) and every group of a level, the test
@@ -498,14 +498,15 @@ fn certified_floors_and_policies() {
 fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     let w4 = AggFp64SignedWidth4::catalog().expect("width-4 catalog");
     let w16 = AggFp64SignedWidth16::catalog().expect("width-16 catalog");
-    // Width 4: 13 grouped rows and 13 scalar rows of G_main4; width 16: 13 scalar rows each
-    // of G_main16, G_1, G_2, G_3, with equal layouts sharing one row.
+    // Width 4, per relation (H-u, H-exact): 13 grouped rows and 13 scalar rows of G_main4
+    // (8 or 9 polynomials), 52 rows; width 16: 13 scalar rows each of G_main16, G_1, G_2,
+    // G_3, with equal layouts sharing one row (the same for both relations).
     let (c4, m4, g4) = audit_catalog("width4", rows_of(w4.catalog()), w4.catalog().len());
     let (c16, m16, g16) = audit_catalog("width16", rows_of(w16.catalog()), w16.catalog().len());
     assert!(m4 >= 128.0 && m16 >= 128.0);
-    // The 13 grouped rows (six root groups, one per N* = 2^3 .. 2^15) are in the width-4
-    // catalog (the family of the final group G_m).
-    assert_eq!((g4, g16), (13, 0));
+    // The 26 grouped rows (six root groups, one per N* = 2^3 .. 2^15 and relation) are in
+    // the width-4 catalog (the family of the final group G_m).
+    assert_eq!((g4, g16), (26, 0));
     // The families that occur (docs/soundness.md Section 4.6).
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
@@ -519,11 +520,12 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
 
 #[test]
 fn grouped_rows_by_batch_size() {
-    use agg_pcs_config::catalogs::CATALOG_D_SIG;
+    use agg_pcs_config::catalogs::Relation;
     use agg_pcs_config::work_plan::WorkPlan;
     // docs/soundness.md 4.6: (d_sig, draws, minimum accepted support in bits, rounded down
-    // to 4 decimals) of the grouped row of N* = 2^d_sig.
-    let expected: [(usize, usize, f64); 13] = [
+    // to 4 decimals) of the grouped row of N* = 2^d_sig, per relation. H-u's row at 2^15
+    // avoids the D = 64 packing family; every H-exact row draws it (its level 1 at 2^15).
+    let expected_h_u: [(usize, usize, f64); 13] = [
         (3, 11, 128.0881),
         (4, 11, 128.0881),
         (5, 11, 128.0881),
@@ -538,43 +540,65 @@ fn grouped_rows_by_batch_size() {
         (14, 12, 128.0881),
         (15, 12, 128.5633),
     ];
+    let expected_h_exact: [(usize, usize, f64); 13] = [
+        (3, 11, 128.0881),
+        (4, 11, 128.0881),
+        (5, 11, 128.0881),
+        (6, 11, 128.0881),
+        (7, 11, 128.0881),
+        (8, 11, 128.0881),
+        (9, 11, 128.0881),
+        (10, 11, 128.0881),
+        (11, 11, 128.0881),
+        (12, 12, 128.0881),
+        (13, 12, 128.0881),
+        (14, 12, 128.0881),
+        (15, 12, 128.0881),
+    ];
     let catalog = AggFp64SignedWidth4::catalog().expect("catalog");
-    assert_eq!(CATALOG_D_SIG.len(), expected.len());
     let (mut got, mut want) = (Vec::new(), Vec::new());
-    for (d_sig, draws, min_bits) in expected {
-        let plan = WorkPlan::for_records(1 << d_sig).expect("work plan");
-        let row = catalog
-            .resolve_key(&plan.schedule_key())
-            .expect("grouped row");
-        let (claims, schedule) = rows_of_one(row.profiles(), row.schedule());
-        let row_sites = sites(&schedule, &claims);
-        let min = row_sites
-            .iter()
-            .map(|s| s.bits)
-            .fold(f64::INFINITY, f64::min);
-        let line: Vec<String> = row_sites
-            .iter()
-            .map(|s| {
-                format!(
-                    "L{}g{}:{}{}({},{}){}",
-                    s.level,
-                    s.group,
-                    &s.method[..1],
-                    s.ring_d,
-                    s.family.count_pm1,
-                    s.family.count_pm2,
-                    if s.rejection.is_some() { "r" } else { "" }
-                )
-            })
-            .collect();
-        eprintln!(
-            "d_sig {d_sig:>2}: {} draws, min {min:.4} bits: {}",
-            row_sites.len(),
-            line.join(" ")
-        );
-        assert!(row_sites.iter().all(|s| s.at_least_128));
-        got.push((d_sig, row_sites.len(), (min * 1e4).floor() / 1e4));
-        want.push((d_sig, draws, min_bits));
+    for relation in Relation::ALL {
+        let expected = match relation {
+            Relation::Hu => expected_h_u,
+            Relation::HExact => expected_h_exact,
+        };
+        assert_eq!(relation.catalog_d_sigs().len(), expected.len());
+        for (d_sig, draws, min_bits) in expected {
+            let plan = WorkPlan::for_records(1 << d_sig, relation).expect("work plan");
+            let row = catalog
+                .resolve_key(&plan.schedule_key())
+                .expect("grouped row");
+            let (claims, schedule) = rows_of_one(row.profiles(), row.schedule());
+            let row_sites = sites(&schedule, &claims);
+            let min = row_sites
+                .iter()
+                .map(|s| s.bits)
+                .fold(f64::INFINITY, f64::min);
+            let line: Vec<String> = row_sites
+                .iter()
+                .map(|s| {
+                    format!(
+                        "L{}g{}:{}{}({},{}){}",
+                        s.level,
+                        s.group,
+                        &s.method[..1],
+                        s.ring_d,
+                        s.family.count_pm1,
+                        s.family.count_pm2,
+                        if s.rejection.is_some() { "r" } else { "" }
+                    )
+                })
+                .collect();
+            eprintln!(
+                "{} d_sig {d_sig:>2}: {} draws, min {min:.4} bits: {}",
+                relation.name(),
+                row_sites.len(),
+                line.join(" ")
+            );
+            assert!(row_sites.iter().all(|s| s.at_least_128));
+            got.push((relation, d_sig, row_sites.len(), (min * 1e4).floor() / 1e4));
+            want.push((relation, d_sig, draws, min_bits));
+        }
     }
     assert_eq!(got, want);
 }
