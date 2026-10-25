@@ -165,6 +165,13 @@ pub const ULO_DIGITS: DigitLayout = DigitLayout {
     bases: &[16, 16, 16, 16],
     signed: false,
 };
+/// Low part B_zlo of z in relation H-exact (witness-crate digits): bases 16,16,16,16,
+/// unsigned, range [0, 2^16). The PIOP looks the same value up in T_16 as one cell S_zlo.
+pub const ZLO_DIGITS: DigitLayout = DigitLayout {
+    name: "bz",
+    bases: &[16, 16, 16, 16],
+    signed: false,
+};
 /// The ring quotient v: bases 16^6, 8, signed, range [-2^26, 2^26 - 1].
 pub const V_DIGITS: DigitLayout = DigitLayout {
     name: "v",
@@ -183,13 +190,15 @@ pub const KAPPA3_DIGITS: DigitLayout = DigitLayout {
     bases: &[16, 16],
     signed: false,
 };
-/// H-exact: b_z in [0, 2^17): bases 16,16,16,16,2, unsigned (C = 100,488).
+/// Retired H-exact sketch (now S1+S2 only): b_z in [0, 2^17): bases 16,16,16,16,2, unsigned
+/// (C = 100,488).
 pub const BZ_DIGITS: DigitLayout = DigitLayout {
     name: "bz",
     bases: &[16, 16, 16, 16, 2],
     signed: false,
 };
-/// H-exact: b_u in [0, 2^18): bases 16,16,16,16,4, unsigned (C = 166,024).
+/// Retired H-exact sketch (non-normative, kept only for its enumeration test): b_u in
+/// [0, 2^18): bases 16,16,16,16,4, unsigned (C = 166,024).
 pub const BU_DIGITS: DigitLayout = DigitLayout {
     name: "bu",
     bases: &[16, 16, 16, 16, 4],
@@ -572,6 +581,15 @@ pub const Z_BIT_SLACK: BitSlackLayout = BitSlackLayout {
     offset: B_Z,
 };
 
+/// z in relation H-exact with witness-crate digits (`tables::Layout::HExact`): the bit-slack
+/// form of `Z_BIT_SLACK` with B_zlo given by four unsigned base-16 digits (`ZLO_DIGITS`):
+/// z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z, exact range [-B_z, B_z].
+pub const Z_BIT_SLACK16: BitSlackLayout = BitSlackLayout {
+    low: ZLO_DIGITS,
+    slack_weight: SLACK_Z,
+    offset: B_Z,
+};
+
 /// u in relation H-u: u = B_ulo + 63,079 H_u - 190,465 with B_ulo in [0, 2^16) (four base-16
 /// digits) and H_u in [0, 6) (one base-6 digit), exact range [-B_u, B_u] since
 /// 5 * 63,079 + 2^16 = 2 B_u + 1.
@@ -879,6 +897,24 @@ mod tests {
             }
         }
         assert!(hit.iter().all(|&h| h));
+    }
+
+    #[test]
+    fn z_bit_slack16_matches_the_lookup_form() {
+        // The witness-crate H-exact form (four base-16 digits for B_zlo) has the same values
+        // as the PIOP's Z_BIT_SLACK (one 16-bit cell), on every z in range.
+        assert_eq!(Z_BIT_SLACK16.constant(), -96_041);
+        assert_eq!(Z_BIT_SLACK16.range(), (-B_Z, B_Z));
+        for z in -B_Z..=B_Z {
+            let d = Z_BIT_SLACK16.decompose(z);
+            assert!(Z_BIT_SLACK16.in_alphabets(&d), "z = {z}");
+            assert_eq!(Z_BIT_SLACK16.compose(&d), z);
+            let e = Z_BIT_SLACK.decompose(z);
+            assert_eq!((d[4], d[5]), (e[1], e[2]), "z = {z}");
+        }
+        for z in [B_Z + 1, -B_Z - 1] {
+            assert!(!Z_BIT_SLACK16.in_alphabets(&Z_BIT_SLACK16.decompose(z)));
+        }
     }
 
     #[test]

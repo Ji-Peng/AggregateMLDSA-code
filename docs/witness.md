@@ -58,8 +58,8 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | | u in [-190,465, 190,465] exactly | u = B_ulo + 63,079 H_u - 190,465, B_ulo digits 16,16,16,16 unsigned, H_u - 3 base 6 | `b16_prod`, `leaf6` |
 | | v in [-2^26, 2^26 - 1] | digits 16^6,8 signed | `b16_prod`, `leaf8` |
 | | b_t in {0, 1}; w1' in [0, 44) | (7.4) b5 (b4 + b3 b2) = 0 | `bool_b`, `range_w1` |
-| H-exact tables | z in [-130,993, 130,993] exactly | z = 130,915 a_z + b_z - 130,993, b_z digits 16,16,16,16,2 unsigned | `bool_slack`, digits |
-| | u in [-190,465, 190,465] exactly | u = 118,787 a_u + b_u - 190,465, b_u digits 16,16,16,16,4 unsigned | same |
+| H-exact tables (spec 4.3) | z in [-130,993, 130,993] exactly | z = B_zlo + 65,536 B_zhi + 130,915 a_z - 130,993, B_zlo digits 16,16,16,16 unsigned (the PIOP looks B_zlo up as one cell S_zlo), B_zhi, a_z in {0, 1} | `b16_prod`, `bool_slack` |
+| | u in [-190,465, 190,465] exactly | as H-u (step form `U_STEP`) | `b16_prod`, `leaf6` |
 | S1+S2 tables | z exact as H-exact; r1 in [0, 43] | r1 = 4 A + B + 24, A in [-4, 3], B in [-8, 7] | digits |
 | | v_r in [0, gamma2 - 1] = [0, 95,231] | v_r = 29,696 a_v + b_v, b_v digits 16^4 unsigned | digits |
 | | s in {-1, 1}; g in {-1, 0, 1}; e in {0, 1} | s^2 = 1; g (g-1)(g+1) = 0; e^2 = e | layout identities |
@@ -74,7 +74,10 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 Proven ranges and digit constants (checked by enumeration in `digits` tests, as
 `spec_checks.py` item 8): C_z = C_ulo = 34,952, C_u = 33,724 (H-u step form: u = sum W_k u_k +
 63,079 u_4 + 33,724), C_v = 8,947,848, C_kappa12 = 648, C_kappa3 = 136, C_bz = 100,488,
-C_bu = 166,024. Q_b(Z (Z + 1)) vanishes exactly on the balanced alphabet for b in
+C_bu = 166,024 (C_bz, C_bu belong to the retired slack sketch; `BZ_DIGITS` survives only in
+S1+S2). H-exact's z form (`Z_BIT_SLACK16`) has constant C_bzlo - B_z = 34,952 - 130,993 = -96,041
+and range exactly [-B_z, B_z] (test `z_bit_slack16_matches_the_lookup_form`).
+Q_b(Z (Z + 1)) vanishes exactly on the balanced alphabet for b in
 {2, 4, 6, 8, 16} (Q_2(P) = P, Q_6(P) = P (P - 2)(P - 6)). The H-u step form covers exactly
 [-190,465, 190,465] because 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
 `u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits).
@@ -87,7 +90,7 @@ main-domain columns by rho. Columns are `i8`. Base-k digit alphabets are [-k/2, 
 | Layout | Columns in table order | Count |
 | --- | --- | ---: |
 | H-u (default, `Layout::H`) | z_0..z_4 (16,16,16,16,4), u_0..u_3 (16^4, B_ulo), u_4 (6, H_u - 3), v_0..v_6 (16^6, 8), b_0..b_5 | 23 |
-| H-exact (`h-exact`) | bz_0..bz_4 (16,16,16,16,2), az, bu_0..bu_4 (16,16,16,16,4), au, v_0..v_6, b_0..b_5 | 25 |
+| H-exact (`h-exact`, `Layout::HExact`) | bz_0..bz_3 (16^4, B_zlo), bz_hi (bit), az (bit), u_0..u_3 (16^4, B_ulo), u_4 (6, H_u - 3), v_0..v_6, b_0..b_5 | 24 |
 | S1+S2 (`fips`) | bz_0..bz_4, az, r1_a (8), r1_b (16), bvr_0..bvr_3 (16^4), avr, s, g, e, v_0..v_6, b_0..b_5; signature domain: bh_0, bh_1 (8, 8), ah | 29 + 3 |
 
 Canonical decompositions: (4.1) digits are the mixed-radix digits of X + eps B/2 shifted by

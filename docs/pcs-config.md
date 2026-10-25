@@ -162,7 +162,12 @@ at `d_sig` 3 to 8, 63,197, 63,273, 64,573, 64,692, 64,842, 64,958 and 65,282 B a
 the setup sizes differ slightly (563,200 field elements at `d_sig` 9 to 11, 794,112,
 912,384, 1,892,352 and 2,838,528 at 12 to 15). Measured at `N = 1,024`: H-exact's Akita
 opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/cli.md` Section 4). The
-Akita grinding plans of the H-exact rows are pinned in `tests/akita_grinding.rs`. The estimated opening proof is at most 2.4% larger than the
+Akita grinding plans of the H-exact rows are pinned in `tests/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
+plan digests (`e9ec8b52...`). This is benign and closes the open item: Akita's
+`GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs, not
+the layout; the two rows draw identical site lists; the layout is bound separately through the
+schedule key, the row name and the instance descriptor, and all 52 width-4 catalog schedules
+hash differently. The estimated opening proof is at most 2.4% larger than the
 base-16 layout's (`d_sig` 9: +2.4%, 11: +2.1%, otherwise below 0.6%): the opening is
 dominated by the folding schedule, not by the number of committed polynomials, and the
 sixth group adds a little. The measured openings are in `ref/notes/bench-local.md`.

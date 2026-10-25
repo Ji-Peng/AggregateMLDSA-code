@@ -175,8 +175,13 @@ const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
     (459, 1_135, 12, 8_336, 4_432),
 ];
 
-/// The plan digests of the 13 H-exact grouped rows at Akita `e023b6a` (the rows of
-/// `d_sig` 3 and 4 have equal plans).
+/// The plan digests of the 13 H-exact grouped rows at Akita `e023b6a`. The rows of `d_sig` 3
+/// and 4 have equal plan digests, which is benign: Akita's `GrindingPlan::canonical_bytes`
+/// covers only the policy, the challenge order and the runs (site, target), not the layout,
+/// and those two rows draw identical site lists (same fold families and targets; the
+/// adapted fold-support run of the pow-close review shows identical draw lists). The layout
+/// (13 against 14 variables) is bound separately through the schedule key, the row name and
+/// Akita's instance descriptor, and all 52 width-4 catalog schedules hash differently.
 const PINNED_H_EXACT: &[&str] = &[
     "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
     "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",

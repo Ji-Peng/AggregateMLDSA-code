@@ -57,8 +57,8 @@ Spec: "for i >= N every value is zero", with the digits of zero at -b_k/2.
 
 Code: padded rows hold the canonical encoding of the all-zero witness (z = 0, w' = 0, h = 0).
 For H this is exactly the spec (all values zero, digits -b_k/2, top signed digit 0). For
-H-exact, z = 0 and u = 0 are encoded through the slack forms (a_z = 0, b_z = 130,993;
-a_u = 0, b_u = 190,465). For S1+S2, Decompose(0) = (0, 0) gives s = -1 (r0 <= 0) and the
+H-exact, z = 0 is encoded through the bit-slack form (a_z = 0, B_zhi = 1, B_zlo = 65,457;
+spec 4.3) and u = 0 as in H-u (B_ulo = 1,228, H_u = 3). For S1+S2, Decompose(0) = (0, 0) gives s = -1 (r0 <= 0) and the
 hint slack is u_h = omega = 80 (a_h = 1, b_h = 63). Why: s in {-1, 1} and
 sum g^2 + u_h = omega then hold on every row, so no live selector is needed.
 
@@ -66,8 +66,8 @@ sum g^2 + u_h = omega then hold on every row, so no live selector is needed.
 
 Fixed in `agg-witness` and documented in `docs/witness.md`: level-3 in-block index
 zeta_3 = t + 6 rho_2 (least significant first); G_2 column order y2_0..y2_5 then
-kappa2_{t,k} t-major; G_1 kappa1_{t,k} t-major; H-exact order (b_z digits, a_z, b_u
-digits, a_u, v, b); S1+S2 order as in W1; r1 = 4 A + B + 24 with A base 8 first;
+kappa2_{t,k} t-major; G_1 kappa1_{t,k} t-major; H-exact order (B_zlo digits, B_zhi, a_z,
+the u digits of H-u, v, b); S1+S2 order as in W1; r1 = 4 A + B + 24 with A base 8 first;
 slack choice a = [x + offset >= 2^j]. The S1+S2 identities have no stage in the spec; the
 checker reports them under "layout".
 
