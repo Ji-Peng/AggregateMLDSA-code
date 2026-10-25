@@ -1,6 +1,7 @@
 //! Digit decompositions in balanced alphabets (spec Section 4.3, (4.1)) and the slack forms of
-//! the feature-flagged layouts (spec Appendix A), the step form of `u` in relation H-u, and the
-//! leaf predicates Q_4, Q_6, Q_8, Q_16.
+//! the feature-flagged layouts (spec Appendix A), the step form of `u` in relations H-u and
+//! H-exact, the bit-slack form of `z` in relation H-exact, and the leaf predicates Q_4, Q_6,
+//! Q_8, Q_16.
 //!
 //! A digit of base b lies in the balanced alphabet [-b/2, b/2 - 1]. A value with digits
 //! Z_0..Z_{m-1} (least significant first) is X = sum_k W_k Z_k + C_X (4.1). Decomposition is the
@@ -8,7 +9,7 @@
 //! proven range the top digit absorbs the excess and leaves its alphabet, which is exactly what
 //! the leaf checks of Section 7 detect.
 
-use crate::params::{B_U, STEP_U, U_TOP_BASE};
+use crate::params::{B_U, B_Z, SLACK_Z, STEP_U, U_TOP_BASE};
 
 /// Alphabet of a committed column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -351,15 +352,106 @@ impl StepLayout {
     }
 }
 
-/// A value committed through digits: a mixed-radix layout (4.1) or a step form. The PIOP
-/// (`agg_piop::manifest::DigitValue::layout`) uses it to treat both alike: the value is
-/// always `sum W_k Z_k + C_X` over the committed digits.
+/// Bit-slack form X = b + 2^j B_hi + w a - offset with b in [0, 2^j) given by unsigned
+/// digits and two Boolean digits B_hi, a (relation H-exact, `docs/h-exact.md` 2.1). With
+/// w <= 2^(j+1) the four blocks [0, 2^j), [2^j, 2^(j+1)), [w, w + 2^j), [w + 2^j, w + 2^(j+1))
+/// cover [0, w + 2^(j+1) - 1] without gap. Committed digits: the low digits of b, then B_hi,
+/// then a, both stored as bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BitSlackLayout {
+    /// Digits of b (unsigned, range [0, 2^j)).
+    pub low: DigitLayout,
+    /// Weight of the Boolean slack a.
+    pub slack_weight: i64,
+    /// Offset subtracted at the end.
+    pub offset: i64,
+}
+
+impl BitSlackLayout {
+    /// Number of committed digits (the low digits, B_hi and a).
+    pub const fn len(&self) -> usize {
+        self.low.len() + 2
+    }
+
+    /// Always false.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The exact range [-offset, w + 2^(j+1) - 1 - offset].
+    pub fn range(&self) -> (i64, i64) {
+        (
+            -self.offset,
+            self.slack_weight + 2 * self.low.product() - 1 - self.offset,
+        )
+    }
+
+    /// Alphabet of committed digit k (low digits first, then the two bits).
+    pub fn alphabet(&self, k: usize) -> Alphabet {
+        if k < self.low.len() {
+            self.low.alphabet(k)
+        } else {
+            Alphabet::Bool
+        }
+    }
+
+    /// Weights of the committed digits in X = sum W_k Z_k + C_X.
+    pub fn weights(&self) -> Vec<i64> {
+        let mut w = self.low.weights();
+        w.push(self.low.product());
+        w.push(self.slack_weight);
+        w
+    }
+
+    /// C_X = C_b - offset.
+    pub fn constant(&self) -> i64 {
+        self.low.constant() - self.offset
+    }
+
+    /// Canonical digits: a = [y >= 2^(j+1)], then B_hi = [y - w a >= 2^j] and b the rest, with
+    /// y = x + offset (`docs/h-exact.md` 2.1). Outside the range the top digit of b leaves its
+    /// alphabet and composition still inverts.
+    pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let y = x + self.offset;
+        let lo = self.low.product();
+        let a = i64::from(y >= 2 * lo);
+        let rest = y - self.slack_weight * a;
+        let hi = rest.div_euclid(lo).clamp(0, 1);
+        let mut out = self.low.decompose(rest - lo * hi);
+        out.push(hi);
+        out.push(a);
+        out
+    }
+
+    /// X = sum W_k Z_k + C_X for any digit values.
+    pub fn compose(&self, digits: &[i64]) -> i64 {
+        assert_eq!(digits.len(), self.len());
+        let m = self.low.len();
+        self.low.compose(&digits[..m]) + self.low.product() * digits[m]
+            + self.slack_weight * digits[m + 1]
+            - self.offset
+    }
+
+    /// True when every digit lies in its alphabet.
+    pub fn in_alphabets(&self, digits: &[i64]) -> bool {
+        digits
+            .iter()
+            .enumerate()
+            .all(|(k, &d)| self.alphabet(k).contains(d))
+    }
+}
+
+/// A value committed through digits: a mixed-radix layout (4.1), a step form or a bit-slack
+/// form. The PIOP (`agg_piop::manifest::DigitValue::layout`) uses it to treat all alike: the
+/// value is always `sum W_k Z_k + C_X` over the committed digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueForm {
     /// Mixed-radix digits (4.1).
     Radix(DigitLayout),
     /// Low digits plus one stepped top digit.
     Step(StepLayout),
+    /// Low digits plus two Boolean digits.
+    BitSlack(BitSlackLayout),
 }
 
 impl ValueForm {
@@ -368,6 +460,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.len(),
             Self::Step(l) => l.len(),
+            Self::BitSlack(l) => l.len(),
         }
     }
 
@@ -376,18 +469,21 @@ impl ValueForm {
         false
     }
 
-    /// Base of committed digit k (its balanced alphabet is [-b/2, b/2 - 1]).
-    pub fn base(&self, k: usize) -> u32 {
+    /// Base of committed digit k (its balanced alphabet is [-b/2, b/2 - 1]); `None` for a
+    /// Boolean digit of a bit-slack form.
+    pub fn base(&self, k: usize) -> Option<u32> {
         match self {
-            Self::Radix(l) => l.bases[k],
-            Self::Step(l) if k < l.low.len() => l.low.bases[k],
-            Self::Step(l) => l.top_base,
+            Self::Radix(l) => Some(l.bases[k]),
+            Self::Step(l) if k < l.low.len() => Some(l.low.bases[k]),
+            Self::Step(l) => Some(l.top_base),
+            Self::BitSlack(l) if k < l.low.len() => Some(l.low.bases[k]),
+            Self::BitSlack(_) => None,
         }
     }
 
     /// Alphabet of committed digit k.
     pub fn alphabet(&self, k: usize) -> Alphabet {
-        Alphabet::Balanced(self.base(k))
+        self.base(k).map_or(Alphabet::Bool, Alphabet::Balanced)
     }
 
     /// Weights W_k.
@@ -395,6 +491,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.weights(),
             Self::Step(l) => l.weights(),
+            Self::BitSlack(l) => l.weights(),
         }
     }
 
@@ -403,6 +500,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.constant(),
             Self::Step(l) => l.constant(),
+            Self::BitSlack(l) => l.constant(),
         }
     }
 
@@ -411,6 +509,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.range(),
             Self::Step(l) => l.range(),
+            Self::BitSlack(l) => l.range(),
         }
     }
 
@@ -419,6 +518,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.decompose(x),
             Self::Step(l) => l.decompose(x),
+            Self::BitSlack(l) => l.decompose(x),
         }
     }
 
@@ -427,6 +527,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.compose(digits),
             Self::Step(l) => l.compose(digits),
+            Self::BitSlack(l) => l.compose(digits),
         }
     }
 
@@ -435,6 +536,7 @@ impl ValueForm {
         match self {
             Self::Radix(l) => l.in_alphabets(digits),
             Self::Step(l) => l.in_alphabets(digits),
+            Self::BitSlack(l) => l.in_alphabets(digits),
         }
     }
 }
@@ -450,6 +552,25 @@ impl From<StepLayout> for ValueForm {
         Self::Step(l)
     }
 }
+
+impl From<BitSlackLayout> for ValueForm {
+    fn from(l: BitSlackLayout) -> Self {
+        Self::BitSlack(l)
+    }
+}
+
+/// z in relation H-exact with a 16-bit low part: z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z
+/// with B_zlo in [0, 2^16) (one unsigned base-2^16 digit, stored B_zlo - 2^15), B_zhi, a_z in
+/// {0, 1}; exact range [-B_z, B_z] since 130,915 + 2^17 = 2 B_z + 1 (`docs/h-exact.md` 2.1).
+pub const Z_BIT_SLACK: BitSlackLayout = BitSlackLayout {
+    low: DigitLayout {
+        name: "bz",
+        bases: &[1 << 16],
+        signed: false,
+    },
+    slack_weight: SLACK_Z,
+    offset: B_Z,
+};
 
 /// u in relation H-u: u = B_ulo + 63,079 H_u - 190,465 with B_ulo in [0, 2^16) (four base-16
 /// digits) and H_u in [0, 6) (one base-6 digit), exact range [-B_u, B_u] since
@@ -711,6 +832,53 @@ mod tests {
         assert!(hit.iter().all(|&h| h));
         // Zero: H_u = 3 (stored 0), B_ulo = 1,228 (digits 4, 4, -4, -8).
         assert_eq!(U_STEP.decompose(0), vec![4, 4, -4, -8, 0]);
+    }
+
+    #[test]
+    fn z_bit_slack_form_is_exact_at_the_fips_bound() {
+        // docs/h-exact.md 2.1: z = S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225.
+        let form = ValueForm::from(Z_BIT_SLACK);
+        assert_eq!(form.len(), 3);
+        assert_eq!(form.weights(), vec![1, 1 << 16, SLACK_Z]);
+        assert_eq!(form.constant(), -98_225);
+        assert_eq!(form.range(), (-B_Z, B_Z));
+        assert_eq!(
+            (0..3).map(|k| form.alphabet(k)).collect::<Vec<_>>(),
+            [Alphabet::Balanced(1 << 16), Alphabet::Bool, Alphabet::Bool]
+        );
+        assert_eq!((form.base(0), form.base(1), form.base(2)), (Some(1 << 16), None, None));
+        // Exhaustive: every z in range has canonical digits in their alphabets and recomposes.
+        for z in -B_Z..=B_Z {
+            let d = form.decompose(z);
+            assert!(form.in_alphabets(&d), "z = {z}: {d:?}");
+            assert_eq!(form.compose(&d), z);
+            // a_z = [z >= 79] (the rule a = [x + offset >= 2^j]).
+            assert_eq!(d[2], i64::from(z >= 79), "z = {z}");
+        }
+        // Edges and padding of docs/h-exact.md 2.1, as (S_zlo, B_zhi, a_z).
+        assert_eq!(form.decompose(B_Z), vec![32_767, 1, 1]);
+        assert_eq!(form.decompose(-B_Z), vec![-32_768, 0, 0]);
+        assert_eq!(form.decompose(0), vec![32_689, 1, 0]);
+        // +-130,994 have no in-alphabet canonical digits; 130,994 lands on S_zlo = 2^15.
+        assert_eq!(form.decompose(B_Z + 1), vec![32_768, 1, 1]);
+        assert_eq!(form.decompose(-B_Z - 1), vec![-32_769, 0, 0]);
+        for z in [B_Z + 1, -B_Z - 1, 131_000, 1 << 17, -(1 << 17)] {
+            let d = form.decompose(z);
+            assert!(!form.in_alphabets(&d), "z = {z}");
+            assert_eq!(form.compose(&d), z);
+        }
+        // Reachable set of all in-alphabet digit tuples: exactly [-B_z, B_z].
+        let mut hit = vec![false; (2 * B_Z + 1) as usize];
+        for a in 0..2 {
+            for hi in 0..2 {
+                for s in -(1i64 << 15)..(1 << 15) {
+                    let z = form.compose(&[s, hi, a]);
+                    assert!((-B_Z..=B_Z).contains(&z), "{s} {hi} {a}");
+                    hit[(z + B_Z) as usize] = true;
+                }
+            }
+        }
+        assert!(hit.iter().all(|&h| h));
     }
 
     #[test]

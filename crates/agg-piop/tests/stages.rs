@@ -8,7 +8,7 @@ mod common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::LookupError;
-use agg_piop::manifest::{stack_columns, Column, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{Column, GroupRole, LOOKUP_SHIFT};
 use agg_piop::prover::PiopProof;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
 use agg_piop::stage::{suffix, StageError};
@@ -116,7 +116,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
     // The stack reductions: sum_c w_c f_c(pi_low) at the low points of the stacks.
     for (j, low) in points.lookup.iter().enumerate() {
         assert_eq!(low.len(), shape.stacks[j].vars);
-        let columns = stack_columns(j);
+        let columns = manifest.stack_columns(j);
         assert!(columns.iter().all(|c| tables.column(*c).len() == 1 << low.len()));
     }
     // Stage 1 terminal: y^(1) (virtual), y^(2), b at r^(1); stage 2: b and P_Z at r^(2).
@@ -133,7 +133,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
         assert_eq!(proof.stage1.claims.b[t], bit.evaluate(&points.r1));
         assert_eq!(proof.stage2.claims.b[t], bit.evaluate(&points.r2));
     }
-    for (k, column) in [Column::Z_HI, Column::U_HI].into_iter().enumerate() {
+    for (k, column) in manifest.leaf_digits().into_iter().enumerate() {
         let square: Vec<i64> = tables.column(column).to_i64().iter().map(|&z| z * (z + 1)).collect();
         assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &points.r2));
     }

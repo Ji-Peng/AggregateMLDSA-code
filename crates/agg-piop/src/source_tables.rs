@@ -11,7 +11,11 @@
 //!   `Z_hi = z_hi - 2` and likewise (spec (4.1) with the L16 bases), and relation H-u's
 //!   `u + 190,465 = B_ulo + 63,079 H_u` (`H_u = min(floor((u + 190,465) / 63,079), 5)`) stored
 //!   as `U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`. Padded rows carry the digits of zero
-//!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0).
+//!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0). Under relation H-exact `z` is
+//!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`, `docs/h-exact.md`
+//!   2.1) stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
+//!   `Z_hi`) and the bit `a_z` (the ninth `G_main4` column); the digits of zero are
+//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`.
 //! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
 //!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
@@ -21,7 +25,8 @@
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
-//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`).
+//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, the
+//! zero-checks of `bz_hi`, `a_z`).
 
 use agg_bridge::{parity, Shape};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
@@ -35,7 +40,7 @@ use rayon::prelude::*;
 use crate::kernel::{Lane, Source};
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
-    stack_columns, Column, CommitmentManifest, DigitValue, GroupDescriptor, GroupRole,
+    value_columns, Column, CommitmentManifest, DigitValue, GroupDescriptor, GroupRole,
     LOOKUP_SHIFT, STACK_DOMAINS,
 };
 use agg_witness::digits::ValueForm;
@@ -253,46 +258,91 @@ impl RecordValues {
     }
 }
 
-/// One record's encoded cells: `4 * 1024` wide cells (`Z_lo, U_lo, V_lo, V_hi`) and
-/// `8 * 1024` narrow cells (`Z_hi, U_hi, b_0..b_5`).
+/// One record's encoded cells: `4 * 1024` wide cells (`G_main16`) and `8 * 1024` (H-u) or
+/// `9 * 1024` (H-exact) narrow cells (`G_main4`), each column at `c * 1024`.
 struct RecordBlock {
     wide: Vec<i32>,
     narrow: Vec<i8>,
 }
 
-fn split_into(value: i64, layout: ValueForm, what: &'static str) -> Result<[i64; 2], SourceTableError> {
-    let digits = layout.decompose(value);
-    if !layout.in_alphabets(&digits) {
-        return Err(SourceTableError::Encode(what));
-    }
-    Ok([digits[0], digits[1]])
+/// Where a committed column of a main group lives in a [`RecordBlock`].
+#[derive(Clone, Copy, Debug)]
+enum Slot {
+    Wide(usize),
+    Narrow(usize),
 }
 
-fn encode_record(values: &RecordValues) -> Result<RecordBlock, SourceTableError> {
-    let mut wide = vec![0_i32; 4 * POSITIONS];
-    let mut narrow = vec![0_i8; 8 * POSITIONS];
-    for row in 0..K {
-        for j in 0..N {
-            let pos = j + N * row;
-            // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
-            let [z_lo, z_hi] = split_into(values.z[row][j], DigitValue::Z.layout(), "z outside [-2^17, 2^17)")?;
-            let [u_lo, u_hi] = split_into(values.u[row][j], DigitValue::U.layout(), "u outside [-190,465, 190,465]")?;
-            let [v_lo, v_hi] = split_into(values.v[row][j], DigitValue::V.layout(), "v outside [-2^31, 2^31)")?;
-            for (c, value) in [z_lo, u_lo, v_lo, v_hi].into_iter().enumerate() {
-                wide[c * POSITIONS + pos] = i32::try_from(value).expect("16-bit digit");
-            }
-            narrow[pos] = i8::try_from(z_hi).expect("base-4 digit");
-            narrow[POSITIONS + pos] = i8::try_from(u_hi).expect("base-6 digit");
-            let w1 = values.w1[row][j];
-            if w1 >= 64 {
-                return Err(SourceTableError::Encode("w1' above six bits"));
-            }
-            for t in 0..W1_BITS {
-                narrow[(2 + t) * POSITIONS + pos] = ((w1 >> t) & 1) as i8;
-            }
+/// The relation's encoder: the value forms of `z, u, v` with the slot of each digit, and the
+/// slots of the bits (resolved once per batch from the manifest).
+struct Encoder {
+    values: [(ValueForm, Vec<Slot>, &'static str); 3],
+    bits: [usize; W1_BITS],
+    narrow: usize,
+}
+
+impl Encoder {
+    fn new(manifest: &CommitmentManifest) -> Self {
+        let slot = |column: Column| match manifest.locate(column) {
+            (GroupRole::Main16, position) => Slot::Wide(position),
+            (GroupRole::Main, position) => Slot::Narrow(position),
+            (role, _) => panic!("{} is in {role:?}, not a main group", column.name()),
+        };
+        let value = |value: DigitValue, what: &'static str| {
+            (value.layout(), value_columns(value).into_iter().map(slot).collect(), what)
+        };
+        let z_range = match manifest.z_value() {
+            DigitValue::Zx => "z outside [-130,993, 130,993]",
+            _ => "z outside [-2^17, 2^17)",
+        };
+        Self {
+            values: [
+                value(manifest.z_value(), z_range),
+                value(DigitValue::U, "u outside [-190,465, 190,465]"),
+                value(DigitValue::V, "v outside [-2^31, 2^31)"),
+            ],
+            bits: std::array::from_fn(|t| match slot(Column::W1Bit(t as u8)) {
+                Slot::Narrow(position) => position,
+                Slot::Wide(_) => unreachable!("bits are narrow"),
+            }),
+            narrow: manifest.group(GroupRole::Main).polynomial_count(),
         }
     }
-    Ok(RecordBlock { wide, narrow })
+
+    fn encode(&self, values: &RecordValues) -> Result<RecordBlock, SourceTableError> {
+        let mut wide = vec![0_i32; 4 * POSITIONS];
+        let mut narrow = vec![0_i8; self.narrow * POSITIONS];
+        for row in 0..K {
+            for j in 0..N {
+                let pos = j + N * row;
+                // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
+                let inputs = [values.z[row][j], values.u[row][j], values.v[row][j]];
+                for ((form, slots, what), x) in self.values.iter().zip(inputs) {
+                    let digits = form.decompose(x);
+                    if !form.in_alphabets(&digits) {
+                        return Err(SourceTableError::Encode(what));
+                    }
+                    for (&slot, digit) in slots.iter().zip(digits) {
+                        match slot {
+                            Slot::Wide(c) => {
+                                wide[c * POSITIONS + pos] = i32::try_from(digit).expect("16-bit digit");
+                            }
+                            Slot::Narrow(c) => {
+                                narrow[c * POSITIONS + pos] = i8::try_from(digit).expect("small digit");
+                            }
+                        }
+                    }
+                }
+                let w1 = values.w1[row][j];
+                if w1 >= 64 {
+                    return Err(SourceTableError::Encode("w1' above six bits"));
+                }
+                for (t, &c) in self.bits.iter().enumerate() {
+                    narrow[c * POSITIONS + pos] = ((w1 >> t) & 1) as i8;
+                }
+            }
+        }
+        Ok(RecordBlock { wide, narrow })
+    }
 }
 
 /// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns).
@@ -307,14 +357,19 @@ impl MainTables {
     /// Encodes the record values (live records in order; padded rows get the zero
     /// witness) and checks the tables against the manifest.
     pub fn from_values(manifest: &CommitmentManifest, values: &[RecordValues]) -> Result<Self, SourceTableError> {
+        let encoder = Encoder::new(manifest);
         let blocks = values
             .par_iter()
-            .map(encode_record)
+            .map(|record| encoder.encode(record))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::from_blocks(manifest, &blocks)
+        Self::from_blocks(manifest, &encoder, &blocks)
     }
 
-    fn from_blocks(manifest: &CommitmentManifest, blocks: &[RecordBlock]) -> Result<Self, SourceTableError> {
+    fn from_blocks(
+        manifest: &CommitmentManifest,
+        encoder: &Encoder,
+        blocks: &[RecordBlock],
+    ) -> Result<Self, SourceTableError> {
         let geom = Geometry::new(blocks.len()).map_err(SourceTableError::Geometry)?;
         if geom.n != manifest.records() || geom.n_star != manifest.padded_records() {
             return Err(SourceTableError::Records {
@@ -322,7 +377,7 @@ impl MainTables {
                 actual: geom.n,
             });
         }
-        let zero = encode_record(&RecordValues::zero()).expect("zero record encodes");
+        let zero = encoder.encode(&RecordValues::zero()).expect("zero record encodes");
         let cells = geom.main_len();
         let mut wide = vec![0_i32; 4 * cells];
         wide.par_chunks_mut(POSITIONS).enumerate().for_each(|(chunk, out)| {
@@ -330,7 +385,7 @@ impl MainTables {
             let block = blocks.get(i).unwrap_or(&zero);
             out.copy_from_slice(&block.wide[c * POSITIONS..(c + 1) * POSITIONS]);
         });
-        let narrow: Vec<Vec<i8>> = (0..8)
+        let narrow: Vec<Vec<i8>> = (0..encoder.narrow)
             .into_par_iter()
             .map(|c| {
                 let mut column = vec![0_i8; cells];
@@ -359,6 +414,7 @@ impl MainTables {
                 actual: signatures.len(),
             });
         }
+        let encoder = Encoder::new(manifest);
         let blocks = instance
             .records
             .par_iter()
@@ -368,7 +424,7 @@ impl MainTables {
                 // The instance computed T for this c~ already.
                 let witness = derive_with_t(&record.key, &record.mu, signature, &record.c_tilde, &record.t)
                     .map_err(|e| SourceTableError::Derive(i, e))?;
-                encode_record(&RecordValues {
+                encoder.encode(&RecordValues {
                     z: witness.z,
                     u: witness.u,
                     v: witness.v,
@@ -376,7 +432,7 @@ impl MainTables {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::from_blocks(manifest, &blocks)
+        Self::from_blocks(manifest, &encoder, &blocks)
     }
 
     /// The shape and alphabet self-check of both groups.
@@ -392,7 +448,8 @@ impl MainTables {
         self.geom
     }
 
-    /// The stacked `G_main16` lane `Z_lo | U_lo | V_lo | V_hi` (`4 * 2^d_main` cells).
+    /// The stacked `G_main16` lane `Z_lo | U_lo | V_lo | V_hi` (`bz_lo` for `Z_lo` under
+    /// H-exact; `4 * 2^d_main` cells).
     #[must_use]
     pub fn wide(&self) -> &[i32] {
         &self.wide
@@ -407,7 +464,8 @@ impl MainTables {
             .collect()
     }
 
-    /// The eight `G_main4` polynomials in manifest order (`2^d_main` cells each).
+    /// The eight (H-u) or nine (H-exact) `G_main4` polynomials in manifest order (`2^d_main`
+    /// cells each).
     #[must_use]
     pub fn columns(&self) -> &[Vec<i8>] {
         &self.narrow
@@ -433,12 +491,18 @@ impl MainTables {
         std::array::from_fn(|t| self.column(manifest, Column::W1Bit(t as u8)).narrow())
     }
 
-    /// The values `z, u, v` of one record recomposed by (4.1) (any cell values).
+    /// The values `z, u, v` of one record recomposed by the relation's value forms (any cell
+    /// values).
     #[must_use]
     pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
-        let at = |column: Column, pos: usize| self.column(manifest, column).value(i * POSITIONS + pos);
-        let compose = |value: DigitValue, lo: Column, hi: Column, pos: usize| {
-            value.layout().compose(&[at(lo, pos), at(hi, pos)])
+        let columns = |value: DigitValue| -> Vec<Cells<'_>> {
+            value_columns(value).into_iter().map(|c| self.column(manifest, c)).collect()
+        };
+        let forms = [manifest.z_value(), DigitValue::U, DigitValue::V].map(|value| (value.layout(), columns(value)));
+        let compose = |k: usize, pos: usize| {
+            let (form, cells) = &forms[k];
+            let digits: Vec<i64> = cells.iter().map(|c| c.value(i * POSITIONS + pos)).collect();
+            form.compose(&digits)
         };
         let mut z = [[0; N]; L];
         let mut u = [[0; N]; K];
@@ -446,9 +510,9 @@ impl MainTables {
         for row in 0..K {
             for j in 0..N {
                 let pos = j + N * row;
-                z[row][j] = compose(DigitValue::Z, Column::Z_LO, Column::Z_HI, pos);
-                u[row][j] = compose(DigitValue::U, Column::U_LO, Column::U_HI, pos);
-                v[row][j] = compose(DigitValue::V, Column::V_LO, Column::V_HI, pos);
+                z[row][j] = compose(0, pos);
+                u[row][j] = compose(1, pos);
+                v[row][j] = compose(2, pos);
             }
         }
         (z, u, v)
@@ -714,10 +778,11 @@ impl<'a> SourceTables<'a> {
         self.group(role)[position]
     }
 
-    /// The two digit polynomials of `z`, `u` or `v` (`lo`, `hi`).
+    /// The digit polynomials of `z`, `u` or `v` in digit order (`lo`, `hi`; H-exact's `z`
+    /// adds `a_z`).
     #[must_use]
-    pub fn digits(&self, value: DigitValue) -> [Cells<'a>; 2] {
-        [0, 1].map(|digit| self.column(Column::Digit { value, digit }))
+    pub fn digits(&self, value: DigitValue) -> Vec<Cells<'a>> {
+        value_columns(value).into_iter().map(|c| self.column(c)).collect()
     }
 
     /// The four lookup stacks.
@@ -728,6 +793,6 @@ impl<'a> SourceTables<'a> {
     /// The looked-up columns of stack `stack`, in slot order.
     #[must_use]
     pub fn stack_cells(&self, stack: usize) -> Vec<Cells<'a>> {
-        stack_columns(stack).into_iter().map(|c| self.column(c)).collect()
+        self.manifest.stack_columns(stack).into_iter().map(|c| self.column(c)).collect()
     }
 }

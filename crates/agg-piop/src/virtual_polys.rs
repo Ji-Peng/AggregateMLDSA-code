@@ -5,8 +5,9 @@
 //!
 //! * affine evaluators, valid at any point because the table is an affine combination of
 //!   committed tables: `w_1' = sum_t 2^t b_t`, the compositions (4.1) of `z, u, v` from
-//!   their two L16 digits (`X = X_lo + 2^16 X_hi + 2^15` for `z, v`; relation H-u's step form
-//!   `u = U_lo + 63,079 U_hi + 31,540`) and of the carries
+//!   their L16 digits (`X = X_lo + 2^16 X_hi + 2^15` for `z, v`; the step form
+//!   `u = U_lo + 63,079 U_hi + 31,540`; relation H-exact's bit-slack form
+//!   `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225`) and of the carries
 //!   (`kappa = K + 2^15`), and the high part `2 gamma_2 w_1' + u + q v` of the ring residual.
 //!   The verifier forms them from opened values ([`MainValues`], [`CarryValues`]);
 //! * Boolean-domain materializations used by the prover and the tests: `w_1'`, the
@@ -29,7 +30,7 @@ use agg_witness::params::{GAMMA2, L, N, POSITIONS, Q, W1_BITS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
+use crate::manifest::{value_columns, Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
 use crate::source_tables::{Cells, MainTables, SourceTables};
 use crate::OpeningField as E;
 
@@ -105,10 +106,10 @@ pub fn residual_table(
     main: &MainTables,
 ) -> Vec<E> {
     let compose = |value: DigitValue| {
-        let digits = [0, 1].map(|digit| main.column(manifest, Column::Digit { value, digit }));
+        let digits: Vec<Cells<'_>> = value_columns(value).into_iter().map(|c| main.column(manifest, c)).collect();
         compose_table(&value.layout(), &digits)
     };
-    let (z, u, v) = (compose(DigitValue::Z), compose(DigitValue::U), compose(DigitValue::V));
+    let (z, u, v) = (compose(manifest.z_value()), compose(DigitValue::U), compose(DigitValue::V));
     let w1 = w1_table(&main.bit_lanes(manifest));
     let geom = main.geometry();
     let mut out = vec![E::zero(); geom.main_len()];
@@ -194,8 +195,8 @@ pub fn leaf(base: u32, p: E) -> E {
     }
 }
 
-/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve
-/// main-domain polynomials (`G_main16` then `G_main4`, manifest order).
+/// `z, u, v, w_1'` at a main-domain point from the stage-3 evaluations of the twelve (H-u)
+/// or thirteen (H-exact) main-domain polynomials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MainValues {
     /// `z` by (4.1).
@@ -209,15 +210,16 @@ pub struct MainValues {
 }
 
 impl MainValues {
-    /// From the claims `value(column)` of the main-domain columns.
+    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation.
     #[must_use]
-    pub fn from_claims(value: impl Fn(Column) -> E) -> Self {
+    pub fn from_claims(manifest: &CommitmentManifest, value: impl Fn(Column) -> E) -> Self {
         let compose = |digit: DigitValue| {
-            compose_digits(&digit.layout(), &[0, 1].map(|d| value(Column::Digit { value: digit, digit: d })))
+            let digits: Vec<E> = value_columns(digit).into_iter().map(&value).collect();
+            compose_digits(&digit.layout(), &digits)
         };
         let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
         Self {
-            z: compose(DigitValue::Z),
+            z: compose(manifest.z_value()),
             u: compose(DigitValue::U),
             v: compose(DigitValue::V),
             w1: w1_from_bits(&bits),
@@ -328,6 +330,20 @@ mod tests {
         let carry = ValueForm::Radix(CARRY16_DIGITS);
         assert_eq!(compose_digits(&carry, &[lift(-(1 << 15))]), E::zero());
         assert_eq!(compose_digits(&carry, &[lift(1000 - (1 << 15))]), lift(1000));
+    }
+
+    #[test]
+    fn h_exact_z_composes_from_three_digits() {
+        let form = DigitValue::Zx.layout();
+        for z in [-130_993_i64, -1, 0, 78, 79, 130_993] {
+            let digits = form.decompose(z);
+            assert!(form.in_alphabets(&digits));
+            let lifted: Vec<E> = digits.iter().map(|&d| lift(d)).collect();
+            assert_eq!(compose_digits(&form, &lifted), lift(z));
+            let cells: Vec<Vec<i32>> = digits.iter().map(|&d| vec![d as i32]).collect();
+            let tables: Vec<Cells<'_>> = cells.iter().map(|c| Cells::Wide(c)).collect();
+            assert_eq!(compose_table(&form, &tables), vec![z]);
+        }
     }
 
     #[test]

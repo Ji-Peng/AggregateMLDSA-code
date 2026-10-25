@@ -54,7 +54,7 @@ use agg_keccak::sponge::{sponge_gate, SpongeRecord};
 use agg_keccak::tied::{TiedCommitment, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::CommitmentManifest;
+use agg_piop::manifest::{CommitmentManifest, Relation};
 use agg_piop::pow::KeccakPlan;
 use agg_piop::prover::{
     main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
@@ -1360,6 +1360,7 @@ impl Aggregator {
             instance: &instance,
             records: &inputs,
             signatures: &signatures,
+            relation: Relation::Hu,
         };
         let clock = Instant::now();
         let (manifest, honest) = main_tables(&prover_inputs)?;
@@ -1638,6 +1639,7 @@ impl AggregateVerifier {
             &SeededMatrices,
             &keccak,
             profile,
+            Relation::Hu,
             cache,
         );
         VerifyCostReport {

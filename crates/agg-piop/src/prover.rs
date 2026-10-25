@@ -21,7 +21,7 @@ use agg_witness::params::C_TILDE_BYTES;
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::{MultiplicityClaims, PreStageClaims};
 use crate::lookup::{prove_in, LookupError, LookupProof, LookupShape, Table};
-use crate::manifest::{CommitmentManifest, GroupRole, LOOKUP_CHALLENGES};
+use crate::manifest::{CommitmentManifest, GroupRole, Relation, LOOKUP_CHALLENGES};
 use crate::opening::opening_claims;
 use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
@@ -201,6 +201,8 @@ pub struct ProverInputs<'a> {
     pub records: &'a [(&'a [u8], &'a [u8], [u8; C_TILDE_BYTES])],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
+    /// The relation to prove (`docs/h-exact.md` Section 1): H-u or H-exact.
+    pub relation: Relation,
 }
 
 /// Wall time of each prover step (spec Section 10 event order).
@@ -353,7 +355,7 @@ pub fn main_tables(inputs: &ProverInputs<'_>) -> Result<(CommitmentManifest, Mai
     if inputs.instance.records.len() != n || inputs.signatures.len() != n {
         return Err(ProveError::Internal("record counts differ".into()));
     }
-    let manifest = CommitmentManifest::for_batch(n).map_err(PcsError::Plan)?;
+    let manifest = CommitmentManifest::for_relation(n, inputs.relation).map_err(PcsError::Plan)?;
     let main = MainTables::build(&manifest, inputs.instance, inputs.signatures)?;
     Ok((manifest, main))
 }
@@ -691,6 +693,7 @@ pub fn prove_with_tables(
     let opening = committer.open_claims(commitments, &claims, &session)?;
     timings.opening = clock.lap();
     let proof = AggregateProof {
+        relation: manifest.relation(),
         records: n,
         c_tilde: inputs.records.iter().map(|r| r.2).collect(),
         main16_commitment,

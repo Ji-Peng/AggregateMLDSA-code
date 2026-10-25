@@ -41,7 +41,7 @@ use jolt_field::Zero;
 use rayon::prelude::*;
 
 use crate::binding::FlockProfile;
-use crate::manifest::CommitmentManifest;
+use crate::manifest::{CommitmentManifest, Relation};
 use crate::prover::{
     main_tables, prove_with_tables, BridgeDerivation, KeccakSide, ProveError, ProveHooks,
     ProverInputs, ProverOutput,
@@ -321,11 +321,12 @@ pub fn prove_mode_b(
 }
 
 /// Verify a mode-B aggregate (the proof bytes, which carry `c~_i` and the public bits) for
-/// the records `(pk_i, M_i)`, with the timing of every step.
+/// the records `(pk_i, M_i)` under the caller's `relation`, with the timing of every step.
 pub fn verify_mode_b(
     records: &[(&[u8], &[u8])],
     aggregate: &[u8],
     bridge: &impl BridgeDerivation,
+    relation: Relation,
     cache: Option<&mut KeyCache>,
 ) -> VerifyReport {
     verify_timed(
@@ -334,6 +335,7 @@ pub fn verify_mode_b(
         bridge,
         &PublicBitsVerifier,
         FlockProfile::PublicBits,
+        relation,
         cache,
     )
 }

@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use agg_bench::harness::{git_revision, median_duration, timed, Batch};
 use agg_bench::memory::{mib, peak_rss_kib, reset_peak, rss_kib};
+use agg_piop::manifest::Relation;
 use agg_piop::mode_b::{prove_mode_b, verify_mode_b};
 use agg_piop::prover::{ProverInputs, SeededMatrices};
 use agg_piop::public_data::KeyCache;
@@ -160,7 +161,7 @@ fn run_verifier(options: &Options, n: usize) {
     let base = rss_kib().unwrap_or(0);
     let mut uncached = Vec::new();
     for run in 0..options.warmup + options.verify_runs {
-        let report = verify_mode_b(&public, &bytes, &bridge, None);
+        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
         assert!(report.accepted(), "verify: {:?}", report.outcome);
         if run >= options.warmup {
             uncached.push(report.timings);
@@ -168,10 +169,10 @@ fn run_verifier(options: &Options, n: usize) {
     }
     let peak_uncached = peak_rss_kib().unwrap_or(0);
     let mut cache = KeyCache::default();
-    assert!(verify_mode_b(&public, &bytes, &bridge, Some(&mut cache)).accepted());
+    assert!(verify_mode_b(&public, &bytes, &bridge, Relation::Hu, Some(&mut cache)).accepted());
     let mut cached = Vec::new();
     for run in 0..options.warmup + options.verify_runs {
-        let report = verify_mode_b(&public, &bytes, &bridge, Some(&mut cache));
+        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, Some(&mut cache));
         let verified = report.outcome.expect("verify with cached keys");
         assert_eq!(verified.expanded_keys, 0);
         if run >= options.warmup {
@@ -223,6 +224,7 @@ fn run_prover(options: &Options, n: usize) {
                 instance: &instance,
                 records: &inputs,
                 signatures: &signatures,
+                relation: Relation::Hu,
             },
             &bridge,
         )

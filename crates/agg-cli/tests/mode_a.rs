@@ -30,7 +30,7 @@ use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
 use agg_keccak::tied;
 use agg_keccak::witness::pack_slot;
 use agg_piop::binding::FlockProfile;
-use agg_piop::manifest::{Column, CommitmentManifest, GroupRole};
+use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, Relation};
 use agg_piop::mode_b::PublicBitsVerifier;
 use agg_piop::prover::{ProveError, SeededMatrices};
 use agg_piop::public_data::KeyCache;
@@ -556,6 +556,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &OtherPlan(agg_cli::mode_a::FlockVerifier::new(&gate)),
             FLOCK_PROFILE,
+            Relation::Hu,
             None,
         );
         assert!(matches!(other_plan.outcome, Err(VerifyError::Keccak(0))));
@@ -654,6 +655,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &flock,
             FlockProfile::None,
+            Relation::Hu,
             None,
         );
         assert!(matches!(
@@ -668,6 +670,7 @@ fn corrupted_aggregates_are_rejected() {
             &SeededMatrices,
             &PublicBitsVerifier,
             FlockProfile::PublicBits,
+            Relation::Hu,
             None,
         );
         assert!(matches!(mode_b.outcome, Err(VerifyError::Keccak(0))));
@@ -844,6 +847,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &SeededMatrices,
             &lenient,
             FLOCK_PROFILE,
+            Relation::Hu,
             None,
         );
         let error = outcome.outcome.expect_err("the range identity");

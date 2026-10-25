@@ -199,3 +199,93 @@ fn committer_rejects_malformed_tables_before_akita() {
         }))
     ));
 }
+
+/// Relation H-exact (`docs/h-exact.md` 2.1, 6.3): the encoder writes `bz_lo` into the slot
+/// of `Z_lo`, the bits `bz_hi`, `a_z` into `G_main4` (nine columns), the canonical digits
+/// of zero on padded rows, and refuses `|z| > 130,993`; the values decoded from the H-exact
+/// tables equal the derived ones, the H-u tables' values and the witness crate's base-16
+/// H-exact form (`Z_EXACT`, other digits, equal values).
+#[test]
+fn h_exact_main_tables_encode_the_exact_z_form() {
+    use agg_piop::manifest::{DigitValue, Relation};
+    use agg_witness::digits::Z_EXACT;
+    let records = common::records(0x7e, 15, 5);
+    let manifest = CommitmentManifest::for_relation(20, Relation::HExact).unwrap();
+    let hu_manifest = CommitmentManifest::for_batch(20).unwrap();
+    let (instance, main) = instance_and_main(&records, &manifest);
+    let (_, hu_main) = instance_and_main(&records, &hu_manifest);
+    assert_eq!(main.columns().len(), 9);
+    assert_eq!(main.wide().len(), 4 * (32 << 10));
+    main.validate(&manifest).unwrap();
+    // Padded rows: (bz_lo, bz_hi, a_z) = (32,689, 1, 0), U_lo = -31,540, V_lo = -2^15.
+    let padded = 25 << 10;
+    let at = |column: Column| main.column(&manifest, column).value(padded);
+    assert_eq!((at(Column::ZX_LO), at(Column::ZX_HI), at(Column::A_Z)), (32_689, 1, 0));
+    assert_eq!((at(Column::U_LO), at(Column::U_HI)), (-31_540, 0));
+    assert_eq!((at(Column::V_LO), at(Column::V_HI)), (-i64::from(LOOKUP_SHIFT), 0));
+    // The H-exact and H-u tables share u, v and the bits cell for cell.
+    for column in [Column::U_LO, Column::U_HI, Column::V_LO, Column::V_HI, Column::W1Bit(4)] {
+        assert_eq!(
+            main.column(&manifest, column).to_i64(),
+            hu_main.column(&hu_manifest, column).to_i64(),
+            "{}",
+            column.name()
+        );
+    }
+    let mut values = Vec::new();
+    for (i, (record, signed)) in instance.records.iter().zip(&records).enumerate() {
+        let w = derive(&record.key, &record.mu, &signed.sig).unwrap();
+        let decoded = main.record_values(&manifest, i);
+        assert_eq!(decoded, hu_main.record_values(&hu_manifest, i), "record {i}");
+        assert_eq!((decoded.0, decoded.1, decoded.2), (w.z, w.u, w.v), "record {i}");
+        for row in w.z {
+            for z in row {
+                let (a, digits) = Z_EXACT.decompose(z);
+                assert_eq!(Z_EXACT.compose(a, &digits), z);
+                let ours = DigitValue::Zx.layout().decompose(z);
+                assert_eq!(ours[2], a, "a_z = [z >= 79] in both forms");
+                assert_eq!(DigitValue::Zx.layout().compose(&ours), z);
+            }
+        }
+        values.push(RecordValues {
+            z: w.z,
+            u: w.u,
+            v: w.v,
+            w1: w.w1,
+        });
+    }
+    assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
+    // z = +-130,993 encodes (edges of 2.1), +-130,994 and 131,000 are honest aborts; the
+    // same values are inside H-u's relaxed range.
+    for (z, ok) in [(130_993, true), (-130_993, true), (130_994, false), (-130_994, false), (131_000, false)] {
+        let mut edge = values.clone();
+        edge[4].z[2][11] = z;
+        let built = MainTables::from_values(&manifest, &edge);
+        assert_eq!(built.is_ok(), ok, "z = {z}");
+        assert!(MainTables::from_values(&hu_manifest, &edge).is_ok(), "H-u, z = {z}");
+        if let Ok(tables) = built {
+            assert_eq!(tables.record_values(&manifest, 4).0[2][11], z);
+            let x = agg_witness::padding::main_index(11, 2, 4);
+            let cell = |c: Column| tables.column(&manifest, c).value(x);
+            let expected = if z > 0 { (32_767, 1, 1) } else { (-32_768, 0, 0) };
+            assert_eq!((cell(Column::ZX_LO), cell(Column::ZX_HI), cell(Column::A_Z)), expected);
+        }
+    }
+    // The self-check: a_z = 2 and bz_hi = -1 are outside the Boolean alphabet.
+    let a_z = manifest.locate(Column::A_Z).1;
+    let bz_hi = manifest.locate(Column::ZX_HI).1;
+    assert_eq!((bz_hi, a_z), (0, 8));
+    for (column, value) in [(a_z, 2_i8), (bz_hi, -1)] {
+        let mut bad = main.clone();
+        bad.columns_mut()[column][123] = value;
+        assert_eq!(
+            bad.validate(&manifest).unwrap_err(),
+            SourceTableError::Alphabet {
+                group: GroupRole::Main,
+                column,
+                cell: 123,
+                value: i64::from(value)
+            }
+        );
+    }
+}

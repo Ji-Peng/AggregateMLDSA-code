@@ -81,6 +81,10 @@ pub const BAR_B_U: i64 = B_U;
 pub const STEP_U: i64 = 63_079;
 /// Base of the top digit H_u of u in relation H-u.
 pub const U_TOP_BASE: u32 = 6;
+/// Weight of the Boolean slack a_z of z in relation H-exact: z = B_zlo + 2^16 B_zhi +
+/// SLACK_Z a_z - B_z with B_zlo in [0, 2^16), B_zhi, a_z in {0, 1}, and
+/// SLACK_Z + 2^17 = 2 B_z + 1 (`docs/h-exact.md` 2.1).
+pub const SLACK_Z: i64 = 130_915;
 /// Proven range of the quotient v: [-2^26, 2^26 - 1] (Section 4.3).
 pub const V_HALF_RANGE: i64 = 1 << 26;
 /// zeta' of (3.5) for the proven bounds of relation H-u (equals zeta of FIPS 204).
@@ -120,6 +124,8 @@ const _: () = assert!(DELTA0_MAX < 1 << 49);
 const _: () = assert!(B_V < V_HALF_RANGE);
 const _: () = assert!((U_TOP_BASE as i64 - 1) * STEP_U + (1 << 16) == 2 * B_U + 1);
 const _: () = assert!(STEP_U <= 1 << 16);
+const _: () = assert!(SLACK_Z + (1 << 17) == 2 * B_Z + 1);
+const _: () = assert!(SLACK_Z <= 1 << 17);
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +174,8 @@ mod tests {
         assert_eq!(ZETA_PRIME, ZETA_MSIS);
         assert_eq!(BAR_B_U, 190_465);
         assert_eq!(5 * STEP_U + (1 << 16), 2 * B_U + 1);
+        // H-exact z: 130,915 (2^1 - 1) + 2^17 = 2 B_z + 1 (slack lemma, docs/h-exact.md 2.1).
+        assert_eq!(SLACK_Z + (1 << 17), 2 * B_Z + 1);
         assert_eq!(P_FIELD, u64::MAX - 58);
     }
 
