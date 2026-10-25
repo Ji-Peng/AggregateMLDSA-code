@@ -28,7 +28,7 @@ fn reduce3(lo: u64, hi: u64, carry: u64) -> u64 {
 /// reductions; equal to `lhs * rhs` (test `fast_product_matches_the_field_product`) and
 /// about 20% faster on this machine (Aerie's `opening_field_ops::mul` is the model).
 #[inline(always)]
-pub(super) fn fm(lhs: E, rhs: E) -> E {
+pub(crate) fn fm(lhs: E, rhs: E) -> E {
     let a = lhs.c0().to_canonical_u64();
     let b = lhs.c1().to_canonical_u64();
     let c = rhs.c0().to_canonical_u64();

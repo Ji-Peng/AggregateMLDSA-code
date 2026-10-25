@@ -51,7 +51,7 @@ use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 
 use crate::kernel::{
-    evaluate_compressed, expected_terminal, fmi, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
+    evaluate_compressed, expected_terminal, fm, fmi, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
     Term,
 };
 use crate::transcript::encode_extensions;
@@ -735,11 +735,23 @@ impl Layer {
 }
 
 fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Layer {
-    let (p, q) = if half >= PARALLEL_NODES {
-        (0..half).into_par_iter().map(node).unzip()
-    } else {
-        (0..half).map(node).unzip()
-    };
+    if half < PARALLEL_NODES {
+        let (p, q) = (0..half).map(node).unzip();
+        return Layer { p, q };
+    }
+    // A parallel first touch, then blocks of both lanes filled in parallel (a parallel
+    // `unzip` was measured slower).
+    const BLOCK: usize = 1 << 10;
+    let mut p: Vec<E> = rayon::iter::repeat_n(E::zero(), half).collect();
+    let mut q: Vec<E> = rayon::iter::repeat_n(E::zero(), half).collect();
+    p.par_chunks_mut(BLOCK)
+        .zip(q.par_chunks_mut(BLOCK))
+        .enumerate()
+        .for_each(|(b, (p, q))| {
+            for (i, (p, q)) in p.iter_mut().zip(q.iter_mut()).enumerate() {
+                (*p, *q) = node(b * BLOCK + i);
+            }
+        });
     Layer { p, q }
 }
 
@@ -748,7 +760,7 @@ fn parent(child: &Layer) -> Layer {
     let half = child.len() / 2;
     let (p0, p1) = child.p.split_at(half);
     let (q0, q1) = child.q.split_at(half);
-    build_nodes(half, |y| (p0[y] * q1[y] + p1[y] * q0[y], q0[y] * q1[y]))
+    build_nodes(half, |y| (fm(p0[y], q1[y]) + fm(p1[y], q0[y]), fm(q0[y], q1[y])))
 }
 
 /// The layer above the leaves `(1, X - g)` of a stacked lane: `p = (X - g_0) + (X - g_1)`,
@@ -758,7 +770,7 @@ fn stack_bottom(stacked: &[i32], x: E) -> Layer {
     build_nodes(half, |y| {
         let a = x - E::from_i64(i64::from(stacked[y]));
         let b = x - E::from_i64(i64::from(stacked[y + half]));
-        (a + b, a * b)
+        (a + b, fm(a, b))
     })
 }
 
