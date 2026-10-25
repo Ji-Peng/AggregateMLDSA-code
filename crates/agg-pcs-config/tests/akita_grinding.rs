@@ -6,15 +6,15 @@
 //! Akita change.
 #![cfg(feature = "schedules")]
 
-use agg_pcs_config::catalogs::{Group, CATALOG_D_SIG};
+use agg_pcs_config::catalogs::{Group, Relation, CATALOG_D_SIG};
 use agg_pcs_config::preset::AggFp64SignedWidth4;
 use agg_pcs_config::work_plan::WorkPlan;
 use akita_config::derive_transcript_grinding_plan;
 use akita_params::{GrindingPlan, GrindingQueryKind, OpeningClaimsLayout};
 
 /// The plan of the grouped row of `N* = 2^d_sig` for the opening of its six groups.
-fn row_plan(d_sig: usize) -> GrindingPlan {
-    let plan = WorkPlan::for_records(1 << d_sig).expect("work plan");
+fn row_plan(d_sig: usize, relation: Relation) -> GrindingPlan {
+    let plan = WorkPlan::for_records(1 << d_sig, relation).expect("work plan");
     let row = AggFp64SignedWidth4::catalog()
         .expect("catalog")
         .resolve_key(&plan.schedule_key())
@@ -83,7 +83,7 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
     assert_eq!(CATALOG_D_SIG, (3..=15).collect::<Vec<_>>().as_slice());
     let mut digests = Vec::new();
     for (d_sig, sites, sum, max, work, bits) in table {
-        let plan = row_plan(d_sig);
+        let plan = row_plan(d_sig, Relation::Hu);
         let digest = plan.digest().expect("digest");
         eprintln!(
             "d_sig {d_sig:>2}: {:?} digest {}",

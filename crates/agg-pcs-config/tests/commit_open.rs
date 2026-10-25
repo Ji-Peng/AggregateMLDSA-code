@@ -3,7 +3,7 @@
 //! config item), at `N = 2^8` and `N = 2^10` signatures.
 #![cfg(feature = "schedules")]
 
-use agg_pcs_config::catalogs::Group;
+use agg_pcs_config::catalogs::{Group, Relation};
 use agg_pcs_config::commit::{evaluate_signed_table, PcsProver, PcsVerifier};
 use agg_pcs_config::preset::{BaseField, OpeningField};
 use agg_pcs_config::work_plan::WorkPlan;
@@ -13,8 +13,8 @@ use jolt_field::{ExtField, Ring};
 mod dummy;
 use dummy::{claims, dummy_tables, Rng};
 
-fn commit_and_open(records: usize) {
-    let plan = WorkPlan::for_records(records).expect("work plan");
+fn commit_and_open(records: usize, relation: Relation) {
+    let plan = WorkPlan::for_records(records, relation).expect("work plan");
     let mut rng = Rng(records as u64);
     let tables = Group::ALL.map(|group| dummy_tables(&plan, group, &mut rng));
     let prover = PcsProver::new(plan.clone()).expect("prover setup");
@@ -35,7 +35,7 @@ fn commit_and_open(records: usize) {
     let proof = prover
         .open(groups, &claims, &session)
         .expect("batched opening");
-    eprintln!("N = {records}: opening proof {} bytes", proof.len());
+    eprintln!("N = {records}, {relation}: opening proof {} bytes", proof.len());
 
     // The seed-only verifier needs no prover state.
     let verifier = PcsVerifier::new(plan).expect("verifier setup");
@@ -75,18 +75,27 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 
 #[test]
 fn two_round_commit_and_batched_opening_at_256() {
-    on_large_stack(|| commit_and_open(1 << 8));
+    on_large_stack(|| commit_and_open(1 << 8, Relation::Hu));
 }
 
 #[test]
 fn two_round_commit_and_batched_opening_at_1024_with_padding() {
     // 1000 live records pad to N* = 1024; padded rows carry the digits of zero.
-    on_large_stack(|| commit_and_open(1000));
+    on_large_stack(|| commit_and_open(1000, Relation::Hu));
+}
+
+#[test]
+fn h_exact_commit_and_batched_opening_at_256_and_1024() {
+    // G_main4 at 9 polynomials (docs/h-exact.md 2.2), the l16x grouped rows.
+    on_large_stack(|| {
+        commit_and_open(1 << 8, Relation::HExact);
+        commit_and_open(1000, Relation::HExact);
+    });
 }
 
 #[test]
 fn malformed_tables_are_rejected_before_akita() {
-    let plan = WorkPlan::for_records(1 << 8).expect("work plan");
+    let plan = WorkPlan::for_records(1 << 8, Relation::Hu).expect("work plan");
     let prover = PcsProver::new(plan.clone()).expect("prover setup");
     let cells = plan.logical_cells(Group::Level3);
     assert!(prover
@@ -105,6 +114,10 @@ fn malformed_tables_are_rejected_before_akita() {
     let mut narrow = vec![vec![0_i8; main_cells]; 8];
     narrow[2][5] = 8;
     assert!(prover.commit_group(Group::Main, &narrow).is_err());
+    // An H-u plan refuses a 9-polynomial G_main4 (H-exact's count).
+    assert!(prover
+        .commit_group(Group::Main, &vec![vec![0_i8; main_cells]; 9])
+        .is_err());
 }
 
 #[test]

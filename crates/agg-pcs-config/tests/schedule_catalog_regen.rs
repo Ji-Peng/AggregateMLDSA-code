@@ -12,15 +12,24 @@
 //! rows of `G_main4` and the grouped rows (final group `G_m`), whose precommitted
 //! producers are taken from the scalar row of their own family.
 //!
-//! Incremental update, one batch size at a time (keeps checked-in rows,
-//! plans only missing ones, saves after every planned row):
+//! Rows are keyed by `(d_sig, relation)` (`catalogs::catalog_batches`): H-u and H-exact
+//! share every width-16 row and differ in `G_main4` (8 or 9 polynomials), so the width-4
+//! catalog holds both relations' scalar and grouped rows.
+//!
+//! Incremental update, one batch size at a time (keeps every checked-in row of both
+//! relations, plans only missing ones, saves after every planned row):
 //!
 //! ```text
-//! AGG_CATALOG_D_SIG=8 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release \
-//!     --no-default-features --test schedule_catalog_regen -- --ignored --exact update_catalog_rows
+//! AGG_CATALOG_D_SIG=8 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
+//!     -p agg-pcs-config --release --no-default-features --test schedule_catalog_regen \
+//!     -- --ignored --exact update_catalog_rows
 //! ```
 //!
-//! Full regeneration of every row of `CATALOG_D_SIG` from scratch:
+//! `AGG_CATALOG_RELATION` is `h-u`, `h-exact` or `all` (the default). Rows of a batch outside
+//! `catalog_batches()` and the requested ones are pruned, so a batch size is first added to
+//! the requested list, then to `CATALOG_D_SIG` or `CATALOG_D_SIG_H_EXACT` once its rows exist.
+//!
+//! Full regeneration of every row of `catalog_batches()` from scratch:
 //!
 //! ```text
 //! taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
@@ -31,7 +40,7 @@
 //! `-- --ignored --exact verify_rows`. `AKITA_SCHEDULE_GEN_JOBS` bounds the
 //! planner workers (default 3; the search is memory bound).
 
-use agg_pcs_config::catalogs::{scalar_layouts, BatchLayout, Family, CATALOG_D_SIG};
+use agg_pcs_config::catalogs::{catalog_batches, scalar_layouts, BatchLayout, Family, Relation};
 use agg_pcs_config::preset::{
     AggFp64SignedWidth16 as W16, AggFp64SignedWidth4 as Cfg, WIDTH16_FAMILY, WIDTH4_FAMILY,
 };
@@ -69,24 +78,45 @@ fn artifact_path(family: Family) -> PathBuf {
     output_dir().join(format!("{}.aks", family_name(family)))
 }
 
-/// Batch sizes requested by the environment (`AGG_CATALOG_D_SIG=8,10`),
-/// defaulting to every checked-in batch size.
-fn requested_d_sigs() -> Vec<usize> {
-    match std::env::var("AGG_CATALOG_D_SIG") {
-        Ok(value) if !value.trim().is_empty() => value
-            .split(',')
-            .map(|item| {
-                item.trim()
-                    .parse::<usize>()
-                    .unwrap_or_else(|_| panic!("AGG_CATALOG_D_SIG item {item:?} is not a number"))
-            })
-            .collect(),
-        _ => CATALOG_D_SIG.to_vec(),
+/// Relations requested by the environment (`AGG_CATALOG_RELATION=h-exact`), default both.
+fn requested_relations() -> Vec<Relation> {
+    match std::env::var("AGG_CATALOG_RELATION") {
+        Ok(value) if !value.trim().is_empty() && value.trim() != "all" => vec![
+            Relation::parse(&value)
+                .unwrap_or_else(|| panic!("AGG_CATALOG_RELATION {value:?} is not a relation")),
+        ],
+        _ => Relation::ALL.to_vec(),
     }
 }
 
-fn batch(d_sig: usize) -> BatchLayout {
-    BatchLayout::new(d_sig).unwrap_or_else(|| panic!("d_sig {d_sig} is outside the wire range"))
+/// Batches requested by the environment (`AGG_CATALOG_D_SIG=8,10` under the relations of
+/// `AGG_CATALOG_RELATION`), defaulting to every checked-in batch.
+fn requested_batches() -> Vec<BatchLayout> {
+    match std::env::var("AGG_CATALOG_D_SIG") {
+        Ok(value) if !value.trim().is_empty() => {
+            let d_sigs: Vec<usize> = value
+                .split(',')
+                .map(|item| {
+                    item.trim().parse::<usize>().unwrap_or_else(|_| {
+                        panic!("AGG_CATALOG_D_SIG item {item:?} is not a number")
+                    })
+                })
+                .collect();
+            requested_relations()
+                .into_iter()
+                .flat_map(|relation| d_sigs.iter().map(move |&d_sig| batch(d_sig, relation)))
+                .collect()
+        }
+        _ => catalog_batches()
+            .into_iter()
+            .filter(|layout| requested_relations().contains(&layout.relation))
+            .collect(),
+    }
+}
+
+fn batch(d_sig: usize, relation: Relation) -> BatchLayout {
+    BatchLayout::new(d_sig, relation)
+        .unwrap_or_else(|| panic!("d_sig {d_sig} is outside the wire range"))
 }
 
 // ---------------------------------------------------------------------------
@@ -310,14 +340,17 @@ fn row_key(profiles: &CommittedGroupBatchProfile) -> ScheduleLookupKey {
     }
 }
 
-/// Whether a catalog row of `family` belongs to one of the batch sizes `d_sigs`.
-fn row_is_requested(family: Family, profiles: &CommittedGroupBatchProfile, d_sigs: &[usize]) -> bool {
+/// Whether a catalog row of `family` belongs to one of `batches`.
+fn row_is_requested(
+    family: Family,
+    profiles: &CommittedGroupBatchProfile,
+    batches: &[BatchLayout],
+) -> bool {
     if profiles.precommitteds.is_empty() {
-        return scalar_layouts(d_sigs, family).contains(&profiles.final_group.group);
+        return scalar_layouts(batches, family).contains(&profiles.final_group.group);
     }
     family == Family::Width4
-        && d_sigs.iter().any(|&d_sig| {
-            let layout = batch(d_sig);
+        && batches.iter().any(|layout| {
             profiles.final_group.group == layout.final_group()
                 && profiles
                     .precommitteds
@@ -337,21 +370,20 @@ fn save(family: Family, rows: &Rows) {
 // ---------------------------------------------------------------------------
 // Offline tests (ignored by default).
 
-/// Plan the rows of `AGG_CATALOG_D_SIG` that the on-disk catalogs lack, keep
-/// every on-disk row of `CATALOG_D_SIG` or `AGG_CATALOG_D_SIG`, drop the rest,
-/// and save after every planned row (so a run killed by a time cap keeps
-/// what it finished).
+/// Plan the rows of the requested batches that the on-disk catalogs lack, keep every
+/// on-disk row of `catalog_batches()` (both relations) or of a requested batch, drop the
+/// rest, and save after every planned row (so a run killed by a time cap keeps what it
+/// finished).
 #[test]
 #[ignore = "offline incremental catalog update; rewrites src/schedules/"]
 fn update_catalog_rows() {
-    let d_sigs = requested_d_sigs();
-    let mut keep: Vec<usize> = CATALOG_D_SIG
-        .iter()
-        .copied()
-        .chain(d_sigs.iter().copied())
-        .collect();
-    keep.sort_unstable();
-    keep.dedup();
+    let requested = requested_batches();
+    let mut keep = catalog_batches();
+    for layout in &requested {
+        if !keep.contains(layout) {
+            keep.push(*layout);
+        }
+    }
     let mut rows: [Rows; 2] = [Vec::new(), Vec::new()];
     for (slot, family) in rows.iter_mut().zip(Family::ALL) {
         if let Some(on_disk) = on_disk_rows(family) {
@@ -365,8 +397,8 @@ fn update_catalog_rows() {
             }
         }
     }
-    for d_sig in d_sigs {
-        let layout = batch(d_sig);
+    for layout in requested {
+        let (d_sig, relation) = (layout.d_sig, layout.relation);
         let started = Instant::now();
         for (slot, family) in rows.iter_mut().zip(Family::ALL) {
             let missing: Vec<PolynomialGroupLayout> = layout
@@ -409,7 +441,7 @@ fn update_catalog_rows() {
             save(Family::Width4, &rows[0]);
         }
         eprintln!(
-            "d_sig {d_sig} ({}): all rows ready in {:.1?}",
+            "d_sig {d_sig}, {relation} ({}): all rows ready in {:.1?}",
             layout.row_name(),
             started.elapsed()
         );
@@ -419,13 +451,14 @@ fn update_catalog_rows() {
     }
 }
 
-/// Full regeneration of `CATALOG_D_SIG` through Akita's emit pipeline, as in
+/// Full regeneration of `catalog_batches()` through Akita's emit pipeline, as in
 /// Aerie's `regenerate`: one emit spec per family, the grouped rows in the width-4 one.
 #[test]
 #[ignore = "offline DP regeneration; rewrites src/schedules/"]
 fn regenerate() {
-    let keys4 = scalar_layouts(CATALOG_D_SIG, Family::Width4);
-    let keys16 = scalar_layouts(CATALOG_D_SIG, Family::Width16);
+    let batches = catalog_batches();
+    let keys4 = scalar_layouts(&batches, Family::Width4);
+    let keys16 = scalar_layouts(&batches, Family::Width16);
     let all: Vec<(Family, PolynomialGroupLayout)> = keys4
         .iter()
         .map(|&key| (Family::Width4, key))
@@ -439,10 +472,7 @@ fn regenerate() {
             .map_err(|error| format!("scalar preplanning failed for {key:?}: {error}"))
     })
     .expect("prewarm scalar schedule plans");
-    let grouped_requests = CATALOG_D_SIG
-        .iter()
-        .map(|&d_sig| grouped_request(&batch(d_sig)))
-        .collect();
+    let grouped_requests = batches.iter().map(grouped_request).collect();
     let spec4 = EmitSpec {
         family_name: WIDTH4_FAMILY,
         policy: policy_of::<Cfg>(),
@@ -478,20 +508,20 @@ fn regenerate() {
     }
 }
 
-/// Drift check: re-plan the rows of `AGG_CATALOG_D_SIG` from scratch and
+/// Drift check: re-plan the rows of the requested batches from scratch and
 /// compare them byte-exactly with the on-disk rows. Grouped producers are
 /// seeded from the on-disk scalar rows, each of which is itself re-planned.
 #[test]
 #[ignore = "offline DP drift check; set AGG_CATALOG_D_SIG"]
 fn verify_rows() {
-    let d_sigs = requested_d_sigs();
+    let batches = requested_batches();
     let mut drift = Vec::new();
     let on_disk: Vec<Rows> = Family::ALL
         .iter()
         .map(|&family| on_disk_rows(family).expect("on-disk catalog"))
         .collect();
     for (family, rows) in Family::ALL.into_iter().zip(&on_disk) {
-        for group in scalar_layouts(&d_sigs, family) {
+        for group in scalar_layouts(&batches, family) {
             let fresh = regen(family, group).expect("fresh scalar planning");
             let row = rows
                 .iter()
@@ -505,8 +535,8 @@ fn verify_rows() {
         }
         seed_scalar_preplans(family, rows);
     }
-    for d_sig in d_sigs {
-        let request = grouped_request(&batch(d_sig));
+    for layout in &batches {
+        let request = grouped_request(layout);
         let key = request.key();
         let fresh = regen_group_batch(request).expect("fresh grouped planning");
         let row = on_disk[0]
@@ -517,7 +547,7 @@ fn verify_rows() {
         if serde_json::to_vec(&row.1).unwrap() != serde_json::to_vec(&fresh).unwrap()
             || serde_json::to_vec(&row.0).unwrap() != serde_json::to_vec(&profiles).unwrap()
         {
-            drift.push(format!("grouped d_sig {d_sig}"));
+            drift.push(format!("grouped {}", layout.row_name()));
         }
     }
     assert!(drift.is_empty(), "catalog drift: {drift:?}");
@@ -703,16 +733,16 @@ fn width16_inner_probe() {
 
 #[cfg(feature = "schedules")]
 fn requested_keys() -> (Vec<ScheduleLookupKey>, Vec<ScheduleLookupKey>) {
-    let mut keys4: Vec<ScheduleLookupKey> = scalar_layouts(CATALOG_D_SIG, Family::Width4)
+    let batches = catalog_batches();
+    let mut keys4: Vec<ScheduleLookupKey> = scalar_layouts(&batches, Family::Width4)
         .into_iter()
         .map(ScheduleLookupKey::single)
         .collect();
-    let keys16: Vec<ScheduleLookupKey> = scalar_layouts(CATALOG_D_SIG, Family::Width16)
+    let keys16: Vec<ScheduleLookupKey> = scalar_layouts(&batches, Family::Width16)
         .into_iter()
         .map(ScheduleLookupKey::single)
         .collect();
-    for &d_sig in CATALOG_D_SIG {
-        let layout = batch(d_sig);
+    for layout in batches {
         keys4.push(ScheduleLookupKey {
             final_group: layout.final_group(),
             precommitteds: layout
@@ -795,17 +825,16 @@ fn checked_in_catalog_holds_exactly_the_requested_rows() {
     let (keys4, keys16) = requested_keys();
     check_catalog(Cfg::catalog().expect("width-4 catalog"), Family::Width4, &keys4);
     check_catalog(W16::catalog().expect("width-16 catalog"), Family::Width16, &keys16);
-    for &d_sig in CATALOG_D_SIG {
-        let layout = batch(d_sig);
-        for ((group, _), profile) in layout
-            .precommitted_groups()
-            .into_iter()
-            .zip(&keys4[keys4.len() - CATALOG_D_SIG.len() + (d_sig - CATALOG_D_SIG[0])].precommitteds)
+    let batches = catalog_batches();
+    let grouped = &keys4[keys4.len() - batches.len()..];
+    for (layout, key) in batches.iter().zip(grouped) {
+        for ((group, _), profile) in layout.precommitted_groups().into_iter().zip(&key.precommitteds)
         {
             let digits = (profile.inner.digits.log_basis, profile.inner.digits.num_digits);
+            let at = layout.row_name();
             match group.family() {
-                Family::Width4 => assert_eq!(digits, (4, 1), "{group:?} at d_sig {d_sig}"),
-                Family::Width16 => assert_eq!(digits, (16, 1), "{group:?} at d_sig {d_sig}"),
+                Family::Width4 => assert_eq!(digits, (4, 1), "{group:?} in {at}"),
+                Family::Width16 => assert_eq!(digits, (16, 1), "{group:?} in {at}"),
             }
         }
     }

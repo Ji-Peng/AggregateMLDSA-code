@@ -9,7 +9,7 @@ use akita_params::{GroupCommitPhaseParams, OpeningScheduleSelection, ScheduleLoo
 use akita_params::PolynomialGroupLayout;
 
 use crate::catalogs::{
-    BatchLayout, Family, Group, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
+    BatchLayout, Family, Group, Relation, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
 };
 use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4, BaseField};
 
@@ -34,10 +34,12 @@ pub enum PlanError {
     NoRecords,
     /// `N > 2^15` (spec Section 1: the verifier MUST reject).
     TooManyRecords(usize),
-    /// The padded size `2^d_sig` has no checked-in catalog rows.
+    /// The padded size `2^d_sig` has no checked-in catalog rows for the relation.
     NotInCatalog {
         /// `log2 N*`.
         d_sig: usize,
+        /// The requested relation.
+        relation: Relation,
     },
     /// Akita rejected the catalog lookup or setup sizing.
     Akita(AkitaError),
@@ -48,8 +50,8 @@ impl std::fmt::Display for PlanError {
         match self {
             Self::NoRecords => write!(f, "a batch needs at least one record"),
             Self::TooManyRecords(n) => write!(f, "{n} records exceed the maximum {MAX_RECORDS}"),
-            Self::NotInCatalog { d_sig } => {
-                write!(f, "batch size 2^{d_sig} has no generated catalog rows")
+            Self::NotInCatalog { d_sig, relation } => {
+                write!(f, "batch size 2^{d_sig} has no generated {relation} catalog rows")
             }
             Self::Akita(error) => write!(f, "akita: {error}"),
         }
@@ -83,7 +85,7 @@ pub struct WorkPlan {
     pub records: usize,
     /// `N*`.
     pub padded: usize,
-    /// The ordered six-group layout.
+    /// The ordered six-group layout (it carries the relation).
     pub layout: BatchLayout,
     /// Producer profiles of the precommitted groups `G_main16, G_main4, G_1, G_2, G_3`,
     /// each from the scalar row of its family's catalog.
@@ -95,12 +97,12 @@ pub struct WorkPlan {
 }
 
 impl WorkPlan {
-    /// The plan for `records` live records.
-    pub fn for_records(records: usize) -> Result<Self, PlanError> {
+    /// The plan for `records` live records under `relation`.
+    pub fn for_records(records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(d_sig).expect("d_sig within the wire range");
+        let layout = BatchLayout::new(d_sig, relation).expect("d_sig within the wire range");
         if !layout.in_catalog() {
-            return Err(PlanError::NotInCatalog { d_sig });
+            return Err(PlanError::NotInCatalog { d_sig, relation });
         }
         let precommitted = layout
             .precommitted_groups()
@@ -126,6 +128,18 @@ impl WorkPlan {
     #[must_use]
     pub const fn d_sig(&self) -> usize {
         self.layout.d_sig
+    }
+
+    /// The relation whose layout this plan commits.
+    #[must_use]
+    pub const fn relation(&self) -> Relation {
+        self.layout.relation
+    }
+
+    /// Committed polynomials of `group` (its layout's count under the plan's relation).
+    #[must_use]
+    pub const fn num_polynomials(&self, group: Group) -> usize {
+        self.layout.groups[group.index()].num_polynomials()
     }
 
     /// Number of `2^13`-signature segments `S`.
@@ -177,7 +191,7 @@ impl WorkPlan {
         }
     }
 
-    /// Akita setup sized for this batch (largest group, all 38 polynomials). The final
+    /// Akita setup sized for this batch (largest group, all 38 or 39 polynomials). The final
     /// family's catalog carries every precommitted profile of its grouped rows, so its
     /// requirements cover the width-16 commits too (Akita's mixed-bound batches).
     pub fn setup_requirements(&self) -> Result<SetupRequirements<BaseField>, AkitaError> {
@@ -210,12 +224,14 @@ mod tests {
     #[cfg(feature = "schedules")]
     #[test]
     fn plans_exist_for_every_catalog_size() {
-        for &d_sig in crate::catalogs::CATALOG_D_SIG {
+        for layout in crate::catalogs::catalog_batches() {
+            let (d_sig, relation) = (layout.d_sig, layout.relation);
             for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
-                let plan = WorkPlan::for_records(records).expect("catalog plan");
-                assert_eq!(plan.d_sig(), d_sig);
+                let plan = WorkPlan::for_records(records, relation).expect("catalog plan");
+                assert_eq!((plan.d_sig(), plan.relation()), (d_sig, relation));
                 for group in Group::ALL {
-                    assert_eq!(plan.profile(group).group, group.layout(d_sig));
+                    assert_eq!(plan.profile(group).group, group.layout(d_sig, relation));
+                    assert_eq!(plan.num_polynomials(group), group.num_polynomials(relation));
                     assert_eq!(
                         plan.logical_vars(group) + plan.pad_vars(group),
                         plan.physical_vars(group)
@@ -225,18 +241,18 @@ mod tests {
             }
         }
         // Every padded size of the wire version has rows.
-        let plan = WorkPlan::for_records(1000).expect("plan");
+        let plan = WorkPlan::for_records(1000, Relation::Hu).expect("plan");
         assert_eq!(plan.precommitted.len(), crate::catalogs::GROUP_COUNT - 1);
         assert_eq!(
             crate::catalogs::CATALOG_D_SIG,
             (MIN_D_SIG..=MAX_D_SIG).collect::<Vec<_>>().as_slice()
         );
         assert!(matches!(
-            WorkPlan::for_records(0),
+            WorkPlan::for_records(0, Relation::Hu),
             Err(PlanError::NoRecords)
         ));
         assert!(matches!(
-            WorkPlan::for_records(MAX_RECORDS + 1),
+            WorkPlan::for_records(MAX_RECORDS + 1, Relation::HExact),
             Err(PlanError::TooManyRecords(_))
         ));
     }

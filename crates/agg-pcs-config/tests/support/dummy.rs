@@ -2,7 +2,7 @@
 //! `benches/commit_open.rs` (included through `#[path]`).
 #![allow(dead_code)]
 
-use agg_pcs_config::catalogs::Group;
+use agg_pcs_config::catalogs::{Group, Relation};
 use agg_pcs_config::commit::{evaluate_signed_table, GroupClaim};
 use agg_pcs_config::preset::{BaseField, OpeningField};
 use agg_pcs_config::work_plan::WorkPlan;
@@ -30,12 +30,17 @@ impl Rng {
 
 /// The honest alphabet of each group's polynomials (spec Section 4.1, lookup layout L16):
 /// `0` marks a Boolean column, `b > 0` a balanced base-`b` digit, so a 16-bit lookup column
-/// is base `2^16`, a multiplicity digit base 16.
-pub fn bases(group: Group) -> Vec<i64> {
+/// is base `2^16`, a multiplicity digit base 16. `G_main4` is `Z_hi` (base 4), `U_hi`
+/// (base 6) and six bits under H-u, and `B_zhi` (bit), `D_u` (base 6), six bits and `a_z`
+/// (bit) under H-exact.
+pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
     let wide = 1 << 16;
     match group {
         Group::Main16 => vec![wide; 4],
-        Group::Main => [4, 8, 0, 0, 0, 0, 0, 0].to_vec(),
+        Group::Main => match relation {
+            Relation::Hu => [4, 6, 0, 0, 0, 0, 0, 0].to_vec(),
+            Relation::HExact => [0, 6, 0, 0, 0, 0, 0, 0, 0].to_vec(),
+        },
         Group::Level1 => vec![wide; 6],
         Group::Level2 => {
             let mut bases = vec![0; 6];
@@ -52,8 +57,8 @@ pub fn bases(group: Group) -> Vec<i64> {
 /// bits; spec Section 4.2).
 pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i32>> {
     let cells = plan.logical_cells(group);
-    let bases = bases(group);
-    assert_eq!(bases.len(), group.num_polynomials());
+    let bases = bases(group, plan.relation());
+    assert_eq!(bases.len(), plan.num_polynomials(group));
     let main = matches!(group, Group::Main16 | Group::Main);
     bases
         .iter()

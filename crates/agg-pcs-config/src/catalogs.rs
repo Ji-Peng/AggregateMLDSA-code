@@ -15,7 +15,11 @@
 //! precommitted layout in its own family's catalog, whose root profile is the producer
 //! profile of that group.
 //!
-//! [`CATALOG_D_SIG`] lists the batch sizes whose rows are checked in;
+//! The relation (`docs/h-exact.md` Section 1) changes the polynomial count of `G_main4`
+//! (8 for H-u, 9 for H-exact, whose extra Boolean column `a_z` is the slack of the exact `z`
+//! form), so every layout, row name and catalog key is a function of `(d_sig, relation)`.
+//! [`CATALOG_D_SIG`] lists the H-u batch sizes and [`CATALOG_D_SIG_H_EXACT`] the H-exact
+//! ones whose rows are checked in ([`catalog_batches`] lists both);
 //! `tests/schedule_catalog_regen.rs` regenerates them (docs/pcs-config.md).
 
 use akita_params::PolynomialGroupLayout;
@@ -39,9 +43,96 @@ pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Groups of one batch.
 pub const GROUP_COUNT: usize = 6;
 
-/// Batch sizes (`d_sig`) whose catalog rows are generated and checked in:
+/// Batch sizes (`d_sig`) whose relation-H-u catalog rows are generated and checked in:
 /// every `N* = 2^3 .. 2^15` of the wire version (spec Section 13).
 pub const CATALOG_D_SIG: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// Batch sizes (`d_sig`) whose relation-H-exact rows are generated and checked in.
+pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10];
+
+/// Relation byte of H-u: the proof header's flags byte and byte 3 of the event-0 bytes.
+pub const RELATION_HU: u8 = 0;
+/// Relation byte of H-exact (`docs/h-exact.md` Section 1.1).
+pub const RELATION_H_EXACT: u8 = 1;
+
+/// The relation a proof certifies (`docs/h-exact.md` Section 1). Its id is bound twice: as
+/// the proof header's flags byte and in the event-0 manifest bytes; it selects the layout of
+/// `G_main4` and hence the catalog rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Relation {
+    /// H-u: `z in [-2^17, 2^17)`, `|u| <= 190,465` exactly (`zeta' = zeta = 350,209`).
+    #[default]
+    Hu,
+    /// H-exact: the FIPS 204 bounds `|z| <= 130,993` and `|u| <= 190,465`, both exact.
+    HExact,
+}
+
+impl Relation {
+    /// Both relations, in id order.
+    pub const ALL: [Self; 2] = [Self::Hu, Self::HExact];
+
+    /// The relation byte.
+    #[must_use]
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::Hu => RELATION_HU,
+            Self::HExact => RELATION_H_EXACT,
+        }
+    }
+
+    /// Inverse of [`Relation::id`] over the relations this version accepts.
+    #[must_use]
+    pub const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            RELATION_HU => Some(Self::Hu),
+            RELATION_H_EXACT => Some(Self::HExact),
+            _ => None,
+        }
+    }
+
+    /// Display name (`H-u`, `H-exact`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Hu => "H-u",
+            Self::HExact => "H-exact",
+        }
+    }
+
+    /// Command-line spelling (`h-u`, `h-exact`); [`Relation::parse`] inverts it.
+    #[must_use]
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::Hu => "h-u",
+            Self::HExact => "h-exact",
+        }
+    }
+
+    /// Parse a command-line spelling (`h-u`, `hu`, `h`, `h-exact`, `hexact`).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "h-u" | "hu" | "h" | "0" => Some(Self::Hu),
+            "h-exact" | "hexact" | "exact" | "1" => Some(Self::HExact),
+            _ => None,
+        }
+    }
+
+    /// The batch sizes whose rows of this relation are checked in.
+    #[must_use]
+    pub const fn catalog_d_sigs(self) -> &'static [usize] {
+        match self {
+            Self::Hu => CATALOG_D_SIG,
+            Self::HExact => CATALOG_D_SIG_H_EXACT,
+        }
+    }
+}
+
+impl std::fmt::Display for Relation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
 /// The commitment preset (schedule family) of a group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -90,7 +181,7 @@ pub enum Group {
     /// `Z_lo, U_lo, V_lo, V_hi` on the main domain (round 1, width 16): the 16-bit
     /// lookup columns.
     Main16,
-    /// `Z_hi, U_hi, b_0..b_5` on the main domain (round 1, width 4).
+    /// `Z_hi, U_hi, b_0..b_5` on the main domain (round 1, width 4); H-exact appends `a_z`.
     Main,
     /// Level-1 carries `kappa^(1)_t` on `D_1` (round 2, width 16).
     Level1,
@@ -152,13 +243,16 @@ impl Group {
     }
 
     /// Number of committed polynomials (spec Section 4.1, L16):
-    /// `4 + 8` on the main domain, 6 carries, `6 + 6` parities and carries, 1 carry, and
-    /// the 7 multiplicity digits.
+    /// `4 + 8` on the main domain (`4 + 9` under H-exact), 6 carries, `6 + 6` parities and
+    /// carries, 1 carry, and the 7 multiplicity digits.
     #[must_use]
-    pub const fn num_polynomials(self) -> usize {
+    pub const fn num_polynomials(self, relation: Relation) -> usize {
         match self {
             Self::Main16 => 4,
-            Self::Main => 2 + 6,
+            Self::Main => match relation {
+                Relation::Hu => 2 + 6,
+                Relation::HExact => 2 + 6 + 1,
+            },
             Self::Level1 => 6,
             Self::Level2 => 6 + 6,
             Self::Level3 => 1,
@@ -192,10 +286,10 @@ impl Group {
         }
     }
 
-    /// Akita group layout at `d_sig`.
+    /// Akita group layout at `d_sig` under `relation`.
     #[must_use]
-    pub const fn layout(self, d_sig: usize) -> PolynomialGroupLayout {
-        PolynomialGroupLayout::new(self.physical_vars(d_sig), self.num_polynomials())
+    pub const fn layout(self, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
+        PolynomialGroupLayout::new(self.physical_vars(d_sig), self.num_polynomials(relation))
     }
 
     /// Short label used in catalog row names and logs.
@@ -212,22 +306,25 @@ impl Group {
     }
 }
 
-/// The ordered six-group layout of one batch size `N* = 2^d_sig`.
+/// The ordered six-group layout of one batch size `N* = 2^d_sig` under one relation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchLayout {
     /// `log2 N*`.
     pub d_sig: usize,
+    /// The relation (it fixes the polynomial count of `G_main4`).
+    pub relation: Relation,
     /// Physical layouts of `G_main16, G_main4, G_1, G_2, G_3, G_m`.
     pub groups: [PolynomialGroupLayout; GROUP_COUNT],
 }
 
 impl BatchLayout {
-    /// The layout at `d_sig`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`.
+    /// The layout at `d_sig` under `relation`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`.
     #[must_use]
-    pub fn new(d_sig: usize) -> Option<Self> {
+    pub fn new(d_sig: usize, relation: Relation) -> Option<Self> {
         (MIN_D_SIG..=MAX_D_SIG).contains(&d_sig).then(|| Self {
             d_sig,
-            groups: Group::ALL.map(|group| group.layout(d_sig)),
+            relation,
+            groups: Group::ALL.map(|group| group.layout(d_sig, relation)),
         })
     }
 
@@ -252,7 +349,7 @@ impl BatchLayout {
         self.groups[GROUP_COUNT - 1]
     }
 
-    /// Total committed polynomials (38).
+    /// Total committed polynomials (38 for H-u, 39 for H-exact).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -271,26 +368,43 @@ impl BatchLayout {
             .expect("six groups")
     }
 
-    /// Catalog row name of the grouped row.
+    /// Catalog row name of the grouped row (`l16` for H-u, `l16x` for H-exact).
     #[must_use]
     pub fn row_name(&self) -> String {
-        format!("mldsa-44-l16-batch-{}-mult-final", 1_usize << self.d_sig)
+        let layout = match self.relation {
+            Relation::Hu => "l16",
+            Relation::HExact => "l16x",
+        };
+        format!("mldsa-44-{layout}-batch-{}-mult-final", 1_usize << self.d_sig)
     }
 
-    /// Whether this batch size has checked-in catalog rows.
+    /// Whether this batch size has checked-in catalog rows for its relation.
     #[must_use]
     pub fn in_catalog(&self) -> bool {
-        CATALOG_D_SIG.contains(&self.d_sig)
+        self.relation.catalog_d_sigs().contains(&self.d_sig)
     }
 }
 
-/// Every distinct scalar (precommitted-producer) layout of `family` needed by the batch
-/// sizes in `d_sigs`, sorted by `(num_vars, num_polynomials)`.
+/// Every checked-in batch layout: the H-u sizes, then the H-exact sizes.
 #[must_use]
-pub fn scalar_layouts(d_sigs: &[usize], family: Family) -> Vec<PolynomialGroupLayout> {
-    let mut layouts: Vec<PolynomialGroupLayout> = d_sigs
+pub fn catalog_batches() -> Vec<BatchLayout> {
+    Relation::ALL
         .iter()
-        .filter_map(|&d_sig| BatchLayout::new(d_sig))
+        .flat_map(|&relation| {
+            relation
+                .catalog_d_sigs()
+                .iter()
+                .filter_map(move |&d_sig| BatchLayout::new(d_sig, relation))
+        })
+        .collect()
+}
+
+/// Every distinct scalar (precommitted-producer) layout of `family` needed by `batches`,
+/// sorted by `(num_vars, num_polynomials)`.
+#[must_use]
+pub fn scalar_layouts(batches: &[BatchLayout], family: Family) -> Vec<PolynomialGroupLayout> {
+    let mut layouts: Vec<PolynomialGroupLayout> = batches
+        .iter()
         .flat_map(|layout| {
             layout
                 .precommitted_groups()
@@ -325,9 +439,17 @@ mod tests {
 
     #[test]
     fn group_shapes_match_spec_section_4() {
-        assert_eq!(Group::ALL.map(Group::num_polynomials), [4, 8, 6, 12, 1, 7]);
-        let total: usize = Group::ALL.iter().map(|group| group.num_polynomials()).sum();
-        assert_eq!(total, 38);
+        let counts = |relation| Group::ALL.map(|group| group.num_polynomials(relation));
+        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 1, 7]);
+        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 1, 7]);
+        let total = |relation| counts(relation).iter().sum::<usize>();
+        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (38, 39));
+        for relation in Relation::ALL {
+            assert_eq!(Relation::from_id(relation.id()), Some(relation));
+            assert_eq!(Relation::parse(relation.flag()), Some(relation));
+        }
+        assert_eq!(Relation::from_id(2), None);
+        assert_eq!(Relation::parse("fips"), None);
         // Spec Section 1 table at N* = 2^15.
         assert_eq!(Group::Main16.logical_vars(15), 25);
         assert_eq!(Group::Main.logical_vars(15), 25);
@@ -359,7 +481,7 @@ mod tests {
     #[test]
     fn batch_layouts_for_the_catalog_sizes() {
         let shape = |d_sig| {
-            BatchLayout::new(d_sig)
+            BatchLayout::new(d_sig, Relation::Hu)
                 .unwrap()
                 .groups
                 .map(|group| (group.num_vars(), group.num_polynomials()))
@@ -372,28 +494,52 @@ mod tests {
             shape(15),
             [(25, 4), (25, 8), (19, 6), (15, 12), (14, 1), (16, 7)]
         );
-        assert!(BatchLayout::new(2).is_none());
-        assert!(BatchLayout::new(16).is_none());
-        let layout = BatchLayout::new(10).unwrap();
+        assert!(BatchLayout::new(2, Relation::Hu).is_none());
+        assert!(BatchLayout::new(16, Relation::HExact).is_none());
+        let layout = BatchLayout::new(10, Relation::Hu).unwrap();
         assert_eq!(layout.total_polynomials(), 38);
         assert_eq!(layout.max_physical_vars(), 20);
         assert_eq!(layout.row_name(), "mldsa-44-l16-batch-1024-mult-final");
         assert_eq!(layout.precommitted().len(), 5);
         assert_eq!(layout.final_group(), PolynomialGroupLayout::new(16, 7));
+        // H-exact: G_main4 at 9 polynomials, its own row name, every other group unchanged.
+        let exact = BatchLayout::new(15, Relation::HExact).unwrap();
+        assert_eq!(
+            exact.groups.map(|group| (group.num_vars(), group.num_polynomials())),
+            [(25, 4), (25, 9), (19, 6), (15, 12), (14, 1), (16, 7)]
+        );
+        assert_eq!(exact.total_polynomials(), 39);
+        assert_eq!(exact.row_name(), "mldsa-44-l16x-batch-32768-mult-final");
+        let hu = BatchLayout::new(15, Relation::Hu).unwrap();
+        for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Mult] {
+            assert_eq!(exact.groups[group.index()], hu.groups[group.index()]);
+        }
+        assert_eq!(catalog_batches().len(), CATALOG_D_SIG.len() + CATALOG_D_SIG_H_EXACT.len());
     }
 
     #[test]
     fn scalar_layouts_are_deduplicated_per_family() {
-        let shapes = |family| -> Vec<(usize, usize)> {
-            scalar_layouts(&[8, 10], family)
+        let shapes = |relations: &[Relation], family| -> Vec<(usize, usize)> {
+            let batches: Vec<BatchLayout> = relations
+                .iter()
+                .flat_map(|&relation| {
+                    [8, 10].map(|d_sig| BatchLayout::new(d_sig, relation).unwrap())
+                })
+                .collect();
+            scalar_layouts(&batches, family)
                 .iter()
                 .map(|layout| (layout.num_vars(), layout.num_polynomials()))
                 .collect()
         };
-        assert_eq!(shapes(Family::Width4), vec![(18, 8), (20, 8)]);
+        assert_eq!(shapes(&[Relation::Hu], Family::Width4), vec![(18, 8), (20, 8)]);
+        let width16 = vec![(13, 1), (13, 6), (13, 12), (14, 6), (18, 4), (20, 4)];
+        assert_eq!(shapes(&[Relation::Hu], Family::Width16), width16);
+        // Both relations: the width-4 family gains the 9-polynomial rows, the width-16
+        // family is shared.
         assert_eq!(
-            shapes(Family::Width16),
-            vec![(13, 1), (13, 6), (13, 12), (14, 6), (18, 4), (20, 4)]
+            shapes(&Relation::ALL, Family::Width4),
+            vec![(18, 8), (18, 9), (20, 8), (20, 9)]
         );
+        assert_eq!(shapes(&Relation::ALL, Family::Width16), width16);
     }
 }
