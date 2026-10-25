@@ -1218,6 +1218,11 @@ A self-check compares the final claim with `eq` times the summand at the termina
   field lane `g = sum_l c_l f_l` built once (unreduced products, one reduction per cell). It
   yields no terminal lane values; the stage driver reads them from the generic group that
   also reads the lanes at the same point.
+- `WeightIntGroup`: `gamma sum_x w(x) g(x)` without an equality factor, for a field weight
+  `w` and the exact integer combination `g = sum_l c_l f_l + c` (stage 3's `w_A z`); the
+  engine's eq-free mode (`s = q`, the linear coefficient from `s(0) + s(1) = claim`) and a
+  coefficient on every round polynomial (`gamma`). The table carries `w`, `g` and the integer
+  lanes (folded for their terminal values).
 
 Field helpers: `fmi(x, k)` (field times a signed integer, two `64 x 64` products, branch
 free: the sign of a balanced digit is random) and `mad_int`; the generic kernel folds integer
@@ -1228,6 +1233,9 @@ unreduced_integer_products_sum_exactly}`.
 
 ### 20.2 Stage driver (`stage::prove_stage_with`)
 
+- A full-domain group without an equality factor whose single instance is one weighted
+  affine term with a field weight and integer or byte lanes runs on `WeightIntGroup`
+  (`Main eq None`: 76.1 -> 62.9 ms at 1,024, one thread).
 - A full-domain equality group whose lanes are all integer tables read only by single-lane
   products, each lane also read by a generic group of the stage, runs on `LinearIntGroup`
   (stage 3: the reduction of the main lookup stack, `Main eq Lookup(0)`, four 16-bit
@@ -1244,10 +1252,14 @@ unreduced_integer_products_sum_exactly}`.
 
 ### 20.3 Instance, witness, events 3 to 5, scheduling
 
-- `agg_witness::ntt::NttPrime`: the products of the 256-point NTTs (about 66 per record in
-  the key expansion, `T`, `A z` by CRT and the strict FIPS verification) are reduced with
-  Barrett (`floor(2^64 / p)`) and the sums with branch-free conditional subtractions instead
-  of `%` by a run-time modulus (`ntt_timing`: 6.3 -> 3.7 us per transform, one core).
+- `agg_witness::ntt::NttPrime`: the 256-point NTTs (about 66 per record in the key
+  expansion, `T`, `A z` by CRT and the strict FIPS verification) used `%` by a run-time
+  modulus (a hardware division) in every butterfly. The butterflies now run on 32-bit lanes
+  with Shoup products by the constant zetas (the quotient `floor(zeta 2^32 / p)` is
+  precomputed; both primes are below `2^31`, so the remainder lies in `[0, 2p)`), the sums
+  with branch-free conditional subtractions, and the pointwise products with a Barrett
+  reduction (`floor(2^64 / p)`). `ntt_timing` (one core): 6.3 us for the forward transform
+  with `%`, 3.7 us with Barrett, 1.8 us with Shoup.
 - `agg_witness::derive::derive_with_t`: the witness reuses the instance's `T = c t1 2^d` when
   the signature's `c~` is the instance's (else it recomputes); `public_t` adds `x^p t1` in
   two straight (vectorized) loops instead of a branch per coefficient.
@@ -1267,32 +1279,36 @@ unreduced_integer_products_sum_exactly}`.
 
 `agg bench --count N --warmup 1 --reps 3`, CLMUL build (`RUSTFLAGS="-C
 target-feature=+pclmulqdq"`), 3 threads on CPUs 0, 1, 3-15, the base `be398d8` and this
-branch at `9a53721` back to back:
+branch back to back. Two runs at 8,192 signatures: branch at `9a53721` (load average 5.7 ->
+4.6) and at `74d5b69` (with the Shoup NTT and `WeightIntGroup`; load average 4.5 -> 5.4):
 
-| Step | 8,192: base | 8,192: branch |
-| --- | ---: | ---: |
-| instance (ExpandA, mu, c, T) | 1,023.1 ms | 643.0 ms |
-| witness and `G_main` tables | 1,204.8 | 729.4 |
-| events 3-5: matrices, round 2 | 518.6 | 343.1 |
-| event 7: lookup | 3,822.5 | 2,270.0 |
-| stage 1 / 2 / 3 | 507.5 / 535.4 / 1,835.3 | 351.7 / 506.9 / 1,467.1 |
-| Flock parts (unchanged code) | 11,348.3 | 11,086.4 |
-| prove, median of 3 | 21,853.0 | 18,447.5 |
-| everything but the Flock parts | 10,504.7 | 7,361.0 |
-| verify uncached / cached | 1,162.5 / 684.5 | 913.5 / 538.8 |
-| prover peak RSS | 7,210 MiB | 7,053 MiB |
+| Step | base (`9a53721` run) | `9a53721` | base (`74d5b69` run) | `74d5b69` |
+| --- | ---: | ---: | ---: | ---: |
+| instance (ExpandA, mu, c, T) | 1,023.1 ms | 643.0 | 1,035.2 | 494.4 |
+| witness and `G_main` tables | 1,204.8 | 729.4 | 1,153.0 | 626.9 |
+| events 3-5: matrices, round 2 | 518.6 | 343.1 | 557.5 | 380.5 |
+| event 7: lookup | 3,822.5 | 2,270.0 | 3,827.2 | 2,551.7 |
+| stage 1 / 2 / 3 | 507.5 / 535.4 / 1,835.3 | 351.7 / 506.9 / 1,467.1 | 509.5 / 499.8 / 1,773.0 | 384.4 / 513.7 / 1,502.0 |
+| Flock parts (unchanged code) | 11,348.3 | 11,086.4 | 11,803.6 | 11,666.8 |
+| prove, median of 3 | 21,853.0 | 18,447.5 | 22,240.9 | 19,256.8 |
+| everything but the Flock parts | 10,504.7 | 7,361.0 | 10,437.3 | 7,590.0 |
+| verify uncached / cached | 1,162.5 / 684.5 | 913.5 / 538.8 | 1,156.2 / 703.6 | 773.7 / 532.4 |
+| prover peak RSS | 7,210 MiB | 7,053 MiB | 7,304 MiB | 6,998 MiB |
 
-Load average 5.7 -> 5.0 (base) and 5.0 -> 4.6 (branch). At 1,024 signatures (two alternated
-pairs, load average 4.5 to 6.5): prove 4,817 / 4,367 -> 4,643 / 3,644 ms, everything but the
-Flock parts 2,218 / 2,216 -> 1,778 / 1,527 ms, verify uncached 508 / 516 -> 344 / 331 ms.
+The lookup and stage-3 lines of the two runs differ by the load (the code of those steps is
+the same apart from `WeightIntGroup`). At 1,024 signatures, `74d5b69` against the base, two
+alternated pairs (load average 3.6 to 4.4): prove 4,058 / 4,220 -> 3,537 / 3,709 ms,
+everything but the Flock parts 1,946 / 2,021 -> 1,422 / 1,486 ms, instance 126 / 131 -> 58 /
+65 ms, witness 142 / 143 -> 79 / 77 ms, lookup 498 / 520 -> 322 / 331 ms, stage 3 232 / 228
+-> 194 / 189 ms, verify uncached 491 / 513 -> 314 / 315 ms, cached 435 / 454 -> 280 / 283 ms.
 
 Against the plan's targets at `2^15` on the VM (lookup <= 1.5 s from 3.86 s, stage 3 <=
 1.0 s from 1.80 s, instance plus witness <= 1.0 s from 2.16 s), scaling the cloud figures by
-the local ratios gives about 2.3 s, 1.5 s and 1.4 s (estimates, not measured): the
-directions hold, the targets are not reached. What is left, with estimates: the stage-3
-weight `w_A` (about 0.3 s at 8,192 locally: four 256-point negacyclic kernels per record) and
-the weighted group `Main eq None` (an eq-free integer-times-weight group would halve it);
-the NTTs (a vectorized or Montgomery-lazy NTT, about 2x on half of the instance and a third
-of the witness); the lookup items listed at the end of `docs/lookup.md` Section 4.6; and the
-overlap of the Flock records and commit with the witness (lever P3, 0.3 to 0.5 s at `2^15`,
-estimate).
+the local ratios at 8,192 gives about 2.3 to 2.6 s, 1.5 s and 1.1 s (estimates, not
+measured): the directions hold; the instance and witness are close to their target, the
+lookup and stage 3 are not. What is left, with estimates: the stage-3 weight `w_A` (about
+0.3 s at 8,192 locally: four 256-point negacyclic kernels per record) and the passenger
+lanes of the split groups; the lookup items listed at the end of `docs/lookup.md` Section
+4.6; and the overlap of the Flock records and commit with the witness (lever P3, 0.3 to 0.5 s
+at `2^15`, estimate). Proving the Flock span beside the lookup and the stages (lever P1)
+needs a transcript change (Section 20.3).
