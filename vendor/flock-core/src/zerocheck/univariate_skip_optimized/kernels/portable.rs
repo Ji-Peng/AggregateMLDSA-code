@@ -77,14 +77,7 @@ pub(super) fn accumulate_convert(
     }
 }
 
-#[cfg(not(any(
-    target_arch = "aarch64",
-    all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    )
-)))]
+#[cfg(not(target_arch = "aarch64"))]
 pub(super) fn accumulate_convert_with_s_hat_v(
     chunk_ab_bytes: &[[u8; 64]; 16],
     chunk_c_bytes: &[[u8; 64]; 16],

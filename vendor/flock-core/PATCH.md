@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Two changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Three changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -38,8 +38,58 @@ same derivation reproduces the shipped `m*_slim.toml` byte for byte). Level-0 qu
 This is a verifier-visible addition (a new parameter set of an unchanged protocol): proofs
 under `Slim8` verify with this copy only, or with upstream Flock given the same configs.
 
-To regenerate: copy `crates/flock-core/{src,configs}` of the revision above here, write the
+To regenerate (Sections 1 and 2; Section 3 below has its own list): copy `crates/flock-core/{src,configs}` of the revision above here, write the
 `Cargo.toml` of this directory, re-apply the `ColSide::Short` hunk (three edits in
 `build_merged_weight_and_prime`: the enum variant and the `bake_columns` decision, the
 `Folded` claim arm, and the segment sweep arm), re-apply the `Slim8` arms, create empty
 `m{22..35}_slim8.toml` files and run the example to fill them.
+
+## 3. Prover-only: x86 SIMD kernels chosen at run time (agg-mldsa deviation K12)
+
+Upstream selects its x86 kernels with `cfg(target_feature = ...)`: they run only in a
+build with `-C target-cpu=native` (Flock's own `.cargo/config.toml`). Our default build
+must not rely on SIMD, and a global `x86-64-v4` build breaks Akita, so the CLMUL timing
+build ran Flock's portable kernels in its hottest loops. This copy checks the CPU once at
+run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and calls the same
+`#[target_feature(enable = ...)]` kernels when the CPU has them:
+
+| Kernel | Features | Call sites |
+| --- | --- | --- |
+| additive NTT butterflies (`butterfly_row_pair`, `butterfly_fused_2layer`, `butterfly_fused_4layer_row`) and the fused-4 schedule choice (`fused4_ok`, two places in `ntt/additive_ntt_f128.rs`) | `avx512f`, `vpclmulqdq` | `ntt/additive_ntt_f128/kernels.rs` |
+| zerocheck round 1: `shift_reduce_inner_ab` (GFNI AVX-512, else GFNI SSE), `bit_transpose_64bytes` (`avx512vbmi`), `accumulate_convert_with_s_hat_v` (VPCLMULQDQ) | as listed | `zerocheck/univariate_skip_optimized/kernels.rs` |
+| inverse-NTT table `apply` (`ell = 64`) | `avx512f` | `ntt/inv_table.rs` |
+| zerocheck round 2 (`fold_pair_run`; the upstream inline block moved verbatim into `fold_pair_run_x86_avx512`) and the fused fold + message (`fold_and_message_x86_avx512`, given its `#[target_feature]`) | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
+
+The AVX-512 GF(2^128) helpers those kernels use (`ghash_mul_x4`, `f128x4_loadu`,
+`f128x4_set`, `WideGhashX4`) are copied from `flock-field` 83f963e
+(`gf2_128/x86_64.rs`) into `simd::x86` without their `cfg(target_feature)` gates;
+`flock-field` itself is unchanged and stays the pinned git dependency. Kernel bodies are
+upstream's; the dispatchers add bounds asserts the upstream callers relied on implicitly
+(the fused shift-reduce reads 8 bytes per K-row offset; the fold + message kernel needs
+`a_in = 2 a_out = 4 eq_lo` and an even `eq_lo` length).
+
+Exact and prover-only: every kernel computes the same GF(2^8)/GF(2^128) values as the
+portable code, so commitments, transcripts and proof bytes are identical whichever path
+runs (tests below; mode-A aggregates at 256 and 1,024 records are byte-identical to the
+unpatched build under `FLOCK_SIMD=portable`, `gfni` and the full set). `FLOCK_SIMD` in
+the environment caps the level for A/B runs: `portable` (or `off`) disables every x86
+kernel, `gfni` keeps only the SSE GFNI one. On a CPU without the features (or another
+architecture) the portable code runs as before.
+
+Tests (every path available on the CPU against the portable one; `simd::with_mask` limits
+the features for one closure): `ntt::additive_ntt_f128::kernels::tests::x86_kernels_match_portable`,
+`ntt::additive_ntt_f128::tests::every_kernel_path_matches_scalar` (whole transforms incl. the
+fused-4 schedule and `from_message`), `zerocheck::univariate_skip_optimized::kernels::tests::*`,
+the upstream x86 oracle tests made runtime-gated (`x86_gfni_sse_inner_matches_scalar_inner`,
+`x86_gfni_avx512_inner_matches_scalar_inner`, `apply_x86_matches_apply_scalar`,
+`fold_round2_pair_x86_matches_scalar`), and `zerocheck::tests::every_kernel_path_gives_the_same_proof`
+(a whole zerocheck proof at m = 13, 16, 18 under every mask). Run them with
+`cargo test --release --manifest-path vendor/flock-core/Cargo.toml --lib` (the crate is
+outside the workspace; use a separate `CARGO_TARGET_DIR`, with and without
+`RUSTFLAGS="-C target-feature=+pclmulqdq"`).
+
+To regenerate: re-apply the call-site edits listed in the table (each replaces a
+`cfg(target_feature)` pair by `if simd::has(...) { unsafe { kernel(...) }; return; }`
+before the portable call), drop the `cfg(target_feature)` gates of the x86 kernel modules
+and items (keep `cfg(target_arch = "x86_64")`), point their GHASH imports at `simd::x86`,
+and copy `src/simd.rs`.

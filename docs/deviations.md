@@ -623,6 +623,17 @@ bytes are unchanged, and proofs made with the vendored crate verify with upstrea
 the patch, or a fork, would remove it); until then `vendor/flock-core/PATCH.md` is the
 record of the revision and the diff.
 
+Second prover-only change (`PATCH.md` Section 3, 2026-10-25): Flock's x86 kernels (additive
+NTT butterflies with the fused-4 schedule, zerocheck rounds 1 and 2, the inverse-NTT table
+apply) are chosen at run time (`is_x86_feature_detected!`: AVX-512F, VPCLMULQDQ, GFNI,
+AVX512-VBMI) instead of by `cfg(target_feature)`, so the CLMUL build uses them on a CPU that
+has them while the default build stays portable and runs everywhere. Why: upstream only
+enables them under `target-cpu=native`, which our builds cannot use (AGENTS.md; a global
+`x86-64-v4` breaks Akita), and the portable kernels were the top of the Flock profile
+(`ref/notes/plan-128bit-speed.md` 2.3). Exact: same field values on every path, so the proof
+bytes are unchanged (byte-identical aggregates; per-path tests listed in `PATCH.md`).
+`FLOCK_SIMD=portable|gfni` caps the level for A/B runs.
+
 ## K13. Two-type bridge union as the bridge instance of a tied part (spec Section 8; docs/bridge.md Sections 5, 5b)
 
 Spec and docs/bridge.md Section 5: one bridge slot per segment, one block whose rows prove

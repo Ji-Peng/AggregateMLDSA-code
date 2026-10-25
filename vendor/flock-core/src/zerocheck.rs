@@ -1535,6 +1535,40 @@ mod tests {
         }
     }
 
+    /// agg-mldsa patch (PATCH.md Section 3): the whole zerocheck proof (round 1,
+    /// round 2, the tail) is identical under every x86 kernel path available on
+    /// this CPU, from portable up to AVX-512/GFNI/VPCLMULQDQ.
+    #[test]
+    fn every_kernel_path_gives_the_same_proof() {
+        use crate::simd::{test_masks, with_mask};
+        for &m in &[13usize, 16, 18] {
+            let mut rng = Rng::new(0x51D0 + m as u64);
+            let a = rng.bits(1 << m);
+            let b = rng.bits(1 << m);
+            let c: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x & *y).collect();
+            let (a_p, b_p, c_p) = pack_abc(&a, &b, &c);
+            let run = |mask| {
+                with_mask(mask, || {
+                    let mut ch = FsChallenger::new(b"flock-test-v0");
+                    let (proof, claim) = prove_packed(&a_p, &b_p, &c_p, m, &mut ch);
+                    (
+                        proof.round1_ab,
+                        proof.round1_c,
+                        proof.multilinear_rounds,
+                        proof.final_a_eval,
+                        proof.final_b_eval,
+                        proof.final_c_eval,
+                        claim,
+                    )
+                })
+            };
+            let want = run(0);
+            for mask in test_masks() {
+                assert!(run(mask) == want, "m={m} mask={mask:#x}");
+            }
+        }
+    }
+
     /// **Prove→verify roundtrip**: an honest proof verifies cleanly, and the
     /// claim returned by `verify` is byte-for-byte equal to the claim returned
     /// by `prove`.

@@ -128,11 +128,6 @@ pub(super) fn butterfly_fused_4layer(values: &mut [F128; 16], twiddles: &[F128; 
 /// # Safety
 /// The caller guarantees that every selected row and lane is valid and that
 /// concurrent calls use disjoint row groups.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-)))]
 pub(super) unsafe fn butterfly_fused_4layer_row(
     ptr: *mut F128,
     sixteenth: usize,

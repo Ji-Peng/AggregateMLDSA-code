@@ -168,9 +168,10 @@ impl InvNttTableByteSingleGf8 {
             unsafe { self.apply_neon_unchecked(bytes, out) };
             return;
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-        if self.ell == 64 {
-            // SAFETY: feature-gated avx512f; ell == 64 as required.
+        // agg-mldsa patch (PATCH.md Section 3): avx512f is checked at run time.
+        #[cfg(target_arch = "x86_64")]
+        if self.ell == 64 && self.n_chunks == 8 && crate::simd::has(crate::simd::AVX512F) {
+            // SAFETY: avx512f checked at run time; ell == 64 as required.
             unsafe { self.apply_x86_avx512_unchecked(bytes, out) };
             return;
         }
@@ -540,10 +541,9 @@ mod tests {
                     bytes
                 );
                 // AVX-512 path is specialized for ell == 64 (k = 6).
-                #[cfg(target_feature = "avx512f")]
-                if ell == 64 {
+                if ell == 64 && crate::simd::has(crate::simd::AVX512F) {
                     let mut out_avx = vec![F8::ZERO; ell];
-                    // SAFETY: build carries avx512f; ell == 64.
+                    // SAFETY: avx512f checked at run time; ell == 64.
                     unsafe { table.apply_x86_avx512_unchecked(&bytes, &mut out_avx) };
                     assert_eq!(
                         out_scalar, out_avx,

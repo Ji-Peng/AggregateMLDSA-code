@@ -49,6 +49,7 @@ pub mod proof;
 pub mod r1cs;
 pub mod schedule;
 pub mod scratch;
+pub(crate) mod simd;
 pub mod suboptimal;
 pub mod test_rng;
 pub mod transcript_record;

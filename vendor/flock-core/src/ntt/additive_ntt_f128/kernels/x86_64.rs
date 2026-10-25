@@ -4,7 +4,8 @@ use core::arch::x86_64::{
 };
 
 use crate::{
-    field::{F128, gf2_128::x86_64::ghash_mul_x4},
+    simd::x86::ghash_mul_x4,
+    field::F128,
     ntt::additive_ntt_f128::kernels::portable::{
         butterfly_fused_2layer as butterfly_fused_2layer_portable, butterfly_fused_4layer,
         butterfly_row_pair as butterfly_row_pair_portable,

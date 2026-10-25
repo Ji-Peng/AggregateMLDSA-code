@@ -430,11 +430,7 @@ impl AdditiveNttF128 {
         // x86 fused-4 pass not claiming these layers (it fuses 4 at a time
         // starting at `start_layer`, which the src-copy wrapper doesn't
         // implement — x86 keeps the replicate path).
-        let fused4_ok = cfg!(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "vpclmulqdq"
-        ));
+        let fused4_ok = kernels::x86_avx512_clmul();
         let fuse_fill =
             !fused4_ok && log_d >= 8 && n_top > 0 && start_layer + 2 <= n_top && block_size >= 4;
         if !fuse_fill {
@@ -723,12 +719,7 @@ impl AdditiveNttF128 {
         // The fused-4 kernel walks rows through raw pointers with its own
         // offset math; the dead-lane skip keeps to the slice-based kernels,
         // so a bounded transform takes the fused-3/2/block route instead.
-        let fused4_ok = live == num_ntts
-            && cfg!(all(
-                target_arch = "x86_64",
-                target_feature = "avx512f",
-                target_feature = "vpclmulqdq"
-            ));
+        let fused4_ok = live == num_ntts && kernels::x86_avx512_clmul();
         // Fused-3 (8-point): the aarch64 middle tier — a third fewer full-
         // buffer passes than fused-2 on the layers it covers, with 8 values
         // + 7 twiddles in flight (the 16-point kernel's register pressure is
@@ -1702,6 +1693,50 @@ mod tests {
 
     fn rand_vec(rng: &mut Rng, n: usize) -> Vec<F128> {
         (0..n).map(|_| rng.f128()).collect()
+    }
+
+    /// agg-mldsa patch (PATCH.md Section 3): every kernel path available on this
+    /// CPU (portable, AVX-512/VPCLMULQDQ with the fused-4 schedule) gives the same
+    /// codeword as the scalar oracle, for the transform shapes the commits use.
+    #[cfg(any(
+        all(target_arch = "aarch64", target_feature = "aes"),
+        all(target_arch = "x86_64", target_feature = "pclmulqdq")
+    ))]
+    #[test]
+    fn every_kernel_path_matches_scalar() {
+        use crate::simd::{test_masks, with_mask};
+        let mut rng = Rng::new(0x5EED_D15);
+        for (log_d, num_ntts) in [(10usize, 8usize), (14, 4), (17, 16), (19, 2), (18, 7)] {
+            let ntt = AdditiveNttF128::standard(log_d);
+            let original = rand_vec(&mut rng, (1 << log_d) * num_ntts);
+            let mut want = original.clone();
+            ntt.forward_transform_interleaved_scalar(&mut want, num_ntts);
+            for mask in test_masks() {
+                let got = with_mask(mask, || {
+                    let mut v = original.clone();
+                    ntt.forward_transform_interleaved_parallel(&mut v, num_ntts);
+                    v
+                });
+                assert_eq!(got, want, "log_d={log_d} num_ntts={num_ntts} mask={mask:#x}");
+            }
+        }
+        for (log_msg, num_ntts, reps) in [(16usize, 32usize, 4usize), (16, 32, 2), (14, 8, 4)] {
+            let log_d = log_msg + log2_pow2(reps);
+            let ntt = AdditiveNttF128::standard(log_d);
+            let msg = rand_vec(&mut rng, (1 << log_msg) * num_ntts);
+            let n_total = (1 << log_d) * num_ntts;
+            let mut want = vec![F128::ZERO; n_total];
+            replicate_interleaved(&mut want, &msg);
+            ntt.forward_transform_interleaved_scalar_from_layer(&mut want, num_ntts, log2_pow2(reps));
+            for mask in test_masks() {
+                let got = with_mask(mask, || {
+                    let mut v = rand_vec(&mut Rng::new(1), n_total);
+                    ntt.forward_transform_interleaved_from_message(&mut v, &msg, num_ntts);
+                    v
+                });
+                assert_eq!(got, want, "from_message log_msg={log_msg} reps={reps} mask={mask:#x}");
+            }
+        }
     }
 
     #[test]

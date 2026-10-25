@@ -40,23 +40,17 @@ use rayon::{
     current_num_threads,
     prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut},
 };
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+#[cfg(target_arch = "x86_64")]
 use {
-    crate::field::gf2_128::x86_64::{WideGhashX4, f128x4_loadu, f128x4_set, ghash_mul_x4},
+    crate::simd::{
+        AVX512_CLMUL, has,
+        x86::{WideGhashX4, f128x4_loadu, f128x4_set, ghash_mul_x4},
+    },
     crate::zerocheck::multilinear::kernels::x86_64::{
         fold_and_message_x86_avx512, fold_round2_pair_x86_unchecked_8,
     },
 };
 
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-)))]
 use crate::field::f128_slice::fold_pairs;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use crate::zerocheck::multilinear::kernels::aarch64::fold_one_row_neon_q_unchecked_8;
@@ -618,6 +612,125 @@ fn kill_pair(a: &mut [F128], b: &mut [F128], x0l: usize, x1l: usize, write_dead:
     }
 }
 
+/// The x86 AVX-512/VPCLMULQDQ body of [`fold_pair_run`] (upstream's
+/// `cfg(target_feature)` block, moved into a `#[target_feature]` function so it
+/// can be chosen at run time; agg-mldsa patch, PATCH.md Section 3).
+///
+/// # Safety
+/// The CPU has `avx512f`, `vpclmulqdq` and `sse4.1`; the geometry contract of
+/// [`fold_pair_run`] holds.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+unsafe fn fold_pair_run_x86_avx512<D>(
+    a_packed: &[u8],
+    b_packed: &[u8],
+    table: &UniSkipFoldTable,
+    eq_lo: &[F128],
+    lo_size: usize,
+    is_dead: &D,
+    write_dead: bool,
+    ps: usize,
+    pe: usize,
+    out_base: usize,
+    a_out: &mut [F128],
+    b_out: &mut [F128],
+) -> (F256Unreduced, F256Unreduced)
+where
+    D: Fn(usize) -> bool + Sync,
+{
+    let lo_mask = lo_size - 1;
+    let mut p1_acc = F256Unreduced::ZERO;
+    let mut pinf_acc = F256Unreduced::ZERO;
+    unsafe {
+        let table_ptr = table.data.as_ptr();
+        let a_pkt_ptr = a_packed.as_ptr();
+        let b_pkt_ptr = b_packed.as_ptr();
+        let mut p1_wide = WideGhashX4::zero();
+        let mut pinf_wide = WideGhashX4::zero();
+        let mut pair = ps;
+
+        while pair + 4 <= pe {
+            let mut a0 = [F128::ZERO; 4];
+            let mut a1 = [F128::ZERO; 4];
+            let mut b0 = [F128::ZERO; 4];
+            let mut b1 = [F128::ZERO; 4];
+
+            for lane in 0..4 {
+                let p = pair + lane;
+                let x0l = 2 * (p - out_base);
+                let x1l = x0l + 1;
+                if is_dead(p) {
+                    kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                    continue;
+                }
+
+                let x0g = 2 * p;
+                let x1g = x0g + 1;
+                let folded = fold_round2_pair_x86_unchecked_8(
+                    table_ptr,
+                    a_pkt_ptr.add(x0g * 8),
+                    a_pkt_ptr.add(x1g * 8),
+                    b_pkt_ptr.add(x0g * 8),
+                    b_pkt_ptr.add(x1g * 8),
+                );
+                [a0[lane], a1[lane], b0[lane], b1[lane]] = folded;
+                a_out[x0l] = a0[lane];
+                a_out[x1l] = a1[lane];
+                b_out[x0l] = b0[lane];
+                b_out[x1l] = b1[lane];
+            }
+
+            let a1x4 = f128x4_loadu(a1.as_ptr());
+            let b1x4 = f128x4_loadu(b1.as_ptr());
+            let a_sum_x4 = f128x4_set(a0[0] + a1[0], a0[1] + a1[1], a0[2] + a1[2], a0[3] + a1[3]);
+            let b_sum_x4 = f128x4_set(b0[0] + b1[0], b0[1] + b1[1], b0[2] + b1[2], b0[3] + b1[3]);
+            let g1x4 = ghash_mul_x4(a1x4, b1x4);
+            let g_inf_x4 = ghash_mul_x4(a_sum_x4, b_sum_x4);
+            // The run never crosses an x_hi boundary, so these 4 eq weights
+            // are in bounds whenever 4 pairs remain.
+            let eqx4 = f128x4_loadu(eq_lo[pair & lo_mask..].as_ptr());
+            p1_wide.mul_acc(eqx4, g1x4);
+            pinf_wide.mul_acc(eqx4, g_inf_x4);
+            pair += 4;
+        }
+
+        // Small instances (and short live runs) can leave a 1- to 3-pair tail.
+        while pair < pe {
+            let x0l = 2 * (pair - out_base);
+            let x1l = x0l + 1;
+            if is_dead(pair) {
+                kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                pair += 1;
+                continue;
+            }
+
+            let x0g = 2 * pair;
+            let x1g = x0g + 1;
+            let [a0, a1, b0, b1] = fold_round2_pair_x86_unchecked_8(
+                table_ptr,
+                a_pkt_ptr.add(x0g * 8),
+                a_pkt_ptr.add(x1g * 8),
+                b_pkt_ptr.add(x0g * 8),
+                b_pkt_ptr.add(x1g * 8),
+            );
+            a_out[x0l] = a0;
+            a_out[x1l] = a1;
+            b_out[x0l] = b0;
+            b_out[x1l] = b1;
+            let eq_l = eq_lo[pair & lo_mask];
+            p1_acc ^= eq_l.mul_unreduced(a1 * b1);
+            pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
+            pair += 1;
+        }
+
+        p1_acc ^= p1_wide.fold();
+        pinf_acc ^= pinf_wide.fold();
+    }
+
+    (p1_acc, pinf_acc)
+}
+
 /// Round-2's inner loop: fold the pairs `[ps, pe)` — which must all share one
 /// `x_hi` block, so one hoisted `eq_hi` factor covers the run — and return the
 /// run's UNREDUCED message accumulators.
@@ -652,6 +765,18 @@ fn fold_pair_run<D>(
 where
     D: Fn(usize) -> bool + Sync,
 {
+    // agg-mldsa patch (PATCH.md Section 3): the AVX-512 body is chosen at run time.
+    #[cfg(target_arch = "x86_64")]
+    if has(AVX512_CLMUL) {
+        // SAFETY: the runtime check guarantees the kernel's target features; the
+        // caller's geometry contract is forwarded unchanged.
+        return unsafe {
+            fold_pair_run_x86_avx512(
+                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe,
+                out_base, a_out, b_out,
+            )
+        };
+    }
     let lo_mask = lo_size - 1;
     let mut p1_acc = F256Unreduced::ZERO;
     let mut pinf_acc = F256Unreduced::ZERO;
@@ -765,104 +890,7 @@ where
             pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
         }
     }
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
-    unsafe {
-        let table_ptr = table.data.as_ptr();
-        let a_pkt_ptr = a_packed.as_ptr();
-        let b_pkt_ptr = b_packed.as_ptr();
-        let mut p1_wide = WideGhashX4::zero();
-        let mut pinf_wide = WideGhashX4::zero();
-        let mut pair = ps;
-
-        while pair + 4 <= pe {
-            let mut a0 = [F128::ZERO; 4];
-            let mut a1 = [F128::ZERO; 4];
-            let mut b0 = [F128::ZERO; 4];
-            let mut b1 = [F128::ZERO; 4];
-
-            for lane in 0..4 {
-                let p = pair + lane;
-                let x0l = 2 * (p - out_base);
-                let x1l = x0l + 1;
-                if is_dead(p) {
-                    kill_pair(a_out, b_out, x0l, x1l, write_dead);
-                    continue;
-                }
-
-                let x0g = 2 * p;
-                let x1g = x0g + 1;
-                let folded = fold_round2_pair_x86_unchecked_8(
-                    table_ptr,
-                    a_pkt_ptr.add(x0g * 8),
-                    a_pkt_ptr.add(x1g * 8),
-                    b_pkt_ptr.add(x0g * 8),
-                    b_pkt_ptr.add(x1g * 8),
-                );
-                [a0[lane], a1[lane], b0[lane], b1[lane]] = folded;
-                a_out[x0l] = a0[lane];
-                a_out[x1l] = a1[lane];
-                b_out[x0l] = b0[lane];
-                b_out[x1l] = b1[lane];
-            }
-
-            let a1x4 = f128x4_loadu(a1.as_ptr());
-            let b1x4 = f128x4_loadu(b1.as_ptr());
-            let a_sum_x4 = f128x4_set(a0[0] + a1[0], a0[1] + a1[1], a0[2] + a1[2], a0[3] + a1[3]);
-            let b_sum_x4 = f128x4_set(b0[0] + b1[0], b0[1] + b1[1], b0[2] + b1[2], b0[3] + b1[3]);
-            let g1x4 = ghash_mul_x4(a1x4, b1x4);
-            let g_inf_x4 = ghash_mul_x4(a_sum_x4, b_sum_x4);
-            // The run never crosses an x_hi boundary, so these 4 eq weights
-            // are in bounds whenever 4 pairs remain.
-            let eqx4 = f128x4_loadu(eq_lo[pair & lo_mask..].as_ptr());
-            p1_wide.mul_acc(eqx4, g1x4);
-            pinf_wide.mul_acc(eqx4, g_inf_x4);
-            pair += 4;
-        }
-
-        // Small instances (and short live runs) can leave a 1- to 3-pair tail.
-        while pair < pe {
-            let x0l = 2 * (pair - out_base);
-            let x1l = x0l + 1;
-            if is_dead(pair) {
-                kill_pair(a_out, b_out, x0l, x1l, write_dead);
-                pair += 1;
-                continue;
-            }
-
-            let x0g = 2 * pair;
-            let x1g = x0g + 1;
-            let [a0, a1, b0, b1] = fold_round2_pair_x86_unchecked_8(
-                table_ptr,
-                a_pkt_ptr.add(x0g * 8),
-                a_pkt_ptr.add(x1g * 8),
-                b_pkt_ptr.add(x0g * 8),
-                b_pkt_ptr.add(x1g * 8),
-            );
-            a_out[x0l] = a0;
-            a_out[x1l] = a1;
-            b_out[x0l] = b0;
-            b_out[x1l] = b1;
-            let eq_l = eq_lo[pair & lo_mask];
-            p1_acc ^= eq_l.mul_unreduced(a1 * b1);
-            pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
-            pair += 1;
-        }
-
-        p1_acc ^= p1_wide.fold();
-        pinf_acc ^= pinf_wide.fold();
-    }
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "vpclmulqdq"
-        )
-    )))]
+    #[cfg(not(target_arch = "aarch64"))]
     {
         let n_chunks = table.n_chunks;
         for pair in ps..pe {
@@ -1321,22 +1349,25 @@ pub fn fold_and_compute_round_pair_into(
             let a_in = &a[x_hi * chunk_in..(x_hi + 1) * chunk_in];
             let b_in = &b[x_hi * chunk_in..(x_hi + 1) * chunk_in];
 
-            #[cfg(all(
-                target_arch = "x86_64",
-                target_feature = "avx512f",
-                target_feature = "vpclmulqdq"
-            ))]
-            // SAFETY: chunk geometry supplies two inputs per output and two
-            // outputs per eq_lo value; features are guaranteed by the cfg.
-            let (p1, pinf) =
-                unsafe { fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo) };
-
-            #[cfg(not(all(
-                target_arch = "x86_64",
-                target_feature = "avx512f",
-                target_feature = "vpclmulqdq"
-            )))]
-            let (p1, pinf) = {
+            // agg-mldsa patch (PATCH.md Section 3): the AVX-512 kernel is chosen at
+            // run time.
+            #[cfg(target_arch = "x86_64")]
+            let simd = has(AVX512_CLMUL);
+            #[cfg(not(target_arch = "x86_64"))]
+            let simd = false;
+            let (p1, pinf) = if simd {
+                // SAFETY: chunk geometry supplies two inputs per output and two
+                // outputs per eq_lo value; features are checked at run time.
+                #[cfg(target_arch = "x86_64")]
+                {
+                    assert!(lo_size & 1 == 0, "lo_size must be even");
+                    assert!(a_in.len() == 2 * a_out.len() && b_in.len() == 2 * b_out.len());
+                    assert!(a_out.len() == 2 * eq_lo.len() && b_out.len() == a_out.len());
+                    unsafe { fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo) }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                unreachable!()
+            } else {
                 // Fold a_in→a_out and b_in→b_out at r_fold. The field layer
                 // selects the architecture kernel; this loop only consumes
                 // the resulting values to build the message.
@@ -1345,17 +1376,6 @@ pub fn fold_and_compute_round_pair_into(
 
                 let mut p1_acc = F256Unreduced::ZERO;
                 let mut pinf_acc = F256Unreduced::ZERO;
-                // x86: 4-wide deferred-reduction accumulators for the unrolled loop;
-                // the 2-wide tail still uses the scalar `*_acc` above, folded in
-                // before the final reduce.
-                #[cfg(all(
-                    target_arch = "x86_64",
-                    target_feature = "avx512f",
-                    target_feature = "vpclmulqdq"
-                ))]
-                // SAFETY: vpclmulqdq+avx512f guaranteed by the cfg gate.
-                let (mut p1_wide, mut pinf_wide) =
-                    unsafe { (WideGhashX4::zero(), WideGhashX4::zero()) };
 
                 // Unroll 4 x_lo's per iteration when lo_size % 4 == 0 (the common
                 // case for the fused path; falls back to 2-wide for lo_size==2 at
@@ -1395,27 +1415,6 @@ pub fn fold_and_compute_round_pair_into(
                         let g_inf_b = (a0_b + a1_b) * (b0_b + b1_b);
                         let g_inf_c = (a0_c + a1_c) * (b0_c + b1_c);
                         let g_inf_d = (a0_d + a1_d) * (b0_d + b1_d);
-                        // Deferred-reduction accumulate: on x86 widen all 8 products
-                        // 4 lanes at a time (eq_lo[x_lo_a..x_lo_a+4] is contiguous),
-                        // reduced once after the loop; else scalar mul_unreduced.
-                        #[cfg(all(
-                            target_arch = "x86_64",
-                            target_feature = "avx512f",
-                            target_feature = "vpclmulqdq"
-                        ))]
-                        // SAFETY: vpclmulqdq+avx512f guaranteed by the cfg gate; the
-                        // four eq values eq_lo[x_lo_a..x_lo_a+4] are in bounds (the
-                        // 4-wide loop runs only while x_lo + 4 <= lo_size == eq_lo.len()).
-                        unsafe {
-                            let eq4 = f128x4_loadu(eq_lo[x_lo_a..].as_ptr());
-                            p1_wide.mul_acc(eq4, f128x4_set(g1_a, g1_b, g1_c, g1_d));
-                            pinf_wide.mul_acc(eq4, f128x4_set(g_inf_a, g_inf_b, g_inf_c, g_inf_d));
-                        }
-                        #[cfg(not(all(
-                            target_arch = "x86_64",
-                            target_feature = "avx512f",
-                            target_feature = "vpclmulqdq"
-                        )))]
                         {
                             let eq_l_a = eq_lo[x_lo_a];
                             let eq_l_b = eq_lo[x_lo_a + 1];
@@ -1463,19 +1462,8 @@ pub fn fold_and_compute_round_pair_into(
                     x_lo += 2;
                 }
 
-                // Merge the 4-wide deferred accumulators with the scalar tail, then
-                // reduce once (reduction is F2-linear, so this equals the scalar
+                // Reduce once (reduction is F2-linear, so this equals the scalar
                 // Σ mul_unreduced then reduce).
-                #[cfg(all(
-                    target_arch = "x86_64",
-                    target_feature = "avx512f",
-                    target_feature = "vpclmulqdq"
-                ))]
-                // SAFETY: vpclmulqdq+avx512f+sse4.1 guaranteed by the cfg gate.
-                unsafe {
-                    p1_acc ^= p1_wide.fold();
-                    pinf_acc ^= pinf_wide.fold();
-                }
                 let p1 = p1_acc.reduce();
                 let pinf = pinf_acc.reduce();
                 (p1, pinf)
@@ -3128,12 +3116,7 @@ fn fold45_compact_chunk(
 mod tests {
     #[cfg(target_arch = "aarch64")]
     use crate::zerocheck::multilinear::fold_one_row_neon_unchecked_8;
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "avx512bw",
-        target_feature = "vpclmulqdq"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     use crate::zerocheck::multilinear::fold_round2_pair_x86_unchecked_8;
     use crate::{
         field::{F8, PHI_8_TABLE},
@@ -3620,11 +3603,7 @@ mod tests {
     }
 
     /// Four-row x86 lookup fold matches four independent scalar folds.
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn fold_round2_pair_x86_matches_scalar() {
         let mut rng = Rng::new(71);

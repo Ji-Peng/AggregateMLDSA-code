@@ -1,5 +1,5 @@
 # Vendored copy of flock-core from succinctlabs/flock at rev
-# 83f963e8ede6d9a85ec4762b0c018943b6f6542b with ONE prover-side patch (see PATCH.md):
+# 83f963e8ede6d9a85ec4762b0c018943b6f6542b with the changes listed in PATCH.md, among them:
 # the merged opening's per-column fold-table bake is skipped for short columns. The
 # workspace-inherited fields of the upstream manifest are inlined here; the sibling
 # Flock crates stay the pinned git dependencies of the root Cargo.toml.

@@ -7,9 +7,12 @@ use core::{
     mem::transmute,
 };
 
-use crate::field::{
-    F128, F256Unreduced,
-    gf2_128::x86_64::{WideGhashX4, f128x4_loadu, ghash_mul_x4},
+// agg-mldsa patch (PATCH.md Section 3): the GHASH primitives come from
+// `crate::simd::x86` (no `cfg(target_feature)` gate) and the AVX-512 kernel
+// carries its own `#[target_feature]`, so the caller can choose it at run time.
+use crate::{
+    field::{F128, F256Unreduced},
+    simd::x86::{WideGhashX4, f128x4_loadu, ghash_mul_x4},
 };
 
 /// Fold the four rows for one round-2 pair in parallel x86 SIMD registers.
@@ -23,11 +26,6 @@ use crate::field::{
 /// # Safety
 /// `table_data` must point to an 8 × 256 `F128` table and every row pointer
 /// must expose 8 readable bytes.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
 #[inline(always)]
 pub(crate) unsafe fn fold_round2_pair_x86_unchecked_8(
     table_data: *const F128,
@@ -62,12 +60,9 @@ pub(crate) unsafe fn fold_round2_pair_x86_unchecked_8(
 ///
 /// # Safety
 /// Input/output lengths must satisfy `input.len() == 2 * output.len()` and
-/// `output.len() == 2 * eq_lo.len()`. AVX-512F and VPCLMULQDQ are cfg-gated.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+/// `output.len() == 2 * eq_lo.len()`, with `eq_lo.len()` even. The CPU has
+/// AVX-512F, VPCLMULQDQ and SSE4.1.
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
 pub(crate) unsafe fn fold_and_message_x86_avx512(
     a_in: &[F128],
     b_in: &[F128],
@@ -81,7 +76,8 @@ pub(crate) unsafe fn fold_and_message_x86_avx512(
     debug_assert_eq!(a_out.len(), 2 * eq_lo.len());
 
     // Fold four adjacent output elements and return them in one ZMM.
-    #[inline(always)]
+    #[inline]
+    #[target_feature(enable = "avx512f,vpclmulqdq")]
     unsafe fn fold_x4(
         src: *const F128,
         r: __m512i,
@@ -99,7 +95,7 @@ pub(crate) unsafe fn fold_and_message_x86_avx512(
     }
 
     // SAFETY: the function's length invariants bound all loads/stores and the
-    // cfg gate supplies every intrinsic feature.
+    // caller checked every intrinsic feature at run time.
     unsafe {
         let r = _mm512_broadcast_i32x4(_mm_set_epi64x(r_fold.hi as i64, r_fold.lo as i64));
         // Select even/odd F128 lanes from two concatenated ZMM inputs. The same

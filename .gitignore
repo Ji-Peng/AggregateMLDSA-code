@@ -1,2 +1,3 @@
 target/
 *.log
+vendor/flock-core/Cargo.lock

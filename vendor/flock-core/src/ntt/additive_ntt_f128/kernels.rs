@@ -1,25 +1,18 @@
-//! Compile-time-selected leaf kernels for the F128 additive NTT.
+//! Leaf kernels for the F128 additive NTT.
 //!
 //! Transform scheduling and cache-blocking policy stay in the parent module;
 //! this module owns the architecture-specific operations on blocks of data.
+//! agg-mldsa patch (PATCH.md Section 3): the x86 AVX-512/VPCLMULQDQ kernels are
+//! chosen at run time (`crate::simd`) instead of by `cfg(target_feature)`.
 
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use crate::ntt::additive_ntt_f128::kernels::aarch64::{butterfly_block, butterfly_block_pair};
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-)))]
 use crate::ntt::additive_ntt_f128::kernels::portable::{
     butterfly_fused_2layer as butterfly_fused_2layer_portable,
     butterfly_fused_4layer_row as butterfly_fused_4layer_row_portable,
     butterfly_row_pair as butterfly_row_pair_portable,
 };
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+#[cfg(target_arch = "x86_64")]
 use crate::ntt::additive_ntt_f128::kernels::x86_64::{
     butterfly_fused_2layer as butterfly_fused_2layer_x86_64,
     butterfly_fused_4layer_row as butterfly_fused_4layer_row_x86_64,
@@ -34,32 +27,33 @@ mod portable;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 mod aarch64;
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+#[cfg(target_arch = "x86_64")]
 mod x86_64;
+
+/// True when the x86 AVX-512 fused kernels run (the parent's schedule fuses four
+/// layers per pass only then).
+#[inline]
+pub(super) fn x86_avx512_clmul() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::simd::has(crate::simd::AVX512_CLMUL)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
 
 #[inline]
 pub(super) fn butterfly_row_pair(top: &mut [F128], bot: &mut [F128], twiddle: F128) {
     debug_assert_eq!(top.len(), bot.len());
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
-    // SAFETY: the cfg gate guarantees the required target features.
-    unsafe {
-        butterfly_row_pair_x86_64(top, bot, twiddle);
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: the runtime check guarantees the required target features.
+        unsafe { butterfly_row_pair_x86_64(top, bot, twiddle) };
+        return;
     }
-
-    #[cfg(not(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    )))]
     butterfly_row_pair_portable(top, bot, twiddle);
 }
 
@@ -78,21 +72,12 @@ pub(super) fn butterfly_fused_2layer(
     debug_assert_eq!(a.len(), c.len());
     debug_assert_eq!(a.len(), d.len());
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
-    // SAFETY: the cfg gate guarantees the required target features.
-    unsafe {
-        butterfly_fused_2layer_x86_64(a, b, c, d, t_outer, t_inner_a, t_inner_b);
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: the runtime check guarantees the required target features.
+        unsafe { butterfly_fused_2layer_x86_64(a, b, c, d, t_outer, t_inner_a, t_inner_b) };
+        return;
     }
-
-    #[cfg(not(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    )))]
     butterfly_fused_2layer_portable(a, b, c, d, t_outer, t_inner_a, t_inner_b);
 }
 
@@ -123,22 +108,13 @@ pub(super) unsafe fn butterfly_fused_4layer_row(
     r: usize,
     twiddles: &[F128; 15],
 ) {
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
-    // SAFETY: target features are guaranteed by cfg; the caller owns the row
-    // geometry and disjointness contract.
-    unsafe {
-        butterfly_fused_4layer_row_x86_64(ptr, sixteenth, num_ntts, r, twiddles);
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: target features are checked at run time; the caller owns the row
+        // geometry and disjointness contract.
+        unsafe { butterfly_fused_4layer_row_x86_64(ptr, sixteenth, num_ntts, r, twiddles) };
+        return;
     }
-
-    #[cfg(not(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    )))]
     // SAFETY: forwarded caller contract.
     unsafe {
         butterfly_fused_4layer_row_portable(ptr, sixteenth, num_ntts, r, twiddles);
@@ -221,4 +197,58 @@ pub(super) unsafe fn butterfly_neon_block_pair(
 pub(super) unsafe fn butterfly_neon_block_pair_chunk(chunk: &mut [F128], t_a: F128, t_b: F128) {
     // SAFETY: the cfg gate guarantees PMULL through the aes feature.
     unsafe { butterfly_block_pair(chunk, t_a, t_b) }
+}
+
+/// agg-mldsa patch (PATCH.md Section 3): each x86 kernel available on this CPU
+/// matches its portable counterpart bit for bit (lengths with and without a
+/// four-lane remainder).
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::{portable, x86_64, x86_avx512_clmul};
+    use crate::{field::F128, test_rng::Rng};
+
+    #[test]
+    fn x86_kernels_match_portable() {
+        if !x86_avx512_clmul() {
+            eprintln!("skipped: no avx512f+vpclmulqdq on this CPU");
+            return;
+        }
+        let mut rng = Rng::new(0xB07);
+        for len in [1usize, 3, 4, 8, 13, 64] {
+            let v: Vec<Vec<F128>> = (0..4).map(|_| rng.f128_vec(len)).collect();
+            let t = [rng.f128(), rng.f128(), rng.f128()];
+
+            let (mut p0, mut p1) = (v[0].clone(), v[1].clone());
+            let (mut x0, mut x1) = (v[0].clone(), v[1].clone());
+            portable::butterfly_row_pair(&mut p0, &mut p1, t[0]);
+            // SAFETY: features checked above; equal lengths.
+            unsafe { x86_64::butterfly_row_pair(&mut x0, &mut x1, t[0]) };
+            assert_eq!((p0, p1), (x0, x1), "row_pair len={len}");
+
+            let mut p = v.clone();
+            let mut x = v.clone();
+            let [pa, pb, pc, pd] = &mut p[..] else { unreachable!() };
+            portable::butterfly_fused_2layer(pa, pb, pc, pd, t[0], t[1], t[2]);
+            let [xa, xb, xc, xd] = &mut x[..] else { unreachable!() };
+            // SAFETY: features checked above; equal lengths.
+            unsafe { x86_64::butterfly_fused_2layer(xa, xb, xc, xd, t[0], t[1], t[2]) };
+            assert_eq!(p, x, "fused_2layer len={len}");
+        }
+        // Fused-4 rows: a 16 x sixteenth x num_ntts block, every row group r.
+        let tw: [F128; 15] = core::array::from_fn(|_| rng.f128());
+        for (sixteenth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16)] {
+            let block = rng.f128_vec(16 * sixteenth * num_ntts);
+            let mut p = block.clone();
+            let mut x = block.clone();
+            for r in 0..sixteenth {
+                // SAFETY: the buffers hold 16 * sixteenth rows of num_ntts lanes;
+                // calls are sequential.
+                unsafe {
+                    portable::butterfly_fused_4layer_row(p.as_mut_ptr(), sixteenth, num_ntts, r, &tw);
+                    x86_64::butterfly_fused_4layer_row(x.as_mut_ptr(), sixteenth, num_ntts, r, &tw);
+                }
+            }
+            assert_eq!(p, x, "fused_4layer_row sixteenth={sixteenth} num_ntts={num_ntts}");
+        }
+    }
 }

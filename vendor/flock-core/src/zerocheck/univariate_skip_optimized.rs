@@ -41,24 +41,13 @@ use {
     crate::zerocheck::univariate_skip_optimized::kernels::bit_transpose_64bytes_scalar,
 };
 
-#[cfg(all(
-    test,
-    any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "gfni")
-    )
-))]
+#[cfg(all(test, target_arch = "aarch64"))]
 use crate::zerocheck::univariate_skip_optimized::kernels::shift_reduce_inner_ab_scalar;
-#[cfg(all(
-    test,
-    target_arch = "x86_64",
-    target_feature = "gfni",
-    target_feature = "avx512f",
-    target_feature = "avx512bw"
-))]
-use crate::zerocheck::univariate_skip_optimized::kernels::x86_64::shift_reduce_inner_ab_x86_avx512;
-#[cfg(all(test, target_arch = "x86_64", target_feature = "gfni"))]
-use crate::zerocheck::univariate_skip_optimized::kernels::x86_64::shift_reduce_inner_ab_x86_sse;
+#[cfg(all(test, target_arch = "x86_64"))]
+use crate::zerocheck::univariate_skip_optimized::kernels::{
+    shift_reduce_inner_ab_scalar_oracle as shift_reduce_inner_ab_scalar,
+    x86_64::{shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse},
+};
 use crate::{
     field::{F8, F128, PHI_8_TABLE, mul_by_x, phi8},
     ntt::InvNttTableByteSingleGf8,
@@ -958,25 +947,12 @@ fn round1_shift_reduce_extract_c_packed_serial(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "gfni")
-    ))]
     use crate::zerocheck::univariate_skip_optimized::N_CHUNKS;
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "gfni")
-    ))]
     use crate::zerocheck::univariate_skip_optimized::shift_reduce_inner_ab_scalar;
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "gfni",
-        target_feature = "avx512f",
-        target_feature = "avx512bw"
-    ))]
-    use crate::zerocheck::univariate_skip_optimized::shift_reduce_inner_ab_x86_avx512;
-    #[cfg(all(target_arch = "x86_64", target_feature = "gfni"))]
-    use crate::zerocheck::univariate_skip_optimized::shift_reduce_inner_ab_x86_sse;
+    #[cfg(target_arch = "x86_64")]
+    use crate::zerocheck::univariate_skip_optimized::{
+        shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
+    };
     #[cfg(target_arch = "aarch64")]
     use crate::zerocheck::univariate_skip_optimized::{
         bit_transpose_64bytes_neon, bit_transpose_64bytes_scalar, shift_reduce_inner_ab_fused_neon,
@@ -1450,10 +1426,14 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "gfni"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn x86_gfni_sse_inner_matches_scalar_inner() {
         // The SSE/GFNI fallback must remain byte-identical to the scalar oracle.
+        if !crate::simd::has(crate::simd::GFNI) {
+            eprintln!("skipped: no gfni on this CPU");
+            return;
+        }
         let mut rng = Rng::new(0xF050D);
         let m = 14;
         let table = make_inv_table();
@@ -1482,7 +1462,7 @@ mod tests {
                 &mut a_col,
                 &mut b_col,
             );
-            // SAFETY: gated on gfni target feature.
+            // SAFETY: gfni checked at run time above.
             unsafe {
                 shift_reduce_inner_ab_x86_sse(
                     &a_packed,
@@ -1502,14 +1482,13 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "gfni",
-        target_feature = "avx512f",
-        target_feature = "avx512bw"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn x86_gfni_avx512_inner_matches_scalar_inner() {
+        if !crate::simd::has(crate::simd::AVX512_GFNI) {
+            eprintln!("skipped: no gfni+avx512bw on this CPU");
+            return;
+        }
         let mut rng = Rng::new(0xA5_512);
         let m = 14;
         let table = make_inv_table();
@@ -1537,7 +1516,7 @@ mod tests {
                 &mut a_col,
                 &mut b_col,
             );
-            // SAFETY: test is compiled only when all kernel features are active.
+            // SAFETY: the kernel features are checked at run time above.
             unsafe {
                 shift_reduce_inner_ab_x86_avx512(
                     &a_packed,

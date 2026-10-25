@@ -1,35 +1,20 @@
-// Every fn below is feature-gated, so the imports carry the union of their
-// users' predicates — a featureless x86_64 build must stay warning-free.
-#[cfg(target_feature = "gfni")]
+// agg-mldsa patch (PATCH.md Section 3): every kernel here carries its own
+// `#[target_feature(enable = ...)]` and is chosen at run time by the caller
+// (`crate::simd`), so no item is gated on `cfg(target_feature)`.
 use core::arch::x86_64::{
-    __m128i, _mm_gf2p8mul_epi8, _mm_loadu_si128, _mm_set1_epi8, _mm_setzero_si128,
-    _mm_storeu_si128, _mm_xor_si128,
-};
-#[cfg(any(
-    all(
-        target_feature = "avx512f",
-        target_feature = "avx512bw",
-        target_feature = "avx512vbmi"
-    ),
-    all(
-        target_feature = "gfni",
-        target_feature = "avx512f",
-        target_feature = "avx512bw"
-    ),
-    all(target_feature = "avx512f", target_feature = "vpclmulqdq")
-))]
-use core::arch::x86_64::{
-    __m512i, _mm512_and_si512, _mm512_gf2p8mul_epi8, _mm512_loadu_si512, _mm512_permutexvar_epi8,
-    _mm512_set1_epi8, _mm512_set1_epi64, _mm512_setzero_si512, _mm512_slli_epi64,
-    _mm512_srli_epi64, _mm512_storeu_si512, _mm512_xor_si512,
+    __m128i, __m512i, _mm_gf2p8mul_epi8, _mm_loadu_si128, _mm_set1_epi8, _mm_setzero_si128,
+    _mm_storeu_si128, _mm_xor_si128, _mm512_and_si512, _mm512_gf2p8mul_epi8,
+    _mm512_loadu_si512, _mm512_permutexvar_epi8, _mm512_set1_epi8, _mm512_set1_epi64,
+    _mm512_setzero_si512, _mm512_slli_epi64, _mm512_srli_epi64, _mm512_storeu_si512,
+    _mm512_xor_si512,
 };
 
-#[cfg(all(target_feature = "avx512f", target_feature = "vpclmulqdq"))]
-use crate::field::gf2_128::x86_64::{f128x4_set, ghash_mul_x4};
-#[cfg(all(target_feature = "avx512f", target_feature = "vpclmulqdq"))]
-use crate::zerocheck::univariate_skip_optimized::{ELL, F128, N_MEDIUM};
-#[cfg(target_feature = "gfni")]
-use crate::zerocheck::univariate_skip_optimized::{F8, InvNttTableByteSingleGf8, N_CHUNKS};
+use crate::{
+    simd::x86::{f128x4_set, ghash_mul_x4},
+    zerocheck::univariate_skip_optimized::{
+        ELL, F8, F128, InvNttTableByteSingleGf8, N_CHUNKS, N_MEDIUM,
+    },
+};
 
 /// AVX-512 (VBMI) 64-byte bit-transpose — direct port of the NEON two-stage
 /// algorithm. `_mm512_permutexvar_epi8` does the byte-gather (NEON `vqtbl4q`)
@@ -38,12 +23,6 @@ use crate::zerocheck::univariate_skip_optimized::{F8, InvNttTableByteSingleGf8, 
 ///
 /// Replaces `bit_transpose_64bytes_scalar` (512 branchy bit ops/call) — which
 /// profiling showed was ~85% of round1's time on x86.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "avx512bw",
-    target_feature = "avx512vbmi"
-))]
 #[target_feature(enable = "avx512vbmi,avx512bw,avx512f")]
 pub(crate) unsafe fn bit_transpose_64bytes_avx512(input: &[u8; 64], output: &mut [u8; 64]) {
     // Gather index = NEON IDX0 ++ IDX1 ++ IDX2 ++ IDX3 (the 8×8 byte transpose).
@@ -78,8 +57,7 @@ pub(crate) unsafe fn bit_transpose_64bytes_avx512(input: &[u8; 64], output: &mut
 /// writes two 64-byte columns, and this kernel multiplies them four XMM chunks
 /// at a time. Kept as the fallback for GFNI CPUs without AVX-512.
 #[inline]
-#[allow(dead_code)] // unused in native AVX-512 builds; exercised by its oracle test
-#[cfg(all(target_arch = "x86_64", target_feature = "gfni"))]
+#[allow(dead_code)] // the fallback for GFNI CPUs without AVX-512
 #[target_feature(enable = "gfni,sse2")]
 pub(crate) unsafe fn shift_reduce_inner_ab_x86_sse(
     a_packed: &[u8],
@@ -124,12 +102,6 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_sse(
 /// evaluations in one ZMM register; the product and x^k scaling stay 64-wide
 /// and register-resident through the final XOR accumulation.
 #[inline]
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "gfni",
-    target_feature = "avx512f",
-    target_feature = "avx512bw"
-))]
 #[target_feature(enable = "gfni,avx512f,avx512bw")]
 pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx512(
     a_packed: &[u8],
@@ -167,11 +139,6 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx512(
 /// scalar because their byte-selected addresses are irregular, while four
 /// lanes of each resulting F128 accumulator are multiplied by `eq_lo_val` in
 /// one VPCLMULQDQ batch before being XORed into the worker partials.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
 pub(crate) unsafe fn accumulate_convert_with_s_hat_v_x86_avx512(
     chunk_ab_bytes: &[[u8; ELL]; 1 << N_MEDIUM],
@@ -188,7 +155,7 @@ pub(crate) unsafe fn accumulate_convert_with_s_hat_v_x86_avx512(
 
     // SAFETY: the fixed-size input/partial arrays contain every four-lane load
     // and store below. Convert indices are `b_med * 256 + u8`, bounded by the
-    // 16*256-entry table. The cfg gate supplies both required target features.
+    // 16*256-entry table. The caller checked both required target features at run time.
     unsafe {
         let eq = f128x4_set(eq_lo_val, eq_lo_val, eq_lo_val, eq_lo_val);
         for lane in (0..ELL).step_by(4) {
