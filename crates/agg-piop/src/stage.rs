@@ -490,8 +490,8 @@ impl StageGroup<'_> {
 
 /// The linear path for group `g` (prover only; the round messages are the generic
 /// kernel's): an equality group on the full domain whose lanes are all integer tables read
-/// only by single-lane products (the stage-3 lookup-stack reductions), each lane also read
-/// by a generic group of the stage, which supplies its terminal value.
+/// only by single-lane products (the stage-3 reductions of the main lookup stack), each lane
+/// also read by a generic group of the stage, which supplies its terminal value.
 fn linear_group<'a>(
     spec: &StageSpec,
     g: usize,
@@ -501,10 +501,11 @@ fn linear_group<'a>(
     rounds: usize,
 ) -> Option<LinearIntGroup<'a>> {
     let point = eq_point.filter(|p| p.len() == rounds && rounds > 0)?;
-    let cells: Vec<&'a [i32]> = lanes
+    let cells: Vec<Source<'a>> = lanes
         .iter()
         .map(|lane| match lane {
-            Lane::Source(Source::Ints(cells)) => Some(*cells),
+            // Byte lanes stay on the generic kernel's coded path, which is faster for them.
+            Lane::Source(source @ Source::Ints(_)) => Some(*source),
             _ => None,
         })
         .collect::<Option<_>>()?;
@@ -604,13 +605,13 @@ fn split_linear<'a>(
             GroupInstance { gamma, terms }
         })
         .collect();
-    let (cells, coefficients): (Vec<&'a [i32]>, Vec<E>) = lanes
+    let (cells, coefficients): (Vec<Source<'a>>, Vec<E>) = lanes
         .iter()
         .zip(coefficients)
         .zip(&candidate)
         .filter(|(_, &c)| c)
         .map(|((lane, coefficient), _)| match lane {
-            Lane::Source(Source::Ints(cells)) => (*cells, coefficient),
+            Lane::Source(source @ Source::Ints(_)) => (*source, coefficient),
             _ => unreachable!("candidates are integer lanes"),
         })
         .unzip();

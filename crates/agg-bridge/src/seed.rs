@@ -73,7 +73,86 @@ pub fn column_input(sd: &[u8; SEED_BYTES], t: u64, zeta: u64) -> [u8; SEED_BYTES
     input
 }
 
-/// Fill `out` (length `k_t`) with the rows of column `zeta` of `level`.
+/// cSHAKE256's rate in bytes.
+const RATE: usize = 136;
+
+/// The column hash of spec 9.1 on the bare Keccak-f[1600] permutation: the state after
+/// cSHAKE256's `bytepad(encode_string("") || encode_string(S), 136)` block is computed
+/// once; a column XORs its 48-byte input with cSHAKE's padding (`0x04 .. 0x80`) into a copy
+/// and squeezes. One permutation per column (two past 136 output bytes), with none of the
+/// generic sponge's buffering; the output equals [`derive_column_into`]'s (test
+/// `keccak_columns_match_the_cshake_columns`).
+#[derive(Clone, Debug)]
+pub struct ColumnHasher {
+    prefix: [u64; 25],
+}
+
+impl Default for ColumnHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ColumnHasher {
+    /// The prefix state of [`BRIDGE_CUSTOMIZATION`].
+    #[must_use]
+    pub fn new() -> Self {
+        // left_encode(136) || left_encode(0) || left_encode(8 |S|) || S, zero padded.
+        let bits = 8 * BRIDGE_CUSTOMIZATION.len();
+        assert!(bits < 256, "a one-byte left_encode");
+        let mut block = [0_u8; RATE];
+        let mut head = vec![1, RATE as u8, 1, 0, 1, bits as u8];
+        head.extend_from_slice(BRIDGE_CUSTOMIZATION);
+        block[..head.len()].copy_from_slice(&head);
+        let mut prefix = [0_u64; 25];
+        absorb(&mut prefix, &block);
+        keccak::f1600(&mut prefix);
+        Self { prefix }
+    }
+
+    /// Fill `out` (length `k_t`) with the rows of column `zeta` of `level` (the reading rule
+    /// of [`derive_column_into`]).
+    pub fn column_into(&self, sd: &[u8; SEED_BYTES], level: &Level, zeta: usize, out: &mut [u32]) {
+        assert_eq!(out.len(), level.k, "one row per unit of column weight");
+        assert!(level.k <= level.rows(), "column weight above the row count");
+        let input = column_input(sd, level.t, zeta as u64);
+        let mut block = [0_u8; RATE];
+        block[..input.len()].copy_from_slice(&input);
+        block[input.len()] ^= 0x04;
+        block[RATE - 1] ^= 0x80;
+        let mut state = self.prefix;
+        absorb(&mut state, &block);
+        let mask = (1_u32 << level.rows_log2) - 1;
+        let mut filled = 0;
+        while filled < out.len() {
+            keccak::f1600(&mut state);
+            let mut bytes = [0_u8; RATE];
+            for (chunk, lane) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&state) {
+                *chunk = lane.to_le_bytes();
+            }
+            for word in bytes.as_chunks::<2>().0 {
+                let row = u32::from(u16::from_le_bytes(*word)) & mask;
+                if !out[..filled].contains(&row) {
+                    out[filled] = row;
+                    filled += 1;
+                    if filled == out.len() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// XOR a rate block into the state (little-endian lanes).
+fn absorb(state: &mut [u64; 25], block: &[u8; RATE]) {
+    for (lane, chunk) in state.iter_mut().zip(block.as_chunks::<8>().0) {
+        *lane ^= u64::from_le_bytes(*chunk);
+    }
+}
+
+/// Fill `out` (length `k_t`) with the rows of column `zeta` of `level` (the generic cSHAKE256
+/// sponge; [`ColumnHasher`] computes the same on the bare permutation).
 pub fn derive_column_into(
     prefix: &CShake256,
     sd: &[u8; SEED_BYTES],
@@ -109,19 +188,20 @@ pub fn derive_column_into(
 #[must_use]
 pub fn derive_column(sd: &[u8; SEED_BYTES], level: &Level, zeta: usize) -> Vec<u32> {
     let mut out = vec![0_u32; level.k];
-    derive_column_into(&prefix_state(), sd, level, zeta, &mut out);
+    ColumnHasher::new().column_into(sd, level, zeta, &mut out);
     out
 }
 
 /// `M_t` of `sd` (columns derived in parallel).
 #[must_use]
 pub fn derive_matrix(sd: &[u8; SEED_BYTES], level: &Level) -> SparseMatrix {
-    let prefix = prefix_state();
+    let hasher = ColumnHasher::new();
     let mut entries = vec![0_u32; level.cols * level.k];
     entries
         .par_chunks_mut(level.k)
         .enumerate()
-        .for_each(|(zeta, column)| derive_column_into(&prefix, sd, level, zeta, column));
+        .with_min_len(1 << 10)
+        .for_each(|(zeta, column)| hasher.column_into(sd, level, zeta, column));
     SparseMatrix {
         rows: level.rows(),
         cols: level.cols,
@@ -152,6 +232,41 @@ pub fn derive_matrices_for(shape: &Shape, sd: &[u8; SEED_BYTES]) -> BridgeMatric
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keccak_columns_match_the_cshake_columns() {
+        let hasher = ColumnHasher::new();
+        let prefix = prefix_state();
+        for (s, sd) in [[0_u8; SEED_BYTES], [0xa5; SEED_BYTES], std::array::from_fn(|i| i as u8)]
+            .iter()
+            .enumerate()
+        {
+            for level in &LEVELS {
+                // Every column of a slice, plus columns that need more than 136 output bytes
+                // when the rows are few (forced with a tiny level below).
+                for zeta in (0..4096).chain([level.cols - 1]) {
+                    let (mut fast, mut slow) = (vec![0; level.k], vec![0; level.k]);
+                    hasher.column_into(sd, level, zeta, &mut fast);
+                    derive_column_into(&prefix, sd, level, zeta, &mut slow);
+                    assert_eq!(fast, slow, "seed {s}, level {}, column {zeta}", level.t);
+                }
+            }
+            // 100 distinct rows of 128 per column: every column reads past the first block
+            // of 68 words.
+            let tiny = Level {
+                t: 9,
+                rows_log2: 7,
+                cols: 64,
+                k: 100,
+            };
+            for zeta in 0..tiny.cols {
+                let (mut fast, mut slow) = (vec![0; 100], vec![0; 100]);
+                hasher.column_into(sd, &tiny, zeta, &mut fast);
+                derive_column_into(&prefix, sd, &tiny, zeta, &mut slow);
+                assert_eq!(fast, slow, "tiny level, column {zeta}");
+            }
+        }
+    }
 
     /// The reading rule of spec 9.1 written out independently: a fresh cSHAKE256 per
     /// column, the input assembled byte by byte, one 16-bit word per read.

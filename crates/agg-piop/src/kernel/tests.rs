@@ -689,7 +689,7 @@ fn dedicated_layer_groups_match_the_generic_group() {
             .collect();
         let mut generic = Group::new(generic_lanes(), instances, Some(&eq_point), vars, 3).expect("group");
         let mut linear =
-            LinearIntGroup::new(lanes.iter().map(Vec::as_slice).collect(), coefficients.clone(), &eq_point)
+            LinearIntGroup::new(lanes.iter().map(|l| Source::Ints(l)).collect(), coefficients.clone(), &eq_point)
                 .expect("linear");
         let expected = drive!(generic);
         let got = drive!(linear);

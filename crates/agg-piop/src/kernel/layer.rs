@@ -815,8 +815,19 @@ impl<'a> IntPairGroup<'a> {
 // ---------------------------------------------------------------------------------------
 
 struct LinearSource<'a> {
-    lanes: Vec<&'a [i32]>,
+    /// Integer or mapped byte lanes (never field lanes).
+    lanes: Vec<super::Source<'a>>,
     coefficients: Vec<E>,
+}
+
+/// The integer value of cell `i` of an integer or byte lane.
+#[inline(always)]
+fn int_cell(lane: &super::Source<'_>, i: usize) -> i64 {
+    match lane {
+        super::Source::Ints(cells) => i64::from(cells[i]),
+        super::Source::Bytes { cells, map } => map[cells[i] as u8 as usize],
+        super::Source::Field(_) => unreachable!("integer lanes only"),
+    }
 }
 
 impl Level0 for LinearSource<'_> {
@@ -835,7 +846,7 @@ impl Level0 for LinearSource<'_> {
         let cell = |i: usize| {
             let mut acc = Acc::zero();
             for (lane, &c) in self.lanes.iter().zip(&self.coefficients) {
-                mad_int(&mut acc, c, i64::from(lane[i]));
+                mad_int(&mut acc, c, int_cell(lane, i));
             }
             E::reduce_product(acc)
         };
@@ -868,18 +879,23 @@ impl Level0 for LinearSource<'_> {
     }
 }
 
-/// `sum_x eq(point, x) sum_l c_l f_l(x)` over integer lanes `f_l` (`|f_l| < 2^62`), as the
-/// single field lane `g = sum_l c_l f_l` built at the first fold. The group yields no
-/// terminal lane values (the caller reads the lanes' values from another group at the
-/// same point).
+/// `sum_x eq(point, x) sum_l c_l f_l(x)` over integer or byte lanes `f_l` (`|f_l| < 2^62`),
+/// as the single field lane `g = sum_l c_l f_l` built once. The group yields no terminal
+/// lane values (the caller reads the lanes' values from another group at the same point).
 pub struct LinearIntGroup<'a>(Engine<LinearSource<'a>>);
 
 impl<'a> LinearIntGroup<'a> {
-    /// `None` without lanes or with lanes of different lengths than `2^eq_point.len()`.
+    /// `None` without lanes, with a field lane, or with lanes of other lengths than
+    /// `2^eq_point.len()`.
     #[must_use]
-    pub fn new(lanes: Vec<&'a [i32]>, coefficients: Vec<E>, eq_point: &[E]) -> Option<Self> {
+    pub fn new(lanes: Vec<super::Source<'a>>, coefficients: Vec<E>, eq_point: &[E]) -> Option<Self> {
         let rows = 1_usize << eq_point.len();
-        if lanes.is_empty() || lanes.len() != coefficients.len() || lanes.iter().any(|l| l.len() != rows) {
+        if lanes.is_empty()
+            || lanes.len() != coefficients.len()
+            || lanes
+                .iter()
+                .any(|l| l.len() != rows || matches!(l, super::Source::Field(_)))
+        {
             return None;
         }
         Engine::new(LinearSource { lanes, coefficients }, eq_point).map(Self)

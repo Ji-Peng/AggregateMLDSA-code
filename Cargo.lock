@@ -127,6 +127,7 @@ dependencies = [
  "agg-witness",
  "flock-field",
  "jolt-field",
+ "keccak 0.1.6",
  "rayon",
  "sha3 0.10.9",
 ]
