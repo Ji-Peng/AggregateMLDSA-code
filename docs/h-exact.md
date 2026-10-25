@@ -65,11 +65,11 @@ estimate scaled from the measured Phase 7 run (`ref/notes/bench-cloud.md`, `be39
 
 | Relation | Id byte | Proven bounds `(B_z bar, B_u bar)` | `zeta'` | Status |
 | --- | ---: | --- | ---: | --- |
-| H (default) | 0 | `(2^17, 2^18)` (inclusive `[-2^17, 2^17 - 1]`, `[-2^18, 2^18 - 1]`) | 421,888 | implemented |
-| H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | this document |
+| H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8); replaced relaxed H `(2^17, 2^18)`, `zeta' = 421,888`, which used id 0 before wire version 3 |
+| H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9) |
 | S1+S2 (`fips`) | 2 | reserved (spec Appendix A) | 350,209 | witness only |
 
-The id equals `agg_witness::tables::Layout::id()` (0 H, 1 H-exact, 2 S1+S2) and the
+The id equals `agg_witness::tables::Layout::id()` (0 H-u, 1 H-exact, 2 S1+S2) and the
 `BatchTables` serialization layout byte, so one number names the relation everywhere.
 
 ### 1.2 Runtime parameter, not a cargo feature
