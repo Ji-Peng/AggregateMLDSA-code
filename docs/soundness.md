@@ -7,7 +7,7 @@
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7); 2026-10-25 (branch `pow-close`): H1 discharged (4.6), the composition proof (Section 12, H2 under assumptions (F), (K)), canonical Flock nonce width and the tie-search error (6.3, 6.5) |
+| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7); 2026-10-25 (branch `pow-close`): H1 discharged (4.6), the composition proof (Section 12, H2 under assumptions (F), (K)), canonical Flock nonce width and the tie-search error (6.3, 6.5); review of `pow-close`: part-site bad sets from the address alone (12.4), mode-B Corollary 12.5, spec 12.3 in two steps |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -738,6 +738,8 @@ exclude the extractor's run count as in Aerie. As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
 
+*Mode B* (public bits, no Flock): Corollary 12.5 gives the same statement without (F).
+
 ## 8. Costs at `N = 2^15` (default: `Slim`, span on)
 
 | Item | Proof bytes | Prover hashes (expected) |
@@ -921,7 +923,8 @@ change with it.
 4. **`R_F`** (Flock sites read by the verifier) is not counted exactly here; it enters only
    the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tie site; its Keccak side is
-   the public bits, so no Flock term.
+   the public bits, so no Flock term. Its soundness statement is Corollary 12.5 (no (F),
+   `sd` at most `theta' = 2^-143.64` per charged segment).
 6. **Akita sparse folds (resolved, 4.6).** The accepted (post-rejection) supports of every
    row of both catalogs are checked by `agg-pcs-config/tests/akita_fold_support.rs`: all at
    least `2^128.0881`. Hypothesis H1 of Section 7 is discharged.
@@ -1045,7 +1048,7 @@ stream is seeded by the PCS session digest, which binds every Flock byte absorbe
 `sd` and `X` are PIOP sites), so the rest of the proof is unchanged.
 
 The parts' sites satisfy (a) by item 2, and (b) by the bad sets of 12.4, which are defined
-from the part's own data.
+from the address alone (the part's own data and the PIOP prefix through `fs`).
 
 **Candidates, tests, binding, witness.** Every certificate below the root fold is a
 first-stage certificate `y` of Proposition 10.44: a prefix through `xi_f` passing every check
@@ -1134,8 +1137,12 @@ check determined by `xi_X`).
 
 **Item (vii)(a)** holds by definition. **Item (vii)(c):** a certificate in `Y_X` passes the
 test `R_PIOP(f; xi_X)`, which implies `C1` and every `C3_sigma` (12.2), and its prefix passes
-every check, so `D(xi_X; sigma_1) = 0`. **Item (vii)(b)**, stage by stage (a stage that does not
-act on the first false claim gets the empty set):
+every check, so `D(xi_X; sigma_1) = 0`. **Item (vii)(b)**, stage by stage. The two PIOP sites `sd`
+and `fs` read the complete linear prefix, so their bad sets may use all of it. The part
+sites (tie and Flock) read only their projected address, so their bad sets are defined from
+the address alone, for every input (whether or not the part's claim is the false one), as
+Lemma 12.3 (b) requires; the argument then shows that every other false claim persists for
+any answer:
 
 * `sd`. If `C1` is false it stays false. Otherwise (3.3) fails for a live record `i*` of a
   segment `sigma*`. Let `Bad_sd` be the set of seeds for which some tuple `(z_p)_p` over the
@@ -1157,22 +1164,32 @@ act on the first false claim gets the empty set):
   linear, so `M^(sigma*) b'_sigma*(z) = Y_sigma* = M^(sigma*) b_sigma*(f_1)`, which makes
   `C2_sigma*` true. Hence some `C4_p` is false.
 * The tie site of part `p` (address: the part's tie-challenger input, with `C_s^p`, `C_u^p`,
-  `y_digest`, the geometry and the nonce). If `C4_p` is false, let `Bad_tie` be the set of
-  `rho` for which some pair `(z, z')` with `Spg_p(z) and Uni_p(z')` but not `(Pub_p(z) and
-  Tie_p(z, z'))` satisfies all tested identities at `rho` (tie 1 for both lane groups, tie 2
-  for both lane groups, the outputs against `Y^_p(rho)`, the public words against the table).
-  For such a pair the first false identity is a nonzero multilinear polynomial in its free
+  `y_digest`, the geometry and the nonce). Its bad set is defined from the address alone:
+  `Bad_tie_p` is the set of `rho` for which some pair `(z, z') in Lambda(C_s^p) x
+  Lambda(C_u^p)` with `Spg_p(z) and Uni_p(z')` but not `(Pub_p(z) and Tie_p(z, z'))`
+  satisfies all tested identities at `rho` (tie 1 for both lane groups, tie 2 for both lane
+  groups, the outputs against `Y^_p(rho)`, the public words against the table). It is a
+  function of `C_s^p`, `C_u^p` (hence the two lists), the part's table `Y^_p` (from
+  `y_digest`, expanded by item 1), the part's public records `(mu_i, c~_i)` and the matrices
+  `M_t` of `sd` (both in the PIOP prefix through `fs`, which the address encodes by item 2);
+  it does not depend on `f_1`, on `C1`, on `Y_sigma`, on `C3_sigma` or on other parts. For
+  such a pair the first false identity is a nonzero multilinear polynomial in its free
   coordinates, and all identities holding at `rho` forces it to vanish there; the union over
   the pairs is the numerator `nu_tie` of Section 3.6, and with the work bits (Akita Remark
   10.18, Proposition 10.3 under (F)(iv)) the address weighs at most `2^-g_tie nu_tie / 2^128
-  <= 2^-128`. Outside `Bad_tie`, a pair with `Spg_p(z) and Uni_p(z')` and `V_p(z, z'; rho)`
-  would have `Pub_p(z) and Tie_p(z, z')`, hence `Val_p`, which `C4_p` excludes; so every pair
-  fails `Spg_p` or `Uni_p` (and then its codeword fails its instance from the first site on)
-  or fails `V_p`, and `C5_p` is false.
+  <= 2^-128`. Persistence for an answer outside `Bad_tie_p`: a failed check, a false `C1`, a
+  false `C2_sigma`, a false `C3_sigma` and a false claim of another part `q != p` (`C4_q` or
+  `C5_q`) do not depend on `rho` and stay false for every answer. If `C4_p` is false, a pair
+  with `Spg_p(z) and Uni_p(z')` and `V_p(z, z'; rho)` would have `Pub_p(z) and Tie_p(z,
+  z')`, hence `Val_p`, which `C4_p` excludes; so every pair fails `Spg_p` or `Uni_p` (and
+  then its codeword fails its instance from the first site on) or fails `V_p`, and `C5_p` is
+  false. If `C4_p` is true, some other claim is false (`D = 1`) and persists.
 * A Flock site `t` of the sponge instance of part `p` (the union's likewise): its bad set is
   Flock's set `B_t` of answers after which some codeword of `Lambda(C_s^p)` that fails the
-  instance at the address stops failing ((F)(ii); determined by the address; weight at most
-  `2^-128` with the scheduled work, K19). If `C5_p` is false and the answer avoids `B_t`,
+  instance at the address stops failing ((F)(ii); a function of the address alone, for every
+  input; weight at most `2^-128` with the scheduled work, K19). Every false claim other than
+  `C5_p` (a check, `C1`, `C2_sigma`, `C3_sigma`, a claim of another part, whose instances
+  this answer does not touch) persists for every answer. If `C5_p` is false and the answer avoids `B_t`,
   every pair still fails: a failed `V_p` depends only on `(z, z', rho)`, a failing `z` keeps
   failing, the union's codewords are untouched, and a message never revives a codeword
   ((F)(ii)). If both instances' verifiers accept, (F)(iii) gives codewords `z*`, `z'*` that do
@@ -1181,7 +1198,9 @@ act on the first false claim gets the empty set):
   `V_p(z*, z'*; rho)`, i.e. `C5_p`. So a false `C5_p` at the end of the part makes a Flock
   verifier or a value check reject, which is a check determined by every later input.
 
-This gives item (vii) for `l_1`, with Lemma 12.3's (a) and (b) for the part sites.
+This gives item (vii) for `l_1`, with Lemma 12.3's (a) and (b) for the part sites. The
+masses are those of Sections 3.5 and 3.6; defining the part sites' bad sets from the address
+alone changes none of them.
 
 **Lemma 12.4 (uniform seed density).** Except with probability `delta_X < 2^-(2^110)` over
 `H_X`, every nonzero `delta` in the level-1 input space of a segment (`J = 6 * 16 * 2^19 =
@@ -1257,6 +1276,30 @@ with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho 
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Section 10, max weight), tie sites `<= 2^-128` (3.6), `sd <=
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
 coordinates `<= 2^-128.088` (4.6). This is the bound of Section 7.
+
+**Corollary 12.5 (mode B).** Fix `N <= 2^15`, mode B (Flock profile id 3, deviation P9:
+the `w1Encode` strings of each segment's live records are the event-2 items, absorbed before
+`sd`; the event-6 proof items are empty), PIOP wire version 2 with the plan of Section 6
+(profile id 3, no tie site) and Akita's plan for the selected row. Then the statement of
+Section 7 holds for mode B without assumption (F) and without the terms `eps_fs`,
+`eps_merkle` and `R_F`, with the same extractor bound otherwise. *Proof.* The structure of
+12.2 with the same checkpoints at `sd` and `X`, and no tie or Flock sites (items 2 and 3 of
+12.1 are void). The public bits `b'` are fixed before `sd`, so the "lists" have one
+element. The verifier checks natively that every 6-bit value is below 44, that `c~_i =
+SHAKE256(mu_i || w1Encode(b'_i))` for every live record and that `Y_sigma = M^(sigma) b'_sigma`
+(P9); these are checks determined by the input of `X`. At `sd`, if `C1` holds but (3.3) fails
+for a live record `i*` of segment `sigma*` under `b(f_1)`, then `delta = b_sigma*(f_1) xor
+b'_sigma*` is nonzero (the native check holds for `b'`), and `Bad_sd = {sd : M^(sigma*)(sd)
+delta = 0}` has mass at most `theta' = 2^-143.64` on the event of Lemma 12.4 (one segment
+charged, the first false one). Outside it, `M^(sigma*) b_sigma*(f_1) != Y_sigma*` once
+`Y_sigma*` is sent, or the native projection check fails, so `C3_sigma*` is false or a check
+fails, and `D(xi_X; sigma_1) = 1` with no site in between (`fs` has no bad set). The segment
+of `X` is 12.3 unchanged; the bit check `b_t(r^(3)) = b'_t(r^(3))` after stage 3 (P9) is an
+additional verifier check and is not used in this bound (the seeded matrices bind on their
+own; the check is P9's matrix-independent second binding).
+Assumption (K) is not needed for the sponge (SHAKE256 is computed natively) or for the
+union. Every address weighs at most `2^-128` (PIOP sites as in Section 10, `sd` at most
+`2^-143.64`, Akita by its plan and 4.6), so the bound of 12.6 holds with `R_F = 0`.
 
 ### 12.7 What is not proved here
 
