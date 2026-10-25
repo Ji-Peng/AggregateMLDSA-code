@@ -20,7 +20,9 @@
 //! derived from the bridge seed as in spec 9.1 (`SeededMatrices`), so prover and verifier
 //! times include the derivation (verifier step `matrices`). Times are medians over the timed
 //! runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
-//! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds).
+//! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds). `AGG_RELATION=h-exact`
+//! proves and verifies relation H-exact (default `h-u`, `docs/h-exact.md`); the relation is
+//! printed in the header and in every row.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -140,6 +142,14 @@ fn median_steps(samples: &[VerifyTimings]) -> Vec<(&'static str, Duration)> {
     out
 }
 
+/// The relation of this run (`AGG_RELATION`, default H-u); prover and verifier children
+/// inherit the environment.
+fn relation() -> Relation {
+    std::env::var("AGG_RELATION").map_or(Relation::Hu, |v| {
+        Relation::parse(&v).unwrap_or_else(|| panic!("AGG_RELATION: h-u or h-exact, not {v:?}"))
+    })
+}
+
 fn steps_line(steps: &[(&'static str, Duration)]) -> String {
     steps
         .iter()
@@ -161,7 +171,7 @@ fn run_verifier(options: &Options, n: usize) {
     let base = rss_kib().unwrap_or(0);
     let mut uncached = Vec::new();
     for run in 0..options.warmup + options.verify_runs {
-        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
+        let report = verify_mode_b(&public, &bytes, &bridge, relation(), None);
         assert!(report.accepted(), "verify: {:?}", report.outcome);
         if run >= options.warmup {
             uncached.push(report.timings);
@@ -169,10 +179,10 @@ fn run_verifier(options: &Options, n: usize) {
     }
     let peak_uncached = peak_rss_kib().unwrap_or(0);
     let mut cache = KeyCache::default();
-    assert!(verify_mode_b(&public, &bytes, &bridge, Relation::Hu, Some(&mut cache)).accepted());
+    assert!(verify_mode_b(&public, &bytes, &bridge, relation(), Some(&mut cache)).accepted());
     let mut cached = Vec::new();
     for run in 0..options.warmup + options.verify_runs {
-        let report = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, Some(&mut cache));
+        let report = verify_mode_b(&public, &bytes, &bridge, relation(), Some(&mut cache));
         let verified = report.outcome.expect("verify with cached keys");
         assert_eq!(verified.expanded_keys, 0);
         if run >= options.warmup {
@@ -224,7 +234,7 @@ fn run_prover(options: &Options, n: usize) {
                 instance: &instance,
                 records: &inputs,
                 signatures: &signatures,
-                relation: Relation::Hu,
+                relation: relation(),
             },
             &bridge,
         )
@@ -339,7 +349,7 @@ fn main() {
         Role::Verifier(n) => return run_verifier(&options, n),
         Role::Driver => {}
     }
-    println!("mode-B benchmark, git {}", git_revision());
+    println!("mode-B benchmark, git {}, relation {}", git_revision(), relation());
     println!(
         "{}, threads {}, warmup {}, prove runs {}, verify runs {} (medians over the timed runs)",
         agg_bench::build_info(),
@@ -369,14 +379,15 @@ fn main() {
     }
     println!();
     println!(
-        "| N | prove (s) | verify uncached (ms) | verify cached (ms) | prover peak RSS (MiB) \
+        "| relation | N | prove (s) | verify uncached (ms) | verify cached (ms) | prover peak RSS (MiB) \
          | prover RSS before proving (MiB) | verifier peak RSS (MiB) | verifier RSS before verifying (MiB) \
          | aggregate (B) | of which public bits (B) | without bits (B) |"
     );
-    println!("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for row in &rows {
         println!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            relation(),
             field(row, "n"),
             field(row, "prove_s"),
             field(row, "verify_uncached_ms"),

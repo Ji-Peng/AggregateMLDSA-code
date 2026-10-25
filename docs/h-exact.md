@@ -774,9 +774,11 @@ the decisions below fill in or depart from Section 6.1.
 * **Measured at `N = 1,024`** (CLMUL build, Slim, 1 warmup + 1 rep, a shared machine, sanity
   only, `docs/cli.md` Section 4): aggregate 522,154 B against H-u's 522,138 B; PIOP bytes
   4,736 B and work nonces 391 B for both; prove 2.98 s against 2.90 s.
-* **Not done.** `agg-bench`'s mode-B harness still proves H-u only (6.1 item 23);
-  `ref/notes/status.md`, `ref/notes/msis-estimate.md` and the paper are outside the code
-  repository; the 32K cloud measurement of both relations is the next cloud run.
+* **Bench harness.** `agg-bench`'s mode-B harness takes `AGG_RELATION=h-exact` and prints
+  the relation in its header and in every row (6.1 item 23).
+* **Not done.** `ref/notes/status.md`, `ref/notes/msis-estimate.md` and the paper are
+  outside the code repository; the 32K cloud measurement of both relations is the next
+  cloud run.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 
