@@ -1018,25 +1018,33 @@ mod tests {
 
     #[test]
     fn fast_slim_and_secure_enable_every_non_ligerito_grinding_family() {
+        // agg-mldsa patch (PATCH.md section 5): the Johnson profiles (Fast, Slim, Slim8)
+        // grind the outer sites with the level-0 list factor; Secure (unique decoding)
+        // keeps upstream's schedule, which is the listed one at list 1.
         for profile in [
             LigeritoProfile::Fast,
             LigeritoProfile::Slim,
+            LigeritoProfile::Slim8,
             LigeritoProfile::Secure,
         ] {
             let mut params = default_params(22);
             params.profile = profile;
+            let list = match profile {
+                LigeritoProfile::Secure => 1,
+                _ => profile.l0_list_factor(),
+            };
             assert_eq!(
                 params.zerocheck_grinding(),
-                ZerocheckGrinding::per_challenge_128()
+                ZerocheckGrinding::per_challenge_128_listed(list)
             );
             assert_eq!(
                 params.lincheck_grinding(),
-                LincheckGrinding::per_challenge_128()
+                LincheckGrinding::per_challenge_128_listed(list)
             );
             assert_eq!(params.element_grinding(), Grinding::per_challenge_128());
             assert_eq!(
                 params.opening_grinding(),
-                OpeningGrinding::per_challenge_128()
+                OpeningGrinding::per_challenge_128_listed(list)
             );
             assert_eq!(
                 params.product_gkr_grinding(),
