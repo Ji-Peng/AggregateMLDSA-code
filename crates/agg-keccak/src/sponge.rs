@@ -97,10 +97,21 @@ impl SpongeRecord {
             let bit = MU_INPUT_BASE + 8 * i;
             words[bit / 64] |= u64::from(byte) << (bit % 64);
         }
-        for q in 0..W1_BITS {
-            if (self.w1_encode[q / 8] >> (q % 8)) & 1 == 1 {
-                let idx = W1_INPUT_BASE + w1_column(q);
-                words[idx / 64] |= 1 << (idx % 64);
+        // Stream bits q = 1536 rho + 6 j + t go to column 1024 t + 256 rho + j
+        // (`w1_column`): read the 6 bits of (rho, j) at once and set bit j of the
+        // (t, rho) run, 256 aligned bits per run.
+        debug_assert_eq!(W1_INPUT_BASE % 64, 0);
+        for rho in 0..W1_BITS / 1536 {
+            for j in 0..256 {
+                let q = 1536 * rho + 6 * j;
+                let lo = q / 8;
+                let pair = u16::from(self.w1_encode[lo])
+                    | self.w1_encode.get(lo + 1).map_or(0, |&b| u16::from(b) << 8);
+                let six = (pair >> (q % 8)) & 0x3f;
+                for t in 0..6 {
+                    let idx = W1_INPUT_BASE + 1024 * t + 256 * rho + j;
+                    words[idx / 64] |= u64::from((six >> t) & 1) << (idx % 64);
+                }
             }
         }
         words
@@ -199,6 +210,27 @@ pub fn bytes_to_words(bytes: &[u8]) -> Vec<F128> {
 mod tests {
     use super::*;
     use flock_core::test_rng::Rng;
+
+    /// `input_bits` equals the bit-by-bit definition through `w1_column`.
+    #[test]
+    fn input_bits_match_w1_column() {
+        let mut rng = Rng::new(0x1B);
+        for _ in 0..20 {
+            let r = random_record(&mut rng);
+            let mut want = vec![0u64; INPUT_BITS / 64];
+            for (i, &byte) in r.mu.iter().enumerate() {
+                let bit = MU_INPUT_BASE + 8 * i;
+                want[bit / 64] |= u64::from(byte) << (bit % 64);
+            }
+            for q in 0..W1_BITS {
+                if (r.w1_encode[q / 8] >> (q % 8)) & 1 == 1 {
+                    let idx = W1_INPUT_BASE + w1_column(q);
+                    want[idx / 64] |= 1 << (idx % 64);
+                }
+            }
+            assert_eq!(r.input_bits(), want);
+        }
+    }
 
     pub(crate) fn random_record(rng: &mut Rng) -> SpongeRecord {
         let mut mu = [0u8; MU_BYTES];

@@ -115,19 +115,35 @@ where
                     if v == [0u64; 8] {
                         continue;
                     }
-                    let dst = &mut out[64 * u..64 * u + 64];
-                    for (bit, d) in dst.iter_mut().enumerate() {
-                        let mut byte = 0u8;
-                        for (r, &x) in v.iter().enumerate() {
-                            byte |= (((x >> bit) & 1) as u8) << r;
-                        }
-                        *d = byte;
-                    }
+                    transpose_8x64(&v, &mut out[64 * u..64 * u + 64]);
                 }
             });
         j0 += cnt;
     }
     SlotBuffers { z, a, b, stripe }
+}
+
+/// `out[bit] = sum_r bit(v[r], bit) << r` for `bit < 64`: eight 8x8 bit-matrix
+/// transposes (byte `k` of every `v[r]` forms one matrix), three delta swaps each,
+/// instead of 512 single-bit moves.
+#[inline]
+fn transpose_8x64(v: &[u64; 8], out: &mut [u8]) {
+    debug_assert_eq!(out.len(), 64);
+    for k in 0..8 {
+        // Byte r of x is byte k of v[r]: row r, column c = bit 8k + c of v[r].
+        let mut x = 0u64;
+        for (r, &w) in v.iter().enumerate() {
+            x |= ((w >> (8 * k)) & 0xff) << (8 * r);
+        }
+        let t = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
+        x ^= t ^ (t << 7);
+        let t = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
+        x ^= t ^ (t << 14);
+        let t = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
+        x ^= t ^ (t << 28);
+        // Now byte c of x is column c: bit r = bit 8k + c of v[r].
+        out[8 * k..8 * k + 8].copy_from_slice(&x.to_le_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +152,24 @@ mod tests {
     use crate::gate::ChainSpec;
     use flock_core::lincheck::pack_z_lincheck;
     use flock_core::test_rng::Rng;
+
+    /// The delta-swap transpose equals the bit-by-bit definition.
+    #[test]
+    fn transpose_matches_bitwise() {
+        let mut rng = Rng::new(17);
+        for _ in 0..200 {
+            let v: [u64; 8] = core::array::from_fn(|_| rng.next_u64());
+            let mut got = [0u8; 64];
+            transpose_8x64(&v, &mut got);
+            for (bit, &g) in got.iter().enumerate() {
+                let mut want = 0u8;
+                for (r, &x) in v.iter().enumerate() {
+                    want |= (((x >> bit) & 1) as u8) << r;
+                }
+                assert_eq!(g, want, "bit {bit}");
+            }
+        }
+    }
 
     /// The packed buffers agree with Flock's canonical `pack_z_lincheck` and
     /// the BatchMajor addressing, dummy rows included.
