@@ -11,7 +11,7 @@
 use aerie_falcon::protocol::algebra::eq_evaluation;
 use jolt_field::{One, Zero};
 
-use crate::kernel::{evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, Term};
+use crate::kernel::{evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::transcript::{gamma_site, round_sites, Transcript, TranscriptError};
 use crate::OpeningField as E;
@@ -326,7 +326,7 @@ fn prove_stage_with<'a>(
     let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
     let rounds = manifest.d_main();
     let mut groups = Vec::with_capacity(spec.groups.len());
-    for group in &spec.groups {
+    for (g, group) in spec.groups.iter().enumerate() {
         let lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
         let instances: Vec<GroupInstance> = group
             .instances
@@ -337,10 +337,13 @@ fn prove_stage_with<'a>(
             })
             .collect();
         let eq_point = points.eq_point(group.eq, manifest, group.domain);
-        groups.push(
-            Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree)
-                .map_err(StageError::Internal)?,
-        );
+        if let Some(linear) = linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds) {
+            groups.push(StageGroup::Linear(linear));
+            continue;
+        }
+        groups.push(StageGroup::Generic(
+            Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
+        ));
     }
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut messages = Vec::with_capacity(rounds);
@@ -389,15 +392,134 @@ fn prove_stage_with<'a>(
         eprintln!("  rounds (ms): {}", per_round.join(" "));
     }
     let group_claims = groups.iter().fold(E::zero(), |acc, g| acc + g.claim());
-    if check && group_claims != claim {
+    if check && (group_claims != claim || groups.iter().any(|g| !g.consistent())) {
         return Err(StageError::Terminal(spec.stage));
     }
-    let lane_values = groups.iter().map(Group::terminal_values).collect();
+    let mut lane_values: Vec<Option<Vec<E>>> = groups.iter().map(StageGroup::terminal_values).collect();
+    // A linear group's lanes are read by another group at the same point (`linear_group`).
+    for g in 0..groups.len() {
+        if lane_values[g].is_some() {
+            continue;
+        }
+        let values = spec.groups[g]
+            .lanes
+            .iter()
+            .map(|&id| {
+                spec.groups
+                    .iter()
+                    .zip(&lane_values)
+                    .find_map(|(other, values)| {
+                        let position = other.lanes.iter().position(|&l| l == id)?;
+                        values.as_ref().map(|v| v[position])
+                    })
+                    .expect("a linear group's lane is read by a generic group")
+            })
+            .collect();
+        lane_values[g] = Some(values);
+    }
+    let lane_values = lane_values.into_iter().map(|v| v.expect("filled")).collect();
     Ok(StageRun {
         gammas,
         messages,
         point,
         lane_values,
+    })
+}
+
+/// A prover group of a stage: the generic kernel or the linear path of `kernel::layer`.
+#[allow(clippy::large_enum_variant)]
+enum StageGroup<'a> {
+    Generic(Group<'a>),
+    Linear(LinearIntGroup<'a>),
+}
+
+impl StageGroup<'_> {
+    fn round_message(&mut self, round: usize) -> Vec<E> {
+        match self {
+            Self::Generic(g) => g.round_message(round),
+            Self::Linear(g) => g.round_message(round),
+        }
+    }
+
+    fn bind(&mut self, round: usize, challenge: E) {
+        match self {
+            Self::Generic(g) => g.bind(round, challenge),
+            Self::Linear(g) => g.bind(round, challenge),
+        }
+    }
+
+    fn claim(&self) -> E {
+        match self {
+            Self::Generic(g) => g.claim(),
+            Self::Linear(g) => g.claim(),
+        }
+    }
+
+    fn consistent(&self) -> bool {
+        match self {
+            Self::Generic(_) => true,
+            Self::Linear(g) => g.terminal_consistent(),
+        }
+    }
+
+    fn terminal_values(&self) -> Option<Vec<E>> {
+        match self {
+            Self::Generic(g) => Some(g.terminal_values()),
+            Self::Linear(_) => None,
+        }
+    }
+}
+
+/// The linear path for group `g` (prover only; the round messages are the generic
+/// kernel's): an equality group on the full domain whose lanes are all integer tables read
+/// only by single-lane products (the stage-3 lookup-stack reductions), each lane also read
+/// by a generic group of the stage, which supplies its terminal value.
+fn linear_group<'a>(
+    spec: &StageSpec,
+    g: usize,
+    lanes: &[Lane<'a>],
+    instances: &[GroupInstance],
+    eq_point: Option<&[E]>,
+    rounds: usize,
+) -> Option<LinearIntGroup<'a>> {
+    let point = eq_point.filter(|p| p.len() == rounds && rounds > 0)?;
+    let cells: Vec<&'a [i32]> = lanes
+        .iter()
+        .map(|lane| match lane {
+            Lane::Source(Source::Ints(cells)) => Some(*cells),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let mut coefficients = vec![E::zero(); lanes.len()];
+    for instance in instances {
+        for term in &instance.terms {
+            match term {
+                Term::Product(read) if read.len() == 1 => coefficients[read[0]] += instance.gamma,
+                _ => return None,
+            }
+        }
+    }
+    let ids = &spec.groups[g].lanes;
+    let elsewhere = |id: &LaneId| {
+        spec.groups
+            .iter()
+            .enumerate()
+            .any(|(other, group)| other != g && group.lanes.contains(id) && !linear_shape(group))
+    };
+    if !ids.iter().all(elsewhere) {
+        return None;
+    }
+    LinearIntGroup::new(cells, coefficients, point)
+}
+
+/// True when a group spec has the shape [`linear_group`] may take (single-lane products
+/// only); such a group never supplies terminal values to another.
+fn linear_shape(group: &GroupSpec) -> bool {
+    group.instances.iter().all(|instance| {
+        instance
+            .terms
+            .iter()
+            .all(|term| matches!(term, Term::Product(read) if read.len() == 1))
     })
 }
 

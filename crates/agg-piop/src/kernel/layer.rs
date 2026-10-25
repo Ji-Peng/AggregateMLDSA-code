@@ -56,6 +56,11 @@ trait Level0: Sync {
     fn products(&self) -> &[(usize, usize)];
     /// The group's terminal lane values from the fully folded row.
     fn terminal(&self, row: &[E]) -> Vec<E>;
+    /// A materialized level-0 table (then the rounds run on it from the first, and
+    /// [`Self::first_item`] and [`Self::folded_row`] are never called).
+    fn initial_table(&self) -> Option<Vec<E>> {
+        None
+    }
     /// `[q(0), q(1), q_2]` of the first round with the equality weights `first`, `second`
     /// when the source has a faster path than [`Self::first_item`].
     fn first_round(&self, _first: &[E], _second: &[E]) -> Option<[E; 3]> {
@@ -134,6 +139,7 @@ impl<S: Level0> Engine<S> {
         if vars == 0 || source.rows() != 1 << vars {
             return None;
         }
+        let table = source.initial_table().unwrap_or_default();
         Some(Self {
             source,
             eq: GruenSplitEq::new(eq_point).ok()?,
@@ -142,7 +148,7 @@ impl<S: Level0> Engine<S> {
             claim: E::zero(),
             pending: Vec::new(),
             unfolded: None,
-            table: Vec::new(),
+            table,
         })
     }
 
@@ -163,6 +169,36 @@ impl<S: Level0> Engine<S> {
                 mad(&mut sums[1], b[i], b[j]);
             }
         }
+    }
+
+    /// `inner += weight * sums` for the sums the round needs (`q(1)` only when `full`,
+    /// `q_2` only with products).
+    #[inline]
+    fn add_weighted(&self, sums: [Acc; 3], weight: E, full: bool, inner: &mut [Acc; 3]) {
+        mad(&mut inner[0], weight, E::reduce_product(sums[0]));
+        if full {
+            mad(&mut inner[1], weight, E::reduce_product(sums[1]));
+        }
+        if !self.source.products().is_empty() {
+            mad(&mut inner[2], weight, E::reduce_product(sums[2]));
+        }
+    }
+
+    /// The weighted item of rows `a`, `b`; a purely linear summand is weighted directly.
+    #[inline]
+    fn weighted_item(&self, a: &[E], b: &[E], weight: E, full: bool, inner: &mut [Acc; 3]) {
+        if self.source.products().is_empty() {
+            for &l in self.source.linear() {
+                mad(&mut inner[0], weight, a[l]);
+                if full {
+                    mad(&mut inner[1], weight, b[l]);
+                }
+            }
+            return;
+        }
+        let mut sums = [Acc::zero(); 3];
+        self.table_item(a, b, full, &mut sums);
+        self.add_weighted(sums, weight, full, inner);
     }
 
     /// One pass: fold by the pending challenge (if any) into the next table, then (when
@@ -216,7 +252,14 @@ impl<S: Level0> Engine<S> {
             let mut inner = [Acc::zero(); 3];
             let mut block = start >> first_bits;
             for k in start..end {
-                let mut sums = [Acc::zero(); 3];
+                if evaluate && (k >> first_bits) != block {
+                    for (o, i) in outer.iter_mut().zip(&mut inner) {
+                        mad(o, second[block], E::reduce_product(*i));
+                        *i = Acc::zero();
+                    }
+                    block = k >> first_bits;
+                }
+                let weight = first[k & first_mask];
                 if keep {
                     let offset = (k - start) * 2 * width;
                     let len = (2 * width).min(out.len() - offset);
@@ -226,24 +269,15 @@ impl<S: Level0> Engine<S> {
                         continue;
                     }
                     let (a, b) = rows.split_at(width);
-                    this.table_item(a, b, full, &mut sums);
+                    this.weighted_item(a, b, weight, full, &mut inner);
                 } else if from_source {
+                    let mut sums = [Acc::zero(); 3];
                     this.source.first_item(k, full, &mut sums);
+                    this.add_weighted(sums, weight, full, &mut inner);
                 } else {
                     let a = &previous[2 * k * width..(2 * k + 1) * width];
                     let b = &previous[(2 * k + 1) * width..(2 * k + 2) * width];
-                    this.table_item(a, b, full, &mut sums);
-                }
-                if (k >> first_bits) != block {
-                    for (o, i) in outer.iter_mut().zip(&mut inner) {
-                        mad(o, second[block], E::reduce_product(*i));
-                        *i = Acc::zero();
-                    }
-                    block = k >> first_bits;
-                }
-                let weight = first[k & first_mask];
-                for (i, s) in inner.iter_mut().zip(sums) {
-                    mad(i, weight, E::reduce_product(s));
+                    this.weighted_item(a, b, weight, full, &mut inner);
                 }
             }
             if evaluate && start < end {
@@ -767,6 +801,108 @@ impl<'a> IntPairGroup<'a> {
     #[must_use]
     pub fn terminal_values(&self) -> Vec<E> {
         self.0.terminal_values()
+    }
+
+    /// The self-check of [`LayerGroup::terminal_consistent`].
+    #[must_use]
+    pub fn terminal_consistent(&self) -> bool {
+        self.0.terminal_consistent()
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// A linear combination of integer lanes.
+// ---------------------------------------------------------------------------------------
+
+struct LinearSource<'a> {
+    lanes: Vec<&'a [i32]>,
+    coefficients: Vec<E>,
+}
+
+impl Level0 for LinearSource<'_> {
+    fn width(&self) -> usize {
+        1
+    }
+
+    fn rows(&self) -> usize {
+        self.lanes[0].len()
+    }
+
+    /// `g = sum_l c_l f_l` on every cell (four products per cell at the L16 stacks, half
+    /// of what the first round and the first fold would cost on the integer lanes).
+    fn initial_table(&self) -> Option<Vec<E>> {
+        let cell = |i: usize| {
+            self.lanes
+                .iter()
+                .zip(&self.coefficients)
+                .fold(E::zero(), |acc, (lane, &c)| acc + fmi(c, i64::from(lane[i])))
+        };
+        let rows = self.rows();
+        Some(if rows >= MIN_PARALLEL_ITEMS {
+            (0..rows).into_par_iter().with_min_len(1 << 10).map(cell).collect()
+        } else {
+            (0..rows).map(cell).collect()
+        })
+    }
+
+    fn first_item(&self, _: usize, _: bool, _: &mut [Acc; 3]) {
+        unreachable!("the rounds run on the materialized table")
+    }
+
+    fn folded_row(&self, _: E, _: &<E as Fold>::Ctx, _: usize, _: &mut [E]) {
+        unreachable!("the rounds run on the materialized table")
+    }
+
+    fn linear(&self) -> &[usize] {
+        &[0]
+    }
+
+    fn products(&self) -> &[(usize, usize)] {
+        &[]
+    }
+
+    fn terminal(&self, _: &[E]) -> Vec<E> {
+        Vec::new()
+    }
+}
+
+/// `sum_x eq(point, x) sum_l c_l f_l(x)` over integer lanes `f_l` (`|f_l| < 2^62`), as the
+/// single field lane `g = sum_l c_l f_l` built at the first fold. The group yields no
+/// terminal lane values (the caller reads the lanes' values from another group at the
+/// same point).
+pub struct LinearIntGroup<'a>(Engine<LinearSource<'a>>);
+
+impl<'a> LinearIntGroup<'a> {
+    /// `None` without lanes or with lanes of different lengths than `2^eq_point.len()`.
+    #[must_use]
+    pub fn new(lanes: Vec<&'a [i32]>, coefficients: Vec<E>, eq_point: &[E]) -> Option<Self> {
+        let rows = 1_usize << eq_point.len();
+        if lanes.is_empty() || lanes.len() != coefficients.len() || lanes.iter().any(|l| l.len() != rows) {
+            return None;
+        }
+        Engine::new(LinearSource { lanes, coefficients }, eq_point).map(Self)
+    }
+
+    /// The current claim.
+    #[must_use]
+    pub fn claim(&self) -> E {
+        self.0.claim
+    }
+
+    /// The compressed message of `round`.
+    ///
+    /// # Panics
+    /// When rounds are called out of order.
+    pub fn round_message(&mut self, round: usize) -> Vec<E> {
+        self.0.round_message(round)
+    }
+
+    /// Bind the round's variable to `challenge`.
+    ///
+    /// # Panics
+    /// When rounds are called out of order.
+    pub fn bind(&mut self, round: usize, challenge: E) {
+        self.0.bind(round, challenge);
     }
 
     /// The self-check of [`LayerGroup::terminal_consistent`].
