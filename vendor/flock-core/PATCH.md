@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Two changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Three changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -38,8 +38,39 @@ same derivation reproduces the shipped `m*_slim.toml` byte for byte). Level-0 qu
 This is a verifier-visible addition (a new parameter set of an unchanged protocol): proofs
 under `Slim8` verify with this copy only, or with upstream Flock given the same configs.
 
+## 3. Verifier-visible: list-aware work at the outer sites (agg-mldsa deviation K19)
+
+`src/zerocheck.rs` (`ZerocheckGrinding`), `src/lincheck.rs` (`LincheckGrinding`),
+`src/pcs.rs` (`OpeningGrinding`), `src/pcs/jagged.rs` (`MultipointGrinding`),
+`src/pcs/ligerito.rs` (`LigeritoProfile::l0_list_factor`) and `src/pcs/commit.rs`
+(`PcsParams::{zerocheck, lincheck, opening}_grinding`).
+
+Why: the outer challenges of a Flock proof (zerocheck, lincheck, ring switch, transport claim
+batch, merged and multipoint rounds) are drawn before Ligerito's level-0 two-point binding,
+so the Flock paper (Appendix A "Security", Remark 11) charges each of them the level-0
+Johnson-list size `L_max = 1 / (2 eta sqrt(rho_0))`. Upstream's `per_challenge_128`
+schedules include it only at the transport claim batch (6 bits, assuming `log2 L < 6`), which
+leaves the other sites at about 122 to 124 work-normalized bits and `Slim8`'s claim batch at
+127.86 (agg-mldsa `docs/soundness.md` Sections 4.3, 4.4).
+
+The change: each policy gains `per_challenge_128_listed(list)` with `list = ceil(L_max)`
+(36, 50, 71 for `Fast`, `Slim`, `Slim8` at `eta = 0.02`; `l0_list_factor`) and grinds
+`floor(log2(numerator * list)) + 1` bits at every outer site: zerocheck initial point
+`bits(m list)`, skip point `bits(127 list)`, rounds `bits(2 list)`; lincheck `alpha` and each
+`beta` `bits(list)`, rounds `bits(2 list)`, skip point `bits((2^k - 1) list)`; ring switch
+`bits(7 list)`, claim batch `max(6, bits(list))`, merged rounds `bits(2 list)`; multipoint
+rounds `bits(2 list)` and batch `bits((K - 1) list)`. `per_challenge_128()` is
+`per_challenge_128_listed(1)`, i.e. upstream's schedule; `PcsParams` selects the listed
+schedules for `Fast`, `Slim` and `Slim8` (`Secure`, unique decoding, and the `*100` profiles
+are unchanged). The AG-basis skip points keep upstream's bits (not used by agg-mldsa). The
+proof bytes do not change (nonces are 8-byte words); the transcript validity rule does, so
+proofs made with this copy do not verify with upstream and vice versa. This is the one
+verifier-visible protocol change of the vendored copy; it should be dropped if the Flock
+authors give an argument for the outer sites without the list factor.
+
 To regenerate: copy `crates/flock-core/{src,configs}` of the revision above here, write the
 `Cargo.toml` of this directory, re-apply the `ColSide::Short` hunk (three edits in
 `build_merged_weight_and_prime`: the enum variant and the `bake_columns` decision, the
 `Folded` claim arm, and the segment sweep arm), re-apply the `Slim8` arms, create empty
-`m{22..35}_slim8.toml` files and run the example to fill them.
+`m{22..35}_slim8.toml` files and run the example to fill them, then re-apply the listed
+schedules of Section 3.

@@ -129,6 +129,17 @@ pub enum LigeritoProfile {
 }
 
 impl LigeritoProfile {
+    /// agg-mldsa patch (PATCH.md section 3): `ceil(L_max)` of the level-0
+    /// Johnson list, `L_max = 1 / (2 eta sqrt(rho_0))` at the shipped level-0
+    /// slack `eta = 0.02`: `ceil(25 * 2^(log_inv_rate / 2))` = 36, 50, 71 for
+    /// rates 1/2, 1/4, 1/8. The outer challenges of a Flock proof are drawn
+    /// before the level-0 binding and carry this factor.
+    pub fn l0_list_factor(self) -> usize {
+        // ceil(sqrt(625 * 2^r)) = isqrt(625 * 2^r - 1) + 1 for non-squares and
+        // squares alike (625 * 2^r is a square only for even r).
+        (625usize << self.log_inv_rate()).saturating_sub(1).isqrt() + 1
+    }
+
     /// L0 code rate index for this profile (`rho_0 = 2^-log_inv_rate`).
     pub fn log_inv_rate(self) -> usize {
         match self {

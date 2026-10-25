@@ -90,21 +90,47 @@ pub static RS_TAIL_LOOKAHEAD_DISABLE: std::sync::atomic::AtomicBool =
 /// The policy is intentionally local to zerocheck. Other sumcheck families
 /// have different degrees and proof formats, so they define separate
 /// schedules.
+///
+/// agg-mldsa patch (vendor/flock-core/PATCH.md, section 3): `list` is the
+/// Johnson-list factor `ceil(L_max)` of the level-0 Ligerito commitment. The
+/// zerocheck challenges are drawn before Ligerito's level-0 two-point binding,
+/// so the Flock paper (Appendix A "Security", Remark 11) charges each of them
+/// `L_max` times its numerator; [`Self::per_challenge_128_listed`] grinds
+/// `bits_for(numerator * list)` bits. `list = 1` is upstream's schedule.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ZerocheckGrinding {
     enabled: bool,
+    list: usize,
 }
 
 impl ZerocheckGrinding {
     /// Legacy/default behaviour: no PoW operations and no nonce payload in
     /// the transcript.
     pub const fn disabled() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            list: 1,
+        }
     }
 
     /// Grind every zerocheck challenge whose soundness is being used.
     pub const fn per_challenge_128() -> Self {
-        Self { enabled: true }
+        Self::per_challenge_128_listed(1)
+    }
+
+    /// [`Self::per_challenge_128`] with every numerator multiplied by the
+    /// level-0 list factor `list >= 1` (agg-mldsa patch).
+    pub const fn per_challenge_128_listed(list: usize) -> Self {
+        assert!(list >= 1);
+        Self {
+            enabled: true,
+            list,
+        }
+    }
+
+    /// The list factor (1 without the agg-mldsa patch's lists).
+    pub const fn list(self) -> usize {
+        self.list
     }
 
     /// Number of leading-zero bits which strictly turns
@@ -123,7 +149,7 @@ impl ZerocheckGrinding {
     /// most `m`, so Schwartz--Zippel contributes at most `m / |F|` here.
     pub const fn initial_bits(self, m: usize) -> Option<u32> {
         if self.enabled {
-            Some(Self::bits_for_numerator(m))
+            Some(Self::bits_for_numerator(m * self.list))
         } else {
             None
         }
@@ -134,7 +160,7 @@ impl ZerocheckGrinding {
     /// `2^(K_SKIP + 1) - 1`.
     pub const fn skip_bits(self) -> Option<u32> {
         if self.enabled {
-            Some(Self::bits_for_numerator((1usize << (K_SKIP + 1)) - 1))
+            Some(Self::bits_for_numerator(((1usize << (K_SKIP + 1)) - 1) * self.list))
         } else {
             None
         }
@@ -159,7 +185,7 @@ impl ZerocheckGrinding {
     /// PoW before a standard degree-two tail-round challenge.
     pub const fn multilinear_round_bits(self) -> Option<u32> {
         if self.enabled {
-            Some(Self::bits_for_numerator(2))
+            Some(Self::bits_for_numerator(2 * self.list))
         } else {
             None
         }

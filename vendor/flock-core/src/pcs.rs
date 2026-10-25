@@ -234,6 +234,26 @@ impl OpeningGrinding {
         }
     }
 
+    /// agg-mldsa patch (PATCH.md section 3): the ring-switch point, the
+    /// transport claim batch and the merged rounds are drawn before Ligerito's
+    /// level-0 two-point binding, so each numerator carries the level-0
+    /// Johnson-list factor `list = ceil(L_max)` (Flock paper Appendix A,
+    /// Remark 11): `bits_for(7 list)`, `bits_for(list)` (at least upstream's 6,
+    /// which already priced the list for `log2 L < 6`), `bits_for(2 list)`.
+    pub const fn per_challenge_128_listed(list: usize) -> Self {
+        assert!(list >= 1);
+        const fn bits(n: usize) -> u32 {
+            usize::BITS - n.leading_zeros()
+        }
+        let claim = bits(list);
+        Self {
+            ring_switch_bits: bits(7 * list),
+            claim_batch_bits: if claim > 6 { claim } else { 6 },
+            merged_round_bits: bits(2 * list),
+            multipoint: MultipointGrinding::per_challenge_128_listed(list),
+        }
+    }
+
     pub const fn per_challenge_128() -> Self {
         Self {
             // 7 / 2^128, then a 2^-3 PoW filter.

@@ -783,6 +783,48 @@ mod tests {
     use crate::{gate::ChainSpec, keccak};
     use flock_core::test_rng::Rng;
 
+    /// The vendored Flock core's outer sites carry the level-0 Johnson list
+    /// (vendor/flock-core/PATCH.md Section 3, deviation K19, docs/soundness.md 4.3, 4.4).
+    #[test]
+    fn flock_outer_sites_carry_the_level0_list() {
+        use flock_core::{
+            lincheck::LincheckGrinding, pcs::ligerito::embedded_security_config,
+            pcs::OpeningGrinding, zerocheck::ZerocheckGrinding,
+        };
+        for (profile, list) in [(Profile::Fast, 36), (Profile::Slim, 50), (Profile::Slim8, 71)] {
+            let ligerito = profile.ligerito();
+            assert_eq!(ligerito.l0_list_factor(), list, "{profile:?}");
+            assert_eq!(profile.list_size(), list as u64 - u64::from(list != 50));
+            // The list factor assumes the shipped level-0 slack eta = 0.02.
+            let mut seen = 0;
+            for m in 22..=35 {
+                if let Some(toml) = embedded_security_config(m, ligerito) {
+                    let eta = toml.lines().find(|l| l.trim_start().starts_with("eta")).unwrap();
+                    assert_eq!(eta.split('=').nth(1).unwrap().trim(), "0.02", "m{m} {profile:?}");
+                    seen += 1;
+                }
+            }
+            assert!(seen >= 10, "{profile:?}: {seen} configs");
+        }
+        // docs/soundness.md 4.3, Fast / Slim / Slim8.
+        let z = ZerocheckGrinding::per_challenge_128_listed;
+        assert_eq!([36, 50, 71].map(|l| z(l).multilinear_round_bits()), [Some(7), Some(7), Some(8)]);
+        assert_eq!([36, 50, 71].map(|l| z(l).skip_bits()), [Some(13), Some(13), Some(14)]);
+        assert_eq!([36, 50, 71].map(|l| z(l).initial_bits(30)), [Some(11), Some(11), Some(12)]);
+        let lc = LincheckGrinding::per_challenge_128_listed;
+        assert_eq!([36, 50, 71].map(|l| lc(l).alpha_bits()), [Some(6), Some(6), Some(7)]);
+        assert_eq!([36, 50, 71].map(|l| lc(l).multilinear_round_bits()), [Some(7), Some(7), Some(8)]);
+        assert_eq!([36, 50, 71].map(|l| lc(l).skip_bits(6)), [Some(12), Some(12), Some(13)]);
+        let op = OpeningGrinding::per_challenge_128_listed;
+        assert_eq!([36, 50, 71].map(|l| op(l).ring_switch_bits), [8, 9, 9]);
+        assert_eq!([36, 50, 71].map(|l| op(l).claim_batch_bits), [6, 6, 7]);
+        assert_eq!([36, 50, 71].map(|l| op(l).merged_round_bits), [7, 7, 8]);
+        // List 1 is upstream's schedule.
+        assert_eq!(ZerocheckGrinding::per_challenge_128_listed(1), ZerocheckGrinding::per_challenge_128());
+        assert_eq!(LincheckGrinding::per_challenge_128().skip_bits(6), Some(6));
+        assert_eq!(OpeningGrinding::per_challenge_128_listed(1).ring_switch_bits, 3);
+    }
+
     /// Packed inputs and public words (input then output state) of `n`
     /// random Keccak-f instances.
     fn permutation_statement(n: usize, seed: u64) -> (Vec<Vec<u64>>, Vec<F128>) {
