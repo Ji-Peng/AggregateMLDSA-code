@@ -48,7 +48,7 @@ pub const GROUP_COUNT: usize = 6;
 pub const CATALOG_D_SIG: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Batch sizes (`d_sig`) whose relation-H-exact rows are generated and checked in.
-pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10];
+pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Relation byte of H-u: the proof header's flags byte and byte 3 of the event-0 bytes.
 pub const RELATION_HU: u8 = 0;

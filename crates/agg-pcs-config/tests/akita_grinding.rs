@@ -126,3 +126,69 @@ const PINNED: &[&str] = &[
     "5bca18a0a4efeee42d646b6b72c94baf1542843b75f6b805cf1e7775e15f6a31",
     "4f5a6026543ff6e0b2a80c74e633110d1f0bfd6fd8606413c6a4300284cd6eb2",
 ];
+
+/// The Akita plans of the 13 H-exact grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`,
+/// `G_main4` at 9 polynomials; `docs/h-exact.md` 2.3): the same checks as for H-u, the
+/// pinned digests below, and every digest distinct from the H-u row's.
+#[test]
+fn akita_plans_of_the_h_exact_rows_are_pinned() {
+    assert_eq!(
+        agg_pcs_config::catalogs::CATALOG_D_SIG_H_EXACT,
+        (3..=15).collect::<Vec<_>>().as_slice()
+    );
+    let mut digests = Vec::new();
+    let mut summaries = Vec::new();
+    for d_sig in 3..=15 {
+        let plan = row_plan(d_sig, Relation::HExact);
+        let digest = hex(&plan.digest().expect("digest"));
+        let got = summary(&plan);
+        eprintln!("H-exact d_sig {d_sig:>2}: {got:?} digest {digest}");
+        assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
+            && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
+        assert_ne!(digest, PINNED[d_sig - 3], "H-exact and H-u rows differ");
+        summaries.push(got);
+        digests.push(digest);
+    }
+    assert_eq!(summaries, H_EXACT_TABLE);
+    assert_eq!(
+        PINNED_H_EXACT,
+        digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice()
+    );
+}
+
+/// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the H-exact rows, `d_sig` 3 to 15: the
+/// H-u values except at `2^15` (sum g 1,135 instead of 1,137, work 8,336 instead of 9,872,
+/// nonce bits 4,432 instead of 4,434).
+const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
+    (401, 984, 9, 3_888, 3_863),
+    (401, 984, 9, 3_888, 3_863),
+    (401, 984, 9, 3_888, 3_863),
+    (401, 985, 10, 4_400, 3_864),
+    (401, 985, 10, 4_400, 3_864),
+    (401, 985, 10, 4_400, 3_864),
+    (406, 980, 10, 5_120, 3_894),
+    (388, 967, 12, 7_692, 3_755),
+    (430, 1_053, 12, 7_868, 4_135),
+    (452, 1_121, 12, 8_304, 4_369),
+    (455, 1_129, 12, 8_832, 4_398),
+    (457, 1_132, 12, 8_076, 4_415),
+    (459, 1_135, 12, 8_336, 4_432),
+];
+
+/// The plan digests of the 13 H-exact grouped rows at Akita `e023b6a` (the rows of
+/// `d_sig` 3 and 4 have equal plans).
+const PINNED_H_EXACT: &[&str] = &[
+    "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
+    "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
+    "3c7f512de2158f5a52f220bf935bba6820de5d928ed5d084c1605bcdcb7101be",
+    "01185ae60bede81716c9608108ff2f6fc1bc41af94439ca31c7a9579678bf75f",
+    "ba2caee4c3d80e55a959751cb48cd6075ad7dccd2b28406040b9fb112f2705b6",
+    "f0153fed842c41e57911c8ecdf379119ea8fa08b93c77dc71593c9535730c494",
+    "9160115448d61de194c42b1369e9626e6d30fa6b51100b65664538662a969234",
+    "a7d8e7e50e9b0402ba72af0345305a0d1c070b0483f53944ba0a33c41a2c8c11",
+    "67e98f69ea11397cf4c4abbfe1a3fa456e497985d98369efacd4b62265fb16ad",
+    "55c675e6d4c45961d664df219d6941b12e347f4ce776c4dcdaa0675eb83ced46",
+    "53d03cbb93960880cda4c7682edb9f70ebd62f51a6cc6482b5d3af454df34258",
+    "afac26e97405f1ea1d5f78763334e8eb94bcedbef6e2eb1b49ded43632ad7f5c",
+    "c3b8d59f1a2f75d62e1df74d33ca8fb96b44f4f066701805d819b052670f6355",
+];
