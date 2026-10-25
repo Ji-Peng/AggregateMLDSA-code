@@ -650,3 +650,137 @@ fn profile_stage_groups() {
         );
     }
 }
+
+/// The dedicated groups of `kernel::layer` against the generic group (the same round
+/// polynomials, bit for bit) on random tables, with challenges drawn per round.
+#[test]
+fn dedicated_layer_groups_match_the_generic_group() {
+    let mut rng = SplitMix64::new(4711);
+    for vars in [1_usize, 2, 5, 13] {
+        let rows = 1 << vars;
+        let eq_point = point(&mut rng, vars);
+        let ints = |rng: &mut SplitMix64, bound: u64| -> Vec<i32> {
+            (0..rows).map(|_| rng.below(2 * bound + 1) as i32 - bound as i32).collect()
+        };
+        let challenges: Vec<E> = (0..vars).map(|_| field(&mut rng)).collect();
+        // Runs a group through every round and returns the messages.
+        macro_rules! drive {
+            ($group:expr) => {{
+                let mut messages = Vec::new();
+                for (round, &r) in challenges.iter().enumerate() {
+                    messages.push($group.round_message(round));
+                    $group.bind(round, r);
+                }
+                messages
+            }};
+        }
+
+        // A linear combination of integer lanes.
+        let lanes: Vec<Vec<i32>> = (0..4).map(|_| ints(&mut rng, 1 << 15)).collect();
+        let coefficients: Vec<E> = (0..4).map(|_| field(&mut rng)).collect();
+        let generic_lanes = || lanes.iter().map(|l| Lane::Source(Source::Ints(l))).collect::<Vec<_>>();
+        let instances: Vec<GroupInstance> = coefficients
+            .iter()
+            .enumerate()
+            .map(|(l, &gamma)| GroupInstance {
+                gamma,
+                terms: vec![Term::Product(vec![l])],
+            })
+            .collect();
+        let mut generic = Group::new(generic_lanes(), instances, Some(&eq_point), vars, 3).expect("group");
+        let mut linear =
+            LinearIntGroup::new(lanes.iter().map(|l| Source::Ints(l)).collect(), coefficients.clone(), &eq_point)
+                .expect("linear");
+        let expected = drive!(generic);
+        let got = drive!(linear);
+        assert_eq!(expected, got, "linear, {vars} vars");
+        assert_eq!(generic.claim(), linear.claim());
+        assert!(linear.terminal_consistent());
+
+        // A field weight times an integer combination, without an equality factor.
+        {
+            let weight: Vec<E> = (0..rows).map(|_| field(&mut rng)).collect();
+            let lo = ints(&mut rng, 1 << 15);
+            let hi: Vec<i8> = (0..rows).map(|_| rng.below(8) as i8 - 4).collect();
+            let gamma = field(&mut rng);
+            let lanes = vec![
+                Lane::Source(Source::Field(&weight)),
+                Lane::Source(Source::Ints(&lo)),
+                Lane::column(&hi),
+            ];
+            let instances = vec![GroupInstance {
+                gamma,
+                terms: vec![Term::Affine {
+                    weight: Some(0),
+                    lanes: vec![(1, 1), (2, 1 << 16)],
+                    constant: 1 << 15,
+                }],
+            }];
+            let sources = [Source::Field(&weight), Source::Ints(&lo), Source::Bytes { cells: &hi, map: &IDENTITY_MAP }];
+            let mut generic = Group::new(lanes, instances, None, vars, 3).expect("group");
+            let mut weighted =
+                WeightIntGroup::new(&sources, 0, &[0, 1, 1 << 16], 1 << 15, gamma, vars).expect("weighted");
+            let expected = drive!(generic);
+            let got = drive!(weighted);
+            assert_eq!(expected, got, "weighted, {vars} vars");
+            assert_eq!(generic.terminal_values(), weighted.terminal_values());
+            assert!(weighted.terminal_consistent());
+        }
+
+        // Integer pairs without and with M lanes.
+        for with_m in [false, true] {
+            let s = [ints(&mut rng, 1 << 16), ints(&mut rng, 1 << 16)];
+            let m = [ints(&mut rng, 1 << 30), ints(&mut rng, 1 << 30)];
+            let c: [E; 5] = std::array::from_fn(|_| field(&mut rng));
+            let mut lanes = vec![Lane::Source(Source::Ints(&s[0])), Lane::Source(Source::Ints(&s[1]))];
+            let mut instances = vec![
+                GroupInstance { gamma: c[0], terms: vec![Term::Product(vec![])] },
+                GroupInstance { gamma: c[1], terms: vec![Term::Product(vec![0]), Term::Product(vec![1])] },
+                GroupInstance { gamma: c[2], terms: vec![Term::Product(vec![0, 1])] },
+            ];
+            if with_m {
+                lanes.push(Lane::Source(Source::Ints(&m[0])));
+                lanes.push(Lane::Source(Source::Ints(&m[1])));
+                instances[2].terms.extend([Term::Product(vec![2]), Term::Product(vec![3])]);
+                instances.push(GroupInstance { gamma: c[3], terms: vec![Term::Product(vec![0, 3]), Term::Product(vec![1, 2])] });
+                instances.push(GroupInstance { gamma: c[4], terms: vec![Term::Product(vec![2, 3])] });
+            }
+            let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
+            let m_lanes = with_m.then(|| [m[0].as_slice(), m[1].as_slice()]);
+            let mut pair = IntPairGroup::new([&s[0], &s[1]], m_lanes, c, &eq_point).expect("pair");
+            let expected = drive!(generic);
+            let got = drive!(pair);
+            assert_eq!(expected, got, "pair, M {with_m}, {vars} vars");
+            assert_eq!(generic.terminal_values(), pair.terminal_values());
+            assert!(pair.terminal_consistent());
+        }
+
+        // The layer group of three trees.
+        let layers: Vec<(Vec<E>, Vec<E>)> = (0..3)
+            .map(|_| ((0..2 * rows).map(|_| field(&mut rng)).collect(), (0..2 * rows).map(|_| field(&mut rng)).collect()))
+            .collect();
+        let gammas: Vec<(E, E)> = (0..3).map(|_| (field(&mut rng), field(&mut rng))).collect();
+        let mut lanes = Vec::new();
+        let mut instances = Vec::new();
+        for (t, ((p, q), &(gp, gq))) in layers.iter().zip(&gammas).enumerate() {
+            let (p0, p1) = p.split_at(rows);
+            let (q0, q1) = q.split_at(rows);
+            lanes.extend([p0, p1, q0, q1].map(|c| Lane::Source(Source::Field(c))));
+            let (a, b, c, d) = (4 * t, 4 * t + 1, 4 * t + 2, 4 * t + 3);
+            instances.push(GroupInstance { gamma: gp, terms: vec![Term::Product(vec![a, d]), Term::Product(vec![b, c])] });
+            instances.push(GroupInstance { gamma: gq, terms: vec![Term::Product(vec![c, d])] });
+        }
+        let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
+        let trees = layers
+            .iter()
+            .zip(&gammas)
+            .map(|((p, q), &(gamma_p, gamma_q))| LayerTree { p, q, gamma_p, gamma_q })
+            .collect();
+        let mut layer = LayerGroup::new(trees, &eq_point).expect("layer");
+        let expected = drive!(generic);
+        let got = drive!(layer);
+        assert_eq!(expected, got, "layer, {vars} vars");
+        assert_eq!(generic.terminal_values(), layer.terminal_values());
+        assert!(layer.terminal_consistent());
+    }
+}

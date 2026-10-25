@@ -407,6 +407,67 @@ break-even at 256 to 1,024 and 6% slower at 2,048 locally; the estimate of Secti
 (-32%) predates that kernel. Stage 3 stays at about 0.12 ms per signature: its four 16-bit
 columns are generic `Ints` lanes. The prover-side levers are in the Handoff.
 
+### 4.6 Dedicated prover paths (branch `piop-speed`, 2026-10-25)
+
+Prover only: the proof bytes are unchanged (the round polynomial of a session is unique, so
+any exact computation of it gives the same messages). The generic kernel stays as the
+fallback and as the reference: `lookup::tests::dedicated_paths_match_the_generic_kernel`
+proves every layout twice (`prove_with(.., dedicated)`) and compares proofs and claims byte
+for byte, and `kernel::tests::dedicated_layer_groups_match_the_generic_group` compares each
+dedicated group with `kernel::Group` message by message.
+
+1. *Session `D - 1` on integer lanes, shared by both challenges.* Node `w` of layer `D - 1`
+   of a stack has the leaves `a = v(w) - c`, `b = v(w + 2^(D-1)) - c` (`c` a centre of the
+   stack's stored values, `|a|, |b| <= 2^15`), so with `X' = X - shift - c`, `p = 2X' - S`
+   and `q = X'^2 - X'S + M` for `S = a + b`, `M = ab`. The session's lanes `P_c, Q_c` are
+   affine in the four `i32` lanes `S_0, S_1, M_0, M_1` (`c` the top bit of the node), which
+   do not depend on `X`. The summand of both trees of the stack,
+   `sum_X gamma_p (P_0 Q_1 + P_1 Q_0) + gamma_q Q_0 Q_1`, is the bipartite quadratic form
+   `c + c_s (S_0 + S_1) + c_m (M_0 + M_1 + S_0 S_1) + c_k (S_0 M_1 + S_1 M_0) + c_mm M_0 M_1`
+   with coefficients from the gammas and the powers of `X'` (`SymLanes::coefficients`). One
+   group of four integer lanes replaces two trees of four field lanes, and layer `D - 1` is
+   never stored: layer `D - 2` is built for every challenge in one pass over the leaves from
+   the elementary symmetric polynomials `e_1 .. e_4` of its four leaves (`q = X'^4 - e_1
+   X'^3 + e_2 X'^2 - e_3 X' + e_4`, `p = dq/dX'`, exact in `i64`). Stored layers halve
+   (8,192 signatures: 2,120 -> 1,062 MiB; `2^15`: about 8.3 -> 4.2 GiB, estimate). A
+   stack whose values spread over more than `2^16` (a dishonest witness) or of depth below 3
+   keeps the stored-layer path.
+2. *Bottom session and session `D - 1` on `kernel::IntPairGroup`.* The first round sums
+   exact `i64` products of the integer lanes weighted by the equality table without
+   reduction (`mad_int`: two `64 x 64` products per term); the table from the first fold on
+   holds `S_0 (, M_0)` and `W = C (1, S_1, M_1)`, so the summand is `W_0 + S_0 W_1 + M_0 W_2`
+   (one or two products per point, no coefficient).
+3. *Layer sessions on `kernel::LayerGroup`.* Per tree the lanes `L_1 = gamma_p P_0`,
+   `L_2 = Q_1`, `L_3 = gamma_p Q_0`, `L_4 = P_1 + (gamma_q / gamma_p) Q_1` give the summand
+   `L_1 L_2 + L_3 L_4`; one pass per round folds four rows into two and accumulates `q(0)`
+   and the leading coefficient (the linear one from the claim, Gruen's factorisation); the
+   first round reads the stored halves and computes `q(1)` too, so the group's claim comes
+   from its tables. About 12 `K`-products per pair and tree in later rounds against 16 on the
+   generic kernel, 18 against 24 in the first. A zero `gamma_p` (probability `2^-128`) falls
+   back to the generic group.
+4. *Tree build.* The branch-free product of the kernel (`fm`) and blocks filled in place
+   after a parallel first touch, instead of a parallel `unzip` of the generic product.
+
+Measured (lookup timing test, 2 challenges, interleaved runs of the generic and the
+dedicated paths in one process, `AGG_LOOKUP_AB=1`; local, shared machine, direction only):
+
+| `N` | threads | load average | generic | dedicated | trees | `s = D` | `s = D - 1` | `s = D - 2` |
+| ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- |
+| 1,024 | 1 | 5.4 to 7.7 | 1,261.9 ms | 909.9 ms | 207.9 -> 160.0 | 259.0 -> 245.7 | 373.0 -> 185.8 | 178.9 -> 135.9 |
+| 8,192 | 3 | 7.6 to 8.3 | 4,519.4 ms | 2,823.4 ms | 798.9 -> 564.5 | 840.2 -> 593.3 | 1,275.0 -> 475.9 | 667.6 -> 555.9 |
+
+(The first row is before the integer first round of item 2, which brought the bottom session
+at 1,024 from 246 to 203 ms in a later pair of runs.) In mode A at 8,192 signatures (CLMUL
+build, 3 threads, `agg bench --warmup 1 --reps 3`, load average 4.6 to 5.7, revisions
+`be398d8` and `9a53721`), event 7 went from 3,822.5 to 2,270.0 ms. The remaining cost is
+close to the arithmetic of the protocol: the tree build (about 0.5 s at 8,192 on 3 threads),
+the bottom session (one pass per round over `2^(D-1)` integer pairs) and the layer sessions
+`D - 2, D - 3` (two trees each). Levers not taken, with their estimates: session `D - 2`
+on the integer lanes `e_1 .. e_4` (a 5 x 5 bilinear form; the first round gets cheaper but
+the first fold dearer, net about 15% of that session plus 1 GiB of stored layers at 8,192,
+estimate); the small-value rounds 1 and 2 of the bottom session from the integers (about
+20% of that session, estimate); multi-way SIMD for the folds.
+
 ## 5. The module (`crates/agg-piop/src/lookup.rs`)
 
 The prototype's construction, now driven by the PIOP transcript:
@@ -435,20 +496,28 @@ The prototype's construction, now driven by the PIOP transcript:
   unit tests and timings).
 - `FractionTree`: layers `0 .. depth - 1` stored as `K` pairs, built in parallel from the
   leaves (the bottom layer straight from the `i32` cells: `1` `K`-multiplication per node;
-  upper layers `3`); layer `s` is freed after session `s`.
+  upper layers `3`); layer `s` is freed after session `s`. For a stack on the integer path
+  (Section 4.6, `SymLanes`) the layers stop at `depth - 2`, built for every challenge in one
+  pass (`stack_upper_bottoms`).
 - `prove_in(stacks, tables, multiplicities, challenges, transcript, check)` and
   `verify_in(shape, proof, transcript) -> LookupClaims`; `prove`/`verify` wrap them with
-  `Fs`. Section 1 exactly, through `kernel::{Group, GroupInstance, Lane::Source(Source::Field
-  | Source::Ints), Term::{Product, Affine}, evaluate_compressed, expected_terminal}` only.
+  `Fs`. Section 1 exactly; the verifier through `kernel::{Group, GroupInstance,
+  Lane::Source(Source::Field | Source::Ints), Term::{Product, Affine}, evaluate_compressed,
+  expected_terminal}` only, the prover on the dedicated groups of Section 4.6
+  (`kernel::{LayerGroup, IntPairGroup}`), whose split of the instances into groups differs
+  from the verifier's plan (`session_plan`) but whose messages, sums over the groups, do not.
   `check` runs the prover's root-identity and session self-checks (tests pass `false` to
   hand a dishonest witness to the verifier). The claims go to stage 3 (stacks) and to the
   multiplicity-digit claims (table).
-- Unit tests (`cargo test -p agg-piop --release --lib lookup`, 7 tests): as before (tree
+- Unit tests (`cargo test -p agg-piop --release --lib lookup`, 8 tests): as before (tree
   roots, digits, honest layouts at one and two challenges, two tables and a cross-table
   cheat, wrong multiplicities, tampered messages and claims, a swapped stack leaf pair
-  caught by the claim). The integrated tests are in `tests/stages.rs` (Section 6).
+  caught by the claim) and `dedicated_paths_match_the_generic_kernel` (Section 4.6). The
+  integrated tests are in `tests/stages.rs` (Section 6).
 - Ignored timing tests: `timing_at_1024_and_8192_signatures` (Section 4; sizes from
-  `AGG_LOOKUP_SIGS`, 7 threads, warmup plus five runs) and `grinding_rate`.
+  `AGG_LOOKUP_SIGS`, threads from `RAYON_NUM_THREADS` (default 7), challenge counts from
+  `AGG_LOOKUP_CHALLENGES` (default `1,2`), `AGG_LOOKUP_AB=1` alternates the generic and the
+  dedicated paths run by run; warmup plus five runs) and `grinding_rate`.
 
 ## 6. Integration (as implemented)
 
@@ -529,12 +598,11 @@ removed (L1). `agg-witness` and `agg-bridge` are unchanged; in `agg-cli` only
 
 ### Open
 
-1. Prover-side savings that keep the soundness of two challenges (measured costs, Section
-   4.5: lookup 0.28 ms per signature, stage 3 0.12 ms per signature at 2,048): one pass
-   building both tree sets (the trees are 98 of the 617 ms of the standalone lookup at 2,048),
-   the bottom layer recomputed instead of stored (Section 4.3), a dedicated layer-session path
-   (sessions `D - 1` and `D` are 179 and 123 ms there), and a 16-bit coded lane for the `Ints`
-   columns of stage 3 and of the bottom session.
+1. Done on branch `piop-speed` (Section 4.6; stage 3 in `docs/piop.md` Section 20): one pass
+   building layer `D - 2` of both tree sets, layer `D - 1` not stored (session `D - 1` on
+   integer lanes), dedicated layer and integer groups for every session, integer paths for
+   the bottom session and the stage-3 `Ints` columns. Remaining levers with estimates are at
+   the end of Section 4.6.
 2. `N = 8,192` and `2^15` on the cloud VM (only extrapolated here, Section 4.5).
 3. Grinding for the remaining field terms (`2^-116.2` before grinding, deviation P3).
 4. The spec's ledger counts each reduction instance as a `d_main/|K|` linear identity

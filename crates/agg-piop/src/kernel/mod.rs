@@ -36,6 +36,7 @@
 
 mod coded;
 mod field;
+mod layer;
 mod plan;
 #[cfg(test)]
 mod tests;
@@ -45,8 +46,10 @@ use jolt_field::{Field, Fold, One, Ring, Unreduced, Zero};
 use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
+pub(crate) use self::field::{fm, fmi};
+pub use self::layer::{IntPairGroup, LayerGroup, LayerTree, LinearIntGroup, WeightIntGroup};
 use self::coded::{code_column, masses, Column, ItemWeights, SegmentShape};
-use self::field::{fm, fold, lift, mad, plain_sum, split_sum, Acc, MIN_PARALLEL_ITEMS};
+use self::field::{fold, lift, mad, plain_sum, split_sum, Acc, MIN_PARALLEL_ITEMS};
 use self::plan::{Pieces, Plan};
 use crate::OpeningField as E;
 
@@ -140,11 +143,11 @@ impl Source<'_> {
             Self::Bytes { cells, map } => {
                 let low = map[cells[2 * k] as u8 as usize];
                 let high = map[cells[2 * k + 1] as u8 as usize];
-                E::from_i64(low) + fm(challenge, E::from_i64(high - low))
+                E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Ints(cells) => {
                 let (low, high) = (i64::from(cells[2 * k]), i64::from(cells[2 * k + 1]));
-                E::from_i64(low) + fm(challenge, E::from_i64(high - low))
+                E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Field(cells) => fold(&context, cells[2 * k], cells[2 * k + 1]),
         };

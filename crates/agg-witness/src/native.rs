@@ -449,18 +449,17 @@ pub fn verify_internal_trace(
     }
     let c_hat = fips.ntt_signed(&c_poly);
     let mut w_approx = [[0i64; N]; K];
-    let p = fips.p;
     for r in 0..K {
         let mut acc = [0u64; N];
         for s in 0..L {
             let prod = fips.pointwise(&key.a_hat[r][s], &z_hat[s]);
             for j in 0..N {
-                acc[j] = (acc[j] + prod[j]) % p;
+                acc[j] = fips.add_mod(acc[j], prod[j]);
             }
         }
         let ct = fips.pointwise(&c_hat, &key.t1_2d_hat[r]);
         for j in 0..N {
-            acc[j] = (acc[j] + p - ct[j]) % p;
+            acc[j] = fips.sub_mod(acc[j], ct[j]);
         }
         let w = fips.intt(&acc);
         for j in 0..N {
