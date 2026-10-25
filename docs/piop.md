@@ -1189,3 +1189,110 @@ integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP lev
 `tests/stages.rs`; mode-B round trips at 64, 256 and 1,024; end-to-end tampering in
 `tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
 `ref/notes/bench-local.md` (lookup integration) and `docs/lookup.md` Section 4.5.
+
+## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
+
+Plan Part 2, Section 2.2 (`ref/notes/plan-128bit-speed.md`): lookup, stage 3, instance and
+witness. Every change is prover only; the aggregates are byte-identical to `main` at 256,
+1,024 and 8,192 signatures (sha256 of `agg aggregate` on the same records, `be398d8` against
+this branch) and the full workspace suite passes.
+
+### 20.1 Dedicated groups (`kernel::layer`)
+
+The round polynomial of a group is unique, so a group may compute it any exact way.
+`kernel::layer` adds a round driver (`Engine`) for groups whose summand is a coefficient-free
+bilinear form `sum_l L_l + sum L_i L_j` on a row-major table of transformed lanes: one pass
+per round folds four rows into two by the previous challenge and accumulates `q(0)` and the
+leading coefficient of the inner polynomial on the new pair; the linear coefficient comes
+from the running claim (Gruen's factorisation of `eq`, as in `Group`); the first round reads
+the group's level-0 data and computes `q(1)` too (the group's claim comes from its tables).
+A self-check compares the final claim with `eq` times the summand at the terminal row.
+
+- `LayerGroup`: the layer group of a lookup session (`docs/lookup.md` Section 4.6 item 3).
+- `IntPairGroup`: integer lanes `S_0, S_1 (, M_0, M_1)` with the summand `c + c_s (S_0 + S_1)
+  + c_m (M_0 + M_1 + S_0 S_1) + c_k (S_0 M_1 + S_1 M_0) + c_mm M_0 M_1`; the first round on
+  exact `i64` products weighted without reduction (`field::mad_int`), the table holds
+  `S_0 (, M_0)` and `W = C (1, S_1, M_1)`. Used by the lookup's bottom session and session
+  `D - 1` (`docs/lookup.md` Section 4.6 items 1, 2).
+- `LinearIntGroup`: `sum_x eq(point, x) sum_l c_l f_l(x)` over integer lanes, as the single
+  field lane `g = sum_l c_l f_l` built once (unreduced products, one reduction per cell). It
+  yields no terminal lane values; the stage driver reads them from the generic group that
+  also reads the lanes at the same point.
+
+Field helpers: `fmi(x, k)` (field times a signed integer, two `64 x 64` products, branch
+free: the sign of a balanced digit is random) and `mad_int`; the generic kernel folds integer
+and byte lanes with `fmi` instead of a full product. Tests:
+`kernel::tests::dedicated_layer_groups_match_the_generic_group` (message by message against
+`Group` at 1, 2, 5 and 13 variables), `field::tests::{integer_product_matches,
+unreduced_integer_products_sum_exactly}`.
+
+### 20.2 Stage driver (`stage::prove_stage_with`)
+
+- A full-domain equality group whose lanes are all integer tables read only by single-lane
+  products, each lane also read by a generic group of the stage, runs on `LinearIntGroup`
+  (stage 3: the reduction of the main lookup stack, `Main eq Lookup(0)`, four 16-bit
+  columns).
+- `split_linear`: in any other full-domain equality group, the single-lane products and
+  unweighted affine terms on integer lanes read nowhere else move to one `LinearIntGroup` at
+  the same point; the lanes stay in the generic group, unread, so it still folds them and
+  yields their terminal values (stage 3 `Main eq R2`: the ring identity's terms on `U_lo,
+  V_lo, V_hi`). The two groups' messages sum to the original group's.
+- Byte lanes stay on the generic coded path: a linear group over the six bits (`Main eq R1`)
+  measured slower than the bucketed generic group (67 against 49 ms at 1,024, one thread).
+- `AGG_STAGE_TRACE` prints the construction time per group and attributes split groups to
+  their spec group.
+
+### 20.3 Instance, witness, events 3 to 5, scheduling
+
+- `agg_witness::ntt::NttPrime`: the products of the 256-point NTTs (about 66 per record in
+  the key expansion, `T`, `A z` by CRT and the strict FIPS verification) are reduced with
+  Barrett (`floor(2^64 / p)`) and the sums with branch-free conditional subtractions instead
+  of `%` by a run-time modulus (`ntt_timing`: 6.3 -> 3.7 us per transform, one core).
+- `agg_witness::derive::derive_with_t`: the witness reuses the instance's `T = c t1 2^d` when
+  the signature's `c~` is the instance's (else it recomputes); `public_t` adds `x^p t1` in
+  two straight (vectorized) loops instead of a branch per coefficient.
+- `agg_bridge::seed::ColumnHasher`: the bridge matrices (about a million columns, prover and
+  verifier) on the bare Keccak-f[1600] from the precomputed cSHAKE256 prefix state, one
+  permutation per column; equal to the cSHAKE256 path (test
+  `keccak_columns_match_the_cshake_columns`).
+- `prover::prove_with_tables`: the parity tables `y^(1)` of the stages (no challenge) are
+  built on the overlap thread beside the Flock prove of event 6.
+- Not done, by design: proving the Flock span concurrently with the lookup and the stages.
+  The data are independent, but the transcript is not: `FLOCK_PROOFS_SITE` is absorbed before
+  the lookup's `X` (`transcript.rs` registry), and every later challenge is squeezed from the
+  sponge that absorbed the Flock proof bytes, so the overlap needs a transcript change (wire
+  version, composition argument; profile lever P1), outside a prover-only branch.
+
+### 20.4 Measurements (local, shared machine, direction only)
+
+`agg bench --count N --warmup 1 --reps 3`, CLMUL build (`RUSTFLAGS="-C
+target-feature=+pclmulqdq"`), 3 threads on CPUs 0, 1, 3-15, the base `be398d8` and this
+branch at `9a53721` back to back:
+
+| Step | 8,192: base | 8,192: branch |
+| --- | ---: | ---: |
+| instance (ExpandA, mu, c, T) | 1,023.1 ms | 643.0 ms |
+| witness and `G_main` tables | 1,204.8 | 729.4 |
+| events 3-5: matrices, round 2 | 518.6 | 343.1 |
+| event 7: lookup | 3,822.5 | 2,270.0 |
+| stage 1 / 2 / 3 | 507.5 / 535.4 / 1,835.3 | 351.7 / 506.9 / 1,467.1 |
+| Flock parts (unchanged code) | 11,348.3 | 11,086.4 |
+| prove, median of 3 | 21,853.0 | 18,447.5 |
+| everything but the Flock parts | 10,504.7 | 7,361.0 |
+| verify uncached / cached | 1,162.5 / 684.5 | 913.5 / 538.8 |
+| prover peak RSS | 7,210 MiB | 7,053 MiB |
+
+Load average 5.7 -> 5.0 (base) and 5.0 -> 4.6 (branch). At 1,024 signatures (two alternated
+pairs, load average 4.5 to 6.5): prove 4,817 / 4,367 -> 4,643 / 3,644 ms, everything but the
+Flock parts 2,218 / 2,216 -> 1,778 / 1,527 ms, verify uncached 508 / 516 -> 344 / 331 ms.
+
+Against the plan's targets at `2^15` on the VM (lookup <= 1.5 s from 3.86 s, stage 3 <=
+1.0 s from 1.80 s, instance plus witness <= 1.0 s from 2.16 s), scaling the cloud figures by
+the local ratios gives about 2.3 s, 1.5 s and 1.4 s (estimates, not measured): the
+directions hold, the targets are not reached. What is left, with estimates: the stage-3
+weight `w_A` (about 0.3 s at 8,192 locally: four 256-point negacyclic kernels per record) and
+the weighted group `Main eq None` (an eq-free integer-times-weight group would halve it);
+the NTTs (a vectorized or Montgomery-lazy NTT, about 2x on half of the instance and a third
+of the witness); the lookup items listed at the end of `docs/lookup.md` Section 4.6; and the
+overlap of the Flock records and commit with the witness (lever P3, 0.3 to 0.5 s at `2^15`,
+estimate).
