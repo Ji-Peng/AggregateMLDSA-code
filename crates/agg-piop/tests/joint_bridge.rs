@@ -31,7 +31,8 @@ use agg_keccak::sponge::SpongeRecord;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{Column, CommitmentManifest};
 use agg_piop::prover::{
-    main_tables, prove, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveHooks,
+    main_tables, prove, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
+    ProveHooks,
     ProverInputs, ProverOutput, SeededMatrices,
 };
 use agg_piop::source_tables::{BridgeGroupTables, MainTables};
@@ -132,7 +133,7 @@ impl KeccakSide for FlockSide<'_, '_> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
         assert_eq!((seeds.len(), final_vectors.len()), (1, 1), "one segment");
         let committed = self
             .committed
@@ -155,7 +156,7 @@ impl KeccakSide for FlockSide<'_, '_> {
             own_y,
             c_tilde,
         });
-        vec![proof.bytes]
+        Ok(vec![proof.bytes])
     }
 }
 

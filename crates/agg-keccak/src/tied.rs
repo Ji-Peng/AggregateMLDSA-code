@@ -214,6 +214,17 @@ pub enum TieWork {
     Check(u32),
 }
 
+/// The prover's tie nonce if it lies below the allowance `limit = 2^(g + 7)`: Flock's
+/// `grind_pow` returns the smallest passing nonce, so a larger one means that the first
+/// `2^(g + 7)` candidates all failed (docs/soundness.md 6.3, 6.5).
+fn nonce_within(nonce: u64, limit: u64) -> Result<u32, KeccakError> {
+    const EXHAUSTED: &str = "tie nonce search exhausted its 2^(g + 7) candidates";
+    if nonce >= limit {
+        return Err(KeccakError::Work(EXHAUSTED));
+    }
+    u32::try_from(nonce).map_err(|_| KeccakError::Work(EXHAUSTED))
+}
+
 impl TieChallenges {
     /// Derive from `fs` for a part of `2^d` record positions and `2^blocks_log` level-1
     /// blocks per lane in each of `2^span_log` segments, a sponge instance of `2^nu_s` rows,
@@ -221,10 +232,10 @@ impl TieChallenges {
     /// sponge's event-2 cap and the bridge union's cap, after `bits` of work.
     ///
     /// # Errors
-    /// [`TieWork::Check`] with a nonce of `g + 7` or more bits or one failing the predicate.
-    ///
-    /// # Panics
-    /// If the prover's search exceeds `2^(g + 7)` candidates (probability below `2^-184`).
+    /// [`TieWork::Check`] with a nonce of `g + 7` or more bits or one failing the predicate
+    /// ([`KeccakError::Tie`]); [`TieWork::Grind`] if the smallest passing nonce is `2^(g + 7)`
+    /// or more, i.e. the honest search exhausted its allowance ([`KeccakError::Work`],
+    /// probability below `2^-184.7`, docs/soundness.md 6.5).
     #[allow(clippy::too_many_arguments)]
     pub fn derive(
         fs: &[u8; 32],
@@ -256,11 +267,7 @@ impl TieChallenges {
                 }
                 0
             }
-            (_, TieWork::Grind) => {
-                let nonce = ch.grind_pow(u32::from(bits));
-                assert!(nonce < limit, "tie nonce search exceeded 2^(g + 7) candidates");
-                u32::try_from(nonce).expect("below 2^32")
-            }
+            (_, TieWork::Grind) => nonce_within(ch.grind_pow(u32::from(bits)), limit)?,
             (_, TieWork::Check(nonce)) => {
                 if u64::from(nonce) >= limit || !ch.verify_pow(u64::from(nonce), u32::from(bits))
                 {
@@ -476,6 +483,7 @@ impl KeccakError {
             Self::Malformed(m) => Self::Malformed(m),
             Self::Statement(m) => Self::Statement(m),
             Self::Tie(m) => Self::Tie(m),
+            Self::Work(m) => Self::Work(m),
             Self::Flock(_) => Self::Malformed("flock"),
         }
     }
@@ -791,22 +799,23 @@ impl<'g> TiedPart<'g> {
 
     /// The tie challenges and points of this part for the Flock seed `fs`, the digest of
     /// the final vectors and the two commitments, the prover grinding the tie nonce.
-    #[must_use]
+    ///
+    /// # Errors
+    /// [`KeccakError::Work`] if the tie nonce search exhausts its allowance.
     pub fn tie(
         &self,
         fs: &[u8; 32],
         y_digest: &[u8; 32],
         sponge_cap: &KeccakCommitment,
         bridge_cap: &KeccakCommitment,
-    ) -> (TieChallenges, TiePoints) {
+    ) -> Result<(TieChallenges, TiePoints), KeccakError> {
         self.tie_with(fs, y_digest, sponge_cap, bridge_cap, TieWork::Grind)
-            .expect("the prover's tie work")
     }
 
     /// [`Self::tie`] with the given tie work (the verifier checks the proof's nonce).
     ///
     /// # Errors
-    /// On a rejected tie nonce.
+    /// On a rejected tie nonce, or (prover) an exhausted tie nonce search.
     pub fn tie_with(
         &self,
         fs: &[u8; 32],
@@ -1061,9 +1070,11 @@ impl<'g> TiedPart<'g> {
     /// relations of `sd` and the given shares `ys` (one per segment of the span; tests pass
     /// wrong ones), seeded by `fs` (the part's Flock seed).
     ///
+    /// # Errors
+    /// As [`Self::prove_with_blocks`].
+    ///
     /// # Panics
     /// As [`Self::prove_with_blocks`].
-    #[must_use]
     pub fn prove_with_final_vectors(
         &self,
         committed: TiedCommitted,
@@ -1071,7 +1082,7 @@ impl<'g> TiedPart<'g> {
         matrices: &BridgeMatrices,
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
-    ) -> KeccakProof {
+    ) -> Result<KeccakProof, KeccakError> {
         let start = std::time::Instant::now();
         let blocks = self.honest_blocks(&committed, matrices);
         trace("bridge blocks", &start);
@@ -1082,10 +1093,13 @@ impl<'g> TiedPart<'g> {
     /// and shares `ys` (one per segment of the span): commit the bridge union, derive the
     /// tie, prove the sponge instance (opening its event-2 commitment) and the bridge union.
     ///
+    /// # Errors
+    /// [`KeccakError::Work`] if the tie nonce search exhausts its allowance of `2^(g + 7)`
+    /// candidates (probability below `2^-184.7`, docs/soundness.md 6.5).
+    ///
     /// # Panics
     /// If `committed` or `blocks` belongs to another part shape, `ys` has the wrong shape,
     /// or Flock commits to another sponge cap than the event-2 one.
-    #[must_use]
     pub fn prove_with_blocks(
         &self,
         committed: TiedCommitted,
@@ -1094,7 +1108,7 @@ impl<'g> TiedPart<'g> {
         blocks: BridgeBlocks,
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
-    ) -> KeccakProof {
+    ) -> Result<KeccakProof, KeccakError> {
         assert_eq!(committed.n, self.n, "committed part of another shape");
         assert_eq!(ys.len(), self.segments, "one final vector per segment");
         let m3 = self.segment().output_bits();
@@ -1121,7 +1135,7 @@ impl<'g> TiedPart<'g> {
         let bridge_data = g.commit_data(&[&buffers[0].z, &buffers[1].z]);
         let bridge_cap = bridge_data.commitment();
         trace("bridge rows and commitment", &start);
-        let (tie, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap);
+        let (tie, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap)?;
         trace("tie work", &start);
         // The sponge instance (three claims, event-2 commitment reused, K14) and the bridge
         // union (seven claims) have independent challengers (both seeded from `fs` and
@@ -1160,26 +1174,28 @@ impl<'g> TiedPart<'g> {
         );
         debug_assert!(bridge_cap_again == bridge_cap);
         trace("bridge union proven", &start);
-        self.encode(tie.nonce, &bridge_cap, &sponge_proof, &bridge_proof)
+        Ok(self.encode(tie.nonce, &bridge_cap, &sponge_proof, &bridge_proof))
     }
 
     /// Compute the shares from the committed bits and prove (the honest prover).
-    #[must_use]
+    ///
+    /// # Errors
+    /// As [`Self::prove_with_blocks`].
     pub fn prove(
         &self,
         committed: TiedCommitted,
         sd: [u8; 32],
         matrices: &BridgeMatrices,
         fs: &[u8; 32],
-    ) -> TiedProof {
+    ) -> Result<TiedProof, KeccakError> {
         let blocks = self.honest_blocks(&committed, matrices);
         let mut ys = self.bridge.shares(matrices, &blocks);
         ys.truncate(self.segments);
-        let proof = self.prove_with_blocks(committed, sd, matrices, blocks, ys.clone(), fs);
-        TiedProof {
+        let proof = self.prove_with_blocks(committed, sd, matrices, blocks, ys.clone(), fs)?;
+        Ok(TiedProof {
             final_vectors: ys,
             proof,
-        }
+        })
     }
 
     fn encode(
@@ -1409,6 +1425,25 @@ mod tests {
     use agg_bridge::{seed::derive_matrices_for, shape::Shape};
     use flock_core::test_rng::Rng;
 
+    /// An exhausted tie nonce search is an error, not a panic (docs/soundness.md 6.3, 6.5):
+    /// the smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one
+    /// is kept.
+    #[test]
+    fn exhausted_tie_nonce_search_is_an_error() {
+        for g in [1_u8, 16, 18, 25] {
+            let limit = 1_u64 << nonce_bits(g);
+            assert_eq!(nonce_bits(g), g + 7);
+            assert!(matches!(nonce_within(0, limit), Ok(0)));
+            assert!(matches!(nonce_within(limit - 1, limit), Ok(n) if u64::from(n) == limit - 1));
+            for nonce in [limit, limit + 1, u64::MAX] {
+                assert!(matches!(
+                    nonce_within(nonce, limit),
+                    Err(KeccakError::Work(_))
+                ));
+            }
+        }
+    }
+
     fn random_record(rng: &mut Rng) -> SpongeRecord {
         let mut mu = [0u8; MU_BYTES];
         let mut w1 = [0u8; 768];
@@ -1464,7 +1499,9 @@ mod tests {
             let mut ys = part.bridge().shares(&mats, &blocks);
             assert!(ys[segments..].iter().all(|y| y.iter().all(|&b| b == 0)));
             ys.truncate(segments);
-            let (chal, points) = part.tie(&fs, &TiedPart::y_digest(&ys), &caps.0, &caps.1);
+            let (chal, points) = part
+                .tie(&fs, &TiedPart::y_digest(&ys), &caps.0, &caps.1)
+                .expect("tie");
             let nu_s = part.nu();
             let zb = bridge_z(&part, &blocks);
             let nu_b = part.bridge().geometry().nu();
@@ -1547,7 +1584,7 @@ mod tests {
             KeccakCommitment::from_bytes(vec![2; 32]),
         );
         let yd = TiedPart::y_digest(&[vec![0; 4096]]);
-        let (chal, points) = part.tie(&[1; 32], &yd, &caps.0, &caps.1);
+        let (chal, points) = part.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
         assert_eq!(part.nu(), 3);
         assert_eq!(part.sponge().word_vars(), 3 + 12);
         // d = 3: level 1 k_log 15, levels 2-3 k_log 16 (slot 0), nu 5, M = 22.
@@ -1648,12 +1685,12 @@ mod tests {
         // A part of 1 record with d = 6: nu_s = 3 < d, so the factor is not 1.
         let wide = TiedPart::new_part(&gate, 1, 6, 0, Profile::Fast);
         assert_eq!(wide.nu(), 3);
-        let (c2, p2) = wide.tie(&[1; 32], &yd, &caps.0, &caps.1);
+        let (c2, p2) = wide.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
         assert_ne!(c2.row_factor(3), F128::ONE);
         assert_eq!(p2.sponge_lanes[0][..3], c2.rho_i[..3]);
         // d = 13: 16 blocks, 4 block coordinates in the rows of level 1.
         let full = TiedPart::new_part(&gate, 1 << 13, 13, 0, Profile::Fast);
-        let (c3, p3) = full.tie(&[1; 32], &yd, &caps.0, &caps.1);
+        let (c3, p3) = full.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
         assert_eq!(c3.rho_beta.len(), 4);
         assert_eq!(&p3.bridge_inputs[0][..4], &c3.rho_i[9..]);
         assert_eq!(&p3.bridge_parities[0][..4], &c3.rho_beta[..]);
@@ -1663,7 +1700,7 @@ mod tests {
         let span = TiedPart::new_span(&gate, 2 * (1 << 13) + 5, 13, 0, 3, Profile::Fast);
         assert_eq!((span.nu(), span.live(2), span.live(3)), (15, 5, 0));
         assert_eq!(span.cost().bridge.rows, [4 * 96, 4]);
-        let (c4, p4) = span.tie(&[1; 32], &yd, &caps.0, &caps.1);
+        let (c4, p4) = span.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
         assert_eq!(c4.rho_sigma.len(), 2);
         assert_eq!(&p4.sponge_lanes[0][..13], &c4.rho_i[..]);
         assert_eq!(&p4.sponge_lanes[0][13..15], &c4.rho_sigma[..]);

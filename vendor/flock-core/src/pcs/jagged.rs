@@ -86,6 +86,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use crate::challenger::CanonicalPow;
 
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
@@ -2214,7 +2215,7 @@ fn verify_frobenius_assist_core<C: Challenger>(
         challenger.observe_f128(g_inf);
         let r = if round_grinding_bits != 0 {
             challenger
-                .verify_pow_and_sample_f128(proof.grinding_nonces[round], round_grinding_bits)?
+                .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[round], round_grinding_bits)?
         } else {
             challenger.sample_f128()
         };
@@ -4573,7 +4574,7 @@ fn verify_multipoint_twisted_core<C: Challenger>(
     // disabled transcript, so check canonical zero without absorbing it.
     let gamma_bits = grinding.gamma_bits_for(n_rs, n_g);
     let gamma = if gamma_bits != 0 {
-        challenger.verify_pow_and_sample_f128(proof.gamma_grinding_nonce, gamma_bits)?
+        challenger.verify_pow_and_sample_f128_canonical(proof.gamma_grinding_nonce, gamma_bits)?
     } else {
         if proof.gamma_grinding_nonce != 0 {
             return None;
@@ -4602,7 +4603,7 @@ fn verify_multipoint_twisted_core<C: Challenger>(
         challenger.observe_f128(g_one);
         challenger.observe_f128(g_inf);
         let r = if grinding.round_bits != 0 {
-            challenger.verify_pow_and_sample_f128(
+            challenger.verify_pow_and_sample_f128_canonical(
                 proof.round_grinding_nonces[round],
                 grinding.round_bits,
             )?

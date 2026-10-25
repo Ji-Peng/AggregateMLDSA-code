@@ -16,6 +16,7 @@ use std::{
     sync::atomic::Ordering,
     time::{Duration, Instant},
 };
+use crate::challenger::CanonicalPow;
 
 use flock_multilinear::{IndexOrder, eq_table};
 use rayon::prelude::ParallelSlice;
@@ -2918,7 +2919,7 @@ where
         let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
             return false;
         };
-        let Some(beta) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(0)) else {
+        let Some(beta) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(0)) else {
             return false;
         };
         claim_nonce += 1;
@@ -2970,7 +2971,7 @@ where
         let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
             return false;
         };
-        let Some(beta) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(1)) else {
+        let Some(beta) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(1)) else {
             return false;
         };
         claim_nonce += 1;
@@ -3003,7 +3004,7 @@ where
     else {
         return false;
     };
-    let Some(alpha_0) = challenger.verify_pow_and_sample_f128_vec(
+    let Some(alpha_0) = challenger.verify_pow_and_sample_f128_vec_canonical(
         nonce,
         consistency_bits(0),
         ceil_log2(config.queries[0]),
@@ -3037,7 +3038,7 @@ where
     let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
         return false;
     };
-    let Some(beta_0) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(1)) else {
+    let Some(beta_0) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(1)) else {
         return false;
     };
     claim_nonce += 1;
@@ -3113,7 +3114,7 @@ where
             else {
                 return false;
             };
-            let Some(alpha) = challenger.verify_pow_and_sample_f128_vec(
+            let Some(alpha) = challenger.verify_pow_and_sample_f128_vec_canonical(
                 nonce,
                 consistency_bits(level),
                 ceil_log2(config.queries[level]),
@@ -3138,7 +3139,7 @@ where
             let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
                 return false;
             };
-            let Some(beta) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(level)) else {
+            let Some(beta) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(level)) else {
                 return false;
             };
             claim_nonce += 1;
@@ -3243,7 +3244,7 @@ where
             let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
                 return false;
             };
-            let Some(beta) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(level + 1))
+            let Some(beta) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(level + 1))
             else {
                 return false;
             };
@@ -3278,7 +3279,7 @@ where
         else {
             return false;
         };
-        let Some(alpha) = challenger.verify_pow_and_sample_f128_vec(
+        let Some(alpha) = challenger.verify_pow_and_sample_f128_vec_canonical(
             nonce,
             consistency_bits(level),
             ceil_log2(config.queries[level]),
@@ -3312,7 +3313,7 @@ where
         let Some(&nonce) = proof.claim_batch_grinding_nonces.get(claim_nonce) else {
             return false;
         };
-        let Some(beta) = challenger.verify_pow_and_sample_f128(nonce, claim_bits(level + 1)) else {
+        let Some(beta) = challenger.verify_pow_and_sample_f128_canonical(nonce, claim_bits(level + 1)) else {
             return false;
         };
         claim_nonce += 1;

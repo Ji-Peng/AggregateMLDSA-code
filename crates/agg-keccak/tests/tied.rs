@@ -175,7 +175,8 @@ impl Ctx<'_> {
         }
         let proof = self
             .part
-            .prove_with_blocks(committed, sd, &mats, blocks, vec![y.clone()], &fs);
+            .prove_with_blocks(committed, sd, &mats, blocks, vec![y.clone()], &fs)
+            .expect("prove");
         Run {
             commitment,
             sd,
@@ -225,7 +226,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let fs = fs_after(&commitment, &sd);
     assert_eq!(committed.c_tilde(), &ctx.c_tilde[..]);
     let t2 = Instant::now();
-    let out = part.prove(committed, sd, &mats, &fs);
+    let out = part.prove(committed, sd, &mats, &fs).expect("prove");
     let t_prove = t2.elapsed();
     let run = Run {
         commitment: commitment.clone(),
@@ -356,11 +357,11 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         let mut committed = part.commit(&ctx.records);
         let data = committed.take_commit_data();
         assert!(data.is_some());
-        let again = part.prove(committed, sd, &mats, &fs);
+        let again = part.prove(committed, sd, &mats, &fs).expect("prove");
         assert_eq!(again, out, "proof without the kept commitment");
         let (sponge_buf, bits) = part.honest_parts(&ctx.records);
         let reattached = part.reattach(sponge_buf, bits, &ctx.records, commitment.clone(), data);
-        assert_eq!(part.prove(reattached, sd, &mats, &fs), out);
+        assert_eq!(part.prove(reattached, sd, &mats, &fs).expect("prove"), out);
     }
 
     let honest = |_: &mut agg_keccak::bridge_union::BridgeBlocks| {};
@@ -520,7 +521,7 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
     let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd));
     let fs = fs_after(&commitment, &sd);
     let t0 = Instant::now();
-    let out = part.prove(committed, sd, &mats, &fs);
+    let out = part.prove(committed, sd, &mats, &fs).expect("prove");
     let t_prove = t0.elapsed();
     let t1 = Instant::now();
     let verify = |ys: &[Vec<u8>], proof: &KeccakProof| {
@@ -566,7 +567,9 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
     let blocks = part.honest_blocks(&committed, &mats);
     let mut wrong = out.final_vectors.clone();
     wrong[1][2049] ^= 1;
-    let proof = part.prove_with_blocks(committed, sd, &mats, blocks, wrong.clone(), &fs);
+    let proof = part
+        .prove_with_blocks(committed, sd, &mats, blocks, wrong.clone(), &fs)
+        .expect("prove");
     assert!(matches!(
         verify(&wrong, &proof),
         Err(KeccakError::Tie("levels-2-3 output columns"))
@@ -582,7 +585,9 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
     assert_eq!(commitment2, commitment, "the sponge is honest");
     let ys = part.final_vectors(&committed, &mats);
     assert_ne!(ys[1], out.final_vectors[1]);
-    let proof = part.prove_with_final_vectors(committed, sd, &mats, ys.clone(), &fs);
+    let proof = part
+        .prove_with_final_vectors(committed, sd, &mats, ys.clone(), &fs)
+        .expect("prove");
     assert!(matches!(
         verify(&ys, &proof),
         Err(KeccakError::Tie("bridge copy of lanes 0..3"))
@@ -756,8 +761,9 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
         };
         assert_eq!(share, own, "honest shares XOR to the segment's Y");
         acc.iter_mut().zip(&share).for_each(|(a, s)| *a ^= s);
-        let proof =
-            segs[k].prove_with_final_vectors(committed, sd, &mats, vec![share.clone()], &fs(k));
+        let proof = segs[k]
+            .prove_with_final_vectors(committed, sd, &mats, vec![share.clone()], &fs(k))
+            .expect("prove");
         shares.push((share, proof));
     }
     assert_eq!(acc, y_segment);
@@ -859,7 +865,7 @@ fn tied_part_profiles_bytes_and_times() {
                 let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd));
                 let fs = fs_after(&commitment, &sd);
                 let t1 = Instant::now();
-                let out = part.prove(committed, sd, &mats, &fs);
+                let out = part.prove(committed, sd, &mats, &fs).expect("prove");
                 let prove = t1.elapsed().as_secs_f64() * 1e3;
                 let t2 = Instant::now();
                 part.verify(

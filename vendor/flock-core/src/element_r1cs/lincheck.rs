@@ -56,6 +56,7 @@
 //! the column point LSB-first — matching the rows-low witness layout.
 
 use rayon::prelude::{ParallelIterator, ParallelSlice};
+use crate::challenger::CanonicalPow;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -149,7 +150,7 @@ pub(crate) fn column_sumcheck_replay<C: Challenger>(
         ch.observe_f128(einf);
         let rho = if let Some(bits) = grinding.round_bits() {
             let rho = ch
-                .verify_pow_and_sample_f128(grinding_nonces[*nonce_idx], bits)
+                .verify_pow_and_sample_f128_canonical(grinding_nonces[*nonce_idx], bits)
                 .ok_or(ElementLincheckError::InvalidGrindingNonce { which: "round" })?;
             *nonce_idx += 1;
             rho
@@ -349,7 +350,7 @@ pub fn verify_with_grinding<C: Challenger>(
     let mut nonce_idx = 0;
     let alpha = if let Some(bits) = grinding.alpha_bits() {
         let alpha = ch
-            .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+            .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
             .ok_or(ElementLincheckError::InvalidGrindingNonce { which: "alpha" })?;
         nonce_idx += 1;
         alpha

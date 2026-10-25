@@ -123,6 +123,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
+use crate::challenger::CanonicalPow;
 
 use flock_multilinear::{IndexOrder, eq_table};
 use rayon::{
@@ -2123,7 +2124,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
     // 1. Sample α (matches prover's order).
     let alpha = if let Some(bits) = grinding.alpha_bits() {
         let alpha = challenger
-            .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+            .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
             .ok_or(LincheckError::InvalidGrindingNonce { which: "alpha" })?;
         nonce_idx += 1;
         alpha
@@ -2163,7 +2164,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
     if let Some(col) = circuit.const_pin_col() {
         let beta = if let Some(bits) = grinding.beta_bits() {
             let beta = challenger
-                .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+                .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
                 .ok_or(LincheckError::InvalidGrindingNonce { which: "beta" })?;
             nonce_idx += 1;
             beta
@@ -2180,7 +2181,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
         challenger.observe_f128(einf);
         let r = if let Some(bits) = grinding.multilinear_round_bits() {
             let r = challenger
-                .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+                .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
                 .ok_or(LincheckError::InvalidGrindingNonce {
                     which: "sumcheck-round",
                 })?;
@@ -2224,7 +2225,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
         SkipPoint::Phi8(_) => match grinding.skip_bits(k_skip) {
             Some(bits) => {
                 let r = challenger
-                    .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+                    .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
                     .ok_or(LincheckError::InvalidGrindingNonce {
                         which: "inner-skip",
                     })?;

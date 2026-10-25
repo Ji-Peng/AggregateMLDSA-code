@@ -20,6 +20,7 @@ use std::{
     mem::{replace, swap},
     time::Instant,
 };
+use crate::challenger::CanonicalPow;
 
 use ag_skip::R1_POW_BITS;
 use serde::{Deserialize, Serialize};
@@ -1356,7 +1357,7 @@ pub fn verify_with_grinding<C: Challenger>(
     // ---- Re-derive r (in lockstep with prove_packed) ----
     let r_skip = if let Some(bits) = grinding.initial_bits(m) {
         let r_skip = challenger
-            .verify_pow_and_sample_f128_vec(proof.grinding_nonces[nonce_idx], bits, k_skip)
+            .verify_pow_and_sample_f128_vec_canonical(proof.grinding_nonces[nonce_idx], bits, k_skip)
             .ok_or(ZerocheckError::InvalidGrindingNonce { which: "initial" })?;
         nonce_idx += 1;
         r_skip
@@ -1379,7 +1380,7 @@ pub fn verify_with_grinding<C: Challenger>(
     challenger.observe_f128_slice(&proof.round1_c);
     let z = if let Some(bits) = grinding.skip_bits() {
         let z = challenger
-            .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+            .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
             .ok_or(ZerocheckError::InvalidGrindingNonce { which: "skip" })?;
         nonce_idx += 1;
         z
@@ -1455,7 +1456,7 @@ pub fn verify_with_grinding<C: Challenger>(
         challenger.observe_f128(msg_inf);
         let rho = if let Some(bits) = grinding.multilinear_round_bits() {
             let rho = challenger
-                .verify_pow_and_sample_f128(proof.grinding_nonces[nonce_idx], bits)
+                .verify_pow_and_sample_f128_canonical(proof.grinding_nonces[nonce_idx], bits)
                 .ok_or(ZerocheckError::InvalidGrindingNonce {
                     which: "multilinear",
                 })?;

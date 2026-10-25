@@ -463,6 +463,9 @@ impl<'g, 'h> FlockProver<'g, 'h> {
 
     /// Event 6 of a span: the proof of every `Y_sigma` in segment 0's item, empty items for
     /// the covered segments.
+    ///
+    /// # Errors
+    /// As [`TiedPart::prove_with_final_vectors`] (an exhausted tie nonce search).
     fn prove_span(
         &self,
         state: &mut ProverState<'g>,
@@ -471,7 +474,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
         let start = Instant::now();
         let segments = part.seg.segments();
         assert_eq!(seeds.len(), segments, "one seed per segment");
@@ -480,13 +483,16 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         let committed =
             part.seg
                 .reattach(sponge, bits, &self.records, part.commitment, part.commit_data);
-        let proof = part.seg.prove_with_final_vectors(
-            committed,
-            *bridge_seed,
-            matrices,
-            final_vectors.to_vec(),
-            &span_seed(seeds),
-        );
+        let proof = part
+            .seg
+            .prove_with_final_vectors(
+                committed,
+                *bridge_seed,
+                matrices,
+                final_vectors.to_vec(),
+                &span_seed(seeds),
+            )
+            .map_err(|e| ProveError::Keccak(e.to_string()))?;
         let log = &mut state.log[0];
         log.prove = start.elapsed();
         log.proof_bytes = proof.bytes.len();
@@ -500,7 +506,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         }
         .to_bytes()];
         items.extend((1..segments).map(|_| empty.to_bytes()));
-        items
+        Ok(items)
     }
 }
 
@@ -587,7 +593,7 @@ impl KeccakSide for FlockProver<'_, '_> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
         let mut state = self.state.lock().expect("state");
         if let Some(span) = state.span.take() {
             return self.prove_span(&mut state, span, bridge_seed, matrices, seeds, final_vectors);
@@ -622,13 +628,16 @@ impl KeccakSide for FlockProver<'_, '_> {
                         .map(|(a, y)| a ^ y)
                         .collect()
                 };
-                let proof = part.seg.prove_with_final_vectors(
-                    committed,
-                    *bridge_seed,
-                    matrices,
-                    vec![share],
-                    &part_seed(&seeds[sigma], s),
-                );
+                let proof = part
+                    .seg
+                    .prove_with_final_vectors(
+                        committed,
+                        *bridge_seed,
+                        matrices,
+                        vec![share],
+                        &part_seed(&seeds[sigma], s),
+                    )
+                    .map_err(|e| ProveError::Keccak(e.to_string()))?;
                 let log = &mut state.log[entry];
                 debug_assert_eq!((log.sigma, log.part), (sigma, s));
                 log.prove = start.elapsed();
@@ -638,7 +647,7 @@ impl KeccakSide for FlockProver<'_, '_> {
             }
             items.push(item.to_bytes());
         }
-        items
+        Ok(items)
     }
 }
 

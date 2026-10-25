@@ -79,6 +79,7 @@
 //! with a `Sparse` eq tensor and no ring-switching.
 
 use core::ops::Range;
+use crate::challenger::CanonicalPow;
 
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice};
 use serde::{Deserialize, Serialize};
@@ -377,7 +378,7 @@ pub fn verify_deferred_with_grinding<C: Challenger>(
     let mut nonce_idx = 0;
     let alpha = if let Some(bits) = grinding.alpha_bits() {
         let alpha = ch
-            .verify_pow_and_sample_f128(proof.lincheck.grinding_nonces[nonce_idx], bits)
+            .verify_pow_and_sample_f128_canonical(proof.lincheck.grinding_nonces[nonce_idx], bits)
             .ok_or(ElementUnionError::LincheckGrindingInvalid { which: "alpha" })?;
         nonce_idx += 1;
         alpha

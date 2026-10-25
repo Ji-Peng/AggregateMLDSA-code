@@ -98,13 +98,17 @@ pub trait KeccakSide {
     /// vectors `Y_sigma` known. `bridge_seed` is `sd` (event 3) and `matrices` its
     /// `M_1, M_2, M_3`: the bridge slot's rows are generated from them and its circuit
     /// digest binds `sd` (docs/bridge.md Section 5, `docs/deviations.md` P11).
+    ///
+    /// # Errors
+    /// [`ProveError::Keccak`] if a sub-proof cannot be made (an exhausted proof-of-work
+    /// search, `docs/soundness.md` 6.5).
     fn prove(
         &self,
         bridge_seed: &[u8; 32],
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>>;
+    ) -> Result<Vec<Vec<u8>>, ProveError>;
 }
 
 /// No Keccak argument (Flock profile 0): empty commitments and proofs, so `c~_i` is not
@@ -125,8 +129,8 @@ impl KeccakSide for NoKeccak {
         _matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         _final_vectors: &[Vec<u8>],
-    ) -> Vec<Vec<u8>> {
-        vec![Vec::new(); seeds.len()]
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
+        Ok(vec![Vec::new(); seeds.len()])
     }
 }
 
@@ -143,6 +147,8 @@ pub enum ProveError {
     Stage(StageError),
     /// The lookup (an honest prover's self-check failed or a shape is wrong).
     Lookup(LookupError),
+    /// The Keccak side could not make its sub-proofs.
+    Keccak(String),
     /// Inconsistent inputs or an internal check.
     Internal(String),
 }
@@ -155,6 +161,7 @@ impl std::fmt::Display for ProveError {
             Self::Transcript(e) => write!(f, "transcript: {e}"),
             Self::Stage(e) => write!(f, "stage: {e}"),
             Self::Lookup(e) => write!(f, "lookup: {e}"),
+            Self::Keccak(e) => write!(f, "keccak: {e}"),
             Self::Internal(e) => write!(f, "prover: {e}"),
         }
     }
@@ -646,6 +653,7 @@ pub fn prove_with_tables(
         || keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits),
         || ProverTables::new(tables, &matrices),
     );
+    let flock_proofs = flock_proofs?;
     if flock_proofs.len() != segments {
         return Err(ProveError::Internal("one Flock proof per segment".into()));
     }

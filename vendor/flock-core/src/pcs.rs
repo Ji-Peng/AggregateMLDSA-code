@@ -20,6 +20,7 @@
 //! ligerito module docs for the recursion.
 
 use std::{env::var, sync::atomic::AtomicU8, time::Instant};
+use crate::challenger::CanonicalPow;
 
 pub use commit::{
     Commitment, PcsParams, ProverData, commit, commit_encode, commit_encode_into, commit_into,
@@ -1315,7 +1316,7 @@ pub fn verify_opening_batch_ligerito_mixed_with_grinding<Ch: Challenger>(
     }
     let gammas = if batch_bits != 0 {
         challenger
-            .verify_pow_and_sample_f128_vec(proof.batching_nonces[0], batch_bits, n_rs + n_pd)
+            .verify_pow_and_sample_f128_vec_canonical(proof.batching_nonces[0], batch_bits, n_rs + n_pd)
             .ok_or(PcsError::RingSwitch(RingSwitchError::InvalidGrinding))?
     } else {
         challenger.sample_f128_vec(n_rs + n_pd)
@@ -2724,7 +2725,7 @@ fn verify_batch_merged_core<Ch: Challenger>(
     }
     let gammas_all = if batch_bits != 0 {
         challenger
-            .verify_pow_and_sample_f128_vec(proof.batching_nonces[0], batch_bits, n_rs + n_pd)
+            .verify_pow_and_sample_f128_vec_canonical(proof.batching_nonces[0], batch_bits, n_rs + n_pd)
             .ok_or(PcsOpenError::Assist)?
     } else {
         challenger.sample_f128_vec(n_rs + n_pd)
@@ -2757,7 +2758,7 @@ fn verify_batch_merged_core<Ch: Challenger>(
         challenger.observe_f128(g_inf);
         let r = if grinding.merged_round_bits != 0 {
             challenger
-                .verify_pow_and_sample_f128(
+                .verify_pow_and_sample_f128_canonical(
                     proof.merged_round_nonces[round],
                     grinding.merged_round_bits,
                 )

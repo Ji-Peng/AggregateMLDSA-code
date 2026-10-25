@@ -58,6 +58,7 @@
 //! `s_hat_v` has 128 entries indexed by the 7-bit prefix.
 
 use std::{env::var, sync::OnceLock, time::Instant};
+use crate::challenger::CanonicalPow;
 
 use flock_multilinear::{IndexOrder, eq_table_scaled};
 use rayon::prelude::{
@@ -2752,7 +2753,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
     // nonce and incorrectly change the legacy transcript).
     let r_dprime = if grinding_bits != 0 {
         challenger
-            .verify_pow_and_sample_f128_vec(proof.grinding_nonce, grinding_bits, LOG_PACKING)
+            .verify_pow_and_sample_f128_vec_canonical(proof.grinding_nonce, grinding_bits, LOG_PACKING)
             .ok_or(RingSwitchError::InvalidGrinding)?
     } else {
         if proof.grinding_nonce != 0 {
@@ -2817,7 +2818,7 @@ pub fn verify_succinct_with_grinding<Ch: Challenger>(
 
     let r_dprime = if grinding_bits != 0 {
         challenger
-            .verify_pow_and_sample_f128_vec(proof.grinding_nonce, grinding_bits, LOG_PACKING)
+            .verify_pow_and_sample_f128_vec_canonical(proof.grinding_nonce, grinding_bits, LOG_PACKING)
             .ok_or(RingSwitchError::InvalidGrinding)?
     } else {
         if proof.grinding_nonce != 0 {
