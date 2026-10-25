@@ -5,9 +5,9 @@
 | Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); implemented in step 2 (branch `pow-128`): PIOP wire version 2 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 4 (`agg_keccak::tied`, deviation K20), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`) |
 | Applies to | mode A and mode B, ML-DSA-44, relation H, lookup layout L16; PIOP wire version 2 and tied-part proof version 4 (both introduced by this document) |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
-| Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10 |
+| Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7) |
+| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7) ; 2026-10-25 (branch `pow-close`): H1 discharged (4.6) |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -456,6 +456,69 @@ challengers MUST absorb it (framed, label `agg-keccak/v4/tie-binding`) right aft
 construction and before `bind_statement`. This binds the union cap, the final-vector
 digest, the sponge cap, the geometry and the tie nonce into both instances.
 
+### 4.6 Akita: accepted support of the sparse fold challenges (hypothesis H1, discharged)
+
+**Requirement.** A fold coordinate of group `g` at level `h` is an indexed address of weight
+`1/|C^acc_{h,g}|` (Akita Definition 10.16, (159); Theorem 10.46, (211)), and Aerie Eq. (19)
+needs every `|C^acc| >= 2^128`. Akita's runtime floor (`SparseChallengeConfig::
+validate_for_ring_dim`, `MIN_FOLD_CHALLENGE_ENTROPY_BITS = 128`, the floors of
+`PRODUCTION_FOLD_CHALLENGE_LADDER`) bounds the raw family `C_0` only. Where the sampler rejects
+by operator norm the raw size is not a valid denominator (Aerie C.3); the accepted size is.
+
+**Dispatch at `e023b6a`** (`akita_types::draw_group_fold_challenges` for the nonterminal
+levels, `akita_verifier::fold::terminal` for the terminal):
+
+* evaluation trace: drawn in the inner ring, `D = d_A`, with operator-norm rejection iff the
+  inner route is L2 and the family is a certified one (`selective_l2_operator_norm_rejection`);
+* subring coefficient packing: drawn in the challenge subring, `D` = the challenge subring
+  dimension, never rejected (the route must be L-infinity); the stride embedding into the
+  ambient ring is injective, so the support is that of the subring draw;
+* terminal: `D = d_A`, rejection iff the terminal has an L2 response cap.
+
+Each coordinate reads its own stream and makes at most 4,096 draws from `C_0`: `w = a + b`
+distinct positions by a partial Fisher-Yates shuffle over exactly rejection-sampled integers,
+then independent signs, magnitude 1 on the first `a` positions; every element of `C_0` has
+exactly `a! b!` orderings, so a draw is uniform on `C_0` in the ideal-XOF model (Akita 10.1).
+Conditioned on success the output is uniform on `C^acc` (Akita Lemma 10.1); exhaustion is a
+completeness event.
+
+**Check (test `crates/agg-pcs-config/tests/akita_fold_support.rs`).** Every row of both
+catalogs: width 4, 26 rows (the 13 grouped rows and the 13 scalar rows of `G_main4`); width
+16, 25 rows (the scalar rows of `G_main16`, `G_1`, `G_2`, `G_3` at every size, equal layouts
+sharing a row). For every level, every group and the terminal the test runs the pinned
+dispatch with a recording `FoldDraw`, which reads `D`, the family, the packing domain and the
+rejection policy from the draw's absorb payload and answers a fixed seed, so that the real
+sampler (rejection loop included) draws the challenges. It checks the record against the
+schedule and every sampled challenge against the family, and requires an accepted support of
+at least `2^128`: exactly, in integers, for an unrestricted family; by the certified accepted
+count `ceil(N_raw p0)` for a rejected one (`p0` the certificate's exact lower bound on the
+accepted fraction of the strict runtime predicate). `docs/scripts/fold_support.py` recomputes
+the family sizes and the certified counts from the certificate files of the pinned tree, and
+Akita's exact checkers (`scripts/operator_norm/d64/check_cert.py`, `d128/check_cert.py`) print
+`ALL CHECKS PASS` for both certificates (run 2026-10-25, 3.5 s and 0.6 s).
+
+| Draw | `D` | `(a, b)` (signs on `+-1`, `+-2`) | Rejection | `log2 |C_0|` | `log2 |C^acc|` | Draws (width 4 / width 16) |
+| --- | ---: | --- | --- | ---: | ---: | ---: |
+| packing | 64 | (31, 10) | none | 128.0881 | 128.0881 | 76 / 24 |
+| packing | 128 | (31, 0) | none | 129.6214 | 129.6214 | 39 / 23 |
+| packing | 256 | (23, 0) | none | 131.0778 | 131.0778 | 2 / 2 |
+| trace | 128 | (31, 0) | none | 129.6214 | 129.6214 | 32 / 26 |
+| trace and terminal | 128 | (31, 0) | operator norm, threshold 13 | 129.6214 | 128.5633 (certified) | 71 / 60 |
+| terminal | 64 | (31, 10) | none | 128.0881 | 128.0881 | 0 / 1 |
+
+The certified count of the threshold-13 family is `ceil(N_raw p0) =
+502822610611069237129947393810277364817` (`cert_d128_w31_gamma13.json`, `p0 = 0.48027`), the
+value of Aerie C.3. Akita's other certified family, `D = 64`, `(31, 11)`, threshold 18
+(`2^128.0624`), does not occur in our catalogs. Per grouped row: 11 draws at `d_sig = 3` to 11,
+12 at 12 to 15; the smallest support is `2^128.0881` at `d_sig = 3` to 14 (a root group or
+level 1 drawing the `D = 64` packing family) and `2^128.5633` at `d_sig = 15`.
+
+**Result.** H1 holds for every row of both catalogs. The smallest accepted support is
+`2^128.0881` (Akita's production `D = 64` shell, margin 0.088 bits), so every fold coordinate
+weighs at most `2^-128.088` and needs no work. Nothing is below the floor and nothing needs to
+change. The test pins the per-row minima, so a catalog regeneration or an Akita change that
+alters a family fails it.
+
 ## 5. Tighter accounting (round-by-round), with the argument
 
 **Lemma S (checks of fixed objects).** Fix the 38 Akita polynomials `f` (values in `F_p`
@@ -600,15 +663,14 @@ predicate evaluations.
 with the plan of Section 6, at most two tied parts per segment (3.5), and Akita's plan for
 the selected catalog row. Assume in addition:
 
-* **(H1, open 6)** every fold group of the 13 grouped Akita rows draws its sparse fold
-  challenges from a family whose accepted support is at least `2^128` after rejection
-  (`PRODUCTION_FOLD_CHALLENGE_LADDER` support floor `>= 128` bits); not yet checked per
-  row in this repository;
+* **(H1, discharged in 4.6)** every fold group of every row of both catalogs draws its
+  sparse fold challenges from a family whose accepted support is at least `2^128` after
+  rejection (smallest `2^128.0881`; test `agg-pcs-config/tests/akita_fold_support.rs`);
 * **(H2, open 3)** Akita's Theorem 10.45 composes with a second, straight-line
   list-decoding extractor for the Flock vectors inside the application segment (step (3)
   below); the argument is not yet written.
 
-Until H1 and H2 are discharged the paper MUST state them as hypotheses and MUST NOT claim
+Until H2 is discharged the paper MUST state it as a hypothesis and MUST NOT claim
 the theorem unconditionally. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 1, every nonce probe
 included) there is an extractor of expected cost polynomial in that of `P` (Aerie
@@ -639,14 +701,14 @@ round-1 polynomials and the sponge list, with Lemma S supplying the bits and bad
 Definition 10.16 (vii) at every PIOP and tie site; Flock's validated per-site bounds
 supply them inside the Keccak side; Akita's plan inside the opening. (4) Every address
 weighs at most `2^-128` (Section 3, the script's assertion `max weight <= 2^-128`; Flock
-with 4.3/4.4; Akita by its plan and, under H1, its 128-bit sparse-challenge floor), so Aerie
+with 4.3/4.4; Akita by its plan and by the accepted sparse-challenge supports of 4.6), so Aerie
 Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <= 2^-128`. (5) The extracted
 objects satisfy relation H by spec 12.2 (lookup, leaves, bridge with `b = b'`, Keccak by
 Flock's relation).
 
 *What is not proved here.* Step (3)'s composition with a second, straight-line extractor
 inside the application segment (the Flock vectors) is hypothesis H2, the obligation of
-step 3 (review) and of the paper; the per-row support floor is hypothesis H1; Flock's own MCA, OOD and query bounds are taken from Flock; Akita's
+step 3 (review) and of the paper; the per-row support floor (former hypothesis H1) is checked in 4.6; Flock's own MCA, OOD and query bounds are taken from Flock; Akita's
 Module-SIS estimates exclude the extractor's run count as in Aerie. As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
@@ -832,8 +894,6 @@ change with it.
    the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tie site; its Keccak side is
    the public bits, so no Flock term.
-6. **Akita sparse folds.** Akita enforces a 128-bit floor on every fold-challenge family
-   (`MIN_FOLD_CHALLENGE_ENTROPY_BITS = 128`); Aerie's spec script additionally checks the
-   accepted (post-rejection) supports of its rows. The same check for our 13 grouped rows
-   is not done here and SHOULD be added with the Akita plan-digest test (4.1). Stated as
-   hypothesis H1 of Section 7.
+6. **Akita sparse folds (resolved, 4.6).** The accepted (post-rejection) supports of every
+   row of both catalogs are checked by `agg-pcs-config/tests/akita_fold_support.rs`: all at
+   least `2^128.0881`. Hypothesis H1 of Section 7 is discharged.
