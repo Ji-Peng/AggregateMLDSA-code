@@ -65,6 +65,7 @@ use flock_core::{
     lincheck::{build_eq_table, LincheckCircuit},
 };
 use flock_field::F128;
+use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
 use agg_witness::bridge::BridgeMatrices;
@@ -773,7 +774,9 @@ impl<'g> TiedPart<'g> {
     #[must_use]
     pub fn honest_parts(&self, records: &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
-        let inputs: Vec<Vec<u64>> = records.iter().map(SpongeRecord::input_bits).collect();
+        // Per record and independent: parallel (the serial loop was a single-thread
+        // window of the Flock witness build; same values in the same order).
+        let inputs: Vec<Vec<u64>> = records.par_iter().map(SpongeRecord::input_bits).collect();
         let sponge = pack_slot(self.gate, self.sponge.nu(), self.n, |j, z, a, b| {
             self.gate.instance_rows(&inputs[j], z, a, b);
         });
@@ -795,7 +798,9 @@ impl<'g> TiedPart<'g> {
     }
 
     fn statement(records: &[SpongeRecord]) -> (Vec<F128>, Vec<[u8; CTILDE_BYTES]>) {
-        let c_tilde: Vec<[u8; CTILDE_BYTES]> = records.iter().map(SpongeRecord::c_tilde).collect();
+        // One SHAKE256 per record: parallel, order preserved.
+        let c_tilde: Vec<[u8; CTILDE_BYTES]> =
+            records.par_iter().map(SpongeRecord::c_tilde).collect();
         let public = records
             .iter()
             .zip(&c_tilde)
@@ -985,32 +990,40 @@ impl<'g> TiedPart<'g> {
         let bridge_cap = bridge_data.commitment();
         trace("bridge rows and commitment", &start);
         let (_, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap);
-        // The sponge instance, with its three claims (event-2 commitment reused, K14).
-        let mut ch = self.sponge_challenger(fs, &public);
-        let gate: [&dyn LincheckCircuit; 1] = [self.gate];
-        let (sponge_proof, cap) = self.sponge.prove(
-            vec![sponge],
-            &gate,
-            &points.sponge_points(),
-            &mut ch,
-            sponge_data,
-        );
+        // The sponge instance (three claims, event-2 commitment reused, K14) and the bridge
+        // union (seven claims) have independent challengers (both seeded from `fs` and
+        // the tie), so the two proofs run side by side on the rayon pool; each proof is
+        // the same as when they ran one after the other.
+        let sponge_points = points.sponge_points();
+        let bridge_points = points.bridge_points();
+        let prove_sponge = || {
+            let mut ch = self.sponge_challenger(fs, &public);
+            let gate: [&dyn LincheckCircuit; 1] = [self.gate];
+            let out = self
+                .sponge
+                .prove(vec![sponge], &gate, &sponge_points, &mut ch, sponge_data);
+            trace("sponge instance proven", &start);
+            out
+        };
+        let prove_bridge = || {
+            let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()]);
+            let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
+            let out = g.prove(buffers, &circuits, &bridge_points, &mut ch, Some(bridge_data));
+            trace("bridge union proven (side by side)", &start);
+            out
+        };
+        // `AGG_TIED_SERIAL` (any value) runs them one after the other (A/B timing).
+        let ((sponge_proof, cap), (bridge_proof, bridge_cap_again)) =
+            if std::env::var_os("AGG_TIED_SERIAL").is_some() {
+                (prove_sponge(), prove_bridge())
+            } else {
+                rayon::join(prove_sponge, prove_bridge)
+            };
         assert!(
             cap == absorbed.sponge,
             "Flock's prover committed to a different sponge cap than TiedPart::commit"
         );
-        trace("sponge instance proven", &start);
-        // The bridge union, with its seven claims.
-        let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()]);
-        let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
-        let (bridge_proof, cap) = g.prove(
-            buffers,
-            &circuits,
-            &points.bridge_points(),
-            &mut ch,
-            Some(bridge_data),
-        );
-        debug_assert!(cap == bridge_cap);
+        debug_assert!(bridge_cap_again == bridge_cap);
         trace("bridge union proven", &start);
         self.encode(&bridge_cap, &sponge_proof, &bridge_proof)
     }
