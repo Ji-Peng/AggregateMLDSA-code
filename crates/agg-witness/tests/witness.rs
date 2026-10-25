@@ -118,7 +118,9 @@ fn derived_values_satisfy_relation_h() {
             assert_eq!(Z_DIGITS.compose(&d), *p);
         }
         for p in w.u.iter().flatten() {
-            assert!(U_DIGITS.in_alphabets(&U_DIGITS.decompose(*p)));
+            let d = U_STEP.decompose(*p);
+            assert!(U_STEP.in_alphabets(&d));
+            assert_eq!(U_STEP.compose(&d), *p);
         }
         for p in w.v.iter().flatten() {
             assert!(V_DIGITS.in_alphabets(&V_DIGITS.decompose(*p)));
@@ -146,7 +148,8 @@ fn padded_rows_hold_canonical_digits_of_zero() {
             let u: Vec<i8> = (0..5)
                 .map(|k| tables.columns[map.u.unwrap() + k][x])
                 .collect();
-            assert_eq!(u, vec![-8, -8, -8, -8, 0]);
+            // H-u: u = 0 is B_ulo = 1,228 (0x4CC), H_u = 3 (stored 0).
+            assert_eq!(u, vec![4, 4, -4, -8, 0]);
             let v: Vec<i8> = (0..7).map(|k| tables.columns[map.v + k][x]).collect();
             assert_eq!(v, vec![-8, -8, -8, -8, -8, -8, 0]);
             assert!((0..6).all(|t| tables.columns[map.b + t][x] == 0));

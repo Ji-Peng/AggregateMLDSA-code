@@ -71,13 +71,19 @@ pub const ZETA_MSIS: i64 = 350_209;
 /// w1Encode bits per signature: k 256 6.
 pub const W1LEN: usize = K * N * W1_BITS;
 
-/// Proven bound on |z| in relation H (Section 3.1): bar B_z = 2^17.
+/// Proven bound on |z| in relation H-u (Section 3.1): bar B_z = 2^17 (z in [-2^17, 2^17 - 1]).
 pub const BAR_B_Z: i64 = 1 << 17;
-/// Proven bound on |u| in relation H (Section 3.1): bar B_u = 2^18.
-pub const BAR_B_U: i64 = 1 << 18;
+/// Proven bound on |u| in relation H-u (Section 3.1): bar B_u = B_u = 190,465, exact and
+/// symmetric (u in [-B_u, B_u]).
+pub const BAR_B_U: i64 = B_U;
+/// Step of the six-valued top digit of u in relation H-u: u = B_ulo + STEP_U H_u - B_u with
+/// B_ulo in [0, 2^16), H_u in [0, 6), and 5 STEP_U + 2^16 = 2 B_u + 1 (`docs/h-exact.md` 2.1).
+pub const STEP_U: i64 = 63_079;
+/// Base of the top digit H_u of u in relation H-u.
+pub const U_TOP_BASE: u32 = 6;
 /// Proven range of the quotient v: [-2^26, 2^26 - 1] (Section 4.3).
 pub const V_HALF_RANGE: i64 = 1 << 26;
-/// zeta' of (3.5) for the relaxed bounds.
+/// zeta' of (3.5) for the proven bounds of relation H-u (equals zeta of FIPS 204).
 pub const ZETA_PRIME: i64 = if BAR_B_Z > BAR_B_U + (1 << (D - 1)) * TAU as i64 {
     BAR_B_Z
 } else {
@@ -112,6 +118,8 @@ pub const PCS_MIN_CELLS_LOG2: u32 = 13;
 const _: () = assert!(B_T < 1 << 29);
 const _: () = assert!(DELTA0_MAX < 1 << 49);
 const _: () = assert!(B_V < V_HALF_RANGE);
+const _: () = assert!((U_TOP_BASE as i64 - 1) * STEP_U + (1 << 16) == 2 * B_U + 1);
+const _: () = assert!(STEP_U <= 1 << 16);
 
 #[cfg(test)]
 mod tests {
@@ -155,7 +163,11 @@ mod tests {
         assert_eq!(W1LEN, 6144);
         let zeta = std::cmp::max(GAMMA1 - BETA, 2 * GAMMA2 + 1 + (1 << (D - 1)) * TAU as i64);
         assert_eq!(zeta, ZETA_MSIS);
-        assert_eq!(ZETA_PRIME, 421_888);
+        // H-u: only the u bound sets zeta', and it is the honest one, so zeta' = zeta.
+        assert_eq!(ZETA_PRIME, 350_209);
+        assert_eq!(ZETA_PRIME, ZETA_MSIS);
+        assert_eq!(BAR_B_U, 190_465);
+        assert_eq!(5 * STEP_U + (1 << 16), 2 * B_U + 1);
         assert_eq!(P_FIELD, u64::MAX - 58);
     }
 

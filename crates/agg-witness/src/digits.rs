@@ -1,5 +1,6 @@
 //! Digit decompositions in balanced alphabets (spec Section 4.3, (4.1)) and the slack forms of
-//! the feature-flagged layouts (spec Appendix A), with the leaf predicates Q_4, Q_8, Q_16.
+//! the feature-flagged layouts (spec Appendix A), the step form of `u` in relation H-u, and the
+//! leaf predicates Q_4, Q_6, Q_8, Q_16.
 //!
 //! A digit of base b lies in the balanced alphabet [-b/2, b/2 - 1]. A value with digits
 //! Z_0..Z_{m-1} (least significant first) is X = sum_k W_k Z_k + C_X (4.1). Decomposition is the
@@ -7,10 +8,12 @@
 //! proven range the top digit absorbs the excess and leaves its alphabet, which is exactly what
 //! the leaf checks of Section 7 detect.
 
+use crate::params::{B_U, STEP_U, U_TOP_BASE};
+
 /// Alphabet of a committed column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Alphabet {
-    /// Balanced digit of the given base (2, 4, 8 or 16): [-b/2, b/2 - 1].
+    /// Balanced digit of the given base (2, 4, 6, 8 or 16): [-b/2, b/2 - 1].
     Balanced(u32),
     /// Boolean {0, 1}.
     Bool,
@@ -155,11 +158,11 @@ pub const Z_DIGITS: DigitLayout = DigitLayout {
     bases: &[16, 16, 16, 16, 4],
     signed: true,
 };
-/// u in relation H: bases 16,16,16,16,8, signed, range [-2^18, 2^18 - 1].
-pub const U_DIGITS: DigitLayout = DigitLayout {
+/// Low part B_ulo of u in relation H-u: bases 16,16,16,16, unsigned, range [0, 2^16).
+pub const ULO_DIGITS: DigitLayout = DigitLayout {
     name: "u",
-    bases: &[16, 16, 16, 16, 8],
-    signed: true,
+    bases: &[16, 16, 16, 16],
+    signed: false,
 };
 /// The ring quotient v: bases 16^6, 8, signed, range [-2^26, 2^26 - 1].
 pub const V_DIGITS: DigitLayout = DigitLayout {
@@ -263,6 +266,101 @@ pub const UH_EXACT: SlackLayout = SlackLayout {
     offset: 0,
 };
 
+/// Step form X = step H + b - offset with one top digit H in [0, c) and b in [0, 2^j) given by
+/// unsigned digits (relation H-u, `docs/h-exact.md` 2.1). It covers [-offset, step (c - 1) +
+/// 2^j - 1 - offset] without gap when step <= 2^j. Committed digits: the low digits of b, then
+/// the top digit stored balanced, D = H - c/2 in the base-c alphabet [-c/2, c/2 - 1].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepLayout {
+    /// Digits of b (unsigned, range [0, 2^j)).
+    pub low: DigitLayout,
+    /// Weight of the top digit.
+    pub step: i64,
+    /// Base c of the top digit (even, so the leaf halving trick applies).
+    pub top_base: u32,
+    /// Offset subtracted at the end.
+    pub offset: i64,
+}
+
+impl StepLayout {
+    /// Number of committed digits (the low digits and the top digit).
+    pub const fn len(&self) -> usize {
+        self.low.len() + 1
+    }
+
+    /// Always false.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The exact range [-offset, step (c - 1) + 2^j - 1 - offset].
+    pub fn range(&self) -> (i64, i64) {
+        (
+            -self.offset,
+            self.step * (i64::from(self.top_base) - 1) + self.low.product() - 1 - self.offset,
+        )
+    }
+
+    /// Alphabet of committed digit k (low digits first, then the top digit).
+    pub fn alphabet(&self, k: usize) -> Alphabet {
+        if k < self.low.len() {
+            self.low.alphabet(k)
+        } else {
+            Alphabet::Balanced(self.top_base)
+        }
+    }
+
+    /// Weights of the committed digits in X = sum W_k Z_k + C_X.
+    pub fn weights(&self) -> Vec<i64> {
+        let mut w = self.low.weights();
+        w.push(self.step);
+        w
+    }
+
+    /// C_X = C_b + step c/2 - offset.
+    pub fn constant(&self) -> i64 {
+        self.low.constant() + self.step * i64::from(self.top_base / 2) - self.offset
+    }
+
+    /// Canonical digits: H = min(floor(y / step), c - 1) clamped at 0, b = y - step H with
+    /// y = x + offset. Outside the range a digit leaves its alphabet (the top digit of b when
+    /// y is too large or negative) and composition still inverts.
+    pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let y = x + self.offset;
+        let c = i64::from(self.top_base);
+        let h = y.div_euclid(self.step).clamp(0, c - 1);
+        let mut out = self.low.decompose(y - self.step * h);
+        out.push(h - c / 2);
+        out
+    }
+
+    /// X = sum W_k Z_k + C_X for any digit values.
+    pub fn compose(&self, digits: &[i64]) -> i64 {
+        assert_eq!(digits.len(), self.len());
+        let m = self.low.len();
+        self.low.compose(&digits[..m]) + self.step * (digits[m] + i64::from(self.top_base / 2))
+            - self.offset
+    }
+
+    /// True when every digit lies in its alphabet.
+    pub fn in_alphabets(&self, digits: &[i64]) -> bool {
+        digits
+            .iter()
+            .enumerate()
+            .all(|(k, &d)| self.alphabet(k).contains(d))
+    }
+}
+
+/// u in relation H-u: u = B_ulo + 63,079 H_u - 190,465 with B_ulo in [0, 2^16) (four base-16
+/// digits) and H_u in [0, 6) (one base-6 digit), exact range [-B_u, B_u] since
+/// 5 * 63,079 + 2^16 = 2 B_u + 1.
+pub const U_STEP: StepLayout = StepLayout {
+    low: ULO_DIGITS,
+    step: STEP_U,
+    top_base: U_TOP_BASE,
+    offset: B_U,
+};
+
 /// S1+S2 r1 = 4 a + b with a in [0, 8), b in [0, 16): committed as the balanced digits
 /// (A, B) = (a - 4, b - 8), so r1 = 4 A + B + 24. Canonical a = min(r1 / 4, 7).
 pub fn r1_decompose(r1: i64) -> (i64, i64) {
@@ -293,6 +391,11 @@ pub fn q4(p: i128) -> Option<i128> {
     product_of_shifts(p, &[0, 2])
 }
 
+/// Q_6(P) = P (P - 2)(P - 6): zero exactly on the base-6 alphabet [-3, 2].
+pub fn q6(p: i128) -> Option<i128> {
+    product_of_shifts(p, &[0, 2, 6])
+}
+
 /// Q_8(P) = P (P - 2)(P - 6)(P - 12).
 pub fn q8(p: i128) -> Option<i128> {
     product_of_shifts(p, &[0, 2, 6, 12])
@@ -318,6 +421,7 @@ pub fn leaf_vanishes(base: u32, p: i128) -> bool {
     let v = match base {
         2 => q2(p),
         4 => q4(p),
+        6 => q6(p),
         8 => q8(p),
         16 => match (q16_lo(p), q16_hi(p)) {
             (Some(a), Some(b)) => a.checked_mul(b),
@@ -359,14 +463,16 @@ mod tests {
     #[test]
     fn constants_of_section_4_3() {
         assert_eq!(Z_DIGITS.constant(), 34_952);
-        assert_eq!(U_DIGITS.constant(), 34_952);
+        assert_eq!(ULO_DIGITS.constant(), 34_952);
+        assert_eq!(U_STEP.constant(), 33_724);
         assert_eq!(V_DIGITS.constant(), 8_947_848);
         assert_eq!(KAPPA12_DIGITS.constant(), 648);
         assert_eq!(KAPPA3_DIGITS.constant(), 136);
         assert_eq!(BZ_DIGITS.constant(), 100_488);
         assert_eq!(BU_DIGITS.constant(), 166_024);
         assert_eq!(Z_DIGITS.range(), (-BAR_B_Z, BAR_B_Z - 1));
-        assert_eq!(U_DIGITS.range(), (-BAR_B_U, BAR_B_U - 1));
+        assert_eq!(U_STEP.range(), (-BAR_B_U, BAR_B_U));
+        assert_eq!(U_STEP.range(), (-B_U, B_U));
         assert_eq!(V_DIGITS.range(), (-V_HALF_RANGE, V_HALF_RANGE - 1));
         assert_eq!(KAPPA12_DIGITS.range(), (0, 1023));
         assert_eq!(KAPPA3_DIGITS.range(), (0, 255));
@@ -381,7 +487,7 @@ mod tests {
         // (4.1) is a bijection from the digit alphabets onto the proven range (spec_checks.py item 8).
         for layout in [
             Z_DIGITS,
-            U_DIGITS,
+            ULO_DIGITS,
             KAPPA12_DIGITS,
             KAPPA3_DIGITS,
             BZ_DIGITS,
@@ -400,7 +506,7 @@ mod tests {
     fn decompose_compose_roundtrip_and_canonical_zero() {
         for layout in [
             Z_DIGITS,
-            U_DIGITS,
+            ULO_DIGITS,
             V_DIGITS,
             KAPPA12_DIGITS,
             KAPPA3_DIGITS,
@@ -472,9 +578,45 @@ mod tests {
     }
 
     #[test]
+    fn u_step_form_is_exact_at_the_slack_boundaries() {
+        // 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16: the six blocks tile [-B_u, B_u].
+        // (Also compile-time checks in params.rs.)
+        assert_eq!(5 * STEP_U + (1 << 16), 2 * B_U + 1);
+        assert_eq!(U_STEP.len(), 5);
+        assert_eq!(U_STEP.weights(), vec![1, 16, 256, 4096, STEP_U]);
+        // Exhaustive: every u in range has canonical digits in their alphabets and recomposes.
+        for u in -B_U..=B_U {
+            let d = U_STEP.decompose(u);
+            assert!(U_STEP.in_alphabets(&d), "u = {u}: {d:?}");
+            assert_eq!(U_STEP.compose(&d), u);
+        }
+        // Boundaries: +-190,465 encode, +-190,466 have no in-alphabet digits.
+        assert_eq!(U_STEP.decompose(B_U), vec![7, 7, 7, 7, 2]);
+        assert_eq!(U_STEP.decompose(-B_U), vec![-8, -8, -8, -8, -3]);
+        for u in [B_U + 1, -B_U - 1, B_U + 12_345, -(1 << 18)] {
+            let d = U_STEP.decompose(u);
+            assert!(!U_STEP.in_alphabets(&d), "u = {u}");
+            assert_eq!(U_STEP.compose(&d), u);
+        }
+        // Reachable set of all in-alphabet digit tuples (low part as one value in [0, 2^16)):
+        // exactly [-B_u, B_u].
+        let mut hit = vec![false; (2 * B_U + 1) as usize];
+        for top in -3..=2i64 {
+            for b in 0..(1i64 << 16) {
+                let u = b + STEP_U * (top + 3) - B_U;
+                assert!((-B_U..=B_U).contains(&u));
+                hit[(u + B_U) as usize] = true;
+            }
+        }
+        assert!(hit.iter().all(|&h| h));
+        // Zero: H_u = 3 (stored 0), B_ulo = 1,228 (digits 4, 4, -4, -8).
+        assert_eq!(U_STEP.decompose(0), vec![4, 4, -4, -8, 0]);
+    }
+
+    #[test]
     fn leaf_predicates_exact_on_balanced_alphabets() {
         // spec_checks.py item 9, extended to base 2.
-        for base in [2u32, 4, 8, 16] {
+        for base in [2u32, 4, 6, 8, 16] {
             let a = Alphabet::Balanced(base);
             for z in -4 * i64::from(base)..4 * i64::from(base) {
                 assert_eq!(

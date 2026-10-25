@@ -15,7 +15,7 @@ source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 | `crt` | (A z) over Z by CRT modulo q and P2 = 15 2^27 + 1; schoolbook reference | 3, B.9 |
 | `instance` | `PublicInstance`: per-record verifier precomputation (keys expanded once per distinct pk) | 2 |
 | `derive` | `derive` (strict), `derive_unchecked`, re-encoding to signature bytes, UseHint residual lemma | 3, 6, A |
-| `digits` | (4.1) layouts, slack forms of Appendix A, leaf predicates Q_2, Q_4, Q_8, Q_16 | 4.3, A |
+| `digits` | (4.1) layouts, slack forms of Appendix A, the step form of u (H-u), leaf predicates Q_2, Q_4, Q_6, Q_8, Q_16 | 4.3, A |
 | `tables` | `Layout`, column maps, `BatchTables` (G_main), padding, serialization | 4 |
 | `bridge` | bridge geometry, honest parities and carries for given matrices, G_1/G_2/G_3 tables, GF(2) composite | 1, 9 |
 | `keccak` | Keccak-f[1600], the 7-permutation sponge trace, bit wiring | 8 |
@@ -24,7 +24,9 @@ source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 
 The `ml-dsa` crate (`=0.1.1`) is used only for key generation, signing and as a test oracle;
 nothing in the relation depends on its internals. Features: `h-exact` (H-exact layout),
-`fips` (S1+S2 layout, `relation = fips`). Default: relation H only.
+`fips` (S1+S2 layout, `relation = fips`). Default: relation H-u only (the default relation
+since 2026-10-25: z relaxed to [-2^17, 2^17), u exact; it replaced the relaxed relation H, whose
+u was relaxed to [-2^18, 2^18); `Layout::H` keeps its name and id 0 and now means H-u).
 
 ## 2. Representatives (spec Section 3.2, Appendix B.9)
 
@@ -52,8 +54,8 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | Strict derivation | \|v\| <= B_v | 67,068,447 | invariant ((3.4'): DELTA0_MAX = 562,061,561,757,697) |
 | Strict derivation | Delta_0 = 0 mod q; CRT = NTT path mod q; S1+S2: w1' = (r1 + g) mod 44 | | invariants |
 | `derive_unchecked` | sigDecode succeeds (length, HintBitUnpack) | | only check |
-| Relation H tables (proven ranges) | z in [-2^17, 2^17 - 1] | digits 16,16,16,16,4 signed | `b16_prod`, `leaf4` |
-| | u in [-2^18, 2^18 - 1] | digits 16,16,16,16,8 signed | `b16_prod`, `leaf8` |
+| Relation H-u tables (proven ranges) | z in [-2^17, 2^17 - 1] | digits 16,16,16,16,4 signed | `b16_prod`, `leaf4` |
+| | u in [-190,465, 190,465] exactly | u = B_ulo + 63,079 H_u - 190,465, B_ulo digits 16,16,16,16 unsigned, H_u - 3 base 6 | `b16_prod`, `leaf6` |
 | | v in [-2^26, 2^26 - 1] | digits 16^6,8 signed | `b16_prod`, `leaf8` |
 | | b_t in {0, 1}; w1' in [0, 44) | (7.4) b5 (b4 + b3 b2) = 0 | `bool_b`, `range_w1` |
 | H-exact tables | z in [-130,993, 130,993] exactly | z = 130,915 a_z + b_z - 130,993, b_z digits 16,16,16,16,2 unsigned | `bool_slack`, digits |
@@ -70,9 +72,12 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | Columns | every committed value fits i8 | | `BuildError::Encode` |
 
 Proven ranges and digit constants (checked by enumeration in `digits` tests, as
-`spec_checks.py` item 8): C_z = C_u = 34,952, C_v = 8,947,848, C_kappa12 = 648,
-C_kappa3 = 136, C_bz = 100,488, C_bu = 166,024. Q_b(Z (Z + 1)) vanishes exactly on the
-balanced alphabet for b in {2, 4, 8, 16} (Q_2(P) = P).
+`spec_checks.py` item 8): C_z = C_ulo = 34,952, C_u = 33,724 (H-u step form: u = sum W_k u_k +
+63,079 u_4 + 33,724), C_v = 8,947,848, C_kappa12 = 648, C_kappa3 = 136, C_bz = 100,488,
+C_bu = 166,024. Q_b(Z (Z + 1)) vanishes exactly on the balanced alphabet for b in
+{2, 4, 6, 8, 16} (Q_2(P) = P, Q_6(P) = P (P - 2)(P - 6)). The H-u step form covers exactly
+[-190,465, 190,465] because 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
+`u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits).
 
 ## 4. Column layouts (G_main)
 
@@ -81,14 +86,16 @@ main-domain columns by rho. Columns are `i8`. Base-k digit alphabets are [-k/2, 
 
 | Layout | Columns in table order | Count |
 | --- | --- | ---: |
-| H (default) | z_0..z_4 (16,16,16,16,4), u_0..u_4 (16,16,16,16,8), v_0..v_6 (16^6, 8), b_0..b_5 | 23 |
+| H-u (default, `Layout::H`) | z_0..z_4 (16,16,16,16,4), u_0..u_3 (16^4, B_ulo), u_4 (6, H_u - 3), v_0..v_6 (16^6, 8), b_0..b_5 | 23 |
 | H-exact (`h-exact`) | bz_0..bz_4 (16,16,16,16,2), az, bu_0..bu_4 (16,16,16,16,4), au, v_0..v_6, b_0..b_5 | 25 |
 | S1+S2 (`fips`) | bz_0..bz_4, az, r1_a (8), r1_b (16), bvr_0..bvr_3 (16^4), avr, s, g, e, v_0..v_6, b_0..b_5; signature domain: bh_0, bh_1 (8, 8), ah | 29 + 3 |
 
 Canonical decompositions: (4.1) digits are the mixed-radix digits of X + eps B/2 shifted by
--b_k/2; slack forms take a = [x + offset >= 2^j], b = x + offset - w a; r1 takes
+-b_k/2; slack forms take a = [x + offset >= 2^j], b = x + offset - w a; the H-u step form
+takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 63,079 H_u; r1 takes
 a = min(floor(r1 / 4), 7). Padded rows (i >= N) hold the encoding of the zero witness:
-for H the digits of zero (-8, -8, -8, -8, 0 for z and u, -8 x6, 0 for v, bits 0); see W2
+for H-u the digits of zero (-8, -8, -8, -8, 0 for z; 4, 4, -4, -8, 0 for u, i.e. B_ulo =
+1,228 and H_u = 3; -8 x6, 0 for v; bits 0); see W2
 for H-exact and S1+S2 (s = -1, u_h = 80).
 
 Physical tables shorter than 2^13 cells (the S1+S2 signature columns) are zero-extended by
@@ -118,7 +125,7 @@ domain, over the integers:
 | Stage | Identities |
 | --- | --- |
 | 1 | `bool_b`, `range_w1` (7.4), `b16_prod` (every base-16 digit), `bool_y1` (7.1) with y1 by (7.5), `level2` (7.2), `level3` (7.3), `bool_y2` |
-| 2 | `leaf16` (A^lo, A^hi = Q_16^b(P_Z)), `leaf8`, `leaf4`, `leaf2` |
+| 2 | `leaf16` (A^lo, A^hi = Q_16^b(P_Z)), `leaf8`, `leaf6`, `leaf4`, `leaf2` |
 | 3 | `ring` (7.6) = (3.1) at every position (A = T = 0 on padded rows), `link` (P_Z = Z (Z + 1)) |
 | Keccak | (3.3) c~ = SHAKE256(mu, w1Encode(bits)) through the sponge; (9.1) Y = M3 M2 M1 b over GF(2) |
 | Layout | H-exact/S1+S2 slack Booleans and e^2 = e; s^2 = 1; e (1 + s) = e v_r = e r1 = 0; g (g-1)(g+1) = 0; g (s - g) = 0; sum g^2 + u_h = omega; x (x - 44)(x + 44) = 0 with x = r1 + g - w1' |
