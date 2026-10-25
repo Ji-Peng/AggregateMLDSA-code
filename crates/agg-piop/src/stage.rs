@@ -11,7 +11,9 @@
 use aerie_falcon::protocol::algebra::eq_evaluation;
 use jolt_field::{One, Ring, Zero};
 
-use crate::kernel::{evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term};
+use crate::kernel::{
+    evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term, WeightIntGroup,
+};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::transcript::{gamma_site, round_sites, Transcript, TranscriptError};
 use crate::OpeningField as E;
@@ -347,6 +349,14 @@ fn prove_stage_with<'a>(
             build_times[g] = build.elapsed().as_secs_f64();
             continue;
         }
+        if eq_point.is_none() {
+            if let Some(weighted) = weight_group(&lanes, &instances, rounds) {
+                groups.push(StageGroup::Weight(weighted));
+                owner.push(g);
+                build_times[g] = build.elapsed().as_secs_f64();
+                continue;
+            }
+        }
         let (instances, linear) = split_linear(&lanes, instances, eq_point.as_deref(), rounds);
         groups.push(StageGroup::Generic(
             Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
@@ -449,6 +459,8 @@ enum StageGroup<'a> {
     Linear(LinearIntGroup<'a>),
     /// The linear integer part split off the preceding generic group ([`split_linear`]).
     Extra(LinearIntGroup<'a>),
+    /// A weight times an integer combination ([`weight_group`]).
+    Weight(WeightIntGroup<'a>),
 }
 
 impl StageGroup<'_> {
@@ -456,6 +468,7 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => g.round_message(round),
             Self::Linear(g) | Self::Extra(g) => g.round_message(round),
+            Self::Weight(g) => g.round_message(round),
         }
     }
 
@@ -463,6 +476,7 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => g.bind(round, challenge),
             Self::Linear(g) | Self::Extra(g) => g.bind(round, challenge),
+            Self::Weight(g) => g.bind(round, challenge),
         }
     }
 
@@ -470,6 +484,7 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => g.claim(),
             Self::Linear(g) | Self::Extra(g) => g.claim(),
+            Self::Weight(g) => g.claim(),
         }
     }
 
@@ -477,6 +492,7 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(_) => true,
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
+            Self::Weight(g) => g.terminal_consistent(),
         }
     }
 
@@ -484,6 +500,7 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => Some(g.terminal_values()),
             Self::Linear(_) | Self::Extra(_) => None,
+            Self::Weight(g) => Some(g.terminal_values()),
         }
     }
 }
@@ -529,6 +546,37 @@ fn linear_group<'a>(
         return None;
     }
     LinearIntGroup::new(cells, coefficients, point)
+}
+
+/// The weighted path (prover only; the generic kernel's messages): a full-domain group
+/// without an equality factor whose single instance is one weighted affine term
+/// `gamma w (sum_l c_l f_l + c)` with a field weight `w` and integer or byte lanes `f_l`
+/// (stage 3's `w_A z`).
+fn weight_group<'a>(lanes: &[Lane<'a>], instances: &[GroupInstance], rounds: usize) -> Option<WeightIntGroup<'a>> {
+    let [instance] = instances else { return None };
+    let [Term::Affine {
+        weight: Some(weight),
+        lanes: affine,
+        constant,
+    }] = instance.terms.as_slice()
+    else {
+        return None;
+    };
+    let sources: Vec<Source<'a>> = lanes
+        .iter()
+        .map(|lane| match lane {
+            Lane::Source(source) => Some(*source),
+            Lane::Folded(_) => None,
+        })
+        .collect::<Option<_>>()?;
+    let mut coefficients = vec![0_i64; lanes.len()];
+    for &(l, c) in affine {
+        if l == *weight || l >= lanes.len() {
+            return None;
+        }
+        coefficients[l] += c;
+    }
+    WeightIntGroup::new(&sources, *weight, &coefficients, *constant, instance.gamma, rounds)
 }
 
 /// Split the linear terms on integer lanes off an equality group on the full domain: a

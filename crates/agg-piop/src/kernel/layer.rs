@@ -61,9 +61,9 @@ trait Level0: Sync {
     fn initial_table(&self) -> Option<Vec<E>> {
         None
     }
-    /// `[q(0), q(1), q_2]` of the first round with the equality weights `first`, `second`
-    /// when the source has a faster path than [`Self::first_item`].
-    fn first_round(&self, _first: &[E], _second: &[E]) -> Option<[E; 3]> {
+    /// `[q(0), q(1), q_2]` of the first round with the equality weights `(first, second)`
+    /// (`None`: unweighted) when the source has a faster path than [`Self::first_item`].
+    fn first_round(&self, _weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
         None
     }
 }
@@ -122,7 +122,11 @@ fn weighted_int_sums<const N: usize>(
 /// The round driver shared by the dedicated groups.
 struct Engine<S: Level0> {
     source: S,
-    eq: GruenSplitEq<E>,
+    /// The equality factor, or `None` for a plain sum over the domain.
+    eq: Option<GruenSplitEq<E>>,
+    /// A coefficient applied to every round polynomial (the batching gamma of an eq-free
+    /// group; one otherwise).
+    scale: E,
     vars: usize,
     bound: usize,
     claim: E,
@@ -135,14 +139,19 @@ struct Engine<S: Level0> {
 
 impl<S: Level0> Engine<S> {
     fn new(source: S, eq_point: &[E]) -> Option<Self> {
-        let vars = eq_point.len();
+        let eq = GruenSplitEq::new(eq_point).ok()?;
+        Self::with_eq(source, Some(eq), eq_point.len(), E::one())
+    }
+
+    fn with_eq(source: S, eq: Option<GruenSplitEq<E>>, vars: usize, scale: E) -> Option<Self> {
         if vars == 0 || source.rows() != 1 << vars {
             return None;
         }
         let table = source.initial_table().unwrap_or_default();
         Some(Self {
             source,
-            eq: GruenSplitEq::new(eq_point).ok()?,
+            eq,
+            scale,
             vars,
             bound: 0,
             claim: E::zero(),
@@ -213,19 +222,22 @@ impl<S: Level0> Engine<S> {
         let rows_out = if challenge.is_some() { rows_in / 2 } else { rows_in };
         let context = challenge.map(E::precompute);
         let previous = std::mem::take(&mut self.table);
-        let (first, second): (Vec<E>, Vec<E>) = if evaluate {
-            let (f, s) = self.eq.remaining_eq_tables();
-            (f.to_vec(), s.to_vec())
-        } else {
-            (vec![E::one()], vec![E::one()])
+        let unweighted = self.eq.is_none();
+        let (first, second): (Vec<E>, Vec<E>) = match &self.eq {
+            Some(eq) if evaluate => {
+                let (f, s) = eq.remaining_eq_tables();
+                (f.to_vec(), s.to_vec())
+            }
+            _ => (vec![E::one()], vec![E::one()]),
         };
         if evaluate && from_source && challenge.is_none() {
-            if let Some(sums) = self.source.first_round(&first, &second) {
+            let weights = (!unweighted).then_some((first.as_slice(), second.as_slice()));
+            if let Some(sums) = self.source.first_round(weights) {
                 return sums;
             }
         }
         let items = (rows_out / 2).max(1);
-        debug_assert!(!evaluate || first.len() * second.len() == items);
+        debug_assert!(!evaluate || unweighted || first.len() * second.len() == items);
         let first_bits = first.len().trailing_zeros();
         let first_mask = first.len() - 1;
         let keep = challenge.is_some();
@@ -252,6 +264,26 @@ impl<S: Level0> Engine<S> {
             let mut inner = [Acc::zero(); 3];
             let mut block = start >> first_bits;
             for k in start..end {
+                if unweighted {
+                    // A plain sum: the item sums accumulate unreduced, without weights.
+                    if keep {
+                        let offset = (k - start) * 2 * width;
+                        let len = (2 * width).min(out.len() - offset);
+                        let rows = &mut out[offset..offset + len];
+                        fill(k, rows);
+                        if evaluate {
+                            let (a, b) = rows.split_at(width);
+                            this.table_item(a, b, full, &mut outer);
+                        }
+                    } else if from_source {
+                        this.source.first_item(k, full, &mut outer);
+                    } else {
+                        let a = &previous[2 * k * width..(2 * k + 1) * width];
+                        let b = &previous[(2 * k + 1) * width..(2 * k + 2) * width];
+                        this.table_item(a, b, full, &mut outer);
+                    }
+                    continue;
+                }
                 if evaluate && (k >> first_bits) != block {
                     for (o, i) in outer.iter_mut().zip(&mut inner) {
                         mad(o, second[block], E::reduce_product(*i));
@@ -280,7 +312,7 @@ impl<S: Level0> Engine<S> {
                     this.weighted_item(a, b, weight, full, &mut inner);
                 }
             }
-            if evaluate && start < end {
+            if evaluate && !unweighted && start < end {
                 for (o, i) in outer.iter_mut().zip(&inner) {
                     mad(o, second[block], E::reduce_product(*i));
                 }
@@ -329,19 +361,29 @@ impl<S: Level0> Engine<S> {
 
     fn round_message(&mut self, round: usize) -> Vec<E> {
         assert_eq!(round, self.bound, "rounds in order");
-        let full = round == 0 || !self.eq.can_recover_linear_q_term_from_claim();
-        let [q0, at_one, q2] = self.pass(true, full);
-        let q1 = if full {
-            at_one - q0 - q2
-        } else {
-            let (l0, l1) = self.eq.linear_factor_evals();
-            let inverse = l1.inverse().expect("recoverable round");
-            (self.claim - l0 * q0) * inverse - q0 - q2
+        let full = round == 0
+            || self
+                .eq
+                .as_ref()
+                .is_some_and(|eq| !eq.can_recover_linear_q_term_from_claim());
+        let [q0, at_one, q2] = self.pass(true, full).map(|q| q * self.scale);
+        let coefficients = match &self.eq {
+            Some(eq) => {
+                let q1 = if full {
+                    at_one - q0 - q2
+                } else {
+                    let (l0, l1) = eq.linear_factor_evals();
+                    let inverse = l1.inverse().expect("recoverable round");
+                    (self.claim - l0 * q0) * inverse - q0 - q2
+                };
+                eq.gruen_mul(&UnivariatePoly::new(vec![q0, q1, q2])).into_coefficients()
+            }
+            // s = q: s(0) + s(1) = 2 q_0 + q_1 + q_2 = claim.
+            None => {
+                let q1 = if full { at_one - q0 - q2 } else { self.claim - q0 - q0 - q2 };
+                vec![q0, q1, q2]
+            }
         };
-        let coefficients = self
-            .eq
-            .gruen_mul(&UnivariatePoly::new(vec![q0, q1, q2]))
-            .into_coefficients();
         if round == 0 {
             self.claim = coefficients.iter().fold(E::zero(), |s, &c| s + c) + coefficients[0];
         }
@@ -355,7 +397,9 @@ impl<S: Level0> Engine<S> {
         assert!(!self.pending.is_empty(), "round_message before bind");
         self.claim = evaluate_compressed(&self.pending, self.claim, challenge);
         self.pending.clear();
-        self.eq.bind(challenge);
+        if let Some(eq) = &mut self.eq {
+            eq.bind(challenge);
+        }
         self.unfolded = Some(challenge);
         self.bound += 1;
         if self.bound == self.vars {
@@ -379,7 +423,8 @@ impl<S: Level0> Engine<S> {
             .products()
             .iter()
             .fold(linear, |s, &(i, j)| s + row[i] * row[j]);
-        self.eq.current_scalar() * sum == self.claim
+        let factor = self.eq.as_ref().map_or(E::one(), GruenSplitEq::current_scalar);
+        factor * self.scale * sum == self.claim
     }
 }
 
@@ -657,7 +702,8 @@ impl Level0 for IntSource<'_> {
         }
     }
 
-    fn first_round(&self, first: &[E], second: &[E]) -> Option<[E; 3]> {
+    fn first_round(&self, weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
+        let (first, second) = weights?;
         let cell = |lane: &[i32], i: usize| i64::from(lane[i]);
         let [s0, s1] = self.s;
         let [c, cs, cm, ck, cmm] = self.c;
@@ -921,6 +967,196 @@ impl<'a> LinearIntGroup<'a> {
     /// When rounds are called out of order.
     pub fn bind(&mut self, round: usize, challenge: E) {
         self.0.bind(round, challenge);
+    }
+
+    /// The self-check of [`LayerGroup::terminal_consistent`].
+    #[must_use]
+    pub fn terminal_consistent(&self) -> bool {
+        self.0.terminal_consistent()
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// A field weight times an integer combination, without an equality factor.
+// ---------------------------------------------------------------------------------------
+
+struct WeightIntSource<'a> {
+    /// The weight lane (a public field table).
+    weight: &'a [E],
+    /// The integer lanes in the group's lane order (all also carried in the table for their
+    /// terminal values) with their coefficients in the combination.
+    lanes: Vec<(super::Source<'a>, i64)>,
+    constant: i64,
+    /// The group lane of the weight (the others are the integer lanes in order).
+    weight_lane: usize,
+}
+
+impl WeightIntSource<'_> {
+    /// `g(i) = sum_l c_l f_l(i) + constant` (exact: coefficients and cells are small).
+    #[inline(always)]
+    fn combination(&self, i: usize) -> i64 {
+        self.lanes
+            .iter()
+            .fold(self.constant, |acc, (lane, c)| acc + c * int_cell(lane, i))
+    }
+}
+
+impl Level0 for WeightIntSource<'_> {
+    fn width(&self) -> usize {
+        2 + self.lanes.len()
+    }
+
+    fn rows(&self) -> usize {
+        self.weight.len()
+    }
+
+    fn first_item(&self, k: usize, full: bool, sums: &mut [Acc; 3]) {
+        let (a, b) = (2 * k, 2 * k + 1);
+        let (wa, wb) = (self.weight[a], self.weight[b]);
+        let (ga, gb) = (self.combination(a), self.combination(b));
+        mad_int(&mut sums[0], wa, ga);
+        if full {
+            mad_int(&mut sums[1], wb, gb);
+        }
+        mad_int(&mut sums[2], wb - wa, gb - ga);
+    }
+
+    fn first_round(&self, weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
+        if weights.is_some() {
+            return None;
+        }
+        let items = self.rows() / 2;
+        let run = |range: std::ops::Range<usize>| {
+            let mut sums = [Acc::zero(); 3];
+            for k in range {
+                self.first_item(k, true, &mut sums);
+            }
+            sums
+        };
+        let total = if items >= MIN_PARALLEL_ITEMS {
+            (0..items.div_ceil(ITEM_CHUNK))
+                .into_par_iter()
+                .map(|task| run(task * ITEM_CHUNK..((task + 1) * ITEM_CHUNK).min(items)))
+                .reduce(
+                    || [Acc::zero(); 3],
+                    |mut left, right| {
+                        for (l, r) in left.iter_mut().zip(right) {
+                            *l += r;
+                        }
+                        left
+                    },
+                )
+        } else {
+            run(0..items)
+        };
+        Some(total.map(E::reduce_product))
+    }
+
+    fn folded_row(&self, r: E, context: &<E as Fold>::Ctx, i: usize, out: &mut [E]) {
+        let (a, b) = (2 * i, 2 * i + 1);
+        out[0] = fold(context, self.weight[a], self.weight[b]);
+        let (ga, gb) = (self.combination(a), self.combination(b));
+        out[1] = E::from_i64(ga) + fmi(r, gb - ga);
+        for (slot, (lane, _)) in out[2..].iter_mut().zip(&self.lanes) {
+            let (low, high) = (int_cell(lane, a), int_cell(lane, b));
+            *slot = E::from_i64(low) + fmi(r, high - low);
+        }
+    }
+
+    fn linear(&self) -> &[usize] {
+        &[]
+    }
+
+    fn products(&self) -> &[(usize, usize)] {
+        &[(0, 1)]
+    }
+
+    fn terminal(&self, row: &[E]) -> Vec<E> {
+        let mut out = row[2..].to_vec();
+        out.insert(self.weight_lane, row[0]);
+        out
+    }
+}
+
+/// `gamma sum_x w(x) g(x)` for a field weight lane `w` and the integer combination
+/// `g = sum_l c_l f_l + c` of integer or byte lanes (no equality factor; stage 3's `w_A z`).
+/// The first round sums `w g` with unreduced integer products; the table holds `w`, `g` and
+/// the integer lanes (folded for their terminal values).
+pub struct WeightIntGroup<'a>(Engine<WeightIntSource<'a>>);
+
+impl<'a> WeightIntGroup<'a> {
+    /// `lanes` are the group's lanes in order: the weight at `weight_lane` (a field lane) and
+    /// integer or byte lanes, with `coefficients[l]` the coefficient of lane `l` in `g`
+    /// (ignored at the weight). `None` on lanes of other lengths than `2^rounds`, a field
+    /// lane besides the weight, or coefficients above `2^20` (exactness of `g`).
+    #[must_use]
+    pub fn new(
+        lanes: &[super::Source<'a>],
+        weight_lane: usize,
+        coefficients: &[i64],
+        constant: i64,
+        gamma: E,
+        rounds: usize,
+    ) -> Option<Self> {
+        let rows = 1_usize << rounds;
+        let super::Source::Field(weight) = *lanes.get(weight_lane)? else {
+            return None;
+        };
+        if lanes.len() != coefficients.len()
+            || lanes.iter().any(|l| l.len() != rows)
+            || coefficients.iter().any(|c| c.abs() > 1 << 20)
+            || constant.abs() > 1 << 40
+        {
+            return None;
+        }
+        let mut ints = Vec::with_capacity(lanes.len() - 1);
+        for (l, (lane, &c)) in lanes.iter().zip(coefficients).enumerate() {
+            if l == weight_lane {
+                continue;
+            }
+            match lane {
+                super::Source::Field(_) => return None,
+                other => ints.push((*other, c)),
+            }
+        }
+        let source = WeightIntSource {
+            weight,
+            lanes: ints,
+            constant,
+            weight_lane,
+        };
+        Engine::with_eq(source, None, rounds, gamma).map(Self)
+    }
+
+    /// The current claim.
+    #[must_use]
+    pub fn claim(&self) -> E {
+        self.0.claim
+    }
+
+    /// The compressed message of `round`.
+    ///
+    /// # Panics
+    /// When rounds are called out of order.
+    pub fn round_message(&mut self, round: usize) -> Vec<E> {
+        self.0.round_message(round)
+    }
+
+    /// Bind the round's variable to `challenge`.
+    ///
+    /// # Panics
+    /// When rounds are called out of order.
+    pub fn bind(&mut self, round: usize, challenge: E) {
+        self.0.bind(round, challenge);
+    }
+
+    /// The lane values at the bound point, in the group's lane order.
+    ///
+    /// # Panics
+    /// Before every round is bound.
+    #[must_use]
+    pub fn terminal_values(&self) -> Vec<E> {
+        self.0.terminal_values()
     }
 
     /// The self-check of [`LayerGroup::terminal_consistent`].

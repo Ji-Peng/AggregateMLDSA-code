@@ -697,6 +697,36 @@ fn dedicated_layer_groups_match_the_generic_group() {
         assert_eq!(generic.claim(), linear.claim());
         assert!(linear.terminal_consistent());
 
+        // A field weight times an integer combination, without an equality factor.
+        {
+            let weight: Vec<E> = (0..rows).map(|_| field(&mut rng)).collect();
+            let lo = ints(&mut rng, 1 << 15);
+            let hi: Vec<i8> = (0..rows).map(|_| rng.below(8) as i8 - 4).collect();
+            let gamma = field(&mut rng);
+            let lanes = vec![
+                Lane::Source(Source::Field(&weight)),
+                Lane::Source(Source::Ints(&lo)),
+                Lane::column(&hi),
+            ];
+            let instances = vec![GroupInstance {
+                gamma,
+                terms: vec![Term::Affine {
+                    weight: Some(0),
+                    lanes: vec![(1, 1), (2, 1 << 16)],
+                    constant: 1 << 15,
+                }],
+            }];
+            let sources = [Source::Field(&weight), Source::Ints(&lo), Source::Bytes { cells: &hi, map: &IDENTITY_MAP }];
+            let mut generic = Group::new(lanes, instances, None, vars, 3).expect("group");
+            let mut weighted =
+                WeightIntGroup::new(&sources, 0, &[0, 1, 1 << 16], 1 << 15, gamma, vars).expect("weighted");
+            let expected = drive!(generic);
+            let got = drive!(weighted);
+            assert_eq!(expected, got, "weighted, {vars} vars");
+            assert_eq!(generic.terminal_values(), weighted.terminal_values());
+            assert!(weighted.terminal_consistent());
+        }
+
         // Integer pairs without and with M lanes.
         for with_m in [false, true] {
             let s = [ints(&mut rng, 1 << 16), ints(&mut rng, 1 << 16)];
