@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | merged into `main` at `8da7538` (2026-10-25); implemented on branch `h-exact`: step A (relation H-u as the default, open question 1 answered (a); wire version 3, deviation L8) and step B (H-exact, relation byte 1, deviation L9; Section 9) |
+| Status | merged into `main` at `8da7538` (2026-10-25); implemented on branch `h-exact`: step A (relation H-u as the default, open question 1 answered (a); wire version 3, deviation L8) and step B (H-exact, relation byte 1, deviation L9; Section 9). H-FIPS (relation byte 2, deviation L10; Section 10) implemented on branch `h-fips` (2026-10-27), not yet merged |
 | Applies to | ML-DSA-44, lookup layout L16, modes A and B; written against PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`), implemented as wire version 3 |
 | Base | code `be398d8` (main); layered on branches `pow-128` (`406245a`), `piop-speed` (`7476508`), `flock-speed` (`baf9e46`) |
 | Replaces | spec Appendix A, paragraph "H-exact" (which `ref/notes/msis-estimate.md` calls "spec Section 15"; there is no Section 15) |
@@ -802,7 +802,8 @@ per-signature slack `u_h`:
 
 ```text
 L  = L_lo + 29,696 L_hi                     L_lo in [0, 2^16) (looked up in T_16)
-r0 = sigma L + (1 + sigma)/2
+s  = (1 + sigma)/2
+r0 = gamma2 s + L + 1 - gamma2
 u  = r0 - 2 gamma2 delta - e                (enters (3.1) in place of H-u's (4.2))
 
 (F1) sigma^2 = 1                            (F4) e (e + 1) w1' = 0
@@ -827,8 +828,12 @@ i.e. `r+ in [q - gamma2, q - 1]`, where it sets `r1 = 0` and `r0 = r0 - 1` (line
 (Algorithm 40) returns `r1` for `h = 0` (line 5) and `(r1 +- 1) mod 44` for `h = 1`, `+` iff
 `r0 > 0` (lines 3, 4). In H-FIPS:
 
-* `r0 = sigma L + (1 + sigma)/2` ranges over `(-gamma2, gamma2]` with `sigma = 1` iff `r0 > 0`, the
-  sign test of Algorithm 40 lines 3, 4 (`L = r0 - 1` or `-r0`);
+* `(s, L) -> r0 = gamma2 s + L + 1 - gamma2` is a bijection onto `(-gamma2, gamma2]` with
+  `s = 1` (`sigma = 1`) iff `r0 > 0`, the sign test of Algorithm 40 lines 3, 4, and
+  `L = (r0 - 1) mod gamma2` (`r0 - 1` for `sigma = 1`, `r0 - 1 + gamma2` for `sigma = -1`).
+  The memo's `r0 = sigma L + (1 + sigma)/2` is the same set of pairs `(sigma, r0)` under
+  another labelling of `L` (`L = -r0` for `sigma = -1`); the form here keeps `u` affine in the
+  committed values (10.6 item 2), and every result of 10.3 holds for both;
 * `delta in {0, sigma}` is the move of UseHint, `w1' = r1 + delta` before reduction mod 44;
 * `e` is the wrap: `e = 1` where `w1' = 0` was reached from `r1 = 43` (`(r1 + 1) mod 44`, line
   3) or where Decompose took line 3 with `h = 0` (read as `r1 = 44`, `r0' = r+ - (q - 1) in
@@ -840,17 +845,18 @@ The honest rule (`agg_witness::hfips::honest_coeff`, from `w'` and the signature
 
 | Case (`r+ = w' mod q`) | `h` | `w1'` | `sigma` | `L` | `delta` | `e` |
 | --- | ---: | --- | ---: | --- | ---: | ---: |
-| `r+ >= q - gamma2` (Decompose line 3) | 0 | 0 | -1 | `q - 1 - r+` | 0 | 1 |
-| `r+ >= q - gamma2` | 1 | 43 | -1 | `q - 1 - r+` | -1 | 0 |
-| otherwise, `(r1, r0) = Decompose(r+)` | 0 | `r1` | sign of `r0` | `r0 - 1` or `-r0` | 0 | 0 |
+| `r+ >= q - gamma2` (Decompose line 3) | 0 | 0 | -1 | `r+ - (q - gamma2)` | 0 | 1 |
+| `r+ >= q - gamma2` | 1 | 43 | -1 | `r+ - (q - gamma2)` | -1 | 0 |
+| otherwise, `(r1, r0) = Decompose(r+)` | 0 | `r1` | sign of `r0` | `(r0 - 1) mod gamma2` | 0 | 0 |
 | otherwise, `r0 > 0`, `r1 < 43` | 1 | `r1 + 1` | 1 | `r0 - 1` | 1 | 0 |
 | otherwise, `r0 > 0`, `r1 = 43` | 1 | 0 | 1 | `r0 - 1` | 1 | 1 |
-| otherwise, `r0 <= 0`, `r1 > 0` | 1 | `r1 - 1` | -1 | `-r0` | -1 | 0 |
-| otherwise, `r0 <= 0`, `r1 = 0` (only `r+ = 0`) | 1 | 43 | -1 | 0 | -1 | -1 |
+| otherwise, `r0 <= 0`, `r1 > 0` | 1 | `r1 - 1` | -1 | `r0 - 1 + gamma2` | -1 | 0 |
+| otherwise, `r0 <= 0`, `r1 = 0` (only `r+ = 0`) | 1 | 43 | -1 | `gamma2 - 1` | -1 | -1 |
 
 It has `delta^2 = h` and `u = ctr_q(w' - 2 gamma2 w1')`, the H-u value, so `v` and the bits are
-unchanged. The corner `w' = q - gamma2, h = 0` gets `(sigma, L, delta, e) = (-1, gamma2 - 1, 0,
-1)`. A padded row (`w' = 0`, `h = 0`) gets `(-1, 0, 0, 0)` and `u_h = 80`.
+unchanged. The corner `w' = q - gamma2, h = 0` (`r0' = 1 - gamma2`) gets `(sigma, L, delta, e)
+= (-1, 0, 0, 1)`. A padded row (`w' = 0`, `h = 0`) gets `(-1, gamma2 - 1, 0, 0)` and
+`u_h = 80`.
 
 ### 10.3 Soundness and weight-aware completeness (exhaustive)
 
@@ -952,9 +958,168 @@ pass, `cargo test --release -p agg-witness`, also with `--all-features`):
   `B_zhi = 2`; the other split of an `L` in the overlap `[29,696, 2^16)` is accepted.
 * Padded rows of a batch of 3 (`N* = 8`).
 
-### 10.6 PIOP layout (step 2)
+### 10.6 Step 2 decisions (where the PIOP departs from the memo)
 
-Section 10.7 records the design and the implementation state.
+The memo's layout (item 3.5) and the task text name a seventh Akita group on the signature
+domain, a `u_h` lookup stack on that domain, six zero-checks (`sigma^2 = 1`,
+`delta (delta - sigma) = 0`, `e (e - 1)(e - delta) = 0`, `e (e + 1) w1' = 0`,
+`e (e - 1)(w1' - 43) = 0`, `L_hi` Boolean) and a stage-1 batching vector of 33. Decisions
+taken while implementing (2026-10-27; the user was not available):
+
+1. **No seventh group.** `u_h` is a thirteenth polynomial of `G_2` (domain `D_2`, width 16,
+   round 2) and takes the free slot 6 of lookup stack 2 (6 carries in 8 slots). `D_2` has
+   `13 + max(0, d_sig - 13)` variables, the last `d_sig` of which are the signature index
+   (spec Section 1); at `d_sig >= 13` it is the signature domain. Below, the honest table holds
+   `u_h(i)` at `D_2` index `i 2^(d_2 - d_sig)` and 0 elsewhere, and the weight identity sums
+   the `D_2` cells of a signature (all in `[0, 2^16)` by the lookup, so `sum delta^2 <= 80`
+   still follows). The six-group contract (`GROUP_COUNT` arrays in the PCS driver, the
+   verifier, Akita's grouped rows with five precommitted profiles) and the lookup shape (four
+   stacks, `L` unchanged) stay; the committed cost is the same as a seventh group's (one
+   element per signature at `2^15`, the `2^13`-cell floor below). Round 2 is early enough:
+   `u_h` is fixed before `X`, `tau` and `r^(2)`, and the extracted signature depends on
+   round-1 values only (10.4; `u_h` only certifies `sum delta^2 <= 80`).
+2. **The sign as a bit, `u` affine.** The PIOP commits `s = (1 + sigma)/2 in {0, 1}`
+   (`sigma^2 = 1` iff `s^2 = s`) and uses `r0 = gamma2 s + L + 1 - gamma2` instead of the
+   memo's `r0 = sigma L + (1 + sigma)/2 = (2 s - 1) L + s` (10.2: the same pairs `(sigma, r0)`,
+   another labelling of `L`). The memo's form puts the products `s l_lo`, `s l_hi` into the
+   stage-3 ring identity; in a first implementation they kept the 16-bit `l_lo` lane off the
+   kernel's linear fast path and cost about 170 ms of stage 3 at `N = 8,192` (measured with
+   `AGG_STAGE_TRACE`, main `eq(r^(2))` group message 264 ms against 178 ms after the change,
+   local, direction only). With the affine form the ring identity is a weight times an affine
+   combination, as in H-u and H-exact.
+3. **Five zero-checks, one of degree 3.** `F4 = e (e + 1) w1'` and `F5 = e (e - 1)(w1' - 43)`
+   are replaced by the single degree-2 `F45 = 2 e w1' + 43 e^2 - 43 e`: once `F1`, `F2`, `F3`
+   give `e in {-1, 0, 1}`, `F45` is `2 w1'` at `e = 1`, `86 - 2 w1'` at `e = -1` and 0 at
+   `e = 0` (small integers, so zero in `F_p` iff zero over `Z`), i.e. exactly `F4` and `F5`.
+   The exhaustive soundness check of 10.3 holds unchanged (the admissible sets are equal).
+4. **Stage placement (the question the task asks).** Stage 3 has degree 3, so only the
+   degree-2 checks can sit there with `eq`: `F1 = s (s - 1)`, `F2 = delta (delta - 2 s + 1)`,
+   `F45` and `F6 = L_hi (L_hi - 1)` go to stage 3 at `r^(2)`, as H-exact's Booleanity checks
+   (their lanes `s, delta, e, L_hi, b_t` are read there by the ring identity anyway, so they add
+   terms, not lanes or reductions). The weight identity `F7` also goes to stage 3 (degree 3 with
+   `eq`, 10.7). The one degree-3 check `F3 = e (e - 1)(e - delta)` needs degree 4 with `eq`:
+   stage 2 at `r^(1)` (degree 4, like `leaf6`; H-FIPS has no leaf digit) rather than stage 1
+   at `tau`, because in stage 2 its terminal claims `delta(r^(2))`, `e(r^(2))` land where the
+   ring already reads both columns (two cheap reductions in an existing group), while in stage
+   1 they would land at `r^(1)` (two reductions in another group) and grow the `tau`-batched
+   vector. Both placements are sound by the same point-reuse argument (`delta`, `e` are
+   committed in round 1, before `r^(1)`; `docs/soundness.md` 3.4).
+
+So the stage-1 vector stays at 26 (the memo's "26 -> 33" does not apply), stage 2 has 7
+coefficients and stage 3 has 51.
+
+### 10.7 PIOP layout as implemented (relation byte 2)
+
+Columns (`agg_piop::manifest`, relation `Relation::HFips`):
+
+| Group | H-FIPS polynomials | Count |
+| --- | --- | ---: |
+| `G_main16` | `bz_lo` (`S_zlo`), `l_lo` (`L_lo - 2^15`, the slot of `U_lo`), `v_lo`, `v_hi` | 4 |
+| `G_main4` | `bz_hi`, `l_hi` (the slot of `U_hi`), `b_0..b_5`, `a_z`, `s`, `delta`, `e` | 12 |
+| `G_1`, `G_3`, `G_m` | unchanged | 6, 1, 7 |
+| `G_2` | `y2_0..5`, `kappa2_0..5`, `u_h` (stored `u_h - 2^15`) | 13 |
+
+43 polynomials (H-u 38, H-exact 39), 36 opened at `r^(3)`; 16 main-domain columns, so
+16,507.5 committed elements per signature at `N = 2^15` (`manifest` test; H-u 12,410.5,
++33.0%). Alphabet codes in event 0: `s` 0 (Boolean), `delta` and `e` `0x23` (ternary,
+`TERNARY_ALPHABET_CODE`), `u_h` `0x90` (looked up). Catalog rows `mldsa-44-l16f-batch-<N*>-mult-final`.
+
+Lookup: stack 0 is `[bz_lo | l_lo | v_lo | v_hi]`, stack 2 `[kappa2_0..5 | u_h]` (7 columns, 8
+slots), so `L` and every lookup site are those of H-u; the stack-2 reduction (7.7) reads `u_h`.
+
+Value forms: `z` by (4.3); `L = l_lo + 29,696 l_hi + 2^15` (`agg_witness::digits::L_SLACK`, a
+new `ValueForm::Slack`); `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`.
+
+Stage 2 (degree 4, 7 coefficients): `def_y1[t]` (gammas 0..5) and `F3` (gamma 6) on the main
+domain at `r^(1)` (a `Term::Monomials` of four monomials in `delta, e`). Terminal claims: `b_t`
+(6), `delta(r^(2))`, `e(r^(2))` (8 in all).
+
+Stage 3 (degree 3, 51 coefficients; `stage3::Gammas`): `ring` (0); `bool` for `bz_hi`, `l_hi`,
+`a_z` (1..3); `F1`, `F2`, `F45`, `F7` (4..7); the 37 reductions (8..44); the reductions of
+stage 2's `delta`, `e` (45, 46); the four stack reductions (47..50). The ring reads `-u` as an
+affine combination (`l_lo` -1, `l_hi` -29,696, `s` `-gamma_2`, `delta` `2 gamma_2`, `e` 1,
+constant `gamma_2 - 2^15 - 1`). `F7` is one instance with two parts at the
+point `(1/2, ..., 1/2, r^(2)_sig)` (`EqPoint::HalfR2`; `eq` at a coordinate `1/2` is `1/2` for
+both bit values, so these are sums over positions): `delta^2` on the main domain with scale
+`2^(d_main - d_sig) = 2^10` and `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`, claim
+`omega = 80`. Its terminal values are `delta(r^(3))` and `U(r^(3)_2)`, opened anyway, so `F7`
+needs no reduction. Every stage-3 term has degree at most 3 with `eq` (test
+`h_fips_stage_three_has_fifty_one_instances`).
+
+Counts: stage gammas (26, 7, 51), stage terminals (18, 8, 36), stage degrees (4, 4, 3); PIOP
+bytes `16 (13 + 18 + 6 + 8 + 36 + 11 d_main)`: 5,696 B at `2^15` (H-u and H-exact: 5,616 B).
+
+Proof of work: `bit_length(7) = 3` and `bit_length(51) = bit_length(45) = 6`, so every
+difficulty, the nonce stream (4,443 bits, 556 bytes, 2,710 units of work at `2^15`) and the
+plan digest equal H-exact's (`pow.rs` test `h_fips_plans_equal_h_exact_plans`,
+`pow_plan.py --relation h-fips` self-check). The relation is bound by event 0's manifest bytes
+(relation byte 2, the `G_main4` and `G_2` descriptors, the catalog row), as 3.7 argues for
+H-exact; the round-by-round ledger before work is H-exact's `1,409/|K|` at `2^15`.
+
+Header and verifier: relation byte 2 in the proof header and byte 3 of event 0;
+`Relation::from_id(2)` is H-FIPS (byte 3 and above are unknown); the verifier takes the relation
+from its caller and rejects another relation's proof before event 0 (`VerifyError::Relation`);
+`agg aggregate|verify|bench --relation h-fips`, `AGG_RELATION=h-fips` for the mode-B bench.
+
+Catalogs (`agg-pcs-config`, `CATALOG_D_SIG_H_FIPS = 3..=15`): 13 width-4 scalar rows
+(`G_main4` at `(13..25, 12)`), 13 grouped rows, 3 width-16 scalar rows (`G_2` at
+`(13|14|15, 13)`), planned by `update_catalog_rows` with `AGG_CATALOG_RELATION=h-fips` in
+1,105.6 s (measured, 2026-10-27, 3 workers, CPUs 0,1,3-15). The planner's opening estimate
+equals H-u's at every size except `2^15` (65,398 B against 65,282 B; estimate of the planner).
+Every grouped row keeps at least 128.0881 bits of accepted fold support (2^128.5633 at
+`d_sig` 13 and 15); the Akita grinding plans are pinned (`tests/akita_grinding.rs`) and
+differ from the H-u and H-exact rows'.
+
+Tests (all pass, `cargo test --release`): `agg-piop` `tests/h_fips.rs` (PIOP round trips
+with every claim equal to its table's extension, the pointwise identities, the synthetic
+weight-80 corner records of `agg_witness::gen::hint_corner_record`, the ideator's corner
+witness rejected by `F7` (stage 3) or, with `u_h = -1`, by the lookup, and tamperings each
+rejected at its place: `s = 2`, `delta = -sigma` (stage 3); `e = -1` at `delta = 0` with `L`
+moved to keep `u` (stage 2, `F3`); `e = 1` at `w1' != 0` and `e = -1` at `w1' != 43` with `L`
+moved to keep `u` (stage 3, `F45` alone); `l_hi = -1` with `l_lo + 29,696` (stage 3, `F6`
+alone); `l_lo = 2^16` and a `u_h` cell of `2^16` (lookup); `u_h +- 1` and a dropped hint
+(stage 3)); `tests/mode_b.rs` (round trips at 1, 64 and 256 records, the 256-record batch with
+two weight-80 corner records; cross-relation verification and rewritten relation bytes
+rejected; a wrong stage-2 gamma nonce rejected); unit tests of the manifest, the stage specs,
+the transcript counts, the wire and the plan; `agg-pcs-config` commit and batched opening at
+256 and 1,000 records; `agg-cli` mode A at 64 (Slim, one part) and 256 (two parts) and the
+CLI round trip with crossed verifications.
+
+### 10.8 Costs (local measurements, direction only)
+
+Prediction written before measuring (`ref/notes/overnight-20261026/h-fips.md`): prove at
+`2^15` on the cloud +0.75 to +1.2 s over H-u (estimate of `ref/notes/brainstorm-20261026.md`
+3.5); locally +6% to +12% of the H-u prove time at 1K and 8K (estimate).
+
+Measured, mode B (`AGG_RELATION=... scripts/bench.sh --bench mode_b -- 1024 8192 --warmup 1
+--reps 2`, default build, CPUs 0,1,3-15 of this box, 2026-10-27, medians of 2 after 1 warmup;
+the PIOP part only, no Flock, so the differences are those of mode A):
+
+| Code | Relation | Prove 1K (s) | Prove 8K (s) | Prover peak RSS 8K (MiB) | Aggregate without public bits 8K (B) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `c93037b` | H-u | 1.559 | 4.120 | 3,567 | 357,148 |
+| `c93037b` | H-exact | 1.687 | 4.378 | 3,655 | 357,105 |
+| `c93037b` | H-FIPS (memo's `r0`, products in stage 3) | 1.883 | 4.842 | 3,897 | 357,349 |
+| `2983a12` | H-u (two runs) | 1.564, 1.676 | 4.367, 4.335 | 3,587, 3,552 | 357,148 |
+| `2983a12` | H-FIPS (affine `r0`, two runs) | 1.729, 1.760 | 4.885, 4.964 | 3,915, 3,909 | 357,309 |
+
+So with the final layout H-FIPS costs about +0.13 s (+8%) at 1K and +0.57 s (+13%) at 8K
+over H-u in this box's mode B (means of the two interleaved runs; the run-to-run spread is about
+0.1 s), +0.34 GiB of prover RSS (+9.5%) and +161 B of aggregate at 8K (0.02 B per signature:
+5 more stage claims, Akita opening of 43 polynomials). The local prediction (+6% to +12%) was
+low at 8K. Stage-3 trace at 8K (`AGG_STAGE_TRACE=1`, `tests/h_fips.rs` `h_fips_stage_trace`):
+the main `eq(r^(2))` group's messages take 178 ms against 93 ms for H-u (the extra terms of
+`F1`, `F2`, `F45` and the reductions), the `F7` main group 55 ms, the ring's `w_A` group 129
+against 103 ms (H-exact's `a_z` lane); stage 2's `F3` group 75 ms against 39 ms for H-u's
+leaves.
+
+Cloud estimate at `2^15` (estimate, two calibrations of this box against `c4d-highmem-16`):
+H-exact's local 8K mode-B delta (+0.26 s) against its measured cloud 32K mode-A delta
+(+0.21 s, `ref/notes/bench-cloud.md`) gives about +0.5 s for H-FIPS; scaling the 8K delta by 4
+for the size and by the throughput ratio of the PIOP part (local 8K mode B 4.35 s against
+about 7.3 s of non-Flock prove time at 32K on the cloud, Phase 9) gives about +1.0 s. So
++0.5 to +1.0 s (+3% to +7% of 15.0 s), inside or below the memo's +0.75 to +1.2 s; to be
+measured on the cloud with both relations back to back.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 

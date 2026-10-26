@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | normative design for the 128-bit schedule (plan `ref/notes/plan-128bit-speed.md` Part 1, step 1); implemented in step 2 (branch `pow-128`): PIOP wire version 2 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 4 (`agg_keccak::tied`, deviation K20), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`); updated 2026-10-26 (branch `parity-chain`) for tied-part proof version 5, the virtual parity chain (deviation K21, `docs/parity-chain.md`): Sections 0, 2, 3.6, 4.5, 6.3 to 6.5, 7, 8, 10, 12; updated 2026-10-26 (branch `suf-proof`) for aggregate unforgeability under SUF-CMA of the relaxed scheme (Section 12.8, spec 12.3 revision 7) |
-| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default since 2026-10-25, `docs/h-exact.md` step A; it replaced relaxed H) and H-exact (relation byte 1, step B; Section 10.1), lookup layout L16; PIOP wire version 4 (version 3 with the parity chain's sites in the plan) and tied-part proof version 5 |
+| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default since 2026-10-25, `docs/h-exact.md` step A; it replaced relaxed H), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16; PIOP wire version 4 (version 3 with the parity chain's sites in the plan) and tied-part proof version 5 |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
@@ -991,6 +991,43 @@ H-exact  N* = 2^15  slim span on   1f8e7aba1af1db61d3be14fccd16252008b8cdc71799c
 The theorem of Section 7 holds verbatim for H-exact with "relation H-u" replaced by
 "relation H-exact" and Akita's plan of the H-exact grouped row (4.1); spec 12.2 gives the
 extraction of the exact bounds.
+
+### 10.2 Relation H-FIPS (`python3 -I docs/scripts/pow_plan.py --relation h-fips`)
+
+Relation H-FIPS (`docs/h-exact.md` Section 10, relation byte 2, deviation L10) keeps the stage
+degrees (4, 4, 3) and has batching vectors of 26, 7, 51 coefficients: stage 2 holds
+`def_y1[t]` and the degree-3 zero-check `F3 = e (e - 1)(e - delta)` at `r^(1)` (degree 4 with
+`eq`), stage 3 the ring identity, the Booleanity of `bz_hi`, `l_hi`, `a_z` and the sign bit
+`s`, `F2 = delta (delta - 2 s + 1)`, `F45 = 2 e w1' + 43 e^2 - 43 e` and the hint-weight
+identity `F7` at `r^(2)` (`F7` at the point `(1/2, ..., 1/2, r^(2)_sig)`, two parts on the main
+domain and `D_2`), the 37 reductions, the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`
+and the four stack reductions. As for H-exact (10.1), the zero-checks add no site: each tests
+tables fixed before its point (`s, delta, e, l_lo, l_hi` in round 1, `u_h` in round 2, both
+before `X`, `tau` and the stages; 3.4), `F3` is pending during the stage-1 rounds that draw
+`r^(1)`, the others during the stage-2 rounds that draw `r^(2)` (`F7`'s identity
+`sum_i eq(r^(2)_sig, i) G(i) = 0` is multilinear in `r^(2)_sig`; its `1/2` coordinates only
+sum over positions and carry no randomness). `bit_length(7) = 3` and `bit_length(51) =
+bit_length(45) = 6`, so every difficulty, the stream (4,443 bits, 556 bytes, 2,710 units of
+work at `2^15`), the round-by-round ledger (`1,409/|K| = 2^-117.5` at `2^15`) and the plan
+digest are H-exact's (`agg_piop::pow::tests::h_fips_plans_equal_h_exact_plans`; the
+`pow_plan.py` self-check). Equal digests are benign, as for Akita's rows of `d_sig` 3 and 4
+(4.1): the relation is bound by the manifest bytes of the same event 0 (byte 3, the `G_main4`
+descriptor at 12 polynomials with the ternary codes of `delta` and `e`, the `G_2` descriptor
+at 13 polynomials, the `l16f` catalog row, the lookup layout with 7 columns in stack 2).
+
+Extraction (spec 12.2 with `docs/h-exact.md` 10.3, 10.4): the lookup gives `l_lo, u_h in
+[0, 2^16)` and `bz_lo` as for H-exact; the stage-3 Booleanity checks give `s, l_hi, bz_hi, a_z`
+bits; `F2` gives `delta in {0, 2 s - 1}`; `F3` gives `e in {0, 1, delta}`, hence `F45` is
+`e (e + 1) w1' = 0` and `e (e - 1)(w1' - 43) = 0`; `F7` gives `sum_p delta_p^2 + sum u_h = 80`
+over the integers (every term is a small non-negative integer). With (3.1) for
+`u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` and (3.3), the round-1 values of every
+live record are an H-FIPS witness, and the exhaustive lemma of `docs/h-exact.md` 10.3 turns them
+into a FIPS 204 signature (10.4). The extracted signature is a function of the round-1 values
+alone (`u_h` only certifies the weight), so the checkpoint argument of Section 12 (round-1
+tables fixed before the first fork) applies unchanged. The theorem of Section 7 holds verbatim
+for H-FIPS with "relation H-u" replaced by "relation H-FIPS" and Akita's plan of the H-FIPS
+grouped row (`agg-pcs-config` `tests/akita_grinding.rs`, `PINNED_H_FIPS`); 43 Akita polynomials
+(36 at `r^(3)`, 7 at `pi_m`) in place of 38.
 
 ## 11. Open questions
 

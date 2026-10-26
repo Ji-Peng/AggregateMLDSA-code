@@ -1162,3 +1162,44 @@ Why: the 2026-10-25 decision record names two results (H-u and H-exact); a runti
 lets one build benchmark both back to back, and X1 is the cheaper layout where the prover
 spends its time (`docs/h-exact.md` Appendix X). The witness crate's base-16 H-exact layout
 (feature `h-exact`, `Layout::HExact`) is unchanged and serves only as a cross-check.
+
+## L10. Relation H-FIPS: relation byte 2, `u_h` in `G_2`, the sign as a bit, five zero-checks (spec Sections 3.1, 4.1, 7.4, 7.5, 10, 12; Appendix A; `docs/h-exact.md` Section 10)
+
+Design (`ref/notes/brainstorm-20261026.md` item 3.5, as relayed by the 2026-10-27 workflow):
+the exact FIPS 204 relation with the hint as an optional third relation, relation byte 2;
+per coefficient `(L_lo, L_hi, sigma, delta, e)` with `L = L_lo + 29,696 L_hi`,
+`r0 = sigma L + (1 + sigma)/2`, `u = r0 - 2 gamma_2 delta - e`; six zero-checks
+(`sigma^2 = 1`, `delta (delta - sigma) = 0`, `e (e - 1)(e - delta) = 0`, `e (e + 1) w1' = 0`,
+`e (e - 1)(w1' - 43) = 0`, `L_hi` Boolean) placed in stage 1 (batching vector 26 -> 33) or in
+stage 3 at `r^(2)`; per signature `sum delta^2 + u_h = 80` with `u_h` looked up "on the
+signature domain" in "a seventh Akita group". Code (decisions 2026-10-27, `docs/h-exact.md`
+10.6, 10.7):
+
+* `u_h` is the thirteenth polynomial of `G_2` (stored `u_h - 2^15`, width 16, round 2) and
+  takes the free slot 6 of lookup stack 2. `D_2`'s last `d_sig` variables are the signature
+  index; below `d_sig = 13` the honest table holds `u_h(i)` at index `i 2^(d_2 - d_sig)` and
+  0 elsewhere, and the weight identity sums the cells of a signature. Same committed cost as
+  a seventh group; the six-group contract and the lookup shape (`L`, sites) are unchanged.
+* The PIOP commits the bit `s = (1 + sigma)/2` instead of `sigma`, and uses
+  `r0 = gamma_2 s + L + 1 - gamma_2` (`L = (r0 - 1) mod gamma_2`) instead of
+  `r0 = sigma L + (1 + sigma)/2`: the same pairs `(sigma, r0)` under another labelling of `L`,
+  but `u` is affine in the committed values, so the ring identity needs no product `s L`.
+* `e (e + 1) w1' = 0` and `e (e - 1)(w1' - 43) = 0` become one degree-2 check
+  `2 e w1' + 43 e^2 - 43 e = 0`, equivalent once `e in {-1, 0, 1}`.
+* Placement: the degree-3 `e (e - 1)(e - delta)` in stage 2 at `r^(1)` (degree 4 with `eq`);
+  `s (s - 1)`, `delta (delta - 2 s + 1)`, the merged wrap check, `L_hi (L_hi - 1)` and the
+  weight identity in stage 3 at `r^(2)` (the weight identity at `(1/2, ..., r^(2)_sig)`, two
+  parts on the main domain and `D_2`). Stage vectors (26, 7, 51), terminals (18, 8, 36).
+* The proof-of-work plan equals H-exact's (`g` 5, 3, 6 at the stage gamma sites); the
+  relation is bound by event 0's manifest bytes, so the plan encoding stays as it is.
+* Catalog rows `mldsa-44-l16f-batch-<N*>-mult-final` (13 grouped, 13 width-4 scalar at
+  `(13..25, 12)`, 3 width-16 scalar for `G_2` at `(13|14|15, 13)`).
+* The retired base-16 S1+S2 layout of the witness crate (feature `fips`) moves from layout
+  id 2 to 3, so the number 2 names H-FIPS only.
+
+Why: a seventh group would turn every fixed six-group array of the PCS driver, the verifier
+and Akita's grouped rows into a per-relation shape for no saving in committed cells; the
+affine `r0` keeps the 16-bit `l_lo` lane on the kernel's linear fast path; the merged wrap check and the stage-3 placement keep stage 3 at degree 3 and need two cheap
+reductions instead of new lanes; the stage-1 vector and the `tau` site stay as they are. No
+wire-version bump: H-u and H-exact proofs are byte-identical, and an H-FIPS proof differs in
+the relation byte and in counts the verifier derives from the manifest.
