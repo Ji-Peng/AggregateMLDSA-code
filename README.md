@@ -6,7 +6,7 @@ with a Flock-based argument for the witness-dependent SHAKE256 call.
 The protocol source of truth is [`docs/spec.md`](docs/spec.md); deviations from it are
 recorded in `docs/deviations.md`.
 
-Status (`main`, 2026-10-25; branch `parity-chain` 2026-10-26): ML-DSA-44, mode A (public
+Status (2026-10-26): ML-DSA-44, mode A (public
 `c~`) and mode B (public bits), PIOP wire version 4 (tied-part proof version 5: the GF(2) side
 of the bridge is the virtual parity chain, [`docs/parity-chain.md`](docs/parity-chain.md),
 deviation K21). Two relations, selected by `--relation` and bound in event 0:

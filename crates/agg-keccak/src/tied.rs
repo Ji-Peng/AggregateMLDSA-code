@@ -902,7 +902,7 @@ impl<'g> TiedPart<'g> {
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
-    /// candidates (probability below `2^-184.7` per site, docs/soundness.md 6.5).
+    /// candidates (probability below `2^-184.6` per site, docs/soundness.md 6.5).
     ///
     /// # Panics
     /// If `committed` belongs to another part shape, `ys` has the wrong shape, or Flock
@@ -1400,9 +1400,10 @@ mod tests {
 
     /// The sponge instance at a full-height count (2,048 records: Flock's block-first
     /// transport) verifies with no bit claim, a bit claim at a random point and one whose
-    /// column coordinates are zero above the chain's 64 word columns. Regression: the block
-    /// rounds fold the column bit-bank's multilinear extension, so a bank computed only on
-    /// the columns of nonzero weight (enough for `s_hat_v`) made the honest proof fail.
+    /// column coordinates are zero above the chain's 64 word columns, and rejects either bit
+    /// claim with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
+    /// fold the column bit-bank's multilinear extension, so a bank computed only on the
+    /// columns of nonzero weight (enough for `s_hat_v`) made the honest proof fail.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
     fn bit_claims_verify_on_a_full_height_sponge() {
@@ -1446,12 +1447,160 @@ mod tests {
                 Some(data),
             );
             let mut ch = FsChallenger::new(b"debug");
-            let with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
-            let r = part
-                .sponge()
-                .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
+            let mut with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
+            let pubs = std::slice::from_ref(&pubp);
+            let r = part.sponge().verify(&gates, &cap, &proof, pubs, &with, &mut ch);
             assert!(r.is_ok(), "{label}: {r:?}");
+            // A false bit value: the ring-switch claim check of the block-first opening
+            // rejects it.
+            if let Some(first) = with.first_mut() {
+                first.1 += F128::ONE;
+                let mut ch = FsChallenger::new(b"debug");
+                let r = part
+                    .sponge()
+                    .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
+                assert!(claim_mismatch(&r), "{label}, false value: {r:?}");
+            }
         }
+    }
+
+    /// Flock's ring-switch claim check rejected (a false value of a ring-switched claim).
+    fn claim_mismatch<T>(r: &Result<T, KeccakError>) -> bool {
+        matches!(r, Err(KeccakError::Flock(e)) if format!("{e:?}").contains("ClaimMismatch"))
+    }
+
+    /// [`TiedPart::prove_with_final_vectors`] with one change: the bit value sent is the
+    /// chain input's `b''~(r)` divided by the row factor, not the sponge's bit value. The two
+    /// agree for an honest prover; for a chain copy of `b'` that differs from the sponge they
+    /// do not, and the chain's final check then passes while the bit claim is false.
+    fn prove_with_the_chains_bit_value(
+        part: &TiedPart<'_>,
+        committed: TiedCommitted,
+        matrices: &BridgeMatrices,
+        ys: &[Vec<u8>],
+        fs: &[u8; 32],
+    ) -> KeccakProof {
+        let TiedCommitted {
+            sponge,
+            sponge_data,
+            bits,
+            public,
+            commitment: absorbed,
+            ..
+        } = committed;
+        let work = part.work();
+        let nu_s = part.sponge.nu();
+        let mut ch = part.tie_start(fs, &TiedPart::y_digest(ys), &absorbed.sponge);
+        let nonce = site_work(&mut ch, work.tie_bits, TieWork::Grind, "tie").unwrap();
+        let rho_r = ch.sample_f128_vec(nu_s);
+        let rho_c = ch.sample_f128_vec(3);
+        let eq_nonce = site_work(&mut ch, work.eq_bits, TieWork::Grind, "eq_Y").unwrap();
+        let eq_y = EqY {
+            r_o: ch.sample_f128_vec(part.chain.out_vars()),
+            r_y: ch.sample_f128_vec(part.chain.span_log),
+        };
+        let claim = part.chain.claim(ys, &eq_y);
+        let input = part.chain_input(&bits, &sponge.z);
+        let mut nonces = Vec::new();
+        let chain = part
+            .chain
+            .prove(matrices, &input, &eq_y, claim, |_, (q1, qinf)| {
+                ch.observe_f128(q1);
+                ch.observe_f128(qinf);
+                nonces.push(site_work(&mut ch, work.round_bits, TieWork::Grind, "round")?);
+                Ok::<F128, KeccakError>(ch.sample_f128())
+            })
+            .unwrap();
+        let bit_claim = part.bit_claim(&chain.point);
+        let value = chain.value * part.row_factor(&chain.point).inv();
+        ch.observe_f128(value);
+        let binding = squeeze_binding(&mut ch);
+        let mut sch = part.sponge_challenger(fs, &public, &binding);
+        let gate: [&dyn LincheckCircuit; 1] = [part.gate];
+        let (sponge_proof, _) = part.sponge.prove(
+            vec![sponge],
+            &gate,
+            &[part.public_point(&rho_r, &rho_c)],
+            &[bit_claim],
+            &mut sch,
+            sponge_data,
+        );
+        let rounds = chain
+            .messages
+            .iter()
+            .zip(&nonces)
+            .map(|(&(q1, qinf), &nonce)| ChainRound { q1, qinf, nonce })
+            .collect();
+        part.encode_parts(&TiedProofParts {
+            nonce,
+            eq_nonce,
+            rounds,
+            value,
+            sponge: sponge_proof,
+        })
+    }
+
+    /// A false bit value that is consistent with the chain is rejected by Flock's ring-switch
+    /// claim check: the chain's copy of `b'` has one bit flipped (in lane 3 of the last
+    /// record), `Y` is the copy's, and the prover sends the copy's bit value, so every chain
+    /// round and the chain's final check pass and only the sponge opening's third
+    /// ring-switched claim (the bit claim) can fail. The honest variant of the same prover
+    /// reproduces the honest proof (counts below 2,048).
+    fn chain_consistent_false_bit_value(n: usize) {
+        let gate = sponge_gate();
+        {
+            let part = TiedPart::new(&gate, n, TiedPart::d_seg_for(n), Profile::Fast);
+            let mut rng = Rng::new(0xFA15E + n as u64);
+            let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+            let sd = [11; 32];
+            let mats = derive_matrices_for(&Shape::PRODUCTION, &sd);
+            let fs = [12; 32];
+            let mu: Vec<[u8; MU_BYTES]> = records.iter().map(|r| r.mu).collect();
+            let ct: Vec<[u8; CTILDE_BYTES]> =
+                records.iter().map(SpongeRecord::c_tilde).collect();
+            if n < 2048 {
+                let honest = part.prove(part.commit(&records), sd, &mats, &fs).expect("prove");
+                let committed = part.commit(&records);
+                let again = prove_with_the_chains_bit_value(
+                    &part,
+                    committed,
+                    &mats,
+                    &honest.final_vectors,
+                    &fs,
+                );
+                assert_eq!(again, honest.proof, "n {n}: the replica is the honest prover");
+            }
+            let (sponge, mut bits) = part.honest_parts(&records);
+            let col = part.segment().column(3, 1024 * (n - 1) + 77);
+            bits[col / 64] ^= 1 << (col % 64);
+            let committed = part.commit_parts(sponge, bits, &records);
+            let commitment = committed.commitment().clone();
+            let ys = part.final_vectors(&committed, &mats);
+            let proof = prove_with_the_chains_bit_value(&part, committed, &mats, &ys, &fs);
+            let r = part.verify(&mu, &ct, &commitment, sd, &mats, &ys, &fs, &proof);
+            assert!(claim_mismatch(&r), "n {n}: {r:?}");
+        }
+    }
+
+    /// Counts 5 and 64: the plain opening.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+    fn a_chain_consistent_false_bit_value_fails_the_bit_claim() {
+        let t = std::time::Instant::now();
+        chain_consistent_false_bit_value(5);
+        chain_consistent_false_bit_value(64);
+        eprintln!("5 and 64: {:.2?}", t.elapsed());
+    }
+
+    /// Count 2,048 (`n = 2^nu_s`, a full-height sponge): Flock's block-first opening. Slow
+    /// (about 83 s in the default build, measured locally); the suite pins the block-first
+    /// rejection of a false bit value in `bit_claims_verify_on_a_full_height_sponge`.
+    #[test]
+    #[ignore = "slow; run with --release --ignored"]
+    fn a_chain_consistent_false_bit_value_fails_the_block_first_bit_claim() {
+        let t = std::time::Instant::now();
+        chain_consistent_false_bit_value(2048);
+        eprintln!("2048: {:.2?}", t.elapsed());
     }
 
     #[test]

@@ -165,7 +165,7 @@ and `verify_pow_and_sample_f128_vec_canonical`, which run the challenger's own c
 (absorbing the nonce exactly as before, so the transcript is unchanged) and additionally
 reject a nonce of `g + 7` or more bits (`g > 0`) or a nonzero nonce at a site without work.
 The prover is unchanged: Flock's `grind_pow` returns the smallest passing nonce, which is at
-least `2^(g + 7)` with probability `(1 - 2^-g)^(2^(g + 7)) <= e^-128 = 2^-184.7` per site; such
+least `2^(g + 7)` with probability `(1 - 2^-g)^(2^(g + 7)) <= e^-128 = 2^-184.66` per site; such
 a proof is refused (a completeness event, counted in `docs/soundness.md` 6.5). Upstream's own
 tests that search for a failing nonce with `verify_pow` (`pcs/ring_switch.rs`,
 `pcs/jagged.rs`) and the `RoundGrindProver` forwarding impl (`zerocheck/ag_skip.rs`) keep the

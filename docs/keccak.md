@@ -363,6 +363,11 @@ stays and is now the only non-succinct verifier cost of the Keccak side.
 
 ## 9. The tied part (docs/bridge.md Sections 5a and 5b; deviations K11, K13, K14)
 
+Since proof version 5 a tied part is one Flock instance, the sponge instance, plus the
+virtual parity chain on its tie challenger; the bridge union below is gone from mode A
+(Section 12.7, `docs/parity-chain.md`, deviation K21). This section and Sections 10 and 11
+describe versions 1 to 4.
+
 Modules `flock_union`, `bridge_union` and `tied`. A part of a segment is proven by two Flock
 instances tied by evaluation claims instead of the two-type union of Section 7: the sponge
 instance (one type) and, since proof version 2, the bridge union (two types, Section 11;
@@ -883,8 +888,15 @@ block statistics and `W'` fold grow by one claim (about +60 ms at 8,192). At 8,1
 these costs about cancel the full-segment union (v5 within the noise of v4); at `8@13/4` and
 2,048 the union dominates and v5 is faster. At 32K (estimate): the union of four
 full-segment geometries cost 1.2 to 2.0 s locally (`8@13/4`), the v5 additions about 0.18 s
-(chain) + 4 x 0.2 s (bank, scaling with the stack) + 0.25 s (opening), so the local net is
-roughly -0.3 to -0.8 s, and on the cloud machine smaller; the 32K A/B on the cloud decides it.
+(chain) + 4 x 0.2 s (bank, scaling with the stack) + 0.25 s (opening) = 1.23 s, so the local
+net is +0.03 to -0.77 s of prover work, about 0.0 to -0.8 s. On the critical path: v4's
+default proves the union after the sponge instance (F3, `AGG_TIED_CONCURRENT`, is off by
+default and was off in Phase 9; its union took about 1.14 s of a 32K cloud run, measured),
+so against that baseline the critical-path effect equals the prover-work estimate; against v4 with `AGG_TIED_CONCURRENT=1` (cloud -0.44 to -0.59 s, top-level
+`ref/notes/bench-cloud.md`) v5 has no such overlap (the chain runs strictly before the
+sponge instance, whose opening holds the bank), and the sign is unknown. The bank's fold
+scaled poorly with threads locally (`docs/perf.md` F5), so the cloud may not shrink it. The
+32K cloud A/B decides.
 
 Mode A end to end (`agg bench --keys 16 --warmup 1 --reps 3 --flock-profile slim`):
 

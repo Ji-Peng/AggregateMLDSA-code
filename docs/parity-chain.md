@@ -215,6 +215,11 @@ dense evaluations; a wrong `y1` (flipped parity) changes the first message. `agg
 (`tests/tied.rs`, release): round trips as in version 4; negative cases: a flipped `b'` bit
 with stale `Y`, a flipped `Y` bit, a tampered round message, a wrong `s_hat_v` of the bit
 claim, another `sd`; the existing statement, seed, segment-count and byte-flip cases.
+Added in review (`tied::tests`): a false bit value consistent with the chain (a chain copy of
+`b'` with one bit flipped, its `Y`, the copy's value) passes every round and the final check
+and fails Flock's ring-switch claim check (`ClaimMismatch`), end to end at 5 and 64 records
+and, ignored by default (about 83 s), at 2,048; the full-height sponge test also rejects a
+false bit value directly, so the block-first path is pinned in every suite run.
 
 ## 12. Measurements and corrections (2026-10-26, local, direction only)
 
@@ -231,7 +236,9 @@ Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7
   gave failing proofs at 2,048 records; fixed in `3ae1a79`). The full bank costs one pass over
   the stack (174 to 222 ms at 8,192 records, measured), and the opening's block statistics
   and `W'` fold grow by one claim. At one full segment these costs about cancel the union's;
-  at 32K the expected prover gain is smaller than the memo's -0.2 to -0.5 s critical-path
-  estimate, possibly zero; the cloud A/B decides.
+  at 32K the prover work changes by about 0.0 to -0.8 s locally (estimate, `docs/keccak.md`
+  12.7). Against version 4 with the union proven beside the sponge instance
+  (`AGG_TIED_CONCURRENT=1`, off by default) the critical-path sign is unknown, since version
+  5 has no such overlap; the cloud A/B decides.
 * Verifier: the Flock part's verification drops from about 80 to 110 ms to 25 to 45 ms per
   part (measured, all sizes).

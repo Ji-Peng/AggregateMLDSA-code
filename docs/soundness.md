@@ -682,7 +682,7 @@ part in `nu_s`; the vectors use full batches.)
 
 The prover tries `v = 0, 1, ...` and takes the first passing value, at most `2^(g + 7)`
 candidates (deterministic proofs). A site fails with probability
-`(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.7`. The capped searches of a proof are the
+`(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.66`. The capped searches of a proof are the
 PIOP sites (at most 484), the tied parts' sites (per part a tie, an `eq_Y` and at most 28
 round sites: at most `8 x 30 = 240` with the two-part cap of 3.5), Akita's capped
 transcript searches (459 at `2^15`) and, since the
@@ -694,7 +694,7 @@ with the same probability per site. Flock has fewer than `2^10` sites with work 
 opening's three ring switches, claim batch and merged rounds, and at most six Ligerito
 levels with two batches and one query nonce each, at `m <= 45` variables), so at most
 `2^13` for eight parts. The completeness error is therefore at most `(484 + 240 + 459 +
-2^13) 2^-184.7 < 2^-171.5` (the Flock count an estimate; without it `< 2^-174.5`). A search
+2^13) 2^-184.66 < 2^-171.4` (the Flock count an estimate; without it `< 2^-174.4`). A search
 that exhausts its allowance returns `KeccakError::Work` (no panic). Expected work per site `2^g` predicate
 evaluations.
 
@@ -917,9 +917,9 @@ Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2
 parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` (three
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Old ledger vs
 round-by-round at `2^15`: `3,509/|K| = 2^-116.2` vs `1,409/|K| = 2^-117.5` (stages 275,
-`tau` 25, gammas 3, GKR 1,106). Honest failure per site `<= 2^-184.7`, per proof
-`<= 2^-174.5` (1,183 capped searches: PIOP, 240 tied-part, 459 Akita; with the Flock sites of
-the canonical nonce width `< 2^-171.5`, Section 6.5).
+`tau` 25, gammas 3, GKR 1,106). Honest failure per site `< 2^-184.6`, per proof
+`< 2^-174.4` (1,183 capped searches: PIOP, 240 tied-part, 459 Akita; with the Flock sites of
+the canonical nonce width `< 2^-171.4`, Section 6.5).
 
 Totals with the tied parts' nonces (`N = N*`, `Slim`): `2^10` 491 B (0.479 B/sig), `2^13`
 599 B (0.073 B/sig), `2^15` 676 B (0.021 B/sig) with the span, 1,004 B with span off

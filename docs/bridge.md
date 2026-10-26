@@ -553,11 +553,14 @@ assumption (F). The bound (9.3) of Section 7 is unchanged. Work: `docs/soundness
 
 **Tests.** `agg-bridge` (`parity_chain`): against a brute-force product sum-check on dense
 tables (toy shapes with 1, 3, 6 lanes, part offsets, spans), every message, the final value
-and $`\widetilde W(r)`$. `agg-keccak` (`tied`, `tests/tied.rs`): round trips at 5 to 1,024 records,
-spans and parts; rejections of a flipped `Y` bit, another `sd`, a chain copy that differs
+and $`\widetilde W(r)`$. `agg-keccak` (`tied`, `tests/tied.rs`): round trips at 5 to 1,024 records and
+at 2,048 (a full-height sponge, Flock's block-first opening), spans and parts; rejections of a flipped `Y` bit, another `sd`, a chain copy that differs
 from the sponge, a flipped `b'` bit with stale `Y`, tampered round messages (also with every
 nonce re-ground), a tampered bit value, a wrong `s_hat_v` of the bit claim, stale `c~` and a
-stale chi witness.
+stale chi witness. A false bit value consistent with the chain (a chain copy of `b'` with one
+bit flipped, its `Y`, the copy's value) passes the chain and is rejected by Flock's
+ring-switch claim check: end to end at 5 and 64 records (plain opening; 2,048 records, the
+block-first opening, as an ignored slow test) and on the full-height sponge instance alone.
 
 ## 6. The final public vector
 
