@@ -1222,6 +1222,24 @@ a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tampering
 synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
 rejection), unit tests of the manifest, claims, stage specs, wire and plan.
 
+### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10, branch `h-fips`, 2026-10-27)
+
+Relation byte 2 (`Relation::HFips`). `G_main16` = `bz_lo, l_lo, v_lo, v_hi`; `G_main4` =
+`bz_hi, l_hi, b_0..b_5, a_z, s, delta, e` (12 polynomials, codes `[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0x23, 0x23]`); `G_2` gains `u_h` (13 polynomials) in slot 6 of lookup stack 2. Values:
+`z` as H-exact's, `L = l_lo + 29,696 l_hi + 2^15` (`DigitValue::L`, `ValueForm::Slack`),
+`u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (affine). Stage 2: `def_y1[t]` (0..6),
+`F3 = e (e - 1)(e - delta)` (6, `Term::Monomials`, main `eq(r^(1))` group); `gamma^(2) in K^7`,
+terminal 8 (`b_t`, `delta`, `e`). Stage 3: `ring` (0), `bool[bz_hi]`, `bool[l_hi]`, `bool[a_z]`
+(1..3), `F1 = s (s - 1)`, `F2`, `F45`, `F7` (4..7), 37 reductions (8..44), `delta`, `e` from
+`r^(2)` (45, 46), the stacks (47..50); `gamma^(3) in K^51`, terminal 36. `F7` lives in two
+groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The proof-of-work plan equals
+H-exact's. Encoder: the coefficient witness comes from `(u, w_1')` (`fips_coefficient`), the
+hint slack per record is kept in `MainTables` for round 2 (`hint_slack_table`). The kernel's
+plan expands `Term::Monomials` into polynomial, bilinear and generic pieces. Tests:
+`tests/h_fips.rs`, `tests/mode_b.rs` (H-FIPS round trips with the weight-80 corner records,
+cross-relation rejections), unit tests of the manifest, stage specs, transcript, wire, plan.
+
 ## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
 
 Plan Part 2, Section 2.2 (`ref/notes/plan-128bit-speed.md`): lookup, stage 3, instance and

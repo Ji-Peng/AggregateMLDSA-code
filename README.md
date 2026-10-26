@@ -9,10 +9,12 @@ recorded in `docs/deviations.md`.
 Status (2026-10-26): ML-DSA-44, mode A (public
 `c~`) and mode B (public bits), PIOP wire version 4 (tied-part proof version 5: the GF(2) side
 of the bridge is the virtual parity chain, [`docs/parity-chain.md`](docs/parity-chain.md),
-deviation K21). Two relations, selected by `--relation` and bound in event 0:
+deviation K21). Three relations, selected by `--relation` and bound in event 0:
 **H-u** (default; `z` in `[-2^17, 2^17)`, `|u| <= 190,465`, SelfTargetMSIS bound
 `zeta' = 350,209`) and **H-exact** (also `|z| <= 130,993`, FIPS 204's bounds; one more
-committed column). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work
+committed column) and **H-FIPS** (relation byte 2, `--relation h-fips`: also the hint, so the
+extracted witness is a FIPS 204 Algorithm 8 signature; four more columns and one value per
+signature, `docs/h-exact.md` Section 10, deviation L10). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work
 schedule ([`docs/soundness.md`](docs/soundness.md): census, schedule, the 128-bit theorem
 and its composition proof, conditional on the stated assumptions (F) and (K)). Aggregate
 unforgeability reduces to SUF-CMA of the relaxed scheme, with no open step for signing
