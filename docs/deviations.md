@@ -1009,7 +1009,8 @@ cost of one run, `T_run`, and the Module-SIS reductions, not the run count or th
 168.6 ms (within the local noise, but quote verifier numbers of this change only from a
 cloud run) (ref/notes/overnight-20261026/fork-join-p1.md);
 a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and 15 (6.76 s),
-one round, direction only, so the default stays the cloud-measured half until a 32K sweep;
+one round, direction only, but a rerun at `52c3d23` tied them (6.34 s each; main `ab62c6d`
+7.31 s in the same session), so the default stays the cloud-measured half until a 32K sweep;
 the 32K cloud run is pending.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
