@@ -342,11 +342,11 @@ it takes `--relation h-exact`, and to move with any `pow-128` change):
 
 ```text
 H-exact  N* = 2^3   modeB          c9dd30a002089fff68b1653faddb2ac860e093f771eb3eeaaf03e60152e54c85
-H-exact  N* = 2^3   slim span on   8f69f49792afc311cf43042df023b98706f92bdaecb1c3ac837690e92995e983
+H-exact  N* = 2^3   slim span on   395afaec30fb8143597d9cd965d9348f8aba6367d5ea3c931338a519f3538f92
 H-exact  N* = 2^10  modeB          750a40c19877ba6bda8c7ddee36866239b6338f7caa84109880662a33d64a1d8
-H-exact  N* = 2^10  slim span on   82ffd38abe14e463ad41cc9ad209e07d5143f28067bb3696f2c445aad2c05c8f
+H-exact  N* = 2^10  slim span on   50f288e92a2e1f8832ee42535ca855bf2883786f79fb1629313f5a7951a36187
 H-exact  N* = 2^15  modeB          e4b1dffc21351ca615ace27500406a1990609ccb6cc07e13c6da50c18a416046
-H-exact  N* = 2^15  slim span on   14666dea14ede0ddea3f5cc34d50e8d746021c034941d060a6c2d08af8960d41
+H-exact  N* = 2^15  slim span on   1f8e7aba1af1db61d3be14fccd16252008b8cdc71799c61d5711d923df38db16
 ```
 
 (The same computation reproduces the H anchors of `docs/soundness.md` Section 10, e.g.
