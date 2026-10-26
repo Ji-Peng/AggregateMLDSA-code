@@ -57,6 +57,10 @@ is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in th
 `z_lo` (stored `S_zlo = B_zlo - 2^15`, column `bz_lo`) and the bits `B_zhi`, `a_z` proven by
 two Booleanity zero-checks in stage 3, so the four stacks, `L` and every lookup site are the
 same; only the honest multiplicities move (padded cells look up 65,457 instead of 0).
+Relation H-FIPS (`docs/h-exact.md` Section 10.7, deviation L10) puts `l_lo` (`L_lo - 2^15`)
+in the slot of `u_lo` and the hint slack `u_h` (stored `u_h - 2^15`) in the free slot 6 of the
+level-2 stack, which then has 7 columns in its 8 slots: the slot count, the depths, `L` and the
+sites are those of H-u, and the stack-2 reduction (7.7) reads `u_h` as its seventh column.
 
 Two deviations from the first design (Handoff, "superseded"), both forced by soundness:
 

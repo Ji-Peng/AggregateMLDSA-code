@@ -30,7 +30,7 @@ use agg_witness::params::{GAMMA2, L, N, POSITIONS, Q, W1_BITS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::manifest::{value_columns, Column, CommitmentManifest, DigitValue, GroupRole, CARRY16_DIGITS};
+use crate::manifest::{value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupRole, CARRY16_DIGITS};
 use crate::source_tables::{Cells, MainTables, SourceTables};
 use crate::OpeningField as E;
 
@@ -109,7 +109,8 @@ pub fn residual_table(
         let digits: Vec<Cells<'_>> = value_columns(value).into_iter().map(|c| main.column(manifest, c)).collect();
         compose_table(&value.layout(), &digits)
     };
-    let (z, u, v) = (compose(manifest.z_value()), compose(DigitValue::U), compose(DigitValue::V));
+    let (z, v) = (compose(manifest.z_value()), compose(DigitValue::V));
+    let u = u_table(manifest, main);
     let w1 = w1_table(&main.bit_lanes(manifest));
     let geom = main.geometry();
     let mut out = vec![E::zero(); geom.main_len()];
@@ -146,6 +147,24 @@ pub fn residual_table(
             }
         });
     out
+}
+
+/// `u` on the Boolean main domain, over the integers: (4.2) under H-u and H-exact, H-FIPS's
+/// `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (`source_tables::fips_u`) otherwise.
+#[must_use]
+pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
+    let value = manifest.u_slot_value();
+    let digits: Vec<Cells<'_>> = value_columns(value).into_iter().map(|c| main.column(manifest, c)).collect();
+    let composed = compose_table(&value.layout(), &digits);
+    if !manifest.is_fips() {
+        return composed;
+    }
+    let [s, delta, e] = FipsColumn::ALL.map(|c| main.column(manifest, Column::Fips(c)));
+    composed
+        .par_iter()
+        .enumerate()
+        .map(|(x, &l)| crate::source_tables::fips_u(l, s.value(x), delta.value(x), e.value(x)))
+        .collect()
 }
 
 /// `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t(zeta, beta) - 2 kappa^(1)_t(rho_1, beta)` on the
@@ -210,7 +229,8 @@ pub struct MainValues {
 }
 
 impl MainValues {
-    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation.
+    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation
+    /// (H-FIPS: the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`).
     #[must_use]
     pub fn from_claims(manifest: &CommitmentManifest, value: impl Fn(Column) -> E) -> Self {
         let compose = |digit: DigitValue| {
@@ -218,9 +238,16 @@ impl MainValues {
             compose_digits(&digit.layout(), &digits)
         };
         let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
+        let u = if manifest.is_fips() {
+            value(Column::SIGN).mul_i64(GAMMA2) + compose(DigitValue::L) + E::from_i64(1 - GAMMA2)
+                - value(Column::DELTA).mul_i64(2 * GAMMA2)
+                - value(Column::WRAP)
+        } else {
+            compose(DigitValue::U)
+        };
         Self {
             z: compose(manifest.z_value()),
-            u: compose(DigitValue::U),
+            u,
             v: compose(DigitValue::V),
             w1: w1_from_bits(&bits),
         }

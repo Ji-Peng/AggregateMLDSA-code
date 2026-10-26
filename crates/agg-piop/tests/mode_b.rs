@@ -432,14 +432,18 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
             rejected(verify_mode_b(&public, &rewritten, &bridge, Relation::HExact, None)),
             VerifyError::Relation { .. }
         ));
-        for flag in [2_u8, 3] {
-            let mut unknown = bytes.clone();
-            unknown[2] = flag;
-            assert!(matches!(
-                rejected(verify_mode_b(&public, &unknown, &bridge, Relation::HExact, None)),
-                VerifyError::Wire(_)
-            ));
-        }
+        // Relation byte 2 names H-FIPS: an H-exact proof rewritten to it is malformed or
+        // mismatched, never accepted; byte 3 is unknown.
+        let mut fips = bytes.clone();
+        fips[2] = Relation::HFips.id();
+        assert!(!verify_mode_b(&public, &fips, &bridge, Relation::HExact, None).accepted());
+        assert!(!verify_mode_b(&public, &fips, &bridge, Relation::HFips, None).accepted());
+        let mut unknown = bytes.clone();
+        unknown[2] = 3;
+        assert!(matches!(
+            rejected(verify_mode_b(&public, &unknown, &bridge, Relation::HExact, None)),
+            VerifyError::Wire(_)
+        ));
         // An H-u proof of the same records verified as H-exact, and rewritten to H-exact.
         let hu = Fixture::new(0xe256, 200, 56).prove(&bridge);
         let hu_bytes = hu.proof.to_bytes();
@@ -470,6 +474,90 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
             offset += usize::from(site.nonce_bits());
         }
         assert!(offset > 0, "the stage-2 gamma site is in the plan");
+    });
+}
+
+/// Relation H-FIPS (`docs/h-exact.md` Section 10.7, protocol level): honest round trips at
+/// 1, 64 and 256 records (the 256-record batch includes the synthetic weight-80 records with
+/// the coefficient `w' = q - gamma2, h = 0`), the claim counts, and cross-relation
+/// verification: an H-FIPS proof verified as H-u or H-exact and an H-exact proof verified as
+/// H-FIPS are rejected before event 0, a rewritten relation byte fails.
+#[test]
+fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
+    on_large_stack(|| {
+        let _ = round_trip_as(Relation::HFips, 1, 0, 0xf001);
+        let _ = round_trip_as(Relation::HFips, 60, 4, 0xf064);
+        // 254 honest records and two synthetic weight-80 corner records.
+        let mut records = common::records(0xf256, 200, 54);
+        records.push(agg_witness::gen::hint_corner_record(1));
+        records.push(agg_witness::gen::hint_corner_record(3));
+        let instance = PublicInstance::from_records(&records).expect("instance");
+        let fixture = Fixture {
+            records,
+            instance,
+            relation: Relation::HFips,
+        };
+        let bridge = SeededMatrices;
+        let output = fixture.prove(&bridge);
+        let bytes = output.proof.to_bytes();
+        let public = fixture.public();
+        assert_eq!(bytes[2], 2);
+        assert!(output.proof.stage2.claims.squares.is_empty());
+        assert_eq!(output.proof.stage2.claims.fips.len(), 2);
+        assert_eq!(output.proof.stage3.claims.0.len(), 36);
+        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 8 + 36 claims.
+        assert_eq!(output.proof.size().piop, 16 * (81 + 11 * 18));
+        eprintln!("N = 256, H-FIPS (with two weight-80 corner records): aggregate {} bytes, prover {}", bytes.len(), output.timings);
+        let report = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
+        report_line("N = 256 H-FIPS: verifier uncached", &report);
+        assert!(report.accepted());
+        for expected in [Relation::Hu, Relation::HExact] {
+            assert!(matches!(
+                rejected(verify_mode_b(&public, &bytes, &bridge, expected, None)),
+                VerifyError::Relation { found: Relation::HFips, .. }
+            ));
+        }
+        for flag in [0_u8, 1] {
+            let mut rewritten = bytes.clone();
+            rewritten[2] = flag;
+            for expected in Relation::ALL {
+                assert!(!verify_mode_b(&public, &rewritten, &bridge, expected, None).accepted());
+            }
+        }
+        // The same records proved under H-exact, verified as H-FIPS (rejected before event 0)
+        // and promoted to H-FIPS (rejected).
+        let exact = Fixture {
+            records: fixture.records.clone(),
+            instance: fixture.instance.clone(),
+            relation: Relation::HExact,
+        };
+        let exact_bytes = exact.prove(&bridge).proof.to_bytes();
+        assert!(verify_mode_b(&public, &exact_bytes, &bridge, Relation::HExact, None).accepted());
+        assert!(matches!(
+            rejected(verify_mode_b(&public, &exact_bytes, &bridge, Relation::HFips, None)),
+            VerifyError::Relation {
+                expected: Relation::HFips,
+                found: Relation::HExact
+            }
+        ));
+        let mut promoted = exact_bytes;
+        promoted[2] = Relation::HFips.id();
+        assert!(!verify_mode_b(&public, &promoted, &bridge, Relation::HFips, None).accepted());
+        // A wrong nonce at the stage-2 gamma site (g = 3, 10-bit nonce) is rejected.
+        let manifest = CommitmentManifest::for_relation(256, Relation::HFips).unwrap();
+        let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+        let mut offset = 0;
+        for site in plan.sites() {
+            if site.class == SiteClass::StageGamma && site.i == 2 {
+                assert_eq!((site.bits, site.nonce_bits()), (3, 10));
+                let mut wrong = output.proof.clone();
+                wrong.work[offset / 8] ^= 1 << (offset % 8);
+                assert!(!verify_mode_b(&public, &wrong.to_bytes(), &bridge, Relation::HFips, None).accepted());
+                break;
+            }
+            offset += usize::from(site.nonce_bits());
+        }
+        assert!(offset > 0);
     });
 }
 

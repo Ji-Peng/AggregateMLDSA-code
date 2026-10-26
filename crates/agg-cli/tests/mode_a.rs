@@ -238,7 +238,7 @@ fn round_trip_as(
     assert!(pinned.verify(&statements, &aggregate.bytes, None).accepted());
     let other_relation = match relation {
         Relation::Hu => Relation::HExact,
-        Relation::HExact => Relation::Hu,
+        Relation::HExact | Relation::HFips => Relation::Hu,
     };
     let crossed = pinned.relation(other_relation).verify(&statements, &aggregate.bytes, None);
     assert!(
@@ -291,6 +291,20 @@ fn round_trip_at_256_signatures_in_two_flock_parts() {
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
+}
+
+/// Relation H-FIPS (`docs/h-exact.md` Section 10) in mode A at 64 records (Slim, one Flock
+/// part) and 256 records (two parts); the cross-relation verifier rejects before event 0.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn h_fips_round_trips_at_64_and_256_signatures_slim() {
+    on_large_stack(|| {
+        round_trip_as(Relation::HFips, 48, 16, 0xf064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim);
+        round_trip_as(Relation::HFips, 200, 56, 0xf256, 7, 2, FlockProfile::Slim);
+    });
 }
 
 #[test]

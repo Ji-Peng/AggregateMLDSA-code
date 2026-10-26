@@ -17,9 +17,11 @@
 //!
 //! The relation (`docs/h-exact.md` Section 1) changes the polynomial count of `G_main4`
 //! (8 for H-u, 9 for H-exact, whose extra Boolean column `a_z` is the slack of the exact `z`
-//! form), so every layout, row name and catalog key is a function of `(d_sig, relation)`.
-//! [`CATALOG_D_SIG`] lists the H-u batch sizes and [`CATALOG_D_SIG_H_EXACT`] the H-exact
-//! ones whose rows are checked in ([`catalog_batches`] lists both);
+//! form, 12 for H-FIPS, which adds the sign bit, `delta` and `e`) and of `G_2` (13 for
+//! H-FIPS: the hint slack `u_h` on `D_2`, `docs/h-exact.md` Section 10.7), so every layout,
+//! row name and catalog key is a function of `(d_sig, relation)`. [`CATALOG_D_SIG`] lists the
+//! H-u batch sizes, [`CATALOG_D_SIG_H_EXACT`] the H-exact and [`CATALOG_D_SIG_H_FIPS`] the
+//! H-FIPS ones whose rows are checked in ([`catalog_batches`] lists all);
 //! `tests/schedule_catalog_regen.rs` regenerates them (docs/pcs-config.md).
 
 use akita_params::PolynomialGroupLayout;
@@ -50,10 +52,15 @@ pub const CATALOG_D_SIG: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 1
 /// Batch sizes (`d_sig`) whose relation-H-exact rows are generated and checked in.
 pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
+/// Batch sizes (`d_sig`) whose relation-H-FIPS rows are generated and checked in.
+pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
 /// Relation byte of H-u: the proof header's flags byte and byte 3 of the event-0 bytes.
 pub const RELATION_HU: u8 = 0;
 /// Relation byte of H-exact (`docs/h-exact.md` Section 1.1).
 pub const RELATION_H_EXACT: u8 = 1;
+/// Relation byte of H-FIPS (`docs/h-exact.md` Section 10).
+pub const RELATION_H_FIPS: u8 = 2;
 
 /// The relation a proof certifies (`docs/h-exact.md` Section 1). Its id is bound twice: as
 /// the proof header's flags byte and in the event-0 manifest bytes; it selects the layout of
@@ -65,11 +72,14 @@ pub enum Relation {
     Hu,
     /// H-exact: the FIPS 204 bounds `|z| <= 130,993` and `|u| <= 190,465`, both exact.
     HExact,
+    /// H-FIPS: H-exact's bounds and the hint: the extracted `(c~, z, h)` is a FIPS 204
+    /// signature (`docs/h-exact.md` Section 10).
+    HFips,
 }
 
 impl Relation {
-    /// Both relations, in id order.
-    pub const ALL: [Self; 2] = [Self::Hu, Self::HExact];
+    /// Every relation, in id order.
+    pub const ALL: [Self; 3] = [Self::Hu, Self::HExact, Self::HFips];
 
     /// The relation byte.
     #[must_use]
@@ -77,6 +87,7 @@ impl Relation {
         match self {
             Self::Hu => RELATION_HU,
             Self::HExact => RELATION_H_EXACT,
+            Self::HFips => RELATION_H_FIPS,
         }
     }
 
@@ -86,34 +97,39 @@ impl Relation {
         match id {
             RELATION_HU => Some(Self::Hu),
             RELATION_H_EXACT => Some(Self::HExact),
+            RELATION_H_FIPS => Some(Self::HFips),
             _ => None,
         }
     }
 
-    /// Display name (`H-u`, `H-exact`).
+    /// Display name (`H-u`, `H-exact`, `H-FIPS`).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Hu => "H-u",
             Self::HExact => "H-exact",
+            Self::HFips => "H-FIPS",
         }
     }
 
-    /// Command-line spelling (`h-u`, `h-exact`); [`Relation::parse`] inverts it.
+    /// Command-line spelling (`h-u`, `h-exact`, `h-fips`); [`Relation::parse`] inverts it.
     #[must_use]
     pub const fn flag(self) -> &'static str {
         match self {
             Self::Hu => "h-u",
             Self::HExact => "h-exact",
+            Self::HFips => "h-fips",
         }
     }
 
-    /// Parse a command-line spelling (`h-u`, `hu`, `h`, `h-exact`, `hexact`).
+    /// Parse a command-line spelling (`h-u`, `hu`, `h`, `h-exact`, `hexact`, `h-fips`,
+    /// `hfips`).
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "h-u" | "hu" | "h" | "0" => Some(Self::Hu),
             "h-exact" | "hexact" | "exact" | "1" => Some(Self::HExact),
+            "h-fips" | "hfips" | "2" => Some(Self::HFips),
             _ => None,
         }
     }
@@ -124,6 +140,7 @@ impl Relation {
         match self {
             Self::Hu => CATALOG_D_SIG,
             Self::HExact => CATALOG_D_SIG_H_EXACT,
+            Self::HFips => CATALOG_D_SIG_H_FIPS,
         }
     }
 }
@@ -243,8 +260,9 @@ impl Group {
     }
 
     /// Number of committed polynomials (spec Section 4.1, L16):
-    /// `4 + 8` on the main domain (`4 + 9` under H-exact), 6 carries, `6 + 6` parities and
-    /// carries, 1 carry, and the 7 multiplicity digits.
+    /// `4 + 8` on the main domain (`4 + 9` under H-exact, `4 + 12` under H-FIPS), 6 carries,
+    /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry, and the 7
+    /// multiplicity digits.
     #[must_use]
     pub const fn num_polynomials(self, relation: Relation) -> usize {
         match self {
@@ -252,9 +270,13 @@ impl Group {
             Self::Main => match relation {
                 Relation::Hu => 2 + 6,
                 Relation::HExact => 2 + 6 + 1,
+                Relation::HFips => 2 + 6 + 1 + 3,
             },
             Self::Level1 => 6,
-            Self::Level2 => 6 + 6,
+            Self::Level2 => match relation {
+                Relation::Hu | Relation::HExact => 6 + 6,
+                Relation::HFips => 6 + 6 + 1,
+            },
             Self::Level3 => 1,
             Self::Mult => MULTIPLICITY_DIGITS,
         }
@@ -311,7 +333,7 @@ impl Group {
 pub struct BatchLayout {
     /// `log2 N*`.
     pub d_sig: usize,
-    /// The relation (it fixes the polynomial count of `G_main4`).
+    /// The relation (it fixes the polynomial counts of `G_main4` and `G_2`).
     pub relation: Relation,
     /// Physical layouts of `G_main16, G_main4, G_1, G_2, G_3, G_m`.
     pub groups: [PolynomialGroupLayout; GROUP_COUNT],
@@ -368,12 +390,14 @@ impl BatchLayout {
             .expect("six groups")
     }
 
-    /// Catalog row name of the grouped row (`l16` for H-u, `l16x` for H-exact).
+    /// Catalog row name of the grouped row (`l16` for H-u, `l16x` for H-exact, `l16f` for
+    /// H-FIPS).
     #[must_use]
     pub fn row_name(&self) -> String {
         let layout = match self.relation {
             Relation::Hu => "l16",
             Relation::HExact => "l16x",
+            Relation::HFips => "l16f",
         };
         format!("mldsa-44-{layout}-batch-{}-mult-final", 1_usize << self.d_sig)
     }
@@ -385,7 +409,7 @@ impl BatchLayout {
     }
 }
 
-/// Every checked-in batch layout: the H-u sizes, then the H-exact sizes.
+/// Every checked-in batch layout: the H-u sizes, then the H-exact and H-FIPS sizes.
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
     Relation::ALL
@@ -442,13 +466,16 @@ mod tests {
         let counts = |relation| Group::ALL.map(|group| group.num_polynomials(relation));
         assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 1, 7]);
         assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 1, 7]);
+        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 1, 7]);
         let total = |relation| counts(relation).iter().sum::<usize>();
         assert_eq!((total(Relation::Hu), total(Relation::HExact)), (38, 39));
+        assert_eq!(total(Relation::HFips), 43);
         for relation in Relation::ALL {
             assert_eq!(Relation::from_id(relation.id()), Some(relation));
             assert_eq!(Relation::parse(relation.flag()), Some(relation));
         }
-        assert_eq!(Relation::from_id(2), None);
+        assert_eq!(Relation::from_id(2), Some(Relation::HFips));
+        assert_eq!(Relation::from_id(3), None);
         assert_eq!(Relation::parse("fips"), None);
         // Spec Section 1 table at N* = 2^15.
         assert_eq!(Group::Main16.logical_vars(15), 25);
@@ -514,7 +541,10 @@ mod tests {
         for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Mult] {
             assert_eq!(exact.groups[group.index()], hu.groups[group.index()]);
         }
-        assert_eq!(catalog_batches().len(), CATALOG_D_SIG.len() + CATALOG_D_SIG_H_EXACT.len());
+        assert_eq!(
+            catalog_batches().len(),
+            CATALOG_D_SIG.len() + CATALOG_D_SIG_H_EXACT.len() + CATALOG_D_SIG_H_FIPS.len()
+        );
     }
 
     #[test]
@@ -534,12 +564,22 @@ mod tests {
         assert_eq!(shapes(&[Relation::Hu], Family::Width4), vec![(18, 8), (20, 8)]);
         let width16 = vec![(13, 1), (13, 6), (13, 12), (14, 6), (18, 4), (20, 4)];
         assert_eq!(shapes(&[Relation::Hu], Family::Width16), width16);
-        // Both relations: the width-4 family gains the 9-polynomial rows, the width-16
+        // H-u and H-exact: the width-4 family gains the 9-polynomial rows, the width-16
         // family is shared.
+        let two = [Relation::Hu, Relation::HExact];
         assert_eq!(
-            shapes(&Relation::ALL, Family::Width4),
+            shapes(&two, Family::Width4),
             vec![(18, 8), (18, 9), (20, 8), (20, 9)]
         );
-        assert_eq!(shapes(&Relation::ALL, Family::Width16), width16);
+        assert_eq!(shapes(&two, Family::Width16), width16);
+        // H-FIPS adds the 12-polynomial G_main4 rows and the 13-polynomial G_2 row (u_h).
+        assert_eq!(
+            shapes(&Relation::ALL, Family::Width4),
+            vec![(18, 8), (18, 9), (18, 12), (20, 8), (20, 9), (20, 12)]
+        );
+        assert_eq!(
+            shapes(&Relation::ALL, Family::Width16),
+            vec![(13, 1), (13, 6), (13, 12), (13, 13), (14, 6), (18, 4), (20, 4)]
+        );
     }
 }

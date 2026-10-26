@@ -40,11 +40,17 @@ pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
         Group::Main => match relation {
             Relation::Hu => [4, 6, 0, 0, 0, 0, 0, 0].to_vec(),
             Relation::HExact => [0, 6, 0, 0, 0, 0, 0, 0, 0].to_vec(),
+            // bz_hi, L_hi, six bits, a_z, the sign bit (Booleans); delta, e in [-1, 1]
+            // (dummy values from the base-4 alphabet, inside the width-4 admission range).
+            Relation::HFips => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4].to_vec(),
         },
         Group::Level1 => vec![wide; 6],
         Group::Level2 => {
             let mut bases = vec![0; 6];
             bases.extend([wide; 6]);
+            if relation == Relation::HFips {
+                bases.push(wide); // u_h on D_2
+            }
             bases
         }
         Group::Level3 => vec![wide],

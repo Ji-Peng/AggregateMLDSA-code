@@ -100,6 +100,16 @@ pub enum Identity {
     HintWeight,
     /// x (x - 44)(x + 44) = 0 with x = r1 + g - w1'.
     UseHintCubic,
+    /// H-FIPS: a looked-up value (L_lo, B_zlo, u_h, the two halves of v) outside its table.
+    Range16,
+    /// H-FIPS: delta (delta - sigma) = 0.
+    DeltaSign,
+    /// H-FIPS: e (e - 1)(e - delta) = 0.
+    EdgeE,
+    /// H-FIPS: e (e + 1) w1' = 0 (e = 1 only at w1' = 0).
+    WrapLow,
+    /// H-FIPS: e (e - 1)(w1' - 43) = 0 (e = -1 only at w1' = 43).
+    WrapHigh,
     /// Padded rows hold the canonical zero encoding.
     PaddingCanonical,
     /// Live values within the honest bounds B_z, B_u, B_v.
@@ -117,7 +127,7 @@ impl Identity {
             Ring | Link => Stage::Three,
             CommitmentHash | Gf2Bridge => Stage::Keccak,
             BoolSlack | SignSquare | EdgeProducts | TernaryG | GSign | HintWeight
-            | UseHintCubic => Stage::Layout,
+            | UseHintCubic | Range16 | DeltaSign | EdgeE | WrapLow | WrapHigh => Stage::Layout,
             PaddingCanonical | HonestBound => Stage::Completeness,
         }
     }
@@ -148,7 +158,7 @@ pub struct CheckReport {
 const MAX_DETAILS: usize = 64;
 
 impl CheckReport {
-    fn fail(&mut self, identity: Identity, what: &str, index: usize, detail: String) {
+    pub(crate) fn fail(&mut self, identity: Identity, what: &str, index: usize, detail: String) {
         *self.counts.entry(identity).or_insert(0) += 1;
         if self.failures.len() < MAX_DETAILS {
             self.failures.push(Failure {

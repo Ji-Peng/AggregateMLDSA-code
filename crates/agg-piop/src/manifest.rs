@@ -23,11 +23,20 @@
 //! to `G_main4` after the bits), so `|z| <= B_z = 130,993`. The value `z` of H-exact is
 //! [`DigitValue::Zx`] with the columns `bz_lo`, `bz_hi`, `a_z`; the Booleanity of `bz_hi`
 //! and `a_z` is proven by two zero-checks at `r^(2)` in stage 3.
+//!
+//! Relation H-FIPS (relation byte 2, `docs/h-exact.md` Section 10): `z` as in H-exact, and in
+//! place of `u`'s digits the per-coefficient witness of `agg_witness::hfips`: the magnitude
+//! `L = L_lo + 29,696 L_hi` ([`DigitValue::L`]: `l_lo` looked up in the slot of `U_lo`, the
+//! bit `l_hi` in the slot of `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e`
+//! ([`FipsColumn`], appended to `G_main4` after `a_z`), so
+//! `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`; and the per-signature hint slack `u_h`
+//! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
+//! variables are the signature index) in the free slot 6 of lookup stack 2.
 
 use agg_pcs_config::catalogs::{BatchLayout, Family, Group, MULTIPLICITY_DIGITS, TABLE_VARS};
-pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT};
+pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELATION_H_FIPS};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
-use agg_witness::digits::{Alphabet, BitSlackLayout, DigitLayout, StepLayout, ValueForm, Z_BIT_SLACK};
+use agg_witness::digits::{Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK, Z_BIT_SLACK};
 use agg_witness::params::{B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
 use crate::lookup::{LookupShape, StackShape, Table};
@@ -87,6 +96,9 @@ pub const V16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16, 1 << 16],
     signed: true,
 };
+/// Relation H-FIPS: `L = L_lo + 29,696 L_hi` with `L_lo = S_lo + 2^15` looked up and the bit
+/// `L_hi`, so `L = S_lo + 29,696 L_hi + 2^15` over exactly `[0, gamma_2 - 1]`.
+pub const L16_SLACK: SlackLayout = L_SLACK;
 /// A carry as one balanced 16-bit column (base `2^16`, unsigned): `kappa = K + 2^15`.
 pub const CARRY16_DIGITS: DigitLayout = DigitLayout {
     name: "kappa",
@@ -100,6 +112,8 @@ pub const LOOKUP_BASE: u32 = 1 << 16;
 pub const LOOKUP_ALPHABET_CODE: u8 = 0x80 | 16;
 /// Alphabet code of a multiplicity digit (base 16, not range-checked).
 pub const MULTIPLICITY_ALPHABET_CODE: u8 = 0x40 | 16;
+/// Alphabet code of a ternary column (`{-1, 0, 1}`: H-FIPS's `delta` and `e`).
+pub const TERNARY_ALPHABET_CODE: u8 = 0x20 | 3;
 
 /// Canonical transcript byte of a group role (its wire position).
 #[must_use]
@@ -114,10 +128,15 @@ pub enum DigitValue {
     Z,
     /// The response `z` of relation H-exact: `bz_lo` (looked up), `bz_hi`, `a_z` (bits).
     Zx,
-    /// The UseHint residual `u` (main domain).
+    /// The UseHint residual `u` (main domain; relations H-u and H-exact).
     U,
+    /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` (main domain): `l_lo` (looked
+    /// up), `l_hi` (bit).
+    L,
     /// The ring quotient `v` (main domain).
     V,
+    /// Relation H-FIPS's hint slack `u_h = omega - sum delta^2` on `D_2` (looked up).
+    HintSlack,
     /// Level-1 carry `kappa^(1)_t` (domain `D_1`).
     Kappa1(u8),
     /// Level-2 carry `kappa^(2)_t` (domain `D_2`).
@@ -135,8 +154,11 @@ impl DigitValue {
             Self::Z => ValueForm::Radix(Z16_DIGITS),
             Self::Zx => ValueForm::BitSlack(ZX16_DIGITS),
             Self::U => ValueForm::Step(U16_DIGITS),
+            Self::L => ValueForm::Slack(L16_SLACK),
             Self::V => ValueForm::Radix(V16_DIGITS),
-            Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 => ValueForm::Radix(CARRY16_DIGITS),
+            Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
+                ValueForm::Radix(CARRY16_DIGITS)
+            }
         }
     }
 
@@ -144,14 +166,31 @@ impl DigitValue {
     #[must_use]
     pub const fn group(self, digit: u8) -> GroupRole {
         match self {
-            Self::Z | Self::Zx | Self::U if digit == 0 => Group::Main16,
-            Self::Z | Self::Zx | Self::U => Group::Main,
+            Self::Z | Self::Zx | Self::U | Self::L if digit == 0 => Group::Main16,
+            Self::Z | Self::Zx | Self::U | Self::L => Group::Main,
             Self::V => Group::Main16,
             Self::Kappa1(_) => Group::Level1,
-            Self::Kappa2(_) => Group::Level2,
+            Self::Kappa2(_) | Self::HintSlack => Group::Level2,
             Self::Kappa3 => Group::Level3,
         }
     }
+}
+
+/// The three per-coefficient columns of relation H-FIPS that are not digits of a value
+/// (`docs/h-exact.md` Section 10): in `G_main4` after `a_z`, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FipsColumn {
+    /// The sign bit `s = (1 + sigma)/2` in `{0, 1}` (`sigma = 1` iff `r0 > 0`).
+    Sign,
+    /// The hint move `delta in {0, sigma}` (`delta^2` is the hint bit).
+    Delta,
+    /// The wrap `e in {-1, 0, 1}`.
+    Wrap,
+}
+
+impl FipsColumn {
+    /// The three columns in `G_main4` order.
+    pub const ALL: [Self; 3] = [Self::Sign, Self::Delta, Self::Wrap];
 }
 
 /// What one committed polynomial holds.
@@ -170,6 +209,8 @@ pub enum Column {
     Parity2(u8),
     /// Digit `k` of the multiplicity column `m` of `T_16` (`2^16` cells).
     Multiplicity(u8),
+    /// A per-coefficient column of relation H-FIPS (main domain, `G_main4`).
+    Fips(FipsColumn),
 }
 
 impl Column {
@@ -208,6 +249,27 @@ impl Column {
         value: DigitValue::U,
         digit: 1,
     };
+    /// `l_lo` (H-FIPS `L_lo - 2^15`, the slot of `U_lo`).
+    pub const L_LO: Self = Self::Digit {
+        value: DigitValue::L,
+        digit: 0,
+    };
+    /// `l_hi` (H-FIPS `L_hi`, a bit in the slot of `U_hi`).
+    pub const L_HI: Self = Self::Digit {
+        value: DigitValue::L,
+        digit: 1,
+    };
+    /// H-FIPS's sign bit `s`.
+    pub const SIGN: Self = Self::Fips(FipsColumn::Sign);
+    /// H-FIPS's `delta`.
+    pub const DELTA: Self = Self::Fips(FipsColumn::Delta);
+    /// H-FIPS's `e`.
+    pub const WRAP: Self = Self::Fips(FipsColumn::Wrap);
+    /// H-FIPS's hint slack `u_h` (stored `u_h - 2^15`, on `D_2`).
+    pub const HINT_SLACK: Self = Self::Digit {
+        value: DigitValue::HintSlack,
+        digit: 0,
+    };
     /// `V_lo`.
     pub const V_LO: Self = Self::Digit {
         value: DigitValue::V,
@@ -235,7 +297,8 @@ impl Column {
     pub fn alphabet(self) -> Alphabet {
         match self {
             Self::Digit { value, digit } => value.layout().alphabet(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) => Alphabet::Bool,
+            Self::W1Bit(_) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) => Alphabet::Bool,
+            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => Alphabet::Ternary,
             Self::Multiplicity(_) => Alphabet::Balanced(16),
         }
     }
@@ -245,7 +308,7 @@ impl Column {
     pub fn base(self) -> Option<u32> {
         match self {
             Self::Digit { value, digit } => value.layout().base(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) | Self::Multiplicity(_) => None,
+            Self::W1Bit(_) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) => None,
         }
     }
 
@@ -272,7 +335,7 @@ impl Column {
     pub const fn group(self) -> GroupRole {
         match self {
             Self::Digit { value, digit } => value.group(digit),
-            Self::W1Bit(_) => Group::Main,
+            Self::W1Bit(_) | Self::Fips(_) => Group::Main,
             Self::Parity2(_) => Group::Level2,
             Self::Multiplicity(_) => Group::Mult,
         }
@@ -287,7 +350,8 @@ impl Column {
         }
     }
 
-    /// True for a Boolean digit of a value (`bz_hi`, `a_z`), proven by a zero-check.
+    /// True for a Boolean digit of a value (`bz_hi`, `a_z`; H-FIPS also `l_hi`), proven by a
+    /// zero-check at `r^(2)` in stage 3.
     #[must_use]
     pub fn is_bool_digit(self) -> bool {
         matches!(self, Self::Digit { .. }) && self.alphabet() == Alphabet::Bool
@@ -302,7 +366,9 @@ impl Column {
                 DigitValue::Z => format!("z_{}", half(digit)),
                 DigitValue::Zx => ["bz_lo", "bz_hi", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::U => format!("u_{}", half(digit)),
+                DigitValue::L => format!("l_{}", half(digit)),
                 DigitValue::V => format!("v_{}", half(digit)),
+                DigitValue::HintSlack => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
                 DigitValue::Kappa2(t) => format!("kappa2_{t}"),
                 DigitValue::Kappa3 => "kappa3".to_owned(),
@@ -310,28 +376,43 @@ impl Column {
             Self::W1Bit(t) => format!("b_{t}"),
             Self::Parity2(t) => format!("y2_{t}"),
             Self::Multiplicity(k) => format!("m_{k}"),
+            Self::Fips(FipsColumn::Sign) => "s".to_owned(),
+            Self::Fips(FipsColumn::Delta) => "delta".to_owned(),
+            Self::Fips(FipsColumn::Wrap) => "e".to_owned(),
         }
     }
 
     /// Transcript code of the alphabet: the digit base of a leaf-checked digit (4, 6),
     /// [`LOOKUP_ALPHABET_CODE`] for a column looked up in `T_16`,
-    /// [`MULTIPLICITY_ALPHABET_CODE`] for a multiplicity digit, 0 for a Boolean.
+    /// [`MULTIPLICITY_ALPHABET_CODE`] for a multiplicity digit, [`TERNARY_ALPHABET_CODE`] for
+    /// H-FIPS's `delta` and `e`, 0 for a Boolean.
     #[must_use]
     pub fn alphabet_code(self) -> u8 {
         match self {
             Self::Multiplicity(_) => MULTIPLICITY_ALPHABET_CODE,
+            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => TERNARY_ALPHABET_CODE,
             column if column.is_lookup() => LOOKUP_ALPHABET_CODE,
             column => column.base().map_or(0, |base| base as u8),
         }
     }
 }
 
-/// The value `z` of `relation` (`Z` for H-u, `Zx` for H-exact).
+/// The value `z` of `relation` (`Z` for H-u, `Zx` for H-exact and H-FIPS).
 #[must_use]
 pub const fn z_value(relation: Relation) -> DigitValue {
     match relation {
         Relation::Hu => DigitValue::Z,
-        Relation::HExact => DigitValue::Zx,
+        Relation::HExact | Relation::HFips => DigitValue::Zx,
+    }
+}
+
+/// The digit-decomposed value in the slots of `U_lo, U_hi`: `u` (H-u, H-exact) or H-FIPS's
+/// magnitude `L`.
+#[must_use]
+pub const fn u_slot_value(relation: Relation) -> DigitValue {
+    match relation {
+        Relation::Hu | Relation::HExact => DigitValue::U,
+        Relation::HFips => DigitValue::L,
     }
 }
 
@@ -345,23 +426,28 @@ pub fn value_columns(value: DigitValue) -> Vec<Column> {
 
 /// The canonical polynomial order of a group under `relation` (spec Section 4.1, L16;
 /// `docs/h-exact.md` 2.2): H-exact puts `bz_lo, bz_hi` in the slots of `Z_lo, Z_hi` and
-/// appends `a_z` to `G_main4`.
+/// appends `a_z` to `G_main4`; H-FIPS (`docs/h-exact.md` Section 10.7) also puts `l_lo,
+/// l_hi` in the slots of `U_lo, U_hi`, appends `s, delta, e` to `G_main4` and `u_h` to `G_2`.
 #[must_use]
 pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
     let lanes = 0..W1_BITS as u8;
     let z = value_columns(z_value(relation));
+    let u = value_columns(u_slot_value(relation));
+    let fips = relation == Relation::HFips;
     match role {
-        Group::Main16 => vec![z[0], Column::U_LO, Column::V_LO, Column::V_HI],
-        Group::Main => [z[1], Column::U_HI]
+        Group::Main16 => vec![z[0], u[0], Column::V_LO, Column::V_HI],
+        Group::Main => [z[1], u[1]]
             .into_iter()
             .chain(lanes.map(Column::W1Bit))
             .chain(z[2..].iter().copied())
+            .chain(FipsColumn::ALL.into_iter().map(Column::Fips).filter(|_| fips))
             .collect(),
         Group::Level1 => lanes.map(|t| Column::carry(1, t)).collect(),
         Group::Level2 => lanes
             .clone()
             .map(Column::Parity2)
             .chain(lanes.map(|t| Column::carry(2, t)))
+            .chain(std::iter::once(Column::HINT_SLACK).filter(|_| fips))
             .collect(),
         Group::Level3 => vec![Column::carry(3, 0)],
         Group::Mult => (0..MULTIPLICITY_DIGITS as u8)
@@ -424,14 +510,18 @@ impl GroupDescriptor {
     }
 }
 
-/// The looked-up columns of one lookup stack (`docs/lookup.md` Section 1), in slot order.
+/// The looked-up columns of one lookup stack (`docs/lookup.md` Section 1), in slot order
+/// (H-FIPS puts `u_h` in slot 6 of stack 2).
 #[must_use]
 pub fn stack_columns(stack: usize, relation: Relation) -> Vec<Column> {
     let lanes = 0..W1_BITS as u8;
     match stack {
         0 => group_columns(Group::Main16, relation),
         1 => lanes.map(|t| Column::carry(1, t)).collect(),
-        2 => lanes.map(|t| Column::carry(2, t)).collect(),
+        2 => lanes
+            .map(|t| Column::carry(2, t))
+            .chain(std::iter::once(Column::HINT_SLACK).filter(|_| relation == Relation::HFips))
+            .collect(),
         3 => vec![Column::carry(3, 0)],
         _ => panic!("four lookup stacks"),
     }
@@ -547,6 +637,18 @@ impl CommitmentManifest {
     #[must_use]
     pub const fn z_value(&self) -> DigitValue {
         z_value(self.relation)
+    }
+
+    /// The value in the slots of `U_lo, U_hi` ([`u_slot_value`]).
+    #[must_use]
+    pub const fn u_slot_value(&self) -> DigitValue {
+        u_slot_value(self.relation)
+    }
+
+    /// True under relation H-FIPS (the hint is part of the relation).
+    #[must_use]
+    pub fn is_fips(&self) -> bool {
+        self.relation == Relation::HFips
     }
 
     /// The looked-up columns of lookup stack `stack` ([`stack_columns`]).
@@ -800,6 +902,80 @@ mod tests {
     }
 
     #[test]
+    fn h_fips_groups_follow_docs_h_exact_section_10() {
+        let manifest = CommitmentManifest::for_relation(256, Relation::HFips).unwrap();
+        assert!(manifest.is_fips());
+        let counts: Vec<usize> = manifest
+            .groups()
+            .iter()
+            .map(GroupDescriptor::polynomial_count)
+            .collect();
+        assert_eq!(counts, [4, 12, 6, 13, 1, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (43, 36));
+        let names = |role| -> Vec<String> {
+            manifest.group(role).columns.iter().map(|c| c.name()).collect()
+        };
+        assert_eq!(names(Group::Main16), ["bz_lo", "l_lo", "v_lo", "v_hi"]);
+        assert_eq!(
+            names(Group::Main),
+            ["bz_hi", "l_hi", "b_0", "b_1", "b_2", "b_3", "b_4", "b_5", "a_z", "s", "delta", "e"]
+        );
+        assert_eq!(names(Group::Level2).last().map(String::as_str), Some("u_h"));
+        assert!(manifest.leaf_digits().is_empty());
+        let bools: Vec<String> = manifest.bool_digits().iter().map(|c| c.name()).collect();
+        assert_eq!(bools, ["bz_hi", "l_hi", "a_z"]);
+        assert_eq!((manifest.z_value(), manifest.u_slot_value()), (DigitValue::Zx, DigitValue::L));
+        // Alphabets and codes: s a bit, delta and e ternary, l_lo and u_h looked up.
+        assert_eq!(Column::SIGN.alphabet(), Alphabet::Bool);
+        assert_eq!(Column::DELTA.alphabet(), Alphabet::Ternary);
+        assert_eq!(
+            (Column::SIGN.alphabet_code(), Column::DELTA.alphabet_code(), Column::WRAP.alphabet_code()),
+            (0, TERNARY_ALPHABET_CODE, TERNARY_ALPHABET_CODE)
+        );
+        assert!(Column::L_LO.is_lookup() && Column::HINT_SLACK.is_lookup());
+        assert!(Column::L_HI.is_bool_digit() && !Column::SIGN.is_bool_digit());
+        assert_eq!(Column::HINT_SLACK.domain(), Group::Level2);
+        // u_h takes the free slot 6 of stack 2: the lookup keeps its depths and L.
+        assert_eq!(manifest.stack_columns(2).len(), 7);
+        assert_eq!(manifest.stack_columns(2)[6], Column::HINT_SLACK);
+        let (fips, hu) = (manifest.lookup_shape(), CommitmentManifest::for_batch(256).unwrap().lookup_shape());
+        assert_eq!(fips.stacks[2].columns, 7);
+        for (a, b) in fips.stacks.iter().zip(&hu.stacks) {
+            assert_eq!(a.depth(), b.depth());
+        }
+        assert_eq!(fips.lookups(0), hu.lookups(0));
+        for group in manifest.groups() {
+            for (position, &column) in group.columns.iter().enumerate() {
+                assert_eq!(manifest.locate(column), (group.role, position));
+                let alphabet = column.alphabet();
+                assert!(group.family.min_value() <= alphabet.min());
+                assert!(alphabet.max() <= group.family.max_value());
+            }
+        }
+        // L = l_lo + 29,696 l_hi + 2^15 over exactly [0, gamma_2 - 1].
+        let form = DigitValue::L.layout();
+        assert_eq!((form.weights(), form.constant()), (vec![1, 29_696], 1 << 15));
+        assert_eq!(form.range(), (0, 95_231));
+        // 16 main-domain columns, u_h one element per signature at 2^15: 16,507.5.
+        let full = CommitmentManifest::for_relation(1 << 15, Relation::HFips).unwrap();
+        let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
+        assert!((per_signature - 16_507.5).abs() < 1e-9, "{per_signature}");
+        assert_eq!(full.catalog_row(), "mldsa-44-l16f-batch-32768-mult-final");
+        // Event 0: relation byte 2, G_main4 at 12 polynomials with the ternary codes.
+        let bytes = manifest.binding_bytes();
+        assert_eq!(bytes[3], RELATION_H_FIPS);
+        let main4 = &bytes[4 + 16 + 2 + 10..];
+        assert_eq!(
+            &main4[..18],
+            &[1, 1, 0, 18, 18, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x23, 0x23]
+        );
+        assert_ne!(
+            bytes,
+            CommitmentManifest::for_relation(256, Relation::HExact).unwrap().binding_bytes()
+        );
+    }
+
+    #[test]
     fn digit_layouts_give_the_l16_ranges() {
         // z = Z_lo + 2^16 Z_hi + 2^15 and likewise for v (docs/lookup.md Section 1).
         for layout in [Z16_DIGITS, V16_DIGITS] {
@@ -933,7 +1109,8 @@ mod tests {
         assert_eq!(manifest.relation(), Relation::Hu);
         assert_eq!(Relation::from_id(RELATION_HU), Some(Relation::Hu));
         assert_eq!(Relation::from_id(RELATION_H_EXACT), Some(Relation::HExact));
-        assert_eq!(Relation::from_id(2), None);
+        assert_eq!(Relation::from_id(RELATION_H_FIPS), Some(Relation::HFips));
+        assert_eq!(Relation::from_id(3), None);
         assert_eq!(
             CommitmentManifest::for_relation(200, Relation::Hu).unwrap(),
             manifest

@@ -387,6 +387,12 @@ pub(super) fn term_poly(term: &Term, a: &[E], d: &[E]) -> Poly {
                 None => affine,
             }
         }
+        Term::Monomials(monomials) => monomials.iter().fold(Poly::constant(E::zero()), |acc, (c, m)| {
+            let product = m
+                .iter()
+                .fold(Poly::constant(E::one()), |p, &l| p.mul(&lane(l)));
+            acc.add(&product.scale(E::from_i64(*c)))
+        }),
     }
 }
 
@@ -492,6 +498,33 @@ impl Plan {
                         weighted[i].constant += gamma.mul_i64(*c);
                         for &(l, coefficient) in lanes {
                             add_weighted_lane(&mut weighted[i], l, gamma.mul_i64(coefficient));
+                        }
+                    }
+                    Term::Monomials(monomials) => {
+                        // Expand into the cheap pieces: constants, single-lane powers (one
+                        // polynomial per lane), products of two lanes (bilinear or weighted),
+                        // and only the mixed products of three or more lanes on the generic
+                        // path.
+                        for (c, m) in monomials {
+                            let coefficient = gamma.mul_i64(*c);
+                            match m.as_slice() {
+                                [] => constant += coefficient,
+                                [first, rest @ ..] if rest.iter().all(|l| l == first) => {
+                                    let mut poly = vec![E::zero(); m.len() + 1];
+                                    poly[m.len()] = coefficient;
+                                    add_poly(&mut polys, *first, &poly);
+                                }
+                                [a, b] => {
+                                    if is_field[*a] != is_field[*b] {
+                                        let (w, l) = if is_field[*a] { (*a, *b) } else { (*b, *a) };
+                                        let i = weighted_of(&mut weighted, w);
+                                        add_weighted_lane(&mut weighted[i], l, coefficient);
+                                    } else {
+                                        bilinear.push(Bilinear { c: coefficient, a: *a, b: *b });
+                                    }
+                                }
+                                _ => generic.push((coefficient, Term::Product(m.clone()))),
+                            }
                         }
                     }
                     other => generic.push((gamma, other.clone())),

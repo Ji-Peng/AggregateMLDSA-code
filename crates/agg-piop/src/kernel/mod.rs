@@ -328,6 +328,10 @@ pub enum Term {
         /// The constant.
         constant: i64,
     },
+    /// `sum_k c_k prod_{l in m_k} v_l`: a polynomial with integer coefficients, each monomial
+    /// a list of lanes (with repetition; an empty list is a constant). Relation H-FIPS's
+    /// wrap constraints (`docs/h-exact.md` Section 10.7); evaluated on the generic path.
+    Monomials(Vec<(i64, Vec<usize>)>),
 }
 
 impl Term {
@@ -340,6 +344,7 @@ impl Term {
             Self::RangeW1(_) => 3,
             Self::Leaf(_, poly) => poly.degree(),
             Self::Affine { weight, .. } => 1 + usize::from(weight.is_some()),
+            Self::Monomials(monomials) => monomials.iter().map(|(_, m)| m.len()).max().unwrap_or(0),
         }
     }
 
@@ -370,6 +375,12 @@ impl Term {
                     None => affine,
                 }
             }
+            Self::Monomials(monomials) => monomials.iter().fold(E::zero(), |acc, (c, m)| {
+                acc + m
+                    .iter()
+                    .fold(E::one(), |p, &l| p * values[l])
+                    .mul_i64(*c)
+            }),
         }
     }
 
@@ -385,6 +396,12 @@ impl Term {
                 .copied()
                 .chain(lanes.iter().map(|&(l, _)| l))
                 .collect(),
+            Self::Monomials(monomials) => {
+                let mut lanes: Vec<usize> = monomials.iter().flat_map(|(_, m)| m.iter().copied()).collect();
+                lanes.sort_unstable();
+                lanes.dedup();
+                lanes
+            }
         }
     }
 }

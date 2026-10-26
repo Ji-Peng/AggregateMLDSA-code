@@ -94,6 +94,15 @@ fn h_exact_commit_and_batched_opening_at_256_and_1024() {
 }
 
 #[test]
+fn h_fips_commit_and_batched_opening_at_256_and_1024() {
+    // G_main4 at 12 polynomials and G_2 at 13 (docs/h-exact.md 10.7), the l16f grouped rows.
+    on_large_stack(|| {
+        commit_and_open(1 << 8, Relation::HFips);
+        commit_and_open(1000, Relation::HFips);
+    });
+}
+
+#[test]
 fn malformed_tables_are_rejected_before_akita() {
     let plan = WorkPlan::for_records(1 << 8, Relation::Hu).expect("work plan");
     let prover = PcsProver::new(plan.clone()).expect("prover setup");

@@ -330,7 +330,7 @@ pub struct ProverInputs<'a> {
     pub records: &'a [(&'a [u8], &'a [u8], [u8; C_TILDE_BYTES])],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
-    /// The relation to prove (`docs/h-exact.md` Section 1): H-u or H-exact.
+    /// The relation to prove (`docs/h-exact.md` Sections 1 and 10): H-u, H-exact or H-FIPS.
     pub relation: Relation,
 }
 

@@ -6,6 +6,7 @@ Run (isolated mode, standard library only):
     python3 -I docs/scripts/pow_plan.py              # summary tables (committed in the doc)
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
     python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md 3.7)
+    python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md 10.7)
 
 What it computes, with exact integer arithmetic:
 
@@ -43,8 +44,11 @@ CHALLENGES = 2  # LOOKUP_CHALLENGES
 # (degree 3) and leaf6[U_hi] (degree 4), so its rounds have degree 4 (relaxed H: 5, leaf8).
 # Relation H-exact (step B): stage 2 holds leaf6[U_hi] only (7 coefficients, g = 3), stage 3
 # one link and two Booleanity zero-checks (45 coefficients, g = 6); the degrees are the same.
+# Relation H-FIPS (docs/h-exact.md 10.7): stage 2 holds def_y1 and F3 (7 coefficients, g = 3),
+# stage 3 51 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
+# (the relation is bound by the manifest bytes of event 0, not by the plan encoding).
 STAGE_DEGREES = (4, 4, 3)
-RELATION_GAMMAS = {"h-u": (26, 8, 44), "h-exact": (26, 7, 45)}
+RELATION_GAMMAS = {"h-u": (26, 8, 44), "h-exact": (26, 7, 45), "h-fips": (26, 7, 51)}
 STAGE_GAMMAS = RELATION_GAMMAS["h-u"]
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
@@ -468,6 +472,15 @@ def self_check() -> None:
     digest = with_gammas(exact, lambda: plan_digest(
         g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
     assert digest.startswith("1f8e7aba"), digest
+    # Relation H-FIPS: 51 < 64 keeps g = 6 at stage 3 and 7 coefficients keep g = 3 at stage 2,
+    # so the plan equals H-exact's at every size.
+    fips = RELATION_GAMMAS["h-fips"]
+    assert grind_bits(51, K) == 6
+    for d_sig in (3, 10, 13, 15):
+        geo = geometry(d_sig)
+        a = with_gammas(fips, lambda: summarize(piop_sites(geo)))
+        b = with_gammas(exact, lambda: summarize(piop_sites(geo)))
+        assert (a["bits"], a["work"]) == (b["bits"], b["work"]), (d_sig, a, b)
 
 
 def main() -> None:

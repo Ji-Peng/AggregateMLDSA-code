@@ -111,9 +111,12 @@ table point.
 
 ## 4. Catalog status
 
-All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for both
-relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact; rows are keyed by
-`(d_sig, relation)`, `catalogs::catalog_batches`); none is pending. Two artifacts:
+All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three
+relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact,
+`CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are keyed by `(d_sig, relation)`,
+`catalogs::catalog_batches`); none is pending. Two artifacts (sizes before H-FIPS in this
+paragraph; with the H-FIPS rows, 2026-10-27: width 16 246,510 B with 28 rows, width 4
+996,253 B with 78 rows):
 
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks` (222,320 bytes):
   25 scalar producer rows, `G_main16` at 13..=25 variables, `G_1` at 13..=19, `G_2` at
@@ -173,6 +176,17 @@ hash differently. The estimated opening proof is at most 2.4% larger than the
 base-16 layout's (`d_sig` 9: +2.4%, 11: +2.1%, otherwise below 0.6%): the opening is
 dominated by the folding schedule, not by the number of committed polynomials, and the
 sixth group adds a little. The measured openings are in `ref/notes/bench-local.md`.
+
+H-FIPS rows (2026-10-27, `update_catalog_rows` with `AGG_CATALOG_RELATION=h-fips` and
+`AGG_CATALOG_D_SIG=3,...,15`, 3 scalar workers, `taskset -c 0,1,3-15`): 1,105.6 s (18
+minutes, measured) for 13 width-4 scalar rows (`G_main4` at `(13..25, 12)`: `bz_hi`, `l_hi`,
+six bits, `a_z`, `s`, `delta`, `e`), 3 width-16 scalar rows (`G_2` at `(13|14|15, 13)`: the
+hint slack `u_h` is its thirteenth polynomial, deviation L10) and 13 grouped rows
+`mldsa-44-l16f-batch-<N*>-mult-final`. The planner's opening estimates equal H-u's except at
+`2^15` (65,398 B against 65,282 B, estimate); setups grow (3,390,464 field elements at `2^15`).
+Every H-FIPS grouped row keeps at least `2^128.0881` of accepted fold support (`2^128.5633` at
+`d_sig` 13 and 15; `tests/akita_fold_support.rs`), and the grinding plans are pinned in
+`tests/akita_grinding.rs` (`PINNED_H_FIPS`, all distinct from the H-u and H-exact rows').
 
 ## 5. Commit driver and test
 

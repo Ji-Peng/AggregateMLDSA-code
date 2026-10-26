@@ -170,6 +170,20 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("the proof claims relation H-u, the verifier expects H-exact"), "{out}");
     assert_eq!(verify_as(&aggregate, Some("fips")).0, 2);
+    // Relation H-FIPS (docs/h-exact.md 10.7): --relation h-fips round trip, crossed with H-exact.
+    let fips = dir.join("fips.agg");
+    let (code, out) = agg(&["aggregate", "--records", s(&recs), "--out", s(&fips), "--relation", "h-fips"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("relation H-FIPS"), "{out}");
+    let (code, out) = verify_as(&fips, Some("h-fips"));
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("relation H-FIPS: accept"), "{out}");
+    let (code, out) = verify_as(&fips, Some("h-exact"));
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("the proof claims relation H-FIPS, the verifier expects H-exact"), "{out}");
+    let (code, out) = verify_as(&exact, Some("h-fips"));
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("the proof claims relation H-exact, the verifier expects H-FIPS"), "{out}");
 
     // Usage errors.
     assert_eq!(agg(&["prove"]).0, 2);

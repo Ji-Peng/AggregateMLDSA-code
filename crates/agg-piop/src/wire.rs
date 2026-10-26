@@ -512,18 +512,20 @@ mod tests {
             // The nonce stream has the plan's exact length (docs/soundness.md Section 6.2).
             assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
             assert!(size.work >= 227);
-            // Relation byte: 0 (H-u) and 1 (H-exact); 2 and above are unknown. The parser
-            // reads the relation from the header (H-u and H-exact proofs have equally many
-            // stage claims, 8 + 31 = 7 + 32, so a rewritten flag may still parse; the
+            // Relation byte: 0 (H-u), 1 (H-exact), 2 (H-FIPS); 3 and above are unknown. The
+            // parser reads the relation from the header (H-u and H-exact proofs have equally
+            // many stage claims, 8 + 31 = 7 + 32, so a rewritten flag may still parse; the
             // verifier compares it with the relation it expects).
             assert_eq!(bytes[2], 0);
-            let mut rewritten = bytes.clone();
-            rewritten[2] = 1;
-            if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
-                assert_eq!(parsed.relation, Relation::HExact);
-                assert_ne!(parsed, proof);
+            for (flag, relation) in [(1_u8, Relation::HExact), (2, Relation::HFips)] {
+                let mut rewritten = bytes.clone();
+                rewritten[2] = flag;
+                if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
+                    assert_eq!(parsed.relation, relation);
+                    assert_ne!(parsed, proof);
+                }
             }
-            for flag in [2_u8, 3, 0xFF] {
+            for flag in [3_u8, 0xFF] {
                 let mut flags = bytes.clone();
                 flags[2] = flag;
                 assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(flag)));
@@ -569,6 +571,29 @@ mod tests {
         }
         // At 2^15 the stage messages and claims take 5,616 bytes (25 rounds).
         assert_eq!(16 * (13 + 18 + 6 + 7 + 32 + 11 * 25), 5_616);
+    }
+
+    #[test]
+    fn h_fips_proofs_round_trip_with_their_claim_counts() {
+        let mut rng = SplitMix64::new(79);
+        for records in [1, 100, 1000] {
+            let proof = sample_proof_of(Relation::HFips, records, &mut rng);
+            let bytes = proof.to_bytes();
+            assert_eq!(bytes[2], 2);
+            let parsed = AggregateProof::from_bytes(&bytes).unwrap();
+            assert_eq!(parsed, proof);
+            assert_eq!(parsed.relation, Relation::HFips);
+            assert!(parsed.stage2.claims.squares.is_empty());
+            assert_eq!(parsed.stage2.claims.fips.len(), 2);
+            assert_eq!(parsed.stage3.claims.0.len(), 36);
+            // docs/h-exact.md 10.7: 13 + 18 + 6 + 8 + 36 claims and 11 elements per round.
+            let rounds = proof.stage1.rounds.len();
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 36 + 11 * rounds));
+            assert_eq!(proof.size().total(), bytes.len());
+            assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
+        }
+        // At 2^15 the stage messages and claims take 5,696 bytes (25 rounds).
+        assert_eq!(16 * (13 + 18 + 6 + 8 + 36 + 11 * 25), 5_696);
     }
 
     #[test]

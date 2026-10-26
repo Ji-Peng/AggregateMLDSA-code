@@ -114,3 +114,86 @@ print("+-130,994 unreachable:", (Bz+1) not in reach and -(Bz+1) not in reach)
 sols=[c for c in range(2,200) if (2*Bz+1-2**16)%(c-1)==0 and (2*Bz+1-2**16)//(c-1)<=2**16]
 print("single-digit bases c<200 for z:",sols)
 print("zeta' H-exact",max(Bz,Bu+2**(d-1)*tau))
+# (14) relation H-FIPS (relation byte 2, docs/h-exact.md Section 10): per coefficient
+# L = L_lo + 29,696 L_hi in [0, gamma2 - 1] (L_lo in [0, 2^16), L_hi a bit), sign sigma,
+# s = (1 + sigma)/2, r0 = gamma2 s + L + 1 - gamma2 (a bijection (s, L) -> (-gamma2, gamma2]
+# with s = [r0 > 0]; the memo's sigma L + (1 + sigma)/2 relabels L), u = r0 - 2 gamma2 delta - e,
+# with the six zero-checks
+# sigma^2 = 1, delta (delta - sigma) = 0, e (e - 1)(e - delta) = 0, e (e + 1) w1' = 0,
+# e (e - 1)(w1' - 43) = 0, L_hi (L_hi - 1) = 0; per signature sum delta^2 + u_h = omega.
+# Soundness: every witness gives w' = 2 gamma2 w1' + u mod q with |u| <= B_u and
+# UseHint(h*, w') = w1' for h* = [HighBits(w') != w1'] <= delta^2 (FIPS 204 Algorithms 36, 37,
+# 40). Weight-aware completeness: for every honest (w', h) in Z_q x {0, 1}, w1' = UseHint(h, w'),
+# u = ctr_q(w' - 2 gamma2 w1'), the least delta^2 over the witnesses of (w1', u) equals h. The
+# ideator's e (e - delta) = 0 in place of e (e - 1)(e - delta) = 0 fails exactly at (q - gamma2, 0).
+LS=29696
+reach=set(range(0,2**16))|set(range(LS,LS+2**16))
+print("H-FIPS L blocks cover exactly [0,gamma2-1]:", reach==set(range(g2)), "29,696+2^16=gamma2:", LS+2**16==g2)
+def decomp(rr):
+    rp=rr%q; r0=rp%(2*g2); r0=np.where(r0>g2,r0-2*g2,r0)
+    wrap=(rp-r0)==q-1
+    return np.where(wrap,0,(rp-r0)//(2*g2)), np.where(wrap,r0-1,r0)
+def usehint(h,rr):
+    r1,r0=decomp(rr)
+    return np.where(h==0, r1, np.where(r0>0,(r1+1)%m,(r1-1)%m))
+def e_ok(e,dl,rule):
+    return e*(e-1)*(e-dl)==0 if rule=="fix" else e*(e-dl)==0
+def combos(rule):
+    out=[]
+    for w1 in range(m):
+        for sg in (-1,1):
+            for dl in (-1,0,1):
+                if dl*(dl-sg)!=0: continue
+                for e in (-1,0,1):
+                    if e_ok(e,dl,rule) and e*(e+1)*w1==0 and e*(e-1)*(w1-43)==0:
+                        out.append((w1,sg,dl,e))
+    return out
+Lv=np.arange(g2,dtype=np.int64)
+for rule in ("fix","ideator"):
+    cs=combos(rule); viol=0; ubad=0
+    for (w1,sg,dl,e) in cs:
+        u=g2*((1+sg)//2)+Lv+1-g2-2*g2*dl-e
+        ubad+=int((np.abs(u)>2*g2+1).sum())
+        wq=(2*g2*w1+u)%q
+        r1,_=decomp(wq)
+        hs=(r1!=w1).astype(np.int64)
+        viol+=int(((usehint(hs,wq)!=w1)|(hs>dl*dl)).sum())
+    print("H-FIPS",rule,"witnesses",len(cs)*g2,"(combos",len(cs),") soundness violations",viol,"|u|>B_u",ubad)
+wv=np.arange(q,dtype=np.int64)
+for rule in ("fix","ideator"):
+    fails=[]
+    for h in (0,1):
+        hv=np.full(q,h,dtype=np.int64)
+        w1=usehint(hv,wv); u=ctr(wv-2*g2*w1)
+        best=np.full(q,9,dtype=np.int64)
+        for sg in (-1,1):
+            for dl in (-1,0,1):
+                if dl*(dl-sg)!=0: continue
+                for e in (-1,0,1):
+                    if not e_ok(e,dl,rule): continue
+                    Lw=u+2*g2*dl+e-1+g2-g2*((1+sg)//2)
+                    ok=(Lw>=0)&(Lw<g2)&(e*(e+1)*w1==0)&(e*(e-1)*(w1-43)==0)
+                    best=np.where(ok,np.minimum(best,dl*dl),best)
+        bad=np.nonzero(best!=h)[0]
+        fails+=[(int(x),h,int(best[x])) for x in bad]
+    print("H-FIPS",rule,"weight-aware completeness failures over 2q pairs:",len(fails),fails[:4],"(w', h, min delta^2)")
+# The honest rule of agg-witness hfips::honest_coeff: wrap (w' mod q >= q - gamma2): sigma = -1,
+# L = w' - (q - gamma2), (delta, e) = (0, 1) for h = 0, (-1, 0) for h = 1; else Decompose's
+# (r1, r0), sigma = sign, L = (r0 - 1) mod gamma2, delta = h sigma, e = h sigma at the w1' wrap
+# (r1 = 43, sigma = 1 or r1 = 0, sigma = -1), else 0. It meets every constraint with delta^2 = h.
+ok=True
+for h in (0,1):
+    hv=np.full(q,h,dtype=np.int64); w1=usehint(hv,wv); u=ctr(wv-2*g2*w1)
+    r1,r0=decomp(wv); wrap=wv>=q-g2
+    sg=np.where(wrap,-1,np.where(r0>0,1,-1))
+    Lw=np.where(wrap,wv-(q-g2),(r0-1)%g2)
+    dl=np.where(wrap,-h,h*sg)
+    e=np.where(wrap,1-h,np.where((h==1)&(sg==1)&(r1==43),1,np.where((h==1)&(sg==-1)&(r1==0),-1,0)))
+    uu=g2*((1+sg)//2)+Lw+1-g2-2*g2*dl-e
+    ok&=bool(((uu==u)&(Lw>=0)&(Lw<g2)&(dl*dl==h)&(dl*(dl-sg)==0)&(e*(e-1)*(e-dl)==0)&(e*(e+1)*w1==0)&(e*(e-1)*(w1-43)==0)).all())
+print("H-FIPS honest rule meets every constraint with delta^2 = h on all 2q pairs:", ok)
+print("H-FIPS corner (q - gamma2, h = 0): sigma, L, delta, e =", -1, (q-g2)-(q-g2), 0, 1, "(r0' = 1 - gamma2, u = -gamma2:", g2*0+0+1-g2-1==-g2, ")")
+# F4 and F5 merge into F45 = 2 e w1' + 43 e^2 - 43 e once e in {-1, 0, 1} (the PIOP's form).
+ok=all(((e*(e+1)*w==0) and (e*(e-1)*(w-43)==0))==(2*e*w+43*e*e-43*e==0) for e in (-1,0,1) for w in range(64))
+print("H-FIPS F45 equivalent to F4 and F5 for e in {-1,0,1}, w1' in [0,64):", ok)
+print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+122.5+1, "(H-u 12,288+122.5 = 12,410.5; 16 main columns, bridge and multiplicities 122.5, u_h 1)")

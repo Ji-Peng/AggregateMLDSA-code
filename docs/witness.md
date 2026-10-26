@@ -141,7 +141,9 @@ tampered virtual table. A failure is reported with its identity and stage.
 
 ## 8. Serialization of `BatchTables`
 
-Little-endian: magic `AGGWTBL\0`, version u16 = 1, layout id u8 (0 H, 1 H-exact, 2 S1+S2),
+Little-endian: magic `AGGWTBL\0`, version u16 = 1, layout id u8 (0 H, 1 H-exact, 3 S1+S2;
+id 2 is relation H-FIPS, which has no base-16 layout: `agg_witness::hfips`, `docs/h-exact.md`
+Section 10.5),
 d_sig u8, N u64, column count u32, then per column: domain u8 (0 main, 1 signature),
 log2 length u8, cells as i8. `from_bytes` checks every header field against the layout.
 

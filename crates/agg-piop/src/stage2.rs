@@ -7,7 +7,12 @@
 //! `leaf4[Z_hi]` (6) and `leaf6[U_hi]` (7), H-exact `leaf6[U_hi]` (6) only (`docs/h-exact.md`
 //! 3.3). The leaf of the six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree
 //! `1 + 3 = 4` in both relations; relaxed H's `leaf8` had degree 5.
-
+//!
+//! Relation H-FIPS (`docs/h-exact.md` Section 10.7) has no leaf digit and adds one instance
+//! after `def_y1` (gamma 6): the degree-3 zero-check `F3 = e (e - 1)(e - delta)` at `r^(1)`
+//! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
+//! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
+//! stage 3.
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
@@ -31,10 +36,35 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 2;
 /// Message degree (`leaf6[U_hi]`: the `eq` factor times `Q_6(P_Z)`).
 pub const DEGREE: usize = 4;
-/// Batching coefficients: 8 under H-u, 7 under H-exact.
+/// H-FIPS instances of stage 2 (`F3`).
+pub const FIPS_INSTANCES: usize = 1;
+
+/// Batching coefficients: 8 under H-u, 7 under H-exact and H-FIPS.
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
+    W1_BITS + manifest.leaf_digits().len() + if manifest.is_fips() { FIPS_INSTANCES } else { 0 }
+}
+
+/// Gamma index of H-FIPS's `F3`.
+#[must_use]
+pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
     W1_BITS + manifest.leaf_digits().len()
+}
+
+/// The H-FIPS terminal lanes of stage 2 beyond the bits, in wire order: `delta`, `e` at
+/// `r^(2)`.
+pub const FIPS_TERMINALS: [Column; 2] = [Column::DELTA, Column::WRAP];
+
+/// `F3 = e (e - 1)(e - delta) = e^3 - e^2 - e^2 delta + e delta` in the lanes `[delta, e]`.
+#[must_use]
+pub fn fips_edge_term() -> Term {
+    let (delta, e) = (0, 1);
+    Term::Monomials(vec![
+        (1, vec![e, e, e]),
+        (-1, vec![e, e]),
+        (-1, vec![e, e, delta]),
+        (1, vec![e, delta]),
+    ])
 }
 
 /// Gamma index of `def_y1[t]`.
@@ -97,16 +127,27 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .collect(),
     });
     // The leaves on the main domain.
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::R1,
-        lanes: all.iter().map(|d| LaneId::DigitSquare(d.column)).collect(),
-        instances: all
-            .iter()
-            .enumerate()
-            .map(|(k, digit)| InstanceSpec::new(gamma_leaf(k), vec![Term::Leaf(k, leaf_poly(digit))]))
-            .collect(),
-    });
+    if !all.is_empty() {
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::R1,
+            lanes: all.iter().map(|d| LaneId::DigitSquare(d.column)).collect(),
+            instances: all
+                .iter()
+                .enumerate()
+                .map(|(k, digit)| InstanceSpec::new(gamma_leaf(k), vec![Term::Leaf(k, leaf_poly(digit))]))
+                .collect(),
+        });
+    }
+    if manifest.is_fips() {
+        // F3 on the main domain at r^(1).
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::R1,
+            lanes: FIPS_TERMINALS.iter().map(|&c| LaneId::Column(c)).collect(),
+            instances: vec![InstanceSpec::new(gamma_fips(manifest), vec![fips_edge_term()])],
+        });
+    }
     StageSpec {
         stage: STAGE,
         degree: DEGREE,
@@ -115,7 +156,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the leaves.
+/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the leaves and H-FIPS's
+/// `F3`.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];
@@ -173,6 +215,11 @@ fn prove_with(
             .iter()
             .map(|digit| value(LaneId::DigitSquare(digit.column)))
             .collect(),
+        fips: if manifest.is_fips() {
+            FIPS_TERMINALS.iter().map(|&c| value(LaneId::Column(c))).collect()
+        } else {
+            Vec::new()
+        },
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -203,7 +250,8 @@ pub fn verify(
     let claims = claimed_sums(manifest, &stage1.claims, &proof.kappa1);
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     let all = digits(manifest);
-    if proof.claims.squares.len() != all.len() {
+    let fips = if manifest.is_fips() { FIPS_TERMINALS.len() } else { 0 };
+    if proof.claims.squares.len() != all.len() || proof.claims.fips.len() != fips {
         return Err(StageError::Shape("stage 2 claims".into()));
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
@@ -211,6 +259,9 @@ pub fn verify(
     let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
     check_terminal(&spec, manifest, points, &replay, |id| match id {
         LaneId::Column(Column::W1Bit(t)) => proof.claims.b[usize::from(t)],
+        LaneId::Column(c) if FIPS_TERMINALS.contains(&c) && manifest.is_fips() => {
+            proof.claims.fips[FIPS_TERMINALS.iter().position(|&f| f == c).expect("listed")]
+        }
         LaneId::DigitSquare(c) => {
             let k = all.iter().position(|d| d.column == c).expect("a digit");
             proof.claims.squares[k]
@@ -230,6 +281,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jolt_field::Ring;
 
     #[test]
     fn h_exact_stage_two_has_seven_instances_and_one_leaf6() {
@@ -245,6 +297,30 @@ mod tests {
         assert_eq!(leaves.instances[0].gamma, 6);
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
         assert_eq!(spec.degree, DEGREE);
+    }
+
+    #[test]
+    fn h_fips_stage_two_has_def_y1_and_f3() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
+        let spec = spec(&manifest);
+        spec.validate().unwrap();
+        assert_eq!(gamma_count(&manifest), 7);
+        // def_y1 (no leaf group: H-FIPS has no leaf digit) and F3 at r^(1).
+        assert_eq!(spec.groups.len(), 2);
+        let f3 = &spec.groups[1];
+        assert_eq!(f3.eq, EqPoint::R1);
+        assert_eq!(f3.lanes, vec![LaneId::Column(Column::DELTA), LaneId::Column(Column::WRAP)]);
+        assert_eq!(f3.instances[0].gamma, 6);
+        assert_eq!(f3.instances[0].terms, vec![fips_edge_term()]);
+        assert_eq!(fips_edge_term().degree() + 1, DEGREE);
+        // F3 vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
+        for delta in -1_i64..=1 {
+            for e in -3_i64..=3 {
+                let values = [E::from_i64(delta), E::from_i64(e)];
+                let zero = fips_edge_term().evaluate(&values) == E::zero();
+                assert_eq!(zero, e == 0 || e == 1 || e == delta, "delta {delta} e {e}");
+            }
+        }
     }
 
     #[test]

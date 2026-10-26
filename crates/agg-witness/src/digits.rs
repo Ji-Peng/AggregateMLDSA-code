@@ -450,9 +450,9 @@ impl BitSlackLayout {
     }
 }
 
-/// A value committed through digits: a mixed-radix layout (4.1), a step form or a bit-slack
-/// form. The PIOP (`agg_piop::manifest::DigitValue::layout`) uses it to treat all alike: the
-/// value is always `sum W_k Z_k + C_X` over the committed digits.
+/// A value committed through digits: a mixed-radix layout (4.1), a step form, a bit-slack
+/// form or a slack form. The PIOP (`agg_piop::manifest::DigitValue::layout`) uses it to treat
+/// all alike: the value is always `sum W_k Z_k + C_X` over the committed digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueForm {
     /// Mixed-radix digits (4.1).
@@ -461,6 +461,9 @@ pub enum ValueForm {
     Step(StepLayout),
     /// Low digits plus two Boolean digits.
     BitSlack(BitSlackLayout),
+    /// Low digits plus one Boolean slack (committed in that order: the low digits, then `a`;
+    /// relation H-FIPS's `L = L_lo + 29,696 L_hi`, [`L_SLACK`]).
+    Slack(SlackLayout),
 }
 
 impl ValueForm {
@@ -470,6 +473,7 @@ impl ValueForm {
             Self::Radix(l) => l.len(),
             Self::Step(l) => l.len(),
             Self::BitSlack(l) => l.len(),
+            Self::Slack(l) => l.digits.len() + 1,
         }
     }
 
@@ -487,6 +491,8 @@ impl ValueForm {
             Self::Step(l) => Some(l.top_base),
             Self::BitSlack(l) if k < l.low.len() => Some(l.low.bases[k]),
             Self::BitSlack(_) => None,
+            Self::Slack(l) if k < l.digits.len() => Some(l.digits.bases[k]),
+            Self::Slack(_) => None,
         }
     }
 
@@ -501,6 +507,11 @@ impl ValueForm {
             Self::Radix(l) => l.weights(),
             Self::Step(l) => l.weights(),
             Self::BitSlack(l) => l.weights(),
+            Self::Slack(l) => {
+                let mut w = l.digits.weights();
+                w.push(l.slack_weight);
+                w
+            }
         }
     }
 
@@ -510,6 +521,7 @@ impl ValueForm {
             Self::Radix(l) => l.constant(),
             Self::Step(l) => l.constant(),
             Self::BitSlack(l) => l.constant(),
+            Self::Slack(l) => l.digits.constant() - l.offset,
         }
     }
 
@@ -519,6 +531,7 @@ impl ValueForm {
             Self::Radix(l) => l.range(),
             Self::Step(l) => l.range(),
             Self::BitSlack(l) => l.range(),
+            Self::Slack(l) => l.range(),
         }
     }
 
@@ -528,6 +541,11 @@ impl ValueForm {
             Self::Radix(l) => l.decompose(x),
             Self::Step(l) => l.decompose(x),
             Self::BitSlack(l) => l.decompose(x),
+            Self::Slack(l) => {
+                let (a, mut digits) = l.decompose(x);
+                digits.push(a);
+                digits
+            }
         }
     }
 
@@ -537,6 +555,11 @@ impl ValueForm {
             Self::Radix(l) => l.compose(digits),
             Self::Step(l) => l.compose(digits),
             Self::BitSlack(l) => l.compose(digits),
+            Self::Slack(l) => {
+                assert_eq!(digits.len(), l.digits.len() + 1);
+                let m = l.digits.len();
+                l.compose(digits[m], &digits[..m])
+            }
         }
     }
 
@@ -546,6 +569,12 @@ impl ValueForm {
             Self::Radix(l) => l.in_alphabets(digits),
             Self::Step(l) => l.in_alphabets(digits),
             Self::BitSlack(l) => l.in_alphabets(digits),
+            Self::Slack(l) => {
+                let m = l.digits.len();
+                digits.len() == m + 1
+                    && l.digits.in_alphabets(&digits[..m])
+                    && Alphabet::Bool.contains(digits[m])
+            }
         }
     }
 }
@@ -567,6 +596,26 @@ impl From<BitSlackLayout> for ValueForm {
         Self::BitSlack(l)
     }
 }
+
+impl From<SlackLayout> for ValueForm {
+    fn from(l: SlackLayout) -> Self {
+        Self::Slack(l)
+    }
+}
+
+/// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` in `[0, gamma2 - 1]` with `L_lo` in
+/// `[0, 2^16)` (one unsigned base-`2^16` digit, stored `L_lo - 2^15`, looked up in `T_16`) and
+/// the bit `L_hi`: `29,696 + 2^16 = gamma2` (`docs/h-exact.md` Section 10). As a
+/// [`ValueForm`]: `L = S_lo + 29,696 L_hi + 2^15`.
+pub const L_SLACK: SlackLayout = SlackLayout {
+    slack_weight: crate::hfips::L_STEP,
+    digits: DigitLayout {
+        name: "l",
+        bases: &[1 << 16],
+        signed: false,
+    },
+    offset: 0,
+};
 
 /// z in relation H-exact with a 16-bit low part: z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z
 /// with B_zlo in [0, 2^16) (one unsigned base-2^16 digit, stored B_zlo - 2^15), B_zhi, a_z in
@@ -897,6 +946,32 @@ mod tests {
             }
         }
         assert!(hit.iter().all(|&h| h));
+    }
+
+    #[test]
+    fn l_slack_form_covers_exactly_zero_to_gamma2_minus_one() {
+        let form = ValueForm::from(L_SLACK);
+        assert_eq!(form.len(), 2);
+        assert_eq!(form.weights(), vec![1, crate::hfips::L_STEP]);
+        assert_eq!(form.constant(), 1 << 15);
+        assert_eq!(form.range(), (0, GAMMA2 - 1));
+        assert_eq!(
+            (form.alphabet(0), form.alphabet(1)),
+            (Alphabet::Balanced(1 << 16), Alphabet::Bool)
+        );
+        for l in 0..GAMMA2 {
+            let d = form.decompose(l);
+            assert!(form.in_alphabets(&d), "L = {l}");
+            assert_eq!(form.compose(&d), l);
+            let (lo, hi) = crate::hfips::Coeff::split_l(l);
+            assert_eq!((d[0] + (1 << 15), d[1]), (lo, hi));
+        }
+        for l in [-1, GAMMA2, GAMMA2 + 7] {
+            let d = form.decompose(l);
+            assert!(!form.in_alphabets(&d), "L = {l}");
+            assert_eq!(form.compose(&d), l);
+        }
+        assert_eq!(form.decompose(0), vec![-(1 << 15), 0]);
     }
 
     #[test]

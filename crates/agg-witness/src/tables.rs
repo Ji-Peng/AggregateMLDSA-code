@@ -47,14 +47,16 @@ impl Layout {
         v
     }
 
-    /// Wire id (event 0 feature flag).
+    /// Layout id, equal to the protocol's relation byte for H-u (0) and H-exact (1). Relation
+    /// byte 2 names H-FIPS (`crate::hfips`, which has no base-16 layout here), so the retired
+    /// S1+S2 sketch serializes as 3 (witness crate only, never a relation byte).
     pub fn id(self) -> u8 {
         match self {
             Layout::H => 0,
             #[cfg(feature = "h-exact")]
             Layout::HExact => 1,
             #[cfg(feature = "fips")]
-            Layout::Fips => 2,
+            Layout::Fips => 3,
         }
     }
 
