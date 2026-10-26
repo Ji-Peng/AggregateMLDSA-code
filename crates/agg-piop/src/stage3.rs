@@ -848,6 +848,77 @@ mod tests {
         }
     }
 
+    /// The H-FIPS checks of stage 3 evaluate to their polynomials (`docs/h-exact.md` 10.7) at
+    /// random field values, so each zero-check is tested on its own: the tamper tests of
+    /// `tests/h_fips.rs` for `F1` (`s = 2`) and `F2` (`delta = -sigma`) also move the ring
+    /// identity, and an in-range `L` cannot isolate `F2`. Also pins the ring's H-FIPS slice to
+    /// `-u = -(gamma_2 s + L + 1 - gamma_2) + 2 gamma_2 delta + e` with
+    /// `L = l_lo + 2^15 + 29,696 l_hi` (`l_lo` stored shifted by `2^15`).
+    #[test]
+    fn h_fips_checks_evaluate_to_their_polynomials() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
+        let mut rng = SplitMix64::new(6);
+        let weights: Vec<Vec<E>> = (0..STACKS)
+            .map(|j| point(&mut rng, manifest.stack_columns(j).len()))
+            .collect();
+        let spec = spec(&manifest, &weights);
+        let gammas = Gammas::new(&manifest);
+        let main = spec
+            .groups
+            .iter()
+            .find(|g| g.eq == EqPoint::R2 && g.lanes.contains(&LaneId::Column(Column::SIGN)))
+            .expect("the main eq(r^(2)) group");
+        let part = |values: &[E], gamma: usize| -> E {
+            main.instances
+                .iter()
+                .filter(|i| i.gamma == gamma)
+                .fold(E::zero(), |acc, i| {
+                    acc + i.scale * i.terms.iter().fold(E::zero(), |a, t| a + t.evaluate(values))
+                })
+        };
+        let (one, two, c43) = (E::one(), E::from_u64(2), E::from_u64(43));
+        let fips_lanes = [Column::L_LO, Column::L_HI, Column::SIGN, Column::DELTA, Column::WRAP];
+        for _ in 0..64 {
+            let values = point(&mut rng, main.lanes.len());
+            let v = |c| values[main.lane(LaneId::Column(c))];
+            let (s, delta, e) = (v(Column::SIGN), v(Column::DELTA), v(Column::WRAP));
+            assert_eq!(part(&values, gammas.fips_check(0)), s * (s - one), "F1");
+            assert_eq!(part(&values, gammas.fips_check(1)), delta * (delta - two * s + one), "F2");
+            let w1 = (0..W1_BITS).fold(E::zero(), |acc, t| {
+                acc + v(Column::W1Bit(t as u8)) * E::from_u64(1 << t)
+            });
+            assert_eq!(part(&values, gammas.fips_check(2)), two * e * w1 + c43 * e * e - c43 * e, "F45");
+            // The ring's affine part moves with the five H-FIPS lanes exactly as -u does.
+            let mut cleared = values.clone();
+            for &c in &fips_lanes {
+                cleared[main.lane(LaneId::Column(c))] = E::zero();
+            }
+            let gamma2 = E::from_i64(GAMMA2);
+            let minus_u_slice = two * gamma2 * delta + e
+                - (gamma2 * s + v(Column::L_LO) + E::from_u64(29_696) * v(Column::L_HI));
+            assert_eq!(
+                part(&values, GAMMA_RING) - part(&cleared, GAMMA_RING),
+                minus_u_slice,
+                "ring"
+            );
+        }
+        // The constants behind the slice: L's step and the lookup shift of l_lo.
+        assert_eq!((L16_SLACK.slack_weight, LOOKUP_SHIFT), (29_696, 1 << 15));
+        // On integers, F1 and F2 vanish exactly on s in {0, 1} and delta in {0, 2 s - 1}.
+        for s in -2_i64..=3 {
+            for delta in -3_i64..=3 {
+                let mut values = vec![E::zero(); main.lanes.len()];
+                values[main.lane(LaneId::Column(Column::SIGN))] = E::from_i64(s);
+                values[main.lane(LaneId::Column(Column::DELTA))] = E::from_i64(delta);
+                let f1 = part(&values, gammas.fips_check(0)) == E::zero();
+                let f2 = part(&values, gammas.fips_check(1)) == E::zero();
+                assert_eq!(f1, s == 0 || s == 1, "s {s}");
+                let expected = (s == 0 || s == 1) && (delta == 0 || delta == 2 * s - 1);
+                assert_eq!(f1 && f2, expected, "s {s} delta {delta}");
+            }
+        }
+    }
+
     fn check_spec(manifest: &CommitmentManifest, count: usize) -> StageSpec {
         let mut rng = SplitMix64::new(3);
         let weights: Vec<Vec<E>> = (0..STACKS)
