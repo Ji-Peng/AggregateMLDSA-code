@@ -245,3 +245,134 @@ target with F4.
 Ranking for the 12 s target: F1 >> F2 > P1 (if a wire bump is acceptable) > P2 > F3 ~ P2b ~
 P3 > F4 > P4 > rest. Prover-only levers alone (F1-F3, P2-P5): about 8-11 s off 23.7 s (est.),
 i.e. roughly 13-16 s; reaching 12 s likely needs P1 or the F4 thread gain as well.
+
+## 7. Verifier kernels (branch `verifier-kernels`, memo 3.4 (a)-(c))
+
+Scope: the cached verifier's public-data steps, which were 272 ms of the 424.0 ms cached
+verify at 32K (public_data 106.3 + public_t 91.9 + public_a 73.8 ms; measured,
+`ref/notes/bench-cloud.md` "Verifier at 32K", code `8da7538`). All changes are verifier-only
+and exact: the transcript, the aggregate bytes and every accept/reject decision are
+unchanged (checks below). Local numbers: i7-11700K under WSL2, CPUs 0,1,3-15, shared with
+other agents' builds and provers (load average 4-14 during the runs), default portable build
+(no CLMUL, so the Flock step is 3.5-6.6 s here and dominates the local totals);
+**direction only**, not benchmarks.
+
+### 7.1 Changes
+
+| Step | Before (`6803ce5`) | After | Exactness argument |
+| --- | --- | --- | --- |
+| `sparse_t` (`public_data.rs`) | per entry `if p + m < N` branch in the inner loop | per nonzero `c_p`, two contiguous slice updates split at `N - p` (`straight += t1[..N-p]`, `wrapped -= t1[N-p..]`, signs swapped for `c_p = -1`); `sparse_ct` without the `2^d` factor | the same integer additions in another order; `|c t1| <= tau (2^10 - 1) < 2^16` |
+| `T(r2)` inner product (`public_stream.rs`, 1,024 terms per record) | `E::mul_i64` per term, i.e. a full `Ext2` product (`jolt_field::Ring::mul_i64` is `self * from_i64(n)`) | `SplitWeights::dot::<16>` on `c t1`, times `2^d` once per pass | integer times `Ext2` element is coordinatewise; each coordinate sum is exact over the integers and reduced once |
+| `key_weight` (cached `A`, 16 x 256 terms per key) | `E::mul_i64` per term, `eq_row[rho] eq_col[s]` per key | `SplitWeights::dot::<22>`, the 16 products `eq_row[rho] eq_col[s]` once per pass | as above; `|A| <= (q-1)/2 < 2^22` |
+| `StreamedPublic::prepare` dedup | serial `HashMap<&[u8], usize>` (SipHash) over all `pk` | keyed SipHash (`RandomState`) per record in parallel, parallel sort of the indices by (hash, full `pk` bytes, index), one scan for runs, runs sorted by first record | equality on the **full** `pk` bytes (never the 32-byte `rho` prefix, which the signer chooses); same keys, same order (first appearance), same record lists; test against the old map |
+| cached keys in `prepare` | per key `pkDecode`, a copy of `pk` (1,312 B) and `t1` (2 KiB) | a cached key holds only its cache entry (`t1`, `tr` of the entry were decoded from the same full `pk`; the cache file recomputes `t1` on load); uncached keys as before | same `t1`/`tr` values; the `pkDecode` length error is kept for cached keys |
+| record stream `X` (`binding.rs`) | serial `Vec` growth | offsets by prefix sum, every record copied into its own disjoint slice in parallel | byte-equal to the serial stream (test) |
+
+`SplitWeights::dot::<BITS>`: every weight is stored as the four 32-bit halves of its two
+canonical `F_p` coordinates; with biased values `b_j = v_j + 2^BITS in [0, 2^(BITS+1))`
+each product `half * b_j` is below `2^(BITS+33)`, so up to `2^(31-BITS)` terms fit four
+`u64` lanes (`u32 x u32 -> u64`, which baseline SSE2 vectorizes with `pmuludq`); the
+coordinate is `lo + 2^32 hi - 2^BITS sum_j w_j` in `i128` (`< 2^97`). If any value is out
+of range (for example a corrupted cache entry) or there are too many terms, `dot` falls
+back to `dot_wide`: per-coordinate `i128` accumulation, exact for any `i32` values (terms
+`< 2^95`, at most `2^31` of them `< 2^126`; for `A` the bound is `256 x 2^64 x 2^22 = 2^94 <
+2^95`). Portable code only; no `target_feature` gate. An AVX2 path was not added: calling a
+`#[target_feature]` function needs `unsafe`, which `agg-piop` forbids (`unsafe_code =
+"forbid"`).
+
+### 7.2 Exactness checks (measured)
+
+- Unit tests against the old code kept as references (`public_stream.rs` tests):
+  `sparse_t` on 200 random and 12 extreme challenges (`tau` entries of one sign at the start,
+  the end, spread; `t1 = 1023`); `dot`, `dot_lanes`, `dot_wide` against the `Ext2` sum on
+  random weights and all-`(p-1)` weights, random/boundary/`i32::MIN`/`i32::MAX` values, and
+  the fast-path selection at each boundary; `key_weight` on random and `+-(q-1)/2` matrices;
+  dedup against the serial map on 500 records over 13 keys (3 sharing key 0's `rho`, one
+  differing in the last byte, one of a wrong length).
+- Two genuine keys sharing `rho` (`agg_witness::gen::keypair_with_rho` builds the second key
+  under the first one's matrix seed and signs through `ml-dsa`'s skDecode): two distinct keys
+  in `prepare`, each record's `T` from its own `t1`, cached or not
+  (`keys_sharing_rho_stay_distinct`); end to end (`agg-cli/tests/mode_a.rs`
+  `keys_sharing_rho_verify_only_against_their_own_t1`): the aggregate verifies uncached, with
+  only the first key cached and fully cached; naming the other key for a record is rejected,
+  cached or not.
+- `agg aggregate` with the old (`6803ce5`) and new (`dc395fc`) binaries on the same records:
+  byte-identical aggregates at 256 (64 shared keys) and 1,024 (own keys) records under both
+  relations (H-u 430,061 / 522,164 B; H-exact 430,089 / 522,171 B); the new verifier accepts
+  the old aggregates uncached and cached, the old verifier accepts the new ones.
+- `cargo test --release -p agg-piop -p agg-witness`: 184 passed, 0 failed, 7 ignored;
+  `cargo test --release -p agg-cli`: 29 passed, 0 failed (commands in Section 7.4).
+
+### 7.3 Timings (local, direction only)
+
+Predictions (written before these runs, from memo 3.4; est.): `sparse_t` 3.7-4.5x and the
+`T` product 3.0-3.8x single-thread; cloud 32K cached public_t 92 -> 25-33 ms, public_a 73.8
+-> 20-30 ms, public_data 106 -> 65-80 ms.
+
+Single thread (`RAYON_NUM_THREADS=1 cargo test --release -p agg-piop --lib kernel_microbench
+-- --ignored --nocapture`, two runs, ns per call, measured):
+
+| Kernel | Before | After | Ratio |
+| --- | ---: | ---: | ---: |
+| `sparse_t` (`k tau 256` additions) | 22,657 / 23,667 | 5,897 / 6,689 | 3.5-3.8x |
+| `T` inner product, 1,024 terms (`Ext2` per term -> `i128` per coordinate) | 5,073 / 5,290 | 1,167 / 1,237 | 4.3-4.4x |
+| `T` inner product, `u32` lanes on `c t1` (final) | 5,073 / 5,290 | 601 / 636 | 8.3-8.4x |
+| per record: `sparse_t` + inner product | 28,021 / 28,374 | 6,264 / 6,402 | 4.4-4.5x |
+| `key_weight`, 512 matrices round robin (`i128` per coordinate) | 21,668 / 20,838 | 4,990 / 5,025 | 4.2-4.3x |
+| `key_weight`, `u32` lanes (final) | 21,668 / 20,838 | 2,943 / 2,933 | 7.1-7.4x |
+
+Step 2 on 8,192 synthetic distinct keys, all threads (`prepare_profile`, medians of 5 after a
+warmup, measured): parallel dedup 1.5 ms vs the serial map 6.4-7.2 ms; record stream 1.5 ms;
+`public_records_binding` 7.4-10.0 ms. The first (cold) `prepare` with a full cache took
+92 ms against 15-19 ms warm (before the slim cached keys): the per-key copies are fresh
+memory, and on this WSL2 kernel parallel first-touch page faults dominate. That is why
+the cached `StreamKey` now holds only the cache entry.
+
+`agg verify` at 8K (8,192 own keys, H-u, `Slim`, 863,597 B aggregate made by the old
+binary; key cache filled by one earlier run; old and new binaries alternated; medians,
+measured; Flock and `matrices` are untouched, their spread is load):
+
+| Round, binary, runs (load average) | public_data | public_t | public_a | sum of the three | total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1, cached, before, 5 (5-7) | 108.7 | 32.7 | 25.1 | 167.4 | 3,855 |
+| 1, cached, `u32` lanes without the slim cached keys, 5 (5-7) | 98.9 | 8.0 | 5.5 | 118.2 | 4,285 |
+| 2, cached, before, 5 (7-8, spikes) | 124.5 | 105.9 | 56.9 | 285.4 | 5,403 |
+| 2, cached, after (`dc395fc`), 5 (7-8) | 23.5 | 16.4 | 7.8 | 46.9 | 4,316 |
+| 3, cached, before, 7 (9-14) | 125.7 | 53.0 | 42.9 | 215.4 | 4,826 |
+| 3, cached, after (`dc395fc`), 7 (9-14) | 30.2 | 17.6 | 12.6 | 61.9 | 4,962 |
+| 3, uncached, before, 3 (9-14) | 103.9 | 31.8 | 93.3 | 226.4 | 4,089 |
+| 3, uncached, after (`dc395fc`), 3 (9-14) | 106.8 | 7.7 | 75.2 | 206.5 | 3,969 |
+
+Each cell is the median over the runs of that row ("sum" is the median of the per-run sums).
+Round 1 isolates the kernels: public_t and public_a drop 4-5x, public_data only 10%; round
+2 adds the slim cached keys, which take public_data from about 100-125 ms to 23-30 ms.
+
+The cloud reference for 8K cached is 188.6 ms total (`bench-cloud.md`, H-u, `8da7538`); the
+local totals are dominated by the portable Flock step and are not comparable. Cached, the
+three public steps drop 3.5-6x locally (rounds 2 and 3). Uncached public_data does not move: it still
+decodes and copies every key into fresh memory and hashes `tr`, and public_a is
+ExpandA plus 16 inverse NTTs per key.
+
+Prediction for the cloud at 32K cached (est., not measured): public_t 92 -> 20-30 ms,
+public_a 74 -> 15-25 ms (floor: streaming 512 MiB of cached `A`), public_data 106 -> 30-60
+ms (the cold-memory share is likely smaller on a native Linux VM than on WSL2), so cached
+verify 424 -> about 280-320 ms. To be measured with the next cloud matrix.
+
+### 7.4 Commands
+
+```sh
+W=/home/jipengzhang/code/aggmldsa-wt/verifier-kernels
+RAYON_NUM_THREADS=1 taskset -c 0,1,3-15 cargo test --release -p agg-piop --lib kernel_microbench -- --ignored --nocapture
+taskset -c 0,1,3-15 cargo test --release -p agg-piop --lib prepare_profile -- --ignored --nocapture
+A=target/release/agg   # old binary: the same build at 6803ce5
+taskset -c 0,1,3-15 $A keygen-batch --count 8192 --seed 1 --out keys8k.bin
+taskset -c 0,1,3-15 $A sign-batch --keys keys8k.bin --count 8192 --seed 1 --out rec8k.bin
+taskset -c 0,1,3-15 $A aggregate --records rec8k.bin --out agg8k-hu.bin
+taskset -c 0,1,3-15 $A verify --records rec8k.bin --aggregate agg8k-hu.bin --cache k.cache   # twice: fill, then cached
+taskset -c 0,1,3-15 cargo test --release -p agg-piop -p agg-witness
+taskset -c 0,1,3-15 cargo test --release -p agg-cli
+```
+
+Open: an uncached public_data with fewer copies (keep the packed `t1` and unpack per record,
+or borrow `pk` from the inputs); a packed 23-bit `A` cache (memo 3.4 (b)); AVX2 kernels
+would need a crate outside the `unsafe_code = "forbid"` rule.

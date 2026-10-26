@@ -183,7 +183,7 @@ pub fn keypair_with_rho(seed: &[u8; 32], rho: &[u8; 32]) -> (ExpandedSigningKey<
     use crate::expand::expand_a;
     use crate::native::{bit_pack, bit_unpack, mod_q, pk_encode, tr, PublicKey};
     use crate::ntt::NttPrime;
-    use crate::params::{D, ETA, K, L, N, Q};
+    use crate::params::{D, ETA, K, L, N};
     use ml_dsa::ExpandedSigningKeyBytes;
 
     let (own, _) = keypair(seed);
@@ -222,7 +222,6 @@ pub fn keypair_with_rho(seed: &[u8; 32], rho: &[u8; 32]) -> (ExpandedSigningKey<
             t0[i][m] = r0;
         }
     }
-    debug_assert!(Q < 1 << 23);
     let pk = pk_encode(&PublicKey { rho: *rho, t1 });
     let mut sk = Vec::with_capacity(own_bytes.len());
     sk.extend_from_slice(rho);

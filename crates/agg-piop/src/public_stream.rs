@@ -132,6 +132,9 @@ pub struct StreamedPublic {
     records: Vec<StreamRecord>,
 }
 
+/// The distinct keys with their records, and the key index of every record.
+type DistinctKeys<'a> = (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>);
+
 /// Groups the records by their full encoded public key: the distinct keys in order of first
 /// appearance, each with its records in increasing order, and the key index of every record.
 ///
@@ -142,9 +145,7 @@ pub struct StreamedPublic {
 /// collisions; a collision only costs a byte comparison), a parallel sort of the record
 /// indices by (hash, key bytes, index), one linear scan for the runs of equal keys and a sort
 /// of the runs by their first record.
-fn distinct_keys<'a>(
-    inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])],
-) -> (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>) {
+fn distinct_keys<'a>(inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])]) -> DistinctKeys<'a> {
     let state = RandomState::new();
     let hashes: Vec<u64> = inputs
         .par_iter()
@@ -415,10 +416,9 @@ mod tests {
         sum
     }
 
-    #[allow(clippy::type_complexity)]
     fn distinct_keys_reference<'a>(
         inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])],
-    ) -> (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>) {
+    ) -> DistinctKeys<'a> {
         let mut index: HashMap<&[u8], usize> = HashMap::new();
         let mut distinct: Vec<(&[u8], Vec<usize>)> = Vec::new();
         let record_keys = inputs
@@ -502,14 +502,25 @@ mod tests {
                 assert_eq!(split.dot::<16>(values), expected);
                 assert_eq!(split.dot::<22>(values), expected); // 1,024 > 2^9 terms: wide path
                 let quarter = SplitWeights::new(&weights[..256]);
-                assert_eq!(quarter.dot::<22>(&values[..256]), dot_reference(&values[..256], &weights));
-                assert_eq!(quarter.dot::<16>(&values[..256]), dot_reference(&values[..256], &weights));
+                let expected = dot_reference(&values[..256], &weights);
+                assert_eq!(quarter.dot::<22>(&values[..256]), expected);
+                assert_eq!(quarter.dot::<16>(&values[..256]), expected);
             };
             // In range for 16 bits, then for 22 bits, then anything (the fallback).
             check(&(0..1024).map(|_| rng.below(1 << 17) as i32 - (1 << 16)).collect::<Vec<_>>());
             check(&(0..1024).map(|_| rng.below(1 << 23) as i32 - (1 << 22)).collect::<Vec<_>>());
             check(&(0..1024).map(|_| rng.next_u64() as i32).collect::<Vec<_>>());
-            for v in [i32::MIN, i32::MAX, -(1 << 22), (1 << 22) - 1, 1 << 22, -(1 << 16), (1 << 16) - 1, 1 << 16, -(1 << 16) - 1] {
+            for v in [
+                i32::MIN,
+                i32::MAX,
+                -(1 << 22),
+                (1 << 22) - 1,
+                1 << 22,
+                -(1 << 16),
+                (1 << 16) - 1,
+                1 << 16,
+                -(1 << 16) - 1,
+            ] {
                 check(&vec![v; 1024]);
             }
             // One out-of-range value among in-range ones.
@@ -639,7 +650,11 @@ mod tests {
             for i in 3..9 {
                 let record = &public.records()[i];
                 let key = &public.keys()[record.key];
-                let (own, foreign) = if i % 2 == 1 { (&victim, &other_t1) } else { (&other, &victim_t1) };
+                let (own, foreign) = if i % 2 == 1 {
+                    (&victim, &other_t1)
+                } else {
+                    (&other, &victim_t1)
+                };
                 assert_eq!(key.pk(), own.as_slice());
                 assert_eq!(key.is_cached(), cache.is_some() && *own == victim);
                 assert_eq!(*public.t(i), *stored.t(i));
@@ -674,7 +689,11 @@ mod tests {
             })
             .collect();
         let mut cache = KeyCache::default();
-        for key in keys.par_iter().map(|k| Arc::new(VerifierKey::from_bytes(k).unwrap())).collect::<Vec<_>>() {
+        let expanded: Vec<_> = keys
+            .par_iter()
+            .map(|k| Arc::new(VerifierKey::from_bytes(k).unwrap()))
+            .collect();
+        for key in expanded {
             cache.insert(key);
         }
         fn time<T>(label: &str, mut f: impl FnMut() -> T) {
@@ -694,10 +713,30 @@ mod tests {
         time("prepare cached (cold)", || StreamedPublic::prepare(&inputs, Some(&cache)).unwrap());
         time("distinct_keys (parallel)", || distinct_keys(&inputs));
         time("distinct_keys_reference (serial map)", || distinct_keys_reference(&inputs));
-        time("pk_decode x N (parallel)", || inputs.par_iter().map(|(pk, _, _)| pk_decode(pk).unwrap().t1[0][0]).sum::<u16>());
-        time("cache.get x N (parallel)", || inputs.par_iter().filter(|(pk, _, _)| cache.get(pk).is_some()).count());
-        time("mu x N (parallel)", || inputs.par_iter().map(|(_, m, _)| mu(&[0; 64], m, &[])[0]).collect::<Vec<_>>());
-        time("sample_in_ball x N (parallel)", || inputs.par_iter().map(|(_, _, c)| sample_in_ball(c).positions.len()).sum::<usize>());
+        time("pk_decode x N (parallel)", || {
+            inputs
+                .par_iter()
+                .map(|(pk, _, _)| pk_decode(pk).unwrap().t1[0][0])
+                .sum::<u16>()
+        });
+        time("cache.get x N (parallel)", || {
+            inputs
+                .par_iter()
+                .filter(|(pk, _, _)| cache.get(pk).is_some())
+                .count()
+        });
+        time("mu x N (parallel)", || {
+            inputs
+                .par_iter()
+                .map(|(_, m, _)| mu(&[0; 64], m, &[])[0])
+                .collect::<Vec<_>>()
+        });
+        time("sample_in_ball x N (parallel)", || {
+            inputs
+                .par_iter()
+                .map(|(_, _, c)| sample_in_ball(c).positions.len())
+                .sum::<usize>()
+        });
         time("prepare uncached", || StreamedPublic::prepare(&inputs, None).unwrap());
         time("prepare cached", || StreamedPublic::prepare(&inputs, Some(&cache)).unwrap());
         time("record_stream (parallel)", || record_stream(&inputs));
@@ -760,7 +799,8 @@ mod tests {
         });
         let new = time("sparse_t + inner, new", 20_000, || {
             i = (i + 1) % cases.len();
-            split.dot::<16>(sparse_ct(&cases[i].0, &cases[i].1).as_flattened()) * E::from_u64(1 << D)
+            let ct = sparse_ct(&cases[i].0, &cases[i].1);
+            split.dot::<16>(ct.as_flattened()) * E::from_u64(1 << D)
         });
         eprintln!("per-record T work speedup {:.2}x", old / new);
 
