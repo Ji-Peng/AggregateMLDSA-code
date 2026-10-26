@@ -1430,18 +1430,19 @@ Sign(sk*, M; {0}^32)` for every `k` for the deterministic signer. Filling entrie
 use gives the same joint law, because each entry is read only after it is set and the
 entries are independent of each other and of the proof oracles: the challenger's signer
 uses `sk*` and its own randomness, and its SHAKE256/SHAKE128 calls are not proof-oracle
-queries (assumption (R) of 12.5; the transcript, bridge and record-binding hashes use
-their own framings and cSHAKE customizations). (a) Within one run the `k`-th query on `M`
+queries (assumption (R) of 12.5; the transcript, bridge and record-binding hashes use their
+own framings and cSHAKE customizations). (a) Within one run the `k`-th query on `M`
 receives `T[(M, k)]`: a fresh independent signature for each `k` (hedged) or one fixed
 signature (deterministic), as the real signer. (b) With `T` fixed, `P_T` is determined by
 its random tape and its oracle answers; a rerun from a saved state restores the counters,
 asks the same signing queries and reads the same entries while its oracle answers agree.
 This is the case Akita's extraction experiment names (Section 10.3, the paragraph on
-auxiliary environments before Definition 10.15): "an auxiliary algorithm whose answers depend on its query history, such as a
-signing simulator, is part of the prover: its initial state is fixed with the prover's
-tape and restored at every rerun"; here the tape includes `T`. It is the shape of Aerie
-Lemma C.5 (i) and (iii). Sections 7 and 12 use no property of the prover
-other than its query count, so the bound holds for every `T` and hence on average.
+auxiliary environments before Definition 10.15): "an auxiliary algorithm whose answers
+depend on its query history, such as a signing simulator, is part of the prover: its
+initial state is fixed with the prover's tape and restored at every rerun"; here the tape
+includes `T`. It is the shape of Aerie Lemma C.5 (i) and (iii). Sections 7 and 12 use no
+property of the prover other than its query count, so the bound holds for every `T` and
+hence on average.
 
 **Lemma 12.7 (rerun-only answers miss the extracted signature).** In the setting of
 Lemma 12.6, let the original execution output an accepting aggregate with a record `i*`,
@@ -1461,46 +1462,45 @@ v_i*)`. Let `R` be the number of entries `T[(M_i*, k)]` created during the extra
    the same min-entropy over a uniform 64-byte `rho''`;
 4. `E[R] <= Q_S (Q_wrap + 2) 4 Tree0_ck(sch)`.
 
-*Proof.* (1) The original run asks no signing query on `M_i*` (freshness of its output),
-so it creates no entry `(M_i*, k)`; the extractor starts from the handle of the completed
+*Proof.* (1) The original run asks no signing query on `M_i*` (freshness of its output), so
+it creates no entry `(M_i*, k)`; the extractor starts from the handle of the completed
 original execution (Akita Definition 10.15: the handle fixes the tape, the initial state
-and the oracle transcript) and only then reruns `P_T`. (2) Every rerun restarts `P_T` from its initial state with
-a challenge table that agrees with the original one (or with its parent's, which agrees
-with the original up to the parent's fork) up to the fork query, the first query at the
-input of an extraction or checkpoint stage of 12.2: `sd`, `X` or a stage of Akita's
-opening suffix. Every such input
-encodes event 0 (the public records through the public-record digest, expanded by item 1
-of 12.1) and event 1. The certificates combined at `sd` share the round-1 commitments, so
-their round-1 projections agree except with an Akita binding break (Corollary 10.25,
-inside `eps_ext`), and `Wit(y) = f_1` (12.2) is these projections. (3) `sigma* =
-phi(sigma)` implies equal `c~`, so it suffices that no rerun-only answer has commitment
-hash `c~_i*`. *Hedged:* index the rerun-only entries in creation order. The decision to
-create entry `j` is made before its `rnd_j` is drawn, and `c~_i*` is fixed by (1), so
-`Pr[c~(entry j) = c~_i* | j <= R, history] <= 2^-H_inf`; summing,
-`sum_j Pr[j <= R] 2^-H_inf = E[R] 2^-H_inf`. *Deterministic:* every entry on `M_i*` is
-`Sign(sk*, M_i*; {0}^32)`, a function of `sk*` and `rho'' = H(K || {0}^32 || mu_i*, 64)`
-(Algorithm 7 line 7), where `K` is the 32-byte secret seed of `sk*` (Algorithm 6 line 1)
-and is used nowhere else. Assume `x -> SHAKE256(K || {0}^32 || x, 64)` is a PRF under `K`
-(in the ROM its advantage is at most about `Q_H 2^-256`). A distinguisher runs the whole
-experiment with its oracle in place of this function and outputs the event; it costs
-`Adv_PRF`. With a random function `F` in its place, the original run sees `F` only at the
-`mu_j` of queried messages; `mu_j = mu_i*` with `M_j != M_i*` is a collision of the 64-byte
-SHAKE256 output at Algorithm 7 line 6 (`Adv_coll(mu)`). Otherwise `F(mu_i*)` is uniform
-and independent of `c~_i*` and of the event `R >= 1`, which gives `Pr[R >= 1] 2^-H'_inf
-<= E[R] 2^-H'_inf`. (4) Each run asks at most `Q_S` signing queries, and the extractor
-runs `P_T` at most `(Q_wrap + 2) 4 Tree0_ck(sch)` times in expectation (12.6).
+and the oracle transcript) and only then reruns `P_T`. (2) Every rerun restarts `P_T` from
+its initial state with a challenge table that agrees with the original one (or with its
+parent's, which agrees with the original up to the parent's fork) up to the fork query, the
+first query at the input of an extraction or checkpoint stage of 12.2: `sd`, `X` or a stage
+of Akita's opening suffix. Every such input encodes event 0 (the public records through the
+public-record digest, expanded by item 1 of 12.1) and event 1. The certificates combined at
+`sd` share the round-1 commitments, so their round-1 projections agree except with an Akita
+binding break (Corollary 10.25, inside `eps_ext`), and `Wit(y) = f_1` (12.2) is these
+projections. (3) `sigma* = phi(sigma)` implies equal `c~`, so it suffices that no
+rerun-only answer has commitment hash `c~_i*`. *Hedged:* index the rerun-only entries in
+creation order. The decision to create entry `j` is made before its `rnd_j` is drawn, and
+`c~_i*` is fixed by (1), so `Pr[c~(entry j) = c~_i* | j <= R, history] <= 2^-H_inf`;
+summing, `sum_j Pr[j <= R] 2^-H_inf = E[R] 2^-H_inf`. *Deterministic:* every entry on
+`M_i*` is `Sign(sk*, M_i*; {0}^32)`, a function of `sk*` and `rho'' = H(K || {0}^32 ||
+mu_i*, 64)` (Algorithm 7 line 7), where `K` is the 32-byte secret seed of `sk*` (Algorithm
+6 line 1) and is used nowhere else. Assume `x -> SHAKE256(K || {0}^32 || x, 64)` is a PRF
+under `K` (in the ROM its advantage is at most about `Q_H 2^-256`). A distinguisher runs
+the whole experiment with its oracle in place of this function and outputs the event; it
+costs `Adv_PRF`. With a random function `F` in its place, the original run sees `F` only at
+the `mu_j` of queried messages; `mu_j = mu_i*` with `M_j != M_i*` is a collision of the
+64-byte SHAKE256 output at Algorithm 7 line 6 (`Adv_coll(mu)`). Otherwise `F(mu_i*)` is
+uniform and independent of `c~_i*` and of the event `R >= 1`, which gives `Pr[R >= 1]
+2^-H'_inf <= E[R] 2^-H'_inf`. (4) Each run asks at most `Q_S` signing queries, and the
+extractor runs `P_T` at most `(Q_wrap + 2) 4 Tree0_ck(sch)` times in expectation (12.6).
 
 *Evaluation (estimate, not a proof).* `H_inf <= 256`, since `rnd` and `c~` have 32 bytes.
 In the ROM for the signer's hash calls (Algorithm 7 lines 7, 11 and 15), an answer's `c~`
-is a fresh oracle output unless a hash query of `A` starts with `K` (at most about
-`Q_H 2^-256` over the whole game) or an iteration's `w1` equals the `w1` of an earlier hash
-query on `mu_i*` (the commitment min-entropy term of the FSwA analyses, KLS18 and
-Devevey et al.); otherwise each of the expected 4.25 iterations (FIPS 204 Table 1,
-"Repetitions") hits `c~_i*` with probability `2^-256`, about `2^-253.9` per answer. The
-term `E[R] 2^-H_inf` grows with the extractor's run count, as `B`'s running time and the
-SUF-CMA advantage it is measured against do (the same accounting as the Module-SIS terms
-of `eps_ext`, whose estimates exclude the run count as in Aerie, Section 7): it is about `2^-253.9`
-per signature the reduction obtains, far below `2^-128` per unit of its work.
+is a fresh oracle output unless a hash query of `A` starts with `K` (at most about `Q_H
+2^-256` over the whole game) or an iteration's `w1` equals the `w1` of an earlier hash
+query on `mu_i*` (the commitment min-entropy term of the FSwA analyses, KLS18 and Devevey
+et al.); otherwise each of the expected 4.25 iterations (FIPS 204 Table 1, "Repetitions")
+hits `c~_i*` with probability `2^-256`, about `2^-253.9` per answer. The term `E[R]
+2^-H_inf` grows with the extractor's run count, as `B`'s running time and the SUF-CMA
+advantage it is measured against do (the same accounting as the Module-SIS terms of
+`eps_ext`, whose estimates exclude the run count as in Aerie, Section 7): it is about
+`2^-253.9` per signature the reduction obtains, far below `2^-128` per unit of its work.
 
 **Lemma 12.8 (SUF-CMA of the relaxed scheme).** Model H (SHAKE256 at FIPS 204 Algorithm 7
 lines 6 and 15 and Algorithm 8 line 12) and ExpandA as random oracles. For every SUF-CMA
