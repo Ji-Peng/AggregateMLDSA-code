@@ -712,7 +712,12 @@ impl KeccakVerifier for WithTie {
         Some(KeccakPlan {
             span: 0,
             d_part: 0,
-            tie_bits: vec![17],
+            parts: vec![agg_bridge::pow::PartWork {
+                tie_bits: 10,
+                eq_bits: 10,
+                round_bits: 7,
+                rounds: 23,
+            }],
         })
     }
 

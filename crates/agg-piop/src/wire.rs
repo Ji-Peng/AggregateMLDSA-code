@@ -1,4 +1,4 @@
-//! Proof wire format (spec Section 10, wire version 3): header (version, flags = relation
+//! Proof wire format (spec Section 10, wire version 4): header (version, flags = relation
 //! byte, `N`), the
 //! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, the lookup (event 7) and
 //! the stages (events 9 to 12) in order, the packed PIOP nonce stream
@@ -485,9 +485,9 @@ mod tests {
             let mut version = bytes.clone();
             version[0] = 9;
             assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(9)));
-            // The retired wire versions 0 and 1 (no work nonces) and 2 (relaxed relation H)
-            // are refused.
-            for old in [0, 1, 2] {
+            // The retired wire versions 0 and 1 (no work nonces), 2 (relaxed relation H) and 3
+            // (the bridge union, K13) are refused.
+            for old in [0, 1, 2, 3] {
                 version[0] = old;
                 assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(u16::from(old))));
             }

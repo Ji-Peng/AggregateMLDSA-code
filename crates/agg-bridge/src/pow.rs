@@ -6,9 +6,10 @@
 //! (Aerie Eq. (17)) computed with the exact field size, and a nonce of `g + 7` bits when
 //! `g > 0` (none when `g = 0`). [`grind_bits_k`] is the rule for the PIOP field
 //! `K = F_{p^2}`, `p = 2^64 - 59` (so even `1/|K|` needs one bit, `p^2 < 2^128`);
-//! [`grind_bits_f128`] the rule for `GF(2^128)` (so `1/2^128` needs none). The tie site's
-//! assigned numerator carries the Johnson-list sizes of the two Ligerito commitments
-//! ([`list_size`], [`tie_numerator`]).
+//! [`grind_bits_f128`] the rule for `GF(2^128)` (so `1/2^128` needs none). The sites of a
+//! tied part (tied-part proof version 5, `docs/parity-chain.md` Section 8: the tie site of
+//! the public claim, the `eq_Y` site and one site per parity-chain round) carry the
+//! Johnson-list size of the sponge commitment ([`list_size`], [`part_work`]).
 
 /// Security target in bits.
 pub const TARGET_BITS: u32 = 128;
@@ -89,27 +90,75 @@ pub struct TieGeometry {
     pub nu_s: usize,
 }
 
-/// Output words of the levels-2-3 row (`log2(m_3 / 128)`).
-const OUTPUT_WORDS_LOG2: usize = 5;
+/// `log2 m_3`: the output-row coordinates of `eq_Y`.
+const OUT_VARS: usize = agg_witness::bridge::M3.trailing_zeros() as usize;
+/// `log2` of the record positions of a production level-1 block (`2^19 / 1024`).
+const BLOCK_RECORDS_LOG2: usize = 9;
+/// `log2 J_1` (the in-block position bits of a full level-1 block).
+const ZETA_VARS: usize = agg_witness::bridge::J1.trailing_zeros() as usize;
+/// Lane coordinates of the chain (`ceil(log2 6)`: lanes 6, 7 carry weight zero).
+const LANE_VARS: usize = 3;
 
-/// The assigned numerator of the tie site (over `2^128`) with list size `list` for both
-/// Ligerito commitments: `2 L^2 (d + span_log + 5) + 2 L (blocks_log + span_log + 9) +
-/// L (5 + span_log) + L (nu_s + 3)` (tie 1 and tie 2 for two lane groups each, the output
-/// claim, the public words).
+/// The assigned numerator of the tie site (over `2^128`) with list size `list` for the
+/// sponge commitment: `L (nu_s + 3)`, the public claim's free coordinates (tied-part proof
+/// version 5; version 4 also priced ties 1 and 2 and the output claim of the bridge union).
 #[must_use]
 pub fn tie_numerator(list: u64, geo: &TieGeometry) -> u64 {
-    let w = |x: usize| x as u64;
-    let tie1 = w(geo.d + geo.span_log + 5);
-    let tie2 = w(geo.blocks_log + geo.span_log + 9);
-    let out = w(OUTPUT_WORDS_LOG2 + geo.span_log);
-    let public = w(geo.nu_s + 3);
-    2 * list * list * tie1 + 2 * list * tie2 + list * out + list * public
+    list * (geo.nu_s as u64 + 3)
 }
 
 /// The tie site's difficulty: [`grind_bits_f128`] of [`tie_numerator`].
 #[must_use]
 pub fn tie_bits(list: u64, geo: &TieGeometry) -> u8 {
     grind_bits_f128(tie_numerator(list, geo))
+}
+
+/// The assigned numerator of the `eq_Y` site: `L (log2 m_3 + span_log)` (two distinct
+/// multilinear tables of the final vectors' variables agree at a random point with
+/// probability at most that over `2^128`, for every sponge list element).
+#[must_use]
+pub fn eq_numerator(list: u64, geo: &TieGeometry) -> u64 {
+    list * (OUT_VARS + geo.span_log) as u64
+}
+
+/// The assigned numerator of one round of the parity chain: `2 L` (degree 2).
+#[must_use]
+pub const fn round_numerator(list: u64) -> u64 {
+    2 * list
+}
+
+/// Rounds of the parity chain of a production part: `min(10 + d, 19)` in-block positions,
+/// `max(0, d - 9)` block coordinates, 3 lane coordinates and `span_log` segment coordinates,
+/// that is `13 + d + span_log`.
+#[must_use]
+pub fn chain_rounds(geo: &TieGeometry) -> usize {
+    let zeta = (10 + geo.d.min(BLOCK_RECORDS_LOG2)).min(ZETA_VARS);
+    zeta + geo.blocks_log + LANE_VARS + geo.span_log
+}
+
+/// The work of one tied part (tied-part proof version 5): the tie site, the `eq_Y` site and
+/// the `rounds` chain rounds, each with its difficulty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartWork {
+    /// Difficulty of the tie site (the public claim's point).
+    pub tie_bits: u8,
+    /// Difficulty of the `eq_Y` site.
+    pub eq_bits: u8,
+    /// Difficulty of every chain round.
+    pub round_bits: u8,
+    /// Chain rounds.
+    pub rounds: u16,
+}
+
+/// The work of a tied part of geometry `geo` with list size `list`.
+#[must_use]
+pub fn part_work(list: u64, geo: &TieGeometry) -> PartWork {
+    PartWork {
+        tie_bits: tie_bits(list, geo),
+        eq_bits: grind_bits_f128(eq_numerator(list, geo)),
+        round_bits: grind_bits_f128(round_numerator(list)),
+        rounds: u16::try_from(chain_rounds(geo)).expect("few rounds"),
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +199,7 @@ mod tests {
 
     #[test]
     fn tie_bounds_match_the_soundness_doc() {
-        // docs/soundness.md Sections 3.6 and 10 (script output).
+        // docs/soundness.md Sections 3.6 and 10 (script output), tied-part proof version 5.
         assert_eq!([1, 2, 3].map(list_size), [35, 50, 70]);
         let four = TieGeometry {
             d: 13,
@@ -158,21 +207,55 @@ mod tests {
             blocks_log: 4,
             nu_s: 15,
         };
-        // Without the lists: docs/bridge.md 5c's 95.
-        assert_eq!(tie_numerator(1, &four), 95);
-        assert_eq!(tie_numerator(35, &four), 50_925);
-        assert_eq!(tie_numerator(50, &four), 102_750);
-        assert_eq!(tie_numerator(70, &four), 199_850);
-        assert_eq!([35, 50, 70].map(|l| tie_bits(l, &four)), [16, 17, 18]);
+        assert_eq!(tie_numerator(1, &four), 18);
+        assert_eq!(
+            [35, 50, 70].map(|l| tie_numerator(l, &four)),
+            [630, 900, 1_260]
+        );
+        assert_eq!([35, 50, 70].map(|l| tie_bits(l, &four)), [10, 10, 11]);
+        assert_eq!(
+            [35, 50, 70].map(|l| eq_numerator(l, &four)),
+            [490, 700, 980]
+        );
+        assert_eq!(chain_rounds(&four), 28);
+        assert_eq!(
+            part_work(50, &four),
+            PartWork {
+                tie_bits: 10,
+                eq_bits: 10,
+                round_bits: 7,
+                rounds: 28
+            }
+        );
         let one = TieGeometry {
             d: 13,
             span_log: 0,
             blocks_log: 4,
             nu_s: 13,
         };
+        assert_eq!(chain_rounds(&one), 26);
         assert_eq!(
-            [35, 50, 70].map(|l| tie_numerator(l, &one)),
-            [45_745, 92_350, 179_690]
+            [35, 50, 70].map(|l| part_work(l, &one)),
+            [
+                PartWork {
+                    tie_bits: 10,
+                    eq_bits: 9,
+                    round_bits: 7,
+                    rounds: 26
+                },
+                PartWork {
+                    tie_bits: 10,
+                    eq_bits: 10,
+                    round_bits: 7,
+                    rounds: 26
+                },
+                PartWork {
+                    tie_bits: 11,
+                    eq_bits: 10,
+                    round_bits: 8,
+                    rounds: 26
+                },
+            ]
         );
         let small = TieGeometry {
             d: 3,
@@ -180,8 +263,8 @@ mod tests {
             blocks_log: 0,
             nu_s: 4,
         };
-        assert_eq!(tie_numerator(35, &small), 20_650);
-        assert_eq!(tie_numerator(50, &small), 41_500);
-        assert_eq!(tie_bits(50, &small), 16);
+        assert_eq!(chain_rounds(&small), 16);
+        assert_eq!(tie_numerator(50, &small), 350);
+        assert_eq!(part_work(50, &small).tie_bits, 9);
     }
 }

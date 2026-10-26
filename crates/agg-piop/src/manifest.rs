@@ -38,10 +38,12 @@ pub type GroupRole = Group;
 /// PCS preset family of a group (`agg_pcs_config::catalogs::Family`).
 pub type PcsFamily = Family;
 
-/// Wire version of this protocol (spec Status: version 3, relation H-u on the lookup layout
-/// L16 with the proof-of-work schedule of `docs/soundness.md`; version 2 proved the relaxed
-/// relation H with the same schedule, version 1 had no work).
-pub const WIRE_VERSION: u16 = 3;
+/// Wire version of this protocol (spec Status: version 4, the Keccak side's tied parts of
+/// proof version 5 with the virtual parity chain and its work sites in the plan, deviation
+/// K21; version 3 had the bridge union of K13 with relation H-u on the lookup layout L16 and
+/// the proof-of-work schedule of `docs/soundness.md`; version 2 proved the relaxed relation
+/// H with the same schedule, version 1 had no work).
+pub const WIRE_VERSION: u16 = 4;
 /// Parameter-set byte of ML-DSA-44 (spec Section 10, event 0).
 pub const PARAMETER_SET: u8 = 0x44;
 /// Identifier of the digit layout of spec Section 4.3: 1 is the lookup layout L16 (the
@@ -916,7 +918,7 @@ mod tests {
     fn binding_bytes_are_pinned_and_separate_batches() {
         let manifest = CommitmentManifest::for_batch(200).unwrap();
         let bytes = manifest.binding_bytes();
-        let mut expected = vec![3, 0, 0x44, 0];
+        let mut expected = vec![4, 0, 0x44, 0];
         expected.extend_from_slice(&200_u64.to_le_bytes());
         expected.extend_from_slice(&256_u64.to_le_bytes());
         expected.extend_from_slice(&[1, 6]);

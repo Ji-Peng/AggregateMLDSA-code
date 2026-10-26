@@ -1,12 +1,12 @@
-//! The tied part (docs/keccak.md Sections 9 to 11, docs/bridge.md Sections 5a and 5b): a
-//! sponge instance and a two-type bridge union per part, tied by evaluation claims. Round
-//! trips at 5 records (padded positions, `d = 3`), 64 (`d = 6`), 256 (`d = 8`), 512 (`d = 9`,
-//! one full level-1 block) and 1,024 (`d = 10`, two level-1 blocks per lane), the tampering
-//! cases of docs/bridge.md Section 9 item 6 with the tie's error names, the precomputed
-//! commitment (K14), and a segment split into parts whose shares XOR to the segment's `Y`
-//! (deviation K10). The bridge seed is derived from the event-2 commitments, so the sponge
-//! witnesses and the part's bits are fixed before the seed exists (spec Section 10, events 2
-//! and 3). Run with `--release`.
+//! The tied part, tied-part proof version 5 (docs/parity-chain.md, deviation K21): the sponge
+//! instance with the virtual parity chain (one sum-check from the public final vectors to a
+//! bit-level claim on the sponge commitment). Round trips at 5 records (padded positions, `d
+//! = 3`), 64 (`d = 6`), 256 (`d = 8`), 512 (`d = 9`, one full level-1 block) and 1,024 (`d =
+//! 10`, two level-1 blocks per lane), spans, the tampering cases of docs/parity-chain.md
+//! Section 11 with their error names, the precomputed commitment (K14), and a segment split
+//! into parts whose shares XOR to the segment's `Y` (deviation K10). The bridge seed is
+//! derived from the event-2 commitments, so the sponge witnesses and the part's bits are
+//! fixed before the seed exists (spec Section 10, events 2 and 3). Run with `--release`.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -17,14 +17,14 @@ use agg_bridge::{seed::derive_matrices_for, shape::Shape};
 use agg_keccak::prover::{KeccakCommitment, KeccakError, KeccakProof, Profile};
 use agg_keccak::{
     bridge_slot::pack_y,
-    flock_union::UnionProof,
     sponge::{self, SpongeRecord, W1_INPUT_BASE},
-    tied::{TiedCommitment, TiedPart},
+    tied::{TiedCommitment, TiedPart, TiedProofParts, ROUND_BYTES},
     witness::pack_slot,
 };
 use agg_witness::bridge::{gf2_composite, BridgeMatrices};
 use agg_witness::padding::Geometry;
 use flock_core::test_rng::Rng;
+use flock_field::F128;
 use sha3::{Digest, Sha3_256};
 
 /// The bridge seed of a test transcript: a hash of the absorbed commitment (event 2 then
@@ -80,15 +80,13 @@ fn statement(records: &[SpongeRecord]) -> (Vec<[u8; 64]>, Vec<[u8; 32]>) {
     )
 }
 
-/// Which share a tampered run proves.
+/// Which final vectors a tampered run proves.
 #[derive(Clone, Copy)]
 enum Share {
-    /// The share of the proven (tampered) blocks.
+    /// The final vectors of the proven (possibly tampered) bits.
     OfProven,
-    /// The share of the honest blocks.
+    /// The final vectors of the honest records.
     Stale,
-    /// The share of the proven blocks with bit `o` flipped.
-    Flipped(usize),
 }
 
 /// One proof of a part and its verification inputs.
@@ -141,49 +139,42 @@ impl Ctx<'_> {
         self.part.verify(mu, c, com, sd, &mats, ys, fs, &r.proof)
     }
 
-    /// Commit `sponge` and `bits` (event 2), derive `sd` and `fs` from the commitment, and
-    /// prove with the honest blocks changed by `tamper` and the chosen share. With `refill`
-    /// the levels-2-3 output columns are recomputed from the (tampered) inputs, so the
-    /// composite rows hold; otherwise they keep the honest blocks' values.
-    fn run(
-        &self,
-        sponge: agg_keccak::witness::SlotBuffers,
-        bits: Vec<u64>,
-        tamper: &dyn Fn(&mut agg_keccak::bridge_union::BridgeBlocks),
-        share: Share,
-        refill: bool,
-    ) -> Run {
+    /// Commit `sponge` and `bits` (event 2) with the statement of the honest records,
+    /// derive `sd` and `fs` from the commitment, and prove against the chosen final vectors.
+    fn run(&self, sponge: agg_keccak::witness::SlotBuffers, bits: Vec<u64>, share: Share) -> Run {
         let committed = self.part.commit_parts(sponge, bits, &self.records);
         let commitment = committed.commitment().clone();
         let sd = seed_after(&commitment);
         let mats = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd));
         let fs = fs_after(&commitment, &sd);
-        let honest = self.part.honest_blocks(&committed, &mats);
-        let mut blocks = honest.clone();
-        tamper(&mut blocks);
-        if refill {
-            self.part.bridge().fill_outputs(&mats, &mut blocks);
-        }
-        let source = if matches!(share, Share::Stale) {
-            &honest
-        } else {
-            &blocks
+        let ys = match share {
+            Share::OfProven => self.part.final_vectors(&committed, &mats),
+            Share::Stale => {
+                let honest = self.part.commit(&self.records);
+                self.part.final_vectors(&honest, &mats)
+            }
         };
-        let mut y = self.part.bridge().share(&mats, source);
-        if let Share::Flipped(o) = share {
-            y[o] ^= 1;
-        }
         let proof = self
             .part
-            .prove_with_blocks(committed, sd, &mats, blocks, vec![y.clone()], &fs)
+            .prove_with_final_vectors(committed, sd, &mats, ys.clone(), &fs)
             .expect("prove");
         Run {
             commitment,
             sd,
             mats,
             fs,
-            ys: vec![y],
+            ys,
             proof,
+        }
+    }
+
+    /// `r` with its proof's parts changed by `f`.
+    fn tampered(&self, r: &Run, f: &dyn Fn(&mut TiedProofParts)) -> Run {
+        let mut parts = self.part.decode_parts(&r.proof).expect("own proof parses");
+        f(&mut parts);
+        Run {
+            proof: self.part.encode_parts(&parts),
+            ..run_clone(r)
         }
     }
 }
@@ -193,13 +184,21 @@ impl Ctx<'_> {
 enum Tamper {
     /// None (round trip and the cheap rejections only).
     None,
-    /// The bridge-union cases that depend on the block geometry: a level-1 input copy (tie
-    /// 1) and a parity copy (tie 2) in the last level-1 block, and the output columns.
+    /// The case that depends on the block geometry: a bit of the chain's copy flipped in the
+    /// last level-1 block.
     Blocks,
     /// Every case, plus the precomputed commitment (K14).
     Full,
 }
 
+fn expect(ctx: &Ctx<'_>, r: &Run, label: &str, ok: &dyn Fn(&KeccakError) -> bool) {
+    match ctx.verify(r) {
+        Err(e) if ok(&e) => eprintln!("  {label}: rejected ({e})"),
+        other => panic!("{label}: {other:?}"),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     let gate = sponge::sponge_gate();
     let d = TiedPart::d_seg_for(n);
@@ -252,61 +251,58 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     assert_eq!(pack_y(&out.final_vectors[0]).len(), 512);
 
     let cost = part.cost();
-    // Proof layout (version 4): header (18, the tie nonce last), then framed bridge cap,
-    // sponge proof, bridge union proof.
-    let framed =
-        |at: usize| u32::from_le_bytes(out.proof.bytes[at..at + 4].try_into().unwrap()) as usize;
-    let h = 18;
-    let cap_len = framed(h);
-    let sponge_len = framed(h + 4 + cap_len);
-    let bridge_len = framed(h + 8 + cap_len + sponge_len);
-    let parse = |at: usize, len: usize, claims: usize| {
-        agg_keccak::flock_union::UnionProof::from_bytes(&out.proof.bytes[at..at + len], claims)
-            .unwrap()
-            .size_breakdown()
-    };
+    let parts = part.decode_parts(&out.proof).expect("parse");
+    let chain_bytes = 4 + ROUND_BYTES * cost.chain_rounds + 16;
+    let [zc, lc, open, values] = parts.sponge.size_breakdown();
+    assert_eq!(parts.rounds.len(), cost.chain_rounds);
+    assert_eq!(out.proof.bytes.len(), 18 + chain_bytes + 4 + zc + lc + open + values + 4);
     eprintln!(
-        "  proof bytes n = {n}: bridge cap {cap_len}, sponge proof {sponge_len} (zerocheck, \
-         lincheck, opening, values {:?}), bridge union proof {bridge_len} ({:?})",
-        parse(h + 8 + cap_len, sponge_len, 3),
-        parse(h + 12 + cap_len + sponge_len, bridge_len, 7)
-    );
-    eprintln!(
-        "tied part n = {n} (d {d}): sponge nu {} M {} dense m {} ({} committed words); bridge \
-         union nu {} k_log {:?} M {} dense m {} ({} committed words, walker {} entries, \
-         one-row slot {}); commit {:.2?}, matrices {:.2?}, prove {:.2?}, verify {:.2?}, proof \
-         {} bytes, commitment {} bytes",
+        "tied part n = {n} (d {d}): sponge nu {} M {} dense m {} ({} committed words); chain \
+         {} rounds over {} bits; commit {:.2?}, matrices {:.2?}, prove {:.2?}, verify {:.2?}; \
+         proof {} B = 18 header + {chain_bytes} chain + sponge proof (zerocheck {zc}, \
+         lincheck {lc}, opening {open} of which ring switches {} B, values {values}) + 8 \
+         framing; commitment {} B",
         cost.sponge_nu,
         cost.sponge_m,
         cost.sponge_dense_m,
         cost.sponge_committed_words,
-        cost.bridge.nu,
-        cost.bridge.k_log,
-        cost.bridge.m,
-        cost.bridge.dense_m,
-        cost.bridge.committed_words,
-        cost.bridge.walker_entries,
-        cost.slot_walker_entries,
+        cost.chain_rounds,
+        cost.chain_input_bits,
         t_commit,
         t_mats,
         t_prove,
         t_verify,
         out.proof.bytes.len(),
+        parts.sponge.flock.pcs_open.ring_switches.len() * (16 * 128 + 8),
         commitment.sponge.as_bytes().len(),
     );
+    assert_eq!(parts.sponge.flock.pcs_open.ring_switches.len(), 3);
 
-    // A flipped Y bit; another seed; a wrong c~; a wrong mu; another fs; a flipped proof
-    // byte (in the bridge cap, in the sponge proof, at the end of the bridge proof).
+    // A flipped Y bit (the final vectors' digest enters the tie challenger before the tie
+    // nonce, so that nonce fails first); the same flipped Y proven by the honest prover (the
+    // chain fails); another seed (other matrices); a wrong c~; a wrong mu; another fs.
     let (mu, c) = (&ctx.mu, &ctx.c_tilde);
     let mut bad = out.final_vectors.clone();
     bad[0][4095] ^= 1;
     assert!(matches!(
         ctx.verify_with(&run, mu, c, &commitment, sd, &bad, &fs),
-        Err(KeccakError::Flock(_) | KeccakError::Tie(_))
+        Err(KeccakError::Tie("tie nonce" | "parity chain"))
     ));
-    assert!(ctx
-        .verify_with(&run, mu, c, &commitment, [0xA5; 32], &run.ys, &fs)
-        .is_err());
+    let wrong = part
+        .prove_with_final_vectors(part.commit(&ctx.records), sd, &mats, bad.clone(), &fs)
+        .expect("prove");
+    let r = Run {
+        ys: bad.clone(),
+        proof: wrong,
+        ..run_clone(&run)
+    };
+    expect(&ctx, &r, "flipped Y bit", &|e| {
+        matches!(e, KeccakError::Tie("parity chain"))
+    });
+    assert!(matches!(
+        ctx.verify_with(&run, mu, c, &commitment, [0xA5; 32], &run.ys, &fs),
+        Err(KeccakError::Tie("parity chain"))
+    ));
     // A wrong c~ or mu changes the public digest the sponge challenger absorbs, so Flock's
     // transcript already rejects (the public claim would, too).
     let mut bad_c = c.clone();
@@ -322,14 +318,10 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     assert!(ctx
         .verify_with(&run, mu, c, &commitment, sd, &run.ys, &[0x3C; 32])
         .is_err());
-    // The tie nonce (header bytes 14..18) and bytes of the cap and the inner proofs.
-    for at in [
-        14,
-        17,
-        18 + 4 + 100,
-        run.proof.bytes.len() / 2,
-        run.proof.bytes.len() - 20,
-    ] {
+    // Flipped proof bytes: the tie nonce, the eq_Y nonce, a round message, the bit value,
+    // the sponge proof.
+    let len = run.proof.bytes.len();
+    for at in [14, 17, 18, 22 + 3 * ROUND_BYTES + 5, 18 + chain_bytes - 3, len / 2, len - 20] {
         let mut flipped = run.proof.clone();
         flipped.bytes[at] ^= 1;
         let r = Run {
@@ -338,12 +330,12 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         };
         assert!(ctx.verify(&r).is_err(), "flipped proof byte {at}");
     }
-    // The bridge union's cap (from the proof) in place of the event-2 sponge cap.
-    let cap_len = part.bridge().geometry().commitment_len();
+    // Another sponge cap in place of the event-2 one.
+    let mut other_cap = commitment.sponge.as_bytes().to_vec();
+    other_cap[0] ^= 1;
     let swapped = TiedCommitment {
-        sponge: KeccakCommitment::from_bytes(run.proof.bytes[22..22 + cap_len].to_vec()),
+        sponge: KeccakCommitment::from_bytes(other_cap),
     };
-    assert_ne!(swapped, commitment);
     assert!(ctx
         .verify_with(&run, mu, c, &swapped, sd, &run.ys, &fs)
         .is_err());
@@ -364,86 +356,99 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         assert_eq!(part.prove(reattached, sd, &mats, &fs).expect("prove"), out);
     }
 
-    let honest = |_: &mut agg_keccak::bridge_union::BridgeBlocks| {};
-    let expect = |r: &Run, label: &str, ok: &dyn Fn(&KeccakError) -> bool| match ctx.verify(r) {
-        Err(e) if ok(&e) => eprintln!("  {label}: rejected ({e})"),
-        other => panic!("{label}: {other:?}"),
-    };
-    // A bit flipped in the level-1 input copy only (lane 3 of the last record), the parities
-    // and Y of the tampered copy (so every bridge row holds): tie 1 of lanes 0..3 fails.
+    // A bit flipped in the chain's copy of b' only (lane 3 of the last record, in the last
+    // level-1 block), the final vectors of the copy (so the chain's claim and messages are
+    // consistent): its final value is not the sponge's.
     let (sponge_buf, mut bits) = part.honest_parts(&ctx.records);
     let col = part.segment().column(3, 1024 * (n - 1) + 77);
     bits[col / 64] ^= 1 << (col % 64);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
-    expect(&r, "level-1 input copy", &|e| {
-        matches!(e, KeccakError::Tie("bridge copy of lanes 0..3"))
-    });
-    // A parity copy flipped in the levels-2-3 row only (lane 5, the last block), Y of the
-    // tampered copies: tie 2 of lanes 4, 5 fails.
-    let top = *part.bridge().top();
-    let blocks = part.bridge().level1().blocks();
-    let flip_copy = move |b: &mut agg_keccak::bridge_union::BridgeBlocks| {
-        let c = top.input_col(5, blocks - 1, 1234);
-        b.tops[0][c / 64] ^= 1 << (c % 64);
-    };
-    let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &flip_copy, Share::OfProven, true);
-    expect(&r, "parity copy", &|e| {
-        matches!(e, KeccakError::Tie("level-1 parities of lanes 4, 5"))
-    });
-    if full {
-        // A level-1 parity flipped in its row only (the copies and Y honest): Flock rejects
-        // the level-1 rows.
-        let level1 = *part.bridge().level1();
-        let flip_parity = move |b: &mut agg_keccak::bridge_union::BridgeBlocks| {
-            let c = level1.y1_col(4321);
-            b.rows[level1.row(2, 0)][c / 64] ^= 1 << (c % 64);
-        };
-        let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-        let r = ctx.run(sponge_buf, bits, &flip_parity, Share::OfProven, true);
-        expect(&r, "level-1 parity", &|e| {
-            matches!(e, KeccakError::Flock(_))
-        });
-        // A share of the honest blocks against tampered copies, the output columns of the
-        // honest blocks: the levels-2-3 rows fail.
-        let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-        let r = ctx.run(sponge_buf, bits, &flip_copy, Share::Stale, false);
-        expect(&r, "stale share", &|e| matches!(e, KeccakError::Flock(_)));
-    }
-    // A wrong share with honest rows (the output columns hold M_3 M_2 y1): the output claim
-    // against the table of the shares fails.
-    let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::Flipped(777), true);
-    expect(&r, "wrong share, honest rows", &|e| {
-        matches!(e, KeccakError::Tie("levels-2-3 output columns"))
-    });
-    // The output column set to the wrong share (rows no longer hold): Flock rejects the
-    // levels-2-3 rows.
-    let flip_out = move |b: &mut agg_keccak::bridge_union::BridgeBlocks| {
-        let c = top.y_col(777);
-        b.tops[0][c / 64] ^= 1 << (c % 64);
-    };
-    let (sponge_buf, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &flip_out, Share::Flipped(777), false);
-    expect(&r, "wrong share, output column set", &|e| {
-        matches!(e, KeccakError::Flock(_))
+    let r = ctx.run(sponge_buf, bits, Share::OfProven);
+    expect(&ctx, &r, "chain copy of b' only", &|e| {
+        matches!(e, KeccakError::Tie("parity chain"))
     });
     if !full {
         return;
     }
-
-    // A bit flipped in both copies (the sponge recomputed on the tampered record), Y
-    // consistent with it, the published c~ stale: the sponge instance's public claim fails.
+    // A b' bit flipped in the committed record (sponge and chain copy recomputed, c~ of
+    // the tampered record), the stale final vectors of the honest records: the chain's claim
+    // is not the committed bits' inner product.
     let mut tampered = ctx.records.clone();
     tampered[0].w1_encode[100] ^= 0x10;
     let (sponge_buf, bits) = part.honest_parts(&tampered);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
-    expect(&r, "both copies, stale c~", &|e| {
+    let tctx = Ctx {
+        part: TiedPart::new(&gate, n, d, Profile::Fast),
+        records: tampered.clone(),
+        mu: ctx.mu.clone(),
+        c_tilde: statement(&tampered).1,
+    };
+    let committed = tctx.part.commit_parts(sponge_buf, bits, &tampered);
+    let com_t = committed.commitment().clone();
+    let sd_t = seed_after(&com_t);
+    let mats_t = Arc::new(derive_matrices_for(&Shape::PRODUCTION, &sd_t));
+    let fs_t = fs_after(&com_t, &sd_t);
+    let honest_ys = part.final_vectors(&part.commit(&ctx.records), &mats_t);
+    let proof = tctx
+        .part
+        .prove_with_final_vectors(committed, sd_t, &mats_t, honest_ys.clone(), &fs_t)
+        .expect("prove");
+    let r = Run {
+        commitment: com_t,
+        sd: sd_t,
+        mats: mats_t,
+        fs: fs_t,
+        ys: honest_ys,
+        proof,
+    };
+    expect(&tctx, &r, "flipped b' bit, stale Y", &|e| {
+        matches!(e, KeccakError::Tie("parity chain"))
+    });
+    // Tampered proof parts: a round message (its own nonce then fails with probability
+    // 1 - 2^-g, else the final check), the last round's leading coefficient, the claimed bit
+    // value, and the bit claim's s_hat_v in the sponge opening (the third ring switch).
+    let r = ctx.tampered(&run, &|p| p.rounds[5].q1 += F128::ONE);
+    expect(&ctx, &r, "round message", &|e| {
+        matches!(
+            e,
+            KeccakError::Tie("parity chain" | "chain round nonce")
+        )
+    });
+    let r = ctx.tampered(&run, &|p| {
+        let last = p.rounds.len() - 1;
+        p.rounds[last].qinf += F128::ONE;
+    });
+    expect(&ctx, &r, "last round message", &|e| {
+        matches!(
+            e,
+            KeccakError::Tie("parity chain" | "chain round nonce")
+        )
+    });
+    let r = ctx.tampered(&run, &|p| p.value += F128::ONE);
+    expect(&ctx, &r, "bit value", &|e| {
+        matches!(e, KeccakError::Tie("parity chain"))
+    });
+    let r = ctx.tampered(&run, &|p| {
+        p.sponge.flock.pcs_open.ring_switches[2].s_hat_v[17] += F128::ONE;
+    });
+    expect(&ctx, &r, "bit claim's s_hat_v", &|e| {
+        matches!(e, KeccakError::Flock(_))
+    });
+    // A bit flipped in both copies (the sponge recomputed on the tampered record), Y
+    // consistent with it, the published c~ stale: the sponge instance's public claim fails.
+    let (sponge_buf, bits) = part.honest_parts(&tampered);
+    let r = ctx.run(sponge_buf, bits, Share::OfProven);
+    expect(&ctx, &r, "both copies, stale c~", &|e| {
         matches!(e, KeccakError::Tie("public words"))
     });
+    // The honest chain copy against stale Y (sponge and copy tampered, Y of the honest
+    // records) as above but with the honest statement: the chain fails first.
+    let (sponge_buf, bits) = part.honest_parts(&tampered);
+    let r = ctx.run(sponge_buf, bits, Share::Stale);
+    expect(&ctx, &r, "both copies, stale Y and c~", &|e| {
+        matches!(e, KeccakError::Tie("parity chain"))
+    });
 
-    // A sponge input bit flipped with the stale chi witness (the bridge copy honest, Y of the
-    // honest bits): the sponge rows fail.
+    // A sponge input bit flipped with the stale chi witness (the chain's copy honest, Y of
+    // the honest bits): the sponge rows fail (or the chain, whose bit value now differs).
     let inputs: Vec<Vec<u64>> = ctx.records.iter().map(SpongeRecord::input_bits).collect();
     let col = gate.layout().input_col(W1_INPUT_BASE + 4000);
     let sponge_buf = pack_slot(&gate, part.nu(), n, |r, zz, a, b| {
@@ -454,9 +459,9 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         gate.apply_ab(zz, a, b);
     });
     let (_, bits) = part.honest_parts(&ctx.records);
-    let r = ctx.run(sponge_buf, bits, &honest, Share::OfProven, true);
-    expect(&r, "sponge input, stale chi", &|e| {
-        matches!(e, KeccakError::Flock(_))
+    let r = ctx.run(sponge_buf, bits, Share::OfProven);
+    expect(&ctx, &r, "sponge input, stale chi", &|e| {
+        matches!(e, KeccakError::Flock(_) | KeccakError::Tie("parity chain"))
     });
 }
 
@@ -472,7 +477,7 @@ fn run_clone(r: &Run) -> Run {
 }
 
 /// 64 records (`d = 6`): round trip, `Y` equal to the F_p side's GF(2) walk, the precomputed
-/// commitment, and the tampering cases with the tie's error names.
+/// commitment, and the tampering cases with their error names.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
 fn tied_part_round_trip_64() {
@@ -494,9 +499,9 @@ fn tied_part_round_trips_256_and_512() {
     tied_round_trip(512, 0x512, Tamper::None);
 }
 
-/// 1,024 records (`d = 10`): two level-1 blocks per lane, the first part whose level-1 rows
-/// carry a block coordinate; with the tampering cases that depend on the blocks (the
-/// tampered input and parity copy sit in block 1).
+/// 1,024 records (`d = 10`): two level-1 blocks per lane, the first part whose chain has a
+/// block coordinate; with the tampering case that depends on the blocks (the flipped copy
+/// sits in block 1).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
 fn tied_part_round_trip_1024_two_blocks() {
@@ -504,11 +509,10 @@ fn tied_part_round_trip_1024_two_blocks() {
 }
 
 /// A span of `segments` segments of `2^d` record positions filled in order by `n` records,
-/// proven as one tied part (proof version 3, docs/bridge.md Section 5c, deviation K16): each
-/// `Y_sigma` equals the F_p side's walk of its segment's records (zero for an empty
-/// segment); swapped or flipped final vectors, a wrong share with honest rows (the output
-/// claim), a level-1 input copy flipped in segment 1 only (tie 1), another segment count and
-/// another record count are rejected.
+/// proven as one tied part (deviation K16; version 5): each `Y_sigma` equals the F_p side's
+/// walk of its segment's records (zero for an empty segment); swapped or flipped final
+/// vectors, a wrong final vector of segment 1 proven by the honest prover, a chain copy
+/// flipped in segment 1 only, another segment count and another record count are rejected.
 fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
     let gate = sponge::sponge_gate();
     let part = TiedPart::new_span(&gate, n, d, 0, segments, Profile::Fast);
@@ -530,11 +534,11 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
     verify(&out.final_vectors, &out.proof).expect("honest span");
     eprintln!(
         "span of {segments} segments (d {d}, n {n}): prove {t_prove:.2?}, verify {:.2?}, \
-         proof {} B, sponge nu {}, bridge rows {:?}",
+         proof {} B, sponge nu {}, chain rounds {}",
         t1.elapsed(),
         out.proof.bytes.len(),
         part.nu(),
-        part.cost().bridge.rows
+        part.cost().chain_rounds
     );
     // Y of every segment against the F_p side's main-domain walk of its records.
     let geom = Geometry::new(1 << d).unwrap();
@@ -562,20 +566,19 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
         verify(&out.final_vectors[..segments - 1], &out.proof),
         Err(KeccakError::Statement("final vector"))
     ));
-    // A wrong share of segment 1 with honest rows: the output claim fails.
+    // A wrong final vector of segment 1 proven by the honest prover: the chain fails.
     let committed = part.commit(&records);
-    let blocks = part.honest_blocks(&committed, &mats);
     let mut wrong = out.final_vectors.clone();
     wrong[1][2049] ^= 1;
     let proof = part
-        .prove_with_blocks(committed, sd, &mats, blocks, wrong.clone(), &fs)
+        .prove_with_final_vectors(committed, sd, &mats, wrong.clone(), &fs)
         .expect("prove");
     assert!(matches!(
         verify(&wrong, &proof),
-        Err(KeccakError::Tie("levels-2-3 output columns"))
+        Err(KeccakError::Tie("parity chain"))
     ));
-    // A level-1 input copy flipped in segment 1 only (lane 1, its first record), the shares
-    // of the tampered copies: tie 1 of lanes 0..3 fails.
+    // The chain's copy flipped in segment 1 only (lane 1, its first record), the final
+    // vectors of the tampered copy: the chain's final value is not the sponge's.
     let (sponge_buf, mut bits) = part.honest_parts(&records);
     let words = part.segment().input_bits() / 64;
     let col = 64 * words + part.segment().column(1, 33);
@@ -590,7 +593,7 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
         .expect("prove");
     assert!(matches!(
         verify(&ys, &proof),
-        Err(KeccakError::Tie("bridge copy of lanes 0..3"))
+        Err(KeccakError::Tie("parity chain"))
     ));
     // The proof checked as a span of another segment count or record count.
     let fewer = TiedPart::new_span(&gate, n, d, 0, segments + 1, Profile::Fast);
@@ -625,7 +628,7 @@ fn tied_span_round_trip(n: usize, d: u32, segments: usize, rng_seed: u64) {
 }
 
 /// Spans: three segments of 8 positions (8, 8, 3 records), three with the last empty (8, 8,
-/// 0; a fourth segment of the union is always empty), two segments of 64 (64, 6).
+/// 0; a fourth segment of the chain is always empty), two segments of 64 (64, 6).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
 fn tied_spans_round_trip() {
@@ -645,34 +648,24 @@ fn tied_part_shapes() {
     assert_eq!(part.segment().lane_len, 1 << 17);
     let cost = part.cost();
     assert_eq!((cost.sponge_nu, cost.sponge_m), (7, 26));
-    // Level 1: 6 rows of 2^17 inputs + 2^14 (k_log 18); levels 2-3: 6 x 8,192 + 4,224 (16).
-    assert_eq!(cost.bridge.k_log, [18, 16]);
-    assert_eq!((cost.bridge.nu, cost.bridge.m), (3, 22));
-    assert_eq!(
-        cost.bridge.committed_words,
-        6 * ((1 << 17) + (1 << 14)) / 128 + 448
-    );
+    // The chain: 17 in-block coordinates (2^17 positions), 3 lane coordinates; its input is
+    // eight lanes of 2^17 bits.
+    assert_eq!((cost.chain_rounds, cost.chain_input_bits), (20, 8 << 17));
     assert_eq!(cost.sponge_committed_words, 100 * 2_156);
-    // A full segment: sponge M = 32; bridge union M = 28 (k_log 20 and 20, nu 7, 96 + 1 live
-    // rows), dense stack 2^19 words, walker 1.9 x 10^7 entries (docs/keccak.md Section 10).
+    // A full segment: sponge M = 32; the chain has 19 + 4 + 3 = 26 rounds.
     let full = TiedPart::new(&gate, 1 << 13, 13, Profile::Fast);
     let cost = full.cost();
     assert_eq!(
         (cost.sponge_nu, cost.sponge_m, cost.sponge_dense_m),
         (13, 32, 32)
     );
+    assert_eq!(cost.chain_rounds, 26);
+    // A span of four full segments (a 32K batch): 28 rounds over 2^28 input bits.
+    let span = TiedPart::new_span(&gate, 1 << 15, 13, 0, 4, Profile::Slim);
     assert_eq!(
-        (
-            cost.bridge.nu,
-            cost.bridge.k_log,
-            cost.bridge.m,
-            cost.bridge.dense_m
-        ),
-        (7, [20, 20], 28, 26)
+        (span.cost().chain_rounds, span.cost().chain_input_bits),
+        (28, 1 << 28)
     );
-    assert_eq!(cost.bridge.rows, [96, 1]);
-    assert_eq!(cost.bridge.walker_entries, 19_234_816);
-    assert_eq!(cost.slot_walker_entries, 716_537_856);
     // A part proof must carry its part's count and d.
     let other = TiedPart::new_part(&gate, 100, 7, 1, Profile::Fast);
     assert_eq!(other.segment().offset, 1 << 17);
@@ -798,9 +791,9 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
 /// small sponge instance) and per Ligerito profile in
 /// `AGG_TIED_PROFILES` (default `fast,slim,secure`): event-2 commit, prove (the K14 path:
 /// the sponge commitment's prover data kept), verify, median of `AGG_TIED_REPS` (default 3)
-/// runs after one warmup; the proof bytes split into the bridge cap, the sponge proof and the
-/// bridge union's proof; the kept commit data's heap bytes. Matrices are derived outside
-/// the timed region.
+/// runs after one warmup; the proof bytes split into the header and chain (version 5) and
+/// the sponge proof; the kept commit data's heap bytes. Matrices are derived outside the
+/// timed region.
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn tied_part_profiles_bytes_and_times() {
@@ -839,7 +832,8 @@ fn tied_part_profiles_bytes_and_times() {
     };
     eprintln!(
         "| Records (d) | Profile | Commit (ms) | Prove (ms) | Verify (ms) | Proof (B) | of which \
-         bridge cap / sponge / bridge union | Commitment (B) | Kept commit data (MiB) |"
+         header and chain / sponge proof (with framing) | Commitment (B) | Kept commit data \
+         (MiB) |"
     );
     for &(n, d, segments) in &sizes {
         let mut rng = Rng::new(n as u64);
@@ -893,12 +887,9 @@ fn tied_part_profiles_bytes_and_times() {
                 .take_commit_data()
                 .map_or(0, |d| d.heap_bytes());
             let b = &out.proof.bytes;
-            let framed = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
-            let cap = framed(14);
-            let sponge_len = framed(18 + cap);
-            let bridge_len = framed(22 + cap + sponge_len);
+            let chain = 18 + 4 + ROUND_BYTES * part.cost().chain_rounds + 16;
             eprintln!(
-                "| {n} ({d}{}) | {name} | {:.1} | {:.1} | {:.1} | {} | {} / {} / {} | {} | {:.1} |",
+                "| {n} ({d}{}) | {name} | {:.1} | {:.1} | {:.1} | {} | {} / {} | {} | {:.1} |",
                 if segments > 1 {
                     format!(", {segments} segments")
                 } else {
@@ -908,28 +899,24 @@ fn tied_part_profiles_bytes_and_times() {
                 median(t_prove),
                 median(t_verify),
                 b.len(),
-                cap,
-                sponge_len,
-                bridge_len,
+                chain,
+                b.len() - chain,
                 commitment.to_bytes().len(),
                 kept as f64 / f64::from(1 << 20)
             );
             if std::env::var_os("AGG_TIED_BREAKDOWN").is_some() {
-                let sponge_at = 22 + cap;
-                let bridge_at = 26 + cap + sponge_len;
-                for (label, at, len, claims) in [
-                    ("sponge", sponge_at, sponge_len, 3),
-                    ("bridge union", bridge_at, bridge_len, 7),
-                ] {
-                    let up = UnionProof::from_bytes(&b[at..at + len], claims).unwrap();
-                    let [zc, lc, open, values] = up.size_breakdown();
-                    eprintln!(
-                        "  {label}: zerocheck {zc} B, lincheck {lc} B, opening {open} B, values \
-                         {values} B; Ligerito inner {} B:",
-                        up.flock.pcs_open.inner.ligerito.size_bytes()
-                    );
-                    up.flock.pcs_open.inner.ligerito.print_size_breakdown();
-                }
+                let up = part.decode_parts(&out.proof).expect("parse").sponge;
+                let [zc, lc, open, values] = up.size_breakdown();
+                let o = &up.flock.pcs_open;
+                eprintln!(
+                    "  sponge: zerocheck {zc} B, lincheck {lc} B, opening {open} B ({} ring \
+                     switches, {} multipoint dual values), values {values} B; Ligerito inner \
+                     {} B:",
+                    o.ring_switches.len(),
+                    o.frobenius.values.iter().map(Vec::len).sum::<usize>(),
+                    o.inner.ligerito.size_bytes()
+                );
+                o.inner.ligerito.print_size_breakdown();
             }
         }
     }

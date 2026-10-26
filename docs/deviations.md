@@ -889,6 +889,42 @@ Exhausted tie search (2026-10-25): if Flock's smallest passing tie nonce is `2^(
 prove_with_final_vectors}` return it and mode A's Keccak side maps it to
 `ProveError::Keccak` (`agg_piop::prover::KeccakSide::prove` now returns a `Result`).
 
+## K21. The virtual parity chain replaces the bridge union (tied-part proof version 5; spec Section 8; docs/bridge.md Sections 5b, 5c; `docs/parity-chain.md`)
+
+docs/bridge.md 5b, 5c (versions 2 to 4): a tied part proved `Y_sigma = M_3 M_2 M_1 b'_sigma`
+over GF(2) with a second Flock instance, the bridge union (level-1 rows holding `y1 = M_1 x`,
+one levels-2-3 row per segment), committed after `sd`, tied to the sponge instance by two
+lane-group claims (tie 1), to itself by two parity-copy claims (tie 2) and to the public final
+vectors by an output claim; its cap and proof travelled in the part's proof (203,052 B at
+`8@13/4` with `Slim`, plus a 2,048 B cap and 8 B of framing, docs/keccak.md 12.3).
+
+Code (`agg_keccak::tied`, version 5; `agg_bridge::parity_chain`): no bridge union. The tie
+challenger draws `eq_Y = eq(r_o, rho_3) eq(r_y, sigma)` (12 + `span_log` coordinates) after the
+sponge cap, the geometry and the final-vector digest, and the prover runs a degree-2 sum-check
+of `<eq_Y, Y> = sum_x W(x) b''(x)` over the `13 + d + span_log` variables of the committed
+bits (eight lanes: lanes 6, 7 are the sponge's word columns 48..63 with weight zero), with the
+public weight `W = M^T eq_Y` never materialized: a block phase over `(i_mid, t, sigma)` from
+the tables `G = M_2^T M_3^T eq_Y` and the honest level-1 parities `y1`, then an in-block phase
+over the position. Each round absorbs `(q(1), q(inf))`, grinds and draws its challenge. The
+final claim is the sponge's bit polynomial at the chain's point; its value `v` is absorbed,
+the 32-byte tie binding squeezed, and the sponge instance's Flock opening proves `v` as a
+third ring-switched claim (`flock_union::BitClaim`, `SkipPoint::Eq` of vendored Flock
+PATCH.md Section 7, a multilinear skip basis). The verifier recomputes the claim from `Y`,
+replays the rounds, checks `T_R = W~(r) eq(r_rec[nu_s..], 0) v` with its own `W~(r)` (about
+`10^7` additions) and verifies the sponge proof with the public claim and the bit claim.
+Proof bytes: `AGGKCT || 5 || profile || LE32(n) || d || S || LE32(tie nonce) || LE32(eq_Y
+nonce) || rounds (q(1) || q(inf) || LE32(nonce)) || v || LE32(len) || sponge proof`.
+
+Work (docs/soundness.md 3.6): the tie site carries `L_s (nu_s + 3)` (the public claim only),
+the `eq_Y` site `L_s (12 + span_log)`, every round `2 L_s` (`agg_bridge::pow::part_work`);
+the plan of event 0 names all of them per tied part (site classes 9 and 10,
+`agg_piop::pow::KeccakPlan::parts`). Why: the union cost a second Flock commitment and
+opening per part (about 205 KB per span, the larger part of the GF(2) side's bytes) and its
+circuit and instance were part of assumptions (K) and (F); the chain costs about 1 KB of
+rounds and one more ring-switched claim (about 4 KB: `s_hat_v` and 128 multipoint dual values).
+The F_p side of the bridge is unchanged. The bridge union module (`bridge_union`) stays as a
+reference with its unit tests; mode A no longer uses it.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):

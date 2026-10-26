@@ -432,7 +432,7 @@ impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
         commitments: &[Vec<u8>],
     ) -> Option<agg_piop::pow::KeccakPlan> {
         let mut plan = self.0.plan(geometry, commitments)?;
-        plan.tie_bits.iter_mut().for_each(|g| *g += 1);
+        plan.parts.iter_mut().for_each(|w| w.tie_bits += 1);
         Some(plan)
     }
 
@@ -550,10 +550,10 @@ fn corrupted_aggregates_are_rejected() {
             Some((0, SegmentRejection::Item(ItemError::Truncated)))
         ));
 
-        // The tie work and binding (tied-part proof version 4, docs/soundness.md 4.5, 6.3):
-        // part 1's tie nonce one below the honest (smallest passing) one, or of 24 bits (Slim
-        // at d = 4 has 16 bits of work, a 23-bit nonce), fails the predicate; a version-3
-        // proof is refused.
+        // The tie work and binding (tied-part proof version 5, docs/soundness.md 3.6, 4.5,
+        // 6.3): part 1's tie nonce one below the honest (smallest passing) one, or of 17 bits
+        // (Slim at d = 4 with 4 records: nu_s = 3, tie numerator 50 x 6 = 300, 9 bits of work,
+        // a nonce of at most 16 bits), fails the predicate; a version-4 proof is refused.
         let nonce_of = |bytes: &[u8]| {
             u32::from_le_bytes(bytes[tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].try_into().unwrap())
         };
@@ -568,7 +568,7 @@ fn corrupted_aggregates_are_rejected() {
             assert_eq!(p.proofs[1][6], tied::VERSION);
             nonce_of(&p.proofs[1])
         };
-        assert!(honest_nonce < 1 << 23);
+        assert!(honest_nonce < 1 << 16);
         let tie_rejected = |r: &VerifyCostReport| {
             matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("tie nonce"))
         };
@@ -577,18 +577,18 @@ fn corrupted_aggregates_are_rejected() {
             expect_rejected("tie nonce below the honest one", &r, keccak);
             assert!(tie_rejected(&r));
         }
-        let r = verify(&set_nonce(honest_nonce + (1 << 23)));
-        expect_rejected("tie nonce of 24 bits", &r, keccak);
+        let r = verify(&set_nonce(honest_nonce + (1 << 16)));
+        expect_rejected("tie nonce of 17 bits", &r, keccak);
         assert!(tie_rejected(&r));
-        let r = verify(&with_items(&honest, |_, p| p.proofs[1][6] = 3));
-        expect_rejected("tied-part proof version 3", &r, keccak);
+        let r = verify(&with_items(&honest, |_, p| p.proofs[1][6] = 4));
+        expect_rejected("tied-part proof version 4", &r, keccak);
         assert!(matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("version")));
         // The PIOP work nonces: a changed byte of the stream is rejected.
         let mut p = honest.clone();
         p.work[0] ^= 0x01;
         expect_rejected("PIOP work nonce", &verify(&p), |_| true);
         // Event 0 binds the plan: a verifier whose plan names other tie difficulties derives
-        // another transcript (here sd, so the bridge union's matrices differ).
+        // another transcript (here sd, so the parity chain's matrices differ).
         let gate = sponge_gate();
         let other_plan = verify_timed(
             &public,
@@ -975,12 +975,12 @@ fn tampered_witnesses_are_rejected_end_to_end() {
                               _: usize,
                               recs: &[SpongeRecord]| {
             let (sponge, mut z) = seg.honest_parts(recs);
-            let c = seg.layout().segment.column(0, j + 256 * rho + 1024 * i);
+            let c = seg.segment().column(0, j + 256 * rho + 1024 * i);
             z[c / 64] ^= 1 << (c % 64);
             (sponge, z)
         };
         run(
-            "Flock: bit flipped in the bridge slot copy only",
+            "Flock: bit flipped in the parity chain's copy only",
             &AggregateHooks {
                 flock_witness: Some(&slot_only),
                 ..AggregateHooks::default()

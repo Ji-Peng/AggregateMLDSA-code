@@ -17,20 +17,20 @@
 //! spec Section 1) is split into parts of `2^{d_part}` record positions, `d_part =
 //! clamp(part_log2, min_part_log2, d_seg)` (default [`DEFAULT_PART_LOG2`]; at most two parts
 //! per segment, [`MAX_PARTS_LOG2`]); each part with live records is
-//! one tied part (`agg_keccak::tied`, deviations K11, K13): a Flock sponge instance of its
-//! records and a Flock bridge union (level-1 rows and one levels-2-3 row) proving the part's
-//! share `Y_{sigma, s} = M^{(sigma)} b'_s`, tied by evaluation claims. The shares XOR to
-//! `Y_sigma` (the last share is implied), which the F_p side proves for the committed bits
-//! `b` (`docs/deviations.md` K10). The event-2 item carries one cap per part (the sponge
-//! instance's; the bridge union depends on `sd` and its cap travels in the part's proof), the
-//! event-6 item one proof per part ([`crate::wire`]). Part `s` seeds its Flock challengers
-//! with [`part_seed`]`(fs_sigma, s)`.
+//! one tied part (`agg_keccak::tied`, tied-part proof version 5, deviation K21): a Flock
+//! sponge instance of its records whose opening also proves the bit claim of the virtual
+//! parity chain, a sum-check that reduces the part's share `Y_{sigma, s} = M^{(sigma)} b'_s`
+//! to that claim (`docs/parity-chain.md`). The shares XOR to `Y_sigma` (the last share is
+//! implied), which the F_p side proves for the committed bits `b` (`docs/deviations.md`
+//! K10). The event-2 item carries one cap per part (the sponge instance's), the event-6 item
+//! one proof per part ([`crate::wire`]). Part `s` seeds its Flock challengers with
+//! [`part_seed`]`(fs_sigma, s)`.
 //!
 //! Span (deviation K16, [`AggregatorConfig::span`], the default): a batch of more than one
 //! segment whose parts are whole segments is proven by ONE tied part over all its segments
 //! (`agg_keccak::tied::TiedPart::new_span`): one sponge instance of all `N` records and one
-//! bridge union whose levels-2-3 rows prove every `Y_sigma`, so the Flock openings are paid
-//! once per batch instead of once per segment. Segment 0's items carry the span's cap and
+//! parity chain over every segment's bits, whose claim `<eq_Y, Y>` covers every `Y_sigma`, so
+//! the Flock opening is paid once per batch instead of once per segment. Segment 0's items carry the span's cap and
 //! proof, the other segments' items say "covered by segment 0" ([`crate::wire`]); the
 //! verifier checks the span when it reaches the last segment, seeded by
 //! [`span_seed`]`(fs_0, .., fs_{S-1})`.
@@ -171,7 +171,7 @@ fn spans_with_floor(geometry: &Geometry, part_log2: u32, span: bool, floor: u32)
 /// The Keccak side's part of the proof-of-work plan of a mode-A batch (docs/soundness.md
 /// 6.4): one tie site for a span (`S` = the segments), else one per part with live records
 /// of every segment in order (`S` = 1), each with the difficulty of its public geometry
-/// ([`TiedPart::plan_tie_bits`]).
+/// ([`TiedPart::plan_work`]: the tie site, the `eq_Y` site and the parity-chain rounds).
 ///
 /// # Panics
 /// If `profile` is not a mode-A profile.
@@ -201,21 +201,21 @@ fn keccak_plan_with_floor(
         return KeccakPlan {
             span: u8::try_from(segments).expect("at most 255 segments"),
             d_part: d as u8,
-            tie_bits: vec![TiedPart::plan_tie_bits(gate, geometry.n, d, segments, ligerito)],
+            parts: vec![TiedPart::plan_work(gate, geometry.n, d, segments, ligerito)],
         };
     }
     let d_part = SegmentParts::plan_with_floor(geometry, 0, part_log2, floor).d_part;
-    let tie_bits = (0..segments)
+    let parts = (0..segments)
         .flat_map(|sigma| {
             let plan = SegmentParts::plan_with_floor(geometry, sigma, part_log2, floor);
             (0..plan.count()).map(move |s| plan.local(s).len())
         })
-        .map(|n| TiedPart::plan_tie_bits(gate, n, d_part, 1, ligerito))
+        .map(|n| TiedPart::plan_work(gate, n, d_part, 1, ligerito))
         .collect();
     KeccakPlan {
         span: 1,
         d_part: d_part as u8,
-        tie_bits,
+        parts,
     }
 }
 
@@ -273,7 +273,7 @@ impl SegmentParts {
 }
 
 /// Builds the Flock witness (sponge slot buffers and the part's lane-major input bits, the
-/// bridge union's source) of one part from its records; the honest builder is
+/// parity chain's copy of `b'`) of one part from its records; the honest builder is
 /// `TiedPart::honest_parts`. Called at event 2 and again at event 6, so it must be
 /// deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
 pub type PartWitness<'a> =
@@ -511,7 +511,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
 }
 
 impl KeccakSide for FlockProver<'_, '_> {
-    /// One tie site per tied part (docs/soundness.md 6.4, [`keccak_plan`]).
+    /// The sites of every tied part (docs/soundness.md 6.4, [`keccak_plan`]).
     fn plan(&self, segments: usize) -> KeccakPlan {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
         keccak_plan_with_floor(
@@ -861,14 +861,14 @@ impl KeccakVerifier for FlockVerifier<'_> {
             return Some(KeccakPlan {
                 span: first.span,
                 d_part: first.d_part as u8,
-                tie_bits: vec![TiedPart::plan_tie_bits(self.gate, geometry.n, first.d_part, segments, profile)],
+                parts: vec![TiedPart::plan_work(self.gate, geometry.n, first.d_part, segments, profile)],
             });
         }
         let d_part = first.d_part;
         if d_part < min_part_log2(geometry) || d_part > geometry.d_seg() {
             return None;
         }
-        let mut tie_bits = Vec::new();
+        let mut parts = Vec::new();
         for (sigma, item) in items.iter().enumerate() {
             if item.span != 1 || item.d_part != d_part {
                 return None;
@@ -879,14 +879,14 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 live: geometry.live_in_segment(sigma),
                 d_part,
             };
-            tie_bits.extend(
-                (0..plan.count()).map(|s| TiedPart::plan_tie_bits(self.gate, plan.local(s).len(), d_part, 1, profile)),
+            parts.extend(
+                (0..plan.count()).map(|s| TiedPart::plan_work(self.gate, plan.local(s).len(), d_part, 1, profile)),
             );
         }
         Some(KeccakPlan {
             span: 1,
             d_part: d_part as u8,
-            tie_bits,
+            parts,
         })
     }
 
@@ -1928,13 +1928,13 @@ mod tests {
         let gate = sponge_gate();
         let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         for (d_sig, profile, span, want) in [
-            (3, FlockProfile::Slim, true, "1d9b37d94b1b32c19fae1312ac52d5da937824e6b8253585c00a3ccd67d1fd32"),
-            (10, FlockProfile::Slim, true, "2d289df145671419fe780abaa2542b28870ce0349ac8cd82ccd9da6a5b091a5b"),
-            (13, FlockProfile::Slim, true, "86581fc1f62e7dfa20d85d03868821a6cc83296e78c9d3e2fcdedaa6d2449e73"),
-            (15, FlockProfile::Fast, true, "57f65044067580b0234487193ebfd49e29093d40423f528600b804db6d90e156"),
-            (15, FlockProfile::Slim, true, "df9161a54a441de0e4065c8129aa9f956f4146427bd3336e59639e0cfdf2e38c"),
-            (15, FlockProfile::Slim, false, "5f69f20374997a0b0a025cf853549d98152025a4ebf946c84a55235c03c70ac0"),
-            (15, FlockProfile::Slim8, true, "902578ff518bcb5adfb672be263e13286e32226d2cdfb8853066b89250f64795"),
+            (3, FlockProfile::Slim, true, "a56daef1067736a1465e21e1099da13ad3dc355f90594e4f401251071f845328"),
+            (10, FlockProfile::Slim, true, "11b035262a5b998594b795e346241abec1b953a14cb4b8afa6d52a444634c960"),
+            (13, FlockProfile::Slim, true, "ca232ca0195b87274440b1745808795c896ef4ceaa4e39d32c08f137f54d75db"),
+            (15, FlockProfile::Fast, true, "98ed5d446d68fe2416580acc5469c29c90d53e1d88937a6c381773b89aa98d00"),
+            (15, FlockProfile::Slim, true, "911303030ad4a06781f89ceff4f373ffdbfe6da1946ae54c30a6a965b3c28cb2"),
+            (15, FlockProfile::Slim, false, "7aa378b470947b1f64a8ae049c4c3741f4ebb493583c305e552750f448f79896"),
+            (15, FlockProfile::Slim8, true, "1467d650376c39e30bde4f7ad9d12ecee8c4f5b3f580ae81ea7364e840b8d8d8"),
         ] {
             let n = 1 << d_sig;
             let geometry = Geometry::new(n).unwrap();
@@ -1943,9 +1943,16 @@ mod tests {
             let plan = PowPlan::new(&manifest, profile, &keccak);
             assert_eq!(hex(plan.digest()), want, "2^{d_sig} {profile:?} span {span}");
         }
-        // Parts of 2^7 at N = 256: two tie sites of 16 bits (d = 7, nu_s = 8, Slim).
+        // Parts of 2^7 at N = 256: two tied parts (d = 7, nu_s = 8, Slim): tie 50 x 11 = 550
+        // (10 bits), eq_Y 50 x 12 = 600 (10 bits), 20 rounds of 2 x 50 = 100 (7 bits).
         let keccak = keccak_plan(&gate, &Geometry::new(256).unwrap(), 7, true, FlockProfile::Slim);
-        assert_eq!((keccak.span, keccak.d_part, keccak.tie_bits), (1, 7, vec![16, 16]));
+        let work = agg_bridge::pow::PartWork {
+            tie_bits: 10,
+            eq_bits: 10,
+            round_bits: 7,
+            rounds: 20,
+        };
+        assert_eq!((keccak.span, keccak.d_part, keccak.parts), (1, 7, vec![work, work]));
     }
 
     #[test]
