@@ -354,35 +354,108 @@ impl ChainLayout {
         eq_eval(&point.sigma, &eq_y.r_y) * inner
     }
 
+    /// The words of the `2^lb` lanes of block `(sigma, i_mid)` at word `w` of the block.
+    #[inline]
+    fn lane_words(&self, bits: &[u64], sigma: usize, i_mid: usize, w: usize) -> [u64; 8] {
+        let start = self.layout.block_len() * i_mid;
+        std::array::from_fn(|t| {
+            if t < self.lanes_padded() {
+                bits[self.bit_index(sigma, t, start) / 64 + w]
+            } else {
+                0
+            }
+        })
+    }
+
     /// The level-1 parities `y1 = M_1 b''` of every block of the input as `GF(2^128)` 0/1
-    /// entries, `[beta][rho_1]`.
+    /// entries, `[beta][rho_1]`. The `2^lb <= 8` lanes of a position travel as one byte mask
+    /// (14 byte XORs per position with a set bit, as `Level1Layout::parities`), one task per
+    /// `(sigma, i_mid)`.
     fn level1_table(&self, m1: &SparseMatrix, bits: &[u64]) -> Vec<F128> {
         let n_blocks = 1usize << self.block_vars();
         let (blen, rows1) = (self.layout.block_len(), m1.rows);
+        let (blocks, lanes_p) = (self.layout.blocks(), self.lanes_padded());
         let base = self.layout.zeta1_base();
+        let masks: Vec<Vec<u8>> = (0..blocks << self.span_log)
+            .into_par_iter()
+            .map(|g| {
+                let (sigma, i_mid) = (g / blocks, g % blocks);
+                let mut m = vec![0_u8; rows1];
+                for w in 0..blen / 64 {
+                    let words = self.lane_words(bits, sigma, i_mid, w);
+                    let mut any = words.iter().fold(0, |acc, x| acc | x);
+                    while any != 0 {
+                        let z = any.trailing_zeros() as usize;
+                        any &= any - 1;
+                        let mask = words
+                            .iter()
+                            .enumerate()
+                            .fold(0_u8, |acc, (t, x)| acc | ((((x >> z) & 1) as u8) << t));
+                        for &r in m1.column(base + 64 * w + z) {
+                            m[r as usize] ^= mask;
+                        }
+                    }
+                }
+                m
+            })
+            .collect();
         let mut out = vec![F128::ZERO; n_blocks * rows1];
         out.par_chunks_mut(rows1)
             .enumerate()
             .for_each(|(beta, row)| {
-                let start = self.block_start(beta);
-                let mut parity = vec![0_u64; rows1.div_ceil(64)];
-                for w in 0..blen / 64 {
-                    let mut word = bits[start / 64 + w];
-                    while word != 0 {
-                        let z = word.trailing_zeros() as usize;
-                        word &= word - 1;
-                        for &r in m1.column(base + 64 * w + z) {
-                            parity[r as usize / 64] ^= 1 << (r % 64);
-                        }
-                    }
-                }
-                for (rho1, o) in row.iter_mut().enumerate() {
-                    if (parity[rho1 / 64] >> (rho1 % 64)) & 1 == 1 {
+                let (i_mid, rest) = (beta % blocks, beta / blocks);
+                let (t, sigma) = (rest % lanes_p, rest / lanes_p);
+                let m = &masks[sigma * blocks + i_mid];
+                for (o, &x) in row.iter_mut().zip(m) {
+                    if (x >> t) & 1 == 1 {
                         *o = F128::ONE;
                     }
                 }
             });
         out
+    }
+
+    /// `bf(zeta) = sum_beta eq(r_block, beta) b''(beta, zeta)` for every in-block position:
+    /// per `(sigma, i_mid)` a 256-entry table of the lane weights' subset sums, looked up
+    /// with the byte of the position's lane bits.
+    fn block_fold(&self, bits: &[u64], e_b: &[F128]) -> Vec<F128> {
+        let (blocks, lanes_p) = (self.layout.blocks(), self.lanes_padded());
+        let groups = blocks << self.span_log;
+        let tables: Vec<Vec<F128>> = (0..groups)
+            .map(|g| {
+                let (sigma, i_mid) = (g / blocks, g % blocks);
+                let lane_e: [F128; 8] = std::array::from_fn(|t| {
+                    if t < lanes_p {
+                        e_b[i_mid + blocks * (t + lanes_p * sigma)]
+                    } else {
+                        F128::ZERO
+                    }
+                });
+                let mut tab = vec![F128::ZERO; 256];
+                for byte in 1..256_usize {
+                    let low = byte & (byte - 1);
+                    tab[byte] = tab[low] + lane_e[(byte ^ low).trailing_zeros() as usize];
+                }
+                tab
+            })
+            .collect();
+        let mut bf = vec![F128::ZERO; self.layout.block_len()];
+        bf.par_chunks_mut(64).enumerate().for_each(|(w, acc)| {
+            for (g, tab) in tables.iter().enumerate() {
+                let words = self.lane_words(bits, g / blocks, g % blocks, w);
+                let mut any = words.iter().fold(0, |a, x| a | x);
+                while any != 0 {
+                    let z = any.trailing_zeros() as usize;
+                    any &= any - 1;
+                    let byte = words
+                        .iter()
+                        .enumerate()
+                        .fold(0_usize, |a, (t, x)| a | ((((x >> z) & 1) as usize) << t));
+                    acc[z] += tab[byte];
+                }
+            }
+        });
+        bf
     }
 
     /// Prove `sum_x W(x) b''(x) = claim` for the input `bits` (module docs) under the matrices
@@ -446,8 +519,8 @@ impl ChainLayout {
             running = round_value(running, q1, qinf, r);
             messages.push((q1, qinf));
             rs.push(r);
-            fold_blocks(&mut gt, len, rows1, r);
-            fold_blocks(&mut yt, len, rows1, r);
+            gt = fold_blocks(&gt, len, rows1, r);
+            yt = fold_blocks(&yt, len, rows1, r);
             len = half;
         }
         drop(yt);
@@ -461,18 +534,7 @@ impl ChainLayout {
             .with_min_len(1024)
             .map(|zeta| gather(&mats.m1, base + zeta, |r| g[r]))
             .collect();
-        let e_b = eq_table(&rs);
-        let mut bf = vec![F128::ZERO; blen];
-        bf.par_chunks_mut(64).enumerate().for_each(|(wz, acc)| {
-            for (beta, &e) in e_b.iter().enumerate() {
-                let mut word = bits[self.block_start(beta) / 64 + wz];
-                while word != 0 {
-                    let z = word.trailing_zeros() as usize;
-                    word &= word - 1;
-                    acc[z] += e;
-                }
-            }
-        });
+        let mut bf = self.block_fold(bits, &eq_table(&rs));
         let nb = self.block_vars();
         for round in 0..self.zeta_vars() {
             let (q1, qinf) = pair_message(&w, &bf);
@@ -600,30 +662,18 @@ fn block_message(g: &[F128], y: &[F128], rows: usize) -> (F128, F128) {
         .reduce(|| (F128::ZERO, F128::ZERO), |p, q| (p.0 + q.0, p.1 + q.1))
 }
 
-/// Fold the lowest block variable of a `[beta][rho_1]` table of `len` blocks in place: block
-/// `k` becomes `T[2k] + r (T[2k] + T[2k + 1])`; the first `len / 2` blocks hold the result.
-fn fold_blocks(t: &mut [F128], len: usize, rows: usize, r: F128) {
-    let half = len / 2;
-    let (head, _) = t.split_at_mut(len * rows);
-    // Block k of the result is computed from blocks 2k, 2k + 1; write block k in place
-    // after reading both (k <= 2k), sequentially over k, each block in parallel over rows.
-    for k in 0..half {
-        let (lo, hi) = head.split_at_mut(2 * k * rows + rows);
-        let src1 = &hi[..rows];
-        let (dst_area, src0) = lo.split_at_mut(2 * k * rows);
-        if k == 0 {
-            src0.par_iter_mut()
-                .zip(src1.par_iter())
-                .with_min_len(1024)
-                .for_each(|(a, &b)| *a += r * (*a + b));
-        } else {
-            let dst = &mut dst_area[k * rows..(k + 1) * rows];
-            dst.par_iter_mut()
-                .zip(src0.par_iter().zip(src1.par_iter()))
-                .with_min_len(1024)
-                .for_each(|(d, (&a, &b))| *d = a + r * (a + b));
+/// Fold the lowest block variable of a `[beta][rho_1]` table of `len` blocks: block `k` of the
+/// result is `T[2k] + r (T[2k] + T[2k + 1])` (parallel over the result's blocks).
+fn fold_blocks(t: &[F128], len: usize, rows: usize, r: F128) -> Vec<F128> {
+    let mut out = vec![F128::ZERO; len / 2 * rows];
+    out.par_chunks_mut(rows).enumerate().for_each(|(k, dst)| {
+        let src0 = &t[2 * k * rows..(2 * k + 1) * rows];
+        let src1 = &t[(2 * k + 1) * rows..(2 * k + 2) * rows];
+        for ((d, &a), &b) in dst.iter_mut().zip(src0).zip(src1) {
+            *d = a + r * (a + b);
         }
-    }
+    });
+    out
 }
 
 #[cfg(test)]

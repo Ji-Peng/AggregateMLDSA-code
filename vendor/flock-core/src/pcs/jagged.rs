@@ -1557,7 +1557,10 @@ pub(crate) fn build_merged_weight_and_prime(
         /// `x ↦ φ(eq_col[c]·x)` is F₂-linear, so its byte decomposition IS
         /// the map. Measured at m=32 against the per-slot multiply: W build
         /// 32.1 → 25.3 ms MT (3/3), 227 → 167 ST; the bake is ~1 ms MT.
-        Baked(Vec<F128>),
+        /// The baked tables and the column factors (agg-mldsa patch, PATCH.md Section 1,
+        /// K21: a column whose factor is zero has an all-zero table and is neither baked
+        /// nor swept).
+        Baked(Vec<F128>, Vec<F128>),
         Combined(&'a [F128]),
         /// AggregateMLDSA patch: a ring-switched claim over SHORT columns, evaluated per
         /// slot as `φ(eq_col[c]·r)` with one field multiply and one fold-table lookup.
@@ -1587,6 +1590,9 @@ pub(crate) fn build_merged_weight_and_prime(
                 return; // empty column: never visited
             }
             let cf = eq_c[c];
+            if cf == F128::ZERO {
+                return; // zero column factor: the table is zero (agg-mldsa patch, K21)
+            }
             for k in 0..FOLD_N_BYTES {
                 for b in 0..FOLD_TABLE_SIZE {
                     let v = (b as u64) << (8 * (k % 8));
@@ -1611,7 +1617,8 @@ pub(crate) fn build_merged_weight_and_prime(
             } => {
                 let eq_c = build_eq_table(z_col);
                 let side = if bake_columns {
-                    ColSide::Baked(bake(&eq_c, table))
+                    let baked = bake(&eq_c, table);
+                    ColSide::Baked(baked, eq_c)
                 } else {
                     ColSide::Short { eq_c, tab: table }
                 };
@@ -1669,9 +1676,24 @@ pub(crate) fn build_merged_weight_and_prime(
                 let seg_end = ps[col + 1].min(live_end);
                 let row0 = (e - ps[col]) as usize;
                 let dst = &mut out[(e - base) as usize..(seg_end - base) as usize];
+                // agg-mldsa patch (PATCH.md Section 1, K21): a ring-switched claim's column
+                // with a zero factor contributes zero (its fold map is the zero map).
+                let zero_col = match side {
+                    ColSide::Baked(_, eq_c) | ColSide::Short { eq_c, .. } => {
+                        eq_c[col] == F128::ZERO
+                    }
+                    ColSide::Combined(_) => false,
+                };
+                if zero_col {
+                    if first_claim {
+                        dst.fill(F128::ZERO);
+                    }
+                    e = seg_end;
+                    continue;
+                }
                 let rows = &eq_r[row0..row0 + dst.len()];
                 match side {
-                    ColSide::Baked(all) => {
+                    ColSide::Baked(all, _) => {
                         let tab_c = &all[col * TAB..(col + 1) * TAB];
                         if first_claim {
                             for (slot, &r) in dst.iter_mut().zip(rows) {

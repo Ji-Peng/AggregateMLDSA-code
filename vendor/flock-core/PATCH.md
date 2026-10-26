@@ -21,6 +21,12 @@ Prover-only and exact: `x ↦ φ(eq_col[c]·x)` is F₂-linear, so the baked byt
 and the direct evaluation compute the same `W` bit for bit; the proof bytes, the transcript
 and the verifier are unchanged, and proofs made with this copy verify with upstream Flock.
 
+Addition (agg-mldsa K21): a ring-switched claim's column whose factor `eq_col[c]` is zero
+contributes the zero map, so it is neither baked (`bake` returns early) nor swept (the
+segment sweep skips it, writing zeros if the claim is the first). The bit claim of the
+parity chain addresses 64 of the sponge's 2,156 used word columns. Exact for the same
+reason; `W` is unchanged.
+
 ## 2. A Ligerito parameter set: `LigeritoProfile::Slim8` (agg-mldsa deviation K18)
 
 `src/pcs/ligerito.rs` and `src/pcs/commit.rs`: a sixth profile, `Slim8`, with `Slim`'s
@@ -108,6 +114,11 @@ across four blocks (field-identical to the scalar multiply), the dot products wi
 `WideGhashX4`. The terms are pushed in the portable order. Measured locally (CLMUL build,
 3 threads, load 6-7): block statistics 800-1,000 ms -> 77-95 ms at 8,192 records;
 aggregates unchanged. Test: `pcs::block_stats_x86::tests::kernels_match_portable`.
+
+Addition (agg-mldsa K21): a block whose bank row is zero has a zero statistic (the inner
+product, `kappa` times it and its squarings are zero), so the portable loop returns zero for
+it and the AVX-512 kernel returns a zero chunk when all its bank rows are zero; the bit claim
+of the parity chain has a nonzero bank on 64 word columns only. Exact.
 
 ## 5. Verifier-visible: list-aware work at the outer sites (agg-mldsa deviation K19)
 

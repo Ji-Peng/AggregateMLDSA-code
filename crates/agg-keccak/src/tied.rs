@@ -191,7 +191,12 @@ fn site_work(
 /// The 32-byte tie binding: two `F128` squeezes.
 fn squeeze_binding(ch: &mut FsChallenger) -> [u8; 32] {
     let mut binding = [0_u8; 32];
-    for (chunk, word) in binding.chunks_exact_mut(16).zip(ch.sample_f128_vec(2)) {
+    for (chunk, word) in binding
+        .as_chunks_mut::<16>()
+        .0
+        .iter_mut()
+        .zip(ch.sample_f128_vec(2))
+    {
         chunk[..8].copy_from_slice(&word.lo.to_le_bytes());
         chunk[8..].copy_from_slice(&word.hi.to_le_bytes());
     }

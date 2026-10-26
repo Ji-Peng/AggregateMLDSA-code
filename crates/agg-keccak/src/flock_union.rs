@@ -126,7 +126,12 @@ pub fn bit_bank(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
     let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
     let rows = 1usize << nu;
     let mut bank = vec![F128::ZERO; eq_col.len() << LOG_PACKING];
-    for (c, chunk) in bank.chunks_exact_mut(1 << LOG_PACKING).enumerate() {
+    for (c, chunk) in bank
+        .as_chunks_mut::<{ 1 << LOG_PACKING }>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
         if eq_col[c] != F128::ZERO {
             chunk.copy_from_slice(&fold_1b_rows_naive(&z[c * rows..(c + 1) * rows], &eq_row));
         }
