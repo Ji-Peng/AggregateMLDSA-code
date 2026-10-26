@@ -20,7 +20,7 @@ except for the proof-of-work nonces of wire version 2/3.
 | P5 stage parity tables built while the Flock span is proven | done | `7476508` |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) | `94bd37e`, `808b763` |
 | instance `T` reused in the witness; vectorized `public_t` | done | `51c3aea` |
-| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22), merged into `main` 2026-10-27 (`8adea56`): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, rerun at `52c3d23`: 4 / 8 threads 6.34 / 6.35 s vs main 7.31 s; the cloud run should sweep 4 / 6 / 8 | `f34d1bd`, `52c3d23` |
+| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22), merged into `main` 2026-10-27 (`8adea56`): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, rerun at `52c3d23`: 4 / 8 threads 6.34 / 6.35 s vs main 7.31 s; cloud sweep at 32K on `184374f` (Section 8.1): pools 0 / 4 / 6 / 8 / 12 give 14.26 / 13.85 / 12.78 / 12.75 / 13.15 s, so the default 8 stays | `f34d1bd`, `52c3d23` |
 | P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open | - |
 
 Outcome on the cloud VM (`ref/notes/bench-cloud.md`, Phase 8 check of `1fef53d`, 2 runs
@@ -376,3 +376,131 @@ taskset -c 0,1,3-15 cargo test --release -p agg-cli
 Open: an uncached public_data with fewer copies (keep the packed `t1` and unpack per record,
 or borrow `pk` from the inputs); a packed 23-bit `A` cache (memo 3.4 (b)); AVX2 kernels
 would need a crate outside the `unsafe_code = "forbid"` rule.
+
+## 8. Cloud profile at 32K after the Stage B merges (`184374f`; bench-cloud.md Phase 10b)
+
+| Field | Value |
+| --- | --- |
+| Status | informative; **measured on the cloud VM** (one session, 2026-10-26 23:10-23:45 UTC, VM `agg-bench-c4d-prof`, c4d-highmem-16, AMD EPYC 9B45, 8 cores x 2 SMT, rustc 1.99.1). Timed runs are `agg bench` 1 warmup + 3 (sweep: + 2; other relations: + 1), so direction-grade, not the paper's medians of 5. Lever savings in 8.4 are estimates. |
+| Revisions | timed runs: code `main` `184374f` (tied-part v5, wire v4, fork-join K22, H-FIPS L10, verifier kernels); profile runs: branch `cloud-profile` `db4a38d` = `184374f` + opt-in `AGG_PHASE_STAMPS` (stderr wall-clock stamps at each prover step end; the aggregate is byte-identical, checked with `cmp`) |
+| Build | CLMUL (`RUSTFLAGS='-C target-feature=+pclmulqdq'`, `cargo build --release --locked -p agg-cli`), 16 threads, Slim, span on, Flock pool 8 (default) unless stated |
+| Raw logs | top-level `ref/notes/overnight-20261026/cloud-profile.md` (per-run numbers and predictions); raw files in that session's scratchpad (not committed) |
+
+Method: `AGG_PHASE_STAMPS=1 agg aggregate` in a fresh process (32K: 5 runs, 3 of them with every
+trace of Section 1 on; 8K: 2 runs at 16 threads, 1 at `RAYON_NUM_THREADS=1`) beside a sampler of
+`/proc/stat` every 100 ms (all 16 vCPUs; `scripts/cpusample.py`; medians by
+`scripts/phase_profile.py`). The stamps give the step boundaries in wall-clock time, so the
+busy share of each step is the time-weighted mean of the samples inside it. "Busy" counts SMT
+siblings: 100% busy is not twice the throughput of 50%.
+
+### 8.1 Timed results at 32K (H-u unless stated; in-process `agg bench`)
+
+| Run | Prove median (min) | Flock proofs / fork-join wall | Verify uncached / cached | Prover VmHWM | Aggregate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pool 8 (default), 1+3 | **12,745.2 (12,713.5) ms** | 7,822.9 / 7,823.1 ms | 392.0 / 163.3 ms | 30,905 MiB | 1,469,874 B (44.9 B/sig) |
+| pool 0 (no fork: Flock proofs on 16 threads, then the PIOP), 1+2 | 14,257.2 (14,216.7) ms | 4,310.7 alone / - | 390.0 / 162.8 ms | 27,067 MiB | same |
+| pool 4, 1+2 | 13,852.3 (13,841.7) ms | 8,922.9 / 8,923.1 | 387.1 / 162.1 ms | 30,654 MiB | same |
+| pool 6, 1+2 | 12,777.3 (12,773.5) ms | 7,842.0 / 7,842.2 | 389.4 / 162.5 ms | 30,183 MiB | same |
+| pool 12, 1+2 | 13,149.1 (13,117.6) ms | 7,837.6 / 8,164.6 | 384.6 / 161.7 ms | 31,286 MiB | same |
+| H-exact, 1+1 | 13,015.8 ms | 7,938.9 / 7,939.2 | 392.4 / 162.1 ms | 30,681 MiB | 1,469,861 B |
+| H-FIPS, 1+1 | 13,714.3 ms | 8,285.1 / 8,288.1 | 391.4 / 171.9 ms | 31,542 MiB | 1,470,050 B |
+| H-u reference right after H-FIPS, 1+1 | 12,778.6 ms | 7,851.5 / 7,851.7 | 389.1 / 161.7 ms | 30,744 MiB | 1,469,874 B |
+
+Fresh processes (main): `agg aggregate` 13,098.4 ms, max RSS 25,187 MiB (`time -v`; the bench
+tool's VmHWM of 30.9 GiB also holds the record set and allocator retention across runs);
+`agg verify` uncached 449.9 ms (wall 0.53 s, 382 MiB), cached 220.2 ms (wall 0.98 s with the
+583 MB cache file read, 1,350 MiB).
+
+Derived: fork-join -1,512 ms against pool 0; tied-part v5 alone (pool 0) -470 ms against the v4
+prover of Phase 10 m0 (14,727.4 ms, another VM). The Flock proofs take 7.82-7.84 s on 6, 8 or 12
+threads beside the PIOP but 4.31 s alone on 16, and the PIOP (lookup + stages) 4.97 s alone but
+6.1-8.0 s beside the Flock pool (pool 4 to 12): the fork section is bound by the shared machine, not by the
+split. H-exact +237 ms and H-FIPS +936 ms over the back-to-back H-u run. Against the 12 s target:
+0.75 s to go (H-u).
+
+### 8.2 Per-phase wall time and CPU utilization at 32K (medians of 5 fresh-process runs)
+
+| Step (between stamps) | Wall ms (range) | Busy % | Idle vCPU-s |
+| --- | ---: | ---: | ---: |
+| instance (ExpandA, mu, c, T) | 540.9 (539-545) | 82.6 | 1.51 |
+| witness and G_main tables | 731.1 (729-732) | 96.8 | 0.37 |
+| Flock records | 50.5 | 66.0 | 0.27 |
+| Akita setup (fresh process; 98 ms warm in `agg bench`) | 260.6 (260-269) | 19.4 | 3.36 |
+| event 1 G_main commits beside the Flock event 2 | 640.6 (612-664) | 90.9 | 0.94 |
+| Flock event 2 after G_main: witness build (~630 ms, 89-90%) then sponge commit (~1,360 ms, 87-88%) | 1,993.0 (1,984-2,009) | 88.5 | 3.66 |
+| events 3-5: matrices, round 2 | 215.1 | 78.0 | 0.76 |
+| fork, PIOP side: parity tables | 137.9 | 90.6 | 0.21 |
+| fork, PIOP side: lookup | 3,425.4 (3,391-3,460) | 85.3 | 8.08 |
+| fork, PIOP side: tau, pre-stage, stage 1 | 608.7 | 81.4 | 1.81 |
+| fork, PIOP side: stage 2 | 876.1 | 91.2 | 1.24 |
+| fork, PIOP side: stage 3 | 2,377.5 | 90.2 | 3.72 |
+| fork: Flock-only tail after stage 3 | 460.4 (423-572) | 62.6 | 2.76 |
+| fork-join section (sum of the fork rows) | 7,878.7 (7,840-7,926) | 85.8 | 17.90 |
+| event 13: Akita opening | 734.2 (728-749) | 62.5 | 4.40 |
+| serialize | 12.5 | 6.2 | 0.19 |
+| **total** | **13,057.6 (13,004-13,120)** | **84.2** | **33.09** |
+
+The prove is throughput-bound: everything but the fresh-process Akita setup runs at 78-97% of
+the 16 vCPUs. The only low-utilization windows are the Akita opening (0.73 s at 62%) and the
+Flock-only tail of the fork (0.46 s at 63%, the PIOP branch ends first). Filling idle cores
+can therefore win at most about 0.4-0.6 s (est.: the two windows at 100% busy); the larger levers
+must remove work or memory traffic.
+
+Flock branch at 32K (3 traced runs, ms): **witness rebuild 2,052-2,070** (`prove_span` calls
+`build` + `reattach` again because the event-2 witness is dropped after the commit, K14), parity
+chain 411-427, zerocheck rounds 1 / 2 / 3+ 390-458 / 394-412 / 691-734, union partial folds ~339,
+bit-claim banks ~314, `open_merged` 2,649-2,688 (Ligerito recursive prover 2,035-2,248); sponge
+instance proven 5,797-5,856 after its start. Event 2: witness build 1,257-1,264 + sponge commit
+1,356-1,369 (lane fill 180-192, NTT 746-748, Merkle 428-429). Lookup: trees 589-634, sessions
+2,803-2,810, stored layers 4,236.5 MiB.
+
+### 8.3 Parallel speedup per step at 8K (16 threads, mean of 2, vs `RAYON_NUM_THREADS=1`)
+
+| Step | 16 threads | 1 thread | Speedup |
+| --- | ---: | ---: | ---: |
+| instance | 135.2 | 1,123.3 | 8.3x |
+| witness and G_main tables | 182.7 | 1,708.0 | 9.3x |
+| event 1 G_main commits | 177.1 | 953.7 | 5.4x |
+| Flock event 2: witness build / sponge commit | 322.8 / 308.6 | 957.7 / 3,278.3 | **3.0x** / 10.6x |
+| events 3-5 round 2 | 100.3 | 714.4 | 7.1x |
+| Flock proofs (16 thr: 8-thread pool beside the PIOP) | 2,261.3 | 6,852.1 | 3.0x |
+| - of which witness rebuild | 347.5 | 924.2 | **2.7x** |
+| lookup (beside the Flock pool) | 1,131.9 | 4,471.8 | 4.0x |
+| stage 1 / 2 / 3 (beside the Flock pool) | 197.6 / 174.9 / 654.6 | 665.6 / 952.6 / 2,811.2 | 3.4x / 5.4x / 4.3x |
+| Akita opening | 342.0 | 1,553.3 | 4.5x |
+| total (ms) | 3,745.4 | 26,650.5 | 7.1x |
+
+The fork section does 15.75 s of one-thread work (Flock proofs 6.85 + PIOP 8.90 s) in 2.26 s
+(7.0x). The sponge witness build scales only 2.7-3.0x although it keeps 89-90% of the vCPUs busy
+at 32K (8.2): it is memory-bound (est.), and it runs twice per prove.
+
+### 8.4 Levers for the 12 s target (from this profile; savings at 32K are estimates)
+
+| # | Lever | Est. saving | Prover-only | Evidence (8.1-8.3) |
+| --- | --- | ---: | --- | --- |
+| W1 | Keep the event-2 sponge witness (`SlotBuffers` and input bits) in the prover state and hand it to the proof, instead of `build` + `reattach` in `prove_span` (`crates/agg-cli/src/mode_a.rs`); amends K14's drop-and-rebuild for the span path | **0.4-1.0 s** (the Flock branch loses 2.05 s and becomes shorter than the PIOP branch, 7.4 s beside Flock / 4.97 s alone; the PIOP gets the freed bandwidth) | yes (same witness, byte-identical aggregate) | rebuild 2,052-2,070 ms of the 7.86-7.93 s Flock branch; 2.7x scaling; RSS est. +0 to +2 GiB (the rebuilt witness is alive at the prover peak anyway) |
+| W2 | Akita opening: parallelize the serial part (P7) | 0.1-0.25 s | yes (upstream Akita) | 734 ms at 62.5% busy, 4.5x scaling |
+| W3 | Rebalance the fork after W1: with a shorter Flock branch, the Flock pool can shrink (6) so the PIOP gets more threads | 0-0.3 s | yes | pool 6 = pool 8 today (12.78 vs 12.75 s); the PIOP branch becomes critical after W1 |
+| W4 | Event-2 witness build: fewer passes over memory (build the bits in the commit's lane layout) | 0.2-0.5 s | yes | 1,257-1,264 ms on the critical path at 89% busy, 3.0x scaling |
+| W5 | Lookup P2b / stage-3 P4 (Section 6) | 0.2-0.5 s under the fork (half of the alone saving, est.) | yes | lookup 3.43 s beside Flock, 2.63 s alone |
+| W6 | Fresh-process Akita setup (one-time init 260 ms at 19% busy; 98 ms warm) | 0.1-0.17 s in a fresh process only | yes | not in `agg bench` numbers |
+
+W1 alone is the best single bet for 12 s (12.75 - 0.4..1.0 = 11.75-12.35 s, est.); W1 + W2 + W3
+reach 12 s by these estimates. P3 of Section 6 (overlap the Flock event 2 with the tables) is
+worth little now: the tables already run at 96.8% busy. A global pool of 8 threads stays
+refuted (Phase 10 (1)); the Flock pool sizes 6 and 8 are equivalent.
+
+Plain default build (no `+pclmulqdq`) at 8K, one run: 752.1 s (Flock commit 548.8 s, Flock
+proofs 202.5 s, 119% CPU), aggregate byte-identical to the CLMUL one; unchanged from Phase 10
+(2b) (769.1 s). It stays unusable for Flock until `flock-field`'s scalar `F128` multiply
+dispatches at run time.
+
+Commands (on the VM; `R=rec32k.bin`):
+
+```sh
+RAYON_NUM_THREADS=16 [AGG_FLOCK_THREADS=k] agg bench --count 32768 --warmup 1 --reps 3 --relation h-u
+python3 scripts/cpusample.py STOP 0.1 > run.cpu &      # /proc/stat busy share every 100 ms until STOP exists
+PCS_TRACE=1 LINCHECK_TRACE=1 AGG_TIED_TRACE=1 AGG_STAGE_TRACE=1 FLOCK_ZC_TIMING=1 FLOCK_COMMIT_TIMING=1 \
+FLOCK_LIG_TIMING=1 AGG_PHASE_STAMPS=1 RAYON_NUM_THREADS=16 agg aggregate --records $R --out a.bin 2> run.err
+touch STOP; python3 scripts/phase_profile.py run   # run.cpu + run.err (several runs: medians); per-step wall time and busy share
+```
