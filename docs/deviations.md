@@ -939,6 +939,11 @@ of its items (3.2 here, 3.3 fork-join, 3.5, 3.6/3.7, 3.8) into one version and l
 bundle to the user. If this branch is merged first, a later bundle takes version 5; the
 cost of a further bump is regenerating the plan digests (`docs/scripts/pow_plan.py`) and the
 pinned test anchors. No other branch at the time of writing changes `WIRE_VERSION`.
+Update (2026-10-27): the fork-join transcript (K22, memo item 3.3) joined this version
+instead of taking version 5. Nothing was released between the two changes, so version 4 is
+a bundle of K21 and K22; aggregates made by `main` with K21 alone do not verify under K22
+(they fail at the event-6 share item). A later bundle of the remaining memo items takes
+version 5.
 
 ## K22. Fork-join transcript: the Flock proofs at a join after stage 3 (spec Sections 10, 11; docs/soundness.md 12; lever P1 of docs/perf.md)
 
@@ -976,8 +981,12 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   fork, the old serial order), else half the global pool rounded up: 8 of 16 on the cloud
   machine, the better split of the dry run (bench-cloud Phase 10 (6): -1.15 s at 32K with
   8 threads, -1.11 s with 16; a global 8-thread pool alone was 13% slower, Phase 10 (1)).
-  On a rayon worker or with a one-thread pool there is no fork (the P12 pattern). Both
-  schedules give the same proof bytes (test `agg-piop/tests/fork_join.rs`).
+  On a rayon worker or with a one-thread pool there is no fork (the P12 pattern), nor for
+  a side whose proof items are empty (`KeccakSide::proves_concurrently`: mode B, profile
+  0). A non-numeric `AGG_FLOCK_THREADS` is reported once on stderr and replaced by the
+  default; larger values are clamped to the larger of the logical CPUs and the global pool
+  (`prover::max_flock_threads`).
+  Both schedules give the same proof bytes (test `agg-piop/tests/fork_join.rs`).
 - Verifier: it checks the Keccak side right after replaying event 6, as before (the verdict
   does not depend on the order of the checks, and the early check keeps precise rejection
   reasons), and absorbs the proof items at the join.
@@ -991,8 +1000,14 @@ Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 1
 12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
 the segment of `X`, after the stage-3 rounds; the checkpoint test at `X` becomes `R_PIOP and
 (for all p) C4_p`, `C4_p` decided by listing the Johnson list of the part's sponge word;
-masses and the work plan are unchanged. Measured: local 8K (15 logical CPUs) -0.93 /
--1.03 s (-13%), prover peak +0.8 to +1.1 GiB (ref/notes/overnight-20261026/fork-join-p1.md);
+masses and the work plan are unchanged. The extractor runs that list decoder (Akita's
+checkpoint node evaluates its test once per invocation), so its polynomial cost enters the
+cost of one run, `T_run`, and the Module-SIS reductions, not the run count or the error
+(soundness.md 12.6); the decoder's fit to Ligerito's level-0 code is cited, not checked
+(12.7 item 9). Measured: local 8K (15 logical CPUs) -0.93 /
+-1.03 s (-13%), prover peak +0.8 to +1.1 GiB, uncached verify 156.7 / 164.9 ms -> 167.4 /
+168.6 ms (within the local noise, but quote verifier numbers of this change only from a
+cloud run) (ref/notes/overnight-20261026/fork-join-p1.md);
 a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and 15 (6.76 s),
 one round, direction only, so the default stays the cloud-measured half until a 32K sweep;
 the 32K cloud run is pending.

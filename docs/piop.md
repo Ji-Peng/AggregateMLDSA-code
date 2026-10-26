@@ -307,12 +307,13 @@ Elements of `K` are rejection-sampled per 64-bit limb from eight squeezed bytes.
 | 3 | `agg-mldsa/v1/bridge/seed` | challenge | 1 | 32 squeezed bytes `sd` |
 | 4 | `agg-mldsa/v1/commit/level1`, `level2`, `level3` | proof | 1 each | the round-2 commitments |
 | 5 | `agg-mldsa/v1/flock/seeds` | challenge | `S` | `32 S` squeezed bytes `fs_sigma` |
-| 6 | `agg-mldsa/v1/flock/final-vectors`; `agg-mldsa/v1/flock/proofs` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed Flock proofs |
+| 6 | `agg-mldsa/v1/flock/final-vectors`; `agg-mldsa/v1/flock/shares` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed share items (deviation K22) |
 | 7 | `agg-mldsa/v1/tau` | challenge | `d_main` | `tau` |
 | 8 | `agg-mldsa/v1/prestage/claims` | proof | 26 | pre-stage claims |
 | 9 | `agg-mldsa/v1/stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 66; 4, 1; 98 | |
 | 10 | `agg-mldsa/v1/stage2/kappa1`; `stage2/gamma`; rounds; terminal | proof; challenge; (5, 1); proof | 18; 101; ; 61 | |
 | 11 | `agg-mldsa/v1/stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 118; ; 67 | |
+| join | `agg-mldsa/v1/flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
 | 12 | `agg-mldsa/v1/pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone |
 
 Grinding (wire version 2, `docs/soundness.md` Section 6): every field-challenge event
@@ -329,7 +330,8 @@ into the instance record of event 0 (`binding::instance_record`).
 
 ## 10. Wire format (`wire::AggregateProof`)
 
-`LE16` version 2, `u8` flags (0 = H), `LE64 N`; `32 N` bytes `c~`; event 1 framed
+`LE16` version 4 (`manifest::WIRE_VERSION`), `u8` relation byte (0 = H-u, 1 = H-exact),
+`LE64 N`; `32 N` bytes `c~`; event 1 framed
 (`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: three framed items;
 event 6: `512 S` bytes then `S` framed share items (deviation K22); events 8 to 11 as raw atom encodings of
 16 bytes per element (26 pre-stage claims; `4 d_main` stage-1 round elements and 98
@@ -1299,8 +1301,10 @@ unreduced_integer_products_sum_exactly}`.
   verifier) on the bare Keccak-f[1600] from the precomputed cSHAKE256 prefix state, one
   permutation per column; equal to the cSHAKE256 path (test
   `keccak_columns_match_the_cshake_columns`).
-- `prover::prove_with_tables`: the parity tables `y^(1)` of the stages (no challenge) are
-  built on the overlap thread beside the Flock prove of event 6.
+- `prover::prove_with_tables`: the parity tables `y^(1)` of the stages (no challenge). Under
+  the fork-join (deviation K22) they are built on the PIOP side after event 6, while the
+  Flock proofs run on their own pool; only the serial schedule (`AGG_FLOCK_THREADS=0`)
+  still builds them on the overlap thread beside the Flock proofs.
 - Not done here, by design: proving the Flock span concurrently with the lookup and the
   stages. The data are independent, but the transcript was not: `FLOCK_PROOFS_SITE` was
   absorbed before the lookup's `X`, so the overlap needed a transcript change (profile lever
