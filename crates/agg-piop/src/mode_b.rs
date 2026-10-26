@@ -7,7 +7,7 @@
 //! P9): the event-2 item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
 //! (768 bytes, FIPS 204 Algorithm 28) of the segment's live records in record order, so
 //! the bits are bound before the bridge seed `sd`, as the Flock commitment would be; the
-//! event-6 proof items are empty and event 0 carries Flock profile id 3
+//! event-6 share items and the join's proof items are empty and event 0 carries Flock profile id 3
 //! ([`FlockProfile::PublicBits`]). The verifier side ([`PublicBitsVerifier`]) checks, per
 //! segment:
 //!
@@ -130,6 +130,7 @@ impl KeccakSide for PublicBits {
         _matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         _final_vectors: &[Vec<u8>],
+        _record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         Ok(vec![Vec::new(); seeds.len()])
     }
@@ -267,6 +268,7 @@ impl KeccakVerifier for PublicBitsVerifier {
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
         let live = segment.mu.len();
         if !segment.proof.is_empty()
+            || !segment.shares.is_empty()
             || segment.c_tilde.len() != live
             || segment.commitment.len() != live * W1_RECORD_BYTES
             || segment.final_vector.len() != M3
@@ -513,6 +515,8 @@ mod tests {
                 mu: &mu,
                 c_tilde,
                 final_vector,
+                shares: &[],
+                record: &[0; 32],
                 proof,
                 matrices: &matrices,
             })

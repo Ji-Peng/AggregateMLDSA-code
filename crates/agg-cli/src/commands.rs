@@ -558,11 +558,25 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         ms(median(&result.prove_times)),
         ms(*result.prove_times.iter().min().expect("reps >= 1"))
     );
-    println!(
-        "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
-        ms(flock),
-        ms(result.prove.total.saturating_sub(flock))
-    );
+    let t = &result.prove.timings;
+    if t.flock_threads > 0 {
+        // Fork-join (deviation K22): the Flock proofs overlap the PIOP steps.
+        println!(
+            "    median run: Flock parts {:.1} ms (proofs {:.1} ms on {} threads beside the PIOP), \
+             fork-join wall {:.1} ms, outside the fork {:.1} ms",
+            ms(flock),
+            ms(t.flock_prove),
+            t.flock_threads,
+            ms(t.fork_join),
+            ms(result.prove.total.saturating_sub(t.fork_join))
+        );
+    } else {
+        println!(
+            "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
+            ms(flock),
+            ms(result.prove.total.saturating_sub(flock))
+        );
+    }
     println!(
         "  verify, uncached keys    {:>10.1} ms ({protocol})",
         ms(median(&result.verify_uncached))

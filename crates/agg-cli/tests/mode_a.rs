@@ -25,7 +25,7 @@ use agg_cli::mode_a::{
     AggregateError, AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig,
     SegmentRejection, VerifyCostReport, DEFAULT_PART_LOG2, FLOCK_PROFILE,
 };
-use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs};
+use agg_cli::wire::{ItemError, SegmentCommitments, SegmentProofs, SegmentShares};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord, W1_INPUT_BASE};
 use agg_keccak::tied;
 use agg_keccak::witness::pack_slot;
@@ -380,18 +380,30 @@ fn keccak(e: &VerifyError) -> bool {
     matches!(e, VerifyError::Keccak(0))
 }
 
-/// Re-encode segment 0's items of a proof after `f` changed them.
+/// Re-encode segment 0's items of a proof (event 2, the event-6 shares, the join's proofs)
+/// after `f` changed them.
+fn with_all_items(
+    proof: &AggregateProof,
+    f: impl Fn(&mut SegmentCommitments, &mut SegmentShares, &mut SegmentProofs),
+) -> AggregateProof {
+    let mut c = SegmentCommitments::from_bytes(&proof.flock_commitments[0]).unwrap();
+    let parts = c.commitments.len();
+    let mut s = SegmentShares::from_bytes(&proof.flock_shares[0], parts).unwrap();
+    let mut p = SegmentProofs::from_bytes(&proof.flock_proofs[0], parts).unwrap();
+    f(&mut c, &mut s, &mut p);
+    let mut out = proof.clone();
+    out.flock_commitments[0] = c.to_bytes();
+    out.flock_shares[0] = s.to_bytes();
+    out.flock_proofs[0] = p.to_bytes();
+    out
+}
+
+/// [`with_all_items`] on the event-2 item and the join's proof item.
 fn with_items(
     proof: &AggregateProof,
     f: impl Fn(&mut SegmentCommitments, &mut SegmentProofs),
 ) -> AggregateProof {
-    let mut c = SegmentCommitments::from_bytes(&proof.flock_commitments[0]).unwrap();
-    let mut p = SegmentProofs::from_bytes(&proof.flock_proofs[0], c.commitments.len()).unwrap();
-    f(&mut c, &mut p);
-    let mut out = proof.clone();
-    out.flock_commitments[0] = c.to_bytes();
-    out.flock_proofs[0] = p.to_bytes();
-    out
+    with_all_items(proof, |c, _, p| f(c, p))
 }
 
 /// A Flock verifier that records the Flock verdict and accepts anyway (to observe the F_p
@@ -530,7 +542,7 @@ fn corrupted_aggregates_are_rejected() {
         let r = verify(&p);
         expect_rejected("Y_sigma bit", &r, keccak);
         assert!(part(1)(&r), "the implied last share is wrong");
-        let p = with_items(&honest, |_, p| p.shares[0][3] ^= 1);
+        let p = with_all_items(&honest, |_, s, _| s.shares[0][3] ^= 1);
         let r = verify(&p);
         expect_rejected("share of part 0", &r, keccak);
         assert!(part(0)(&r));
@@ -578,10 +590,10 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("part size 2^2", &verify(&p), |e| matches!(e, VerifyError::Plan));
         let p = with_items(&honest, |c, _| c.d_part = 3);
         expect_rejected("part size 2^3", &verify(&p), |e| matches!(e, VerifyError::Plan));
-        let p = with_items(&honest, |c, p| {
+        let p = with_all_items(&honest, |c, s, p| {
             c.commitments.pop();
             p.proofs.pop();
-            p.shares.pop();
+            s.shares.pop();
         });
         let r = verify(&p);
         expect_rejected("last part dropped", &r, keccak);

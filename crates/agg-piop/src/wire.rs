@@ -1,7 +1,8 @@
 //! Proof wire format (spec Section 10, wire version 4): header (version, flags = relation
 //! byte, `N`), the
-//! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, the lookup (event 7) and
-//! the stages (events 9 to 12) in order, the packed PIOP nonce stream
+//! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6 (the final vectors and the
+//! Keccak side's share items), the lookup (event 7), the stages (events 9 to 12) and the join
+//! (the Keccak side's proof items, deviation K22) in transcript order, the packed PIOP nonce stream
 //! (`docs/soundness.md` Section 6.2, its exact length a function of `N`), then the Akita
 //! opening. Variable-length items carry
 //! a `LE32` length; field elements use the canonical atom encoding of the transcript; the
@@ -70,7 +71,10 @@ pub struct AggregateProof {
     pub bridge_commitments: [Vec<u8>; 4],
     /// Event 6: `Y_sigma`, 4,096 bits packed least significant first.
     pub final_vectors: Vec<[u8; FINAL_VECTOR_BYTES]>,
-    /// Event 6: `S` Flock proof byte strings.
+    /// Event 6: `S` share items of the Keccak side (mode A: the shares of a segment's parts
+    /// but the last; empty for a span, a one-part segment and mode B).
+    pub flock_shares: Vec<Vec<u8>>,
+    /// The join event (after stage 3, deviation K22): `S` Flock proof byte strings.
     pub flock_proofs: Vec<Vec<u8>>,
     /// Event 7: the lookup (layer 1 and the sessions).
     pub lookup: LookupProof,
@@ -168,7 +172,7 @@ impl AggregateProof {
         for y in &self.final_vectors {
             w.bytes(y);
         }
-        for item in &self.flock_proofs {
+        for item in &self.flock_shares {
             w.framed(item);
         }
         for layer in &self.lookup.layer1 {
@@ -188,6 +192,9 @@ impl AggregateProof {
         w.elements(&self.stage2.claims.to_vec());
         w.rounds(&self.stage3.rounds);
         w.elements(&self.stage3.claims.0);
+        for item in &self.flock_proofs {
+            w.framed(item);
+        }
         w.bytes(&self.work);
         w.framed(&self.opening);
         w.0
@@ -226,7 +233,7 @@ impl AggregateProof {
         let final_vectors = (0..segments)
             .map(|_| r.array::<FINAL_VECTOR_BYTES>())
             .collect::<Result<Vec<_>, _>>()?;
-        let flock_proofs = (0..segments)
+        let flock_shares = (0..segments)
             .map(|_| r.framed())
             .collect::<Result<Vec<_>, _>>()?;
         let lookup = read_lookup(&mut r, &manifest.lookup_shape())?;
@@ -251,6 +258,9 @@ impl AggregateProof {
             claims: Stage3Claims::from_slice(&manifest, &r.elements(Stage3Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 3 claims"))?,
         };
+        let flock_proofs = (0..segments)
+            .map(|_| r.framed())
+            .collect::<Result<Vec<_>, _>>()?;
         let work = r.take(work_bytes(&manifest))?.to_vec();
         let opening = r.framed()?;
         if r.at != bytes.len() {
@@ -265,6 +275,7 @@ impl AggregateProof {
             flock_commitments,
             bridge_commitments,
             final_vectors,
+            flock_shares,
             flock_proofs,
             lookup,
             multiplicities,
@@ -310,7 +321,7 @@ pub struct ProofSize {
     pub keccak_commitments: usize,
     /// Event 6: the final vectors `Y_sigma`.
     pub final_vectors: usize,
-    /// Event 6: the Keccak-side proofs.
+    /// Event 6 and the join: the Keccak side's share and proof items.
     pub keccak_proofs: usize,
     /// Event 7: the lookup and the multiplicity claims.
     pub lookup: usize,
@@ -353,7 +364,7 @@ impl AggregateProof {
                 + framed(&self.bridge_commitments),
             keccak_commitments: 4 + framed(&self.flock_commitments),
             final_vectors: FINAL_VECTOR_BYTES * self.final_vectors.len(),
-            keccak_proofs: framed(&self.flock_proofs),
+            keccak_proofs: framed(&self.flock_shares) + framed(&self.flock_proofs),
             lookup: self.lookup_bytes(),
             piop: self.piop_bytes(),
             work: self.work.len(),
@@ -441,7 +452,8 @@ mod tests {
             flock_commitments: vec![vec![4; 10]; segments],
             bridge_commitments: [vec![5], vec![], vec![6, 7], vec![8]],
             final_vectors: vec![[8; 512]; segments],
-            flock_proofs: vec![vec![]; segments],
+            flock_shares: vec![vec![]; segments],
+            flock_proofs: vec![vec![3; 5]; segments],
             lookup: sample_lookup(&manifest.lookup_shape(), rng),
             multiplicities: MultiplicityClaims::from_slice(&point(rng, MultiplicityClaims::LEN)).unwrap(),
             prestage: PreStageClaims::from_slice(&point(rng, PreStageClaims::LEN)).unwrap(),
@@ -474,6 +486,12 @@ mod tests {
             let size = proof.size();
             assert_eq!(size.total(), bytes.len());
             assert_eq!((size.c_tilde, size.piop), (32 * records, proof.piop_bytes()));
+            // The join (deviation K22): the framed proof items follow the stage-3 claims and
+            // precede the nonce stream and the opening.
+            let tail = size.work + 4 + proof.opening.len();
+            let segments = proof.flock_proofs.len();
+            let join = &bytes[bytes.len() - tail - 9 * segments..bytes.len() - tail];
+            assert_eq!(join, [5, 0, 0, 0, 3, 3, 3, 3, 3].repeat(segments));
             // Relation H-u: stage degrees 4, 4, 3 (11 elements per round).
             assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 31 + 11 * proof.stage1.rounds.len()));
             let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();

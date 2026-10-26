@@ -880,14 +880,27 @@ impl<'g> TiedPart<'g> {
         committed: &TiedCommitted,
         matrices: &BridgeMatrices,
     ) -> Vec<Vec<u8>> {
+        self.final_vectors_of_bits(&committed.bits, matrices)
+    }
+
+    /// [`Self::final_vectors`] from the part's lane-major input bits (as returned by
+    /// [`Self::honest_parts`] and kept by [`TiedCommitted::bits`]), without the sponge
+    /// witness: the event-6 shares of a segment's parts are computed before the Flock proofs
+    /// (fork-join transcript, deviation K22).
+    ///
+    /// # Panics
+    /// If `bits` has another length than the part's input.
+    #[must_use]
+    pub fn final_vectors_of_bits(&self, bits: &[u64], matrices: &BridgeMatrices) -> Vec<Vec<u8>> {
         let words = self.segment_words();
+        assert_eq!(bits.len(), self.segments * words, "part input length");
         (0..self.segments)
             .into_par_iter()
             .map(|sigma| {
                 gf2_walker::composite(
                     self.segment(),
                     matrices,
-                    &committed.bits[sigma * words..(sigma + 1) * words],
+                    &bits[sigma * words..(sigma + 1) * words],
                 )
             })
             .collect()

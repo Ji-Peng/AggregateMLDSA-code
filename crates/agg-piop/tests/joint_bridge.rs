@@ -133,6 +133,7 @@ impl KeccakSide for FlockSide<'_, '_> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
+        _record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         assert_eq!((seeds.len(), final_vectors.len()), (1, 1), "one segment");
         let committed = self

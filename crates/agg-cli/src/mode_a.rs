@@ -9,9 +9,11 @@
 //! `Slim8`, [`AggregatorConfig::profile`]), event 1 the
 //! round-1 Akita commitment `G_main`, event 2 the Flock commitments, event 3 the bridge seed
 //! `sd`, event 4 the round-2 Akita commitments, event 5 the Flock seeds `fs_sigma`, event 6
-//! the final vectors `Y_sigma` and the Flock proofs, events 7 to 11 the three sum-check
-//! stages, event 12 the batched Akita opening. There is no projection seed: the residual is
-//! proven through the committed quotient (spec Section 6, `docs/deviations.md` P2).
+//! the final vectors `Y_sigma` and the part shares, events 7 to 12 the lookup and the three
+//! sum-check stages, the join the Flock proofs (deviation K22: proven on their own thread
+//! pool while the prover runs events 7 to 12), event 13 the batched Akita opening. There is
+//! no projection seed: the residual is proven through the committed quotient (spec Section
+//! 6, `docs/deviations.md` P2).
 //!
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions,
 //! spec Section 1) is split into parts of `2^{d_part}` record positions, `d_part =
@@ -23,8 +25,9 @@
 //! to that claim (`docs/parity-chain.md`). The shares XOR to `Y_sigma` (the last share is
 //! implied), which the F_p side proves for the committed bits `b` (`docs/deviations.md`
 //! K10). The event-2 item carries one cap per part (the sponge instance's), the event-6 item
-//! one proof per part ([`crate::wire`]). Part `s` seeds its Flock challengers with
-//! [`part_seed`]`(fs_sigma, s)`.
+//! the shares, the join's item one proof per part ([`crate::wire`]). Part `s` seeds its Flock
+//! challengers with [`part_seed`]`(fs_sigma, s, rec)`, `rec` the digest of the event-6 record
+//! (`agg_piop::transcript::flock_record_digest`, K22).
 //!
 //! Span (deviation K16, [`AggregatorConfig::span`], the default): a batch of more than one
 //! segment whose parts are whole segments is proven by ONE tied part over all its segments
@@ -33,15 +36,16 @@
 //! the Flock opening is paid once per batch instead of once per segment. Segment 0's items carry the span's cap and
 //! proof, the other segments' items say "covered by segment 0" ([`crate::wire`]); the
 //! verifier checks the span when it reaches the last segment, seeded by
-//! [`span_seed`]`(fs_0, .., fs_{S-1})`.
+//! [`span_seed`]`(fs_0, .., fs_{S-1}, rec)`.
 //!
 //! Memory: the parts are committed one after the other at event 2; each keeps its
 //! commitment and, by default, the sponge commitment's Flock prover data (its Reed-Solomon
-//! codeword and Merkle tree, deviation K14), so that event 6 opens it without committing
+//! codeword and Merkle tree, deviation K14), so that the proof opens it without committing
 //! again; [`Aggregator::keep_commit_data`]`(false)` drops it and Flock commits a second time
-//! (K7). The witness buffers are dropped after event 2 and rebuilt from the records at event
-//! 6, proven and dropped, so at most one part's Flock buffers are alive. The PIOP tables are
-//! `i8` columns (`agg_piop::source_tables`).
+//! (K7). The witness buffers are dropped after event 2 and rebuilt from the records for the
+//! proof, proven and dropped, so at most one part's Flock buffers are alive (the input bits
+//! of a part whose share is sent are kept, `6 * 2^(d + 7)` bytes, to compute the share at
+//! event 6). The PIOP tables are `i8` columns (`agg_piop::source_tables`).
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -71,7 +75,7 @@ use agg_witness::params::{C_TILDE_BYTES, K, N, PK_BYTES, SIG_BYTES, W1_ENCODE_BY
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
-use crate::wire::{SegmentCommitments, SegmentProofs};
+use crate::wire::{SegmentCommitments, SegmentProofs, SegmentShares};
 
 /// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]): Ligerito
 /// `Slim`, 36% fewer Flock bytes than `Fast` for 3% more prover time at 2,048 records
@@ -128,24 +132,30 @@ pub const PART_SEED_LABEL: &[u8] = b"agg-mldsa/v1/flock-part-seed";
 /// Label of the Flock seed of a span over all segments.
 pub const SPAN_SEED_LABEL: &[u8] = b"agg-mldsa/v1/flock-span-seed";
 /// Bits of a final vector or share.
+#[cfg(test)]
 const Y_BITS: usize = 4096;
 
-/// The Flock challenger seed of part `part` of a segment whose seed is `fs` (event 5):
-/// `SHA3-256(label || fs || LE64(part))`.
+/// The Flock challenger seed of part `part` of a segment whose seed is `fs` (event 5), bound
+/// to the digest `record` of the event-6 record (`agg_piop::transcript::flock_record_digest`):
+/// `SHA3-256(label || fs || LE64(part) || record)`. Both challengers of the part (tie and
+/// sponge) absorb it first, so every Flock challenge address encodes the input of the
+/// lookup challenge `X` (`docs/soundness.md` 12.2, Lemma 12.3 (a); deviation K22).
 #[must_use]
-pub fn part_seed(fs: &[u8; 32], part: usize) -> [u8; 32] {
+pub fn part_seed(fs: &[u8; 32], part: usize, record: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update((PART_SEED_LABEL.len() as u64).to_le_bytes());
     h.update(PART_SEED_LABEL);
     h.update(fs);
     h.update((part as u64).to_le_bytes());
+    h.update(record);
     h.finalize().into()
 }
 
-/// The Flock challenger seed of a span over the segments whose seeds are `fs` (event 5):
-/// `SHA3-256(label || LE64(S) || fs_0 || .. || fs_{S-1})`.
+/// The Flock challenger seed of a span over the segments whose seeds are `fs` (event 5),
+/// bound to the event-6 record digest `record` as [`part_seed`]:
+/// `SHA3-256(label || LE64(S) || fs_0 || .. || fs_{S-1} || record)`.
 #[must_use]
-pub fn span_seed(fs: &[[u8; 32]]) -> [u8; 32] {
+pub fn span_seed(fs: &[[u8; 32]], record: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update((SPAN_SEED_LABEL.len() as u64).to_le_bytes());
     h.update(SPAN_SEED_LABEL);
@@ -153,6 +163,7 @@ pub fn span_seed(fs: &[[u8; 32]]) -> [u8; 32] {
     for f in fs {
         h.update(f);
     }
+    h.update(record);
     h.finalize().into()
 }
 
@@ -274,7 +285,7 @@ impl SegmentParts {
 
 /// Builds the Flock witness (sponge slot buffers and the part's lane-major input bits, the
 /// parity chain's copy of `b'`) of one part from its records; the honest builder is
-/// `TiedPart::honest_parts`. Called at event 2 and again at event 6, so it must be
+/// `TiedPart::honest_parts`. Called at event 2 and again for the proof, so it must be
 /// deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
 pub type PartWitness<'a> =
     &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
@@ -292,7 +303,7 @@ pub struct PartProveLog {
     pub commit: Duration,
     /// Heap bytes of the kept commit data (codeword and Merkle tree; 0 when not kept).
     pub kept_bytes: usize,
-    /// Event 6: witness rebuilt, share, Flock proof.
+    /// The join's proof (witness rebuilt, Flock proof; the share is computed at event 6).
     pub prove: Duration,
     /// Proof bytes.
     pub proof_bytes: usize,
@@ -318,6 +329,9 @@ struct PartState<'g> {
     range: Range<usize>,
     commitment: TiedCommitment,
     commit_data: Option<CommitData>,
+    /// The part's input bits when its share is sent (every part of a segment but the last):
+    /// the share is computed from them at event 6, before the proofs.
+    share_bits: Option<Vec<u64>>,
 }
 
 #[derive(Default)]
@@ -325,6 +339,9 @@ struct ProverState<'g> {
     segments: Vec<Vec<PartState<'g>>>,
     /// The span over all segments, when the batch is proven as one (module docs).
     span: Option<PartState<'g>>,
+    /// Per segment, the shares of its parts but the last (one bit per byte), from
+    /// [`KeccakSide::shares`].
+    shares: Vec<Vec<Vec<u8>>>,
     log: Vec<PartProveLog>,
 }
 
@@ -457,11 +474,12 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             range: 0..n,
             commitment,
             commit_data,
+            share_bits: None,
         });
         items
     }
 
-    /// Event 6 of a span: the proof of every `Y_sigma` in segment 0's item, empty items for
+    /// The join of a span: the proof of every `Y_sigma` in segment 0's item, empty items for
     /// the covered segments.
     ///
     /// # Errors
@@ -474,6 +492,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
+        record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         let start = Instant::now();
         let segments = part.seg.segments();
@@ -490,18 +509,14 @@ impl<'g, 'h> FlockProver<'g, 'h> {
                 *bridge_seed,
                 matrices,
                 final_vectors.to_vec(),
-                &span_seed(seeds),
+                &span_seed(seeds, record),
             )
             .map_err(|e| ProveError::Keccak(e.to_string()))?;
         let log = &mut state.log[0];
         log.prove = start.elapsed();
         log.proof_bytes = proof.bytes.len();
-        let empty = SegmentProofs {
-            shares: Vec::new(),
-            proofs: Vec::new(),
-        };
+        let empty = SegmentProofs { proofs: Vec::new() };
         let mut items = vec![SegmentProofs {
-            shares: Vec::new(),
             proofs: vec![proof.bytes],
         }
         .to_bytes()];
@@ -529,6 +544,7 @@ impl KeccakSide for FlockProver<'_, '_> {
         let mut state = self.state.lock().expect("state");
         state.segments.clear();
         state.span = None;
+        state.shares.clear();
         state.log.clear();
         if spans_with_floor(&self.geometry, self.part_log2, self.span, self.part_floor) {
             return self.commit_span(&mut state, segments);
@@ -550,8 +566,10 @@ impl KeccakSide for FlockProver<'_, '_> {
                     ligerito_of(self.profile),
                 );
                 let (sponge, bits) = self.build(&seg, sigma, s, records);
-                // The committed buffers are dropped here and rebuilt at event 6; the commit
-                // data (codeword, Merkle tree) is kept unless configured otherwise (K14).
+                let share_bits = (s + 1 < plan.count()).then(|| bits.clone());
+                // The committed buffers are dropped here and rebuilt for the proof; the
+                // commit data (codeword, Merkle tree) is kept unless configured otherwise
+                // (K14).
                 let mut committed = seg.commit_parts(sponge, bits, records);
                 let commitment = committed.commitment().clone();
                 let commit_data = committed
@@ -571,6 +589,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                     range,
                     commitment,
                     commit_data,
+                    share_bits,
                 });
             }
             items.push(
@@ -587,27 +606,82 @@ impl KeccakSide for FlockProver<'_, '_> {
         items
     }
 
+    /// Event 6: the shares of every segment's parts but the last, under the matrices of `sd`,
+    /// from the input bits kept at event 2 (empty items for a span and one-part segments).
+    fn shares(
+        &self,
+        matrices: &BridgeMatrices,
+        final_vectors: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
+        let mut state = self.state.lock().expect("state");
+        let segments = final_vectors.len();
+        if state.span.is_some() {
+            return Ok(vec![Vec::new(); segments]);
+        }
+        assert_eq!(state.segments.len(), segments, "one Y per segment");
+        let shares: Vec<Vec<Vec<u8>>> = state
+            .segments
+            .iter_mut()
+            .map(|parts| {
+                parts
+                    .iter_mut()
+                    .filter_map(|part| {
+                        let bits = part.share_bits.take()?;
+                        Some(part.seg.final_vectors_of_bits(&bits, matrices).remove(0))
+                    })
+                    .collect()
+            })
+            .collect();
+        let items = shares
+            .iter()
+            .map(|own| {
+                SegmentShares {
+                    shares: own.iter().map(|bits| pack_final_vector(bits)).collect(),
+                }
+                .to_bytes()
+            })
+            .collect();
+        state.shares = shares;
+        Ok(items)
+    }
+
     fn prove(
         &self,
         bridge_seed: &[u8; 32],
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
+        record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         let mut state = self.state.lock().expect("state");
         if let Some(span) = state.span.take() {
-            return self.prove_span(&mut state, span, bridge_seed, matrices, seeds, final_vectors);
+            return self.prove_span(
+                &mut state,
+                span,
+                bridge_seed,
+                matrices,
+                seeds,
+                final_vectors,
+                record,
+            );
         }
         let segments = std::mem::take(&mut state.segments);
+        let shares = std::mem::take(&mut state.shares);
         assert_eq!(segments.len(), seeds.len(), "one seed per segment");
         assert_eq!(segments.len(), final_vectors.len(), "one Y per segment");
+        assert_eq!(segments.len(), shares.len(), "the shares of event 6 first");
         let mut entry = 0;
         let mut items = Vec::with_capacity(segments.len());
-        for (sigma, parts) in segments.into_iter().enumerate() {
+        for (sigma, (parts, own)) in segments.into_iter().zip(shares).enumerate() {
             let count = parts.len();
-            let mut acc = vec![0_u8; Y_BITS];
+            assert_eq!(own.len(), count.saturating_sub(1), "one share per part but the last");
+            // The last part's share is Y_sigma XOR the others.
+            let mut last = final_vectors[sigma].clone();
+            for share in &own {
+                last.iter_mut().zip(share).for_each(|(a, b)| *a ^= b);
+            }
+            let mut own = own.into_iter();
             let mut item = SegmentProofs {
-                shares: Vec::with_capacity(count.saturating_sub(1)),
                 proofs: Vec::with_capacity(count),
             };
             for (s, part) in parts.into_iter().enumerate() {
@@ -618,15 +692,9 @@ impl KeccakSide for FlockProver<'_, '_> {
                     part.seg
                         .reattach(sponge, bits, records, part.commitment, part.commit_data);
                 let share = if s + 1 < count {
-                    let own = part.seg.final_vectors(&committed, matrices).remove(0);
-                    item.shares.push(pack_final_vector(&own));
-                    acc.iter_mut().zip(&own).for_each(|(a, b)| *a ^= b);
-                    own
+                    own.next().expect("a share per part but the last")
                 } else {
-                    acc.iter()
-                        .zip(&final_vectors[sigma])
-                        .map(|(a, y)| a ^ y)
-                        .collect()
+                    std::mem::take(&mut last)
                 };
                 let proof = part
                     .seg
@@ -635,7 +703,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                         *bridge_seed,
                         matrices,
                         vec![share],
-                        &part_seed(&seeds[sigma], s),
+                        &part_seed(&seeds[sigma], s, record),
                     )
                     .map_err(|e| ProveError::Keccak(e.to_string()))?;
                 let log = &mut state.log[entry];
@@ -695,6 +763,7 @@ struct SpanStash {
     d_part: u32,
     commitment: Vec<u8>,
     proof: Vec<u8>,
+    record: [u8; 32],
     mu: Vec<[u8; 64]>,
     c_tilde: Vec<[u8; C_TILDE_BYTES]>,
     final_vectors: Vec<Vec<u8>>,
@@ -743,8 +812,9 @@ impl<'g> FlockVerifier<'g> {
     }
 
     /// Segment `sigma` of a span (`commitments.span != 1`): segment 0 opens it with the
-    /// span's cap and proof, every later segment is covered (no commitment, an empty proof
-    /// item) and adds its statement, `Y_sigma` and seed; the last one verifies the span.
+    /// span's cap and proof, every later segment is covered (no commitment, empty share and
+    /// proof items) and adds its statement, `Y_sigma` and seed; the last one verifies the
+    /// span. A span sends no share, so every share item is empty.
     fn verify_span(&self, segment: &SegmentContext<'_>, commitments: &SegmentCommitments) -> bool {
         use crate::wire::ItemError;
         let sigma = segment.sigma;
@@ -759,6 +829,9 @@ impl<'g> FlockVerifier<'g> {
             {
                 return self.reject(sigma, SegmentRejection::Item(ItemError::Span(commitments.span)));
             }
+            if let Err(e) = SegmentShares::from_bytes(segment.shares, 1) {
+                return self.reject(sigma, SegmentRejection::Item(e));
+            }
             let proofs = match SegmentProofs::from_bytes(segment.proof, 1) {
                 Ok(p) => p,
                 Err(e) => return self.reject(sigma, SegmentRejection::Item(e)),
@@ -768,6 +841,7 @@ impl<'g> FlockVerifier<'g> {
                 d_part: commitments.d_part,
                 commitment: commitments.commitments[0].clone(),
                 proof: proofs.proofs[0].clone(),
+                record: *segment.record,
                 mu: Vec::new(),
                 c_tilde: Vec::new(),
                 final_vectors: Vec::new(),
@@ -782,7 +856,9 @@ impl<'g> FlockVerifier<'g> {
             if !covered {
                 return self.reject(sigma, SegmentRejection::Item(ItemError::Span(commitments.span)));
             }
-            if let Err(e) = SegmentProofs::from_bytes(segment.proof, 0) {
+            if let Err(e) = SegmentShares::from_bytes(segment.shares, 0)
+                .and_then(|_| SegmentProofs::from_bytes(segment.proof, 0))
+            {
                 return self.reject(sigma, SegmentRejection::Item(e));
             }
         }
@@ -818,7 +894,7 @@ impl<'g> FlockVerifier<'g> {
                 *segment.bridge_seed,
                 segment.matrices,
                 &st.final_vectors,
-                &span_seed(&st.seeds),
+                &span_seed(&st.seeds, &st.record),
                 &KeccakProof { bytes: st.proof },
             )
         });
@@ -934,6 +1010,10 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 }),
             );
         }
+        let shares = match SegmentShares::from_bytes(segment.shares, count) {
+            Ok(s) => s,
+            Err(e) => return self.reject(sigma, SegmentRejection::Item(e)),
+        };
         let proofs = match SegmentProofs::from_bytes(segment.proof, count) {
             Ok(p) => p,
             Err(e) => return self.reject(sigma, SegmentRejection::Item(e)),
@@ -943,7 +1023,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
             return segment.final_vector.iter().all(|&b| b == 0)
                 || self.reject(sigma, SegmentRejection::EmptySegment);
         }
-        let shares: Vec<Vec<u8>> = proofs.shares.iter().map(unpack_final_vector).collect();
+        let shares: Vec<Vec<u8>> = shares.shares.iter().map(unpack_final_vector).collect();
         let mut last = segment.final_vector.to_vec();
         for share in &shares {
             last.iter_mut().zip(share).for_each(|(a, b)| *a ^= b);
@@ -972,7 +1052,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
                 *segment.bridge_seed,
                 segment.matrices,
                 std::slice::from_ref(share),
-                &part_seed(segment.seed, s),
+                &part_seed(segment.seed, s, segment.record),
                 &KeccakProof {
                     bytes: proofs.proofs[s].clone(),
                 },
@@ -1160,7 +1240,7 @@ impl std::fmt::Display for ProveReport {
             ("Flock records", self.flock_records),
             ("Akita setup", t.setup),
             ("event 1: G_main16, G_main4 commits", t.round1),
-            ("events 2, 6: Flock parts", t.keccak),
+            ("Flock parts (events 2, 6, join)", t.keccak),
             ("events 3-5: matrices, round 2", t.round2),
             ("event 7: lookup into T_16", t.lookup),
             ("events 8, 9: tau, pre-stage", t.prestage),
@@ -1170,6 +1250,17 @@ impl std::fmt::Display for ProveReport {
             ("event 13: Akita opening", t.opening),
         ] {
             writeln!(f, "  {name:<32} {:>10.1} ms", ms(d))?;
+        }
+        if t.flock_threads > 0 {
+            writeln!(
+                f,
+                "  fork-join: Flock proofs {:.1} ms on {} threads beside the PIOP; wall {:.1} ms",
+                ms(t.flock_prove),
+                t.flock_threads,
+                ms(t.fork_join)
+            )?;
+        } else {
+            writeln!(f, "  no fork-join: Flock proofs {:.1} ms, then the PIOP", ms(t.flock_prove))?;
         }
         writeln!(f, "  {:<32} {:>10.1} ms", "total", ms(self.total))?;
         for p in &self.parts {
@@ -1754,7 +1845,7 @@ mod tests {
         let zero = vec![0_u8; Y_BITS];
         let mut one = zero.clone();
         one[5] = 1;
-        let check = |commitment: &[u8], y: &[u8], proof: &[u8]| {
+        let check_with = |commitment: &[u8], y: &[u8], shares: &[u8], proof: &[u8]| {
             verifier.verify(&SegmentContext {
                 sigma: 3,
                 geometry,
@@ -1764,10 +1855,13 @@ mod tests {
                 mu: &[],
                 c_tilde: &[],
                 final_vector: y,
+                shares,
+                record: &[0; 32],
                 proof,
                 matrices: &matrices,
             })
         };
+        let check = |commitment: &[u8], y: &[u8], proof: &[u8]| check_with(commitment, y, &[], proof);
         let empty = item(12, Vec::new());
         assert!(check(&empty, &zero, &[]));
         assert!(verifier.rejection().is_none());
@@ -1777,6 +1871,11 @@ mod tests {
             Some((3, SegmentRejection::EmptySegment))
         );
         assert!(!check(&empty, &zero, &[0]));
+        assert!(matches!(
+            verifier.rejection(),
+            Some((3, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
+        ));
+        assert!(!check_with(&empty, &zero, &[0; 512], &[]), "a share for an empty segment");
         assert!(matches!(
             verifier.rejection(),
             Some((3, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
@@ -1836,7 +1935,6 @@ mod tests {
         };
         let open = item(4, vec![vec![0; 8]]);
         let open_proof = SegmentProofs {
-            shares: Vec::new(),
             proofs: vec![vec![1, 2, 3]],
         }
         .to_bytes();
@@ -1845,7 +1943,7 @@ mod tests {
         let mu = vec![[0_u8; 64]; 1 << 13];
         let c_tilde = vec![[0_u8; C_TILDE_BYTES]; 1 << 13];
         let live = [1 << 13, 1 << 13, 1, 0];
-        let check = |sigma: usize, commitment: &[u8], proof: &[u8]| {
+        let check_with = |sigma: usize, commitment: &[u8], shares: &[u8], proof: &[u8]| {
             verifier.verify(&SegmentContext {
                 sigma,
                 geometry,
@@ -1855,9 +1953,14 @@ mod tests {
                 mu: &mu[..live[sigma]],
                 c_tilde: &c_tilde[..live[sigma]],
                 final_vector: &zero,
+                shares,
+                record: &[7; 32],
                 proof,
                 matrices: &matrices,
             })
+        };
+        let check = |sigma: usize, commitment: &[u8], proof: &[u8]| {
+            check_with(sigma, commitment, &[], proof)
         };
         let span_rejection = |b: u8| {
             matches!(
@@ -1899,6 +2002,19 @@ mod tests {
                 )),
             }
         }
+        // A span sends no share: a share item at segment 0 or at a covered segment is
+        // rejected (the record digest would bind it, but the item must be empty).
+        assert!(!check_with(0, &open, &[0; 512], &open_proof));
+        assert!(matches!(
+            verifier.rejection(),
+            Some((0, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
+        ));
+        assert!(check(0, &open, &open_proof));
+        assert!(!check_with(1, &covered, &[1], &[]));
+        assert!(matches!(
+            verifier.rejection(),
+            Some((1, SegmentRejection::Item(crate::wire::ItemError::Trailing)))
+        ));
     }
 
     /// The Flock records of honest tables are `mu_i` and `w1Encode(w_1'_i)`, which hash to the
@@ -1956,15 +2072,19 @@ mod tests {
     }
 
     #[test]
-    fn part_seeds_are_distinct_per_part_and_segment_seed() {
-        let a = part_seed(&[1; 32], 0);
-        assert_ne!(a, part_seed(&[1; 32], 1));
-        assert_ne!(a, part_seed(&[2; 32], 0));
-        assert_eq!(a, part_seed(&[1; 32], 0));
-        // The span seed depends on every segment seed and their order.
-        let s = span_seed(&[[1; 32], [2; 32]]);
-        assert_ne!(s, span_seed(&[[2; 32], [1; 32]]));
-        assert_ne!(s, span_seed(&[[1; 32], [2; 32], [0; 32]]));
-        assert_ne!(s, part_seed(&[1; 32], 0));
+    fn part_seeds_are_distinct_per_part_segment_seed_and_record() {
+        let rec = [9; 32];
+        let a = part_seed(&[1; 32], 0, &rec);
+        assert_ne!(a, part_seed(&[1; 32], 1, &rec));
+        assert_ne!(a, part_seed(&[2; 32], 0, &rec));
+        assert_eq!(a, part_seed(&[1; 32], 0, &rec));
+        // The event-6 record digest (deviation K22) changes every seed.
+        assert_ne!(a, part_seed(&[1; 32], 0, &[8; 32]));
+        // The span seed depends on every segment seed, their order and the record digest.
+        let s = span_seed(&[[1; 32], [2; 32]], &rec);
+        assert_ne!(s, span_seed(&[[2; 32], [1; 32]], &rec));
+        assert_ne!(s, span_seed(&[[1; 32], [2; 32], [0; 32]], &rec));
+        assert_ne!(s, span_seed(&[[1; 32], [2; 32]], &[8; 32]));
+        assert_ne!(s, part_seed(&[1; 32], 0, &rec));
     }
 }
