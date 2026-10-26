@@ -28,9 +28,8 @@
 //! omega`, one instance with two parts at [`EqPoint::HalfR2`] (`delta^2` on the main domain
 //! with scale `2^(d_main - d_sig)`, `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`);
 //! after the 37 reductions the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`. The ring
-//! reads `u = (2 s - 1) L + s - 2 gamma_2 delta - e` with `L = l_lo + 29,696 l_hi + 2^15`:
-//! affine terms and the two products `s l_lo`, `s l_hi` (parts with scales -2 and -59,392).
-//! H-FIPS has 51 coefficients.
+//! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
+//! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 51 coefficients.
 
 use agg_witness::params::{GAMMA2, OMEGA, Q, W1_BITS};
 use jolt_field::{One, Ring, Zero};
@@ -286,14 +285,11 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     ring_b.push((position(Column::V_HI), -(Q * v_weights[1])));
     let mut instances = Vec::new();
     if gammas.fips {
-        // -u = -(2 s - 1)(l_lo + 29,696 l_hi + 2^15) - s + 2 gamma_2 delta + e: the affine part
-        // here, the products -2 s l_lo and -59,392 s l_hi as scaled parts.
+        // -u = -(gamma_2 s + l_lo + 29,696 l_hi + 2^15 + 1 - gamma_2) + 2 gamma_2 delta + e.
         let (sign, delta, wrap) = (position(Column::SIGN), position(Column::DELTA), position(Column::WRAP));
-        let (l_lo, l_hi) = (position(Column::L_LO), position(Column::L_HI));
-        let step = L16_SLACK.slack_weight;
-        ring_b.push((l_lo, 1));
-        ring_b.push((l_hi, step));
-        ring_b.push((sign, -(2 * i64::from(LOOKUP_SHIFT) + 1)));
+        ring_b.push((position(Column::L_LO), -1));
+        ring_b.push((position(Column::L_HI), -L16_SLACK.slack_weight));
+        ring_b.push((sign, -GAMMA2));
         ring_b.push((delta, 2 * GAMMA2));
         ring_b.push((wrap, 1));
         instances.push(InstanceSpec::new(
@@ -301,16 +297,9 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
             vec![Term::Affine {
                 weight: None,
                 lanes: ring_b,
-                constant: i64::from(LOOKUP_SHIFT) - Q * V16_DIGITS.constant(),
+                constant: -(i64::from(LOOKUP_SHIFT) + 1 - GAMMA2) - Q * V16_DIGITS.constant(),
             }],
         ));
-        for (lane, scale) in [(l_lo, -2), (l_hi, -2 * step)] {
-            instances.push(InstanceSpec {
-                gamma: GAMMA_RING,
-                scale: E::from_i64(scale),
-                terms: vec![Term::Product(vec![sign, lane])],
-            });
-        }
     } else {
         let u_weights = U16_DIGITS.weights();
         ring_b.push((position(Column::U_LO), -u_weights[0]));
@@ -814,16 +803,16 @@ mod tests {
         assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (4, 7, 8));
         assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (45, 46));
         assert_eq!((gammas.stack(0), gammas.stack(3)), (47, 50));
-        // Parts per gamma index: the ring spans the eq(r^(2)) group (affine part and the two
-        // products s l_lo, s l_hi) and the w_A group; F2 two parts, F45 eight, F7 two (main and
-        // D_2), the stacks one per column (u_h is stack 2's seventh column).
+        // Parts per gamma index: the ring spans the eq(r^(2)) group (one affine part) and the
+        // w_A group; F2 two parts, F45 eight, F7 two (main and D_2), the stacks one per column
+        // (u_h is stack 2's seventh column).
         let mut counts = vec![0; 51];
         for group in &spec.groups {
             for instance in &group.instances {
                 counts[instance.gamma] += 1;
             }
         }
-        assert_eq!(counts[GAMMA_RING], 4);
+        assert_eq!(counts[GAMMA_RING], 2);
         assert_eq!(counts[gammas.fips_check(1)], 2);
         assert_eq!(counts[gammas.fips_check(2)], 8);
         assert_eq!(counts[gammas.fips_check(3)], 2);

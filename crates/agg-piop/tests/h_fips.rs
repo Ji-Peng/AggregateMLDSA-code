@@ -112,7 +112,7 @@ fn write(manifest: &CommitmentManifest, main: &mut MainTables, x: usize, values:
 /// `u` of the H-FIPS form from the cells.
 fn u_of(c: [i64; 5]) -> i64 {
     let l = c[3] + i64::from(LOOKUP_SHIFT) + L_STEP * c[4];
-    (2 * c[0] - 1) * l + c[0] - 2 * GAMMA2 * c[1] - c[2]
+    GAMMA2 * c[0] + l + 1 - GAMMA2 - 2 * GAMMA2 * c[1] - c[2]
 }
 
 /// The first live position whose cells satisfy `pred` (cells, `w_1'`).
@@ -233,8 +233,8 @@ fn h_fips_weight_80_records_with_the_corner_prove_and_verify() {
             let corner = main_index(HINT_CORNER.1, HINT_CORNER.0, i);
             assert_eq!(
                 cells(manifest, &batch.main, corner),
-                [0, 0, 1, GAMMA2 - 1 - L_STEP - i64::from(LOOKUP_SHIFT), 1],
-                "the corner witness (sigma, L, delta, e) = (-1, gamma2 - 1, 0, 1)"
+                [0, 0, 1, -i64::from(LOOKUP_SHIFT), 0],
+                "the corner witness (sigma, L, delta, e) = (-1, 0, 0, 1)"
             );
             let zero = main_index(HINT_ZERO.1, HINT_ZERO.0, i);
             assert_eq!(cells(manifest, &batch.main, zero)[..3], [0, -1, -1], "the e = -1 wrap");
@@ -247,7 +247,7 @@ fn h_fips_weight_80_records_with_the_corner_prove_and_verify() {
         // fails in stage 3; with u_h = -1 the lookup rejects.
         let corner = main_index(HINT_CORNER.1, HINT_CORNER.0, 6);
         let honest = cells(manifest, &batch.main, corner);
-        let ideator = [1, 1, 0, honest[3], honest[4]];
+        let ideator = [1, 1, 0, GAMMA2 - 1 - L_STEP - i64::from(LOOKUP_SHIFT), 1];
         assert_eq!(u_of(ideator), u_of(honest));
         let mut main = batch.main.clone();
         write(manifest, &mut main, corner, ideator);
@@ -283,27 +283,26 @@ fn h_fips_tamperings_fail_at_the_stated_place() {
         assert_eq!(tampered(plain, &|c| [2, c[1], c[2], c[3], c[4]]), Some(3), "s = 2");
         // F2: delta = -sigma = -1 at s = 1 (stage 3; the ring and the weight move too).
         assert_eq!(tampered(plain, &|c| [c[0], -1, c[2], c[3], c[4]]), Some(3), "delta = -sigma");
-        // F3: e = -1 at delta = 0 with L - 1 (s = 1: u = L + 1 - e) keeping u: only F3
-        // (stage 2) and F45 (stage 3) see it; stage 2 comes first.
+        // F3: e = -1 at delta = 0 with L - 1 (u = gamma_2 s + L + 1 - gamma_2 - e) keeping u:
+        // only F3 (stage 2) and F45 (stage 3) see it; stage 2 comes first.
         let f3 = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
         let f3_at = find(&batch, |c, w| {
             c[0] == 1 && c[1] == 0 && c[2] == 0 && c[4] == 0 && c[3] >= 1 - i64::from(LOOKUP_SHIFT) && w != 0 && w != 43
         });
         keeps_u(f3_at, &f3);
         assert_eq!(tampered(f3_at, &f3), Some(2), "e = -1 at delta = 0");
-        // F4: e = 1 at w1' != 0 with L + 1 (s = 1: u = L + 1 - e) keeping u: F3 holds
-        // (e = 1), only F45 sees it.
+        // F4: e = 1 at w1' != 0 with L + 1 keeping u: F3 holds (e = 1), only F45 sees it.
         let f4 = |c: [i64; 5]| [c[0], c[1], 1, c[3] + 1, c[4]];
         let f4_at = find(&batch, |c, w| {
             c[0] == 1 && c[1] == 0 && c[2] == 0 && c[4] == 0 && c[3] + 1 < i64::from(LOOKUP_SHIFT) && w != 0
         });
         keeps_u(f4_at, &f4);
         assert_eq!(tampered(f4_at, &f4), Some(3), "e = 1 at w1' != 0 (F45 alone)");
-        // F5: e = -1 at delta = -1 and w1' != 43 with L + 1 (s = 0: u = -L + 2 gamma2 - e)
-        // keeping u: F3 holds (e = delta), only F45 sees it.
-        let f5 = |c: [i64; 5]| [c[0], c[1], -1, c[3] + 1, c[4]];
+        // F5: e = -1 at delta = -1 and w1' != 43 with L - 1 keeping u: F3 holds (e = delta),
+        // only F45 sees it.
+        let f5 = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
         let f5_at = find(&batch, |c, w| {
-            c[0] == 0 && c[1] == -1 && c[2] == 0 && c[4] == 0 && c[3] + 1 < i64::from(LOOKUP_SHIFT) && w != 43
+            c[0] == 0 && c[1] == -1 && c[2] == 0 && c[3] >= 1 - i64::from(LOOKUP_SHIFT) && w != 43
         });
         keeps_u(f5_at, &f5);
         assert_eq!(tampered(f5_at, &f5), Some(3), "e = -1 at w1' != 43 (F45 alone)");
@@ -365,4 +364,23 @@ fn h_fips_records_decode_and_encode_through_the_main_tables() {
         assert_eq!(main.column(&manifest, Column::DELTA).value(main_index(0, 0, i)), c.delta);
     }
     assert_eq!(main.hint_slack()[5..], [OMEGA as i64; 3]);
+}
+
+/// Stage timings of H-u and H-FIPS on the same records (diagnostic, run with
+/// `AGG_STAGE_TRACE=1 ... -- --ignored --nocapture h_fips_stage_trace`; `AGG_TRACE_N` sets
+/// the batch size, default 8,192).
+#[test]
+#[ignore = "diagnostic: stage timings at 8,192 records"]
+fn h_fips_stage_trace() {
+    on_large_stack(|| {
+        let n: usize = std::env::var("AGG_TRACE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(8192);
+        let records = common::records(0xF1F8, n - n / 32, n / 32);
+        for relation in [Relation::Hu, Relation::HFips] {
+            let batch = Batch::build_as(relation, records.clone(), 0xF1F8);
+            let start = std::time::Instant::now();
+            let (proof, _) = prove_tables(&batch, batch.tables(), false).expect("prover");
+            eprintln!("{relation}: PIOP part (lookup and stages) {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
+            verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
+        }
+    });
 }

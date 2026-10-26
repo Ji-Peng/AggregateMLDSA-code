@@ -21,8 +21,8 @@
 //!   `h* = [HighBits(w') != w_1']` (the signature's own hint for an honest record), gives
 //!   `l_lo = L_lo - 2^15`, `l_hi` (the slots of `U_lo`, `U_hi`), the sign bit
 //!   `s = (1 + sigma)/2`, `delta` and `e` (after `a_z`); each record's hint slack
-//!   `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) = (0, 0, 0,
-//!   0)`, `u_h = 80`.
+//!   `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) = (0,
+//!   gamma_2 - 1, 0, 0)`, `u_h = 80`.
 //! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
 //!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
@@ -580,7 +580,7 @@ impl MainTables {
     }
 
     /// The values `z, u, v` of one record recomposed by the relation's value forms (any cell
-    /// values); under H-FIPS `u = (2 s - 1) L + s - 2 gamma_2 delta - e` ([`fips_u`]).
+    /// values); under H-FIPS `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` ([`fips_u`]).
     #[must_use]
     pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
         let columns = |value: DigitValue| -> Vec<Cells<'_>> {
@@ -637,11 +637,11 @@ impl MainTables {
     }
 }
 
-/// H-FIPS's `u = (2 s - 1) L + s - 2 gamma_2 delta - e` from the magnitude `L`, the sign bit
-/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md` Section 10.1), any integers.
+/// H-FIPS's `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` from `L`, the sign bit
+/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md` Section 10.7), any integers.
 #[must_use]
 pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
-    (2 * s - 1) * l + s - 2 * GAMMA2 * delta - e
+    GAMMA2 * s + l + 1 - GAMMA2 - 2 * GAMMA2 * delta - e
 }
 
 /// `x = j + 256 rho + 1024 i` (re-exported for tests and tools).

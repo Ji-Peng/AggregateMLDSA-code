@@ -5,9 +5,15 @@
 //!
 //! ```text
 //! L  = L_lo + 29,696 L_hi in [0, gamma2 - 1]     L_lo in [0, 2^16) (looked up), L_hi in {0, 1}
-//! r0 = sigma L + (1 + sigma)/2 in (-gamma2, gamma2]
+//! s  = (1 + sigma)/2 in {0, 1}
+//! r0 = gamma2 s + L + 1 - gamma2 in (-gamma2, gamma2]
 //! u  = r0 - 2 gamma2 delta - e
 //! ```
+//!
+//! `(s, L) -> r0` is a bijection onto `(-gamma2, gamma2]` with `s = 1` iff `r0 > 0`
+//! (`L = (r0 - 1) mod gamma2`), so `sigma` is the sign test of FIPS 204 Algorithm 40 and `u` is
+//! affine in the committed values. (The memo's `r0 = sigma L + (1 + sigma)/2` is the same set of
+//! pairs `(sigma, r0)` under another labelling of `L`, but has the product `sigma L`.)
 //!
 //! and the six zero-checks `sigma^2 - 1`, `delta (delta - sigma)`, `e (e - 1)(e - delta)`,
 //! `e (e + 1) w1'`, `e (e - 1)(w1' - 43)`, `L_hi (L_hi - 1)`; per signature the hint-weight
@@ -74,9 +80,14 @@ impl Coeff {
         self.l_lo + L_STEP * self.l_hi
     }
 
-    /// `r0 = sigma L + (1 + sigma)/2`.
+    /// The sign bit `s = (1 + sigma)/2`.
+    pub fn s(&self) -> i64 {
+        (1 + self.sigma).div_euclid(2)
+    }
+
+    /// `r0 = gamma2 s + L + 1 - gamma2`.
     pub fn r0(&self) -> i64 {
-        self.sigma * self.l() + (1 + self.sigma).div_euclid(2)
+        GAMMA2 * self.s() + self.l() + 1 - GAMMA2
     }
 
     /// `u = r0 - 2 gamma2 delta - e`, the value that enters the ring identity (3.1).
@@ -122,10 +133,10 @@ impl Coeff {
     }
 
     /// The zero coefficient of a padded row (`w' = 0`, `h = 0`): Decompose(0) = (0, 0), so
-    /// `sigma = -1`, `L = 0`, `delta = e = 0`.
+    /// `sigma = -1`, `L = gamma2 - 1` (`L_lo = 2^16 - 1`, `L_hi = 1`), `delta = e = 0`.
     pub const PADDED: Coeff = Coeff {
-        l_lo: 0,
-        l_hi: 0,
+        l_lo: TABLE - 1,
+        l_hi: 1,
         sigma: -1,
         delta: 0,
         e: 0,
@@ -137,21 +148,23 @@ impl Coeff {
 /// `delta^2 = h`, and `u` equals `ctr_q(w' - 2 gamma2 w1')`.
 ///
 /// * Decompose wrap (Algorithm 36 line 4, `w' mod q in [q - gamma2, q - 1]`, `r1 = 0`): read as
-///   `r1 = 44`, `r0' = w' - (q - 1) in (-gamma2, 0]`, so `sigma = -1`, `L = q - 1 - w'`; `h = 0`
-///   gives `w1' = 0` and `u = r0' - 1`: `(delta, e) = (0, 1)` (the corner `w' = q - gamma2` has
-///   `L = gamma2 - 1`); `h = 1` gives `w1' = 43` and `u = r0' + 2 gamma2`: `(delta, e) = (-1, 0)`.
-/// * Otherwise `(r1, r0) = Decompose(w')`, `sigma = 1` iff `r0 > 0`, `L = r0 - 1` or `-r0`;
-///   `h = 0`: `delta = e = 0`; `h = 1`: `delta = sigma`, and `e = sigma` when `w1'` wraps
-///   (`r1 = 43, sigma = 1` gives `w1' = 0`; `r1 = 0, sigma = -1` gives `w1' = 43`), else 0.
+///   `r1 = 44`, `r0' = w' - (q - 1) in (-gamma2, 0]`, so `sigma = -1`,
+///   `L = r0' - 1 + gamma2 = w' - (q - gamma2)`; `h = 0` gives `w1' = 0` and `u = r0' - 1`:
+///   `(delta, e) = (0, 1)` (the corner `w' = q - gamma2` has `L = 0`); `h = 1` gives
+///   `w1' = 43` and `u = r0' + 2 gamma2`: `(delta, e) = (-1, 0)`.
+/// * Otherwise `(r1, r0) = Decompose(w')`, `sigma = 1` iff `r0 > 0`,
+///   `L = (r0 - 1) mod gamma2` (`r0 - 1` or `r0 - 1 + gamma2`); `h = 0`: `delta = e = 0`;
+///   `h = 1`: `delta = sigma`, and `e = sigma` when `w1'` wraps (`r1 = 43, sigma = 1` gives
+///   `w1' = 0`; `r1 = 0, sigma = -1` gives `w1' = 43`), else 0.
 pub fn honest_coeff(w: i64, h: bool) -> Coeff {
     let wq = mod_q(w);
     let hv = i64::from(h);
     let (sigma, l, delta, e) = if wq >= Q - GAMMA2 {
-        (-1, Q - 1 - wq, -hv, 1 - hv)
+        (-1, wq - (Q - GAMMA2), -hv, 1 - hv)
     } else {
         let (r1, r0) = decompose(wq);
         let sigma = if r0 > 0 { 1 } else { -1 };
-        let l = if sigma == 1 { r0 - 1 } else { -r0 };
+        let l = (r0 - 1).rem_euclid(GAMMA2);
         let wraps = (sigma == 1 && r1 == W1_TOP) || (sigma == -1 && r1 == 0);
         (sigma, l, hv * sigma, if h && wraps { sigma } else { 0 })
     };
@@ -542,17 +555,31 @@ mod tests {
                 assert!((0..GAMMA2).contains(&c.l()));
             }
         }
-        // The corner of the memo: w' = q - gamma2, h = 0.
+        // The corner of the memo: w' = q - gamma2, h = 0 (r0' = -gamma2 + 1, so L = 0).
         assert_eq!(
             honest_coeff(Q - GAMMA2, false),
             Coeff {
-                l_lo: GAMMA2 - 1 - L_STEP,
-                l_hi: 1,
+                l_lo: 0,
+                l_hi: 0,
                 sigma: -1,
                 delta: 0,
                 e: 1
             }
         );
+        // (s, L) -> r0 is a bijection onto (-gamma2, gamma2] with s = [r0 > 0].
+        let mut seen = vec![false; 2 * GAMMA2 as usize];
+        for sigma in [-1, 1] {
+            for l in 0..GAMMA2 {
+                let (l_lo, l_hi) = Coeff::split_l(l);
+                let r0 = Coeff { l_lo, l_hi, sigma, delta: 0, e: 0 }.r0();
+                assert!(-GAMMA2 < r0 && r0 <= GAMMA2);
+                assert_eq!(sigma == 1, r0 > 0);
+                let slot = &mut seen[(r0 + GAMMA2 - 1) as usize];
+                assert!(!*slot);
+                *slot = true;
+            }
+        }
+        assert!(seen.iter().all(|&s| s));
         assert_eq!(honest_coeff(0, false), Coeff::PADDED);
     }
 
@@ -573,7 +600,7 @@ mod tests {
                     if e * (e + 1) * w1 != 0 || e * (e - 1) * (w1 - W1_TOP) != 0 {
                         continue;
                     }
-                    let l = sigma * (u + 2 * GAMMA2 * delta + e - (1 + sigma).div_euclid(2));
+                    let l = u + 2 * GAMMA2 * delta + e + GAMMA2 - 1 - GAMMA2 * (1 + sigma).div_euclid(2);
                     if (0..GAMMA2).contains(&l) {
                         best = best.min(delta * delta);
                     }

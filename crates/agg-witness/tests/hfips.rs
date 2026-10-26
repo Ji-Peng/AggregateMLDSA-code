@@ -80,7 +80,7 @@ fn edge_residue_record_uses_the_corner_witness() {
                 let c = h.coeffs[rho][j];
                 assert_eq!(c, honest_coeff(Q - GAMMA2, hb));
                 if !hb {
-                    assert_eq!((c.sigma, c.l(), c.delta, c.e), (-1, GAMMA2 - 1, 0, 1));
+                    assert_eq!((c.sigma, c.l(), c.delta, c.e), (-1, 0, 0, 1));
                 }
             }
         }
@@ -133,8 +133,8 @@ fn synthetic_weight_80_signature_with_the_corner() {
     assert_eq!(
         c,
         Coeff {
-            l_lo: GAMMA2 - 1 - L_STEP,
-            l_hi: 1,
+            l_lo: 0,
+            l_hi: 0,
             sigma: -1,
             delta: 0,
             e: 1

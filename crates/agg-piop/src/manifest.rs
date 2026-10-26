@@ -29,7 +29,7 @@
 //! `L = L_lo + 29,696 L_hi` ([`DigitValue::L`]: `l_lo` looked up in the slot of `U_lo`, the
 //! bit `l_hi` in the slot of `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e`
 //! ([`FipsColumn`], appended to `G_main4` after `a_z`), so
-//! `u = (2 s - 1) L + s - 2 gamma_2 delta - e`; and the per-signature hint slack `u_h`
+//! `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`; and the per-signature hint slack `u_h`
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
 //! variables are the signature index) in the free slot 6 of lookup stack 2.
 

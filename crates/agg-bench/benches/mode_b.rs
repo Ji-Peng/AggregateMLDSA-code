@@ -289,7 +289,7 @@ fn run_prover(options: &Options, n: usize) {
         size.piop,
         size.opening
     );
-    let manifest = agg_piop::manifest::CommitmentManifest::for_batch(n).expect("manifest");
+    let manifest = agg_piop::manifest::CommitmentManifest::for_relation(n, relation()).expect("manifest");
     #[allow(clippy::cast_precision_loss)]
     let per_signature = manifest.total_logical_cells() as f64 / n as f64;
     println!(

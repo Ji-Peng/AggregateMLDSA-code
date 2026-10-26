@@ -150,7 +150,7 @@ pub fn residual_table(
 }
 
 /// `u` on the Boolean main domain, over the integers: (4.2) under H-u and H-exact, H-FIPS's
-/// `u = (2 s - 1) L + s - 2 gamma_2 delta - e` (`source_tables::fips_u`) otherwise.
+/// `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (`source_tables::fips_u`) otherwise.
 #[must_use]
 pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
     let value = manifest.u_slot_value();
@@ -229,9 +229,8 @@ pub struct MainValues {
 }
 
 impl MainValues {
-    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation.
-    /// Under H-FIPS `u` is the form `(2 s - 1) L + s - 2 gamma_2 delta - e` at the claims, which
-    /// is the extension of `u` only on Boolean points (`s L` is a product).
+    /// From the claims `value(column)` of the main-domain columns of `manifest`'s relation
+    /// (H-FIPS: the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`).
     #[must_use]
     pub fn from_claims(manifest: &CommitmentManifest, value: impl Fn(Column) -> E) -> Self {
         let compose = |digit: DigitValue| {
@@ -240,8 +239,9 @@ impl MainValues {
         };
         let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
         let u = if manifest.is_fips() {
-            let (l, s) = (compose(DigitValue::L), value(Column::SIGN));
-            (s + s - E::from_i64(1)) * l + s - value(Column::DELTA).mul_i64(2 * GAMMA2) - value(Column::WRAP)
+            value(Column::SIGN).mul_i64(GAMMA2) + compose(DigitValue::L) + E::from_i64(1 - GAMMA2)
+                - value(Column::DELTA).mul_i64(2 * GAMMA2)
+                - value(Column::WRAP)
         } else {
             compose(DigitValue::U)
         };
