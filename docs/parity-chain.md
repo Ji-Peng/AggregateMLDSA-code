@@ -215,3 +215,23 @@ dense evaluations; a wrong `y1` (flipped parity) changes the first message. `agg
 (`tests/tied.rs`, release): round trips as in version 4; negative cases: a flipped `b'` bit
 with stale `Y`, a flipped `Y` bit, a tampered round message, a wrong `s_hat_v` of the bit
 claim, another `sd`; the existing statement, seed, segment-count and byte-flip cases.
+
+## 12. Measurements and corrections (2026-10-26, local, direction only)
+
+Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7 and 10:
+
+* Bytes as predicted: at `8@13/4` the proof is 150,758 B (predicted 150.8 KB), 200,008 B less
+  than version 4: 205,108 B removed, 5,100 B added.
+* The chain's prover work as estimated: 178.5 ms at the 32K span on dense random bits (7
+  threads, loaded machine), the verifier's `W~(r)` and claim 7 ms.
+* Not foreseen: Flock's block-first opening (taken for a full-height sponge, `n = 2^nu_s`, so
+  for every power-of-two batch from 2,048 records on) folds each ring-switched claim's column
+  bit-bank in its block rounds, so the bit claim needs the FULL bank of the sponge stack (all
+  2,156 word columns), not just its 64 columns (a partial bank suffices for `s_hat_v` and
+  gave failing proofs at 2,048 records; fixed in `3ae1a79`). The full bank costs one pass over
+  the stack (174 to 222 ms at 8,192 records, measured), and the opening's block statistics
+  and `W'` fold grow by one claim. At one full segment these costs about cancel the union's;
+  at 32K the expected prover gain is smaller than the memo's -0.2 to -0.5 s critical-path
+  estimate, possibly zero; the cloud A/B decides.
+* Verifier: the Flock part's verification drops from about 80 to 110 ms to 25 to 45 ms per
+  part (measured, all sizes).
