@@ -117,6 +117,14 @@ pub trait KeccakSide {
         Ok(vec![Vec::new(); final_vectors.len()])
     }
 
+    /// Whether [`Self::prove`] does work worth a thread pool of its own (default `true`). A
+    /// side whose proof items are empty (mode B, profile 0) returns `false`, and the prover
+    /// then skips the fork of deviation K22: the transcript and the proof are the same
+    /// either way.
+    fn proves_concurrently(&self) -> bool {
+        true
+    }
+
     /// The `S` Flock proofs of the join event. They may be computed concurrently with the
     /// PIOP (deviation K22), so they depend on nothing after event 6: `bridge_seed` is `sd`
     /// (event 3) and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
@@ -151,6 +159,10 @@ impl KeccakSide for NoKeccak {
         vec![Vec::new(); segments]
     }
 
+    fn proves_concurrently(&self) -> bool {
+        false
+    }
+
     fn prove(
         &self,
         _bridge_seed: &[u8; 32],
@@ -167,17 +179,44 @@ impl KeccakSide for NoKeccak {
 /// (`0`: no fork, the Flock proofs and then the PIOP on the caller's pool), else half the
 /// global pool rounded up (8 of 16 threads on the cloud machine, the better split of
 /// `ref/notes/bench-cloud.md` Phase 10 (6); a global pool of 8 threads alone was slower,
-/// Phase 10 (1)). `0` on a rayon worker or with a one-thread global pool, where an extra
-/// pool gains nothing or a blocked worker could deadlock (deviation P12).
+/// Phase 10 (1)). A value that is not a number is reported once on stderr and replaced by
+/// the default (a measurement must not silently run another pool size; the bench report
+/// prints the size used); a larger value than [`max_flock_threads`] is clamped to it. `0`
+/// on a rayon worker or with a one-thread global pool, where an extra pool gains nothing or a
+/// blocked worker could deadlock (deviation P12).
 #[must_use]
 pub fn flock_pool_threads() -> usize {
     if crate::pcs::on_calling_thread() {
         return 0;
     }
-    std::env::var("AGG_FLOCK_THREADS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or_else(|| rayon::current_num_threads().div_ceil(2))
+    let default = || rayon::current_num_threads().div_ceil(2);
+    match std::env::var("AGG_FLOCK_THREADS") {
+        Err(std::env::VarError::NotPresent) => default(),
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(threads) => threads.min(max_flock_threads()),
+            Err(_) => {
+                warn_once(&format!("AGG_FLOCK_THREADS={v:?} is not a thread count; using {}", default()));
+                default()
+            }
+        },
+        Err(std::env::VarError::NotUnicode(_)) => {
+            warn_once("AGG_FLOCK_THREADS is not Unicode; using the default pool size");
+            default()
+        }
+    }
+}
+
+/// The largest Flock pool: the global pool or the machine's logical CPUs, whichever is
+/// larger (more threads than that only oversubscribe the cores).
+#[must_use]
+pub fn max_flock_threads() -> usize {
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    cpus.max(rayon::current_num_threads())
+}
+
+fn warn_once(message: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| eprintln!("agg-piop: {message}"));
 }
 
 /// Stack size of the Flock pool's workers (the Flock prover nests large frames; a virtual
@@ -756,7 +795,7 @@ pub fn prove_with_tables(
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
     // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
     // (events 10 to 12) run on the global pool; the join absorbs them after stage 3.
-    let flock_threads = flock_pool_threads();
+    let flock_threads = if keccak.proves_concurrently() { flock_pool_threads() } else { 0 };
     let prove_flock = || keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();

@@ -37,7 +37,9 @@ use agg_piop::prover::{
 };
 use agg_piop::source_tables::{BridgeGroupTables, MainTables};
 use agg_piop::stage::StageError;
+use agg_piop::transcript::flock_record_digest;
 use agg_piop::verifier::{verify, KeccakVerifier, SegmentContext, VerifyError};
+use sha3::{Digest, Sha3_256};
 use agg_piop::wire::{unpack_final_vector, AggregateProof};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::derive::{derive, SigWitness};
@@ -89,8 +91,19 @@ struct FlockRun {
     c_tilde: Vec<[u8; C_TILDE_BYTES]>,
 }
 
+/// The Flock challenger seed of the test side: `fs_sigma` bound to the digest of the
+/// event-6 record, as the `KeccakSide::prove` contract requires (deviation K22; mode A's
+/// `part_seed` is the production form).
+fn bound_seed(fs: &[u8; 32], record: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(b"agg-piop/tests/joint-bridge/seed");
+    h.update(fs);
+    h.update(record);
+    h.finalize().into()
+}
+
 /// The Flock side of mode A for one segment: commits the bridged segment of `records`
-/// at event 2 and proves it at event 6 against the F_p side's published `Y_sigma`.
+/// at event 2 and proves it for the join against the F_p side's published `Y_sigma`.
 struct FlockSide<'a, 'g> {
     seg: &'a BridgedSegment<'g>,
     committed: Mutex<Option<BridgedCommitted>>,
@@ -133,7 +146,7 @@ impl KeccakSide for FlockSide<'_, '_> {
         matrices: &BridgeMatrices,
         seeds: &[[u8; 32]],
         final_vectors: &[Vec<u8>],
-        _record: &[u8; 32],
+        record: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         assert_eq!((seeds.len(), final_vectors.len()), (1, 1), "one segment");
         let committed = self
@@ -150,7 +163,7 @@ impl KeccakSide for FlockSide<'_, '_> {
             *bridge_seed,
             matrices,
             final_vectors[0].clone(),
-            &seeds[0],
+            &bound_seed(&seeds[0], record),
         );
         *self.run.lock().unwrap() = Some(FlockRun {
             bridge_seed: *bridge_seed,
@@ -198,7 +211,7 @@ impl KeccakVerifier for FlockVerifier<'_, '_> {
                 *segment.bridge_seed,
                 Arc::new(segment.matrices.clone()),
                 segment.final_vector,
-                segment.seed,
+                &bound_seed(segment.seed, segment.record),
                 &KeccakProof {
                     bytes: segment.proof.to_vec(),
                 },
@@ -498,7 +511,10 @@ fn joint_bridge(n: usize, seed: u64) {
     // The Flock rejection is the bridge rows alone: under the tampered records' own
     // statement (their c~), the F_p side's Y is rejected and their own Y verifies.
     let commitment = KeccakCommitment::from_bytes(output.proof.flock_commitments[0].clone());
-    let fs = output.flock_seeds[0];
+    let fs = bound_seed(
+        &output.flock_seeds[0],
+        &flock_record_digest(&output.proof.final_vectors, &output.proof.flock_shares),
+    );
     let mu: Vec<[u8; 64]> = tampered.iter().map(|r| r.mu).collect();
     let joint = KeccakProof {
         bytes: output.proof.flock_proofs[0].clone(),

@@ -2,8 +2,9 @@
 //! items are absorbed at the join, after the stage-3 claims and before the PCS session
 //! digest. So no PIOP challenge depends on them, while the session (and with it the Akita
 //! opening) binds every byte; the side's challengers receive the digest of the event-6
-//! record. The prover's two schedules (the Flock proofs on their own pool beside the PIOP, or
-//! one after the other) produce the same proof.
+//! record. The share items are absorbed at event 6, before the lookup challenge `X`, so every
+//! PIOP challenge depends on them. The prover's two schedules (the Flock proofs on their own
+//! pool beside the PIOP, or one after the other) produce the same proof.
 //!
 //! This binary sets `AGG_FLOCK_THREADS`, so it holds one test function only.
 
@@ -20,16 +21,22 @@ use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
 
-/// A Keccak side without commitments whose proof items are fixed bytes; it records the
-/// event-6 record digest it was given.
+/// A Keccak side without commitments whose share and proof items are fixed bytes; it
+/// records the event-6 record digest it was given.
 struct FixedProofs {
+    share: Vec<u8>,
     proof: Vec<u8>,
     record: Mutex<Option<[u8; 32]>>,
 }
 
 impl FixedProofs {
     fn new(proof: &[u8]) -> Self {
+        Self::with_share(&[], proof)
+    }
+
+    fn with_share(share: &[u8], proof: &[u8]) -> Self {
         Self {
+            share: share.to_vec(),
             proof: proof.to_vec(),
             record: Mutex::new(None),
         }
@@ -39,6 +46,14 @@ impl FixedProofs {
 impl KeccakSide for FixedProofs {
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>> {
         vec![Vec::new(); segments]
+    }
+
+    fn shares(
+        &self,
+        _matrices: &BridgeMatrices,
+        final_vectors: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, ProveError> {
+        Ok(vec![self.share.clone(); final_vectors.len()])
     }
 
     fn prove(
@@ -65,6 +80,20 @@ impl KeccakVerifier for AnyProof {
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
         segment.commitment.is_empty() && segment.shares.is_empty()
+    }
+}
+
+/// Accepts any share and proof item with an empty commitment (profile 0, test hooks), so
+/// that a changed share item reaches the PIOP checks.
+struct AnyShares;
+
+impl KeccakVerifier for AnyShares {
+    fn profile(&self) -> FlockProfile {
+        FlockProfile::None
+    }
+
+    fn verify(&self, segment: &SegmentContext<'_>) -> bool {
+        segment.commitment.is_empty()
     }
 }
 
@@ -155,9 +184,42 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
         let mut tampered = a.proof.clone();
         tampered.flock_proofs[0][1] ^= 1;
         assert!(matches!(check(&tampered), Err(VerifyError::Opening(_))), "one byte changed");
-        // A share item changes event 6: the PIOP transcript diverges before the join.
+        // AnyProof refuses a non-empty share item at the Keccak side's check.
         let mut share = a.proof.clone();
         share.flock_shares[0] = vec![0];
         assert!(matches!(check(&share), Err(VerifyError::Keccak(0))), "AnyProof refuses shares");
+
+        // The share items are bound at event 6, before `X`: a side that sends a share item
+        // gets another record digest and other PIOP challenges, from the lookup on.
+        let shared_side = FixedProofs::with_share(&[7, 7], &[1, 2, 3]);
+        let shared = run("2", &shared_side);
+        let shared_record = shared_side.record.lock().unwrap().expect("the side proved");
+        assert_eq!(shared.proof.flock_shares, vec![vec![7, 7]]);
+        assert_eq!(shared.proof.final_vectors, a.proof.final_vectors, "Y precedes the shares");
+        assert_eq!(
+            shared_record,
+            flock_record_digest(&shared.proof.final_vectors, &shared.proof.flock_shares)
+        );
+        assert_ne!(shared_record, record, "the record digest binds the share items");
+        assert_ne!(shared.points.0.lookup, a.points.0.lookup, "the lookup challenges follow event 6");
+        assert_ne!(shared.points.0.tau, a.points.0.tau);
+        assert_ne!(shared.points.1, a.points.1, "r^(3)");
+        assert_ne!(shared.session, a.session);
+        // A verifier that accepts any share item accepts both proofs as made, and rejects a
+        // proof whose share item was replaced before the join: the replayed challenges from
+        // `X` on differ from the prover's, so the lookup, a stage or a work nonce fails.
+        let check_shares = |proof: &agg_piop::wire::AggregateProof| {
+            verify(&public, &proof.to_bytes(), &bridge, &AnyShares, FlockProfile::None, Relation::Hu, None)
+        };
+        check_shares(&a.proof).expect("verify the proof without shares");
+        check_shares(&shared.proof).expect("verify the proof with a share item");
+        for (label, proof, item) in [("added", &a.proof, vec![7, 7]), ("changed", &shared.proof, vec![7, 6])] {
+            let mut moved = proof.clone();
+            moved.flock_shares[0] = item;
+            match check_shares(&moved) {
+                Err(VerifyError::Lookup(_) | VerifyError::Stage(_) | VerifyError::Transcript(_)) => {}
+                other => panic!("share item {label}: expected a rejection before the join, got {other:?}"),
+            }
+        }
     });
 }

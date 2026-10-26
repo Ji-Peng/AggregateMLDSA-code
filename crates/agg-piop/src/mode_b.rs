@@ -134,6 +134,11 @@ impl KeccakSide for PublicBits {
     ) -> Result<Vec<Vec<u8>>, ProveError> {
         Ok(vec![Vec::new(); seeds.len()])
     }
+
+    /// The proof items are empty, so the prover skips the fork (deviation K22).
+    fn proves_concurrently(&self) -> bool {
+        false
+    }
 }
 
 /// The public bits of live record `i` in a mode-B proof, if the proof has that record.

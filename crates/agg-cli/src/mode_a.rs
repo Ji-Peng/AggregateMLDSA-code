@@ -406,8 +406,9 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         self
     }
 
-    /// Keep each part's sponge commit data from event 2 to event 6 (default; K14), or drop it
-    /// and let Flock commit again at event 6 (K7).
+    /// Keep each part's sponge commit data from event 2 until its proof for the join is made
+    /// (default; K14), or drop it and let Flock commit again when it proves the part (K7).
+    /// Under the fork-join (K22) the proofs are made concurrently with events 7 to 12.
     #[must_use]
     pub fn keep_commit_data(mut self, keep: bool) -> Self {
         self.keep_commit_data = keep;
@@ -1392,9 +1393,9 @@ pub struct Aggregator {
 
 impl Aggregator {
     /// An aggregator with the given configuration. It keeps each Flock part's sponge commit
-    /// data from event 2 to event 6 (K14) unless the environment variable
-    /// `AGG_FLOCK_RECOMMIT` is set (a measurement knob) or [`Self::keep_commit_data`] says
-    /// otherwise.
+    /// data from event 2 until the part is proven for the join (K14, K22) unless the
+    /// environment variable `AGG_FLOCK_RECOMMIT` is set (a measurement knob) or
+    /// [`Self::keep_commit_data`] says otherwise.
     #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         Self {
@@ -1404,10 +1405,11 @@ impl Aggregator {
         }
     }
 
-    /// Keep the Flock parts' sponge commit data between events 2 and 6 (`true`, K14: about
-    /// the size of the sponge instance's codeword and Merkle tree per part, measured in
-    /// `ref/notes/bench-local.md`) or commit again at event 6 (`false`, K7: one more Ligerito
-    /// commit per part).
+    /// Keep the Flock parts' sponge commit data from event 2 until each part is proven for
+    /// the join (`true`, K14: about the size of the sponge instance's codeword and Merkle
+    /// tree per part, measured in `ref/notes/bench-local.md`) or commit again when the part
+    /// is proven (`false`, K7: one more Ligerito commit per part). Under the fork-join (K22)
+    /// the parts are proven on their own pool concurrently with events 7 to 12.
     #[must_use]
     pub fn keep_commit_data(mut self, keep: bool) -> Self {
         self.keep_commit_data = keep;
