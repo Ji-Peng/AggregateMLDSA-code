@@ -1442,6 +1442,7 @@ impl Aggregator {
         hooks: &AggregateHooks<'_>,
     ) -> Result<Aggregate, AggregateError> {
         let start = Instant::now();
+        agg_piop::prover::phase_stamp("start");
         let n = records.len();
         if n == 0 || n > 1 << 15 {
             return Err(AggregateError::Count(n));
@@ -1468,6 +1469,7 @@ impl Aggregator {
             InstanceError::Geometry(_) => AggregateError::Count(n),
         })?;
         let instance_time = start.elapsed();
+        agg_piop::prover::phase_stamp("instance");
         let prover_inputs = ProverInputs {
             instance: &instance,
             records: &inputs,
@@ -1477,6 +1479,7 @@ impl Aggregator {
         let clock = Instant::now();
         let (manifest, honest) = main_tables(&prover_inputs)?;
         let tables_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("tables");
         let clock = Instant::now();
         let tampered = hooks.tamper_main.map(|tamper| {
             let mut main = honest.clone();
@@ -1497,6 +1500,7 @@ impl Aggregator {
             tamper(&mut flock_records);
         }
         let flock_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("flock-records");
         let side = FlockProver::new(
             &self.gate,
             main.geometry(),
@@ -1565,6 +1569,7 @@ impl Aggregator {
             bridge_seed: output.bridge_seed,
             total: start.elapsed(),
         };
+        agg_piop::prover::phase_stamp("end");
         Ok(Aggregate {
             proof: output.proof,
             bytes,

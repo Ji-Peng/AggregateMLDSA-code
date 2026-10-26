@@ -214,6 +214,19 @@ pub fn max_flock_threads() -> usize {
     cpus.max(rayon::current_num_threads())
 }
 
+/// With `AGG_PHASE_STAMPS` set, print `phase-stamp <name> <unix time in ns>` on stderr when
+/// a prover step ends, so that an external CPU sampler can be aligned with the steps
+/// (`docs/perf.md` Section 8). Prover diagnostics only; off by default, no effect on the proof.
+pub fn phase_stamp(name: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("AGG_PHASE_STAMPS").is_some()) {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        eprintln!("phase-stamp {name} {ns}");
+    }
+}
+
 fn warn_once(message: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| eprintln!("agg-piop: {message}"));
@@ -610,6 +623,7 @@ fn prove_piop_with<'a>(
         );
     }
     run.lookup = clock.lap();
+    phase_stamp("lookup");
 
     // Events 8 and 9: tau and the pre-stage claims.
     let mut points = Points {
@@ -624,6 +638,7 @@ fn prove_piop_with<'a>(
         &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
     );
     run.prestage = clock.lap();
+    phase_stamp("prestage");
 
     // Stages 1 to 3.
     let weights_clock = Instant::now();
@@ -644,6 +659,7 @@ fn prove_piop_with<'a>(
     };
     points.r1 = stage1.point.clone();
     run.stage1 = clock.lap();
+    phase_stamp("stage1");
     let weights_clock = Instant::now();
     prover_tables.set_r1(matrices, &points.r1);
     if trace {
@@ -656,6 +672,7 @@ fn prove_piop_with<'a>(
     };
     points.r2 = stage2.point.clone();
     run.stage2 = clock.lap();
+    phase_stamp("stage2");
     let weights_clock = Instant::now();
     prover_tables.set_r2(public, &points.r2);
     if trace {
@@ -679,6 +696,7 @@ fn prove_piop_with<'a>(
     )?;
     drop(prover_tables);
     run.stage3 = clock.lap();
+    phase_stamp("stage3");
     run.points = points;
     run.r3 = stage3.point;
     run.pi_m = pi_m;
@@ -719,6 +737,7 @@ pub fn prove_with_tables(
     let public = PublicData::from_instance(inputs.instance);
     let committer = TableCommitter::new(manifest.clone())?;
     timings.setup = clock.lap();
+    phase_stamp("setup");
 
     // Events 0 to 3: instance (with the proof-of-work plan's digest, docs/soundness.md 6.4),
     // round-1 commitments, Flock commitments, bridge seed.
@@ -735,11 +754,15 @@ pub fn prove_with_tables(
     let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
         || {
             let start = Instant::now();
-            (committer.commit_round1(main), start.elapsed())
+            let out = committer.commit_round1(main);
+            phase_stamp("round1-commit");
+            (out, start.elapsed())
         },
         || {
             let start = Instant::now();
-            (keccak.commitments(segments), start.elapsed())
+            let out = keccak.commitments(segments);
+            phase_stamp("flock-commit");
+            (out, start.elapsed())
         },
     );
     let [main16_round1, main_round1] = round1?;
@@ -756,6 +779,7 @@ pub fn prove_with_tables(
         .try_into()
         .expect("32 bytes");
     clock.lap();
+    phase_stamp("events1-3");
     timings.round1 = round1_time;
     timings.keccak = keccak_time;
 
@@ -778,6 +802,7 @@ pub fn prove_with_tables(
     let final_vectors: Vec<[u8; 512]> = final_bits.iter().map(|bits| pack_final_vector(bits)).collect();
     transcript.absorb(FINAL_VECTORS_SITE, segments, &final_vectors.concat())?;
     timings.round2 = clock.lap();
+    phase_stamp("round2");
     let flock_shares = keccak.shares(&matrices, &final_bits)?;
     if flock_shares.len() != segments {
         return Err(ProveError::Internal("one share item per segment".into()));
@@ -785,6 +810,7 @@ pub fn prove_with_tables(
     transcript.absorb_items(FLOCK_SHARES_SITE, &flock_shares)?;
     let flock_record = flock_record_digest(&final_vectors, &flock_shares);
     timings.keccak += clock.lap();
+    phase_stamp("shares");
     let tables = SourceTables {
         manifest,
         main,
@@ -796,11 +822,16 @@ pub fn prove_with_tables(
     // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
     // (events 10 to 12) run on the global pool; the join absorbs them after stage 3.
     let flock_threads = if keccak.proves_concurrently() { flock_pool_threads() } else { 0 };
-    let prove_flock = || keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
+    let prove_flock = || {
+        let out = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
+        phase_stamp("flock-prove");
+        out
+    };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
             let prover_tables = ProverTables::new(tables, &matrices);
+            phase_stamp("parity-tables");
             prove_piop_with(
                 manifest,
                 tables,
@@ -812,6 +843,7 @@ pub fn prove_with_tables(
             )
         });
         timings.fork_join = fork.elapsed();
+        phase_stamp("join");
         timings.flock_prove = flock_time;
         timings.keccak += flock_time;
         clock.lap();
@@ -824,7 +856,11 @@ pub fn prove_with_tables(
                 let start = Instant::now();
                 (prove_flock(), start.elapsed())
             },
-            || ProverTables::new(tables, &matrices),
+            || {
+                let out = ProverTables::new(tables, &matrices);
+                phase_stamp("parity-tables");
+                out
+            },
         );
         let (flock_proofs, flock_time) = flock_proofs;
         timings.flock_prove = flock_time;
@@ -878,6 +914,7 @@ pub fn prove_with_tables(
     };
     let opening = committer.open_claims(commitments, &claims, &session)?;
     timings.opening = clock.lap();
+    phase_stamp("opening");
     let proof = AggregateProof {
         relation: manifest.relation(),
         records: n,
