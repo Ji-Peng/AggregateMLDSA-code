@@ -158,10 +158,32 @@ pub fn bit_s_hat_v(bank: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
     out
 }
 
+/// `s_hat_v` of a bit claim on the padded buffer `z` (rows `2^nu`) in one pass over the
+/// smallest aligned prefix of word columns that holds every column of nonzero weight (the
+/// chain's claim has zero column coordinates above its 64 columns): the four-Russians fold of
+/// Flock's ring switch over that region with the tensor `eq(x_col, c) eq(x_row, j)`.
+#[must_use]
+pub fn bit_region_s_hat_v(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let cols = &claim.x_full[1 + nu..];
+    let live = cols
+        .iter()
+        .rposition(|&x| x != F128::ZERO)
+        .map_or(0, |k| k + 1);
+    let eq_col = build_eq_table(&cols[..live]);
+    let eq_row = build_eq_table(&claim.x_full[1..=nu]);
+    let rows = 1usize << nu;
+    let tensor: Vec<F128> = (0..eq_col.len() * rows)
+        .into_par_iter()
+        .with_min_len(1 << 12)
+        .map(|i| eq_col[i >> nu] * eq_row[i & (rows - 1)])
+        .collect();
+    fold_1b_rows_naive(&z[..tensor.len()], &tensor)
+}
+
 /// The value `z_bit(point)` of a bit claim on the padded buffer `z` (rows `2^nu`).
 #[must_use]
 pub fn bit_value(z: &[F128], claim: &BitClaim, nu: usize) -> F128 {
-    let s_hat_v = bit_s_hat_v(&bit_bank(z, claim, nu), claim, nu);
+    let s_hat_v = bit_region_s_hat_v(z, claim, nu);
     let weights = build_claim_weights_from_skip(&claim.skip_point().weights(6), claim.x_full[0]);
     claim_check(&weights, &s_hat_v)
 }
@@ -703,18 +725,32 @@ impl UnionGeometry {
         // bank's multilinear extension, so the columns of zero weight enter too), computed
         // like the C claim's from the stripes; otherwise only `s_hat_v` is needed, and the
         // columns of nonzero weight suffice (`bit_bank`).
+        let t_banks = std::time::Instant::now();
         let bit_banks: Vec<Vec<F128>> = bit_claims
             .iter()
             .map(|c| match &bank_c {
                 Some(_) => lincheck::union_bitbank_fold(&union, &slots, &c.x_full[1..=nu]),
-                None => bit_bank(&z, c, nu),
+                None => Vec::new(),
             })
             .collect();
         let bit_s_hat: Vec<Vec<F128>> = bit_claims
             .iter()
             .zip(&bit_banks)
-            .map(|(c, bank)| bit_s_hat_v(bank, c, nu))
+            .map(|(c, bank)| {
+                if bank.is_empty() {
+                    bit_region_s_hat_v(&z, c, nu)
+                } else {
+                    bit_s_hat_v(bank, c, nu)
+                }
+            })
             .collect();
+        if !bit_claims.is_empty() && std::env::var_os("PCS_TRACE").is_some() {
+            eprintln!(
+                "  [flock_union] bit claims' banks and s_hat_v ({}): {:6.2} ms",
+                if bank_c.is_some() { "full, block-first" } else { "region" },
+                t_banks.elapsed().as_secs_f64() * 1e3
+            );
+        }
         drop(slots);
         drop(stripes);
         let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
