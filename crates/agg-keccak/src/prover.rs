@@ -147,7 +147,7 @@ pub enum KeccakError {
     /// not match the other instance's or the verifier's table.
     Tie(&'static str),
     /// The prover's proof-of-work search exhausted its allowance of `2^(g + 7)` candidates
-    /// (probability below `2^-184.7` per site, docs/soundness.md 6.5).
+    /// (probability below `2^-184.6` per site, docs/soundness.md 6.5).
     Work(&'static str),
 }
 

@@ -40,16 +40,17 @@ Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` reco
 `docs/soundness.md` 3.5), `part_log2` from `AggregatorConfig` (default
 `DEFAULT_PART_LOG2 = 13`: the whole segment is one part since the tied part of K11 removed
 the cost that forced parts of 512 in Section 4; the `agg` usage text still says 9). Each part
-is a tied part (`agg_keccak::tied`): a Flock sponge instance of its records and a Flock
-bridge union of its share (`docs/keccak.md` Section 11): the sponge cap at event 2, and at
-event 6 the bridge union (its cap in the part's proof, since it depends on `sd`) and the
-proofs. At most one part's Flock buffers are alive: parts are committed one by one at event
+is a tied part (`agg_keccak::tied`, proof version 5): a Flock sponge instance of its records
+and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7;
+until version 4 a second Flock instance, the bridge union of Section 11): the sponge cap at
+event 2, and at event 6 the chain's rounds and the sponge proof, whose opening carries the
+chain's bit claim. At most one part's Flock buffers are alive: parts are committed one by one at event
 2 (the cap and, by default, the sponge commit data are kept, K14) and rebuilt, proven and
 dropped one by one at event 6.
 
 Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
 parts are whole segments is one tied part over all segments (one sponge instance of all `N`
-records, one bridge union proving every `Y_sigma`); segment 0's items carry its cap and proof,
+records, one parity chain over every `Y_sigma`); segment 0's items carry its cap and proof,
 the others are covered (`agg_cli::wire`, span byte 0), and the verifier checks the span at the
 last segment. Batches of at most `2^13` records (every local batch) have one segment and are
 unchanged by it.

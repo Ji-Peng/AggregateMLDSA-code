@@ -418,8 +418,9 @@ Cost at $`N=2^{15}`$, single core (misc memo 2.4, estimates): Keccak-f $`92N`$ (
 ### 12.1 Knowledge soundness ledger
 
 Normative analysis: `docs/soundness.md` (site census, round-by-round accounting, the
-proof-of-work schedule and the theorem); implemented in wire version 2 and kept in version 3 (`agg_piop::pow`,
-`agg_piop::transcript`; tied-part proof version 4 in `agg_keccak::tied`). $`|K|=p^2`$,
+proof-of-work schedule and the theorem); implemented in wire version 2 and kept in versions 3 and 4 (`agg_piop::pow`,
+`agg_piop::transcript`; tied-part proof version 5 in `agg_keccak::tied`, deviation K21: the
+bridge union replaced by the virtual parity chain of `docs/parity-chain.md`, wire version 4). $`|K|=p^2`$,
 $`p=2^{64}-59`$. $`L`$ is the number of looked-up cells (padding slots included),
 $`L=4\cdot2^{d_{\rm main}}+8\cdot2^{d_1}+8\cdot2^{d_2}+2^{d_3}`$ (138,690,560 at $`N=2^{15}`$,
 4,395,008 at $`N=1{,}024`$), $`M=2^{16}`$, $`D=\max(d_{\rm main}+2,16)`$ the deepest fraction
@@ -443,7 +444,9 @@ address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Propositio
 | stage batching $`\gamma^{(1)},\gamma^{(2)},\gamma^{(3)}`$ (26, 8, 44 coefficients; H-exact 26, 7, 45) | 3 | 1 | $`26,8,44`$ over $`|K|`$ (H-exact $`26,7,45`$) | 5, 4, 6 (H-exact 5, 3, 6) | 12, 11, 13 (H-exact 12, 10, 13) |
 | stage rounds, degrees 4, 4, 3 (the leaves, links, ring identity, 37 reductions and 4 stack reductions ride on them) | $`3\cdot25`$ | 4, 4, 3 | degree over $`|K|`$ | 3, 3, 2 | 10, 10, 9 |
 | bridge seed $`\mathsf{sd}`$ (9.4) over the sponge commitments' Johnson lists: $`\sum_\sigma L_s^{P_\sigma}\theta`$, $`P_\sigma\le2`$ parts per segment | 1 | | span on $`L_s\theta=2^{-139.0}`$, span off $`4L_s\theta=2^{-137.0}`$, worst admitted $`4L_s^2\theta=2^{-131.4}`$ (`Slim`) | 0 | 0 |
-| Flock tie site of a tied part, GF($`2^{128}`$), with the list sizes $`L_s=L_u`$ (35, 50, 70) | 1 (span) | $`L_sL_u(d+s+5)+L_u\max(\log_2b+s+9,5+s)+L_s(\nu_s+3)`$ (union over list pairs) | $`[2L^2(d+s+5)+2L(\log_2b+s+9)+L(5+s)+L(\nu_s+3)]/2^{128}`$ | 16 / 17 / 18 (`Fast`/`Slim`/`Slim8`, full segment or span) | $`g+7`$ |
+| tied part's tie site (public claim), GF($`2^{128}`$), with the sponge list size $`L_s`$ (35, 50, 70) | 1 (span) | $`L_s(\nu_s+3)`$ | $`L_s(\nu_s+3)/2^{128}`$ | 10 / 10 / 11 (`Fast`/`Slim`/`Slim8`, span of four) | $`g+7`$ |
+| tied part's $`\mathrm{eq}_Y`$ site (parity chain, K21) | 1 (span) | $`L_s(12+s)`$ | $`L_s(12+s)/2^{128}`$ | 9 / 10 / 10 | $`g+7`$ |
+| tied part's chain rounds (degree 2) | $`13+d+s`$ (28) | $`2L_s`$ | $`2L_s/2^{128}`$ | 7 / 7 / 8 | $`g+7`$ |
 | Akita opening sites | 459 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
 | Flock internal sites | | Flock's | Flock's per-site schedule; outer sites with the level-0 list factor (PATCH.md 5) | | 8-byte words (already in the Flock proofs) |
 
@@ -453,7 +456,7 @@ $`\sum2^{g_t}=2{,}718`$ predicate evaluations. Before work the round-by-round su
 field terms is $`(11d_{\rm main}+d_{\rm main}+3+{\rm GKR})/|K|=1{,}409/|K|=2^{-117.5}`$ at
 $`2^{15}`$ (979/|K| at $`2^{10}`$; relaxed H with stage-2 degree 5: 1,434 and 999); the former per-instance ledger charged every reduction,
 zero-check and linear identity its own $`d_{\rm main}/|K|`$ and summed to $`3{,}509/|K|`$
-(`docs/soundness.md` Section 5). The plan (tie sites, then the PIOP sites in registry order)
+(`docs/soundness.md` Section 5). The plan (the tied parts' sites, then the PIOP sites in registry order)
 is bound in event 0 by its SHA3-256 digest (Section 10). Mode A admits at most two tied parts
 per segment ($`d_{\rm part}\ge d_{\rm seg}-1`$; `docs/soundness.md` 3.5), so the $`\mathsf{sd}`$
 union stays below $`2^{-128}`$. The composition of Akita's extractor with the Flock

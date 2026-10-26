@@ -1,8 +1,9 @@
 //! The proof-of-work plan of a proof and the packed PIOP nonce stream
 //! (`docs/soundness.md` Sections 3, 6; deviation P3 resolved).
 //!
-//! The plan is the ordered list of the proof's protected challenge sites: the tie site of
-//! every tied part of the Keccak side ([`KeccakPlan`], in segment and part order), then the
+//! The plan is the ordered list of the proof's protected challenge sites: the sites of every
+//! tied part of the Keccak side ([`KeccakPlan`], in segment and part order: the tie site, the
+//! `eq_Y` site and the parity-chain rounds of tied-part proof version 5), then the
 //! PIOP field-challenge sites in registry order ([`crate::transcript::Registry`], the lookup
 //! vector `X` included with difficulty 0). Every site carries its class, two indices and its
 //! difficulty `g` ([`agg_bridge::pow`]); the canonical encoding of Section 6.4 is hashed with
@@ -15,7 +16,7 @@
 //! order, the padding bits zero ([`WorkWriter`], [`WorkReader`]). The tie nonces travel in the
 //! tied-part proofs and Akita's and Flock's nonces in their own proofs.
 
-use agg_bridge::pow::nonce_bits;
+use agg_bridge::pow::{nonce_bits, PartWork};
 use sha3::{Digest, Sha3_256};
 
 use crate::binding::FlockProfile;
@@ -43,8 +44,22 @@ pub enum SiteClass {
     StageGamma = 6,
     /// A round challenge of a stage (degree 4, 5, 3).
     StageRound = 7,
-    /// The tie challenges of a tied part (GF(2^128), `agg_keccak::tied`).
+    /// The tie challenges of a tied part (GF(2^128), `agg_keccak::tied`): the public claim's
+    /// point.
     Tie = 8,
+    /// The `eq_Y` challenges of a tied part's parity chain (GF(2^128), version 5).
+    ChainEq = 9,
+    /// A round challenge of a tied part's parity chain (degree 2).
+    ChainRound = 10,
+}
+
+impl SiteClass {
+    /// Sites of the Keccak side (their nonces travel in the tied-part proofs, not in the
+    /// PIOP nonce stream).
+    #[must_use]
+    pub const fn is_keccak(self) -> bool {
+        matches!(self, Self::Tie | Self::ChainEq | Self::ChainRound)
+    }
 }
 
 /// One protected site of the plan.
@@ -70,15 +85,16 @@ impl WorkSite {
 
 /// The Keccak side's part of the plan: the span length `S` of a tied part (1 for parts of
 /// one segment, 0 without tied parts), the part size `d_part` (0 without tied parts) and the
-/// difficulty of each tied part's tie site in segment and part order.
+/// work of each tied part (its tie, `eq_Y` and chain-round difficulties and its round count)
+/// in segment and part order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeccakPlan {
     /// `S`, the segments of one tied part (0: no tied parts).
     pub span: u8,
     /// `log2` of the record positions per part (0: no tied parts).
     pub d_part: u8,
-    /// Difficulty of each tie site.
-    pub tie_bits: Vec<u8>,
+    /// The work of each tied part.
+    pub parts: Vec<PartWork>,
 }
 
 /// The plan of one proof (module docs).
@@ -96,17 +112,28 @@ impl PowPlan {
     /// side's tied parts `keccak`.
     #[must_use]
     pub fn new(manifest: &CommitmentManifest, profile: FlockProfile, keccak: &KeccakPlan) -> Self {
-        let mut sites: Vec<WorkSite> = keccak
-            .tie_bits
-            .iter()
-            .enumerate()
-            .map(|(part, &bits)| WorkSite {
+        let mut sites = Vec::new();
+        for (part, work) in keccak.parts.iter().enumerate() {
+            let i = u16::try_from(part).expect("at most 2^16 tied parts");
+            sites.push(WorkSite {
                 class: SiteClass::Tie,
-                i: u16::try_from(part).expect("at most 2^16 tied parts"),
+                i,
                 j: 0,
-                bits,
-            })
-            .collect();
+                bits: work.tie_bits,
+            });
+            sites.push(WorkSite {
+                class: SiteClass::ChainEq,
+                i,
+                j: 0,
+                bits: work.eq_bits,
+            });
+            sites.extend((0..work.rounds).map(|j| WorkSite {
+                class: SiteClass::ChainRound,
+                i,
+                j,
+                bits: work.round_bits,
+            }));
+        }
         sites.extend(Registry::new(manifest).work_sites());
         Self {
             padded: manifest.padded_records() as u64,
@@ -157,7 +184,7 @@ impl PowPlan {
     pub fn work_bits(&self) -> usize {
         self.sites
             .iter()
-            .filter(|s| s.class != SiteClass::Tie)
+            .filter(|s| !s.class.is_keccak())
             .map(|s| usize::from(s.nonce_bits()))
             .sum()
     }
@@ -167,7 +194,7 @@ impl PowPlan {
     pub fn expected_work(&self) -> u64 {
         self.sites
             .iter()
-            .filter(|s| s.class != SiteClass::Tie && s.bits > 0)
+            .filter(|s| !s.class.is_keccak() && s.bits > 0)
             .map(|s| 1_u64 << s.bits)
             .sum()
     }
@@ -284,7 +311,7 @@ impl WorkReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agg_bridge::pow::{list_size, tie_bits, TieGeometry};
+    use agg_bridge::pow::{list_size, part_work, TieGeometry};
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -314,13 +341,13 @@ mod tests {
             KeccakPlan {
                 span: segments as u8,
                 d_part: d as u8,
-                tie_bits: vec![tie_bits(list, &geo(span_log, d_sig))],
+                parts: vec![part_work(list, &geo(span_log, d_sig))],
             }
         } else {
             KeccakPlan {
                 span: 1,
                 d_part: d as u8,
-                tie_bits: vec![tie_bits(list, &geo(0, 13)); segments],
+                parts: vec![part_work(list, &geo(0, 13)); segments],
             }
         }
     }
@@ -339,7 +366,7 @@ mod tests {
                 3,
                 FlockProfile::Slim,
                 Some(true),
-                "1d9b37d94b1b32c19fae1312ac52d5da937824e6b8253585c00a3ccd67d1fd32",
+                "a56daef1067736a1465e21e1099da13ad3dc355f90594e4f401251071f845328",
             ),
             (
                 10,
@@ -351,13 +378,13 @@ mod tests {
                 10,
                 FlockProfile::Slim,
                 Some(true),
-                "2d289df145671419fe780abaa2542b28870ce0349ac8cd82ccd9da6a5b091a5b",
+                "11b035262a5b998594b795e346241abec1b953a14cb4b8afa6d52a444634c960",
             ),
             (
                 13,
                 FlockProfile::Slim,
                 Some(true),
-                "86581fc1f62e7dfa20d85d03868821a6cc83296e78c9d3e2fcdedaa6d2449e73",
+                "ca232ca0195b87274440b1745808795c896ef4ceaa4e39d32c08f137f54d75db",
             ),
             (
                 15,
@@ -369,25 +396,25 @@ mod tests {
                 15,
                 FlockProfile::Fast,
                 Some(true),
-                "57f65044067580b0234487193ebfd49e29093d40423f528600b804db6d90e156",
+                "98ed5d446d68fe2416580acc5469c29c90d53e1d88937a6c381773b89aa98d00",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(true),
-                "df9161a54a441de0e4065c8129aa9f956f4146427bd3336e59639e0cfdf2e38c",
+                "911303030ad4a06781f89ceff4f373ffdbfe6da1946ae54c30a6a965b3c28cb2",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(false),
-                "5f69f20374997a0b0a025cf853549d98152025a4ebf946c84a55235c03c70ac0",
+                "7aa378b470947b1f64a8ae049c4c3741f4ebb493583c305e552750f448f79896",
             ),
             (
                 15,
                 FlockProfile::Slim8,
                 Some(true),
-                "902578ff518bcb5adfb672be263e13286e32226d2cdfb8853066b89250f64795",
+                "1467d650376c39e30bde4f7ad9d12ecee8c4f5b3f580ae81ea7364e840b8d8d8",
             ),
         ];
         for (d_sig, profile, span, want) in cases {
@@ -460,11 +487,11 @@ mod tests {
         // The provisional anchors of docs/h-exact.md 3.7 (mode B = PublicBits; Slim, span on).
         for (d_sig, profile, want) in [
             (3, FlockProfile::PublicBits, "c9dd30a002089fff68b1653faddb2ac860e093f771eb3eeaaf03e60152e54c85"),
-            (3, FlockProfile::Slim, "8f69f49792afc311cf43042df023b98706f92bdaecb1c3ac837690e92995e983"),
+            (3, FlockProfile::Slim, "395afaec30fb8143597d9cd965d9348f8aba6367d5ea3c931338a519f3538f92"),
             (10, FlockProfile::PublicBits, "750a40c19877ba6bda8c7ddee36866239b6338f7caa84109880662a33d64a1d8"),
-            (10, FlockProfile::Slim, "82ffd38abe14e463ad41cc9ad209e07d5143f28067bb3696f2c445aad2c05c8f"),
+            (10, FlockProfile::Slim, "50f288e92a2e1f8832ee42535ca855bf2883786f79fb1629313f5a7951a36187"),
             (15, FlockProfile::PublicBits, "e4b1dffc21351ca615ace27500406a1990609ccb6cc07e13c6da50c18a416046"),
-            (15, FlockProfile::Slim, "14666dea14ede0ddea3f5cc34d50e8d746021c034941d060a6c2d08af8960d41"),
+            (15, FlockProfile::Slim, "1f8e7aba1af1db61d3be14fccd16252008b8cdc71799c61d5711d923df38db16"),
         ] {
             let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
             let keccak = match profile {
@@ -481,10 +508,16 @@ mod tests {
     #[test]
     fn plan_digest_depends_on_profile_span_and_ties() {
         let manifest = CommitmentManifest::for_batch(1000).unwrap();
+        let work = PartWork {
+            tie_bits: 10,
+            eq_bits: 10,
+            round_bits: 7,
+            rounds: 23,
+        };
         let base = KeccakPlan {
             span: 1,
             d_part: 10,
-            tie_bits: vec![17],
+            parts: vec![work],
         };
         let d = |p: FlockProfile, k: &KeccakPlan| PowPlan::new(&manifest, p, k).digest();
         let reference = d(FlockProfile::Slim, &base);
@@ -514,7 +547,10 @@ mod tests {
             d(
                 FlockProfile::Slim,
                 &KeccakPlan {
-                    tie_bits: vec![16],
+                    parts: vec![PartWork {
+                        tie_bits: 9,
+                        ..work
+                    }],
                     ..base.clone()
                 }
             )
@@ -524,7 +560,33 @@ mod tests {
             d(
                 FlockProfile::Slim,
                 &KeccakPlan {
-                    tie_bits: vec![17, 17],
+                    parts: vec![PartWork {
+                        round_bits: 8,
+                        ..work
+                    }],
+                    ..base.clone()
+                }
+            )
+        );
+        assert_ne!(
+            reference,
+            d(
+                FlockProfile::Slim,
+                &KeccakPlan {
+                    parts: vec![PartWork {
+                        rounds: 22,
+                        ..work
+                    }],
+                    ..base.clone()
+                }
+            )
+        );
+        assert_ne!(
+            reference,
+            d(
+                FlockProfile::Slim,
+                &KeccakPlan {
+                    parts: vec![work, work],
                     ..base
                 }
             )

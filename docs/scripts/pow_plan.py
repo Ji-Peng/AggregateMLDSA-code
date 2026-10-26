@@ -14,8 +14,10 @@ What it computes, with exact integer arithmetic:
   round-by-round numerator nu_t, its assigned bound e_t (>= nu_t / |F|), the difficulty
   g_t = min{g >= 0 : 2^128 e_t <= 2^g} (Aerie Eq. (17)) and the nonce width g_t + 7
   (0 when g_t = 0: no nonce);
-* the Flock tie site of every tied part (docs/bridge.md 5c) for part sizes d = 3 .. 13 and
-  span lengths S = 1, 2, 4, with the Johnson-list factors of the two Ligerito commitments;
+* the sites of every tied part (tied-part proof version 5, docs/parity-chain.md Section 8:
+  the tie site of the public claim, the eq_Y site and the parity-chain rounds) for part
+  sizes d = 3 .. 13 and span lengths S = 1, 2, 4, with the Johnson-list factor of the
+  sponge commitment;
 * the packed nonce stream size, the expected honest work sum 2^g, the honest failure bound,
   the union-bound ledger before work, and the plan digest test vectors (encoding of
   docs/soundness.md Section 6.4);
@@ -48,7 +50,9 @@ SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
 RECT_MIN_ROWS_LOG = 11
 D_SEG_MAX = 13
-OUTPUT_WORDS_LOG2 = 5
+OUT_VARS = 12  # log2 m_3, the output-row coordinates of eq_Y
+ZETA_VARS = 19  # log2 J_1
+LANE_VARS = 3  # ceil(log2 6): the chain's eight lanes
 PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
 # Level-0 Ligerito rate exponent r (rho = 2^-r) per profile; eta = 0.02 at level 0 in every
 # shipped and derived config (vendor/flock-core/configs/ligerito/m*_{fast,slim,slim8}.toml).
@@ -66,6 +70,8 @@ CLASS_ID = {
     "stage.gamma": 6,
     "stage.round": 7,
     "tie": 8,
+    "chain.eq": 9,
+    "chain.round": 10,
 }
 
 
@@ -142,33 +148,41 @@ def piop_sites(geo: dict) -> list:
     return sites
 
 
+def chain_rounds(d: int, span_log: int) -> int:
+    """Rounds of the parity chain of a production part (agg_bridge::pow::chain_rounds)."""
+    return min(10 + min(d, 9), ZETA_VARS) + max(0, d - 9) + LANE_VARS + span_log
+
+
 def tie_terms(d: int, span_log: int, nu_s: int, profile: str) -> dict:
-    """Tie identities of one tied part (docs/bridge.md 5c) and their list-weighted bounds."""
-    lst = list_size(L0_RATE[profile])
-    ls = lu = lst
-    blocks_log = max(0, d - 9)
-    tie1 = d + span_log + 5  # sponge inputs vs level-1 inputs (two lane groups): pairs of lists
-    tie2 = blocks_log + span_log + 9  # parities vs copies inside the union (two lane groups)
-    out = OUTPUT_WORDS_LOG2 + span_log  # output columns vs the public table of Y
-    pub = nu_s + 3  # sponge public region vs the verifier's table
-    plain = 2 * tie1 + 2 * tie2 + out + pub
-    listed = 2 * ls * lu * tie1 + 2 * lu * tie2 + lu * out + ls * pub
-    # union over list pairs: tie2 and out depend only on g, pub only on f (soundness.md 3.6)
-    tight = ls * lu * tie1 + lu * max(tie2, out) + ls * pub
-    g = grind_bits(listed, F2_128)
+    """Work sites of one tied part, version 5 (docs/parity-chain.md 8, soundness.md 3.6).
+
+    The sponge commitment is bound only to its Johnson list of L_s codewords when the tie
+    challenger draws, so every numerator carries L_s: the public claim L_s (nu_s + 3), eq_Y
+    L_s (log2 m_3 + span_log), each degree-2 round 2 L_s.
+    """
+    ls = list_size(L0_RATE[profile])
+    tie = ls * (nu_s + 3)
+    eq = ls * (OUT_VARS + span_log)
+    rnd = 2 * ls
+    rounds = chain_rounds(d, span_log)
+    g, g_eq, g_rd = grind_bits(tie, F2_128), grind_bits(eq, F2_128), grind_bits(rnd, F2_128)
     return {
         "d": d,
         "span_log": span_log,
         "nu_s": nu_s,
-        "list": lst,
-        "terms": (tie1, tie2, out, pub),
-        "plain": plain,
-        "listed": listed,
-        "tight": tight,
+        "list": ls,
+        "tie": tie,
+        "eq": eq,
+        "round": rnd,
+        "rounds": rounds,
         "g": g,
-        "g_plain": grind_bits(plain, F2_128),
-        "g_tight": grind_bits(tight, F2_128),
         "w": width(g),
+        "g_eq": g_eq,
+        "g_round": g_rd,
+        # bytes of nonces in the proof (LE32 each): tie, eq_Y, every round
+        "nonce_bytes": 4 * (2 + rounds),
+        "work": (1 << g) + (1 << g_eq) + rounds * (1 << g_rd),
+        "sites": 2 + rounds,
     }
 
 
@@ -190,8 +204,11 @@ def tie_parts(geo: dict, profile: str, span: bool, n: int) -> list:
 def plan_digest(geo: dict, sites: list, ties: list, profile: str, span_count: int, d_part: int) -> str:
     """SHA3-256 test vector of the canonical plan encoding (docs/soundness.md Section 6.4)."""
     entries = []
-    for t in ties:  # tie sites first: they precede the lookup (event 6)
-        entries.append((CLASS_ID["tie"], len(entries), 0, t["g"], t["w"]))
+    for p, t in enumerate(ties):  # tied parts first: they precede the lookup (event 6)
+        entries.append((CLASS_ID["tie"], p, 0, t["g"], t["w"]))
+        entries.append((CLASS_ID["chain.eq"], p, 0, t["g_eq"], width(t["g_eq"])))
+        for k in range(t["rounds"]):
+            entries.append((CLASS_ID["chain.round"], p, k, t["g_round"], width(t["g_round"])))
     for cls, i, j, nu, num, den in sites:
         g = grind_bits(num, den)
         entries.append((CLASS_ID[cls], i, j, g, width(g)))
@@ -299,8 +316,8 @@ def print_summary(args) -> None:
             e = theta * mult
             print(f"       {label:<31} 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
     print()
-    print("== Tie site of one tied part (GF(2^128), docs/bridge.md 5c), full parts n = 2^d S ==")
-    print("profile  d   S  nu_s  terms(tie1,tie2,out,pub)  plain  g_plain  list  listed    g   nonce  tight(RBR)  g_tight")
+    print("== Sites of one tied part, version 5 (GF(2^128), docs/parity-chain.md 8), full parts n = 2^d S ==")
+    print("profile  d   S  nu_s  list  tie=L(nu_s+3)  g   eq=L(12+s)  g_eq  round=2L  g_rd  rounds  nonce bytes  work(sum 2^g)")
     for prof in ("fast", "slim", "slim8"):
         for d in range(3, 14):
             for S in (1, 2, 4):
@@ -309,7 +326,7 @@ def print_summary(args) -> None:
                 span_log = (S - 1).bit_length()
                 t = tie_terms(d, span_log, capacity_log((1 << d) * S), prof)
                 print(
-                    f"{prof:<7} {d:>2}  {S:>2}  {t['nu_s']:>4}  {str(t['terms']):<24}  {t['plain']:>5}  {t['g_plain']:>7}  {t['list']:>4}  {t['listed']:>7}  {t['g']:>3}  {t['w']:>5}  {t['tight']:>10}  {t['g_tight']:>7}"
+                    f"{prof:<7} {d:>2}  {S:>2}  {t['nu_s']:>4}  {t['list']:>4}  {t['tie']:>13}  {t['g']:>2}  {t['eq']:>10}  {t['g_eq']:>4}  {t['round']:>8}  {t['g_round']:>4}  {t['rounds']:>6}  {t['nonce_bytes']:>11}  {t['work']:>13}"
                 )
     print()
     print("== Flock outer sites before the level-0 two-point binding (audit, Section 4.3) ==")
@@ -336,8 +353,8 @@ def print_summary(args) -> None:
             fix = math.floor(math.log2(nu * lmax)) + 1
             print(f"   {name:<26} nu {nu:>4}  bits {bits:>2}  -> {sec:7.2f} bits; strict bits with L_max: {fix}")
     print()
-    print("== Totals at N = N* (bytes of the PIOP packed stream + tie nonces; expected work) ==")
-    print("d_sig  profile  span  parts  tie g     PIOP bytes  tie bytes  total bytes  B/sig    PIOP work  tie work")
+    print("== Totals at N = N* (bytes of the PIOP packed stream + tied-part nonces; expected work) ==")
+    print("d_sig  profile  span  parts  tie g     PIOP bytes  part bytes  total bytes  B/sig    PIOP work  part work")
     for d_sig in range(3, 16):
         geo = geometry(d_sig)
         s = summarize(piop_sites(geo))
@@ -345,11 +362,11 @@ def print_summary(args) -> None:
             spans = (True, False) if geo["segments"] > 1 else (True,)
             for span in spans:
                 ties = tie_parts(geo, prof, span, 1 << d_sig)
-                tie_bytes = 4 * len(ties)
-                tie_work = sum(1 << t["g"] for t in ties)
+                tie_bytes = sum(t["nonce_bytes"] for t in ties)
+                tie_work = sum(t["work"] for t in ties)
                 tot = s["bytes"] + tie_bytes
                 print(
-                    f"{d_sig:>5}  {prof:<7}  {'on ' if span else 'off'}   {len(ties):>5}  {','.join(str(t['g']) for t in ties):<8}  {s['bytes']:>10}  {tie_bytes:>9}  {tot:>11}  {tot / (1 << d_sig):>6.3f}  {s['work']:>9}  {tie_work:>8}"
+                    f"{d_sig:>5}  {prof:<7}  {'on ' if span else 'off'}   {len(ties):>5}  {','.join(str(t['g']) for t in ties):<8}  {s['bytes']:>10}  {tie_bytes:>10}  {tot:>11}  {tot / (1 << d_sig):>6.3f}  {s['work']:>9}  {tie_work:>9}"
                 )
     print()
     print("== Plan digests (SHA3-256, Section 6.4 encoding; N = N*, default part size) ==")
@@ -365,11 +382,13 @@ def print_summary(args) -> None:
                 print(f"N* = 2^{d_sig:<2} {prof:<6} span {'on ' if span else 'off'} {plan_digest(geo, sites, ties, prof, S, geo['d_seg'])}")
     print()
     # Honest completeness: per site (1 - 2^-g)^(2^(g+7)) <= exp(-2^7).
-    # Capped searches: PIOP sites, tie sites (at most 2 parts x 4 segments), Akita's 459.
-    worst = max(len(piop_sites(geometry(d))) for d in range(3, 16)) + 8 + AKITA_SITES_2_15
+    # Capped searches: PIOP sites, tied-part sites (at most 2 parts x 4 segments, each a tie, an
+    # eq_Y and at most 28 rounds), Akita's 459.
+    part_sites = 8 * (2 + chain_rounds(D_SEG_MAX, 2))
+    worst = max(len(piop_sites(geometry(d))) for d in range(3, 16)) + part_sites + AKITA_SITES_2_15
     print(
         f"Honest failure: per site <= exp(-128) = 2^{-128 / math.log(2):.1f};"
-        f" at most {worst} capped searches per proof (PIOP + 8 tie + {AKITA_SITES_2_15} Akita):"
+        f" at most {worst} capped searches per proof (PIOP + {part_sites} tied-part + {AKITA_SITES_2_15} Akita):"
         f" <= 2^{math.log2(worst) - 128 / math.log(2):.1f}"
     )
 
@@ -380,9 +399,13 @@ def print_details(d_sig: int) -> None:
     print("#    class         i   j   nu      e_t numerator     g  width")
     ties = tie_parts(geo, "slim", True, 1 << d_sig)
     idx = 0
-    for t in ties:
-        print(f"{idx:<4} tie          {idx:>2}  0   {t['tight']:<6}  {t['listed']}/2^128  {t['g']:>2}  {t['w']:>2}")
-        idx += 1
+    for p, t in enumerate(ties):
+        print(f"{idx:<4} tie          {p:>2}  0   {t['nu_s'] + 3:<6}  {t['tie']}/2^128  {t['g']:>2}  {t['w']:>2}")
+        print(f"{idx + 1:<4} chain.eq     {p:>2}  0   {OUT_VARS + t['span_log']:<6}  {t['eq']}/2^128  {t['g_eq']:>2}  {width(t['g_eq']):>2}")
+        idx += 2
+        for k in range(t["rounds"]):
+            print(f"{idx:<4} chain.round  {p:>2}  {k:>2}  2       {t['round']}/2^128  {t['g_round']:>2}  {width(t['g_round']):>2}")
+            idx += 1
     for cls, i, j, nu, num, den in piop_sites(geo):
         g = grind_bits(num, den)
         e = f"{num}/|K|" if cls != "lookup.x" else "((L+M-1)/|K|)^2"
@@ -411,10 +434,11 @@ def self_check() -> None:
     assert all(grind_bits(nu, K) == nu.bit_length() for nu in range(1, 5000))
     # GF(2^128): ceil(log2 nu), 1/2^128 needs no work.
     assert grind_bits(1, F2_128) == 0 and grind_bits(95, F2_128) == 7
-    # docs/bridge.md 5c: 95 at four full segments without lists.
-    assert tie_terms(13, 2, 15, "slim")["plain"] == 95
-    # docs/bridge.md 5b: 83 at a full segment.
-    assert tie_terms(13, 0, 13, "slim")["plain"] == 83
+    # Version 5 (docs/parity-chain.md 8): a span of four full segments under Slim.
+    t = tie_terms(13, 2, 15, "slim")
+    assert (t["tie"], t["g"], t["eq"], t["g_eq"], t["round"], t["g_round"], t["rounds"]) == (
+        900, 10, 700, 10, 100, 7, 28), t
+    assert chain_rounds(13, 0) == 26 and chain_rounds(3, 0) == 16 and chain_rounds(8, 0) == 21
     # spec 12.1: GKR 1,106/|K| at 2^15 and 391/|K| at N* = 8; L at 2^15.
     g15 = geometry(15)
     assert g15["L"] == 138_690_560 and g15["D"] == 27
@@ -440,7 +464,7 @@ def self_check() -> None:
     assert digest.startswith("e4b1dffc"), digest
     digest = with_gammas(exact, lambda: plan_digest(
         g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
-    assert digest.startswith("14666dea"), digest
+    assert digest.startswith("1f8e7aba"), digest
 
 
 def main() -> None:

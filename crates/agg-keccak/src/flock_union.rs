@@ -46,7 +46,11 @@ use flock_core::{
     lincheck::{self, build_eq_table, LincheckCircuit, QuirkyPoint, SkipPoint, UnionLincheckSlot},
     pcs::{
         commit, commit_lane_major, ligerito::embedded_initial_k_or_default, open_batch_merged,
-        rectangular_prefix_columns, ring_switch::s_hat_v_from_z_vec, verify_batch_merged,
+        rectangular_prefix_columns,
+        ring_switch::{
+            build_claim_weights_from_skip, claim_check, fold_1b_rows_naive, s_hat_v_from_z_vec,
+        },
+        verify_batch_merged,
         Commitment, DirectEqInd, PackedDirectClaim, PackedDirectClaimRef, PcsParams, ProverData,
         LOG_PACKING,
     },
@@ -81,6 +85,107 @@ fn x_full(point: &QuirkyPoint) -> Vec<F128> {
     v.extend_from_slice(&point.x_inner_rest);
     v.extend_from_slice(&point.x_outer);
     v
+}
+
+/// A ring-switched claim of the caller on the committed BIT polynomial (deviation K21,
+/// `docs/parity-chain.md` Section 4): `z_bit(point) = value` where the point's in-word bits
+/// 0..5 are the multilinear skip coordinates `skip` (Flock's `SkipPoint::Eq`) and `x_full`
+/// is in-word bit 6 followed by the `M - 7` word-address coordinates (rows low, as a
+/// packed-direct point). Unlike a packed-direct claim it goes through Flock's ring switch
+/// (`s_hat_v`, 128 values) and the twisted multipoint assist (128 dual values).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BitClaim {
+    /// In-word bits 0..5.
+    pub skip: [F128; 6],
+    /// In-word bit 6, then the word address (`M - 6` coordinates in all).
+    pub x_full: Vec<F128>,
+}
+
+impl BitClaim {
+    /// Flock's skip point of the claim.
+    #[must_use]
+    pub fn skip_point(&self) -> SkipPoint {
+        SkipPoint::Eq(self.skip)
+    }
+}
+
+/// The partial column bit-bank of a bit claim on the padded buffer `z` with `2^nu` rows per
+/// word column: `bank[128 c + b] = sum_j eq(x_row, j) bit_b(z[(c << nu) | j])` for every word
+/// column `c` whose column weight `eq(x_col, c)` is nonzero, zero elsewhere. Enough for
+/// `s_hat_v` ([`bit_s_hat_v`], where the other columns are multiplied by their zero weight),
+/// NOT for the block-first transport of `pcs::open_batch_merged`, whose block rounds fold the
+/// bank's multilinear extension and need every column ([`UnionGeometry::prove`] uses Flock's
+/// `union_bitbank_fold` there).
+///
+/// # Panics
+/// If the claim's length does not fit `z` and `nu`.
+#[must_use]
+pub fn bit_bank(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let vars = claim.x_full.len() - 1;
+    assert_eq!(z.len(), 1usize << vars, "padded buffer length");
+    assert!(nu <= vars, "row coordinates");
+    let eq_row = build_eq_table(&claim.x_full[1..=nu]);
+    let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
+    let rows = 1usize << nu;
+    let mut bank = vec![F128::ZERO; eq_col.len() << LOG_PACKING];
+    for (c, chunk) in bank
+        .as_chunks_mut::<{ 1 << LOG_PACKING }>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        if eq_col[c] != F128::ZERO {
+            chunk.copy_from_slice(&fold_1b_rows_naive(&z[c * rows..(c + 1) * rows], &eq_row));
+        }
+    }
+    bank
+}
+
+/// `s_hat_v` of a bit claim from its bank: `sum_c eq(x_col, c) bank[c]`.
+#[must_use]
+pub fn bit_s_hat_v(bank: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
+    let n = 1usize << LOG_PACKING;
+    assert_eq!(bank.len(), eq_col.len() * n, "one bank row per word column");
+    let mut out = vec![F128::ZERO; n];
+    for (c, &e) in eq_col.iter().enumerate() {
+        if e != F128::ZERO {
+            for (o, &b) in out.iter_mut().zip(&bank[c * n..(c + 1) * n]) {
+                *o += e * b;
+            }
+        }
+    }
+    out
+}
+
+/// `s_hat_v` of a bit claim on the padded buffer `z` (rows `2^nu`) in one pass over the
+/// smallest aligned prefix of word columns that holds every column of nonzero weight (the
+/// chain's claim has zero column coordinates above its 64 columns): the four-Russians fold of
+/// Flock's ring switch over that region with the tensor `eq(x_col, c) eq(x_row, j)`.
+#[must_use]
+pub fn bit_region_s_hat_v(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let cols = &claim.x_full[1 + nu..];
+    let live = cols
+        .iter()
+        .rposition(|&x| x != F128::ZERO)
+        .map_or(0, |k| k + 1);
+    let eq_col = build_eq_table(&cols[..live]);
+    let eq_row = build_eq_table(&claim.x_full[1..=nu]);
+    let rows = 1usize << nu;
+    let tensor: Vec<F128> = (0..eq_col.len() * rows)
+        .into_par_iter()
+        .with_min_len(1 << 12)
+        .map(|i| eq_col[i >> nu] * eq_row[i & (rows - 1)])
+        .collect();
+    fold_1b_rows_naive(&z[..tensor.len()], &tensor)
+}
+
+/// The value `z_bit(point)` of a bit claim on the padded buffer `z` (rows `2^nu`).
+#[must_use]
+pub fn bit_value(z: &[F128], claim: &BitClaim, nu: usize) -> F128 {
+    let s_hat_v = bit_region_s_hat_v(z, claim, nu);
+    let weights = build_claim_weights_from_skip(&claim.skip_point().weights(6), claim.x_full[0]);
+    claim_check(&weights, &s_hat_v)
 }
 
 /// A proof of one union with the caller's claims.
@@ -488,6 +593,7 @@ impl UnionGeometry {
         buffers: Vec<SlotBuffers>,
         circuits: &[&dyn LincheckCircuit],
         points: &[Vec<F128>],
+        bit_claims: &[BitClaim],
         ch: &mut Ch,
         pre: Option<CommitData>,
     ) -> (UnionProof, KeccakCommitment) {
@@ -538,6 +644,9 @@ impl UnionGeometry {
             })
             .collect();
         let values: Vec<F128> = packed_direct.iter().map(|c| c.value).collect();
+        for c in bit_claims {
+            assert_eq!(c.x_full.len(), word_vars + 1, "bit claim point length");
+        }
         let q_owned = self.compact(&union, &z);
         let (commitment, prover_data) = match pre {
             Some(CommitData {
@@ -611,15 +720,51 @@ impl UnionGeometry {
             assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
             lincheck::union_bitbank_fold(&union, &slots, &zc_claim.r_rest[1..1 + nu])
         });
+        // The caller's bit claims (K21). With the block-first transport the bank must be the
+        // full column bit-bank of the stack at the claim's row point (the block rounds fold the
+        // bank's multilinear extension, so the columns of zero weight enter too), computed
+        // like the C claim's from the stripes; otherwise only `s_hat_v` is needed, and the
+        // columns of nonzero weight suffice (`bit_bank`).
+        let t_banks = std::time::Instant::now();
+        let bit_banks: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .map(|c| match &bank_c {
+                Some(_) => lincheck::union_bitbank_fold(&union, &slots, &c.x_full[1..=nu]),
+                None => Vec::new(),
+            })
+            .collect();
+        let bit_s_hat: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .zip(&bit_banks)
+            .map(|(c, bank)| {
+                if bank.is_empty() {
+                    bit_region_s_hat_v(&z, c, nu)
+                } else {
+                    bit_s_hat_v(bank, c, nu)
+                }
+            })
+            .collect();
+        if !bit_claims.is_empty() && std::env::var_os("PCS_TRACE").is_some() {
+            eprintln!(
+                "  [flock_union] bit claims' banks and s_hat_v ({}): {:6.2} ms",
+                if bank_c.is_some() { "full, block-first" } else { "region" },
+                t_banks.elapsed().as_secs_f64() * 1e3
+            );
+        }
         drop(slots);
         drop(stripes);
-        let pre: [Option<&[F128]>; 2] = [s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
-        let banks: [Option<&[F128]>; 2] = match &bank_c {
-            Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())],
-            None => [None, None],
+        let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
+        pre.extend(bit_s_hat.iter().map(|v| Some(v.as_slice())));
+        let banks: Vec<Option<&[F128]>> = match &bank_c {
+            Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())]
+                .into_iter()
+                .chain(bit_banks.iter().map(|b| Some(b.as_slice())))
+                .collect(),
+            None => vec![None; 2 + bit_claims.len()],
         };
-        let x_fulls = [x_full(&ab.point), x_full(&c.point)];
-        let x_refs: [&[F128]; 2] = [&x_fulls[0], &x_fulls[1]];
+        let mut x_fulls = vec![x_full(&ab.point), x_full(&c.point)];
+        x_fulls.extend(bit_claims.iter().map(|c| c.x_full.clone()));
+        let x_refs: Vec<&[F128]> = x_fulls.iter().map(Vec::as_slice).collect();
         let padding = union.padding_spec();
         let grinding = self.pcs_params.opening_grinding();
         let pcs_open = match q_owned {
@@ -682,6 +827,7 @@ impl UnionGeometry {
         commitment: &KeccakCommitment,
         proof: &UnionProof,
         points: &[Vec<F128>],
+        bit_claims: &[(BitClaim, F128)],
         ch: &mut Ch,
     ) -> Result<Vec<F128>, KeccakError> {
         assert_eq!(circuits.len(), self.types(), "one circuit per type");
@@ -693,7 +839,9 @@ impl UnionGeometry {
             return Err(KeccakError::Malformed("claim count"));
         }
         let word_vars = self.word_vars();
-        if points.iter().any(|p| p.len() != word_vars) {
+        if points.iter().any(|p| p.len() != word_vars)
+            || bit_claims.iter().any(|(c, _)| c.x_full.len() != word_vars + 1)
+        {
             return Err(KeccakError::Statement("claim point length"));
         }
         let commitment = Commitment {
@@ -746,10 +894,13 @@ impl UnionGeometry {
             point: union.c_claim_point(SkipPoint::Phi8(zc.z), &zc.r_rest),
             value: zc.c_eval,
         };
-        let values = [ab.value, c.value];
-        let z_skips = [ab.point.z_skip, c.point.z_skip];
-        let x_fulls = [x_full(&ab.point), x_full(&c.point)];
-        let x_refs: [&[F128]; 2] = [&x_fulls[0], &x_fulls[1]];
+        let mut values = vec![ab.value, c.value];
+        values.extend(bit_claims.iter().map(|(_, v)| *v));
+        let mut z_skips = vec![ab.point.z_skip, c.point.z_skip];
+        z_skips.extend(bit_claims.iter().map(|(c, _)| c.skip_point()));
+        let mut x_fulls = vec![x_full(&ab.point), x_full(&c.point)];
+        x_fulls.extend(bit_claims.iter().map(|(c, _)| c.x_full.clone()));
+        let x_refs: Vec<&[F128]> = x_fulls.iter().map(Vec::as_slice).collect();
         let pd: Vec<PackedDirectClaimRef<'_>> = points
             .iter()
             .zip(&proof.values)

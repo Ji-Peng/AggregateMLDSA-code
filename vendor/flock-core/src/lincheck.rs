@@ -1226,7 +1226,18 @@ pub enum SkipPoint {
     /// AG multiplication-code basis: a genus-95 curve point; weights via the
     /// base-code evaluation functional. Always `k_skip = 6` (64 base coords).
     Ag(EvaluationPoint),
+    /// agg-mldsa patch (PATCH.md Section 7, deviation K21): the MULTILINEAR basis. The six
+    /// coordinates of in-word bits 0..5, least significant first; the functional is the eq
+    /// tensor `w[i] = prod_k (x_k if bit k of i is set else 1 + x_k)`, so a ring-switched
+    /// claim at this point is an ordinary bit-MLE evaluation. Enters ring-switched openings
+    /// only (`pcs::verify_batch_merged`); a zerocheck or lincheck skip round never carries
+    /// it, and the sampling and grinding paths of those rounds panic on it.
+    Eq([F128; 6]),
 }
+
+/// Panic message of the skip-round paths that a multilinear skip point never reaches.
+pub(crate) const EQ_SKIP_OPENING_ONLY: &str =
+    "SkipPoint::Eq enters ring-switched openings only, never a skip round (agg-mldsa K21)";
 
 impl SkipPoint {
     /// The length-`2^k_skip` skip evaluation functional at this point.
@@ -1238,6 +1249,10 @@ impl SkipPoint {
                 let bf = base_evaluation_functional(p)
                     .expect("AG base evaluation functional: denominator nonzero at point");
                 (0..(1usize << k_skip)).map(|i| bf[i]).collect()
+            }
+            SkipPoint::Eq(x) => {
+                assert_eq!(k_skip, K_SKIP, "the multilinear skip basis has six coordinates");
+                build_eq_table(x)
             }
         }
     }
@@ -1251,6 +1266,7 @@ impl SkipPoint {
     pub fn sample_fresh<Ch: Challenger>(&self, ch: &mut Ch) -> SkipPoint {
         match self {
             SkipPoint::Phi8(_) => SkipPoint::Phi8(ch.sample_f128()),
+            SkipPoint::Eq(_) => panic!("{}", EQ_SKIP_OPENING_ONLY),
             SkipPoint::Ag(_) => {
                 let seed = Self::ag_fresh_seed(ch);
                 let p = sample_random_evaluation_point(&mut FsRng::new(ch.hash_kind(), seed))
@@ -1342,6 +1358,7 @@ impl SkipPoint {
                     "SkipPoint::phi8 on an AG point — the AG PCS clear-tail path (#6) is not wired"
                 )
             }
+            SkipPoint::Eq(_) => panic!("{}", EQ_SKIP_OPENING_ONLY),
         }
     }
 }
@@ -1977,6 +1994,7 @@ fn column_sumcheck_prove<Ch: Challenger>(
             }
             None => z_skip.sample_fresh(challenger),
         },
+        SkipPoint::Eq(_) => panic!("{}", EQ_SKIP_OPENING_ONLY),
     };
 
     // 8. Output claim's value: φ8 Lagrange combination of z_partial at z_skip.
@@ -2246,6 +2264,7 @@ pub fn verify_with_grinding<Ch: Challenger>(
             }
             None => x_ab.z_skip.sample_fresh(challenger),
         },
+        SkipPoint::Eq(_) => panic!("{}", EQ_SKIP_OPENING_ONLY),
     };
     debug_assert_eq!(nonce_idx, proof.grinding_nonces.len());
 

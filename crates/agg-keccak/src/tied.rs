@@ -1,77 +1,44 @@
-//! The tied part: the Flock argument of one part of a segment as two Flock instances, the
-//! sponge instance (the `n` live records' SHAKE256 gates, docs/keccak.md Sections 1 to 4)
-//! and the bridge union (the level-1 rows and the levels-2-3 row of
-//! [`crate::bridge_union`], docs/bridge.md Section 5b, deviation K13), tied to each other and
-//! to the public words by evaluation claims on their committed polynomials
-//! ([`crate::flock_union`]; docs/keccak.md Sections 9 to 11, docs/bridge.md Sections 5a and
-//! 5b, deviations K11, K13, K14). It replaces the two-type union of [`crate::segment`]
-//! (docs/keccak.md Section 8) and, since proof version 2, the one-row bridge slot of
-//! [`crate::bridge_slot`] (docs/keccak.md Section 10).
+//! The tied part (tied-part proof version 5, deviation K21, `docs/parity-chain.md`): the
+//! Flock argument of one part of a segment (or of a span of segments) as ONE Flock instance,
+//! the sponge instance (the `n` live records' SHAKE256 gates, docs/keccak.md Sections 1 to
+//! 4), and the virtual parity chain ([`agg_bridge::parity_chain`]): a degree-2 sum-check that
+//! reduces the public final vectors `Y_sigma = M_3 M_2 M_1 b'_sigma` to one bit-level
+//! evaluation of the sponge commitment, which the sponge instance's Flock opening proves as a
+//! third ring-switched claim ([`crate::flock_union::BitClaim`]). Version 4 proved the GF(2)
+//! side with a second Flock instance, the bridge union of [`crate::bridge_union`]
+//! (docs/bridge.md Section 5b, deviation K13), tied to the sponge by evaluation claims; that
+//! instance, its cap, its ties and its output claim are gone.
 //!
-//! Regions. Both instances commit their words BatchMajor: word column `c` of row `j` of a
-//! slot is the padded word `(prefix << (nu + k_log - 7)) | (c << nu) | j`. In the sponge
-//! block (`nu_s` rows, one slot) lane `t` of record `j` is the eight words `8 t + w`, `w < 8`
-//! ([`crate::sponge::W1_WORD_BASE`]), so lanes 0..3 are the word columns `[0, 32)` and lanes
-//! 4, 5 the columns `[32, 48)`: two aligned subcubes of the column index `[w (3 bits) | t |
-//! high bits]`. The public region of the sponge block is the word columns `[48, 56)`: mu
-//! (4 words), `c~` (2), the constant (1, the word with bit 0 set), one zero word. In the
-//! bridge union, level-1 row `j = beta + blocks t` holds lane `t`, level-1 block `beta` of
-//! the part: record `i` (`i = i_lo + 2^9 beta`) is its input words `8 i_lo + w`, so a lane
-//! group is the subcube rows `[beta | t (3 bits)]`, columns `[w (3) | i_lo]`; the row's
-//! level-1 parities are its 64 words from `y1_base / 128`, and their copies in the
-//! levels-2-3 row are the words `y + 64 beta + 64 blocks t`.
+//! Regions. The sponge instance commits its words BatchMajor: word column `c` of row `j` is
+//! the padded word `(c << nu_s) | j`. Lane `t` of a record is the eight words `8 t + w`, `w <
+//! 8` ([`crate::sponge::W1_WORD_BASE`]), bit `p & 127` of word `p >> 7` for the lane position
+//! `p = j + 256 rho`; the words `[48, 56)` are the public region (mu, `c~`, the constant, a
+//! zero word). The chain runs over eight lanes, the word columns `[0, 64)`: lanes 6 and 7 are
+//! the public region and the first chi words, with weight zero (docs Section 2).
 //!
-//! Claims. From the part's Flock seed `fs` and the two commitments both sides derive `rho =
-//! (rho_w, rho_i, rho_t, rho_t', rho_r, rho_c, rho_beta, rho_y)` ([`TieChallenges`]) and the
-//! points of [`TiePoints`]. The sponge proof carries `v_pub = z_s(P_pub)` and the lane-group
-//! values `v_s_h = z_s(P_s_h)`; the bridge union's proof carries the level-1 input values
-//! `v_in_h`, the level-1 parity values `v_y1_h`, their copies' values `v_top_h` and the
-//! value `v_out` of the levels-2-3 output columns, each the committed multilinear (over
-//! words) at the point, bound by Flock's merged opening. The verifier checks `v_pub` against
-//! the table it builds from `(mu_i, c~_i)`, `v_in_h = eq(rho_i[nu_s..d], 0) v_s_h` (tie 1:
-//! the level-1 inputs are the sponge inputs; the factor is 1 unless the sponge instance has
-//! fewer row coordinates than the part has record positions), `v_top_h = v_y1_h` (tie 2:
-//! the levels-2-3 inputs are the level-1 parities) for both lane groups `h`, and `v_out = 0`
-//! (the output columns are zero, so the composite rows say `M_3 M_2 y1 = Y`). A differing
-//! (nonzero) word makes the restricted multilinears differ as polynomials in their free
-//! coordinates (`d + 5` for tie 1, `log2(blocks) + 9` for tie 2, 5 for the outputs), so they
-//! agree at `rho` with probability at most that number over `2^128`.
+//! Transcript (docs Section 6). From the part's Flock seed `fs`, its geometry, the digest of
+//! the final vectors and the sponge's event-2 cap, the tie challenger draws (each site after
+//! its proof of work): the public claim's point `(rho_r, rho_c)`; `eq_Y = (r_o, r_y)`; one
+//! challenge per chain round after absorbing its message `(q(1), q(inf))`; then it absorbs
+//! the claimed bit value `v` and squeezes a 32-byte tie binding, which the sponge challenger
+//! absorbs before Flock binds its statement (docs/soundness.md 4.5). The verifier recomputes
+//! the claim `<eq_Y, Y>`, replays the rounds, checks the last claim against its own weight
+//! `W~(r)` times `eq(r_rec[nu_s..], 0) v`, and Flock's opening proves `v` and the public value.
 //!
-//! Order (deviations K7, K13, K14). [`TiedPart::commit`] fixes the sponge witness and the
-//! part's lane-major input bits and returns the sponge cap (event 2), keeping Flock's
-//! prover data. After `sd` (event 3) the level-1 parities exist; after `fs` (event 5)
-//! [`TiedPart::prove`] builds the bridge union's blocks, commits them (its cap is part of the
-//! proof), derives the tie challenges from `fs` and both caps, proves the sponge instance
-//! (opening the event-2 commitment without recommitting) and then the bridge union.
-//! [`TiedPart::verify`] replays both with its own points, matrices and share.
+//! Spans (deviation K16). A tied part may cover `S` segments that share its geometry (`d`,
+//! part index): mode A proves all segments of a batch of more than `2^13` records as one tied
+//! part. The sponge instance holds the `n` records of the span in order (record `i` of
+//! segment `sigma` is row `2^d sigma + i`), and the chain covers `2^span_log >= S` segments,
+//! the final vectors of the segments `S..2^span_log` being zero.
 //!
-//! Spans (proof version 3; docs/bridge.md Section 5c, deviation K16). A tied part may cover
-//! `S` segments that share its geometry (`d`, part index): mode A proves all segments of a
-//! batch of more than `2^13` records as one tied part. The sponge instance holds the `n`
-//! records of the span in order (record `i` of segment `sigma` is row `2^d sigma + i`; the
-//! segments are filled in order, so only the last ones may be partial or empty), and the
-//! bridge union covers `2^span_log >= S` segments ([`BridgeUnion::new_span`]). Every claim
-//! point gains the `span_log` coordinates `rho_sigma` of the segment index: on the sponge rows
-//! above the record index, on the bridge rows below. The levels-2-3 rows are proven with a
-//! zero coefficient, so their output columns hold `M_3 M_2 y1`; the output claim's value is
-//! the multilinear extension of the public table of the final vectors `Y_sigma` (zero for the
-//! segments `S..2^span_log`), computed by the verifier, and the table's digest is absorbed
-//! before the tie challenges. For `S = 1` this is the tied part of version 2 with `Y` moved
-//! from a coefficient of the composite rows to the output claim.
-//!
-//! Work and binding (proof version 4, `docs/soundness.md` Sections 3.6, 4.5 and 6.3). The
-//! tie challenges are drawn while both Ligerito commitments are bound only to their Johnson
-//! lists, so the tie site's bound carries the list sizes ([`agg_bridge::pow::tie_numerator`])
-//! and the tie challenger grinds `g_tie` bits ([`TiedPart::tie_bits`], 16 to 18 bits at a
-//! full segment) before the first coordinate: Flock's `grind_pow` (BLAKE3 of the state
-//! digest and `LE64(nonce)`, `g_tie` leading zero bits), the nonce below `2^(g_tie + 7)`,
-//! carried as `LE32` in the proof header. After the coordinates the tie challenger squeezes
-//! a 32-byte tie binding ([`TieChallenges::binding`]), which both instance challengers
-//! absorb before Flock binds its statement: the sponge instance's challenges then depend on
-//! the union's cap and the final vectors, from which its claim points are derived.
+//! Work (docs/soundness.md 3.6): the sponge commitment is bound only to its Johnson list
+//! when these challenges are drawn, so the tie site carries `L_s (nu_s + 3)`, the `eq_Y` site
+//! `L_s (log2 m_3 + span_log)` and every round `2 L_s` ([`agg_bridge::pow::part_work`]); the
+//! nonces (`g + 7` bits, `LE32`) travel in the proof.
 
-use agg_bridge::gf2_walker::SegmentLayout;
-use agg_bridge::pow::{nonce_bits, TieGeometry};
+use agg_bridge::gf2_walker::{self, SegmentLayout};
+use agg_bridge::parity_chain::{ChainLayout, ChainPoint, EqY};
+use agg_bridge::pow::{nonce_bits, part_work, PartWork, TieGeometry};
 use flock_core::{
     challenger::{Challenger, FsChallenger},
     lincheck::{build_eq_table, LincheckCircuit},
@@ -84,8 +51,7 @@ use agg_witness::bridge::BridgeMatrices;
 
 use crate::{
     bridge_slot::pack_y,
-    bridge_union::{BridgeBlocks, BridgeUnion, BridgeUnionCost, Level1Layout},
-    flock_union::{CommitData, UnionGeometry, UnionProof},
+    flock_union::{bit_value, BitClaim, CommitData, UnionGeometry, UnionProof},
     gate::ChainGate,
     prover::{
         capacity_log, sponge_public_words, KeccakCommitment, KeccakError, KeccakProof, Profile,
@@ -100,34 +66,30 @@ use crate::{
 
 /// Magic prefix of a tied-part proof.
 pub const MAGIC: &[u8; 6] = b"AGGKCT";
-/// Serialization version (4: the tie nonce in the header and the tie binding absorbed by
-/// both instances, docs/soundness.md 4.5 and 6.3; 3: spans of segments and the final
-/// vectors as the output claim, K16; 2: the bridge union of K13, its cap inside the proof).
-pub const VERSION: u8 = 4;
+/// Serialization version (5: the virtual parity chain replaces the bridge union, K21; 4:
+/// the tie nonce and the tie binding, K20; 3: spans and the output claim, K16; 2: the
+/// bridge union, K13).
+pub const VERSION: u8 = 5;
 /// Header: magic, version, profile, `n` (LE32), `d`, segments, tie nonce (LE32).
 const HEADER: usize = 6 + 1 + 1 + 4 + 1 + 1 + 4;
 /// Offset of the tie nonce in the header.
 pub const NONCE_OFFSET: usize = 14;
-/// Label under which both instance challengers absorb the tie binding.
+/// Bytes of one chain round in the proof: `q(1)`, `q(inf)`, `LE32(nonce)`.
+pub const ROUND_BYTES: usize = 16 + 16 + 4;
+/// Label under which the sponge challenger absorbs the tie binding.
 const TIE_BINDING_LABEL: &[u8] = b"agg-keccak/v4/tie-binding";
 /// Digest label of the public table of final vectors.
 const Y_TABLE_LABEL: &[u8] = b"agg-keccak/v3/tied-final-vectors";
-/// Domain of the tie challenges.
-pub const TIE_DOMAIN: &[u8] = b"agg-mldsa/v2/tie";
-/// Challenger labels of the two instances.
-const SPONGE_LABEL: &[u8] = b"agg-keccak/v2/tied-sponge";
-const BRIDGE_LABEL: &[u8] = b"agg-keccak/v2/tied-bridge-union";
+/// Domain of the tie challenger (version 5).
+pub const TIE_DOMAIN: &[u8] = b"agg-mldsa/v3/tie";
+/// Challenger label of the sponge instance (version 5).
+const SPONGE_LABEL: &[u8] = b"agg-keccak/v5/tied-sponge";
 /// Record positions per production level-1 block (`log2`): `2^19 / 1024`.
 const BLOCK_RECORDS_LOG2: usize = 9;
-/// Lane groups tied by one claim each: lanes 0..3 (two `t` coordinates) and lanes 4, 5 (one).
-const LANE_GROUPS: usize = 2;
-/// Claims of the sponge proof: the public region, then the two lane groups.
-const SPONGE_CLAIMS: usize = 1 + LANE_GROUPS;
-/// Claims of the bridge union's proof: level-1 inputs, level-1 parities, their copies, each
-/// per lane group, then the levels-2-3 output columns.
-const BRIDGE_CLAIMS: usize = 3 * LANE_GROUPS + 1;
-/// Output words of the levels-2-3 row (`log2(m_3 / 128)`).
-const OUTPUT_WORDS_LOG2: usize = 5;
+/// Packed-direct claims of the sponge proof: the public region.
+const SPONGE_CLAIMS: usize = 1;
+/// Lanes of the chain (`2^lb`, junk lanes 6 and 7 included).
+const CHAIN_LANES: usize = 8;
 
 /// Peak resident set size (VmHWM, MiB) of this process, for the `AGG_TIED_TRACE` phase trace.
 fn peak_rss_mib() -> Option<u64> {
@@ -148,8 +110,8 @@ fn trace(phase: &str, start: &std::time::Instant) {
     }
 }
 
-/// The sponge gate's block layout must be the one the tie regions assume
-/// (`crate::sponge`, module docs).
+/// The sponge gate's block layout must be the one the regions assume (`crate::sponge`,
+/// module docs).
 fn assert_tied_layout(gate: &ChainGate) {
     let lay = gate.layout();
     let spec = gate.spec();
@@ -165,6 +127,7 @@ fn assert_tied_layout(gate: &ChainGate) {
             && lay.t_base == 2 * CHI_WORD_BASE
             && PUBLIC_WORD_BASE + (1 << PUBLIC_WORDS_LOG2) == CHI_WORD_BASE
             && PUBLIC_WORD_BASE.is_multiple_of(1 << PUBLIC_WORDS_LOG2)
+            && 8 * CHAIN_LANES <= CHI_WORD_BASE + 8
             && W1_WORD_BASE == 0,
         "the tied part needs the sponge layout of crate::sponge"
     );
@@ -175,37 +138,7 @@ fn put_framed(h: &mut impl Challenger, bytes: &[u8]) {
     h.observe_bytes(bytes);
 }
 
-/// The random coordinates of the tie, derived from the part's Flock seed and the two
-/// commitments.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TieChallenges {
-    /// The word within a lane (3 coordinates).
-    pub rho_w: [F128; 3],
-    /// The record within the part (`d` coordinates).
-    pub rho_i: Vec<F128>,
-    /// The lane within lanes 0..3 (2 coordinates).
-    pub rho_t: [F128; 2],
-    /// The lane within lanes 4, 5 (1 coordinate).
-    pub rho_t1: F128,
-    /// The row of the public claim (`nu_s` coordinates).
-    pub rho_r: Vec<F128>,
-    /// The word within the public region (3 coordinates).
-    pub rho_c: [F128; 3],
-    /// The level-1 block of the parity tie (`log2(blocks)` coordinates).
-    pub rho_beta: Vec<F128>,
-    /// The parity word within a level-1 row (6 coordinates).
-    pub rho_y: [F128; 6],
-    /// The output word of the levels-2-3 row (5 coordinates).
-    pub rho_o: [F128; OUTPUT_WORDS_LOG2],
-    /// The segment within the span (`span_log` coordinates).
-    pub rho_sigma: Vec<F128>,
-    /// The tie site's work nonce (0 without work).
-    pub nonce: u32,
-    /// The tie binding squeezed after the coordinates, absorbed by both instances.
-    pub binding: [u8; 32],
-}
-
-/// The tie site's work: the prover grinds, the verifier checks a nonce from the proof.
+/// The work of a site: the prover grinds, the verifier checks a nonce from the proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TieWork {
     /// Search the smallest passing nonce (Flock's `grind_pow`).
@@ -214,9 +147,9 @@ pub enum TieWork {
     Check(u32),
 }
 
-/// The prover's tie nonce if it lies below the allowance `limit = 2^(g + 7)`: Flock's
-/// `grind_pow` returns the smallest passing nonce, so a larger one means that the first
-/// `2^(g + 7)` candidates all failed (docs/soundness.md 6.3, 6.5).
+/// The prover's nonce if it lies below the allowance `limit = 2^(g + 7)`: Flock's `grind_pow`
+/// returns the smallest passing nonce, so a larger one means that the first `2^(g + 7)`
+/// candidates all failed (docs/soundness.md 6.3, 6.5).
 fn nonce_within(nonce: u64, limit: u64) -> Result<u32, KeccakError> {
     const EXHAUSTED: &str = "tie nonce search exhausted its 2^(g + 7) candidates";
     if nonce >= limit {
@@ -225,219 +158,52 @@ fn nonce_within(nonce: u64, limit: u64) -> Result<u32, KeccakError> {
     u32::try_from(nonce).map_err(|_| KeccakError::Work(EXHAUSTED))
 }
 
-impl TieChallenges {
-    /// Derive from `fs` for a part of `2^d` record positions and `2^blocks_log` level-1
-    /// blocks per lane in each of `2^span_log` segments, a sponge instance of `2^nu_s` rows,
-    /// the digest of the final vectors (fixed before the proof, [`TiedPart::y_digest`]), the
-    /// sponge's event-2 cap and the bridge union's cap, after `bits` of work.
-    ///
-    /// # Errors
-    /// [`TieWork::Check`] with a nonce of `g + 7` or more bits or one failing the predicate
-    /// ([`KeccakError::Tie`]); [`TieWork::Grind`] if the smallest passing nonce is `2^(g + 7)`
-    /// or more, i.e. the honest search exhausted its allowance ([`KeccakError::Work`],
-    /// probability below `2^-184.7`, docs/soundness.md 6.5).
-    #[allow(clippy::too_many_arguments)]
-    pub fn derive(
-        fs: &[u8; 32],
-        d: u32,
-        nu_s: usize,
-        blocks_log: usize,
-        span_log: usize,
-        y_digest: &[u8; 32],
-        sponge_cap: &KeccakCommitment,
-        bridge_cap: &KeccakCommitment,
-        bits: u8,
-        work: TieWork,
-    ) -> Result<Self, KeccakError> {
-        let mut ch = FsChallenger::new(TIE_DOMAIN);
-        ch.observe_bytes(fs);
-        ch.observe_bytes(&u64::from(d).to_le_bytes());
-        ch.observe_bytes(&(nu_s as u64).to_le_bytes());
-        ch.observe_bytes(&(blocks_log as u64).to_le_bytes());
-        ch.observe_bytes(&(span_log as u64).to_le_bytes());
-        ch.observe_bytes(y_digest);
-        put_framed(&mut ch, sponge_cap.as_bytes());
-        put_framed(&mut ch, bridge_cap.as_bytes());
-        let limit = 1_u64 << nonce_bits(bits);
-        let nonce = match (bits, work) {
-            (0, TieWork::Grind) => 0,
-            (0, TieWork::Check(nonce)) => {
-                if nonce != 0 {
-                    return Err(KeccakError::Tie("tie nonce without work"));
-                }
-                0
-            }
-            (_, TieWork::Grind) => nonce_within(ch.grind_pow(u32::from(bits)), limit)?,
-            (_, TieWork::Check(nonce)) => {
-                if u64::from(nonce) >= limit || !ch.verify_pow(u64::from(nonce), u32::from(bits))
-                {
-                    return Err(KeccakError::Tie("tie nonce"));
-                }
-                nonce
-            }
-        };
-        let w = ch.sample_f128_vec(3);
-        let rho_i = ch.sample_f128_vec(d as usize);
-        let t = ch.sample_f128_vec(2);
-        let rho_t1 = ch.sample_f128();
-        let rho_r = ch.sample_f128_vec(nu_s);
-        let c = ch.sample_f128_vec(3);
-        let rho_beta = ch.sample_f128_vec(blocks_log);
-        let y = ch.sample_f128_vec(6);
-        let o = ch.sample_f128_vec(OUTPUT_WORDS_LOG2);
-        let rho_sigma = ch.sample_f128_vec(span_log);
-        let mut binding = [0_u8; 32];
-        for (chunk, word) in binding.chunks_exact_mut(16).zip(ch.sample_f128_vec(2)) {
-            chunk[..8].copy_from_slice(&word.lo.to_le_bytes());
-            chunk[8..].copy_from_slice(&word.hi.to_le_bytes());
-        }
-        Ok(Self {
-            rho_w: [w[0], w[1], w[2]],
-            rho_i,
-            rho_t: [t[0], t[1]],
-            rho_t1,
-            rho_r,
-            rho_c: [c[0], c[1], c[2]],
-            rho_beta,
-            rho_y: std::array::from_fn(|k| y[k]),
-            rho_o: std::array::from_fn(|k| o[k]),
-            rho_sigma,
-            nonce,
-            binding,
-        })
-    }
-
-    /// The record coordinates of the span, `rho_i || rho_sigma` (the sponge row index of
-    /// record `i` of segment `sigma` is `i + 2^d sigma`).
-    #[must_use]
-    pub fn record_coords(&self) -> Vec<F128> {
-        self.rho_i.iter().chain(&self.rho_sigma).copied().collect()
-    }
-
-    /// `eq(rho[nu_s..], 0) = prod_k (1 + rho[k])` over the record coordinates
-    /// `rho = rho_i || rho_sigma`: the factor between a level-1 input value and the sponge
-    /// value of the same lane group when the sponge instance has `nu_s < d + span_log` row
-    /// coordinates (its records `>= 2^nu_s` do not exist and the bridge's are padded zeros).
-    #[must_use]
-    pub fn row_factor(&self, nu_s: usize) -> F128 {
-        self.record_coords()
-            .iter()
-            .skip(nu_s)
-            .fold(F128::ONE, |acc, &x| acc * (F128::ONE + x))
-    }
-
-    /// Lane coordinates of group `h` (lane-index bits 0..2): lanes 0..3 are `[t0, t1, 0]`,
-    /// lanes 4, 5 are `[t', 0, 1]`.
-    #[must_use]
-    pub fn lane_bits(&self, h: usize) -> [F128; 3] {
-        if h == 0 {
-            [self.rho_t[0], self.rho_t[1], F128::ZERO]
-        } else {
-            [self.rho_t1, F128::ZERO, F128::ONE]
-        }
-    }
-}
-
-/// The claim points of both instances (module docs), `M - 7` coordinates each, rows low.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TiePoints {
-    /// Sponge: the public region (all rows, word columns `[48, 56)`).
-    pub sponge_public: Vec<F128>,
-    /// Sponge: lanes 0..3 and lanes 4, 5 (rows `< 2^d`).
-    pub sponge_lanes: [Vec<F128>; LANE_GROUPS],
-    /// Bridge union, level 1: the input words of lanes 0..3 and of lanes 4, 5.
-    pub bridge_inputs: [Vec<F128>; LANE_GROUPS],
-    /// Bridge union, level 1: the parity words of the two lane groups.
-    pub bridge_parities: [Vec<F128>; LANE_GROUPS],
-    /// Bridge union, levels 2-3: the parity copies of the two lane groups.
-    pub bridge_copies: [Vec<F128>; LANE_GROUPS],
-    /// Bridge union, levels 2-3: the output columns (value: the final vectors' table).
-    pub bridge_outputs: Vec<F128>,
-}
-
-impl TiePoints {
-    /// The points for a part of `2^d` record positions (in each segment of the bridge
-    /// union's span), a sponge instance of `2^nu_s` rows and `sponge_vars` word coordinates,
-    /// and the bridge union `bridge`.
-    #[must_use]
-    pub fn new(
-        ch: &TieChallenges,
-        d: u32,
-        nu_s: usize,
-        sponge_vars: usize,
-        bridge: &BridgeUnion,
-    ) -> Self {
-        let d = d as usize;
-        assert_eq!(ch.rho_i.len(), d);
-        assert_eq!(ch.rho_r.len(), nu_s);
-        assert_eq!(ch.rho_beta.len(), bridge.level1().blocks_log());
-        assert_eq!(ch.rho_sigma.len(), bridge.span_log());
-        assert!(sponge_vars >= nu_s + 6, "sponge block of at least 64 words");
-        let zero = F128::ZERO;
-        // Sponge rows: the record coordinates rho_i || rho_sigma on the first nu_s
-        // coordinates, zero above (rows `>= 2^(d + span_log)` hold no record of this span).
-        let record = ch.record_coords();
-        let sponge_rows: Vec<F128> = (0..nu_s)
-            .map(|k| record.get(k).copied().unwrap_or(zero))
-            .collect();
-        let sponge_lane = |h: usize| {
-            let mut p = sponge_rows.clone();
-            p.extend_from_slice(&ch.rho_w);
-            p.extend_from_slice(&ch.lane_bits(h));
-            p.resize(sponge_vars, zero);
-            p
-        };
-        // Level 1: record i = i_lo + 2^9 beta; columns [w | i_lo], rows [beta | t].
-        let lo = d.min(BLOCK_RECORDS_LOG2);
-        let cols: Vec<F128> = ch.rho_w.iter().chain(&ch.rho_i[..lo]).copied().collect();
-        let sigma = &ch.rho_sigma;
-        let input = |h: usize| bridge.input_point(sigma, &ch.rho_i[lo..], &ch.lane_bits(h), &cols);
-        let parity = |h: usize| bridge.y1_point(sigma, &ch.rho_beta, &ch.lane_bits(h), &ch.rho_y);
-        let copy = |h: usize| bridge.top_point(sigma, &ch.rho_y, &ch.rho_beta, &ch.lane_bits(h));
-        // Public region: word columns 48 + c8 = 0b110000 | c8.
-        let mut sponge_public = ch.rho_r.clone();
-        sponge_public.extend_from_slice(&ch.rho_c);
-        for bit in PUBLIC_WORDS_LOG2..sponge_vars - nu_s {
-            sponge_public.push(if (PUBLIC_WORD_BASE >> bit) & 1 == 1 {
-                F128::ONE
+/// The proof of work of one site of the tie challenger with difficulty `bits`: the prover
+/// grinds (Flock's `grind_pow`, the nonce absorbed), the verifier checks the given nonce
+/// (`g + 7` bits at most, the predicate) or rejects with `KeccakError::Tie(name)`.
+fn site_work(
+    ch: &mut FsChallenger,
+    bits: u8,
+    work: TieWork,
+    name: &'static str,
+) -> Result<u32, KeccakError> {
+    let limit = 1_u64 << nonce_bits(bits);
+    match (bits, work) {
+        (0, TieWork::Grind) => Ok(0),
+        (0, TieWork::Check(nonce)) => {
+            if nonce == 0 {
+                Ok(0)
             } else {
-                zero
-            });
+                Err(KeccakError::Tie(name))
+            }
         }
-        Self {
-            sponge_public,
-            sponge_lanes: [sponge_lane(0), sponge_lane(1)],
-            bridge_inputs: [input(0), input(1)],
-            bridge_parities: [parity(0), parity(1)],
-            bridge_copies: [copy(0), copy(1)],
-            bridge_outputs: bridge.output_point(sigma, &ch.rho_o),
+        (_, TieWork::Grind) => nonce_within(ch.grind_pow(u32::from(bits)), limit),
+        (_, TieWork::Check(nonce)) => {
+            if u64::from(nonce) >= limit || !ch.verify_pow(u64::from(nonce), u32::from(bits)) {
+                Err(KeccakError::Tie(name))
+            } else {
+                Ok(nonce)
+            }
         }
-    }
-
-    /// The bridge union's claim points in proof order: inputs, parities, copies, outputs.
-    #[must_use]
-    pub fn bridge_points(&self) -> Vec<Vec<F128>> {
-        self.bridge_inputs
-            .iter()
-            .chain(&self.bridge_parities)
-            .chain(&self.bridge_copies)
-            .chain(std::iter::once(&self.bridge_outputs))
-            .cloned()
-            .collect()
-    }
-
-    /// The sponge's claim points in proof order: public region, lanes.
-    #[must_use]
-    pub fn sponge_points(&self) -> Vec<Vec<F128>> {
-        std::iter::once(&self.sponge_public)
-            .chain(&self.sponge_lanes)
-            .cloned()
-            .collect()
     }
 }
 
-/// The event-2 commitment of a tied part: the sponge instance's Ligerito cap (the bridge
-/// union's cap depends on `sd` and travels in the proof, K13).
+/// The 32-byte tie binding: two `F128` squeezes.
+fn squeeze_binding(ch: &mut FsChallenger) -> [u8; 32] {
+    let mut binding = [0_u8; 32];
+    for (chunk, word) in binding
+        .as_chunks_mut::<16>()
+        .0
+        .iter_mut()
+        .zip(ch.sample_f128_vec(2))
+    {
+        chunk[..8].copy_from_slice(&word.lo.to_le_bytes());
+        chunk[8..].copy_from_slice(&word.hi.to_le_bytes());
+    }
+    binding
+}
+
+/// The event-2 commitment of a tied part: the sponge instance's Ligerito cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TiedCommitment {
     /// The sponge instance's Ligerito cap.
@@ -464,11 +230,11 @@ impl TiedCommitment {
     /// # Errors
     /// On a malformed byte string.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, KeccakError> {
-        let malformed = KeccakError::Malformed("tied commitment");
-        let len = bytes.get(..4).ok_or(malformed.clone_static())?;
+        let malformed = || KeccakError::Malformed("tied commitment");
+        let len = bytes.get(..4).ok_or_else(malformed)?;
         let len = u32::from_le_bytes(len.try_into().expect("4 bytes")) as usize;
         if bytes.len() != 4 + len {
-            return Err(malformed);
+            return Err(malformed());
         }
         Ok(Self {
             sponge: KeccakCommitment::from_bytes(bytes[4..].to_vec()),
@@ -476,21 +242,9 @@ impl TiedCommitment {
     }
 }
 
-impl KeccakError {
-    /// A copy of a `Malformed` error (the enum does not derive `Clone`).
-    fn clone_static(&self) -> Self {
-        match self {
-            Self::Malformed(m) => Self::Malformed(m),
-            Self::Statement(m) => Self::Statement(m),
-            Self::Tie(m) => Self::Tie(m),
-            Self::Work(m) => Self::Work(m),
-            Self::Flock(_) => Self::Malformed("flock"),
-        }
-    }
-}
-
 /// A committed tied part: the sponge witness and its commitment data, the part's input
-/// bits (the bridge union's source, independent of `sd`), the statement words and the cap.
+/// bits (the chain's lanes 0..5, the prover's copy of `b'`), the statement words and the
+/// cap.
 pub struct TiedCommitted {
     n: usize,
     sponge: SlotBuffers,
@@ -514,7 +268,7 @@ impl TiedCommitted {
         &self.c_tilde
     }
 
-    /// The part's lane-major input bits (the bridge union's inputs).
+    /// The part's lane-major input bits.
     #[must_use]
     pub fn bits(&self) -> &[u64] {
         &self.bits
@@ -549,7 +303,34 @@ pub struct TiedProof {
     pub proof: KeccakProof,
 }
 
-/// Sizes of a tied part's two instances.
+/// One round of the parity chain in a proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainRound {
+    /// `q(1)`.
+    pub q1: F128,
+    /// `q(inf)`, the leading coefficient.
+    pub qinf: F128,
+    /// The round's work nonce.
+    pub nonce: u32,
+}
+
+/// The parsed parts of a tied-part proof (version 5): the nonces, the chain's rounds, the
+/// claimed bit value and the sponge instance's proof. Tests use it to tamper single fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TiedProofParts {
+    /// The tie site's nonce.
+    pub nonce: u32,
+    /// The `eq_Y` site's nonce.
+    pub eq_nonce: u32,
+    /// The chain's rounds.
+    pub rounds: Vec<ChainRound>,
+    /// The claimed value `v` of the sponge's bit polynomial at the chain's point.
+    pub value: F128,
+    /// The sponge instance's Flock proof (one packed-direct value: the public region).
+    pub sponge: UnionProof,
+}
+
+/// Sizes of a tied part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TiedCost {
     /// Records.
@@ -562,11 +343,10 @@ pub struct TiedCost {
     pub sponge_dense_m: usize,
     /// Committed 128-bit words of the sponge instance.
     pub sponge_committed_words: usize,
-    /// The bridge union.
-    pub bridge: BridgeUnionCost,
-    /// Entries the one-row bridge slot's walker read per fold (proof version 1), for
-    /// comparison.
-    pub slot_walker_entries: u64,
+    /// Rounds of the parity chain.
+    pub chain_rounds: usize,
+    /// Input bits of the parity chain (`2^span_log` segments of eight lanes).
+    pub chain_input_bits: usize,
 }
 
 /// Proving and verifying context of one tied part: `n` live records in part `index` of a
@@ -580,7 +360,7 @@ pub struct TiedPart<'g> {
     segments: usize,
     profile: Profile,
     sponge: UnionGeometry,
-    bridge: BridgeUnion,
+    chain: ChainLayout,
 }
 
 impl<'g> TiedPart<'g> {
@@ -605,9 +385,8 @@ impl<'g> TiedPart<'g> {
     }
 
     /// Part `index` of a segment split into parts of `2^d` record positions, with `n` live
-    /// records (the part's first `n` positions, segment records `2^d index ..`). Its bridge
-    /// union proves the part's share `Y_{sigma, index} = M^{(sigma)} b'_{index}` (deviation
-    /// K10).
+    /// records (the part's first `n` positions, segment records `2^d index ..`). It proves
+    /// the part's share `Y_{sigma, index} = M^{(sigma)} b'_{index}` (deviation K10).
     ///
     /// # Panics
     /// If `n == 0`, `n > 2^d`, `d < 3`, `d > 13`, the part lies outside the segment, or the
@@ -620,8 +399,8 @@ impl<'g> TiedPart<'g> {
     /// Part `index` of `segments` consecutive segments (each split into parts of `2^d`
     /// record positions) as one tied part with `n` live records in segment order: record
     /// `i` of segment `sigma` is record `2^d sigma + i` of the span, so the segments are
-    /// filled in order (segments `>= ceil(n / 2^d)` are empty). Its bridge union proves
-    /// `Y_sigma = M^{(sigma)} b'_sigma` for every segment of the span (module docs).
+    /// filled in order (segments `>= ceil(n / 2^d)` are empty). It proves `Y_sigma =
+    /// M^{(sigma)} b'_sigma` for every segment of the span (module docs).
     ///
     /// # Panics
     /// If `n == 0`, `n > segments 2^d`, `segments == 0`, `d < 3`, `d > 13`, the part lies
@@ -637,16 +416,18 @@ impl<'g> TiedPart<'g> {
     ) -> Self {
         assert!(segments >= 1, "a span of at least one segment");
         assert!(n >= 1 && n <= segments << d, "1 <= n <= segments 2^d");
+        assert!((3..=13).contains(&d), "3 <= d <= 13");
         assert_tied_layout(gate);
         let span_log = segments.next_power_of_two().trailing_zeros() as usize;
-        let bridge = BridgeUnion::production_span(d, index, span_log, profile);
-        assert_eq!(
-            bridge.segment().lane_len,
-            1 << (10 + d),
-            "1,024 positions per record"
-        );
+        let layout = SegmentLayout::production_part(d, index);
+        let chain = ChainLayout::new(layout, span_log);
+        assert_eq!(chain.lanes_padded(), CHAIN_LANES, "eight chain lanes");
         let nu_s = capacity_log(n, gate.layout().k_log);
         let sponge = UnionGeometry::new(gate.table_type(), n, nu_s, profile);
+        assert!(
+            sponge.word_vars() >= nu_s + 6,
+            "the chain's lanes span 64 word columns"
+        );
         let part = Self {
             gate,
             n,
@@ -655,13 +436,14 @@ impl<'g> TiedPart<'g> {
             segments,
             profile,
             sponge,
-            bridge,
+            chain,
         };
         assert_eq!(
             part.tie_geometry(),
             Self::plan_geometry(gate, n, d, segments),
             "the plan's tie geometry is the part's"
         );
+        assert_eq!(part.chain.rounds(), usize::from(part.work().rounds));
         part
     }
 
@@ -678,11 +460,32 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// The tie site's difficulty of a part from the public numbers (as
-    /// [`Self::plan_geometry`]) under `profile`.
+    /// The work of a part from the public numbers (as [`Self::plan_geometry`]) under
+    /// `profile`: the tie, `eq_Y` and round difficulties and the round count.
     #[must_use]
-    pub fn plan_tie_bits(gate: &ChainGate, n: usize, d: u32, segments: usize, profile: Profile) -> u8 {
-        agg_bridge::pow::tie_bits(profile.list_size(), &Self::plan_geometry(gate, n, d, segments))
+    pub fn plan_work(
+        gate: &ChainGate,
+        n: usize,
+        d: u32,
+        segments: usize,
+        profile: Profile,
+    ) -> PartWork {
+        part_work(
+            profile.list_size(),
+            &Self::plan_geometry(gate, n, d, segments),
+        )
+    }
+
+    /// The tie site's difficulty from the public numbers.
+    #[must_use]
+    pub fn plan_tie_bits(
+        gate: &ChainGate,
+        n: usize,
+        d: u32,
+        segments: usize,
+        profile: Profile,
+    ) -> u8 {
+        Self::plan_work(gate, n, d, segments, profile).tie_bits
     }
 
     /// The part's tie geometry.
@@ -690,17 +493,22 @@ impl<'g> TiedPart<'g> {
     pub fn tie_geometry(&self) -> TieGeometry {
         TieGeometry {
             d: self.d as usize,
-            span_log: self.bridge.span_log(),
-            blocks_log: self.bridge.level1().blocks_log(),
+            span_log: self.chain.span_log,
+            blocks_log: self.chain.mid_vars(),
             nu_s: self.sponge.nu(),
         }
     }
 
-    /// The tie site's difficulty `g_tie` (`docs/soundness.md` Section 3.6): the list-weighted
-    /// numerator of the four tie identities over `2^128`.
+    /// The part's work (`docs/soundness.md` Section 3.6).
+    #[must_use]
+    pub fn work(&self) -> PartWork {
+        part_work(self.profile.list_size(), &self.tie_geometry())
+    }
+
+    /// The tie site's difficulty `g_tie`.
     #[must_use]
     pub fn tie_bits(&self) -> u8 {
-        agg_bridge::pow::tie_bits(self.profile.list_size(), &self.tie_geometry())
+        self.work().tie_bits
     }
 
     /// Segments of the span (1 for a part of one segment).
@@ -715,7 +523,7 @@ impl<'g> TiedPart<'g> {
         self.n.saturating_sub(sigma << self.d).min(1 << self.d)
     }
 
-    /// u64 words of the lane-major input bits of one segment.
+    /// u64 words of the lane-major input bits of one segment (six lanes).
     fn segment_words(&self) -> usize {
         self.segment().input_bits() / 64
     }
@@ -732,16 +540,16 @@ impl<'g> TiedPart<'g> {
         false
     }
 
-    /// The bridge union's level-1 layout (its `segment` is the part's input geometry).
-    #[must_use]
-    pub fn layout(&self) -> &Level1Layout {
-        self.bridge.level1()
-    }
-
     /// The part's input geometry (shape, lanes, `lane_len = 2^(10 + d)`, offset).
     #[must_use]
     pub fn segment(&self) -> &SegmentLayout {
-        self.bridge.segment()
+        &self.chain.layout
+    }
+
+    /// The parity chain's geometry.
+    #[must_use]
+    pub fn chain(&self) -> &ChainLayout {
+        &self.chain
     }
 
     /// `log2` of the part's record positions.
@@ -762,13 +570,7 @@ impl<'g> TiedPart<'g> {
         &self.sponge
     }
 
-    /// The bridge union.
-    #[must_use]
-    pub fn bridge(&self) -> &BridgeUnion {
-        &self.bridge
-    }
-
-    /// Sizes of the two instances.
+    /// Sizes of the part.
     #[must_use]
     pub fn cost(&self) -> TiedCost {
         TiedCost {
@@ -778,13 +580,13 @@ impl<'g> TiedPart<'g> {
             sponge_m: self.sponge.m_total(),
             sponge_dense_m: self.sponge.dense_m(),
             sponge_committed_words: self.n * self.gate.layout().useful_bits.div_ceil(128),
-            bridge: self.bridge.cost(),
-            slot_walker_entries: self.segment().factored_nonzeros(),
+            chain_rounds: self.chain.rounds(),
+            chain_input_bits: 64 * self.chain.input_words(),
         }
     }
 
     /// SHA3-256 of the final vectors of the span (label, count, the packed vectors): bound
-    /// before the tie challenges, so the output claim's value is fixed before its point.
+    /// before the tie challenges, so the chain's claim is fixed before `eq_Y`.
     #[must_use]
     pub fn y_digest(ys: &[Vec<u8>]) -> [u8; 32] {
         let mut h = Sha3_256::new();
@@ -797,79 +599,39 @@ impl<'g> TiedPart<'g> {
         h.finalize().into()
     }
 
-    /// The tie challenges and points of this part for the Flock seed `fs`, the digest of
-    /// the final vectors and the two commitments, the prover grinding the tie nonce.
-    ///
-    /// # Errors
-    /// [`KeccakError::Work`] if the tie nonce search exhausts its allowance.
-    pub fn tie(
-        &self,
-        fs: &[u8; 32],
-        y_digest: &[u8; 32],
-        sponge_cap: &KeccakCommitment,
-        bridge_cap: &KeccakCommitment,
-    ) -> Result<(TieChallenges, TiePoints), KeccakError> {
-        self.tie_with(fs, y_digest, sponge_cap, bridge_cap, TieWork::Grind)
-    }
-
-    /// [`Self::tie`] with the given tie work (the verifier checks the proof's nonce).
-    ///
-    /// # Errors
-    /// On a rejected tie nonce, or (prover) an exhausted tie nonce search.
-    pub fn tie_with(
-        &self,
-        fs: &[u8; 32],
-        y_digest: &[u8; 32],
-        sponge_cap: &KeccakCommitment,
-        bridge_cap: &KeccakCommitment,
-        work: TieWork,
-    ) -> Result<(TieChallenges, TiePoints), KeccakError> {
-        let ch = TieChallenges::derive(
-            fs,
-            self.d,
-            self.sponge.nu(),
-            self.bridge.level1().blocks_log(),
-            self.bridge.span_log(),
-            y_digest,
-            sponge_cap,
-            bridge_cap,
-            self.tie_bits(),
-            work,
-        )?;
-        let points = TiePoints::new(
-            &ch,
-            self.d,
-            self.sponge.nu(),
-            self.sponge.word_vars(),
-            &self.bridge,
-        );
-        Ok((ch, points))
-    }
-
-    /// Digest of the tie geometry (bound into both challengers): `d`, the part index, the
-    /// segments and the span, `n`, the two instances' row capacities, word coordinates and
-    /// block widths, the blocks.
+    /// Digest of the part's geometry (bound into both challengers): `d`, the part index, the
+    /// segments and the span, `n`, the sponge's row capacity and word coordinates, the
+    /// chain's rounds and coordinate groups.
     fn tie_digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
-        h.update(b"agg-keccak/v3/tie-geometry");
-        let g = self.bridge.geometry();
+        h.update(b"agg-keccak/v5/tie-geometry");
         for v in [
             self.d as usize,
             self.index,
             self.segments,
-            self.bridge.span_log(),
+            self.chain.span_log,
             self.n,
             self.sponge.nu(),
             self.sponge.word_vars(),
-            g.nu(),
-            g.word_vars(),
-            g.k_log(BridgeUnion::LEVEL1),
-            g.k_log(BridgeUnion::TOP),
-            self.bridge.level1().blocks(),
+            self.chain.rounds(),
+            self.chain.zeta_vars(),
+            self.chain.mid_vars(),
+            self.chain.lane_vars(),
         ] {
             h.update((v as u64).to_le_bytes());
         }
         h.finalize().into()
+    }
+
+    /// The tie challenger before its first site: `fs`, the geometry, the final vectors'
+    /// digest and the sponge cap.
+    fn tie_start(&self, fs: &[u8; 32], y_digest: &[u8; 32], cap: &KeccakCommitment) -> FsChallenger {
+        let mut ch = FsChallenger::new(TIE_DOMAIN);
+        ch.observe_bytes(fs);
+        ch.observe_bytes(&self.tie_digest());
+        ch.observe_bytes(y_digest);
+        put_framed(&mut ch, cap.as_bytes());
+        ch
     }
 
     /// Digest of the sponge statement: `n` and the words `[mu_i, c~_i]`.
@@ -896,16 +658,88 @@ impl<'g> TiedPart<'g> {
         ch
     }
 
-    fn bridge_challenger(&self, fs: &[u8; 32], digests: [[u8; 32]; 2], binding: &[u8; 32]) -> FsChallenger {
-        let mut ch = FsChallenger::new(DOMAIN);
-        ch.observe_bytes(fs);
-        ch.observe_label(BRIDGE_LABEL);
-        ch.observe_bytes(&digests[0]);
-        ch.observe_bytes(&digests[1]);
-        ch.observe_bytes(&self.tie_digest());
-        ch.observe_label(TIE_BINDING_LABEL);
-        put_framed(&mut ch, binding);
-        ch
+    /// The public claim's point: rows `rho_r`, word columns `48 + c8` (`c8 = rho_c`).
+    fn public_point(&self, rho_r: &[F128], rho_c: &[F128]) -> Vec<F128> {
+        let nu_s = self.sponge.nu();
+        let mut p = rho_r.to_vec();
+        p.extend_from_slice(rho_c);
+        for bit in PUBLIC_WORDS_LOG2..self.sponge.word_vars() - nu_s {
+            p.push(if (PUBLIC_WORD_BASE >> bit) & 1 == 1 {
+                F128::ONE
+            } else {
+                F128::ZERO
+            });
+        }
+        p
+    }
+
+    /// The record coordinates of a chain point: `i_lo` (the in-block coordinates above the
+    /// record position), `i_mid`, then `sigma` (`d + span_log` in all).
+    fn record_coords(point: &ChainPoint) -> Vec<F128> {
+        point.zeta[10..]
+            .iter()
+            .chain(&point.i_mid)
+            .chain(&point.sigma)
+            .copied()
+            .collect()
+    }
+
+    /// `eq(r_rec[nu_s..], 0) = prod_k (1 + r_rec[k])` over the record coordinates beyond the
+    /// sponge's rows: the factor between the chain's `b''~(r)` and the sponge's bit value
+    /// when the sponge instance has `nu_s < d + span_log` row coordinates (its records `>=
+    /// 2^nu_s` do not exist, and the chain's are zero).
+    fn row_factor(&self, point: &ChainPoint) -> F128 {
+        Self::record_coords(point)
+            .iter()
+            .skip(self.sponge.nu())
+            .fold(F128::ONE, |acc, &x| acc * (F128::ONE + x))
+    }
+
+    /// The bit claim on the sponge commitment at a chain point (docs Section 4): in-word bits
+    /// 0..6 from `zeta[0..7]`, rows from the record coordinates (truncated or zero-padded to
+    /// `nu_s`), word columns `[zeta[7..10] | t | 0 ..]` (word `8 t + w`).
+    fn bit_claim(&self, point: &ChainPoint) -> BitClaim {
+        let nu_s = self.sponge.nu();
+        let rec = Self::record_coords(point);
+        let mut x = Vec::with_capacity(self.sponge.word_vars() + 1);
+        x.push(point.zeta[6]);
+        x.extend((0..nu_s).map(|k| rec.get(k).copied().unwrap_or(F128::ZERO)));
+        x.extend_from_slice(&point.zeta[7..10]);
+        x.extend_from_slice(&point.t);
+        x.resize(self.sponge.word_vars() + 1, F128::ZERO);
+        BitClaim {
+            skip: std::array::from_fn(|k| point.zeta[k]),
+            x_full: x,
+        }
+    }
+
+    /// The chain's input (`2^span_log` segments of eight lanes): lanes 0..5 from the part's
+    /// input bits, lanes 6, 7 from the sponge's word columns 48..63 (module docs).
+    fn chain_input(&self, bits: &[u64], z: &[F128]) -> Vec<u64> {
+        let chain = &self.chain;
+        let lane_words = self.segment().lane_len / 64;
+        let seg_words = self.segment_words();
+        let mut out = vec![0_u64; chain.input_words()];
+        for sigma in 0..self.segments {
+            for t in 0..self.segment().lanes() {
+                let src = sigma * seg_words + t * lane_words;
+                let dst = chain.bit_index(sigma, t, 0) / 64;
+                out[dst..dst + lane_words].copy_from_slice(&bits[src..src + lane_words]);
+            }
+        }
+        let nu = self.sponge.nu();
+        for g in 0..self.n {
+            let (sigma, i) = (g >> self.d, g & ((1 << self.d) - 1));
+            for t in self.segment().lanes()..CHAIN_LANES {
+                for w in 0..8 {
+                    let word = z[((8 * t + w) << nu) | g];
+                    let dst = chain.bit_index(sigma, t, 1024 * i + 128 * w) / 64;
+                    out[dst] = word.lo;
+                    out[dst + 1] = word.hi;
+                }
+            }
+        }
+        out
     }
 
     /// The honest sponge slot buffers of `records` (`n` of them) and the span's lane-major
@@ -915,8 +749,7 @@ impl<'g> TiedPart<'g> {
     #[must_use]
     pub fn honest_parts(&self, records: &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
-        // Per record and independent: parallel (the serial loop was a single-thread
-        // window of the Flock witness build; same values in the same order).
+        // Per record and independent: parallel (same values in the same order).
         let inputs: Vec<Vec<u64>> = records.par_iter().map(SpongeRecord::input_bits).collect();
         let sponge = pack_slot(self.gate, self.sponge.nu(), self.n, |j, z, a, b| {
             self.gate.instance_rows(&inputs[j], z, a, b);
@@ -1039,73 +872,46 @@ impl<'g> TiedPart<'g> {
         self.sponge.commitment_len()
     }
 
-    /// The honest bridge-union blocks of a committed part under the matrices of `sd`, the
-    /// output columns of the levels-2-3 rows set to their composites (the shares).
-    #[must_use]
-    pub fn honest_blocks(
-        &self,
-        committed: &TiedCommitted,
-        matrices: &BridgeMatrices,
-    ) -> BridgeBlocks {
-        let mut blocks = self.bridge.honest_blocks(matrices, &committed.bits);
-        self.bridge.fill_outputs(matrices, &mut blocks);
-        blocks
-    }
-
     /// The honest shares `M^{(sigma)} b'_sigma` of a committed part (one per segment of the
-    /// span) under the matrices of `sd`.
+    /// span) under the matrices of `sd`, from the part's input bits.
     #[must_use]
     pub fn final_vectors(
         &self,
         committed: &TiedCommitted,
         matrices: &BridgeMatrices,
     ) -> Vec<Vec<u8>> {
-        let blocks = self.honest_blocks(committed, matrices);
-        let mut ys = self.bridge.shares(matrices, &blocks);
-        ys.truncate(self.segments);
-        ys
+        let words = self.segment_words();
+        (0..self.segments)
+            .into_par_iter()
+            .map(|sigma| {
+                gf2_walker::composite(
+                    self.segment(),
+                    matrices,
+                    &committed.bits[sigma * words..(sigma + 1) * words],
+                )
+            })
+            .collect()
     }
 
-    /// Prove a committed part with the honest bridge-union blocks of its bits, the
-    /// relations of `sd` and the given shares `ys` (one per segment of the span; tests pass
-    /// wrong ones), seeded by `fs` (the part's Flock seed).
+    /// Prove a committed part against the final vectors `ys` (one per segment of the span;
+    /// tests pass wrong ones) under the matrices of `sd`, seeded by `fs` (the part's Flock
+    /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (lanes 0..5) and the
+    /// sponge's word columns 48..63 (lanes 6, 7), the claimed bit value, then the sponge
+    /// instance's Flock proof with the public claim and the bit claim (opening the event-2
+    /// commitment, K14). `sd` is bound through `fs` (event 5 follows event 3).
     ///
     /// # Errors
-    /// As [`Self::prove_with_blocks`].
+    /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
+    /// candidates (probability below `2^-184.6` per site, docs/soundness.md 6.5).
     ///
     /// # Panics
-    /// As [`Self::prove_with_blocks`].
+    /// If `committed` belongs to another part shape, `ys` has the wrong shape, or Flock
+    /// commits to another sponge cap than the event-2 one.
     pub fn prove_with_final_vectors(
         &self,
         committed: TiedCommitted,
-        sd: [u8; 32],
+        _sd: [u8; 32],
         matrices: &BridgeMatrices,
-        ys: Vec<Vec<u8>>,
-        fs: &[u8; 32],
-    ) -> Result<KeccakProof, KeccakError> {
-        let start = std::time::Instant::now();
-        let blocks = self.honest_blocks(&committed, matrices);
-        trace("bridge blocks", &start);
-        self.prove_with_blocks(committed, sd, matrices, blocks, ys, fs)
-    }
-
-    /// Prove a committed part with the given bridge-union blocks (tests pass tampered ones)
-    /// and shares `ys` (one per segment of the span): commit the bridge union, derive the
-    /// tie, prove the sponge instance (opening its event-2 commitment) and the bridge union.
-    ///
-    /// # Errors
-    /// [`KeccakError::Work`] if the tie nonce search exhausts its allowance of `2^(g + 7)`
-    /// candidates (probability below `2^-184.7`, docs/soundness.md 6.5).
-    ///
-    /// # Panics
-    /// If `committed` or `blocks` belongs to another part shape, `ys` has the wrong shape,
-    /// or Flock commits to another sponge cap than the event-2 one.
-    pub fn prove_with_blocks(
-        &self,
-        committed: TiedCommitted,
-        sd: [u8; 32],
-        matrices: &BridgeMatrices,
-        blocks: BridgeBlocks,
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
     ) -> Result<KeccakProof, KeccakError> {
@@ -1120,67 +926,81 @@ impl<'g> TiedPart<'g> {
         let TiedCommitted {
             sponge,
             sponge_data,
+            bits,
             public,
             commitment: absorbed,
             ..
         } = committed;
         let start = std::time::Instant::now();
         trace("prove: start", &start);
-        // The bridge union: its rows under the relations of sd (zero coefficient: the output
-        // columns hold M_3 M_2 y1), then its commitment.
-        let (s1, s2) = self.bridge.slots(sd, matrices, vec![0; m3]);
-        let buffers = self.bridge.buffers(&blocks, Some((&s1, &s2)));
-        drop(blocks);
-        let g = self.bridge.geometry();
-        let bridge_data = g.commit_data(&[&buffers[0].z, &buffers[1].z]);
-        let bridge_cap = bridge_data.commitment();
-        trace("bridge rows and commitment", &start);
-        let (tie, points) = self.tie(fs, &Self::y_digest(&ys), &absorbed.sponge, &bridge_cap)?;
-        trace("tie work", &start);
-        // The sponge instance (three claims, event-2 commitment reused, K14) and the bridge
-        // union (seven claims) have independent challengers (both seeded from `fs` and
-        // the tie binding), so the two proofs may run side by side on the rayon pool; each
-        // proof is the same either way. Serial by default: locally (3 threads, 8,192
-        // records) side by side saved about 2% of the prove time but raised the peak RSS by
-        // about 0.5 GiB (+8%), and the 32K run is close to its RSS budget.
-        // `AGG_TIED_CONCURRENT` (any value) turns it on for an A/B on a larger machine.
-        let sponge_points = points.sponge_points();
-        let bridge_points = points.bridge_points();
-        let prove_sponge = || {
-            let mut ch = self.sponge_challenger(fs, &public, &tie.binding);
-            let gate: [&dyn LincheckCircuit; 1] = [self.gate];
-            let out = self
-                .sponge
-                .prove(vec![sponge], &gate, &sponge_points, &mut ch, sponge_data);
-            trace("sponge instance proven", &start);
-            out
+        let work = self.work();
+        let nu_s = self.sponge.nu();
+        let mut ch = self.tie_start(fs, &Self::y_digest(&ys), &absorbed.sponge);
+        let nonce = site_work(&mut ch, work.tie_bits, TieWork::Grind, "tie nonce")?;
+        let rho_r = ch.sample_f128_vec(nu_s);
+        let rho_c = ch.sample_f128_vec(3);
+        let eq_nonce = site_work(&mut ch, work.eq_bits, TieWork::Grind, "eq_Y nonce")?;
+        let eq_y = EqY {
+            r_o: ch.sample_f128_vec(self.chain.out_vars()),
+            r_y: ch.sample_f128_vec(self.chain.span_log),
         };
-        let prove_bridge = || {
-            let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()], &tie.binding);
-            let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
-            let out = g.prove(buffers, &circuits, &bridge_points, &mut ch, Some(bridge_data));
-            trace("bridge union proof done", &start);
-            out
-        };
-        let ((sponge_proof, cap), (bridge_proof, bridge_cap_again)) =
-            if std::env::var_os("AGG_TIED_CONCURRENT").is_some() {
-                rayon::join(prove_sponge, prove_bridge)
-            } else {
-                (prove_sponge(), prove_bridge())
-            };
+        let claim = self.chain.claim(&ys, &eq_y);
+        let input = self.chain_input(&bits, &sponge.z);
+        drop(bits);
+        trace("chain input", &start);
+        let mut nonces = Vec::with_capacity(self.chain.rounds());
+        let chain = self.chain.prove(matrices, &input, &eq_y, claim, |_, (q1, qinf)| {
+            ch.observe_f128(q1);
+            ch.observe_f128(qinf);
+            nonces.push(site_work(
+                &mut ch,
+                work.round_bits,
+                TieWork::Grind,
+                "chain round nonce",
+            )?);
+            Ok(ch.sample_f128())
+        })?;
+        drop(input);
+        trace("parity chain", &start);
+        let bit_claim = self.bit_claim(&chain.point);
+        let value = bit_value(&sponge.z, &bit_claim, nu_s);
+        ch.observe_f128(value);
+        let binding = squeeze_binding(&mut ch);
+        trace("bit value", &start);
+        let mut sch = self.sponge_challenger(fs, &public, &binding);
+        let gate: [&dyn LincheckCircuit; 1] = [self.gate];
+        let (sponge_proof, cap) = self.sponge.prove(
+            vec![sponge],
+            &gate,
+            &[self.public_point(&rho_r, &rho_c)],
+            &[bit_claim],
+            &mut sch,
+            sponge_data,
+        );
         assert!(
             cap == absorbed.sponge,
             "Flock's prover committed to a different sponge cap than TiedPart::commit"
         );
-        debug_assert!(bridge_cap_again == bridge_cap);
-        trace("bridge union proven", &start);
-        Ok(self.encode(tie.nonce, &bridge_cap, &sponge_proof, &bridge_proof))
+        trace("sponge instance proven", &start);
+        let rounds = chain
+            .messages
+            .iter()
+            .zip(&nonces)
+            .map(|(&(q1, qinf), &nonce)| ChainRound { q1, qinf, nonce })
+            .collect();
+        Ok(self.encode_parts(&TiedProofParts {
+            nonce,
+            eq_nonce,
+            rounds,
+            value,
+            sponge: sponge_proof,
+        }))
     }
 
     /// Compute the shares from the committed bits and prove (the honest prover).
     ///
     /// # Errors
-    /// As [`Self::prove_with_blocks`].
+    /// As [`Self::prove_with_final_vectors`].
     pub fn prove(
         &self,
         committed: TiedCommitted,
@@ -1188,48 +1008,54 @@ impl<'g> TiedPart<'g> {
         matrices: &BridgeMatrices,
         fs: &[u8; 32],
     ) -> Result<TiedProof, KeccakError> {
-        let blocks = self.honest_blocks(&committed, matrices);
-        let mut ys = self.bridge.shares(matrices, &blocks);
-        ys.truncate(self.segments);
-        let proof = self.prove_with_blocks(committed, sd, matrices, blocks, ys.clone(), fs)?;
+        let ys = self.final_vectors(&committed, matrices);
+        let proof = self.prove_with_final_vectors(committed, sd, matrices, ys.clone(), fs)?;
         Ok(TiedProof {
             final_vectors: ys,
             proof,
         })
     }
 
-    fn encode(
-        &self,
-        nonce: u32,
-        bridge_cap: &KeccakCommitment,
-        sponge: &UnionProof,
-        bridge: &UnionProof,
-    ) -> KeccakProof {
-        let (s, b) = (sponge.to_bytes(), bridge.to_bytes());
-        let cap = bridge_cap.as_bytes();
-        let mut bytes = Vec::with_capacity(HEADER + 12 + cap.len() + s.len() + b.len());
+    /// The proof bytes of `parts`: `AGGKCT || 5 || profile || LE32(n) || d || S || LE32(tie
+    /// nonce) || LE32(eq nonce) || rounds (q(1) || q(inf) || LE32(nonce)) || v || LE32(len) ||
+    /// sponge proof`.
+    #[must_use]
+    pub fn encode_parts(&self, parts: &TiedProofParts) -> KeccakProof {
+        let f128 = |out: &mut Vec<u8>, x: F128| {
+            out.extend_from_slice(&x.lo.to_le_bytes());
+            out.extend_from_slice(&x.hi.to_le_bytes());
+        };
+        let s = parts.sponge.to_bytes();
+        let mut bytes =
+            Vec::with_capacity(HEADER + 4 + ROUND_BYTES * parts.rounds.len() + 20 + s.len());
         bytes.extend_from_slice(MAGIC);
         bytes.push(VERSION);
         bytes.push(self.profile.id());
         bytes.extend_from_slice(&(self.n as u32).to_le_bytes());
         bytes.push(self.d as u8);
         bytes.push(u8::try_from(self.segments).expect("at most 255 segments"));
-        bytes.extend_from_slice(&nonce.to_le_bytes());
-        for part in [cap, &s, &b] {
-            bytes.extend_from_slice(
-                &u32::try_from(part.len())
-                    .expect("proof below 4 GiB")
-                    .to_le_bytes(),
-            );
-            bytes.extend_from_slice(part);
+        bytes.extend_from_slice(&parts.nonce.to_le_bytes());
+        bytes.extend_from_slice(&parts.eq_nonce.to_le_bytes());
+        for r in &parts.rounds {
+            f128(&mut bytes, r.q1);
+            f128(&mut bytes, r.qinf);
+            bytes.extend_from_slice(&r.nonce.to_le_bytes());
         }
+        f128(&mut bytes, parts.value);
+        bytes.extend_from_slice(
+            &u32::try_from(s.len())
+                .expect("proof below 4 GiB")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&s);
         KeccakProof { bytes }
     }
 
-    fn decode(
-        &self,
-        proof: &KeccakProof,
-    ) -> Result<(u32, KeccakCommitment, UnionProof, UnionProof), KeccakError> {
+    /// Parse a proof of this part (the inverse of [`Self::encode_parts`]).
+    ///
+    /// # Errors
+    /// On a malformed proof or one of another version, profile or part shape.
+    pub fn decode_parts(&self, proof: &KeccakProof) -> Result<TiedProofParts, KeccakError> {
         let b = &proof.bytes;
         if b.len() < HEADER || &b[..6] != MAGIC {
             return Err(KeccakError::Malformed("magic"));
@@ -1246,42 +1072,48 @@ impl<'g> TiedPart<'g> {
         {
             return Err(KeccakError::Malformed("instance count"));
         }
-        let nonce = u32::from_le_bytes(b[NONCE_OFFSET..HEADER].try_into().expect("4 bytes"));
-        let mut at = HEADER;
-        let mut framed = || -> Result<&[u8], KeccakError> {
-            let len = b.get(at..at + 4).ok_or(KeccakError::Malformed("framing"))?;
-            let len = u32::from_le_bytes(len.try_into().expect("4 bytes")) as usize;
-            at += 4;
-            let out = b
-                .get(at..at + len)
-                .ok_or(KeccakError::Malformed("framing"))?;
-            at += len;
-            Ok(out)
+        let le32 = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().expect("4 bytes"));
+        let f128 = |at: usize| {
+            F128::new(
+                u64::from_le_bytes(b[at..at + 8].try_into().expect("8 bytes")),
+                u64::from_le_bytes(b[at + 8..at + 16].try_into().expect("8 bytes")),
+            )
         };
-        let cap = framed()?;
-        let s = framed()?;
-        let br = framed()?;
-        if at != b.len() {
-            return Err(KeccakError::Malformed("trailing bytes"));
+        let rounds = self.chain.rounds();
+        let chain_end = HEADER + 4 + ROUND_BYTES * rounds + 16;
+        if b.len() < chain_end + 4 {
+            return Err(KeccakError::Malformed("framing"));
         }
-        if cap.len() != self.bridge.geometry().commitment_len() {
-            return Err(KeccakError::Malformed("bridge commitment length"));
+        let len = le32(chain_end) as usize;
+        if b.len() != chain_end + 4 + len {
+            return Err(KeccakError::Malformed("framing"));
         }
-        Ok((
-            nonce,
-            KeccakCommitment::from_bytes(cap.to_vec()),
-            UnionProof::from_bytes(s, SPONGE_CLAIMS)?,
-            UnionProof::from_bytes(br, BRIDGE_CLAIMS)?,
-        ))
+        let rounds = (0..rounds)
+            .map(|k| {
+                let at = HEADER + 4 + ROUND_BYTES * k;
+                ChainRound {
+                    q1: f128(at),
+                    qinf: f128(at + 16),
+                    nonce: le32(at + 32),
+                }
+            })
+            .collect();
+        Ok(TiedProofParts {
+            nonce: le32(NONCE_OFFSET),
+            eq_nonce: le32(HEADER),
+            rounds,
+            value: f128(chain_end - 16),
+            sponge: UnionProof::from_bytes(&b[chain_end + 4..], SPONGE_CLAIMS)?,
+        })
     }
 
     /// The verifier's value of the public claim: the multilinear extension of the public
     /// region's words (mu, `c~`, the constant 1, zero; zero on dummy rows) at the point.
-    fn public_value(&self, public: &[F128], ch: &TieChallenges) -> F128 {
+    fn public_value(&self, public: &[F128], rho_r: &[F128], rho_c: &[F128]) -> F128 {
         let words = 6; // mu (4) then c~ (2) per record, as `sponge_public_words`
         assert_eq!(public.len(), words * self.n);
-        let eq_rows = build_eq_table(&ch.rho_r);
-        let eq_c = build_eq_table(&ch.rho_c);
+        let eq_rows = build_eq_table(rho_r);
+        let eq_c = build_eq_table(rho_c);
         let mu_at = MU_WORD_BASE - PUBLIC_WORD_BASE;
         let ct_at = CTILDE_WORD_BASE - PUBLIC_WORD_BASE;
         let const_at = CONST_WORD - PUBLIC_WORD_BASE;
@@ -1300,41 +1132,21 @@ impl<'g> TiedPart<'g> {
         acc
     }
 
-    /// The verifier's value of the output claim: the multilinear extension of the final
-    /// vectors' table (segment `sigma`'s `m_3 / 128` words, zero for the segments without a
-    /// vector) at `(rho_o, rho_sigma)`, in the word layout of the committed output columns.
-    fn output_value(ys: &[Vec<u8>], ch: &TieChallenges) -> F128 {
-        let eq_o = build_eq_table(&ch.rho_o);
-        let eq_s = build_eq_table(&ch.rho_sigma);
-        let mut acc = F128::ZERO;
-        for (sigma, y) in ys.iter().enumerate() {
-            let mut v = F128::ZERO;
-            for (w, chunk) in y.chunks(128).enumerate() {
-                let word = |half: &[u8]| {
-                    half.iter()
-                        .enumerate()
-                        .fold(0_u64, |acc, (r, &b)| acc | (u64::from(b) << r))
-                };
-                v += eq_o[w] * F128::new(word(&chunk[..64]), word(&chunk[64..]));
-            }
-            acc += eq_s[sigma] * v;
-        }
-        acc
-    }
-
     /// Verify a part proof against `(mu_i, c~_i)` of the span's records, the event-2
-    /// commitment, the bridge seed and its matrices, the shares `ys` (one per segment of the
-    /// span) and the part's Flock seed `fs`.
+    /// commitment, the bridge seed and its matrices, the final vectors `ys` (one per segment
+    /// of the span) and the part's Flock seed `fs`.
     ///
     /// # Errors
-    /// On a malformed statement, proof or commitment, a Flock rejection, or a tie mismatch.
+    /// On a malformed statement, proof or commitment, a Flock rejection, a rejected nonce, or
+    /// a failed chain or public check (`KeccakError::Tie` with `"parity chain"`, `"public
+    /// words"`).
     #[allow(clippy::too_many_arguments)]
     pub fn verify(
         &self,
         mu: &[[u8; MU_BYTES]],
         c_tilde: &[[u8; CTILDE_BYTES]],
         commitment: &TiedCommitment,
-        sd: [u8; 32],
+        _sd: [u8; 32],
         matrices: &BridgeMatrices,
         ys: &[Vec<u8>],
         fs: &[u8; 32],
@@ -1351,68 +1163,66 @@ impl<'g> TiedPart<'g> {
         if !self.segment().shape.matches(matrices) {
             return Err(KeccakError::Statement("bridge matrices"));
         }
+        if commitment.sponge.as_bytes().len() != self.sponge.commitment_len() {
+            return Err(KeccakError::Malformed("commitment length"));
+        }
         let start = std::time::Instant::now();
-        let (nonce, bridge_cap, sponge_proof, bridge_proof) = self.decode(proof)?;
+        let parts = self.decode_parts(proof)?;
         let public: Vec<F128> = mu
             .iter()
             .zip(c_tilde)
             .flat_map(|(m, c)| sponge_public_words(m, c))
             .collect();
-        let (chal, points) = self.tie_with(
-            fs,
-            &Self::y_digest(ys),
-            &commitment.sponge,
-            &bridge_cap,
-            TieWork::Check(nonce),
+        let work = self.work();
+        let nu_s = self.sponge.nu();
+        let mut ch = self.tie_start(fs, &Self::y_digest(ys), &commitment.sponge);
+        site_work(&mut ch, work.tie_bits, TieWork::Check(parts.nonce), "tie nonce")?;
+        let rho_r = ch.sample_f128_vec(nu_s);
+        let rho_c = ch.sample_f128_vec(3);
+        site_work(
+            &mut ch,
+            work.eq_bits,
+            TieWork::Check(parts.eq_nonce),
+            "eq_Y nonce",
         )?;
-        // The sponge instance.
-        let mut ch = self.sponge_challenger(fs, &public, &chal.binding);
+        let eq_y = EqY {
+            r_o: ch.sample_f128_vec(self.chain.out_vars()),
+            r_y: ch.sample_f128_vec(self.chain.span_log),
+        };
+        let claim = self.chain.claim(ys, &eq_y);
+        let messages: Vec<(F128, F128)> = parts.rounds.iter().map(|r| (r.q1, r.qinf)).collect();
+        let (point, last) = self.chain.replay(claim, &messages, |k, (q1, qinf)| {
+            ch.observe_f128(q1);
+            ch.observe_f128(qinf);
+            site_work(
+                &mut ch,
+                work.round_bits,
+                TieWork::Check(parts.rounds[k].nonce),
+                "chain round nonce",
+            )?;
+            Ok::<_, KeccakError>(ch.sample_f128())
+        })?;
+        let weight = self.chain.weight_at(matrices, &eq_y, &point);
+        if last != weight * self.row_factor(&point) * parts.value {
+            return Err(KeccakError::Tie("parity chain"));
+        }
+        ch.observe_f128(parts.value);
+        let binding = squeeze_binding(&mut ch);
+        trace("verify: parity chain", &start);
+        let mut sch = self.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
-        let v_s = self.sponge.verify(
+        let v = self.sponge.verify(
             &gate,
             &commitment.sponge,
-            &sponge_proof,
-            &points.sponge_points(),
-            &mut ch,
+            &parts.sponge,
+            &[self.public_point(&rho_r, &rho_c)],
+            &[(self.bit_claim(&point), parts.value)],
+            &mut sch,
         )?;
-        if v_s[0] != self.public_value(&public, &chal) {
+        if v[0] != self.public_value(&public, &rho_r, &rho_c) {
             return Err(KeccakError::Tie("public words"));
         }
         trace("verify: sponge instance", &start);
-        // The bridge union (zero coefficient; the output claim carries the shares).
-        let (s1, s2) = self.bridge.slots(sd, matrices, vec![0; m3]);
-        let mut ch = self.bridge_challenger(fs, [s1.digest(), s2.digest()], &chal.binding);
-        let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
-        let v_b = self.bridge.geometry().verify(
-            &circuits,
-            &bridge_cap,
-            &bridge_proof,
-            &points.bridge_points(),
-            &mut ch,
-        )?;
-        let factor = chal.row_factor(self.sponge.nu());
-        for h in 0..LANE_GROUPS {
-            if v_b[h] != factor * v_s[1 + h] {
-                return Err(KeccakError::Tie(if h == 0 {
-                    "bridge copy of lanes 0..3"
-                } else {
-                    "bridge copy of lanes 4, 5"
-                }));
-            }
-        }
-        for h in 0..LANE_GROUPS {
-            if v_b[2 * LANE_GROUPS + h] != v_b[LANE_GROUPS + h] {
-                return Err(KeccakError::Tie(if h == 0 {
-                    "level-1 parities of lanes 0..3"
-                } else {
-                    "level-1 parities of lanes 4, 5"
-                }));
-            }
-        }
-        if v_b[3 * LANE_GROUPS] != Self::output_value(ys, &chal) {
-            return Err(KeccakError::Tie("levels-2-3 output columns"));
-        }
-        trace("verify: bridge union", &start);
         Ok(())
     }
 }
@@ -1422,12 +1232,13 @@ mod tests {
     use super::*;
     use crate::flock_union::eval_packed;
     use crate::sponge::sponge_gate;
-    use agg_bridge::{seed::derive_matrices_for, shape::Shape};
+    use agg_bridge::seed::derive_matrices_for;
+    use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
 
-    /// An exhausted tie nonce search is an error, not a panic (docs/soundness.md 6.3, 6.5):
-    /// the smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one
-    /// is kept.
+    /// An exhausted nonce search is an error, not a panic (docs/soundness.md 6.3, 6.5): the
+    /// smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one is
+    /// kept.
     #[test]
     fn exhausted_tie_nonce_search_is_an_error() {
         for g in [1_u8, 16, 18, 25] {
@@ -1452,34 +1263,25 @@ mod tests {
         SpongeRecord { mu, w1_encode: w1 }
     }
 
-    /// The bridge union's padded `z` of honest blocks.
-    fn bridge_z(part: &TiedPart<'_>, blocks: &BridgeBlocks) -> Vec<F128> {
-        let g = part.bridge().geometry();
-        let bufs = part.bridge().buffers(blocks, None);
-        let mut out = vec![F128::ZERO; 1 << (g.m_total() - 7)];
-        for (i, b) in bufs.iter().enumerate() {
-            let start = g.slot(i).offset >> 7;
-            out[start..start + b.z.len()].copy_from_slice(&b.z);
-        }
-        out
+    fn rand_f(rng: &mut Rng) -> F128 {
+        F128::new(rng.next_u64(), rng.next_u64())
     }
 
-    /// On honest witnesses the region evaluations satisfy the tie identities exactly
-    /// (`v_in = eq(rho[nu_s..], 0) v_s` and `v_top = v_y1` per lane group, the public value
-    /// equals the verifier's table, the output value equals the table of the shares),
-    /// including parts whose sponge instance has fewer row coordinates than the part has
-    /// record positions, a part of two level-1 blocks (`d = 10`) and spans of two and three
-    /// segments (the last partial, a fourth segment of the union empty); a flipped input bit
-    /// breaks exactly its lane group's tie 1, a flipped parity copy its group's tie 2.
+    /// The chain's input and its bit claim on the sponge commitment agree with the sponge's
+    /// committed words: at random chain points `b''~(r)` of the chain input equals the row
+    /// factor times the sponge's bit value at the claim, for parts whose sponge has more,
+    /// fewer or exactly as many row coordinates as the part has record positions, a part of
+    /// two level-1 blocks, parts with an offset and spans; the public value equals the
+    /// verifier's table; the honest final vectors are the F_p-side walk's.
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn honest_regions_satisfy_the_tie_identities() {
+    fn the_bit_claim_is_the_chain_input_on_the_sponge() {
         let gate = sponge_gate();
         let mats = derive_matrices_for(&Shape::PRODUCTION, &[5; 32]);
         for (n, d, index, segments) in [
             (5usize, 3u32, 0usize, 1usize),
+            (8, 3, 0, 1),
             (9, 6, 2, 1),
-            (3, 5, 1, 1),
+            (1, 6, 0, 1),
             (3, 10, 0, 1),
             (12, 3, 0, 2),
             (19, 3, 1, 3),
@@ -1489,244 +1291,342 @@ mod tests {
             let mut rng = Rng::new(100 + n as u64 + u64::from(d));
             let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
             let (sponge, bits) = part.honest_parts(&records);
-            let (public, _) = TiedPart::statement(&records);
-            let caps = (
-                KeccakCommitment::from_bytes(vec![1; 32]),
-                KeccakCommitment::from_bytes(vec![2; 32]),
-            );
-            let fs = [n as u8; 32];
-            let blocks = part.bridge().honest_blocks(&mats, &bits);
-            let mut ys = part.bridge().shares(&mats, &blocks);
-            assert!(ys[segments..].iter().all(|y| y.iter().all(|&b| b == 0)));
-            ys.truncate(segments);
-            let (chal, points) = part
-                .tie(&fs, &TiedPart::y_digest(&ys), &caps.0, &caps.1)
-                .expect("tie");
-            let nu_s = part.nu();
-            let zb = bridge_z(&part, &blocks);
-            let nu_b = part.bridge().geometry().nu();
-            let v_pub = eval_packed(&sponge.z, &points.sponge_public, nu_s);
-            assert_eq!(v_pub, part.public_value(&public, &chal), "public (n {n})");
-            let factor = chal.row_factor(nu_s);
-            for h in 0..LANE_GROUPS {
-                let v_s = eval_packed(&sponge.z, &points.sponge_lanes[h], nu_s);
-                let v_in = eval_packed(&zb, &points.bridge_inputs[h], nu_b);
-                assert_eq!(v_in, factor * v_s, "lane group {h} (n {n}, d {d})");
-                assert_ne!(v_s, F128::ZERO);
-                let v_y1 = eval_packed(&zb, &points.bridge_parities[h], nu_b);
-                let v_top = eval_packed(&zb, &points.bridge_copies[h], nu_b);
-                assert_eq!(v_y1, v_top, "parities of group {h} (d {d})");
-                assert_ne!(v_y1, F128::ZERO);
+            let input = part.chain_input(&bits, &sponge.z);
+            let chain = part.chain();
+            for _ in 0..3 {
+                let rs: Vec<F128> = (0..chain.rounds()).map(|_| rand_f(&mut rng)).collect();
+                let point = chain.split_point(&rs);
+                let claim = part.bit_claim(&point);
+                assert_eq!(claim.x_full.len(), part.sponge().word_vars() + 1);
+                assert_eq!(
+                    chain.input_value(&input, &point),
+                    part.row_factor(&point) * bit_value(&sponge.z, &claim, part.nu()),
+                    "n {n}, d {d}, index {index}, segments {segments}"
+                );
             }
-            // The honest blocks leave the output columns zero; the rows proven with a zero
-            // coefficient set them to M_3 M_2 y1 = Y_sigma, whose table is the output value.
-            assert_eq!(eval_packed(&zb, &points.bridge_outputs, nu_b), F128::ZERO);
-            let mut with_y = blocks.clone();
+            // The six lanes of the chain input are the bits, lanes 6, 7 the public and chi
+            // words of the records.
+            let (public, _) = TiedPart::statement(&records);
+            let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
+            let rho_c: Vec<F128> = (0..3).map(|_| rand_f(&mut rng)).collect();
+            let p = part.public_point(&rho_r, &rho_c);
+            assert_eq!(
+                eval_packed(&sponge.z, &p, part.nu()),
+                part.public_value(&public, &rho_r, &rho_c)
+            );
+            let committed = part.commit_parts(sponge, bits, &records);
+            let ys = part.final_vectors(&committed, &mats);
+            assert_eq!(ys.len(), segments);
             for (sigma, y) in ys.iter().enumerate() {
-                for (o, &bit) in y.iter().enumerate() {
-                    let c = part.bridge().top().y_col(o);
-                    with_y.tops[sigma][c / 64] |= u64::from(bit) << (c % 64);
+                if part.live(sigma) == 0 {
+                    assert!(y.iter().all(|&b| b == 0));
                 }
             }
-            let zb_y = bridge_z(&part, &with_y);
-            assert_eq!(
-                eval_packed(&zb_y, &points.bridge_outputs, nu_b),
-                TiedPart::output_value(&ys, &chal),
-                "output table (n {n}, d {d}, segments {segments})"
+        }
+    }
+
+    /// A prover that re-grinds every nonce after changing a round message (so every work
+    /// site of the tie challenger accepts) still fails the chain's final check: the last
+    /// round's message, a middle round's message (the later challenges change, the later
+    /// messages stay) and the claimed bit value are rejected with `"parity chain"`; the
+    /// re-grind of the honest parts reproduces the honest proof (the smallest nonces).
+    #[test]
+    fn regrinding_after_a_tampered_round_still_fails_the_chain() {
+        let gate = sponge_gate();
+        let n = 5;
+        let part = TiedPart::new_part(&gate, n, 3, 0, Profile::Fast);
+        let mut rng = Rng::new(0x7e57);
+        let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+        let committed = part.commit(&records);
+        let commitment = committed.commitment().clone();
+        let sd = [9; 32];
+        let mats = derive_matrices_for(&Shape::PRODUCTION, &sd);
+        let fs = [3; 32];
+        let out = part.prove(committed, sd, &mats, &fs).expect("prove");
+        let mu: Vec<[u8; MU_BYTES]> = records.iter().map(|r| r.mu).collect();
+        let ct: Vec<[u8; CTILDE_BYTES]> = records.iter().map(SpongeRecord::c_tilde).collect();
+        let ys = &out.final_vectors;
+        let verify = |p: &KeccakProof| part.verify(&mu, &ct, &commitment, sd, &mats, ys, &fs, p);
+        verify(&out.proof).expect("honest");
+        let regrind = |parts: &mut TiedProofParts| {
+            let work = part.work();
+            let mut ch = part.tie_start(&fs, &TiedPart::y_digest(ys), &commitment.sponge);
+            parts.nonce = site_work(&mut ch, work.tie_bits, TieWork::Grind, "tie").unwrap();
+            let _ = ch.sample_f128_vec(part.nu());
+            let _ = ch.sample_f128_vec(3);
+            parts.eq_nonce = site_work(&mut ch, work.eq_bits, TieWork::Grind, "eq").unwrap();
+            let _ = ch.sample_f128_vec(part.chain().out_vars());
+            let _ = ch.sample_f128_vec(part.chain().span_log);
+            for r in &mut parts.rounds {
+                ch.observe_f128(r.q1);
+                ch.observe_f128(r.qinf);
+                r.nonce = site_work(&mut ch, work.round_bits, TieWork::Grind, "round").unwrap();
+                let _ = ch.sample_f128();
+            }
+        };
+        let honest = part.decode_parts(&out.proof).expect("parse");
+        let mut again = honest.clone();
+        regrind(&mut again);
+        assert_eq!(again, honest, "the re-grind reproduces the honest nonces");
+        let rounds = honest.rounds.len();
+        for (label, k) in [("last round", rounds - 1), ("middle round", rounds / 2)] {
+            let mut bad = honest.clone();
+            bad.rounds[k].qinf += F128::ONE;
+            regrind(&mut bad);
+            assert!(
+                matches!(
+                    verify(&part.encode_parts(&bad)),
+                    Err(KeccakError::Tie("parity chain"))
+                ),
+                "{label}"
             );
-            assert_ne!(TiedPart::output_value(&ys, &chal), F128::ZERO);
-            // One output bit of the last segment flipped is seen.
-            let c = part.bridge().top().y_col(4095);
-            with_y.tops[segments - 1][c / 64] ^= 1 << (c % 64);
-            let zb_bad = bridge_z(&part, &with_y);
-            assert_ne!(
-                eval_packed(&zb_bad, &points.bridge_outputs, nu_b),
-                TiedPart::output_value(&ys, &chal)
+        }
+        let mut bad = honest.clone();
+        bad.value += F128::ONE;
+        assert!(matches!(
+            verify(&part.encode_parts(&bad)),
+            Err(KeccakError::Tie("parity chain"))
+        ));
+        // An eq_Y nonce one below the honest (smallest passing) one fails its site.
+        if honest.eq_nonce > 0 {
+            let mut bad = honest.clone();
+            bad.eq_nonce -= 1;
+            assert!(matches!(
+                verify(&part.encode_parts(&bad)),
+                Err(KeccakError::Tie("eq_Y nonce"))
+            ));
+        }
+    }
+
+    /// The sponge instance at a full-height count (2,048 records: Flock's block-first
+    /// transport) verifies with no bit claim, a bit claim at a random point and one whose
+    /// column coordinates are zero above the chain's 64 word columns, and rejects either bit
+    /// claim with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
+    /// fold the column bit-bank's multilinear extension, so a bank computed only on the
+    /// columns of nonzero weight (enough for `s_hat_v`) made the honest proof fail.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+    fn bit_claims_verify_on_a_full_height_sponge() {
+        let gate = sponge_gate();
+        let n = 2048;
+        let part = TiedPart::new_part(&gate, n, 11, 0, Profile::Fast);
+        let mut rng = Rng::new(77);
+        let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+        let nu = part.nu();
+        let wv = part.sponge().word_vars();
+        let rand_claim = |rng: &mut Rng, zero_cols_from: usize| {
+            let mut x: Vec<F128> = (0..=wv).map(|_| rand_f(rng)).collect();
+            for v in x.iter_mut().skip(1 + nu + zero_cols_from) {
+                *v = F128::ZERO;
+            }
+            BitClaim {
+                skip: std::array::from_fn(|_| rand_f(rng)),
+                x_full: x,
+            }
+        };
+        for (label, claims) in [
+            ("none", vec![]),
+            ("random", vec![rand_claim(&mut rng, wv)]),
+            ("64 columns", vec![rand_claim(&mut rng, 6)]),
+        ] {
+            let (sponge, _) = part.honest_parts(&records);
+            let data = part.sponge().commit_data(&[&sponge.z]);
+            let cap = data.commitment();
+            let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
+            let _ = &records;
+            let rho_r: Vec<F128> = (0..nu).map(|_| rand_f(&mut rng)).collect();
+            let pubp = part.public_point(&rho_r, &[F128::ONE, F128::ZERO, F128::ONE]);
+            let mut ch = FsChallenger::new(b"debug");
+            let gates: [&dyn LincheckCircuit; 1] = [part.gate];
+            let (proof, _) = part.sponge().prove(
+                vec![sponge],
+                &gates,
+                std::slice::from_ref(&pubp),
+                &claims,
+                &mut ch,
+                Some(data),
             );
-            // A bit flipped in the input copy (lane 4, the last record) breaks tie 1 of
-            // lanes 4, 5 only.
-            let mut bad = bits.clone();
-            let last = n - 1;
-            let (sigma, i) = (last >> d, last & ((1 << d) - 1));
-            let c = 64 * sigma * part.segment_words() + part.segment().column(4, 1024 * i + 300);
-            bad[c / 64] ^= 1 << (c % 64);
-            let bad_blocks = part.bridge().honest_blocks(&mats, &bad);
-            let zb_bad = bridge_z(&part, &bad_blocks);
-            let v_s1 = eval_packed(&sponge.z, &points.sponge_lanes[1], nu_s);
-            assert_ne!(
-                eval_packed(&zb_bad, &points.bridge_inputs[1], nu_b),
-                factor * v_s1
-            );
-            let v_s0 = eval_packed(&sponge.z, &points.sponge_lanes[0], nu_s);
-            assert_eq!(
-                eval_packed(&zb_bad, &points.bridge_inputs[0], nu_b),
-                factor * v_s0
-            );
-            // A parity copy of lane 1 (last segment) flipped: tie 2 of lanes 0..3 only.
-            let mut bad = blocks.clone();
-            let c = part.bridge().top().input_col(1, 0, 4000);
-            bad.tops[segments - 1][c / 64] ^= 1 << (c % 64);
-            let zb_bad = bridge_z(&part, &bad);
-            for h in 0..LANE_GROUPS {
-                let v_y1 = eval_packed(&zb_bad, &points.bridge_parities[h], nu_b);
-                let v_top = eval_packed(&zb_bad, &points.bridge_copies[h], nu_b);
-                assert_eq!(v_y1 == v_top, h == 1, "group {h} (d {d})");
+            let mut ch = FsChallenger::new(b"debug");
+            let mut with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
+            let pubs = std::slice::from_ref(&pubp);
+            let r = part.sponge().verify(&gates, &cap, &proof, pubs, &with, &mut ch);
+            assert!(r.is_ok(), "{label}: {r:?}");
+            // A false bit value: the ring-switch claim check of the block-first opening
+            // rejects it.
+            if let Some(first) = with.first_mut() {
+                first.1 += F128::ONE;
+                let mut ch = FsChallenger::new(b"debug");
+                let r = part
+                    .sponge()
+                    .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
+                assert!(claim_mismatch(&r), "{label}, false value: {r:?}");
             }
         }
     }
 
-    #[test]
-    fn tie_points_have_the_documented_shape() {
+    /// Flock's ring-switch claim check rejected (a false value of a ring-switched claim).
+    fn claim_mismatch<T>(r: &Result<T, KeccakError>) -> bool {
+        matches!(r, Err(KeccakError::Flock(e)) if format!("{e:?}").contains("ClaimMismatch"))
+    }
+
+    /// [`TiedPart::prove_with_final_vectors`] with one change: the bit value sent is the
+    /// chain input's `b''~(r)` divided by the row factor, not the sponge's bit value. The two
+    /// agree for an honest prover; for a chain copy of `b'` that differs from the sponge they
+    /// do not, and the chain's final check then passes while the bit claim is false.
+    fn prove_with_the_chains_bit_value(
+        part: &TiedPart<'_>,
+        committed: TiedCommitted,
+        matrices: &BridgeMatrices,
+        ys: &[Vec<u8>],
+        fs: &[u8; 32],
+    ) -> KeccakProof {
+        let TiedCommitted {
+            sponge,
+            sponge_data,
+            bits,
+            public,
+            commitment: absorbed,
+            ..
+        } = committed;
+        let work = part.work();
+        let nu_s = part.sponge.nu();
+        let mut ch = part.tie_start(fs, &TiedPart::y_digest(ys), &absorbed.sponge);
+        let nonce = site_work(&mut ch, work.tie_bits, TieWork::Grind, "tie").unwrap();
+        let rho_r = ch.sample_f128_vec(nu_s);
+        let rho_c = ch.sample_f128_vec(3);
+        let eq_nonce = site_work(&mut ch, work.eq_bits, TieWork::Grind, "eq_Y").unwrap();
+        let eq_y = EqY {
+            r_o: ch.sample_f128_vec(part.chain.out_vars()),
+            r_y: ch.sample_f128_vec(part.chain.span_log),
+        };
+        let claim = part.chain.claim(ys, &eq_y);
+        let input = part.chain_input(&bits, &sponge.z);
+        let mut nonces = Vec::new();
+        let chain = part
+            .chain
+            .prove(matrices, &input, &eq_y, claim, |_, (q1, qinf)| {
+                ch.observe_f128(q1);
+                ch.observe_f128(qinf);
+                nonces.push(site_work(&mut ch, work.round_bits, TieWork::Grind, "round")?);
+                Ok::<F128, KeccakError>(ch.sample_f128())
+            })
+            .unwrap();
+        let bit_claim = part.bit_claim(&chain.point);
+        let value = chain.value * part.row_factor(&chain.point).inv();
+        ch.observe_f128(value);
+        let binding = squeeze_binding(&mut ch);
+        let mut sch = part.sponge_challenger(fs, &public, &binding);
+        let gate: [&dyn LincheckCircuit; 1] = [part.gate];
+        let (sponge_proof, _) = part.sponge.prove(
+            vec![sponge],
+            &gate,
+            &[part.public_point(&rho_r, &rho_c)],
+            &[bit_claim],
+            &mut sch,
+            sponge_data,
+        );
+        let rounds = chain
+            .messages
+            .iter()
+            .zip(&nonces)
+            .map(|(&(q1, qinf), &nonce)| ChainRound { q1, qinf, nonce })
+            .collect();
+        part.encode_parts(&TiedProofParts {
+            nonce,
+            eq_nonce,
+            rounds,
+            value,
+            sponge: sponge_proof,
+        })
+    }
+
+    /// A false bit value that is consistent with the chain is rejected by Flock's ring-switch
+    /// claim check: the chain's copy of `b'` has one bit flipped (in lane 3 of the last
+    /// record), `Y` is the copy's, and the prover sends the copy's bit value, so every chain
+    /// round and the chain's final check pass and only the sponge opening's third
+    /// ring-switched claim (the bit claim) can fail. The honest variant of the same prover
+    /// reproduces the honest proof (counts below 2,048).
+    fn chain_consistent_false_bit_value(n: usize) {
         let gate = sponge_gate();
-        let part = TiedPart::new_part(&gate, 5, 3, 0, Profile::Fast);
-        let caps = (
-            KeccakCommitment::from_bytes(vec![1; 32]),
-            KeccakCommitment::from_bytes(vec![2; 32]),
-        );
-        let yd = TiedPart::y_digest(&[vec![0; 4096]]);
-        let (chal, points) = part.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
-        assert_eq!(part.nu(), 3);
-        assert_eq!(part.sponge().word_vars(), 3 + 12);
-        // d = 3: level 1 k_log 15, levels 2-3 k_log 16 (slot 0), nu 5, M = 22.
-        let g = part.bridge().geometry();
-        assert_eq!((g.nu(), g.word_vars()), (5, 15));
-        assert_eq!(
-            (
-                g.slot(BridgeUnion::TOP).offset,
-                g.slot(BridgeUnion::LEVEL1).prefix
-            ),
-            (0, 2)
-        );
-        assert_eq!(chal.rho_i.len(), 3);
-        assert!(chal.rho_beta.is_empty());
-        assert_eq!(chal.row_factor(3), F128::ONE);
-        assert_eq!(points.sponge_public.len(), 15);
-        // Public region: rows, c8, then bits 3..5 of 48 = 0b110000.
-        assert_eq!(&points.sponge_public[..3], &chal.rho_r[..]);
-        assert_eq!(&points.sponge_public[3..6], &chal.rho_c[..]);
-        assert_eq!(
-            &points.sponge_public[6..9],
-            &[F128::ZERO, F128::ONE, F128::ONE]
-        );
-        assert!(points.sponge_public[9..].iter().all(|&x| x == F128::ZERO));
-        // Level-1 inputs of lanes 4, 5: rows [t', 0, 1, 0, 0], columns [w, i (3), 0 ...],
-        // the level-1 slot's prefix (0b10, one bit: slot 1 of two equal halves).
-        let p = &points.bridge_inputs[1];
-        assert_eq!(p.len(), 15);
-        assert_eq!(
-            &p[..5],
-            &[chal.rho_t1, F128::ZERO, F128::ONE, F128::ZERO, F128::ZERO]
-        );
-        assert_eq!(&p[5..8], &chal.rho_w[..]);
-        assert_eq!(&p[8..11], &chal.rho_i[..]);
-        assert!(p[11..13].iter().all(|&x| x == F128::ZERO));
-        assert_eq!(&p[13..], &[F128::ZERO, F128::ONE]);
-        // Parity words of lanes 0..3: columns [y (6) | (2^13 + 2^13) / 2^13 = 2 = 0b10].
-        let p = &points.bridge_parities[0];
-        assert_eq!(
-            &p[..5],
-            &[
-                chal.rho_t[0],
-                chal.rho_t[1],
-                F128::ZERO,
-                F128::ZERO,
-                F128::ZERO
-            ]
-        );
-        assert_eq!(&p[5..11], &chal.rho_y[..]);
-        assert_eq!(&p[11..13], &[F128::ZERO, F128::ONE]);
-        // Their copies: row 0, columns [y | t (3)], slot 0 (prefix 0).
-        let p = &points.bridge_copies[0];
-        assert!(p[..5].iter().all(|&x| x == F128::ZERO));
-        assert_eq!(&p[5..11], &chal.rho_y[..]);
-        assert_eq!(&p[11..14], &chal.lane_bits(0)[..]);
-        assert_eq!(p[14], F128::ZERO);
-        // The output columns: row 0, words 6 x 64 + 32 + o = 0b1_1010_0000 + o (o < 32), so
-        // columns [o (5) | 1, 0, 1, 1] then the slot prefix 0.
-        let p = &points.bridge_outputs;
-        assert!(p[..5].iter().all(|&x| x == F128::ZERO));
-        assert_eq!(&p[5..10], &chal.rho_o[..]);
-        assert_eq!(&p[10..14], &[F128::ONE, F128::ZERO, F128::ONE, F128::ONE]);
-        assert_eq!(p[14], F128::ZERO);
-        // Another seed, another cap, another table of final vectors or another span gives
-        // other challenges.
-        let other = KeccakCommitment::from_bytes(vec![3; 32]);
-        let bits = part.tie_bits();
-        let derive_with = |fs: &[u8; 32], span_log, yd: &[u8; 32], a, b, work| {
-            TieChallenges::derive(fs, 3, 3, 0, span_log, yd, a, b, bits, work)
-        };
-        let derive = |fs: &[u8; 32], span_log, yd: &[u8; 32], a, b| {
-            derive_with(fs, span_log, yd, a, b, TieWork::Grind).unwrap()
-        };
-        assert_eq!(derive(&[1; 32], 0, &yd, &caps.0, &caps.1), chal);
-        // Work (docs/soundness.md 3.6, 6.3): Fast at d = 3, nu_s = 3 is 20,615 / 2^128, so 15
-        // bits and a nonce below 2^22. The prover's nonce is the smallest passing one, so
-        // every smaller nonce fails; a nonce of 22 bits or more is refused before hashing.
-        assert_eq!(bits, 15);
-        assert_eq!(bits, TiedPart::plan_tie_bits(&gate, 5, 3, 1, Profile::Fast));
-        assert!(u64::from(chal.nonce) < 1 << 22);
-        let check = |nonce| derive_with(&[1; 32], 0, &yd, &caps.0, &caps.1, TieWork::Check(nonce));
-        assert_eq!(check(chal.nonce).unwrap(), chal);
-        for wrong in 0..chal.nonce.min(16) {
-            assert!(matches!(check(wrong), Err(KeccakError::Tie("tie nonce"))));
+        {
+            let part = TiedPart::new(&gate, n, TiedPart::d_seg_for(n), Profile::Fast);
+            let mut rng = Rng::new(0xFA15E + n as u64);
+            let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+            let sd = [11; 32];
+            let mats = derive_matrices_for(&Shape::PRODUCTION, &sd);
+            let fs = [12; 32];
+            let mu: Vec<[u8; MU_BYTES]> = records.iter().map(|r| r.mu).collect();
+            let ct: Vec<[u8; CTILDE_BYTES]> =
+                records.iter().map(SpongeRecord::c_tilde).collect();
+            if n < 2048 {
+                let honest = part.prove(part.commit(&records), sd, &mats, &fs).expect("prove");
+                let committed = part.commit(&records);
+                let again = prove_with_the_chains_bit_value(
+                    &part,
+                    committed,
+                    &mats,
+                    &honest.final_vectors,
+                    &fs,
+                );
+                assert_eq!(again, honest.proof, "n {n}: the replica is the honest prover");
+            }
+            let (sponge, mut bits) = part.honest_parts(&records);
+            let col = part.segment().column(3, 1024 * (n - 1) + 77);
+            bits[col / 64] ^= 1 << (col % 64);
+            let committed = part.commit_parts(sponge, bits, &records);
+            let commitment = committed.commitment().clone();
+            let ys = part.final_vectors(&committed, &mats);
+            let proof = prove_with_the_chains_bit_value(&part, committed, &mats, &ys, &fs);
+            let r = part.verify(&mu, &ct, &commitment, sd, &mats, &ys, &fs, &proof);
+            assert!(claim_mismatch(&r), "n {n}: {r:?}");
         }
-        assert!(matches!(check(chal.nonce + (1 << 22)), Err(KeccakError::Tie("tie nonce"))));
-        // The binding depends on every input of the tie challenger.
-        assert_ne!(derive(&[1; 32], 0, &yd, &caps.0, &other).binding, chal.binding);
-        assert_ne!(derive(&[2; 32], 0, &yd, &caps.0, &caps.1), chal);
-        assert_ne!(derive(&[1; 32], 0, &yd, &caps.0, &other), chal);
-        assert_ne!(derive(&[1; 32], 0, &yd, &other, &caps.1), chal);
-        let mut y1 = vec![0; 4096];
-        y1[7] = 1;
-        let yd1 = TiedPart::y_digest(&[y1]);
-        assert_ne!(derive(&[1; 32], 0, &yd1, &caps.0, &caps.1), chal);
-        assert_ne!(derive(&[1; 32], 1, &yd, &caps.0, &caps.1).rho_w, chal.rho_w);
-        assert_ne!(TiedPart::y_digest(&[vec![0; 4096], vec![0; 4096]]), yd);
-        // A part of 1 record with d = 6: nu_s = 3 < d, so the factor is not 1.
-        let wide = TiedPart::new_part(&gate, 1, 6, 0, Profile::Fast);
-        assert_eq!(wide.nu(), 3);
-        let (c2, p2) = wide.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
-        assert_ne!(c2.row_factor(3), F128::ONE);
-        assert_eq!(p2.sponge_lanes[0][..3], c2.rho_i[..3]);
-        // d = 13: 16 blocks, 4 block coordinates in the rows of level 1.
-        let full = TiedPart::new_part(&gate, 1 << 13, 13, 0, Profile::Fast);
-        let (c3, p3) = full.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
-        assert_eq!(c3.rho_beta.len(), 4);
-        assert_eq!(&p3.bridge_inputs[0][..4], &c3.rho_i[9..]);
-        assert_eq!(&p3.bridge_parities[0][..4], &c3.rho_beta[..]);
-        // A span of three full-segment parts (mode A at N > 2^14): two segment coordinates,
-        // above the record index on the sponge rows, below the blocks on the level-1 rows,
-        // the levels-2-3 row index on the copies and the outputs.
-        let span = TiedPart::new_span(&gate, 2 * (1 << 13) + 5, 13, 0, 3, Profile::Fast);
-        assert_eq!((span.nu(), span.live(2), span.live(3)), (15, 5, 0));
-        assert_eq!(span.cost().bridge.rows, [4 * 96, 4]);
-        let (c4, p4) = span.tie(&[1; 32], &yd, &caps.0, &caps.1).expect("tie");
-        assert_eq!(c4.rho_sigma.len(), 2);
-        assert_eq!(&p4.sponge_lanes[0][..13], &c4.rho_i[..]);
-        assert_eq!(&p4.sponge_lanes[0][13..15], &c4.rho_sigma[..]);
-        assert_eq!(&p4.bridge_inputs[0][..2], &c4.rho_sigma[..]);
-        assert_eq!(&p4.bridge_inputs[0][2..6], &c4.rho_i[9..]);
-        assert_eq!(&p4.bridge_copies[1][..2], &c4.rho_sigma[..]);
-        assert_eq!(&p4.bridge_outputs[..2], &c4.rho_sigma[..]);
-        assert_eq!(c4.row_factor(15), F128::ONE);
+    }
+
+    /// Counts 5 and 64: the plain opening.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+    fn a_chain_consistent_false_bit_value_fails_the_bit_claim() {
+        let t = std::time::Instant::now();
+        chain_consistent_false_bit_value(5);
+        chain_consistent_false_bit_value(64);
+        eprintln!("5 and 64: {:.2?}", t.elapsed());
+    }
+
+    /// Count 2,048 (`n = 2^nu_s`, a full-height sponge): Flock's block-first opening. Slow
+    /// (about 83 s in the default build, measured locally); the suite pins the block-first
+    /// rejection of a false bit value in `bit_claims_verify_on_a_full_height_sponge`.
+    #[test]
+    #[ignore = "slow; run with --release --ignored"]
+    fn a_chain_consistent_false_bit_value_fails_the_block_first_bit_claim() {
+        let t = std::time::Instant::now();
+        chain_consistent_false_bit_value(2048);
+        eprintln!("2048: {:.2?}", t.elapsed());
     }
 
     #[test]
-    fn tie_difficulty_follows_the_profile_lists() {
-        // docs/soundness.md Sections 3.6 and 10: a full segment 45,745 / 92,350 / 179,690 and
-        // a span of four full segments 50,925 / 102,750 / 199,850 over 2^128.
+    fn work_follows_the_profile_lists() {
+        // docs/soundness.md Sections 3.6 and 10 (version 5): tie L_s (nu_s + 3), eq_Y
+        // L_s (12 + span_log), rounds 2 L_s.
         let gate = sponge_gate();
         let profiles = [Profile::Fast, Profile::Slim, Profile::Slim8];
         assert_eq!(profiles.map(Profile::list_size), [35, 50, 70]);
         assert_eq!(Profile::Secure.list_size(), 1);
-        for (n, segments) in [(1 << 13, 1), (1 << 15, 4)] {
-            let bits = profiles.map(|p| TiedPart::plan_tie_bits(&gate, n, 13, segments, p));
-            assert_eq!(bits, [16, 17, 18], "n = {n}");
-        }
-        assert_eq!(TiedPart::plan_tie_bits(&gate, 8, 3, 1, Profile::Slim), 16);
+        let four = profiles.map(|p| TiedPart::plan_work(&gate, 1 << 15, 13, 4, p));
+        assert_eq!(four.map(|w| w.tie_bits), [10, 10, 11]);
+        assert_eq!(four.map(|w| w.eq_bits), [9, 10, 10]);
+        assert_eq!(four.map(|w| w.round_bits), [7, 7, 8]);
+        assert_eq!(four.map(|w| w.rounds), [28; 3]);
         let span = TiedPart::new_span(&gate, 3 << 13, 13, 0, 3, Profile::Slim);
         assert_eq!(span.tie_geometry(), TiedPart::plan_geometry(&gate, 3 << 13, 13, 3));
-        assert_eq!(span.tie_bits(), 17);
+        assert_eq!(span.work(), four[1]);
+        assert_eq!(span.chain().rounds(), 28);
+        let small = TiedPart::new_part(&gate, 5, 3, 0, Profile::Fast);
+        assert_eq!((small.nu(), small.chain().rounds()), (3, 16));
+        // n = 256 = 2^8 below 2^11 rows: nu_s = 9 > d = 8 (capacity_log), so the claim's
+        // ninth row coordinate is zero.
+        let wide = TiedPart::new_part(&gate, 256, 8, 0, Profile::Fast);
+        assert_eq!(wide.nu(), 9);
+        assert_eq!(wide.chain().rounds(), 21);
     }
 
     #[test]

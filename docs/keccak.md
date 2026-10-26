@@ -363,6 +363,11 @@ stays and is now the only non-succinct verifier cost of the Keccak side.
 
 ## 9. The tied part (docs/bridge.md Sections 5a and 5b; deviations K11, K13, K14)
 
+Since proof version 5 a tied part is one Flock instance, the sponge instance, plus the
+virtual parity chain on its tie challenger; the bridge union below is gone from mode A
+(Section 12.7, `docs/parity-chain.md`, deviation K21). This section and Sections 10 and 11
+describe versions 1 to 4.
+
 Modules `flock_union`, `bridge_union` and `tied`. A part of a segment is proven by two Flock
 instances tied by evaluation claims instead of the two-type union of Section 7: the sponge
 instance (one type) and, since proof version 2, the bridge union (two types, Section 11;
@@ -711,6 +716,8 @@ depths, and by the NUMBER of openings: two per tied part, whatever its size.
 
 ### 12.3 Measurements
 
+(Tied-part proof versions 3 and 4, with the bridge union. Version 5 removed the union: 12.7.)
+
 Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CPU 2 not used,
 `crypto_bench off` not run, shared with another agent's jobs. CLMUL build
 (`RUSTFLAGS="-C target-feature=+pclmulqdq"`, `--features agg-keccak/avx512,agg-piop/avx512`,
@@ -838,6 +845,94 @@ of four parts (4 x 69 ms on the cloud).
   the vendored core (or upstream given the same configs).
 - The span path of mode A runs only above `2^13` records: tested at the tied-part level and
   on the item level, to be run on the cloud machine (32K: bytes, time, peak memory).
+
+### 12.7 Tied-part proof version 5: the virtual parity chain (2026-10-26)
+
+The bridge union is gone (deviation K21, `docs/parity-chain.md`, `docs/bridge.md` 5d): a tied
+part is the sponge instance plus a sum-check on its tie challenger, whose final claim the
+sponge's opening proves as a third ring-switched claim. The table rows of 12.3 that split a
+proof into "cap / sponge / union" therefore become "header and chain / sponge proof".
+
+Machine and build as in 12.3 (i7-11700K, CLMUL build `RUSTFLAGS="-C
+target-feature=+pclmulqdq"` in `target/clmul`, 7 threads `taskset -c 0,1,3-15`,
+`RAYON_NUM_THREADS=7`, CPU 2 unused, `crypto_bench off` not run), shared with other agents'
+jobs (load average 6 to 18 during the runs, so times are direction only). "v4" is code
+`6803ce5` (main), "v5" is branch `parity-chain` (`3ae1a79` for the first two pairs of the
+`8@13/4` and 2,048 rows, `5ef97f4` for the rest; they differ by one 20 to 30 ms pass of the
+bit value); both binaries ran interleaved, the v4 test
+binary with only its measurement printout fixed (it read the v3 header offsets). Bytes are
+deterministic; times are medians of 5 runs after 1 warmup (`8192`: of 3), each pair run back
+to back.
+
+Tied part alone (`tests/tied.rs`, `tied_part_profiles_bytes_and_times`, `Slim`):
+
+| Part | Proof v4 (cap / sponge / union) | Proof v5 (header and chain / sponge) | Prove v4 / v5 | Verify v4 / v5 |
+| --- | --- | --- | --- | --- |
+| `8@13/4` | 350,766 B (2,048 / 145,636 / 203,052) | 150,758 B (1,046 / 149,712) | 1,412.0 / 153.4 ms; 1,217.9 / 150.0 ms; 2,002.5 / 196.4 ms | 98.0 / 26.5; 97.9 / 24.6; 113.6 / 32.3 ms |
+| 2,048 (`d` 11) | 438,854 B (2,048 / 243,252 / 193,524) | 248,230 B (902 / 247,328) | 863.0 / 802.9 ms; 804.6 / 752.5 ms; 1,340.3 / 1,034.2 ms | 79.6 / 28.4; 82.1 / 29.7; 90.4 / 39.9 ms |
+| 8,192 (`d` 13) | 504,358 B (2,048 / 277,604 / 224,676) | 282,654 B (974 / 281,680) | 1,897.6 / 1,959.8 ms; 3,400.2 / 3,295.9 ms | 109.4 / 33.8; 138.8 / 44.0 ms |
+
+Bytes: at `8@13/4` (the GF(2) side of a 32K batch) the proof shrinks by 200,008 B: the
+union's 205,108 B (its proof, cap and framing) go and 5,100 B come (the chain's 1,028 B and,
+in the sponge opening, the bit claim's `s_hat_v` and nonce, 2,056 B, and its 128 multipoint
+dual values, 2,048 B, less the two lane-group values, 32 B). The memo's 3.0 to 3.6 KB
+(estimate) missed the dual values.
+
+Prover: the chain itself is cheap (the timing test `parity_chain::tests::
+chain_timing_at_production_shapes` on dense random bits: 32.8 / 59.8 / 178.5 ms at `d` 11 /
+13 / the 32K span `13/2`; the verifier's weight and claim 7 ms), but the third ring-switched
+claim is not: at a full-height sponge (every power-of-two batch from 2,048 records on) Flock's
+block-first opening needs the claim's full column bit-bank (all 2,156 word columns, Flock's
+`union_bitbank_fold`, measured 174 to 222 ms at 8,192 records under load), and the opening's
+block statistics and `W'` fold grow by one claim (about +60 ms at 8,192). At 8,192 records
+these costs about cancel the full-segment union (v5 within the noise of v4); at `8@13/4` and
+2,048 the union dominates and v5 is faster. At 32K (estimate): the union of four
+full-segment geometries cost 1.2 to 2.0 s locally (`8@13/4`), the v5 additions about 0.18 s
+(chain) + 4 x 0.2 s (bank, scaling with the stack) + 0.25 s (opening) = 1.23 s, so the local
+net is +0.03 to -0.77 s of prover work, about 0.0 to -0.8 s. On the critical path: v4's
+default proves the union after the sponge instance (F3, `AGG_TIED_CONCURRENT`, is off by
+default and was off in Phase 9; its union took about 1.14 s of a 32K cloud run, measured),
+so against that baseline the critical-path effect equals the prover-work estimate; against v4 with `AGG_TIED_CONCURRENT=1` (cloud -0.44 to -0.59 s, top-level
+`ref/notes/bench-cloud.md`) v5 has no such overlap (the chain runs strictly before the
+sponge instance, whose opening holds the bank), and the sign is unknown. The bank's fold
+scaled poorly with threads locally (`docs/perf.md` F5), so the cloud may not shrink it. The
+32K cloud A/B decides.
+
+Mode A end to end (`agg bench --keys 16 --warmup 1 --reps 3 --flock-profile slim`):
+
+| N | Aggregate v4 -> v5 (B/sig) | Flock proofs v4 -> v5 | Prove v4 / v5 (Flock parts) | Verify uncached / cached v4 -> v5 | Flock part verify |
+| ---: | --- | --- | --- | --- | --- |
+| 1,024 | 522,155 (509.9) -> 339,262 (331.3) | 398,518 -> 215,610 B | 2,308.1 (1,029.1) / 2,280.1 (1,019.8) ms | 181.3 / 193.2 -> 142.7 / 327.7 ms | 78.3 -> 36.4 ms |
+| 2,048 | 598,031 (292.0) -> 407,457 (199.0) | 438,862 -> 248,238 B | 3,350.9 (1,209.3) / 2,839.9 (1,114.2) ms | 258.0 / 201.1 -> 147.5 / 146.4 ms | 79.2 -> 29.9 ms |
+
+(The cached verify of v5 at 1,024 is an outlier of the shared machine; the prover's and
+verifier's peak RSS, `VmHWM` maxima over the runs of one process, were 1,780 / 891 -> 2,109 /
+978 MiB at 1,024 and 1,791 / 1,087 -> 2,094 / 1,612 MiB at 2,048; the per-phase trace of the
+tied part shows the same peak, 1,257 vs 1,259 MiB at 2,048; see below.) CLI round trips (`agg aggregate` then `agg verify`, `keygen-batch --count 64`) at 256
+and 1,024 records accept under H-u and H-exact (300,425 / 300,424 B and 339,252 / 339,258 B);
+each aggregate verified under the other relation, and one with a flipped middle byte, is
+rejected.
+
+Peak RSS in a fresh process (review fix round, 2026-10-27; `/usr/bin/time -v`, `agg
+aggregate` and `agg verify` of the same records, v4 = `6803ce5` and v5 = `55f3fe4` CLMUL
+builds run interleaved, 2 runs each, load 0.9 to 4.5, measured; times direction only):
+
+| N | Aggregate max RSS v4 -> v5 | Same, `MALLOC_MMAP_THRESHOLD_=1048576` | Verify max RSS v4 -> v5 | Aggregate wall v4 -> v5 |
+| ---: | --- | --- | --- | --- |
+| 2,048 | 1,882 / 1,880 -> 2,011 / 2,007 MiB | - | 126 / 125 -> 117 / 116 MiB | 3.70 / 3.47 -> 3.29 / 3.27 s |
+| 8,192 | 6,088 / 6,077 -> 6,542 / 6,484 MiB | 5,725 / 5,710 -> 5,764 / 5,761 MiB | 196 / 196 -> 143 / 144 MiB | 7.86 / 7.89 -> 7.84 / 8.02 s |
+
+The verifier's peak goes down (the in-process `VmHWM` of `agg bench` above is an artefact of
+the prover's memory still held by the allocator). The prover's peak rises by about 7% with
+glibc's default allocator but only by 39 to 51 MiB (under 1%) with a fixed 1 MiB mmap threshold,
+so most of the rise is heap retention, not live data: a VmRSS trace sampled every 50 ms puts
+both peaks in the lookup after the Flock part (v4 6,019 MiB at 6.3 s, v5 6,540 MiB at 5.5
+s), while the tied part's own peak is lower in v5 (5,812 vs 5,878 MiB at the end of its
+proof, `AGG_TIED_TRACE`). glibc raises its mmap threshold dynamically (up to 32 MiB) after
+large frees, so the different allocation pattern of v5 leaves more freed heap resident when
+the lookup allocates. Whether this carries to 32K (25.8 GiB baseline) is for the cloud run;
+a fixed mmap threshold (or `mallopt` at start-up) also lowered v4's own peak by about 370 MiB
+at 8,192 and is a prover-only memory lever to measure there (its time cost is unmeasured).
 
 ## Handoff (2026-10-24)
 

@@ -16,7 +16,7 @@ except for the proof-of-work nonces of wire version 2/3.
 | --- | --- | --- |
 | F1 runtime-dispatched Flock x86 SIMD kernels in the vendored `flock-core` | done | `48d89d8` (`vendor/flock-core/PATCH.md` Section 3) |
 | F2 parallel Flock witness inputs, stripe transpose, `input_bits` | done | `efb80ce`, `4bba464` |
-| F3 sponge instance and bridge union proven side by side | done | `efb80ce` |
+| F3 sponge instance and bridge union proven side by side | done, opt-in (`AGG_TIED_CONCURRENT`); moot since tied-part version 5, which has no bridge union (K21) | `efb80ce` |
 | P5 stage parity tables built while the Flock span is proven | done | `7476508` |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) | `94bd37e`, `808b763` |
 | instance `T` reused in the witness; vectorized `public_t` | done | `51c3aea` |
@@ -220,9 +220,9 @@ they are not additive with each other where noted.
 | --- | --- | ---: | --- | --- |
 | F1 | Runtime-dispatched AVX-512/VPCLMULQDQ/GFNI kernels in the vendored `flock-core` (NTT, zerocheck shift-reduce/accumulate/transpose, multilinear folds) and a vendored `flock-field` (`fold_pairs`, slice ops): replace the `cfg(target_feature)` call-site gates by `is_x86_feature_detected!` + the existing `#[target_feature(enable)]` kernels; default build stays portable (extends K12) | **4.5-5.6 s** (NTT -1.5, zerocheck -3.0, opening -1.1) | yes (exact field arithmetic; same proof size in the A/B; check pinned digests) | Section 4 A/B: sponge instance 7.22 -> 3.25 s; NTT 4.2x, zerocheck 4.9x, opening 1.6x |
 | F2 | Flock witness: parallelize `input_bits` (`tied.rs:776`, serial `.iter()`), the bits loop (`:784-793`) and `statement` (`:797-805`, serial SHAKE c~); compute inputs/statement once and reuse at event 6; overlap the event-6 rebuild with round 2 (events 3-5) | **1.0-1.8 s** | yes | 2.8x / 3.3x scaling; ~0.28 s serial `input_bits` per call at 8K (2 calls); Amdahl ~0.5 s serial per build |
-| F3 | Prove the bridge union concurrently with the sponge instance (`tied.rs:991-1014`) | 0.3-0.6 s | yes | bridge union ~0.41 s at 8K, 2.5x scaling, 3.3 busy threads |
+| F3 | Prove the bridge union concurrently with the sponge instance (`tied.rs:991-1014`; superseded: version 5 deletes the union, K21) | 0.3-0.6 s | yes | bridge union ~0.41 s at 8K, 2.5x scaling, 3.3 busy threads |
 | F4 | Pool sizing on SMT: run the Flock span on an 8-thread (physical-core) pool, the rest on 16 | 0-1 s (unmeasured; one VM A/B with `RAYON_NUM_THREADS=8` vs 16) | yes | Flock's own doc and bench use physical cores |
-| F5 | Lincheck union partial fold does not scale with threads (`union_bitbank_fold`) | 0.1-0.3 s | yes | 179 ms 1T vs 193 ms 7T at 8K |
+| F5 | Lincheck union partial fold does not scale with threads (`union_bitbank_fold`; since tied-part version 5 it runs once more, for the bit claim's full bank, K21, `docs/keccak.md` 12.7) | 0.1-0.3 s | yes | 179 ms 1T vs 193 ms 7T at 8K |
 | F6 | Interim, no code change: add `+gfni` to the timing build (SSE GFNI zerocheck path; Akita unaffected) | ~0.9 s (subsumed by F1) | yes (build flag; conflicts with "default build without SIMD", so keep it to the CLMUL timing build or use F1) | Section 4: Flock part -6.8%, aggregate byte-identical |
 | ref | `Fast` instead of `Slim` | 1.6 s (measured P7) | no (verifier-visible profile; +6.6 B/sig) | bench-cloud.md P7 |
 

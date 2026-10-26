@@ -324,7 +324,7 @@ zero and then the challenge; the prover searches the smallest passing nonce and 
 the work stream (`Transcript::new`, `work_stream`), the verifier reads and checks it
 (`Transcript::replay`, `TranscriptError::Work`), the stream's exact length and zero padding
 checked up front and its exhaustion at `ensure_complete`. The seeds and the PCS export carry
-no work. The plan (`pow::PowPlan`: the Keccak side's tie sites, then these sites) is hashed
+no work. The plan (`pow::PowPlan`: the Keccak side's tied-part sites (tie, `eq_Y`, chain rounds), then these sites) is hashed
 into the instance record of event 0 (`binding::instance_record`).
 
 ## 10. Wire format (`wire::AggregateProof`)

@@ -4,10 +4,10 @@
 | --- | --- |
 | Status | normative for milestones M2 (F_p side, `agg-bridge`, `agg-piop`) and M3 (Flock side, `agg-keccak` bridge slot); resolves the open items of `ref/notes/improvements-bridge.md` Section 5 and `docs/spec.md` Sections 8, 9 |
 | Source of truth | `docs/spec.md` (Sections 1, 4, 5, 7, 8, 9, 10). This document only fixes what the spec leaves open; a conflict is a bug here. Deviations go to `docs/deviations.md` |
-| Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `carry`, `weights`, `final_vector`, `gf2_walker`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/bridge_union.rs`, `tied.rs`, `flock_union.rs` (the mode-A Flock side, Sections 5a, 5b), `bridge_slot.rs`, `segment.rs` (the one-row slot and two-type union of Section 5, reference) |
+| Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `carry`, `weights`, `final_vector`, `gf2_walker`, `parity_chain`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/tied.rs`, `flock_union.rs` (the mode-A Flock side: the virtual parity chain of Section 5d since tied-part proof version 5), `bridge_union.rs` (the bridge union of Sections 5b, 5c, versions 2 to 4, reference), `bridge_slot.rs`, `segment.rs` (the one-row slot and two-type union of Section 5, reference) |
 | Counts | exact numbers are products of the shape constants and exact binomials (`math.comb`); every number marked "estimate" is unmeasured |
 
-Problem. The 6,144 w1Encode bits of every signature are committed twice: as the Boolean columns $`b_0..b_5`$ of $`G_{\rm main}`$ (Akita, $`\mathbb F_p`$) and as the `Input` words of the sponge gate (Flock, GF(2)). The bridge proves $`b=b'`$ with a chain of three seeded sparse parity maps $`M_1,M_2,M_3`$: both sides prove $`Y_\sigma=M_3M_2M_1(\cdot)`$ for the same public 4,096-bit vector per segment, the $`\mathbb F_p`$ side over the integers with committed carries, the Flock side as GF(2)-linear rows. Soundness rests only on column independence (Section 7), not on code distance.
+Problem. The 6,144 w1Encode bits of every signature are committed twice: as the Boolean columns $`b_0..b_5`$ of $`G_{\rm main}`$ (Akita, $`\mathbb F_p`$) and as the `Input` words of the sponge gate (Flock, GF(2)). The bridge proves $`b=b'`$ with a chain of three seeded sparse parity maps $`M_1,M_2,M_3`$: both sides prove $`Y_\sigma=M_3M_2M_1(\cdot)`$ for the same public 4,096-bit vector per segment, the $`\mathbb F_p`$ side over the integers with committed carries, the Flock side as GF(2)-linear rows (Sections 5 to 5c) or, since tied-part proof version 5, as one sum-check over the committed bits (the virtual parity chain, Section 5d, `docs/parity-chain.md`). Soundness rests only on column independence (Section 7), not on code distance.
 
 ## 1. Shapes and notation
 
@@ -107,6 +107,10 @@ This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`
 **Binding.** The registry type carries empty matrix stubs (Flock's walker convention, deviation K2), so the relation is bound by `BridgeSlot::digest` = SHA3-256 of (`agg-keccak/v1/bridge-slot`, $`\mathsf{sd}`$, $`(J_t,m_t,k_t)_{t\le3}`$, $`d_{\rm seg}`$, the live count, $`k_{\log}`$, `useful_bits`, the constant column, the $`Y`$ base), absorbed into the Flock challenger after $`\mathsf{fs}_\sigma`$ and the sponge digest (deviation K4) and before Flock's own statement binding, which covers the registry, the counts, the commitment and the public words $`(\mu_i,\tilde c_i)_{i}`$, $`Y_\sigma`$. The driver order per segment (`segment.rs`): commit the two-type union (event 2) $`\to`$ receive $`\mathsf{sd}`$, derive matrices, compute parities $`\to`$ receive $`\mathsf{fs}_\sigma`$ $`\to`$ build rows, bind, prove $`\to`$ emit $`Y_\sigma`$ and the proof (event 6).
 
 ## 5a. The tied part: two Flock instances per part, tied by evaluation claims
+
+(Versions 1 to 4. Since tied-part proof version 5 a tied part is one Flock instance and the
+virtual parity chain, Section 5d; the sponge instance, its public claim, the part seeds, the
+shares and their XOR are kept.)
 
 Status: normative for M3 as implemented in `crates/agg-keccak/src/tied.rs` and
 `flock_union.rs` (deviation K11); it replaces the two-type union of Section 5 as the mode-A
@@ -211,6 +215,9 @@ version 1; since version 2 the event-2 item holds the sponge cap alone and the b
 union's cap is inside the proof (Section 5b, item version 3).
 
 ## 5b. The bridge union: the factored bridge instance of a tied part
+
+(Versions 2 to 4; superseded by the virtual parity chain of Section 5d, deviation K21. The
+module `bridge_union` stays as a reference with its unit tests.)
 
 Status: normative for M3 as implemented in `crates/agg-keccak/src/bridge_union.rs`,
 `flock_union.rs` (multi-type unions) and `tied.rs` (tied-part proof version 2; deviations
@@ -395,6 +402,10 @@ fails tie 1).
 
 ## 5c. Spans: one tied part over several segments; the final vectors as the output claim
 
+(Versions 3 and 4. The spans themselves, their record order, the span seed and the
+final-vector digest carry over to version 5, Section 5d; the bridge union, its output claim
+and the tie of this section do not.)
+
 Status: normative for tied-part proof version 3 (`crates/agg-keccak/src/bridge_union.rs`,
 `tied.rs`; deviation K16; mode A: `agg_cli::mode_a`, segment items of version 4), with the
 tie work and the tie binding of version 4 (end of this section; deviation K20,
@@ -506,6 +517,51 @@ copy flipped in segment 1 only (`bridge copy of lanes 0..3`), another segment co
 record count are rejected; the tampering cases of Section 5b run on version 3 (a wrong share
 with honest rows fails the output claim, the output columns set to it break the rows).
 
+## 5d. The virtual parity chain (tied-part proof version 5; deviation K21)
+
+Status: normative for M3 as implemented in `crates/agg-bridge/src/parity_chain.rs` and
+`crates/agg-keccak/src/tied.rs` (`VERSION = 5`); the design, the variable order, the
+weight evaluation and the costs are in `docs/parity-chain.md`, the sites in
+`docs/soundness.md` 3.6 and 12.4. It replaces the bridge union of Sections 5b and 5c as the
+GF(2) side of a tied part.
+
+**Mechanism.** In characteristic 2 the composite $`M=M_3M_2M_1`$ is $`\mathbb F_{2^{128}}`$-linear,
+so for $`\mathrm{eq}_Y=\mathrm{eq}(r_o,\rho_3)\,\mathrm{eq}(r_y,\sigma)`$ drawn after the
+final vectors, $`\langle\mathrm{eq}_Y,Y\rangle=\sum_xW(x)\,b''(x)`$ with the public weight
+$`W=M^{\mathsf T}\mathrm{eq}_Y`$, never materialized. The prover proves this inner product by
+one degree-2 sum-check over the `13 + d + span_log` variables of the part's bits in eight
+lanes (lanes 6, 7 are the sponge's word columns 48..63 with weight zero): a block phase over
+`(i_mid, t, sigma)` whose messages come from the tables $`G=M_2^{\mathsf T}M_3^{\mathsf T}\mathrm{eq}_Y`$
+and the honest level-1 parities $`y_1=M_1b''`$ (prover state, unchecked: the sum-check carries
+the soundness), then an in-block phase over the position. The last claim is
+$`\widetilde W(r)\,\widetilde{b''}(r)`$: the verifier evaluates $`\widetilde W(r)`$ itself (about $`10^7`$ additions,
+`docs/parity-chain.md` 5), and the sponge instance's Flock opening proves $`\widetilde{b''}(r)`$ (up to
+the row factor of a short sponge) as a third ring-switched claim on the bit polynomial
+(`flock_union::BitClaim`, the multilinear skip basis `SkipPoint::Eq` of the vendored core).
+
+**What goes.** The bridge union's commitment and proof (203,052 B of proof, a 2,048 B cap and
+8 B of framing at `8@13/4` with `Slim`, `docs/keccak.md` 12.3), its two walkers (verifier:
+`1.9 x 10^7` entries over `2^20`-entry tables), ties 1 and 2 and the output claim. The sponge
+instance keeps its public claim; its two lane-group claims (tie 1's sponge side) go.
+
+**Soundness.** `b'` is the sponge's input, fixed at event 2 before `sd`; `Y` is fixed by its
+digest before `eq_Y`. If $`Mb'\ne Y`$ for every element of the sponge's Johnson list, then
+$`\langle\mathrm{eq}_Y,Mb'\rangle=\langle\mathrm{eq}_Y,Y\rangle`$ with probability at most
+$`L_s(12+\mathrm{span\_log})/2^{128}`$, each round at most $`2L_s/2^{128}`$, and a false final
+claim makes the bit claim false for every list element, which Flock's opening rejects under
+assumption (F). The bound (9.3) of Section 7 is unchanged. Work: `docs/soundness.md` 3.6.
+
+**Tests.** `agg-bridge` (`parity_chain`): against a brute-force product sum-check on dense
+tables (toy shapes with 1, 3, 6 lanes, part offsets, spans), every message, the final value
+and $`\widetilde W(r)`$. `agg-keccak` (`tied`, `tests/tied.rs`): round trips at 5 to 1,024 records and
+at 2,048 (a full-height sponge, Flock's block-first opening), spans and parts; rejections of a flipped `Y` bit, another `sd`, a chain copy that differs
+from the sponge, a flipped `b'` bit with stale `Y`, tampered round messages (also with every
+nonce re-ground), a tampered bit value, a wrong `s_hat_v` of the bit claim, stale `c~` and a
+stale chi witness. A false bit value consistent with the chain (a chain copy of `b'` with one
+bit flipped, its `Y`, the copy's value) passes the chain and is rejected by Flock's
+ring-switch claim check: end to end at 5 and 64 records (plain opening; 2,048 records, the
+block-first opening, as an ignored slow test) and on the full-height sponge instance alone.
+
 ## 6. The final public vector
 
 $`Y_\sigma\in\{0,1\}^{4096}`$ per segment, 512 bytes, bit $`\rho_3`$ at byte $`\rho_3\gg3`$, bit position $`\rho_3\bmod8`$ (least significant first, deviation P6), absorbed at event 6 before the Flock proofs and before $`\tau`$. The same bytes are: the `Out` words of the bridge slot (public words of the Flock statement), the public table $`Y(\rho_3,\sigma)`$ of the PIOP whose extension $`Y(\tau_3)`$ the verifier evaluates in step 4 of spec Section 11, and the right-hand side of the level-3 identity. Proof cost $`512S`$ bytes (2 KB at $`N=2^{15}`$). A verifier MUST reject a proof whose event-6 item has a length other than $`512S`$.
@@ -557,5 +613,5 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 1. Composite rows in one bridge slot per segment, parities not materialized on the Flock side (spec B.13). Alternative kept in reserve: reveal $`y^{(2)}`$ (6 KB per segment) and drop level 3; it saves nothing in walker work, since level 1 dominates.
 2. Padded records are forced to zero by empty rows, not left free; the parity rows range over all record positions of the slot so that the composite relation depends on $`\mathsf{sd}`$ and $`d_{\rm seg}`$ only, and the walker is count-independent except for the identity rows.
 3. Matrices are derived once and shared, not regenerated inside the fold (one Keccak-f per column would cost 1 s per fold on one core).
-4. The verifier's bridge-slot fold ($`7\times10^8`$ additions and a $`2^{26}`$ `eq` table per segment) was the largest verifier cost of the Keccak side: measured 1.43 s per segment on the cloud machine and 1.87 s locally at the full-segment geometry. Resolved by the bridge union of Section 5b (walkers of $`1.9\times10^7`$ entries over $`2^{20}`$-entry tables): about 70 ms per segment locally (`docs/keccak.md` Section 11). Remaining candidates if needed: a smaller $`k_1`$ (12: $`2^{-136.5}`$ per level, 14% fewer nonzeros) or a Flock entry that delegates the fold to the prover with a sum-check, which does not exist at `83f963e`.
+4. The verifier's bridge-slot fold ($`7\times10^8`$ additions and a $`2^{26}`$ `eq` table per segment) was the largest verifier cost of the Keccak side: measured 1.43 s per segment on the cloud machine and 1.87 s locally at the full-segment geometry. Resolved by the bridge union of Section 5b (walkers of $`1.9\times10^7`$ entries over $`2^{20}`$-entry tables): about 70 ms per segment locally (`docs/keccak.md` Section 11). Delegating the fold to a sum-check (the candidate named here) is done outside Flock by the virtual parity chain of Section 5d (tied-part proof version 5): the verifier evaluates the weight at one point and the union is gone. Remaining candidate if needed: a smaller $`k_1`$ (12: $`2^{-136.5}`$ per level, 14% fewer nonzeros).
 5. Derivation cost 0.94 s single-threaded (P4) and $`J_2=2^{19}`$ padding: candidates for wire version 1 (Section 3), not adopted.
