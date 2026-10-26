@@ -57,6 +57,17 @@ pub fn inverse_ntt_matrix(a_hat: &MatrixNtt) -> Box<MatrixCoeff> {
 /// < 2^16`, so no `i32` overflows; after it `|T| < 2^29`.
 #[must_use]
 pub fn sparse_t(c: &Challenge, t1: &[[u16; N]; K]) -> PublicT {
+    let mut out = sparse_ct(c, t1);
+    for coeff in out.as_flattened_mut() {
+        *coeff <<= D;
+    }
+    out
+}
+
+/// `c * t1` over `Z[X]/(X^256 + 1)` (no factor `2^d`), `|c * t1| <= tau (2^10 - 1) < 2^16`;
+/// see [`sparse_t`].
+#[must_use]
+pub fn sparse_ct(c: &Challenge, t1: &[[u16; N]; K]) -> PublicT {
     let mut out = [[0_i32; N]; K];
     for (row, t1_row) in out.iter_mut().zip(t1) {
         let t: [i32; N] = std::array::from_fn(|m| i32::from(t1_row[m]));
@@ -72,9 +83,6 @@ pub fn sparse_t(c: &Challenge, t1: &[[u16; N]; K]) -> PublicT {
                 sub_assign(straight_dst, straight_src);
                 add_assign(wrapped_dst, wrapped_src);
             }
-        }
-        for coeff in row.iter_mut() {
-            *coeff <<= D;
         }
     }
     out
@@ -94,30 +102,43 @@ fn sub_assign(dst: &mut [i32], src: &[i32]) {
     }
 }
 
-/// A vector over `E = F_{p^2}` split into the canonical `u64` coordinates of its two base
-/// coefficients, for exact integer inner products with small signed integer vectors
+/// A vector over `E = F_{p^2}` split into the canonical coordinates of its two base
+/// coefficients, for exact inner products with small signed integer vectors
 /// ([`SplitWeights::dot`]). Multiplying `e = (e_0, e_1)` by an integer `v` is coordinatewise
 /// (`v e = (v e_0, v e_1)`, whatever the `Ext2` non-residue), so
 /// `sum_j v_j e_j = (sum_j v_j e_{j,0} mod p, sum_j v_j e_{j,1} mod p)`: each coordinate sum is
-/// accumulated exactly in `i128` and reduced once, instead of one `Ext2` product and its
-/// reductions per term.
+/// accumulated exactly over the integers and reduced once, instead of one `Ext2` product and
+/// its reductions per term.
 #[derive(Clone, Debug)]
 pub struct SplitWeights {
+    /// `[lo32(e_0), hi32(e_0), lo32(e_1), hi32(e_1)]` per weight.
+    halves: Vec<[u32; 4]>,
+    /// `[e_0, e_1]` per weight.
     coords: Vec<[u64; 2]>,
+    /// `sum_j e_{j,0}` and `sum_j e_{j,1}` over the integers.
+    sums: [u128; 2],
 }
 
 impl SplitWeights {
     /// Splits `weights` into canonical coordinates.
     #[must_use]
     pub fn new(weights: &[E]) -> Self {
+        let coords: Vec<[u64; 2]> = weights
+            .iter()
+            .map(|w| {
+                w.coeffs
+                    .map(|c| c.to_u64_checked().expect("a canonical fp64 coordinate"))
+            })
+            .collect();
+        let halves = coords
+            .iter()
+            .map(|&[a, b]| [a as u32, (a >> 32) as u32, b as u32, (b >> 32) as u32])
+            .collect();
+        let sums = [0, 1].map(|k| coords.iter().map(|c| u128::from(c[k])).sum());
         Self {
-            coords: weights
-                .iter()
-                .map(|w| {
-                    w.coeffs
-                        .map(|c| c.to_u64_checked().expect("a canonical fp64 coordinate"))
-                })
-                .collect(),
+            halves,
+            coords,
+            sums,
         }
     }
 
@@ -133,19 +154,61 @@ impl SplitWeights {
         self.coords.is_empty()
     }
 
-    /// `sum_j values[j] weights[offset + j]` in `E`, exact.
+    /// `sum_j values[j] weights[j]` in `E`, exact for any `i32` values; fast when every value
+    /// lies in `[-2^BITS, 2^BITS)`. Panics unless `values` has one entry per weight.
     ///
-    /// Bound: every coordinate is below `p < 2^64` and every value is an `i32`, so each term is
-    /// below `2^95` in absolute value and any sum of at most `2^31` terms below `2^126`: the
-    /// accumulation is exact in `i128` whatever the values. The callers are much smaller:
-    /// `T` (`|T| < 2^29`, 1,024 terms): below `2^103`; `A` (`|A| < 2^22`, 256 terms):
-    /// `256 x 2^64 x 2^22 = 2^94 < 2^95`. Panics if `values` runs past the weights.
+    /// Fast path (`len <= 2^(31 - BITS)`): with the biased values `b_j = v_j + 2^BITS` in
+    /// `[0, 2^(BITS+1))` and the 32-bit halves `h` of the coordinates, every product `h b_j`
+    /// is below `2^(BITS+33)` and `len` of them below `2^64`, so four `u64` lanes
+    /// (`u32 x u32 -> u64` products, which the baseline SSE2 `pmuludq` vectorizes) hold
+    /// `sum_j h b_j` exactly; then `sum_j e_j v_j = lo + 2^32 hi - 2^BITS sum_j e_j` in `i128`
+    /// (`< 2^97`). The callers: `A` (`|A| <= (q - 1) / 2 < 2^22`, `BITS = 22`, 256 terms
+    /// `<= 2^9`) and `c t1` (`|c t1| <= tau (2^10 - 1) < 2^16`, `BITS = 16`, 1,024 terms
+    /// `<= 2^15`). If any value is out of range (a corrupted cache entry, say) the exact
+    /// `i128` path is taken: terms below `2^95`, at most `2^31` of them below `2^126`.
     #[must_use]
     #[inline]
-    pub fn dot(&self, offset: usize, values: &[i32]) -> E {
-        let coords = &self.coords[offset..offset + values.len()];
+    pub fn dot<const BITS: u32>(&self, values: &[i32]) -> E {
+        self.dot_lanes::<BITS>(values)
+            .unwrap_or_else(|| self.dot_wide(values))
+    }
+
+    /// The fast path of [`SplitWeights::dot`]: `None` when a value is outside
+    /// `[-2^BITS, 2^BITS)` or there are more than `2^(31 - BITS)` values.
+    #[must_use]
+    #[inline]
+    pub fn dot_lanes<const BITS: u32>(&self, values: &[i32]) -> Option<E> {
+        assert_eq!(values.len(), self.len(), "one value per weight");
+        if BITS > 30 || values.len() > 1 << (31 - BITS) {
+            return None;
+        }
+        let bias = 1_u32 << BITS;
+        let (mut acc, mut seen) = ([0_u64; 4], 0_u32);
+        for (h, &v) in self.halves.iter().zip(values) {
+            let b = (v as u32).wrapping_add(bias);
+            seen |= b;
+            let b = u64::from(b);
+            for k in 0..4 {
+                acc[k] = acc[k].wrapping_add(u64::from(h[k]) * b);
+            }
+        }
+        if seen >> (BITS + 1) != 0 {
+            return None;
+        }
+        let [c0, c1] = [0, 1].map(|k| {
+            i128::from(acc[2 * k]) + (i128::from(acc[2 * k + 1]) << 32)
+                - ((self.sums[k] as i128) << BITS)
+        });
+        Some(E::new(BaseField::from_i128(c0), BaseField::from_i128(c1)))
+    }
+
+    /// `sum_j values[j] weights[j]` accumulated per coordinate in `i128`, exact for any `i32`
+    /// values (terms below `2^95`; at most `2^31` of them below `2^126`).
+    #[must_use]
+    pub fn dot_wide(&self, values: &[i32]) -> E {
+        assert_eq!(values.len(), self.len(), "one value per weight");
         let (mut acc0, mut acc1) = (0_i128, 0_i128);
-        for (&[w0, w1], &v) in coords.iter().zip(values) {
+        for (&[w0, w1], &v) in self.coords.iter().zip(values) {
             let v = i128::from(v);
             acc0 += i128::from(w0) * v;
             acc1 += i128::from(w1) * v;

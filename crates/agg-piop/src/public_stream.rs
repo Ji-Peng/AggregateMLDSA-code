@@ -26,33 +26,74 @@ use agg_witness::expand::{expand_a, MatrixCoeff};
 use agg_witness::instance::InstanceError;
 use agg_witness::native::{mu, pk_decode, sample_in_ball, tr, Challenge};
 use agg_witness::padding::Geometry;
-use agg_witness::params::{C_TILDE_BYTES, D_COEF, D_POS, K, L, N, TR_BYTES};
-use jolt_field::Zero;
+use agg_witness::params::{C_TILDE_BYTES, D, D_COEF, D_POS, K, L, N, PK_BYTES, TR_BYTES};
+use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::public_data::{
-    eq_correlation, inverse_ntt_matrix, sparse_t, KeyCache, SplitWeights, VerifierKey,
+    eq_correlation, inverse_ntt_matrix, sparse_ct, sparse_t, KeyCache, SplitWeights, VerifierKey,
 };
 use crate::OpeningField as E;
 
 /// One distinct key of the batch.
+///
+/// A cached key holds only the cache entry, whose `t1` and `tr` were derived from the same
+/// encoded key (the cache is keyed by the full `pk`; every insertion path decodes `t1` from
+/// `pk`, and the cache file recomputes it on load), so the verifier neither decodes nor
+/// copies the key again: at 32K keys the copies were about 110 MB of fresh memory per run.
 #[derive(Clone, Debug)]
 pub struct StreamKey {
-    /// Encoded public key (the cache key).
-    pub pk: Vec<u8>,
+    source: KeySource,
+    /// Live records signed under this key, increasing.
+    pub records: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+enum KeySource {
+    Cached(Arc<VerifierKey>),
+    Fresh(Box<FreshKey>),
+}
+
+#[derive(Clone, Debug)]
+struct FreshKey {
+    pk: Vec<u8>,
     rho: [u8; 32],
     t1: [[u16; N]; K],
     tr: [u8; TR_BYTES],
-    cached: Option<Arc<VerifierKey>>,
-    /// Live records signed under this key, increasing.
-    pub records: Vec<usize>,
 }
 
 impl StreamKey {
     /// True when the expansion came from the cache.
     #[must_use]
     pub fn is_cached(&self) -> bool {
-        self.cached.is_some()
+        matches!(self.source, KeySource::Cached(_))
+    }
+
+    /// Encoded public key (the cache key).
+    #[must_use]
+    pub fn pk(&self) -> &[u8] {
+        match &self.source {
+            KeySource::Cached(key) => &key.pk,
+            KeySource::Fresh(key) => &key.pk,
+        }
+    }
+
+    /// `t1` of the key.
+    #[must_use]
+    pub fn t1(&self) -> &[[u16; N]; K] {
+        match &self.source {
+            KeySource::Cached(key) => &key.t1,
+            KeySource::Fresh(key) => &key.t1,
+        }
+    }
+
+    /// `tr = H(pk, 64)`.
+    #[must_use]
+    pub fn tr(&self) -> &[u8; TR_BYTES] {
+        match &self.source {
+            KeySource::Cached(key) => &key.tr,
+            KeySource::Fresh(key) => &key.tr,
+        }
     }
 }
 
@@ -143,8 +184,9 @@ fn distinct_keys<'a>(
 }
 
 impl StreamedPublic {
-    /// Step 2 from `(pk, M, c~)` triples (pure mode, empty context): `pkDecode`, `tr` per
-    /// distinct key (taken from the cache when present), `mu` and `SampleInBall` per record.
+    /// Step 2 from `(pk, M, c~)` triples (pure mode, empty context): the distinct keys by
+    /// full `pk` bytes ([`distinct_keys`]), `pkDecode` and `tr` per distinct uncached key (a
+    /// cached key reuses its entry), `mu` and `SampleInBall` per record.
     pub fn prepare(
         inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
         cache: Option<&KeyCache>,
@@ -154,17 +196,21 @@ impl StreamedPublic {
         let keys = distinct
             .into_par_iter()
             .map(|(pk, records)| {
-                let decoded = pk_decode(pk).ok_or(InstanceError::PublicKey(records[0]))?;
-                let cached = cache.and_then(|c| c.get(pk));
-                let tr = cached.as_ref().map_or_else(|| tr(pk), |key| key.tr);
-                Ok(StreamKey {
-                    pk: pk.to_vec(),
-                    rho: decoded.rho,
-                    t1: decoded.t1,
-                    tr,
-                    cached,
-                    records,
-                })
+                let source = match cache.and_then(|c| c.get(pk)) {
+                    // The length check keeps the error of pkDecode for any cache content.
+                    Some(cached) if pk.len() == PK_BYTES => KeySource::Cached(cached),
+                    _ => {
+                        let decoded =
+                            pk_decode(pk).ok_or(InstanceError::PublicKey(records[0]))?;
+                        KeySource::Fresh(Box::new(FreshKey {
+                            pk: pk.to_vec(),
+                            rho: decoded.rho,
+                            t1: decoded.t1,
+                            tr: tr(pk),
+                        }))
+                    }
+                };
+                Ok(StreamKey { source, records })
             })
             .collect::<Result<Vec<_>, InstanceError>>()?;
         let records = inputs
@@ -172,7 +218,7 @@ impl StreamedPublic {
             .zip(&record_keys)
             .map(|(&(_, msg, c_tilde), &key)| StreamRecord {
                 key,
-                mu: mu(&keys[key].tr, msg, &[]),
+                mu: mu(keys[key].tr(), msg, &[]),
                 c_tilde,
                 challenge: sample_in_ball(&c_tilde),
             })
@@ -206,7 +252,7 @@ impl StreamedPublic {
     #[must_use]
     pub fn t(&self, i: usize) -> Box<crate::public_data::PublicT> {
         let record = &self.records[i];
-        Box::new(sparse_t(&record.challenge, &self.keys[record.key].t1))
+        Box::new(sparse_t(&record.challenge, self.keys[record.key].t1()))
     }
 
     /// Step 6: `T(r^(2))` and `w_A(r^(3))` in one streamed pass (module docs). New
@@ -221,17 +267,18 @@ impl StreamedPublic {
         let eq_sig3 = eq_table(&r3[pos..]);
 
         let start = Instant::now();
-        // `|T| < 2^29` and 1,024 terms: the exact sums stay below 2^103 (SplitWeights::dot).
+        // `<T_i, eq> = 2^d <c_i t1, eq>` with `|c_i t1| < 2^16` (SplitWeights::dot, 16 bits).
         let eq_pos2 = SplitWeights::new(&eq_pos2);
         let t_at_r2 = self
             .records
             .par_iter()
             .enumerate()
             .map(|(i, record)| {
-                let t = sparse_t(&record.challenge, &self.keys[record.key].t1);
-                eq_sig2[i] * eq_pos2.dot(0, t.as_flattened())
+                let ct = sparse_ct(&record.challenge, self.keys[record.key].t1());
+                eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
             })
-            .reduce(E::zero, |a, b| a + b);
+            .reduce(E::zero, |a, b| a + b)
+            * E::from_u64(1 << D);
         let t_time = start.elapsed();
 
         let start = Instant::now();
@@ -250,17 +297,19 @@ impl StreamedPublic {
                     .records
                     .iter()
                     .fold(E::zero(), |sum, &i| sum + eq_sig2[i] * eq_sig3[i]);
-                let (weight, fresh) = match &key.cached {
-                    Some(cached) => (key_weight(&cached.a, &lambda, &entry_weights), None),
-                    None => {
-                        let a = inverse_ntt_matrix(&expand_a(&key.rho).0);
+                let (weight, fresh) = match &key.source {
+                    KeySource::Cached(cached) => {
+                        (key_weight(&cached.a, &lambda, &entry_weights), None)
+                    }
+                    KeySource::Fresh(fresh) => {
+                        let a = inverse_ntt_matrix(&expand_a(&fresh.rho).0);
                         let weight = key_weight(&a, &lambda, &entry_weights);
                         let fresh = keep.then(|| {
                             Arc::new(VerifierKey {
-                                pk: key.pk.clone(),
+                                pk: fresh.pk.clone(),
                                 a,
-                                t1: key.t1,
-                                tr: key.tr,
+                                t1: fresh.t1,
+                                tr: fresh.tr,
                             })
                         });
                         (weight, fresh)
@@ -270,7 +319,7 @@ impl StreamedPublic {
             })
             .collect();
         let ring_weight = per_key.iter().fold(E::zero(), |sum, (w, _)| sum + *w);
-        let expanded = self.keys.iter().filter(|key| key.cached.is_none()).count();
+        let expanded = self.keys.iter().filter(|key| !key.is_cached()).count();
         if let Some(cache) = cache {
             for (_, fresh) in per_key {
                 if let Some(key) = fresh {
@@ -292,14 +341,15 @@ impl StreamedPublic {
 /// (7.10)), with `entry_weights[rho][s] = eq(r2_row, rho) eq(r3_col, s)`.
 ///
 /// `A` entries are centered mod `q`, `|A| <= (q - 1) / 2 < 2^22`, so each of the `k l` inner
-/// products of 256 terms is accumulated per base coordinate of `Lambda` in `i128` and reduced
-/// once: `256 x 2^64 x 2^22 = 2^94 < 2^95`, far below `2^127` ([`SplitWeights::dot`]).
+/// products of 256 terms is accumulated exactly per base coordinate of `Lambda` and reduced
+/// once ([`SplitWeights::dot`] with 22 bits; in `i128` terms the bound is
+/// `256 x 2^64 x 2^22 = 2^94 < 2^95`). Out-of-range entries take the exact `i128` path.
 fn key_weight(a: &MatrixCoeff, lambda: &SplitWeights, entry_weights: &[[E; L]; K]) -> E {
     debug_assert_eq!(lambda.len(), N);
     let mut sum = E::zero();
     for (a_row, weights) in a.iter().zip(entry_weights) {
         for (poly, &weight) in a_row.iter().zip(weights) {
-            sum += weight * lambda.dot(0, poly);
+            sum += weight * lambda.dot::<22>(poly);
         }
     }
     sum
@@ -314,7 +364,7 @@ mod tests {
     use agg_witness::gen::{self, SplitMix64};
     use agg_witness::instance::PublicInstance;
     use agg_witness::native::Challenge;
-    use agg_witness::params::{D, P_FIELD, Q, TAU};
+    use agg_witness::params::{P_FIELD, Q, TAU};
     use jolt_field::Ring;
     use std::collections::HashMap;
     use std::hint::black_box;
@@ -443,17 +493,48 @@ mod tests {
     #[test]
     fn split_dot_matches_the_extension_products_including_extremes() {
         let mut rng = SplitMix64::new(6);
-        let weights: Vec<E> = point(&mut rng, 1024);
-        let split = SplitWeights::new(&weights);
-        let values: Vec<i32> = (0..1024).map(|_| rng.next_u64() as i32).collect();
-        assert_eq!(split.dot(0, &values), dot_reference(&values, &weights));
-        assert_eq!(split.dot(256, &values[..256]), dot_reference(&values[..256], &weights[256..]));
-        let top = vec![max_field(); 1024];
-        let top_split = SplitWeights::new(&top);
-        for v in [i32::MIN, i32::MAX, -(1 << 29) + 1, (1 << 29) - 1] {
-            let values = vec![v; 1024];
-            assert_eq!(top_split.dot(0, &values), dot_reference(&values, &top));
+        let top = SplitWeights::new(&vec![max_field(); 1024]);
+        for weights in [point(&mut rng, 1024), vec![max_field(); 1024]] {
+            let split = SplitWeights::new(&weights);
+            let check = |values: &[i32]| {
+                let expected = dot_reference(values, &weights);
+                assert_eq!(split.dot_wide(values), expected);
+                assert_eq!(split.dot::<16>(values), expected);
+                assert_eq!(split.dot::<22>(values), expected); // 1,024 > 2^9 terms: wide path
+                let quarter = SplitWeights::new(&weights[..256]);
+                assert_eq!(quarter.dot::<22>(&values[..256]), dot_reference(&values[..256], &weights));
+                assert_eq!(quarter.dot::<16>(&values[..256]), dot_reference(&values[..256], &weights));
+            };
+            // In range for 16 bits, then for 22 bits, then anything (the fallback).
+            check(&(0..1024).map(|_| rng.below(1 << 17) as i32 - (1 << 16)).collect::<Vec<_>>());
+            check(&(0..1024).map(|_| rng.below(1 << 23) as i32 - (1 << 22)).collect::<Vec<_>>());
+            check(&(0..1024).map(|_| rng.next_u64() as i32).collect::<Vec<_>>());
+            for v in [i32::MIN, i32::MAX, -(1 << 22), (1 << 22) - 1, 1 << 22, -(1 << 16), (1 << 16) - 1, 1 << 16, -(1 << 16) - 1] {
+                check(&vec![v; 1024]);
+            }
+            // One out-of-range value among in-range ones.
+            let mut values = vec![(1 << 16) - 1; 1024];
+            values[777] = 1 << 16;
+            check(&values);
+            // The fast path is taken exactly on in-range values within the length bound.
+            let quarter = SplitWeights::new(&weights[..256]);
+            for (v, in16, in22) in [
+                (-(1 << 16), true, true),
+                ((1 << 16) - 1, true, true),
+                (1 << 16, false, true),
+                (-(1 << 16) - 1, false, true),
+                (-(1 << 22), false, true),
+                ((1 << 22) - 1, false, true),
+                (1 << 22, false, false),
+                (i32::MIN, false, false),
+            ] {
+                assert_eq!(split.dot_lanes::<16>(&vec![v; 1024]).is_some(), in16, "{v}");
+                assert_eq!(quarter.dot_lanes::<22>(&vec![v; 256]).is_some(), in22, "{v}");
+            }
+            assert!(split.dot_lanes::<22>(&vec![0; 1024]).is_none(), "2^10 > 2^9 terms");
+            assert!(split.dot_lanes::<16>(&values).is_none());
         }
+        assert_eq!(top.len(), 1024);
     }
 
     #[test]
@@ -559,13 +640,68 @@ mod tests {
                 let record = &public.records()[i];
                 let key = &public.keys()[record.key];
                 let (own, foreign) = if i % 2 == 1 { (&victim, &other_t1) } else { (&other, &victim_t1) };
-                assert_eq!(key.pk, *own);
+                assert_eq!(key.pk(), own.as_slice());
                 assert_eq!(key.is_cached(), cache.is_some() && *own == victim);
                 assert_eq!(*public.t(i), *stored.t(i));
                 assert_ne!(*public.t(i), sparse_t(&record.challenge, foreign));
                 assert_eq!(record.mu, instance.records[i].mu);
             }
         }
+    }
+
+    /// Timings of step 2 of the verifier on 8,192 synthetic records with distinct keys, all
+    /// threads (direction only; `cargo test --release -p agg-piop --lib prepare_profile --
+    /// --ignored --nocapture` on CPUs 0,1,3-15).
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn prepare_profile() {
+        use crate::binding::{public_records_binding, record_stream};
+        let n = 8192;
+        let mut rng = SplitMix64::new(10);
+        let keys: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let mut k = vec![0_u8; agg_witness::params::PK_BYTES];
+                rng.fill(&mut k);
+                k
+            })
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 80]).collect();
+        let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = (0..n)
+            .map(|i| {
+                let mut c = [0_u8; C_TILDE_BYTES];
+                rng.fill(&mut c);
+                (keys[i].as_slice(), msgs[i].as_slice(), c)
+            })
+            .collect();
+        let mut cache = KeyCache::default();
+        for key in keys.par_iter().map(|k| Arc::new(VerifierKey::from_bytes(k).unwrap())).collect::<Vec<_>>() {
+            cache.insert(key);
+        }
+        fn time<T>(label: &str, mut f: impl FnMut() -> T) {
+            let start = Instant::now();
+            black_box(f());
+            eprintln!("{label}: first run {:.2} ms", start.elapsed().as_secs_f64() * 1e3);
+            let mut runs: Vec<f64> = (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    black_box(f());
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            runs.sort_by(f64::total_cmp);
+            eprintln!("{label}: median {:.2} ms (min {:.2})", runs[2], runs[0]);
+        }
+        time("prepare cached (cold)", || StreamedPublic::prepare(&inputs, Some(&cache)).unwrap());
+        time("distinct_keys (parallel)", || distinct_keys(&inputs));
+        time("distinct_keys_reference (serial map)", || distinct_keys_reference(&inputs));
+        time("pk_decode x N (parallel)", || inputs.par_iter().map(|(pk, _, _)| pk_decode(pk).unwrap().t1[0][0]).sum::<u16>());
+        time("cache.get x N (parallel)", || inputs.par_iter().filter(|(pk, _, _)| cache.get(pk).is_some()).count());
+        time("mu x N (parallel)", || inputs.par_iter().map(|(_, m, _)| mu(&[0; 64], m, &[])[0]).collect::<Vec<_>>());
+        time("sample_in_ball x N (parallel)", || inputs.par_iter().map(|(_, _, c)| sample_in_ball(c).positions.len()).sum::<usize>());
+        time("prepare uncached", || StreamedPublic::prepare(&inputs, None).unwrap());
+        time("prepare cached", || StreamedPublic::prepare(&inputs, Some(&cache)).unwrap());
+        time("record_stream (parallel)", || record_stream(&inputs));
+        time("public_records_binding", || public_records_binding(&inputs));
     }
 
     /// Single-thread timings of the three kernels against the references (direction only;
@@ -603,13 +739,19 @@ mod tests {
         let eq = point(&mut rng, 1024);
         let split = SplitWeights::new(&eq);
         let tables: Vec<_> = cases.iter().map(|(c, t1)| sparse_t(c, t1)).collect();
+        let products: Vec<_> = cases.iter().map(|(c, t1)| sparse_ct(c, t1)).collect();
         let old = time("T inner product reference (1,024 terms)", 20_000, || {
             i = (i + 1) % tables.len();
             dot_reference(tables[i].as_flattened(), &eq)
         });
-        let new = time("T inner product split i128", 20_000, || {
+        let wide = time("T inner product split i128", 20_000, || {
             i = (i + 1) % tables.len();
-            split.dot(0, tables[i].as_flattened())
+            split.dot_wide(tables[i].as_flattened())
+        });
+        eprintln!("T inner product i128 speedup {:.2}x", old / wide);
+        let new = time("T inner product u32 lanes (c t1, 16 bits)", 20_000, || {
+            i = (i + 1) % products.len();
+            split.dot::<16>(products[i].as_flattened()) * E::from_u64(1 << D)
         });
         eprintln!("T inner product speedup {:.2}x", old / new);
         let old = time("sparse_t + inner, reference", 20_000, || {
@@ -618,7 +760,7 @@ mod tests {
         });
         let new = time("sparse_t + inner, new", 20_000, || {
             i = (i + 1) % cases.len();
-            split.dot(0, sparse_t(&cases[i].0, &cases[i].1).as_flattened())
+            split.dot::<16>(sparse_ct(&cases[i].0, &cases[i].1).as_flattened()) * E::from_u64(1 << D)
         });
         eprintln!("per-record T work speedup {:.2}x", old / new);
 
@@ -633,11 +775,23 @@ mod tests {
             i = (i + 1) % matrices.len();
             key_weight_reference(&matrices[i], &lambda, &eq_row, &eq_col)
         });
-        let new = time("key_weight split i128", 5_000, || {
+        let wide = time("key_weight split i128", 5_000, || {
+            i = (i + 1) % matrices.len();
+            let mut sum = E::zero();
+            for (row, w) in matrices[i].iter().zip(&weights) {
+                for (poly, &w) in row.iter().zip(w) {
+                    sum += w * split.dot_wide(poly);
+                }
+            }
+            sum
+        });
+        eprintln!("key_weight i128 speedup {:.2}x", old / wide);
+        let new = time("key_weight u32 lanes (22 bits)", 5_000, || {
             i = (i + 1) % matrices.len();
             key_weight(&matrices[i], &split, &weights)
         });
         eprintln!("key_weight speedup {:.2}x", old / new);
+
     }
 
     #[test]
