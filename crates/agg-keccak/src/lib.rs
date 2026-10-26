@@ -14,11 +14,14 @@
 //!   committed before the bridge seed) and the standalone bridge slot proof; superseded
 //!   by [`tied`] for mode A (kept for the toy-shape slot tests and as the reference).
 //! - [`flock_union`]: boolean Flock union proofs (one or more types) with the caller's
-//!   evaluation claims and precomputed commitments.
+//!   evaluation claims (packed-direct and ring-switched bit claims) and precomputed
+//!   commitments.
 //! - [`bridge_union`]: the two-type bridge union (level-1 rows with `A_0 = M_1`, one
-//!   levels-2-3 row), the factored bridge instance of a tied part (docs/bridge.md Section 5b).
-//! - [`tied`]: the tied part, a sponge instance and a bridge union tied by evaluation
-//!   claims (docs/keccak.md Sections 9 to 11), the mode-A Flock argument of one part.
+//!   levels-2-3 row), the factored bridge instance of a tied part in proof versions 2 to 4
+//!   (docs/bridge.md Section 5b); a reference since version 5.
+//! - [`tied`]: the tied part (proof version 5, docs/parity-chain.md): the sponge instance and
+//!   the virtual parity chain whose bit claim its opening proves, the mode-A Flock argument of
+//!   one part.
 
 // Index loops mirror the (x, y, z) bit arithmetic of FIPS 202.
 #![allow(clippy::needless_range_loop)]

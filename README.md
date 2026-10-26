@@ -6,8 +6,10 @@ with a Flock-based argument for the witness-dependent SHAKE256 call.
 The protocol source of truth is [`docs/spec.md`](docs/spec.md); deviations from it are
 recorded in `docs/deviations.md`.
 
-Status (`main`, 2026-10-25): ML-DSA-44, mode A (public `c~`) and mode B (public bits),
-PIOP wire version 3. Two relations, selected by `--relation` and bound in event 0:
+Status (`main`, 2026-10-25; branch `parity-chain` 2026-10-26): ML-DSA-44, mode A (public
+`c~`) and mode B (public bits), PIOP wire version 4 (tied-part proof version 5: the GF(2) side
+of the bridge is the virtual parity chain, [`docs/parity-chain.md`](docs/parity-chain.md),
+deviation K21). Two relations, selected by `--relation` and bound in event 0:
 **H-u** (default; `z` in `[-2^17, 2^17)`, `|u| <= 190,465`, SelfTargetMSIS bound
 `zeta' = 350,209`) and **H-exact** (also `|z| <= 130,993`, FIPS 204's bounds; one more
 committed column). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work
@@ -22,8 +24,8 @@ cloud check at 32K: `ref/notes/bench-cloud.md` in the top-level repository.
 | `crates/agg-witness` | lib | ML-DSA-44 native verify, key expansion, (z,u,v,b) derivation, digit forms of H-u and H-exact, CRT product, table builders, padding, relation checker | M1 |
 | `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset and the width-16 preset `AggFp64SignedWidth16`, six-group catalogs in two families for both relations (`Relation`), two-round commit driver, work plan | M1 |
 | `crates/agg-piop` | lib | the LogUp-GKR lookup into `T_16` (layout L16, `docs/lookup.md`), stages 1-3, the two remaining range leaves and links, weight tables, the proof-of-work schedule (`pow`), verifier, Akita openings | M2 |
-| `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, soundness constants | M2 |
-| `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, tied parts (sponge and bridge instances tied by evaluation claims, `flock_union`, `tied`; spans over several segments, K16), legacy segment driver; `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs | M3 |
+| `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities, quotient (carry) columns and carry digits, public weights and their verifier evaluation, final vector, GF(2) composite walker, the virtual parity chain (`parity_chain`, K21), soundness constants and work | M2 |
+| `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, bridge slot, tied parts (version 5: the sponge instance whose opening proves the parity chain's bit claim, `flock_union`, `tied`, K21; spans over several segments, K16), the bridge union of versions 2 to 4 (`bridge_union`, reference), legacy segment driver; `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs | M3 |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` | M3 |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory | M2/M3 |
 
