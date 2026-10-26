@@ -204,7 +204,10 @@ def tie_parts(geo: dict, profile: str, span: bool, n: int) -> list:
 def plan_digest(geo: dict, sites: list, ties: list, profile: str, span_count: int, d_part: int) -> str:
     """SHA3-256 test vector of the canonical plan encoding (docs/soundness.md Section 6.4)."""
     entries = []
-    for p, t in enumerate(ties):  # tied parts first: they precede the lookup (event 6)
+    # Tied parts first: a fixed convention of the plan encoding (they preceded the lookup
+    # until the fork-join of deviation K22; the transcript now absorbs them at the join after
+    # stage 3, and the encoding and its digests are unchanged).
+    for p, t in enumerate(ties):
         entries.append((CLASS_ID["tie"], p, 0, t["g"], t["w"]))
         entries.append((CLASS_ID["chain.eq"], p, 0, t["g_eq"], width(t["g_eq"])))
         for k in range(t["rounds"]):

@@ -667,7 +667,9 @@ in the vendored verifier (`vendor/flock-core/PATCH.md` Section 6, deviation K19)
 
 The plan of a proof is the ordered list of its tied parts' sites (per tied part, in segment
 and part order: the tie site, the `eq_Y` site, then the `R` chain rounds) followed by the
-PIOP field-challenge sites in registry order (`X` included with `g = 0`). It is a function of public data only: `N` (hence `N*`), the Flock profile,
+PIOP field-challenge sites in registry order (`X` included with `g = 0`). The tied parts come
+first by convention of the encoding: since the fork-join of deviation K22 their sites follow
+the stage-3 rounds in the transcript, and the encoding and its digests are unchanged. It is a function of public data only: `N` (hence `N*`), the Flock profile,
 and the tied-part geometry (span byte, part size) of the event-2 items, which the verifier
 parses before replaying event 0. Canonical encoding:
 
