@@ -246,7 +246,7 @@ Ranking for the 12 s target: F1 >> F2 > P1 (if a wire bump is acceptable) > P2 >
 P3 > F4 > P4 > rest. Prover-only levers alone (F1-F3, P2-P5): about 8-11 s off 23.7 s (est.),
 i.e. roughly 13-16 s; reaching 12 s likely needs P1 or the F4 thread gain as well.
 
-## 7. Verifier kernels (branch `verifier-kernels`, memo 3.4 (a)-(c))
+## 7. Verifier kernels (branch `verifier-kernels`, merged into `main`; memo 3.4 (a)-(c))
 
 Scope: the cached verifier's public-data steps, which were 272 ms of the 424.0 ms cached
 verify at 32K (public_data 106.3 + public_t 91.9 + public_a 73.8 ms; measured,

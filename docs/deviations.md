@@ -932,7 +932,8 @@ claim's zero-weight columns (prover-only, PATCH.md Section 1).
 The F_p side of the bridge is unchanged. The bridge union module (`bridge_union`) stays as a
 reference with its unit tests; mode A no longer uses it.
 
-Wire version (open decision for the user): this change takes PIOP wire version 4 on its own.
+Wire version: this change takes PIOP wire version 4 on its own (merged into `main` on
+2026-10-27; bundling later bumps stays the user's decision).
 The brainstorm memo of 2026-10-26 (Section 5, conflicts) proposes to bundle the wire bumps
 of its items (3.2 here, 3.3 fork-join, 3.5, 3.6/3.7, 3.8) into one version and leaves the
 bundle to the user. If this branch is merged first, a later bundle takes version 5; the

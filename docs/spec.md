@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Status | normative draft for milestone 1; no implementation yet |
-| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relation H-u ($`z`$ relaxed, $`u`$ exact; it replaced the relaxed relation H on 2026-10-25), wire version 3 (unfrozen; lookup layout L16, `docs/lookup.md`; the proof-of-work schedule of `docs/soundness.md`) |
+| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relation H-u ($`z`$ relaxed, $`u`$ exact; it replaced the relaxed relation H on 2026-10-25), wire version 4 (unfrozen; version 3 with tied-part proof version 5, the virtual parity chain of `docs/parity-chain.md`, deviation K21; lookup layout L16, `docs/lookup.md`; the proof-of-work schedule of `docs/soundness.md`) |
 | Base system | Aerie `49b6c21` (Akita pin `e023b6a`), Flock HEAD `83f963e` circuit language, retired Keccak encoder `c2d0c24` as reference |
 | Variants | H-exact (relation byte 1, Appendix A, `docs/h-exact.md` step B; implemented, deviation L9) and S1+S2 (Appendix A, not implemented) |
 | Last reviewed | 2026-10-26, revision 7: aggregate unforgeability under SUF-CMA of the relaxed scheme (Section 12.3, steps 1' and 2'; `docs/soundness.md` 12.8), which closes the rewound-signing-query obligation; 2026-10-25, revision 6: relation H-exact as the second result (Sections 3.1, 4.1, 4.3, 7.4, 7.5, 10, 12; Appendix A), deviation L9; revision 5: relation H-u is the default (Sections 3, 4.3, 7.4, 10, 12; `docs/h-exact.md` step A, deviation L8), wire version 3; revision 4: wire version 2, the per-site ledger and the proof-of-work schedule of `docs/soundness.md` in Sections 10 and 12.1 (deviation P3 resolved); 2026-10-24, revision 3: the lookup layout L16 (former Appendix C) is normative in Sections 4 to 7 and 10 to 12; the base-16 digit layout of wire version 0 is retired (`docs/deviations.md` L1) |
@@ -384,7 +384,7 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 
 | # | Event | Payload |
 | --- | ---: | --- |
-| 0 | instance | wire version LE16 (3), parameter-set byte 0x44, relation byte (0 = H-u, 1 = H-exact; 2 reserved for S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (1, Section 4.3), the six group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
+| 0 | instance | wire version LE16 (4), parameter-set byte 0x44, relation byte (0 = H-u, 1 = H-exact; 2 reserved for S1+S2), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (1, Section 4.3), the six group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
 | 1 | absorb | round-1 Akita commitments $`G_{\rm main16}`$, $`G_{\rm main4}`$ (native encoding) |
 | 2 | absorb | $`S`$ Flock commitments (Ligerito roots or LaBinius commitments), segment order |
 | 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling |

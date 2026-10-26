@@ -14,7 +14,9 @@ deviation K21). Two relations, selected by `--relation` and bound in event 0:
 `zeta' = 350,209`) and **H-exact** (also `|z| <= 130,993`, FIPS 204's bounds; one more
 committed column). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work
 schedule ([`docs/soundness.md`](docs/soundness.md): census, schedule, the 128-bit theorem
-and its composition proof, conditional on the stated assumptions (F) and (K)). Latest
+and its composition proof, conditional on the stated assumptions (F) and (K)). Aggregate
+unforgeability reduces to SUF-CMA of the relaxed scheme, with no open step for signing
+queries asked only in rewound runs (spec 12.3 revision 7, `docs/soundness.md` 12.8). Latest
 cloud check at 32K: `ref/notes/bench-cloud.md` in the top-level repository.
 
 ## Layout
@@ -35,7 +37,8 @@ theorem; `h-exact.md` for relations H-u and H-exact; `witness.md`; `pcs-config.m
 Akita presets, catalog status and regeneration; `piop.md` for the PIOP tables and
 commitments; `lookup.md` for the range lookup; `bridge.md` and `keccak.md` for the parity
 bridge and the Flock side; `cli.md` for mode A end to end and the `agg` tool;
-`perf.md` for the local prover profile and the speed levers (direction only);
+`perf.md` for the local prover profile, the speed levers and the verifier kernels
+(direction only);
 `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
@@ -50,7 +53,7 @@ and was seeded from Aerie's lockfile so shared transitive crates match Aerie's.
 | Akita (`akita-*`) | https://github.com/LayerZero-Labs/akita | `e023b6a46143f7b23199ccecb2684192baf7b640` (the rev Aerie 49b6c21 pins; `akita-config` with `dev-protocol`, transcripts with `transcript-blake2b`) |
 | Jolt (`jolt-field` with `solinas`, `jolt-poly`) | https://github.com/a16z/jolt | `c7c2d08d5bb0c7c80501f29f723e595af7fcff3c` (as Aerie) |
 | Spongefish | https://github.com/arkworks-rs/spongefish | `ef9741346a150039427d9e0c02d6b2d73e93ec81` (as Aerie) |
-| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch, runtime-dispatched x86 SIMD kernels, the derived rate-1/8 Ligerito parameter set `Slim8`, the verifier-visible list-aware work at the outer sites and the canonical work-nonce width of `vendor/flock-core/PATCH.md` (`docs/deviations.md` K12, K18, K19; our Flock proofs do not verify with upstream), applied through `[patch]` in `Cargo.toml` |
+| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch, runtime-dispatched x86 SIMD kernels, the derived rate-1/8 Ligerito parameter set `Slim8`, the verifier-visible list-aware work at the outer sites and the canonical work-nonce width of `vendor/flock-core/PATCH.md` (`docs/deviations.md` K12, K18, K19, K21; our Flock proofs do not verify with upstream), applied through `[patch]` in `Cargo.toml` |
 | `ml-dsa` (RustCrypto) | crates.io | `=0.1.1` (key generation and signing) |
 | `sha3` | crates.io | `0.10.9` (reference SHAKE) |
 
