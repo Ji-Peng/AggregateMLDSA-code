@@ -506,6 +506,40 @@ mod tests {
     }
 
     #[test]
+    fn h_fips_plans_equal_h_exact_plans() {
+        use crate::manifest::Relation;
+        // docs/h-exact.md 10.7: H-FIPS's stage batching vectors (26, 7, 51) give the same
+        // difficulties as H-exact's (26, 7, 45): bit_length(51) = bit_length(45) = 6. The plan,
+        // its stream and its digest are H-exact's; the relation is bound by event 0's
+        // manifest bytes (relation byte, G_main4 and G_2 descriptors, catalog row).
+        for d_sig in [3, 10, 13, 15] {
+            for profile in [FlockProfile::PublicBits, FlockProfile::Slim] {
+                let keccak = match profile {
+                    FlockProfile::Slim => mode_a(d_sig, 2, true),
+                    _ => KeccakPlan::default(),
+                };
+                let plan = |relation| {
+                    let manifest = CommitmentManifest::for_relation(1 << d_sig, relation).unwrap();
+                    PowPlan::new(&manifest, profile, &keccak)
+                };
+                let (fips, exact) = (plan(Relation::HFips), plan(Relation::HExact));
+                assert_eq!(fips.work_bits(), exact.work_bits());
+                assert_eq!(fips.expected_work(), exact.expected_work());
+                assert_eq!(fips.digest(), exact.digest(), "N* = 2^{d_sig} {profile:?}");
+                let gamma3 = fips
+                    .sites()
+                    .iter()
+                    .find(|s| s.class == SiteClass::StageGamma && s.i == 3)
+                    .unwrap();
+                assert_eq!(gamma3.bits, 6);
+            }
+        }
+        let fips = CommitmentManifest::for_relation(1 << 15, Relation::HFips).unwrap();
+        let exact = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
+        assert_ne!(fips.binding_bytes(), exact.binding_bytes());
+    }
+
+    #[test]
     fn plan_digest_depends_on_profile_span_and_ties() {
         let manifest = CommitmentManifest::for_batch(1000).unwrap();
         let work = PartWork {
