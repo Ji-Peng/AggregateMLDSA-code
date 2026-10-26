@@ -883,6 +883,70 @@ mod tests {
         assert_eq!(q0(&junk) + m.0, claim, "junk lanes carry no weight");
     }
 
+    /// Measurement (ignored; `--release --ignored --nocapture`): the chain prover (`prove`,
+    /// dense random input, the production shape) and the verifier's `claim` + `weight_at` at
+    /// `AGG_CHAIN_SHAPES` (default `11/0,13/0,13/2`: `d/span_log`), median of
+    /// `AGG_CHAIN_REPS` (default 3) runs after one warmup.
+    #[test]
+    #[ignore = "measurement; run with --release --ignored --nocapture"]
+    fn chain_timing_at_production_shapes() {
+        let shapes: Vec<(u32, usize)> = std::env::var("AGG_CHAIN_SHAPES")
+            .unwrap_or_else(|_| "11/0,13/0,13/2".to_string())
+            .split(',')
+            .map(|x| {
+                let (d, s) = x.split_once('/').expect("d/span_log");
+                (d.trim().parse().unwrap(), s.trim().parse().unwrap())
+            })
+            .collect();
+        let reps: usize = std::env::var("AGG_CHAIN_REPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let shape = Shape::PRODUCTION;
+        let t = std::time::Instant::now();
+        let mats = derive_matrices_for(&shape, &[3; 32]);
+        eprintln!("matrices: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        for (d, span_log) in shapes {
+            let chain = ChainLayout::new(SegmentLayout::production_part(d, 0), span_log);
+            let mut rng = SplitMix64::new(u64::from(d) + 100 * span_log as u64);
+            let bits: Vec<u64> = (0..chain.input_words()).map(|_| rng.next_u64()).collect();
+            let eq_y = EqY {
+                r_o: (0..chain.out_vars()).map(|_| rand_f(&mut rng)).collect(),
+                r_y: (0..span_log).map(|_| rand_f(&mut rng)).collect(),
+            };
+            let (mut tp, mut tv) = (Vec::new(), Vec::new());
+            for rep in 0..=reps {
+                let t = std::time::Instant::now();
+                let proof = chain
+                    .prove(&mats, &bits, &eq_y, F128::ZERO, |k, (q1, qi)| {
+                        Ok::<_, ()>(q1 + qi + F128::new(k as u64 + 1, 7))
+                    })
+                    .unwrap();
+                let p = t.elapsed().as_secs_f64() * 1e3;
+                let t = std::time::Instant::now();
+                let w = chain.weight_at(&mats, &eq_y, &proof.point);
+                std::hint::black_box((w, chain.claim(&[vec![1; 4096]], &eq_y)));
+                let v = t.elapsed().as_secs_f64() * 1e3;
+                if rep > 0 {
+                    tp.push(p);
+                    tv.push(v);
+                }
+            }
+            eprintln!(
+                "d {d}, span_log {span_log}: {} rounds over {} input bits: prove {:.1} ms, \
+                 verifier weight and claim {:.1} ms (medians of {reps})",
+                chain.rounds(),
+                64 * chain.input_words(),
+                median(tp),
+                median(tv)
+            );
+        }
+    }
+
     #[test]
     fn eq_helpers_agree() {
         let mut rng = SplitMix64::new(3);
