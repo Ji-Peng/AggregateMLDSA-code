@@ -20,7 +20,7 @@ except for the proof-of-work nonces of wire version 2/3.
 | P5 stage parity tables built while the Flock span is proven | done | `7476508` |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) | `94bd37e`, `808b763` |
 | instance `T` reused in the witness; vectorized `public_t` | done | `51c3aea` |
-| P1 overlap the Flock span with the lookup and stages | open: needs a transcript change and a composition argument | - |
+| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22, not yet merged): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB | `f34d1bd` |
 | P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open | - |
 
 Outcome on the cloud VM (`ref/notes/bench-cloud.md`, Phase 8 check of `1fef53d`, 2 runs
@@ -233,7 +233,7 @@ target with F4.
 
 | # | Lever | Est. saving | Prover-only | Evidence |
 | --- | --- | ---: | --- | --- |
-| P1 | Overlap the Flock span prove with the lookup and stages: absorb the Flock proofs after stage 3 (wire version bump) | 1.5-3 s before F1, about 1-2 s after F1 (bounded by idle capacity and RSS: lookup layers 8.3 GiB at 32K would coexist with the Flock prove peak) | **no** (transcript change) | Section 5 |
+| P1 | Overlap the Flock span prove with the lookup and stages: absorb the Flock proofs after stage 3 (implemented on branch `fork-join-p1`, deviation K22; wire version 4 kept, nothing released since K21) | 1.5-3 s before F1, about 1-2 s after F1 (est.); measured: cloud dry run at 32K -1.11 s (Flock pool 16, +2.6 GiB) and -1.15 s (pool 8, +0.5 GiB), bench-cloud Phase 10 (6); local 8K -0.93 / -1.03 s with pool 8, +0.8 to +1.1 GiB | **no** (transcript change) | Section 5; `ref/notes/overnight-20261026/fork-join-p1.md` |
 | P2 | Lookup: evaluate the `s = D-1` session from the leaf integers (node `= (2X - a - b, (X-a)(X-b))`, shared by `X_1, X_2`) instead of stored field layers; drop layer `D-1` from the trees | 0.8-1.2 s (lookup 3.86 -> ~2.8 s) and -4 GiB stored layers | yes (same round messages) | `s = 24` is 681 ms = 37% of the 8K lookup; bottom `Ints` session 434 ms covers both challenges |
 | P2b | Extend coded evaluation to `s = D-2` (four leaves per node) and trim tree build | 0.3-0.6 s | yes | `s = 23` 362 ms, trees 353 ms at 8K |
 | P3 | Start the Flock records + event-2 build/commit beside the rest of `MainTables::build` (compute `w1'` first) | 0.3-0.5 s | yes | Section 5 |

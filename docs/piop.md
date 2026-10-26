@@ -331,14 +331,14 @@ into the instance record of event 0 (`binding::instance_record`).
 
 `LE16` version 2, `u8` flags (0 = H), `LE64 N`; `32 N` bytes `c~`; event 1 framed
 (`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: three framed items;
-event 6: `512 S` bytes then `S` framed items; events 8 to 11 as raw atom encodings of
+event 6: `512 S` bytes then `S` framed share items (deviation K22); events 8 to 11 as raw atom encodings of
 16 bytes per element (26 pre-stage claims; `4 d_main` stage-1 round elements and 98
 claims; 18 `kappa1` claims, `5 d_main` round elements and 61 claims; `3 d_main` round
-elements and 67 claims); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and rejects
+elements and 67 claims); the join: `S` framed Flock proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and rejects
 non-canonical limbs. PIOP bytes: `16 (270 + 12 d_main)` = 7,776 at `N = 256`, 8,640 at
 `N = 2^15`. `AggregateProof::size()` (`ProofSize`) splits the serialized length into header,
-`c~`, Akita commitments, Keccak-side items (event 2), final vectors, Keccak-side proofs,
-PIOP and opening, framing included.
+`c~`, Akita commitments, Keccak-side items (event 2), final vectors, Keccak-side shares and
+proofs (event 6 and the join), PIOP and opening, framing included.
 
 ## 11. Drivers and hooks
 
@@ -390,7 +390,7 @@ with the test hooks. The test stand-ins `FixedMatrices` (matrices that ignore `s
 Mode B is the Keccak-free aggregate of milestone M2 (spec Section 14): the aggregate is
 the proof bytes, which carry `c~_i` and, as the event-2 item of segment `sigma`, the
 `w1Encode(w_1'_i)` strings (768 bytes each, record order) of the segment's live records;
-the event-6 proof items are empty; event 0 binds Flock profile id 3 (`PublicBits`). Layout
+the event-6 share items and the join's proof items are empty; event 0 binds Flock profile id 3 (`PublicBits`). Layout
 and the extra bit check: deviation P9.
 
 - Prover: `prove_mode_b(inputs, bridge)` builds `G_main`, publishes the committed bits
@@ -1301,11 +1301,12 @@ unreduced_integer_products_sum_exactly}`.
   `keccak_columns_match_the_cshake_columns`).
 - `prover::prove_with_tables`: the parity tables `y^(1)` of the stages (no challenge) are
   built on the overlap thread beside the Flock prove of event 6.
-- Not done, by design: proving the Flock span concurrently with the lookup and the stages.
-  The data are independent, but the transcript is not: `FLOCK_PROOFS_SITE` is absorbed before
-  the lookup's `X` (`transcript.rs` registry), and every later challenge is squeezed from the
-  sponge that absorbed the Flock proof bytes, so the overlap needs a transcript change (wire
-  version, composition argument; profile lever P1), outside a prover-only branch.
+- Not done here, by design: proving the Flock span concurrently with the lookup and the
+  stages. The data are independent, but the transcript was not: `FLOCK_PROOFS_SITE` was
+  absorbed before the lookup's `X`, so the overlap needed a transcript change (profile lever
+  P1). Done since by the fork-join transcript (deviation K22, branch `fork-join-p1`): the
+  proofs are absorbed at a join after stage 3, and `prove_with_tables` proves them on their
+  own pool beside the PIOP.
 
 ### 20.4 Measurements (local, shared machine, direction only)
 

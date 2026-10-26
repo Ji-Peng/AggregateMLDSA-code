@@ -22,8 +22,10 @@ the byte size of every part of the aggregate). Steps:
    `FlockProver` (Flock profile `AggregatorConfig::profile`: `Slim` by default, `Fast` or
    `Slim8`; bound at event 0, K15, K18): event 1 `G_main`, event 2 the parts' Flock
    commitments, event 3 `sd`, event 4 `G_1, G_2, G_3`, event 5 `fs_sigma`, event 6 `Y_sigma`
-   and the parts' shares and proofs, events 7 to 11 the stages, event 12 the opening. There
-   is no projection seed (deviation P2).
+   and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
+   proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
+   default half the global pool, `0` for the serial order, while the prover runs events 7 to
+   12), event 13 the opening. There is no projection seed (deviation P2).
 
 `agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
 `VerifyCostReport`: accept or the first failing check, the 14 step times of
@@ -43,10 +45,12 @@ the cost that forced parts of 512 in Section 4; the `agg` usage text still says 
 is a tied part (`agg_keccak::tied`, proof version 5): a Flock sponge instance of its records
 and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7;
 until version 4 a second Flock instance, the bridge union of Section 11): the sponge cap at
-event 2, and at event 6 the chain's rounds and the sponge proof, whose opening carries the
-chain's bit claim. At most one part's Flock buffers are alive: parts are committed one by one at event
-2 (the cap and, by default, the sponge commit data are kept, K14) and rebuilt, proven and
-dropped one by one at event 6.
+event 2, the share at event 6 (computed from the part's input bits, kept since event 2), and
+at the join the chain's rounds and the sponge proof, whose opening carries the chain's bit
+claim; the part and span seeds bind the digest of the event-6 record (K22). At most one
+part's Flock buffers are alive: parts are committed one by one at event 2 (the cap and, by
+default, the sponge commit data are kept, K14) and rebuilt, proven and dropped one by one
+for the join.
 
 Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
 parts are whole segments is one tied part over all segments (one sponge instance of all `N`

@@ -940,6 +940,61 @@ bundle to the user. If this branch is merged first, a later bundle takes version
 cost of a further bump is regenerating the plan digests (`docs/scripts/pow_plan.py`) and the
 pinned test anchors. No other branch at the time of writing changes `WIRE_VERSION`.
 
+## K22. Fork-join transcript: the Flock proofs at a join after stage 3 (spec Sections 10, 11; docs/soundness.md 12; lever P1 of docs/perf.md)
+
+Spec Section 10 (through wire version 4 as merged on 2026-10-27): event 6 absorbs the final
+vectors `Y_sigma`, then the `S` Flock proof items (mode A: the shares of a segment's parts but
+the last, then one tied-part proof per part), before the lookup challenge `X`. The prover
+therefore ran the Flock proofs (about 5.1 s of the 15.0 s prove at 32K, bench-cloud Phase 9)
+before the lookup and the stages, although no PIOP check reads a Flock value in mode A.
+
+Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}`):
+
+- Event 6 absorbs `Y_0..Y_{S-1}` (site `flock/final-vectors`) and the `S` share items (new
+  site `flock/shares`; empty for a span, a one-part segment and mode B). The `S` proof items
+  are absorbed at the join (site `flock/proofs`), after the stage-3 terminal claims and
+  before the PCS session export (event 13), so the session digest, which seeds Akita's
+  stream, binds every Flock byte. The work plan and its digest are unchanged (no site moves
+  or is added; the join and the share event carry no work).
+- The part and span seeds bind `rec = cSHAKE256("agg-mldsa/v1/flock/record", LE64(S) ||
+  Y_0 || .. || Y_{S-1} || framed share items)` (`transcript::flock_record_digest`):
+  `part_seed = SHA3-256(label || fs_sigma || LE64(part) || rec)`, `span_seed =
+  SHA3-256(label || LE64(S) || fs_0 .. fs_{S-1} || rec)`. Both challengers of a tied part
+  absorb the seed first. Why: with the parts' stages after `X`, Lemma 12.3 (a) of
+  docs/soundness.md needs every part address to encode the input of `X`, the whole event-6
+  record. A span's table is all of `Y`, so a span alone would satisfy it without `rec`; the
+  memo's alternative was to admit only span layouts under this wire version. Binding `rec`
+  keeps every layout (span off, two parts per segment, `--part-log2`) at the cost of one hash
+  and no bytes.
+- The shares are computed at event 6 from the part's input bits kept since event 2 (6 MiB
+  per non-last part of a full segment), not from the rebuilt witness
+  (`TiedPart::final_vectors_of_bits`).
+- Prover schedule: after event 6, `KeccakSide::prove` runs on its own rayon `ThreadPool` (on
+  its own OS thread, 64 MiB worker stacks) while the parity tables, the lookup, the
+  pre-stage claims and the three stages run on the global pool; the join then absorbs the
+  proofs (`prover::fork_join`). The pool has `AGG_FLOCK_THREADS` threads if set (`0`: no
+  fork, the old serial order), else half the global pool rounded up: 8 of 16 on the cloud
+  machine, the better split of the dry run (bench-cloud Phase 10 (6): -1.15 s at 32K with
+  8 threads, -1.11 s with 16; a global 8-thread pool alone was 13% slower, Phase 10 (1)).
+  On a rayon worker or with a one-thread pool there is no fork (the P12 pattern). Both
+  schedules give the same proof bytes (test `agg-piop/tests/fork_join.rs`).
+- Verifier: it checks the Keccak side right after replaying event 6, as before (the verdict
+  does not depend on the order of the checks, and the early check keeps precise rejection
+  reasons), and absorbs the proof items at the join.
+- Wire: the share items follow the final vectors, the proof items follow the stage-3 claims
+  (before the nonce stream); `+4 S` bytes of framing for the share items. Item version 4,
+  tied-part proof version 5 and PIOP wire version 4 are kept: version 4 was introduced by
+  K21 on 2026-10-27 and no aggregate was released in between (the task's rule); aggregates of
+  `main` before this change do not verify under it.
+
+Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 12.3, 12.3,
+12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
+the segment of `X`, after the stage-3 rounds; the checkpoint test at `X` becomes `R_PIOP and
+(for all p) C4_p`, `C4_p` decided by listing the Johnson list of the part's sponge word;
+masses and the work plan are unchanged. Measured: local 8K (7 cores) -0.93 / -1.03 s
+(-13%), prover peak +0.8 to +1.1 GiB (ref/notes/overnight-20261026/fork-join-p1.md); the 32K
+cloud run is pending.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
