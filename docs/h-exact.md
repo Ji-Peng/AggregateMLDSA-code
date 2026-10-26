@@ -6,7 +6,7 @@
 | Applies to | ML-DSA-44, lookup layout L16, modes A and B; written against PIOP wire version 2 of `docs/soundness.md` (branch `pow-128`), implemented as wire version 3 |
 | Base | code `be398d8` (main); layered on branches `pow-128` (`406245a`), `piop-speed` (`7476508`), `flock-speed` (`baf9e46`) |
 | Replaces | spec Appendix A, paragraph "H-exact" (which `ref/notes/msis-estimate.md` calls "spec Section 15"; there is no Section 15) |
-| Last reviewed | 2026-10-25, first version; step A notes added (Section 8); step B notes added (Section 9) |
+| Last reviewed | 2026-10-25, first version; step A notes added (Section 8); step B notes added (Section 9); 2026-10-27, Section 10 (H-FIPS, relation byte 2, branch `h-fips`) |
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
 "estimate" were computed for this document with exact integer arithmetic (Section 4.4 lists
@@ -67,10 +67,12 @@ estimate scaled from the measured Phase 7 run (`ref/notes/bench-cloud.md`, `be39
 | --- | ---: | --- | ---: | --- |
 | H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8); replaced relaxed H `(2^17, 2^18)`, `zeta' = 421,888`, which used id 0 before wire version 3 |
 | H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9) |
-| S1+S2 (`fips`) | 2 | reserved (spec Appendix A) | 350,209 | witness only |
+| H-FIPS | 2 | `(130,993, 190,465)` and the hint: `sum h <= omega` and `UseHint(h, w') = w1'` (Section 10) | 350,209 (not needed: the extracted witness is a FIPS 204 signature) | witness side implemented (Section 10.5); PIOP Section 10.6 |
+| S1+S2 (`fips`, retired sketch) | none (witness-crate layout id 3) | as H-FIPS | 350,209 | witness only, superseded by H-FIPS |
 
-The id equals `agg_witness::tables::Layout::id()` (0 H-u, 1 H-exact, 2 S1+S2) and the
-`BatchTables` serialization layout byte, so one number names the relation everywhere.
+The id equals `agg_witness::tables::Layout::id()` (0 H-u, 1 H-exact; the base-16 S1+S2
+sketch serializes as 3) and the `BatchTables` serialization layout byte, so one number names
+the relation everywhere; H-FIPS (2) has no base-16 layout (`agg_witness::hfips`).
 
 ### 1.2 Runtime parameter, not a cargo feature
 
@@ -779,6 +781,180 @@ the decisions below fill in or depart from Section 6.1.
 * **Not done.** `ref/notes/status.md`, `ref/notes/msis-estimate.md` and the paper are
   outside the code repository; the 32K cloud measurement of both relations is the next
   cloud run.
+
+## 10. H-FIPS: the exact FIPS 204 relation, hint included (relation byte 2)
+
+Source: `ref/notes/brainstorm-20261026.md` item 3.5 (mechanism with the skeptic's
+completeness fix). Branch `h-fips`, from code main `ab62c6d` (wire version 4). Step 1 (witness
+side, 10.1 to 10.5) is implemented; step 2 (PIOP) is Section 10.6. FIPS 204 citations are by
+algorithm and line of `ref/FIPS-204-ML-DSA.pdf` (read with `pdftotext -layout`).
+
+H-u and H-exact are hint-free: they certify `z`, `u = ctr_q(w' - 2 gamma2 w1')` and `w1'`, but
+not that some hint of weight at most `omega` maps `w'` to `w1'`, so the extracted values are a
+signature of a relaxed scheme, and unforgeability goes through the SelfTargetMSIS argument of
+spec 12.3. H-FIPS adds the hint: the extracted `(c~, z, h)` is an Algorithm 8 signature.
+
+### 10.1 Relation
+
+For every live record the witness is H-exact's (`z` by (4.3), the six bits `b_t`, the quotient
+`v`) with `u` replaced by a per-coefficient tuple `(L_lo, L_hi, sigma, delta, e)` and one
+per-signature slack `u_h`:
+
+```text
+L  = L_lo + 29,696 L_hi                     L_lo in [0, 2^16) (looked up in T_16)
+r0 = sigma L + (1 + sigma)/2
+u  = r0 - 2 gamma2 delta - e                (enters (3.1) in place of H-u's (4.2))
+
+(F1) sigma^2 = 1                            (F4) e (e + 1) w1' = 0
+(F2) delta (delta - sigma) = 0              (F5) e (e - 1)(w1' - 43) = 0
+(F3) e (e - 1)(e - delta) = 0               (F6) L_hi (L_hi - 1) = 0
+(F7) sum over the 1,024 coefficients of delta^2, plus u_h, equals omega = 80;  u_h in [0, 2^16)
+```
+
+with (3.1), (3.3), `w1' in [0, 44)` and `|z| <= B_z` as in H-exact. `29,696 + 2^16 = gamma2`, so
+the two blocks `[0, 2^16)` and `[29,696, gamma2)` give `L in [0, gamma2 - 1]` exactly (the
+spec_checks item 14 check). (F1) to (F3) give `sigma in {-1, 1}`, `delta in {0, sigma}` and
+`e in {0, 1, delta}`, hence `e in {-1, 0, 1}` with `e = -1` only when `delta = -1`; (F4), (F5)
+allow `e = 1` only at `w1' = 0` and `e = -1` only at `w1' = 43`. Committed per position: three
+columns more than H-exact (`sigma`, `delta`, `e`; `L_lo`, `L_hi` take the slots of `U_lo`,
+`U_hi`); per signature one more value (`u_h`).
+
+### 10.2 What the pieces encode (FIPS 204 Algorithms 36 and 40)
+
+Decompose (Algorithm 36) writes `r+ = w' mod q` (line 1) as `r1 (2 gamma2) + r0` with
+`r0 = r+ mod+- 2 gamma2 in (-gamma2, gamma2]` (line 2), except when `r+ - r0 = q - 1` (line 3),
+i.e. `r+ in [q - gamma2, q - 1]`, where it sets `r1 = 0` and `r0 = r0 - 1` (lines 4, 5). UseHint
+(Algorithm 40) returns `r1` for `h = 0` (line 5) and `(r1 +- 1) mod 44` for `h = 1`, `+` iff
+`r0 > 0` (lines 3, 4). In H-FIPS:
+
+* `r0 = sigma L + (1 + sigma)/2` ranges over `(-gamma2, gamma2]` with `sigma = 1` iff `r0 > 0`, the
+  sign test of Algorithm 40 lines 3, 4 (`L = r0 - 1` or `-r0`);
+* `delta in {0, sigma}` is the move of UseHint, `w1' = r1 + delta` before reduction mod 44;
+* `e` is the wrap: `e = 1` where `w1' = 0` was reached from `r1 = 43` (`(r1 + 1) mod 44`, line
+  3) or where Decompose took line 3 with `h = 0` (read as `r1 = 44`, `r0' = r+ - (q - 1) in
+  (-gamma2, 0]`, and `q - 1 = 88 gamma2`, so `u = r0' - 1`); `e = -1` where `w1' = 43` was
+  reached from `r1 = 0` (`(r1 - 1) mod 44`, line 4). Each wrap moves `u` by one because
+  `44 (2 gamma2) = q - 1`.
+
+The honest rule (`agg_witness::hfips::honest_coeff`, from `w'` and the signature's `h`):
+
+| Case (`r+ = w' mod q`) | `h` | `w1'` | `sigma` | `L` | `delta` | `e` |
+| --- | ---: | --- | ---: | --- | ---: | ---: |
+| `r+ >= q - gamma2` (Decompose line 3) | 0 | 0 | -1 | `q - 1 - r+` | 0 | 1 |
+| `r+ >= q - gamma2` | 1 | 43 | -1 | `q - 1 - r+` | -1 | 0 |
+| otherwise, `(r1, r0) = Decompose(r+)` | 0 | `r1` | sign of `r0` | `r0 - 1` or `-r0` | 0 | 0 |
+| otherwise, `r0 > 0`, `r1 < 43` | 1 | `r1 + 1` | 1 | `r0 - 1` | 1 | 0 |
+| otherwise, `r0 > 0`, `r1 = 43` | 1 | 0 | 1 | `r0 - 1` | 1 | 1 |
+| otherwise, `r0 <= 0`, `r1 > 0` | 1 | `r1 - 1` | -1 | `-r0` | -1 | 0 |
+| otherwise, `r0 <= 0`, `r1 = 0` (only `r+ = 0`) | 1 | 43 | -1 | 0 | -1 | -1 |
+
+It has `delta^2 = h` and `u = ctr_q(w' - 2 gamma2 w1')`, the H-u value, so `v` and the bits are
+unchanged. The corner `w' = q - gamma2, h = 0` gets `(sigma, L, delta, e) = (-1, gamma2 - 1, 0,
+1)`. A padded row (`w' = 0`, `h = 0`) gets `(-1, 0, 0, 0)` and `u_h = 80`.
+
+### 10.3 Soundness and weight-aware completeness (exhaustive)
+
+**Soundness.** For every `(w1', L, sigma, delta, e)` with `w1' in [0, 44)`, `L in [0, gamma2)`
+and (F1) to (F6), let `w' = 2 gamma2 w1' + u mod q` and `h* = [HighBits(w') != w1']`
+(Algorithm 37). Then `|u| <= B_u`, `UseHint(h*, w') = w1'` and `h* <= delta^2`. Checked over all
+181 admissible `(w1', sigma, delta, e)` times 95,232 values of `L`, 17,236,992 witnesses: 0
+violations (`docs/scripts/spec_checks.py` item 14 with numpy; `agg_witness::hfips` unit test
+`every_witness_is_sound` in Rust). `h*` is below `delta^2`, not equal: e.g. `(w1', sigma, L,
+delta, e) = (0, 1, gamma2 - 1, 1, 0)` gives `w' = q - gamma2`, where `HighBits = 0 = w1'`.
+
+**Weight-aware completeness.** For every honest pair `(w', h) in Z_q x {0, 1}`, with
+`w1' = UseHint(h, w')` and `u = ctr_q(w' - 2 gamma2 w1')`, the least `delta^2` over the witnesses
+of `(w1', u)` equals `h`: 0 failures over the 16,760,834 pairs (item 14), and the honest rule of
+10.2 attains it (item 14 and unit test `honest_rule_is_complete_with_weight_h`). Hence an
+honest signature of hint weight `wt(h) <= 80` has `sum delta^2 = wt(h)` and `u_h = 80 - wt(h)`.
+
+**The completeness fix.** The ideator's `e (e - delta) = 0` in place of (F3) forbids `e = 1` at
+`delta = 0`. Item 14 then finds exactly one failing pair, `(w', h) = (8,285,185, 0)` =
+`(q - gamma2, 0)`, whose only witnesses have `delta^2 = 1` (`(sigma, L, delta, e) = (1,
+gamma2 - 1, 1, 0)`); an honest signature of hint weight 80 with such a coefficient would need
+`u_h = -1`. The memo's model puts this at about `3.2e-7` per signature (estimate,
+brainstorm-20261026.md 3.5), about `3e-4` per batch of 1,024 (estimate). Soundness is the same
+under both (item 14: 0 violations over the 16,951,296 witnesses of the ideator's set).
+
+### 10.4 Extraction: the witness is a FIPS 204 signature
+
+Let a record satisfy H-FIPS. Set `w' = 2 gamma2 w1' + u mod q`, `h*_p = [HighBits(w'_p) !=
+w1'_p]` and `sigma_FIPS = sigEncode(c~, z, h*)` (Algorithm 26, with HintBitPack, Algorithm 20).
+Algorithm 8 on `(pk, M', sigma_FIPS)`:
+
+* line 2 (sigDecode, Algorithm 27): `|z|_inf <= 130,993 < gamma1`, so BitPack/BitUnpack round-trip
+  `z` (Algorithm 27 line 3); `wt(h*) <= sum delta^2 = 80 - u_h <= 80` (10.3; the sum is at most
+  1,024 and `u_h < 2^16`, so (F7) over `F_p` is the integer identity), so HintBitPack is defined,
+  and HintBitUnpack (Algorithm 21, called at Algorithm 27 line 5) returns `h*`: the counts are
+  nondecreasing and at most `omega` (line 4), the indices within a row increase (line 9), and
+  the unused bytes are zero (line 17). So line 3 does not return false;
+* line 9: `w'_Approx = A z - c t1 2^d mod q`, which is `2 gamma2 w1' + u mod q = w'` by (3.1)
+  (`T = 2^d c t1` over the integers);
+* line 10: `UseHint(h*, w') = w1'` coefficient-wise (10.3);
+* line 12: `c~' = H(mu || w1Encode(w1'), 32) = c~` by (3.3);
+* line 13: `||z||_inf <= 130,993 < gamma1 - beta = 131,000`.
+
+So Algorithm 8 accepts, and the aggregate argument for H-FIPS is a proof of knowledge of `N`
+FIPS 204 signatures (on the records' keys and messages, with the published `c~`). The aggregate
+unforgeability game then reduces to the SUF-CMA (or EUF-CMA) security of ML-DSA-44 itself, as a
+black box: FIPS 204 Section 3.1 states SUF-CMA as the design goal. The relaxed scheme and the
+SelfTargetMSIS step 2' of spec 12.3 are not needed for this relation (step 1' stays, with
+`Sigma_H` replaced by ML-DSA-44 and `phi` by the identity). For an honest signature the
+extracted `h*` is the signature's own hint (UseHint is injective in `h`), so the extracted bytes
+equal the signature, byte for byte (tests below).
+
+### 10.5 Witness side (step 1) as implemented
+
+`agg-witness` module `hfips` (always compiled; the PIOP of step 2 calls it):
+
+* `Coeff` (`l_lo, l_hi, sigma, delta, e`), with `l()`, `r0()`, `u()`, `weight()`,
+  `zero_checks(w1)` (F1) to (F6) in that order, `is_valid`, `split_l` (canonical
+  `L_hi = [L >= 2^16]`), `Coeff::PADDED`; `honest_coeff(w', h)` (10.2); constants
+  `RELATION_H_FIPS = 2`, `L_STEP = 29,696`.
+* `HFipsRecord` (the committed values of one record before storage shifts: the three
+  `Z_BIT_SLACK` digits of `z`, the coefficients, `v`, the bits, `u_h`): `from_witness` (from
+  `derive::derive`; checks `u`, `w1'`, `delta^2 = h` and every constraint coefficient by
+  coefficient), `padded()`, `extracted_hint()`, `extract_signature(c~)` (through
+  `derive::reencode_h`).
+* `check_record` / `check_batch`: every H-FIPS identity over the integers (the five looked-up
+  kinds `B_zlo, L_lo, u_h` and the halves of `v`, the Booleans, `range_w1`, (F1) to (F7), the
+  ring identity with the H-FIPS `u`, (3.3) through the sponge) on live and padded records. New
+  checker identities `Range16`, `DeltaSign`, `EdgeE`, `WrapLow`, `WrapHigh` (with `SignSquare`,
+  `BoolSlack`, `HintWeight` reused).
+* The retired S1+S2 sketch (feature `fips`, base-16 `tables::Layout::Fips`) moves from layout
+  id 2 to 3, so relation byte 2 names H-FIPS only. H-FIPS supersedes S1+S2: it commits no `r1`
+  (the `w1'` bits already carry it) and replaces the cubic UseHint check by (F3) to (F5).
+
+Tests (`crates/agg-witness/tests/hfips.rs`, 6 tests; unit tests in `hfips.rs`, 4 tests; all
+pass, `cargo test --release -p agg-witness`, also with `--all-features`):
+
+* 64 honest signatures (40 own-key deterministic, 24 shared-key hedged): derivation, the
+  checker, the extracted signature equals the original bytes and verifies; measured hint
+  weights min 48, median 62, max 76 (test output, 2026-10-27).
+* The pinned edge record `EDGE_RESIDUE` (a coefficient `w' = q - gamma2`): the corner witness.
+* **Synthetic weight-80 signature with the corner** (deterministic). A public key with
+  `t1 = 0` (`rho` from a seed, 1,280 zero bytes: a well-formed key, pkDecode accepts any bytes,
+  Algorithm 23) makes Algorithm 8 line 9 compute `w'_Approx = A z` independently of `c`. The
+  test draws `z` uniform in `[-B_z, B_z]`, moves two coefficients of `z` (solving a 2x2 system
+  modulo `q`) so that `A z` equals `q - gamma2` at `(rho, j) = (1, 17)` and `0` at `(2, 101)`,
+  sets 80 hint bits (at least one per `h = 1` case of 10.2, including `w' = 0, h = 1`, the only
+  `e = -1` case; none at the corner), and computes `c~ = H(mu || w1Encode(UseHint(h, w')))`.
+  This crate's Algorithm 8 and RustCrypto's `ml-dsa` verifier both accept it. Derivation gives
+  `sum delta^2 = 80`, `u_h = 0` and the corner witness; every `(sigma, delta, e)` class occurs;
+  the checker passes; the extracted signature equals the constructed bytes and verifies. Honest
+  signing cannot place such a coefficient deliberately (the hash fixes `c` after `w1'`).
+* The same record under the ideator's constraint: the corner's alternative witness keeps `u`
+  but makes the weight 81, rejected by the weight identity (`u_h = 0`) or the lookup (`u_h = -1`).
+* Tamperings, each rejected by its identity: `sigma = 0`, `delta = -sigma`, `e = -1` at
+  `delta = 0`, `e = 1` at `w1' != 0`, `e = -1` at `w1' != 43`, `L_hi = 2`, `L_lo = 2^16`,
+  `L_hi = -1` with `L_lo + 29,696` (keeps `L` and the ring: only (F6)), `u_h + 1` (weight), a
+  dropped hint (`delta -> 0`, `u_h + 1`: only the ring), a flipped `w1'` bit (ring and (3.3)),
+  `B_zhi = 2`; the other split of an `L` in the overlap `[29,696, 2^16)` is accepted.
+* Padded rows of a batch of 3 (`N* = 8`).
+
+### 10.6 PIOP layout (step 2)
+
+Section 10.7 records the design and the implementation state.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 
