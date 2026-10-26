@@ -727,9 +727,9 @@ hypotheses are settled:
   the Flock commitments: no second extractor is needed (the extractor returns Akita's
   round-1 sources; the Ligerito words are fixed straight-line by the Merkle expansion and
   enter the round-by-round bits through their Johnson lists, and the test at `X` through a
-  list decoder), with a checkpoint at `sd` (round-1 candidate) and one at `X` (all six
-  groups, and since the fork-join of K22 the tied parts' pending claims), and Lemma 12.3 for
-  the parallel Flock transcripts.
+  list decoder, which the extractor runs, 12.6), with a checkpoint at `sd` (round-1
+  candidate) and one at `X` (all six groups, and since the fork-join of K22 the tied parts'
+  pending claims), and Lemma 12.3 for the parallel Flock transcripts.
 
 The theorem is conditional on the assumptions of Section 12.5: **(F)** Flock's documented
 round-by-round analysis of its instances (per-site bounds as validated by its configs, the
@@ -737,11 +737,14 @@ list factor at the outer sites by K19, its work composition, its ring-switched c
 multilinear skip basis of K21) and **(K)** the correctness of the sponge circuit. The paper MUST state (F) and (K) as assumptions and
 MUST NOT claim the theorem without them. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 12.1, every nonce probe
-included) there is an extractor of expected cost polynomial in that of `P` (at most
-`(Q_wrap + 2) 4 Tree0_ck(sch)` runs, Section 12.6) that returns the original execution and,
-whenever the verifier accepts, a witness of the caller's relation (H-u or H-exact) for every
-live record, except with
-probability at most
+included) there is an extractor of expected cost at most `(Q_wrap + 2) 4 Tree0_ck(sch) T_run`
+(Section 12.6). Here `T_run` bounds one run of `P` and the verifier with the extractor's
+work attached to it. Since deviation K22 that work includes, at most once per run, the test
+at `X` with a list decoder of every tied part's level-0 word, `poly(n_0, L)` per part
+(12.6, 12.7 item 9). The cost is thus polynomial in that of `P` and in the code parameters.
+The extractor returns the original execution and, whenever the verifier accepts, a witness
+of the caller's relation (H-u or H-exact) for every live record, except with probability at
+most
 
 ```text
 eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + eps_fs
@@ -753,8 +756,9 @@ where `R_f` is the number of field sites of the PIOP and of Akita read by the ve
 the verifier, `R_F` the Flock sites read by the verifier (the sponge instance of every tied
 part, outer and Ligerito, queries included), `eps_bind, eps_pk, eps_dig` the hashed-entry terms of Aerie
 Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock part and
-span seeds, final-vector digests, tie bindings, Flock statement digests, the BLAKE3 chaining
-of Flock's challenger), `eps_fs` the Flock-seed term of Lemma 12.1, `eps_merkle` the
+span seeds, the event-6 record digest `rec` that they bind (K22), final-vector digests, tie
+bindings, Flock statement digests, the BLAKE3 chaining of Flock's challenger), `eps_fs` the
+Flock-seed term of Lemma 12.1, `eps_merkle` the
 Ligerito Merkle term of Lemma 12.2, `delta_X < 2^-(2^110)` the seed-density term of Lemma
 12.4, `delta_samp = 0` for the exact samplers, and the Module-SIS terms those of Akita
 Lemma 10.20 for the schedule's occurrences.
@@ -777,8 +781,11 @@ under H-exact, the bridge with `b = b'`).
 
 *What is not proved here* (Section 12.7): assumption (F), which the Flock paper presents
 as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17 and should be checked
-by a reviewer of Akita's proof; `R_F` is not counted exactly; Akita's Module-SIS estimates
-exclude the extractor's run count as in Aerie. As in Aerie, the term
+by a reviewer of Akita's proof, together with the decider of the test at `X` (12.7 item 9),
+which is cited, not checked against Ligerito's level-0 code; `R_F` is not counted exactly;
+Akita's Module-SIS estimates exclude the extractor's run count and the cost of one run as in
+Aerie, although the Module-SIS algorithms built from the collisions inherit `T_run`, the
+decoder included (12.6). As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
 
@@ -1055,8 +1062,11 @@ fixed straight-line by the Merkle expansion (Lemma 12.2), and the round-by-round
 quantify over their Johnson lists. They enter one test: the checkpoint test at `X` lists
 each tied part's sponge word to the Johnson radius and checks its pending claim `C4_p` on
 the list (12.2), a polynomial-time function of the transcript, as Akita Definition 10.16
-requires of every map. No rewinding is spent on it. Every other test is a polynomial-time
-function of Akita candidates.
+requires of every map. No rewinding is spent on it, but the extractor does run it: the
+checkpoint node at `X` (Akita Appendix E.2, procedure `E_l`, step 2) evaluates `Good_{l_2}`,
+the decoder included, on the certificate that each of its invocations receives. Its cost
+therefore enters the cost `T_run` of a run (12.6), not the run count and not the error. Every
+other test is a polynomial-time function of Akita candidates.
 
 ### 12.1 Oracles and the expanded protocol
 
@@ -1209,7 +1219,9 @@ it determines, with a root weak opening `omega_y` of the six groups; all stages 
   lifted to the interleaved code, 12.7), then check `Val_p` on each of the at most `L`
   elements. The conjunct is needed because the fork-join verifies the parts after `X`: their
   claims are still pending at `xi_X`, and item (vii)(c) of the segment of `sd` must hold for
-  every certificate passing this test (12.4). Binding: Corollary 10.25 (both rounds'
+  every certificate passing this test (12.4). The extractor evaluates this test, decoder
+  included, once per invocation of the node at `X` that receives a certificate (12.6).
+  Binding: Corollary 10.25 (both rounds'
   commitments are in `xi_X`; the conjunct `C4_p` depends on `xi_X` only, not on the
   candidate).
 * `Wit(y) = f_1` on the original domains, i.e. `(z_i, u_i, v_i, b_i)` by (4.1) to (4.3).
@@ -1463,6 +1475,23 @@ with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho 
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
 coordinates `<= 2^-128.088` (4.6). This is the bound of Section 7.
 
+*Cost.* Akita Theorem 10.17 bounds the extractor's expected cost by `(Q_wrap + 2) 4
+Tree0_ck(sch) T_run`, with `T_run` the expected cost of one run of `P` and the verifier
+together with the extractor's work attached to that run. The work includes the maps of 12.2:
+`Cand`, `Coll`, `Wit` and the two tests. Akita's procedure `E_l` (Appendix E.2) evaluates
+`Good_l` in step 2 on the certificate returned by its first continuation, once per
+invocation that receives a certificate outside `T`; every invocation contains at least one
+run of `P`, so each test is attached to a run at most once. `Good_{l_1}` is the relation `H`
+on `f_1` (one SHAKE256 per live record). Since deviation K22, `Good_{l_2}` is `R_PIOP` and,
+for every tied part, the decider of `C4_p`: list decoding of the part's level-0 word (`n_0`
+field elements: block length times interleaved rows) to Flock's radius, then `Val_p` on at
+most `L` codewords, `poly(n_0, L)` per part (12.7 item 9). This adds that cost to `T_run`; it
+changes neither the run count nor the error bound above. The Module-SIS algorithms `B_I` of
+the binding step run the extractor to obtain the collisions `Coll_l`, so they inherit
+`T_run`, decoder included (Akita Lemma 10.20 and Remark 10.50: the binding term grows with
+`(Q + 3) T_run`). Akita's Module-SIS estimates, as Aerie's, exclude the extractor's cost
+(Section 7), so the tabulated margins do not account for the decoder either.
+
 **Corollary 12.5 (mode B).** Fix `N <= 2^15`, mode B (Flock profile id 3, deviation P9:
 the `w1Encode` strings of each segment's live records are the event-2 items, absorbed before
 `sd`; the event-6 share items and the join's proof items are empty), PIOP wire version 4 with the plan of Section 6
@@ -1495,10 +1524,12 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
 2. Assumption (K), the correctness of the sponge circuit (since version 5 the only fixed
    circuit of the Keccak side).
 3. Lemma 12.3 extends Akita's Theorem 10.17; its proof above modifies Claims 1 and 2 of
-   Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof.
+   Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof, together with
+   item 9.
 4. `R_F` is not counted exactly (open 4); the `Q = 0` term stays about `2^-117` (estimate).
 5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
-   C.4 tabulates its `K`); it bounds the running time only, not the error.
+   C.4 tabulates its `K`); it bounds the running time only, not the error. Nor is the cost
+   `T_run` of one run, which includes the decoder of item 9 (12.6).
 6. The classical ROM only, as Aerie and Akita.
 7. The CMA-to-NMA simulation step for FIPS 204's exact algorithms (12.8, Lemma 12.8 case
    (i)): the published corrected proofs cover round-3 Dilithium (UF-CMA) and generic
@@ -1510,9 +1541,14 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
    Guruswami-Sudan list decoder for the base Reed-Solomon code and on the reduction of
    Gopalan, Guruswami and Raghavendra (list decoding of interleaved codes) for the
    interleaved code, at Flock's list radius, which lies below the Johnson radius
-   (Flock Eq. (10)). The decider is never run (it is part of a test, not of the extractor's
-   output) and is not implemented here; its match with the exact level-0 code of each
-   profile SHOULD be checked by the reviewer of Lemma 12.3.
+   (Flock Eq. (10)). The extractor runs the decider: the node at `X` evaluates `Good_{l_2}`
+   once per invocation that receives a certificate (Akita Appendix E.2, `E_l` step 2), so
+   its cost `poly(n_0, L)` per tied part is part of `T_run` (12.6) and of the running
+   time of the Module-SIS algorithms built from the collisions; the run count and the
+   knowledge error do not change. The decider is not implemented here. That it applies to
+   the exact level-0 code of each profile (Ligerito's level 0, a packed binary-tower
+   Reed-Solomon code, interleaved, at Flock's radius for `Fast`, `Slim` and `Slim8`) is
+   cited, not checked; it SHOULD be checked externally together with Lemma 12.3 (item 3).
 
 ### 12.8 Aggregate unforgeability: signing queries in rewound runs (spec 12.3)
 
