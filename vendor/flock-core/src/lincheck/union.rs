@@ -949,6 +949,7 @@ pub fn verify_union_deferred_with_grinding<Ch: Challenger>(
             }
             None => x_ab.z_skip.sample_fresh(challenger),
         },
+        SkipPoint::Eq(_) => panic!("{}", crate::lincheck::EQ_SKIP_OPENING_ONLY),
     };
     debug_assert_eq!(nonce_idx, proof.grinding_nonces.len());
     let lambda = r_inner_skip.weights(k_skip);

@@ -3203,6 +3203,39 @@ mod tests {
         }
     }
 
+    /// agg-mldsa patch (PATCH.md Section 7, K21): with the multilinear skip basis
+    /// (`SkipPoint::Eq`) the claim check recovers the plain bit-MLE of the witness, and the
+    /// succinct verifier accepts the honest ring switch of that claim and rejects another value.
+    #[test]
+    fn claim_check_with_the_eq_skip_basis_is_the_bit_mle() {
+        use crate::lincheck::SkipPoint;
+        let mut rng = Rng::new(0xE051);
+        for &m in &[8usize, 9, 11] {
+            let z = rng.bits(1 << m);
+            let point: Vec<F128> = (0..m).map(|_| rng.f128()).collect();
+            // The bit-MLE at the point, bit i on coordinate i (LSB first).
+            let eq = build_eq(&point);
+            let expected = z
+                .iter()
+                .zip(&eq)
+                .filter(|(b, _)| **b)
+                .fold(F128::ZERO, |acc, (_, &e)| acc + e);
+            let skip = SkipPoint::Eq(std::array::from_fn(|k| point[k]));
+            let x_outer = &point[6..];
+            let packed = pack_witness(&z, m);
+            let s_hat_v = fold_1b_rows_naive(&packed, &build_eq(&x_outer[1..]));
+            let weights = super::build_claim_weights_from_skip(&skip.weights(6), x_outer[0]);
+            assert_eq!(claim_check(&weights, &s_hat_v), expected, "m = {m}");
+            let mut ch_p = FsChallenger::new(b"flock-test-eq-skip");
+            let (proof, _) = prove(&packed, x_outer, &mut ch_p);
+            let mut ch_v = FsChallenger::new(b"flock-test-eq-skip");
+            assert!(verify(expected, &skip.weights(6), x_outer, &proof, &mut ch_v).is_ok());
+            let mut ch_v = FsChallenger::new(b"flock-test-eq-skip");
+            assert!(verify(expected + F128::ONE, &skip.weights(6), x_outer, &proof, &mut ch_v)
+                .is_err());
+        }
+    }
+
     #[test]
     fn weights_have_correct_length() {
         let w = build_claim_weights(F128 { lo: 1, hi: 0 }, F128 { lo: 2, hi: 0 });

@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Six changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Seven changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -170,3 +170,30 @@ To regenerate: copy the additions of `src/challenger.rs`, then in every other fi
 `.verify_pow(`, `.verify_pow_and_sample_f128(` and `.verify_pow_and_sample_f128_vec(` by their
 `_canonical` forms outside the three places named above and add
 `use crate::challenger::CanonicalPow;`.
+
+## 7. Verifier-visible: a multilinear skip basis for ring-switched claims (agg-mldsa deviation K21)
+
+`src/lincheck.rs` (`SkipPoint::Eq`, its arm in `SkipPoint::weights`, panic arms in
+`sample_fresh`, `phi8` and the two lincheck skip-round matches), `src/lincheck/union.rs` (the
+union lincheck's skip-round match) and a test in `src/pcs/ring_switch.rs`.
+
+Why: agg-mldsa's tied part (tied-part proof version 5, `docs/parity-chain.md`) ends its parity
+chain, a sum-check over the committed bits, with an evaluation of the sponge commitment's BIT
+polynomial at a fully multilinear point. Flock's ring-switched claims carry a `SkipPoint` for
+in-word bits 0..5, with the `phi_8` univariate-skip basis (`Phi8`) or the AG basis (`Ag`) only.
+The verifier uses a ring-switched claim's skip point only through `SkipPoint::weights(6)`, the
+64-entry functional that `ring_switch::build_claim_weights_from_skip` tensors with bit 6
+(`pcs::verify_batch_merged`); the prover's ring switch never sees it (`s_hat_v` depends only on
+the multilinear suffix).
+
+The change: a third variant `SkipPoint::Eq([F128; 6])` whose functional is the eq tensor over
+the six coordinates (index bit `k` on coordinate `k`), so a ring-switched claim at it is a plain
+bit-MLE evaluation. The claim check `claim = sum_i w_i s_hat_v[i]` is exact for any linear
+functional, and the reduction after it (`r''`, the packed claim) does not involve the basis, so
+the ring-switch analysis is unchanged. A zerocheck or lincheck skip round never carries the new
+variant; the paths that sample or grind a fresh skip point panic on it. Proofs that do not use
+it are byte-identical to before. Test: `pcs::ring_switch::tests::claim_check_with_the_eq_skip_
+basis_is_the_bit_mle` (the claim check with the eq weights equals the bit-MLE; the succinct
+verifier accepts the honest ring switch and rejects another value).
+
+To regenerate: add the variant and the arms named above.
