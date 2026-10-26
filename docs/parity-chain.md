@@ -242,3 +242,8 @@ Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7
   5 has no such overlap; the cloud A/B decides.
 * Verifier: the Flock part's verification drops from about 80 to 110 ms to 25 to 45 ms per
   part (measured, all sizes).
+* Memory (fresh process, measured at 2,048 and 8,192 records, `docs/keccak.md` 12.7): the
+  verifier's peak goes down; the prover's rises by about 7% with glibc's default allocator
+  but by under 1% with a fixed mmap threshold, so the rise is heap retention after the
+  Flock part, not live data (the memo's -0.3 to -0.6 GiB at 32K is not borne out locally;
+  the cloud run decides).

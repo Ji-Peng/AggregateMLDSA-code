@@ -907,12 +907,32 @@ Mode A end to end (`agg bench --keys 16 --warmup 1 --reps 3 --flock-profile slim
 
 (The cached verify of v5 at 1,024 is an outlier of the shared machine; the prover's and
 verifier's peak RSS, `VmHWM` maxima over the runs of one process, were 1,780 / 891 -> 2,109 /
-978 MiB at 1,024 and 1,791 / 1,087 -> 2,094 / 1,612 MiB at 2,048: no reduction, cause not
-analyzed; the per-phase trace of the tied part shows the same peak, 1,257 vs 1,259 MiB at
-2,048.) CLI round trips (`agg aggregate` then `agg verify`, `keygen-batch --count 64`) at 256
+978 MiB at 1,024 and 1,791 / 1,087 -> 2,094 / 1,612 MiB at 2,048; the per-phase trace of the
+tied part shows the same peak, 1,257 vs 1,259 MiB at 2,048; see below.) CLI round trips (`agg aggregate` then `agg verify`, `keygen-batch --count 64`) at 256
 and 1,024 records accept under H-u and H-exact (300,425 / 300,424 B and 339,252 / 339,258 B);
 each aggregate verified under the other relation, and one with a flipped middle byte, is
 rejected.
+
+Peak RSS in a fresh process (review fix round, 2026-10-27; `/usr/bin/time -v`, `agg
+aggregate` and `agg verify` of the same records, v4 = `6803ce5` and v5 = `55f3fe4` CLMUL
+builds run interleaved, 2 runs each, load 0.9 to 4.5, measured; times direction only):
+
+| N | Aggregate max RSS v4 -> v5 | Same, `MALLOC_MMAP_THRESHOLD_=1048576` | Verify max RSS v4 -> v5 | Aggregate wall v4 -> v5 |
+| ---: | --- | --- | --- | --- |
+| 2,048 | 1,882 / 1,880 -> 2,011 / 2,007 MiB | - | 126 / 125 -> 117 / 116 MiB | 3.70 / 3.47 -> 3.29 / 3.27 s |
+| 8,192 | 6,088 / 6,077 -> 6,542 / 6,484 MiB | 5,725 / 5,710 -> 5,764 / 5,761 MiB | 196 / 196 -> 143 / 144 MiB | 7.86 / 7.89 -> 7.84 / 8.02 s |
+
+The verifier's peak goes down (the in-process `VmHWM` of `agg bench` above is an artefact of
+the prover's memory still held by the allocator). The prover's peak rises by about 7% with
+glibc's default allocator but only by 39 to 51 MiB (under 1%) with a fixed 1 MiB mmap threshold,
+so most of the rise is heap retention, not live data: a VmRSS trace sampled every 50 ms puts
+both peaks in the lookup after the Flock part (v4 6,019 MiB at 6.3 s, v5 6,540 MiB at 5.5
+s), while the tied part's own peak is lower in v5 (5,812 vs 5,878 MiB at the end of its
+proof, `AGG_TIED_TRACE`). glibc raises its mmap threshold dynamically (up to 32 MiB) after
+large frees, so the different allocation pattern of v5 leaves more freed heap resident when
+the lookup allocates. Whether this carries to 32K (25.8 GiB baseline) is for the cloud run;
+a fixed mmap threshold (or `mallopt` at start-up) also lowered v4's own peak by about 370 MiB
+at 8,192 and is a prover-only memory lever to measure there (its time cost is unmeasured).
 
 ## Handoff (2026-10-24)
 
