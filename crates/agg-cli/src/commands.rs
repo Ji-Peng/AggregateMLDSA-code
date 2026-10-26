@@ -50,7 +50,13 @@ commands:
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
       prover and of the verifier (max over all runs), and the aggregate size per
-      signature. Set AGG_GIT_REV to print the revision.";
+      signature. Set AGG_GIT_REV to print the revision.
+
+environment:
+  AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
+                        (aggregate, bench; default half the rayon pool; 0: one after the other;
+                        at most the logical CPUs or the rayon pool; a value that is not a
+                        number warns and falls back to the default).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,11 +564,25 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         ms(median(&result.prove_times)),
         ms(*result.prove_times.iter().min().expect("reps >= 1"))
     );
-    println!(
-        "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
-        ms(flock),
-        ms(result.prove.total.saturating_sub(flock))
-    );
+    let t = &result.prove.timings;
+    if t.flock_threads > 0 {
+        // Fork-join (deviation K22): the Flock proofs overlap the PIOP steps.
+        println!(
+            "    median run: Flock parts {:.1} ms (proofs {:.1} ms on {} threads beside the PIOP), \
+             fork-join wall {:.1} ms, outside the fork {:.1} ms",
+            ms(flock),
+            ms(t.flock_prove),
+            t.flock_threads,
+            ms(t.fork_join),
+            ms(result.prove.total.saturating_sub(t.fork_join))
+        );
+    } else {
+        println!(
+            "    median run: Flock parts {:.1} ms, everything else {:.1} ms",
+            ms(flock),
+            ms(result.prove.total.saturating_sub(flock))
+        );
+    }
     println!(
         "  verify, uncached keys    {:>10.1} ms ({protocol})",
         ms(median(&result.verify_uncached))

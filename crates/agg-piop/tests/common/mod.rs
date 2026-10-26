@@ -11,7 +11,7 @@ use agg_piop::stage::Points;
 use agg_piop::stage3::Stage3Output;
 use agg_piop::transcript::{
     commitment_site, Transcript, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE,
-    FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE,
+    FLOCK_SEEDS_SITE, FLOCK_SHARES_SITE,
 };
 use agg_piop::verifier::{verify_piop, VerifyError, VerifyTimings};
 use agg_piop::weights::ring_weight_at;
@@ -100,8 +100,9 @@ impl Batch {
     }
 }
 
-/// A transcript driven through events 0 to 6 with fixed dummy payloads, for isolated
-/// PIOP tests (prover and verifier replay the same prefix).
+/// A transcript driven through events 0 to 6 (the final vectors and empty share items) with
+/// fixed dummy payloads, for isolated PIOP tests (prover and verifier replay the same
+/// prefix; the join follows the stages).
 pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {
     let segments = manifest.segments();
     let mut t = Transcript::new(manifest, &manifest.binding_bytes()).unwrap();
@@ -114,7 +115,7 @@ pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript
     }
     t.challenge_bytes(FLOCK_SEEDS_SITE, segments).unwrap();
     t.absorb(FINAL_VECTORS_SITE, segments, &vec![0; 512 * segments]).unwrap();
-    t.absorb_items(FLOCK_PROOFS_SITE, &vec![vec![]; segments]).unwrap();
+    t.absorb_items(FLOCK_SHARES_SITE, &vec![vec![]; segments]).unwrap();
     t
 }
 

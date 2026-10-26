@@ -9,15 +9,15 @@
 //! | --- | --- | --- |
 //! | `parse` | 1 | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
 //! | `public_data` | 2 | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
-//! | `transcript` | 3 | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma` |
+//! | `transcript` | 3 | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | 3 | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) is spec 9.1) |
-//! | `keccak` | 3 | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks) |
+//! | `keccak` | 3 | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks), on the proof items the join absorbs later |
 //! | `lookup` | 4 | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
 //! | `prestage` | 4 | `tau`, `Y(tau_3)`, pre-stage claims |
 //! | `stage1`, `stage2` | 5, 6 | rounds and terminal checks with `w_2, w_3, w_1` and the leaf predicates |
 //! | `stage3_rounds` | 6 | stage-3 rounds and terminal claims, ring claim deferred |
 //! | `public_pass` | 6 | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
-//! | `stage3_terminal` | 7 | the batched stage-3 terminal check |
+//! | `stage3_terminal` | 7 | the batched stage-3 terminal check; the join absorbs the proof items |
 //! | `bits` | 7 | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
 //! | `opening` | 7 | the batched Akita opening of the 38 claims |
 //!
@@ -50,9 +50,9 @@ use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
 use crate::stage3::{LookupInputs, Stage3Output};
 use crate::transcript::{
-    commitment_site, Transcript, TranscriptError, BRIDGE_SEED_SITE, FINAL_VECTORS_SITE,
-    FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE, MULTIPLICITY_SITE, PRESTAGE_SITE,
-    TAU_SITE,
+    commitment_site, flock_record_digest, Transcript, TranscriptError, BRIDGE_SEED_SITE,
+    FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE,
+    FLOCK_SHARES_SITE, MULTIPLICITY_SITE, PRESTAGE_SITE, TAU_SITE,
 };
 use crate::wire::{unpack_final_vector, AggregateProof, WireError};
 use crate::{stage1, stage2, stage3, BaseField, OpeningField as E};
@@ -76,7 +76,12 @@ pub struct SegmentContext<'a> {
     pub c_tilde: &'a [[u8; C_TILDE_BYTES]],
     /// `Y_sigma`, 4,096 bits, one per byte.
     pub final_vector: &'a [u8],
-    /// The segment's event-6 proof item.
+    /// The segment's event-6 share item.
+    pub shares: &'a [u8],
+    /// The digest of the event-6 record (`crate::transcript::flock_record_digest`), which
+    /// the sub-proofs' challengers bind (deviation K22).
+    pub record: &'a [u8; 32],
+    /// The segment's proof item (the join event).
     pub proof: &'a [u8],
     /// The bridge matrices of `sd`.
     pub matrices: &'a BridgeMatrices,
@@ -108,8 +113,10 @@ pub trait KeccakVerifier {
         Some(KeccakPlan::default())
     }
 
-    /// Verify segment `sigma`: the sub-proof against its commitment, challenger seed,
-    /// public inputs and final vector.
+    /// Verify segment `sigma`: the sub-proof (absorbed at the join, after stage 3) against its
+    /// commitment, challenger seed, public inputs, final vector, share item and the event-6
+    /// record digest. The verifier calls it right after replaying event 6: the outcome does
+    /// not depend on the PIOP, and an early check gives a precise rejection.
     fn verify(&self, segment: &SegmentContext<'_>) -> bool;
 
     /// An optional check of the committed bits at `r^(3)`; the Flock side has none.
@@ -131,7 +138,7 @@ impl KeccakVerifier for NoKeccakVerifier {
     }
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
-        segment.commitment.is_empty() && segment.proof.is_empty()
+        segment.commitment.is_empty() && segment.shares.is_empty() && segment.proof.is_empty()
     }
 }
 
@@ -310,11 +317,12 @@ pub struct VerifyTimings {
     pub parse: Duration,
     /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding.
     pub public_data: Duration,
-    /// Events 0 to 6 without the matrices and the Keccak side.
+    /// Events 0 to 6 without the matrices.
     pub transcript: Duration,
     /// The bridge matrices from `sd`.
     pub matrices: Duration,
-    /// The Keccak side per segment.
+    /// The Keccak side per segment (checked after event 6; its proof items are absorbed at
+    /// the join).
     pub keccak: Duration,
     /// The lookup and the multiplicity-digit claims.
     pub lookup: Duration,
@@ -533,14 +541,16 @@ fn run(
         .0
         .to_vec();
     transcript.absorb(FINAL_VECTORS_SITE, segments, &proof.final_vectors.concat())?;
-    transcript.absorb_items(FLOCK_PROOFS_SITE, &proof.flock_proofs)?;
-    timings.transcript += clock.lap();
-    let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
+    transcript.absorb_items(FLOCK_SHARES_SITE, &proof.flock_shares)?;
+    let flock_record = flock_record_digest(&proof.final_vectors, &proof.flock_shares);
     // The public table Y on D_3 (Y_sigma[rho_3] at rho_3 + 2^12 sigma), docs/bridge.md 6.
-    let mut y_table: Vec<u8> = Vec::with_capacity(4096 * segments);
-    #[allow(clippy::needless_range_loop)]
-    for sigma in 0..segments {
-        let bits = unpack_final_vector(&proof.final_vectors[sigma]);
+    let final_bits: Vec<Vec<u8>> = proof.final_vectors.iter().map(unpack_final_vector).collect();
+    let y_table: Vec<u8> = final_bits.concat();
+    timings.transcript += clock.lap();
+    // The Keccak side per segment, on event 6 and the proof items of the join (its outcome
+    // does not depend on the PIOP's challenges, so it is checked first).
+    let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
+    for (sigma, bits) in final_bits.iter().enumerate() {
         // A trailing segment may hold padded records only (`2^13 sigma >= N`).
         let first = (sigma << 13).min(n);
         let live = first..first + geometry.live_in_segment(sigma);
@@ -552,14 +562,15 @@ fn run(
             bridge_seed: &bridge_seed,
             mu: &mu[live.clone()],
             c_tilde: &proof.c_tilde[live],
-            final_vector: &bits,
+            final_vector: bits,
+            shares: &proof.flock_shares[sigma],
+            record: &flock_record,
             proof: &proof.flock_proofs[sigma],
             matrices: &matrices,
         };
         if !keccak.verify(&segment) {
             return Err(VerifyError::Keccak(sigma));
         }
-        y_table.extend_from_slice(&bits);
     }
     timings.keccak = clock.lap();
 
@@ -603,6 +614,10 @@ fn run(
     let (_, stage3, pi_m) = verified.outcome?;
     let expanded_keys = pass_result.map_or(0, |pass| pass.expanded);
 
+    // The join (deviation K22): the Flock proofs, checked above, absorbed after the stage-3
+    // claims and before the PCS session digest.
+    transcript.absorb_items(FLOCK_PROOFS_SITE, &proof.flock_proofs)?;
+
     // The Keccak side's check of the committed bits at r^(3).
     let bits = BitsContext {
         geometry,
@@ -615,7 +630,7 @@ fn run(
     }
     timings.bits = clock.lap();
 
-    // Event 12: the opening.
+    // Event 13: the opening.
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
     let claims: [GroupClaim; GROUP_COUNT] = opening_claims(
@@ -650,7 +665,8 @@ pub struct PiopVerified {
     pub stage3_end: Instant,
 }
 
-/// Verify the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6:
+/// Verify the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6 (the
+/// final vectors and the share items; the Flock proofs follow at the join):
 /// the lookup (`lookup::verify_in`, the claims on the stacked lanes and on `m`), the
 /// multiplicity-digit claims (`sum_k 16^k m_k(pi_m) = m(pi_m)`), `tau`, the pre-stage claims
 /// with `Y(tau_3)` from `y_table`, and stages 1 to 3 with the public pass deferred

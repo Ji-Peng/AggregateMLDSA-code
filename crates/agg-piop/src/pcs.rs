@@ -178,7 +178,7 @@ pub fn opening_claims(
 
 /// Stack size of a commit thread (Akita's commit runs on it, its parallel loops on the
 /// rayon pool) and of the thread [`overlap`] starts.
-const COMMIT_THREAD_STACK: usize = 64 << 20;
+pub(crate) const COMMIT_THREAD_STACK: usize = 64 << 20;
 
 /// Whether concurrent work must run on the calling thread instead of extra OS threads.
 ///
@@ -187,12 +187,12 @@ const COMMIT_THREAD_STACK: usize = 64 << 20;
 /// `RAYON_NUM_THREADS=1`) the pool deadlocks, and with more it loses a worker for the whole
 /// wait. A caller outside the pool whose pool has one thread gains nothing from extra
 /// threads either.
-fn on_calling_thread() -> bool {
+pub(crate) fn on_calling_thread() -> bool {
     rayon::current_thread_index().is_some() || rayon::current_num_threads() <= 1
 }
 
 /// Join an OS thread, re-raising its panic on the caller.
-fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+pub(crate) fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
     handle
         .join()
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload))

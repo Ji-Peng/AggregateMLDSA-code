@@ -6,10 +6,11 @@ with a Flock-based argument for the witness-dependent SHAKE256 call.
 The protocol source of truth is [`docs/spec.md`](docs/spec.md); deviations from it are
 recorded in `docs/deviations.md`.
 
-Status (2026-10-26): ML-DSA-44, mode A (public
+Status (2026-10-27): ML-DSA-44, mode A (public
 `c~`) and mode B (public bits), PIOP wire version 4 (tied-part proof version 5: the GF(2) side
 of the bridge is the virtual parity chain, [`docs/parity-chain.md`](docs/parity-chain.md),
-deviation K21). Two relations, selected by `--relation` and bound in event 0:
+deviation K21; fork-join transcript: the Flock proofs are absorbed at a join after stage 3
+and proven on their own thread pool beside the PIOP, `AGG_FLOCK_THREADS`, deviation K22). Two relations, selected by `--relation` and bound in event 0:
 **H-u** (default; `z` in `[-2^17, 2^17)`, `|u| <= 190,465`, SelfTargetMSIS bound
 `zeta' = 350,209`) and **H-exact** (also `|z| <= 130,993`, FIPS 204's bounds; one more
 committed column). Every Fiat-Shamir field site carries Aerie's per-site proof-of-work

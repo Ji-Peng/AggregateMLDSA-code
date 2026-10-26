@@ -1,31 +1,35 @@
-//! Mode-A segment items of the aggregate wire format (spec Section 10, events 2 and 6;
-//! `docs/deviations.md` K10, K11, K13).
+//! Mode-A segment items of the aggregate wire format (spec Section 10, events 2 and 6 and the
+//! join; `docs/deviations.md` K10, K11, K13, K22).
 //!
 //! The aggregate itself is `agg_piop::wire::AggregateProof`: header (version, flags, `N`),
-//! the `32 N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, 8 to 11 and the Akita
-//! opening. In mode A the event-2 item and the event-6 proof item of segment `sigma` are the
-//! byte strings defined here, because a segment's Flock argument is split into parts of
-//! `2^{d_part}` records (sub-batches), each with its own Flock commitment and proof:
+//! the `32 N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, 7 to 12, the join and
+//! the Akita opening. In mode A the event-2 item, the event-6 share item and the join's proof
+//! item of segment `sigma` are the byte strings defined here, because a segment's Flock
+//! argument is split into parts of `2^{d_part}` records (sub-batches), each with its own Flock
+//! commitment and proof:
 //!
 //! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || span
 //!   (u8) || parts (LE32)`, then per part `LE32(len) || commitment`, the part's
 //!   `agg_keccak::tied::TiedCommitment` bytes
 //!   (the framed Ligerito level-0 cap of its sponge instance, K7, K11; the bridge union's
 //!   cap depends on `sd` and is part of the proof, K13);
-//! - event 6, [`SegmentProofs`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
-//!   bytes each (4,096 bits packed least significant first, like `Y_sigma`), then per part
-//!   `LE32(len) || tied-part proof` (the bridge union's cap, the sponge proof and the bridge
-//!   union's proof, `agg_keccak::tied`, proof version 2). The last part's share is
-//!   not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by construction.
+//! - event 6, [`SegmentShares`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
+//!   bytes each (4,096 bits packed least significant first, like `Y_sigma`). The last part's
+//!   share is not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by
+//!   construction;
+//! - the join (after stage 3, K22), [`SegmentProofs`]: per part `LE32(len) || tied-part
+//!   proof` (`agg_keccak::tied`, proof version 5: the chain rounds and the sponge proof).
 //!
 //! The span byte (deviation K16) is 1 for a segment proven on its own (the layout above);
 //! `S >= 2` in segment 0's item of a batch of `S` segments proven as ONE tied part over all
 //! of them (one part, `d_part = d_seg`: its cap at event 2 and its proof, of every
-//! `Y_sigma`, at event 6, without shares); 0 in the items of segments `1..S` of such a batch
-//! (no commitment, an empty event-6 item: covered by segment 0's span).
+//! `Y_sigma`, at the join, without shares); 0 in the items of segments `1..S` of such a batch
+//! (no commitment, empty share and proof items: covered by segment 0's span).
 //!
-//! Both items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`,
-//! event 6 before `tau`), so `d_part`, the commitments, the shares and the proofs are bound.
+//! All items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`, the
+//! shares at event 6 before the lookup challenge `X`, the proofs at the join before the PCS
+//! session digest), so `d_part`, the commitments, the shares and the proofs are bound; the
+//! part and span seeds also bind the digest of the event-6 record (`crate::mode_a::part_seed`).
 //! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at event 0
 //! (1 `Fast`, 4 `Slim`, 5 `Slim8`): the verifier reads it to select its Flock parameters
 //! ([`flock_profile`]) and runs the transcript with it, so an aggregate whose items name
@@ -35,7 +39,9 @@
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
 /// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
-/// runs `Fast`, `Slim` or `Slim8`, and the span of its part, K16; the part proofs are tied-part proofs
+/// runs `Fast`, `Slim` or `Slim8`, and the span of its part, K16; since K22 the shares and the
+/// proofs are separate items, at event 6 and at the join, with the version kept as no
+/// aggregate of the joint item was released; the part proofs are tied-part proofs
 /// of version 3; version 3 had the tied parts of deviation K13 under `Fast` only, one per
 /// segment or part: one Flock cap per part at event 2 and one tied-part proof, holding the
 /// bridge union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap
@@ -194,12 +200,41 @@ pub fn flock_profile(items: &[Vec<u8>]) -> Option<u8> {
         .map(|c| c.profile)
 }
 
-/// The event-6 proof item of one segment: the shares of all parts but the last, and one
-/// Flock proof per part.
+/// The event-6 share item of one segment: the shares of all parts but the last.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SegmentProofs {
+pub struct SegmentShares {
     /// `Y_{sigma, s}` for `s < parts - 1`, packed (512 bytes each).
     pub shares: Vec<[u8; FINAL_VECTOR_BYTES]>,
+}
+
+impl SegmentShares {
+    /// Serialize.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.shares.concat()
+    }
+
+    /// Parse the item of a segment of `parts` parts (`parts - 1` shares, none for zero or
+    /// one part).
+    ///
+    /// # Errors
+    /// On a malformed item.
+    pub fn from_bytes(bytes: &[u8], parts: usize) -> Result<Self, ItemError> {
+        let mut r = Reader { bytes, at: 0 };
+        let shares = (0..parts.saturating_sub(1))
+            .map(|_| {
+                r.take(FINAL_VECTOR_BYTES)
+                    .map(|s| s.try_into().expect("512 bytes"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        r.finish()?;
+        Ok(Self { shares })
+    }
+}
+
+/// The join item of one segment: one Flock proof per part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentProofs {
     /// The parts' Flock proofs, in part order.
     pub proofs: Vec<Vec<u8>>,
 }
@@ -208,15 +243,7 @@ impl SegmentProofs {
     /// Serialize.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        assert_eq!(
-            self.shares.len() + 1,
-            self.proofs.len().max(1),
-            "one share per part but the last"
-        );
         let mut out = Vec::new();
-        for share in &self.shares {
-            out.extend_from_slice(share);
-        }
         for proof in &self.proofs {
             put_framed(&mut out, proof);
         }
@@ -229,17 +256,11 @@ impl SegmentProofs {
     /// On a malformed item.
     pub fn from_bytes(bytes: &[u8], parts: usize) -> Result<Self, ItemError> {
         let mut r = Reader { bytes, at: 0 };
-        let shares = (0..parts.saturating_sub(1))
-            .map(|_| {
-                r.take(FINAL_VECTOR_BYTES)
-                    .map(|s| s.try_into().expect("512 bytes"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let proofs = (0..parts)
             .map(|_| r.framed())
             .collect::<Result<Vec<_>, _>>()?;
         r.finish()?;
-        Ok(Self { shares, proofs })
+        Ok(Self { proofs })
     }
 }
 
@@ -296,19 +317,30 @@ mod tests {
         };
         assert_eq!(SegmentCommitments::from_bytes(&empty.to_bytes()), Ok(empty));
 
-        let p = SegmentProofs {
+        let shares = SegmentShares {
             shares: vec![[7; 512], [8; 512]],
+        };
+        let bytes = shares.to_bytes();
+        assert_eq!(bytes.len(), 1024);
+        assert_eq!(SegmentShares::from_bytes(&bytes, 3), Ok(shares));
+        assert_eq!(SegmentShares::from_bytes(&bytes, 2), Err(ItemError::Trailing));
+        assert_eq!(SegmentShares::from_bytes(&bytes, 4), Err(ItemError::Truncated));
+        for parts in [0, 1] {
+            assert_eq!(
+                SegmentShares::from_bytes(&[], parts),
+                Ok(SegmentShares { shares: Vec::new() })
+            );
+            assert_eq!(SegmentShares::from_bytes(&[0], parts), Err(ItemError::Trailing));
+        }
+        let p = SegmentProofs {
             proofs: vec![vec![1], vec![2; 3], vec![]],
         };
         let bytes = p.to_bytes();
-        assert_eq!(bytes.len(), 1024 + 12 + 4);
+        assert_eq!(bytes.len(), 12 + 4);
         assert_eq!(SegmentProofs::from_bytes(&bytes, 3), Ok(p));
         assert!(SegmentProofs::from_bytes(&bytes, 2).is_err());
         assert!(SegmentProofs::from_bytes(&bytes, 4).is_err());
-        let none = SegmentProofs {
-            shares: Vec::new(),
-            proofs: Vec::new(),
-        };
+        let none = SegmentProofs { proofs: Vec::new() };
         assert!(none.to_bytes().is_empty());
         assert_eq!(SegmentProofs::from_bytes(&[], 0), Ok(none));
         assert_eq!(SegmentProofs::from_bytes(&[0], 0), Err(ItemError::Trailing));

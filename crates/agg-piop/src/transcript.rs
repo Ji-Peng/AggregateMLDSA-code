@@ -78,7 +78,15 @@ pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";
 pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
 pub const FLOCK_SEEDS_SITE: &str = "agg-mldsa/v1/flock/seeds";
 pub const FINAL_VECTORS_SITE: &str = "agg-mldsa/v1/flock/final-vectors";
+/// Event 6 (after the final vectors): the `S` framed share items of the Keccak side (empty
+/// for a span or a segment of one tied part; mode B: empty).
+pub const FLOCK_SHARES_SITE: &str = "agg-mldsa/v1/flock/shares";
+/// The join event (fork-join transcript, deviation K22): the `S` framed proof items of the
+/// Keccak side, absorbed after the stage-3 terminal claims and before the PCS session
+/// export, so the Flock sub-proofs no longer precede the lookup challenge `X`.
 pub const FLOCK_PROOFS_SITE: &str = "agg-mldsa/v1/flock/proofs";
+/// cSHAKE256 customization of the digest of the event-6 record ([`flock_record_digest`]).
+pub const FLOCK_RECORD_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/flock/record";
 pub const TAU_SITE: &str = "agg-mldsa/v1/tau";
 pub const PRESTAGE_SITE: &str = "agg-mldsa/v1/prestage/claims";
 pub const KAPPA1_SITE: &str = "agg-mldsa/v1/stage2/kappa1";
@@ -281,7 +289,7 @@ impl Registry {
             segments,
             PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
         );
-        b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        b.push(FLOCK_SHARES_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         // The lookup (docs/lookup.md Section 1): X, layer 1, mu_1, the sessions, then the
         // multiplicity-digit claims.
         let shape = manifest.lookup_shape();
@@ -351,6 +359,9 @@ impl Registry {
                 PayloadSize::Exact(16 * terminals),
             );
         }
+        // The join (deviation K22): the Keccak side's proofs, after every PIOP challenge and
+        // before the PCS session digest, which therefore binds every Flock byte.
+        b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
         Self { events: b.0 }
     }
@@ -387,6 +398,25 @@ pub fn cshake256(customization: &[u8], data: &[u8], out_len: usize) -> Vec<u8> {
     let mut out = vec![0_u8; out_len];
     hash.finalize_xof().read(&mut out);
     out
+}
+
+/// The digest of the event-6 record: `LE64(S)`, the packed final vectors `Y_0..Y_{S-1}` and
+/// the `S` share items framed as absorbed (`LE64(len) || bytes`), cSHAKE256 with
+/// customization [`FLOCK_RECORD_CUSTOMIZATION`]. The Keccak side binds it into every tied
+/// part's challengers (mode A: through the part and span seeds), so that every Flock
+/// challenge address encodes the input of the lookup challenge `X` (`docs/soundness.md`
+/// 12.2, Lemma 12.3 (a); deviation K22).
+#[must_use]
+pub fn flock_record_digest(final_vectors: &[[u8; FINAL_VECTOR_BYTES]], shares: &[Vec<u8>]) -> [u8; 32] {
+    let mut data = Vec::with_capacity(8 + FINAL_VECTOR_BYTES * final_vectors.len());
+    data.extend_from_slice(&(final_vectors.len() as u64).to_le_bytes());
+    for y in final_vectors {
+        data.extend_from_slice(y);
+    }
+    data.extend_from_slice(&frame_items(shares));
+    cshake256(FLOCK_RECORD_CUSTOMIZATION, &data, 32)
+        .try_into()
+        .expect("32 bytes")
 }
 
 /// The 32-byte instance digest of the canonical instance record.
@@ -720,7 +750,7 @@ mod tests {
     }
 
     /// The events before the lookup: instance, two round-1 commitments, Flock commitments,
-    /// seed, four round-2 commitments, Flock seeds, final vectors, Flock proofs.
+    /// seed, four round-2 commitments, Flock seeds, final vectors, Flock shares.
     const LEADING: usize = 12;
 
     fn lookup_events(manifest: &CommitmentManifest) -> usize {
@@ -735,10 +765,10 @@ mod tests {
         let rounds = 17;
         let lookup = lookup_events(&manifest);
         // Leading events, the lookup, tau and the pre-stage claims, the kappa1 absorb,
-        // three stages of gamma + rounds + terminal, the PCS export.
+        // three stages of gamma + rounds + terminal, the join, the PCS export.
         assert_eq!(
             registry.len(),
-            LEADING + lookup + 2 + 1 + 3 * (2 + 2 * rounds) + 1
+            LEADING + lookup + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1
         );
         let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
         assert_eq!(
@@ -755,7 +785,7 @@ mod tests {
                 "agg-mldsa/v1/commit/mult",
                 FLOCK_SEEDS_SITE,
                 FINAL_VECTORS_SITE,
-                FLOCK_PROOFS_SITE,
+                FLOCK_SHARES_SITE,
                 "agg-mldsa/v1/lookup/x",
                 "agg-mldsa/v1/lookup/layer1",
             ]
@@ -767,7 +797,12 @@ mod tests {
         assert_eq!(sites[after + 3], "agg-mldsa/v1/stage1/round/0/message");
         assert_eq!(sites[after + 3 + 2 * rounds], "agg-mldsa/v1/stage1/terminal");
         assert_eq!(sites[after + 4 + 2 * rounds], KAPPA1_SITE);
+        // The join: the Flock proofs after the stage-3 terminal, right before the export.
+        assert_eq!(sites[registry.len() - 3], "agg-mldsa/v1/stage3/terminal");
+        assert_eq!(sites[registry.len() - 2], FLOCK_PROOFS_SITE);
+        assert_eq!(registry.events[registry.len() - 2].atoms, 1, "one segment at N = 100");
         assert_eq!(sites[registry.len() - 1], PCS_SESSION_SITE);
+        assert_eq!(sites.iter().filter(|s| **s == FLOCK_PROOFS_SITE).count(), 1);
         let kinds: Vec<u8> = registry.events.iter().map(|e| e.kind).collect();
         assert_eq!(&kinds[..5], &[0, 1, 1, 1, 2]);
         assert_eq!(registry.events[4].size, PayloadSize::Exact(32));
@@ -841,7 +876,7 @@ mod tests {
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
-        t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]).unwrap();
+        t.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).unwrap();
     }
 
     #[test]
@@ -949,6 +984,42 @@ mod tests {
     }
 
     #[test]
+    fn the_flock_proofs_cannot_be_absorbed_at_event_6() {
+        let manifest = manifest();
+        let mut t = Transcript::new(&manifest, &manifest.binding_bytes()).unwrap();
+        to_seed(&mut t, &[0]);
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+            t.absorb(commitment_site(role), 1, &[0]).unwrap();
+        }
+        t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
+        t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
+        assert!(matches!(
+            t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]),
+            Err(TranscriptError::EventOrder { index: 11, .. })
+        ));
+    }
+
+    #[test]
+    fn the_record_digest_binds_every_final_vector_and_share_item() {
+        let ys = [[1_u8; 512], [2; 512]];
+        let shares = vec![vec![], vec![7; 512]];
+        let base = flock_record_digest(&ys, &shares);
+        assert_eq!(base, flock_record_digest(&ys, &shares));
+        let mut other = ys;
+        other[1][511] ^= 1;
+        assert_ne!(base, flock_record_digest(&other, &shares));
+        let mut moved = shares.clone();
+        moved.swap(0, 1);
+        assert_ne!(base, flock_record_digest(&ys, &moved), "share items are framed per segment");
+        assert_ne!(base, flock_record_digest(&ys, &[vec![], vec![7; 511]]));
+        assert_ne!(
+            flock_record_digest(&ys[..1], &[vec![]]),
+            flock_record_digest(&ys[..1], &[vec![0]]),
+            "a non-empty share item of a span changes the digest"
+        );
+    }
+
+    #[test]
     fn extension_encoding_round_trips_and_rejects_non_canonical_limbs() {
         let values = vec![
             OpeningField::from_u64(5),
@@ -968,7 +1039,7 @@ mod tests {
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
-        t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]).unwrap();
+        t.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).unwrap();
         // The lookup's challenges come first: tau out of order is refused.
         assert!(t.challenge_extensions(TAU_SITE, 17).is_err());
         let x = LookupTranscript::challenges(&mut t, LookupSite::X, 2).unwrap();
