@@ -1238,7 +1238,9 @@ H-exact's. Encoder: the coefficient witness comes from `(u, w_1')` (`fips_coeffi
 hint slack per record is kept in `MainTables` for round 2 (`hint_slack_table`). The kernel's
 plan expands `Term::Monomials` into polynomial, bilinear and generic pieces. Tests:
 `tests/h_fips.rs`, `tests/mode_b.rs` (H-FIPS round trips with the weight-80 corner records,
-cross-relation rejections), unit tests of the manifest, stage specs, transcript, wire, plan.
+cross-relation rejections), unit tests of the manifest, stage specs, transcript, wire, plan,
+and `stage3::tests::h_fips_checks_evaluate_to_their_polynomials` (each stage-3 check against
+its polynomial at random field values, so `F1` and `F2` are tested on their own).
 
 ## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
 

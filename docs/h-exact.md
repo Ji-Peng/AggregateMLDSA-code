@@ -1105,7 +1105,9 @@ Prediction written before measuring (`ref/notes/overnight-20261026/h-fips.md`): 
 
 Measured, mode B (`AGG_RELATION=... scripts/bench.sh --bench mode_b -- 1024 8192 --warmup 1
 --reps 2`, default build, CPUs 0,1,3-15 of this box, 2026-10-27, medians of 2 after 1 warmup;
-the PIOP part only, no Flock, so the differences are those of mode A):
+the PIOP part only, no Flock. Mode A adds Flock's Keccak argument, the same for every relation,
+but there the `G_main` commitment overlaps the Flock commitments, so the mode-A delta may
+differ from the mode-B delta in either direction; it has not been measured):
 
 | Code | Relation | Prove 1K (s) | Prove 8K (s) | Prover peak RSS 8K (MiB) | Aggregate without public bits 8K (B) |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -1114,24 +1116,54 @@ the PIOP part only, no Flock, so the differences are those of mode A):
 | `c93037b` | H-FIPS (memo's `r0`, products in stage 3) | 1.883 | 4.842 | 3,897 | 357,349 |
 | `2983a12` | H-u (two runs) | 1.564, 1.676 | 4.367, 4.335 | 3,587, 3,552 | 357,148 |
 | `2983a12` | H-FIPS (affine `r0`, two runs) | 1.729, 1.760 | 4.885, 4.964 | 3,915, 3,909 | 357,309 |
+| `6a10bea` | H-u (review spot check) | 1.658 | | | |
+| `6a10bea` | H-FIPS (review spot check) | 1.696 | | | |
 
 So with the final layout H-FIPS costs about +0.13 s (+8%) at 1K and +0.57 s (+13%) at 8K
 over H-u in this box's mode B (means of the two interleaved runs; the run-to-run spread is about
 0.1 s), +0.34 GiB of prover RSS (+9.5%) and +161 B of aggregate at 8K (0.02 B per signature:
-5 more stage claims, Akita opening of 43 polynomials). The local prediction (+6% to +12%) was
-low at 8K. Stage-3 trace at 8K (`AGG_STAGE_TRACE=1`, `tests/h_fips.rs` `h_fips_stage_trace`):
+5 more stage claims, Akita opening of 43 polynomials). The 1K delta is inside the run-to-run
+noise: the review's spot check at `6a10bea` (1 warmup + 2 reps) measured +0.04 s, with
+systematic step deltas of about +85 ms (stage 3 +47, round 1 +20, tables +12 ms) and an
+opening that varied by about 90 ms. The local prediction (+6% to +12%) was low at 8K.
+Stage-3 trace at 8K (`AGG_STAGE_TRACE=1`, `tests/h_fips.rs` `h_fips_stage_trace`):
 the main `eq(r^(2))` group's messages take 178 ms against 93 ms for H-u (the extra terms of
 `F1`, `F2`, `F45` and the reductions), the `F7` main group 55 ms, the ring's `w_A` group 129
 against 103 ms (H-exact's `a_z` lane); stage 2's `F3` group 75 ms against 39 ms for H-u's
 leaves.
 
-Cloud estimate at `2^15` (estimate, two calibrations of this box against `c4d-highmem-16`):
-H-exact's local 8K mode-B delta (+0.26 s) against its measured cloud 32K mode-A delta
-(+0.21 s, `ref/notes/bench-cloud.md`) gives about +0.5 s for H-FIPS; scaling the 8K delta by 4
-for the size and by the throughput ratio of the PIOP part (local 8K mode B 4.35 s against
-about 7.3 s of non-Flock prove time at 32K on the cloud, Phase 9) gives about +1.0 s. So
-+0.5 to +1.0 s (+3% to +7% of 15.0 s), inside or below the memo's +0.75 to +1.2 s; to be
-measured on the cloud with both relations back to back.
+16K, the first end-to-end use of the `d_sig = 14` rows (the `l16f` grouped row for `2^14` and
+the width-16 `G_2` row at (14, 13); the bench asserts that the verifier accepts). Measured,
+mode B, code `bd2fff9`, same box and cores, `-- 16384 --warmup 1 --reps 1`, run four times
+interleaved (H-u, H-FIPS, H-u, H-FIPS; the second pair ran with only this file modified):
+
+| Relation | Prove 16K (s) | Prover peak RSS (MiB) | Aggregate without public bits (B) | Committed elements per signature |
+| --- | ---: | ---: | ---: | ---: |
+| H-u | 6.826, 7.230 | 6,981, 6,945 | 621,859 | 12,424.5 |
+| H-FIPS | 7.858, 8.459 | 7,657, 7,638 | 621,901 | 16,521.5 |
+
+So +1.13 s (+16%, means of two runs each; pairwise +1.03 and +1.23 s), +0.67 GiB of prover
+RSS (+9.8%) and +42 B of aggregate (PIOP +80 B, Akita opening -38 B). The step deltas (means)
+are stage 3 +0.47 s, tables +0.25 s, opening +0.19 s, round 1 +0.18 s and stage 2 +0.07 s; the
+lookup does not change. Predictions written before this run (estimates): +0.9 to +1.3 s, +0.6
+to +0.75 GiB and +100 to +250 B; the aggregate delta came out below the range.
+
+Cloud estimate at `2^15` (weak estimate). Two calibrations of this box against
+`c4d-highmem-16`. (a) H-exact's local 8K mode-B delta (+0.26 s) against its measured cloud 32K
+mode-A delta (+0.21 s, `ref/notes/bench-cloud.md`) gives about +0.5 s for H-FIPS. (b) The
+relative overhead in mode B (+13% at 8K, +16% at 16K) applied to about 7.3 s of non-Flock
+prove time at 32K on the cloud (Phase 9) gives about +1.0 to +1.2 s. So +0.5 to +1.2 s (+3% to
++8% of 15.0 s), against the memo's +0.75 to +1.2 s (estimate). Both calibrations are weak.
+Calibration (a) rests on H-exact's local 8K delta, which is smaller than the drift of H-u
+itself between sessions on this box (4.120 s at `c93037b`, 4.335 and 4.367 s at `2983a12`).
+Calibration (b) assumes that mode A adds no overlap effect. Only a back-to-back cloud run of
+both relations at 32K can settle the number.
+
+Prover RSS at `2^15` (estimate). The local delta grows linearly with `N` (+0.34 GiB at 8K,
++0.67 GiB at 16K), as expected: the four extra main-domain columns, the `HalfR2` group and
+`u_h` all scale with `N`. Scaling by 2 gives about +1.3 to +1.4 GiB at 32K, about twice the
+memo's +0.7 GiB (estimate) and about +5% over H-u's 25.8 GiB on the cloud. This holds if the
+mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should measure it.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 

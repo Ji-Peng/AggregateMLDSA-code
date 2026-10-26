@@ -18,7 +18,9 @@ signature, `docs/h-exact.md` Section 10, deviation L10). Every Fiat-Shamir field
 schedule ([`docs/soundness.md`](docs/soundness.md): census, schedule, the 128-bit theorem
 and its composition proof, conditional on the stated assumptions (F) and (K)). Aggregate
 unforgeability reduces to SUF-CMA of the relaxed scheme, with no open step for signing
-queries asked only in rewound runs (spec 12.3 revision 7, `docs/soundness.md` 12.8). Latest
+queries asked only in rewound runs (spec 12.3 revision 7, `docs/soundness.md` 12.8); under
+H-FIPS it reduces to SUF-CMA of ML-DSA-44 itself, an assumption (FIPS 204 Section 3.1 states it
+as a design goal; `docs/h-exact.md` 10.4). Latest
 cloud check at 32K: `ref/notes/bench-cloud.md` in the top-level repository.
 
 ## Layout
