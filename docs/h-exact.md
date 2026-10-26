@@ -21,9 +21,9 @@ estimate scaled from the measured Phase 7 run (`ref/notes/bench-cloud.md`, `be39
    SelfTargetMSIS bound is `zeta' = max(130,993, 190,465 + 2^12 * 39) = 350,209 = zeta` of
    FIPS 204, so aggregate unforgeability rests on ML-DSA-44's own instance (core-SVP 123.5
    classical, `ref/notes/msis-estimate.md`).
-2. **Flag.** Runtime relation id, byte `1` (H is `0`, S1+S2 keeps `2`), carried in the proof
-   header's flags byte and in the event-0 manifest bytes; the verifier accepts exactly the
-   relation its caller configures (no downgrade to H).
+2. **Flag.** Runtime relation id, byte `1` (H is `0`; byte `2` is H-FIPS, Section 10),
+   carried in the proof header's flags byte and in the event-0 manifest bytes; the verifier
+   accepts exactly the relation its caller configures (no downgrade to H).
 3. **Layout (recommended, "X1").** `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with
    `B_zlo in [0, 2^16)` looked up in `T_16` and `B_zhi, a_z` Boolean (spec Appendix A's `z`
    form); `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` looked up and **one six-valued digit**
@@ -426,7 +426,7 @@ The SelfTargetMSIS solution of spec 3.3, `(z, -c, c t_0 - u)` for `[A | t | I]`,
 
 ```text
 zeta'(H-exact) = max(B_z, B_u + 2^(d-1) tau) = max(130,993, 190,465 + 159,744) = 350,209
-zeta (FIPS 204) = max(gamma_1 - beta, 2 gamma_2 + 1 + 2^(d-1) tau) = max(131,000, 350,209) = 350,209
+zeta (FIPS 204) = max(gamma_1 - beta, 2 gamma_2 + 1 + 2^(d-1) tau) = max(130,994, 350,209) = 350,209
 ```
 
 and the reduction of spec 12.3 runs with ML-DSA-44's own instance: core-SVP 123.5 classical
@@ -652,7 +652,9 @@ takes `A, T` and the bits directly, `#[cfg(test)]` or a `test-hooks` feature; `T
 
 Protocol level: an H proof verified with `RelationPolicy::Exactly(HExact)` and an H-exact
 proof verified as H are rejected before event 0 (flag mismatch); an H-exact proof whose
-header flag is rewritten to 0 is rejected (and vice versa); a flag byte 2 or 3 is rejected;
+header flag is rewritten to 0 is rejected (and vice versa); an H-exact proof whose flag is
+rewritten to 2 (H-FIPS, Section 10) is not accepted under either relation, and flag byte 3 is
+rejected as malformed;
 an H-exact proof replayed with H's catalog row or H's plan digest fails event 0 (different
 transcript); a proof-of-work nonce wrong at the stage-2 `gamma` site (10-bit nonce) is
 rejected; a truncated stage-2 message (H-exact width 4) is rejected.
@@ -898,16 +900,26 @@ Algorithm 8 on `(pk, M', sigma_FIPS)`:
   (`T = 2^d c t1` over the integers);
 * line 10: `UseHint(h*, w') = w1'` coefficient-wise (10.3);
 * line 12: `c~' = H(mu || w1Encode(w1'), 32) = c~` by (3.3);
-* line 13: `||z||_inf <= 130,993 < gamma1 - beta = 131,000`.
+* line 13: `||z||_inf <= 130,993 < gamma1 - beta = 131,072 - 78 = 130,994` (FIPS 204 Table 1:
+  `gamma1 = 2^17`, `beta = tau eta = 78`; `B_z = gamma1 - beta - 1`).
 
 So Algorithm 8 accepts, and the aggregate argument for H-FIPS is a proof of knowledge of `N`
 FIPS 204 signatures (on the records' keys and messages, with the published `c~`). The aggregate
-unforgeability game then reduces to the SUF-CMA (or EUF-CMA) security of ML-DSA-44 itself, as a
-black box: FIPS 204 Section 3.1 states SUF-CMA as the design goal. The relaxed scheme and the
-SelfTargetMSIS step 2' of spec 12.3 are not needed for this relation (step 1' stays, with
-`Sigma_H` replaced by ML-DSA-44 and `phi` by the identity). For an honest signature the
-extracted `h*` is the signature's own hint (UseHint is injective in `h`), so the extracted bytes
-equal the signature, byte for byte (tests below).
+unforgeability game then reduces, as a black box, to the SUF-CMA security of ML-DSA-44 itself:
+step 1' of spec 12.3 runs with `Sigma_H` replaced by ML-DSA-44 and `phi` by the identity, and
+`B` outputs `(M_i*, sigEncode(c~_i*, z_i*, h*_i*))`. EUF-CMA is not enough: the extractor's
+reruns may ask signing queries on `M_i*` (the rerun-only queries of step 1'), so `B`'s
+challenger may have signed `M_i*`, and `B` wins only because its output differs from every
+answer (the `c~` collision bound of step 1'). That is the obligation spec revision 7 closed
+with SUF. SUF-CMA of ML-DSA-44 is an assumption, not a theorem: FIPS 204 Section 3.1 says that
+ML-DSA "is designed to be" SUF-CMA, and the published proofs do not cover FIPS 204's exact
+algorithms (spec 12.3, "What is assumed", (b)). The relaxed scheme and step 2' are not needed
+for this relation. Compared with H-u, H-FIPS replaces the proved SUF-CMA of the relaxed scheme
+(Lemma 12.8 of `docs/soundness.md`: MLWE, SelfTargetMSIS at `zeta'`, MSIS at 380,930, plus the
+CMA-to-NMA assumption) by the standard assumption on ML-DSA-44; it does not strengthen the
+concrete bound, since `zeta' = zeta` already holds for H-u and H-exact (spec 12.3). For an
+honest signature the extracted `h*` is the signature's own hint (UseHint is injective in `h`),
+so the extracted bytes equal the signature, byte for byte (tests below).
 
 ### 10.5 Witness side (step 1) as implemented
 

@@ -709,9 +709,10 @@ evaluations.
 
 **Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` or `Slim` with the fix of
 4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 5 (3.6, 4.5), PIOP wire version 4
-(relation H-u or H-exact, the caller's relation, bound by byte 3 of event 0 and checked by the
-verifier before event 0) with the plan of Section 6 (Section 10.1 for H-exact), at most two
-tied parts per segment (3.5), and Akita's plan for the selected catalog row. The two former
+(relation H-u, H-exact or H-FIPS, the caller's relation, bound by byte 3 of event 0 and checked
+by the verifier before event 0) with the plan of Section 6 (Section 10.1 for H-exact, 10.2 for
+H-FIPS), at most two tied parts per segment (3.5), and Akita's plan for the selected catalog
+row. The two former
 hypotheses are settled:
 
 * **(H1, discharged in 4.6)** every fold group of every row of both catalogs draws its
@@ -732,9 +733,8 @@ MUST NOT claim the theorem without them. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 12.1, every nonce probe
 included) there is an extractor of expected cost polynomial in that of `P` (at most
 `(Q_wrap + 2) 4 Tree0_ck(sch)` runs, Section 12.6) that returns the original execution and,
-whenever the verifier accepts, a witness of the caller's relation (H-u or H-exact) for every
-live record, except with
-probability at most
+whenever the verifier accepts, a witness of the caller's relation (H-u, H-exact or H-FIPS)
+for every live record, except with probability at most
 
 ```text
 eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + eps_fs
@@ -755,7 +755,7 @@ Lemma 10.20 for the schedule's occurrences.
 *Proof (Section 12).* (1) Hashed entries, the Flock seeds and the Ligerito caps are expanded
 (Akita Lemma 10.47, Lemmas 12.1, 12.2): `eps_bind + eps_pk + eps_dig + eps_fs + eps_merkle`.
 (2) A checkpoint structure for the expanded protocol (12.2): checkpoints at `sd` (candidate
-the round-1 sources, test the caller's relation H-u or H-exact) and at `X` (candidate all six groups, test the PIOP
+the round-1 sources, test the caller's relation H-u, H-exact or H-FIPS) and at `X` (candidate all six groups, test the PIOP
 relation), Akita's opening suffix (Proposition 10.44) after the root fold, and Lemma 12.3 for
 the tied parts' own challengers. (3) Item (vii) of Akita Definition 10.16: Lemma S and the
 evaluation batch on the segment of `X` (12.3); the bridge seed with the sponge lists, the
@@ -1072,8 +1072,10 @@ assumed, 12.6 states the bound, and 12.7 lists what is not proved. Section 12.8 
 theorem for aggregate unforgeability (spec 12.3): signing queries asked only in rewound
 runs, by strong unforgeability of the relaxed scheme.
 
-The key observation is that no second extractor runs. The relation (H-u or H-exact, written
-`H` below for the caller's relation) constrains the round-1
+The key observation is that no second extractor runs. The relation (H-u, H-exact or H-FIPS,
+written `H` below for the caller's relation; for H-FIPS the weight condition is read as
+`sum_p delta_p^2 <= 80` on the round-1 values, the round-2 `u_h` being only its certificate,
+Section 10.2) constrains the round-1
 polynomials alone ((3.3) is a SHAKE256 computation on their bits `b`), so the extractor
 returns Akita's round-1 sources and never decodes a Flock word. The Ligerito words enter only
 the analysis: they are fixed straight-line by the Merkle expansion (Lemma 12.2), and the
@@ -1190,8 +1192,10 @@ it determines, with a root weak opening `omega_y` of the six groups; all stages 
 
 * `l_1 = sd`: `Cand(y) = sigma_1(y)`, the source projections of the round-1 groups `G_main16`,
   `G_main4` in `omega_y`, decoding to `f_1 = Dec(sigma_1)`; `Good_{l_1}(y) = H(f_1)`, the caller's
-  relation `H` bound by byte 3 of event 0, H-u or H-exact ((3.1) to (3.3) with that
-  relation's proven bounds, spec 3.1 and 12.2), on every live record. Binding: two
+  relation `H` bound by byte 3 of event 0, H-u, H-exact or H-FIPS ((3.1) to (3.3) with that
+  relation's proven bounds, spec 3.1 and 12.2; for H-FIPS also the hint constraints of
+  `docs/h-exact.md` 10.3 with the weight read as `sum_p delta_p^2 <= 80`, Section 10.2), on
+  every live record. Binding: two
   certificates with the same input at `sd` have the same round-1 commitments, so different
   projections give a kernel vector (Akita Corollary 10.25).
 * `l_2 = X`: `Cand(y) = sigma(y) = Src(omega_y)`, all six groups, `f = Dec(sigma)`;
@@ -1219,8 +1223,9 @@ For a fixed `sigma` put `D(xi; sigma) = 1` iff a check determined by `xi` fails 
 claim is false, with the pending claims of Lemma S (Section 5), starting from `R_PIOP(f;
 xi_X)` at `X`. Item (vii)(a) holds by definition. Item (vii)(b) is Lemma S for the PIOP
 sites; at Akita's evaluation batch a false claim `v_k != f_k(z_k)` makes the batched equation
-false outside one hyperplane of the 38 or 39 independent coefficients (H-u or H-exact; mass
-`1/|K|`, Akita Remark 10.43; assigned `38/|K|` or `39/|K|`, `g = 6` either way). Item (vii)(c): at `xi_f` the only pending claim is the root
+false outside one hyperplane of the 38, 39 or 43 independent coefficients (H-u, H-exact or
+H-FIPS; mass `1/|K|`, Akita Remark 10.43; assigned `38/|K|`, `39/|K|` or `43/|K|`; the bit
+lengths of 38, 39 and 43 are all 6, so `g = 6` for every relation). Item (vii)(c): at `xi_f` the only pending claim is the root
 row `sum_k eta_k v_k = sum_k eta_k f_k(z_k)` (Akita (202)), which a certificate's weak opening
 satisfies (Proposition 10.44, witness step), as in Aerie Lemma C.1 (ii).
 
