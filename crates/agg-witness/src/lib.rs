@@ -6,7 +6,8 @@
 //! Section 7 over the integers). `native` is an independent FIPS 204 verifier, `keccak` the
 //! sponge of Section 8, `bridge` the integer side of the parity bridge (Section 9).
 //! Feature `h-exact` adds the H-exact layout (spec 4.3), feature `fips` the S1+S2 layout
-//! (Appendix A).
+//! (Appendix A). `hfips` holds relation H-FIPS (relation byte 2, spec Appendix A): its
+//! per-coefficient witness, derivation, checker and the extraction of a FIPS 204 signature.
 //! Bounds enforced are listed in docs/witness.md.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
@@ -19,6 +20,7 @@ pub mod derive;
 pub mod digits;
 pub mod expand;
 pub mod gen;
+pub mod hfips;
 pub mod instance;
 pub mod keccak;
 pub mod native;
