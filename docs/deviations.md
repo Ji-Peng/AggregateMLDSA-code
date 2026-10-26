@@ -921,7 +921,14 @@ the plan of event 0 names all of them per tied part (site classes 9 and 10,
 `agg_piop::pow::KeccakPlan::parts`). Why: the union cost a second Flock commitment and
 opening per part (about 205 KB per span, the larger part of the GF(2) side's bytes) and its
 circuit and instance were part of assumptions (K) and (F); the chain costs about 1 KB of
-rounds and one more ring-switched claim (about 4 KB: `s_hat_v` and 128 multipoint dual values).
+rounds and one more ring-switched claim (about 4 KB: `s_hat_v` and 128 multipoint dual values;
+measured: 200,008 B less per span at `8@13/4`, `docs/keccak.md` 12.7). Prover cost: the chain
+itself is small (178.5 ms locally at the 32K shape), but at a full-height sponge Flock's
+block-first opening needs the bit claim's full column bit-bank (one pass over the sponge
+stack, as for Flock's own C claim; 174 to 222 ms locally at 8,192 records) and one more claim
+in its statistics; at one full segment this about cancels the union's cost (measured locally),
+so the 32K prover gain is open until the cloud A/B. The vendored core's bake skips the bit
+claim's zero-weight columns (prover-only, PATCH.md Section 1).
 The F_p side of the bridge is unchanged. The bridge union module (`bridge_union`) stays as a
 reference with its unit tests; mode A no longer uses it.
 
