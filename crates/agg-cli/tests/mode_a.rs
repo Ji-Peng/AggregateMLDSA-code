@@ -541,7 +541,9 @@ fn corrupted_aggregates_are_rejected() {
         p.final_vectors[0][100] ^= 4;
         let r = verify(&p);
         expect_rejected("Y_sigma bit", &r, keccak);
-        assert!(part(1)(&r), "the implied last share is wrong");
+        // Event 6 changed, so the record digest in every part seed changed (K22): part 0
+        // fails first, before the implied last share of part 1 is reached.
+        assert!(part(0)(&r), "every part seed binds the event-6 record");
         let p = with_all_items(&honest, |_, s, _| s.shares[0][3] ^= 1);
         let r = verify(&p);
         expect_rejected("share of part 0", &r, keccak);
@@ -782,6 +784,90 @@ fn corrupted_aggregates_are_rejected() {
         assert!(matches!(mode_b.outcome, Err(VerifyError::Keccak(0))));
         // The honest aggregate still verifies after all this.
         assert!(verifier.verify(&public, &bytes, None).accepted());
+    });
+}
+
+/// The fork-join transcript (deviation K22) with real Flock parts. The join absorbs the
+/// Flock proof items after the stage-3 claims and before the PCS session digest, and every
+/// part's challengers are seeded from `fs_sigma` and the digest of the event-6 record. A
+/// tampered proof item, or the proof item of another aggregate of the same geometry, is
+/// rejected by the Flock verifier; with a Flock verifier that accepts every part, the PIOP
+/// stages still pass (no PIOP challenge depends on the items) and the join rejects it at the
+/// Akita opening (the session digest binds every item byte). Both relations, one part
+/// (64 records) and two parts per segment (256 records, `d_part = 7`).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
+    on_large_stack(|| {
+        let gate = sponge_gate();
+        for (own, shared, part_log2, relation) in [
+            (48, 16, DEFAULT_PART_LOG2, Relation::Hu),
+            (200, 56, 7, Relation::HExact),
+        ] {
+            let config = AggregatorConfig {
+                part_log2,
+                relation,
+                ..AggregatorConfig::default()
+            };
+            let aggregator = Aggregator::new(config);
+            let (ra, rb) = (records(0xf0a, own, shared), records(0xf0b, own, shared));
+            let a = aggregator.aggregate(&signed(&ra)).expect("aggregate a");
+            let b = aggregator.aggregate(&signed(&rb)).expect("aggregate b");
+            if std::env::var_os("AGG_FLOCK_THREADS").is_none() {
+                assert_eq!(a.report.timings.flock_threads > 0, rayon::current_num_threads() > 1);
+            }
+            let public = statements(&ra);
+            let verifier = AggregateVerifier::new().relation(relation);
+            assert!(verifier.verify(&public, &a.bytes, None).accepted());
+            let lenient = |proof: &AggregateProof| {
+                verify_timed(
+                    &public,
+                    &proof.to_bytes(),
+                    &SeededMatrices,
+                    &Lenient(agg_cli::mode_a::FlockVerifier::new(&gate)),
+                    FLOCK_PROFILE,
+                    relation,
+                    None,
+                )
+            };
+            let parts = a.report.parts.len();
+            // A Flock proof byte changed (the last part's, in its middle).
+            let tampered = with_items(&a.proof, |_, p| {
+                let mid = p.proofs[parts - 1].len() / 2;
+                p.proofs[parts - 1][mid] ^= 0x10;
+            });
+            let r = verifier.verify(&public, &tampered.to_bytes(), None);
+            expect_rejected("tampered Flock proof", &r, keccak);
+            assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == parts - 1));
+            let r = lenient(&tampered);
+            assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+            assert!(r.timings.stage3_rounds > std::time::Duration::ZERO, "the PIOP ran");
+            // b's Flock proof item in a (same geometry, other records and transcript).
+            let mut moved = a.proof.clone();
+            moved.flock_proofs = b.proof.flock_proofs.clone();
+            let r = verifier.verify(&public, &moved.to_bytes(), None);
+            expect_rejected("Flock proof item of another aggregate", &r, keccak);
+            assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(0, _)))));
+            let r = lenient(&moved);
+            assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+            // With two parts, b's shares as well: event 6 changes, so the record digest in
+            // the part seeds and the PIOP transcript change; still rejected.
+            if parts == 2 {
+                let mut both = moved.clone();
+                both.flock_shares = b.proof.flock_shares.clone();
+                let r = verifier.verify(&public, &both.to_bytes(), None);
+                expect_rejected("Flock shares and proofs of another aggregate", &r, keccak);
+            }
+            // The proofs of the two parts swapped.
+            if parts == 2 {
+                let swapped = with_items(&a.proof, |_, p| p.proofs.swap(0, 1));
+                let r = lenient(&swapped);
+                assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+            }
+        }
     });
 }
 

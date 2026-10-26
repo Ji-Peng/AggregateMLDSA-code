@@ -50,7 +50,11 @@ commands:
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
       prover and of the verifier (max over all runs), and the aggregate size per
-      signature. Set AGG_GIT_REV to print the revision.";
+      signature. Set AGG_GIT_REV to print the revision.
+
+environment:
+  AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
+                        (aggregate, bench; default half the rayon pool; 0: one after the other).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
