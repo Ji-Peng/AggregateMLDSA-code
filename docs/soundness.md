@@ -7,7 +7,7 @@
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound of `docs/spec.md` 12.1 (Section 5), deviation P3 once implemented |
-| Last reviewed | 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7); 2026-10-25 (branch `pow-close`): H1 discharged (4.6), the composition proof (Section 12, H2 under assumptions (F), (K)), canonical Flock nonce width and the tie-search error (6.3, 6.5); review of `pow-close`: part-site bad sets from the address alone (12.4), mode-B Corollary 12.5, spec 12.3 in two steps |
+| Last reviewed | 2026-10-26: Section 12.8 (aggregate unforgeability under SUF-CMA of the relaxed scheme, spec 12.3 steps 1' and 2'; branch `suf-proof`); 2026-10-25, first version; implementation notes added (Sections 4.1, 4.3, 11); review fixes: at most two parts per segment and the `sd` union (3.5), the tie union over list pairs (3.6), the site-label argument (6.1), the completeness count (6.5), hypotheses H1/H2 (7); 2026-10-25 (branch `pow-close`): H1 discharged (4.6), the composition proof (Section 12, H2 under assumptions (F), (K)), canonical Flock nonce width and the tie-search error (6.3, 6.5); review of `pow-close`: part-site bad sets from the address alone (12.4), mode-B Corollary 12.5, spec 12.3 in two steps |
 
 The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. Every
 number below that is not marked "estimate" is computed exactly by the script or read from
@@ -68,6 +68,13 @@ the pinned code; estimates are marked.
    two stated assumptions: Flock's documented round-by-round analysis (F) and the
    correctness of the Keccak circuit (K) (since version 5 the bridge has no Flock circuit:
    its GF(2) side is a sum-check whose weight the verifier evaluates).
+8. **Unforgeability (Section 12.8).** Spec 12.3's open obligation (signing queries asked
+   only in rewound runs) is closed by lazy forwarding to a SUF-CMA challenger of the
+   relaxed scheme (Lemmas 12.6, 12.7) and a three-case SUF-CMA lemma (12.8): SelfTargetMSIS
+   at `zeta' = 350,209`, a SHAKE256 collision, or Module-SIS on `[A | I]` at `l_inf`
+   380,930. Theorem 12.9: `Adv_agg <= Adv_SUF-CMA + eps_ext + E[R] 2^-H_inf` (`+ Adv_PRF +
+   Adv_coll(mu)` for the deterministic signer), no `q_H` or `e(Q_S + 1)` factor. The
+   lattice basis moves from core-SVP `2^123.5` to `2^121.8` (block size 417, measured).
 
 ## 1. Model and method
 
@@ -1024,7 +1031,9 @@ application challenge `sd`; the Flock words are committed by Merkle caps, not by
 the tied parts run on their own challengers, in parallel, so their challenge inputs do not
 encode the complete preceding transcript. Sections 12.1 to 12.4 build a checkpoint
 structure for the expanded protocol that handles all three, 12.5 lists exactly what is
-assumed, 12.6 states the bound, and 12.7 lists what is not proved.
+assumed, 12.6 states the bound, and 12.7 lists what is not proved. Section 12.8 uses the
+theorem for aggregate unforgeability (spec 12.3): signing queries asked only in rewound
+runs, by strong unforgeability of the relaxed scheme.
 
 The key observation is that no second extractor runs. The relation (H-u or H-exact, written
 `H` below for the caller's relation) constrains the round-1
@@ -1420,3 +1429,210 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
 5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
    C.4 tabulates its `K`); it bounds the running time only, not the error.
 6. The classical ROM only, as Aerie and Akita.
+7. The CMA-to-NMA simulation step for FIPS 204's exact algorithms (12.8, Lemma 12.8 case
+   (i)): the published corrected proofs cover round-3 Dilithium (UF-CMA) and generic
+   Fiat-Shamir-with-aborts signatures (sUF-CMA), not ML-DSA as standardized (spec 12.3 (b)).
+8. The min-entropy `H_inf` of a fresh signature's `c~` (Lemma 12.7) is evaluated only
+   heuristically, in the ROM for the signer's hash calls (about 253.9 bits, estimate).
+
+### 12.8 Aggregate unforgeability: signing queries in rewound runs (spec 12.3)
+
+Spec 12.3 (revision 6) reduced an aggregate forger to a UF-CMA forger against the relaxed
+scheme and left one obligation open: a rewound run may ask the signing oracle for
+`M_i*`, and the output is then no UF-CMA forgery. ML-DSA has no salt (`mu = H(tr || M')`,
+FIPS 204 Algorithm 7 line 6), so Aerie's presampled signature/target lists (Aerie C.6) do
+not apply. This section closes the obligation with strong unforgeability (SUF-CMA) of the
+relaxed scheme, lazy forwarding and no presampling (spec 12.3 steps 1' and 2'). Notation
+as in spec 12.3: one honest key `pk*` (chosen-key model, Aerie Definition 5.10), the
+relaxed scheme `Sigma_H` of the caller's relation (H-u or H-exact) whose signing returns
+the FIPS 204 signature `sigma = (c~, z, h)` and its relaxed image `phi(sigma) = (c~, z,
+w1', u, v)` (spec 3.2), validity by (3.1) to (3.3) with the relation's proven bounds, and
+the facts (U) (`(u, v)` is a function of `(pk, M, c~, z, w1')`, since `B_u < (q - 1)/2`)
+and (E) (a relaxed signature has no encoding). `Q_S` bounds the signing queries of the
+aggregate adversary `A` per run.
+
+**Lemma 12.6 (lazy forwarding is a fixed tape).** Let `B` answer the signing queries of
+`A` from a table `T[(M, k)]`, where `k` is the occurrence index of `M` among the signing
+queries of the current run (a counter that is part of the prover state and is restored
+with it on every rewind); `T` is never rolled back, and an entry is filled on first use
+by one query to `B`'s SUF-CMA challenger. Then (a) in every run, `A`'s view of the
+signing oracle has the law of the real game; (b) for each value of `T` the composed
+prover `P_T` (`A` with these answers, followed by the aggregate verifier) is a fixed
+prover with auxiliary input `T` in the sense of Akita 10.3, and `T` is independent of
+the setup and of the proof oracles of 12.1; so the theorem of Section 7 applies to `P_T`
+with the same `eps_ext` (`Q` counts `P_T`'s proof-oracle queries), and its extractor
+returns the original execution.
+
+*Proof.* Sample `T` up front: independent signatures `T[(M, k)] <- Sign(sk*, M)` for the
+hedged signer (FIPS 204 Algorithm 2 line 5, a fresh `rnd` per entry), and `T[(M, k)] =
+Sign(sk*, M; {0}^32)` for every `k` for the deterministic signer. Filling entries on first
+use gives the same joint law, because each entry is read only after it is set and the
+entries are independent of each other and of the proof oracles: the challenger's signer
+uses `sk*` and its own randomness, and its SHAKE256/SHAKE128 calls are not proof-oracle
+queries (assumption (R) of 12.5; the transcript, bridge and record-binding hashes use their
+own framings and cSHAKE customizations). (a) Within one run the `k`-th query on `M`
+receives `T[(M, k)]`: a fresh independent signature for each `k` (hedged) or one fixed
+signature (deterministic), as the real signer. (b) With `T` fixed, `P_T` is determined by
+its random tape and its oracle answers; a rerun from a saved state restores the counters,
+asks the same signing queries and reads the same entries while its oracle answers agree.
+This is the case Akita's extraction experiment names (Section 10.3, the paragraph on
+auxiliary environments before Definition 10.15): "an auxiliary algorithm whose answers
+depend on its query history, such as a signing simulator, is part of the prover: its
+initial state is fixed with the prover's tape and restored at every rerun"; here the tape
+includes `T`. It is the shape of Aerie Lemma C.5 (i) and (iii). Sections 7 and 12 use no
+property of the prover other than its query count, so the bound holds for every `T` and
+hence on average.
+
+**Lemma 12.7 (rerun-only answers miss the extracted signature).** In the setting of
+Lemma 12.6, let the original execution output an accepting aggregate with a record `i*`,
+`pk_i* = pk*`, `M_i*` not queried in the original run, and let the extractor return the
+witness of 12.2, read as the relaxed signature `sigma* = (c~_i*, z_i*, w1'_i*, u_i*,
+v_i*)`. Let `R` be the number of entries `T[(M_i*, k)]` created during the extraction
+(the *rerun-only* queries on `M_i*`). Then:
+
+1. every such entry is created after the original execution has ended, hence after
+   `c~_i*` is fixed;
+2. `sigma*` is fixed by events 0 and 1 of the original transcript before the first fork:
+   `c~_i*` is a public input bound in event 0, and `z, u, v, b` are the round-1 tables of
+   `G_main16`, `G_main4` (spec 4.1), fixed by the round-1 commitments up to Akita binding;
+3. `Pr[sigma* = phi(T[(M_i*, k)]) for some k] <= E[R] 2^-H_inf` for the hedged signer,
+   with `2^-H_inf = max_{sk, M, x} Pr_rnd[c~(Sign(sk, M; rnd)) = x]`, and at most
+   `Adv_PRF + Adv_coll(mu) + E[R] 2^-H'_inf` for the deterministic signer, with `H'_inf`
+   the same min-entropy over a uniform 64-byte `rho''`;
+4. `E[R] <= Q_S (Q_wrap + 2) 4 Tree0_ck(sch)`.
+
+*Proof.* (1) The original run asks no signing query on `M_i*` (freshness of its output), so
+it creates no entry `(M_i*, k)`; the extractor starts from the handle of the completed
+original execution (Akita Definition 10.15: the handle fixes the tape, the initial state
+and the oracle transcript) and only then reruns `P_T`. (2) Every rerun restarts `P_T` from
+its initial state with a challenge table that agrees with the original one (or with its
+parent's, which agrees with the original up to the parent's fork) up to the fork query, the
+first query at the input of an extraction or checkpoint stage of 12.2: `sd`, `X` or a stage
+of Akita's opening suffix. Every such input encodes event 0 (the public records through the
+public-record digest, expanded by item 1 of 12.1) and event 1. The certificates combined at
+`sd` share the round-1 commitments, so their round-1 projections agree except with an Akita
+binding break (Corollary 10.25, inside `eps_ext`), and `Wit(y) = f_1` (12.2) is these
+projections. (3) `sigma* = phi(sigma)` implies equal `c~`, so it suffices that no
+rerun-only answer has commitment hash `c~_i*`. *Hedged:* index the rerun-only entries in
+creation order. The decision to create entry `j` is made before its `rnd_j` is drawn, and
+`c~_i*` is fixed by (1), so `Pr[c~(entry j) = c~_i* | j <= R, history] <= 2^-H_inf`;
+summing, `sum_j Pr[j <= R] 2^-H_inf = E[R] 2^-H_inf`. *Deterministic:* every entry on
+`M_i*` is `Sign(sk*, M_i*; {0}^32)`, a function of `sk*` and `rho'' = H(K || {0}^32 ||
+mu_i*, 64)` (Algorithm 7 line 7), where `K` is the 32-byte secret seed of `sk*` (Algorithm
+6 line 1) and is used nowhere else. Assume `x -> SHAKE256(K || {0}^32 || x, 64)` is a PRF
+under `K` (in the ROM its advantage is at most about `Q_H 2^-256`). A distinguisher runs
+the whole experiment with its oracle in place of this function and outputs the event; it
+costs `Adv_PRF`. With a random function `F` in its place, the original run sees `F` only at
+the `mu_j` of queried messages; `mu_j = mu_i*` with `M_j != M_i*` is a collision of the
+64-byte SHAKE256 output at Algorithm 7 line 6 (`Adv_coll(mu)`). Otherwise `F(mu_i*)` is
+uniform and independent of `c~_i*` and of the event `R >= 1`, which gives `Pr[R >= 1]
+2^-H'_inf <= E[R] 2^-H'_inf`. (4) Each run asks at most `Q_S` signing queries, and the
+extractor runs `P_T` at most `(Q_wrap + 2) 4 Tree0_ck(sch)` times in expectation (12.6).
+
+*Evaluation (estimate, not a proof).* `H_inf <= 256`, since `rnd` and `c~` have 32 bytes.
+In the ROM for the signer's hash calls (Algorithm 7 lines 7, 11 and 15), an answer's `c~`
+is a fresh oracle output unless a hash query of `A` starts with `K` (at most about `Q_H
+2^-256` over the whole game) or an iteration's `w1` equals the `w1` of an earlier hash
+query on `mu_i*` (the commitment min-entropy term of the FSwA analyses, KLS18 and Devevey
+et al.); otherwise each of the expected 4.25 iterations (FIPS 204 Table 1, "Repetitions")
+hits `c~_i*` with probability `2^-256`, about `2^-253.9` per answer. The term `E[R]
+2^-H_inf` grows with the extractor's run count, as `B`'s running time and the SUF-CMA
+advantage it is measured against do (the same accounting as the Module-SIS terms of
+`eps_ext`, whose estimates exclude the run count as in Aerie, Section 7): it is about
+`2^-253.9` per signature the reduction obtains, far below `2^-128` per unit of its work.
+
+**Lemma 12.8 (SUF-CMA of the relaxed scheme).** Model H (SHAKE256 at FIPS 204 Algorithm 7
+lines 6 and 15 and Algorithm 8 line 12) and ExpandA as random oracles. For every SUF-CMA
+adversary `B'` against `Sigma_H` there are reductions with
+
+```text
+Adv^SUF-CMA_{Sigma_H}(B') <= Adv^MLWE + Adv^SelfTargetMSIS_{zeta'} + eps_sim
+                             + Adv^coll_{SHAKE256/256} + Adv^MSIS_{[A | I], 380,930},
+```
+
+where `zeta' = 350,209` (spec (3.5), both relations), `eps_sim` collects the simulation
+terms of the CMA-to-NMA step (below) and `Adv^coll_{SHAKE256/256} <= q_H^2 / 2^257` in the
+ROM; the Module-SIS instance is `[A | I]` over `Z_q`, `256 k = 1,024` rows, `256 (k + l) =
+2,048` columns, `l_inf` bound 380,930.
+
+*Proof.* Let `(M*, sigma*)` win, `sigma* = (c~*, z*, w1'*, u*, v*)`, and let `S` be the
+answers on `M*`. One of three cases holds.
+
+* (i) `c~*` differs from the `c~` of every answer in `S` (always when `M*` was never
+  queried). Then the hash input `mu* || w1Encode(w1'*)` is not the input of any returned
+  answer: for an answer in `S` the outputs differ, and an answer on `M_j != M*` has
+  `mu_j != mu*` unless SHAKE256 collides at line 6. The UF-CMA argument of the Dilithium
+  and FIPS 204 analyses applies with the relaxed verification: replace `t` by uniform
+  (MLWE), simulate signatures by programming H at `mu || w1Encode(w1)`, and output
+  `(z*, -c*, c* t0 - u*)`, a SelfTargetMSIS solution with bound `zeta'` (spec 3.3). The
+  CMA-to-NMA step is the one corrected by Barbosa et al. (CRYPTO 2023), with the
+  strong-unforgeability bookkeeping of Devevey et al. (CRYPTO 2023; ePrint 2023/245,
+  Theorems 9 and 11): the forgery's input can equal that of a rejected, never revealed
+  iteration only with the commitment min-entropy term. These are `eps_sim`.
+* (ii) `c~* = c~_j` for some answer `j` in `S` and `w1'* != w1'_j`. Then
+  `H(mu* || w1Encode(w1'*), 32) = H(mu* || w1Encode(w1'_j), 32)` on distinct inputs
+  (w1Encode, Algorithm 28, packs each coefficient of `[0, 44)` in 6 bits and is injective):
+  a SHAKE256 collision at the 256-bit output whose collision strength FIPS 204 Table 1
+  gives as `lambda = 128`.
+* (iii) `c~* = c~_j` and `w1'* = w1'_j` for some answer `j` in `S`. Then `c* = c_j` and
+  `T* = T_j` (same key), and (3.1) for both gives `sum_s A[., s] (*) dz[s] - du - q dv = 0`
+  over `Z` for the differences. If `dz = 0`, then `du = -q dv` with `|du| <= 2 B_u < q`,
+  so `du = dv = 0` and `sigma* = phi(sigma_j)` (this is (U)), which is excluded. So
+  `dz != 0` and `[A | -I] (dz, du) = 0 mod q` with `|dz|_inf <= 2^17 + B_z = 262,065`
+  (H-u: `z* in [-2^17, 2^17)`, honest `|z_j|_inf <= B_z`; H-exact: `2 B_z = 261,986`) and
+  `|du|_inf <= 2 B_u = 380,930`: a nonzero Module-SIS solution for `[A | I]` with `A` the
+  challenge matrix (programmed into ExpandA at `rho`). The reduction samples `(s1, s2)`,
+  publishes `t1`, signs honestly and needs no MLWE step. This is the computational
+  unique-response property of the relaxed identification scheme (Devevey et al.,
+  Definition 6); case (i) is its no-message part.
+
+Under H-exact every bound is the honest one or smaller, so the same instance applies.
+
+**Theorem 12.9 (aggregate unforgeability, classical ROM).** Under the hypotheses of the
+theorem of Section 7 (mode A, assumptions (F) and (K)), for every aggregate adversary `A`
+in the chosen-key game of spec 12.3 that makes `Q` proof-oracle queries and `Q_S` signing
+queries, there is a SUF-CMA adversary `B` against `Sigma_H` whose running time and
+signing-query count are those of the extractor (at most `(Q_wrap + 2) 4 Tree0_ck(sch)`
+runs of `A` in expectation, each with `Q_S` signing queries) such that
+
+```text
+Adv^agg(A) <= Adv^SUF-CMA_{Sigma_H}(B) + eps_ext + E[R] 2^-H_inf          (hedged signer)
+Adv^agg(A) <= Adv^SUF-CMA_{Sigma_H}(B) + eps_ext + E[R] 2^-H'_inf
+              + Adv^PRF + Adv^coll(mu)                                   (deterministic signer)
+```
+
+with `eps_ext` the bound of Section 7 and `R` as in Lemma 12.7; Lemma 12.8 bounds the
+first term. There is no `q_H` factor, no `e(Q_S + 1)` factor, no presampling and no
+programmed hash in step 1'. *Proof.* Lemma 12.6 makes the theorem of Section 7 apply to
+`P_T`: except with `eps_ext` the extractor returns the original execution and, since the
+verifier accepted, a witness of the relation for every live record; `B` outputs
+`(M_i*, sigma*)` for the first fresh record `i*` with `pk_i* = pk*`. The witness satisfies
+(3.1) to (3.3) with the verifier's `c~_i*`, `T_i*` and `mu_i*` computed from `pk*` and
+`M_i*` (spec 2), so `sigma*` is a valid relaxed signature on `M_i*`. It is a strong
+forgery unless it equals `phi` of a stored answer on `M_i*`, and Lemma 12.7 bounds that
+event.
+
+*Hardness of the two lattice instances* (`ref/notes/msis-estimate.md`, measured with
+lattice-estimator `f31b86f` and pq-crystals security-estimates `75c2694`):
+SelfTargetMSIS at `zeta = 350,209`, block size 423, core-SVP `2^123.5` (rough) /
+`2^152.2` (default model), 123 / 112 (classical / quantum); the case-(iii) instance,
+block size 417, core-SVP `2^121.8` / `2^149.3`, 121 / 110. The second is the instance of
+the Dilithium round-3 strong-unforgeability row (that script's `max(2 gamma1, 4 gamma2 +
+1) = 380,929` gives the same block size). Unforgeability therefore rests on `2^121.8`
+core-SVP, the basis of ML-DSA-44's own SUF claim; MLWE stays at 124 / 123.
+
+*Mode C* (private `c~_i`, not specified here). Lemma 12.7 (1) and (2) need every candidate
+value of `c~_i*` fixed before the first fork, so a mode-C design MUST commit `c~` in event
+1 or 2. With a Ligerito commitment the candidates are the values in the codewords of its
+Johnson list (at most `L`, fixed by the Merkle expansion in the original run, Lemma 12.2),
+and the term becomes `L E[R] 2^-H_inf`.
+
+*Why not presampling* (for the record; do not re-propose). One presampled signature per
+hash entry cannot answer a message signed twice under the hedged signer; a rerun branch
+may receive a signature the adversary never saw; guessing the deterministic signer's
+`q_H`-th hash query multiplies `eps_ext` by `q_H`; `tr = H(pk)` is public, so keyed-sponge
+results do not make `mu` pseudorandom; and SHAKE256 serves `tr`, `mu`, `rho''` and `c~`
+without domain separation (Aerie C.7 notes the same overlap). The salt-free case appears
+in Aardal et al. (Lemma C.3) and Aerie C.7 through a partition argument with loss
+`e(Q_S + 1)`; SUF removes that loss and the cached-signer restriction, at the price of the
+`[A | I]` instance above (`2^121.8` instead of `2^123.5` core-SVP).
