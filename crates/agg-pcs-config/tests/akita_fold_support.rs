@@ -504,9 +504,9 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     let (c4, m4, g4) = audit_catalog("width4", rows_of(w4.catalog()), w4.catalog().len());
     let (c16, m16, g16) = audit_catalog("width16", rows_of(w16.catalog()), w16.catalog().len());
     assert!(m4 >= 128.0 && m16 >= 128.0);
-    // The 26 grouped rows (six root groups, one per N* = 2^3 .. 2^15 and relation) are in
-    // the width-4 catalog (the family of the final group G_m).
-    assert_eq!((g4, g16), (26, 0));
+    // The 39 grouped rows (six root groups, one per N* = 2^3 .. 2^15 and relation: H-u,
+    // H-exact, H-FIPS) are in the width-4 catalog (the family of the final group G_m).
+    assert_eq!((g4, g16), (39, 0));
     // The families that occur (docs/soundness.md Section 4.6).
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
@@ -606,7 +606,21 @@ fn grouped_rows_by_batch_size() {
 
 /// (d_sig, draws, minimum accepted support in bits) of the H-FIPS grouped rows
 /// (`mldsa-44-l16f-batch-<N*>-mult-final`), one entry per checked-in batch size.
-const EXPECTED_H_FIPS: [(usize, usize, f64); 0] = [];
+const EXPECTED_H_FIPS: [(usize, usize, f64); 13] = [
+    (3, 11, 128.0881),
+    (4, 11, 128.0881),
+    (5, 11, 128.0881),
+    (6, 11, 128.0881),
+    (7, 11, 128.0881),
+    (8, 11, 128.0881),
+    (9, 11, 128.0881),
+    (10, 11, 128.0881),
+    (11, 11, 128.0881),
+    (12, 12, 128.0881),
+    (13, 12, 128.5633),
+    (14, 12, 128.0881),
+    (15, 12, 128.5633),
+];
 
 /// Claims per root group and the schedule of one resolved row.
 fn rows_of_one(

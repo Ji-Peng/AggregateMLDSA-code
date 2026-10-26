@@ -156,6 +156,45 @@ fn akita_plans_of_the_h_exact_rows_are_pinned() {
     );
 }
 
+/// The Akita plans of the 13 H-FIPS grouped rows (`mldsa-44-l16f-batch-<N*>-mult-final`,
+/// `G_main4` at 12 polynomials and `G_2` at 13; `docs/h-exact.md` 10.7), printed for the
+/// record: every row stays within Akita's transition cap with 7 bits of nonce slack, and
+/// every digest differs from the H-u and H-exact rows' of the same size.
+#[test]
+fn akita_plans_of_the_h_fips_rows_are_well_formed() {
+    assert_eq!(
+        agg_pcs_config::catalogs::CATALOG_D_SIG_H_FIPS,
+        (3..=15).collect::<Vec<_>>().as_slice()
+    );
+    for d_sig in 3..=15 {
+        let plan = row_plan(d_sig, Relation::HFips);
+        let digest = hex(&plan.digest().expect("digest"));
+        eprintln!("H-FIPS d_sig {d_sig:>2}: {:?} digest {digest}", summary(&plan));
+        assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
+            && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
+        assert_ne!(digest, PINNED[d_sig - 3], "H-FIPS and H-u rows differ");
+        assert_ne!(digest, PINNED_H_EXACT[d_sig - 3], "H-FIPS and H-exact rows differ");
+        assert_eq!(digest, PINNED_H_FIPS[d_sig - 3], "d_sig {d_sig}");
+    }
+}
+
+/// The plan digests of the 13 H-FIPS grouped rows at Akita `e023b6a` (2026-10-27).
+const PINNED_H_FIPS: &[&str] = &[
+    "27cd35e561b702708c6f59a648340120943865e0f7c90cc8d6f28ebc1791c810",
+    "39a7949f7c18473cc94914f9edb84d4632e32f3fef1e306998991695630c30f0",
+    "f61d584694fe23ffd63dc0e15eda04d82c4e12b6b17ab7f066f405074db400bd",
+    "f11081519e9ea15314efcdf0a99299d58a79c505729050a385fb86be5d1305b3",
+    "deb430b8a76ba9e61aa266441100928bd969ac4aea3e6aa33773742512d2e2b0",
+    "9088cf643bb2b4f1ec60c3a69903c335c0d392e5e428b6b010f3b2bd5e83c3a5",
+    "e8df53a5ad4a91d875f85596f42e09b14da1b6a78e12befe0f1ee321c6e92b03",
+    "77cdddab3f6076f791172ed1147111282d9368c311014af9f72d9608e7ee403d",
+    "9e4eb72b4b4cfcba3493d98d58bfb939882b8232e3e1f9d553629a967d810313",
+    "74ac4db6052a0d45d63046dac72dab3db676430eddd97cb96a1c43f8d9cae224",
+    "fe542c447373deb49b8a7248ecfe2ccd80f59adeca8a1823267fd41cc2d3f006",
+    "82de9cccb9fb1b4514f9c2d7ed8dd707e2911f80c5a10b1ef166ff053fbcfe43",
+    "bce905c59fdcec79df5367d170a70be9c9c87cb20cbcddf1a8789a3b11c3d4b2",
+];
+
 /// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the H-exact rows, `d_sig` 3 to 15: the
 /// H-u values except at `2^15` (sum g 1,135 instead of 1,137, work 8,336 instead of 9,872,
 /// nonce bits 4,432 instead of 4,434).
