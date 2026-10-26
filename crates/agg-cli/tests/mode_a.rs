@@ -441,6 +441,60 @@ impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
     }
 }
 
+/// Two genuine keys sharing `rho` (memo 3.4 (c): `rho` is the signer's choice, so the
+/// verifier must key its expansions and records by the full `pk`): an aggregate over records
+/// of both keys verifies (uncached, with only the first key cached, fully cached), and the
+/// records verify only against their own key: naming the other key for a record is
+/// rejected, cached or not.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn keys_sharing_rho_verify_only_against_their_own_t1() {
+    on_large_stack(|| {
+        let (victim_sk, victim) = gen::keypair(&gen::key_seed(0x5a, 0));
+        let rho: [u8; 32] = victim[..32].try_into().unwrap();
+        let (other_sk, other) = gen::keypair_with_rho(&gen::key_seed(0x5a, 1), &rho);
+        let mut records = gen::records(0x5b, 4);
+        for i in 0..8_u64 {
+            let (sk, pk) = if i % 2 == 0 { (&victim_sk, &victim) } else { (&other_sk, &other) };
+            let msg = gen::message(0x5c, i);
+            let sig = gen::sign(sk, &msg, None);
+            records.push(Record { pk: pk.clone(), msg, sig });
+        }
+        let aggregate = Aggregator::new(AggregatorConfig::default())
+            .aggregate(&signed(&records))
+            .expect("aggregate");
+        let public = statements(&records);
+        let verifier = AggregateVerifier::new();
+        let uncached = verifier.verify(&public, &aggregate.bytes, None);
+        assert!(uncached.accepted(), "{uncached}");
+        assert_eq!(uncached.report.outcome.as_ref().unwrap().expanded_keys, 6);
+        let mut victim_only = KeyCache::default();
+        victim_only.insert(std::sync::Arc::new(
+            agg_piop::public_data::VerifierKey::from_bytes(&victim).unwrap(),
+        ));
+        let partly = verifier.verify(&public, &aggregate.bytes, Some(&mut victim_only));
+        assert!(partly.accepted(), "{partly}");
+        assert_eq!(partly.report.outcome.as_ref().unwrap().expanded_keys, 5);
+        let mut full = victim_only.clone();
+        let warm = verifier.verify(&public, &aggregate.bytes, Some(&mut full));
+        assert!(warm.accepted());
+        assert_eq!(full.len(), 6);
+        // Record 5 is signed under `other`, record 4 under `victim`.
+        for (record, wrong) in [(5, &victim), (4, &other)] {
+            let mut swapped = public.clone();
+            swapped[record].0 = wrong.as_slice();
+            for cache in [None, Some(full.clone())] {
+                let mut cache = cache;
+                let report = verifier.verify(&swapped, &aggregate.bytes, cache.as_mut());
+                assert!(!report.accepted(), "record {record} under the other key: {report}");
+            }
+        }
+    });
+}
+
 #[test]
 #[cfg_attr(
     debug_assertions,

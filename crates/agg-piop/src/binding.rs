@@ -64,9 +64,41 @@ impl FlockProfile {
     }
 }
 
-/// The canonical record stream `X`.
+/// The canonical record stream `X`, written in parallel: the record offsets are a prefix sum
+/// of the record lengths, and every record is copied into its own disjoint slice.
 #[must_use]
 pub fn record_stream(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<u8> {
+    let sizes: Vec<usize> = records
+        .iter()
+        .map(|(pk, msg, _)| pk.len() + 8 + msg.len() + C_TILDE_BYTES)
+        .collect();
+    let mut stream = vec![0_u8; 8 + sizes.iter().sum::<usize>()];
+    let (count, mut rest) = stream.split_at_mut(8);
+    count.copy_from_slice(&(records.len() as u64).to_le_bytes());
+    let mut slots: Vec<&mut [u8]> = Vec::with_capacity(records.len());
+    for &size in &sizes {
+        let (slot, tail) = std::mem::take(&mut rest).split_at_mut(size);
+        slots.push(slot);
+        rest = tail;
+    }
+    slots
+        .into_par_iter()
+        .zip(records.par_iter())
+        .for_each(|(slot, (pk, msg, c_tilde))| {
+            let (pk_part, slot) = slot.split_at_mut(pk.len());
+            pk_part.copy_from_slice(pk);
+            let (len_part, slot) = slot.split_at_mut(8);
+            len_part.copy_from_slice(&(msg.len() as u64).to_le_bytes());
+            let (msg_part, c_part) = slot.split_at_mut(msg.len());
+            msg_part.copy_from_slice(msg);
+            c_part.copy_from_slice(c_tilde);
+        });
+    stream
+}
+
+/// The record stream `X` built serially (the reference of [`record_stream`]).
+#[cfg(test)]
+fn record_stream_serial(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<u8> {
     let mut stream = Vec::new();
     stream.extend_from_slice(&(records.len() as u64).to_le_bytes());
     for (pk, msg, c_tilde) in records {
@@ -115,6 +147,20 @@ pub fn instance_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_stream_matches_the_serial_stream() {
+        let keys: Vec<Vec<u8>> = (0..5_u8).map(|k| vec![k; 1312]).collect();
+        let msgs: Vec<Vec<u8>> = (0..300_usize).map(|i| vec![i as u8; i % 97]).collect();
+        let records: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = msgs
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (keys[i % 5].as_slice(), m.as_slice(), [i as u8; C_TILDE_BYTES]))
+            .collect();
+        for n in [0, 1, 2, 13, 300] {
+            assert_eq!(record_stream(&records[..n]), record_stream_serial(&records[..n]));
+        }
+    }
 
     #[test]
     fn binding_depends_on_every_field_and_spans_blocks() {
