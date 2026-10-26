@@ -387,6 +387,12 @@ pub(super) fn term_poly(term: &Term, a: &[E], d: &[E]) -> Poly {
                 None => affine,
             }
         }
+        Term::Monomials(monomials) => monomials.iter().fold(Poly::constant(E::zero()), |acc, (c, m)| {
+            let product = m
+                .iter()
+                .fold(Poly::constant(E::one()), |p, &l| p.mul(&lane(l)));
+            acc.add(&product.scale(E::from_i64(*c)))
+        }),
     }
 }
 

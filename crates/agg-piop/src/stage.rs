@@ -9,7 +9,7 @@
 //! verifier to claimed evaluations, so both sides evaluate the same [`Term`]s.
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
-use jolt_field::{One, Ring, Zero};
+use jolt_field::{Field, One, Ring, Zero};
 
 use crate::kernel::{
     evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term, WeightIntGroup,
@@ -72,6 +72,11 @@ pub enum EqPoint {
     /// The low coordinates of the final point of lookup stack `j` (`docs/lookup.md`
     /// Section 1), on the stack's domain.
     Lookup(usize),
+    /// `(1/2, ..., 1/2, r^(2)_sig)` on the domain: the signature coordinates of `r^(2)` (its
+    /// last `d_sig`) and `1/2` on the others, so that `eq` is `2^-(vars - d_sig)
+    /// eq(r^(2)_sig, i)` at every cell of signature `i` (H-FIPS's hint-weight identity,
+    /// `docs/h-exact.md` Section 10.7).
+    HalfR2,
 }
 
 /// One instance (or one part of an instance): its position in the stage's `gamma` vector,
@@ -210,6 +215,14 @@ impl Points {
                 let point = &self.lookup[stack];
                 assert_eq!(point.len(), vars, "a stack point on its domain");
                 return Some(point.clone());
+            }
+            EqPoint::HalfR2 => {
+                let d_sig = manifest.d_sig();
+                assert!(vars >= d_sig, "the domain holds the signature variables");
+                let half = E::from_u64(2).inverse().expect("two is invertible");
+                let mut point = vec![half; vars - d_sig];
+                point.extend_from_slice(&suffix(&self.r2, d_sig));
+                return Some(point);
             }
         };
         assert_eq!(full.len(), manifest.d_main(), "a main-domain point");

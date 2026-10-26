@@ -887,6 +887,19 @@ mod tests {
         assert_eq!(gammas, [5, 3, 6]);
         assert_eq!(exact_registry.work_bits(), 2441);
         assert_eq!(work_bytes(&exact), 306);
+        // H-FIPS (docs/h-exact.md 10.7): gamma^(2) has 7 coefficients (def_y1 and F3, g = 3),
+        // gamma^(3) 51 (g = 6); stage-2 terminals add delta and e, stage 3 opens 36 claims.
+        let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
+        assert_eq!(stage_gammas(&fips), [26, 7, 51]);
+        assert_eq!(stage_terminals(&fips), [18, 8, 36]);
+        let fips_registry = Registry::new(&fips);
+        let gammas: Vec<u8> = fips_registry
+            .work_sites()
+            .filter(|s| s.class == SiteClass::StageGamma)
+            .map(|s| s.bits)
+            .collect();
+        assert_eq!(gammas, [5, 3, 6]);
+        assert_eq!(fips_registry.work_bits(), exact_registry.work_bits());
         // The challenge field is K = F_{p^2} with p = 2^64 - 59, as the difficulties assume.
         assert_eq!(BaseField::from_u64(agg_bridge::pow::P), BaseField::from_u64(0));
     }

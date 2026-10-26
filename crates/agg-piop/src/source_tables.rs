@@ -15,13 +15,22 @@
 //!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`, `docs/h-exact.md`
 //!   2.1) stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
 //!   `Z_hi`) and the bit `a_z` (the ninth `G_main4` column); the digits of zero are
-//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`.
+//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`. Under relation H-FIPS (`docs/h-exact.md`
+//!   Section 10) `z` is H-exact's, and each coefficient's canonical witness
+//!   `agg_witness::hfips::honest_coeff(w', h*)`, with `w' = 2 gamma_2 w_1' + u mod q` and
+//!   `h* = [HighBits(w') != w_1']` (the signature's own hint for an honest record), gives
+//!   `l_lo = L_lo - 2^15`, `l_hi` (the slots of `U_lo`, `U_hi`), the sign bit
+//!   `s = (1 + sigma)/2`, `delta` and `e` (after `a_z`); each record's hint slack
+//!   `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) = (0, 0, 0,
+//!   0)`, `u_h = 80`.
 //! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
 //!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
 //!   the multiplicity column `m` of `T_16` over every looked-up cell with its seven balanced
 //!   base-16 digits (`G_m`). Parities and carries come from `agg_bridge::parity` at the
-//!   production shape; the honest prover aborts on a row weight above the cap.
+//!   production shape; the honest prover aborts on a row weight above the cap. Under H-FIPS
+//!   the hint slack `u_h` takes slot 6 of the level-2 stack (and is `G_2`'s thirteenth
+//!   polynomial): `u_h(i)` at `D_2` index `i 2^(d_2 - d_sig)`, zero elsewhere.
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
@@ -31,16 +40,17 @@
 use agg_bridge::{parity, Shape};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
 use agg_witness::derive::{derive_with_t, DeriveError};
+use agg_witness::hfips::honest_coeff;
 use agg_witness::instance::PublicInstance;
-use agg_witness::native::{VecK, VecL};
+use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
 use agg_witness::padding::{main_index, Geometry, GeometryError};
-use agg_witness::params::{K, L, N, POSITIONS, W1_BITS};
+use agg_witness::params::{GAMMA2, K, L, N, OMEGA, POSITIONS, W1_BITS};
 use rayon::prelude::*;
 
 use crate::kernel::{Lane, Source};
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
-    value_columns, Column, CommitmentManifest, DigitValue, GroupDescriptor, GroupRole,
+    value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupDescriptor, GroupRole,
     LOOKUP_SHIFT, STACK_DOMAINS,
 };
 use agg_witness::digits::ValueForm;
@@ -258,11 +268,28 @@ impl RecordValues {
     }
 }
 
-/// One record's encoded cells: `4 * 1024` wide cells (`G_main16`) and `8 * 1024` (H-u) or
-/// `9 * 1024` (H-exact) narrow cells (`G_main4`), each column at `c * 1024`.
+/// One record's encoded cells: `4 * 1024` wide cells (`G_main16`) and `8 * 1024` (H-u),
+/// `9 * 1024` (H-exact) or `12 * 1024` (H-FIPS) narrow cells (`G_main4`), each column at
+/// `c * 1024`, and the H-FIPS hint slack (`omega` otherwise unused).
 struct RecordBlock {
     wide: Vec<i32>,
     narrow: Vec<i8>,
+    hint_slack: i64,
+}
+
+/// The H-FIPS witness of one coefficient from `(u, w_1')` (`docs/h-exact.md` Section 10.2):
+/// `w' = 2 gamma_2 w_1' + u mod q`, `h* = [HighBits(w') != w_1']`, the canonical
+/// `honest_coeff(w', h*)`; `None` when `w_1'` is not reachable from `w'` by any hint bit or
+/// the form's `u` differs (an input outside the honest relation).
+#[must_use]
+pub fn fips_coefficient(u: i64, w1: i64) -> Option<agg_witness::hfips::Coeff> {
+    let wq = mod_q(2 * GAMMA2 * w1 + u);
+    let hint = high_bits(wq) != w1;
+    if use_hint(hint, wq) != w1 {
+        return None;
+    }
+    let c = honest_coeff(wq, hint);
+    (c.u() == u).then_some(c)
 }
 
 /// Where a committed column of a main group lives in a [`RecordBlock`].
@@ -272,11 +299,13 @@ enum Slot {
     Narrow(usize),
 }
 
-/// The relation's encoder: the value forms of `z, u, v` with the slot of each digit, and the
-/// slots of the bits (resolved once per batch from the manifest).
+/// The relation's encoder: the value forms of `z, u, v` (H-FIPS: `z, L, v`) with the slot of
+/// each digit, the slots of the bits and, under H-FIPS, of `s, delta, e` (resolved once per
+/// batch from the manifest).
 struct Encoder {
     values: [(ValueForm, Vec<Slot>, &'static str); 3],
     bits: [usize; W1_BITS],
+    fips: Option<[usize; 3]>,
     narrow: usize,
 }
 
@@ -294,16 +323,25 @@ impl Encoder {
             DigitValue::Zx => "z outside [-130,993, 130,993]",
             _ => "z outside [-2^17, 2^17)",
         };
+        let narrow_slot = |column: Column| match slot(column) {
+            Slot::Narrow(position) => position,
+            Slot::Wide(_) => unreachable!("{} is narrow", column.name()),
+        };
+        let u_what = if manifest.is_fips() {
+            "L outside [0, gamma_2)"
+        } else {
+            "u outside [-190,465, 190,465]"
+        };
         Self {
             values: [
                 value(manifest.z_value(), z_range),
-                value(DigitValue::U, "u outside [-190,465, 190,465]"),
+                value(manifest.u_slot_value(), u_what),
                 value(DigitValue::V, "v outside [-2^31, 2^31)"),
             ],
-            bits: std::array::from_fn(|t| match slot(Column::W1Bit(t as u8)) {
-                Slot::Narrow(position) => position,
-                Slot::Wide(_) => unreachable!("bits are narrow"),
-            }),
+            bits: std::array::from_fn(|t| narrow_slot(Column::W1Bit(t as u8))),
+            fips: manifest
+                .is_fips()
+                .then(|| FipsColumn::ALL.map(|c| narrow_slot(Column::Fips(c)))),
             narrow: manifest.group(GroupRole::Main).polynomial_count(),
         }
     }
@@ -311,11 +349,26 @@ impl Encoder {
     fn encode(&self, values: &RecordValues) -> Result<RecordBlock, SourceTableError> {
         let mut wide = vec![0_i32; 4 * POSITIONS];
         let mut narrow = vec![0_i8; self.narrow * POSITIONS];
+        let mut weight = 0_i64;
         for row in 0..K {
             for j in 0..N {
                 let pos = j + N * row;
+                // H-FIPS: the coefficient's witness; its magnitude L takes the slot of u.
+                let middle = match self.fips {
+                    None => values.u[row][j],
+                    Some(slots) => {
+                        let c = fips_coefficient(values.u[row][j], i64::from(values.w1[row][j]))
+                            .ok_or(SourceTableError::Encode("w1' not reachable from w' by UseHint"))?;
+                        let cells = [(1 + c.sigma) / 2, c.delta, c.e];
+                        for (&slot, cell) in slots.iter().zip(cells) {
+                            narrow[slot * POSITIONS + pos] = cell as i8;
+                        }
+                        weight += c.weight();
+                        c.l()
+                    }
+                };
                 // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
-                let inputs = [values.z[row][j], values.u[row][j], values.v[row][j]];
+                let inputs = [values.z[row][j], middle, values.v[row][j]];
                 for ((form, slots, what), x) in self.values.iter().zip(inputs) {
                     let digits = form.decompose(x);
                     if !form.in_alphabets(&digits) {
@@ -341,16 +394,26 @@ impl Encoder {
                 }
             }
         }
-        Ok(RecordBlock { wide, narrow })
+        let hint_slack = OMEGA as i64 - weight;
+        if hint_slack < 0 {
+            return Err(SourceTableError::Encode("hint weight above omega"));
+        }
+        Ok(RecordBlock {
+            wide,
+            narrow,
+            hint_slack,
+        })
     }
 }
 
-/// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns).
+/// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns), and
+/// under H-FIPS the hint slack of every record (committed in round 2, `G_2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MainTables {
     geom: Geometry,
     wide: Vec<i32>,
     narrow: Vec<Vec<i8>>,
+    hint_slack: Vec<i64>,
 }
 
 impl MainTables {
@@ -396,7 +459,19 @@ impl MainTables {
                 column
             })
             .collect();
-        let tables = Self { geom, wide, narrow };
+        let hint_slack = if encoder.fips.is_some() {
+            (0..geom.n_star)
+                .map(|i| blocks.get(i).unwrap_or(&zero).hint_slack)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tables = Self {
+            geom,
+            wide,
+            narrow,
+            hint_slack,
+        };
         tables.validate(manifest)?;
         Ok(tables)
     }
@@ -448,6 +523,19 @@ impl MainTables {
         self.geom
     }
 
+    /// The H-FIPS hint slack `u_h = 80 - sum delta^2` per record (`N*` entries, padded rows
+    /// 80); empty under the other relations.
+    #[must_use]
+    pub fn hint_slack(&self) -> &[i64] {
+        &self.hint_slack
+    }
+
+    /// Mutable hint slack (adversarial tests; the round-2 tables take it at build time).
+    #[doc(hidden)]
+    pub fn hint_slack_mut(&mut self) -> &mut [i64] {
+        &mut self.hint_slack
+    }
+
     /// The stacked `G_main16` lane `Z_lo | U_lo | V_lo | V_hi` (`bz_lo` for `Z_lo` under
     /// H-exact; `4 * 2^d_main` cells).
     #[must_use]
@@ -492,18 +580,22 @@ impl MainTables {
     }
 
     /// The values `z, u, v` of one record recomposed by the relation's value forms (any cell
-    /// values).
+    /// values); under H-FIPS `u = (2 s - 1) L + s - 2 gamma_2 delta - e` ([`fips_u`]).
     #[must_use]
     pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
         let columns = |value: DigitValue| -> Vec<Cells<'_>> {
             value_columns(value).into_iter().map(|c| self.column(manifest, c)).collect()
         };
-        let forms = [manifest.z_value(), DigitValue::U, DigitValue::V].map(|value| (value.layout(), columns(value)));
+        let forms = [manifest.z_value(), manifest.u_slot_value(), DigitValue::V]
+            .map(|value| (value.layout(), columns(value)));
         let compose = |k: usize, pos: usize| {
             let (form, cells) = &forms[k];
             let digits: Vec<i64> = cells.iter().map(|c| c.value(i * POSITIONS + pos)).collect();
             form.compose(&digits)
         };
+        let fips = manifest
+            .is_fips()
+            .then(|| FipsColumn::ALL.map(|c| self.column(manifest, Column::Fips(c))));
         let mut z = [[0; N]; L];
         let mut u = [[0; N]; K];
         let mut v = [[0; N]; K];
@@ -511,7 +603,13 @@ impl MainTables {
             for j in 0..N {
                 let pos = j + N * row;
                 z[row][j] = compose(0, pos);
-                u[row][j] = compose(1, pos);
+                u[row][j] = match &fips {
+                    None => compose(1, pos),
+                    Some([s, delta, e]) => {
+                        let x = i * POSITIONS + pos;
+                        fips_u(compose(1, pos), s.value(x), delta.value(x), e.value(x))
+                    }
+                };
                 v[row][j] = compose(2, pos);
             }
         }
@@ -539,14 +637,40 @@ impl MainTables {
     }
 }
 
+/// H-FIPS's `u = (2 s - 1) L + s - 2 gamma_2 delta - e` from the magnitude `L`, the sign bit
+/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md` Section 10.1), any integers.
+#[must_use]
+pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
+    (2 * s - 1) * l + s - 2 * GAMMA2 * delta - e
+}
+
 /// `x = j + 256 rho + 1024 i` (re-exported for tests and tools).
 #[must_use]
 pub fn main_cell(j: usize, rho: usize, i: usize) -> usize {
     main_index(j, rho, i)
 }
 
-/// The stacked carries of one level: `6` columns in `8` slots (levels 1, 2) or one column
-/// (level 3), each slot of `2^d_t` cells, the padding slots holding `-2^15`.
+/// H-FIPS's hint slack as a `D_2` table (`docs/h-exact.md` Section 10.7): `u_h(i)` at index
+/// `i 2^(d_2 - d_sig)` (the low `d_2 - d_sig` variables of `D_2` are position variables when
+/// `d_sig < 13`), zero elsewhere.
+///
+/// # Panics
+/// If `hint_slack` does not hold `N*` values.
+#[must_use]
+pub fn hint_slack_table(manifest: &CommitmentManifest, hint_slack: &[i64]) -> Vec<i64> {
+    assert_eq!(hint_slack.len(), manifest.padded_records(), "one slack per signature");
+    let vars = manifest.group(GroupRole::Level2).logical_vars;
+    let shift = vars - manifest.d_sig();
+    let mut table = vec![0_i64; 1 << vars];
+    for (i, &slack) in hint_slack.iter().enumerate() {
+        table[i << shift] = slack;
+    }
+    table
+}
+
+/// The stacked carries of one level: `6` columns in `8` slots (levels 1, 2; H-FIPS adds
+/// `u_h` in slot 6 of level 2) or one column (level 3), each slot of `2^d_t` cells, the
+/// padding slots holding `-2^15`.
 fn stack_carries(columns: &[Vec<i64>], slots: usize) -> Result<Vec<i32>, SourceTableError> {
     let cells = columns.first().map_or(0, Vec::len);
     let mut stacked = vec![-LOOKUP_SHIFT; slots * cells];
@@ -593,10 +717,14 @@ impl BridgeGroupTables {
                 .map(|&bit| i8::try_from(bit).map_err(|_| SourceTableError::Encode("parity")))
                 .collect()
         };
+        let mut level2_columns = witness.kappa2.clone();
+        if manifest.is_fips() {
+            level2_columns.push(hint_slack_table(manifest, main.hint_slack()));
+        }
         let mut tables = Self {
             level1: stack_carries(&witness.kappa1, 8)?,
             parities: witness.y2.iter().map(narrow_bits).collect::<Result<_, _>>()?,
-            level2: stack_carries(&witness.kappa2, 8)?,
+            level2: stack_carries(&level2_columns, 8)?,
             level3: stack_carries(std::slice::from_ref(&witness.kappa3), 1)?,
             y: witness.y_bits(),
             multiplicity: Vec::new(),
@@ -652,7 +780,7 @@ impl BridgeGroupTables {
                 .parities
                 .iter()
                 .map(|p| Cells::Narrow(p))
-                .chain(carries(&self.level2, cells, W1_BITS))
+                .chain(carries(&self.level2, cells, manifest.stack_columns(2).len()))
                 .collect(),
             GroupRole::Level3 => carries(&self.level3, cells, 1),
             GroupRole::Mult => self.digits.iter().map(|d| Cells::Narrow(d)).collect(),

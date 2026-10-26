@@ -8,24 +8,15 @@
 mod common;
 
 use agg_witness::check::{CheckReport, Identity};
-use agg_witness::crt::az_integer;
 use agg_witness::derive::derive;
-use agg_witness::expand::ExpandedKey;
-use agg_witness::gen::{self, SplitMix64};
+use agg_witness::gen;
 use agg_witness::hfips::{check_batch, honest_coeff, Coeff, HFipsRecord, L_STEP};
 use agg_witness::instance::PublicInstance;
-use agg_witness::native::{
-    self, commitment_hash, ctr_q, decompose, mod_q, sig_encode, use_hint, w1_encode, SmallK,
-    VecL,
-};
-use agg_witness::ntt::pow_mod;
+use agg_witness::native::{self, mod_q, SmallK};
 use agg_witness::params::*;
 
-/// Position of the corner coefficient `w' = q - gamma2, h = 0` in the synthetic signature
-/// (`rho`, `j`).
-const CORNER: (usize, usize) = (1, 17);
-/// Position of the coefficient `w' = 0, h = 1` (the `e = -1` wrap) in the synthetic signature.
-const ZERO: (usize, usize) = (2, 101);
+/// Position of the corner coefficient `w' = q - gamma2, h = 0` in the synthetic signature.
+const CORNER: (usize, usize) = gen::HINT_CORNER;
 
 fn records_of(inst: &PublicInstance, recs: &[gen::Record]) -> Vec<HFipsRecord> {
     inst.records
@@ -99,13 +90,7 @@ fn edge_residue_record_uses_the_corner_witness() {
     assert_eq!(h.extract_signature(&p.c_tilde).unwrap(), r.sig);
 }
 
-/// A synthetic but genuine FIPS 204 signature of hint weight exactly 80 with a coefficient
-/// `w' = q - gamma2, h = 0`. The public key has `t1 = 0` (a well-formed 1,312-byte key; pkDecode,
-/// Algorithm 23, accepts any bytes), so Algorithm 8 computes `w'_Approx = A z` independently of
-/// `c` (line 9): `z` is chosen first (two coefficients adjusted so that `(A z)` hits `q - gamma2`
-/// at `CORNER` and `0` at `ZERO`), then the hint `h` (80 ones, none at the corner), then
-/// `c~ = H(mu || w1Encode(UseHint(h, w')))` (line 12). Honest signing cannot place a coefficient
-/// or a weight deliberately, and random batches of 1K hit the corner with probability about 3e-4.
+/// The synthetic weight-80 record of `gen::hint_corner_record` with its hint.
 struct Synthetic {
     pk: Vec<u8>,
     msg: Vec<u8>,
@@ -114,113 +99,14 @@ struct Synthetic {
 }
 
 fn synthetic() -> Synthetic {
-    let mut rho = [0u8; 32];
-    gen::derive_bytes(b"h-fips/rho", &[1], &mut rho);
-    let mut pk = rho.to_vec();
-    pk.resize(PK_BYTES, 0);
-    let key = ExpandedKey::from_bytes(&pk).unwrap();
-    assert!(key.t1.iter().flatten().all(|&t| t == 0));
-    let msg = b"h-fips synthetic signature of hint weight 80".to_vec();
-    let mu = native::mu(&key.tr, &msg, &[]);
-
-    // z uniform in [-B_z, B_z], then two coefficients moved so that (A z) = q - gamma2 at
-    // CORNER and (A z) = 0 at ZERO (the only non-wrap residue with r1 = 0 and r0 <= 0, where
-    // h = 1 gives the e = -1 wrap to w1' = 43).
-    let mut rng = SplitMix64::new(0x4F1F5);
-    let mut z: VecL = [[0; N]; L];
-    for zi in z.iter_mut() {
-        for x in zi.iter_mut() {
-            *x = rng.below(2 * B_Z as u64 + 1) as i64 - B_Z;
-        }
+    let r = gen::hint_corner_record(1);
+    let h = native::sig_decode(&r.sig).unwrap().h;
+    Synthetic {
+        pk: r.pk,
+        msg: r.msg,
+        sig: r.sig,
+        h,
     }
-    let targets = [(CORNER, Q - GAMMA2), (ZERO, 0)];
-    let az0 = az_integer(&key, &z);
-    let need: Vec<i64> = targets
-        .iter()
-        .map(|&((r, j), t)| mod_q(t - az0[r][j] as i64))
-        .collect();
-    // Coefficient of z[s][k] in (A z)[r][j] = sum_s (A[r][s] * z[s])_j (negacyclic).
-    let coef = |(r, j): (usize, usize), s: usize, k: usize| -> i64 {
-        mod_q(i64::from(key.a[r][s][(j + N - k) % N]) * if k <= j { 1 } else { -1 })
-    };
-    let inv = |a: i64| pow_mod(a as u64, (Q - 2) as u64, Q as u64) as i64;
-    let mulq = |a: i64, b: i64| ((i128::from(a) * i128::from(b)).rem_euclid(i128::from(Q))) as i64;
-    let mut moved = false;
-    'search: for k1 in 0..N {
-        for k2 in (k1 + 1)..N {
-            let (s1, s2) = (k1 % L, k2 % L);
-            let (a11, a12) = (coef(targets[0].0, s1, k1), coef(targets[0].0, s2, k2));
-            let (a21, a22) = (coef(targets[1].0, s1, k1), coef(targets[1].0, s2, k2));
-            let det = mod_q(mulq(a11, a22) - mulq(a12, a21));
-            if det == 0 {
-                continue;
-            }
-            let di = inv(det);
-            let d1 = ctr_q(mulq(mod_q(mulq(need[0], a22) - mulq(a12, need[1])), di));
-            let d2 = ctr_q(mulq(mod_q(mulq(a11, need[1]) - mulq(a21, need[0])), di));
-            let (n1, n2) = (z[s1][k1] + d1, z[s2][k2] + d2);
-            if n1.abs() <= B_Z && n2.abs() <= B_Z {
-                z[s1][k1] = n1;
-                z[s2][k2] = n2;
-                moved = true;
-                break 'search;
-            }
-        }
-    }
-    assert!(moved, "no two-coefficient move found");
-    let az = az_integer(&key, &z);
-    let w: [[i64; N]; K] = std::array::from_fn(|r| std::array::from_fn(|j| mod_q(az[r][j] as i64)));
-    assert_eq!(w[CORNER.0][CORNER.1], Q - GAMMA2);
-    assert_eq!(w[ZERO.0][ZERO.1], 0);
-
-    // Hint: up to two coefficients of each class with h = 1 (wrap; w1' wraps 43 -> 0; w1' wraps
-    // 0 -> 43, only w' = 0; plain sigma = 1; plain sigma = -1), then the first others up to
-    // exactly 80.
-    let class = |wq: i64| -> usize {
-        if wq >= Q - GAMMA2 {
-            return 0;
-        }
-        let (r1, r0) = decompose(wq);
-        match (r0 > 0, r1) {
-            (true, 43) => 1,
-            (false, 0) => 2,
-            (true, _) => 3,
-            (false, _) => 4,
-        }
-    };
-    let mut h: SmallK = [[0; N]; K];
-    let mut per_class = [0usize; 5];
-    let mut weight = 0usize;
-    for r in 0..K {
-        for j in 0..N {
-            let c = class(w[r][j]);
-            if (r, j) != CORNER && per_class[c] < 2 {
-                per_class[c] += 1;
-                h[r][j] = 1;
-                weight += 1;
-            }
-        }
-    }
-    assert!(per_class.iter().all(|&c| c >= 1), "every class present: {per_class:?}");
-    assert_eq!(h[ZERO.0][ZERO.1], 1);
-    for r in 0..K {
-        for j in 0..N {
-            if weight < OMEGA && (r, j) != CORNER && h[r][j] == 0 {
-                h[r][j] = 1;
-                weight += 1;
-            }
-        }
-    }
-    assert_eq!(weight, OMEGA);
-    let mut w1: SmallK = [[0; N]; K];
-    for r in 0..K {
-        for j in 0..N {
-            w1[r][j] = use_hint(h[r][j] != 0, w[r][j]) as u8;
-        }
-    }
-    let c_tilde = commitment_hash(&mu, &w1_encode(&w1));
-    let sig = sig_encode(&c_tilde, &z, &h);
-    Synthetic { pk, msg, sig, h }
 }
 
 fn derive_synthetic(s: &Synthetic) -> (PublicInstance, HFipsRecord) {

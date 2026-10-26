@@ -169,28 +169,42 @@ impl Stage1Claims {
 }
 
 /// The stage-2 terminal claims (spec Section 7.4): `b_t(r^(2))` and `P_Z(r^(2))` for each
-/// leaf-checked digit (`Z_hi`, `U_hi` under H-u: 8 claims; `U_hi` under H-exact: 7).
+/// leaf-checked digit (`Z_hi`, `U_hi` under H-u: 8 claims; `U_hi` under H-exact: 7); under
+/// H-FIPS no leaf but `delta(r^(2))` and `e(r^(2))` (8 claims, `stage2::FIPS_TERMINALS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
     /// `b_t(r^(2))`.
     pub b: [E; W1_BITS],
     /// `P_Z(r^(2))` per leaf-checked digit, in the order of `manifest.leaf_digits()`.
     pub squares: Vec<E>,
+    /// H-FIPS: `delta(r^(2))`, `e(r^(2))` (empty otherwise).
+    pub fips: Vec<E>,
 }
 
 impl Stage2Claims {
     /// Wire length under `manifest`'s relation.
     #[must_use]
     pub fn len(manifest: &CommitmentManifest) -> usize {
-        W1_BITS + manifest.leaf_digits().len()
+        W1_BITS + manifest.leaf_digits().len() + Self::fips_len(manifest)
+    }
+
+    /// H-FIPS claims (2 under H-FIPS, else 0).
+    #[must_use]
+    pub fn fips_len(manifest: &CommitmentManifest) -> usize {
+        if manifest.is_fips() {
+            crate::stage2::FIPS_TERMINALS.len()
+        } else {
+            0
+        }
     }
 
     /// Wire order.
     #[must_use]
     pub fn to_vec(&self) -> Vec<E> {
-        let mut out = Vec::with_capacity(W1_BITS + self.squares.len());
+        let mut out = Vec::with_capacity(W1_BITS + self.squares.len() + self.fips.len());
         out.extend_from_slice(&self.b);
         out.extend_from_slice(&self.squares);
+        out.extend_from_slice(&self.fips);
         out
     }
 
@@ -201,9 +215,12 @@ impl Stage2Claims {
             return None;
         }
         let mut offset = 0;
+        let b = take(values, &mut offset);
+        let squares_end = offset + manifest.leaf_digits().len();
         Some(Self {
-            b: take(values, &mut offset),
-            squares: values[offset..].to_vec(),
+            b,
+            squares: values[offset..squares_end].to_vec(),
+            fips: values[squares_end..].to_vec(),
         })
     }
 }

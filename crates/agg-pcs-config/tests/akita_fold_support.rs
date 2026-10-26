@@ -558,12 +558,13 @@ fn grouped_rows_by_batch_size() {
     let catalog = AggFp64SignedWidth4::catalog().expect("catalog");
     let (mut got, mut want) = (Vec::new(), Vec::new());
     for relation in Relation::ALL {
-        let expected = match relation {
-            Relation::Hu => expected_h_u,
-            Relation::HExact => expected_h_exact,
+        let expected: &[(usize, usize, f64)] = match relation {
+            Relation::Hu => &expected_h_u,
+            Relation::HExact => &expected_h_exact,
+            Relation::HFips => &EXPECTED_H_FIPS,
         };
         assert_eq!(relation.catalog_d_sigs().len(), expected.len());
-        for (d_sig, draws, min_bits) in expected {
+        for &(d_sig, draws, min_bits) in expected {
             let plan = WorkPlan::for_records(1 << d_sig, relation).expect("work plan");
             let row = catalog
                 .resolve_key(&plan.schedule_key())
@@ -602,6 +603,10 @@ fn grouped_rows_by_batch_size() {
     }
     assert_eq!(got, want);
 }
+
+/// (d_sig, draws, minimum accepted support in bits) of the H-FIPS grouped rows
+/// (`mldsa-44-l16f-batch-<N*>-mult-final`), one entry per checked-in batch size.
+const EXPECTED_H_FIPS: [(usize, usize, f64); 0] = [];
 
 /// Claims per root group and the schedule of one resolved row.
 fn rows_of_one(

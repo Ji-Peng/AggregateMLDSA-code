@@ -18,15 +18,29 @@
 //! group of `r^(2)`), both affine in the committed columns: `z = Z_lo + 2^16 Z_hi + 2^15`
 //! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
 //! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
+//!
+//! Relation H-FIPS (`docs/h-exact.md` Section 10.7): `bool` for `bz_hi`, `l_hi`, `a_z`, then
+//! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F1 = s (s - 1)`,
+//! `F2 = delta (delta - 2 s + 1)` (`delta (delta - sigma)` with `sigma = 2 s - 1`),
+//! `F45 = 2 e w_1' + 43 e^2 - 43 e` (equivalent to `e (e + 1) w_1' = 0` and
+//! `e (e - 1)(w_1' - 43) = 0` once `F1`, `F2` and stage 2's `F3` give `e in {-1, 0, 1}`), and
+//! the hint-weight identity `F7`, `sum_i eq(r^(2)_sig, i) (sum_pos delta^2 + sum_hi u_h) =
+//! omega`, one instance with two parts at [`EqPoint::HalfR2`] (`delta^2` on the main domain
+//! with scale `2^(d_main - d_sig)`, `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`);
+//! after the 37 reductions the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`. The ring
+//! reads `u = (2 s - 1) L + s - 2 gamma_2 delta - e` with `L = l_lo + 29,696 l_hi + 2^15`:
+//! affine terms and the two products `s l_lo`, `s l_hi` (parts with scales -2 and -59,392).
+//! H-FIPS has 51 coefficients.
 
-use agg_witness::params::{GAMMA2, Q, W1_BITS};
-use jolt_field::{One, Zero};
+use agg_witness::params::{GAMMA2, OMEGA, Q, W1_BITS};
+use jolt_field::{One, Ring, Zero};
 
 use crate::claims::{Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
 use crate::kernel::Term;
 use crate::lookup::LookupClaims;
 use crate::manifest::{
-    value_columns, Column, CommitmentManifest, GroupRole, STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
+    value_columns, Column, CommitmentManifest, FipsColumn, GroupRole, L16_SLACK, LOOKUP_SHIFT, STACK_DOMAINS,
+    U16_DIGITS, V16_DIGITS,
 };
 use crate::public_data::PublicData;
 use crate::range::digits;
@@ -51,14 +65,22 @@ pub const STACKS: usize = 4;
 /// Gamma index of `ring`.
 pub const GAMMA_RING: usize = 0;
 
+/// H-FIPS checks of stage 3 (`F1`, `F2`, `F45`, `F7`).
+pub const FIPS_CHECKS: usize = 4;
+/// H-FIPS reductions of stage 3 (stage 2's `delta(r^(2))`, `e(r^(2))`).
+pub const FIPS_REDUCTIONS: usize = 2;
+
 /// The `gamma^(3)` layout of one relation: `links` leaf-checked digits (2 under H-u, 1 under
-/// H-exact) and `bools` Boolean value digits (0 under H-u, 2 under H-exact).
+/// H-exact, 0 under H-FIPS), `bools` Boolean value digits (0 under H-u, 2 under H-exact, 3
+/// under H-FIPS) and the H-FIPS checks and reductions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gammas {
     /// Link instances.
     pub links: usize,
     /// Booleanity zero-checks.
     pub bools: usize,
+    /// Relation H-FIPS.
+    pub fips: bool,
 }
 
 impl Gammas {
@@ -68,18 +90,47 @@ impl Gammas {
         Self {
             links: manifest.leaf_digits().len(),
             bools: manifest.bool_digits().len(),
+            fips: manifest.is_fips(),
         }
     }
 
-    /// First reduction index `o = 1 + links + bools`.
-    const fn first_reduction(self) -> usize {
-        1 + self.links + self.bools
+    const fn fips_checks(self) -> usize {
+        if self.fips {
+            FIPS_CHECKS
+        } else {
+            0
+        }
     }
 
-    /// Batching coefficients: 44 under H-u, 45 under H-exact.
+    const fn fips_reductions(self) -> usize {
+        if self.fips {
+            FIPS_REDUCTIONS
+        } else {
+            0
+        }
+    }
+
+    /// First reduction index `o = 1 + links + bools (+ 4 H-FIPS checks)`.
+    const fn first_reduction(self) -> usize {
+        1 + self.links + self.bools + self.fips_checks()
+    }
+
+    /// Batching coefficients: 44 under H-u, 45 under H-exact, 51 under H-FIPS.
     #[must_use]
     pub const fn count(self) -> usize {
-        self.first_reduction() + 6 * W1_BITS + 1 + STACKS
+        self.first_reduction() + 6 * W1_BITS + 1 + self.fips_reductions() + STACKS
+    }
+
+    /// Gamma index of H-FIPS check `k` (`F1, F2, F45, F7`).
+    #[must_use]
+    pub const fn fips_check(self, k: usize) -> usize {
+        1 + self.links + self.bools + k
+    }
+
+    /// Gamma index of H-FIPS reduction `k` (`delta`, `e` from `r^(2)`).
+    #[must_use]
+    pub const fn fips_reduction(self, k: usize) -> usize {
+        self.first_reduction() + 1 + 6 * W1_BITS + k
     }
 
     /// Gamma index of `link[k]`.
@@ -139,7 +190,7 @@ impl Gammas {
     /// Gamma index of the reduction of lookup stack `j`.
     #[must_use]
     pub const fn stack(self, j: usize) -> usize {
-        self.first_reduction() + 1 + 6 * W1_BITS + j
+        self.first_reduction() + 1 + 6 * W1_BITS + self.fips_reductions() + j
     }
 }
 
@@ -217,32 +268,106 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
 
     // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1'), the links, the
     // Booleanity zero-checks and the b_t reductions from r^(2). The high digits of z
-    // (Z_hi under H-u; bz_hi, a_z under H-exact) ride along for the link or the zero-checks.
-    let mut main_columns = vec![Column::U_LO, Column::V_LO, Column::V_HI, z_columns[1], Column::U_HI];
+    // (Z_hi under H-u; bz_hi, a_z under H-exact) ride along for the link or the zero-checks;
+    // H-FIPS reads l_lo, l_hi in the slots of U_lo, U_hi and adds s, delta, e.
+    let u_columns = value_columns(manifest.u_slot_value());
+    let mut main_columns = vec![u_columns[0], Column::V_LO, Column::V_HI, z_columns[1], u_columns[1]];
     main_columns.extend(z_columns[2..].iter().copied());
     main_columns.extend(lanes.clone().map(|t| Column::W1Bit(t as u8)));
+    if gammas.fips {
+        main_columns.extend(FipsColumn::ALL.map(Column::Fips));
+    }
     let position = |column: Column| main_columns.iter().position(|&c| c == column).expect("lane");
-    let [u_weights, v_weights] = [U16_DIGITS.weights(), V16_DIGITS.weights()];
+    let v_weights = V16_DIGITS.weights();
     let mut ring_b: Vec<(usize, i64)> = (0..W1_BITS)
         .map(|t| (position(Column::W1Bit(t as u8)), -((2 * GAMMA2) << t)))
         .collect();
-    ring_b.push((position(Column::U_LO), -u_weights[0]));
-    ring_b.push((position(Column::U_HI), -u_weights[1]));
     ring_b.push((position(Column::V_LO), -(Q * v_weights[0])));
     ring_b.push((position(Column::V_HI), -(Q * v_weights[1])));
-    let mut instances = vec![InstanceSpec::new(
-        GAMMA_RING,
-        vec![Term::Affine {
-            weight: None,
-            lanes: ring_b,
-            constant: -(U16_DIGITS.constant() + Q * V16_DIGITS.constant()),
-        }],
-    )];
+    let mut instances = Vec::new();
+    if gammas.fips {
+        // -u = -(2 s - 1)(l_lo + 29,696 l_hi + 2^15) - s + 2 gamma_2 delta + e: the affine part
+        // here, the products -2 s l_lo and -59,392 s l_hi as scaled parts.
+        let (sign, delta, wrap) = (position(Column::SIGN), position(Column::DELTA), position(Column::WRAP));
+        let (l_lo, l_hi) = (position(Column::L_LO), position(Column::L_HI));
+        let step = L16_SLACK.slack_weight;
+        ring_b.push((l_lo, 1));
+        ring_b.push((l_hi, step));
+        ring_b.push((sign, -(2 * i64::from(LOOKUP_SHIFT) + 1)));
+        ring_b.push((delta, 2 * GAMMA2));
+        ring_b.push((wrap, 1));
+        instances.push(InstanceSpec::new(
+            GAMMA_RING,
+            vec![Term::Affine {
+                weight: None,
+                lanes: ring_b,
+                constant: i64::from(LOOKUP_SHIFT) - Q * V16_DIGITS.constant(),
+            }],
+        ));
+        for (lane, scale) in [(l_lo, -2), (l_hi, -2 * step)] {
+            instances.push(InstanceSpec {
+                gamma: GAMMA_RING,
+                scale: E::from_i64(scale),
+                terms: vec![Term::Product(vec![sign, lane])],
+            });
+        }
+    } else {
+        let u_weights = U16_DIGITS.weights();
+        ring_b.push((position(Column::U_LO), -u_weights[0]));
+        ring_b.push((position(Column::U_HI), -u_weights[1]));
+        instances.push(InstanceSpec::new(
+            GAMMA_RING,
+            vec![Term::Affine {
+                weight: None,
+                lanes: ring_b,
+                constant: -(U16_DIGITS.constant() + Q * V16_DIGITS.constant()),
+            }],
+        ));
+    }
     for (k, digit) in all.iter().enumerate() {
         instances.push(InstanceSpec::new(gammas.link(k), vec![Term::Link(position(digit.column))]));
     }
     for (k, &column) in manifest.bool_digits().iter().enumerate() {
         instances.push(InstanceSpec::new(gammas.bool(k), vec![Term::Bool(position(column))]));
+    }
+    if gammas.fips {
+        let (sign, delta, wrap) = (position(Column::SIGN), position(Column::DELTA), position(Column::WRAP));
+        // F1 = s (s - 1).
+        instances.push(InstanceSpec::new(gammas.fips_check(0), vec![Term::Bool(sign)]));
+        // F2 = delta^2 + delta - 2 delta s.
+        instances.push(InstanceSpec::new(
+            gammas.fips_check(1),
+            vec![Term::Product(vec![delta, delta]), Term::Product(vec![delta])],
+        ));
+        instances.push(InstanceSpec {
+            gamma: gammas.fips_check(1),
+            scale: E::from_i64(-2),
+            terms: vec![Term::Product(vec![delta, sign])],
+        });
+        // F45 = sum_t 2^(t+1) e b_t + 43 e^2 - 43 e.
+        let f45 = gammas.fips_check(2);
+        for t in 0..W1_BITS {
+            instances.push(InstanceSpec {
+                gamma: f45,
+                scale: E::from_i64(2 << t),
+                terms: vec![Term::Product(vec![wrap, position(Column::W1Bit(t as u8))])],
+            });
+        }
+        let top = 43;
+        instances.push(InstanceSpec {
+            gamma: f45,
+            scale: E::from_i64(top),
+            terms: vec![Term::Product(vec![wrap, wrap])],
+        });
+        instances.push(InstanceSpec {
+            gamma: f45,
+            scale: E::from_i64(-top),
+            terms: vec![Term::Product(vec![wrap])],
+        });
+        // The reductions of stage 2's delta(r^(2)) and e(r^(2)).
+        for (k, lane) in [delta, wrap].into_iter().enumerate() {
+            instances.push(InstanceSpec::new(gammas.fips_reduction(k), vec![Term::Product(vec![lane])]));
+        }
     }
     instances.extend(lanes.clone().map(|t| {
         InstanceSpec::new(gammas.b_r2(t), vec![Term::Product(vec![position(Column::W1Bit(t as u8))])])
@@ -253,6 +378,37 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         lanes: column_lanes(&main_columns),
         instances,
     });
+    if gammas.fips {
+        // F7: sum_pos delta^2 (main) plus sum_hi u_h (D_2), both at (1/2, ..., r^(2)_sig).
+        let gamma = gammas.fips_check(3);
+        let lifted = |role: GroupRole| -> E {
+            E::from_u64(1_u64 << (manifest.group(role).logical_vars - manifest.d_sig()))
+        };
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::HalfR2,
+            lanes: vec![LaneId::Column(Column::DELTA)],
+            instances: vec![InstanceSpec {
+                gamma,
+                scale: lifted(GroupRole::Main),
+                terms: vec![Term::Product(vec![0, 0])],
+            }],
+        });
+        groups.push(GroupSpec {
+            domain: GroupRole::Level2,
+            eq: EqPoint::HalfR2,
+            lanes: vec![LaneId::Column(Column::HINT_SLACK)],
+            instances: vec![InstanceSpec {
+                gamma,
+                scale: lifted(GroupRole::Level2),
+                terms: vec![Term::Affine {
+                    weight: None,
+                    lanes: vec![(0, 1)],
+                    constant: i64::from(LOOKUP_SHIFT),
+                }],
+            }],
+        });
+    }
 
     // Main domain, no equality factor: w_A times z (z = Z_lo + 2^16 Z_hi + 2^15 under H-u,
     // z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 under H-exact).
@@ -295,7 +451,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     });
 
     // D_2, eq(tau_2): y^(2)_t and K^(2)_t reductions; eq(r^(1)_2): y^(2)_t.
-    let kappa2 = column_lanes(&manifest.stack_columns(2));
+    let kappa2: Vec<LaneId> = lanes.clone().map(|t| LaneId::Column(Column::carry(2, t as u8))).collect();
     let y2: Vec<LaneId> = lanes
         .clone()
         .map(|t| LaneId::Column(Column::Parity2(t as u8)))
@@ -375,6 +531,12 @@ pub fn claimed_sums(
     claims[GAMMA_RING] = t_at_r2;
     for (k, &square) in stage2.squares.iter().enumerate() {
         claims[gammas.link(k)] = square;
+    }
+    if gammas.fips {
+        claims[gammas.fips_check(3)] = E::from_u64(OMEGA as u64);
+        for (k, &value) in stage2.fips.iter().enumerate() {
+            claims[gammas.fips_reduction(k)] = value;
+        }
     }
     for t in 0..W1_BITS {
         claims[gammas.b_r1(t)] = stage1.b[t];
