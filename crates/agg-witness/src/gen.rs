@@ -172,6 +172,78 @@ pub fn records_shared_keys(seed: u64, n: usize, n_keys: usize) -> Vec<Record> {
         .collect()
 }
 
+/// A genuine key pair whose public key starts with the given `rho` (the matrix seed of
+/// another key): the secrets `s1`, `s2` and `K` of the seed's own key, `t = A[rho] s1 + s2`
+/// recomputed under `rho`, `(t1, t0) = Power2Round(t)` (FIPS 204 Algorithm 35) and
+/// `tr = H(pk, 64)`, decoded by the crate through skDecode (Algorithm 25).
+///
+/// For tests of key handling: `rho` is chosen by the signer, so two honest-looking keys may
+/// share it, and anything keyed by the 32-byte prefix of `pk` would confuse them.
+pub fn keypair_with_rho(seed: &[u8; 32], rho: &[u8; 32]) -> (ExpandedSigningKey<MlDsa44>, Vec<u8>) {
+    use crate::expand::expand_a;
+    use crate::native::{bit_pack, bit_unpack, mod_q, pk_encode, tr, PublicKey};
+    use crate::ntt::NttPrime;
+    use crate::params::{D, ETA, K, L, N, Q};
+    use ml_dsa::ExpandedSigningKeyBytes;
+
+    let (own, _) = keypair(seed);
+    #[allow(deprecated)]
+    let own_bytes = own.to_expanded();
+    let own_bytes = own_bytes.as_slice();
+    let poly_eta = 32 * 3; // bitlen(2 eta) = 3 bits per coefficient
+    let s1_at = 32 + 32 + 64;
+    let s2_at = s1_at + L * poly_eta;
+    let t0_at = s2_at + K * poly_eta;
+    let s1: Vec<[i64; N]> = (0..L)
+        .map(|j| bit_unpack(&own_bytes[s1_at + j * poly_eta..][..poly_eta], ETA, ETA))
+        .collect();
+    let s2: Vec<[i64; N]> = (0..K)
+        .map(|i| bit_unpack(&own_bytes[s2_at + i * poly_eta..][..poly_eta], ETA, ETA))
+        .collect();
+    let fips = NttPrime::fips();
+    let (a_hat, _) = expand_a(rho);
+    let s1_hat: Vec<[u64; N]> = s1.iter().map(|s| fips.ntt_signed(s)).collect();
+    let mut t1 = [[0_u16; N]; K];
+    let mut t0 = [[0_i64; N]; K];
+    for i in 0..K {
+        let mut acc = [0_u64; N];
+        for j in 0..L {
+            let product = fips.pointwise(&a_hat[i][j], &s1_hat[j]);
+            for (x, y) in acc.iter_mut().zip(product) {
+                *x = fips.add_mod(*x, y);
+            }
+        }
+        let t = fips.intt(&acc);
+        for m in 0..N {
+            let r = mod_q(t[m] as i64 + s2[i][m]);
+            let half = 1_i64 << (D - 1);
+            let r0 = (r + half - 1).rem_euclid(1 << D) - (half - 1); // r mod+- 2^d
+            t1[i][m] = ((r - r0) >> D) as u16;
+            t0[i][m] = r0;
+        }
+    }
+    debug_assert!(Q < 1 << 23);
+    let pk = pk_encode(&PublicKey { rho: *rho, t1 });
+    let mut sk = Vec::with_capacity(own_bytes.len());
+    sk.extend_from_slice(rho);
+    sk.extend_from_slice(&own_bytes[32..64]);
+    sk.extend_from_slice(&tr(&pk));
+    sk.extend_from_slice(&own_bytes[s1_at..t0_at]);
+    for row in &t0 {
+        bit_pack(row, (1 << (D - 1)) - 1, 1 << (D - 1), &mut sk);
+    }
+    assert_eq!(sk.len(), own_bytes.len(), "skEncode length");
+    let bytes = ExpandedSigningKeyBytes::<MlDsa44>::try_from(sk.as_slice()).expect("sk length");
+    #[allow(deprecated)]
+    let signer = ExpandedSigningKey::<MlDsa44>::from_expanded(&bytes);
+    assert_eq!(
+        signer.verifying_key().encode().as_slice(),
+        pk.as_slice(),
+        "the crate derives the same public key"
+    );
+    (signer, pk)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +265,22 @@ mod tests {
         let s = records_shared_keys(2, 6, 2);
         assert_eq!(s[0].pk, s[2].pk);
         assert!(s.iter().all(|r| crate_verify(&r.pk, &r.msg, &r.sig)));
+    }
+
+    #[test]
+    fn keys_sharing_rho_sign_and_verify() {
+        let (_, victim) = keypair(&key_seed(9, 0));
+        let mut rho = [0u8; 32];
+        rho.copy_from_slice(&victim[..32]);
+        let (sk, pk) = keypair_with_rho(&key_seed(9, 1), &rho);
+        assert_eq!(pk[..32], victim[..32]);
+        assert_ne!(pk, victim);
+        let msg = message(9, 2);
+        let sig = sign(&sk, &msg, None);
+        assert!(crate_verify(&pk, &msg, &sig));
+        assert!(crate::native::verify(&pk, &msg, &sig));
+        assert!(!crate_verify(&victim, &msg, &sig));
+        assert!(!crate::native::verify(&victim, &msg, &sig));
     }
 
     #[test]

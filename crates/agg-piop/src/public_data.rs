@@ -23,9 +23,10 @@ use agg_witness::native::{ctr_q, mu, pk_decode, sample_in_ball, tr, Challenge};
 use agg_witness::ntt::NttPrime;
 use agg_witness::padding::{main_index, Geometry};
 use agg_witness::params::{C_TILDE_BYTES, D, D_POS, K, L, N, TR_BYTES};
-use jolt_field::{Fold, One, Ring, Zero};
+use jolt_field::{CanonicalEncoding, Fold, One, Ring, Zero};
 use rayon::prelude::*;
 
+use crate::BaseField;
 use crate::OpeningField as E;
 
 /// `T_i` of one record: `k` polynomials of 256 integer coefficients, `|T| < 2^29`.
@@ -48,20 +49,28 @@ pub fn inverse_ntt_matrix(a_hat: &MatrixNtt) -> Box<MatrixCoeff> {
 
 /// `T[rho] = 2^d (c * t1[rho])` over `Z[X]/(X^256 + 1)` from the `tau` nonzero entries of
 /// `c` (`k tau 256` signed additions; spec Section 2 item 5).
+///
+/// Each nonzero `c_p = +-1` adds `+-X^p t1`: coefficient `m < N - p` of `t1` lands at
+/// `p + m`, the others wrap to `p + m - N` with the opposite sign, so the shift-add is two
+/// contiguous slice updates split at `N - p` (branch-free inner loops that the compiler
+/// vectorizes with the baseline SSE2 lanes). Before the shift `|c * t1| <= tau (2^10 - 1)
+/// < 2^16`, so no `i32` overflows; after it `|T| < 2^29`.
 #[must_use]
 pub fn sparse_t(c: &Challenge, t1: &[[u16; N]; K]) -> PublicT {
     let mut out = [[0_i32; N]; K];
     for (row, t1_row) in out.iter_mut().zip(t1) {
+        let t: [i32; N] = std::array::from_fn(|m| i32::from(t1_row[m]));
         for &position in &c.positions {
             let p = usize::from(position);
-            let sign = i32::from(c.coeffs[p]);
-            for (m, &t) in t1_row.iter().enumerate() {
-                let value = sign * i32::from(t);
-                if p + m < N {
-                    row[p + m] += value;
-                } else {
-                    row[p + m - N] -= value;
-                }
+            let (straight_src, wrapped_src) = t.split_at(N - p);
+            let (wrapped_dst, straight_dst) = row.split_at_mut(p);
+            debug_assert!(c.coeffs[p] == 1 || c.coeffs[p] == -1);
+            if c.coeffs[p] > 0 {
+                add_assign(straight_dst, straight_src);
+                sub_assign(wrapped_dst, wrapped_src);
+            } else {
+                sub_assign(straight_dst, straight_src);
+                add_assign(wrapped_dst, wrapped_src);
             }
         }
         for coeff in row.iter_mut() {
@@ -69,6 +78,80 @@ pub fn sparse_t(c: &Challenge, t1: &[[u16; N]; K]) -> PublicT {
         }
     }
     out
+}
+
+#[inline(always)]
+fn add_assign(dst: &mut [i32], src: &[i32]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d += s;
+    }
+}
+
+#[inline(always)]
+fn sub_assign(dst: &mut [i32], src: &[i32]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d -= s;
+    }
+}
+
+/// A vector over `E = F_{p^2}` split into the canonical `u64` coordinates of its two base
+/// coefficients, for exact integer inner products with small signed integer vectors
+/// ([`SplitWeights::dot`]). Multiplying `e = (e_0, e_1)` by an integer `v` is coordinatewise
+/// (`v e = (v e_0, v e_1)`, whatever the `Ext2` non-residue), so
+/// `sum_j v_j e_j = (sum_j v_j e_{j,0} mod p, sum_j v_j e_{j,1} mod p)`: each coordinate sum is
+/// accumulated exactly in `i128` and reduced once, instead of one `Ext2` product and its
+/// reductions per term.
+#[derive(Clone, Debug)]
+pub struct SplitWeights {
+    coords: Vec<[u64; 2]>,
+}
+
+impl SplitWeights {
+    /// Splits `weights` into canonical coordinates.
+    #[must_use]
+    pub fn new(weights: &[E]) -> Self {
+        Self {
+            coords: weights
+                .iter()
+                .map(|w| {
+                    w.coeffs
+                        .map(|c| c.to_u64_checked().expect("a canonical fp64 coordinate"))
+                })
+                .collect(),
+        }
+    }
+
+    /// Number of weights.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.coords.len()
+    }
+
+    /// True when empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.coords.is_empty()
+    }
+
+    /// `sum_j values[j] weights[offset + j]` in `E`, exact.
+    ///
+    /// Bound: every coordinate is below `p < 2^64` and every value is an `i32`, so each term is
+    /// below `2^95` in absolute value and any sum of at most `2^31` terms below `2^126`: the
+    /// accumulation is exact in `i128` whatever the values. The callers are much smaller:
+    /// `T` (`|T| < 2^29`, 1,024 terms): below `2^103`; `A` (`|A| < 2^22`, 256 terms):
+    /// `256 x 2^64 x 2^22 = 2^94 < 2^95`. Panics if `values` runs past the weights.
+    #[must_use]
+    #[inline]
+    pub fn dot(&self, offset: usize, values: &[i32]) -> E {
+        let coords = &self.coords[offset..offset + values.len()];
+        let (mut acc0, mut acc1) = (0_i128, 0_i128);
+        for (&[w0, w1], &v) in coords.iter().zip(values) {
+            let v = i128::from(v);
+            acc0 += i128::from(w0) * v;
+            acc1 += i128::from(w1) * v;
+        }
+        E::new(BaseField::from_i128(acc0), BaseField::from_i128(acc1))
+    }
 }
 
 /// What the verifier keeps per key.
