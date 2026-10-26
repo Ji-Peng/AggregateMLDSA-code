@@ -1762,11 +1762,6 @@ fn block_first_phase<Ch: Challenger>(
                     let s: Vec<F128> = (0..n_e)
                         .map(|e| {
                             let bank = &cl.bank[(2 * e + c0) * NB..(2 * e + c0 + 1) * NB];
-                            // agg-mldsa patch (PATCH.md Section 4, K21): a zero bank row
-                            // has a zero statistic.
-                            if bank.iter().all(|x| *x == F128::ZERO) {
-                                return F128::ZERO;
-                            }
                             let mut acc = F128::ZERO;
                             for b in 0..NB {
                                 acc += pw[b][kinv] * bank[b];

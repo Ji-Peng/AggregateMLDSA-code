@@ -115,11 +115,6 @@ across four blocks (field-identical to the scalar multiply), the dot products wi
 3 threads, load 6-7): block statistics 800-1,000 ms -> 77-95 ms at 8,192 records;
 aggregates unchanged. Test: `pcs::block_stats_x86::tests::kernels_match_portable`.
 
-Addition (agg-mldsa K21): a block whose bank row is zero has a zero statistic (the inner
-product, `kappa` times it and its squarings are zero), so the portable loop returns zero for
-it and the AVX-512 kernel returns a zero chunk when all its bank rows are zero; the bit claim
-of the parity chain has a nonzero bank on 64 word columns only. Exact.
-
 ## 5. Verifier-visible: list-aware work at the outer sites (agg-mldsa deviation K19)
 
 `src/zerocheck.rs` (`ZerocheckGrinding`), `src/lincheck.rs` (`LincheckGrinding`),

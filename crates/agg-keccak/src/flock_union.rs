@@ -109,11 +109,13 @@ impl BitClaim {
     }
 }
 
-/// The column bit-bank of a bit claim on the padded buffer `z` with `2^nu` rows per word
-/// column: `bank[128 c + b] = sum_j eq(x_row, j) bit_b(z[(c << nu) | j])` for every word column
-/// `c` whose column weight `eq(x_col, c)` is nonzero, zero elsewhere (those columns enter
-/// every use of the bank multiplied by their zero weight). The input of the block-first
-/// transport (`pcs::open_batch_merged`) and of `s_hat_v`.
+/// The partial column bit-bank of a bit claim on the padded buffer `z` with `2^nu` rows per
+/// word column: `bank[128 c + b] = sum_j eq(x_row, j) bit_b(z[(c << nu) | j])` for every word
+/// column `c` whose column weight `eq(x_col, c)` is nonzero, zero elsewhere. Enough for
+/// `s_hat_v` ([`bit_s_hat_v`], where the other columns are multiplied by their zero weight),
+/// NOT for the block-first transport of `pcs::open_batch_merged`, whose block rounds fold the
+/// bank's multilinear extension and need every column ([`UnionGeometry::prove`] uses Flock's
+/// `union_bitbank_fold` there).
 ///
 /// # Panics
 /// If the claim's length does not fit `z` and `nu`.
@@ -620,19 +622,9 @@ impl UnionGeometry {
             })
             .collect();
         let values: Vec<F128> = packed_direct.iter().map(|c| c.value).collect();
-        // The caller's bit claims (K21): banks and s_hat_v from the padded buffer.
-        let bit_banks: Vec<Vec<F128>> = bit_claims
-            .iter()
-            .map(|c| {
-                assert_eq!(c.x_full.len(), word_vars + 1, "bit claim point length");
-                bit_bank(&z, c, nu)
-            })
-            .collect();
-        let bit_s_hat: Vec<Vec<F128>> = bit_claims
-            .iter()
-            .zip(&bit_banks)
-            .map(|(c, bank)| bit_s_hat_v(bank, c, nu))
-            .collect();
+        for c in bit_claims {
+            assert_eq!(c.x_full.len(), word_vars + 1, "bit claim point length");
+        }
         let q_owned = self.compact(&union, &z);
         let (commitment, prover_data) = match pre {
             Some(CommitData {
@@ -706,6 +698,23 @@ impl UnionGeometry {
             assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
             lincheck::union_bitbank_fold(&union, &slots, &zc_claim.r_rest[1..1 + nu])
         });
+        // The caller's bit claims (K21). With the block-first transport the bank must be the
+        // full column bit-bank of the stack at the claim's row point (the block rounds fold the
+        // bank's multilinear extension, so the columns of zero weight enter too), computed
+        // like the C claim's from the stripes; otherwise only `s_hat_v` is needed, and the
+        // columns of nonzero weight suffice (`bit_bank`).
+        let bit_banks: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .map(|c| match &bank_c {
+                Some(_) => lincheck::union_bitbank_fold(&union, &slots, &c.x_full[1..=nu]),
+                None => bit_bank(&z, c, nu),
+            })
+            .collect();
+        let bit_s_hat: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .zip(&bit_banks)
+            .map(|(c, bank)| bit_s_hat_v(bank, c, nu))
+            .collect();
         drop(slots);
         drop(stripes);
         let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];

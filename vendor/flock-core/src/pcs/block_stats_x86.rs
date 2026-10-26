@@ -86,13 +86,6 @@ unsafe fn chunk(
 ) -> Vec<F128> {
     let nj = js.len();
     let mut buf = vec![F128::ZERO; nj * ne];
-    // agg-mldsa patch (PATCH.md Section 4, K21): a chunk whose bank rows are all zero has
-    // all-zero statistics (the inner products, kappa times them and their squarings are
-    // zero); a caller's bit claim over a few word columns has zero bank rows elsewhere.
-    let rows = &bank[(2 * e0 + c0) * nb..(2 * (e0 + ne - 1) + c0 + 1) * nb];
-    if rows.iter().all(|x| x.lo == 0 && x.hi == 0) {
-        return buf;
-    }
     let mut lanes = [F128::ZERO; 4];
     // Pass 1: the inner products, four terms per accumulator, GROUP accumulators
     // per sweep of the bank row.

@@ -1398,6 +1398,62 @@ mod tests {
         }
     }
 
+    /// The sponge instance at a full-height count (2,048 records: Flock's block-first
+    /// transport) verifies with no bit claim, a bit claim at a random point and one whose
+    /// column coordinates are zero above the chain's 64 word columns. Regression: the block
+    /// rounds fold the column bit-bank's multilinear extension, so a bank computed only on
+    /// the columns of nonzero weight (enough for `s_hat_v`) made the honest proof fail.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
+    fn bit_claims_verify_on_a_full_height_sponge() {
+        let gate = sponge_gate();
+        let n = 2048;
+        let part = TiedPart::new_part(&gate, n, 11, 0, Profile::Fast);
+        let mut rng = Rng::new(77);
+        let records: Vec<SpongeRecord> = (0..n).map(|_| random_record(&mut rng)).collect();
+        let nu = part.nu();
+        let wv = part.sponge().word_vars();
+        let rand_claim = |rng: &mut Rng, zero_cols_from: usize| {
+            let mut x: Vec<F128> = (0..=wv).map(|_| rand_f(rng)).collect();
+            for v in x.iter_mut().skip(1 + nu + zero_cols_from) {
+                *v = F128::ZERO;
+            }
+            BitClaim {
+                skip: std::array::from_fn(|_| rand_f(rng)),
+                x_full: x,
+            }
+        };
+        for (label, claims) in [
+            ("none", vec![]),
+            ("random", vec![rand_claim(&mut rng, wv)]),
+            ("64 columns", vec![rand_claim(&mut rng, 6)]),
+        ] {
+            let (sponge, _) = part.honest_parts(&records);
+            let data = part.sponge().commit_data(&[&sponge.z]);
+            let cap = data.commitment();
+            let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
+            let _ = &records;
+            let rho_r: Vec<F128> = (0..nu).map(|_| rand_f(&mut rng)).collect();
+            let pubp = part.public_point(&rho_r, &[F128::ONE, F128::ZERO, F128::ONE]);
+            let mut ch = FsChallenger::new(b"debug");
+            let gates: [&dyn LincheckCircuit; 1] = [part.gate];
+            let (proof, _) = part.sponge().prove(
+                vec![sponge],
+                &gates,
+                std::slice::from_ref(&pubp),
+                &claims,
+                &mut ch,
+                Some(data),
+            );
+            let mut ch = FsChallenger::new(b"debug");
+            let with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
+            let r = part
+                .sponge()
+                .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
+            assert!(r.is_ok(), "{label}: {r:?}");
+        }
+    }
+
     #[test]
     fn work_follows_the_profile_lists() {
         // docs/soundness.md Sections 3.6 and 10 (version 5): tie L_s (nu_s + 3), eq_Y

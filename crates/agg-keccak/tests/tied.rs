@@ -499,6 +499,15 @@ fn tied_part_round_trips_256_and_512() {
     tied_round_trip(512, 0x512, Tamper::None);
 }
 
+/// 2,048 records (`d = 11`): a full-height sponge instance (`n = 2^nu_s`), so Flock's opening
+/// takes the block-first transport with the chain's column bit-bank (the path of every
+/// power-of-two batch from 2,048 records on, 32K included).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
+fn tied_part_round_trip_2048_full_height() {
+    tied_round_trip(2048, 0x2048, Tamper::None);
+}
+
 /// 1,024 records (`d = 10`): two level-1 blocks per lane, the first part whose chain has a
 /// block coordinate; with the tampering case that depends on the blocks (the flipped copy
 /// sits in block 1).
