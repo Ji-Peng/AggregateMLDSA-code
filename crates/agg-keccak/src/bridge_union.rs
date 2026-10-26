@@ -1803,7 +1803,7 @@ mod tests {
             let mut ch = FsChallenger::new(b"test/bridge-union");
             ch.observe_bytes(&s1.digest());
             let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
-            g.prove(bufs, &circuits, &points, &mut ch, data)
+            g.prove(bufs, &circuits, &points, &[], &mut ch, data)
         };
         let verify = |cap: &crate::prover::KeccakCommitment,
                       proof: &crate::flock_union::UnionProof,
@@ -1812,7 +1812,7 @@ mod tests {
             let mut ch = FsChallenger::new(b"test/bridge-union");
             ch.observe_bytes(&s1.digest());
             let circuits: [&dyn LincheckCircuit; 2] = [&s1, &s2];
-            g.verify(&circuits, cap, proof, &points, &mut ch)
+            g.verify(&circuits, cap, proof, &points, &[], &mut ch)
         };
         let (proof, cap) = prove(&blocks, &y, false);
         verify(&cap, &proof, &y).expect("honest toy union");

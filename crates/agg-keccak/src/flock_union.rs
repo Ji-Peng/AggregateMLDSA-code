@@ -46,7 +46,11 @@ use flock_core::{
     lincheck::{self, build_eq_table, LincheckCircuit, QuirkyPoint, SkipPoint, UnionLincheckSlot},
     pcs::{
         commit, commit_lane_major, ligerito::embedded_initial_k_or_default, open_batch_merged,
-        rectangular_prefix_columns, ring_switch::s_hat_v_from_z_vec, verify_batch_merged,
+        rectangular_prefix_columns,
+        ring_switch::{
+            build_claim_weights_from_skip, claim_check, fold_1b_rows_naive, s_hat_v_from_z_vec,
+        },
+        verify_batch_merged,
         Commitment, DirectEqInd, PackedDirectClaim, PackedDirectClaimRef, PcsParams, ProverData,
         LOG_PACKING,
     },
@@ -81,6 +85,78 @@ fn x_full(point: &QuirkyPoint) -> Vec<F128> {
     v.extend_from_slice(&point.x_inner_rest);
     v.extend_from_slice(&point.x_outer);
     v
+}
+
+/// A ring-switched claim of the caller on the committed BIT polynomial (deviation K21,
+/// `docs/parity-chain.md` Section 4): `z_bit(point) = value` where the point's in-word bits
+/// 0..5 are the multilinear skip coordinates `skip` (Flock's `SkipPoint::Eq`) and `x_full`
+/// is in-word bit 6 followed by the `M - 7` word-address coordinates (rows low, as a
+/// packed-direct point). Unlike a packed-direct claim it goes through Flock's ring switch
+/// (`s_hat_v`, 128 values) and the twisted multipoint assist (128 dual values).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BitClaim {
+    /// In-word bits 0..5.
+    pub skip: [F128; 6],
+    /// In-word bit 6, then the word address (`M - 6` coordinates in all).
+    pub x_full: Vec<F128>,
+}
+
+impl BitClaim {
+    /// Flock's skip point of the claim.
+    #[must_use]
+    pub fn skip_point(&self) -> SkipPoint {
+        SkipPoint::Eq(self.skip)
+    }
+}
+
+/// The column bit-bank of a bit claim on the padded buffer `z` with `2^nu` rows per word
+/// column: `bank[128 c + b] = sum_j eq(x_row, j) bit_b(z[(c << nu) | j])` for every word column
+/// `c` whose column weight `eq(x_col, c)` is nonzero, zero elsewhere (those columns enter
+/// every use of the bank multiplied by their zero weight). The input of the block-first
+/// transport (`pcs::open_batch_merged`) and of `s_hat_v`.
+///
+/// # Panics
+/// If the claim's length does not fit `z` and `nu`.
+#[must_use]
+pub fn bit_bank(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let vars = claim.x_full.len() - 1;
+    assert_eq!(z.len(), 1usize << vars, "padded buffer length");
+    assert!(nu <= vars, "row coordinates");
+    let eq_row = build_eq_table(&claim.x_full[1..=nu]);
+    let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
+    let rows = 1usize << nu;
+    let mut bank = vec![F128::ZERO; eq_col.len() << LOG_PACKING];
+    for (c, chunk) in bank.chunks_exact_mut(1 << LOG_PACKING).enumerate() {
+        if eq_col[c] != F128::ZERO {
+            chunk.copy_from_slice(&fold_1b_rows_naive(&z[c * rows..(c + 1) * rows], &eq_row));
+        }
+    }
+    bank
+}
+
+/// `s_hat_v` of a bit claim from its bank: `sum_c eq(x_col, c) bank[c]`.
+#[must_use]
+pub fn bit_s_hat_v(bank: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
+    let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
+    let n = 1usize << LOG_PACKING;
+    assert_eq!(bank.len(), eq_col.len() * n, "one bank row per word column");
+    let mut out = vec![F128::ZERO; n];
+    for (c, &e) in eq_col.iter().enumerate() {
+        if e != F128::ZERO {
+            for (o, &b) in out.iter_mut().zip(&bank[c * n..(c + 1) * n]) {
+                *o += e * b;
+            }
+        }
+    }
+    out
+}
+
+/// The value `z_bit(point)` of a bit claim on the padded buffer `z` (rows `2^nu`).
+#[must_use]
+pub fn bit_value(z: &[F128], claim: &BitClaim, nu: usize) -> F128 {
+    let s_hat_v = bit_s_hat_v(&bit_bank(z, claim, nu), claim, nu);
+    let weights = build_claim_weights_from_skip(&claim.skip_point().weights(6), claim.x_full[0]);
+    claim_check(&weights, &s_hat_v)
 }
 
 /// A proof of one union with the caller's claims.
@@ -488,6 +564,7 @@ impl UnionGeometry {
         buffers: Vec<SlotBuffers>,
         circuits: &[&dyn LincheckCircuit],
         points: &[Vec<F128>],
+        bit_claims: &[BitClaim],
         ch: &mut Ch,
         pre: Option<CommitData>,
     ) -> (UnionProof, KeccakCommitment) {
@@ -538,6 +615,19 @@ impl UnionGeometry {
             })
             .collect();
         let values: Vec<F128> = packed_direct.iter().map(|c| c.value).collect();
+        // The caller's bit claims (K21): banks and s_hat_v from the padded buffer.
+        let bit_banks: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .map(|c| {
+                assert_eq!(c.x_full.len(), word_vars + 1, "bit claim point length");
+                bit_bank(&z, c, nu)
+            })
+            .collect();
+        let bit_s_hat: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .zip(&bit_banks)
+            .map(|(c, bank)| bit_s_hat_v(bank, c, nu))
+            .collect();
         let q_owned = self.compact(&union, &z);
         let (commitment, prover_data) = match pre {
             Some(CommitData {
@@ -613,13 +703,18 @@ impl UnionGeometry {
         });
         drop(slots);
         drop(stripes);
-        let pre: [Option<&[F128]>; 2] = [s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
-        let banks: [Option<&[F128]>; 2] = match &bank_c {
-            Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())],
-            None => [None, None],
+        let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
+        pre.extend(bit_s_hat.iter().map(|v| Some(v.as_slice())));
+        let banks: Vec<Option<&[F128]>> = match &bank_c {
+            Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())]
+                .into_iter()
+                .chain(bit_banks.iter().map(|b| Some(b.as_slice())))
+                .collect(),
+            None => vec![None; 2 + bit_claims.len()],
         };
-        let x_fulls = [x_full(&ab.point), x_full(&c.point)];
-        let x_refs: [&[F128]; 2] = [&x_fulls[0], &x_fulls[1]];
+        let mut x_fulls = vec![x_full(&ab.point), x_full(&c.point)];
+        x_fulls.extend(bit_claims.iter().map(|c| c.x_full.clone()));
+        let x_refs: Vec<&[F128]> = x_fulls.iter().map(Vec::as_slice).collect();
         let padding = union.padding_spec();
         let grinding = self.pcs_params.opening_grinding();
         let pcs_open = match q_owned {
@@ -682,6 +777,7 @@ impl UnionGeometry {
         commitment: &KeccakCommitment,
         proof: &UnionProof,
         points: &[Vec<F128>],
+        bit_claims: &[(BitClaim, F128)],
         ch: &mut Ch,
     ) -> Result<Vec<F128>, KeccakError> {
         assert_eq!(circuits.len(), self.types(), "one circuit per type");
@@ -693,7 +789,9 @@ impl UnionGeometry {
             return Err(KeccakError::Malformed("claim count"));
         }
         let word_vars = self.word_vars();
-        if points.iter().any(|p| p.len() != word_vars) {
+        if points.iter().any(|p| p.len() != word_vars)
+            || bit_claims.iter().any(|(c, _)| c.x_full.len() != word_vars + 1)
+        {
             return Err(KeccakError::Statement("claim point length"));
         }
         let commitment = Commitment {
@@ -746,10 +844,13 @@ impl UnionGeometry {
             point: union.c_claim_point(SkipPoint::Phi8(zc.z), &zc.r_rest),
             value: zc.c_eval,
         };
-        let values = [ab.value, c.value];
-        let z_skips = [ab.point.z_skip, c.point.z_skip];
-        let x_fulls = [x_full(&ab.point), x_full(&c.point)];
-        let x_refs: [&[F128]; 2] = [&x_fulls[0], &x_fulls[1]];
+        let mut values = vec![ab.value, c.value];
+        values.extend(bit_claims.iter().map(|(_, v)| *v));
+        let mut z_skips = vec![ab.point.z_skip, c.point.z_skip];
+        z_skips.extend(bit_claims.iter().map(|(c, _)| c.skip_point()));
+        let mut x_fulls = vec![x_full(&ab.point), x_full(&c.point)];
+        x_fulls.extend(bit_claims.iter().map(|(c, _)| c.x_full.clone()));
+        let x_refs: Vec<&[F128]> = x_fulls.iter().map(Vec::as_slice).collect();
         let pd: Vec<PackedDirectClaimRef<'_>> = points
             .iter()
             .zip(&proof.values)
