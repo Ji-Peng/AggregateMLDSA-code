@@ -991,9 +991,11 @@ Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 1
 12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
 the segment of `X`, after the stage-3 rounds; the checkpoint test at `X` becomes `R_PIOP and
 (for all p) C4_p`, `C4_p` decided by listing the Johnson list of the part's sponge word;
-masses and the work plan are unchanged. Measured: local 8K (7 cores) -0.93 / -1.03 s
-(-13%), prover peak +0.8 to +1.1 GiB (ref/notes/overnight-20261026/fork-join-p1.md); the 32K
-cloud run is pending.
+masses and the work plan are unchanged. Measured: local 8K (15 logical CPUs) -0.93 /
+-1.03 s (-13%), prover peak +0.8 to +1.1 GiB (ref/notes/overnight-20261026/fork-join-p1.md);
+a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and 15 (6.76 s),
+one round, direction only, so the default stays the cloud-measured half until a 32K sweep;
+the 32K cloud run is pending.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

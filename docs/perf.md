@@ -20,7 +20,7 @@ except for the proof-of-work nonces of wire version 2/3.
 | P5 stage parity tables built while the Flock span is proven | done | `7476508` |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) | `94bd37e`, `808b763` |
 | instance `T` reused in the witness; vectorized `public_t` | done | `51c3aea` |
-| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22, not yet merged): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB | `f34d1bd` |
+| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22, not yet merged): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, so the cloud run should sweep 4 / 6 / 8 | `f34d1bd` |
 | P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open | - |
 
 Outcome on the cloud VM (`ref/notes/bench-cloud.md`, Phase 8 check of `1fef53d`, 2 runs
