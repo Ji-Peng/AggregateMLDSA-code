@@ -1224,7 +1224,7 @@ a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tampering
 synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
 rejection), unit tests of the manifest, claims, stage specs, wire and plan.
 
-### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10, branch `h-fips`, 2026-10-27)
+### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10, branch `h-fips`, merged 2026-10-27)
 
 Relation byte 2 (`Relation::HFips`). `G_main16` = `bz_lo, l_lo, v_lo, v_hi`; `G_main4` =
 `bz_hi, l_hi, b_0..b_5, a_z, s, delta, e` (12 polynomials, codes `[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
