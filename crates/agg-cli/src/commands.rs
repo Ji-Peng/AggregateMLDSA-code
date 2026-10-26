@@ -36,8 +36,9 @@ commands:
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
       Flock's accounting; default: the build's FLOCK_PROFILE); with --flock-span on (default) a
       batch of more than one segment in whole-segment parts is one tied part over all
-      segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465) or h-exact
-      (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465).
+      segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465), h-exact
+      (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465) or h-fips (also the hint:
+      the extracted (c~, z, h) is a FIPS 204 signature).
   verify --records RECORDS --aggregate AGGREGATE [--cache CACHE] [--flock-profile P]
          [--relation R]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
@@ -137,11 +138,11 @@ impl Options {
             .transpose()
     }
 
-    /// `--name h-u|h-exact`: the relation, H-u when absent.
+    /// `--name h-u|h-exact|h-fips`: the relation, H-u when absent.
     fn relation(&mut self, name: &str) -> Result<Relation, String> {
         match self.take(name) {
             None => Ok(Relation::Hu),
-            Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-u or h-exact, not {v:?}")),
+            Some(v) => Relation::parse(&v).ok_or_else(|| format!("--{name}: h-u, h-exact or h-fips, not {v:?}")),
         }
     }
 
@@ -643,6 +644,8 @@ mod tests {
         let mut o = Options::parse(&strings(&["--relation", "h-exact"])).unwrap();
         assert_eq!(o.relation("relation"), Ok(Relation::HExact));
         assert_eq!(o.relation("relation"), Ok(Relation::Hu));
+        let mut o = Options::parse(&strings(&["--relation", "h-fips"])).unwrap();
+        assert_eq!(o.relation("relation"), Ok(Relation::HFips));
         let mut o = Options::parse(&strings(&["--relation", "fips"])).unwrap();
         assert!(o.relation("relation").is_err());
         let mut o = Options::parse(&strings(&["--flock-span", "off", "--x", "maybe"])).unwrap();

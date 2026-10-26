@@ -281,6 +281,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jolt_field::Ring;
 
     #[test]
     fn h_exact_stage_two_has_seven_instances_and_one_leaf6() {
@@ -296,6 +297,30 @@ mod tests {
         assert_eq!(leaves.instances[0].gamma, 6);
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
         assert_eq!(spec.degree, DEGREE);
+    }
+
+    #[test]
+    fn h_fips_stage_two_has_def_y1_and_f3() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
+        let spec = spec(&manifest);
+        spec.validate().unwrap();
+        assert_eq!(gamma_count(&manifest), 7);
+        // def_y1 (no leaf group: H-FIPS has no leaf digit) and F3 at r^(1).
+        assert_eq!(spec.groups.len(), 2);
+        let f3 = &spec.groups[1];
+        assert_eq!(f3.eq, EqPoint::R1);
+        assert_eq!(f3.lanes, vec![LaneId::Column(Column::DELTA), LaneId::Column(Column::WRAP)]);
+        assert_eq!(f3.instances[0].gamma, 6);
+        assert_eq!(f3.instances[0].terms, vec![fips_edge_term()]);
+        assert_eq!(fips_edge_term().degree() + 1, DEGREE);
+        // F3 vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
+        for delta in -1_i64..=1 {
+            for e in -3_i64..=3 {
+                let values = [E::from_i64(delta), E::from_i64(e)];
+                let zero = fips_edge_term().evaluate(&values) == E::zero();
+                assert_eq!(zero, e == 0 || e == 1 || e == delta, "delta {delta} e {e}");
+            }
+        }
     }
 
     #[test]

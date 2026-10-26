@@ -796,6 +796,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn h_fips_stage_three_has_fifty_one_instances() {
+        let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
+        let mut rng = SplitMix64::new(4);
+        let weights: Vec<Vec<E>> = (0..STACKS)
+            .map(|j| point(&mut rng, manifest.stack_columns(j).len()))
+            .collect();
+        let spec = spec(&manifest, &weights);
+        spec.validate().unwrap();
+        let gammas = Gammas::new(&manifest);
+        assert_eq!((gammas.links, gammas.bools, gammas.fips), (0, 3, true));
+        assert_eq!(gammas.count(), 51);
+        assert_eq!(spec.gamma_count, 51);
+        // ring 0, bool[bz_hi, l_hi, a_z] 1..3, F1, F2, F45, F7 4..7, reductions from 8, the
+        // delta and e reductions 45, 46, the stacks 47..50.
+        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (4, 7, 8));
+        assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (45, 46));
+        assert_eq!((gammas.stack(0), gammas.stack(3)), (47, 50));
+        // Parts per gamma index: the ring spans the eq(r^(2)) group (affine part and the two
+        // products s l_lo, s l_hi) and the w_A group; F2 two parts, F45 eight, F7 two (main and
+        // D_2), the stacks one per column (u_h is stack 2's seventh column).
+        let mut counts = vec![0; 51];
+        for group in &spec.groups {
+            for instance in &group.instances {
+                counts[instance.gamma] += 1;
+            }
+        }
+        assert_eq!(counts[GAMMA_RING], 4);
+        assert_eq!(counts[gammas.fips_check(1)], 2);
+        assert_eq!(counts[gammas.fips_check(2)], 8);
+        assert_eq!(counts[gammas.fips_check(3)], 2);
+        assert_eq!(
+            (0..STACKS).map(|j| counts[gammas.stack(j)]).collect::<Vec<_>>(),
+            [4, 6, 7, 1]
+        );
+        for group in &spec.groups {
+            let inner = usize::from(group.eq != EqPoint::None);
+            for instance in &group.instances {
+                for term in &instance.terms {
+                    assert!(term.degree() + inner <= DEGREE, "{term:?}");
+                }
+            }
+        }
+        for group in manifest.groups() {
+            for &column in &group.columns {
+                assert_eq!(
+                    spec.lane_ids().contains(&LaneId::Column(column)),
+                    group.role != GroupRole::Mult,
+                    "{}",
+                    column.name()
+                );
+            }
+        }
+        // F7's two parts at (1/2, ..., r^(2)_sig) with scales 2^(d_main - d_sig) = 2^10 and
+        // 2^(d_2 - d_sig) = 2^10 (d_sig = 3, d_2 = 13).
+        let f7: Vec<&GroupSpec> = spec.groups.iter().filter(|g| g.eq == EqPoint::HalfR2).collect();
+        assert_eq!(f7.len(), 2);
+        assert_eq!((f7[0].domain, f7[1].domain), (GroupRole::Main, GroupRole::Level2));
+        for group in f7 {
+            assert_eq!(group.instances[0].scale, E::from_u64(1 << 10));
+        }
+    }
+
     fn check_spec(manifest: &CommitmentManifest, count: usize) -> StageSpec {
         let mut rng = SplitMix64::new(3);
         let weights: Vec<Vec<E>> = (0..STACKS)
