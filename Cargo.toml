@@ -9,9 +9,9 @@ members = [
   "crates/agg-cli",
   "crates/agg-bench",
 ]
-# The vendored, patched Flock core (vendor/flock-core/PATCH.md) is a `[patch]` source,
-# not a member.
-exclude = ["vendor/flock-core"]
+# The vendored, patched Flock core and field crates (vendor/flock-*/PATCH.md) are
+# `[patch]` sources, not members.
+exclude = ["vendor/flock-core", "vendor/flock-field"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,17 +32,6 @@ opt-level = 3
 inherits = "release"
 debug-assertions = true
 overflow-checks = true
-
-# The CLMUL timing build (scripts/bench.sh CLMUL=1; RUSTFLAGS
-# `-C target-feature=+pclmulqdq,+sse4.1`; binaries in target/clmul/). flock-field's x86
-# GF(2^128) multiplies are `#[target_feature(enable = "pclmulqdq,sse4.1")]` without
-# `#[inline]`, so without LTO every F128 multiply in flock-core is an out-of-line call. Thin
-# LTO plus `+sse4.1` lets LLVM inline them (either alone does not); exact arithmetic, so the
-# aggregate is byte-identical. Kept out of `[profile.release]` so that the default build keeps
-# its codegen and build time (docs/perf.md Section 10).
-[profile.clmul]
-inherits = "release"
-lto = "thin"
 
 [workspace.dependencies]
 # Internal crates.
@@ -98,3 +87,6 @@ serde_json = "1"
 # the other Flock crates.
 [patch."https://github.com/succinctlabs/flock"]
 flock-core = { path = "vendor/flock-core" }
+# flock-field with `#[inline]` on the x86 scalar GF(2^128) multiply (vendor/flock-field/PATCH.md),
+# so that the CLMUL timing build (`+pclmulqdq,+sse4.1`) inlines it without LTO.
+flock-field = { path = "vendor/flock-field" }

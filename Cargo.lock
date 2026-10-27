@@ -705,7 +705,6 @@ dependencies = [
 [[package]]
 name = "flock-field"
 version = "0.1.0"
-source = "git+https://github.com/succinctlabs/flock?rev=83f963e8ede6d9a85ec4762b0c018943b6f6542b#83f963e8ede6d9a85ec4762b0c018943b6f6542b"
 dependencies = [
  "serde",
 ]

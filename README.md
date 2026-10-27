@@ -58,7 +58,7 @@ and was seeded from Aerie's lockfile so shared transitive crates match Aerie's.
 | Akita (`akita-*`) | https://github.com/LayerZero-Labs/akita | `e023b6a46143f7b23199ccecb2684192baf7b640` (the rev Aerie 49b6c21 pins; `akita-config` with `dev-protocol`, transcripts with `transcript-blake2b`) |
 | Jolt (`jolt-field` with `solinas`, `jolt-poly`) | https://github.com/a16z/jolt | `c7c2d08d5bb0c7c80501f29f723e595af7fcff3c` (as Aerie) |
 | Spongefish | https://github.com/arkworks-rs/spongefish | `ef9741346a150039427d9e0c02d6b2d73e93ec81` (as Aerie) |
-| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch, runtime-dispatched x86 SIMD kernels, the derived rate-1/8 Ligerito parameter set `Slim8`, the verifier-visible list-aware work at the outer sites and the canonical work-nonce width of `vendor/flock-core/PATCH.md` (`docs/deviations.md` K12, K18, K19, K21; our Flock proofs do not verify with upstream), applied through `[patch]` in `Cargo.toml` |
+| Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch, runtime-dispatched x86 SIMD kernels, the derived rate-1/8 Ligerito parameter set `Slim8`, the verifier-visible list-aware work at the outer sites and the canonical work-nonce width of `vendor/flock-core/PATCH.md` (`docs/deviations.md` K12, K18, K19, K21; our Flock proofs do not verify with upstream), applied through `[patch]` in `Cargo.toml`; `flock-field` is the vendored copy `vendor/flock-field` with `#[inline]` on the x86 scalar GF(2^128) multiply (exact, speed only, `vendor/flock-field/PATCH.md`) |
 | `ml-dsa` (RustCrypto) | crates.io | `=0.1.1` (key generation and signing) |
 | `sha3` | crates.io | `0.10.9` (reference SHAKE) |
 
@@ -111,14 +111,14 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
   kernels (AVX-512/VPCLMULQDQ NTT and zerocheck, GFNI) are runtime-dispatched in the
   vendored `flock-core` (`vendor/flock-core/PATCH.md` Section 3; `FLOCK_SIMD=portable|gfni`
   caps them for A/B runs). The recommended opt-in
-  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq,+sse4.1` and the
-  thin-LTO cargo profile `clmul`, outputs in `target/clmul`); for the CLI:
-  `RUSTFLAGS='-C target-feature=+pclmulqdq,+sse4.1' cargo build --profile clmul --locked -p agg-cli`
-  (binary `target/clmul/agg`). Only Flock's carry-less path gains target features; Akita,
-  Jolt and Aerie keep baseline target features but are compiled under thin LTO, which with
-  `+sse4.1` inlines Flock's scalar GF(2^128) multiply (`docs/perf.md` Section 10; every
-  PCLMULQDQ CPU has SSE4.1). Measured 2026-10-24 (bench-local.md, then
-  `+pclmulqdq` without LTO): mode A proves 13x and verifies
+  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq,+sse4.1`, target dir
+  `target/clmul`); for the CLI: `RUSTFLAGS='-C target-feature=+pclmulqdq,+sse4.1'
+  CARGO_TARGET_DIR=target/clmul cargo build --release --locked -p agg-cli`. Only Flock's
+  carry-less path changes; Akita, Jolt and Aerie keep the baseline codegen. `+sse4.1`
+  (every PCLMULQDQ CPU has it) lets the scalar GF(2^128) multiply of the vendored
+  `flock-field` (`#[inline]`, `vendor/flock-field/PATCH.md`) inline into flock-core
+  (`docs/perf.md` Section 10); with `+pclmulqdq` alone it stays an out-of-line call.
+  Measured 2026-10-24 (bench-local.md, `+pclmulqdq` only): mode A proves 13x and verifies
   14x faster than the default build at N = 1,024; the Keccak bench alone reaches about
   83% of the throughput of the full AVX-512 build.
 - `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,
