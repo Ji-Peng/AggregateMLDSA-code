@@ -499,3 +499,97 @@ assumed the Flock branch critical, which no longer holds after W1. Bytes are ide
 the verifier changes by about 0 to -1%. Next measurement, on the next cloud session (1 warmup + 3,
 back to back with main's binary, same flags): predict Flock proofs -0.3 to -0.7 s, prove
 -0.14 to -0.36 s, verify within +-2%, 1,469,874 B at 32K H-u.
+
+## 11. Lever A: move the one-vCPU windows off the serial path (branch `lever-3`)
+
+Sources (top-level repo): `ref/notes/overnight-20261026/ideate-schedule-memory.md` Sections 1,
+3, 4 (the windows in the Phase 10b sampler logs, the env-gated prototype on branch
+`sched-serial`), `verify-A-serial-windows.md` (verdict, corrected 32K estimate) and `lever-3.md`
+(commands and raw numbers of this section).
+
+### 11.1 Change
+
+The Phase 10b 32K sampler logs (5 fresh runs, 100 ms `/proc/stat` samples) show three windows
+on the serial path where one vCPU works, mostly in the kernel, while the other 15 wait
+(measured on the VM, re-cut by the verifier): (a) the "Akita setup" step, 97.7 ms in the bench
+and 260.6 ms fresh, mostly the serial `PublicData::from_instance` loop; (b) the event-2 witness
+unmap, 166-197 ms; (c) the release of the six committed sources inside Akita's opening,
+132-163 ms. Changes (prover-only, no transcript change):
+
+- (a) `PublicData::from_instance` builds the distinct keys and the records in parallel (same
+  keys, same first-appearance order; unit test against the serial loop). `aggregate_with`
+  builds the Akita `TableCommitter` on its own thread at entry (it depends on `n` and the
+  relation only) and hands it to the new `prove_with_tables_using`.
+- (b) The event-2 witness is dropped on a detached thread. Since W1 it is dropped there only
+  in multi-part non-span batches; the span and one-part batches keep it until the join.
+- (c) `PcsProver::open` holds `Arc` clones of the six `CommitmentHandle`s across
+  `batched_prove` and releases them on a detached thread afterwards. Akita `e023b6a` shares the
+  committed source by `Arc` inside the opening anyway (`opaque/openings.rs:90`,
+  `opaque/eor.rs:175`), so the clones trigger no copy.
+- On the PIOP branch, which W1 made critical: the stage-3 `ProverTables` buffers and each
+  finished lookup layer are dropped on detached threads.
+- Opt-in, `AGG_PARITY_EARLY`: build the stages' parity tables beside the round-2 commitment
+  instead of in the fork.
+
+Knobs: `AGG_SCHED_SERIAL` (any value) restores the old schedule in the same binary;
+`AGG_STAGE_TRACE` prints the time of each detached (or inline) drop.
+
+### 11.2 Checks (measured, local)
+
+- `cmp` against main `f175c97` (CLMUL build): identical at 256 and 1K (H-u and H-exact), 1K
+  over 100 shared keys, 2K in two parts (`--part-log2 10`, the multi-part drop path) and 8K, for
+  the default, `AGG_SCHED_SERIAL=1` and both parity placements; 16 fresh 8K runs of the A/B
+  below are identical too. `agg verify` accepts.
+- Tests under `+pclmulqdq`, `--release`, `-p agg-pcs-config -p agg-piop -p agg-cli`: 193
+  passed, 0 failed, 12 ignored (5m35s), including the new
+  `public_data::tests::parallel_and_serial_instance_data_agree`.
+- Detached drop times, `AGG_STAGE_TRACE=1`, 8K fresh, THP off for the process (`prctl` wrapper,
+  as on the cloud VM), 2 runs: opening sources 15.6 / 15.9 ms, lookup layers 21.9 / 34.9 ms in
+  24 drops, stage tables 3.0 / 3.1 ms. These are the windows taken off the critical path at 8K
+  locally.
+
+### 11.3 Local 8K A/B (measured, direction only)
+
+CLMUL build, `RAYON_NUM_THREADS=7`, `taskset -c 0,1,3-15`, arms interleaved in rotated order,
+no other job on the box (load is the runs themselves). Arms: main `f175c97`; new (`1f2cd97`,
+parity beside round 2); ser (new with `AGG_SCHED_SERIAL=1`, the old schedule); pif (new with the
+parity tables in the fork, the schedule `c20001e` ships by default). Predictions were written
+first (lever-3 log Section 1).
+
+`agg bench --count 8192 --warmup 1 --reps 2`, 4 rounds, medians of the 4 per-run medians:
+
+| Arm | Prove | Akita setup | Round 2 | Fork-join wall | Outside the fork | Opening |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| main | 5,731.4 ms | 27.6 | 185.5 | 2,970.1 | 2,731.1 | 793.3 |
+| ser | 5,654.1 ms | 26.5 | 183.7 | 2,952.5 | 2,690.3 | 799.4 |
+| new (parity early) | 5,713.6 ms | 11.6 | 252.6 | 2,909.4 | 2,787.5 | 786.5 |
+| pif (shipped default) | 5,809.9 ms | 12.3 | 187.4 | 2,978.8 | 2,763.1 | 796.8 |
+
+Fresh `agg aggregate` of the same 8K records, 4 runs per arm (THP on), medians: Akita setup
+124.6 (main) / 141.5 (ser) -> 15.0 (new) / 14.5 (pif) ms; total minus the instance and table
+steps 5,616.9 / 5,779.6 / 5,716.1 / 5,668.3 ms.
+
+Final binary `c20001e` against main, `agg bench` as above, 3 more rounds in rotated order (the
+box ran about 0.3 s slower in these rounds for both arms): prove 6,146.7 / 6,061.5 / 6,314.2 ms
+(main) against 5,997.5 / 5,975.4 / 6,027.3 ms (lever A), paired median -149 ms, faster in 3 of 3
+pairs; fork wall -81 to -143 ms, lookup -66 to -187 ms, opening -15 to -69 ms; prover peak RSS
+8,781-8,883 MiB (main) against 8,746-8,782 MiB.
+
+Reading: the setup line moves as predicted (fresh -110 to -125 ms, warm bench -15 ms; prediction
+P2 5-20 ms: inside). In the first 4 rounds the totals do not resolve: main and ser run the same
+schedule and differ by 77 ms (bench) and 163 ms (fresh), which is the noise floor; the -149 ms
+of the last 3 pairs is of the same size, so it is direction only. On this box (THP on, 2 MiB pages) the
+unmaps are short, so (c) and the PIOP drops are 15-50 ms at 8K, below the noise; on the VM they
+are larger (4 KiB pages, 132-163 ms for (c) in the sampler logs). Parity tables beside round 2:
+round 2 +65 ms, fork wall -38 to -61 ms; no net change locally, so it stays opt-in.
+
+### 11.4 What it means at 32K (est.)
+
+`agg bench` on `c4d-highmem-16`, from the verifier's re-cut of the Phase 10b windows: (a) -0.07
+to -0.08 s, (c) -0.12 to -0.15 s (partly a stopwatch-boundary gain: the release moves after the
+prove, where serialization and the untimed drops sit), (b) about 0 (W1 keeps the witness at
+32K), PIOP-branch drops 0 to -0.10 s (unmeasured at 32K; locally 25-38 ms at 8K, about 4x at
+32K on THP-on pages). Total -0.19 to -0.33 s (est.); fresh process about -0.15 s more from (a).
+Next measurement (bundle with the W1 and lever B A/B): `agg bench --count 32768 --warmup 1
+--reps 3` with and without `AGG_SCHED_SERIAL=1` on the same binary, and the same pair with
+`AGG_PARITY_EARLY=1`; success is >= 0.15 s median gain and identical aggregates.

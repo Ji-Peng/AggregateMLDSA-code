@@ -65,7 +65,7 @@ use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
 use agg_piop::pow::KeccakPlan;
 use agg_piop::prover::{
-    main_tables, prove_with_tables, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
+    main_tables, prove_with_tables_using, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
     ProveHooks, ProveTimings, ProverInputs, SeededMatrices,
 };
 use agg_piop::public_data::KeyCache;
@@ -454,7 +454,8 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             let commit_data = committed
                 .take_commit_data()
                 .filter(|_| self.keep_commit_data);
-            drop(committed);
+            // A one-thread unmap of the part's witness: off the critical path (lever A (b)).
+            agg_pcs_config::sched::drop_in_background("event-2 witness", committed);
             (commitment, commit_data, None)
         }
     }
@@ -1557,6 +1558,23 @@ impl Aggregator {
         if keccak_profile(profile).is_none() {
             return Err(AggregateError::Profile(profile));
         }
+        // The Akita prover setup depends on the record count and the relation only: it is
+        // built on its own thread while the instance and the tables are computed (lever A
+        // (a), docs/perf.md Section 11; inline under `AGG_SCHED_SERIAL`). Any failure here
+        // leaves it to `prove_with_tables_using`, which builds it and reports the error.
+        let relation = self.config.relation;
+        let early_setup = (!agg_pcs_config::sched::serial_schedule())
+            .then(|| {
+                std::thread::Builder::new()
+                    .name("agg-setup".into())
+                    .spawn(move || {
+                        CommitmentManifest::for_relation(n, relation)
+                            .ok()
+                            .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok())
+                    })
+                    .ok()
+            })
+            .flatten();
         for (i, (pk, _, sig)) in records.iter().enumerate() {
             if pk.len() != PK_BYTES {
                 return Err(AggregateError::Malformed(i, "public key length"));
@@ -1635,8 +1653,10 @@ impl Aggregator {
                 hooks.tamper_bridge
             },
         };
+        let committer = early_setup.and_then(|h| h.join().ok()).flatten();
         let mut output = if hooks.stale_bridge {
-            prove_with_tables(
+            prove_with_tables_using(
+                committer,
                 &prover_inputs,
                 &manifest,
                 main,
@@ -1646,7 +1666,8 @@ impl Aggregator {
                 &prove_hooks,
             )?
         } else {
-            prove_with_tables(
+            prove_with_tables_using(
+                committer,
                 &prover_inputs,
                 &manifest,
                 main,

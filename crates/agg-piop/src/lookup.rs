@@ -1674,12 +1674,13 @@ fn prove_with(
             table_claims[t] = Some((rho.clone(), line(leaf[0], leaf[1], mu)));
         }
         point = rho;
-        // Layer `s` is no longer read.
-        for tree in &mut trees {
-            if let Some(layer) = tree.layers.get_mut(s) {
-                *layer = Layer::default();
-            }
-        }
+        // Layer `s` is no longer read: unmapped on a detached thread, off the PIOP branch's
+        // critical path (lever A, docs/perf.md Section 11).
+        let done: Vec<Layer> = trees
+            .iter_mut()
+            .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
+            .collect();
+        agg_pcs_config::sched::drop_in_background("lookup layer", done);
         sessions.push(SessionProof {
             rounds,
             terminals,

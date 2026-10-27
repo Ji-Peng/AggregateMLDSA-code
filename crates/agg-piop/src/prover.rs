@@ -256,6 +256,15 @@ fn fork_join<A: Send, B>(
     })
 }
 
+/// Build the stages' parity tables beside the round-2 commitment (`AGG_PARITY_EARLY` set
+/// and `AGG_SCHED_SERIAL` unset), or in the fork (default). Read once per process.
+fn parity_beside_round2() -> bool {
+    static BESIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BESIDE.get_or_init(|| {
+        !agg_pcs_config::sched::serial_schedule() && std::env::var_os("AGG_PARITY_EARLY").is_some()
+    })
+}
+
 /// A prover failure.
 #[derive(Debug)]
 pub enum ProveError {
@@ -677,7 +686,18 @@ fn prove_piop_with<'a>(
         &lookup_inputs,
         transcript,
     )?;
-    drop(prover_tables);
+    // The owned buffers (parities and weights, several GiB at 32K) are unmapped on a
+    // detached thread, off the PIOP branch's critical path (lever A, docs/perf.md
+    // Section 11); `prover_tables` itself only borrows the committed tables.
+    let ProverTables {
+        parity1,
+        w1,
+        w2,
+        w3,
+        wa,
+        ..
+    } = prover_tables;
+    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa));
     run.stage3 = clock.lap();
     run.points = points;
     run.r3 = stage3.point;
@@ -697,8 +717,25 @@ fn prove_piop_with<'a>(
 
 /// Prove from given round-1 tables (events 0 to 13 with the join). `hooks` are for
 /// adversarial tests; an honest caller passes `ProveHooks::default()`.
-#[allow(clippy::too_many_lines)]
 pub fn prove_with_tables(
+    inputs: &ProverInputs<'_>,
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+    bridge: &impl BridgeDerivation,
+    keccak: &(impl KeccakSide + Sync),
+    flock: FlockProfile,
+    hooks: &ProveHooks<'_>,
+) -> Result<ProverOutput, ProveError> {
+    prove_with_tables_using(None, inputs, manifest, main, bridge, keccak, flock, hooks)
+}
+
+/// [`prove_with_tables`] with the Akita prover setup built beforehand: it depends on the
+/// record count and the relation only, so a caller can build it on its own thread while
+/// the instance and the tables are computed (lever A (a), docs/perf.md Section 11).
+/// `None`, or a setup of another manifest, builds it here.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn prove_with_tables_using(
+    committer: Option<TableCommitter>,
     inputs: &ProverInputs<'_>,
     manifest: &CommitmentManifest,
     main: &MainTables,
@@ -717,7 +754,10 @@ pub fn prove_with_tables(
     check_bridge(bridge, flock)?;
     let segments = manifest.segments();
     let public = PublicData::from_instance(inputs.instance);
-    let committer = TableCommitter::new(manifest.clone())?;
+    let committer = match committer {
+        Some(prebuilt) if prebuilt.manifest() == manifest => prebuilt,
+        _ => TableCommitter::new(manifest.clone())?,
+    };
     timings.setup = clock.lap();
 
     // Events 0 to 3: instance (with the proof-of-work plan's digest, docs/soundness.md 6.4),
@@ -765,7 +805,25 @@ pub fn prove_with_tables(
     if let Some(tamper) = hooks.tamper_bridge {
         tamper(manifest, &mut bridge_tables);
     }
-    let round2 = committer.commit_round2(&bridge_tables)?;
+    let tables = SourceTables {
+        manifest,
+        main,
+        bridge: &bridge_tables,
+    };
+    // The parity tables of the stages need no challenge after event 3. Under
+    // `AGG_PARITY_EARLY` they are built beside the round-2 commitment (a memory-bound step
+    // that leaves threads idle on the cloud VM) instead of on the PIOP branch of the fork;
+    // opt-in until a 32K A/B decides (local 8K: no net change, docs/perf.md Section 11).
+    let (round2, mut early_parity) = if parity_beside_round2() {
+        let (round2, parity) = crate::pcs::overlap(
+            || committer.commit_round2(&bridge_tables),
+            || ProverTables::new(tables, &matrices),
+        );
+        (round2, Some(parity))
+    } else {
+        (committer.commit_round2(&bridge_tables), None)
+    };
+    let round2 = round2?;
     let mut bridge_commitments: [Vec<u8>; 4] = Default::default();
     for (slot, group) in bridge_commitments.iter_mut().zip(&round2) {
         *slot = group.serialized()?;
@@ -785,11 +843,6 @@ pub fn prove_with_tables(
     transcript.absorb_items(FLOCK_SHARES_SITE, &flock_shares)?;
     let flock_record = flock_record_digest(&final_vectors, &flock_shares);
     timings.keccak += clock.lap();
-    let tables = SourceTables {
-        manifest,
-        main,
-        bridge: &bridge_tables,
-    };
 
     // The fork (deviation K22): the Flock proofs depend on nothing after event 6, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
@@ -800,7 +853,9 @@ pub fn prove_with_tables(
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = ProverTables::new(tables, &matrices);
+            let prover_tables = early_parity
+                .take()
+                .unwrap_or_else(|| ProverTables::new(tables, &matrices));
             prove_piop_with(
                 manifest,
                 tables,
@@ -824,7 +879,7 @@ pub fn prove_with_tables(
                 let start = Instant::now();
                 (prove_flock(), start.elapsed())
             },
-            || ProverTables::new(tables, &matrices),
+            || early_parity.take().unwrap_or_else(|| ProverTables::new(tables, &matrices)),
         );
         let (flock_proofs, flock_time) = flock_proofs;
         timings.flock_prove = flock_time;
