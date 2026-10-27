@@ -62,7 +62,12 @@ environment:
                         and rebuild it for its proof, as before lever W1 (measurement knob;
                         the aggregate is the same).
   AGG_FLOCK_RECOMMIT    (any value) drop the Flock commit data after event 2 and commit again
-                        for the proof (K7; measurement knob; the aggregate is the same).";
+                        for the proof (K7; measurement knob; the aggregate is the same).
+  AGG_SCHED_SERIAL      (any value) the prover schedule before lever A: serial public data,
+                        Akita setup inside the prove, every large drop in place (measurement
+                        knob; the aggregate is the same).
+  AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2
+                        commitment instead of in the fork (opt-in; the aggregate is the same).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

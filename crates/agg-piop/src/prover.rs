@@ -256,12 +256,12 @@ fn fork_join<A: Send, B>(
     })
 }
 
-/// Build the stages' parity tables beside the round-2 commitment (default), or in the
-/// fork under `AGG_SCHED_SERIAL` or `AGG_PARITY_IN_FORK` (read once per process).
+/// Build the stages' parity tables beside the round-2 commitment (`AGG_PARITY_EARLY` set
+/// and `AGG_SCHED_SERIAL` unset), or in the fork (default). Read once per process.
 fn parity_beside_round2() -> bool {
     static BESIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *BESIDE.get_or_init(|| {
-        !agg_pcs_config::sched::serial_schedule() && std::env::var_os("AGG_PARITY_IN_FORK").is_none()
+        !agg_pcs_config::sched::serial_schedule() && std::env::var_os("AGG_PARITY_EARLY").is_some()
     })
 }
 
@@ -697,7 +697,7 @@ fn prove_piop_with<'a>(
         wa,
         ..
     } = prover_tables;
-    agg_pcs_config::sched::drop_in_background((parity1, w1, w2, w3, wa));
+    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa));
     run.stage3 = clock.lap();
     run.points = points;
     run.r3 = stage3.point;
@@ -810,10 +810,10 @@ pub fn prove_with_tables_using(
         main,
         bridge: &bridge_tables,
     };
-    // The parity tables of the stages need no challenge after event 3, so they are built
-    // beside the round-2 commitment (a memory-bound step that leaves threads idle) instead
-    // of on the PIOP branch of the fork (lever A, docs/perf.md Section 11); in the fork
-    // under `AGG_SCHED_SERIAL` or `AGG_PARITY_IN_FORK`.
+    // The parity tables of the stages need no challenge after event 3. Under
+    // `AGG_PARITY_EARLY` they are built beside the round-2 commitment (a memory-bound step
+    // that leaves threads idle on the cloud VM) instead of on the PIOP branch of the fork;
+    // opt-in until a 32K A/B decides (local 8K: no net change, docs/perf.md Section 11).
     let (round2, mut early_parity) = if parity_beside_round2() {
         let (round2, parity) = crate::pcs::overlap(
             || committer.commit_round2(&bridge_tables),

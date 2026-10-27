@@ -331,7 +331,7 @@ impl PcsProver {
             session,
             BasisMode::Lagrange,
         );
-        crate::sched::drop_in_background(keep);
+        crate::sched::drop_in_background("opening sources", keep);
         Ok(proof?)
     }
 

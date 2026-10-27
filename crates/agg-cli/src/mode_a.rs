@@ -455,7 +455,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
                 .take_commit_data()
                 .filter(|_| self.keep_commit_data);
             // A one-thread unmap of the part's witness: off the critical path (lever A (b)).
-            agg_pcs_config::sched::drop_in_background(committed);
+            agg_pcs_config::sched::drop_in_background("event-2 witness", committed);
             (commitment, commit_data, None)
         }
     }

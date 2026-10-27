@@ -1680,7 +1680,7 @@ fn prove_with(
             .iter_mut()
             .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
             .collect();
-        agg_pcs_config::sched::drop_in_background(done);
+        agg_pcs_config::sched::drop_in_background("lookup layer", done);
         sessions.push(SessionProof {
             rounds,
             terminals,
