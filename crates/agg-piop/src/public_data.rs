@@ -376,8 +376,51 @@ impl PublicData {
     }
 
     /// The same data taken from the prover's instance (keys shared by `Arc` identity).
+    /// The keys (one [`VerifierKey`] per distinct expanded key, in first-appearance order)
+    /// and the records are built in parallel (lever A (a), docs/perf.md Section 11); under
+    /// `AGG_SCHED_SERIAL` serially, as before. Both give the same data.
     #[must_use]
     pub fn from_instance(instance: &PublicInstance) -> Self {
+        if agg_pcs_config::sched::serial_schedule() {
+            return Self::from_instance_serial(instance);
+        }
+        let mut seen: HashMap<*const ExpandedKey, usize> = HashMap::new();
+        let mut firsts: Vec<usize> = Vec::new();
+        let key_of: Vec<usize> = instance
+            .records
+            .iter()
+            .enumerate()
+            .map(|(i, record)| {
+                *seen.entry(Arc::as_ptr(&record.key)).or_insert_with(|| {
+                    firsts.push(i);
+                    firsts.len() - 1
+                })
+            })
+            .collect();
+        let keys: Vec<Arc<VerifierKey>> = firsts
+            .par_iter()
+            .map(|&i| Arc::new(VerifierKey::from_expanded(&instance.records[i].key)))
+            .collect();
+        let records = instance
+            .records
+            .par_iter()
+            .zip(key_of.par_iter())
+            .map(|(record, &key)| PublicRecordData {
+                key,
+                mu: record.mu,
+                c_tilde: record.c_tilde,
+                t: Self::t_of(record),
+            })
+            .collect();
+        Self {
+            geom: instance.geom,
+            keys,
+            records,
+        }
+    }
+
+    /// [`Self::from_instance`] on one thread (the schedule before lever A).
+    fn from_instance_serial(instance: &PublicInstance) -> Self {
         let mut keys: Vec<Arc<VerifierKey>> = Vec::new();
         let mut seen: HashMap<*const ExpandedKey, usize> = HashMap::new();
         let records = instance
@@ -388,17 +431,11 @@ impl PublicData {
                     keys.push(Arc::new(VerifierKey::from_expanded(&record.key)));
                     keys.len() - 1
                 });
-                let mut t = Box::new([[0_i32; N]; K]);
-                for (row, source) in t.iter_mut().zip(&record.t) {
-                    for (out, &value) in row.iter_mut().zip(source) {
-                        *out = i32::try_from(value).expect("|T| < 2^29");
-                    }
-                }
                 PublicRecordData {
                     key,
                     mu: record.mu,
                     c_tilde: record.c_tilde,
-                    t,
+                    t: Self::t_of(record),
                 }
             })
             .collect();
@@ -407,6 +444,17 @@ impl PublicData {
             keys,
             records,
         }
+    }
+
+    /// A record's `T = c t_1 2^d` as `i32` (|T| < 2^29).
+    fn t_of(record: &agg_witness::instance::PublicRecord) -> Box<[[i32; N]; K]> {
+        let mut t = Box::new([[0_i32; N]; K]);
+        for (row, source) in t.iter_mut().zip(&record.t) {
+            for (out, &value) in row.iter_mut().zip(source) {
+                *out = i32::try_from(value).expect("|T| < 2^29");
+            }
+        }
+        t
     }
 
     /// Batch geometry.
@@ -762,6 +810,18 @@ mod tests {
             PublicData::prepare(&bad, None).unwrap_err(),
             InstanceError::PublicKey(3)
         );
+    }
+
+    #[test]
+    fn parallel_and_serial_instance_data_agree() {
+        // 5 own keys, then 6 records over 2 shared keys: first-appearance order matters.
+        let (instance, _) = small_instance(17);
+        let parallel = PublicData::from_instance(&instance);
+        let serial = PublicData::from_instance_serial(&instance);
+        assert_eq!(parallel.geometry(), serial.geometry());
+        assert_eq!(parallel.keys().len(), 7);
+        assert_eq!(parallel.keys(), serial.keys());
+        assert_eq!(parallel.records(), serial.records());
     }
 
     #[test]

@@ -308,6 +308,11 @@ impl PcsProver {
             handles.push(commitment.handle);
         }
         let catalog = Cfg::catalog()?;
+        // Hold a reference to every group's committed source, so that the last one is not
+        // released inside the opening (a one-thread unmap of several GiB at 32K, lever A (c),
+        // docs/perf.md Section 11); released after it, on a detached thread. Akita shares
+        // the source by `Arc` inside the opening anyway, so the clones copy nothing.
+        let keep = (!crate::sched::serial_schedule()).then(|| handles.clone());
         let opening = SelectedProverOpeningData::from_committed_claims::<Cfg>(
             OpeningClaims::from_groups(groups)?,
             handles,
@@ -319,13 +324,15 @@ impl PcsProver {
             )
             .into());
         }
-        Ok(AkitaCommitmentScheme::new(catalog.clone()).batched_prove(
+        let proof = AkitaCommitmentScheme::new(catalog.clone()).batched_prove(
             &self.setup,
             opening,
             &self.backend,
             session,
             BasisMode::Lagrange,
-        )?)
+        );
+        crate::sched::drop_in_background(keep);
+        Ok(proof?)
     }
 
     /// The verifier derived from this prover's setup (shares the matrix).

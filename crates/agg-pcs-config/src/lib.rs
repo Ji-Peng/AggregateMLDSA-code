@@ -4,6 +4,7 @@
 pub mod catalogs;
 pub mod commit;
 pub mod preset;
+pub mod sched;
 pub mod work_plan;
 
 /// Re-export of Aerie's preset crate, whose `Fp64SignedWidth4` parameters

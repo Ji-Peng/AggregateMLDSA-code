@@ -677,7 +677,18 @@ fn prove_piop_with<'a>(
         &lookup_inputs,
         transcript,
     )?;
-    drop(prover_tables);
+    // The owned buffers (parities and weights, several GiB at 32K) are unmapped on a
+    // detached thread, off the PIOP branch's critical path (lever A, docs/perf.md
+    // Section 11); `prover_tables` itself only borrows the committed tables.
+    let ProverTables {
+        parity1,
+        w1,
+        w2,
+        w3,
+        wa,
+        ..
+    } = prover_tables;
+    agg_pcs_config::sched::drop_in_background((parity1, w1, w2, w3, wa));
     run.stage3 = clock.lap();
     run.points = points;
     run.r3 = stage3.point;
@@ -697,8 +708,25 @@ fn prove_piop_with<'a>(
 
 /// Prove from given round-1 tables (events 0 to 13 with the join). `hooks` are for
 /// adversarial tests; an honest caller passes `ProveHooks::default()`.
-#[allow(clippy::too_many_lines)]
 pub fn prove_with_tables(
+    inputs: &ProverInputs<'_>,
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+    bridge: &impl BridgeDerivation,
+    keccak: &(impl KeccakSide + Sync),
+    flock: FlockProfile,
+    hooks: &ProveHooks<'_>,
+) -> Result<ProverOutput, ProveError> {
+    prove_with_tables_using(None, inputs, manifest, main, bridge, keccak, flock, hooks)
+}
+
+/// [`prove_with_tables`] with the Akita prover setup built beforehand: it depends on the
+/// record count and the relation only, so a caller can build it on its own thread while
+/// the instance and the tables are computed (lever A (a), docs/perf.md Section 11).
+/// `None`, or a setup of another manifest, builds it here.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn prove_with_tables_using(
+    committer: Option<TableCommitter>,
     inputs: &ProverInputs<'_>,
     manifest: &CommitmentManifest,
     main: &MainTables,
@@ -717,7 +745,10 @@ pub fn prove_with_tables(
     check_bridge(bridge, flock)?;
     let segments = manifest.segments();
     let public = PublicData::from_instance(inputs.instance);
-    let committer = TableCommitter::new(manifest.clone())?;
+    let committer = match committer {
+        Some(prebuilt) if prebuilt.manifest() == manifest => prebuilt,
+        _ => TableCommitter::new(manifest.clone())?,
+    };
     timings.setup = clock.lap();
 
     // Events 0 to 3: instance (with the proof-of-work plan's digest, docs/soundness.md 6.4),
