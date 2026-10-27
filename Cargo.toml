@@ -33,6 +33,17 @@ inherits = "release"
 debug-assertions = true
 overflow-checks = true
 
+# The CLMUL timing build (scripts/bench.sh CLMUL=1; RUSTFLAGS
+# `-C target-feature=+pclmulqdq,+sse4.1`; binaries in target/clmul/). flock-field's x86
+# GF(2^128) multiplies are `#[target_feature(enable = "pclmulqdq,sse4.1")]` without
+# `#[inline]`, so without LTO every F128 multiply in flock-core is an out-of-line call. Thin
+# LTO plus `+sse4.1` lets LLVM inline them (either alone does not); exact arithmetic, so the
+# aggregate is byte-identical. Kept out of `[profile.release]` so that the default build keeps
+# its codegen and build time (docs/perf.md Section 10).
+[profile.clmul]
+inherits = "release"
+lto = "thin"
+
 [workspace.dependencies]
 # Internal crates.
 agg-witness = { path = "crates/agg-witness" }

@@ -111,9 +111,14 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
   kernels (AVX-512/VPCLMULQDQ NTT and zerocheck, GFNI) are runtime-dispatched in the
   vendored `flock-core` (`vendor/flock-core/PATCH.md` Section 3; `FLOCK_SIMD=portable|gfni`
   caps them for A/B runs). The recommended opt-in
-  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq`, target dir
-  `target/clmul`): only Flock's carry-less path changes; Akita, Jolt and Aerie keep the
-  baseline codegen. Measured 2026-10-24 (bench-local.md): mode A proves 13x and verifies
+  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq,+sse4.1` and the
+  thin-LTO cargo profile `clmul`, outputs in `target/clmul`); for the CLI:
+  `RUSTFLAGS='-C target-feature=+pclmulqdq,+sse4.1' cargo build --profile clmul --locked -p agg-cli`
+  (binary `target/clmul/agg`). Only Flock's carry-less path gains target features; Akita,
+  Jolt and Aerie keep baseline target features but are compiled under thin LTO, which with
+  `+sse4.1` inlines Flock's scalar GF(2^128) multiply (`docs/perf.md` Section 10; every
+  PCLMULQDQ CPU has SSE4.1). Measured 2026-10-24 (bench-local.md, then
+  `+pclmulqdq` without LTO): mode A proves 13x and verifies
   14x faster than the default build at N = 1,024; the Keccak bench alone reaches about
   83% of the throughput of the full AVX-512 build.
 - `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,
