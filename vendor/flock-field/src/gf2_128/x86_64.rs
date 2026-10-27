@@ -1,6 +1,6 @@
 use core::arch::x86_64::{
-    __m128i, __m512i, _mm_clmulepi64_si128, _mm_extract_epi64, _mm_set_epi64x, _mm_slli_si128,
-    _mm_xor_si128, _mm512_bslli_epi128, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32,
+    __m128i, __m512i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_set_epi64x,
+    _mm_slli_si128, _mm_unpackhi_epi64, _mm_xor_si128, _mm512_bslli_epi128, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32,
     _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_xor_si512,
 };
 
@@ -12,8 +12,9 @@ use crate::gf2_128::{F128, F256Unreduced, ghash_reduce};
 /// Caller must ensure `pclmulqdq` (and `sse4.1` for the lane extracts in
 /// callers) is enabled — statically satisfied since every caller is itself
 /// `#[target_feature(enable = "pclmulqdq,sse4.1")]`.
+// agg-mldsa patch (PATCH.md): `pclmulqdq` only (upstream also enables `sse4.1`).
 #[inline]
-#[target_feature(enable = "pclmulqdq,sse4.1")]
+#[target_feature(enable = "pclmulqdq")]
 unsafe fn pmull(a: u64, b: u64) -> __m128i {
     let va = _mm_set_epi64x(0, a as i64);
     let vb = _mm_set_epi64x(0, b as i64);
@@ -21,16 +22,18 @@ unsafe fn pmull(a: u64, b: u64) -> __m128i {
     _mm_clmulepi64_si128::<0x00>(va, vb)
 }
 
+// agg-mldsa patch (PATCH.md): SSE2 lane extracts instead of `_mm_extract_epi64` (SSE4.1).
+// Both are an `extractelement` in LLVM IR; LLVM still emits `pextrq` where SSE4.1 is on.
 #[inline]
-#[target_feature(enable = "sse4.1")]
 unsafe fn lane0(v: __m128i) -> u64 {
-    _mm_extract_epi64::<0>(v) as u64
+    // SAFETY: SSE2 is part of the x86_64 baseline.
+    unsafe { _mm_cvtsi128_si64(v) as u64 }
 }
 
 #[inline]
-#[target_feature(enable = "sse4.1")]
 unsafe fn lane1(v: __m128i) -> u64 {
-    _mm_extract_epi64::<1>(v) as u64
+    // SAFETY: SSE2 is part of the x86_64 baseline.
+    unsafe { _mm_cvtsi128_si64(_mm_unpackhi_epi64(v, v)) as u64 }
 }
 
 /// Schoolbook 4 CLMUL — fully independent products, then scalar reduction.
@@ -129,12 +132,11 @@ pub unsafe fn ghash_mul_karatsuba(a: F128, b: F128) -> F128 {
 /// `aarch64::ghash_mul_karatsuba_barrett`.
 ///
 /// # Safety
-/// Requires `pclmulqdq` and `sse4.1`, as declared by the target-feature
-/// attribute.
-// agg-mldsa patch (PATCH.md): `#[inline]` so that callers built with
-// `+pclmulqdq,+sse4.1` inline the multiply across the crate boundary without LTO.
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+// agg-mldsa patch (PATCH.md): `#[inline]` and `pclmulqdq` only (upstream: no `#[inline]`,
+// `pclmulqdq,sse4.1`), so that callers built with `+pclmulqdq` inline it without LTO.
 #[inline]
-#[target_feature(enable = "pclmulqdq,sse4.1")]
+#[target_feature(enable = "pclmulqdq")]
 pub unsafe fn ghash_mul_karatsuba_barrett(a: F128, b: F128) -> F128 {
     // SAFETY: function carries the required target features.
     unsafe {
@@ -178,12 +180,11 @@ pub unsafe fn ghash_mul_karatsuba_barrett(a: F128, b: F128) -> F128 {
 /// deferred `reduce()`. Port of `aarch64::ghash_mul_unreduced_neon`.
 ///
 /// # Safety
-/// Requires `pclmulqdq` and `sse4.1`, as declared by the target-feature
-/// attribute.
-// agg-mldsa patch (PATCH.md): `#[inline]` so that callers built with
-// `+pclmulqdq,+sse4.1` inline the multiply across the crate boundary without LTO.
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+// agg-mldsa patch (PATCH.md): `#[inline]` and `pclmulqdq` only (upstream: no `#[inline]`,
+// `pclmulqdq,sse4.1`), so that callers built with `+pclmulqdq` inline it without LTO.
 #[inline]
-#[target_feature(enable = "pclmulqdq,sse4.1")]
+#[target_feature(enable = "pclmulqdq")]
 pub unsafe fn ghash_mul_unreduced_x86(a: F128, b: F128) -> F256Unreduced {
     // SAFETY: function carries the required target features.
     unsafe {
@@ -403,12 +404,11 @@ impl WideGhashX4 {
 /// a general multiply.
 ///
 /// # Safety
-/// Requires `pclmulqdq` and `sse4.1`, as declared by the target-feature
-/// attribute.
-// agg-mldsa patch (PATCH.md): `#[inline]` so that callers built with
-// `+pclmulqdq,+sse4.1` inline the multiply across the crate boundary without LTO.
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+// agg-mldsa patch (PATCH.md): `#[inline]` and `pclmulqdq` only (upstream: no `#[inline]`,
+// `pclmulqdq,sse4.1`), so that callers built with `+pclmulqdq` inline it without LTO.
 #[inline]
-#[target_feature(enable = "pclmulqdq,sse4.1")]
+#[target_feature(enable = "pclmulqdq")]
 pub unsafe fn ghash_square_x86(a: F128) -> F128 {
     // SAFETY: function carries the required target features.
     unsafe {

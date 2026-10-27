@@ -111,14 +111,11 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
   kernels (AVX-512/VPCLMULQDQ NTT and zerocheck, GFNI) are runtime-dispatched in the
   vendored `flock-core` (`vendor/flock-core/PATCH.md` Section 3; `FLOCK_SIMD=portable|gfni`
   caps them for A/B runs). The recommended opt-in
-  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq,+sse4.1`, target dir
-  `target/clmul`); for the CLI: `RUSTFLAGS='-C target-feature=+pclmulqdq,+sse4.1'
-  CARGO_TARGET_DIR=target/clmul cargo build --release --locked -p agg-cli`. Only Flock's
-  carry-less path changes; Akita, Jolt and Aerie keep the baseline codegen. `+sse4.1`
-  (every PCLMULQDQ CPU has it) lets the scalar GF(2^128) multiply of the vendored
-  `flock-field` (`#[inline]`, `vendor/flock-field/PATCH.md`) inline into flock-core
-  (`docs/perf.md` Section 10); with `+pclmulqdq` alone it stays an out-of-line call.
-  Measured 2026-10-24 (bench-local.md, `+pclmulqdq` only): mode A proves 13x and verifies
+  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq`, target dir
+  `target/clmul`): only Flock's carry-less path changes; Akita, Jolt and Aerie keep the
+  baseline codegen. Do not add `+sse4.1`: it slows our lookup and stage 3 by 6-7% locally
+  (`docs/perf.md` Section 10); the vendored `flock-field` needs only `pclmulqdq` to inline
+  its scalar GF(2^128) multiply (`vendor/flock-field/PATCH.md`). Measured 2026-10-24 (bench-local.md): mode A proves 13x and verifies
   14x faster than the default build at N = 1,024; the Keccak bench alone reaches about
   83% of the throughput of the full AVX-512 build.
 - `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,

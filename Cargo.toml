@@ -87,6 +87,6 @@ serde_json = "1"
 # the other Flock crates.
 [patch."https://github.com/succinctlabs/flock"]
 flock-core = { path = "vendor/flock-core" }
-# flock-field with `#[inline]` on the x86 scalar GF(2^128) multiply (vendor/flock-field/PATCH.md),
-# so that the CLMUL timing build (`+pclmulqdq,+sse4.1`) inlines it without LTO.
+# flock-field with `#[inline]` on the x86 scalar GF(2^128) multiply and without its `sse4.1`
+# requirement (vendor/flock-field/PATCH.md), so that the CLMUL build (`+pclmulqdq`) inlines it.
 flock-field = { path = "vendor/flock-field" }
