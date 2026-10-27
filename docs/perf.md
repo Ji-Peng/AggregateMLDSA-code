@@ -463,7 +463,12 @@ verifier functions). Exact arithmetic; the default build is unchanged.
 ### 10.2 Checks (measured, local)
 
 - Aggregates identical to main's CLMUL build at 256 and 1,024 records, H-u and H-exact; `agg
-  verify` accepts with both binaries. `flock-field` tests under `+pclmulqdq`: 29 passed.
+  verify` accepts with both binaries.
+- Tests under `+pclmulqdq`, `--release`: workspace 367 passed, 0 failed, 19 ignored (5m27s);
+  vendored `flock-core` lib with the vendored `flock-field` patched in (`--config
+  'patch."https://github.com/succinctlabs/flock".flock-field.path=...'`) 460 passed, 0 failed,
+  6 ignored; `flock-field` 29 passed. Default build (no flags): `cargo check --workspace
+  --all-targets` clean, `flock-field` tests 28 passed.
 - 8K, `agg bench --count 8192 --warmup 1 --reps 2`, 7 threads, base and new interleaved in
   rotated order (load 4.1-4.3, another job active; direction only):
 
