@@ -645,6 +645,13 @@ bytes are unchanged (byte-identical aggregates; per-path tests listed in `PATCH.
 `FLOCK_SIMD=portable|gfni` caps the level for A/B runs. The merged opening's block
 statistics have an AVX-512 path of the same kind (`PATCH.md` Section 4).
 
+Third change, in a second vendored crate (`vendor/flock-field/PATCH.md`, 2026-10-27): the x86
+scalar GF(2^128) multiply, unreduced multiply and square of `flock-field` get `#[inline]` and
+need only `pclmulqdq` (upstream: not inline, `pclmulqdq,sse4.1`), so the `+pclmulqdq` CLMUL
+build inlines them into flock-core instead of calling them out of line. Exact (same
+instructions on the same values), proof bytes unchanged, upstream interoperability kept;
+`docs/perf.md` Section 10.
+
 ## K13. Two-type bridge union as the bridge instance of a tied part (spec Section 8; docs/bridge.md Sections 5, 5b)
 
 Spec and docs/bridge.md Section 5: one bridge slot per segment, one block whose rows prove

@@ -438,3 +438,64 @@ session, besides the 32K bench (1 warmup + 3) of W1 against `AGG_FLOCK_REBUILD=1
 lookup and stage levers then act directly on the critical path. RSS at 32K: about 4.2-4.5
 GiB of witness (est.) stays resident from event 2 to the join; the bench VmHWM headroom to
 32 GiB is 1.82 GiB (Phase 10b), so check VmHWM in that run.
+
+## 10. Lever B: inline Flock's scalar GF(2^128) multiply (branch `lever-2`)
+
+Sources: `ref/notes/overnight-20261026/ideate-flock-span.md` Sections 4, 7, 8 (profile,
+microbench), `verify-flock-B-inline-mul.md` (verdict, 32K estimate) and `lever-2.md` (commands and
+raw numbers of this section), all in the top-level repo.
+
+### 10.1 Change
+
+`flock-field` 83f963e declares its x86 multiplies (`ghash_mul_karatsuba_barrett`,
+`ghash_mul_unreduced_x86`, `ghash_square_x86`) `#[target_feature(enable = "pclmulqdq,sse4.1")]`
+without `#[inline]`, so in our CLMUL build (`+pclmulqdq`, no LTO) every `F128` multiply in
+flock-core was an out-of-line call (3.87% self time in a local 8K profile; microbench 5.5 ns per
+multiply against 2.7 ns inlined). The memo proposed thin LTO plus `+sse4.1`. Measured locally,
+a global `+sse4.1` slows our lookup and stage 3 by 6-7% (it alone, without LTO, gives the same
+loss), which cancels the Flock gain once W1 makes the PIOP branch critical. The branch therefore
+vendors `flock-field` (`vendor/flock-field/PATCH.md`): `#[inline]` on the three functions,
+`pclmulqdq` as their only target feature, SSE2 lane extracts. The CLMUL build line stays
+`-C target-feature=+pclmulqdq`, and the multiply inlines everywhere in the prover (pclmul
+instruction lines in `agg`: 461 -> 6,903; 18 out-of-line Karatsuba calls remain, all in
+verifier functions). Exact arithmetic; the default build is unchanged.
+
+### 10.2 Checks (measured, local)
+
+- Aggregates identical to main's CLMUL build at 256 and 1,024 records, H-u and H-exact; `agg
+  verify` accepts with both binaries.
+- Tests under `+pclmulqdq`, `--release`: workspace 367 passed, 0 failed, 19 ignored (5m27s);
+  vendored `flock-core` lib with the vendored `flock-field` patched in (`--config
+  'patch."https://github.com/succinctlabs/flock".flock-field.path=...'`) 460 passed, 0 failed,
+  6 ignored; `flock-field` 29 passed. Default build (no flags): `cargo check --workspace
+  --all-targets` clean, `flock-field` tests 28 passed.
+- 8K, `agg bench --count 8192 --warmup 1 --reps 2`, 7 threads, base and new interleaved in
+  rotated order (load 4.1-4.3, another job active; direction only):
+
+| Mode | Line | base (median) | new (median) |
+| --- | --- | ---: | ---: |
+| fork-join (default), 4 runs each | prove | 5,715 ms | 5,698 ms |
+| | Flock proofs (4-thread pool) | 2,474 ms | 2,191 ms (-11.4%) |
+| | fork-join wall | 2,945 ms | 2,915 ms |
+| | zerocheck rounds 3+ tail | 220 ms | 171 ms |
+| | user CPU of the bench | 129.7 s | 126.1 s (-2.8%) |
+| `AGG_FLOCK_THREADS=0`, 3 runs each | prove | 6,899 ms | 6,796 ms |
+| | Flock parts (commit + proofs) | 2,897 ms | 2,746 ms (-5.2%) |
+| | event 7 lookup / stage 3 | 1,236 / 684 ms | 1,225 / 692 ms |
+| both | verify uncached | 275.7 ms | 273.5 ms |
+
+- Rejected variants (same A/B method, `lever-2.md` 3.4-3.8): thin LTO + `+sse4.1` (Flock
+  proofs -0.26 to -0.30 s, but lookup +38 to +88 ms and stage 3 +42 ms, prove +0.23 s in one
+  set, -0.04 s in another); `+sse4.1` alone (lookup +70 ms, stage 3 +50 ms, no Flock gain);
+  vendored inline with `+sse4.1` (Flock gain, same PIOP loss). Commits `8eedc3e` and
+  `936bb0d` record them; `570a94b` is the kept version.
+
+### 10.3 What it means at 32K (est.)
+
+At 8K on this box the PIOP branch is critical, so the Flock gain shows as freed CPU only.
+On `c4d-highmem-16` at 32K, with W1 in `main`, the verifier's model gives prove -0.14 to
+-0.36 s (est.) from 2-5 vCPU-s freed. The upper end of the memo's estimate (-0.3 to -0.8 s)
+assumed the Flock branch critical, which no longer holds after W1. Bytes are identical, and
+the verifier changes by about 0 to -1%. Next measurement, on the next cloud session (1 warmup + 3,
+back to back with main's binary, same flags): predict Flock proofs -0.3 to -0.7 s, prove
+-0.14 to -0.36 s, verify within +-2%, 1,469,874 B at 32K H-u.
