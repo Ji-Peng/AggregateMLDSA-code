@@ -281,6 +281,13 @@ impl TiedCommitted {
         self.sponge_data.take()
     }
 
+    /// The sponge commitment's prover data, if it is still held (the proof then opens it
+    /// without committing again, K14).
+    #[must_use]
+    pub fn commit_data(&self) -> Option<&CommitData> {
+        self.sponge_data.as_ref()
+    }
+
     /// Records in the part.
     #[must_use]
     pub fn len(&self) -> usize {

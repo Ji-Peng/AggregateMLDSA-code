@@ -52,7 +52,9 @@ at the join the chain's rounds and the sponge proof, whose opening carries the c
 claim; the part and span seeds bind the digest of the event-6 record (K22). At most one
 part's Flock buffers are alive: parts are committed one by one at event 2 (the cap and, by
 default, the sponge commit data are kept, K14) and rebuilt, proven and dropped one by one
-for the join.
+for the join. A batch of exactly one part (a span, or one part at `N <= 2^13`) keeps its
+committed witness from event 2 instead and proves it without a rebuild (lever W1,
+`docs/perf.md` Section 9; `AGG_FLOCK_REBUILD` restores the rebuild).
 
 Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
 parts are whole segments is one tied part over all segments (one sponge instance of all `N`
