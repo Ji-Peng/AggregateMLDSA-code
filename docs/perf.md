@@ -376,3 +376,65 @@ taskset -c 0,1,3-15 cargo test --release -p agg-cli
 Open: an uncached public_data with fewer copies (keep the packed `t1` and unpack per record,
 or borrow `pk` from the inputs); a packed 23-bit `A` cache (memo 3.4 (b)); AVX2 kernels
 would need a crate outside the `unsafe_code = "forbid"` rule.
+
+## 9. Lever W1: keep the event-2 Flock witness until the join (branch `lever-1`)
+
+Section 8 (Phase 10b profile, W1 to W3) lives on branch `cloud-profile`; this section records
+W1's implementation and local check. Sources: `ref/notes/bench-cloud.md` Phase 10b (top-level
+repo), `ref/notes/overnight-20261026/verify-flock-A-keep-witness.md` (saving recomputed from
+the raw traces) and `ref/notes/overnight-20261026/lever-1.md` (commands and raw outputs of
+this section).
+
+### 9.1 Change
+
+Before W1, every Flock part dropped its sponge buffers, input bits and statement after event 2
+and rebuilt them in the Flock branch of the fork-join (K14). At 32K on the cloud VM the
+rebuild is 2,052-2,070 ms of the 7.86-7.93 s Flock branch (measured, Phase 10b, 3 traced
+runs), and the drop at the end of event 2 is a serial munmap of 166-197 ms on one vCPU
+(measured, sampler re-read). Now a batch with exactly one tied part keeps its whole
+`TiedCommitted` in `mode_a::PartState` from event 2 to the join and proves it without a
+rebuild. That covers the span (every batch of `N >= 2^14` with whole-segment parts) and the
+one-part batch at `N <= 2^13` (default part size), the second added so that the change is
+visible locally. Batches of more than one part keep the drop-and-rebuild. Knobs:
+`Aggregator::keep_witness(false)` or `AGG_FLOCK_REBUILD` (any value) restore the old behaviour.
+Prover-only; the aggregate is byte-identical by construction.
+
+### 9.2 Checks (measured, local)
+
+- `cmp` against main `184374f` (and against `AGG_FLOCK_REBUILD=1`): identical at 256 and 1K
+  (H-u and H-exact), 2K, 8K, and 2K in two parts (`--part-log2 10`); `agg verify` accepts.
+- Tests: `kept_and_rebuilt_witnesses_give_the_same_aggregate` (64 records in one part, 256 in
+  two) and `kept_and_rebuilt_span_witnesses_give_the_same_proof` (a two-segment span of 8,193
+  records, prover side only, `--ignored`; the only local check of the span path, since a 16K
+  aggregate does not fit this box's 15.6 GiB).
+
+### 9.3 Local 8K A/B (measured, direction only)
+
+`agg bench --count 8192 --warmup 1 --reps 2`, CLMUL build, `RAYON_NUM_THREADS=7`,
+`taskset -c 0,1,3-15`, main / W1 / main / W1 interleaved, other agents active (load 1.8 to
+6.6). Predictions written first (lever-1 log Section 1): Flock proofs -0.6 to -1.2 s, prove
+-0.2 to -0.8 s, peak RSS -0.3 to +0.5 GiB.
+
+| Binary | Prove median of 2 | Flock proofs (pool of 4) | Fork-join wall | Outside the fork | Prover peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main `184374f` | 5,957.6 / 6,018.7 ms | 3,051.8 / 3,047.9 | 3,052.5 / 3,112.3 | 2,782.0 / 2,819.4 | 8,657 / 8,739 MiB |
+| W1 `241753e` | 5,712.1 / 5,888.7 ms | 2,480.2 / 2,539.8 | 2,950.5 / 3,023.6 | 2,755.6 / 2,833.2 | 8,779 / 8,871 MiB |
+
+Flock proofs -0.51 to -0.57 s (just below the predicted range). Prove -0.25 / -0.13 s (low
+edge of the prediction). Peak +122 / +132 MiB (inside). The fork wall drops only 0.09-0.10 s:
+at 8K on this box the PIOP branch (about 2.95 s) becomes the critical one as soon as the Flock
+branch loses its rebuild. This is the "soft floor" case of the verifier's model, where only
+the Flock-only tail disappears.
+
+### 9.4 What it means at 32K (est.)
+
+The local result supports the floor end of the verifier's range. Revised estimate for
+`c4d-highmem-16` at 32K: fork -0.46 s (Flock-only tail, measured 460.4 ms) to -0.99 s
+(uniform-rate model), plus the event-2 munmap -0.16 to -0.19 s, so prove -0.6 to -1.2 s,
+point -0.7 s (est., lowered from -0.9 s by the 8K result). From 12.75 s (bench median, Phase
+10b) that is about 11.6-12.1 s (est.). Once W1 is in, the PIOP branch is critical. The Flock
+pool should then shrink: `AGG_FLOCK_THREADS` 4 / 6 / 8 (1 warmup + 2 each) on the next VM
+session, besides the 32K bench (1 warmup + 3) of W1 against `AGG_FLOCK_REBUILD=1`. The
+lookup and stage levers then act directly on the critical path. RSS at 32K: about 4.2-4.5
+GiB of witness (est.) stays resident from event 2 to the join; the bench VmHWM headroom to
+32 GiB is 1.82 GiB (Phase 10b), so check VmHWM in that run.

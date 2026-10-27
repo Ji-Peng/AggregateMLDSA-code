@@ -698,7 +698,7 @@ proofs with and without it). `TiedCommitted` keeps the sponge instance's data;
 `agg_cli::mode_a` keeps it per part from event 2 to event 6 (default;
 `Aggregator::keep_commit_data(false)` or the environment variable `AGG_FLOCK_RECOMMIT`
 restores the K7 behaviour), while the witness buffers are still dropped after event 2 and
-rebuilt at event 6. The bridge union is committed once, at event 6 (K13). The standalone
+rebuilt at event 6 (since lever W1, below, only in a batch of more than one part). The bridge union is committed once, at event 6 (K13). The standalone
 sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
 
 Cost (`docs/keccak.md` Section 11): the kept data is the sponge instance's codeword and Merkle
@@ -708,6 +708,18 @@ measured); it is the data the sponge proof would rebuild at event 6, so the prov
 unchanged (1,942 MiB kept, 1,959 MiB recommitted at 2,048 records). Saved: one Ligerito commit
 per part, 217 ms of the Flock part at 2,048 records (1,901 against 2,118 ms) and 58 ms at
 1,024.
+
+Update (lever W1, 2026-10-27; `docs/perf.md` Section 9): a batch with exactly one tied
+part (the span at `N >= 2^14`, one part at `N <= 2^13` under the default part size) keeps the
+whole `TiedCommitted` (sponge buffers, input bits, statement and commit data) in `mode_a`'s
+`PartState` from event 2 until its proof at the join, so the witness is built once. At most
+one part's buffers are then alive trivially; a batch of more than one part still drops and
+rebuilds them as above. `Aggregator::keep_witness(false)` or the environment variable
+`AGG_FLOCK_REBUILD` restores the drop-and-rebuild (a measurement knob). Prover-only: the
+witness and statement are the ones the deterministic builder would rebuild, so the aggregate
+is byte-identical (tests `kept_and_rebuilt_witnesses_give_the_same_aggregate`,
+`kept_and_rebuilt_span_witnesses_give_the_same_proof`; `cmp` of 256 / 1K / 2K / 8K
+aggregates against `184374f`).
 
 ## K15. Ligerito `Slim` in mode A; the profile in the segment item (spec Sections 8, 10)
 

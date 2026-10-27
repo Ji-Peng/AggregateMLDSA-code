@@ -57,7 +57,12 @@ environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
                         (aggregate, bench; default half the rayon pool; 0: one after the other;
                         at most the logical CPUs or the rayon pool; a value that is not a
-                        number warns and falls back to the default).";
+                        number warns and falls back to the default).
+  AGG_FLOCK_REBUILD     (any value) drop the Flock witness of a one-part batch after event 2
+                        and rebuild it for its proof, as before lever W1 (measurement knob;
+                        the aggregate is the same).
+  AGG_FLOCK_RECOMMIT    (any value) drop the Flock commit data after event 2 and commit again
+                        for the proof (K7; measurement knob; the aggregate is the same).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -618,7 +618,10 @@ kept data is the codeword and tree the sponge proof would otherwise rebuild at e
 the peak is reached, so it only adds memory between events 2 and 6. Extrapolated, not
 measured: about 0.6 GiB per full segment with `Fast` (twice that with `Slim`), 2.4 GiB at
 `N = 2^15` if all four segments keep theirs; a driver short of memory can drop it
-(`Aggregator::keep_commit_data(false)`).
+(`Aggregator::keep_commit_data(false)`). Since lever W1 (`docs/perf.md` Section 9) a batch
+of one tied part (the span, or one part at `N <= 2^13`) keeps its whole witness from event 2
+to the join, not only the commit data, and is not rebuilt (`AGG_FLOCK_REBUILD` restores the
+rebuild).
 
 Ligerito profiles on one tied part (`tied_part_profiles_bytes_and_times`, medians of 3 after
 1 warmup; commit is event 2, prove includes the bridge union's blocks and commitment; the

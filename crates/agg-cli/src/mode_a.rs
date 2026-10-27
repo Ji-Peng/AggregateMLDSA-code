@@ -2127,6 +2127,75 @@ mod tests {
         ));
     }
 
+    /// Lever W1 on the span path (the only Flock path at 16K and 32K): a two-segment span
+    /// (`N = 8,193`) that keeps its event-2 witness until the join gives the same items,
+    /// shares and proof as one that drops and rebuilds it (K14), and the Flock verifier
+    /// accepts it. Records are arbitrary bytes (the Keccak side only hashes them).
+    #[test]
+    #[ignore = "a two-segment Flock span (6.5 GB peak, 23 min in the plain build): run with --release --ignored"]
+    fn kept_and_rebuilt_span_witnesses_give_the_same_proof() {
+        let gate = sponge_gate();
+        let geometry = Geometry::new((1 << 13) + 1).unwrap();
+        let segments = geometry.segments();
+        assert!(segments == 2 && spans_segments(&geometry, DEFAULT_PART_LOG2, true));
+        let n = geometry.n;
+        let mut x = 0x5eed_u64;
+        let mut byte = move || {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 56) as u8
+        };
+        let records: Vec<SpongeRecord> = (0..n)
+            .map(|_| SpongeRecord {
+                mu: std::array::from_fn(|_| byte()),
+                w1_encode: std::array::from_fn(|_| byte()),
+            })
+            .collect();
+        let matrices = BridgeMatrices::random_for_tests(3);
+        let span = TiedPart::new_span(&gate, n, 13, 0, segments, ligerito_of(FLOCK_PROFILE));
+        let final_vectors = span.final_vectors_of_bits(&span.honest_parts(&records).1, &matrices);
+        let seeds = [[1_u8; 32], [2_u8; 32]];
+        let (bridge_seed, record) = ([3_u8; 32], [7_u8; 32]);
+        let run = |keep: bool| {
+            let prover = FlockProver::new(&gate, geometry, records.clone(), DEFAULT_PART_LOG2, None)
+                .keep_witness(keep);
+            let items = prover.commitments(segments);
+            let state = prover.state.lock().unwrap();
+            assert_eq!(state.span.as_ref().unwrap().committed.is_some(), keep);
+            drop(state);
+            let shares = prover.shares(&matrices, &final_vectors).unwrap();
+            let proofs = prover
+                .prove(&bridge_seed, &matrices, &seeds, &final_vectors, &record)
+                .unwrap();
+            (items, shares, proofs)
+        };
+        let kept = run(true);
+        assert!(kept == run(false), "a kept witness changed the span's items or proof");
+        let verifier = FlockVerifier::new(&gate);
+        let mu: Vec<[u8; 64]> = records.iter().map(|r| r.mu).collect();
+        let c_tilde: Vec<[u8; C_TILDE_BYTES]> = records.iter().map(SpongeRecord::c_tilde).collect();
+        for sigma in 0..segments {
+            let range = (sigma << 13)..((sigma + 1) << 13).min(n);
+            let accepted = verifier.verify(&SegmentContext {
+                sigma,
+                geometry,
+                commitment: &kept.0[sigma],
+                seed: &seeds[sigma],
+                bridge_seed: &bridge_seed,
+                mu: &mu[range.clone()],
+                c_tilde: &c_tilde[range],
+                final_vector: &final_vectors[sigma],
+                shares: &kept.1[sigma],
+                record: &record,
+                proof: &kept.2[sigma],
+                matrices: &matrices,
+            });
+            assert!(accepted, "segment {sigma}: {:?}", verifier.rejection());
+        }
+        assert_eq!(verifier.log().len(), 1, "one span verified at the last segment");
+    }
+
     /// The Flock records of honest tables are `mu_i` and `w1Encode(w_1'_i)`, which hash to the
     /// published `c~_i`.
     #[test]
