@@ -42,10 +42,14 @@
 //! commitment and, by default, the sponge commitment's Flock prover data (its Reed-Solomon
 //! codeword and Merkle tree, deviation K14), so that the proof opens it without committing
 //! again; [`Aggregator::keep_commit_data`]`(false)` drops it and Flock commits a second time
-//! (K7). The witness buffers are dropped after event 2 and rebuilt from the records for the
-//! proof, proven and dropped, so at most one part's Flock buffers are alive (the input bits
-//! of a part whose share is sent are kept, `6 * 2^(d + 7)` bytes, to compute the share at
-//! event 6). The PIOP tables are `i8` columns (`agg_piop::source_tables`).
+//! (K7). When the batch has exactly one tied part (a span, or one part in a one-segment
+//! batch), its committed witness (sponge buffers, input bits, statement) is kept from event 2
+//! until the join and proven without a rebuild (lever W1, `docs/perf.md` Section 9;
+//! [`Aggregator::keep_witness`], `AGG_FLOCK_REBUILD` restores the rebuild). With more than
+//! one part the witness buffers are dropped after event 2 and rebuilt from the records for
+//! the proof, proven and dropped, so at most one part's Flock buffers are alive (the input
+//! bits of a part whose share is sent are kept, `6 * 2^(d + 7)` bytes, to compute the share
+//! at event 6). The PIOP tables are `i8` columns (`agg_piop::source_tables`).
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -55,7 +59,7 @@ use agg_keccak::flock_union::CommitData;
 use agg_keccak::gate::ChainGate;
 use agg_keccak::prover::{KeccakProof, Profile};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord};
-use agg_keccak::tied::{TiedCommitment, TiedPart};
+use agg_keccak::tied::{TiedCommitment, TiedCommitted, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
@@ -285,7 +289,8 @@ impl SegmentParts {
 
 /// Builds the Flock witness (sponge slot buffers and the part's lane-major input bits, the
 /// parity chain's copy of `b'`) of one part from its records; the honest builder is
-/// `TiedPart::honest_parts`. Called at event 2 and again for the proof, so it must be
+/// `TiedPart::honest_parts`. Called at event 2 and again for the proof (unless the batch has
+/// one part and keeps its witness, [`FlockProver::keep_witness`]), so it must be
 /// deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
 pub type PartWitness<'a> =
     &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
@@ -303,7 +308,8 @@ pub struct PartProveLog {
     pub commit: Duration,
     /// Heap bytes of the kept commit data (codeword and Merkle tree; 0 when not kept).
     pub kept_bytes: usize,
-    /// The join's proof (witness rebuilt, Flock proof; the share is computed at event 6).
+    /// The join's proof (witness rebuilt unless kept, Flock proof; the share is computed at
+    /// event 6).
     pub prove: Duration,
     /// Proof bytes.
     pub proof_bytes: usize,
@@ -321,6 +327,7 @@ pub struct FlockProver<'g, 'h> {
     part_floor: u32,
     witness: Option<PartWitness<'h>>,
     keep_commit_data: bool,
+    keep_witness: bool,
     state: Mutex<ProverState<'g>>,
 }
 
@@ -329,6 +336,9 @@ struct PartState<'g> {
     range: Range<usize>,
     commitment: TiedCommitment,
     commit_data: Option<CommitData>,
+    /// The committed witness, kept from event 2 for the join when the batch has exactly one
+    /// part and [`FlockProver::keep_witness`] is on (lever W1); `None`: rebuilt for the proof.
+    committed: Option<TiedCommitted>,
     /// The part's input bits when its share is sent (every part of a segment but the last):
     /// the share is computed from them at event 6, before the proofs.
     share_bits: Option<Vec<u64>>,
@@ -373,6 +383,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             part_floor: min_part_log2(&geometry),
             witness,
             keep_commit_data: true,
+            keep_witness: true,
             state: Mutex::new(ProverState::default()),
         }
     }
@@ -415,6 +426,61 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         self
     }
 
+    /// Keep the committed witness (sponge buffers, input bits, statement) of a batch with
+    /// exactly one tied part from event 2 until its proof at the join (default; lever W1), or
+    /// drop it after event 2 and rebuild it from the records for the proof (K14). The proof is
+    /// the same either way; batches with more than one part always rebuild.
+    #[must_use]
+    pub fn keep_witness(mut self, keep: bool) -> Self {
+        self.keep_witness = keep;
+        self
+    }
+
+    /// The committed witness and commit data to keep from event 2 (module docs): the
+    /// witness only if `keep` (one part in the batch and [`Self::keep_witness`]), the
+    /// commit data only under [`Self::keep_commit_data`].
+    fn split_committed(
+        &self,
+        mut committed: TiedCommitted,
+        keep: bool,
+    ) -> (TiedCommitment, Option<CommitData>, Option<TiedCommitted>) {
+        let commitment = committed.commitment().clone();
+        if keep {
+            if !self.keep_commit_data {
+                drop(committed.take_commit_data());
+            }
+            (commitment, None, Some(committed))
+        } else {
+            let commit_data = committed
+                .take_commit_data()
+                .filter(|_| self.keep_commit_data);
+            drop(committed);
+            (commitment, commit_data, None)
+        }
+    }
+
+    /// The part's committed witness for its proof: the one kept at event 2, or rebuilt from
+    /// the records with the commitment (and commit data) of event 2.
+    fn committed_for_proof(
+        &self,
+        seg: &TiedPart<'_>,
+        (sigma, s): (usize, usize),
+        records: &[SpongeRecord],
+        commitment: TiedCommitment,
+        commit_data: Option<CommitData>,
+        kept: Option<TiedCommitted>,
+    ) -> TiedCommitted {
+        if let Some(committed) = kept {
+            debug_assert!(
+                *committed.commitment() == commitment,
+                "kept witness of another commitment"
+            );
+            return committed;
+        }
+        let (sponge, bits) = self.build(seg, sigma, s, records);
+        seg.reattach(sponge, bits, records, commitment, commit_data)
+    }
+
     /// Per-part wall times and proof sizes (after [`KeccakSide::prove`]).
     #[must_use]
     pub fn log(&self) -> Vec<PartProveLog> {
@@ -442,18 +508,23 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         let n = self.records.len();
         let seg = TiedPart::new_span(self.gate, n, d, 0, segments, ligerito_of(self.profile));
         let (sponge, bits) = self.build(&seg, 0, 0, &self.records);
-        let mut committed = seg.commit_parts(sponge, bits, &self.records);
-        let commitment = committed.commitment().clone();
-        let commit_data = committed
-            .take_commit_data()
-            .filter(|_| self.keep_commit_data);
-        drop(committed);
+        // One part in the batch: its witness is kept for the join unless configured
+        // otherwise (lever W1); the commit data under K14.
+        let (commitment, commit_data, committed) = self.split_committed(
+            seg.commit_parts(sponge, bits, &self.records),
+            self.keep_witness,
+        );
+        let kept_bytes = committed
+            .as_ref()
+            .and_then(TiedCommitted::commit_data)
+            .or(commit_data.as_ref())
+            .map_or(0, CommitData::heap_bytes);
         state.log.push(PartProveLog {
             sigma: 0,
             part: 0,
             records: n,
             commit: start.elapsed(),
-            kept_bytes: commit_data.as_ref().map_or(0, CommitData::heap_bytes),
+            kept_bytes,
             ..PartProveLog::default()
         });
         let item = |span: u8, commitments: Vec<Vec<u8>>| {
@@ -475,6 +546,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
             range: 0..n,
             commitment,
             commit_data,
+            committed,
             share_bits: None,
         });
         items
@@ -499,10 +571,14 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         let segments = part.seg.segments();
         assert_eq!(seeds.len(), segments, "one seed per segment");
         assert_eq!(final_vectors.len(), segments, "one Y per segment");
-        let (sponge, bits) = self.build(&part.seg, 0, 0, &self.records);
-        let committed =
-            part.seg
-                .reattach(sponge, bits, &self.records, part.commitment, part.commit_data);
+        let committed = self.committed_for_proof(
+            &part.seg,
+            (0, 0),
+            &self.records,
+            part.commitment,
+            part.commit_data,
+            part.committed,
+        );
         let proof = part
             .seg
             .prove_with_final_vectors(
@@ -550,6 +626,15 @@ impl KeccakSide for FlockProver<'_, '_> {
         if spans_with_floor(&self.geometry, self.part_log2, self.span, self.part_floor) {
             return self.commit_span(&mut state, segments);
         }
+        // A batch of exactly one part keeps its witness for the join (lever W1); with more
+        // parts at most one part's buffers are alive (module docs).
+        let total: usize = (0..segments)
+            .map(|sigma| {
+                let floor = self.part_floor;
+                SegmentParts::plan_with_floor(&self.geometry, sigma, self.part_log2, floor).count()
+            })
+            .sum();
+        let keep = self.keep_witness && total == 1;
         let mut items = Vec::with_capacity(segments);
         for sigma in 0..segments {
             let plan =
@@ -568,21 +653,22 @@ impl KeccakSide for FlockProver<'_, '_> {
                 );
                 let (sponge, bits) = self.build(&seg, sigma, s, records);
                 let share_bits = (s + 1 < plan.count()).then(|| bits.clone());
-                // The committed buffers are dropped here and rebuilt for the proof; the
-                // commit data (codeword, Merkle tree) is kept unless configured otherwise
-                // (K14).
-                let mut committed = seg.commit_parts(sponge, bits, records);
-                let commitment = committed.commitment().clone();
-                let commit_data = committed
-                    .take_commit_data()
-                    .filter(|_| self.keep_commit_data);
-                drop(committed);
+                // Unless kept (one part in the batch, lever W1), the committed buffers are
+                // dropped here and rebuilt for the proof; the commit data (codeword, Merkle
+                // tree) is kept unless configured otherwise (K14).
+                let (commitment, commit_data, committed) =
+                    self.split_committed(seg.commit_parts(sponge, bits, records), keep);
+                let kept_bytes = committed
+                    .as_ref()
+                    .and_then(TiedCommitted::commit_data)
+                    .or(commit_data.as_ref())
+                    .map_or(0, CommitData::heap_bytes);
                 state.log.push(PartProveLog {
                     sigma,
                     part: s,
                     records: records.len(),
                     commit: start.elapsed(),
-                    kept_bytes: commit_data.as_ref().map_or(0, CommitData::heap_bytes),
+                    kept_bytes,
                     ..PartProveLog::default()
                 });
                 parts.push(PartState {
@@ -590,6 +676,7 @@ impl KeccakSide for FlockProver<'_, '_> {
                     range,
                     commitment,
                     commit_data,
+                    committed,
                     share_bits,
                 });
             }
@@ -688,10 +775,14 @@ impl KeccakSide for FlockProver<'_, '_> {
             for (s, part) in parts.into_iter().enumerate() {
                 let start = Instant::now();
                 let records = &self.records[part.range.clone()];
-                let (sponge, bits) = self.build(&part.seg, sigma, s, records);
-                let committed =
-                    part.seg
-                        .reattach(sponge, bits, records, part.commitment, part.commit_data);
+                let committed = self.committed_for_proof(
+                    &part.seg,
+                    (sigma, s),
+                    records,
+                    part.commitment,
+                    part.commit_data,
+                    part.committed,
+                );
                 let share = if s + 1 < count {
                     own.next().expect("a share per part but the last")
                 } else {
@@ -1389,19 +1480,24 @@ pub struct Aggregator {
     gate: ChainGate,
     config: AggregatorConfig,
     keep_commit_data: bool,
+    keep_witness: bool,
 }
 
 impl Aggregator {
     /// An aggregator with the given configuration. It keeps each Flock part's sponge commit
     /// data from event 2 until the part is proven for the join (K14, K22) unless the
     /// environment variable `AGG_FLOCK_RECOMMIT` is set (a measurement knob) or
-    /// [`Self::keep_commit_data`] says otherwise.
+    /// [`Self::keep_commit_data`] says otherwise. A batch with exactly one Flock part keeps
+    /// its committed witness from event 2 until the join (lever W1) unless
+    /// `AGG_FLOCK_REBUILD` is set (a measurement knob) or [`Self::keep_witness`] says
+    /// otherwise.
     #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         Self {
             gate: sponge_gate(),
             config,
             keep_commit_data: std::env::var_os("AGG_FLOCK_RECOMMIT").is_none(),
+            keep_witness: std::env::var_os("AGG_FLOCK_REBUILD").is_none(),
         }
     }
 
@@ -1413,6 +1509,17 @@ impl Aggregator {
     #[must_use]
     pub fn keep_commit_data(mut self, keep: bool) -> Self {
         self.keep_commit_data = keep;
+        self
+    }
+
+    /// Keep the committed Flock witness (sponge buffers, input bits, statement) of a batch
+    /// with exactly one tied part (a span, or a one-segment batch of one part) from event 2
+    /// until it is proven for the join (`true`, lever W1: no rebuild, about 4.2-4.5 GiB held
+    /// through events 3 to 6 at 32K, est.) or drop it after event 2 and rebuild it from the
+    /// records for the proof (`false`, K14). The aggregate is the same either way.
+    #[must_use]
+    pub fn keep_witness(mut self, keep: bool) -> Self {
+        self.keep_witness = keep;
         self
     }
 
@@ -1506,7 +1613,8 @@ impl Aggregator {
         )
         .profile(profile)
         .span(self.config.span)
-        .keep_commit_data(self.keep_commit_data);
+        .keep_commit_data(self.keep_commit_data)
+        .keep_witness(self.keep_witness);
         let side = match hooks.part_floor {
             Some(floor) => side.part_floor(floor),
             None => side,

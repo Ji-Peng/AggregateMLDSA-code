@@ -15,6 +15,7 @@
 //!   `agg-keccak/tests/{proofs,bridge}.rs`) pushed through the mode-A aggregator (stages
 //!   unchecked) and rejected by the verifier at the stated step.
 //! - Invalid signatures are refused by the aggregator (`agg-witness/tests/negative.rs`).
+//! - A kept and a rebuilt Flock witness give the same aggregate (lever W1).
 //!
 //! Run with `--release`.
 
@@ -291,6 +292,45 @@ fn round_trip_at_256_signatures_in_two_flock_parts() {
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
+}
+
+/// Lever W1 (`docs/perf.md` Section 9): a batch of one Flock part keeps its committed witness
+/// from event 2 until the join; dropping and rebuilding it (K14), or keeping it without the
+/// commit data (K7), gives the same aggregate bytes, at 64 records (one part) and at 256 records in
+/// two parts (always rebuilt). The kept aggregate verifies.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn kept_and_rebuilt_witnesses_give_the_same_aggregate() {
+    on_large_stack(|| {
+        for (n_own, n_shared, part_log2) in [(48, 16, DEFAULT_PART_LOG2), (200, 56, 7)] {
+            let records = records(0xc0de, n_own, n_shared);
+            let config = AggregatorConfig {
+                part_log2,
+                ..AggregatorConfig::default()
+            };
+            let run = |keep_witness: bool, keep_data: bool| {
+                Aggregator::new(config)
+                    .keep_witness(keep_witness)
+                    .keep_commit_data(keep_data)
+                    .aggregate(&signed(&records))
+                    .expect("aggregate")
+            };
+            let kept = run(true, true);
+            for (keep_witness, keep_data) in [(false, true), (true, false)] {
+                assert!(
+                    run(keep_witness, keep_data).bytes == kept.bytes,
+                    "N = {}, part_log2 {part_log2}: keep_witness {keep_witness}, \
+                     keep_commit_data {keep_data} changed the aggregate",
+                    records.len()
+                );
+            }
+            let report = AggregateVerifier::new().verify(&statements(&records), &kept.bytes, None);
+            assert!(report.accepted(), "the kept-witness aggregate verifies");
+        }
+    });
 }
 
 /// Relation H-FIPS (`docs/h-exact.md` Section 10) in mode A at 64 records (Slim, one Flock
