@@ -256,6 +256,15 @@ fn fork_join<A: Send, B>(
     })
 }
 
+/// Build the stages' parity tables beside the round-2 commitment (default), or in the
+/// fork under `AGG_SCHED_SERIAL` or `AGG_PARITY_IN_FORK` (read once per process).
+fn parity_beside_round2() -> bool {
+    static BESIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BESIDE.get_or_init(|| {
+        !agg_pcs_config::sched::serial_schedule() && std::env::var_os("AGG_PARITY_IN_FORK").is_none()
+    })
+}
+
 /// A prover failure.
 #[derive(Debug)]
 pub enum ProveError {
@@ -796,7 +805,25 @@ pub fn prove_with_tables_using(
     if let Some(tamper) = hooks.tamper_bridge {
         tamper(manifest, &mut bridge_tables);
     }
-    let round2 = committer.commit_round2(&bridge_tables)?;
+    let tables = SourceTables {
+        manifest,
+        main,
+        bridge: &bridge_tables,
+    };
+    // The parity tables of the stages need no challenge after event 3, so they are built
+    // beside the round-2 commitment (a memory-bound step that leaves threads idle) instead
+    // of on the PIOP branch of the fork (lever A, docs/perf.md Section 11); in the fork
+    // under `AGG_SCHED_SERIAL` or `AGG_PARITY_IN_FORK`.
+    let (round2, mut early_parity) = if parity_beside_round2() {
+        let (round2, parity) = crate::pcs::overlap(
+            || committer.commit_round2(&bridge_tables),
+            || ProverTables::new(tables, &matrices),
+        );
+        (round2, Some(parity))
+    } else {
+        (committer.commit_round2(&bridge_tables), None)
+    };
+    let round2 = round2?;
     let mut bridge_commitments: [Vec<u8>; 4] = Default::default();
     for (slot, group) in bridge_commitments.iter_mut().zip(&round2) {
         *slot = group.serialized()?;
@@ -816,11 +843,6 @@ pub fn prove_with_tables_using(
     transcript.absorb_items(FLOCK_SHARES_SITE, &flock_shares)?;
     let flock_record = flock_record_digest(&final_vectors, &flock_shares);
     timings.keccak += clock.lap();
-    let tables = SourceTables {
-        manifest,
-        main,
-        bridge: &bridge_tables,
-    };
 
     // The fork (deviation K22): the Flock proofs depend on nothing after event 6, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
@@ -831,7 +853,9 @@ pub fn prove_with_tables_using(
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = ProverTables::new(tables, &matrices);
+            let prover_tables = early_parity
+                .take()
+                .unwrap_or_else(|| ProverTables::new(tables, &matrices));
             prove_piop_with(
                 manifest,
                 tables,
@@ -855,7 +879,7 @@ pub fn prove_with_tables_using(
                 let start = Instant::now();
                 (prove_flock(), start.elapsed())
             },
-            || ProverTables::new(tables, &matrices),
+            || early_parity.take().unwrap_or_else(|| ProverTables::new(tables, &matrices)),
         );
         let (flock_proofs, flock_time) = flock_proofs;
         timings.flock_prove = flock_time;
