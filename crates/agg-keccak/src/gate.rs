@@ -307,6 +307,13 @@ impl ChainGate {
     /// Write one instance's rows: the committed bits `z` and the row values
     /// `a = A_0 z`, `b = B_0 z` over the first [`GateLayout::useful_words`] words.
     /// The slices must be zeroed on entry. Returns the final state.
+    ///
+    /// One Keccak walk emits all three: per round `phi(s)` is computed once and
+    /// gives the chi row values `a = !phi(s)[x + 1]`, `b = phi(s)[x + 2]`, the
+    /// committed AND bits `t = a & b` and the next state `phi(s) ^ t ^ RC`.
+    /// On the honest `z` this is exactly [`Self::honest_z`] followed by
+    /// [`Self::apply_ab`] (which recomputes the states from `z`): the same
+    /// inputs, constant bit and states enter every row.
     pub fn instance_rows(
         &self,
         inputs: &[u64],
@@ -314,9 +321,53 @@ impl ChainGate {
         a: &mut [u64],
         b: &mut [u64],
     ) -> Lanes {
-        let out = self.honest_z(inputs, z);
-        self.apply_ab(z, a, b);
-        out
+        let lay = &self.layout;
+        let n_in = self.spec.n_inputs();
+        assert!(inputs.len() >= n_in.div_ceil(64));
+        // Constant row: A = B = e_const, z_const = 1.
+        let c = lay.const_col;
+        z[c / 64] |= 1 << (c % 64);
+        a[c / 64] |= 1 << (c % 64);
+        b[c / 64] |= 1 << (c % 64);
+        // Input rows: A = e_i (the input bit), B = e_const.
+        for i in 0..n_in {
+            let col = lay.input_col(i);
+            let bit = ((inputs[i / 64] >> (i % 64)) & 1) << (col % 64);
+            z[col / 64] |= bit;
+            a[col / 64] |= bit;
+            b[col / 64] |= 1 << (col % 64);
+        }
+        let r_n = self.spec.n_rounds;
+        let mut s = [0u64; N_LANES];
+        for m in 0..self.spec.n_perms() {
+            self.absorb(m, inputs, &mut s);
+            for r in 0..r_n {
+                let bl = keccak::phi(&s);
+                let base = lay.t_base + (m * r_n + r) * N_LANES;
+                for y in 0..5 {
+                    for x in 0..5 {
+                        let l = keccak::lane(x, y);
+                        let al = !bl[keccak::lane((x + 1) % 5, y)];
+                        let bv = bl[keccak::lane((x + 2) % 5, y)];
+                        let t = al & bv;
+                        a[base + l] = al;
+                        b[base + l] = bv;
+                        z[base + l] = t;
+                        s[l] = bl[l] ^ t;
+                    }
+                }
+                s[0] ^= ROUND_CONSTANTS[r];
+            }
+        }
+        // Output rows: z and A = final state bit, B = e_const.
+        for (j, &o) in self.spec.outputs.iter().enumerate() {
+            let col = lay.output_base + j;
+            let bit = ((s[o as usize / 64] >> (o % 64)) & 1) << (col % 64);
+            z[col / 64] |= bit;
+            a[col / 64] |= bit;
+            b[col / 64] |= 1 << (col % 64);
+        }
+        s
     }
 
     /// The honest committed bits for packed inputs (`z` zeroed on entry).
@@ -627,6 +678,33 @@ pub(crate) mod tests {
             }
             let bits = gate.output_bits(&s0);
             assert_eq!(bits, keccak::lanes_to_bits(&want));
+        }
+    }
+
+    /// The one-walk `instance_rows` equals `honest_z` then `apply_ab`, for the
+    /// permutation, the sponge gate (absorptions, constant ones, outputs) and
+    /// a short chain.
+    #[test]
+    fn instance_rows_matches_honest_z_then_apply_ab() {
+        let mut rng = Rng::new(0x1A57);
+        for gate in [
+            ChainGate::new(ChainSpec::permutation()),
+            crate::sponge::sponge_gate(),
+            ChainGate::new(mini_chain(3)),
+        ] {
+            let w = gate.layout().useful_words();
+            for _ in 0..4 {
+                let inputs: Vec<u64> = (0..gate.input_words()).map(|_| rng.next_u64()).collect();
+                let (mut z, mut a, mut b) = (vec![0u64; w], vec![0u64; w], vec![0u64; w]);
+                let out = gate.instance_rows(&inputs, &mut z, &mut a, &mut b);
+                let (mut z2, mut a2, mut b2) = (vec![0u64; w], vec![0u64; w], vec![0u64; w]);
+                let out2 = gate.honest_z(&inputs, &mut z2);
+                gate.apply_ab(&z2, &mut a2, &mut b2);
+                assert_eq!(out, out2);
+                assert_eq!(z, z2);
+                assert_eq!(a, a2);
+                assert_eq!(b, b2);
+            }
         }
     }
 

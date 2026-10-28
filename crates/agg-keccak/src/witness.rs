@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use crate::gate::ChainGate;
 
 /// Instances whose rows are generated together before scattering.
-const BATCH: usize = 256;
+const BATCH: usize = 1024;
 
 /// One slot's prover buffers: `z`, `a = A z`, `b = B z` (BatchMajor) and the lincheck stripe.
 pub struct SlotBuffers {
@@ -55,19 +55,31 @@ where
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
     let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
     let mut scratch = vec![0u64; BATCH * 3 * w];
+    // AGG_TIED_TRACE: time per phase (instance rows; BatchMajor scatter and
+    // the lincheck stripe) summed over the batches.
+    let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
+    let mut phase_ms = [0f64; 2];
+    // Columns per scatter task: one 64-byte line (eight words) of every
+    // instance row per part, so each scratch line is read exactly once.
+    const COLS: usize = 4;
+    let n_col_blocks = useful_chunks.div_ceil(COLS);
     let mut j0 = 0;
     while j0 < n {
         let cnt = BATCH.min(n - j0);
         let scratch = &mut scratch[..cnt * 3 * w];
-        scratch.fill(0);
+        let t0 = std::time::Instant::now();
+        // Each task zeroes its own rows (the contract of `rows`) in parallel.
         scratch
             .par_chunks_mut(3 * w)
             .enumerate()
             .for_each(|(i, buf)| {
+                buf.fill(0);
                 let (zb, rest) = buf.split_at_mut(w);
                 let (ab, bb) = rest.split_at_mut(w);
                 rows(j0 + i, zb, ab, bb);
             });
+        phase_ms[0] += t0.elapsed().as_secs_f64() * 1e3;
+        let t0 = std::time::Instant::now();
         let scratch = &*scratch;
         let word = |i: usize, part: usize, u: usize| -> u64 {
             if u < w {
@@ -76,17 +88,30 @@ where
                 0
             }
         };
-        for (part, buf) in [&mut z, &mut a, &mut b].into_iter().enumerate() {
-            buf.par_chunks_mut(1 << nu)
-                .take(useful_chunks)
-                .enumerate()
-                .for_each(|(c, col)| {
-                    for i in 0..cnt {
-                        col[j0 + i] = F128::new(word(i, part, 2 * c), word(i, part, 2 * c + 1));
+        // BatchMajor scatter of z, a, b, parallel over blocks of COLS
+        // columns: each task reads the line of its columns from every
+        // instance row once and writes its own columns of the three buffers.
+        z.par_chunks_mut(COLS << nu)
+            .zip(a.par_chunks_mut(COLS << nu))
+            .zip(b.par_chunks_mut(COLS << nu))
+            .take(n_col_blocks)
+            .enumerate()
+            .for_each(|(cb, ((zc, ac), bc))| {
+                let c0 = cb * COLS;
+                let c1 = (c0 + COLS).min(useful_chunks);
+                for (part, cols) in [zc, ac, bc].into_iter().enumerate() {
+                    for c in c0..c1 {
+                        let col = &mut cols[(c - c0) << nu..((c - c0) + 1) << nu];
+                        for i in 0..cnt {
+                            col[j0 + i] =
+                                F128::new(word(i, part, 2 * c), word(i, part, 2 * c + 1));
+                        }
                     }
-                });
-        }
-        // Stripe: groups of 8 instances; j0 and BATCH are multiples of 8.
+                }
+            });
+        // Stripe: groups of 8 instances (j0 and BATCH are multiples of 8),
+        // parallel over groups and over runs of 8 words, so each task reads
+        // one line of each of its 8 instance rows.
         let g0 = j0 / 8;
         stripe
             .par_chunks_mut(k)
@@ -95,18 +120,30 @@ where
             .enumerate()
             .for_each(|(g, out)| {
                 let lanes = 8 * g..(8 * g + 8).min(cnt);
-                for u in 0..w {
-                    let mut v = [0u64; 8];
-                    for (r, i) in lanes.clone().enumerate() {
-                        v[r] = word(i, 0, u);
-                    }
-                    if v == [0u64; 8] {
-                        continue;
-                    }
-                    transpose_8x64(&v, &mut out[64 * u..64 * u + 64]);
-                }
+                out[..64 * w]
+                    .par_chunks_mut(64 * 8)
+                    .enumerate()
+                    .for_each(|(ub, run)| {
+                        for (du, o) in run.chunks_exact_mut(64).enumerate() {
+                            let u = 8 * ub + du;
+                            let mut v = [0u64; 8];
+                            for (r, i) in lanes.clone().enumerate() {
+                                v[r] = word(i, 0, u);
+                            }
+                            if v != [0u64; 8] {
+                                transpose_8x64(&v, o);
+                            }
+                        }
+                    });
             });
+        phase_ms[1] += t0.elapsed().as_secs_f64() * 1e3;
         j0 += cnt;
+    }
+    if trace {
+        eprintln!(
+            "  [tied] pack_slot: rows {:.1} ms, scatter and stripe {:.1} ms",
+            phase_ms[0], phase_ms[1]
+        );
     }
     SlotBuffers { z, a, b, stripe }
 }
