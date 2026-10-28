@@ -133,7 +133,7 @@ fn derive_core(
         _ => public_t(&trace.c, &key.t1),
     };
     // The residue of A z modulo q is the trace's, in the NTT domain.
-    let az_wide = az_integer_with(key, &z, None);
+    let az_wide = az_integer_with(key, &z, Some(&trace.az_hat));
     let mut az = [[0i64; N]; K];
     let mut w = [[0i64; N]; K];
     let mut u = [[0i64; N]; K];
