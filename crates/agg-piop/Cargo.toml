@@ -46,4 +46,4 @@ sha3 = { workspace = true }
 agg-piop = { path = ".", features = ["test-hooks"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"

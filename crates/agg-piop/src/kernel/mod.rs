@@ -33,6 +33,8 @@
 //!   most 4,096, else the pair table with the second challenge; bind 2 materializes every
 //!   lane in one row-major `K` table at an eighth of the domain; later rounds are dense.
 
+#[allow(unsafe_code)]
+pub(crate) mod buf;
 mod coded;
 mod field;
 mod layer;
