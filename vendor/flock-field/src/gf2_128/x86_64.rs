@@ -4,7 +4,140 @@ use core::arch::x86_64::{
     _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_xor_si512,
 };
 
+use core::arch::x86_64::{_mm_set_epi64x as set2, _mm_srli_si128};
+
 use crate::gf2_128::{F128, F256Unreduced, ghash_reduce};
+
+// agg-mldsa patch (PATCH.md, section 2): register-resident scalar arithmetic.
+//
+// `F128` is `repr(C, align(16))` with `lo` first, so on little-endian x86 its
+// bytes are exactly an `__m128i` with lane 0 = `lo`, lane 1 = `hi`, and a
+// transmute is a plain `movdqa` (or nothing, when the value is already in a
+// register). The functions below keep every intermediate in XMM registers:
+// CLMUL reads its operands' qwords through the immediate selector, and the
+// reduction folds with two CLMULs by the reduction constant. The older forms
+// move each operand qword to an XMM register and every partial product back
+// to general-purpose registers (about ten cross-domain moves per multiply).
+
+/// `F128` as an `__m128i` (lane 0 = `lo`, lane 1 = `hi`).
+#[inline(always)]
+pub fn to_xmm(a: F128) -> __m128i {
+    // SAFETY: `F128` is `repr(C, align(16))`, 16 bytes, `lo` at offset 0;
+    // every bit pattern is a valid `__m128i` and vice versa.
+    unsafe { core::mem::transmute::<F128, __m128i>(a) }
+}
+
+/// Inverse of [`to_xmm`].
+#[inline(always)]
+pub fn from_xmm(v: __m128i) -> F128 {
+    // SAFETY: see `to_xmm`.
+    unsafe { core::mem::transmute::<__m128i, F128>(v) }
+}
+
+/// Schoolbook 128 x 128 carry-less product as `(low 128 bits, high 128 bits)`,
+/// both in XMM registers: four CLMULs, the two cross terms XORed and split
+/// across the halves with byte shifts.
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn clmul_256_xmm(a: __m128i, b: __m128i) -> (__m128i, __m128i) {
+    let d0 = _mm_clmulepi64_si128::<0x00>(a, b);
+    let d2 = _mm_clmulepi64_si128::<0x11>(a, b);
+    let d1 = _mm_xor_si128(
+        _mm_clmulepi64_si128::<0x01>(a, b),
+        _mm_clmulepi64_si128::<0x10>(a, b),
+    );
+    (
+        _mm_xor_si128(d0, _mm_slli_si128::<8>(d1)),
+        _mm_xor_si128(d2, _mm_srli_si128::<8>(d1)),
+    )
+}
+
+/// Reduce `l + h * x^128` modulo `x^128 + x^7 + x^2 + x + 1` in XMM registers.
+///
+/// `x^128 = 0x87` modulo p. First the top qword `h.hi` (at `x^192`) folds to
+/// `q = h.hi * 0x87` at `x^64` (degree <= 70): `q.lo` lands in `l.hi` and the
+/// at most seven bits of `q.hi` in `h.lo`. Then `h.lo` (at `x^128`) folds to
+/// `h.lo * 0x87` (degree <= 70) at `x^0`. The result is the canonical residue
+/// (degree < 128), the same element any other exact reduction yields.
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn reduce_xmm(l: __m128i, h: __m128i) -> __m128i {
+    let poly = set2(0, 0x87);
+    let q = _mm_clmulepi64_si128::<0x01>(h, poly);
+    let l = _mm_xor_si128(l, _mm_slli_si128::<8>(q));
+    let h_lo = _mm_xor_si128(h, _mm_srli_si128::<8>(q));
+    _mm_xor_si128(l, _mm_clmulepi64_si128::<0x00>(h_lo, poly))
+}
+
+/// Register-resident GF(2^128) multiply: [`clmul_256_xmm`] then
+/// [`reduce_xmm`] (six CLMULs, no general-purpose-register round trip).
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn ghash_mul_xmm(a: F128, b: F128) -> F128 {
+    // SAFETY: function carries the required target features.
+    unsafe {
+        let (l, h) = clmul_256_xmm(to_xmm(a), to_xmm(b));
+        from_xmm(reduce_xmm(l, h))
+    }
+}
+
+/// Register-resident unreduced product: the 256-bit [`clmul_256_xmm`] result
+/// reinterpreted as `F256Unreduced` (`repr(C, align(16))`, `r0..r3` in
+/// order, so `{r0, r1}` is the low XMM half and `{r2, r3}` the high one).
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn ghash_mul_unreduced_xmm(a: F128, b: F128) -> F256Unreduced {
+    // SAFETY: function carries the required target features; the layout
+    // argument is in the doc comment.
+    unsafe {
+        let (l, h) = clmul_256_xmm(to_xmm(a), to_xmm(b));
+        core::mem::transmute::<[__m128i; 2], F256Unreduced>([l, h])
+    }
+}
+
+/// Register-resident reduction of an accumulated `F256Unreduced`.
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn ghash_reduce_xmm(u: F256Unreduced) -> F128 {
+    // SAFETY: function carries the required target features; layout as in
+    // `ghash_mul_unreduced_xmm`.
+    unsafe {
+        let [l, h] = core::mem::transmute::<F256Unreduced, [__m128i; 2]>(u);
+        from_xmm(reduce_xmm(l, h))
+    }
+}
+
+/// Register-resident square: two diagonal CLMULs (no cross term in
+/// characteristic 2) and [`reduce_xmm`].
+///
+/// # Safety
+/// Requires `pclmulqdq`, as declared by the target-feature attribute.
+#[inline]
+#[target_feature(enable = "pclmulqdq")]
+pub unsafe fn ghash_square_xmm(a: F128) -> F128 {
+    // SAFETY: function carries the required target features.
+    unsafe {
+        let a = to_xmm(a);
+        let l = _mm_clmulepi64_si128::<0x00>(a, a);
+        let h = _mm_clmulepi64_si128::<0x11>(a, a);
+        from_xmm(reduce_xmm(l, h))
+    }
+}
 
 /// 64×64 carry-less product, returned as a 128-bit vector {lo, hi}.
 ///

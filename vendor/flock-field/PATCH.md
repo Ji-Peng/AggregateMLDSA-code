@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-One change; `Cargo.toml` inlines the workspace-inherited fields (package metadata, the
+Two changes; `Cargo.toml` inlines the workspace-inherited fields (package metadata, the
 `serde` dependency, the clippy lints) and allows dead code and unused imports (a path
 dependency shows warnings that Cargo hides for a git dependency). Everything else is a
 verbatim copy of `crates/flock-field/src` at that revision.
@@ -47,3 +47,22 @@ reach these functions and is unchanged. The crate's own tests pass under `+pclmu
 
 To regenerate: copy `crates/flock-field/src` of the revision above here, write this
 `Cargo.toml`, and apply the edits listed above (each carries an `agg-mldsa patch` comment).
+
+## 2. Register-resident x86 scalar arithmetic (prover and verifier speed)
+
+`src/gf2_128/x86_64.rs` gains `to_xmm`/`from_xmm`, `clmul_256_xmm`, `reduce_xmm`,
+`ghash_mul_xmm`, `ghash_mul_unreduced_xmm`, `ghash_reduce_xmm` and `ghash_square_xmm`;
+`src/gf2_128.rs` maps `F128 * F128`, `mul_unreduced`, `square` and, under `+pclmulqdq`,
+`F256Unreduced::reduce` to them, and gives `F256Unreduced` `#[repr(C, align(16))]` so that its
+`{r0, r1}` and `{r2, r3}` halves are two XMM values.
+
+Why: the forms of section 1 move every operand qword into an XMM register for `pclmulqdq`
+and every partial product back into general-purpose registers for the XORs and the
+shift-based reduction, about ten cross-domain moves per multiply. The new forms reinterpret
+`F128` (`repr(C, align(16))`, `lo` first) as an `__m128i`, select the qwords with the CLMUL
+immediate (schoolbook, four products) and reduce with two CLMULs by `0x87`. Measured on the
+i7-11700K, one core: butterfly 3.2 -> 1.7 ns, unreduced dot product 2.1 -> 1.0 ns per term.
+
+Exact: a canonical residue modulo `x^128 + x^7 + x^2 + x + 1` is unique, so every reduction
+route yields the same bits (test `xmm_forms_match_software`, including operands with the top
+bits set). Proofs and transcripts are unchanged (aggregates byte-identical to main).

@@ -38,9 +38,10 @@ use crate::gf2_128::software::{
     ghash_square as ghash_square_software,
 };
 #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+// agg-mldsa patch (PATCH.md, section 2): the register-resident forms.
 use crate::gf2_128::x86_64::{
-    ghash_mul_karatsuba_barrett as ghash_mul_x86_64,
-    ghash_mul_unreduced_x86 as ghash_mul_unreduced_x86_64, ghash_square_x86 as ghash_square_x86_64,
+    ghash_mul_unreduced_xmm as ghash_mul_unreduced_x86_64, ghash_mul_xmm as ghash_mul_x86_64,
+    ghash_reduce_xmm, ghash_square_xmm as ghash_square_x86_64,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -247,7 +248,11 @@ pub const fn mul_by_x(z: F128) -> F128 {
 // Deferred reduction: 256-bit unreduced products that can be XOR-accumulated.
 // ---------------------------------------------------------------------------
 
+// agg-mldsa patch (PATCH.md, section 2): `repr(C, align(16))` fixes the field
+// order so the x86 register-resident product can write `{r0, r1}` and
+// `{r2, r3}` as two XMM halves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C, align(16))]
 pub struct F256Unreduced {
     pub r0: u64,
     pub r1: u64,
@@ -265,7 +270,15 @@ impl F256Unreduced {
 
     #[inline]
     pub fn reduce(self) -> F128 {
-        ghash_reduce(self.r0, self.r1, self.r2, self.r3)
+        #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+        {
+            // SAFETY: pclmulqdq target feature is enabled at compile time.
+            unsafe { ghash_reduce_xmm(self) }
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "pclmulqdq")))]
+        {
+            ghash_reduce(self.r0, self.r1, self.r2, self.r3)
+        }
     }
 }
 
@@ -425,7 +438,8 @@ mod tests {
         ghash_mul_karatsuba as ghash_mul_karatsuba_x86_64,
         ghash_mul_karatsuba_barrett as ghash_mul_karatsuba_barrett_x86_64,
         ghash_mul_schoolbook as ghash_mul_schoolbook_x86_64,
-        ghash_mul_unreduced_x86 as ghash_mul_unreduced_x86_64,
+        ghash_mul_unreduced_x86 as ghash_mul_unreduced_x86_64, ghash_mul_unreduced_xmm,
+        ghash_mul_xmm, ghash_reduce_xmm, ghash_square_xmm,
     };
     use crate::{
         gf2_128::{F128, F256Unreduced, mul_by_x},
@@ -719,6 +733,40 @@ mod tests {
             assert_eq!(sw, bi, "binius");
             assert_eq!(sw, un, "unreduced");
         }
+    }
+
+    /// The register-resident forms must give the software result, including
+    /// on operands with the top bits set (the two-step fold's overflow case),
+    /// and an accumulated sum must reduce like the shift-based reduction.
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    #[test]
+    fn xmm_forms_match_software() {
+        let mut rng = Rng::new(0x5EED_0128);
+        let mut edge = vec![F128::new(u64::MAX, u64::MAX), F128::new(0, u64::MAX), F128::ONE];
+        edge.push(F128::new(u64::MAX, 1 << 63));
+        let mut acc = F256Unreduced::ZERO;
+        let mut direct = F128::ZERO;
+        for i in 0..4096 {
+            let (a, b) = if i < edge.len() * edge.len() {
+                (edge[i % edge.len()], edge[i / edge.len()])
+            } else {
+                (rng.f128(), rng.f128())
+            };
+            let sw = ghash_mul_software(a, b);
+            assert_eq!(unsafe { ghash_mul_xmm(a, b) }, sw, "mul");
+            assert_eq!(unsafe { ghash_square_xmm(a) }, ghash_mul_software(a, a), "square");
+            let u = unsafe { ghash_mul_unreduced_xmm(a, b) };
+            assert_eq!(u, super::software::ghash_mul_unreduced(a, b), "unreduced");
+            assert_eq!(unsafe { ghash_reduce_xmm(u) }, sw, "reduce");
+            acc ^= u;
+            direct += sw;
+        }
+        assert_eq!(unsafe { ghash_reduce_xmm(acc) }, direct, "accumulated");
+        assert_eq!(
+            unsafe { ghash_reduce_xmm(acc) },
+            super::ghash_reduce(acc.r0, acc.r1, acc.r2, acc.r3),
+            "shift reduction"
+        );
     }
 
     /// The 4-lane VPCLMULQDQ multiply must agree, lane for lane, with the
