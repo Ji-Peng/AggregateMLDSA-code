@@ -112,20 +112,28 @@ impl DigitLayout {
 
     /// Digits of x; the top digit absorbs any excess (then it leaves its alphabet).
     pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let mut out = vec![0; self.len()];
+        self.decompose_into(x, &mut out);
+        out
+    }
+
+    /// [`Self::decompose`] into `out[..self.len()]` (no allocation).
+    ///
+    /// # Panics
+    /// If `out` is shorter than the layout.
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) {
         let mut y = x + if self.signed { self.product() / 2 } else { 0 };
         let m = self.len();
-        let mut out = Vec::with_capacity(m);
-        for (k, &b) in self.bases.iter().enumerate() {
+        for (k, (&b, slot)) in self.bases.iter().zip(&mut out[..m]).enumerate() {
             let b = i64::from(b);
             if k + 1 < m {
                 let d = y.rem_euclid(b);
-                out.push(d - b / 2);
+                *slot = d - b / 2;
                 y = (y - d) / b;
             } else {
-                out.push(y - b / 2);
+                *slot = y - b / 2;
             }
         }
-        out
     }
 
     /// X = sum W_k Z_k + C_X, for any digit values.
@@ -170,9 +178,18 @@ impl SlackLayout {
 
     /// Canonical decomposition: a = [x + offset >= 2^j], b = x + offset - w a.
     pub fn decompose(&self, x: i64) -> (i64, Vec<i64>) {
+        let mut digits = vec![0; self.digits.len()];
+        let a = self.decompose_into(x, &mut digits);
+        (a, digits)
+    }
+
+    /// [`Self::decompose`] with the digits of b written into `out[..digits.len()]`;
+    /// returns a.
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) -> i64 {
         let y = x + self.offset;
         let a = i64::from(y >= self.digits.product());
-        (a, self.digits.decompose(y - self.slack_weight * a))
+        self.digits.decompose_into(y - self.slack_weight * a, out);
+        a
     }
 
     /// X = w a + b - offset.
@@ -241,12 +258,19 @@ impl StepLayout {
     /// y = x + offset. Outside the range a digit leaves its alphabet (the top digit of b when
     /// y is too large or negative) and composition still inverts.
     pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let mut out = vec![0; self.len()];
+        self.decompose_into(x, &mut out);
+        out
+    }
+
+    /// [`Self::decompose`] into `out[..self.len()]` (no allocation).
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) {
         let y = x + self.offset;
         let c = i64::from(self.top_base);
         let h = y.div_euclid(self.step).clamp(0, c - 1);
-        let mut out = self.low.decompose(y - self.step * h);
-        out.push(h - c / 2);
-        out
+        let m = self.low.len();
+        self.low.decompose_into(y - self.step * h, &mut out[..m]);
+        out[m] = h - c / 2;
     }
 
     /// X = sum W_k Z_k + C_X for any digit values.
@@ -326,15 +350,22 @@ impl BitSlackLayout {
     /// y = x + offset. Outside the range the top digit of b leaves its
     /// alphabet and composition still inverts.
     pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let mut out = vec![0; self.len()];
+        self.decompose_into(x, &mut out);
+        out
+    }
+
+    /// [`Self::decompose`] into `out[..self.len()]` (no allocation).
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) {
         let y = x + self.offset;
         let lo = self.low.product();
         let a = i64::from(y >= 2 * lo);
         let rest = y - self.slack_weight * a;
         let hi = rest.div_euclid(lo).clamp(0, 1);
-        let mut out = self.low.decompose(rest - lo * hi);
-        out.push(hi);
-        out.push(a);
-        out
+        let m = self.low.len();
+        self.low.decompose_into(rest - lo * hi, &mut out[..m]);
+        out[m] = hi;
+        out[m + 1] = a;
     }
 
     /// X = sum W_k Z_k + C_X for any digit values.
@@ -442,14 +473,24 @@ impl ValueForm {
 
     /// Canonical digits (a digit leaves its alphabet outside the range).
     pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let mut out = vec![0; self.len()];
+        self.decompose_into(x, &mut out);
+        out
+    }
+
+    /// [`Self::decompose`] into `out[..self.len()]`, without an allocation (the encoder
+    /// calls it for every value of every coefficient).
+    ///
+    /// # Panics
+    /// If `out` is shorter than [`Self::len`].
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) {
         match self {
-            Self::Radix(l) => l.decompose(x),
-            Self::Step(l) => l.decompose(x),
-            Self::BitSlack(l) => l.decompose(x),
+            Self::Radix(l) => l.decompose_into(x, out),
+            Self::Step(l) => l.decompose_into(x, out),
+            Self::BitSlack(l) => l.decompose_into(x, out),
             Self::Slack(l) => {
-                let (a, mut digits) = l.decompose(x);
-                digits.push(a);
-                digits
+                let m = l.digits.len();
+                out[m] = l.decompose_into(x, &mut out[..m]);
             }
         }
     }

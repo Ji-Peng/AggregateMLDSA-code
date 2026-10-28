@@ -204,7 +204,26 @@ impl<'a> Cells<'a> {
     }
 }
 
-/// Shape and alphabet self-check of one group against its descriptor.
+/// Cells per task of the alphabet scan in [`validate_group`].
+const VALIDATE_CHUNK: usize = 1 << 16;
+
+/// True when every cell of `cells[range]` lies in `[min, max]` (a branch-free min/max scan
+/// that vectorises; the bad cell itself is located afterwards, only on failure).
+fn chunk_in_range(cells: &Cells<'_>, range: std::ops::Range<usize>, min: i64, max: i64) -> bool {
+    fn scan<T: Copy + Ord + Into<i64>>(cells: &[T], min: i64, max: i64) -> bool {
+        let Some(&first) = cells.first() else { return true };
+        let (lo, hi) = cells.iter().fold((first, first), |(lo, hi), &c| (lo.min(c), hi.max(c)));
+        min <= lo.into() && hi.into() <= max
+    }
+    match *cells {
+        Cells::Narrow(c) => scan(&c[range], min, max),
+        Cells::Wide(c) => scan(&c[range], min, max),
+    }
+}
+
+/// Shape and alphabet self-check of one group against its descriptor. The error is the one a
+/// column-by-column, cell-by-cell walk meets first; the scan itself runs over all
+/// (column, chunk) pairs at once, so the pool is not drained after every column.
 pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Result<(), SourceTableError> {
     let group = descriptor.role;
     if columns.len() != descriptor.polynomial_count() {
@@ -214,28 +233,46 @@ pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Re
             actual: columns.len(),
         });
     }
-    for (position, (cells, &column)) in columns.iter().zip(&descriptor.columns).enumerate() {
-        if cells.len() != descriptor.logical_cells() {
-            return Err(SourceTableError::ColumnLength {
-                group,
-                column: position,
-                expected: descriptor.logical_cells(),
-                actual: cells.len(),
-            });
-        }
-        let alphabet = column.alphabet();
-        let (min, max) = (alphabet.min(), alphabet.max());
-        let bad = (0..cells.len())
+    let expected = descriptor.logical_cells();
+    // The walk stops at the first column of the wrong length; only the columns before it
+    // are scanned.
+    let checked = columns.iter().position(|cells| cells.len() != expected).unwrap_or(columns.len());
+    let bounds: Vec<(i64, i64)> = descriptor.columns[..checked]
+        .iter()
+        .map(|column| (column.alphabet().min(), column.alphabet().max()))
+        .collect();
+    let chunks = expected.div_ceil(VALIDATE_CHUNK);
+    let bad_column = (0..checked * chunks)
+        .into_par_iter()
+        .filter(|&task| {
+            let (position, chunk) = (task / chunks, task % chunks);
+            let start = chunk * VALIDATE_CHUNK;
+            let (min, max) = bounds[position];
+            !chunk_in_range(&columns[position], start..expected.min(start + VALIDATE_CHUNK), min, max)
+        })
+        .map(|task| task / chunks)
+        .min();
+    if let Some(position) = bad_column {
+        let cells = &columns[position];
+        let (min, max) = bounds[position];
+        let cell = (0..cells.len())
             .into_par_iter()
-            .position_first(|cell| !(min..=max).contains(&cells.value(cell)));
-        if let Some(cell) = bad {
-            return Err(SourceTableError::Alphabet {
-                group,
-                column: position,
-                cell,
-                value: cells.value(cell),
-            });
-        }
+            .position_first(|cell| !(min..=max).contains(&cells.value(cell)))
+            .expect("the scan found a bad cell in this column");
+        return Err(SourceTableError::Alphabet {
+            group,
+            column: position,
+            cell,
+            value: cells.value(cell),
+        });
+    }
+    if checked < columns.len() {
+        return Err(SourceTableError::ColumnLength {
+            group,
+            column: checked,
+            expected,
+            actual: columns[checked].len(),
+        });
     }
     Ok(())
 }
@@ -288,6 +325,9 @@ enum Slot {
     Narrow(usize),
 }
 
+/// Most digits of one committed value (the encoder decomposes into a stack buffer).
+const MAX_DIGITS: usize = 8;
+
 /// The relation's encoder: the value forms of `z, u, v` (H-FIPS: `z, L, v`) with the slot of
 /// each digit, the slots of the bits and, under H-FIPS, of `s, delta, e` (resolved once per
 /// batch from the manifest).
@@ -321,12 +361,14 @@ impl Encoder {
         } else {
             "u outside [-190,465, 190,465]"
         };
+        let values = [
+            value(manifest.z_value(), z_range),
+            value(manifest.u_slot_value(), u_what),
+            value(DigitValue::V, "v outside [-2^31, 2^31)"),
+        ];
+        assert!(values.iter().all(|(form, _, _)| form.len() <= MAX_DIGITS), "at most {MAX_DIGITS} digits");
         Self {
-            values: [
-                value(manifest.z_value(), z_range),
-                value(manifest.u_slot_value(), u_what),
-                value(DigitValue::V, "v outside [-2^31, 2^31)"),
-            ],
+            values,
             bits: std::array::from_fn(|t| narrow_slot(Column::W1Bit(t as u8))),
             fips: manifest
                 .is_fips()
@@ -362,11 +404,13 @@ impl Encoder {
                 // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
                 let inputs = [values.z[row][j], middle, values.v[row][j]];
                 for ((form, slots, what), x) in self.values.iter().zip(inputs) {
-                    let digits = form.decompose(x);
-                    if !form.in_alphabets(&digits) {
+                    let mut buffer = [0_i64; MAX_DIGITS];
+                    let digits = &mut buffer[..form.len()];
+                    form.decompose_into(x, digits);
+                    if !form.in_alphabets(digits) {
                         return Err(SourceTableError::Encode(what));
                     }
-                    for (&slot, digit) in slots.iter().zip(digits) {
+                    for (&slot, &digit) in slots.iter().zip(&*digits) {
                         match slot {
                             Slot::Wide(c) => {
                                 wide[c][pos].write(i32::try_from(digit).expect("16-bit digit"));
