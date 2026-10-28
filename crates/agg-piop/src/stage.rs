@@ -381,6 +381,8 @@ fn prove_stage_with<'a>(
         }
         build_times[g] = build.elapsed().as_secs_f64();
     }
+    let arena = crate::kernel::TableArena::shared();
+    for group in &mut groups { group.set_arena(&arena); }
     let mut claim = gamma_weighted_claim(&gammas, claims);
     let mut messages = Vec::with_capacity(rounds);
     let mut point = Vec::with_capacity(rounds);
@@ -477,6 +479,14 @@ enum StageGroup<'a> {
 }
 
 impl StageGroup<'_> {
+    fn set_arena(&mut self, arena: &crate::kernel::SharedArena) {
+        match self {
+            Self::Generic(g) => g.set_arena(arena),
+            Self::Linear(g) | Self::Extra(g) => g.set_arena(arena),
+            Self::Weight(g) => g.set_arena(arena),
+        }
+    }
+
     fn round_message(&mut self, round: usize) -> Vec<E> {
         match self {
             Self::Generic(g) => g.round_message(round),

@@ -135,6 +135,7 @@ struct Engine<S: Level0> {
     unfolded: Option<E>,
     /// The table from level 1 on (empty before the first fold).
     table: Vec<E>,
+    arena: Option<super::SharedArena>,
 }
 
 impl<S: Level0> Engine<S> {
@@ -158,6 +159,7 @@ impl<S: Level0> Engine<S> {
             pending: Vec::new(),
             unfolded: None,
             table,
+            arena: None,
         })
     }
 
@@ -328,7 +330,14 @@ impl<S: Level0> Engine<S> {
         };
         let tasks = items.div_ceil(ITEM_CHUNK);
         let parallel = items >= MIN_PARALLEL_ITEMS && tasks > 1;
-        let mut table = super::buf::uninit::<E>(if keep { rows_out * width } else { 0 });
+        let mut table = if keep {
+            match &self.arena {
+                Some(arena) => arena.lock().unwrap().take(rows_out * width),
+                None => super::buf::reuse(Vec::new(), rows_out * width),
+            }
+        } else {
+            Vec::new()
+        };
         let add = |mut left: [Acc; 3], right: [Acc; 3]| {
             for (l, r) in left.iter_mut().zip(right) {
                 *l += r;
@@ -353,9 +362,11 @@ impl<S: Level0> Engine<S> {
             // round, which reads the source) keeps the table.
             self.table = previous;
         } else {
-            drop(previous);
+            if let Some(arena) = &self.arena {
+                arena.lock().unwrap().put(previous);
+            }
             // SAFETY: each kept output row is initialized exactly once by run/fill.
-            self.table = unsafe { table.assume_init().into_vec() };
+            self.table = unsafe { super::buf::finish(table) };
         }
         total.map(E::reduce_product)
     }
@@ -532,6 +543,10 @@ impl Level0 for LayerSource<'_> {
 pub struct LayerGroup<'a>(Engine<LayerSource<'a>>);
 
 impl<'a> LayerGroup<'a> {
+    pub(crate) fn set_arena(&mut self, arena: &super::SharedArena) {
+        self.0.arena = Some(arena.clone());
+    }
+
     /// A group over `trees` (every layer of `2^(vars + 1)` cells, `vars = eq_point.len()`
     /// rounds). `None` when some `gamma_p` is zero, the layers have different or wrong
     /// lengths, or there are no trees.
@@ -781,6 +796,10 @@ impl Level0 for IntSource<'_> {
 pub struct IntPairGroup<'a>(Engine<IntSource<'a>>);
 
 impl<'a> IntPairGroup<'a> {
+    pub(crate) fn set_arena(&mut self, arena: &super::SharedArena) {
+        self.0.arena = Some(arena.clone());
+    }
+
     /// The group over `S_0, S_1` (and `M_0, M_1`), every lane of `2^vars` cells
     /// (`vars = eq_point.len()` rounds), with `coefficients = [c, c_s, c_m, c_k, c_mm]`
     /// (`c_k`, `c_mm` unused without `M`). With `M` lanes the caller guarantees
@@ -932,6 +951,10 @@ impl Level0 for LinearSource<'_> {
 pub struct LinearIntGroup<'a>(Engine<LinearSource<'a>>);
 
 impl<'a> LinearIntGroup<'a> {
+    pub(crate) fn set_arena(&mut self, arena: &super::SharedArena) {
+        self.0.arena = Some(arena.clone());
+    }
+
     /// `None` without lanes, with a field lane, or with lanes of other lengths than
     /// `2^eq_point.len()`.
     #[must_use]
@@ -1086,6 +1109,10 @@ impl Level0 for WeightIntSource<'_> {
 pub struct WeightIntGroup<'a>(Engine<WeightIntSource<'a>>);
 
 impl<'a> WeightIntGroup<'a> {
+    pub(crate) fn set_arena(&mut self, arena: &super::SharedArena) {
+        self.0.arena = Some(arena.clone());
+    }
+
     /// `lanes` are the group's lanes in order: the weight at `weight_lane` (a field lane) and
     /// integer or byte lanes, with `coefficients[l]` the coefficient of lane `l` in `g`
     /// (ignored at the weight). `None` on lanes of other lengths than `2^rounds`, a field
@@ -1164,5 +1191,13 @@ impl<'a> WeightIntGroup<'a> {
     #[must_use]
     pub fn terminal_consistent(&self) -> bool {
         self.0.terminal_consistent()
+    }
+}
+
+impl<S: Level0> Drop for Engine<S> {
+    fn drop(&mut self) {
+        if let Some(arena) = &self.arena {
+            arena.lock().unwrap().put(std::mem::take(&mut self.table));
+        }
     }
 }

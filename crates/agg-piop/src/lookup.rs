@@ -1166,6 +1166,14 @@ enum SessionGroup<'a> {
 }
 
 impl SessionGroup<'_> {
+    fn set_arena(&mut self, arena: &crate::kernel::SharedArena) {
+        match self {
+            Self::Generic(g) => g.set_arena(arena),
+            Self::Layer(g) => g.set_arena(arena),
+            Self::Pair(g) => g.set_arena(arena),
+        }
+    }
+
     fn round_message(&mut self, round: usize) -> Vec<E> {
         match self {
             Self::Generic(g) => g.round_message(round),
@@ -1392,6 +1400,7 @@ fn prove_with(
     let mut stack_claims: Vec<Option<(Vec<E>, E)>> = vec![None; stacks.len()];
     let mut table_claims: Vec<Option<(Vec<E>, E)>> = vec![None; tables.len()];
     let mut sessions = Vec::new();
+    let arena = crate::kernel::TableArena::shared();
 
     for s in 2..=shape.max_depth() {
         let session_start = Instant::now();
@@ -1524,6 +1533,7 @@ fn prove_with(
                 }
             }
         }
+        for (_, group) in &mut groups { group.set_arena(&arena); }
         let mut rounds = Vec::with_capacity(s - 1);
         let mut rho = Vec::with_capacity(s - 1);
         for round in 0..s - 1 {

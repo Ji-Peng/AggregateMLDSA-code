@@ -35,6 +35,8 @@
 
 #[allow(unsafe_code)]
 pub(crate) mod buf;
+mod arena;
+pub(crate) use arena::{SharedArena, TableArena};
 mod coded;
 mod field;
 mod layer;
@@ -641,6 +643,7 @@ pub struct Group<'a> {
     level2_pieces: Pieces,
     /// Row-major `K` table of every lane from level 3 on.
     dense: Vec<E>,
+    arena: Option<SharedArena>,
     challenges: Vec<E>,
     /// Quartet masses of the bucketed segments (the two-round prefix), kept for level 1.
     masses: Option<Vec<Vec<E>>>,
@@ -663,6 +666,10 @@ struct Scratch {
 }
 
 impl<'a> Group<'a> {
+    pub(crate) fn set_arena(&mut self, arena: &SharedArena) {
+        self.arena = Some(arena.clone());
+    }
+
     /// A group on a local domain of `2^local_vars` cells inside a stage of `rounds`
     /// rounds and message degree `degree`. `eq_point` is the shared equality point of
     /// the group's instances (length `local_vars`), if any.
@@ -904,6 +911,7 @@ impl<'a> Group<'a> {
             taylor: Vec::new(),
             level2_pieces: Pieces::default(),
             dense: Vec::new(),
+            arena: None,
             challenges: Vec::new(),
             masses: None,
             cached_level0: None,
@@ -1693,7 +1701,12 @@ impl<'a> Group<'a> {
             }
         };
         // SAFETY: fill writes every row/lane slot, including the last partial block.
-        let dense = unsafe { buf::fill_par(buf::uninit(rows * lanes), BLOCK_ROWS * lanes, fill) };
+        let mut dense = match &self.arena {
+            Some(arena) => arena.lock().unwrap().take(rows * lanes),
+            None => buf::reuse(Vec::new(), rows * lanes),
+        };
+        dense.par_chunks_mut(BLOCK_ROWS * lanes).enumerate().for_each(|(block, out)| fill(block, out));
+        let dense = unsafe { buf::finish(dense) };
         self.dense = dense;
         self.states = vec![State::Dense; lanes];
         // The pair codes are not read again (one byte per pair of cells and column).
@@ -1755,3 +1768,11 @@ fn fold_rows_in_place(table: &mut Vec<E>, lanes: usize, challenge: E) {
     table.truncate(next_rows * lanes);
 }
 
+
+impl Drop for Group<'_> {
+    fn drop(&mut self) {
+        if let Some(arena) = &self.arena {
+            arena.lock().unwrap().put(std::mem::take(&mut self.dense));
+        }
+    }
+}
