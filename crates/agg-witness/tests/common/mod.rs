@@ -1,13 +1,11 @@
 //! Shared helpers of the integration tests.
 #![allow(dead_code)]
 
-use agg_witness::check::{check, CheckOptions, CheckReport};
 use agg_witness::derive::{derive, SigWitness};
 use agg_witness::gen::{self, Record};
 use agg_witness::instance::PublicInstance;
 use agg_witness::native::mod_q;
 use agg_witness::params::*;
-use agg_witness::tables::{BatchTables, Layout};
 use rayon::prelude::*;
 
 /// Edge record: hedged signature (seed, key index, index) whose w' has a coefficient equal to
@@ -16,26 +14,12 @@ pub const EDGE_RESIDUE: (u64, u64, u64) = (0xED6E, 0, 783);
 /// Edge record whose z has a coefficient with |z| = B_z (found by `edge_search`).
 pub const EDGE_ZMAX: (u64, u64, u64) = (0x2A4A, 0, 290);
 
-pub fn sigs(records: &[Record]) -> Vec<&[u8]> {
-    records.iter().map(|r| r.sig.as_slice()).collect()
-}
-
 pub fn witnesses(inst: &PublicInstance, records: &[Record]) -> Vec<SigWitness> {
     inst.records
         .par_iter()
         .zip(records.par_iter())
         .map(|(p, r)| derive(&p.key, &p.mu, &r.sig).expect("honest record derives"))
         .collect()
-}
-
-pub fn batch(layout: Layout, records: &[Record]) -> (PublicInstance, BatchTables) {
-    let inst = PublicInstance::from_records(records).expect("instance");
-    let tables = BatchTables::build(layout, &inst, &sigs(records)).expect("tables");
-    (inst, tables)
-}
-
-pub fn report(inst: &PublicInstance, tables: &BatchTables) -> CheckReport {
-    check(inst, tables, None, CheckOptions::default())
 }
 
 /// Count of positions of a witness whose w' (mod q) lies in [q - gamma2, q - 1].

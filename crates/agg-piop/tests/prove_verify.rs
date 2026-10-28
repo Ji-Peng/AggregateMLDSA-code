@@ -49,7 +49,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
             relation: Relation::Hu,
         };
         // Mode A over matrices that ignore the seed is refused before any work.
-        for profile in [FlockProfile::Fast, FlockProfile::LaBinius] {
+        for profile in [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8] {
             assert!(matches!(
                 prove(&prover_inputs, &bridge, &NoKeccak, profile),
                 Err(ProveError::Internal(_))

@@ -377,13 +377,9 @@ impl PublicData {
 
     /// The same data taken from the prover's instance (keys shared by `Arc` identity).
     /// The keys (one [`VerifierKey`] per distinct expanded key, in first-appearance order)
-    /// and the records are built in parallel; under `AGG_SCHED_SERIAL` serially. Both give
-    /// the same data.
+    /// and the records are built in parallel.
     #[must_use]
     pub fn from_instance(instance: &PublicInstance) -> Self {
-        if agg_pcs_config::sched::serial_schedule() {
-            return Self::from_instance_serial(instance);
-        }
         let mut seen: HashMap<*const ExpandedKey, usize> = HashMap::new();
         let mut firsts: Vec<usize> = Vec::new();
         let key_of: Vec<usize> = instance
@@ -410,33 +406,6 @@ impl PublicData {
                 mu: record.mu,
                 c_tilde: record.c_tilde,
                 t: Self::t_of(record),
-            })
-            .collect();
-        Self {
-            geom: instance.geom,
-            keys,
-            records,
-        }
-    }
-
-    /// [`Self::from_instance`] on one thread (`AGG_SCHED_SERIAL`).
-    fn from_instance_serial(instance: &PublicInstance) -> Self {
-        let mut keys: Vec<Arc<VerifierKey>> = Vec::new();
-        let mut seen: HashMap<*const ExpandedKey, usize> = HashMap::new();
-        let records = instance
-            .records
-            .iter()
-            .map(|record| {
-                let key = *seen.entry(Arc::as_ptr(&record.key)).or_insert_with(|| {
-                    keys.push(Arc::new(VerifierKey::from_expanded(&record.key)));
-                    keys.len() - 1
-                });
-                PublicRecordData {
-                    key,
-                    mu: record.mu,
-                    c_tilde: record.c_tilde,
-                    t: Self::t_of(record),
-                }
             })
             .collect();
         Self {
@@ -810,18 +779,6 @@ mod tests {
             PublicData::prepare(&bad, None).unwrap_err(),
             InstanceError::PublicKey(3)
         );
-    }
-
-    #[test]
-    fn parallel_and_serial_instance_data_agree() {
-        // 5 own keys, then 6 records over 2 shared keys: first-appearance order matters.
-        let (instance, _) = small_instance(17);
-        let parallel = PublicData::from_instance(&instance);
-        let serial = PublicData::from_instance_serial(&instance);
-        assert_eq!(parallel.geometry(), serial.geometry());
-        assert_eq!(parallel.keys().len(), 7);
-        assert_eq!(parallel.keys(), serial.keys());
-        assert_eq!(parallel.records(), serial.records());
     }
 
     #[test]

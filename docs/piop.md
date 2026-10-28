@@ -2,7 +2,7 @@
 
 **Lookup layout L16:** the range mechanism is the lookup into `T_16` (`docs/lookup.md`).
 Section 19 is the current description of the groups, the event-0 bytes, the commit flow, the
-lookup, the stage tables, the transcript and the wire format; Sections 2, 3, 7, 9 and 10 below
+lookup, the stage tables, the transcript and the wire format; Sections 3, 9 and 10 below
 describe wire version 0 (the base-16 digit layout) where Section 19 does not replace them, and
 Sections 13 to 18 are measurements and kernel work on that layout.
 
@@ -42,28 +42,27 @@ polynomials; `commit_group` delegates to it.
 
 ## 2. Manifest and the event-0 bytes
 
-Group and polynomial order are the table order of spec Section 4.1 and `docs/witness.md`
-W3: `G_main = z_0..z_4, u_0..u_4, v_0..v_6, b_0..b_5`; `G_1 = kappa1_{t,k}` (t-major);
-`G_2 = y2_0..y2_5, kappa2_{t,k}`; `G_3 = kappa3_0, kappa3_1`. Counts: 67 polynomials, 55
-digits (40 base 16, 2 base 8, 13 base 4), 23,865 committed elements per signature at
-`N = 2^15`.
+Group and polynomial order are those of Section 19.1 (lookup layout L16, spec Section 4.1):
+six groups, `G_main16, G_main4` in round 1 and `G_1, G_2, G_3, G_m` in round 2.
 
 `CommitmentManifest::binding_bytes` (all integers little-endian):
 
 | Field | Encoding |
 | --- | --- |
-| wire version | `u16` = 0 |
+| wire version | `u16` = 4 |
 | parameter set | `u8` = `0x44` |
-| relation flag | `u8` = 0 (H) |
+| relation byte | `u8` (0 H-u, 1 H-exact, 2 H-FIPS) |
 | `N`, `N*` | `u64`, `u64` |
-| digit layout id | `u8` = 0 (spec Section 4.3) |
-| group count | `u8` = 4 |
-| per group, wire order | role `u8` (0..3), round `u8`, family `u8` (0 = width 4), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet byte per polynomial (digit base, 0 for a Boolean) |
-| catalog row id | `u16` length, ASCII (`mldsa-44-mode-a-batch-<N*>-level3-final`) |
+| digit layout id | `u8` = 1 (the lookup layout) |
+| group count | `u8` = 6 |
+| per group, wire order | role `u8`, round `u8`, family `u8` (0 = width 4, 1 = width 16), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet code per polynomial (Section 19.2) |
+| catalog row id | `u16` length, ASCII (`mldsa-44-l16-batch-<N*>-mult-final`, `l16x` under H-exact, `l16f` under H-FIPS) |
 | bridge parameters | for levels 1..3: `J_t` `u64`, `m_t` `u64`, `k_t` `u8` |
+| lookup layout | challenges `u8` (2), table count `u8` and widths `u8` (16), stack count `u8`, per stack column count `u8`, variables `u8`, table `u8`, shift `i32` |
 
 The instance record of event 0 (`binding::instance_record`) is these bytes followed by the
-32-byte public-record digest and the Flock profile id (`u8`: 0 none, 1 `Fast`, 2 LaBinius).
+32-byte public-record digest and the Flock profile id (`u8`: 0 none, 1 `Fast`, 3 public bits, 4 `Slim`,
+5 `Slim8`; other bytes are rejected).
 The record digest: the stream `LE64(N) || (pk || LE64(|M|) || M || c~)*` is cut into
 16-KiB blocks, each hashed by cSHAKE256 under `agg-mldsa/v1/record-leaf`, and the root is
 cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-binding`.
@@ -208,67 +207,13 @@ most `2^19` cells.
 ## 7. Stage table
 
 Gamma indices are positions in the stage's `gamma^(s)` vector; "lift" is the number of
-inactive leading rounds (`d_main - d_t`). Digit order is that of spec Section 4.1 (`range::digits`):
-`z_0..z_4, u_0..u_4, v_0..v_6` (main), `kappa1_{t,k}` (`D_1`), `kappa2_{t,k}` (`D_2`),
-`kappa3_k` (`D_3`); the 40 base-16 digits in that order are `z_0..z_3, u_0..u_3,
-v_0..v_5, kappa1_{t,0}, kappa1_{t,1}, kappa2_{t,0}, kappa2_{t,1}, kappa3_0, kappa3_1`.
-
-Stage 1 (degree 4, `gamma^(1) in K^66`, point `tau`):
-
-| Instance | Gamma | Domain | Equality / weight | Summand | Degree | Claimed sum |
-| --- | ---: | --- | --- | --- | ---: | --- |
-| `bool_y1[t]` | `t` | `D_1` | `eq(tau_1, .)` | `y1_t (y1_t - 1)` | 3 | 0 |
-| `level2[t]` | `6 + t` | `D_1` | lane `w_2` | `w_2 y1_t` | 2 | `y2_t(tau_2) + 2 kappa2_t(tau_2)` |
-| `level3` | 12 | `D_2` | lanes `w_{3,t}` | `sum_t w_{3,t} y2_t` | 2 | `Y(tau_3) + 2 kappa3(tau_3)` |
-| `bool_y2[t]` | `13 + t` | `D_2` | `eq(tau_2, .)` | `y2_t (y2_t - 1)` | 3 | 0 |
-| `bool_b[t]` | `19 + t` | main | `eq(tau, .)` | `b_t (b_t - 1)` | 3 | 0 |
-| `range_w1` | 25 | main | `eq(tau, .)` | `b_5 (b_4 + b_3 b_2)` | 4 | 0 |
-| `b16_prod[Z]` | `26 + k` | `D_Z` | `eq(tau_Z, .)` | `A_Z^lo A_Z^hi` | 3 | 0 |
-
-Terminal (98, `claims::Stage1Claims`): `y1_t(r1_1)`, `y2_t(r1_2)`, `b_t(r1)`, then
-`(A_Z^lo, A_Z^hi)(r1_Z)` per base-16 digit. Pre-stage (event 8, 26 values): `y2_t(tau_2)`,
-`kappa2_{t,k}(tau_2)` (t-major), `kappa3_k(tau_3)`.
-
-Stage 2 (degree 5, `gamma^(2) in K^101`, point `r^(1)`; before `gamma^(2)` the 18 claims
-`kappa1_{t,k}(r1_1)`):
-
-| Instance | Gamma | Domain | Equality / weight | Summand | Degree | Claimed sum |
-| --- | ---: | --- | --- | --- | ---: | --- |
-| `def_y1[t]` | `t` | main | lane `w_1` | `w_1 b_t` | 2 | `y1_t(r1_1) + 2 kappa1_t(r1_1)` |
-| `leaf16[Z, lo]` | `6 + 2k` | `D_Z` | `eq(r1_Z, .)` | `Q_8(P_Z)` | 5 | `A_Z^lo(r1_Z)` |
-| `leaf16[Z, hi]` | `7 + 2k` | `D_Z` | `eq(r1_Z, .)` | `Q_16^hi(P_Z)` | 5 | `A_Z^hi(r1_Z)` |
-| `leaf8[Z]` (`u_4, v_6`) | `86, 87` | main | `eq(r1, .)` | `Q_8(P_Z)` | 5 | 0 |
-| `leaf4[Z]` (13 base-4 digits) | `88 + m` | `D_Z` | `eq(r1_Z, .)` | `Q_4(P_Z)` | 3 | 0 |
-
-Terminal (61, `Stage2Claims`): `b_t(r2)`, then `P_Z(r2_Z)` per digit.
-
-Stage 3 (degree 3, `gamma^(3) in K^118`, point `r^(2)`):
-
-| Instance | Gamma | Domain | Equality / weight | Summand | Degree | Claimed sum |
-| --- | ---: | --- | --- | --- | ---: | --- |
-| `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A z - eq (2 gamma_2 w_1' + u + q v)` | 2 | `T(r2)` |
-| `link[Z]` | `1 + k` | `D_Z` | `eq(r2_Z, .)` | `Z (Z + 1)` | 3 | `P_Z(r2_Z)` |
-| `b_t` from `r1` | `56 + t` | main | `eq(r1, .)` | `b_t` | 2 | `b_t(r1)` |
-| `b_t` from `r2` | `62 + t` | main | `eq(r2, .)` | `b_t` | 2 | `b_t(r2)` |
-| `y2_t` from `tau_2` | `68 + t` | `D_2` | `eq(tau_2, .)` | `y2_t` | 2 | `y2_t(tau_2)` |
-| `y2_t` from `r1_2` | `74 + t` | `D_2` | `eq(r1_2, .)` | `y2_t` | 2 | `y2_t(r1_2)` |
-| `kappa2_{t,k}` from `tau_2` | `80 + 3t + k` | `D_2` | `eq(tau_2, .)` | `kappa2_{t,k}` | 2 | `kappa2_{t,k}(tau_2)` |
-| `kappa3_k` from `tau_3` | `98 + k` | `D_3` | `eq(tau_3, .)` | `kappa3_k` | 2 | `kappa3_k(tau_3)` |
-| `kappa1_{t,k}` from `r1_1` | `100 + 3t + k` | `D_1` | `eq(r1_1, .)` | `kappa1_{t,k}` | 2 | `kappa1_{t,k}(r1_1)` |
-
-The ring instance is one gamma on two groups (the `w_A` lane group and the `eq(r2)` group);
-`z, u, v` enter as the affine (4.1) combinations of their digit lanes and `w_1'` as
-`sum 2^t b_t`. Terminal (67, `Stage3Claims`): every committed polynomial at `r^(3)`
-restricted to its group, in manifest order; these are the opening claims.
-
-Prover groups per stage (lanes): stage 1: main `eq(tau)` {6 bits, 14 x (`A^lo`, `A^hi`)},
-`D_1` `eq(tau_1)` {6 `y1`, 12 x (`A^lo`, `A^hi`)}, `D_1` {`w_2`, 6 `y1`}, `D_2` `eq(tau_2)`
-{6 `y2`, 12 x (`A^lo`, `A^hi`)}, `D_2` {6 `w_3`, 6 `y2`}, `D_3` `eq(tau_3)` {2 x (`A^lo`,
-`A^hi`)}; stage 2: main {`w_1`, 6 bits}, one `eq(r1_Z)` group per domain with the `P_Z`
-lanes (17, 18, 18, 2); stage 3: main `eq(r2)` {23 columns}, main {`w_A`, 5 `z` digits},
-main `eq(r1)` {6 bits}, `D_1` `eq(r2_1)` and `eq(r1_1)` {18 `kappa1` digits each}, `D_2`
-`eq(r2_2)` {18 `kappa2`}, `eq(tau_2)` {6 `y2`, 18 `kappa2`}, `eq(r1_2)` {6 `y2`}, `D_3`
-`eq(r2_3)` and `eq(tau_3)` {2 `kappa3` digits each}.
+inactive leading rounds (`d_main - d_t`). The instances, gammas, prover groups and terminal
+claims of the three stages are listed with the lookup layout: Section 19.3 (relation H-u),
+19.6 (H-exact) and 19.7 (H-FIPS). The ring instance is one gamma on two groups (the `w_A`
+lane group and the `eq(r2)` group); `z, u, v` enter as the affine combinations of their
+digit lanes and `w_1'` as `sum 2^t b_t`. The stage-3 terminal is every committed
+polynomial of the five non-multiplicity groups at `r^(3)`, in manifest order; these are the
+opening claims together with the multiplicity digits at `pi_m`.
 
 ## 8. Weight tables (`weights`)
 
@@ -380,7 +325,7 @@ A rejected run stops at its failing step (later timings stay zero); a trailing s
 holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
 Before step `parse` the verifier refuses an unsound configuration
 (`verifier::check_configuration`, `VerifyError::Configuration`): a `KeccakVerifier` whose
-`profile()` differs from the requested Flock profile, mode A (`Fast`, `LaBinius`) without
+`profile()` differs from the requested Flock profile, mode A (`Fast`, `Slim`, `Slim8`) without
 `BridgeDerivation::seed_derived()` (only `SeededMatrices`), and profile 0 outside builds
 with the test hooks. The test stand-ins `FixedMatrices` (matrices that ignore `sd`) and
 `NoKeccak`/`NoKeccakVerifier` (profile 0) exist only in unit tests and with the
@@ -500,8 +445,7 @@ build; the 1,024-signature round trip is ignored in debug builds):
   lanes and the shifted polynomial; the compiled pieces (source, folded, depressed, upper
   coefficients) against the terms; the fast product against `*` on boundary and random
   inputs; split and plain unreduced sums against nested sums; Taylor shifts; narrow and wide
-  parity tables (`tables.rs`). `profile_stage_groups` (ignored) prints per-round times of
-  stage-like groups (`AGG_PROFILE_VARS`, `AGG_PROFILE_POLICY`).
+  parity tables (`tables.rs`).
 - `tests/stages.rs` (256 signatures, 200 own keys, 56 on 3 shared keys): every stage-1 and
   stage-2 zero-check sums to zero and every level, `def_y1` and link claimed sum equals an
   independent dense evaluation (equality tables materialized, weights from their table
@@ -683,7 +627,7 @@ transcript, the wire format (version 0) and the verifier are untouched.
 ### 18.2 Where the implementation departs from the design, with the measured alternatives
 
 Synthetic stage-like groups at `2^21` cells (the main domain at `N = 2,048`;
-`kernel::tests::profile_stage_groups`, 7 threads, minimum of 3 runs, load average 1 to 3),
+the base-16 digit layout, 7 threads, minimum of 3 runs, load average 1 to 3),
 total ms for the stage-1, stage-2 and stage-3 main equality groups:
 
 | Variant | Stage 1 | Stage 2 | Stage 3 |

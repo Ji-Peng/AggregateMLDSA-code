@@ -86,8 +86,8 @@ pub const U_TOP_BASE: u32 = 6;
 /// SLACK_Z a_z - B_z with B_zlo in [0, 2^16), B_zhi, a_z in {0, 1}, and
 /// SLACK_Z + 2^17 = 2 B_z + 1 (`docs/h-exact.md`).
 pub const SLACK_Z: i64 = 130_915;
-/// Proven range of the quotient v: [-2^26, 2^26 - 1].
-pub const V_HALF_RANGE: i64 = 1 << 26;
+/// Proven range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1].
+pub const V_HALF_RANGE: i64 = 1 << 31;
 /// SelfTargetMSIS bound zeta' = max(bar B_z, bar B_u + 2^(d-1) tau) for the proven bounds of
 /// relation H-u (equals zeta of FIPS 204).
 pub const ZETA_PRIME: i64 = if BAR_B_Z > BAR_B_U + (1 << (D - 1)) * TAU as i64 {
@@ -183,14 +183,14 @@ mod tests {
 
     #[test]
     fn lifting_bound_6_1() {
-        // |Delta^Z| < 2^51 < p/2 under the proven ranges.
+        // |Delta^Z| < 2^55 < p/2 under the proven ranges.
         let az = (L * N) as i128 * ((Q - 1) / 2) as i128 * BAR_B_Z as i128;
         let d = az
             + B_T as i128
             + (2 * GAMMA2 * (M_W - 1)) as i128
             + BAR_B_U as i128
             + Q as i128 * V_HALF_RANGE as i128;
-        assert!(d < 1i128 << 51);
+        assert!(d < 1i128 << 55);
         assert!(d < (P_FIELD / 2) as i128);
     }
 }

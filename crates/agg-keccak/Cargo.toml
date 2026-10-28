@@ -1,6 +1,6 @@
 [package]
 name = "agg-keccak"
-description = "Flock Keccak gate port, sponge union circuit, bridge slot and segment driver."
+description = "Flock Keccak gate port, sponge union circuit and tied parts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

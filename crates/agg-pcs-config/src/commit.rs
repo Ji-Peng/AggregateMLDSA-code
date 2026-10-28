@@ -312,7 +312,7 @@ impl PcsProver {
         // released inside the opening (a one-thread unmap of several GiB at 32K); released
         // after it, on a detached thread. Akita shares
         // the source by `Arc` inside the opening anyway, so the clones copy nothing.
-        let keep = (!crate::sched::serial_schedule()).then(|| handles.clone());
+        let keep = handles.clone();
         let opening = SelectedProverOpeningData::from_committed_claims::<Cfg>(
             OpeningClaims::from_groups(groups)?,
             handles,

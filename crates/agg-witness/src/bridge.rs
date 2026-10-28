@@ -352,13 +352,6 @@ fn digit_columns(
     Ok(cols)
 }
 
-fn compose_columns(cols: &[Vec<i8>], layout: &crate::digits::DigitLayout) -> Vec<i64> {
-    let len = cols.first().map_or(0, Vec::len);
-    (0..len)
-        .map(|x| layout.compose(&cols.iter().map(|c| i64::from(c[x])).collect::<Vec<_>>()))
-        .collect()
-}
-
 impl BridgeTables {
     /// Commits the honest witness: carries by their digits.
     pub fn from_witness(w: &BridgeWitness) -> Result<Self, &'static str> {
@@ -376,53 +369,6 @@ impl BridgeTables {
         let g3 = digit_columns(&w.kappa3, &KAPPA3_DIGITS)?;
         let y = w.y.iter().map(|&v| v as u8).collect();
         Ok(Self { g1, g2, g3, y })
-    }
-
-    /// kappa^(1)_t recomposed from its digits.
-    pub fn kappa1(&self, t: usize) -> Vec<i64> {
-        compose_columns(&self.g1[3 * t..3 * t + 3], &crate::digits::KAPPA12_DIGITS)
-    }
-
-    /// y^(2)_t.
-    pub fn y2(&self, t: usize) -> Vec<i64> {
-        self.g2[t].iter().map(|&x| i64::from(x)).collect()
-    }
-
-    /// kappa^(2)_t recomposed from its digits.
-    pub fn kappa2(&self, t: usize) -> Vec<i64> {
-        compose_columns(
-            &self.g2[W1_BITS + 3 * t..W1_BITS + 3 * t + 3],
-            &crate::digits::KAPPA12_DIGITS,
-        )
-    }
-
-    /// kappa^(3) recomposed from its digits.
-    pub fn kappa3(&self) -> Vec<i64> {
-        compose_columns(&self.g3, &crate::digits::KAPPA3_DIGITS)
-    }
-
-    /// Column names and alphabets of (G_1, G_2, G_3).
-    pub fn specs() -> [Vec<(String, crate::digits::Alphabet)>; 3] {
-        use crate::digits::{Alphabet, KAPPA12_DIGITS, KAPPA3_DIGITS};
-        let mut g1 = Vec::new();
-        let mut g2 = Vec::new();
-        for t in 0..W1_BITS {
-            for k in 0..3 {
-                g1.push((format!("kappa1_{t}_{k}"), KAPPA12_DIGITS.alphabet(k)));
-            }
-        }
-        for t in 0..W1_BITS {
-            g2.push((format!("y2_{t}"), Alphabet::Bool));
-        }
-        for t in 0..W1_BITS {
-            for k in 0..3 {
-                g2.push((format!("kappa2_{t}_{k}"), KAPPA12_DIGITS.alphabet(k)));
-            }
-        }
-        let g3 = (0..2)
-            .map(|k| (format!("kappa3_{k}"), KAPPA3_DIGITS.alphabet(k)))
-            .collect();
-        [g1, g2, g3]
     }
 }
 

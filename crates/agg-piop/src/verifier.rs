@@ -24,7 +24,7 @@
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
 //! [`KeccakVerifier`] for another Flock profile than the requested one; mode A (profiles
-//! `Fast`, `LaBinius`) without the seed-derived matrices (the bridge's soundness bound
+//! `Fast`, `Slim`, `Slim8`) without the seed-derived matrices (the bridge's soundness bound
 //! needs `M_t` sampled after `G_main` and the Flock commitments are fixed); and profile 0
 //! (no Keccak argument, `c~_i` not tied to the bits) outside unit tests and the
 //! `test-hooks` feature (`docs/deviations.md`).
@@ -67,8 +67,8 @@ pub struct SegmentContext<'a> {
     pub commitment: &'a [u8],
     /// The challenger seed `fs_sigma` (event 5).
     pub seed: &'a [u8; 32],
-    /// The bridge seed `sd` (event 3), which the bridge slot's circuit digest binds
-    /// (`docs/bridge.md`, `docs/deviations.md`).
+    /// The bridge seed `sd` (event 3), whose matrices define the parity chain's weight
+    /// (`docs/bridge.md`, `docs/parity-chain.md`).
     pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
     pub mu: &'a [[u8; TR_BYTES]],
@@ -749,10 +749,9 @@ mod tests {
     use crate::prover::{FixedMatrices, SeededMatrices};
     use agg_witness::bridge::BridgeMatrices;
 
-    const PROFILES: [FlockProfile; 6] = [
+    const PROFILES: [FlockProfile; 5] = [
         FlockProfile::None,
         FlockProfile::Fast,
-        FlockProfile::LaBinius,
         FlockProfile::PublicBits,
         FlockProfile::Slim,
         FlockProfile::Slim8,
@@ -787,7 +786,7 @@ mod tests {
             configuration_policy(profile, profile, seed_derived, hooks)
         };
         assert!(policy(FlockProfile::Fast, false, true).is_err());
-        assert!(policy(FlockProfile::LaBinius, true, false).is_ok());
+        assert!(policy(FlockProfile::Slim, true, false).is_ok());
         assert!(policy(FlockProfile::PublicBits, false, false).is_ok());
     }
 
@@ -825,7 +824,6 @@ mod tests {
             FlockProfile::Fast,
             FlockProfile::Slim,
             FlockProfile::Slim8,
-            FlockProfile::LaBinius,
         ] {
             assert_eq!(
                 refused(&fixed, &AcceptAll(profile), profile),

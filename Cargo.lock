@@ -188,7 +188,6 @@ dependencies = [
  "aerie-prover",
  "aerie-simd",
  "agg-bridge",
- "agg-keccak",
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",

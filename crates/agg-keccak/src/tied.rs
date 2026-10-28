@@ -47,7 +47,6 @@ use sha3::{Digest, Sha3_256};
 use agg_witness::bridge::BridgeMatrices;
 
 use crate::{
-    bridge_slot::pack_y,
     flock_union::{bit_value, BitClaim, CommitData, UnionGeometry, UnionProof},
     gate::ChainGate,
     prover::{
@@ -126,6 +125,16 @@ fn assert_tied_layout(gate: &ChainGate) {
             && W1_WORD_BASE == 0,
         "the tied part needs the sponge layout of crate::sponge"
     );
+}
+
+/// `Y` (one bit per byte) packed least significant first, bit `o` at byte `o / 8`.
+#[must_use]
+pub fn pack_y(y: &[u8]) -> Vec<u8> {
+    let mut out = vec![0_u8; y.len().div_ceil(8)];
+    for (o, &bit) in y.iter().enumerate() {
+        out[o / 8] |= (bit & 1) << (o % 8);
+    }
+    out
 }
 
 fn put_framed(h: &mut impl Challenger, bytes: &[u8]) {

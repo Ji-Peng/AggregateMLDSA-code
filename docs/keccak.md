@@ -4,11 +4,10 @@
 ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock HEAD
 (`succinctlabs/flock` `83f963e`, vendored `flock-core`, K12) and its Ligerito PCS. Deviations
 from the spec are listed in `docs/deviations.md` (the K entries). Sections 1 to 6 describe
-the sponge gate and the standalone sponge proof, Section 7 the bridge slot and the two-type
-union segment, Sections 8 to 11 the tied part that mode A uses (Section 9 its API, Sections 10
-and 11 the bridge instances of tied-part proof versions 1 to 4), Section 12 the Flock bytes:
-the `Slim` profile in mode A, spans over all segments, the level-0 cap, the options measured
-or estimated, and (12.7) tied-part proof version 5, the virtual parity chain.
+the sponge gate and the standalone sponge proof, Section 9 the tied part that mode A uses,
+Section 12 the Flock bytes: the `Slim` profile in mode A, spans over all segments, the
+level-0 cap, the options measured or estimated, and (12.7) tied-part proof version 5, the
+virtual parity chain.
 
 ## 1. The chi-only Keccak-f gate
 
@@ -113,7 +112,7 @@ Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit
   asserts that Flock commits to the same cap (Flock 83f963e recommits internally; it has no
   entry that takes a precomputed commitment). The tied part of the mode-A driver does not go
   through Flock's prover entry and opens the event-2 commitment without recommitting (K14,
-  Sections 9 and 11); this standalone path still commits twice. `verify(public, commitment, proof, fs)` hands
+  Section 9); this standalone path still commits twice. `verify(public, commitment, proof, fs)` hands
   the event-2 commitment, with the verifier's own PCS parameters, to Flock's verifier.
   `prove`/`prove_buffers` return `(commitment, proof)` in one call for callers whose seed
   does not depend on the commitment (tests, benches).
@@ -122,9 +121,9 @@ Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit
   registry, counts, commitment, circuit digest and public words.
 - PCS: Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding), `Slim` (rate 1/4), or
   `Slim8` (rate 1/8, K18), `Profile::{Fast, Secure, Slim, Slim8}` with header bytes 0, 1, 3, 4
-  (2 is reserved for LaBinius); Flock's documented accounting: `Fast`, `Slim` and `Slim8` 128
+  (2 is unassigned); Flock's documented accounting: `Fast`, `Slim` and `Slim8` 128
   bits work-normalized with 16-bit query proof of work, `Secure` 120 bits. Bytes and times on a
-  tied part: Section 11; mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
+  tied part: Section 12; mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
 - Commitment bytes (`KeccakCommitment::as_bytes`): the Ligerito level-0 Merkle cap, `2^c`
   nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; Fast: 128 nodes, 4,096 bytes;
   Slim and Slim8: 64 nodes, 2,048 bytes), the bytes Flock's `bind_statement` absorbs.
@@ -224,121 +223,13 @@ Observations:
   the cloud machine; extrapolation from the table, not measured: about 7 s with CLMUL
   and 7 GB peak.
 
-## 7. Bridge slot and bridged segment (docs/bridge.md Section 5)
+## 9. The tied part (docs/bridge.md Sections 5a, 5c, 5d; deviations K11, K14, K16, K21)
 
-Module `bridge_slot` (`SlotLayout`, `BridgeSlot`) and `segment` (`BridgeBatch`,
-`BridgedSegment`); the GF(2) walks are `agg_bridge::gf2_walker` (generic over
-`agg_bridge::shape::Shape`, so the toy shape `L = 2^12` and the production shape share the
-code). Deviations: K6 (the 48 w1Encode words in the sponge schema), K8 (`Y_sigma` as a
-coefficient of the rows), K9 (full-segment scaling).
-
-- Layout of the bridge type (one live row): input columns `c = p + Lambda t` (`Lambda =
-  2^{10 + d_seg}`, `p = j + 256 rho + 1024 i_seg`), the constant at `6 Lambda`, the composite
-  rows at `6 Lambda + 128 + o`, `o < 4,096` (committed zeros), `k_log = 13 + d_seg`. Rows:
-  live input `z_c * 1 = z_c`; padded input and every other column empty (forced zero);
-  composite row `(sum_c M[o, c] z_c + Y_o z_one) * z_one = z_{y_o}`.
-- `LincheckCircuit`: `comb = alpha xi_A + xi_B` with `xi_A` on the inputs the walker
-  `M_1^T M_2^T M_3^T eq_Y` (`gf2_walker::transpose_into`, parallel over lanes and level-1
-  blocks) plus the identity rows, `xi_A[one] = eq[one] + sum_o Y_o eq[y_o]`,
-  `xi_B[one] = eq[one] + sum_live eq[c] + sum_o eq[y_o]`; `fold_split` from the same walk;
-  `const_pin_col = 6 Lambda`. The matrices are derived once from `sd`
-  (`agg_bridge::seed::derive_matrices_for`) and shared (`Arc<BridgeMatrices>`).
-- `BridgedSegment`: the two-type union of `n` sponge rows (bridged schema, K6) and one bridge
-  row; `48 n` copy wires plus the `mu`, `c~` public wires. `commit(records)` (event 2, no
-  seed), `final_vector(committed, matrices)` (`Y_sigma`, forward XOR walk),
-  `prove(committed, sd, matrices, fs)` (challenger: domain, `fs`, sponge gate digest,
-  `BridgeSlot::digest`), `verify(mu, c~, commitment, sd, matrices, Y, fs, proof)`. Proof
-  format `AGGKCB` version 1 (kind byte 2, `n`, `d_seg`). `BridgeBatch` proves a bridge slot
-  alone (kind 1), used for the toy shape.
-- Cost (`BridgedSegment::cost`, exact counts): the bridge adds the factored nonzeros
-  `14 * 6 Lambda + 14 * 6 * 8192 * ceil(Lambda / 2^19) + 18 * 49,152` that the walker
-  touches, plus `3 * 6 * 1024 n + 3 + 2 * 4096 + |Y|` identity, constant and composite-row
-  `B`, `C` entries; the flattened composite (never built) is reported by
-  `gf2_walker::composite_nonzeros`. Measurements: below.
-
-Tests (`--release`): `agg_bridge::gf2_walker` (toy composite and transpose against the
-dense product `M_3 M_2 M_1`, 16 by 4,096; the transpose is the adjoint of the forward walk
-on toy and production layouts; single flips change `Y` exactly when their composite column
-is nonzero; the slot layout at `d_seg = 6` agrees with `agg_witness::bridge::gf2_composite`
-on the main domain); `bridge_slot` (layout constants, honest rows satisfy `a & b = z` and
-tampered blocks or `Y` break a row, the walker is the transpose of the row evaluator, equals
-Flock's `SparseMatrixCircuit` fold on the explicitly lowered rows of the toy and of a
-one-record production slot, `fold_split` agrees with two alpha folds, the digest binds `sd`,
-the layout and `Y`); `tests/bridge.rs` (toy slot proven alone against a direct GF(2)
-product, with a flipped `Y` bit, another seed, a malformed `Y` and a flipped committed bit
-with the stale `Y` rejected; bridged segments at 5 records (`d_seg = 3`, padded positions)
-and 64 records (`d_seg = 6`) round-trip with `Y` equal to the F_p side's walk, and reject a
-flipped `Y` bit, another seed, a wrong `c~`, a bit flipped in the slot copy only (copy
-constraint) and a bit flipped in both copies with the stale `c~` (sponge)).
-
-Measurements at 64 records (`tests/bridge.rs`, `sponge_with_bridge_rows_round_trip_64`,
-`--nocapture`; default build without CLMUL, 7 threads on `taskset -c 0,1,3-15`, single
-runs, not a CPU-2 benchmark):
-
-| | Sponge sub-proof alone | Bridged segment (sponges + bridge slot) |
-| --- | ---: | ---: |
-| union `M` / dense `m` | 26 / 25 | 27 / 25 |
-| committed 128-bit words | 137,920 | 137,920 + 3,105 |
-| structural nonzeros | 163,827,904 (2,559,811 per record) | + 7,077,888 factored bridge rows + 1,189,955 identity/constant/`B`,`C` (+5.05%) |
-| flattened bridge composite (never built) | | 657,057,514 entries of `A_0` (4.0 times the sponge's structural count) |
-| copy wires | 384 public | 384 public + 3,072 slot copies |
-| prove (both commits included) | 6.71 s | 1.62 s commit + 9.15 s prove |
-| verify | 0.52 s | 1.64 s |
-| proof bytes (plus the 4,096-byte commitment) | 284,294 | 343,584 |
-
-Matrix derivation from `sd` took 0.14 s (production shape, 7 threads). At 5 records
-(`d_seg = 3`) the bridge adds 2,363,427 nonzeros (18.5% of the 12.8M sponge nonzeros); the
-factored count grows with `Lambda`, the identity count with the live records. Full segments
-are blocked by K9 in this form.
-
-## 8. Why a tied part: profile of the two-type union in mode A
-
-A profile of one 512-record part (`d_part = 9`) proven as the two-type union of Section 7
-(CLMUL build, 7 threads, a heavily shared machine, so only the proportions matter): the union
-has `nu = 10`, a bridge slot of `2^32` bits (`k_log = 22`) and `M = 33`; the merged opening
-took 73% of the part's prover time, and 394,080 B (58%) of its 676,264-byte proof were the
-24,630 gather values of the wiring argument.
-
-Findings. The sponge rows are not the problem: witness, commit, partial folds and the
-Ligerito inner open together cost what the sponge-only bench costs. Three costs come from
-the bridge slot as designed in Section 7:
-
-1. **Per-copied-word wiring claims.** Flock's copy constraints run over cell-slots, one per
-   schema word of a type across its `2^nu` rows. The bridge type has one live row, so each of
-   its `48 n` copied words is its own cell-slot with its own packed-direct gather claim: 768
-   proof bytes per record (58% of the proof), 73% of the prover time in the opening, and the
-   verifier's circuit setup. This cost is linear in the records with a constant that rules
-   out the byte target (25 MB of gather values at `N = 2^15`) and cannot be reduced within
-   the wiring argument: a cross-record linear relation needs its inputs in one block, and a
-   one-row block has one cell-slot per word.
-2. **Uniform row capacity (K9, K10).** The bridge slot occupies `2^(k_b + nu)` of the union
-   address space, `k_b = 13 + d_part`, `nu >= d_part`: the padded buffers, the stripes and the
-   zerocheck domain grow with `2^(2 d_part + 14)`, which is what forced parts of `2^9`
-   records (3 GiB of union buffers; `2^13` records would need 3 x 128 GiB).
-3. **The bridge walker itself**: 506 ms of comb build at `k_log = 22` (with the sponge walk),
-   `7 x 10^8` additions at a full segment. This is the cost of the per-segment composite and
-   is independent of 1 and 2; it also appears in the verifier (the lincheck's matrix
-   discharge calls the same fold).
-
-Decision (Section 9 and docs/bridge.md Section 5a): remove 1 and 2 by splitting every part
-into two single-type Flock instances, the sponge instance (its own row capacity, no bridge
-slot) and the bridge instance (`nu = 3`, one live row), and tying the bridge instance's bit
-copies to the sponge instance's input words with evaluation claims on the two committed
-polynomials at a random point derived from `fs_sigma`, instead of word copies through the
-wiring argument. The public words `mu_i`, `c~_i` are tied by one evaluation claim against the
-verifier's own table as well, so neither instance has a circuit or a wiring argument. Cost 3
-stays and is now the only non-succinct verifier cost of the Keccak side.
-
-## 9. The tied part (docs/bridge.md Sections 5a to 5d; deviations K11, K13, K14, K16, K21)
-
-Modules `flock_union`, `bridge_union` and `tied`. A part of a segment (or a span of segments,
-deviation K16) is proven by one Flock instance, the sponge instance, plus the virtual parity
-chain on its tie challenger (tied-part proof version 5, deviation K21, Section 12.7,
+Modules `flock_union` and `tied`. A part of a segment (or a span of segments, deviation K16)
+is proven by one Flock instance, the sponge instance, plus the virtual parity chain on its
+tie challenger (tied-part proof version 5, deviation K21, Section 12.7,
 `docs/parity-chain.md`): the part's bits are tied to the public final vectors by evaluation
-claims instead of the word copies of the two-type union of Section 7. Versions 1 to 4 proved
-the GF(2) side with a second Flock instance: the one-row bridge slot of Section 7 (version 1),
-then the bridge union of Sections 10 and 11 (versions 2 to 4; module `bridge_union`, kept as a
-reference).
+claims, not by Flock's word copies.
 
 - `flock_union::UnionGeometry` (a registry of one or more boolean types in the caller's order,
   declared counts, PCS parameters derived as in Section 4; `new` for one type, `new_multi`
@@ -377,102 +268,14 @@ reference).
   statement words, a digest of the tie geometry and the 32-byte tie binding (label
   `agg-keccak/v4/tie-binding`), then Flock's statement binding.
 
+Memory: the sponge commit data of every part is kept from event 2 until its proof (K14), and
+a batch of exactly one tied part keeps its whole committed witness until the join (lever W1,
+`docs/perf.md` Section 9); the proof is the same as with a rebuilt witness.
+
 Tests: `flock_union` (the eq-table index order and `eval_packed` against the plain inner
-product; proof byte framing); `bridge_union` unit tests (docs/bridge.md Sections 5b, 5c);
-`tied` unit tests and `tests/tied.rs` (docs/bridge.md Section 5d, `docs/parity-chain.md`
-Section 11), including a segment in parts whose shares XOR to the segment's `Y`. The legacy
-two-type union keeps its tests (`tests/bridge.rs`).
-
-## 10. The one-row bridge instance and the two-type bridge union
-
-A profile of the version-1 tied part at 2,048 records (`d = 11`; CLMUL build, 7 threads) put
-the sponge instance at 1,394 ms and the one-row bridge instance at 1,725 ms of prover time
-(walker comb 573 ms, partial folds 208 ms, zerocheck about 500 ms, opening 293 ms), and the
-bridge instance's lincheck discharge at about 480 ms of the part's 503 ms of verification.
-
-Findings:
-
-1. **The bridge instance costs more than the sponge instance from `d = 11` on**, and all
-   its costs scale with its column count `2^(13 + d)`: the walker's comb (`7 x 10^8` field
-   additions and two 1 GiB vectors at a full segment), the lincheck's partial folds and
-   sumcheck over `2^k_b` columns, the zerocheck over `2^(k_b + 3)` bits, and the opening's
-   per-column claim values (the bridge type has one row, so every committed word is its
-   own column). Extrapolated to `d = 13` (x4 per doubling of `d`... x4 in total): about 7 s
-   locally; the cloud run measured 7.0 s of Flock prove per segment at 8,192 records of
-   which the sponge instance is about 2.4 s (Keccak-only bench, 9,362 records: 3.1 s with
-   its commit).
-2. **The verifier's Flock cost is the bridge instance's lincheck discharge** and is linear
-   in `2^k_b` (measured 0.26 s at `d = 10`, 0.50 s at `d = 11`, 1.43 s at `d = 13` on the
-   cloud machine): Flock's lincheck verifier builds the `2^k_b` eq table, runs the walker,
-   and folds the resulting `comb_vec` through every sumcheck round. Splitting the bridge
-   into smaller parts (`d_b < d_s`) does not change the sum of these costs (the walker's
-   nonzeros and the vector lengths add up to the same total) and would add one bridge
-   proof (about 300 KB) per extra part, so it cannot reach the target of well under 1 s at
-   32K; what does is a bridge layout whose per-block matrices are small.
-3. **The duplicate Ligerito commit (K7)** costs the commit of event 2 again inside Flock's
-   prover: 132 + 68 ms at 2,048 records (10% of the Flock part), about 0.9 s per segment
-   on the cloud machine (3.5 s of the 33 s at 32K).
-
-Decision (docs/bridge.md Section 5b, deviation K13): factor the bridge instance the way the
-composite is factored. A **two-type bridge union** replaces the one-row bridge slot: a
-level-1 type with one row per (lane, level-1 block) of the part whose `A_0` is `M_1` itself
-(`I (x) M_1` is exactly Flock's per-block lincheck), and a one-row levels-2-3 type whose
-rows prove the share `Y = M_3 M_2 y1`; the level-1 parities `y1` are committed in both
-types and tied by evaluation claims, like the sponge inputs. At a full segment the walker
-touches `14 x 2^19 + 14 x 6 x 2^17 + 18 x 49,152 = 1.9 x 10^7` entries instead of
-`7.2 x 10^8`, the field vectors are `2^20` entries (16 MiB) instead of `2^26`, and the
-address space `2^28` bits instead of `2^29` with 97 live rows instead of one. The
-duplicate commit is removed by keeping Flock's `ProverData` from event 2 to event 6
-(deviation K14). Measurements: Section 11.
-
-## 11. The two-type bridge union (proof version 2)
-
-Implementation of the decision of Section 10 (docs/bridge.md Section 5b, normative;
-deviations K13, K14): the bridge instance of a tied part is a Flock union of two boolean
-types, `bridge_union::Level1Slot` (one row per lane and level-1 block, `A_0 = M_1`, the
-level-1 parities committed) and `bridge_union::TopSlot` (one row whose inputs are the parities
-of all level-1 rows, its composite rows `M_3 M_2` with `Y` as a coefficient), proven by the
-multi-type `flock_union::UnionGeometry`; the sponge instance opens its event-2 commitment
-without recommitting (K14).
-
-Two points differ from the design of Section 10: (1) the level-1
-parities depend on `sd`, so the bridge union cannot be committed at event 2; it is committed
-at event 6 inside the part's proof (its cap travels there; the event-2 item of a part is the
-sponge cap alone, wire item version 3), and the tie challenges are derived from `fs` and both
-caps; (2) the composite rows only define the committed output columns, so a union committed
-after `sd` needs the extra claim `z_y = 0` (seven claims instead of six; the output region
-moved to the aligned base `6 G + 4096`). docs/bridge.md Section 5b gives both arguments.
-
-Exact sizes (`TiedPart::cost`, `BridgeUnion::cost`) are tabulated in docs/bridge.md Section
-5b; at a full segment the union has `M = 28`, 96 + 1 live rows, 411,712 committed words
-(dense `m = 26`), and its walkers read 19,234,816 matrix entries per fold over `2^20`-entry
-tables, against `M = 29`, 393,249 words and 716,537,856 entries over `2^26` entries for the
-one-row slot.
-
-Measured (CLMUL build, 7 threads, medians of 5 after 1 warmup, a shared machine): at 2,048
-records the mode-A prover takes 4,803.3 ms instead of 6,586.8 ms with the one-row bridge
-instance (Flock part 1,901.1 instead of 3,704.7 ms), the verifier 304.4 instead of 753.4 ms
-uncached (Flock part 62.6 instead of 504.7 ms), and the prover's peak RSS 1,942 instead of
-3,103 MiB; the aggregate is 0.9 to 1.3% larger (the union's 4,096-byte cap moved from the
-event-2 item into the proof, and the opening is a few KB larger). A part of 8 live records at
-`d = 13` (the full-segment bridge union with a small sponge instance) proves in 445.3 ms
-instead of 6,773.8 ms and verifies in 83.2 ms instead of 1,865.5 ms (peak RSS 806 against
-6,215 MiB). At a full segment the bridge part of the Flock prover therefore drops from about
-6.7 s to about 0.4 s on this machine, and the verifier's Flock cost per segment from 1.87 s to
-about 0.08 s.
-
-Precomputed commitment (K14), at 2,048 records: keeping the sponge commitment's data from
-event 2 to event 6 saves 217 ms of the Flock part (2,117.9 -> 1,901.1 ms; prove 5,063.1 ->
-4,803.3 ms, `AGG_FLOCK_RECOMMIT=1` against the default) and costs 152 MiB of kept data (84
-MiB at 1,024, 19 MiB at 256), which did not raise the prover's peak (1,959 and 1,942 MiB): the
-kept data is the codeword and tree the sponge proof would otherwise rebuild at event 6, where
-the peak is reached, so it only adds memory between events 2 and 6. Extrapolated, not
-measured: about 0.6 GiB per full segment with `Fast` (twice that with `Slim`), 2.4 GiB at
-`N = 2^15` if all four segments keep theirs; a driver short of memory can drop it
-(`Aggregator::keep_commit_data(false)`). Since lever W1 (`docs/perf.md` Section 9) a batch
-of one tied part (the span, or one part at `N <= 2^13`) keeps its whole witness from event 2
-to the join, not only the commit data, and is not rebuilt (`AGG_FLOCK_REBUILD` restores the
-rebuild).
+product; proof byte framing); `tied` unit tests and `tests/tied.rs` (docs/bridge.md Sections
+5c, 5d, `docs/parity-chain.md` Section 11), including a segment in parts whose shares XOR to
+the segment's `Y`.
 
 ## 12. Flock bytes: `Slim` in mode A, spans, the level-0 cap, `Slim8`
 
@@ -483,8 +286,8 @@ with its proof of work), at a stated prover and verifier cost. Deviations K15 to
 
 ### 12.1 Where the bytes are
 
-A tied part's proof is the bridge union's cap, the sponge instance's proof and the bridge
-union's proof; each instance proof is a zerocheck (about 3 KB), a lincheck (1.7 KB), the
+A tied part's proof is a header, the parity chain's rounds and the sponge instance's proof
+(12.7); the instance proof is a zerocheck (about 3 KB), a lincheck (1.7 KB), the
 claim values and Flock's merged opening, which is a ring-switch and Frobenius layer (13 to 15
 KB) around one Ligerito proof. The Ligerito proof is almost everything: per level, `Q`
 queried rows of the interleaved codeword (`lanes x 16` bytes at level 0, `2^4 x 16` above) and
@@ -496,25 +299,19 @@ deterministic):
 | --- | --- | --- | --- | --- | ---: | ---: |
 | sponge (2,048, `m` 30) | Fast | 244 x 34 lanes: 129.6 KB | 83.9 KB (11 siblings) | 47.8 / 63.7 KB | 340,912 B | 361,556 B |
 | sponge (2,048, `m` 30) | Slim | 119 x 34: 63.2 KB | 48.3 KB (13) | 40.0 / 60.1 KB | 223,856 B | 243,252 B |
-| bridge union (2,048, `m` 24) | Fast | 244 x 51: 194.4 KB | 38.1 KB (5) | 31.8 / 19.8 KB | 296,608 B | 315,804 B |
-| bridge union (2,048, `m` 24) | Slim | 119 x 51: 94.8 KB | 26.0 KB (7) | 25.2 / 20.8 KB | 175,536 B | 193,524 B |
-| bridge union of four segments (`8@13/4`, `m` 28, `initial_k` 4) | Slim8 | 79 x 13: 16.0 KB | 34.6 KB (14) | 34.2 / 56.4 KB | 151,168 B | 169,972 B |
 
 (The Ligerito column is the proof's `size_bytes` without the level-0 cap, which the
 serialized proof no longer carries, K17.) So the bytes are set by the level-0 query count (rate and the 16-bit
 query PoW), the level-0 row width (`lanes = ceil(words / 2^(m - 7 - initial_k))`), the path
-depths, and by the NUMBER of openings: two per tied part, whatever its size.
+depths, and by the NUMBER of openings: one per tied part, whatever its size.
 
 ### 12.2 What was implemented
 
 1. **`Slim` in mode A** (K15): `FlockProfile::Slim = 4`, bound at event 0, named in the
    event-2 item (item version 4), `--flock-profile`. Default of mode A.
-2. **Spans** (K16, docs/bridge.md Section 5c, tied-part proof version 3): a batch of `S >= 2`
-   segments is ONE tied part (one sponge instance of all records, one bridge union of all
-   segments), so it pays two openings instead of `2 S`. Every tied part now checks the output
-   columns against the public table of final vectors (the coefficient form cannot carry a
-   different `Y` per row). `--flock-span on|off`, default on. At `N <= 2^13` (one segment) a
-   span is the part of version 2 with the output claim moved.
+2. **Spans** (K16, docs/bridge.md Section 5c): a batch of `S >= 2` segments is ONE tied part
+   (one sponge instance of all records, one parity chain over all segments), so it pays one
+   opening instead of `S`. `--flock-span on|off`, default on.
 3. **The level-0 cap is not sent twice** (K17): 4,096 B (`Fast`) or 2,048 B (`Slim`) per
    instance.
 4. **`Slim8`** (K18): a rate-1/8 Ligerito parameter set derived by Flock's own
@@ -588,14 +385,6 @@ post-K17 it predicts 775,046 B against ~766.8 KB).
 - **(1) `Slim`**: measured above, 36% fewer Flock bytes than `Fast` at 2,048 records (30% fewer
   aggregate bytes) for 3% more prover time (119 ms: commit time 1.23x in mode A, 1.36x in the
   standalone tied part), the same verifier time and twice the kept commit data. Adopted as the default.
-- **(2) One batched opening across the sponge instance and the bridge union** of a part: not
-  possible within Flock's accounting. The two are committed at different events (the union
-  depends on `sd`), as polynomials of different sizes; Flock's Ligerito opens one commitment,
-  and a batched opening of two codewords would need its own proximity analysis. What it could
-  save is one tail (levels 1+ and the merged-opening layer, about 45 KB of the union at 2,048
-  records with `Slim`). Across the parts of all segments the schedule does allow merging (all
-  sponge instances are committed at event 2, all unions at event 6): that is the span, which
-  merges them into one commitment each and needs no new analysis.
 - **(3) Query PoW and the rate.** Raising the query PoW from 16 to 20 / 22 / 24 bits removes
   about 3.5 / 5 / 7% of the queries per level (each bit is one bit of the work-normalized query
   term): estimated 13 / 20 / 27 KB less per 2,048-record `Slim` part (3 to 6%) and 16 / 24 /
@@ -614,15 +403,8 @@ post-K17 it predicts 775,046 B against ~766.8 KB).
   times a segment's Flock buffers and kept data (estimate at 32K with `Slim`: about 5 GiB of
   kept commit data, 6 GiB of union buffers for the sponge instance, on top of the PIOP's
   tables; to be measured on the cloud machine; the 128 GB VM is far from it).
-- **(5) LaBinius** (estimate only, not integrated): it would replace the two Ligerito
-  openings of a span (about 400 KB at 32K with `Slim`) by two lattice commitment openings.
-  The only LaBinius proof size we measured with recursion is the whole binius64 Keccak proof
-  of 3,495 permutations, 86.3 KB; if an opening of our `2^33`-bit sponge stack
-  stays near that size, a 32K span would be about 2 x 86 KB plus the 40 KB of zerocheck,
-  lincheck and ring-switch layers, about 6.6 bytes per signature (an unverified
-  extrapolation). It changes the PCS layer only (commitment at event 2, the opening at event
-  6, the ring switch to LaBinius's field, K14's kept data), not the relation, the ties or the
-  bridge.
+- **(5) LaBinius**: not adopted. Its small proofs need LaBRADOR recursion, which costs
+  about 1.5 times the prover time and about 0.4 to 0.7 s of verifier time.
 
 ### 12.5 Flock bytes per signature at `N = 2^15` (estimates from the model, not measured)
 
@@ -632,7 +414,6 @@ post-K17 it predicts 775,046 B against ~766.8 KB).
 | Slim | 62.3 | 16.0 |
 | Slim8 | 50.2 | 13.3 |
 | Slim with 24-bit query PoW | 58.4 | 15.0 |
-| LaBinius openings (extrapolation, Section 12.4) | - | about 6.6 |
 
 With the default (`Slim`, span) the Flock side would be about 16 bytes per signature at 32K
 instead of 94.6 (pre-K17 cloud run), the aggregate about 51 instead of 129.4 bytes per signature

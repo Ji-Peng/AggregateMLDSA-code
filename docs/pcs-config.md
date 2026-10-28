@@ -54,7 +54,7 @@ policy searches `b` in `3..=min(16, w)` (`PROOF_OPTIMIZED_INNER_LOG_BASIS_MAX = 
 | 17..=31 | 2 | widths 18-20: base `2^11`..`2^16`, 2 digits; base `2^10` needs 3 at width 20 |
 | 32..=47 | 3 | two base-`2^16` digits reach only `2^31 - 2^15 - 1` |
 
-Planner probe (`width_admissibility_probe`): a planning-only preset per width, equal to
+Planner probe (measured once; the question is settled): a planning-only preset per width, equal to
 the width-4 preset except `log_commit_bound = w` and Dense's inner search 3..=16, planned
 for one polynomial at 13 variables (this machine). Every width is
 admissible; the cost-optimal DP does not pick the fewest digits but small bases:
@@ -69,8 +69,8 @@ admissible; the cost-optimal DP does not pick the fewest digits but small bases:
 | 19 | 5 | 4 | 51,961 |
 | 20 | 5 | 5 | 56,207 |
 
-Width-16 inner digits for the lookup columns (`width16_inner_probe`, the
-`G_main16` layouts of 256 and 1,024 signatures):
+Width-16 inner digits for the lookup columns (planner probe, the `G_main16` layouts of 256
+and 1,024 signatures; settled by deviation L3):
 
 | Layout | Inner range | Selected | Estimated proof (B) | Planning time |
 | --- | --- | --- | ---: | ---: |
@@ -237,11 +237,6 @@ taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features
 # drift check: re-plan the rows of the listed sizes and compare bytes with the artifacts
 AGG_CATALOG_D_SIG=8,10 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release \
     --no-default-features --test schedule_catalog_regen -- --ignored --exact verify_rows
-# which inner digits the planner picks for raw widths 4..20, and for the width-16 columns
-taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
-    --test schedule_catalog_regen -- --ignored --exact width_admissibility_probe --nocapture
-taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
-    --test schedule_catalog_regen -- --ignored --exact width16_inner_probe --nocapture
 ```
 
 `AKITA_SCHEDULE_GEN_JOBS` bounds the parallel scalar planners (default 3; the search

@@ -6,13 +6,12 @@
 //!
 //! ```text
 //! taskset -c 0,1,3-15 cargo bench -p agg-bench --bench mode_b -- [N ...]
-//!     [--warmup W] [--reps R] [--prove-runs R] [--verify-runs V] [--shared S]
+//!     [--warmup W] [--reps R] [--shared S]
 //! ```
 //!
 //! Protocol: `W` warmup runs (default 1, discarded), then `R` timed runs (default 5),
-//! medians reported, for the prover and for each verifier mode. `--prove-runs` and
-//! `--verify-runs` set the timed runs of one role only. Peak RSS is the
-//! maximum over all runs, warmup included.
+//! medians reported, for the prover and for each verifier mode. Peak RSS is the maximum over
+//! all runs, warmup included.
 //!
 //! Every size runs in its own prover process, which hands the proof to its own verifier
 //! process over a pipe, so each peak RSS belongs to one role. Records: `N - S` under their
@@ -42,8 +41,7 @@ const SEED: u64 = 0x00b0_0b0b;
 struct Options {
     sizes: Vec<usize>,
     warmup: usize,
-    prove_runs: usize,
-    verify_runs: usize,
+    reps: usize,
     shared: Option<usize>,
     role: Role,
 }
@@ -59,8 +57,7 @@ fn parse_options() -> Options {
     let mut options = Options {
         sizes: Vec::new(),
         warmup: 1,
-        prove_runs: 5,
-        verify_runs: 5,
+        reps: 5,
         shared: None,
         role: Role::Driver,
     };
@@ -73,13 +70,7 @@ fn parse_options() -> Options {
         };
         match arg.as_str() {
             "--warmup" => options.warmup = value("--warmup"),
-            "--reps" => {
-                let reps = value("--reps").max(1);
-                options.prove_runs = reps;
-                options.verify_runs = reps;
-            }
-            "--prove-runs" => options.prove_runs = value("--prove-runs").max(1),
-            "--verify-runs" => options.verify_runs = value("--verify-runs").max(1),
+            "--reps" => options.reps = value("--reps").max(1),
             "--shared" => options.shared = Some(value("--shared")),
             "--prover-child" => options.role = Role::Prover(value("--prover-child")),
             "--verifier-child" => options.role = Role::Verifier(value("--verifier-child")),
@@ -103,10 +94,8 @@ impl Options {
         vec![
             "--warmup".into(),
             self.warmup.to_string(),
-            "--prove-runs".into(),
-            self.prove_runs.to_string(),
-            "--verify-runs".into(),
-            self.verify_runs.to_string(),
+            "--reps".into(),
+            self.reps.to_string(),
             "--shared".into(),
             self.shared_for(n).to_string(),
         ]
@@ -170,7 +159,7 @@ fn run_verifier(options: &Options, n: usize) {
     let reset = reset_peak();
     let base = rss_kib().unwrap_or(0);
     let mut uncached = Vec::new();
-    for run in 0..options.warmup + options.verify_runs {
+    for run in 0..options.warmup + options.reps {
         let report = verify_mode_b(&public, &bytes, &bridge, relation(), None);
         assert!(report.accepted(), "verify: {:?}", report.outcome);
         if run >= options.warmup {
@@ -181,7 +170,7 @@ fn run_verifier(options: &Options, n: usize) {
     let mut cache = KeyCache::default();
     assert!(verify_mode_b(&public, &bytes, &bridge, relation(), Some(&mut cache)).accepted());
     let mut cached = Vec::new();
-    for run in 0..options.warmup + options.verify_runs {
+    for run in 0..options.warmup + options.reps {
         let report = verify_mode_b(&public, &bytes, &bridge, relation(), Some(&mut cache));
         let verified = report.outcome.expect("verify with cached keys");
         assert_eq!(verified.expanded_keys, 0);
@@ -194,13 +183,13 @@ fn run_verifier(options: &Options, n: usize) {
     let cached = median_steps(&cached);
     println!(
         "  verifier uncached (ms, medians of {}, {} warmup): {}",
-        options.verify_runs,
+        options.reps,
         options.warmup,
         steps_line(&uncached)
     );
     println!(
         "  verifier cached keys (ms, medians of {}, {} warmup): {}",
-        options.verify_runs,
+        options.reps,
         options.warmup,
         steps_line(&cached)
     );
@@ -228,7 +217,7 @@ fn run_prover(options: &Options, n: usize) {
     let mut times = Vec::new();
     let mut steps = Vec::new();
     let mut last = None;
-    for run in 0..options.warmup + options.prove_runs {
+    for run in 0..options.warmup + options.reps {
         let output = prove_mode_b(
             &ProverInputs {
                 instance: &instance,
@@ -268,7 +257,7 @@ fn run_prover(options: &Options, n: usize) {
     };
     println!(
         "  prover steps (ms, median run of {}, {} warmup): {}",
-        options.prove_runs, options.warmup, steps[median_run]
+        options.reps, options.warmup, steps[median_run]
     );
     println!(
         "  prove (s): median {:.3}, min {:.3}",
@@ -351,12 +340,11 @@ fn main() {
     }
     println!("mode-B benchmark, git {}, relation {}", git_revision(), relation());
     println!(
-        "{}, threads {}, warmup {}, prove runs {}, verify runs {} (medians over the timed runs)",
+        "{}, threads {}, warmup {}, reps {} (medians over the timed runs)",
         agg_bench::build_info(),
         std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
         options.warmup,
-        options.prove_runs,
-        options.verify_runs
+        options.reps
     );
     let mut rows = Vec::new();
     for &n in &options.sizes {

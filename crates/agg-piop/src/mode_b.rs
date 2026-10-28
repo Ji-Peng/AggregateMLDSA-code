@@ -15,8 +15,8 @@
 //! 2. range: every 6-bit value of `w1Encode` is below `m_w = 44`;
 //! 3. hash: `c~_i = SHAKE256(mu_i || w1Encode(w_1'_i), 32)`, `mu_i` from the public data;
 //! 4. projection predicate: `Y_sigma = M_3 M_2 M_1 b'` over GF(2) for the public bits `b'`
-//!    ([`segment_projection`]), the GF(2) side of the parity bridge that the Flock
-//!    bridge slot proves in mode A;
+//!    ([`segment_projection`]), the GF(2) side of the parity bridge that the parity
+//!    chain proves in mode A;
 //!
 //! and after stage 3 ([`KeccakVerifier::check_bits`]):
 //!

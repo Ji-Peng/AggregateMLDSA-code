@@ -203,12 +203,11 @@ fn committer_rejects_malformed_tables_before_akita() {
 /// Relation H-exact (`docs/h-exact.md`): the encoder writes `bz_lo` into the slot
 /// of `Z_lo`, the bits `bz_hi`, `a_z` into `G_main4` (nine columns), the canonical digits
 /// of zero on padded rows, and refuses `|z| > 130,993`; the values decoded from the H-exact
-/// tables equal the derived ones, the H-u tables' values and the witness crate's base-16
-/// H-exact form (`Z_EXACT`, other digits, equal values).
+/// tables equal the derived ones and the H-u tables' values, and the slack bit is
+/// `a_z = [z >= 79]`.
 #[test]
 fn h_exact_main_tables_encode_the_exact_z_form() {
     use agg_piop::manifest::{DigitValue, Relation};
-    use agg_witness::digits::Z_EXACT;
     let records = common::records(0x7e, 15, 5);
     let manifest = CommitmentManifest::for_relation(20, Relation::HExact).unwrap();
     let hu_manifest = CommitmentManifest::for_batch(20).unwrap();
@@ -240,10 +239,8 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
         assert_eq!((decoded.0, decoded.1, decoded.2), (w.z, w.u, w.v), "record {i}");
         for row in w.z {
             for z in row {
-                let (a, digits) = Z_EXACT.decompose(z);
-                assert_eq!(Z_EXACT.compose(a, &digits), z);
                 let ours = DigitValue::Zx.layout().decompose(z);
-                assert_eq!(ours[2], a, "a_z = [z >= 79] in both forms");
+                assert_eq!(ours[2], i64::from(z >= 79), "a_z = [z >= 79]");
                 assert_eq!(DigitValue::Zx.layout().compose(&ours), z);
             }
         }

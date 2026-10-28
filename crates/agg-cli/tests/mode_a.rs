@@ -11,11 +11,10 @@
 //!   commitments), the tie nonce and the tied-part proof version, the PIOP work nonces, a
 //!   plan-digest mismatch, the records (order, message, key, count) and the configuration.
 //! - Tampered witnesses (`tampered_witnesses_are_rejected_end_to_end`): every witness
-//!   tampering of the per-crate tests (`agg-piop/tests/mode_b.rs`, `tests/joint_bridge.rs`,
-//!   `agg-keccak/tests/{proofs,bridge}.rs`) pushed through the mode-A aggregator (stages
+//!   tampering of the per-crate tests (`agg-piop/tests/mode_b.rs`,
+//!   `agg-keccak/tests/{proofs,tied}.rs`) pushed through the mode-A aggregator (stages
 //!   unchecked) and rejected by the verifier at the stated step.
 //! - Invalid signatures are refused by the aggregator (`agg-witness/tests/negative.rs`).
-//! - A kept and a rebuilt Flock witness give the same aggregate.
 //!
 //! Run with `--release`.
 
@@ -285,38 +284,6 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
 }
 
-/// A batch of one Flock part keeps its committed witness from event 2 until the join; dropping
-/// and rebuilding it, or keeping it without the commit data, gives the same aggregate bytes
-/// (64 records). The kept aggregate verifies.
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "Flock and Akita proofs: run with --release"
-)]
-fn kept_and_rebuilt_witnesses_give_the_same_aggregate() {
-    on_large_stack(|| {
-        let records = records(0xc0de, 48, 16);
-        let config = AggregatorConfig::default();
-        let run = |keep_witness: bool, keep_data: bool| {
-            Aggregator::new(config)
-                .keep_witness(keep_witness)
-                .keep_commit_data(keep_data)
-                .aggregate(&signed(&records))
-                .expect("aggregate")
-        };
-        let kept = run(true, true);
-        for (keep_witness, keep_data) in [(false, true), (true, false)] {
-            assert!(
-                run(keep_witness, keep_data).bytes == kept.bytes,
-                "keep_witness {keep_witness}, keep_commit_data {keep_data} changed the \
-                 aggregate"
-            );
-        }
-        let report = AggregateVerifier::new().verify(&statements(&records), &kept.bytes, None);
-        assert!(report.accepted(), "the kept-witness aggregate verifies");
-    });
-}
-
 /// Relation H-FIPS (`docs/h-exact.md`) in mode A at 64 records (Slim, one Flock
 /// part) and 256 records (two parts); the cross-relation verifier rejects before event 0.
 #[test]
@@ -414,7 +381,7 @@ fn with_items(
 }
 
 /// A Flock verifier that records the Flock verdict and accepts anyway (to observe the F_p
-/// side on its own, as in `agg-piop/tests/joint_bridge.rs`).
+/// side on its own).
 struct Lenient<'g>(agg_cli::mode_a::FlockVerifier<'g>);
 
 impl agg_piop::verifier::KeccakVerifier for Lenient<'_> {
@@ -983,7 +950,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &keccak,
         );
         // The same flip with the round-2 tables (and Y_sigma) of the honest bits: the Flock
-        // part accepts and the F_p side fails at the stage-1 terminal (joint bridge test).
+        // part accepts and the F_p side fails at the stage-1 terminal.
         let flipped = |m: &CommitmentManifest, t: &mut MainTables| {
             *cell(m, t, Column::W1Bit(0), main_index(17, 2, 5)) ^= 1;
         };
@@ -1115,8 +1082,8 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         );
 
         // Flock side (agg-keccak tests): the record's bit flipped in both Flock copies with
-        // the published c~; in the bridge slot copy only; in the sponge input only with the
-        // stale chi witness.
+        // the published c~; in the parity chain's copy only; in the sponge input only with
+        // the stale chi witness.
         let q = stream_bit(0, j, rho);
         let flip_record =
             move |recs: &mut Vec<SpongeRecord>| recs[i].w1_encode[q / 8] ^= 1 << (q % 8);

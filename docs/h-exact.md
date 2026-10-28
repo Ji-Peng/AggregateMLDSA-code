@@ -65,19 +65,15 @@ estimate scaled from a measured 32K cloud run of relation H.
 | H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8); replaced relaxed H `(2^17, 2^18)`, `zeta' = 421,888`, which used id 0 before wire version 3 |
 | H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9) |
 | H-FIPS | 2 | `(130,993, 190,465)` and the hint: `sum h <= omega` and `UseHint(h, w') = w1'` (Section 10) | 350,209 (not needed: the extracted witness is a FIPS 204 signature) | implemented (Sections 10.5 to 10.7) |
-| S1+S2 (`fips`, retired sketch) | none (witness-crate layout id 3) | as H-FIPS | 350,209 | witness only, superseded by H-FIPS |
 
-The id equals `agg_witness::tables::Layout::id()` (0 H-u, 1 H-exact; the base-16 S1+S2
-sketch serializes as 3) and the `BatchTables` serialization layout byte, so one number names
-the relation everywhere; H-FIPS (2) has no base-16 layout (`agg_witness::hfips`).
+The id equals `agg_pcs_config::catalogs::Relation::id()` (0 H-u, 1 H-exact, 2 H-FIPS), so one
+number names the relation everywhere.
 
 ### 1.2 Runtime parameter, not a cargo feature
 
 The relation MUST be a runtime parameter of `agg_piop::manifest::CommitmentManifest`
 (`Relation::{H, HExact}`), so one binary proves and benchmarks both results and the checked-in
-catalogs hold the rows of both. The `agg-witness` feature `h-exact` stays as it is (it gates
-the wire-version-0 base-16 H-exact layout and its checker, used only by the cross-check of
-Section 6.3).
+catalogs hold the rows of both.
 
 ### 1.3 Where it is bound
 
@@ -417,7 +413,7 @@ Hence every live record satisfies `H(130,993, 190,465)`, i.e. H-exact.
 So H-exact is the image of FIPS 204 verification on the quantities that enter the security
 proof: FIPS verification implies H-exact (spec 3.2, unchanged), and H-exact certifies no
 larger `z` or `u`. It is still hint-free: it does not certify `sum h <= omega` and does not
-re-encode to a FIPS signature (that is S1+S2's black-box reduction).
+re-encode to a FIPS signature (that is H-FIPS, Section 10).
 
 The SelfTargetMSIS solution of spec 3.3, `(z, -c, c t_0 - u)` for `[A | t | I]`, has
 `|c t_0|_inf <= tau 2^(d-1) = 39 * 4,096 = 159,744`, so
@@ -518,12 +514,10 @@ slack, `G_main4` count 9, catalogs: Section 9).
   under H-exact; extend `edge_search` to find a record with a coefficient `|u| = B_u`
   (rare; if none is found within a bounded search, the synthetic statements of 6.4 cover it).
 
-### 6.3 Cross-check with the witness checker
+### 6.3 Cross-check with the integer relation
 
-* For 128 random signatures (as `agg-witness/tests/witness.rs`): `agg_witness::check` with
-  `Layout::HExact` (feature `h-exact`, dev-dependency of `agg-piop`) passes, and the `(z, u, v,
-  b)` decoded from the PIOP's H-exact tables equal those of `derive` and those composed from
-  the witness crate's base-16 H-exact digits (different digits, equal values).
+* `tests/source_tables.rs`: the `(z, u, v)` decoded from the PIOP's H-exact tables equal those
+  of `derive` and those of the H-u tables, and the slack bit is `a_z = [z >= 79]`.
 * `tests/virtual_checker.rs`: the pointwise H-exact identities on the Boolean domain (both
   `bool`, `Q_6(P_D) = 0`, `P_D = D_u (D_u + 1)`, the ring with the forms) on the honest
   tables, and each tampering of 6.4 caught pointwise by the identity it targets.
@@ -667,10 +661,8 @@ depart from the design.
   record so that (3.1) holds over the integers (`T' = T + A (z' - z)` from the exact CRT
   product, or `T' = T - (u' - u)`), at the PIOP level where the verifier takes `T` from the
   instance. All rows of the table behave as stated (H-u accepts `z = 130,994` and `131,000`).
-  Cross-check with the witness crate (6.3): the values decoded from the H-exact tables equal
-  the derived ones, the H-u tables' values and the base-16 `Z_EXACT` form's (`a_z` agrees);
-  the feature-gated `agg_witness::check` with `Layout::HExact` is exercised by the witness
-  crate's own tests (`--features h-exact`), not from `agg-piop`.
+  Cross-check (6.3): the values decoded from the H-exact tables equal the derived ones and the
+  H-u tables' values, and `a_z = [z >= 79]`.
 * **Measured at `N = 1,024`** (CLMUL build, Slim, 1 warmup + 1 rep, a shared machine, sanity
   only, `docs/cli.md` Section 4): aggregate 522,154 B against H-u's 522,138 B; PIOP bytes
   4,736 B and work nonces 391 B for both; prove 2.98 s against 2.90 s.
@@ -827,15 +819,13 @@ so the extracted bytes equal the signature, byte for byte (tests below).
   `derive::reencode_h`).
 * `check_record` / `check_batch`: every H-FIPS identity over the integers (the five looked-up
   kinds `B_zlo, L_lo, u_h` and the halves of `v`, the Booleans, `range_w1`, (F1) to (F7), the
-  ring identity with the H-FIPS `u`, (3.3) through the sponge) on live and padded records. New
-  checker identities `Range16`, `DeltaSign`, `EdgeE`, `WrapLow`, `WrapHigh` (with `SignSquare`,
-  `BoolSlack`, `HintWeight` reused).
-* The retired S1+S2 sketch (feature `fips`, base-16 `tables::Layout::Fips`) moves from layout
-  id 2 to 3, so relation byte 2 names H-FIPS only. H-FIPS supersedes S1+S2: it commits no `r1`
-  (the `w1'` bits already carry it) and replaces the cubic UseHint check by (F3) to (F5).
+  ring identity with the H-FIPS `u`, (3.3) through the sponge) on live and padded records,
+  reported per identity (`check::Identity`: `Range16`, `BoolSlack`, `BoolB`, `RangeW1`,
+  `SignSquare`, `DeltaSign`, `EdgeE`, `WrapLow`, `WrapHigh`, `HintWeight`, `Ring`,
+  `CommitmentHash`).
 
 Tests (`crates/agg-witness/tests/hfips.rs`, 6 tests; unit tests in `hfips.rs`, 4 tests; all
-pass, `cargo test --release -p agg-witness`, also with `--all-features`):
+pass, `cargo test --release -p agg-witness`):
 
 * 64 honest signatures (40 own-key deterministic, 24 shared-key hedged): derivation, the
   checker, the extracted signature equals the original bytes and verifies; measured hint

@@ -43,11 +43,12 @@ Akita preset: `Z_lo = z_lo - 2^15`, `U_lo = u_lo - 2^15`, `V_lo = v_lo - 2^15`,
 `K = kappa - 2^15` (`docs/deviations.md` L2). Every looked-up value is the affine shift
 `f = stored + 2^15`, so a claim on the stored lane is a claim on the committed column; the
 tree leaves are `1 / ((X - 2^15) - stored)`. Spec (4.1) holds with bases `(2^16, 4)`,
-`(2^16, 8)`, `(2^16, 2^16)` and `(2^16)` (unsigned): `z = Z_lo + 2^16 Z_hi + 2^15`,
-`u = U_lo + 2^16 U_hi + 2^15`, `v = V_lo + 2^16 V_hi + 2^15`, `kappa = K + 2^15` (all four
-constants are `C = 2^15`). Padded rows hold the digits of zero: `Z_lo = U_lo = V_lo = -2^15`,
-`Z_hi = U_hi = V_hi = 0`; padded carries are `K = -2^15`, and so are the padding slots of
-the carry stacks (looked-up value 0).
+`(2^16, 2^16)` and `(2^16)` (unsigned): `z = Z_lo + 2^16 Z_hi + 2^15`,
+`v = V_lo + 2^16 V_hi + 2^15`, `kappa = K + 2^15` (constant `C = 2^15` each); `u` takes the
+step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`. Padded rows hold the digits of zero:
+`Z_lo = V_lo = -2^15`, `U_lo = -31,540` (`u_lo = 1,228`, `u_hi = 3`), `Z_hi = U_hi = V_hi = 0`;
+padded carries are `K = -2^15`, and so are the padding slots of the carry stacks (looked-up
+value 0).
 
 Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
 is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
@@ -186,12 +187,10 @@ one challenge or `368/|K|` with two at `2^15`, in place of `26/|K|`; the total s
 below `2^-116`). The root check is exact; the merge at `mu_s` costs `1/|K|` per session
 because one false claim suffices to carry on.
 
-Ledger at `N = 2^15` (spec 12.1 recomputed for L16): stage sum-checks `12 d_main`
-(degrees still 4, 5, 3: `range_w1` and `leaf8`), zero-checks `19 d_main` (the 19
-Booleanity and range instances), leaves and links `4 d_main`, linear identities
-`(13 + 1 + 6 + 1 + 41) d_main` (62 reductions minus 25 carry-digit ones plus 4 lookup
-ones), gammas 3: `2,428/|K|`; plus GKR `1,106/|K|`: `3,534/|K| <
-2^-116.2` for every field term except the LogUp one.
+Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `11 d_main` (degrees
+4, 4, 3, set by `range_w1` in stage 1 and `leaf6[U_hi]` in stage 2), the zero-check point
+`tau` `d_main`, the three stage batching vectors 3: `303/|K|`; plus GKR `1,106/|K|`:
+`1,409/|K| = 2^-117.5` for every field term except the LogUp one.
 
 **The LogUp term is the critical one** (`2^-101` at `2^15` with one challenge, above every
 other term). Decision: two independent challenges. Section 2.1 records the bounded search;
@@ -235,7 +234,7 @@ and (iii); (ii) is the cheapest of the three by the measurements of Section 4 an
 neither grinding for that term nor a kernel field change. This is not 128 bits for the
 lookup: its GKR sessions are `1,106/|K| ~ 2^-117.9` at `2^15` and each degree-3 round is
 `3/|K| ~ 2^-126.4`, above `2^-128`, so the lookup, like the other field terms
-(`3,534/|K| < 2^-116.2` in all), reaches `2^-128` per site only with grinding to Aerie's
+(`1,409/|K| = 2^-117.5` in all), reaches `2^-128` per site only with grinding to Aerie's
 schedule (`docs/soundness.md`: 2 bits per GKR round, a merge 1
 bit, a batching vector `bit_length(2 active)`; deviation P3). Implementation-level savings that keep the soundness of (ii),
 both implemented in Section 4.6: build both tree sets in one pass over the stacked lanes (the leaves are read
@@ -529,7 +528,7 @@ The prototype's construction, now driven by the PIOP transcript:
    one with the scalar rows of its four groups, the width-4 one with the scalar rows of
    `G_main4` and the 13 grouped rows; the planner accepted every mixed-family grouped row
    (Akita freezes the bound per group).
-2. *Tables* (`source_tables`, in `agg-piop`; `agg-witness` and `agg-bridge` are unchanged).
+2. *Tables* (`source_tables`, in `agg-piop`).
    `MainTables`: `G_main16` as one stacked `i32` lane, `G_main4` as `i8` columns, encoded
    from the derived `z, u, v, w_1'` (`RecordValues`). `BridgeGroupTables`: the stacked
    balanced carries of `agg_bridge::parity::compute`, the parities, `Y`, and `m` with its
@@ -539,8 +538,8 @@ The prototype's construction, now driven by the PIOP transcript:
    derive every count from `N` (`session_counts`). Wire version 1 carries the six
    commitments (two at event 1, four at event 4), the `LookupProof` and the 7 digit
    claims; version 0 is refused.
-4. *Stages.* Stage 1: 26 instances (no `b16_prod`). Stage 2: `def_y1` (6), `leaf4[Z_hi]`,
-   `leaf8[U_hi]`; 6 `K^(1)` claims before it. Stage 3: `ring` with (4.1) of
+4. *Stages.* Stage 1: 26 instances. Stage 2: `def_y1` (6), `leaf4[Z_hi]`, `leaf6[U_hi]`;
+   6 `K^(1)` claims before it. Stage 3: `ring` with (4.1) of
    Section 1, 2 links, 37 reductions and the 4 stack reductions (one gamma per stack, one
    part per column with the scale `eq(pi_top, c)`, deviation L6); 44 instances, 31 terminal
    claims. The prover and verifier share `prover::prove_piop` / `verifier::verify_piop`.

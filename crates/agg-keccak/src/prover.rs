@@ -110,7 +110,7 @@ impl Profile {
     }
 
     /// The profile byte of the proof headers: 0 `Fast`, 1 `Secure`, 3 `Slim`, 4 `Slim8` (2 is
-    /// reserved for LaBinius).
+    /// unassigned).
     #[must_use]
     pub fn id(self) -> u8 {
         match self {

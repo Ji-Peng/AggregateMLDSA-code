@@ -4,8 +4,7 @@
 //! w' = ctr_q(A z - T) with A centered and T = 2^d (c * t1) over Z, w1' = UseHint(h, w'),
 //! u = ctr_q(w' - 2 gamma2 w1') (|u| <= B_u by the UseHint lemma), and the exact quotient
 //! v = (A z - T - 2 gamma2 w1' - u) / q over Z (|v| <= B_v). The six w1Encode bits are
-//! b_t = bit t of w1'. Behind the `fips` feature the S1+S2 values (r1, r0, s, v_r, e, g = h s,
-//! the quotient of 2 gamma2 r1 + r0, and the hint slack) are derived as well.
+//! b_t = bit t of w1'.
 
 use crate::crt::az_integer;
 use crate::expand::{public_t, ExpandedKey};
@@ -29,28 +28,6 @@ impl From<SigDecodeError> for DeriveError {
     fn from(e: SigDecodeError) -> Self {
         DeriveError::Decode(e)
     }
-}
-
-/// S1+S2 per-position values.
-#[cfg(feature = "fips")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FipsValues {
-    /// r1 = HighBits(w') in [0, 44).
-    pub r1: VecK,
-    /// r0 = LowBits(w') in (-gamma2, gamma2] or -gamma2 at the edge.
-    pub r0: VecK,
-    /// Sign s in {-1, 1}: s = 1 iff r0 > 0.
-    pub s: VecK,
-    /// Magnitude v_r in [0, gamma2): r0 = s v_r - gamma2 e + (1 + s)/2.
-    pub vr: VecK,
-    /// Edge flag e: 1 iff (r1, r0) = (0, -gamma2).
-    pub e: VecK,
-    /// g = h s in {-1, 0, 1}.
-    pub g: VecK,
-    /// Quotient of the S1+S2 ring identity: A z - T - 2 gamma2 r1 - r0 = q v.
-    pub v: VecK,
-    /// Hint slack u_h = omega - sum h.
-    pub uh: i64,
 }
 
 /// The witness of one signature.
@@ -80,9 +57,6 @@ pub struct SigWitness {
     pub v: VecK,
     /// Whether Algorithm 8 accepts (always true in strict mode).
     pub accepted: bool,
-    /// S1+S2 values.
-    #[cfg(feature = "fips")]
-    pub fips: FipsValues,
 }
 
 impl SigWitness {
@@ -95,22 +69,6 @@ impl SigWitness {
     pub fn sponge(&self) -> crate::keccak::SpongeTrace {
         crate::keccak::sponge_trace(&self.mu, &self.w1_bytes)
     }
-}
-
-/// S1+S2 encoding of one coefficient: (r1, r0, s, v_r, e) from w'.
-#[cfg(feature = "fips")]
-pub fn fips_position(w: i64) -> (i64, i64, i64, i64, i64) {
-    let (r1, r0) = decompose(w);
-    let s = if r0 > 0 { 1 } else { -1 };
-    let e = i64::from(r0 == -GAMMA2);
-    let vr = if s == 1 {
-        r0 - 1
-    } else if e == 1 {
-        0
-    } else {
-        -r0
-    };
-    (r1, r0, s, vr, e)
 }
 
 /// Strict derivation: the signature must verify (Algorithm 8) under (key, mu).
@@ -212,45 +170,6 @@ fn derive_core(
             return Err(DeriveError::Invariant("|v| > B_v (3.4')"));
         }
     }
-    #[cfg(feature = "fips")]
-    let fips = {
-        let mut f = FipsValues {
-            r1: [[0; N]; K],
-            r0: [[0; N]; K],
-            s: [[0; N]; K],
-            vr: [[0; N]; K],
-            e: [[0; N]; K],
-            g: [[0; N]; K],
-            v: [[0; N]; K],
-            uh: 0,
-        };
-        let mut weight = 0i64;
-        for r in 0..K {
-            for j in 0..N {
-                let (r1, r0, s, vr, e) = fips_position(w[r][j]);
-                let h = i64::from(trace.sig.h[r][j]);
-                weight += h;
-                f.r1[r][j] = r1;
-                f.r0[r][j] = r0;
-                f.s[r][j] = s;
-                f.vr[r][j] = vr;
-                f.e[r][j] = e;
-                f.g[r][j] = h * s;
-                if (r1 + h * s).rem_euclid(M_W) != i64::from(trace.w1[r][j]) {
-                    return Err(DeriveError::Invariant(
-                        "UseHint disagrees with (r1 + g) mod 44",
-                    ));
-                }
-                let delta = az[r][j] - t[r][j] - 2 * GAMMA2 * r1 - r0;
-                if delta.rem_euclid(Q) != 0 {
-                    return Err(DeriveError::Invariant("S1+S2 residual not divisible by q"));
-                }
-                f.v[r][j] = delta / Q;
-            }
-        }
-        f.uh = OMEGA as i64 - weight;
-        f
-    };
     Ok(SigWitness {
         c_tilde: trace.sig.c_tilde,
         mu: *mu,
@@ -264,8 +183,6 @@ fn derive_core(
         u,
         v,
         accepted: trace.accept,
-        #[cfg(feature = "fips")]
-        fips,
     })
 }
 
@@ -278,11 +195,11 @@ pub enum ReencodeError {
     NotReachable,
     /// The hint weight exceeds omega.
     HintWeight,
-    /// A value is outside its domain (w1' not in [0, 44), g not in {-1, 0, 1}).
+    /// A value is outside its domain (w1' not in [0, 44)).
     Domain,
 }
 
-/// Re-encodes H or H-exact witness values (z, u, w1') to signature bytes (c~, z, h) with
+/// Re-encodes witness values (z, u, w1') to signature bytes (c~, z, h) with
 /// h = [HighBits(w') != w1'] and w' = u + 2 gamma2 w1' mod q.
 pub fn reencode_h(
     c_tilde: &[u8; C_TILDE_BYTES],
@@ -311,36 +228,6 @@ pub fn reencode_h(
             }
             h[r][j] = u8::from(hb);
             weight += usize::from(hb);
-        }
-    }
-    if weight > OMEGA {
-        return Err(ReencodeError::HintWeight);
-    }
-    Ok(sig_encode(c_tilde, z, &h))
-}
-
-/// Re-encodes S1+S2 witness values (z, g) to signature bytes with h = g^2.
-#[cfg(feature = "fips")]
-pub fn reencode_fips(
-    c_tilde: &[u8; C_TILDE_BYTES],
-    z: &VecL,
-    g: &VecK,
-) -> Result<Vec<u8>, ReencodeError> {
-    if z.iter()
-        .flat_map(|p| p.iter())
-        .any(|&x| x <= -GAMMA1 || x > GAMMA1)
-    {
-        return Err(ReencodeError::ZRange);
-    }
-    let mut h = [[0u8; N]; K];
-    let mut weight = 0usize;
-    for r in 0..K {
-        for j in 0..N {
-            if !(-1..=1).contains(&g[r][j]) {
-                return Err(ReencodeError::Domain);
-            }
-            h[r][j] = (g[r][j] * g[r][j]) as u8;
-            weight += usize::from(h[r][j]);
         }
     }
     if weight > OMEGA {

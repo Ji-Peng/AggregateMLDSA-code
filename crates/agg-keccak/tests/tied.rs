@@ -16,9 +16,8 @@ use std::time::Instant;
 use agg_bridge::{seed::derive_matrices_for, shape::Shape};
 use agg_keccak::prover::{KeccakCommitment, KeccakError, KeccakProof, Profile};
 use agg_keccak::{
-    bridge_slot::pack_y,
     sponge::{self, SpongeRecord, W1_INPUT_BASE},
-    tied::{TiedCommitment, TiedPart, TiedProofParts, ROUND_BYTES},
+    tied::{pack_y, TiedCommitment, TiedPart, TiedProofParts, ROUND_BYTES},
     witness::pack_slot,
 };
 use agg_witness::bridge::{gf2_composite, BridgeMatrices};

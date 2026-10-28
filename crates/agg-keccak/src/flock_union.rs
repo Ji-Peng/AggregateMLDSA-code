@@ -12,8 +12,7 @@
 //! boolean-only union pipeline of `flock_prover::prover::prove_fast_ligerito_union`
 //! (statement binding, zerocheck, union-column lincheck, merged opening) composed from
 //! Flock's public building blocks for a registry of one or more boolean types (the sponge
-//! instance has one; the bridge union of [`crate::bridge_union`] has two), plus the
-//! caller's packed-direct claims; [`UnionGeometry::verify`] mirrors
+//! instance of [`crate::tied`] has one), plus the caller's packed-direct claims; [`UnionGeometry::verify`] mirrors
 //! `flock_core::verifier::verify_ligerito_union` step by step and returns the claimed
 //! values for the caller's own checks. The transcript uses Flock's labels in Flock's order
 //! (`flock-mixed-v1`, `flock-zerocheck-v0`, `flock-lincheck-v0`, `flock-merged-open-v1`); the
@@ -36,9 +35,8 @@
 //! Proof bytes ([`UnionProof::to_bytes`]): bincode of Flock's `R1csProofMergedLigerito`
 //! (zerocheck, lincheck, merged opening) framed by its length, then the claim values, 16
 //! bytes each (little-endian `lo`, `hi`). The Ligerito proof's level-0 cap is not sent: it
-//! is the commitment the verifier already holds (event 2, or the framed cap of the bridge
-//! union), and Flock's verifier rejects any other cap, so [`UnionGeometry::verify`] puts the
-//! commitment's cap in its place.
+//! is the commitment the verifier already holds (event 2), and Flock's verifier rejects any
+//! other cap, so [`UnionGeometry::verify`] puts the commitment's cap in its place.
 
 use bincode::Options as _;
 use flock_core::{
@@ -979,7 +977,7 @@ mod tests {
     #[test]
     fn union_proof_bytes_round_trip_and_reject_bad_lengths() {
         // Malformed framing (the round trip of a real proof, without its level-0 cap, is in
-        // `bridge_union::tests::toy_bridge_union_round_trip`).
+        // the tied-part round trips of `tests/tied.rs`).
         let bytes = [7u8, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7];
         assert!(matches!(
             UnionProof::from_bytes(&bytes, 0),

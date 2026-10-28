@@ -32,8 +32,7 @@
 //!
 //! Fiat-Shamir runs through [`LookupTranscript`]: the integrated protocol drives the PIOP
 //! transcript (`transcript.rs`, the lookup events of its registry, [`prove_in`] and
-//! [`verify_in`]); the standalone [`prove`] and [`verify`] use a local SHAKE256 sponge
-//! (`Fs`) bound to the layout and a caller binding.
+//! [`verify_in`]).
 //!
 //! A stack may store its cells shifted: the looked-up value is `f = stored + shift` (the
 //! PIOP's looked-up columns are stored balanced, `shift = 2^15`). The leaves are then
@@ -44,17 +43,14 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
-use jolt_field::{CanonicalEncoding, ExtField, Field, One, Ring, Zero};
+use jolt_field::{Field, One, Ring, Zero};
 use rayon::prelude::*;
-use sha3::digest::{ExtendableOutput, Update, XofReader};
-use sha3::Shake256;
 
 use crate::kernel::{
     evaluate_compressed, expected_terminal, fm, fmi, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
     Term,
 };
-use crate::transcript::encode_extensions;
-use crate::{BaseField, OpeningField as E};
+use crate::OpeningField as E;
 
 /// Message degree of every session (equality factor times a bilinear summand).
 pub const DEGREE: usize = 3;
@@ -64,8 +60,6 @@ pub const MAX_CHALLENGES: usize = 4;
 pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Below this many nodes a tree layer is built serially.
 const PARALLEL_NODES: usize = 1 << 12;
-/// Domain separator of the standalone transcript.
-const DOMAIN: &[u8] = b"agg-mldsa/v1/lookup-prototype";
 
 /// A lookup failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -577,6 +571,8 @@ impl LookupShape {
         count
     }
 
+    /// The layout's bytes, bound by the test transcript.
+    #[cfg(test)]
     fn binding_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.challenges as u64).to_le_bytes());
@@ -650,62 +646,6 @@ pub trait LookupTranscript {
     /// # Errors
     /// When the transcript refuses the event.
     fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<E>, LookupError>;
-}
-
-/// The standalone transcript: SHAKE256 over framed, labelled absorptions; a challenge
-/// squeezes from a clone of the state and absorbs what it squeezed.
-#[derive(Clone)]
-struct Fs {
-    state: Shake256,
-}
-
-impl Fs {
-    fn new(shape: &LookupShape, binding: &[u8]) -> Self {
-        let mut fs = Self {
-            state: Shake256::default(),
-        };
-        fs.frame(b"domain", DOMAIN);
-        fs.frame(b"shape", &shape.binding_bytes());
-        fs.frame(b"binding", binding);
-        fs
-    }
-
-    fn frame(&mut self, label: &[u8], bytes: &[u8]) {
-        self.state.update(&(label.len() as u64).to_le_bytes());
-        self.state.update(label);
-        self.state.update(&(bytes.len() as u64).to_le_bytes());
-        self.state.update(bytes);
-    }
-}
-
-impl LookupTranscript for Fs {
-    fn absorb(&mut self, site: LookupSite, values: &[E]) -> Result<(), LookupError> {
-        self.frame(site.label().as_bytes(), &encode_extensions(values));
-        Ok(())
-    }
-
-    /// `count` elements of `K`, each limb rejection-sampled from eight bytes as in
-    /// `Transcript::sample_base`.
-    fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<E>, LookupError> {
-        self.frame(site.label().as_bytes(), &(count as u64).to_le_bytes());
-        let mut reader = self.state.clone().finalize_xof();
-        let mut base = || loop {
-            let mut candidate = [0_u8; 8];
-            reader.read(&mut candidate);
-            if let Some(value) = BaseField::from_bytes_le_checked(&candidate) {
-                return value;
-            }
-        };
-        let out: Vec<E> = (0..count)
-            .map(|_| {
-                let c0 = base();
-                let c1 = base();
-                E::from_base_slice(&[c0, c1])
-            })
-            .collect();
-        self.frame(b"squeezed", &encode_extensions(&out));
-        Ok(out)
-    }
 }
 
 fn one(transcript: &mut impl LookupTranscript, site: LookupSite) -> Result<E, LookupError> {
@@ -1348,33 +1288,17 @@ pub struct LookupOutput {
     pub stats: ProveStats,
 }
 
-/// Prove that every cell of every stack lies in its table.
-///
-/// `multiplicities[t]` is the multiplicity column of table `t` ([`multiplicities`]);
-/// `binding` stands for the commitments of the looked-up columns and of the
-/// multiplicities, which must precede the challenges `X`.
-///
-/// # Errors
-/// On a bad layout, a kernel error, or when the prover's own tables fail the root
-/// identity or a session self-check (a dishonest witness).
-pub fn prove(
-    stacks: &[LookupStack<'_>],
-    tables: &[Table],
-    multiplicities: &[Vec<i32>],
-    challenges: usize,
-    binding: &[u8],
-) -> Result<LookupOutput, LookupError> {
-    let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
-    prove_with(stacks, tables, multiplicities, challenges, &mut fs, true, true)
-}
-
-/// [`prove`] inside a caller's transcript (the PIOP transcript of the integrated
-/// protocol, which has bound the commitments before the challenges `X`). `check` runs
-/// the prover's self-checks (root identity, session claims); tests pass `false` to hand a
-/// dishonest witness to the verifier.
+/// Prove that every cell of every stack lies in its table, inside a caller's transcript (the
+/// PIOP transcript of the integrated protocol, which has bound the commitments of the
+/// looked-up columns and of the multiplicities before the challenges `X`).
+/// `multiplicities[t]` is the multiplicity column of table `t` ([`multiplicities`]). `check`
+/// runs the prover's self-checks (root identity, session claims); tests pass `false` to hand
+/// a dishonest witness to the verifier.
 ///
 /// # Errors
-/// As [`prove`], or when the transcript refuses an event.
+/// On a bad layout, a kernel error, when the transcript refuses an event, or (with `check`)
+/// when the prover's own tables fail the root identity or a session self-check (a dishonest
+/// witness).
 pub fn prove_in(
     stacks: &[LookupStack<'_>],
     tables: &[Table],
@@ -1384,20 +1308,6 @@ pub fn prove_in(
     check: bool,
 ) -> Result<LookupOutput, LookupError> {
     prove_with(stacks, tables, multiplicities, challenges, transcript, check, true)
-}
-
-/// [`prove`] without the prover's self-checks, so tests can hand a dishonest witness to
-/// the verifier.
-#[doc(hidden)]
-pub fn prove_unchecked(
-    stacks: &[LookupStack<'_>],
-    tables: &[Table],
-    multiplicities: &[Vec<i32>],
-    challenges: usize,
-    binding: &[u8],
-) -> Result<LookupOutput, LookupError> {
-    let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
-    prove_with(stacks, tables, multiplicities, challenges, &mut fs, false, true)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1703,24 +1613,16 @@ fn prove_with(
 // The verifier.
 // ---------------------------------------------------------------------------------------
 
-/// Verify a lookup proof against its public layout and return the claims on the committed
-/// columns, which the caller must check (Akita openings in the integrated protocol).
+/// Verify a lookup proof against its public layout inside a caller's transcript (the PIOP
+/// transcript of the integrated protocol) and return the claims on the committed columns,
+/// which the caller must check (Akita openings in the integrated protocol).
 ///
 /// # Errors
-/// On a malformed proof, a failed root identity or a failed session terminal.
+/// On a malformed proof, a failed root identity, a failed session terminal, or when the
+/// transcript refuses an event.
 ///
 /// # Panics
 /// Never: the leaf counts are checked against the layout before they are read.
-pub fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Result<LookupClaims, LookupError> {
-    let mut fs = Fs::new(shape, binding);
-    verify_in(shape, proof, &mut fs)
-}
-
-/// [`verify`] inside a caller's transcript (the PIOP transcript of the integrated
-/// protocol).
-///
-/// # Errors
-/// As [`verify`], or when the transcript refuses an event.
 pub fn verify_in(
     shape: &LookupShape,
     proof: &LookupProof,
@@ -1812,8 +1714,100 @@ pub fn verify_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::encode_extensions;
+    use crate::BaseField;
+    use jolt_field::{CanonicalEncoding, ExtField};
     use aerie_falcon::protocol::algebra::evaluate_mle;
     use agg_witness::gen::SplitMix64;
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    use sha3::Shake256;
+
+    const DOMAIN: &[u8] = b"agg-mldsa/v1/lookup-prototype";
+
+    /// A test transcript: SHAKE256 over framed, labelled absorptions bound to the layout and a
+    /// binding; a challenge squeezes from a clone of the state and absorbs what it squeezed.
+    #[derive(Clone)]
+    struct Fs {
+        state: Shake256,
+    }
+
+    impl Fs {
+        fn new(shape: &LookupShape, binding: &[u8]) -> Self {
+            let mut fs = Self {
+                state: Shake256::default(),
+            };
+            fs.frame(b"domain", DOMAIN);
+            fs.frame(b"shape", &shape.binding_bytes());
+            fs.frame(b"binding", binding);
+            fs
+        }
+
+        fn frame(&mut self, label: &[u8], bytes: &[u8]) {
+            self.state.update(&(label.len() as u64).to_le_bytes());
+            self.state.update(label);
+            self.state.update(&(bytes.len() as u64).to_le_bytes());
+            self.state.update(bytes);
+        }
+    }
+
+    impl LookupTranscript for Fs {
+        fn absorb(&mut self, site: LookupSite, values: &[E]) -> Result<(), LookupError> {
+            self.frame(site.label().as_bytes(), &encode_extensions(values));
+            Ok(())
+        }
+
+        /// `count` elements of `K`, each limb rejection-sampled from eight bytes as in
+        /// `Transcript::sample_base`.
+        fn challenges(&mut self, site: LookupSite, count: usize) -> Result<Vec<E>, LookupError> {
+            self.frame(site.label().as_bytes(), &(count as u64).to_le_bytes());
+            let mut reader = self.state.clone().finalize_xof();
+            let mut base = || loop {
+                let mut candidate = [0_u8; 8];
+                reader.read(&mut candidate);
+                if let Some(value) = BaseField::from_bytes_le_checked(&candidate) {
+                    return value;
+                }
+            };
+            let out: Vec<E> = (0..count)
+                .map(|_| {
+                    let c0 = base();
+                    let c1 = base();
+                    E::from_base_slice(&[c0, c1])
+                })
+                .collect();
+            self.frame(b"squeezed", &encode_extensions(&out));
+            Ok(out)
+        }
+    }
+
+    /// [`prove_in`] with the self-checks, in a fresh test transcript.
+    fn prove(
+        stacks: &[LookupStack<'_>],
+        tables: &[Table],
+        multiplicities: &[Vec<i32>],
+        challenges: usize,
+        binding: &[u8],
+    ) -> Result<LookupOutput, LookupError> {
+        let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
+        prove_in(stacks, tables, multiplicities, challenges, &mut fs, true)
+    }
+
+    /// [`prove_in`] without the self-checks (a dishonest witness reaches the verifier).
+    fn prove_unchecked(
+        stacks: &[LookupStack<'_>],
+        tables: &[Table],
+        multiplicities: &[Vec<i32>],
+        challenges: usize,
+        binding: &[u8],
+    ) -> Result<LookupOutput, LookupError> {
+        let mut fs = Fs::new(&LookupShape::of(stacks, tables, challenges), binding);
+        prove_in(stacks, tables, multiplicities, challenges, &mut fs, false)
+    }
+
+    /// [`verify_in`] in a fresh test transcript.
+    fn verify(shape: &LookupShape, proof: &LookupProof, binding: &[u8]) -> Result<LookupClaims, LookupError> {
+        verify_in(shape, proof, &mut Fs::new(shape, binding))
+    }
 
     fn lift(cells: &[i32]) -> Vec<E> {
         cells.iter().map(|&c| E::from_i64(i64::from(c))).collect()

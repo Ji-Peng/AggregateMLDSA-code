@@ -8,17 +8,9 @@
 //! - [`sponge`]: the SHAKE256 gate for `c~ = H(mu || w1Encode)`.
 //! - [`witness`]: batch-major packing into a Flock union slot.
 //! - [`prover`]: prove/verify of a sub-batch (Ligerito `Fast` or `Secure`), proof bytes.
-//! - [`bridge_slot`]: the bridge type, whose seeded rows prove `Y_sigma = M_3 M_2 M_1 b'`
-//!   with a factored `LincheckCircuit` walker (docs/bridge.md).
-//! - [`segment`]: the bridged segment (sponge rows and bridge slot in one union proof,
-//!   committed before the bridge seed) and the standalone bridge slot proof; mode A uses
-//!   [`tied`] (this one is kept for the toy-shape slot tests and as the reference).
 //! - [`flock_union`]: boolean Flock union proofs (one or more types) with the caller's
 //!   evaluation claims (packed-direct and ring-switched bit claims) and precomputed
 //!   commitments.
-//! - [`bridge_union`]: the two-type bridge union (level-1 rows with `A_0 = M_1`, one
-//!   levels-2-3 row), a factored bridge instance kept as a reference (docs/bridge.md);
-//!   [`tied`] does not use it.
 //! - [`tied`]: the tied part (docs/parity-chain.md): the sponge instance and
 //!   the virtual parity chain whose bit claim its opening proves, the mode-A Flock argument of
 //!   one part.
@@ -26,15 +18,12 @@
 // Index loops mirror the (x, y, z) bit arithmetic of FIPS 202.
 #![allow(clippy::needless_range_loop)]
 
-pub mod bridge_slot;
-pub mod bridge_union;
 #[cfg(test)]
 mod dsl_ref;
 pub mod flock_union;
 pub mod gate;
 pub mod keccak;
 pub mod prover;
-pub mod segment;
 pub mod sponge;
 pub mod tied;
 pub mod witness;

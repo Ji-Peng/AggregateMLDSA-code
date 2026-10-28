@@ -391,18 +391,12 @@ batch with exactly one tied part keeps its whole
 `TiedCommitted` in `mode_a::PartState` from event 2 to the join and proves it without a
 rebuild. That covers the span (every batch of `N >= 2^14` with whole-segment parts) and the
 one-part batch at `N <= 2^13` (default part size), the second added so that the change is
-visible locally. Batches of more than one part keep the drop-and-rebuild. Knobs:
-`Aggregator::keep_witness(false)` or `AGG_FLOCK_REBUILD` (any value) restore the rebuild.
-Prover-only; the aggregate is byte-identical by construction.
+visible locally. Batches of more than one part keep the drop-and-rebuild. Prover-only; the aggregate is byte-identical by construction.
 
 ### 9.2 Checks (measured, local)
 
 - `cmp` against the code without W1 (and against `AGG_FLOCK_REBUILD=1`): identical at 256 and 1K
   (H-u and H-exact), 2K, 8K, and 2K in two parts (`--part-log2 10`); `agg verify` accepts.
-- Tests: `kept_and_rebuilt_witnesses_give_the_same_aggregate` (64 records in one part, 256 in
-  two) and `kept_and_rebuilt_span_witnesses_give_the_same_proof` (a two-segment span of 8,193
-  records, prover side only, `--ignored`; the only local check of the span path, since a 16K
-  aggregate does not fit this box's 15.6 GiB).
 
 ### 9.3 Local 8K A/B (measured, direction only)
 
@@ -501,7 +495,7 @@ unmap, 166-197 ms; (c) the release of the six committed sources inside Akita's o
 132-163 ms. Changes (prover-only, no transcript change):
 
 - (a) `PublicData::from_instance` builds the distinct keys and the records in parallel (same
-  keys, same first-appearance order; unit test against the serial loop). `aggregate_with`
+  keys, same first-appearance order; unit test against `PublicData::prepare`). `aggregate_with`
   builds the Akita `TableCommitter` on its own thread at entry (it depends on `n` and the
   relation only) and hands it to the new `prove_with_tables_using`.
 - (b) The event-2 witness is dropped on a detached thread. Since W1 it is dropped there only
@@ -515,8 +509,7 @@ unmap, 166-197 ms; (c) the release of the six committed sources inside Akita's o
 - Opt-in, `AGG_PARITY_EARLY`: build the stages' parity tables beside the round-2 commitment
   instead of in the fork.
 
-Knobs: `AGG_SCHED_SERIAL` (any value) restores the old schedule in the same binary;
-`AGG_STAGE_TRACE` prints the time of each detached (or inline) drop.
+`AGG_STAGE_TRACE` prints the time of each detached drop.
 
 ### 11.2 Checks (measured, local)
 
@@ -526,8 +519,7 @@ Knobs: `AGG_SCHED_SERIAL` (any value) restores the old schedule in the same bina
   the default, `AGG_SCHED_SERIAL=1` and both parity placements; 16 fresh 8K runs of the A/B
   below are identical too. `agg verify` accepts.
 - Tests under `+pclmulqdq`, `--release`, `-p agg-pcs-config -p agg-piop -p agg-cli`: 193
-  passed, 0 failed, 12 ignored (5m35s), including the new
-  `public_data::tests::parallel_and_serial_instance_data_agree`.
+  passed, 0 failed, 12 ignored (5m35s).
 - Detached drop times, `AGG_STAGE_TRACE=1`, 8K fresh, THP off for the process (`prctl` wrapper,
   as on the cloud VM), 2 runs: opening sources 15.6 / 15.9 ms, lookup layers 21.9 / 34.9 ms in
   24 drops, stage tables 3.0 / 3.1 ms. These are the windows taken off the critical path at 8K
@@ -574,9 +566,6 @@ to -0.08 s, (c) -0.12 to -0.15 s (partly a stopwatch-boundary gain: the release 
 prove, where serialization and the untimed drops sit), (b) about 0 (W1 keeps the witness at
 32K), PIOP-branch drops 0 to -0.10 s (unmeasured at 32K; locally 25-38 ms at 8K, about 4x at
 32K on THP-on pages). Total -0.19 to -0.33 s (est.); fresh process about -0.15 s more from (a).
-Cloud check: `agg bench --count 32768 --warmup 1
---reps 3` with and without `AGG_SCHED_SERIAL=1` on the same binary, and the same pair with
-`AGG_PARITY_EARLY=1`; success is >= 0.15 s median gain and identical aggregates.
 
 ## 12. Cloud measurement of W1, B and A at 32K
 

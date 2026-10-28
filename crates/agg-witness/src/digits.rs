@@ -1,6 +1,6 @@
-//! Digit decompositions in balanced alphabets and the slack forms of the feature-flagged
-//! layouts, the step form of `u` in relations H-u and
-//! H-exact, the bit-slack form of `z` in relation H-exact, and the leaf predicates Q_4, Q_6,
+//! Digit decompositions in balanced alphabets, the value forms the PIOP commits (the step form
+//! of `u` in relations H-u and H-exact, the bit-slack form of `z` in relations H-exact and
+//! H-FIPS, the slack form of H-FIPS's magnitude `L`), and the leaf predicates Q_2, Q_4, Q_6,
 //! Q_8, Q_16.
 //!
 //! A digit of base b lies in the balanced alphabet [-b/2, b/2 - 1]. A value with digits
@@ -9,7 +9,7 @@
 //! proven range the top digit absorbs the excess and leaves its alphabet, which is exactly what
 //! the leaf checks detect.
 
-use crate::params::{B_U, B_Z, SLACK_Z, STEP_U, U_TOP_BASE};
+use crate::params::{B_Z, SLACK_Z};
 
 /// Alphabet of a committed column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,9 +18,7 @@ pub enum Alphabet {
     Balanced(u32),
     /// Boolean {0, 1}.
     Bool,
-    /// Sign {-1, 1} (S1+S2 layout).
-    Sign,
-    /// Ternary {-1, 0, 1} (S1+S2 layout).
+    /// Ternary {-1, 0, 1} (relation H-FIPS).
     Ternary,
 }
 
@@ -30,7 +28,7 @@ impl Alphabet {
         match self {
             Alphabet::Balanced(b) => -i64::from(b / 2),
             Alphabet::Bool => 0,
-            Alphabet::Sign | Alphabet::Ternary => -1,
+            Alphabet::Ternary => -1,
         }
     }
 
@@ -38,16 +36,13 @@ impl Alphabet {
     pub fn max(self) -> i64 {
         match self {
             Alphabet::Balanced(b) => i64::from(b / 2) - 1,
-            Alphabet::Bool | Alphabet::Sign | Alphabet::Ternary => 1,
+            Alphabet::Bool | Alphabet::Ternary => 1,
         }
     }
 
     /// Membership.
     pub fn contains(self, v: i64) -> bool {
-        match self {
-            Alphabet::Sign => v == -1 || v == 1,
-            _ => self.min() <= v && v <= self.max(),
-        }
+        self.min() <= v && v <= self.max()
     }
 }
 
@@ -153,31 +148,6 @@ impl DigitLayout {
     }
 }
 
-/// z in relation H: bases 16,16,16,16,4, signed, range [-2^17, 2^17 - 1].
-pub const Z_DIGITS: DigitLayout = DigitLayout {
-    name: "z",
-    bases: &[16, 16, 16, 16, 4],
-    signed: true,
-};
-/// Low part B_ulo of u in relation H-u: bases 16,16,16,16, unsigned, range [0, 2^16).
-pub const ULO_DIGITS: DigitLayout = DigitLayout {
-    name: "u",
-    bases: &[16, 16, 16, 16],
-    signed: false,
-};
-/// Low part B_zlo of z in relation H-exact (witness-crate digits): bases 16,16,16,16,
-/// unsigned, range [0, 2^16). The PIOP looks the same value up in T_16 as one cell S_zlo.
-pub const ZLO_DIGITS: DigitLayout = DigitLayout {
-    name: "bz",
-    bases: &[16, 16, 16, 16],
-    signed: false,
-};
-/// The ring quotient v: bases 16^6, 8, signed, range [-2^26, 2^26 - 1].
-pub const V_DIGITS: DigitLayout = DigitLayout {
-    name: "v",
-    bases: &[16, 16, 16, 16, 16, 16, 8],
-    signed: true,
-};
 /// Level-1 and level-2 carries: bases 16,16,4, unsigned, range [0, 1023].
 pub const KAPPA12_DIGITS: DigitLayout = DigitLayout {
     name: "kappa",
@@ -190,33 +160,6 @@ pub const KAPPA3_DIGITS: DigitLayout = DigitLayout {
     bases: &[16, 16],
     signed: false,
 };
-/// S1+S2: b_z in [0, 2^17): bases 16,16,16,16,2, unsigned
-/// (C = 100,488).
-pub const BZ_DIGITS: DigitLayout = DigitLayout {
-    name: "bz",
-    bases: &[16, 16, 16, 16, 2],
-    signed: false,
-};
-/// Unused by every layout (kept for its enumeration test): b_u in
-/// [0, 2^18): bases 16,16,16,16,4, unsigned (C = 166,024).
-pub const BU_DIGITS: DigitLayout = DigitLayout {
-    name: "bu",
-    bases: &[16, 16, 16, 16, 4],
-    signed: false,
-};
-/// S1+S2: b_v in [0, 2^16): bases 16^4, unsigned.
-pub const BV_DIGITS: DigitLayout = DigitLayout {
-    name: "bvr",
-    bases: &[16, 16, 16, 16],
-    signed: false,
-};
-/// S1+S2: b_h in [0, 64): bases 8,8, unsigned.
-pub const BH_DIGITS: DigitLayout = DigitLayout {
-    name: "bh",
-    bases: &[8, 8],
-    signed: false,
-};
-
 /// Slack form X = w a + b - offset with a in {0, 1}, b in [0, 2^j) given by unsigned digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlackLayout {
@@ -249,32 +192,6 @@ impl SlackLayout {
         self.slack_weight * a + self.digits.compose(digits) - self.offset
     }
 }
-
-/// S1+S2 z: z = 130,915 a_z + b_z - 130,993, exact range [-B_z, B_z].
-pub const Z_EXACT: SlackLayout = SlackLayout {
-    slack_weight: 130_915,
-    digits: BZ_DIGITS,
-    offset: 130_993,
-};
-/// Slack form of u (unused by every layout): u = 118,787 a_u + b_u - 190,465, exact range
-/// [-B_u, B_u].
-pub const U_EXACT: SlackLayout = SlackLayout {
-    slack_weight: 118_787,
-    digits: BU_DIGITS,
-    offset: 190_465,
-};
-/// S1+S2 magnitude v_r = 29,696 a_v + b_v, exact range [0, gamma2 - 1].
-pub const VR_EXACT: SlackLayout = SlackLayout {
-    slack_weight: 29_696,
-    digits: BV_DIGITS,
-    offset: 0,
-};
-/// S1+S2 hint slack u_h = 17 a_h + b_h, exact range [0, omega].
-pub const UH_EXACT: SlackLayout = SlackLayout {
-    slack_weight: 17,
-    digits: BH_DIGITS,
-    offset: 0,
-};
 
 /// Step form X = step H + b - offset with one top digit H in [0, c) and b in [0, 2^j) given by
 /// unsigned digits (relation H-u, `docs/h-exact.md`). It covers [-offset, step (c - 1) +
@@ -630,38 +547,6 @@ pub const Z_BIT_SLACK: BitSlackLayout = BitSlackLayout {
     offset: B_Z,
 };
 
-/// z in relation H-exact with witness-crate digits (`tables::Layout::HExact`): the bit-slack
-/// form of `Z_BIT_SLACK` with B_zlo given by four unsigned base-16 digits (`ZLO_DIGITS`):
-/// z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z, exact range [-B_z, B_z].
-pub const Z_BIT_SLACK16: BitSlackLayout = BitSlackLayout {
-    low: ZLO_DIGITS,
-    slack_weight: SLACK_Z,
-    offset: B_Z,
-};
-
-/// u in relation H-u: u = B_ulo + 63,079 H_u - 190,465 with B_ulo in [0, 2^16) (four base-16
-/// digits) and H_u in [0, 6) (one base-6 digit), exact range [-B_u, B_u] since
-/// 5 * 63,079 + 2^16 = 2 B_u + 1.
-pub const U_STEP: StepLayout = StepLayout {
-    low: ULO_DIGITS,
-    step: STEP_U,
-    top_base: U_TOP_BASE,
-    offset: B_U,
-};
-
-/// S1+S2 r1 = 4 a + b with a in [0, 8), b in [0, 16): committed as the balanced digits
-/// (A, B) = (a - 4, b - 8), so r1 = 4 A + B + 24. Canonical a = min(r1 / 4, 7).
-pub fn r1_decompose(r1: i64) -> (i64, i64) {
-    let a = (r1.div_euclid(4)).clamp(0, 7);
-    let b = r1 - 4 * a;
-    (a - 4, b - 8)
-}
-
-/// r1 = 4 A + B + 24.
-pub fn r1_compose(a_digit: i64, b_digit: i64) -> i64 {
-    4 * a_digit + b_digit + 24
-}
-
 /// P_Z = Z (Z + 1).
 #[inline]
 pub fn p_of(z: i64) -> i128 {
@@ -748,42 +633,42 @@ mod tests {
         vals
     }
 
+    /// A signed layout (the canonical digits of zero differ in the top digit).
+    const SIGNED: DigitLayout = DigitLayout {
+        name: "signed",
+        bases: &[16, 16, 4],
+        signed: true,
+    };
+    /// Relation H-u's step form of u as the PIOP commits it: one 16-bit low digit.
+    const U_STEP16: StepLayout = StepLayout {
+        low: DigitLayout {
+            name: "u",
+            bases: &[1 << 16],
+            signed: false,
+        },
+        step: STEP_U,
+        top_base: U_TOP_BASE,
+        offset: B_U,
+    };
+
     #[test]
-    fn constants_of_section_4_3() {
-        assert_eq!(Z_DIGITS.constant(), 34_952);
-        assert_eq!(ULO_DIGITS.constant(), 34_952);
-        assert_eq!(U_STEP.constant(), 33_724);
-        assert_eq!(V_DIGITS.constant(), 8_947_848);
+    fn constants_and_ranges() {
         assert_eq!(KAPPA12_DIGITS.constant(), 648);
         assert_eq!(KAPPA3_DIGITS.constant(), 136);
-        assert_eq!(BZ_DIGITS.constant(), 100_488);
-        assert_eq!(BU_DIGITS.constant(), 166_024);
-        assert_eq!(Z_DIGITS.range(), (-BAR_B_Z, BAR_B_Z - 1));
-        assert_eq!(U_STEP.range(), (-BAR_B_U, BAR_B_U));
-        assert_eq!(U_STEP.range(), (-B_U, B_U));
-        assert_eq!(V_DIGITS.range(), (-V_HALF_RANGE, V_HALF_RANGE - 1));
+        assert_eq!(SIGNED.constant(), 136);
+        assert_eq!(U_STEP16.constant(), 31_540);
         assert_eq!(KAPPA12_DIGITS.range(), (0, 1023));
         assert_eq!(KAPPA3_DIGITS.range(), (0, 255));
-        assert_eq!(Z_EXACT.range(), (-B_Z, B_Z));
-        assert_eq!(U_EXACT.range(), (-B_U, B_U));
-        assert_eq!(VR_EXACT.range(), (0, GAMMA2 - 1));
-        assert_eq!(UH_EXACT.range(), (0, OMEGA as i64));
+        assert_eq!(SIGNED.range(), (-512, 511));
+        assert_eq!(U_STEP16.range(), (-BAR_B_U, BAR_B_U));
+        assert_eq!(U_STEP16.range(), (-B_U, B_U));
     }
 
     #[test]
     fn bijections_by_enumeration() {
         // The mixed-radix map is a bijection from the digit alphabets onto the proven range
         // (spec_checks.py item 8).
-        for layout in [
-            Z_DIGITS,
-            ULO_DIGITS,
-            KAPPA12_DIGITS,
-            KAPPA3_DIGITS,
-            BZ_DIGITS,
-            BU_DIGITS,
-            BV_DIGITS,
-            BH_DIGITS,
-        ] {
+        for layout in [KAPPA12_DIGITS, KAPPA3_DIGITS, SIGNED] {
             let vals = enumerate(&layout);
             let (lo, hi) = layout.range();
             assert_eq!(vals.len() as i64, hi - lo + 1, "{}", layout.name);
@@ -793,15 +678,12 @@ mod tests {
 
     #[test]
     fn decompose_compose_roundtrip_and_canonical_zero() {
-        for layout in [
-            Z_DIGITS,
-            ULO_DIGITS,
-            V_DIGITS,
-            KAPPA12_DIGITS,
-            KAPPA3_DIGITS,
-            BZ_DIGITS,
-            BU_DIGITS,
-        ] {
+        let z16 = DigitLayout {
+            name: "z16",
+            bases: &[1 << 16, 4],
+            signed: true,
+        };
+        for layout in [KAPPA12_DIGITS, KAPPA3_DIGITS, SIGNED, z16] {
             let (lo, hi) = layout.range();
             let step = ((hi - lo) / 5000).max(1);
             let mut x = lo;
@@ -834,61 +716,27 @@ mod tests {
     }
 
     #[test]
-    fn slack_forms_exhaustive() {
-        for s in [Z_EXACT, U_EXACT, VR_EXACT, UH_EXACT] {
-            let (lo, hi) = s.range();
-            for x in lo..=hi {
-                let (a, d) = s.decompose(x);
-                assert!(a == 0 || a == 1);
-                assert!(s.digits.in_alphabets(&d), "{x}");
-                assert_eq!(s.compose(a, &d), x);
-            }
-            for x in [lo - 1, hi + 1] {
-                let (a, d) = s.decompose(x);
-                assert!(!s.digits.in_alphabets(&d) || !(a == 0 || a == 1));
-                assert_eq!(s.compose(a, &d), x);
-            }
-        }
-        // The slack-digit lemma: {w a + b} covers exactly the range (every value reachable).
-        for r1 in 0..M_W {
-            let (a, b) = r1_decompose(r1);
-            assert!(Alphabet::Balanced(8).contains(a) && Alphabet::Balanced(16).contains(b));
-            assert_eq!(r1_compose(a, b), r1);
-        }
-        let mut image: Vec<i64> = Vec::new();
-        for a in -4..4 {
-            for b in -8..8 {
-                image.push(r1_compose(a, b));
-            }
-        }
-        image.sort_unstable();
-        image.dedup();
-        assert!(image.iter().copied().eq(0..M_W));
-    }
-
-    #[test]
     fn u_step_form_is_exact_at_the_slack_boundaries() {
         // 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16: the six blocks tile [-B_u, B_u].
         // (Also compile-time checks in params.rs.)
         assert_eq!(5 * STEP_U + (1 << 16), 2 * B_U + 1);
-        assert_eq!(U_STEP.len(), 5);
-        assert_eq!(U_STEP.weights(), vec![1, 16, 256, 4096, STEP_U]);
+        assert_eq!(U_STEP16.len(), 2);
+        assert_eq!(U_STEP16.weights(), vec![1, STEP_U]);
         // Exhaustive: every u in range has canonical digits in their alphabets and recomposes.
         for u in -B_U..=B_U {
-            let d = U_STEP.decompose(u);
-            assert!(U_STEP.in_alphabets(&d), "u = {u}: {d:?}");
-            assert_eq!(U_STEP.compose(&d), u);
+            let d = U_STEP16.decompose(u);
+            assert!(U_STEP16.in_alphabets(&d), "u = {u}: {d:?}");
+            assert_eq!(U_STEP16.compose(&d), u);
         }
         // Boundaries: +-190,465 encode, +-190,466 have no in-alphabet digits.
-        assert_eq!(U_STEP.decompose(B_U), vec![7, 7, 7, 7, 2]);
-        assert_eq!(U_STEP.decompose(-B_U), vec![-8, -8, -8, -8, -3]);
+        assert_eq!(U_STEP16.decompose(B_U), vec![(1 << 15) - 1, 2]);
+        assert_eq!(U_STEP16.decompose(-B_U), vec![-(1 << 15), -3]);
         for u in [B_U + 1, -B_U - 1, B_U + 12_345, -(1 << 18)] {
-            let d = U_STEP.decompose(u);
-            assert!(!U_STEP.in_alphabets(&d), "u = {u}");
-            assert_eq!(U_STEP.compose(&d), u);
+            let d = U_STEP16.decompose(u);
+            assert!(!U_STEP16.in_alphabets(&d), "u = {u}");
+            assert_eq!(U_STEP16.compose(&d), u);
         }
-        // Reachable set of all in-alphabet digit tuples (low part as one value in [0, 2^16)):
-        // exactly [-B_u, B_u].
+        // Reachable set of all in-alphabet digit tuples: exactly [-B_u, B_u].
         let mut hit = vec![false; (2 * B_U + 1) as usize];
         for top in -3..=2i64 {
             for b in 0..(1i64 << 16) {
@@ -898,8 +746,8 @@ mod tests {
             }
         }
         assert!(hit.iter().all(|&h| h));
-        // Zero: H_u = 3 (stored 0), B_ulo = 1,228 (digits 4, 4, -4, -8).
-        assert_eq!(U_STEP.decompose(0), vec![4, 4, -4, -8, 0]);
+        // Zero: H_u = 3 (stored 0), B_ulo = 1,228 (stored 1,228 - 2^15).
+        assert_eq!(U_STEP16.decompose(0), vec![-31_540, 0]);
     }
 
     #[test]
@@ -976,24 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn z_bit_slack16_matches_the_lookup_form() {
-        // The witness-crate H-exact form (four base-16 digits for B_zlo) has the same values
-        // as the PIOP's Z_BIT_SLACK (one 16-bit cell), on every z in range.
-        assert_eq!(Z_BIT_SLACK16.constant(), -96_041);
-        assert_eq!(Z_BIT_SLACK16.range(), (-B_Z, B_Z));
-        for z in -B_Z..=B_Z {
-            let d = Z_BIT_SLACK16.decompose(z);
-            assert!(Z_BIT_SLACK16.in_alphabets(&d), "z = {z}");
-            assert_eq!(Z_BIT_SLACK16.compose(&d), z);
-            let e = Z_BIT_SLACK.decompose(z);
-            assert_eq!((d[4], d[5]), (e[1], e[2]), "z = {z}");
-        }
-        for z in [B_Z + 1, -B_Z - 1] {
-            assert!(!Z_BIT_SLACK16.in_alphabets(&Z_BIT_SLACK16.decompose(z)));
-        }
-    }
-
-    #[test]
     fn leaf_predicates_exact_on_balanced_alphabets() {
         // spec_checks.py item 9, extended to base 2.
         for base in [2u32, 4, 6, 8, 16] {
@@ -1009,7 +839,7 @@ mod tests {
                 assert_eq!(leaf_vanishes(base, p_of(z)), a.contains(z));
             }
         }
-        // b16_prod: one of Q16_lo, Q16_hi vanishes exactly on [-8, 7].
+        // The base-16 leaf factors as Q16_lo Q16_hi: one factor vanishes on each digit of [-8, 7].
         for z in -8..8 {
             let p = p_of(z);
             assert!(q16_lo(p) == Some(0) || q16_hi(p) == Some(0));

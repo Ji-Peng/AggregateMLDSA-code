@@ -48,11 +48,10 @@ and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.
 event 2, the share at event 6 (computed from the part's input bits, kept since event 2), and
 at the join the chain's rounds and the sponge proof, whose opening carries the chain's bit
 claim; the part and span seeds bind the digest of the event-6 record (K22). At most one
-part's Flock buffers are alive: parts are committed one by one at event 2 (the cap and, by
-default, the sponge commit data are kept, K14) and rebuilt, proven and dropped one by one
-for the join. A batch of exactly one part (a span, or one part at `N <= 2^13`) keeps its
-committed witness from event 2 instead and proves it without a rebuild (lever W1,
-`docs/perf.md` Section 9; `AGG_FLOCK_REBUILD` restores the rebuild).
+part's Flock buffers are alive: parts are committed one by one at event 2 (the cap and the
+sponge commit data are kept, K14) and rebuilt, proven and dropped one by one for the join.
+A batch of exactly one part (a span, or one part at `N <= 2^13`) keeps its committed witness
+from event 2 instead and proves it without a rebuild (lever W1, `docs/perf.md` Section 9).
 
 Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
 parts are whole segments is one tied part over all segments (one sponge instance of all `N`
@@ -63,7 +62,8 @@ unchanged by it.
 
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
-Flock witness per part, and the stale round-2 tables of the joint bridge test.
+Flock witness per part, and stale round-2 tables (the honest bits' parities and `Y_sigma`
+over tampered round-1 bits).
 
 ## 2. Files and the `agg` binary
 
@@ -147,7 +147,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   (Flock part; stage 1 with the Flock verdict ignored), a base-16 digit 9 (the Akita
   commitment refuses it), base-4 and base-6 digits (stage 2), a level-1 carry digit and a
   level-2 parity (stage 1), a final-vector bit (Flock part), and on the Flock side a bit
-  flipped in both copies, in the bridge slot copy only, and in the sponge input with the stale
+  flipped in both copies, in the parity chain's copy only, and in the sponge input with the stale
   chi witness (Flock part);
 - invalid signatures refused by the aggregator: `c~`, `z` and hint bits, another message,
   wrong lengths;

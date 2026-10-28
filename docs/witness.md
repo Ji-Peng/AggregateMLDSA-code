@@ -1,7 +1,8 @@
-# agg-witness: witness derivation, tables and checker
+# agg-witness: witness derivation and reference checks
 
 Crate `crates/agg-witness` (`docs/spec.md` Section 14). This note records the
-exact conventions, the bounds the code enforces, and the column layouts. The spec is the
+exact conventions and the bounds the code enforces; the committed column layouts are
+`agg-piop`'s (`docs/lookup.md`, `docs/h-exact.md`). The spec is the
 source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 
 ## 1. Pipeline and modules
@@ -15,17 +16,15 @@ source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 | `crt` | (A z) over Z by CRT modulo q and P2 = 15 2^27 + 1; schoolbook reference | 3, B.9 |
 | `instance` | `PublicInstance`: per-record verifier precomputation (keys expanded once per distinct pk) | 2 |
 | `derive` | `derive` (strict), `derive_unchecked`, re-encoding to signature bytes, UseHint residual lemma | 3, 6, A |
-| `digits` | (4.1) layouts, slack forms of Appendix A, the step form of u (H-u), leaf predicates Q_2, Q_4, Q_6, Q_8, Q_16 | 4.3, A |
-| `tables` | `Layout`, column maps, `BatchTables` (G_main), padding, serialization | 4 |
+| `digits` | (4.1) layouts, the step form (4.2), the bit-slack form (4.3) and the slack form of H-FIPS's L, leaf predicates Q_2, Q_4, Q_6, Q_8, Q_16 | 4.3, A |
 | `bridge` | bridge geometry, honest parities and carries for given matrices, G_1/G_2/G_3 tables, GF(2) composite | 1, 9 |
 | `keccak` | Keccak-f[1600], the 7-permutation sponge trace, bit wiring | 8 |
-| `check` | integer checker of every identity (Section 7, (3.1) to (3.3), (9.1), Appendix A) | 7 |
+| `hfips` | relation H-FIPS: per-coefficient witness, derivation, integer checker of every identity, signature extraction | A |
+| `check` | failure reports of the H-FIPS checker (`Identity`, `CheckReport`) | A |
 | `gen` | deterministic keys, messages and signatures through the `ml-dsa` crate | 13 |
 
 The `ml-dsa` crate (`=0.1.1`) is used only for key generation, signing and as a test oracle;
-nothing in the relation depends on its internals. Features: `h-exact` (H-exact layout),
-`fips` (S1+S2 layout, `relation = fips`). Default: relation H-u only (z relaxed to
-[-2^17, 2^17), u exact; `Layout::H`, id 0, means H-u).
+nothing in the relation depends on its internals. The crate has no features.
 
 ## 2. Representatives (spec Section 3.2, Appendix B.9)
 
@@ -39,9 +38,6 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 * w1' = UseHint(h, w') in [0, 44); b_t = bit t of w1'.
 * u = ctr_q(w' - 2 gamma2 w1').
 * v = (A z - T - 2 gamma2 w1' - u) / q, asserted exact over Z.
-* S1+S2 only: (r1, r0) = Decompose(w'); s = 1 iff r0 > 0 else -1; e = [r0 = -gamma2];
-  v_r = r0 - 1 (s = 1), 0 (e = 1), -r0 otherwise; g = h s; quotient
-  v = (A z - T - 2 gamma2 r1 - r0) / q; u_h = omega - sum h.
 
 ## 3. Bounds enforced
 
@@ -51,57 +47,31 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | Strict derivation | \|z\| <= B_z | 130,993 | invariant (implied by Alg. 8) |
 | Strict derivation | \|u\| <= B_u | 190,465 | invariant (UseHint lemma; `usehint_residual_max()` = 190,465 exhaustively) |
 | Strict derivation | \|v\| <= B_v | 67,068,447 | invariant ((3.4'): DELTA0_MAX = 562,061,561,757,697) |
-| Strict derivation | Delta_0 = 0 mod q; CRT = NTT path mod q; S1+S2: w1' = (r1 + g) mod 44 | | invariants |
+| Strict derivation | Delta_0 = 0 mod q; CRT = NTT path mod q | | invariants |
 | `derive_unchecked` | sigDecode succeeds (length, HintBitUnpack) | | only check |
-| Relation H-u tables (proven ranges) | z in [-2^17, 2^17 - 1] | digits 16,16,16,16,4 signed | `b16_prod`, `leaf4` |
-| | u in [-190,465, 190,465] exactly | u = B_ulo + 63,079 H_u - 190,465, B_ulo digits 16,16,16,16 unsigned, H_u - 3 base 6 | `b16_prod`, `leaf6` |
-| | v in [-2^26, 2^26 - 1] | digits 16^6,8 signed | `b16_prod`, `leaf8` |
-| | b_t in {0, 1}; w1' in [0, 44) | (7.4) b5 (b4 + b3 b2) = 0 | `bool_b`, `range_w1` |
-| H-exact tables (spec 4.3) | z in [-130,993, 130,993] exactly | z = B_zlo + 65,536 B_zhi + 130,915 a_z - 130,993, B_zlo digits 16,16,16,16 unsigned (the PIOP looks B_zlo up as one cell S_zlo), B_zhi, a_z in {0, 1} | `b16_prod`, `bool_slack` |
-| | u in [-190,465, 190,465] exactly | as H-u (step form `U_STEP`) | `b16_prod`, `leaf6` |
-| S1+S2 tables | z exact as H-exact; r1 in [0, 43] | r1 = 4 A + B + 24, A in [-4, 3], B in [-8, 7] | digits |
-| | v_r in [0, gamma2 - 1] = [0, 95,231] | v_r = 29,696 a_v + b_v, b_v digits 16^4 unsigned | digits |
-| | s in {-1, 1}; g in {-1, 0, 1}; e in {0, 1} | s^2 = 1; g (g-1)(g+1) = 0; e^2 = e | layout identities |
-| | u_h in [0, 80] | u_h = 17 a_h + b_h, b_h digits 8,8 unsigned (signature domain) | digits |
-| Bridge | kappa1, kappa2 in [0, 1023]; kappa3 in [0, 255]; y1, y2 Boolean | digits 16,16,4 and 16,16 unsigned | `b16_prod`, `leaf4`, `bool_y1`, `bool_y2` |
+| Bridge (`BridgeTables`) | kappa1, kappa2 in [0, 1023]; kappa3 in [0, 255] | digits 16,16,4 and 16,16 unsigned | `KAPPA12_DIGITS`, `KAPPA3_DIGITS` |
 | Bridge (honest abort) | row weight of M_1, M_2 <= 2,047; of M_3 <= 511 | | `BridgeError::RowWeight` |
-| Re-encoding | z in (-gamma1, gamma1]; sum h <= 80; UseHint(h, w') = w1' reachable | h = [HighBits(w') != w1'] (H), h = g^2 (S1+S2) | `ReencodeError` |
-| Checker completeness | live: \|z\| <= B_z, \|u\| <= B_u, \|v\| <= B_v; padded rows = zero encoding | | `honest_bound`, `padding_canonical` |
+| Re-encoding | z in (-gamma1, gamma1]; sum h <= 80; UseHint(h, w') = w1' reachable | h = [HighBits(w') != w1'] | `ReencodeError` |
+| H-FIPS witness (`HFipsRecord::from_witness`) | \|z\| <= B_z (bit-slack digits in their alphabets); every coefficient's (F1) to (F6) | | `HFipsError` |
 | Geometry | 1 <= N <= 2^15; N* = max(next_pow2(N), 8) | | `GeometryError` |
-| Columns | every committed value fits i8 | | `BuildError::Encode` |
 
-Proven ranges and digit constants (checked by enumeration in `digits` tests, as
-`spec_checks.py` item 8): C_z = C_ulo = 34,952, C_u = 33,724 (H-u step form: u = sum W_k u_k +
-63,079 u_4 + 33,724), C_v = 8,947,848, C_kappa12 = 648, C_kappa3 = 136, C_bz = 100,488,
-C_bu = 166,024 (C_bz, C_bu belong to the retired slack sketch; `BZ_DIGITS` survives only in
-S1+S2). H-exact's z form (`Z_BIT_SLACK16`) has constant C_bzlo - B_z = 34,952 - 130,993 = -96,041
-and range exactly [-B_z, B_z] (test `z_bit_slack16_matches_the_lookup_form`).
-Q_b(Z (Z + 1)) vanishes exactly on the balanced alphabet for b in
-{2, 4, 6, 8, 16} (Q_2(P) = P, Q_6(P) = P (P - 2)(P - 6)). The H-u step form covers exactly
-[-190,465, 190,465] because 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
-`u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits).
+Digit constants and ranges (checked by enumeration in `digits` tests, as `spec_checks.py`
+item 8): C_kappa12 = 648, C_kappa3 = 136. The H-u step form of u with one 16-bit low digit,
+u = U_lo + 63,079 U_hi + 31,540, covers exactly [-190,465, 190,465] because
+5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
+`u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits). The
+bit-slack form of z, z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225, covers exactly
+[-B_z, B_z] (test `z_bit_slack_form_is_exact_at_the_fips_bound`), and H-FIPS's
+L = S_lo + 29,696 L_hi + 2^15 exactly [0, gamma2 - 1]. Q_b(Z (Z + 1)) vanishes exactly on the
+balanced alphabet for b in {2, 4, 6, 8, 16} (Q_2(P) = P, Q_6(P) = P (P - 2)(P - 6)).
 
-## 4. Column layouts (G_main)
+## 4. Canonical decompositions
 
-Main index x = j + 256 (rho or s) + 1024 i; z is indexed by s (column of A), all other
-main-domain columns by rho. Columns are `i8`. Base-k digit alphabets are [-k/2, k/2 - 1].
-
-| Layout | Columns in table order | Count |
-| --- | --- | ---: |
-| H-u (default, `Layout::H`) | z_0..z_4 (16,16,16,16,4), u_0..u_3 (16^4, B_ulo), u_4 (6, H_u - 3), v_0..v_6 (16^6, 8), b_0..b_5 | 23 |
-| H-exact (`h-exact`, `Layout::HExact`) | bz_0..bz_3 (16^4, B_zlo), bz_hi (bit), az (bit), u_0..u_3 (16^4, B_ulo), u_4 (6, H_u - 3), v_0..v_6, b_0..b_5 | 24 |
-| S1+S2 (`fips`) | bz_0..bz_4, az, r1_a (8), r1_b (16), bvr_0..bvr_3 (16^4), avr, s, g, e, v_0..v_6, b_0..b_5; signature domain: bh_0, bh_1 (8, 8), ah | 29 + 3 |
-
-Canonical decompositions: (4.1) digits are the mixed-radix digits of X + eps B/2 shifted by
--b_k/2; slack forms take a = [x + offset >= 2^j], b = x + offset - w a; the H-u step form
-takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 63,079 H_u; r1 takes
-a = min(floor(r1 / 4), 7). Padded rows (i >= N) hold the encoding of the zero witness:
-for H-u the digits of zero (-8, -8, -8, -8, 0 for z; 4, 4, -4, -8, 0 for u, i.e. B_ulo =
-1,228 and H_u = 3; -8 x6, 0 for v; bits 0); see W2
-for H-exact and S1+S2 (s = -1, u_h = 80).
-
-Physical tables shorter than 2^13 cells (the S1+S2 signature columns) are zero-extended by
-the PCS layer (`padding::physical_len`).
+(4.1) digits are the mixed-radix digits of X + eps B/2 shifted by -b_k/2 (base-k alphabets
+are [-k/2, k/2 - 1]); slack forms take a = [x + offset >= 2^j], b = x + offset - w a; the
+H-u step form takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 63,079 H_u;
+the bit-slack form takes a_z = [z + B_z >= 2^17], then B_zhi and B_zlo from the rest. Outside
+the proven range the top digit absorbs the excess and leaves its alphabet.
 
 ## 5. Bridge tables (G_1, G_2, G_3)
 
@@ -119,43 +89,16 @@ after each Keccak-f[1600], and c~ (the low 256 bits of the P_7 output). Message 
 512 + 1536 rho + 6 j + t carries b_t(j, rho); it lands in permutation floor(bit / 1088)
 at state bit (bit mod 1088). Tests compare against `sha3::Shake256` and the signature c~.
 
-## 7. Checker
-
-`check::check(instance, tables, bridge, options)` evaluates pointwise on the Boolean
-domain, over the integers:
-
-| Stage | Identities |
-| --- | --- |
-| 1 | `bool_b`, `range_w1` (7.4), `b16_prod` (every base-16 digit), `bool_y1` (7.1) with y1 by (7.5), `level2` (7.2), `level3` (7.3), `bool_y2` |
-| 2 | `leaf16` (A^lo, A^hi = Q_16^b(P_Z)), `leaf8`, `leaf6`, `leaf4`, `leaf2` |
-| 3 | `ring` (7.6) = (3.1) at every position (A = T = 0 on padded rows), `link` (P_Z = Z (Z + 1)) |
-| Keccak | (3.3) c~ = SHAKE256(mu, w1Encode(bits)) through the sponge; (9.1) Y = M3 M2 M1 b over GF(2) |
-| Layout | H-exact/S1+S2 slack Booleans and e^2 = e; s^2 = 1; e (1 + s) = e v_r = e r1 = 0; g (g-1)(g+1) = 0; g (s - g) = 0; sum g^2 + u_h = omega; x (x - 44)(x + 44) = 0 with x = r1 + g - w1' |
-| Completeness | padded rows canonical; honest bounds |
-
-The evaluation reductions of stage 3 are f = f pointwise and need no check. The virtual
-digit tables (P_Z, A^lo, A^hi) are materialized as the prover would (`digit_virtual`);
-`check_digit_column` also accepts prover-supplied tables, so `link` and `leaf16` catch a
-tampered virtual table. A failure is reported with its identity and stage.
-
-## 8. Serialization of `BatchTables`
-
-Little-endian: magic `AGGWTBL\0`, version u16 = 1, layout id u8 (0 H, 1 H-exact, 3 S1+S2;
-id 2 is relation H-FIPS, which has no base-16 layout: `agg_witness::hfips`, `docs/h-exact.md`
-Section 10.5),
-d_sig u8, N u64, column count u32, then per column: domain u8 (0 main, 1 signature),
-log2 length u8, cells as i8. `from_bytes` checks every header field against the layout.
-
 ## 9. Tests
 
-`cargo test -p agg-witness --all-features --release` (also passes in debug and for every
-feature subset). Integration tests: `verify` (own verifier vs crate on 160 signatures and
-1,024 mutations), `witness` (128 signatures per layout: checker, re-encoding to identical
-bytes accepted by the crate, CRT vs schoolbook, bridge identities, padding, serialization),
-`negative` (bit flips of z, h, c~ rejected by the checker; one mutation per identity
-failing at its stage; the F_p quotient cheat of Section 6), `edge` (UseHint lemma and the
-S1 encoding exhaustively over Z_q; pinned signatures hitting the Decompose residue -gamma2
-and |z| = B_z), `keccak` (sponge and wiring for 128 signatures). Pinned edge records:
-`gen::record_hedged(0xED6E, 0, 783)` (w' coefficient = q - gamma2) and
-`gen::record_hedged(0x2A4A, 0, 290)` (|z| = B_z), found by the ignored test
-`edge_search`.
+`cargo test -p agg-witness --release` (also passes in debug). Integration tests: `verify`
+(own verifier vs crate on 160 signatures and 1,024 mutations), `witness` (128 signatures: the
+derived values satisfy (3.1), the bounds and UseHint, re-encoding gives identical bytes
+accepted by the crate, CRT vs schoolbook; padded records have T = 0), `negative` (bit flips
+of z, h, c~ rejected by the H-FIPS checker, at derivation or by |z| > B_z; the F_p quotient
+cheat of Section 6; an unreachable w1' has no hint), `edge` (UseHint lemma exhaustively
+over Z_q; pinned signatures hitting the Decompose residue -gamma2 and |z| = B_z, checked
+under H-FIPS and re-encoded), `hfips` (`docs/h-exact.md` Section 10.5), `keccak` (sponge and
+wiring for 128 signatures). Pinned edge records: `gen::record_hedged(0xED6E, 0, 783)`
+(w' coefficient = q - gamma2) and `gen::record_hedged(0x2A4A, 0, 290)` (|z| = B_z), found by
+the ignored test `edge_search`.

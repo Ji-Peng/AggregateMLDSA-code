@@ -23,8 +23,8 @@
 //! `32..48`; mu follows at words 48..51, `c~` at 52..53, the constant at word 54,
 //! word 55 is zero and the chi words start at word 56, so words 48..56 are the
 //! public region (mu, `c~`, the constant, zero). The tied part (`crate::tied`)
-//! ties these regions to the bridge instance and to the public words by
-//! evaluation claims; the word constants below name the layout.
+//! ties the public region to the public words and the w1Encode bits to the parity
+//! chain by evaluation claims; the word constants below name the layout.
 
 use flock_field::F128;
 use sha3::{

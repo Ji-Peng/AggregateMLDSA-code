@@ -27,8 +27,6 @@ pub enum FlockProfile {
     None = 0,
     /// Ligerito `Fast` (engineering baseline).
     Fast = 1,
-    /// LaBinius (reserved id).
-    LaBinius = 2,
     /// Mode B: the `w_1'` bits in the clear as the event-2 items (`crate::mode_b`).
     PublicBits = 3,
     /// Ligerito `Slim` (rate 1/4, Flock's 128-bit work-normalized accounting as `Fast`):
@@ -46,7 +44,6 @@ impl FlockProfile {
         match id {
             0 => Some(Self::None),
             1 => Some(Self::Fast),
-            2 => Some(Self::LaBinius),
             3 => Some(Self::PublicBits),
             4 => Some(Self::Slim),
             5 => Some(Self::Slim8),
@@ -54,12 +51,11 @@ impl FlockProfile {
         }
     }
 
-    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim`, `Slim8` or
-    /// `LaBinius`), whose tie to the committed bits is the parity bridge with seed-derived
-    /// matrices.
+    /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim` or `Slim8`),
+    /// whose tie to the committed bits is the parity bridge with seed-derived matrices.
     #[must_use]
     pub const fn is_mode_a(self) -> bool {
-        matches!(self, Self::Fast | Self::Slim | Self::Slim8 | Self::LaBinius)
+        matches!(self, Self::Fast | Self::Slim | Self::Slim8)
     }
 }
 
@@ -185,16 +181,16 @@ mod tests {
         assert_eq!(record.len(), manifest.binding_bytes().len() + 65);
         assert_eq!(record[record.len() - 33], 0);
         assert_eq!(record[record.len() - 32..], [7; 32]);
-        assert_eq!(FlockProfile::from_id(2), Some(FlockProfile::LaBinius));
+        assert_eq!(FlockProfile::from_id(2), None);
         assert_eq!(FlockProfile::from_id(3), Some(FlockProfile::PublicBits));
         assert_eq!(FlockProfile::from_id(4), Some(FlockProfile::Slim));
         assert_eq!(FlockProfile::from_id(5), Some(FlockProfile::Slim8));
         assert_eq!(FlockProfile::from_id(6), None);
         let mode_a: Vec<u8> = (0..6)
-            .filter(|&id| FlockProfile::from_id(id).unwrap().is_mode_a())
+            .filter(|&id| FlockProfile::from_id(id).is_some_and(FlockProfile::is_mode_a))
             .collect();
-        assert_eq!(mode_a, [1, 2, 4, 5]);
-        for id in 0..6 {
+        assert_eq!(mode_a, [1, 4, 5]);
+        for id in [0, 1, 3, 4, 5] {
             assert_eq!(FlockProfile::from_id(id).unwrap() as u8, id);
         }
     }

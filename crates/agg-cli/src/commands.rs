@@ -58,14 +58,8 @@ environment:
                         (aggregate, bench; default half the rayon pool; 0: one after the other;
                         at most the logical CPUs or the rayon pool; a value that is not a
                         number warns and falls back to the default).
-  AGG_FLOCK_REBUILD     (any value) drop the Flock witness of a one-part batch after event 2
-                        and rebuild it for its proof (measurement knob; the aggregate is the
-                        same).
-  AGG_FLOCK_RECOMMIT    (any value) drop the Flock commit data after event 2 and commit again
-                        for the proof (measurement knob; the aggregate is the same).
-  AGG_SCHED_SERIAL      (any value) the serial prover schedule: serial public data,
-                        Akita setup inside the prove, every large drop in place (measurement
-                        knob; the aggregate is the same).
+  AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
+                        end of every prover step (diagnostics; the aggregate is the same).
   AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2
                         commitment instead of in the fork (opt-in; the aggregate is the same).";
 

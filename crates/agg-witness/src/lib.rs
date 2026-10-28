@@ -1,12 +1,11 @@
 //! ML-DSA-44 witness generation for the aggregation PIOP (`docs/spec.md`).
 //!
 //! Pipeline: `instance::PublicInstance` (verifier precomputation) -> `derive::derive`
-//! (per-signature witness of relation H) -> `tables::BatchTables` (G_main columns) ->
-//! `check::check` (every sum-check identity over the integers). `native` is an independent
-//! FIPS 204 verifier, `keccak` the commitment-hash sponge, `bridge` the integer side of the
-//! parity bridge. Feature `h-exact` adds the H-exact layout, feature `fips` the S1+S2 layout.
-//! `hfips` holds relation H-FIPS (relation byte 2): its per-coefficient witness, derivation,
-//! checker and the extraction of a FIPS 204 signature.
+//! (per-signature witness: z, u, v, w1' and the bits). `native` is an independent FIPS 204
+//! verifier, `keccak` the commitment-hash sponge, `bridge` the integer side of the parity
+//! bridge, `digits` the value forms the PIOP commits. `hfips` holds relation H-FIPS (relation
+//! byte 2): its per-coefficient witness, derivation, integer checker (failures reported
+//! through `check`) and the extraction of a FIPS 204 signature.
 //! Bounds enforced are listed in docs/witness.md.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
@@ -26,7 +25,6 @@ pub mod native;
 pub mod ntt;
 pub mod padding;
 pub mod params;
-pub mod tables;
 
 /// Re-export of the RustCrypto ML-DSA crate used for key generation and signing.
 pub use ml_dsa;

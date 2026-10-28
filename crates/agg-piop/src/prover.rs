@@ -53,8 +53,8 @@ pub trait BridgeDerivation {
 
     /// True only when [`Self::matrices`] is the seed derivation ([`SeededMatrices`]), so that
     /// the matrices are uniform and independent of everything absorbed before `sd` and the
-    /// bridge's soundness bound applies. Mode A (Flock profiles `Fast` and `LaBinius`) is refused
-    /// by [`prove`] and by `verifier::verify` otherwise.
+    /// bridge's soundness bound applies. Mode A (Flock profiles `Fast`, `Slim` and `Slim8`) is
+    /// refused by [`prove`] and by `verifier::verify` otherwise.
     fn seed_derived(&self) -> bool {
         false
     }
@@ -463,13 +463,12 @@ impl Lap {
     }
 }
 
-/// Mode A (Flock profiles `Fast`, `LaBinius`) only with the seed-derived matrices: a proof
+/// Mode A (Flock profiles `Fast`, `Slim`, `Slim8`) only with the seed-derived matrices: a proof
 /// over other matrices would be refused by the verifier.
 fn check_bridge(bridge: &impl BridgeDerivation, flock: FlockProfile) -> Result<(), ProveError> {
     if flock.is_mode_a() && !bridge.seed_derived() {
         return Err(ProveError::Internal(
-            "mode A (Flock profiles Fast, LaBinius) needs the seed-derived matrices of spec 9.1"
-                .into(),
+            "mode A (Flock profiles Fast, Slim, Slim8) needs the seed-derived matrices".into(),
         ));
     }
     Ok(())

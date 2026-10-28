@@ -1,22 +1,16 @@
-# The virtual parity chain: the GF(2) side of the bridge without the bridge union
+# The virtual parity chain: the GF(2) side of the bridge
 
 | Field | Value |
 | --- | --- |
-| Scope | tied-part proof version 5 (deviation K21): the GF(2) side of a tied part, in place of the bridge union of `docs/bridge.md` Section 5b |
-| Related | `docs/bridge.md` Sections 4, 5, 5b, 5c, 10.4; `docs/keccak.md` Sections 9 to 12 |
+| Scope | tied-part proof version 5 (deviation K21): the GF(2) side of a tied part |
+| Related | `docs/bridge.md` Sections 4, 5a, 5c, 5d, 10.4; `docs/keccak.md` Sections 9 and 12 |
 | Code | `crates/agg-bridge/src/parity_chain.rs` (the sum-check, generic over `Shape`), `crates/agg-keccak/src/tied.rs` (transcript, proof bytes), `crates/agg-keccak/src/flock_union.rs` (extra ring-switched claims), `vendor/flock-core` (`SkipPoint::Eq`) |
 | Numbers | "est." marks an estimate; sizes are exact products of the shape constants |
 
-## 1. What changes
+## 1. Idea
 
-Proof version 4 proved `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) with a
-second Flock instance, the bridge union (level-1 rows `y1 = M_1 x` and a levels-2-3 row),
-committed after `sd`, tied to the sponge instance by two lane-group claims (tie 1), to
-itself by two parity-copy claims (tie 2), and to the public final vectors by an output
-claim. Its proof was 203,052 B at `8@13/4` with `Slim` plus a 2,048 B cap and 8 B of framing
-(measured, `docs/keccak.md` 12.3).
-
-Version 5 deletes the union. In characteristic 2 the composite `M = M_3 M_2 M_1` is
+A tied part proves `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) without a second Flock
+instance. In characteristic 2 the composite `M = M_3 M_2 M_1` is
 `F_{2^128}`-linear, so for a random `eq_Y` the verifier's value `<eq_Y, Y>` equals
 `<M^T eq_Y, b'>`, an inner product of a public weight `W = M^T eq_Y` and the committed bits.
 One degree-2 sum-check over the variables of `b'` reduces it to one evaluation of the bit
@@ -122,14 +116,12 @@ W~(r)     = eq(r_sigma, r_Y) sum_zeta eq(r_zeta, zeta) sum_{rho_1 in S_1(zeta1_b
 ```
 
 About `1.0 x 10^7` additions and `1.3 x 10^6` multiplications per part (derived), est. 10 to
-30 ms on one core, against the union's walkers (`1.9 x 10^7` entries), its `2^20`-entry
-tables, zerocheck, lincheck and Ligerito verification (est. 70 ms locally at `8@13`,
-measured 83.2 ms for the whole part in `docs/keccak.md` 11).
+30 ms on one core.
 
 ## 6. Transcript (tie challenger, version 5)
 
 `TieChallenges` (domain `agg-mldsa/v3/tie`) absorbs `fs`, `d`, `nu_s`, `log2 blocks`,
-`span_log`, the final-vector digest and the framed sponge cap (no union cap any more), then:
+`span_log`, the final-vector digest and the framed sponge cap, then:
 
 1. tie work (`g_tie` bits), then `rho_r` (`nu_s`), `rho_c` (3): the public claim's point;
 2. `eq_Y` work (`g_eq` bits), then `r_o` (12) and `r_Y` (`span_log`);
@@ -137,7 +129,7 @@ measured 83.2 ms for the whole part in `docs/keccak.md` 11).
 4. absorb `v'`; squeeze the 32-byte tie binding.
 
 The sponge challenger absorbs the binding (label `agg-keccak/v4/tie-binding`) before Flock's
-statement binding, as in version 4 (`docs/soundness.md` 4.5): both claim points (public
+statement binding (`docs/soundness.md` 4.5): both claim points (public
 region, bit point) and `v'` are fixed before any Flock challenge.
 
 ## 7. Proof bytes (version 5)
@@ -164,8 +156,7 @@ The sponge commitment is bound only to its Johnson list (`L_s` = 35, 50, 70 for 
 
 The bridge lemma (`2^-144.64`, `docs/bridge.md` 7) and the `sd` site (`L_s theta =
 2^-139.0`) are untouched: `b''` is fixed by the event-2 cap before `sd`, and `Y` before
-`eq_Y`. The bridge-union extractor `z_u`, ties 1 and 2 and the output claim disappear; the
-union leaves assumption (K) (its circuit) and (F) (its Flock instance).
+`eq_Y`.
 
 ## 9. The SkipPoint route: a multilinear skip basis
 
@@ -212,7 +203,7 @@ exist): the claim equals `sum b'' W` by brute force (`gf2_walker::transpose`); e
 round message equals the brute-force round polynomial of `W~ b''~` on random `b''` (cross
 terms included), and every in-block message too; the final value and `W~(r)` agree with
 dense evaluations; a wrong `y1` (flipped parity) changes the first message. `agg-keccak`
-(`tests/tied.rs`, release): round trips as in version 4; negative cases: a flipped `b'` bit
+(`tests/tied.rs`, release): round trips at 5 to 1,024 records, spans and parts; negative cases: a flipped `b'` bit
 with stale `Y`, a flipped `Y` bit, a tampered round message, a wrong `s_hat_v` of the bit
 claim, another `sd`; the existing statement, seed, segment-count and byte-flip cases.
 In `tied::tests`: a false bit value consistent with the chain (a chain copy of
