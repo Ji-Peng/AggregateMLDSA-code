@@ -1746,11 +1746,14 @@ impl<'a> Group<'a> {
             let count = DENSE_BLOCK_ROWS.min(rows - first);
             for (l, (reader, &shift)) in readers.iter().zip(shifts).enumerate() {
                 // SAFETY: the plane segment of lane `l` and rows `first..first + count` is
-                // written by this block only; every slot of the table is covered once.
-                let out = unsafe { std::slice::from_raw_parts_mut(base.get().add(l * rows + first), count) };
+                // written by this block only; every slot of the table is covered once. The
+                // slots are uninitialized, so they are viewed as `MaybeUninit` and written.
+                let out = unsafe {
+                    std::slice::from_raw_parts_mut(base.get().add(l * rows + first).cast::<std::mem::MaybeUninit<E>>(), count)
+                };
                 for (r, slot) in out.iter_mut().enumerate() {
                     let (even, odd) = reader.item(first + r);
-                    *slot = fold(&context, even, odd) - shift;
+                    slot.write(fold(&context, even, odd) - shift);
                 }
             }
             if evaluate {
@@ -1762,7 +1765,8 @@ impl<'a> Group<'a> {
                 Vec::new()
             }
         };
-        let total = if rows >= MIN_PARALLEL_ITEMS {
+        // Parallel once the table holds a few thousand cells (as for the other folds).
+        let total = if blocks > 1 && rows * lanes >= MIN_PARALLEL_ITEMS {
             (0..blocks).into_par_iter().map(run).reduce(|| vec![Acc::zero(); width], add_acc)
         } else {
             (0..blocks).map(run).fold(vec![Acc::zero(); width], add_acc)
@@ -1810,10 +1814,13 @@ impl<'a> Group<'a> {
             for l in 0..lanes {
                 let plane = &source[l * stride..l * stride + rows];
                 // SAFETY: rows `r0..r1` of plane `l` of the new table are written by this
-                // block only; every slot is covered once.
-                let out = unsafe { std::slice::from_raw_parts_mut(out.get().add(l * next_rows + r0), r1 - r0) };
+                // block only; every slot is covered once. The slots are uninitialized, so
+                // they are viewed as `MaybeUninit` and written.
+                let out = unsafe {
+                    std::slice::from_raw_parts_mut(out.get().add(l * next_rows + r0).cast::<std::mem::MaybeUninit<E>>(), r1 - r0)
+                };
                 for (r, slot) in (r0..r1).zip(out.iter_mut()) {
-                    *slot = fold(&context, plane[2 * r], plane[2 * r + 1]);
+                    slot.write(fold(&context, plane[2 * r], plane[2 * r + 1]));
                 }
             }
             if evaluate {
@@ -1825,7 +1832,7 @@ impl<'a> Group<'a> {
             }
         };
         let blocks = next_rows.div_ceil(DENSE_BLOCK_ROWS);
-        let total = if next_rows >= MIN_PARALLEL_ITEMS {
+        let total = if blocks > 1 && next_rows * lanes >= MIN_PARALLEL_ITEMS {
             (0..blocks).into_par_iter().map(run).reduce(|| vec![Acc::zero(); width], add_acc)
         } else {
             (0..blocks).map(run).fold(vec![Acc::zero(); width], add_acc)
