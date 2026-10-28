@@ -365,6 +365,20 @@ Open: an uncached public_data with fewer copies (keep the packed `t1` and unpack
 or borrow `pk` from the inputs); a packed 23-bit `A` cache; AVX2 kernels
 would need a crate outside the `unsafe_code = "forbid"` rule.
 
+## 8. Per-step profile with phase stamps
+
+`AGG_PHASE_STAMPS=1` makes the prover print `phase-stamp <step> <unix ns>` on stderr at the end
+of every prover step. `scripts/cpusample.py` samples the busy share of all vCPUs from
+`/proc/stat`, and `scripts/phase_profile.py` aligns both into per-step wall time and busy
+share (medians over several runs). "Busy" counts SMT siblings: 100% busy is not twice the
+throughput of 50%.
+
+```sh
+python3 scripts/cpusample.py STOP 0.1 > run.cpu &      # busy share every 100 ms until STOP exists
+AGG_PHASE_STAMPS=1 agg aggregate --records rec32k.bin --out a.bin 2> run.err
+touch STOP; python3 scripts/phase_profile.py run      # run.cpu + run.err: per-step wall time and busy share
+```
+
 ## 9. Lever W1: keep the event-2 Flock witness until the join
 
 ### 9.1 Change

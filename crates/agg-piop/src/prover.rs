@@ -212,6 +212,19 @@ pub fn max_flock_threads() -> usize {
     cpus.max(rayon::current_num_threads())
 }
 
+/// With `AGG_PHASE_STAMPS` set, print `phase-stamp <name> <unix time in ns>` on stderr when
+/// a prover step ends, so that an external CPU sampler can be aligned with the steps
+/// (`docs/perf.md`). Prover diagnostics only; off by default, no effect on the proof.
+pub fn phase_stamp(name: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("AGG_PHASE_STAMPS").is_some()) {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        eprintln!("phase-stamp {name} {ns}");
+    }
+}
+
 fn warn_once(message: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| eprintln!("agg-piop: {message}"));
@@ -251,15 +264,6 @@ fn fork_join<A: Send, B>(
             .expect("spawn the Flock thread");
         let b = piop();
         (crate::pcs::join_os_thread(handle), b)
-    })
-}
-
-/// Build the stages' parity tables beside the round-2 commitment (`AGG_PARITY_EARLY` set
-/// and `AGG_SCHED_SERIAL` unset), or in the fork (default). Read once per process.
-fn parity_beside_round2() -> bool {
-    static BESIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *BESIDE.get_or_init(|| {
-        !agg_pcs_config::sched::serial_schedule() && std::env::var_os("AGG_PARITY_EARLY").is_some()
     })
 }
 
@@ -617,6 +621,7 @@ fn prove_piop_with<'a>(
         );
     }
     run.lookup = clock.lap();
+    phase_stamp("lookup");
 
     // Events 8 and 9: tau and the pre-stage claims.
     let mut points = Points {
@@ -631,6 +636,7 @@ fn prove_piop_with<'a>(
         &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
     );
     run.prestage = clock.lap();
+    phase_stamp("prestage");
 
     // Stages 1 to 3.
     let weights_clock = Instant::now();
@@ -651,6 +657,7 @@ fn prove_piop_with<'a>(
     };
     points.r1 = stage1.point.clone();
     run.stage1 = clock.lap();
+    phase_stamp("stage1");
     let weights_clock = Instant::now();
     prover_tables.set_r1(matrices, &points.r1);
     if trace {
@@ -663,6 +670,7 @@ fn prove_piop_with<'a>(
     };
     points.r2 = stage2.point.clone();
     run.stage2 = clock.lap();
+    phase_stamp("stage2");
     let weights_clock = Instant::now();
     prover_tables.set_r2(public, &points.r2);
     if trace {
@@ -697,6 +705,7 @@ fn prove_piop_with<'a>(
     } = prover_tables;
     agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa));
     run.stage3 = clock.lap();
+    phase_stamp("stage3");
     run.points = points;
     run.r3 = stage3.point;
     run.pi_m = pi_m;
@@ -757,6 +766,7 @@ pub fn prove_with_tables_using(
         _ => TableCommitter::new(manifest.clone())?,
     };
     timings.setup = clock.lap();
+    phase_stamp("setup");
 
     // Events 0 to 3: instance (with the proof-of-work plan's digest),
     // round-1 commitments, Flock commitments, bridge seed.
@@ -773,11 +783,15 @@ pub fn prove_with_tables_using(
     let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
         || {
             let start = Instant::now();
-            (committer.commit_round1(main), start.elapsed())
+            let out = committer.commit_round1(main);
+            phase_stamp("round1-commit");
+            (out, start.elapsed())
         },
         || {
             let start = Instant::now();
-            (keccak.commitments(segments), start.elapsed())
+            let out = keccak.commitments(segments);
+            phase_stamp("flock-commit");
+            (out, start.elapsed())
         },
     );
     let [main16_round1, main_round1] = round1?;
@@ -794,6 +808,7 @@ pub fn prove_with_tables_using(
         .try_into()
         .expect("32 bytes");
     clock.lap();
+    phase_stamp("events1-3");
     timings.round1 = round1_time;
     timings.keccak = keccak_time;
 
@@ -808,20 +823,7 @@ pub fn prove_with_tables_using(
         main,
         bridge: &bridge_tables,
     };
-    // The parity tables of the stages need no challenge after event 3. Under
-    // `AGG_PARITY_EARLY` they are built beside the round-2 commitment (a memory-bound step
-    // that leaves threads idle on the cloud VM) instead of on the PIOP branch of the fork;
-    // opt-in (no net change at 8K records).
-    let (round2, mut early_parity) = if parity_beside_round2() {
-        let (round2, parity) = crate::pcs::overlap(
-            || committer.commit_round2(&bridge_tables),
-            || ProverTables::new(tables, &matrices),
-        );
-        (round2, Some(parity))
-    } else {
-        (committer.commit_round2(&bridge_tables), None)
-    };
-    let round2 = round2?;
+    let round2 = committer.commit_round2(&bridge_tables)?;
     let mut bridge_commitments: [Vec<u8>; 4] = Default::default();
     for (slot, group) in bridge_commitments.iter_mut().zip(&round2) {
         *slot = group.serialized()?;
@@ -834,6 +836,7 @@ pub fn prove_with_tables_using(
     let final_vectors: Vec<[u8; 512]> = final_bits.iter().map(|bits| pack_final_vector(bits)).collect();
     transcript.absorb(FINAL_VECTORS_SITE, segments, &final_vectors.concat())?;
     timings.round2 = clock.lap();
+    phase_stamp("round2");
     let flock_shares = keccak.shares(&matrices, &final_bits)?;
     if flock_shares.len() != segments {
         return Err(ProveError::Internal("one share item per segment".into()));
@@ -841,19 +844,23 @@ pub fn prove_with_tables_using(
     transcript.absorb_items(FLOCK_SHARES_SITE, &flock_shares)?;
     let flock_record = flock_record_digest(&final_vectors, &flock_shares);
     timings.keccak += clock.lap();
+    phase_stamp("shares");
 
     // The fork: the Flock proofs depend on nothing after event 6, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
     // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
     // (events 10 to 12) run on the global pool; the join absorbs them after stage 3.
     let flock_threads = if keccak.proves_concurrently() { flock_pool_threads() } else { 0 };
-    let prove_flock = || keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
+    let prove_flock = || {
+        let out = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
+        phase_stamp("flock-prove");
+        out
+    };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = early_parity
-                .take()
-                .unwrap_or_else(|| ProverTables::new(tables, &matrices));
+            let prover_tables = ProverTables::new(tables, &matrices);
+            phase_stamp("parity-tables");
             prove_piop_with(
                 manifest,
                 tables,
@@ -865,6 +872,7 @@ pub fn prove_with_tables_using(
             )
         });
         timings.fork_join = fork.elapsed();
+        phase_stamp("join");
         timings.flock_prove = flock_time;
         timings.keccak += flock_time;
         clock.lap();
@@ -877,7 +885,11 @@ pub fn prove_with_tables_using(
                 let start = Instant::now();
                 (prove_flock(), start.elapsed())
             },
-            || early_parity.take().unwrap_or_else(|| ProverTables::new(tables, &matrices)),
+            || {
+                let out = ProverTables::new(tables, &matrices);
+                phase_stamp("parity-tables");
+                out
+            },
         );
         let (flock_proofs, flock_time) = flock_proofs;
         timings.flock_prove = flock_time;
@@ -931,6 +943,7 @@ pub fn prove_with_tables_using(
     };
     let opening = committer.open_claims(commitments, &claims, &session)?;
     timings.opening = clock.lap();
+    phase_stamp("opening");
     let proof = AggregateProof {
         relation: manifest.relation(),
         records: n,
