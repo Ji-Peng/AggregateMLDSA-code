@@ -10,6 +10,7 @@
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
 use jolt_field::{Field, One, Ring, Zero};
+use rayon::prelude::*;
 
 use crate::kernel::{
     evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term, WeightIntGroup,
@@ -325,6 +326,10 @@ pub fn prove_stage_unchecked<'a>(
     prove_stage_with(spec, manifest, points, claims, resolve, transcript, false)
 }
 
+/// The groups of a round run concurrently while the main domain has at least this many
+/// unbound variables (`2^12` rows); below it the hand-off costs more than the overlap saves.
+const CONCURRENT_ROUNDS_MIN_VARS: usize = 12;
+
 fn prove_stage_with<'a>(
     spec: &StageSpec,
     manifest: &CommitmentManifest,
@@ -392,22 +397,46 @@ fn prove_stage_with<'a>(
     let mut round_times = Vec::with_capacity(rounds);
     for round in 0..rounds {
         let round_start = std::time::Instant::now();
-        let mut message = vec![E::zero(); spec.degree];
-        for (g, group) in groups.iter_mut().enumerate() {
+        // While the main-domain tables are large, the groups' messages are computed
+        // concurrently (each group is parallel inside, and the small-domain groups fill the
+        // pool beside the main-domain ones); the late rounds are too small to pay for the
+        // task hand-off and run in order. Either way the parts are summed in the fixed group
+        // order, so the message does not depend on the scheduling. With concurrency the
+        // per-group trace times overlap.
+        let concurrent = rounds - round >= CONCURRENT_ROUNDS_MIN_VARS;
+        let message_part = |group: &mut StageGroup<'a>| {
             let start = std::time::Instant::now();
-            for (slot, value) in message.iter_mut().zip(group.round_message(round)) {
+            let part = group.round_message(round);
+            (part, start.elapsed().as_secs_f64())
+        };
+        let parts: Vec<(Vec<E>, f64)> = if concurrent {
+            groups.par_iter_mut().map(message_part).collect()
+        } else {
+            groups.iter_mut().map(message_part).collect()
+        };
+        let mut message = vec![E::zero(); spec.degree];
+        for (g, (part, time)) in parts.into_iter().enumerate() {
+            for (slot, value) in message.iter_mut().zip(part) {
                 *slot += value;
             }
-            group_times[owner[g]].0 += start.elapsed().as_secs_f64();
+            group_times[owner[g]].0 += time;
         }
         let (message_site, challenge_site) = round_sites(spec.stage, round);
         transcript.absorb_extensions(&message_site, &message)?;
         let challenge = transcript.challenge_extensions(&challenge_site, 1)?[0];
         claim = evaluate_compressed(&message, claim, challenge);
-        for (g, group) in groups.iter_mut().enumerate() {
+        let bind_group = |group: &mut StageGroup<'a>| {
             let start = std::time::Instant::now();
             group.bind(round, challenge);
-            group_times[owner[g]].1 += start.elapsed().as_secs_f64();
+            start.elapsed().as_secs_f64()
+        };
+        let bind_times: Vec<f64> = if concurrent {
+            groups.par_iter_mut().map(bind_group).collect()
+        } else {
+            groups.iter_mut().map(bind_group).collect()
+        };
+        for (g, time) in bind_times.into_iter().enumerate() {
+            group_times[owner[g]].1 += time;
         }
         round_times.push(round_start.elapsed().as_secs_f64());
         messages.push(message);
