@@ -219,8 +219,9 @@ pub(in super::super) fn bit_transpose_64bytes_words(input: &[u8; 64], output: &m
 /// Window accumulation for one `x_outer_lo`: per lane, the convert-table sum
 /// of the 16 `b_med` bytes times `eq_lo_val`, XORed as a 256-bit unreduced
 /// product into `acc_*` (exact in `F_2[x]`, no term bound; the caller reduces
-/// each lane once per `x_hi` window). Three CLMUL-pair products instead of
-/// reduced multiplies, and no reduction per window.
+/// each lane once per `x_hi` window). Unreduced carry-less products (four
+/// CLMULs each with `pclmulqdq`) instead of reduced multiplies, and no
+/// reduction per window.
 #[allow(clippy::too_many_arguments)]
 #[cfg(not(target_arch = "aarch64"))]
 pub(super) fn accumulate_convert(

@@ -310,7 +310,9 @@ pub unsafe fn ghash_mul_karatsuba_barrett(a: F128, b: F128) -> F128 {
 }
 
 /// 256-bit unreduced Karatsuba product, for XOR-accumulation then one
-/// deferred `reduce()` of the exact polynomial product.
+/// deferred `reduce()` of the exact polynomial product. `F128::mul_unreduced`
+/// uses the register-resident schoolbook [`ghash_mul_unreduced_xmm`] instead
+/// (measured faster); this form remains as the tested Karatsuba reference.
 ///
 /// # Safety
 /// Requires `pclmulqdq`, as declared by the target-feature attribute.
