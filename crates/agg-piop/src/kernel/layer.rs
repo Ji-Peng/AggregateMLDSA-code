@@ -66,8 +66,9 @@ trait Level0: Sync {
     fn linear(&self) -> &[(usize, usize)];
     /// `(lane, lane, slot)` of the products of the summand on a table row.
     fn products(&self) -> &[(usize, usize, usize)];
-    /// The group's terminal lane values from the fully folded row.
-    fn terminal(&self, row: &[E]) -> Vec<E>;
+    /// The group's terminal lane values from the fully folded row and the bound
+    /// challenges (round order).
+    fn terminal(&self, row: &[E], challenges: &[E]) -> Vec<E>;
     /// A materialized level-0 table (then the rounds run on it from the first, and
     /// [`Self::first_item`] and [`Self::folded_row`] are never called).
     fn initial_table(&self) -> Option<Vec<E>> {
@@ -185,6 +186,8 @@ struct Engine<S: Level0> {
     unfolded: Vec<E>,
     /// The table from the first fold on (empty before it).
     table: Vec<E>,
+    /// Every bound challenge, in round order.
+    challenges: Vec<E>,
     arena: Option<super::SharedArena>,
     /// The products grouped by slot (each group reduced and weighted once per item).
     product_groups: Vec<(usize, Vec<(usize, usize)>)>,
@@ -218,6 +221,7 @@ impl<S: Level0> Engine<S> {
             pending: Vec::new(),
             unfolded: Vec::new(),
             table,
+            challenges: Vec::new(),
             arena: None,
             product_groups,
         })
@@ -561,6 +565,7 @@ impl<S: Level0> Engine<S> {
             eq.bind(challenge);
         }
         self.unfolded.push(challenge);
+        self.challenges.push(challenge);
         self.bound += 1;
         if self.bound == self.vars {
             self.pass(false, false);
@@ -569,7 +574,7 @@ impl<S: Level0> Engine<S> {
 
     fn terminal_values(&self) -> Vec<E> {
         assert_eq!(self.bound, self.vars, "all rounds bound");
-        self.source.terminal(&self.table)
+        self.source.terminal(&self.table, &self.challenges)
     }
 
     fn terminal_consistent(&self) -> bool {
@@ -693,7 +698,7 @@ impl Level0 for LayerSource<'_> {
         &self.products
     }
 
-    fn terminal(&self, row: &[E]) -> Vec<E> {
+    fn terminal(&self, row: &[E], _: &[E]) -> Vec<E> {
         let mut out = Vec::with_capacity(row.len());
         for (&(ratio, inverse), lanes) in self.ratio.iter().zip(row.as_chunks::<4>().0) {
             let q1 = lanes[1];
@@ -1133,7 +1138,7 @@ impl Level0 for IntSource<'_> {
         &self.products
     }
 
-    fn terminal(&self, row: &[E]) -> Vec<E> {
+    fn terminal(&self, row: &[E], _: &[E]) -> Vec<E> {
         let [_, cs, cm, ck, cmm] = self.c;
         match self.m {
             None => row.to_vec(),
@@ -1333,7 +1338,7 @@ impl Level0 for LinearSource<'_> {
         &[]
     }
 
-    fn terminal(&self, _: &[E]) -> Vec<E> {
+    fn terminal(&self, _: &[E], _: &[E]) -> Vec<E> {
         Vec::new()
     }
 }
@@ -1400,8 +1405,8 @@ impl<'a> LinearIntGroup<'a> {
 struct WeightIntSource<'a> {
     /// The weight lane (a public field table).
     weight: &'a [E],
-    /// The integer lanes in the group's lane order (all also carried in the table for their
-    /// terminal values) with their coefficients in the combination.
+    /// The integer lanes in the group's lane order with their coefficients in the
+    /// combination (their terminal values are evaluated at the bound point at the end).
     lanes: Vec<(super::Source<'a>, i64)>,
     constant: i64,
     /// The group lane of the weight (the others are the integer lanes in order).
@@ -1420,9 +1425,35 @@ impl WeightIntSource<'_> {
     }
 }
 
+/// `eq(point, x)` for every `x` of the Boolean cube (bit `j` of `x` paired with `point[j]`).
+fn eq_table(point: &[E]) -> Vec<E> {
+    let mut table = vec![E::one()];
+    for (j, &r) in point.iter().enumerate() {
+        let complement = E::one() - r;
+        let mut next = vec![E::zero(); 2 << j];
+        for (x, &value) in table.iter().enumerate() {
+            next[x] = value * complement;
+            next[x | (1 << j)] = value * r;
+        }
+        table = next;
+    }
+    table
+}
+
+impl WeightIntSource<'_> {
+    /// The multilinear extension of integer lane `lane` at `point` (bit `j` bound to
+    /// `point[j]`): weighted integer sums over two equality tables of half the variables.
+    fn evaluate_lane(lane: &super::Source<'_>, point: &[E]) -> E {
+        let split = point.len() / 2;
+        let first = eq_table(&point[..split]);
+        let second = eq_table(&point[split..]);
+        weighted_int_sums::<1>(lane.len(), &first, &second, |k| [int_cell(lane, k)])[0]
+    }
+}
+
 impl Level0 for WeightIntSource<'_> {
     fn width(&self) -> usize {
-        2 + self.lanes.len()
+        2
     }
 
     fn rows(&self) -> usize {
@@ -1485,10 +1516,6 @@ impl Level0 for WeightIntSource<'_> {
         out[0] = fold(context, self.weight[a], self.weight[b]);
         let (ga, gb) = (self.combination(a), self.combination(b));
         out[1] = E::from_i64(ga) + fmi(r, gb - ga);
-        for (slot, (lane, _)) in out[2..].iter_mut().zip(&self.lanes) {
-            let (low, high) = (int_cell(lane, a), int_cell(lane, b));
-            *slot = E::from_i64(low) + fmi(r, high - low);
-        }
     }
 
     fn linear(&self) -> &[(usize, usize)] {
@@ -1499,8 +1526,8 @@ impl Level0 for WeightIntSource<'_> {
         &[(0, 1, 0)]
     }
 
-    fn terminal(&self, row: &[E]) -> Vec<E> {
-        let mut out = row[2..].to_vec();
+    fn terminal(&self, row: &[E], challenges: &[E]) -> Vec<E> {
+        let mut out: Vec<E> = self.lanes.iter().map(|(lane, _)| Self::evaluate_lane(lane, challenges)).collect();
         out.insert(self.weight_lane, row[0]);
         out
     }
@@ -1508,8 +1535,9 @@ impl Level0 for WeightIntSource<'_> {
 
 /// `gamma sum_x w(x) g(x)` for a field weight lane `w` and the integer combination
 /// `g = sum_l c_l f_l + c` of integer or byte lanes (no equality factor; stage 3's `w_A z`).
-/// The first round sums `w g` with unreduced integer products; the table holds `w`, `g` and
-/// the integer lanes (folded for their terminal values).
+/// The first round sums `w g` with unreduced integer products; the table holds `w` and `g`
+/// only, and the integer lanes' terminal values are their multilinear extensions at the
+/// bound point, evaluated once at the end.
 pub struct WeightIntGroup<'a>(Engine<WeightIntSource<'a>>);
 
 impl<'a> WeightIntGroup<'a> {
