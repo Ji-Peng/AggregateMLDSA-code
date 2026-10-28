@@ -455,7 +455,7 @@ build; the 1,024-signature round trip is ignored in debug builds):
   message is rejected at the stage. Tampering (50 and 24 records, unchecked prover): a
   changed `z` digit, a changed `v` digit (residual off by `q`) and a flipped bit fail at
   stage 3 only; a non-Boolean bit, `w_1' >= 44`, a base-16 digit outside its alphabet, a
-  changed level-1 carry digit, a flipped level-2 parity and a flipped `Y` bit fail at
+  changed level-1 carry, a flipped level-2 parity and a flipped `Y` bit fail at
   stage 1; base-4 and base-8 digits outside their alphabets pass stage 1 and fail at
   stage 2.
 - `tests/prove_verify.rs`: a full prover run at 256 signatures; the opening claims taken
@@ -477,7 +477,7 @@ build; the 1,024-signature round trip is ignored in debug builds):
   record list, another Flock profile and a truncated aggregate. Every tampering of
   `tests/stages.rs` through the full prover (`prove_with_tables`, unchecked stages, honest
   public bits, 50 records): `z` and `v` digits at stage 3; a non-Boolean bit at stage 1;
-  base-4 and base-8 digits at stage 2; a level-1 carry digit and a level-2 parity at
+  base-4 and base-8 digits at stage 2; a level-1 carry and a level-2 parity at
   stage 1; a flipped committed bit, `w_1' = 44` in the committed bits and a flipped `Y`
   bit at the Keccak side (the final vector no longer matches the projection of the public
   bits); a base-16 digit of 9 cannot be committed (Akita: "committed source exceeds the
@@ -492,7 +492,7 @@ build; the 1,024-signature round trip is ignored in debug builds):
   `w_{3,t}`, `stage1::BridgeWeightsAt`) and at `r^(2)` (`w_1`) equal the extensions of the
   prover's weight tables at the transcript's points. Tampering through the full prover (48
   records, `FixedMatrices`, unchecked stages): a flipped `Y` bit, a flipped level-2 parity, a
-  level-1 and a level-3 carry digit, and a flipped committed bit under the stale round-2
+  level-1 and a level-3 carry, and a flipped committed bit under the stale round-2
   tables are each rejected at the stage-1 terminal.
 - `tests/commit_open.rs`, `tests/virtual_checker.rs`, `tests/source_tables.rs` as in part 1.
 

@@ -5,7 +5,7 @@
 
 use agg_bridge::parity::{self, IdentityError, ParityWitness};
 use agg_bridge::seed::derive_matrices_for;
-use agg_bridge::{carry, final_vector, gf2_walker, weights, Shape};
+use agg_bridge::{final_vector, gf2_walker, weights, Shape};
 use agg_witness::bridge::{BridgeMatrices, SparseMatrix};
 use agg_witness::gen::SplitMix64;
 use jolt_field::{Prime64Offset59 as F, Ring, Zero};
@@ -158,35 +158,6 @@ fn toy_instance_matches_a_dense_recomputation() {
     }
     parity::check(&shape, &[&bits], &m, &w).unwrap();
     assert!(w.y.contains(&1) && w.y.contains(&0));
-
-    // Carry digits: in their alphabets and recomposed exactly.
-    let tables = carry::group_tables(&shape, &w).unwrap();
-    assert_eq!(
-        (tables.g1.len(), tables.g2.len(), tables.g3.len()),
-        (2, 1 + 2, 2)
-    );
-    assert_eq!(
-        carry::compose_columns(shape.level(1), &tables.g1),
-        w.kappa1[0]
-    );
-    assert_eq!(
-        carry::compose_columns(shape.level(2), &tables.g2[1..]),
-        w.kappa2[0]
-    );
-    assert_eq!(carry::compose_columns(shape.level(3), &tables.g3), w.kappa3);
-    for (level, group) in [
-        (1, &tables.g1[..]),
-        (2, &tables.g2[1..]),
-        (3, &tables.g3[..]),
-    ] {
-        let layout = shape.level(level).carry;
-        for (k, column) in group.iter().enumerate() {
-            assert!(column
-                .iter()
-                .all(|&d| layout.alphabet(k).contains(i64::from(d))));
-        }
-    }
-    assert_eq!(tables.y, w.y_bits());
 
     // (b), (c) The GF(2) side: the forward walk equals the dense composite and the Fp
     // parities reduced modulo 2 at every level.
@@ -400,12 +371,6 @@ fn tampered_parities_and_carries_fail_the_identities() {
     let mut w = honest.clone();
     w.kappa3.push(0);
     assert_eq!(fails(&w), IdentityError::Shape);
-    assert!(carry::group_tables(&shape, &{
-        let mut w = honest.clone();
-        w.kappa2[0][0] = 32;
-        w
-    })
-    .is_err());
     // Non-Boolean inputs.
     let mut two = bits.clone();
     two[17] = 2;
@@ -461,13 +426,6 @@ fn carries_at_the_range_boundary_and_the_row_weight_abort() {
                 parity::compute(&shape, &lanes, &over),
                 Err(agg_witness::bridge::BridgeError::RowWeight)
             );
-            // The largest carry has every digit at the top of its alphabet.
-            let top: Vec<i64> = (0..level.carry.len())
-                .map(|k| level.carry.alphabet(k).max())
-                .collect();
-            assert_eq!(carry::digits(level, level.carry_max()).unwrap(), top);
-            assert!(carry::digits(level, level.carry_max() + 1).is_err());
-            assert!(carry::digits(level, -1).is_err());
             if t == 1 {
                 // All-one inputs on a row of weight exactly W_1: sum W_1, parity 1, top carry.
                 let w = parity::compute(&shape, &lanes, &with(cap)).unwrap();
@@ -478,10 +436,4 @@ fn carries_at_the_range_boundary_and_the_row_weight_abort() {
             }
         }
     }
-    let production = Shape::PRODUCTION;
-    assert_eq!(
-        carry::digits(production.level(1), 1023).unwrap(),
-        vec![7, 7, 1]
-    );
-    assert_eq!(carry::digits(production.level(3), 255).unwrap(), vec![7, 7]);
 }

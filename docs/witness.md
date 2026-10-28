@@ -49,14 +49,13 @@ Per live record, with z from sigDecode (integers in [-gamma1 + 1, gamma1]):
 | Strict derivation | \|v\| <= B_v | 67,068,447 | invariant ((3.4'): DELTA0_MAX = 562,061,561,757,697) |
 | Strict derivation | Delta_0 = 0 mod q; CRT = NTT path mod q | | invariants |
 | `derive_unchecked` | sigDecode succeeds (length, HintBitUnpack) | | only check |
-| Bridge (`BridgeTables`) | kappa1, kappa2 in [0, 1023]; kappa3 in [0, 255] | digits 16,16,4 and 16,16 unsigned | `KAPPA12_DIGITS`, `KAPPA3_DIGITS` |
 | Bridge (honest abort) | row weight of M_1, M_2 <= 2,047; of M_3 <= 511 | | `BridgeError::RowWeight` |
 | Re-encoding | z in (-gamma1, gamma1]; sum h <= 80; UseHint(h, w') = w1' reachable | h = [HighBits(w') != w1'] | `ReencodeError` |
 | H-FIPS witness (`HFipsRecord::from_witness`) | \|z\| <= B_z (bit-slack digits in their alphabets); every coefficient's (F1) to (F6) | | `HFipsError` |
 | Geometry | 1 <= N <= 2^15; N* = max(next_pow2(N), 8) | | `GeometryError` |
 
 Digit constants and ranges (checked by enumeration in `digits` tests, as `spec_checks.py`
-item 8): C_kappa12 = 648, C_kappa3 = 136. The H-u step form of u with one 16-bit low digit,
+item 8). The H-u step form of u with one 16-bit low digit,
 u = U_lo + 63,079 U_hi + 31,540, covers exactly [-190,465, 190,465] because
 5 * 63,079 + 2^16 = 2 B_u + 1 and 63,079 <= 2^16 (exhaustive test
 `u_step_form_is_exact_at_the_slack_boundaries`; +-190,466 have no in-alphabet digits). The

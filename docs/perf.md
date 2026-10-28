@@ -86,10 +86,10 @@ timer are by difference of timestamps (marked "diff").
 | --- | ---: | ---: | ---: | ---: | --- |
 | instance (ExpandA, mu, c, T) | 578 | 3,246 | 5.6 | 5.4 (with witness) | `NttPrime::ntt_signed/intt`, `public_t`, SHAKE |
 | witness and `G_main` tables | 777 | 3,451 | 4.4 | | `az_crt`, Akita NTT |
-| event 2, Flock witness build `honest_parts` + `statement` (diff) | ~890 | ~2,464 | **2.8** | | `pack_rows`, **`SpongeRecord::input_bits` (serial)**, `ChainGate::apply_ab/honest_z` |
+| event 2, Flock witness build `honest_parts` + `statement` (diff) | ~890 | ~2,464 | **2.8** | | `pack_slot`, **`SpongeRecord::input_bits` (serial)**, `ChainGate::apply_ab/honest_z` |
 | event 2, sponge commit: lane fill / NTT (rate 1/4) / Merkle | 87 / **1,087** / 180 | 393 / 5,972 / 1,036 | 4.5 / 5.5 / 5.8 | 5.7 | **`kernels::portable::butterfly_fused_2layer` 32%**, `ghash_mul_karatsuba_barrett` 25%, BLAKE3 avx512 12% |
 | events 3-5: matrices, round 2 | 302 | 1,496 | 5.0 | 4.1 (with rebuild) | software `keccak_p` in `agg_bridge::seed::derive_column_into`, `level1_sums` |
-| event 6, witness rebuild + `reattach` (diff) | ~725 | ~2,410 | **3.3** | 1.0-2.1 for ~0.3 s | **`input_bits` 71% at ~1.3 threads**, `pack_rows` |
+| event 6, witness rebuild + `reattach` (diff) | ~725 | ~2,410 | **3.3** | 1.0-2.1 for ~0.3 s | **`input_bits` 71% at ~1.3 threads**, `pack_slot` |
 | bridge blocks / bridge rows and commitment | 18 / 116 | 100 / 318 | | | |
 | sponge zerocheck: round 1 (URM) / round 2 / tail | **1,807** / 190 / 170 | 9,936 / 976 / 914 | 5.5 | 5.6 | **`kernels::portable::shift_reduce_inner_ab_scalar` 38%**, `round1_shift_reduce_extract...` 37%, portable `accumulate_convert_with_s_hat_v` |
 | sponge lincheck: comb / union partial folds / sumcheck | 20 / 193 / 4 | 20 / 179 / 18 | **~1.0** (folds) | 4.9 | `partial_fold_packed_z_x86_tiled_padded` |

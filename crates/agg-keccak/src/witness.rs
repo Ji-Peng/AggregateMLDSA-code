@@ -42,19 +42,7 @@ where
     F: Fn(usize, &mut [u64], &mut [u64], &mut [u64]) + Sync,
 {
     let lay = gate.layout();
-    pack_rows(lay.k_log, lay.useful_bits, nu, n, rows)
-}
-
-/// [`pack_slot`] for any block geometry: `n <= 2^nu` instances of a type with block width
-/// `2^k_log` whose columns `[0, useful_bits)` carry data. `rows(j, z, a, b)` writes instance
-/// `j` into zeroed slices of `ceil(useful_bits / 64)` words.
-///
-/// # Panics
-/// If `n > 2^nu`, `nu < 3`, `k_log < 7` or `useful_bits > 2^k_log`.
-pub fn pack_rows<F>(k_log: usize, useful_bits: usize, nu: usize, n: usize, rows: F) -> SlotBuffers
-where
-    F: Fn(usize, &mut [u64], &mut [u64], &mut [u64]) + Sync,
-{
+    let (k_log, useful_bits) = (lay.k_log, lay.useful_bits);
     assert!(nu >= 3, "Flock's lincheck stripe needs at least 8 rows");
     assert!(n <= 1 << nu, "count exceeds the row capacity");
     assert!(k_log >= 7 && useful_bits <= 1 << k_log, "block geometry");

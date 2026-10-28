@@ -232,8 +232,8 @@ tie challenger (tied-part proof version 5, deviation K21, Section 12.7,
 claims, not by Flock's word copies.
 
 - `flock_union::UnionGeometry` (a registry of one or more boolean types in the caller's order,
-  declared counts, PCS parameters derived as in Section 4; `new` for one type, `new_multi`
-  for several, `slot(i)` maps a caller type to Flock's slot, which Flock sorts by `k_log`):
+  declared counts, PCS parameters derived as in Section 4; `new` builds one of a single type,
+  `slot(i)` maps a caller type to Flock's slot, which Flock sorts by `k_log`):
   `commit_data(slot_zs) -> CommitData` (the event-2 cap of the padded union buffer with
   Flock's prover data, its codeword and Merkle tree), `commit(slot_zs)` (the cap alone),
   `prove(buffers, circuits, points, challenger, pre) -> (UnionProof, cap)` and

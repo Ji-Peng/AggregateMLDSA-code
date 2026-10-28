@@ -322,56 +322,6 @@ pub fn gf2_composite(geom: &Geometry, b: &[&[i8]; W1_BITS], mats: &BridgeMatrice
     y
 }
 
-/// The committed bridge groups (round 2) and the public Y.
-///
-/// Column order: G_1 = kappa^(1)_{t,k} at index 3 t + k; G_2 = y^(2)_t at index t, then
-/// kappa^(2)_{t,k} at 6 + 3 t + k; G_3 = kappa^(3)_k at index k (t < 6, digits least significant
-/// first). Logical lengths 2^{d_1}, 2^{d_2}, 2^{d_3} (physical zero-extension to 2^13 is the PCS's).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BridgeTables {
-    /// G_1: 18 carry-digit columns on D_1.
-    pub g1: Vec<Vec<i8>>,
-    /// G_2: 6 parity columns and 18 carry-digit columns on D_2.
-    pub g2: Vec<Vec<i8>>,
-    /// G_3: 2 carry-digit columns on D_3.
-    pub g3: Vec<Vec<i8>>,
-    /// Public Y on D_3 (Y_sigma[rho_3] at rho_3 + 2^12 sigma).
-    pub y: Vec<u8>,
-}
-
-fn digit_columns(
-    values: &[i64],
-    layout: &crate::digits::DigitLayout,
-) -> Result<Vec<Vec<i8>>, &'static str> {
-    let mut cols = vec![Vec::with_capacity(values.len()); layout.len()];
-    for &v in values {
-        for (k, d) in layout.decompose(v).into_iter().enumerate() {
-            cols[k].push(i8::try_from(d).map_err(|_| "carry digit does not fit i8")?);
-        }
-    }
-    Ok(cols)
-}
-
-impl BridgeTables {
-    /// Commits the honest witness: carries by their digits.
-    pub fn from_witness(w: &BridgeWitness) -> Result<Self, &'static str> {
-        use crate::digits::{KAPPA12_DIGITS, KAPPA3_DIGITS};
-        let mut g1 = Vec::new();
-        for t in 0..W1_BITS {
-            g1.extend(digit_columns(&w.kappa1[t], &KAPPA12_DIGITS)?);
-        }
-        let mut g2: Vec<Vec<i8>> = (0..W1_BITS)
-            .map(|t| w.y2[t].iter().map(|&y| y as i8).collect())
-            .collect();
-        for t in 0..W1_BITS {
-            g2.extend(digit_columns(&w.kappa2[t], &KAPPA12_DIGITS)?);
-        }
-        let g3 = digit_columns(&w.kappa3, &KAPPA3_DIGITS)?;
-        let y = w.y.iter().map(|&v| v as u8).collect();
-        Ok(Self { g1, g2, g3, y })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

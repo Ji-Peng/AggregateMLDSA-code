@@ -29,15 +29,12 @@ aerie-falcon = { workspace = true }
 aerie-prover = { workspace = true }
 aerie-simd = { workspace = true }
 akita-algebra = { workspace = true }
-akita-config = { workspace = true }
 akita-error = { workspace = true }
 akita-params = { workspace = true }
 akita-pcs = { workspace = true }
 akita-serialization = { workspace = true }
-akita-sumcheck = { workspace = true }
 akita-transcript = { workspace = true }
 akita-types = { workspace = true }
-akita-verifier = { workspace = true }
 jolt-field = { workspace = true }
 jolt-poly = { workspace = true }
 spongefish = { workspace = true }

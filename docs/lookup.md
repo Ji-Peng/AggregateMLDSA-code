@@ -6,7 +6,7 @@ under two presets with generated catalogs. The
 normative text is `docs/spec.md` Sections 4, 7, 10 to 12; departures
 are `docs/deviations.md` L1 to L7, D2. Sections 1 to 6 are the argument, its soundness
 (with the comparison of remedies for the identity term, Section 2.1), the column counts, the
-costs (prototype and integrated), the module and the integration as implemented.
+costs, the module and the integration as implemented.
 
 References: LogUp (Haboeck, ePrint 2022/1530, Lemma 5), LogUp-GKR (Papini and Haboeck,
 ePrint 2023/1284, Sections 3-4, Propositions 1-2),
@@ -67,7 +67,7 @@ Two design rules, both forced by soundness:
    `F_p` element, so Lemma 5 only puts a looked-up value in the *union* of the tables: a
    `T_16` column could hold `65,536..67,583` and the tagged `v_hi` any of
    `-2^16..2^11 - 1`. No integer offset separates tables (column `c` with offset `o_c`
-   may take `tau - o_c` for any foreign entry `tau`). The prototype therefore proves one
+   may take `tau - o_c` for any foreign entry `tau`). The module therefore proves one
    identity per table (test `two_tables_verify_and_a_cross_table_value_is_rejected`
    books a `T_8` cell valued 300 under `T_16`, which the shared identity would accept).
 2. *No `T_11` at all.* `v` needs no exact range: spec (6.1) lifts `Delta = 0` to the
@@ -221,7 +221,7 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 | --- | ---: | --- | ---: | --- |
 | one `X` | `(L + M - 1)/|K| = 2^-101.0` | 1 | 22,896 | below the 128-bit ledger |
 | (i) one `X` and a 28-bit work nonce | `2^-129.0` (difficulty 28) | `+27.6 s` nonce search on 7 threads (Section 4.4), about 7x the second challenge | 22,896 + nonce | above Akita's 25-bit cap (the nonce format of wire version 2 caps targets at 25 bits) |
-| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.46x (1,024) to 1.54x (8,192) of the lookup prover (prototype, Section 4.2); integrated figures in Section 4.5 | 28,784 | the identity term needs no grinding; the GKR rounds are ground to Aerie's schedule in wire version 2 (`docs/soundness.md`); before grinding the lookup is at about `2^-117.9` (`1,106/|K|`) |
+| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.41x (1,024) to 1.54x (2,048) of the lookup prover (Section 4.5) | 28,784 | the identity term needs no grinding; the GKR rounds are ground to Aerie's schedule in wire version 2 (`docs/soundness.md`); before grinding the lookup is at about `2^-117.9` (`1,106/|K|`) |
 | (iii) `X` in `F_{p^4}` (trees over the degree-4 extension, challenges of the sessions in `K`) | `(L + M - 1)/p^4 = 2^-229` | every tree node and lane product in `F_{p^4}`: 3 `K`-multiplications per product (Karatsuba) plus a constant, about 3x the arithmetic of one challenge, i.e. 2x that of (ii); a kernel field change | about 2x of one `X` (every layer value and message in `F_{p^4}`) | rejected: dearer than (ii) |
 | (iv) tighter counting (bound `deg N` by the distinct out-of-table values) | none: an adversary can make every `f_i` distinct, `deg N = L + M - 1` is reachable | 0 | 22,896 | no improvement in the worst case |
 | (v) the conjugate `X^p` as a second point | none: `N` has coefficients in `F_p`, so `N(X) = 0` implies `N(X^p) = 0` | 0 | 22,896 | no information |
@@ -239,7 +239,7 @@ schedule (`docs/soundness.md`: 2 bits per GKR round, a merge 1
 bit, a batching vector `bit_length(2 active)`; deviation P3). Implementation-level savings that keep the soundness of (ii),
 both implemented in Section 4.6: build both tree sets in one pass over the stacked lanes (the leaves are read
 once, the two `(p, q)` pairs per node stored side by side), and recompute the bottom layer
-in session `D - 1` instead of storing it (Section 4.3). Both change only the prover.
+in session `D - 1` instead of storing it (Section 4.6 item 1). Both change only the prover.
 
 **Extraction** (spec 12.2 with L16). Akita yields `F_p` values for every committed column
 (Remark 10.41). Except with the terms above: every looked-up cell is an entry of `T_16`,
@@ -253,33 +253,25 @@ carry is an integer in `[0, 2^16)`, enough for (9.2) (`docs/bridge.md` Section 4
 
 ## 3. Column counts
 
-Per position (main domain): 23 columns (`z` 5, `u` 5, `v` 7, `b` 6) become 12
-(`Z_lo, Z_hi, U_lo, U_hi, V_lo, V_hi, b_0..b_5`). Committed elements per signature:
+Per position (main domain): 12 columns (`Z_lo, Z_hi, U_lo, U_hi, V_lo, V_hi, b_0..b_5`).
+Committed elements per signature:
 
-| | Before (spec 4.1) | L16 | Change |
-| --- | ---: | ---: | ---: |
-| Main domain | 23,552 | 12,288 | -47.8% |
-| `D_1` carries (`N = 2^15`, `2^19` cells) | 288 (18 columns) | 96 (6) | |
-| `D_2` parities and carries (`2^15` cells) | 24 (6 + 18) | 12 (6 + 6) | |
-| `D_3` carries (`2^14` cells) | 1 (2) | 0.5 (1) | |
-| Multiplicities `m` (7 digits x `2^16` cells) | 0 | 14 | |
-| **Total at `N = 2^15`** | **23,865** | **12,410.5** | **-48.0%** |
-| Total at `N = 1,024` (physical cells, 13-variable minimum) | 24,048 | 12,936 | -46.2% |
+| | L16 |
+| --- | ---: |
+| Main domain | 12,288 |
+| `D_1` carries (`N = 2^15`, `2^19` cells) | 96 (6 columns) |
+| `D_2` parities and carries (`2^15` cells) | 12 (6 + 6) |
+| `D_3` carries (`2^14` cells) | 0.5 (1) |
+| Multiplicities `m` (7 digits x `2^16` cells) | 14 |
+| **Total at `N = 2^15`** | **12,410.5** |
+| Total at `N = 1,024` (physical cells, 13-variable minimum) | 12,936 |
 
 At `N = 1,024`, `m` costs 448 elements per signature (7 x `2^16` / 1,024); it is
-independent of `N`. Akita inner digits per position: the width-4 columns keep one; the
-four width-16 columns need one balanced base-`2^16` digit if the preset forces it
-(`num_digits_inner_for_bound(16, 16) = 1`) or three base-`2^6` digits under the planner's
-cost-optimal choice (`docs/pcs-config.md` Section 2: estimate 51,961 B against 37,625 B
-for width 4, one polynomial at 13 variables). So 12 (forced) or 20 (planner) inner
-digits per position instead of 23. Decided (deviation L3): the planner's estimated proof
-is the same for one, two or three inner digits at the `G_main16` layouts, so the preset
-forces one digit, 12 inner digits per position.
-
-Instances removed from the stages: 40 `b16_prod` (stage 1), 93 of 95 leaves (stage 2),
-53 of 55 links (stage 3), 25 carry-digit evaluation reductions (stage 3); added: 4
-lookup reductions (stage 3). Claims before stage 1 fall from 26 to 13, before stage 2
-from 18 to 6.
+independent of `N`. Akita inner digits per position: one per width-4 column, and one forced
+balanced base-`2^16` digit per width-16 column, so 12 per position (deviation L3: the
+planner's estimated proof is the same for one, two or three inner digits at the `G_main16`
+layouts; its cost-optimal choice would be three base-`2^6` digits, `docs/pcs-config.md`
+Section 2).
 
 ## 4. Prover cost
 
@@ -299,60 +291,8 @@ one weight product per point, one fold per lane and pair):
 Leaves per signature (main stack 4,096, carry stacks with their padding slots, table
 `2^16 / N`): 4,356 at `N = 1,024`, 4,240.5 at 8,192, 4,234.5 at `2^15`. Per signature:
 about 91K `K`-multiplications with one challenge and 144K with two at 1,024 (89K and 140K
-at `2^15`), i.e. 270K to 430K `F_p` multiplications. The four stage-3 reductions it adds
+at `2^15`), i.e. 270K to 430K `F_p` multiplications. The four stage-3 stack reductions
 cost about 4K per signature (4 linear lanes, degree 2).
-
-Current range machinery, same counting: stage 2's main group (17 `P_Z` lanes, degree 5)
-costs 346 products per pair from round 2 on (`17 x 5` Horner evaluations of degree 4,
-weights, `eq`) plus 17 folds, about 96 per position or 98K per signature; with `def_y1`
-and the carry groups, stage 2 is about 100K per signature. The lookup also removes
-stage 1's `b16_prod` share (about 36K per signature: 28 of the 34 lanes of the main
-`eq(tau)` group) and the stage-3 links (about 20K), so the range machinery it replaces is
-about 160K per signature against 91K (one challenge) or 144K (two).
-
-### 4.2 Measured (this machine, 7 threads, default build)
-
-Baseline: stage 2 at `N = 1,024` on `7ed4a32`, median of 6 runs of
-`mode_b_round_trip_at_1024_signatures` with `AGG_STAGE_TRACE=1` (load average 0.5 to
-1.6): **464.6 ms, 454 us per signature** (stage 1 277.0 ms, stage 3 374.5 ms). Per group (message + bind): main leaves 346.9 ms,
-`def_y1` 58.2, carry leaves on `D_1, D_2, D_3` 25.0, 19.5, 1.7. Stage 2 at 8,192 is not
-run here (memory rule); the 16-vCPU cloud machine takes 5,020.5 ms at 32,768.
-
-Prototype on the same kernel (`7ed4a32` plus `lookup.rs`), the full L16 layout (main stack and
-three carry stacks, one table), `timing_at_1024_and_8192_signatures`, load average 3.9
-to 5.3 including the run itself (a first run at 4.5 to 6.6 agreed within 5%):
-
-| `N` | `X` | Prove | per signature | trees | layer sessions | bottom session | verify | proof | stored layers | peak RSS |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,024 | 1 | 260.9 ms | 255 us | 18.2 | 159.1 | 84.0 | 0.50 ms | 16,240 B | 136 MiB | 172 MiB |
-| 1,024 | 2 | 379.9 ms | 371 us | 30.7 | 259.8 | 86.9 | 0.56 ms | 21,232 B | 272 MiB | 321 MiB |
-| 8,192 | 1 | 1,818.9 ms | 222 us | 140.9 | 966.6 | 711.4 | 0.62 ms | 19,936 B | 1,060 MiB | 1,336 MiB |
-| 8,192 | 2 | 2,794.3 ms | 341 us | 283.3 | 1,801.3 | 707.3 | 0.69 ms | 25,312 B | 2,120 MiB | 2,292 MiB |
-
-(layer sessions = sessions minus the bottom one; the next-largest session, `s = D - 1`,
-is 53.9 / 96.9 ms at 1,024 and 452.0 / 844.8 ms at 8,192.) The second challenge costs
-1.46x at 1,024 and 1.54x at 8,192, not 2x, because the bottom session is shared.
-
-**Against stage 2 at `N = 1,024`: 255 us per signature (one challenge) or 371 us (two)
-against 454 us, i.e. 0.56x or 0.82x of stage 2 alone,** while the lookup replaces more
-than stage 2's range part. Lane-share estimates from the same traces: stage 1's
-`b16_prod` share about 206 ms (82% of the main `eq(tau)` group, 80% of the carry
-groups), stage 2's leaves 393.1 ms (measured), stage 3's links and the narrower `ring`
-and `w_A z` groups about 160 ms: about 760 ms of the 1,116 ms of stages 1 to 3. Adding
-the lookup with two challenges (380 ms) and the new reductions (about 20 ms, estimate),
-stages 1 to 3 plus the lookup would cost about 0.76 s instead of 1.12 s at 1,024 (-32%,
-estimate), before the PCS gains (46% fewer committed elements).
-
-### 4.3 Extrapolation to `N = 2^15` (estimates, this machine)
-
-The per-signature cost is flat from 1,024 to 8,192 (the trees are linear in the leaves),
-so 4x the 8,192 figures: about 7.3 s with one challenge and 11.2 s with two on 7 threads;
-stored layers 4.1 and 8.3 GiB, peak RSS of the stage about 5.2 and 9.0 GiB (the trees are
-dropped before stage 1, so this is a stage peak, not an addition to the process peak;
-stage 1's main group holds about 4.6 GB at `2^15`, `docs/piop.md` Section 6).
-Mitigations if memory matters: recompute the bottom layer from the columns in session
-`D - 1` instead of storing it (halves the stored layers), and a 16-bit cell lane that
-folds through two `2^16`-entry tables.
 
 ### 4.4 Option (i): the work nonce (measured)
 
@@ -370,7 +310,7 @@ at the `X` site:
 The nonce is about 7x dearer than the second challenge even with a parallel search, and
 above 25 bits it is not expressible in the pinned Akita transcript. Hence option (ii).
 
-### 4.5 One against two challenges on the current kernel, and the integrated protocol
+### 4.5 One against two challenges, and the integrated protocol
 
 Standalone (`timing_at_1024_and_8192_signatures` with `AGG_LOOKUP_SIGS=1024,2048`, the
 CLMUL build, 7 threads, warmup plus five runs, medians;
@@ -383,28 +323,12 @@ load average 6.6 to 6.8 including the run and another agent's tests):
 | 2,048 | 1 | 401.5 ms | 196 us | 48.6 | 354.2 | 118.6 | 0.55 ms | 17,424 B | 268 MiB | 576 MiB |
 | 2,048 | 2 | 617.1 ms | 301 us | 97.6 | 519.4 | 122.8 | 0.61 ms | 22,544 B | 536 MiB | 756 MiB |
 
-The second challenge costs 1.41x at 1,024 and 1.54x at 2,048 (the bottom session is
-shared), the same ratio as the prototype's on the older kernel.
+The second challenge costs 1.41x at 1,024 and 1.54x at 2,048, not 2x, because the bottom
+session is shared.
 
-Integrated, end to end (CLMUL build,
-interleaved with `4247f61`, medians of 5 after 1 warmup, load average 6.1 to 8.7), mode B:
-
-| `N` | Prove before / after | Lookup | Stages 1-3 before / after | Main-domain commitments before / after | Committed cells per signature before / after | Aggregate without bits before / after |
-| ---: | --- | ---: | --- | --- | --- | --- |
-| 256 | 0.674 / 0.655 s | 113 ms | 175 / 77 ms | 37 / 18 ms | 24,928 / 14,672 | 76,425 / 92,630 B |
-| 1,024 | 1.157 / 1.135 s | 283 ms | 404 / 218 ms | 151 / 45 ms | 24,040 / 12,932 | 102,984 / 121,508 B |
-| 2,048 | 1.710 / 1.817 s | 572 ms | 740 / 386 ms | 190 / 82 ms | 23,940 / 12,658 | 135,948 / 157,057 B |
-
-Mode A at 1,024 / 2,048: prove 2.629 -> 2.555 s and 3.957 -> 4.109 s (the Flock part is the
-same code), verify 306 -> 283 and 392 -> 346 ms uncached, 700.8 -> 718.9 and 405.1 -> 415.4 B
-per signature. The aggregate without the public bits grows by 16.2, 18.8, 18.5 and 21.1 KB at 256, 512,
-1,024 and 2,048 (mode A: 18.5 and 21.1 KB at 1,024 and 2,048): the lookup proof minus the
-shorter stage claims. The layout halves the committed cells and makes the main-domain commitments
-2 to 3x faster, but with the kernel of `docs/piop.md` Section 18 the old range machinery cost
-only about 0.2 ms per signature, so the lookup (0.28 ms per signature) makes the prover
-break-even at 256 to 1,024 and 6% slower at 2,048 locally; the estimate of Section 4.2
-(-32%) predates that kernel. Stage 3 stays at about 0.12 ms per signature: its four 16-bit
-columns are generic `Ints` lanes.
+Integrated (mode B): committed cells per signature 14,672, 12,932 and 12,658 at 256, 1,024
+and 2,048 signatures. Stage 3 takes about 0.12 ms per signature locally (CLMUL build): its
+four 16-bit columns are generic `Ints` lanes.
 
 ### 4.6 Dedicated prover paths
 
@@ -469,12 +393,12 @@ estimate); the small-value rounds 1 and 2 of the bottom session from the integer
 
 ## 5. The module (`crates/agg-piop/src/lookup.rs`)
 
-The prototype's construction, now driven by the PIOP transcript:
+The construction, driven by the PIOP transcript:
 
 - `Table` (`T_w`, index halves, `index_evaluation`), `StackShape` (columns, variables,
   table, storage `shift`; `slots`, `depth`, `leaves`, `padding = -shift`, `column_weights`,
   `column_claim`, which removes the public padding slots from a stacked claim),
-  `LookupStack::new(&[&[i32]], table)` (zero shift, a copy, the prototype tests),
+  `LookupStack::new(&[&[i32]], table)` (zero shift, a copy; unit tests),
   `LookupStack::with_shift` and `LookupStack::borrowed(shape, &stacked)` (the integrated
   stacks, no copy).
 - `multiplicities(stacks, tables)`: parallel histogram per table of `stored + shift`,
@@ -490,28 +414,26 @@ The prototype's construction, now driven by the PIOP transcript:
   `identity_error_log2`, `proof_elements`); the integrated shape is
   `CommitmentManifest::lookup_shape` (four stacks, `T_16`, two challenges, shift `2^15`).
 - `LookupTranscript` (absorb, challenges at a `LookupSite`): implemented by the PIOP
-  transcript (sites `agg-mldsa/v1/lookup/<site>`, `docs/deviations.md` L5) and by the
-  standalone `Fs` (a SHAKE256 transcript bound to the layout and a caller binding, for the
-  unit tests and timings).
+  transcript (sites `agg-mldsa/v1/lookup/<site>`, `docs/deviations.md` L5); the unit tests
+  and timings use a SHAKE256 test transcript bound to the layout.
 - `FractionTree`: layers `0 .. depth - 1` stored as `K` pairs, built in parallel from the
   leaves (the bottom layer straight from the `i32` cells: `1` `K`-multiplication per node;
   upper layers `3`); layer `s` is freed after session `s`. For a stack on the integer path
   (Section 4.6, `SymLanes`) the layers stop at `depth - 2`, built for every challenge in one
   pass (`stack_upper_bottoms`).
 - `prove_in(stacks, tables, multiplicities, challenges, transcript, check)` and
-  `verify_in(shape, proof, transcript) -> LookupClaims`; `prove`/`verify` wrap them with
-  `Fs`. Section 1 exactly; the verifier through `kernel::{Group, GroupInstance,
-  Lane::Source(Source::Field | Source::Ints), Term::{Product, Affine}, evaluate_compressed,
-  expected_terminal}` only, the prover on the dedicated groups of Section 4.6
+  `verify_in(shape, proof, transcript) -> LookupClaims`, Section 1 exactly; the verifier
+  through `kernel::{Group, GroupInstance, Lane::Source(Source::Field | Source::Ints),
+  Term::{Product, Affine}, evaluate_compressed, expected_terminal}` only, the prover on the dedicated groups of Section 4.6
   (`kernel::{LayerGroup, IntPairGroup}`), whose split of the instances into groups differs
   from the verifier's plan (`session_plan`) but whose messages, sums over the groups, do not.
   `check` runs the prover's root-identity and session self-checks (tests pass `false` to
   hand a dishonest witness to the verifier). The claims go to stage 3 (stacks) and to the
   multiplicity-digit claims (table).
-- Unit tests (`cargo test -p agg-piop --release --lib lookup`, 8 tests): as before (tree
+- Unit tests (`cargo test -p agg-piop --release --lib lookup`, 8 tests): tree
   roots, digits, honest layouts at one and two challenges, two tables and a cross-table
   cheat, wrong multiplicities, tampered messages and claims, a swapped stack leaf pair
-  caught by the claim) and `dedicated_paths_match_the_generic_kernel` (Section 4.6). The
+  caught by the claim, and `dedicated_paths_match_the_generic_kernel` (Section 4.6). The
   integrated tests are in `tests/stages.rs` (Section 6).
 - Ignored timing tests: `timing_at_1024_and_8192_signatures` (Section 4; sizes from
   `AGG_LOOKUP_SIGS`, threads from `RAYON_NUM_THREADS` (default 7), challenge counts from

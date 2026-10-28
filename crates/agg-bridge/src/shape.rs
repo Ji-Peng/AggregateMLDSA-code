@@ -1,6 +1,5 @@
 //! Bridge shapes (`docs/bridge.md`): three levels `(J_t, m_t, k_t)`, the lanes and
-//! the number `B_1` of level-1 blocks per lane and segment, with the carry caps `W_t` and the
-//! carry-digit layouts.
+//! the number `B_1` of level-1 blocks per lane and segment, with the row-weight caps `W_t`.
 //!
 //! Level `t` maps every block of `J_t` input positions to `m_t` outputs with one matrix
 //! `M_t` shared by all blocks, lanes and segments. Level 2 reads only the first
@@ -17,7 +16,6 @@ use agg_witness::bridge::{
     BridgeMatrices, SparseMatrix, J1, J2, J3, K1, K2, K3, M1, M2, M3, ROW_WEIGHT_MAX_12,
     ROW_WEIGHT_MAX_3, ZETA2_USED,
 };
-use agg_witness::digits::{DigitLayout, KAPPA12_DIGITS, KAPPA3_DIGITS};
 use agg_witness::params::W1_BITS;
 
 use crate::seed::Level;
@@ -37,8 +35,6 @@ pub struct LevelShape {
     pub k: usize,
     /// `W_t`: the largest row weight (over the used columns) the honest prover accepts.
     pub weight_cap: u32,
-    /// The carry digits; their range is `[0, floor(W_t / 2)]`.
-    pub carry: DigitLayout,
 }
 
 impl LevelShape {
@@ -82,25 +78,6 @@ impl LevelShape {
     }
 }
 
-/// Toy level-1 carries: bases 8, 8, range `[0, 63]`.
-pub const TOY_CARRY1_DIGITS: DigitLayout = DigitLayout {
-    name: "kappa-toy1",
-    bases: &[8, 8],
-    signed: false,
-};
-/// Toy level-2 carries: bases 8, 4, range `[0, 31]`.
-pub const TOY_CARRY2_DIGITS: DigitLayout = DigitLayout {
-    name: "kappa-toy2",
-    bases: &[8, 4],
-    signed: false,
-};
-/// Toy level-3 carries: bases 4, 4, range `[0, 15]`.
-pub const TOY_CARRY3_DIGITS: DigitLayout = DigitLayout {
-    name: "kappa-toy3",
-    bases: &[4, 4],
-    signed: false,
-};
-
 /// A bridge shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -126,7 +103,6 @@ impl Shape {
                 rows: M1,
                 k: K1,
                 weight_cap: ROW_WEIGHT_MAX_12,
-                carry: KAPPA12_DIGITS,
             },
             LevelShape {
                 t: 2,
@@ -135,7 +111,6 @@ impl Shape {
                 rows: M2,
                 k: K2,
                 weight_cap: ROW_WEIGHT_MAX_12,
-                carry: KAPPA12_DIGITS,
             },
             LevelShape {
                 t: 3,
@@ -144,7 +119,6 @@ impl Shape {
                 rows: M3,
                 k: K3,
                 weight_cap: ROW_WEIGHT_MAX_3,
-                carry: KAPPA3_DIGITS,
             },
         ],
         lanes: W1_BITS,
@@ -163,7 +137,6 @@ impl Shape {
                 rows: 1 << 6,
                 k: 4,
                 weight_cap: 127,
-                carry: TOY_CARRY1_DIGITS,
             },
             LevelShape {
                 t: 2,
@@ -172,7 +145,6 @@ impl Shape {
                 rows: 1 << 5,
                 k: 4,
                 weight_cap: 63,
-                carry: TOY_CARRY2_DIGITS,
             },
             LevelShape {
                 t: 3,
@@ -181,7 +153,6 @@ impl Shape {
                 rows: 16,
                 k: 4,
                 weight_cap: 31,
-                carry: TOY_CARRY3_DIGITS,
             },
         ],
         lanes: 1,
@@ -221,9 +192,6 @@ impl Shape {
             }
             if level.used > level.cols {
                 return Err("J_t^used <= J_t");
-            }
-            if level.carry.signed || level.carry.range() != (0, level.carry_max()) {
-                return Err("the carry digits cover [0, floor(W_t / 2)] exactly");
             }
             // Both sides of a level identity stay far below p.
             if u64::from(level.weight_cap) >= 1 << 20 {
@@ -347,21 +315,16 @@ mod tests {
         assert_eq!(p.segment_input_bits(), 1 << 23);
         assert_eq!(p.output_bits(), 4096);
         assert_eq!(p.levels.map(|l| l.carry_max()), [1023, 1023, 255]);
-        assert_eq!(p.levels.map(|l| l.carry.constant()), [648, 648, 136]);
         let t = Shape::TOY;
         assert_eq!(t.segment_input_bits(), 1 << 12);
         assert_eq!(t.output_bits(), 16);
         assert_eq!(t.levels.map(|l| l.carry_max()), [63, 31, 15]);
-        assert_eq!(t.levels.map(|l| l.carry.range().1), [63, 31, 15]);
         assert_eq!(
             t.levels.map(|l| (l.cols, l.rows, l.k)),
             [(1 << 10, 64, 4), (1 << 8, 32, 4), (32, 16, 4)]
         );
         let mut bad = Shape::TOY;
         bad.levels[1].used = 128;
-        assert!(bad.validate().is_err());
-        let mut bad = Shape::TOY;
-        bad.levels[2].carry = TOY_CARRY2_DIGITS;
         assert!(bad.validate().is_err());
     }
 

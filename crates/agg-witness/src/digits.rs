@@ -148,18 +148,6 @@ impl DigitLayout {
     }
 }
 
-/// Level-1 and level-2 carries: bases 16,16,4, unsigned, range [0, 1023].
-pub const KAPPA12_DIGITS: DigitLayout = DigitLayout {
-    name: "kappa",
-    bases: &[16, 16, 4],
-    signed: false,
-};
-/// Level-3 carries: bases 16,16, unsigned, range [0, 255].
-pub const KAPPA3_DIGITS: DigitLayout = DigitLayout {
-    name: "kappa3",
-    bases: &[16, 16],
-    signed: false,
-};
 /// Slack form X = w a + b - offset with a in {0, 1}, b in [0, 2^j) given by unsigned digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlackLayout {
@@ -633,6 +621,17 @@ mod tests {
         vals
     }
 
+    /// Unsigned layouts of ranges [0, 1023] and [0, 255].
+    const UNSIGNED: DigitLayout = DigitLayout {
+        name: "unsigned",
+        bases: &[16, 16, 4],
+        signed: false,
+    };
+    const UNSIGNED2: DigitLayout = DigitLayout {
+        name: "unsigned2",
+        bases: &[16, 16],
+        signed: false,
+    };
     /// A signed layout (the canonical digits of zero differ in the top digit).
     const SIGNED: DigitLayout = DigitLayout {
         name: "signed",
@@ -653,12 +652,12 @@ mod tests {
 
     #[test]
     fn constants_and_ranges() {
-        assert_eq!(KAPPA12_DIGITS.constant(), 648);
-        assert_eq!(KAPPA3_DIGITS.constant(), 136);
+        assert_eq!(UNSIGNED.constant(), 648);
+        assert_eq!(UNSIGNED2.constant(), 136);
         assert_eq!(SIGNED.constant(), 136);
         assert_eq!(U_STEP16.constant(), 31_540);
-        assert_eq!(KAPPA12_DIGITS.range(), (0, 1023));
-        assert_eq!(KAPPA3_DIGITS.range(), (0, 255));
+        assert_eq!(UNSIGNED.range(), (0, 1023));
+        assert_eq!(UNSIGNED2.range(), (0, 255));
         assert_eq!(SIGNED.range(), (-512, 511));
         assert_eq!(U_STEP16.range(), (-BAR_B_U, BAR_B_U));
         assert_eq!(U_STEP16.range(), (-B_U, B_U));
@@ -668,7 +667,7 @@ mod tests {
     fn bijections_by_enumeration() {
         // The mixed-radix map is a bijection from the digit alphabets onto the proven range
         // (spec_checks.py item 8).
-        for layout in [KAPPA12_DIGITS, KAPPA3_DIGITS, SIGNED] {
+        for layout in [UNSIGNED, UNSIGNED2, SIGNED] {
             let vals = enumerate(&layout);
             let (lo, hi) = layout.range();
             assert_eq!(vals.len() as i64, hi - lo + 1, "{}", layout.name);
@@ -683,7 +682,7 @@ mod tests {
             bases: &[1 << 16, 4],
             signed: true,
         };
-        for layout in [KAPPA12_DIGITS, KAPPA3_DIGITS, SIGNED, z16] {
+        for layout in [UNSIGNED, UNSIGNED2, SIGNED, z16] {
             let (lo, hi) = layout.range();
             let step = ((hi - lo) / 5000).max(1);
             let mut x = lo;

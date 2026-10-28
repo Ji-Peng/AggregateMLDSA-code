@@ -3,8 +3,8 @@
 
 use agg_bridge::parity::{self, ParityWitness};
 use agg_bridge::seed::{derive_matrices, derive_matrix, Level};
-use agg_bridge::{carry, final_vector, weights, Shape};
-use agg_witness::bridge::{self as reference, BridgeMatrices, BridgeTables};
+use agg_bridge::{final_vector, weights, Shape};
+use agg_witness::bridge::{self as reference, BridgeMatrices};
 use agg_witness::gen::SplitMix64;
 use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
@@ -37,10 +37,6 @@ fn check_against_reference(n: usize, matrices: &BridgeMatrices, seed: u64) -> Pa
     let array: [&[i8]; W1_BITS] = std::array::from_fn(|t| views[t]);
     let expected = reference::compute(&geom, &array, matrices).unwrap();
     assert_eq!(w.clone().into_witness().unwrap(), expected, "N = {n}");
-    assert_eq!(
-        carry::group_tables(&shape, &w).unwrap(),
-        BridgeTables::from_witness(&expected).unwrap()
-    );
     assert_eq!(
         w.y_bits(),
         reference::gf2_composite(&geom, &array, matrices)

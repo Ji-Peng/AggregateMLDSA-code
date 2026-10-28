@@ -1,6 +1,6 @@
 [package]
 name = "agg-bridge"
-description = "Parity bridge: seed to matrices, Fp parity and carry-digit tables, GF(2) composite walker."
+description = "Parity bridge: seed to matrices, Fp parity and carry tables, GF(2) composite walker, parity chain."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

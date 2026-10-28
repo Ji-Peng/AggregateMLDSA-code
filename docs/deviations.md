@@ -1042,10 +1042,10 @@ independent challenges, `Z_hi` and `U_hi` kept on small leaves (base 4 and, sinc
 digit layout is removed, not kept behind a configuration switch. Why: a switch would have
 duplicated the manifest, the three stage tables, the claim vectors, the transcript
 registry, the wire format, the verifier and the catalogs (the four-group width-4 rows next
-to the six-group two-family rows), so every protocol file would carry two layouts; the
-measurements (`docs/lookup.md` Section 4.5) show no batch size at which
-the base-16 layout is cheaper. The old layout stays reproducible at code `4247f61` (the
-"before" of every comparison); its wire version 0 is refused by the parser.
+to the six-group two-family rows), so every protocol file would carry two layouts; measured
+against it (mode B, 256 to 2,048 signatures), the lookup layout halves the committed cells and
+makes the main-domain commitments 2 to 3x faster. The old layout stays reproducible at code
+`4247f61`; its wire version 0 is refused by the parser.
 
 ## L2. Carries stored balanced like every looked-up column (docs/lookup.md Section 1)
 

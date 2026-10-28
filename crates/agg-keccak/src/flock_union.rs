@@ -11,8 +11,8 @@
 //! class), but no prove entry lets a caller add its own. This module is that entry: the
 //! boolean-only union pipeline of `flock_prover::prover::prove_fast_ligerito_union`
 //! (statement binding, zerocheck, union-column lincheck, merged opening) composed from
-//! Flock's public building blocks for a registry of one or more boolean types (the sponge
-//! instance of [`crate::tied`] has one), plus the caller's packed-direct claims; [`UnionGeometry::verify`] mirrors
+//! Flock's public building blocks for a boolean registry (the sponge instance of
+//! [`crate::tied`], one type), plus the caller's packed-direct claims; [`UnionGeometry::verify`] mirrors
 //! `flock_core::verifier::verify_ligerito_union` step by step and returns the claimed
 //! values for the caller's own checks. The transcript uses Flock's labels in Flock's order
 //! (`flock-mixed-v1`, `flock-zerocheck-v0`, `flock-lincheck-v0`, `flock-merged-open-v1`); the
@@ -330,8 +330,9 @@ impl CommitData {
     }
 }
 
-/// The registry, counts and PCS parameters of a boolean union of one or more types: the
-/// geometry prover and verifier derive from the types and the declared counts.
+/// The registry, counts and PCS parameters of a boolean union ([`Self::new`] builds one of a
+/// single type): the geometry prover and verifier derive from the types and the declared
+/// counts.
 ///
 /// Types and their per-type inputs (slot buffers, circuits, counts) are given in the
 /// CALLER's order; Flock's registry sorts its slots by `k_log` descending (stable), and
@@ -346,55 +347,17 @@ pub struct UnionGeometry {
 }
 
 impl UnionGeometry {
-    /// A registry of the one type `ty` with row capacity `2^nu` and `n` declared rows.
+    /// A registry of the one boolean type `ty` with row capacity `2^nu` and `n` declared
+    /// rows.
     ///
     /// # Panics
-    /// If `n` is zero or exceeds the capacity.
+    /// If `n` is zero or exceeds the capacity, or `ty` is not boolean.
     #[must_use]
     pub fn new(ty: TableType, n: usize, nu: usize, profile: Profile) -> Self {
-        Self::new_multi(vec![ty], vec![n], nu, profile)
-    }
-
-    /// A registry of the boolean `types` (caller order) with the uniform row capacity
-    /// `2^nu` and `counts[i]` declared rows of type `i`.
-    ///
-    /// # Panics
-    /// If the lengths differ, a count is zero or exceeds the capacity, or a type is not
-    /// boolean.
-    #[must_use]
-    pub fn new_multi(
-        types: Vec<TableType>,
-        counts: Vec<usize>,
-        nu: usize,
-        profile: Profile,
-    ) -> Self {
-        assert_eq!(types.len(), counts.len(), "one count per type");
-        assert!(
-            counts.iter().all(|&n| n >= 1 && n <= 1 << nu),
-            "1 <= n_t <= 2^nu"
-        );
-        assert!(types.iter().all(|t| !t.is_element()), "boolean types only");
-        // Flock's registry order: k_log descending, stable (Registry::new).
-        let mut order: Vec<usize> = (0..types.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(types[i].k_log));
-        let mut slot_of = vec![0; types.len()];
-        for (s, &i) in order.iter().enumerate() {
-            slot_of[i] = s;
-        }
-        let shapes: Vec<(usize, usize, Option<usize>)> = types
-            .iter()
-            .map(|t| (t.k_log, t.useful_bits, t.const_pin))
-            .collect();
-        let registry = Registry::new(types, nu);
-        for (i, &s) in slot_of.iter().enumerate() {
-            let ty = &registry.types()[s];
-            assert_eq!(
-                (ty.k_log, ty.useful_bits, ty.const_pin),
-                shapes[i],
-                "registry slot order"
-            );
-        }
-        let counts: Vec<usize> = order.iter().map(|&i| counts[i]).collect();
+        assert!(n >= 1 && n <= 1 << nu, "1 <= n <= 2^nu");
+        assert!(!ty.is_element(), "boolean types only");
+        let registry = Registry::new(vec![ty], nu);
+        let (slot_of, counts) = (vec![0], vec![n]);
         let union = UnionInstance::new(&registry, counts.clone());
         let lp = profile.ligerito();
         let m = union.dense_m();
