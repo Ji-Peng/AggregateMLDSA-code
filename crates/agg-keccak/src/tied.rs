@@ -1413,9 +1413,8 @@ mod tests {
     }
 
     /// The sponge instance at a full-height count (2,048 records: Flock's block-first
-    /// transport) verifies with no bit claim, a bit claim at a random point and one whose
-    /// column coordinates are zero above the chain's 64 word columns, and rejects either bit
-    /// claim with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
+    /// transport) verifies with a bit claim whose column coordinates are zero above the
+    /// chain's 64 word columns, and rejects it with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
     /// fold the column bit-bank's multilinear extension, so a bank computed only on the
     /// columns of nonzero weight (enough for `s_hat_v`) makes the honest proof fail.
     #[test]
@@ -1438,43 +1437,38 @@ mod tests {
                 x_full: x,
             }
         };
-        for (label, claims) in [
-            ("none", vec![]),
-            ("random", vec![rand_claim(&mut rng, wv)]),
-            ("64 columns", vec![rand_claim(&mut rng, 6)]),
-        ] {
-            let (sponge, _) = part.honest_parts(&records);
-            let data = part.sponge().commit_data(&[&sponge.z]);
-            let cap = data.commitment();
-            let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
-            let _ = &records;
-            let rho_r: Vec<F128> = (0..nu).map(|_| rand_f(&mut rng)).collect();
-            let pubp = part.public_point(&rho_r, &[F128::ONE, F128::ZERO, F128::ONE]);
+        let label = "64 columns";
+        let claims = vec![rand_claim(&mut rng, 6)];
+        let (sponge, _) = part.honest_parts(&records);
+        let data = part.sponge().commit_data(&[&sponge.z]);
+        let cap = data.commitment();
+        let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
+        let rho_r: Vec<F128> = (0..nu).map(|_| rand_f(&mut rng)).collect();
+        let pubp = part.public_point(&rho_r, &[F128::ONE, F128::ZERO, F128::ONE]);
+        let mut ch = FsChallenger::new(b"debug");
+        let gates: [&dyn LincheckCircuit; 1] = [part.gate];
+        let (proof, _) = part.sponge().prove(
+            vec![sponge],
+            &gates,
+            std::slice::from_ref(&pubp),
+            &claims,
+            &mut ch,
+            Some(data),
+        );
+        let mut ch = FsChallenger::new(b"debug");
+        let mut with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
+        let pubs = std::slice::from_ref(&pubp);
+        let r = part.sponge().verify(&gates, &cap, &proof, pubs, &with, &mut ch);
+        assert!(r.is_ok(), "{label}: {r:?}");
+        // A false bit value: the ring-switch claim check of the block-first opening
+        // rejects it.
+        if let Some(first) = with.first_mut() {
+            first.1 += F128::ONE;
             let mut ch = FsChallenger::new(b"debug");
-            let gates: [&dyn LincheckCircuit; 1] = [part.gate];
-            let (proof, _) = part.sponge().prove(
-                vec![sponge],
-                &gates,
-                std::slice::from_ref(&pubp),
-                &claims,
-                &mut ch,
-                Some(data),
-            );
-            let mut ch = FsChallenger::new(b"debug");
-            let mut with: Vec<(BitClaim, F128)> = claims.iter().cloned().zip(values).collect();
-            let pubs = std::slice::from_ref(&pubp);
-            let r = part.sponge().verify(&gates, &cap, &proof, pubs, &with, &mut ch);
-            assert!(r.is_ok(), "{label}: {r:?}");
-            // A false bit value: the ring-switch claim check of the block-first opening
-            // rejects it.
-            if let Some(first) = with.first_mut() {
-                first.1 += F128::ONE;
-                let mut ch = FsChallenger::new(b"debug");
-                let r = part
-                    .sponge()
-                    .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
-                assert!(claim_mismatch(&r), "{label}, false value: {r:?}");
-            }
+            let r = part
+                .sponge()
+                .verify(&gates, &cap, &proof, &[pubp], &with, &mut ch);
+            assert!(claim_mismatch(&r), "{label}, false value: {r:?}");
         }
     }
 

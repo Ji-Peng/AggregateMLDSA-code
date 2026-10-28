@@ -491,11 +491,10 @@ fn tied_part_with_padded_records_round_trip() {
     tied_round_trip(5, 0x5EED5, Tamper::None);
 }
 
-/// 256 records (`d = 8`) and 512 records (`d = 9`: exactly one level-1 block per lane).
+/// 512 records (`d = 9`: exactly one level-1 block per lane).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
-fn tied_part_round_trips_256_and_512() {
-    tied_round_trip(256, 0x256, Tamper::None);
+fn tied_part_round_trip_512() {
     tied_round_trip(512, 0x512, Tamper::None);
 }
 

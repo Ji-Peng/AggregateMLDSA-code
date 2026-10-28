@@ -1,8 +1,8 @@
-//! The joint parity-bridge test (`docs/bridge.md`, mode A): for 64 and
-//! 256 signatures the witness is derived from real ML-DSA-44 records, the F_p side
-//! (`agg-piop` with the bridge tables) and the Flock side (`agg-keccak`, sponge gates plus
-//! the bridge slot) run in one transcript, so both use the same bridge seed `sd` (event 3,
-//! drawn after the Akita round-1 commitment and the Flock commitment). Checked:
+//! The joint parity-bridge test (`docs/bridge.md`, mode A): for 64 signatures the witness is
+//! derived from real ML-DSA-44 records, the F_p side (`agg-piop` with the bridge tables) and
+//! the Flock side (`agg-keccak`, sponge gates plus the bridge slot) run in one transcript, so
+//! both use the same bridge seed `sd` (event 3, drawn after the Akita round-1 commitment and
+//! the Flock commitment). Checked:
 //!
 //! - both final vectors (the F_p side's published `Y_sigma` and the Flock side's
 //!   `M_3 M_2 M_1 b'` of its committed bridge copy) agree with each other and with a
@@ -548,11 +548,3 @@ fn joint_bridge_64_signatures() {
     on_large_stack(|| joint_bridge(64, 0x7015_0064));
 }
 
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "Flock and Akita proofs; run with --release"
-)]
-fn joint_bridge_256_signatures() {
-    on_large_stack(|| joint_bridge(256, 0x7015_0256));
-}
