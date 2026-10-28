@@ -11,11 +11,13 @@ use crate::zerocheck::univariate_skip_optimized::kernels::aarch64::{
     accumulate_convert_with_s_hat_v as accumulate_convert_with_s_hat_v_aarch64,
     bit_transpose_64bytes_neon, shift_reduce_inner_ab_fused_neon,
 };
+#[cfg(all(test, not(target_arch = "aarch64")))]
+use crate::zerocheck::univariate_skip_optimized::kernels::portable::bit_transpose_64bytes_scalar;
 #[cfg(not(target_arch = "aarch64"))]
 use crate::zerocheck::univariate_skip_optimized::kernels::portable::{
     accumulate_convert as accumulate_convert_portable,
     accumulate_convert_with_s_hat_v as accumulate_convert_with_s_hat_v_portable,
-    bit_transpose_64bytes_scalar, shift_reduce_inner_ab_scalar,
+    bit_transpose_64bytes_words, shift_reduce_inner_ab_bitsliced, shift_reduce_inner_ab_logexp,
 };
 // agg-mldsa patch (PATCH.md): the x86 kernels below are chosen at run
 // time (`crate::simd`) instead of by `cfg(target_feature)`.
@@ -27,8 +29,45 @@ use crate::{
         shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
     },
 };
-use crate::zerocheck::univariate_skip_optimized::{F8, F128, InvNttTableByteSingleGf8};
+use crate::{
+    field::F256Unreduced,
+    zerocheck::univariate_skip_optimized::{ELL, F8, F128, InvNttTableByteSingleGf8},
+};
 mod portable;
+
+/// Per-lane accumulator of one `x_hi` window sum `sum_{x_outer_lo} converted *
+/// eq_lo`. The SIMD kernels add reduced products into `red`; the portable
+/// kernels XOR the 256-bit carry-less products into `unred` (exact in
+/// `F_2[x]`: degree <= 254, no carries, so no bound on the number of terms)
+/// and the window reduces each lane once in [`Self::lane`]. Whichever half a
+/// kernel leaves untouched stays zero, so `lane` is the same field element
+/// either way.
+#[derive(Clone)]
+pub(super) struct LaneAcc {
+    pub(super) red: [F128; ELL],
+    pub(super) unred: [F256Unreduced; ELL],
+}
+
+impl LaneAcc {
+    pub(super) fn new() -> Self {
+        Self {
+            red: [F128::ZERO; ELL],
+            unred: [F256Unreduced::ZERO; ELL],
+        }
+    }
+
+    #[inline]
+    pub(super) fn clear(&mut self) {
+        self.red = [F128::ZERO; ELL];
+        self.unred = [F256Unreduced::ZERO; ELL];
+    }
+
+    /// The reduced window sum of `lane`.
+    #[inline]
+    pub(super) fn lane(&self, lane: usize) -> F128 {
+        self.red[lane] + self.unred[lane].reduce()
+    }
+}
 
 #[cfg(target_arch = "aarch64")]
 pub(super) mod aarch64;
@@ -52,7 +91,7 @@ pub(super) fn bit_transpose_64bytes(input: &[u8; 64], output: &mut [u8; 64]) {
     }
 
     #[cfg(not(target_arch = "aarch64"))]
-    bit_transpose_64bytes_scalar(input, output);
+    bit_transpose_64bytes_words(input, output);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,8 +156,18 @@ pub(super) fn shift_reduce_inner_ab(
         return;
     }
 
+    // Portable: the bit-sliced kernel for the production row width (measured
+    // 2x faster than the log/exp table kernel and 5x faster than the
+    // software-multiply oracle), log/exp otherwise. All three are
+    // byte-identical.
     #[cfg(not(target_arch = "aarch64"))]
-    shift_reduce_inner_ab_scalar(
+    if inv_table.ell == 64 {
+        let _ = (a_col, b_col);
+        shift_reduce_inner_ab_bitsliced(a_packed, b_packed, inv_table, chunk_byte_base, b_med, out);
+        return;
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    shift_reduce_inner_ab_logexp(
         a_packed,
         b_packed,
         inv_table,
@@ -138,8 +187,8 @@ pub(super) fn accumulate_convert(
     n_b_med: usize,
     convert: &[F128],
     eq_lo_val: F128,
-    partial_ab: &mut [F128; 64],
-    partial_c: &mut [F128; 64],
+    acc_ab: &mut LaneAcc,
+    acc_c: &mut LaneAcc,
 ) {
     #[cfg(target_arch = "aarch64")]
     // SAFETY: aarch64 statically guarantees NEON and the fixed arrays cover
@@ -151,8 +200,8 @@ pub(super) fn accumulate_convert(
             n_b_med,
             convert,
             eq_lo_val,
-            partial_ab,
-            partial_c,
+            &mut acc_ab.red,
+            &mut acc_c.red,
         );
     }
 
@@ -163,8 +212,8 @@ pub(super) fn accumulate_convert(
         n_b_med,
         convert,
         eq_lo_val,
-        partial_ab,
-        partial_c,
+        &mut acc_ab.unred,
+        &mut acc_c.unred,
     );
 }
 
@@ -176,9 +225,9 @@ pub(super) fn accumulate_convert_with_s_hat_v(
     n_b_med: usize,
     convert: &[F128],
     eq_lo_val: F128,
-    partial_ab: &mut [F128; 64],
-    partial_c_0: &mut [F128; 64],
-    partial_c_1: &mut [F128; 64],
+    acc_ab: &mut LaneAcc,
+    acc_c_0: &mut LaneAcc,
+    acc_c_1: &mut LaneAcc,
 ) {
     #[cfg(target_arch = "aarch64")]
     // SAFETY: aarch64 statically guarantees NEON and the fixed arrays cover
@@ -190,9 +239,9 @@ pub(super) fn accumulate_convert_with_s_hat_v(
             n_b_med,
             convert,
             eq_lo_val,
-            partial_ab,
-            partial_c_0,
-            partial_c_1,
+            &mut acc_ab.red,
+            &mut acc_c_0.red,
+            &mut acc_c_1.red,
         );
     }
 
@@ -210,9 +259,9 @@ pub(super) fn accumulate_convert_with_s_hat_v(
                 n_b_med,
                 convert,
                 eq_lo_val,
-                partial_ab,
-                partial_c_0,
-                partial_c_1,
+                &mut acc_ab.red,
+                &mut acc_c_0.red,
+                &mut acc_c_1.red,
             );
         }
         return;
@@ -225,9 +274,9 @@ pub(super) fn accumulate_convert_with_s_hat_v(
         n_b_med,
         convert,
         eq_lo_val,
-        partial_ab,
-        partial_c_0,
-        partial_c_1,
+        &mut acc_ab.unred,
+        &mut acc_c_0.unred,
+        &mut acc_c_1.unred,
     );
 }
 
@@ -237,8 +286,8 @@ pub(super) fn accumulate_convert_with_s_hat_v(
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::{
-        accumulate_convert_with_s_hat_v, accumulate_convert_with_s_hat_v_portable,
-        bit_transpose_64bytes, bit_transpose_64bytes_scalar,
+        LaneAcc, accumulate_convert_with_s_hat_v, bit_transpose_64bytes,
+        bit_transpose_64bytes_scalar,
     };
     use crate::{
         field::F128,
@@ -272,25 +321,45 @@ mod tests {
             for row in ab.iter_mut().chain(c.iter_mut()) {
                 rng.fill_bytes(row);
             }
-            let eq = rng.f128();
+            let eqs = [rng.f128(), rng.f128()];
             let init: [[F128; 64]; 3] = core::array::from_fn(|_| {
                 let v = rng.f128_vec(64);
                 core::array::from_fn(|i| v[i])
             });
+            // Reference: two windows of reduced products added to `init`.
             let mut want = init;
-            {
-                let [w0, w1, w2] = &mut want;
-                accumulate_convert_with_s_hat_v_portable(&ab, &c, n_b_med, &convert, eq, w0, w1, w2);
+            for &eq in &eqs {
+                for lane in 0..64 {
+                    let mut conv = [F128::ZERO; 3];
+                    for b_med in 0..n_b_med {
+                        let t = b_med * 256;
+                        let v = c[b_med][lane] as usize;
+                        conv[0] += convert[t + ab[b_med][lane] as usize];
+                        conv[1] += convert[t + (v & 0x55)];
+                        conv[2] += convert[t + (v & 0xaa)];
+                    }
+                    for k in 0..3 {
+                        want[k][lane] += conv[k] * eq;
+                    }
+                }
             }
             for mask in test_masks() {
-                let mut got = init;
+                let mut got: [LaneAcc; 3] = core::array::from_fn(|_| LaneAcc::new());
+                for k in 0..3 {
+                    got[k].red = init[k];
+                }
                 {
                     let [g0, g1, g2] = &mut got;
-                    with_mask(mask, || {
-                        accumulate_convert_with_s_hat_v(&ab, &c, n_b_med, &convert, eq, g0, g1, g2)
-                    });
+                    for &eq in &eqs {
+                        with_mask(mask, || {
+                            accumulate_convert_with_s_hat_v(&ab, &c, n_b_med, &convert, eq, g0, g1, g2)
+                        });
+                    }
                 }
-                assert_eq!(got, want, "n_b_med={n_b_med} mask {mask:#x}");
+                for k in 0..3 {
+                    let lanes: Vec<F128> = (0..64).map(|i| got[k].lane(i)).collect();
+                    assert_eq!(lanes, want[k], "n_b_med={n_b_med} bank {k} mask {mask:#x}");
+                }
             }
         }
     }

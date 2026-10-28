@@ -55,7 +55,7 @@ use crate::{
         PaddingSpec,
         univariate_skip::{SplitEqGhash, ntt_extend_f128_vec_ghash, pack_bits},
         univariate_skip_optimized::kernels::{
-            accumulate_convert, bit_transpose_64bytes as kernel_bit_transpose_64bytes,
+            LaneAcc, accumulate_convert, bit_transpose_64bytes as kernel_bit_transpose_64bytes,
             shift_reduce_inner_ab as kernel_shift_reduce_inner_ab,
         },
     },
@@ -295,8 +295,8 @@ pub fn round1_shift_reduce_extract_c(
 
 // Per-worker scratch + local accumulator. ~6 KB total, stack-allocated.
 struct WorkerState {
-    partial_ab: [F128; ELL],
-    partial_c: [F128; ELL],
+    partial_ab: LaneAcc,
+    partial_c: LaneAcc,
     chunk_ab_bytes: [[u8; 64]; 1 << N_MEDIUM],
     chunk_c_bytes: [[u8; 64]; 1 << N_MEDIUM],
     a_col: [F8; ELL],
@@ -308,8 +308,8 @@ struct WorkerState {
 impl WorkerState {
     fn new() -> Self {
         Self {
-            partial_ab: [F128::ZERO; ELL],
-            partial_c: [F128::ZERO; ELL],
+            partial_ab: LaneAcc::new(),
+            partial_c: LaneAcc::new(),
             chunk_ab_bytes: [[0u8; 64]; 1 << N_MEDIUM],
             chunk_c_bytes: [[0u8; 64]; 1 << N_MEDIUM],
             a_col: [F8::ZERO; ELL],
@@ -350,8 +350,8 @@ fn process_one_x_hi(
     convert: &[F128],
     state: &mut WorkerState,
 ) {
-    state.partial_ab.iter_mut().for_each(|p| *p = F128::ZERO);
-    state.partial_c.iter_mut().for_each(|p| *p = F128::ZERO);
+    state.partial_ab.clear();
+    state.partial_c.clear();
 
     let n_lo = n_lo_and_inner - N_INNER;
 
@@ -437,8 +437,8 @@ fn process_one_x_hi(
 
     // Outer fold by eq_hi.
     for lane in 0..ELL {
-        state.local_res_ab[lane] += eq_hi_val * state.partial_ab[lane];
-        state.local_res_c_s[lane] += eq_hi_val * state.partial_c[lane];
+        state.local_res_ab[lane] += eq_hi_val * state.partial_ab.lane(lane);
+        state.local_res_c_s[lane] += eq_hi_val * state.partial_c.lane(lane);
     }
 }
 
@@ -462,9 +462,9 @@ fn process_one_x_hi(
 /// Identical to [`WorkerState`] except `partial_c` and `local_res_c_s` are
 /// split into bank 0 / bank 1.
 struct WorkerStateWithSHatV {
-    partial_ab: [F128; ELL],
-    partial_c_0: [F128; ELL],
-    partial_c_1: [F128; ELL],
+    partial_ab: LaneAcc,
+    partial_c_0: LaneAcc,
+    partial_c_1: LaneAcc,
     chunk_ab_bytes: [[u8; 64]; 1 << N_MEDIUM],
     chunk_c_bytes: [[u8; 64]; 1 << N_MEDIUM],
     a_col: [F8; ELL],
@@ -477,9 +477,9 @@ struct WorkerStateWithSHatV {
 impl WorkerStateWithSHatV {
     fn new() -> Self {
         Self {
-            partial_ab: [F128::ZERO; ELL],
-            partial_c_0: [F128::ZERO; ELL],
-            partial_c_1: [F128::ZERO; ELL],
+            partial_ab: LaneAcc::new(),
+            partial_c_0: LaneAcc::new(),
+            partial_c_1: LaneAcc::new(),
             chunk_ab_bytes: [[0u8; 64]; 1 << N_MEDIUM],
             chunk_c_bytes: [[0u8; 64]; 1 << N_MEDIUM],
             a_col: [F8::ZERO; ELL],
@@ -511,9 +511,9 @@ fn process_one_x_hi_with_s_hat_v(
     convert: &[F128],
     state: &mut WorkerStateWithSHatV,
 ) {
-    state.partial_ab.iter_mut().for_each(|p| *p = F128::ZERO);
-    state.partial_c_0.iter_mut().for_each(|p| *p = F128::ZERO);
-    state.partial_c_1.iter_mut().for_each(|p| *p = F128::ZERO);
+    state.partial_ab.clear();
+    state.partial_c_0.clear();
+    state.partial_c_1.clear();
 
     let n_lo = n_lo_and_inner - N_INNER;
 
@@ -591,9 +591,9 @@ fn process_one_x_hi_with_s_hat_v(
 
     // Outer fold by eq_hi (per bank).
     for lane in 0..ELL {
-        state.local_res_ab[lane] += eq_hi_val * state.partial_ab[lane];
-        state.local_res_c_s_0[lane] += eq_hi_val * state.partial_c_0[lane];
-        state.local_res_c_s_1[lane] += eq_hi_val * state.partial_c_1[lane];
+        state.local_res_ab[lane] += eq_hi_val * state.partial_ab.lane(lane);
+        state.local_res_c_s_0[lane] += eq_hi_val * state.partial_c_0.lane(lane);
+        state.local_res_c_s_1[lane] += eq_hi_val * state.partial_c_1.lane(lane);
     }
 }
 

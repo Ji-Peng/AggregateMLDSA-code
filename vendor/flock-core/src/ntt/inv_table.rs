@@ -48,7 +48,19 @@ pub struct InvNttTableByteSingleGf8 {
     /// arithmetic. Same size and alignment discipline as `data`.
     data_x4: Vec<F8>,
     data_x4_offset: usize,
+    /// Bit-plane image of the table for `ell == 64` (empty otherwise):
+    /// entry `b * 256 + w` holds eight `u64` planes with bit `i` of plane `j`
+    /// equal to bit `j` of `T_0[w][i ^ 8 b]`, i.e. byte chunk `b`'s
+    /// contribution `pi_b(T_0[w])` in bit-sliced form (one plane per bit of
+    /// the 64 output lanes). 128 KiB, one cache line per entry.
+    planes: Vec<BytePlanes>,
 }
+
+/// Eight 64-lane bit planes of a 64-byte GF(2^8) row: bit `i` of word `j` is
+/// bit `j` of lane `i`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C, align(64))]
+pub struct BytePlanes(pub [u64; 8]);
 
 impl InvNttTableByteSingleGf8 {
     /// Build the table given the two NTT instances: `ntt_S` over the input
@@ -119,6 +131,26 @@ impl InvNttTableByteSingleGf8 {
             data_x4[data_x4_offset + i] = data[data_offset + i] * X4;
         }
 
+        let planes = if ell == 64 {
+            let table = &data[data_offset..data_offset + table_len];
+            let mut planes = vec![BytePlanes::default(); n_chunks * 256];
+            for b in 0..n_chunks {
+                for w in 0..256 {
+                    let row = &table[w * ell..(w + 1) * ell];
+                    let p = &mut planes[b * 256 + w].0;
+                    for i in 0..ell {
+                        let v = row[i ^ (8 * b)].0;
+                        for (j, plane) in p.iter_mut().enumerate() {
+                            *plane |= (((v >> j) & 1) as u64) << i;
+                        }
+                    }
+                }
+            }
+            planes
+        } else {
+            Vec::new()
+        };
+
         Self {
             k,
             ell,
@@ -127,7 +159,14 @@ impl InvNttTableByteSingleGf8 {
             data_offset,
             data_x4,
             data_x4_offset,
+            planes,
         }
+    }
+
+    /// The bit-plane image (see the `planes` field); empty unless `ell == 64`.
+    #[inline]
+    pub fn planes(&self) -> &[BytePlanes] {
+        &self.planes
     }
 
     /// Raw pointer to the table data (`256 × ell` bytes, row-major). Used by
