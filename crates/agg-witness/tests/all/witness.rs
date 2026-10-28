@@ -25,7 +25,7 @@ fn derived_values_satisfy_relation_h() {
         assert!(inf_norm(&w.z) <= B_Z);
         assert!(inf_norm(&w.u) <= B_U);
         assert!(inf_norm(&w.v) <= B_V);
-        assert_eq!(w.t, inst.records[i].t);
+        assert_eq!(w.t, inst.records[i].t.map(|row| row.map(i64::from)));
         // (A z) by CRT equals the schoolbook product.
         if i % 16 == 0 {
             let sb = az_schoolbook(&key.a, &w.z);

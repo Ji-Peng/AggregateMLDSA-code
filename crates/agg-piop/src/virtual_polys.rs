@@ -132,7 +132,7 @@ pub fn residual_table(
                 let (az, t) = match &product {
                     Some(az) => (
                         E::from_i128(az[rho][j]),
-                        E::from_i64(instance.records[i].t[rho][j]),
+                        E::from_i64(i64::from(instance.records[i].t[rho][j])),
                     ),
                     None => (E::zero(), E::zero()),
                 };

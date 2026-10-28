@@ -142,26 +142,35 @@ impl ExpandedKey {
 /// T[rho] = 2^d (c * t1[rho]) over Z[X]/(X^256 + 1), from the tau nonzero entries of c
 /// (k tau 256 signed additions, no reduction). |T| <= B_T < 2^29.
 pub fn public_t(c: &Challenge, t1: &[[u16; N]; K]) -> VecK {
-    let mut out = [[0i64; N]; K];
+    let mut out = [[0i32; N]; K];
+    public_t_into(c, t1, &mut out);
+    out.map(|row| row.map(i64::from))
+}
+
+/// [`public_t`] in its stored width, written into `out` (overwritten). Every partial sum is
+/// a signed sum of at most tau values below 2^10, so |c * t1| <= tau (2^10 - 1) < 2^16
+/// before the shift and |T| < 2^29 after it: all of it fits `i32`.
+pub fn public_t_into(c: &Challenge, t1: &[[u16; N]; K], out: &mut [[i32; N]; K]) {
     for r in 0..K {
+        let row = &mut out[r];
+        row.fill(0);
         for &pos in &c.positions {
             let p = usize::from(pos);
-            let sign = i64::from(c.coeffs[p]);
+            let sign = i32::from(c.coeffs[p]);
             // x^p t1: coefficients m < N - p land at p + m, the others wrap negated to
             // m + p - N (two straight loops, which vectorize, instead of a branch per m).
             let (low, high) = t1[r].split_at(N - p);
-            for (slot, &x) in out[r][p..].iter_mut().zip(low) {
-                *slot += sign * i64::from(x);
+            for (slot, &x) in row[p..].iter_mut().zip(low) {
+                *slot += sign * i32::from(x);
             }
-            for (slot, &x) in out[r][..p].iter_mut().zip(high) {
-                *slot -= sign * i64::from(x);
+            for (slot, &x) in row[..p].iter_mut().zip(high) {
+                *slot -= sign * i32::from(x);
             }
         }
-        for x in out[r].iter_mut() {
+        for x in row.iter_mut() {
             *x <<= D;
         }
     }
-    out
 }
 
 #[cfg(test)]

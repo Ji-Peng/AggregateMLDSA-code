@@ -417,15 +417,9 @@ impl PublicData {
         }
     }
 
-    /// A record's `T = c t_1 2^d` as `i32` (|T| < 2^29).
+    /// A record's `T = c t_1 2^d` (|T| < 2^29, already `i32` in the instance).
     fn t_of(record: &agg_witness::instance::PublicRecord) -> PublicT {
-        let mut t = [[0_i32; N]; K];
-        for (row, source) in t.iter_mut().zip(&record.t) {
-            for (out, &value) in row.iter_mut().zip(source) {
-                *out = i32::try_from(value).expect("|T| < 2^29");
-            }
-        }
-        t
+        *record.t
     }
 
     /// Batch geometry.

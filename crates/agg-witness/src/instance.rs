@@ -4,13 +4,62 @@
 //! key), mu_i = H(tr_i || 0x00 || 0x00 || M_i, 64), c_i = SampleInBall(c~_i) and
 //! T_i = 2^d (c_i * t1_i) over Z. The public main-domain table T(j, rho, i) is zero on padded rows.
 
-use crate::expand::{public_t, ExpandedKey};
-use crate::native::{mu, sample_in_ball, Challenge, VecK};
+use crate::expand::{public_t_into, ExpandedKey};
+use crate::native::{mu, sample_in_ball, Challenge};
 use crate::padding::{main_index, Geometry, GeometryError};
 use crate::params::{C_TILDE_BYTES, K, N, TR_BYTES};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// One record's `T = 2^d (c * t1)` (|T| < 2^29, stored as `i32`) inside the batch's single
+/// flat allocation (`k 256` values per record, record order). The records share the
+/// allocation; a mutable borrow copies it first (`Arc::make_mut`), so a tampered clone of an
+/// instance never changes the original.
+#[derive(Clone, Debug)]
+pub struct TView {
+    data: Arc<Vec<i32>>,
+    index: usize,
+}
+
+impl TView {
+    /// Record `index` of a flat `T` buffer of whole records.
+    ///
+    /// # Panics
+    /// If the buffer holds no record `index`.
+    #[must_use]
+    pub fn new(data: Arc<Vec<i32>>, index: usize) -> Self {
+        assert!(index < data.len() / (K * N), "record inside the T buffer");
+        Self { data, index }
+    }
+}
+
+impl std::ops::Deref for TView {
+    type Target = [[i32; N]; K];
+    fn deref(&self) -> &Self::Target {
+        let record = &self.data[self.index * K * N..(self.index + 1) * K * N];
+        let (rows, _) = record.as_chunks::<N>();
+        rows.try_into().expect("k rows of 256")
+    }
+}
+
+impl std::ops::DerefMut for TView {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let index = self.index;
+        let data = Arc::make_mut(&mut self.data);
+        let record = &mut data[index * K * N..(index + 1) * K * N];
+        let (rows, _) = record.as_chunks_mut::<N>();
+        rows.try_into().expect("k rows of 256")
+    }
+}
+
+impl PartialEq for TView {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for TView {}
 
 /// Public data of one live record.
 #[derive(Clone, Debug)]
@@ -26,7 +75,7 @@ pub struct PublicRecord {
     /// c = SampleInBall(c~).
     pub c: Challenge,
     /// T = 2^d (c * t1) over Z.
-    pub t: VecK,
+    pub t: TView,
 }
 
 /// Errors building the instance.
@@ -63,24 +112,42 @@ impl PublicInstance {
             .par_iter()
             .map(|pk| ExpandedKey::from_bytes(pk).map(Arc::new))
             .collect();
-        let records = inputs
+        // The first record whose key does not decode, as the serial order finds it.
+        if let Some(i) = inputs.iter().position(|(pk, _, _)| keys[index[pk]].is_none()) {
+            return Err(InstanceError::PublicKey(i));
+        }
+        // Indexed collects write each record in place; the records are small (T lives in
+        // one flat buffer below), so no per-thread chunk is grown and concatenated.
+        let partial: Vec<(Arc<ExpandedKey>, [u8; TR_BYTES], Challenge)> = inputs
             .par_iter()
-            .enumerate()
-            .map(|(i, (pk, msg, c_tilde))| {
-                let key = keys[index[pk]].clone().ok_or(InstanceError::PublicKey(i))?;
+            .map(|(pk, msg, c_tilde)| {
+                let key = Arc::clone(keys[index[pk]].as_ref().expect("checked above"));
                 let mu = mu(&key.tr, msg, &[]);
-                let c = sample_in_ball(c_tilde);
-                let t = public_t(&c, &key.t1);
-                Ok(PublicRecord {
-                    key,
-                    msg: msg.to_vec(),
-                    c_tilde: *c_tilde,
-                    mu,
-                    c,
-                    t,
-                })
+                (key, mu, sample_in_ball(c_tilde))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
+        // One zeroed allocation (fresh pages, first touched by the parallel writers).
+        let mut t = vec![0_i32; inputs.len() * K * N];
+        t.par_chunks_exact_mut(K * N)
+            .zip(&partial)
+            .for_each(|(out, (key, _, c))| {
+                let (rows, _) = out.as_chunks_mut::<N>();
+                public_t_into(c, &key.t1, rows.try_into().expect("k rows of 256"));
+            });
+        let t = Arc::new(t);
+        let records = partial
+            .into_par_iter()
+            .zip(inputs)
+            .enumerate()
+            .map(|(i, ((key, mu, c), (_, msg, c_tilde)))| PublicRecord {
+                key,
+                msg: msg.to_vec(),
+                c_tilde: *c_tilde,
+                mu,
+                c,
+                t: TView::new(Arc::clone(&t), i),
+            })
+            .collect();
         Ok(Self { geom, records })
     }
 
@@ -104,7 +171,7 @@ impl PublicInstance {
         for (i, r) in self.records.iter().enumerate() {
             for rho in 0..K {
                 for j in 0..N {
-                    out[main_index(j, rho, i)] = r.t[rho][j];
+                    out[main_index(j, rho, i)] = i64::from(r.t[rho][j]);
                 }
             }
         }

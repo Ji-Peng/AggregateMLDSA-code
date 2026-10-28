@@ -87,7 +87,7 @@ pub fn derive_with_t(
     mu: &[u8; TR_BYTES],
     sig: &[u8],
     c_tilde: &[u8; C_TILDE_BYTES],
-    t: &VecK,
+    t: &[[i32; N]; K],
 ) -> Result<SigWitness, DeriveError> {
     derive_core(key, mu, sig, true, Some((c_tilde, t)))
 }
@@ -116,7 +116,7 @@ fn derive_core(
     mu: &[u8; TR_BYTES],
     sig: &[u8],
     strict: bool,
-    known_t: Option<(&[u8; C_TILDE_BYTES], &VecK)>,
+    known_t: Option<(&[u8; C_TILDE_BYTES], &[[i32; N]; K])>,
 ) -> Result<SigWitness, DeriveError> {
     let trace = verify_internal_trace(key, mu, sig)?;
     if strict {
@@ -129,7 +129,7 @@ fn derive_core(
     }
     let z = trace.sig.z;
     let t = match known_t {
-        Some((c_tilde, t)) if *c_tilde == trace.sig.c_tilde => *t,
+        Some((c_tilde, t)) if *c_tilde == trace.sig.c_tilde => t.map(|row| row.map(i64::from)),
         _ => public_t(&trace.c, &key.t1),
     };
     // The residue of A z modulo q is the trace's, in the NTT domain.

@@ -105,14 +105,13 @@ fn synthetic(batch: &Batch, target: Target, i: usize, row: usize, j: usize, valu
             for rho in 0..4 {
                 for k in 0..N {
                     let t = &mut instance.records[i].t[rho][k];
-                    *t += i64::try_from(after[rho][k] - before[rho][k]).unwrap();
-                    assert!(t.unsigned_abs() < 1 << 31, "T stays an i32");
+                    *t += i32::try_from(after[rho][k] - before[rho][k]).expect("T stays an i32");
                 }
             }
             write_digits(manifest, &mut main, manifest.z_value(), x, digits);
         }
         Target::U => {
-            instance.records[i].t[row][j] -= value - u[row][j];
+            instance.records[i].t[row][j] -= i32::try_from(value - u[row][j]).expect("T stays an i32");
             write_digits(manifest, &mut main, DigitValue::U, x, digits);
         }
     }
