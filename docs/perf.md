@@ -626,13 +626,15 @@ and measured; they set a direction only, not a 32K figure.
 | 8 | 3,339.2 / 3,272.9 / 3,247.8 | 873.2 / 847.2 / 917.3 | 1,406.5 / 1,274.4 / 1,373.2 |
 
 At 4K the PIOP branch is the longer one at every size (the fork wall exceeds the Flock
-proofs), so a smaller Flock pool helps the wall until the Flock branch slows down: 6 threads
-gave the shortest fork wall and prove time, 4 threads lengthened the Flock proofs without a
-shorter wall, and 8 threads took cores from the PIOP. The default is now 3/8 of the global
-pool rounded up (6 of 16), the value Section 12.1 suggested from the 32K sweep (4 / 6 / 8
-threads: 11,262.0 / 11,336.3 / 11,688.6 ms).
+proofs), so a smaller Flock pool helps the wall until the Flock branch slows down. On this shared
+host 4 and 6 threads do not separate: 4 had the shortest single fork wall (1,148.0 ms) and
+the prove times overlap (3,064.6-3,540.4 against 2,926.0-3,363.0 ms); 8 threads took cores
+from the PIOP. The default is now 3/8 of the global pool rounded up (6 of 16), the value
+Section 12.1 suggested. In that 32K sweep on main (4 / 6 / 8 threads: 11,262.0 / 11,336.3 /
+11,688.6 ms) 4 threads were 74 ms (0.7%) faster than 6, within the run-to-run spread, so the
+32K re-sweep below decides the default.
 
 For the next cloud run: the scalar kernel work shortens the PIOP branch (lookup and stages)
 more than the Flock proofs, so at 32K the Flock branch may become the critical one; sweep
-`AGG_FLOCK_THREADS` = 4 / 6 / 8 at 32K again (1 warmup + 5) and move the default if 8 wins
-there.
+`AGG_FLOCK_THREADS` = 4 / 6 / 8 at 32K again (1 warmup + 5) and move the default to the
+winner.
