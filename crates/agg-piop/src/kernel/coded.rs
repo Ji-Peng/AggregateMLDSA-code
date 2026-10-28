@@ -258,44 +258,136 @@ pub(super) fn masses(
             .map(|(&o, &w)| sums[o..o + w].to_vec())
             .collect();
     }
-    // Wide tables (16-class columns at the quartet level): each task owns a subset of the
-    // segments over all items, so no table is replicated or reduced; the item weights are
-    // computed once for all tasks.
-    let tasks = threads.min(segments.len());
-    let mut order: Vec<usize> = (0..segments.len()).collect();
-    order.sort_by_key(|&s| std::cmp::Reverse(widths[s]));
-    let mut assignment: Vec<Vec<usize>> = vec![Vec::new(); tasks];
-    for (i, &s) in order.iter().enumerate() {
-        // Round robin over the size order balances the item work (one update per item
-        // and segment) and the table sizes.
-        assignment[i % tasks].push(s);
-    }
+    // Wide tables (16-class columns, or a joint segment of several columns, at the quartet
+    // level). A segment whose columns all belong to a wider segment is not accumulated over
+    // the items: its masses are marginals of that segment's table (one addition per entry of
+    // the wider table instead of one pass over the items). Every other segment is split into
+    // item ranges in proportion to its share of the item work (one code read per column and
+    // one table update per item), and a task owns one segment over one range: a table is
+    // replicated only over its own segment's ranges, and a joint segment of several columns
+    // no longer runs on one thread while the pool idles. The item weights are computed once
+    // for all tasks.
+    let parents = marginal_parents(segments, &widths, items);
+    let cost: Vec<usize> = segments
+        .iter()
+        .zip(&parents)
+        .map(|(s, parent)| if parent.is_some() { 0 } else { s.columns.len() + 1 })
+        .collect();
+    let total_cost: usize = cost.iter().sum();
+    let ranges: Vec<usize> = cost
+        .iter()
+        .zip(&widths)
+        .map(|(&c, &w)| {
+            if c == 0 {
+                return 0;
+            }
+            // At least a table's width of items per range, so that the replicated tables and
+            // their reduction stay below the item work of the segment.
+            (threads * c).div_ceil(total_cost).min(items / w.max(1)).max(1)
+        })
+        .collect();
+    let tasks: Vec<(usize, usize)> = ranges
+        .iter()
+        .enumerate()
+        .flat_map(|(s, &k)| (0..k).map(move |j| (s, j)))
+        .collect();
     let item_weights: Vec<E> = match weights {
         ItemWeights::Split(..) => (0..items).into_par_iter().map(|item| weights.at(item)).collect(),
         ItemWeights::One => Vec::new(),
     };
-    let results: Vec<Vec<(usize, Vec<E>)>> = assignment
-        .into_par_iter()
-        .map(|owned| {
-            let mut tables: Vec<Vec<E>> = owned.iter().map(|&s| vec![E::zero(); widths[s]]).collect();
-            for (table, &s) in tables.iter_mut().zip(&owned) {
-                if item_weights.is_empty() {
-                    let one = jolt_field::One::one();
-                    for item in 0..items {
-                        table[pattern(s, item)] += one;
-                    }
-                } else {
-                    for (item, &w) in item_weights.iter().enumerate() {
-                        table[pattern(s, item)] += w;
-                    }
+    let partials: Vec<Vec<E>> = tasks
+        .par_iter()
+        .map(|&(s, j)| {
+            let per = items.div_ceil(ranges[s]);
+            let (lo, hi) = ((j * per).min(items), ((j + 1) * per).min(items));
+            let mut table = vec![E::zero(); widths[s]];
+            if item_weights.is_empty() {
+                let one = jolt_field::One::one();
+                for item in lo..hi {
+                    table[pattern(s, item)] += one;
+                }
+            } else {
+                for (item, &w) in (lo..hi).zip(&item_weights[lo..hi]) {
+                    table[pattern(s, item)] += w;
                 }
             }
-            owned.into_iter().zip(tables).collect()
+            table
         })
         .collect();
-    let mut out: Vec<Vec<E>> = vec![Vec::new(); segments.len()];
-    for (s, table) in results.into_iter().flatten() {
-        out[s] = table;
+    // Sum the ranges of every segment (the tasks of a segment are consecutive), then the
+    // marginals. Field additions are exact, so neither the order nor the grouping changes a
+    // mass.
+    let mut partials = partials.into_iter();
+    let pieces: Vec<Vec<Vec<E>>> = ranges.iter().map(|&k| partials.by_ref().take(k).collect()).collect();
+    let direct: Vec<Vec<E>> = pieces
+        .into_par_iter()
+        .map(|mut pieces| {
+            if pieces.is_empty() {
+                return Vec::new();
+            }
+            let mut sum = pieces.swap_remove(0);
+            for piece in &pieces {
+                for (x, &y) in sum.iter_mut().zip(piece) {
+                    *x += y;
+                }
+            }
+            sum
+        })
+        .collect();
+    (0..segments.len())
+        .into_par_iter()
+        .map(|s| match parents[s] {
+            Some(t) => marginal(&segments[t], &segments[s], columns, &direct[t], quartets),
+            None => direct[s].clone(),
+        })
+        .collect()
+}
+
+/// Per segment, the segment whose table yields its masses as marginals: a segment that
+/// holds all of its columns and more, is itself accumulated over the items (it lies in no
+/// wider segment), and has a table smaller than the item count; the smallest such table.
+fn marginal_parents(segments: &[SegmentShape], widths: &[usize], items: usize) -> Vec<Option<usize>> {
+    let inside = |s: usize, t: usize| {
+        segments[t].columns.len() > segments[s].columns.len()
+            && segments[s].columns.iter().all(|c| segments[t].columns.contains(c))
+    };
+    let maximal: Vec<bool> = (0..segments.len()).map(|t| !(0..segments.len()).any(|u| inside(t, u))).collect();
+    (0..segments.len())
+        .map(|s| {
+            (0..segments.len())
+                .filter(|&t| maximal[t] && inside(s, t) && widths[t] < items)
+                .min_by_key(|&t| widths[t])
+        })
+        .collect()
+}
+
+/// The masses of segment `child` from the table of segment `parent`, whose columns include
+/// the child's. A joint code `j` of the parent holds the code `(j / stride) % pair_space` of
+/// each of its columns.
+fn marginal(parent: &SegmentShape, child: &SegmentShape, columns: &[Column], table: &[E], quartets: bool) -> Vec<E> {
+    let project: Vec<usize> = (0..parent.pair_space)
+        .map(|j| {
+            child
+                .columns
+                .iter()
+                .zip(&child.strides)
+                .map(|(&c, &stride)| {
+                    let i = parent.columns.iter().position(|&x| x == c).expect("a column of the parent");
+                    (j / parent.strides[i]) % columns[c].pair_space() * stride
+                })
+                .sum()
+        })
+        .collect();
+    let space = parent.pair_space;
+    let mut out = vec![E::zero(); if quartets { child.pair_space * child.pair_space } else { child.pair_space }];
+    if quartets {
+        for (p, &mass) in table.iter().enumerate() {
+            out[project[p / space] * child.pair_space + project[p % space]] += mass;
+        }
+    } else {
+        for (j, &mass) in table.iter().enumerate() {
+            out[project[j]] += mass;
+        }
     }
     out
 }
@@ -337,6 +429,39 @@ mod tests {
         assert_eq!(code_column(&wide, &[square_map()]).unwrap().classes, 9);
         let shifted = digit_map(|z| z + 100);
         assert_eq!(code_column(&cells, &[&shifted]).unwrap().classes, 16);
+    }
+
+    #[test]
+    fn wide_masses_split_joint_segments_and_derive_marginals() {
+        // Six bit columns: one segment per column, a joint segment of four of them (65,536
+        // quartet patterns, split into item ranges) and a joint segment of two inside it, so
+        // that five segments are marginals of the wide one and one is accumulated directly.
+        let mut rng = SplitMix64::new(17);
+        let len = 1 << 19;
+        let bit_cells: Vec<Vec<i8>> = (0..6).map(|_| (0..len).map(|_| rng.below(2) as i8).collect()).collect();
+        let columns: Vec<Column> = bit_cells.iter().map(|c| code_column(c, &[&IDENTITY_MAP]).unwrap()).collect();
+        let mut pick: Vec<Vec<usize>> = (0..6).map(|c| vec![c]).collect();
+        pick.push(vec![5, 4, 3, 2]);
+        pick.push(vec![2, 4]);
+        let segments: Vec<SegmentShape> = pick.iter().map(|cols| SegmentShape::new(cols.clone(), &columns)).collect();
+        let widths: Vec<usize> = segments.iter().map(|s| s.pair_space * s.pair_space).collect();
+        let items = len / 4;
+        let parents = marginal_parents(&segments, &widths, items);
+        assert_eq!(parents, vec![None, None, Some(6), Some(6), Some(6), Some(6), None, Some(6)]);
+        let first: Vec<E> = (0..64).map(|_| field(&mut rng)).collect();
+        let second: Vec<E> = (0..items / 64).map(|_| field(&mut rng)).collect();
+        for weights in [ItemWeights::Split(&first, &second), ItemWeights::One] {
+            let got = masses(&columns, &segments, items, true, &weights);
+            for (segment, table) in segments.iter().zip(&got) {
+                let mut expected = vec![E::zero(); segment.pair_space * segment.pair_space];
+                for item in 0..items {
+                    let p = segment.pair_pattern(&columns, 2 * item) * segment.pair_space
+                        + segment.pair_pattern(&columns, 2 * item + 1);
+                    expected[p] += weights.at(item);
+                }
+                assert_eq!(*table, expected);
+            }
+        }
     }
 
     #[test]
