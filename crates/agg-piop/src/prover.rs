@@ -817,6 +817,9 @@ pub fn prove_with_tables_using(
     let mut bridge_tables = BridgeGroupTables::build(manifest, main, &matrices)?;
     if let Some(tamper) = hooks.tamper_bridge {
         tamper(manifest, &mut bridge_tables);
+        // A tampered (or replaced) table set no longer matches `main`: the parities are
+        // recomputed from the committed bits.
+        bridge_tables.drop_parity1_cache();
     }
     let tables = SourceTables {
         manifest,

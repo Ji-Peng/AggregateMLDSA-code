@@ -784,6 +784,11 @@ impl BridgeGroupTables {
         self.parity1.as_ref()
     }
 
+    /// Forget the cached level-1 parities (the tables were changed after `build`).
+    pub(crate) fn drop_parity1_cache(&mut self) {
+        self.parity1 = None;
+    }
+
     /// The level-2 parities `y^(2)_t`.
     #[must_use]
     pub fn parities(&self) -> &[Vec<i8>] {
