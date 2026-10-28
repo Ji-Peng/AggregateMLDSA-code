@@ -1274,6 +1274,48 @@ struct LinearSource<'a> {
     coefficients: Vec<E>,
     /// The single slot's coefficient, one.
     unit: [E; 1],
+    /// The lanes as `i32` cells when every lane is an integer lane and there are at most
+    /// [`LINEAR_PREFIX_LANES`] of them: then the first round runs on the cells (the
+    /// integer prefix) and the first table is level 1, built straight from the cells by
+    /// the first fold (measured faster than a level-2 first table, whose fill costs four
+    /// integer products per lane and row, and than a level-0 table, which costs a full
+    /// write and read of the domain).
+    prefix: Option<Vec<&'a [i32]>>,
+    /// `[c_l, c_l r0]` per lane for the level-1 fill, computed once (all rows of the fill
+    /// share the challenge).
+    fold1: std::sync::OnceLock<(E, Vec<E>)>,
+}
+
+/// Lane count up to which a linear group runs the integer prefix.
+const LINEAR_PREFIX_LANES: usize = 8;
+
+/// `[sum_k w_k f_l(2k), sum_k w_k f_l(2k + 1)]` per lane `l` (lane-major), with the
+/// weights `w_k = first[..] second[..]`, unreduced within a block of `first`.
+fn linear_pair_sums(lanes: &[&[i32]], items: usize, first: &[E], second: &[E]) -> Vec<E> {
+    fn run<const N: usize>(lanes: &[&[i32]], items: usize, first: &[E], second: &[E]) -> Vec<E> {
+        debug_assert_eq!(N, 2 * lanes.len());
+        // Cells are i32, so every quantity is below 2^31 (mad_int needs |k| < p).
+        weighted_int_sums::<N>(items, first, second, |k| {
+            let mut out = [0_i64; N];
+            for (pair, lane) in out.chunks_exact_mut(2).zip(lanes) {
+                pair[0] = i64::from(lane[2 * k]);
+                pair[1] = i64::from(lane[2 * k + 1]);
+            }
+            out
+        })
+        .to_vec()
+    }
+    match lanes.len() {
+        1 => run::<2>(lanes, items, first, second),
+        2 => run::<4>(lanes, items, first, second),
+        3 => run::<6>(lanes, items, first, second),
+        4 => run::<8>(lanes, items, first, second),
+        5 => run::<10>(lanes, items, first, second),
+        6 => run::<12>(lanes, items, first, second),
+        7 => run::<14>(lanes, items, first, second),
+        8 => run::<16>(lanes, items, first, second),
+        _ => unreachable!("at most LINEAR_PREFIX_LANES lanes"),
+    }
 }
 
 /// The integer value of cell `i` of an integer or byte lane.
@@ -1296,8 +1338,12 @@ impl Level0 for LinearSource<'_> {
     }
 
     /// `g = sum_l c_l f_l` on every cell (four products per cell at the lookup stacks, half
-    /// of what the first round and the first fold would cost on the integer lanes).
+    /// of what the first round and the first fold would cost on the integer lanes); none
+    /// with the integer prefix.
     fn initial_table(&self) -> Option<Vec<E>> {
+        if self.prefix.is_some() {
+            return None;
+        }
         // Unreduced products, one reduction per cell.
         let cell = |i: usize| {
             let mut acc = Acc::zero();
@@ -1319,15 +1365,44 @@ impl Level0 for LinearSource<'_> {
     }
 
     fn first_item(&self, _: usize, _: bool, _: &mut [[Acc; 3]]) {
-        unreachable!("the rounds run on the materialized table")
+        unreachable!("the rounds run on the materialized table or the integer prefix")
     }
 
     fn first_slots(&self) -> &[usize] {
         &[]
     }
 
-    fn folded_row(&self, _: E, _: &<E as Fold>::Ctx, _: usize, _: &mut [E]) {
-        unreachable!("the rounds run on the materialized table")
+    /// `g` at level-1 row `i`: per lane `c_l f_l(2i) + c_l r (f_l(2i + 1) - f_l(2i))` (one
+    /// reduction per row).
+    fn folded_row(&self, r: E, _: &<E as Fold>::Ctx, i: usize, out: &mut [E]) {
+        let lanes = self.prefix.as_deref().expect("the integer prefix");
+        let (bound, products) = self.fold1.get_or_init(|| {
+            (r, self.coefficients.iter().flat_map(|&c| [c, c * r]).collect())
+        });
+        debug_assert!(*bound == r, "one fill per group");
+        let mut acc = Acc::zero();
+        for (lane, c) in lanes.iter().zip(products.chunks_exact(2)) {
+            let (low, high) = (i64::from(lane[2 * i]), i64::from(lane[2 * i + 1]));
+            // Cells are i32: the difference is below 2^32 in magnitude (mad_int needs
+            // |k| < p); 2 mad_int per lane, at most 16 terms per accumulator.
+            mad_int(&mut acc, c[0], low);
+            mad_int(&mut acc, c[1], high - low);
+        }
+        out[0] = E::reduce_product(acc);
+    }
+
+    /// From the cells: `q(t) = sum_l c_l sum_k w_k f_l(2k + t)`, `q_2 = 0` (linear summand).
+    fn first_round(&self, weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
+        let lanes = self.prefix.as_deref()?;
+        let one = [E::one()];
+        let (first, second) = weights.unwrap_or((&one, &one));
+        let sums = linear_pair_sums(lanes, self.rows() / 2, first, second);
+        let (mut q0, mut q1) = (Acc::zero(), Acc::zero());
+        for (pair, &c) in sums.chunks_exact(2).zip(&self.coefficients) {
+            mad(&mut q0, c, pair[0]);
+            mad(&mut q1, c, pair[1]);
+        }
+        Some([E::reduce_product(q0), E::reduce_product(q1), E::zero()])
     }
 
     fn linear(&self) -> &[(usize, usize)] {
@@ -1343,8 +1418,15 @@ impl Level0 for LinearSource<'_> {
     }
 }
 
+/// `AGG_LINEAR_TABLE=1` keeps the materialized level-0 table for the linear groups (an
+/// A/B switch; the messages are the same either way).
+fn linear_prefix_disabled() -> bool {
+    std::env::var_os("AGG_LINEAR_TABLE").is_some()
+}
+
 /// `sum_x eq(point, x) sum_l c_l f_l(x)` over integer or byte lanes `f_l` (`|f_l| < 2^62`),
-/// as the single field lane `g = sum_l c_l f_l` built once. The group yields no terminal
+/// as the single field lane `g = sum_l c_l f_l` (with `i32` lanes the first round runs on
+/// the cells and the first fold builds `g` at level 1 from them). The group yields no terminal
 /// lane values (the caller reads the lanes' values from another group at the same point).
 pub struct LinearIntGroup<'a>(Engine<LinearSource<'a>>);
 
@@ -1366,7 +1448,19 @@ impl<'a> LinearIntGroup<'a> {
         {
             return None;
         }
-        Engine::new(LinearSource { lanes, coefficients, unit: [E::one()] }, eq_point).map(Self)
+        let prefix = (lanes.len() <= LINEAR_PREFIX_LANES && !linear_prefix_disabled())
+            .then(|| {
+                lanes
+                    .iter()
+                    .map(|l| match l {
+                        super::Source::Ints(cells) => Some(*cells),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
+        let source = LinearSource { lanes, coefficients, unit: [E::one()], prefix, fold1: std::sync::OnceLock::new() };
+        Engine::new(source, eq_point).map(Self)
     }
 
     /// The current claim.
