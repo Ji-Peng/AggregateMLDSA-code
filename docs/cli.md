@@ -24,7 +24,7 @@ the byte size of every part of the aggregate). Steps:
    commitments, event 3 `sd`, event 4 `G_1, G_2, G_3, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
-   default half the global pool, `0` for the serial order, at most the logical CPUs or the
+   default 3/8 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the
    global pool, a non-numeric value warned about on stderr and replaced by the default,
    while the prover runs events 7 to 12), event 13 the opening. There is no projection seed
    (deviation P2).

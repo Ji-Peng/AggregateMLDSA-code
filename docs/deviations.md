@@ -916,9 +916,10 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   its own OS thread, 64 MiB worker stacks) while the parity tables, the lookup, the
   pre-stage claims and the three stages run on the global pool; the join then absorbs the
   proofs (`prover::fork_join`). The pool has `AGG_FLOCK_THREADS` threads if set (`0`: no
-  fork, the old serial order), else half the global pool rounded up: 8 of 16 on the cloud
-  machine, the better split on the cloud machine (-1.15 s at 32K with 8 threads, -1.11 s
-  with 16; a global 8-thread pool alone was 13% slower).
+  fork, the old serial order), else 3/8 of the global pool rounded up: 6 of 16 on the cloud
+  machine (the fork itself: -1.15 s at 32K with 8 threads, -1.11 s with 16; a global
+  8-thread pool alone was 13% slower; the 6-thread default follows the pool sweeps of
+  `docs/perf.md` 12.1 and 13).
   On a rayon worker or with a one-thread pool there is no fork (the P12 pattern), nor for
   a side whose proof items are empty (`KeccakSide::proves_concurrently`: mode B, profile
   0). A non-numeric `AGG_FLOCK_THREADS` is reported once on stderr and replaced by the

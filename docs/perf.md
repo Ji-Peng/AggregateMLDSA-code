@@ -610,3 +610,29 @@ the pool shifts back towards 8. On the serial path, the Flock commit (2.38 s, be
 is the largest item; P3 (start the event-2 build earlier) is 0.3-0.5 s (est., Section 6).
 The 11.34 s already use the 6-thread pool; with the default pool (8) the starting point is
 11.69 s, so the default change of 12.1 is the first 0.35 s (measured).
+
+## 13. Flock pool after the scalar kernel work (local 4K, direction only)
+
+WSL on an i7-11700K (8 cores, 16 threads, turbo and HT on), CLMUL build, H-u 4K,
+`agg bench --count 4096 --keys 16 --warmup 1 --reps 2` per pool size, sizes alternated
+(4, 6, 8, 8, 6, 4) in two passes. The host was shared with another session (load 4-16), so
+runs that the load visibly disturbed (prove above 5 s) are left out. All numbers are local
+and measured; they set a direction only, not a 32K figure.
+
+| `AGG_FLOCK_THREADS` | prove, median of 2 (ms) | Flock proofs (ms) | fork-join wall (ms) |
+|---:|---:|---:|---:|
+| 4 | 3,540.4 / 3,064.6 / 3,174.0 | 882.8 / 902.6 / 979.0 | 1,275.4 / 1,148.0 / 1,294.7 |
+| 6 | 3,363.0 / 2,926.0 | 799.3 / 795.2 | 1,203.9 / 1,216.7 |
+| 8 | 3,339.2 / 3,272.9 / 3,247.8 | 873.2 / 847.2 / 917.3 | 1,406.5 / 1,274.4 / 1,373.2 |
+
+At 4K the PIOP branch is the longer one at every size (the fork wall exceeds the Flock
+proofs), so a smaller Flock pool helps the wall until the Flock branch slows down: 6 threads
+gave the shortest fork wall and prove time, 4 threads lengthened the Flock proofs without a
+shorter wall, and 8 threads took cores from the PIOP. The default is now 3/8 of the global
+pool rounded up (6 of 16), the value Section 12.1 suggested from the 32K sweep (4 / 6 / 8
+threads: 11,262.0 / 11,336.3 / 11,688.6 ms).
+
+For the next cloud run: the scalar kernel work shortens the PIOP branch (lookup and stages)
+more than the Flock proofs, so at 32K the Flock branch may become the critical one; sweep
+`AGG_FLOCK_THREADS` = 4 / 6 / 8 at 32K again (1 warmup + 5) and move the default if 8 wins
+there.
