@@ -145,7 +145,8 @@ pub use crate::lincheck::kernels::{
 };
 pub use crate::lincheck::union::{
     MatrixAssertion, UnionLincheckSlot, eq_prefix_sum, eq_prefix_weight, prove_union_capture_z_vec,
-    prove_union_capture_z_vec_with_grinding, union_bitbank_fold, union_comb_partial, verify_union,
+    prove_union_capture_z_vec_with_grinding, union_bitbank_fold, union_bitbank_fold_multi,
+    union_comb_partial, verify_union,
     verify_union_deferred, verify_union_deferred_with_grinding, verify_union_with_grinding,
 };
 use crate::{
@@ -1093,6 +1094,17 @@ fn partial_fold_packed_z_rows_best(
     n_rows: usize,
 ) -> Vec<F128> {
     let n_outer = 1usize << (m - k_log);
+    if iblock_wins(m, k_log) {
+        let mut out = partial_fold_packed_z_rows_iblock(
+            z_packed,
+            m,
+            k_log,
+            useful_bits,
+            &[eq_outer],
+            n_rows,
+        );
+        return out.pop().expect("one point");
+    }
     if n_rows < n_outer {
         partial_fold_packed_z_rows_padded(z_packed, m, k_log, useful_bits, eq_outer, n_rows)
     } else {
@@ -1118,6 +1130,112 @@ fn n_log_ok_for_tile(m: usize, k_log: usize, tile_t: usize) -> bool {
     }
     let n_stripes = 1usize << (n_log - 3);
     n_stripes.is_multiple_of(tile_t)
+}
+
+/// Whether the column-partitioned fold [`partial_fold_packed_z_rows_iblock`]
+/// serves a stripe of `2^(m - k_log)` rows by `2^k_log` columns. The stripe-
+/// partitioned kernels give every task a full `2^k_log` accumulator vector
+/// (re-streamed per stripe, or per tile of eight, and summed across tasks at
+/// the end), which is the whole cost once that vector leaves L2: measured at
+/// the 4K union shape (2^12 rows by 2^18 columns, 4 MiB accumulators) about
+/// 120 ms per fold. Wide stripes (`k_log >= 14`, 256 KiB of accumulators)
+/// take the column partition.
+fn iblock_wins(m: usize, k_log: usize) -> bool {
+    k_log >= 14 && m - k_log >= 6
+}
+
+/// Partial folds of one bit-packed stripe at several row points at once,
+/// partitioned over columns: `out[p][c] = sum_{r < n_rows} eq_p[r] * z[c, r]`
+/// for `c < useful_bits` (zero above), with `z[c, r]` bit `r % 8` of
+/// `z_packed[(r / 8) * k + c]`.
+///
+/// Each task owns a range of columns for every stripe, so its accumulators
+/// (eight registers per tile and column block) are written once and no
+/// cross-task sum is needed; the 256-entry subset-sum tables of every row
+/// byte and point are built once up front (`4 KiB` per byte and point) and
+/// read by every task. One read of `z` serves all points. It reads the same
+/// stripes as the row-prefix fold (`ceil(n_rows / 8)`, all of them at a full
+/// count) and the sums are XORs, so the result equals every other partition
+/// bit for bit.
+pub fn partial_fold_packed_z_rows_iblock(
+    z_packed: &[u8],
+    m: usize,
+    k_log: usize,
+    useful_bits: usize,
+    eq_outers: &[&[F128]],
+    n_rows: usize,
+) -> Vec<Vec<F128>> {
+    const TILE_T: usize = 8;
+    const BLOCK_K: usize = 8;
+    let n_log = m - k_log;
+    let k = 1usize << k_log;
+    let n_outer = 1usize << n_log;
+    assert_eq!(z_packed.len(), (1usize << m) / 8);
+    assert!(n_log >= 6 && k_log >= 3, "tile of 8 stripes and 8 columns");
+    assert!(useful_bits <= k && n_rows <= n_outer);
+    assert!(eq_outers.iter().all(|e| e.len() == n_outer));
+    let np = eq_outers.len();
+    // The stripes holding the declared rows: the same bytes the row-prefix
+    // fold reads (and, at a full count, all of them).
+    let n_stripes = n_rows.div_ceil(8);
+    let n_tiles = n_stripes.div_ceil(TILE_T);
+    // tables[(s * np + p) * 256 + v] = sum of eq_p over the set bits of v in
+    // row byte s: the points of one stripe are adjacent.
+    let mut tables: Vec<F128> = alloc_uninit_vec(n_stripes * np * 256);
+    tables
+        .par_chunks_mut(256)
+        .enumerate()
+        .for_each(|(i, t)| {
+            let (st, p) = (i / np, i % np);
+            build_sum_table(&eq_outers[p][8 * st..8 * st + 8], t);
+        });
+    let n_blocks = useful_bits.div_ceil(BLOCK_K);
+    // Column ranges: a few per thread, at least 64 columns.
+    let per_task = n_blocks
+        .div_ceil(4 * current_num_threads().max(1))
+        .max(64 / BLOCK_K);
+    let n_tasks = n_blocks.div_ceil(per_task);
+    let parts: Vec<Vec<F128>> = (0..n_tasks)
+        .into_par_iter()
+        .map(|task| {
+            let b0 = task * per_task;
+            let b1 = (b0 + per_task).min(n_blocks);
+            let width = (b1 - b0) * BLOCK_K;
+            let mut acc = vec![F128::ZERO; np * width];
+            for tile in 0..n_tiles {
+                let s0 = tile * TILE_T;
+                let tt = TILE_T.min(n_stripes - s0);
+                for blk in b0..b1 {
+                    let col = blk * BLOCK_K;
+                    for p in 0..np {
+                        let mut a = [F128::ZERO; BLOCK_K];
+                        for t in 0..tt {
+                            let row = &z_packed[(s0 + t) * k + col..(s0 + t) * k + col + BLOCK_K];
+                            let tab = &tables[((s0 + t) * np + p) * 256..((s0 + t) * np + p + 1) * 256];
+                            for (x, &byte) in a.iter_mut().zip(row) {
+                                *x += tab[byte as usize];
+                            }
+                        }
+                        let dst = &mut acc[p * width + (blk - b0) * BLOCK_K..][..BLOCK_K];
+                        for (d, x) in dst.iter_mut().zip(&a) {
+                            *d += *x;
+                        }
+                    }
+                }
+            }
+            acc
+        })
+        .collect();
+    let mut out = vec![vec![F128::ZERO; k]; np];
+    for (task, part) in parts.iter().enumerate() {
+        let col0 = task * per_task * BLOCK_K;
+        let width = part.len() / np;
+        for (p, o) in out.iter_mut().enumerate() {
+            let w = width.min(useful_bits.saturating_sub(col0)).min(k - col0);
+            o[col0..col0 + w].copy_from_slice(&part[p * width..p * width + w]);
+        }
+    }
+    out
 }
 
 /// Build a 256-entry sum table over 8 F128 values:
@@ -2316,8 +2434,9 @@ mod tests {
             SparseBinaryMatrix, SparseMatrixCircuit, build_eq_table,
             build_quirky_eq_table_from_weights, n_log_ok_for_tile, pack_z_lincheck,
             partial_fold_packed_z, partial_fold_packed_z_best, partial_fold_packed_z_fast,
-            partial_fold_packed_z_fast_padded, prove, prove_with_grinding, sparse_row_fold, verify,
-            verify_with_grinding,
+            partial_fold_packed_z_fast_padded, partial_fold_packed_z_rows_iblock,
+            partial_fold_packed_z_rows_padded, prove, prove_with_grinding, sparse_row_fold,
+            verify, verify_with_grinding,
         },
         test_rng::Rng,
     };
@@ -2645,6 +2764,44 @@ mod tests {
     /// Covers the three hash padding shapes plus a non-byte-aligned
     /// `useful_bits` to exercise the NEON's boundary block (rounded up to
     /// `BLOCK_K = 8`).
+    #[test]
+    fn partial_fold_iblock_matches_row_prefix_and_dense() {
+        // (m, k_log, useful_bits, n_rows): wide stripes, a useful boundary
+        // inside a column block, row counts below, at and off a tile edge.
+        let cases: &[(usize, usize, usize, usize)] = &[
+            (20, 14, 15_409, 64),
+            (20, 14, 15_409, 37),
+            (21, 15, 31_401, 64),
+            (21, 15, 32_768, 50),
+            (22, 16, 42_560, 9),
+        ];
+        for &(m, k_log, useful_bits, n_rows) in cases {
+            let mut rng = Rng::new(0x1B10C + (m * 7 + n_rows) as u64);
+            let n_log = m - k_log;
+            let k = 1usize << k_log;
+            let mut z = rng.bits(1usize << m);
+            for row in 0..(1usize << n_log) {
+                for c in 0..k {
+                    if c >= useful_bits || row >= n_rows {
+                        z[row * k + c] = false;
+                    }
+                }
+            }
+            let z_packed = pack_z_lincheck(&z, m, k_log);
+            let eqs: Vec<Vec<F128>> =
+                (0..3).map(|_| build_eq_table(&rng.f128_vec(n_log))).collect();
+            let refs: Vec<&[F128]> = eqs.iter().map(Vec::as_slice).collect();
+            let got = partial_fold_packed_z_rows_iblock(&z_packed, m, k_log, useful_bits, &refs, n_rows);
+            for (p, eq) in eqs.iter().enumerate() {
+                let want =
+                    partial_fold_packed_z_rows_padded(&z_packed, m, k_log, useful_bits, eq, n_rows);
+                assert_eq!(got[p], want, "m={m} k_log={k_log} n_rows={n_rows} point {p}");
+                let dense = partial_fold_packed_z_fast(&z_packed, m, k_log, eq);
+                assert_eq!(got[p], dense, "dense m={m} k_log={k_log} n_rows={n_rows}");
+            }
+        }
+    }
+
     #[test]
     fn partial_fold_padded_matches_dense() {
         // (m, k_log, useful_bits)

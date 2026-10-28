@@ -68,7 +68,8 @@ use crate::{
     lincheck::{
         LincheckCircuit, LincheckClaim, LincheckError, LincheckGrinding, LincheckProof,
         QuirkyPoint, SkipPoint, build_eq_table, build_quirky_eq_table_from_weights,
-        column_sumcheck_prove, inner_product, partial_fold_packed_z_rows_best,
+        column_sumcheck_prove, iblock_wins, inner_product, partial_fold_packed_z_rows_best,
+        partial_fold_packed_z_rows_iblock,
     },
     matrix_fold::{MatrixClaim, Weight},
     schedule::Registry,
@@ -248,6 +249,67 @@ pub fn union_bitbank_fold(
         }
     }
     z_vec
+}
+
+/// [`union_bitbank_fold`] at several row points in one pass over each slot's
+/// stripe (one subset-sum table set per point, every stripe byte read once
+/// for all points). Same vectors as calling [`union_bitbank_fold`] per point.
+pub fn union_bitbank_fold_multi(
+    union: &UnionInstance,
+    slots: &[UnionLincheckSlot<'_>],
+    x_outers: &[&[F128]],
+) -> Vec<Vec<F128>> {
+    let registry = union.registry();
+    let nu = union.n_log();
+    let col_vars = union.m_bool() - nu;
+    let single = registry.num_boolean() == 1 && registry.slots()[0].m_slot == registry.m_bool();
+    let eqs: Vec<Vec<F128>> = x_outers.iter().map(|x| build_eq_table(x)).collect();
+    let mut z_vecs: Vec<Vec<F128>> = if single {
+        vec![Vec::new(); x_outers.len()]
+    } else {
+        vec![vec![F128::ZERO; 1usize << col_vars]; x_outers.len()]
+    };
+    for (((ty, slot), slot_in), &n_t) in registry
+        .boolean_types()
+        .iter()
+        .zip(registry.slots())
+        .zip(slots)
+        .zip(union.counts())
+    {
+        let ys: Vec<Vec<F128>> = if iblock_wins(nu + ty.k_log, ty.k_log) {
+            let refs: Vec<&[F128]> = eqs.iter().map(Vec::as_slice).collect();
+            partial_fold_packed_z_rows_iblock(
+                slot_in.z_lincheck,
+                nu + ty.k_log,
+                ty.k_log,
+                ty.useful_bits,
+                &refs,
+                n_t,
+            )
+        } else {
+            eqs.iter()
+                .map(|eq| {
+                    partial_fold_packed_z_rows_best(
+                        slot_in.z_lincheck,
+                        nu + ty.k_log,
+                        ty.k_log,
+                        ty.useful_bits,
+                        eq,
+                        n_t,
+                    )
+                })
+                .collect()
+        };
+        for (z_vec, y_t) in z_vecs.iter_mut().zip(ys) {
+            if single {
+                *z_vec = y_t;
+            } else {
+                let off = slot.prefix << ty.k_log;
+                z_vec[off..off + y_t.len()].copy_from_slice(&y_t);
+            }
+        }
+    }
+    z_vecs
 }
 
 pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(

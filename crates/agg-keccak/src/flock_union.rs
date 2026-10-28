@@ -677,23 +677,24 @@ impl UnionGeometry {
         let heights = union.jagged_heights();
         // Block-first transport inputs (a full-height stack): the column bit-bank at the C
         // claim's row point, as Flock's union prover computes it.
-        let bank_c = rectangular_prefix_columns(&heights, nu).map(|_| {
-            assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
-            lincheck::union_bitbank_fold(&union, &slots, &zc_claim.r_rest[1..1 + nu])
-        });
         // The caller's bit claims. With the block-first transport the bank must be the
         // full column bit-bank of the stack at the claim's row point (the block rounds fold the
         // bank's multilinear extension, so the columns of zero weight enter too), computed
-        // like the C claim's from the stripes; otherwise only `s_hat_v` is needed, and the
-        // columns of nonzero weight suffice (`bit_bank`).
+        // like the C claim's from the stripes, in the same pass over the stripes; otherwise
+        // only `s_hat_v` is needed, and the columns of nonzero weight suffice (`bit_bank`).
         let t_banks = std::time::Instant::now();
-        let bit_banks: Vec<Vec<F128>> = bit_claims
-            .iter()
-            .map(|c| match &bank_c {
-                Some(_) => lincheck::union_bitbank_fold(&union, &slots, &c.x_full[1..=nu]),
-                None => Vec::new(),
-            })
-            .collect();
+        let (bank_c, bit_banks): (Option<Vec<F128>>, Vec<Vec<F128>>) =
+            match rectangular_prefix_columns(&heights, nu) {
+                Some(_) => {
+                    assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
+                    let mut points: Vec<&[F128]> = vec![&zc_claim.r_rest[1..1 + nu]];
+                    points.extend(bit_claims.iter().map(|c| &c.x_full[1..=nu]));
+                    let mut banks = lincheck::union_bitbank_fold_multi(&union, &slots, &points);
+                    let bank_c = banks.remove(0);
+                    (Some(bank_c), banks)
+                }
+                None => (None, vec![Vec::new(); bit_claims.len()]),
+            };
         let bit_s_hat: Vec<Vec<F128>> = bit_claims
             .iter()
             .zip(&bit_banks)
@@ -707,7 +708,7 @@ impl UnionGeometry {
             .collect();
         if !bit_claims.is_empty() && std::env::var_os("PCS_TRACE").is_some() {
             eprintln!(
-                "  [flock_union] bit claims' banks and s_hat_v ({}): {:6.2} ms",
+                "  [flock_union] C and bit claims' banks and s_hat_v ({}): {:6.2} ms",
                 if bank_c.is_some() { "full, block-first" } else { "region" },
                 t_banks.elapsed().as_secs_f64() * 1e3
             );
