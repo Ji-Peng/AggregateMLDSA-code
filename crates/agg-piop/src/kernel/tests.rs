@@ -571,6 +571,62 @@ fn compiled_pieces_evaluate_every_term_in_coefficient_form() {
     );
 }
 
+/// The integer prefix of `IntPairGroup` (rounds 0 and 1 from the leaves, the first table
+/// at level 2) and the table path (leaves beyond the prefix bounds) both match the generic
+/// group byte for byte, with and without `M` lanes, at `2^8..2^14` rows.
+#[test]
+fn integer_prefix_matches_the_generic_group() {
+    let mut rng = SplitMix64::new(2718);
+    for vars in [8_usize, 9, 11, 14] {
+        let rows = 1 << vars;
+        let eq_point = point(&mut rng, vars);
+        let challenges: Vec<E> = (0..vars).map(|_| field(&mut rng)).collect();
+        let ints = |rng: &mut SplitMix64, bound: u64| -> Vec<i32> {
+            (0..rows).map(|_| rng.below(2 * bound + 1) as i32 - bound as i32).collect()
+        };
+        // (S bound, M bound, prefix expected).
+        for (with_m, s_bound, m_bound, prefix) in [
+            (false, 1 << 15, 0, true),
+            (false, 1 << 20, 0, true),
+            (false, 1 << 21, 0, false),
+            (true, 1 << 16, 1 << 30, true),
+            (true, 1 << 17, 1 << 30, false),
+        ] {
+            let s = [ints(&mut rng, s_bound), ints(&mut rng, s_bound)];
+            let m = [ints(&mut rng, m_bound), ints(&mut rng, m_bound)];
+            let c: [E; 5] = std::array::from_fn(|_| field(&mut rng));
+            let mut lanes = vec![Lane::Source(Source::Ints(&s[0])), Lane::Source(Source::Ints(&s[1]))];
+            let mut instances = vec![
+                GroupInstance { gamma: c[0], terms: vec![Term::Product(vec![])] },
+                GroupInstance { gamma: c[1], terms: vec![Term::Product(vec![0]), Term::Product(vec![1])] },
+                GroupInstance { gamma: c[2], terms: vec![Term::Product(vec![0, 1])] },
+            ];
+            if with_m {
+                lanes.push(Lane::Source(Source::Ints(&m[0])));
+                lanes.push(Lane::Source(Source::Ints(&m[1])));
+                instances[2].terms.extend([Term::Product(vec![2]), Term::Product(vec![3])]);
+                instances.push(GroupInstance { gamma: c[3], terms: vec![Term::Product(vec![0, 3]), Term::Product(vec![1, 2])] });
+                instances.push(GroupInstance { gamma: c[4], terms: vec![Term::Product(vec![2, 3])] });
+            }
+            let (expected, _) = reference(&lanes, &instances, Some(&eq_point), vars, 3, &challenges);
+            let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
+            let m_lanes = with_m.then(|| [m[0].as_slice(), m[1].as_slice()]);
+            let mut pair = IntPairGroup::new([&s[0], &s[1]], m_lanes, c, &eq_point).expect("pair");
+            assert_eq!(pair.uses_prefix(), prefix, "M {with_m}, S {s_bound}, M {m_bound}");
+            for (round, &r) in challenges.iter().enumerate() {
+                let got = pair.round_message(round);
+                assert_eq!(expected[round], got, "reference, round {round}, M {with_m}, S {s_bound}, {vars} vars");
+                assert_eq!(generic.round_message(round), got, "generic, round {round}, M {with_m}, S {s_bound}, {vars} vars");
+                generic.bind(round, r);
+                pair.bind(round, r);
+                assert_eq!(generic.claim(), pair.claim());
+            }
+            assert_eq!(generic.terminal_values(), pair.terminal_values());
+            assert!(pair.terminal_consistent());
+        }
+    }
+}
+
 /// The dedicated groups of `kernel::layer` against the generic group (the same round
 /// polynomials, bit for bit) on random tables, with challenges drawn per round.
 #[test]

@@ -82,6 +82,38 @@ pub(crate) fn mad_int(acc: &mut Acc, w: E, k: i64) {
     acc.0[3] += b >> 64;
 }
 
+/// `acc += w u` without reduction for a canonical `u < p` (two products, as [`mad_int`]).
+#[inline(always)]
+pub(super) fn mad_u64(acc: &mut Acc, w: E, u: u64) {
+    let u = u128::from(u);
+    let a = u128::from(w.c0().to_canonical_u64()) * u;
+    let b = u128::from(w.c1().to_canonical_u64()) * u;
+    acc.0[0] += u128::from(a as u64);
+    acc.0[1] += a >> 64;
+    acc.0[2] += u128::from(b as u64);
+    acc.0[3] += b >> 64;
+}
+
+/// Add a signed integer `|k| < p` to an unreduced accumulator (its residue goes to the
+/// low slot of the first coordinate).
+#[inline(always)]
+pub(super) fn lift_int(acc: &mut Acc, k: i64) {
+    acc.0[0] += u128::from((k as u64).wrapping_add(((k >> 63) as u64) & P));
+}
+
+/// The canonical residue of a signed `|v| <= 2^64 + 2^63` (an exact `i128` product sum
+/// that overflows `i64`; `carry` of [`reduce3`] stays zero for `|v| < 2^128`).
+#[inline(always)]
+pub(super) fn reduce_i128(v: i128) -> u64 {
+    let magnitude = v.unsigned_abs();
+    let residue = reduce3(magnitude as u64, (magnitude >> 64) as u64, 0);
+    if v < 0 && residue != 0 {
+        P - residue
+    } else {
+        residue
+    }
+}
+
 /// `even + r (odd - even)`.
 #[inline(always)]
 pub(super) fn fold(context: &<E as Fold>::Ctx, even: E, odd: E) -> E {

@@ -31,7 +31,7 @@ use jolt_field::{Field, Fold, One, Ring, Unreduced, Zero};
 use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
-use super::field::{fm, fmi, fold, lift, mad, mad_int, Acc, ITEM_CHUNK, MIN_PARALLEL_ITEMS};
+use super::field::{fm, fmi, fold, lift, lift_int, mad, mad_int, mad_u64, reduce_i128, Acc, ITEM_CHUNK, MIN_PARALLEL_ITEMS};
 use super::{compress, evaluate_compressed};
 use crate::OpeningField as E;
 
@@ -66,6 +66,17 @@ trait Level0: Sync {
     fn first_round(&self, _weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
         None
     }
+    /// `[q(0), q(1), q_2]` of the second round straight from the level-0 data with the
+    /// first challenge `r0` bound (no level-1 table); a source answering `Some` must
+    /// implement [`Self::folded2_row`], since its first table is then level 2.
+    fn second_round(&self, _r0: E, _weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
+        None
+    }
+    /// Row `i` of level 2 (level-0 rows `4i..4i + 4` folded by `r0` then `r1`,
+    /// `r = [r0, r1, r0 r1]`), transformed.
+    fn folded2_row(&self, _r: [E; 3], _i: usize, _out: &mut [E]) {
+        unreachable!("no two-challenge fold from the source")
+    }
 }
 
 /// `sum_k first[k mod |first|] second[k / |first|] values(k)` for `N` integer quantities per
@@ -76,47 +87,73 @@ fn weighted_int_sums<const N: usize>(
     second: &[E],
     values: impl Fn(usize) -> [i64; N] + Sync,
 ) -> [E; N] {
+    weighted_int_sums_wide::<N, 0>(items, first, second, |k| (values(k), [])).0
+}
+
+/// [`weighted_int_sums`] with `W` further quantities per item that are exact in `i128` but
+/// may exceed `i64` (each is reduced to its canonical residue before the weighting).
+fn weighted_int_sums_wide<const N: usize, const W: usize>(
+    items: usize,
+    first: &[E],
+    second: &[E],
+    values: impl Fn(usize) -> ([i64; N], [i128; W]) + Sync,
+) -> ([E; N], [E; W]) {
     let first_bits = first.len().trailing_zeros();
     let first_mask = first.len() - 1;
-    let run = |task: usize| -> [Acc; N] {
+    let run = |task: usize| -> ([Acc; N], [Acc; W]) {
         let start = task * ITEM_CHUNK;
         let end = ((task + 1) * ITEM_CHUNK).min(items);
-        let mut outer = [Acc::zero(); N];
-        let mut inner = [Acc::zero(); N];
+        let mut outer = ([Acc::zero(); N], [Acc::zero(); W]);
+        let mut inner = ([Acc::zero(); N], [Acc::zero(); W]);
         let mut block = start >> first_bits;
+        let flush = |outer: &mut ([Acc; N], [Acc; W]), inner: &mut ([Acc; N], [Acc; W]), block: usize| {
+            for (o, i) in outer.0.iter_mut().zip(&mut inner.0) {
+                mad(o, second[block], E::reduce_product(*i));
+                *i = Acc::zero();
+            }
+            for (o, i) in outer.1.iter_mut().zip(&mut inner.1) {
+                mad(o, second[block], E::reduce_product(*i));
+                *i = Acc::zero();
+            }
+        };
         for k in start..end {
             if (k >> first_bits) != block {
-                for (o, i) in outer.iter_mut().zip(&mut inner) {
-                    mad(o, second[block], E::reduce_product(*i));
-                    *i = Acc::zero();
-                }
+                flush(&mut outer, &mut inner, block);
                 block = k >> first_bits;
             }
             let weight = first[k & first_mask];
-            for (i, v) in inner.iter_mut().zip(values(k)) {
+            let (narrow, wide) = values(k);
+            for (i, v) in inner.0.iter_mut().zip(narrow) {
                 mad_int(i, weight, v);
+            }
+            for (i, v) in inner.1.iter_mut().zip(wide) {
+                mad_u64(i, weight, reduce_i128(v));
             }
         }
         if start < end {
-            for (o, i) in outer.iter_mut().zip(&inner) {
-                mad(o, second[block], E::reduce_product(*i));
-            }
+            flush(&mut outer, &mut inner, block);
         }
         outer
     };
     let tasks = items.div_ceil(ITEM_CHUNK);
-    let add = |mut left: [Acc; N], right: [Acc; N]| {
-        for (l, r) in left.iter_mut().zip(right) {
+    let add = |mut left: ([Acc; N], [Acc; W]), right: ([Acc; N], [Acc; W])| {
+        for (l, r) in left.0.iter_mut().zip(right.0) {
+            *l += r;
+        }
+        for (l, r) in left.1.iter_mut().zip(right.1) {
             *l += r;
         }
         left
     };
     let total = if items >= MIN_PARALLEL_ITEMS && tasks > 1 {
-        (0..tasks).into_par_iter().map(run).reduce(|| [Acc::zero(); N], add)
+        (0..tasks)
+            .into_par_iter()
+            .map(run)
+            .reduce(|| ([Acc::zero(); N], [Acc::zero(); W]), add)
     } else {
         run(0)
     };
-    total.map(E::reduce_product)
+    (total.0.map(E::reduce_product), total.1.map(E::reduce_product))
 }
 
 /// The round driver shared by the dedicated groups.
@@ -131,9 +168,10 @@ struct Engine<S: Level0> {
     bound: usize,
     claim: E,
     pending: Vec<E>,
-    /// The challenge whose fold the next pass performs.
-    unfolded: Option<E>,
-    /// The table from level 1 on (empty before the first fold).
+    /// The challenges whose folds the next pass performs (two at most: a source with an
+    /// integer prefix answers the second round from level 0 and folds both at once).
+    unfolded: Vec<E>,
+    /// The table from the first fold on (empty before it).
     table: Vec<E>,
     arena: Option<super::SharedArena>,
 }
@@ -157,7 +195,7 @@ impl<S: Level0> Engine<S> {
             bound: 0,
             claim: E::zero(),
             pending: Vec::new(),
-            unfolded: None,
+            unfolded: Vec::new(),
             table,
             arena: None,
         })
@@ -219,12 +257,10 @@ impl<S: Level0> Engine<S> {
     #[allow(unsafe_code)]
     fn pass(&mut self, evaluate: bool, full: bool) -> [E; 3] {
         let width = self.source.width();
-        let challenge = self.unfolded.take();
+        let challenges = std::mem::take(&mut self.unfolded);
         let from_source = self.table.is_empty();
         let rows_in = if from_source { self.source.rows() } else { self.table.len() / width };
-        let rows_out = if challenge.is_some() { rows_in / 2 } else { rows_in };
-        let context = challenge.map(E::precompute);
-        let previous = std::mem::take(&mut self.table);
+        let rows_out = rows_in >> challenges.len();
         let unweighted = self.eq.is_none();
         let (first, second): (Vec<E>, Vec<E>) = match &self.eq {
             Some(eq) if evaluate => {
@@ -233,25 +269,47 @@ impl<S: Level0> Engine<S> {
             }
             _ => (vec![E::one()], vec![E::one()]),
         };
-        if evaluate && from_source && challenge.is_none() {
+        if evaluate && from_source {
             let weights = (!unweighted).then_some((first.as_slice(), second.as_slice()));
-            if let Some(sums) = self.source.first_round(weights) {
-                return sums;
+            match challenges.as_slice() {
+                [] => {
+                    if let Some(sums) = self.source.first_round(weights) {
+                        return sums;
+                    }
+                }
+                [r0] => {
+                    if let Some(sums) = self.source.second_round(*r0, weights) {
+                        // The fold by `r0` waits for the second challenge.
+                        self.unfolded = challenges;
+                        return sums;
+                    }
+                }
+                _ => {}
             }
         }
+        debug_assert!(from_source || challenges.len() <= 1, "one pending fold on a table");
+        let context = challenges.first().map(|&r| E::precompute(r));
+        let two = match challenges.as_slice() {
+            [r0, r1] => Some([*r0, *r1, fm(*r0, *r1)]),
+            _ => None,
+        };
+        let previous = std::mem::take(&mut self.table);
         let items = (rows_out / 2).max(1);
         debug_assert!(!evaluate || unweighted || first.len() * second.len() == items);
         let first_bits = first.len().trailing_zeros();
         let first_mask = first.len() - 1;
-        let keep = challenge.is_some();
+        let keep = !challenges.is_empty();
         let this = &*self;
         // Output rows 2k, 2k + 1 (row 0 alone at the final fold) into `rows`.
         let fill = |k: usize, rows: &mut [std::mem::MaybeUninit<E>], scratch: &mut [E]| {
-            let (r, context) = (challenge.expect("a fold"), context.as_ref().expect("a fold"));
+            let context = context.as_ref().expect("a fold");
             for (t, out) in rows.chunks_exact_mut(width).enumerate() {
                 let row = 2 * k + t;
                 if from_source {
-                    this.source.folded_row(r, context, row, scratch);
+                    match two {
+                        None => this.source.folded_row(challenges[0], context, row, scratch),
+                        Some(r) => this.source.folded2_row(r, row, scratch),
+                    }
                     for (slot, &value) in out.iter_mut().zip(scratch.iter()) { slot.write(value); }
                 } else {
                     let (even, odd) = (2 * row * width, (2 * row + 1) * width);
@@ -378,7 +436,17 @@ impl<S: Level0> Engine<S> {
                 .eq
                 .as_ref()
                 .is_some_and(|eq| !eq.can_recover_linear_q_term_from_claim());
+        let trace = std::env::var_os("AGG_SESSION_TRACE").is_some().then(std::time::Instant::now);
         let [q0, at_one, q2] = self.pass(true, full).map(|q| q * self.scale);
+        if let Some(start) = trace {
+            eprintln!(
+                "session-trace vars {} round {round} width {} table_rows {} pass {:.2} ms",
+                self.vars,
+                self.source.width(),
+                self.table.len() / self.source.width(),
+                start.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let coefficients = match &self.eq {
             Some(eq) => {
                 let q1 = if full {
@@ -412,7 +480,7 @@ impl<S: Level0> Engine<S> {
         if let Some(eq) = &mut self.eq {
             eq.bind(challenge);
         }
-        self.unfolded = Some(challenge);
+        self.unfolded.push(challenge);
         self.bound += 1;
         if self.bound == self.vars {
             self.pass(false, false);
@@ -615,6 +683,13 @@ impl<'a> LayerGroup<'a> {
 
 /// Largest magnitude of an `S` lane without `M` lanes (`|dS_0 dS_1| < 2^62`).
 const PAIR_BOUND: i64 = 1 << 30;
+/// Largest leaf magnitude of the integer prefix without `M` lanes (products of the leaf
+/// differences below 2^45).
+const PREFIX_PAIR_BOUND: i64 = 1 << 20;
+/// Largest `S` and `M` magnitudes of the integer prefix with `M` lanes (the `M M` products
+/// of the differences reach 2^64, kept exact in `i128`).
+const PREFIX_S_BOUND: i64 = 1 << 16;
+const PREFIX_M_BOUND: i64 = 1 << 30;
 
 struct IntSource<'a> {
     s: [&'a [i32]; 2],
@@ -625,9 +700,105 @@ struct IntSource<'a> {
     inverse: E,
     linear: [usize; 1],
     products: Vec<(usize, usize)>,
+    /// The integer prefix of two rounds: the second round is computed from the leaves and
+    /// the first table is level 2 (the leaves are small enough for exact `i64` products of
+    /// the leaf differences, see [`IntPairGroup::new`]).
+    prefix: bool,
+}
+
+/// The four leaves `L_bX = lane[4y + 2X + b]` of item `y` of the second round (`b` the
+/// first round's variable, `X` the second's) as the affine functions of `X`
+/// `A(X) = L_0X` and `D(X) = L_1X - L_0X` (so that the leaf folded by `r0` is
+/// `A(X) + r0 D(X)`), each by its values at `X = 0, 1` and its difference.
+#[derive(Clone, Copy)]
+struct Leaf4 {
+    a: [i64; 2],
+    d: [i64; 2],
+    da: i64,
+    dd: i64,
+}
+
+impl Leaf4 {
+    #[inline(always)]
+    fn of(lane: &[i32], y: usize) -> Self {
+        let l = &lane[4 * y..4 * y + 4];
+        let a = [i64::from(l[0]), i64::from(l[2])];
+        let d = [i64::from(l[1]) - a[0], i64::from(l[3]) - a[1]];
+        Self { a, d, da: a[1] - a[0], dd: d[1] - d[0] }
+    }
+
+    /// `[A(0), A(1), D(0), D(1)]` of the sum of two leaves.
+    #[inline(always)]
+    fn linear(x: &Self, y: &Self) -> [i64; 4] {
+        [x.a[0] + y.a[0], x.a[1] + y.a[1], x.d[0] + y.d[0], x.d[1] + y.d[1]]
+    }
+
+    /// The product `(A_x + r0 D_x)(A_y + r0 D_y) = P + r0 Q + r0^2 R` as
+    /// `[P(0), P(1), P_2, Q(0), Q(1), Q_2, R(0), R(1), R_2]` (`P_2 = dA_x dA_y` etc. the
+    /// quadratic parts at the differences), exact in `i64`.
+    #[inline(always)]
+    fn product(x: &Self, y: &Self) -> [i64; 9] {
+        [
+            x.a[0] * y.a[0],
+            x.a[1] * y.a[1],
+            x.da * y.da,
+            x.a[0] * y.d[0] + x.d[0] * y.a[0],
+            x.a[1] * y.d[1] + x.d[1] * y.a[1],
+            x.da * y.dd + x.dd * y.da,
+            x.d[0] * y.d[0],
+            x.d[1] * y.d[1],
+            x.dd * y.dd,
+        ]
+    }
+
+    /// [`Self::product`] without `Q_2` and `R_2`, which are returned exact in `i128`.
+    #[inline(always)]
+    fn product_wide(x: &Self, y: &Self) -> ([i64; 7], [i128; 2]) {
+        (
+            [
+                x.a[0] * y.a[0],
+                x.a[1] * y.a[1],
+                x.da * y.da,
+                x.a[0] * y.d[0] + x.d[0] * y.a[0],
+                x.a[1] * y.d[1] + x.d[1] * y.a[1],
+                x.d[0] * y.d[0],
+                x.d[1] * y.d[1],
+            ],
+            [
+                i128::from(x.da) * i128::from(y.dd) + i128::from(x.dd) * i128::from(y.da),
+                i128::from(x.dd) * i128::from(y.dd),
+            ],
+        )
+    }
+}
+
+/// `[v(0), v(1), v_2]` of a product's nine weighted sums at `r0` (`v = P + r0 Q + r0^2 R`).
+#[inline]
+fn at_r0(s: &[E], r0: E, r0_squared: E) -> [E; 3] {
+    [
+        s[0] + r0 * s[3] + r0_squared * s[6],
+        s[1] + r0 * s[4] + r0_squared * s[7],
+        s[2] + r0 * s[5] + r0_squared * s[8],
+    ]
 }
 
 impl IntSource<'_> {
+    /// The leaf folded by `r0` then `r1` (`r = [r0, r1, r0 r1]`): `L_00 + r1 (L_01 - L_00) +
+    /// r0 (L_10 - L_00) + r0 r1 ((L_11 - L_01) - (L_10 - L_00))`, three unreduced products
+    /// and one reduction.
+    #[inline(always)]
+    fn fold2(r: [E; 3], lane: &[i32], y: usize) -> E {
+        let l = &lane[4 * y..4 * y + 4];
+        let (l00, l10, l01, l11) = (i64::from(l[0]), i64::from(l[1]), i64::from(l[2]), i64::from(l[3]));
+        let mut acc = Acc::zero();
+        lift_int(&mut acc, l00);
+        // Leaf differences below 2^34 in magnitude (leaves checked below 2^31).
+        mad_int(&mut acc, r[1], l01 - l00);
+        mad_int(&mut acc, r[0], l10 - l00);
+        mad_int(&mut acc, r[2], (l11 - l01) - (l10 - l00));
+        E::reduce_product(acc)
+    }
+
     /// `f` minus `c` at integer lanes (exact products in `i64`).
     #[inline(always)]
     fn value(&self, s0: i64, s1: i64, m: Option<(i64, i64)>) -> E {
@@ -769,6 +940,93 @@ impl Level0 for IntSource<'_> {
         })
     }
 
+    fn second_round(&self, r0: E, weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
+        if !self.prefix {
+            return None;
+        }
+        let (first, second) = weights?;
+        let [s0, s1] = self.s;
+        let [c, cs, cm, ck, cmm] = self.c;
+        let items = self.rows() / 4;
+        let weight = first.iter().fold(E::zero(), |a, &w| a + w) * second.iter().fold(E::zero(), |a, &w| a + w);
+        let constant = c * weight;
+        let r0_squared = r0 * r0;
+        let linear_at = |s: &[E]| [s[0] + r0 * s[2], s[1] + r0 * s[3]];
+        Some(match self.m {
+            None => {
+                // Leaves below 2^20: |A| <= 2^20, |D|, |dA| <= 2^21, |dD| <= 2^22, so every
+                // product and sum of two products is below 2^45 (exact in i64, below p).
+                let sums = weighted_int_sums::<13>(items, first, second, |y| {
+                    let (x0, x1) = (Leaf4::of(s0, y), Leaf4::of(s1, y));
+                    let mut out = [0_i64; 13];
+                    out[..4].copy_from_slice(&Leaf4::linear(&x0, &x1));
+                    out[4..].copy_from_slice(&Leaf4::product(&x0, &x1));
+                    out
+                });
+                let lin = linear_at(&sums[..4]);
+                let prod = at_r0(&sums[4..], r0, r0_squared);
+                [
+                    constant + cs * lin[0] + cm * prod[0],
+                    constant + cs * lin[1] + cm * prod[1],
+                    cm * prod[2],
+                ]
+            }
+            Some([m0, m1]) => {
+                // |S| <= 2^16 and |M| <= 2^30: |A_S| <= 2^16, |D_S|, |dA_S| <= 2^17,
+                // |dD_S| <= 2^18; |A_M| <= 2^30, |D_M|, |dA_M| <= 2^31, |dD_M| <= 2^32. The
+                // S S quantities are below 2^37, the S M sums of two products below 2^52,
+                // the M M quantities P, Q, R, P_2 at most 2^62 (exact in i64); Q_2 and
+                // R_2 of M M reach 2^64 and are exact in i128.
+                let (sums, wide) = weighted_int_sums_wide::<29, 2>(items, first, second, |y| {
+                    let (xs0, xs1) = (Leaf4::of(s0, y), Leaf4::of(s1, y));
+                    let (xm0, xm1) = (Leaf4::of(m0, y), Leaf4::of(m1, y));
+                    let mut out = [0_i64; 29];
+                    out[..4].copy_from_slice(&Leaf4::linear(&xs0, &xs1));
+                    // c_m multiplies M_0 + M_1 + S_0 S_1: the linear M values join the
+                    // constant (P) and the r0-linear (Q) parts of the S product.
+                    let mut ss = Leaf4::product(&xs0, &xs1);
+                    let lm = Leaf4::linear(&xm0, &xm1);
+                    ss[0] += lm[0];
+                    ss[1] += lm[1];
+                    ss[3] += lm[2];
+                    ss[4] += lm[3];
+                    out[4..13].copy_from_slice(&ss);
+                    let (p, q) = (Leaf4::product(&xs0, &xm1), Leaf4::product(&xs1, &xm0));
+                    for (slot, (a, b)) in out[13..22].iter_mut().zip(p.iter().zip(&q)) {
+                        *slot = a + b;
+                    }
+                    let (mm, mm_wide) = Leaf4::product_wide(&xm0, &xm1);
+                    out[22..].copy_from_slice(&mm);
+                    (out, mm_wide)
+                });
+                let lin = linear_at(&sums[..4]);
+                let sm = at_r0(&sums[4..13], r0, r0_squared);
+                let cross = at_r0(&sums[13..22], r0, r0_squared);
+                let mm = [sums[22], sums[23], sums[24], sums[25], sums[26], wide[0], sums[27], sums[28], wide[1]];
+                let mm = at_r0(&mm, r0, r0_squared);
+                [
+                    constant + cs * lin[0] + cm * sm[0] + ck * cross[0] + cmm * mm[0],
+                    constant + cs * lin[1] + cm * sm[1] + ck * cross[1] + cmm * mm[1],
+                    cm * sm[2] + ck * cross[2] + cmm * mm[2],
+                ]
+            }
+        })
+    }
+
+    fn folded2_row(&self, r: [E; 3], i: usize, out: &mut [E]) {
+        let [s0, s1] = self.s;
+        out[0] = Self::fold2(r, s0, i);
+        let s1 = Self::fold2(r, s1, i);
+        match self.m {
+            None => self.w_lanes(s1, E::zero(), &mut out[1..3]),
+            Some([m0, m1]) => {
+                out[1] = Self::fold2(r, m0, i);
+                let m1 = Self::fold2(r, m1, i);
+                self.w_lanes(s1, m1, &mut out[2..5]);
+            }
+        }
+    }
+
     fn linear(&self) -> &[usize] {
         &self.linear
     }
@@ -803,9 +1061,12 @@ impl<'a> IntPairGroup<'a> {
     /// The group over `S_0, S_1` (and `M_0, M_1`), every lane of `2^vars` cells
     /// (`vars = eq_point.len()` rounds), with `coefficients = [c, c_s, c_m, c_k, c_mm]`
     /// (`c_k`, `c_mm` unused without `M`). With `M` lanes the caller guarantees
-    /// `|S| <= 2^17` and `|M| <= 2^31` (exact `i64` products); without them the lanes are
-    /// checked against `2^30`. `None` when the transform is singular, a lane has the wrong
-    /// length or a value is out of range.
+    /// `|S| <= 2^17` and `|M| <= 2^30` (exact `i64` products of the pair differences);
+    /// without them the lanes are checked against `2^30`. Smaller lanes (`|S| <= 2^16`
+    /// with `M`, leaves below `2^20` without) run the integer prefix: the second round is
+    /// computed from the leaves as well and the first table is a quarter of the domain.
+    /// `None` when the transform is singular, a lane has the wrong length or a value is out
+    /// of range.
     #[must_use]
     pub fn new(s: [&'a [i32]; 2], m: Option<[&'a [i32]; 2]>, coefficients: [E; 5], eq_point: &[E]) -> Option<Self> {
         let rows = 1_usize << eq_point.len();
@@ -814,17 +1075,26 @@ impl<'a> IntPairGroup<'a> {
             return None;
         }
         let [_, _, cm, ck, cmm] = coefficients;
-        let (inverse, products) = match m {
+        // The largest magnitude over a set of lanes (one streaming pass).
+        let magnitude = |lanes: &[&[i32]]| -> i64 {
+            lanes
+                .iter()
+                .map(|lane| lane.par_iter().map(|&v| i64::from(v).abs()).max().unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        };
+        let max_s = magnitude(&s);
+        let (inverse, products, prefix) = match m {
             None => {
-                let out_of_range = s
-                    .iter()
-                    .any(|lane| lane.par_iter().any(|&v| i64::from(v).abs() > PAIR_BOUND));
-                if out_of_range {
+                if max_s > PAIR_BOUND {
                     return None;
                 }
-                (cm.inverse()?, vec![(0, 2)])
+                (cm.inverse()?, vec![(0, 2)], max_s <= PREFIX_PAIR_BOUND)
             }
-            Some(_) => ((cm * cmm - ck * ck).inverse()?, vec![(0, 3), (1, 4)]),
+            Some(m) => {
+                let prefix = max_s <= PREFIX_S_BOUND && magnitude(&m) <= PREFIX_M_BOUND;
+                ((cm * cmm - ck * ck).inverse()?, vec![(0, 3), (1, 4)], prefix)
+            }
         };
         let linear = [if m.is_some() { 2 } else { 1 }];
         let source = IntSource {
@@ -834,6 +1104,7 @@ impl<'a> IntPairGroup<'a> {
             inverse,
             linear,
             products,
+            prefix: prefix && eq_point.len() >= 2,
         };
         Engine::new(source, eq_point).map(Self)
     }
@@ -873,6 +1144,12 @@ impl<'a> IntPairGroup<'a> {
     #[must_use]
     pub fn terminal_consistent(&self) -> bool {
         self.0.terminal_consistent()
+    }
+
+    /// True when the group runs the integer prefix (its second round from the leaves).
+    #[cfg(test)]
+    pub(super) fn uses_prefix(&self) -> bool {
+        self.0.source.prefix
     }
 }
 
