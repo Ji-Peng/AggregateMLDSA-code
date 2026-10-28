@@ -85,6 +85,19 @@ pub struct ProverTables<'a> {
 }
 
 impl<'a> ProverTables<'a> {
+    /// Reuse the parities built from these main tables and matrices by the honest
+    /// driver. A carry mutation invalidates the cache and takes the general path.
+    pub(crate) fn from_bridge_cache(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
+        match tables.bridge.parity1_cached() {
+            Some(parities) => Self::with_parity1(tables, Parity1::Narrow(parities.clone())),
+            None => Self::new(tables, matrices),
+        }
+    }
+
+    fn with_parity1(tables: SourceTables<'a>, parity1: Parity1) -> Self {
+        Self { tables, parity1, w1: None, w2: None, w3: None, wa: None }
+    }
+
     /// Materialize the parities of the committed bits under the bridge matrices.
     #[must_use]
     pub fn new(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
@@ -175,4 +188,24 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn cached_parity_matches_recomputation_and_invalidates_on_carry_mutation() {
+        use crate::manifest::CommitmentManifest;
+        use crate::source_tables::{BridgeGroupTables, MainTables, RecordValues};
+        let manifest = CommitmentManifest::for_batch(3).unwrap();
+        let main = MainTables::from_values(&manifest, &vec![RecordValues::zero(); 3]).unwrap();
+        let matrices = BridgeMatrices::random_for_tests(939);
+        let mut bridge = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
+        {
+            let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
+            assert_eq!(ProverTables::from_bridge_cache(tables, &matrices).parity1,
+                ProverTables::new(tables, &matrices).parity1);
+        }
+        bridge.carries_mut(1)[0] -= 1;
+        let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
+        let cached = ProverTables::from_bridge_cache(tables, &matrices);
+        assert_eq!(cached.parity1, ProverTables::new(tables, &matrices).parity1);
+        assert_eq!(cached.parity1.value(0, 0), 2);
+    }
+
 }

@@ -688,6 +688,8 @@ fn stack_carries(columns: &[Vec<i64>], slots: usize) -> Result<Vec<i32>, SourceT
 /// with its digits (`G_m`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeGroupTables {
+    /// Honest level-1 parities, invalidated when the committed level-1 carries change.
+    parity1: Option<[Vec<i8>; W1_BITS]>,
     level1: Vec<i32>,
     parities: Vec<Vec<i8>>,
     level2: Vec<i32>,
@@ -720,6 +722,8 @@ impl BridgeGroupTables {
             level2_columns.push(hint_slack_table(manifest, main.hint_slack()));
         }
         let mut tables = Self {
+            parity1: Some(witness.y1.iter().map(narrow_bits).collect::<Result<Vec<_>, _>>()?
+                .try_into().expect("six lanes")),
             level1: stack_carries(&witness.kappa1, 8)?,
             parities: witness.y2.iter().map(narrow_bits).collect::<Result<_, _>>()?,
             level2: stack_carries(&level2_columns, 8)?,
@@ -800,12 +804,19 @@ impl BridgeGroupTables {
     /// Mutable stacked carry lane (adversarial tests; `m` is not recounted).
     #[doc(hidden)]
     pub fn carries_mut(&mut self, level: usize) -> &mut [i32] {
+        if level == 1 { self.parity1 = None; }
         match level {
             1 => &mut self.level1,
             2 => &mut self.level2,
             3 => &mut self.level3,
             _ => panic!("levels 1 to 3"),
         }
+    }
+
+    /// Cached parities for the honest driver, whose main tables and matrices are
+    /// the same immutable inputs used by build. Other callers recompute their tables.
+    pub(crate) fn parity1_cached(&self) -> Option<&[Vec<i8>; W1_BITS]> {
+        self.parity1.as_ref()
     }
 
     /// The level-2 parities `y^(2)_t`.

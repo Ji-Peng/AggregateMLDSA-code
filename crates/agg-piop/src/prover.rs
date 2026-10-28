@@ -858,7 +858,7 @@ pub fn prove_with_tables_using(
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = ProverTables::new(tables, &matrices);
+            let prover_tables = ProverTables::from_bridge_cache(tables, &matrices);
             phase_stamp("parity-tables");
             prove_piop_with(
                 manifest,
@@ -885,7 +885,7 @@ pub fn prove_with_tables_using(
                 (prove_flock(), start.elapsed())
             },
             || {
-                let out = ProverTables::new(tables, &matrices);
+                let out = ProverTables::from_bridge_cache(tables, &matrices);
                 phase_stamp("parity-tables");
                 out
             },
