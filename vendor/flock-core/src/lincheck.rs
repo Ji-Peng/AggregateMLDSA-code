@@ -1056,6 +1056,14 @@ pub fn partial_fold_packed_z_best(
         }
         #[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
         {
+            // agg-mldsa patch (PATCH.md): wide stripes take the column partition here
+            // too (the single-table lincheck), as in the row-aware dispatch.
+            if iblock_wins(m, k_log) {
+                let n_rows = 1usize << (m - k_log);
+                let mut out =
+                    partial_fold_packed_z_rows_iblock(z_packed, m, k_log, useful_bits, &[eq_outer], n_rows);
+                return out.pop().expect("one point");
+            }
             partial_fold_packed_z_x86_tiled_padded(z_packed, m, k_log, useful_bits, eq_outer)
         }
         #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
@@ -1175,6 +1183,9 @@ pub fn partial_fold_packed_z_rows_iblock(
     assert!(useful_bits <= k && n_rows <= n_outer);
     assert!(eq_outers.iter().all(|e| e.len() == n_outer));
     let np = eq_outers.len();
+    if np == 0 {
+        return Vec::new();
+    }
     // The stripes holding the declared rows: the same bytes the row-prefix
     // fold reads (and, at a full count, all of them).
     let n_stripes = n_rows.div_ceil(8);
@@ -2798,7 +2809,13 @@ mod tests {
                 assert_eq!(got[p], want, "m={m} k_log={k_log} n_rows={n_rows} point {p}");
                 let dense = partial_fold_packed_z_fast(&z_packed, m, k_log, eq);
                 assert_eq!(got[p], dense, "dense m={m} k_log={k_log} n_rows={n_rows}");
+                if n_rows == 1 << n_log {
+                    let best = partial_fold_packed_z_best(&z_packed, m, k_log, useful_bits, eq);
+                    assert_eq!(best, dense, "best m={m} k_log={k_log}");
+                }
             }
+            let none = partial_fold_packed_z_rows_iblock(&z_packed, m, k_log, useful_bits, &[], n_rows);
+            assert!(none.is_empty(), "no points, no folds");
         }
     }
 

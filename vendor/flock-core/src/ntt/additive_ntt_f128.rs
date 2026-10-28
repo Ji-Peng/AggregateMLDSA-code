@@ -719,12 +719,15 @@ impl AdditiveNttF128 {
         // The fused-4 kernel walks rows through raw pointers with its own
         // offset math; the dead-lane skip keeps to the slice-based kernels,
         // so a bounded transform takes the fused-3/2/block route instead.
-        // Portable targets take fused-4 too: with the register-resident
-        // scalar multiply the 16-point pass (two top sweeps instead of
-        // three at the commit shape) measured 2x faster than fused-3 on the
-        // top layers. `FLOCK_NTT_NO_FUSED4=1` restores fused-3 (A/B knob).
+        // Portable x86 builds with `pclmulqdq` take fused-4 too: with the
+        // register-resident scalar multiply the 16-point pass (two top sweeps
+        // instead of three at the commit shape) measured 2x faster than
+        // fused-3 on the top layers. Other targets keep their calibrated
+        // fused-3 tier. `FLOCK_NTT_NO_FUSED4=1` restores fused-3 (A/B knob).
+        let portable_fused4 = cfg!(all(target_arch = "x86_64", target_feature = "pclmulqdq"));
         let fused4_ok = live == num_ntts
-            && (kernels::x86_avx512_clmul() || var_os("FLOCK_NTT_NO_FUSED4").is_none());
+            && (kernels::x86_avx512_clmul()
+                || (portable_fused4 && var_os("FLOCK_NTT_NO_FUSED4").is_none()));
         // Fused-3 (8-point): the aarch64 middle tier — a third fewer full-
         // buffer passes than fused-2 on the layers it covers, with 8 values
         // + 7 twiddles in flight (the 16-point kernel's register pressure is

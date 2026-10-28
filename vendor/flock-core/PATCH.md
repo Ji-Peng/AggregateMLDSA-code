@@ -219,8 +219,9 @@ aggregates are byte-identical to main.
   plane-to-byte transpose per window; a log/exp kernel for other widths; the software-multiply
   kernel stays the test oracle), the C bit transpose uses delta swaps, and the per-lane window
   sums accumulate unreduced 256-bit products (`kernels::LaneAcc`).
-- Additive NTT (`ntt/additive_ntt_f128.rs`): the four-layer top pass on every target
-  (`FLOCK_NTT_NO_FUSED4=1` restores fused-3 where no AVX-512 kernel runs), and the deep pass
+- Additive NTT (`ntt/additive_ntt_f128.rs`): the four-layer top pass on x86 builds with
+  `pclmulqdq` (`FLOCK_NTT_NO_FUSED4=1` restores fused-3 where no AVX-512 kernel runs; other
+  targets keep fused-3), and the deep pass
   runs block-major once a block fits 512 KiB (`FLOCK_NTT_DEEP_BUDGET_LOG2`).
 - Merged opening (`pcs.rs`, `pcs/block_stats_portable.rs`): portable block statistics mirror
   the AVX-512 structure (bank row read once, unreduced inner products, Frobenius powers from
@@ -229,7 +230,8 @@ aggregates are byte-identical to main.
 - Lincheck (`lincheck.rs`, `lincheck/union.rs`): stripes with `k_log >= 14` fold with a
   column-partitioned kernel (`partial_fold_packed_z_rows_iblock`: shared subset-sum tables,
   register tiles, no per-task full-width accumulator or cross-task sum), at several row points
-  per pass (`union_bitbank_fold_multi`).
+  per pass (`union_bitbank_fold_multi`); on x86 the single-table dispatch
+  (`partial_fold_packed_z_best`) takes it for the same shapes.
 
 Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`,
 `pcs::block_stats_portable::tests`, `pcs::block_round_tests`,
