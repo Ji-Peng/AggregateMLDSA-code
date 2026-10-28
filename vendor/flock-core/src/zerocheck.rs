@@ -1057,6 +1057,10 @@ fn prove_packed_padded_inner<C: Challenger>(
     // all, so leaving the sparse path means EXPANDING (scatter + zero-fill)
     // rather than zeroing in place.
     let mut sparse_dirty = sparse_from_round2;
+    // FLOCK_ZC_TIMING: wall time and round count per tail route (sparse,
+    // expansion, fused dense, naive).
+    let mut route_ms = [0f64; 4];
+    let mut route_n = [0usize; 4];
 
     // LOOKAHEAD/cascade tail: one 4→1 pass serves TWO rounds. The pass folds
     // the deferred challenges and, from the four folded values held per
@@ -1136,6 +1140,7 @@ fn prove_packed_padded_inner<C: Challenger>(
         let use_sparse = store
             .as_ref()
             .is_some_and(|st| domain >= 1024 && st.len() * SPARSE_TAIL_GATE <= domain);
+        let t_route = std::time::Instant::now();
         if !use_sparse
             && let Some(st) = store.take()
             && sparse_dirty
@@ -1160,7 +1165,11 @@ fn prove_packed_padded_inner<C: Challenger>(
                 b_nxt = take_f128(domain / 2);
             }
             sparse_dirty = false;
+            route_ms[1] += t_route.elapsed().as_secs_f64() * 1e3;
+            route_n[1] += 1;
         }
+        let t_route = std::time::Instant::now();
+        let route = if use_sparse { 0 } else if log_n_before >= 10 { 2 } else { 3 };
 
         let (m1, mi) = if use_sparse {
             let st = store.as_ref().expect("use_sparse implies store");
@@ -1213,6 +1222,17 @@ fn prove_packed_padded_inner<C: Challenger>(
             fold_in_place_pair(&mut a_mlv, &mut b_mlv, rho_prev);
             round_pair_naive(&a_mlv, &b_mlv, &r_next)
         };
+        route_ms[route] += t_route.elapsed().as_secs_f64() * 1e3;
+        route_n[route] += 1;
+        if zc_timing && std::env::var_os("FLOCK_ZC_ROUNDS").is_some() {
+            eprintln!(
+                "[zc-round] route {} domain {} stored {} {:.3} ms",
+                route,
+                domain,
+                a_mlv.len(),
+                t_route.elapsed().as_secs_f64() * 1e3
+            );
+        }
 
         domain /= 2;
         multilinear_msgs.push((m1, mi));
@@ -1262,6 +1282,10 @@ fn prove_packed_padded_inner<C: Challenger>(
     give_f128(b_nxt);
 
     if zc_timing {
+        eprintln!(
+            "[zc-timing] tail routes (ms/rounds): sparse {:.2}/{} expand {:.2}/{} fused {:.2}/{} naive {:.2}/{}",
+            route_ms[0], route_n[0], route_ms[1], route_n[1], route_ms[2], route_n[2], route_ms[3], route_n[3]
+        );
         eprintln!(
             "[zc-timing] rounds 3+ tail: {:.2} ms",
             t_tail.elapsed().as_secs_f64() * 1e3

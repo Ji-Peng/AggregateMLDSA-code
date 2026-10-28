@@ -726,6 +726,8 @@ impl AdditiveNttF128 {
         // what lost on this target). `FLOCK_NTT_NO_FUSED3=1` disables — the
         // A/B knob.
         let fused3_ok = var_os("FLOCK_NTT_NO_FUSED3").is_none();
+        let ntt_trace = var_os("FLOCK_NTT_TRACE").is_some();
+        let t_top = std::time::Instant::now();
         let mut layer = start_layer.min(n_top);
         while layer < n_top {
             let num_blocks = 1usize << layer;
@@ -821,6 +823,8 @@ impl AdditiveNttF128 {
             }
         }
 
+        let top_ms = t_top.elapsed().as_secs_f64() * 1e3;
+        let t_deep = std::time::Instant::now();
         // Deep layers: process each sub-NTT-group cache-resident.
         let sub_size_positions = 1usize << (log_d - n_top);
         let sub_bytes = sub_size_positions * num_ntts;
@@ -902,6 +906,18 @@ impl AdditiveNttF128 {
             all_core_pool().install(|| deep(data));
         } else {
             deep(data);
+        }
+        if ntt_trace {
+            eprintln!(
+                "[ntt-trace] log_d {} lanes {}/{} start {} n_top {} top {:.2} ms deep {:.2} ms",
+                log_d,
+                live,
+                num_ntts,
+                start_layer,
+                n_top,
+                top_ms,
+                t_deep.elapsed().as_secs_f64() * 1e3
+            );
         }
         #[allow(unreachable_code)]
         {}
