@@ -719,7 +719,12 @@ impl AdditiveNttF128 {
         // The fused-4 kernel walks rows through raw pointers with its own
         // offset math; the dead-lane skip keeps to the slice-based kernels,
         // so a bounded transform takes the fused-3/2/block route instead.
-        let fused4_ok = live == num_ntts && kernels::x86_avx512_clmul();
+        // Portable targets take fused-4 too: with the register-resident
+        // scalar multiply the 16-point pass (two top sweeps instead of
+        // three at the commit shape) measured 2x faster than fused-3 on the
+        // top layers. `FLOCK_NTT_NO_FUSED4=1` restores fused-3 (A/B knob).
+        let fused4_ok = live == num_ntts
+            && (kernels::x86_avx512_clmul() || var_os("FLOCK_NTT_NO_FUSED4").is_none());
         // Fused-3 (8-point): the aarch64 middle tier — a third fewer full-
         // buffer passes than fused-2 on the layers it covers, with 8 values
         // + 7 twiddles in flight (the 16-point kernel's register pressure is
@@ -838,48 +843,68 @@ impl AdditiveNttF128 {
         // `butterfly_interleaved_block` beats fusion's general muls.
         let fuse = true;
         let halfwidth_start = log_d.saturating_sub(3);
+        // Layers `from..to` over `blk`, which is block `grp` of layer
+        // `grp_layer` (global block index of block `j` at layer `l` is
+        // `grp * 2^(l - grp_layer) + j`). Same butterflies as the per-layer
+        // loop; only the traversal order differs.
+        let run_layers = |blk: &mut [F128], grp: usize, grp_layer: usize, from: usize, to: usize| {
+            let mut layer = from;
+            while layer < to {
+                let num_blocks_in_grp = 1usize << (layer - grp_layer);
+                let block_size = 1usize << (log_d - layer);
+                let block_bytes = block_size * num_ntts;
+
+                if fuse && layer + 2 <= halfwidth_start.min(to) && block_size >= 4 {
+                    let quarter = block_size >> 2;
+                    for block_in_grp in 0..num_blocks_in_grp {
+                        let global_block = grp * num_blocks_in_grp + block_in_grp;
+                        let t_outer = self.twiddle(layer, global_block);
+                        let t_inner_a = self.twiddle(layer + 1, 2 * global_block);
+                        let t_inner_b = self.twiddle(layer + 1, 2 * global_block + 1);
+                        let block_start = block_in_grp * block_bytes;
+                        let block = &mut blk[block_start..block_start + block_bytes];
+                        butterfly_interleaved_fused_2layer_serial(
+                            block, t_outer, t_inner_a, t_inner_b, quarter, num_ntts, live,
+                        );
+                    }
+                    layer += 2;
+                } else {
+                    let block_size_half = block_size >> 1;
+                    for block_in_grp in 0..num_blocks_in_grp {
+                        let global_block = grp * num_blocks_in_grp + block_in_grp;
+                        let twiddle = self.twiddle(layer, global_block);
+                        let block_start = block_in_grp * block_bytes;
+                        let block = &mut blk[block_start..block_start + block_bytes];
+                        butterfly_interleaved_block(block, twiddle, block_size_half, num_ntts, live);
+                    }
+                    layer += 1;
+                }
+            }
+        };
+        // Within a sub-group, the layers run layer-major only while a block
+        // exceeds the per-thread L2 budget; from the first layer whose blocks
+        // fit, each block runs all remaining layers before the next one
+        // (blocks are independent), so those layers stay L2-resident instead
+        // of sweeping the whole sub-group once per layer pair.
+        let l2_budget_bytes = deep_block_budget_bytes();
         let deep = |data: &mut [F128]| {
             data.par_chunks_mut(sub_bytes)
                 .enumerate()
                 .for_each(|(sub_idx, sub_data)| {
                     let sub_base = sub_idx * sub_bytes;
-                    let mut layer = n_top.max(start_layer);
-                    while layer < log_d {
-                        let layer_in_sub = layer - n_top;
-                        let num_blocks_in_sub = 1usize << layer_in_sub;
-                        let block_size = 1usize << (log_d - layer);
-                        let block_bytes = block_size * num_ntts;
-
-                        if fuse && layer + 2 <= halfwidth_start && block_size >= 4 {
-                            let quarter = block_size >> 2;
-                            for block_in_sub in 0..num_blocks_in_sub {
-                                let global_block = sub_idx * num_blocks_in_sub + block_in_sub;
-                                let t_outer = self.twiddle(layer, global_block);
-                                let t_inner_a = self.twiddle(layer + 1, 2 * global_block);
-                                let t_inner_b = self.twiddle(layer + 1, 2 * global_block + 1);
-                                let block_start = block_in_sub * block_bytes;
-                                let block = &mut sub_data[block_start..block_start + block_bytes];
-                                butterfly_interleaved_fused_2layer_serial(
-                                    block, t_outer, t_inner_a, t_inner_b, quarter, num_ntts, live,
-                                );
-                            }
-                            layer += 2;
-                        } else {
-                            let block_size_half = block_size >> 1;
-                            for block_in_sub in 0..num_blocks_in_sub {
-                                let global_block = sub_idx * num_blocks_in_sub + block_in_sub;
-                                let twiddle = self.twiddle(layer, global_block);
-                                let block_start = block_in_sub * block_bytes;
-                                let block = &mut sub_data[block_start..block_start + block_bytes];
-                                butterfly_interleaved_block(
-                                    block,
-                                    twiddle,
-                                    block_size_half,
-                                    num_ntts,
-                                    live,
-                                );
-                            }
-                            layer += 1;
+                    let from = n_top.max(start_layer);
+                    let mut split = from;
+                    while split < log_d
+                        && (num_ntts << (log_d - split)) * size_of::<F128>() > l2_budget_bytes
+                    {
+                        split += 1;
+                    }
+                    run_layers(sub_data, sub_idx, n_top, from, split);
+                    if split < log_d {
+                        let chunk = num_ntts << (log_d - split);
+                        let per_sub = 1usize << (split - n_top);
+                        for (c, blk) in sub_data.chunks_mut(chunk).enumerate() {
+                            run_layers(blk, sub_idx * per_sub + c, split, split, log_d);
                         }
                     }
                     if let Some(cb) = on_sub {
@@ -1679,6 +1704,23 @@ fn butterfly_interleaved_fused_4layer_par_rows(
             unsafe { butterfly_fused_4layer_row(base as *mut F128, sixteenth, num_ntts, r, t) };
         });
     }
+}
+
+/// Per-thread cache budget of the deep pass's block-major phase (see
+/// `interleaved_parallel_live_from_layer`): 512 KiB, one L2 of the i7-11700K
+/// and the best of 64 KiB..1 MiB measured there at the commit shape.
+/// `FLOCK_NTT_DEEP_BUDGET_LOG2` overrides it (A/B knob; a budget at least the
+/// sub-group size restores the plain layer-major order). Output is the same
+/// for every budget.
+fn deep_block_budget_bytes() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let log2 = std::env::var("FLOCK_NTT_DEEP_BUDGET_LOG2")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(19);
+        1usize << log2.min(40)
+    })
 }
 
 #[inline]
