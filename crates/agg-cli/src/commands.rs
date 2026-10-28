@@ -58,6 +58,9 @@ environment:
                         (aggregate, bench; default half the rayon pool; 0: one after the other;
                         at most the logical CPUs or the rayon pool; a value that is not a
                         number warns and falls back to the default).
+  AGG_OPENING_THREADS=K threads of the pool that runs the Akita opening (aggregate, bench;
+                        default one per physical core, at most the rayon pool; 0 or at least
+                        the rayon pool: the rayon pool itself).
   AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
                         end of every prover step (diagnostics; the aggregate is the same).
   AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2
@@ -570,6 +573,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         ms(*result.prove_times.iter().min().expect("reps >= 1"))
     );
     let t = &result.prove.timings;
+    println!("    opening pool: {} threads", t.opening_threads);
     if t.flock_threads > 0 {
         // Fork-join: the Flock proofs overlap the PIOP steps.
         println!(

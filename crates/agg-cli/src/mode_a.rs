@@ -1302,6 +1302,7 @@ impl std::fmt::Display for ProveReport {
         ] {
             writeln!(f, "  {name:<32} {:>10.1} ms", ms(d))?;
         }
+        writeln!(f, "  opening pool: {} threads", t.opening_threads)?;
         if t.flock_threads > 0 {
             writeln!(
                 f,

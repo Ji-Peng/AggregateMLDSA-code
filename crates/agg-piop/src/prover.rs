@@ -206,6 +206,55 @@ pub fn flock_pool_threads() -> usize {
     }
 }
 
+/// Threads of the pool that runs the Akita opening (event 13): `AGG_OPENING_THREADS` if set
+/// (`0` or a value of at least the global pool: the global pool itself), else one per
+/// physical core, capped by the global pool. The opening is a chain of small parallel
+/// loops; on SMT hosts a second thread per core adds idle spinning and futex wake-ups
+/// beside the critical thread instead of throughput (4K opening on an 8-core, 16-thread host:
+/// about 0.9 s on 16 threads, 0.6-0.75 s on 8, direction only).
+#[must_use]
+pub fn opening_pool_threads() -> usize {
+    let global = rayon::current_num_threads();
+    let default = || physical_cores().map_or(global, |cores| cores.min(global));
+    match std::env::var("AGG_OPENING_THREADS") {
+        Err(_) => default(),
+        Ok(v) => v.trim().parse::<usize>().unwrap_or_else(|_| {
+            warn_once(&format!("AGG_OPENING_THREADS={v:?} is not a thread count; using {}", default()));
+            default()
+        }),
+    }
+}
+
+/// Physical cores of the machine from the Linux CPU topology (distinct sibling lists of the
+/// online CPUs), or `None` where it cannot be read.
+fn physical_cores() -> Option<usize> {
+    let cpus = std::thread::available_parallelism().ok()?.get();
+    let mut cores = std::collections::BTreeSet::new();
+    for cpu in 0..cpus {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+        cores.insert(std::fs::read_to_string(path).ok()?.trim().to_owned());
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}
+
+/// Run `f` on a pool of `threads` threads, or on the current pool when `threads` is 0 or not
+/// below the current pool's size (or the pool cannot be built).
+fn on_pool<T: Send>(threads: usize, name: &str, f: impl FnOnce() -> T + Send) -> T {
+    if threads == 0 || threads >= rayon::current_num_threads() {
+        return f();
+    }
+    let name = name.to_owned();
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(FLOCK_POOL_STACK)
+        .thread_name(move |i| format!("{name}-{i}"))
+        .build()
+    {
+        Ok(pool) => pool.install(f),
+        Err(_) => f(),
+    }
+}
+
 /// The largest Flock pool: the global pool or the machine's logical CPUs, whichever is
 /// larger (more threads than that only oversubscribe the cores).
 #[must_use]
@@ -381,6 +430,9 @@ pub struct ProveTimings {
     pub stage3: Duration,
     /// Event 13: the batched Akita opening.
     pub opening: Duration,
+    /// Threads of the opening's pool ([`opening_pool_threads`]; the global pool's size when
+    /// the opening runs on it).
+    pub opening_threads: usize,
     /// End to end.
     pub total: Duration,
 }
@@ -393,7 +445,7 @@ impl std::fmt::Display for ProveTimings {
             "tables {:.1} ms, setup {:.1} ms, round 1 {:.1} ms, keccak {:.1} ms (flock prove \
              {:.1} ms on {} threads, fork-join {:.1} ms), round 2 {:.1} ms, \
              lookup {:.1} ms, prestage {:.1} ms, stage 1 {:.1} ms, stage 2 {:.1} ms, \
-             stage 3 {:.1} ms, opening {:.1} ms, total {:.1} ms",
+             stage 3 {:.1} ms, opening {:.1} ms on {} threads, total {:.1} ms",
             ms(self.tables),
             ms(self.setup),
             ms(self.round1),
@@ -408,6 +460,7 @@ impl std::fmt::Display for ProveTimings {
             ms(self.stage2),
             ms(self.stage3),
             ms(self.opening),
+            self.opening_threads,
             ms(self.total)
         )
     }
@@ -947,7 +1000,15 @@ pub fn prove_with_tables_using(
         let [l1, l2, l3, m] = round2;
         [main16_round1, main_round1, l1, l2, l3, m]
     };
-    let opening = committer.open_claims(commitments, &claims, &session)?;
+    let opening_threads = opening_pool_threads();
+    timings.opening_threads = if opening_threads == 0 {
+        rayon::current_num_threads()
+    } else {
+        opening_threads.min(rayon::current_num_threads())
+    };
+    let opening = on_pool(opening_threads, "agg-open", || {
+        committer.open_claims(commitments, &claims, &session)
+    })?;
     timings.opening = clock.lap();
     phase_stamp("opening");
     let proof = AggregateProof {
