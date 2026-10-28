@@ -520,6 +520,7 @@ impl PublicData {
 /// scratch buffer of the same length (no allocation). With `f_t(0) = 1 - r_t` each output
 /// of a butterfly is one product: `f0 a0 + f1 rot = a0 + r (rot - a0)`,
 /// `f1 a0 + f0 a1 = a1 + r (a0 - a1)`.
+#[cfg(test)]
 fn eq_negacyclic_product(a: &mut [E], r: &[E], scratch: &mut [E]) {
     let size = a.len();
     if size == 1 {
@@ -548,14 +549,63 @@ fn eq_negacyclic_product(a: &mut [E], r: &[E], scratch: &mut [E]) {
 /// [`negacyclic_kernel`] into `out` (`out.len() = a.len()`), with a scratch buffer of at
 /// least that length (no allocation).
 pub fn negacyclic_kernel_into(a: &[E], r_coef: &[E], out: &mut [E], scratch: &mut [E]) {
-    let n = a.len();
-    assert_eq!(n, 1 << r_coef.len(), "a has 2^|r| coefficients");
-    assert!(out.len() == n && scratch.len() >= n, "buffers of the polynomial's length");
+    NegacyclicKernel::new(r_coef).apply_into(a, out, scratch);
+
+}
+
+
+#[cfg(test)]
+pub(crate) fn negacyclic_kernel_reference_into(a: &[E], r: &[E], out: &mut [E], scratch: &mut [E]) {
     out[0] = a[0];
-    for j in 1..n {
-        out[j] = -a[n - j];
+    for j in 1..a.len() { out[j] = -a[a.len() - j]; }
+    eq_negacyclic_product(out, r, scratch);
+}
+
+/// A fixed challenge's fold contexts, shared by all
+/// record/column transforms of one weight table.
+pub(crate) struct NegacyclicKernel {
+    contexts: Vec<<E as Fold>::Ctx>,
+}
+
+impl NegacyclicKernel {
+    pub(crate) fn new(point: &[E]) -> Self {
+        Self { contexts: point.iter().map(|&r| E::precompute(r)).collect() }
     }
-    eq_negacyclic_product(out, r_coef, scratch);
+
+    pub(crate) fn apply_into(&self, a: &[E], out: &mut [E], scratch: &mut [E]) {
+        let n = 1_usize << self.contexts.len();
+        assert_eq!(a.len(), n, "a has 2^|r| coefficients");
+        assert!(out.len() == n && scratch.len() >= n, "buffers of the polynomial's length");
+        let scratch = &mut scratch[..n];
+        // Choose the initial buffer so the final level always writes into out.
+        let mut source_out = self.contexts.len() % 2 == 0;
+        let initial = if source_out { &mut *out } else { &mut *scratch };
+        initial[0] = a[0];
+        for j in 1..n { initial[j] = -a[n - j]; }
+        for (level, context) in self.contexts.iter().enumerate() {
+            let (src, dst) = if source_out {
+                (&*out, &mut *scratch)
+            } else {
+                (&*scratch, &mut *out)
+            };
+            // Keep the already-decimated path in the low index bits. Each
+            // butterfly streams contiguous paths, so the last level is already
+            // in natural output order and needs no permutation or copy-back.
+            let stride = 1_usize << level;
+            for base in (0..n).step_by(2 * stride) {
+                let (low, high) = dst[base..base + 2 * stride].split_at_mut(stride);
+                for path in 0..stride {
+                    let a0 = src[base + path];
+                    let a1 = src[base + stride + path];
+                    let rotated = if base == 0 { -src[n - stride + path] } else { src[base - stride + path] };
+                    low[path] = E::fold_one(context, a0, rotated);
+                    high[path] = E::fold_one(context, a1, a0);
+                }
+            }
+            source_out = !source_out;
+        }
+        debug_assert!(source_out);
+    }
 }
 
 /// `K_{a, r}[j'] = sum_{a'} a[a'] (-1)^{floor((a' + j') / n)} eq(r, (a' + j') mod n)`
@@ -814,4 +864,23 @@ mod tests {
         });
         assert_eq!(mixed[3][77], expected);
     }
+    #[test]
+    fn iterative_negacyclic_matches_recursive_on_64_records() {
+        let mut rng = SplitMix64::new(571);
+        for record in 0..64 {
+            // Exercise both buffer parities and all production-size levels.
+            let bits = record % 9;
+            let a: Vec<E> = (0..1 << bits).map(|_| crate::test_support::field(&mut rng)).collect();
+            let r = point(&mut rng, bits);
+            let mut expected = vec![E::zero(); a.len()];
+            expected[0] = a[0];
+            for j in 1..a.len() { expected[j] = -a[a.len() - j]; }
+            let mut scratch = vec![E::zero(); a.len()];
+            eq_negacyclic_product(&mut expected, &r, &mut scratch);
+            let mut actual = vec![E::zero(); a.len()];
+            NegacyclicKernel::new(&r).apply_into(&a, &mut actual, &mut scratch);
+            assert_eq!(actual, expected, "record {record}");
+        }
+    }
+
 }

@@ -26,11 +26,11 @@ use agg_bridge::{weights as bridge, Domains, Shape};
 use agg_witness::bridge::SparseMatrix;
 use agg_witness::padding::Geometry;
 use agg_witness::params::{D_COEF, D_POS, K, L, N, W1_BITS};
-use jolt_field::{ExtField, Ring, Zero};
+use jolt_field::{Ring, Unreduced, Zero};
 use rayon::prelude::*;
 
-use crate::public_data::{eq_correlation, negacyclic_kernel_into, PublicData};
-use crate::{BaseField, OpeningField as E};
+use crate::public_data::{eq_correlation, PublicData};
+use crate::OpeningField as E;
 
 /// Row variables of levels 1 and 2 (`m_1 = m_2 = 2^13`).
 pub const RHO12_VARS: usize = 13;
@@ -110,6 +110,7 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     let geom = public.geometry();
     assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
     let coef = &r2[..D_COEF as usize];
+    let kernel = crate::public_data::NegacyclicKernel::new(coef);
     let row = eq_table(&r2[D_COEF as usize..D_POS as usize]);
     assert_eq!(row.len(), K, "two row coordinates");
     let eq_sig = eq_table(&r2[D_POS as usize..]);
@@ -130,11 +131,15 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
             let mut output = [E::zero(); N];
             for (s, out) in chunk.chunks_exact_mut(N).take(L).enumerate() {
                 for (j, slot) in combined.iter_mut().enumerate() {
-                    *slot = (0..K).fold(E::zero(), |sum, rho| {
-                        sum + weights[rho].mul_base(BaseField::from_i64(i64::from(a[rho][s][j])))
-                    });
+                    // Four integer products, |a| < 2^23. Each split accumulator
+                    // slot is below 4 * 2^64; reduce once per coordinate.
+                    let mut sum = crate::kernel::Acc::zero();
+                    for rho in 0..K {
+                        crate::kernel::mad_int(&mut sum, weights[rho], i64::from(a[rho][s][j]));
+                    }
+                    *slot = E::reduce_product(sum);
                 }
-                negacyclic_kernel_into(&combined, coef, &mut output, &mut scratch);
+                kernel.apply_into(&combined, &mut output, &mut scratch);
                 for (slot, &value) in out.iter_mut().zip(&output) { slot.write(value); }
             }
         }) }
@@ -346,4 +351,68 @@ mod tests {
         assert_eq!(ring_weight_at(&public, &r2, &r3), evaluate_mle(&table, &r3));
         let _ = suffix(&r3, 2);
     }
+fn ring_weight_table_reference(public: &PublicData, r2: &[E]) -> Vec<E> {
+    use jolt_field::ExtField;
+    use crate::BaseField;
+    let geom = public.geometry();
+    assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
+    let coef = &r2[..D_COEF as usize];
+    let row = eq_table(&r2[D_COEF as usize..D_POS as usize]);
+    assert_eq!(row.len(), K, "two row coordinates");
+    let eq_sig = eq_table(&r2[D_POS as usize..]);
+    let positions = 1_usize << D_POS;
+    let mut table: Vec<E> = rayon::iter::repeat_n(E::zero(), geom.main_len()).collect();
+    table
+        .par_chunks_mut(positions)
+        .take(geom.n)
+        .enumerate()
+        .for_each(|(i, chunk)| {
+            // The kernel is linear in its polynomial: scale the row weights by eq(sig, i)
+            // once, combine the integer rows of A with base-field products, and transform
+            // each column into the table without allocating.
+            let weights: [E; K] = std::array::from_fn(|rho| eq_sig[i] * row[rho]);
+            let a = public.a(i);
+            let mut combined = [E::zero(); N];
+            let mut scratch = [E::zero(); N];
+            for (s, out) in chunk.chunks_exact_mut(N).take(L).enumerate() {
+                for (j, slot) in combined.iter_mut().enumerate() {
+                    *slot = (0..K).fold(E::zero(), |sum, rho| {
+                        sum + weights[rho].mul_base(BaseField::from_i64(i64::from(a[rho][s][j])))
+                    });
+                }
+                crate::public_data::negacyclic_kernel_reference_into(&combined, coef, out, &mut scratch);
+            }
+        });
+    table
+}
+
+
+    #[test]
+    fn ring_weights_match_recursive_reference_on_64_records() {
+        let records = gen::records_shared_keys(713, 64, 4);
+        let instance = PublicInstance::from_records(&records).unwrap();
+        let public = PublicData::from_instance(&instance);
+        let mut rng = SplitMix64::new(714);
+        let point = point(&mut rng, public.geometry().d_main() as usize);
+        assert_eq!(ring_weight_table(&public, &point), ring_weight_table_reference(&public, &point));
+    }
+
+    #[test]
+    #[ignore = "timing: run with --release --ignored --nocapture"]
+    fn ring_weight_timing() {
+        let records = gen::records_shared_keys(713, 4096, 16);
+        let instance = PublicInstance::from_records(&records).unwrap();
+        let public = PublicData::from_instance(&instance);
+        let mut rng = SplitMix64::new(714);
+        let point = point(&mut rng, public.geometry().d_main() as usize);
+        for run in 0..7 {
+            for new in if run % 2 == 0 { [false, true] } else { [true, false] } {
+                let start = std::time::Instant::now();
+                let table = if new { ring_weight_table(&public, &point) } else { ring_weight_table_reference(&public, &point) };
+                std::hint::black_box(&table);
+                eprintln!("ring-weight run={run} new={new} ms={:.3}", start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+
 }
