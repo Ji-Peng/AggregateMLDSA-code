@@ -36,10 +36,9 @@ pub(super) unsafe fn fold_pairs(src: &[F128], base: usize, dst: &mut [F128], r: 
 
 #[inline]
 fn portable_tail(src: &[F128], base: usize, dst: &mut [F128], r: F128, mut t: usize) {
-    let one_plus_r = F128::ONE + r;
     while t < dst.len() {
         let s = 2 * (base + t);
-        dst[t] = src[s] * one_plus_r + src[s + 1] * r;
+        dst[t] = src[s] + (src[s] + src[s + 1]) * r;
         t += 1;
     }
 }

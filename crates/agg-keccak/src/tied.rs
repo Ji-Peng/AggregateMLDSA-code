@@ -759,16 +759,22 @@ impl<'g> TiedPart<'g> {
     #[must_use]
     pub fn honest_parts(&self, records: &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
+        let start = std::time::Instant::now();
         // Per record and independent: parallel (same values in the same order).
-        let inputs: Vec<Vec<u64>> = records.par_iter().map(SpongeRecord::input_bits).collect();
+        let input_words = crate::sponge::INPUT_BITS / 64;
+        let mut inputs = vec![0_u64; records.len() * input_words];
+        inputs.par_chunks_mut(input_words).zip(records.par_iter())
+            .for_each(|(out, record)| record.input_bits_into(out));
+        trace("witness input bits", &start);
         let sponge = pack_slot(self.gate, self.sponge.nu(), self.n, |j, z, a, b| {
-            self.gate.instance_rows(&inputs[j], z, a, b);
+            self.gate.instance_rows(&inputs[j * input_words..(j + 1) * input_words], z, a, b);
         });
+        trace("witness packed", &start);
         let seg = self.segment();
         let words = self.segment_words();
         let mut bits = vec![0_u64; self.segments * words];
         let lane = seg.lane_len;
-        for (g, input) in inputs.iter().enumerate() {
+        for (g, input) in inputs.chunks_exact(input_words).enumerate() {
             let (sigma, i) = (g >> self.d, g & ((1 << self.d) - 1));
             // Lane t of a record is gate input bits W1_INPUT_BASE + 1024 t + (256 rho + j),
             // 16 aligned u64 words (`SpongeRecord::input_bits`).
@@ -778,6 +784,7 @@ impl<'g> TiedPart<'g> {
                 bits[dst..dst + 16].copy_from_slice(&input[src..src + 16]);
             }
         }
+        trace("witness complete", &start);
         (sponge, bits)
     }
 

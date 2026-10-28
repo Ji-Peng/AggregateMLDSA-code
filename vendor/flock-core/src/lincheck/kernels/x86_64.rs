@@ -107,11 +107,10 @@ pub fn partial_fold_packed_z_x86_tiled_padded(
         .par_chunks(bytes_per_chunk)
         .enumerate()
         .fold(
-            || vec![F128::ZERO; k],
-            |mut out, (chunk_idx, chunk_bytes)| {
+            || (vec![F128::ZERO; k], vec![F128::ZERO; TILE_T * 256].into_boxed_slice()),
+            |(mut out, mut tables), (chunk_idx, chunk_bytes)| {
                 let tile_start = chunk_idx * tiles_per_chunk;
                 // TILE_T × 256 F128 = 32 KB tables. L1 resident.
-                let mut tables = vec![F128::ZERO; TILE_T * 256];
                 let n_tiles_in_chunk = chunk_bytes.len() / (TILE_T * k);
                 for tile_rel in 0..n_tiles_in_chunk {
                     let tile_idx = tile_start + tile_rel;
@@ -142,9 +141,10 @@ pub fn partial_fold_packed_z_x86_tiled_padded(
                         }
                     }
                 }
-                out
+                (out, tables)
             },
         )
+        .map(|(out, _)| out)
         .reduce(
             || vec![F128::ZERO; k],
             |mut a, b| {

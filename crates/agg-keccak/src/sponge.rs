@@ -93,28 +93,41 @@ impl SpongeRecord {
     #[must_use]
     pub fn input_bits(&self) -> Vec<u64> {
         let mut words = vec![0u64; INPUT_BITS / 64];
-        for (i, &byte) in self.mu.iter().enumerate() {
-            let bit = MU_INPUT_BASE + 8 * i;
-            words[bit / 64] |= u64::from(byte) << (bit % 64);
+        self.input_bits_into(&mut words);
+        words
+    }
+
+    /// Fill one record's view of a flat input buffer, retaining the bit-plane layout.
+    pub fn input_bits_into(&self, words: &mut [u64]) {
+        assert_eq!(words.len(), INPUT_BITS / 64);
+        for (word, bytes) in words[MU_INPUT_BASE / 64..].iter_mut().zip(self.mu.chunks_exact(8)) {
+            *word = u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
         }
-        // Stream bits q = 1536 rho + 6 j + t go to column 1024 t + 256 rho + j
-        // (`w1_column`): read the 6 bits of (rho, j) at once and set bit j of the
-        // (t, rho) run, 256 aligned bits per run.
+        // Read eight six-bit coefficients together, then transpose their bytes into
+        // the six bit planes. Each coefficient enters the byte matrix with one shift/OR.
         debug_assert_eq!(W1_INPUT_BASE % 64, 0);
         for rho in 0..W1_BITS / 1536 {
-            for j in 0..256 {
-                let q = 1536 * rho + 6 * j;
-                let lo = q / 8;
-                let pair = u16::from(self.w1_encode[lo])
-                    | self.w1_encode.get(lo + 1).map_or(0, |&b| u16::from(b) << 8);
-                let six = (pair >> (q % 8)) & 0x3f;
+            for j in (0..256).step_by(8) {
+                let lo = 192 * rho + 6 * (j / 8);
+                let b = &self.w1_encode[lo..lo + 6];
+                let packed = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], 0, 0]);
+                let mut matrix = 0_u64;
+                for i in 0..8 {
+                    matrix |= ((packed >> (6 * i)) & 0x3f) << (8 * i);
+                }
+                let swap = (matrix ^ (matrix >> 7)) & 0x00AA_00AA_00AA_00AA;
+                matrix ^= swap ^ (swap << 7);
+                let swap = (matrix ^ (matrix >> 14)) & 0x0000_CCCC_0000_CCCC;
+                matrix ^= swap ^ (swap << 14);
+                let swap = (matrix ^ (matrix >> 28)) & 0x0000_0000_F0F0_F0F0;
+                matrix ^= swap ^ (swap << 28);
                 for t in 0..6 {
                     let idx = W1_INPUT_BASE + 1024 * t + 256 * rho + j;
-                    words[idx / 64] |= u64::from((six >> t) & 1) << (idx % 64);
+                    let byte = ((matrix >> (8 * t)) & 0xff) << (idx % 64);
+                    if j % 64 == 0 { words[idx / 64] = byte; } else { words[idx / 64] |= byte; }
                 }
             }
         }
-        words
     }
 }
 
@@ -229,6 +242,9 @@ mod tests {
                 }
             }
             assert_eq!(r.input_bits(), want);
+            let mut into = vec![u64::MAX; INPUT_BITS / 64];
+            r.input_bits_into(&mut into);
+            assert_eq!(into, want);
         }
     }
 

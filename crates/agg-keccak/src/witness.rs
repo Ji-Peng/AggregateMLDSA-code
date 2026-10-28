@@ -94,10 +94,10 @@ where
             .take(cnt.div_ceil(8))
             .enumerate()
             .for_each(|(g, out)| {
-                let lanes = (8 * g..(8 * g + 8).min(cnt)).collect::<Vec<_>>();
+                let lanes = 8 * g..(8 * g + 8).min(cnt);
                 for u in 0..w {
                     let mut v = [0u64; 8];
-                    for (r, &i) in lanes.iter().enumerate() {
+                    for (r, i) in lanes.clone().enumerate() {
                         v[r] = word(i, 0, u);
                     }
                     if v == [0u64; 8] {

@@ -550,6 +550,7 @@ impl LincheckCircuit for ChainGate {
         }
         // Output rows: A = final state bit, B = e_const.
         let mut kv = vec![F128::ZERO; STATE_BITS];
+        let mut spare = vec![F128::ZERO; STATE_BITS];
         for (j, &o) in self.spec.outputs.iter().enumerate() {
             let e = eq[lay.output_base + j];
             kv[o as usize] += alpha * e;
@@ -585,7 +586,8 @@ impl LincheckCircuit for ChainGate {
                     }
                 }
                 konst += alpha * sum_e;
-                kv = keccak::phi_transpose(&kv);
+                keccak::phi_transpose_into(&kv, &mut spare);
+                std::mem::swap(&mut kv, &mut spare);
             }
             // state_0^(m) = out^(m-1) + absorb_m.
             for &(s, col) in &self.absorb_cols[m] {

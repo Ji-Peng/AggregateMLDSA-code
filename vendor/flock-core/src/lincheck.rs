@@ -977,20 +977,20 @@ pub fn partial_fold_packed_z_rows_padded(
         .par_chunks(bytes_per_chunk)
         .enumerate()
         .fold(
-            || vec![F128::ZERO; k],
-            |mut acc, (chunk_idx, chunk_bytes)| {
+            || (vec![F128::ZERO; k], Box::new([F128::ZERO; 256])),
+            |(mut acc, mut table), (chunk_idx, chunk_bytes)| {
                 let stripe_start = chunk_idx * stripes_per_chunk;
-                let mut table = vec![F128::ZERO; 256];
                 for (rel_stripe, stripe) in chunk_bytes.chunks(k).enumerate() {
                     let byte_idx = stripe_start + rel_stripe;
-                    build_sum_table(&eq_outer[8 * byte_idx..8 * byte_idx + 8], &mut table);
+                    build_sum_table(&eq_outer[8 * byte_idx..8 * byte_idx + 8], &mut table[..]);
                     for (i_inner, &z_byte) in stripe[..useful_bits].iter().enumerate() {
                         acc[i_inner] += table[z_byte as usize];
                     }
                 }
-                acc
+                (acc, table)
             },
         )
+        .map(|(acc, _)| acc)
         .reduce(
             || vec![F128::ZERO; k],
             |mut a, b| {

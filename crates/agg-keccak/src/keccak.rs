@@ -165,9 +165,17 @@ pub fn bits_to_lanes(bits: &[bool]) -> Lanes {
 /// state `s` (both inner products taken in characteristic 2).
 #[must_use]
 pub fn phi_transpose(g: &[F128]) -> Vec<F128> {
+    let mut out = vec![F128::ZERO; STATE_BITS];
+    phi_transpose_into(g, &mut out);
+    out
+}
+
+/// Adjoint linear layer into a reusable output buffer.
+pub fn phi_transpose_into(g: &[F128], out: &mut [F128]) {
     assert_eq!(g.len(), STATE_BITS);
+    assert_eq!(out.len(), STATE_BITS);
     // (rho pi)^T: weight on A1[a, b, c] = g[B position (x = b, y = 2(a - b), z = c + r[a][b])].
-    let mut g1 = vec![F128::ZERO; STATE_BITS];
+    let g1 = &mut *out;
     for y in 0..5 {
         for x in 0..5 {
             let a = (x + 3 * y) % 5;
@@ -189,7 +197,7 @@ pub fn phi_transpose(g: &[F128]) -> Vec<F128> {
             }
         }
     }
-    let mut k = g1;
+    let k = g1;
     for x in 0..5 {
         let xp = (x + 1) % 5;
         let xm = (x + 4) % 5;
@@ -204,7 +212,6 @@ pub fn phi_transpose(g: &[F128]) -> Vec<F128> {
             }
         }
     }
-    k
 }
 
 #[cfg(test)]

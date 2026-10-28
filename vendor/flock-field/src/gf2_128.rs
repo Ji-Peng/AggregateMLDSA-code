@@ -710,7 +710,9 @@ mod tests {
             let kb = unsafe { ghash_mul_karatsuba_barrett_x86_64(a, b) };
             let bi = unsafe { ghash_mul_binius_x86_64(a, b) };
             // Unreduced + deferred reduce must match the direct software product.
-            let un = unsafe { ghash_mul_unreduced_x86_64(a, b) }.reduce();
+            let product = unsafe { ghash_mul_unreduced_x86_64(a, b) };
+            assert_eq!(product, super::software::ghash_mul_unreduced(a, b));
+            let un = product.reduce();
             assert_eq!(sw, sb, "schoolbook");
             assert_eq!(sw, ka, "karatsuba");
             assert_eq!(sw, kb, "karatsuba_barrett");

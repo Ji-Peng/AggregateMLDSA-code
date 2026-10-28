@@ -115,5 +115,9 @@ mod tests {
         fold_pairs(&src, 3, &mut actual, r);
 
         assert_eq!(actual, expected);
+        for (t, &value) in expected.iter().enumerate() {
+            let s = 2 * (3 + t);
+            assert_eq!(value, src[s] * (F128::ONE + r) + src[s + 1] * r);
+        }
     }
 }
