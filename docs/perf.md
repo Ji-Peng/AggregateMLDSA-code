@@ -20,13 +20,15 @@ proof-of-work nonces of wire version 2/3.
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) |
 | instance `T` reused in the witness; vectorized `public_t` | done |
 | P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
-| W1, lever B, lever A | Sections 9 to 11 |
+| W1 keep the event-2 Flock witness of a one-part batch until the join (Section 9) | done; cloud 32K: -0.66 s (Section 12) |
+| B inline Flock's scalar GF(2^128) multiply via a vendored `flock-field` (Section 10) | done; cloud 32K: -0.26 s prover, Flock verifier 29.0 -> 22.6 ms (Section 12) |
+| A move the one-vCPU windows off the serial path (Section 11) | done; cloud 32K: -0.21 s (Section 12) |
 | P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open |
 
 Outcome on the cloud VM after F1 to P5 (2 runs at `N = 32,768`, so not a median of 5): prove
 23.74 s to 14.62 s, Flock parts 13.8 s to 7.57 s, lookup 3.86 s to 2.53 s, stage 3 1.80 s to
-1.48 s. The 12 s target was not reached by these; P1 and P2 were the largest remaining levers
-by the estimates below.
+1.48 s. With P1, W1, B and A the 12 s target is met: H-u 32K proves in 11.34 s with a 6-thread Flock
+pool and 11.69 s with the default pool of 8 (medians of 5, Section 12).
 
 Machine: i7-11700K (Rocket Lake, 8 cores, HT off; flags include `pclmulqdq`, `vpclmulqdq`,
 `gfni`, `avx512f/bw/vl/vbmi`), runs on `taskset -c 0,1,3-15` (= cores 0,1,3-7, 7 cores),
@@ -561,3 +563,47 @@ prove, where serialization and the untimed drops sit), (b) about 0 (W1 keeps the
 Cloud check: `agg bench --count 32768 --warmup 1
 --reps 3` with and without `AGG_SCHED_SERIAL=1` on the same binary, and the same pair with
 `AGG_PARITY_EARLY=1`; success is >= 0.15 s median gain and identical aggregates.
+
+## 12. Cloud measurement of W1, B and A at 32K
+
+`c4d-highmem-16`, CLMUL build, 16 threads, H-u unless stated. All numbers in this section are
+measured on the VM.
+
+### 12.1 Results
+
+- Matrix, `agg bench --warmup 1 --reps 5`: H-u 32K **11,336.3 ms** with `AGG_FLOCK_THREADS=6`
+  and 11,688.6 ms with the default pool (8); H-exact 11,581.8 / 11,933.3 ms; H-FIPS 12,306.9 /
+  12,625.0 ms; H-u 8K 3,285.3 / 3,423.9 ms, 1K 912.4 / 930.4 ms. `FLOCK_SIMD=portable` 32K:
+  15,169.6 / 14,968.2 ms. Bytes unchanged (1,469,874 B = 44.9 B/sig at 32K); verify 380.9 /
+  156.8 ms in process, 426.9 / 202.3 ms in a fresh process. Prover peak: tool VmHWM 31,177 MiB
+  (H-u), 32,605 MiB (H-FIPS); fresh `agg aggregate` 28,669 MiB (H-u), up 3.4 GiB from
+  the schedule without W1, B and A because W1 keeps the witness.
+- Lever decomposition, same VM, back to back (1 warmup + 3, pool 8): without the three levers
+  12,775.9 ms; + W1 12,112.9 ms; + B (main with `AGG_SCHED_SERIAL=1`) 11,855.8 ms; + A (main)
+  11,680.4 / 11,604.4 ms. W1 -0.66 s, B -0.26 s, A -0.21 s (setup -66 ms, opening -123 ms);
+  together -1.13 s (-8.9%). `AGG_FLOCK_REBUILD=1` on main: +0.65 s. All three inside the
+  estimates of Sections 9.4, 10.3 and 11.4. `AGG_PARITY_EARLY=1`: -47 ms, under the 50 ms bar,
+  so it stays opt-in. Every arm's aggregate is byte-identical.
+- Flock pool (H-u 32K): 4 threads 11,262.0 ms (1+5), 6 threads 11,336.3 ms (1+5), 8 threads
+  11,688.6 ms (1+5), 10 threads 11,944.5 ms (1+2). With W1 the PIOP branch is critical at 6 or
+  more Flock threads (fork wall 6,850.6 ms against Flock proofs 6,279.5 ms at 6) and the Flock
+  branch at 4 (6,693.7 against 6,656.9 ms). Suggested default: about 3/8 of the rayon pool (6 at
+  16 threads) instead of half; not changed yet (a code change with its own test run).
+
+### 12.2 Where the 11.34 s go (H-u, pool 6, median run, ms)
+
+Outside the fork 4,485.7: instance 495.7, witness and tables 697.4, Flock records 49.0, setup
+35.6, Flock commit 2,376.7 (event 1, 578.0, runs beside it), round 2 190.3, opening 615.4.
+Fork wall 6,850.6, PIOP branch critical: lookup 3,471.8, stages 1/2/3 508.2 / 768.1 / 1,977.4;
+the Flock proofs take 6,279.5 on 6 threads beside it.
+
+### 12.3 Toward the 10 s stretch target (est.)
+
+1.34 s to go from 11.34 s. Since the PIOP branch is critical, its levers now count at full
+value: P2 / P2b (lookup, Section 6: 0.8-1.2 s + 0.3-0.6 s, estimated against the old 3.86 s
+lookup; against today's 3.47 s inside the fork, est. 0.5-1.0 s) and P4 (stage 3, 0.2-0.4 s,
+est.), each until the Flock branch (6.28 s at 6 threads) becomes critical again, at which point
+the pool shifts back towards 8. On the serial path, the Flock commit (2.38 s, beside event 1)
+is the largest item; P3 (start the event-2 build earlier) is 0.3-0.5 s (est., Section 6).
+The 11.34 s already use the 6-thread pool; with the default pool (8) the starting point is
+11.69 s, so the default change of 12.1 is the first 0.35 s (measured).
