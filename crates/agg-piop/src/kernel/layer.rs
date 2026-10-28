@@ -792,6 +792,10 @@ const PREFIX_PAIR_BOUND: i64 = 1 << 20;
 /// of the differences reach 2^64, kept exact in `i128`).
 const PREFIX_S_BOUND: i64 = 1 << 16;
 const PREFIX_M_BOUND: i64 = 1 << 30;
+/// Largest `S` magnitude with `M` lanes (`|M| <= 2^30` as well): the pair differences
+/// `|dS| <= 2^18`, `|dM| <= 2^31` keep `dS dS`, `dS dM` and `dM dM` (at most 2^62) exact
+/// in `i64`.
+const PAIR_S_BOUND: i64 = 1 << 17;
 
 struct IntSource<'a> {
     s: [&'a [i32]; 2],
@@ -1169,15 +1173,9 @@ impl<'a> IntPairGroup<'a> {
     /// with `M`, leaves below `2^20` without) run the integer prefix: the second round is
     /// computed from the leaves as well and the first table is a quarter of the domain.
     /// `None` when the `W` transform is singular (with `M`), a lane has the wrong length or a
-    /// value is out of range.
+    /// value is out of range (`|S| > 2^17` or `|M| > 2^30` with `M`, `|S| > 2^30` without).
     #[must_use]
     pub fn new(s: [&'a [i32]; 2], m: Option<[&'a [i32]; 2]>, coefficients: [E; 5], eq_point: &[E]) -> Option<Self> {
-        let rows = 1_usize << eq_point.len();
-        let lanes = s.iter().chain(m.iter().flatten());
-        if lanes.clone().any(|lane| lane.len() != rows) {
-            return None;
-        }
-        let [_, cs, cm, ck, cmm] = coefficients;
         // The largest magnitude over a set of lanes (one streaming pass).
         let magnitude = |lanes: &[&[i32]]| -> i64 {
             lanes
@@ -1187,6 +1185,28 @@ impl<'a> IntPairGroup<'a> {
                 .unwrap_or(0)
         };
         let max_s = magnitude(&s);
+        let max_m = m.map_or(0, |m| magnitude(&m));
+        Self::with_magnitudes(s, m, coefficients, eq_point, max_s, max_m)
+    }
+
+    /// [`Self::new`] with the lanes' largest magnitudes supplied by a caller that bounds
+    /// them already (no scan of the lanes): `max_s >= |S|`, `max_m >= |M|` (`max_m` unused
+    /// without `M`). An understated bound breaks the exactness of the integer sums.
+    #[must_use]
+    pub(crate) fn with_magnitudes(
+        s: [&'a [i32]; 2],
+        m: Option<[&'a [i32]; 2]>,
+        coefficients: [E; 5],
+        eq_point: &[E],
+        max_s: i64,
+        max_m: i64,
+    ) -> Option<Self> {
+        let rows = 1_usize << eq_point.len();
+        let lanes = s.iter().chain(m.iter().flatten());
+        if lanes.clone().any(|lane| lane.len() != rows) {
+            return None;
+        }
+        let [_, cs, cm, ck, cmm] = coefficients;
         // Without `M`: the slots c_s on S_0 + S_1 and c_m on S_0 S_1 over the lanes S_0, S_1
         // (a width-2 table). With `M`: the lanes S_0, M_0, W_0, W_1, W_2 with
         // W = C (1, S_1, M_1), so that f = W_0 + S_0 W_1 + M_0 W_2 in one slot (measured
@@ -1199,8 +1219,13 @@ impl<'a> IntPairGroup<'a> {
                 }
                 (E::one(), vec![cs, cm], vec![(0, 0), (1, 0)], vec![(0, 1, 1)], max_s <= PREFIX_PAIR_BOUND)
             }
-            Some(m) => {
-                let prefix = max_s <= PREFIX_S_BOUND && magnitude(&m) <= PREFIX_M_BOUND;
+            Some(_) => {
+                // The table path's i64 products of the pair differences are exact only
+                // within these bounds (|dS| <= 2^18, |dM| <= 2^31).
+                if max_s > PAIR_S_BOUND || max_m > PREFIX_M_BOUND {
+                    return None;
+                }
+                let prefix = max_s <= PREFIX_S_BOUND;
                 let inverse = (cm * cmm - ck * ck).inverse()?;
                 (inverse, vec![E::one()], vec![(2, 0)], vec![(0, 3, 0), (1, 4, 0)], prefix)
             }
@@ -1642,7 +1667,8 @@ impl<'a> WeightIntGroup<'a> {
     /// `lanes` are the group's lanes in order: the weight at `weight_lane` (a field lane) and
     /// integer or byte lanes, with `coefficients[l]` the coefficient of lane `l` in `g`
     /// (ignored at the weight). `None` on lanes of other lengths than `2^rounds`, a field
-    /// lane besides the weight, or coefficients above `2^20` (exactness of `g`).
+    /// lane besides the weight, more than `2^10` lanes, coefficients above `2^20` or
+    /// byte-map entries above `2^31` (exactness of `g`).
     #[must_use]
     pub fn new(
         lanes: &[super::Source<'a>],
@@ -1656,8 +1682,14 @@ impl<'a> WeightIntGroup<'a> {
         let super::Source::Field(weight) = *lanes.get(weight_lane)? else {
             return None;
         };
+        // Every integer cell is at most 2^31 (an `i32`, or a byte-map entry checked here),
+        // so |g| <= 2^10 * 2^20 * 2^31 + 2^40 < 2^62 and the differences `g_b - g_a` of
+        // the first round stay below 2^63 (exact in `i64`).
+        let map_too_large =
+            |lane: &super::Source<'_>| matches!(lane, super::Source::Bytes { map, .. } if map.iter().any(|v| v.unsigned_abs() > 1 << 31));
         if lanes.len() != coefficients.len()
-            || lanes.iter().any(|l| l.len() != rows)
+            || lanes.len() > 1 << 10
+            || lanes.iter().any(|l| l.len() != rows || map_too_large(l))
             || coefficients.iter().any(|c| c.abs() > 1 << 20)
             || constant.abs() > 1 << 40
         {

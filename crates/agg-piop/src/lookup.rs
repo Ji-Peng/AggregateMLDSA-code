@@ -1460,7 +1460,17 @@ fn prove_with(
                         let trees_x: Vec<(E, E, E)> = list.iter().map(|&(_, x, gp, gq)| (x, gp, gq)).collect();
                         let coefficients = SymLanes::coefficients(&trees_x);
                         let [s0, s1, m0, m1] = sym_lanes.each_ref().map(Vec::as_slice);
-                        let group = match IntPairGroup::new([s0, s1], Some([m0, m1]), coefficients, &point) {
+                        // Recentred leaves |a|, |b| <= 2^15 (`SymLanes::of`) bound the lanes
+                        // without a scan: |S| = |a + b| <= 2^16, |M| = |a b| <= 2^30.
+                        let bounded = IntPairGroup::with_magnitudes(
+                            [s0, s1],
+                            Some([m0, m1]),
+                            coefficients,
+                            &point,
+                            SYM_SPREAD,
+                            SYM_SPREAD * SYM_SPREAD / 4,
+                        );
+                        let group = match bounded {
                             Some(group) => SessionGroup::Pair(group),
                             None => {
                                 let lanes = sym_lanes.iter().map(|lane| Lane::Source(Source::Ints(lane))).collect();

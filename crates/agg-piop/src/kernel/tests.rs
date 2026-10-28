@@ -701,6 +701,12 @@ fn dedicated_layer_groups_match_the_generic_group() {
             assert_eq!(expected, got, "weighted, {vars} vars");
             assert_eq!(generic.terminal_values(), weighted.terminal_values());
             assert!(weighted.terminal_consistent());
+            // A byte map whose entries break the exactness of `g` is rejected.
+            let mut wide = IDENTITY_MAP;
+            wide[0] = 1 << 43;
+            wide[1] = -(1 << 43);
+            let sources = [Source::Field(&weight), Source::Ints(&lo), Source::Bytes { cells: &hi, map: &wide }];
+            assert!(WeightIntGroup::new(&sources, 0, &[0, 1, 1 << 16], 1 << 15, gamma, vars).is_none());
         }
 
         // Integer pairs without and with M lanes.
@@ -759,4 +765,23 @@ fn dedicated_layer_groups_match_the_generic_group() {
         assert_eq!(generic.terminal_values(), layer.terminal_values());
         assert!(layer.terminal_consistent());
     }
+}
+
+/// Integer pair groups reject lanes whose pair differences would overflow the exact `i64`
+/// products of the table path (instead of wrapping in release builds).
+#[test]
+fn integer_pair_group_rejects_out_of_range_lanes() {
+    let mut rng = SplitMix64::new(99);
+    let eq_point = point(&mut rng, 3);
+    let c: [E; 5] = std::array::from_fn(|_| field(&mut rng));
+    let small = vec![0_i32; 8];
+    let mut big_m = vec![0_i32; 8];
+    big_m[0] = i32::MAX;
+    big_m[1] = i32::MIN;
+    let mut big_s = vec![0_i32; 8];
+    big_s[2] = (1 << 17) + 1;
+    assert!(IntPairGroup::new([&small, &small], Some([&big_m, &big_m]), c, &eq_point).is_none());
+    assert!(IntPairGroup::new([&big_s, &small], Some([&small, &small]), c, &eq_point).is_none());
+    assert!(IntPairGroup::new([&big_m, &small], None, c, &eq_point).is_none());
+    assert!(IntPairGroup::new([&small, &small], Some([&small, &small]), c, &eq_point).is_some());
 }
