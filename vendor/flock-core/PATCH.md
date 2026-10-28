@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Seven changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Eight changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -203,3 +203,35 @@ basis_is_the_bit_mle` (the claim check with the eq weights equals the bit-MLE; t
 verifier accepts the honest ring switch and rejects another value).
 
 To regenerate: add the variant and the arms named above.
+
+## 8. Prover-only: scalar kernel engineering (CLMUL build, every CPU)
+
+Pure evaluation-order and data-layout changes; every route computes the same field elements
+(canonical residues, exact XOR sums), so proofs, transcripts and the verifier are unchanged and
+aggregates are byte-identical to main.
+
+- Diagnostics: `FLOCK_ZC_TIMING` reports the zerocheck tail per route (sparse, expansion, fused,
+  naive; `FLOCK_ZC_ROUNDS` per round), `FLOCK_NTT_TRACE` the interleaved NTT's top/deep split,
+  `PCS_TRACE` the block rounds' folds, `q'` and `W'` parts.
+- Zerocheck round 1, portable path (`zerocheck/univariate_skip_optimized/kernels/portable.rs`,
+  `ntt/inv_table.rs`): the shift-reduce kernel works on 64-lane bit planes (a 128 KiB bit-plane
+  image of the inverse-NTT table, schoolbook GF(2^8) products on planes, one reduction and one
+  plane-to-byte transpose per window; a log/exp kernel for other widths; the software-multiply
+  kernel stays the test oracle), the C bit transpose uses delta swaps, and the per-lane window
+  sums accumulate unreduced 256-bit products (`kernels::LaneAcc`).
+- Additive NTT (`ntt/additive_ntt_f128.rs`): the four-layer top pass on every target
+  (`FLOCK_NTT_NO_FUSED4=1` restores fused-3 where no AVX-512 kernel runs), and the deep pass
+  runs block-major once a block fits 512 KiB (`FLOCK_NTT_DEEP_BUDGET_LOG2`).
+- Merged opening (`pcs.rs`, `pcs/block_stats_portable.rs`): portable block statistics mirror
+  the AVX-512 structure (bank row read once, unreduced inner products, Frobenius powers from
+  16 byte tables built once per process); the block rounds fuse fold and next message per term
+  (parallel above 2^16 elements); `W'` tables are built in parallel.
+- Lincheck (`lincheck.rs`, `lincheck/union.rs`): stripes with `k_log >= 14` fold with a
+  column-partitioned kernel (`partial_fold_packed_z_rows_iblock`: shared subset-sum tables,
+  register tiles, no per-task full-width accumulator or cross-task sum), at several row points
+  per pass (`union_bitbank_fold_multi`).
+
+Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`,
+`pcs::block_stats_portable::tests`, `pcs::block_round_tests`,
+`lincheck::tests::partial_fold_iblock_matches_row_prefix_and_dense`, the NTT path tests (also
+under `FLOCK_SIMD=portable` with a 4 KiB deep budget).
