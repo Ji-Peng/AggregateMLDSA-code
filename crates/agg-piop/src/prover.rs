@@ -176,9 +176,10 @@ impl KeccakSide for NoKeccak {
 
 /// Threads of the Flock pool of the fork-join: `AGG_FLOCK_THREADS` if set (`0`: no fork,
 /// the Flock proofs and then the PIOP on the caller's pool), else 3/8 of the global pool
-/// rounded up (6 of 16 threads: the PIOP branch is the longer one, and 6 balanced the two
-/// branches best both at 32K on the cloud machine and at 4K locally, against 4 and 8; a
-/// global pool of 8 threads alone is slower). A value that is not a number is reported once on stderr
+/// rounded up (6 of 16 threads: the PIOP branch is the longer one. On main's 32K cloud sweep
+/// 4 threads were 0.7% faster than 6, within noise, and 8 slower; at 4K locally 4 and 6
+/// overlap and 8 is slower; a 32K re-sweep of this prover decides. A global pool of 8 threads
+/// alone is slower). A value that is not a number is reported once on stderr
 /// and replaced by the default (a measurement must not silently run another pool size; the
 /// bench report prints the size used); a larger value than [`max_flock_threads`] is clamped
 /// to it. `0` on a rayon worker or with a one-thread global pool, where an extra pool gains
@@ -821,6 +822,8 @@ pub fn prove_with_tables_using(
         // recomputed from the committed bits.
         bridge_tables.drop_parity1_cache();
     }
+    // The honest level-1 parities move to the stage tables; only `ProverTables` reads them.
+    let parity1_cache = bridge_tables.take_parity1();
     let tables = SourceTables {
         manifest,
         main,
@@ -862,7 +865,7 @@ pub fn prove_with_tables_using(
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = ProverTables::from_bridge_cache(tables, &matrices);
+            let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
             phase_stamp("parity-tables");
             prove_piop_with(
                 manifest,
@@ -889,7 +892,7 @@ pub fn prove_with_tables_using(
                 (prove_flock(), start.elapsed())
             },
             || {
-                let out = ProverTables::from_bridge_cache(tables, &matrices);
+                let out = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
                 phase_stamp("parity-tables");
                 out
             },

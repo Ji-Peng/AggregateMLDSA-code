@@ -3,10 +3,18 @@
 //! Each group owns its current table. A fold checks out a spare and returns its
 //! previous table after all readers finish; terminal tables return when groups drop.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::OpeningField as E;
 
 pub(crate) type SharedArena = Arc<Mutex<TableArena>>;
+
+/// Lock the arena, also after a panic on another thread poisoned it. `take` and `put` leave
+/// the two spares valid at every step, so a poisoned arena is still usable; failing here
+/// instead would panic inside the groups' `Drop` while unwinding and abort the process
+/// without the original panic message.
+pub(crate) fn lock_arena(arena: &SharedArena) -> MutexGuard<'_, TableArena> {
+    arena.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Default)]
 pub(crate) struct TableArena {

@@ -85,11 +85,16 @@ pub struct ProverTables<'a> {
 }
 
 impl<'a> ProverTables<'a> {
-    /// Reuse the parities built from these main tables and matrices by the honest
-    /// driver. A carry mutation invalidates the cache and takes the general path.
-    pub(crate) fn from_bridge_cache(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
-        match tables.bridge.parity1_cached() {
-            Some(parities) => Self::with_parity1(tables, Parity1::Narrow(parities.clone())),
+    /// Reuse the parities that `BridgeGroupTables::build` derived from these main tables and
+    /// matrices (moved out of the bridge tables by the honest driver). `None` (a carry
+    /// mutation or a tamper hook dropped the cache) takes the general path.
+    pub(crate) fn from_parity1_cache(
+        tables: SourceTables<'a>,
+        cache: Option<[Vec<i8>; W1_BITS]>,
+        matrices: &BridgeMatrices,
+    ) -> Self {
+        match cache {
+            Some(parities) => Self::with_parity1(tables, Parity1::Narrow(parities)),
             None => Self::new(tables, matrices),
         }
     }
@@ -198,12 +203,22 @@ mod tests {
         let mut bridge = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
         {
             let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
-            assert_eq!(ProverTables::from_bridge_cache(tables, &matrices).parity1,
+            let cache = bridge.parity1_cached().cloned();
+            assert!(cache.is_some());
+            assert_eq!(ProverTables::from_parity1_cache(tables, cache, &matrices).parity1,
                 ProverTables::new(tables, &matrices).parity1);
         }
+        // Handing the cache over leaves the committed content (and equality) unchanged.
+        let before = bridge.clone();
+        assert!(bridge.take_parity1().is_some());
+        assert!(bridge.parity1_cached().is_none());
+        assert_eq!(bridge, before);
+        let mut bridge = before;
         bridge.carries_mut(1)[0] -= 1;
         let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
-        let cached = ProverTables::from_bridge_cache(tables, &matrices);
+        let cache = bridge.parity1_cached().cloned();
+        assert!(cache.is_none());
+        let cached = ProverTables::from_parity1_cache(tables, cache, &matrices);
         assert_eq!(cached.parity1, ProverTables::new(tables, &matrices).parity1);
         assert_eq!(cached.parity1.value(0, 0), 2);
     }

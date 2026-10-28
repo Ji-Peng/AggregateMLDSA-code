@@ -875,7 +875,7 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
         let e3 = sa * mb + sb * ma;
         let e4 = ma * mb;
         for (slot, &[x, x2, x3, x4]) in out.iter_mut().zip(&powers) {
-            // |e1| <= 2^17, |e2| < 2^32, |e3| <= 2^48, |e4| <= 2^60,
+            // |e1| <= 2^17, |e2| <= 2^32 + 2^31, |e3| <= 2^47, |e4| <= 2^60,
             // all below p. At most four integer products per accumulator: each
             // split slot is below 4 * 2^64, far below the u128 accumulator limit.
             let mut q = crate::kernel::Acc::zero();

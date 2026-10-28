@@ -651,9 +651,10 @@ fn stack_carries(columns: &[Vec<i64>], slots: usize) -> Result<Vec<i32>, SourceT
 /// Round-2 tables: the carries of `G_1, G_2, G_3` (stacked, balanced), the level-2
 /// parities, the public bridge vectors `Y`, and the multiplicity column `m` of `T_16`
 /// with its digits (`G_m`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct BridgeGroupTables {
-    /// Honest level-1 parities, invalidated when the committed level-1 carries change.
+    /// Honest level-1 parities, invalidated when the committed level-1 carries change and
+    /// moved out by the honest driver; not part of the committed content (`PartialEq`).
     parity1: Option<[Vec<i8>; W1_BITS]>,
     level1: Vec<i32>,
     parities: Vec<Vec<i8>>,
@@ -663,6 +664,22 @@ pub struct BridgeGroupTables {
     multiplicity: Vec<i32>,
     digits: Vec<Vec<i8>>,
 }
+
+/// Equality of the committed content: the level-1 parity cache is left out, so a table set
+/// that dropped or handed over its cache equals one that keeps it.
+impl PartialEq for BridgeGroupTables {
+    fn eq(&self, other: &Self) -> bool {
+        self.level1 == other.level1
+            && self.parities == other.parities
+            && self.level2 == other.level2
+            && self.level3 == other.level3
+            && self.y == other.y
+            && self.multiplicity == other.multiplicity
+            && self.digits == other.digits
+    }
+}
+
+impl Eq for BridgeGroupTables {}
 
 impl BridgeGroupTables {
     /// The honest round-2 tables for the committed bits of `main` and the matrices derived
@@ -778,10 +795,16 @@ impl BridgeGroupTables {
         }
     }
 
-    /// Cached parities for the honest driver, whose main tables and matrices are
-    /// the same immutable inputs used by build. Other callers recompute their tables.
+    /// Cached parities (unit tests; the honest driver moves them out with `take_parity1`).
+    #[cfg(test)]
     pub(crate) fn parity1_cached(&self) -> Option<&[Vec<i8>; W1_BITS]> {
         self.parity1.as_ref()
+    }
+
+    /// Move the cached parities out (the honest driver's single use), so they are neither
+    /// copied on the PIOP branch nor kept twice through the stages.
+    pub(crate) fn take_parity1(&mut self) -> Option<[Vec<i8>; W1_BITS]> {
+        self.parity1.take()
     }
 
     /// Forget the cached level-1 parities (the tables were changed after `build`).

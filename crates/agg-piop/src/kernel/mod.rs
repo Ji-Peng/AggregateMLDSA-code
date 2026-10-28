@@ -36,7 +36,7 @@
 #[allow(unsafe_code)]
 pub(crate) mod buf;
 mod arena;
-pub(crate) use arena::{SharedArena, TableArena};
+pub(crate) use arena::{lock_arena, SharedArena, TableArena};
 mod coded;
 mod field;
 mod layer;
@@ -1733,7 +1733,7 @@ impl<'a> Group<'a> {
         let eval = self.dense_evaluator(upper);
         let width = eval.width;
         let mut dense = match &self.arena {
-            Some(arena) => arena.lock().unwrap().take(rows * lanes),
+            Some(arena) => lock_arena(arena).take(rows * lanes),
             None => buf::reuse(Vec::new(), rows * lanes),
         };
         let base = SendPtr(dense.as_mut_ptr().cast::<E>());
@@ -1797,7 +1797,7 @@ impl<'a> Group<'a> {
         let evaluate = next_rows >= 2;
         let upper = evaluate && self.recovery().is_some();
         let mut next = match &self.arena {
-            Some(arena) => arena.lock().unwrap().take(next_rows * lanes),
+            Some(arena) => lock_arena(arena).take(next_rows * lanes),
             None => buf::reuse(Vec::new(), next_rows * lanes),
         };
         let out = SendPtr(next.as_mut_ptr().cast::<E>());
@@ -1838,7 +1838,7 @@ impl<'a> Group<'a> {
             (0..blocks).map(run).fold(vec![Acc::zero(); width], add_acc)
         };
         if let Some(arena) = &self.arena {
-            arena.lock().unwrap().put(previous);
+            lock_arena(arena).put(previous);
         }
         // SAFETY: every row of every plane of the new table was written by exactly one block.
         self.dense = unsafe { buf::finish(next) };
@@ -1982,7 +1982,7 @@ impl DenseEval<'_> {
 impl Drop for Group<'_> {
     fn drop(&mut self) {
         if let Some(arena) = &self.arena {
-            arena.lock().unwrap().put(std::mem::take(&mut self.dense));
+            lock_arena(arena).put(std::mem::take(&mut self.dense));
         }
     }
 }

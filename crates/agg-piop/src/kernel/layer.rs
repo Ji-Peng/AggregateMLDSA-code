@@ -464,7 +464,7 @@ impl<S: Level0> Engine<S> {
         let parallel = items >= MIN_PARALLEL_ITEMS && tasks > 1;
         let mut table = if keep {
             match &self.arena {
-                Some(arena) => arena.lock().unwrap().take(rows_out * width),
+                Some(arena) => super::lock_arena(arena).take(rows_out * width),
                 None => super::buf::reuse(Vec::new(), rows_out * width),
             }
         } else {
@@ -495,7 +495,7 @@ impl<S: Level0> Engine<S> {
             self.table = previous;
         } else {
             if let Some(arena) = &self.arena {
-                arena.lock().unwrap().put(previous);
+                super::lock_arena(arena).put(previous);
             }
             // SAFETY: each kept output row is initialized exactly once by run/fill.
             self.table = unsafe { super::buf::finish(table) };
@@ -1756,7 +1756,7 @@ impl<'a> WeightIntGroup<'a> {
 impl<S: Level0> Drop for Engine<S> {
     fn drop(&mut self) {
         if let Some(arena) = &self.arena {
-            arena.lock().unwrap().put(std::mem::take(&mut self.table));
+            super::lock_arena(arena).put(std::mem::take(&mut self.table));
         }
     }
 }

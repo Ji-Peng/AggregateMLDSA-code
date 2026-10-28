@@ -1618,6 +1618,9 @@ fn fold_terms_and_message(
     let one = |(a, s): &mut (Vec<F128>, Vec<F128>)| {
         let half = a.len() / 2;
         debug_assert_eq!(s.len(), a.len());
+        // The fused path folds whole quartets: a length of 2 mod 4 would leave its last
+        // pair unfolded. Term lengths are powers of two (`1 << kb`).
+        debug_assert!(a.len() < 4 || a.len() % 4 == 0, "term length {} is 2 mod 4", a.len());
         let mut g1 = F256Unreduced::ZERO;
         let mut gi = F256Unreduced::ZERO;
         if with_msg && half >= 2 {
