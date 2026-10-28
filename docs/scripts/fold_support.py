@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Accepted support of Akita's sparse fold-challenge families (docs/soundness.md 4.6, H1).
+"""Accepted support of Akita's sparse fold-challenge families (docs/soundness.md).
 
 Run (isolated mode, standard library only):
 
@@ -16,13 +16,13 @@ What it computes, exactly (integers and fractions):
   production ladder, against 2^128;
 * for the two certified operator-norm policies, N_raw (checked against the family size)
   and the accepted floor ceil(N_raw p0), where p0 is the certificate's exact lower bound on
-  the accepted fraction of the strict runtime predicate (Akita Lemma 10.1: conditioned on
+  the accepted fraction of the strict runtime predicate (Akita: conditioned on
   success the sampler's output is uniform on the accepted set, so this is the support).
 
 The certificates' own proofs (moments, dual polynomial, Bernstein or Sturm positivity) are
 checked by Akita's exact checkers, scripts/operator_norm/d64/check_cert.py and
 scripts/operator_norm/d128/check_cert.py of the same tree (both print ALL CHECKS PASS at
-e023b6a; docs/soundness.md 4.6).
+e023b6a).
 """
 
 from __future__ import annotations

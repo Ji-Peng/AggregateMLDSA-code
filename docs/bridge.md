@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | normative for milestones M2 (F_p side, `agg-bridge`, `agg-piop`) and M3 (Flock side, `agg-keccak` bridge slot); resolves the open items of `ref/notes/improvements-bridge.md` Section 5 and `docs/spec.md` Sections 8, 9 |
+| Status | normative for the F_p side (`agg-bridge`, `agg-piop`) and the Flock side (`agg-keccak`); resolves the open items of `docs/spec.md` Sections 8, 9 |
 | Source of truth | `docs/spec.md` (Sections 1, 4, 5, 7, 8, 9, 10). This document only fixes what the spec leaves open; a conflict is a bug here. Deviations go to `docs/deviations.md` |
 | Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `carry`, `weights`, `final_vector`, `gf2_walker`, `parity_chain`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/tied.rs`, `flock_union.rs` (the mode-A Flock side: the virtual parity chain of Section 5d since tied-part proof version 5), `bridge_union.rs` (the bridge union of Sections 5b, 5c, versions 2 to 4, reference), `bridge_slot.rs`, `segment.rs` (the one-row slot and two-type union of Section 5, reference) |
 | Counts | exact numbers are products of the shape constants and exact binomials (`math.comb`); every number marked "estimate" is unmeasured |
@@ -41,7 +41,7 @@ Alignment. The Akita main domain of lane $`t`$ at $`N^\star=2^{d_{\rm sig}}`$ re
 
 ## 3. Seed and matrix sampling
 
-**Transcript position** (spec Section 10, `docs/piop.md` Section 9). $`\mathsf{sd}`$ is the 32-byte squeeze of event 3 (`agg-mldsa/v1/bridge/seed`). Before it the transcript has absorbed event 0 (wire version, $`N,N^\star`$, the public-record digest over all $`(\mathsf{pk}_i,M_i,\tilde c_i)`$, the group descriptors and $`(J_t,m_t,k_t)`$), event 1 (the round-1 Akita commitment of $`G_{\rm main}`$, which contains $`b_0..b_5`$) and event 2 (the $`S`$ Flock commitments, each the Ligerito level-0 cap of the sub-batch whose witness contains $`b'`$ and the bridge-slot copies, deviation K7). Hence $`\delta=b\oplus b'`$ is fixed by binding commitments before $`\mathsf{sd}`$ exists. Everything seed-dependent comes later: the round-2 groups $`G_1,G_2,G_3`$ (event 4), the Flock challenger seeds $`\mathsf{fs}_\sigma`$ (event 5), $`Y_\sigma`$ and the Flock proofs (event 6). The Flock side binds $`\mathsf{sd}`$ twice: through $`\mathsf{fs}_\sigma`$ and through the bridge-slot digest absorbed into its challenger (Section 5).
+**Transcript position** (spec Section 10, `docs/piop.md` Section 9). $`\mathsf{sd}`$ is the 32-byte squeeze of event 3 (`agg-mldsa/v1/bridge/seed`). Before it the transcript has absorbed event 0 (wire version, $`N,N^\star`$, the public-record digest over all $`(\mathsf{pk}_i,M_i,\tilde c_i)`$, the group descriptors and $`(J_t,m_t,k_t)`$), event 1 (the round-1 Akita commitment of $`G_{\rm main}`$, which contains $`b_0..b_5`$) and event 2 (the $`S`$ Flock commitments, each the Ligerito level-0 cap of the sub-batch whose witness contains $`b'`$ and the bridge-slot copies, deviation K7). Hence $`\delta=b\oplus b'`$ is fixed by binding commitments before $`\mathsf{sd}`$ exists. Everything seed-dependent comes later: the round-2 groups $`G_1,G_2,G_3`$ (event 4), the Flock challenger seeds $`\mathsf{fs}_\sigma`$ (event 5), $`Y_\sigma`$ and the share items (event 6) and the Flock proofs (at the join after stage 3, deviation K22). The Flock side binds $`\mathsf{sd}`$ twice: through $`\mathsf{fs}_\sigma`$ and through the bridge-slot digest absorbed into its challenger (Section 5).
 
 **Derivation** (`agg_bridge::seed`, normative as implemented and known-answer tested). Column $`\zeta`$ of $`M_t`$ is read from $`\mathrm{cSHAKE256}(\mathsf{sd}\Vert\mathrm{LE64}(t)\Vert\mathrm{LE64}(\zeta),\cdot,N=\varepsilon,S=\texttt{agg-mldsa/v1/bridge})`$ with $`t\in\{1,2,3\}`$ the level number: take 16-bit little-endian words, keep the low $`\log_2m_t`$ bits (13, 13, 12), skip a value already drawn for this column, stop after $`k_t`$ distinct rows, stored in draw order. This is column-regular ($`|S_\zeta|=k_t`$ exactly), rejection-free on the row value (power-of-two $`m_t`$, a mask, no modular bias) and exactly uniform over $`k_t`$-subsets (the distinct values of an i.i.d. uniform stream form a uniform ordered $`k`$-tuple); the only skipped words are exact repeats, $`k(k-1)/2m\approx0.011`$ per column in expectation. The XOF is squeezed in 64-byte chunks (32 words); the word stream does not depend on the chunking. Both sides, and every segment, use the same three matrices; nothing is transmitted. Representation: `SparseMatrix` (column-major, `cols * k` row indices of `u32`), 62 MB for the production shape, derived once per proof or verification and shared by the $`\mathbb F_p`$ tables, the weights and the Flock walker.
 
@@ -102,7 +102,7 @@ xi_A[one]  = eq[one];  xi_B[one] = eq[one] + sum_{live c} eq[c] + sum_o eq[Y_col
 comb       = alpha * xi_A + xi_B                  (all other entries zero)
 ```
 
-This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`\mathbb F_{2^{128}}`$, where GF(2) and field products agree because the characteristic is 2; the sparse column lists are read from the shared `BridgeMatrices` (generated from $`\mathsf{sd}`$, Section 3), so the rows exist only as this recurrence. Cost per fold, full segment, exact: $`884{,}736+11{,}010{,}048+704{,}643{,}072=7.17\times10^8`$ $`\mathbb F_{2^{128}}`$ additions (128-bit XORs), $`5.0\times10^7`$ multiplications by $`\alpha`$, one read of the $`2^{26}`$-entry `eq` and one write of `comb` (1 GiB each). Parallel over lanes and level-1 blocks (96 independent $`2^{19}`$-vectors at level 1). Flock's verifier calls the same `fold_alpha_batched` at its own `eq` table (`lincheck::verify`, step 2), so the bridge-slot verification costs the walker plus the $`2^{26}`$-entry `eq` build per segment: an estimated 0.3 to 1 s and 2 GiB per segment on 7 threads, to be measured on the cloud machine (risk R3; the spec's verifier budget of Section 11 does not yet include it). Sub-batches at $`d_{\rm seg}\le10`$ (local tests) fold $`2^{23}`$ entries or fewer.
+This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`\mathbb F_{2^{128}}`$, where GF(2) and field products agree because the characteristic is 2; the sparse column lists are read from the shared `BridgeMatrices` (generated from $`\mathsf{sd}`$, Section 3), so the rows exist only as this recurrence. Cost per fold, full segment, exact: $`884{,}736+11{,}010{,}048+704{,}643{,}072=7.17\times10^8`$ $`\mathbb F_{2^{128}}`$ additions (128-bit XORs), $`5.0\times10^7`$ multiplications by $`\alpha`$, one read of the $`2^{26}`$-entry `eq` and one write of `comb` (1 GiB each). Parallel over lanes and level-1 blocks (96 independent $`2^{19}`$-vectors at level 1). Flock's verifier calls the same `fold_alpha_batched` at its own `eq` table (`lincheck::verify`, step 2), so the bridge-slot verification costs the walker plus the $`2^{26}`$-entry `eq` build per segment: measured 1.43 s per segment on the cloud machine (Section 10 item 4). Sub-batches at $`d_{\rm seg}\le10`$ (local tests) fold $`2^{23}`$ entries or fewer.
 
 **Binding.** The registry type carries empty matrix stubs (Flock's walker convention, deviation K2), so the relation is bound by `BridgeSlot::digest` = SHA3-256 of (`agg-keccak/v1/bridge-slot`, $`\mathsf{sd}`$, $`(J_t,m_t,k_t)_{t\le3}`$, $`d_{\rm seg}`$, the live count, $`k_{\log}`$, `useful_bits`, the constant column, the $`Y`$ base), absorbed into the Flock challenger after $`\mathsf{fs}_\sigma`$ and the sponge digest (deviation K4) and before Flock's own statement binding, which covers the registry, the counts, the commitment and the public words $`(\mu_i,\tilde c_i)_{i}`$, $`Y_\sigma`$. The driver order per segment (`segment.rs`): commit the two-type union (event 2) $`\to`$ receive $`\mathsf{sd}`$, derive matrices, compute parities $`\to`$ receive $`\mathsf{fs}_\sigma`$ $`\to`$ build rows, bind, prove $`\to`$ emit $`Y_\sigma`$ and the proof (event 6).
 
@@ -112,7 +112,7 @@ This is $`M_1^{\mathsf T}(M_2^{\mathsf T}(M_3^{\mathsf T}\mathrm{eq}_Y))`$ in $`
 virtual parity chain, Section 5d; the sponge instance, its public claim, the part seeds, the
 shares and their XOR are kept.)
 
-Status: normative for M3 as implemented in `crates/agg-keccak/src/tied.rs` and
+Status: normative as implemented in `crates/agg-keccak/src/tied.rs` and
 `flock_union.rs` (deviation K11); it replaces the two-type union of Section 5 as the mode-A
 Flock argument. Section 5 stays the specification of the bridge slot itself (its block
 layout, rows, walker, binding and the `Y` coefficient of K8). Since tied-part proof version 2
@@ -195,7 +195,7 @@ additional `4 (d + 5) / 2^128` per part for the ties, inside `epsilon_Flock`. Th
 proofs share `fs` but have distinct challenger labels and digests (the gate digest and the
 public digest; the slot digest), so neither can be replayed as the other.
 
-**Costs** (exact sizes; measurements in `ref/notes/bench-local.md`). Sponge instance: the
+**Costs** (exact sizes). Sponge instance: the
 sponge-only union of docs/keccak.md Section 4 plus three claims (one `eq` tensor of `2^nu_s`
 and three of 8 or 32 entries). Bridge instance: `3 x 2^(k_b + nu_b - 7)` words of padded
 buffers and a `2^(k_b + nu_b - 3)`-byte stripe (64 MiB each at a full segment), the walker's
@@ -219,7 +219,7 @@ union's cap is inside the proof (Section 5b, item version 3).
 (Versions 2 to 4; superseded by the virtual parity chain of Section 5d, deviation K21. The
 module `bridge_union` stays as a reference with its unit tests.)
 
-Status: normative for M3 as implemented in `crates/agg-keccak/src/bridge_union.rs`,
+Status: normative as implemented in `crates/agg-keccak/src/bridge_union.rs`,
 `flock_union.rs` (multi-type unions) and `tied.rs` (tied-part proof version 2; deviations
 K13, K14). It replaces the one-row bridge slot as the bridge instance of the tied part of
 Section 5a. Unchanged from Section 5a: the sponge instance, its three claims and the public
@@ -287,9 +287,8 @@ rows), so Flock's block-first opening is never selected. Exact sizes (`BridgeUni
 | 11 | 4 | 20 / 18 | 5 | 26 | 24 + 1 | 102,976 | 24 | 10,977,280 | 24, 27, 98,337, 179,798,016 |
 | 13 | 16 | 20 / 20 | 7 | 28 | 96 + 1 | 411,712 | 26 | 19,234,816 | 26, 29, 393,249, 716,537,856 |
 
-**Commitment order (the change against the design note of `docs/keccak.md` Section 10).** The
-parities `y1 = M_1 b'` depend on `sd`, so the union cannot be committed at event 2 (the design
-note of Section 10 had it there, which is impossible). The part's event-2 item is the sponge
+**Commitment order.** The
+parities `y1 = M_1 b'` depend on `sd`, so the union cannot be committed at event 2. The part's event-2 item is the sponge
 instance's cap alone (`TiedCommitment`); the bridge union is built, committed and proven at
 event 6 (`TiedPart::prove_with_blocks`): blocks of the part's bits under the matrices of
 `sd`, then its Ligerito cap, which the proof carries (framed, before the two inner proofs).
@@ -366,7 +365,7 @@ position chunks), the levels-2-3 block and the share (`TopLayout::parities`), pa
 (`3 x 2^(nu + k_log - 7)` words each), assembles the union buffers (`3 x 2^(M - 7)` words, 32
 MiB each at a full segment), commits once and proves. The row values `a` of the level-1 rows
 are recomputed from the committed rows' own inputs, so a tampered parity breaks its row.
-Measurements: `docs/keccak.md` Section 11 and `ref/notes/bench-local.md`.
+Measurements: `docs/keccak.md` Section 11.
 
 **Wire.** Event 2: per part `TiedCommitment` = `LE32(len) || sponge cap`. Event 6: per part
 `AGGKCT || 2 || profile || LE32(n) || d || LE32(len) || bridge union cap || LE32(len) ||
@@ -519,7 +518,7 @@ with honest rows fails the output claim, the output columns set to it break the 
 
 ## 5d. The virtual parity chain (tied-part proof version 5; deviation K21)
 
-Status: normative for M3 as implemented in `crates/agg-bridge/src/parity_chain.rs` and
+Status: normative as implemented in `crates/agg-bridge/src/parity_chain.rs` and
 `crates/agg-keccak/src/tied.rs` (`VERSION = 5`); the design, the variable order, the
 weight evaluation and the costs are in `docs/parity-chain.md`, the sites in
 `docs/soundness.md` 3.6 and 12.4. It replaces the bridge union of Sections 5b and 5c as the
@@ -568,7 +567,12 @@ $`Y_\sigma\in\{0,1\}^{4096}`$ per segment, 512 bytes, bit $`\rho_3`$ at byte $`\
 
 ## 7. Soundness
 
-Let $`\delta=b\oplus b'`$ over all lanes, segments and positions of the main domain (padded positions included; they are fixed zeros on the Flock side). $`\delta`$ is determined by events 1 and 2, before $`\mathsf{sd}`$. If both sides accept with the same $`Y_\sigma`$, then by Section 4 (lifting, Booleanity, carry ranges) and Section 5 (GF(2) rows), $`M_3M_2M_1\delta=0`$ in every segment. From `ref/notes/improvements-bridge.md`: Lemma 1 (a block with exactly one nonzero input has a nonzero image, since every column has weight $`k_t\ge1`$), Lemma 2 (for a fixed nonzero block input, $`\Pr[M_tv=0]\le1/\binom{m_t}{k_t}`$, with equality at weight 2: condition on all but one of the involved columns, the remaining uniform $`k_t`$-subset must equal a fixed set), Lemma 3 (a level with the same $`M_t`$ on every block is missed only if every nonzero block is missed, so no union bound over blocks, lanes or segments is needed) and the composition theorem (the first level that zeroes a nonzero input is a disjoint-event decomposition; $`d^{(t-1)}`$ is fixed and independent of $`M_t`$ because the three levels use distinct hash inputs):
+Let $`\delta=b\oplus b'`$ over all lanes, segments and positions of the main domain (padded positions included; they are fixed zeros on the Flock side). $`\delta`$ is determined by events 1 and 2, before $`\mathsf{sd}`$. If both sides accept with the same $`Y_\sigma`$, then by Section 4 (lifting, Booleanity, carry ranges) and Section 5 (GF(2) rows), $`M_3M_2M_1\delta=0`$ in every segment. Write one level as $`M\in\{0,1\}^{m\times J}`$ whose column $`j`$ is the indicator of a uniform $`k`$-subset $`S_j`$ of the rows, the $`S_j`$ independent, so that $`Mv=\sum_{j\in T}1_{S_j}`$ for $`v`$ of support $`T`$.
+
+- **Lemma 1** (weight 1). If $`|T|=1`$ then $`Mv=1_{S_j}`$ has weight $`k\ge1`$, so $`Mv\ne0`$ with probability 1.
+- **Lemma 2** (weight at least 2). If $`|T|\ge2`$ then $`\Pr[Mv=0]\le1/\binom mk`$, with equality at $`|T|=2`$. Proof: fix $`j_0\in T`$ and condition on the other columns of $`T`$; their sum $`w`$ is fixed, and $`Mv=0`$ iff $`S_{j_0}=\mathrm{supp}(w)`$, which has probability $`1/\binom mk`$ if $`|\mathrm{supp}(w)|=k`$ and 0 otherwise. At $`|T|=2`$, $`w=1_{S_{j_1}}`$ always has weight $`k`$. No code distance is needed, only that one column cannot be predicted from the others.
+- **Lemma 3** (block reuse). If the same $`M`$ is applied to every block of a nonzero input $`(v_1,\dots,v_B)`$, then $`\Pr[Mv_\beta=0\ \forall\beta]\le1/\binom mk`$: the output is zero only if $`Mv_\beta=0`$ for one fixed $`\beta`$ with $`v_\beta\ne0`$, and Lemmas 1 and 2 bound that single event. No union bound over blocks, lanes or segments is needed (padded blocks are blocks of public zeros).
+- **Composition.** For a fixed $`d\ne0`$ and independent levels, $`d^{(0)}=d`$, $`d^{(t)}=M_td^{(t-1)}`$: the events "level $`t`$ is the first with $`d^{(t)}=0`$" are disjoint, and $`d^{(t-1)}`$ is a function of $`d,M_1,\dots,M_{t-1}`$, hence a fixed nonzero vector independent of $`M_t`$ (the levels use distinct hash inputs), so Lemma 3 bounds each term:
 
 ```math
 \Pr_{\mathsf{sd}}\big[M_3M_2M_1\delta=0\big]\ \le\ \sum_{t=1}^{3}\frac1{\binom{m_t}{k_t}}
@@ -605,7 +609,7 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 3. **Single-bit tampering on either side** (toy part present: `single_bit_tampering_on_either_side_changes_y` in `agg-bridge/tests/toy.rs`; deterministic by Lemma 1 at level 1): for 64 random positions, flip bit $`x`$ in the $`\mathbb F_p`$ copy only, recompute honest parities and carries from the tampered bits, and check that $`Y`$ differs from the GF(2) side's; then flip it in the GF(2) copy only and check the same; then flip it in both and check agreement (the bridge compares, it does not verify the bits). On the production shape the same test runs through `agg_piop::mode_b` with `FixedMatrices` at $`N=64`$: a changed $`Y_\sigma`$ bit, a flipped committed bit with stale carries, and a flipped public bit each fail (present: `every_stage_tampering_is_rejected_end_to_end` in `agg-piop/tests/mode_b.rs`, `bridge_mutations_are_rejected` in `agg-witness/tests/negative.rs`).
 4. **Weight-2 survival rate** (spec Section 13, present: `agg-bridge/tests/production.rs`, columns drawn by the seed derivation, 51 equal pairs): at $`(m,k)=(64,3)`$, $`2\times10^6`$ random column pairs from a fixed PRNG seed; the number with equal row sets (expected $`2\times10^6/\binom{64}{3}=48.0`$) lies in $`[27,69]`$, three standard deviations.
 5. **Lifting at the range boundary** (present in `agg-witness` and, for both shapes, in `agg-bridge/tests/toy.rs`): rows of weight exactly $`W_t`$ with all-one inputs give carries $`1023`$ and $`255`$ and the digits $`(7,7,1)`$ and $`(7,7)`$; weight $`W_t+1`$ makes `compute` return `RowWeight`.
-6. **Flock bridge slot** (`agg-keccak`, required at M3): a two-type union at $`d_{\rm seg}=3`$ and $`7`$ ($`k_{\log}`$ 16 and 20) proves and verifies with honest records; rejects a flipped $`Y_\sigma`$ bit, a bit flipped in the slot copy but not in the sponge (copy constraint), a bit flipped in both with stale $`\tilde c`$ (sponge), another seed's matrices (digest), and a stale parity row; the walker equals Flock's `SparseMatrixCircuit` fold on the explicitly lowered rows at $`d_{\rm seg}=3`$ (16 records, $`2^{16}`$ columns, dense composite built in GF(2)); `fold_split` agrees with two `fold_alpha_batched` calls. $`k_{\log}=26`$ (a full segment) is measured on the cloud machine only: prove and verify time, peak memory, proof size.
+6. **Flock bridge slot** (`agg-keccak`): a two-type union at $`d_{\rm seg}=3`$ and $`7`$ ($`k_{\log}`$ 16 and 20) proves and verifies with honest records; rejects a flipped $`Y_\sigma`$ bit, a bit flipped in the slot copy but not in the sponge (copy constraint), a bit flipped in both with stale $`\tilde c`$ (sponge), another seed's matrices (digest), and a stale parity row; the walker equals Flock's `SparseMatrixCircuit` fold on the explicitly lowered rows at $`d_{\rm seg}=3`$ (16 records, $`2^{16}`$ columns, dense composite built in GF(2)); `fold_split` agrees with two `fold_alpha_batched` calls. $`k_{\log}=26`$ (a full segment) is measured on the cloud machine only: prove and verify time, peak memory, proof size.
 7. **End to end** (present for mode B and for the Fp side with seed-derived matrices in `agg-piop/tests/bridge.rs`; the joint F_p and Flock run in one transcript at $`N=64`$ and $`256`$, with both final vectors against a direct computation and a single-bit flip on either side failing exactly that side, in `agg-piop/tests/joint_bridge.rs`, deviation P11; required for mode A): honest aggregates at $`N=256`$ and $`1{,}024`$ verify; a single w1Encode bit changed in one copy is rejected; the verifier's bridge-weight evaluation agrees with the prover's weight tables at the terminal points.
 
 ## 10. Decisions and open items

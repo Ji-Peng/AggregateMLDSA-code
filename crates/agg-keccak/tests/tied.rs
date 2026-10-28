@@ -1,12 +1,12 @@
-//! The tied part, tied-part proof version 5 (docs/parity-chain.md, deviation K21): the sponge
+//! The tied part (docs/parity-chain.md): the sponge
 //! instance with the virtual parity chain (one sum-check from the public final vectors to a
 //! bit-level claim on the sponge commitment). Round trips at 5 records (padded positions, `d
 //! = 3`), 64 (`d = 6`), 256 (`d = 8`), 512 (`d = 9`, one full level-1 block) and 1,024 (`d =
 //! 10`, two level-1 blocks per lane), spans, the tampering cases of docs/parity-chain.md
-//! Section 11 with their error names, the precomputed commitment (K14), and a segment split
-//! into parts whose shares XOR to the segment's `Y` (deviation K10). The bridge seed is
+//! with their error names, the precomputed commitment, and a segment split into parts whose
+//! shares XOR to the segment's `Y`. The bridge seed is
 //! derived from the event-2 commitments, so the sponge witnesses and the part's bits are
-//! fixed before the seed exists (spec Section 10, events 2 and 3). Run with `--release`.
+//! fixed before the seed exists (events 2 and 3). Run with `--release`.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -187,7 +187,7 @@ enum Tamper {
     /// The case that depends on the block geometry: a bit of the chain's copy flipped in the
     /// last level-1 block.
     Blocks,
-    /// Every case, plus the precomputed commitment (K14).
+    /// Every case, plus the precomputed commitment.
     Full,
 }
 
@@ -345,7 +345,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
     }
     let full = tamper == Tamper::Full;
     if full {
-        // The precomputed commitment (K14) gives the same proof as committing again (K7).
+        // The precomputed commitment gives the same proof as committing again.
         let mut committed = part.commit(&ctx.records);
         let data = committed.take_commit_data();
         assert!(data.is_some());
@@ -518,7 +518,7 @@ fn tied_part_round_trip_1024_two_blocks() {
 }
 
 /// A span of `segments` segments of `2^d` record positions filled in order by `n` records,
-/// proven as one tied part (deviation K16; version 5): each `Y_sigma` equals the F_p side's
+/// proven as one tied part: each `Y_sigma` equals the F_p side's
 /// walk of its segment's records (zero for an empty segment); swapped or flipped final
 /// vectors, a wrong final vector of segment 1 proven by the honest prover, a chain copy
 /// flipped in segment 1 only, another segment count and another record count are rejected.
@@ -697,7 +697,7 @@ fn tied_part_shapes() {
     ));
 }
 
-/// A segment split into parts (deviation K10): 20 live records (`d_seg = 5`) in parts of 8
+/// A segment split into parts: 20 live records (`d_seg = 5`) in parts of 8
 /// record positions (`d = 3`; 8, 8 and 4 live records). Each part commits before the seed,
 /// keeps only its commitment and commit data, proves its share, and the shares XOR to the
 /// F_p side's `Y_sigma` of the whole segment. The buffers are rebuilt for the proof
@@ -796,11 +796,11 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
 
 /// Measurement (ignored; `--ignored --nocapture`, CLMUL build): one tied part per size in
 /// `AGG_TIED_SIZES` (default `256,512,1024,2048`; an entry `n@d` is a part of `2^d` record
-/// positions with `n` live records, e.g. `8@13` for a full-segment bridge union with a
+/// positions with `n` live records, e.g. `8@13` for a full segment with a
 /// small sponge instance) and per Ligerito profile in
-/// `AGG_TIED_PROFILES` (default `fast,slim,secure`): event-2 commit, prove (the K14 path:
+/// `AGG_TIED_PROFILES` (default `fast,slim,secure`): event-2 commit, prove (with
 /// the sponge commitment's prover data kept), verify, median of `AGG_TIED_REPS` (default 3)
-/// runs after one warmup; the proof bytes split into the header and chain (version 5) and
+/// runs after one warmup; the proof bytes split into the header and chain and
 /// the sponge proof; the kept commit data's heap bytes. Matrices are derived outside the
 /// timed region.
 #[test]
@@ -814,7 +814,7 @@ fn tied_part_profiles_bytes_and_times() {
             .collect()
     };
     // `n`, `n@d` or `n@d/S` (a span of S segments of 2^d positions filled in order by n
-    // records; `8@13/4` is the bridge union of a 32K batch with a small sponge instance).
+    // records; `8@13/4` is a 32K batch's span with a small sponge instance).
     let sizes: Vec<(usize, u32, usize)> = list("AGG_TIED_SIZES", "256,512,1024,2048")
         .iter()
         .map(|s| {
@@ -935,7 +935,7 @@ fn tied_part_profiles_bytes_and_times() {
 /// proof of work at `AGG_GRIND_BITS` (default `16,20,22,24`) bits with Flock's challenger
 /// (the fused BLAKE3 PoW and squeeze its Ligerito levels use, parallel on the rayon pool),
 /// median of `AGG_TIED_REPS` (default 5) grinds from distinct transcript states, for the
-/// grinding-versus-queries trade of docs/keccak.md Section 12.
+/// grinding-versus-queries trade of docs/keccak.md.
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn ligerito_query_grinding_cost() {

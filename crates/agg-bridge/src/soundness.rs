@@ -1,10 +1,9 @@
-//! Soundness constants of the bridge (spec Section 12.1, docs/bridge.md Section 7).
+//! Soundness constants of the bridge (`docs/bridge.md`).
 //!
 //! For a nonzero difference `delta = b XOR b'` fixed before the seed, the three seeded levels
-//! all miss it with probability at most `sum_t 1 / binom(m_t, k_t)` (Lemmas 1 to 3 and the
-//! composition theorem of `ref/notes/improvements-bridge.md`), independent of `J_t`, the row
-//! weights and the number of blocks. Production: `2^-145.64 + 2^-145.64 + 2^-163.44 =
-//! 2^-144.64`; toy: `2^-10.75`.
+//! all miss it with probability at most `sum_t 1 / binom(m_t, k_t)` (derivation in
+//! `docs/bridge.md`), independent of `J_t`, the row weights and the number of blocks.
+//! Production: `2^-145.64 + 2^-145.64 + 2^-163.44 = 2^-144.64`; toy: `2^-10.75`.
 
 use crate::shape::{LevelShape, Shape};
 
@@ -18,7 +17,7 @@ pub fn log2_binomial(n: u64, k: u64) -> f64 {
         .sum()
 }
 
-/// `log2` of the per-level miss probability `1 / binom(m_t, k_t)` (Lemma 2).
+/// `log2` of the per-level miss probability `1 / binom(m_t, k_t)`.
 #[must_use]
 pub fn level_error_log2(level: &LevelShape) -> f64 {
     -log2_binomial(level.rows as u64, level.k as u64)

@@ -1,4 +1,4 @@
-//! SHAKE256 sponge circuit for `c~ = H(mu || w1Encode(w1'))` (spec Section 8).
+//! SHAKE256 sponge circuit for `c~ = H(mu || w1Encode(w1'))`.
 //!
 //! One gate instance per signature: seven chained chi-only Keccak-f[1600]
 //! permutations (rate 136 bytes, capacity 512 bits, initial state zero):

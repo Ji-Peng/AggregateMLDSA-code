@@ -1,4 +1,4 @@
-//! Native ML-DSA-44 verification exposing the intermediate values the relation needs (spec Section 3).
+//! Native ML-DSA-44 verification exposing the intermediate values the relation needs.
 //!
 //! Own implementation of the FIPS 204 verifier-side algorithms: encodings (Algorithms 16 to 23,
 //! 26 to 28), hashes (tr, mu, SampleInBall, Algorithm 29), rounding (Algorithms 36 to 40) and
@@ -23,7 +23,7 @@ pub type SmallK = [[u8; N]; K];
 // Modular helpers.
 // ---------------------------------------------------------------------------------------------
 
-/// Centered representative ctr_q(x) in [-(q-1)/2, (q-1)/2] (spec Section 1).
+/// Centered representative ctr_q(x) in [-(q-1)/2, (q-1)/2].
 #[inline]
 pub fn ctr_q(x: i64) -> i64 {
     let r = x.rem_euclid(Q);
@@ -504,7 +504,7 @@ pub fn verify_with_context(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> boo
     }
 }
 
-/// ML-DSA.Verify in pure mode with empty context (the statement of spec Section 2).
+/// ML-DSA.Verify in pure mode with empty context (the aggregated statement).
 pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     verify_with_context(pk, msg, &[], sig)
 }
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(use_hint(true, 1), 1);
         assert_eq!(use_hint(true, 0), 43);
         assert_eq!(use_hint(false, Q - 1), 0);
-        // MakeHint/UseHint correctness (FIPS 204 Section 2.4 of [6]) on random small z.
+        // MakeHint/UseHint correctness (FIPS 204 Section 2.4) on random small z.
         let mut rng = SplitMix64::new(5);
         for _ in 0..20000 {
             let r = rng.below(Q as u64) as i64;

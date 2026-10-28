@@ -1,6 +1,5 @@
 //! The production shape against the independent `agg-witness` reference, the seed-derived
-//! matrices, the weight-2 survival rate of spec Section 13 (docs/bridge.md Section 9 item 4)
-//! and the final-vector encoding.
+//! matrices, the weight-2 survival rate and the final-vector encoding.
 
 use agg_bridge::parity::{self, ParityWitness};
 use agg_bridge::seed::{derive_matrices, derive_matrix, Level};
@@ -118,7 +117,7 @@ fn production_weights_agree_with_their_extensions() {
     }
 }
 
-/// Spec Section 13: at `(m, k) = (64, 3)`, `2 x 10^6` column pairs drawn by the seed
+/// At `(m, k) = (64, 3)`, `2 x 10^6` column pairs drawn by the seed
 /// derivation; the pairs with equal row sets (expected `2 x 10^6 / binom(64, 3) = 48.0`)
 /// lie within three standard deviations, `[27, 69]`.
 #[test]

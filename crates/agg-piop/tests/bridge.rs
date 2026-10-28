@@ -1,5 +1,5 @@
-//! The Fp side of the parity bridge inside the 256-signature prover run (docs/bridge.md
-//! Sections 4, 6 and 9 item 7): matrices derived from the transcript's `sd` by the shared
+//! The Fp side of the parity bridge inside the 256-signature prover run (`docs/bridge.md`):
+//! matrices derived from the transcript's `sd` by the shared
 //! `agg_bridge::seed` on both sides, the honest round-2 tables against the independent
 //! `agg-witness` reference and the GF(2) side, the verifier's bridge weights against the
 //! prover's weight tables at the transcript's terminal points, and bridge tampering that the
@@ -245,10 +245,10 @@ fn bridge_tampering_is_rejected_at_stage_one() {
         };
         assert_eq!(run(&main, None), None);
 
-        // A flipped final-vector bit, committed through the transcript: level3 (7.3) breaks.
+        // A flipped final-vector bit, committed through the transcript: level3 breaks.
         let flip_y: BridgeTamper<'_> = &|_, tables| tables.public_y_mut()[11] ^= 1;
         assert_eq!(run(&main, Some(flip_y)), Some(1));
-        // A flipped level-2 parity: level2 (7.2) and level3 break.
+        // A flipped level-2 parity: level2 and level3 break.
         let flip_y2: BridgeTamper<'_> = &|_, tables| tables.parities_mut()[2][5] ^= 1;
         assert_eq!(run(&main, Some(flip_y2)), Some(1));
         // A level-1 carry moved inside T_16 (m recounted): y^(1) leaves {0, 1} (bool_y1).

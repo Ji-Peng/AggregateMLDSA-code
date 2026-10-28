@@ -1,33 +1,33 @@
-//! The aggregate verifier (spec Section 11): parse, precompute the light public data,
-//! replay the transcript, run the Keccak side's checks, verify the three stages with the
-//! public weights, stream the public matrices once, and verify the Akita opening. Every
-//! step is timed ([`VerifyTimings`]); [`verify_timed`] returns the outcome with the timings.
+//! The aggregate verifier: parse, precompute the light public data, replay the transcript,
+//! run the Keccak side's checks, verify the three stages with the public weights, stream the
+//! public matrices once, and verify the Akita opening. Every step is timed
+//! ([`VerifyTimings`]); [`verify_timed`] returns the outcome with the timings.
 //!
-//! Steps and their spec items:
+//! Steps:
 //!
-//! | Step | Spec 11 | Work |
-//! | --- | --- | --- |
-//! | `parse` | 1 | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
-//! | `public_data` | 2 | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
-//! | `transcript` | 3 | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
-//! | `matrices` | 3 | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) is spec 9.1) |
-//! | `keccak` | 3 | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks), on the proof items the join absorbs later |
-//! | `lookup` | 4 | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
-//! | `prestage` | 4 | `tau`, `Y(tau_3)`, pre-stage claims |
-//! | `stage1`, `stage2` | 5, 6 | rounds and terminal checks with `w_2, w_3, w_1` and the leaf predicates |
-//! | `stage3_rounds` | 6 | stage-3 rounds and terminal claims, ring claim deferred |
-//! | `public_pass` | 6 | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
-//! | `stage3_terminal` | 7 | the batched stage-3 terminal check; the join absorbs the proof items |
-//! | `bits` | 7 | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
-//! | `opening` | 7 | the batched Akita opening of the 38 claims |
+//! | Step | Work |
+//! | --- | --- |
+//! | `parse` | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
+//! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
+//! | `transcript` | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
+//! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
+//! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks), on the proof items the join absorbs later |
+//! | `lookup` | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
+//! | `prestage` | `tau`, `Y(tau_3)`, pre-stage claims |
+//! | `stage1`, `stage2` | rounds and terminal checks with `w_2, w_3, w_1` and the leaf predicates |
+//! | `stage3_rounds` | stage-3 rounds and terminal claims, ring claim deferred |
+//! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
+//! | `stage3_terminal` | the batched stage-3 terminal check; the join absorbs the proof items |
+//! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
+//! | `opening` | the batched Akita opening of the 38 claims |
 //!
-//! Before step 1 the verifier checks its own configuration ([`check_configuration`]) and
+//! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
 //! [`KeccakVerifier`] for another Flock profile than the requested one; mode A (profiles
-//! `Fast`, `LaBinius`) without the seed-derived matrices of spec 9.1 (the bound of spec 9.4
+//! `Fast`, `LaBinius`) without the seed-derived matrices (the bridge's soundness bound
 //! needs `M_t` sampled after `G_main` and the Flock commitments are fixed); and profile 0
 //! (no Keccak argument, `c~_i` not tied to the bits) outside unit tests and the
-//! `test-hooks` feature (`docs/deviations.md` P4).
+//! `test-hooks` feature (`docs/deviations.md`).
 
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,7 @@ use crate::transcript::{
 use crate::wire::{unpack_final_vector, AggregateProof, WireError};
 use crate::{stage1, stage2, stage3, BaseField, OpeningField as E};
 
-/// What the Keccak side sees of one segment (spec Section 11 step 3).
+/// What the Keccak side sees of one segment.
 pub struct SegmentContext<'a> {
     /// Segment index.
     pub sigma: usize,
@@ -68,7 +68,7 @@ pub struct SegmentContext<'a> {
     /// The challenger seed `fs_sigma` (event 5).
     pub seed: &'a [u8; 32],
     /// The bridge seed `sd` (event 3), which the bridge slot's circuit digest binds
-    /// (docs/bridge.md Section 5, `docs/deviations.md` P11).
+    /// (`docs/bridge.md`, `docs/deviations.md`).
     pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
     pub mu: &'a [[u8; TR_BYTES]],
@@ -79,7 +79,7 @@ pub struct SegmentContext<'a> {
     /// The segment's event-6 share item.
     pub shares: &'a [u8],
     /// The digest of the event-6 record (`crate::transcript::flock_record_digest`), which
-    /// the sub-proofs' challengers bind (deviation K22).
+    /// the sub-proofs' challengers bind.
     pub record: &'a [u8; 32],
     /// The segment's proof item (the join event).
     pub proof: &'a [u8],
@@ -99,13 +99,13 @@ pub struct BitsContext<'a> {
     pub claims: [E; W1_BITS],
 }
 
-/// The Keccak argument's verifier side (spec Section 8).
+/// The Keccak argument's verifier side.
 pub trait KeccakVerifier {
     /// The Flock profile this side verifies (bound in event 0). [`verify`] refuses to run
     /// with a different requested profile.
     fn profile(&self) -> FlockProfile;
 
-    /// The Keccak side's part of the proof-of-work plan (`docs/soundness.md` Section 6.4)
+    /// The Keccak side's part of the proof-of-work plan (`docs/soundness.md`)
     /// from the batch geometry and the `S` event-2 items (the tied parts' geometry), before
     /// event 0; `None` refuses the items. The default (no tied parts) fits a side without
     /// Flock sub-proofs.
@@ -152,7 +152,7 @@ pub enum ConfigurationError {
         /// [`KeccakVerifier::profile`].
         keccak: FlockProfile,
     },
-    /// Mode A without the seed-derived matrices of spec 9.1
+    /// Mode A without the seed-derived matrices
     /// ([`BridgeDerivation::seed_derived`] is false).
     UnseededMatrices(FlockProfile),
     /// Flock profile 0 (no Keccak argument) outside unit tests and the `test-hooks` feature.
@@ -220,7 +220,7 @@ pub enum VerifyError {
     /// Malformed proof bytes.
     Wire(WireError),
     /// The proof's relation byte differs from the relation the caller expects (checked
-    /// before event 0; `docs/h-exact.md` 1.3: a proof of a weaker relation is no proof of
+    /// before event 0: a proof of a weaker relation is no proof of
     /// the stronger one, and the relation is never trusted from the proof).
     Relation {
         /// The caller's relation.
@@ -466,8 +466,8 @@ fn run(
     check_configuration(bridge, keccak, flock).map_err(VerifyError::Configuration)?;
     let mut clock = Lap(Instant::now());
 
-    // Step 1: parse; the header's relation must be the caller's (docs/h-exact.md 1.3), and
-    // the manifest (event 0, the catalog row, the plan) comes from the caller's relation.
+    // Parse: the header's relation must be the caller's, and the manifest (event 0, the
+    // catalog row, the plan) comes from the caller's relation.
     let proof = AggregateProof::from_bytes(proof_bytes)?;
     if proof.relation != relation {
         return Err(VerifyError::Relation {
@@ -486,7 +486,7 @@ fn run(
     let plan = pcs.plan();
     timings.parse = clock.lap();
 
-    // Step 2: light public data and the record binding.
+    // Light public data and the record binding.
     let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
         .iter()
         .zip(&proof.c_tilde)
@@ -500,8 +500,8 @@ fn run(
     let digest = public_records_binding(&inputs);
     timings.public_data = clock.lap();
 
-    // Step 3: events 0 to 6; event 0 binds the proof-of-work plan, derived from the public
-    // geometry and the tied parts named by the event-2 items (docs/soundness.md 6.4).
+    // Events 0 to 6; event 0 binds the proof-of-work plan, derived from the public
+    // geometry and the tied parts named by the event-2 items.
     let keccak_plan = keccak
         .plan(&geometry, &proof.flock_commitments)
         .ok_or(VerifyError::Plan)?;
@@ -543,7 +543,7 @@ fn run(
     transcript.absorb(FINAL_VECTORS_SITE, segments, &proof.final_vectors.concat())?;
     transcript.absorb_items(FLOCK_SHARES_SITE, &proof.flock_shares)?;
     let flock_record = flock_record_digest(&proof.final_vectors, &proof.flock_shares);
-    // The public table Y on D_3 (Y_sigma[rho_3] at rho_3 + 2^12 sigma), docs/bridge.md 6.
+    // The public table Y on D_3 (Y_sigma[rho_3] at rho_3 + 2^12 sigma).
     let final_bits: Vec<Vec<u8>> = proof.final_vectors.iter().map(unpack_final_vector).collect();
     let y_table: Vec<u8> = final_bits.concat();
     timings.transcript += clock.lap();
@@ -574,7 +574,7 @@ fn run(
     }
     timings.keccak = clock.lap();
 
-    // Steps 4 to 7: the lookup, tau, the pre-stage claims and the stages; the public pass
+    // The lookup, tau, the pre-stage claims and the stages; the public pass
     // runs inside stage 3 once r^(3) is known.
     let piop = PiopProof {
         lookup: proof.lookup.clone(),
@@ -614,7 +614,7 @@ fn run(
     let (_, stage3, pi_m) = verified.outcome?;
     let expanded_keys = pass_result.map_or(0, |pass| pass.expanded);
 
-    // The join (deviation K22): the Flock proofs, checked above, absorbed after the stage-3
+    // The join: the Flock proofs, checked above, absorbed after the stage-3
     // claims and before the PCS session digest.
     transcript.absorb_items(FLOCK_PROOFS_SITE, &proof.flock_proofs)?;
 
@@ -849,6 +849,6 @@ mod tests {
         let fast = AcceptAll(FlockProfile::Fast);
         let report = verify_timed(&[], &[], &fixed, &fast, FlockProfile::Fast, Relation::Hu, None);
         assert!(matches!(report.outcome, Err(VerifyError::Configuration(_))));
-        assert_eq!(report.timings.parse, Duration::ZERO, "refused before step 1");
+        assert_eq!(report.timings.parse, Duration::ZERO, "refused before the parse");
     }
 }

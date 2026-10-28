@@ -1,15 +1,15 @@
-//! The verifier's streamed public data (spec Section 11, steps 2 and 6).
+//! The verifier's streamed public data.
 //!
-//! Step 2 keeps per live record only what the transcript and the Keccak side need before
-//! the sum-checks: `pkDecode` (`rho`, `t1`), `tr = H(pk)` once per distinct key, `mu` and
-//! `c = SampleInBall(c~)`. Nothing of size `k l 256` is stored: `A_i` and `T_i` are formed
-//! inside the one pass of step 6, after the stage-3 rounds have fixed `r^(3)`
+//! The light precomputation keeps per live record only what the transcript and the Keccak
+//! side need before the sum-checks: `pkDecode` (`rho`, `t1`), `tr = H(pk)` once per distinct
+//! key, `mu` and `c = SampleInBall(c~)`. Nothing of size `k l 256` is stored: `A_i` and
+//! `T_i` are formed inside the one public pass, after the stage-3 rounds have fixed `r^(3)`
 //! ([`StreamedPublic::pass`]):
 //!
 //! - `T(r^(2)) = sum_i eq(r2_sig, i) sum_{rho, j} eq(r2_pos, (j, rho)) T_i[rho][j]`, with
 //!   `T_i = 2^d (c_i * t1)` recomputed from the `tau` sparse entries of `c_i`
 //!   ([`sparse_t`], `k tau 256` integer additions) and dropped after use;
-//! - `w_A(r^(3))` of (7.10): per distinct key the expansion `A = ctr_q(NTT^{-1}(ExpandA(rho)))`
+//! - `w_A(r^(3))`: per distinct key the expansion `A = ctr_q(NTT^{-1}(ExpandA(rho)))`
 //!   (or the cached one), its `k l` inner products with the correlation vector `Lambda`
 //!   ([`eq_correlation`]), weighted by `sum_{i of the key} eq(r2_sig, i) eq(r3_sig, i)`.
 //!
@@ -40,7 +40,7 @@ use crate::OpeningField as E;
 /// A cached key holds only the cache entry, whose `t1` and `tr` were derived from the same
 /// encoded key (the cache is keyed by the full `pk`; every insertion path decodes `t1` from
 /// `pk`, and the cache file recomputes it on load), so the verifier neither decodes nor
-/// copies the key again: at 32K keys the copies were about 110 MB of fresh memory per run.
+/// copies the key again: at 32K keys the copies would be about 110 MB of fresh memory.
 #[derive(Clone, Debug)]
 pub struct StreamKey {
     source: KeySource,
@@ -109,7 +109,7 @@ pub struct StreamRecord {
     challenge: Challenge,
 }
 
-/// What the pass of step 6 returns.
+/// What the public pass returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublicPass {
     /// `T(r^(2))`.
@@ -185,9 +185,9 @@ fn distinct_keys<'a>(inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])]) -> Disti
 }
 
 impl StreamedPublic {
-    /// Step 2 from `(pk, M, c~)` triples (pure mode, empty context): the distinct keys by
-    /// full `pk` bytes ([`distinct_keys`]), `pkDecode` and `tr` per distinct uncached key (a
-    /// cached key reuses its entry), `mu` and `SampleInBall` per record.
+    /// The light precomputation from `(pk, M, c~)` triples (pure mode, empty context): the
+    /// distinct keys by full `pk` bytes ([`distinct_keys`]), `pkDecode` and `tr` per distinct
+    /// uncached key (a cached key reuses its entry), `mu` and `SampleInBall` per record.
     pub fn prepare(
         inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
         cache: Option<&KeyCache>,
@@ -256,7 +256,7 @@ impl StreamedPublic {
         Box::new(sparse_t(&record.challenge, self.keys[record.key].t1()))
     }
 
-    /// Step 6: `T(r^(2))` and `w_A(r^(3))` in one streamed pass (module docs). New
+    /// `T(r^(2))` and `w_A(r^(3))` in one streamed pass (module docs). New
     /// expansions are added to `cache` when one is given.
     pub fn pass(&self, r2: &[E], r3: &[E], cache: Option<&mut KeyCache>) -> PublicPass {
         let d_main = self.geom.d_main() as usize;
@@ -339,7 +339,7 @@ impl StreamedPublic {
 }
 
 /// `sum_{rho, s} eq(r2_row, rho) eq(r3_col, s) <A[rho][s], Lambda>` (the per-key factor of
-/// (7.10)), with `entry_weights[rho][s] = eq(r2_row, rho) eq(r3_col, s)`.
+/// `w_A(r^(3))`), with `entry_weights[rho][s] = eq(r2_row, rho) eq(r3_col, s)`.
 ///
 /// `A` entries are centered mod `q`, `|A| <= (q - 1) / 2 < 2^22`, so each of the `k l` inner
 /// products of 256 terms is accumulated exactly per base coordinate of `Lambda` and reduced
@@ -373,7 +373,7 @@ mod tests {
 
     use crate::BaseField;
 
-    // The pre-kernel implementations (main at 6803ce5), kept as references.
+    // Plain implementations of the kernels, kept as references.
 
     fn sparse_t_reference(c: &Challenge, t1: &[[u16; N]; K]) -> crate::public_data::PublicT {
         let mut out = [[0_i32; N]; K];
@@ -664,9 +664,9 @@ mod tests {
         }
     }
 
-    /// Timings of step 2 of the verifier on 8,192 synthetic records with distinct keys, all
-    /// threads (direction only; `cargo test --release -p agg-piop --lib prepare_profile --
-    /// --ignored --nocapture` on CPUs 0,1,3-15).
+    /// Timings of the verifier's light precomputation on 8,192 synthetic records with
+    /// distinct keys, all threads (direction only; `cargo test --release -p agg-piop --lib
+    /// prepare_profile -- --ignored --nocapture` on CPUs 0,1,3-15).
     #[test]
     #[ignore = "microbenchmark"]
     fn prepare_profile() {

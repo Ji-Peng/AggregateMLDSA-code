@@ -1,9 +1,8 @@
-//! Mode B end to end (spec Sections 11, 13, 14; lookup layout L16): `prove_mode_b` /
-//! `verify_mode_b` round trips at 64, 256 and 1,024 signatures with the seed-derived
-//! matrices of spec 9.1
-//! (`SeededMatrices`), the proof size and the verifier's step timings printed, corrupted
-//! aggregates rejected, and every witness tampering of `tests/stages.rs` pushed through the
-//! full prover (unchecked stages) and rejected by the verifier.
+//! Mode B end to end: `prove_mode_b` / `verify_mode_b` round trips at 64, 256 and 1,024
+//! signatures with the seed-derived matrices (`SeededMatrices`), the proof size and the
+//! verifier's step timings printed, corrupted aggregates rejected, and every witness
+//! tampering of `tests/stages.rs` pushed through the full prover (unchecked stages) and
+//! rejected by the verifier.
 #![allow(clippy::needless_range_loop)]
 
 mod common;
@@ -109,7 +108,7 @@ fn report_line(label: &str, report: &VerifyReport) {
     );
 }
 
-/// An honest round trip with the matrices derived from `sd` (spec 9.1): proof size,
+/// An honest round trip with the matrices derived from `sd`: proof size,
 /// verifier timings uncached and cached, and the public bits satisfying the hash relation.
 fn round_trip(
     n_own: usize,
@@ -267,7 +266,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             VerifyError::Opening(_)
         ));
 
-        // Work nonces (docs/soundness.md Sections 6.1, 6.2): a changed nonce at one site of
+        // Work nonces (`docs/soundness.md`): a changed nonce at one site of
         // every class is rejected (the prover's nonce is the smallest passing one, so a
         // smaller one fails the predicate; from 0 the next one changes the challenge).
         let manifest = CommitmentManifest::for_batch(256).unwrap();
@@ -400,7 +399,7 @@ fn mode_b_round_trip_at_64_signatures() {
     });
 }
 
-/// Relation H-exact (`docs/h-exact.md` 6.2 and 6.4, protocol level): honest round trips at
+/// Relation H-exact (`docs/h-exact.md`, protocol level): honest round trips at
 /// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
 /// proof verified as H-u and an H-u proof verified as H-exact are rejected before event 0,
 /// a rewritten relation byte fails, and an unknown relation byte is malformed.
@@ -477,7 +476,7 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
     });
 }
 
-/// Relation H-FIPS (`docs/h-exact.md` Section 10.7, protocol level): honest round trips at
+/// Relation H-FIPS (`docs/h-exact.md`, protocol level): honest round trips at
 /// 1, 64 and 256 records (the 256-record batch includes the synthetic weight-80 records with
 /// the coefficient `w' = q - gamma2, h = 0`), the claim counts, and cross-relation
 /// verification: an H-FIPS proof verified as H-u or H-exact and an H-exact proof verified as
@@ -693,7 +692,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         // interval, so no aggregate exists to verify. The verifier's rejection of a
         // looked-up value outside T_16 is tested at the PIOP level (tests/stages.rs,
         // without commitments): a cheating prover's commitment to such a value is bound
-        // only by the lookup, not by this admission check (spec Section 12.2).
+        // only by the lookup, not by this admission check.
         let wide = tampered(&|m| *m.wide_cell_mut(&manifest, Column::U_LO, x) = LOOKUP_SHIFT);
         let error = prove_tampered(&fixture, &bridge, &wide, None)
             .expect_err("Akita refuses a stored value outside the width-16 interval");
@@ -704,7 +703,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
             "{error}"
         );
         // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = 3
-        // is in relaxed H's base-8 alphabet, not in H-u's base-6 one).
+        // is in a base-8 alphabet, not in H-u's base-6 one).
         expect(
             "base-4 digit",
             &tampered(&|m| *cell(&manifest, m, Column::Z_HI, x) = 3),
@@ -775,7 +774,7 @@ impl KeccakVerifier for AsProfile {
     }
 }
 
-/// The projection predicate alone (check 4), without the direct bit check (check 5).
+/// The projection predicate alone, without the direct bit check (`check_bits`).
 struct ProjectionOnly;
 
 impl KeccakVerifier for ProjectionOnly {
@@ -824,7 +823,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
         // Fixed matrices with two equal M_1 columns let a prover flip b_0 at both positions
         // without changing any parity, and u absorbs the change of w1' in the ring identity:
         // every PIOP check passes, the projection of the public bits matches, and only the
-        // direct check of b_t(r^(3)) against the public bits rejects (deviation P9).
+        // direct check of b_t(r^(3)) against the public bits rejects.
         let fixture = Fixture::new(0x5b, 20, 4);
         let inputs = fixture.inputs();
         let signatures = fixture.signatures();

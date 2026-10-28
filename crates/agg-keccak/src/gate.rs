@@ -1,4 +1,4 @@
-//! The chi-only Keccak-f[1600] gate and chains of it (spec Section 8).
+//! The chi-only Keccak-f[1600] gate and chains of it.
 //!
 //! A gate instance (one row of the Flock union, one `A_0` block) proves a chain
 //! of `P` Keccak-f permutations whose input states are absorbed from input
@@ -22,9 +22,8 @@
 //!
 //! The constraint matrices are dense once the implicit states are substituted,
 //! so they are never materialized: [`ChainGate`] implements Flock's
-//! [`LincheckCircuit`] with the backward transpose walk of the retired
-//! `c2d0c24` encoder, `K_r = phi^T(K_{r+1} + W_r)`, extended across the
-//! permutation boundaries of the chain.
+//! [`LincheckCircuit`] with a backward transpose walk, `K_r = phi^T(K_{r+1} + W_r)`,
+//! extended across the permutation boundaries of the chain.
 
 use flock_core::{
     lincheck::LincheckCircuit,
@@ -145,7 +144,7 @@ impl GateLayout {
         // The chi words start at the next 8-word (1,024-bit) boundary after the constant,
         // so the non-chi columns `[0, 64 t_base)` are whole 8-word blocks and a gate's
         // inputs, outputs and constant can be addressed as aligned word subcubes (the
-        // tied part's evaluation claims, `crate::tied`, docs/keccak.md Section 9).
+        // tied part's evaluation claims, `crate::tied`, docs/keccak.md).
         let chi_col = (const_col / 128 + 1).next_multiple_of(8) * 128;
         let t_base = chi_col / 64;
         let useful_bits = 64 * (t_base + spec.n_perms() * spec.n_rounds * N_LANES);

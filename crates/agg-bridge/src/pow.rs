@@ -1,19 +1,18 @@
-//! Proof-of-work arithmetic of the 128-bit schedule (`docs/soundness.md` Sections 1, 3.6
-//! and 6), shared by the PIOP plan (`agg-piop`) and the tie site of a tied part
-//! (`agg-keccak`).
+//! Proof-of-work arithmetic of the 128-bit schedule (`docs/soundness.md`), shared by the PIOP
+//! plan (`agg-piop`) and the tie site of a tied part (`agg-keccak`).
 //!
 //! A site with assigned bound `e` gets the difficulty `g = min{g >= 0 : 2^128 e <= 2^g}`
-//! (Aerie Eq. (17)) computed with the exact field size, and a nonce of `g + 7` bits when
+//! (Aerie) computed with the exact field size, and a nonce of `g + 7` bits when
 //! `g > 0` (none when `g = 0`). [`grind_bits_k`] is the rule for the PIOP field
 //! `K = F_{p^2}`, `p = 2^64 - 59` (so even `1/|K|` needs one bit, `p^2 < 2^128`);
 //! [`grind_bits_f128`] the rule for `GF(2^128)` (so `1/2^128` needs none). The sites of a
-//! tied part (tied-part proof version 5, `docs/parity-chain.md` Section 8: the tie site of
+//! tied part (tied-part proof version 5, `docs/parity-chain.md`: the tie site of
 //! the public claim, the `eq_Y` site and one site per parity-chain round) carry the
 //! Johnson-list size of the sponge commitment ([`list_size`], [`part_work`]).
 
 /// Security target in bits.
 pub const TARGET_BITS: u32 = 128;
-/// Nonce bits beyond the difficulty (Aerie C.1, Akita Eq. (146)): honest search fails with
+/// Nonce bits beyond the difficulty (Aerie, Akita): honest search fails with
 /// probability at most `exp(-2^7)` per site.
 pub const NONCE_SLACK_BITS: u8 = 7;
 /// Largest difficulty a site may carry (Akita's transition cap; the 32-bit nonce must hold
@@ -68,7 +67,7 @@ pub const fn nonce_bits(g: u8) -> u8 {
     }
 }
 
-/// `floor(L_max)`, `L_max = 1 / (2 eta sqrt(rho_0))` (Flock Eq. (10)) at `eta = 1/50` and
+/// `floor(L_max)`, `L_max = 1 / (2 eta sqrt(rho_0))` (Flock) at `eta = 1/50` and
 /// level-0 rate `rho_0 = 2^-rate_log`: `floor(25 * 2^(rate_log / 2))` = 35, 50, 70 for
 /// `rate_log` = 1, 2, 3 (Ligerito `Fast`, `Slim`, `Slim8`).
 #[must_use]
@@ -76,8 +75,7 @@ pub fn list_size(rate_log: u32) -> u64 {
     (625_u64 << rate_log).isqrt()
 }
 
-/// The public geometry of one tied part that its tie bound depends on
-/// (`docs/soundness.md` Section 3.6).
+/// The public geometry of one tied part that its tie bound depends on (`docs/soundness.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TieGeometry {
     /// `log2` of the record positions per segment of the part.
@@ -101,7 +99,7 @@ const LANE_VARS: usize = 3;
 
 /// The assigned numerator of the tie site (over `2^128`) with list size `list` for the
 /// sponge commitment: `L (nu_s + 3)`, the public claim's free coordinates (tied-part proof
-/// version 5; version 4 also priced ties 1 and 2 and the output claim of the bridge union).
+/// version 5).
 #[must_use]
 pub fn tie_numerator(list: u64, geo: &TieGeometry) -> u64 {
     list * (geo.nu_s as u64 + 3)
@@ -199,7 +197,7 @@ mod tests {
 
     #[test]
     fn tie_bounds_match_the_soundness_doc() {
-        // docs/soundness.md Sections 3.6 and 10 (script output), tied-part proof version 5.
+        // The script output of docs/soundness.md, tied-part proof version 5.
         assert_eq!([1, 2, 3].map(list_size), [35, 50, 70]);
         let four = TieGeometry {
             d: 13,

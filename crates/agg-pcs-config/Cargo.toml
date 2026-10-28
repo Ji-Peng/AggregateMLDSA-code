@@ -10,7 +10,7 @@ publish.workspace = true
 [features]
 # The generated fold-schedule catalog under `src/schedules/`. Akita resolves
 # schedules only from generated catalogs, so the feature is on by default;
-# turn it off only while regenerating the catalog (docs/pcs-config.md).
+# turn it off only while regenerating the catalog (`docs/pcs-config.md`).
 default = ["schedules", "parallel"]
 schedules = []
 parallel = [

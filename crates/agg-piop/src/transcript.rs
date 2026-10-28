@@ -1,4 +1,4 @@
-//! Native Spongefish transcript and the version-0 PIOP event registry (spec Section 10).
+//! Native Spongefish transcript and the PIOP event registry.
 //!
 //! Exactly the construction of `aerie-falcon/src/protocol/transcript.rs` with our own
 //! domain: backend Spongefish `Blake2b512` (`akita_transcript::TranscriptSponge`), protocol
@@ -10,14 +10,14 @@
 //! `K`. The ordered registry rejects a missing, extra or out-of-order event before it
 //! reaches the sponge. Prover and verifier run the same state machine.
 //!
-//! Grinding (wire version 2, `docs/soundness.md` Section 6.1): every field-challenge event
+//! Grinding (`docs/soundness.md`): every field-challenge event
 //! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
 //! public message `LE32(v)`; the 32-byte predicate squeezed next must have its low `g` bits
 //! zero (Akita's `grinding_predicate_accepts`), and the challenge is squeezed after it from
 //! the same stream. The prover searches `v = 0, 1, ..` and records the winner in the packed
 //! nonce stream ([`crate::pow::WorkWriter`]); the verifier reads and checks it
-//! ([`crate::pow::WorkReader`]). The seeds `sd`, `fs_sigma` and the PCS export carry no work
-//! (`docs/soundness.md` Section 3.5).
+//! ([`crate::pow::WorkReader`]). The seeds `sd`, `fs_sigma` and the PCS export carry no
+//! work.
 
 use std::num::NonZeroU8;
 
@@ -39,12 +39,11 @@ pub const PIOP_PROTOCOL_TAG: [u8; 64] = protocol_tag();
 pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 /// cSHAKE256 customization of the instance digest.
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
-/// Stage message degrees (spec Section 7.1): the same in relations H-u and H-exact (stage 2
-/// has degree 4 in both, `docs/h-exact.md` 3.5).
+/// Stage message degrees: the same in relations H-u and H-exact (stage 2 has degree 4 in
+/// both).
 pub const STAGE_DEGREES: [usize; 3] = [4, 4, 3];
 
-/// Batching coefficients per stage (spec Section 7, lookup layout L16): `(26, 8, 44)` under
-/// H-u, `(26, 7, 45)` under H-exact (`docs/h-exact.md` 3.5).
+/// Batching coefficients per stage: `(26, 8, 44)` under H-u, `(26, 7, 45)` under H-exact.
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -63,9 +62,9 @@ pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
         crate::claims::Stage3Claims::len(manifest),
     ]
 }
-/// Pre-stage claims (spec Section 7.2).
+/// Pre-stage claims.
 pub const PRESTAGE_CLAIMS: usize = 13;
-/// Level-1 carry claims before stage 2 (spec Section 7.4).
+/// Level-1 carry claims before stage 2.
 pub const KAPPA1_CLAIMS: usize = 6;
 /// Multiplicity-digit claims after the lookup.
 pub const MULTIPLICITY_CLAIMS: usize = agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
@@ -81,9 +80,9 @@ pub const FINAL_VECTORS_SITE: &str = "agg-mldsa/v1/flock/final-vectors";
 /// Event 6 (after the final vectors): the `S` framed share items of the Keccak side (empty
 /// for a span or a segment of one tied part; mode B: empty).
 pub const FLOCK_SHARES_SITE: &str = "agg-mldsa/v1/flock/shares";
-/// The join event (fork-join transcript, deviation K22): the `S` framed proof items of the
-/// Keccak side, absorbed after the stage-3 terminal claims and before the PCS session
-/// export, so the Flock sub-proofs no longer precede the lookup challenge `X`.
+/// The join event (fork-join transcript): the `S` framed proof items of the Keccak side,
+/// absorbed after the stage-3 terminal claims and before the PCS session export, so the
+/// Flock sub-proofs follow the lookup challenge `X`.
 pub const FLOCK_PROOFS_SITE: &str = "agg-mldsa/v1/flock/proofs";
 /// cSHAKE256 customization of the digest of the event-6 record ([`flock_record_digest`]).
 pub const FLOCK_RECORD_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/flock/record";
@@ -218,7 +217,7 @@ struct RegistryEvent {
     kind: u8,
     atoms: usize,
     size: PayloadSize,
-    /// The protected site of a field-challenge event (`docs/soundness.md` Section 3.1).
+    /// The protected site of a field-challenge event (`docs/soundness.md`).
     work: Option<WorkSite>,
 }
 
@@ -250,7 +249,7 @@ impl Builder {
     }
 }
 
-/// The ordered event list of one batch (spec Section 10).
+/// The ordered event list of one batch.
 #[derive(Clone, Debug)]
 pub struct Registry {
     events: Vec<RegistryEvent>,
@@ -258,7 +257,7 @@ pub struct Registry {
 
 impl Registry {
     /// The registry of `manifest`, with the difficulty of every field-challenge site
-    /// (`docs/soundness.md` Section 3.1: Aerie's assigned bounds, a vector of `l`
+    /// (`docs/soundness.md`: Aerie's assigned bounds, a vector of `l`
     /// coefficients `l / |K|`, a round its degree over `|K|`, a merge `1 / |K|`, the point
     /// `tau` `d_main / |K|`; `X` carries none, its joint bound is `((L + M - 1) / |K|)^2`).
     #[must_use]
@@ -290,7 +289,7 @@ impl Registry {
             PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
         );
         b.push(FLOCK_SHARES_SITE, PROOF_KIND, segments, PayloadSize::Variable);
-        // The lookup (docs/lookup.md Section 1): X, layer 1, mu_1, the sessions, then the
+        // The lookup: X, layer 1, mu_1, the sessions, then the
         // multiplicity-digit claims.
         let shape = manifest.lookup_shape();
         let challenges = shape.challenges;
@@ -359,7 +358,7 @@ impl Registry {
                 PayloadSize::Exact(16 * terminals),
             );
         }
-        // The join (deviation K22): the Keccak side's proofs, after every PIOP challenge and
+        // The join: the Keccak side's proofs, after every PIOP challenge and
         // before the PCS session digest, which therefore binds every Flock byte.
         b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
@@ -404,8 +403,7 @@ pub fn cshake256(customization: &[u8], data: &[u8], out_len: usize) -> Vec<u8> {
 /// the `S` share items framed as absorbed (`LE64(len) || bytes`), cSHAKE256 with
 /// customization [`FLOCK_RECORD_CUSTOMIZATION`]. The Keccak side binds it into every tied
 /// part's challengers (mode A: through the part and span seeds), so that every Flock
-/// challenge address encodes the input of the lookup challenge `X` (`docs/soundness.md`
-/// 12.2, Lemma 12.3 (a); deviation K22).
+/// challenge address encodes the input of the lookup challenge `X` (`docs/soundness.md`).
 #[must_use]
 pub fn flock_record_digest(final_vectors: &[[u8; FINAL_VECTOR_BYTES]], shares: &[Vec<u8>]) -> [u8; 32] {
     let mut data = Vec::with_capacity(8 + FINAL_VECTOR_BYTES * final_vectors.len());
@@ -507,7 +505,7 @@ fn preview(sponge: &TranscriptSponge, nonce: u32) -> (TranscriptSponge, [u8; GRI
     (sponge, predicate)
 }
 
-/// Bytes of the packed PIOP nonce stream of `manifest` (`docs/soundness.md` Section 6.2).
+/// Bytes of the packed PIOP nonce stream of `manifest` (`docs/soundness.md`).
 #[must_use]
 pub fn work_bytes(manifest: &CommitmentManifest) -> usize {
     Registry::new(manifest).work_bits().div_ceil(8)
@@ -567,7 +565,7 @@ impl Transcript {
         }
     }
 
-    /// The work of site `site` at registry event `index` (`docs/soundness.md` Section 6.1).
+    /// The work of site `site` at registry event `index` (`docs/soundness.md`).
     fn grind(&mut self, index: usize, site: WorkSite) -> Result<(), TranscriptError> {
         let Some(bits) = NonZeroU8::new(site.bits) else {
             return Ok(());
@@ -881,7 +879,7 @@ mod tests {
 
     #[test]
     fn registry_difficulties_follow_the_soundness_doc() {
-        // docs/soundness.md 3.1 at N = 100 (N* = 128): d_main = 17.
+        // The difficulties of `docs/soundness.md` at N = 100 (N* = 128): d_main = 17.
         let registry = Registry::new(&manifest());
         let sites: Vec<WorkSite> = registry.work_sites().collect();
         assert_eq!(sites.len(), 264);
@@ -903,10 +901,10 @@ mod tests {
             assert!(rounds.iter().all(|s| s.bits == bits));
             assert_eq!(rounds[16].j, 16);
         }
-        // 2,442 stream bits at N* = 2^7 (docs/soundness.md Section 10).
+        // 2,442 stream bits at N* = 2^7.
         assert_eq!(registry.work_bits(), 2442);
         assert_eq!(work_bytes(&manifest()), 306);
-        // H-exact (docs/h-exact.md 3.7): gamma^(2) has 7 coefficients (g = 3), gamma^(3) 45
+        // H-exact: gamma^(2) has 7 coefficients (g = 3), gamma^(3) 45
         // (g = 6), the rounds keep their difficulties; one stream bit fewer.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
         assert_eq!(stage_gammas(&exact), [26, 7, 45]);
@@ -922,7 +920,7 @@ mod tests {
         assert_eq!(gammas, [5, 3, 6]);
         assert_eq!(exact_registry.work_bits(), 2441);
         assert_eq!(work_bytes(&exact), 306);
-        // H-FIPS (docs/h-exact.md 10.7): gamma^(2) has 7 coefficients (def_y1 and F3, g = 3),
+        // H-FIPS: gamma^(2) has 7 coefficients (def_y1 and F3, g = 3),
         // gamma^(3) 51 (g = 6); stage-2 terminals add delta and e, stage 3 opens 36 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
         assert_eq!(stage_gammas(&fips), [26, 7, 51]);

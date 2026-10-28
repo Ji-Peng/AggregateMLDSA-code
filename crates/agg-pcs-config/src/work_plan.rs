@@ -32,7 +32,7 @@ pub const MAX_RECORDS: usize = 1 << MAX_D_SIG;
 pub enum PlanError {
     /// `N = 0`.
     NoRecords,
-    /// `N > 2^15` (spec Section 1: the verifier MUST reject).
+    /// `N > 2^15` (the verifier MUST reject).
     TooManyRecords(usize),
     /// The padded size `2^d_sig` has no checked-in catalog rows for the relation.
     NotInCatalog {
@@ -66,7 +66,7 @@ impl From<AkitaError> for PlanError {
     }
 }
 
-/// `N* = max(next_power_of_two(N), 8)` and `d_sig = log2 N*` (spec Section 1).
+/// `N* = max(next_power_of_two(N), 8)` and `d_sig = log2 N*`.
 pub fn padded_size(records: usize) -> Result<(usize, usize), PlanError> {
     if records == 0 {
         return Err(PlanError::NoRecords);

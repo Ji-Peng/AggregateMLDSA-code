@@ -1,5 +1,4 @@
-//! Exact commitment manifest of one batch (spec Sections 4.1, 4.3 and 10, event 0), lookup
-//! layout L16 (`docs/lookup.md`).
+//! Exact commitment manifest of one batch (event 0; `docs/lookup.md`).
 //!
 //! Mirrors `aerie-falcon/src/protocol/manifest.rs`: the manifest fixes the canonical wire
 //! order, the commitment round, the preset family, the logical and physical domain of every
@@ -11,20 +10,20 @@
 //! multiplicity column of `T_16`, width 4) in round 2; `G_m` is Akita's final group, so PCS
 //! execution follows wire order. The alphabets listed here are the honest producer's; the
 //! ranges are proven inside the PIOP (the lookup into `T_16`, the base-4 and base-6 leaves),
-//! never by Akita (Remark 10.41).
+//! never by Akita.
 //!
-//! Relation H-u (the default since wire version 3, `docs/h-exact.md` step A): `z` relaxed to
-//! `[-2^17, 2^17)` as before, `u` exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the
-//! looked-up `U_lo + 2^15` and `H_u = U_hi + 3` a six-valued digit, so `|u| <= B_u = 190,465`.
+//! Relation H-u (the default, `docs/h-exact.md`): `z` relaxed to `[-2^17, 2^17)`, `u`
+//! exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
+//! `H_u = U_hi + 3` a six-valued digit, so `|u| <= B_u = 190,465`.
 //!
-//! Relation H-exact (relation byte 1, `docs/h-exact.md` step B): `u` as in H-u and `z` exact,
+//! Relation H-exact (relation byte 1, `docs/h-exact.md`): `u` as in H-u and `z` exact,
 //! `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with `B_zlo = S_zlo + 2^15` looked up (the
 //! slot of `Z_lo`) and `B_zhi`, `a_z` Boolean (`B_zhi` in the slot of `Z_hi`, `a_z` appended
 //! to `G_main4` after the bits), so `|z| <= B_z = 130,993`. The value `z` of H-exact is
 //! [`DigitValue::Zx`] with the columns `bz_lo`, `bz_hi`, `a_z`; the Booleanity of `bz_hi`
 //! and `a_z` is proven by two zero-checks at `r^(2)` in stage 3.
 //!
-//! Relation H-FIPS (relation byte 2, `docs/h-exact.md` Section 10): `z` as in H-exact, and in
+//! Relation H-FIPS (relation byte 2, `docs/h-exact.md`): `z` as in H-exact, and in
 //! place of `u`'s digits the per-coefficient witness of `agg_witness::hfips`: the magnitude
 //! `L = L_lo + 29,696 L_hi` ([`DigitValue::L`]: `l_lo` looked up in the slot of `U_lo`, the
 //! bit `l_hi` in the slot of `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e`
@@ -41,29 +40,26 @@ use agg_witness::params::{B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
 use crate::lookup::{LookupShape, StackShape, Table};
 
-/// Role of a committed group; the six groups of spec Section 4.1 in wire order.
+/// Role of a committed group; the six groups in wire order.
 pub type GroupRole = Group;
 
 /// PCS preset family of a group (`agg_pcs_config::catalogs::Family`).
 pub type PcsFamily = Family;
 
-/// Wire version of this protocol (spec Status: version 4, the Keccak side's tied parts of
-/// proof version 5 with the virtual parity chain and its work sites in the plan, deviation
-/// K21; version 3 had the bridge union of K13 with relation H-u on the lookup layout L16 and
-/// the proof-of-work schedule of `docs/soundness.md`; version 2 proved the relaxed relation
-/// H with the same schedule, version 1 had no work).
+/// Wire version of this protocol (the Keccak side's tied parts of proof version 5 with the
+/// virtual parity chain and its work sites in the plan).
 pub const WIRE_VERSION: u16 = 4;
-/// Parameter-set byte of ML-DSA-44 (spec Section 10, event 0).
+/// Parameter-set byte of ML-DSA-44 (event 0).
 pub const PARAMETER_SET: u8 = 0x44;
-/// Identifier of the digit layout of spec Section 4.3: 1 is the lookup layout L16 (the
-/// base-16 layout 0 of wire version 0 is retired).
+/// Identifier of the digit layout: 1 is the lookup layout (ranges by the lookup into
+/// `T_16`).
 pub const DIGIT_LAYOUT_ID: u8 = 1;
 /// Number of committed groups.
 pub const GROUP_COUNT: usize = agg_pcs_config::catalogs::GROUP_COUNT;
-/// Independent lookup challenges `X_1, X_2` (`docs/lookup.md` Section 2).
+/// Independent lookup challenges `X_1, X_2` (`docs/lookup.md`).
 pub const LOOKUP_CHALLENGES: usize = 2;
 /// The balanced storage shift of every looked-up column: the looked-up value is
-/// `f = stored + 2^15` (`docs/lookup.md` Section 1).
+/// `f = stored + 2^15` (`docs/lookup.md`).
 pub const LOOKUP_SHIFT: i32 = 1 << 15;
 
 /// `z + 2^17 = z_lo + 2^16 z_hi` (bases `2^16, 4`, signed): `z = Z_lo + 2^16 Z_hi + 2^15`.
@@ -73,7 +69,7 @@ pub const Z16_DIGITS: DigitLayout = DigitLayout {
     signed: true,
 };
 /// Relation H-exact: `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` over exactly `[-B_z, B_z]`
-/// (`docs/h-exact.md` 2.1): `S_zlo = B_zlo - 2^15` looked up, `B_zhi, a_z` bits.
+/// (`docs/h-exact.md`): `S_zlo = B_zlo - 2^15` looked up, `B_zhi, a_z` bits.
 pub const ZX16_DIGITS: BitSlackLayout = Z_BIT_SLACK;
 /// `B_ulo = U_lo + 2^15` in `[0, 2^16)` (base `2^16`, unsigned).
 pub const ULO16_DIGITS: DigitLayout = DigitLayout {
@@ -83,7 +79,7 @@ pub const ULO16_DIGITS: DigitLayout = DigitLayout {
 };
 /// Relation H-u: `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo = U_lo + 2^15` looked up and
 /// `H_u = U_hi + 3 in [0, 6)`, so `u = U_lo + 63,079 U_hi + 31,540` over exactly `[-B_u, B_u]`
-/// (`5 * 63,079 + 2^16 = 2 B_u + 1`, `docs/h-exact.md` 2.1).
+/// (`5 * 63,079 + 2^16 = 2 B_u + 1`).
 pub const U16_DIGITS: StepLayout = StepLayout {
     low: ULO16_DIGITS,
     step: STEP_U,
@@ -121,7 +117,7 @@ pub const fn role_id(role: GroupRole) -> u8 {
     role.index() as u8
 }
 
-/// A value committed through its balanced digits (spec (4.1) with the L16 bases).
+/// A value committed through its balanced digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DigitValue {
     /// The response `z` of relation H-u (main domain, indexed by `(j, s, i)`).
@@ -146,8 +142,8 @@ pub enum DigitValue {
 }
 
 impl DigitValue {
-    /// The value form of spec Section 4.3 (L16; the step form for `u`, H-exact's bit-slack
-    /// form for `z`).
+    /// The value form (digit composition; the step form for `u`, H-exact's bit-slack form
+    /// for `z`).
     #[must_use]
     pub const fn layout(self) -> ValueForm {
         match self {
@@ -177,7 +173,7 @@ impl DigitValue {
 }
 
 /// The three per-coefficient columns of relation H-FIPS that are not digits of a value
-/// (`docs/h-exact.md` Section 10): in `G_main4` after `a_z`, in this order.
+/// (`docs/h-exact.md`): in `G_main4` after `a_z`, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FipsColumn {
     /// The sign bit `s = (1 + sigma)/2` in `{0, 1}` (`sigma = 1` iff `r0 > 0`).
@@ -424,10 +420,10 @@ pub fn value_columns(value: DigitValue) -> Vec<Column> {
         .collect()
 }
 
-/// The canonical polynomial order of a group under `relation` (spec Section 4.1, L16;
-/// `docs/h-exact.md` 2.2): H-exact puts `bz_lo, bz_hi` in the slots of `Z_lo, Z_hi` and
-/// appends `a_z` to `G_main4`; H-FIPS (`docs/h-exact.md` Section 10.7) also puts `l_lo,
-/// l_hi` in the slots of `U_lo, U_hi`, appends `s, delta, e` to `G_main4` and `u_h` to `G_2`.
+/// The canonical polynomial order of a group under `relation` (`docs/h-exact.md`): H-exact
+/// puts `bz_lo, bz_hi` in the slots of `Z_lo, Z_hi` and appends `a_z` to `G_main4`; H-FIPS
+/// also puts `l_lo, l_hi` in the slots of `U_lo, U_hi`, appends `s, delta, e` to `G_main4`
+/// and `u_h` to `G_2`.
 #[must_use]
 pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
     let lanes = 0..W1_BITS as u8;
@@ -510,7 +506,7 @@ impl GroupDescriptor {
     }
 }
 
-/// The looked-up columns of one lookup stack (`docs/lookup.md` Section 1), in slot order
+/// The looked-up columns of one lookup stack (`docs/lookup.md`), in slot order
 /// (H-FIPS puts `u_h` in slot 6 of stack 2).
 #[must_use]
 pub fn stack_columns(stack: usize, relation: Relation) -> Vec<Column> {
@@ -686,7 +682,7 @@ impl CommitmentManifest {
         self.total_polynomials() - MULTIPLICITY_DIGITS
     }
 
-    /// The public shape of the lookup (`docs/lookup.md` Section 1): the four stacks
+    /// The public shape of the lookup (`docs/lookup.md`): the four stacks
     /// `[Z_lo | U_lo | V_lo | V_hi]` on the main domain, `kappa^(1)` (6 columns in 8 slots)
     /// on `D_1`, `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, one table `T_16`, two
     /// challenges.
@@ -742,17 +738,17 @@ impl CommitmentManifest {
             && plan.layout.row_name() == self.catalog_row
     }
 
-    /// Canonical byte encoding of the manifest part of event 0 (spec Section 10).
+    /// Canonical byte encoding of the manifest part of event 0.
     ///
     /// `LE16` wire version, parameter-set byte `0x44`, relation byte ([`Relation::id`],
-    /// `0` = H-u, `1` = H-exact), `LE64` `N`,
-    /// `LE64` `N*`, digit layout id (1 = L16), group count; per group: role, round, family
-    /// (0 = width 4, 1 = width 16), logical and physical variable counts, polynomial count
-    /// and one alphabet byte per polynomial ([`Column::alphabet_code`]); the catalog row id
-    /// (`LE16` length, ASCII); the bridge parameters `(J_t, m_t, k_t)` of levels 1 to 3
-    /// (`LE64`, `LE64`, `U8`); the lookup layout (challenge count, table width, and per
-    /// stack the column count, variables and storage shift, `U8, U8, U8, U8, LE32`). The
-    /// public-record digest and the Flock profile id complete event 0 elsewhere.
+    /// `0` = H-u, `1` = H-exact), `LE64` `N`, `LE64` `N*`, digit layout id (1 = the lookup
+    /// layout), group count; per group: role, round, family (0 = width 4, 1 = width 16),
+    /// logical and physical variable counts, polynomial count and one alphabet byte per
+    /// polynomial ([`Column::alphabet_code`]); the catalog row id (`LE16` length, ASCII);
+    /// the bridge parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`, `LE64`, `U8`); the
+    /// lookup layout (challenge count, table width, and per stack the column count,
+    /// variables and storage shift, `U8, U8, U8, U8, LE32`). The public-record digest and
+    /// the Flock profile id complete event 0 elsewhere.
     #[must_use]
     pub fn binding_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(160);
@@ -977,7 +973,7 @@ mod tests {
 
     #[test]
     fn digit_layouts_give_the_l16_ranges() {
-        // z = Z_lo + 2^16 Z_hi + 2^15 and likewise for v (docs/lookup.md Section 1).
+        // z = Z_lo + 2^16 Z_hi + 2^15 and likewise for v.
         for layout in [Z16_DIGITS, V16_DIGITS] {
             assert_eq!(layout.constant(), 1 << 15);
             assert_eq!(layout.weights(), vec![1, 1 << 16]);
@@ -1019,7 +1015,7 @@ mod tests {
 
     #[test]
     fn committed_elements_per_signature() {
-        // docs/lookup.md Section 3: 12,288 main-domain elements, 96 + 12 + 0.5 bridge
+        // 12,288 main-domain elements, 96 + 12 + 0.5 bridge
         // elements and the 7 * 2^16 multiplicity cells (14 per signature) at N = 2^15.
         let full = CommitmentManifest::for_batch(1 << 15).unwrap();
         assert_eq!(full.d_main(), 25);
@@ -1035,8 +1031,8 @@ mod tests {
         assert_eq!(physical, [18, 18, 13, 13, 13, 16]);
         assert_eq!(small.group(Group::Level3).pad_vars(), 1);
         assert_eq!(small.catalog_row(), "mldsa-44-l16-batch-256-mult-final");
-        // H-exact: one more main-domain column, 13,434.5 elements per signature at 2^15
-        // (docs/h-exact.md 2.2); 13,960 physical at N = 1,024.
+        // H-exact: one more main-domain column, 13,434.5 elements per signature at 2^15;
+        // 13,960 physical at N = 1,024.
         let exact = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
         let per_signature = exact.total_logical_cells() as f64 / f64::from(1 << 15);
         assert!((per_signature - 13_434.5).abs() < 1e-9, "{per_signature}");
@@ -1131,7 +1127,7 @@ mod tests {
             CommitmentManifest::for_batch(200).unwrap().binding_bytes(),
             bytes
         );
-        // H-exact (docs/h-exact.md 6.1 item 9): relation byte 1, G_main4 at 9 polynomials
+        // H-exact: relation byte 1, G_main4 at 9 polynomials
         // with codes [0, 6, 0, 0, 0, 0, 0, 0, 0], G_main16 unchanged, the l16x row.
         let exact = CommitmentManifest::for_relation(200, Relation::HExact).unwrap();
         let xbytes = exact.binding_bytes();

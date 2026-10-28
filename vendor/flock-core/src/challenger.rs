@@ -14,7 +14,7 @@ use flock_field::F128;
 
 /// Slack of a proof-of-work nonce above its site's difficulty: a site of `g > 0` bits takes
 /// nonces of at most `g + 7` bits, as Akita's `GRINDING_NONCE_SLACK_BITS` and Aerie's work
-/// nonces (agg-mldsa deviation K19, `docs/soundness.md` Section 6.5). The honest search
+/// nonces (agg-mldsa patch, `docs/soundness.md`). The honest search
 /// (`Challenger::grind_pow`, smallest passing nonce first) exceeds `2^(g + 7)` candidates with
 /// probability `(1 - 2^-g)^(2^(g + 7)) <= e^-128`.
 pub const POW_NONCE_SLACK_BITS: u32 = 7;
@@ -32,10 +32,10 @@ pub const fn pow_nonce_is_canonical(nonce: u64, bits: u32) -> bool {
 }
 
 /// The verifier's proof-of-work checks with the canonical nonce width
-/// ([`pow_nonce_is_canonical`]; agg-mldsa deviation K19). Each method runs the challenger's
+/// ([`pow_nonce_is_canonical`]; agg-mldsa patch). Each method runs the challenger's
 /// own check (which absorbs the nonce, keeping the transcript in lockstep with the prover)
 /// and additionally rejects a nonce wider than `bits + 7` bits. Every verifier call site of
-/// this crate uses these methods (`PATCH.md` Section 6).
+/// this crate uses these methods (`PATCH.md`).
 pub trait CanonicalPow: Challenger {
     /// [`Challenger::verify_pow`] with the canonical width.
     fn verify_pow_canonical(&mut self, nonce: u64, bits: u32) -> bool {

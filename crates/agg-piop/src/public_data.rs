@@ -1,5 +1,5 @@
-//! Public data: the verifier's per-record precomputation (spec Section 2) and the
-//! negacyclic `eq` helpers of the public weights (spec Section 7.6, Aerie Section 8).
+//! Public data: the verifier's per-record precomputation and the negacyclic `eq` helpers of
+//! the public weights (Aerie).
 //!
 //! Per distinct key the verifier expands `A_hat = ExpandA(rho)` and keeps only the centered
 //! coefficient form `A = ctr_q(NTT^{-1}(A_hat))` (16 inverse NTTs, 11.8 KB per key, MAY be
@@ -9,9 +9,9 @@
 //! `T(j, rho, i)` is zero on padded rows; [`PublicData::t_evaluation`] streams it at a point.
 //!
 //! The ring weight pulls `eq(r_coef, .)` back through a polynomial `a`:
-//! [`negacyclic_kernel`] computes `K_{a, r_coef}` of (7.8) by Aerie's factorized transform
-//! (8.5) to (8.7) in `O(n log n)`, and [`eq_correlation`] the verifier's 256-entry vector
-//! `Lambda` of Aerie (8.8) to (8.10) (the correlation of two `eq` vectors) in `O(n)`.
+//! [`negacyclic_kernel`] computes `K_{a, r_coef}` by Aerie's factorized transform in
+//! `O(n log n)`, and [`eq_correlation`] the verifier's 256-entry vector `Lambda` of Aerie
+//! (the correlation of two `eq` vectors) in `O(n)`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use crate::OpeningField as E;
 /// `T_i` of one record: `k` polynomials of 256 integer coefficients, `|T| < 2^29`.
 pub type PublicT = [[i32; N]; K];
 
-/// `A = ctr_q(NTT^{-1}(A_hat))` entrywise: 16 inverse NTTs (spec Section 2 item 2).
+/// `A = ctr_q(NTT^{-1}(A_hat))` entrywise: 16 inverse NTTs.
 #[must_use]
 pub fn inverse_ntt_matrix(a_hat: &MatrixNtt) -> Box<MatrixCoeff> {
     let fips = NttPrime::fips();
@@ -48,7 +48,7 @@ pub fn inverse_ntt_matrix(a_hat: &MatrixNtt) -> Box<MatrixCoeff> {
 }
 
 /// `T[rho] = 2^d (c * t1[rho])` over `Z[X]/(X^256 + 1)` from the `tau` nonzero entries of
-/// `c` (`k tau 256` signed additions; spec Section 2 item 5).
+/// `c` (`k tau 256` signed additions).
 ///
 /// Each nonzero `c_p = +-1` adds `+-X^p t1`: coefficient `m < N - p` of `t1` lands at
 /// `p + m`, the others wrap to `p + m - N` with the opposite sign, so the shift-add is two
@@ -256,7 +256,7 @@ impl VerifierKey {
     }
 }
 
-/// Expanded keys kept across batches (the "cached" verifier of spec Section 11).
+/// Expanded keys kept across batches (the "cached" verifier).
 #[derive(Clone, Debug, Default)]
 pub struct KeyCache {
     keys: HashMap<Vec<u8>, Arc<VerifierKey>>,
@@ -377,8 +377,8 @@ impl PublicData {
 
     /// The same data taken from the prover's instance (keys shared by `Arc` identity).
     /// The keys (one [`VerifierKey`] per distinct expanded key, in first-appearance order)
-    /// and the records are built in parallel (lever A (a), docs/perf.md Section 11); under
-    /// `AGG_SCHED_SERIAL` serially, as before. Both give the same data.
+    /// and the records are built in parallel; under `AGG_SCHED_SERIAL` serially. Both give
+    /// the same data.
     #[must_use]
     pub fn from_instance(instance: &PublicInstance) -> Self {
         if agg_pcs_config::sched::serial_schedule() {
@@ -419,7 +419,7 @@ impl PublicData {
         }
     }
 
-    /// [`Self::from_instance`] on one thread (the schedule before lever A).
+    /// [`Self::from_instance`] on one thread (`AGG_SCHED_SERIAL`).
     fn from_instance_serial(instance: &PublicInstance) -> Self {
         let mut keys: Vec<Arc<VerifierKey>> = Vec::new();
         let mut seen: HashMap<*const ExpandedKey, usize> = HashMap::new();
@@ -530,7 +530,7 @@ impl PublicData {
             .reduce(E::zero, |left, right| left + right)
     }
 
-    /// `A~_{i,s} = sum_rho eq(r_row, rho) A_i[rho, s]` for every column `s` (spec (7.9)).
+    /// `A~_{i,s} = sum_rho eq(r_row, rho) A_i[rho, s]` for every column `s`.
     #[must_use]
     pub fn a_row_combination(&self, i: usize, r_row: &[E]) -> [[E; N]; L] {
         let weights = eq_table(r_row);
@@ -547,7 +547,7 @@ impl PublicData {
 }
 
 /// `w^(t) (X) = (f_t(0) + f_t(1) X) w^(t+1)(X^2)`: replaces `a` by `a * eq(r, .)` in
-/// `K[X]/(X^D + 1)` for `D = a.len() = 2^|r|` by the recurrence (8.7), in place, with a
+/// `K[X]/(X^D + 1)` for `D = a.len() = 2^|r|` by Aerie's recurrence, in place, with a
 /// scratch buffer of the same length (no allocation). With `f_t(0) = 1 - r_t` each output
 /// of a butterfly is one product: `f0 a0 + f1 rot = a0 + r (rot - a0)`,
 /// `f1 a0 + f0 a1 = a1 + r (a0 - a1)`.
@@ -590,9 +590,9 @@ pub fn negacyclic_kernel_into(a: &[E], r_coef: &[E], out: &mut [E], scratch: &mu
 }
 
 /// `K_{a, r}[j'] = sum_{a'} a[a'] (-1)^{floor((a' + j') / n)} eq(r, (a' + j') mod n)`
-/// (spec (7.8), Aerie (8.2)), so that `sum_j eq(r, j) (a * z)_j = sum_{j'} K[j'] z[j']` for
+/// (Aerie), so that `sum_j eq(r, j) (a * z)_j = sum_{j'} K[j'] z[j']` for
 /// the negacyclic product. Computed as `a^dagger * w^(0)` with `a^dagger[0] = a[0]`,
-/// `a^dagger[j] = -a[n - j]` by the factorized transform (8.5) to (8.7), `O(n log n)`.
+/// `a^dagger[j] = -a[n - j]` by the factorized transform, `O(n log n)`.
 #[must_use]
 pub fn negacyclic_kernel(a: &[E], r_coef: &[E]) -> Vec<E> {
     let mut out = vec![E::zero(); a.len()];
@@ -602,7 +602,7 @@ pub fn negacyclic_kernel(a: &[E], r_coef: &[E]) -> Vec<E> {
 }
 
 /// `Lambda_a = sum_j eq(right, j) (-1)^{floor((a + j) / n)} eq(left, (a + j) mod n)`
-/// (Aerie (8.8)) for every `a < n = 2^|left|`, by the carry trie (8.9), (8.10) in `O(n)`.
+/// (Aerie) for every `a < n = 2^|left|`, by the carry trie in `O(n)`.
 /// With `left = r^(2)_coef` and `right = r^(3)_coef`,
 /// `sum_{j'} eq(right, j') K_{a, left}[j'] = sum_{a'} a[a'] Lambda_{a'}`.
 #[must_use]

@@ -1,8 +1,7 @@
-//! Carry-digit tables with their digit ranges (spec Sections 4.3, 9.2; docs/bridge.md
-//! Section 4).
+//! Carry-digit tables with their digit ranges (`docs/bridge.md`).
 //!
 //! A carry `kappa` of level `t` is committed as the digits of its level's layout,
-//! `kappa = sum_k W_k Z_k + C` (4.1): production levels 1 and 2 use bases 16, 16, 4
+//! `kappa = sum_k W_k Z_k + C`: production levels 1 and 2 use bases 16, 16, 4
 //! (`C = 648`, range `[0, 1023]`), level 3 bases 16, 16 (`C = 136`, `[0, 255]`); the toy
 //! shape bases (8, 8), (8, 4), (4, 4). Every digit lies in its balanced alphabet exactly when
 //! the carry lies in `[0, floor(W_t / 2)]`, which is what the PIOP's leaf predicates prove.
@@ -60,7 +59,7 @@ pub fn digit_columns(level: &LevelShape, values: &[i64]) -> Result<Vec<Vec<i8>>,
     Ok(columns)
 }
 
-/// The carries recomposed by (4.1) from digit columns (any digit values).
+/// The carries recomposed as `sum_k W_k Z_k + C` from digit columns (any digit values).
 #[must_use]
 pub fn compose_columns(level: &LevelShape, columns: &[Vec<i8>]) -> Vec<i64> {
     assert_eq!(columns.len(), level.carry.len(), "one column per digit");

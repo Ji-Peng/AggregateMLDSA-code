@@ -1,6 +1,6 @@
 //! Subcommands of the `agg` tool: `keygen-batch`, `sign-batch`, `aggregate`, `verify` and
-//! `bench` (docs/spec.md Section 14, milestone M3). Batch files are those of
-//! [`crate::record`]; the aggregate is the mode-A wire format ([`crate::mode_a`]).
+//! `bench`. Batch files are those of [`crate::record`]; the aggregate is the mode-A wire format
+//! ([`crate::mode_a`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -59,11 +59,11 @@ environment:
                         at most the logical CPUs or the rayon pool; a value that is not a
                         number warns and falls back to the default).
   AGG_FLOCK_REBUILD     (any value) drop the Flock witness of a one-part batch after event 2
-                        and rebuild it for its proof, as before lever W1 (measurement knob;
-                        the aggregate is the same).
+                        and rebuild it for its proof (measurement knob; the aggregate is the
+                        same).
   AGG_FLOCK_RECOMMIT    (any value) drop the Flock commit data after event 2 and commit again
-                        for the proof (K7; measurement knob; the aggregate is the same).
-  AGG_SCHED_SERIAL      (any value) the prover schedule before lever A: serial public data,
+                        for the proof (measurement knob; the aggregate is the same).
+  AGG_SCHED_SERIAL      (any value) the serial prover schedule: serial public data,
                         Akita setup inside the prove, every large drop in place (measurement
                         knob; the aggregate is the same).
   AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2
@@ -577,7 +577,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     );
     let t = &result.prove.timings;
     if t.flock_threads > 0 {
-        // Fork-join (deviation K22): the Flock proofs overlap the PIOP steps.
+        // Fork-join: the Flock proofs overlap the PIOP steps.
         println!(
             "    median run: Flock parts {:.1} ms (proofs {:.1} ms on {} threads beside the PIOP), \
              fork-join wall {:.1} ms, outside the fork {:.1} ms",

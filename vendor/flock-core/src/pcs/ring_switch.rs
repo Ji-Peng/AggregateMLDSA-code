@@ -3203,7 +3203,7 @@ mod tests {
         }
     }
 
-    /// agg-mldsa patch (PATCH.md Section 7, K21): with the multilinear skip basis
+    /// agg-mldsa patch (PATCH.md): with the multilinear skip basis
     /// (`SkipPoint::Eq`) the claim check recovers the plain bit-MLE of the witness, and the
     /// succinct verifier accepts the honest ring switch of that claim and rejects another value.
     #[test]

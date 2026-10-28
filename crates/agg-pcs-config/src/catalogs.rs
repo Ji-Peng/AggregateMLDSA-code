@@ -1,4 +1,4 @@
-//! Group layouts of spec Section 4.1 (lookup layout L16, `docs/lookup.md`) and the
+//! Group layouts (16-bit lookup digits, `docs/lookup.md`) and the
 //! generated fold-schedule catalogs.
 //!
 //! The six witness groups, in wire and catalog order, are `G_main16` and `G_main4`
@@ -15,14 +15,14 @@
 //! precommitted layout in its own family's catalog, whose root profile is the producer
 //! profile of that group.
 //!
-//! The relation (`docs/h-exact.md` Section 1) changes the polynomial count of `G_main4`
+//! The relation (`docs/h-exact.md`) changes the polynomial count of `G_main4`
 //! (8 for H-u, 9 for H-exact, whose extra Boolean column `a_z` is the slack of the exact `z`
 //! form, 12 for H-FIPS, which adds the sign bit, `delta` and `e`) and of `G_2` (13 for
-//! H-FIPS: the hint slack `u_h` on `D_2`, `docs/h-exact.md` Section 10.7), so every layout,
+//! H-FIPS: the hint slack `u_h` on `D_2`), so every layout,
 //! row name and catalog key is a function of `(d_sig, relation)`. [`CATALOG_D_SIG`] lists the
 //! H-u batch sizes, [`CATALOG_D_SIG_H_EXACT`] the H-exact and [`CATALOG_D_SIG_H_FIPS`] the
 //! H-FIPS ones whose rows are checked in ([`catalog_batches`] lists all);
-//! `tests/schedule_catalog_regen.rs` regenerates them (docs/pcs-config.md).
+//! `tests/schedule_catalog_regen.rs` regenerates them (`docs/pcs-config.md`).
 
 use akita_params::PolynomialGroupLayout;
 
@@ -36,7 +36,7 @@ pub const D_POS: usize = 10;
 pub const MIN_D_SIG: usize = 3;
 /// Largest `d_sig` of this wire version (`N <= 2^15`).
 pub const MAX_D_SIG: usize = 15;
-/// Signatures per segment, log2 (spec Section 1).
+/// Signatures per segment, log2.
 pub const D_SEG_MAX: usize = 13;
 /// Variables of the lookup table `T_16` and of its multiplicity column.
 pub const TABLE_VARS: usize = 16;
@@ -46,7 +46,7 @@ pub const MULTIPLICITY_DIGITS: usize = 7;
 pub const GROUP_COUNT: usize = 6;
 
 /// Batch sizes (`d_sig`) whose relation-H-u catalog rows are generated and checked in:
-/// every `N* = 2^3 .. 2^15` of the wire version (spec Section 13).
+/// every `N* = 2^3 .. 2^15` of the wire version.
 pub const CATALOG_D_SIG: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Batch sizes (`d_sig`) whose relation-H-exact rows are generated and checked in.
@@ -57,12 +57,12 @@ pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
 
 /// Relation byte of H-u: the proof header's flags byte and byte 3 of the event-0 bytes.
 pub const RELATION_HU: u8 = 0;
-/// Relation byte of H-exact (`docs/h-exact.md` Section 1.1).
+/// Relation byte of H-exact (`docs/h-exact.md`).
 pub const RELATION_H_EXACT: u8 = 1;
-/// Relation byte of H-FIPS (`docs/h-exact.md` Section 10).
+/// Relation byte of H-FIPS (`docs/h-exact.md`).
 pub const RELATION_H_FIPS: u8 = 2;
 
-/// The relation a proof certifies (`docs/h-exact.md` Section 1). Its id is bound twice: as
+/// The relation a proof certifies (`docs/h-exact.md`). Its id is bound twice: as
 /// the proof header's flags byte and in the event-0 manifest bytes; it selects the layout of
 /// `G_main4` and hence the catalog rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -73,7 +73,7 @@ pub enum Relation {
     /// H-exact: the FIPS 204 bounds `|z| <= 130,993` and `|u| <= 190,465`, both exact.
     HExact,
     /// H-FIPS: H-exact's bounds and the hint: the extracted `(c~, z, h)` is a FIPS 204
-    /// signature (`docs/h-exact.md` Section 10).
+    /// signature (`docs/h-exact.md`).
     HFips,
 }
 
@@ -192,7 +192,7 @@ impl Family {
     }
 }
 
-/// The six committed groups of spec Section 4.1 (L16), in wire order.
+/// The six committed groups, in wire order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
     /// `Z_lo, U_lo, V_lo, V_hi` on the main domain (round 1, width 16): the 16-bit
@@ -235,7 +235,7 @@ impl Group {
         }
     }
 
-    /// Commitment round (spec Section 10): 1 before the bridge seed, 2 after.
+    /// Commitment round: 1 before the bridge seed, 2 after.
     #[must_use]
     pub const fn round(self) -> u8 {
         match self {
@@ -259,7 +259,7 @@ impl Group {
         }
     }
 
-    /// Number of committed polynomials (spec Section 4.1, L16):
+    /// Number of committed polynomials:
     /// `4 + 8` on the main domain (`4 + 9` under H-exact, `4 + 12` under H-FIPS), 6 carries,
     /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry, and the 7
     /// multiplicity digits.
@@ -283,7 +283,7 @@ impl Group {
     }
 
     /// Logical variable count of the group's domain at `d_sig`
-    /// (spec Section 1): `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
+    /// `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
     /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`; 16 for `G_m`.
     #[must_use]
     pub const fn logical_vars(self, d_sig: usize) -> usize {
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(Relation::from_id(2), Some(Relation::HFips));
         assert_eq!(Relation::from_id(3), None);
         assert_eq!(Relation::parse("fips"), None);
-        // Spec Section 1 table at N* = 2^15.
+        // The domain sizes at N* = 2^15.
         assert_eq!(Group::Main16.logical_vars(15), 25);
         assert_eq!(Group::Main.logical_vars(15), 25);
         assert_eq!(Group::Level1.logical_vars(15), 19);

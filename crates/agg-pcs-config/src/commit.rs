@@ -1,11 +1,11 @@
 //! Two-round commit driver and the batched opening of the six groups
-//! (spec Sections 4.1 and 10).
+//! (`docs/spec.md`).
 //!
 //! Round 1 commits `G_main16` and `G_main4` before the bridge seed; round 2 commits
 //! `G_1`, `G_2`, `G_3` and, last, the final group `G_m` against the precommitted profiles
 //! of the work plan. Every commit is transcript-free (the caller absorbs the
 //! serialized commitments in event order), so the two rounds share one
-//! commitment contract and one batched Akita opening (Akita Section 4.6). Each group is
+//! commitment contract and one batched Akita opening. Each group is
 //! committed under its own family's catalog (width 4 or width 16); the opening and its
 //! verifier run under the final group's width-4 catalog, whose grouped row carries the
 //! precommitted width-16 profiles (Akita freezes the source bound per group).
@@ -309,8 +309,8 @@ impl PcsProver {
         }
         let catalog = Cfg::catalog()?;
         // Hold a reference to every group's committed source, so that the last one is not
-        // released inside the opening (a one-thread unmap of several GiB at 32K, lever A (c),
-        // docs/perf.md Section 11); released after it, on a detached thread. Akita shares
+        // released inside the opening (a one-thread unmap of several GiB at 32K); released
+        // after it, on a detached thread. Akita shares
         // the source by `Arc` inside the opening anyway, so the clones copy nothing.
         let keep = (!crate::sched::serial_schedule()).then(|| handles.clone());
         let opening = SelectedProverOpeningData::from_committed_claims::<Cfg>(

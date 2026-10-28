@@ -1,6 +1,6 @@
-//! The prover with a one-thread rayon pool (deviation P12): `taskset -c 2` benchmarks and
-//! `RAYON_NUM_THREADS=1` give rayon exactly one worker. The round-1 commits once blocked
-//! that worker on OS threads whose Akita loops needed it, and the prover hung in round 1.
+//! The prover with a one-thread rayon pool: `taskset -c 2` benchmarks and
+//! `RAYON_NUM_THREADS=1` give rayon exactly one worker. A round-1 commit that blocks that
+//! worker on OS threads whose Akita loops need it hangs the prover in round 1.
 //! Both tests run a whole prover (rounds 1 and 2, the lookup, the stages and the opening)
 //! and the verifier, under a timeout, once from a plain thread and once from inside an
 //! installed one-thread pool (the caller is then a rayon worker). This binary sets the

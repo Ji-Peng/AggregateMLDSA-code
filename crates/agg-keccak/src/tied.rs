@@ -1,37 +1,34 @@
-//! The tied part (tied-part proof version 5, deviation K21, `docs/parity-chain.md`): the
-//! Flock argument of one part of a segment (or of a span of segments) as ONE Flock instance,
-//! the sponge instance (the `n` live records' SHAKE256 gates, docs/keccak.md Sections 1 to
-//! 4), and the virtual parity chain ([`agg_bridge::parity_chain`]): a degree-2 sum-check that
-//! reduces the public final vectors `Y_sigma = M_3 M_2 M_1 b'_sigma` to one bit-level
-//! evaluation of the sponge commitment, which the sponge instance's Flock opening proves as a
-//! third ring-switched claim ([`crate::flock_union::BitClaim`]). Version 4 proved the GF(2)
-//! side with a second Flock instance, the bridge union of [`crate::bridge_union`]
-//! (docs/bridge.md Section 5b, deviation K13), tied to the sponge by evaluation claims; that
-//! instance, its cap, its ties and its output claim are gone.
+//! The tied part (`docs/parity-chain.md`): the Flock argument of one part of a segment (or
+//! of a span of segments) as ONE Flock instance, the sponge instance (the `n` live records'
+//! SHAKE256 gates, docs/keccak.md), and the virtual parity chain
+//! ([`agg_bridge::parity_chain`]): a degree-2 sum-check that reduces the public final vectors
+//! `Y_sigma = M_3 M_2 M_1 b'_sigma` to one bit-level evaluation of the sponge commitment,
+//! which the sponge instance's Flock opening proves as a third ring-switched claim
+//! ([`crate::flock_union::BitClaim`]).
 //!
 //! Regions. The sponge instance commits its words BatchMajor: word column `c` of row `j` is
 //! the padded word `(c << nu_s) | j`. Lane `t` of a record is the eight words `8 t + w`, `w <
 //! 8` ([`crate::sponge::W1_WORD_BASE`]), bit `p & 127` of word `p >> 7` for the lane position
 //! `p = j + 256 rho`; the words `[48, 56)` are the public region (mu, `c~`, the constant, a
 //! zero word). The chain runs over eight lanes, the word columns `[0, 64)`: lanes 6 and 7 are
-//! the public region and the first chi words, with weight zero (docs Section 2).
+//! the public region and the first chi words, with weight zero.
 //!
-//! Transcript (docs Section 6). From the part's Flock seed `fs`, its geometry, the digest of
+//! Transcript. From the part's Flock seed `fs`, its geometry, the digest of
 //! the final vectors and the sponge's event-2 cap, the tie challenger draws (each site after
 //! its proof of work): the public claim's point `(rho_r, rho_c)`; `eq_Y = (r_o, r_y)`; one
 //! challenge per chain round after absorbing its message `(q(1), q(inf))`; then it absorbs
 //! the claimed bit value `v` and squeezes a 32-byte tie binding, which the sponge challenger
-//! absorbs before Flock binds its statement (docs/soundness.md 4.5). The verifier recomputes
+//! absorbs before Flock binds its statement (docs/soundness.md). The verifier recomputes
 //! the claim `<eq_Y, Y>`, replays the rounds, checks the last claim against its own weight
 //! `W~(r)` times `eq(r_rec[nu_s..], 0) v`, and Flock's opening proves `v` and the public value.
 //!
-//! Spans (deviation K16). A tied part may cover `S` segments that share its geometry (`d`,
+//! Spans. A tied part may cover `S` segments that share its geometry (`d`,
 //! part index): mode A proves all segments of a batch of more than `2^13` records as one tied
 //! part. The sponge instance holds the `n` records of the span in order (record `i` of
 //! segment `sigma` is row `2^d sigma + i`), and the chain covers `2^span_log >= S` segments,
 //! the final vectors of the segments `S..2^span_log` being zero.
 //!
-//! Work (docs/soundness.md 3.6): the sponge commitment is bound only to its Johnson list
+//! Work (docs/soundness.md): the sponge commitment is bound only to its Johnson list
 //! when these challenges are drawn, so the tie site carries `L_s (nu_s + 3)`, the `eq_Y` site
 //! `L_s (log2 m_3 + span_log)` and every round `2 L_s` ([`agg_bridge::pow::part_work`]); the
 //! nonces (`g + 7` bits, `LE32`) travel in the proof.
@@ -66,9 +63,7 @@ use crate::{
 
 /// Magic prefix of a tied-part proof.
 pub const MAGIC: &[u8; 6] = b"AGGKCT";
-/// Serialization version (5: the virtual parity chain replaces the bridge union, K21; 4:
-/// the tie nonce and the tie binding, K20; 3: spans and the output claim, K16; 2: the
-/// bridge union, K13).
+/// Serialization version.
 pub const VERSION: u8 = 5;
 /// Header: magic, version, profile, `n` (LE32), `d`, segments, tie nonce (LE32).
 const HEADER: usize = 6 + 1 + 1 + 4 + 1 + 1 + 4;
@@ -149,7 +144,7 @@ pub enum TieWork {
 
 /// The prover's nonce if it lies below the allowance `limit = 2^(g + 7)`: Flock's `grind_pow`
 /// returns the smallest passing nonce, so a larger one means that the first `2^(g + 7)`
-/// candidates all failed (docs/soundness.md 6.3, 6.5).
+/// candidates all failed (docs/soundness.md).
 fn nonce_within(nonce: u64, limit: u64) -> Result<u32, KeccakError> {
     const EXHAUSTED: &str = "tie nonce search exhausted its 2^(g + 7) candidates";
     if nonce >= limit {
@@ -274,15 +269,15 @@ impl TiedCommitted {
         &self.bits
     }
 
-    /// Take the sponge commitment's prover data (to keep it while the buffers are dropped,
-    /// K14); the proof then commits again unless the data is handed back by
+    /// Take the sponge commitment's prover data (to keep it while the buffers are dropped);
+    /// the proof then commits again unless the data is handed back by
     /// [`TiedPart::reattach`].
     pub fn take_commit_data(&mut self) -> Option<CommitData> {
         self.sponge_data.take()
     }
 
     /// The sponge commitment's prover data, if it is still held (the proof then opens it
-    /// without committing again, K14).
+    /// without committing again).
     #[must_use]
     pub fn commit_data(&self) -> Option<&CommitData> {
         self.sponge_data.as_ref()
@@ -321,7 +316,7 @@ pub struct ChainRound {
     pub nonce: u32,
 }
 
-/// The parsed parts of a tied-part proof (version 5): the nonces, the chain's rounds, the
+/// The parsed parts of a tied-part proof: the nonces, the chain's rounds, the
 /// claimed bit value and the sponge instance's proof. Tests use it to tamper single fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TiedProofParts {
@@ -371,8 +366,7 @@ pub struct TiedPart<'g> {
 }
 
 impl<'g> TiedPart<'g> {
-    /// `d_seg` of a single-segment batch of `n <= 2^13` records: `log2 max(next_pow2(n), 8)`
-    /// (spec Section 1).
+    /// `d_seg` of a single-segment batch of `n <= 2^13` records: `log2 max(next_pow2(n), 8)`.
     #[must_use]
     pub fn d_seg_for(n: usize) -> u32 {
         assert!(
@@ -393,7 +387,7 @@ impl<'g> TiedPart<'g> {
 
     /// Part `index` of a segment split into parts of `2^d` record positions, with `n` live
     /// records (the part's first `n` positions, segment records `2^d index ..`). It proves
-    /// the part's share `Y_{sigma, index} = M^{(sigma)} b'_{index}` (deviation K10).
+    /// the part's share `Y_{sigma, index} = M^{(sigma)} b'_{index}`.
     ///
     /// # Panics
     /// If `n == 0`, `n > 2^d`, `d < 3`, `d > 13`, the part lies outside the segment, or the
@@ -506,7 +500,7 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// The part's work (`docs/soundness.md` Section 3.6).
+    /// The part's work (`docs/soundness.md`).
     #[must_use]
     pub fn work(&self) -> PartWork {
         part_work(self.profile.list_size(), &self.tie_geometry())
@@ -702,7 +696,7 @@ impl<'g> TiedPart<'g> {
             .fold(F128::ONE, |acc, &x| acc * (F128::ONE + x))
     }
 
-    /// The bit claim on the sponge commitment at a chain point (docs Section 4): in-word bits
+    /// The bit claim on the sponge commitment at a chain point: in-word bits
     /// 0..6 from `zeta[0..7]`, rows from the record coordinates (truncated or zero-padded to
     /// `nu_s`), word columns `[zeta[7..10] | t | 0 ..]` (word `8 t + w`).
     fn bit_claim(&self, point: &ChainPoint) -> BitClaim {
@@ -792,7 +786,7 @@ impl<'g> TiedPart<'g> {
 
     /// Commit to given witnesses (tests commit tampered ones): the sponge buffers and the
     /// part's input bits; `records` give the statement words `[mu_i, c~_i]` (with `c~_i`
-    /// computed natively). Keeps the sponge commitment's prover data (K14).
+    /// computed natively). Keeps the sponge commitment's prover data.
     #[must_use]
     pub fn commit_parts(
         &self,
@@ -833,9 +827,9 @@ impl<'g> TiedPart<'g> {
 
     /// Rebuild a committed part from its witnesses and the commitment computed earlier by
     /// [`Self::commit_parts`] on the same witnesses (the driver drops the buffers between
-    /// events 2 and 6), with the commitment's prover data if it was kept (K14). Without
+    /// events 2 and 6), with the commitment's prover data if it was kept. Without
     /// the data the proof commits again and panics if Flock's cap differs from
-    /// `commitment` (K7).
+    /// `commitment`.
     #[must_use]
     pub fn reattach(
         &self,
@@ -893,7 +887,7 @@ impl<'g> TiedPart<'g> {
     /// [`Self::final_vectors`] from the part's lane-major input bits (as returned by
     /// [`Self::honest_parts`] and kept by [`TiedCommitted::bits`]), without the sponge
     /// witness: the event-6 shares of a segment's parts are computed before the Flock proofs
-    /// (fork-join transcript, deviation K22).
+    /// (fork-join transcript: the Flock proofs run at a join after stage 3).
     ///
     /// # Panics
     /// If `bits` has another length than the part's input.
@@ -918,11 +912,11 @@ impl<'g> TiedPart<'g> {
     /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (lanes 0..5) and the
     /// sponge's word columns 48..63 (lanes 6, 7), the claimed bit value, then the sponge
     /// instance's Flock proof with the public claim and the bit claim (opening the event-2
-    /// commitment, K14). `sd` is bound through `fs` (event 5 follows event 3).
+    /// commitment). `sd` is bound through `fs` (event 5 follows event 3).
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
-    /// candidates (probability below `2^-184.6` per site, docs/soundness.md 6.5).
+    /// candidates (probability below `2^-184.6` per site, docs/soundness.md).
     ///
     /// # Panics
     /// If `committed` belongs to another part shape, `ys` has the wrong shape, or Flock
@@ -1256,7 +1250,7 @@ mod tests {
     use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
 
-    /// An exhausted nonce search is an error, not a panic (docs/soundness.md 6.3, 6.5): the
+    /// An exhausted nonce search is an error, not a panic (docs/soundness.md): the
     /// smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one is
     /// kept.
     #[test]
@@ -1423,7 +1417,7 @@ mod tests {
     /// column coordinates are zero above the chain's 64 word columns, and rejects either bit
     /// claim with a false value (ring-switch `ClaimMismatch`). Regression: the block rounds
     /// fold the column bit-bank's multilinear extension, so a bank computed only on the
-    /// columns of nonzero weight (enough for `s_hat_v`) made the honest proof fail.
+    /// columns of nonzero weight (enough for `s_hat_v`) makes the honest proof fail.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "Flock proofs; run with --release")]
     fn bit_claims_verify_on_a_full_height_sponge() {
@@ -1612,9 +1606,9 @@ mod tests {
         eprintln!("5 and 64: {:.2?}", t.elapsed());
     }
 
-    /// Count 2,048 (`n = 2^nu_s`, a full-height sponge): Flock's block-first opening. Slow
-    /// (about 83 s in the default build, measured locally); the suite pins the block-first
-    /// rejection of a false bit value in `bit_claims_verify_on_a_full_height_sponge`.
+    /// Count 2,048 (`n = 2^nu_s`, a full-height sponge): Flock's block-first opening. Slow;
+    /// the suite pins the block-first rejection of a false bit value in
+    /// `bit_claims_verify_on_a_full_height_sponge`.
     #[test]
     #[ignore = "slow; run with --release --ignored"]
     fn a_chain_consistent_false_bit_value_fails_the_block_first_bit_claim() {
@@ -1625,7 +1619,7 @@ mod tests {
 
     #[test]
     fn work_follows_the_profile_lists() {
-        // docs/soundness.md Sections 3.6 and 10 (version 5): tie L_s (nu_s + 3), eq_Y
+        // docs/soundness.md: tie L_s (nu_s + 3), eq_Y
         // L_s (12 + span_log), rounds 2 L_s.
         let gate = sponge_gate();
         let profiles = [Profile::Fast, Profile::Slim, Profile::Slim8];

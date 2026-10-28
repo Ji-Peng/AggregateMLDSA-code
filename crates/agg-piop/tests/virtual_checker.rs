@@ -1,5 +1,5 @@
-//! The L16 tables and the virtual-table evaluators agree with the integer relation on the
-//! Boolean domain (spec Sections 3, 4.1, 5 and 9.2 with the lookup layout L16): the
+//! The committed tables and the virtual-table evaluators agree with the integer relation on
+//! the Boolean domain: the
 //! recomposed `z, u, v` equal the derived witnesses, the ring residual vanishes, the bridge
 //! identities hold over the integers with the balanced carries, and single-cell mutations
 //! move exactly the expected entries.
@@ -50,7 +50,7 @@ fn parity_witness(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables) 
 fn honest_l16_tables_satisfy_the_integer_relation() {
     let batch = small_batch();
     let manifest = &batch.manifest;
-    // z, u, v recomposed from the two L16 digits equal the derived witnesses; padded rows
+    // z, u, v recomposed from their two digits equal the derived witnesses; padded rows
     // recompose to zero.
     for i in 0..manifest.padded_records() {
         let (z, u, v) = batch.main.record_values(manifest, i);
@@ -68,7 +68,7 @@ fn honest_l16_tables_satisfy_the_integer_relation() {
     // The ring residual vanishes on the whole domain.
     let residual = residual_table(manifest, &batch.instance, &batch.main);
     assert!(nonzero(&residual).is_empty());
-    // The (4.1) tables of z and the stored digits: z = Z_lo + 2^16 Z_hi + 2^15.
+    // The tables of z and the stored digits: z = Z_lo + 2^16 Z_hi + 2^15.
     let tables = batch.tables();
     let z = compose_table(&DigitValue::Z.layout(), &tables.digits(DigitValue::Z));
     let (z_lo, z_hi) = (tables.column(Column::Z_LO), tables.column(Column::Z_HI));

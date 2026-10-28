@@ -1,4 +1,4 @@
-// agg-mldsa patch (PATCH.md Section 3): every kernel here carries its own
+// agg-mldsa patch (PATCH.md): every kernel here carries its own
 // `#[target_feature(enable = ...)]` and is chosen at run time by the caller
 // (`crate::simd`), so no item is gated on `cfg(target_feature)`.
 use core::arch::x86_64::{

@@ -1,8 +1,8 @@
-//! Parity-bridge geometry and the honest integer bridge witness (spec Sections 1, 5, 9).
+//! Parity-bridge geometry and the honest integer bridge witness.
 //!
 //! The matrices M_1, M_2, M_3 are taken as input (`SparseMatrix`); their derivation from the
-//! bridge seed sd (spec Section 9.1) belongs to `agg-bridge`. Given the w1Encode bit tables b_t
-//! on the main domain, this module computes the honest parities and carries of (9.2):
+//! bridge seed sd belongs to `agg-bridge`. Given the w1Encode bit tables b_t
+//! on the main domain, this module computes the honest parities and carries of the three levels:
 //! level 1 per block beta = (i_mid, sigma) over in-block positions zeta = (j, rho, i_lo),
 //! level 2 per segment over zeta = (rho_1, i_mid) zero-padded to 2^19, level 3 per segment over
 //! the six lanes zeta = (t, rho_2). Index conventions (least significant first):
@@ -129,13 +129,13 @@ impl BridgeMatrices {
         }
     }
 
-    /// True when the shapes are those of spec Section 1.
+    /// True when the shapes are the production ones.
     pub fn has_spec_shapes(&self) -> bool {
         let s = |m: &SparseMatrix| (m.rows, m.cols, m.k);
         s(&self.m1) == (M1, J1, K1) && s(&self.m2) == (M2, J2, K2) && s(&self.m3) == (M3, J3, K3)
     }
 
-    /// Honest-prover abort condition (spec Section 9.2): a row weight above the cap.
+    /// Honest-prover abort condition: a row weight above the cap.
     pub fn row_weights_ok(&self) -> bool {
         let max = |m: &SparseMatrix| m.row_weights().into_iter().max().unwrap_or(0);
         max(&self.m1) <= ROW_WEIGHT_MAX_12
@@ -213,7 +213,7 @@ pub fn level3_sums(geom: &Geometry, y2: &[Vec<i64>; W1_BITS], m3: &SparseMatrix)
     sums
 }
 
-/// Honest bridge witness: parities and carries of the three levels (9.2) and the public Y.
+/// Honest bridge witness: parities and carries of the three levels and the public Y.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeWitness {
     /// y^(1)_t on D_1 (virtual in the PIOP; materialized here).
@@ -233,9 +233,9 @@ pub struct BridgeWitness {
 /// Bridge errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeError {
-    /// Matrix shapes differ from spec Section 1.
+    /// Matrix shapes differ from the production ones.
     Shape,
-    /// A row weight exceeds the cap (the honest prover MUST abort, spec Section 9.2).
+    /// A row weight exceeds the cap (the honest prover MUST abort).
     RowWeight,
 }
 
@@ -280,7 +280,7 @@ pub fn compute(
     })
 }
 
-/// The GF(2) side (9.1): Y_sigma = M_3 M_2 M_1 b' computed with XOR only.
+/// The GF(2) side: Y_sigma = M_3 M_2 M_1 b' computed with XOR only.
 pub fn gf2_composite(geom: &Geometry, b: &[&[i8]; W1_BITS], mats: &BridgeMatrices) -> Vec<u8> {
     let len1 = 1usize << geom.d1();
     let mut y1 = vec![[0u8; W1_BITS]; len1];
@@ -322,7 +322,7 @@ pub fn gf2_composite(geom: &Geometry, b: &[&[i8]; W1_BITS], mats: &BridgeMatrice
     y
 }
 
-/// The committed bridge groups of spec Section 4.1 (round 2) and the public Y.
+/// The committed bridge groups (round 2) and the public Y.
 ///
 /// Column order: G_1 = kappa^(1)_{t,k} at index 3 t + k; G_2 = y^(2)_t at index t, then
 /// kappa^(2)_{t,k} at 6 + 3 t + k; G_3 = kappa^(3)_k at index k (t < 6, digits least significant
@@ -360,7 +360,7 @@ fn compose_columns(cols: &[Vec<i8>], layout: &crate::digits::DigitLayout) -> Vec
 }
 
 impl BridgeTables {
-    /// Commits the honest witness: carries by their digits (spec Section 4.3).
+    /// Commits the honest witness: carries by their digits.
     pub fn from_witness(w: &BridgeWitness) -> Result<Self, &'static str> {
         use crate::digits::{KAPPA12_DIGITS, KAPPA3_DIGITS};
         let mut g1 = Vec::new();
@@ -378,7 +378,7 @@ impl BridgeTables {
         Ok(Self { g1, g2, g3, y })
     }
 
-    /// kappa^(1)_t recomposed by (4.1).
+    /// kappa^(1)_t recomposed from its digits.
     pub fn kappa1(&self, t: usize) -> Vec<i64> {
         compose_columns(&self.g1[3 * t..3 * t + 3], &crate::digits::KAPPA12_DIGITS)
     }
@@ -388,7 +388,7 @@ impl BridgeTables {
         self.g2[t].iter().map(|&x| i64::from(x)).collect()
     }
 
-    /// kappa^(2)_t recomposed by (4.1).
+    /// kappa^(2)_t recomposed from its digits.
     pub fn kappa2(&self, t: usize) -> Vec<i64> {
         compose_columns(
             &self.g2[W1_BITS + 3 * t..W1_BITS + 3 * t + 3],
@@ -396,7 +396,7 @@ impl BridgeTables {
         )
     }
 
-    /// kappa^(3) recomposed by (4.1).
+    /// kappa^(3) recomposed from its digits.
     pub fn kappa3(&self) -> Vec<i64> {
         compose_columns(&self.g3, &crate::digits::KAPPA3_DIGITS)
     }

@@ -1,4 +1,4 @@
-//! The GF(2) side of the bridge for one segment (docs/bridge.md Sections 2, 5): the forward
+//! The GF(2) side of the bridge for one segment (`docs/bridge.md`): the forward
 //! composite `Y = M_3 M_2 M_1 b'` and its transpose `M_1^T M_2^T M_3^T v` over `GF(2^128)`.
 //!
 //! Generic over [`Shape`]. A segment holds `lanes` lanes of `lane_len` input positions each
@@ -7,7 +7,7 @@
 //! `zeta_1 = p mod J_1`; when `lane_len < J_1` there is one block whose positions
 //! `[lane_len, J_1)` are public zeros. The level-2 input of a lane is `zeta_2 = rho_1 + m_1
 //! beta < blocks * m_1`, the level-3 input `zeta_3 = t + lanes rho_2`. For the production
-//! shape and `lane_len = 2^{10 + d_seg}` this is the slot layout of docs/bridge.md Section 2
+//! shape and `lane_len = 2^{10 + d_seg}` this is the bridge slot layout
 //! (`p = j + 256 rho + 1024 i_seg`) and the main-domain layout of `agg_witness::bridge`.
 //!
 //! A layout may also be one part of a segment split into parts of `lane_len` positions
@@ -37,7 +37,7 @@ pub struct SegmentLayout {
     pub lane_len: usize,
     /// Position of the layout's first input within the segment's lane: `0` for a whole
     /// segment, `index * lane_len` for part `index` of a segment split into parts of
-    /// `lane_len` positions (sub-batches, `docs/deviations.md` K10). Local position `p` is
+    /// `lane_len` positions (sub-batches). Local position `p` is
     /// segment position `offset + p`.
     pub offset: usize,
 }
@@ -271,7 +271,7 @@ fn gather(m: &SparseMatrix, col: usize, v: impl Fn(usize) -> F128) -> F128 {
 
 /// `out[c] = (M^T v3)[c]` for every input column `c`, with `M = M_3 M_2 M_1` the segment's
 /// composite: `v2 = M_3^T v3`, `v1_t = M_2^T v2(t, .)`, `out_t = M_1^T v1_t` block by block
-/// (docs/bridge.md Section 5, the walker). `v3` has `m_3` entries; `out` has `input_bits`
+/// (the walker). `v3` has `m_3` entries; `out` has `input_bits`
 /// entries and is overwritten.
 ///
 /// # Panics
@@ -458,7 +458,7 @@ mod tests {
         rows
     }
 
-    /// docs/bridge.md Section 9 item 2(b): the toy shape, `L = 2^12` input bits, against the
+    /// The toy shape, `L = 2^12` input bits, against the
     /// dense composite (16 rows by 4,096 columns) and its transpose on a random vector.
     #[test]
     fn toy_composite_and_transpose_match_the_dense_product() {
@@ -536,9 +536,9 @@ mod tests {
     }
 
     /// A single flipped input bit changes `Y` exactly when its composite column is nonzero
-    /// (linearity). Level 1 never kills a weight-one difference (Lemma 1 of docs/bridge.md
-    /// Section 7: column weight `k_1 >= 1`); levels 2 and 3 kill its weight-`k_1` image with
-    /// probability at most `1 / C(m_2, k_2) + 1 / C(m_3, k_3)` (Lemma 2), which is
+    /// (linearity). Level 1 never kills a weight-one difference (column weight `k_1 >= 1`);
+    /// levels 2 and 3 kill its weight-`k_1` image with probability at most
+    /// `1 / C(m_2, k_2) + 1 / C(m_3, k_3)`, which is
     /// `2^-10.7` on the toy, so a handful of the 4,096 toy columns may vanish (expected 2.4).
     #[test]
     fn single_bit_flips_are_detected_unless_the_column_vanishes() {

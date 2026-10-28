@@ -1,16 +1,15 @@
 # PIOP (`agg-piop`): tables, commitments, sum-check stages, transcript and wire format
 
-**Wire version 1 (lookup layout L16, 2026-10-24):** the range mechanism is the lookup into
-`T_16` (`docs/lookup.md`). Section 19 is the current description of the groups, the event-0
-bytes, the commit flow, the lookup, the stage tables, the transcript and the wire format;
-Sections 2, 3, 7, 9 and 10 below describe wire version 0 (the base-16 digit layout, code
-`4247f61`) where Section 19 does not replace them, and Sections 13 to 18 are measurements and
-kernel work on that layout.
+**Lookup layout L16:** the range mechanism is the lookup into `T_16` (`docs/lookup.md`).
+Section 19 is the current description of the groups, the event-0 bytes, the commit flow, the
+lookup, the stage tables, the transcript and the wire format; Sections 2, 3, 7, 9 and 10 below
+describe wire version 0 (the base-16 digit layout) where Section 19 does not replace them, and
+Sections 13 to 18 are measurements and kernel work on that layout.
 
 Part 1 (prover-side tables, commitments, public data, virtual evaluators; spec Sections
 2, 4, 5, 7.6), part 2 (the three sum-check stages, the weight tables, the transcript,
 the proof wire format, the prover and verifier drivers; spec Sections 6, 7, 10, 11) and
-part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `prove_mode_b`
+part 3 (the timed, streamed verifier and the mode-B aggregate, `prove_mode_b`
 / `verify_mode_b`; spec Sections 11, 14). Deviations: `docs/deviations.md` entries P1 to P12.
 
 ## 1. Modules
@@ -38,8 +37,8 @@ part 3 (the timed, streamed verifier and the mode-B aggregate of milestone M2, `
 | `public_stream` | `StreamedPublic`: the verifier's light per-record data (step 2) and the one pass of step 6 (`T(r^(2))`, `w_A(r^(3))`) | 2, 11 | |
 | `mode_b` | mode B: public `w_1'` bits as the Keccak side (`PublicBits`, `PublicBitsVerifier`), the GF(2) projection, the bit check, `prove_mode_b`, `verify_mode_b` | 11, 14 | |
 
-`agg-pcs-config` gained `PcsProver::commit_polynomials` (commit already materialized
-polynomials); `commit_group` now delegates to it.
+`agg-pcs-config`'s `PcsProver::commit_polynomials` commits already materialized
+polynomials; `commit_group` delegates to it.
 
 ## 2. Manifest and the event-0 bytes
 
@@ -200,7 +199,7 @@ field helpers):
 Memory at `N = 2^15` (estimates, 16 bytes per `K` element): the first `K` tables appear
 after the third fold at an eighth of the domain, so stage 1's main-domain group holds
 `34 * 2^22 * 16 B = 2.3 GB` (one row-major table), stage 2 `17 * 2^22 * 16 B = 1.1 GB`,
-stage 3 `23 * 2^22 * 16 B = 1.5 GB` (half the figures of `50fc538`); before that the coded
+stage 3 `23 * 2^22 * 16 B = 1.5 GB`; before that the coded
 lanes cost one byte of pair code per pair of cells and group (`2^24` bytes per column at
 32K), the quartet masses at most `17 * 1 MiB` (stage 3) and the quartet and Taylor tables
 `80 KiB` per lane. The weight tables `w_1`, `w_A` are `512 MB` each. The bridge domains are at
@@ -389,7 +388,7 @@ with the test hooks. The test stand-ins `FixedMatrices` (matrices that ignore `s
 
 ## 12. Mode B (`mode_b`)
 
-Mode B is the Keccak-free aggregate of milestone M2 (spec Section 14): the aggregate is
+Mode B is the Keccak-free aggregate (spec Section 14): the aggregate is
 the proof bytes, which carry `c~_i` and, as the event-2 item of segment `sigma`, the
 `w1Encode(w_1'_i)` strings (768 bytes each, record order) of the segment's live records;
 the event-6 share items and the join's proof items are empty; event 0 binds Flock profile id 3 (`PublicBits`). Layout
@@ -415,17 +414,17 @@ ones (relation `H(2^17, 2^18)` with the hash relation checked in the clear).
 
 ## 13. Measurements
 
-This machine (i7-11700K, turbo boost and hyper-threading off), 2026-10-24,
+This machine (i7-11700K, turbo boost and hyper-threading off),
 `taskset -c 0,1,3-15` (7 cores; CPU 2 busy with another task, load average about 6 at the
 start), release build without the `avx512` feature (Aerie's runtime dispatch selected
-AVX-512), working tree on top of `6434fef` (dirty: this stage, uncommitted).
+AVX-512).
 `scripts/bench.sh --bench mode_b` (`crates/agg-bench/benches/mode_b.rs`): per size one
 prover process (3 runs) and one verifier process (7 runs uncached, then 7 with every key
 cached); `N - N/32` records under their own keys, `N/32` under 3 shared keys; fixed test
-matrices (`FixedMatrices`, built outside the timed region; deviation P4). The benchmark now
-derives the matrices from `sd` (`SeededMatrices`), which adds the derivation (about
-150 ms on 7 threads, 62 MB, deviation P4) to the prover and to every verification, so the
-table below predates that change. Times are medians; peak RSS is `VmHWM` of the
+matrices (`FixedMatrices`, built outside the timed region; deviation P4). The benchmark
+itself derives the matrices from `sd` (`SeededMatrices`), which adds the derivation (about
+150 ms on 7 threads, 62 MB, deviation P4) to the prover and to every verification; the
+table below uses the fixed matrices. Times are medians; peak RSS is `VmHWM` of the
 role's process after resetting it once the inputs are built (`/proc/self/clear_refs`).
 
 | `N` | `d_main` | Prove | Verify uncached | Verify cached keys | Prover peak RSS | Verifier peak RSS | Aggregate | Public bits | Aggregate without bits |
@@ -556,83 +555,14 @@ build; the 1,024-signature round trip is ignored in debug builds):
 `agg-bench` (`taskset -c 0,1,3-15 cargo test -p agg-bench --release`, 3 tests): medians,
 batch inputs, `VmHWM`/`VmRSS` parsing, the peak following a 64 MiB allocation and its reset.
 
-## 15. Profile of stages 1 to 3 (2026-10-24, before the kernel rework)
-
-Setting: this machine, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CLMUL
-build (`RUSTFLAGS="-C target-feature=+pclmulqdq"`, `CARGO_TARGET_DIR=target/clmul`), tree
-`a735dff` plus the `AGG_STAGE_TRACE` instrumentation of `stage::prove_stage` (per group:
-message and fold time summed over the rounds; per round: wall time), `N = 1,024`
-(`d_main = 20`), one run each, load average below 1. Mode A: `agg bench --count 1024
---warmup 0 --reps 1`; mode B: `cargo bench -p agg-bench --bench mode_b -- 1024 --warmup 0
---reps 1`. The stages cost the same in both modes (mode A 667 / 1,829 / 683 ms, mode B
-656 / 1,842 / 682 ms for stages 1 / 2 / 3); the non-Flock prover is 4.03 s (mode A) and
-3.95 s (mode B), of which stages 1-3 are 3.2 s, the `G_main` commitment 0.15 s, the opening
-0.34 s, round 2 (matrices, parities, carries, commitments) 0.17-0.20 s.
-
-Per group (message = `Group::round_message` over all rounds, bind = `Group::bind`), ms:
-
-| Stage | Group | Lanes | Instances | Message | Bind | Share of the stage |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | main, `eq(tau)`: 6 bits, 14 x (`A^lo`, `A^hi`) | 34 | 21 | 478 | 88 | 89% |
-| 1 | `D_1`, `eq(tau_1)`: 6 `y^(1)`, 12 x (`A^lo`, `A^hi`) | 30 | 18 | 19 | 3 | 3% |
-| 1 | `D_2`, `eq(tau_2)`: 6 `y^(2)`, 12 x (`A^lo`, `A^hi`) | 30 | 18 | 13 | 2 | 2% |
-| 1 | `D_3`, `eq(tau_3)` | 4 | 2 | 2 | 0 | |
-| 1 | `D_1`, weight `w_2` | 7 | 6 | 8 | 1 | 1% |
-| 1 | `D_2`, weights `w_{3,t}` | 12 | 1 | 6 | 1 | 1% |
-| 2 | main, weight `w_1`: 6 bits (`def_y1`) | 7 | 6 | 216 | 17 | 13% |
-| 2 | main, `eq(r^(1))`: 17 `P_Z` (leaves) | 17 | 31 | 1,444 | 45 | 81% |
-| 2 | `D_1`, `eq(r^(1)_1)`: 18 `P_Z` | 18 | 30 | 58 | 2 | 3% |
-| 2 | `D_2`, `eq(r^(1)_2)`: 18 `P_Z` | 18 | 30 | 41 | 1 | 2% |
-| 2 | `D_3`, `eq(r^(1)_3)`: 2 `P_Z` | 2 | 4 | 5 | 0 | |
-| 3 | main, `eq(r^(2))`: 23 columns (ring residual, 17 links, 6 reductions) | 23 | 24 | 369 | 64 | 61% |
-| 3 | main, weight `w_A`: 5 `z` digits | 6 | 1 | 60 | 17 | 11% |
-| 3 | main, `eq(r^(1))`: 6 bits (reductions) | 6 | 6 | 88 | 20 | 15% |
-| 3 | the seven bridge-domain groups | 2-24 | 2-24 | 42 | 6 | 7% |
-
-Per round (ms, round 0 first): stage 1 `272 130 66 36 18 11 18 21 24 12 6 3 2 1 0 ...`;
-stage 2 `829 396 203 115 64 35 43 30 57 28 14 7 4 2 1 0 ...`; stage 3 `292 146 72 38 20 14
-17 19 23 12 6 3 1 1 0 ...`. Round `r` has `2^(d_main - 1 - r)` pairs of cells, so round 0
-is 43-45% of a stage, round 1 20-21%, round 2 10-11%; the bump at rounds 6 to 8 is the
-bridge-domain groups becoming active (`d_1 = 14`, `d_2 = d_3 = 13` at this `N`). The
-weight tables are not the cost: `y^(1)` parities 9.5 ms, `w_2, w_3` 0.8 ms, `w_1` 5.2 ms,
-`w_A` 32.5 ms.
-
-Where the time goes (`kernel::Group::inner_evaluations`): for every pair of cells and
-every interpolation point `X` (`degree` points with an equality factor, `degree + 1`
-without) every term of every instance is evaluated in `K` and multiplied by its gamma. The
-stage-2 main group evaluates 31 leaves `Q(P_Z)` of degree 4 at 5 points: `31 * 5 * (4 + 1)
-= 775` `K` multiplications per pair (about 11 ns each on this machine, 8.7 us per pair in
-round 0), the same in every round although the first round reads `i8` cells. The stage-1
-main group does 21 terms x 4 points x 2 multiplications (term and gamma) plus 34 lane
-extrapolations; the stage-3 main group an affine form in 17 lanes (17 `mul_i64`, each a
-full `K` multiplication: `jolt_field::Ring::mul_i64` is `self * from_i64(n)`) plus 17
-links and 6 reductions at 3 points. Folding (`bind`) is 10-15% of a stage; the first fold
-lifts every cell with one `K` multiplication (`challenge.mul_i64(high - low)`).
-
-What this suggests, measured against Aerie's kernels (`aerie-prover/src/protocol/kernels/`,
-`quartic_kernel.rs`, `range_source_kernel.rs`): Aerie never evaluates a term per cell in
-the first rounds. Its sources are coded (`CodedSource`: cells in `[min, max]` with
-`max - min < 16`), round 0 buckets the equality weights by the pair pattern of the two
-cells (256 patterns per source) and evaluates each term once per pattern, round 1 does the
-same on quartet patterns when the domain is large enough (`BUCKET_MIN_RATIO = 4`), and
-the lifted lanes appear only after the compact rounds. Its terms are also pre-aggregated
-per source (`aggregate_weights`: one gamma-weighted polynomial per digit instead of two
-leaves). Neither is done here. The committed layout itself (23 main-domain columns) is not
-what separates us from Aerie's cost; see Section 16 for the element-count analysis.
-
-Reference figures of this profile (prove, ms, one run): mode A 6,272 total (Flock part
-2,238, stages 3,178); mode B 3,945 (stages 3,180).
-
-## 16. Design of the kernel rework (2026-10-24)
+## 16. Design of the kernel rework
 
 ### 16.1 Committed elements: what can and cannot be cut
 
 The 23 main-domain columns (spec Section 4.1) hold 70 bits of range-checked value per
 position (`z` 18, `u` 19, `v` 27, `w_1'` 6) in base-16 digits (4 bits each) plus the six
-bits; 5 + 5 + 7 + 6 = 23 is the minimum for that argument. The 8,192 elements of the H
-layout in `ref/notes/improvements-tables.md` assumed that an Akita width certifies a
-range; the review withdrew that (Akita Remark 10.41, spec B.3). The candidates of the
-task, with numbers:
+bits; 5 + 5 + 7 + 6 = 23 is the minimum for that argument. An Akita width does not certify a
+range (Akita Remark 10.41, spec B.3). The candidates, with numbers:
 
 - **Divisibility projection instead of `v` (P2).** A single-level residual projection
   with coefficients in `[-12, 12]` over the `2^25` entries of `Delta_0 = (A z) - T -
@@ -661,12 +591,13 @@ task, with numbers:
   sum-check, not the PCS (0.5 s of 4 s at 1K), is the cost. Not adopted.
 - **Merging the six Boolean lanes.** The bridge takes six separate Boolean lanes
   (parities per bit) and the bits are not low-degree in `w_1'`. Not possible in relation H.
-- **Lookups** (Shout, LogUp) would allow 16-bit digits and about 12 columns; none exists
-  for fp64/Akita (risks R5). Open.
+- **Lookups** (Shout, LogUp) allow 16-bit digits and about 12 columns: adopted as the
+  lookup layout L16 (Section 19).
 
-Conclusion: the element count stays at 23,552 main-domain elements per signature; the
-wire format, the verifier and the soundness ledger of spec Section 12 are unchanged by
-this work. The cost gap to Aerie is in the prover's kernel, not in the layout.
+Conclusion for the base-16 layout: the element count stays at 23,552 main-domain elements
+per signature; the wire format, the verifier and the soundness ledger of spec Section 12 are
+unchanged by the kernel work. The cost gap to Aerie is in the prover's kernel, not in the
+layout.
 
 ### 16.2 Kernel rework (prover only, bit-identical proofs)
 
@@ -702,77 +633,19 @@ summands; Horner and the folded coefficients are exact). The verifier is untouch
 existing stage tests (prover/verifier agreement, tampering at the stated stage) check the
 rework end to end; `kernel` tests compare the compact and generic paths on random tables
 with every `Term` kind. Memory after the first fold is unchanged (one `K` per cell per
-lane); a coded `u8` representation through round 1 (Aerie's quartet LUT) would divide
-it by 16 and is the next step if measurements justify it (Section 17).
+lane); Section 18 keeps the codes through three rounds.
 
-## 17. Measurements of the kernel rework
-
-(First step, `50fc538`. The second step, codes through three rounds and a dense table from
-the third fold, is Section 18; its measurements are in Section 18.3.)
-
-Same machine and build as Section 15 (7 threads, CLMUL build), tree `a735dff` plus the
-rework; full tables in `ref/notes/bench-local.md` (last section). Every aggregate is
-byte-identical to the one before the rework and verifies with the unchanged verifier.
-
-Stages at `N = 1,024` through the steps of Section 16.2 (ms, one traced run each):
-
-| Step | Stage 1 | Stage 2 | Stage 3 | Rounds 0, 1, 2 of stage 2 |
-| --- | ---: | ---: | ---: | --- |
-| before | 637 | 1,848 | 706 | 829, 396, 203 |
-| compiled plan, bucketed round 0, lookup fold | 295 | 579 | 360 | 32, 220, 112 |
-| plus round 1 bucketed by quartet patterns | 257 | 441 | 348 | 18, 104, 112 |
-| (quartet lookup after the second fold, rejected) | 305 | 516 | 383 | 17, 96, 172 |
-
-Medians of 5 runs after 1 warmup (`agg bench`, mode A, and the mode-B bench), ms:
-
-| `N` | Stage 1 | Stage 2 | Stage 3 | Stages per signature | Non-Flock prover (mode A) | Mode-B prove |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 | 104 | 203 | 122 | 1.68 ms | 917 | 879 |
-| 512 | 161 | 317 | 192 | 1.31 ms | 1,283 | 1,233 |
-| 1,024 | 258 | 452 | 353 | 1.04 ms | 1,852 | 1,825 |
-| 2,048 | 446 | 783 | 608 | 0.90 ms | 2,931 | 2,789 |
-
-Before the rework the stages cost 1,032 / 1,723 / 3,245 / 6,070 ms at these sizes (2.4x
-to 3.3x), the non-Flock prover 1,510 / 2,346 / 4,103 / 7,171 ms. The per-signature cost
-falls with `N` because the bucketed rounds amortize over more pairs (the quartet space
-is fixed). What remains: round 2, the first generic round over the materialized `K`
-lanes, is now the largest term of every stage (249 ms of stage 2 at `N = 2,048`), then
-the geometric tail of the later rounds; a third compact round would need Aerie's
-quartet-LUT approach with a cache-resident layout (the straightforward 1 MiB-per-lane
-lookup was slower, see the table). The `G_main` commitment (138 ms) and the opening
-(325 ms) are now a third of the non-Flock prover at `N = 1,024`.
-
-## 18. Kernel rework, second step: codes through three rounds (2026-10-24)
+## 18. Kernel rework, second step: codes through three rounds
 
 Prover only: every message, terminal value and proof byte is unchanged (aggregates
-byte-identical to `7ed4a32` at 256 to 2,048 records, Section 18.3), so the transcript, the
-wire format (version 0) and the verifier are untouched.
+byte-identical to those of the first step at 256 to 2,048 records, Section 18.3), so the
+transcript, the wire format (version 0) and the verifier are untouched.
 
-**Public API changes** (for code that uses `kernel` or the prover; all inside `agg-piop`):
+### 18.1 What was implemented
 
-- `src/kernel.rs` is now the directory `src/kernel/` (`mod.rs` with the public items,
-  `plan.rs`, `coded.rs`, `field.rs`, `tests.rs`). Unchanged public items: `Source`,
-  `Lane::{column, mapped, len, is_empty, value, fold, terminal}`, `Lane::Source`,
-  `Lane::Folded`, `Term`, `LeafPoly`, `GroupInstance`, `Group::{new, claim, round_message,
-  bind, terminal_values, inactive_rounds, is_bucketed}`, `compress`, `evaluate_compressed`,
-  `inactive_message`, `inverse_power_of_two`, `expected_terminal`, `digit_map`,
-  `IDENTITY_MAP`. Removed: `Lane::Lookup` (it held a crate-private `Column` and could not be
-  built outside the kernel); `Lane` is now the input type only, the compact states live in
-  `Group`.
-- `tables::ProverTables::parity1` is a `tables::Parity1` (`Narrow([Vec<i8>; 6])` when every
-  parity fits an `i8`, as for an honest witness, `Wide([Vec<i32>; 6])` otherwise, with
-  `lane(t)` and `value(t, index)`) instead of `[Vec<i32>; 6]`.
-- `prover::prove` and `prover::prove_with_tables` take `keccak: &(impl KeccakSide + Sync)`
-  (every implementation in the workspace already is: `PublicBits`, `NoKeccak`,
-  `agg-cli`'s `FlockProver`, which holds its state in a `Mutex`).
-- `pcs::TableCommitter::open_claims(commitments, claims, session)`; `open` is kept.
-- `public_data::negacyclic_kernel_into(a, r, out, scratch)` (no allocation).
-
-### 18.1 What was implemented (handoff items)
-
-1. *Coding by lane maps* (item 1) as designed: classes of the present cells under the tuple
+1. *Coding by lane maps* as designed: classes of the present cells under the tuple
    of the maps of the lanes on the column, at most 16; one byte of pair code per pair.
-2. *Pieces* (item 2): bucketed per column or joint column set; direct otherwise. Weighted
+2. *Pieces*: bucketed per column or joint column set; direct otherwise. Weighted
    sums replace the keyed buckets (`Piece::Weighted`, `WeightConstant` are gone): every
    `Affine` with a weight and every product of a field lane with another lane is one form
    `w (sum c_l v_l + c)` per weight lane; in the first round its byte lanes are read through
@@ -780,19 +653,18 @@ wire format (version 0) and the verifier are untouched.
    coefficients at the first fold. The virtual `Int` lane of the design was not needed: with
    the per-byte tables and the absorbed coefficients the `w_A` and `w_1` groups cost about
    seven products per pair at every level (synthetic profile below: 33 and 36 ms at
-   `2^21`, against 110 and 128 ms of message and fold time in the `50fc538` trace at
-   2,048).
-3. *Lane states* (item 3): `Source -> Pair -> Quartet | PairFold -> Dense`, plus `Table` for
+   `2^21`, against 110 and 128 ms of message and fold time before at 2,048).
+3. *Lane states*: `Source -> Pair -> Quartet | PairFold -> Dense`, plus `Table` for
    uncoded lanes; `terminal_values` reads any state (domains of 0 to 3 variables end in a
    compact state).
-4. *Rounds* (item 4): quartet masses with `remaining_eq_tables_after(1)` serve rounds 0 and 1;
-   level 2 reads quartet tables with Taylor tables. Departures: see 18.2.
-5. *Coefficient form* (item 5) everywhere, and two further reductions of the arithmetic: the
+4. *Rounds*: quartet masses with `remaining_eq_tables_after(1)` serve rounds 0 and 1;
+   level 2 reads quartet tables with Taylor tables.
+5. *Coefficient form* everywhere, and two further reductions of the arithmetic: the
    constant coefficient is recovered from the running claim from the second active round
    on, and the last product of each coefficient is accumulated unreduced.
-6. *Narrow parities* (item 6) as designed (`tables::Parity1`); the stage-1 `D_1` group is now
+6. *Narrow parities* as designed (`tables::Parity1`); the stage-1 `D_1` group is now
    bucketed.
-7. *Faster `K` product* (item 7): `kernel::field::fm`, four `64 x 64` products and two
+7. *Faster `K` product*: `kernel::field::fm`, four `64 x 64` products and two
    branch-free reductions (`2^64 = 59`, `2^128 = 3481` modulo `p`); 7.4 ns against 9.4 ns for
    `*` in a throughput loop on this machine (Aerie's `opening_field_ops::mul`: 7.7 ns), equal
    to `*` on boundary and random inputs (`fast_product_matches_the_field_product`).
@@ -800,9 +672,9 @@ wire format (version 0) and the verifier are untouched.
    values (`TableCommitter::open_claims`; the recomputation is a debug assertion and a check
    in `tests/prove_verify.rs`); (2b) `rayon::join` of the round-1 commitment and
    `KeccakSide::commitments`, no change to `agg-cli` needed; (2c) the round-2 groups are
-   committed concurrently; (2d) no planner change (Section 16 of the handoff).
-9. *Weight table `w_A`* (not in the handoff; it was 73 ms of stage 3 at 2,048 after the
-   kernel work): the negacyclic transform of `ring_weight_table` is allocation-free (it
+   committed concurrently; (2d) no planner change.
+9. *Weight table `w_A`* (73 ms of stage 3 at 2,048 after the kernel work): the negacyclic
+   transform of `ring_weight_table` is allocation-free (it
    allocated two vectors per recursion node, about 2,000 per record) with one fold product
    per butterfly output, the row weights are scaled by `eq(r2_sig, i)` once per record and
    combined with the integer rows of `A` by base-field products: 73 to 36 ms at 2,048
@@ -841,7 +713,7 @@ Measured and rejected (kept out of the code):
   implemented.
 
 The bivariate prefix does apply to the 16-class stage-3 group from `N = 1,024` on (`2^18`
-quartets against `4 * 16^4`), contrary to the handoff's estimate (from 2,048); its masses are
+quartets against `4 * 16^4`), not only from 2,048; its masses are
 17 tables of 1 MiB accumulated one table per task (no replication), and round 1 reads them
 by moments (2.5 ms instead of 12 ms at `2^21`).
 
@@ -849,9 +721,9 @@ by moments (2.5 ms instead of 12 ms at `2^21`).
 
 This machine, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CLMUL build
 (`RUSTFLAGS="-C target-feature=+pclmulqdq" CARGO_TARGET_DIR=target/clmul`; the CLI with
-`--features agg-keccak/avx512,agg-piop/avx512`), 2026-10-24 16:53 to 16:56. "Before" is the
-binary of `7ed4a32` built at the start of this work (PIOP code of `50fc538`), "after" the
-tree with this section's changes; the two ran back to back, before first, medians of 5 timed
+`--features agg-keccak/avx512,agg-piop/avx512`). "Before" is the binary of the first step
+(Section 16.2), "after" the code with this section's changes; the two ran back to back, before
+first, medians of 5 timed
 runs after 1 warmup. Load average 2.8 at the start and 5.1 to 5.6 during the runs (the runs'
 own 7 threads included; no other job was visible). Every mode-B aggregate (256 to 2,048
 records) and the mode-A aggregates of 256 and 1,024 records (`agg aggregate`, same records)
@@ -877,7 +749,7 @@ because the first `K` tables are an eighth of the domain instead of a quarter.
 Per round, one traced run after one warmup (`AGG_STAGE_TRACE=1`, prover child), ms, round 0
 first:
 
-| `N`, stage | Before (`50fc538` profile, Handoff) | After |
+| `N`, stage | Before | After |
 | --- | --- | --- |
 | 1,024, stage 1 | `10 92 59 25 16 9 13 8 15 8 4 2 1 1` | `7 1 31 11 6 4 3 4 5 3 2 1 0` |
 | 1,024, stage 2 | `17 116 118 61 37 19 13 12 31 16 8 4 2 1 1` | `16 5 32 17 11 7 4 7 8 5 2 1 1` |
@@ -905,199 +777,14 @@ total, the overlap; Flock parts 1.300 -> 1.375 s (commit included), everything e
 
 Against the goals: stages 1-3 are 2.8x faster at 1,024 and 2,048 (target about 2x), 0.32 ms
 per signature at 2,048 on 7 threads. At 32K this extrapolates to about 10 s of stages on this
-machine and, with the cloud-to-local ratio of the `50fc538` runs (13.4 s measured against
+machine and, with the cloud-to-local ratio of the first step's runs (13.4 s measured against
 29 s extrapolated), about 5 s on the cloud VM (estimates, not measured; Aerie's stages take
 0.60 s there). Per committed element that is about 6.5 ns on the cloud VM at 32K
 (estimate) against Aerie's 12 ns.
 
-## Handoff (2026-10-24)
+## 19. Lookup layout L16
 
-State of the working tree: clean at `50fc538`; nothing was edited yet (the baseline
-build in `target/clmul` is current, the workspace tests of `50fc538` pass as recorded in
-Section 14). Everything below is the profile taken for the next kernel step, the design
-decided from it, and the implementation order. Raw logs are in the session scratchpad
-only (`bench/baseline-*.log`, `bench/trace-baseline.log`).
-
-### Done: profile of `50fc538` (CLMUL build, 7 threads, load average 0.7 to 3.7)
-
-Mode B, `cargo bench -p agg-bench --bench mode_b -- N --warmup 1 --reps 5`
-(`RUSTFLAGS="-C target-feature=+pclmulqdq" CARGO_TARGET_DIR=target/clmul`,
-`RAYON_NUM_THREADS=7`), medians of 5, prover steps in ms:
-
-| `N` | Prove | tables | round 1 (`G_main`) | round 2 (matrices etc.) | stage 1 | stage 2 | stage 3 | opening |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 | 0.903 s | 20 | 36 | 158 | 105 | 204 | 125 | 249 |
-| 512 | 1.272 s | 45 | 72 | 199 | 165 | 337 | 188 | 257 |
-| 1,024 | 1.833 s | 77 | 137 | 189 | 257 | 450 | 359 | 356 |
-| 2,048 | 2.824 s | 159 | 189 | 186 | 445 | 753 | 665 | 413 |
-
-Round 2 is the seeded matrix derivation (P4, about 150 ms, not a PIOP cost). The
-`AGG_STAGE_TRACE=1` output of the mode-B bench is swallowed by the driver (`Command::output`
-captures the prover child's stderr); run the prover child directly:
-`target/clmul/release/deps/mode_b-<hash> --prover-child N --warmup 0 --prove-runs 1
---verify-runs 1 --shared N/32`. Per round at `N = 2,048` (ms, round 0 first):
-stage 1 `21 140 113 48 28 17 19 11 8 15 8 4 2 1 1`, stage 2 `34 162 226 115 62 30 22 22 15
-31 16 8 4 2 1 1`, stage 3 `42 198 112 66 36 17 13 13 8 17 9 4 2 1 1`; at 1,024: stage 1
-`10 92 59 25 16 9 13 8 15 8 4 2 1 1`, stage 2 `17 116 118 61 37 19 13 12 31 16 8 4 2 1 1`,
-stage 3 `22 143 57 32 16 9 10 9 17 8 4 2 1 1`. Per group at 2,048 (message / bind, ms):
-stage 1 main `eq(tau)` 268 / 124, `D_1 eq(tau)` (generic: `Ints` parity lanes) 19 / 3;
-stage 2 main `eq(r1)` 536 / 45, main `w_1` 80 / 32; stage 3 main `eq(r2)` 246 / 71, main
-`w_A` 108 / 18, main `eq(r1)` 28 / 30; bridge-domain groups 1 to 15 ms each.
-
-Reading: round 1 (quartet buckets, 65,536 patterns per digit column under the raw
-coding) is the largest or second-largest round in every stage. Its cost is not the
-arithmetic (about 15 ms of per-pattern work) but the bucket tables: `bucketed_evaluations`
-builds one `Sums` of 14 x 65,536 x 16 B = 14.7 MB per rayon split and `reduce(zeroed,
-add)` zeroes and adds a fresh table per split (about 16 tables = 235 MB memset + 118 MB
-adds at 2,048). Round 2 (first generic round over the materialized `K` lanes at a quarter
-of the domain) costs 17 lanes x 5 points x 4 Horner multiplications = 340 `K`
-multiplications per pair in stage 2 (3.5 us per pair), plus the materializing fold at the
-end of round 1 (34 lanes x 2^19 x 16 B = 285 MB written in stage 1). The dense tail from
-round 3 on is 160 / 330 / 190 ms per stage at 2,048, i.e. as large as rounds 0-2 together
-after the prefix below is in place. Per committed element the stages cost 17 ns at 32K
-(13.4 s / (32,768 x 23,552)) against Aerie's 12 ns (0.60 s / (32,768 x 1,536)): the
-remaining gap to Aerie's absolute figure is mostly the 15x element count of the layout
-(Section 16.1), so the realistic kernel target is about 2x on stages 1-3.
-
-### Design (prover only; every path computes the same polynomials, proof bytes unchanged)
-
-Aerie's kernels (`aerie-prover/src/protocol/kernels/{quartic,product,range_source}_kernel.rs`,
-`kernel_common.rs`) keep the `i8` sources through three active rounds: round 0 buckets
-quartet masses with the round-1 equality weights and serves rounds 0 and 1 from them
-("bivariate prefix"), round 2 reads a quartet lookup table (folded values of every
-quartet pattern) and expands the terms with Taylor coefficients, and only the third bind
-materializes `K` lanes at an eighth of the domain. Pattern spaces use the range image
-`z(z + 1)` (8 classes for a base-16 digit). The plan for `kernel::Group`:
-
-1. *Column coding by lane maps.* A column's code is the class of its cell under the tuple
-   of the maps of the bucketable lanes reading it (`lo_map`, `hi_map`, `square_map` all
-   factor through `z(z+1)`, so stages 1 and 2 get 8 codes per digit column, bits 2; stage
-   3's links read the identity map, 16 codes). `Column { cells, code: [u8; 256], reps:
-   Vec<i8>, pair_bits }`; a column with more than 16 classes is not coded. Coding must be
-   by lane *map value*, never by the composed polynomial: `v(v+1)` at the pair `(3, -4)`
-   and at `(3, 3)` are different polynomials in the round variable.
-2. *Pieces.* Compile as now into per-lane polynomials, same-column bilinears, joint generic
-   terms (bucketable when all their lanes are coded) and *direct* pieces evaluated per
-   item at every level: every `Term::Affine` becomes `gamma [* w] *` a virtual integer
-   lane `Lane::Int { parts: (column, map, i64 coefficient), constant, challenges }` (value
-   at level `a` = fold of `2^a` consecutive `i64` cell values by the stored challenges,
-   `E::mul_base` for the first level); bilinears with a `Field` weight lane or across two
-   columns, and polynomials on non-coded lanes, are direct as well. Keyed buckets
-   (`Piece::Weighted`, `WeightConstant`) disappear: the `w_A * z` and `w_1 * b_t` pieces
-   cost about 7 `K` multiplications per pair directly and no bucket memory. A group is
-   never "all generic" any more; only its direct pieces take the per-item pass.
-3. *Lane states.* `Source -> Lookup {pair LUT, n^2} -> Quartet {quartet LUT, 2^(2 pair_bits)}
-   -> Folded` (materialized at 1/8 of the domain). LUTs carry the first-fold scale, as now;
-   `Int` lanes are not scaled. `terminal()` works in any state (domains of 1 or 2
-   variables end as `Lookup`/`Quartet`).
-4. *Rounds.* Level 0: if `quartets >= BUCKET_MIN_RATIO * max pattern space` (and at least
-   two active rounds) accumulate quartet masses per pure column and joint term with the
-   round-1 equality tables (`GruenSplitEq::remaining_eq_tables_after(1)`, exists at Akita
-   `e023b6a`), using Aerie's `chunked_bucket_sums` shape (exactly `min(threads, items /
-   width)` contiguous chunks, one table each, block-parallel reduction), and derive the
-   round-0 polynomial as `l0 * sum_q M_q F(pair p0 of q) + l1 * sum_q M_q F(pair p1 of q)`
-   with `l0 = 1 - tau_1, l1 = tau_1` (`tau_1` = the local eq point's second coordinate;
-   both 1 for weight groups); keep the masses. Level 1: from the kept masses with the pair
-   LUT values (`F(lut[p0] + X (lut[p1] - lut[p0]))`), no pass over the data. Otherwise
-   pair masses at level 0 (as today) and per-item at level 1. Level 2: one pass over
-   octets; each coded lane's `(left, right)` are two quartet-LUT reads; lane polynomials
-   of degree >= 2 on columns with at most 4,096 quartet patterns use a Taylor table built
-   at the second bind (`(d + 1)` coefficients per LUT entry, so a lane costs `2d - 1`
-   multiplications per octet instead of `d * points`), larger ones the shift below.
-   Levels >= 3: per pair over `Folded` lanes.
-5. *Coefficient form everywhere.* Pieces return the coefficient vector of the inner
-   polynomial `q(X)` (a small fixed-size `Poly`) instead of evaluations at `points`
-   points; a lane polynomial of degree `d` at `u + delta X` by Taylor shift (synthetic
-   division, `d(d+1)/2` multiplications, then `delta` powers): 14-17 for `d = 4` against
-   20, 5-6 for `d = 2` against 6; bilinears 3-4; joint terms by `Poly` arithmetic. The
-   message is `UnivariatePoly::new(coefficients)` then `gruen_mul` as now (exact, so
-   identical to `from_evals`). `direct_claim` of lifted groups uses `q(0) + q(1)` from the
-   same coefficients and caches the level-0 result so the first active round does not
-   repeat the pass.
-6. *Parity lanes as `i8`.* `ProverTables::parity1` becomes narrow (`Vec<i8>`) when every
-   value fits, else the `i32` fallback (`Source::Ints`, uncoded, direct). Then the stage-1
-   `D_1 eq(tau)` group (30 lanes, generic today) is bucketable; it matters at 32K
-   (`D_1 = 2^19`). Public type change of `tables.rs`; note it here when done.
-7. Optional: a faster `K` multiplication (Aerie's `opening_field_ops::mul`, 4 `u128`
-   products and two `reduce130` steps; `pub(crate)` in Aerie, so copy it and test against
-   `*` on random inputs; `Prime64Offset59::solinas_reduce` and `to_limbs` are public in
-   jolt-field `c7c2d08`).
-
-Memory: quartet masses per chunk = sum over pure columns of `2^(2 pair_bits) * 16 B`
-(stage 2 main: 17 x 64 KB; stage 3 main: 17 x 1 MiB, 125 MB over 7 chunks; the bivariate
-threshold `quartets >= 4 * 65,536` holds from `N = 2,048` on for the stage-3 group), the
-quartet LUTs 1 MiB per 16-code lane, and the materialized lanes at 1/8 of the domain
-(stage 1 at 32K: 2.3 GB instead of 4.6).
-
-Expected (estimates from the per-round costs above, at `N = 2,048`): stage 1 about 200 ms
-(from 445), stage 2 about 350 (from 753), stage 3 about 250 (from 665); the dense tail
-then dominates, where only fewer multiplications per lane (item 5, Aerie's unreduced
-`sum_split_coefficients` accumulation) remain.
-
-Goal (2), commit and opening (`G_main` 189 ms, opening 413 ms at 2,048): (a) the opening
-recomputes the 67 claims with `evaluate_signed_table` (one streaming pass per column,
-about 50-70 ms at 2,048 on 7 threads) although they equal the stage-3 terminal values the
-prover already has and checks against; take the claims from `stage3.claims` and keep the
-recomputation as a debug assertion or test; (b) in mode A, run `commit_round1` and
-`keccak.commitments(segments)` under `rayon::join` (both precede `sd`; absorb in event
-order afterwards; Aerie commits its groups in a parallel fan-out because an Akita commit
-is memory-bound and does not scale across threads); (c) `commit_round2` can commit `G_1,
-G_2, G_3` in parallel (the final group needs only the plan's profiles); (d) the catalog
-rows are planned under `policy_of::<Cfg>()` (proof-size objective, `akita-config`); there
-is no prover-time objective to switch to, and the opening's 200 ms fixed part at 256
-records is Akita's `batched_prove`, so no planner change is proposed. None of (a)-(c)
-changes a byte of the proof.
-
-### Next steps, in order
-
-1. Rewrite the internals of `crates/agg-piop/src/kernel.rs` per the design (keep the
-   public items `Source`, `Lane` constructors, `Term`, `LeafPoly`, `GroupInstance`,
-   `Group::{new, claim, round_message, bind, terminal_values, inactive_rounds,
-   is_bucketed}`, `compress`, `evaluate_compressed`, `inactive_message`,
-   `inverse_power_of_two`, `expected_terminal`, `digit_map`, `IDENTITY_MAP`; `Lane::Lookup`
-   changes shape and gains `Quartet`/`Int` variants, used only inside the kernel). Adapt
-   the kernel tests and add: coding classes (8 per digit column under `lo`/`hi`/`square`
-   maps, 16 under the identity), bivariate masses vs generic path vs definition on random
-   tables with every `Term` kind (bit-exact messages and terminals), quartet-LUT and
-   octet rounds vs generic, `Int` lanes vs the affine `Term`, Taylor tables vs the shift,
-   domains of 1, 2 and 3 variables, the `i32` parity fallback, the wide-cell fallback.
-2. `tables.rs`: narrow parity tables (item 6); `prover.rs`: opening claims from stage 3
-   (2a), `rayon::join` of round 1 and the Keccak commitments (2b); `pcs.rs`/`commit.rs`:
-   parallel round 2 (2c).
-3. `taskset -c 0,1,3-15 cargo test --release --workspace` (RUSTUP_TOOLCHAIN=stable), then
-   confirm byte-identical aggregates against `50fc538` (the mode-B bench prints the sizes;
-   `tests/mode_b.rs` and `tests/prove_verify.rs` verify with the unchanged verifier).
-4. Measure: mode B at 256, 512, 1,024, 2,048 (`--warmup 1 --reps 5`) and the prover child
-   with `AGG_STAGE_TRACE=1` at 1,024 and 2,048; mode A at 1,024 (`target/clmul/release/agg
-   bench --count 1024 --warmup 1 --reps 5`, built with `--features
-   agg-keccak/avx512,agg-piop/avx512` as in bench-local.md); report the load average.
-5. Docs: update Sections 6 and 17 of this file (round schedule, memory, measured per-round
-   table), `docs/deviations.md` P12 (extend, no new wire change), `docs/pcs-config.md`
-   Section 5 if the commit driver changes, append a section to `ref/notes/bench-local.md`
-   and update the PIOP items of `ref/notes/status.md` (Section 3 row and open problem 4).
-
-### Progress (kernel rework, second agent; updated after each step)
-
-- Step 1 (kernel): done; `src/kernel/` per Section 18 (API notes there). Kernel tests compare
-  every strategy against an independent reference bit for bit.
-- Step 2: done; `tables::Parity1` (item 6), opening claims from stage 3 (2a), `rayon::join` of
-  the round-1 and Keccak commitments (2b, no `agg-cli` edit needed), concurrent round-2
-  commits (2c), no planner change (2d); plus the allocation-free `w_A` table (Section 18.1
-  item 9).
-- Step 3: done. `taskset -c 0,1,3-15 cargo test --release --workspace`: 261 passed, 0 failed,
-  10 ignored (`agg-piop` 88 and 3); mode-B aggregates at 256 to 2,048 and mode-A aggregates
-  at 256 and 1,024 records byte-identical to `7ed4a32`.
-- Step 4: done (Section 18.3; `ref/notes/bench-local.md`, last section).
-- Step 5: done (Sections 1, 3, 6, 11, 14, 17, 18; deviations P12; pcs-config Section 5;
-  bench-local.md; the PIOP items of status.md).
-- Open: the 32K cloud run of this step; the third active round and the materialization at
-  the third fold are the largest rounds (deferring the materialization one fold is the
-  next candidate, Section 18.2); `agg_bridge::parity` (20 ms at 2,048) and the matrices
-  (P4, about 150 ms) are outside this crate.
-
-## 19. Lookup layout L16 (wire version 1, 2026-10-24)
-
-Branch `lookup-integration` (base `4247f61`). `docs/lookup.md` has the argument, the
+`docs/lookup.md` has the argument, the
 soundness and the remedies for the identity term; `docs/deviations.md` L1 to L7 and D2 the
 departures; `docs/spec.md` Sections 4, 7, 10 to 12 the normative text.
 
@@ -1124,7 +811,7 @@ rounds (`recount`, `lookup::multiplicities`), with their digits. `agg-witness` a
 
 ### 19.2 Event-0 bytes and commit flow
 
-`CommitmentManifest::binding_bytes`: wire version 1, digit layout id 1, six groups (role,
+`CommitmentManifest::binding_bytes`: the wire version, digit layout id 1, six groups (role,
 round, family byte 0/1, variables, polynomial count, alphabet codes: 4 and 8 for the leaf
 digits, `0x90` for a looked-up column, `0x50` for a multiplicity digit, 0 for a Boolean),
 the grouped row id `mldsa-44-l16-batch-<N*>-mult-final`, the bridge shape, then the lookup
@@ -1183,17 +870,18 @@ stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity 
 ### 19.4 Transcript and wire
 
 Registry (`transcript::Registry`): instance; `commit/main16`, `commit/main`; Flock
-commitments; seed; `commit/level1..3`, `commit/mult`; Flock seeds; final vectors; Flock
-proofs; `lookup/x` (2), `lookup/layer1` (40), `lookup/mu/1`; per session `s = 2 .. D`:
+commitments; seed; `commit/level1..3`, `commit/mult`; Flock seeds; final vectors and share
+items; `lookup/x` (2), `lookup/layer1` (40), `lookup/mu/1`; per session `s = 2 .. D`:
 `lookup/gamma/s` (2 per active tree), `lookup/round/s/k` (3) and `lookup/r/s/k`,
 `lookup/terminals/s` (4 per continuing tree), `lookup/leaves/s` (2 per ending stack or
 table), `lookup/mu/s`; `lookup/multiplicities` (7); `tau`; pre-stage (13); stage 1
 (`gamma` 26, rounds, terminal 18); `stage2/kappa1` (6), stage 2 (8, rounds, 8); stage 3 (44,
-rounds, 31); PCS session. Wire (`wire::AggregateProof`, version 1): header, `c~`, the
-`G_main16` and `G_main4` commitments (framed), the Flock items, the four round-2 commitments,
-`Y_sigma`, the Flock proofs, the lookup (layer-1 values, then per session the rounds, the
-terminals and the leaves), the 7 digit claims, the pre-stage claims, the stages, the
-opening. `ProofSize::lookup` is the lookup part. Every count follows from `N`.
+rounds, 31); the Flock proofs (the join, deviation K22); PCS session. Wire
+(`wire::AggregateProof`): header, `c~`, the `G_main16` and `G_main4` commitments (framed),
+the Flock items, the four round-2 commitments, `Y_sigma` and the share items, the lookup
+(layer-1 values, then per session the rounds, the terminals and the leaves), the 7 digit
+claims, the pre-stage claims, the stages, the Flock proofs, the work nonces, the opening.
+`ProofSize::lookup` is the lookup part. Every count follows from `N`.
 
 ### 19.5 Tests
 
@@ -1201,9 +889,9 @@ opening. `ProofSize::lookup` is the lookup part. Every count follows from `N`.
 integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP level in
 `tests/stages.rs`; mode-B round trips at 64, 256 and 1,024; end-to-end tampering in
 `tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
-`ref/notes/bench-local.md` (lookup integration) and `docs/lookup.md` Section 4.5.
+`docs/lookup.md` Section 4.5.
 
-### 19.6 Relation H-exact (`docs/h-exact.md` step B, 2026-10-25)
+### 19.6 Relation H-exact (`docs/h-exact.md` step B)
 
 The relation (`manifest::Relation`, byte 0 H-u, byte 1 H-exact) is a field of the manifest
 and selects, through it, everything below; the verifier takes it from its caller
@@ -1224,7 +912,7 @@ a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tampering
 synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
 rejection), unit tests of the manifest, claims, stage specs, wire and plan.
 
-### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10, branch `h-fips`, merged 2026-10-27)
+### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10)
 
 Relation byte 2 (`Relation::HFips`). `G_main16` = `bz_lo, l_lo, v_lo, v_hi`; `G_main4` =
 `bz_hi, l_hi, b_0..b_5, a_z, s, delta, e` (12 polynomials, codes `[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1244,12 +932,11 @@ cross-relation rejections), unit tests of the manifest, stage specs, transcript,
 and `stage3::tests::h_fips_checks_evaluate_to_their_polynomials` (each stage-3 check against
 its polynomial at random field values, so `F1` and `F2` are tested on their own).
 
-## 20. Prover speed of the PIOP side (branch `piop-speed`, 2026-10-25)
+## 20. Prover speed of the PIOP side
 
-Plan Part 2, Section 2.2 (`ref/notes/plan-128bit-speed.md`): lookup, stage 3, instance and
-witness. Every change is prover only; the aggregates are byte-identical to `main` at 256,
-1,024 and 8,192 signatures (sha256 of `agg aggregate` on the same records, `be398d8` against
-this branch) and the full workspace suite passes.
+Targets: lookup, stage 3, instance and witness. Every change is prover only; the aggregates
+are byte-identical to those of the code before these changes at 256, 1,024 and 8,192
+signatures (sha256 of `agg aggregate` on the same records).
 
 ### 20.1 Dedicated groups (`kernel::layer`)
 
@@ -1325,21 +1012,18 @@ unreduced_integer_products_sum_exactly}`.
   the fork-join (deviation K22) they are built on the PIOP side after event 6, while the
   Flock proofs run on their own pool; only the serial schedule (`AGG_FLOCK_THREADS=0`)
   still builds them on the overlap thread beside the Flock proofs.
-- Not done here, by design: proving the Flock span concurrently with the lookup and the
-  stages. The data are independent, but the transcript was not: `FLOCK_PROOFS_SITE` was
-  absorbed before the lookup's `X`, so the overlap needed a transcript change (profile lever
-  P1). Done since by the fork-join transcript (deviation K22, branch `fork-join-p1`): the
-  proofs are absorbed at a join after stage 3, and `prove_with_tables` proves them on their
-  own pool beside the PIOP.
+- The Flock span is proven beside the lookup and the stages through the fork-join
+  transcript (deviation K22, lever P1): the proofs are absorbed at a join after stage 3, and
+  `prove_with_tables` proves them on their own pool beside the PIOP.
 
 ### 20.4 Measurements (local, shared machine, direction only)
 
 `agg bench --count N --warmup 1 --reps 3`, CLMUL build (`RUSTFLAGS="-C
-target-feature=+pclmulqdq"`), 3 threads on CPUs 0, 1, 3-15, the base `be398d8` and this
-branch back to back. Two runs at 8,192 signatures: branch at `9a53721` (load average 5.7 ->
-4.6) and at `74d5b69` (with the Shoup NTT and `WeightIntGroup`; load average 4.5 -> 5.4):
+target-feature=+pclmulqdq"`), 3 threads on CPUs 0, 1, 3-15, the base (the code before these
+changes) and the new code back to back. Two runs at 8,192 signatures: run 1 (load average 5.7
+-> 4.6) and run 2 (with the Shoup NTT and `WeightIntGroup`; load average 4.5 -> 5.4):
 
-| Step | base (`9a53721` run) | `9a53721` | base (`74d5b69` run) | `74d5b69` |
+| Step | base (run 1) | run 1 | base (run 2) | run 2 |
 | --- | ---: | ---: | ---: | ---: |
 | instance (ExpandA, mu, c, T) | 1,023.1 ms | 643.0 | 1,035.2 | 494.4 |
 | witness and `G_main` tables | 1,204.8 | 729.4 | 1,153.0 | 626.9 |
@@ -1353,13 +1037,13 @@ branch back to back. Two runs at 8,192 signatures: branch at `9a53721` (load ave
 | prover peak RSS | 7,210 MiB | 7,053 MiB | 7,304 MiB | 6,998 MiB |
 
 The lookup and stage-3 lines of the two runs differ by the load (the code of those steps is
-the same apart from `WeightIntGroup`). At 1,024 signatures, `74d5b69` against the base, two
+the same apart from `WeightIntGroup`). At 1,024 signatures, run 2's code against the base, two
 alternated pairs (load average 3.6 to 4.4): prove 4,058 / 4,220 -> 3,537 / 3,709 ms,
 everything but the Flock parts 1,946 / 2,021 -> 1,422 / 1,486 ms, instance 126 / 131 -> 58 /
 65 ms, witness 142 / 143 -> 79 / 77 ms, lookup 498 / 520 -> 322 / 331 ms, stage 3 232 / 228
 -> 194 / 189 ms, verify uncached 491 / 513 -> 314 / 315 ms, cached 435 / 454 -> 280 / 283 ms.
 
-Against the plan's targets at `2^15` on the VM (lookup <= 1.5 s from 3.86 s, stage 3 <=
+Against the targets at `2^15` on the VM (lookup <= 1.5 s from 3.86 s, stage 3 <=
 1.0 s from 1.80 s, instance plus witness <= 1.0 s from 2.16 s), scaling the cloud figures by
 the local ratios at 8,192 gives about 2.3 to 2.6 s, 1.5 s and 1.1 s (estimates, not
 measured): the directions hold; the instance and witness are close to their target, the
@@ -1367,5 +1051,5 @@ lookup and stage 3 are not. What is left, with estimates: the stage-3 weight `w_
 0.3 s at 8,192 locally: four 256-point negacyclic kernels per record) and the passenger
 lanes of the split groups; the lookup items listed at the end of `docs/lookup.md` Section
 4.6; and the overlap of the Flock records and commit with the witness (lever P3, 0.3 to 0.5 s
-at `2^15`, estimate). Proving the Flock span beside the lookup and the stages (lever P1)
-needs a transcript change (Section 20.3).
+at `2^15`, estimate). Proving the Flock span beside the lookup and the stages (lever P1) is
+the fork-join transcript of deviation K22 (Section 20.3).

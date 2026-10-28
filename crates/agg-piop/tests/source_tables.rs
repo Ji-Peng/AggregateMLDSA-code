@@ -1,5 +1,5 @@
-//! Source-table construction checks shapes and honest alphabets against the manifest
-//! (lookup layout L16), the honest bridge builder aborts on heavy rows and counts the
+//! Source-table construction checks shapes and honest alphabets against the manifest,
+//! the honest bridge builder aborts on heavy rows and counts the
 //! multiplicities of `T_16`, and the committer rejects malformed tables before Akita.
 
 mod common;
@@ -62,7 +62,7 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
             actual: 20
         }
     );
-    // A value outside its L16 range is an honest abort.
+    // A value outside its digit range is an honest abort.
     let mut wide = values.clone();
     wide[3].z[1][7] = 1 << 17;
     assert!(matches!(
@@ -167,7 +167,7 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
         Err(SourceTableError::Lookup(_))
     ));
 
-    // Row 0 of M_3 in 600 columns: weight above 511, the honest prover aborts (Section 9.2).
+    // Row 0 of M_3 in 600 columns: weight above 511, the honest prover aborts.
     let m3 = &matrices.m3;
     let mut entries = m3.entries.clone();
     for column in 0..600 {
@@ -200,7 +200,7 @@ fn committer_rejects_malformed_tables_before_akita() {
     ));
 }
 
-/// Relation H-exact (`docs/h-exact.md` 2.1, 6.3): the encoder writes `bz_lo` into the slot
+/// Relation H-exact (`docs/h-exact.md`): the encoder writes `bz_lo` into the slot
 /// of `Z_lo`, the bits `bz_hi`, `a_z` into `G_main4` (nine columns), the canonical digits
 /// of zero on padded rows, and refuses `|z| > 130,993`; the values decoded from the H-exact
 /// tables equal the derived ones, the H-u tables' values and the witness crate's base-16
@@ -255,7 +255,7 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
         });
     }
     assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
-    // z = +-130,993 encodes (edges of 2.1), +-130,994 and 131,000 are honest aborts; the
+    // z = +-130,993 encodes (the range edges), +-130,994 and 131,000 are honest aborts; the
     // same values are inside H-u's relaxed range.
     for (z, ok) in [(130_993, true), (-130_993, true), (130_994, false), (-130_994, false), (131_000, false)] {
         let mut edge = values.clone();

@@ -1,7 +1,7 @@
-//! Library half of the `agg` command-line tool (docs/spec.md Sections 10, 11 and 14,
-//! milestone M3): the mode-A aggregator and verifier ([`mode_a`]), the mode-A segment items
-//! of the wire format ([`wire`]), the persistent key cache ([`cache`]), the batch files
-//! ([`record`]), peak-memory readings ([`rss`]) and the subcommands ([`commands`]).
+//! Library half of the `agg` command-line tool: the mode-A aggregator and verifier
+//! ([`mode_a`]), the mode-A segment items of the wire format ([`wire`]), the persistent key
+//! cache ([`cache`]), the batch files ([`record`]), peak-memory readings ([`rss`]) and the
+//! subcommands ([`commands`]).
 
 pub mod cache;
 pub mod commands;

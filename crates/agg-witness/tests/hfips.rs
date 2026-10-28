@@ -1,6 +1,6 @@
 //! Relation H-FIPS (relation byte 2) on the witness side: derivation from accepted signatures,
 //! the integer checker, the extraction of a FIPS 204 signature, and a synthetic signature of hint
-//! weight exactly 80 with a coefficient `w' = q - gamma2, h = 0` (`docs/h-exact.md` Section 10).
+//! weight exactly 80 with a coefficient `w' = q - gamma2, h = 0` (`docs/h-exact.md`).
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
 #![allow(clippy::needless_range_loop)]
@@ -260,7 +260,7 @@ fn tampered_witnesses_are_rejected_by_their_identity() {
         t.u_h += 1;
     });
     assert_eq!(ids, vec![Identity::Ring]);
-    // A flipped bit of w1': the ring and (3.3) fail.
+    // A flipped bit of w1': the ring and the hash identity fail.
     let ids = run(&|t| t.bits[0][plain.0][plain.1] ^= 1);
     assert!(ids.contains(&Identity::Ring) && ids.contains(&Identity::CommitmentHash), "{ids:?}");
     // z digit outside its alphabets: B_zhi = 2 keeps nothing.

@@ -2,34 +2,32 @@
 
 | Field | Value |
 | --- | --- |
-| Status | informative; a local profile, **direction only**. No number here is a benchmark result: the development box was shared with other agents' builds (load average 2 to 10), and figures marked "est." are estimates. Benchmark results are in the top-level `ref/notes/bench-cloud.md` (cloud VM, medians, exact revisions). |
-| Profiled revision | `be398d8` (2026-10-25, before the proof-of-work schedule and the speed branches) |
-| Folded in | 2026-10-25, from the profiling report of plan Part 2, Sections 2.2-2.3 (`ref/notes/plan-128bit-speed.md`) |
+| Status | informative; a local profile, **direction only**. No number here is a benchmark result: the development box was shared with other agents' builds (load average 2 to 10), and figures marked "est." are estimates. |
+| Profiled code | the code before the proof-of-work schedule and the speed levers of Section 0 |
 
-## 0. What happened since the profile (merged into `main`)
+## 0. What happened since the profile
 
-The ranking of Section 6 drove the speed branches `flock-speed` and `piop-speed`, merged
-into `main` before `1fef53d`. All changes are prover-only; aggregates stayed byte-identical
-except for the proof-of-work nonces of wire version 2/3.
+The ranking of Section 6 drove the prover speed work below (`docs/piop.md` Section 20 for the
+PIOP side). All changes are prover-only; aggregates stayed byte-identical except for the
+proof-of-work nonces of wire version 2/3.
 
-| Lever (Section 6) | Status | Commit(s) |
-| --- | --- | --- |
-| F1 runtime-dispatched Flock x86 SIMD kernels in the vendored `flock-core` | done | `48d89d8` (`vendor/flock-core/PATCH.md` Section 3) |
-| F2 parallel Flock witness inputs, stripe transpose, `input_bits` | done | `efb80ce`, `4bba464` |
-| F3 sponge instance and bridge union proven side by side | done, opt-in (`AGG_TIED_CONCURRENT`); moot since tied-part version 5, which has no bridge union (K21) | `efb80ce` |
-| P5 stage parity tables built while the Flock span is proven | done | `7476508` |
-| lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) | `94bd37e`, `808b763` |
-| instance `T` reused in the witness; vectorized `public_t` | done | `51c3aea` |
-| P1 overlap the Flock span with the lookup and stages | done on branch `fork-join-p1` (deviation K22), merged into `main` 2026-10-27 (`8adea56`): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Decision rule of the memo (>= 1 s saved at 32K in the cloud dry run): met, -1.11 s (pool 16) and -1.15 s (pool 8), `ref/notes/bench-cloud.md` Phase 10 (6). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, rerun at `52c3d23`: 4 / 8 threads 6.34 / 6.35 s vs main 7.31 s; the cloud run should sweep 4 / 6 / 8 | `f34d1bd`, `52c3d23` |
-| P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open | - |
+| Lever (Section 6) | Status |
+| --- | --- |
+| F1 runtime-dispatched Flock x86 SIMD kernels in the vendored `flock-core` | done (`vendor/flock-core/PATCH.md` Section 3) |
+| F2 parallel Flock witness inputs, stripe transpose, `input_bits` | done |
+| F3 sponge instance and bridge union proven side by side | moot: tied-part version 5 has no bridge union (K21) |
+| P5 stage parity tables built while the Flock span is proven | done |
+| lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) |
+| instance `T` reused in the witness; vectorized `public_t` | done |
+| P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
+| W1, lever B, lever A | Sections 9 to 11 |
+| P2 coded bottom lookup session, P2b, P3, P4, P6, P7, F4, F5 | open |
 
-Outcome on the cloud VM (`ref/notes/bench-cloud.md`, Phase 8 check of `1fef53d`, 2 runs
-at `N = 32,768`, so not a median of 5): prove 23.74 s (Phase 7, `be398d8`) to 14.62 s,
-Flock parts 13.8 s to 7.57 s, lookup 3.86 s to 2.53 s, stage 3 1.80 s to 1.48 s. The 12 s
-target of the plan is not reached yet; P1 and P2 are the largest remaining levers by the
-estimates below.
+Outcome on the cloud VM after F1 to P5 (2 runs at `N = 32,768`, so not a median of 5): prove
+23.74 s to 14.62 s, Flock parts 13.8 s to 7.57 s, lookup 3.86 s to 2.53 s, stage 3 1.80 s to
+1.48 s. The 12 s target was not reached by these; P1 and P2 were the largest remaining levers
+by the estimates below.
 
-Date 2026-10-25. Code `be398d8` (main checkout, read-only; no committed code changed).
 Machine: i7-11700K (Rocket Lake, 8 cores, HT off; flags include `pclmulqdq`, `vpclmulqdq`,
 `gfni`, `avx512f/bw/vl/vbmi`), runs on `taskset -c 0,1,3-15` (= cores 0,1,3-7, 7 cores),
 `RAYON_NUM_THREADS=7`. **The box was shared with other agents' builds and Python jobs during
@@ -42,10 +40,9 @@ Builds (all `RUSTUP_TOOLCHAIN=stable`, `CARGO_BUILD_JOBS=4`):
 | --- | --- | --- |
 | `target/clmul` | `-C target-feature=+pclmulqdq` | the baseline (as `scripts/bench.sh CLMUL=1`) |
 | `target/prof-gfni` | `+pclmulqdq,+gfni` | A/B of Flock's GFNI (SSE) zerocheck kernel in full mode A |
-| `target/prof-v4` | `-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq,+gfni,+avx512vbmi` | Keccak-only bench (`agg-keccak --bench keccak_sponge`, no `avx512` feature) to measure Flock's AVX-512 kernels; mode A cannot run in this build (Akita self-check, bench-cloud.md) |
+| `target/prof-v4` | `-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq,+gfni,+avx512vbmi` | Keccak-only bench (`agg-keccak --bench keccak_sponge`, no `avx512` feature) to measure Flock's AVX-512 kernels; mode A cannot run in this build (Akita self-check) |
 | scratch `gfbench` | soft / `+pclmulqdq` / `+pclmulqdq,+avx512f,+vpclmulqdq` | GF(2^128) multiply microbench on `flock-field` 83f963e |
 
-Scripts and raw logs stayed in the profiling session's scratch directory (not committed).
 
 ## 1. Commands
 
@@ -168,7 +165,7 @@ the measured local-8K -> cloud-32K ratio of the Flock part):
 | Cause | Ours, 32K (est.) | Flock bench | Evidence |
 | --- | ---: | ---: | --- |
 | Build flags: Flock's workspace `.cargo/config.toml` sets `rustflags = ["-C", "target-cpu=native"]` (Zen 5: AVX-512, VPCLMULQDQ, GFNI kernels); ours runs the portable kernels | zerocheck ~3.9 s, NTT ~1.9 s, opening ~2.9 s | zerocheck 1.50 s, commit 0.94 s, open 1.91 s | local A/B above: 2.22x on the sponge instance |
-| Profile: Flock bench `prove_fast` (rate 1/2) vs our `Slim` (rate 1/4: 2x encode, more queries) | | | P7 cloud: `Fast` 22.12 s vs `Slim` 23.74 s |
+| Profile: Flock bench `prove_fast` (rate 1/2) vs our `Slim` (rate 1/4: 2x encode, more queries) | | | 32K cloud run: `Fast` 22.12 s vs `Slim` 23.74 s |
 | Witness built twice, with a serial `input_bits` loop and serial `statement` (c~ by SHAKE per record) | ~2.9 s | witness + lincheck 0.74 s | Section 3: 2.8x / 3.3x scaling, perf dips |
 | Bridge union, bridge rows/commit, tie (absent from Flock's bench) | ~1.0 s | 0 | Section 3 |
 | Threads: Flock 8 (physical cores; its doc reports SMT hurts its CLMUL kernels), ours 16 on 8 cores x 2 SMT | | | not measured on the VM |
@@ -176,26 +173,15 @@ the measured local-8K -> cloud-32K ratio of the Flock part):
 The flags alone explain about half of the gap (2.2x on the sponge instance), the duplicated
 serial witness work and the bridge union most of the rest.
 
-## 5. Overlap (plan 2.3 item 3): file/line evidence
+## 5. Overlap: file/line evidence
 
-- **Flock span prove vs lookup/stages: not overlappable without a transcript change.**
-  `crates/agg-piop/src/prover.rs:614` proves the Flock span, `:618` absorbs the proofs
-  (`FLOCK_PROOFS_SITE`) and only then `:627` calls `prove_piop`; the registry orders
-  `FLOCK_PROOFS_SITE` (`transcript.rs:212`) before the lookup's `X` (`:220`). Every later
-  challenge (lookup `X`, `mu_s`, `gamma`, round challenges, `tau`, stage rounds, the PCS
-  session at `prover.rs:636`) is squeezed from the sponge that absorbed the Flock proof
-  bytes. In data the two are independent: the Flock prove reads only `sd` (event 3,
-  `:588`), the matrices, `fs_sigma` (event 5, `:607`) and `Y_sigma` (event 6, `:612`), and
-  the PIOP reads none of the Flock proof. Moving the absorb after stage 3 (or into the
-  event-12 export) is a wire/transcript change that needs a written composition argument
-  (the Flock statement is fixed at event 6 and its challengers are seeded from `fs` only).
-- **Prover-only overlap inside the Flock prove:** the bridge-union proof does not read the
-  sponge proof: `crates/agg-keccak/src/tied.rs:987` derives the tie points before both,
-  the sponge challenger (`:749`) observes `fs`, the gate, the public words and the tie
-  geometry, the bridge challenger (`:759`) observes `fs` and the two slot digests; the
-  sponge prove (`:989-1002`) and the bridge prove (`:1004-1014`) run in sequence today.
+- **Flock span prove vs lookup/stages.** In data the two are independent: the Flock prove
+  reads only `sd` (event 3), the matrices, `fs_sigma` (event 5) and `Y_sigma` (event 6), and
+  the PIOP reads none of the Flock proof. The profiled transcript absorbed the Flock proofs
+  (`FLOCK_PROOFS_SITE`) before the lookup's `X`, so every later challenge depended on them;
+  the fork-join transcript (deviation K22, lever P1) absorbs them after stage 3.
 - **Event-2 Flock commit vs `G_main` commit: already concurrent** (`prover.rs:568-577`,
-  `crate::pcs::overlap`, a scoped OS thread, `pcs.rs:238-261`); in the P7 32K breakdown the
+  `crate::pcs::overlap`, a scoped OS thread, `pcs.rs:238-261`); in the 32K cloud breakdown the
   step times sum to ~570 ms more than the total, i.e. the 603 ms `G_main` commit is hidden.
 - **Event-2 Flock commit vs witness work: not as written.** The Flock records are built
   from the main tables (`crates/agg-cli/src/mode_a.rs:1210-1232`; `sponge_records` reads
@@ -209,7 +195,8 @@ serial witness work and the bridge union most of the rest.
 
 ## 6. Ranked levers (estimated savings at 32K on `c4d-highmem-16`; all est.)
 
-Baseline P7: prove 23.74 s = Flock 13.82 (commit 4.40, prove 9.41) + lookup 3.86 + stages
+Baseline (32K cloud run): prove 23.74 s = Flock 13.82 (commit 4.40, prove 9.41) + lookup 3.86
++ stages
 2.75 + instance/witness 2.16 + Akita opening 0.74 + rest. Savings below are estimates from
 the local measurements scaled by ~1.75 (local 8K -> cloud 32K ratio of N-linear phases);
 they are not additive with each other where noted.
@@ -224,16 +211,16 @@ they are not additive with each other where noted.
 | F4 | Pool sizing on SMT: run the Flock span on an 8-thread (physical-core) pool, the rest on 16 | 0-1 s (unmeasured; one VM A/B with `RAYON_NUM_THREADS=8` vs 16) | yes | Flock's own doc and bench use physical cores |
 | F5 | Lincheck union partial fold does not scale with threads (`union_bitbank_fold`; since tied-part version 5 it runs once more, for the bit claim's full bank, K21, `docs/keccak.md` 12.7) | 0.1-0.3 s | yes | 179 ms 1T vs 193 ms 7T at 8K |
 | F6 | Interim, no code change: add `+gfni` to the timing build (SSE GFNI zerocheck path; Akita unaffected) | ~0.9 s (subsumed by F1) | yes (build flag; conflicts with "default build without SIMD", so keep it to the CLMUL timing build or use F1) | Section 4: Flock part -6.8%, aggregate byte-identical |
-| ref | `Fast` instead of `Slim` | 1.6 s (measured P7) | no (verifier-visible profile; +6.6 B/sig) | bench-cloud.md P7 |
+| ref | `Fast` instead of `Slim` | 1.6 s (measured) | no (verifier-visible profile; +6.6 B/sig) | 32K cloud run |
 
-F1 + F2 + F3 bring the Flock span from 13.8 s to about 6-7 s (est.), at the plan's <= 6 s
-target with F4.
+F1 + F2 + F3 bring the Flock span from 13.8 s to about 6-7 s (est.), at the <= 6 s target
+with F4.
 
 ### PIOP, lookup and the rest
 
 | # | Lever | Est. saving | Prover-only | Evidence |
 | --- | --- | ---: | --- | --- |
-| P1 | Overlap the Flock span prove with the lookup and stages: absorb the Flock proofs after stage 3 (implemented on branch `fork-join-p1`, merged into `main` 2026-10-27, deviation K22; wire version 4 kept, nothing released since K21) | 1.5-3 s before F1, about 1-2 s after F1 (est.); measured: cloud dry run at 32K -1.11 s (Flock pool 16, +2.6 GiB) and -1.15 s (pool 8, +0.5 GiB), bench-cloud Phase 10 (6); local 8K -0.93 / -1.03 s with pool 8, +0.8 to +1.1 GiB | **no** (transcript change) | Section 5; `ref/notes/overnight-20261026/fork-join-p1.md` |
+| P1 | Overlap the Flock span prove with the lookup and stages: absorb the Flock proofs after stage 3 (implemented, deviation K22; wire version 4 kept, nothing released since K21) | 1.5-3 s before F1, about 1-2 s after F1 (est.); measured: cloud dry run at 32K -1.11 s (Flock pool 16, +2.6 GiB) and -1.15 s (pool 8, +0.5 GiB); local 8K -0.93 / -1.03 s with pool 8, +0.8 to +1.1 GiB | **no** (transcript change) | Section 5 |
 | P2 | Lookup: evaluate the `s = D-1` session from the leaf integers (node `= (2X - a - b, (X-a)(X-b))`, shared by `X_1, X_2`) instead of stored field layers; drop layer `D-1` from the trees | 0.8-1.2 s (lookup 3.86 -> ~2.8 s) and -4 GiB stored layers | yes (same round messages) | `s = 24` is 681 ms = 37% of the 8K lookup; bottom `Ints` session 434 ms covers both challenges |
 | P2b | Extend coded evaluation to `s = D-2` (four leaves per node) and trim tree build | 0.3-0.6 s | yes | `s = 23` 362 ms, trees 353 ms at 8K |
 | P3 | Start the Flock records + event-2 build/commit beside the rest of `MainTables::build` (compute `w1'` first) | 0.3-0.5 s | yes | Section 5 |
@@ -246,11 +233,11 @@ Ranking for the 12 s target: F1 >> F2 > P1 (if a wire bump is acceptable) > P2 >
 P3 > F4 > P4 > rest. Prover-only levers alone (F1-F3, P2-P5): about 8-11 s off 23.7 s (est.),
 i.e. roughly 13-16 s; reaching 12 s likely needs P1 or the F4 thread gain as well.
 
-## 7. Verifier kernels (branch `verifier-kernels`, merged into `main`; memo 3.4 (a)-(c))
+## 7. Verifier kernels
 
 Scope: the cached verifier's public-data steps, which were 272 ms of the 424.0 ms cached
-verify at 32K (public_data 106.3 + public_t 91.9 + public_a 73.8 ms; measured,
-`ref/notes/bench-cloud.md` "Verifier at 32K", code `8da7538`). All changes are verifier-only
+verify at 32K (public_data 106.3 + public_t 91.9 + public_a 73.8 ms; measured on the cloud
+VM). All changes are verifier-only
 and exact: the transcript, the aggregate bytes and every accept/reject decision are
 unchanged (checks below). Local numbers: i7-11700K under WSL2, CPUs 0,1,3-15, shared with
 other agents' builds and provers (load average 4-14 during the runs), default portable build
@@ -259,7 +246,7 @@ other agents' builds and provers (load average 4-14 during the runs), default po
 
 ### 7.1 Changes
 
-| Step | Before (`6803ce5`) | After | Exactness argument |
+| Step | Before | After | Exactness argument |
 | --- | --- | --- | --- |
 | `sparse_t` (`public_data.rs`) | per entry `if p + m < N` branch in the inner loop | per nonzero `c_p`, two contiguous slice updates split at `N - p` (`straight += t1[..N-p]`, `wrapped -= t1[N-p..]`, signs swapped for `c_p = -1`); `sparse_ct` without the `2^d` factor | the same integer additions in another order; `|c t1| <= tau (2^10 - 1) < 2^16` |
 | `T(r2)` inner product (`public_stream.rs`, 1,024 terms per record) | `E::mul_i64` per term, i.e. a full `Ext2` product (`jolt_field::Ring::mul_i64` is `self * from_i64(n)`) | `SplitWeights::dot::<16>` on `c t1`, times `2^d` once per pass | integer times `Ext2` element is coordinatewise; each coordinate sum is exact over the integers and reduced once |
@@ -296,7 +283,7 @@ back to `dot_wide`: per-coordinate `i128` accumulation, exact for any `i32` valu
   `keys_sharing_rho_verify_only_against_their_own_t1`): the aggregate verifies uncached, with
   only the first key cached and fully cached; naming the other key for a record is rejected,
   cached or not.
-- `agg aggregate` with the old (`6803ce5`) and new (`dc395fc`) binaries on the same records:
+- `agg aggregate` with the old and new binaries on the same records:
   byte-identical aggregates at 256 (64 shared keys) and 1,024 (own keys) records under both
   relations (H-u 430,061 / 522,164 B; H-exact 430,089 / 522,171 B); the new verifier accepts
   the old aggregates uncached and cached, the old verifier accepts the new ones.
@@ -305,7 +292,7 @@ back to `dot_wide`: per-coordinate `i128` accumulation, exact for any `i32` valu
 
 ### 7.3 Timings (local, direction only)
 
-Predictions (written before these runs, from memo 3.4; est.): `sparse_t` 3.7-4.5x and the
+Predictions (written before these runs; est.): `sparse_t` 3.7-4.5x and the
 `T` product 3.0-3.8x single-thread; cloud 32K cached public_t 92 -> 25-33 ms, public_a 73.8
 -> 20-30 ms, public_data 106 -> 65-80 ms.
 
@@ -337,17 +324,17 @@ measured; Flock and `matrices` are untouched, their spread is load):
 | 1, cached, before, 5 (5-7) | 108.7 | 32.7 | 25.1 | 167.4 | 3,855 |
 | 1, cached, `u32` lanes without the slim cached keys, 5 (5-7) | 98.9 | 8.0 | 5.5 | 118.2 | 4,285 |
 | 2, cached, before, 5 (7-8, spikes) | 124.5 | 105.9 | 56.9 | 285.4 | 5,403 |
-| 2, cached, after (`dc395fc`), 5 (7-8) | 23.5 | 16.4 | 7.8 | 46.9 | 4,316 |
+| 2, cached, after, 5 (7-8) | 23.5 | 16.4 | 7.8 | 46.9 | 4,316 |
 | 3, cached, before, 7 (9-14) | 125.7 | 53.0 | 42.9 | 215.4 | 4,826 |
-| 3, cached, after (`dc395fc`), 7 (9-14) | 30.2 | 17.6 | 12.6 | 61.9 | 4,962 |
+| 3, cached, after, 7 (9-14) | 30.2 | 17.6 | 12.6 | 61.9 | 4,962 |
 | 3, uncached, before, 3 (9-14) | 103.9 | 31.8 | 93.3 | 226.4 | 4,089 |
-| 3, uncached, after (`dc395fc`), 3 (9-14) | 106.8 | 7.7 | 75.2 | 206.5 | 3,969 |
+| 3, uncached, after, 3 (9-14) | 106.8 | 7.7 | 75.2 | 206.5 | 3,969 |
 
 Each cell is the median over the runs of that row ("sum" is the median of the per-run sums).
 Round 1 isolates the kernels: public_t and public_a drop 4-5x, public_data only 10%; round
 2 adds the slim cached keys, which take public_data from about 100-125 ms to 23-30 ms.
 
-The cloud reference for 8K cached is 188.6 ms total (`bench-cloud.md`, H-u, `8da7538`); the
+The cloud reference for 8K cached is 188.6 ms total (H-u); the
 local totals are dominated by the portable Flock step and are not comparable. Cached, the
 three public steps drop 3.5-6x locally (rounds 2 and 3). Uncached public_data does not move: it still
 decodes and copies every key into fresh memory and hashes `tr`, and public_a is
@@ -356,15 +343,14 @@ ExpandA plus 16 inverse NTTs per key.
 Prediction for the cloud at 32K cached (est., not measured): public_t 92 -> 20-30 ms,
 public_a 74 -> 15-25 ms (floor: streaming 512 MiB of cached `A`), public_data 106 -> 30-60
 ms (the cold-memory share is likely smaller on a native Linux VM than on WSL2), so cached
-verify 424 -> about 280-320 ms. To be measured with the next cloud matrix.
+verify 424 -> about 280-320 ms.
 
 ### 7.4 Commands
 
 ```sh
-W=/home/jipengzhang/code/aggmldsa-wt/verifier-kernels
 RAYON_NUM_THREADS=1 taskset -c 0,1,3-15 cargo test --release -p agg-piop --lib kernel_microbench -- --ignored --nocapture
 taskset -c 0,1,3-15 cargo test --release -p agg-piop --lib prepare_profile -- --ignored --nocapture
-A=target/release/agg   # old binary: the same build at 6803ce5
+A=target/release/agg   # old binary: the same build of the code before 7.1
 taskset -c 0,1,3-15 $A keygen-batch --count 8192 --seed 1 --out keys8k.bin
 taskset -c 0,1,3-15 $A sign-batch --keys keys8k.bin --count 8192 --seed 1 --out rec8k.bin
 taskset -c 0,1,3-15 $A aggregate --records rec8k.bin --out agg8k-hu.bin
@@ -374,34 +360,28 @@ taskset -c 0,1,3-15 cargo test --release -p agg-cli
 ```
 
 Open: an uncached public_data with fewer copies (keep the packed `t1` and unpack per record,
-or borrow `pk` from the inputs); a packed 23-bit `A` cache (memo 3.4 (b)); AVX2 kernels
+or borrow `pk` from the inputs); a packed 23-bit `A` cache; AVX2 kernels
 would need a crate outside the `unsafe_code = "forbid"` rule.
 
-## 9. Lever W1: keep the event-2 Flock witness until the join (branch `lever-1`)
-
-Section 8 (Phase 10b profile, W1 to W3) lives on branch `cloud-profile`; this section records
-W1's implementation and local check. Sources: `ref/notes/bench-cloud.md` Phase 10b (top-level
-repo), `ref/notes/overnight-20261026/verify-flock-A-keep-witness.md` (saving recomputed from
-the raw traces) and `ref/notes/overnight-20261026/lever-1.md` (commands and raw outputs of
-this section).
+## 9. Lever W1: keep the event-2 Flock witness until the join
 
 ### 9.1 Change
 
-Before W1, every Flock part dropped its sponge buffers, input bits and statement after event 2
-and rebuilt them in the Flock branch of the fork-join (K14). At 32K on the cloud VM the
-rebuild is 2,052-2,070 ms of the 7.86-7.93 s Flock branch (measured, Phase 10b, 3 traced
-runs), and the drop at the end of event 2 is a serial munmap of 166-197 ms on one vCPU
-(measured, sampler re-read). Now a batch with exactly one tied part keeps its whole
+Without W1, every Flock part drops its sponge buffers, input bits and statement after event 2
+and rebuilds them in the Flock branch of the fork-join (K14). At 32K on the cloud VM the
+rebuild is 2,052-2,070 ms of the 7.86-7.93 s Flock branch (measured, 3 traced runs), and the
+drop at the end of event 2 is a serial munmap of 166-197 ms on one vCPU (measured). With W1 a
+batch with exactly one tied part keeps its whole
 `TiedCommitted` in `mode_a::PartState` from event 2 to the join and proves it without a
 rebuild. That covers the span (every batch of `N >= 2^14` with whole-segment parts) and the
 one-part batch at `N <= 2^13` (default part size), the second added so that the change is
 visible locally. Batches of more than one part keep the drop-and-rebuild. Knobs:
-`Aggregator::keep_witness(false)` or `AGG_FLOCK_REBUILD` (any value) restore the old behaviour.
+`Aggregator::keep_witness(false)` or `AGG_FLOCK_REBUILD` (any value) restore the rebuild.
 Prover-only; the aggregate is byte-identical by construction.
 
 ### 9.2 Checks (measured, local)
 
-- `cmp` against main `184374f` (and against `AGG_FLOCK_REBUILD=1`): identical at 256 and 1K
+- `cmp` against the code without W1 (and against `AGG_FLOCK_REBUILD=1`): identical at 256 and 1K
   (H-u and H-exact), 2K, 8K, and 2K in two parts (`--part-log2 10`); `agg verify` accepts.
 - Tests: `kept_and_rebuilt_witnesses_give_the_same_aggregate` (64 records in one part, 256 in
   two) and `kept_and_rebuilt_span_witnesses_give_the_same_proof` (a two-segment span of 8,193
@@ -412,38 +392,32 @@ Prover-only; the aggregate is byte-identical by construction.
 
 `agg bench --count 8192 --warmup 1 --reps 2`, CLMUL build, `RAYON_NUM_THREADS=7`,
 `taskset -c 0,1,3-15`, main / W1 / main / W1 interleaved, other agents active (load 1.8 to
-6.6). Predictions written first (lever-1 log Section 1): Flock proofs -0.6 to -1.2 s, prove
+6.6). Predictions written first: Flock proofs -0.6 to -1.2 s, prove
 -0.2 to -0.8 s, peak RSS -0.3 to +0.5 GiB.
 
 | Binary | Prove median of 2 | Flock proofs (pool of 4) | Fork-join wall | Outside the fork | Prover peak RSS |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| main `184374f` | 5,957.6 / 6,018.7 ms | 3,051.8 / 3,047.9 | 3,052.5 / 3,112.3 | 2,782.0 / 2,819.4 | 8,657 / 8,739 MiB |
-| W1 `241753e` | 5,712.1 / 5,888.7 ms | 2,480.2 / 2,539.8 | 2,950.5 / 3,023.6 | 2,755.6 / 2,833.2 | 8,779 / 8,871 MiB |
+| without W1 | 5,957.6 / 6,018.7 ms | 3,051.8 / 3,047.9 | 3,052.5 / 3,112.3 | 2,782.0 / 2,819.4 | 8,657 / 8,739 MiB |
+| W1 | 5,712.1 / 5,888.7 ms | 2,480.2 / 2,539.8 | 2,950.5 / 3,023.6 | 2,755.6 / 2,833.2 | 8,779 / 8,871 MiB |
 
 Flock proofs -0.51 to -0.57 s (just below the predicted range). Prove -0.25 / -0.13 s (low
 edge of the prediction). Peak +122 / +132 MiB (inside). The fork wall drops only 0.09-0.10 s:
 at 8K on this box the PIOP branch (about 2.95 s) becomes the critical one as soon as the Flock
-branch loses its rebuild. This is the "soft floor" case of the verifier's model, where only
+branch loses its rebuild. This is the "soft floor" case of the model, where only
 the Flock-only tail disappears.
 
 ### 9.4 What it means at 32K (est.)
 
-The local result supports the floor end of the verifier's range. Revised estimate for
+The local result supports the floor end of the estimated range. Estimate for
 `c4d-highmem-16` at 32K: fork -0.46 s (Flock-only tail, measured 460.4 ms) to -0.99 s
 (uniform-rate model), plus the event-2 munmap -0.16 to -0.19 s, so prove -0.6 to -1.2 s,
-point -0.7 s (est., lowered from -0.9 s by the 8K result). From 12.75 s (bench median, Phase
-10b) that is about 11.6-12.1 s (est.). Once W1 is in, the PIOP branch is critical. The Flock
-pool should then shrink: `AGG_FLOCK_THREADS` 4 / 6 / 8 (1 warmup + 2 each) on the next VM
-session, besides the 32K bench (1 warmup + 3) of W1 against `AGG_FLOCK_REBUILD=1`. The
-lookup and stage levers then act directly on the critical path. RSS at 32K: about 4.2-4.5
-GiB of witness (est.) stays resident from event 2 to the join; the bench VmHWM headroom to
-32 GiB is 1.82 GiB (Phase 10b), so check VmHWM in that run.
+point -0.7 s (est.). From 12.75 s (32K bench median without W1) that is about 11.6-12.1 s
+(est.). With W1 the PIOP branch is critical, so the Flock pool can shrink (`AGG_FLOCK_THREADS`
+4 / 6 / 8 to compare), and the lookup and stage levers act directly on the critical path.
+RSS at 32K: about 4.2-4.5 GiB of witness (est.) stays resident from event 2 to the join; the
+bench VmHWM headroom to 32 GiB is 1.82 GiB.
 
-## 10. Lever B: inline Flock's scalar GF(2^128) multiply (branch `lever-2`)
-
-Sources: `ref/notes/overnight-20261026/ideate-flock-span.md` Sections 4, 7, 8 (profile,
-microbench), `verify-flock-B-inline-mul.md` (verdict, 32K estimate) and `lever-2.md` (commands and
-raw numbers of this section), all in the top-level repo.
+## 10. Lever B: inline Flock's scalar GF(2^128) multiply
 
 ### 10.1 Change
 
@@ -451,9 +425,10 @@ raw numbers of this section), all in the top-level repo.
 `ghash_mul_unreduced_x86`, `ghash_square_x86`) `#[target_feature(enable = "pclmulqdq,sse4.1")]`
 without `#[inline]`, so in our CLMUL build (`+pclmulqdq`, no LTO) every `F128` multiply in
 flock-core was an out-of-line call (3.87% self time in a local 8K profile; microbench 5.5 ns per
-multiply against 2.7 ns inlined). The memo proposed thin LTO plus `+sse4.1`. Measured locally,
+multiply against 2.7 ns inlined). Thin LTO plus `+sse4.1` was the first candidate. Measured
+locally,
 a global `+sse4.1` slows our lookup and stage 3 by 6-7% (it alone, without LTO, gives the same
-loss), which cancels the Flock gain once W1 makes the PIOP branch critical. The branch therefore
+loss), which cancels the Flock gain once W1 makes the PIOP branch critical. The code therefore
 vendors `flock-field` (`vendor/flock-field/PATCH.md`): `#[inline]` on the three functions,
 `pclmulqdq` as their only target feature, SSE2 lane extracts. The CLMUL build line stays
 `-C target-feature=+pclmulqdq`, and the multiply inlines everywhere in the prover (pclmul
@@ -484,34 +459,27 @@ verifier functions). Exact arithmetic; the default build is unchanged.
 | | event 7 lookup / stage 3 | 1,236 / 684 ms | 1,225 / 692 ms |
 | both | verify uncached | 275.7 ms | 273.5 ms |
 
-- Rejected variants (same A/B method, `lever-2.md` 3.4-3.8): thin LTO + `+sse4.1` (Flock
+- Rejected variants (same A/B method): thin LTO + `+sse4.1` (Flock
   proofs -0.26 to -0.30 s, but lookup +38 to +88 ms and stage 3 +42 ms, prove +0.23 s in one
   set, -0.04 s in another); `+sse4.1` alone (lookup +70 ms, stage 3 +50 ms, no Flock gain);
-  vendored inline with `+sse4.1` (Flock gain, same PIOP loss). Commits `8eedc3e` and
-  `936bb0d` record them; `570a94b` is the kept version.
+  vendored inline with `+sse4.1` (Flock gain, same PIOP loss).
 
 ### 10.3 What it means at 32K (est.)
 
 At 8K on this box the PIOP branch is critical, so the Flock gain shows as freed CPU only.
-On `c4d-highmem-16` at 32K, with W1 in `main`, the verifier's model gives prove -0.14 to
--0.36 s (est.) from 2-5 vCPU-s freed. The upper end of the memo's estimate (-0.3 to -0.8 s)
-assumed the Flock branch critical, which no longer holds after W1. Bytes are identical, and
-the verifier changes by about 0 to -1%. Next measurement, on the next cloud session (1 warmup + 3,
-back to back with main's binary, same flags): predict Flock proofs -0.3 to -0.7 s, prove
--0.14 to -0.36 s, verify within +-2%, 1,469,874 B at 32K H-u.
+On `c4d-highmem-16` at 32K, with W1, the model gives prove -0.14 to -0.36 s (est.) from 2-5
+vCPU-s freed. An estimate of -0.3 to -0.8 s assumes the Flock branch critical, which does not
+hold with W1. Bytes are identical, and the verifier changes by about 0 to -1%. Prediction for
+a cloud A/B (1 warmup + 3, back to back, same flags): Flock proofs -0.3 to -0.7 s, prove -0.14
+to -0.36 s, verify within +-2%, 1,469,874 B at 32K H-u.
 
-## 11. Lever A: move the one-vCPU windows off the serial path (branch `lever-3`)
-
-Sources (top-level repo): `ref/notes/overnight-20261026/ideate-schedule-memory.md` Sections 1,
-3, 4 (the windows in the Phase 10b sampler logs, the env-gated prototype on branch
-`sched-serial`), `verify-A-serial-windows.md` (verdict, corrected 32K estimate) and `lever-3.md`
-(commands and raw numbers of this section).
+## 11. Lever A: move the one-vCPU windows off the serial path
 
 ### 11.1 Change
 
-The Phase 10b 32K sampler logs (5 fresh runs, 100 ms `/proc/stat` samples) show three windows
-on the serial path where one vCPU works, mostly in the kernel, while the other 15 wait
-(measured on the VM, re-cut by the verifier): (a) the "Akita setup" step, 97.7 ms in the bench
+The 32K sampler logs of the cloud VM (5 fresh runs, 100 ms `/proc/stat` samples) show three
+windows on the serial path where one vCPU works, mostly in the kernel, while the other 15 wait
+(measured on the VM): (a) the "Akita setup" step, 97.7 ms in the bench
 and 260.6 ms fresh, mostly the serial `PublicData::from_instance` loop; (b) the event-2 witness
 unmap, 166-197 ms; (c) the release of the six committed sources inside Akita's opening,
 132-163 ms. Changes (prover-only, no transcript change):
@@ -536,7 +504,8 @@ Knobs: `AGG_SCHED_SERIAL` (any value) restores the old schedule in the same bina
 
 ### 11.2 Checks (measured, local)
 
-- `cmp` against main `f175c97` (CLMUL build): identical at 256 and 1K (H-u and H-exact), 1K
+- `cmp` against the code without lever A (CLMUL build): identical at 256 and 1K (H-u and
+  H-exact), 1K
   over 100 shared keys, 2K in two parts (`--part-log2 10`, the multi-part drop path) and 8K, for
   the default, `AGG_SCHED_SERIAL=1` and both parity placements; 16 fresh 8K runs of the A/B
   below are identical too. `agg verify` accepts.
@@ -551,10 +520,9 @@ Knobs: `AGG_SCHED_SERIAL` (any value) restores the old schedule in the same bina
 ### 11.3 Local 8K A/B (measured, direction only)
 
 CLMUL build, `RAYON_NUM_THREADS=7`, `taskset -c 0,1,3-15`, arms interleaved in rotated order,
-no other job on the box (load is the runs themselves). Arms: main `f175c97`; new (`1f2cd97`,
-parity beside round 2); ser (new with `AGG_SCHED_SERIAL=1`, the old schedule); pif (new with the
-parity tables in the fork, the schedule `c20001e` ships by default). Predictions were written
-first (lever-3 log Section 1).
+no other job on the box (load is the runs themselves). Arms: main (without lever A); new
+(parity beside round 2); ser (new with `AGG_SCHED_SERIAL=1`, the old schedule); pif (new with
+the parity tables in the fork, the shipped default). Predictions were written first.
 
 `agg bench --count 8192 --warmup 1 --reps 2`, 4 rounds, medians of the 4 per-run medians:
 
@@ -569,7 +537,7 @@ Fresh `agg aggregate` of the same 8K records, 4 runs per arm (THP on), medians: 
 124.6 (main) / 141.5 (ser) -> 15.0 (new) / 14.5 (pif) ms; total minus the instance and table
 steps 5,616.9 / 5,779.6 / 5,716.1 / 5,668.3 ms.
 
-Final binary `c20001e` against main, `agg bench` as above, 3 more rounds in rotated order (the
+The final binary against main, `agg bench` as above, 3 more rounds in rotated order (the
 box ran about 0.3 s slower in these rounds for both arms): prove 6,146.7 / 6,061.5 / 6,314.2 ms
 (main) against 5,997.5 / 5,975.4 / 6,027.3 ms (lever A), paired median -149 ms, faster in 3 of 3
 pairs; fork wall -81 to -143 ms, lookup -66 to -187 ms, opening -15 to -69 ms; prover peak RSS
@@ -585,11 +553,11 @@ round 2 +65 ms, fork wall -38 to -61 ms; no net change locally, so it stays opt-
 
 ### 11.4 What it means at 32K (est.)
 
-`agg bench` on `c4d-highmem-16`, from the verifier's re-cut of the Phase 10b windows: (a) -0.07
+`agg bench` on `c4d-highmem-16`, from the sampler windows: (a) -0.07
 to -0.08 s, (c) -0.12 to -0.15 s (partly a stopwatch-boundary gain: the release moves after the
 prove, where serialization and the untimed drops sit), (b) about 0 (W1 keeps the witness at
 32K), PIOP-branch drops 0 to -0.10 s (unmeasured at 32K; locally 25-38 ms at 8K, about 4x at
 32K on THP-on pages). Total -0.19 to -0.33 s (est.); fresh process about -0.15 s more from (a).
-Next measurement (bundle with the W1 and lever B A/B): `agg bench --count 32768 --warmup 1
+Cloud check: `agg bench --count 32768 --warmup 1
 --reps 3` with and without `AGG_SCHED_SERIAL=1` on the same binary, and the same pair with
 `AGG_PARITY_EARLY=1`; success is >= 0.15 s median gain and identical aggregates.

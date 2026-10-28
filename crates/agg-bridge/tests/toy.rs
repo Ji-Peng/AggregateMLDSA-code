@@ -1,4 +1,4 @@
-//! The toy instance of docs/bridge.md Section 9 items 2 and 3: `Shape::TOY`, `L = 2^12`
+//! The toy instance: `Shape::TOY`, `L = 2^12`
 //! input bits from a seeded PRNG, matrices from the seed derivation; every Fp-side table
 //! against a direct recomputation with dense `{0, 1}` matrices, the weights against their
 //! dense definitions, the GF(2) side against a dense composite, and single-bit tampering.
@@ -320,7 +320,7 @@ fn single_bit_tampering_on_either_side_changes_y() {
         let x = rng.below(L as u64) as usize;
         let tampered = flipped(&bits, x);
         // Fp copy only: honest parities and carries of the tampered bits. The level-1 image
-        // of a single-bit difference is the column S_x (Lemma 1, deterministic); with this
+        // of a single-bit difference is the column S_x (nonzero, deterministic); with this
         // seed it also survives levels 2 and 3 at every sampled position.
         let fp = parity::compute(&shape, &[&tampered], &m).unwrap();
         parity::check(&shape, &[&tampered], &m, &fp).unwrap();

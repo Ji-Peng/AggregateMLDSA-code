@@ -1,7 +1,6 @@
-//! Legacy segment driver (superseded by [`crate::tied`] for mode A, deviation K11; kept as
-//! the reference two-type union and for the toy-shape slot tests): one Flock proof per
-//! segment covering the segment's SHAKE256 sponges and its bridge slot (spec Sections 1, 8
-//! and 10; docs/bridge.md Section 5).
+//! Reference segment driver (mode A uses [`crate::tied`]; this one is kept as the reference
+//! two-type union and for the toy-shape slot tests): one Flock proof per segment covering
+//! the segment's SHAKE256 sponges and its bridge slot (docs/bridge.md).
 //!
 //! The sub-batch is a two-type union: `n` instances of the sponge gate (one per live record,
 //! [`crate::sponge`]) and one instance of the bridge type ([`crate::bridge_slot`]). The
@@ -9,10 +8,10 @@
 //! at words `4 + 8t .. 4 + 8t + 8`) and `c~` (2 words, `Out`); the bridge type's schema lists
 //! the copies of every live input word. Wire classes: `{sponge mu/c~ word of record i,
 //! public word}` and `{sponge word 4 + 8t + w of record i, bridge word of (t, i, w)}`, so
-//! the slot's bits are word-for-word the sponge inputs (no bit permutation, docs/bridge.md
-//! Section 2). Public words: `[mu_i, c~_i]` per record.
+//! the slot's bits are word-for-word the sponge inputs (no bit permutation).
+//! Public words: `[mu_i, c~_i]` per record.
 //!
-//! Order (spec Section 10; deviation K7): [`BridgedSegment::commit`] fixes the union witness,
+//! Order: [`BridgedSegment::commit`] fixes the union witness,
 //! the sponge rows and the bridge copies, none of which depends on the bridge seed `sd`, and
 //! returns the event-2 commitment. Then the PIOP draws `sd` (event 3), both sides derive the
 //! matrices, the prover computes `Y_sigma`, the PIOP draws `fs_sigma` (event 5), and
@@ -271,7 +270,7 @@ const KIND_SLOT: u8 = 1;
 /// Proof kind byte of a bridged segment (sponges and bridge slot).
 const KIND_SEGMENT: u8 = 2;
 
-/// A Flock challenger seeded with `fs` and then the given digests (deviation K4).
+/// A Flock challenger seeded with `fs` and then the given digests.
 fn challenger(fs: &[u8; 32], digests: &[[u8; 32]]) -> FsChallenger {
     let mut ch = FsChallenger::new(DOMAIN);
     ch.observe_bytes(fs);
@@ -403,7 +402,7 @@ impl BridgeBatch {
 }
 
 /// The sponge type of a bridged segment: the sponge gate with the 48 w1Encode words added
-/// to its IO schema as inputs after `mu` (deviation K6).
+/// to its IO schema as inputs after `mu`.
 fn bridged_sponge_type(gate: &ChainGate) -> TableType {
     let spec = gate.spec();
     assert!(
@@ -515,8 +514,7 @@ pub struct BridgedSegment<'g> {
 }
 
 impl<'g> BridgedSegment<'g> {
-    /// `d_seg` of a single-segment batch of `n <= 2^13` records: `log2 max(next_pow2(n), 8)`
-    /// (spec Section 1).
+    /// `d_seg` of a single-segment batch of `n <= 2^13` records: `log2 max(next_pow2(n), 8)`.
     #[must_use]
     pub fn d_seg_for(n: usize) -> u32 {
         assert!(
@@ -541,7 +539,7 @@ impl<'g> BridgedSegment<'g> {
     /// positions, with `n` live records (the part's first `n` positions; segment records
     /// `2^{d_part} index ..`). Its bridge slot proves the part's share
     /// `Y_{sigma, index} = M^{(sigma)} b'_{index}` of the segment's final vector (the parts'
-    /// shares XOR to `Y_sigma`; deviation K10). Part 0 of `2^{d_seg}` positions is
+    /// shares XOR to `Y_sigma`). Part 0 of `2^{d_seg}` positions is
     /// [`Self::new`].
     ///
     /// # Panics

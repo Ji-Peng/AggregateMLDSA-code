@@ -28,7 +28,7 @@ impl Rng {
     }
 }
 
-/// The honest alphabet of each group's polynomials (spec Section 4.1, lookup layout L16):
+/// The honest alphabet of each group's polynomials:
 /// `0` marks a Boolean column, `b > 0` a balanced base-`b` digit, so a 16-bit lookup column
 /// is base `2^16`, a multiplicity digit base 16. `G_main4` is `Z_hi` (base 4), `U_hi`
 /// (base 6) and six bits under H-u, and `B_zhi` (bit), `D_u` (base 6), six bits and `a_z`
@@ -60,7 +60,7 @@ pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
 
 /// Dummy tables of one group; the rows of padded signatures (`i >= live`) are the
 /// canonical digits of zero (`-2^15` for the 16-bit columns, `0` for the top digits and
-/// bits; spec Section 4.2).
+/// bits).
 pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i32>> {
     let cells = plan.logical_cells(group);
     let bases = bases(group, plan.relation());

@@ -586,7 +586,7 @@ pub struct LincheckProof {
 /// The same policy applies to the single-table and union-column linchecks;
 /// the union simply has one β site for every pinned Boolean table.
 ///
-/// agg-mldsa patch (vendor/flock-core/PATCH.md, section 5): with the level-0
+/// agg-mldsa patch (vendor/flock-core/PATCH.md): with the level-0
 /// Johnson-list factor `list` ([`Self::per_challenge_128_listed`]) every
 /// numerator above is multiplied by `list` (the lincheck challenges precede
 /// Ligerito's level-0 binding, Flock paper Appendix A, Remark 11); `list = 1`
@@ -1226,7 +1226,7 @@ pub enum SkipPoint {
     /// AG multiplication-code basis: a genus-95 curve point; weights via the
     /// base-code evaluation functional. Always `k_skip = 6` (64 base coords).
     Ag(EvaluationPoint),
-    /// agg-mldsa patch (PATCH.md Section 7, deviation K21): the MULTILINEAR basis. The six
+    /// agg-mldsa patch (PATCH.md): the MULTILINEAR basis. The six
     /// coordinates of in-word bits 0..5, least significant first; the functional is the eq
     /// tensor `w[i] = prod_k (x_k if bit k of i is set else 1 + x_k)`, so a ring-switched
     /// claim at this point is an ordinary bit-MLE evaluation. Enters ring-switched openings
@@ -1237,7 +1237,7 @@ pub enum SkipPoint {
 
 /// Panic message of the skip-round paths that a multilinear skip point never reaches.
 pub(crate) const EQ_SKIP_OPENING_ONLY: &str =
-    "SkipPoint::Eq enters ring-switched openings only, never a skip round (agg-mldsa K21)";
+    "SkipPoint::Eq enters ring-switched openings only, never a skip round (agg-mldsa patch)";
 
 impl SkipPoint {
     /// The length-`2^k_skip` skip evaluation functional at this point.

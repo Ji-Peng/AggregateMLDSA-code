@@ -1,5 +1,5 @@
-//! Dedicated sum-check groups of the LogUp-GKR sessions and of stage 3 (`docs/lookup.md`
-//! Section 4.6, `docs/piop.md` Section 20). Prover only.
+//! Dedicated sum-check groups of the LogUp-GKR sessions and of stage 3 (`docs/lookup.md`,
+//! `docs/piop.md`). Prover only.
 //!
 //! The polynomial of a round is unique, so any exact computation of it gives the messages
 //! of the generic [`super::Group`] byte for byte. These groups compute it from fewer
@@ -885,7 +885,7 @@ impl Level0 for LinearSource<'_> {
         self.lanes[0].len()
     }
 
-    /// `g = sum_l c_l f_l` on every cell (four products per cell at the L16 stacks, half
+    /// `g = sum_l c_l f_l` on every cell (four products per cell at the lookup stacks, half
     /// of what the first round and the first fold would cost on the integer lanes).
     fn initial_table(&self) -> Option<Vec<E>> {
         // Unreduced products, one reduction per cell.

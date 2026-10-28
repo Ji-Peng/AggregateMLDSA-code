@@ -1,5 +1,5 @@
-//! Mode A end to end (spec Sections 10, 11, 13): the aggregator on real ML-DSA-44 records
-//! and the verifier on `(pk_i, M_i)` and the aggregate.
+//! Mode A end to end: the aggregator on real ML-DSA-44 records and the verifier on `(pk_i,
+//! M_i)` and the aggregate.
 //!
 //! - Round trips at 64, 256 (two Flock parts), 512 and (`Slim`) 1,024 signatures under each mode-A Flock
 //!   profile (`Fast`, `Slim`, `Slim8`): the aggregate size per part, the prover's and the verifier's
@@ -11,11 +11,11 @@
 //!   commitments), the tie nonce and the tied-part proof version, the PIOP work nonces, a
 //!   plan-digest mismatch, the records (order, message, key, count) and the configuration.
 //! - Tampered witnesses (`tampered_witnesses_are_rejected_end_to_end`): every witness
-//!   tampering of the earlier stages (`agg-piop/tests/mode_b.rs`, `tests/joint_bridge.rs`,
+//!   tampering of the per-crate tests (`agg-piop/tests/mode_b.rs`, `tests/joint_bridge.rs`,
 //!   `agg-keccak/tests/{proofs,bridge}.rs`) pushed through the mode-A aggregator (stages
 //!   unchecked) and rejected by the verifier at the stated step.
 //! - Invalid signatures are refused by the aggregator (`agg-witness/tests/negative.rs`).
-//! - A kept and a rebuilt Flock witness give the same aggregate (lever W1).
+//! - A kept and a rebuilt Flock witness give the same aggregate.
 //!
 //! Run with `--release`.
 
@@ -110,7 +110,7 @@ fn round_trip(
 }
 
 /// [`round_trip`] under `relation`; a verifier of the other relation rejects the aggregate
-/// before event 0 (`docs/h-exact.md` 1.3).
+/// before event 0.
 fn round_trip_as(
     relation: Relation,
     n_own: usize,
@@ -294,10 +294,10 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
 }
 
-/// Lever W1 (`docs/perf.md` Section 9): a batch of one Flock part keeps its committed witness
-/// from event 2 until the join; dropping and rebuilding it (K14), or keeping it without the
-/// commit data (K7), gives the same aggregate bytes, at 64 records (one part) and at 256 records in
-/// two parts (always rebuilt). The kept aggregate verifies.
+/// A batch of one Flock part keeps its committed witness from event 2 until the join; dropping
+/// and rebuilding it, or keeping it without the commit data, gives the same aggregate bytes, at
+/// 64 records (one part) and at 256 records in two parts (always rebuilt). The kept aggregate
+/// verifies.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -333,7 +333,7 @@ fn kept_and_rebuilt_witnesses_give_the_same_aggregate() {
     });
 }
 
-/// Relation H-FIPS (`docs/h-exact.md` Section 10) in mode A at 64 records (Slim, one Flock
+/// Relation H-FIPS (`docs/h-exact.md`) in mode A at 64 records (Slim, one Flock
 /// part) and 256 records (two parts); the cross-relation verifier rejects before event 0.
 #[test]
 #[cfg_attr(
@@ -507,11 +507,10 @@ impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
     }
 }
 
-/// Two genuine keys sharing `rho` (memo 3.4 (c): `rho` is the signer's choice, so the
-/// verifier must key its expansions and records by the full `pk`): an aggregate over records
-/// of both keys verifies (uncached, with only the first key cached, fully cached), and the
-/// records verify only against their own key: naming the other key for a record is
-/// rejected, cached or not.
+/// Two genuine keys sharing `rho` (`rho` is the signer's choice, so the verifier must key its
+/// expansions and records by the full `pk`): an aggregate over records of both keys verifies
+/// (uncached, with only the first key cached, fully cached), and the records verify only
+/// against their own key: naming the other key for a record is rejected, cached or not.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -595,7 +594,7 @@ fn corrupted_aggregates_are_rejected() {
         p.final_vectors[0][100] ^= 4;
         let r = verify(&p);
         expect_rejected("Y_sigma bit", &r, keccak);
-        // Event 6 changed, so the record digest in every part seed changed (K22): part 0
+        // Event 6 changed, so the record digest in every part seed changed: part 0
         // fails first, before the implied last share of part 1 is reached.
         assert!(part(0)(&r), "every part seed binds the event-6 record");
         let p = with_all_items(&honest, |_, s, _| s.shares[0][3] ^= 1);
@@ -672,10 +671,10 @@ fn corrupted_aggregates_are_rejected() {
             Some((0, SegmentRejection::Item(ItemError::Truncated)))
         ));
 
-        // The tie work and binding (tied-part proof version 5, docs/soundness.md 3.6, 4.5,
-        // 6.3): part 1's tie nonce one below the honest (smallest passing) one, or of 17 bits
-        // (Slim at d = 4 with 4 records: nu_s = 3, tie numerator 50 x 6 = 300, 9 bits of work,
-        // a nonce of at most 16 bits), fails the predicate; a version-4 proof is refused.
+        // The tie work and binding (tied-part proof version 5, docs/soundness.md): part 1's tie
+        // nonce one below the honest (smallest passing) one, or of 17 bits (Slim at d = 4 with
+        // 4 records: nu_s = 3, tie numerator 50 x 6 = 300, 9 bits of work, a nonce of at most
+        // 16 bits), fails the predicate; a version-4 proof is refused.
         let nonce_of = |bytes: &[u8]| {
             u32::from_le_bytes(bytes[tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].try_into().unwrap())
         };
@@ -841,7 +840,7 @@ fn corrupted_aggregates_are_rejected() {
     });
 }
 
-/// The fork-join transcript (deviation K22) with real Flock parts. The join absorbs the
+/// The fork-join transcript with real Flock parts. The join absorbs the
 /// Flock proof items after the stage-3 claims and before the PCS session digest, and every
 /// part's challengers are seeded from `fs_sigma` and the digest of the event-6 record. A
 /// tampered proof item, or the proof item of another aggregate of the same geometry, is
@@ -925,7 +924,7 @@ fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
     });
 }
 
-/// More than two tied parts in a segment (docs/soundness.md 3.5): an honest prover that
+/// More than two tied parts in a segment (docs/soundness.md): an honest prover that
 /// splits 20 records (d_seg = 5) into parts of 8 (three parts) builds an aggregate that every
 /// verifier refuses, because `sd`'s bad set would be a union over three Johnson lists.
 #[test]
@@ -1024,7 +1023,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &at_stage(3),
         );
         // A committed bit flipped, the Flock side honest: the F_p side's Y_sigma (of the
-        // flipped bits) differs from the Flock side's M b' (Lemma 1), so the Flock part fails.
+        // flipped bits) differs from the Flock side's M b', so the Flock part fails.
         run(
             "committed bit flipped",
             &main(&|m, t| *cell(m, t, Column::W1Bit(0), main_index(17, 2, 5)) ^= 1),
@@ -1116,7 +1115,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             "{error}"
         );
         // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = -4
-        // is in relaxed H's base-8 alphabet, not in relation H-u's base-6 one).
+        // is outside relation H-u's base-6 alphabet).
         run(
             "base-4 digit",
             &main(&|m, t| *cell(m, t, Column::Z_HI, main_index(17, 2, 5)) = 3),

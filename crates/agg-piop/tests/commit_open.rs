@@ -1,7 +1,6 @@
-//! Round-1 and round-2 tables of real ML-DSA-44 batches (lookup layout L16: two main
-//! groups of widths 16 and 4, three width-16 bridge groups and the width-4 multiplicity
-//! group) commit through agg-pcs-config and open in one batched Akita proof (spec Sections
-//! 4, 7.5 and 10; Section 13 PCS item).
+//! Round-1 and round-2 tables of real ML-DSA-44 batches (two main groups of widths 16 and
+//! 4, three width-16 bridge groups and the width-4 multiplicity group) commit through
+//! agg-pcs-config and open in one batched Akita proof.
 
 mod common;
 

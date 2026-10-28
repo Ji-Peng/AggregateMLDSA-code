@@ -1,5 +1,5 @@
-//! Akita commitment presets and catalogs for the four witness groups
-//! (docs/spec.md Sections 4 and 14, milestone M1; docs/pcs-config.md).
+//! Akita commitment presets and catalogs for the six witness groups
+//! (`docs/spec.md`, `docs/pcs-config.md`).
 
 pub mod catalogs;
 pub mod commit;

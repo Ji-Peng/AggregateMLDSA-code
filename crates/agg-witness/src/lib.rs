@@ -1,13 +1,12 @@
-//! ML-DSA-44 witness generation for the aggregation PIOP (docs/spec.md Section 14, milestone M1).
+//! ML-DSA-44 witness generation for the aggregation PIOP (`docs/spec.md`).
 //!
-//! Pipeline: `instance::PublicInstance` (verifier precomputation, spec Section 2) ->
-//! `derive::derive` (per-signature witness of relation H, Sections 3 and 6) ->
-//! `tables::BatchTables` (G_main columns, Section 4) -> `check::check` (every identity of
-//! Section 7 over the integers). `native` is an independent FIPS 204 verifier, `keccak` the
-//! sponge of Section 8, `bridge` the integer side of the parity bridge (Section 9).
-//! Feature `h-exact` adds the H-exact layout (spec 4.3), feature `fips` the S1+S2 layout
-//! (Appendix A). `hfips` holds relation H-FIPS (relation byte 2, spec Appendix A): its
-//! per-coefficient witness, derivation, checker and the extraction of a FIPS 204 signature.
+//! Pipeline: `instance::PublicInstance` (verifier precomputation) -> `derive::derive`
+//! (per-signature witness of relation H) -> `tables::BatchTables` (G_main columns) ->
+//! `check::check` (every sum-check identity over the integers). `native` is an independent
+//! FIPS 204 verifier, `keccak` the commitment-hash sponge, `bridge` the integer side of the
+//! parity bridge. Feature `h-exact` adds the H-exact layout, feature `fips` the S1+S2 layout.
+//! `hfips` holds relation H-FIPS (relation byte 2): its per-coefficient witness, derivation,
+//! checker and the extraction of a FIPS 204 signature.
 //! Bounds enforced are listed in docs/witness.md.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.

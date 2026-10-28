@@ -1,5 +1,5 @@
-//! Mode-A segment items of the aggregate wire format (spec Section 10, events 2 and 6 and the
-//! join; `docs/deviations.md` K10, K11, K13, K22).
+//! Mode-A segment items of the aggregate wire format (transcript events 2 and 6 and the
+//! join).
 //!
 //! The aggregate itself is `agg_piop::wire::AggregateProof`: header (version, flags, `N`),
 //! the `32 N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, 7 to 12, the join and
@@ -11,16 +11,15 @@
 //! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || span
 //!   (u8) || parts (LE32)`, then per part `LE32(len) || commitment`, the part's
 //!   `agg_keccak::tied::TiedCommitment` bytes
-//!   (the framed Ligerito level-0 cap of its sponge instance, K7, K11; the bridge union's
-//!   cap depends on `sd` and is part of the proof, K13);
+//!   (the framed Ligerito level-0 cap of its sponge instance);
 //! - event 6, [`SegmentShares`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
 //!   bytes each (4,096 bits packed least significant first, like `Y_sigma`). The last part's
 //!   share is not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by
 //!   construction;
-//! - the join (after stage 3, K22), [`SegmentProofs`]: per part `LE32(len) || tied-part
+//! - the join (after stage 3), [`SegmentProofs`]: per part `LE32(len) || tied-part
 //!   proof` (`agg_keccak::tied`, proof version 5: the chain rounds and the sponge proof).
 //!
-//! The span byte (deviation K16) is 1 for a segment proven on its own (the layout above);
+//! The span byte is 1 for a segment proven on its own (the layout above);
 //! `S >= 2` in segment 0's item of a batch of `S` segments proven as ONE tied part over all
 //! of them (one part, `d_part = d_seg`: its cap at event 2 and its proof, of every
 //! `Y_sigma`, at the join, without shares); 0 in the items of segments `1..S` of such a batch
@@ -39,13 +38,8 @@
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
 /// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
-/// runs `Fast`, `Slim` or `Slim8`, and the span of its part, K16; since K22 the shares and the
-/// proofs are separate items, at event 6 and at the join, with the version kept as no
-/// aggregate of the joint item was released; the part proofs are tied-part proofs
-/// of version 3; version 3 had the tied parts of deviation K13 under `Fast` only, one per
-/// segment or part: one Flock cap per part at event 2 and one tied-part proof, holding the
-/// bridge union's cap, per part at event 6; version 2 carried the one-row bridge slot's cap
-/// at event 2).
+/// runs `Fast`, `Slim` or `Slim8`, and the span of its part; the shares and the proofs are
+/// separate items, at event 6 and at the join).
 pub const ITEM_VERSION: u8 = 4;
 
 /// A malformed segment item.

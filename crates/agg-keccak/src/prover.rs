@@ -8,7 +8,7 @@
 //! `[n, 2^nu)` are identically zero, which satisfies the relation with the
 //! constant pinned to 0 (Flock's count-derived pin target).
 //!
-//! Commit, then prove (spec Section 8, driver; Section 10, events 2 to 6):
+//! Commit, then prove (PIOP transcript events 2 to 6):
 //! [`GateBatch::commit`] fixes the witness and returns its [`KeccakCommitment`]
 //! before any PIOP challenge that depends on it (the PIOP absorbs it at event
 //! 2 and then draws `sd` and `fs_sigma`); [`GateBatch::prove_committed`] runs
@@ -18,7 +18,7 @@
 //! commitment, so there is no second copy that could differ from event 2.
 //!
 //! Fiat-Shamir: the Flock challenger is created with the domain
-//! `agg-mldsa/v1/keccak`, then absorbs the 32-byte seed `fs` (spec Section 10,
+//! `agg-mldsa/v1/keccak`, then absorbs the 32-byte seed `fs` (PIOP
 //! event 5) and the gate digest (the registry type carries empty matrix stubs,
 //! so the relation is bound here), then Flock binds the registry, counts,
 //! commitment, circuit digest and public words.
@@ -82,7 +82,7 @@ pub enum Profile {
     /// Flock's `Slim`: rate 1/4 with the accounting of `Fast` (128 bits work-normalized);
     /// about half the opening bytes for about twice the level-0 encoding work.
     Slim,
-    /// `Slim8` of the vendored Flock core (deviation K18): rate 1/8 at level 0 with `Slim`'s
+    /// `Slim8` of the vendored Flock core: rate 1/8 at level 0 with `Slim`'s
     /// accounting, derived and validated by Flock's own `derive_profile`/`validate`; about
     /// two thirds of `Slim`'s level-0 queries for twice its level-0 encoding work.
     Slim8,
@@ -99,7 +99,7 @@ impl Profile {
     }
 
     /// `floor(L_max)`, the Johnson-list size of a level-0 Ligerito commitment
-    /// (`docs/soundness.md` Section 3.6; Flock Eq. (10) at `eta = 0.02`): 35, 50, 70 for
+    /// (`docs/soundness.md`; the Flock paper's Johnson bound at `eta = 0.02`): 35, 50, 70 for
     /// `Fast`, `Slim`, `Slim8` (rates 1/2, 1/4, 1/8); 1 for the unique-decoding `Secure`.
     #[must_use]
     pub fn list_size(self) -> u64 {
@@ -147,7 +147,7 @@ pub enum KeccakError {
     /// not match the other instance's or the verifier's table.
     Tie(&'static str),
     /// The prover's proof-of-work search exhausted its allowance of `2^(g + 7)` candidates
-    /// (probability below `2^-184.6` per site, docs/soundness.md 6.5).
+    /// (probability below `2^-184.6` per site, docs/soundness.md).
     Work(&'static str),
 }
 
@@ -177,7 +177,7 @@ pub struct KeccakProof {
 /// `2^c` nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`), which is
 /// exactly what Flock's `bind_statement` absorbs (the PCS parameters are not
 /// transmitted; both sides derive them from `n` and the profile).
-/// [`Self::as_bytes`] is the event-2 payload of spec Section 10.
+/// [`Self::as_bytes`] is the event-2 payload of the PIOP transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeccakCommitment {
     bytes: Vec<u8>,
@@ -204,10 +204,9 @@ impl KeccakCommitment {
     }
 }
 
-/// A sub-batch witness committed before the PIOP draws `sd` and `fs_sigma`
-/// (spec Section 8, driver). Holds the slot buffers until
-/// [`GateBatch::prove_committed`], so nothing about the witness can change
-/// after its commitment entered the transcript.
+/// A sub-batch witness committed before the PIOP draws `sd` and `fs_sigma`.
+/// Holds the slot buffers until [`GateBatch::prove_committed`], so nothing
+/// about the witness can change after its commitment entered the transcript.
 pub struct CommittedBatch {
     n: usize,
     profile: Profile,
@@ -393,9 +392,9 @@ impl<'g> GateBatch<'g> {
         commitment
     }
 
-    /// Commit to prepared slot buffers (spec Section 8, driver: before `sd`
-    /// and `fs_sigma` exist). Honest provers use [`Self::commit_inputs`];
-    /// tests use this to commit tampered witnesses.
+    /// Commit to prepared slot buffers (before `sd` and `fs_sigma` exist).
+    /// Honest provers use [`Self::commit_inputs`]; tests use this to commit
+    /// tampered witnesses.
     #[must_use]
     pub fn commit(&self, buffers: SlotBuffers) -> CommittedBatch {
         let commitment = KeccakCommitment::from_flock(&self.flock_commit(&buffers.z));
@@ -416,7 +415,7 @@ impl<'g> GateBatch<'g> {
 
     /// Prove a committed sub-batch against the public words `public` with the
     /// Flock challenger seeded by `fs` (`fs_sigma`, drawn after the commitment
-    /// was absorbed). Flock 83f963e has no entry that takes a precomputed
+    /// was absorbed). Flock has no entry that takes a precomputed
     /// commitment, so its prover commits again (deterministically); the
     /// result must equal [`CommittedBatch::commitment`].
     ///
@@ -788,7 +787,7 @@ mod tests {
     use flock_core::test_rng::Rng;
 
     /// The vendored Flock core's outer sites carry the level-0 Johnson list
-    /// (vendor/flock-core/PATCH.md Section 5, deviation K19, docs/soundness.md 4.3, 4.4).
+    /// (vendor/flock-core/PATCH.md, docs/soundness.md).
     #[test]
     fn flock_outer_sites_carry_the_level0_list() {
         use flock_core::{
@@ -810,7 +809,7 @@ mod tests {
             }
             assert!(seen >= 10, "{profile:?}: {seen} configs");
         }
-        // docs/soundness.md 4.3, Fast / Slim / Slim8.
+        // docs/soundness.md, Fast / Slim / Slim8.
         let z = ZerocheckGrinding::per_challenge_128_listed;
         assert_eq!([36, 50, 71].map(|l| z(l).multilinear_round_bits()), [Some(7), Some(7), Some(8)]);
         assert_eq!([36, 50, 71].map(|l| z(l).skip_bits()), [Some(13), Some(13), Some(14)]);

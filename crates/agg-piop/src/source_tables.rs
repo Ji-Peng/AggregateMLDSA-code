@@ -1,5 +1,4 @@
-//! Batch-level committed source tables (spec Sections 4.1, 4.2 and 9.2; lookup layout L16,
-//! `docs/lookup.md` Sections 1 and 6).
+//! Batch-level committed source tables (`docs/lookup.md`).
 //!
 //! Mirrors `aerie-prover/src/protocol/source_tables.rs`: one holder per commitment round,
 //! built from the derived witnesses and checked against the [`CommitmentManifest`]:
@@ -8,21 +7,20 @@
 //!   `i32` cells in one stacked lane, column `c` at cells `c 2^d_main ..`) and `G_main4`
 //!   (`Z_hi, U_hi, b_0..b_5`, `i8` cells), from `z + 2^17 = z_lo + 2^16 z_hi`,
 //!   `v + 2^31 = v_lo + 2^16 v_hi` with the stored values `Z_lo = z_lo - 2^15`,
-//!   `Z_hi = z_hi - 2` and likewise (spec (4.1) with the L16 bases), and relation H-u's
+//!   `Z_hi = z_hi - 2` and likewise, and relation H-u's
 //!   `u + 190,465 = B_ulo + 63,079 H_u` (`H_u = min(floor((u + 190,465) / 63,079), 5)`) stored
 //!   as `U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`. Padded rows carry the digits of zero
 //!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0). Under relation H-exact `z` is
-//!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`, `docs/h-exact.md`
-//!   2.1) stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
+//!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`, `docs/h-exact.md`)
+//!   stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
 //!   `Z_hi`) and the bit `a_z` (the ninth `G_main4` column); the digits of zero are
-//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`. Under relation H-FIPS (`docs/h-exact.md`
-//!   Section 10) `z` is H-exact's, and each coefficient's canonical witness
-//!   `agg_witness::hfips::honest_coeff(w', h*)`, with `w' = 2 gamma_2 w_1' + u mod q` and
-//!   `h* = [HighBits(w') != w_1']` (the signature's own hint for an honest record), gives
-//!   `l_lo = L_lo - 2^15`, `l_hi` (the slots of `U_lo`, `U_hi`), the sign bit
-//!   `s = (1 + sigma)/2`, `delta` and `e` (after `a_z`); each record's hint slack
-//!   `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) = (0,
-//!   gamma_2 - 1, 0, 0)`, `u_h = 80`.
+//!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`. Under relation H-FIPS `z` is H-exact's, and
+//!   each coefficient's canonical witness `agg_witness::hfips::honest_coeff(w', h*)`, with
+//!   `w' = 2 gamma_2 w_1' + u mod q` and `h* = [HighBits(w') != w_1']` (the signature's own
+//!   hint for an honest record), gives `l_lo = L_lo - 2^15`, `l_hi` (the slots of `U_lo`,
+//!   `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e` (after `a_z`); each record's
+//!   hint slack `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) =
+//!   (0, gamma_2 - 1, 0, 0)`, `u_h = 80`.
 //! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
 //!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
@@ -103,7 +101,7 @@ pub enum SourceTableError {
     Derive(usize, DeriveError),
     /// The batch geometry is invalid.
     Geometry(GeometryError),
-    /// A value is outside the L16 range of its decomposition (honest abort).
+    /// A value is outside the range of its digit decomposition (honest abort).
     Encode(&'static str),
     /// The bridge matrices are malformed or a row weight exceeds its cap (honest abort).
     Bridge(BridgeError),
@@ -242,7 +240,7 @@ pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Re
     Ok(())
 }
 
-/// The L16 values of one record: `z, u, v` and the six bit lanes.
+/// The values of one record: `z, u, v` and the six bit lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordValues {
     /// `z[s][j]`.
@@ -256,7 +254,7 @@ pub struct RecordValues {
 }
 
 impl RecordValues {
-    /// The canonical all-zero witness of a padded row (spec Section 4.2).
+    /// The canonical all-zero witness of a padded row.
     #[must_use]
     pub const fn zero() -> Self {
         Self {
@@ -277,7 +275,7 @@ struct RecordBlock {
     hint_slack: i64,
 }
 
-/// The H-FIPS witness of one coefficient from `(u, w_1')` (`docs/h-exact.md` Section 10.2):
+/// The H-FIPS witness of one coefficient from `(u, w_1')` (`docs/h-exact.md`):
 /// `w' = 2 gamma_2 w_1' + u mod q`, `h* = [HighBits(w') != w_1']`, the canonical
 /// `honest_coeff(w', h*)`; `None` when `w_1'` is not reachable from `w'` by any hint bit or
 /// the form's `u` differs (an input outside the honest relation).
@@ -638,7 +636,7 @@ impl MainTables {
 }
 
 /// H-FIPS's `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` from `L`, the sign bit
-/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md` Section 10.7), any integers.
+/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md`), any integers.
 #[must_use]
 pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
     GAMMA2 * s + l + 1 - GAMMA2 - 2 * GAMMA2 * delta - e
@@ -650,7 +648,7 @@ pub fn main_cell(j: usize, rho: usize, i: usize) -> usize {
     main_index(j, rho, i)
 }
 
-/// H-FIPS's hint slack as a `D_2` table (`docs/h-exact.md` Section 10.7): `u_h(i)` at index
+/// H-FIPS's hint slack as a `D_2` table (`docs/h-exact.md`): `u_h(i)` at index
 /// `i 2^(d_2 - d_sig)` (the low `d_2 - d_sig` variables of `D_2` are position variables when
 /// `d_sig < 13`), zero elsewhere.
 ///
@@ -701,7 +699,7 @@ pub struct BridgeGroupTables {
 
 impl BridgeGroupTables {
     /// The honest round-2 tables for the committed bits of `main` and the matrices derived
-    /// from the bridge seed (spec Sections 9.1, 9.2), with the multiplicities of every
+    /// from the bridge seed, with the multiplicities of every
     /// looked-up cell of both rounds.
     pub fn build(
         manifest: &CommitmentManifest,
@@ -860,7 +858,7 @@ impl BridgeGroupTables {
     }
 }
 
-/// The four lookup stacks of the batch (`docs/lookup.md` Section 1), borrowed from the
+/// The four lookup stacks of the batch (`docs/lookup.md`), borrowed from the
 /// tables: `[Z_lo | U_lo | V_lo | V_hi]` and the stacked carries of levels 1 to 3.
 pub fn lookup_stacks<'a>(
     manifest: &CommitmentManifest,

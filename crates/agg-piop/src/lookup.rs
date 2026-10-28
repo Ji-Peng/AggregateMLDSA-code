@@ -1,6 +1,6 @@
-//! Lookup-based range argument (prototype, `docs/lookup.md`): `LogUp` (Haboeck, ePrint
-//! 2022/1530, Lemma 5) with the GKR fractional sum-check of Papini and Haboeck (ePrint
-//! 2023/1284, Sections 3-4) over `F_p`, challenges in `K = F_{p^2}`.
+//! Lookup-based range argument (`docs/lookup.md`): `LogUp` (Haboeck, ePrint 2022/1530) with
+//! the GKR fractional sum-check of Papini and Haboeck (ePrint 2023/1284) over `F_p`,
+//! challenges in `K = F_{p^2}`.
 //!
 //! A *stack* is a list of committed digit columns of one domain that are looked up in one
 //! table `T_w = [0, 2^w)`. Its columns are stacked into one lane of `2^depth` cells
@@ -22,8 +22,7 @@
 //! point of `K^depth`, an Akita opening claim in the integrated protocol (here checked by
 //! the caller). One rational identity is proven per table: tables are never merged by
 //! integer offsets, because a committed value is an arbitrary `F_p` element and an offset
-//! tag does not stop a column from matching another table's entries (`docs/lookup.md`
-//! Section 1).
+//! tag does not stop a column from matching another table's entries (`docs/lookup.md`).
 //!
 //! Every sum-check runs on [`crate::kernel::Group`] through its public constructors only:
 //! layer lanes are `Source::Field` halves of the stored layers, leaf lanes are
@@ -37,7 +36,7 @@
 //! (`Fs`) bound to the layout and a caller binding.
 //!
 //! A stack may store its cells shifted: the looked-up value is `f = stored + shift` (the
-//! L16 columns are stored balanced, `shift = 2^15`). The leaves are then
+//! PIOP's looked-up columns are stored balanced, `shift = 2^15`). The leaves are then
 //! `1 / ((X - shift) - stored)`, the multiplicities count `f`, and the final claim is on the
 //! stored lane (so it is a claim on the committed columns as they are).
 
@@ -59,13 +58,13 @@ use crate::{BaseField, OpeningField as E};
 
 /// Message degree of every session (equality factor times a bilinear summand).
 pub const DEGREE: usize = 3;
-/// Largest number of independent challenges `X` (the prototype measures 1 and 2).
+/// Largest number of independent challenges `X` (the timing test measures 1 and 2).
 pub const MAX_CHALLENGES: usize = 4;
 /// Balanced base-16 digits of one multiplicity (`m < 7 (16^7 - 1) / 15 ~ 2^26.9`).
 pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Below this many nodes a tree layer is built serially.
 const PARALLEL_NODES: usize = 1 << 12;
-/// Domain separator of the prototype transcript.
+/// Domain separator of the standalone transcript.
 const DOMAIN: &[u8] = b"agg-mldsa/v1/lookup-prototype";
 
 /// A lookup failure.
@@ -129,7 +128,7 @@ pub struct Table {
 }
 
 impl Table {
-    /// The 16-bit table of the L16 layout.
+    /// The 16-bit table `T_16`.
     pub const T16: Self = Self { width: 16 };
 
     /// `T_width`.
@@ -398,7 +397,7 @@ pub fn multiplicities(stacks: &[LookupStack<'_>], tables: &[Table]) -> Result<Ve
 
 /// The balanced base-16 digits `m = sum_k 16^k d_k`, `d_k in [-8, 7]`, of a multiplicity
 /// column: the seven width-4 Akita polynomials of group `G_m`. No digit check is needed
-/// (Lemma 5 of `LogUp` holds for any `m in F_p`); the digits only let the honest values fit
+/// (the `LogUp` identity holds for any `m in F_p`); the digits only let the honest values fit
 /// the width-4 preset.
 ///
 /// # Panics
@@ -557,7 +556,7 @@ impl LookupShape {
     }
 
     /// The bad-set probability of one challenge `X` for table `table` before grinding:
-    /// `(L + |T| - 1) / (|K| - |T|)` (LogUp-GKR Proposition 2), as `log2`.
+    /// `(L + |T| - 1) / (|K| - |T|)` (LogUp-GKR), as `log2`.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn identity_error_log2(&self, table: usize) -> f64 {
@@ -600,7 +599,7 @@ impl LookupShape {
 // Fiat-Shamir.
 // ---------------------------------------------------------------------------------------
 
-/// The events of a lookup in transcript order (`docs/piop.md` Section 9).
+/// The events of a lookup in transcript order (`docs/piop.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LookupSite {
     /// The challenges `X_1 .. X_c` (one vector challenge).
@@ -1675,7 +1674,7 @@ fn prove_with(
         }
         point = rho;
         // Layer `s` is no longer read: unmapped on a detached thread, off the PIOP branch's
-        // critical path (lever A, docs/perf.md Section 11).
+        // critical path.
         let done: Vec<Layer> = trees
             .iter_mut()
             .filter_map(|tree| tree.layers.get_mut(s).map(std::mem::take))
@@ -1826,8 +1825,8 @@ mod tests {
             .collect()
     }
 
-    /// The L16 main-domain stack `[z_lo | u_lo | v_lo | v_hi]` with honest-looking values
-    /// (the encoder of `docs/lookup.md` Section 1: `z + 2^17`, `v + 2^31`; relation H-u's
+    /// The main-domain stack `[z_lo | u_lo | v_lo | v_hi]` with honest-looking values
+    /// (the encoder of `docs/lookup.md`: `z + 2^17`, `v + 2^31`; relation H-u's
     /// `B_ulo = u + 190,465 - 63,079 H_u`).
     fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
@@ -2062,7 +2061,7 @@ mod tests {
             .map_or(0.0, |kb| kb / 1024.0)
     }
 
-    /// The L16 lookups of `n` signatures: the main stack `[z_lo | u_lo | v_lo | v_hi]` on
+    /// The lookups of `n` signatures: the main stack `[z_lo | u_lo | v_lo | v_hi]` on
     /// `d_main = 10 + d_sig` variables and the carry stacks `kappa^(1)` (6 columns on
     /// `D_1`), `kappa^(2)` (6 on `D_2`), `kappa^(3)` (1 on `D_3`), all in `T_16`.
     fn layout(rng: &mut SplitMix64, n: usize) -> Vec<LookupStack<'static>> {
@@ -2177,10 +2176,10 @@ mod tests {
         });
     }
 
-    /// The cost of a work nonce at the challenge site of `X` (option (i) of
-    /// `docs/lookup.md` Section 2): Akita's `preview_grinding_predicate` per candidate
-    /// (clone the Blake2b512 sponge, absorb the 4-byte nonce, squeeze 32 bytes), serial as
-    /// in Akita's `search_grinding_nonce`, and on 7 threads.
+    /// The cost of a work nonce at the challenge site of `X` (`docs/lookup.md`): Akita's
+    /// `preview_grinding_predicate` per candidate (clone the Blake2b512 sponge, absorb the
+    /// 4-byte nonce, squeeze 32 bytes), serial as in Akita's `search_grinding_nonce`, and
+    /// on 7 threads.
     #[test]
     #[ignore = "timing: run with --release --ignored --nocapture"]
     fn grinding_rate() {

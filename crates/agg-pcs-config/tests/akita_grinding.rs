@@ -1,5 +1,5 @@
 //! Akita's transcript proof-of-work plan for every grouped catalog row
-//! (`docs/soundness.md` Sections 3.7 and 4.1): the pinned Akita revision derives the only
+//! (`docs/soundness.md`): the pinned Akita revision derives the only
 //! accepted plan from the row's schedule and the opening layout and binds its digest into
 //! the instance descriptor, on both the prover and the verifier side. This test pins the
 //! plan of each row (sites, difficulties, digest) as a regression guard against a catalog or
@@ -64,7 +64,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[test]
 fn akita_plans_of_the_grouped_rows_are_pinned() {
-    // docs/soundness.md Section 3.7: (d_sig, PoW sites, sum g, max g, sum 2^g, nonce bits).
+    // (d_sig, PoW sites, sum g, max g, sum 2^g, nonce bits).
     let table: [(usize, u64, u64, u8, u64, u64); 13] = [
         (3, 401, 984, 9, 3_888, 3_863),
         (4, 401, 984, 9, 3_888, 3_863),
@@ -97,7 +97,7 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
             && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
         digests.push(hex(&digest));
     }
-    // The first plan-digest bytes reported in docs/soundness.md Section 4.1.
+    // The first plan-digest bytes reported in `docs/soundness.md`.
     assert!(digests[0].starts_with("225708cb"), "{}", digests[0]);
     assert!(digests[12].starts_with("4f5a6026"), "{}", digests[12]);
     assert_eq!(
@@ -110,7 +110,7 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
     );
 }
 
-/// The plan digests of the 13 grouped rows (`d_sig` 3 to 15) at Akita `e023b6a`.
+/// The plan digests of the 13 grouped rows (`d_sig` 3 to 15) at the pinned Akita revision.
 const PINNED: &[&str] = &[
     "225708cbc2955271cbe9c9357de749875aeda1900a94bc4c7593a9f961bfcb62",
     "7c4431eaa095aa5315c240f30f983907d524361347e09fd39f3b7b4858171981",
@@ -128,7 +128,7 @@ const PINNED: &[&str] = &[
 ];
 
 /// The Akita plans of the 13 H-exact grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`,
-/// `G_main4` at 9 polynomials; `docs/h-exact.md` 2.3): the same checks as for H-u, the
+/// `G_main4` at 9 polynomials): the same checks as for H-u, the
 /// pinned digests below, and every digest distinct from the H-u row's.
 #[test]
 fn akita_plans_of_the_h_exact_rows_are_pinned() {
@@ -157,7 +157,7 @@ fn akita_plans_of_the_h_exact_rows_are_pinned() {
 }
 
 /// The Akita plans of the 13 H-FIPS grouped rows (`mldsa-44-l16f-batch-<N*>-mult-final`,
-/// `G_main4` at 12 polynomials and `G_2` at 13; `docs/h-exact.md` 10.7), printed for the
+/// `G_main4` at 12 polynomials and `G_2` at 13), printed for the
 /// record: every row stays within Akita's transition cap with 7 bits of nonce slack, and
 /// every digest differs from the H-u and H-exact rows' of the same size.
 #[test]
@@ -178,7 +178,7 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
     }
 }
 
-/// The plan digests of the 13 H-FIPS grouped rows at Akita `e023b6a` (2026-10-27).
+/// The plan digests of the 13 H-FIPS grouped rows at the pinned Akita revision.
 const PINNED_H_FIPS: &[&str] = &[
     "27cd35e561b702708c6f59a648340120943865e0f7c90cc8d6f28ebc1791c810",
     "39a7949f7c18473cc94914f9edb84d4632e32f3fef1e306998991695630c30f0",
@@ -214,13 +214,13 @@ const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
     (459, 1_135, 12, 8_336, 4_432),
 ];
 
-/// The plan digests of the 13 H-exact grouped rows at Akita `e023b6a`. The rows of `d_sig` 3
-/// and 4 have equal plan digests, which is benign: Akita's `GrindingPlan::canonical_bytes`
-/// covers only the policy, the challenge order and the runs (site, target), not the layout,
-/// and those two rows draw identical site lists (same fold families and targets; the
-/// adapted fold-support run of the pow-close review shows identical draw lists). The layout
-/// (13 against 14 variables) is bound separately through the schedule key, the row name and
-/// Akita's instance descriptor, and all 52 width-4 catalog schedules hash differently.
+/// The plan digests of the 13 H-exact grouped rows at the pinned Akita revision. The rows of
+/// `d_sig` 3 and 4 have equal plan digests, which is benign: Akita's
+/// `GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs
+/// (site, target), not the layout, and those two rows draw identical site lists (same fold
+/// families and targets). The layout (13 against 14 variables) is bound separately through
+/// the schedule key, the row name and Akita's instance descriptor, and all 52 width-4
+/// catalog schedules hash differently.
 const PINNED_H_EXACT: &[&str] = &[
     "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
     "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",

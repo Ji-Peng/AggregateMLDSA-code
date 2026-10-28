@@ -1,6 +1,6 @@
 //! End-to-end Flock proofs of the Keccak gate and of the batched SHAKE256
 //! sponge: honest round trips, wrong statements, tampered witnesses, tampered
-//! proof bytes, and the commit-then-prove order of spec Section 10 (the
+//! proof bytes, and the commit-then-prove order of the PIOP transcript (the
 //! commitment is absorbed before the seed is derived, and the verifier checks
 //! the proof against exactly that commitment). Run with `--release` (proofs at
 //! up to 2^27 bits).
@@ -183,7 +183,7 @@ fn flipped_input_bit_with_consistent_witness_is_rejected() {
     assert!(batch.verify(&public, &commitment, &proof, &FS).is_err());
 }
 
-/// A stand-in for the PIOP transcript of spec Section 10: absorb the `S`
+/// A stand-in for the PIOP transcript: absorb the `S`
 /// Flock commitments (event 2), derive `sd` (event 3), then one `fs_sigma`
 /// per sub-proof (event 5). Every seed depends on every commitment.
 fn transcript_seeds(commitments: &[KeccakCommitment]) -> ([u8; 32], Vec<[u8; 32]>) {
@@ -207,12 +207,11 @@ fn transcript_seeds(commitments: &[KeccakCommitment]) -> ([u8; 32], Vec<[u8; 32]
     (sd, fs)
 }
 
-/// Regression for the commit-then-prove order (spec Section 10, events 2,
-/// 3 and 5): the `S` commitments exist before any seed, the seeds are derived
-/// from them, and each proof verifies only against the commitment that was
-/// absorbed for its sub-batch. Sub-batching: a target of 500 permutations
-/// gives 64 records per proof (the largest power of two with 7 n <= 500);
-/// 100 records give 2 proofs.
+/// Regression for the commit-then-prove order (events 2, 3 and 5): the `S`
+/// commitments exist before any seed, the seeds are derived from them, and each
+/// proof verifies only against the commitment that was absorbed for its sub-batch.
+/// Sub-batching: a target of 500 permutations gives 64 records per proof (the
+/// largest power of two with 7 n <= 500); 100 records give 2 proofs.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
 fn commitments_are_absorbed_before_the_seeds_and_bound() {

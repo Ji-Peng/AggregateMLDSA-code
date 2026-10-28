@@ -11,7 +11,7 @@ Only `build_merged_weight_and_prime` (the merged opening's weight vector `W`) is
 Why: Flock bakes, for every ring-switched claim, a 16 x 256-entry fold table (64 KB,
 4,096 fold evaluations) per used word column of the committed stack, whatever the column's
 height. A one-row table type with `2^16` word columns (the bridge instance of
-`agg-keccak`, `docs/keccak.md` Section 9) then spends 3.4 s and 6.4 GiB in this step for a
+`agg-keccak`, `docs/keccak.md`) then spends 3.4 s and 6.4 GiB in this step for a
 stack of `2^16` words, and a full segment would need 51 GiB. The patch evaluates such
 claims per slot instead, `φ(eq_col[c]·r)` with one multiply and one fold-table lookup,
 whenever the stack averages fewer than `BAKE_MIN_HEIGHT = 64` live rows per used column
@@ -21,13 +21,13 @@ Prover-only and exact: `x ↦ φ(eq_col[c]·x)` is F₂-linear, so the baked byt
 and the direct evaluation compute the same `W` bit for bit; the proof bytes, the transcript
 and the verifier are unchanged, and proofs made with this copy verify with upstream Flock.
 
-Addition (agg-mldsa K21): a ring-switched claim's column whose factor `eq_col[c]` is zero
+Addition (agg-mldsa): a ring-switched claim's column whose factor `eq_col[c]` is zero
 contributes the zero map, so it is neither baked (`bake` returns early) nor swept (the
 segment sweep skips it, writing zeros if the claim is the first). The bit claim of the
 parity chain addresses 64 of the sponge's 2,156 used word columns. Exact for the same
 reason; `W` is unchanged.
 
-## 2. A Ligerito parameter set: `LigeritoProfile::Slim8` (agg-mldsa deviation K18)
+## 2. A Ligerito parameter set: `LigeritoProfile::Slim8`
 
 `src/pcs/ligerito.rs` and `src/pcs/commit.rs`: a sixth profile, `Slim8`, with `Slim`'s
 accounting (analysis `f256_split_johnson_two_point_ood_query128_c3_algebraic_row_union_over_bchks25_thm_4_6`,
@@ -50,7 +50,7 @@ To regenerate (Sections 1 and 2; Sections 3 to 5 below have their own lists): co
 `Folded` claim arm, and the segment sweep arm), re-apply the `Slim8` arms, create empty
 `m{22..35}_slim8.toml` files and run the example to fill them.
 
-## 3. Prover-only: x86 SIMD kernels chosen at run time (agg-mldsa deviation K12)
+## 3. Prover-only: x86 SIMD kernels chosen at run time
 
 Upstream selects its x86 kernels with `cfg(target_feature = ...)`: they run only in a
 build with `-C target-cpu=native` (Flock's own `.cargo/config.toml`). Our default build
@@ -100,7 +100,7 @@ before the portable call), drop the `cfg(target_feature)` gates of the x86 kerne
 and items (keep `cfg(target_arch = "x86_64")`), point their GHASH imports at `simd::x86`,
 and copy `src/simd.rs`.
 
-## 4. Prover-only: AVX-512 block statistics of the merged opening (agg-mldsa deviation K12)
+## 4. Prover-only: AVX-512 block statistics of the merged opening
 
 `pcs.rs::block_first_phase` computes, per ring-switched claim, term `j` (128 of them)
 and block `e`, `S_j[e] = frob(kappa * sum_b pw[b][kinv_j] * bank[e][b], j)`: one scalar
@@ -115,7 +115,7 @@ across four blocks (field-identical to the scalar multiply), the dot products wi
 3 threads, load 6-7): block statistics 800-1,000 ms -> 77-95 ms at 8,192 records;
 aggregates unchanged. Test: `pcs::block_stats_x86::tests::kernels_match_portable`.
 
-## 5. Verifier-visible: list-aware work at the outer sites (agg-mldsa deviation K19)
+## 5. Verifier-visible: list-aware work at the outer sites
 
 `src/zerocheck.rs` (`ZerocheckGrinding`), `src/lincheck.rs` (`LincheckGrinding`),
 `src/pcs.rs` (`OpeningGrinding`), `src/pcs/jagged.rs` (`MultipointGrinding`),
@@ -128,7 +128,7 @@ so the Flock paper (Appendix A "Security", Remark 11) charges each of them the l
 Johnson-list size `L_max = 1 / (2 eta sqrt(rho_0))`. Upstream's `per_challenge_128`
 schedules include it only at the transport claim batch (6 bits, assuming `log2 L < 6`), which
 leaves the other sites at about 122 to 124 work-normalized bits and `Slim8`'s claim batch at
-127.86 (agg-mldsa `docs/soundness.md` Sections 4.3, 4.4).
+127.86 (agg-mldsa `docs/soundness.md`).
 
 The change: each policy gains `per_challenge_128_listed(list)` with `list = ceil(L_max)`
 (36, 50, 71 for `Fast`, `Slim`, `Slim8` at `eta = 0.02`; `l0_list_factor`) and grinds
@@ -147,7 +147,7 @@ dropped if the Flock authors give an argument for the outer sites without the li
 
 To regenerate: re-apply the listed schedules of this section in the files named above.
 
-## 6. Verifier-visible: canonical nonce width (agg-mldsa deviation K19, `docs/soundness.md` 6.5)
+## 6. Verifier-visible: canonical nonce width
 
 `src/challenger.rs` (`POW_NONCE_SLACK_BITS`, `pow_nonce_is_canonical`, the extension trait
 `CanonicalPow`) and every verifier call site of a proof-of-work check (39 sites in
@@ -158,7 +158,7 @@ To regenerate: re-apply the listed schedules of this section in the files named 
 Why: upstream's verifier accepts any `u64` nonce that passes the predicate, so the nonce of a
 `g`-bit site has no fixed width and a proof has many valid nonce variants. Akita and Aerie fix
 the width at `g + 7` bits (Akita `GRINDING_NONCE_SLACK_BITS`, Aerie C.1) and their verifiers
-reject anything else; our PIOP and tie nonces follow them (`docs/soundness.md` 6.1 to 6.3).
+reject anything else; our PIOP and tie nonces follow them (`docs/soundness.md`).
 
 The change: the verifier calls `verify_pow_canonical`, `verify_pow_and_sample_f128_canonical`
 and `verify_pow_and_sample_f128_vec_canonical`, which run the challenger's own check
@@ -166,7 +166,7 @@ and `verify_pow_and_sample_f128_vec_canonical`, which run the challenger's own c
 reject a nonce of `g + 7` or more bits (`g > 0`) or a nonzero nonce at a site without work.
 The prover is unchanged: Flock's `grind_pow` returns the smallest passing nonce, which is at
 least `2^(g + 7)` with probability `(1 - 2^-g)^(2^(g + 7)) <= e^-128 = 2^-184.66` per site; such
-a proof is refused (a completeness event, counted in `docs/soundness.md` 6.5). Upstream's own
+a proof is refused (a completeness event, counted in `docs/soundness.md`). Upstream's own
 tests that search for a failing nonce with `verify_pow` (`pcs/ring_switch.rs`,
 `pcs/jagged.rs`) and the `RoundGrindProver` forwarding impl (`zerocheck/ag_skip.rs`) keep the
 plain check. Unit tests: `challenger::tests::{canonical_width_is_bits_plus_seven,
@@ -177,7 +177,7 @@ To regenerate: copy the additions of `src/challenger.rs`, then in every other fi
 `_canonical` forms outside the three places named above and add
 `use crate::challenger::CanonicalPow;`.
 
-## 7. Verifier-visible: a multilinear skip basis for ring-switched claims (agg-mldsa deviation K21)
+## 7. Verifier-visible: a multilinear skip basis for ring-switched claims
 
 `src/lincheck.rs` (`SkipPoint::Eq`, its arm in `SkipPoint::weights`, panic arms in
 `sample_fresh`, `phi8` and the two lincheck skip-round matches), `src/lincheck/union.rs` (the

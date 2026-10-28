@@ -1,6 +1,5 @@
-//! Stage 1 (spec Section 7.3, degree 4): bridge Booleanity and levels 2 and 3, w1Encode
-//! Booleanity and the bit-range identity (7.4). The 40 `b16_prod` products of the base-16
-//! layout are gone: the lookup into `T_16` proves those ranges (`docs/lookup.md`).
+//! Stage 1 (degree 4): bridge Booleanity and levels 2 and 3, w1Encode Booleanity and the
+//! bit-range identity. The lookup into `T_16` proves the other ranges (`docs/lookup.md`).
 //!
 //! `gamma^(1)` order: `bool_y1[t]` (0..6), `level2[t]` (6..12), `level3` (12),
 //! `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25).
@@ -156,8 +155,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: zero for the zero-checks, (7.2) and (7.3) for the
-/// level instances.
+/// The claimed sums in gamma order: zero for the zero-checks, the level-2 and level-3 sums
+/// of the pre-stage claims for the level instances.
 #[must_use]
 pub fn claimed_sums(prestage: &PreStageClaims, y_at_tau3: E) -> Vec<E> {
     let mut claims = vec![E::zero(); GAMMA_COUNT];
@@ -231,7 +230,7 @@ fn prove_with(
 }
 
 /// The verifier's bridge weights at the stage-1 terminal `r^(1)`: `w_2(r^(1)_1)` for the
-/// point `tau_2` and `w_{3,t}(r^(1)_2)` for `tau_3` (docs/bridge.md Section 4), each one
+/// point `tau_2` and `w_{3,t}(r^(1)_2)` for `tau_3` (`docs/bridge.md`), each one
 /// `c_t` build and one sparse contraction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeWeightsAt {

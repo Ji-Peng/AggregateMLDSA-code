@@ -1,6 +1,5 @@
 //! End to end: a full prover run at 256 signatures produces a proof blob that the
-//! verifier accepts from the public records alone, and corrupted blobs are rejected
-//! (spec Sections 10, 11, 13).
+//! verifier accepts from the public records alone, and corrupted blobs are rejected.
 
 mod common;
 

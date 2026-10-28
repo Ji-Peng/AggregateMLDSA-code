@@ -1,4 +1,4 @@
-//! Batched SHAKE256 sponge proof benchmark (spec Section 8).
+//! Batched SHAKE256 sponge proof benchmark.
 //!
 //! Default: 1,170 records = 8,190 Keccak-f permutations (about 2^13) in one
 //! Flock proof, Fast profile, 1 warmup run (discarded) and 5 timed repetitions,
@@ -152,7 +152,7 @@ fn main() {
         let buffers = batch.honest_buffers(&inputs);
         let t1 = Instant::now();
         // Event 2 (commit before the seed), then the Flock proof with fs_sigma;
-        // Flock's prover commits once more internally (docs/deviations.md K7).
+        // Flock's prover commits once more internally.
         let committed = batch.commit(buffers);
         let commitment = committed.commitment().clone();
         let tc = Instant::now();

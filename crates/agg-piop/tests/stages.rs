@@ -1,7 +1,7 @@
-//! The PIOP part (the lookup into `T_16` and the three sum-check stages, lookup layout L16)
+//! The PIOP part (the lookup into `T_16` and the three sum-check stages)
 //! on real batches of ML-DSA-44 signatures: honest round trips whose claims equal the
 //! extensions of the committed and virtual tables, and tampered witnesses and proofs
-//! rejected at the stated place (spec Section 13, `docs/lookup.md` Section 6).
+//! rejected at the stated place (`docs/lookup.md`).
 #![allow(clippy::needless_range_loop)]
 
 mod common;
@@ -349,7 +349,7 @@ fn values_valid_only_for_another_range_are_rejected() {
         main.columns_mut()[z_hi][main_index(3, 1, 4)] = 2;
         let bridge = rebuilt(&batch, &main);
         assert_eq!(rejecting_place(&batch, &main, &bridge), Some(2));
-        // U_hi = 3 and U_hi = -4 are in relaxed H's base-8 alphabet but outside H-u's
+        // U_hi = 3 and U_hi = -4 are in a base-8 alphabet but outside H-u's
         // base-6 one [-3, 2]: leaf6 (stage 2).
         for value in [3_i8, -4] {
             let mut main = batch.main.clone();
@@ -366,12 +366,11 @@ fn values_valid_only_for_another_range_are_rejected() {
         bridge.recount(manifest, &batch.main).expect("in the table");
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(1));
         // A low part valid only for a wider range: U_lo + 63,079 with U_hi - 1 keeps u
-        // (relation H-u's step form) and V_lo + 2^16 with V_hi - 1 keeps v (4.1), U_hi in
+        // (relation H-u's step form) and V_lo + 2^16 with V_hi - 1 keeps v, U_hi in
         // its base-6 alphabet and V_hi in T_16, so the leaves and the ring identity hold;
-        // when the looked-up value lands in [2^16, 2^17) only the lookup sees it. (The
-        // prototype's cross-table case, a T_8 value booked under T_16, is the lookup.rs unit
-        // test `two_tables_verify_and_a_cross_table_value_is_rejected`; layout L16 has one
-        // table.)
+        // when the looked-up value lands in [2^16, 2^17) only the lookup sees it. (A value
+        // booked under another table is the lookup.rs unit test
+        // `two_tables_verify_and_a_cross_table_value_is_rejected`; there is one table here.)
         let u_cells = batch.main.column(manifest, Column::U_LO);
         let u_hi_cells = batch.main.column(manifest, Column::U_HI);
         let u_cell = (0..1024 * 50)

@@ -1,7 +1,7 @@
 //! The bridge slot: one Flock instance per segment whose rows prove `Y_sigma = M_3 M_2 M_1 b'`
-//! over GF(2) (docs/bridge.md Section 5, spec Section 8, decision B.13).
+//! over GF(2) (docs/bridge.md).
 //!
-//! Block layout (`Lambda = lane_len`, `lanes * Lambda` input columns, deviation K8):
+//! Block layout (`Lambda = lane_len`, `lanes * Lambda` input columns):
 //!
 //! | Columns | Committed | Row (`C = I`: `(A z)_c (B z)_c = z_c`) |
 //! | --- | --- | --- |
@@ -16,7 +16,7 @@
 //! coefficient of the constant column, so the committed witness (bit copies, the constant,
 //! zeros) is independent of `sd` and `Y` and can be committed at event 2, before `sd` exists.
 //! The relation binds `Y`: a satisfying witness has `M b' = Y` (characteristic 2). The type
-//! carries empty matrix stubs (Flock's walker convention, deviation K2); [`BridgeSlot`]
+//! carries empty matrix stubs (Flock's walker convention); [`BridgeSlot`]
 //! implements `LincheckCircuit` with the factored walker and its [`BridgeSlot::digest`]
 //! (covering `sd`, the shape, the layout and `Y`) is absorbed into the Flock challenger.
 
@@ -81,7 +81,7 @@ impl SlotLayout {
 
     /// The production slot of part `index` of a segment split into parts of `2^{d_part}`
     /// record positions, with `live` live records in the part (`Lambda = 2^{10 + d_part}`,
-    /// local record `i` is segment record `2^{d_part} index + i`; deviation K10).
+    /// local record `i` is segment record `2^{d_part} index + i`).
     ///
     /// # Panics
     /// If `live > 2^{d_part}`, `d_part > 13` or the part lies outside the segment.
@@ -170,7 +170,7 @@ impl SlotLayout {
 
     /// The IO schema: every live input word, lane-major, then record, then word (`In`). The
     /// copy constraints to the sponge rows name these words; there are no outputs (`Y` is a
-    /// coefficient of the relation, deviation K8).
+    /// coefficient of the relation).
     #[must_use]
     pub fn io_schema(&self) -> Vec<IoWord> {
         let lanes = self.segment.lanes();
@@ -364,8 +364,8 @@ impl BridgeSlot {
 
     /// SHA3-256 of the relation: label, `sd`, the shape (`(J_t, used, m_t, k_t)`, lanes,
     /// `B_1`), the layout (`Lambda`, the part offset, live positions, `k_log`, useful bits,
-    /// constant column, first composite row) and `Y` packed (docs/bridge.md Section 5,
-    /// Binding; the offset distinguishes the parts of a sub-batched segment, K10).
+    /// constant column, first composite row) and `Y` packed (docs/bridge.md;
+    /// the offset distinguishes the parts of a sub-batched segment).
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let lay = &self.layout;
@@ -445,7 +445,7 @@ impl LincheckCircuit for BridgeSlot {
     }
 
     /// `comb[c] = alpha xi_A(c) + xi_B(c)`: the factored walker on the input columns, the
-    /// identity rows, and the constant column (docs/bridge.md Section 5).
+    /// identity rows, and the constant column (docs/bridge.md).
     fn fold_alpha_batched(&self, alpha: F128, eq: &[F128]) -> Vec<F128> {
         let lay = &self.layout;
         let mut comb = vec![F128::ZERO; 1 << lay.k_log()];

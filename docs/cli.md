@@ -1,4 +1,4 @@
-# Mode A end to end and the `agg` tool (spec Sections 10, 11, 14; milestone M3)
+# Mode A end to end and the `agg` tool (spec Sections 10, 11, 14)
 
 Crate `agg-cli`: library `agg_cli` (aggregator, verifier, wire items, key cache, batch
 files) and binary `agg`. Deviations: K10 (Flock parts within a segment), K15, K18 (the Flock
@@ -42,11 +42,9 @@ transcript binds it at event 0 (K15).
 Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` record positions,
 `d_part = clamp(part_log2, max(3, d_seg - 1), d_seg)` (at most two parts per segment,
 `docs/soundness.md` 3.5), `part_log2` from `AggregatorConfig` (default
-`DEFAULT_PART_LOG2 = 13`: the whole segment is one part since the tied part of K11 removed
-the cost that forced parts of 512 in Section 4; the `agg` usage text still says 9). Each part
+`DEFAULT_PART_LOG2 = 13`: the whole segment is one part). Each part
 is a tied part (`agg_keccak::tied`, proof version 5): a Flock sponge instance of its records
-and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7;
-until version 4 a second Flock instance, the bridge union of Section 11): the sponge cap at
+and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7): the sponge cap at
 event 2, the share at event 6 (computed from the part's input bits, kept since event 2), and
 at the join the chain's rounds and the sponge proof, whose opening carries the chain's bit
 claim; the part and span seeds bind the digest of the event-6 record (K22). At most one
@@ -113,7 +111,7 @@ medians, all marked "(median of R, W warmup)", the prover's and the verifier's p
 over all runs (`VmHWM`, reset in
 between through `/proc/self/clear_refs`, which affects only the process's own accounting)
 and the aggregate bytes per signature with the size of every part. Benchmarks proper run on
-CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks.
+CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 
 ## 3. Tests
 
@@ -158,7 +156,7 @@ CPU 2 after `crypto_bench off` (AGENTS.md); the numbers below are not benchmarks
 
 ## 4. Local measurements
 
-Relation sanity runs (2026-10-25, revision `f526097`, CLMUL build `RUSTFLAGS="-C
+Relation sanity runs (revision `f526097`, CLMUL build `RUSTFLAGS="-C
 target-feature=+pclmulqdq"`, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
 span on, CPUs 0,1,3-15 with `RAYON_NUM_THREADS=3` while a catalog generation ran with 3
 workers: single noisy runs, not benchmarks):
@@ -170,55 +168,3 @@ workers: single noisy runs, not benchmarks):
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
 with `16 (76 + 11 d_main)` at `d_main = 20` for both relations (8 + 31 and 7 + 32 claims).
-
-Superseded for the current code by `ref/notes/bench-local.md` ("Mode A with tied parts"):
-with the tied part of K11 and the Flock patch of K12, a batch of up to 2,048 records is one
-part, and the part sizes below no longer apply. The table is kept as the record of the
-two-type unions that motivated the change.
-
-Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`), turbo and hyper-threading off,
-default build (no CLMUL, so Flock's GF(2^128) arithmetic is software; `docs/keccak.md`
-Section 6), revision `9db9084` plus the uncommitted changes of this stage, 2026-10-24,
-single runs on a shared machine, not CPU-2 benchmarks. Times are wall clock.
-
-`agg bench --reps 1` (separate processes, own keys; prover and verifier peak RSS measured
-separately):
-
-| N | `d_part` (parts) | Prove | Flock parts (commit + prove) | Verify uncached / cached | Prover / verifier peak RSS | Aggregate | Per signature |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 8 | 3 (1) | 5.6 s | | 1.11 / 1.11 s | 1,196 / 236 MiB | 315,372 B | 39,421 B |
-| 256 | 8 (1) | 37.0 s | 7.7 + 27.7 s | 4.32 / 4.32 s | 5,493 / 1,198 MiB | 602,568 B | 2,354 B |
-| 512 | 7 (4) | 77.6 s | 4 x (3.6 + 15.3 s) | 10.06 / 10.00 s | 3,174 / 949 MiB | 1,734,785 B | 3,388 B |
-| 512 | 8 (2) | 73.5 s | 2 x (7.7 + 27.7 s) | 8.49 / 8.45 s | 5,633 / 1,295 MiB | 1,137,530 B | 2,222 B |
-| 512 | 9 (1) | 100.1 s | 19.6 + 77.9 s | 7.71 / 7.69 s | 11,529 / 2,396 MiB | 765,261 B | 1,495 B |
-
-The round-trip tests (`tests/mode_a.rs`, one process for all, 3/4 own keys and 1/4 over
-three shared keys, `--nocapture`):
-
-| N | `d_part` (parts) | Prove | Verify uncached / cached | Aggregate | Per signature |
-| ---: | --- | ---: | ---: | ---: | ---: |
-| 64 | 6 (1) | 11.7 s | 1.82 / 1.81 s | 417,630 B | 6,526 B |
-| 256 | 7 (2) | 38.5 s | 5.07 / 5.05 s | 901,196 B | 3,520 B |
-| 512 | 9 (1) | 98.1 s | 7.59 / 7.64 s | 765,231 B | 1,495 B |
-
-Aggregate at `N = 512`, `d_part = 9` (bytes): header 11, `c~` list 16,384 (32 per
-signature), Akita commitments 528, Flock commitments 4,114, final vector 512, Flock proof
-676,272, PIOP rounds and claims 7,968, Akita opening 59,442.
-
-Observations:
-
-- The Flock parts are 92 to 98% of the prover time and 91 to 98% of the verifier time (software
-  GF(2^128) in the default build; the CLMUL build is about 100 times faster on the Flock
-  side, `docs/keccak.md` Section 6, not measured here for mode A). The PIOP prover takes
-  2.3 s at 512 (stages, opening, matrices), the PIOP verifier about 0.17 s, of which the
-  bridge matrices from `sd` are 0.13 to 0.15 s (deviation P4).
-- Cached and uncached verification differ by less than the run-to-run noise at these
-  sizes: the uncached key expansion (`ExpandA`, inverse NTTs) is about 11 ms at 512 records
-  (step `public_a`), against seconds of Flock verification.
-- The prover's peak RSS is set by the largest Flock part: it roughly doubles with the part
-  size (3.2, 5.5, 11.5 GiB for 128, 256, 512 records), while the time per record stays at
-  140 to 190 ms; proof bytes per part grow slowly (408, 522, 676 KB), so larger parts give
-  smaller aggregates. At `N = 2^15` (estimate from these sizes, not measured): 64 parts of
-  512, about 43 MB of Flock proofs (1.3 KB per signature), and 11.5 GiB for the part on top
-  of the PIOP tables. Parts of 1,024 records (about 23 GiB, extrapolated) do not fit the
-  development machine's limits and are left to the cloud calibration.

@@ -1,13 +1,13 @@
 //! Offline generation of the `agg_mldsa_fp64_signed_width4` and
-//! `agg_mldsa_fp64_signed_width16` schedule catalogs (lookup layout L16).
+//! `agg_mldsa_fp64_signed_width16` schedule catalogs.
 //!
-//! Adapted from Aerie's `aerie-pcs-config/tests/schedule_catalog_regen.rs`
-//! (rev 49b6c21): the same `akita_planner` entry points (`find_schedule`,
+//! Adapted from Aerie's `aerie-pcs-config/tests/schedule_catalog_regen.rs`:
+//! the same `akita_planner` entry points (`find_schedule`,
 //! `EmitSpec`, `render_schedule_artifact_outputs_with_validation`) and the same
 //! row construction (a scalar row per precommitted layout, whose root profile is
 //! the group's producer profile, and one grouped row per batch size keyed by
 //! the final group and the ordered precommitted profiles). The key lists come from
-//! `agg_pcs_config::catalogs` (spec Section 4.1). Two families: the width-16 catalog holds
+//! `agg_pcs_config::catalogs`. Two families: the width-16 catalog holds
 //! the scalar rows of `G_main16, G_1, G_2, G_3`; the width-4 catalog holds the scalar
 //! rows of `G_main4` and the grouped rows (final group `G_m`), whose precommitted
 //! producers are taken from the scalar row of their own family.
@@ -622,7 +622,7 @@ fn probe<const W: u32>(layout: PolynomialGroupLayout) -> Result<(u32, usize, u64
     ))
 }
 
-/// Ask the planner which inner digits a raw signed width selects (risks.md R1).
+/// Ask the planner which inner digits a raw signed width selects.
 /// Widths up to 16 fit one digit; 17 and more need at least two.
 #[test]
 #[ignore = "offline planner probe (minutes)"]
@@ -716,7 +716,7 @@ fn probe16<const LO: u32, const HI: u32>(layout: PolynomialGroupLayout) {
 }
 
 /// Which inner digits the planner selects for the width-16 lookup columns
-/// (docs/lookup.md Section 6 item 1): Dense's search (3..=16) against one forced
+/// (`docs/lookup.md`): Dense's search (3..=16) against one forced
 /// balanced base-2^16 digit, at the main-domain layouts of 256 and 1,024 signatures.
 #[test]
 #[ignore = "offline planner probe (minutes)"]

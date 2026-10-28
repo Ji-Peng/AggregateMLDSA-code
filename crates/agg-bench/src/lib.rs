@@ -1,11 +1,11 @@
 //! Benchmark harness: prover, verifier (cached and uncached) and memory
-//! (docs/spec.md Section 14). Local runs stay at <= 1K signatures and run on
+//! (`docs/spec.md`). Local runs stay at <= 1K signatures and run on
 //! CPUs 0,1,3-15 (never CPU 2); 32K runs go to the cloud machine.
 
 pub mod harness;
 pub mod memory;
 
-/// Median of a non-empty sample (benchmarks report medians, AGENTS.md).
+/// Median of a non-empty sample (benchmarks report medians).
 /// For an even count it returns the mean of the two middle values.
 #[must_use]
 pub fn median(samples: &mut [f64]) -> Option<f64> {

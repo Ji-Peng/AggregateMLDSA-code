@@ -1,4 +1,4 @@
-//! Public instance: the verifier's per-record precomputation (spec Section 2).
+//! Public instance: the verifier's per-record precomputation.
 //!
 //! For live record i: the expanded key (A_hat_i, A_i, tr_i, shared between records with the same
 //! key), mu_i = H(tr_i || 0x00 || 0x00 || M_i, 64), c_i = SampleInBall(c~_i) and

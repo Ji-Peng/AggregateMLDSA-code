@@ -7,7 +7,7 @@ use core::{
     mem::transmute,
 };
 
-// agg-mldsa patch (PATCH.md Section 3): the GHASH primitives come from
+// agg-mldsa patch (PATCH.md): the GHASH primitives come from
 // `crate::simd::x86` (no `cfg(target_feature)` gate) and the AVX-512 kernel
 // carries its own `#[target_feature]`, so the caller can choose it at run time.
 use crate::{

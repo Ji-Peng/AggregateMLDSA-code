@@ -1695,7 +1695,7 @@ mod tests {
         (0..n).map(|_| rng.f128()).collect()
     }
 
-    /// agg-mldsa patch (PATCH.md Section 3): every kernel path available on this
+    /// agg-mldsa patch (PATCH.md): every kernel path available on this
     /// CPU (portable, AVX-512/VPCLMULQDQ with the fused-4 schedule) gives the same
     /// codeword as the scalar oracle, for the transform shapes the commits use.
     #[cfg(any(

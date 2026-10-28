@@ -17,7 +17,7 @@ use crate::zerocheck::univariate_skip_optimized::kernels::portable::{
     accumulate_convert_with_s_hat_v as accumulate_convert_with_s_hat_v_portable,
     bit_transpose_64bytes_scalar, shift_reduce_inner_ab_scalar,
 };
-// agg-mldsa patch (PATCH.md Section 3): the x86 kernels below are chosen at run
+// agg-mldsa patch (PATCH.md): the x86 kernels below are chosen at run
 // time (`crate::simd`) instead of by `cfg(target_feature)`.
 #[cfg(target_arch = "x86_64")]
 use crate::{
@@ -231,7 +231,7 @@ pub(super) fn accumulate_convert_with_s_hat_v(
     );
 }
 
-/// agg-mldsa patch (PATCH.md Section 3): the round-1 x86 kernels available on
+/// agg-mldsa patch (PATCH.md): the round-1 x86 kernels available on
 /// this CPU match the portable ones bit for bit; the dispatching wrappers match
 /// the portable kernels under every feature mask.
 #[cfg(all(test, target_arch = "x86_64"))]

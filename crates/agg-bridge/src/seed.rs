@@ -1,4 +1,4 @@
-//! Bridge seed to the three bridge matrices (spec Section 9.1).
+//! Bridge seed to the three bridge matrices.
 //!
 //! Column `zeta` of `M_t` (`t` = 1, 2, 3, the level number) is a `k_t`-subset of the
 //! `m_t = 2^{e_t}` rows (`e_t` = 13, 13, 12): read 16-bit little-endian words from
@@ -20,7 +20,7 @@ pub const NAME: &str = "agg-bridge seed";
 /// cSHAKE256 customization string `S` of the derivation (the function name `N` is empty).
 pub const BRIDGE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/bridge";
 
-/// Length of the bridge seed `sd` (spec Section 10, event 3).
+/// Length of the bridge seed `sd` (transcript event 3).
 pub const SEED_BYTES: usize = 32;
 
 /// Shape of one bridge matrix: level number, rows `2^rows_log2`, columns, column weight.
@@ -36,7 +36,7 @@ pub struct Level {
     pub k: usize,
 }
 
-/// The three levels of spec Section 1 (`Shape::PRODUCTION`).
+/// The three production levels (`Shape::PRODUCTION`).
 pub const LEVELS: [Level; 3] = [
     Shape::PRODUCTION.levels[0].seed_level(),
     Shape::PRODUCTION.levels[1].seed_level(),
@@ -76,7 +76,7 @@ pub fn column_input(sd: &[u8; SEED_BYTES], t: u64, zeta: u64) -> [u8; SEED_BYTES
 /// cSHAKE256's rate in bytes.
 const RATE: usize = 136;
 
-/// The column hash of spec 9.1 on the bare Keccak-f[1600] permutation: the state after
+/// The column hash on the bare Keccak-f[1600] permutation: the state after
 /// cSHAKE256's `bytepad(encode_string("") || encode_string(S), 136)` block is computed
 /// once; a column XORs its 48-byte input with cSHAKE's padding (`0x04 .. 0x80`) into a copy
 /// and squeezes. One permutation per column (two past 136 output bytes), with none of the
@@ -210,7 +210,7 @@ pub fn derive_matrix(sd: &[u8; SEED_BYTES], level: &Level) -> SparseMatrix {
     }
 }
 
-/// `M_1, M_2, M_3` of `sd` (spec Section 9.1).
+/// `M_1, M_2, M_3` of `sd`.
 #[must_use]
 pub fn derive_matrices(sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
     derive_matrices_for(&Shape::PRODUCTION, sd)
@@ -218,7 +218,7 @@ pub fn derive_matrices(sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
 
 /// `M_1, M_2, M_3` of `sd` for any shape (the toy shape in tests). Every column of every
 /// level is derived, including the unused level-2 columns of the production shape, so the
-/// production matrices are exactly those of spec Section 9.1.
+/// production matrices are exactly those of the derivation rule.
 #[must_use]
 pub fn derive_matrices_for(shape: &Shape, sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
     let [l1, l2, l3] = shape.levels.map(|level| level.seed_level());
@@ -268,7 +268,7 @@ mod tests {
         }
     }
 
-    /// The reading rule of spec 9.1 written out independently: a fresh cSHAKE256 per
+    /// The reading rule written out independently: a fresh cSHAKE256 per
     /// column, the input assembled byte by byte, one 16-bit word per read.
     fn reference_column(sd: &[u8; SEED_BYTES], level: &Level, zeta: usize) -> (Vec<u32>, bool) {
         let mut hash = CShake256::from_core(CShake256Core::new(b"agg-mldsa/v1/bridge"));

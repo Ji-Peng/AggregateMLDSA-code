@@ -1,5 +1,4 @@
-//! The claim vectors exchanged between the stages (spec Sections 7.2 to 7.5, lookup layout
-//! L16) and their canonical wire order.
+//! The claim vectors exchanged between the stages and their canonical wire order.
 
 use agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
 use agg_witness::params::W1_BITS;
@@ -23,7 +22,7 @@ pub fn carry_value(stored: E) -> E {
     compose_digits(&agg_witness::digits::ValueForm::Radix(CARRY16_DIGITS), &[stored])
 }
 
-/// The 13 pre-stage claims (spec Section 7.2): `y^(2)_t(tau_2)`, `K^(2)_t(tau_2)`,
+/// The 13 pre-stage claims: `y^(2)_t(tau_2)`, `K^(2)_t(tau_2)`,
 /// `K^(3)(tau_3)` (the balanced carry columns).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreStageClaims {
@@ -52,13 +51,13 @@ impl PreStageClaims {
         }
     }
 
-    /// `kappa^(2)_t(tau_2)` by (4.1).
+    /// `kappa^(2)_t(tau_2)` by `kappa = K + 2^15`.
     #[must_use]
     pub fn kappa2_value(&self, t: usize) -> E {
         carry_value(self.kappa2[t])
     }
 
-    /// `kappa^(3)(tau_3)` by (4.1).
+    /// `kappa^(3)(tau_3)` by `kappa = K + 2^15`.
     #[must_use]
     pub fn kappa3_value(&self) -> E {
         carry_value(self.kappa3)
@@ -91,7 +90,7 @@ impl PreStageClaims {
     }
 }
 
-/// The 6 claims `K^(1)_t(r^(1)_1)` sent before `gamma^(2)` (spec Section 7.4).
+/// The 6 claims `K^(1)_t(r^(1)_1)` sent before `gamma^(2)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kappa1Claims(pub [E; W1_BITS]);
 
@@ -108,7 +107,7 @@ impl Kappa1Claims {
         }))
     }
 
-    /// `kappa^(1)_t(r^(1)_1)` by (4.1).
+    /// `kappa^(1)_t(r^(1)_1)` by `kappa = K + 2^15`.
     #[must_use]
     pub fn value(&self, t: usize) -> E {
         carry_value(self.0[t])
@@ -127,7 +126,7 @@ impl Kappa1Claims {
     }
 }
 
-/// The 18 stage-1 terminal claims (spec Section 7.3): `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`,
+/// The 18 stage-1 terminal claims: `y^(1)_t(r^(1)_1)`, `y^(2)_t(r^(1)_2)`,
 /// `b_t(r^(1))`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage1Claims {
@@ -168,7 +167,7 @@ impl Stage1Claims {
     }
 }
 
-/// The stage-2 terminal claims (spec Section 7.4): `b_t(r^(2))` and `P_Z(r^(2))` for each
+/// The stage-2 terminal claims: `b_t(r^(2))` and `P_Z(r^(2))` for each
 /// leaf-checked digit (`Z_hi`, `U_hi` under H-u: 8 claims; `U_hi` under H-exact: 7); under
 /// H-FIPS no leaf but `delta(r^(2))` and `e(r^(2))` (8 claims, `stage2::FIPS_TERMINALS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,7 +269,7 @@ impl Stage3Claims {
 }
 
 /// The seven claims `m_k(pi_m)` on the digits of the multiplicity column at the table
-/// tree's final point (`docs/lookup.md` Section 1): the verifier checks
+/// tree's final point (`docs/lookup.md`): the verifier checks
 /// `sum_k 16^k m_k(pi_m) = m(pi_m)` against the lookup's claim; the Akita opening of `G_m`
 /// authenticates them.
 #[derive(Clone, Debug, PartialEq, Eq)]

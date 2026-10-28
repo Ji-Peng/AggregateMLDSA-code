@@ -1,10 +1,10 @@
-//! Boolean Flock union proofs with the caller's evaluation claims (docs/keccak.md
-//! Sections 9 and 11; docs/bridge.md Sections 5a and 5b; deviations K11, K13, K14).
+//! Boolean Flock union proofs with the caller's evaluation claims (docs/keccak.md,
+//! docs/bridge.md).
 //!
-//! Flock 83f963e ties committed words to each other and to public words only through its
+//! Flock ties committed words to each other and to public words only through its
 //! wiring argument, whose cost is one cell-slot (one gather claim, 16 proof bytes, one
 //! `2^nu`-cell column) per schema word of a type: for a one-row type that is one claim per
-//! copied word (docs/keccak.md Section 8, finding 1). The tied part ([`crate::tied`]) needs a
+//! copied word (docs/keccak.md). The tied part ([`crate::tied`]) needs a
 //! different tie, `z_hat(point) = value` claims on the committed polynomial at points of the
 //! caller's choosing. Flock's merged opening already carries such claims
 //! ([`PackedDirectClaim`], the intake of the wiring's gather claims and of the element
@@ -29,7 +29,7 @@
 //! of free coordinates evaluates the multilinear extension of the words of that aligned
 //! region alone ([`eval_packed`]).
 //!
-//! Commit, then prove (deviations K7, K14): [`UnionGeometry::commit_data`] computes the
+//! Commit, then prove: [`UnionGeometry::commit_data`] computes the
 //! Ligerito commitment and keeps Flock's prover data (codeword and Merkle tree), which
 //! [`UnionGeometry::prove`] then opens without committing a second time.
 //!
@@ -38,7 +38,7 @@
 //! bytes each (little-endian `lo`, `hi`). The Ligerito proof's level-0 cap is not sent: it
 //! is the commitment the verifier already holds (event 2, or the framed cap of the bridge
 //! union), and Flock's verifier rejects any other cap, so [`UnionGeometry::verify`] puts the
-//! commitment's cap in its place (deviation K17).
+//! commitment's cap in its place.
 
 use bincode::Options as _;
 use flock_core::{
@@ -87,8 +87,8 @@ fn x_full(point: &QuirkyPoint) -> Vec<F128> {
     v
 }
 
-/// A ring-switched claim of the caller on the committed BIT polynomial (deviation K21,
-/// `docs/parity-chain.md` Section 4): `z_bit(point) = value` where the point's in-word bits
+/// A ring-switched claim of the caller on the committed BIT polynomial
+/// (`docs/parity-chain.md`): `z_bit(point) = value` where the point's in-word bits
 /// 0..5 are the multilinear skip coordinates `skip` (Flock's `SkipPoint::Eq`) and `x_full`
 /// is in-word bit 6 followed by the `M - 7` word-address coordinates (rows low, as a
 /// packed-direct point). Unlike a packed-direct claim it goes through Flock's ring switch
@@ -309,7 +309,7 @@ pub fn eval_packed(z: &[F128], point: &[F128], nu: usize) -> F128 {
 
 /// A commitment computed ahead of the proof together with Flock's prover data (the
 /// Reed-Solomon codeword and Merkle tree of the dense stack), so that
-/// [`UnionGeometry::prove`] opens it without committing a second time (deviation K14; the
+/// [`UnionGeometry::prove`] opens it without committing a second time (the
 /// Ligerito commit is deterministic, so the data is exactly what the prover would
 /// recompute). The caller keeps it from event 2 to event 6.
 pub struct CommitData {
@@ -559,7 +559,7 @@ impl UnionGeometry {
 
     /// Flock's commitment to the per-type slot buffers `z` (caller order) with its prover
     /// data (event 2, before any seed): the map [`Self::prove`] applies, so a proof may
-    /// open it without committing again (K14).
+    /// open it without committing again.
     #[must_use]
     pub fn commit_data(&self, slot_zs: &[&[F128]]) -> CommitData {
         let scattered = self.scatter_z(slot_zs);
@@ -582,7 +582,7 @@ impl UnionGeometry {
     /// Prove the slots' rows under `circuits` (caller order, one per type) with the
     /// packed-direct claims at `points`, whose values the prover computes from the
     /// assembled union buffer, with the challenger `ch` (already seeded and bound to the
-    /// caller's statement). With `pre` the commitment of event 2 is opened as is (K14);
+    /// caller's statement). With `pre` the commitment of event 2 is opened as is;
     /// otherwise Flock commits here. Returns the proof and the commitment Flock bound.
     ///
     /// # Panics
@@ -720,7 +720,7 @@ impl UnionGeometry {
             assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
             lincheck::union_bitbank_fold(&union, &slots, &zc_claim.r_rest[1..1 + nu])
         });
-        // The caller's bit claims (K21). With the block-first transport the bank must be the
+        // The caller's bit claims. With the block-first transport the bank must be the
         // full column bit-bank of the stack at the claim's row point (the block rounds fold the
         // bank's multilinear extension, so the columns of zero weight enter too), computed
         // like the C claim's from the stripes; otherwise only `s_hat_v` is needed, and the

@@ -1,5 +1,5 @@
 //! AVX-512/VPCLMULQDQ kernels for the block statistics of the merged opening's
-//! block-first phase (agg-mldsa patch, PATCH.md Section 4).
+//! block-first phase (agg-mldsa patch, PATCH.md).
 //!
 //! The portable code computes, per term `j` and block `e`,
 //! `S_j[e] = frob(kappa * sum_b pw[b][kinv_j] * bank[e][b], j)` with one scalar

@@ -14,7 +14,7 @@ parallel = ["aerie-falcon/parallel", "aerie-prover/parallel"]
 # with a scalar fallback whatever this flag says; the flag gates our own
 # AVX-512 kernels (none yet) and is what scripts/bench.sh AVX512=1 turns on.
 avx512 = []
-# Test stand-ins that make the verifier unsound outside tests (docs/deviations.md P4):
+# Test stand-ins that make the verifier unsound outside tests (see `docs/deviations.md`):
 # `prover::FixedMatrices` (matrices that ignore the bridge seed), `prover::NoKeccak` and
 # `verifier::NoKeccakVerifier` (Flock profile 0, no Keccak argument). Without this
 # feature these types do not exist and the verifier refuses Flock profile 0. Never

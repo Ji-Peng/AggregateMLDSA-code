@@ -1,4 +1,4 @@
-//! Keccak sponge inputs and outputs of the commitment hash (spec Section 8).
+//! Keccak sponge inputs and outputs of the commitment hash.
 //!
 //! Per live record the Keccak argument proves c~ = SHAKE256(mu || w1Encode(w1'), 32): 832 input
 //! bytes, rate 136, so 7 Keccak-f[1600] permutations P_1..P_7. This module computes the absorbed
@@ -103,7 +103,7 @@ pub fn state_bytes(state: &State) -> [u8; 200] {
 }
 
 /// The seven absorbed blocks: P_1 = mu || w1 bytes 0..71, P_2..P_6 = 136 w1 bytes each,
-/// P_7 = w1 bytes 752..767 || 0x1F || 0x00^118 || 0x80 (spec Section 8 table).
+/// P_7 = w1 bytes 752..767 || 0x1F || 0x00^118 || 0x80.
 pub fn sponge_blocks(mu: &[u8; TR_BYTES], w1_bytes: &[u8; W1_ENCODE_BYTES]) -> [[u8; RATE]; PERMS] {
     let mut msg = [0u8; PERMS * RATE];
     msg[..TR_BYTES].copy_from_slice(mu);
@@ -131,7 +131,7 @@ pub struct SpongeTrace {
     pub c_tilde: [u8; 32],
 }
 
-/// Runs the sponge of spec Section 8.
+/// Runs the commitment-hash sponge.
 pub fn sponge_trace(mu: &[u8; TR_BYTES], w1_bytes: &[u8; W1_ENCODE_BYTES]) -> SpongeTrace {
     let blocks = sponge_blocks(mu, w1_bytes);
     let mut inputs = [[0u64; 25]; PERMS];
@@ -162,7 +162,7 @@ pub struct BitSlot {
     pub state_bit: usize,
 }
 
-/// Index of b_t(j, rho) in the w1Encode bit string: 1536 rho + 6 j + t (spec Section 8).
+/// Index of b_t(j, rho) in the w1Encode bit string: 1536 rho + 6 j + t.
 pub fn w1_bit_index(t: usize, j: usize, rho: usize) -> usize {
     debug_assert!(t < W1_BITS && j < N && rho < K);
     rho * N * W1_BITS + j * W1_BITS + t

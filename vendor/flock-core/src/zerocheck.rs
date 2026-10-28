@@ -92,7 +92,7 @@ pub static RS_TAIL_LOOKAHEAD_DISABLE: std::sync::atomic::AtomicBool =
 /// have different degrees and proof formats, so they define separate
 /// schedules.
 ///
-/// agg-mldsa patch (vendor/flock-core/PATCH.md, section 5): `list` is the
+/// agg-mldsa patch (vendor/flock-core/PATCH.md): `list` is the
 /// Johnson-list factor `ceil(L_max)` of the level-0 Ligerito commitment. The
 /// zerocheck challenges are drawn before Ligerito's level-0 two-point binding,
 /// so the Flock paper (Appendix A "Security", Remark 11) charges each of them
@@ -1562,7 +1562,7 @@ mod tests {
         }
     }
 
-    /// agg-mldsa patch (PATCH.md Section 3): the whole zerocheck proof (round 1,
+    /// agg-mldsa patch (PATCH.md): the whole zerocheck proof (round 1,
     /// round 2, the tail) is identical under every x86 kernel path available on
     /// this CPU, from portable up to AVX-512/GFNI/VPCLMULQDQ.
     #[test]

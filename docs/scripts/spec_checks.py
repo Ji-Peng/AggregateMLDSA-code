@@ -20,7 +20,7 @@ print("usehint residual max h0,h1:",b0,b1, "2g2+1=",2*g2+1)
 # (3) quotient bound
 Az=1024*((q-1)//2)*(g1-beta-1); T=2**d*tau*1023; W=2*g2*43; U=2*g2+1
 Dmax=Az+T+W+U; print("Delta max",Dmax, "log2",math.log2(Dmax)); print("v max",Dmax//q, "2^26=",2**26, "<2^26:",Dmax//q<2**26)
-# relaxed: Bz=2^18-? , Bu
+# wider bounds (Bz, Bu)
 for Bz,Bu in [(2**17,2**18),(2**18,2**19),(2**19,2**20)]:
     Dm=1024*((q-1)//2)*Bz+T+W+Bu
     print("ext Bz,Bu",Bz,Bu,"log2 Delta",round(math.log2(Dm),2),"zeta'",max(Bz,Bu+2**(d-1)*tau))
@@ -39,7 +39,7 @@ print("blocks",math.ceil((832+1)/136), "block1 w1 bytes",136-64,"blocks2-6",5*13
 for ds in [3,8,10,13,15]:
     L=6144*2**ds; lane=1024*2**ds; b1=max(1,lane//2**19); o1=b1*8192
     print("d_sig",ds,"lane bits",lane,"L1 blocks/lane/seg",min(b1,16),"segments",max(1,2**ds//8192),"L1 out/lane",o1)
-# (8) digit decompositions of Section 4.3: bases least significant first, balanced alphabets
+# (8) digit decompositions of the spec: bases least significant first, balanced alphabets
 import itertools
 def layout(bases, signed):
     Wt=[1]
@@ -71,16 +71,16 @@ def Q(b,P):
     return r
 for b in (4,6,8,16):
     print("Q",b,"exact on balanced alphabet",all((Q(b,Z*(Z+1))==0)==(-b//2<=Z<b//2) for Z in range(-4*b,4*b)))
-# (10) lifting bound (6.1) with the digit ranges, and the v ceiling
+# (10) lifting bound with the digit ranges, and the v ceiling
 Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**26
 print("Delta lift log2",round(math.log2(D),2),"<63:",D<2**63,"v ceiling log2",round(math.log2((2**63-D0)//q),2))
 # (11) committed elements per signature at N=2^15 (main 23 columns; D1 18; D2 24; D3 2)
 main=23*1024; d1=18*2**19/2**15; d2=24*2**15/2**15; d3=2*2**14/2**15
 print("elements/sig",main+d1+d2+d3,"main",main,"bridge",d1+d2+d3)
-# (12) relation H-u (default since wire version 3, docs/h-exact.md 2.1 and step A):
+# (12) relation H-u (default, docs/h-exact.md):
 # u = B_ulo + 63,079 H_u - B_u, B_ulo in [0,2^16), H_u in [0,6); stored U_lo = B_ulo - 2^15,
 # U_hi = H_u - 3, so u = U_lo + 63,079 U_hi + 31,540. Exact reachable set, constant, padding,
-# boundaries, the unique single-digit base c <= 16, and zeta' of (3.5).
+# boundaries, the unique single-digit base c <= 16, and zeta'.
 Bu=2*g2+1; A=63079
 reach=set()
 for H in range(6):
@@ -95,7 +95,7 @@ print("+-190,466 unreachable:", (Bu+1) not in reach and -(Bu+1) not in reach)
 sols=[c for c in range(2,17) if (2*Bu+1-2**16)%(c-1)==0 and (2*Bu+1-2**16)//(c-1)<=2**16]
 print("single-digit bases c<=16:",sols)
 print("zeta' H-u",max(2**17,Bu+2**(d-1)*tau),"zeta",max(g1-beta,2*g2+1+2**(d-1)*tau))
-# (13) relation H-exact (docs/h-exact.md 2.1, step B): z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z,
+# (13) relation H-exact (docs/h-exact.md): z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z,
 # B_zlo in [0,2^16), B_zhi, a_z bits; stored S_zlo = B_zlo - 2^15, so z = S_zlo + 2^16 B_zhi
 # + 130,915 a_z - 98,225. Exact reachable set, constant, canonical choice a_z = [z >= 79],
 # padding, edges, the canonical encoding of 130,994, no single small digit for z, zeta'.
@@ -114,18 +114,17 @@ print("+-130,994 unreachable:", (Bz+1) not in reach and -(Bz+1) not in reach)
 sols=[c for c in range(2,200) if (2*Bz+1-2**16)%(c-1)==0 and (2*Bz+1-2**16)//(c-1)<=2**16]
 print("single-digit bases c<200 for z:",sols)
 print("zeta' H-exact",max(Bz,Bu+2**(d-1)*tau))
-# (14) relation H-FIPS (relation byte 2, docs/h-exact.md Section 10): per coefficient
+# (14) relation H-FIPS (relation byte 2, docs/h-exact.md): per coefficient
 # L = L_lo + 29,696 L_hi in [0, gamma2 - 1] (L_lo in [0, 2^16), L_hi a bit), sign sigma,
 # s = (1 + sigma)/2, r0 = gamma2 s + L + 1 - gamma2 (a bijection (s, L) -> (-gamma2, gamma2]
-# with s = [r0 > 0]; the memo's sigma L + (1 + sigma)/2 relabels L), u = r0 - 2 gamma2 delta - e,
-# with the six zero-checks
+# with s = [r0 > 0]), u = r0 - 2 gamma2 delta - e, with the six zero-checks
 # sigma^2 = 1, delta (delta - sigma) = 0, e (e - 1)(e - delta) = 0, e (e + 1) w1' = 0,
 # e (e - 1)(w1' - 43) = 0, L_hi (L_hi - 1) = 0; per signature sum delta^2 + u_h = omega.
 # Soundness: every witness gives w' = 2 gamma2 w1' + u mod q with |u| <= B_u and
 # UseHint(h*, w') = w1' for h* = [HighBits(w') != w1'] <= delta^2 (FIPS 204 Algorithms 36, 37,
 # 40). Weight-aware completeness: for every honest (w', h) in Z_q x {0, 1}, w1' = UseHint(h, w'),
 # u = ctr_q(w' - 2 gamma2 w1'), the least delta^2 over the witnesses of (w1', u) equals h. The
-# ideator's e (e - delta) = 0 in place of e (e - 1)(e - delta) = 0 fails exactly at (q - gamma2, 0).
+# weaker e (e - delta) = 0 in place of e (e - 1)(e - delta) = 0 fails exactly at (q - gamma2, 0).
 LS=29696
 reach=set(range(0,2**16))|set(range(LS,LS+2**16))
 print("H-FIPS L blocks cover exactly [0,gamma2-1]:", reach==set(range(g2)), "29,696+2^16=gamma2:", LS+2**16==g2)

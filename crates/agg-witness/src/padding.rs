@@ -1,8 +1,8 @@
-//! Padding of batches and positions to powers of two (spec Sections 1 and 4).
+//! Padding of batches and positions to powers of two.
 //!
 //! Main-domain index x = j + 256 rho + 1024 i (canonical order (j, rho or s, i), least
-//! significant first). Bridge domains D_1, D_2, D_3 and their block/in-block indices follow the
-//! table of spec Section 1; see `crate::bridge` for the level maps.
+//! significant first). For the bridge domains D_1, D_2, D_3, their block/in-block indices and
+//! the level maps see `crate::bridge`.
 
 use crate::params::{D_COEF, D_POS, D_SEG_MAX, N_MAX, N_STAR_MIN, PCS_MIN_CELLS_LOG2};
 
@@ -22,7 +22,7 @@ pub struct Geometry {
 pub enum GeometryError {
     /// N = 0.
     Empty,
-    /// N > 2^15 (the verifier MUST reject in wire version 0).
+    /// N > 2^15 (the verifier MUST reject).
     TooMany(usize),
 }
 
@@ -80,7 +80,7 @@ impl Geometry {
             .min(1 << D_SEG_MAX)
     }
 
-    /// Keccak permutations of segment sigma: 7 min(N - 2^13 sigma, 2^13) (spec Section 8).
+    /// Keccak permutations of segment sigma: 7 min(N - 2^13 sigma, 2^13).
     pub fn keccak_perms_in_segment(&self, sigma: usize) -> usize {
         7 * self.live_in_segment(sigma)
     }

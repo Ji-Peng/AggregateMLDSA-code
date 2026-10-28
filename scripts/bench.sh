@@ -5,7 +5,7 @@
 #   CLMUL=1 scripts/bench.sh    builds with `-C target-feature=+pclmulqdq` (Flock's
 #   carry-less GF(2^128) kernels) in target/clmul; Akita stays at baseline codegen.
 #   AVX512=1 scripts/bench.sh   adds the `avx512` feature and x86-64-v4 (VPCLMULQDQ);
-#   BROKEN for the Akita side as of 2026-10-24, see README "SIMD policy".
+#   BROKEN for the Akita side, see README "SIMD policy".
 # Benchmarks report medians; record `git rev-parse HEAD` with every result.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,7 +17,7 @@ if [[ "${CLMUL:-0}" == "1" ]]; then
   exec taskset -c 0,1,3-15 cargo bench -p agg-bench "$@"
 fi
 if [[ "${AVX512:-0}" == "1" ]]; then
-  # x86-64-v4 = AVX-512 F/BW/CD/DQ/VL. A bare `+avx512f,...` feature list made
+  # x86-64-v4 = AVX-512 F/BW/CD/DQ/VL. A bare `+avx512f,...` feature list makes
   # rustc 1.99.1 (LLVM 23) crash with SIGILL while compiling aerie-prover.
   # With x86-64-v4, Akita's compile-time avx512bw path (windowed_accum.rs) makes its
   # prover self-check fail ("relation session final claim disagrees with its folded

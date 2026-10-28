@@ -168,7 +168,7 @@ impl InvNttTableByteSingleGf8 {
             unsafe { self.apply_neon_unchecked(bytes, out) };
             return;
         }
-        // agg-mldsa patch (PATCH.md Section 3): avx512f is checked at run time.
+        // agg-mldsa patch (PATCH.md): avx512f is checked at run time.
         #[cfg(target_arch = "x86_64")]
         if self.ell == 64 && self.n_chunks == 8 && crate::simd::has(crate::simd::AVX512F) {
             // SAFETY: avx512f checked at run time; ell == 64 as required.

@@ -1,4 +1,4 @@
-//! Akita commit + open alone (spec Section 13): setup, the two-round commit of dummy
+//! Akita commit + open alone: setup, the two-round commit of dummy
 //! tables of all six groups, one batched opening, and the verifier, at `N` records
 //! (default 1,024). Medians over `AGG_AKITA_REPS` runs (default 5); the opening proof
 //! size is printed. Run pinned, never on CPU 2:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the workspace tests on CPUs 0,1,3-15 (CPU 2 is reserved; see AGENTS.md), then the lib
+# Run the workspace tests on CPUs 0,1,3-15 (CPU 2 is reserved), then the lib
 # tests of the vendored flock-core, which the workspace excludes (Cargo.toml `exclude`) and
 # whose patched verifier the Keccak side depends on (vendor/flock-core/PATCH.md).
 # Usage: scripts/test.sh [extra cargo test args...]   e.g. scripts/test.sh --release -p agg-witness

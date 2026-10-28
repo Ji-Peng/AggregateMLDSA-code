@@ -251,14 +251,14 @@ pub const HINT_ZERO: (usize, usize) = (2, 101);
 
 /// A synthetic but genuine FIPS 204 signature of hint weight exactly 80 with a coefficient
 /// `w' = q - gamma2, h = 0` at [`HINT_CORNER`] and `w' = 0, h = 1` at [`HINT_ZERO`] (relation
-/// H-FIPS, `docs/h-exact.md` Section 10.5). The public key has `t1 = 0` (a well-formed
+/// H-FIPS, `docs/h-exact.md`). The public key has `t1 = 0` (a well-formed
 /// 1,312-byte key; pkDecode, FIPS 204 Algorithm 23, accepts any bytes), so Algorithm 8 computes
 /// `w'_Approx = A z` independently of `c` (line 9): `z` is drawn uniform in `[-B_z, B_z]` and two
 /// of its coefficients are moved (a 2x2 solve modulo `q`) so that `A z` hits both targets, then
 /// the hint gets 80 ones (at least one per `h = 1` case of the H-FIPS honest rule, none at the
 /// corner), then `c~ = H(mu || w1Encode(UseHint(h, w')))` (line 12). Honest signing cannot place
 /// a coefficient or a weight deliberately; random batches of 1K hit the corner with weight 80
-/// with probability about 3e-4 (estimate, `ref/notes/brainstorm-20261026.md` 3.5).
+/// with probability about 3e-4 (estimate).
 ///
 /// # Panics
 /// If no two-coefficient move is found or a hint case is missing (does not happen for the

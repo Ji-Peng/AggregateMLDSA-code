@@ -1,6 +1,5 @@
-//! The two-type bridge union: the bridge instance of a tied part factored the way the
-//! composite `M = M_3 M_2 M_1` is factored (docs/bridge.md Section 5b, deviation K13;
-//! docs/keccak.md Sections 10 and 11).
+//! The two-type bridge union: a bridge instance factored the way the composite
+//! `M = M_3 M_2 M_1` is factored (docs/bridge.md, docs/keccak.md).
 //!
 //! The one-row bridge slot of [`crate::bridge_slot`] proves `Y = M b'` with one block of
 //! `2^(13 + d)` columns, so its walker, its eq and comb vectors and the verifier's lincheck
@@ -22,7 +21,8 @@
 //!   beta + G t` (`G = blocks * m_1`), the constant at `lanes * G`, and the output columns
 //!   `y_o = y_base + o`, `y_base = lanes G + max(m_3, 128)` (an aligned region of `m_3 / 128`
 //!   words), `o < m_3`, with rows `(sum_c (M_3 M_2)[o, c] z_c + Y_o one) * one = z_{y_o}` (`Y`
-//!   a coefficient of the relation as in K8), where `(M_3 M_2)[o, (t, beta, rho_1)] =
+//!   a coefficient of the relation as in [`crate::bridge_slot`]), where
+//!   `(M_3 M_2)[o, (t, beta, rho_1)] =
 //!   sum_{rho_2} M_3[o, t + lanes rho_2] M_2[rho_2, rho_1 + m_1 (first_block + beta)]`.
 //!
 //! The parities are a function of `sd`, so the union's commitment is computed after `sd`
@@ -32,20 +32,20 @@
 //! evaluation claims ([`BridgeUnion::input_point`], [`BridgeUnion::y1_point`],
 //! [`BridgeUnion::top_point`]). A row with `C = I` only DEFINES its output column, so the
 //! output columns `y_o` are pinned to zero by one more claim ([`BridgeUnion::output_point`],
-//! value 0), which turns the definitions into `M_3 M_2 y1 = Y`. (The one-row slot of K8 did
-//! not need it: its block, the `y_o` columns included, was committed at event 2, before
-//! `sd` and `Y` existed; a block committed after `sd` could otherwise set `z_y = M_3 M_2 y1 +
-//! Y` for any `Y`.)
+//! value 0), which turns the definitions into `M_3 M_2 y1 = Y`. (The one-row slot of
+//! [`crate::bridge_slot`] does not need it: its block, the `y_o` columns included, is
+//! committed at event 2, before `sd` and `Y` exist; a block committed after `sd` could
+//! otherwise set `z_y = M_3 M_2 y1 + Y` for any `Y`.)
 //!
 //! Layouts are generic over [`Shape`] (the toy shape has one lane and `m_1 = 64`); the tie
 //! points need the production shape's six lanes and `m_1` a multiple of 128.
 //!
-//! **Spans** (tied-part proof version 3, docs/bridge.md Section 5c, deviation K16). A union
-//! may cover `2^span_log` segments that share the part geometry (`d`, part index; in mode A
-//! whole segments of `2^13` records): the level-1 row of segment `sigma`, lane `t`, block
-//! `beta` is `sigma + 2^span_log (beta + blocks t)` and the levels-2-3 row of segment `sigma`
-//! is row `sigma`. Every row of both types is live (`2^span_log * lanes * blocks` and
-//! `2^span_log`); segments without records are all-zero rows (constant 1). The tied part
+//! **Spans** (docs/bridge.md). A union may cover `2^span_log` segments that share the part
+//! geometry (`d`, part index; in mode A whole segments of `2^13` records): the level-1 row of
+//! segment `sigma`, lane `t`, block `beta` is `sigma + 2^span_log (beta + blocks t)` and the
+//! levels-2-3 row of segment `sigma` is row `sigma`. Every row of both types is live
+//! (`2^span_log * lanes * blocks` and `2^span_log`); segments without records are all-zero
+//! rows (constant 1). A span
 //! proves the relations with a zero coefficient (`Y = 0` in [`TopSlot`]), so the composite rows
 //! say `z_{y_o} = (M_3 M_2 z_in)_o`, and pins the output columns of row `sigma` to the public
 //! `Y_sigma` with the output claim (its value is the multilinear extension of the `Y` table,
@@ -243,7 +243,7 @@ impl Level1Layout {
         start..start + self.block_len() / 64
     }
 
-    /// The Flock registry type: empty matrix stubs (walker convention, K2), the constant
+    /// The Flock registry type: empty matrix stubs (walker convention), the constant
     /// pin, no IO schema.
     #[must_use]
     pub fn table_type(&self) -> TableType {
@@ -1831,7 +1831,7 @@ mod tests {
             "the cap's bytes are saved"
         );
         // A proof that carries its level-0 cap (e.g. serialized with its cap intact) is
-        // rejected on parse (K17).
+        // rejected on parse.
         let raw_with_cap = crate::prover::codec().serialize(&proof.flock).unwrap();
         let mut malformed_with_cap = Vec::new();
         malformed_with_cap.extend_from_slice(&(raw_with_cap.len() as u32).to_le_bytes());
@@ -1849,7 +1849,7 @@ mod tests {
         other[5] ^= 1;
         let other = crate::prover::KeccakCommitment::from_bytes(other);
         assert!(verify(&other, &parsed, &y).is_err());
-        // The precomputed commitment gives the same proof (K14).
+        // The precomputed commitment gives the same proof.
         let (again, cap2) = prove(&blocks, &y, true);
         assert_eq!((again, cap2.clone()), (proof.clone(), cap.clone()));
         let mut wrong = y.clone();

@@ -1,6 +1,6 @@
 //! Shared stage machinery: the declarative instance table of a stage, the prover driver
 //! (batching with `gamma`, ordinary compressed rounds, lifted local domains) and the
-//! verifier replay with the terminal equation (spec Section 7.1).
+//! verifier replay with the terminal equation.
 //!
 //! A [`StageSpec`] lists the groups of a stage: each group names its local domain, its
 //! shared equality point (one of `tau`, `r^(1)`, `r^(2)` restricted to the domain, or
@@ -21,13 +21,13 @@ use crate::OpeningField as E;
 /// A public weight table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WeightId {
-    /// `w_1` on the main domain (spec (7.5)).
+    /// `w_1` on the main domain.
     Level1,
-    /// `w_2` on `D_1` (spec (7.2)).
+    /// `w_2` on `D_1`.
     Level2,
-    /// `w_{3,t}` on `D_2` (spec (7.3)).
+    /// `w_{3,t}` on `D_2`.
     Level3(u8),
-    /// `w_A` on the main domain in order `(j', s, i)` (spec (7.9)).
+    /// `w_A` on the main domain in order `(j', s, i)`.
     Ring,
 }
 
@@ -38,7 +38,7 @@ pub enum LaneId {
     Column(Column),
     /// `P_Z = Z (Z + 1)` of a leaf-checked digit (virtual; `Z_hi`, `U_hi`).
     DigitSquare(Column),
-    /// `y^(1)_t` on `D_1` (virtual, spec Section 5).
+    /// `y^(1)_t` on `D_1` (virtual).
     Parity1(u8),
     /// A public weight.
     Weight(WeightId),
@@ -63,19 +63,19 @@ impl LaneId {
 pub enum EqPoint {
     /// No equality factor (the weight is a lane).
     None,
-    /// `tau` (spec Section 7.1).
+    /// `tau`.
     Tau,
     /// `r^(1)`.
     R1,
     /// `r^(2)`.
     R2,
-    /// The low coordinates of the final point of lookup stack `j` (`docs/lookup.md`
-    /// Section 1), on the stack's domain.
+    /// The low coordinates of the final point of lookup stack `j` (`docs/lookup.md`),
+    /// on the stack's domain.
     Lookup(usize),
     /// `(1/2, ..., 1/2, r^(2)_sig)` on the domain: the signature coordinates of `r^(2)` (its
     /// last `d_sig`) and `1/2` on the others, so that `eq` is `2^-(vars - d_sig)
     /// eq(r^(2)_sig, i)` at every cell of signature `i` (H-FIPS's hint-weight identity,
-    /// `docs/h-exact.md` Section 10.7).
+    /// `docs/h-exact.md`).
     HalfR2,
 }
 

@@ -1,4 +1,4 @@
-//! Relation H-FIPS (relation byte 2; `docs/h-exact.md` Section 10, spec Appendix A): the
+//! Relation H-FIPS (relation byte 2; `docs/h-exact.md`): the
 //! exact FIPS 204 verification relation, hint included.
 //!
 //! Per coefficient of `w'` the witness is `(L_lo, L_hi, sigma, delta, e)` with
@@ -12,14 +12,14 @@
 //!
 //! `(s, L) -> r0` is a bijection onto `(-gamma2, gamma2]` with `s = 1` iff `r0 > 0`
 //! (`L = (r0 - 1) mod gamma2`), so `sigma` is the sign test of FIPS 204 Algorithm 40 and `u` is
-//! affine in the committed values. (The memo's `r0 = sigma L + (1 + sigma)/2` is the same set of
-//! pairs `(sigma, r0)` under another labelling of `L`, but has the product `sigma L`.)
+//! affine in the committed values. (The alternative `r0 = sigma L + (1 + sigma)/2` is the same
+//! set of pairs `(sigma, r0)` under another labelling of `L`, but has the product `sigma L`.)
 //!
 //! and the six zero-checks `sigma^2 - 1`, `delta (delta - sigma)`, `e (e - 1)(e - delta)`,
 //! `e (e + 1) w1'`, `e (e - 1)(w1' - 43)`, `L_hi (L_hi - 1)`; per signature the hint-weight
 //! identity `sum_p delta_p^2 + u_h = omega = 80` with `u_h in [0, 2^16)` (looked up); `z` by
 //! H-exact's bit-slack form (`digits::Z_BIT_SLACK`). This `u` takes the place of H-u's step
-//! form in the ring identity (3.1), so `v` and the six bits are those of relations H-u and
+//! form in the ring identity, so `v` and the six bits are those of relations H-u and
 //! H-exact (the value `u = ctr_q(w' - 2 gamma2 w1')` is the same integer).
 //!
 //! The constraint `e (e - 1)(e - delta) = 0` (not `e (e - delta) = 0`) is what makes the honest
@@ -33,7 +33,7 @@
 //! the extracted `(c~, z, h*)` with the canonical HintBitPack is a FIPS 204 Algorithm 8
 //! signature: `||z||_inf <= B_z` (line 13), `wt(h*) <= sum delta^2 <= omega` (HintBitUnpack,
 //! Algorithm 21, line 3 of Algorithm 8), and `c~ = H(mu || w1Encode(UseHint(h*, w')))` (line 12)
-//! by (3.3). [`HFipsRecord::extract_signature`] does it.
+//! by the proven hash identity. [`HFipsRecord::extract_signature`] does it.
 
 use crate::check::{CheckReport, Identity};
 use crate::crt::az_integer;
@@ -59,7 +59,7 @@ const _: () = assert!(L_STEP + TABLE == GAMMA2);
 const _: () = assert!(OMEGA < 1 << 16);
 
 /// The per-coefficient H-FIPS witness. `l_lo` is the looked-up value itself (the PIOP stores
-/// `L_lo - 2^15`, the L16 storage shift of deviation L2).
+/// `L_lo - 2^15`, the storage shift of the `T_16` lookup).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Coeff {
     /// `L_lo in [0, 2^16)`.
@@ -90,7 +90,7 @@ impl Coeff {
         GAMMA2 * self.s() + self.l() + 1 - GAMMA2
     }
 
-    /// `u = r0 - 2 gamma2 delta - e`, the value that enters the ring identity (3.1).
+    /// `u = r0 - 2 gamma2 delta - e`, the value that enters the ring identity.
     pub fn u(&self) -> i64 {
         self.r0() - 2 * GAMMA2 * self.delta - self.e
     }
@@ -197,7 +197,7 @@ pub struct HFipsRecord {
     pub z_digits: Box<[[[i64; 3]; N]; L]>,
     /// The per-coefficient witness, `[rho][j]`.
     pub coeffs: Box<[[Coeff; N]; K]>,
-    /// The quotient `v` of (3.1) (unchanged from relation H-u).
+    /// The quotient `v` of the ring identity (as in relation H-u).
     pub v: VecK,
     /// The six w1Encode bits, `bits[t][rho][j]`.
     pub bits: Box<[[[i64; N]; K]; W1_BITS]>,
@@ -258,7 +258,7 @@ impl HFipsRecord {
         })
     }
 
-    /// The canonical encoding of the all-zero witness of a padded row (spec 4.2): `z = 0`
+    /// The canonical encoding of the all-zero witness of a padded row: `z = 0`
     /// (digits `(32,689, 1, 0)`), `w' = 0` with `h = 0` ([`Coeff::PADDED`]), `v = 0`, bits 0,
     /// `u_h = omega`.
     pub fn padded() -> Self {
@@ -345,9 +345,9 @@ impl HFipsRecord {
 
 /// Every identity of relation H-FIPS on one record, over the integers: the lookups (`B_zlo`,
 /// `L_lo`, `u_h`, the two 16-bit halves of `v`), the Booleans (`B_zhi`, `a_z`, `L_hi`, `b_t`),
-/// `range_w1` (3.4), the six zero-checks, the hint-weight identity, the ring identity (3.1) with
-/// the H-FIPS `u`, and, for a live record, (3.3) through the seven-permutation sponge. `public`
-/// is `None` for a padded row (`A = T = 0`, no hash). `i` is the record index (reports).
+/// `range_w1`, the six zero-checks, the hint-weight identity, the ring identity with the
+/// H-FIPS `u`, and, for a live record, the hash identity through the seven-permutation sponge.
+/// `public` is `None` for a padded row (`A = T = 0`, no hash). `i` is the record index (reports).
 pub fn check_record(rep: &mut CheckReport, public: Option<&PublicRecord>, rec: &HFipsRecord, i: usize) {
     for s in 0..L {
         for j in 0..N {
@@ -414,7 +414,7 @@ pub fn check_record(rep: &mut CheckReport, public: Option<&PublicRecord>, rec: &
             format!("sum delta^2 = {weight}, u_h = {}", rec.u_h),
         );
     }
-    // Ring identity (3.1) with the H-FIPS u; A = T = 0 on padded rows.
+    // Ring identity with the H-FIPS u; A = T = 0 on padded rows.
     let z = rec.z();
     let az = public.map(|p| az_integer(&p.key, &z));
     for rho in 0..K {
@@ -555,7 +555,7 @@ mod tests {
                 assert!((0..GAMMA2).contains(&c.l()));
             }
         }
-        // The corner of the memo: w' = q - gamma2, h = 0 (r0' = -gamma2 + 1, so L = 0).
+        // The corner: w' = q - gamma2, h = 0 (r0' = -gamma2 + 1, so L = 0).
         assert_eq!(
             honest_coeff(Q - GAMMA2, false),
             Coeff {

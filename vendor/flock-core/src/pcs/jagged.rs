@@ -1557,8 +1557,8 @@ pub(crate) fn build_merged_weight_and_prime(
         /// `x ↦ φ(eq_col[c]·x)` is F₂-linear, so its byte decomposition IS
         /// the map. Measured at m=32 against the per-slot multiply: W build
         /// 32.1 → 25.3 ms MT (3/3), 227 → 167 ST; the bake is ~1 ms MT.
-        /// The baked tables and the column factors (agg-mldsa patch, PATCH.md Section 1,
-        /// K21: a column whose factor is zero has an all-zero table and is neither baked
+        /// The baked tables and the column factors (agg-mldsa patch, PATCH.md:
+        /// a column whose factor is zero has an all-zero table and is neither baked
         /// nor swept).
         Baked(Vec<F128>, Vec<F128>),
         Combined(&'a [F128]),
@@ -1591,7 +1591,7 @@ pub(crate) fn build_merged_weight_and_prime(
             }
             let cf = eq_c[c];
             if cf == F128::ZERO {
-                return; // zero column factor: the table is zero (agg-mldsa patch, K21)
+                return; // zero column factor: the table is zero (agg-mldsa patch)
             }
             for k in 0..FOLD_N_BYTES {
                 for b in 0..FOLD_TABLE_SIZE {
@@ -1676,7 +1676,7 @@ pub(crate) fn build_merged_weight_and_prime(
                 let seg_end = ps[col + 1].min(live_end);
                 let row0 = (e - ps[col]) as usize;
                 let dst = &mut out[(e - base) as usize..(seg_end - base) as usize];
-                // agg-mldsa patch (PATCH.md Section 1, K21): a ring-switched claim's column
+                // agg-mldsa patch (PATCH.md): a ring-switched claim's column
                 // with a zero factor contributes zero (its fold map is the zero map).
                 let zero_col = match side {
                     ColSide::Baked(_, eq_c) | ColSide::Short { eq_c, .. } => {
@@ -2937,7 +2937,7 @@ pub struct MultipointGrinding {
     pub gamma_bits: u32,
     pub round_bits: u32,
     pub anchor_round_bits: u32,
-    /// agg-mldsa patch (PATCH.md section 5): the level-0 Johnson-list factor
+    /// agg-mldsa patch (PATCH.md): the level-0 Johnson-list factor
     /// multiplying the gamma numerator (1: upstream).
     pub list: usize,
 }

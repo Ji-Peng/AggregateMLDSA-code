@@ -125,7 +125,7 @@ fn table_mutations_fail_at_the_stated_stage() {
     let rep = rep_of(&inst, &t);
     assert_rejected(&rep, Identity::B16Prod);
     assert_eq!(rep.first_stage(), Some(Stage::One));
-    // Base-6 digit (u_4, H-u) outside [-3, 2]: leaf6, stage 2 (3 and -4 are in the old
+    // Base-6 digit (u_4, H-u) outside [-3, 2]: leaf6, stage 2 (3 and -4 are in the
     // base-8 alphabet).
     for value in [3, -4] {
         let mut t = base.clone();
@@ -167,7 +167,7 @@ fn table_mutations_fail_at_the_stated_stage() {
     let rep = rep_of(&inst, &t);
     assert!(rep.failed(Identity::Ring) && rep.failed(Identity::CommitmentHash));
     // A padded row with other in-alphabet digits violates only the honest padding form: the
-    // relation does not constrain padded z (spec Section 4.2: padded digits MUST NOT be required zero).
+    // relation does not constrain padded z (padded digits MUST NOT be required zero).
     let mut t = base.clone();
     t.columns[map.z][main_index(5, 1, 7)] = 3;
     let rep = rep_of(&inst, &t);
@@ -298,7 +298,7 @@ fn bridge_mutations_are_rejected() {
     assert_rejected(&run(&bt), Identity::B16Prod);
 }
 
-/// The F_p cheat of spec Section 6: for a wrong z, v = q^{-1} Delta_0 mod p satisfies the field
+/// The F_p cheat: for a wrong z, v = q^{-1} Delta_0 mod p satisfies the field
 /// identity, but no v in [-2^26, 2^26) does, so the digits of v reject it.
 #[test]
 fn unbounded_quotient_cheat_needs_out_of_range_v() {
@@ -382,7 +382,7 @@ fn hint_reencoding_rejects_unreachable_w1() {
 #[cfg(feature = "h-exact")]
 #[test]
 fn h_exact_mutations() {
-    // Relation H-exact (spec 4.3): bz_0..bz_3 (base 16), bz_hi, az, then u as in H-u.
+    // Relation H-exact: bz_0..bz_3 (base 16), bz_hi, az, then u as in H-u.
     let (inst, base) = honest(Layout::HExact);
     let map = base.map();
     assert_eq!(map.len(), 24);

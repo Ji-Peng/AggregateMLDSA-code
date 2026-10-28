@@ -1,4 +1,4 @@
-//! Fp parity tables (spec Section 9.2, docs/bridge.md Section 4), generic over [`Shape`].
+//! Fp parity tables (`docs/bridge.md`), generic over [`Shape`].
 //!
 //! Per lane and level the prover proves over the integers
 //! `sum_zeta M_t[rho, zeta] v^(t-1)(zeta) = y^(t)(rho) + 2 kappa^(t)(rho)` with
@@ -6,7 +6,7 @@
 //! `s` of a row determines both outputs: the parity `y = s mod 2` and the quotient column
 //! `kappa = floor(s / 2)` (the carry). Both sides of the identity stay below
 //! `1 + 2 floor(W_t / 2) <= W_t < p`, so the field identity is the integer one and reducing it
-//! modulo 2 gives `y = XOR_zeta M_t[rho, zeta] v(zeta)` (lifting, docs/bridge.md Section 4).
+//! modulo 2 gives `y = XOR_zeta M_t[rho, zeta] v(zeta)` (lifting).
 //!
 //! Index conventions are those of [`crate::shape`]: level-1 block `beta = x / J_1`, `D_1` cell
 //! `rho_1 + m_1 beta`; segment `sigma = D_1 cell / J_2^used`, `D_2` cell `rho_2 + m_2 sigma`;
@@ -173,7 +173,7 @@ impl ParityWitness {
 
 /// The honest parities and quotient columns of the inputs `lanes` (main-domain bit columns
 /// in production) under `matrices`. Refuses matrices of another shape and, as the honest
-/// prover MUST (docs/bridge.md Section 3), a row weight above its cap.
+/// prover MUST, a row weight above its cap.
 pub fn compute(
     shape: &Shape,
     lanes: &[&[i8]],
@@ -221,7 +221,7 @@ pub enum IdentityError {
         /// The cell.
         cell: usize,
     },
-    /// The integer identity (9.2) of `level` fails at `(lane, cell)`.
+    /// The integer level identity of `level` fails at `(lane, cell)`.
     Identity {
         /// 1, 2 or 3.
         level: usize,
@@ -232,7 +232,7 @@ pub enum IdentityError {
     },
 }
 
-/// Check the three identities (9.2) at every Boolean point, with Booleanity of the inputs and
+/// Check the three level identities at every Boolean point, with Booleanity of the inputs and
 /// of every parity and the carry ranges, by recomputing the integer sums from the witness's
 /// own inputs (an independent check of any witness, honest or not).
 pub fn check(

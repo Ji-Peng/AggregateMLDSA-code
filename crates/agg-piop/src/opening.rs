@@ -1,4 +1,4 @@
-//! The Akita opening of the six groups (spec Sections 7.5 and 10, event 13): five groups at
+//! The Akita opening of the six groups (event 13): five groups at
 //! `r^(3)` and its suffixes, `G_m` at the lookup's table point; and the parsing of the
 //! commitments absorbed at events 1 and 4.
 

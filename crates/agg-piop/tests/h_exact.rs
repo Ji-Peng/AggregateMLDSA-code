@@ -1,6 +1,6 @@
-//! Relation H-exact (`docs/h-exact.md` step B) at the PIOP level (the lookup and the three
+//! Relation H-exact (`docs/h-exact.md`) at the PIOP level (the lookup and the three
 //! stages, no commitments): an honest round trip, the pointwise identities on the Boolean
-//! domain, the tamperings of Section 6.4 rejected at the stated place, and synthetic
+//! domain, instance tamperings rejected at the stated place, and synthetic
 //! statements at the value boundaries `z = +-130,994` and `u = +-190,466` whose public `T`
 //! is moved so that the ring identity still holds over the integers: only the range
 //! mechanism (the lookup, the leaf of `D_u`, the Booleanity zero-checks) can reject them.
@@ -152,7 +152,7 @@ fn h_exact_piop_round_trip_matches_the_tables_and_the_pointwise_identities() {
         let batch = small_batch(Relation::HExact);
         let manifest = &batch.manifest;
         let tables = batch.tables();
-        // Pointwise on the Boolean domain (docs/h-exact.md 6.3): the ring residual is zero,
+        // Pointwise on the Boolean domain: the ring residual is zero,
         // bz_hi and a_z are bits, Q_6(D_u (D_u + 1)) = 0, w_1' < 44.
         assert!(residual_table(manifest, &batch.instance, &batch.main).iter().all(|r| *r == E::zero()));
         for column in manifest.bool_digits() {
@@ -192,7 +192,7 @@ fn tables_mle(cells: &[i64], point: &[E]) -> E {
 #[test]
 fn h_exact_tamperings_fail_at_the_stated_place() {
     on_large_stack(|| {
-        // docs/h-exact.md 6.4, instance level.
+        // Instance level.
         let batch = small_batch(Relation::HExact);
         let manifest = &batch.manifest;
         let x = main_index(17, 2, 5);
@@ -244,7 +244,7 @@ fn h_exact_tamperings_fail_at_the_stated_place() {
 #[test]
 fn h_exact_value_boundaries_with_synthetic_statements() {
     on_large_stack(|| {
-        // docs/h-exact.md 6.4, value boundaries: the tamper keeps the ring identity.
+        // Value boundaries: the tamper keeps the ring identity.
         let exact = small_batch(Relation::HExact);
         let hu = small_batch(Relation::Hu);
         let zx = DigitValue::Zx.layout();

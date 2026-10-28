@@ -1,12 +1,11 @@
-//! Stage 3 (spec Section 7.5, degree 3): the ring identity (7.6) with `(A z)` pulled back
-//! through the public matrices, the range links, the Booleanity zero-checks of H-exact's
-//! bit digits, the evaluation reductions to `r^(3)`, and the four lookup-stack reductions
-//! (lookup layout L16, `docs/lookup.md` Section 6 item 4).
+//! Stage 3 (degree 3): the ring identity with `(A z)` pulled back through the public
+//! matrices, the range links, the Booleanity zero-checks of H-exact's bit digits, the
+//! evaluation reductions to `r^(3)`, and the four lookup-stack reductions (`docs/lookup.md`).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
 //! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2; H-exact: `link[U_hi]` 1), one
 //! `bool` per Boolean value digit (H-exact: `bool[bz_hi]` 2, `bool[a_z]` 3; claim 0,
-//! `docs/h-exact.md` 3.4), then the reductions: `b_t` from `r^(1)` (`o..o+6`), `b_t` from
+//! `docs/h-exact.md`), then the reductions: `b_t` from `r^(1)` (`o..o+6`), `b_t` from
 //! `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t` from `tau_2`, `K^(3)`
 //! from `tau_3`, `K^(1)_t` from `r^(1)_1`, and the lookup stacks `j = 0..4`: `sum_x eq(pi_j,
 //! x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >= cols} w_{j,c}` with `w_{j,c}
@@ -19,7 +18,7 @@
 //! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
 //! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
 //!
-//! Relation H-FIPS (`docs/h-exact.md` Section 10.7): `bool` for `bz_hi`, `l_hi`, `a_z`, then
+//! Relation H-FIPS (`docs/h-exact.md`): `bool` for `bz_hi`, `l_hi`, `a_z`, then
 //! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F1 = s (s - 1)`,
 //! `F2 = delta (delta - 2 s + 1)` (`delta (delta - sigma)` with `sigma = 2 s - 1`),
 //! `F45 = 2 e w_1' + 43 e^2 - 43 e` (equivalent to `e (e + 1) w_1' = 0` and
@@ -671,7 +670,7 @@ pub fn verify(
     )
 }
 
-/// Verify stage 3 with the public pass deferred (spec Section 11 step 6): the rounds are
+/// Verify stage 3 with the public pass deferred: the rounds are
 /// replayed with the ring claim `T(r^(2))` set to zero, the terminal claims absorbed, and
 /// only then `public_pass(r^(2), r^(3))` returns `(T(r^(2)), w_A(r^(3)))`, so both come
 /// from one pass over the public matrices. Compressed rounds make the final claim affine
@@ -758,7 +757,7 @@ mod tests {
         assert_eq!((gammas.links, gammas.bools), (1, 2));
         assert_eq!((gammas.bool(0), gammas.bool(1), gammas.b_r1(0)), (2, 3, 4));
         assert_eq!((gammas.kappa3_tau(), gammas.stack(3)), (34, 44));
-        // docs/h-exact.md 3.4: link[u_hi] at 1, bool[bz_hi] at 2, bool[a_z] at 3, all in the
+        // H-exact: link[u_hi] at 1, bool[bz_hi] at 2, bool[a_z] at 3, all in the
         // eq(r^(2)) group; the w_A group reads bz_lo, bz_hi, a_z with weights (1, 2^16,
         // 130,915) and constant -98,225.
         let main = &spec.groups[0];
@@ -848,7 +847,7 @@ mod tests {
         }
     }
 
-    /// The H-FIPS checks of stage 3 evaluate to their polynomials (`docs/h-exact.md` 10.7) at
+    /// The H-FIPS checks of stage 3 evaluate to their polynomials (`docs/h-exact.md`) at
     /// random field values, so each zero-check is tested on its own: the tamper tests of
     /// `tests/h_fips.rs` for `F1` (`s = 2`) and `F2` (`delta = -sigma`) also move the ring
     /// identity, and an in-range `L` cannot isolate `F2`. Also pins the ring's H-FIPS slice to

@@ -3,8 +3,8 @@
 //! The FIPS instance is `NttPrime::fips()` (q = 8,380,417, zeta = 1753). The same butterfly
 //! network works for any prime P < 2^31 with a primitive 512th root of unity; the CRT product
 //! of `crate::crt` uses a second such prime. Arithmetic is `u64` with a Barrett reduction of the
-//! products (below `2^62`) and conditional subtractions for the sums (exact; the `%` division
-//! made the NTTs the bulk of the instance and witness time); not constant time, not vectorized.
+//! products (below `2^62`) and conditional subtractions for the sums (exact; a `%` division
+//! makes the NTTs the bulk of the instance and witness time); not constant time, not vectorized.
 
 use crate::params::{N, N_INV_Q, Q, ZETA};
 use std::sync::OnceLock;

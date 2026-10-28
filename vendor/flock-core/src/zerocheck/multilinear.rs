@@ -614,7 +614,7 @@ fn kill_pair(a: &mut [F128], b: &mut [F128], x0l: usize, x1l: usize, write_dead:
 
 /// The x86 AVX-512/VPCLMULQDQ body of [`fold_pair_run`] (upstream's
 /// `cfg(target_feature)` block, moved into a `#[target_feature]` function so it
-/// can be chosen at run time; agg-mldsa patch, PATCH.md Section 3).
+/// can be chosen at run time; agg-mldsa patch, PATCH.md).
 ///
 /// # Safety
 /// The CPU has `avx512f`, `vpclmulqdq` and `sse4.1`; the geometry contract of
@@ -765,7 +765,7 @@ fn fold_pair_run<D>(
 where
     D: Fn(usize) -> bool + Sync,
 {
-    // agg-mldsa patch (PATCH.md Section 3): the AVX-512 body is chosen at run time.
+    // agg-mldsa patch (PATCH.md): the AVX-512 body is chosen at run time.
     #[cfg(target_arch = "x86_64")]
     if has(AVX512_CLMUL) {
         // SAFETY: the runtime check guarantees the kernel's target features; the
@@ -1349,7 +1349,7 @@ pub fn fold_and_compute_round_pair_into(
             let a_in = &a[x_hi * chunk_in..(x_hi + 1) * chunk_in];
             let b_in = &b[x_hi * chunk_in..(x_hi + 1) * chunk_in];
 
-            // agg-mldsa patch (PATCH.md Section 3): the AVX-512 kernel is chosen at
+            // agg-mldsa patch (PATCH.md): the AVX-512 kernel is chosen at
             // run time.
             #[cfg(target_arch = "x86_64")]
             let simd = has(AVX512_CLMUL);

@@ -1,4 +1,4 @@
-//! The virtual parity chain (`docs/parity-chain.md`, deviation K21): the GF(2) side of the
+//! The virtual parity chain (`docs/parity-chain.md`): the GF(2) side of the
 //! bridge as one degree-2 sum-check over the committed bits, without the bridge union.
 //!
 //! In characteristic 2 the composite `M = M_3 M_2 M_1` is `GF(2^128)`-linear, so for a random
@@ -23,7 +23,7 @@
 //!
 //! Indices. A chain covers `2^span_log` segments of one part layout ([`SegmentLayout`],
 //! `lane_len` positions per lane, part `offset`), each with `2^lb` lanes (`lb =
-//! ceil(log2 lanes)`; the lanes `lanes..2^lb` are junk with weight zero, docs Section 2).
+//! ceil(log2 lanes)`; the lanes `lanes..2^lb` are junk with weight zero).
 //! The input bits are `2^span_log` segment blocks of `2^lb * lane_len` bits, lane-major:
 //! bit `p + lane_len t` of a segment block is position `p` of lane `t`
 //! ([`ChainLayout::bit_index`]). A position `p = zeta + block_len i_mid` has the in-block
@@ -297,7 +297,7 @@ impl ChainLayout {
             .collect()
     }
 
-    /// `W~(r)`: the multilinear extension of the weight at the chain point (docs Section 5),
+    /// `W~(r)`: the multilinear extension of the weight at the chain point,
     /// computed right to left without the level-2 table.
     ///
     /// # Panics

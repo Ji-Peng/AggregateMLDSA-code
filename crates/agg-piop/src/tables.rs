@@ -99,7 +99,7 @@ impl<'a> ProverTables<'a> {
         }
     }
 
-    /// Build `w_2` and `w_{3,t}` from `tau` (spec (7.2), (7.3)).
+    /// Build `w_2` and `w_{3,t}` from `tau`.
     pub fn set_tau(&mut self, matrices: &BridgeMatrices, tau: &[E]) {
         let geom = self.tables.main.geometry();
         let tau2 = &tau[tau.len() - geom.d2() as usize..];
@@ -108,7 +108,7 @@ impl<'a> ProverTables<'a> {
         self.w3 = Some(level3_weight_tables(&geom, &matrices.m3, tau3));
     }
 
-    /// Build `w_1` from `r^(1)` (spec (7.5)) and drop the stage-1 weights.
+    /// Build `w_1` from `r^(1)` and drop the stage-1 weights.
     pub fn set_r1(&mut self, matrices: &BridgeMatrices, r1: &[E]) {
         let geom = self.tables.main.geometry();
         let r1_1 = &r1[r1.len() - geom.d1() as usize..];
@@ -117,7 +117,7 @@ impl<'a> ProverTables<'a> {
         self.w1 = Some(level1_weight_table(&geom, &matrices.m1, r1_1));
     }
 
-    /// Build `w_A` from `r^(2)` (spec (7.9)) and drop `w_1`.
+    /// Build `w_A` from `r^(2)` and drop `w_1`.
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
         self.wa = Some(ring_weight_table(public, r2));

@@ -1,12 +1,12 @@
 //! The proof-of-work plan of a proof and the packed PIOP nonce stream
-//! (`docs/soundness.md` Sections 3, 6; deviation P3 resolved).
+//! (`docs/soundness.md`).
 //!
 //! The plan is the ordered list of the proof's protected challenge sites: the sites of every
 //! tied part of the Keccak side ([`KeccakPlan`], in segment and part order: the tie site, the
 //! `eq_Y` site and the parity-chain rounds of tied-part proof version 5), then the
 //! PIOP field-challenge sites in registry order ([`crate::transcript::Registry`], the lookup
 //! vector `X` included with difficulty 0). Every site carries its class, two indices and its
-//! difficulty `g` ([`agg_bridge::pow`]); the canonical encoding of Section 6.4 is hashed with
+//! difficulty `g` ([`agg_bridge::pow`]); the canonical encoding is hashed with
 //! SHA3-256 and the digest completes the instance record of event 0
 //! ([`crate::binding::instance_record`]), so the transcript binds the plan before its first
 //! site.
@@ -26,7 +26,7 @@ use crate::transcript::Registry;
 /// Domain label of the plan digest.
 pub const PLAN_LABEL: &[u8] = b"agg-mldsa/v2/pow-plan";
 
-/// Class of a protected site (`docs/soundness.md` Section 3.1; the id is its wire byte).
+/// Class of a protected site (`docs/soundness.md`; the id is its wire byte).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum SiteClass {
@@ -150,7 +150,7 @@ impl PowPlan {
         &self.sites
     }
 
-    /// Canonical encoding (`docs/soundness.md` Section 6.4): `LE64(N*) || u8(profile) ||
+    /// Canonical encoding: `LE64(N*) || u8(profile) ||
     /// u8(S) || u8(d_part) || LE32(count) || (u8(class) || LE16(i) || LE16(j) || u8(g) ||
     /// u8(nonce bits))*`.
     #[must_use]
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn plan_digests_reproduce_the_soundness_doc_vectors() {
-        // docs/soundness.md Section 10 (python3 -I docs/scripts/pow_plan.py).
+        // The vectors of `docs/soundness.md` (python3 -I docs/scripts/pow_plan.py).
         let cases: [(usize, FlockProfile, Option<bool>, &str); 10] = [
             (
                 3,
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn plan_totals_match_the_soundness_doc() {
-        // Section 10: sites, nonces, bits, bytes and sum 2^g of the PIOP part.
+        // Sites, nonces, bits, bytes and sum 2^g of the PIOP part.
         for (d_sig, sites, nonces, bits, work) in [
             (3, 195, 194, 1811, 1364),
             (10, 339, 338, 3124, 2048),
@@ -484,7 +484,7 @@ mod tests {
                 .unwrap();
             assert_eq!((gamma2.bits, gamma2.nonce_bits()), (3, 10));
         }
-        // The provisional anchors of docs/h-exact.md 3.7 (mode B = PublicBits; Slim, span on).
+        // The anchors of `docs/h-exact.md` (mode B = PublicBits; Slim, span on).
         for (d_sig, profile, want) in [
             (3, FlockProfile::PublicBits, "c9dd30a002089fff68b1653faddb2ac860e093f771eb3eeaaf03e60152e54c85"),
             (3, FlockProfile::Slim, "395afaec30fb8143597d9cd965d9348f8aba6367d5ea3c931338a519f3538f92"),
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn h_fips_plans_equal_h_exact_plans() {
         use crate::manifest::Relation;
-        // docs/h-exact.md 10.7: H-FIPS's stage batching vectors (26, 7, 51) give the same
+        // H-FIPS's stage batching vectors (26, 7, 51) give the same
         // difficulties as H-exact's (26, 7, 45): bit_length(51) = bit_length(45) = 6. The plan,
         // its stream and its digest are H-exact's; the relation is bound by event 0's
         // manifest bytes (relation byte, G_main4 and G_2 descriptors, catalog row).

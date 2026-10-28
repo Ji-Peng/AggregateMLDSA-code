@@ -1,5 +1,5 @@
 //! Regenerate the `Slim8` Ligerito security configs of the vendored Flock core
-//! (`vendor/flock-core/configs/ligerito/m{22..35}_slim8.toml`, deviation K18) with Flock's
+//! (`vendor/flock-core/configs/ligerito/m{22..35}_slim8.toml`) with Flock's
 //! own derivation and validator, and check that the same derivation reproduces the shipped
 //! `Slim` files byte for byte.
 //!

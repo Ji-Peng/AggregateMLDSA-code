@@ -1,12 +1,12 @@
-//! Public-record binding (spec Section 2) and the canonical instance record of event 0.
+//! Public-record binding and the canonical instance record of event 0.
 //!
 //! The transcript binds `X = LE64(N) || ||_i (pk_i || LE64(|M_i|) || M_i || c~_i)` with a
 //! 16-KiB-leaf cSHAKE256 tree: leaf `i` is `cSHAKE256(block_i, 32)` under
 //! `agg-mldsa/v1/record-leaf`, the root `cSHAKE256(LE64(blocks) || leaves, 32)` under
 //! `agg-mldsa/v1/public-records-binding`. The instance record is the manifest binding
-//! bytes of event 0 (`docs/piop.md` Section 2) followed by this digest, the Flock
-//! profile id and (wire version 2) the 32-byte proof-of-work plan digest
-//! ([`crate::pow::PowPlan::digest`], `docs/soundness.md` Section 6.4).
+//! bytes of event 0 (`docs/piop.md`) followed by this digest, the Flock
+//! profile id and the 32-byte proof-of-work plan digest
+//! ([`crate::pow::PowPlan::digest`], `docs/soundness.md`).
 
 use agg_witness::params::C_TILDE_BYTES;
 use rayon::prelude::*;
@@ -27,7 +27,7 @@ pub enum FlockProfile {
     None = 0,
     /// Ligerito `Fast` (engineering baseline).
     Fast = 1,
-    /// LaBinius (target commitment).
+    /// LaBinius (reserved id).
     LaBinius = 2,
     /// Mode B: the `w_1'` bits in the clear as the event-2 items (`crate::mode_b`).
     PublicBits = 3,
@@ -35,8 +35,7 @@ pub enum FlockProfile {
     /// about two thirds of the `Fast` Flock bytes for about twice the level-0 encoding work.
     Slim = 4,
     /// Ligerito `Slim8` (rate 1/8 at level 0 with `Slim`'s accounting, a parameter set the
-    /// vendored Flock core derives and validates with its own analysis; `agg-keccak`
-    /// deviation K18).
+    /// vendored Flock core derives and validates with its own analysis).
     Slim8 = 5,
 }
 
@@ -57,7 +56,7 @@ impl FlockProfile {
 
     /// Mode A: the hash relation is proved by Flock sub-proofs (`Fast`, `Slim`, `Slim8` or
     /// `LaBinius`), whose tie to the committed bits is the parity bridge with seed-derived
-    /// matrices (spec 9.4).
+    /// matrices.
     #[must_use]
     pub const fn is_mode_a(self) -> bool {
         matches!(self, Self::Fast | Self::Slim | Self::Slim8 | Self::LaBinius)

@@ -1,11 +1,11 @@
-//! Prover-side scheduling helpers (lever A, docs/perf.md Section 11): take the
+//! Prover-side scheduling helpers (`docs/perf.md`): take the
 //! one-vCPU windows (single-threaded unmaps of buffers of several GiB, the serial
 //! public-data copy) off the prover's critical path. Nothing here changes an output.
 
 use std::sync::OnceLock;
 
-/// `true` when `AGG_SCHED_SERIAL` is set (any value): every helper then behaves as
-/// before lever A (drops in place, the serial setup step), for A/B runs in one binary.
+/// `true` when `AGG_SCHED_SERIAL` is set (any value): every helper then drops in place
+/// and the setup step runs serially, for A/B runs in one binary.
 /// Read once per process.
 #[must_use]
 pub fn serial_schedule() -> bool {

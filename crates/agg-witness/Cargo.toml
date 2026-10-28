@@ -9,9 +9,9 @@ publish.workspace = true
 
 [features]
 default = []
-# Relation H-exact (spec Appendix A): z and u by slack digits.
+# Relation H-exact: z by the bit-slack form, u as in H-u.
 h-exact = []
-# Relation S1+S2, `relation = fips` (spec Appendix A): FIPS-faithful layout with re-encoding.
+# Relation S1+S2: FIPS-faithful layout with re-encoding.
 fips = []
 
 [dependencies]

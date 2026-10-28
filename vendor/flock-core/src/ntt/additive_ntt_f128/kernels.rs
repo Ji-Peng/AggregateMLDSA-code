@@ -2,7 +2,7 @@
 //!
 //! Transform scheduling and cache-blocking policy stay in the parent module;
 //! this module owns the architecture-specific operations on blocks of data.
-//! agg-mldsa patch (PATCH.md Section 3): the x86 AVX-512/VPCLMULQDQ kernels are
+//! agg-mldsa patch (PATCH.md): the x86 AVX-512/VPCLMULQDQ kernels are
 //! chosen at run time (`crate::simd`) instead of by `cfg(target_feature)`.
 
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
@@ -199,7 +199,7 @@ pub(super) unsafe fn butterfly_neon_block_pair_chunk(chunk: &mut [F128], t_a: F1
     unsafe { butterfly_block_pair(chunk, t_a, t_b) }
 }
 
-/// agg-mldsa patch (PATCH.md Section 3): each x86 kernel available on this CPU
+/// agg-mldsa patch (PATCH.md): each x86 kernel available on this CPU
 /// matches its portable counterpart bit for bit (lengths with and without a
 /// four-lane remainder).
 #[cfg(all(test, target_arch = "x86_64"))]

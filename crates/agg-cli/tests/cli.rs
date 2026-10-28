@@ -138,8 +138,8 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains(": reject"), "{out}");
 
-    // Relation H-exact (docs/h-exact.md 1.3): aggregate and verify with --relation h-exact;
-    // the default (H-u) verifier and an H-u aggregate verified as H-exact are rejected.
+    // Relation H-exact: aggregate and verify with --relation h-exact; the default (H-u)
+    // verifier and an H-u aggregate verified as H-exact are rejected.
     assert!(out.contains("relation H-u"), "{out}");
     let exact = dir.join("exact.agg");
     let (code, out) = agg(&[
@@ -170,7 +170,7 @@ fn keygen_sign_aggregate_verify_and_bench() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("the proof claims relation H-u, the verifier expects H-exact"), "{out}");
     assert_eq!(verify_as(&aggregate, Some("fips")).0, 2);
-    // Relation H-FIPS (docs/h-exact.md 10.7): --relation h-fips round trip, crossed with H-exact.
+    // Relation H-FIPS: --relation h-fips round trip, crossed with H-exact.
     let fips = dir.join("fips.agg");
     let (code, out) = agg(&["aggregate", "--records", s(&recs), "--out", s(&fips), "--relation", "h-fips"]);
     assert_eq!(code, 0, "{out}");

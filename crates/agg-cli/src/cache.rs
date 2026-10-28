@@ -1,8 +1,8 @@
-//! A persistent cache of expanded public keys for the verifier (spec Sections 2 and 11).
+//! A persistent cache of expanded public keys for the verifier.
 //!
-//! The verifier's "cached" number of spec Section 11 assumes `A_i = ctr_q(NTT^{-1}(ExpandA(
-//! rho_i)))` and `tr_i` are known for every key; this module stores them across runs. The
-//! file holds one entry per key, addressed by the public-key hash `SHA3-256(pk)`:
+//! The verifier's "cached" timing assumes `A_i = ctr_q(NTT^{-1}(ExpandA(rho_i)))` and `tr_i`
+//! are known for every key; this module stores them across runs. The file holds one entry
+//! per key, addressed by the public-key hash `SHA3-256(pk)`:
 //!
 //! `magic "AGGKCACH" || version u8 || count LE32 || (hash[32] || pk[1312] || tr[64] ||
 //! A[k][l][256] as LE32)*`

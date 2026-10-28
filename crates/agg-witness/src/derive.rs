@@ -1,6 +1,6 @@
-//! Per-signature witness derivation of (z, u, v, b) and the committed quotient (spec Sections 3 and 6).
+//! Per-signature witness derivation of (z, u, v, b) and the committed quotient.
 //!
-//! For a signature accepted by Algorithm 8 (spec Section 3.2):
+//! For a signature accepted by Algorithm 8:
 //! w' = ctr_q(A z - T) with A centered and T = 2^d (c * t1) over Z, w1' = UseHint(h, w'),
 //! u = ctr_q(w' - 2 gamma2 w1') (|u| <= B_u by the UseHint lemma), and the exact quotient
 //! v = (A z - T - 2 gamma2 w1' - u) / q over Z (|v| <= B_v). The six w1Encode bits are
@@ -31,7 +31,7 @@ impl From<SigDecodeError> for DeriveError {
     }
 }
 
-/// S1+S2 per-position values (spec Appendix A, `improvements-tables.md` Section 1).
+/// S1+S2 per-position values.
 #[cfg(feature = "fips")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FipsValues {
@@ -91,13 +91,13 @@ impl SigWitness {
         (self.w1[rho][j] >> t) & 1
     }
 
-    /// The seven-permutation sponge of c~ = SHAKE256(mu || w1Encode(w1'), 32) (spec Section 8).
+    /// The seven-permutation sponge of c~ = SHAKE256(mu || w1Encode(w1'), 32).
     pub fn sponge(&self) -> crate::keccak::SpongeTrace {
         crate::keccak::sponge_trace(&self.mu, &self.w1_bytes)
     }
 }
 
-/// S1+S2 encoding of one coefficient: (r1, r0, s, v_r, e) from w' (spec Appendix A).
+/// S1+S2 encoding of one coefficient: (r1, r0, s, v_r, e) from w'.
 #[cfg(feature = "fips")]
 pub fn fips_position(w: i64) -> (i64, i64, i64, i64, i64) {
     let (r1, r0) = decompose(w);
@@ -319,7 +319,7 @@ pub fn reencode_h(
     Ok(sig_encode(c_tilde, z, &h))
 }
 
-/// Re-encodes S1+S2 witness values (z, g) to signature bytes with h = g^2 (spec Appendix A).
+/// Re-encodes S1+S2 witness values (z, g) to signature bytes with h = g^2.
 #[cfg(feature = "fips")]
 pub fn reencode_fips(
     c_tilde: &[u8; C_TILDE_BYTES],
@@ -350,7 +350,7 @@ pub fn reencode_fips(
 }
 
 /// The UseHint residual lemma, exhaustively: max |ctr_q(r - 2 gamma2 UseHint(h, r))| over
-/// r in Z_q and h in {0, 1} (spec Section 3.2; expected exactly 190,465).
+/// r in Z_q and h in {0, 1} (expected exactly 190,465).
 pub fn usehint_residual_max() -> i64 {
     let mut m = 0i64;
     for r in 0..Q {

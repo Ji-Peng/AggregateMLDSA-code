@@ -1,4 +1,4 @@
-//! The fork-join transcript (deviation K22, `docs/soundness.md` 12.2): the Keccak side's proof
+//! The fork-join transcript (`docs/soundness.md`): the Keccak side's proof
 //! items are absorbed at the join, after the stage-3 claims and before the PCS session
 //! digest. So no PIOP challenge depends on them, while the session (and with it the Akita
 //! opening) binds every byte; the side's challengers receive the digest of the event-6

@@ -1,18 +1,18 @@
-//! Virtual polynomials (spec Section 5, lookup layout L16).
+//! Virtual polynomials.
 //!
 //! Every virtual table is defined on Boolean points and extended multilinearly as a table.
 //! Two kinds of evaluator live here:
 //!
 //! * affine evaluators, valid at any point because the table is an affine combination of
-//!   committed tables: `w_1' = sum_t 2^t b_t`, the compositions (4.1) of `z, u, v` from
-//!   their L16 digits (`X = X_lo + 2^16 X_hi + 2^15` for `z, v`; the step form
+//!   committed tables: `w_1' = sum_t 2^t b_t`, the compositions of `z, u, v` from
+//!   their digits (`X = X_lo + 2^16 X_hi + 2^15` for `z, v`; the step form
 //!   `u = U_lo + 63,079 U_hi + 31,540`; relation H-exact's bit-slack form
 //!   `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225`) and of the carries
 //!   (`kappa = K + 2^15`), and the high part `2 gamma_2 w_1' + u + q v` of the ring residual.
 //!   The verifier forms them from opened values ([`MainValues`], [`CarryValues`]);
 //! * Boolean-domain materializations used by the prover and the tests: `w_1'`, the
 //!   residual `Delta = (A z) - T - 2 gamma_2 w_1' - u - q v`, the level-1 parities
-//!   `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t - 2 kappa^(1)_t` (spec (7.5); the sums are
+//!   `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t - 2 kappa^(1)_t` (the sums are
 //!   `agg_bridge::parity::level1_sums` at the production shape, for any [`SparseMatrix`] of
 //!   that shape), and the leaf tables `P_Z = Z (Z + 1)` of the two small digits.
 //!
@@ -51,7 +51,7 @@ pub fn w1_table(lanes: &[&[i8]; W1_BITS]) -> Vec<i64> {
         .collect()
 }
 
-/// (4.1): `X = sum_k W_k Z_k + C_X` from the digit evaluations (any point).
+/// The digit composition `X = sum_k W_k Z_k + C_X` from the digit evaluations (any point).
 #[must_use]
 pub fn compose_digits(layout: &ValueForm, digits: &[E]) -> E {
     assert_eq!(digits.len(), layout.len(), "one evaluation per digit");
@@ -64,7 +64,7 @@ pub fn compose_digits(layout: &ValueForm, digits: &[E]) -> E {
         })
 }
 
-/// (4.1) on the Boolean domain, over the integers.
+/// The digit composition on the Boolean domain, over the integers.
 #[must_use]
 pub fn compose_table(layout: &ValueForm, digits: &[Cells<'_>]) -> Vec<i64> {
     assert_eq!(digits.len(), layout.len(), "one table per digit");
@@ -82,13 +82,13 @@ pub fn compose_table(layout: &ValueForm, digits: &[Cells<'_>]) -> Vec<i64> {
 }
 
 /// The high part `2 gamma_2 w_1' + u + q v` of the ring residual (any point): the
-/// eq-weighted second sum of the ring instance (7.6).
+/// eq-weighted second sum of the stage-3 ring instance.
 #[must_use]
 pub fn residual_high(w1: E, u: E, v: E) -> E {
     w1.mul_i64(2 * GAMMA2) + u + v.mul_i64(Q)
 }
 
-/// `Delta = (A z) - T - 2 gamma_2 w_1' - u - q v` (spec Section 5) from its parts.
+/// `Delta = (A z) - T - 2 gamma_2 w_1' - u - q v` from its parts.
 #[must_use]
 pub fn residual(az: E, t: E, w1: E, u: E, v: E) -> E {
     az - t - residual_high(w1, u, v)
@@ -96,7 +96,7 @@ pub fn residual(az: E, t: E, w1: E, u: E, v: E) -> E {
 
 /// `Delta` on the Boolean main domain, as a field table. `(A z)` is the exact integer
 /// product of `agg-witness` (CRT) for live records, and `A = T = 0` on padded rows; `z, u,
-/// v` are recomposed from the committed digits by (4.1), `w_1'` from the bits. Diagnostic and
+/// v` are recomposed from the committed digits, `w_1'` from the bits. Diagnostic and
 /// test use only: the prover never materializes `Delta` (stage 3 pulls `(A z)` back through
 /// the ring weight).
 #[must_use]
@@ -149,7 +149,7 @@ pub fn residual_table(
     out
 }
 
-/// `u` on the Boolean main domain, over the integers: (4.2) under H-u and H-exact, H-FIPS's
+/// `u` on the Boolean main domain, over the integers: the step form under H-u and H-exact, H-FIPS's
 /// `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (`source_tables::fips_u`) otherwise.
 #[must_use]
 pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
@@ -168,7 +168,7 @@ pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
 }
 
 /// `y^(1)_t = sum_zeta M_1[rho_1, zeta] b_t(zeta, beta) - 2 kappa^(1)_t(rho_1, beta)` on the
-/// Boolean domain `D_1`, over the integers, per lane (spec Section 5, (7.5)), with
+/// Boolean domain `D_1`, over the integers, per lane, with
 /// `kappa^(1)_t = K^(1)_t + 2^15` from the committed balanced carries. The honest value is
 /// the GF(2) parity of the level-1 row, `{0, 1}`.
 #[must_use]
@@ -182,7 +182,7 @@ pub fn parity1_tables(tables: SourceTables<'_>, m1: &SparseMatrix) -> [Vec<i64>;
     out
 }
 
-/// The claimed sum of the `def_y1[t]` instance (7.5): `y^(1)_t(r) + 2 kappa^(1)_t(r)`.
+/// The claimed sum of the `def_y1[t]` instance: `y^(1)_t(r) + 2 kappa^(1)_t(r)`.
 #[must_use]
 pub fn parity1_claimed_sum(y1: E, kappa1: E) -> E {
     y1 + kappa1 + kappa1
@@ -200,7 +200,7 @@ fn shifted_product(p: E, roots: &[i64]) -> E {
         .fold(E::from_i64(1), |acc, &root| acc * (p - E::from_i64(root)))
 }
 
-/// The leaf predicate `Q_b(P)` of a base-4 or base-6 digit (spec Section 4.3): zero on
+/// The leaf predicate `Q_b(P)` of a base-4 or base-6 digit: zero on
 /// `P = Z (Z + 1)` exactly when `Z` is in the balanced alphabet.
 ///
 /// # Panics
@@ -218,11 +218,11 @@ pub fn leaf(base: u32, p: E) -> E {
 /// or thirteen (H-exact) main-domain polynomials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MainValues {
-    /// `z` by (4.1).
+    /// `z` from its digits.
     pub z: E,
-    /// `u` by (4.1).
+    /// `u` from its digits.
     pub u: E,
-    /// `v` by (4.1).
+    /// `v` from its digits.
     pub v: E,
     /// `w_1'`.
     pub w1: E,
@@ -263,7 +263,7 @@ impl MainValues {
 /// The carries (and the level-2 parities) of a round-2 group from its evaluations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarryValues {
-    /// `kappa^(l)_t` by (4.1) (`K + 2^15`), per lane (one for level 3).
+    /// `kappa^(l)_t = K + 2^15`, per lane (one for level 3).
     pub kappa: Vec<E>,
     /// `y^(2)_t` (level 2 only).
     pub parity: Vec<E>,
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn residual_parts_are_the_ring_identity() {
-        // (3.1) for integers: az - t - 2 gamma2 w1 - u - q v.
+        // The ring identity over the integers: az - t - 2 gamma2 w1 - u - q v.
         let (az, t, w1, u, v) = (562_061_561_757_i64, -326_836_224, 43, -190_465, 67_068);
         let expected = az - t - 2 * GAMMA2 * w1 - u - Q * v;
         assert_eq!(

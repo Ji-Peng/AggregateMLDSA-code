@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn fast_slim_and_secure_enable_every_non_ligerito_grinding_family() {
-        // agg-mldsa patch (PATCH.md section 5): the Johnson profiles (Fast, Slim, Slim8)
+        // agg-mldsa patch (PATCH.md): the Johnson profiles (Fast, Slim, Slim8)
         // grind the outer sites with the level-0 list factor; Secure (unique decoding)
         // keeps upstream's schedule, which is the listed one at list 1.
         for profile in [

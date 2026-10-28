@@ -2,18 +2,18 @@
 
 | Field | Value |
 | --- | --- |
-| Status | design note for tied-part proof version 5 (deviation K21); replaces the bridge union of `docs/bridge.md` Section 5b as the GF(2) side of a tied part |
-| Source | `ref/notes/brainstorm-20261026.md` Section 3.2 (idea and skeptic's corrections); `docs/bridge.md` Sections 4, 5, 5b, 5c, 10.4; `docs/keccak.md` Sections 9 to 12 |
+| Scope | tied-part proof version 5 (deviation K21): the GF(2) side of a tied part, in place of the bridge union of `docs/bridge.md` Section 5b |
+| Related | `docs/bridge.md` Sections 4, 5, 5b, 5c, 10.4; `docs/keccak.md` Sections 9 to 12 |
 | Code | `crates/agg-bridge/src/parity_chain.rs` (the sum-check, generic over `Shape`), `crates/agg-keccak/src/tied.rs` (transcript, proof bytes), `crates/agg-keccak/src/flock_union.rs` (extra ring-switched claims), `vendor/flock-core` (`SkipPoint::Eq`) |
 | Numbers | "est." marks an estimate; sizes are exact products of the shape constants |
 
 ## 1. What changes
 
-Today (proof version 4) a tied part proves `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) with a
+Proof version 4 proved `Y_sigma = M_3 M_2 M_1 b'_sigma` over GF(2) with a
 second Flock instance, the bridge union (level-1 rows `y1 = M_1 x` and a levels-2-3 row),
 committed after `sd`, tied to the sponge instance by two lane-group claims (tie 1), to
 itself by two parity-copy claims (tie 2), and to the public final vectors by an output
-claim. Its proof is 203,052 B at `8@13/4` with `Slim` plus a 2,048 B cap and 8 B of framing
+claim. Its proof was 203,052 B at `8@13/4` with `Slim` plus a 2,048 B cap and 8 B of framing
 (measured, `docs/keccak.md` 12.3).
 
 Version 5 deletes the union. In characteristic 2 the composite `M = M_3 M_2 M_1` is
@@ -94,8 +94,8 @@ g(rho_1)`, `14 x 2^19` additions) and `bf(zeta) = sum_beta eq(r_block, beta) b''
 
 **Final claim.** The prover sends `v = b''~(r)`, `r = (r_zeta, r_block)`; the verifier
 checks `T_R = W~(r) v` with its own `W~(r)` (Section 5). `v` is an evaluation of the BIT
-polynomial: `r_zeta` holds the 7 in-word bit coordinates, so it is not a packed-direct claim
-(the skeptic's correction). It becomes a ring-switched claim on the sponge commitment:
+polynomial: `r_zeta` holds the 7 in-word bit coordinates, so it is not a packed-direct claim.
+It becomes a ring-switched claim on the sponge commitment:
 
 ```text
 skip coordinates (6)  = r_zeta[0..6]                       (bits 0..5 of the word)
@@ -148,7 +148,7 @@ region, bit point) and `v'` are fixed before any Flock challenge.
 claims in its merged opening (ab, c, and the bit claim). Est. added bytes at `8@13/4`:
 `4 + 28 x 36 + 16 = 1,028` B of chain, about 2,056 B of ring switch (`s_hat_v`, 128 values,
 and its nonce) and 2,048 B of multipoint dual values (128 per ring-switched claim in Flock's
-twisted assist; the memo's 3.0-3.6 KB did not count these), minus 32 B of the two dropped
+twisted assist), minus 32 B of the two dropped
 lane-group values; total est. 5.1 KB against 205,108 B removed.
 
 ## 8. Sites and work (`docs/soundness.md` 3.6, 10)
@@ -215,13 +215,13 @@ dense evaluations; a wrong `y1` (flipped parity) changes the first message. `agg
 (`tests/tied.rs`, release): round trips as in version 4; negative cases: a flipped `b'` bit
 with stale `Y`, a flipped `Y` bit, a tampered round message, a wrong `s_hat_v` of the bit
 claim, another `sd`; the existing statement, seed, segment-count and byte-flip cases.
-Added in review (`tied::tests`): a false bit value consistent with the chain (a chain copy of
+In `tied::tests`: a false bit value consistent with the chain (a chain copy of
 `b'` with one bit flipped, its `Y`, the copy's value) passes every round and the final check
 and fails Flock's ring-switch claim check (`ClaimMismatch`), end to end at 5 and 64 records
 and, ignored by default (about 83 s), at 2,048; the full-height sponge test also rejects a
 false bit value directly, so the block-first path is pinned in every suite run.
 
-## 12. Measurements and corrections (2026-10-26, local, direction only)
+## 12. Measurements and corrections (local, direction only)
 
 Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7 and 10:
 
@@ -233,17 +233,14 @@ Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7
   for every power-of-two batch from 2,048 records on) folds each ring-switched claim's column
   bit-bank in its block rounds, so the bit claim needs the FULL bank of the sponge stack (all
   2,156 word columns), not just its 64 columns (a partial bank suffices for `s_hat_v` and
-  gave failing proofs at 2,048 records; fixed in `3ae1a79`). The full bank costs one pass over
+  gave failing proofs at 2,048 records). The full bank costs one pass over
   the stack (174 to 222 ms at 8,192 records, measured), and the opening's block statistics
   and `W'` fold grow by one claim. At one full segment these costs about cancel the union's;
   at 32K the prover work changes by about 0.0 to -0.8 s locally (estimate, `docs/keccak.md`
-  12.7). Against version 4 with the union proven beside the sponge instance
-  (`AGG_TIED_CONCURRENT=1`, off by default) the critical-path sign is unknown, since version
-  5 has no such overlap; the cloud A/B decides.
+  12.7).
 * Verifier: the Flock part's verification drops from about 80 to 110 ms to 25 to 45 ms per
   part (measured, all sizes).
 * Memory (fresh process, measured at 2,048 and 8,192 records, `docs/keccak.md` 12.7): the
   verifier's peak goes down; the prover's rises by about 7% with glibc's default allocator
   but by under 1% with a fixed mmap threshold, so the rise is heap retention after the
-  Flock part, not live data (the memo's -0.3 to -0.6 GiB at 32K is not borne out locally;
-  the cloud run decides).
+  Flock part, not live data.

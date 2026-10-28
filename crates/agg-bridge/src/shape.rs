@@ -1,4 +1,4 @@
-//! Bridge shapes (docs/bridge.md Section 1): three levels `(J_t, m_t, k_t)`, the lanes and
+//! Bridge shapes (`docs/bridge.md`): three levels `(J_t, m_t, k_t)`, the lanes and
 //! the number `B_1` of level-1 blocks per lane and segment, with the carry caps `W_t` and the
 //! carry-digit layouts.
 //!
@@ -7,7 +7,7 @@
 //! `J_2^used = B_1 m_1` columns of `M_2`; level 3 takes all lanes of a segment,
 //! `J_3 = lanes m_2`, in-block index `zeta_3 = t + lanes rho_2`.
 //!
-//! Domains (least significant index first, docs/bridge.md Section 2) for an input of `len`
+//! Domains (least significant index first) for an input of `len`
 //! positions per lane (a power of two; the main domain in production):
 //! level-1 block `beta = x / J_1` (one block, zero-padded, when `len < J_1`), `D_1` cell
 //! `rho_1 + m_1 beta`; level-2 block (segment) `sigma = D_1 cell / J_2^used`, `D_2` cell
@@ -37,7 +37,7 @@ pub struct LevelShape {
     pub k: usize,
     /// `W_t`: the largest row weight (over the used columns) the honest prover accepts.
     pub weight_cap: u32,
-    /// The carry digits (spec (4.1)); their range is `[0, floor(W_t / 2)]`.
+    /// The carry digits; their range is `[0, floor(W_t / 2)]`.
     pub carry: DigitLayout,
 }
 
@@ -115,7 +115,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// The production shape of spec Section 1 (wire version 0 admits no other).
+    /// The production shape (the only one the wire format admits).
     pub const PRODUCTION: Shape = Shape {
         name: "production",
         levels: [
@@ -151,7 +151,7 @@ impl Shape {
         blocks1: 16,
     };
 
-    /// The toy shape of docs/bridge.md Section 1 (tests only): `L = 2^12` input bits, one
+    /// The toy shape (tests only): `L = 2^12` input bits, one
     /// lane, one segment, 16 output bits.
     pub const TOY: Shape = Shape {
         name: "toy",
@@ -206,7 +206,7 @@ impl Shape {
         self.levels[2].rows
     }
 
-    /// The invariants of docs/bridge.md Section 1; `Err` names the first one violated.
+    /// The shape invariants; `Err` names the first one violated.
     pub fn validate(&self) -> Result<(), &'static str> {
         let [l1, l2, l3] = &self.levels;
         for (t, level) in self.levels.iter().enumerate() {
@@ -225,7 +225,7 @@ impl Shape {
             if level.carry.signed || level.carry.range() != (0, level.carry_max()) {
                 return Err("the carry digits cover [0, floor(W_t / 2)] exactly");
             }
-            // Both sides of a level identity stay far below p (spec Section 9.2).
+            // Both sides of a level identity stay far below p.
             if u64::from(level.weight_cap) >= 1 << 20 {
                 return Err("W_t far below p");
             }
@@ -257,7 +257,7 @@ impl Shape {
             && self.levels[2].matches(&matrices.m3)
     }
 
-    /// The honest prover's abort condition (docs/bridge.md Section 3): every row weight over
+    /// The honest prover's abort condition: every row weight over
     /// the used columns is at most `W_t`.
     #[must_use]
     pub fn row_weights_ok(&self, matrices: &BridgeMatrices) -> bool {

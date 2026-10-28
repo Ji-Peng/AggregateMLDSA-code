@@ -5,25 +5,25 @@ Run (isolated mode, standard library only):
 
     python3 -I docs/scripts/pow_plan.py              # summary tables (committed in the doc)
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
-    python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md 3.7)
-    python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md 10.7)
+    python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md)
+    python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md)
 
 What it computes, with exact integer arithmetic:
 
-* the ordered PIOP field-challenge sites of the mode-A/mode-B transcript (spec Section 10,
-  crates/agg-piop/src/transcript.rs Registry::new) for every N* = 2^3 .. 2^15, each with its
+* the ordered PIOP field-challenge sites of the mode-A/mode-B transcript
+  (crates/agg-piop/src/transcript.rs Registry::new) for every N* = 2^3 .. 2^15, each with its
   round-by-round numerator nu_t, its assigned bound e_t (>= nu_t / |F|), the difficulty
-  g_t = min{g >= 0 : 2^128 e_t <= 2^g} (Aerie Eq. (17)) and the nonce width g_t + 7
+  g_t = min{g >= 0 : 2^128 e_t <= 2^g} (Aerie) and the nonce width g_t + 7
   (0 when g_t = 0: no nonce);
-* the sites of every tied part (tied-part proof version 5, docs/parity-chain.md Section 8:
+* the sites of every tied part (tied-part proof version 5, docs/parity-chain.md:
   the tie site of the public claim, the eq_Y site and the parity-chain rounds) for part
   sizes d = 3 .. 13 and span lengths S = 1, 2, 4, with the Johnson-list factor of the
   sponge commitment;
 * the packed nonce stream size, the expected honest work sum 2^g, the honest failure bound,
   the union-bound ledger before work, and the plan digest test vectors (encoding of
-  docs/soundness.md Section 6.4);
+  docs/soundness.md);
 * the audit of Flock's outer (pre-binding) challenge sites against the Flock paper's
-  list-size accounting (docs/soundness.md Section 4.3).
+  list-size accounting (docs/soundness.md).
 """
 
 from __future__ import annotations
@@ -37,14 +37,14 @@ P = 2**64 - 59
 K = P * P  # |K| = p^2, the PIOP challenge field
 F2_128 = 2**128  # |GF(2^128)|, the Flock / tie challenge field
 TARGET = 128
-SLACK = 7  # nonce width = g + 7 (Aerie C.1, Akita (146))
+SLACK = 7  # nonce width = g + 7 (Aerie, Akita)
 M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
-# Relation H-u (default since 2026-10-25, docs/h-exact.md step A): stage 2 holds leaf4[Z_hi]
-# (degree 3) and leaf6[U_hi] (degree 4), so its rounds have degree 4 (relaxed H: 5, leaf8).
-# Relation H-exact (step B): stage 2 holds leaf6[U_hi] only (7 coefficients, g = 3), stage 3
+# Relation H-u (default, docs/h-exact.md): stage 2 holds leaf4[Z_hi] (degree 3) and
+# leaf6[U_hi] (degree 4), so its rounds have degree 4.
+# Relation H-exact: stage 2 holds leaf6[U_hi] only (7 coefficients, g = 3), stage 3
 # one link and two Booleanity zero-checks (45 coefficients, g = 6); the degrees are the same.
-# Relation H-FIPS (docs/h-exact.md 10.7): stage 2 holds def_y1 and F3 (7 coefficients, g = 3),
+# Relation H-FIPS: stage 2 holds def_y1 and F3 (7 coefficients, g = 3),
 # stage 3 51 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
 # (the relation is bound by the manifest bytes of event 0, not by the plan encoding).
 STAGE_DEGREES = (4, 4, 3)
@@ -62,7 +62,7 @@ PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
 # shipped and derived config (vendor/flock-core/configs/ligerito/m*_{fast,slim,slim8}.toml).
 L0_RATE = {"fast": 1, "slim": 2, "slim8": 3}
 # Measured cost of one Blake2b predicate preview (Akita preview_grinding_predicate,
-# docs/lookup.md Section 4.4): 724 ns serial on this machine.
+# docs/lookup.md): 724 ns serial on this machine.
 PREVIEW_NS = 724.0
 
 CLASS_ID = {
@@ -79,7 +79,7 @@ CLASS_ID = {
 }
 
 
-# Akita's capped transcript proof-of-work searches at 2^15 (soundness.md 3.7).
+# Akita's capped transcript proof-of-work searches at 2^15 (docs/soundness.md).
 AKITA_SITES_2_15 = 459
 
 
@@ -158,7 +158,7 @@ def chain_rounds(d: int, span_log: int) -> int:
 
 
 def tie_terms(d: int, span_log: int, nu_s: int, profile: str) -> dict:
-    """Work sites of one tied part, version 5 (docs/parity-chain.md 8, soundness.md 3.6).
+    """Work sites of one tied part, version 5 (docs/parity-chain.md, docs/soundness.md).
 
     The sponge commitment is bound only to its Johnson list of L_s codewords when the tie
     challenger draws, so every numerator carries L_s: the public claim L_s (nu_s + 3), eq_Y
@@ -206,11 +206,10 @@ def tie_parts(geo: dict, profile: str, span: bool, n: int) -> list:
 
 
 def plan_digest(geo: dict, sites: list, ties: list, profile: str, span_count: int, d_part: int) -> str:
-    """SHA3-256 test vector of the canonical plan encoding (docs/soundness.md Section 6.4)."""
+    """SHA3-256 test vector of the canonical plan encoding (docs/soundness.md)."""
     entries = []
-    # Tied parts first: a fixed convention of the plan encoding (they preceded the lookup
-    # until the fork-join of deviation K22; the transcript now absorbs them at the join after
-    # stage 3, and the encoding and its digests are unchanged).
+    # Tied parts first: a fixed convention of the plan encoding (the transcript absorbs them
+    # at the join after stage 3).
     for p, t in enumerate(ties):
         entries.append((CLASS_ID["tie"], p, 0, t["g"], t["w"]))
         entries.append((CLASS_ID["chain.eq"], p, 0, t["g_eq"], width(t["g_eq"])))
@@ -315,7 +314,7 @@ def print_summary(args) -> None:
         ls = list_size(L0_RATE[prof])
         e = theta * ls
         print(f"{prof:<6} theta = 2^{math.log2(theta):.2f}, times L_s = {ls}: 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
-        # sum over segment checks of L_s^(parts in the segment) theta (soundness.md 3.5);
+        # sum over segment checks of L_s^(parts in the segment) theta (docs/soundness.md);
         # mode A admits at most two parts per segment.
         rows = (("span off, 4 segments x 1 part", 4 * ls), ("1 segment x 2 parts", ls * ls),
                 ("4 segments x 2 parts", 4 * ls * ls), ("1 segment x 3 parts (refused)", ls ** 3))
@@ -432,8 +431,7 @@ def with_gammas(gammas: tuple, f):
 
 
 def self_check() -> None:
-    # Relation H-u: the stage-2 degree drops from 5 to 4 but bit_length(4) = bit_length(5), so
-    # every difficulty, the nonce stream and the plan digests equal relaxed H's.
+    # Relation H-u: stage 2 has degree 4, and bit_length(4) = bit_length(5).
     assert grind_bits(4, K) == grind_bits(5, K) == 3
     # Aerie's grind_bits(L) = bit_length(L) for |K| sites (crates/aerie-falcon/src/protocol/grinding.rs).
     for nu, want in ((1, 1), (3, 2), (8, 4), (16, 5), (25, 5), (44, 6)):
@@ -441,12 +439,12 @@ def self_check() -> None:
     assert all(grind_bits(nu, K) == nu.bit_length() for nu in range(1, 5000))
     # GF(2^128): ceil(log2 nu), 1/2^128 needs no work.
     assert grind_bits(1, F2_128) == 0 and grind_bits(95, F2_128) == 7
-    # Version 5 (docs/parity-chain.md 8): a span of four full segments under Slim.
+    # Version 5 (docs/parity-chain.md): a span of four full segments under Slim.
     t = tie_terms(13, 2, 15, "slim")
     assert (t["tie"], t["g"], t["eq"], t["g_eq"], t["round"], t["g_round"], t["rounds"]) == (
         900, 10, 700, 10, 100, 7, 28), t
     assert chain_rounds(13, 0) == 26 and chain_rounds(3, 0) == 16 and chain_rounds(8, 0) == 21
-    # spec 12.1: GKR 1,106/|K| at 2^15 and 391/|K| at N* = 8; L at 2^15.
+    # The spec's ledger: GKR 1,106/|K| at 2^15 and 391/|K| at N* = 8; L at 2^15.
     g15 = geometry(15)
     assert g15["L"] == 138_690_560 and g15["D"] == 27
     assert sorted(set(g15["trees"]), reverse=True) == [27, 22, 18, 16, 14]
@@ -458,7 +456,7 @@ def self_check() -> None:
     assert [list_size(r) for r in (1, 2, 3)] == [35, 50, 70]
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
-    # Relation H-exact (docs/h-exact.md 3.7): the stage-2 batching site has g = 3 (7
+    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has g = 3 (7
     # coefficients) instead of 4, so one stream bit and 8 units of work fewer; gamma^(3) keeps
     # g = 6 (45 < 64); the totals and the Slim/span-on and mode-B digests at 2^15.
     assert grind_bits(7, K) == 3 and grind_bits(8, K) == 4 and grind_bits(45, K) == grind_bits(44, K) == 6

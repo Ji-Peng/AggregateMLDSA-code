@@ -1,4 +1,4 @@
-//! The two Akita commitment presets of the committed tables (spec Section 4.1): signed
+//! The two Akita commitment presets of the committed tables: signed
 //! width 4 (bits, small digits, multiplicity digits) and signed width 16 (the 16-bit lookup
 //! columns and the carries).
 //!
@@ -12,8 +12,8 @@
 //! Aerie's catalog (see `docs/deviations.md`).
 //!
 //! Akita enforces the declared interval at commitment admission only. It is
-//! not a range proof (Akita Remark 10.41); every range in the protocol is
-//! proven inside the PIOP by the digits of spec Section 4.3.
+//! not a range proof (Akita); every range in the protocol is
+//! proven inside the PIOP by the committed digits.
 
 use akita_config::proof_optimized::fp64::{Dense, ExtensionField, Field};
 use akita_config::{CommitmentConfig, RingDimensionSchedule, TrustedScheduleCatalog};
@@ -131,19 +131,19 @@ impl CommitmentConfig for AggFp64SignedWidth4 {
 
 /// Signed commit bound of the width-16 preset, in bits (`[-2^15, 2^15 - 1]`).
 pub const WIDTH16_LOG_COMMIT_BOUND: u32 = 16;
-/// Inner (A/source) log-basis range of the width-16 preset (see `docs/pcs-config.md`
-/// Section 2: the planner's choice within it is recorded per catalog row).
+/// Inner (A/source) log-basis range of the width-16 preset (see `docs/pcs-config.md`;
+/// the planner's choice within it is recorded per catalog row).
 pub const WIDTH16_INNER_BASIS_RANGE: (u32, u32) = (16, 16);
 /// Schedule family name of the width-16 preset.
 pub const WIDTH16_FAMILY: &str = "agg_mldsa_fp64_signed_width16";
 
 /// Fp64 preset for signed width-16 sources in `[-2^15, 2^15 - 1]`, with its own catalog:
 /// the balanced 16-bit lookup columns `Z_lo, U_lo, V_lo, V_hi`, the carries and the
-/// level-2 parities (`docs/lookup.md` Section 1). Every parameter except the commit bound,
+/// level-2 parities (`docs/lookup.md`). Every parameter except the commit bound,
 /// the inner-basis range and the family name is the width-4 preset's.
 ///
-/// Like the width-4 preset, the bound is enforced at commitment admission only (Akita
-/// Remark 10.41); the ranges are proven by the lookup into `T_16`.
+/// Like the width-4 preset, the bound is enforced at commitment admission only; the
+/// ranges are proven by the lookup into `T_16`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AggFp64SignedWidth16;
 
@@ -327,7 +327,7 @@ mod tests {
         assert!(!AggFp64SignedWidth4::recursive_setup_planning());
     }
 
-    /// Every digit alphabet of spec Section 4.3 (bases 4, 8, 16, balanced), the
+    /// Every digit alphabet (bases 4, 8, 16, balanced), the
     /// Booleans and the padded digits of zero (`-b/2`) lie in `[-8, 7]`.
     #[test]
     fn width4_admits_every_digit_alphabet_and_padding() {
@@ -345,7 +345,7 @@ mod tests {
         for bit in [0, 1] {
             assert!(negative <= bit && bit <= positive);
         }
-        // A base-32 digit would not fit (spec Section 4.3: not adopted).
+        // A base-32 digit would not fit.
         assert!(-16 < negative);
         assert_eq!(
             admissible_inner_digits(LOG_COMMIT_BOUND).unwrap(),
@@ -364,7 +364,7 @@ mod tests {
 
     /// The width-16 preset differs from the width-4 one in the commit bound, the inner
     /// range and the family only, and its certified interval is exactly the balanced
-    /// 16-bit interval of the lookup columns (`docs/lookup.md` Section 1).
+    /// 16-bit interval of the lookup columns (`docs/lookup.md`).
     #[test]
     fn width16_preset_certifies_the_balanced_sixteen_bit_interval() {
         let (w4, w16) = (
@@ -412,7 +412,7 @@ mod tests {
         assert!((lo..=hi).all(|b| admissible.iter().any(|o| o.log_basis == b)));
     }
 
-    /// Akita admissibility of raw signed widths (risks.md R1): one inner digit
+    /// Akita admissibility of raw signed widths: one inner digit
     /// up to 16 bits (`PROOF_OPTIMIZED_INNER_LOG_BASIS_MAX`), two balanced
     /// digits for 17 to 32 bits, so widths 18 to 20 take two digits.
     #[test]

@@ -13,7 +13,7 @@ use agg_witness::tables::Layout;
 
 #[test]
 fn usehint_residual_lemma_is_exact() {
-    // max over Z_q x {0, 1} of |ctr_q(r - 2 gamma2 UseHint(h, r))| is exactly B_u (spec 3.2).
+    // max over Z_q x {0, 1} of |ctr_q(r - 2 gamma2 UseHint(h, r))| is exactly B_u.
     assert_eq!(usehint_residual_max(), B_U);
 }
 

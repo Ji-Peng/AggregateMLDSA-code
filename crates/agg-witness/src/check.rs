@@ -1,21 +1,21 @@
-//! Integer checker: the executable version of the spec's identities (spec Sections 3, 4.3, 7, 8, 9).
+//! Integer checker: the executable version of the spec's identities (`docs/spec.md`).
 //!
-//! `check` takes the public instance (verifier precomputation, Section 2), the committed G_main
-//! tables and, optionally, the bridge matrices with the committed G_1, G_2, G_3 tables, and
-//! evaluates every identity of Section 7 pointwise on the Boolean domain over the integers:
+//! `check` takes the public instance (verifier precomputation), the committed G_main tables
+//! and, optionally, the bridge matrices with the committed G_1, G_2, G_3 tables, and evaluates
+//! every sum-check identity pointwise on the Boolean domain over the integers:
 //!
-//! * stage 1: `bool_b`, `range_w1` (7.4), `b16_prod` for every base-16 digit, `bool_y1` (7.1)
-//!   with y^(1) defined by (7.5), `level2` (7.2), `level3` (7.3), `bool_y2`;
-//! * stage 2: `def_y1` (7.5, the definition used by `bool_y1`), `leaf16` lo/hi (the virtual
+//! * stage 1: `bool_b`, `range_w1`, `b16_prod` for every base-16 digit, `bool_y1` with y^(1)
+//!   defined by `def_y1`, `level2`, `level3`, `bool_y2`;
+//! * stage 2: `def_y1` (the definition used by `bool_y1`), `leaf16` lo/hi (the virtual
 //!   tables A^lo, A^hi equal Q_16^b(P_Z)), `leaf8`, `leaf6` (the top u digit of H-u), `leaf4`
 //!   (and `leaf2` for H-exact's base-2 digit);
-//! * stage 3: `ring` (7.6), i.e. (3.1) at every position with A, T zero on padded rows, and
+//! * stage 3: `ring`, the ring identity at every position with A, T zero on padded rows, and
 //!   `link` (P_Z = Z(Z + 1)); the evaluation reductions are identities f = f pointwise;
-//! * Section 3.3 / 8: c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32) per live record through the
-//!   seven-permutation sponge of `crate::keccak`, and the GF(2) side Y = M3 M2 M1 b of (9.1);
-//! * Appendix A: the H-exact slack Booleans and the S1+S2 identities;
+//! * the Keccak argument: c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32) per live record through
+//!   the seven-permutation sponge of `crate::keccak`, and the GF(2) side Y = M3 M2 M1 b;
+//! * layout-specific: the H-exact slack Booleans and the S1+S2 identities;
 //! * completeness (honest-form) checks that are not part of the relation: padded rows hold the
-//!   canonical zero encoding (Section 4.2) and live values meet the honest bounds B_z, B_u, B_v.
+//!   canonical zero encoding and live values meet the honest bounds B_z, B_u, B_v.
 //!
 //! A committed column of the wrong alphabet fails the identity of its stage (`b16_prod` for
 //! base 16, the leaf for bases 8, 6, 4, 2, the Booleanity check otherwise).
@@ -35,15 +35,15 @@ use std::collections::BTreeMap;
 pub enum Stage {
     /// Table shapes and header.
     Shape,
-    /// Sum-check stage 1 (Section 7.3).
+    /// Sum-check stage 1.
     One,
-    /// Sum-check stage 2 (Section 7.4).
+    /// Sum-check stage 2.
     Two,
-    /// Sum-check stage 3 (Section 7.5).
+    /// Sum-check stage 3.
     Three,
-    /// The Keccak argument (Section 8) and its GF(2) bridge side.
+    /// The Keccak argument and its GF(2) bridge side.
     Keccak,
-    /// Layout-specific identities of Appendix A.
+    /// Layout-specific identities (H-exact, S1+S2).
     Layout,
     /// Honest-form checks, not part of the relation.
     Completeness,
@@ -56,15 +56,15 @@ pub enum Identity {
     Shape,
     /// `bool_b`: b_t (b_t - 1) = 0.
     BoolB,
-    /// `range_w1` (7.4): b5 (b4 + b3 b2) = 0.
+    /// `range_w1`: b5 (b4 + b3 b2) = 0.
     RangeW1,
     /// `b16_prod`: A^lo A^hi = 0 for a base-16 digit.
     B16Prod,
-    /// `bool_y1` (7.1) with y^(1) = sum M1 b - 2 kappa^(1) (7.5).
+    /// `bool_y1` with y^(1) = sum M1 b - 2 kappa^(1).
     BoolY1,
-    /// `level2` (7.2): sum M2 y^(1) = y^(2) + 2 kappa^(2).
+    /// `level2`: sum M2 y^(1) = y^(2) + 2 kappa^(2).
     Level2,
-    /// `level3` (7.3): sum M3 y^(2) = Y + 2 kappa^(3).
+    /// `level3`: sum M3 y^(2) = Y + 2 kappa^(3).
     Level3,
     /// `bool_y2`.
     BoolY2,
@@ -78,15 +78,15 @@ pub enum Identity {
     Leaf4,
     /// Base-2 leaf of H-exact's top b_z digit: P_Z = 0.
     Leaf2,
-    /// `ring` (7.6): Delta = 0 at every position.
+    /// `ring`: Delta = 0 at every position.
     Ring,
     /// `link`: P_Z = Z (Z + 1).
     Link,
-    /// (3.3): c~ = SHAKE256(mu || w1Encode(w1'), 32).
+    /// Commitment hash: c~ = SHAKE256(mu || w1Encode(w1'), 32).
     CommitmentHash,
-    /// (9.1): Y = M3 M2 M1 b over GF(2).
+    /// GF(2) side: Y = M3 M2 M1 b.
     Gf2Bridge,
-    /// Slack Booleans a_z, a_u, a_v, a_h and e^2 = e (Appendix A).
+    /// Slack Booleans a_z, a_u, a_v, a_h and e^2 = e.
     BoolSlack,
     /// s^2 = 1.
     SignSquare,
@@ -387,7 +387,7 @@ fn w1_bytes_from_bits(bits: &[[[i64; N]; K]; W1_BITS]) -> [u8; W1_ENCODE_BYTES] 
     out
 }
 
-/// Runs every check. `bridge` adds the bridge identities (7.1) to (7.3), (7.5) and (9.1).
+/// Runs every check. `bridge` adds the bridge identities and the GF(2) side.
 pub fn check(
     inst: &PublicInstance,
     tables: &BatchTables,
@@ -400,11 +400,11 @@ pub fn check(
         return rep;
     }
     let geom = tables.geom;
-    // Alphabet identities of every committed column (stages 1 to 3 and Appendix A).
+    // Alphabet identities of every committed column (stages 1 to 3 and layout-specific).
     for (spec, col) in map.specs.iter().zip(&tables.columns) {
         check_column(&mut rep, &spec.name, col, spec.alphabet);
     }
-    // range_w1 (7.4) at every position.
+    // range_w1 at every position.
     let lanes = tables.bit_lanes();
     for x in 0..geom.main_len() {
         let b = |t: usize| i64::from(lanes[t][x]);
@@ -459,7 +459,7 @@ fn check_record(
         None
     };
     let fips = map.r1.is_some();
-    // Ring identity (7.6) / (3.1): Delta = A z - T - 2 gamma2 w1' - u - q v (H, H-exact) or
+    // Ring identity: Delta = A z - T - 2 gamma2 w1' - u - q v (H, H-exact) or
     // A z - T - 2 gamma2 r1 - r0 - q v (S1+S2); A = T = 0 on padded rows.
     for rho in 0..K {
         for j in 0..N {
@@ -489,7 +489,7 @@ fn check_record(
         check_fips_record(rep, &vals, i);
     }
     if live {
-        // (3.3) through the seven-permutation sponge.
+        // The commitment hash through the seven-permutation sponge.
         let rec = &inst.records[i];
         let bytes = w1_bytes_from_bits(&vals.bits);
         let trace = sponge_trace(&rec.mu, &bytes);
@@ -602,7 +602,7 @@ fn check_bridge(
             check_column(rep, name, col, *alphabet);
         }
     }
-    // (7.5) defines y^(1); (7.1) requires it Boolean.
+    // def_y1 defines y^(1); bool_y1 requires it Boolean.
     let sums1 = bridge::level1_sums(geom, lanes, &mats.m1);
     let mut y1: [Vec<i64>; W1_BITS] = Default::default();
     for t in 0..W1_BITS {
@@ -614,7 +614,7 @@ fn check_bridge(
             }
         }
     }
-    // (7.2).
+    // level2.
     let sums2 = bridge::level2_sums(geom, &y1, &mats.m2);
     let y2: [Vec<i64>; W1_BITS] = std::array::from_fn(|t| bt.y2(t));
     for t in 0..W1_BITS {
@@ -630,7 +630,7 @@ fn check_bridge(
             }
         }
     }
-    // (7.3).
+    // level3.
     let sums3 = bridge::level3_sums(geom, &y2, &mats.m3);
     let k3 = bt.kappa3();
     for x in 0..lens[2] {
@@ -643,7 +643,7 @@ fn check_bridge(
             );
         }
     }
-    // (9.1): the GF(2) side with b' = b.
+    // The GF(2) side with b' = b.
     let gf2 = bridge::gf2_composite(geom, lanes, mats);
     for x in 0..lens[2] {
         if gf2[x] != bt.y[x] {

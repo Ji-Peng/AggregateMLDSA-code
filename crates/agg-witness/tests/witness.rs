@@ -88,7 +88,7 @@ fn derived_values_satisfy_relation_h() {
             for j in 0..N {
                 let w1 = i64::from(w.w1[r][j]);
                 assert!((0..M_W).contains(&w1));
-                // (3.1) over Z with the spec's centering.
+                // The ring identity over Z with the spec's centering.
                 assert_eq!(
                     w.az[r][j] - w.t[r][j] - 2 * GAMMA2 * w1 - w.u[r][j] - Q * w.v[r][j],
                     0

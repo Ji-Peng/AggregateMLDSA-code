@@ -1,7 +1,7 @@
 //! Coded columns: an `i8` column whose cells fall into at most 16 classes under the maps
 //! of the lanes reading it, the pair codes of its cells (one byte per pair), the pattern
 //! spaces of pairs and quartets, and the pattern-mass accumulation of the compact rounds
-//! (Aerie's `CodedSource`, `chunked_bucket_sums`; docs/piop.md Section 18).
+//! (Aerie's `CodedSource`, `chunked_bucket_sums`; `docs/piop.md`).
 
 use jolt_field::Zero;
 use rayon::prelude::*;

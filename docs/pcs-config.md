@@ -2,9 +2,8 @@
 
 Akita commitment presets, generated fold-schedule catalogs, work plan and two-round
 commit driver for the six witness groups of spec Section 4.1 (lookup layout L16,
-`docs/lookup.md`; introduced with wire version 1, unchanged in the current PIOP wire
-version 3, which adds the relation byte: H-u rows `mldsa-44-l16-*`, H-exact rows
-`mldsa-44-l16x-*`). Akita and Aerie pins as in `README.md` (Akita
+`docs/lookup.md`; H-u rows `mldsa-44-l16-*`, H-exact rows `mldsa-44-l16x-*`, H-FIPS rows
+`mldsa-44-l16f-*`). Akita and Aerie pins as in `README.md` (Akita
 `e023b6a`, the revision Aerie `49b6c21` pins, with the `dev-protocol` feature the
 catalogs are priced for).
 
@@ -57,7 +56,7 @@ policy searches `b` in `3..=min(16, w)` (`PROOF_OPTIMIZED_INNER_LOG_BASIS_MAX = 
 
 Planner probe (`width_admissibility_probe`): a planning-only preset per width, equal to
 the width-4 preset except `log_commit_bound = w` and Dense's inner search 3..=16, planned
-for one polynomial at 13 variables (2026-10-24, this machine). Every width is
+for one polynomial at 13 variables (this machine). Every width is
 admissible; the cost-optimal DP does not pick the fewest digits but small bases:
 
 | Width | Selected inner log basis | Inner digits | Estimated proof (B) |
@@ -70,7 +69,7 @@ admissible; the cost-optimal DP does not pick the fewest digits but small bases:
 | 19 | 5 | 4 | 51,961 |
 | 20 | 5 | 5 | 56,207 |
 
-Width-16 inner digits for the lookup columns (`width16_inner_probe`, 2026-10-24, the
+Width-16 inner digits for the lookup columns (`width16_inner_probe`, the
 `G_main16` layouts of 256 and 1,024 signatures):
 
 | Layout | Inner range | Selected | Estimated proof (B) | Planning time |
@@ -114,15 +113,14 @@ table point.
 All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three
 relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact,
 `CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are keyed by `(d_sig, relation)`,
-`catalogs::catalog_batches`); none is pending. Two artifacts (sizes before H-FIPS in this
-paragraph; with the H-FIPS rows, 2026-10-27: width 16 246,510 B with 28 rows, width 4
-996,253 B with 78 rows):
+`catalogs::catalog_batches`); none is pending. Two artifacts (width 16: 246,510 B with 28
+rows; width 4: 996,253 B with 78 rows; the H-FIPS rows are listed at the end of this section):
 
-- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks` (222,320 bytes):
+- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks`:
   25 scalar producer rows, `G_main16` at 13..=25 variables, `G_1` at 13..=19, `G_2` at
   13..=15, `G_3` at 13..=14;
-- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks` (661,869 bytes;
-  331,178 before H-exact): per relation 13 scalar producer rows (`G_main4` at 13..=25
+- `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks`: per relation 13
+  scalar producer rows (`G_main4` at 13..=25
   variables with 8 polynomials for H-u, 9 for H-exact) and 13 grouped rows, one per batch
   size, named `mldsa-44-l16-batch-<N*>-mult-final` (H-u) and
   `mldsa-44-l16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
@@ -134,9 +132,9 @@ balanced base-`2^16` digit; no row needs a setup prefix (checked by
 `checked_in_catalog_holds_exactly_the_requested_rows`, which also re-encodes both artifacts
 byte for byte).
 
-Planning run (2026-10-24, `update_catalog_rows`, one process for all sizes in the order
-8, 10, 3, 6, 9, 11, 5, 4, 7, 12, 13, 14, 15, 3 scalar workers, `taskset -c 0,1,3-15`, load
-average 6 to 17 from another agent's builds and this agent's compiles). Wall time per size
+Planning run (`update_catalog_rows`, one process for all sizes in the order 8, 10, 3, 6, 9,
+11, 5, 4, 7, 12, 13, 14, 15, 3 scalar workers, `taskset -c 0,1,3-15`, a shared machine). Wall
+time per size
 (scalar rows not yet planned, then the grouped row); the proof and setup figures are the
 planner's estimates for the grouped row.
 
@@ -158,9 +156,9 @@ planner's estimates for the grouped row.
 
 Total 2,666 s (44 minutes).
 
-H-exact rows (2026-10-25, `update_catalog_rows` with `AGG_CATALOG_RELATION=h-exact`, in a
-separate worktree with its own target directory, 3 scalar workers, `taskset -c
-0,1,3-15`, a shared machine): `d_sig` 3 to 10 in 732 s, 11 to 15 in 885 s, 1,617 s (27
+H-exact rows (`update_catalog_rows` with `AGG_CATALOG_RELATION=h-exact`, 3 scalar workers,
+`taskset -c 0,1,3-15`, a shared machine): `d_sig` 3 to 10 in 732 s, 11 to 15 in 885 s, 1,617 s
+(27
 minutes) for the 26 rows, within the 20 to 35 minutes estimated in `docs/h-exact.md` 2.3.
 The planner's opening estimate of every H-exact grouped row equals the H-u row's (61,707 B
 at `d_sig` 3 to 8, 63,197, 63,273, 64,573, 64,692, 64,842, 64,958 and 65,282 B at 9 to 15);
@@ -168,16 +166,16 @@ the setup sizes differ slightly (563,200 field elements at `d_sig` 9 to 11, 794,
 912,384, 1,892,352 and 2,838,528 at 12 to 15). Measured at `N = 1,024`: H-exact's Akita
 opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/cli.md` Section 4). The
 Akita grinding plans of the H-exact rows are pinned in `tests/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
-plan digests (`e9ec8b52...`). This is benign and closes the open item: Akita's
+plan digests (`e9ec8b52...`). This is benign: Akita's
 `GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs, not
 the layout; the two rows draw identical site lists; the layout is bound separately through the
 schedule key, the row name and the instance descriptor, and all 52 width-4 catalog schedules
 hash differently. The estimated opening proof is at most 2.4% larger than the
 base-16 layout's (`d_sig` 9: +2.4%, 11: +2.1%, otherwise below 0.6%): the opening is
 dominated by the folding schedule, not by the number of committed polynomials, and the
-sixth group adds a little. The measured openings are in `ref/notes/bench-local.md`.
+sixth group adds a little.
 
-H-FIPS rows (2026-10-27, `update_catalog_rows` with `AGG_CATALOG_RELATION=h-fips` and
+H-FIPS rows (`update_catalog_rows` with `AGG_CATALOG_RELATION=h-fips` and
 `AGG_CATALOG_D_SIG=3,...,15`, 3 scalar workers, `taskset -c 0,1,3-15`): 1,105.6 s (18
 minutes, measured) for 13 width-4 scalar rows (`G_main4` at `(13..25, 12)`: `bz_hi`, `l_hi`,
 six bits, `a_z`, `s`, `delta`, `e`), 3 width-16 scalar rows (`G_2` at `(13|14|15, 13)`: the

@@ -1,6 +1,6 @@
 # agg-witness: witness derivation, tables and checker
 
-Crate `crates/agg-witness` (milestone M1 of `docs/spec.md` Section 14). This note records the
+Crate `crates/agg-witness` (`docs/spec.md` Section 14). This note records the
 exact conventions, the bounds the code enforces, and the column layouts. The spec is the
 source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 
@@ -24,9 +24,8 @@ source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 
 The `ml-dsa` crate (`=0.1.1`) is used only for key generation, signing and as a test oracle;
 nothing in the relation depends on its internals. Features: `h-exact` (H-exact layout),
-`fips` (S1+S2 layout, `relation = fips`). Default: relation H-u only (the default relation
-since 2026-10-25: z relaxed to [-2^17, 2^17), u exact; it replaced the relaxed relation H, whose
-u was relaxed to [-2^18, 2^18); `Layout::H` keeps its name and id 0 and now means H-u).
+`fips` (S1+S2 layout, `relation = fips`). Default: relation H-u only (z relaxed to
+[-2^17, 2^17), u exact; `Layout::H`, id 0, means H-u).
 
 ## 2. Representatives (spec Section 3.2, Appendix B.9)
 

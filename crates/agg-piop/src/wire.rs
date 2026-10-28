@@ -1,14 +1,13 @@
-//! Proof wire format (spec Section 10, wire version 4): header (version, flags = relation
-//! byte, `N`), the
+//! Proof wire format (wire version 4): header (version, flags = relation byte, `N`), the
 //! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6 (the final vectors and the
 //! Keccak side's share items), the lookup (event 7), the stages (events 9 to 12) and the join
-//! (the Keccak side's proof items, deviation K22) in transcript order, the packed PIOP nonce stream
-//! (`docs/soundness.md` Section 6.2, its exact length a function of `N`), then the Akita
-//! opening. Variable-length items carry
-//! a `LE32` length; field elements use the canonical atom encoding of the transcript; the
-//! round and session counts follow from `N`, the stage-2 and stage-3 claim counts from the
-//! relation (`docs/h-exact.md` 3.5). The parser reads the relation from the header; a
-//! verifier MUST compare it with the relation it expects before using the proof.
+//! (the Keccak side's proof items, after stage 3) in transcript order, the packed PIOP nonce
+//! stream (`docs/soundness.md`, its exact length a function of `N`), then the Akita opening.
+//! Variable-length items carry a `LE32` length; field elements use the canonical atom
+//! encoding of the transcript; the round and session counts follow from `N`, the stage-2 and
+//! stage-3 claim counts from the relation (`docs/h-exact.md`). The parser reads the relation
+//! from the header; a verifier MUST compare it with the relation it expects before using the
+//! proof.
 
 use agg_witness::params::C_TILDE_BYTES;
 
@@ -74,7 +73,7 @@ pub struct AggregateProof {
     /// Event 6: `S` share items of the Keccak side (mode A: the shares of a segment's parts
     /// but the last; empty for a span, a one-part segment and mode B).
     pub flock_shares: Vec<Vec<u8>>,
-    /// The join event (after stage 3, deviation K22): `S` Flock proof byte strings.
+    /// The join event (after stage 3): `S` Flock proof byte strings.
     pub flock_proofs: Vec<Vec<u8>>,
     /// Event 7: the lookup (layer 1 and the sessions).
     pub lookup: LookupProof,
@@ -88,7 +87,7 @@ pub struct AggregateProof {
     pub stage2: Stage2Proof,
     /// Event 11.
     pub stage3: Stage3Proof,
-    /// The packed PIOP work nonces in plan order (`docs/soundness.md` Section 6.2).
+    /// The packed PIOP work nonces in plan order (`docs/soundness.md`).
     pub work: Vec<u8>,
     /// Event 12: the Akita opening.
     pub opening: Vec<u8>,
@@ -486,7 +485,7 @@ mod tests {
             let size = proof.size();
             assert_eq!(size.total(), bytes.len());
             assert_eq!((size.c_tilde, size.piop), (32 * records, proof.piop_bytes()));
-            // The join (deviation K22): the framed proof items follow the stage-3 claims and
+            // The join: the framed proof items follow the stage-3 claims and
             // precede the nonce stream and the opening.
             let tail = size.work + 4 + proof.opening.len();
             let segments = proof.flock_proofs.len();
@@ -503,13 +502,12 @@ mod tests {
             let mut version = bytes.clone();
             version[0] = 9;
             assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(9)));
-            // The retired wire versions 0 and 1 (no work nonces), 2 (relaxed relation H) and 3
-            // (the bridge union, K13) are refused.
+            // Wire versions 0 to 3 are refused.
             for old in [0, 1, 2, 3] {
                 version[0] = old;
                 assert_eq!(AggregateProof::from_bytes(&version), Err(WireError::Version(u16::from(old))));
             }
-            // The nonce stream has the plan's exact length (docs/soundness.md Section 6.2).
+            // The nonce stream has the plan's exact length.
             assert_eq!(size.work, work_bytes(&CommitmentManifest::for_batch(records).unwrap()));
             assert!(size.work >= 227);
             // Relation byte: 0 (H-u), 1 (H-exact), 2 (H-FIPS); 3 and above are unknown. The
@@ -562,7 +560,7 @@ mod tests {
             assert_eq!(parsed.relation, Relation::HExact);
             assert_eq!(parsed.stage2.claims.squares.len(), 1);
             assert_eq!(parsed.stage3.claims.0.len(), 32);
-            // docs/h-exact.md 3.5: 13 + 18 + 6 + 7 + 32 claims and 11 elements per round.
+            // H-exact: 13 + 18 + 6 + 7 + 32 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
             assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 7 + 32 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
@@ -586,7 +584,7 @@ mod tests {
             assert!(parsed.stage2.claims.squares.is_empty());
             assert_eq!(parsed.stage2.claims.fips.len(), 2);
             assert_eq!(parsed.stage3.claims.0.len(), 36);
-            // docs/h-exact.md 10.7: 13 + 18 + 6 + 8 + 36 claims and 11 elements per round.
+            // H-FIPS: 13 + 18 + 6 + 8 + 36 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
             assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 36 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());

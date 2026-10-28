@@ -1,10 +1,10 @@
-//! Public-key expansion: ExpandA matrix and t1 * 2^d in NTT-free coefficient form (spec Section 2).
+//! Public-key expansion: ExpandA matrix and t1 * 2^d in NTT-free coefficient form.
 //!
-//! `ExpandedKey` holds what the verifier precomputes per key (spec Section 2 items 1 to 3):
+//! `ExpandedKey` holds what the verifier precomputes per key:
 //! A_hat = ExpandA(rho) (FIPS 204 Algorithms 14, 30, 32), the centered coefficient-form matrix
 //! A = ctr_q(NTT^{-1}(A_hat)), tr = H(pk, 64), plus NTT(t1 2^d) for the native verifier and the
 //! NTT of A modulo the second CRT prime for the prover's integer product (`crate::crt`).
-//! `public_t` computes T = 2^d (c * t1) over the integers from the sparse c (item 5).
+//! `public_t` computes T = 2^d (c * t1) over the integers from the sparse c.
 
 use crate::crt;
 use crate::native::{ctr_q, pk_decode, tr, Challenge, VecK};
@@ -34,7 +34,7 @@ pub fn coeff_from_three_bytes(b0: u8, b1: u8, b2: u8) -> Option<u32> {
 }
 
 /// RejNTTPoly(rho') (FIPS 204 Algorithm 30) with G = SHAKE128. Returns the polynomial and the
-/// number of SHAKE128 output blocks touched (5 except with probability about 2^-132; spec Section 2).
+/// number of SHAKE128 output blocks touched (5 except with probability about 2^-132).
 pub fn rej_ntt_poly(seed: &[u8; 34]) -> ([u64; N], usize) {
     let mut g = sha3::Shake128::default();
     g.update(seed);
@@ -88,7 +88,7 @@ pub struct ExpandedKey {
     pub a_hat: Box<MatrixNtt>,
     /// SHAKE128 blocks used by each RejNTTPoly call.
     pub expand_blocks: [[usize; L]; K],
-    /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2] (spec Appendix B.9).
+    /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2].
     pub a: Box<MatrixCoeff>,
     /// NTT(t1 2^d) mod q (native verifier, Algorithm 8 line 9).
     pub t1_2d_hat: [[u64; N]; K],
@@ -140,7 +140,7 @@ impl ExpandedKey {
 }
 
 /// T[rho] = 2^d (c * t1[rho]) over Z[X]/(X^256 + 1), from the tau nonzero entries of c
-/// (k tau 256 signed additions, no reduction; spec Section 2 item 5). |T| <= B_T < 2^29.
+/// (k tau 256 signed additions, no reduction). |T| <= B_T < 2^29.
 pub fn public_t(c: &Challenge, t1: &[[u16; N]; K]) -> VecK {
     let mut out = [[0i64; N]; K];
     for r in 0..K {

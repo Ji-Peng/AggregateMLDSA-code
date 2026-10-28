@@ -1,8 +1,8 @@
-//! Hypothesis H1 of `docs/soundness.md` Section 7, discharged (Section 4.6 there): every
-//! sparse fold challenge of every row of both generated catalogs (the 26 grouped width-4
-//! rows of relations H-u and H-exact, the width-4 scalar rows of `G_main4` and the width-16
-//! scalar rows of `G_main16`, `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support, after the sampler's
-//! rejection, is at least `2^128`.
+//! The fold-support hypothesis of `docs/soundness.md`, discharged: every sparse fold
+//! challenge of every row of both generated catalogs (the 26 grouped width-4 rows of
+//! relations H-u and H-exact, the width-4 scalar rows of `G_main4` and the width-16 scalar
+//! rows of `G_main16`, `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support,
+//! after the sampler's rejection, is at least `2^128`.
 //!
 //! For every level (root, recursive folds, terminal) and every group of a level, the test
 //! runs the pinned Akita revision's own dispatch (`akita_types::draw_group_fold_challenges`
@@ -14,7 +14,7 @@
 //! then produces the challenges, which are checked against the family. The test recomputes
 //! the dispatch from the schedule and requires both to agree.
 //!
-//! Support of a draw (Akita Lemma 10.1: conditioned on success the output is uniform on
+//! Support of a draw (Akita: conditioned on success the output is uniform on
 //! the accepted set):
 //! * no rejection: the exact family size `C(D, w) C(w, count_pm1) 2^w`, `w = count_pm1 +
 //!   count_pm2`, compared with `2^128` in integers;
@@ -53,7 +53,7 @@ struct Certified {
     log2_accepted: f64,
 }
 
-/// The two certified policies of Akita `e023b6a` (`OperatorNormRejection::D128_SELECTIVE_L2`,
+/// The two certified policies of the pinned Akita (`OperatorNormRejection::D128_SELECTIVE_L2`,
 /// `D64_SELECTIVE_L2`). Their predicate parameters are those of the certificates'
 /// `fixed_point_containment` (threshold, fractional bits, root error, margin).
 fn certified() -> [Certified; 2] {
@@ -507,7 +507,7 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     // The 39 grouped rows (six root groups, one per N* = 2^3 .. 2^15 and relation: H-u,
     // H-exact, H-FIPS) are in the width-4 catalog (the family of the final group G_m).
     assert_eq!((g4, g16), (39, 0));
-    // The families that occur (docs/soundness.md Section 4.6).
+    // The families that occur (`docs/soundness.md`).
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
         v.sort_unstable();
@@ -522,7 +522,7 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
 fn grouped_rows_by_batch_size() {
     use agg_pcs_config::catalogs::Relation;
     use agg_pcs_config::work_plan::WorkPlan;
-    // docs/soundness.md 4.6: (d_sig, draws, minimum accepted support in bits, rounded down
+    // (d_sig, draws, minimum accepted support in bits, rounded down
     // to 4 decimals) of the grouped row of N* = 2^d_sig, per relation. H-u's row at 2^15
     // avoids the D = 64 packing family; every H-exact row draws it (its level 1 at 2^15).
     let expected_h_u: [(usize, usize, f64); 13] = [

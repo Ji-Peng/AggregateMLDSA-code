@@ -1,5 +1,4 @@
-//! Akita commitments of the six groups and their batched opening (spec Sections 4.1, 7.5,
-//! 10 events 1, 4 and 13; lookup layout L16).
+//! Akita commitments of the six groups and their batched opening (events 1, 4 and 13).
 //!
 //! Mirrors `aerie-prover/src/protocol/pcs/group.rs`: narrow signed tables stay `i8` (or
 //! `i32` for the 16-bit lookup columns) until commitment, and each polynomial is
@@ -130,8 +129,8 @@ pub fn evaluate_column(cells: &[i8], point: &[OpeningField]) -> OpeningField {
     evaluate_signed_table(cells, point)
 }
 
-/// The group points: every group but `G_m` at the suffix of the main-domain point `r3`
-/// (spec Section 7.1), `G_m` at the lookup's table point `pi_m`.
+/// The group points: every group but `G_m` at the suffix of the main-domain point `r3`,
+/// `G_m` at the lookup's table point `pi_m`.
 pub fn group_points(
     manifest: &CommitmentManifest,
     r3: &[OpeningField],
@@ -207,7 +206,7 @@ pub(crate) fn join_os_thread<T>(handle: std::thread::ScopedJoinHandle<'_, T>) ->
 /// the same thread. A commit on a plain OS thread blocks on the `OnceLock` instead, and its
 /// parallel loops still run on the pool. On a rayon worker, or with a one-thread pool, the
 /// commits run one after another on the calling thread ([`on_calling_thread`]); one commit
-/// at a time cannot re-enter a `OnceLock` (deviation P12).
+/// at a time cannot re-enter a `OnceLock`.
 fn concurrent_commits<const K: usize>(
     commits: [&(dyn Fn() -> Result<GroupCommitment, PcsError> + Sync); K],
 ) -> [Result<GroupCommitment, PcsError>; K] {
@@ -234,7 +233,7 @@ fn concurrent_commits<const K: usize>(
 /// ([`concurrent_commits`]), so outside the pool `second` gets a scoped OS thread and
 /// `first` (with its commit threads) stays on the caller. On a rayon worker this is
 /// `rayon::join` (the commits inside then run one after another); with a one-thread pool
-/// the two run one after another on the caller (deviation P12).
+/// the two run one after another on the caller.
 pub(crate) fn overlap<A, B>(
     first: impl FnOnce() -> A + Send,
     second: impl FnOnce() -> B + Send,

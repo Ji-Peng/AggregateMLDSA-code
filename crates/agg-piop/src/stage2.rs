@@ -1,14 +1,13 @@
-//! Stage 2 (spec Section 7.4, degree 4 in relations H-u and H-exact): the level-1 definition
-//! (7.5) and the range leaves of the small digits on the virtual tables `P_Z` (lookup layout
-//! L16: every other range is the lookup into `T_16` or, for the Boolean digits of H-exact, a
-//! zero-check in stage 3).
+//! Stage 2 (degree 4 in relations H-u and H-exact): the level-1 definition and the range
+//! leaves of the small digits on the virtual tables `P_Z` (every other range is the lookup
+//! into `T_16` or, for the Boolean digits of H-exact, a zero-check in stage 3).
 //!
 //! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-u has
-//! `leaf4[Z_hi]` (6) and `leaf6[U_hi]` (7), H-exact `leaf6[U_hi]` (6) only (`docs/h-exact.md`
-//! 3.3). The leaf of the six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree
-//! `1 + 3 = 4` in both relations; relaxed H's `leaf8` had degree 5.
+//! `leaf4[Z_hi]` (6) and `leaf6[U_hi]` (7), H-exact `leaf6[U_hi]` (6) only (`docs/h-exact.md`).
+//! The leaf of the six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree
+//! `1 + 3 = 4` in both relations.
 //!
-//! Relation H-FIPS (`docs/h-exact.md` Section 10.7) has no leaf digit and adds one instance
+//! Relation H-FIPS (`docs/h-exact.md`) has no leaf digit and adds one instance
 //! after `def_y1` (gamma 6): the degree-3 zero-check `F3 = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
 //! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
@@ -156,8 +155,8 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order: (7.5) for `def_y1`, zero for the leaves and H-FIPS's
-/// `F3`.
+/// The claimed sums in gamma order: the level-1 sum for `def_y1`, zero for the leaves and
+/// H-FIPS's `F3`.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];

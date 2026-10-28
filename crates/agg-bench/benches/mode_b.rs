@@ -1,8 +1,8 @@
-//! Mode-B benchmark (criterion-free, spec Section 14 milestone M2): prove time, verify time
+//! Mode-B benchmark (criterion-free): prove time, verify time
 //! (uncached and with cached expanded keys), peak RSS of the prover and of the verifier
 //! (`VmHWM`), and the aggregate size, at 256, 512 and 1,024 signatures by default.
 //!
-//! Usage (never on CPU 2, see AGENTS.md):
+//! Usage (never on CPU 2):
 //!
 //! ```text
 //! taskset -c 0,1,3-15 cargo bench -p agg-bench --bench mode_b -- [N ...]
@@ -11,13 +11,13 @@
 //!
 //! Protocol: `W` warmup runs (default 1, discarded), then `R` timed runs (default 5),
 //! medians reported, for the prover and for each verifier mode. `--prove-runs` and
-//! `--verify-runs` (older flags) set the timed runs of one role only. Peak RSS is the
+//! `--verify-runs` set the timed runs of one role only. Peak RSS is the
 //! maximum over all runs, warmup included.
 //!
 //! Every size runs in its own prover process, which hands the proof to its own verifier
 //! process over a pipe, so each peak RSS belongs to one role. Records: `N - S` under their
 //! own keys and `S` (default `N / 32`) under three shared keys; the bridge matrices are
-//! derived from the bridge seed as in spec 9.1 (`SeededMatrices`), so prover and verifier
+//! derived from the bridge seed (`SeededMatrices`), so prover and verifier
 //! times include the derivation (verifier step `matrices`). Times are medians over the timed
 //! runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
 //! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds). `AGG_RELATION=h-exact`

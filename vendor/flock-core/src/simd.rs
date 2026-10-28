@@ -1,5 +1,4 @@
-//! Runtime CPU-feature dispatch for the x86-64 kernels (agg-mldsa patch, PATCH.md
-//! Section 3).
+//! Runtime CPU-feature dispatch for the x86-64 kernels (agg-mldsa patch, PATCH.md).
 //!
 //! Upstream Flock selects its x86 kernels with `cfg(target_feature = ...)`, so a build
 //! without `-C target-cpu=native` always runs the portable kernels. This copy checks the

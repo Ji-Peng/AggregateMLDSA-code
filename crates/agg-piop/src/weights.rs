@@ -1,11 +1,11 @@
-//! Public weight tables (spec Section 7.6): the bridge weights `w_1, w_2, w_{3,t}` and the
+//! Public weight tables: the bridge weights `w_1, w_2, w_{3,t}` and the
 //! ring weight `w_A`, each as the prover's table on its domain and as the verifier's
 //! evaluation at a terminal point.
 //!
 //! Point conventions (least significant coordinate first): a main-domain point `r` splits
 //! as `(r[..8], r[8..10], r[10..]) = (coef, row or column, sig)`; the suffix of length
 //! `d_1` splits as `(rho_1: 13, beta = (i_mid, sigma))`, of length `d_2` as `(rho_2: 13,
-//! sigma)`, of length `d_3` as `(rho_3: 12, sigma)` (spec Section 1, `docs/witness.md`).
+//! sigma)`, of length `d_3` as `(rho_3: 12, sigma)` (`docs/witness.md`).
 //!
 //! Bridge weight of level `t` at a point `pi` on `D_t`: `eq(pi_beta, beta) c_t(zeta)` with
 //! `c_t(zeta) = sum_rho M_t[rho, zeta] eq(pi_rho, rho)`, one `J_t`-entry vector per level
@@ -16,9 +16,9 @@
 //! The bridge weights are `agg_bridge::weights` at the production shape (shared with any
 //! other consumer of the bridge); this module fixes the PIOP's point conventions.
 //!
-//! Ring weight (7.9): `w_A(j', s, i) = eq(r_sig, i) K_{A~_{i,s}, r_coef}[j']` with
+//! Ring weight: `w_A(j', s, i) = eq(r_sig, i) K_{A~_{i,s}, r_coef}[j']` with
 //! `A~_{i,s} = sum_rho eq(r_row, rho) A_i[rho, s]`, by Aerie's factorized negacyclic
-//! transform once per `(i, s)`; the verifier evaluates (7.10) by streaming over the
+//! transform once per `(i, s)`; the verifier evaluates `w_A` at `r^(3)` by streaming over the
 //! expanded keys with the correlation vector `Lambda` of `(r^(2)_coef, r^(3)_coef)`.
 
 use aerie_falcon::protocol::algebra::eq_table;
@@ -53,7 +53,7 @@ pub fn column_sums(matrix: &SparseMatrix, eq_rows: &[E], cols: usize) -> Vec<E> 
     bridge::column_weights(matrix, eq_rows, cols)
 }
 
-/// `w_1` on the main domain for the point `p1` on `D_1` (spec (7.5)).
+/// `w_1` on the main domain for the point `p1` on `D_1`.
 #[must_use]
 pub fn level1_weight_table(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> Vec<E> {
     assert_eq!(p1.len(), geom.d1() as usize, "a D_1 point");
@@ -68,7 +68,7 @@ pub fn level1_weight_at(geom: &Geometry, m1: &SparseMatrix, p1: &[E], r: &[E]) -
     bridge::level1_at(&Shape::PRODUCTION, &bridge_domains(geom), m1, p1, r)
 }
 
-/// `w_2` on `D_1` for the point `p2` on `D_2` (spec (7.2)).
+/// `w_2` on `D_1` for the point `p2` on `D_2`.
 #[must_use]
 pub fn level2_weight_table(geom: &Geometry, m2: &SparseMatrix, p2: &[E]) -> Vec<E> {
     assert_eq!(p2.len(), geom.d2() as usize, "a D_2 point");
@@ -83,7 +83,7 @@ pub fn level2_weight_at(geom: &Geometry, m2: &SparseMatrix, p2: &[E], q: &[E]) -
     bridge::level2_at(&Shape::PRODUCTION, &bridge_domains(geom), m2, p2, q)
 }
 
-/// `w_{3,t}` on `D_2`, one table per lane, for the point `p3` on `D_3` (spec (7.3)).
+/// `w_{3,t}` on `D_2`, one table per lane, for the point `p3` on `D_3`.
 #[must_use]
 pub fn level3_weight_tables(geom: &Geometry, m3: &SparseMatrix, p3: &[E]) -> [Vec<E>; W1_BITS] {
     assert_eq!(p3.len(), geom.d3() as usize, "a D_3 point");
@@ -103,7 +103,7 @@ pub fn level3_weights_at(geom: &Geometry, m3: &SparseMatrix, p3: &[E], q: &[E]) 
 }
 
 /// The ring weight `w_A(j', s, i)` on the main domain in order `(j', s, i)` for the point
-/// `r2 = r^(2)` (spec (7.9)); zero on padded rows.
+/// `r2 = r^(2)`; zero on padded rows.
 #[must_use]
 pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     let geom = public.geometry();
@@ -138,7 +138,7 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     table
 }
 
-/// `w_A(r3)` at the stage-3 point for the ring weight of `r2` (spec (7.10)): `k l 256`
+/// `w_A(r3)` at the stage-3 point for the ring weight of `r2`: `k l 256`
 /// multiply-adds per live record, streamed over the expanded keys.
 #[must_use]
 pub fn ring_weight_at(public: &PublicData, r2: &[E], r3: &[E]) -> E {

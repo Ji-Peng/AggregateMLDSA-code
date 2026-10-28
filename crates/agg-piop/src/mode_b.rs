@@ -1,10 +1,10 @@
-//! Mode B (spec Section 14, milestone M2): the Keccak-free aggregate. The `w_1'` bits of
-//! every live record are published in the clear, so the verifier checks the hash relation
-//! (3.3) natively instead of through a Keccak argument, and the PIOP proves (3.1), (3.2)
-//! for committed bits tied to the public ones.
+//! Mode B: the Keccak-free aggregate. The `w_1'` bits of every live record are published in
+//! the clear, so the verifier checks the hash relation natively instead of through a Keccak
+//! argument, and the PIOP proves the ring identity and the ranges for committed bits tied to
+//! the public ones.
 //!
-//! The public bits take the place of the Keccak side in the transcript (`docs/deviations.md`
-//! P9): the event-2 item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
+//! The public bits take the place of the Keccak side in the transcript (`docs/deviations.md`):
+//! the event-2 item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
 //! (768 bytes, FIPS 204 Algorithm 28) of the segment's live records in record order, so
 //! the bits are bound before the bridge seed `sd`, as the Flock commitment would be; the
 //! event-6 share items and the join's proof items are empty and event 0 carries Flock profile id 3
@@ -12,10 +12,10 @@
 //! segment:
 //!
 //! 1. shape: `768` bytes per live record, empty proof item;
-//! 2. range: every 6-bit value of `w1Encode` is below `m_w = 44` (3.2);
-//! 3. hash: `c~_i = SHAKE256(mu_i || w1Encode(w_1'_i), 32)` (3.3), `mu_i` from step 2;
+//! 2. range: every 6-bit value of `w1Encode` is below `m_w = 44`;
+//! 3. hash: `c~_i = SHAKE256(mu_i || w1Encode(w_1'_i), 32)`, `mu_i` from the public data;
 //! 4. projection predicate: `Y_sigma = M_3 M_2 M_1 b'` over GF(2) for the public bits `b'`
-//!    ([`segment_projection`]), the GF(2) side of the parity bridge (9.1) that the Flock
+//!    ([`segment_projection`]), the GF(2) side of the parity bridge that the Flock
 //!    bridge slot proves in mode A;
 //!
 //! and after stage 3 ([`KeccakVerifier::check_bits`]):
@@ -24,11 +24,11 @@
 //!    multilinear extensions of the public bit tables at `r^(3)`
 //!    ([`public_bit_evaluations`]).
 //!
-//! Check 4 with the seed-derived matrices of spec 9.1 (`prover::SeededMatrices`, the
+//! Check 4 with the seed-derived matrices (`prover::SeededMatrices`, the
 //! derivation of prover and verifier builds) ties the committed bits to the public ones up
-//! to `2^-144.6` (spec 9.4); check 5 does so on its own, up to `d_main / |K|`, because the
+//! to `2^-144.6`; check 5 does so on its own, up to `d_main / |K|`, because the
 //! public bits are absorbed before `r^(3)` is sampled, whatever the [`BridgeDerivation`]
-//! (the test stand-in `FixedMatrices` included, `docs/deviations.md` P4, P9).
+//! (the test stand-in `FixedMatrices` included, `docs/deviations.md`).
 
 use std::time::Instant;
 
@@ -55,7 +55,7 @@ use crate::OpeningField as E;
 /// Bytes of one record's public bits: `w1Encode(w_1')`.
 pub const W1_RECORD_BYTES: usize = W1_ENCODE_BYTES;
 
-/// Records per segment (spec Section 1).
+/// Records per segment.
 const SEGMENT_RECORDS_LOG2: usize = 13;
 
 /// `w_1'[rho][j] = sum_t 2^t b_t(j, rho, i)` of live record `i` from the committed bit lanes.
@@ -135,7 +135,7 @@ impl KeccakSide for PublicBits {
         Ok(vec![Vec::new(); seeds.len()])
     }
 
-    /// The proof items are empty, so the prover skips the fork (deviation K22).
+    /// The proof items are empty, so the prover skips the fork.
     fn proves_concurrently(&self) -> bool {
         false
     }

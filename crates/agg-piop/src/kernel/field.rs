@@ -26,7 +26,7 @@ fn reduce3(lo: u64, hi: u64, carry: u64) -> u64 {
 
 /// The product in `K` (non-residue 2) from four `64 x 64` products and two branch-free
 /// reductions; equal to `lhs * rhs` (test `fast_product_matches_the_field_product`) and
-/// about 20% faster on this machine (Aerie's `opening_field_ops::mul` is the model).
+/// faster (Aerie's `opening_field_ops::mul` is the model).
 #[inline(always)]
 pub(crate) fn fm(lhs: E, rhs: E) -> E {
     let a = lhs.c0().to_canonical_u64();

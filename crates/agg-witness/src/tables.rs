@@ -1,13 +1,13 @@
-//! Witness table builders for the four Akita groups (spec Section 4).
+//! Witness table builders for the four Akita groups.
 //!
-//! This module builds G_main, the round-1 group of spec Section 4.1: per main-domain position
+//! This module builds G_main, the round-1 group: per main-domain position
 //! (j, rho or s, i) the digits of z, u, v and the six w1Encode bits, in the table order
 //! z_0..z_4, u_0..u_4, v_0..v_6, b_0..b_5 (relation H-u: u_0..u_3 the base-16 digits of B_ulo,
 //! u_4 the base-6 top digit H_u - 3). Padded rows (i >= N) hold the canonical encoding of
-//! the all-zero witness (spec Section 4.2). The seed-dependent groups G_1, G_2, G_3 are built
+//! the all-zero witness. The seed-dependent groups G_1, G_2, G_3 are built
 //! from `crate::bridge::BridgeTables`. Behind features: the H-exact layout (`h-exact`, relation
-//! H-exact of spec 4.3: z by the bit-slack form, u as in H-u) and the S1+S2 layout (`fips`,
-//! spec Appendix A); their column orders are fixed in docs/witness.md.
+//! H-exact: z by the bit-slack form, u as in H-u) and the S1+S2 layout (`fips`); their
+//! column orders are fixed in docs/witness.md.
 //!
 //! Every committed value is a digit, a bit, a sign or a ternary value, so columns are `i8`.
 
@@ -19,18 +19,18 @@ use crate::padding::{Geometry, GeometryError};
 use crate::params::*;
 use rayon::prelude::*;
 
-/// Relation layout (spec Section 4 and Appendix A).
+/// Relation layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layout {
     /// Relation H-u (default): z, u, v digits and the six bits; 23 columns. z is relaxed to
     /// [-2^17, 2^17), u is exact (`digits::U_STEP`).
     H,
-    /// Relation H-exact (spec 4.3, normative): z exact by the bit-slack form
+    /// Relation H-exact: z exact by the bit-slack form
     /// (`digits::Z_BIT_SLACK16`: bz_0..bz_3, bz_hi, az), u as in H-u (`digits::U_STEP`);
     /// 24 columns.
     #[cfg(feature = "h-exact")]
     HExact,
-    /// S1+S2 (`relation = fips`): FIPS-faithful layout; 29 main and 3 per-signature columns.
+    /// S1+S2 (feature `fips`): FIPS-faithful layout; 29 main and 3 per-signature columns.
     #[cfg(feature = "fips")]
     Fips,
 }
@@ -48,8 +48,8 @@ impl Layout {
     }
 
     /// Layout id, equal to the protocol's relation byte for H-u (0) and H-exact (1). Relation
-    /// byte 2 names H-FIPS (`crate::hfips`, which has no base-16 layout here), so the retired
-    /// S1+S2 sketch serializes as 3 (witness crate only, never a relation byte).
+    /// byte 2 names H-FIPS (`crate::hfips`, which has no base-16 layout here), so S1+S2
+    /// serializes as 3 (witness crate only, never a relation byte).
     pub fn id(self) -> u8 {
         match self {
             Layout::H => 0,
@@ -278,7 +278,7 @@ impl ColumnMap {
 /// Values of one record recomposed from (or to be encoded into) the tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordValues {
-    /// z (from (4.1) or the slack form).
+    /// z (from its digits or the slack form).
     pub z: VecL,
     /// u (H and H-exact; zero for S1+S2).
     pub u: VecK,
@@ -312,7 +312,7 @@ pub struct FipsRecord {
 }
 
 impl RecordValues {
-    /// The canonical all-zero witness (padded rows, spec Section 4.2): z = u = v = w1' = 0;
+    /// The canonical all-zero witness (padded rows): z = u = v = w1' = 0;
     /// for S1+S2 additionally (r1, r0) = Decompose(0) = (0, 0), so s = -1, and u_h = omega.
     pub fn zero(layout: Layout) -> Self {
         let mut r = RecordValues {
@@ -680,7 +680,7 @@ impl BatchTables {
         r
     }
 
-    /// Re-encodes record i to FIPS 204 signature bytes with the public c~ (spec Sections 3, A).
+    /// Re-encodes record i to FIPS 204 signature bytes with the public c~.
     pub fn reencode(
         &self,
         i: usize,

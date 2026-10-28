@@ -237,7 +237,7 @@ impl OpeningGrinding {
         }
     }
 
-    /// agg-mldsa patch (PATCH.md section 5): the ring-switch point, the
+    /// agg-mldsa patch (PATCH.md): the ring-switch point, the
     /// transport claim batch and the merged rounds are drawn before Ligerito's
     /// level-0 two-point binding, so each numerator carries the level-0
     /// Johnson-list factor `list = ceil(L_max)` (Flock paper Appendix A,
@@ -1691,7 +1691,7 @@ fn block_first_phase<Ch: Challenger>(
 
     // Rank-1 terms on the block cube.
     let mut terms: Vec<(Vec<F128>, Vec<F128>)> = Vec::new();
-    // agg-mldsa patch (PATCH.md Section 4): AVX-512 block statistics, chosen at run
+    // agg-mldsa patch (PATCH.md): AVX-512 block statistics, chosen at run
     // time; the same terms in the same order as the portable loop below.
     #[cfg(target_arch = "x86_64")]
     let simd = crate::simd::has(crate::simd::AVX512_CLMUL);

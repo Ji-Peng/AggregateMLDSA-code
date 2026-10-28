@@ -1,4 +1,4 @@
-//! Public bridge weights (spec 7.6, docs/bridge.md Section 4), generic over the shape and
+//! Public bridge weights (`docs/bridge.md`), generic over the shape and
 //! the field (any `jolt_field::Ring`; the PIOP instantiates them with its opening field).
 //!
 //! For level `t` at a point `pi = (pi_rho, pi_beta)` of `D_t` the summation weight of the
@@ -155,7 +155,7 @@ pub fn level1_columns<F: Ring>(
     column_weights(m1, &eq_table(&p1[..rho_vars(shape, 1)]), 1 << zeta_vars)
 }
 
-/// `w_1` on the input (main) domain for the point `p1` of `D_1` (spec (7.5)).
+/// `w_1` on the input (main) domain for the point `p1` of `D_1`.
 #[must_use]
 pub fn level1_table<F: Ring>(
     shape: &Shape,
@@ -196,7 +196,7 @@ pub fn level2_columns<F: Ring>(
     column_weights(m2, &eq_table(&p2[..rho_vars(shape, 2)]), cols)
 }
 
-/// `w_2` on `D_1` for the point `p2` of `D_2` (spec (7.2)).
+/// `w_2` on `D_1` for the point `p2` of `D_2`.
 #[must_use]
 pub fn level2_table<F: Ring>(
     shape: &Shape,
@@ -240,7 +240,7 @@ pub fn level3_columns<F: Ring>(
     )
 }
 
-/// `w_{3,t}` on `D_2`, one table per lane, for the point `p3` of `D_3` (spec (7.3)).
+/// `w_{3,t}` on `D_2`, one table per lane, for the point `p3` of `D_3`.
 #[must_use]
 pub fn level3_tables<F: Ring>(
     shape: &Shape,

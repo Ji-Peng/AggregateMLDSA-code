@@ -1,4 +1,4 @@
-//! Reference authoring of the chain gate in Flock HEAD's Boolean circuit DSL
+//! Reference authoring of the chain gate in Flock's Boolean circuit DSL
 //! (`flock_core::circuit::boolean`): theta, rho, pi, iota, the absorptions and
 //! the chaining as virtual `xor` nodes, the chi AND outputs as `define_and`
 //! columns, the outputs as `define_linear` columns. Flock lowers it to sparse

@@ -1,4 +1,4 @@
-//! Relation H-FIPS (`docs/h-exact.md` Section 10.7) at the PIOP level (the lookup and the
+//! Relation H-FIPS (`docs/h-exact.md`) at the PIOP level (the lookup and the
 //! three stages, no commitments): honest round trips (random records, and the synthetic
 //! weight-80 records with the coefficient `w' = q - gamma2, h = 0` of
 //! `agg_witness::gen::hint_corner_record`), the pointwise identities on the Boolean domain,
@@ -123,7 +123,7 @@ fn find(batch: &Batch, pred: impl Fn([i64; 5], i64) -> bool) -> usize {
         .expect("a matching position")
 }
 
-/// The pointwise H-FIPS identities on the Boolean domain (`docs/h-exact.md` 10.1) and the
+/// The pointwise H-FIPS identities on the Boolean domain and the
 /// agreement of the committed values with the witness crate.
 fn check_pointwise(batch: &Batch) {
     let manifest = &batch.manifest;
@@ -242,7 +242,7 @@ fn h_fips_weight_80_records_with_the_corner_prove_and_verify() {
         assert_eq!(rejecting_place(&batch, &batch.main), None, "honest");
         let (proof, _) = prove_tables(&batch, batch.tables(), false).expect("honest prover");
         verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
-        // The ideator's witness of the corner (sigma, L, delta, e) = (1, gamma2 - 1, 1, 0) keeps
+        // The witness of the corner (sigma, L, delta, e) = (1, gamma2 - 1, 1, 0) keeps
         // u (and the ring identity) but makes the weight 81: with u_h = 0 the weight identity
         // fails in stage 3; with u_h = -1 the lookup rejects.
         let corner = main_index(HINT_CORNER.1, HINT_CORNER.0, 6);

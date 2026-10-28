@@ -130,7 +130,7 @@ pub enum LigeritoProfile {
 }
 
 impl LigeritoProfile {
-    /// agg-mldsa patch (PATCH.md section 5): `ceil(L_max)` of the level-0
+    /// agg-mldsa patch (PATCH.md): `ceil(L_max)` of the level-0
     /// Johnson list, `L_max = 1 / (2 eta sqrt(rho_0))` at the shipped level-0
     /// slack `eta = 0.02`: `ceil(25 * 2^(log_inv_rate / 2))` = 36, 50, 71 for
     /// rates 1/2, 1/4, 1/8. The outer challenges of a Flock proof are drawn

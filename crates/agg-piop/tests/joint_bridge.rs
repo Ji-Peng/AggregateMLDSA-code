@@ -1,4 +1,4 @@
-//! The joint parity-bridge test (docs/bridge.md Section 9 items 3 and 7, mode A): for 64 and
+//! The joint parity-bridge test (`docs/bridge.md`, mode A): for 64 and
 //! 256 signatures the witness is derived from real ML-DSA-44 records, the F_p side
 //! (`agg-piop` with the bridge tables) and the Flock side (`agg-keccak`, sponge gates plus
 //! the bridge slot) run in one transcript, so both use the same bridge seed `sd` (event 3,
@@ -7,7 +7,7 @@
 //! - both final vectors (the F_p side's published `Y_sigma` and the Flock side's
 //!   `M_3 M_2 M_1 b'` of its committed bridge copy) agree with each other and with a
 //!   direct computation from the derived `w_1'` (sparse columns, index conventions of
-//!   docs/bridge.md Section 2, written here independently of both crates);
+//!   `docs/bridge.md`, written here independently of both crates);
 //! - the bit orders agree: the derived `w1Encode` bytes, the committed `b_t` columns and
 //!   the Flock records carry the same bits;
 //! - the honest aggregate verifies with the Flock sub-proof checked inside the PIOP
@@ -57,7 +57,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
         .expect("test thread");
 }
 
-/// The derivation of spec 9.1 (`SeededMatrices`) that also records the seed it was asked
+/// The seed derivation (`SeededMatrices`) that also records the seed it was asked
 /// for, so that a test hook can rebuild tables under the transcript's matrices.
 #[derive(Default)]
 struct RecordingSeed(Mutex<Option<([u8; 32], Arc<BridgeMatrices>)>>);
@@ -92,7 +92,7 @@ struct FlockRun {
 }
 
 /// The Flock challenger seed of the test side: `fs_sigma` bound to the digest of the
-/// event-6 record, as the `KeccakSide::prove` contract requires (deviation K22; mode A's
+/// event-6 record, as the `KeccakSide::prove` contract requires (mode A's
 /// `part_seed` is the production form).
 fn bound_seed(fs: &[u8; 32], record: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -274,7 +274,7 @@ impl Fixture {
             .collect()
     }
 
-    /// The mode-A verifier (Flock profile `Fast`, the matrices of spec 9.1).
+    /// The mode-A verifier (Flock profile `Fast`, seed-derived matrices).
     fn verify(&self, bytes: &[u8], keccak: &FlockVerifier<'_, '_>) -> Result<(), VerifyError> {
         let public: Vec<(&[u8], &[u8])> = self
             .records
@@ -294,7 +294,7 @@ impl Fixture {
     }
 }
 
-/// Main-domain cell of `b_t(j, rho, i)` (docs/bridge.md Section 2): `x = j + 256 rho + 1024 i`.
+/// Main-domain cell of `b_t(j, rho, i)` (`docs/bridge.md`): `x = j + 256 rho + 1024 i`.
 const fn cell(j: usize, rho: usize, i: usize) -> usize {
     j + 256 * rho + 1024 * i
 }
@@ -325,7 +325,7 @@ fn check_bit_orders(witnesses: &[SigWitness], lanes: &[&[i8]; 6]) {
 /// `Y = M_3 M_2 M_1 b` over GF(2) for one segment, straight from the derived `w_1'` and
 /// the sparse columns: level 1 per `2^19`-cell block (`zeta_1 = x mod 2^19`, output cell
 /// `rho_1 + 2^13 (x >> 19)`), level 2 over the level-1 cells (`zeta_2 = rho_1 + 2^13
-/// i_mid`), level 3 over `zeta_3 = t + 6 rho_2` (docs/bridge.md Section 2). Padded cells
+/// i_mid`), level 3 over `zeta_3 = t + 6 rho_2` (`docs/bridge.md`). Padded cells
 /// are zero and contribute nothing.
 fn direct_final_vector(witnesses: &[SigWitness], m: &BridgeMatrices) -> Vec<u8> {
     let blocks = (1024 * witnesses.len()).div_ceil(1 << 19);

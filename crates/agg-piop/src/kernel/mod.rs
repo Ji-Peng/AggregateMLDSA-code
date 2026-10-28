@@ -1,6 +1,5 @@
 //! Generic sum-check kernels: narrow source tables read through codes and lookup tables
-//! for the first active rounds, and groups of batched instances over one local domain
-//! (spec Section 7.1).
+//! for the first active rounds, and groups of batched instances over one local domain.
 //!
 //! Mirrors the shape of Aerie's kernels (`aerie-prover/src/protocol/kernels/`): every
 //! committed table stays an `i8` array (with one byte of pair code per pair of cells)
@@ -8,14 +7,14 @@
 //! A [`Group`] holds the lanes of one local domain, an optional shared equality factor
 //! (Akita's `GruenSplitEq`, so the equality table of the remaining variables is never
 //! materialized) and the gamma-weighted [`Term`]s of the instances batched on it. The round
-//! message of a group is the compressed ordinary message of Aerie 10.3: the coefficients of
+//! message of a group is the compressed ordinary message of Aerie: the coefficients of
 //! the degree-`d` round polynomial without the linear one, which the verifier recovers from
 //! the running claim (`g(0) + g(1) = claim`).
 //!
 //! Instances on a smaller domain than the stage are inactive in the leading rounds, where
-//! the message is the constant `claim / 2`, and are lifted by `2^-inactive` (Aerie 7.1).
+//! the message is the constant `claim / 2`, and are lifted by `2^-inactive` (Aerie).
 //!
-//! Round schedule (`docs/piop.md` Sections 6 and 18; every path computes the same round
+//! Round schedule (`docs/piop.md`; every path computes the same round
 //! polynomials, so the proof bytes do not depend on it):
 //!
 //! - The terms are compiled into a [`plan::Plan`]: one polynomial per lane, bilinear
@@ -237,7 +236,7 @@ impl<'a> Lane<'a> {
     }
 }
 
-/// The leaf predicate of a digit alphabet (spec Section 4.3), as a polynomial in `P_Z`.
+/// The leaf predicate of a digit alphabet, as a polynomial in `P_Z`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeafPoly {
     /// `Q_4(P) = P (P - 2)`.
@@ -313,7 +312,7 @@ pub enum Term {
     Product(Vec<usize>),
     /// `v (v - 1)` of one lane.
     Bool(usize),
-    /// `b_5 (b_4 + b_3 b_2)` (spec (7.4)), lanes in that order.
+    /// `b_5 (b_4 + b_3 b_2)`, lanes in that order.
     RangeW1([usize; 4]),
     /// `Q(P)` for a leaf predicate on the lane `P_Z`.
     Leaf(usize, LeafPoly),
@@ -330,7 +329,7 @@ pub enum Term {
     },
     /// `sum_k c_k prod_{l in m_k} v_l`: a polynomial with integer coefficients, each monomial
     /// a list of lanes (with repetition; an empty list is a constant). Relation H-FIPS's
-    /// wrap constraints (`docs/h-exact.md` Section 10.7); evaluated on the generic path.
+    /// wrap constraints (`docs/h-exact.md`); evaluated on the generic path.
     Monomials(Vec<(i64, Vec<usize>)>),
 }
 

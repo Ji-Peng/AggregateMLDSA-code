@@ -1,6 +1,6 @@
 //! Two-round commit of a dummy batch of every group (two families, width 4 and
-//! width 16) and one batched Akita opening of all six groups (spec Section 13, PCS
-//! config item), at `N = 2^8` and `N = 2^10` signatures.
+//! width 16) and one batched Akita opening of all six groups, at `N = 2^8` and
+//! `N = 2^10` signatures.
 #![cfg(feature = "schedules")]
 
 use agg_pcs_config::catalogs::{Group, Relation};
@@ -86,7 +86,7 @@ fn two_round_commit_and_batched_opening_at_1024_with_padding() {
 
 #[test]
 fn h_exact_commit_and_batched_opening_at_256_and_1024() {
-    // G_main4 at 9 polynomials (docs/h-exact.md 2.2), the l16x grouped rows.
+    // G_main4 at 9 polynomials (H-exact), the l16x grouped rows.
     on_large_stack(|| {
         commit_and_open(1 << 8, Relation::HExact);
         commit_and_open(1000, Relation::HExact);
@@ -95,7 +95,7 @@ fn h_exact_commit_and_batched_opening_at_256_and_1024() {
 
 #[test]
 fn h_fips_commit_and_batched_opening_at_256_and_1024() {
-    // G_main4 at 12 polynomials and G_2 at 13 (docs/h-exact.md 10.7), the l16f grouped rows.
+    // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the l16f grouped rows.
     on_large_stack(|| {
         commit_and_open(1 << 8, Relation::HFips);
         commit_and_open(1000, Relation::HFips);

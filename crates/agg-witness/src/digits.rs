@@ -1,13 +1,13 @@
-//! Digit decompositions in balanced alphabets (spec Section 4.3, (4.1)) and the slack forms of
-//! the feature-flagged layouts (spec Appendix A), the step form of `u` in relations H-u and
+//! Digit decompositions in balanced alphabets and the slack forms of the feature-flagged
+//! layouts, the step form of `u` in relations H-u and
 //! H-exact, the bit-slack form of `z` in relation H-exact, and the leaf predicates Q_4, Q_6,
 //! Q_8, Q_16.
 //!
 //! A digit of base b lies in the balanced alphabet [-b/2, b/2 - 1]. A value with digits
-//! Z_0..Z_{m-1} (least significant first) is X = sum_k W_k Z_k + C_X (4.1). Decomposition is the
+//! Z_0..Z_{m-1} (least significant first) is X = sum_k W_k Z_k + C_X. Decomposition is the
 //! inverse: the unsigned mixed-radix digits of X + eps B/2, each shifted by -b_k/2. Outside the
 //! proven range the top digit absorbs the excess and leaves its alphabet, which is exactly what
-//! the leaf checks of Section 7 detect.
+//! the leaf checks detect.
 
 use crate::params::{B_U, B_Z, SLACK_Z, STEP_U, U_TOP_BASE};
 
@@ -51,7 +51,7 @@ impl Alphabet {
     }
 }
 
-/// Mixed-radix layout of (4.1).
+/// Mixed-radix layout X = sum W_k Z_k + C_X.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DigitLayout {
     /// Short name used in column names and reports.
@@ -133,7 +133,7 @@ impl DigitLayout {
         out
     }
 
-    /// X = sum W_k Z_k + C_X (4.1), for any digit values.
+    /// X = sum W_k Z_k + C_X, for any digit values.
     pub fn compose(&self, digits: &[i64]) -> i64 {
         assert_eq!(digits.len(), self.len());
         self.weights()
@@ -190,14 +190,14 @@ pub const KAPPA3_DIGITS: DigitLayout = DigitLayout {
     bases: &[16, 16],
     signed: false,
 };
-/// Retired H-exact sketch (now S1+S2 only): b_z in [0, 2^17): bases 16,16,16,16,2, unsigned
+/// S1+S2: b_z in [0, 2^17): bases 16,16,16,16,2, unsigned
 /// (C = 100,488).
 pub const BZ_DIGITS: DigitLayout = DigitLayout {
     name: "bz",
     bases: &[16, 16, 16, 16, 2],
     signed: false,
 };
-/// Retired H-exact sketch (non-normative, kept only for its enumeration test): b_u in
+/// Unused by every layout (kept for its enumeration test): b_u in
 /// [0, 2^18): bases 16,16,16,16,4, unsigned (C = 166,024).
 pub const BU_DIGITS: DigitLayout = DigitLayout {
     name: "bu",
@@ -217,8 +217,7 @@ pub const BH_DIGITS: DigitLayout = DigitLayout {
     signed: false,
 };
 
-/// Slack form X = w a + b - offset with a in {0, 1}, b in [0, 2^j) given by unsigned digits
-/// (spec Appendix A; `improvements-tables.md` Section 2 slack-digit lemma).
+/// Slack form X = w a + b - offset with a in {0, 1}, b in [0, 2^j) given by unsigned digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlackLayout {
     /// Weight w of the Boolean slack a.
@@ -251,13 +250,14 @@ impl SlackLayout {
     }
 }
 
-/// H-exact z: z = 130,915 a_z + b_z - 130,993, exact range [-B_z, B_z].
+/// S1+S2 z: z = 130,915 a_z + b_z - 130,993, exact range [-B_z, B_z].
 pub const Z_EXACT: SlackLayout = SlackLayout {
     slack_weight: 130_915,
     digits: BZ_DIGITS,
     offset: 130_993,
 };
-/// H-exact u: u = 118,787 a_u + b_u - 190,465, exact range [-B_u, B_u].
+/// Slack form of u (unused by every layout): u = 118,787 a_u + b_u - 190,465, exact range
+/// [-B_u, B_u].
 pub const U_EXACT: SlackLayout = SlackLayout {
     slack_weight: 118_787,
     digits: BU_DIGITS,
@@ -277,7 +277,7 @@ pub const UH_EXACT: SlackLayout = SlackLayout {
 };
 
 /// Step form X = step H + b - offset with one top digit H in [0, c) and b in [0, 2^j) given by
-/// unsigned digits (relation H-u, `docs/h-exact.md` 2.1). It covers [-offset, step (c - 1) +
+/// unsigned digits (relation H-u, `docs/h-exact.md`). It covers [-offset, step (c - 1) +
 /// 2^j - 1 - offset] without gap when step <= 2^j. Committed digits: the low digits of b, then
 /// the top digit stored balanced, D = H - c/2 in the base-c alphabet [-c/2, c/2 - 1].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -362,7 +362,7 @@ impl StepLayout {
 }
 
 /// Bit-slack form X = b + 2^j B_hi + w a - offset with b in [0, 2^j) given by unsigned
-/// digits and two Boolean digits B_hi, a (relation H-exact, `docs/h-exact.md` 2.1). With
+/// digits and two Boolean digits B_hi, a (relation H-exact, `docs/h-exact.md`). With
 /// w <= 2^(j+1) the four blocks [0, 2^j), [2^j, 2^(j+1)), [w, w + 2^j), [w + 2^j, w + 2^(j+1))
 /// cover [0, w + 2^(j+1) - 1] without gap. Committed digits: the low digits of b, then B_hi,
 /// then a, both stored as bits.
@@ -418,7 +418,7 @@ impl BitSlackLayout {
     }
 
     /// Canonical digits: a = [y >= 2^(j+1)], then B_hi = [y - w a >= 2^j] and b the rest, with
-    /// y = x + offset (`docs/h-exact.md` 2.1). Outside the range the top digit of b leaves its
+    /// y = x + offset. Outside the range the top digit of b leaves its
     /// alphabet and composition still inverts.
     pub fn decompose(&self, x: i64) -> Vec<i64> {
         let y = x + self.offset;
@@ -450,12 +450,12 @@ impl BitSlackLayout {
     }
 }
 
-/// A value committed through digits: a mixed-radix layout (4.1), a step form, a bit-slack
+/// A value committed through digits: a mixed-radix layout, a step form, a bit-slack
 /// form or a slack form. The PIOP (`agg_piop::manifest::DigitValue::layout`) uses it to treat
 /// all alike: the value is always `sum W_k Z_k + C_X` over the committed digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueForm {
-    /// Mixed-radix digits (4.1).
+    /// Mixed-radix digits.
     Radix(DigitLayout),
     /// Low digits plus one stepped top digit.
     Step(StepLayout),
@@ -605,7 +605,7 @@ impl From<SlackLayout> for ValueForm {
 
 /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` in `[0, gamma2 - 1]` with `L_lo` in
 /// `[0, 2^16)` (one unsigned base-`2^16` digit, stored `L_lo - 2^15`, looked up in `T_16`) and
-/// the bit `L_hi`: `29,696 + 2^16 = gamma2` (`docs/h-exact.md` Section 10). As a
+/// the bit `L_hi`: `29,696 + 2^16 = gamma2` (`docs/h-exact.md`). As a
 /// [`ValueForm`]: `L = S_lo + 29,696 L_hi + 2^15`.
 pub const L_SLACK: SlackLayout = SlackLayout {
     slack_weight: crate::hfips::L_STEP,
@@ -619,7 +619,7 @@ pub const L_SLACK: SlackLayout = SlackLayout {
 
 /// z in relation H-exact with a 16-bit low part: z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z
 /// with B_zlo in [0, 2^16) (one unsigned base-2^16 digit, stored B_zlo - 2^15), B_zhi, a_z in
-/// {0, 1}; exact range [-B_z, B_z] since 130,915 + 2^17 = 2 B_z + 1 (`docs/h-exact.md` 2.1).
+/// {0, 1}; exact range [-B_z, B_z] since 130,915 + 2^17 = 2 B_z + 1.
 pub const Z_BIT_SLACK: BitSlackLayout = BitSlackLayout {
     low: DigitLayout {
         name: "bz",
@@ -662,7 +662,7 @@ pub fn r1_compose(a_digit: i64, b_digit: i64) -> i64 {
     4 * a_digit + b_digit + 24
 }
 
-/// P_Z = Z (Z + 1) (spec Section 4.3).
+/// P_Z = Z (Z + 1).
 #[inline]
 pub fn p_of(z: i64) -> i128 {
     i128::from(z) * (i128::from(z) + 1)
@@ -772,7 +772,8 @@ mod tests {
 
     #[test]
     fn bijections_by_enumeration() {
-        // (4.1) is a bijection from the digit alphabets onto the proven range (spec_checks.py item 8).
+        // The mixed-radix map is a bijection from the digit alphabets onto the proven range
+        // (spec_checks.py item 8).
         for layout in [
             Z_DIGITS,
             ULO_DIGITS,
@@ -819,7 +820,7 @@ mod tests {
                 assert!(!layout.in_alphabets(&d));
                 assert_eq!(layout.compose(&d), x);
             }
-            // Digits of zero: -b_k/2, except 0 for the top digit of a signed value (spec 4.2).
+            // Digits of zero: -b_k/2, except 0 for the top digit of a signed value.
             let z = layout.decompose(0);
             for (k, &b) in layout.bases.iter().enumerate() {
                 let expect = if layout.signed && k + 1 == layout.len() {
@@ -903,7 +904,7 @@ mod tests {
 
     #[test]
     fn z_bit_slack_form_is_exact_at_the_fips_bound() {
-        // docs/h-exact.md 2.1: z = S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225.
+        // docs/h-exact.md: z = S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225.
         let form = ValueForm::from(Z_BIT_SLACK);
         assert_eq!(form.len(), 3);
         assert_eq!(form.weights(), vec![1, 1 << 16, SLACK_Z]);
@@ -922,7 +923,7 @@ mod tests {
             // a_z = [z >= 79] (the rule a = [x + offset >= 2^j]).
             assert_eq!(d[2], i64::from(z >= 79), "z = {z}");
         }
-        // Edges and padding of docs/h-exact.md 2.1, as (S_zlo, B_zhi, a_z).
+        // Edges and padding of docs/h-exact.md, as (S_zlo, B_zhi, a_z).
         assert_eq!(form.decompose(B_Z), vec![32_767, 1, 1]);
         assert_eq!(form.decompose(-B_Z), vec![-32_768, 0, 0]);
         assert_eq!(form.decompose(0), vec![32_689, 1, 0]);

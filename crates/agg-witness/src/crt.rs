@@ -1,7 +1,7 @@
-//! CRT product and representative choices for the ring identity (spec Section 3, Appendix B.9).
+//! CRT product and representative choices for the ring identity.
 //!
-//! The ring identity (3.1) is over the integers, so the prover needs (A z) in Z[X]/(X^256 + 1)
-//! with A centered (Appendix B.9). With |A| <= (q-1)/2 and |z| <= 2^20 every coefficient of A z
+//! The ring identity is over the integers, so the prover needs (A z) in Z[X]/(X^256 + 1)
+//! with A centered. With |A| <= (q-1)/2 and |z| <= 2^20 every coefficient of A z
 //! is below l 256 (q-1)/2 2^20 < 2^52.1 < M/2 for M = q P2 (about 2^53.9), so the product is
 //! recovered exactly from its residues modulo q (FIPS NTT with the key's A_hat) and modulo
 //! P2 = 15 2^27 + 1 (NTT with a 512th root of unity), by CRT with the centered representative.
@@ -41,7 +41,7 @@ pub fn crt_centered(x1: u64, x2: u64) -> i64 {
     x as i64
 }
 
-/// (A z) over the integers by CRT (spec (3.1)); requires |z|_inf <= 2^20.
+/// (A z) over the integers by CRT; requires |z|_inf <= 2^20.
 pub fn az_crt(key: &ExpandedKey, z: &VecL) -> VecK {
     assert!(
         z.iter()

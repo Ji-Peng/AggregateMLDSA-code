@@ -1,7 +1,7 @@
-//! The final public vector `Y` (docs/bridge.md Section 6).
+//! The final public vector `Y` (`docs/bridge.md`).
 //!
 //! `Y_sigma` is `m_3` bits per segment (4,096 in production, 512 bytes), bit `rho_3` at byte
-//! `rho_3 >> 3`, bit position `rho_3 mod 8` (least significant first, deviation P6). The
+//! `rho_3 >> 3`, bit position `rho_3 mod 8` (least significant first). The
 //! verifier reads exactly `S m_3 / 8` bytes ([`parse`]), lays the segments out as the public
 //! table `Y` on `D_3` (`Y_sigma[rho_3]` at `rho_3 + m_3 sigma`), and evaluates its multilinear
 //! extension at `tau_3` ([`evaluate`]) for the right-hand side of the level-3 identity,
@@ -80,7 +80,7 @@ pub fn evaluate<F: Ring>(y: &[u8], point: &[F]) -> F {
         })
 }
 
-/// The level-3 claimed sum `Y(tau_3) + 2 kappa^(3)(tau_3)` (spec (7.3)).
+/// The level-3 claimed sum `Y(tau_3) + 2 kappa^(3)(tau_3)`.
 #[must_use]
 pub fn level3_claimed_sum<F: Ring>(y_at_tau3: F, kappa3_at_tau3: F) -> F {
     y_at_tau3 + kappa3_at_tau3 + kappa3_at_tau3

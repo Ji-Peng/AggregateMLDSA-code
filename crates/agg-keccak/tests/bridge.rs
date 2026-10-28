@@ -1,8 +1,8 @@
-//! Flock side of the parity bridge (docs/bridge.md Sections 5 and 9): the bridge slot proven
+//! Flock side of the parity bridge (docs/bridge.md): the bridge slot proven
 //! on its own at the toy shape (`L = 2^12`) and the bridged sponge segment (sponge gates and
 //! bridge slot in one union proof) at the production shape. The bridge seed is derived from
-//! the Flock commitment, so the witness is fixed before the seed exists (spec Section 10,
-//! events 2 and 3). Run with `--release`.
+//! the Flock commitment, so the witness is fixed before the seed exists (events 2
+//! and 3). Run with `--release`.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -76,7 +76,7 @@ fn direct_toy_product(mats: &BridgeMatrices, bits: &[u64]) -> Vec<u8> {
         .collect()
 }
 
-/// docs/bridge.md Section 9 items 2 and 3 on the Flock side: the toy slot (`L = 2^12`, one
+/// On the Flock side, the toy slot (`L = 2^12`, one
 /// lane) proves `Y = M_3 M_2 M_1 b'` against a direct GF(2) computation; a flipped `Y` bit,
 /// a flipped committed bit with the stale `Y`, and another seed are rejected.
 #[test]
@@ -375,7 +375,7 @@ fn bridged_round_trip(n: usize, rng_seed: u64, check_tampering: bool) {
 
 /// The sponge proof at 64 signatures with the bridge rows (`d_seg = 6`, `k_log = 19` for
 /// both types): round trip, `Y` equal to the F_p side's GF(2) walk, the added nonzeros
-/// reported, and the tampering cases of docs/bridge.md Section 9 item 6.
+/// reported, and the tampering cases of docs/bridge.md.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
 fn sponge_with_bridge_rows_round_trip_64() {
@@ -405,7 +405,7 @@ fn bridged_segment_shapes() {
     assert_eq!(cost.bridge_committed_words, (6 << 17) / 128 + 1 + 32);
 }
 
-/// A segment split into Flock parts (deviation K10): 20 live records (`d_seg = 5`) in parts
+/// A segment split into Flock parts: 20 live records (`d_seg = 5`) in parts
 /// of 8 record positions (`d_part = 3`; 8, 8 and 4 live records). Each part commits before
 /// the seed, proves its share `Y_{sigma, s}` of the segment's final vector, and the shares
 /// XOR to the F_p side's `Y_sigma` of the whole segment. The slot buffers are dropped after

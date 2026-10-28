@@ -1,20 +1,20 @@
 //! The aggregate prover: commitment rounds, bridge seed, Keccak side, the lookup into
-//! `T_16`, the three stages and the Akita opening in transcript order (spec Sections 7, 10;
-//! lookup layout L16, `docs/lookup.md`). [`prove_piop`] is the PIOP part after the
-//! commitments (lookup, pre-stage claims, stages 1 to 3), shared with the stage tests.
+//! `T_16`, the three stages and the Akita opening in transcript order (`docs/lookup.md`).
+//! [`prove_piop`] is the PIOP part after the commitments (lookup, pre-stage claims, stages
+//! 1 to 3), shared with the stage tests.
 //!
-//! Fork-join (deviation K22, lever P1 of `docs/perf.md`): event 6 absorbs the final vectors
-//! and the Keccak side's share items only; the Flock proofs are absorbed at the join event
-//! after the stage-3 claims. No PIOP challenge depends on them, so after event 6 the prover
-//! runs [`KeccakSide::prove`] on its own rayon pool ([`flock_pool_threads`]) while the PIOP
+//! Fork-join (`docs/perf.md`): event 6 absorbs the final vectors and the Keccak side's
+//! share items only; the Flock proofs are absorbed at the join event after the stage-3
+//! claims. No PIOP challenge depends on them, so after event 6 the prover runs
+//! [`KeccakSide::prove`] on its own rayon pool ([`flock_pool_threads`]) while the PIOP
 //! (lookup, pre-stage claims, stages) runs on the global pool, then absorbs the proofs.
 //!
 //! Two hooks connect the parts owned by other crates: [`BridgeDerivation`] maps the bridge
-//! seed `sd` to the matrices ([`SeededMatrices`] is the derivation of spec Section 9.1,
+//! seed `sd` to the matrices ([`SeededMatrices`] is the seed derivation,
 //! `agg_bridge::seed`) and [`KeccakSide`] produces the Flock commitments and sub-proofs
-//! (`agg-keccak`, spec Section 8; `mode_b::PublicBits` in mode B). The stand-ins
-//! `FixedMatrices` (matrices that ignore the seed) and `NoKeccak` (Flock profile 0) exist
-//! only in unit tests and with the `test-hooks` feature (`docs/deviations.md` P4).
+//! (`agg-keccak`; `mode_b::PublicBits` in mode B). The stand-ins `FixedMatrices` (matrices
+//! that ignore the seed) and `NoKeccak` (Flock profile 0) exist only in unit tests and with
+//! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
@@ -46,21 +46,21 @@ use crate::transcript::{
 use crate::wire::{pack_final_vector, AggregateProof};
 use crate::{stage1, stage2, stage3, OpeningField as E};
 
-/// Maps the bridge seed to the three matrices (spec Section 9.1).
+/// Maps the bridge seed to the three matrices.
 pub trait BridgeDerivation {
     /// The matrices of `seed` (borrowed when they do not depend on it).
     fn matrices(&self, seed: &[u8; 32]) -> Cow<'_, BridgeMatrices>;
 
-    /// True only when [`Self::matrices`] is the derivation of spec Section 9.1, so that the
-    /// matrices are uniform and independent of everything absorbed before `sd` and the
-    /// bound of spec 9.4 applies. Mode A (Flock profiles `Fast` and `LaBinius`) is refused
+    /// True only when [`Self::matrices`] is the seed derivation ([`SeededMatrices`]), so that
+    /// the matrices are uniform and independent of everything absorbed before `sd` and the
+    /// bridge's soundness bound applies. Mode A (Flock profiles `Fast` and `LaBinius`) is refused
     /// by [`prove`] and by `verifier::verify` otherwise.
     fn seed_derived(&self) -> bool {
         false
     }
 }
 
-/// The matrices of spec Section 9.1: `M_1, M_2, M_3` derived from `sd` with cSHAKE256
+/// The seed-derived matrices: `M_1, M_2, M_3` derived from `sd` with cSHAKE256
 /// (`agg_bridge::seed::derive_matrices`). The derivation for prover and verifier builds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SeededMatrices;
@@ -76,9 +76,9 @@ impl BridgeDerivation for SeededMatrices {
 }
 
 /// Fixed matrices whatever the seed (test stand-in: unit tests and the `test-hooks`
-/// feature only). The prover knows them before it commits `G_main`, so the bound of spec
-/// 9.4 does not hold; mode A refuses them, mode B stays sound through its direct bit check
-/// (`docs/deviations.md` P9).
+/// feature only). The prover knows them before it commits `G_main`, so the bridge's
+/// soundness bound does not hold; mode A refuses them, mode B stays sound through its direct
+/// bit check (`docs/deviations.md`).
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct FixedMatrices(pub BridgeMatrices);
 
@@ -89,11 +89,10 @@ impl BridgeDerivation for FixedMatrices {
     }
 }
 
-/// The Keccak argument's transcript contributions (spec Section 10: events 2 and 6 and the
-/// join event).
+/// The Keccak argument's transcript contributions (events 2 and 6 and the join event).
 pub trait KeccakSide {
     /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites,
-    /// `docs/soundness.md` Section 6.4), a function of the public batch geometry, needed
+    /// `docs/soundness.md`), a function of the public batch geometry, needed
     /// before event 0. The default (no tied parts) fits a side without Flock sub-proofs.
     fn plan(&self, _segments: usize) -> KeccakPlan {
         KeccakPlan::default()
@@ -119,24 +118,24 @@ pub trait KeccakSide {
 
     /// Whether [`Self::prove`] does work worth a thread pool of its own (default `true`). A
     /// side whose proof items are empty (mode B, profile 0) returns `false`, and the prover
-    /// then skips the fork of deviation K22: the transcript and the proof are the same
+    /// then skips the fork: the transcript and the proof are the same
     /// either way.
     fn proves_concurrently(&self) -> bool {
         true
     }
 
     /// The `S` Flock proofs of the join event. They may be computed concurrently with the
-    /// PIOP (deviation K22), so they depend on nothing after event 6: `bridge_seed` is `sd`
+    /// PIOP, so they depend on nothing after event 6: `bridge_seed` is `sd`
     /// (event 3) and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
     /// `fs_sigma` (event 5), `final_vectors` the `Y_sigma` and `record` the digest of the
     /// event-6 record ([`crate::transcript::flock_record_digest`]: the final vectors and the
     /// share items), which the side MUST bind into every challenger of its sub-proofs, so
     /// that their challenge addresses encode the input of the lookup challenge `X`
-    /// (`docs/soundness.md` 12.2, Lemma 12.3 (a)).
+    /// (`docs/soundness.md`).
     ///
     /// # Errors
     /// [`ProveError::Keccak`] if a sub-proof cannot be made (an exhausted proof-of-work
-    /// search, `docs/soundness.md` 6.5).
+    /// search).
     fn prove(
         &self,
         bridge_seed: &[u8; 32],
@@ -175,15 +174,14 @@ impl KeccakSide for NoKeccak {
     }
 }
 
-/// Threads of the Flock pool of the fork-join (deviation K22): `AGG_FLOCK_THREADS` if set
-/// (`0`: no fork, the Flock proofs and then the PIOP on the caller's pool), else half the
-/// global pool rounded up (8 of 16 threads on the cloud machine, the better split of
-/// `ref/notes/bench-cloud.md` Phase 10 (6); a global pool of 8 threads alone was slower,
-/// Phase 10 (1)). A value that is not a number is reported once on stderr and replaced by
-/// the default (a measurement must not silently run another pool size; the bench report
-/// prints the size used); a larger value than [`max_flock_threads`] is clamped to it. `0`
-/// on a rayon worker or with a one-thread global pool, where an extra pool gains nothing or a
-/// blocked worker could deadlock (deviation P12).
+/// Threads of the Flock pool of the fork-join: `AGG_FLOCK_THREADS` if set (`0`: no fork,
+/// the Flock proofs and then the PIOP on the caller's pool), else half the global pool
+/// rounded up (8 of 16 threads on the cloud machine, the better split there; a global pool
+/// of 8 threads alone is slower). A value that is not a number is reported once on stderr
+/// and replaced by the default (a measurement must not silently run another pool size; the
+/// bench report prints the size used); a larger value than [`max_flock_threads`] is clamped
+/// to it. `0` on a rayon worker or with a one-thread global pool, where an extra pool gains
+/// nothing or a blocked worker could deadlock.
 #[must_use]
 pub fn flock_pool_threads() -> usize {
     if crate::pcs::on_calling_thread() {
@@ -339,11 +337,11 @@ pub struct ProverInputs<'a> {
     pub records: &'a [(&'a [u8], &'a [u8], [u8; C_TILDE_BYTES])],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
-    /// The relation to prove (`docs/h-exact.md` Sections 1 and 10): H-u, H-exact or H-FIPS.
+    /// The relation to prove (`docs/h-exact.md`): H-u, H-exact or H-FIPS.
     pub relation: Relation,
 }
 
-/// Wall time of each prover step (spec Section 10 event order).
+/// Wall time of each prover step (in event order).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProveTimings {
     /// Witness derivation and the round-1 tables (`G_main16`, `G_main4`).
@@ -461,7 +459,7 @@ impl Lap {
     }
 }
 
-/// Mode A (Flock profiles `Fast`, `LaBinius`) only with the matrices of spec 9.1: a proof
+/// Mode A (Flock profiles `Fast`, `LaBinius`) only with the seed-derived matrices: a proof
 /// over other matrices would be refused by the verifier.
 fn check_bridge(bridge: &impl BridgeDerivation, flock: FlockProfile) -> Result<(), ProveError> {
     if flock.is_mode_a() && !bridge.seed_derived() {
@@ -588,7 +586,7 @@ fn prove_piop_with<'a>(
     let mut run = PiopRun::default();
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
 
-    // Event 7: the lookup into T_16 (docs/lookup.md Section 1) and the digit claims of m.
+    // Event 7: the lookup into T_16 and the digit claims of m.
     let stacks = tables.lookup_stacks()?;
     let multiplicity = vec![tables.bridge.multiplicity().to_vec()];
     let output = prove_in(
@@ -687,8 +685,8 @@ fn prove_piop_with<'a>(
         transcript,
     )?;
     // The owned buffers (parities and weights, several GiB at 32K) are unmapped on a
-    // detached thread, off the PIOP branch's critical path (lever A, docs/perf.md
-    // Section 11); `prover_tables` itself only borrows the committed tables.
+    // detached thread, off the PIOP branch's critical path; `prover_tables` itself only
+    // borrows the committed tables.
     let ProverTables {
         parity1,
         w1,
@@ -731,7 +729,7 @@ pub fn prove_with_tables(
 
 /// [`prove_with_tables`] with the Akita prover setup built beforehand: it depends on the
 /// record count and the relation only, so a caller can build it on its own thread while
-/// the instance and the tables are computed (lever A (a), docs/perf.md Section 11).
+/// the instance and the tables are computed.
 /// `None`, or a setup of another manifest, builds it here.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn prove_with_tables_using(
@@ -760,7 +758,7 @@ pub fn prove_with_tables_using(
     };
     timings.setup = clock.lap();
 
-    // Events 0 to 3: instance (with the proof-of-work plan's digest, docs/soundness.md 6.4),
+    // Events 0 to 3: instance (with the proof-of-work plan's digest),
     // round-1 commitments, Flock commitments, bridge seed.
     let digest = public_records_binding(inputs.records);
     let plan = PowPlan::new(manifest, flock, &keccak.plan(segments));
@@ -771,7 +769,7 @@ pub fn prove_with_tables_using(
     // transcript absorbs them in event order afterwards. Each step's time is its own
     // closure's, so in mode A the two overlap in wall time. `overlap`, not `rayon::join`:
     // the commit side must not run on a rayon worker that then blocks on its commit threads
-    // (one-thread pools deadlocked; deviation P12).
+    // (a one-thread pool would deadlock).
     let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
         || {
             let start = Instant::now();
@@ -813,7 +811,7 @@ pub fn prove_with_tables_using(
     // The parity tables of the stages need no challenge after event 3. Under
     // `AGG_PARITY_EARLY` they are built beside the round-2 commitment (a memory-bound step
     // that leaves threads idle on the cloud VM) instead of on the PIOP branch of the fork;
-    // opt-in until a 32K A/B decides (local 8K: no net change, docs/perf.md Section 11).
+    // opt-in (no net change at 8K records).
     let (round2, mut early_parity) = if parity_beside_round2() {
         let (round2, parity) = crate::pcs::overlap(
             || committer.commit_round2(&bridge_tables),
@@ -844,7 +842,7 @@ pub fn prove_with_tables_using(
     let flock_record = flock_record_digest(&final_vectors, &flock_shares);
     timings.keccak += clock.lap();
 
-    // The fork (deviation K22): the Flock proofs depend on nothing after event 6, and no
+    // The fork: the Flock proofs depend on nothing after event 6, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
     // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
     // (events 10 to 12) run on the global pool; the join absorbs them after stage 3.

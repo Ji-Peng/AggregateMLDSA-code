@@ -1,22 +1,21 @@
-//! Sum-check PIOP for the ML-DSA-44 aggregation relation H
-//! (docs/spec.md Sections 5-7, 10-11; Section 14, milestone M2).
+//! Sum-check PIOP for the ML-DSA-44 aggregation relation H (`docs/spec.md`).
 //!
 //! Aerie's projection, stage and transcript machinery is reached through
 //! `aerie_prover` with its `internals` feature (re-exported below).
 //!
-//! Prover-side tables and commitments (spec Sections 2, 4, 5): [`manifest`] fixes the four
+//! Prover-side tables and commitments: [`manifest`] fixes the four
 //! Akita groups, [`source_tables`] materializes them from `agg-witness` batches, [`pcs`]
 //! commits them through `agg-pcs-config` and opens them in one batch, [`public_data`] holds
 //! the verifier's precomputation and the negacyclic `eq` helpers, and [`virtual_polys`] the
 //! virtual-table evaluators.
 //!
-//! The sum-check PIOP (spec Sections 6, 7, 10, 11): [`kernel`] folds narrow tables and
+//! The sum-check PIOP: [`kernel`] folds narrow tables and
 //! batches instances per local domain, [`stage`] runs a declarative stage table as prover
 //! or verifier, [`stage1`], [`stage2`], [`stage3`] are the three stages, [`weights`] the
 //! public weight tables, [`transcript`] the Spongefish stream and event registry,
 //! [`wire`] the proof bytes, [`prover`] and [`verifier`] the drivers, [`public_stream`]
-//! the verifier's streamed public data. [`mode_b`] is the Keccak-free aggregate of
-//! milestone M2 (`prove_mode_b`, `verify_mode_b`). `docs/piop.md` has the stage table.
+//! the verifier's streamed public data. [`mode_b`] is the Keccak-free aggregate
+//! (`prove_mode_b`, `verify_mode_b`). `docs/piop.md` has the stage table.
 
 pub mod binding;
 pub mod claims;
@@ -60,7 +59,7 @@ pub const fn avx512_enabled() -> bool {
 /// Whether the unsound test stand-ins are compiled in (unit tests, or the `test-hooks`
 /// feature): `prover::FixedMatrices`, `prover::NoKeccak`, `verifier::NoKeccakVerifier`,
 /// and verification under Flock profile 0. A prover, verifier or benchmark build has
-/// `false` (`docs/deviations.md` P4).
+/// `false` (`docs/deviations.md`).
 #[must_use]
 pub const fn test_hooks_enabled() -> bool {
     cfg!(any(test, feature = "test-hooks"))
