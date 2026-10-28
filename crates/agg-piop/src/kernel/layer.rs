@@ -38,22 +38,34 @@ use crate::OpeningField as E;
 /// Message degree of a session.
 const DEGREE: usize = 3;
 
-/// The level-0 data of a dedicated group and its table form.
+/// The level-0 data of a dedicated group and its table form. The summand is
+/// `constant + sum_s c_s (sum_(l in L_s) L_l + sum_((i, j) in P_s) L_i L_j)` over coefficient
+/// slots `s`: the engine accumulates every slot's sums unreduced and applies `c_s` once per
+/// block of the first equality table (or once per task without an equality factor).
 trait Level0: Sync {
     /// Lanes per table row.
     fn width(&self) -> usize;
     /// Rows at level 0.
     fn rows(&self) -> usize;
-    /// Item `k` of the first round (level-0 rows `2k`, `2k + 1`): `sums[0] += f(row 2k)`,
-    /// `sums[1] += f(row 2k + 1)` when `full`, `sums[2] +=` the quadratic part of
-    /// `f` at the difference.
-    fn first_item(&self, k: usize, full: bool, sums: &mut [Acc; 3]);
+    /// The coefficient of every slot (one is applied without a product).
+    fn slots(&self) -> &[E];
+    /// The constant of the summand (the remaining equality weights sum to one).
+    fn constant(&self) -> E {
+        E::zero()
+    }
+    /// Item `k` of the first round (level-0 rows `2k`, `2k + 1`): for every slot `s` of
+    /// [`Self::first_slots`], `sums[s][0] += f_s(row 2k)`, `sums[s][1] += f_s(row 2k + 1)`
+    /// when `full`, `sums[s][2] +=` the quadratic part of `f_s` at the difference (all
+    /// unreduced and without the coefficient `c_s`).
+    fn first_item(&self, k: usize, full: bool, sums: &mut [[Acc; 3]]);
+    /// The slots [`Self::first_item`] writes.
+    fn first_slots(&self) -> &[usize];
     /// Row `i` of level 1 (level-0 rows `2i`, `2i + 1` folded by `r`), transformed.
     fn folded_row(&self, r: E, context: &<E as Fold>::Ctx, i: usize, out: &mut [E]);
-    /// The lanes of the summand `sum_l L_l + sum L_i L_j` on a table row.
-    fn linear(&self) -> &[usize];
-    /// The products of the summand.
-    fn products(&self) -> &[(usize, usize)];
+    /// `(lane, slot)` of the linear lanes of the summand on a table row.
+    fn linear(&self) -> &[(usize, usize)];
+    /// `(lane, lane, slot)` of the products of the summand on a table row.
+    fn products(&self) -> &[(usize, usize, usize)];
     /// The group's terminal lane values from the fully folded row.
     fn terminal(&self, row: &[E]) -> Vec<E>;
     /// A materialized level-0 table (then the rounds run on it from the first, and
@@ -174,6 +186,8 @@ struct Engine<S: Level0> {
     /// The table from the first fold on (empty before it).
     table: Vec<E>,
     arena: Option<super::SharedArena>,
+    /// The products grouped by slot (each group reduced and weighted once per item).
+    product_groups: Vec<(usize, Vec<(usize, usize)>)>,
 }
 
 impl<S: Level0> Engine<S> {
@@ -187,6 +201,13 @@ impl<S: Level0> Engine<S> {
             return None;
         }
         let table = source.initial_table().unwrap_or_default();
+        let mut product_groups: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+        for &(i, j, slot) in source.products() {
+            match product_groups.iter_mut().find(|(s, _)| *s == slot) {
+                Some((_, list)) => list.push((i, j)),
+                None => product_groups.push((slot, vec![(i, j)])),
+            }
+        }
         Some(Self {
             source,
             eq,
@@ -198,59 +219,94 @@ impl<S: Level0> Engine<S> {
             unfolded: Vec::new(),
             table,
             arena: None,
+            product_groups,
         })
     }
 
-    /// `f` on rows `a` (into `sums[0]`) and `b` (into `sums[1]`, when `full`) and its
-    /// quadratic part at `b - a` (into `sums[2]`).
-    #[inline]
-    fn table_item(&self, a: &[E], b: &[E], full: bool, sums: &mut [Acc; 3]) {
-        for &l in self.source.linear() {
-            lift(&mut sums[0], a[l]);
+    /// The products of rows `a`, `b` into their slots: `sums[s][0] += L_i L_j` at `a`,
+    /// `sums[s][1]` at `b` (when `full`), `sums[s][2]` at the difference.
+    #[inline(always)]
+    fn product_sums(&self, a: &[E], b: &[E], full: bool, sums: &mut [[Acc; 3]]) {
+        for &(i, j, s) in self.source.products() {
+            mad(&mut sums[s][0], a[i], a[j]);
+            mad(&mut sums[s][2], b[i] - a[i], b[j] - a[j]);
             if full {
-                lift(&mut sums[1], b[l]);
-            }
-        }
-        for &(i, j) in self.source.products() {
-            mad(&mut sums[0], a[i], a[j]);
-            mad(&mut sums[2], b[i] - a[i], b[j] - a[j]);
-            if full {
-                mad(&mut sums[1], b[i], b[j]);
+                mad(&mut sums[s][1], b[i], b[j]);
             }
         }
     }
 
-    /// `inner += weight * sums` for the sums the round needs (`q(1)` only when `full`,
-    /// `q_2` only with products).
-    #[inline]
-    fn add_weighted(&self, sums: [Acc; 3], weight: E, full: bool, inner: &mut [Acc; 3]) {
-        mad(&mut inner[0], weight, E::reduce_product(sums[0]));
-        if full {
-            mad(&mut inner[1], weight, E::reduce_product(sums[1]));
-        }
-        if !self.source.products().is_empty() {
-            mad(&mut inner[2], weight, E::reduce_product(sums[2]));
+    /// The linear lanes of rows `a`, `b` into their slots (the unweighted path).
+    #[inline(always)]
+    fn linear_sums(&self, a: &[E], b: &[E], full: bool, sums: &mut [[Acc; 3]]) {
+        for &(l, s) in self.source.linear() {
+            lift(&mut sums[s][0], a[l]);
+            if full {
+                lift(&mut sums[s][1], b[l]);
+            }
         }
     }
 
-    /// The weighted item of rows `a`, `b`; a purely linear summand is weighted directly.
-    #[inline]
-    fn weighted_item(&self, a: &[E], b: &[E], weight: E, full: bool, inner: &mut [Acc; 3]) {
-        if self.source.products().is_empty() {
-            for &l in self.source.linear() {
-                mad(&mut inner[0], weight, a[l]);
+    /// `inner[s] += weight * sums[s]` (reduced once per slot and value) for the listed
+    /// slots, which are cleared.
+    #[inline(always)]
+    fn add_weighted(slots: &[usize], sums: &mut [[Acc; 3]], weight: E, full: bool, inner: &mut [[Acc; 3]]) {
+        for &s in slots {
+            mad(&mut inner[s][0], weight, E::reduce_product(sums[s][0]));
+            mad(&mut inner[s][2], weight, E::reduce_product(sums[s][2]));
+            if full {
+                mad(&mut inner[s][1], weight, E::reduce_product(sums[s][1]));
+            }
+            sums[s] = [Acc::zero(); 3];
+        }
+    }
+
+    /// The weighted item of table rows `a`, `b`: linear lanes are weighted directly (no
+    /// reduction), the products of a slot through one unreduced sum each.
+    #[inline(always)]
+    fn weighted_item(&self, a: &[E], b: &[E], weight: E, full: bool, inner: &mut [[Acc; 3]]) {
+        for &(l, s) in self.source.linear() {
+            mad(&mut inner[s][0], weight, a[l]);
+            if full {
+                mad(&mut inner[s][1], weight, b[l]);
+            }
+        }
+        for (s, list) in &self.product_groups {
+            let mut sums = [Acc::zero(); 3];
+            for &(i, j) in list {
+                mad(&mut sums[0], a[i], a[j]);
+                mad(&mut sums[2], b[i] - a[i], b[j] - a[j]);
                 if full {
-                    mad(&mut inner[1], weight, b[l]);
+                    mad(&mut sums[1], b[i], b[j]);
                 }
             }
-            return;
+            let slot = &mut inner[*s];
+            mad(&mut slot[0], weight, E::reduce_product(sums[0]));
+            mad(&mut slot[2], weight, E::reduce_product(sums[2]));
+            if full {
+                mad(&mut slot[1], weight, E::reduce_product(sums[1]));
+            }
         }
-        let mut sums = [Acc::zero(); 3];
-        self.table_item(a, b, full, &mut sums);
-        self.add_weighted(sums, weight, full, inner);
     }
 
-    /// One pass: fold by the pending challenge (if any) into the next table, then (when
+    /// `out += sum_s c_s reduce(slots[s])` (the slot coefficients applied once), clearing
+    /// the slots.
+    #[inline]
+    fn combine_slots(coefficients: &[E], slots: &mut [[Acc; 3]], out: &mut [Acc; 3]) {
+        for (acc, &c) in slots.iter_mut().zip(coefficients) {
+            for (o, a) in out.iter_mut().zip(acc.iter()) {
+                let value = E::reduce_product(*a);
+                if c == E::one() {
+                    lift(o, value);
+                } else {
+                    mad(o, c, value);
+                }
+            }
+            *acc = [Acc::zero(); 3];
+        }
+    }
+
+    /// One pass: fold by the pending challenges (if any) into the next table, then (when
     /// `evaluate`) `[q(0), q(1), q_2]` of the round on the new level, with the remaining
     /// equality weights (`q(1)` only when `full`).
     #[allow(clippy::too_many_lines)]
@@ -300,6 +356,9 @@ impl<S: Level0> Engine<S> {
         let first_mask = first.len() - 1;
         let keep = !challenges.is_empty();
         let this = &*self;
+        let coefficients = self.source.slots();
+        let slot_count = coefficients.len();
+        let first_slots = self.source.first_slots();
         // Output rows 2k, 2k + 1 (row 0 alone at the final fold) into `rows`.
         let fill = |k: usize, rows: &mut [std::mem::MaybeUninit<E>], scratch: &mut [E]| {
             let context = context.as_ref().expect("a fold");
@@ -323,12 +382,15 @@ impl<S: Level0> Engine<S> {
             let mut scratch = vec![E::zero(); width];
             let start = task * ITEM_CHUNK;
             let end = ((task + 1) * ITEM_CHUNK).min(items);
+            // Per slot: the first-round item sums (unreduced), the block sums (weighted by
+            // the first table); `outer` carries the coefficients and the second table.
+            let mut sums = vec![[Acc::zero(); 3]; if from_source { slot_count } else { 0 }];
+            let mut inner = vec![[Acc::zero(); 3]; slot_count];
             let mut outer = [Acc::zero(); 3];
-            let mut inner = [Acc::zero(); 3];
             let mut block = start >> first_bits;
             for k in start..end {
                 if unweighted {
-                    // A plain sum: the item sums accumulate unreduced, without weights.
+                    // A plain sum: the slot sums accumulate unreduced over the whole task.
                     if keep {
                         let offset = (k - start) * 2 * width;
                         let len = (2 * width).min(out.len() - offset);
@@ -338,21 +400,24 @@ impl<S: Level0> Engine<S> {
                         let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
                         if evaluate {
                             let (a, b) = rows.split_at(width);
-                            this.table_item(a, b, full, &mut outer);
+                            this.linear_sums(a, b, full, &mut inner);
+                            this.product_sums(a, b, full, &mut inner);
                         }
                     } else if from_source {
-                        this.source.first_item(k, full, &mut outer);
+                        this.source.first_item(k, full, &mut inner);
                     } else {
                         let a = &previous[2 * k * width..(2 * k + 1) * width];
                         let b = &previous[(2 * k + 1) * width..(2 * k + 2) * width];
-                        this.table_item(a, b, full, &mut outer);
+                        this.linear_sums(a, b, full, &mut inner);
+                        this.product_sums(a, b, full, &mut inner);
                     }
                     continue;
                 }
                 if evaluate && (k >> first_bits) != block {
-                    for (o, i) in outer.iter_mut().zip(&mut inner) {
-                        mad(o, second[block], E::reduce_product(*i));
-                        *i = Acc::zero();
+                    let mut total = [Acc::zero(); 3];
+                    Self::combine_slots(coefficients, &mut inner, &mut total);
+                    for (o, t) in outer.iter_mut().zip(total) {
+                        mad(o, second[block], E::reduce_product(t));
                     }
                     block = k >> first_bits;
                 }
@@ -362,26 +427,31 @@ impl<S: Level0> Engine<S> {
                     let len = (2 * width).min(out.len() - offset);
                     let rows = &mut out[offset..offset + len];
                     fill(k, rows, &mut scratch);
-                        // SAFETY: fill initialized every slot in these rows before evaluation.
-                        let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
+                    // SAFETY: fill initialized every slot in these rows before evaluation.
+                    let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
                     if !evaluate {
                         continue;
                     }
                     let (a, b) = rows.split_at(width);
                     this.weighted_item(a, b, weight, full, &mut inner);
                 } else if from_source {
-                    let mut sums = [Acc::zero(); 3];
                     this.source.first_item(k, full, &mut sums);
-                    this.add_weighted(sums, weight, full, &mut inner);
+                    Self::add_weighted(first_slots, &mut sums, weight, full, &mut inner);
                 } else {
                     let a = &previous[2 * k * width..(2 * k + 1) * width];
                     let b = &previous[(2 * k + 1) * width..(2 * k + 2) * width];
                     this.weighted_item(a, b, weight, full, &mut inner);
                 }
             }
-            if evaluate && !unweighted && start < end {
-                for (o, i) in outer.iter_mut().zip(&inner) {
-                    mad(o, second[block], E::reduce_product(*i));
+            if evaluate && start < end {
+                let mut total = [Acc::zero(); 3];
+                Self::combine_slots(coefficients, &mut inner, &mut total);
+                if unweighted {
+                    outer = total;
+                } else {
+                    for (o, t) in outer.iter_mut().zip(total) {
+                        mad(o, second[block], E::reduce_product(t));
+                    }
                 }
             }
             outer
@@ -426,7 +496,17 @@ impl<S: Level0> Engine<S> {
             // SAFETY: each kept output row is initialized exactly once by run/fill.
             self.table = unsafe { super::buf::finish(table) };
         }
-        total.map(E::reduce_product)
+        let mut sums = total.map(E::reduce_product);
+        if evaluate {
+            // The constant, summed with the weights (one) or over the items.
+            let constant = self.source.constant();
+            if !constant.is_zero() {
+                let constant = if unweighted { constant * E::from_u64(items as u64) } else { constant };
+                sums[0] += constant;
+                sums[1] += constant;
+            }
+        }
+        sums
     }
 
     fn round_message(&mut self, round: usize) -> Vec<E> {
@@ -497,12 +577,17 @@ impl<S: Level0> Engine<S> {
             return false;
         }
         let row = &self.table;
-        let linear = self.source.linear().iter().fold(E::zero(), |s, &l| s + row[l]);
+        let coefficients = self.source.slots();
+        let linear = self
+            .source
+            .linear()
+            .iter()
+            .fold(self.source.constant(), |s, &(l, slot)| s + coefficients[slot] * row[l]);
         let sum = self
             .source
             .products()
             .iter()
-            .fold(linear, |s, &(i, j)| s + row[i] * row[j]);
+            .fold(linear, |s, &(i, j, slot)| s + coefficients[slot] * row[i] * row[j]);
         let factor = self.eq.as_ref().map_or(E::one(), GruenSplitEq::current_scalar);
         factor * self.scale * sum == self.claim
     }
@@ -530,8 +615,10 @@ struct LayerSource<'a> {
     trees: Vec<LayerTree<'a>>,
     /// `gamma_q / gamma_p` and `1 / gamma_p` per tree.
     ratio: Vec<(E, E)>,
-    products: Vec<(usize, usize)>,
+    products: Vec<(usize, usize, usize)>,
     half: usize,
+    /// The single slot's coefficient, one.
+    unit: [E; 1],
 }
 
 impl LayerSource<'_> {
@@ -561,7 +648,12 @@ impl Level0 for LayerSource<'_> {
         self.half
     }
 
-    fn first_item(&self, k: usize, full: bool, sums: &mut [Acc; 3]) {
+    fn slots(&self) -> &[E] {
+        &self.unit
+    }
+
+    fn first_item(&self, k: usize, full: bool, sums: &mut [[Acc; 3]]) {
+        let sums = &mut sums[0];
         for t in 0..self.trees.len() {
             let a = self.cell(t, 2 * k);
             let b = self.cell(t, 2 * k + 1);
@@ -574,6 +666,10 @@ impl Level0 for LayerSource<'_> {
                 mad(&mut sums[1], b[2], b[3]);
             }
         }
+    }
+
+    fn first_slots(&self) -> &[usize] {
+        &[0]
     }
 
     fn folded_row(&self, _: E, context: &<E as Fold>::Ctx, i: usize, out: &mut [E]) {
@@ -589,11 +685,11 @@ impl Level0 for LayerSource<'_> {
         }
     }
 
-    fn linear(&self) -> &[usize] {
+    fn linear(&self) -> &[(usize, usize)] {
         &[]
     }
 
-    fn products(&self) -> &[(usize, usize)] {
+    fn products(&self) -> &[(usize, usize, usize)] {
         &self.products
     }
 
@@ -628,12 +724,13 @@ impl<'a> LayerGroup<'a> {
             .iter()
             .map(|t| t.gamma_p.inverse().map(|inverse| (t.gamma_q * inverse, inverse)))
             .collect::<Option<Vec<(E, E)>>>()?;
-        let products = (0..trees.len()).flat_map(|t| [(4 * t, 4 * t + 1), (4 * t + 2, 4 * t + 3)]).collect();
+        let products = (0..trees.len()).flat_map(|t| [(4 * t, 4 * t + 1, 0), (4 * t + 2, 4 * t + 3, 0)]).collect();
         let source = LayerSource {
             trees,
             ratio,
             products,
             half,
+            unit: [E::one()],
         };
         Engine::new(source, eq_point).map(Self)
     }
@@ -696,10 +793,13 @@ struct IntSource<'a> {
     m: Option<[&'a [i32]; 2]>,
     /// `c, c_s, c_m, c_k, c_mm`.
     c: [E; 5],
-    /// Without `M`: `1 / c_m`; with `M`: `1 / (c_m c_mm - c_k^2)`.
+    /// With `M` lanes: `1 / (c_m c_mm - c_k^2)` (the inverse of the `W` transform).
     inverse: E,
-    linear: [usize; 1],
-    products: Vec<(usize, usize)>,
+    /// Without `M`: the slot coefficients `c_s, c_m`; with `M`: one.
+    slots: Vec<E>,
+    linear: Vec<(usize, usize)>,
+    products: Vec<(usize, usize, usize)>,
+    first_slots: Vec<usize>,
     /// The integer prefix of two rounds: the second round is computed from the leaves and
     /// the first table is level 2 (the leaves are small enough for exact `i64` products of
     /// the leaf differences, see [`IntPairGroup::new`]).
@@ -799,33 +899,20 @@ impl IntSource<'_> {
         E::reduce_product(acc)
     }
 
-    /// `f` minus `c` at integer lanes (exact products in `i64`).
+    /// `f` minus `c` at integer lanes with `M` (exact products in `i64`).
     #[inline(always)]
-    fn value(&self, s0: i64, s1: i64, m: Option<(i64, i64)>) -> E {
+    fn value(&self, s0: i64, s1: i64, m0: i64, m1: i64) -> E {
         let [_, cs, cm, ck, cmm] = self.c;
-        match m {
-            None => fmi(cs, s0 + s1) + fmi(cm, s0 * s1),
-            Some((m0, m1)) => {
-                fmi(cs, s0 + s1) + fmi(cm, m0 + m1 + s0 * s1) + fmi(ck, s0 * m1 + s1 * m0) + fmi(cmm, m0 * m1)
-            }
-        }
+        fmi(cs, s0 + s1) + fmi(cm, m0 + m1 + s0 * s1) + fmi(ck, s0 * m1 + s1 * m0) + fmi(cmm, m0 * m1)
     }
 
-    /// `S_1` (and `M_1`) folded into the `W` lanes.
+    /// `S_1` and `M_1` folded into the `W` lanes (`W = C (1, S_1, M_1)`).
     #[inline(always)]
     fn w_lanes(&self, s1: E, m1: E, out: &mut [E]) {
         let [c, cs, cm, ck, cmm] = self.c;
-        match self.m {
-            None => {
-                out[0] = c + fm(cs, s1);
-                out[1] = cs + fm(cm, s1);
-            }
-            Some(_) => {
-                out[0] = c + fm(cs, s1) + fm(cm, m1);
-                out[1] = cs + fm(cm, s1) + fm(ck, m1);
-                out[2] = cm + fm(ck, s1) + fm(cmm, m1);
-            }
-        }
+        out[0] = c + fm(cs, s1) + fm(cm, m1);
+        out[1] = cs + fm(cm, s1) + fm(ck, m1);
+        out[2] = cm + fm(ck, s1) + fm(cmm, m1);
     }
 }
 
@@ -837,54 +924,67 @@ fn int_fold(r: E, lane: &[i32], i: usize) -> E {
 
 impl Level0 for IntSource<'_> {
     fn width(&self) -> usize {
-        if self.m.is_some() { 5 } else { 3 }
+        if self.m.is_some() { 5 } else { 2 }
     }
 
     fn rows(&self) -> usize {
         self.s[0].len()
     }
 
-    fn first_item(&self, k: usize, full: bool, sums: &mut [Acc; 3]) {
+    fn slots(&self) -> &[E] {
+        &self.slots
+    }
+
+    fn constant(&self) -> E {
+        // With `M` lanes the constant is part of `W_0`.
+        if self.m.is_some() { E::zero() } else { self.c[0] }
+    }
+
+    fn first_item(&self, k: usize, full: bool, sums: &mut [[Acc; 3]]) {
         let cell = |lane: &[i32], i: usize| i64::from(lane[i]);
         let (a, b) = (2 * k, 2 * k + 1);
         let [s0, s1] = self.s;
-        let c = self.c[0];
-        let [_, _, cm, ck, cmm] = self.c;
         let (sa0, sa1, sb0, sb1) = (cell(s0, a), cell(s1, a), cell(s0, b), cell(s1, b));
         let (ds0, ds1) = (sb0 - sa0, sb1 - sa1);
         match self.m {
             None => {
-                lift(&mut sums[0], c + self.value(sa0, sa1, None));
+                // Exact integer values of both slots (products below 2^62 within the bound).
+                lift_int(&mut sums[0][0], sa0 + sa1);
+                lift_int(&mut sums[1][0], sa0 * sa1);
+                lift_int(&mut sums[1][2], ds0 * ds1);
                 if full {
-                    lift(&mut sums[1], c + self.value(sb0, sb1, None));
+                    lift_int(&mut sums[0][1], sb0 + sb1);
+                    lift_int(&mut sums[1][1], sb0 * sb1);
                 }
-                lift(&mut sums[2], fmi(cm, ds0 * ds1));
             }
             Some([m0, m1]) => {
                 let (ma0, ma1, mb0, mb1) = (cell(m0, a), cell(m1, a), cell(m0, b), cell(m1, b));
                 let (dm0, dm1) = (mb0 - ma0, mb1 - ma1);
-                lift(&mut sums[0], c + self.value(sa0, sa1, Some((ma0, ma1))));
+                let [c, _, cm, ck, cmm] = self.c;
+                lift(&mut sums[0][0], c + self.value(sa0, sa1, ma0, ma1));
                 if full {
-                    lift(&mut sums[1], c + self.value(sb0, sb1, Some((mb0, mb1))));
+                    lift(&mut sums[0][1], c + self.value(sb0, sb1, mb0, mb1));
                 }
                 lift(
-                    &mut sums[2],
+                    &mut sums[0][2],
                     fmi(cm, ds0 * ds1) + fmi(ck, ds0 * dm1 + ds1 * dm0) + fmi(cmm, dm0 * dm1),
                 );
             }
         }
     }
 
+    fn first_slots(&self) -> &[usize] {
+        &self.first_slots
+    }
+
     fn folded_row(&self, r: E, _: &<E as Fold>::Ctx, i: usize, out: &mut [E]) {
         let [s0, s1] = self.s;
         out[0] = int_fold(r, s0, i);
-        let s1 = int_fold(r, s1, i);
         match self.m {
-            None => self.w_lanes(s1, E::zero(), &mut out[1..3]),
+            None => out[1] = int_fold(r, s1, i),
             Some([m0, m1]) => {
                 out[1] = int_fold(r, m0, i);
-                let m1 = int_fold(r, m1, i);
-                self.w_lanes(s1, m1, &mut out[2..5]);
+                self.w_lanes(int_fold(r, s1, i), int_fold(r, m1, i), &mut out[2..5]);
             }
         }
     }
@@ -1016,29 +1116,27 @@ impl Level0 for IntSource<'_> {
     fn folded2_row(&self, r: [E; 3], i: usize, out: &mut [E]) {
         let [s0, s1] = self.s;
         out[0] = Self::fold2(r, s0, i);
-        let s1 = Self::fold2(r, s1, i);
         match self.m {
-            None => self.w_lanes(s1, E::zero(), &mut out[1..3]),
+            None => out[1] = Self::fold2(r, s1, i),
             Some([m0, m1]) => {
                 out[1] = Self::fold2(r, m0, i);
-                let m1 = Self::fold2(r, m1, i);
-                self.w_lanes(s1, m1, &mut out[2..5]);
+                self.w_lanes(Self::fold2(r, s1, i), Self::fold2(r, m1, i), &mut out[2..5]);
             }
         }
     }
 
-    fn linear(&self) -> &[usize] {
+    fn linear(&self) -> &[(usize, usize)] {
         &self.linear
     }
 
-    fn products(&self) -> &[(usize, usize)] {
+    fn products(&self) -> &[(usize, usize, usize)] {
         &self.products
     }
 
     fn terminal(&self, row: &[E]) -> Vec<E> {
         let [_, cs, cm, ck, cmm] = self.c;
         match self.m {
-            None => vec![row[0], (row[2] - cs) * self.inverse],
+            None => row.to_vec(),
             Some(_) => {
                 // [W_1 - c_s; W_2 - c_m] = [[c_m, c_k], [c_k, c_mm]] [S_1; M_1].
                 let (u, v) = (row[3] - cs, row[4] - cm);
@@ -1065,8 +1163,8 @@ impl<'a> IntPairGroup<'a> {
     /// without them the lanes are checked against `2^30`. Smaller lanes (`|S| <= 2^16`
     /// with `M`, leaves below `2^20` without) run the integer prefix: the second round is
     /// computed from the leaves as well and the first table is a quarter of the domain.
-    /// `None` when the transform is singular, a lane has the wrong length or a value is out
-    /// of range.
+    /// `None` when the `W` transform is singular (with `M`), a lane has the wrong length or a
+    /// value is out of range.
     #[must_use]
     pub fn new(s: [&'a [i32]; 2], m: Option<[&'a [i32]; 2]>, coefficients: [E; 5], eq_point: &[E]) -> Option<Self> {
         let rows = 1_usize << eq_point.len();
@@ -1074,7 +1172,7 @@ impl<'a> IntPairGroup<'a> {
         if lanes.clone().any(|lane| lane.len() != rows) {
             return None;
         }
-        let [_, _, cm, ck, cmm] = coefficients;
+        let [_, cs, cm, ck, cmm] = coefficients;
         // The largest magnitude over a set of lanes (one streaming pass).
         let magnitude = |lanes: &[&[i32]]| -> i64 {
             lanes
@@ -1084,26 +1182,34 @@ impl<'a> IntPairGroup<'a> {
                 .unwrap_or(0)
         };
         let max_s = magnitude(&s);
-        let (inverse, products, prefix) = match m {
+        // Without `M`: the slots c_s on S_0 + S_1 and c_m on S_0 S_1 over the lanes S_0, S_1
+        // (a width-2 table). With `M`: the lanes S_0, M_0, W_0, W_1, W_2 with
+        // W = C (1, S_1, M_1), so that f = W_0 + S_0 W_1 + M_0 W_2 in one slot (measured
+        // faster than four slots on S_0, S_1, M_0, M_1: the rounds are bound by the
+        // products, not by the table width).
+        let (inverse, slots, linear, products, prefix) = match m {
             None => {
                 if max_s > PAIR_BOUND {
                     return None;
                 }
-                (cm.inverse()?, vec![(0, 2)], max_s <= PREFIX_PAIR_BOUND)
+                (E::one(), vec![cs, cm], vec![(0, 0), (1, 0)], vec![(0, 1, 1)], max_s <= PREFIX_PAIR_BOUND)
             }
             Some(m) => {
                 let prefix = max_s <= PREFIX_S_BOUND && magnitude(&m) <= PREFIX_M_BOUND;
-                ((cm * cmm - ck * ck).inverse()?, vec![(0, 3), (1, 4)], prefix)
+                let inverse = (cm * cmm - ck * ck).inverse()?;
+                (inverse, vec![E::one()], vec![(2, 0)], vec![(0, 3, 0), (1, 4, 0)], prefix)
             }
         };
-        let linear = [if m.is_some() { 2 } else { 1 }];
+        let first_slots = (0..slots.len()).collect();
         let source = IntSource {
             s,
             m,
             c: coefficients,
             inverse,
+            slots,
             linear,
             products,
+            first_slots,
             prefix: prefix && eq_point.len() >= 2,
         };
         Engine::new(source, eq_point).map(Self)
@@ -1161,6 +1267,8 @@ struct LinearSource<'a> {
     /// Integer or mapped byte lanes (never field lanes).
     lanes: Vec<super::Source<'a>>,
     coefficients: Vec<E>,
+    /// The single slot's coefficient, one.
+    unit: [E; 1],
 }
 
 /// The integer value of cell `i` of an integer or byte lane.
@@ -1201,19 +1309,27 @@ impl Level0 for LinearSource<'_> {
         })
     }
 
-    fn first_item(&self, _: usize, _: bool, _: &mut [Acc; 3]) {
+    fn slots(&self) -> &[E] {
+        &self.unit
+    }
+
+    fn first_item(&self, _: usize, _: bool, _: &mut [[Acc; 3]]) {
         unreachable!("the rounds run on the materialized table")
+    }
+
+    fn first_slots(&self) -> &[usize] {
+        &[]
     }
 
     fn folded_row(&self, _: E, _: &<E as Fold>::Ctx, _: usize, _: &mut [E]) {
         unreachable!("the rounds run on the materialized table")
     }
 
-    fn linear(&self) -> &[usize] {
-        &[0]
+    fn linear(&self) -> &[(usize, usize)] {
+        &[(0, 0)]
     }
 
-    fn products(&self) -> &[(usize, usize)] {
+    fn products(&self) -> &[(usize, usize, usize)] {
         &[]
     }
 
@@ -1245,7 +1361,7 @@ impl<'a> LinearIntGroup<'a> {
         {
             return None;
         }
-        Engine::new(LinearSource { lanes, coefficients }, eq_point).map(Self)
+        Engine::new(LinearSource { lanes, coefficients, unit: [E::one()] }, eq_point).map(Self)
     }
 
     /// The current claim.
@@ -1290,6 +1406,8 @@ struct WeightIntSource<'a> {
     constant: i64,
     /// The group lane of the weight (the others are the integer lanes in order).
     weight_lane: usize,
+    /// The single slot's coefficient, one.
+    unit: [E; 1],
 }
 
 impl WeightIntSource<'_> {
@@ -1311,7 +1429,12 @@ impl Level0 for WeightIntSource<'_> {
         self.weight.len()
     }
 
-    fn first_item(&self, k: usize, full: bool, sums: &mut [Acc; 3]) {
+    fn slots(&self) -> &[E] {
+        &self.unit
+    }
+
+    fn first_item(&self, k: usize, full: bool, sums: &mut [[Acc; 3]]) {
+        let sums = &mut sums[0];
         let (a, b) = (2 * k, 2 * k + 1);
         let (wa, wb) = (self.weight[a], self.weight[b]);
         let (ga, gb) = (self.combination(a), self.combination(b));
@@ -1322,17 +1445,21 @@ impl Level0 for WeightIntSource<'_> {
         mad_int(&mut sums[2], wb - wa, gb - ga);
     }
 
+    fn first_slots(&self) -> &[usize] {
+        &[0]
+    }
+
     fn first_round(&self, weights: Option<(&[E], &[E])>) -> Option<[E; 3]> {
         if weights.is_some() {
             return None;
         }
         let items = self.rows() / 2;
         let run = |range: std::ops::Range<usize>| {
-            let mut sums = [Acc::zero(); 3];
+            let mut sums = [[Acc::zero(); 3]];
             for k in range {
                 self.first_item(k, true, &mut sums);
             }
-            sums
+            sums[0]
         };
         let total = if items >= MIN_PARALLEL_ITEMS {
             (0..items.div_ceil(ITEM_CHUNK))
@@ -1364,12 +1491,12 @@ impl Level0 for WeightIntSource<'_> {
         }
     }
 
-    fn linear(&self) -> &[usize] {
+    fn linear(&self) -> &[(usize, usize)] {
         &[]
     }
 
-    fn products(&self) -> &[(usize, usize)] {
-        &[(0, 1)]
+    fn products(&self) -> &[(usize, usize, usize)] {
+        &[(0, 1, 0)]
     }
 
     fn terminal(&self, row: &[E]) -> Vec<E> {
@@ -1429,6 +1556,7 @@ impl<'a> WeightIntGroup<'a> {
             lanes: ints,
             constant,
             weight_lane,
+            unit: [E::one()],
         };
         Engine::with_eq(source, None, rounds, gamma).map(Self)
     }
