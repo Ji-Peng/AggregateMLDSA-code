@@ -641,14 +641,21 @@ pub struct Group<'a> {
     taylor: Vec<Taylor>,
     /// The folded pieces without the polynomials of the Taylor lanes (level 2).
     level2_pieces: Pieces,
-    /// Row-major `K` table of every lane from level 3 on.
+    /// Lane-major `K` table of every lane from level 3 on: lane `l` occupies
+    /// `[l * dense_stride, l * dense_stride + dense_rows)` (the stride is the row count at
+    /// level 3; a fold halves `dense_rows` in place).
     dense: Vec<E>,
+    dense_stride: usize,
+    dense_rows: usize,
     arena: Option<SharedArena>,
     challenges: Vec<E>,
     /// Quartet masses of the bucketed segments (the two-round prefix), kept for level 1.
     masses: Option<Vec<Vec<E>>>,
     /// The level-0 inner polynomial computed for the direct claim of a lifted group.
     cached_level0: Option<Vec<E>>,
+    /// The inner polynomial of the next dense round, computed by the fold that produced its
+    /// table (without the constant term, with coefficient 0 only when not recovered).
+    cached_next: Option<Vec<E>>,
     policy: Policy,
     degree: usize,
     inactive: usize,
@@ -911,10 +918,13 @@ impl<'a> Group<'a> {
             taylor: Vec::new(),
             level2_pieces: Pieces::default(),
             dense: Vec::new(),
+            dense_stride: 0,
+            dense_rows: 0,
             arena: None,
             challenges: Vec::new(),
             masses: None,
             cached_level0: None,
+            cached_next: None,
             policy,
             degree,
             inactive: rounds - local_vars,
@@ -1018,7 +1028,16 @@ impl<'a> Group<'a> {
             },
             1 => self.level1(upper),
             2 => self.level2(upper),
-            _ => self.dense_round(upper),
+            _ => {
+                let mut q = match self.cached_next.take() {
+                    Some(q) => q,
+                    None => self.dense_items(upper),
+                };
+                if !upper {
+                    q[0] += self.constant_term();
+                }
+                q
+            }
         };
         if let Some(recovery) = recovery {
             q[0] = self.recovered_constant(&q, recovery);
@@ -1230,7 +1249,7 @@ impl<'a> Group<'a> {
     fn value_at(&self, l: usize, cell: usize) -> E {
         match &self.states[l] {
             State::Source => self.sources[l].value(cell),
-            State::Dense => self.dense[cell * self.sources.len() + l] + self.plan.shifts[l],
+            State::Dense => self.dense[l * self.dense_stride + cell] + self.plan.shifts[l],
             _ => self.reader(l).at(cell),
         }
     }
@@ -1523,27 +1542,42 @@ impl<'a> Group<'a> {
         q
     }
 
-    /// A round over the dense table.
-    fn dense_round(&self, upper: bool) -> Vec<E> {
-        let lanes = self.sources.len();
+    /// The item sums of a round over the dense table (the fallback when the fold that
+    /// produced the table did not evaluate them).
+    fn dense_items(&self, upper: bool) -> Vec<E> {
+        let (stride, dense) = (self.dense_stride, &self.dense);
         let pieces = &self.plan.dense;
-        let dense = &self.dense;
-        let mut q = self.item_sum(|k, scratch, out| {
-            let left = &dense[2 * k * lanes..(2 * k + 1) * lanes];
-            let right = &dense[(2 * k + 1) * lanes..(2 * k + 2) * lanes];
-            for ((slot, &x), &y) in scratch.d.iter_mut().zip(left).zip(right) {
-                *slot = y - x;
+        self.item_sum(|k, scratch, out| {
+            for (l, (a, d)) in scratch.a.iter_mut().zip(&mut scratch.d).enumerate() {
+                let x = dense[l * stride + 2 * k];
+                *a = x;
+                *d = dense[l * stride + 2 * k + 1] - x;
             }
             if upper {
-                pieces.add_upper(left, &scratch.d, out);
+                pieces.add_upper(&scratch.a, &scratch.d, out);
             } else {
-                pieces.add_at(left, &scratch.d, out);
+                pieces.add_at(&scratch.a, &scratch.d, out);
             }
-        });
-        if !upper {
-            q[0] += self.constant_term();
+        })
+    }
+
+    /// The evaluation of the next round's item sums on a freshly folded block of the dense
+    /// table: `(first, second)` the remaining equality tables after the bind (or ones).
+    fn dense_evaluator(&self, upper: bool) -> DenseEval<'_> {
+        let (first, second): (&[E], &[E]) = match &self.eq {
+            Some(eq) => eq.remaining_eq_tables(),
+            None => (&[], &[]),
+        };
+        DenseEval {
+            pieces: &self.plan.dense,
+            lanes: self.sources.len(),
+            stride: self.dense_stride,
+            first,
+            second,
+            weighted: self.eq.is_some(),
+            upper,
+            width: self.coefficient_count(),
         }
-        q
     }
 
     /// Bind the round's variable to `challenge`.
@@ -1557,17 +1591,19 @@ impl<'a> Group<'a> {
             self.bound += 1;
             return;
         }
-        match self.level() {
-            0 => self.bind_first(challenge),
-            1 => self.bind_second(challenge),
-            2 => self.bind_third(challenge),
-            _ => fold_rows_in_place(&mut self.dense, self.sources.len(), challenge),
-        }
-        self.challenges.push(challenge);
+        // The equality factor first: the folds into the dense table evaluate the next
+        // round's item sums with the next round's weights.
         if let Some(eq) = &mut self.eq {
             eq.bind(challenge);
         }
+        self.challenges.push(challenge);
         self.bound += 1;
+        match self.level() - 1 {
+            0 => self.bind_first(challenge),
+            1 => self.bind_second(challenge),
+            2 => self.bind_third(challenge),
+            _ => self.bind_dense(challenge),
+        }
     }
 
     /// Bind 0: pair tables for coded lanes, folded tables for the others.
@@ -1678,40 +1714,129 @@ impl<'a> Group<'a> {
         self.level2_pieces = level2;
     }
 
-    /// Bind 2: every lane into the dense row-major table at an eighth of the domain.
+    /// Bind 2: every lane into the dense lane-major table at an eighth of the domain, and
+    /// the item sums of the first dense round on every block as it is written.
     #[allow(unsafe_code)]
     fn bind_third(&mut self, challenge: E) {
         self.taylor.clear();
         let context = E::precompute(challenge);
         let lanes = self.sources.len();
         let rows = 1 << (self.local_vars - 3);
+        self.dense_stride = rows;
+        self.dense_rows = rows;
         let readers: Vec<Reader<'_>> = (0..lanes).map(|l| self.reader(l)).collect();
         let shifts = &self.plan.shifts;
-        // Row blocks filled lane by lane, so each lane's lookup table stays in cache while
-        // the block (2^9 rows) is written; a row-major collect was measured slower.
-        const BLOCK_ROWS: usize = 1 << 9;
-        let fill = |block: usize, out: &mut [std::mem::MaybeUninit<E>]| {
-            let first = block * BLOCK_ROWS;
-            let count = out.len() / lanes;
-            for (l, (reader, &shift)) in readers.iter().zip(shifts).enumerate() {
-                for r in 0..count {
-                    let (even, odd) = reader.item(first + r);
-                    out[r * lanes + l].write(fold(&context, even, odd) - shift);
-                }
-            }
-        };
-        // SAFETY: fill writes every row/lane slot, including the last partial block.
+        // The next round exists when the table has pairs; its constant coefficient comes
+        // from the claim when recoverable.
+        let evaluate = rows >= 2;
+        let upper = evaluate && self.recovery().is_some();
+        let eval = self.dense_evaluator(upper);
+        let width = eval.width;
         let mut dense = match &self.arena {
             Some(arena) => arena.lock().unwrap().take(rows * lanes),
             None => buf::reuse(Vec::new(), rows * lanes),
         };
-        dense.par_chunks_mut(BLOCK_ROWS * lanes).enumerate().for_each(|(block, out)| fill(block, out));
-        let dense = unsafe { buf::finish(dense) };
-        self.dense = dense;
+        let base = SendPtr(dense.as_mut_ptr().cast::<E>());
+        // Row blocks filled lane by lane, so each lane's lookup table stays in cache while
+        // the block (2^9 rows) is written; then the block's pairs are evaluated while they
+        // are still in cache.
+        let blocks = rows.div_ceil(DENSE_BLOCK_ROWS);
+        let run = |block: usize| -> Vec<Acc> {
+            let first = block * DENSE_BLOCK_ROWS;
+            let count = DENSE_BLOCK_ROWS.min(rows - first);
+            for (l, (reader, &shift)) in readers.iter().zip(shifts).enumerate() {
+                // SAFETY: the plane segment of lane `l` and rows `first..first + count` is
+                // written by this block only; every slot of the table is covered once.
+                let out = unsafe { std::slice::from_raw_parts_mut(base.get().add(l * rows + first), count) };
+                for (r, slot) in out.iter_mut().enumerate() {
+                    let (even, odd) = reader.item(first + r);
+                    *slot = fold(&context, even, odd) - shift;
+                }
+            }
+            if evaluate {
+                let mut scratch = Scratch::new(lanes);
+                // SAFETY: the block's rows of every lane were written above and no other
+                // block writes them.
+                unsafe { eval.items(base.get(), first / 2, (first + count) / 2, &mut scratch) }
+            } else {
+                Vec::new()
+            }
+        };
+        let total = if rows >= MIN_PARALLEL_ITEMS {
+            (0..blocks).into_par_iter().map(run).reduce(|| vec![Acc::zero(); width], add_acc)
+        } else {
+            (0..blocks).map(run).fold(vec![Acc::zero(); width], add_acc)
+        };
+        // SAFETY: every row of every lane was written by exactly one block.
+        self.dense = unsafe { buf::finish(dense) };
         self.states = vec![State::Dense; lanes];
+        if evaluate {
+            self.cached_next = Some(total.into_iter().map(E::reduce_product).collect());
+        }
         // The pair codes are not read again (one byte per pair of cells and column).
         for column in &mut self.columns {
             column.pairs = Vec::new();
+        }
+    }
+
+    /// A dense bind: fold every plane (rows `2k, 2k + 1` into `k`) into a fresh table from
+    /// the arena, block by block in parallel, and evaluate the next round's item sums on
+    /// every block as it is written (the block is still in cache). The previous table
+    /// returns to the arena, so the two buffers alternate round after round.
+    #[allow(unsafe_code)]
+    fn bind_dense(&mut self, challenge: E) {
+        let lanes = self.sources.len();
+        let (stride, rows) = (self.dense_stride, self.dense_rows);
+        debug_assert!(rows >= 2 && rows.is_power_of_two());
+        let next_rows = rows / 2;
+        let context = E::precompute(challenge);
+        let evaluate = next_rows >= 2;
+        let upper = evaluate && self.recovery().is_some();
+        let mut next = match &self.arena {
+            Some(arena) => arena.lock().unwrap().take(next_rows * lanes),
+            None => buf::reuse(Vec::new(), next_rows * lanes),
+        };
+        let out = SendPtr(next.as_mut_ptr().cast::<E>());
+        let previous = std::mem::take(&mut self.dense);
+        // The evaluator reads the new table (stride `next_rows`).
+        self.dense_stride = next_rows;
+        self.dense_rows = next_rows;
+        let eval = self.dense_evaluator(upper);
+        let width = eval.width;
+        let source = &previous;
+        let run = |block: usize| -> Vec<Acc> {
+            let r0 = block * DENSE_BLOCK_ROWS;
+            let r1 = (r0 + DENSE_BLOCK_ROWS).min(next_rows);
+            for l in 0..lanes {
+                let plane = &source[l * stride..l * stride + rows];
+                // SAFETY: rows `r0..r1` of plane `l` of the new table are written by this
+                // block only; every slot is covered once.
+                let out = unsafe { std::slice::from_raw_parts_mut(out.get().add(l * next_rows + r0), r1 - r0) };
+                for (r, slot) in (r0..r1).zip(out.iter_mut()) {
+                    *slot = fold(&context, plane[2 * r], plane[2 * r + 1]);
+                }
+            }
+            if evaluate {
+                let mut scratch = Scratch::new(lanes);
+                // SAFETY: rows `r0..r1` of every plane were written above by this block.
+                unsafe { eval.items(out.get(), r0 / 2, r1 / 2, &mut scratch) }
+            } else {
+                Vec::new()
+            }
+        };
+        let blocks = next_rows.div_ceil(DENSE_BLOCK_ROWS);
+        let total = if next_rows >= MIN_PARALLEL_ITEMS {
+            (0..blocks).into_par_iter().map(run).reduce(|| vec![Acc::zero(); width], add_acc)
+        } else {
+            (0..blocks).map(run).fold(vec![Acc::zero(); width], add_acc)
+        };
+        if let Some(arena) = &self.arena {
+            arena.lock().unwrap().put(previous);
+        }
+        // SAFETY: every row of every plane of the new table was written by exactly one block.
+        self.dense = unsafe { buf::finish(next) };
+        if evaluate {
+            self.cached_next = Some(total.into_iter().map(E::reduce_product).collect());
         }
     }
 
@@ -1733,41 +1858,119 @@ impl<'a> Group<'a> {
     }
 }
 
-/// Fold one dense row-major table in place (Aerie's `fold_rows_in_place`): a leading
-/// sequential wave, then disjoint waves in parallel.
-fn fold_rows_in_place(table: &mut Vec<E>, lanes: usize, challenge: E) {
-    let rows = table.len() / lanes;
-    debug_assert!(rows >= 2 && rows.is_power_of_two());
-    let next_rows = rows / 2;
-    let context = E::precompute(challenge);
-    let sequential_rows = next_rows.min(1 << 12);
-    for row in 0..sequential_rows {
-        for lane in 0..lanes {
-            let left = table[(2 * row) * lanes + lane];
-            let right = table[(2 * row + 1) * lanes + lane];
-            table[row * lanes + lane] = fold(&context, left, right);
-        }
+/// Rows per block of the dense table: filled, folded and evaluated while in cache.
+const DENSE_BLOCK_ROWS: usize = 1 << 9;
+
+/// A raw table pointer shared by the parallel tasks of a fold (each writes its own rows).
+#[derive(Clone, Copy)]
+struct SendPtr(*mut E);
+#[allow(unsafe_code)]
+unsafe impl Send for SendPtr {}
+#[allow(unsafe_code)]
+unsafe impl Sync for SendPtr {}
+
+impl SendPtr {
+    /// The pointer (a method, so that closures capture the whole wrapper).
+    fn get(self) -> *mut E {
+        self.0
     }
-    let mut wave_start = sequential_rows;
-    while wave_start < next_rows {
-        let wave_end = (2 * wave_start).min(next_rows);
-        let source_start = 2 * wave_start;
-        let (output_prefix, source_suffix) = table.split_at_mut(source_start * lanes);
-        let output = &mut output_prefix[wave_start * lanes..wave_end * lanes];
-        let source = &source_suffix[..2 * (wave_end - wave_start) * lanes];
-        output
-            .par_chunks_mut(lanes)
-            .zip(source.par_chunks_exact(2 * lanes))
-            .for_each(|(output, source)| {
-                for lane in 0..lanes {
-                    output[lane] = fold(&context, source[lane], source[lanes + lane]);
-                }
-            });
-        wave_start = wave_end;
-    }
-    table.truncate(next_rows * lanes);
 }
 
+fn add_acc(mut left: Vec<Acc>, right: Vec<Acc>) -> Vec<Acc> {
+    for (l, r) in left.iter_mut().zip(right) {
+        *l += r;
+    }
+    left
+}
+
+impl Scratch {
+    fn new(lanes: usize) -> Self {
+        Self {
+            a: vec![E::zero(); lanes],
+            d: vec![E::zero(); lanes],
+        }
+    }
+}
+
+/// The next round's item sums over a range of pairs of the dense table (lane-major, read
+/// through a raw pointer right after the pairs were written).
+struct DenseEval<'g> {
+    pieces: &'g Pieces,
+    lanes: usize,
+    stride: usize,
+    first: &'g [E],
+    second: &'g [E],
+    weighted: bool,
+    upper: bool,
+    width: usize,
+}
+
+impl DenseEval<'_> {
+    /// `sum_k first[k & mask] second[k >> bits] c(k)` over the pairs `k0..k1` (or the plain
+    /// sum without an equality factor), unreduced per coefficient: the block sums of
+    /// `first` are reduced once and weighted by `second`, as `split_sum` does.
+    ///
+    /// # Safety
+    /// Rows `2 k0..2 k1` of every plane at `base` must be initialized and not written
+    /// concurrently.
+    #[allow(unsafe_code)]
+    unsafe fn items(&self, base: *const E, k0: usize, k1: usize, scratch: &mut Scratch) -> Vec<Acc> {
+        let width = self.width;
+        let mut coefficients = vec![Acc::zero(); width];
+        let mut outer = vec![Acc::zero(); width];
+        let mut inner = vec![Acc::zero(); width];
+        let (first_bits, first_mask) = if self.weighted {
+            (self.first.len().trailing_zeros(), self.first.len() - 1)
+        } else {
+            (0, 0)
+        };
+        let mut block = k0 >> first_bits;
+        for k in k0..k1 {
+            for l in 0..self.lanes {
+                // SAFETY: the caller guarantees rows `2k`, `2k + 1` of plane `l` are initialized.
+                let x = unsafe { *base.add(l * self.stride + 2 * k) };
+                let y = unsafe { *base.add(l * self.stride + 2 * k + 1) };
+                scratch.a[l] = x;
+                scratch.d[l] = y - x;
+            }
+            if !self.weighted {
+                if self.upper {
+                    self.pieces.add_upper(&scratch.a, &scratch.d, &mut outer);
+                } else {
+                    self.pieces.add_at(&scratch.a, &scratch.d, &mut outer);
+                }
+                continue;
+            }
+            if (k >> first_bits) != block {
+                let scale = self.second[block];
+                for (o, i) in outer.iter_mut().zip(&mut inner) {
+                    *o += scale.mul_unreduced(E::reduce_product(*i));
+                    *i = Acc::zero();
+                }
+                block = k >> first_bits;
+            }
+            for c in &mut coefficients {
+                *c = Acc::zero();
+            }
+            if self.upper {
+                self.pieces.add_upper(&scratch.a, &scratch.d, &mut coefficients);
+            } else {
+                self.pieces.add_at(&scratch.a, &scratch.d, &mut coefficients);
+            }
+            let weight = self.first[k & first_mask];
+            for (i, &c) in inner.iter_mut().zip(&coefficients) {
+                *i += weight.mul_unreduced(E::reduce_product(c));
+            }
+        }
+        if self.weighted && k0 < k1 {
+            let scale = self.second[block];
+            for (o, i) in outer.iter_mut().zip(&inner) {
+                *o += scale.mul_unreduced(E::reduce_product(*i));
+            }
+        }
+        outer
+    }
+}
 
 impl Drop for Group<'_> {
     fn drop(&mut self) {
