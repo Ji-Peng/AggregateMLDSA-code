@@ -87,7 +87,7 @@ taskset -c 0,1,3-15 cargo build --release --workspace
 scripts/test.sh                 # = taskset -c 0,1,3-15 cargo test --workspace, then the vendored flock-core lib tests (target/flock-core; skipped with -p or SKIP_FLOCK_CORE=1)
 scripts/test.sh --release       # for heavy tests
 scripts/bench.sh                # local calibration benches (agg-bench)
-scripts/bench.sh --bench mode_b -- 256 512 1024 [--warmup 1] [--reps 5]   # mode-B prove/verify/RSS/size (docs/piop.md)
+scripts/bench.sh --bench mode_b -- 256 512 1024 [--warmup 1] [--reps 5]   # mode-B prove/verify/RSS/size (crates/agg-bench/benches/mode_b.rs)
 AGG_KECCAK_WARMUP=1 AGG_KECCAK_REPS=5 taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge   # Keccak sponge proof
 AVX512=1 scripts/bench.sh       # opt-in AVX-512 build in target/avx512
 ./target/release/agg            # mode-A tool: keygen-batch, sign-batch, aggregate, verify, bench (docs/cli.md)

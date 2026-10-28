@@ -12,7 +12,7 @@ certificates (JSON) of that tree; it does not run code from it.
 What it computes, exactly (integers and fractions):
 
 * the size C(D, w) C(w, a) 2^w of every family (D, a, b), w = a + b, that the catalog test
-  crates/agg-pcs-config/tests/akita_fold_support.rs finds in our rows, and of Akita's
+  crates/agg-pcs-config/tests/all/akita_fold_support.rs finds in our rows, and of Akita's
   production ladder, against 2^128;
 * for the two certified operator-norm policies, N_raw (checked against the family size)
   and the accepted floor ceil(N_raw p0), where p0 is the certificate's exact lower bound on

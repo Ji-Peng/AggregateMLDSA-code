@@ -1,11 +1,11 @@
 //! Mode B end to end: `prove_mode_b` / `verify_mode_b` round trips at 64, 256 and 1,024
 //! signatures with the seed-derived matrices (`SeededMatrices`), the proof size and the
 //! verifier's step timings printed, corrupted aggregates rejected, and every witness
-//! tampering of `tests/stages.rs` pushed through the full prover (unchecked stages) and
+//! tampering of `tests/all/stages.rs` pushed through the full prover (unchecked stages) and
 //! rejected by the verifier.
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, Relation, LOOKUP_SHIFT, U16_DIGITS};
@@ -690,7 +690,7 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         // A 16-bit value outside [-2^15, 2^15) (looked-up value 2^16): Akita refuses to
         // commit it, because the width-16 coefficient bound is the balanced 16-bit
         // interval, so no aggregate exists to verify. The verifier's rejection of a
-        // looked-up value outside T_16 is tested at the PIOP level (tests/stages.rs,
+        // looked-up value outside T_16 is tested at the PIOP level (tests/all/stages.rs,
         // without commitments): a cheating prover's commitment to such a value is bound
         // only by the lookup, not by this admission check.
         let wide = tampered(&|m| *m.wide_cell_mut(&manifest, Column::U_LO, x) = LOOKUP_SHIFT);

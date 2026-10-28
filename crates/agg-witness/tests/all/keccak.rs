@@ -2,7 +2,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::instance::PublicInstance;
 use agg_witness::keccak::{mu_bit_slot, sponge_trace, w1_bit_slot, PERMS, RATE};

@@ -203,7 +203,7 @@ exist): the claim equals `sum b'' W` by brute force (`gf2_walker::transpose`); e
 round message equals the brute-force round polynomial of `W~ b''~` on random `b''` (cross
 terms included), and every in-block message too; the final value and `W~(r)` agree with
 dense evaluations; a wrong `y1` (flipped parity) changes the first message. `agg-keccak`
-(`tests/tied.rs`, release): round trips at 5 to 1,024 records, spans and parts; negative cases: a flipped `b'` bit
+(`tests/all/tied.rs`, release): round trips at 5 to 1,024 records, spans and parts; negative cases: a flipped `b'` bit
 with stale `Y`, a flipped `Y` bit, a tampered round message, a wrong `s_hat_v` of the bit
 claim, another `sd`; the existing statement, seed, segment-count and byte-flip cases.
 In `tied::tests`: a false bit value consistent with the chain (a chain copy of

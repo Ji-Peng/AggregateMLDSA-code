@@ -11,10 +11,10 @@
 //!   commitments), the tie nonce and the tied-part proof version, the PIOP work nonces, a
 //!   plan-digest mismatch, the records (order, message, key, count) and the configuration.
 //! - Tampered witnesses (`tampered_witnesses_are_rejected_end_to_end`): every witness
-//!   tampering of the per-crate tests (`agg-piop/tests/mode_b.rs`,
+//!   tampering of the per-crate tests (`agg-piop/tests/all/mode_b.rs`,
 //!   `agg-keccak/tests/{proofs,tied}.rs`) pushed through the mode-A aggregator (stages
 //!   unchecked) and rejected by the verifier at the stated step.
-//! - Invalid signatures are refused by the aggregator (`agg-witness/tests/negative.rs`).
+//! - Invalid signatures are refused by the aggregator (`agg-witness/tests/all/negative.rs`).
 //!
 //! Run with `--release`.
 
@@ -1021,7 +1021,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         // A 16-bit value outside T_16 (stored 2^15): Akita refuses to commit it (the
         // width-16 coefficient bound is the balanced 16-bit interval), so no aggregate
         // exists to verify; the verifier's rejection of a looked-up value outside T_16 is
-        // tested at the PIOP level (agg-piop tests/stages.rs, without commitments).
+        // tested at the PIOP level (agg-piop tests/all/stages.rs, without commitments).
         let Err(error) = aggregator.aggregate_with(
             &signed,
             &main(&|m, t| *t.wide_cell_mut(m, Column::U_LO, main_index(17, 2, 5)) = 1 << 15),
@@ -1141,7 +1141,7 @@ fn tampered_witnesses_are_rejected_end_to_end() {
 }
 
 /// The aggregator verifies every signature strictly while deriving its witness
-/// (`agg-witness/tests/negative.rs`): flipped `c~`, `z` and hint bits, a wrong message, and
+/// (`agg-witness/tests/all/negative.rs`): flipped `c~`, `z` and hint bits, a wrong message, and
 /// malformed lengths are refused with the record's index; nothing is proven.
 #[test]
 fn invalid_signatures_are_refused_by_the_aggregator() {

@@ -7,7 +7,7 @@
 //! that only the targeted check can catch them.
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, Relation, LOOKUP_SHIFT};
 use agg_piop::source_tables::{hint_slack_table, BridgeGroupTables, MainTables, SourceTables};
@@ -21,7 +21,7 @@ use agg_witness::hfips::{honest_coeff, HFipsRecord, L_STEP};
 use agg_witness::instance::PublicInstance;
 use agg_witness::padding::main_index;
 use agg_witness::params::{GAMMA2, N, OMEGA, POSITIONS};
-use common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
+use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
 use jolt_field::{Ring, Zero};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {

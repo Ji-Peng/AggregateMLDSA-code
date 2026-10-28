@@ -22,7 +22,7 @@
 //! row name and catalog key is a function of `(d_sig, relation)`. [`CATALOG_D_SIG`] lists the
 //! H-u batch sizes, [`CATALOG_D_SIG_H_EXACT`] the H-exact and [`CATALOG_D_SIG_H_FIPS`] the
 //! H-FIPS ones whose rows are checked in ([`catalog_batches`] lists all);
-//! `tests/schedule_catalog_regen.rs` regenerates them (`docs/pcs-config.md`).
+//! `tests/all/schedule_catalog_regen.rs` regenerates them (`docs/pcs-config.md`).
 
 use akita_params::PolynomialGroupLayout;
 

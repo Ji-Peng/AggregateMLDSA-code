@@ -2,7 +2,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::crt::az_schoolbook;
 use agg_witness::derive::reencode_h;

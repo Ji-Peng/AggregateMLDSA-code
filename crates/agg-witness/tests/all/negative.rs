@@ -3,7 +3,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::check::Identity;
 use agg_witness::derive::derive_unchecked;

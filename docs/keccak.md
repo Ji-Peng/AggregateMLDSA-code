@@ -156,7 +156,7 @@ segment. A single sub-batch may hold any `n` up to that (the bench proves 1,170 
   committed `c~` words are the digest, the absorb map covers the rate and the padding.
 - `witness`: the packed slot equals Flock's canonical `pack_z_lincheck` and BatchMajor
   layout, dummy rows zero.
-- `tests/proofs.rs` (`--release`): Keccak-f gate round trip at 64 permutations with a wrong
+- `tests/all/proofs.rs` (`--release`): Keccak-f gate round trip at 64 permutations with a wrong
   output word and a wrong seed rejected; sponge round trips at 64 and 256 signatures with a
   wrong `c~` bit, a wrong `mu` bit and a flipped proof byte rejected; a flipped w1Encode bit
   with the stale chi witness rejected; a flipped w1Encode bit with a consistent witness
@@ -273,7 +273,7 @@ a batch of exactly one tied part keeps its whole committed witness until the joi
 `docs/perf.md` Section 9); the proof is the same as with a rebuilt witness.
 
 Tests: `flock_union` (the eq-table index order and `eval_packed` against the plain inner
-product; proof byte framing); `tied` unit tests and `tests/tied.rs` (docs/bridge.md Sections
+product; proof byte framing); `tied` unit tests and `tests/all/tied.rs` (docs/bridge.md Sections
 5c, 5d, `docs/parity-chain.md` Section 11), including a segment in parts whose shares XOR to
 the segment's `Y`.
 
@@ -292,7 +292,7 @@ claim values and Flock's merged opening, which is a ring-switch and Frobenius la
 KB) around one Ligerito proof. The Ligerito proof is almost everything: per level, `Q`
 queried rows of the interleaved codeword (`lanes x 16` bytes at level 0, `2^4 x 16` above) and
 their Merkle paths (`log2(codeword) - cap` siblings of 32 bytes), plus the caps, the final
-block and the sum-check messages. Breakdown (`tests/tied.rs`, `AGG_TIED_BREAKDOWN=1`; bytes are
+block and the sum-check messages. Breakdown (`tests/all/tied.rs`, `AGG_TIED_BREAKDOWN=1`; bytes are
 deterministic):
 
 | Instance (records, `m`) | Profile | Level-0 rows | Level-0 paths | Levels 1+ rows / paths | Ligerito | Instance proof |
@@ -348,7 +348,7 @@ Flock items (the two level-0 caps, K17, less three new header bytes), the rest t
 opening, whose size varies by a few bytes with the transcript. Kept commit data (K14): 84 / 168 / 336 MiB at
 1,024 and 152 / 304 / 608 MiB at 2,048 (Fast / Slim / Slim8).
 
-Tied parts alone (`tests/tied.rs`, `tied_part_profiles_bytes_and_times`, `AGG_TIED_REPS=5`,
+Tied parts alone (`tests/all/tied.rs`, `tied_part_profiles_bytes_and_times`, `AGG_TIED_REPS=5`,
 medians of 5 after 1 warmup, load 8.6 to 10.5; prove includes the bridge union's blocks and
 commitment; peak RSS of the whole test process 3.5 GiB); `8@13` is a part of 8 live records at
 `d = 13` (the full-segment bridge union, a small sponge instance) and `8@13/4` a span of four
@@ -450,7 +450,7 @@ Bytes are
 deterministic; times are medians of 5 runs after 1 warmup (`8192`: of 3), each pair run back
 to back.
 
-Tied part alone (`tests/tied.rs`, `tied_part_profiles_bytes_and_times`, `Slim`):
+Tied part alone (`tests/all/tied.rs`, `tied_part_profiles_bytes_and_times`, `Slim`):
 
 | Part | Proof v4 (cap / sponge / union) | Proof v5 (header and chain / sponge) | Prove v4 / v5 | Verify v4 / v5 |
 | --- | --- | --- | --- | --- |

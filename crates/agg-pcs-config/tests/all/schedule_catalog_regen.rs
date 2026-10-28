@@ -21,8 +21,8 @@
 //!
 //! ```text
 //! AGG_CATALOG_D_SIG=8 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
-//!     -p agg-pcs-config --release --no-default-features --test schedule_catalog_regen \
-//!     -- --ignored --exact update_catalog_rows
+//!     -p agg-pcs-config --release --no-default-features --test all \
+//!     -- --ignored --exact schedule_catalog_regen::update_catalog_rows
 //! ```
 //!
 //! `AGG_CATALOG_RELATION` is `h-u`, `h-exact` or `all` (the default). Rows of a batch outside
@@ -33,11 +33,11 @@
 //!
 //! ```text
 //! taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
-//!     --test schedule_catalog_regen -- --ignored --exact regenerate
+//!     --test all -- --ignored --exact schedule_catalog_regen::regenerate
 //! ```
 //!
 //! Drift check (re-plans the rows of `AGG_CATALOG_D_SIG` and compares bytes):
-//! `-- --ignored --exact verify_rows`. `AKITA_SCHEDULE_GEN_JOBS` bounds the
+//! `-- --ignored --exact schedule_catalog_regen::verify_rows`. `AKITA_SCHEDULE_GEN_JOBS` bounds the
 //! planner workers (default 3; the search is memory bound).
 
 use agg_pcs_config::catalogs::{catalog_batches, scalar_layouts, BatchLayout, Family, Relation};

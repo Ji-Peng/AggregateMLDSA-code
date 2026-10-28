@@ -927,7 +927,7 @@ pub fn prove_with_tables_using(
     let work = transcript.work_stream();
     let claims = opening_claims(manifest, &run.r3, &piop.stage3.claims, &run.pi_m, &piop.multiplicities)?;
     // The stage-3 terminal values are the multilinear extensions of the committed tables at
-    // the group points (the kernel's terminal values; `tests/prove_verify.rs` checks them
+    // the group points (the kernel's terminal values; `tests/all/prove_verify.rs` checks them
     // against the table evaluations), so the opening takes them directly instead of
     // evaluating every table again.
     debug_assert!(

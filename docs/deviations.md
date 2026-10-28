@@ -265,7 +265,7 @@ challenge after it; the nonces travel in one packed stream (`AggregateProof::wor
 (`agg_piop::pow::PowPlan`). The sites of a tied part grind on the tie challenger
 (tied-part proof version 5, `docs/soundness.md` 3.6). Akita's opening already ran its own plan
 (`akita_config::transcript_instance_descriptor`, pinned by
-`agg-pcs-config/tests/akita_grinding.rs`). Remaining differences from Aerie: (1) the nonce is a fixed-width field of a packed stream, not a LEB128 atom in a
+`agg-pcs-config/tests/all/akita_grinding.rs`). Remaining differences from Aerie: (1) the nonce is a fixed-width field of a packed stream, not a LEB128 atom in a
 Spongefish argument string (our PIOP has no argument string; the stream's width per site is
 public, so the encoding is canonical); (2) the plan is a function of `N*`, the Flock profile
 and the tied-part geometry rather than a per-shape table in `agg-pcs-config`; (3) the seeds
@@ -544,7 +544,7 @@ boolean type, plus the caller's claims; Flock 83f963e is unmodified. The one `un
 does) lives there. The mode-A driver and its wire items (version 2) use the tied part.
 
 Test-plan differences: the tampering cases run on the tied
-part (`tests/tied.rs`) with the tie's error names: a bit flipped in the bridge copy only
+part (`tests/all/tied.rs`) with the tie's error names: a bit flipped in the bridge copy only
 fails the lane-group tie, a bit flipped in both copies with the stale `c~` fails the public
 claim, a sponge input bit flipped with the stale chi witness fails Flock's sponge rows; a
 flipped share, another seed, another `fs`, a flipped proof byte and swapped caps are
@@ -980,7 +980,7 @@ Spec: the stages are ordinary batched sum-checks whose round polynomials are def
 the instance tables of Sections 7.3 to 7.5; nothing is said about how the prover
 evaluates them.
 
-Code (`agg_piop::kernel`, `docs/piop.md` Sections 6, 16.2 and 18): the prover compiles the
+Code (`agg_piop::kernel`, `docs/piop.md` Section 6): the prover compiles the
 gamma-weighted terms of a group into per-lane polynomials, bilinear products, weighted sums
 and residual terms, evaluated in coefficient form. An `i8` column whose present cells fall
 into at most 16 classes under the maps of its lanes is coded (one byte per pair of cells);
@@ -993,8 +993,8 @@ second; every lane is materialized in one row-major `K` table after the third fo
 the second active round on, the constant coefficient of the inner polynomial is recovered
 from the running claim, which is the group's own exact sum. The parities `y^(1)` are `i8`
 tables when every value fits. The opening takes its claims from the stage-3 terminal values
-instead of evaluating the 67 tables again; the round-1 commitment runs concurrently with
-the Keccak side's commitments, and the three round-2 commitments concurrently with each
+instead of evaluating the tables again; the round-1 commitment runs concurrently with
+the Keccak side's commitments, and the four round-2 commitments concurrently with each
 other (all transcript-free, absorbed in event order). With the lookup layout (L4) the two
 round-1 commits and the four round-2 commits run concurrently on scoped OS threads
 (`pcs::concurrent_commits`), not as rayon jobs: Akita builds its NTT slots lazily inside
@@ -1025,10 +1025,7 @@ variables. The claim recovery uses only the prover's own running claim (computed
 group's tables in its first active round, or directly for a lifted group), never a claimed
 sum, so a tampered witness under the test-only unchecked provers still yields the true
 polynomials of its tables. Why: stages 1-3 were 1.82 s of the 2.73 s mode-B prover at
-`N = 2,048` (`7ed4a32`, same session) and 0.65 s with this kernel (`docs/piop.md` Section 18.3). The committed layout
-is not changed: `docs/piop.md` Section 16.1 records why the quotient `v`, wider Akita
-digits and merged Boolean lanes do not reduce the element count without weakening relation
-H or adding a lookup argument.
+`N = 2,048` (`7ed4a32`, same session) and 0.65 s with this kernel.
 
 ## L1. Lookup layout L16 adopted; the base-16 digit path removed (spec Sections 4 to 7, 10 to 12; was Appendix C)
 

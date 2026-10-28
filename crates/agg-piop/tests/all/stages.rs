@@ -4,7 +4,7 @@
 //! rejected at the stated place (`docs/lookup.md`).
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::LookupError;
@@ -17,7 +17,7 @@ use agg_piop::virtual_polys::parity1_tables;
 use agg_piop::OpeningField as E;
 use agg_witness::padding::main_index;
 use agg_witness::params::W1_BITS;
-use common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
+use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
 use jolt_field::Ring;
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {

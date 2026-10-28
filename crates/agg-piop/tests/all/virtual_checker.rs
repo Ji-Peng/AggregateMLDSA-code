@@ -4,7 +4,7 @@
 //! identities hold over the integers with the balanced carries, and single-cell mutations
 //! move exactly the expected entries.
 
-mod common;
+use crate::common;
 
 use agg_bridge::parity::{check, ParityWitness};
 use agg_bridge::Shape;
@@ -15,7 +15,7 @@ use agg_piop::OpeningField;
 use agg_witness::derive::derive;
 use agg_witness::padding::main_index;
 use agg_witness::params::{K, L, N};
-use common::Batch;
+use crate::common::Batch;
 use jolt_field::Zero;
 
 fn small_batch() -> Batch {

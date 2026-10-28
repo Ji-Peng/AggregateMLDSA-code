@@ -6,7 +6,7 @@
 #![cfg_attr(not(feature = "schedules"), allow(unused))]
 
 #[cfg(feature = "schedules")]
-#[path = "../tests/support/dummy.rs"]
+#[path = "../tests/all/dummy.rs"]
 mod dummy;
 
 #[cfg(feature = "schedules")]

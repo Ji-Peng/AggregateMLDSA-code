@@ -326,7 +326,7 @@ impl HFipsRecord {
 
     /// The extracted FIPS 204 signature `(c~, z, h*)`, sigEncode (Algorithm 26) with the
     /// canonical HintBitPack (Algorithm 20). For a record that passes [`check_record`] it
-    /// verifies under Algorithm 8 (`tests/hfips.rs`); `reencode_h` re-checks reachability and
+    /// verifies under Algorithm 8 (`tests/all/hfips.rs`); `reencode_h` re-checks reachability and
     /// the weight.
     pub fn extract_signature(&self, c_tilde: &[u8; C_TILDE_BYTES]) -> Result<Vec<u8>, ReencodeError> {
         let w1 = self.w1();

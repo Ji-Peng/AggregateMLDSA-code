@@ -6,7 +6,7 @@
 //! mechanism (the lookup, the leaf of `D_u`, the Booleanity zero-checks) can reject them.
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_piop::manifest::{Column, CommitmentManifest, DigitValue, GroupRole, Relation, LOOKUP_SHIFT, U16_DIGITS};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
@@ -18,7 +18,7 @@ use agg_witness::crt::az_integer;
 use agg_witness::digits::{leaf_vanishes, p_of};
 use agg_witness::padding::main_index;
 use agg_witness::params::{B_U, B_Z, N};
-use common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
+use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
 use jolt_field::{Ring, Zero};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {

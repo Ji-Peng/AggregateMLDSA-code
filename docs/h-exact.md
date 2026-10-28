@@ -7,8 +7,8 @@
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
 "estimate" were computed for this document with exact integer arithmetic (Section 4.4 lists
-the checks) or read from the pinned code and docs; every cost figure in Section 5 is an
-estimate scaled from a measured 32K cloud run of relation H.
+the checks) or read from the pinned code and docs; Section 5 marks its estimates and
+measurements.
 
 ## 0. Results in one page
 
@@ -18,9 +18,9 @@ estimate scaled from a measured 32K cloud run of relation H.
    SelfTargetMSIS bound is `zeta' = max(130,993, 190,465 + 2^12 * 39) = 350,209 = zeta` of
    FIPS 204, so aggregate unforgeability rests on ML-DSA-44's own instance (core-SVP 123.5
    classical).
-2. **Flag.** Runtime relation id, byte `1` (H is `0`; byte `2` is H-FIPS, Section 10),
+2. **Flag.** Runtime relation id, byte `1` (H-u is `0`; byte `2` is H-FIPS, Section 10),
    carried in the proof header's flags byte and in the event-0 manifest bytes; the verifier
-   accepts exactly the relation its caller configures (no downgrade to H).
+   accepts exactly the relation its caller configures (no downgrade to H-u).
 3. **Layout (recommended, "X1").** `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with
    `B_zlo in [0, 2^16)` looked up in `T_16` and `B_zhi, a_z` Boolean (spec Appendix A's `z`
    form); `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` looked up and **one six-valued digit**
@@ -33,28 +33,27 @@ estimate scaled from a measured 32K cloud run of relation H.
    polynomials (`B_zhi, D_u, b_0..b_5, a_z`), so the width-4 catalog needs 13 new scalar rows
    (`G_main4` at `(13..25, 9)`) and 13 new grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`);
    regenerating only these is an estimated 20 to 35 minutes, not the full 44.
-5. **PIOP.** Lookup unchanged (same four stacks, same `L = 138,690,560` at `2^15`). Stage 1
-   unchanged. Stage 2: `def_y1[t]` and one `leaf6[D_u]`: 7 instances, **degree 4** (was 8,
-   degree 5). Stage 3: `ring` with the affine `z, u`, `link[D_u]`, two Booleanity zero-checks
+5. **PIOP.** Lookup as in H-u (same four stacks, same `L = 138,690,560` at `2^15`). Stage 1
+   as in H-u. Stage 2: `def_y1[t]` and one `leaf6[D_u]`: 7 instances (H-u: 8), degree 4.
+   Stage 3: `ring` with the affine `z, u`, `link[D_u]`, two Booleanity zero-checks
    `bool[B_zhi]`, `bool[a_z]` at `r^(2)` (degree 3, no new evaluation reductions), the 37
-   reductions, 4 stack reductions: 45 instances (was 44). Opening: 32 claims at `r^(3)` plus
-   7 multiplicity claims (was 31 + 7).
+   reductions, 4 stack reductions: 45 instances (H-u: 44). Opening: 32 claims at `r^(3)` plus
+   7 multiplicity claims (H-u: 31 + 7).
 6. **Proof of work (`docs/soundness.md`).** The `tau` site is unchanged (`nu = d_main` whatever
    the number of zero-checks, round-by-round), the new zero-checks sit at `r^(2)` inside the
-   stage-2 rounds (no new site). Changes: `gamma^(2)` has 7 coefficients, `g` 4 -> 3; stage-2
-   rounds have degree 4, `g` stays 3; `gamma^(3)` has 45, `g` stays 6. At `2^15`: 483 nonces,
-   4,443 bits (was 4,444), 556 bytes (unchanged); round-by-round ledger before work
-   `1,409/|K| = 2^-117.5` (was 1,434). The plan digest differs from H's at every `N*`.
-7. **Costs at `N = 2^15` (estimates).** 13,434.5 committed elements per signature (+8.3%);
-   prove about 23.8 to 24.0 s against the measured 23.74 s (+0.1 to +0.25 s); PIOP bytes
-   5,616 (was 6,016), Akita opening +0 to +1.5 KB, so 51.0 B/sig unchanged at one decimal;
-   verifier unchanged within noise.
-8. **A free intermediate (open question 1).** The SelfTargetMSIS bound does not depend on the
-   `z` bound at all (`2^17 < 350,209`). Making only `u` exact ("H-u": H's `z` digits, the
-   six-valued `u` digit) gives `zeta' = zeta = 350,209` with **no** extra column, the same
-   catalog rows as H, and a cheaper stage 2 (degree 4). The relaxed result could therefore be
-   reported at core-SVP 123.5 instead of 119.7 at no cost; H-exact then adds only the exact
-   `z` bound (the literal FIPS 204 line-13 bound) for +1,024 elements per signature.
+   stage-2 rounds (no new site). Against H-u: `gamma^(2)` has 7 coefficients, `g` 4 -> 3;
+   the stage-2 rounds (degree 4, `g = 3`) and `gamma^(3)` (45 coefficients, `g = 6`) keep
+   their difficulties. At `2^15`: 483 nonces, 4,443 bits (H-u: 4,444), 556 bytes;
+   round-by-round ledger before work `1,409/|K| = 2^-117.5`, as for H-u. The plan digest
+   differs from H-u's at every `N*`.
+7. **Costs.** 13,434.5 committed elements per signature at `N = 2^15` (H-u: 12,410.5,
+   +8.25%); PIOP bytes 5,616 at `2^15`, as for H-u. Measured at `N = 1,024` (Section 9): the
+   aggregate is 16 B longer than H-u's (the Akita opening), prove 2.98 s against 2.90 s.
+8. **H-u.** The SelfTargetMSIS bound does not depend on the `z` bound at all (`2^17 <
+   350,209`). Relation H-u (byte 0, the default, Section 8) keeps the `z` digits `Z_lo, Z_hi`
+   and makes only `u` exact with the six-valued digit: `zeta' = zeta = 350,209` with no extra
+   column. H-exact adds only the exact `z` bound (the literal FIPS 204 line-13 bound) for
+   +1,024 elements per signature.
 
 ## 1. The relation flag and its binding
 
@@ -62,7 +61,7 @@ estimate scaled from a measured 32K cloud run of relation H.
 
 | Relation | Id byte | Proven bounds `(B_z bar, B_u bar)` | `zeta'` | Status |
 | --- | ---: | --- | ---: | --- |
-| H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8); replaced relaxed H `(2^17, 2^18)`, `zeta' = 421,888`, which used id 0 before wire version 3 |
+| H-u (default) | 0 | `(2^17, 190,465)` (inclusive `[-2^17, 2^17 - 1]`, `[-190,465, 190,465]`) | 350,209 | implemented (step A, deviation L8), the default |
 | H-exact | 1 | `(130,993, 190,465)`, both symmetric and exact | 350,209 | implemented (step B, deviation L9) |
 | H-FIPS | 2 | `(130,993, 190,465)` and the hint: `sum h <= omega` and `UseHint(h, w') = w1'` (Section 10) | 350,209 (not needed: the extracted witness is a FIPS 204 signature) | implemented (Sections 10.5 to 10.7) |
 
@@ -72,19 +71,19 @@ number names the relation everywhere.
 ### 1.2 Runtime parameter, not a cargo feature
 
 The relation MUST be a runtime parameter of `agg_piop::manifest::CommitmentManifest`
-(`Relation::{H, HExact}`), so one binary proves and benchmarks both results and the checked-in
-catalogs hold the rows of both.
+(`Relation::{Hu, HExact, HFips}`), so one binary proves and benchmarks every relation and the
+checked-in catalogs hold the rows of every relation.
 
 ### 1.3 Where it is bound
 
 1. **Proof header** (`wire::AggregateProof`): the flags byte after the version is the relation
-   id. `from_bytes` accepts `0` and `1` and rejects any other value (`WireError::Flags`).
+   id. `from_bytes` accepts `0`, `1` and `2` and rejects any other value (`WireError::Flags`).
 2. **Event 0** (`CommitmentManifest::binding_bytes`, absorbed through
    `binding::instance_record` before any commitment):
-   * byte 3, the relation flag (today the constant `RELATION_H = 0`), becomes the id;
+   * byte 3 is the relation id;
    * the `G_main4` descriptor: polynomial count 9 instead of 8, alphabet codes
      `[0, 6, 0, 0, 0, 0, 0, 0, 0]` (`B_zhi` Boolean, `D_u` six-valued leaf digit, six bits,
-     `a_z` Boolean) instead of `[4, 8, 0, 0, 0, 0, 0, 0]`; the `G_main16` codes stay
+     `a_z` Boolean) instead of H-u's `[4, 6, 0, 0, 0, 0, 0, 0]`; the `G_main16` codes stay
      `[0x90; 4]`;
    * the catalog row id `mldsa-44-l16x-batch-<N*>-mult-final` instead of
      `mldsa-44-l16-batch-<N*>-mult-final`;
@@ -93,17 +92,17 @@ catalogs hold the rows of both.
    The digit layout id stays `1` (it names the lookup layout L16, which is unchanged), and the
    lookup layout bytes are unchanged (Section 3.1). The affine value forms of Section 2.3 are
    a function of the relation id (normative constants), not separately encoded.
-3. **Verifier policy.** An H proof is a valid proof of a weaker statement, so the relation
+3. **Verifier policy.** An H-u proof is a valid proof of a weaker statement, so the relation
    MUST NOT be read from the proof and trusted: `verifier::verify` takes the expected relation
-   (`RelationPolicy::Exactly(Relation)`), rejects a header flag that differs from it before
-   replaying event 0, and builds the manifest (hence event 0, the catalog row, the plan) from
-   the policy, not from the header. `agg verify --relation {h,h-exact}` (default `h`) prints the
-   relation it verified; `agg prove --relation ...` and `agg bench --relation ...` likewise.
+   as an argument, rejects a header flag that differs from it before replaying event 0
+   (`VerifyError::Relation`), and builds the manifest (hence event 0, the catalog row, the
+   plan) from that argument, not from the header. `agg verify --relation h-u|h-exact|h-fips`
+   (default `h-u`) prints the relation it verified; `agg aggregate` and `agg bench` take the
+   same option.
 
-No wire-version bump is needed beyond version 2 (the proof-of-work schedule): H proofs are
-byte-identical, and
-H-exact proofs differ only in the flags byte, in counts the verifier derives from the manifest
-(stage-2 message width and claim count, stage-3 claim count) and in the opening.
+Every relation uses wire version 4. An H-exact proof differs from an H-u proof in the flags
+byte, in the stage-2 and stage-3 claim counts the verifier derives from the manifest, and in
+the `G_main4` commitment and the opening.
 
 ## 2. Column layout and catalogs
 
@@ -144,21 +143,21 @@ which is harmless because only the value enters an identity): `a_z = [w >= 2^17]
 
 ### 2.2 Groups
 
-| Group | Family (preset) | H (L16, today) | H-exact | Polys |
+| Group | Family (preset) | H-u | H-exact | Polys |
 | --- | --- | --- | --- | ---: |
 | `G_main16` | width 16 (`AggFp64SignedWidth16`) | `Z_lo, U_lo, V_lo, V_hi` | `S_zlo, S_ulo, V_lo, V_hi` (same slots, same alphabet `[-2^15, 2^15)`, all looked up) | 4 |
-| `G_main4` | width 4 (`AggFp64SignedWidth4`) | `Z_hi` (base 4, `[-2, 1]`), `U_hi` (base 8, `[-4, 3]`), `b_0..b_5` | `B_zhi` (`{0, 1}`), `D_u` (base 6, `[-3, 2]`), `b_0..b_5`, `a_z` (`{0, 1}`) | 8 -> 9 |
+| `G_main4` | width 4 (`AggFp64SignedWidth4`) | `Z_hi` (base 4, `[-2, 1]`), `U_hi` (base 6, `[-3, 2]`), `b_0..b_5` | `B_zhi` (`{0, 1}`), `D_u` (base 6, `[-3, 2]`), `b_0..b_5`, `a_z` (`{0, 1}`) | 8 -> 9 |
 | `G_1, G_2, G_3, G_m` | unchanged | unchanged | unchanged | 6, 12, 1, 7 |
 
 `a_z` is appended after the bits so that `b_t` keeps positions 2..7 of `G_main4` (code that
 locates bits by position keeps working; everything else locates through `manifest.locate`).
 Every new alphabet lies inside the width-4 admission interval `[-8, 7]`; as always the width
 is a producer bound, not a range proof (Akita Remark 10.41): Section 3 proves every range.
-Total 39 polynomials (was 38); 32 opened at `r^(3)`, 7 at the table point.
+Total 39 polynomials (H-u: 38); 32 opened at `r^(3)`, 7 at the table point.
 
-Committed elements per signature: main domain `13 * 1,024 = 13,312` (was 12,288), bridge and
-multiplicities unchanged (96 + 12 + 0.5 + 14 at `2^15`): **13,434.5** at `N = 2^15` (was
-12,410.5, +8.25%); 13,960 physical at `N = 1,024` (was 12,936).
+Committed elements per signature: main domain `13 * 1,024 = 13,312` (H-u: 12,288), bridge and
+multiplicities as in H-u (96 + 12 + 0.5 + 14 at `2^15`): **13,434.5** at `N = 2^15` (H-u:
+12,410.5, +8.25%); 13,960 physical at `N = 1,024` (H-u: 12,936).
 
 Rejected alternatives: `a_z` in `G_main16` (5 width-16 polynomials) needs new width-16 rows
 instead and commits a bit at width 16; a fifth main-stack column would double the main
@@ -175,12 +174,12 @@ module doc), so:
 * width-4 family: 13 new scalar producer rows, `G_main4` at `(13..=25, 9)`, and 13 new grouped
   rows, one per `N* = 2^3 .. 2^15`, keyed by `G_m = (16, 7)` and the five precommitted
   profiles `(G_main16 (v, 4), G_main4 (v, 9), G_1, G_2, G_3)`, named
-  `mldsa-44-l16x-batch-<N*>-mult-final`. H's 26 width-4 rows and 25 width-16 rows stay
-  byte-identical (H's plan digests and pinned proofs do not move).
+  `mldsa-44-l16x-batch-<N*>-mult-final`. H-u's 26 width-4 rows and the 25 width-16 rows stay
+  byte-identical (H-u's plan digests and pinned proofs do not move).
 
 Generation: `update_catalog_rows` plans only missing rows but **prunes rows of layouts no
 longer requested**, so `CATALOG_D_SIG` must become a list of `(d_sig, relation)` pairs (or
-`scalar_layouts`/`BatchLayout` must iterate both relations) before it is run, or H's rows are
+`scalar_layouts`/`BatchLayout` must iterate both relations) before it is run, or H-u's rows are
 deleted. Estimated cost: 20 to 35 minutes with 3 scalar workers off CPU 2 (estimate: the
 run of all rows of both families took 2,666 s; the width-16 rows, about a third to
 a half of the scalar work, are reused). The width-4 artifact grows from 331,178 B by about
@@ -188,35 +187,34 @@ the same amount again (estimate). Akita derives its transcript proof-of-work pla
 row, so the 13 new rows get their own Akita plan digests (the pin test of `docs/soundness.md`
 4.1 gains 13 entries); the evaluation batch has 39 claims, `g = 6` as for 38.
 
-The planner's opening estimate barely depends on the polynomial count (`docs/pcs-config.md`
-Section 4: the 67-polynomial base-16 layout was within 2.4% of the 38-polynomial L16 layout),
-so one more polynomial should cost between 0 and about 1.5 KB of opening (estimate; the
-planner may switch schedule at a size, as at `d_sig` 9 and 11).
+The planner's opening estimate barely depends on the polynomial count: the estimates of the
+H-exact rows equal H-u's, and at `N = 1,024` the measured H-exact opening is 16 B longer
+(Section 9).
 
 ## 3. PIOP changes
 
-### 3.1 Lookup (event 7): unchanged shape
+### 3.1 Lookup (event 7): H-u's shape
 
-The four stacks keep their column counts and domains: `[S_zlo | S_ulo | V_lo | V_hi]` on the
+The four stacks keep H-u's column counts and domains: `[S_zlo | S_ulo | V_lo | V_hi]` on the
 main domain (depth `d_main + 2`), the carries on `D_1, D_2, D_3`; one table `T_16`, two
 challenges, storage shift `2^15`. Hence `L = 4 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3` is
-unchanged (138,690,560 at `2^15`, 4,395,008 at 1,024), `D = max(d_main + 2, 16)` is unchanged,
-the lookup proof (1,799 elements plus 7 digit claims, 28,896 B at `2^15`) and all lookup sites
-are unchanged. Only the honest multiplicities move (padded cells now look up 65,457 and
-1,228 instead of 0); the seven multiplicity digits still suffice because `L` is unchanged. The
-lookup now proves `B_zlo, B_ulo in [0, 2^16)` instead of `z_lo, u_lo in [0, 2^16)`: the same
-cells, other meaning (bound by the relation id).
+H-u's (138,690,560 at `2^15`, 4,395,008 at 1,024), and so are `D = max(d_main + 2, 16)`,
+the lookup proof (1,799 elements plus 7 digit claims, 28,896 B at `2^15`) and all lookup
+sites. Only the honest multiplicities differ (the padded `z` cells look up 65,457 instead of
+0); the seven multiplicity digits suffice because `L` is the same. The lookup proves
+`B_zlo, B_ulo in [0, 2^16)`: the cells of H-u's `z_lo, B_ulo`, with the meaning bound by the
+relation id.
 
-### 3.2 Stage 1 (point `tau`): unchanged
+### 3.2 Stage 1 (point `tau`): as in H-u
 
-26 instances, degree 4, the 13 pre-stage and 18 terminal claims unchanged. The two new
+26 instances, degree 4, the 13 pre-stage and 18 terminal claims of H-u. The two new
 Booleanity zero-checks could go here (`bool[B_zhi]`, `bool[a_z]` at `tau`, degree 3, 28
 instances, `g` of `gamma^(1)` still 5), but then each leaves a claim at `r^(1)` that needs an
 evaluation reduction in stage 3; placing them in stage 3 at `r^(2)` (3.4) needs none.
 
 ### 3.3 Stage 2 (point `r^(1)`): one leaf of degree 4
 
-Instances, in `gamma^(2)` order: `def_y1[t]` for `t < 6` (gammas 0..5, unchanged, degree 2)
+Instances, in `gamma^(2)` order: `def_y1[t]` for `t < 6` (gammas 0..5, as in H-u, degree 2)
 and `leaf6[D_u]` (gamma 6):
 
 ```text
@@ -224,9 +222,9 @@ and `leaf6[D_u]` (gamma 6):
 Q_6(P) = P (P - 2)(P - 6).                                             degree 1 + 3 = 4
 ```
 
-`leaf4[Z_hi]` and `leaf8[U_hi]` are removed (`B_zhi` is Boolean, checked in stage 3). Stage
-degree 4 (was 5), 7 batching coefficients (was 8), terminal claims `b_t(r^(2))` (6) and
-`P_D(r^(2))` (1): 7 (was 8). `Q_6` is exact over `F_p`: `Z (Z + 1) = t` has at most two roots,
+H-u's `leaf4[Z_hi]` has no counterpart (`B_zhi` is Boolean, checked in stage 3), and
+`leaf6[D_u]` is H-u's `leaf6[U_hi]`. Stage degree 4, 7 batching coefficients (H-u: 8), terminal
+claims `b_t(r^(2))` (6) and `P_D(r^(2))` (1): 7 (H-u: 8). `Q_6` is exact over `F_p`: `Z (Z + 1) = t` has at most two roots,
 and for `t in {0, 2, 6}` the roots are `{0, -1}, {1, -2}, {2, -3}`, so `Q_6(Z (Z + 1)) = 0`
 iff `Z in [-3, 2]` (the halving trick of Aerie (3.7) works for every even alphabet symmetric
 about `-1/2`). `Q_6` is `Q_8` without its last root.
@@ -241,10 +239,10 @@ Instances, in `gamma^(3)` order:
 | 1 | `link[D_u]` | main, `eq(r^(2))` | `D_u (D_u + 1)`, input claim `P_D(r^(2))` | 3 |
 | 2 | `bool[B_zhi]` | main, `eq(r^(2))` | `B_zhi (B_zhi - 1)`, claim 0 | 3 |
 | 3 | `bool[a_z]` | main, `eq(r^(2))` | `a_z (a_z - 1)`, claim 0 | 3 |
-| 4..40 | the 37 evaluation reductions | as today | as today | 2 |
-| 41..44 | the 4 lookup-stack reductions (7.7) | as today | as today | 2 |
+| 4..40 | the 37 evaluation reductions | as in H-u | as in H-u | 2 |
+| 41..44 | the 4 lookup-stack reductions (7.7) | as in H-u | as in H-u | 2 |
 
-`GAMMA_COUNT = 45` (was 44: one link fewer, two zero-checks more). The ring identity reads
+`GAMMA_COUNT = 45` (H-u: 44; one link fewer, two zero-checks more). The ring identity reads
 
 ```text
 T(r^(2)) = sum_{j',s,i} w_A(j',s,i) * (S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225)(j',s,i)
@@ -258,10 +256,10 @@ The constants are exact because the multilinear extension of an affine combinati
 plus a constant is the same combination of the extensions plus the constant. The
 linear split (`stage::split_linear`) takes only `Ints` lanes, i.e. `S_zlo, S_ulo, V_lo,
 V_hi`; the narrow lanes `B_zhi, a_z, D_u` stay in the generic groups exactly as `Z_hi, U_hi`
-do today.
+do under H-u.
 
-Groups: main `eq(r^(2))` `{S_ulo, V_lo, V_hi, B_zhi, D_u, a_z, b_0..b_5}` (12 lanes, was 11);
-main `{w_A, S_zlo, B_zhi, a_z}` (4 lanes, was 3); the others unchanged. Terminal: the 32
+Groups: main `eq(r^(2))` `{S_ulo, V_lo, V_hi, B_zhi, D_u, a_z, b_0..b_5}` (12 lanes, H-u 11);
+main `{w_A, S_zlo, B_zhi, a_z}` (4 lanes, H-u 3); the others as in H-u. Terminal: the 32
 committed values at `r^(3)` and its suffixes (manifest order); the verifier forms `z, u, v`
 by 2.1, `w_1'`, `w_A(r^(3))`, `D_u (D_u + 1)` for the link and `B (B - 1)` for the two
 zero-checks, and checks the batched terminal. The Booleanity zero-checks need no new
@@ -275,30 +273,30 @@ reuse", `docs/soundness.md` 3.4 "identities tested at a point of the preceding s
 
 ### 3.5 Stage degrees and transcript counts
 
-| | H | H-exact |
+| | H-u | H-exact |
 | --- | --- | --- |
-| Stage degrees (`STAGE_DEGREES`) | (4, 5, 3) | (4, 4, 3) |
+| Stage degrees (`STAGE_DEGREES`) | (4, 4, 3) | (4, 4, 3) |
 | Batching coefficients (`STAGE_GAMMAS`) | (26, 8, 44) | (26, 7, 45) |
 | Pre-stage, stage-1, `K^(1)`, stage-2, stage-3 claims | 13, 18, 6, 8, 31 (76) | 13, 18, 6, 7, 32 (76) |
 | Opening claims | 31 at `r^(3)` + 7 at `pi_m` | 32 + 7 |
-| Stage messages at `2^15` | `(4 + 5 + 3) * 25` = 300 elements | `(4 + 4 + 3) * 25` = 275 |
-| PIOP stage bytes at `2^15` | 6,016 | 5,616 |
+| Stage messages at `2^15` | `(4 + 4 + 3) * 25` = 275 elements | 275 |
+| PIOP stage bytes at `2^15` | 5,616 | 5,616 |
 
 Events of spec Section 10 for H-exact: event 11 `gamma^(2) in K^7`, stage-2 rounds of 4
 elements, 7 claims; event 12 `gamma^(3) in K^45`, rounds of 3 elements, 32 claims. Every count
-follows from `N` and the relation; `transcript::Registry` MUST take both from the manifest
-(today `STAGE_DEGREES` and the claim counts are constants).
+follows from `N` and the relation; `transcript::Registry` takes the gamma and claim counts
+from the manifest (`STAGE_DEGREES` is the same for every relation).
 
 ### 3.6 Instances that change, by mechanism
 
-| Value | Mechanism in H | Mechanism in H-exact |
+| Value | Mechanism in H-u | Mechanism in H-exact |
 | --- | --- | --- |
 | `z` low part | `Z_lo` looked up | `S_zlo` looked up (same stack slot) |
 | `z` high part | `Z_hi in [-2, 1]`: `leaf4` (stage 2), `link` (stage 3) | `B_zhi in {0, 1}`: `bool` at `r^(2)` (stage 3) |
 | `z` slack | none | `a_z in {0, 1}`: `bool` at `r^(2)` (stage 3) |
 | `u` low part | `U_lo` looked up | `S_ulo` looked up (same stack slot) |
-| `u` high part | `U_hi in [-4, 3]`: `leaf8` (degree 5), `link` | `D_u in [-3, 2]`: `leaf6` (degree 4), `link` |
-| `v`, bits, carries, parities | unchanged | unchanged |
+| `u` high part | `U_hi in [-3, 2]`: `leaf6` (degree 4), `link` | `D_u in [-3, 2]`: `leaf6` (degree 4), `link` (same slot) |
+| `v`, bits, carries, parities | spec Section 4 | the same |
 
 ### 3.7 Proof-of-work schedule
 
@@ -307,28 +305,28 @@ or range instance can change a difficulty only through (i) the `tau` site, (ii) 
 vector's length `l` (`e = l/|K|`, `g = bit_length(l)`), (iii) a stage's round degree
 (`e = deg/|K|`), or (iv) a new site. For H-exact:
 
-| Site class | H | H-exact | Why |
+| Site class | H-u | H-exact | Why |
 | --- | --- | --- | --- |
 | `tau` (`nu = d_main`) | `g = 5` at `2^15` | unchanged | one site for all zero-checks at `tau` (round-by-round); H-exact adds none there, and would not change `nu` if it did |
 | `stage.gamma` stage 1 | `l = 26`, `g = 5` | unchanged | |
-| `stage.gamma` stage 2 | `l = 8`, `g = 4`, nonce 11 bits | `l = 7`, **`g = 3`**, nonce 10 bits | `leaf4[Z_hi]`, `leaf8[U_hi]` -> `leaf6[D_u]` |
+| `stage.gamma` stage 2 | `l = 8`, `g = 4`, nonce 11 bits | `l = 7`, **`g = 3`**, nonce 10 bits | no `leaf4[Z_hi]` |
 | `stage.gamma` stage 3 | `l = 44`, `g = 6` | `l = 45`, `g = 6` | below 64 |
-| `stage.round` stage 2 (`d_main` sites) | degree 5, `g = 3` | degree 4, `g = 3` | `bit_length(4) = bit_length(5)` |
+| `stage.round` stage 2 (`d_main` sites) | degree 4, `g = 3` | unchanged | |
 | `stage.round` stages 1, 3 | degrees 4, 3; `g` = 3, 2 | unchanged | |
 | new zero-checks `bool[B_zhi]`, `bool[a_z]` at `r^(2)` | | no site | ride on the stage-2 rounds' `nu >= 1` and on `gamma^(3)` (`docs/soundness.md` 3.4) |
 | lookup (`X`, `mu`, `gamma_s`, rounds) | | unchanged | same trees |
-| Akita (inside the opening) | per H row | per new row | the plan is derived from the selected catalog row |
+| Akita (inside the opening) | per H-u row | per H-exact row | the plan is derived from the selected catalog row |
 | tie site, Flock | | unchanged | the Keccak side does not see the relation |
 
 Totals (`docs/scripts/pow_plan.py`, run with `STAGE_DEGREES = (4, 4, 3)` and
 `STAGE_GAMMAS = (26, 7, 45)`):
 
-| `N*` | H: bits / bytes / work / ledger | H-exact: bits / bytes / work / ledger |
+| `N*` | H-u: bits / bytes / work / ledger | H-exact: bits / bytes / work / ledger |
 | ---: | --- | --- |
-| `2^3` | 1,811 / 227 / 1,364 / `563/|K|` | 1,810 / 227 / 1,356 / `550/|K|` |
-| `2^10` | 3,124 / 391 / 2,048 / `999/|K|` | 3,123 / 391 / 2,040 / `979/|K|` |
-| `2^13` | 3,889 / 487 / 2,438 / `1,251/|K|` | 3,888 / 486 / 2,430 / `1,228/|K|` |
-| `2^15` | 4,444 / 556 / 2,718 / `1,434/|K|` | 4,443 / 556 / 2,710 / `1,409/|K|` |
+| `2^3` | 1,811 / 227 / 1,364 / `550/|K|` | 1,810 / 227 / 1,356 / `550/|K|` |
+| `2^10` | 3,124 / 391 / 2,048 / `979/|K|` | 3,123 / 391 / 2,040 / `979/|K|` |
+| `2^13` | 3,889 / 487 / 2,438 / `1,228/|K|` | 3,888 / 486 / 2,430 / `1,228/|K|` |
+| `2^15` | 4,444 / 556 / 2,718 / `1,409/|K|` | 4,443 / 556 / 2,710 / `1,409/|K|` |
 
 (`ledger` = round-by-round sum before work; nonce counts are equal, 194 to 483.) The plan
 encoding of `docs/soundness.md` 6.4 needs no new field: the relation is bound by the manifest
@@ -345,7 +343,7 @@ H-exact  N* = 2^15  modeB          e4b1dffc21351ca615ace27500406a1990609ccb6cc07
 H-exact  N* = 2^15  slim span on   1f8e7aba1af1db61d3be14fccd16252008b8cdc71799c61d5711d923df38db16
 ```
 
-(The same computation reproduces the H anchors of `docs/soundness.md` Section 10, e.g.
+(The same computation reproduces the H-u anchors of `docs/soundness.md` Section 10, e.g.
 `df9161a5...e2f38c` at `2^15` Slim span on.)
 
 ## 4. Knowledge soundness and the exact bounds
@@ -354,25 +352,25 @@ H-exact  N* = 2^15  slim span on   1f8e7aba1af1db61d3be14fccd16252008b8cdc71799c
 
 Spec 12.1 (per-instance union bound):
 
-| Component | H | H-exact |
+| Component | H-u | H-exact |
 | --- | ---: | ---: |
 | LogUp identity, two challenges | `2^-201.9` | `2^-201.9` (same `L`, `M`) |
 | GKR sessions | `1,106/|K|` | `1,106/|K|` |
-| Stage sum-checks, degrees (4, 5, 3) -> (4, 4, 3) | `300/|K|` | `275/|K|` |
+| Stage sum-checks, degrees (4, 4, 3) | `275/|K|` | `275/|K|` |
 | Zero-checks at `tau` (19) | `475/|K|` | `475/|K|` |
 | Leaves at `r^(1)`, links and new zero-checks at `r^(2)` | 2 + 2 instances, `100/|K|` | 1 + 1 + 2 instances, `100/|K|` |
 | Linear identities at a point (62) | `1,550/|K|` | `1,550/|K|` |
 | Batching coefficients | `3/|K|` | `3/|K|` |
-| **Sum of field terms** | `3,534/|K| = 2^-116.2` | `3,509/|K| = 2^-116.2` |
+| **Sum of field terms** | `3,509/|K| = 2^-116.2` | `3,509/|K| = 2^-116.2` |
 | Bridge | `2^-144.6` | `2^-144.6` |
 | Akita, Flock | by their ledgers | Akita by the new rows' ledger; Flock unchanged |
 
 `docs/soundness.md` Section 5 (round-by-round, the ledger that replaces 12.1):
 `(sum of stage degrees * d_main + d_main + 3 + GKR)/|K|` = `(275 + 25 + 3 + 1,106)/|K| =
-1,409/|K| = 2^-117.5` (H: 1,434). With the schedule of 3.7 every site weighs at most
-`2^-128` per address (the maximum site weight is the script's `2^-128.36` at `2^15`, as for H),
-so the theorem of `docs/soundness.md` Section 7 holds verbatim with "relation H" replaced by
-"relation H-exact" and the H-exact rows' Akita plan.
+1,409/|K| = 2^-117.5`, as for H-u. With the schedule of 3.7 every site weighs at most
+`2^-128` per address (the maximum site weight is the script's `2^-128.36` at `2^15`, as for
+H-u), so the theorem of `docs/soundness.md` Section 7 holds verbatim with "relation H-u"
+replaced by "relation H-exact" and the H-exact rows' Akita plan.
 
 ### 4.2 Extraction
 
@@ -425,9 +423,8 @@ zeta (FIPS 204) = max(gamma_1 - beta, 2 gamma_2 + 1 + 2^(d-1) tau) = max(130,994
 
 and the reduction of spec 12.3 runs with ML-DSA-44's own instance: core-SVP 123.5 classical
 (lattice-estimator rough model, block size 423; 112 quantum by security-estimates), the
-published Dilithium2 figures; the "+20.5%" sentence of spec 12.3 and
-its estimator obligation do not apply to H-exact. (FIPS 204 Table 1 claims Category 2 for
-ML-DSA-44; spec 12.3's "category 1" is H's.)
+published Dilithium2 figures, as for H-u (spec 12.3). (FIPS 204 Table 1 claims Category 2 for
+ML-DSA-44.)
 
 ### 4.4 Checks run for this document
 
@@ -443,59 +440,41 @@ Exact integer checks (`docs/scripts/spec_checks.py` items 12 and 13, `python3 -I
 * `zeta', zeta` as above; `B_z, B_u, gamma_2, beta` from FIPS 204 Table 1;
 * the proof-of-work totals and digests of 3.7 with `docs/scripts/pow_plan.py`.
 
-## 5. Costs at `N = 2^15` (estimates)
-
-Base: a measured run of relation H at `N = 2^15` on `c4d-highmem-16` (`Slim`, span on,
-medians of 5), before the prover speed work of `docs/perf.md` and `docs/piop.md` Section 20.
-The deltas are estimates from the structure of each step (which lanes and polynomials it
-touches); they are not measurements. They apply in absolute terms on top of that speed work
-(which does not touch the parts H-exact changes, except stage 3, where it makes the `Ints`
-lanes cheaper and leaves the narrow lanes as they are).
+## 5. Costs
 
 ### 5.1 Committed elements and memory
 
-| | H (measured layout) | H-exact |
+| | H-u | H-exact |
 | --- | ---: | ---: |
 | Main-domain columns | 12 (4 width 16 + 8 width 4) | 13 (4 + 9) |
-| Committed elements per signature | 12,410.5 | 13,434.5 (+8.25%) |
-| Committed elements, total | 406.7M | 440.2M |
-| Prover RSS | 28.9 GiB | +0.1 to +0.3 GiB (one `i8` column of `2^25` cells, its Akita commit data; estimate) |
+| Committed elements per signature at `2^15` | 12,410.5 | 13,434.5 (+8.25%) |
+| Committed elements at `2^15`, total | 406.7M | 440.2M |
+
+H-exact adds one `i8` column of `2^25` cells at `2^15` and its Akita commit data to the
+prover's memory (+0.1 to +0.3 GiB, estimate).
 
 ### 5.2 Prover time
 
-| Step | H (ms) | H-exact (estimate, ms) | Reason |
-| --- | ---: | ---: | --- |
-| witness and tables | 1,103.9 | +10 to +30 | one more narrow column to encode and validate |
-| event 1 `G_main` commits | 602.8 | +35 to +50 | 13 instead of 12 columns, one width-4 digit each |
-| Flock span (commit + prove) | 13,816.4 | 0 | Keccak side unchanged |
-| LogUp-GKR lookup | 3,861.7 | 0 | same stacks and `L` |
-| stage 1 | 466.4 | 0 | unchanged |
-| stage 2 | 483.6 | -60 to -120 | stage degree 5 -> 4 for every group (one evaluation point fewer per round), one mapped leaf lane instead of two |
-| stage 3 | 1,795.6 | +60 to +150 | `a_z` lane in two main groups, two `Bool` terms instead of one `Link`, a third lane in the ring's `w_A` group |
-| Akita opening | 737.6 | +10 to +20 | 39 instead of 38 polynomials |
-| **prove total** | **23,742.5** | **+55 to +130 (about +0.1 s; range -0.05 to +0.25 s)** | |
-
-So prove about 23.8 to 24.0 s at this base, +0.5% to +1%; against a 12-s prove the same
-absolute delta is +1% to +2%.
+H-exact changes the work of five prover steps (structure only): the witness tables (one more
+narrow column to encode and validate), the round-1 `G_main4` commitment (9 instead of 8
+polynomials), stage 2 (7 instead of 8 instances, one mapped leaf lane instead of two), stage
+3 (the `a_z` lane in two main groups, two `Bool` terms instead of one `Link`, a third lane in
+the ring's `w_A` group) and the Akita opening (39 instead of 38 polynomials). The Flock side,
+the lookup and stage 1 are H-u's. Measured at `N = 1,024` (Section 9): prove 2.98 s against
+H-u's 2.90 s.
 
 ### 5.3 Proof bytes
 
-| Part | H (B) | H-exact (B) |
-| --- | ---: | ---: |
-| `c~` list | 1,048,576 | 1,048,576 |
-| Flock proofs, commitments, final vectors | 522,458 | 522,458 |
-| lookup `T_16` | 28,896 | 28,896 |
-| PIOP rounds and claims | 6,016 | 5,616 (exact count, 3.5) |
-| proof-of-work stream | 556 | 556 |
-| Akita commitments | 792 | about 792 (estimate) |
-| Akita opening | 62,974 | 63.0 to 64.5 K (estimate, planner) |
-| **total** | **1,669,723 (51.0 B/sig)**, plus 560 with the proof-of-work stream | **about 1,669.9 to 1,671.4 K with the proof-of-work stream (51.0 B/sig)** |
+At `2^15` the `c~` list (1,048,576 B), the Keccak side, the lookup (28,896 B), the PIOP rounds
+and claims (5,616 B, exact, 3.5) and the proof-of-work stream (556 B) have H-u's sizes. The
+planner's opening estimates of the H-exact rows equal H-u's; measured at `N = 1,024` the
+H-exact aggregate is 16 B longer, all in the Akita opening (Section 9).
 
 ### 5.4 Verifier
 
-Unchanged within noise (estimate): three integer coefficients more at the stage-3 terminal,
-one claim more in the Akita opening (9.1 ms today), the same lookup, public data and Flock
-work. 0.92 s uncached, 0.46 s cached as measured for H.
+Three integer coefficients more at the stage-3 terminal and one claim more in the Akita
+opening; the lookup, the public data and the Flock work are H-u's. Measured at `N = 1,024`
+the two verifiers are within noise (`docs/cli.md` Section 4).
 
 ## 6. Test plan
 
@@ -504,9 +483,9 @@ slack, `G_main4` count 9, catalogs: Section 9).
 
 ### 6.2 Honest round trips
 
-* `agg-piop` mode B: H-exact at 64, 256, 1,024 records (`tests/mode_b.rs`), also with
-  `N` not a power of two (padding) and `N = 1`; H unchanged at the same sizes (pinned digests
-  of H MUST NOT move).
+* `agg-piop` mode B: H-exact at 64, 256, 1,024 records (`tests/all/mode_b.rs`), also with
+  `N` not a power of two (padding) and `N = 1`; H-u unchanged at the same sizes (pinned
+  digests of H-u MUST NOT move).
 * `agg-cli` mode A: H-exact at 256 and 1,024 locally (`tests/mode_a.rs`, `tests/cli.rs`),
   cached and uncached verifier paths agree; 32,768 on the cloud VM (both relations back to
   back, same VM, medians of 5).
@@ -516,15 +495,15 @@ slack, `G_main4` count 9, catalogs: Section 9).
 
 ### 6.3 Cross-check with the integer relation
 
-* `tests/source_tables.rs`: the `(z, u, v)` decoded from the PIOP's H-exact tables equal those
+* `tests/all/source_tables.rs`: the `(z, u, v)` decoded from the PIOP's H-exact tables equal those
   of `derive` and those of the H-u tables, and the slack bit is `a_z = [z >= 79]`.
-* `tests/virtual_checker.rs`: the pointwise H-exact identities on the Boolean domain (both
+* `tests/all/virtual_checker.rs`: the pointwise H-exact identities on the Boolean domain (both
   `bool`, `Q_6(P_D) = 0`, `P_D = D_u (D_u + 1)`, the ring with the forms) on the honest
   tables, and each tampering of 6.4 caught pointwise by the identity it targets.
 
 ### 6.4 Negative tests (each MUST be rejected, at the stated place)
 
-Instance level (`tests/stages.rs`, tables tampered after commitment, stage prover run
+Instance level (`tests/all/stages.rs`, tables tampered after commitment, stage prover run
 unchecked; the stage verifier rejects):
 
 | Tamper | Rejected by |
@@ -540,22 +519,22 @@ can catch it (synthetic mode-B statements through a test-only `PublicData` const
 takes `A, T` and the bits directly, `#[cfg(test)]` or a `test-hooks` feature; `T` chosen as
 `A z - 2 gamma_2 w_1' - u - q v` for the chosen witness):
 
-| Witness | H | H-exact |
+| Witness | H-u | H-exact |
 | --- | --- | --- |
 | `z = +-130,993`, `u = +-190,465` (canonical digits) | accept | accept |
 | `z = 130,994` encoded as `(a_z, B_zhi, S_zlo) = (1, 1, 32,768)` | accept (`|z| < 2^17`) | reject: lookup |
 | `z = 130,994` encoded with `B_zhi = 2` or `a_z = 2` (`S` in range) | | reject: `bool` |
 | `z = -130,994` encoded with `S_zlo = -32,769` | | reject: lookup |
-| `u = 190,466` as `(D_u, S_ulo) = (2, 32,768)` | accept (`|u| < 2^18`) | reject: lookup |
-| `u = 190,466` as `D_u = 3` (`S_ulo = -30,311`) | | reject: `leaf6` |
-| `z = 131,000` (FIPS rejects, H accepts) | accept | reject |
+| `u = 190,466` as `(D_u, S_ulo) = (2, 32,768)` | reject: lookup | reject: lookup |
+| `u = 190,466` as `D_u = 3` (`S_ulo = -30,311`) | reject: `leaf6` | reject: `leaf6` |
+| `z = 131,000` (FIPS 204 rejects) | accept | reject: lookup |
 
-Protocol level: an H proof verified with `RelationPolicy::Exactly(HExact)` and an H-exact
-proof verified as H are rejected before event 0 (flag mismatch); an H-exact proof whose
+Protocol level: an H-u proof verified as H-exact and an H-exact proof verified as H-u are
+rejected before event 0 (flag mismatch); an H-exact proof whose
 header flag is rewritten to 0 is rejected (and vice versa); an H-exact proof whose flag is
 rewritten to 2 (H-FIPS, Section 10) is not accepted under either relation, and flag byte 3 is
 rejected as malformed;
-an H-exact proof replayed with H's catalog row or H's plan digest fails event 0 (different
+an H-exact proof replayed with H-u's catalog row or plan digest fails event 0 (different
 transcript); a proof-of-work nonce wrong at the stage-2 `gamma` site (10-bit nonce) is
 rejected; a truncated stage-2 message (H-exact width 4) is rejected.
 
@@ -564,56 +543,40 @@ Catalog: `checked_in_catalog_holds_exactly_the_requested_rows` with both relatio
 
 ## 7. Open questions
 
-1. **Exact `u` for free (H-u).** `zeta'` depends only on the `u` bound (`B_z bar = 2^17 <
-   350,209`), and the six-valued digit makes `u` exact with the same two columns as H. H with
-   that `u` digit (relation H-u: `z in [-2^17, 2^17)`, `u` exact) has `zeta' = 350,209`, the
-   same physical layouts `(v, 4)`, `(v, 8)` as H (no new catalog rows; only the alphabet code
-   of `U_hi` 8 -> 6 and the relation byte change), stage-2 degree 4 instead of 5 (about
-   -60 to -120 ms, estimate), PIOP bytes 5,616, and the same proof-of-work totals as H (`gamma^(2)`
-   keeps 8 coefficients, degree-4 rounds keep `g = 3`). Options: (a) replace H's `u` digit (H's `zeta'` becomes
-   350,209 and the relaxed result is reported at core-SVP 123.5; H's pinned digests move);
-   (b) add H-u as relation id 3 and report three rows; (c) keep H as is. Recommendation:
-   (a), since it dominates H in security and cost; then H-exact differs from the default only
-   by the literal `z` bound (+1,024 elements per signature), which matters for a "the exact
-   FIPS 204 relation" statement but not for MSIS hardness. Answered (a): Section 8.
-2. **Appendix A vs X1.** This design departs from spec Appendix A for `u` (one six-valued digit
+1. **Appendix A vs X1.** This design departs from spec Appendix A for `u` (one six-valued digit
    instead of `a_u` plus a base-4 digit; Appendix X). If Appendix A must be kept literally,
    Appendix X gives the exact deltas (+2,048 elements, `G_main4` at 10 polynomials, stage-2
    degree 3).
-3. **Booleanity placement.** Stage 3 at `r^(2)` (chosen) vs stage 1 at `tau` (two more
+2. **Booleanity placement.** Stage 3 at `r^(2)` (chosen) vs stage 1 at `tau` (two more
    reductions). Both are sound; the choice is a cost question only.
-4. **Catalog regeneration placement.** Done locally off CPU 2 (1,617 s, Section 9).
-5. **Plan encoding.** Keep `docs/soundness.md` 6.4 unchanged (chosen; the relation is bound by
-   the manifest bytes in the same event) or add a relation byte to the plan body (moves H's
+3. **Catalog regeneration placement.** Done locally off CPU 2 (1,617 s, Section 9).
+4. **Plan encoding.** Keep `docs/soundness.md` 6.4 unchanged (chosen; the relation is bound by
+   the manifest bytes in the same event) or add a relation byte to the plan body (moves H-u's
    anchors).
-6. **`v` exactness.** H-exact keeps `v in [-2^31, 2^31)` (the honest bound is `|v| <=
+5. **`v` exactness.** H-exact keeps `v in [-2^31, 2^31)` (the honest bound is `|v| <=
    67,068,447 < 2^26`). `v` is not part of any FIPS 204 check or of `zeta`; a tighter `v` only
    matters for (6.1), which has 9 bits of slack. No change proposed.
-7. **ML-DSA-65/87.** The same construction applies with their `gamma_1, gamma_2, beta`: for
+6. **ML-DSA-65/87.** The same construction applies with their `gamma_1, gamma_2, beta`: for
    each set, search the single-digit `u` form (`(c - 1) A = 2 B_u + 1 - 2^16`, `A <= 2^16`,
    even `c`) and the `z` slack; not done here.
 
 ## 8. Step A as implemented (relation H-u)
 
-Open question 1 is answered with option (a): H-u replaces H as the default relation.
+H-u is the default relation.
 
-* Relation byte 0 means H-u (`agg_piop::manifest::Relation::Hu`, `RELATION_HU`). It is bound
-  in the proof
+* Relation byte 0 means H-u (`agg_piop::manifest::Relation::Hu`). It is bound in the proof
   header's flags byte and in byte 3 of the event-0 manifest bytes as Section 1.3 says; the
   manifest carries the relation (`CommitmentManifest::for_relation`), and `for_batch` is the
-  H-u default. Unlike Section 1.3's "no wire-version bump" (written for adding H-exact next to
-  an unchanged H), the meaning of relation byte 0 changed, so `WIRE_VERSION` is 3 and a
-  version-2 (relaxed H) proof is refused by its header.
-* `u = U_lo + 63,079 U_hi + 31,540` (the form of 2.1 with H's slot names: `U_lo` is `S_ulo`,
-  `U_hi` is `D_u`), `leaf6` with `Q_6`, `G_main4` alphabet codes `[4, 6, 0, 0, 0, 0, 0, 0]`,
-  catalog rows unchanged (no new rows, as 7.1 predicted), stage degrees (4, 4, 3), gammas
+  H-u default.
+* `u = U_lo + 63,079 U_hi + 31,540` (the form of 2.1 with the slot names `U_lo` for `S_ulo`
+  and `U_hi` for `D_u`), `leaf6` with `Q_6`, `G_main4` alphabet codes `[4, 6, 0, 0, 0, 0, 0, 0]`,
+  catalog rows `mldsa-44-l16-batch-<N*>-mult-final`, stage degrees (4, 4, 3), gammas
   (26, 8, 44), stage-2 rounds of 4 elements, PIOP stage bytes 5,616 at `2^15` (4,736 at
   `N = 1,024`, measured in the mode-A sanity run).
 * Proof of work, checked against `docs/soundness.md` and `pow_plan.py`: with
-  `STAGE_DEGREES = (4, 4, 3)` and `STAGE_GAMMAS = (26, 8, 44)` every difficulty, nonce width,
-  total (4,444 bits / 556 bytes / 2,718 work at `2^15`) and plan digest equals relaxed H's
-  (`bit_length(4) = bit_length(5)`; the script asserts it), and the round-by-round ledger is
-  `1,409/|K|` at `2^15` (`979` at `2^10`). The H-exact figures of 3.7 (4,443 bits, 2,710 work,
+  `STAGE_DEGREES = (4, 4, 3)` and `STAGE_GAMMAS = (26, 8, 44)` the totals are 4,444 bits /
+  556 bytes / 2,718 work at `2^15`, the plan digests are the anchors of `docs/soundness.md`,
+  and the round-by-round ledger is `1,409/|K|` at `2^15` (`979` at `2^10`). The H-exact figures of 3.7 (4,443 bits, 2,710 work,
   `1,409/|K|`, the six anchors) reproduce exactly with the script and
   `STAGE_GAMMAS = (26, 7, 45)`, so step B's schedule stands as written.
 ## 9. Step B as implemented (relation H-exact)
@@ -621,28 +584,28 @@ Open question 1 is answered with option (a): H-u replaces H as the default relat
 Layout X1 as designed (Sections 1 to 4), on top of step A; the decisions below fill in or
 depart from the design.
 
-* **Relation type.** `Relation { Hu = 0, HExact = 1 }` lives in `agg_pcs_config::catalogs`
-  (the lowest crate both use) and is re-exported by `agg_piop::manifest`; it
-  also parses the command-line spelling (`h-u`, `h-exact`). Step A's name `Hu` is kept for
-  relation byte 0 (the design's `H`).
+* **Relation type.** `Relation { Hu, HExact, HFips }` (ids 0, 1, 2) lives in
+  `agg_pcs_config::catalogs` (the lowest crate both use) and is re-exported by
+  `agg_piop::manifest`; it also parses the command-line spelling (`h-u`, `h-exact`,
+  `h-fips`).
 * **Columns.** H-exact's `z` is a value of its own, `DigitValue::Zx` with the columns `bz_lo`
   (`S_zlo`), `bz_hi` (`B_zhi`), `a_z` and the value form `ValueForm::BitSlack` (agg-witness
   `BitSlackLayout`, `Z_BIT_SLACK`), instead of new column kinds `BzLo, BzHi, Az`; `u` keeps
   step A's `U_lo`/`U_hi` (the design's `S_ulo`/`D_u`). So `Column::alphabet` stays a function
   of the column, and only `group_columns`, `stack_columns`, `leaf_digits` and the new
   `bool_digits` depend on the relation. `a_z` follows the bits (positions 2..7 unchanged).
-* **Counts.** `STAGE_DEGREES` stays a constant ((4, 4, 3) for both relations); the gamma and
+* **Counts.** `STAGE_DEGREES` is a constant ((4, 4, 3) for every relation); the gamma and
   claim counts come from the manifest (`stage2::gamma_count`, `stage3::Gammas`,
   `Stage2Claims::len`, `Stage3Claims::len`, `transcript::stage_gammas`/`stage_terminals`),
   and the wire reads the claim vectors with the manifest's lengths. The proof-of-work plan
   follows the registry, so it needed no change; `pow_plan.py --relation h-exact` prints the
   H-exact tables and its self-check asserts the totals and two anchors of 3.7.
 * **Verifier policy.** `verifier::verify` and `verify_timed` take the expected relation as
-  an argument (the design's `RelationPolicy::Exactly`) and return `VerifyError::Relation`
+  an argument and return `VerifyError::Relation`
   for a header that names another one, before event 0; the manifest, hence event 0, the
   catalog row and the plan, comes from the argument. `ProverInputs::relation` selects the
-  prover's relation; `agg aggregate|verify|bench --relation h-u|h-exact` (default `h-u`;
-  the design's `h`) set them in the CLI, whose reports print the relation.
+  prover's relation; `agg aggregate|verify|bench --relation h-u|h-exact|h-fips` (default
+  `h-u`) set them in the CLI, whose reports print the relation.
 * **Catalogs.** As 2.3: 26 new width-4 rows, generated in 1,617 s (`docs/pcs-config.md`
   Section 4); the H-u rows and the width-16 artifact are unchanged; the harness keeps every
   row of `catalog_batches()` (both relations) and takes `AGG_CATALOG_RELATION`. The planner's
@@ -651,7 +614,7 @@ depart from the design.
 * **Tests** (6.2 to 6.4). Mode B: H-exact round trips at 1, 64 and 256 records with the
   protocol-level negatives (cross-relation verification, a rewritten or unknown relation
   byte, a wrong stage-2 gamma nonce of 10 bits). Mode A: H-exact at 64 and 256 (Slim, one
-  and two Flock parts) and the CLI round trip. PIOP level (`tests/h_exact.rs`): honest
+  and two Flock parts) and the CLI round trip. PIOP level (`tests/all/h_exact.rs`): honest
   round trip with every claim equal to its table, the pointwise identities, the tamperings
   of the 6.4 table (stage 3 for `a_z = 2`, `B_zhi = 2, -1`; stage 2 for `D_u = 3, -4`; the
   lookup for `S_zlo = 2^15`, `S_ulo = -2^15 - 1`), non-Boolean digits that keep both `z` and
@@ -824,7 +787,7 @@ so the extracted bytes equal the signature, byte for byte (tests below).
   `SignSquare`, `DeltaSign`, `EdgeE`, `WrapLow`, `WrapHigh`, `HintWeight`, `Ring`,
   `CommitmentHash`).
 
-Tests (`crates/agg-witness/tests/hfips.rs`, 6 tests; unit tests in `hfips.rs`, 4 tests; all
+Tests (`crates/agg-witness/tests/all/hfips.rs`, 6 tests; unit tests in `hfips.rs`, 4 tests; all
 pass, `cargo test --release -p agg-witness`):
 
 * 64 honest signatures (40 own-key deterministic, 24 shared-key hedged): derivation, the
@@ -960,10 +923,10 @@ Catalogs (`agg-pcs-config`, `CATALOG_D_SIG_H_FIPS = 3..=15`): 13 width-4 scalar 
 1,105.6 s (measured, 3 workers, CPUs 0,1,3-15). The planner's opening estimate
 equals H-u's at every size except `2^15` (65,398 B against 65,282 B; estimate of the planner).
 Every grouped row keeps at least 128.0881 bits of accepted fold support (2^128.5633 at
-`d_sig` 13 and 15); the Akita grinding plans are pinned (`tests/akita_grinding.rs`) and
+`d_sig` 13 and 15); the Akita grinding plans are pinned (`tests/all/akita_grinding.rs`) and
 differ from the H-u and H-exact rows'.
 
-Tests (all pass, `cargo test --release`): `agg-piop` `tests/h_fips.rs` (PIOP round trips
+Tests (all pass, `cargo test --release`): `agg-piop` `tests/all/h_fips.rs` (PIOP round trips
 with every claim equal to its table's extension, the pointwise identities, the synthetic
 weight-80 corner records of `agg_witness::gen::hint_corner_record`, the variant's corner
 witness rejected by `F7` (stage 3) or, with `u_h = -1`, by the lookup, and tamperings each
@@ -971,7 +934,7 @@ rejected at its place: `s = 2`, `delta = -sigma` (stage 3); `e = -1` at `delta =
 moved to keep `u` (stage 2, `F3`); `e = 1` at `w1' != 0` and `e = -1` at `w1' != 43` with `L`
 moved to keep `u` (stage 3, `F45` alone); `l_hi = -1` with `l_lo + 29,696` (stage 3, `F6`
 alone); `l_lo = 2^16` and a `u_h` cell of `2^16` (lookup); `u_h +- 1` and a dropped hint
-(stage 3)); `tests/mode_b.rs` (round trips at 1, 64 and 256 records, the 256-record batch with
+(stage 3)); `tests/all/mode_b.rs` (round trips at 1, 64 and 256 records, the 256-record batch with
 two weight-80 corner records; cross-relation verification and rewritten relation bytes
 rejected; a wrong stage-2 gamma nonce rejected); unit tests of the manifest, the stage specs,
 the transcript counts, the wire and the plan; `agg-pcs-config` commit and batched opening at
@@ -1006,7 +969,7 @@ over H-u in this box's mode B (means of the two interleaved runs; the run-to-run
 noise: the spot check (1 warmup + 2 reps) measured +0.04 s, with
 systematic step deltas of about +85 ms (stage 3 +47, round 1 +20, tables +12 ms) and an
 opening that varied by about 90 ms. The local prediction (+6% to +12%) was low at 8K.
-Stage-3 trace at 8K (`AGG_STAGE_TRACE=1`, `tests/h_fips.rs` `h_fips_stage_trace`):
+Stage-3 trace at 8K (`AGG_STAGE_TRACE=1`, `tests/all/h_fips.rs` `h_fips_stage_trace`):
 the main `eq(r^(2))` group's messages take 178 ms against 93 ms for H-u (the extra terms of
 `F1`, `F2`, `F45` and the reductions), the `F7` main group 55 ms, the ring's `w_A` group 129
 against 103 ms (H-exact's `a_z` lane); stage 2's `F3` group 75 ms against 39 ms for H-u's
@@ -1051,16 +1014,16 @@ mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should 
 `u = 118,787 a_u + 2^16 B_uhi + B_ulo - 190,465` with `a_u in {0, 1}`, `B_uhi in [0, 4)`
 (stored balanced `[-2, 1]`, `leaf4` and `link`), `B_ulo` looked up; `z` as in X1.
 
-| | H | H-exact X1 (recommended) | H-exact X2 (Appendix A) |
+| | H-u | H-exact X1 (recommended) | H-exact X2 (Appendix A) |
 | --- | --- | --- | --- |
 | `G_main4` polynomials | 8 | 9 | 10 |
 | New width-4 rows | 0 | 13 scalar + 13 grouped | 13 scalar + 13 grouped |
 | Committed elements per signature at `2^15` | 12,410.5 | 13,434.5 | 14,458.5 |
-| Stage degrees | (4, 5, 3) | (4, 4, 3) | (4, 3, 3) |
+| Stage degrees | (4, 4, 3) | (4, 4, 3) | (4, 3, 3) |
 | Stage instances | 26, 8, 44 | 26, 7, 45 | 26, 7, 46 |
-| PIOP stage bytes at `2^15` | 6,016 | 5,616 | 5,232 |
+| PIOP stage bytes at `2^15` | 5,616 | 5,616 | 5,232 |
 | Proof-of-work bits / bytes at `2^15` | 4,444 / 556 | 4,443 / 556 | 4,418 / 553 |
-| Round-by-round ledger at `2^15` | `1,434/|K|` | `1,409/|K|` | `1,384/|K|` |
+| Round-by-round ledger at `2^15` | `1,409/|K|` | `1,409/|K|` | `1,384/|K|` |
 | Prove delta at `2^15` (estimate) | | about +0.1 s | about +0.2 to +0.4 s |
 
 X2 saves 384 B of PIOP bytes against X1 (0.01 B/sig) and costs a second committed column

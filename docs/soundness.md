@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/akita_grinding.rs`) |
+| Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
 | Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16; PIOP wire version 4 (the parity chain's sites in the plan; the fork-join transcript of K22) and tied-part proof version 5 |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
@@ -334,7 +334,7 @@ The 13 H-exact grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`, `G_main4` at
 polynomials, 39 claims in the evaluation batch, `docs/h-exact.md` 2.3) have the same plan
 summaries as the table above at `d_sig` 3 to 14; at `d_sig` 15: 459 sites, `sum g` 1,135,
 max `g` 12, expected work 8,336, nonce bits 4,432. Their digests are pinned next to H-u's
-(`agg-pcs-config/tests/akita_grinding.rs`, `akita_plans_of_the_h_exact_rows_are_pinned`).
+(`agg-pcs-config/tests/all/akita_grinding.rs`, `akita_plans_of_the_h_exact_rows_are_pinned`).
 
 ### 3.8 Flock internal sites (inherited; audit in 4.2 to 4.4)
 
@@ -373,7 +373,7 @@ fix of Section 4.3 only widens existing ones.
   `akita_config::derive_transcript_grinding_plan::<AggFp64SignedWidth4>` on every grouped
   row (`WorkPlan::for_records(2^d_sig).schedule_key()`) produced the table of Section 3.7;
   plan digests begin `22 57 08 cb` (`d_sig` 3) through `4f 5a 60 26` (`d_sig` 15) (hex).
-* No change in `agg-pcs-config` is needed; `crates/agg-pcs-config/tests/akita_grinding.rs`
+* No change in `agg-pcs-config` is needed; `crates/agg-pcs-config/tests/all/akita_grinding.rs`
   (a regression guard against a catalog or Akita change) derives the plan of every
   grouped row for the opening layout of its six root groups
   (`OpeningClaimsLayout::from_root_groups`), checks the table of Section 3.7 (sites, `sum g`,
@@ -506,7 +506,7 @@ exactly `a! b!` orderings, so a draw is uniform on `C_0` in the ideal-XOF model 
 Conditioned on success the output is uniform on `C^acc` (Akita Lemma 10.1); exhaustion is a
 completeness event.
 
-**Check (test `crates/agg-pcs-config/tests/akita_fold_support.rs`).** Every row of both
+**Check (test `crates/agg-pcs-config/tests/all/akita_fold_support.rs`).** Every row of both
 catalogs: width 4, 52 rows (per relation H-u and H-exact, the 13 grouped rows and the 13
 scalar rows of `G_main4`, 26 grouped in all); width 16, 25 rows (shared by both relations) (the scalar rows of `G_main16`, `G_1`, `G_2`, `G_3` at every size, equal layouts
 sharing a row). For every level, every group and the terminal the test runs the pinned
@@ -711,7 +711,7 @@ are settled:
 
 * **(H1, discharged in 4.6)** every fold group of every row of both catalogs draws its
   sparse fold challenges from a family whose accepted support is at least `2^128` after
-  rejection (smallest `2^128.0881`; test `agg-pcs-config/tests/akita_fold_support.rs`);
+  rejection (smallest `2^128.0881`; test `agg-pcs-config/tests/all/akita_fold_support.rs`);
 * **(H2, proved in Section 12 under (F) and (K))** the composition of Akita's extractor with
   the Flock commitments: no second extractor is needed (the extractor returns Akita's
   round-1 sources; the Ligerito words are fixed straight-line by the Merkle expansion and
@@ -975,7 +975,7 @@ into a FIPS 204 signature (10.4). The extracted signature is a function of the r
 alone (`u_h` only certifies the weight), so the checkpoint argument of Section 12 (round-1
 tables fixed before the first fork) applies unchanged. The theorem of Section 7 holds verbatim
 for H-FIPS with "relation H-u" replaced by "relation H-FIPS" and Akita's plan of the H-FIPS
-grouped row (`agg-pcs-config` `tests/akita_grinding.rs`, `PINNED_H_FIPS`); 43 Akita polynomials
+grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 43 Akita polynomials
 (36 at `r^(3)`, 7 at `pi_m`) in place of 38.
 
 ## 11. Open questions

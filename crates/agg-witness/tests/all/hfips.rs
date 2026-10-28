@@ -5,7 +5,7 @@
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::check::{CheckReport, Identity};
 use agg_witness::derive::derive;
@@ -64,7 +64,7 @@ fn real_signatures_derive_check_and_extract_byte_identically() {
 
 #[test]
 fn edge_residue_record_uses_the_corner_witness() {
-    // The pinned record whose w' has a coefficient equal to q - gamma2 (tests/edge.rs).
+    // The pinned record whose w' has a coefficient equal to q - gamma2 (tests/all/edge.rs).
     let (seed, key, index) = common::EDGE_RESIDUE;
     let r = gen::record_hedged(seed, key, index);
     let inst = PublicInstance::from_records(std::slice::from_ref(&r)).unwrap();

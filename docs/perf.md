@@ -7,8 +7,8 @@
 
 ## 0. What happened since the profile
 
-The ranking of Section 6 drove the prover speed work below (`docs/piop.md` Section 20 for the
-PIOP side). All changes are prover-only; aggregates stayed byte-identical except for the
+The ranking of Section 6 drove the prover speed work below (`docs/piop.md` Sections 6 and 14 for
+the PIOP side). All changes are prover-only; aggregates stayed byte-identical except for the
 proof-of-work nonces of wire version 2/3.
 
 | Lever (Section 6) | Status |

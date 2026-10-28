@@ -1,5 +1,4 @@
 //! Shared helpers of the integration tests.
-#![allow(dead_code)]
 
 use agg_witness::derive::{derive, SigWitness};
 use agg_witness::gen::{self, Record};
@@ -9,7 +8,7 @@ use agg_witness::params::*;
 use rayon::prelude::*;
 
 /// Edge record: hedged signature (seed, key index, index) whose w' has a coefficient equal to
-/// the Decompose edge residue q - gamma2 (found by `edge_search`, see tests/edge.rs).
+/// the Decompose edge residue q - gamma2 (found by `edge_search`, see tests/all/edge.rs).
 pub const EDGE_RESIDUE: (u64, u64, u64) = (0xED6E, 0, 783);
 /// Edge record whose z has a coefficient with |z| = B_z (found by `edge_search`).
 pub const EDGE_ZMAX: (u64, u64, u64) = (0x2A4A, 0, 290);

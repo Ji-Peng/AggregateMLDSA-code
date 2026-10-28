@@ -1,39 +1,40 @@
 # PIOP (`agg-piop`): tables, commitments, sum-check stages, transcript and wire format
 
-**Lookup layout L16:** the range mechanism is the lookup into `T_16` (`docs/lookup.md`).
-Section 19 is the current description of the groups, the event-0 bytes, the commit flow, the
-lookup, the stage tables, the transcript and the wire format; Sections 3, 9 and 10 below
-describe wire version 0 (the base-16 digit layout) where Section 19 does not replace them, and
-Sections 13 to 18 are measurements and kernel work on that layout.
+The range mechanism is the lookup into `T_16` (lookup layout L16, digit layout id 1, wire
+version 4): `docs/lookup.md` has the argument, the soundness and the remedies for the
+identity term; `docs/deviations.md` P1 to P12, L1 to L10 and D2 the departures from the spec;
+`docs/spec.md` Sections 4, 7, 10 to 12 the normative text. The relations are H-u (relation
+byte 0, the default), H-exact (byte 1) and H-FIPS (byte 2), `docs/h-exact.md`.
 
 Part 1 (prover-side tables, commitments, public data, virtual evaluators; spec Sections
-2, 4, 5, 7.6), part 2 (the three sum-check stages, the weight tables, the transcript,
-the proof wire format, the prover and verifier drivers; spec Sections 6, 7, 10, 11) and
-part 3 (the timed, streamed verifier and the mode-B aggregate, `prove_mode_b`
-/ `verify_mode_b`; spec Sections 11, 14). Deviations: `docs/deviations.md` entries P1 to P12.
+2, 4, 5, 7.6), part 2 (the lookup, the three sum-check stages, the weight tables, the
+transcript, the proof wire format, the prover and verifier drivers; spec Sections 6, 7, 10,
+11) and part 3 (the timed, streamed verifier and the mode-B aggregate, `prove_mode_b`
+/ `verify_mode_b`; spec Sections 11, 14).
 
 ## 1. Modules
 
 | Module | Content | Spec | Aerie counterpart |
 | --- | --- | --- | --- |
-| `manifest` | `CommitmentManifest`: the four groups (role, round, family, logical and physical variables, polynomial order and alphabets), digit columns, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
-| `source_tables` | `MainTables` (round 1, `G_main`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3` and public `Y`, from `agg_bridge::parity` and `agg_bridge::carry` at `Shape::PRODUCTION`), `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
-| `pcs` | `group_polynomials`, `TableCommitter` (two rounds, round 2 committed concurrently, batched opening from given claims `open_claims` or table evaluations `open`), `opening_claims`, `suffix_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
+| `manifest` | `CommitmentManifest`: the six groups (role, round, family, logical and physical variables, polynomial order and alphabets) under the batch's relation, the columns and their value forms, the lookup shape, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
+| `source_tables` | `MainTables` (round 1, `G_main16` and `G_main4`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3, G_m` and public `Y`, from `agg_bridge::parity` at `Shape::PRODUCTION`, with the multiplicities of `T_16`), `Cells`, `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
+| `pcs` | `group_polynomials`, `TableCommitter` (two rounds, the groups of a round committed concurrently, batched opening from given claims `open_claims` or table evaluations `open`), `opening_claims`, `group_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
 | `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` and the allocation-free `negacyclic_kernel_into` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
-| `virtual_polys` | `w_1'`, (4.1) compositions, ring residual, `y^(1)` parities, `P_Z, A^lo, A^hi`, `MainValues`/`CarryValues` | 4.3, 5 | |
-| `kernel` (`kernel/`: `mod.rs`, `plan.rs`, `coded.rs`, `field.rs`, `tests.rs`) | `Source`/`Lane` (the narrow input tables), `Term` (summand shapes), `Group` (one local domain, optional split equality factor, gamma-weighted instances; coded columns, pattern masses, pair/quartet/Taylor tables, one dense table from the third fold), compressed messages, lifted inactive rounds | 7.1 | `aerie-prover/src/protocol/kernels/`, `algebra.rs` |
-| `lookup` | LogUp-GKR range argument: stacks, multiplicities and their digits, fraction trees, sessions on the kernel, `prove_in`/`verify_in` on a `LookupTranscript` (Section 19) | 4.3, 7.0 | |
-| `range` | the digit map `z -> z(z+1)`; the two leaf-checked digits `Z_hi`, `U_hi` | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
-| `stage` | `StageSpec` (declarative instance table: groups, lanes, equality points, gamma indices), `prove_stage`, `replay_stage`, `check_terminal` | 7.1 | `aerie-falcon/src/protocol/stage.rs` |
-| `stage1`, `stage2`, `stage3` | the instance tables of Section 7.3 to 7.5, claimed sums, terminal claims, `prove`/`verify` | 7.3-7.5 | `stage1.rs`, `stage2.rs`, `stage3.rs` of both Aerie crates |
+| `virtual_polys` | `w_1'`, the compositions of `z, u, v` and the carries from their columns, ring residual, `y^(1)` parities, `P_Z`, `MainValues`/`CarryValues` | 4.3, 5 | |
+| `kernel` (`kernel/`: `mod.rs`, `plan.rs`, `coded.rs`, `field.rs`, `layer.rs`, `tests.rs`) | `Source`/`Lane` (the narrow input tables), `Term` (summand shapes), `Group` (one local domain, optional split equality factor, gamma-weighted instances; coded columns, pattern masses, pair/quartet/Taylor tables, one dense table from the third fold), the dedicated groups of `layer`, compressed messages, lifted inactive rounds | 7.1 | `aerie-prover/src/protocol/kernels/`, `algebra.rs` |
+| `lookup` | LogUp-GKR range argument: stacks, multiplicities and their digits, fraction trees, sessions on the kernel, `prove_in`/`verify_in` on a `LookupTranscript` (Section 7.1) | 4.3, 7.0 | |
+| `range` | the digit map `z -> z(z+1)`; the leaf-checked digits (`Z_hi` base 4, `U_hi` base 6) and the order of their leaf and link instances | 4.3 | `aerie-falcon/src/protocol/relations/quartic.rs` |
+| `stage` | `StageSpec` (declarative instance table: groups, lanes, equality points, gamma indices), `prove_stage`, `prove_stage_with`, `split_linear`, `replay_stage`, `check_terminal` | 7.1 | `aerie-falcon/src/protocol/stage.rs` |
+| `stage1`, `stage2`, `stage3` | the instance tables of spec Sections 7.3 to 7.5, claimed sums, terminal claims, `prove`/`verify` | 7.3-7.5 | `stage1.rs`, `stage2.rs`, `stage3.rs` of both Aerie crates |
 | `weights` | `w_1, w_2, w_{3,t}` tables and verifier evaluations (wrappers of `agg_bridge::weights` at the production shape); `w_A` table and (7.10) | 7.6 | `ring/functional.rs`, `stage1/projection_link.rs` |
 | `claims` | the claim vectors between stages and their wire order | 7.2-7.5 | |
-| `tables` | `ProverTables`: borrowed `i8` columns, `y^(1)` as `Parity1` (`i8` when every value fits, else `i32`), the weight tables when known; `LaneId -> Lane` | 7 | |
-| `transcript` | Spongefish `Blake2b512` stream, event registry, samplers, `pcs_session` | 10 | `aerie-falcon/src/protocol/transcript.rs` |
-| `binding` | public-record digest (16-KiB-leaf cSHAKE256 tree), instance record of event 0 | 2, 10 | `public_records_binding.rs` |
-| `wire` | `AggregateProof`, byte format, packed final vectors | 10 | `wire.rs` |
-| `opening` | opening claims at `r^(3)` and its suffixes, commitment parsing | 7.5, 10 | `pcs/verifier.rs` |
-| `prover`, `verifier` | the drivers in event order with per-step timings (`ProveTimings`, `VerifyTimings`); hooks `BridgeDerivation`, `KeccakSide`/`KeccakVerifier` | 10, 11 | `transport.rs` |
+| `tables` | `ProverTables`: borrowed `i8` columns and `i32` lookup columns, `y^(1)` as `Parity1` (`i8` when every value fits, else `i32`), the weight tables when known; `LaneId -> Lane` | 7 | |
+| `transcript` | Spongefish `Blake2b512` stream, event registry, samplers, work nonces, `pcs_session` | 10 | `aerie-falcon/src/protocol/transcript.rs` |
+| `pow` | the proof-of-work plan (`PowPlan`, its digest) and the packed nonce stream (`WorkWriter`, `WorkReader`) | 10, 12.1 | |
+| `binding` | public-record digest (16-KiB-leaf cSHAKE256 tree), instance record of event 0, `FlockProfile` | 2, 10 | `public_records_binding.rs` |
+| `wire` | `AggregateProof`, byte format, packed final vectors, `ProofSize` | 10 | `wire.rs` |
+| `opening` | opening claims at `r^(3)` and its suffixes and at the lookup's table point, commitment parsing | 7.5, 10 | `pcs/verifier.rs` |
+| `prover`, `verifier` | the drivers in event order with per-step timings (`ProveTimings`, `VerifyTimings`); hooks `BridgeDerivation`, `KeccakSide`/`KeccakVerifier`; `prove_piop`/`verify_piop`, the PIOP part shared with the stage tests | 10, 11 | `transport.rs` |
 | `public_stream` | `StreamedPublic`: the verifier's light per-record data (step 2) and the one pass of step 6 (`T(r^(2))`, `w_A(r^(3))`) | 2, 11 | |
 | `mode_b` | mode B: public `w_1'` bits as the Keccak side (`PublicBits`, `PublicBitsVerifier`), the GF(2) projection, the bit check, `prove_mode_b`, `verify_mode_b` | 11, 14 | |
 
@@ -42,8 +43,40 @@ polynomials; `commit_group` delegates to it.
 
 ## 2. Manifest and the event-0 bytes
 
-Group and polynomial order are those of Section 19.1 (lookup layout L16, spec Section 4.1):
-six groups, `G_main16, G_main4` in round 1 and `G_1, G_2, G_3, G_m` in round 2.
+Six groups (spec Section 4.1), in wire order, under relation H-u:
+
+| Group | Columns (manifest order) | Width | Storage | Round |
+| --- | --- | ---: | --- | ---: |
+| `G_main16` | `Z_lo, U_lo, V_lo, V_hi` | 16 | one stacked `i32` lane (`MainTables::wide`), column `c` at `c 2^d_main` | 1 |
+| `G_main4` | `Z_hi, U_hi, b_0..b_5` | 4 | `i8` columns (`MainTables::columns`) | 1 |
+| `G_1` | `kappa1_0..5` (stored `K = kappa - 2^15`) | 16 | stacked `i32`, 8 slots, slots 6, 7 hold `-2^15` | 2 |
+| `G_2` | `y2_0..5`, `kappa2_0..5` | 16 | `i8` parities, stacked `i32` carries | 2 |
+| `G_3` | `kappa3` | 16 | `i32` | 2 |
+| `G_m` | `m_0..m_6` (digits of the multiplicities of `T_16`) | 4 | `i8` | 2 |
+
+`G_m` is Akita's final group. The relation changes the columns (`manifest::group_columns`):
+
+- H-exact: `G_main16` = `bz_lo, U_lo, V_lo, V_hi` (`bz_lo` = `S_zlo` in the slot of `Z_lo`,
+  so the main lookup stack keeps its shape), `G_main4` = `bz_hi, U_hi, b_0..b_5, a_z` (9
+  polynomials), `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (`DigitValue::Zx`,
+  `ValueForm::BitSlack`).
+- H-FIPS: `G_main16` = `bz_lo, l_lo, v_lo, v_hi`; `G_main4` = `bz_hi, l_hi, b_0..b_5, a_z, s,
+  delta, e` (12 polynomials); `G_2` gains `u_h` (13 polynomials) in slot 6 of lookup stack 2.
+  `z` as H-exact's, `L = l_lo + 29,696 l_hi + 2^15` (`DigitValue::L`, `ValueForm::Slack`),
+  `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (affine).
+
+`source_tables::Cells` reads a column of either width (`Narrow(&[i8])`, `Wide(&[i32])`);
+`Cells::lane` gives a coded byte lane or an `Ints` lane. `MainTables::build` derives every
+witness (strict) and encodes `z + 2^17 = z_lo + 2^16 z_hi` (stored `Z_lo = z_lo - 2^15`,
+`Z_hi = z_hi - 2`), `u` by relation H-u's step form (`U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`
+in base 6, spec (4.2)) and `v` (two 16-bit halves); padded rows hold the digits of zero. The
+encoder resolves the slot of every digit of `z, u, v` and of the bits from the manifest;
+under H-exact `a_z = [z >= 79]` and the padded rows are `(bz_lo, bz_hi, a_z) = (32,689, 1,
+0)`; under H-FIPS the coefficient witness comes from `(u, w_1')` (`fips_coefficient`) and the
+hint slack per record is kept in `MainTables` for round 2 (`hint_slack_table`).
+`BridgeGroupTables::build` adds the balanced carries, the parities and `Y` of
+`agg_bridge::parity::compute` and the multiplicities of every looked-up cell of both rounds
+(`recount`, `lookup::multiplicities`), with their digits.
 
 `CommitmentManifest::binding_bytes` (all integers little-endian):
 
@@ -55,35 +88,44 @@ six groups, `G_main16, G_main4` in round 1 and `G_1, G_2, G_3, G_m` in round 2.
 | `N`, `N*` | `u64`, `u64` |
 | digit layout id | `u8` = 1 (the lookup layout) |
 | group count | `u8` = 6 |
-| per group, wire order | role `u8`, round `u8`, family `u8` (0 = width 4, 1 = width 16), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet code per polynomial (Section 19.2) |
+| per group, wire order | role `u8`, round `u8`, family `u8` (0 = width 4, 1 = width 16), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet code per polynomial: the base of a leaf digit (4, 6), `0x90` for a looked-up column, `0x50` for a multiplicity digit, `0x23` for H-FIPS's `delta` and `e`, 0 for a Boolean |
 | catalog row id | `u16` length, ASCII (`mldsa-44-l16-batch-<N*>-mult-final`, `l16x` under H-exact, `l16f` under H-FIPS) |
 | bridge parameters | for levels 1..3: `J_t` `u64`, `m_t` `u64`, `k_t` `u8` |
 | lookup layout | challenges `u8` (2), table count `u8` and widths `u8` (16), stack count `u8`, per stack column count `u8`, variables `u8`, table `u8`, shift `i32` |
 
 The instance record of event 0 (`binding::instance_record`) is these bytes followed by the
-32-byte public-record digest and the Flock profile id (`u8`: 0 none, 1 `Fast`, 3 public bits, 4 `Slim`,
-5 `Slim8`; other bytes are rejected).
-The record digest: the stream `LE64(N) || (pk || LE64(|M|) || M || c~)*` is cut into
-16-KiB blocks, each hashed by cSHAKE256 under `agg-mldsa/v1/record-leaf`, and the root is
-cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-binding`.
+32-byte public-record digest, the Flock profile id (`u8`: 0 none, 1 `Fast`, 3 public bits,
+4 `Slim`, 5 `Slim8`; other bytes are rejected) and the digest of the proof-of-work plan
+(Section 9). The record digest: the stream `LE64(N) || (pk || LE64(|M|) || M || c~)*` is cut
+into 16-KiB blocks, each hashed by cSHAKE256 under `agg-mldsa/v1/record-leaf`, and the root
+is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-binding`.
 
 ## 3. Commit flow
 
-1. `MainTables::build(manifest, instance, sigs)` (strict derivation) or `from_batch`;
-   both check shape and honest alphabets (encoder self-check, not a soundness check).
+1. `MainTables::build(manifest, instance, sigs)` (strict derivation) or `from_values`; both
+   check shape and honest alphabets (encoder self-check, not a soundness check).
 2. `TableCommitter::new(manifest)`: work plan from the catalog, `manifest.matches_plan`,
-   seed-derived Akita setup. `commit_round1` gives the event-1 commitment.
+   seed-derived Akita setup. `commit_round1` commits `G_main16` and `G_main4` concurrently
+   (event 1); `pcs::overlap` runs the pair on the calling thread while the Keccak side's
+   commitments run on a scoped OS thread.
 3. After the bridge seed: `BridgeGroupTables::build(manifest, main, matrices)` (honest abort
-   on a row weight above the cap), `commit_round2` gives `G_1, G_2, G_3` (event 4); the three
-   commits run concurrently (each is transcript-free and the final group is committed
-   against the plan's precommitted profiles), the prover absorbs them in wire order.
+   on a row weight above the cap or a cell outside `T_16`), `commit_round2` commits the four
+   round-2 groups concurrently (event 4), each commit on its own scoped OS thread
+   (`pcs::concurrent_commits`): Akita's lazily built NTT slots sit behind a `OnceLock` whose
+   initializer runs rayon loops, so commits joined as rayon jobs can deadlock (deviation
+   P12). No rayon worker waits on those threads: on a worker, or with a one-thread pool, the
+   commits run one after another on the calling thread (`tests/single_thread.rs`). Each
+   commit is transcript-free and the final group is committed against the plan's
+   precommitted profiles; the prover absorbs the commitments in wire order.
 4. After stage 3: `open_claims(commitments, claims, session)` proves one batched opening of
-   the 67 claims at the four suffix points of `r^(3)`, with the claims taken from the
-   stage-3 terminal values (the multilinear extensions of the committed tables; a debug
-   assertion and `tests/prove_verify.rs` compare them with `opening_claims`, which evaluates
-   every table again; `open` still does that). `verifier_for(manifest)` verifies from the
-   setup seed alone; `opening::parse_commitment` reads a commitment with the coefficient
-   count of the plan's profile, never from the proof.
+   the stage-3 claims (31 under H-u, 32 under H-exact, 36 under H-FIPS) at the suffixes of
+   `r^(3)` and of the 7 multiplicity-digit claims at the lookup's table point `pi_m`
+   (`pcs::group_points`). The claims are the stage-3 terminal values (the multilinear
+   extensions of the committed tables) and the digit claims of the lookup; a debug assertion
+   and `tests/all/prove_verify.rs` compare them with `opening_claims`, which evaluates every
+   table again (`open` does that). `verifier_for(manifest)` verifies from the setup seed
+   alone; `opening::parse_commitment` reads a commitment with the coefficient count of the
+   plan's profile, never from the proof.
 
 ## 4. Public data
 
@@ -99,72 +141,74 @@ Aerie's recurrence (8.7); `eq_correlation(l, n)` is Aerie's `Lambda` by the carr
 
 ## 5. Virtual evaluators
 
-Affine in committed evaluations: `w1_from_bits`, `compose_digits`, `residual_high`,
-`MainValues`, `CarryValues`. Boolean-domain materializations: `w1_table`, `compose_table`,
-`residual_table` (diagnostic), `parity1_tables` (`y^(1)_t = sum M_1 b_t - 2 kappa^(1)_t`),
-`digit_tables`, `leaf`.
+Affine in committed evaluations: `w1_from_bits`, `compose_digits` (the value forms of `z, u,
+v` and the carries), `residual_high`, `MainValues`, `CarryValues`. Boolean-domain
+materializations: `w1_table`, `compose_table`, `u_table`, `residual_table` (diagnostic),
+`parity1_tables` (`y^(1)_t = sum M_1 b_t - 2 kappa^(1)_t`), and for the leaf digits
+`digit_square` (`P_Z = Z (Z + 1)`) and `leaf` (`Q_4`, `Q_6`).
 
 ## 6. Sum-check kernel
 
 Every stage is one batched ordinary sum-check of `d_main` rounds (Aerie 10.3): a round
 message is the degree-`d` round polynomial without its linear coefficient (`d` elements;
-`d = 4, 5, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
+`d = 4, 4, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
 domain `D_t` (always a suffix of the main variables, spec 7.1) are inactive in the
 leading `d_main - d_t` rounds, where their message is the constant `claim / 2`, and are
 lifted by `2^-(d_main - d_t)` at the terminal.
 
+### 6.1 Generic groups (`kernel::Group`)
+
 `kernel::Group` holds the lanes of one local domain. Every lane starts as a narrow
-`Source` (`i8` cells with a per-cell integer map, `i32` parities, or a materialized `K`
+`Source` (`i8` cells with a per-cell integer map, `i32` cells, or a materialized `K`
 weight). Within a group the instances share one equality factor, kept as Akita's
 `GruenSplitEq` (two tables of about `2^(d/2)` entries; the full `eq` table is never
 materialized), and their gamma-weighted summands (`Term`s: products, `v(v-1)`, the bit-range
 expression, leaf predicates `Q(P)`, links `Z(Z+1)`, affine combinations with an optional
-weight lane) are evaluated at `d` or `d + 1` interpolation points per pair of cells and
-interpolated to coefficients (Newton), then multiplied by the equality line of the current
-variable (`gruen_mul`) and the lift. Groups without an equality factor carry their weight
-as a lane. A group's claim is computed from its own tables (directly for lifted groups,
-from `g(0) + g(1)` of round 0 otherwise); the stage driver checks the sum of the group
-claims against the gamma-weighted claimed sums at the end (prover self-check; the
-test-only `prove_unchecked` paths skip it so tampered witnesses reach the verifier).
+weight lane, monomial sums) are evaluated at `d` or `d + 1` interpolation points per pair of
+cells and interpolated to coefficients (Newton), then multiplied by the equality line of the
+current variable (`gruen_mul`) and the lift. Groups without an equality factor carry their
+weight as a lane. A group's claim is computed from its own tables (directly for lifted
+groups, from `g(0) + g(1)` of round 0 otherwise); the stage driver checks the sum of the
+group claims against the gamma-weighted claimed sums at the end (prover self-check; the
+test-only unchecked provers skip it so tampered witnesses reach the verifier).
 
-How a round is evaluated (Sections 16.2 and 18; all paths compute the same polynomial, so
-the proof bytes do not depend on them; `kernel/mod.rs` holds the schedule, `kernel/plan.rs`
-the compiled pieces, `kernel/coded.rs` the codes and pattern masses, `kernel/field.rs` the
-field helpers):
+How a round is evaluated (all paths compute the same polynomial, so the proof bytes do not
+depend on them; `kernel/mod.rs` holds the schedule, `kernel/plan.rs` the compiled pieces,
+`kernel/coded.rs` the codes and pattern masses, `kernel/field.rs` the field helpers):
 
 - *Compiled plan.* `Group::new` compiles the gamma-weighted terms into one polynomial per
   lane (every single-lane term: `Bool`, `Link`, `Leaf`, one-lane `Product`, the lanes of a
   weightless `Affine`; constants go to one per-cell constant), bilinear products
   `c v_a v_b`, weighted sums `w (sum c_l v_l + c)` (every `Affine` with a weight and every
   product of a field lane with another lane, merged per weight lane), and the residual
-  generic terms (`RangeW1`, products of three lanes). Everything is evaluated in coefficient
-  form at `v = a + X d` (Taylor coefficients `P^(i)(a) / i!` times `d^i`). A lane read only
-  by its linear polynomial, by one bilinear product or once in one weighted sum absorbs its
+  generic terms (`RangeW1`, products of three lanes; `Term::Monomials` is expanded into
+  polynomial, bilinear and generic pieces). Everything is evaluated in coefficient form at
+  `v = a + X d` (Taylor coefficients `P^(i)(a) / i!` times `d^i`). A lane read only by its
+  linear polynomial, by one bilinear product or once in one weighted sum absorbs its
   coefficient at its first fold (the terminal values are unscaled before they are
   reported).
 - *Coded columns.* The `i8` lanes over one column (by pointer) code the column by the
-  classes of its present cells under the tuple of their maps, if there are at most 16: 8 for a
-  digit read through `z (z + 1)` (`P_Z`, `A^lo`, `A^hi`), 16 for a digit under the identity
-  (the stage-3 links), 2 for a bit, and one byte of pair code per pair of cells
-  (`class(2k) n + class(2k + 1)`). A tampered cell (for example a digit 9 under the identity:
-  17 classes) and the `i32` parity fallback leave a lane uncoded. Pieces on coded lanes are
-  *bucketed*: per column (polynomials, same-column products), or per set of columns for a
-  generic term whose joint pair space is at most `2^12` (`RangeW1` on four bit columns: 256);
-  the other pieces (weighted sums, uncoded lanes, cross-column digit products) are *direct*
-  and evaluated per item.
-- *Level 0* (first active round). If the group has at least two active rounds and the
-  quartets outnumber the largest quartet space by `BUCKET_MIN_RATIO = 4` (`4 * 8^4` for an
-  8-class column: from `N = 1,024` on the main domain; `4 * 16^4`: from 1,024 for the
-  stage-3 links), one pass accumulates per segment the *quartet masses* (the round-1
-  equality weight `eq(tau_{2..}, q)`, or one without an equality factor, per quartet
-  pattern); round 0 is `sum_p (l_0 H_0[p] + l_1 H_1[p]) F(p)` over the pair patterns with the
-  two marginals `H_0, H_1` and `l_0 = 1 - tau_1`, `l_1 = tau_1` (Aerie's bivariate prefix),
-  and the masses are kept for round 1. Otherwise pair masses with the round-0 weights.
-  Narrow segment sets (at most `2^16` entries in all) accumulate in one table per item chunk
-  (Aerie's `chunked_bucket_sums`); wide ones (the 16-class stage-3 columns, 17 MiB) one table
-  per segment, each task owning whole segments with the item weights computed once. Direct
-  pieces run one pass over the pairs; weighted sums read per-byte tables `c_l map_l[byte]`
-  of their byte lanes (additions, no products).
+  classes of its present cells under the tuple of their maps, if there are at most 16 (a
+  width-4 digit has at most its base of classes, fewer when it is read only through
+  `z (z + 1)`, which identifies `z` and `-1 - z`; a bit has 2), with one byte of pair code
+  per pair of cells (`class(2k) n + class(2k + 1)`). A column with more classes (a tampered
+  cell can cause that), the `i32` lanes (the looked-up columns, the carries) and the `i32`
+  parity fallback stay uncoded. Pieces on coded lanes are *bucketed*: per column
+  (polynomials, same-column products), or per set of columns for a generic term whose joint
+  pair space is at most `2^12` (`RangeW1` on four bit columns: 256); the other pieces
+  (weighted sums, uncoded lanes, cross-column products) are *direct* and evaluated per item.
+- *Level 0* (first active round). If the group has at least two active rounds, the largest
+  quartet space is at most `2^16` and the quartets outnumber it by `BUCKET_MIN_RATIO = 4`,
+  one pass accumulates per segment the *quartet masses* (the round-1 equality weight
+  `eq(tau_{2..}, q)`, or one without an equality factor, per quartet pattern); round 0 is
+  `sum_p (l_0 H_0[p] + l_1 H_1[p]) F(p)` over the pair patterns with the two marginals
+  `H_0, H_1` and `l_0 = 1 - tau_1`, `l_1 = tau_1` (Aerie's bivariate prefix), and the
+  masses are kept for round 1. Otherwise pair masses with the round-0 weights. Narrow
+  segment sets (at most `2^16` entries in all) accumulate in one table per item chunk
+  (Aerie's `chunked_bucket_sums`); wide ones one table per segment, each task owning whole
+  segments with the item weights computed once. Direct pieces run one pass over the pairs;
+  weighted sums read per-byte tables `c_l map_l[byte]` of their byte lanes (additions, no
+  products).
 - *Bind 0.* Coded lanes become pair tables (`n^2` entries, scaled; no storage per cell);
   uncoded lanes are folded into `K` tables.
 - *Level 1.* With quartet masses, every quartet pattern once with the pair tables of its
@@ -172,10 +216,10 @@ field helpers):
   `m_j[left] = sum_right M[left, right] L[right]^j` and the Taylor coefficients at
   `L[left]` (one unreduced product per pattern and power). Direct pieces, and every piece
   without masses, per item.
-- *Bind 1.* Coded lanes of columns with at most 4,096 quartet patterns (8 classes) become
-  quartet tables (when the octets outnumber the patterns), with Taylor tables of their
-  polynomials of degree 2 to 4 (coefficients 1 to 4 per entry, one 64-byte line); the
-  others keep the pair table and the second challenge.
+- *Bind 1.* Coded lanes of columns with at most 4,096 quartet patterns become quartet tables
+  (when the octets outnumber the patterns), with Taylor tables of their polynomials of
+  degree 2 to 4 (coefficients 1 to 4 per entry, one 64-byte line); the others keep the pair
+  table and the second challenge.
 - *Level 2.* Per item: quartet tables (two reads per lane), Taylor tables (seven products
   for a quartic), or the pair table folded on the fly.
 - *Bind 2.* Every lane is written into one row-major `K` table at an eighth of the domain
@@ -190,702 +234,22 @@ field helpers):
   scalar, 2 without one). The last product of every coefficient is accumulated unreduced
   (`mul_unreduced`), each item's coefficients are reduced once and contracted with the split
   equality tables unreduced (Aerie's `sum_split_coefficients`). Products use a branch-free
-  `K` multiplication (`kernel::field::fm`, about 20% faster than `*` here).
-- `AGG_STAGE_TRACE=1` prints per group the message and fold time summed over the rounds,
-  the per-round wall time, and the weight-table build times (`stage::prove_stage`,
-  `prover::prove_with_tables`).
-
-Memory at `N = 2^15` (estimates, 16 bytes per `K` element): the first `K` tables appear
-after the third fold at an eighth of the domain, so stage 1's main-domain group holds
-`34 * 2^22 * 16 B = 2.3 GB` (one row-major table), stage 2 `17 * 2^22 * 16 B = 1.1 GB`,
-stage 3 `23 * 2^22 * 16 B = 1.5 GB`; before that the coded
-lanes cost one byte of pair code per pair of cells and group (`2^24` bytes per column at
-32K), the quartet masses at most `17 * 1 MiB` (stage 3) and the quartet and Taylor tables
-`80 KiB` per lane. The weight tables `w_1`, `w_A` are `512 MB` each. The bridge domains are at
-most `2^19` cells.
-
-## 7. Stage table
-
-Gamma indices are positions in the stage's `gamma^(s)` vector; "lift" is the number of
-inactive leading rounds (`d_main - d_t`). The instances, gammas, prover groups and terminal
-claims of the three stages are listed with the lookup layout: Section 19.3 (relation H-u),
-19.6 (H-exact) and 19.7 (H-FIPS). The ring instance is one gamma on two groups (the `w_A`
-lane group and the `eq(r2)` group); `z, u, v` enter as the affine combinations of their
-digit lanes and `w_1'` as `sum 2^t b_t`. The stage-3 terminal is every committed
-polynomial of the five non-multiplicity groups at `r^(3)`, in manifest order; these are the
-opening claims together with the multiplicity digits at `pi_m`.
-
-## 8. Weight tables (`weights`)
-
-Point conventions (least significant coordinate first): a main point splits as
-`(coef 8, row/column 2, sig d_sig)`; the suffix of length `d_1` as `(rho_1: 13, beta =
-(i_mid, sigma))`; of `d_2` as `(rho_2: 13, sigma)`; of `d_3` as `(rho_3: 12, sigma)`.
-
-- `w_1` on the main domain for `p1 = r1_1`: `c_1[zeta] = sum_{rho in column zeta of M_1}
-  eq(p1_rho, rho)` for `zeta < min(2^19, 2^d_main)`, `w_1[x] = c_1[x mod 2^19]
-  eq(p1_beta, x >> 19)`. Verifier: `eq(p1_beta, r_beta) sum_zeta eq(r_zeta, zeta) c_1[zeta]`
-  (`k_1 2^19` additions for `c_1`, one `2^19` equality table).
-- `w_2` on `D_1` for `p2 = tau_2`: `c_2` over the used `zeta_2 < 2^17` with `M_2` and
-  `eq(p2_rho, .)`, times `eq(p2_sigma, sigma)`; zero-padded positions have zero weight.
-- `w_{3,t}` on `D_2` for `p3 = tau_3`: `c_3[t + 6 rho_2]` with `M_3` and `eq(p3_rho, .)`,
-  times `eq(p3_sigma, sigma)`.
-- `w_A(j', s, i) = eq(r2_sig, i) K_{A~_{i,s}, r2_coef}[j']`, `A~_{i,s} = sum_rho
-  eq(r2_row, rho) A_i[rho, s]`, one `negacyclic_kernel` per `(i, s)` (`O(256 log 256)`);
-  zero on padded rows. Verifier (7.10): `Lambda = eq_correlation(r2_coef, r3_coef)`, then
-  per live record `eq(r2_sig, i) eq(r3_sig, i) sum_{rho, s} eq(r2_row, rho) eq(r3_col, s)
-  <A_i[rho, s], Lambda>` (`k l 256` multiply-adds per record, streamed over the keys).
-
-## 9. Transcript (`transcript`)
-
-Spongefish `Blake2b512` (`akita_transcript::TranscriptSponge`), tag
-`agg-mldsa/v1/piop/blake2b` zero-padded to 64 bytes, session `B("agg-mldsa/v1")`, instance
-`B(cSHAKE256(LE64(len) || record))` under `agg-mldsa/v1/instance`. Prover and verifier run
-the same state machine (every payload is a public message; no Spongefish argument string).
-Elements of `K` are rejection-sampled per 64-bit limb from eight squeezed bytes.
-
-| # | Site | Kind | Atoms | Payload |
-| ---: | --- | --- | ---: | --- |
-| 0 | `agg-mldsa/v1/instance` | public | 1 | the instance record |
-| 1 | `agg-mldsa/v1/commit/main` | proof | 1 | Akita native encoding of `G_main` |
-| 2 | `agg-mldsa/v1/commit/flock` | proof | `S` | `S` framed (`LE64` length) Flock commitments |
-| 3 | `agg-mldsa/v1/bridge/seed` | challenge | 1 | 32 squeezed bytes `sd` |
-| 4 | `agg-mldsa/v1/commit/level1`, `level2`, `level3` | proof | 1 each | the round-2 commitments |
-| 5 | `agg-mldsa/v1/flock/seeds` | challenge | `S` | `32 S` squeezed bytes `fs_sigma` |
-| 6 | `agg-mldsa/v1/flock/final-vectors`; `agg-mldsa/v1/flock/shares` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed share items (deviation K22) |
-| 7 | `agg-mldsa/v1/tau` | challenge | `d_main` | `tau` |
-| 8 | `agg-mldsa/v1/prestage/claims` | proof | 26 | pre-stage claims |
-| 9 | `agg-mldsa/v1/stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 66; 4, 1; 98 | |
-| 10 | `agg-mldsa/v1/stage2/kappa1`; `stage2/gamma`; rounds; terminal | proof; challenge; (5, 1); proof | 18; 101; ; 61 | |
-| 11 | `agg-mldsa/v1/stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 118; ; 67 | |
-| join | `agg-mldsa/v1/flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
-| 12 | `agg-mldsa/v1/pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone |
-
-Grinding (wire version 2, `docs/soundness.md` Section 6): every field-challenge event
-carries a difficulty from Aerie's assigned bounds (`Registry::work_sites`: `X` 0, a merge 1, a
-GKR batching vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the
-stage batching vectors 5, 4, 6, the stage rounds 3, 3, 2). With `g > 0` the transcript absorbs
-`LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose low `g` bits must be
-zero and then the challenge; the prover searches the smallest passing nonce and packs it into
-the work stream (`Transcript::new`, `work_stream`), the verifier reads and checks it
-(`Transcript::replay`, `TranscriptError::Work`), the stream's exact length and zero padding
-checked up front and its exhaustion at `ensure_complete`. The seeds and the PCS export carry
-no work. The plan (`pow::PowPlan`: the Keccak side's tied-part sites (tie, `eq_Y`, chain rounds), then these sites) is hashed
-into the instance record of event 0 (`binding::instance_record`).
-
-## 10. Wire format (`wire::AggregateProof`)
-
-`LE16` version 4 (`manifest::WIRE_VERSION`), `u8` relation byte (0 = H-u, 1 = H-exact, 2 = H-FIPS),
-`LE64 N`; `32 N` bytes `c~`; event 1 framed
-(`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: three framed items;
-event 6: `512 S` bytes then `S` framed share items (deviation K22); events 8 to 11 as raw atom encodings of
-16 bytes per element (26 pre-stage claims; `4 d_main` stage-1 round elements and 98
-claims; 18 `kappa1` claims, `5 d_main` round elements and 61 claims; `3 d_main` round
-elements and 67 claims); the join: `S` framed Flock proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and rejects
-non-canonical limbs. PIOP bytes: `16 (270 + 12 d_main)` = 7,776 at `N = 256`, 8,640 at
-`N = 2^15`. `AggregateProof::size()` (`ProofSize`) splits the serialized length into header,
-`c~`, Akita commitments, Keccak-side items (event 2), final vectors, Keccak-side shares and
-proofs (event 6 and the join), PIOP and opening, framing included.
-
-## 11. Drivers and hooks
-
-`prover::prove(inputs, bridge, keccak, flock)` derives every witness (strict FIPS 204
-verification, `main_tables`) and calls `prove_with_tables`, which runs events 0 to 12:
-round-1 commitment and the Keccak commitments (`KeccakSide::commitments`) concurrently
-(`rayon::join`; `keccak` is `KeccakSide + Sync`; absorbed in event order, and each step's time
-is its own closure's, so the two overlap in wall time), the bridge seed, the
-matrices (`BridgeDerivation::matrices(sd)`, a `Cow` so fixed matrices are not copied),
-round 2, the Flock seeds, the final vectors and Flock proofs (`KeccakSide::prove`), `tau`,
-the pre-stage claims, the three stages with the weight tables built between them
-(`ProverTables::set_tau/set_r1/set_r2`, each dropping the previous weights), the PCS
-session and the opening. `ProverOutput::timings` (`ProveTimings`) has the wall time of each
-step. `ProveHooks` (adversarial tests only) selects the stages' unchecked provers and may
-change the honest round-2 tables before they are committed.
-
-`verifier::verify_timed(records, bytes, bridge, keccak, flock, cache)` returns a
-`VerifyReport`: the outcome (`VerifiedAggregate`, or the first failing check as a
-`VerifyError`) and `VerifyTimings`, one entry per step of spec Section 11;
-`verifier::verify` returns the outcome only. Steps:
-
-| Timing | Spec 11 | Work |
-| --- | --- | --- |
-| `parse` | 1 | wire parse (all shapes from `N`), manifest, PCS verifier from the plan's setup seed |
-| `public_data` | 2 | `StreamedPublic::prepare`: `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest |
-| `transcript` | 3 | events 0 to 6: commitments parsed (coefficient counts from the plan) and absorbed, `sd`, `fs_sigma`, final vectors, Keccak-side proofs |
-| `matrices` | 3 | `BridgeDerivation::matrices(sd)`; `SeededMatrices` derives them as in spec 9.1 (`agg_bridge::seed`) |
-| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, proof item, matrices; deviation P11) |
-| `prestage` | 4 | `tau`, pre-stage claims, `Y(tau_3)` |
-| `stage1`, `stage2` | 5, 6 | rounds and terminal checks; `w_2, w_3` at `r^(1)`, `w_1` at `r^(2)` (bridge weights, Section 8) |
-| `stage3_rounds` | 6 | `stage3::verify_streamed`: gamma, rounds, terminal claims, with the ring claim `T(r^(2))` deferred (deviation P10) |
-| `public_t`, `public_a` | 6 | `StreamedPublic::pass`: `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded and inverse-NTT'd, or cached; `Lambda` products) |
-| `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added |
-| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B |
-| `opening` | 7 | the batched Akita opening of the 67 claims at the four group points |
-
-A rejected run stops at its failing step (later timings stay zero); a trailing segment that
-holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
-Before step `parse` the verifier refuses an unsound configuration
-(`verifier::check_configuration`, `VerifyError::Configuration`): a `KeccakVerifier` whose
-`profile()` differs from the requested Flock profile, mode A (`Fast`, `Slim`, `Slim8`) without
-`BridgeDerivation::seed_derived()` (only `SeededMatrices`), and profile 0 outside builds
-with the test hooks. The test stand-ins `FixedMatrices` (matrices that ignore `sd`) and
-`NoKeccak`/`NoKeccakVerifier` (profile 0) exist only in unit tests and with the
-`test-hooks` feature (deviation P4).
-
-## 12. Mode B (`mode_b`)
-
-Mode B is the Keccak-free aggregate (spec Section 14): the aggregate is
-the proof bytes, which carry `c~_i` and, as the event-2 item of segment `sigma`, the
-`w1Encode(w_1'_i)` strings (768 bytes each, record order) of the segment's live records;
-the event-6 share items and the join's proof items are empty; event 0 binds Flock profile id 3 (`PublicBits`). Layout
-and the extra bit check: deviation P9.
-
-- Prover: `prove_mode_b(inputs, bridge)` builds `G_main`, publishes the committed bits
-  (`PublicBits::from_tables`, i.e. `w_1' = sum_t 2^t b_t` per position, `w1Encode` per
-  record), and runs `prove_with_tables` with `PublicBits` as the Keccak side.
-- Verifier: `verify_mode_b(records, aggregate, bridge, cache)` is `verify_timed` with
-  `PublicBitsVerifier`. Step `keccak` checks per segment: 768 bytes per live record and an
-  empty proof item; every 6-bit value below 44; `c~_i = SHAKE256(mu_i || w1Encode)` (7
-  Keccak-f per record); and the projection predicate `Y_sigma = M_3 M_2 M_1 b'` over GF(2)
-  (`segment_projection`: the six lanes share the matrices, so the 6-bit value is XORed as a
-  lane mask, 14 byte XORs per nonzero position at level 1, parallel over level-1 blocks).
-  Step `bits` checks `b_t(r^(3))` against `public_bit_evaluations` (per record the 1,024
-  equality weights of `r^(3)_pos` bucketed by the 6-bit value, then 32 buckets per lane,
-  times `eq(r^(3)_sig, i)`).
-- `public_bits(proof, i)` returns record `i`'s 768 bytes.
-
-What an accepted mode-B aggregate establishes: for every live record, (3.3) natively for
-the published `w_1'` and (3.1), (3.2) by the PIOP for committed bits equal to the published
-ones (relation `H(2^17, 2^18)` with the hash relation checked in the clear).
-
-## 13. Measurements
-
-This machine (i7-11700K, turbo boost and hyper-threading off),
-`taskset -c 0,1,3-15` (7 cores; CPU 2 busy with another task, load average about 6 at the
-start), release build without the `avx512` feature (Aerie's runtime dispatch selected
-AVX-512).
-`scripts/bench.sh --bench mode_b` (`crates/agg-bench/benches/mode_b.rs`): per size one
-prover process (3 runs) and one verifier process (7 runs uncached, then 7 with every key
-cached); `N - N/32` records under their own keys, `N/32` under 3 shared keys; fixed test
-matrices (`FixedMatrices`, built outside the timed region; deviation P4). The benchmark
-itself derives the matrices from `sd` (`SeededMatrices`), which adds the derivation (about
-150 ms on 7 threads, 62 MB, deviation P4) to the prover and to every verification; the
-table below uses the fixed matrices. Times are medians; peak RSS is `VmHWM` of the
-role's process after resetting it once the inputs are built (`/proc/self/clear_refs`).
-
-| `N` | `d_main` | Prove | Verify uncached | Verify cached keys | Prover peak RSS | Verifier peak RSS | Aggregate | Public bits | Aggregate without bits |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 | 18 | 1.38 s | 34.3 ms | 31.6 ms | 310 MiB | 100 MiB | 273,069 B | 196,616 B | 76,453 B |
-| 512 | 19 | 2.20 s | 55.0 ms | 41.5 ms | 453 MiB | 117 MiB | 478,058 B | 393,224 B | 84,834 B |
-| 1,024 | 20 | 3.90 s | 78.3 ms | 50.8 ms | 782 MiB | 123 MiB | 889,459 B | 786,440 B | 103,019 B |
-
-The RSS before proving was 93, 120 and 173 MiB (records, instance, expanded keys, test
-matrices); before verifying 68, 69 and 71 MiB, of which about 62 MB are the fixed test
-matrices the verifier process builds. The aggregate is `32 N` bytes of `c~` plus 768 bytes of
-public bits per signature (`786,440 = 1,024 * 768 + 8` bytes of framing at one segment)
-plus 59 to 61 KB of opening, 7.8 to 8.2 KB of PIOP messages, 528 bytes of Akita
-commitments and 512 bytes of final vector. Without the public bits (mode A replaces them
-by a Flock commitment and proof) it is 76 to 103 KB, of which `32 N` are the hashes.
-
-Verifier steps at `N = 1,024` (ms, medians; uncached / cached keys): parse 5.4 / 5.0
-(wire parse, manifest and the PCS verifier from the plan's setup seed; the parts are not
-timed separately, and at 256 the step still takes 3.9 ms, so the setup dominates); public data 5.0 / 4.4 (`pkDecode`, `tr`, `mu`,
-`SampleInBall`, record digest); transcript 1.0 / 1.0; matrices 0 (borrowed); Keccak side
-7.2 / 7.3 (1,024 SHAKE256 hashes of 832 bytes, range checks, GF(2) projection); prestage
-0.04; stage 1 5.0 / 4.7 (`w_2, w_3`); stage 2 10.8 / 10.2 (`c_1`: `14 2^19` additions and a
-`2^19` equality table); stage-3 rounds 0.07; public pass `T` 6.5 / 5.6 and `A` 27.8 / 4.0
-(992 + 3 ExpandA and 16 inverse NTTs each when uncached); stage-3 terminal 0.04; bit check
-1.1 / 1.0; opening 6.8 / 6.7. At 256 the same steps total 34.3 / 31.6 ms.
-
-Prover steps at `N = 1,024` (last run, ms): witness tables 76, Akita setup 7, round 1 143,
-round 2 (matrices, parities, carries, commitments) 84, stage 1 691, stage 2 1,827, stage 3
-700, opening 338; stage 2 (degree 5, 101 instances) dominates.
-
-`tests/mode_b.rs` prints the same breakdowns for one run each (`--nocapture`); there the
-round trips run concurrently with the other tests, so its timings are noisier.
-
-## 14. Tests
-
-`taskset -c 0,1,3-15 cargo test -p agg-piop --release` (61 tests, about 25 s after the
-build; the 1,024-signature round trip is ignored in debug builds):
-
-- unit: manifest shapes and binding bytes; field conversion; kernel and `Lambda` vs their
-  definitions; `sparse_t`, inverse NTT, `prepare` vs `from_instance`, `T(r)` vs the MLE;
-  leaves and digit tables; kernel groups (equality and weight groups) vs direct sums with
-  the terminal equation at random challenges, compressed-message round trips, lift and
-  rejections; weight tables vs dense definitions and vs their verifier evaluations at
-  Boolean and random points, `w_A` vs `(A z)` for random `z` and vs its extension at `r3`;
-  transcript registry order, shape faults, determinism, encoding round trips; claim
-  vectors; the three stage specs (instance counts, gamma order, degrees, every column read
-  at `r3`); wire round trips, the `ProofSize` parts summing to the length, and every
-  malformed-buffer rejection; record binding; the stage-3 deferral (compressed rounds
-  are affine in the claim with slope `prod_k r_k`); `StreamedPublic` (`mu`, `T_i`, and
-  the pass against `PublicData::t_evaluation` and `weights::ring_weight_at`, without a
-  cache, filling a cache, and from it with no expansion; a malformed key); mode B:
-  `segment_projection` against `agg_witness::bridge::gf2_composite` on a real batch and
-  against a sparse per-lane reference at 600, `2^13 + 700` (two segments) and `2^14 + 3`
-  (four segments, the last one padded) records; `public_bit_evaluations` against the
-  extensions of the bit lanes and on malformed items; `PublicBitsVerifier` accepting the
-  honest segment and rejecting a non-empty proof, a short item, a flipped bit (hash),
-  `w_1' >= 44`, a changed `Y` bit (projection) and a changed `c~`; `check_bits` with a
-  changed claim.
-- kernel (`src/kernel/tests.rs`, `coded.rs`, `field.rs`; Section 18): every evaluation
-  strategy (automatic; no coding; coded per item; quartet masses forced; pair masses only;
-  quartet tables forced, with and without Taylor tables; pair fold at level 2; without the
-  claim recovery, also with quartet tables) against an independent reference (full `K`
-  tables, the round polynomial from its definition at `d + 1` points over full equality
-  tables, interpolated), bit for bit in every message and terminal value and with the
-  terminal equation, on an equality group with every `Term` kind (Booleans, `RangeW1`, both
-  leaves of a digit, `A^lo A^hi`, links, reductions, a base-4 leaf on a five-class column, a
-  weightless affine form), a weight group (field, `i32` and materialized lanes, weighted
-  sums, a field-field product), a group with a tampered wide column, an `i32` lane and
-  cross-column products, the two-round prefix at `2^16` cells, and domains of 0 to 4
-  variables with and without lifted rounds; classes of digit columns under the square, leaf
-  and identity maps (8, 8, 16, and 17 for a tampered 9: not coded); pattern masses against
-  the serial sums in both accumulation layouts; quartet and Taylor tables against the folded
-  lanes and the shifted polynomial; the compiled pieces (source, folded, depressed, upper
-  coefficients) against the terms; the fast product against `*` on boundary and random
-  inputs; split and plain unreduced sums against nested sums; Taylor shifts; narrow and wide
-  parity tables (`tables.rs`).
-- `tests/stages.rs` (256 signatures, 200 own keys, 56 on 3 shared keys): every stage-1 and
-  stage-2 zero-check sums to zero and every level, `def_y1` and link claimed sum equals an
-  independent dense evaluation (equality tables materialized, weights from their table
-  definitions, `(A z)` by the integer CRT product); the ring sum equals `T(r2)`; the
-  terminal claims of each stage equal the multilinear extensions of the virtual tables at
-  the stage point; prover and verifier outputs agree; a changed terminal claim or round
-  message is rejected at the stage. Tampering (50 and 24 records, unchecked prover): a
-  changed `z` digit, a changed `v` digit (residual off by `q`) and a flipped bit fail at
-  stage 3 only; a non-Boolean bit, `w_1' >= 44`, a base-16 digit outside its alphabet, a
-  changed level-1 carry, a flipped level-2 parity and a flipped `Y` bit fail at
-  stage 1; base-4 and base-8 digits outside their alphabets pass stage 1 and fail at
-  stage 2.
-- `tests/prove_verify.rs`: a full prover run at 256 signatures; the opening claims taken
-  from the stage-3 terminal values equal the evaluations of the committed tables at the
-  group points; the blob round-trips and verifies from `(pk, M)` with and without cached
-  keys; a shorter or reordered record
-  list, a changed `c~`, other bridge matrices, another Flock profile, a changed round
-  message (rejected at stage 2), a changed opening claim (stage 3), a changed pre-stage
-  claim, a corrupted opening byte, a truncated commitment, a non-empty Keccak payload in
-  mode B and a truncated blob are rejected; a padded batch of 10 records round-trips.
-- `tests/mode_b.rs`: `prove_mode_b` / `verify_mode_b` round trips at 256 (200 own keys,
-  56 on 3 shared keys) and 1,024 signatures (1,000 and 24; about 4.5 s): the proof size by
-  part, the prover and verifier step timings (uncached, cached) printed; the published
-  bits satisfy `c~ = H(mu || w1Encode)`; a cached run expands no key. Rejections at 256: a
-  flipped public bit, a public value of 63, a short bit item, a changed `c~`, a changed
-  final-vector bit, other matrices and a non-empty proof item at the Keccak side of
-  segment 0; a changed pre-stage claim at stage 1, round messages at stages 2 and 3, a
-  changed stage-3 claim at stage 3; an opening byte at the opening; a reordered or shorter
-  record list, another Flock profile and a truncated aggregate. Every tampering of
-  `tests/stages.rs` through the full prover (`prove_with_tables`, unchecked stages, honest
-  public bits, 50 records): `z` and `v` digits at stage 3; a non-Boolean bit at stage 1;
-  base-4 and base-8 digits at stage 2; a level-1 carry and a level-2 parity at
-  stage 1; a flipped committed bit, `w_1' = 44` in the committed bits and a flipped `Y`
-  bit at the Keccak side (the final vector no longer matches the projection of the public
-  bits); a base-16 digit of 9 cannot be committed (Akita: "committed source exceeds the
-  scheduled coefficient bound"). Bit check: with two equal `M_1` columns a prover flips
-  `b_0` at two positions and moves `u` by `-/+ 2 gamma_2`; every PIOP check, the projection
-  and the opening pass, `verify_mode_b` rejects with `VerifyError::Bits`, and the same
-  aggregate is accepted by a verifier without the bit check (deviation P9).
-- `tests/bridge.rs` (the Fp side of the bridge, `docs/bridge.md` Section 9 item 7): a full
-  prover run at 256 signatures with `SeededMatrices` verifies; the round-2 tables built through
-  `agg_bridge` equal the `agg-witness` reference, satisfy `agg_bridge::parity::check`, and the
-  published `Y` equals both GF(2) composites; the verifier's bridge weights at `r^(1)` (`w_2`,
-  `w_{3,t}`, `stage1::BridgeWeightsAt`) and at `r^(2)` (`w_1`) equal the extensions of the
-  prover's weight tables at the transcript's points. Tampering through the full prover (48
-  records, `FixedMatrices`, unchecked stages): a flipped `Y` bit, a flipped level-2 parity, a
-  level-1 and a level-3 carry, and a flipped committed bit under the stale round-2
-  tables are each rejected at the stage-1 terminal.
-- `tests/commit_open.rs`, `tests/virtual_checker.rs`, `tests/source_tables.rs` as in part 1.
-
-`agg-bench` (`taskset -c 0,1,3-15 cargo test -p agg-bench --release`, 3 tests): medians,
-batch inputs, `VmHWM`/`VmRSS` parsing, the peak following a 64 MiB allocation and its reset.
-
-## 16. Design of the kernel rework
-
-### 16.1 Committed elements: what can and cannot be cut
-
-The 23 main-domain columns (spec Section 4.1) hold 70 bits of range-checked value per
-position (`z` 18, `u` 19, `v` 27, `w_1'` 6) in base-16 digits (4 bits each) plus the six
-bits; 5 + 5 + 7 + 6 = 23 is the minimum for that argument. An Akita width does not certify a
-range (Akita Remark 10.41, spec B.3). The candidates, with numbers:
-
-- **Divisibility projection instead of `v` (P2).** A single-level residual projection
-  with coefficients in `[-12, 12]` over the `2^25` entries of `Delta_0 = (A z) - T -
-  2 gamma_2 w_1' - u` has worst-case output `2^49 * 12 * 2^25 = 2^77.6` (honest RMS
-  `2^57.75`; Aerie's three composed levels give about `2^63`), against `p/2 = 2^63`: the
-  integer output cannot be recovered from its residue, so `q | y` cannot be checked. The
-  worst case is reachable by a signer who holds the key (`z` sign-aligned with a row of
-  `A` gives `|(A z)_j| ~ 2^48`), so a completeness cap below `B_v` would make valid
-  signatures non-aggregatable. A coarse quotient `v = 2^m v_hi + v_lo` with only `v_hi`
-  committed needs `2^(22 + m) * 12 * 2^25 < 2^63`, so `m <= 12` and `v_hi` keeps 15 bits
-  (4 base-16 columns): 3 columns saved for the whole projection machinery (seeded cores,
-  weight pull-back through `A`, Rice codec, one stage-1 instance). Sending the output as a
-  clear integer with slack `y = Y - m p` is unsound (a residual entry `== p (mod q)` lets
-  every output be shifted to a multiple of `q`). Not adopted.
-- **One wide `v` column with Aerie's norm projection as an approximate range proof.**
-  (6.1) needs `|v| < 2^39.9`, i.e. `||v||_2^2 < 2^79.8` over the batch. Aerie's Theorem 5.1
-  certifies `E* = (Theta + 1) / zeta` with `zeta = 1024^-5 (33/32)^1470 ~ 2^15.3`, a slack
-  of about `2^15.8` over the honest batch norm; the honest worst case for `v` is
-  `||v||_2^2 <= 2^25 * 2^52 = 2^77`, so the certified bound would be `2^92.8`. Not usable
-  without a new projection analysis (Aerie's is parameter-specific and Lean-checked).
-- **Wider Akita digits.** A width-27 column needs two Akita inner digits instead of seven
-  (docs/pcs-config.md Section 2), but gives no range, and the leaf argument needs the
-  digits themselves committed (`P_Z = Z (Z + 1)` is a table of a committed `Z`). No gain.
-- **Base-32 digits.** Save 3 columns (`z` 4, `u` 4, `v` 6) but need 4 virtual factor lanes
-  per digit in stage 1 and 4 degree-5 leaves per digit in stage 2 instead of 2 each; the
-  sum-check, not the PCS (0.5 s of 4 s at 1K), is the cost. Not adopted.
-- **Merging the six Boolean lanes.** The bridge takes six separate Boolean lanes
-  (parities per bit) and the bits are not low-degree in `w_1'`. Not possible in relation H.
-- **Lookups** (Shout, LogUp) allow 16-bit digits and about 12 columns: adopted as the
-  lookup layout L16 (Section 19).
-
-Conclusion for the base-16 layout: the element count stays at 23,552 main-domain elements
-per signature; the wire format, the verifier and the soundness ledger of spec Section 12 are
-unchanged by the kernel work. The cost gap to Aerie is in the prover's kernel, not in the
-layout.
-
-### 16.2 Kernel rework (prover only, bit-identical proofs)
-
-Three changes in `kernel::Group`, all of which compute the same round polynomials:
-
-1. **Compiled evaluation plan.** At `Group::new`, the gamma-weighted terms are compiled
-   into: one polynomial per lane in `K[v]` (the sum of every single-lane term on that
-   lane: `Bool`, `Link`, `Leaf`, one-lane `Product`, the lanes of a weightless `Affine`,
-   the constant of an `Affine`), evaluated by Horner at each interpolation point; weighted
-   affine forms `w (sum_l c_l v_l + c)` with `K` coefficients (gamma folded in);
-   bilinear products `c * v_a * v_b`; and the residual generic terms (`RangeW1`). The
-   stage-2 leaves of one digit cost 4 multiplications per point instead of 10, the stage-3
-   links and residual 2 per lane instead of 3.4.
-2. **Compact round 0 (pattern buckets).** A `Source::Bytes` lane whose cells lie in a
-   span of at most 16 values is *coded* (`min`, `span`); a lane pair `(cell(2k),
-   cell(2k+1))` has one of at most 256 patterns. In the first active round of a group
-   whose terms read only coded lanes (and, for weight groups, the one weight lane), the
-   prover sums the equality weights (or the weight lane's values at every interpolation
-   point) into one bucket per pattern per source column (one `K` addition per pair per
-   column), then evaluates every term once per pattern. Multi-column terms (`RangeW1` on
-   four bit columns) use a joint pattern of at most `2^12` entries. Groups with an `Ints`
-   lane (the `y^(1)` parities on `D_1`) or a non-coded cell (tampered tables in tests)
-   fall back to the generic path. Aerie's `CodedSource` and `chunked_bucket_sums` do the
-   same.
-3. **Fold by lookup.** The first fold of a coded lane is a 256-entry table lookup
-   (`lut[pattern] = v(2k) + r (v(2k+1) - v(2k))`) instead of one `K` multiplication per
-   cell; a lane read by exactly one linear term is scaled by its coefficient at this
-   fold, so that term costs no multiplication in later rounds.
-
-Why this is sound: every message is the same polynomial `g_j(Y)` as before, evaluated in
-a different order over `K` (bucketing is distributivity of the eq weights over equal
-summands; Horner and the folded coefficients are exact). The verifier is untouched, so the
-existing stage tests (prover/verifier agreement, tampering at the stated stage) check the
-rework end to end; `kernel` tests compare the compact and generic paths on random tables
-with every `Term` kind. Memory after the first fold is unchanged (one `K` per cell per
-lane); Section 18 keeps the codes through three rounds.
-
-## 18. Kernel rework, second step: codes through three rounds
-
-Prover only: every message, terminal value and proof byte is unchanged (aggregates
-byte-identical to those of the first step at 256 to 2,048 records, Section 18.3), so the
-transcript, the wire format (version 0) and the verifier are untouched.
-
-### 18.1 What was implemented
-
-1. *Coding by lane maps* as designed: classes of the present cells under the tuple
-   of the maps of the lanes on the column, at most 16; one byte of pair code per pair.
-2. *Pieces*: bucketed per column or joint column set; direct otherwise. Weighted
-   sums replace the keyed buckets (`Piece::Weighted`, `WeightConstant` are gone): every
-   `Affine` with a weight and every product of a field lane with another lane is one form
-   `w (sum c_l v_l + c)` per weight lane; in the first round its byte lanes are read through
-   per-byte tables `c_l map_l[byte]` (additions only), later its lanes absorb their
-   coefficients at the first fold. The virtual `Int` lane of the design was not needed: with
-   the per-byte tables and the absorbed coefficients the `w_A` and `w_1` groups cost about
-   seven products per pair at every level (synthetic profile below: 33 and 36 ms at
-   `2^21`, against 110 and 128 ms of message and fold time before at 2,048).
-3. *Lane states*: `Source -> Pair -> Quartet | PairFold -> Dense`, plus `Table` for
-   uncoded lanes; `terminal_values` reads any state (domains of 0 to 3 variables end in a
-   compact state).
-4. *Rounds*: quartet masses with `remaining_eq_tables_after(1)` serve rounds 0 and 1;
-   level 2 reads quartet tables with Taylor tables.
-5. *Coefficient form* everywhere, and two further reductions of the arithmetic: the
-   constant coefficient is recovered from the running claim from the second active round
-   on, and the last product of each coefficient is accumulated unreduced.
-6. *Narrow parities* as designed (`tables::Parity1`); the stage-1 `D_1` group is now
-   bucketed.
-7. *Faster `K` product*: `kernel::field::fm`, four `64 x 64` products and two
-   branch-free reductions (`2^64 = 59`, `2^128 = 3481` modulo `p`); 7.4 ns against 9.4 ns for
-   `*` in a throughput loop on this machine (Aerie's `opening_field_ops::mul`: 7.7 ns), equal
-   to `*` on boundary and random inputs (`fast_product_matches_the_field_product`).
-8. *Opening and commitments*: (2a) the opening takes its claims from the stage-3 terminal
-   values (`TableCommitter::open_claims`; the recomputation is a debug assertion and a check
-   in `tests/prove_verify.rs`); (2b) `rayon::join` of the round-1 commitment and
-   `KeccakSide::commitments`, no change to `agg-cli` needed; (2c) the round-2 groups are
-   committed concurrently; (2d) no planner change.
-9. *Weight table `w_A`* (73 ms of stage 3 at 2,048 after the kernel work): the negacyclic
-   transform of `ring_weight_table` is allocation-free (it
-   allocated two vectors per recursion node, about 2,000 per record) with one fold product
-   per butterfly output, the row weights are scaled by `eq(r2_sig, i)` once per record and
-   combined with the integer rows of `A` by base-field products: 73 to 36 ms at 2,048
-   (single traced runs).
-
-### 18.2 Where the implementation departs from the design, with the measured alternatives
-
-Synthetic stage-like groups at `2^21` cells (the main domain at `N = 2,048`;
-the base-16 digit layout, 7 threads, minimum of 3 runs, load average 1 to 3),
-total ms for the stage-1, stage-2 and stage-3 main equality groups:
-
-| Variant | Stage 1 | Stage 2 | Stage 3 |
-| --- | ---: | ---: | ---: |
-| first complete version (dense table filled by a serial `vec!`, Taylor tables with the constant) | 275 | 353 | 261 |
-| dense table filled in parallel row by row | 170 | 199 | 179 |
-| Taylor tables without the constant, claim recovery, dense table filled in lane-major row blocks | 145 | 175 | 165 |
-| unreduced accumulation of the last products | 132 | 156 | 154 |
-| level-1 patterns without divisions, wide masses with shared item weights, moments for polynomial-only columns | 128 | 149 | 132 |
-
-Measured and rejected (kept out of the code):
-
-- *Quartet tables for 16-class columns*: the stage-3 links (identity map) have `16^4`
-  quartet patterns, 1 MiB per lane; level 2 keeps the pair table and folds by the second
-  challenge on the fly. For 8-class columns the quartet table wins (one profile run, stage-2
-  level 2: 58 ms with quartet and Taylor tables, 86 ms with quartet tables only, 96 ms with
-  the pair fold).
-- *Dense table by one indexed parallel collect* (row-major, multiply-shift division by the
-  lane count, no zero fill): 49.5 ms for the stage-1 materialization against 31.6 ms for
-  lane-major row blocks after a parallel first touch, because each row touches every lane's
-  quartet table.
-- *Level 2 segment by segment over blocks of 256 items* (so each segment's tables stay in
-  cache): stage 1, 2, 3 level 2 at 33, 42, 42 ms against 25, 40, 36 ms item by item.
-- *Deferring the materialization to the fourth fold*: estimated from the single-thread
-  profile (bind 2 at 23 ns per cell, quartet reads plus two folds per lane and pair in
-  round 3) to save about 10 ms on stage 1 and to cost on stage 3 (pair-fold lanes); not
-  implemented.
-
-The bivariate prefix does apply to the 16-class stage-3 group from `N = 1,024` on (`2^18`
-quartets against `4 * 16^4`), not only from 2,048; its masses are
-17 tables of 1 MiB accumulated one table per task (no replication), and round 1 reads them
-by moments (2.5 ms instead of 12 ms at `2^21`).
-
-### 18.3 Measurements
-
-This machine, 7 threads (`taskset -c 0,1,3-15`, `RAYON_NUM_THREADS=7`), CLMUL build
-(`RUSTFLAGS="-C target-feature=+pclmulqdq" CARGO_TARGET_DIR=target/clmul`; the CLI with
-`--features agg-keccak/avx512,agg-piop/avx512`). "Before" is the binary of the first step
-(Section 16.2), "after" the code with this section's changes; the two ran back to back, before
-first, medians of 5 timed
-runs after 1 warmup. Load average 2.8 at the start and 5.1 to 5.6 during the runs (the runs'
-own 7 threads included; no other job was visible). Every mode-B aggregate (256 to 2,048
-records) and the mode-A aggregates of 256 and 1,024 records (`agg aggregate`, same records)
-are byte-identical before and after.
-
-Mode B (`cargo bench -p agg-bench --bench mode_b -- 256 512 1024 2048 --warmup 1 --reps 5`),
-prover steps of the median run, ms:
-
-| `N` | Prove before / after | Stage 1 | Stage 2 | Stage 3 | Stages per signature | Opening | Round 1 (`G_main`) | Round 2 | Prover peak RSS (MiB) |
-| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 256 | 0.880 / 0.601 s | 104.0 / 44.5 | 213.1 / 60.7 | 120.5 / 56.7 | 1.71 / 0.63 ms | 218.6 / 220.2 | 36.5 / 36.1 | 161.4 / 155.8 | 294 / 302 |
-| 512 | 1.245 / 0.761 s | 177.9 / 72.5 | 319.7 / 82.5 | 208.4 / 90.9 | 1.38 / 0.48 ms | 255.2 / 242.2 | 67.8 / 67.5 | 170.0 / 155.9 | 437 / 449 |
-| 1,024 | 1.770 / 1.038 s | 276.6 / 99.6 | 440.6 / 127.0 | 340.9 / 152.1 | 1.03 / 0.37 ms | 306.8 / 272.8 | 138.2 / 135.2 | 181.5 / 163.3 | 809 / 668 |
-| 2,048 | 2.734 / 1.495 s | 442.1 / 176.9 | 776.3 / 229.1 | 601.0 / 244.5 | 0.89 / 0.32 ms | 383.0 / 311.3 | 182.4 / 192.1 | 180.1 / 173.2 | 1,343 / 1,125 |
-
-Stages 1-3 are 2.7x, 2.9x, 2.8x and 2.8x faster (256 to 2,048); the prover 1.46x to 1.83x. The
-opening is 19% faster at 2,048 (the 67 table evaluations are gone, 2a) and unchanged at 256,
-where Akita's `batched_prove` dominates. Round 2 is mostly the seeded matrices (P4); its
-concurrent commits save 6 to 18 ms. Verification is unchanged (174 / 183 / 213 / 260 ms
-uncached before, 173 / 196 / 201 / 256 ms after). The prover's peak falls at 1,024 and 2,048
-because the first `K` tables are an eighth of the domain instead of a quarter.
-
-Per round, one traced run after one warmup (`AGG_STAGE_TRACE=1`, prover child), ms, round 0
-first:
-
-| `N`, stage | Before | After |
-| --- | --- | --- |
-| 1,024, stage 1 | `10 92 59 25 16 9 13 8 15 8 4 2 1 1` | `7 1 31 11 6 4 3 4 5 3 2 1 0` |
-| 1,024, stage 2 | `17 116 118 61 37 19 13 12 31 16 8 4 2 1 1` | `16 5 32 17 11 7 4 7 8 5 2 1 1` |
-| 1,024, stage 3 | `22 143 57 32 16 9 10 9 17 8 4 2 1 1` | `15 5 40 12 7 5 3 5 6 4 2 1 0` |
-| 2,048, stage 1 | `21 140 113 48 28 17 19 11 8 15 8 4 2 1 1` | `13 1 58 19 10 6 4 4 5 5 3 2 1` |
-| 2,048, stage 2 | `34 162 226 115 62 30 22 22 15 31 16 8 4 2 1 1` | `20 7 61 34 20 10 7 8 6 9 5 2 1 1` |
-| 2,048, stage 3 | `42 198 112 66 36 17 13 13 8 17 9 4 2 1 1` | `28 8 83 24 12 8 6 5 6 6 4 2 1` |
-
-Round 1 now costs 1 to 8 ms (quartet masses from round 0); round 2 (level 2 and the
-materialization at bind 2) is the largest round of every stage, then the first dense round.
-Per group at 2,048 (message / bind summed over the rounds, before -> after, ms): stage 1
-main `eq(tau)` 272 / 124 -> 66 / 56, `D_1 eq(tau)` (now coded parities) 19 / 3 -> 4 / 2;
-stage 2 main `eq(r^(1))` 516 / 49 -> 112 / 30, main `w_1` 78 / 32 -> 18 / 15; stage 3 main
-`eq(r^(2))` 244 / 64 -> 76 / 44, main `w_A` 110 / 18 -> 20 / 18, main `eq(r^(1))` 23 / 29 ->
-11 / 10. Weight tables at 2,048: `w_A` 77 -> 33 ms (item 9), `w_1` 9 -> 8 ms, parities
-(`agg_bridge::parity`, not this crate) 19 -> 20 ms.
-
-Mode A (`agg bench --count 1024 --warmup 1 --reps 5`): prove 3.140 -> 2.374 s (min 3.115 ->
-2.361 s); stages 258 / 449 / 361 -> 100 / 129 / 141 ms; opening 309 -> 297 ms; the `G_main`
-commitment (137 -> 183 ms) now runs concurrently with the Flock commitment (183 -> 249 ms,
-both slower when they share the cores), and the listed steps add up to 171 ms more than the
-total, the overlap; Flock parts 1.300 -> 1.375 s (commit included), everything else 1.840 ->
-0.999 s; verify 272 / 243 -> 283 / 263 ms (verifier unchanged; noise); prover peak RSS 1,699
--> 1,672 MiB; aggregate 717,641 B before and after.
-
-Against the goals: stages 1-3 are 2.8x faster at 1,024 and 2,048 (target about 2x), 0.32 ms
-per signature at 2,048 on 7 threads. At 32K this extrapolates to about 10 s of stages on this
-machine and, with the cloud-to-local ratio of the first step's runs (13.4 s measured against
-29 s extrapolated), about 5 s on the cloud VM (estimates, not measured; Aerie's stages take
-0.60 s there). Per committed element that is about 6.5 ns on the cloud VM at 32K
-(estimate) against Aerie's 12 ns.
-
-## 19. Lookup layout L16
-
-`docs/lookup.md` has the argument, the
-soundness and the remedies for the identity term; `docs/deviations.md` L1 to L7 and D2 the
-departures; `docs/spec.md` Sections 4, 7, 10 to 12 the normative text.
-
-### 19.1 Groups and tables
-
-| Group | Columns (manifest order) | Width | Storage | Round |
-| --- | --- | ---: | --- | ---: |
-| `G_main16` | `Z_lo, U_lo, V_lo, V_hi` | 16 | one stacked `i32` lane (`MainTables::wide`), column `c` at `c 2^d_main` | 1 |
-| `G_main4` | `Z_hi, U_hi, b_0..b_5` | 4 | `i8` columns (`MainTables::columns`) | 1 |
-| `G_1` | `kappa1_0..5` (stored `K = kappa - 2^15`) | 16 | stacked `i32`, 8 slots, slots 6, 7 hold `-2^15` | 2 |
-| `G_2` | `y2_0..5`, `kappa2_0..5` | 16 | `i8` parities, stacked `i32` carries | 2 |
-| `G_3` | `kappa3` | 16 | `i32` | 2 |
-| `G_m` | `m_0..m_6` (digits of the multiplicities of `T_16`) | 4 | `i8` | 2 |
-
-`source_tables::Cells` reads a column of either width (`Narrow(&[i8])`, `Wide(&[i32])`);
-`Cells::lane` gives a coded byte lane or an `Ints` lane. `MainTables::build` derives every
-witness (strict) and encodes `z + 2^17 = z_lo + 2^16 z_hi` (stored `Z_lo = z_lo - 2^15`,
-`Z_hi = z_hi - 2`), `u` by relation H-u's step form (`U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`
-in base 6, spec (4.2)) and `v` (two 16-bit halves); padded rows hold
-the digits of zero. `BridgeGroupTables::build` adds the balanced carries, the parities and
-`Y` of `agg_bridge::parity::compute` and the multiplicities of every looked-up cell of both
-rounds (`recount`, `lookup::multiplicities`), with their digits. `agg-witness` and
-`agg-bridge` are unchanged.
-
-### 19.2 Event-0 bytes and commit flow
-
-`CommitmentManifest::binding_bytes`: the wire version, digit layout id 1, six groups (role,
-round, family byte 0/1, variables, polynomial count, alphabet codes: 4 and 8 for the leaf
-digits, `0x90` for a looked-up column, `0x50` for a multiplicity digit, 0 for a Boolean),
-the grouped row id `mldsa-44-l16-batch-<N*>-mult-final`, the bridge shape, then the lookup
-layout (2 challenges; table width 16; per stack column count, variables, table and shift).
-Commit flow: `TableCommitter::commit_round1` commits `G_main16` and `G_main4` concurrently
-(the pair runs on the calling thread while the Keccak side's commitments run on a scoped OS
-thread, `pcs::overlap`), `commit_round2` the four round-2 groups concurrently, each commit on
-its own scoped OS thread (`pcs::concurrent_commits`: Akita's lazily built NTT slots sit
-behind a `OnceLock` whose initializer runs rayon loops, so commits joined as rayon jobs can
-deadlock; deviation P12). No rayon worker waits on those threads: on a worker, or with a
-one-thread pool, the commits run one after another on the calling thread (a worker blocked
-on its commit threads hung the one-thread prover in round 1; `tests/single_thread.rs`);
-`open_claims` opens the 31 stage-3 claims at the suffixes of
-`r^(3)` and the 7 digit claims at `pi_m` (`pcs::group_points`).
-
-### 19.3 The lookup (event 7) and the stages
-
-Shape (`CommitmentManifest::lookup_shape`): stacks `[Z_lo | U_lo | V_lo | V_hi]` (depth
-`d_main + 2`), `kappa1` (8 slots, `d_1 + 3`), `kappa2` (8 slots, `d_2 + 3`), `kappa3`
-(`d_3`); table `T_16`; challenges `X_1, X_2`; storage shift `2^15` (leaves
-`1 / ((X - 2^15) - stored)`). `prover::prove_piop` runs `lookup::prove_in` on the PIOP
-transcript, sends the seven digit claims `m_k(pi_m)`, then `tau`, the pre-stage claims and
-the stages; `verifier::verify_piop` mirrors it (`VerifyError::Lookup` for the lookup and
-the digit check). Lookup proof elements: 1,015 + 312 = 1,327 at `N = 1,024` with two
-challenges (21,232 B), 1,799 at `2^15` (28,784 B), plus 112 B of digit claims.
-
-Stage 1 (degree 4, `gamma^(1) in K^26`, point `tau`): `bool_y1[t]` (0..6), `level2[t]`
-(6..12), `level3` (12), `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25); groups:
-main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`}, `D_1`
-{`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
-`b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
-
-Stage 2 (degree 4 in relation H-u, 5 in relaxed H; `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
-`K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7)
-(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}). Terminal (8): `b_t(r2)`, `P_Z(r2)`.
-
-Stage 3 (degree 3, `gamma^(3) in K^44`, point `r^(2)`):
-
-| Instance | Gamma | Domain | Equality / weight | Summand |
-| --- | ---: | --- | --- | --- |
-| `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A (Z_lo + 2^16 Z_hi + 2^15) - eq (2 gamma_2 w_1' + u + q v)` |
-| `link[Z_hi]`, `link[U_hi]` | 1, 2 | main | `eq(r2, .)` | `Z (Z + 1)` |
-| `b_t` from `r1`, from `r2` | 3..9, 9..15 | main | `eq(r1)`, `eq(r2)` | `b_t` |
-| `y2_t` from `tau_2`, from `r1_2` | 15..21, 21..27 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
-| `K2_t` from `tau_2` | 27..33 | `D_2` | `eq(tau_2)` | `K2_t` |
-| `K3` from `tau_3` | 33 | `D_3` | `eq(tau_3)` | `K3` |
-| `K1_t` from `r1_1` | 34..40 | `D_1` | `eq(r1_1)` | `K1_t` |
-| stack `j` | 40 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
-
-Groups: main `eq(r2)` {`U_lo, V_lo, V_hi, Z_hi, U_hi`, 6 bits}, main {`w_A`, `Z_lo`,
-`Z_hi`}, main `eq(r1)` {6 bits}, `D_1` `eq(r1_1)` {6 `K1`}, `D_2` `eq(tau_2)` {6 `y2`, 6
-`K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, and one `eq(pi_j,low)` group per
-stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity groups at
-`r^(3)`, manifest order.
-
-### 19.4 Transcript and wire
-
-Registry (`transcript::Registry`): instance; `commit/main16`, `commit/main`; Flock
-commitments; seed; `commit/level1..3`, `commit/mult`; Flock seeds; final vectors and share
-items; `lookup/x` (2), `lookup/layer1` (40), `lookup/mu/1`; per session `s = 2 .. D`:
-`lookup/gamma/s` (2 per active tree), `lookup/round/s/k` (3) and `lookup/r/s/k`,
-`lookup/terminals/s` (4 per continuing tree), `lookup/leaves/s` (2 per ending stack or
-table), `lookup/mu/s`; `lookup/multiplicities` (7); `tau`; pre-stage (13); stage 1
-(`gamma` 26, rounds, terminal 18); `stage2/kappa1` (6), stage 2 (8, rounds, 8); stage 3 (44,
-rounds, 31); the Flock proofs (the join, deviation K22); PCS session. Wire
-(`wire::AggregateProof`): header, `c~`, the `G_main16` and `G_main4` commitments (framed),
-the Flock items, the four round-2 commitments, `Y_sigma` and the share items, the lookup
-(layer-1 values, then per session the rounds, the terminals and the leaves), the 7 digit
-claims, the pre-stage claims, the stages, the Flock proofs, the work nonces, the opening.
-`ProofSize::lookup` is the lookup part. Every count follows from `N`.
-
-### 19.5 Tests
-
-`cargo test -p agg-piop --release` (67 unit tests, 28 integration tests in 8 files): the
-integrated tests of `docs/lookup.md` Section 6 (lookup tampering at the PIOP level in
-`tests/stages.rs`; mode-B round trips at 64, 256 and 1,024; end-to-end tampering in
-`tests/mode_b.rs`, `tests/prove_verify.rs`, `tests/bridge.rs`). Measurements:
-`docs/lookup.md` Section 4.5.
-
-### 19.6 Relation H-exact (`docs/h-exact.md` step B)
-
-The relation (`manifest::Relation`, byte 0 H-u, byte 1 H-exact) is a field of the manifest
-and selects, through it, everything below; the verifier takes it from its caller
-(`verifier::verify(..., relation, ...)`, `VerifyError::Relation` on a header mismatch).
-Under H-exact: `G_main16` = `bz_lo, U_lo, V_lo, V_hi` (`bz_lo` = `S_zlo` in the slot of
-`Z_lo`, so the main lookup stack is unchanged), `G_main4` = `bz_hi, U_hi, b_0..b_5, a_z` (9
-polynomials, codes `[0, 6, 0, 0, 0, 0, 0, 0, 0]`), `z = S_zlo + 2^16 B_zhi + 130,915 a_z -
-98,225` (`DigitValue::Zx`, `ValueForm::BitSlack`), the catalog row
-`mldsa-44-l16x-batch-<N*>-mult-final`. Stage 2: `def_y1[t]` (0..6), `leaf6[U_hi]` (6);
-`gamma^(2) in K^7`, degree 4, terminal 7. Stage 3: `ring` (0, the `w_A` group reads `bz_lo,
-bz_hi, a_z` with weights `1, 2^16, 130,915` and constant `-98,225`), `link[U_hi]` (1),
-`bool[bz_hi]` (2), `bool[a_z]` (3) (`Term::Bool` in the main `eq(r2)` group, claim 0), then
-the reductions from 4 (`stage3::Gammas`); `gamma^(3) in K^45`, terminal 32. Registry: stage 2
-(7, rounds of 4, 7), stage 3 (45, rounds of 3, 32); the proof-of-work plan follows (stage-2
-batching `g = 3`). Encoder: `source_tables::Encoder` resolves the slot of every digit of
-`z, u, v` and of the bits from the manifest; `a_z = [z >= 79]`; padded rows `(bz_lo, bz_hi,
-a_z) = (32,689, 1, 0)`. Tests: `tests/h_exact.rs` (PIOP level: honest, tamperings,
-synthetic value boundaries), `tests/mode_b.rs` (H-exact round trips, cross-relation
-rejection), unit tests of the manifest, claims, stage specs, wire and plan.
-
-### 19.7 Relation H-FIPS (`docs/h-exact.md` Section 10)
-
-Relation byte 2 (`Relation::HFips`). `G_main16` = `bz_lo, l_lo, v_lo, v_hi`; `G_main4` =
-`bz_hi, l_hi, b_0..b_5, a_z, s, delta, e` (12 polynomials, codes `[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-0x23, 0x23]`); `G_2` gains `u_h` (13 polynomials) in slot 6 of lookup stack 2. Values:
-`z` as H-exact's, `L = l_lo + 29,696 l_hi + 2^15` (`DigitValue::L`, `ValueForm::Slack`),
-`u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` (affine). Stage 2: `def_y1[t]` (0..6),
-`F3 = e (e - 1)(e - delta)` (6, `Term::Monomials`, main `eq(r^(1))` group); `gamma^(2) in K^7`,
-terminal 8 (`b_t`, `delta`, `e`). Stage 3: `ring` (0), `bool[bz_hi]`, `bool[l_hi]`, `bool[a_z]`
-(1..3), `F1 = s (s - 1)`, `F2`, `F45`, `F7` (4..7), 37 reductions (8..44), `delta`, `e` from
-`r^(2)` (45, 46), the stacks (47..50); `gamma^(3) in K^51`, terminal 36. `F7` lives in two
-groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The proof-of-work plan equals
-H-exact's. Encoder: the coefficient witness comes from `(u, w_1')` (`fips_coefficient`), the
-hint slack per record is kept in `MainTables` for round 2 (`hint_slack_table`). The kernel's
-plan expands `Term::Monomials` into polynomial, bilinear and generic pieces. Tests:
-`tests/h_fips.rs`, `tests/mode_b.rs` (H-FIPS round trips with the weight-80 corner records,
-cross-relation rejections), unit tests of the manifest, stage specs, transcript, wire, plan,
-and `stage3::tests::h_fips_checks_evaluate_to_their_polynomials` (each stage-3 check against
-its polynomial at random field values, so `F1` and `F2` are tested on their own).
-
-## 20. Prover speed of the PIOP side
-
-Targets: lookup, stage 3, instance and witness. Every change is prover only; the aggregates
-are byte-identical to those of the code before these changes at 256, 1,024 and 8,192
-signatures (sha256 of `agg aggregate` on the same records).
-
-### 20.1 Dedicated groups (`kernel::layer`)
+  `K` multiplication (`kernel::field::fm`: four `64 x 64` products and two reductions with
+  `2^64 = 59`, `2^128 = 3481` modulo `p`); `fmi(x, k)` multiplies by a signed integer (two
+  `64 x 64` products, branch free: the sign of a balanced digit is random) and folds the
+  integer and byte lanes.
+- `AGG_STAGE_TRACE=1` prints per group the construction time, the message and fold time
+  summed over the rounds, the per-round wall time, and the weight-table build times
+  (`stage::prove_stage_with`, `prover::prove_with_tables`); split groups are attributed to
+  their spec group.
+
+The weight tables `w_1`, `w_A` are `512 MB` each at `N = 2^15` (16 bytes per `K` element on
+the `2^25`-cell main domain); the bridge domains are at most `2^19` cells.
+
+### 6.2 Dedicated groups (`kernel::layer`)
 
 The round polynomial of a group is unique, so a group may compute it any exact way.
-`kernel::layer` adds a round driver (`Engine`) for groups whose summand is a coefficient-free
+`kernel::layer` has a round driver (`Engine`) for groups whose summand is a coefficient-free
 bilinear form `sum_l L_l + sum L_i L_j` on a row-major table of transformed lanes: one pass
 per round folds four rows into two by the previous challenge and accumulates `q(0)` and the
 leading coefficient of the inner polynomial on the new pair; the linear coefficient comes
@@ -909,91 +273,388 @@ A self-check compares the final claim with `eq` times the summand at the termina
   coefficient on every round polynomial (`gamma`). The table carries `w`, `g` and the integer
   lanes (folded for their terminal values).
 
-Field helpers: `fmi(x, k)` (field times a signed integer, two `64 x 64` products, branch
-free: the sign of a balanced digit is random) and `mad_int`; the generic kernel folds integer
-and byte lanes with `fmi` instead of a full product. Tests:
-`kernel::tests::dedicated_layer_groups_match_the_generic_group` (message by message against
-`Group` at 1, 2, 5 and 13 variables), `field::tests::{integer_product_matches,
-unreduced_integer_products_sum_exactly}`.
-
-### 20.2 Stage driver (`stage::prove_stage_with`)
+### 6.3 Stage driver (`stage::prove_stage_with`)
 
 - A full-domain group without an equality factor whose single instance is one weighted
-  affine term with a field weight and integer or byte lanes runs on `WeightIntGroup`
-  (`Main eq None`: 76.1 -> 62.9 ms at 1,024, one thread).
+  affine term with a field weight and integer or byte lanes runs on `WeightIntGroup` (stage
+  3's `w_A` group).
 - A full-domain equality group whose lanes are all integer tables read only by single-lane
   products, each lane also read by a generic group of the stage, runs on `LinearIntGroup`
-  (stage 3: the reduction of the main lookup stack, `Main eq Lookup(0)`, four 16-bit
-  columns).
+  (stage 3: the reduction of the main lookup stack, four 16-bit columns).
 - `split_linear`: in any other full-domain equality group, the single-lane products and
   unweighted affine terms on integer lanes read nowhere else move to one `LinearIntGroup` at
   the same point; the lanes stay in the generic group, unread, so it still folds them and
-  yields their terminal values (stage 3 `Main eq R2`: the ring identity's terms on `U_lo,
-  V_lo, V_hi`). The two groups' messages sum to the original group's.
-- Byte lanes stay on the generic coded path: a linear group over the six bits (`Main eq R1`)
-  measured slower than the bucketed generic group (67 against 49 ms at 1,024, one thread).
-- `AGG_STAGE_TRACE` prints the construction time per group and attributes split groups to
-  their spec group.
+  yields their terminal values (stage 3's `eq(r^(2))` group: the ring identity's terms on
+  `U_lo, V_lo, V_hi`). The two groups' messages sum to the original group's.
+- Byte lanes stay on the generic coded path (the six bits of stage 3's `eq(r^(1))` group).
 
-### 20.3 Instance, witness, events 3 to 5, scheduling
+## 7. Lookup and stage tables
+
+Gamma indices are positions in the stage's `gamma^(s)` vector; "lift" is the number of
+inactive leading rounds (`d_main - d_t`). The ring instance is one gamma on two groups (the
+`w_A` lane group and the `eq(r2)` group); `z, u, v` enter as the affine combinations of
+their columns and `w_1'` as `sum 2^t b_t`.
+
+### 7.1 The lookup (event 7)
+
+Shape (`CommitmentManifest::lookup_shape`): stacks `[Z_lo | U_lo | V_lo | V_hi]` (depth
+`d_main + 2`), `kappa1` (8 slots, `d_1 + 3`), `kappa2` (8 slots, `d_2 + 3`), `kappa3`
+(`d_3`); table `T_16`; challenges `X_1, X_2`; storage shift `2^15` (leaves
+`1 / ((X - 2^15) - stored)`). `prover::prove_piop` runs `lookup::prove_in` on the PIOP
+transcript, sends the seven digit claims `m_k(pi_m)`, then `tau`, the pre-stage claims and
+the stages; `verifier::verify_piop` mirrors it (`VerifyError::Lookup` for the lookup and
+the digit check). Lookup proof elements: 1,015 + 312 = 1,327 at `N = 1,024` with two
+challenges (21,232 B), 1,799 at `2^15` (28,784 B), plus 112 B of digit claims.
+
+### 7.2 Stages under relation H-u
+
+Stage 1 (degree 4, `gamma^(1) in K^26`, point `tau`): `bool_y1[t]` (0..6), `level2[t]`
+(6..12), `level3` (12), `bool_y2[t]` (13..19), `bool_b[t]` (19..25), `range_w1` (25); groups:
+main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`}, `D_1`
+{`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
+`b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
+
+Stage 2 (degree 4, `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
+`K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7)
+(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}). Terminal (8): `b_t(r2)`, `P_Z(r2)`.
+
+Stage 3 (degree 3, `gamma^(3) in K^44`, point `r^(2)`):
+
+| Instance | Gamma | Domain | Equality / weight | Summand |
+| --- | ---: | --- | --- | --- |
+| `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A (Z_lo + 2^16 Z_hi + 2^15) - eq (2 gamma_2 w_1' + u + q v)` |
+| `link[Z_hi]`, `link[U_hi]` | 1, 2 | main | `eq(r2, .)` | `Z (Z + 1)` |
+| `b_t` from `r1`, from `r2` | 3..9, 9..15 | main | `eq(r1)`, `eq(r2)` | `b_t` |
+| `y2_t` from `tau_2`, from `r1_2` | 15..21, 21..27 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
+| `K2_t` from `tau_2` | 27..33 | `D_2` | `eq(tau_2)` | `K2_t` |
+| `K3` from `tau_3` | 33 | `D_3` | `eq(tau_3)` | `K3` |
+| `K1_t` from `r1_1` | 34..40 | `D_1` | `eq(r1_1)` | `K1_t` |
+| stack `j` | 40 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
+
+Groups: main `eq(r2)` {`U_lo, V_lo, V_hi, Z_hi, U_hi`, 6 bits}, main {`w_A`, `Z_lo`,
+`Z_hi`}, main `eq(r1)` {6 bits}, `D_1` `eq(r1_1)` {6 `K1`}, `D_2` `eq(tau_2)` {6 `y2`, 6
+`K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, and one `eq(pi_j,low)` group per
+stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity groups at
+`r^(3)`, manifest order; these are the opening claims together with the multiplicity digits
+at `pi_m`.
+
+### 7.3 Relation H-exact (`docs/h-exact.md` step B)
+
+The relation (`manifest::Relation`) is a field of the manifest and selects, through it,
+everything below; the verifier takes it from its caller (`verifier::verify(..., relation,
+...)`, `VerifyError::Relation` on a header mismatch). Columns: Section 2. Stage 2:
+`def_y1[t]` (0..6), `leaf6[U_hi]` (6); `gamma^(2) in K^7`, degree 4, terminal 7. Stage 3:
+`ring` (0, the `w_A` group reads `bz_lo, bz_hi, a_z` with weights `1, 2^16, 130,915` and
+constant `-98,225`), `link[U_hi]` (1), `bool[bz_hi]` (2), `bool[a_z]` (3) (`Term::Bool` in
+the main `eq(r2)` group, claim 0), then the reductions from 4 (`stage3::Gammas`);
+`gamma^(3) in K^45`, terminal 32. Registry: stage 2 (7, rounds of 4, 7), stage 3 (45,
+rounds of 3, 32); the proof-of-work plan follows (stage-2 batching `g = 3`).
+
+### 7.4 Relation H-FIPS (`docs/h-exact.md` Section 10)
+
+Relation byte 2 (`Relation::HFips`); columns and values: Section 2. Stage 2: `def_y1[t]`
+(0..6), `F3 = e (e - 1)(e - delta)` (6, `Term::Monomials`, main `eq(r^(1))` group);
+`gamma^(2) in K^7`, terminal 8 (`b_t`, `delta`, `e`). Stage 3: `ring` (0), `bool[bz_hi]`,
+`bool[l_hi]`, `bool[a_z]` (1..3), `F1 = s (s - 1)`, `F2`, `F45`, `F7` (4..7), 37 reductions
+(8..44), `delta`, `e` from `r^(2)` (45, 46), the stacks (47..50); `gamma^(3) in K^51`,
+terminal 36. `F7` lives in two groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The
+proof-of-work plan equals H-exact's.
+
+## 8. Weight tables (`weights`)
+
+Point conventions (least significant coordinate first): a main point splits as
+`(coef 8, row/column 2, sig d_sig)`; the suffix of length `d_1` as `(rho_1: 13, beta =
+(i_mid, sigma))`; of `d_2` as `(rho_2: 13, sigma)`; of `d_3` as `(rho_3: 12, sigma)`.
+
+- `w_1` on the main domain for `p1 = r1_1`: `c_1[zeta] = sum_{rho in column zeta of M_1}
+  eq(p1_rho, rho)` for `zeta < min(2^19, 2^d_main)`, `w_1[x] = c_1[x mod 2^19]
+  eq(p1_beta, x >> 19)`. Verifier: `eq(p1_beta, r_beta) sum_zeta eq(r_zeta, zeta) c_1[zeta]`
+  (`k_1 2^19` additions for `c_1`, one `2^19` equality table).
+- `w_2` on `D_1` for `p2 = tau_2`: `c_2` over the used `zeta_2 < 2^17` with `M_2` and
+  `eq(p2_rho, .)`, times `eq(p2_sigma, sigma)`; zero-padded positions have zero weight.
+- `w_{3,t}` on `D_2` for `p3 = tau_3`: `c_3[t + 6 rho_2]` with `M_3` and `eq(p3_rho, .)`,
+  times `eq(p3_sigma, sigma)`.
+- `w_A(j', s, i) = eq(r2_sig, i) K_{A~_{i,s}, r2_coef}[j']`, `A~_{i,s} = sum_rho
+  eq(r2_row, rho) A_i[rho, s]`, one `negacyclic_kernel` per `(i, s)` (`O(256 log 256)`);
+  zero on padded rows. Verifier (7.10): `Lambda = eq_correlation(r2_coef, r3_coef)`, then
+  per live record `eq(r2_sig, i) eq(r3_sig, i) sum_{rho, s} eq(r2_row, rho) eq(r3_col, s)
+  <A_i[rho, s], Lambda>` (`k l 256` multiply-adds per record, streamed over the keys).
+- `ring_weight_table` builds `w_A` with the allocation-free negacyclic transform (one fold
+  product per butterfly output); the row weights are scaled by `eq(r2_sig, i)` once per
+  record and combined with the integer rows of `A` by base-field products.
+
+## 9. Transcript (`transcript`)
+
+Spongefish `Blake2b512` (`akita_transcript::TranscriptSponge`), tag
+`agg-mldsa/v1/piop/blake2b` zero-padded to 64 bytes, session `B("agg-mldsa/v1")`, instance
+`B(cSHAKE256(LE64(len) || record))` under `agg-mldsa/v1/instance`. Prover and verifier run
+the same state machine (every payload is a public message; no Spongefish argument string).
+Elements of `K` are rejection-sampled per 64-bit limb from eight squeezed bytes. The ordered
+registry (`transcript::Registry`, spec Section 10) rejects a missing, extra or out-of-order
+event before it reaches the sponge. Counts below are those of H-u (Section 7.3 and 7.4 for
+the other relations):
+
+| # | Site (`agg-mldsa/v1/...`) | Kind | Atoms | Payload |
+| ---: | --- | --- | ---: | --- |
+| 0 | `instance` | public | 1 | the instance record |
+| 1 | `commit/main16`, `commit/main` | proof | 1 each | Akita native encodings of `G_main16`, `G_main4` |
+| 2 | `commit/flock` | proof | `S` | `S` framed (`LE64` length) Flock commitments |
+| 3 | `bridge/seed` | challenge | 1 | 32 squeezed bytes `sd` |
+| 4 | `commit/level1`, `level2`, `level3`, `mult` | proof | 1 each | the round-2 commitments |
+| 5 | `flock/seeds` | challenge | `S` | `32 S` squeezed bytes `fs_sigma` |
+| 6 | `flock/final-vectors`; `flock/shares` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed share items (deviation K22) |
+| 7 | `lookup/x`; `lookup/layer1`; `lookup/mu/1`; per session `s = 2 .. D`: `lookup/gamma/s`, `lookup/round/s/k` and `lookup/r/s/k`, `lookup/terminals/s`, `lookup/leaves/s`, `lookup/mu/s`; `lookup/multiplicities` | challenge; proof; challenge; (challenge, proof and challenge, proof, proof, challenge); proof | 2; 40; 1; (2 per active tree, 3 and 1, 4 per continuing tree, 2 per ending stack or table, 1); 7 | the lookup, then the digit claims `m_k(pi_m)` |
+| 8 | `tau` | challenge | `d_main` | `tau` |
+| 9 | `prestage/claims` | proof | 13 | pre-stage claims |
+| 10 | `stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 26; 4, 1; 18 | |
+| 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal | proof; challenge; (4, 1); proof | 6; 8; ; 8 | |
+| 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 44; ; 31 | |
+| join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
+| 13 | `pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone, the seed of the Akita opening |
+
+Grinding (`docs/soundness.md` Section 6): every field-challenge event carries a difficulty
+from Aerie's assigned bounds (`Registry::work_sites`: `X` 0, a merge 1, a GKR batching
+vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the stage batching
+vectors 5, 4, 6 (H-exact and H-FIPS: 5, 3, 6), the stage rounds 3, 3, 2). With `g > 0` the
+transcript absorbs `LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose
+low `g` bits must be zero and then the challenge; the prover searches the smallest passing
+nonce and packs it into the work stream (`Transcript::new`, `work_stream`), the verifier reads
+and checks it (`Transcript::replay`, `TranscriptError::Work`), the stream's exact length and
+zero padding checked up front and its exhaustion at `ensure_complete`. The seeds and the PCS
+export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part sites (tie,
+`eq_Y`, chain rounds), then these sites) is hashed into the instance record of event 0
+(`binding::instance_record`).
+
+## 10. Wire format (`wire::AggregateProof`)
+
+`LE16` version 4 (`manifest::WIRE_VERSION`), `u8` relation byte (0 = H-u, 1 = H-exact,
+2 = H-FIPS), `LE64 N`; `32 N` bytes `c~`; the `G_main16` and `G_main4` commitments framed
+(`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: four framed items; event
+6: `512 S` bytes then `S` framed share items (deviation K22); the lookup (layer-1 values,
+then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
+to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
+round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 8 claims;
+`3 d_main` round elements and 31 claims); the join: `S` framed Flock proof items (K22); the
+packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at
+`2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
+the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
+`16 (76 + 11 d_main)` under H-u and H-exact (8 + 31 and 7 + 32 stage-2 and stage-3 claims),
+`16 (81 + 11 d_main)` under H-FIPS; 5,616 B at `N = 2^15` under H-u. `AggregateProof::size()`
+(`ProofSize`) splits the serialized length into header, `c~`, Akita commitments, Keccak-side
+items (event 2), final vectors, Keccak-side shares and proofs (event 6 and the join), lookup,
+PIOP, work nonces and opening, framing included.
+
+## 11. Drivers and hooks
+
+`prover::prove(inputs, bridge, keccak, flock)` derives every witness (strict FIPS 204
+verification, `main_tables`) and calls `prove_with_tables`, which runs events 0 to 13: the
+round-1 commitments and the Keccak commitments (`KeccakSide::commitments`) concurrently
+(`pcs::overlap`, Section 3; absorbed in event order, and each step's time is its own
+closure's, so the two overlap in wall time), the bridge seed, the matrices
+(`BridgeDerivation::matrices(sd)`, a `Cow` so fixed matrices are not copied), round 2, the
+Flock seeds, the final vectors and the share items. Then the fork (deviation K22): the Flock
+proofs (`KeccakSide::prove`) run on their own rayon pool (`flock_pool_threads`,
+`AGG_FLOCK_THREADS`, default half the global pool) while the parity tables `y^(1)`, the
+lookup, `tau`, the pre-stage claims and the three stages run on the global pool, with the
+weight tables built between the stages (`ProverTables::set_tau/set_r1/set_r2`, each dropping
+the previous weights); `AGG_FLOCK_THREADS=0` (also on a rayon worker or with a one-thread
+pool) proves the Flock side first, with the parity tables built beside it, then the PIOP.
+The join absorbs the Flock proofs; the PCS session and the opening follow.
+`prove_with_tables_using` takes the Akita prover setup built beforehand (it depends on the
+record count and the relation only). `ProverOutput::timings` (`ProveTimings`) has the wall
+time of each step. `ProveHooks` (adversarial tests only) selects the stages' unchecked
+provers and may change the honest round-2 tables before they are committed.
+
+`verifier::verify_timed(records, bytes, bridge, keccak, flock, relation, cache)` returns a
+`VerifyReport`: the outcome (`VerifiedAggregate`, or the first failing check as a
+`VerifyError`) and `VerifyTimings`, one entry per step of spec Section 11;
+`verifier::verify` returns the outcome only. Steps:
+
+| Timing | Spec 11 | Work |
+| --- | --- | --- |
+| `parse` | 1 | wire parse (all shapes from `N` and the relation), the header's relation against the caller's, manifest, PCS verifier from the plan's setup seed |
+| `public_data` | 2 | `StreamedPublic::prepare`: `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest |
+| `transcript` | 3 | events 0 to 6: commitments parsed (coefficient counts from the plan) and absorbed, `sd`, `fs_sigma`, final vectors and share items |
+| `matrices` | 3 | `BridgeDerivation::matrices(sd)`; `SeededMatrices` derives them as in spec 9.1 (`agg_bridge::seed`) |
+| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, share item, the event-6 record digest, proof item, matrices; deviation P11); the proof items are absorbed at the join |
+| `lookup` | 4 | the lookup (event 7) and the multiplicity-digit claims |
+| `prestage` | 4 | `tau`, pre-stage claims, `Y(tau_3)` |
+| `stage1`, `stage2` | 5, 6 | rounds and terminal checks; `w_2, w_3` at `r^(1)`, `w_1` at `r^(2)` (bridge weights, Section 8), the leaf predicates |
+| `stage3_rounds` | 6 | `stage3::verify_streamed`: gamma, rounds, terminal claims, with the ring claim `T(r^(2))` deferred (deviation P10) |
+| `public_t`, `public_a` | 6 | `StreamedPublic::pass`: `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded and inverse-NTT'd, or cached; `Lambda` products) |
+| `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added, the links and the stack reductions |
+| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B |
+| `opening` | 7 | the batched Akita opening of the 38 claims (H-u) at the six group points |
+
+A rejected run stops at its failing step (later timings stay zero); a trailing segment that
+holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
+Before step `parse` the verifier refuses an unsound configuration
+(`verifier::check_configuration`, `VerifyError::Configuration`): a `KeccakVerifier` whose
+`profile()` differs from the requested Flock profile, mode A (`Fast`, `Slim`, `Slim8`) without
+`BridgeDerivation::seed_derived()` (only `SeededMatrices`), and profile 0 outside builds
+with the test hooks. The test stand-ins `FixedMatrices` (matrices that ignore `sd`) and
+`NoKeccak`/`NoKeccakVerifier` (profile 0) exist only in unit tests and with the
+`test-hooks` feature (deviation P4).
+
+## 12. Mode B (`mode_b`)
+
+Mode B is the Keccak-free aggregate (spec Section 14): the aggregate is
+the proof bytes, which carry `c~_i` and, as the event-2 item of segment `sigma`, the
+`w1Encode(w_1'_i)` strings (768 bytes each, record order) of the segment's live records;
+the event-6 share items and the join's proof items are empty; event 0 binds Flock profile
+id 3 (`PublicBits`). Layout and the extra bit check: deviation P9.
+
+- Prover: `prove_mode_b(inputs, bridge)` builds the round-1 tables, publishes the committed
+  bits (`PublicBits::from_tables`, i.e. `w_1' = sum_t 2^t b_t` per position, `w1Encode` per
+  record), and runs `prove_with_tables` with `PublicBits` as the Keccak side.
+- Verifier: `verify_mode_b(records, aggregate, bridge, relation, cache)` is `verify_timed`
+  with `PublicBitsVerifier`. Step `keccak` checks per segment: 768 bytes per live record and
+  an empty proof item; every 6-bit value below 44; `c~_i = SHAKE256(mu_i || w1Encode)` (7
+  Keccak-f per record); and the projection predicate `Y_sigma = M_3 M_2 M_1 b'` over GF(2)
+  (`segment_projection`: the six lanes share the matrices, so the 6-bit value is XORed as a
+  lane mask, 14 byte XORs per nonzero position at level 1, parallel over level-1 blocks).
+  Step `bits` checks `b_t(r^(3))` against `public_bit_evaluations` (per record the 1,024
+  equality weights of `r^(3)_pos` bucketed by the 6-bit value, then 32 buckets per lane,
+  times `eq(r^(3)_sig, i)`).
+- `public_bits(proof, i)` returns record `i`'s 768 bytes.
+
+What an accepted mode-B aggregate establishes: for every live record, (3.3) natively for
+the published `w_1'` and (3.1), (3.2) by the PIOP for committed bits equal to the published
+ones, under the caller's relation, with the hash relation checked in the clear.
+
+## 13. Tests
+
+`taskset -c 0,1,3-15 cargo test -p agg-piop --release` (101 unit tests; 40 integration tests
+in three binaries: `tests/all/` with one module per topic, and `tests/fork_join.rs`,
+`tests/single_thread.rs`, which change process-wide state; one diagnostic test is ignored, and
+the 1,024-signature round trip is ignored in debug builds):
+
+- unit: manifest shapes, digit layouts, lookup shape and binding bytes under the three
+  relations, the manifest against the work plan, committed elements per signature; kernel
+  and `Lambda` vs their definitions; `sparse_t`, inverse NTT, `prepare` vs `from_instance`,
+  `T(r)` vs the MLE; the square map, the leaves and the digit compositions of the three
+  relations; the ring residual; the narrow and wide parity tables; weight tables vs dense
+  definitions and vs their verifier evaluations at Boolean and random points, `w_A` vs
+  `(A z)` for random `z` and vs its extension at `r3`; transcript registry order, shape
+  faults, determinism, the difficulties, work nonces searched, recorded and checked, the
+  Flock proofs refused at event 6, the record digest, encoding round trips; the plan
+  digests, totals and nonce stream of `pow` against `docs/soundness.md` and
+  `docs/h-exact.md`; claim vectors; the three stage specs of every relation (instance
+  counts, gamma order, degrees) and the H-FIPS checks against their polynomials; the
+  stage-3 deferral (compressed rounds are affine in the claim with slope `prod_k r_k`); wire
+  round trips with the claim counts of every relation, the packed final vectors and every
+  malformed-buffer rejection; record binding; the lookup (tree roots, multiplicity digits,
+  honest stacks at several sizes, the full layout with two challenges, two tables and a
+  cross-table value, an out-of-range digit, a wrong multiplicity, tampered messages and
+  claims, the dedicated paths against the generic kernel); `StreamedPublic` (`T_i`, the
+  split products and key weights against references, deduplication, keys sharing `rho`, and
+  the pass against `PublicData::t_evaluation` and `weights::ring_weight_at`, without a
+  cache, filling a cache, and from it with no expansion); the seeded and fixed matrices; the
+  verifier's configuration policy; mode B: `segment_projection` against the GF(2) side of
+  the bridge, `public_bit_evaluations` against the extensions of the bit lanes,
+  `PublicBitsVerifier` on shape, range, hash and projection faults.
+- kernel (`src/kernel/tests.rs`, `coded.rs`, `field.rs`): every evaluation strategy
+  (automatic; no coding; coded per item; quartet masses forced; pair masses only; quartet
+  tables forced, with and without Taylor tables; pair fold at level 2; without the claim
+  recovery, also with quartet tables) against an independent reference (full `K` tables,
+  the round polynomial from its definition at `d + 1` points over full equality tables,
+  interpolated), bit for bit in every message and terminal value and with the terminal
+  equation, on an equality group with every `Term` kind, a weight group (field, `i32` and
+  materialized lanes, weighted sums, a field-field product), a group with wide cells, an
+  `i32` lane and cross-column products, the two-round prefix, and domains of 0 to 4
+  variables with and without lifted rounds; the classes of digit columns under the square,
+  leaf and identity maps; pattern masses against the serial sums in both accumulation
+  layouts; quartet and Taylor tables against the folded lanes and the shifted polynomial;
+  the compiled pieces against the terms; compressed-message round trips and rejections; the
+  leaf polynomials on their alphabets; the dedicated layer groups against `Group`; the fast
+  and integer products against `*`; split and plain unreduced sums against nested sums;
+  Taylor shifts.
+- `tests/all/stages.rs` (the lookup and the stages without commitments): at 256 signatures
+  (200 own keys, 56 on 3 shared keys) the claims equal the extensions of the committed and
+  virtual tables, and a changed round message, terminal claim or pre-stage claim is rejected
+  at its stage. Tampering (50 records, unchecked prover): main cells looked up outside
+  `T_16` (`Z_lo` moved by `2^16` against `Z_hi`, `V_hi = 2^16`), carries outside `T_16` and
+  a wrong multiplicity at the lookup, a padding slot of the level-1 stack at stage 3;
+  tampered lookup messages, layer terminals, table leaves and digit claims at the lookup,
+  a swapped stack leaf pair; swapped column claims at stage 3; values valid only for
+  another range (`Z_hi = 2` and `U_hi = 3, -4` at stage 2, an unshifted carry at stage 1,
+  `U_lo + 63,079` with `U_hi - 1` and `V_lo + 2^16` with `V_hi - 1` at the lookup); a
+  16-bit column or `Z_hi` changed inside its range and a flipped bit at stage 3; a
+  non-Boolean bit and `w_1' = 44` at stage 1; changed carries of every level, a level-2
+  parity and a `Y` bit at stage 1; a padded batch of 10 records round-trips.
+- `tests/all/h_exact.rs`, `tests/all/h_fips.rs` (PIOP level): honest round trips with every
+  claim equal to its table and the pointwise identities; each relation's tamperings at the
+  stated place; for H-exact the value boundaries `z = +-130,994`, `u = +-190,466` with
+  synthetic statements (the public `T` moved so that the ring identity holds over the
+  integers), also under H-u; for H-FIPS the weight-80 corner records and the encoding round
+  trip of the main tables.
+- `tests/all/prove_verify.rs`: a full prover run at 256 signatures; the opening claims taken
+  from the stage-3 terminal values equal the evaluations of the committed tables at the
+  group points; the blob round-trips and verifies from `(pk, M)` with and without cached
+  keys; mode A over fixed matrices is refused; a shorter or reordered record list, a changed
+  `c~`, other bridge matrices, a changed lookup round or layer-1 value, compensated digit
+  claims, a mode-A profile under the no-Keccak stand-in, a changed round message, stage-3
+  claim, pre-stage claim or opening byte, a truncated commitment, a non-empty Keccak payload
+  in mode B and a truncated blob are rejected; a padded batch of 10 records round-trips.
+- `tests/all/mode_b.rs`: `prove_mode_b` / `verify_mode_b` round trips at 64, 256 (200 own keys,
+  56 on 3 shared keys) and 1,024 signatures, H-exact at 1, 64 and 256 and H-FIPS round
+  trips with the cross-relation rejections; the proof size by part, the prover and verifier
+  step timings (uncached, cached) printed; the published bits satisfy
+  `c~ = H(mu || w1Encode)`; a cached run expands no key. Rejections at 256: a flipped public
+  bit, a public value of 63, a short bit item, a changed `c~`, a changed final-vector bit
+  and a non-empty proof item at the Keccak side of segment 0; a changed lookup round at the
+  lookup; a changed pre-stage claim, round messages of stages 2 and 3 and a stage-3 claim at
+  the stage or the next work nonce; a changed nonce at one site of every class, bad nonce
+  padding and length; a plan with a tie site; an opening byte; a reordered or shorter record
+  list, another Flock profile, other matrices and a truncated aggregate. Every tampering
+  through the full prover (`prove_with_tables`, unchecked stages, honest public bits, 50
+  records): a 16-bit `Z_lo` or `V_lo` cell changed inside `T_16` at stage 3; a flipped
+  committed bit and `w_1' = 44` in the committed bits at the Keccak side (the final vector no
+  longer matches the projection of the public bits); a non-Boolean bit at stage 1; a stored
+  `U_lo = 2^15` cannot be committed (Akita: "committed source exceeds the scheduled
+  coefficient bound"); base-4 and base-6 digits outside their alphabets at stage 2; a
+  level-1 carry and a level-2 parity at stage 1; a final-vector bit at the Keccak side; a
+  wrong multiplicity at the lookup. Bit check: with two equal `M_1` columns a prover flips
+  `b_0` at two positions and moves `u` by `-/+ 2 gamma_2`; every PIOP check, the projection
+  and the opening pass, `verify_mode_b` rejects with `VerifyError::Bits`, and the same
+  aggregate is accepted by a verifier without the bit check (deviation P9).
+- `tests/all/bridge.rs` (the Fp side of the bridge, `docs/bridge.md` Section 9 item 7): a full
+  prover run at 256 signatures with `SeededMatrices` verifies; the round-2 tables built
+  through `agg_bridge` equal the `agg-witness` reference, satisfy `agg_bridge::parity::check`,
+  and the published `Y` equals both GF(2) composites; the verifier's bridge weights at
+  `r^(1)` (`w_2`, `w_{3,t}`, `stage1::BridgeWeightsAt`) and at `r^(2)` (`w_1`) equal the
+  extensions of the prover's weight tables at the transcript's points. Tampering through the
+  full prover (`FixedMatrices`, unchecked stages): a flipped final-vector bit, a flipped
+  level-2 parity, a level-1 and a level-3 carry moved inside `T_16`, and a flipped committed
+  bit under the stale round-2 tables are each rejected at the stage-1 terminal.
+- `tests/fork_join.rs`: the Flock proofs are absorbed at the join (no PIOP challenge depends
+  on them, the PCS session binds them, the side's challengers receive the event-6 record
+  digest), and both prover schedules give the same proof.
+- `tests/single_thread.rs`: a prover and verifier run with a one-thread rayon pool, from a
+  plain thread and from a pool worker.
+- `tests/all/commit_open.rs` (the six groups commit and open in one batch, also for a padded
+  batch at independent points), `tests/all/source_tables.rs` (shapes, alphabets,
+  multiplicities, heavy rows, malformed tables refused before Akita, the H-exact `z` form),
+  `tests/all/virtual_checker.rs` (the integer relation on the Boolean domain, single-cell
+  mutations).
+
+`agg-bench` (`taskset -c 0,1,3-15 cargo test -p agg-bench --release`): medians, batch
+inputs, `VmHWM`/`VmRSS` parsing, the peak following a 64 MiB allocation and its reset.
+
+## 14. Instance, witness and bridge on the prover's path
+
+Parts of other crates that the prover's speed depends on:
 
 - `agg_witness::ntt::NttPrime`: the 256-point NTTs (about 66 per record in the key
-  expansion, `T`, `A z` by CRT and the strict FIPS verification) used `%` by a run-time
-  modulus (a hardware division) in every butterfly. The butterflies now run on 32-bit lanes
-  with Shoup products by the constant zetas (the quotient `floor(zeta 2^32 / p)` is
-  precomputed; both primes are below `2^31`, so the remainder lies in `[0, 2p)`), the sums
-  with branch-free conditional subtractions, and the pointwise products with a Barrett
-  reduction (`floor(2^64 / p)`). `ntt_timing` (one core): 6.3 us for the forward transform
-  with `%`, 3.7 us with Barrett, 1.8 us with Shoup.
+  expansion, `T`, `A z` by CRT and the strict FIPS verification) run on 32-bit lanes with
+  Shoup products by the constant zetas (the quotient `floor(zeta 2^32 / p)` is precomputed;
+  both primes are below `2^31`, so the remainder lies in `[0, 2p)`), the sums with
+  branch-free conditional subtractions, and the pointwise products with a Barrett reduction
+  (`floor(2^64 / p)`).
 - `agg_witness::derive::derive_with_t`: the witness reuses the instance's `T = c t1 2^d` when
   the signature's `c~` is the instance's (else it recomputes); `public_t` adds `x^p t1` in
-  two straight (vectorized) loops instead of a branch per coefficient.
+  two straight (vectorized) loops.
 - `agg_bridge::seed::ColumnHasher`: the bridge matrices (about a million columns, prover and
   verifier) on the bare Keccak-f[1600] from the precomputed cSHAKE256 prefix state, one
   permutation per column; equal to the cSHAKE256 path (test
   `keccak_columns_match_the_cshake_columns`).
-- `prover::prove_with_tables`: the parity tables `y^(1)` of the stages (no challenge). Under
-  the fork-join (deviation K22) they are built on the PIOP side after event 6, while the
-  Flock proofs run on their own pool; only the serial schedule (`AGG_FLOCK_THREADS=0`)
-  still builds them on the overlap thread beside the Flock proofs.
-- The Flock span is proven beside the lookup and the stages through the fork-join
-  transcript (deviation K22, lever P1): the proofs are absorbed at a join after stage 3, and
-  `prove_with_tables` proves them on their own pool beside the PIOP.
-
-### 20.4 Measurements (local, shared machine, direction only)
-
-`agg bench --count N --warmup 1 --reps 3`, CLMUL build (`RUSTFLAGS="-C
-target-feature=+pclmulqdq"`), 3 threads on CPUs 0, 1, 3-15, the base (the code before these
-changes) and the new code back to back. Two runs at 8,192 signatures: run 1 (load average 5.7
--> 4.6) and run 2 (with the Shoup NTT and `WeightIntGroup`; load average 4.5 -> 5.4):
-
-| Step | base (run 1) | run 1 | base (run 2) | run 2 |
-| --- | ---: | ---: | ---: | ---: |
-| instance (ExpandA, mu, c, T) | 1,023.1 ms | 643.0 | 1,035.2 | 494.4 |
-| witness and `G_main` tables | 1,204.8 | 729.4 | 1,153.0 | 626.9 |
-| events 3-5: matrices, round 2 | 518.6 | 343.1 | 557.5 | 380.5 |
-| event 7: lookup | 3,822.5 | 2,270.0 | 3,827.2 | 2,551.7 |
-| stage 1 / 2 / 3 | 507.5 / 535.4 / 1,835.3 | 351.7 / 506.9 / 1,467.1 | 509.5 / 499.8 / 1,773.0 | 384.4 / 513.7 / 1,502.0 |
-| Flock parts (unchanged code) | 11,348.3 | 11,086.4 | 11,803.6 | 11,666.8 |
-| prove, median of 3 | 21,853.0 | 18,447.5 | 22,240.9 | 19,256.8 |
-| everything but the Flock parts | 10,504.7 | 7,361.0 | 10,437.3 | 7,590.0 |
-| verify uncached / cached | 1,162.5 / 684.5 | 913.5 / 538.8 | 1,156.2 / 703.6 | 773.7 / 532.4 |
-| prover peak RSS | 7,210 MiB | 7,053 MiB | 7,304 MiB | 6,998 MiB |
-
-The lookup and stage-3 lines of the two runs differ by the load (the code of those steps is
-the same apart from `WeightIntGroup`). At 1,024 signatures, run 2's code against the base, two
-alternated pairs (load average 3.6 to 4.4): prove 4,058 / 4,220 -> 3,537 / 3,709 ms,
-everything but the Flock parts 1,946 / 2,021 -> 1,422 / 1,486 ms, instance 126 / 131 -> 58 /
-65 ms, witness 142 / 143 -> 79 / 77 ms, lookup 498 / 520 -> 322 / 331 ms, stage 3 232 / 228
--> 194 / 189 ms, verify uncached 491 / 513 -> 314 / 315 ms, cached 435 / 454 -> 280 / 283 ms.
-
-Against the targets at `2^15` on the VM (lookup <= 1.5 s from 3.86 s, stage 3 <=
-1.0 s from 1.80 s, instance plus witness <= 1.0 s from 2.16 s), scaling the cloud figures by
-the local ratios at 8,192 gives about 2.3 to 2.6 s, 1.5 s and 1.1 s (estimates, not
-measured): the directions hold; the instance and witness are close to their target, the
-lookup and stage 3 are not. What is left, with estimates: the stage-3 weight `w_A` (about
-0.3 s at 8,192 locally: four 256-point negacyclic kernels per record) and the passenger
-lanes of the split groups; the lookup items listed at the end of `docs/lookup.md` Section
-4.6; and the overlap of the Flock records and commit with the witness (lever P3, 0.3 to 0.5 s
-at `2^15`, estimate). Proving the Flock span beside the lookup and the stages (lever P1) is
-the fork-join transcript of deviation K22 (Section 20.3).

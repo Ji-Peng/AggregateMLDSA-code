@@ -1,6 +1,4 @@
-//! One-off search for edge-case seeds (run with `--ignored`); results are pinned in common/mod.rs.
-
-mod common;
+//! One-off search for edge-case seeds (run with `--ignored`); results are pinned in `common.rs`.
 
 use agg_witness::derive::derive;
 use agg_witness::expand::ExpandedKey;

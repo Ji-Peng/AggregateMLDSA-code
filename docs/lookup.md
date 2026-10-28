@@ -434,7 +434,7 @@ The construction, driven by the PIOP transcript:
   roots, digits, honest layouts at one and two challenges, two tables and a cross-table
   cheat, wrong multiplicities, tampered messages and claims, a swapped stack leaf pair
   caught by the claim, and `dedicated_paths_match_the_generic_kernel` (Section 4.6). The
-  integrated tests are in `tests/stages.rs` (Section 6).
+  integrated tests are in `tests/all/stages.rs` (Section 6).
 - Ignored timing tests: `timing_at_1024_and_8192_signatures` (Section 4; sizes from
   `AGG_LOOKUP_SIGS`, threads from `RAYON_NUM_THREADS` (default 7), challenge counts from
   `AGG_LOOKUP_CHALLENGES` (default `1,2`), `AGG_LOOKUP_AB=1` alternates the generic and the
@@ -470,7 +470,7 @@ The construction, driven by the PIOP transcript:
    path). A 16-bit coded lane (two `2^16`-entry tables per fold) is the next prover-side
    step if the stage-3 groups on `Ints` lanes dominate (Section 4.5).
 
-Integrated tests (`cargo test -p agg-piop --release`): `tests/stages.rs` (honest PIOP at
+Integrated tests (`cargo test -p agg-piop --release`): `tests/all/stages.rs` (honest PIOP at
 256 and 10 signatures with every claim against the table extensions; the lookup rejects
 16-bit cells out of `T_16` with `z` unchanged (`Z_lo +- 2^16`, `Z_hi -+ 1`), `V_hi = 2^16`,
 carries `2^16` and negative at every level, a wrong multiplicity (moved and added), a
@@ -481,14 +481,14 @@ at stage 3; a value valid only for another range (`Z_hi = 2`, valid for `U_hi`; 
 holding a table entry) rejected at the leaf, the bridge identity or the stack reduction;
 a low part valid only for the wider range `[0, 2^17)` (`U_lo + 2^16` with `U_hi - 1`,
 `V_lo + 2^16` with `V_hi - 1`: `u`, `v` unchanged) rejected by the lookup; every old witness
-tampering at its stage), `tests/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
+tampering at its stage), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
 tampering including a wrong multiplicity; a stored 16-bit value outside the width-16
 interval is refused by Akita's commit, so the prover fails and no aggregate exists: the
 verifier's rejection of a looked-up value outside `T_16` is tested only at the PIOP level,
-in `tests/stages.rs`, without commitments and opening; an end-to-end test would need a
+in `tests/all/stages.rs`, without commitments and opening; an end-to-end test would need a
 commit path that skips Akita's admission bound), `tests/single_thread.rs` (a whole prover
 and verifier run with a one-thread rayon pool, called from a plain thread and from a pool
 worker, under a timeout: the regression test of the round-1 deadlock, deviation P12),
-`tests/prove_verify.rs`, `tests/bridge.rs`, `tests/source_tables.rs`,
-`tests/virtual_checker.rs` (the L16 tables against the integer relation), `tests/commit_open.rs`;
+`tests/all/prove_verify.rs`, `tests/all/bridge.rs`, `tests/all/source_tables.rs`,
+`tests/all/virtual_checker.rs` (the L16 tables against the integer relation), `tests/all/commit_open.rs`;
 `agg-cli` `tests/mode_a.rs` (mode A round trips and tampering).

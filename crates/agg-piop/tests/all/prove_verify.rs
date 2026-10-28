@@ -1,7 +1,7 @@
 //! End to end: a full prover run at 256 signatures produces a proof blob that the
 //! verifier accepts from the public records alone, and corrupted blobs are rejected.
 
-mod common;
+use crate::common;
 
 use agg_piop::manifest::Relation;
 use agg_piop::transcript::TranscriptError;

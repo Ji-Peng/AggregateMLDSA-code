@@ -2,7 +2,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::gen::{self, crate_verify, SplitMix64};
 use agg_witness::native::{sig_decode, verify, verify_with_context};

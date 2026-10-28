@@ -165,7 +165,7 @@ at `d_sig` 3 to 8, 63,197, 63,273, 64,573, 64,692, 64,842, 64,958 and 65,282 B a
 the setup sizes differ slightly (563,200 field elements at `d_sig` 9 to 11, 794,112,
 912,384, 1,892,352 and 2,838,528 at 12 to 15). Measured at `N = 1,024`: H-exact's Akita
 opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/cli.md` Section 4). The
-Akita grinding plans of the H-exact rows are pinned in `tests/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
+Akita grinding plans of the H-exact rows are pinned in `tests/all/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
 plan digests (`e9ec8b52...`). This is benign: Akita's
 `GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs, not
 the layout; the two rows draw identical site lists; the layout is bound separately through the
@@ -183,8 +183,8 @@ hint slack `u_h` is its thirteenth polynomial, deviation L10) and 13 grouped row
 `mldsa-44-l16f-batch-<N*>-mult-final`. The planner's opening estimates equal H-u's except at
 `2^15` (65,398 B against 65,282 B, estimate); setups grow (3,390,464 field elements at `2^15`).
 Every H-FIPS grouped row keeps at least `2^128.0881` of accepted fold support (`2^128.5633` at
-`d_sig` 13 and 15; `tests/akita_fold_support.rs`), and the grinding plans are pinned in
-`tests/akita_grinding.rs` (`PINNED_H_FIPS`, all distinct from the H-u and H-exact rows').
+`d_sig` 13 and 15; `tests/all/akita_fold_support.rs`), and the grinding plans are pinned in
+`tests/all/akita_grinding.rs` (`PINNED_H_FIPS`, all distinct from the H-u and H-exact rows').
 
 ## 5. Commit driver and test
 
@@ -206,7 +206,7 @@ with the Keccak side's commitments), `G_1`, `G_2`, `G_3`, `G_m` concurrently (ro
 opens with the claims it already holds (the stage-3 terminal values and the multiplicity
 digit claims).
 
-Test `tests/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
+Test `tests/all/commit_open.rs` (release, 7 cores): dummy tables in each group's honest
 alphabet (16-bit balanced values, the base-4 and base-8 digits (relaxed H; H-u's base 6 lies inside), Booleans, multiplicity
 digits; padded signatures carry the digits of zero), random claims in `K` at logical points
 (both main groups at one point), both rounds, one batched opening, verification by the
@@ -216,7 +216,7 @@ changed session and swapped commitments; and the admission bounds of both famili
 
 ## 6. Regenerating the catalogs
 
-The harness is `crates/agg-pcs-config/tests/schedule_catalog_regen.rs`, adapted from
+The harness is `crates/agg-pcs-config/tests/all/schedule_catalog_regen.rs`, adapted from
 Aerie's `tests/schedule_catalog_regen.rs`: same `akita_planner` entry points
 (`find_schedule`, `EmitSpec`, `render_schedule_artifact_outputs_with_validation`), same
 estimate cross-check against `akita_schedules`, key lists from `catalogs.rs`; it plans the
@@ -229,14 +229,14 @@ feature off, off CPU 2:
 # plan only missing rows of one or more batch sizes (keeps the others, of both relations;
 # saves after each row); AGG_CATALOG_RELATION = h-u, h-exact or all (default)
 AGG_CATALOG_D_SIG=15 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
-    -p agg-pcs-config --release --no-default-features --test schedule_catalog_regen \
-    -- --ignored --exact update_catalog_rows --nocapture
+    -p agg-pcs-config --release --no-default-features --test all \
+    -- --ignored --exact schedule_catalog_regen::update_catalog_rows --nocapture
 # full regeneration of every row of catalog_batches() from scratch (Aerie's `regenerate`, two emit specs)
 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release --no-default-features \
-    --test schedule_catalog_regen -- --ignored --exact regenerate --nocapture
+    --test all -- --ignored --exact schedule_catalog_regen::regenerate --nocapture
 # drift check: re-plan the rows of the listed sizes and compare bytes with the artifacts
 AGG_CATALOG_D_SIG=8,10 taskset -c 0,1,3-15 cargo test -p agg-pcs-config --release \
-    --no-default-features --test schedule_catalog_regen -- --ignored --exact verify_rows
+    --no-default-features --test all -- --ignored --exact schedule_catalog_regen::verify_rows
 ```
 
 `AKITA_SCHEDULE_GEN_JOBS` bounds the parallel scalar planners (default 3; the search

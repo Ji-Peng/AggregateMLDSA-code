@@ -2,7 +2,7 @@
 //! 4, three width-16 bridge groups and the width-4 multiplicity group) commit through
 //! agg-pcs-config and open in one batched Akita proof.
 
-mod common;
+use crate::common;
 
 use agg_piop::manifest::{Column, DigitValue, GroupRole, CARRY16_DIGITS};
 use agg_piop::pcs::{group_points, verifier_for, TableCommitter};
@@ -10,7 +10,7 @@ use agg_piop::source_tables::Cells;
 use agg_piop::virtual_polys::{compose_table, w1_table, CarryValues, MainValues};
 use agg_piop::{BaseField, OpeningField};
 use agg_witness::gen::SplitMix64;
-use common::{mle_i64, point, Batch};
+use crate::common::{mle_i64, point, Batch};
 use jolt_field::{ExtField, Ring};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {

@@ -9,19 +9,19 @@ profiles `Fast`, `Slim` and `Slim8`), K16 (one span over all segments), K17 and 
 
 `agg_cli::mode_a::Aggregator::aggregate(&[(pk, M, signature)])` returns an `Aggregate`:
 the wire bytes of `agg_piop::wire::AggregateProof` (header, the `c~_i` list, then the proof
-blob: the four Akita commitments, the mode-A segment items, `Y_sigma`, the PIOP rounds and
+blob: the six Akita commitments, the mode-A segment items, `Y_sigma`, the PIOP rounds and
 claims, the Akita opening) and a `ProveReport` (step times, per Flock part times and sizes,
 the byte size of every part of the aggregate). Steps:
 
 1. Lengths checked; `c~_i` is the first 32 signature bytes; the public instance
    (`ExpandA`, `tr`, `mu`, `SampleInBall`, `T`) is built.
 2. Witnesses derived with strict FIPS 204 verification (an invalid signature is refused with
-   its index) and the round-1 tables `G_main` built (`i8` columns).
+   its index) and the round-1 tables `G_main16` (`i32` cells) and `G_main4` (`i8` cells) built.
 3. The PIOP prover `agg_piop::prover::prove_with_tables` runs the one transcript of spec
    Section 10 with the seed-derived matrices (`SeededMatrices`) and the Flock side
    `FlockProver` (Flock profile `AggregatorConfig::profile`: `Slim` by default, `Fast` or
-   `Slim8`; bound at event 0, K15, K18): event 1 `G_main`, event 2 the parts' Flock
-   commitments, event 3 `sd`, event 4 `G_1, G_2, G_3`, event 5 `fs_sigma`, event 6 `Y_sigma`
+   `Slim8`; bound at event 0, K15, K18): event 1 `G_main16, G_main4`, event 2 the parts' Flock
+   commitments, event 3 `sd`, event 4 `G_1, G_2, G_3, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
    default half the global pool, `0` for the serial order, at most the logical CPUs or the
@@ -30,7 +30,7 @@ the byte size of every part of the aggregate). Steps:
    (deviation P2).
 
 `agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
-`VerifyCostReport`: accept or the first failing check, the 14 step times of
+`VerifyCostReport`: accept or the first failing check, the 15 step times of
 `agg_piop::verifier::VerifyTimings`, per Flock part the setup and verification time, and the
 keys expanded in the run. The verifier computes `tr_i, mu_i, c_i, T_i` and the `ExpandA`
 data itself; `cache: Option<&mut KeyCache>` skips the expansion of cached keys and adds
@@ -137,16 +137,17 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 - corrupted aggregates (20 records, parts of 8, 8, 4): `c~_i`, `Y_sigma`, a share, swapped
   shares, swapped part proofs, a part-proof byte, a part-commitment byte, the part size
   (too large, too small), a dropped part, a truncated item, a pre-stage claim, stage-1, -2
-  and -3 rounds, a stage-3 claim, the opening, the `G_main` commitment, reordered round-2
+  and -3 rounds, a stage-3 claim, the opening, the `G_main4` commitment, reordered round-2
   commitments, swapped records, another message, another key, a missing record, truncated
   and trailing bytes, the wire version, the item's profile byte (another mode-A profile; the
   mode-B id 3), a Flock verifier under another profile, the mode-B checks under profile 3;
-- tampered witnesses through the aggregator (12 records): a `z` and a `v` digit (stage 3),
-  a committed bit flipped (Flock part) and the same with stale round-2 tables (stage 1), a
-  bit of value 2 (stage 1), `w_1' = 44` in the committed bits (Flock part) and in both copies
-  (Flock part; stage 1 with the Flock verdict ignored), a base-16 digit 9 (the Akita
-  commitment refuses it), base-4 and base-6 digits (stage 2), a level-1 carry and a
-  level-2 parity (stage 1), a final-vector bit (Flock part), and on the Flock side a bit
+- tampered witnesses through the aggregator (12 records): a `Z_lo` and a `V_lo` cell changed
+  inside `T_16` (stage 3), a committed bit flipped (Flock part) and the same with stale
+  round-2 tables (stage 1), a bit of value 2 (stage 1), `w_1' = 44` in the committed bits
+  (Flock part) and in both copies (Flock part; stage 1 with the Flock verdict ignored), a
+  stored `U_lo = 2^15` outside `T_16` (the Akita commitment refuses it), base-4 and base-6
+  digits outside their alphabets (stage 2), a level-1 carry and a level-2 parity (stage 1),
+  a final-vector bit (Flock part), and on the Flock side a bit
   flipped in both copies, in the parity chain's copy only, and in the sponge input with the stale
   chi witness (Flock part);
 - invalid signatures refused by the aggregator: `c~`, `z` and hint bits, another message,

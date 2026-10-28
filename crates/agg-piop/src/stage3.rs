@@ -849,7 +849,7 @@ mod tests {
 
     /// The H-FIPS checks of stage 3 evaluate to their polynomials (`docs/h-exact.md`) at
     /// random field values, so each zero-check is tested on its own: the tamper tests of
-    /// `tests/h_fips.rs` for `F1` (`s = 2`) and `F2` (`delta = -sigma`) also move the ring
+    /// `tests/all/h_fips.rs` for `F1` (`s = 2`) and `F2` (`delta = -sigma`) also move the ring
     /// identity, and an in-range `L` cannot isolate `F2`. Also pins the ring's H-FIPS slice to
     /// `-u = -(gamma_2 s + L + 1 - gamma_2) + 2 gamma_2 delta + e` with
     /// `L = l_lo + 2^15 + 29,696 l_hi` (`l_lo` stored shifted by `2^15`).

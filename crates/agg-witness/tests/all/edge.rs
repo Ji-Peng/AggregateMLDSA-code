@@ -2,7 +2,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-mod common;
+use crate::common;
 
 use agg_witness::derive::{derive, reencode_h, usehint_residual_max};
 use agg_witness::digits::{ValueForm, Z_BIT_SLACK};

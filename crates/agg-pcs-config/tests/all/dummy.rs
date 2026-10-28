@@ -1,6 +1,5 @@
-//! Dummy group tables and claims shared by `tests/commit_open.rs` and
+//! Dummy group tables and claims shared by `tests/all/commit_open.rs` and
 //! `benches/commit_open.rs` (included through `#[path]`).
-#![allow(dead_code)]
 
 use agg_pcs_config::catalogs::{Group, Relation};
 use agg_pcs_config::commit::{evaluate_signed_table, GroupClaim};

@@ -9,9 +9,7 @@ use agg_pcs_config::preset::{BaseField, OpeningField};
 use agg_pcs_config::work_plan::WorkPlan;
 use jolt_field::{ExtField, Ring};
 
-#[path = "support/dummy.rs"]
-mod dummy;
-use dummy::{claims, dummy_tables, Rng};
+use crate::dummy::{claims, dummy_tables, Rng};
 
 fn commit_and_open(records: usize, relation: Relation) {
     let plan = WorkPlan::for_records(records, relation).expect("work plan");

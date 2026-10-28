@@ -5,7 +5,7 @@
 //! prover's weight tables at the transcript's terminal points, and bridge tampering that the
 //! stage-1 identities reject.
 
-mod common;
+use crate::common;
 
 use agg_bridge::seed::derive_matrices;
 use agg_bridge::{gf2_walker, parity, weights as bridge_weights, Shape};

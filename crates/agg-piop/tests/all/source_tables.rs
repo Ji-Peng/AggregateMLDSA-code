@@ -2,7 +2,7 @@
 //! the honest bridge builder aborts on heavy rows and counts the
 //! multiplicities of `T_16`, and the committer rejects malformed tables before Akita.
 
-mod common;
+use crate::common;
 
 use agg_piop::lookup::compose_multiplicity;
 use agg_piop::manifest::{Column, CommitmentManifest, GroupRole, LOOKUP_SHIFT};

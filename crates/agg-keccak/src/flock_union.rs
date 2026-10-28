@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn union_proof_bytes_round_trip_and_reject_bad_lengths() {
         // Malformed framing (the round trip of a real proof, without its level-0 cap, is in
-        // the tied-part round trips of `tests/tied.rs`).
+        // the tied-part round trips of `tests/all/tied.rs`).
         let bytes = [7u8, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7];
         assert!(matches!(
             UnionProof::from_bytes(&bytes, 0),
