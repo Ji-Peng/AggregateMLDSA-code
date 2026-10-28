@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use crate::{BaseField as F, OpeningField as E};
 
 /// The unreduced product accumulator of `K` (exact sums of more than `2^62` products).
-pub(super) type Acc = <E as Unreduced>::Product;
+pub(crate) type Acc = <E as Unreduced>::Product;
 
 /// `p = 2^64 - 59`.
 const P: u64 = 0_u64.wrapping_sub(59);
@@ -72,7 +72,7 @@ pub(crate) fn fmi(x: E, k: i64) -> E {
 /// as a `u64` and each coordinate product (below `2^128`) is split into its two 64-bit
 /// halves, so an accumulator absorbs `2^64` terms (two products, no reduction).
 #[inline(always)]
-pub(super) fn mad_int(acc: &mut Acc, w: E, k: i64) {
+pub(crate) fn mad_int(acc: &mut Acc, w: E, k: i64) {
     let u = u128::from((k as u64).wrapping_add(((k >> 63) as u64) & P));
     let a = u128::from(w.c0().to_canonical_u64()) * u;
     let b = u128::from(w.c1().to_canonical_u64()) * u;

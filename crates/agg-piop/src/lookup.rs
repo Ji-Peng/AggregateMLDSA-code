@@ -43,11 +43,11 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
-use jolt_field::{Field, One, Ring, Zero};
+use jolt_field::{Unreduced, Field, One, Ring, Zero};
 use rayon::prelude::*;
 
 use crate::kernel::{
-    evaluate_compressed, expected_terminal, fm, fmi, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
+    evaluate_compressed, expected_terminal, fm, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
     Term,
 };
 use crate::OpeningField as E;
@@ -703,7 +703,11 @@ fn parent(child: &Layer) -> Layer {
     let half = child.len() / 2;
     let (p0, p1) = child.p.split_at(half);
     let (q0, q1) = child.q.split_at(half);
-    build_nodes(half, |y| (fm(p0[y], q1[y]) + fm(p1[y], q0[y]), fm(q0[y], q1[y])))
+    build_nodes(half, |y| {
+        // Two K products: each high accumulator slot is below 6 * 2^64.
+        let p = E::reduce_product(p0[y].mul_unreduced(q1[y]) + p1[y].mul_unreduced(q0[y]));
+        (p, fm(q0[y], q1[y]))
+    })
 }
 
 /// The layer above the leaves `(1, X - g)` of a stacked lane: `p = (X - g_0) + (X - g_1)`,
@@ -751,6 +755,7 @@ struct SymLanes {
 impl SymLanes {
     /// `None` when the stack is shallower than 3 or its values spread over more than
     /// [`SYM_SPREAD`] (only a dishonest witness; it then takes the stored-layer path).
+    #[allow(unsafe_code)]
     fn of(stacked: &[i32]) -> Option<Self> {
         let depth = stacked.len().trailing_zeros() as usize;
         if depth < 3 {
@@ -765,22 +770,26 @@ impl SymLanes {
         }
         let center = i32::try_from((i64::from(min) + i64::from(max)) / 2).expect("between two i32");
         let quarter = stacked.len() / 4;
-        let lane = |c: usize, product: bool| -> Vec<i32> {
-            let cell = |y: usize| {
-                let a = stacked[y + c * quarter] - center;
-                let b = stacked[y + c * quarter + 2 * quarter] - center;
-                if product { a * b } else { a + b }
-            };
-            if quarter >= PARALLEL_NODES {
-                (0..quarter).into_par_iter().map(cell).collect()
-            } else {
-                (0..quarter).map(cell).collect()
-            }
-        };
-        Some(Self {
-            center,
-            lanes: [lane(0, false), lane(1, false), lane(0, true), lane(1, true)],
-        })
+        let mut lanes: [_; 4] = std::array::from_fn(|_| crate::kernel::buf::uninit::<i32>(quarter));
+        let [s0, s1, m0, m1] = &mut lanes;
+        const BLOCK: usize = 1024;
+        s0.par_chunks_mut(BLOCK).zip(s1.par_chunks_mut(BLOCK))
+            .zip(m0.par_chunks_mut(BLOCK)).zip(m1.par_chunks_mut(BLOCK))
+            .enumerate().for_each(|(block, (((s0, s1), m0), m1))| {
+                for i in 0..s0.len() {
+                    let y = block * BLOCK + i;
+                    let a = stacked[y] - center;
+                    let b = stacked[y + quarter] - center;
+                    let c = stacked[y + 2 * quarter] - center;
+                    let d = stacked[y + 3 * quarter] - center;
+                    s0[i].write(a + c);
+                    s1[i].write(b + d);
+                    m0[i].write(a * c);
+                    m1[i].write(b * d);
+                }
+            });
+        // SAFETY: the four equal-length output lanes were completely initialized above.
+        Some(Self { center, lanes: lanes.map(|lane| unsafe { lane.assume_init().into_vec() }) })
     }
 
     /// The coefficients `[c, c_s, c_m, c_k, c_mm]` of the group of four lanes (`S_0 = 0,
@@ -866,8 +875,20 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
         let e3 = sa * mb + sb * ma;
         let e4 = ma * mb;
         for (slot, &[x, x2, x3, x4]) in out.iter_mut().zip(&powers) {
-            let q = x4 - fmi(x3, e1) + fmi(x2, e2) - fmi(x, e3) + E::from_i64(e4);
-            let p = (x3 + x3 + x3 + x3) - fmi(x2, 3 * e1) + fmi(x, 2 * e2) - E::from_i64(e3);
+            // |e1| <= 2^17, |e2| < 2^32, |e3| <= 2^48, |e4| <= 2^60,
+            // all below p. At most four integer products per accumulator: each
+            // split slot is below 4 * 2^64, far below the u128 accumulator limit.
+            let mut q = crate::kernel::Acc::zero();
+            crate::kernel::mad_int(&mut q, x4, 1);
+            crate::kernel::mad_int(&mut q, x3, -e1);
+            crate::kernel::mad_int(&mut q, x2, e2);
+            crate::kernel::mad_int(&mut q, x, -e3);
+            let q = E::reduce_product(q) + E::from_i64(e4);
+            let mut p = crate::kernel::Acc::zero();
+            crate::kernel::mad_int(&mut p, x3, 4);
+            crate::kernel::mad_int(&mut p, x2, -3 * e1);
+            crate::kernel::mad_int(&mut p, x, 2 * e2);
+            let p = E::reduce_product(p) - E::from_i64(e3);
             *slot = (p, q);
         }
     };
