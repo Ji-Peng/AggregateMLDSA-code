@@ -301,8 +301,6 @@ pub struct PublicRecordData {
     pub mu: [u8; TR_BYTES],
     /// `c~` from the aggregate.
     pub c_tilde: [u8; C_TILDE_BYTES],
-    /// `T = 2^d (c * t1)`.
-    pub t: Box<PublicT>,
 }
 
 /// The public instance as the verifier precomputes it.
@@ -311,6 +309,8 @@ pub struct PublicData {
     geom: Geometry,
     keys: Vec<Arc<VerifierKey>>,
     records: Vec<PublicRecordData>,
+    /// `T_i = 2^d (c_i * t1_i)` of every live record, in one buffer (record order).
+    t: Vec<PublicT>,
 }
 
 impl PublicData {
@@ -355,23 +355,24 @@ impl PublicData {
                     .or_insert_with(|| Arc::clone(key));
             }
         }
-        let records = inputs
+        let (records, t): (Vec<PublicRecordData>, Vec<PublicT>) = inputs
             .par_iter()
             .map(|&(pk, msg, c_tilde)| {
                 let key = index[pk];
                 let c = sample_in_ball(&c_tilde);
-                PublicRecordData {
+                let record = PublicRecordData {
                     key,
                     mu: mu(&keys[key].tr, msg, &[]),
                     c_tilde,
-                    t: Box::new(sparse_t(&c, &keys[key].t1)),
-                }
+                };
+                (record, sparse_t(&c, &keys[key].t1))
             })
-            .collect();
+            .unzip();
         Ok(Self {
             geom,
             keys,
             records,
+            t,
         })
     }
 
@@ -405,19 +406,20 @@ impl PublicData {
                 key,
                 mu: record.mu,
                 c_tilde: record.c_tilde,
-                t: Self::t_of(record),
             })
             .collect();
+        let t = instance.records.par_iter().map(Self::t_of).collect();
         Self {
             geom: instance.geom,
             keys,
             records,
+            t,
         }
     }
 
     /// A record's `T = c t_1 2^d` as `i32` (|T| < 2^29).
-    fn t_of(record: &agg_witness::instance::PublicRecord) -> Box<[[i32; N]; K]> {
-        let mut t = Box::new([[0_i32; N]; K]);
+    fn t_of(record: &agg_witness::instance::PublicRecord) -> PublicT {
+        let mut t = [[0_i32; N]; K];
         for (row, source) in t.iter_mut().zip(&record.t) {
             for (out, &value) in row.iter_mut().zip(source) {
                 *out = i32::try_from(value).expect("|T| < 2^29");
@@ -453,15 +455,15 @@ impl PublicData {
     /// `T_i` of live record `i`.
     #[must_use]
     pub fn t(&self, i: usize) -> &PublicT {
-        &self.records[i].t
+        &self.t[i]
     }
 
     /// The public table `T(j, rho, i)` on the main domain, zero on padded rows.
     #[must_use]
     pub fn t_table(&self) -> Vec<i64> {
         let mut out = vec![0_i64; self.geom.main_len()];
-        for (i, record) in self.records.iter().enumerate() {
-            for (rho, row) in record.t.iter().enumerate() {
+        for (i, t) in self.t.iter().enumerate() {
+            for (rho, row) in t.iter().enumerate() {
                 for (j, &value) in row.iter().enumerate() {
                     out[main_index(j, rho, i)] = i64::from(value);
                 }
@@ -482,12 +484,11 @@ impl PublicData {
         let (position, signature) = point.split_at(D_POS as usize);
         let eq_position = eq_table(position);
         let eq_signature = eq_table(signature);
-        self.records
+        self.t
             .par_iter()
             .enumerate()
-            .map(|(i, record)| {
-                let inner = record
-                    .t
+            .map(|(i, t)| {
+                let inner = t
                     .iter()
                     .flatten()
                     .zip(&eq_position)
@@ -818,6 +819,7 @@ mod tests {
             assert_eq!(data.geometry(), instance.geom);
             for i in 0..inputs.len() {
                 assert_eq!(data.a(i), from_instance.a(i));
+                assert_eq!(data.t(i), from_instance.t(i));
                 assert_eq!(data.records()[i].mu, instance.records[i].mu);
             }
         }

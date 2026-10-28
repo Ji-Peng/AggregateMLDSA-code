@@ -43,6 +43,24 @@ pub fn crt_centered(x1: u64, x2: u64) -> i64 {
 
 /// (A z) over the integers by CRT; requires |z|_inf <= 2^20.
 pub fn az_crt(key: &ExpandedKey, z: &VecL) -> VecK {
+    let fips = NttPrime::fips();
+    let z1: Vec<[u64; N]> = z.iter().map(|zi| fips.ntt_signed(zi)).collect();
+    let mut az_hat = [[0u64; N]; K];
+    for (r, acc) in az_hat.iter_mut().enumerate() {
+        for s in 0..L {
+            let a1 = fips.pointwise(&key.a_hat[r][s], &z1[s]);
+            for j in 0..N {
+                acc[j] = fips.add_mod(acc[j], a1[j]);
+            }
+        }
+    }
+    az_crt_with(key, z, &az_hat)
+}
+
+/// [`az_crt`] with the residue modulo q already in the NTT domain: `az_hat = A_hat o
+/// NTT(z)` in [0, q) (as [`crate::native::verify_internal_trace`] computes it), so only the
+/// product modulo P2 is computed here. Requires |z|_inf <= 2^20.
+pub fn az_crt_with(key: &ExpandedKey, z: &VecL, az_hat: &[[u64; N]; K]) -> VecK {
     assert!(
         z.iter()
             .flat_map(|p| p.iter())
@@ -51,21 +69,17 @@ pub fn az_crt(key: &ExpandedKey, z: &VecL) -> VecK {
     );
     let fips = NttPrime::fips();
     let p2 = prime2();
-    let z1: Vec<[u64; N]> = z.iter().map(|zi| fips.ntt_signed(zi)).collect();
     let z2: Vec<[u64; N]> = z.iter().map(|zi| p2.ntt_signed(zi)).collect();
     let mut out = [[0i64; N]; K];
     for r in 0..K {
-        let mut acc1 = [0u64; N];
         let mut acc2 = [0u64; N];
         for s in 0..L {
-            let a1 = fips.pointwise(&key.a_hat[r][s], &z1[s]);
             let a2 = p2.pointwise(&key.a_hat_p2[r][s], &z2[s]);
             for j in 0..N {
-                acc1[j] = fips.add_mod(acc1[j], a1[j]);
                 acc2[j] = p2.add_mod(acc2[j], a2[j]);
             }
         }
-        let x1 = fips.intt(&acc1);
+        let x1 = fips.intt(&az_hat[r]);
         let x2 = p2.intt(&acc2);
         for j in 0..N {
             out[r][j] = crt_centered(x1[j], x2[j]);
@@ -114,11 +128,20 @@ pub fn az_schoolbook(a: &crate::expand::MatrixCoeff, z: &VecL) -> [[i128; N]; K]
 
 /// (A z) over the integers: CRT when |z| <= 2^20, schoolbook otherwise.
 pub fn az_integer(key: &ExpandedKey, z: &VecL) -> [[i128; N]; K] {
+    az_integer_with(key, z, None)
+}
+
+/// [`az_integer`], reusing `A_hat o NTT(z)` modulo q when the caller has it (see
+/// [`az_crt_with`]).
+pub fn az_integer_with(key: &ExpandedKey, z: &VecL, az_hat: Option<&[[u64; N]; K]>) -> [[i128; N]; K] {
     if z.iter()
         .flat_map(|p| p.iter())
         .all(|x| x.abs() <= Z_CRT_MAX)
     {
-        let v = az_crt(key, z);
+        let v = match az_hat {
+            Some(az_hat) => az_crt_with(key, z, az_hat),
+            None => az_crt(key, z),
+        };
         let mut out = [[0i128; N]; K];
         for r in 0..K {
             for j in 0..N {

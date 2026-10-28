@@ -412,6 +412,9 @@ pub struct VerifyTrace {
     pub c: Challenge,
     /// w'_Approx = NTT^{-1}(A_hat o NTT(z) - NTT(c) o NTT(t1 2^d)) in [0, q).
     pub w_approx: VecK,
+    /// A_hat o NTT(z) in [0, q) (the NTT-domain residue of A z modulo q, which the
+    /// integer product of [`crate::crt::az_crt_with`] reuses).
+    pub az_hat: [[u64; N]; K],
     /// w1' = UseHint(h, w'_Approx).
     pub w1: SmallK,
     /// w1Encode(w1').
@@ -449,6 +452,7 @@ pub fn verify_internal_trace(
     }
     let c_hat = fips.ntt_signed(&c_poly);
     let mut w_approx = [[0i64; N]; K];
+    let mut az_hat = [[0u64; N]; K];
     for r in 0..K {
         let mut acc = [0u64; N];
         for s in 0..L {
@@ -457,6 +461,7 @@ pub fn verify_internal_trace(
                 acc[j] = fips.add_mod(acc[j], prod[j]);
             }
         }
+        az_hat[r] = acc;
         let ct = fips.pointwise(&c_hat, &key.t1_2d_hat[r]);
         for j in 0..N {
             acc[j] = fips.sub_mod(acc[j], ct[j]);
@@ -481,6 +486,7 @@ pub fn verify_internal_trace(
         mu: *mu,
         c,
         w_approx,
+        az_hat,
         w1,
         w1_bytes,
         c_tilde_prime,

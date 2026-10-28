@@ -6,7 +6,7 @@
 //! v = (A z - T - 2 gamma2 w1' - u) / q over Z (|v| <= B_v). The six w1Encode bits are
 //! b_t = bit t of w1'.
 
-use crate::crt::az_integer;
+use crate::crt::az_integer_with;
 use crate::expand::{public_t, ExpandedKey};
 use crate::native::*;
 use crate::params::*;
@@ -132,7 +132,8 @@ fn derive_core(
         Some((c_tilde, t)) if *c_tilde == trace.sig.c_tilde => *t,
         _ => public_t(&trace.c, &key.t1),
     };
-    let az_wide = az_integer(key, &z);
+    // The residue of A z modulo q is the trace's, in the NTT domain.
+    let az_wide = az_integer_with(key, &z, None);
     let mut az = [[0i64; N]; K];
     let mut w = [[0i64; N]; K];
     let mut u = [[0i64; N]; K];
