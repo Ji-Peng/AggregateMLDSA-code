@@ -673,6 +673,7 @@ impl Layer {
     }
 }
 
+#[allow(unsafe_code)]
 fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Layer {
     if half < PARALLEL_NODES {
         let (p, q) = (0..half).map(node).unzip();
@@ -681,17 +682,20 @@ fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Lay
     // A parallel first touch, then blocks of both lanes filled in parallel (a parallel
     // `unzip` was measured slower).
     const BLOCK: usize = 1 << 10;
-    let mut p: Vec<E> = rayon::iter::repeat_n(E::zero(), half).collect();
-    let mut q: Vec<E> = rayon::iter::repeat_n(E::zero(), half).collect();
+    let mut p = crate::kernel::buf::uninit::<E>(half);
+    let mut q = crate::kernel::buf::uninit::<E>(half);
     p.par_chunks_mut(BLOCK)
         .zip(q.par_chunks_mut(BLOCK))
         .enumerate()
         .for_each(|(b, (p, q))| {
             for (i, (p, q)) in p.iter_mut().zip(q.iter_mut()).enumerate() {
-                (*p, *q) = node(b * BLOCK + i);
+                let (pv, qv) = node(b * BLOCK + i);
+                p.write(pv);
+                q.write(qv);
             }
         });
-    Layer { p, q }
+    // SAFETY: the zipped blocks have equal lengths and every slot was written.
+    unsafe { Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() } }
 }
 
 /// The parent layer: `p = p_0 q_1 + p_1 q_0`, `q = q_0 q_1` (3 `K`-multiplications per node).
@@ -841,6 +845,7 @@ impl SymLanes {
 /// [`SYM_SPREAD`]), `q = X'^4 - e_1 X'^3 + e_2 X'^2 - e_3 X' + e_4` and `p = dq/dX' =
 /// 4 X'^3 - 3 e_1 X'^2 + 2 e_2 X' - e_3` (`X' = X - shift - c`), the same values as two
 /// levels of [`stack_bottom`] and [`parent`].
+#[allow(unsafe_code)]
 fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     let quarter = stacked.len() / 4;
     let powers: Vec<[E; 4]> = xs
@@ -867,19 +872,14 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
         }
     };
     let challenges = xs.len();
-    let zeros = || -> Vec<E> {
-        if quarter >= PARALLEL_NODES {
-            rayon::iter::repeat_n(E::zero(), quarter).collect()
-        } else {
-            vec![E::zero(); quarter]
-        }
-    };
-    let mut layers: Vec<Layer> = (0..challenges).map(|_| Layer { p: zeros(), q: zeros() }).collect();
+    let mut layers: Vec<_> = (0..challenges)
+        .map(|_| (crate::kernel::buf::uninit::<E>(quarter), crate::kernel::buf::uninit::<E>(quarter)))
+        .collect();
     // Blocks of nodes: every output lane split at the same boundaries.
     const BLOCK: usize = 1 << 10;
-    let mut blocks: Vec<Vec<&mut [E]>> = Vec::new();
+    let mut blocks: Vec<Vec<&mut [std::mem::MaybeUninit<E>]>> = Vec::new();
     for layer in &mut layers {
-        for lane in [&mut layer.p, &mut layer.q] {
+        for lane in [&mut layer.0, &mut layer.1] {
             for (b, chunk) in lane.chunks_mut(BLOCK).enumerate() {
                 if blocks.len() <= b {
                     blocks.push(Vec::with_capacity(2 * challenges));
@@ -888,14 +888,14 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
             }
         }
     }
-    let fill = |(b, mut lanes): (usize, Vec<&mut [E]>)| {
+    let fill = |(b, mut lanes): (usize, Vec<&mut [std::mem::MaybeUninit<E>]>)| {
         let mut values = vec![(E::zero(), E::zero()); challenges];
         let count = lanes[0].len();
         for i in 0..count {
             node(b * BLOCK + i, &mut values);
             for (pair, &(p, q)) in lanes.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
-                pair[0][i] = p;
-                pair[1][i] = q;
+                pair[0][i].write(p);
+                pair[1][i].write(q);
             }
         }
     };
@@ -904,7 +904,10 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     } else {
         blocks.into_iter().enumerate().for_each(fill);
     }
-    layers
+    // SAFETY: each node writes both coordinates of every challenge, including tails.
+    layers.into_iter().map(|(p, q)| unsafe {
+        Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() }
+    }).collect()
 }
 
 /// The stored layers `0 .. depth - 1` of one tree (the leaves are read from the columns).

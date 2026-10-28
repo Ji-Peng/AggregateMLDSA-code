@@ -1671,6 +1671,7 @@ impl<'a> Group<'a> {
     }
 
     /// Bind 2: every lane into the dense row-major table at an eighth of the domain.
+    #[allow(unsafe_code)]
     fn bind_third(&mut self, challenge: E) {
         self.taylor.clear();
         let context = E::precompute(challenge);
@@ -1681,33 +1682,18 @@ impl<'a> Group<'a> {
         // Row blocks filled lane by lane, so each lane's lookup table stays in cache while
         // the block (2^9 rows) is written; a row-major collect was measured slower.
         const BLOCK_ROWS: usize = 1 << 9;
-        let fill = |block: usize, out: &mut [E]| {
+        let fill = |block: usize, out: &mut [std::mem::MaybeUninit<E>]| {
             let first = block * BLOCK_ROWS;
             let count = out.len() / lanes;
             for (l, (reader, &shift)) in readers.iter().zip(shifts).enumerate() {
                 for r in 0..count {
                     let (even, odd) = reader.item(first + r);
-                    out[r * lanes + l] = fold(&context, even, odd) - shift;
+                    out[r * lanes + l].write(fold(&context, even, odd) - shift);
                 }
             }
         };
-        let dense: Vec<E> = if rows >= MIN_PARALLEL_ITEMS / 8 {
-            // A parallel first touch (a serial `vec!` of 16-byte zeros would write the
-            // whole table on one thread), then the blocks in parallel.
-            let mut dense: Vec<E> = rayon::iter::repeat_n(E::zero(), rows * lanes).collect();
-            dense
-                .par_chunks_mut(BLOCK_ROWS * lanes)
-                .enumerate()
-                .for_each(|(block, out)| fill(block, out));
-            dense
-        } else {
-            let mut dense = vec![E::zero(); rows * lanes];
-            dense
-                .chunks_mut(BLOCK_ROWS * lanes)
-                .enumerate()
-                .for_each(|(block, out)| fill(block, out));
-            dense
-        };
+        // SAFETY: fill writes every row/lane slot, including the last partial block.
+        let dense = unsafe { buf::fill_par(buf::uninit(rows * lanes), BLOCK_ROWS * lanes, fill) };
         self.dense = dense;
         self.states = vec![State::Dense; lanes];
         // The pair codes are not read again (one byte per pair of cells and column).

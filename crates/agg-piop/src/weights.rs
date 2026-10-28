@@ -105,6 +105,7 @@ pub fn level3_weights_at(geom: &Geometry, m3: &SparseMatrix, p3: &[E], q: &[E]) 
 /// The ring weight `w_A(j', s, i)` on the main domain in order `(j', s, i)` for the point
 /// `r2 = r^(2)`; zero on padded rows.
 #[must_use]
+#[allow(unsafe_code)]
 pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     let geom = public.geometry();
     assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
@@ -113,12 +114,12 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     assert_eq!(row.len(), K, "two row coordinates");
     let eq_sig = eq_table(&r2[D_POS as usize..]);
     let positions = 1_usize << D_POS;
-    let mut table: Vec<E> = rayon::iter::repeat_n(E::zero(), geom.main_len()).collect();
-    table
-        .par_chunks_mut(positions)
-        .take(geom.n)
-        .enumerate()
-        .for_each(|(i, chunk)| {
+    // SAFETY: each record block is filled, including every padded record.
+    unsafe { crate::kernel::buf::fill_par(crate::kernel::buf::uninit(geom.main_len()), positions, |i, chunk| {
+            if i >= geom.n {
+                for slot in chunk { slot.write(E::zero()); }
+                return;
+            }
             // The kernel is linear in its polynomial: scale the row weights by eq(sig, i)
             // once, combine the integer rows of A with base-field products, and transform
             // each column into the table without allocating.
@@ -126,16 +127,17 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
             let a = public.a(i);
             let mut combined = [E::zero(); N];
             let mut scratch = [E::zero(); N];
+            let mut output = [E::zero(); N];
             for (s, out) in chunk.chunks_exact_mut(N).take(L).enumerate() {
                 for (j, slot) in combined.iter_mut().enumerate() {
                     *slot = (0..K).fold(E::zero(), |sum, rho| {
                         sum + weights[rho].mul_base(BaseField::from_i64(i64::from(a[rho][s][j])))
                     });
                 }
-                negacyclic_kernel_into(&combined, coef, out, &mut scratch);
+                negacyclic_kernel_into(&combined, coef, &mut output, &mut scratch);
+                for (slot, &value) in out.iter_mut().zip(&output) { slot.write(value); }
             }
-        });
-    table
+        }) }
 }
 
 /// `w_A(r3)` at the stage-3 point for the ring weight of `r2`: `k l 256`

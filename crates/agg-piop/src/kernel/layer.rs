@@ -214,6 +214,7 @@ impl<S: Level0> Engine<S> {
     /// `evaluate`) `[q(0), q(1), q_2]` of the round on the new level, with the remaining
     /// equality weights (`q(1)` only when `full`).
     #[allow(clippy::too_many_lines)]
+    #[allow(unsafe_code)]
     fn pass(&mut self, evaluate: bool, full: bool) -> [E; 3] {
         let width = self.source.width();
         let challenge = self.unfolded.take();
@@ -243,21 +244,23 @@ impl<S: Level0> Engine<S> {
         let keep = challenge.is_some();
         let this = &*self;
         // Output rows 2k, 2k + 1 (row 0 alone at the final fold) into `rows`.
-        let fill = |k: usize, rows: &mut [E]| {
+        let fill = |k: usize, rows: &mut [std::mem::MaybeUninit<E>], scratch: &mut [E]| {
             let (r, context) = (challenge.expect("a fold"), context.as_ref().expect("a fold"));
             for (t, out) in rows.chunks_exact_mut(width).enumerate() {
                 let row = 2 * k + t;
                 if from_source {
-                    this.source.folded_row(r, context, row, out);
+                    this.source.folded_row(r, context, row, scratch);
+                    for (slot, &value) in out.iter_mut().zip(scratch.iter()) { slot.write(value); }
                 } else {
                     let (even, odd) = (2 * row * width, (2 * row + 1) * width);
                     for (j, slot) in out.iter_mut().enumerate() {
-                        *slot = fold(context, previous[even + j], previous[odd + j]);
+                        slot.write(fold(context, previous[even + j], previous[odd + j]));
                     }
                 }
             }
         };
-        let run = |task: usize, out: &mut [E]| -> [Acc; 3] {
+        let run = |task: usize, out: &mut [std::mem::MaybeUninit<E>]| -> [Acc; 3] {
+            let mut scratch = vec![E::zero(); width];
             let start = task * ITEM_CHUNK;
             let end = ((task + 1) * ITEM_CHUNK).min(items);
             let mut outer = [Acc::zero(); 3];
@@ -270,7 +273,9 @@ impl<S: Level0> Engine<S> {
                         let offset = (k - start) * 2 * width;
                         let len = (2 * width).min(out.len() - offset);
                         let rows = &mut out[offset..offset + len];
-                        fill(k, rows);
+                        fill(k, rows, &mut scratch);
+                        // SAFETY: fill initialized every slot in these rows before evaluation.
+                        let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
                         if evaluate {
                             let (a, b) = rows.split_at(width);
                             this.table_item(a, b, full, &mut outer);
@@ -296,7 +301,9 @@ impl<S: Level0> Engine<S> {
                     let offset = (k - start) * 2 * width;
                     let len = (2 * width).min(out.len() - offset);
                     let rows = &mut out[offset..offset + len];
-                    fill(k, rows);
+                    fill(k, rows, &mut scratch);
+                        // SAFETY: fill initialized every slot in these rows before evaluation.
+                        let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
                     if !evaluate {
                         continue;
                     }
@@ -321,14 +328,7 @@ impl<S: Level0> Engine<S> {
         };
         let tasks = items.div_ceil(ITEM_CHUNK);
         let parallel = items >= MIN_PARALLEL_ITEMS && tasks > 1;
-        // A parallel first touch (a serial `vec!` would write the table on one thread).
-        let mut table: Vec<E> = if !keep {
-            Vec::new()
-        } else if parallel {
-            rayon::iter::repeat_n(E::zero(), rows_out * width).collect()
-        } else {
-            vec![E::zero(); rows_out * width]
-        };
+        let mut table = super::buf::uninit::<E>(if keep { rows_out * width } else { 0 });
         let add = |mut left: [Acc; 3], right: [Acc; 3]| {
             for (l, r) in left.iter_mut().zip(right) {
                 *l += r;
@@ -354,7 +354,8 @@ impl<S: Level0> Engine<S> {
             self.table = previous;
         } else {
             drop(previous);
-            self.table = table;
+            // SAFETY: each kept output row is initialized exactly once by run/fill.
+            self.table = unsafe { table.assume_init().into_vec() };
         }
         total.map(E::reduce_product)
     }

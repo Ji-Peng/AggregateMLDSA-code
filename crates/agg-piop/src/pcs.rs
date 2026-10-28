@@ -83,6 +83,7 @@ fn i8_field_values() -> &'static [BaseField; 256] {
 /// Materialize one Akita polynomial per logical table (`i8` or `i32` cells), in group
 /// order, each zero-extended to `2^physical_vars` evaluations (index bits least significant
 /// first, so the pad variables are trailing).
+#[allow(unsafe_code)]
 pub fn group_polynomials(
     columns: &[Cells<'_>],
     physical_vars: usize,
@@ -98,25 +99,20 @@ pub fn group_polynomials(
                     actual: cells.len(),
                 });
             }
-            let mut evaluations = vec![BaseField::zero(); physical_len];
-            match cells {
-                Cells::Narrow(cells) => evaluations[..cells.len()]
-                    .par_chunks_mut(FIELD_CONVERSION_CHUNK)
-                    .zip(cells.par_chunks(FIELD_CONVERSION_CHUNK))
-                    .for_each(|(output, input)| {
-                        for (value, &cell) in output.iter_mut().zip(input) {
-                            *value = values[usize::from(cell as u8)];
-                        }
-                    }),
-                Cells::Wide(cells) => evaluations[..cells.len()]
-                    .par_chunks_mut(FIELD_CONVERSION_CHUNK)
-                    .zip(cells.par_chunks(FIELD_CONVERSION_CHUNK))
-                    .for_each(|(output, input)| {
-                        for (value, &cell) in output.iter_mut().zip(input) {
-                            *value = BaseField::from_i64(i64::from(cell));
-                        }
-                    }),
-            }
+            // SAFETY: every physical slot is initialized, including zero padding.
+            let evaluations = unsafe {
+                crate::kernel::buf::fill_par(crate::kernel::buf::uninit(physical_len), FIELD_CONVERSION_CHUNK, |block, out| {
+                    let start = block * FIELD_CONVERSION_CHUNK;
+                    for (i, slot) in out.iter_mut().enumerate() {
+                        let index = start + i;
+                        let value = match cells {
+                            Cells::Narrow(c) => c.get(index).map_or(BaseField::zero(), |&v| values[v as u8 as usize]),
+                            Cells::Wide(c) => c.get(index).map_or(BaseField::zero(), |&v| BaseField::from_i64(i64::from(v))),
+                        };
+                        slot.write(value);
+                    }
+                })
+            };
             DensePoly::from_field_evals(physical_vars, evaluations)
         })
         .collect()
