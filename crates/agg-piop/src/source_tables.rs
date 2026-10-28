@@ -266,15 +266,6 @@ impl RecordValues {
     }
 }
 
-/// One record's encoded cells: `4 * 1024` wide cells (`G_main16`) and `8 * 1024` (H-u),
-/// `9 * 1024` (H-exact) or `12 * 1024` (H-FIPS) narrow cells (`G_main4`), each column at
-/// `c * 1024`, and the H-FIPS hint slack (`omega` otherwise unused).
-struct RecordBlock {
-    wide: Vec<i32>,
-    narrow: Vec<i8>,
-    hint_slack: i64,
-}
-
 /// The H-FIPS witness of one coefficient from `(u, w_1')` (`docs/h-exact.md`):
 /// `w' = 2 gamma_2 w_1' + u mod q`, `h* = [HighBits(w') != w_1']`, the canonical
 /// `honest_coeff(w', h*)`; `None` when `w_1'` is not reachable from `w'` by any hint bit or
@@ -290,7 +281,7 @@ pub fn fips_coefficient(u: i64, w1: i64) -> Option<agg_witness::hfips::Coeff> {
     (c.u() == u).then_some(c)
 }
 
-/// Where a committed column of a main group lives in a [`RecordBlock`].
+/// The final column holding a digit of a main group.
 #[derive(Clone, Copy, Debug)]
 enum Slot {
     Wide(usize),
@@ -344,9 +335,12 @@ impl Encoder {
         }
     }
 
-    fn encode(&self, values: &RecordValues) -> Result<RecordBlock, SourceTableError> {
-        let mut wide = vec![0_i32; 4 * POSITIONS];
-        let mut narrow = vec![0_i8; self.narrow * POSITIONS];
+    fn encode(
+        &self,
+        values: &RecordValues,
+        wide: &mut [&mut [std::mem::MaybeUninit<i32>]],
+        narrow: &mut [&mut [std::mem::MaybeUninit<i8>]],
+    ) -> Result<i64, SourceTableError> {
         let mut weight = 0_i64;
         for row in 0..K {
             for j in 0..N {
@@ -359,7 +353,7 @@ impl Encoder {
                             .ok_or(SourceTableError::Encode("w1' not reachable from w' by UseHint"))?;
                         let cells = [(1 + c.sigma) / 2, c.delta, c.e];
                         for (&slot, cell) in slots.iter().zip(cells) {
-                            narrow[slot * POSITIONS + pos] = cell as i8;
+                            narrow[slot][pos].write(cell as i8);
                         }
                         weight += c.weight();
                         c.l()
@@ -375,10 +369,10 @@ impl Encoder {
                     for (&slot, digit) in slots.iter().zip(digits) {
                         match slot {
                             Slot::Wide(c) => {
-                                wide[c * POSITIONS + pos] = i32::try_from(digit).expect("16-bit digit");
+                                wide[c][pos].write(i32::try_from(digit).expect("16-bit digit"));
                             }
                             Slot::Narrow(c) => {
-                                narrow[c * POSITIONS + pos] = i8::try_from(digit).expect("small digit");
+                                narrow[c][pos].write(i8::try_from(digit).expect("small digit"));
                             }
                         }
                     }
@@ -388,7 +382,7 @@ impl Encoder {
                     return Err(SourceTableError::Encode("w1' above six bits"));
                 }
                 for (t, &c) in self.bits.iter().enumerate() {
-                    narrow[c * POSITIONS + pos] = ((w1 >> t) & 1) as i8;
+                    narrow[c][pos].write(((w1 >> t) & 1) as i8);
                 }
             }
         }
@@ -396,11 +390,7 @@ impl Encoder {
         if hint_slack < 0 {
             return Err(SourceTableError::Encode("hint weight above omega"));
         }
-        Ok(RecordBlock {
-            wide,
-            narrow,
-            hint_slack,
-        })
+        Ok(hint_slack)
     }
 }
 
@@ -418,64 +408,53 @@ impl MainTables {
     /// Encodes the record values (live records in order; padded rows get the zero
     /// witness) and checks the tables against the manifest.
     pub fn from_values(manifest: &CommitmentManifest, values: &[RecordValues]) -> Result<Self, SourceTableError> {
-        let encoder = Encoder::new(manifest);
-        let blocks = values
-            .par_iter()
-            .map(|record| encoder.encode(record))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::from_blocks(manifest, &encoder, &blocks)
+        Self::encode_records(manifest, values.len(), |i| Ok(values[i].clone()))
     }
 
-    fn from_blocks(
+    /// Allocate final columns and give each worker disjoint views of one record.
+    #[allow(unsafe_code)]
+    fn encode_records(
         manifest: &CommitmentManifest,
-        encoder: &Encoder,
-        blocks: &[RecordBlock],
+        count: usize,
+        record: impl Fn(usize) -> Result<RecordValues, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
-        let geom = Geometry::new(blocks.len()).map_err(SourceTableError::Geometry)?;
+        let encoder = Encoder::new(manifest);
+        let geom = Geometry::new(count).map_err(SourceTableError::Geometry)?;
         if geom.n != manifest.records() || geom.n_star != manifest.padded_records() {
-            return Err(SourceTableError::Records {
-                expected: manifest.records(),
-                actual: geom.n,
-            });
+            return Err(SourceTableError::Records { expected: manifest.records(), actual: geom.n });
         }
-        let zero = encoder.encode(&RecordValues::zero()).expect("zero record encodes");
         let cells = geom.main_len();
-        let mut wide = vec![0_i32; 4 * cells];
-        wide.par_chunks_mut(POSITIONS).enumerate().for_each(|(chunk, out)| {
-            let (c, i) = (chunk / geom.n_star, chunk % geom.n_star);
-            let block = blocks.get(i).unwrap_or(&zero);
-            out.copy_from_slice(&block.wide[c * POSITIONS..(c + 1) * POSITIONS]);
-        });
-        let narrow: Vec<Vec<i8>> = (0..encoder.narrow)
-            .into_par_iter()
-            .map(|c| {
-                let mut column = vec![0_i8; cells];
-                for (i, chunk) in column.chunks_mut(POSITIONS).enumerate() {
-                    let block = blocks.get(i).unwrap_or(&zero);
-                    chunk.copy_from_slice(&block.narrow[c * POSITIONS..(c + 1) * POSITIONS]);
-                }
-                column
-            })
-            .collect();
-        let hint_slack = if encoder.fips.is_some() {
-            (0..geom.n_star)
-                .map(|i| blocks.get(i).unwrap_or(&zero).hint_slack)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut wide = crate::kernel::buf::uninit::<i32>(4 * cells);
+        let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| crate::kernel::buf::uninit::<i8>(cells)).collect();
+        let mut views: Vec<(Vec<&mut [std::mem::MaybeUninit<i32>]>, Vec<&mut [std::mem::MaybeUninit<i8>]>)> =
+            (0..geom.n_star).map(|_| (Vec::with_capacity(4), Vec::with_capacity(encoder.narrow))).collect();
+        for column in wide.chunks_exact_mut(cells) {
+            for (i, chunk) in column.chunks_exact_mut(POSITIONS).enumerate() {
+                views[i].0.push(chunk);
+            }
+        }
+        for column in &mut narrow {
+            for (i, chunk) in column.chunks_exact_mut(POSITIONS).enumerate() {
+                views[i].1.push(chunk);
+            }
+        }
+        let hint_slack = views.into_par_iter().enumerate().map(|(i, (mut wide, mut narrow))| {
+            let values = if i < geom.n { record(i)? } else { RecordValues::zero() };
+            encoder.encode(&values, &mut wide, &mut narrow)
+        }).collect::<Result<Vec<_>, _>>()?;
+        // SAFETY: successful encoding writes every digit, bit and FIPS cell of every
+        // record, including padding. On error the MaybeUninit allocations just drop.
+        let wide = unsafe { wide.assume_init().into_vec() };
+        let narrow = narrow.into_iter().map(|column| unsafe { column.assume_init().into_vec() }).collect();
         let tables = Self {
-            geom,
-            wide,
-            narrow,
-            hint_slack,
+            geom, wide, narrow,
+            hint_slack: if encoder.fips.is_some() { hint_slack } else { Vec::new() },
         };
         tables.validate(manifest)?;
         Ok(tables)
     }
 
-    /// Derives every live witness (strict FIPS 204 verification) and builds both main
-    /// groups.
+    /// Derive witnesses and encode them directly into their final columns.
     pub fn build(
         manifest: &CommitmentManifest,
         instance: &PublicInstance,
@@ -483,29 +462,15 @@ impl MainTables {
     ) -> Result<Self, SourceTableError> {
         if signatures.len() != instance.records.len() {
             return Err(SourceTableError::Records {
-                expected: instance.records.len(),
-                actual: signatures.len(),
+                expected: instance.records.len(), actual: signatures.len(),
             });
         }
-        let encoder = Encoder::new(manifest);
-        let blocks = instance
-            .records
-            .par_iter()
-            .zip(signatures.par_iter())
-            .enumerate()
-            .map(|(i, (record, signature))| {
-                // The instance computed T for this c~ already.
-                let witness = derive_with_t(&record.key, &record.mu, signature, &record.c_tilde, &record.t)
-                    .map_err(|e| SourceTableError::Derive(i, e))?;
-                encoder.encode(&RecordValues {
-                    z: witness.z,
-                    u: witness.u,
-                    v: witness.v,
-                    w1: witness.w1,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::from_blocks(manifest, &encoder, &blocks)
+        Self::encode_records(manifest, instance.records.len(), |i| {
+            let record = &instance.records[i];
+            let witness = derive_with_t(&record.key, &record.mu, signatures[i], &record.c_tilde, &record.t)
+                .map_err(|e| SourceTableError::Derive(i, e))?;
+            Ok(RecordValues { z: witness.z, u: witness.u, v: witness.v, w1: witness.w1 })
+        })
     }
 
     /// The shape and alphabet self-check of both groups.
