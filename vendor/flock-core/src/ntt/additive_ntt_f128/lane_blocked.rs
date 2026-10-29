@@ -66,7 +66,8 @@ pub fn lane_blocked_ok(log_d: usize, log_inv_rate: usize) -> bool {
 thread_local! {
     static TILE: RefCell<Vec<F128>> = const { RefCell::new(Vec::new()) };
     /// Pass 2 with hashing: the block copy (when the final codeword is not kept) and the
-    /// leaf chaining state of one position range.
+    /// leaf chaining state of one position range. The buffers are kept for the thread's
+    /// lifetime (about 96 B per pass-2 position).
     static PASS2: RefCell<(Vec<F128>, Vec<u32>)> = const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
@@ -283,7 +284,8 @@ impl AdditiveNttF128 {
         let avail = log_d - r;
         let env = |k: &str, dflt: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(dflt);
         let (tile_log, max_top) = (env("FLOCK_LB_TILE_LOG", TILE_LOG), env("FLOCK_LB_TOP", max_top));
-        let b = max_top.min(avail - MIN_ROWS_LOG);
+        assert!(tile_log >= MIN_ROWS_LOG, "FLOCK_LB_TILE_LOG ({tile_log}) must be at least {MIN_ROWS_LOG}");
+        let b = max_top.min(avail - MIN_ROWS_LOG).min(tile_log - MIN_ROWS_LOG);
         let low = avail - b;
         // Groups of dead lanes: their codeword is zero.
         codeword[live_groups * group_len..]
