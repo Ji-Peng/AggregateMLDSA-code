@@ -407,6 +407,48 @@ fn diag_breakdown() {
 #[cfg(cref)]
 fn diag() {
     diag_breakdown();
+    if Engine::new(Backend::Avx2).is_some() {
+        // The AVX2 scheduler with the C permutation, against the bare C permutation.
+        let seed = [42u8; 34];
+        let pk = [73u8; 1312];
+        let (jobs, limits) = mixed_jobs(&seed, &pk);
+        let mut counts = vec![0; jobs.len()];
+        let cperm = |s: &mut lanes::State<4>| {
+            // SAFETY: State<4> is 100 contiguous u64 words, 64-byte aligned.
+            let words = unsafe { &mut *(s as *mut lanes::State<4> as *mut [u64; 100]) };
+            agg_mldsa_cref::f1600x4(words);
+        };
+        let mut c = lanes::State([[0u64; 4]; 25]);
+        let (t, b) = paired(
+            || {
+                counts.fill(0);
+                lanes::run(
+                    black_box(&jobs),
+                    &mut CountSink {
+                        counts: &mut counts,
+                        limits: &limits,
+                    },
+                    lanes::Kernel {
+                        permute: cperm,
+                        // SAFETY: AVX2 is available.
+                        absorb: |s: &mut lanes::State<4>, f, i: &[lanes::Input<'_>], p, q| unsafe {
+                            avx2::absorb(s, f, i, p, q)
+                        },
+                        // SAFETY: AVX2 is available.
+                        extract: |s: &lanes::State<4>, b: &mut [Block; 4], r| unsafe {
+                            avx2::extract(s, b, r)
+                        },
+                    },
+                );
+            },
+            || {
+                for _ in 0..198 {
+                    cperm(&mut c);
+                }
+            },
+        );
+        println!("diag Avx2 mixed with C permutation: ratio {:.3}", t / b);
+    }
     #[repr(C, align(64))]
     struct Aligned<const N: usize>([u64; N]);
     let mut c4 = Aligned([0u64; 100]);

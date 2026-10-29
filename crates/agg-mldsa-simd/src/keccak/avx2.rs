@@ -162,6 +162,15 @@ pub(crate) unsafe fn run_xof<S: Sink>(_: &[XofJob<'_>], _: &mut S) {
     unreachable!("SIMD backend cannot be constructed on this architecture");
 }
 
+/// Compiler barrier on the state: the stores before it reach memory and the
+/// loads after it re-read memory, so the row schedule stays the in-memory one
+/// of the assembly original instead of a register-promoted copy with spills.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn fence(state: &mut State<4>) {
+    core::hint::black_box(state);
+}
+
 // Keep the state in its final interleaved storage between rows. The explicit
 // load/store schedule bounds the live vector set to sixteen YMM registers.
 #[cfg(target_arch = "x86_64")]
@@ -303,6 +312,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[12], y15);
         store(&mut state.0[18], y7);
         store(&mut state.0[24], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y2, load(&state.0[3]));
         y9 = _mm256_xor_si256(y1, load(&state.0[9]));
         y10 = _mm256_xor_si256(y5, load(&state.0[10]));
@@ -338,6 +348,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[22], y15);
         store(&mut state.0[3], y7);
         store(&mut state.0[9], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y4, load(&state.0[1]));
         y9 = _mm256_xor_si256(y3, load(&state.0[7]));
         y10 = _mm256_xor_si256(y2, load(&state.0[13]));
@@ -371,6 +382,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[7], y15);
         store(&mut state.0[13], y7);
         store(&mut state.0[19], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y1, load(&state.0[4]));
         y9 = _mm256_xor_si256(y5, load(&state.0[5]));
         y10 = _mm256_xor_si256(y4, load(&state.0[11]));
@@ -404,6 +416,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[17], y15);
         store(&mut state.0[23], y7);
         store(&mut state.0[4], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y3, load(&state.0[2]));
         y9 = _mm256_xor_si256(y2, load(&state.0[8]));
         y10 = _mm256_xor_si256(y1, load(&state.0[14]));
@@ -439,6 +452,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[2], y15);
         store(&mut state.0[8], y7);
         store(&mut state.0[14], y6);
+        fence(state);
         y8 = load(&state.0[0]);
         y9 = load(&state.0[1]);
         y10 = load(&state.0[2]);
@@ -518,6 +532,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[7], y15);
         store(&mut state.0[23], y7);
         store(&mut state.0[14], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y2, load(&state.0[18]));
         y9 = _mm256_xor_si256(y1, load(&state.0[9]));
         y10 = _mm256_xor_si256(y5, load(&state.0[20]));
@@ -553,6 +568,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[2], y15);
         store(&mut state.0[18], y7);
         store(&mut state.0[9], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y4, load(&state.0[6]));
         y9 = _mm256_xor_si256(y3, load(&state.0[22]));
         y10 = _mm256_xor_si256(y2, load(&state.0[13]));
@@ -586,6 +602,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[22], y15);
         store(&mut state.0[13], y7);
         store(&mut state.0[4], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y1, load(&state.0[24]));
         y9 = _mm256_xor_si256(y5, load(&state.0[10]));
         y10 = _mm256_xor_si256(y4, load(&state.0[1]));
@@ -619,6 +636,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[17], y15);
         store(&mut state.0[8], y7);
         store(&mut state.0[24], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y3, load(&state.0[12]));
         y9 = _mm256_xor_si256(y2, load(&state.0[3]));
         y10 = _mm256_xor_si256(y1, load(&state.0[19]));
@@ -654,6 +672,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[12], y15);
         store(&mut state.0[3], y7);
         store(&mut state.0[19], y6);
+        fence(state);
         y8 = load(&state.0[0]);
         y9 = load(&state.0[1]);
         y10 = load(&state.0[2]);
@@ -733,6 +752,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[22], y15);
         store(&mut state.0[8], y7);
         store(&mut state.0[19], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y2, load(&state.0[23]));
         y9 = _mm256_xor_si256(y1, load(&state.0[9]));
         y10 = _mm256_xor_si256(y5, load(&state.0[15]));
@@ -768,6 +788,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[12], y15);
         store(&mut state.0[23], y7);
         store(&mut state.0[9], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y4, load(&state.0[16]));
         y9 = _mm256_xor_si256(y3, load(&state.0[2]));
         y10 = _mm256_xor_si256(y2, load(&state.0[13]));
@@ -801,6 +822,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[2], y15);
         store(&mut state.0[13], y7);
         store(&mut state.0[24], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y1, load(&state.0[14]));
         y9 = _mm256_xor_si256(y5, load(&state.0[20]));
         y10 = _mm256_xor_si256(y4, load(&state.0[6]));
@@ -834,6 +856,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[17], y15);
         store(&mut state.0[3], y7);
         store(&mut state.0[14], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y3, load(&state.0[7]));
         y9 = _mm256_xor_si256(y2, load(&state.0[18]));
         y10 = _mm256_xor_si256(y1, load(&state.0[4]));
@@ -869,6 +892,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[7], y15);
         store(&mut state.0[18], y7);
         store(&mut state.0[4], y6);
+        fence(state);
         y8 = load(&state.0[0]);
         y9 = load(&state.0[1]);
         y10 = load(&state.0[2]);
@@ -948,6 +972,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[2], y15);
         store(&mut state.0[3], y7);
         store(&mut state.0[4], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y2, load(&state.0[8]));
         y9 = _mm256_xor_si256(y1, load(&state.0[9]));
         y10 = _mm256_xor_si256(y5, load(&state.0[5]));
@@ -983,6 +1008,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[7], y15);
         store(&mut state.0[8], y7);
         store(&mut state.0[9], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y4, load(&state.0[11]));
         y9 = _mm256_xor_si256(y3, load(&state.0[12]));
         y10 = _mm256_xor_si256(y2, load(&state.0[13]));
@@ -1016,6 +1042,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[12], y15);
         store(&mut state.0[13], y7);
         store(&mut state.0[14], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y1, load(&state.0[19]));
         y9 = _mm256_xor_si256(y5, load(&state.0[15]));
         y10 = _mm256_xor_si256(y4, load(&state.0[16]));
@@ -1049,6 +1076,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[17], y15);
         store(&mut state.0[18], y7);
         store(&mut state.0[19], y6);
+        fence(state);
         y8 = _mm256_xor_si256(y3, load(&state.0[22]));
         y9 = _mm256_xor_si256(y2, load(&state.0[23]));
         y10 = _mm256_xor_si256(y1, load(&state.0[24]));
@@ -1084,5 +1112,6 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[22], y15);
         store(&mut state.0[23], y7);
         store(&mut state.0[24], y6);
+        fence(state);
     }
 }
