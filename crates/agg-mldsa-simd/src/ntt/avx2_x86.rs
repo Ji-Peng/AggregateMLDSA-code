@@ -1,6 +1,9 @@
 //! AVX2 NTT translated from pq-crystals Dilithium (CC0/Apache-2.0).
 //! Adjacent coefficients remain in the reference backend order throughout arithmetic.
-#[cfg(target_arch = "x86_64")]
+//! On x86-64 Linux the forward transform, the q inverse, `dot4` and the order maps
+//! run the assembly port; elsewhere the equivalent intrinsics kernels run.
+// The assembly is SysV ELF; other x86-64 targets use the intrinsics kernels.
+#[cfg(target_os = "linux")]
 #[path = "avx2_asm.rs"]
 mod assembly;
 #[path = "avx2_tables.rs"]
@@ -17,7 +20,7 @@ use core::arch::x86::*;
 use core::arch::x86_64::*;
 // Forward inputs start at |x| <= 2^22. Each lazy sum/difference has
 // |out| <= |low| + |high*z|/2^32 + p/2; the schedule test proves < 4.52q or 4.25P2.
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 macro_rules! forward {($l:expr,$h:expr,$zl:expr,$zlo:expr,$zh:expr,$zho:expr,$p:expr)=>{{
 let (vl,vh,vzl,vzlo,vzh,vzho,p)=($l,$h,$zl,$zlo,$zh,$zho,$p);
 let v13 = _mm256_mul_epi32(vh, vzl);
@@ -70,7 +73,7 @@ fn store(a: &mut [i32; 8], v: __m256i) {
 }
 
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 unsafe fn ntt_intrinsics(p: Prime, a: &mut Poly32) {
     let t = std::hint::black_box(tables::table(p, Scale::Mont));
     let v0 = _mm256_set1_epi32(consts(p).p);
@@ -647,42 +650,42 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v9 = load(a.0[40..48].try_into().unwrap());
         let v10 = load(a.0[48..56].try_into().unwrap());
         let v11 = load(a.0[56..64].try_into().unwrap());
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[320..328].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[616..624].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 320, false);
+        let v15 = inv_twiddle(t, 616, false);
+        let v1 = inv_twiddle(t, 320, true);
+        let v2 = inv_twiddle(t, 616, true);
         let (v4, v5) = backward!(v4, v5, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[288..296].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[584..592].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 288, false);
+        let v15 = inv_twiddle(t, 584, false);
+        let v1 = inv_twiddle(t, 288, true);
+        let v2 = inv_twiddle(t, 584, true);
         let (v6, v7) = backward!(v6, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[256..264].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[552..560].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 256, false);
+        let v15 = inv_twiddle(t, 552, false);
+        let v1 = inv_twiddle(t, 256, true);
+        let v2 = inv_twiddle(t, 552, true);
         let (v8, v9) = backward!(v8, v9, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[224..232].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[520..528].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 224, false);
+        let v15 = inv_twiddle(t, 520, false);
+        let v1 = inv_twiddle(t, 224, true);
+        let v2 = inv_twiddle(t, 520, true);
         let (v10, v11) = backward!(v10, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[192..200].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[488..496].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 192, false);
+        let v15 = inv_twiddle(t, 488, false);
+        let v1 = inv_twiddle(t, 192, true);
+        let v2 = inv_twiddle(t, 488, true);
         let (v4, v6) = backward!(v4, v6, v1, v3, v2, v15, v0);
         let (v5, v7) = backward!(v5, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[160..168].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[456..464].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 160, false);
+        let v15 = inv_twiddle(t, 456, false);
+        let v1 = inv_twiddle(t, 160, true);
+        let v2 = inv_twiddle(t, 456, true);
         let (v8, v10) = backward!(v8, v10, v1, v3, v2, v15, v0);
         let (v9, v11) = backward!(v9, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[128..136].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[424..432].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 128, false);
+        let v15 = inv_twiddle(t, 424, false);
+        let v1 = inv_twiddle(t, 128, true);
+        let v2 = inv_twiddle(t, 424, true);
         let (v4, v8) = backward!(v4, v8, v1, v3, v2, v15, v0);
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
@@ -703,8 +706,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v8 = _mm256_blend_epi32::<0xAA>(v10, v8);
         let v10 = _mm256_srli_epi64::<32>(v10);
         let v11 = _mm256_blend_epi32::<0xAA>(v10, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[96..104].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[392..400].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 96, false);
+        let v2 = inv_twiddle(t, 392, false);
         let (v3, v5) = backward!(v3, v5, v1, v1, v2, v2, v0);
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
@@ -730,8 +733,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v7 = _mm256_unpackhi_epi64(v5, v7);
         let v5 = _mm256_unpacklo_epi64(v9, v11);
         let v11 = _mm256_unpackhi_epi64(v9, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[64..72].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[360..368].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 64, false);
+        let v2 = inv_twiddle(t, 360, false);
         let (v10, v4) = backward!(v10, v4, v1, v1, v2, v2, v0);
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
@@ -768,42 +771,42 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v9 = load(a.0[104..112].try_into().unwrap());
         let v10 = load(a.0[112..120].try_into().unwrap());
         let v11 = load(a.0[120..128].try_into().unwrap());
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[312..320].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[608..616].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 312, false);
+        let v15 = inv_twiddle(t, 608, false);
+        let v1 = inv_twiddle(t, 312, true);
+        let v2 = inv_twiddle(t, 608, true);
         let (v4, v5) = backward!(v4, v5, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[280..288].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[576..584].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 280, false);
+        let v15 = inv_twiddle(t, 576, false);
+        let v1 = inv_twiddle(t, 280, true);
+        let v2 = inv_twiddle(t, 576, true);
         let (v6, v7) = backward!(v6, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[248..256].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[544..552].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 248, false);
+        let v15 = inv_twiddle(t, 544, false);
+        let v1 = inv_twiddle(t, 248, true);
+        let v2 = inv_twiddle(t, 544, true);
         let (v8, v9) = backward!(v8, v9, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[216..224].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[512..520].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 216, false);
+        let v15 = inv_twiddle(t, 512, false);
+        let v1 = inv_twiddle(t, 216, true);
+        let v2 = inv_twiddle(t, 512, true);
         let (v10, v11) = backward!(v10, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[184..192].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[480..488].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 184, false);
+        let v15 = inv_twiddle(t, 480, false);
+        let v1 = inv_twiddle(t, 184, true);
+        let v2 = inv_twiddle(t, 480, true);
         let (v4, v6) = backward!(v4, v6, v1, v3, v2, v15, v0);
         let (v5, v7) = backward!(v5, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[152..160].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[448..456].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 152, false);
+        let v15 = inv_twiddle(t, 448, false);
+        let v1 = inv_twiddle(t, 152, true);
+        let v2 = inv_twiddle(t, 448, true);
         let (v8, v10) = backward!(v8, v10, v1, v3, v2, v15, v0);
         let (v9, v11) = backward!(v9, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[120..128].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[416..424].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 120, false);
+        let v15 = inv_twiddle(t, 416, false);
+        let v1 = inv_twiddle(t, 120, true);
+        let v2 = inv_twiddle(t, 416, true);
         let (v4, v8) = backward!(v4, v8, v1, v3, v2, v15, v0);
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
@@ -824,8 +827,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v8 = _mm256_blend_epi32::<0xAA>(v10, v8);
         let v10 = _mm256_srli_epi64::<32>(v10);
         let v11 = _mm256_blend_epi32::<0xAA>(v10, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[88..96].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[384..392].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 88, false);
+        let v2 = inv_twiddle(t, 384, false);
         let (v3, v5) = backward!(v3, v5, v1, v1, v2, v2, v0);
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
@@ -851,8 +854,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v7 = _mm256_unpackhi_epi64(v5, v7);
         let v5 = _mm256_unpacklo_epi64(v9, v11);
         let v11 = _mm256_unpackhi_epi64(v9, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[56..64].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[352..360].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 56, false);
+        let v2 = inv_twiddle(t, 352, false);
         let (v10, v4) = backward!(v10, v4, v1, v1, v2, v2, v0);
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
@@ -889,42 +892,42 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v9 = load(a.0[168..176].try_into().unwrap());
         let v10 = load(a.0[176..184].try_into().unwrap());
         let v11 = load(a.0[184..192].try_into().unwrap());
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[304..312].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[600..608].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 304, false);
+        let v15 = inv_twiddle(t, 600, false);
+        let v1 = inv_twiddle(t, 304, true);
+        let v2 = inv_twiddle(t, 600, true);
         let (v4, v5) = backward!(v4, v5, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[272..280].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[568..576].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 272, false);
+        let v15 = inv_twiddle(t, 568, false);
+        let v1 = inv_twiddle(t, 272, true);
+        let v2 = inv_twiddle(t, 568, true);
         let (v6, v7) = backward!(v6, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[240..248].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[536..544].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 240, false);
+        let v15 = inv_twiddle(t, 536, false);
+        let v1 = inv_twiddle(t, 240, true);
+        let v2 = inv_twiddle(t, 536, true);
         let (v8, v9) = backward!(v8, v9, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[208..216].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[504..512].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 208, false);
+        let v15 = inv_twiddle(t, 504, false);
+        let v1 = inv_twiddle(t, 208, true);
+        let v2 = inv_twiddle(t, 504, true);
         let (v10, v11) = backward!(v10, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[176..184].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[472..480].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 176, false);
+        let v15 = inv_twiddle(t, 472, false);
+        let v1 = inv_twiddle(t, 176, true);
+        let v2 = inv_twiddle(t, 472, true);
         let (v4, v6) = backward!(v4, v6, v1, v3, v2, v15, v0);
         let (v5, v7) = backward!(v5, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[144..152].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[440..448].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 144, false);
+        let v15 = inv_twiddle(t, 440, false);
+        let v1 = inv_twiddle(t, 144, true);
+        let v2 = inv_twiddle(t, 440, true);
         let (v8, v10) = backward!(v8, v10, v1, v3, v2, v15, v0);
         let (v9, v11) = backward!(v9, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[112..120].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[408..416].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 112, false);
+        let v15 = inv_twiddle(t, 408, false);
+        let v1 = inv_twiddle(t, 112, true);
+        let v2 = inv_twiddle(t, 408, true);
         let (v4, v8) = backward!(v4, v8, v1, v3, v2, v15, v0);
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
@@ -945,8 +948,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v8 = _mm256_blend_epi32::<0xAA>(v10, v8);
         let v10 = _mm256_srli_epi64::<32>(v10);
         let v11 = _mm256_blend_epi32::<0xAA>(v10, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[80..88].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[376..384].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 80, false);
+        let v2 = inv_twiddle(t, 376, false);
         let (v3, v5) = backward!(v3, v5, v1, v1, v2, v2, v0);
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
@@ -972,8 +975,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v7 = _mm256_unpackhi_epi64(v5, v7);
         let v5 = _mm256_unpacklo_epi64(v9, v11);
         let v11 = _mm256_unpackhi_epi64(v9, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[48..56].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[344..352].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 48, false);
+        let v2 = inv_twiddle(t, 344, false);
         let (v10, v4) = backward!(v10, v4, v1, v1, v2, v2, v0);
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
@@ -1010,42 +1013,42 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v9 = load(a.0[232..240].try_into().unwrap());
         let v10 = load(a.0[240..248].try_into().unwrap());
         let v11 = load(a.0[248..256].try_into().unwrap());
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[296..304].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[592..600].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 296, false);
+        let v15 = inv_twiddle(t, 592, false);
+        let v1 = inv_twiddle(t, 296, true);
+        let v2 = inv_twiddle(t, 592, true);
         let (v4, v5) = backward!(v4, v5, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[264..272].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[560..568].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 264, false);
+        let v15 = inv_twiddle(t, 560, false);
+        let v1 = inv_twiddle(t, 264, true);
+        let v2 = inv_twiddle(t, 560, true);
         let (v6, v7) = backward!(v6, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[232..240].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[528..536].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 232, false);
+        let v15 = inv_twiddle(t, 528, false);
+        let v1 = inv_twiddle(t, 232, true);
+        let v2 = inv_twiddle(t, 528, true);
         let (v8, v9) = backward!(v8, v9, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[200..208].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[496..504].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 200, false);
+        let v15 = inv_twiddle(t, 496, false);
+        let v1 = inv_twiddle(t, 200, true);
+        let v2 = inv_twiddle(t, 496, true);
         let (v10, v11) = backward!(v10, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[168..176].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[464..472].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 168, false);
+        let v15 = inv_twiddle(t, 464, false);
+        let v1 = inv_twiddle(t, 168, true);
+        let v2 = inv_twiddle(t, 464, true);
         let (v4, v6) = backward!(v4, v6, v1, v3, v2, v15, v0);
         let (v5, v7) = backward!(v5, v7, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[136..144].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[432..440].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 136, false);
+        let v15 = inv_twiddle(t, 432, false);
+        let v1 = inv_twiddle(t, 136, true);
+        let v2 = inv_twiddle(t, 432, true);
         let (v8, v10) = backward!(v8, v10, v1, v3, v2, v15, v0);
         let (v9, v11) = backward!(v9, v11, v1, v3, v2, v15, v0);
-        let v3 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[104..112].try_into().unwrap()));
-        let v15 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[400..408].try_into().unwrap()));
-        let v1 = _mm256_shuffle_epi32::<0xF5>(v3);
-        let v2 = _mm256_shuffle_epi32::<0xF5>(v15);
+        let v3 = inv_twiddle(t, 104, false);
+        let v15 = inv_twiddle(t, 400, false);
+        let v1 = inv_twiddle(t, 104, true);
+        let v2 = inv_twiddle(t, 400, true);
         let (v4, v8) = backward!(v4, v8, v1, v3, v2, v15, v0);
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
@@ -1066,8 +1069,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v8 = _mm256_blend_epi32::<0xAA>(v10, v8);
         let v10 = _mm256_srli_epi64::<32>(v10);
         let v11 = _mm256_blend_epi32::<0xAA>(v10, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[72..80].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[368..376].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 72, false);
+        let v2 = inv_twiddle(t, 368, false);
         let (v3, v5) = backward!(v3, v5, v1, v1, v2, v2, v0);
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
@@ -1093,8 +1096,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let v7 = _mm256_unpackhi_epi64(v5, v7);
         let v5 = _mm256_unpacklo_epi64(v9, v11);
         let v11 = _mm256_unpackhi_epi64(v9, v11);
-        let v1 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[40..48].try_into().unwrap()));
-        let v2 = _mm256_permute4x64_epi64::<0x1B>(load(t.0[336..344].try_into().unwrap()));
+        let v1 = inv_twiddle(t, 40, false);
+        let v2 = inv_twiddle(t, 336, false);
         let (v10, v4) = backward!(v10, v4, v1, v1, v2, v2, v0);
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
@@ -1495,6 +1498,15 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         );
     }
 }
+/// Inverse twiddles of the eight-word group at reference word `w`, read
+/// pre-shuffled: the qword-reversed group, or (`odd`) its odd words duplicated.
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+fn inv_twiddle(t: &tables::Table, w: usize, odd: bool) -> __m256i {
+    let (i, z) = if w >= 328 { (w - 328, 1) } else { (w - 32, 0) };
+    let v = 8 * (tables::FWD_VECS + 4 * (i / 8 - 1) + 2 * z + usize::from(odd));
+    load(t.1[v..v + 8].try_into().unwrap())
+}
 #[inline]
 #[target_feature(enable = "avx2,popcnt")]
 fn mont(a: __m256i, z: __m256i, p: __m256i, qi: __m256i) -> __m256i {
@@ -1509,8 +1521,10 @@ fn mont(a: __m256i, z: __m256i, p: __m256i, qi: __m256i) -> __m256i {
 #[inline]
 #[target_feature(enable = "avx2,popcnt")]
 fn finish(x: __m256i, p: __m256i, f: Form) -> __m256i {
-    // The inverse final multiply and dot output are in (-p,p).
-    let x = _mm256_add_epi32(x, _mm256_and_si256(_mm256_srai_epi32::<31>(x), p));
+    // Input in (-p,p): the inverse final multiply gives below 0.74q resp. 0.61P2,
+    // the rounded-reciprocal reduction below 0.751p. A negative x is a huge
+    // unsigned value while x + p is in [0,p), so the unsigned minimum is canonical.
+    let x = _mm256_min_epu32(x, _mm256_add_epi32(x, p));
     if f == Form::Canonical {
         x
     } else {
@@ -1520,8 +1534,10 @@ fn finish(x: __m256i, p: __m256i, f: Form) -> __m256i {
 }
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
+    #[cfg(target_os = "linux")]
     if p == Prime::Q {
-        // SAFETY: dispatch proved AVX2; polynomial/table lengths and alignment match the assembly contract.
+        // SAFETY: dispatch proved AVX2; the polynomial and the table are aligned
+        // and complete, as the SysV assembly reads them.
         unsafe {
             assembly::agg_mldsa_inverse_avx2(
                 a,
@@ -1529,12 +1545,12 @@ pub(crate) unsafe fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
                 u32::from(f == Form::Centered),
             );
         }
-    } else {
-        inverse(p, tables::table(p, s), a, f);
+        return;
     }
+    inverse(p, tables::table(p, s), a, f);
 }
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 unsafe fn dot4_intrinsics(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
     if p == Prime::Q {
         dot_inner::<false>(a, b, out);
@@ -1543,7 +1559,7 @@ unsafe fn dot4_intrinsics(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut 
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 fn dot_inner<const SECOND: bool>(a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
     let c = consts(if SECOND { Prime::P2 } else { Prime::Q });
     let pv = _mm256_set1_epi32(c.p);
@@ -1608,7 +1624,7 @@ pub(crate) unsafe fn reduce(p: Prime, a: &mut Poly32, f: Form) {
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 unsafe fn order_from_fips_intrinsics(a: &mut Poly32) {
     permute(a, false);
 }
@@ -1620,7 +1636,7 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 fn permute(a: &mut Poly32, _inverse: bool) {
     for chunk in a.0.chunks_exact_mut(64) {
         transpose(chunk.try_into().unwrap());
@@ -1628,7 +1644,7 @@ fn permute(a: &mut Poly32, _inverse: bool) {
 }
 #[inline(never)]
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(test)]
+#[cfg(any(test, not(target_os = "linux")))]
 fn transpose(a: &mut [i32; 64]) {
     let v4 = load(a[0..8].try_into().unwrap());
     let v5 = load(a[8..16].try_into().unwrap());
@@ -1682,14 +1698,23 @@ fn transpose(a: &mut [i32; 64]) {
 
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn ntt(p: Prime, a: &mut Poly32) {
-    // SAFETY: dispatch proved AVX2/POPCNT; aligned typed buffers contain the complete transform/table.
+    // SAFETY: dispatch proved AVX2/POPCNT; the polynomial and the table are
+    // aligned and complete, as the SysV assembly reads them.
+    #[cfg(target_os = "linux")]
     unsafe {
         assembly::agg_mldsa_ntt_avx2(a, tables::table(p, Scale::Mont));
+    }
+    // SAFETY: dispatch proved AVX2/POPCNT.
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        ntt_intrinsics(p, a);
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    // SAFETY: all typed arrays have the alignment and full lengths used by the four-product kernel.
+    // SAFETY: dispatch proved AVX2/POPCNT; all typed arrays are aligned and
+    // complete, and the SysV assembly reads only inside them.
+    #[cfg(target_os = "linux")]
     unsafe {
         assembly::agg_mldsa_dot_avx2(
             out,
@@ -1699,12 +1724,23 @@ pub(crate) unsafe fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut 
             u32::from(p == Prime::P2),
         );
     }
+    // SAFETY: dispatch proved AVX2/POPCNT.
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        dot4_intrinsics(p, a, b, out);
+    }
 }
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn order_from_fips(a: &mut Poly32) {
     // SAFETY: dispatch proved AVX2; all accesses remain within this aligned polynomial.
+    #[cfg(target_os = "linux")]
     unsafe {
         assembly::agg_mldsa_order_avx2(a);
+    }
+    // SAFETY: dispatch proved AVX2/POPCNT.
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        order_from_fips_intrinsics(a);
     }
 }
 

@@ -1,8 +1,27 @@
-//! Generated-at-compile-time pq-crystals AVX2 qdata layout (CC0/Apache-2.0).
+//! Generated-at-compile-time pq-crystals AVX2 qdata layout (CC0/Apache-2.0),
+//! followed by twiddle vectors that the kernels would otherwise shuffle per call.
+//!
+//! The second field holds, for every eight-word twiddle group starting at
+//! word `i` of the first field's `_ZETAS_QINV`/`_ZETAS` regions:
+//! - forward groups `i = 72..=288`: the odd words duplicated into both lanes
+//!   of each pair (`vmovshdup`), at vector `2 * (i / 8 - 9) + z`;
+//! - inverse groups `i = 8..=288`: the qword-reversed group (`vpermq 0x1B`)
+//!   and its odd-word duplicate, at vector `FWD_VECS + 4 * (i / 8 - 1) + 2 * z + odd`;
+//!
+//! where `z` is 0 for `_ZETAS_QINV` and 1 for `_ZETAS`. The kernels only read the
+//! even word of each pair, so every vector reproduces the shuffled operand exactly.
 use super::Scale;
 use crate::params::{consts, Prime};
-#[repr(C, align(32))]
-pub(super) struct Table(pub [i32; 624]);
+/// Number of forward odd-word vectors (28 groups, two regions).
+pub(super) const FWD_VECS: usize = 56;
+/// Number of inverse vectors (36 groups, two regions, two shuffles).
+pub(super) const INV_VECS: usize = 144;
+/// Words after the 624-word reference layout.
+pub(super) const EXTRA: usize = 8 * (FWD_VECS + INV_VECS);
+// Page alignment gives every table the same placement modulo 4 KiB, so 4K
+// store-to-load aliasing with the polynomial does not depend on prime or scale.
+#[repr(C, align(4096))]
+pub(super) struct Table(pub [i32; 624], pub [i32; EXTRA]);
 const fn pow(mut a: i64, mut n: u32, p: i64) -> i64 {
     let mut r = 1;
     while n > 0 {
@@ -63,7 +82,43 @@ const fn generate(prime: Prime, scale: Scale) -> Table {
         t[32 + i] = z.wrapping_mul(c.pinv);
         i += 1;
     }
-    Table(t)
+    let mut x = [0; EXTRA];
+    // Forward groups: odd words duplicated.
+    let mut g = 72;
+    while g <= 288 {
+        let mut z = 0;
+        while z < 2 {
+            let base = if z == 0 { 32 } else { 328 } + g;
+            let v = 8 * (2 * (g / 8 - 9) + z);
+            let mut j = 0;
+            while j < 8 {
+                x[v + j] = t[base + (j | 1)];
+                j += 1;
+            }
+            z += 1;
+        }
+        g += 8;
+    }
+    // Inverse groups: qword-reversed, then its odd words duplicated.
+    g = 8;
+    while g <= 288 {
+        let mut z = 0;
+        while z < 2 {
+            let base = if z == 0 { 32 } else { 328 } + g;
+            let v = 8 * (FWD_VECS + 4 * (g / 8 - 1) + 2 * z);
+            let mut j = 0;
+            while j < 8 {
+                // Lane j of vpermq 0x1B reads qword 3 - j / 2, same word parity.
+                let r = 2 * (3 - j / 2) + (j & 1);
+                x[v + j] = t[base + r];
+                x[v + 8 + j] = t[base + (r | 1)];
+                j += 1;
+            }
+            z += 1;
+        }
+        g += 8;
+    }
+    Table(t, x)
 }
 pub(super) static Q: Table = generate(Prime::Q, Scale::Mont);
 pub(super) static Q_PLAIN: Table = generate(Prime::Q, Scale::Plain);

@@ -1,8 +1,14 @@
 //! pq-crystals Dilithium AVX2 assembly port (CC0/Apache-2.0).
 //! Kept for kernels whose LLVM register allocation misses the reference gate.
 //! Forward butterflies keep |x| below 4.52q or 4.25P2; q inverse sums
-//! stay below 256q. Four dot products accumulate in i64 below 2^58.
-//! P2 dot outputs lie in (-p,p) before correction to the centered interval.
+//! stay below 256q, and its final values lie in (-0.74q, 0.74q) before the
+//! canonical or centered store. Four dot products accumulate in i64 below 2^58.
+//! Twiddle shuffles that the reference performs per call are read pre-shuffled
+//! from the table's second field.
+//!
+//! The code is SysV x86-64 ELF assembly (argument registers rdi, rsi, rdx, rcx,
+//! r8; all vector registers caller-saved), so it is built only on x86-64 Linux
+//! and declared with the `sysv64` ABI.
 use super::{tables, Poly32};
 core::arch::global_asm!(
     r#"
@@ -38,6 +44,20 @@ vpblendw	$0xAA,%ymm\r1,%ymm\r0,%ymm\r3
 .set agg_avx2__8XDIV,24
 .set agg_avx2__ZETAS_QINV,32
 .set agg_avx2__ZETAS,328
+.set agg_avx2__FWD,624
+.set agg_avx2__INV,1072
+
+.macro agg_avx2_fwdz c,ql,zl
+vmovdqa		(agg_avx2__FWD+16*(\c))*4(%rsi),%ymm\ql
+vmovdqa		(agg_avx2__FWD+16*(\c)+8)*4(%rsi),%ymm\zl
+.endm
+
+.macro agg_avx2_invz n,aq,bq,az,bz
+vmovdqa		(agg_avx2__INV+32*(\n))*4(%rsi),%ymm\aq
+vmovdqa		(agg_avx2__INV+32*(\n)+8)*4(%rsi),%ymm\bq
+vmovdqa		(agg_avx2__INV+32*(\n)+16)*4(%rsi),%ymm\az
+vmovdqa		(agg_avx2__INV+32*(\n)+24)*4(%rsi),%ymm\bz
+.endm
 
 .macro agg_avx2_butterfly l,h,zl0=1,zl1=1,zh0=2,zh1=2
 vpmuldq		%ymm\zl0,%ymm\h,%ymm13
@@ -158,8 +178,7 @@ agg_avx2_shuffle2	10,11,3,11
 /* level 5 */
 vmovdqa		(agg_avx2__ZETAS_QINV+72+8*\off)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+72+8*\off)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off,10,15
 
 agg_avx2_butterfly	9,5,1,10,2,15
 agg_avx2_butterfly	8,4,1,10,2,15
@@ -169,41 +188,35 @@ agg_avx2_butterfly	6,11,1,10,2,15
 /* level 6 */
 vmovdqa		(agg_avx2__ZETAS_QINV+104+8*\off)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+104+8*\off)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+4,10,15
 agg_avx2_butterfly	9,7,1,10,2,15
 agg_avx2_butterfly	8,6,1,10,2,15
 
 vmovdqa		(agg_avx2__ZETAS_QINV+104+8*\off+32)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+104+8*\off+32)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+8,10,15
 agg_avx2_butterfly	5,3,1,10,2,15
 agg_avx2_butterfly	4,11,1,10,2,15
 
 /* level 7 */
 vmovdqa		(agg_avx2__ZETAS_QINV+168+8*\off)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+168+8*\off)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+12,10,15
 agg_avx2_butterfly	9,8,1,10,2,15
 
 vmovdqa		(agg_avx2__ZETAS_QINV+168+8*\off+32)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+168+8*\off+32)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+16,10,15
 agg_avx2_butterfly	7,6,1,10,2,15
 
 vmovdqa		(agg_avx2__ZETAS_QINV+168+8*\off+64)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+168+8*\off+64)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+20,10,15
 agg_avx2_butterfly	5,4,1,10,2,15
 
 vmovdqa		(agg_avx2__ZETAS_QINV+168+8*\off+96)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__ZETAS+168+8*\off+96)*4(%rsi),%ymm2
-vpsrlq		$32,%ymm1,%ymm10
-vmovshdup	%ymm2,%ymm15
+agg_avx2_fwdz	\off+24,10,15
 agg_avx2_butterfly	3,11,1,10,2,15
 
 vmovdqa		%ymm9,256*\off+  0(%rdi)
@@ -232,27 +245,28 @@ agg_avx2_levels2t7	1
 agg_avx2_levels2t7	2
 agg_avx2_levels2t7	3
 
+vzeroupper
 ret
 
-.section .note.GNU-stack,"",@progbits
 .purgem agg_avx2_butterfly
-.text
-.macro agg_avx2_pointwise off
-#load
-vmovdqa		\off(%rsi),%ymm6
-vmovdqa		\off+32(%rsi),%ymm8
-vmovdqa		\off(%rdx),%ymm10
-vmovdqa		\off+32(%rdx),%ymm12
-vpsrlq		$32,%ymm6,%ymm7
-vpsrlq		$32,%ymm8,%ymm9
-vmovshdup	%ymm10,%ymm11
-vmovshdup	%ymm12,%ymm13
-
-#mul
-vpmuldq		%ymm6,%ymm10,%ymm6
-vpmuldq		%ymm7,%ymm11,%ymm7
-vpmuldq		%ymm8,%ymm12,%ymm8
-vpmuldq		%ymm9,%ymm13,%ymm9
+/* Four products of 16 coefficients. a's odd words are shifted down; b's odd
+   words are read from b + 4 bytes, since vpmuldq only reads the even word of
+   each qword. On the final b block that read would pass the end of b, so
+   `last` takes b's odd words with vmovshdup instead. */
+.macro agg_avx2_pointwise off,d0,d1,d2,d3,last=0
+vmovdqa		\off(%rsi),%ymm\d0
+vmovdqa		\off+32(%rsi),%ymm\d2
+vpsrlq		$32,%ymm\d0,%ymm\d1
+vpsrlq		$32,%ymm\d2,%ymm\d3
+vpmuldq		\off(%rdx),%ymm\d0,%ymm\d0
+vpmuldq		\off+32(%rdx),%ymm\d2,%ymm\d2
+vpmuldq		\off+4(%rdx),%ymm\d1,%ymm\d1
+.if \last
+vmovshdup	\off+32(%rdx),%ymm13
+vpmuldq		%ymm13,%ymm\d3,%ymm\d3
+.else
+vpmuldq		\off+36(%rdx),%ymm\d3,%ymm\d3
+.endif
 .endm
 
 .macro agg_avx2_acc
@@ -262,39 +276,35 @@ vpaddq		%ymm8,%ymm4,%ymm4
 vpaddq		%ymm9,%ymm5,%ymm5
 .endm
 
-.macro agg_avx2_dotbody center
-agg_avx2_pointwise	0
-
-#mov
-vmovdqa		%ymm6,%ymm2
-vmovdqa		%ymm7,%ymm3
-vmovdqa		%ymm8,%ymm4
-vmovdqa		%ymm9,%ymm5
-
-agg_avx2_pointwise	1024
+/* q: signed Montgomery as pq-crystals, |out| < 0.54q for canonical a.
+   P2: |sum| < 2^31 P2 (centered a, |b| < 6.4 P2). With the unsigned quotient
+   t in [0,2^32), out = (sum - t P2) / 2^32 lies in (sum/2^32 - P2, sum/2^32],
+   a subset of [-(P2-1)/2 - P2, (P2-1)/2], so adding P2 below -(P2-1)/2 centers it. */
+.macro agg_avx2_dotbody center,last=0
+agg_avx2_pointwise	0,2,3,4,5
+agg_avx2_pointwise	1024,6,7,8,9
 agg_avx2_acc
-
-agg_avx2_pointwise	2048
+agg_avx2_pointwise	2048,6,7,8,9
 agg_avx2_acc
-
-agg_avx2_pointwise	3072
+agg_avx2_pointwise	3072,6,7,8,9,\last
 agg_avx2_acc
-
-
-
-
-
-
 
 #reduce
 vpmuldq		%ymm0,%ymm2,%ymm6
 vpmuldq		%ymm0,%ymm3,%ymm7
 vpmuldq		%ymm0,%ymm4,%ymm8
 vpmuldq		%ymm0,%ymm5,%ymm9
+.if \center
+vpmuludq	%ymm1,%ymm6,%ymm6
+vpmuludq	%ymm1,%ymm7,%ymm7
+vpmuludq	%ymm1,%ymm8,%ymm8
+vpmuludq	%ymm1,%ymm9,%ymm9
+.else
 vpmuldq		%ymm1,%ymm6,%ymm6
 vpmuldq		%ymm1,%ymm7,%ymm7
 vpmuldq		%ymm1,%ymm8,%ymm8
 vpmuldq		%ymm1,%ymm9,%ymm9
+.endif
 vpsubq		%ymm6,%ymm2,%ymm2
 vpsubq		%ymm7,%ymm3,%ymm3
 vpsubq		%ymm8,%ymm4,%ymm4
@@ -305,18 +315,13 @@ vmovshdup	%ymm4,%ymm4
 #store
 vpblendd	$0xAA,%ymm3,%ymm2,%ymm2
 vpblendd	$0xAA,%ymm5,%ymm4,%ymm4
-
- .if \center
-vpabsd %ymm2,%ymm6
-vpcmpgtd %ymm14,%ymm6,%ymm6
-vpand %ymm1,%ymm6,%ymm6
-vpsignd %ymm2,%ymm6,%ymm6
-vpsubd %ymm6,%ymm2,%ymm2
-vpabsd %ymm4,%ymm6
-vpcmpgtd %ymm14,%ymm6,%ymm6
-vpand %ymm1,%ymm6,%ymm6
-vpsignd %ymm4,%ymm6,%ymm6
-vpsubd %ymm6,%ymm4,%ymm4
+.if \center
+vpcmpgtd	%ymm2,%ymm14,%ymm6
+vpcmpgtd	%ymm4,%ymm14,%ymm7
+vpand		%ymm1,%ymm6,%ymm6
+vpand		%ymm1,%ymm7,%ymm7
+vpaddd		%ymm6,%ymm2,%ymm2
+vpaddd		%ymm7,%ymm4,%ymm4
 .endif
 vmovdqa		%ymm2,(%rdi)
 vmovdqa		%ymm4,32(%rdi)
@@ -325,33 +330,41 @@ add		$64,%rsi
 add		$64,%rdx
 add		$64,%rdi
 .endm
+
 .global agg_mldsa_dot_avx2
 .p2align 5
 agg_mldsa_dot_avx2:
-vmovdqa agg_avx2__8XQINV*4(%rcx),%ymm0
-vmovdqa agg_avx2__8XQ*4(%rcx),%ymm1
-xor %eax,%eax
-test %r8d,%r8d
-jnz 990f
+vmovdqa		agg_avx2__8XQINV*4(%rcx),%ymm0
+vmovdqa		agg_avx2__8XQ*4(%rcx),%ymm1
+mov		$5,%eax
+test		%r8d,%r8d
+jnz		990f
 .p2align 5
 989:
+.rept 3
 agg_avx2_dotbody 0
-add $1,%eax
-cmp $16,%eax
-jb 989b
+.endr
+sub		$1,%eax
+jnz		989b
+agg_avx2_dotbody 0,1
+vzeroupper
 ret
 990:
-vpsrld $1,%ymm1,%ymm14
+/* ymm14 = -(P2-1)/2 */
+vpsrld		$1,%ymm1,%ymm14
+vpxor		%ymm15,%ymm15,%ymm15
+vpsubd		%ymm14,%ymm15,%ymm14
 .p2align 5
 988:
-.rept 4
+.rept 3
 agg_avx2_dotbody 1
 .endr
-add $1,%eax
-cmp $4,%eax
-jb 988b
+sub		$1,%eax
+jnz		988b
+agg_avx2_dotbody 1,1
+vzeroupper
 ret
-.section .note.GNU-stack,"",@progbits
+
 .text
 .global agg_mldsa_order_avx2
 agg_mldsa_order_avx2:
@@ -498,6 +511,7 @@ vmovdqa		%ymm4,160(%rdi)
 vmovdqa		%ymm3,192(%rdi)
 vmovdqa		%ymm11,224(%rdi)
 
+vzeroupper
 ret
 
 .macro agg_avx2_butterfly l,h,zl0=1,zl1=1,zh0=2,zh1=2
@@ -532,50 +546,29 @@ vmovdqa		256*\off+192(%rdi),%ymm10
 vmovdqa	 	256*\off+224(%rdi),%ymm11
 
 /* level 0 */
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+296-8*\off-8)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+296-8*\off-8)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	35-\off,3,1,15,2
 agg_avx2_butterfly	4,5,1,3,2,15
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+296-8*\off-40)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+296-8*\off-40)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	31-\off,3,1,15,2
 agg_avx2_butterfly	6,7,1,3,2,15
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+296-8*\off-72)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+296-8*\off-72)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	27-\off,3,1,15,2
 agg_avx2_butterfly	8,9,1,3,2,15
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+296-8*\off-104)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+296-8*\off-104)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	23-\off,3,1,15,2
 agg_avx2_butterfly	10,11,1,3,2,15
 
 /* level 1 */
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+168-8*\off-8)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+168-8*\off-8)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	19-\off,3,1,15,2
 agg_avx2_butterfly	4,6,1,3,2,15
 agg_avx2_butterfly	5,7,1,3,2,15
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+168-8*\off-40)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+168-8*\off-40)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	15-\off,3,1,15,2
 agg_avx2_butterfly	8,10,1,3,2,15
 agg_avx2_butterfly	9,11,1,3,2,15
 
 /* level 2 */
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+104-8*\off-8)*4(%rsi),%ymm3
-vpermq		$0x1B,(agg_avx2__ZETAS+104-8*\off-8)*4(%rsi),%ymm15
-vmovshdup	%ymm3,%ymm1
-vmovshdup	%ymm15,%ymm2
+agg_avx2_invz	11-\off,3,1,15,2
 agg_avx2_butterfly	4,8,1,3,2,15
 agg_avx2_butterfly	5,9,1,3,2,15
 agg_avx2_butterfly	6,10,1,3,2,15
@@ -587,8 +580,8 @@ agg_avx2_shuffle2	6,7,4,7
 agg_avx2_shuffle2	8,9,6,9
 agg_avx2_shuffle2	10,11,8,11
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+72-8*\off-8)*4(%rsi),%ymm1
-vpermq		$0x1B,(agg_avx2__ZETAS+72-8*\off-8)*4(%rsi),%ymm2
+vmovdqa		(agg_avx2__INV+32*(7-\off))*4(%rsi),%ymm1
+vmovdqa		(agg_avx2__INV+32*(7-\off)+16)*4(%rsi),%ymm2
 agg_avx2_butterfly	3,5
 agg_avx2_butterfly	4,7
 agg_avx2_butterfly	6,9
@@ -600,8 +593,8 @@ agg_avx2_shuffle4	6,8,3,8
 agg_avx2_shuffle4	5,7,6,7
 agg_avx2_shuffle4	9,11,5,11
 
-vpermq		$0x1B,(agg_avx2__ZETAS_QINV+40-8*\off-8)*4(%rsi),%ymm1
-vpermq		$0x1B,(agg_avx2__ZETAS+40-8*\off-8)*4(%rsi),%ymm2
+vmovdqa		(agg_avx2__INV+32*(3-\off))*4(%rsi),%ymm1
+vmovdqa		(agg_avx2__INV+32*(3-\off)+16)*4(%rsi),%ymm2
 agg_avx2_butterfly	10,4
 agg_avx2_butterfly	3,8
 agg_avx2_butterfly	6,7
@@ -630,7 +623,24 @@ vmovdqa		%ymm8,256*\off+192(%rdi)
 vmovdqa		%ymm11,256*\off+224(%rdi)
 .endm
 
+/* Store a final value r in (-q,q): min_u32(r, r+q) is canonical, because a
+   negative r is a huge unsigned value while r+q is in [0,q). Centered output
+   then subtracts q above (q-1)/2, which levels6t7 keeps in ymm3. */
+.macro agg_avx2_fstore r,dst,centered
+vpaddd		%ymm0,%ymm\r,%ymm12
+vpminud		%ymm12,%ymm\r,%ymm\r
+.if \centered
+vpcmpgtd	%ymm3,%ymm\r,%ymm12
+vpand		%ymm0,%ymm12,%ymm12
+vpsubd		%ymm12,%ymm\r,%ymm\r
+.endif
+vmovdqa		%ymm\r,\dst(%rdi)
+.endm
+
 .macro agg_avx2_levels6t7 off,centered
+.if \centered
+vpsrld		$1,%ymm0,%ymm3
+.endif
 vmovdqa		  0+32*\off(%rdi),%ymm4
 vmovdqa		128+32*\off(%rdi),%ymm5
 vmovdqa		256+32*\off(%rdi),%ymm6
@@ -660,46 +670,10 @@ agg_avx2_butterfly	5,9
 agg_avx2_butterfly	6,10
 agg_avx2_butterfly	7,11
 
-vpsrad $31,%ymm8,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm8,%ymm8
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm8,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm8,%ymm8
-.endif
-vmovdqa         %ymm8,512+32*\off(%rdi)
-vpsrad $31,%ymm9,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm9,%ymm9
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm9,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm9,%ymm9
-.endif
-vmovdqa         %ymm9,640+32*\off(%rdi)
-vpsrad $31,%ymm10,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm10,%ymm10
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm10,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm10,%ymm10
-.endif
-vmovdqa         %ymm10,768+32*\off(%rdi)
-vpsrad $31,%ymm11,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm11,%ymm11
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm11,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm11,%ymm11
-.endif
-vmovdqa         %ymm11,896+32*\off(%rdi)
+agg_avx2_fstore	8,512+32*\off,\centered
+agg_avx2_fstore	9,640+32*\off,\centered
+agg_avx2_fstore	10,768+32*\off,\centered
+agg_avx2_fstore	11,896+32*\off,\centered
 
 vmovdqa		(agg_avx2__8XDIV_QINV)*4(%rsi),%ymm1
 vmovdqa		(agg_avx2__8XDIV)*4(%rsi),%ymm2
@@ -749,46 +723,10 @@ vmovshdup	%ymm7,%ymm7
 vpblendd	$0xAA,%ymm8,%ymm6,%ymm6
 vpblendd	$0xAA,%ymm9,%ymm7,%ymm7
 
-vpsrad $31,%ymm4,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm4,%ymm4
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm4,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm4,%ymm4
-.endif
-vmovdqa         %ymm4,  0+32*\off(%rdi)
-vpsrad $31,%ymm5,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm5,%ymm5
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm5,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm5,%ymm5
-.endif
-vmovdqa         %ymm5,128+32*\off(%rdi)
-vpsrad $31,%ymm6,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm6,%ymm6
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm6,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm6,%ymm6
-.endif
-vmovdqa         %ymm6,256+32*\off(%rdi)
-vpsrad $31,%ymm7,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpaddd %ymm12,%ymm7,%ymm7
-.if \centered
-vpsrld $1,%ymm0,%ymm13
-vpcmpgtd %ymm13,%ymm7,%ymm12
-vpand %ymm0,%ymm12,%ymm12
-vpsubd %ymm12,%ymm7,%ymm7
-.endif
-vmovdqa         %ymm7,384+32*\off(%rdi)
+agg_avx2_fstore	4,0+32*\off,\centered
+agg_avx2_fstore	5,128+32*\off,\centered
+agg_avx2_fstore	6,256+32*\off,\centered
+agg_avx2_fstore	7,384+32*\off,\centered
 .endm
 
 .text
@@ -808,21 +746,21 @@ agg_avx2_levels6t7 1,0
 agg_avx2_levels6t7 2,0
 agg_avx2_levels6t7 3,0
 
+vzeroupper
 ret
 992:
 agg_avx2_levels6t7 0,1
 agg_avx2_levels6t7 1,1
 agg_avx2_levels6t7 2,1
 agg_avx2_levels6t7 3,1
+vzeroupper
 ret
 
-.section .note.GNU-stack,"",@progbits
-.section .note.GNU-stack,"",@progbits
 
 "#,
     options(att_syntax)
 );
-unsafe extern "C" {
+unsafe extern "sysv64" {
     pub(super) fn agg_mldsa_ntt_avx2(a: &mut Poly32, t: &tables::Table);
     pub(super) fn agg_mldsa_dot_avx2(
         out: &mut Poly32,
