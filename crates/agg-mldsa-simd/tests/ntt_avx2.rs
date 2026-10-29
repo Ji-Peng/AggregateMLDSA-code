@@ -127,8 +127,6 @@ fn dot_schoolbook_and_orders() {
             #[cfg(t3_cref)]
             if p == Prime::Q {
                 let mut cf = Poly32::zero();
-                let aa: [i32; 1024] = std::array::from_fn(|i| ah[i / 256].0[i % 256]);
-                let bb: [i32; 1024] = std::array::from_fn(|i| bh[i / 256].0[i % 256]);
                 // The reference uses aligned loads, so use the aligned polynomial arrays directly.
                 unsafe {
                     agg_mldsa_cref::ffi::pqcrystals_dilithium2_avx2_pointwise_acc_avx(
@@ -138,7 +136,7 @@ fn dot_schoolbook_and_orders() {
                         tables::Q.0.as_ptr(),
                     );
                 }
-                let _ = (aa, bb);
+
                 assert_eq!(got, cf);
                 let mut inv = cf;
                 agg_mldsa_cref::invntt_avx(&mut inv.0, &tables::Q.0);
@@ -267,6 +265,46 @@ fn schedule_bounds() {
             };
             for &b in &bound {
                 assert!(red(b, f as i64) < 7 * modulus / 10);
+            }
+        }
+    }
+}
+
+#[test]
+fn inverse_extreme_inputs() {
+    let Some(e) = engine() else { return };
+    for p in [Prime::Q, Prime::P2] {
+        let c = consts(p);
+        let oracle = common::oracle_ntt_prime(p);
+        let max = if p == Prime::Q { c.p - 1 } else { c.p / 2 };
+        for pattern in 0..260 {
+            let input = Poly32(std::array::from_fn(|i| match pattern {
+                0 => max,
+                1 => -max,
+                2 => {
+                    if i % 2 == 0 {
+                        max
+                    } else {
+                        -max
+                    }
+                }
+                3..=258 => {
+                    if i == pattern - 3 {
+                        max
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            }));
+            let mut fips = input;
+            e.order_to_fips(&mut fips);
+            let expected = oracle.intt(&common::poly32_to_u64(&fips, c.p));
+            for form in [Form::Canonical, Form::Centered] {
+                let mut got = input;
+                e.intt(p, &mut got, Scale::Plain, form);
+                check_range(&got, c.p, form);
+                assert_eq!(common::poly32_to_u64(&got, c.p), expected);
             }
         }
     }
