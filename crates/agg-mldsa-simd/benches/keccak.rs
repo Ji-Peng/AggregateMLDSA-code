@@ -586,6 +586,117 @@ fn diag() {
     }
 }
 
+/// The AVX-512 scheduler with a no-op permutation and a selectable set of
+/// kernels: 0 = clear and absorb, 1 = absorb, 2 = neither (no state writes),
+/// 3 = extract, clear and absorb.
+#[target_feature(enable = "avx512f")]
+fn no_permutation8(jobs: &[XofJob<'_>], counts: &mut [usize], limits: &[usize], mode: u32) {
+    counts[..limits.len()].copy_from_slice(limits);
+    let sink = &mut CountSink { counts };
+    let permute = |s: &mut lanes::State<8>| {
+        black_box(s);
+    };
+    let absorb = |l: &mut [lanes::Lane; 8], j: &[XofJob<'_>], s: &mut lanes::State<8>, m| {
+        avx512::absorb(l, j, s, m)
+    };
+    let no_extract = |_: &lanes::State<8>, _: &mut [Block; 8], _| {};
+    match mode {
+        0 => {
+            lanes::run::<8, false, _, _>(
+                jobs,
+                sink,
+                lanes::Kernel {
+                    permute,
+                    extract: no_extract,
+                    clear: |s: &mut lanes::State<8>, l| avx512::clear(s, l),
+                    absorb,
+                },
+            );
+        }
+        1 => {
+            lanes::run::<8, false, _, _>(
+                jobs,
+                sink,
+                lanes::Kernel {
+                    permute,
+                    extract: no_extract,
+                    clear: |_: &mut lanes::State<8>, _| {},
+                    absorb,
+                },
+            );
+        }
+        2 => {
+            lanes::run::<8, false, _, _>(
+                jobs,
+                sink,
+                lanes::Kernel {
+                    permute,
+                    extract: no_extract,
+                    clear: |_: &mut lanes::State<8>, _| {},
+                    absorb: absorb_dry,
+                },
+            );
+        }
+        _ => {
+            lanes::run::<8, false, _, _>(
+                jobs,
+                sink,
+                lanes::Kernel {
+                    permute,
+                    extract: |s: &lanes::State<8>, b: &mut [Block; 8], r| avx512::extract(s, b, r),
+                    clear: |s: &mut lanes::State<8>, l| avx512::clear(s, l),
+                    absorb,
+                },
+            );
+        }
+    }
+}
+
+// Ticks per permutation boundary of the AVX-512 scheduler without the
+// permutation (set KECCAK_BOOKKEEPING): the mixed key workload and 136
+// SHAKE128 jobs of 5 blocks each.
+fn bookkeeping() {
+    if Engine::new(Backend::Avx512).is_none() {
+        return;
+    }
+    let seed = [42u8; 34];
+    let pk = [73u8; 1312];
+    let (mixed, mixed_limits) = mixed_jobs(&seed, &pk);
+    let uniform: Vec<XofJob<'_>> = vec![
+        XofJob {
+            xof: Xof::Shake128,
+            input: [&seed, &[], &[], &[]]
+        };
+        136
+    ];
+    let uniform_limits = vec![5usize; 136];
+    let mut counts = vec![0; mixed.len()];
+    for (name, jobs, limits) in [
+        ("mixed", &mixed, &mixed_limits),
+        ("uniform", &uniform, &uniform_limits),
+    ] {
+        let (_, cap) = dry_run(8, jobs, &mut counts, limits);
+        let boundaries = (cap / 8) as f64;
+        let mut ticks = [0.0; 4];
+        for (mode, t) in ticks.iter_mut().enumerate() {
+            // SAFETY: An AVX-512 engine exists, so the features were detected.
+            *t = common::measure_kernel(|| unsafe {
+                no_permutation8(black_box(jobs), &mut counts, limits, mode as u32)
+            })
+            .median
+                / boundaries;
+        }
+        println!(
+            "bookkeeping Avx512 {name}: {:.1} ticks/boundary = extract {:.1} + clear {:.1} + absorb writes {:.1} + rest {:.1}",
+            ticks[3],
+            ticks[3] - ticks[0],
+            ticks[0] - ticks[1],
+            ticks[1] - ticks[2],
+            ticks[2]
+        );
+    }
+}
+
 // Short paired diagnostics for tuning; never substitutes for --gate.
 fn quick() {
     let seed = [42u8; 34];
@@ -608,7 +719,7 @@ fn quick() {
             ("34B/5", &single[..], &single_limits[..]),
         ] {
             let mut counts = vec![0; jobs.len()];
-            let (_, cap) = dry_run(w, jobs, &mut counts, limits);
+            let (used, cap) = dry_run(w, jobs, &mut counts, limits);
             let mut s4 = lanes::State([[0; 4]; 25]);
             let mut s8 = lanes::State([[0; 8]; 25]);
             let r = pair_ratio(
@@ -632,7 +743,10 @@ fn quick() {
                 }
             })
             .median;
-            println!("quick {backend:?} {name}: scheduler/bare {r:.3}, bare {bare:.0} ticks");
+            println!(
+                "quick {backend:?} {name}: scheduler/bare {r:.3}, bare {bare:.0} ticks, occupied {:.2}%",
+                100.0 * used as f64 / cap as f64
+            );
             #[cfg(cref)]
             if name == "mixed" {
                 #[repr(C, align(64))]
@@ -663,6 +777,11 @@ fn quick() {
 }
 
 fn main() {
+    if std::env::var_os("KECCAK_BOOKKEEPING").is_some() && !std::env::args().any(|a| a == "--gate")
+    {
+        bookkeeping();
+        return;
+    }
     if std::env::var_os("KECCAK_QUICK").is_some() && !std::env::args().any(|a| a == "--gate") {
         quick();
         return;

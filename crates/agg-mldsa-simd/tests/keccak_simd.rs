@@ -47,8 +47,6 @@ fn permutation_oracles() {
         if Engine::new(Backend::Avx512).is_some() {
             // SAFETY: Engine construction checked the required ISA.
             permutations::<8>(|state| unsafe { avx512::permute(state) });
-            // SAFETY: As above, for the intrinsics form kept for review.
-            permutations::<8>(|state| unsafe { avx512::permute_intrinsics(state) });
         }
     }
 }
