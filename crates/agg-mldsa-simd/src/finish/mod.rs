@@ -1,6 +1,6 @@
 //! Finish operations: CRT combination, rounding, UseHint, quotient check, and column decomposition.
 
-pub(crate) mod avx2;
+pub mod avx2;
 pub(crate) mod avx512;
 pub(crate) mod scalar;
 
