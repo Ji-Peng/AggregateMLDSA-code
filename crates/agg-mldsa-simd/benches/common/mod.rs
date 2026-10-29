@@ -1,5 +1,7 @@
 //! Benchmarking harness using high-resolution Time Stamp Counter (TSC).
 
+#![allow(dead_code)]
+
 use std::hint::black_box;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
