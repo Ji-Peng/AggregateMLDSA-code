@@ -849,7 +849,57 @@ fn quick() {
     }
 }
 
+/// Rounds rows: one Keccak-f[1600] with its chi row outputs (24 rounds of
+/// `chi_rounds`) on eight states, and the stripe transpose of the 600 words of
+/// one permutation, each SIMD backend against the scalar walk of the same eight
+/// states. Ticks per eight states; the SIMD side must be faster.
+fn rounds_rows() -> bool {
+    let scalar = Engine::new(Backend::Scalar).expect("scalar engine");
+    let mut ok = true;
+    let mut st = [[0x0123_4567_89AB_CDEFu64; 8]; 25];
+    let (mut z, mut a, mut b) = (
+        vec![[0u64; 8]; 600],
+        vec![[0u64; 8]; 600],
+        vec![[0u64; 8]; 600],
+    );
+    let mut out = vec![0u8; 64 * 600];
+    let mut ticks = |e: &Engine| {
+        let walk = common::measure_kernel(|| {
+            e.chi_rounds(black_box(&mut st), 0, &mut z, &mut a, &mut b);
+            black_box((&z, &a, &b));
+        })
+        .median;
+        let stripe = common::measure_kernel(|| {
+            e.transpose_bits8(black_box(&z), &mut out);
+            black_box(&out);
+        })
+        .median;
+        (walk, stripe)
+    };
+    let (walk1, stripe1) = ticks(&scalar);
+    println!("rounds Scalar: 8 walks {walk1:.0} ticks, stripe of 600 words {stripe1:.0} ticks");
+    for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
+        let Some(engine) = Engine::new(backend) else {
+            continue;
+        };
+        let (walk, stripe) = ticks(&engine);
+        let pass = walk < walk1 && stripe < stripe1;
+        println!(
+            "rounds {backend:?}: x{w} rounds {walk:.0} ticks ({:.2}x vs 8 scalar walks), stripe {stripe:.0} ticks ({:.2}x): {}",
+            walk1 / walk,
+            stripe1 / stripe,
+            if pass { "PASS" } else { "FAIL" }
+        );
+        ok &= pass;
+    }
+    ok
+}
+
 fn main() {
+    if std::env::var_os("KECCAK_ROUNDS").is_some() && !std::env::args().any(|a| a == "--gate") {
+        rounds_rows();
+        return;
+    }
     if std::env::var_os("KECCAK_BOOKKEEPING").is_some() && !std::env::args().any(|a| a == "--gate")
     {
         bookkeeping();
@@ -1005,6 +1055,7 @@ fn main() {
         );
         ok &= faster;
     }
+    ok &= rounds_rows();
     common::finish_benchmarks();
     if std::env::args().any(|a| a == "--gate") && !ok {
         std::process::exit(1);

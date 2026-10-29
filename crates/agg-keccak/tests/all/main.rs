@@ -2,3 +2,4 @@
 
 mod proofs;
 mod tied;
+mod witness;
