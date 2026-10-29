@@ -7,7 +7,10 @@
 //! the column parities and 0xD2 for chi, and the in-place lane renaming that
 //! repeats every four rounds. Theta folds `D[x] = C[x-1] ^ rol(C[x+1], 1)` into
 //! each lane with one three-input XOR, as in Xurong Qi's Hybrid-SHA-3
-//! `keccak8x.c` (translated with the authors' permission); columns 2 to 4 apply
+//! `keccak8x.c`. The project owner authorized direct Rust translation on
+//! 2026-10-29, confirming permission from the Hybrid-SHA-3 authors. The scope
+//! includes the permutation and squeeze techniques attributed here; the
+//! original permission correspondence is not reproduced here. Columns 2 to 4 apply
 //! it just before their lanes enter chi, which interleaves the rotations with
 //! the logic operations. The extraction starts like the 8x8 transposes of the
 //! Hybrid-SHA-3 squeeze but stops one level early: each vector then holds the
