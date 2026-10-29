@@ -68,30 +68,8 @@ fn bytes(a: &[u8; 8]) -> V {
     // SAFETY: the load reads exactly the fixed-size byte array.
     unsafe { _mm256_cvtepu8_epi32(_mm_loadl_epi64(a.as_ptr().cast())) }
 }
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn put_bytes(a: &mut [u8; 8], v: V) {
-    let words = _mm_packus_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
-    let b = _mm_packus_epi16(words, words);
-    // SAFETY: the store writes exactly eight bytes.
-    unsafe { _mm_storel_epi64(a.as_mut_ptr().cast(), b) }
-}
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn crt_mont(a: V) -> V {
-    let c = splat(CRT_C);
-    let t = mul(a, splat(CRT_C.wrapping_mul(CONSTS_P2.pinv)));
-    let even = _mm256_sub_epi64(_mm256_mul_epi32(a,c), _mm256_mul_epi32(t,splat(P2)));
-    let odd = _mm256_sub_epi64(_mm256_mul_epi32(_mm256_srli_epi64::<32>(a),c),
-        _mm256_mul_epi32(_mm256_srli_epi64::<32>(t),splat(P2)));
-    // |a| < P2, |CRT_C| < P2/2: Montgomery output lies in (-P2,P2).
-    // The result is the high half of each 64-bit difference: even lanes from `even`, odd lanes from `odd`.
-    _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(even), odd)
-}
-/// Multiplies lanes in [0,44] by ALPHA = 93 * 2^11 with one 16-bit multiply and a shift.
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn times_alpha(a: V) -> V { _mm256_slli_epi32::<11>(_mm256_mullo_epi16(a,splat(93))) }
+
+
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, out: &mut [[i32;256];4]) {
     for (t,dest) in t1.iter().zip(out) {
@@ -110,7 +88,7 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
                 let start = 256 - pos as usize + base;
                 let sign = splat(-((c.neg >> k) as i32 & 1));
                 // Each partial sum has magnitude <= 39*1023 = 39897, safely in i32.
-                let v = load(window[start+0..start+8].try_into().unwrap());
+                let v = load(window[start..start+8].try_into().unwrap());
                 a0 = add(a0, sub(_mm256_xor_si256(v,sign),sign));
                 let v = load(window[start+8..start+16].try_into().unwrap());
                 a1 = add(a1, sub(_mm256_xor_si256(v,sign),sign));
@@ -127,7 +105,7 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
                 let v = load(window[start+56..start+64].try_into().unwrap());
                 a7 = add(a7, sub(_mm256_xor_si256(v,sign),sign));
             }
-            store((&mut dest[base+0..base+8]).try_into().unwrap(), _mm256_sllv_epi32(a0,splat(shift as i32)));
+            store((&mut dest[base..base+8]).try_into().unwrap(), _mm256_sllv_epi32(a0,splat(shift as i32)));
             store((&mut dest[base+8..base+16]).try_into().unwrap(), _mm256_sllv_epi32(a1,splat(shift as i32)));
             store((&mut dest[base+16..base+24]).try_into().unwrap(), _mm256_sllv_epi32(a2,splat(shift as i32)));
             store((&mut dest[base+24..base+32]).try_into().unwrap(), _mm256_sllv_epi32(a3,splat(shift as i32)));
@@ -138,69 +116,128 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
         }
     }
 }
+#[repr(C, align(32))]
+struct AlignedConst<T>(pub T);
+
+macro_rules! c32 {
+    ($val:expr) => {
+        AlignedConst([$val; 8])
+    };
+}
+
+static C_CRT_C: AlignedConst<[i32; 8]> = c32!(CRT_C);
+static C_CRT_C_PINV: AlignedConst<[i32; 8]> = c32!(CRT_C.wrapping_mul(CONSTS_P2.pinv));
+static C_P2: AlignedConst<[i32; 8]> = c32!(P2);
+static C_P2_HALF: AlignedConst<[i32; 8]> = c32!((P2 - 1) / 2);
+static C_Q_HALF: AlignedConst<[i32; 8]> = c32!((Q - 1) / 2);
+static C_NEG_Q_HALF: AlignedConst<[i32; 8]> = c32!(-(Q - 1) / 2);
+static C_Q: AlignedConst<[i32; 8]> = c32!(Q);
+static C_ROUND_Q: AlignedConst<[i32; 8]> = c32!(1 << 22);
+static C_OFF127: AlignedConst<[i32; 8]> = c32!(127);
+static C_MUL11275: AlignedConst<[i32; 8]> = c32!(11275);
+static C_SHIFT128: AlignedConst<[i32; 8]> = c32!(128);
+static C_MAX43: AlignedConst<[i32; 8]> = c32!(43);
+static C_ALPHA_93: AlignedConst<[i32; 8]> = c32!(93);
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+fn times_alpha(a: V) -> V {
+    _mm256_slli_epi32::<11>(_mm256_mullo_epi16(a, c_load(&C_ALPHA_93)))
+}
+static C_ONE: AlignedConst<[i32; 8]> = c32!(1);
+static C_MOD44: AlignedConst<[i32; 8]> = c32!(44);
+static C_QINV32: AlignedConst<[i32; 8]> = c32!(QINV32);
+static C_B_Q: AlignedConst<[i32; 8]> = c32!(41);
+static C_B_U: AlignedConst<[i32; 8]> = c32!(B_U);
+static C_B_V: AlignedConst<[i32; 8]> = c32!(B_V);
+
+#[inline(always)]
+fn c_load(c: &'static AlignedConst<[i32; 8]>) -> V {
+    // SAFETY: the static array is aligned to 32 bytes and contains 8 i32 values.
+    unsafe { _mm256_load_si256(c.0.as_ptr().cast()) }
+}
+
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+fn put_bytes(a: &mut [u8; 8], v: V) {
+    let words = _mm_packus_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+    let b = _mm_packus_epi16(words, words);
+    // SAFETY: the store writes exactly eight bytes.
+    unsafe { _mm_storel_epi64(a.as_mut_ptr().cast(), b) }
+}
+
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
-    // Each check keeps the unsigned maximum of x + bound; |x| <= bound iff that maximum is <= 2*bound.
     let mut bad_q = splat(0);
     let mut bad_u = splat(0);
     let mut bad_v = splat(0);
-    // The row step is expanded 4 times per iteration so that independent chains interleave.
-    macro_rules! step { ($i:expr) => {{
-        let i: usize = $i;
+
+    let c = c_load(&C_CRT_C);
+    let c_pinv = c_load(&C_CRT_C_PINV);
+    let p2 = c_load(&C_P2);
+    let p2_half = c_load(&C_P2_HALF);
+    let q_half = c_load(&C_Q_HALF);
+    let qv = c_load(&C_Q);
+
+    for i in (0..256).step_by(8) {
         let xq = load(row.xq[i..i+8].try_into().unwrap());
         let xp = load(row.xp[i..i+8].try_into().unwrap());
         let t = load(row.t[i..i+8].try_into().unwrap());
         let hint = bytes(row.h[i..i+8].try_into().unwrap());
-        let k = crt_mont(sub(xp,xq));
-        // k is in (-P2,P2); the unsigned minimum with k+P2 picks the representative in [0,P2).
-        let k = _mm256_min_epu32(k,add(k,splat(P2)));
-        // Centre down when k > (P2-1)/2, or when k equals it and xq is above (q-1)/2.
-        let center = gt(sub(k,gt(xq,splat((Q-1)/2))),splat((P2-1)/2));
-        let kc = sub(k,and(center,splat(P2)));
-        // |xq-t| <= q-1+B_T < 2^29; reduce32 leaves (-q,q).
-        let a = sub(xq,t);
-        let r = sub(a,mul(sar::<23>(add(a,splat(1<<22))),splat(Q)));
-        let r = _mm256_min_epu32(r,add(r,splat(Q)));
-        // (r+127)>>7 < 2^16, so the 16-bit multiply-high pair computes round(x*11275/2^24) exactly.
-        let hi = shr::<7>(add(r,splat(127)));
-        let hi = _mm256_mulhrs_epi16(_mm256_mulhi_epu16(hi,splat(11275)),splat(128));
-        let hi = andnot(gt(hi,splat(43)),hi);
-        let lo = sub(r,times_alpha(hi));
-        // The centred low part is non-positive when lo <= 0 or lo > (q-1)/2; then the hint steps down.
-        let neg = or(gt(splat(1),lo),gt(lo,splat((Q-1)/2)));
-        let w = add(hi,sub(_mm256_xor_si256(hint,neg),neg));
-        // w is in [-1,44]; reduce modulo 44 with two unsigned minima.
-        let w = _mm256_min_epu32(w,add(w,splat(44)));
-        let w = _mm256_min_epu32(w,sub(w,splat(44)));
-        // r-ALPHA*w is in (-q,q), so two conditional corrections center it.
+
+        // CRT Montgomery reduction & centering
+        let a_p = sub(xp, xq);
+        let m = mul(a_p, c_pinv);
+        let even = _mm256_sub_epi64(_mm256_mul_epi32(a_p, c), _mm256_mul_epi32(m, p2));
+        let odd = _mm256_sub_epi64(
+            _mm256_mul_epi32(_mm256_srli_epi64::<32>(a_p), c),
+            _mm256_mul_epi32(_mm256_srli_epi64::<32>(m), p2),
+        );
+        let k = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(even), odd);
+        let k = _mm256_min_epu32(k, add(k, p2));
+        let center = gt(sub(k, gt(xq, q_half)), p2_half);
+        let kc = sub(k, and(center, p2));
+
+        // Reduction modulo q of (xq - t)
+        let a = sub(xq, t);
+        let r = sub(a, mul(sar::<23>(add(a, c_load(&C_ROUND_Q))), qv));
+        let r = _mm256_min_epu32(r, add(r, qv));
+
+        // Decompose / Hint for gamma2 = (q-1)/88
+        let hi = shr::<7>(add(r, c_load(&C_OFF127)));
+        let hi = _mm256_mulhrs_epi16(_mm256_mulhi_epu16(hi, c_load(&C_MUL11275)), c_load(&C_SHIFT128));
+        let hi = andnot(gt(hi, c_load(&C_MAX43)), hi);
+
+        let lo = sub(r, times_alpha(hi));
+        let neg = or(gt(c_load(&C_ONE), lo), gt(lo, q_half));
+        let w = add(hi, sub(_mm256_xor_si256(hint, neg), neg));
+        let w = _mm256_min_epu32(w, add(w, c_load(&C_MOD44)));
+        let w = _mm256_min_epu32(w, sub(w, c_load(&C_MOD44)));
+
         let wa = times_alpha(w);
-        let u = sub(r,wa);
-        let u = sub(u,and(gt(u,splat((Q-1)/2)),splat(Q)));
-        let u = add(u,and(gt(splat(-(Q-1)/2),u),splat(Q)));
-        // |e| <= B_T+2*q < 2^29 and e is divisible by q. Its quotient is in [-41,41].
-        let e = sub(sub(a,wa),u);
-        let ve = mul(e,splat(QINV32));
-        let v = add(kc,ve);
-        bad_q = _mm256_max_epu32(bad_q,add(ve,splat(41)));
-        bad_u = _mm256_max_epu32(bad_u,add(u,splat(B_U)));
-        bad_v = _mm256_max_epu32(bad_v,add(v,splat(B_V)));
-        store((&mut out.u[i..i+8]).try_into().unwrap(),u);
-        store((&mut out.v[i..i+8]).try_into().unwrap(),v);
-        put_bytes((&mut out.w1[i..i+8]).try_into().unwrap(),w);
-    }}; }
-    for base in (0..256).step_by(32) {
-        step!(base+0);
-        step!(base+8);
-        step!(base+16);
-        step!(base+24);
+        let u = sub(r, wa);
+        let u = sub(u, and(gt(u, q_half), qv));
+        let u = add(u, and(gt(c_load(&C_NEG_Q_HALF), u), qv));
+
+        let e = sub(sub(a, wa), u);
+        let ve = mul(e, c_load(&C_QINV32));
+        let v = add(kc, ve);
+
+        bad_q = _mm256_max_epu32(bad_q, add(ve, c_load(&C_B_Q)));
+        bad_u = _mm256_max_epu32(bad_u, add(u, c_load(&C_B_U)));
+        bad_v = _mm256_max_epu32(bad_v, add(v, c_load(&C_B_V)));
+
+        store((&mut out.u[i..i+8]).try_into().unwrap(), u);
+        store((&mut out.v[i..i+8]).try_into().unwrap(), v);
+        put_bytes((&mut out.w1[i..i+8]).try_into().unwrap(), w);
     }
+
     let exceeds = |acc: V, bound: i32| {
-        let limit = splat(2*bound);
-        _mm256_movemask_epi8(eq(_mm256_max_epu32(acc,limit),limit)) != -1
+        let limit = splat(2 * bound);
+        _mm256_movemask_epi8(eq(_mm256_max_epu32(acc, limit), limit)) != -1
     };
-    if exceeds(bad_q,41) { Err(FinishError::Quotient) }
-    else if exceeds(bad_u,B_U) { Err(FinishError::UBound) }
-    else if exceeds(bad_v,B_V) { Err(FinishError::VBound) }
+    if exceeds(bad_q, 41) { Err(FinishError::Quotient) }
+    else if exceeds(bad_u, B_U) { Err(FinishError::UBound) }
+    else if exceeds(bad_v, B_V) { Err(FinishError::VBound) }
     else { Ok(()) }
 }
 /// Packs four vectors of small signed values into 32 consecutive bytes (saturating).

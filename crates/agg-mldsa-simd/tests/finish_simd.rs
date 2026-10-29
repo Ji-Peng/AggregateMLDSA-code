@@ -35,7 +35,7 @@ fn sparse_against_public_t() {
             let mut c=native::sample_in_ball(&rng.next_u64().to_le_bytes());
             if iteration==0 {
                 c.positions=(0..38).chain([255]).collect();
-                c.coeffs=[0;256]; for &p in &c.positions { c.coeffs[p as usize]=-1; }
+                c.coeffs=[0;256]; for &p in &c.positions { c.coeffs[p as usize] = -1; }
             }
             let challenge=Challenge39{pos:c.positions.clone().try_into().unwrap(),neg:c.positions.iter().enumerate().fold(0,|m,(k,&p)|m|((c.coeffs[p as usize]<0) as u64)<<k)};
             let t1=std::array::from_fn(|_|std::array::from_fn(|_|if iteration==0 {1023} else {(rng.next_u64()%1024) as u16}));

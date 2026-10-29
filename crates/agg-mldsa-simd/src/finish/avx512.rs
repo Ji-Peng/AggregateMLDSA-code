@@ -109,7 +109,7 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
                 let start = 256 - pos as usize + base;
                 let sign = splat(-((c.neg >> k) as i32 & 1));
                 // Each partial sum has magnitude <= 39*1023 = 39897, safely in i32.
-                let v = load(window[start+0..start+16].try_into().unwrap());
+                let v = load(window[start..start+16].try_into().unwrap());
                 a0 = add(a0, sub(_mm512_xor_si512(v,sign),sign));
                 let v = load(window[start+16..start+32].try_into().unwrap());
                 a1 = add(a1, sub(_mm512_xor_si512(v,sign),sign));
@@ -142,7 +142,7 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
                 let v = load(window[start+240..start+256].try_into().unwrap());
                 a15 = add(a15, sub(_mm512_xor_si512(v,sign),sign));
             }
-            store((&mut dest[base+0..base+16]).try_into().unwrap(), _mm512_sllv_epi32(a0,splat(shift as i32)));
+            store((&mut dest[base..base+16]).try_into().unwrap(), _mm512_sllv_epi32(a0,splat(shift as i32)));
             store((&mut dest[base+16..base+32]).try_into().unwrap(), _mm512_sllv_epi32(a1,splat(shift as i32)));
             store((&mut dest[base+32..base+48]).try_into().unwrap(), _mm512_sllv_epi32(a2,splat(shift as i32)));
             store((&mut dest[base+48..base+64]).try_into().unwrap(), _mm512_sllv_epi32(a3,splat(shift as i32)));
@@ -218,7 +218,7 @@ pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Resu
         put_bytes((&mut out.w1[i..i+16]).try_into().unwrap(),w);
     }}; }
     for base in (0..256).step_by(32) {
-        step!(base+0);
+        step!(base);
         step!(base+16);
     }
     if bad_q != 0 { Err(FinishError::Quotient) }
