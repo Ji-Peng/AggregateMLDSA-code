@@ -26,9 +26,9 @@ fn permutations<const W: usize>(mut permute: impl FnMut(&mut lanes::State<W>)) {
             keccak::f1600(lane);
         }
         permute(&mut state);
-        for lane in 0..W {
-            for word in 0..25 {
-                assert_eq!(state.0[word][lane], expected[lane][word]);
+        for (lane, expected) in expected.iter().enumerate() {
+            for (word, value) in state.0.iter().zip(expected) {
+                assert_eq!(word[lane], *value);
             }
         }
     }
@@ -82,7 +82,7 @@ fn check(jobs: &[XofJob<'_>], limits: &[usize]) {
             out
         })
         .collect();
-    for backend in [Backend::Avx2, Backend::Avx512] {
+    for backend in [Backend::Scalar, Backend::Avx2, Backend::Avx512] {
         let Some(engine) = Engine::new(backend) else {
             continue;
         };
@@ -186,25 +186,19 @@ fn c_permutation_oracles() {
         });
     }
     if Engine::new(Backend::Avx512).is_some() {
-        for hybrid in [true] {
-            permutations::<8>(|state| {
-                let mut c = Aligned([0u64; 200]);
-                for word in 0..25 {
-                    for lane in 0..8 {
-                        c.0[word * 8 + lane] = state.0[word][lane];
-                    }
+        permutations::<8>(|state| {
+            let mut c = Aligned([0u64; 200]);
+            for word in 0..25 {
+                for lane in 0..8 {
+                    c.0[word * 8 + lane] = state.0[word][lane];
                 }
-                if hybrid {
-                    agg_mldsa_cref::xurq_keccak8x_permute(&mut c.0);
-                } else {
-                    agg_mldsa_cref::keccak_p1600_times8_permute_all_24rounds(&mut c.0);
+            }
+            agg_mldsa_cref::xurq_keccak8x_permute(&mut c.0);
+            for word in 0..25 {
+                for lane in 0..8 {
+                    state.0[word][lane] = c.0[word * 8 + lane];
                 }
-                for word in 0..25 {
-                    for lane in 0..8 {
-                        state.0[word][lane] = c.0[word * 8 + lane];
-                    }
-                }
-            });
-        }
+            }
+        });
     }
 }

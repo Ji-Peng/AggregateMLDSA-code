@@ -1,11 +1,15 @@
-//! 4-way Keccak-f[1600] and SHAKE extraction.
+//! 4-way Keccak-f[1600], lane absorption and block extraction (AVX2).
 //!
-//! Based on the CC0 XKCP permutation and pq-crystals' CC0 f1600x4,
-//! with the rotating register names and row schedule used by Xurong Qi's
-//! Hybrid-SHA-3 implementation (translated with the authors' permission).
+//! The permutation is an instruction-by-instruction intrinsics translation of
+//! pq-crystals' `f1600x4.S` (CC0; derived from Bas Westerbaan's 4-way SHAKE and
+//! XKCP, Keccak designed by Guido Bertoni, Joan Daemen, Michael Peeters and
+//! Gilles Van Assche): the variables `y0..y15` are its YMM registers, the state
+//! stays in memory between rows, rotations are shift/shift/or with `vpshufb`
+//! for the byte rotations by 8 and 56, and chi uses `vpandn`. The extraction
+//! transposes 4x4 word tiles with `unpack` and `permute2x128`.
 
 use super::{
-    lanes::{self, Kernel, State},
+    lanes::{self, Input, Kernel, State},
     Sink, XofJob,
 };
 use crate::poly::Block;
@@ -28,80 +32,112 @@ fn store(word: &mut [u64; 4], value: __m256i) {
     unsafe { _mm256_storeu_si256(word.as_mut_ptr().cast(), value) }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-fn extract(state: &State<4>, blocks: &mut [Block; 4], rate: usize) {
-    if rate == 168 {
-        extract_rate::<168>(state, blocks);
-    } else {
-        extract_rate::<136>(state, blocks);
-    }
-}
-
+/// Expands bits 0..4 of `mask` to all-ones 64-bit lanes.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2")]
-fn extract_rate<const RATE: usize>(state: &State<4>, blocks: &mut [Block; 4]) {
-    let rate = RATE;
-    // Transpose whole register tiles; handle the last one to five words separately.
-    let words = rate / 8;
-    let tiled = words / 4 * 4;
-    for base in (0..tiled).step_by(4) {
-        let a = load(&state.0[base]);
-        let b = load(&state.0[base + 1]);
-        let c = load(&state.0[base + 2]);
-        let d = load(&state.0[base + 3]);
-        let t0 = _mm256_unpacklo_epi64(a, b);
-        let t1 = _mm256_unpackhi_epi64(a, b);
-        let t2 = _mm256_unpacklo_epi64(c, d);
-        let t3 = _mm256_unpackhi_epi64(c, d);
-        let dst: &mut [u8; 32] = (&mut blocks[0].bytes[base * 8..(base + 4) * 8])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store fits exactly in the checked output subarray.
-        unsafe {
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().cast(),
-                _mm256_permute2x128_si256::<0x20>(t0, t2),
-            )
-        };
-        let dst: &mut [u8; 32] = (&mut blocks[1].bytes[base * 8..(base + 4) * 8])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store fits exactly in the checked output subarray.
-        unsafe {
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().cast(),
-                _mm256_permute2x128_si256::<0x20>(t1, t3),
-            )
-        };
-        let dst: &mut [u8; 32] = (&mut blocks[2].bytes[base * 8..(base + 4) * 8])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store fits exactly in the checked output subarray.
-        unsafe {
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().cast(),
-                _mm256_permute2x128_si256::<0x31>(t0, t2),
-            )
-        };
-        let dst: &mut [u8; 32] = (&mut blocks[3].bytes[base * 8..(base + 4) * 8])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store fits exactly in the checked output subarray.
-        unsafe {
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().cast(),
-                _mm256_permute2x128_si256::<0x31>(t1, t3),
-            )
-        };
-    }
-    for (lane, block) in blocks.iter_mut().enumerate() {
-        for word in tiled..words {
-            block.bytes[word * 8..word * 8 + 8].copy_from_slice(&state.0[word][lane].to_le_bytes());
+fn lane_mask(mask: u8) -> __m256i {
+    let bits = _mm256_setr_epi64x(1, 2, 4, 8);
+    let mask = _mm256_cmpeq_epi64(
+        _mm256_and_si256(_mm256_set1_epi64x(mask as i64), bits),
+        bits,
+    );
+    // Hide the mask from the optimiser: masking a state word that is then stored
+    // would otherwise become a masked store (`vpmaskmovq`), and the following
+    // permutation's full-width loads cannot forward from it.
+    core::hint::black_box(mask)
+}
+
+/// Clears the `fresh` lanes, then XORs each input's whole words into its lane.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) fn absorb(state: &mut State<4>, fresh: u8, inputs: &[Input<'_>], pad16: u8, pad20: u8) {
+    if fresh != 0 {
+        let keep = lane_mask(!fresh);
+        for word in &mut state.0 {
+            store(word, _mm256_and_si256(load(word), keep));
         }
-        block.bytes[rate..].fill(0);
     }
+    for input in inputs {
+        let lane = lane_mask(1 << input.lane);
+        for (word, bytes) in state.0.iter_mut().zip(input.words.as_chunks::<8>().0) {
+            let x = _mm256_set1_epi64x(i64::from_le_bytes(*bytes));
+            store(
+                word,
+                _mm256_xor_si256(load(word), _mm256_and_si256(x, lane)),
+            );
+        }
+        if input.tail != 0 {
+            let word = &mut state.0[input.words.len() / 8];
+            let x = _mm256_set1_epi64x(input.tail as i64);
+            store(
+                word,
+                _mm256_xor_si256(load(word), _mm256_and_si256(x, lane)),
+            );
+        }
+    }
+    let pad = _mm256_set1_epi64x(i64::MIN);
+    for (w, mask) in [(16, pad16), (20, pad20)] {
+        if mask != 0 {
+            let x = _mm256_and_si256(pad, lane_mask(mask));
+            let v = load(&state.0[w]);
+            store(&mut state.0[w], _mm256_xor_si256(v, x));
+        }
+    }
+}
+
+/// Transposes four state words into one 32-byte row of each of the four blocks.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+fn transpose_store(
+    a: __m256i,
+    b: __m256i,
+    c: __m256i,
+    d: __m256i,
+    blocks: &mut [Block; 4],
+    tile: usize,
+) {
+    let t0 = _mm256_unpacklo_epi64(a, b);
+    let t1 = _mm256_unpackhi_epi64(a, b);
+    let t2 = _mm256_unpacklo_epi64(c, d);
+    let t3 = _mm256_unpackhi_epi64(c, d);
+    let rows = [
+        _mm256_permute2x128_si256::<0x20>(t0, t2),
+        _mm256_permute2x128_si256::<0x20>(t1, t3),
+        _mm256_permute2x128_si256::<0x31>(t0, t2),
+        _mm256_permute2x128_si256::<0x31>(t1, t3),
+    ];
+    for (block, row) in blocks.iter_mut().zip(rows) {
+        let dst: &mut [u8; 32] = (&mut block.bytes[tile * 32..tile * 32 + 32])
+            .try_into()
+            .unwrap();
+        // SAFETY: The store covers exactly the checked 32-byte subarray.
+        unsafe { _mm256_storeu_si256(dst.as_mut_ptr().cast(), row) };
+    }
+}
+
+/// Writes bytes 0..192 of every block; words 17..20 only for the `wide` lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
+    let s = &state.0;
+    for tile in 0..4 {
+        let w = 4 * tile;
+        transpose_store(
+            load(&s[w]),
+            load(&s[w + 1]),
+            load(&s[w + 2]),
+            load(&s[w + 3]),
+            blocks,
+            tile,
+        );
+    }
+    let keep = lane_mask(wide);
+    let w = |i: usize| _mm256_and_si256(load(&s[i]), keep);
+    let zero = _mm256_setzero_si256();
+    transpose_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);
+    transpose_store(w(20), zero, zero, zero, blocks, 5);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -113,9 +149,10 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
         Kernel {
             // Closures inherit the enclosing target features.
             permute: |state: &mut State<4>| permute(state),
-            // The same target features cover extraction.
-            extract: |state: &State<4>, blocks: &mut [Block; 4], rate| extract(state, blocks, rate),
-            clear: |state: &mut State<4>, mask| clear(state, mask),
+            absorb: |state: &mut State<4>, fresh, inputs: &[Input<'_>], pad16, pad20| {
+                absorb(state, fresh, inputs, pad16, pad20)
+            },
+            extract: |state: &State<4>, blocks: &mut [Block; 4], wide| extract(state, blocks, wide),
         },
     );
 }
@@ -259,7 +296,7 @@ pub(crate) fn permute(state: &mut State<4>) {
         y15 = _mm256_xor_si256(y15, y10);
         y7 = _mm256_xor_si256(y7, y11);
         y6 = _mm256_xor_si256(y6, y12);
-        y8 = _mm256_set1_epi64x(RC[round + 0] as i64);
+        y8 = _mm256_set1_epi64x(RC[round] as i64);
         y13 = _mm256_xor_si256(y13, y8);
         store(&mut state.0[0], y13);
         store(&mut state.0[6], y14);
@@ -1047,20 +1084,5 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[22], y15);
         store(&mut state.0[23], y7);
         store(&mut state.0[24], y6);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline]
-#[target_feature(enable = "avx2")]
-fn clear(state: &mut State<4>, mask: u8) {
-    let keep = _mm256_set_epi64x(
-        if mask & 8 == 0 { -1 } else { 0 },
-        if mask & 4 == 0 { -1 } else { 0 },
-        if mask & 2 == 0 { -1 } else { 0 },
-        if mask & 1 == 0 { -1 } else { 0 },
-    );
-    for word in &mut state.0 {
-        store(word, _mm256_and_si256(load(word), keep));
     }
 }
