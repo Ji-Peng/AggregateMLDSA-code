@@ -3,13 +3,19 @@ use crate::params::{PrimeConsts, CONSTS_P2, CONSTS_Q};
 
 #[repr(C, align(64))]
 pub(super) struct Lanes(pub [i32; 16]);
+#[repr(C)]
 pub(super) struct Tables {
     pub z: [Lanes; 64],
     pub zi: [Lanes; 64],
     pub iz: [Lanes; 64],
     pub izi: [Lanes; 64],
+    pub scale: [Lanes; 2],
+    pub scale_i: [Lanes; 2],
+    pub last: [Lanes; 2],
+    pub last_i: [Lanes; 2],
 }
 const fn pow(mut a: i64, mut n: u32, p: i64) -> i64 {
+    a %= p;
     let mut r = 1;
     while n != 0 {
         if n & 1 != 0 {
@@ -56,6 +62,10 @@ pub(super) const fn exchange(
 }
 const fn make(c: PrimeConsts) -> Tables {
     let mut t = Tables {
+        scale: [const { Lanes([0; 16]) }; 2],
+        scale_i: [const { Lanes([0; 16]) }; 2],
+        last: [const { Lanes([0; 16]) }; 2],
+        last_i: [const { Lanes([0; 16]) }; 2],
         iz: [const { Lanes([0; 16]) }; 64],
         izi: [const { Lanes([0; 16]) }; 64],
         z: [const { Lanes([0; 16]) }; 64],
@@ -110,6 +120,22 @@ const fn make(c: PrimeConsts) -> Tables {
         }
         stage += 1;
     }
+    let mut i = 0;
+    while i < 2 {
+        let f = if i == 0 { c.inv_plain } else { c.inv_mont };
+        // Fuse the last inverse root with the requested normalization.
+        let root = (t.iz[0].0[0] as i64).rem_euclid(c.p as i64);
+        let r_inverse = pow(1i64 << 32, c.p as u32 - 2, c.p as i64);
+        let last = centered(
+            root * f as i64 % (c.p as i64) * r_inverse % (c.p as i64),
+            c.p as i64,
+        );
+        t.scale[i] = Lanes([f; 16]);
+        t.scale_i[i] = Lanes([f.wrapping_mul(c.pinv); 16]);
+        t.last[i] = Lanes([last; 16]);
+        t.last_i[i] = Lanes([last.wrapping_mul(c.pinv); 16]);
+        i += 1;
+    }
     t
 }
 pub(super) static Q: Tables = make(CONSTS_Q);
@@ -117,6 +143,7 @@ pub(super) static P2: Tables = make(CONSTS_P2);
 
 // Conservative integer bounds in natural coefficient order after each GS layer.
 // Each multiply uses |Mont(x*z)| <= ceil(|x*z|/2^32) + floor(p/2).
+// The short reduction of selected lanes leaves |x| < 0.61p.
 pub(super) const fn inverse_bounds() -> ([[i64; 256]; 8], [bool; 256]) {
     let p = CONSTS_P2.p as i64;
     let mut b = [p / 2; 256];
@@ -147,7 +174,10 @@ pub(super) const fn inverse_bounds() -> ([[i64; 256]; 8], [bool; 256]) {
             while j < 256 {
                 if b[j] > p {
                     reduce[j] = true;
-                    b[j] = (b[j] * 67_108_890 + ((1i64 << 32) - 1)) / (1i64 << 32) + p / 2;
+                    // Rounded x/2^25 followed by rounded division by five.
+                    // |n|<=41 and 6554/32768 differs from 1/5 by < 1/65536:
+                    // |x-q*p| < (0.5/5 + 0.5 + 41/65536)*p < 0.61p.
+                    b[j] = (61 * p + 99) / 100;
                 }
                 j += 1;
             }
@@ -174,6 +204,78 @@ pub(super) const fn reduction_mask(reg: usize) -> u16 {
 mod tests {
     use super::*;
     #[test]
+    fn short_reduction_bound() {
+        let p = CONSTS_P2.p as i64;
+        // Each rounded n corresponds to an interval of width 2^25. The
+        // residual is linear in x there, so checking its endpoints suffices.
+        for n in -41i64..=41 {
+            let q = (n * 6554 + (1 << 14)) >> 15;
+            for x in [n * (1 << 25) - (1 << 24), n * (1 << 25) + (1 << 24) - 1] {
+                if x.abs() <= 8 * p {
+                    assert!((x - q * p).abs() * 100 < 61 * p);
+                }
+            }
+        }
+    }
+    #[test]
+    fn inverse_bound_trace() {
+        let p = CONSTS_P2.p as i64;
+        let mut seed = 1u64;
+        for trial in 0..128 {
+            let mut a = [0i64; 256];
+            for (i, x) in a.iter_mut().enumerate() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *x = match trial {
+                    0 => p / 2,
+                    1 => -p / 2,
+                    2 => {
+                        if i % 2 == 0 {
+                            p / 2
+                        } else {
+                            -p / 2
+                        }
+                    }
+                    _ => seed as i64 % (p / 2),
+                };
+            }
+            for stage in 0..8 {
+                let len = 1 << stage;
+                for base in (0..256).step_by(2 * len) {
+                    let k = (512 >> (stage + 1)) - 1 - base / (2 * len);
+                    let z = -centered(
+                        pow(CONSTS_P2.zeta as i64, reverse8(k), p) * (1i64 << 32) % p,
+                        p,
+                    ) as i64;
+                    for j in base..base + len {
+                        let x = a[j];
+                        let y = a[j + len];
+                        assert!((x + y).abs() < 1i64 << 31);
+                        assert!((x - y).abs() < 1i64 << 31);
+                        a[j] = x + y;
+                        let product = (x - y) * z;
+                        let t = (product as i32).wrapping_mul(CONSTS_P2.pinv) as i64;
+                        a[j + len] = (product - t * p) >> 32;
+                    }
+                }
+                if stage == 3 {
+                    for i in 0..256 {
+                        if INVERSE_BOUNDS.1[i] {
+                            assert!(a[i].abs() <= 8 * p);
+                            let n = (a[i] + (1 << 24)) >> 25;
+                            let q = (n * 6554 + (1 << 14)) >> 15;
+                            a[i] -= q * p;
+                        }
+                    }
+                }
+                for i in 0..256 {
+                    assert!(a[i].abs() <= INVERSE_BOUNDS.0[stage][i]);
+                }
+            }
+        }
+    }
+    #[test]
     fn inverse_headroom() {
         for layer in INVERSE_BOUNDS.0 {
             for bound in layer {
@@ -183,3 +285,16 @@ mod tests {
         assert!(INVERSE_BOUNDS.1.iter().any(|&x| x));
     }
 }
+
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<Lanes>() == 64);
+    assert!(offset_of!(Tables, z) == 0);
+    assert!(offset_of!(Tables, zi) == 4096);
+    assert!(offset_of!(Tables, iz) == 8192);
+    assert!(offset_of!(Tables, izi) == 12288);
+    assert!(offset_of!(Tables, scale) == 16384);
+    assert!(offset_of!(Tables, scale_i) == 16384 + 128);
+    assert!(offset_of!(Tables, last) == 16384 + 256);
+    assert!(offset_of!(Tables, last_i) == 16384 + 384);
+};

@@ -197,3 +197,70 @@ fn c_reference() {
         assert_eq!(r, c);
     }
 }
+
+#[test]
+fn arbitrary_inverse_inputs() {
+    let Some(e) = engine() else { return };
+    let mut rng = SplitMix64::new(256);
+    for prime in [Prime::Q, Prime::P2] {
+        let p = consts(prime).p;
+        for trial in 0..64 {
+            let bound = if prime == Prime::Q { p - 1 } else { p / 2 };
+            let input = Poly32(core::array::from_fn(|i| match trial {
+                0 => bound,
+                1 => -bound,
+                2 => {
+                    if i & 1 == 0 {
+                        bound
+                    } else {
+                        -bound
+                    }
+                }
+                _ => (rng.next_u64() % (2 * bound as u64 + 1)) as i32 - bound,
+            }));
+            for form in [Form::Canonical, Form::Centered] {
+                let mut a = input;
+                e.order_from_fips(&mut a);
+                e.intt(prime, &mut a, Scale::Plain, form);
+                assert!(a.iter().all(|&x| if form == Form::Canonical {
+                    (0..p).contains(&x)
+                } else {
+                    x.abs() <= p / 2
+                }));
+                assert_poly_eq_mod_p(&oracle(prime, &a), &input, p);
+            }
+        }
+    }
+}
+#[test]
+fn dot4_accumulator_limits() {
+    let Some(e) = engine() else { return };
+    for prime in [Prime::Q, Prime::P2] {
+        let c = consts(prime);
+        let p = c.p as i64;
+        let a_bound = if prime == Prime::Q { p - 1 } else { p / 2 };
+        let b_bound = if prime == Prime::Q {
+            41 * p / 10
+        } else {
+            44 * p / 10
+        };
+        for sa in [-1i64, 1] {
+            for sb in [-1i64, 1] {
+                if prime == Prime::Q && sa < 0 {
+                    continue;
+                }
+                let a = [Poly32([(sa * a_bound) as i32; 256]); 4];
+                let b = [Poly32([(sb * b_bound) as i32; 256]); 4];
+                let product = 4 * sa * a_bound * sb * b_bound;
+                let t = (product as i32).wrapping_mul(c.pinv) as i64;
+                let mut expected = (product - t * p) >> 32;
+                if prime == Prime::P2 {
+                    expected = (expected + p / 2).rem_euclid(p) - p / 2;
+                }
+                let mut out = Poly32::zero();
+                e.dot4(prime, &a, &b, &mut out);
+                assert!(out.iter().all(|&x| x as i64 == expected));
+            }
+        }
+    }
+}

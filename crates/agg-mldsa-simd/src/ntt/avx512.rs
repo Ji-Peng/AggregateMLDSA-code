@@ -1,4 +1,4 @@
-//! AVX-512 NTT using the register schedule of Hybrid-SHA-3 by Xurong Xiao et al.
+//! AVX-512 NTT using the register schedule of Hybrid-SHA-3 (xurq5953).
 //! Translated with the authors' permission. Twiddles are generated from the roots
 //! and moduli; no external literal tables are embedded.
 
@@ -8,6 +8,8 @@ use crate::{
     poly::Poly32,
 };
 use core::arch::x86_64::*;
+#[path = "avx512_asm.rs"]
+mod allocated;
 #[path = "avx512_tables.rs"]
 mod tables;
 
@@ -39,9 +41,11 @@ fn mont(x: __m512i, z: __m512i, zi: __m512i, p: __m512i) -> __m512i {
     let o = _mm512_mul_epi32(odd, _mm512_srli_epi64::<32>(z));
     let te = _mm512_mul_epi32(x, zi);
     let to = _mm512_mul_epi32(odd, _mm512_srli_epi64::<32>(zi));
-    let e = _mm512_sub_epi64(e, _mm512_mul_epi32(te, p));
-    let o = _mm512_sub_epi64(o, _mm512_mul_epi32(to, p));
-    _mm512_mask_blend_epi32(0xaaaa, _mm512_srli_epi64::<32>(e), o)
+    // The low words cancel exactly, so no borrow crosses into the high
+    // words. Merge the odd high-word subtraction directly into the result.
+    let e = _mm512_sub_epi32(e, _mm512_mul_epi32(te, p));
+    let e = _mm512_srli_epi64::<32>(e);
+    _mm512_mask_sub_epi32(e, 0xaaaa, o, _mm512_mul_epi32(to, p))
 }
 // These exchanges are involutions; they preserve the coefficient storage layout.
 macro_rules! exchange {
@@ -69,10 +73,15 @@ macro_rules! exchange {
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
-    let t = match prime {
-        Prime::Q => &tables::Q,
-        Prime::P2 => &tables::P2,
-    };
+    allocated::forward(prime, a)
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+#[inline(never)]
+#[allow(dead_code)]
+fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
+    let prime = if SECOND { Prime::P2 } else { Prime::Q };
+    let t = if SECOND { &tables::P2 } else { &tables::Q };
     let p = _mm512_set1_epi32(consts(prime).p);
     // Lazy CT sums: starting at 2^22, every layer adds at most
     // p/2 + |z*x|/2^32; generated twiddles keep all outputs below 4.4p.
@@ -212,11 +221,17 @@ pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form) {
+    allocated::inverse(prime, a, scale, form)
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+#[inline(never)]
+#[allow(dead_code)]
+fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
+    let prime = if SECOND { Prime::P2 } else { Prime::Q };
+    let scale = if MONT { Scale::Mont } else { Scale::Plain };
     let c = consts(prime);
-    let t = match prime {
-        Prime::Q => &tables::Q,
-        Prime::P2 => &tables::P2,
-    };
+    let t = if SECOND { &tables::P2 } else { &tables::Q };
     let p = _mm512_set1_epi32(c.p);
     // GS sum chains double bounds; P2's selected long chains are reduced
     // after four layers. The generated bound table proves every lane < 2^31.
@@ -305,24 +320,31 @@ pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form
     bf!(b14, b15, 39);
     exchange!(b14, b15, 8);
     if prime == Prime::P2 {
-        let z = _mm512_set1_epi32(c.mont);
-        let zi = _mm512_set1_epi32(c.mont.wrapping_mul(c.pinv));
-        b0 = _mm512_mask_blend_epi32(tables::reduction_mask(0), b0, mont(b0, z, zi, p));
-        b1 = _mm512_mask_blend_epi32(tables::reduction_mask(1), b1, mont(b1, z, zi, p));
-        b2 = _mm512_mask_blend_epi32(tables::reduction_mask(2), b2, mont(b2, z, zi, p));
-        b3 = _mm512_mask_blend_epi32(tables::reduction_mask(3), b3, mont(b3, z, zi, p));
-        b4 = _mm512_mask_blend_epi32(tables::reduction_mask(4), b4, mont(b4, z, zi, p));
-        b5 = _mm512_mask_blend_epi32(tables::reduction_mask(5), b5, mont(b5, z, zi, p));
-        b6 = _mm512_mask_blend_epi32(tables::reduction_mask(6), b6, mont(b6, z, zi, p));
-        b7 = _mm512_mask_blend_epi32(tables::reduction_mask(7), b7, mont(b7, z, zi, p));
-        b8 = _mm512_mask_blend_epi32(tables::reduction_mask(8), b8, mont(b8, z, zi, p));
-        b9 = _mm512_mask_blend_epi32(tables::reduction_mask(9), b9, mont(b9, z, zi, p));
-        b10 = _mm512_mask_blend_epi32(tables::reduction_mask(10), b10, mont(b10, z, zi, p));
-        b11 = _mm512_mask_blend_epi32(tables::reduction_mask(11), b11, mont(b11, z, zi, p));
-        b12 = _mm512_mask_blend_epi32(tables::reduction_mask(12), b12, mont(b12, z, zi, p));
-        b13 = _mm512_mask_blend_epi32(tables::reduction_mask(13), b13, mont(b13, z, zi, p));
-        b14 = _mm512_mask_blend_epi32(tables::reduction_mask(14), b14, mont(b14, z, zi, p));
-        b15 = _mm512_mask_blend_epi32(tables::reduction_mask(15), b15, mont(b15, z, zi, p));
+        // |x|<=8p: rounded division by 2^25 and five leaves |r|<0.61p.
+        let bias = _mm512_set1_epi32(1 << 24);
+        let fifth = _mm512_set1_epi16(6554);
+        let red = |x| {
+            let n = _mm512_srai_epi32::<25>(_mm512_add_epi32(x, bias));
+            let q = _mm512_mulhrs_epi16(n, fifth);
+            let q = _mm512_srai_epi32::<16>(_mm512_slli_epi32::<16>(q));
+            _mm512_sub_epi32(x, _mm512_mullo_epi32(q, p))
+        };
+        b0 = _mm512_mask_blend_epi32(tables::reduction_mask(0), b0, red(b0));
+        b1 = _mm512_mask_blend_epi32(tables::reduction_mask(1), b1, red(b1));
+        b2 = _mm512_mask_blend_epi32(tables::reduction_mask(2), b2, red(b2));
+        b3 = _mm512_mask_blend_epi32(tables::reduction_mask(3), b3, red(b3));
+        b4 = _mm512_mask_blend_epi32(tables::reduction_mask(4), b4, red(b4));
+        b5 = _mm512_mask_blend_epi32(tables::reduction_mask(5), b5, red(b5));
+        b6 = _mm512_mask_blend_epi32(tables::reduction_mask(6), b6, red(b6));
+        b7 = _mm512_mask_blend_epi32(tables::reduction_mask(7), b7, red(b7));
+        b8 = _mm512_mask_blend_epi32(tables::reduction_mask(8), b8, red(b8));
+        b9 = _mm512_mask_blend_epi32(tables::reduction_mask(9), b9, red(b9));
+        b10 = _mm512_mask_blend_epi32(tables::reduction_mask(10), b10, red(b10));
+        b11 = _mm512_mask_blend_epi32(tables::reduction_mask(11), b11, red(b11));
+        b12 = _mm512_mask_blend_epi32(tables::reduction_mask(12), b12, red(b12));
+        b13 = _mm512_mask_blend_epi32(tables::reduction_mask(13), b13, red(b13));
+        b14 = _mm512_mask_blend_epi32(tables::reduction_mask(14), b14, red(b14));
+        b15 = _mm512_mask_blend_epi32(tables::reduction_mask(15), b15, red(b15));
     }
     bf!(b0, b1, 24);
     bf!(b2, b3, 25);
@@ -466,5 +488,51 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
         let y = load(a, reg + 1);
         store(a, reg, _mm512_permutex2var_epi32(x, lo, y));
         store(a, reg + 1, _mm512_permutex2var_epi32(x, hi, y));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::{Backend, Engine};
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+    fn compare_intrinsics() {
+        for prime in [Prime::Q, Prime::P2] {
+            let input = Poly32(core::array::from_fn(|i| i as i32 * 32513 - (1 << 22)));
+            let mut a = input;
+            let mut b = input;
+            allocated::forward(prime, &mut a);
+            match prime {
+                Prime::Q => ntt_impl::<false>(&mut b),
+                Prime::P2 => ntt_impl::<true>(&mut b),
+            }
+            assert_eq!(a, b);
+            // Reduce before GS so the inverse starts within its proven range.
+            let p = consts(prime).p as i64;
+            for x in a.iter_mut() {
+                *x = ((*x as i64 + p / 2).rem_euclid(p) - p / 2) as i32;
+            }
+            for scale in [Scale::Plain, Scale::Mont] {
+                for form in [Form::Centered, Form::Canonical] {
+                    let mut x = a;
+                    let mut y = a;
+                    allocated::inverse(prime, &mut x, scale, form);
+                    match (prime, scale) {
+                        (Prime::Q, Scale::Plain) => intt_impl::<false, false>(&mut y, form),
+                        (Prime::Q, Scale::Mont) => intt_impl::<false, true>(&mut y, form),
+                        (Prime::P2, Scale::Plain) => intt_impl::<true, false>(&mut y, form),
+                        (Prime::P2, Scale::Mont) => intt_impl::<true, true>(&mut y, form),
+                    }
+                    assert_eq!(x, y);
+                }
+            }
+        }
+    }
+    #[test]
+    fn intrinsics_match_allocated_registers() {
+        if Engine::new(Backend::Avx512).is_some() {
+            // SAFETY: Engine construction checked every required CPU feature.
+            unsafe { compare_intrinsics() }
+        }
     }
 }
