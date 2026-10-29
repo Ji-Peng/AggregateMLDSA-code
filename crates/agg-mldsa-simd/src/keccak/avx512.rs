@@ -56,6 +56,13 @@ fn rotate<const N: i32>(x: __m512i) -> __m512i {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) fn permute(state: &mut State<8>) {
+    // A 64-byte aligned local makes LLVM realign the frame, which aligns the
+    // loop's register spill slots: an unaligned 64-byte slot that straddles a
+    // 4 KiB page boundary makes every spill a page split.
+    #[repr(align(64))]
+    struct Line(u64);
+    let mut line = Line(0);
+    core::hint::black_box(&mut line.0);
     let mut a0 = load(&state.0[0]);
     let mut a1 = load(&state.0[1]);
     let mut a2 = load(&state.0[2]);

@@ -871,6 +871,40 @@ fn main() {
                 || shake(&engine, &jobs, &mut counts, &limits),
                 || c_shake(w, &mut c4.0, &mut c8.0, &mut out, input),
             );
+            // Information only (no verdict): each side's SHAKE128 34B/5 run over
+            // its own five bare permutations, i.e. the absorb, squeeze and
+            // extraction overhead of the C reference and of the scheduler.
+            let mut d4 = Aligned([0u64; 100]);
+            let mut d8 = Aligned([0u64; 200]);
+            let c_over = pair_ratio(
+                50,
+                || c_shake(w, &mut c4.0, &mut c8.0, &mut out, input),
+                || {
+                    for _ in 0..5 {
+                        if w == 4 {
+                            agg_mldsa_cref::f1600x4(black_box(&mut d4.0))
+                        } else {
+                            agg_mldsa_cref::xurq_keccak8x_permute(black_box(&mut d8.0))
+                        }
+                    }
+                },
+            );
+            let rust_over = pair_ratio(
+                50,
+                || shake(&engine, &jobs, &mut counts, &limits),
+                || {
+                    for _ in 0..5 {
+                        if w == 4 {
+                            rust4(&mut s4)
+                        } else {
+                            rust8(&mut s8)
+                        }
+                    }
+                },
+            );
+            println!(
+                "info {backend:?}: SHAKE128 34B/5 over its own 5 bare permutations: C {c_over:.3}, Rust {rust_over:.3} (median of paired ratios)"
+            );
         }
         #[cfg(not(cref))]
         {
