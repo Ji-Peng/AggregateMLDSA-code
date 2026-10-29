@@ -129,23 +129,27 @@ impl PublicInstance {
         inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
     ) -> Result<Self, InstanceError> {
         let geom = Geometry::new(inputs.len()).map_err(InstanceError::Geometry)?;
+        // Full-key dedup; `slot[i]` is the distinct key of record i (each key hashed once).
         let mut distinct: Vec<&[u8]> = Vec::new();
         let mut index: HashMap<&[u8], usize> = HashMap::new();
-        for (pk, _, _) in inputs {
-            index.entry(pk).or_insert_with(|| {
-                distinct.push(pk);
-                distinct.len() - 1
-            });
-        }
+        let slot: Vec<usize> = inputs
+            .iter()
+            .map(|(pk, _, _)| {
+                *index.entry(pk).or_insert_with(|| {
+                    distinct.push(pk);
+                    distinct.len() - 1
+                })
+            })
+            .collect();
         let keys: Vec<Option<Arc<ExpandedKey>>> = ExpandedKey::many_with(engine, &distinct)
             .into_iter()
             .map(|key| key.map(Arc::new))
             .collect();
         // The first record whose key does not decode, as the serial order finds it.
-        if let Some(i) = inputs.iter().position(|(pk, _, _)| keys[index[pk]].is_none()) {
+        if let Some(i) = slot.iter().position(|&k| keys[k].is_none()) {
             return Err(InstanceError::PublicKey(i));
         }
-        let key_of = |pk: &[u8]| Arc::clone(keys[index[pk]].as_ref().expect("checked above"));
+        let key_of = |i: usize| Arc::clone(keys[slot[i]].as_ref().expect("checked above"));
         // Per tile of records: one batch of mu digests, one of SampleInBall streams, then T
         // straight into the flat buffer (fresh zeroed pages, first touched by the writers).
         let mut mus = vec![[0u8; TR_BYTES]; inputs.len()];
@@ -155,8 +159,11 @@ impl PublicInstance {
             .zip(challenges.par_chunks_mut(RECORD_TILE))
             .zip(t.par_chunks_mut(RECORD_TILE * K * N))
             .zip(inputs.par_chunks(RECORD_TILE))
-            .for_each(|(((mus, challenges), t), tile)| {
-                let tile_keys: Vec<Arc<ExpandedKey>> = tile.iter().map(|(pk, _, _)| key_of(pk)).collect();
+            .enumerate()
+            .for_each(|(n, (((mus, challenges), t), tile))| {
+                let first = n * RECORD_TILE;
+                let tile_keys: Vec<&ExpandedKey> =
+                    (first..first + tile.len()).map(|i| keys[slot[i]].as_deref().expect("checked above")).collect();
                 let mu_inputs: Vec<[&[u8]; 4]> = tile_keys
                     .iter()
                     .zip(tile)
@@ -177,8 +184,8 @@ impl PublicInstance {
             .zip(challenges)
             .zip(inputs)
             .enumerate()
-            .map(|(i, ((mu, c), (pk, msg, c_tilde)))| PublicRecord {
-                key: key_of(pk),
+            .map(|(i, ((mu, c), (_, msg, c_tilde)))| PublicRecord {
+                key: key_of(i),
                 msg: msg.to_vec(),
                 c_tilde: *c_tilde,
                 mu,
