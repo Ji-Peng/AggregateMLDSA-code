@@ -59,6 +59,11 @@ vmovdqa		(agg_avx2__INV+32*(\n)+16)*4(%rsi),%ymm\az
 vmovdqa		(agg_avx2__INV+32*(\n)+24)*4(%rsi),%ymm\bz
 .endm
 
+/* Forward butterfly: r = (h z - t p) / 2^32 with t = lo32(h z pinv), then
+   (l + r, l - r). The two 64-bit products share their low words, so a
+   32-bit subtraction leaves r in the high word; subtracting before the
+   lane merge needs one merge instead of the reference's two, with the
+   same 32-bit results. |r| <= |h z|/2^32 + p/2. */
 .macro agg_avx2_butterfly l,h,zl0=1,zl1=1,zh0=2,zh1=2
 vpmuldq		%ymm\zl0,%ymm\h,%ymm13
 vmovshdup	%ymm\h,%ymm12
@@ -70,17 +75,14 @@ vpmuldq		%ymm\zh1,%ymm12,%ymm12
 vpmuldq		%ymm0,%ymm13,%ymm13
 vpmuldq		%ymm0,%ymm14,%ymm14
 
+vpsubd		%ymm13,%ymm\h,%ymm\h
+vpsubd		%ymm14,%ymm12,%ymm12
+
 vmovshdup	%ymm\h,%ymm\h
-vpblendd	$0xAA,%ymm12,%ymm\h,%ymm\h
+vpblendd	$0xAA,%ymm12,%ymm\h,%ymm12
 
-vpsubd		%ymm\h,%ymm\l,%ymm12
-vpaddd		%ymm\h,%ymm\l,%ymm\l
-
-vmovshdup	%ymm13,%ymm13
-vpblendd	$0xAA,%ymm14,%ymm13,%ymm13
-
-vpaddd		%ymm13,%ymm12,%ymm\h
-vpsubd		%ymm13,%ymm\l,%ymm\l
+vpsubd		%ymm12,%ymm\l,%ymm\h
+vpaddd		%ymm12,%ymm\l,%ymm\l
 .endm
 
 .macro agg_avx2_levels0t1 off
@@ -252,7 +254,9 @@ ret
 /* Four products of 16 coefficients. a's odd words are shifted down; b's odd
    words are read from b + 4 bytes, since vpmuldq only reads the even word of
    each qword. On the final b block that read would pass the end of b, so
-   `last` takes b's odd words with vmovshdup instead. */
+   `last` takes b's odd words with vmovshdup instead. (Reading a's odd words
+   at a + 4 as well was slower: the extra cache-line-split loads cost more
+   than the shifts they save.) */
 .macro agg_avx2_pointwise off,d0,d1,d2,d3,last=0
 vmovdqa		\off(%rsi),%ymm\d0
 vmovdqa		\off+32(%rsi),%ymm\d2

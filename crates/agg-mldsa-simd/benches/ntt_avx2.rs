@@ -115,14 +115,20 @@ fn compare(mut r: impl FnMut(), mut c: impl FnMut(), name: &str, limit: f64) -> 
     let rm = rs[rs.len() / 2];
     let cm = cs[cs.len() / 2];
     let ratio = rm / cm;
+    // The gate uses medians; the minima are a diagnostic that preemption by
+    // other processes on the same core cannot inflate.
+    let min_ratio = rs[0] / cs[0];
     println!(
-        "{name:<24} {rm:9.2} {cm:9.2} {ratio:7.3} limit {limit:.2} {}",
-        if ratio <= limit { "PASS" } else { "FAIL" }
+        "{name:<24} {rm:9.2} {cm:9.2} {ratio:7.3} limit {limit:.2} {}  (min {:.2} {:.2} {min_ratio:.3})",
+        if ratio <= limit { "PASS" } else { "FAIL" },
+        rs[0],
+        cs[0],
     );
     ratio <= limit
 }
 fn main() {
     common::print_system_info();
+    println!("kernel                   rust med    C med   ratio  (min rust, min C, min ratio)");
     let Some(e) = Engine::new(Backend::Avx2) else {
         eprintln!("Skipping: AVX2/POPCNT unavailable");
         return;
