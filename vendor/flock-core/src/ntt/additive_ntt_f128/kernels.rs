@@ -81,6 +81,30 @@ pub(super) fn butterfly_fused_2layer(
     butterfly_fused_2layer_portable(a, b, c, d, t_outer, t_inner_a, t_inner_b);
 }
 
+/// One layer over a lane-blocked block (`block.len() == 8 half` words, position `i` =
+/// words `4i .. 4i + 4`): positions `i` and `i + half` butterflied with `twiddle` (the
+/// row-pair kernel on the two halves: word `w` of the top half pairs word `w` of the
+/// bottom half).
+#[inline]
+pub(super) fn blocked4_layer(block: &mut [F128], twiddle: F128) {
+    debug_assert!(block.len().is_multiple_of(8));
+    let (top, bot) = block.split_at_mut(block.len() / 2);
+    butterfly_row_pair(top, bot, twiddle);
+}
+
+/// Two layers over a lane-blocked block of `4 quarter` positions: layer L pairs
+/// quarters (1, 3) and (2, 4) with `t_outer`, layer L+1 pairs (1, 2) with `t_inner_a`
+/// and (3, 4) with `t_inner_b`.
+#[inline]
+pub(super) fn blocked4_fused_2layer(block: &mut [F128], t_outer: F128, t_inner_a: F128, t_inner_b: F128) {
+    debug_assert!(block.len().is_multiple_of(16));
+    let quarter = block.len() / 4;
+    let (h1, h2) = block.split_at_mut(2 * quarter);
+    let (a, b) = h1.split_at_mut(quarter);
+    let (c, d) = h2.split_at_mut(quarter);
+    butterfly_fused_2layer(a, b, c, d, t_outer, t_inner_a, t_inner_b);
+}
+
 /// Fused three-layer (8-point) butterfly over one row group. Portable on
 /// every target: the kernel is deliberately scalar-per-lane (compiler ILP —
 /// see the fused-2 lane-batching regression note) and the x86 AVX-512 path

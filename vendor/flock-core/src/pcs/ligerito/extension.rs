@@ -10,6 +10,7 @@
 //! `u^b B(x)`. Consequently each recursive level spends one fold round on the
 //! coordinate bit and removes only `k - 1` variables from the extension table.
 
+use crate::pcs::commit::CodewordRows;
 use std::{
     env::{var, var_os},
     mem::replace,
@@ -2055,7 +2056,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     packed_witness: Vec<F128>,
     mut b_initial: Vec<F128>,
     mut target: F128,
-    l0_codeword: &[F128],
+    l0_codeword: CodewordRows<'_>,
     l0_tree: &[Hash],
     l0_num_lanes: usize,
     l0_lane_major: bool,
@@ -2090,7 +2091,8 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     let log_inv_rate_0 = config.log_inv_rates[0];
     let log_msg_cols_0 = log_n - initial_k;
     let block_len_0 = 1usize << (log_msg_cols_0 + log_inv_rate_0);
-    assert_eq!(l0_codeword.len(), block_len_0 * l0_num_lanes);
+    assert_eq!(l0_codeword.positions(), block_len_0);
+    assert_eq!(l0_codeword.lanes(), l0_num_lanes);
     assert_eq!(l0_tree.len(), 2 * block_len_0 - 1);
     let fold_block = if l0_lane_major {
         1usize << log_msg_cols_0
@@ -2122,7 +2124,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     let claim_bits = |level: usize| config.claim_batch_grinding_bits[level] as u32;
     let consistency_bits = |level: usize| config.consistency_batch_grinding_bits[level] as u32;
     let ood_count = |level: usize| config.ood_samples[level];
-    let l0_row = |q: usize| &l0_codeword[q * l0_num_lanes..(q + 1) * l0_num_lanes];
+    let l0_row = |q: usize| l0_codeword.row(q);
 
     let mut ood_values = Vec::new();
     let mut claim_batch_grinding_nonces = Vec::new();
@@ -2482,7 +2484,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
         t_grind += _t.elapsed();
     }
     let _t = Instant::now();
-    let opened_rows_0: Vec<Vec<F128>> = queries_0.iter().map(|&q| l0_row(q).to_vec()).collect();
+    let opened_rows_0: Vec<Vec<F128>> = queries_0.iter().map(|&q| l0_row(q)).collect();
     let initial_proof = RecursiveProof {
         opened_rows: opened_rows_0.clone(),
         merkle_proof: merkle_paths_for(l0_tree, block_len_0, &queries_0, strat(0)),

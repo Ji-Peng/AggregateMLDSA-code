@@ -80,6 +80,8 @@ use crate::{
     },
 };
 mod kernels;
+mod lane_blocked;
+pub use lane_blocked::{LANES_PER_GROUP, lane_blocked_ok};
 
 /// Compute the normalized subspace-polynomial evaluation table.
 ///

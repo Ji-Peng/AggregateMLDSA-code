@@ -30,6 +30,7 @@
 //!    b. Last step: send remaining poly + open f^i.
 //!    c. Else: commit f^{i+2}, open f^{i+1}, induce next basis, glue.
 
+use crate::pcs::commit::CodewordRows;
 use core::{mem::size_of, slice::from_raw_parts};
 use crate::challenger::CanonicalPow;
 use std::{
@@ -4773,7 +4774,7 @@ pub fn recursive_prover_with_basis<Ch: Challenger>(
     packed_witness: Vec<F128>,
     b_initial: Vec<F128>,
     target: F128,
-    l0_codeword: &[F128],
+    l0_codeword: CodewordRows<'_>,
     l0_tree: &[Hash],
     challenger: &mut Ch,
 ) -> LigeritoProof {
@@ -4806,7 +4807,7 @@ pub fn recursive_prover_with_basis_precomputed_round0<Ch: Challenger>(
     packed_witness: Vec<F128>,
     b_initial: Vec<F128>,
     target: F128,
-    l0_codeword: &[F128],
+    l0_codeword: CodewordRows<'_>,
     l0_tree: &[Hash],
     round0_uv: (F128, F128),
     round1_lookahead: Option<FoldLookahead>,
@@ -4849,7 +4850,7 @@ pub(crate) fn recursive_prover_with_basis_precomputed_round0_lanes<Ch: Challenge
     packed_witness: Vec<F128>,
     b_initial: Vec<F128>,
     target: F128,
-    l0_codeword: &[F128],
+    l0_codeword: CodewordRows<'_>,
     l0_tree: &[Hash],
     l0_num_lanes: usize,
     l0_lane_major: bool,
@@ -5501,6 +5502,8 @@ mod tests {
         mem::take,
         time::{Duration, Instant},
     };
+
+    use crate::pcs::commit::CodewordRows;
 
     use bincode::{deserialize, serialize};
     use serde_json::{from_str, to_string_pretty};
@@ -6257,7 +6260,7 @@ mod tests {
             poly.clone(),
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -6405,7 +6408,7 @@ mod tests {
                 poly.clone(),
                 b.clone(),
                 target,
-                &wtns_0.mat,
+                CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
                 &wtns_0.tree,
                 &mut p_ch,
             );
@@ -7513,7 +7516,7 @@ mod tests {
                 f.clone(),
                 b.clone(),
                 target,
-                &wtns.mat,
+                CodewordRows::interleaved(&wtns.mat, wtns.num_interleaved),
                 &wtns.tree,
                 (first.u_0, first.u_2),
                 la,
@@ -7609,7 +7612,7 @@ mod tests {
             poly.clone(),
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -8052,7 +8055,7 @@ mod tests {
             poly.clone(),
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -8198,7 +8201,7 @@ mod tests {
             poly.clone(),
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -8338,7 +8341,7 @@ mod tests {
             poly,
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -8429,7 +8432,7 @@ mod tests {
             poly,
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );
@@ -8511,7 +8514,7 @@ mod tests {
                     poly,
                     b.clone(),
                     target,
-                    &wtns_0.mat,
+                    CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
                     &wtns_0.tree,
                     &mut p_ch,
                 );
@@ -8629,7 +8632,7 @@ mod tests {
             poly.clone(),
             b.clone(),
             target,
-            &wtns_0.mat,
+            CodewordRows::interleaved(&wtns_0.mat, wtns_0.num_interleaved),
             &wtns_0.tree,
             &mut p_ch,
         );

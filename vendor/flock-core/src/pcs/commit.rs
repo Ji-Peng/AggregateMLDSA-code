@@ -31,7 +31,10 @@ use crate::{
     lincheck::LincheckGrinding,
     matrix_fold::FoldGrinding,
     merkle::{self, Hash, HashKind},
-    ntt::AdditiveNttF128,
+    ntt::{
+        AdditiveNttF128,
+        additive_ntt_f128::{LANES_PER_GROUP, lane_blocked_ok},
+    },
     pcs::{
         OpeningGrinding,
         ligerito::{
@@ -303,6 +306,95 @@ pub struct Commitment {
 pub struct ProverData {
     pub codeword: Vec<F128>,
     pub merkle_tree: Vec<Hash>,
+    /// How `codeword` is laid out (agg-mldsa patch, PATCH.md section 8).
+    pub layout: CodewordLayout,
+    /// Committed lanes (`params.num_ntts()`): the words per Merkle leaf.
+    pub num_lanes: usize,
+}
+
+impl ProverData {
+    /// The codeword's rows (Merkle leaves) behind their layout.
+    pub fn rows(&self) -> CodewordRows<'_> {
+        CodewordRows {
+            data: &self.codeword,
+            lanes: self.num_lanes,
+            layout: self.layout,
+        }
+    }
+}
+
+/// How a level-0 codeword is stored (agg-mldsa patch, PATCH.md section 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodewordLayout {
+    /// Row-major: `codeword[pos * lanes + lane]`, one Merkle leaf per `lanes` consecutive
+    /// words (upstream's layout; the `commit*` entry points).
+    Interleaved,
+    /// Groups of four lanes: `codeword[((lane / 4) * positions + pos) * 4 + lane % 4]` with
+    /// `ceil(lanes / 4)` groups, the lanes past `lanes` in the last group zero
+    /// (`AdditiveNttF128::encode_lane_blocked`; `commit_lane_major`).
+    LaneBlocked4,
+}
+
+/// A borrowed level-0 codeword with its layout: [`Self::row`] is Merkle leaf `pos`.
+#[derive(Clone, Copy, Debug)]
+pub struct CodewordRows<'a> {
+    data: &'a [F128],
+    lanes: usize,
+    layout: CodewordLayout,
+}
+
+impl<'a> CodewordRows<'a> {
+    /// Rows of an interleaved (row-major) codeword of `lanes` words per position.
+    pub fn interleaved(data: &'a [F128], lanes: usize) -> Self {
+        assert!(lanes >= 1 && data.len().is_multiple_of(lanes));
+        Self { data, lanes, layout: CodewordLayout::Interleaved }
+    }
+
+    /// Rows of a lane-blocked codeword of `lanes` committed lanes.
+    pub fn lane_blocked(data: &'a [F128], lanes: usize) -> Self {
+        let group = LANES_PER_GROUP * lanes.div_ceil(LANES_PER_GROUP);
+        assert!(lanes >= 1 && data.len().is_multiple_of(group));
+        Self { data, lanes, layout: CodewordLayout::LaneBlocked4 }
+    }
+
+    /// Words per row.
+    pub fn lanes(&self) -> usize {
+        self.lanes
+    }
+
+    /// Number of rows (positions).
+    pub fn positions(&self) -> usize {
+        match self.layout {
+            CodewordLayout::Interleaved => self.data.len() / self.lanes,
+            CodewordLayout::LaneBlocked4 => {
+                self.data.len() / (LANES_PER_GROUP * self.lanes.div_ceil(LANES_PER_GROUP))
+            }
+        }
+    }
+
+    /// Row `pos`: the `lanes` words of that position.
+    pub fn row(&self, pos: usize) -> Vec<F128> {
+        match self.layout {
+            CodewordLayout::Interleaved => self.data[pos * self.lanes..(pos + 1) * self.lanes].to_vec(),
+            CodewordLayout::LaneBlocked4 => {
+                let n = self.positions();
+                let mut row = Vec::with_capacity(self.lanes);
+                for g in 0..self.lanes.div_ceil(LANES_PER_GROUP) {
+                    let k = LANES_PER_GROUP.min(self.lanes - g * LANES_PER_GROUP);
+                    row.extend_from_slice(&self.data[(g * n + pos) * LANES_PER_GROUP..][..k]);
+                }
+                row
+            }
+        }
+    }
+
+    /// Every row in order (positions x lanes), for comparisons across layouts.
+    pub fn to_interleaved(&self) -> Vec<F128> {
+        match self.layout {
+            CodewordLayout::Interleaved => self.data.to_vec(),
+            CodewordLayout::LaneBlocked4 => (0..self.positions()).flat_map(|p| self.row(p)).collect(),
+        }
+    }
 }
 
 // Recycle the codeword buffer (the prover's largest single allocation —
@@ -613,6 +705,8 @@ fn commit_into_pipelined(
         ProverData {
             codeword,
             merkle_tree,
+            layout: CodewordLayout::Interleaved,
+            num_lanes: params.num_ntts(),
         },
     )
 }
@@ -722,8 +816,44 @@ pub fn commit_lane_major(q: &[F128], params: &PcsParams) -> (Commitment, ProverD
             live -= 1;
         }
     }
-    let codeword_len = params.n_positions() * t;
     let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+    // Lane-blocked layout (agg-mldsa patch, PATCH.md section 8): the codeword is
+    // encoded in groups of four lanes straight from `q` and the Merkle rows are
+    // gathered from the groups; the values, the tree and the cap are those of the
+    // interleaved path below, which `FLOCK_COMMIT_INTERLEAVED=1` selects (the A/B and
+    // certification knob) and which serves the shapes too small for the tiling.
+    if var_os("FLOCK_COMMIT_INTERLEAVED").is_none() && lane_blocked_ok(params.k_code(), params.log_inv_rate) {
+        let n = params.n_positions();
+        let groups = t.div_ceil(LANES_PER_GROUP);
+        let t_enc = std::time::Instant::now();
+        let mut codeword = crate::scratch::take_f128(groups * LANES_PER_GROUP * n);
+        let ntt = AdditiveNttF128::standard(params.k_code());
+        ntt.encode_lane_blocked(&mut codeword, q, t, live, d, params.log_inv_rate);
+        let t_enc = t_enc.elapsed();
+        let t_merkle = std::time::Instant::now();
+        let merkle_tree = merkle::merkle_tree_lane_blocked(&codeword, t, n, params.merkle_hash);
+        let cap = cap_layer(&merkle_tree, n, params.level_zero_cap_depth()).to_vec();
+        if timing {
+            eprintln!(
+                "[commit-timing] lane-blocked encode (fill + ntt): {:.2} ms | merkle: {:.2} ms",
+                t_enc.as_secs_f64() * 1e3,
+                t_merkle.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        return (
+            Commitment {
+                cap,
+                params: params.clone(),
+            },
+            ProverData {
+                codeword,
+                merkle_tree,
+                layout: CodewordLayout::LaneBlocked4,
+                num_lanes: t,
+            },
+        );
+    }
+    let codeword_len = params.n_positions() * t;
     let t_take = std::time::Instant::now();
     let mut codeword = crate::scratch::take_f128(codeword_len);
     let t_take = t_take.elapsed();
@@ -881,6 +1011,8 @@ pub fn commit_merkle(codeword: Vec<F128>, params: &PcsParams) -> (Commitment, Pr
         ProverData {
             codeword,
             merkle_tree,
+            layout: CodewordLayout::Interleaved,
+            num_lanes: params.num_ntts(),
         },
     )
 }
@@ -956,7 +1088,8 @@ mod tests {
         ntt::AdditiveNttF128,
         pcs::{
             commit::{
-                BatchedGrinding, F128, FoldGrinding, Grinding, HashKind, LOG_PACKING,
+                BatchedGrinding, CodewordLayout, F128, FoldGrinding, Grinding, HashKind, LOG_PACKING,
+                lane_blocked_ok,
                 LincheckGrinding, OpeningGrinding, PcsParams, ZerocheckGrinding, commit,
                 commit_encode, commit_into_pipelined, commit_lane_major, commit_merkle,
                 dense_lanes, finalize_commit, lane_grid_from_lane_major, replicate_lane_major_fill,
@@ -1223,7 +1356,8 @@ mod tests {
                 let (c_ref, pd_ref) = finalize_commit(codeword, t, &params);
                 assert_eq!(c_skip.cap, c_ref.cap, "cap (m={m}, t={t}, c={c})");
                 assert_eq!(
-                    pd_skip.codeword, pd_ref.codeword,
+                    pd_skip.rows().to_interleaved(),
+                    pd_ref.rows().to_interleaved(),
                     "codeword (m={m}, t={t}, c={c})"
                 );
                 assert_eq!(
@@ -1372,8 +1506,59 @@ mod tests {
                 let (c_ref, pd_ref) = commit(&extract, &params);
                 let (c_grid, pd_grid) = commit_lane_major(&q, &params);
                 assert_eq!(c_ref.cap, c_grid.cap, "cap diverged (m={m}, t={t})");
-                assert_eq!(pd_ref.codeword, pd_grid.codeword, "codeword diverged");
+                assert_eq!(
+                    pd_ref.rows().to_interleaved(),
+                    pd_grid.rows().to_interleaved(),
+                    "codeword diverged"
+                );
                 assert_eq!(pd_ref.merkle_tree, pd_grid.merkle_tree, "tree diverged");
+            }
+        }
+    }
+
+    /// The lane-blocked commit of random lane-major stacks at m = 22 and 24 (several
+    /// lane counts and rates) gives the cap, the whole Merkle tree and the rows of the
+    /// interleaved commit of the compacted message, on every SIMD mask.
+    #[test]
+    fn lane_blocked_commit_matches_interleaved() {
+        use crate::simd::{test_masks, with_mask};
+        let mut rng = Rng::new(0x1A4E_C0DE);
+        for (m, log_inv_rate, log_batch_size, t) in
+            [(22usize, 2usize, 4usize, 13usize), (22, 1, 3, 8), (24, 2, 5, 17), (24, 1, 4, 5), (24, 3, 5, 32)]
+        {
+            let log_dim = (m - LOG_PACKING) - log_batch_size;
+            let d = 1usize << log_dim;
+            let params = PcsParams {
+                m,
+                log_inv_rate,
+                log_batch_size,
+                profile: Default::default(),
+                num_lanes: Some(t),
+                merkle_hash: HashKind::Blake3,
+            };
+            assert!(lane_blocked_ok(params.k_code(), log_inv_rate));
+            let mut q = vec![F128::ZERO; 1usize << (m - LOG_PACKING)];
+            let content = rng.f128_vec(t * d - d / 2);
+            q[..content.len()].copy_from_slice(&content);
+            let mut extract = vec![F128::ZERO; t * d];
+            for p in 0..d {
+                for l in 0..t {
+                    extract[p * t + l] = q[l * d + p];
+                }
+            }
+            let (c_ref, pd_ref) = commit(&extract, &params);
+            let want_rows = pd_ref.rows().to_interleaved();
+            for mask in test_masks() {
+                let (c, pd) = with_mask(mask, || commit_lane_major(&q, &params));
+                assert_eq!(pd.layout, CodewordLayout::LaneBlocked4, "m={m} t={t}");
+                assert_eq!(c.cap, c_ref.cap, "cap (m={m}, t={t}, mask={mask:#x})");
+                assert!(pd.merkle_tree == pd_ref.merkle_tree, "tree (m={m}, t={t}, mask={mask:#x})");
+                let rows = pd.rows();
+                assert_eq!(rows.positions(), params.n_positions());
+                assert!(rows.to_interleaved() == want_rows, "rows (m={m}, t={t}, mask={mask:#x})");
+                for &p in &[0usize, 1, params.n_positions() / 3, params.n_positions() - 1] {
+                    assert_eq!(rows.row(p), pd_ref.rows().row(p));
+                }
             }
         }
     }

@@ -233,7 +233,21 @@ aggregates are byte-identical to main.
   per pass (`union_bitbank_fold_multi`); on x86 the single-table dispatch
   (`partial_fold_packed_z_best`) takes it for the same shapes.
 
+- Lane-blocked level-0 codeword (`ntt/additive_ntt_f128/lane_blocked.rs`,
+  `kernels::{blocked4_layer, blocked4_fused_2layer}`, `merkle::merkle_tree_lane_blocked`,
+  `pcs::commit::{CodewordLayout, CodewordRows}`): `commit_lane_major` stores the codeword in
+  groups of four lanes (`codeword[((l / 4) n + p) 4 + l % 4]`, lanes past the committed count
+  zero). Pass 1 reads the message lanes once, skips the replicate layers, applies up to eight
+  layers inside a 1 MiB tile and writes it with SSE2 streaming stores; pass 2 transforms
+  cache-resident blocks through the remaining layers with the existing butterfly kernels. The
+  Merkle leaves are the rows as before (gathered sixteen per batch); the Ligerito level-0 opens
+  read rows through `CodewordRows`. `FLOCK_COMMIT_INTERLEAVED=1` selects the interleaved path
+  (also used below six layers past the replicate); `FLOCK_LB_TILE_LOG`, `FLOCK_LB_TOP` tune
+  pass 1.
+
 Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`,
 `pcs::block_stats_portable::tests`, `pcs::block_round_tests`,
 `lincheck::tests::partial_fold_iblock_matches_row_prefix_and_dense`, the NTT path tests (also
-under `FLOCK_SIMD=portable` with a 4 KiB deep budget).
+under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
+`ntt::additive_ntt_f128::lane_blocked::tests::matches_interleaved_transform`,
+`pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows).

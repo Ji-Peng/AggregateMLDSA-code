@@ -462,7 +462,7 @@ pub fn open_batch_mixed_ligerito_seeded<Ch: Challenger>(
         packed_witness,
         b_combined,
         target_combined,
-        &prover_data.codeword,
+        prover_data.rows(),
         &prover_data.merkle_tree,
         l0_num_lanes,
         lane_major,
