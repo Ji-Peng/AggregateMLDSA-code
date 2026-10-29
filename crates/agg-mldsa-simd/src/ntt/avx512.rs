@@ -1,6 +1,13 @@
-//! AVX-512 NTT using the register schedule of Hybrid-SHA-3 (xurq5953).
-//! Translated with the authors' permission. Twiddles are generated from the roots
-//! and moduli; no external literal tables are embedded.
+//! AVX-512 NTT for q and P2 (F/BW/VL instructions only).
+//!
+//! The transforms reimplement the register schedule published with
+//! Hybrid-SHA-3 (github.com/xurq5953, `ntt_so_avx512` / `intt_so_avx512`):
+//! the whole polynomial stays in sixteen ZMM registers, layers 0-3 are
+//! butterflies between registers, layers 4-7 butterflies inside registers
+//! after lane exchanges, and the forward output keeps that schedule's
+//! coefficient order (`order_from_fips` maps FIPS order to it). No source
+//! file or literal table is taken from that project: every twiddle is
+//! generated from the prime parameters in `avx512_tables.rs`.
 
 #[cfg(target_arch = "x86_64")]
 use super::{Form, Scale};
@@ -11,9 +18,6 @@ use crate::{
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
-#[cfg(target_arch = "x86_64")]
-#[path = "avx512_asm.rs"]
-mod allocated;
 #[cfg(target_arch = "x86_64")]
 #[path = "avx512_tables.rs"]
 mod tables;
@@ -38,23 +42,37 @@ fn store(a: &mut Poly32, reg: usize, v: __m512i) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn lanes(a: &tables::Lanes) -> __m512i {
-    // SAFETY: Lanes contains sixteen initialized i32 values.
+    // SAFETY: Lanes is 64-byte aligned and holds sixteen initialized i32 values.
     unsafe { _mm512_load_si512(a.0.as_ptr().cast()) }
 }
+/// Returns the twiddle tables behind an optimisation barrier. When LLVM sees
+/// the constant values it rewrites the signed products into unsigned products
+/// plus two extra shifts per product; opaque loads keep one multiply each.
+#[inline]
+#[cfg(target_arch = "x86_64")]
+fn opaque(t: &'static tables::Tables) -> &'static tables::Tables {
+    core::hint::black_box(t)
+}
+/// Signed Montgomery product per lane: (x*z - t*p) / 2^32 with
+/// t = x*z*p^-1 mod 2^32, so |result| <= |x*z| / 2^32 + p/2.
+/// `zo`/`zio` hold the odd-lane twiddles in the even dword of each qword;
+/// layers whose twiddles agree within a qword pass `z`/`zi` again.
 #[inline]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn mont(x: __m512i, z: __m512i, zi: __m512i, p: __m512i) -> __m512i {
-    let odd = _mm512_srli_epi64::<32>(x);
+fn mont(x: __m512i, z: __m512i, zi: __m512i, zo: __m512i, zio: __m512i, p: __m512i) -> __m512i {
+    // Odd lanes moved to the even dwords, where vpmuldq reads its operands.
+    let h = _mm512_shuffle_epi32::<0xf5>(x);
     let e = _mm512_mul_epi32(x, z);
-    let o = _mm512_mul_epi32(odd, _mm512_srli_epi64::<32>(z));
-    let te = _mm512_mul_epi32(x, zi);
-    let to = _mm512_mul_epi32(odd, _mm512_srli_epi64::<32>(zi));
-    // The low words cancel exactly, so no borrow crosses into the high
-    // words. Merge the odd high-word subtraction directly into the result.
-    let e = _mm512_sub_epi32(e, _mm512_mul_epi32(te, p));
-    let e = _mm512_srli_epi64::<32>(e);
-    _mm512_mask_sub_epi32(e, 0xaaaa, o, _mm512_mul_epi32(to, p))
+    let o = _mm512_mul_epi32(h, zo);
+    let te = _mm512_mul_epi32(_mm512_mul_epi32(x, zi), p);
+    let to = _mm512_mul_epi32(_mm512_mul_epi32(h, zio), p);
+    // The low dwords cancel exactly, so a 32-bit subtraction gives the exact
+    // high dwords without a borrow.
+    let e = _mm512_sub_epi32(e, te);
+    let o = _mm512_sub_epi32(o, to);
+    // Even results come from the high dwords of `e`; odd ones are in place in `o`.
+    _mm512_mask_shuffle_epi32::<0xf5>(o, 0x5555, e)
 }
 // These exchanges are involutions; they preserve the coefficient storage layout.
 #[cfg(target_arch = "x86_64")]
@@ -84,23 +102,36 @@ macro_rules! exchange {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
-    allocated::forward(prime, a)
+    match prime {
+        Prime::Q => ntt_impl::<false>(a),
+        Prime::P2 => ntt_impl::<true>(a),
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 #[inline(never)]
-#[allow(dead_code)]
 fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
     let prime = if SECOND { Prime::P2 } else { Prime::Q };
-    let t = if SECOND { &tables::P2 } else { &tables::Q };
+    let t = opaque(if SECOND { &tables::P2 } else { &tables::Q });
     let p = _mm512_set1_epi32(consts(prime).p);
     // Lazy CT sums: starting at 2^22, every layer adds at most
-    // p/2 + |z*x|/2^32; generated bounds give |x|<4.52q or |x|<4.25P2.
-    macro_rules! bf { ($a:ident,$b:ident,$i:expr) => {{
-        let v=mont($b,lanes(&t.z[$i]),lanes(&t.zi[$i]),p);
-        $b=_mm512_sub_epi32($a,v); $a=_mm512_add_epi32($a,v);
-    }}; }
+    // p/2 + |z*x|/2^32; generated bounds give |x|<4.52q or |x|<4.25P2 < 2^31.
+    macro_rules! bf {
+        ($a:ident, $b:ident, $i:expr) => {{
+            let (z, zi) = (lanes(&t.z[$i]), lanes(&t.zi[$i]));
+            let v = mont($b, z, zi, z, zi, p);
+            $b = _mm512_sub_epi32($a, v);
+            $a = _mm512_add_epi32($a, v);
+        }};
+        ($a:ident, $b:ident, $i:expr, odd) => {{
+            let (z, zi) = (lanes(&t.z[$i]), lanes(&t.zi[$i]));
+            let (zo, zio) = (lanes(&t.zo[$i - 56]), lanes(&t.zio[$i - 56]));
+            let v = mont($b, z, zi, zo, zio, p);
+            $b = _mm512_sub_epi32($a, v);
+            $a = _mm512_add_epi32($a, v);
+        }};
+    }
     let mut b0 = load(a, 0);
     let mut b1 = load(a, 1);
     let mut b2 = load(a, 2);
@@ -198,21 +229,21 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
     exchange!(b14, b15, 2);
     bf!(b14, b15, 55);
     exchange!(b0, b1, 1);
-    bf!(b0, b1, 56);
+    bf!(b0, b1, 56, odd);
     exchange!(b2, b3, 1);
-    bf!(b2, b3, 57);
+    bf!(b2, b3, 57, odd);
     exchange!(b4, b5, 1);
-    bf!(b4, b5, 58);
+    bf!(b4, b5, 58, odd);
     exchange!(b6, b7, 1);
-    bf!(b6, b7, 59);
+    bf!(b6, b7, 59, odd);
     exchange!(b8, b9, 1);
-    bf!(b8, b9, 60);
+    bf!(b8, b9, 60, odd);
     exchange!(b10, b11, 1);
-    bf!(b10, b11, 61);
+    bf!(b10, b11, 61, odd);
     exchange!(b12, b13, 1);
-    bf!(b12, b13, 62);
+    bf!(b12, b13, 62, odd);
     exchange!(b14, b15, 1);
-    bf!(b14, b15, 63);
+    bf!(b14, b15, 63, odd);
     store(a, 0, b0);
     store(a, 1, b1);
     store(a, 2, b2);
@@ -234,25 +265,56 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form) {
-    allocated::inverse(prime, a, scale, form)
+    match (prime, scale, form) {
+        (Prime::Q, Scale::Plain, Form::Canonical) => intt_impl::<false, false, false>(a),
+        (Prime::Q, Scale::Plain, Form::Centered) => intt_impl::<false, false, true>(a),
+        (Prime::Q, Scale::Mont, Form::Canonical) => intt_impl::<false, true, false>(a),
+        (Prime::Q, Scale::Mont, Form::Centered) => intt_impl::<false, true, true>(a),
+        (Prime::P2, Scale::Plain, Form::Canonical) => intt_impl::<true, false, false>(a),
+        (Prime::P2, Scale::Plain, Form::Centered) => intt_impl::<true, false, true>(a),
+        (Prime::P2, Scale::Mont, Form::Canonical) => intt_impl::<true, true, false>(a),
+        (Prime::P2, Scale::Mont, Form::Centered) => intt_impl::<true, true, true>(a),
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 #[inline(never)]
-#[allow(dead_code)]
-fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
+fn intt_impl<const SECOND: bool, const MONT: bool, const CENTERED: bool>(a: &mut Poly32) {
     let prime = if SECOND { Prime::P2 } else { Prime::Q };
-    let scale = if MONT { Scale::Mont } else { Scale::Plain };
     let c = consts(prime);
-    let t = if SECOND { &tables::P2 } else { &tables::Q };
+    let t = opaque(if SECOND { &tables::P2 } else { &tables::Q });
+    let s = MONT as usize;
     let p = _mm512_set1_epi32(c.p);
     // GS sum chains double bounds; P2's selected long chains are reduced
     // after four layers. The generated bound table proves every lane < 2^31.
-    macro_rules! bf { ($a:ident,$b:ident,$i:expr) => {{
-        let v=_mm512_sub_epi32($a,$b); $a=_mm512_add_epi32($a,$b);
-        $b=mont(v,lanes(&t.iz[$i]),lanes(&t.izi[$i]),p);
-    }}; }
+    macro_rules! bf {
+        ($a:ident, $b:ident, $i:expr) => {{
+            let v = _mm512_sub_epi32($a, $b);
+            $a = _mm512_add_epi32($a, $b);
+            let (z, zi) = (lanes(&t.iz[$i]), lanes(&t.izi[$i]));
+            $b = mont(v, z, zi, z, zi, p);
+        }};
+        ($a:ident, $b:ident, $i:expr, odd) => {{
+            let v = _mm512_sub_epi32($a, $b);
+            $a = _mm512_add_epi32($a, $b);
+            let (z, zi) = (lanes(&t.iz[$i]), lanes(&t.izi[$i]));
+            let (zo, zio) = (lanes(&t.izo[$i - 56]), lanes(&t.izio[$i - 56]));
+            $b = mont(v, z, zi, zo, zio, p);
+        }};
+    }
+    // The last GS layer fuses the normalization: sums are scaled by f and
+    // differences by root*f/R, so both outputs are Montgomery products
+    // of inputs < 2^31 with twiddles <= p/2 and lie in (-p, p).
+    macro_rules! last {
+        ($a:ident, $b:ident) => {{
+            let v = _mm512_sub_epi32($a, $b);
+            let (f, fi) = (lanes(&t.scale[s]), lanes(&t.scale_i[s]));
+            $a = mont(_mm512_add_epi32($a, $b), f, fi, f, fi, p);
+            let (z, zi) = (lanes(&t.last[s]), lanes(&t.last_i[s]));
+            $b = mont(v, z, zi, z, zi, p);
+        }};
+    }
     let mut b0 = load(a, 0);
     let mut b1 = load(a, 1);
     let mut b2 = load(a, 2);
@@ -269,21 +331,21 @@ fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
     let mut b13 = load(a, 13);
     let mut b14 = load(a, 14);
     let mut b15 = load(a, 15);
-    bf!(b0, b1, 56);
+    bf!(b0, b1, 56, odd);
     exchange!(b0, b1, 1);
-    bf!(b2, b3, 57);
+    bf!(b2, b3, 57, odd);
     exchange!(b2, b3, 1);
-    bf!(b4, b5, 58);
+    bf!(b4, b5, 58, odd);
     exchange!(b4, b5, 1);
-    bf!(b6, b7, 59);
+    bf!(b6, b7, 59, odd);
     exchange!(b6, b7, 1);
-    bf!(b8, b9, 60);
+    bf!(b8, b9, 60, odd);
     exchange!(b8, b9, 1);
-    bf!(b10, b11, 61);
+    bf!(b10, b11, 61, odd);
     exchange!(b10, b11, 1);
-    bf!(b12, b13, 62);
+    bf!(b12, b13, 62, odd);
     exchange!(b12, b13, 1);
-    bf!(b14, b15, 63);
+    bf!(b14, b15, 63, odd);
     exchange!(b14, b15, 1);
     bf!(b0, b1, 48);
     exchange!(b0, b1, 2);
@@ -333,8 +395,8 @@ fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
     exchange!(b12, b13, 8);
     bf!(b14, b15, 39);
     exchange!(b14, b15, 8);
-    if prime == Prime::P2 {
-        // |x|<=8p: rounded division by 2^25 and five leaves |r|<0.61p.
+    if SECOND {
+        // |x|<=8p: rounded division by 2^25 and then by five leaves |r|<0.61p.
         let bias = _mm512_set1_epi32(1 << 24);
         let fifth = _mm512_set1_epi16(6554);
         let red = |x| {
@@ -384,53 +446,48 @@ fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
     bf!(b9, b13, 13);
     bf!(b10, b14, 14);
     bf!(b11, b15, 15);
-    bf!(b0, b8, 0);
-    bf!(b1, b9, 1);
-    bf!(b2, b10, 2);
-    bf!(b3, b11, 3);
-    bf!(b4, b12, 4);
-    bf!(b5, b13, 5);
-    bf!(b6, b14, 6);
-    bf!(b7, b15, 7);
-    let f = match scale {
-        Scale::Plain => c.inv_plain,
-        Scale::Mont => c.inv_mont,
-    };
-    let z = _mm512_set1_epi32(f);
-    let zi = _mm512_set1_epi32(f.wrapping_mul(c.pinv));
-    store(a, 0, finish(mont(b0, z, zi, p), p, form));
-    store(a, 1, finish(mont(b1, z, zi, p), p, form));
-    store(a, 2, finish(mont(b2, z, zi, p), p, form));
-    store(a, 3, finish(mont(b3, z, zi, p), p, form));
-    store(a, 4, finish(mont(b4, z, zi, p), p, form));
-    store(a, 5, finish(mont(b5, z, zi, p), p, form));
-    store(a, 6, finish(mont(b6, z, zi, p), p, form));
-    store(a, 7, finish(mont(b7, z, zi, p), p, form));
-    store(a, 8, finish(mont(b8, z, zi, p), p, form));
-    store(a, 9, finish(mont(b9, z, zi, p), p, form));
-    store(a, 10, finish(mont(b10, z, zi, p), p, form));
-    store(a, 11, finish(mont(b11, z, zi, p), p, form));
-    store(a, 12, finish(mont(b12, z, zi, p), p, form));
-    store(a, 13, finish(mont(b13, z, zi, p), p, form));
-    store(a, 14, finish(mont(b14, z, zi, p), p, form));
-    store(a, 15, finish(mont(b15, z, zi, p), p, form));
+    last!(b0, b8);
+    last!(b1, b9);
+    last!(b2, b10);
+    last!(b3, b11);
+    last!(b4, b12);
+    last!(b5, b13);
+    last!(b6, b14);
+    last!(b7, b15);
+    store(a, 0, finish::<CENTERED>(b0, p));
+    store(a, 1, finish::<CENTERED>(b1, p));
+    store(a, 2, finish::<CENTERED>(b2, p));
+    store(a, 3, finish::<CENTERED>(b3, p));
+    store(a, 4, finish::<CENTERED>(b4, p));
+    store(a, 5, finish::<CENTERED>(b5, p));
+    store(a, 6, finish::<CENTERED>(b6, p));
+    store(a, 7, finish::<CENTERED>(b7, p));
+    store(a, 8, finish::<CENTERED>(b8, p));
+    store(a, 9, finish::<CENTERED>(b9, p));
+    store(a, 10, finish::<CENTERED>(b10, p));
+    store(a, 11, finish::<CENTERED>(b11, p));
+    store(a, 12, finish::<CENTERED>(b12, p));
+    store(a, 13, finish::<CENTERED>(b13, p));
+    store(a, 14, finish::<CENTERED>(b14, p));
+    store(a, 15, finish::<CENTERED>(b15, p));
 }
 
 #[inline]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn finish(x: __m512i, p: __m512i, form: Form) -> __m512i {
-    // Input lies in (-p,p); one correction makes it canonical.
-    let x = _mm512_add_epi32(x, _mm512_and_si512(_mm512_srai_epi32::<31>(x), p));
-    if form == Form::Centered {
-        _mm512_mask_sub_epi32(
+fn finish<const CENTERED: bool>(x: __m512i, p: __m512i) -> __m512i {
+    // Input lies in (-p, p); at most one correction reaches the requested range.
+    if CENTERED {
+        let h = _mm512_srli_epi32::<1>(p);
+        let x = _mm512_mask_add_epi32(
             x,
-            _mm512_cmpgt_epi32_mask(x, _mm512_srli_epi32::<1>(p)),
+            _mm512_cmplt_epi32_mask(x, _mm512_sub_epi32(_mm512_setzero_si512(), h)),
             x,
             p,
-        )
+        );
+        _mm512_mask_sub_epi32(x, _mm512_cmpgt_epi32_mask(x, h), x, p)
     } else {
-        x
+        _mm512_mask_add_epi32(x, _mm512_cmplt_epi32_mask(x, _mm512_setzero_si512()), x, p)
     }
 }
 #[cfg(target_arch = "x86_64")]
@@ -459,7 +516,7 @@ pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &
             out,
             reg,
             if prime == Prime::P2 {
-                finish(v, p, Form::Centered)
+                finish::<true>(v, p)
             } else {
                 v
             },
@@ -482,7 +539,14 @@ pub(crate) unsafe fn reduce(prime: Prime, a: &mut Poly32, form: Form) {
         let q = _mm512_mask_blend_epi32(0xaaaa, e, _mm512_slli_epi64::<32>(o));
         let v = _mm512_sub_epi32(x, _mm512_mullo_epi32(q, p));
         let v = _mm512_mask_sub_epi32(v, _mm512_cmpge_epi32_mask(v, p), v, p);
-        store(a, reg, finish(v, p, form));
+        store(
+            a,
+            reg,
+            match form {
+                Form::Canonical => finish::<false>(v, p),
+                Form::Centered => finish::<true>(v, p),
+            },
+        );
     }
 }
 #[cfg(target_arch = "x86_64")]
@@ -507,53 +571,6 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
         let y = load(a, reg + 1);
         store(a, reg, _mm512_permutex2var_epi32(x, lo, y));
         store(a, reg + 1, _mm512_permutex2var_epi32(x, hi, y));
-    }
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
-mod tests {
-    use super::*;
-    use crate::dispatch::{Backend, Engine};
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-    fn compare_intrinsics() {
-        for prime in [Prime::Q, Prime::P2] {
-            let input = Poly32(core::array::from_fn(|i| i as i32 * 32513 - (1 << 22)));
-            let mut a = input;
-            let mut b = input;
-            allocated::forward(prime, &mut a);
-            match prime {
-                Prime::Q => ntt_impl::<false>(&mut b),
-                Prime::P2 => ntt_impl::<true>(&mut b),
-            }
-            assert_eq!(a, b);
-            // Reduce before GS so the inverse starts within its proven range.
-            let p = consts(prime).p as i64;
-            for x in a.iter_mut() {
-                *x = ((*x as i64 + p / 2).rem_euclid(p) - p / 2) as i32;
-            }
-            for scale in [Scale::Plain, Scale::Mont] {
-                for form in [Form::Centered, Form::Canonical] {
-                    let mut x = a;
-                    let mut y = a;
-                    allocated::inverse(prime, &mut x, scale, form);
-                    match (prime, scale) {
-                        (Prime::Q, Scale::Plain) => intt_impl::<false, false>(&mut y, form),
-                        (Prime::Q, Scale::Mont) => intt_impl::<false, true>(&mut y, form),
-                        (Prime::P2, Scale::Plain) => intt_impl::<true, false>(&mut y, form),
-                        (Prime::P2, Scale::Mont) => intt_impl::<true, true>(&mut y, form),
-                    }
-                    assert_eq!(x, y);
-                }
-            }
-        }
-    }
-    #[test]
-    fn intrinsics_match_allocated_registers() {
-        if Engine::new(Backend::Avx512).is_some() {
-            // SAFETY: Engine construction checked every required CPU feature.
-            unsafe { compare_intrinsics() }
-        }
     }
 }
 

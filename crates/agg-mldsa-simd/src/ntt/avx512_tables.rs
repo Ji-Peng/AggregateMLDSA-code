@@ -1,4 +1,6 @@
-//! Parameter-derived twiddles for the register shuffle network.
+//! Parameter-derived twiddles for the register shuffle network. Every value is
+//! computed at compile time from the prime, its 512th root of unity and its
+//! Montgomery constants.
 use crate::params::{PrimeConsts, CONSTS_P2, CONSTS_Q};
 
 #[repr(C, align(64))]
@@ -9,6 +11,13 @@ pub(super) struct Tables {
     pub zi: [Lanes; 64],
     pub iz: [Lanes; 64],
     pub izi: [Lanes; 64],
+    // Odd-lane twiddles of the last forward (first inverse) layer, moved into
+    // the even dword of each qword where the signed 32x32 multiply reads them.
+    // Earlier layers share one twiddle per qword and need no second table.
+    pub zo: [Lanes; 8],
+    pub zio: [Lanes; 8],
+    pub izo: [Lanes; 8],
+    pub izio: [Lanes; 8],
     pub scale: [Lanes; 2],
     pub scale_i: [Lanes; 2],
     pub last: [Lanes; 2],
@@ -70,6 +79,10 @@ const fn make(c: PrimeConsts) -> Tables {
         izi: [const { Lanes([0; 16]) }; 64],
         z: [const { Lanes([0; 16]) }; 64],
         zi: [const { Lanes([0; 16]) }; 64],
+        zo: [const { Lanes([0; 16]) }; 8],
+        zio: [const { Lanes([0; 16]) }; 8],
+        izo: [const { Lanes([0; 16]) }; 8],
+        izio: [const { Lanes([0; 16]) }; 8],
     };
     let mut labels = [[0usize; 16]; 16];
     let mut i = 0;
@@ -119,6 +132,18 @@ const fn make(c: PrimeConsts) -> Tables {
             base += 2 * stride;
         }
         stage += 1;
+    }
+    let mut k = 0;
+    while k < 8 {
+        let mut lane = 0;
+        while lane < 16 {
+            t.zo[k].0[lane] = t.z[56 + k].0[lane | 1];
+            t.zio[k].0[lane] = t.zi[56 + k].0[lane | 1];
+            t.izo[k].0[lane] = t.iz[56 + k].0[lane | 1];
+            t.izio[k].0[lane] = t.izi[56 + k].0[lane | 1];
+            lane += 1;
+        }
+        k += 1;
     }
     let mut i = 0;
     while i < 2 {
@@ -302,6 +327,28 @@ mod tests {
         }
     }
     #[test]
+    fn shared_qword_twiddles() {
+        // The butterflies feed the even-dword twiddle to both lanes of a qword
+        // in every layer but the last, so those layers must agree per qword.
+        for t in [&Q, &P2] {
+            for table in [&t.z, &t.zi, &t.iz, &t.izi] {
+                for v in &table[..56] {
+                    assert!((0..16).step_by(2).all(|l| v.0[l] == v.0[l + 1]));
+                }
+            }
+            for (odd, full) in [
+                (&t.zo, &t.z),
+                (&t.zio, &t.zi),
+                (&t.izo, &t.iz),
+                (&t.izio, &t.izi),
+            ] {
+                for k in 0..8 {
+                    assert!((0..16).all(|l| odd[k].0[l] == full[56 + k].0[l | 1]));
+                }
+            }
+        }
+    }
+    #[test]
     fn inverse_headroom() {
         for layer in INVERSE_BOUNDS.0 {
             for bound in layer {
@@ -312,15 +359,4 @@ mod tests {
     }
 }
 
-const _: () = {
-    use core::mem::{offset_of, size_of};
-    assert!(size_of::<Lanes>() == 64);
-    assert!(offset_of!(Tables, z) == 0);
-    assert!(offset_of!(Tables, zi) == 4096);
-    assert!(offset_of!(Tables, iz) == 8192);
-    assert!(offset_of!(Tables, izi) == 12288);
-    assert!(offset_of!(Tables, scale) == 16384);
-    assert!(offset_of!(Tables, scale_i) == 16384 + 128);
-    assert!(offset_of!(Tables, last) == 16384 + 256);
-    assert!(offset_of!(Tables, last_i) == 16384 + 384);
-};
+const _: () = assert!(core::mem::size_of::<Lanes>() == 64);

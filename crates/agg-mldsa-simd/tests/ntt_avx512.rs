@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 mod common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},
@@ -163,14 +162,83 @@ fn dot4_schoolbook() {
         }
     }
 }
+/// Coefficient `i` of test case `trial` with |x| <= bound: the first cases
+/// are constant, alternating and random-sign values at the bound, the rest
+/// mix bound values with uniform ones.
+fn extreme(trial: usize, i: usize, bound: i32, rng: &mut SplitMix64) -> i32 {
+    let r = rng.next_u64();
+    match trial {
+        0 => bound,
+        1 => -bound,
+        2 => {
+            if i & 1 == 0 {
+                bound
+            } else {
+                -bound
+            }
+        }
+        3 => {
+            if r & 1 == 0 {
+                bound
+            } else {
+                -bound
+            }
+        }
+        _ if r.is_multiple_of(4) => {
+            if r & 4 == 0 {
+                bound
+            } else {
+                -bound
+            }
+        }
+        _ => ((r >> 3) % (2 * bound as u64 + 1)) as i32 - bound,
+    }
+}
+// Exact agreement with the scalar backend in natural order, for both primes,
+// both scales and both forms, at the edges of the documented input domains:
+// |a| <= 2^22 forward, |x| < q and |x| <= (P2-1)/2 inverse.
+#[test]
+fn transforms_match_scalar_at_bounds() {
+    let Some(e) = engine() else { return };
+    let s = Engine::new(Backend::Scalar).unwrap();
+    let mut rng = SplitMix64::new(0x5ca1a7);
+    for prime in [Prime::Q, Prime::P2] {
+        let p = consts(prime).p;
+        let bound = if prime == Prime::Q { p - 1 } else { p / 2 };
+        for trial in 0..256 {
+            let a = Poly32(core::array::from_fn(|i| {
+                extreme(trial, i, 1 << 22, &mut rng)
+            }));
+            let (mut x, mut y) = (a, a);
+            e.ntt(prime, &mut x);
+            s.ntt(prime, &mut y);
+            e.order_to_fips(&mut x);
+            s.order_to_fips(&mut y);
+            e.reduce(prime, &mut x, Form::Canonical);
+            s.reduce(prime, &mut y, Form::Canonical);
+            assert_eq!(x, y, "{prime:?} ntt trial {trial}");
+            let v = Poly32(core::array::from_fn(|i| extreme(trial, i, bound, &mut rng)));
+            for scale in [Scale::Plain, Scale::Mont] {
+                for form in [Form::Canonical, Form::Centered] {
+                    let (mut x, mut y) = (v, v);
+                    e.order_from_fips(&mut x);
+                    s.order_from_fips(&mut y);
+                    e.intt(prime, &mut x, scale, form);
+                    s.intt(prime, &mut y, scale, form);
+                    assert_eq!(x, y, "{prime:?} {scale:?} {form:?} intt trial {trial}");
+                }
+            }
+        }
+    }
+}
 #[cfg(cref)]
 #[test]
 fn c_reference() {
     let Some(e) = engine() else { return };
     let mut rng = SplitMix64::new(123);
-    for _ in 0..128 {
-        let a = Poly32(core::array::from_fn(|_| {
-            (rng.next_u64() % (1 << 23)) as i32 - (1 << 22)
+    for trial in 0..128 {
+        let a = Poly32(core::array::from_fn(|i| {
+            extreme(trial, i, 1 << 22, &mut rng)
         }));
         let mut r = a;
         let mut c = a;
