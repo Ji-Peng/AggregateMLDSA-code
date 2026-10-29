@@ -129,6 +129,15 @@ fn mixed_jobs<'a>(seed: &'a [u8; 34], pk: &'a [u8; 1312]) -> (Vec<XofJob<'a>>, V
     (jobs, limits)
 }
 
+fn absorb_dry<const W: usize>(
+    lanes: &mut [lanes::Lane; W],
+    jobs: &[XofJob<'_>],
+    _: &mut lanes::State<W>,
+    mask: u8,
+) -> u8 {
+    lanes::absorb_with(lanes, jobs, mask, |_, _, _| {})
+}
+
 /// Runs the scheduler with no-op kernels: its progress does not depend on the
 /// permutation's output.
 fn dry_run(
@@ -140,23 +149,25 @@ fn dry_run(
     counts.fill(0);
     let mut sink = CountSink { counts, limits };
     if w == 4 {
-        lanes::run(
+        lanes::run::<4, true, _, _>(
             jobs,
             &mut sink,
             lanes::Kernel {
                 permute: |_: &mut lanes::State<4>| {},
                 extract: |_: &lanes::State<4>, _: &mut [Block; 4], _| {},
                 clear: |_: &mut lanes::State<4>, _| {},
+                absorb: absorb_dry,
             },
         )
     } else {
-        lanes::run(
+        lanes::run::<8, true, _, _>(
             jobs,
             &mut sink,
             lanes::Kernel {
                 permute: |_: &mut lanes::State<8>| {},
                 extract: |_: &lanes::State<8>, _: &mut [Block; 8], _| {},
                 clear: |_: &mut lanes::State<8>, _| {},
+                absorb: absorb_dry,
             },
         )
     }
@@ -304,7 +315,7 @@ unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(
     jobs: &[XofJob<'_>],
     sink: &mut CountSink<'_>,
 ) {
-    lanes::run(
+    lanes::run::<4, false, _, _>(
         jobs,
         sink,
         lanes::Kernel {
@@ -321,6 +332,9 @@ unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(
                 }
             },
             clear: |s: &mut lanes::State<4>, l| avx2::clear(s, l),
+            absorb: |l: &mut [lanes::Lane; 4], j: &[XofJob<'_>], s: &mut lanes::State<4>, m| {
+                avx2::absorb(l, j, s, m)
+            },
         },
     );
 }
@@ -332,7 +346,7 @@ unsafe fn variant8<const PERMUTE: bool, const EXTRACT: bool>(
     jobs: &[XofJob<'_>],
     sink: &mut CountSink<'_>,
 ) {
-    lanes::run(
+    lanes::run::<8, false, _, _>(
         jobs,
         sink,
         lanes::Kernel {
@@ -349,6 +363,9 @@ unsafe fn variant8<const PERMUTE: bool, const EXTRACT: bool>(
                 }
             },
             clear: |s: &mut lanes::State<8>, l| avx512::clear(s, l),
+            absorb: |l: &mut [lanes::Lane; 8], j: &[XofJob<'_>], s: &mut lanes::State<8>, m| {
+                avx512::absorb(l, j, s, m)
+            },
         },
     );
 }
@@ -446,7 +463,7 @@ fn diag() {
         let (t, b) = paired(
             || {
                 counts.fill(0);
-                lanes::run(
+                lanes::run::<4, false, _, _>(
                     black_box(&jobs),
                     &mut CountSink {
                         counts: &mut counts,
@@ -454,6 +471,12 @@ fn diag() {
                     },
                     lanes::Kernel {
                         permute: cperm,
+                        absorb: |l: &mut [lanes::Lane; 4],
+                                 j: &[XofJob<'_>],
+                                 s: &mut lanes::State<4>,
+                                 m| {
+                            lanes::absorb_with(l, j, m, |i, w, value| s.0[w][i] ^= value)
+                        },
                         // SAFETY: AVX2 is available.
                         extract: |s: &lanes::State<4>, b: &mut [Block; 4], r| unsafe {
                             avx2::extract(s, b, r)
@@ -524,7 +547,87 @@ fn diag() {
     }
 }
 
+// Short paired diagnostics for tuning; never substitutes for --gate.
+fn quick() {
+    let seed = [42u8; 34];
+    let pk = [73u8; 1312];
+    let (mixed, mixed_limits) = mixed_jobs(&seed, &pk);
+    for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
+        let Some(engine) = Engine::new(backend) else {
+            continue;
+        };
+        let single = vec![
+            XofJob {
+                xof: Xof::Shake128,
+                input: [&seed, &[], &[], &[]]
+            };
+            w
+        ];
+        let single_limits = vec![5; w];
+        for (name, jobs, limits) in [
+            ("mixed", &mixed[..], &mixed_limits[..]),
+            ("34B/5", &single[..], &single_limits[..]),
+        ] {
+            let mut counts = vec![0; jobs.len()];
+            let (_, cap) = dry_run(w, jobs, &mut counts, limits);
+            let mut s4 = lanes::State([[0; 4]; 25]);
+            let mut s8 = lanes::State([[0; 8]; 25]);
+            let r = pair_ratio(
+                1 + 800 / (cap / w),
+                || shake(&engine, jobs, &mut counts, limits),
+                || {
+                    for _ in 0..cap / w {
+                        if w == 4 {
+                            rust4(&mut s4)
+                        } else {
+                            rust8(&mut s8)
+                        }
+                    }
+                },
+            );
+            let bare = common::measure_kernel(|| {
+                if w == 4 {
+                    rust4(&mut s4)
+                } else {
+                    rust8(&mut s8)
+                }
+            })
+            .median;
+            println!("quick {backend:?} {name}: scheduler/bare {r:.3}, bare {bare:.0} ticks");
+            #[cfg(cref)]
+            if name == "mixed" {
+                #[repr(C, align(64))]
+                struct Aligned<const N: usize>([u64; N]);
+                let mut c4 = Aligned([0; 100]);
+                let mut c8 = Aligned([0; 200]);
+                let r = pair_ratio(
+                    200,
+                    || {
+                        if w == 4 {
+                            rust4(&mut s4)
+                        } else {
+                            rust8(&mut s8)
+                        }
+                    },
+                    || {
+                        if w == 4 {
+                            agg_mldsa_cref::f1600x4(&mut c4.0)
+                        } else {
+                            agg_mldsa_cref::xurq_keccak8x_permute(&mut c8.0)
+                        }
+                    },
+                );
+                println!("quick {backend:?} permutation Rust/C {r:.3}");
+            }
+        }
+    }
+}
+
 fn main() {
+    if std::env::var_os("KECCAK_QUICK").is_some() && !std::env::args().any(|a| a == "--gate") {
+        quick();
+        return;
+    }
     #[cfg(cref)]
     if std::env::var_os("KECCAK_DIAG").is_some() {
         diag();

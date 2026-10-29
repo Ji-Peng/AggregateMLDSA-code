@@ -128,8 +128,24 @@ pub(crate) fn clear(state: &mut State<4>, lanes: u8) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+pub(crate) fn absorb(
+    lanes: &mut [lanes::Lane; 4],
+    jobs: &[XofJob<'_>],
+    state: &mut State<4>,
+    mask: u8,
+) -> u8 {
+    lanes::absorb_with(lanes, jobs, mask, |i, w, value| {
+        let mask = lane_mask(1 << i);
+        let word = &mut state.0[w];
+        let value = _mm256_and_si256(_mm256_set1_epi64x(value as i64), mask);
+        store(word, _mm256_xor_si256(load(word), value));
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
-    lanes::run(
+    lanes::run::<4, false, _, _>(
         jobs,
         sink,
         Kernel {
@@ -137,6 +153,10 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
             permute: |state: &mut State<4>| permute(state),
             extract: |state: &State<4>, blocks: &mut [Block; 4], wide| extract(state, blocks, wide),
             clear: |state: &mut State<4>, lanes| clear(state, lanes),
+            absorb: |lanes: &mut [lanes::Lane; 4],
+                     jobs: &[XofJob<'_>],
+                     state: &mut State<4>,
+                     mask| absorb(lanes, jobs, state, mask),
         },
     );
 }

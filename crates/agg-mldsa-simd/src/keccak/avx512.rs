@@ -1,6 +1,6 @@
 //! 8-way Keccak-f[1600] and block extraction (AVX-512F).
 //!
-//! The permutation keeps all 25 lanes in ZMM registers and follows the
+//! The permutation uses ZMM vectors for the 25 words and follows the
 //! structure of XKCP's `KeccakP-1600-times8-SIMD512.c` (CC0; implementer
 //! Ronny Van Keer, Keccak designed by Guido Bertoni, Joan Daemen, Michael
 //! Peeters and Gilles Van Assche): `vprolq` rotations, `vpternlogq` 0x96 for
@@ -12,9 +12,8 @@
 //! includes the permutation and squeeze techniques attributed here; the
 //! original permission correspondence is not reproduced here. Columns 2 to 4 apply
 //! it just before their lanes enter chi, which interleaves the rotations with
-//! the logic operations. The extraction starts like the 8x8 transposes of the
-//! Hybrid-SHA-3 squeeze but stops one level early: each vector then holds the
-//! 32-byte rows of two lanes, which are stored as two halves.
+//! the logic operations. Extraction uses 8x8 word transposes built from
+//! unpack and two-input shuffles, with zero vectors for the last tile's padding.
 
 use super::{
     lanes::{self, Kernel, State},
@@ -271,71 +270,77 @@ pub(crate) fn permute(state: &mut State<8>) {
     store(&mut state.0[24], a24);
 }
 
-/// Transposes four state words of eight lanes into the 32-byte rows
-/// `16 * quad..16 * quad + 32` of the eight blocks: two levels of two-input
-/// shuffles leave two lanes' rows in each vector, and the high halves are
-/// stored straight from the register.
+/// Transpose eight words of eight lanes using only two-input shuffles.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
-fn quad_store(
-    a: __m512i,
-    b: __m512i,
-    c: __m512i,
-    d: __m512i,
-    blocks: &mut [Block; 8],
-    quad: usize,
-) {
-    // [a0 b0 a2 b2 a4 b4 a6 b6] and the odd lanes; likewise for c, d.
-    let t0 = _mm512_unpacklo_epi64(a, b);
-    let t1 = _mm512_unpackhi_epi64(a, b);
-    let t2 = _mm512_unpacklo_epi64(c, d);
-    let t3 = _mm512_unpackhi_epi64(c, d);
-    let lo = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
-    let hi = _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15);
-    // Row pairs of lanes (0, 2), (4, 6), (1, 3), (5, 7).
+fn oct_store(state: &State<8>, blocks: &mut [Block; 8], tile: usize, wide: u8) {
+    let w = tile * 8;
+    let s = &state.0;
+    let a = load(&s[w]);
+    let tail = tile == 2;
+    let mask = if tail { wide } else { 0xff };
+    let b = _mm512_maskz_mov_epi64(mask, load(&s[w + 1]));
+    let c = _mm512_maskz_mov_epi64(mask, load(&s[w + 2]));
+    let d = _mm512_maskz_mov_epi64(mask, load(&s[w + 3]));
+    let e = _mm512_maskz_mov_epi64(mask, load(&s[w + 4]));
+    let f = if tail {
+        _mm512_setzero_si512()
+    } else {
+        load(&s[w + 5])
+    };
+    let g = if tail {
+        _mm512_setzero_si512()
+    } else {
+        load(&s[w + 6])
+    };
+    let h = if tail {
+        _mm512_setzero_si512()
+    } else {
+        load(&s[w + 7])
+    };
+    let u0 = _mm512_unpacklo_epi64(a, b);
+    let u1 = _mm512_unpackhi_epi64(a, b);
+    let u2 = _mm512_unpacklo_epi64(c, d);
+    let u3 = _mm512_unpackhi_epi64(c, d);
+    let u4 = _mm512_unpacklo_epi64(e, f);
+    let u5 = _mm512_unpackhi_epi64(e, f);
+    let u6 = _mm512_unpacklo_epi64(g, h);
+    let u7 = _mm512_unpackhi_epi64(g, h);
+    let v0 = _mm512_shuffle_i64x2::<0x44>(u0, u2);
+    let v1 = _mm512_shuffle_i64x2::<0xee>(u0, u2);
+    let v2 = _mm512_shuffle_i64x2::<0x44>(u1, u3);
+    let v3 = _mm512_shuffle_i64x2::<0xee>(u1, u3);
+    let v4 = _mm512_shuffle_i64x2::<0x44>(u4, u6);
+    let v5 = _mm512_shuffle_i64x2::<0xee>(u4, u6);
+    let v6 = _mm512_shuffle_i64x2::<0x44>(u5, u7);
+    let v7 = _mm512_shuffle_i64x2::<0xee>(u5, u7);
     let rows = [
-        (_mm512_permutex2var_epi64(t0, lo, t2), 0, 2),
-        (_mm512_permutex2var_epi64(t0, hi, t2), 4, 6),
-        (_mm512_permutex2var_epi64(t1, lo, t3), 1, 3),
-        (_mm512_permutex2var_epi64(t1, hi, t3), 5, 7),
+        _mm512_shuffle_i64x2::<0x88>(v0, v4),
+        _mm512_shuffle_i64x2::<0x88>(v2, v6),
+        _mm512_shuffle_i64x2::<0xdd>(v0, v4),
+        _mm512_shuffle_i64x2::<0xdd>(v2, v6),
+        _mm512_shuffle_i64x2::<0x88>(v1, v5),
+        _mm512_shuffle_i64x2::<0x88>(v3, v7),
+        _mm512_shuffle_i64x2::<0xdd>(v1, v5),
+        _mm512_shuffle_i64x2::<0xdd>(v3, v7),
     ];
-    let at = 32 * quad;
-    for (row, first, second) in rows {
-        let dst: &mut [u8; 32] = (&mut blocks[first].bytes[at..at + 32]).try_into().unwrap();
-        // SAFETY: The store covers exactly the checked 32-byte subarray.
-        unsafe { _mm256_storeu_si256(dst.as_mut_ptr().cast(), _mm512_castsi512_si256(row)) };
-        let dst: &mut [u8; 32] = (&mut blocks[second].bytes[at..at + 32]).try_into().unwrap();
-        // SAFETY: The store covers exactly the checked 32-byte subarray.
-        unsafe {
-            _mm256_storeu_si256(dst.as_mut_ptr().cast(), _mm512_extracti64x4_epi64::<1>(row))
-        };
+    for (block, row) in blocks.iter_mut().zip(rows) {
+        let dst: &mut [u8; 64] = (&mut block.bytes[tile * 64..tile * 64 + 64])
+            .try_into()
+            .unwrap();
+        // SAFETY: The complete store is contained in the checked subarray.
+        unsafe { _mm512_storeu_si512(dst.as_mut_ptr().cast(), row) };
     }
 }
 
-/// Writes bytes 0..168 of every block; words 17..20 only for the `wide` lanes.
+/// Writes bytes 0..192 of every block, zeroing bytes 168..192; words 17..20 only for the `wide` lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) fn extract(state: &State<8>, blocks: &mut [Block; 8], wide: u8) {
-    let s = &state.0;
-    for quad in 0..4 {
-        let w = 4 * quad;
-        quad_store(
-            load(&s[w]),
-            load(&s[w + 1]),
-            load(&s[w + 2]),
-            load(&s[w + 3]),
-            blocks,
-            quad,
-        );
-    }
-    let w = |i: usize| _mm512_maskz_mov_epi64(wide, load(&s[i]));
-    quad_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);
-    // Word 20 lane by lane: one 64-bit store per block instead of a tile.
-    for (lane, block) in blocks.iter_mut().enumerate() {
-        let word = s[20][lane] & 0u64.wrapping_sub(u64::from(wide >> lane & 1));
-        block.bytes[160..168].copy_from_slice(&word.to_le_bytes());
-    }
+    oct_store(state, blocks, 0, wide);
+    oct_store(state, blocks, 1, wide);
+    oct_store(state, blocks, 2, wide);
 }
 
 /// Zeroes the columns of `lanes`.
@@ -350,8 +355,25 @@ pub(crate) fn clear(state: &mut State<8>, lanes: u8) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+pub(crate) fn absorb(
+    lanes: &mut [lanes::Lane; 8],
+    jobs: &[XofJob<'_>],
+    state: &mut State<8>,
+    mask: u8,
+) -> u8 {
+    lanes::absorb_with(lanes, jobs, mask, |i, w, value| {
+        let mask = 1u8 << i;
+        let word = &mut state.0[w];
+        let old = load(word);
+        let value = _mm512_set1_epi64(value as i64);
+        store(word, _mm512_mask_xor_epi64(old, mask, old, value));
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
 pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
-    lanes::run(
+    lanes::run::<8, false, _, _>(
         jobs,
         sink,
         Kernel {
@@ -359,6 +381,10 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
             permute: |state: &mut State<8>| permute(state),
             extract: |state: &State<8>, blocks: &mut [Block; 8], wide| extract(state, blocks, wide),
             clear: |state: &mut State<8>, lanes| clear(state, lanes),
+            absorb: |lanes: &mut [lanes::Lane; 8],
+                     jobs: &[XofJob<'_>],
+                     state: &mut State<8>,
+                     mask| absorb(lanes, jobs, state, mask),
         },
     );
 }
