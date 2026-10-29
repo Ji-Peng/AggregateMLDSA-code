@@ -14,6 +14,7 @@ avx512 = ["agg-piop/avx512", "agg-keccak/avx512"]
 agg-witness = { workspace = true }
 agg-piop = { workspace = true }
 agg-keccak = { workspace = true }
+agg-mldsa-simd = { workspace = true }
 
 [[bench]]
 name = "skeleton"
@@ -22,6 +23,10 @@ harness = false
 # Mode-B prove/verify benchmark (criterion-free): see benches/mode_b.rs.
 [[bench]]
 name = "mode_b"
+harness = false
+
+[[bench]]
+name = "step12"
 harness = false
 
 [lints.rust]

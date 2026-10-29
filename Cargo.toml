@@ -8,6 +8,8 @@ members = [
   "crates/agg-bridge",
   "crates/agg-cli",
   "crates/agg-bench",
+  "crates/agg-mldsa-simd",
+  "crates/agg-mldsa-cref",
 ]
 # The vendored, patched Flock core and field crates (vendor/flock-*/PATCH.md) are
 # `[patch]` sources, not members.
@@ -40,6 +42,10 @@ agg-pcs-config = { path = "crates/agg-pcs-config" }
 agg-piop = { path = "crates/agg-piop" }
 agg-keccak = { path = "crates/agg-keccak" }
 agg-bridge = { path = "crates/agg-bridge" }
+agg-mldsa-simd = { path = "crates/agg-mldsa-simd" }
+agg-mldsa-cref = { path = "crates/agg-mldsa-cref" }
+keccak = "=0.1.6"
+cc = "=1.4.4"
 
 # Aerie (a16z/aerie) at rev 49b6c21. Path crates inside the git repo resolve
 # through Aerie's own workspace, so its pins of Akita/Jolt/Spongefish apply.

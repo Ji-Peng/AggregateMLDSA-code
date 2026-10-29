@@ -1,0 +1,50 @@
+[package]
+name = "agg-mldsa-simd"
+description = "SIMD-accelerated kernels and scalar fallbacks for ML-DSA operations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+keccak = { workspace = true }
+
+[dev-dependencies]
+agg-witness = { workspace = true }
+sha3 = { workspace = true }
+agg-mldsa-cref = { workspace = true }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[[bench]]
+name = "scalar"
+harness = false
+
+[[bench]]
+name = "ntt_avx2"
+harness = false
+
+[[bench]]
+name = "ntt_avx512"
+harness = false
+
+[[bench]]
+name = "keccak"
+harness = false
+
+[[bench]]
+name = "sample"
+harness = false
+
+[[bench]]
+name = "finish"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
