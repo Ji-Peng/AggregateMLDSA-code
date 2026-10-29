@@ -2,18 +2,24 @@
 //! Translated with the authors' permission. Twiddles are generated from the roots
 //! and moduli; no external literal tables are embedded.
 
+#[cfg(target_arch = "x86_64")]
 use super::{Form, Scale};
+#[cfg(target_arch = "x86_64")]
 use crate::{
     params::{consts, Prime},
     poly::Poly32,
 };
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
+#[cfg(target_arch = "x86_64")]
 #[path = "avx512_asm.rs"]
 mod allocated;
+#[cfg(target_arch = "x86_64")]
 #[path = "avx512_tables.rs"]
 mod tables;
 
 #[inline]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn load(a: &Poly32, reg: usize) -> __m512i {
     let chunk: &[i32; 16] = a.0[reg * 16..reg * 16 + 16].try_into().unwrap();
@@ -21,6 +27,7 @@ fn load(a: &Poly32, reg: usize) -> __m512i {
     unsafe { _mm512_loadu_si512(chunk.as_ptr().cast()) }
 }
 #[inline]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn store(a: &mut Poly32, reg: usize, v: __m512i) {
     let chunk: &mut [i32; 16] = (&mut a.0[reg * 16..reg * 16 + 16]).try_into().unwrap();
@@ -28,12 +35,14 @@ fn store(a: &mut Poly32, reg: usize, v: __m512i) {
     unsafe { _mm512_storeu_si512(chunk.as_mut_ptr().cast(), v) }
 }
 #[inline]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn lanes(a: &tables::Lanes) -> __m512i {
     // SAFETY: Lanes contains sixteen initialized i32 values.
     unsafe { _mm512_load_si512(a.0.as_ptr().cast()) }
 }
 #[inline]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn mont(x: __m512i, z: __m512i, zi: __m512i, p: __m512i) -> __m512i {
     let odd = _mm512_srli_epi64::<32>(x);
@@ -48,6 +57,7 @@ fn mont(x: __m512i, z: __m512i, zi: __m512i, p: __m512i) -> __m512i {
     _mm512_mask_sub_epi32(e, 0xaaaa, o, _mm512_mul_epi32(to, p))
 }
 // These exchanges are involutions; they preserve the coefficient storage layout.
+#[cfg(target_arch = "x86_64")]
 macro_rules! exchange {
     ($a:ident,$b:ident,8) => {{
         let t = $a;
@@ -71,11 +81,13 @@ macro_rules! exchange {
     }};
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
     allocated::forward(prime, a)
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 #[inline(never)]
 #[allow(dead_code)]
@@ -84,7 +96,7 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
     let t = if SECOND { &tables::P2 } else { &tables::Q };
     let p = _mm512_set1_epi32(consts(prime).p);
     // Lazy CT sums: starting at 2^22, every layer adds at most
-    // p/2 + |z*x|/2^32; generated twiddles keep all outputs below 4.4p.
+    // p/2 + |z*x|/2^32; generated bounds give |x|<4.52q or |x|<4.25P2.
     macro_rules! bf { ($a:ident,$b:ident,$i:expr) => {{
         let v=mont($b,lanes(&t.z[$i]),lanes(&t.zi[$i]),p);
         $b=_mm512_sub_epi32($a,v); $a=_mm512_add_epi32($a,v);
@@ -219,11 +231,13 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
     store(a, 15, b15);
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form) {
     allocated::inverse(prime, a, scale, form)
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 #[inline(never)]
 #[allow(dead_code)]
@@ -403,6 +417,7 @@ fn intt_impl<const SECOND: bool, const MONT: bool>(a: &mut Poly32, form: Form) {
 }
 
 #[inline]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn finish(x: __m512i, p: __m512i, form: Form) -> __m512i {
     // Input lies in (-p,p); one correction makes it canonical.
@@ -418,6 +433,7 @@ fn finish(x: __m512i, p: __m512i, form: Form) -> __m512i {
         x
     }
 }
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
     let c = consts(prime);
@@ -429,7 +445,7 @@ pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &
         for k in 0..4 {
             let x = load(&a[k], reg);
             let y = load(&b[k], reg);
-            // Four unreduced signed products: q < 18q^2, P2 < 8.8P2^2 < 2^58.
+            // Four unreduced signed products: q < 18.1q^2, P2 < 8.8P2^2 < 2^58.
             e = _mm512_add_epi64(e, _mm512_mul_epi32(x, y));
             o = _mm512_add_epi64(
                 o,
@@ -450,6 +466,7 @@ pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &
         );
     }
 }
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn reduce(prime: Prime, a: &mut Poly32, form: Form) {
     let c = consts(prime);
@@ -468,6 +485,7 @@ pub(crate) unsafe fn reduce(prime: Prime, a: &mut Poly32, form: Form) {
         store(a, reg, finish(v, p, form));
     }
 }
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn order_from_fips(a: &mut Poly32) {
     let even = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
@@ -479,6 +497,7 @@ pub(crate) unsafe fn order_from_fips(a: &mut Poly32) {
         store(a, reg + 1, _mm512_permutex2var_epi32(x, odd, y));
     }
 }
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
     let lo = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
@@ -491,10 +510,11 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use crate::dispatch::{Backend, Engine};
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
     fn compare_intrinsics() {
         for prime in [Prime::Q, Prime::P2] {
@@ -536,3 +556,8 @@ mod tests {
         }
     }
 }
+
+// These names remain resolvable on scalar-only targets; dispatch never selects
+// the AVX-512 backend there.
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) use super::scalar::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};

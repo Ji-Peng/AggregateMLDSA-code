@@ -1,8 +1,13 @@
 //! Explicit register allocation for the Hybrid-SHA-3 transform schedule.
 //! The intrinsics versions remain alongside this module for review. LLVM 22
 //! hoists twiddles and spills the polynomial; these kernels keep all sixteen
-//! coefficient registers resident, using only AVX-512F instructions.
+//! coefficient registers resident, using only AVX-512F/BW instructions.
 use super::{consts, tables, Form, Poly32, Prime, Scale};
+// Lazy CT sums start at |x|<=2^22 and stay below 4.52q or 4.25P2. GS sums
+// and differences stay below 2^31 by the generated per-position bounds.
+// The selected P2 lanes are reduced after four layers to |x|<0.61p.
+// Montgomery low words cancel exactly, so a masked high-word subtraction
+// combines the odd lanes without a separate blend or a carry correction.
 use core::arch::asm;
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]

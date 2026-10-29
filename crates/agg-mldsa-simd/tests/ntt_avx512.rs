@@ -240,7 +240,7 @@ fn dot4_accumulator_limits() {
         let p = c.p as i64;
         let a_bound = if prime == Prime::Q { p - 1 } else { p / 2 };
         let b_bound = if prime == Prime::Q {
-            41 * p / 10
+            452 * p / 100
         } else {
             44 * p / 10
         };

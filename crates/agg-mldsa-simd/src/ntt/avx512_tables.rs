@@ -204,6 +204,32 @@ pub(super) const fn reduction_mask(reg: usize) -> u16 {
 mod tests {
     use super::*;
     #[test]
+    fn forward_bounds() {
+        for c in [CONSTS_Q, CONSTS_P2] {
+            let p = c.p as i64;
+            let mut bounds = [1i64 << 22; 256];
+            for stage in 0..8 {
+                let len = 128 >> stage;
+                for base in (0..256).step_by(2 * len) {
+                    let k = (1 << stage) + base / (2 * len);
+                    let z = (centered(pow(c.zeta as i64, reverse8(k), p) * (1i64 << 32) % p, p)
+                        as i64)
+                        .abs();
+                    for j in base..base + len {
+                        let product =
+                            (z * bounds[j + len] + ((1i64 << 32) - 1)) / (1i64 << 32) + p / 2;
+                        let bound = bounds[j] + product;
+                        assert!(bound < 1i64 << 31);
+                        bounds[j] = bound;
+                        bounds[j + len] = bound;
+                    }
+                }
+            }
+            let hundredths = if c.p == CONSTS_Q.p { 452 } else { 425 };
+            assert!(bounds.into_iter().all(|b| b * 100 < hundredths * p));
+        }
+    }
+    #[test]
     fn short_reduction_bound() {
         let p = CONSTS_P2.p as i64;
         // Each rounded n corresponds to an interval of width 2^25. The
