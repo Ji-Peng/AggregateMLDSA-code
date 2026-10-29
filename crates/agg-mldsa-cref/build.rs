@@ -114,6 +114,33 @@ fn main() {
         ]);
     pq_build.compile("pqcrystals_dilithium2_avx2");
 
+    // Restore the original XKCP theta schedule in the build copy. The pinned
+    // Hybrid modification overwrites column parities before later uses.
+    // Keep external checkouts untouched and reject unexpected source changes.
+    let xkcp_path = hybrid_dir.join("MLDSA_AVX512/keccak/KeccakP-1600-times8-SIMD512.c");
+    let xkcp = std::fs::read_to_string(&xkcp_path).expect("read pinned XKCP");
+    let start = xkcp
+        .find("\n#define KeccakP_ThetaRhoPiChiIota0(")
+        .expect("theta macro");
+    let end = start
+        + xkcp[start..]
+            .find("#define KeccakP_ThetaRhoPiChi1(")
+            .expect("next macro");
+    assert!(
+        xkcp[start..end].contains("_Be = XOR3(_Ba, _L2, _De);"),
+        "unexpected pinned XKCP theta macro"
+    );
+    let restored = include_str!("c/xkcp-theta.h");
+    let mut corrected = xkcp[..start].to_owned();
+    corrected.push('\n');
+    corrected.push_str(restored);
+    corrected.push_str(&xkcp[end..]);
+    let corrected_xkcp = out_dir.join("KeccakP-1600-times8-corrected.c");
+    std::fs::write(&corrected_xkcp, corrected).expect("write restored XKCP");
+    println!("cargo:rerun-if-changed={}", xkcp_path.display());
+    println!("cargo:rerun-if-changed=c/xkcp-theta.h");
+    println!("cargo:rerun-if-changed=c/shake128x8.c");
+
     // 3. Build Hybrid MLDSA_AVX512 static library
     let hyb512_base = hybrid_dir.join("MLDSA_AVX512");
     let mut hyb512_build = cc::Build::new();
@@ -146,7 +173,8 @@ fn main() {
             hyb512_base.join("ntt/pointwise512.c"),
             hyb512_base.join("ntt/consts.c"),
             hyb512_base.join("keccak/keccak8x.c"),
-            hyb512_base.join("keccak/KeccakP-1600-times8-SIMD512.c"),
+            corrected_xkcp,
+            PathBuf::from("c/shake128x8.c"),
             hyb512_base.join("keccak/fips202x8.c"),
             hyb512_base.join("rejsample.c"),
             hyb512_base.join("pspm.c"),

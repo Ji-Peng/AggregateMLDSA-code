@@ -34,15 +34,8 @@ pub mod ffi {
         pub fn pqcrystals_dilithium2_avx2_polyz_unpack(r: *mut i32, a: *const u8);
         pub fn pqcrystals_dilithium2_avx2_polyw1_pack(r: *mut u8, a: *const i32);
         pub fn pqcrystals_dilithium2_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
-        pub fn pqcrystals_dilithium2_avx2_poly_decompose(
-            a1: *mut i32,
-            a0: *mut i32,
-            a: *const i32,
-        );
-        pub fn pqcrystals_dilithium2_avx2_polyvec_matrix_expand(
-            mat: *mut i32,
-            rho: *const u8,
-        );
+        pub fn pqcrystals_dilithium2_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
+        pub fn pqcrystals_dilithium2_avx2_polyvec_matrix_expand(mat: *mut i32, rho: *const u8);
         pub fn pqcrystals_dilithium2_avx2_poly_challenge(c: *mut i32, seed: *const u8);
 
         pub fn pqcrystals_dilithium_fips202x4_avx2_f1600x4(s: *mut u64, rc: *const u64);
@@ -92,7 +85,7 @@ pub mod ffi {
         pub fn hyb512_pointwise_avx512(c: *mut i32, a: *const i32, b: *const i32);
         pub fn hyb512_XURQ_keccak8x_permute(state: *mut u64);
         pub fn hyb512_KeccakP1600times8_PermuteAll_24rounds(state: *mut u64);
-        pub fn hyb512_XURQ_AVX512_shake128x8_absorb(
+        pub fn agg_cref_shake128x8_absorb(
             state: *mut u64,
             in0: *const u8,
             in1: *const u8,
@@ -137,19 +130,12 @@ pub mod ffi {
             n7: u16,
         );
         pub fn hyb512_ExpandA_shuffled(mat: *mut i32, rho: *const u8);
-        pub fn hyb512_poly_emulate_ct(
-            r: *mut i32,
-            c: *const i32,
-            t: *const i32,
-        ) -> std::ffi::c_int;
+        pub fn hyb512_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32)
+            -> std::ffi::c_int;
         pub fn hyb512_decompose_avx512(a1: *mut i32, a0: *mut i32, a: *const i32);
 
         // --- Hybrid-SHA-3 AVX2 ---
-        pub fn hyb2_poly_emulate_ct(
-            r: *mut i32,
-            c: *const i32,
-            t: *const i32,
-        ) -> std::ffi::c_int;
+        pub fn hyb2_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32) -> std::ffi::c_int;
     }
 }
 
@@ -233,12 +219,7 @@ mod safe_wrappers {
     }
 
     /// Pointwise Montgomery multiplication: c = a o b / 2^32 mod q.
-    pub fn pointwise_avx(
-        c: &mut [i32; 256],
-        a: &[i32; 256],
-        b: &[i32; 256],
-        qdata: &[i32; 624],
-    ) {
+    pub fn pointwise_avx(c: &mut [i32; 256], a: &[i32; 256], b: &[i32; 256], qdata: &[i32; 624]) {
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_pointwise_avx(
                 c.as_mut_ptr(),
@@ -268,9 +249,7 @@ mod safe_wrappers {
 
     /// Uniform rejection sampling in AVX2.
     pub fn rej_uniform_avx(r: &mut [i32; 256], buf: &[u8; 848]) -> u32 {
-        unsafe {
-            ffi::pqcrystals_dilithium2_avx2_rej_uniform_avx(r.as_mut_ptr(), buf.as_ptr())
-        }
+        unsafe { ffi::pqcrystals_dilithium2_avx2_rej_uniform_avx(r.as_mut_ptr(), buf.as_ptr()) }
     }
 
     /// Unpacks 576 bytes into 256 signed coefficients z.
@@ -290,11 +269,7 @@ mod safe_wrappers {
     /// UseHint on one polynomial: b = UseHint(h, a).
     pub fn poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
         unsafe {
-            ffi::pqcrystals_dilithium2_avx2_poly_use_hint(
-                b.as_mut_ptr(),
-                a.as_ptr(),
-                h.as_ptr(),
-            );
+            ffi::pqcrystals_dilithium2_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
         }
     }
 
@@ -319,6 +294,40 @@ mod safe_wrappers {
         }
     }
 
+    /// Padded input buffer providing at least 8 bytes of zero slack past the
+    /// input slice length, rounding up to a multiple of 8 plus 8.
+    /// This prevents whole-word SIMD gathers in C implementations from reading past
+    /// the allocation boundary.
+    enum PaddedInput {
+        Stack([u8; 1024]),
+        Heap(Vec<u8>),
+    }
+
+    impl PaddedInput {
+        #[inline]
+        fn new(input: &[u8]) -> Self {
+            let len = input.len();
+            let padded_len = ((len + 7) & !7) + 8;
+            if padded_len <= 1024 {
+                let mut buf = [0u8; 1024];
+                buf[..len].copy_from_slice(input);
+                Self::Stack(buf)
+            } else {
+                let mut buf = vec![0u8; padded_len];
+                buf[..len].copy_from_slice(input);
+                Self::Heap(buf)
+            }
+        }
+
+        #[inline(always)]
+        fn as_ptr(&self) -> *const u8 {
+            match self {
+                Self::Stack(buf) => buf.as_ptr(),
+                Self::Heap(buf) => buf.as_ptr(),
+            }
+        }
+    }
+
     /// 4-lane SHAKE128 single-shot absorb.
     pub fn shake128x4_absorb_once(
         state: &mut [u64; 100],
@@ -330,16 +339,62 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
+        let b0 = PaddedInput::new(in0);
+        let b1 = PaddedInput::new(in1);
+        let b2 = PaddedInput::new(in2);
+        let b3 = PaddedInput::new(in3);
         unsafe {
             ffi::pqcrystals_dilithium_fips202x4_avx2_shake128x4_absorb_once(
                 state.as_mut_ptr(),
-                in0.as_ptr(),
-                in1.as_ptr(),
-                in2.as_ptr(),
-                in3.as_ptr(),
+                b0.as_ptr(),
+                b1.as_ptr(),
+                b2.as_ptr(),
+                b3.as_ptr(),
                 in0.len(),
             );
         }
+    }
+
+    /// 4-lane SHAKE128 single-shot absorb without defensive buffer copy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that at least 8 readable bytes follow the end of each
+    /// input slice (or that the slice length is an exact multiple of 8), because
+    /// the pq-crystals AVX2 implementation performs whole-word 64-bit SIMD gathers.
+    pub unsafe fn shake128x4_absorb_once_unpadded(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        debug_assert_eq!(in0.len(), in1.len());
+        debug_assert_eq!(in0.len(), in2.len());
+        debug_assert_eq!(in0.len(), in3.len());
+        ffi::pqcrystals_dilithium_fips202x4_avx2_shake128x4_absorb_once(
+            state.as_mut_ptr(),
+            in0.as_ptr(),
+            in1.as_ptr(),
+            in2.as_ptr(),
+            in3.as_ptr(),
+            in0.len(),
+        );
+    }
+
+    /// Alias for [`shake128x4_absorb_once_unpadded`].
+    ///
+    /// # Safety
+    ///
+    /// See [`shake128x4_absorb_once_unpadded`].
+    pub unsafe fn shake128x4_absorb_once_raw(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        shake128x4_absorb_once_unpadded(state, in0, in1, in2, in3);
     }
 
     /// 4-lane SHAKE128 squeezeblocks.
@@ -378,16 +433,62 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
+        let b0 = PaddedInput::new(in0);
+        let b1 = PaddedInput::new(in1);
+        let b2 = PaddedInput::new(in2);
+        let b3 = PaddedInput::new(in3);
         unsafe {
             ffi::pqcrystals_dilithium_fips202x4_avx2_shake256x4_absorb_once(
                 state.as_mut_ptr(),
-                in0.as_ptr(),
-                in1.as_ptr(),
-                in2.as_ptr(),
-                in3.as_ptr(),
+                b0.as_ptr(),
+                b1.as_ptr(),
+                b2.as_ptr(),
+                b3.as_ptr(),
                 in0.len(),
             );
         }
+    }
+
+    /// 4-lane SHAKE256 single-shot absorb without defensive buffer copy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that at least 8 readable bytes follow the end of each
+    /// input slice (or that the slice length is an exact multiple of 8), because
+    /// the pq-crystals AVX2 implementation performs whole-word 64-bit SIMD gathers.
+    pub unsafe fn shake256x4_absorb_once_unpadded(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        debug_assert_eq!(in0.len(), in1.len());
+        debug_assert_eq!(in0.len(), in2.len());
+        debug_assert_eq!(in0.len(), in3.len());
+        ffi::pqcrystals_dilithium_fips202x4_avx2_shake256x4_absorb_once(
+            state.as_mut_ptr(),
+            in0.as_ptr(),
+            in1.as_ptr(),
+            in2.as_ptr(),
+            in3.as_ptr(),
+            in0.len(),
+        );
+    }
+
+    /// Alias for [`shake256x4_absorb_once_unpadded`].
+    ///
+    /// # Safety
+    ///
+    /// See [`shake256x4_absorb_once_unpadded`].
+    pub unsafe fn shake256x4_absorb_once_raw(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        shake256x4_absorb_once_unpadded(state, in0, in1, in2, in3);
     }
 
     /// 4-lane SHAKE256 squeezeblocks.
@@ -489,6 +590,9 @@ mod safe_wrappers {
     }
 
     /// 8-lane SHAKE128 absorb in AVX-512.
+    ///
+    /// The C implementation (`agg_cref_shake128x8_absorb`) uses `memcpy` for tail bytes
+    /// and never reads beyond `in*.len()`, so no padding buffer is required.
     #[allow(clippy::too_many_arguments)]
     pub fn xurq_avx512_shake128x8_absorb(
         state: &mut [u64; 200],
@@ -509,7 +613,7 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in6.len());
         assert_eq!(in0.len(), in7.len());
         unsafe {
-            ffi::hyb512_XURQ_AVX512_shake128x8_absorb(
+            ffi::agg_cref_shake128x8_absorb(
                 state.as_mut_ptr(),
                 in0.as_ptr(),
                 in1.as_ptr(),
@@ -522,6 +626,42 @@ mod safe_wrappers {
                 in0.len() as std::ffi::c_int,
             );
         }
+    }
+
+    /// 8-lane SHAKE128 absorb in AVX-512 without buffer copying.
+    /// Alias for [`xurq_avx512_shake128x8_absorb`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn xurq_avx512_shake128x8_absorb_unpadded(
+        state: &mut [u64; 200],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+        in4: &[u8],
+        in5: &[u8],
+        in6: &[u8],
+        in7: &[u8],
+    ) {
+        xurq_avx512_shake128x8_absorb(state, in0, in1, in2, in3, in4, in5, in6, in7);
+    }
+
+    /// 8-lane SHAKE128 absorb in AVX-512 without buffer copying.
+    /// Alias for [`xurq_avx512_shake128x8_absorb`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn xurq_avx512_shake128x8_absorb_raw(
+        state: &mut [u64; 200],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+        in4: &[u8],
+        in5: &[u8],
+        in6: &[u8],
+        in7: &[u8],
+    ) {
+        xurq_avx512_shake128x8_absorb(state, in0, in1, in2, in3, in4, in5, in6, in7);
     }
 
     /// 8-lane SHAKE128 squeezeblocks in AVX-512.
@@ -613,16 +753,12 @@ mod safe_wrappers {
 
     /// Computes c * t in AVX-512 (Hybrid pspm.c).
     pub fn poly_emulate_ct_avx512(r: &mut [i32; 256], c: &[i32; 256], t: &[i32; 256]) -> i32 {
-        unsafe {
-            ffi::hyb512_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr())
-        }
+        unsafe { ffi::hyb512_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr()) }
     }
 
     /// Computes c * t in AVX2 (Hybrid pspm.c).
     pub fn poly_emulate_ct_avx2(r: &mut [i32; 256], c: &[i32; 256], t: &[i32; 256]) -> i32 {
-        unsafe {
-            ffi::hyb2_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr())
-        }
+        unsafe { ffi::hyb2_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr()) }
     }
 
     /// Decomposes polynomial in AVX-512 into a1 and a0.
