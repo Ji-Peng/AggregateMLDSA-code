@@ -46,9 +46,10 @@ pub fn az_crt(key: &ExpandedKey, z: &VecL) -> VecK {
     let fips = NttPrime::fips();
     let z1: Vec<[u64; N]> = z.iter().map(|zi| fips.ntt_signed(zi)).collect();
     let mut az_hat = [[0u64; N]; K];
+    let a_hat = key.a_hat();
     for (r, acc) in az_hat.iter_mut().enumerate() {
         for s in 0..L {
-            let a1 = fips.pointwise(&key.a_hat[r][s], &z1[s]);
+            let a1 = fips.pointwise(&a_hat[r][s], &z1[s]);
             for j in 0..N {
                 acc[j] = fips.add_mod(acc[j], a1[j]);
             }
@@ -71,10 +72,11 @@ pub fn az_crt_with(key: &ExpandedKey, z: &VecL, az_hat: &[[u64; N]; K]) -> VecK 
     let p2 = prime2();
     let z2: Vec<[u64; N]> = z.iter().map(|zi| p2.ntt_signed(zi)).collect();
     let mut out = [[0i64; N]; K];
+    let a_hat_p2 = key.a_hat_p2_reference();
     for r in 0..K {
         let mut acc2 = [0u64; N];
         for s in 0..L {
-            let a2 = p2.pointwise(&key.a_hat_p2[r][s], &z2[s]);
+            let a2 = p2.pointwise(&a_hat_p2[r][s], &z2[s]);
             for j in 0..N {
                 acc2[j] = p2.add_mod(acc2[j], a2[j]);
             }

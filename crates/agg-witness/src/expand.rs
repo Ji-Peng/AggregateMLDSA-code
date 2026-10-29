@@ -2,14 +2,20 @@
 //!
 //! `ExpandedKey` holds what the verifier precomputes per key:
 //! A_hat = ExpandA(rho) (FIPS 204 Algorithms 14, 30, 32), the centered coefficient-form matrix
-//! A = ctr_q(NTT^{-1}(A_hat)), tr = H(pk, 64), plus NTT(t1 2^d) for the native verifier and the
-//! NTT of A modulo the second CRT prime for the prover's integer product (`crate::crt`).
+//! A = ctr_q(NTT^{-1}(A_hat)), tr = H(pk, 64), and the prover's NTT-domain matrices
+//! (`PreparedMatrices`: A_hat mod q and NTT(A) mod the 28-bit transform prime of
+//! `agg_mldsa_simd`, in the coefficient order of the SIMD backend). The FIPS-order u64 forms
+//! of A_hat, NTT(t1 2^d) and NTT(A) modulo the legacy CRT prime (`crate::crt`) are reference
+//! methods, recomputed on demand for the native verifier and the legacy derivation.
+//! `ExpandedKey::many` expands keys in tiles of 8 (batched ExpandA and tr hashing).
 //! `public_t` computes T = 2^d (c * t1) over the integers from the sparse c.
 
 use crate::crt;
-use crate::native::{ctr_q, pk_decode, tr, Challenge, VecK};
+use crate::native::{pk_decode, Challenge, VecK};
 use crate::ntt::NttPrime;
 use crate::params::*;
+use agg_mldsa_simd::{Backend, Engine, ExpandedA, Poly32};
+use rayon::prelude::*;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 
 /// A k x l matrix of NTT-domain polynomials.
@@ -73,6 +79,24 @@ pub fn expand_a(rho: &[u8; 32]) -> (Box<MatrixNtt>, [[usize; L]; K]) {
     (a_hat, blocks)
 }
 
+/// Keys per expansion tile: one batch of ExpandA streams and tr digests at a time.
+pub const KEY_TILE: usize = 8;
+
+/// A k x l matrix of NTT-domain polynomials in the coefficient order of one SIMD backend.
+pub type MatrixPoly32 = [[Poly32; L]; K];
+
+/// The prover's NTT-domain copies of A, in the coefficient order of the backend that built
+/// them (never serialized; only an engine of the same backend may read them).
+#[derive(Clone, Debug)]
+pub struct PreparedMatrices {
+    /// A_hat = ExpandA(rho) modulo q, canonical in [0, q).
+    pub a_hat_q: Box<MatrixPoly32>,
+    /// NTT(A) modulo the 28-bit transform prime `agg_mldsa_simd::params::P2`, centered.
+    pub a_hat_p2: Box<MatrixPoly32>,
+    /// The backend whose coefficient order the two matrices use.
+    pub backend: Backend,
+}
+
 /// Per-key precomputation of the verifier and the prover.
 #[derive(Clone, Debug)]
 pub struct ExpandedKey {
@@ -84,58 +108,120 @@ pub struct ExpandedKey {
     pub t1: [[u16; N]; K],
     /// tr = H(pk, 64).
     pub tr: [u8; TR_BYTES],
-    /// A_hat = ExpandA(rho), NTT domain mod q.
-    pub a_hat: Box<MatrixNtt>,
     /// SHAKE128 blocks used by each RejNTTPoly call.
     pub expand_blocks: [[usize; L]; K],
     /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2].
     pub a: Box<MatrixCoeff>,
-    /// NTT(t1 2^d) mod q (native verifier, Algorithm 8 line 9).
-    pub t1_2d_hat: [[u64; N]; K],
-    /// NTT of A modulo the second CRT prime (prover's integer product).
-    pub a_hat_p2: Box<MatrixNtt>,
+    /// A_hat modulo q and NTT(A) modulo the transform prime, in backend order.
+    pub prepared: PreparedMatrices,
+}
+
+/// A zeroed boxed matrix built on the heap (no matrix-sized stack temporary).
+fn boxed_matrix<T: Clone>(zero: T) -> Box<[[T; L]; K]> {
+    let rows: Vec<[T; L]> = vec![std::array::from_fn(|_| zero.clone()); K];
+    match rows.into_boxed_slice().try_into() {
+        Ok(boxed) => boxed,
+        Err(_) => unreachable!("k rows"),
+    }
+}
+
+/// Expands one tile of at most [`KEY_TILE`] encoded keys; `None` for a key of the wrong
+/// length.
+fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey>> {
+    let decoded: Vec<Option<_>> = pks.iter().map(|pk| pk_decode(pk)).collect();
+    let live: Vec<usize> = (0..pks.len()).filter(|&i| decoded[i].is_some()).collect();
+    let rhos: Vec<[u8; 32]> = live.iter().map(|&i| decoded[i].as_ref().expect("live").rho).collect();
+    let mut expanded = vec![ExpandedA::zero(); live.len()];
+    engine.expand_a_many(&rhos, &mut expanded);
+    let tr_inputs: Vec<[&[u8]; 4]> = live.iter().map(|&i| [pks[i], &[][..], &[], &[]]).collect();
+    let mut trs = vec![0u8; live.len() * TR_BYTES];
+    engine.shake256_many(&tr_inputs, TR_BYTES, &mut trs);
+    let mut out: Vec<Option<ExpandedKey>> = (0..pks.len()).map(|_| None).collect();
+    for ((&i, ex), tr) in live.iter().zip(&expanded).zip(trs.as_chunks::<TR_BYTES>().0) {
+        let key = decoded[i].as_ref().expect("live");
+        let mut a = boxed_matrix([0i32; N]);
+        let mut a_hat_q = boxed_matrix(Poly32::zero());
+        let mut a_hat_p2 = boxed_matrix(Poly32::zero());
+        *a_hat_q = ex.a_hat;
+        engine.prepare_matrices(&ex.a_hat, &mut a, &mut a_hat_p2);
+        out[i] = Some(ExpandedKey {
+            pk: pks[i].to_vec(),
+            rho: key.rho,
+            t1: key.t1,
+            tr: *tr,
+            expand_blocks: ex.blocks.map(|row| row.map(usize::from)),
+            a,
+            prepared: PreparedMatrices { a_hat_q, a_hat_p2, backend: engine.backend() },
+        });
+    }
+    out
 }
 
 impl ExpandedKey {
     /// pkDecode plus the expansion; `None` on a wrong length.
     pub fn from_bytes(pk: &[u8]) -> Option<Self> {
-        let decoded = pk_decode(pk)?;
-        let (a_hat, expand_blocks) = expand_a(&decoded.rho);
-        let fips = NttPrime::fips();
-        let p2 = crt::prime2();
-        let mut a = Box::new([[[0i32; N]; L]; K]);
-        let mut a_hat_p2 = Box::new([[[0u64; N]; L]; K]);
-        for r in 0..K {
-            for s in 0..L {
-                let coeff = fips.intt(&a_hat[r][s]);
-                let mut centered = [0i64; N];
-                for j in 0..N {
-                    let c = ctr_q(coeff[j] as i64);
-                    a[r][s][j] = c as i32;
-                    centered[j] = c;
+        Self::many(&[pk]).pop().flatten()
+    }
+
+    /// [`ExpandedKey::from_bytes`] for many keys, in tiles of [`KEY_TILE`] keys on the Rayon
+    /// pool, with the process-wide SIMD engine.
+    pub fn many(pks: &[&[u8]]) -> Vec<Option<Self>> {
+        Self::many_with(agg_mldsa_simd::engine(), pks)
+    }
+
+    /// [`ExpandedKey::many`] with an explicit engine (tests compare every backend).
+    #[doc(hidden)]
+    pub fn many_with(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<Self>> {
+        let tiles: Vec<Vec<Option<Self>>> = pks.par_chunks(KEY_TILE).map(|tile| expand_tile(engine, tile)).collect();
+        tiles.into_iter().flatten().collect()
+    }
+
+    /// An engine reading [`ExpandedKey::prepared`] (the backend that built it).
+    ///
+    /// # Panics
+    /// Never on the machine that built the key.
+    #[must_use]
+    pub fn prepared_engine(&self) -> Engine {
+        Engine::new(self.prepared.backend).expect("the backend that prepared the key")
+    }
+
+    /// A_hat = ExpandA(rho) in the FIPS 204 NTT order, in [0, q) (reference form, recomputed
+    /// from the prepared matrix).
+    #[must_use]
+    pub fn a_hat(&self) -> Box<MatrixNtt> {
+        let engine = self.prepared_engine();
+        let mut out = boxed_matrix([0u64; N]);
+        for (out_row, row) in out.iter_mut().zip(self.prepared.a_hat_q.iter()) {
+            for (dest, poly) in out_row.iter_mut().zip(row) {
+                let mut fips = *poly;
+                engine.order_to_fips(&mut fips);
+                for (d, &x) in dest.iter_mut().zip(fips.iter()) {
+                    *d = u64::try_from(x).expect("canonical residue");
                 }
-                a_hat_p2[r][s] = p2.ntt_signed(&centered);
             }
         }
-        let mut t1_2d_hat = [[0u64; N]; K];
-        for r in 0..K {
-            let mut t = [0i64; N];
-            for j in 0..N {
-                t[j] = i64::from(decoded.t1[r][j]) << D;
+        out
+    }
+
+    /// NTT(A) modulo the legacy CRT prime [`crt::P2`] (reference form for [`crate::crt`],
+    /// recomputed from A).
+    #[must_use]
+    pub fn a_hat_p2_reference(&self) -> Box<MatrixNtt> {
+        let p2 = crt::prime2();
+        let mut out = boxed_matrix([0u64; N]);
+        for (out_row, row) in out.iter_mut().zip(self.a.iter()) {
+            for (dest, poly) in out_row.iter_mut().zip(row) {
+                *dest = p2.ntt_signed(&poly.map(i64::from));
             }
-            t1_2d_hat[r] = fips.ntt_signed(&t);
         }
-        Some(Self {
-            pk: pk.to_vec(),
-            rho: decoded.rho,
-            t1: decoded.t1,
-            tr: tr(pk),
-            a_hat,
-            expand_blocks,
-            a,
-            t1_2d_hat,
-            a_hat_p2,
-        })
+        out
+    }
+
+    /// NTT(t1 2^d) mod q (native verifier, Algorithm 8 line 9), recomputed from t1.
+    #[must_use]
+    pub fn t1_2d_hat(&self) -> [[u64; N]; K] {
+        let fips = NttPrime::fips();
+        self.t1.map(|row| fips.ntt_signed(&row.map(|x| i64::from(x) << D)))
     }
 }
 
@@ -212,7 +298,7 @@ mod tests {
                     assert!(c.abs() <= (Q - 1) / 2);
                     back[j] = mod_q(c) as u64;
                 }
-                assert_eq!(fips.ntt(&back), key.a_hat[row][s]);
+                assert_eq!(fips.ntt(&back), key.a_hat()[row][s]);
             }
         }
     }
@@ -230,7 +316,7 @@ mod tests {
         }
         let c_hat = fips.ntt_signed(&cp);
         for row in 0..K {
-            let prod = fips.intt(&fips.pointwise(&c_hat, &key.t1_2d_hat[row]));
+            let prod = fips.intt(&fips.pointwise(&c_hat, &key.t1_2d_hat()[row]));
             for j in 0..N {
                 assert!(t[row][j].abs() <= B_T);
                 assert_eq!(mod_q(t[row][j]) as u64, prod[j]);
