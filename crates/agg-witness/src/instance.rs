@@ -3,11 +3,15 @@
 //! For live record i: the expanded key (A_hat_i, A_i, tr_i, shared between records with the same
 //! key), mu_i = H(tr_i || 0x00 || 0x00 || M_i, 64), c_i = SampleInBall(c~_i) and
 //! T_i = 2^d (c_i * t1_i) over Z. The public main-domain table T(j, rho, i) is zero on padded rows.
+//! Keys expand in tiles of 8 (`ExpandedKey::many`); records hash in tiles of 64 (batched mu
+//! digests and SampleInBall streams), and T is the sparse product written straight into one
+//! flat buffer.
 
-use crate::expand::{public_t_into, ExpandedKey};
-use crate::native::{mu, sample_in_ball, Challenge};
+use crate::expand::ExpandedKey;
+use crate::native::Challenge;
 use crate::padding::{main_index, Geometry, GeometryError};
-use crate::params::{C_TILDE_BYTES, K, N, TR_BYTES};
+use crate::params::{C_TILDE_BYTES, D, K, N, TR_BYTES};
+use agg_mldsa_simd::{Challenge39, Engine};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -96,55 +100,96 @@ pub struct PublicInstance {
     pub records: Vec<PublicRecord>,
 }
 
+/// Records per hashing tile of [`PublicInstance::new`] (mu and SampleInBall jobs).
+pub const RECORD_TILE: usize = 64;
+
+/// The challenge of [`crate::native::sample_in_ball`] from its sparse form.
+#[must_use]
+pub fn challenge_from_sparse(c: &Challenge39) -> Challenge {
+    let mut coeffs = [0i8; N];
+    for (k, &pos) in c.pos.iter().enumerate() {
+        coeffs[usize::from(pos)] = if (c.neg >> k) & 1 == 1 { -1 } else { 1 };
+    }
+    Challenge {
+        coeffs,
+        positions: c.pos.to_vec(),
+    }
+}
+
 impl PublicInstance {
     /// Builds the instance from (pk, M, c~) triples; keys are expanded once per distinct pk.
     pub fn new(inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Result<Self, InstanceError> {
+        Self::new_with(agg_mldsa_simd::engine(), inputs)
+    }
+
+    /// [`PublicInstance::new`] with an explicit engine (tests compare every backend).
+    #[doc(hidden)]
+    pub fn new_with(
+        engine: &Engine,
+        inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
+    ) -> Result<Self, InstanceError> {
         let geom = Geometry::new(inputs.len()).map_err(InstanceError::Geometry)?;
+        // Full-key dedup; `slot[i]` is the distinct key of record i (each key hashed once).
         let mut distinct: Vec<&[u8]> = Vec::new();
         let mut index: HashMap<&[u8], usize> = HashMap::new();
-        for (pk, _, _) in inputs {
-            index.entry(pk).or_insert_with(|| {
-                distinct.push(pk);
-                distinct.len() - 1
-            });
-        }
-        let keys: Vec<Option<Arc<ExpandedKey>>> = distinct
-            .par_iter()
-            .map(|pk| ExpandedKey::from_bytes(pk).map(Arc::new))
-            .collect();
-        // The first record whose key does not decode, as the serial order finds it.
-        if let Some(i) = inputs.iter().position(|(pk, _, _)| keys[index[pk]].is_none()) {
-            return Err(InstanceError::PublicKey(i));
-        }
-        // Indexed collects write each record in place; the records are small (T lives in
-        // one flat buffer below), so no per-thread chunk is grown and concatenated.
-        let partial: Vec<(Arc<ExpandedKey>, [u8; TR_BYTES], Challenge)> = inputs
-            .par_iter()
-            .map(|(pk, msg, c_tilde)| {
-                let key = Arc::clone(keys[index[pk]].as_ref().expect("checked above"));
-                let mu = mu(&key.tr, msg, &[]);
-                (key, mu, sample_in_ball(c_tilde))
+        let slot: Vec<usize> = inputs
+            .iter()
+            .map(|(pk, _, _)| {
+                *index.entry(pk).or_insert_with(|| {
+                    distinct.push(pk);
+                    distinct.len() - 1
+                })
             })
             .collect();
-        // One zeroed allocation (fresh pages, first touched by the parallel writers).
+        let keys: Vec<Option<Arc<ExpandedKey>>> = ExpandedKey::many_with(engine, &distinct)
+            .into_iter()
+            .map(|key| key.map(Arc::new))
+            .collect();
+        // The first record whose key does not decode, as the serial order finds it.
+        if let Some(i) = slot.iter().position(|&k| keys[k].is_none()) {
+            return Err(InstanceError::PublicKey(i));
+        }
+        let key_of = |i: usize| Arc::clone(keys[slot[i]].as_ref().expect("checked above"));
+        // Per tile of records: one batch of mu digests, one of SampleInBall streams, then T
+        // straight into the flat buffer (fresh zeroed pages, first touched by the writers).
+        let mut mus = vec![[0u8; TR_BYTES]; inputs.len()];
+        let mut challenges = vec![Challenge39::zero(); inputs.len()];
         let mut t = vec![0_i32; inputs.len() * K * N];
-        t.par_chunks_exact_mut(K * N)
-            .zip(&partial)
-            .for_each(|(out, (key, _, c))| {
-                let (rows, _) = out.as_chunks_mut::<N>();
-                public_t_into(c, &key.t1, rows.try_into().expect("k rows of 256"));
+        mus.par_chunks_mut(RECORD_TILE)
+            .zip(challenges.par_chunks_mut(RECORD_TILE))
+            .zip(t.par_chunks_mut(RECORD_TILE * K * N))
+            .zip(inputs.par_chunks(RECORD_TILE))
+            .enumerate()
+            .for_each(|(n, (((mus, challenges), t), tile))| {
+                let first = n * RECORD_TILE;
+                let tile_keys: Vec<&ExpandedKey> =
+                    (first..first + tile.len()).map(|i| keys[slot[i]].as_deref().expect("checked above")).collect();
+                let mu_inputs: Vec<[&[u8]; 4]> = tile_keys
+                    .iter()
+                    .zip(tile)
+                    .map(|(key, (_, msg, _))| [&key.tr[..], &[0u8, 0u8][..], &[][..], *msg])
+                    .collect();
+                engine.shake256_many(&mu_inputs, TR_BYTES, mus.as_flattened_mut());
+                let seeds: Vec<[u8; C_TILDE_BYTES]> = tile.iter().map(|(_, _, c)| *c).collect();
+                engine.sample_in_ball_many(&seeds, challenges);
+                let (records_t, _) = t.as_chunks_mut::<{ K * N }>();
+                for ((out, c), key) in records_t.iter_mut().zip(challenges.iter()).zip(&tile_keys) {
+                    let (rows, _) = out.as_chunks_mut::<N>();
+                    engine.sparse_ct(c, &key.t1, D, rows.try_into().expect("k rows of 256"));
+                }
             });
         let t = Arc::new(t);
-        let records = partial
+        let records = mus
             .into_par_iter()
+            .zip(challenges)
             .zip(inputs)
             .enumerate()
-            .map(|(i, ((key, mu, c), (_, msg, c_tilde)))| PublicRecord {
-                key,
+            .map(|(i, ((mu, c), (_, msg, c_tilde)))| PublicRecord {
+                key: key_of(i),
                 msg: msg.to_vec(),
                 c_tilde: *c_tilde,
                 mu,
-                c,
+                c: challenge_from_sparse(&c),
                 t: TView::new(Arc::clone(&t), i),
             })
             .collect();
