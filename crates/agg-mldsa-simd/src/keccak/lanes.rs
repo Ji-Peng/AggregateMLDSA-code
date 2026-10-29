@@ -91,7 +91,7 @@ impl Lane {
     /// segment, or ends the input inside one. Returns the input and whether
     /// it is the final (padded) block, or `None` when the block spans
     /// segments (see `gather`). The 0x80 padding bit is left to the kernel.
-    #[inline]
+    #[inline(always)]
     fn next_block<'b>(&mut self, job: &XofJob<'b>, lane: usize) -> Option<(Input<'b>, bool)> {
         let rate = self.rate;
         while self.segment < 4 && self.offset == job.input[self.segment].len() {
