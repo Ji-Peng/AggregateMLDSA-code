@@ -73,8 +73,8 @@ for keys in (4096, 16):
     for label, pattern in metrics:
         values = []
         for text in texts:
-            prefix = r'\b' if label in ('public_data', 'public_t', 'public_a') else r'^\s*'
-            match = re.search(prefix + pattern + r'\s+([0-9.,]+)\s+(?:ms|MiB)', text, re.M)
+            gap = r'[^\n]*?\s+' if label.startswith('public_') else r'\s+'
+            match = re.search(r'^\s*' + pattern + gap + r'([0-9.,]+)\s+(?:ms|MiB)', text, re.M)
             if not match:
                 raise SystemExit(f'Missing metric {label}; inspect logs')
             values.append(float(match[1].replace(',', '')))
