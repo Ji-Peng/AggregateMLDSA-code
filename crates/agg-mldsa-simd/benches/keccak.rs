@@ -131,7 +131,12 @@ fn mixed_jobs<'a>(seed: &'a [u8; 34], pk: &'a [u8; 1312]) -> (Vec<XofJob<'a>>, V
 
 /// Runs the scheduler with no-op kernels: its progress does not depend on the
 /// permutation's output.
-fn dry_run(w: usize, jobs: &[XofJob<'_>], counts: &mut [usize], limits: &[usize]) -> (usize, usize) {
+fn dry_run(
+    w: usize,
+    jobs: &[XofJob<'_>],
+    counts: &mut [usize],
+    limits: &[usize],
+) -> (usize, usize) {
     counts.fill(0);
     let mut sink = CountSink { counts, limits };
     if w == 4 {
@@ -192,7 +197,13 @@ fn scheduler(engine: &Engine, w: usize) -> bool {
 
 /// The C SHAKE128 rows: absorb one 34-byte input per lane, squeeze 5 blocks.
 #[cfg(cref)]
-fn c_shake(w: usize, c4: &mut [u64; 100], c8: &mut [u64; 200], out: &mut [[u8; 840]; 8], input: &[u8]) {
+fn c_shake(
+    w: usize,
+    c4: &mut [u64; 100],
+    c8: &mut [u64; 200],
+    out: &mut [[u8; 840]; 8],
+    input: &[u8],
+) {
     let [o0, o1, o2, o3, o4, o5, o6, o7] = out;
     if w == 4 {
         agg_mldsa_cref::shake128x4_absorb_once(c4, input, input, input, input);
@@ -289,7 +300,10 @@ fn check_cref(backend: Backend) {
 /// The scheduler with each kernel switched on or off.
 #[cfg(cref)]
 #[target_feature(enable = "avx2")]
-unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(jobs: &[XofJob<'_>], sink: &mut CountSink<'_>) {
+unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(
+    jobs: &[XofJob<'_>],
+    sink: &mut CountSink<'_>,
+) {
     lanes::run(
         jobs,
         sink,
@@ -314,7 +328,10 @@ unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(jobs: &[XofJob<'_>]
 /// The scheduler with each kernel switched on or off.
 #[cfg(cref)]
 #[target_feature(enable = "avx512f")]
-unsafe fn variant8<const PERMUTE: bool, const EXTRACT: bool>(jobs: &[XofJob<'_>], sink: &mut CountSink<'_>) {
+unsafe fn variant8<const PERMUTE: bool, const EXTRACT: bool>(
+    jobs: &[XofJob<'_>],
+    sink: &mut CountSink<'_>,
+) {
     lanes::run(
         jobs,
         sink,
@@ -374,7 +391,11 @@ fn diag_breakdown() {
                     }
                 }
             };
-            let full = pair_ratio(calls, || shake(&engine, jobs, &mut counts, limits), &mut bare);
+            let full = pair_ratio(
+                calls,
+                || shake(&engine, jobs, &mut counts, limits),
+                &mut bare,
+            );
             // The scheduler with a no-op permutation, with or without extraction,
             // compiled with the backend's features as the real one is.
             let mut partial = |extracting: bool| {

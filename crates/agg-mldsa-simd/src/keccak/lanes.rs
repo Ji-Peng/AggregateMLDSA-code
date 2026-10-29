@@ -33,7 +33,6 @@ pub(crate) trait Permutation<const W: usize> {
     fn clear(&self, state: &mut State<W>, lanes: u8);
 }
 
-
 /// Closure-based kernel set; closures defined inside a `#[target_feature]`
 /// function inherit its features.
 pub(crate) struct Kernel<P, E, C> {
@@ -233,7 +232,12 @@ fn absorb<const W: usize>(
 /// bytes 136..168 for a SHAKE256 lane, which a previous SHAKE128 job may have
 /// written).
 #[inline(never)]
-fn copy_lanes<const W: usize>(state: &State<W>, blocks: &mut [Block; W], lanes: &[Lane; W], mask: u8) {
+fn copy_lanes<const W: usize>(
+    state: &State<W>,
+    blocks: &mut [Block; W],
+    lanes: &[Lane; W],
+    mask: u8,
+) {
     for i in bits(mask) {
         let words = lanes[i].rate / 8;
         let (out, _) = blocks[i].bytes[..168].as_chunks_mut::<8>();

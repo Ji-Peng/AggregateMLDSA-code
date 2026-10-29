@@ -275,7 +275,14 @@ pub(crate) fn permute(state: &mut State<8>) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
-fn quad_store(a: __m512i, b: __m512i, c: __m512i, d: __m512i, blocks: &mut [Block; 8], quad: usize) {
+fn quad_store(
+    a: __m512i,
+    b: __m512i,
+    c: __m512i,
+    d: __m512i,
+    blocks: &mut [Block; 8],
+    quad: usize,
+) {
     // [a0 b0 a2 b2 a4 b4 a6 b6] and the odd lanes; likewise for c, d.
     let t0 = _mm512_unpacklo_epi64(a, b);
     let t1 = _mm512_unpackhi_epi64(a, b);
@@ -298,10 +305,7 @@ fn quad_store(a: __m512i, b: __m512i, c: __m512i, d: __m512i, blocks: &mut [Bloc
         let dst: &mut [u8; 32] = (&mut blocks[second].bytes[at..at + 32]).try_into().unwrap();
         // SAFETY: The store covers exactly the checked 32-byte subarray.
         unsafe {
-            _mm256_storeu_si256(
-                dst.as_mut_ptr().cast(),
-                _mm512_extracti64x4_epi64::<1>(row),
-            )
+            _mm256_storeu_si256(dst.as_mut_ptr().cast(), _mm512_extracti64x4_epi64::<1>(row))
         };
     }
 }
@@ -313,7 +317,14 @@ pub(crate) fn extract(state: &State<8>, blocks: &mut [Block; 8], wide: u8) {
     let s = &state.0;
     for quad in 0..4 {
         let w = 4 * quad;
-        quad_store(load(&s[w]), load(&s[w + 1]), load(&s[w + 2]), load(&s[w + 3]), blocks, quad);
+        quad_store(
+            load(&s[w]),
+            load(&s[w + 1]),
+            load(&s[w + 2]),
+            load(&s[w + 3]),
+            blocks,
+            quad,
+        );
     }
     let w = |i: usize| _mm512_maskz_mov_epi64(wide, load(&s[i]));
     quad_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);

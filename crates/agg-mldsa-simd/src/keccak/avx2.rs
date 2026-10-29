@@ -98,7 +98,11 @@ pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
     let last = w(20);
     let lo = _mm256_castsi256_si128(last);
     let hi = _mm256_extracti128_si256::<1>(last);
-    for (block, (half, high)) in blocks.iter_mut().zip([(lo, false), (lo, true), (hi, false), (hi, true)]) {
+    for (block, (half, high)) in
+        blocks
+            .iter_mut()
+            .zip([(lo, false), (lo, true), (hi, false), (hi, true)])
+    {
         let dst: &mut [u8; 8] = (&mut block.bytes[160..168]).try_into().unwrap();
         let half = _mm_castsi128_pd(half);
         // SAFETY: Each store covers exactly the checked 8-byte subarray.
