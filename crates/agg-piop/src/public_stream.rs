@@ -108,6 +108,8 @@ pub struct StreamRecord {
     /// `c~` from the aggregate.
     pub c_tilde: [u8; C_TILDE_BYTES],
     challenge: Challenge,
+    /// The same challenge in the packed form of the engine kernels.
+    packed: Challenge39,
 }
 
 /// What the public pass returns.
@@ -186,6 +188,7 @@ fn distinct_keys<'a>(inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])]) -> Disti
 }
 
 /// Converts a sparse `Challenge` to the packed SIMD representation `Challenge39`.
+#[cfg(test)]
 #[inline]
 fn challenge_to_c39(c: &Challenge) -> Challenge39 {
     let mut pos = [0_u8; 39];
@@ -322,6 +325,7 @@ impl StreamedPublic {
                         mu,
                         c_tilde: input_tile[j].2,
                         challenge,
+                        packed: c39_out[j],
                     }
                 })
             })
@@ -391,8 +395,7 @@ impl StreamedPublic {
             .enumerate()
             .map(|(i, record)| {
                 let mut ct = [[0_i32; N]; K];
-                let c39 = challenge_to_c39(&record.challenge);
-                engine.sparse_ct(&c39, self.keys[record.key].t1(), 0, &mut ct);
+                engine.sparse_ct(&record.packed, self.keys[record.key].t1(), 0, &mut ct);
                 eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
             })
             .reduce(E::zero, |a, b| a + b)
@@ -974,6 +977,25 @@ mod tests {
         (t, w)
     }
 
+    /// The `T(r2)` part of the pass alone, through the pre-engine kernel (`None`) or an engine.
+    fn t_part(s: &StreamedPublic, eq: &SplitWeights, eq_sig2: &[E], e: Option<&agg_mldsa_simd::Engine>) -> E {
+        s.records
+            .par_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let ct = match e {
+                    None => crate::public_data::sparse_ct(&r.challenge, s.keys[r.key].t1()),
+                    Some(e) => {
+                        let mut ct = [[0_i32; N]; K];
+                        e.sparse_ct(&r.packed, s.keys[r.key].t1(), 0, &mut ct);
+                        ct
+                    }
+                };
+                eq_sig2[i] * eq.dot::<16>(ct.as_flattened())
+            })
+            .reduce(E::zero, |a, b| a + b)
+    }
+
     /// End-to-end single-thread A/B of `prepare` and `pass` against the pre-engine code
     /// (direction only; `RAYON_NUM_THREADS=1 cargo test --release -p agg-piop --lib
     /// engine_e2e_microbench -- --ignored --nocapture` on one pinned CPU).
@@ -990,7 +1012,7 @@ mod tests {
                 })
                 .fold(f64::MAX, f64::min)
         }
-        let n = 1024;
+        let n = 4096;
         let mut rng = SplitMix64::new(10);
         let keys: Vec<Vec<u8>> = (0..n)
             .map(|_| {
@@ -1016,7 +1038,12 @@ mod tests {
         let old_pass = best(|| {
             black_box(baseline_pass(&s, &r2, &r3));
         });
-        eprintln!("n = {n}: baseline prepare {old_prep:.2} ms, pass {old_pass:.2} ms");
+        let eq = SplitWeights::new(&eq_table(&r2[..D_POS as usize]));
+        let eq_sig2 = eq_table(&r2[D_POS as usize..]);
+        let old_t = best(|| {
+            black_box(t_part(&s, &eq, &eq_sig2, None));
+        });
+        eprintln!("n = {n}: baseline prepare {old_prep:.2} ms, pass {old_pass:.2} ms, T part {old_t:.2} ms");
         for backend in [
             agg_mldsa_simd::Backend::Scalar,
             agg_mldsa_simd::Backend::Avx2,
@@ -1031,7 +1058,10 @@ mod tests {
             let pass = best(|| {
                 black_box(s.pass_with(&e, &r2, &r3, None));
             });
-            eprintln!("{backend:?}: prepare {prep:.2} ms, pass {pass:.2} ms");
+            let t = best(|| {
+                black_box(t_part(&s, &eq, &eq_sig2, Some(&e)));
+            });
+            eprintln!("{backend:?}: prepare {prep:.2} ms, pass {pass:.2} ms, T part {t:.2} ms");
         }
     }
 
