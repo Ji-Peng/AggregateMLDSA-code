@@ -116,16 +116,20 @@ fn pack_bits(values: impl Iterator<Item = u64>, bits: usize, out: &mut Vec<u8>) 
 
 fn unpack_bits(bytes: &[u8], bits: usize) -> [u64; N] {
     debug_assert_eq!(bytes.len(), 32 * bits);
+    assert!((1..=56).contains(&bits), "a coefficient and a byte fit the 64-bit window");
     let mut out = [0u64; N];
     let mask = (1u64 << bits) - 1;
-    for (i, o) in out.iter_mut().enumerate() {
-        let start = i * bits;
-        let mut v = 0u64;
-        for b in 0..bits {
-            let pos = start + b;
-            v |= u64::from((bytes[pos / 8] >> (pos % 8)) & 1) << b;
+    // Little-endian bit stream: `acc` holds the `n` unread bits, n < bits + 8 <= 64.
+    let (mut acc, mut n) = (0u64, 0usize);
+    let mut next = bytes.iter();
+    for o in out.iter_mut() {
+        while n < bits {
+            acc |= u64::from(*next.next().expect("32 bits bytes")) << n;
+            n += 8;
         }
-        *o = v & mask;
+        *o = acc & mask;
+        acc >>= bits;
+        n -= bits;
     }
     out
 }
@@ -519,6 +523,26 @@ pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpack_bits_matches_a_bit_by_bit_reader() {
+        let mut rng = crate::gen::SplitMix64::new(0xB175);
+        for bits in 1..=24 {
+            let mut bytes = vec![0u8; 32 * bits];
+            rng.fill(&mut bytes);
+            let got = unpack_bits(&bytes, bits);
+            for (i, &v) in got.iter().enumerate() {
+                let want = (0..bits).fold(0u64, |acc, b| {
+                    let pos = i * bits + b;
+                    acc | (u64::from((bytes[pos / 8] >> (pos % 8)) & 1) << b)
+                });
+                assert_eq!(v, want, "bits {bits}, coefficient {i}");
+            }
+            let mut packed = Vec::new();
+            pack_bits(got.iter().copied(), bits, &mut packed);
+            assert_eq!(packed, bytes);
+        }
+    }
     use crate::gen::{self, SplitMix64};
 
     #[test]
