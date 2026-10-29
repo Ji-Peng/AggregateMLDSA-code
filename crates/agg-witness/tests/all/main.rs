@@ -6,5 +6,6 @@ mod edge_search;
 mod hfips;
 mod keccak;
 mod negative;
+mod simd;
 mod verify;
 mod witness;
