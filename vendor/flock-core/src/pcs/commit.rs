@@ -424,7 +424,7 @@ impl<'a> CodewordRows<'a> {
                 row
             })
             .collect();
-        if var_os("FLOCK_COMMIT_TIMING").is_some() {
+        if positions.len() > 1 && var_os("FLOCK_COMMIT_TIMING").is_some() {
             eprintln!(
                 "[commit-timing] level-0 rows recomputed: {} rows of {sub} positions x {groups} groups in {:.2} ms",
                 positions.len(),

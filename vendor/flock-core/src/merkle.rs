@@ -113,9 +113,18 @@ impl GroupLeafHasher {
         let words = if g + 1 == self.groups { 4 * (self.lanes - LANES_PER_GROUP * g) } else { 16 };
         let flags = if g == 0 { blake3_groups::CHUNK_START } else { 0 }
             | if g + 1 == self.groups { blake3_groups::CHUNK_END } else { 0 };
-        let full = positions / 16;
+        #[cfg(feature = "hash-count")]
+        if g == 0 {
+            use core::sync::atomic::Ordering::Relaxed;
+            hash_count::LEAF_CALLS.fetch_add(positions as u64, Relaxed);
+            hash_count::LEAF_COMPRESSIONS.fetch_add(
+                positions as u64 * hash_count::blocks(HashKind::Blake3, self.lanes * size_of::<F128>()),
+                Relaxed,
+            );
+        }
         #[cfg(target_arch = "x86_64")]
         if blake3_groups::x16_available() {
+            let full = positions / 16;
             for b in 0..full {
                 let st: &mut [u32; 128] = (&mut state[128 * b..128 * (b + 1)]).try_into().expect("128 words");
                 // SAFETY: AVX-512F is available (checked above); the sixteen lines of batch
@@ -125,7 +134,6 @@ impl GroupLeafHasher {
             blake3_groups::absorb_portable(state, lines, 16 * full, positions, words, flags, g == 0);
             return;
         }
-        let _ = full;
         blake3_groups::absorb_portable(state, lines, 0, positions, words, flags, g == 0);
     }
 
@@ -450,5 +458,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Absorbing fused leaves increments `LEAF_CALLS` and `LEAF_COMPRESSIONS` exactly
+    /// as `hash_leaf` on each row would.
+    #[cfg(feature = "hash-count")]
+    #[test]
+    fn group_leaf_hasher_counts_match_hash_leaf() {
+        use super::hash_count;
+        let lanes = 5usize;
+        let positions = 32usize;
+        let groups = lanes.div_ceil(LANES_PER_GROUP);
+        let lines = vec![F128::ZERO; groups * positions * LANES_PER_GROUP];
+        hash_count::reset();
+        let hasher = GroupLeafHasher::new(lanes, HashKind::Blake3).expect("one chunk");
+        let mut state = vec![0u32; GroupLeafHasher::state_len(positions)];
+        for g in 0..groups {
+            let w = positions * LANES_PER_GROUP;
+            hasher.absorb(&mut state, g, &lines[g * w..(g + 1) * w]);
+        }
+        let (fused_calls, fused_comps, _) = hash_count::snapshot();
+
+        hash_count::reset();
+        let leaf_bytes = vec![0u8; lanes * core::mem::size_of::<F128>()];
+        for _ in 0..positions {
+            hash_leaf(&leaf_bytes, HashKind::Blake3);
+        }
+        let (unfused_calls, unfused_comps, _) = hash_count::snapshot();
+
+        assert_eq!(fused_calls, unfused_calls);
+        assert_eq!(fused_comps, unfused_comps);
     }
 }
