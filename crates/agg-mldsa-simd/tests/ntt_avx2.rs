@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 mod common;
 use agg_mldsa_simd::params;
 use agg_mldsa_simd::{
@@ -52,7 +51,7 @@ fn forward_and_roundtrips() {
                 oracle.ntt(&common::poly32_to_u64(&a, c.p)),
                 "{p:?} case {case}"
             );
-            #[cfg(t3_cref)]
+            #[cfg(cref)]
             {
                 let mut cf = a;
                 agg_mldsa_cref::ntt_avx(&mut cf.0, &tables::table(p, Scale::Mont).0);
@@ -86,7 +85,7 @@ fn dot_schoolbook_and_orders() {
     let labels = Poly32(std::array::from_fn(|i| i as i32));
     let mut labels2 = labels;
     e.order_from_fips(&mut labels2);
-    #[cfg(t3_cref)]
+    #[cfg(cref)]
     {
         let mut cf = labels;
         agg_mldsa_cref::nttunpack_avx(&mut cf.0);
@@ -124,7 +123,7 @@ fn dot_schoolbook_and_orders() {
             }
             let mut got = Poly32::zero();
             e.dot4(p, &ah, &bh, &mut got);
-            #[cfg(t3_cref)]
+            #[cfg(cref)]
             if p == Prime::Q {
                 let mut cf = Poly32::zero();
                 // The reference uses aligned loads, so use the aligned polynomial arrays directly.
@@ -185,15 +184,31 @@ fn reduction_full_i32() {
     }
 }
 #[test]
-#[cfg(t3_cref)]
+#[cfg(cref)]
 fn qdata_matches_reference() {
     assert_eq!(&tables::Q.0, agg_mldsa_cref::qdata());
+}
+
+/// Natural-order butterfly index `k` (1..256) of twiddle entry `i` (1..296) in
+/// the reference table: levels 3-7 repeat or interleave the 2^l twiddles of
+/// level l across the vector lanes.
+fn table_twiddle_index(i: usize) -> usize {
+    match i {
+        1..=7 => i,
+        8..=39 => 8 + (i - 8) / 4,
+        40..=71 => 16 + (i - 40) / 2,
+        72..=103 => 32 + i - 72,
+        104..=167 => 64 + 2 * ((i - 104) % 32) + (i - 104) / 32,
+        168..=295 => 128 + 4 * ((i - 168) % 32) + (i - 168) / 32,
+        _ => unreachable!(),
+    }
 }
 
 #[test]
 fn schedule_bounds() {
     // Absolute-value envelopes in natural butterfly coordinates; the register
-    // shuffles only permute these positions. Use ceiling division throughout.
+    // shuffles only permute these positions. Every twiddle magnitude is read
+    // from the table the kernels load. Use ceiling division throughout.
     for p in [Prime::Q, Prime::P2] {
         let c = consts(p);
         let modulus = c.p as i64;
@@ -201,14 +216,24 @@ fn schedule_bounds() {
         let red = |bound: i64, z: i64| -> i64 {
             (bound * z.abs() + ((1i64 << 32) - 1)) / (1i64 << 32) + (modulus + 1) / 2
         };
-        let tw: [i64; 256] = std::array::from_fn(|k| {
-            let z = (oracle.zetas[k] * ((1u64 << 32) % c.p as u64) % c.p as u64) as i64;
-            if z > modulus / 2 {
-                z - modulus
-            } else {
-                z
-            }
-        });
+        let t = &tables::table(p, Scale::Mont).0;
+        let mut tw = [0i64; 256];
+        for i in 1..296 {
+            let k = table_twiddle_index(i);
+            let z = t[328 + i] as i64;
+            assert!(tw[k] == 0 || tw[k] == z, "{p:?} entry {i}");
+            assert_eq!(
+                t[32 + i],
+                (z as i32).wrapping_mul(c.pinv),
+                "{p:?} entry {i}"
+            );
+            // The table holds zeta^brv(k) R, centered.
+            let expected = (oracle.zetas[k] * ((1u64 << 32) % c.p as u64) % c.p as u64) as i64;
+            assert_eq!(z.rem_euclid(modulus), expected, "{p:?} entry {i}");
+            assert!(z.abs() <= modulus / 2);
+            tw[k] = z;
+        }
+        assert!(tw[1..].iter().all(|&z| z != 0));
         let mut bound = [1i64 << 22; 256];
         let mut k = 0;
         for layer in 0..8 {
@@ -226,45 +251,69 @@ fn schedule_bounds() {
         }
         let max_forward = *bound.iter().max().unwrap();
         eprintln!(
-            "{p:?} forward envelope: {max_forward} ({} p)",
+            "{p:?} forward envelope: {max_forward} ({:.4} p)",
             max_forward as f64 / modulus as f64
         );
         assert!(max_forward < (1i64 << 31));
+        // Inverse input: |x| < q for q (dot4 output), |x| <= (P2-1)/2 for P2.
         bound = [if p == Prime::Q {
             modulus - 1
         } else {
             modulus / 2
         }; 256];
         k = 256;
-        for layer in 0..8 {
+        let mut max_inverse = 0;
+        // Layers 0-6; the last layer is modelled per scale below.
+        for layer in 0..7 {
             let len = 1 << layer;
             for start in (0..256).step_by(2 * len) {
                 k -= 1;
                 for j in start..start + len {
                     let sum = bound[j] + bound[j + len];
                     assert!(sum < 1i64 << 31, "{p:?} layer {layer} position {j}: {sum}");
+                    max_inverse = max_inverse.max(sum);
                     bound[j] = sum;
                     bound[j + len] = red(sum, tw[k]);
                     if p == Prime::P2 && layer == 3 {
+                        // Sum outputs are reduced by a Montgomery multiply with R mod p.
                         bound[j] = red(bound[j], c.mont as i64);
                         assert!(bound[j] < 63 * modulus / 100);
                     }
                 }
             }
         }
-        eprintln!(
-            "{p:?}: forward max {max_forward}, inverse max {}",
-            bound.iter().max().unwrap()
-        );
-        // The reference folds the last twiddle into f on the difference outputs.
+        assert_eq!(k, 2);
+        // Last layer: the sum is multiplied by f (table words 16-31); the raw
+        // difference is multiplied once by centered(zeta^128 f) (table entry 0).
         for scale in [Scale::Plain, Scale::Mont] {
-            let f = if scale == Scale::Mont {
-                c.inv_mont
-            } else {
-                c.inv_plain
-            };
-            for &b in &bound {
-                assert!(red(b, f as i64) < 7 * modulus / 10);
+            let ts = &tables::table(p, scale).0;
+            let f = ts[24] as i64;
+            let zf = ts[328] as i64;
+            assert_eq!(
+                f,
+                if scale == Scale::Mont {
+                    c.inv_mont
+                } else {
+                    c.inv_plain
+                } as i64
+            );
+            assert_eq!(ts[16], ts[24].wrapping_mul(c.pinv));
+            assert_eq!(ts[32], ts[328].wrapping_mul(c.pinv));
+            let mut max_out = 0;
+            for j in 0..128 {
+                let sum = bound[j] + bound[j + 128];
+                assert!(sum < 1i64 << 31, "{p:?} last layer position {j}: {sum}");
+                max_inverse = max_inverse.max(sum);
+                max_out = max_out.max(red(sum, f)).max(red(sum, zf));
+            }
+            eprintln!(
+                "{p:?} {scale:?}: inverse max {max_inverse}, final max {max_out} ({:.4} p)",
+                max_out as f64 / modulus as f64
+            );
+            // The canonical/centered store needs (-p, p).
+            assert!(max_out < modulus);
+            if p == Prime::Q && scale == Scale::Mont {
+                assert!(max_out < 74 * modulus / 100);
             }
         }
     }
@@ -305,6 +354,80 @@ fn inverse_extreme_inputs() {
                 e.intt(p, &mut got, Scale::Plain, form);
                 check_range(&got, c.p, form);
                 assert_eq!(common::poly32_to_u64(&got, c.p), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn dot_extreme_inputs() {
+    // Largest P2 products the contract allows: centered a at +-(P2-1)/2 and b
+    // at the forward envelope, all four products of one sign or alternating.
+    let Some(e) = engine() else { return };
+    let s = Engine::new(Backend::Scalar).unwrap();
+    for p in [Prime::Q, Prime::P2] {
+        let c = consts(p);
+        let (amax, bmax) = if p == Prime::Q {
+            (c.p - 1, 37_829_663)
+        } else {
+            (c.p / 2, 711_838_595)
+        };
+        for pattern in 0..6 {
+            let sign = |i: usize, k: usize| -> i32 {
+                match pattern {
+                    0 => 1,
+                    1 => -1,
+                    2 => {
+                        if i % 2 == 0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    }
+                    3 => {
+                        if k % 2 == 0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    }
+                    4 => {
+                        if (i / 8) % 2 == 0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    }
+                    _ => {
+                        if i % 3 == 0 {
+                            -1
+                        } else {
+                            1
+                        }
+                    }
+                }
+            };
+            let a: [Poly32; 4] = std::array::from_fn(|k| {
+                Poly32(std::array::from_fn(|i| {
+                    if p == Prime::Q {
+                        amax
+                    } else {
+                        sign(i, k) * amax
+                    }
+                }))
+            });
+            let b: [Poly32; 4] =
+                std::array::from_fn(|k| Poly32(std::array::from_fn(|i| sign(i, k) * bmax)));
+            let mut got = Poly32::zero();
+            let mut want = Poly32::zero();
+            e.dot4(p, &a, &b, &mut got);
+            s.dot4(p, &a, &b, &mut want);
+            common::assert_poly_eq_mod_p(&got, &want, c.p);
+            if p == Prime::P2 {
+                check_range(&got, c.p, Form::Centered);
+                assert_eq!(got, want, "pattern {pattern}");
+            } else {
+                assert!(got.0.iter().all(|x| x.abs() < c.p));
             }
         }
     }

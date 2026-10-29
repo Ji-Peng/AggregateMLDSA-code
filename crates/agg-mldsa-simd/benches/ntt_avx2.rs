@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 mod common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},
@@ -26,25 +25,25 @@ fn rust_dot(e: &Engine, p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Po
 fn rust_order(e: &Engine, a: &mut Poly32) {
     e.order_from_fips(black_box(a));
 }
-#[cfg(t3_cref)]
+#[cfg(cref)]
 #[inline(never)]
 fn c_ntt(p: Prime, a: &mut Poly32) {
     let a = black_box(a);
     agg_mldsa_cref::ntt_avx(&mut a.0, &tables::table(p, Scale::Mont).0);
 }
-#[cfg(t3_cref)]
+#[cfg(cref)]
 #[inline(never)]
 fn c_intt(a: &mut Poly32, s: Scale) {
     let a = black_box(a);
     agg_mldsa_cref::invntt_avx(&mut a.0, &tables::table(Prime::Q, s).0);
 }
-#[cfg(t3_cref)]
+#[cfg(cref)]
 #[inline(never)]
 fn c_order(a: &mut Poly32) {
     let a = black_box(a);
     agg_mldsa_cref::nttunpack_avx(&mut a.0);
 }
-#[cfg(t3_cref)]
+#[cfg(cref)]
 #[inline(never)]
 fn c_dot(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
     let a = black_box(a);
@@ -128,7 +127,7 @@ fn main() {
         eprintln!("Skipping: AVX2/POPCNT unavailable");
         return;
     };
-    #[cfg(not(t3_cref))]
+    #[cfg(not(cref))]
     {
         for p in [Prime::Q, Prime::P2] {
             let input = Poly32(std::array::from_fn(|i| i as i32 - 128));
@@ -143,9 +142,9 @@ fn main() {
                 stats.median
             );
         }
-        eprintln!("C gate unavailable: set AGG_CREF_SRC and RUSTFLAGS='--cfg t3_cref'");
+        eprintln!("C gate unavailable: set AGG_CREF_SRC (scripts/cref-fetch.sh)");
     }
-    #[cfg(t3_cref)]
+    #[cfg(cref)]
     {
         let mut pass = true;
         for p in [Prime::Q, Prime::P2] {
