@@ -44,6 +44,7 @@ fn transforms_match_oracle_and_roundtrip() {
             let original = a;
             e.ntt(p, &mut a);
             assert_eq!(poly32_to_u64(&a, c.p), expected, "{p:?} case {case}");
+            e.reduce(p, &mut a, Form::Centered);
             e.intt(p, &mut a, Scale::Plain, Form::Centered);
             assert_poly_eq_mod_p(&a, &original, c.p);
         }
@@ -80,7 +81,7 @@ fn dot_products_match_schoolbook() {
             });
             let b = std::array::from_fn(|r| {
                 Poly32(std::array::from_fn(|i| {
-                    if i == (r * 67 + case) % 256 {
+                    if case < 2 || i == (r * 67 + case) % 256 {
                         -(1 << 22)
                     } else {
                         0
@@ -340,7 +341,7 @@ fn sparse_products_and_rejection_continuation() {
     let t = [[1023; 256]; 4];
     let mut out = [[0; 256]; 4];
     e.sparse_ct(&c, &t, 0, &mut out);
-    for j in 0..256 {
+    for (j, &actual) in out[0].iter().enumerate() {
         let expected: i32 = c
             .pos
             .iter()
@@ -349,7 +350,7 @@ fn sparse_products_and_rejection_continuation() {
                 (if j < (p as usize) { -1023 } else { 1023 }) * (1 - 2 * ((c.neg >> k) & 1) as i32)
             })
             .sum();
-        assert_eq!(out[0][j], expected);
+        assert_eq!(actual, expected);
     }
     let mut state = RejState::new();
     let mut block = Block::zero();
@@ -541,4 +542,48 @@ fn hu_digits_match_generic_at_edges() {
             }
         }
     }
+}
+
+#[test]
+fn finish_quotient_guard_and_residue_perturbation() {
+    use agg_mldsa_simd::FinishError;
+    let e = engine();
+    let mut out = FinishOut::new();
+    let zero = Poly32::zero();
+    let h = [0; 256];
+    // A public term outside the supported bound can require more than 41q.
+    let invalid_t = [500_000_000; 256];
+    assert_eq!(
+        e.finish_row(
+            FinishRow {
+                xq: &zero,
+                xp: &zero,
+                t: &invalid_t,
+                h: &h
+            },
+            &mut out
+        ),
+        Err(FinishError::Quotient)
+    );
+    // Perturbing xq still describes a CRT integer. It cannot break divisibility:
+    // u is derived from that same residue, so the exact quotient check still holds.
+    let xq = Poly32([1; 256]);
+    let t = [0; 256];
+    e.finish_row(
+        FinishRow {
+            xq: &xq,
+            xp: &zero,
+            t: &t,
+            h: &h,
+        },
+        &mut out,
+    )
+    .unwrap();
+    let inv = agg_witness::ntt::pow_mod(Q as u64, (P2 - 2) as u64, P2 as u64) as i64;
+    let k = (-inv).rem_euclid(P2 as i64);
+    let az = 1 + Q as i64 * (if k > P2 as i64 / 2 { k - P2 as i64 } else { k });
+    assert_eq!(
+        az - ALPHA as i64 * out.w1[0] as i64 - out.u[0] as i64,
+        Q as i64 * out.v[0] as i64
+    );
 }

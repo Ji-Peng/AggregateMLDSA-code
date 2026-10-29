@@ -1,4 +1,8 @@
 //! Signed Montgomery NTT in FIPS 204 order, following pq-crystals Dilithium.
+//!
+//! Forward inputs have magnitude at most 2^22. Inverse inputs have magnitude
+//! below q for the primary prime and at most (P2-1)/2 for the CRT prime;
+//! callers normalize forward outputs before a standalone inverse round trip.
 use super::{Form, Scale};
 use crate::{
     params::{Prime, PrimeConsts, CONSTS_P2, CONSTS_Q},
@@ -49,40 +53,58 @@ fn centered(x: i32, c: PrimeConsts) -> i32 {
     r - (((c.p / 2 - r) >> 31) & c.p)
 }
 pub(crate) fn ntt(p: Prime, a: &mut Poly32) {
-    let c = p.consts();
-    let zs = if p == Prime::Q { &ZQ } else { &ZP };
+    match p {
+        Prime::Q => forward::<false>(a),
+        Prime::P2 => forward::<true>(a),
+    }
+}
+fn forward<const SECOND: bool>(a: &mut Poly32) {
+    let c = if SECOND { CONSTS_P2 } else { CONSTS_Q };
+    let zs = if SECOND { &ZP } else { &ZQ };
     let mut k = 0;
     let mut len = 128;
     while len > 0 {
         for start in (0..256).step_by(2 * len) {
             k += 1;
-            for j in start..start + len {
-                let t = mul(a[j + len], zs[k], c.p);
-                // Centered twiddles bound eight lazy layers by 4.4p < 2^31.
-                a[j + len] = a[j] - t;
-                a[j] += t;
+            let (low, high) = a.0[start..start + 2 * len].split_at_mut(len);
+            for (x, y) in low.iter_mut().zip(high) {
+                let t = mul(*y, zs[k], c.p);
+                // The recurrence b <- b*(1+p/(2R))+p/2 bounds all
+                // eight lazy layers by 5p < 2^31 (R = 2^32).
+                *y = *x - t;
+                *x += t;
             }
         }
         len >>= 1;
     }
 }
 pub(crate) fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
-    let c = p.consts();
-    let zs = if p == Prime::Q { &ZQ } else { &ZP };
+    match p {
+        Prime::Q => inverse::<false>(a, s, f),
+        Prime::P2 => inverse::<true>(a, s, f),
+    }
+}
+fn inverse<const SECOND: bool>(a: &mut Poly32, s: Scale, f: Form) {
+    let c = if SECOND { CONSTS_P2 } else { CONSTS_Q };
+    let zs = if SECOND { &ZP } else { &ZQ };
     let mut k = 256;
     let mut len = 1;
     while len < 256 {
         for start in (0..256).step_by(2 * len) {
             k -= 1;
             let z = (-zs[k].0, zs[k].1.wrapping_neg());
-            for j in start..start + len {
-                let t = a[j];
-                // q starts in (-q,q); its sum chains stay below 256q < 2^31.
-                // P2 is centered each layer, so sums/differences stay below p.
-                a[j] = t + a[j + len];
-                a[j + len] = mul(t - a[j + len], z, c.p);
-                if p == Prime::P2 {
-                    a[j] = centered(a[j], c);
+            let (low, high) = a.0[start..start + 2 * len].split_at_mut(len);
+            for (x, y) in low.iter_mut().zip(high) {
+                let t = *x;
+                // q input |x| < q gives sums below 256q < 2^31.
+                // Centered P2 inputs give sums <= 8p through layer four.
+                *x = t + *y;
+                *y = mul(t - *y, z, c.p);
+                if SECOND && len == 8 {
+                    // |sum| <= 8p becomes |r| < 0.626p. Four remaining
+                    // doublings stay below 10.016p < 2^31; the difference
+                    // outputs of this layer are already below 0.657p.
+                    *x = mont(*x as i64 * c.mont as i64, c);
                 }
             }
         }
@@ -93,9 +115,14 @@ pub(crate) fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
         Scale::Mont => c.inv_mont,
     };
     for x in a.iter_mut() {
-        *x = mont(*x as i64 * scale as i64, c);
+        let r = mont(*x as i64 * scale as i64, c);
+        // Final scaled Montgomery output has |r| < p; normalize directly.
+        let r = r + ((r >> 31) & c.p);
+        *x = match f {
+            Form::Canonical => r,
+            Form::Centered => r - (((c.p / 2 - r) >> 31) & c.p),
+        };
     }
-    reduce(p, a, f);
 }
 pub(crate) fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
     let c = p.consts();

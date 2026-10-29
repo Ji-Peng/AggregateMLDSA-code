@@ -5,7 +5,7 @@ use crate::{
     poly::{Block, Poly32},
 };
 pub(crate) fn rej_uniform(block: &Block, st: &mut RejState) -> bool {
-    for b in block.bytes[..168].chunks_exact(3) {
+    for b in block.bytes[..168].as_chunks::<3>().0 {
         if st.count == 256 {
             break;
         }
@@ -19,8 +19,13 @@ pub(crate) fn rej_uniform(block: &Block, st: &mut RejState) -> bool {
 }
 pub(crate) fn unpack_z(z: &[u8; 2304], out: &mut [Poly32; 4]) -> u32 {
     let mut max = 0;
-    for (poly, bytes) in out.iter_mut().zip(z.chunks_exact(576)) {
-        for (coeffs, b) in poly.chunks_exact_mut(4).zip(bytes.chunks_exact(9)) {
+    for (poly, bytes) in out.iter_mut().zip(z.as_chunks::<576>().0.iter()) {
+        for (coeffs, b) in poly
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(bytes.as_chunks::<9>().0.iter())
+        {
             let lo = u64::from_le_bytes(b[..8].try_into().unwrap());
             let bits = lo as u128 | (b[8] as u128) << 64;
             for (j, x) in coeffs.iter_mut().enumerate() {
@@ -32,8 +37,13 @@ pub(crate) fn unpack_z(z: &[u8; 2304], out: &mut [Poly32; 4]) -> u32 {
     max
 }
 pub(crate) fn pack_w1(w1: &[[u8; 256]; 4], out: &mut [u8; 768]) {
-    for (row, bytes) in w1.iter().zip(out.chunks_exact_mut(192)) {
-        for (v, b) in row.chunks_exact(4).zip(bytes.chunks_exact_mut(3)) {
+    for (row, bytes) in w1.iter().zip(out.as_chunks_mut::<192>().0.iter_mut()) {
+        for (v, b) in row
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(bytes.as_chunks_mut::<3>().0.iter_mut())
+        {
             let x = v[0] as u32 | (v[1] as u32) << 6 | (v[2] as u32) << 12 | (v[3] as u32) << 18;
             b.copy_from_slice(&x.to_le_bytes()[..3]);
         }
