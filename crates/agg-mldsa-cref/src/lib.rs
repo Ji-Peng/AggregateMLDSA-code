@@ -294,6 +294,40 @@ mod safe_wrappers {
         }
     }
 
+    /// Padded input buffer providing at least 8 bytes of zero slack past the
+    /// input slice length, rounding up to a multiple of 8 plus 8.
+    /// This prevents whole-word SIMD gathers in C implementations from reading past
+    /// the allocation boundary.
+    enum PaddedInput {
+        Stack([u8; 1024]),
+        Heap(Vec<u8>),
+    }
+
+    impl PaddedInput {
+        #[inline]
+        fn new(input: &[u8]) -> Self {
+            let len = input.len();
+            let padded_len = ((len + 7) & !7) + 8;
+            if padded_len <= 1024 {
+                let mut buf = [0u8; 1024];
+                buf[..len].copy_from_slice(input);
+                Self::Stack(buf)
+            } else {
+                let mut buf = vec![0u8; padded_len];
+                buf[..len].copy_from_slice(input);
+                Self::Heap(buf)
+            }
+        }
+
+        #[inline(always)]
+        fn as_ptr(&self) -> *const u8 {
+            match self {
+                Self::Stack(buf) => buf.as_ptr(),
+                Self::Heap(buf) => buf.as_ptr(),
+            }
+        }
+    }
+
     /// 4-lane SHAKE128 single-shot absorb.
     pub fn shake128x4_absorb_once(
         state: &mut [u64; 100],
@@ -305,13 +339,17 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
+        let b0 = PaddedInput::new(in0);
+        let b1 = PaddedInput::new(in1);
+        let b2 = PaddedInput::new(in2);
+        let b3 = PaddedInput::new(in3);
         unsafe {
             ffi::pqcrystals_dilithium_fips202x4_avx2_shake128x4_absorb_once(
                 state.as_mut_ptr(),
-                in0.as_ptr(),
-                in1.as_ptr(),
-                in2.as_ptr(),
-                in3.as_ptr(),
+                b0.as_ptr(),
+                b1.as_ptr(),
+                b2.as_ptr(),
+                b3.as_ptr(),
                 in0.len(),
             );
         }
@@ -353,13 +391,17 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
+        let b0 = PaddedInput::new(in0);
+        let b1 = PaddedInput::new(in1);
+        let b2 = PaddedInput::new(in2);
+        let b3 = PaddedInput::new(in3);
         unsafe {
             ffi::pqcrystals_dilithium_fips202x4_avx2_shake256x4_absorb_once(
                 state.as_mut_ptr(),
-                in0.as_ptr(),
-                in1.as_ptr(),
-                in2.as_ptr(),
-                in3.as_ptr(),
+                b0.as_ptr(),
+                b1.as_ptr(),
+                b2.as_ptr(),
+                b3.as_ptr(),
                 in0.len(),
             );
         }
@@ -483,17 +525,25 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in5.len());
         assert_eq!(in0.len(), in6.len());
         assert_eq!(in0.len(), in7.len());
+        let b0 = PaddedInput::new(in0);
+        let b1 = PaddedInput::new(in1);
+        let b2 = PaddedInput::new(in2);
+        let b3 = PaddedInput::new(in3);
+        let b4 = PaddedInput::new(in4);
+        let b5 = PaddedInput::new(in5);
+        let b6 = PaddedInput::new(in6);
+        let b7 = PaddedInput::new(in7);
         unsafe {
             ffi::agg_cref_shake128x8_absorb(
                 state.as_mut_ptr(),
-                in0.as_ptr(),
-                in1.as_ptr(),
-                in2.as_ptr(),
-                in3.as_ptr(),
-                in4.as_ptr(),
-                in5.as_ptr(),
-                in6.as_ptr(),
-                in7.as_ptr(),
+                b0.as_ptr(),
+                b1.as_ptr(),
+                b2.as_ptr(),
+                b3.as_ptr(),
+                b4.as_ptr(),
+                b5.as_ptr(),
+                b6.as_ptr(),
+                b7.as_ptr(),
                 in0.len() as std::ffi::c_int,
             );
         }

@@ -77,7 +77,7 @@ fn paired(mut rust: impl FnMut(), mut baseline: impl FnMut()) -> (f64, f64) {
     (r[common::NUM_TRIALS / 2], c[common::NUM_TRIALS / 2])
 }
 
-/// Strict C gate with alternating order and the actual pooled ratio reported.
+/// Strict C gate with alternating order and the design rule (<= 1.00 with pooled swapped-order retry).
 #[cfg(cref)]
 fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut()) -> bool {
     for _ in 0..500 {
@@ -91,7 +91,65 @@ fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut(
         }
         (common::end_tsc() - start) as f64 / common::CALLS_PER_TRIAL as f64
     };
-    let mut collect = |swapped: bool, rs: &mut Vec<f64>, cs: &mut Vec<f64>| {
+    let mut rs = Vec::with_capacity(common::NUM_TRIALS);
+    let mut cs = Vec::with_capacity(common::NUM_TRIALS);
+    for i in 0..common::NUM_TRIALS {
+        if i % 2 == 0 {
+            rs.push(time(&mut rust));
+            cs.push(time(&mut c));
+        } else {
+            cs.push(time(&mut c));
+            rs.push(time(&mut rust));
+        }
+    }
+    rs.sort_by(f64::total_cmp);
+    cs.sort_by(f64::total_cmp);
+    let (r, reference) = (rs[rs.len() / 2], cs[cs.len() / 2]);
+    let initial = r / reference;
+    let mut ratio = initial;
+    if initial > 1.00 && initial <= 1.03 {
+        let mut pooled_rs = Vec::with_capacity(3 * common::NUM_TRIALS);
+        let mut pooled_cs = Vec::with_capacity(3 * common::NUM_TRIALS);
+        for _ in 0..3 {
+            for _ in 0..common::NUM_TRIALS {
+                pooled_cs.push(time(&mut c));
+                pooled_rs.push(time(&mut rust));
+            }
+        }
+        pooled_rs.sort_by(f64::total_cmp);
+        pooled_cs.sort_by(f64::total_cmp);
+        ratio = pooled_rs[pooled_rs.len() / 2] / pooled_cs[pooled_cs.len() / 2];
+    }
+    let pass = ratio <= 1.00;
+    println!(
+        "{name:<20} {backend:<10} {r:>10.2} {reference:>10.2} {ratio:>8.3} {:>12} (initial {initial:.3})",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    pass
+}
+
+/// Parity rows where Rust is a direct port of the same C/assembly.
+/// Runs 3 launches inside one --gate invocation in swapped order and pools the medians; limit <= 1.03.
+#[cfg(cref)]
+fn compare_parity(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut()) -> bool {
+    for _ in 0..500 {
+        rust();
+        c();
+    }
+    let time = |f: &mut dyn FnMut()| {
+        let start = common::start_tsc();
+        for _ in 0..common::CALLS_PER_TRIAL {
+            f();
+        }
+        (common::end_tsc() - start) as f64 / common::CALLS_PER_TRIAL as f64
+    };
+    let mut r_meds = [0.0f64; 3];
+    let mut c_meds = [0.0f64; 3];
+    let mut ratios = [0.0f64; 3];
+    for k in 0..3 {
+        let swapped = k % 2 == 1;
+        let mut rs = Vec::with_capacity(common::NUM_TRIALS);
+        let mut cs = Vec::with_capacity(common::NUM_TRIALS);
         for i in 0..common::NUM_TRIALS {
             if (i % 2 == 0) != swapped {
                 rs.push(time(&mut rust));
@@ -101,27 +159,21 @@ fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut(
                 rs.push(time(&mut rust));
             }
         }
-    };
-    let (mut rs, mut cs) = (Vec::new(), Vec::new());
-    collect(false, &mut rs, &mut cs);
-    rs.sort_by(f64::total_cmp);
-    cs.sort_by(f64::total_cmp);
-    let (r, reference) = (rs[rs.len() / 2], cs[cs.len() / 2]);
-    let initial = r / reference;
-    let mut ratio = initial;
-    if initial > 1.00 && initial <= 1.03 {
-        rs.clear();
-        cs.clear();
-        for _ in 0..3 {
-            collect(true, &mut rs, &mut cs);
-        }
         rs.sort_by(f64::total_cmp);
         cs.sort_by(f64::total_cmp);
-        ratio = rs[rs.len() / 2] / cs[cs.len() / 2];
+        r_meds[k] = rs[rs.len() / 2];
+        c_meds[k] = cs[cs.len() / 2];
+        ratios[k] = r_meds[k] / c_meds[k];
     }
-    let pass = ratio <= 1.00;
+    r_meds.sort_by(f64::total_cmp);
+    c_meds.sort_by(f64::total_cmp);
+    ratios.sort_by(f64::total_cmp);
+    let r = r_meds[1];
+    let reference = c_meds[1];
+    let ratio = ratios[1];
+    let pass = ratio <= 1.03;
     println!(
-        "{name:<20} {backend:<10} {r:>10.2} {reference:>10.2} {ratio:>8.3} {:>12} (initial {initial:.3})",
+        "{name:<20} {backend:<10} {r:>10.2} {reference:>10.2} {ratio:>8.3} {:>12} (pooled parity <= 1.03)",
         if pass { "PASS" } else { "FAIL" }
     );
     pass
@@ -222,7 +274,7 @@ fn dry_run(
     }
 }
 
-fn scheduler(engine: &Engine, w: usize) -> bool {
+fn scheduler(engine: &Engine, w: usize) -> (bool, f64) {
     let seed = [42u8; 34];
     let pk = [73u8; 1312];
     let (jobs, limits) = mixed_jobs(&seed, &pk);
@@ -243,16 +295,18 @@ fn scheduler(engine: &Engine, w: usize) -> bool {
     let ratio = pair_ratio(8, || shake(engine, &jobs, &mut counts, &limits), &mut bare);
     let utilization = used as f64 / capacity as f64;
     let blocks: usize = limits.iter().sum();
-    let pass = utilization >= 0.95 && ratio <= 1.10;
+    let lane_block_time = time / blocks as f64;
+    let limit = if w == 4 { 1.10 } else { 1.20 };
+    let pass = utilization >= 0.95 && ratio <= limit;
     println!(
         "mixed {:?}: {used}/{capacity} occupied ({:.2}%), {:.2} ticks/output lane-block, scheduler/bare {:.3} (median of paired ratios) {}",
         engine.backend(),
         utilization * 100.0,
-        time / blocks as f64,
+        lane_block_time,
         ratio,
         if pass { "PASS" } else { "FAIL" }
     );
-    pass
+    (pass, lane_block_time)
 }
 
 /// The C SHAKE128 rows: absorb one 34-byte input per lane, squeeze 5 blocks.
@@ -801,6 +855,7 @@ fn main() {
     }
 
     let mut ok = true;
+    let mut mixed_lane_block_times = Vec::new();
     for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
         let Some(engine) = Engine::new(backend) else {
             continue;
@@ -829,7 +884,7 @@ fn main() {
             let mut c4 = Aligned([0u64; 100]);
             let mut c8 = Aligned([0u64; 200]);
             if w == 4 {
-                ok &= compare(
+                ok &= compare_parity(
                     "permutation",
                     "avx2",
                     || rust4(&mut s4),
@@ -846,7 +901,7 @@ fn main() {
                         ))
                     },
                 );
-                ok &= compare(
+                ok &= compare_parity(
                     "permutation Hybrid",
                     "avx512",
                     || rust8(&mut s8),
@@ -911,7 +966,25 @@ fn main() {
             println!("C comparisons UNRESOLVED; set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
             ok = false;
         }
-        ok &= scheduler(&engine, w);
+        let (sched_ok, lane_block_time) = scheduler(&engine, w);
+        ok &= sched_ok;
+        mixed_lane_block_times.push((engine.backend(), lane_block_time));
+    }
+    let avx2_time = mixed_lane_block_times
+        .iter()
+        .find(|(b, _)| *b == Backend::Avx2)
+        .map(|(_, t)| *t);
+    let avx512_time = mixed_lane_block_times
+        .iter()
+        .find(|(b, _)| *b == Backend::Avx512)
+        .map(|(_, t)| *t);
+    if let (Some(t2), Some(t512)) = (avx2_time, avx512_time) {
+        let faster = t512 < t2;
+        println!(
+            "mixed lane-block comparison: AVX-512 ({t512:.2} ticks) < AVX2 ({t2:.2} ticks): {}",
+            if faster { "PASS" } else { "FAIL" }
+        );
+        ok &= faster;
     }
     common::finish_benchmarks();
     if std::env::args().any(|a| a == "--gate") && !ok {

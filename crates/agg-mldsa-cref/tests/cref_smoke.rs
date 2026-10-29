@@ -186,7 +186,7 @@ mod smoke_tests {
         let qdata = qdata();
 
         // Warmup
-        for _ in 0..1000 {
+        for _ in 0..50000 {
             ntt_avx(&mut a.0, qdata);
         }
 
@@ -203,7 +203,10 @@ mod smoke_tests {
             }
             run_trials.sort_by(f64::total_cmp);
             run_medians[run_idx] = run_trials[15];
-            println!("ntt_avx Run {run_idx} median: {:.2} ticks", run_medians[run_idx]);
+            println!(
+                "ntt_avx Run {run_idx} median: {:.2} ticks",
+                run_medians[run_idx]
+            );
         }
 
         let min_m = run_medians[0].min(run_medians[1]).min(run_medians[2]);
@@ -215,5 +218,127 @@ mod smoke_tests {
             "ntt_avx runs spread exceeds 2%: {:.2}%",
             diff * 100.0
         );
+    }
+
+    #[cfg(unix)]
+    struct GuardPageBuffer {
+        ptr: *mut u8,
+        total_len: usize,
+    }
+
+    #[cfg(unix)]
+    extern "C" {
+        fn mmap(
+            addr: *mut std::ffi::c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut std::ffi::c_void;
+        fn munmap(addr: *mut std::ffi::c_void, len: usize) -> i32;
+        fn mprotect(addr: *mut std::ffi::c_void, len: usize, prot: i32) -> i32;
+    }
+
+    #[cfg(unix)]
+    impl GuardPageBuffer {
+        fn new(len: usize) -> (Self, &'static [u8]) {
+            const PROT_READ: i32 = 1;
+            const PROT_WRITE: i32 = 2;
+            const PROT_NONE: i32 = 0;
+            const MAP_PRIVATE: i32 = 2;
+            const MAP_ANONYMOUS: i32 = 0x20;
+            const PAGE_SIZE: usize = 4096;
+
+            let total_len = 2 * PAGE_SIZE;
+            unsafe {
+                let mapped = mmap(
+                    core::ptr::null_mut(),
+                    total_len,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
+                assert!(!mapped.is_null() && mapped != usize::MAX as *mut std::ffi::c_void);
+                let guard_page = (mapped as *mut u8).add(PAGE_SIZE);
+                let ret = mprotect(guard_page as *mut std::ffi::c_void, PAGE_SIZE, PROT_NONE);
+                assert_eq!(ret, 0);
+
+                let slice_start = guard_page.sub(len);
+                for i in 0..len {
+                    *slice_start.add(i) = ((i * 37 + 11) & 0xff) as u8;
+                }
+                let slice = core::slice::from_raw_parts(slice_start, len);
+                (
+                    GuardPageBuffer {
+                        ptr: mapped as *mut u8,
+                        total_len,
+                    },
+                    slice,
+                )
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for GuardPageBuffer {
+        fn drop(&mut self) {
+            unsafe {
+                munmap(self.ptr as *mut std::ffi::c_void, self.total_len);
+            }
+        }
+    }
+
+    #[test]
+    fn test_absorb_exact_allocation_end() {
+        assert!(available());
+        for len in [0, 1, 7, 8, 9, 34, 135, 136, 137, 167, 168, 169] {
+            #[cfg(unix)]
+            {
+                let (_guard0, s0) = GuardPageBuffer::new(len);
+                let (_guard1, s1) = GuardPageBuffer::new(len);
+                let (_guard2, s2) = GuardPageBuffer::new(len);
+                let (_guard3, s3) = GuardPageBuffer::new(len);
+                let (_guard4, s4) = GuardPageBuffer::new(len);
+                let (_guard5, s5) = GuardPageBuffer::new(len);
+                let (_guard6, s6) = GuardPageBuffer::new(len);
+                let (_guard7, s7) = GuardPageBuffer::new(len);
+
+                let mut state4 = Align64([0u64; 100]);
+                shake128x4_absorb_once(&mut state4.0, s0, s1, s2, s3);
+                let mut out4 = [[0u8; 168]; 4];
+                let [o0, o1, o2, o3] = &mut out4;
+                shake128x4_squeezeblocks(o0, o1, o2, o3, 1, &mut state4.0);
+
+                let mut state256 = Align64([0u64; 100]);
+                shake256x4_absorb_once(&mut state256.0, s0, s1, s2, s3);
+                let mut out256 = [[0u8; 136]; 4];
+                let [o0_256, o1_256, o2_256, o3_256] = &mut out256;
+                shake256x4_squeezeblocks(o0_256, o1_256, o2_256, o3_256, 1, &mut state256.0);
+
+                let mut state8 = Align64([0u64; 200]);
+                xurq_avx512_shake128x8_absorb(&mut state8.0, s0, s1, s2, s3, s4, s5, s6, s7);
+                let mut out8 = [[0u8; 168]; 8];
+                let [a, b, c, d, e, f, g, h] = &mut out8;
+                xurq_avx512_shake128x8_squeezeblocks(&mut state8.0, a, b, c, d, e, f, g, h, 1);
+                assert_eq!(out4[0], out8[0]);
+            }
+
+            // Also test with exact-capacity boxed slices on all platforms.
+            let b0 = vec![42u8; len].into_boxed_slice();
+            let b1 = vec![42u8; len].into_boxed_slice();
+            let b2 = vec![42u8; len].into_boxed_slice();
+            let b3 = vec![42u8; len].into_boxed_slice();
+            let b4 = vec![42u8; len].into_boxed_slice();
+            let b5 = vec![42u8; len].into_boxed_slice();
+            let b6 = vec![42u8; len].into_boxed_slice();
+            let b7 = vec![42u8; len].into_boxed_slice();
+
+            let mut state4 = Align64([0u64; 100]);
+            shake128x4_absorb_once(&mut state4.0, &b0, &b1, &b2, &b3);
+            let mut state8 = Align64([0u64; 200]);
+            xurq_avx512_shake128x8_absorb(&mut state8.0, &b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7);
+        }
     }
 }
