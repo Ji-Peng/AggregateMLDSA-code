@@ -638,3 +638,58 @@ For the next cloud run: the scalar kernel work shortens the PIOP branch (lookup 
 more than the Flock proofs, so at 32K the Flock branch may become the critical one; sweep
 `AGG_FLOCK_THREADS` = 4 / 6 / 8 at 32K again (1 warmup + 5) and move the default to the
 winner.
+
+## 14. Scalar prover work against main (local 1K and 4K, direction only)
+
+Same box as Section 13 (shared, load 8-10 throughout). Main `44c882d` against `scalar-opt`
+`e95fe80`, both CLMUL builds with their default pools (Flock 8 on main, 6 on the branch;
+Akita opening 8 on the branch). `agg bench --keys 16 --warmup 1 --reps 2`, main and the
+branch alternated, two passes. Proofs are byte-identical: the 1K gate (H-u, H-exact, H-u with
+`FLOCK_SIMD=portable`) and the 4K H-u aggregates of both binaries compare equal (498,885 B).
+
+| ms (median of 2) | main pass 1 / 2 | scalar-opt pass 1 / 2 | ratio |
+| --- | ---: | ---: | ---: |
+| 1K prove | 2,094.8 / 2,254.8 | 1,282.6 / 1,361.4 | 1.63x / 1.66x |
+| 1K fork-join wall | 1,003.1 / 1,039.7 | 552.0 / 596.6 | 1.82x / 1.74x |
+| 4K prove | 4,190.8 / 3,939.0 | 2,643.1 / 2,719.1 | 1.59x / 1.45x |
+| 4K fork-join wall | 2,253.0 / 2,053.6 | 1,324.9 / 1,323.7 | 1.70x / 1.55x |
+| 4K outside the fork (total - wall) | 1,888.6 / 1,872.7 | 1,301.6 / 1,335.5 | 1.45x / 1.40x |
+| 4K prover peak RSS (MiB) | 4,226 / 4,265 | 4,345 / 4,362 | +3% |
+
+One cold 4K aggregate per binary (`agg aggregate`, H-u, ms):
+
+| Phase | main | scalar-opt | ratio |
+| --- | ---: | ---: | ---: |
+| instance | 115.1 | 22.1 | 5.2x |
+| witness and `G_main` tables | 237.4 | 79.2 | 3.0x |
+| Flock commit (event 2) | 683.7 | 492.6 | 1.39x |
+| event 1 (beside the Flock commit) | 242.1 | 501.5 | runs beside it |
+| events 3-5 | 206.9 | 143.5 | 1.44x |
+| lookup (event 7) | 1,480.3 | 750.1 | 1.97x |
+| stage 1 | 123.7 | 214.7 | 0.58x (overlap with the Flock tail) |
+| stage 2 | 132.3 | 123.4 | 1.07x |
+| stage 3 | 383.9 | 262.4 | 1.46x |
+| Flock proofs (beside the PIOP) | 1,368.1 (8 thr.) | 925.0 (6 thr.) | 1.48x |
+| fork-join wall | 2,174.1 | 1,351.9 | 1.61x |
+| Akita opening (event 13) | 933.7 | 609.6 | 1.53x |
+| total | 4,370.6 | 2,737.0 | 1.60x |
+
+Stage 1 code is not slower: with no fork (`AGG_FLOCK_THREADS=0`) the branch's stage 1 is at
+least as fast as main's. Since the lookup shrank 2x and the Flock proofs only 1.5x, stage 1
+now runs beside the last part of the Flock proofs and shares the cores with them. The round-0
+quartet-mass pass, which ran its widest segment on one thread, now splits segments over item
+ranges and derives nested segments as marginals (mass pass 12-18 -> 7.3-7.6 ms without the
+fork). The rest of the stage-1 excess moves with the pool split, not with stage-1 code; the
+fork wall is set by the PIOP branch either way. In the two bench passes stage 1 was 189.6 /
+125.3 ms on main and 175.4 / 179.7 ms on the branch.
+
+Outside the fork, the opening pool (one thread per physical core), the flat instance `T`, the
+stack-buffer digit decomposition and the lane-blocked level-0 Flock codeword gave 1.4-1.45x
+in the bench. Event 1 now takes about as long as the Flock commit beside it (502 against
+493 ms), so the two share the window and only less total work in it shortens it.
+
+At 32K (est., from the 32K phases of Section 12.2 and the 4K ratios above): outside the fork
+about 2.6-2.8 s instead of 4.49 s, the PIOP branch about 3.8 s and the Flock proofs 3.7-4.2 s
+on 6 threads, so the Flock branch may be the critical one, and a total of about 6.5-7.0 s
+instead of 11.34 s (1.6-1.75x, est.). The cloud matrix and the 4 / 6 / 8 pool sweep of
+Section 13 decide.
