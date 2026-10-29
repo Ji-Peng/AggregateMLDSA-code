@@ -5,6 +5,13 @@
 //! permutation. This generalises the HSH/SSA technique of the Hybrid-SHA-3
 //! authors to batches. A lane whose job ends is refilled from the queue at the
 //! next permutation boundary, so no job ever has two blocks in flight.
+//!
+//! Absorption XORs each lane's input words straight into its column of the
+//! state with scalar operations, so an absorbing lane touches only its own 17
+//! to 21 words. Lanes that keep absorbing take their next block right after
+//! the extraction, before the sinks run, which leaves their stores time to
+//! retire before the next permutation loads the state; lanes that start a new
+//! job are first cleared with full-width vector stores.
 
 use super::{Sink, XofJob};
 use crate::poly::Block;
@@ -13,58 +20,64 @@ use crate::poly::Block;
 #[repr(C, align(64))]
 pub(crate) struct State<const W: usize>(pub [[u64; W]; 25]);
 
-/// One lane's contribution to an absorb pass: whole little-endian words, then
-/// one assembled word.
-#[derive(Clone, Copy)]
-pub(crate) struct Input<'a> {
-    pub lane: usize,
-    /// Length is a multiple of 8 and at most 168.
-    pub words: &'a [u8],
-    /// XORed into word `words.len() / 8` when nonzero (a partial final word
-    /// with its 0x1F suffix byte).
-    pub tail: u64,
-}
-
 /// The ISA kernels behind the scheduler.
 pub(crate) trait Permutation<const W: usize> {
     fn permute(&mut self, state: &mut State<W>);
-    /// Zeroes the lanes in `fresh`, XORs each input's words into words
-    /// `0..len / 8` of its lane (and its nonzero tail into word `len / 8`), and XORs the final padding bit `1 << 63` into
-    /// word 16 of the lanes in `pad16` (SHAKE256) and word 20 of the lanes in
-    /// `pad20` (SHAKE128).
-    fn absorb(&self, state: &mut State<W>, fresh: u8, inputs: &[Input<'_>], pad16: u8, pad20: u8);
-    /// Writes bytes `0..192` of every block (the largest rate rounded up to a
-    /// whole 64-byte vector): 168 rate bytes for the lanes in `wide`, 136 for
-    /// the others, zeros after them. Bytes `192..256` are never written.
+    /// Writes bytes `0..168` of every block: 168 rate bytes for the lanes in
+    /// `wide`, 136 rate bytes and 32 zero bytes for the others. Bytes
+    /// `168..256` are never written.
     fn extract(&self, state: &State<W>, blocks: &mut [Block; W], wide: u8);
+    /// Zeroes the columns of `lanes` with full-width loads and stores, which
+    /// the next permutation's loads can forward from (scalar stores into a
+    /// vector word cannot be forwarded, so its loads would wait for them).
+    fn clear(&self, state: &mut State<W>, lanes: u8);
 }
+
 
 /// Closure-based kernel set; closures defined inside a `#[target_feature]`
 /// function inherit its features.
-pub(crate) struct Kernel<P, A, E> {
+pub(crate) struct Kernel<P, E, C> {
     pub permute: P,
-    pub absorb: A,
     pub extract: E,
+    pub clear: C,
 }
 
-impl<const W: usize, P, A, E> Permutation<W> for Kernel<P, A, E>
+impl<const W: usize, P, E, C> Permutation<W> for Kernel<P, E, C>
 where
     P: FnMut(&mut State<W>),
-    A: Fn(&mut State<W>, u8, &[Input<'_>], u8, u8),
     E: Fn(&State<W>, &mut [Block; W], u8),
+    C: Fn(&mut State<W>, u8),
 {
+    #[inline(always)]
+    fn clear(&self, state: &mut State<W>, lanes: u8) {
+        (self.clear)(state, lanes);
+    }
     #[inline(always)]
     fn permute(&mut self, state: &mut State<W>) {
         (self.permute)(state);
     }
     #[inline(always)]
-    fn absorb(&self, state: &mut State<W>, fresh: u8, inputs: &[Input<'_>], pad16: u8, pad20: u8) {
-        (self.absorb)(state, fresh, inputs, pad16, pad20);
-    }
-    #[inline(always)]
     fn extract(&self, state: &State<W>, blocks: &mut [Block; W], wide: u8) {
         (self.extract)(state, blocks, wide);
     }
+}
+
+/// The `len < 8` bytes of `segment` ending at `end`, little-endian.
+#[inline(always)]
+fn partial(segment: &[u8], end: usize, len: usize) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if end >= 8 {
+        // The 8 bytes ending at `end`; keep the top `len` of them.
+        let word = u64::from_le_bytes(segment[end - 8..end].try_into().unwrap());
+        return word >> (64 - 8 * len);
+    }
+    let mut word = 0;
+    for (i, &byte) in segment[end - len..end].iter().enumerate() {
+        word |= u64::from(byte) << (8 * i);
+    }
+    word
 }
 
 /// Absorb cursor of one lane.
@@ -87,77 +100,147 @@ impl Lane {
         }
     }
 
-    /// Takes the lane's next block for lane index `lane` when it lies in one
-    /// segment, or ends the input inside one. Returns the input and whether
-    /// it is the final (padded) block, or `None` when the block spans
-    /// segments (see `gather`). The 0x80 padding bit is left to the kernel.
+    /// XORs the lane's next block into column `lane` and returns whether it
+    /// was the final (padded) block.
     #[inline(always)]
-    fn next_block<'b>(&mut self, job: &XofJob<'b>, lane: usize) -> Option<(Input<'b>, bool)> {
+    fn absorb<const W: usize>(
+        &mut self,
+        job: &XofJob<'_>,
+        state: &mut State<W>,
+        lane: usize,
+    ) -> bool {
         let rate = self.rate;
         while self.segment < 4 && self.offset == job.input[self.segment].len() {
             self.segment += 1;
             self.offset = 0;
         }
-        if self.segment == 4 {
-            // Exact multiple of the rate: a block of padding only.
-            return Some((
-                Input {
-                    lane,
-                    words: &[],
-                    tail: 0x1f,
-                },
-                true,
-            ));
-        }
-        let segment = job.input[self.segment];
-        let rest = &segment[self.offset..];
-        if rest.len() >= rate {
-            self.offset += rate;
-            return Some((
-                Input {
-                    lane,
-                    words: &rest[..rate],
-                    tail: 0,
-                },
-                false,
-            ));
-        }
-        if job.input[self.segment + 1..].iter().any(|s| !s.is_empty()) {
-            return None;
-        }
-        // Whole words in place; the partial word and the suffix byte in a register.
-        self.segment = 4;
-        let (words, partial) = rest.split_at(rest.len() & !7);
-        let mut tail = 0x1fu64 << (8 * partial.len());
-        for (i, &byte) in partial.iter().enumerate() {
-            tail |= u64::from(byte) << (8 * i);
-        }
-        Some((Input { lane, words, tail }, true))
-    }
-
-    /// Copies a block that spans segments into `buf` (zeroed by the caller) and
-    /// returns its length in bytes (whole words) and whether it is final.
-    #[cold]
-    #[inline(never)]
-    fn gather(&mut self, job: &XofJob<'_>, buf: &mut [u8; 168]) -> (usize, bool) {
-        let rate = self.rate;
-        let mut used = 0;
-        while used < rate && self.segment < 4 {
+        if self.segment < 4 {
             let segment = job.input[self.segment];
-            let n = (rate - used).min(segment.len() - self.offset);
-            buf[used..used + n].copy_from_slice(&segment[self.offset..self.offset + n]);
-            used += n;
-            self.offset += n;
-            if self.offset == segment.len() {
-                self.segment += 1;
-                self.offset = 0;
+            if segment.len() - self.offset >= rate {
+                // A whole block inside one segment.
+                let block = &segment[self.offset..self.offset + rate];
+                self.offset += rate;
+                for (chunk, word) in block.as_chunks::<8>().0.iter().zip(&mut state.0) {
+                    word[lane] ^= u64::from_le_bytes(*chunk);
+                }
+                return false;
+            }
+            if job.input[self.segment + 1..].iter().all(|s| s.is_empty()) {
+                // The final block inside one segment: whole words in place, the
+                // partial word and the suffix byte in a register.
+                let rest = &segment[self.offset..];
+                self.segment = 4;
+                let (whole, tail) = rest.as_chunks::<8>();
+                for (chunk, word) in whole.iter().zip(&mut state.0) {
+                    word[lane] ^= u64::from_le_bytes(*chunk);
+                }
+                state.0[whole.len()][lane] ^=
+                    partial(segment, segment.len(), tail.len()) | 0x1f << (8 * tail.len());
+                state.0[rate / 8 - 1][lane] ^= 1 << 63;
+                return true;
             }
         }
-        if used == rate {
-            return (rate, false);
+        self.stream(job, state, lane)
+    }
+
+    /// A block that spans segments, or the padding-only block after an input
+    /// of a whole number of blocks: bytes stream from the
+    /// segments into whole words, and a word that straddles a segment
+    /// boundary is assembled in a register.
+    #[inline(always)]
+    fn stream<const W: usize>(
+        &mut self,
+        job: &XofJob<'_>,
+        state: &mut State<W>,
+        lane: usize,
+    ) -> bool {
+        let rate = self.rate;
+        let mut words = state.0.iter_mut();
+        let mut emit = |value: u64| {
+            // At most `rate / 8 <= 21` words are emitted per block.
+            if let Some(word) = words.next() {
+                word[lane] ^= value;
+            }
+        };
+        // Bytes of a word in progress (fewer than 8).
+        let (mut acc, mut pending) = (0u64, 0usize);
+        let mut room = rate;
+        while room > 0 && self.segment < 4 {
+            let segment = job.input[self.segment];
+            let start = self.offset;
+            let end = segment.len().min(start + room);
+            let bytes = &segment[start..end];
+            room -= bytes.len();
+            if end == segment.len() {
+                self.segment += 1;
+                self.offset = 0;
+            } else {
+                self.offset = end;
+            }
+            if pending == 0 {
+                let (whole, rest) = bytes.as_chunks::<8>();
+                for chunk in whole {
+                    emit(u64::from_le_bytes(*chunk));
+                }
+                pending = rest.len();
+                acc = partial(segment, end, pending);
+            } else {
+                for &byte in bytes {
+                    acc |= u64::from(byte) << (8 * pending);
+                    pending += 1;
+                    if pending == 8 {
+                        emit(acc);
+                        (acc, pending) = (0, 0);
+                    }
+                }
+            }
         }
-        buf[used] = 0x1f;
-        ((used + 8) & !7, true)
+        // A full block leaves no pending bytes; otherwise the input ended here.
+        let last = room > 0;
+        if last {
+            emit(acc | 0x1f << (8 * pending));
+        }
+        if last {
+            state.0[rate / 8 - 1][lane] ^= 1 << 63;
+        }
+        last
+    }
+}
+
+// The two column loops below are separate functions on purpose: they are
+// compiled without the caller's vector features, so their strided accesses stay
+// scalar loads and stores (inlined into an AVX-512 caller, LLVM turns them into
+// `vpscatterqq`/`vpgatherqq`, which cost more than the scalar copies here).
+
+/// XORs the next block of every lane in `absorbing` into its column and
+/// returns the lanes whose final block that was.
+#[inline(never)]
+fn absorb<const W: usize>(
+    lanes: &mut [Lane; W],
+    jobs: &[XofJob<'_>],
+    state: &mut State<W>,
+    absorbing: u8,
+) -> u8 {
+    let mut last = 0;
+    for i in bits(absorbing) {
+        let lane = &mut lanes[i];
+        last |= u8::from(lane.absorb(&jobs[lane.job], state, i)) << i;
+    }
+    last
+}
+
+/// Copies the rate words of the lanes in `mask` into their blocks (and zeros
+/// bytes 136..168 for a SHAKE256 lane, which a previous SHAKE128 job may have
+/// written).
+#[inline(never)]
+fn copy_lanes<const W: usize>(state: &State<W>, blocks: &mut [Block; W], lanes: &[Lane; W], mask: u8) {
+    for i in bits(mask) {
+        let words = lanes[i].rate / 8;
+        let (out, _) = blocks[i].bytes[..168].as_chunks_mut::<8>();
+        for (w, bytes) in out.iter_mut().enumerate() {
+            let word = if w < words { state.0[w][i] } else { 0 };
+            *bytes = word.to_le_bytes();
+        }
     }
 }
 
@@ -182,10 +265,13 @@ pub(crate) fn run<const W: usize, S: Sink, P: Permutation<W>>(
     mut kernel: P,
 ) -> (usize, usize) {
     debug_assert!(W <= 8);
+    // Up to this many squeezing lanes copy their words one by one; more go
+    // through the kernel's transposes.
+    let copy_max = W / 4;
     let mut state = State([[0; W]; 25]);
     let mut blocks = [Block::zero(); W];
     let mut lanes = [Lane::default(); W];
-    // Lane masks: running a job, squeezing, rate 168.
+    // Lane masks: running a job, squeezing (absorbed its final block), rate 168.
     let mut active = 0u8;
     let mut squeezing = 0u8;
     let mut wide = 0u8;
@@ -199,70 +285,30 @@ pub(crate) fn run<const W: usize, S: Sink, P: Permutation<W>>(
         wide |= u8::from(lane.rate == 168) << i;
         next += 1;
     }
-    // The state starts at zero, so the first jobs need no clearing.
-    let mut fresh = 0u8;
     let (mut occupied, mut total) = (0, 0);
+    if active != 0 {
+        squeezing = absorb(&mut lanes, jobs, &mut state, active);
+    }
     while active != 0 {
-        let absorbing = active & !squeezing;
-        if absorbing != 0 || fresh != 0 {
-            let mut inputs = [Input {
-                lane: 0,
-                words: &[],
-                tail: 0,
-            }; W];
-            let mut n = 0;
-            let (mut pad16, mut pad20, mut spanning) = (0u8, 0u8, 0u8);
-            for (i, lane) in lanes.iter_mut().enumerate() {
-                if absorbing >> i & 1 == 0 {
-                    continue;
-                }
-                let Some((input, last)) = lane.next_block(&jobs[lane.job], i) else {
-                    spanning |= 1 << i;
-                    continue;
-                };
-                inputs[n] = input;
-                n += 1;
-                if last {
-                    squeezing |= 1 << i;
-                    *(if lane.rate == 168 {
-                        &mut pad20
-                    } else {
-                        &mut pad16
-                    }) |= 1 << i;
-                }
-            }
-            kernel.absorb(&mut state, fresh, &inputs[..n], pad16, pad20);
-            fresh = 0;
-            // Blocks spanning segments go through a staging copy after the clear.
-            for i in bits(spanning) {
-                let lane = &mut lanes[i];
-                let mut buf = [0u8; 168];
-                let (len, last) = lane.gather(&jobs[lane.job], &mut buf);
-                let (mut pad16, mut pad20) = (0u8, 0u8);
-                if last {
-                    squeezing |= 1 << i;
-                    *(if lane.rate == 168 {
-                        &mut pad20
-                    } else {
-                        &mut pad16
-                    }) |= 1 << i;
-                }
-                let input = Input {
-                    lane: i,
-                    words: &buf[..len],
-                    tail: 0,
-                };
-                kernel.absorb(&mut state, 0, &[input], pad16, pad20);
-            }
-        }
         kernel.permute(&mut state);
         occupied += active.count_ones() as usize;
         total += W;
-        if squeezing == 0 {
-            continue;
+        let out = squeezing;
+        if out != 0 {
+            if out.count_ones() as usize <= copy_max {
+                copy_lanes(&state, &mut blocks, &lanes, out);
+            } else {
+                kernel.extract(&state, &mut blocks, wide);
+            }
         }
-        kernel.extract(&state, &mut blocks, wide);
-        for i in bits(squeezing) {
+        // Lanes still absorbing take their next block now, so these stores
+        // retire while the sinks run rather than just before the permutation.
+        let absorbing = active & !out;
+        if absorbing != 0 {
+            squeezing |= absorb(&mut lanes, jobs, &mut state, absorbing);
+        }
+        let mut fresh = 0u8;
+        for i in bits(out) {
             let lane = &lanes[i];
             if !sink.block(lane.job, &blocks[i], lane.rate) {
                 continue;
@@ -278,6 +324,10 @@ pub(crate) fn run<const W: usize, S: Sink, P: Permutation<W>>(
             } else {
                 active &= !(1 << i);
             }
+        }
+        if fresh != 0 {
+            kernel.clear(&mut state, fresh);
+            squeezing |= absorb(&mut lanes, jobs, &mut state, fresh);
         }
     }
     (occupied, total)

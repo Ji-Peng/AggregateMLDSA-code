@@ -35,10 +35,20 @@ impl Sink for CountSink<'_> {
         self.counts[job] == self.limits[job]
     }
 }
+/// Runs the jobs through this binary's copy of the backend, so the scheduler
+/// calls the same permutation symbol (same code alignment) as the bare rows.
 #[inline(never)]
 fn shake(engine: &Engine, jobs: &[XofJob<'_>], counts: &mut [usize], limits: &[usize]) {
     counts.fill(0);
-    engine.run_xof(black_box(jobs), &mut CountSink { counts, limits });
+    let sink = &mut CountSink { counts, limits };
+    let jobs = black_box(jobs);
+    match engine.backend() {
+        // SAFETY: The engine exists, so the backend's features were detected.
+        Backend::Avx2 => unsafe { avx2::run_xof(jobs, sink) },
+        // SAFETY: As above.
+        Backend::Avx512 => unsafe { avx512::run_xof(jobs, sink) },
+        Backend::Scalar => engine.run_xof(jobs, sink),
+    }
 }
 
 // Alternate the scheduler and its bare-permutation baseline at the same frequency.
@@ -69,13 +79,12 @@ fn paired(mut rust: impl FnMut(), mut baseline: impl FnMut()) -> (f64, f64) {
 }
 
 // Median of per-pair ratios over many short alternating trials; frequency drift
-// between neighbouring trials cancels.
-#[cfg(cref)]
-fn pair_ratio(mut a: impl FnMut(), mut b: impl FnMut()) -> f64 {
+// and load on the sibling hyperthread between neighbouring trials cancel.
+fn pair_ratio(calls: usize, mut a: impl FnMut(), mut b: impl FnMut()) -> f64 {
     let mut ratios = Vec::with_capacity(401);
     let time = |f: &mut dyn FnMut()| {
         let start = common::start_tsc();
-        for _ in 0..200 {
+        for _ in 0..calls {
             f();
         }
         (common::end_tsc() - start) as f64
@@ -120,59 +129,81 @@ fn mixed_jobs<'a>(seed: &'a [u8; 34], pk: &'a [u8; 1312]) -> (Vec<XofJob<'a>>, V
     (jobs, limits)
 }
 
-fn scheduler(engine: &Engine, w: usize, _bare_ticks: f64) -> bool {
+/// Runs the scheduler with no-op kernels: its progress does not depend on the
+/// permutation's output.
+fn dry_run(w: usize, jobs: &[XofJob<'_>], counts: &mut [usize], limits: &[usize]) -> (usize, usize) {
+    counts.fill(0);
+    let mut sink = CountSink { counts, limits };
+    if w == 4 {
+        lanes::run(
+            jobs,
+            &mut sink,
+            lanes::Kernel {
+                permute: |_: &mut lanes::State<4>| {},
+                extract: |_: &lanes::State<4>, _: &mut [Block; 4], _| {},
+                clear: |_: &mut lanes::State<4>, _| {},
+            },
+        )
+    } else {
+        lanes::run(
+            jobs,
+            &mut sink,
+            lanes::Kernel {
+                permute: |_: &mut lanes::State<8>| {},
+                extract: |_: &lanes::State<8>, _: &mut [Block; 8], _| {},
+                clear: |_: &mut lanes::State<8>, _| {},
+            },
+        )
+    }
+}
+
+fn scheduler(engine: &Engine, w: usize) -> bool {
     let seed = [42u8; 34];
     let pk = [73u8; 1312];
     let (jobs, limits) = mixed_jobs(&seed, &pk);
     let mut counts = vec![0; jobs.len()];
-    // The scheduler's progress is independent of permutation contents.
-    let kernel = lanes::Kernel {
-        permute: |_: &mut lanes::State<4>| {},
-        absorb: |_: &mut lanes::State<4>, _, _: &[lanes::Input<'_>], _, _| {},
-        extract: |_: &lanes::State<4>, _: &mut [Block; 4], _| {},
-    };
-    let (used, capacity) = if w == 4 {
-        lanes::run(
-            &jobs,
-            &mut CountSink {
-                counts: &mut counts,
-                limits: &limits,
-            },
-            kernel,
-        )
-    } else {
-        lanes::run(
-            &jobs,
-            &mut CountSink {
-                counts: &mut counts,
-                limits: &limits,
-            },
-            lanes::Kernel {
-                permute: |_: &mut lanes::State<8>| {},
-                absorb: |_: &mut lanes::State<8>, _, _: &[lanes::Input<'_>], _, _| {},
-                extract: |_: &lanes::State<8>, _: &mut [Block; 8], _| {},
-            },
-        )
-    };
+    let (used, capacity) = dry_run(w, &jobs, &mut counts, &limits);
     let mut s4 = lanes::State([[0; 4]; 25]);
     let mut s8 = lanes::State([[0; 8]; 25]);
-    let (time, baseline) = paired(
-        || shake(engine, &jobs, &mut counts, &limits),
-        || {
-            for _ in 0..capacity / w {
-                if w == 4 {
-                    rust4(&mut s4);
-                } else {
-                    rust8(&mut s8);
-                }
+    let mut bare = || {
+        for _ in 0..capacity / w {
+            if w == 4 {
+                rust4(&mut s4);
+            } else {
+                rust8(&mut s8);
             }
-        },
-    );
+        }
+    };
+    let (time, _) = paired(|| shake(engine, &jobs, &mut counts, &limits), &mut bare);
+    let ratio = pair_ratio(8, || shake(engine, &jobs, &mut counts, &limits), &mut bare);
     let utilization = used as f64 / capacity as f64;
-    let ratio = time / baseline;
     let blocks: usize = limits.iter().sum();
-    println!("mixed {:?}: {used}/{capacity} occupied ({:.2}%), {:.2} ticks/output lane-block, scheduler/bare {:.3} {}", engine.backend(), utilization * 100.0, time / blocks as f64, ratio, if utilization >= 0.95 && ratio <= 1.10 { "PASS" } else { "FAIL" });
-    utilization >= 0.95 && ratio <= 1.10
+    let pass = utilization >= 0.95 && ratio <= 1.10;
+    println!(
+        "mixed {:?}: {used}/{capacity} occupied ({:.2}%), {:.2} ticks/output lane-block, scheduler/bare {:.3} (median of paired ratios) {}",
+        engine.backend(),
+        utilization * 100.0,
+        time / blocks as f64,
+        ratio,
+        if pass { "PASS" } else { "FAIL" }
+    );
+    pass
+}
+
+/// The C SHAKE128 rows: absorb one 34-byte input per lane, squeeze 5 blocks.
+#[cfg(cref)]
+fn c_shake(w: usize, c4: &mut [u64; 100], c8: &mut [u64; 200], out: &mut [[u8; 840]; 8], input: &[u8]) {
+    let [o0, o1, o2, o3, o4, o5, o6, o7] = out;
+    if w == 4 {
+        agg_mldsa_cref::shake128x4_absorb_once(c4, input, input, input, input);
+        agg_mldsa_cref::shake128x4_squeezeblocks(o0, o1, o2, o3, 5, c4);
+    } else {
+        agg_mldsa_cref::xurq_avx512_shake128x8_absorb(
+            c8, input, input, input, input, input, input, input, input,
+        );
+        agg_mldsa_cref::xurq_avx512_shake128x8_squeezeblocks(c8, o0, o1, o2, o3, o4, o5, o6, o7, 5);
+    }
+    black_box(out);
 }
 
 #[cfg(cref)]
@@ -255,15 +286,63 @@ fn check_cref(backend: Backend) {
     }
 }
 
-// Splits the mixed workload's time into permutations, extraction and the rest.
+/// The scheduler with each kernel switched on or off.
+#[cfg(cref)]
+#[target_feature(enable = "avx2")]
+unsafe fn variant4<const PERMUTE: bool, const EXTRACT: bool>(jobs: &[XofJob<'_>], sink: &mut CountSink<'_>) {
+    lanes::run(
+        jobs,
+        sink,
+        lanes::Kernel {
+            permute: |s: &mut lanes::State<4>| {
+                if PERMUTE {
+                    avx2::permute(s)
+                } else {
+                    black_box(s);
+                }
+            },
+            extract: |s: &lanes::State<4>, b: &mut [Block; 4], r| {
+                if EXTRACT {
+                    avx2::extract(s, b, r)
+                }
+            },
+            clear: |s: &mut lanes::State<4>, l| avx2::clear(s, l),
+        },
+    );
+}
+
+/// The scheduler with each kernel switched on or off.
+#[cfg(cref)]
+#[target_feature(enable = "avx512f")]
+unsafe fn variant8<const PERMUTE: bool, const EXTRACT: bool>(jobs: &[XofJob<'_>], sink: &mut CountSink<'_>) {
+    lanes::run(
+        jobs,
+        sink,
+        lanes::Kernel {
+            permute: |s: &mut lanes::State<8>| {
+                if PERMUTE {
+                    avx512::permute(s)
+                } else {
+                    black_box(s);
+                }
+            },
+            extract: |s: &lanes::State<8>, b: &mut [Block; 8], r| {
+                if EXTRACT {
+                    avx512::extract(s, b, r)
+                }
+            },
+            clear: |s: &mut lanes::State<8>, l| avx512::clear(s, l),
+        },
+    );
+}
+
+// Splits the scheduler's time into permutations, extraction and the rest
+// (absorption, sink calls, bookkeeping), as paired ratios to the bare permutations.
 #[cfg(cref)]
 fn diag_breakdown() {
     let seed = [42u8; 34];
     let pk = [73u8; 1312];
-    let (jobs, limits) = mixed_jobs(&seed, &pk);
-    let mut counts = vec![0; jobs.len()];
-    let mut s4 = lanes::State([[0u64; 4]; 25]);
-    let mut s8 = lanes::State([[0u64; 8]; 25]);
+    let (mixed, mixed_limits) = mixed_jobs(&seed, &pk);
     let single: Vec<XofJob<'_>> = vec![
         XofJob {
             xof: Xof::Shake128,
@@ -272,109 +351,21 @@ fn diag_breakdown() {
         8
     ];
     let single_limits = [5; 8];
+    let mut counts = vec![0; mixed.len()];
+    let mut s4 = lanes::State([[0u64; 4]; 25]);
+    let mut s8 = lanes::State([[0u64; 8]; 25]);
     for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
         let Some(engine) = Engine::new(backend) else {
             continue;
         };
         for (name, jobs, limits) in [
-            ("mixed", &jobs[..], &limits[..]),
+            ("mixed", &mixed[..], &mixed_limits[..]),
             ("34B/5", &single[..w], &single_limits[..w]),
         ] {
-            macro_rules! run_with {
-                ($b:ident, $e:expr, $z:expr) => {
-                    paired(
-                        || {
-                            counts.fill(0);
-                            if w == 4 {
-                                lanes::run(
-                                    black_box(jobs),
-                                    &mut CountSink {
-                                        counts: &mut counts,
-                                        limits,
-                                    },
-                                    lanes::Kernel {
-                                        permute: |_: &mut lanes::State<4>| {},
-                                        absorb: |s: &mut lanes::State<4>,
-                                                 f,
-                                                 i: &[lanes::Input<'_>],
-                                                 p,
-                                                 q| {
-                                            if $z {
-                                                // SAFETY: the engine exists, so the ISA is available.
-                                                unsafe { avx2::absorb(s, f, i, p, q) }
-                                            }
-                                        },
-                                        extract: |s: &lanes::State<4>, b: &mut [Block; 4], r| {
-                                            if $e {
-                                                // SAFETY: the engine exists, so the ISA is available.
-                                                unsafe { avx2::extract(s, b, r) }
-                                            }
-                                        },
-                                    },
-                                )
-                            } else {
-                                lanes::run(
-                                    black_box(jobs),
-                                    &mut CountSink {
-                                        counts: &mut counts,
-                                        limits,
-                                    },
-                                    lanes::Kernel {
-                                        permute: |_: &mut lanes::State<8>| {},
-                                        absorb: |s: &mut lanes::State<8>,
-                                                 f,
-                                                 i: &[lanes::Input<'_>],
-                                                 p,
-                                                 q| {
-                                            if $z {
-                                                // SAFETY: the engine exists, so the ISA is available.
-                                                unsafe { avx512::absorb(s, f, i, p, q) }
-                                            }
-                                        },
-                                        extract: |s: &lanes::State<8>, b: &mut [Block; 8], r| {
-                                            if $e {
-                                                // SAFETY: the engine exists, so the ISA is available.
-                                                unsafe { avx512::extract(s, b, r) }
-                                            }
-                                        },
-                                    },
-                                )
-                            };
-                        },
-                        &mut $b,
-                    )
-                };
-            }
-            counts.fill(0);
-            let (_, cap) = if w == 4 {
-                lanes::run(
-                    jobs,
-                    &mut CountSink {
-                        counts: &mut counts,
-                        limits,
-                    },
-                    lanes::Kernel {
-                        permute: |_: &mut lanes::State<4>| {},
-                        absorb: |_: &mut lanes::State<4>, _, _: &[lanes::Input<'_>], _, _| {},
-                        extract: |_: &lanes::State<4>, _: &mut [Block; 4], _| {},
-                    },
-                )
-            } else {
-                lanes::run(
-                    jobs,
-                    &mut CountSink {
-                        counts: &mut counts,
-                        limits,
-                    },
-                    lanes::Kernel {
-                        permute: |_: &mut lanes::State<8>| {},
-                        absorb: |_: &mut lanes::State<8>, _, _: &[lanes::Input<'_>], _, _| {},
-                        extract: |_: &lanes::State<8>, _: &mut [Block; 8], _| {},
-                    },
-                )
-            };
+            let (_, cap) = dry_run(w, jobs, &mut counts, limits);
             let perms = cap / w;
-            let mut bare_loop = || {
+            let calls = 1 + 800 / perms;
+            let mut bare = || {
                 for _ in 0..perms {
                     if w == 4 {
                         rust4(&mut s4)
@@ -383,21 +374,33 @@ fn diag_breakdown() {
                     }
                 }
             };
-            let (full, bare) = paired(|| shake(&engine, jobs, &mut counts, limits), &mut bare_loop);
-            let (no_perm, bare2) = run_with!(bare_loop, true, true);
-            let (bookkeeping, bare3) = run_with!(bare_loop, false, false);
-            let (extract_only, bare4) = run_with!(bare_loop, true, false);
+            let full = pair_ratio(calls, || shake(&engine, jobs, &mut counts, limits), &mut bare);
+            // The scheduler with a no-op permutation, with or without extraction,
+            // compiled with the backend's features as the real one is.
+            let mut partial = |extracting: bool| {
+                counts.fill(0);
+                let mut sink = CountSink {
+                    counts: &mut counts,
+                    limits,
+                };
+                // SAFETY: The engine exists, so the backend's features were detected.
+                unsafe {
+                    match (w, extracting) {
+                        (4, true) => variant4::<false, true>(black_box(jobs), &mut sink),
+                        (4, false) => variant4::<false, false>(black_box(jobs), &mut sink),
+                        (_, true) => variant8::<false, true>(black_box(jobs), &mut sink),
+                        (_, false) => variant8::<false, false>(black_box(jobs), &mut sink),
+                    }
+                }
+            };
+            let with_extract = pair_ratio(calls, || partial(true), &mut bare);
+            let rest = pair_ratio(calls, || partial(false), &mut bare);
+            let ticks = common::measure_kernel(&mut bare).median;
+            let dry = common::measure_kernel(|| partial(false)).median;
             println!(
-                "diag {backend:?} {name}: extract {:.0}",
-                (extract_only * bare / bare4) - bookkeeping * bare / bare3
-            );
-            let (no_perm, bookkeeping) = (no_perm * bare / bare2, bookkeeping * bare / bare3);
-            println!(
-                "diag {backend:?} {name}: full {full:.0}, permutations {bare:.0} ({perms}), overhead {:.0} = absorb+extract {:.0} + rest {bookkeeping:.0} (+{:.0} unexplained), ratio {:.3}",
-                full - bare,
-                no_perm - bookkeeping,
-                full - bare - no_perm,
-                full / bare
+                "diag {backend:?} {name}: {perms} permutations ({ticks:.0} ticks, no-op kernels {dry:.0}); full/bare {full:.3} = 1 + extract {:.3} + absorb, sinks and bookkeeping {rest:.3} + interaction {:.3}",
+                with_extract - rest,
+                full - 1.0 - with_extract
             );
         }
     }
@@ -431,13 +434,11 @@ fn diag() {
                     lanes::Kernel {
                         permute: cperm,
                         // SAFETY: AVX2 is available.
-                        absorb: |s: &mut lanes::State<4>, f, i: &[lanes::Input<'_>], p, q| unsafe {
-                            avx2::absorb(s, f, i, p, q)
-                        },
-                        // SAFETY: AVX2 is available.
                         extract: |s: &lanes::State<4>, b: &mut [Block; 4], r| unsafe {
                             avx2::extract(s, b, r)
                         },
+                        // SAFETY: AVX2 is available.
+                        clear: |s: &mut lanes::State<4>, l| unsafe { avx2::clear(s, l) },
                     },
                 );
             },
@@ -455,8 +456,32 @@ fn diag() {
     let mut c8 = Aligned([0u64; 200]);
     let mut s4 = lanes::State([[0u64; 4]; 25]);
     let mut s8 = lanes::State([[0u64; 8]; 25]);
+    for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
+        let Some(engine) = Engine::new(backend) else {
+            continue;
+        };
+        let padded_input = [42u8; 64];
+        let input = &padded_input[..34];
+        let jobs = vec![
+            XofJob {
+                xof: Xof::Shake128,
+                input: [input, &[], &[], &[]]
+            };
+            w
+        ];
+        let limits = vec![5; w];
+        let mut counts = vec![0; w];
+        let mut out = [[0u8; 840]; 8];
+        let r = pair_ratio(
+            50,
+            || shake(&engine, &jobs, &mut counts, &limits),
+            || c_shake(w, &mut c4.0, &mut c8.0, &mut out, input),
+        );
+        println!("diag {backend:?} SHAKE128 34B/5 rust/C {r:.3}");
+    }
     if Engine::new(Backend::Avx2).is_some() {
         let r = pair_ratio(
+            200,
             || rust4(&mut s4),
             || agg_mldsa_cref::f1600x4(black_box(&mut c4.0)),
         );
@@ -464,11 +489,13 @@ fn diag() {
     }
     if Engine::new(Backend::Avx512).is_some() {
         let r = pair_ratio(
+            200,
             || rust8(&mut s8),
             || agg_mldsa_cref::xurq_keccak8x_permute(black_box(&mut c8.0)),
         );
         println!("diag avx512 permutation rust/Hybrid {r:.3}");
         let r = pair_ratio(
+            200,
             || rust8(&mut s8),
             || agg_mldsa_cref::keccak_p1600_times8_permute_all_24rounds(black_box(&mut c8.0)),
         );
@@ -551,29 +578,13 @@ fn main() {
                 "SHAKE128 34B/5",
                 if w == 4 { "avx2" } else { "avx512" },
                 || shake(&engine, &jobs, &mut counts, &limits),
-                || {
-                    let [o0, o1, o2, o3, o4, o5, o6, o7] = &mut out;
-                    if w == 4 {
-                        agg_mldsa_cref::shake128x4_absorb_once(
-                            &mut c4.0, input, input, input, input,
-                        );
-                        agg_mldsa_cref::shake128x4_squeezeblocks(o0, o1, o2, o3, 5, &mut c4.0);
-                    } else {
-                        agg_mldsa_cref::xurq_avx512_shake128x8_absorb(
-                            &mut c8.0, input, input, input, input, input, input, input, input,
-                        );
-                        agg_mldsa_cref::xurq_avx512_shake128x8_squeezeblocks(
-                            &mut c8.0, o0, o1, o2, o3, o4, o5, o6, o7, 5,
-                        );
-                    }
-                    black_box(&out);
-                },
+                || c_shake(w, &mut c4.0, &mut c8.0, &mut out, input),
                 true,
             );
         }
         #[cfg(not(cref))]
         println!("C comparisons UNRESOLVED; set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
-        ok &= scheduler(&engine, w, bare_ticks);
+        ok &= scheduler(&engine, w);
     }
     common::finish_benchmarks();
     if std::env::args().any(|a| a == "--gate") && !ok {

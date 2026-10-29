@@ -1,4 +1,4 @@
-//! 4-way Keccak-f[1600], lane absorption and block extraction (AVX2).
+//! 4-way Keccak-f[1600] and block extraction (AVX2).
 //!
 //! The permutation is an instruction-by-instruction intrinsics translation of
 //! pq-crystals' `f1600x4.S` (CC0; derived from Bas Westerbaan's 4-way SHAKE and
@@ -9,7 +9,7 @@
 //! transposes 4x4 word tiles with `unpack` and `permute2x128`.
 
 use super::{
-    lanes::{self, Input, Kernel, State},
+    lanes::{self, Kernel, State},
     Sink, XofJob,
 };
 use crate::poly::Block;
@@ -38,52 +38,10 @@ fn store(word: &mut [u64; 4], value: __m256i) {
 #[target_feature(enable = "avx2")]
 fn lane_mask(mask: u8) -> __m256i {
     let bits = _mm256_setr_epi64x(1, 2, 4, 8);
-    let mask = _mm256_cmpeq_epi64(
+    _mm256_cmpeq_epi64(
         _mm256_and_si256(_mm256_set1_epi64x(mask as i64), bits),
         bits,
-    );
-    // Hide the mask from the optimiser: masking a state word that is then stored
-    // would otherwise become a masked store (`vpmaskmovq`), and the following
-    // permutation's full-width loads cannot forward from it.
-    core::hint::black_box(mask)
-}
-
-/// Clears the `fresh` lanes, then XORs each input's whole words into its lane.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub(crate) fn absorb(state: &mut State<4>, fresh: u8, inputs: &[Input<'_>], pad16: u8, pad20: u8) {
-    if fresh != 0 {
-        let keep = lane_mask(!fresh);
-        for word in &mut state.0 {
-            store(word, _mm256_and_si256(load(word), keep));
-        }
-    }
-    for input in inputs {
-        let lane = lane_mask(1 << input.lane);
-        for (word, bytes) in state.0.iter_mut().zip(input.words.as_chunks::<8>().0) {
-            let x = _mm256_set1_epi64x(i64::from_le_bytes(*bytes));
-            store(
-                word,
-                _mm256_xor_si256(load(word), _mm256_and_si256(x, lane)),
-            );
-        }
-        if input.tail != 0 {
-            let word = &mut state.0[input.words.len() / 8];
-            let x = _mm256_set1_epi64x(input.tail as i64);
-            store(
-                word,
-                _mm256_xor_si256(load(word), _mm256_and_si256(x, lane)),
-            );
-        }
-    }
-    let pad = _mm256_set1_epi64x(i64::MIN);
-    for (w, mask) in [(16, pad16), (20, pad20)] {
-        if mask != 0 {
-            let x = _mm256_and_si256(pad, lane_mask(mask));
-            let v = load(&state.0[w]);
-            store(&mut state.0[w], _mm256_xor_si256(v, x));
-        }
-    }
+    )
 }
 
 /// Transposes four state words into one 32-byte row of each of the four blocks.
@@ -117,7 +75,7 @@ fn transpose_store(
     }
 }
 
-/// Writes bytes 0..192 of every block; words 17..20 only for the `wide` lanes.
+/// Writes bytes 0..168 of every block; words 17..20 only for the `wide` lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
@@ -135,9 +93,33 @@ pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
     }
     let keep = lane_mask(wide);
     let w = |i: usize| _mm256_and_si256(load(&s[i]), keep);
-    let zero = _mm256_setzero_si256();
     transpose_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);
-    transpose_store(w(20), zero, zero, zero, blocks, 5);
+    // Word 20 lane by lane: one 64-bit store per block instead of a tile.
+    let last = w(20);
+    let lo = _mm256_castsi256_si128(last);
+    let hi = _mm256_extracti128_si256::<1>(last);
+    for (block, (half, high)) in blocks.iter_mut().zip([(lo, false), (lo, true), (hi, false), (hi, true)]) {
+        let dst: &mut [u8; 8] = (&mut block.bytes[160..168]).try_into().unwrap();
+        let half = _mm_castsi128_pd(half);
+        // SAFETY: Each store covers exactly the checked 8-byte subarray.
+        unsafe {
+            if high {
+                _mm_storeh_pd(dst.as_mut_ptr().cast(), half);
+            } else {
+                _mm_storel_pd(dst.as_mut_ptr().cast(), half);
+            }
+        }
+    }
+}
+
+/// Zeroes the columns of `lanes`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) fn clear(state: &mut State<4>, lanes: u8) {
+    let keep = core::hint::black_box(lane_mask(!lanes));
+    for word in &mut state.0 {
+        store(word, _mm256_and_si256(load(word), keep));
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -149,10 +131,8 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
         Kernel {
             // Closures inherit the enclosing target features.
             permute: |state: &mut State<4>| permute(state),
-            absorb: |state: &mut State<4>, fresh, inputs: &[Input<'_>], pad16, pad20| {
-                absorb(state, fresh, inputs, pad16, pad20)
-            },
             extract: |state: &State<4>, blocks: &mut [Block; 4], wide| extract(state, blocks, wide),
+            clear: |state: &mut State<4>, lanes| clear(state, lanes),
         },
     );
 }

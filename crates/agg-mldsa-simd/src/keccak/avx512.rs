@@ -1,4 +1,4 @@
-//! 8-way Keccak-f[1600], lane absorption and block extraction (AVX-512F).
+//! 8-way Keccak-f[1600] and block extraction (AVX-512F).
 //!
 //! The permutation keeps all 25 lanes in ZMM registers and follows the
 //! structure of XKCP's `KeccakP-1600-times8-SIMD512.c` (CC0; implementer
@@ -9,11 +9,12 @@
 //! each lane with one three-input XOR, as in Xurong Qi's Hybrid-SHA-3
 //! `keccak8x.c` (translated with the authors' permission); columns 2 to 4 apply
 //! it just before their lanes enter chi, which interleaves the rotations with
-//! the logic operations. The extraction transposes 8x8 word tiles as the
-//! Hybrid-SHA-3 squeeze does.
+//! the logic operations. The extraction starts like the 8x8 transposes of the
+//! Hybrid-SHA-3 squeeze but stops one level early: each vector then holds the
+//! 32-byte rows of two lanes, which are stored as two halves.
 
 use super::{
-    lanes::{self, Input, Kernel, State},
+    lanes::{self, Kernel, State},
     Sink, XofJob,
 };
 use crate::poly::Block;
@@ -267,106 +268,70 @@ pub(crate) fn permute(state: &mut State<8>) {
     store(&mut state.0[24], a24);
 }
 
-/// Hides a lane mask from the optimiser. Masking a state word that is then
-/// stored would otherwise become a masked load or store, and the following
-/// permutation's full-width loads cannot forward from masked stores.
+/// Transposes four state words of eight lanes into the 32-byte rows
+/// `16 * quad..16 * quad + 32` of the eight blocks: two levels of two-input
+/// shuffles leave two lanes' rows in each vector, and the high halves are
+/// stored straight from the register.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
-fn opaque(mask: __m512i) -> __m512i {
-    core::hint::black_box(mask)
-}
-
-/// Clears the `fresh` lanes, then XORs each input's whole words into its lane.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-pub(crate) fn absorb(state: &mut State<8>, fresh: u8, inputs: &[Input<'_>], pad16: u8, pad20: u8) {
-    if fresh != 0 {
-        let keep = opaque(_mm512_maskz_set1_epi64(!fresh, -1));
-        for word in &mut state.0 {
-            store(word, _mm512_and_si512(load(word), keep));
-        }
-    }
-    for input in inputs {
-        let lane = 1 << input.lane;
-        for (word, bytes) in state.0.iter_mut().zip(input.words.as_chunks::<8>().0) {
-            let x = _mm512_set1_epi64(i64::from_le_bytes(*bytes));
-            let v = load(word);
-            store(word, _mm512_mask_xor_epi64(v, lane, v, x));
-        }
-        if input.tail != 0 {
-            let word = &mut state.0[input.words.len() / 8];
-            let v = load(word);
-            store(
-                word,
-                _mm512_mask_xor_epi64(v, lane, v, _mm512_set1_epi64(input.tail as i64)),
-            );
-        }
-    }
-    let pad = _mm512_set1_epi64(i64::MIN);
-    for (w, mask) in [(16, pad16), (20, pad20)] {
-        if mask != 0 {
-            let v = load(&state.0[w]);
-            store(&mut state.0[w], _mm512_mask_xor_epi64(v, mask, v, pad));
-        }
-    }
-}
-
-/// Transposes eight state words into one 64-byte row of each of the eight blocks.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-#[target_feature(enable = "avx512f")]
-fn transpose_store(a: [__m512i; 8], blocks: &mut [Block; 8], tile: usize) {
-    let t0 = _mm512_unpacklo_epi64(a[0], a[1]);
-    let t1 = _mm512_unpackhi_epi64(a[0], a[1]);
-    let t2 = _mm512_unpacklo_epi64(a[2], a[3]);
-    let t3 = _mm512_unpackhi_epi64(a[2], a[3]);
-    let t4 = _mm512_unpacklo_epi64(a[4], a[5]);
-    let t5 = _mm512_unpackhi_epi64(a[4], a[5]);
-    let t6 = _mm512_unpacklo_epi64(a[6], a[7]);
-    let t7 = _mm512_unpackhi_epi64(a[6], a[7]);
-    let f0 = _mm512_shuffle_i64x2::<0x44>(t0, t2);
-    let f1 = _mm512_shuffle_i64x2::<0x44>(t1, t3);
-    let f2 = _mm512_shuffle_i64x2::<0xee>(t0, t2);
-    let f3 = _mm512_shuffle_i64x2::<0xee>(t1, t3);
-    let f4 = _mm512_shuffle_i64x2::<0x44>(t4, t6);
-    let f5 = _mm512_shuffle_i64x2::<0x44>(t5, t7);
-    let f6 = _mm512_shuffle_i64x2::<0xee>(t4, t6);
-    let f7 = _mm512_shuffle_i64x2::<0xee>(t5, t7);
+fn quad_store(a: __m512i, b: __m512i, c: __m512i, d: __m512i, blocks: &mut [Block; 8], quad: usize) {
+    // [a0 b0 a2 b2 a4 b4 a6 b6] and the odd lanes; likewise for c, d.
+    let t0 = _mm512_unpacklo_epi64(a, b);
+    let t1 = _mm512_unpackhi_epi64(a, b);
+    let t2 = _mm512_unpacklo_epi64(c, d);
+    let t3 = _mm512_unpackhi_epi64(c, d);
+    let lo = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
+    let hi = _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15);
+    // Row pairs of lanes (0, 2), (4, 6), (1, 3), (5, 7).
     let rows = [
-        _mm512_shuffle_i64x2::<0x88>(f0, f4),
-        _mm512_shuffle_i64x2::<0x88>(f1, f5),
-        _mm512_shuffle_i64x2::<0xdd>(f0, f4),
-        _mm512_shuffle_i64x2::<0xdd>(f1, f5),
-        _mm512_shuffle_i64x2::<0x88>(f2, f6),
-        _mm512_shuffle_i64x2::<0x88>(f3, f7),
-        _mm512_shuffle_i64x2::<0xdd>(f2, f6),
-        _mm512_shuffle_i64x2::<0xdd>(f3, f7),
+        (_mm512_permutex2var_epi64(t0, lo, t2), 0, 2),
+        (_mm512_permutex2var_epi64(t0, hi, t2), 4, 6),
+        (_mm512_permutex2var_epi64(t1, lo, t3), 1, 3),
+        (_mm512_permutex2var_epi64(t1, hi, t3), 5, 7),
     ];
-    for (block, row) in blocks.iter_mut().zip(rows) {
-        let dst: &mut [u8; 64] = (&mut block.bytes[tile * 64..tile * 64 + 64])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store covers exactly the checked 64-byte subarray.
-        unsafe { _mm512_storeu_si512(dst.as_mut_ptr().cast(), row) };
+    let at = 32 * quad;
+    for (row, first, second) in rows {
+        let dst: &mut [u8; 32] = (&mut blocks[first].bytes[at..at + 32]).try_into().unwrap();
+        // SAFETY: The store covers exactly the checked 32-byte subarray.
+        unsafe { _mm256_storeu_si256(dst.as_mut_ptr().cast(), _mm512_castsi512_si256(row)) };
+        let dst: &mut [u8; 32] = (&mut blocks[second].bytes[at..at + 32]).try_into().unwrap();
+        // SAFETY: The store covers exactly the checked 32-byte subarray.
+        unsafe {
+            _mm256_storeu_si256(
+                dst.as_mut_ptr().cast(),
+                _mm512_extracti64x4_epi64::<1>(row),
+            )
+        };
     }
 }
 
-/// Writes bytes 0..192 of every block; words 17..20 only for the `wide` lanes.
+/// Writes bytes 0..168 of every block; words 17..20 only for the `wide` lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) fn extract(state: &State<8>, blocks: &mut [Block; 8], wide: u8) {
     let s = &state.0;
-    transpose_store(core::array::from_fn(|i| load(&s[i])), blocks, 0);
-    transpose_store(core::array::from_fn(|i| load(&s[8 + i])), blocks, 1);
-    let zero = _mm512_setzero_si512();
-    let keep = opaque(_mm512_maskz_set1_epi64(wide, -1));
-    let w = |i: usize| _mm512_and_si512(load(&s[i]), keep);
-    transpose_store(
-        [load(&s[16]), w(17), w(18), w(19), w(20), zero, zero, zero],
-        blocks,
-        2,
-    );
+    for quad in 0..4 {
+        let w = 4 * quad;
+        quad_store(load(&s[w]), load(&s[w + 1]), load(&s[w + 2]), load(&s[w + 3]), blocks, quad);
+    }
+    let w = |i: usize| _mm512_maskz_mov_epi64(wide, load(&s[i]));
+    quad_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);
+    // Word 20 lane by lane: one 64-bit store per block instead of a tile.
+    for (lane, block) in blocks.iter_mut().enumerate() {
+        let word = s[20][lane] & 0u64.wrapping_sub(u64::from(wide >> lane & 1));
+        block.bytes[160..168].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// Zeroes the columns of `lanes`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+pub(crate) fn clear(state: &mut State<8>, lanes: u8) {
+    let keep = core::hint::black_box(_mm512_maskz_set1_epi64(!lanes, -1));
+    for word in &mut state.0 {
+        store(word, _mm512_and_si512(load(word), keep));
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -378,10 +343,8 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
         Kernel {
             // Closures inherit the enclosing target features.
             permute: |state: &mut State<8>| permute(state),
-            absorb: |state: &mut State<8>, fresh, inputs: &[Input<'_>], pad16, pad20| {
-                absorb(state, fresh, inputs, pad16, pad20)
-            },
             extract: |state: &State<8>, blocks: &mut [Block; 8], wide| extract(state, blocks, wide),
+            clear: |state: &mut State<8>, lanes| clear(state, lanes),
         },
     );
 }
