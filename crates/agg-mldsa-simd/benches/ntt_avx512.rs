@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 mod common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},
@@ -61,7 +60,8 @@ fn main() {
     let mut bhat = input;
     e.ntt(Prime::Q, &mut bhat);
     let b = [bhat; 4];
-    let mut passed = true;
+    // Without the C rows the ratio gates cannot be checked, so a gated run fails.
+    let mut passed = cfg!(cref);
     #[cfg(cref)]
     {
         for (name, op) in [
@@ -94,7 +94,7 @@ fn main() {
         );
     }
     #[cfg(not(cref))]
-    println!("C rows unavailable: set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
+    println!("C rows unavailable: export AGG_CREF_SRC (scripts/cref-fetch.sh) and rebuild");
     passed &= budget(
         "P2 ntt / q ntt",
         1.02,
