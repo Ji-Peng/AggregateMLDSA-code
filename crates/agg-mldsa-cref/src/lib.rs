@@ -34,15 +34,8 @@ pub mod ffi {
         pub fn pqcrystals_dilithium2_avx2_polyz_unpack(r: *mut i32, a: *const u8);
         pub fn pqcrystals_dilithium2_avx2_polyw1_pack(r: *mut u8, a: *const i32);
         pub fn pqcrystals_dilithium2_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
-        pub fn pqcrystals_dilithium2_avx2_poly_decompose(
-            a1: *mut i32,
-            a0: *mut i32,
-            a: *const i32,
-        );
-        pub fn pqcrystals_dilithium2_avx2_polyvec_matrix_expand(
-            mat: *mut i32,
-            rho: *const u8,
-        );
+        pub fn pqcrystals_dilithium2_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
+        pub fn pqcrystals_dilithium2_avx2_polyvec_matrix_expand(mat: *mut i32, rho: *const u8);
         pub fn pqcrystals_dilithium2_avx2_poly_challenge(c: *mut i32, seed: *const u8);
 
         pub fn pqcrystals_dilithium_fips202x4_avx2_f1600x4(s: *mut u64, rc: *const u64);
@@ -92,7 +85,7 @@ pub mod ffi {
         pub fn hyb512_pointwise_avx512(c: *mut i32, a: *const i32, b: *const i32);
         pub fn hyb512_XURQ_keccak8x_permute(state: *mut u64);
         pub fn hyb512_KeccakP1600times8_PermuteAll_24rounds(state: *mut u64);
-        pub fn hyb512_XURQ_AVX512_shake128x8_absorb(
+        pub fn agg_cref_shake128x8_absorb(
             state: *mut u64,
             in0: *const u8,
             in1: *const u8,
@@ -137,19 +130,12 @@ pub mod ffi {
             n7: u16,
         );
         pub fn hyb512_ExpandA_shuffled(mat: *mut i32, rho: *const u8);
-        pub fn hyb512_poly_emulate_ct(
-            r: *mut i32,
-            c: *const i32,
-            t: *const i32,
-        ) -> std::ffi::c_int;
+        pub fn hyb512_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32)
+            -> std::ffi::c_int;
         pub fn hyb512_decompose_avx512(a1: *mut i32, a0: *mut i32, a: *const i32);
 
         // --- Hybrid-SHA-3 AVX2 ---
-        pub fn hyb2_poly_emulate_ct(
-            r: *mut i32,
-            c: *const i32,
-            t: *const i32,
-        ) -> std::ffi::c_int;
+        pub fn hyb2_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32) -> std::ffi::c_int;
     }
 }
 
@@ -233,12 +219,7 @@ mod safe_wrappers {
     }
 
     /// Pointwise Montgomery multiplication: c = a o b / 2^32 mod q.
-    pub fn pointwise_avx(
-        c: &mut [i32; 256],
-        a: &[i32; 256],
-        b: &[i32; 256],
-        qdata: &[i32; 624],
-    ) {
+    pub fn pointwise_avx(c: &mut [i32; 256], a: &[i32; 256], b: &[i32; 256], qdata: &[i32; 624]) {
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_pointwise_avx(
                 c.as_mut_ptr(),
@@ -268,9 +249,7 @@ mod safe_wrappers {
 
     /// Uniform rejection sampling in AVX2.
     pub fn rej_uniform_avx(r: &mut [i32; 256], buf: &[u8; 848]) -> u32 {
-        unsafe {
-            ffi::pqcrystals_dilithium2_avx2_rej_uniform_avx(r.as_mut_ptr(), buf.as_ptr())
-        }
+        unsafe { ffi::pqcrystals_dilithium2_avx2_rej_uniform_avx(r.as_mut_ptr(), buf.as_ptr()) }
     }
 
     /// Unpacks 576 bytes into 256 signed coefficients z.
@@ -290,11 +269,7 @@ mod safe_wrappers {
     /// UseHint on one polynomial: b = UseHint(h, a).
     pub fn poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
         unsafe {
-            ffi::pqcrystals_dilithium2_avx2_poly_use_hint(
-                b.as_mut_ptr(),
-                a.as_ptr(),
-                h.as_ptr(),
-            );
+            ffi::pqcrystals_dilithium2_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
         }
     }
 
@@ -509,7 +484,7 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in6.len());
         assert_eq!(in0.len(), in7.len());
         unsafe {
-            ffi::hyb512_XURQ_AVX512_shake128x8_absorb(
+            ffi::agg_cref_shake128x8_absorb(
                 state.as_mut_ptr(),
                 in0.as_ptr(),
                 in1.as_ptr(),
@@ -613,16 +588,12 @@ mod safe_wrappers {
 
     /// Computes c * t in AVX-512 (Hybrid pspm.c).
     pub fn poly_emulate_ct_avx512(r: &mut [i32; 256], c: &[i32; 256], t: &[i32; 256]) -> i32 {
-        unsafe {
-            ffi::hyb512_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr())
-        }
+        unsafe { ffi::hyb512_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr()) }
     }
 
     /// Computes c * t in AVX2 (Hybrid pspm.c).
     pub fn poly_emulate_ct_avx2(r: &mut [i32; 256], c: &[i32; 256], t: &[i32; 256]) -> i32 {
-        unsafe {
-            ffi::hyb2_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr())
-        }
+        unsafe { ffi::hyb2_poly_emulate_ct(r.as_mut_ptr(), c.as_ptr(), t.as_ptr()) }
     }
 
     /// Decomposes polynomial in AVX-512 into a1 and a0.

@@ -186,20 +186,25 @@ fn c_permutation_oracles() {
         });
     }
     if Engine::new(Backend::Avx512).is_some() {
-        permutations::<8>(|state| {
-            let mut c = Aligned([0u64; 200]);
-            for word in 0..25 {
-                for lane in 0..8 {
-                    c.0[word * 8 + lane] = state.0[word][lane];
+        for permute in [
+            agg_mldsa_cref::xurq_keccak8x_permute,
+            agg_mldsa_cref::keccak_p1600_times8_permute_all_24rounds,
+        ] {
+            permutations::<8>(|state| {
+                let mut c = Aligned([0u64; 200]);
+                for word in 0..25 {
+                    for lane in 0..8 {
+                        c.0[word * 8 + lane] = state.0[word][lane];
+                    }
                 }
-            }
-            agg_mldsa_cref::xurq_keccak8x_permute(&mut c.0);
-            for word in 0..25 {
-                for lane in 0..8 {
-                    state.0[word][lane] = c.0[word * 8 + lane];
+                permute(&mut c.0);
+                for word in 0..25 {
+                    for lane in 0..8 {
+                        state.0[word][lane] = c.0[word * 8 + lane];
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -299,4 +304,47 @@ fn scheduler_accounting_matches_execution() {
     run::<4, true>(&jobs, &limits);
     run::<8, false>(&jobs, &limits);
     run::<8, true>(&jobs, &limits);
+}
+
+/// The timed C SHAKE computations must be valid for distinct lanes, tails,
+/// exact rate multiples, repeated state reuse and all five output blocks.
+#[cfg(cref)]
+#[test]
+fn c_shake128_oracles() {
+    #[repr(C, align(64))]
+    struct Aligned<const N: usize>([u64; N]);
+    for len in [0, 1, 7, 8, 9, 34, 135, 136, 137, 167, 168, 169, 336, 400] {
+        let inputs: [Vec<u8>; 8] =
+            std::array::from_fn(|lane| (0..len).map(|i| (i * 37 + lane * 23) as u8).collect());
+        let expected: [[u8; 840]; 8] = std::array::from_fn(|lane| {
+            let mut out = [0; 840];
+            common::shake128_segments(&[&inputs[lane], &[], &[], &[]], &mut out);
+            out
+        });
+        let [i0, i1, i2, i3, i4, i5, i6, i7] = &inputs;
+        let mut s4 = Aligned([!0; 100]);
+        let mut s8 = Aligned([!0; 200]);
+        for backend in [Backend::Avx2, Backend::Avx512] {
+            if Engine::new(backend).is_none() {
+                continue;
+            }
+            for _ in 0..2 {
+                let mut out = [[0; 840]; 8];
+                let [a, b, c, d, e, f, g, h] = &mut out;
+                if backend == Backend::Avx2 {
+                    agg_mldsa_cref::shake128x4_absorb_once(&mut s4.0, i0, i1, i2, i3);
+                    agg_mldsa_cref::shake128x4_squeezeblocks(a, b, c, d, 5, &mut s4.0);
+                    assert_eq!(out[..4], expected[..4], "{backend:?} len {len}");
+                } else {
+                    agg_mldsa_cref::xurq_avx512_shake128x8_absorb(
+                        &mut s8.0, i0, i1, i2, i3, i4, i5, i6, i7,
+                    );
+                    agg_mldsa_cref::xurq_avx512_shake128x8_squeezeblocks(
+                        &mut s8.0, a, b, c, d, e, f, g, h, 5,
+                    );
+                    assert_eq!(out, expected, "{backend:?} len {len}");
+                }
+            }
+        }
+    }
 }
