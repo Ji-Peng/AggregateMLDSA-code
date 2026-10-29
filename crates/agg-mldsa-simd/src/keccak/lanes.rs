@@ -251,7 +251,7 @@ fn copy_lanes<const W: usize>(
 }
 
 #[inline(always)]
-fn bits(mut mask: u8) -> impl Iterator<Item = usize> {
+pub(crate) fn bits(mut mask: u8) -> impl Iterator<Item = usize> {
     core::iter::from_fn(move || {
         if mask == 0 {
             return None;
@@ -334,6 +334,9 @@ pub(crate) fn run<const W: usize, const STATS: bool, S: Sink, P: Permutation<W>>
         deliver!(6);
         deliver!(7);
         squeezing &= !done;
+        if done == 0 && absorbing == 0 {
+            continue;
+        }
         let mut fresh = 0u8;
         for i in bits(done) {
             if next < jobs.len() {

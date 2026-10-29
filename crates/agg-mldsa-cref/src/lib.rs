@@ -355,6 +355,48 @@ mod safe_wrappers {
         }
     }
 
+    /// 4-lane SHAKE128 single-shot absorb without defensive buffer copy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that at least 8 readable bytes follow the end of each
+    /// input slice (or that the slice length is an exact multiple of 8), because
+    /// the pq-crystals AVX2 implementation performs whole-word 64-bit SIMD gathers.
+    pub unsafe fn shake128x4_absorb_once_unpadded(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        debug_assert_eq!(in0.len(), in1.len());
+        debug_assert_eq!(in0.len(), in2.len());
+        debug_assert_eq!(in0.len(), in3.len());
+        ffi::pqcrystals_dilithium_fips202x4_avx2_shake128x4_absorb_once(
+            state.as_mut_ptr(),
+            in0.as_ptr(),
+            in1.as_ptr(),
+            in2.as_ptr(),
+            in3.as_ptr(),
+            in0.len(),
+        );
+    }
+
+    /// Alias for [`shake128x4_absorb_once_unpadded`].
+    ///
+    /// # Safety
+    ///
+    /// See [`shake128x4_absorb_once_unpadded`].
+    pub unsafe fn shake128x4_absorb_once_raw(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        shake128x4_absorb_once_unpadded(state, in0, in1, in2, in3);
+    }
+
     /// 4-lane SHAKE128 squeezeblocks.
     pub fn shake128x4_squeezeblocks(
         out0: &mut [u8],
@@ -405,6 +447,48 @@ mod safe_wrappers {
                 in0.len(),
             );
         }
+    }
+
+    /// 4-lane SHAKE256 single-shot absorb without defensive buffer copy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that at least 8 readable bytes follow the end of each
+    /// input slice (or that the slice length is an exact multiple of 8), because
+    /// the pq-crystals AVX2 implementation performs whole-word 64-bit SIMD gathers.
+    pub unsafe fn shake256x4_absorb_once_unpadded(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        debug_assert_eq!(in0.len(), in1.len());
+        debug_assert_eq!(in0.len(), in2.len());
+        debug_assert_eq!(in0.len(), in3.len());
+        ffi::pqcrystals_dilithium_fips202x4_avx2_shake256x4_absorb_once(
+            state.as_mut_ptr(),
+            in0.as_ptr(),
+            in1.as_ptr(),
+            in2.as_ptr(),
+            in3.as_ptr(),
+            in0.len(),
+        );
+    }
+
+    /// Alias for [`shake256x4_absorb_once_unpadded`].
+    ///
+    /// # Safety
+    ///
+    /// See [`shake256x4_absorb_once_unpadded`].
+    pub unsafe fn shake256x4_absorb_once_raw(
+        state: &mut [u64; 100],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+    ) {
+        shake256x4_absorb_once_unpadded(state, in0, in1, in2, in3);
     }
 
     /// 4-lane SHAKE256 squeezeblocks.
@@ -506,6 +590,9 @@ mod safe_wrappers {
     }
 
     /// 8-lane SHAKE128 absorb in AVX-512.
+    ///
+    /// The C implementation (`agg_cref_shake128x8_absorb`) uses `memcpy` for tail bytes
+    /// and never reads beyond `in*.len()`, so no padding buffer is required.
     #[allow(clippy::too_many_arguments)]
     pub fn xurq_avx512_shake128x8_absorb(
         state: &mut [u64; 200],
@@ -525,28 +612,56 @@ mod safe_wrappers {
         assert_eq!(in0.len(), in5.len());
         assert_eq!(in0.len(), in6.len());
         assert_eq!(in0.len(), in7.len());
-        let b0 = PaddedInput::new(in0);
-        let b1 = PaddedInput::new(in1);
-        let b2 = PaddedInput::new(in2);
-        let b3 = PaddedInput::new(in3);
-        let b4 = PaddedInput::new(in4);
-        let b5 = PaddedInput::new(in5);
-        let b6 = PaddedInput::new(in6);
-        let b7 = PaddedInput::new(in7);
         unsafe {
             ffi::agg_cref_shake128x8_absorb(
                 state.as_mut_ptr(),
-                b0.as_ptr(),
-                b1.as_ptr(),
-                b2.as_ptr(),
-                b3.as_ptr(),
-                b4.as_ptr(),
-                b5.as_ptr(),
-                b6.as_ptr(),
-                b7.as_ptr(),
+                in0.as_ptr(),
+                in1.as_ptr(),
+                in2.as_ptr(),
+                in3.as_ptr(),
+                in4.as_ptr(),
+                in5.as_ptr(),
+                in6.as_ptr(),
+                in7.as_ptr(),
                 in0.len() as std::ffi::c_int,
             );
         }
+    }
+
+    /// 8-lane SHAKE128 absorb in AVX-512 without buffer copying.
+    /// Alias for [`xurq_avx512_shake128x8_absorb`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn xurq_avx512_shake128x8_absorb_unpadded(
+        state: &mut [u64; 200],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+        in4: &[u8],
+        in5: &[u8],
+        in6: &[u8],
+        in7: &[u8],
+    ) {
+        xurq_avx512_shake128x8_absorb(state, in0, in1, in2, in3, in4, in5, in6, in7);
+    }
+
+    /// 8-lane SHAKE128 absorb in AVX-512 without buffer copying.
+    /// Alias for [`xurq_avx512_shake128x8_absorb`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn xurq_avx512_shake128x8_absorb_raw(
+        state: &mut [u64; 200],
+        in0: &[u8],
+        in1: &[u8],
+        in2: &[u8],
+        in3: &[u8],
+        in4: &[u8],
+        in5: &[u8],
+        in6: &[u8],
+        in7: &[u8],
+    ) {
+        xurq_avx512_shake128x8_absorb(state, in0, in1, in2, in3, in4, in5, in6, in7);
     }
 
     /// 8-lane SHAKE128 squeezeblocks in AVX-512.

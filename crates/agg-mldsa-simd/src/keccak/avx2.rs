@@ -51,71 +51,76 @@ fn lane_mask(mask: u8) -> __m256i {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2")]
-fn transpose_store(
+fn transpose_store<const TILE: usize>(
     a: __m256i,
     b: __m256i,
     c: __m256i,
     d: __m256i,
     blocks: &mut [Block; 4],
-    tile: usize,
 ) {
     let t0 = _mm256_unpacklo_epi64(a, b);
     let t1 = _mm256_unpackhi_epi64(a, b);
     let t2 = _mm256_unpacklo_epi64(c, d);
     let t3 = _mm256_unpackhi_epi64(c, d);
-    let rows = [
-        _mm256_permute2x128_si256::<0x20>(t0, t2),
-        _mm256_permute2x128_si256::<0x20>(t1, t3),
-        _mm256_permute2x128_si256::<0x31>(t0, t2),
-        _mm256_permute2x128_si256::<0x31>(t1, t3),
-    ];
-    for (block, row) in blocks.iter_mut().zip(rows) {
-        let dst: &mut [u8; 32] = (&mut block.bytes[tile * 32..tile * 32 + 32])
-            .try_into()
-            .unwrap();
-        // SAFETY: The store covers exactly the checked 32-byte subarray.
-        unsafe { _mm256_storeu_si256(dst.as_mut_ptr().cast(), row) };
+    // SAFETY: TILE * 32 + 32 <= 160 <= 256 bytes of each block.
+    unsafe {
+        _mm256_storeu_si256(
+            blocks[0].bytes.as_mut_ptr().add(TILE * 32).cast(),
+            _mm256_permute2x128_si256::<0x20>(t0, t2),
+        );
+        _mm256_storeu_si256(
+            blocks[1].bytes.as_mut_ptr().add(TILE * 32).cast(),
+            _mm256_permute2x128_si256::<0x20>(t1, t3),
+        );
+        _mm256_storeu_si256(
+            blocks[2].bytes.as_mut_ptr().add(TILE * 32).cast(),
+            _mm256_permute2x128_si256::<0x31>(t0, t2),
+        );
+        _mm256_storeu_si256(
+            blocks[3].bytes.as_mut_ptr().add(TILE * 32).cast(),
+            _mm256_permute2x128_si256::<0x31>(t1, t3),
+        );
     }
 }
 
-/// Writes bytes 0..168 of every block; words 17..20 only for the `wide` lanes.
+/// Writes bytes 0..192 of every block, zeroing bytes 168..192; words 17..20 only for the `wide` lanes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
     let s = &state.0;
-    for tile in 0..4 {
-        let w = 4 * tile;
-        transpose_store(
-            load(&s[w]),
-            load(&s[w + 1]),
-            load(&s[w + 2]),
-            load(&s[w + 3]),
-            blocks,
-            tile,
-        );
-    }
-    let keep = lane_mask(wide);
-    let w = |i: usize| _mm256_and_si256(load(&s[i]), keep);
-    transpose_store(load(&s[16]), w(17), w(18), w(19), blocks, 4);
+    transpose_store::<0>(load(&s[0]), load(&s[1]), load(&s[2]), load(&s[3]), blocks);
+    transpose_store::<1>(load(&s[4]), load(&s[5]), load(&s[6]), load(&s[7]), blocks);
+    transpose_store::<2>(load(&s[8]), load(&s[9]), load(&s[10]), load(&s[11]), blocks);
+    transpose_store::<3>(
+        load(&s[12]),
+        load(&s[13]),
+        load(&s[14]),
+        load(&s[15]),
+        blocks,
+    );
+    let (w17, w18, w19, w20) = if wide == 0b1111 {
+        (load(&s[17]), load(&s[18]), load(&s[19]), load(&s[20]))
+    } else {
+        let keep = lane_mask(wide);
+        (
+            _mm256_and_si256(load(&s[17]), keep),
+            _mm256_and_si256(load(&s[18]), keep),
+            _mm256_and_si256(load(&s[19]), keep),
+            _mm256_and_si256(load(&s[20]), keep),
+        )
+    };
+    transpose_store::<4>(load(&s[16]), w17, w18, w19, blocks);
     // Word 20 lane by lane: one 64-bit store per block instead of a tile.
-    let last = w(20);
-    let lo = _mm256_castsi256_si128(last);
-    let hi = _mm256_extracti128_si256::<1>(last);
-    for (block, (half, high)) in
-        blocks
-            .iter_mut()
-            .zip([(lo, false), (lo, true), (hi, false), (hi, true)])
-    {
-        let dst: &mut [u8; 8] = (&mut block.bytes[160..168]).try_into().unwrap();
-        let half = _mm_castsi128_pd(half);
-        // SAFETY: Each store covers exactly the checked 8-byte subarray.
-        unsafe {
-            if high {
-                _mm_storeh_pd(dst.as_mut_ptr().cast(), half);
-            } else {
-                _mm_storel_pd(dst.as_mut_ptr().cast(), half);
-            }
-        }
+    let lo = _mm256_castsi256_si128(w20);
+    let hi = _mm256_extracti128_si256::<1>(w20);
+    let lo_pd = _mm_castsi128_pd(lo);
+    let hi_pd = _mm_castsi128_pd(hi);
+    // SAFETY: Stores bytes 160..168 within each 256-byte block.
+    unsafe {
+        _mm_storel_pd(blocks[0].bytes.as_mut_ptr().add(160).cast(), lo_pd);
+        _mm_storeh_pd(blocks[1].bytes.as_mut_ptr().add(160).cast(), lo_pd);
+        _mm_storel_pd(blocks[2].bytes.as_mut_ptr().add(160).cast(), hi_pd);
+        _mm_storeh_pd(blocks[3].bytes.as_mut_ptr().add(160).cast(), hi_pd);
     }
 }
 
@@ -138,10 +143,7 @@ pub(crate) fn absorb(
     mask: u8,
 ) -> u8 {
     lanes::absorb_with(lanes, jobs, mask, |i, w, value| {
-        let mask = lane_mask(1 << i);
-        let word = &mut state.0[w];
-        let value = _mm256_and_si256(_mm256_set1_epi64x(value as i64), mask);
-        store(word, _mm256_xor_si256(load(word), value));
+        state.0[w][i] ^= value;
     })
 }
 

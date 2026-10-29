@@ -289,16 +289,27 @@ pub(crate) fn permute(state: &mut State<8>) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
-fn oct_store(state: &State<8>, blocks: &mut [Block; 8], tile: usize, wide: u8) {
-    let w = tile * 8;
+fn oct_store<const TILE: usize>(state: &State<8>, blocks: &mut [Block; 8], wide: u8) {
+    let w = TILE * 8;
     let s = &state.0;
     let a = load(&s[w]);
-    let tail = tile == 2;
+    let tail = TILE == 2;
     let mask = if tail { wide } else { 0xff };
-    let b = _mm512_maskz_mov_epi64(mask, load(&s[w + 1]));
-    let c = _mm512_maskz_mov_epi64(mask, load(&s[w + 2]));
-    let d = _mm512_maskz_mov_epi64(mask, load(&s[w + 3]));
-    let e = _mm512_maskz_mov_epi64(mask, load(&s[w + 4]));
+    let (b, c, d, e) = if !tail || mask == 0xff {
+        (
+            load(&s[w + 1]),
+            load(&s[w + 2]),
+            load(&s[w + 3]),
+            load(&s[w + 4]),
+        )
+    } else {
+        (
+            _mm512_maskz_mov_epi64(mask, load(&s[w + 1])),
+            _mm512_maskz_mov_epi64(mask, load(&s[w + 2])),
+            _mm512_maskz_mov_epi64(mask, load(&s[w + 3])),
+            _mm512_maskz_mov_epi64(mask, load(&s[w + 4])),
+        )
+    };
     let f = if tail {
         _mm512_setzero_si512()
     } else {
@@ -330,22 +341,40 @@ fn oct_store(state: &State<8>, blocks: &mut [Block; 8], tile: usize, wide: u8) {
     let v5 = _mm512_shuffle_i64x2::<0xee>(u4, u6);
     let v6 = _mm512_shuffle_i64x2::<0x44>(u5, u7);
     let v7 = _mm512_shuffle_i64x2::<0xee>(u5, u7);
-    let rows = [
-        _mm512_shuffle_i64x2::<0x88>(v0, v4),
-        _mm512_shuffle_i64x2::<0x88>(v2, v6),
-        _mm512_shuffle_i64x2::<0xdd>(v0, v4),
-        _mm512_shuffle_i64x2::<0xdd>(v2, v6),
-        _mm512_shuffle_i64x2::<0x88>(v1, v5),
-        _mm512_shuffle_i64x2::<0x88>(v3, v7),
-        _mm512_shuffle_i64x2::<0xdd>(v1, v5),
-        _mm512_shuffle_i64x2::<0xdd>(v3, v7),
-    ];
-    for (block, row) in blocks.iter_mut().zip(rows) {
-        let dst: &mut [u8; 64] = (&mut block.bytes[tile * 64..tile * 64 + 64])
-            .try_into()
-            .unwrap();
-        // SAFETY: The complete store is contained in the checked subarray.
-        unsafe { _mm512_storeu_si512(dst.as_mut_ptr().cast(), row) };
+    // SAFETY: TILE * 64 + 64 <= 192 <= 256 bytes of each block.
+    unsafe {
+        _mm512_storeu_si512(
+            blocks[0].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0x88>(v0, v4),
+        );
+        _mm512_storeu_si512(
+            blocks[1].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0x88>(v2, v6),
+        );
+        _mm512_storeu_si512(
+            blocks[2].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0xdd>(v0, v4),
+        );
+        _mm512_storeu_si512(
+            blocks[3].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0xdd>(v2, v6),
+        );
+        _mm512_storeu_si512(
+            blocks[4].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0x88>(v1, v5),
+        );
+        _mm512_storeu_si512(
+            blocks[5].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0x88>(v3, v7),
+        );
+        _mm512_storeu_si512(
+            blocks[6].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0xdd>(v1, v5),
+        );
+        _mm512_storeu_si512(
+            blocks[7].bytes.as_mut_ptr().add(TILE * 64).cast(),
+            _mm512_shuffle_i64x2::<0xdd>(v3, v7),
+        );
     }
 }
 
@@ -353,9 +382,9 @@ fn oct_store(state: &State<8>, blocks: &mut [Block; 8], tile: usize, wide: u8) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(crate) fn extract(state: &State<8>, blocks: &mut [Block; 8], wide: u8) {
-    oct_store(state, blocks, 0, wide);
-    oct_store(state, blocks, 1, wide);
-    oct_store(state, blocks, 2, wide);
+    oct_store::<0>(state, blocks, 0xff);
+    oct_store::<1>(state, blocks, 0xff);
+    oct_store::<2>(state, blocks, wide);
 }
 
 /// Zeroes the columns of `lanes`.
@@ -377,11 +406,7 @@ pub(crate) fn absorb(
     mask: u8,
 ) -> u8 {
     lanes::absorb_with(lanes, jobs, mask, |i, w, value| {
-        let mask = 1u8 << i;
-        let word = &mut state.0[w];
-        let old = load(word);
-        let value = _mm512_set1_epi64(value as i64);
-        store(word, _mm512_mask_xor_epi64(old, mask, old, value));
+        state.0[w][i] ^= value;
     })
 }
 

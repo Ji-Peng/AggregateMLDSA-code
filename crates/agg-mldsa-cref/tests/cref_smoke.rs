@@ -341,4 +341,48 @@ mod smoke_tests {
             xurq_avx512_shake128x8_absorb(&mut state8.0, &b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7);
         }
     }
+
+    #[test]
+    fn test_absorb_unpadded_matches_padded() {
+        assert!(available());
+        for len in [0, 1, 7, 8, 9, 34, 135, 136, 137, 167, 168, 169] {
+            // Buffer has at least 8 bytes of slack beyond len
+            let mut buf0 = vec![0u8; len + 16];
+            let mut buf1 = vec![0u8; len + 16];
+            let mut buf2 = vec![0u8; len + 16];
+            let mut buf3 = vec![0u8; len + 16];
+            for i in 0..len {
+                buf0[i] = ((i * 37 + 11) & 0xff) as u8;
+                buf1[i] = ((i * 41 + 13) & 0xff) as u8;
+                buf2[i] = ((i * 43 + 17) & 0xff) as u8;
+                buf3[i] = ((i * 47 + 19) & 0xff) as u8;
+            }
+            let s0 = &buf0[..len];
+            let s1 = &buf1[..len];
+            let s2 = &buf2[..len];
+            let s3 = &buf3[..len];
+
+            let mut state_padded = Align64([0u64; 100]);
+            shake128x4_absorb_once(&mut state_padded.0, s0, s1, s2, s3);
+            let mut state_unpadded = Align64([0u64; 100]);
+            unsafe {
+                shake128x4_absorb_once_unpadded(&mut state_unpadded.0, s0, s1, s2, s3);
+            }
+            assert_eq!(
+                state_padded.0, state_unpadded.0,
+                "shake128x4 mismatch at len {len}"
+            );
+
+            let mut state_p256 = Align64([0u64; 100]);
+            shake256x4_absorb_once(&mut state_p256.0, s0, s1, s2, s3);
+            let mut state_u256 = Align64([0u64; 100]);
+            unsafe {
+                shake256x4_absorb_once_unpadded(&mut state_u256.0, s0, s1, s2, s3);
+            }
+            assert_eq!(
+                state_p256.0, state_u256.0,
+                "shake256x4 mismatch at len {len}"
+            );
+        }
+    }
 }
