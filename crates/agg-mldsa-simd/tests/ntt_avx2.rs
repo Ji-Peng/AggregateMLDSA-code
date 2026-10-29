@@ -126,7 +126,8 @@ fn dot_schoolbook_and_orders() {
             #[cfg(cref)]
             if p == Prime::Q {
                 let mut cf = Poly32::zero();
-                // The reference uses aligned loads, so use the aligned polynomial arrays directly.
+                // SAFETY: the reference reads four aligned 256-coefficient polynomials
+                // from each array and 624 table words, all of which exist here.
                 unsafe {
                     agg_mldsa_cref::ffi::pqcrystals_dilithium2_avx2_pointwise_acc_avx(
                         cf.0.as_mut_ptr(),
