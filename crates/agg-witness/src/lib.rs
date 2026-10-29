@@ -1,7 +1,9 @@
 //! ML-DSA-44 witness generation for the aggregation PIOP (`docs/spec.md`).
 //!
 //! Pipeline: `instance::PublicInstance` (verifier precomputation) -> `derive::derive`
-//! (per-signature witness: z, u, v, w1' and the bits). `native` is an independent FIPS 204
+//! (per-signature witness: z, u, v, w1' and the bits); `fast` is the batched derivation of the
+//! prover on the `agg_mldsa_simd` engine, falling back to `derive` for any record it does not
+//! accept, so its results and errors are the legacy ones. `native` is an independent FIPS 204
 //! verifier, `keccak` the commitment-hash sponge, `bridge` the integer side of the parity
 //! bridge, `digits` the value forms the PIOP commits. `hfips` holds relation H-FIPS (relation
 //! byte 2): its per-coefficient witness, derivation, integer checker (failures reported
@@ -17,6 +19,7 @@ pub mod crt;
 pub mod derive;
 pub mod digits;
 pub mod expand;
+pub mod fast;
 pub mod gen;
 pub mod hfips;
 pub mod instance;
