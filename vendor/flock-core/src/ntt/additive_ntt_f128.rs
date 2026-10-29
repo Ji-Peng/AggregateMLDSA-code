@@ -79,6 +79,7 @@ use crate::{
         butterfly_row_pair,
     },
 };
+mod blocked;
 mod kernels;
 mod lane_blocked;
 pub use lane_blocked::{LANES_PER_GROUP, lane_blocked_ok};
