@@ -120,13 +120,50 @@ impl GroupLeafHasher {
                 let st: &mut [u32; 128] = (&mut state[128 * b..128 * (b + 1)]).try_into().expect("128 words");
                 // SAFETY: AVX-512F is available (checked above); the sixteen lines of batch
                 // b are `lines[64 b .. 64 (b + 1)]`, inside the slice.
-                unsafe { blake3_groups::absorb16(st, lines[64 * b..].as_ptr(), words, flags, g == 0) };
+                unsafe { blake3_groups::absorb16(st, lines[64 * b..].as_ptr(), words, flags, g == 0, LANES_PER_GROUP) };
             }
             blake3_groups::absorb_portable(state, lines, 16 * full, positions, words, flags, g == 0);
             return;
         }
         let _ = full;
         blake3_groups::absorb_portable(state, lines, 0, positions, words, flags, g == 0);
+    }
+
+    /// Hash native interleaved rows without rearranging lane groups in memory.
+    pub fn hash_interleaved(&self, rows: &[F128], out: &mut [Hash]) {
+        assert_eq!(rows.len(), out.len() * self.lanes);
+        if !blake3_groups::x16_available() {
+            for (row, hash) in rows.chunks_exact(self.lanes).zip(out) {
+                // SAFETY: F128 is sixteen initialized bytes with the canonical leaf layout.
+                let bytes = unsafe { std::slice::from_raw_parts(row.as_ptr().cast::<u8>(), row.len() * 16) };
+                *hash = hash_leaf(bytes, HashKind::Blake3);
+            }
+            return;
+        }
+        for (batch, hashes) in rows.chunks(16 * self.lanes).zip(out.chunks_mut(16)) {
+            let mut state = [0u32; 128];
+            for g in 0..self.groups {
+                let words = 4 * (self.lanes - g * 4).min(4);
+                let flags = if g == 0 { blake3_groups::CHUNK_START } else { 0 }
+                    | if g + 1 == self.groups { blake3_groups::CHUNK_END } else { 0 };
+                #[cfg(target_arch = "x86_64")]
+                if hashes.len() == 16 && blake3_groups::x16_available() {
+                    // SAFETY: feature detection passed; sixteen strided group lines are
+                    // inside the batch. The final partial group is masked by words.
+                    unsafe { blake3_groups::absorb16(&mut state, batch[g * 4..].as_ptr(), words, flags, g == 0, self.lanes) };
+                    continue;
+                }
+                for i in 0..hashes.len() {
+                    let row = &batch[i * self.lanes + g * 4..][..words / 4];
+                    // A single leaf uses the same transposed state with lane zero.
+                    let mut one = [0u32; 128];
+                    for w in 0..8 { one[16 * w] = state[16 * w + i]; }
+                    blake3_groups::absorb_portable(&mut one, row, 0, 1, words, flags, g == 0);
+                    for w in 0..8 { state[16 * w + i] = one[16 * w]; }
+                }
+            }
+            self.finish(&state, hashes);
+        }
     }
 
     /// The chaining values of the `out.len()` leaves after the last group.
@@ -325,17 +362,17 @@ mod blake3_groups {
     /// is BLAKE3's zero padding).
     ///
     /// # Safety
-    /// AVX-512F is available; `lines .. lines + 64` words are readable.
+    /// AVX-512F is available; sixteen lines separated by `stride` words are readable.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f")]
-    pub(super) unsafe fn absorb16(state: &mut [u32; 128], lines: *const F128, words: usize, flags: u32, first: bool) {
+    pub(super) unsafe fn absorb16(state: &mut [u32; 128], lines: *const F128, words: usize, flags: u32, first: bool, stride: usize) {
         debug_assert!((1..=16).contains(&words));
         let mask = if words == 16 { u16::MAX } else { (1u16 << words) - 1 };
         let mut m = [_mm512_setzero_si512(); 16];
         for (i, mi) in m.iter_mut().enumerate() {
             // SAFETY: line i is four F128 words (64 bytes) inside the caller's range.
             *mi = unsafe {
-                let p = lines.add(i * LANES_PER_GROUP).cast::<i32>();
+                let p = lines.add(i * stride).cast::<i32>();
                 if words == 16 { _mm512_loadu_si512(p.cast()) } else { _mm512_maskz_loadu_epi32(mask, p) }
             };
         }

@@ -3042,11 +3042,14 @@ fn transpose_forward_ntt_sparse(
 
 /// Codeword + Merkle tree for one Ligerito commitment level.
 ///
-/// `mat` is row-major: `mat[pos * num_interleaved + lane]` for
+/// When deep layers are pending, `mat` holds the row-major pass-1 state and
+/// [`Self::row`] reconstructs the requested row. Otherwise `mat` is row-major: `mat[pos * num_interleaved + lane]` for
 /// `pos ∈ [0, block_len)`, `lane ∈ [0, num_interleaved)`. Each row
 /// (one `pos` across all lanes) is one Merkle leaf.
 pub struct LigeroWitness {
     pub mat: Vec<F128>,
+    /// Transform and log block length needed to finish a sparse opening.
+    pending: Option<(AdditiveNttF128, usize)>,
     pub tree: Vec<Hash>,
     pub block_len: usize,
     pub num_interleaved: usize,
@@ -3071,9 +3074,19 @@ impl Drop for SumcheckProver {
 
 impl LigeroWitness {
     #[inline]
-    pub fn row(&self, pos: usize) -> &[F128] {
+    pub fn row(&self, pos: usize) -> std::borrow::Cow<'_, [F128]> {
+        assert!(pos < self.block_len);
+        if let Some((ntt, low)) = &self.pending {
+            let sub = 1usize << low;
+            let p0 = pos / sub * sub;
+            let mut block = self.mat[p0 * self.num_interleaved..(p0 + sub) * self.num_interleaved].to_vec();
+            let log_d = self.block_len.trailing_zeros() as usize;
+            ntt.blocked_deep_layers(&mut block, self.num_interleaved, p0, log_d - low, log_d);
+            let start = (pos - p0) * self.num_interleaved;
+            return std::borrow::Cow::Owned(block[start..start + self.num_interleaved].to_vec());
+        }
         let start = pos * self.num_interleaved;
-        &self.mat[start..start + self.num_interleaved]
+        std::borrow::Cow::Borrowed(&self.mat[start..start + self.num_interleaved])
     }
 
     /// The cap layer at depth `c` — this witness's commitment message.
@@ -3107,24 +3120,31 @@ pub fn ligero_commit(
     assert_eq!(poly.len(), num_interleaved * msg_cols);
     assert!(log_block_len <= ntt.log_domain_size());
 
-    // LSB-lane layout: input matches the SoA layout `data[pos * num_interleaved + lane]`
-    // directly. The first `log_inv_rate` NTT layers on the zero-padded
-    // coefficients are pure copies, so the encode starts past those layers
-    // with `poly` replicated `2^log_inv_rate` times.
-    //
-    // Fill fusion (`from_message`, which sources the first pass's rows from
-    // `poly` and skips the replicate write) was tried here and measured
-    // SLOWER — see the 2026-08-31 log entry. These levels run at rate 1/8
-    // .. 1/2048, where the replicate is a cheap 1->2^r broadcast, unlike the
-    // rate-1/2 L0 shape the fused pass is tuned for.
+    // The blocked encoder gathers message rows into the first pass directly. At
+    // width sixteen, eight top layers leave at least ten deep layers exactly when
+    // log_msg_cols >= 18; smaller ladder levels keep the interleaved encoder.
     let codeword_len = block_len * num_interleaved;
     let mut mat = crate::scratch::take_f128(codeword_len);
 
     // RS-encode every lane in one call (each lane is one independent NTT).
     let lig_timing = std::env::var_os("FLOCK_LIG_TIMING").is_some();
     let t_enc = std::time::Instant::now();
-    super::commit::replicate_message_fill(&mut mat, poly);
-    ntt.forward_transform_interleaved_from_layer(&mut mat, num_interleaved, log_inv_rate);
+    let blocked = num_interleaved == 16 && log_msg_cols >= 18
+        && std::env::var("FLOCK_LIG_BLOCKED").as_deref() != Ok("0");
+    let fused = blocked && kind == HashKind::Blake3
+        && std::env::var("FLOCK_LIG_FUSED_MERKLE").as_deref() != Ok("0");
+    let discard = fused && std::env::var("FLOCK_LIG_DISCARD").as_deref() != Ok("0");
+    let mut prehashed = if fused { vec![[0u8; 32]; 2 * block_len - 1] } else { Vec::new() };
+    let mut pending = None;
+    if blocked {
+        let low = ntt.encode_blocked(&mut mat, num_interleaved, 1, log_block_len, log_inv_rate,
+            |_, m0, dst| dst.copy_from_slice(&poly[m0 * num_interleaved..m0 * num_interleaved + dst.len()]),
+            fused.then(|| &mut prehashed[..block_len]), discard);
+        if discard { pending = Some((ntt.clone(), low)); }
+    } else {
+        super::commit::replicate_message_fill(&mut mat, poly);
+        ntt.forward_transform_interleaved_from_layer(&mut mat, num_interleaved, log_inv_rate);
+    }
     let t_enc = t_enc.elapsed();
 
     // Merkle over rows. One leaf = `num_interleaved` consecutive F128 = 16·num_interleaved bytes.
@@ -3133,7 +3153,7 @@ pub fn ligero_commit(
         unsafe { from_raw_parts(mat.as_ptr() as *const u8, mat.len() * size_of::<F128>()) };
     debug_assert_eq!(data_bytes.len(), block_len * leaf_size_bytes);
     let t_mk = std::time::Instant::now();
-    let tree = merkle::merkle_tree(data_bytes, block_len, kind);
+    let tree = if fused { merkle::merkle_tree_from_prehashed_level(prehashed, block_len, kind, 0) } else { merkle::merkle_tree(data_bytes, block_len, kind) };
     if lig_timing {
         eprintln!(
             "[lig-timing] ligero_commit log_cols={log_msg_cols} lanes={num_interleaved} rate=1/{}: encode {:.2} ms + merkle {:.2} ms",
@@ -3144,6 +3164,7 @@ pub fn ligero_commit(
     }
 
     LigeroWitness {
+        pending,
         mat,
         tree,
         block_len,
@@ -4736,6 +4757,7 @@ pub fn recursive_prover_with_level_zero<Ch: Challenger>(
     challenger.observe_f128_slice(eval_point);
 
     let wtns_0 = LigeroWitness {
+        pending: None,
         mat: l0_codeword,
         tree: l0_tree,
         block_len,
@@ -8909,5 +8931,31 @@ mod tests {
             HashKind::Sha256,
         );
         assert_eq!(w.tree.last(), w2.tree.last());
+    }
+}
+
+#[cfg(test)]
+mod blocked_witness_tests {
+    use super::*;
+
+    #[test]
+    fn pending_rows_match_full_commitment() {
+        let (log_d, r, width) = (13, 2, 16);
+        let n = 1usize << log_d;
+        let mut rng = crate::test_rng::Rng::new(0xd15ca4d);
+        let poly = rng.f128_vec((n >> r) * width);
+        let ntt = AdditiveNttF128::standard(log_d);
+        let full = ligero_commit(&poly, log_d - r, 4, r, &ntt, HashKind::Blake3);
+        let mut mat = crate::scratch::take_f128(n * width);
+        let mut tree = vec![[0u8; 32]; 2 * n - 1];
+        let low = ntt.encode_blocked(&mut mat, width, 1, log_d, r,
+            |_, p, dst| dst.copy_from_slice(&poly[p * width..p * width + dst.len()]),
+            Some(&mut tree[..n]), true);
+        let tree = merkle::merkle_tree_from_prehashed_level(tree, n, HashKind::Blake3, 0);
+        let pending = LigeroWitness { mat, tree, block_len: n, num_interleaved: width, pending: Some((ntt, low)) };
+        assert_eq!(pending.tree, full.tree);
+        for p in [0, 1, (1 << low) - 1, 1 << low, n / 2, n - 1] {
+            assert_eq!(pending.row(p), full.row(p));
+        }
     }
 }
