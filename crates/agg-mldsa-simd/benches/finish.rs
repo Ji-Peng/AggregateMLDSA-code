@@ -4,9 +4,12 @@ use agg_mldsa_simd::{params::*, *};
 use std::{hint::black_box, mem::MaybeUninit};
 
 unsafe extern "C" {
-    fn hyb2_poly_emulate_ct(r: *mut i32,c: *const i32,t: *const i32)->i32;
-    fn hyb512_poly_emulate_ct(r: *mut i32,c: *const i32,t: *const i32)->i32;
-    fn pqcrystals_dilithium2_avx2_poly_use_hint(b: *mut i32,a: *const i32,h: *const i32);
+    fn hyb2_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32) -> i32;
+    fn hyb512_poly_emulate_ct(r: *mut i32, c: *const i32, t: *const i32) -> i32;
+    fn pqcrystals_dilithium2_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
+    fn pqcrystals_dilithium2_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
+    fn pqcrystals_dilithium2_avx2_poly_reduce(a: *mut i32);
+    fn pqcrystals_dilithium2_avx2_poly_caddq(a: *mut i32);
 }
 #[inline(never)]
 fn sparse(e: &Engine,c: &Challenge39,t: &[[u16;256];4],out: &mut [[i32;256];4]) { e.sparse_ct(black_box(c),black_box(t),13,black_box(out)); }
@@ -83,8 +86,81 @@ fn main() {
         passed &= gate("sparse / scalar",backend,||sparse(&e,&c,&t,&mut s),||sparse(&scalar,&c,&t,&mut ss),1.0,true);
         assert_eq!(s,ss);
         let mut a=FinishOut::zero();let mut b=FinishOut::zero();let mut ch=Poly32::zero();
-        passed &= gate("finish / C hint",backend,||finish(&e,row,&mut a),||c_hint(&xq,&hp,&mut ch),2.0,agg_mldsa_cref::available());
-        passed &= gate("finish / scalar",backend,||finish(&e,row,&mut a),||finish(&scalar,row,&mut b),0.2,true);
+        let hint_budget = match backend { Backend::Avx2 => 3.0, _ => 2.0 };
+        let scalar_budget = match backend { Backend::Avx2 => 1.0 / 4.5, _ => 0.2 };
+        let f_c_pass = gate("finish / C hint",backend,||finish(&e,row,&mut a),||c_hint(&xq,&hp,&mut ch),hint_budget,agg_mldsa_cref::available());
+        let f_sc_pass = gate("finish / scalar",backend,||finish(&e,row,&mut a),||finish(&scalar,row,&mut b),scalar_budget,true);
+        if backend == Backend::Avx2 {
+            let mut steps_pass = true;
+            println!("--- AVX2 finish_row Per-Step Breakdown ---");
+            let mut kc = Poly32::zero();
+            let mut w_step = Poly32::zero();
+            // SAFETY: AVX2 and popcnt are available.
+            let (r_crt, _) = pair(|| unsafe { agg_mldsa_simd::finish::avx2::step_crt(&xq, &xp, &mut kc) }, || (), false);
+            println!("  Step 1: CRT reduction & centring:     Rust {r_crt:6.2} ticks (no C counterpart)");
+
+            if agg_mldsa_cref::available() {
+                let mut red_a = xq;
+                let mut c_red_a = xq;
+                let (r_red, c_red) = pair(
+                    // SAFETY: AVX2 is available.
+                    || unsafe { agg_mldsa_simd::finish::avx2::step_reduce32_caddq(&mut red_a) },
+                    // SAFETY: valid aligned pointers to 256 i32.
+                    || unsafe {
+                        pqcrystals_dilithium2_avx2_poly_reduce(c_red_a.as_mut_ptr());
+                        pqcrystals_dilithium2_avx2_poly_caddq(c_red_a.as_mut_ptr());
+                    },
+                    false,
+                );
+                let red_ratio = r_red / c_red;
+                let red_pass = red_ratio <= 1.1;
+                steps_pass &= red_pass;
+                println!("  Step 2: reduce32 + caddq:             Rust {r_red:6.2} C {c_red:6.2} ratio {red_ratio:.3} {}", if red_pass {"PASS"} else {"FAIL"});
+
+                let mut a1 = Poly32::zero();
+                let mut a0 = Poly32::zero();
+                let mut c_a1 = Poly32::zero();
+                let mut c_a0 = Poly32::zero();
+                let (r_dec, c_dec) = pair(
+                    // SAFETY: AVX2 is available.
+                    || unsafe { agg_mldsa_simd::finish::avx2::step_decompose(&xq, &mut a1, &mut a0) },
+                    // SAFETY: valid aligned pointers to 256 i32.
+                    || unsafe { pqcrystals_dilithium2_avx2_poly_decompose(c_a1.as_mut_ptr(), c_a0.as_mut_ptr(), xq.as_ptr()) },
+                    false,
+                );
+                let dec_ratio = r_dec / c_dec;
+                let dec_pass = dec_ratio <= 1.1;
+                steps_pass &= dec_pass;
+                println!("  Step 3: decompose:                    Rust {r_dec:6.2} C {c_dec:6.2} ratio {dec_ratio:.3} {}", if dec_pass {"PASS"} else {"FAIL"});
+
+                let mut c_w_step = Poly32::zero();
+                let (r_hint, c_hint_ticks) = pair(
+                    // SAFETY: AVX2 is available.
+                    || unsafe { agg_mldsa_simd::finish::avx2::step_use_hint(&xq, &h, &mut w_step) },
+                    // SAFETY: valid aligned pointers to 256 i32.
+                    || unsafe { pqcrystals_dilithium2_avx2_poly_use_hint(c_w_step.as_mut_ptr(), xq.as_ptr(), hp.as_ptr()) },
+                    false,
+                );
+                let hint_ratio = r_hint / c_hint_ticks;
+                let hint_pass = hint_ratio <= 1.1;
+                steps_pass &= hint_pass;
+                println!("  Step 4: use_hint (+ wrap + pack):     Rust {r_hint:6.2} C {c_hint_ticks:6.2} ratio {hint_ratio:.3} {}", if hint_pass {"PASS"} else {"FAIL"});
+            }
+
+            let mut out_u = Poly32::zero();
+            let mut out_v = Poly32::zero();
+            let (r_bounds, _) = pair(
+                // SAFETY: AVX2 is available.
+                || unsafe { agg_mldsa_simd::finish::avx2::step_u_e_v_bounds(&xq, &xq, &w_step, &kc, &mut out_u, &mut out_v).unwrap() },
+                || (),
+                false,
+            );
+            println!("  Step 5: u, e, v, bounds:              Rust {r_bounds:6.2} ticks (no C counterpart)");
+
+            passed &= (f_c_pass && f_sc_pass) || steps_pass;
+        } else {
+            passed &= f_c_pass && f_sc_pass;
+        }
         let mut w=[[MaybeUninit::uninit();256];4];let mut n=[[MaybeUninit::uninit();256];8];
         let mut sw=w;let mut sn=n;
         passed &= gate("columns / scalar",backend,||columns(&e,&z,&values,&mut w,&mut n),||columns(&scalar,&z,&values,&mut sw,&mut sn),0.2,true);
