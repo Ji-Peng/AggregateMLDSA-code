@@ -126,6 +126,10 @@ fn main() {
         + xkcp[start..]
             .find("#define KeccakP_ThetaRhoPiChi1(")
             .expect("next macro");
+    assert!(
+        xkcp[start..end].contains("_Be = XOR3(_Ba, _L2, _De);"),
+        "unexpected pinned XKCP theta macro"
+    );
     let restored = include_str!("c/xkcp-theta.h");
     let mut corrected = xkcp[..start].to_owned();
     corrected.push('\n');

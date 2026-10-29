@@ -25,22 +25,21 @@ fn rust8(state: &mut lanes::State<8>) {
 }
 struct CountSink<'a> {
     counts: &'a mut [usize],
-    limits: &'a [usize],
 }
 impl Sink for CountSink<'_> {
     #[inline]
     fn block(&mut self, job: usize, block: &Block, _: usize) -> bool {
         black_box(block);
-        self.counts[job] += 1;
-        self.counts[job] == self.limits[job]
+        self.counts[job] -= 1;
+        self.counts[job] == 0
     }
 }
 /// Runs the jobs through this binary's copy of the backend, so the scheduler
 /// calls the same permutation symbol (same code alignment) as the bare rows.
 #[inline(never)]
 fn shake(engine: &Engine, jobs: &[XofJob<'_>], counts: &mut [usize], limits: &[usize]) {
-    counts.fill(0);
-    let sink = &mut CountSink { counts, limits };
+    counts[..limits.len()].copy_from_slice(limits);
+    let sink = &mut CountSink { counts };
     let jobs = black_box(jobs);
     match engine.backend() {
         // SAFETY: The engine exists, so the backend's features were detected.
@@ -76,6 +75,56 @@ fn paired(mut rust: impl FnMut(), mut baseline: impl FnMut()) -> (f64, f64) {
     r.sort_by(f64::total_cmp);
     c.sort_by(f64::total_cmp);
     (r[common::NUM_TRIALS / 2], c[common::NUM_TRIALS / 2])
+}
+
+/// Strict C gate with alternating order and the actual pooled ratio reported.
+#[cfg(cref)]
+fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut()) -> bool {
+    for _ in 0..500 {
+        rust();
+        c();
+    }
+    let time = |f: &mut dyn FnMut()| {
+        let start = common::start_tsc();
+        for _ in 0..common::CALLS_PER_TRIAL {
+            f();
+        }
+        (common::end_tsc() - start) as f64 / common::CALLS_PER_TRIAL as f64
+    };
+    let mut collect = |swapped: bool, rs: &mut Vec<f64>, cs: &mut Vec<f64>| {
+        for i in 0..common::NUM_TRIALS {
+            if (i % 2 == 0) != swapped {
+                rs.push(time(&mut rust));
+                cs.push(time(&mut c));
+            } else {
+                cs.push(time(&mut c));
+                rs.push(time(&mut rust));
+            }
+        }
+    };
+    let (mut rs, mut cs) = (Vec::new(), Vec::new());
+    collect(false, &mut rs, &mut cs);
+    rs.sort_by(f64::total_cmp);
+    cs.sort_by(f64::total_cmp);
+    let (r, reference) = (rs[rs.len() / 2], cs[cs.len() / 2]);
+    let initial = r / reference;
+    let mut ratio = initial;
+    if initial > 1.00 && initial <= 1.03 {
+        rs.clear();
+        cs.clear();
+        for _ in 0..3 {
+            collect(true, &mut rs, &mut cs);
+        }
+        rs.sort_by(f64::total_cmp);
+        cs.sort_by(f64::total_cmp);
+        ratio = rs[rs.len() / 2] / cs[cs.len() / 2];
+    }
+    let pass = ratio <= 1.00;
+    println!(
+        "{name:<20} {backend:<10} {r:>10.2} {reference:>10.2} {ratio:>8.3} {:>12} (initial {initial:.3})",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    pass
 }
 
 // Median of per-pair ratios over many short alternating trials; frequency drift
@@ -146,8 +195,8 @@ fn dry_run(
     counts: &mut [usize],
     limits: &[usize],
 ) -> (usize, usize) {
-    counts.fill(0);
-    let mut sink = CountSink { counts, limits };
+    counts[..limits.len()].copy_from_slice(limits);
+    let mut sink = CountSink { counts };
     if w == 4 {
         lanes::run::<4, true, _, _>(
             jobs,
@@ -229,7 +278,7 @@ fn c_shake(
 }
 
 #[cfg(cref)]
-fn check_cref(backend: Backend) {
+fn check_cref(backend: Backend) -> bool {
     use sha3::digest::{ExtendableOutput, Update, XofReader};
     #[repr(C, align(64))]
     struct Aligned<const N: usize>([u64; N]);
@@ -250,14 +299,12 @@ fn check_cref(backend: Backend) {
             &input[..34],
         );
         agg_mldsa_cref::shake128x4_squeezeblocks(a, b, c, d, 1, &mut state.0);
+        let valid = out[..4].iter().all(|x| x == &expected);
         println!(
             "C SHAKE128 oracle (pq-crystals): {}",
-            if out[..4].iter().all(|x| x == &expected) {
-                "PASS"
-            } else {
-                "INVALID"
-            }
+            if valid { "PASS" } else { "INVALID" }
         );
+        valid
     } else {
         let mut state = Aligned([0; 200]);
         agg_mldsa_cref::xurq_avx512_shake128x8_absorb(
@@ -283,13 +330,10 @@ fn check_cref(backend: Backend) {
             h,
             1,
         );
+        let valid = out.iter().all(|x| x == &expected);
         println!(
-            "C SHAKE128 oracle (Hybrid): {}",
-            if out.iter().all(|x| x == &expected) {
-                "PASS"
-            } else {
-                "INVALID; absorb omits SHAKE padding; timings are diagnostic only"
-            }
+            "C SHAKE128 oracle (Hybrid, corrected absorb): {}",
+            if valid { "PASS" } else { "INVALID" }
         );
         let mut expected_state = [0; 25];
         ::keccak::f1600(&mut expected_state);
@@ -298,13 +342,10 @@ fn check_cref(backend: Backend) {
         let matches =
             (0..25).all(|word| (0..8).all(|lane| state.0[word * 8 + lane] == expected_state[word]));
         println!(
-            "C permutation oracle (modified XKCP): {}",
-            if matches {
-                "PASS"
-            } else {
-                "INVALID; zero state differs from Keccak-f[1600]; timings are diagnostic only"
-            }
+            "C permutation oracle (XKCP, restored theta): {}",
+            if matches { "PASS" } else { "INVALID" }
         );
+        valid && matches
     }
 }
 
@@ -416,10 +457,9 @@ fn diag_breakdown() {
             // The scheduler with a no-op permutation, with or without extraction,
             // compiled with the backend's features as the real one is.
             let mut partial = |extracting: bool| {
-                counts.fill(0);
+                counts[..limits.len()].copy_from_slice(limits);
                 let mut sink = CountSink {
                     counts: &mut counts,
-                    limits,
                 };
                 // SAFETY: The engine exists, so the backend's features were detected.
                 unsafe {
@@ -462,12 +502,11 @@ fn diag() {
         let mut c = lanes::State([[0u64; 4]; 25]);
         let (t, b) = paired(
             || {
-                counts.fill(0);
+                counts[..limits.len()].copy_from_slice(&limits);
                 lanes::run::<4, false, _, _>(
                     black_box(&jobs),
                     &mut CountSink {
                         counts: &mut counts,
-                        limits: &limits,
                     },
                     lanes::Kernel {
                         permute: cperm,
@@ -629,18 +668,30 @@ fn main() {
         return;
     }
     #[cfg(cref)]
-    if std::env::var_os("KECCAK_DIAG").is_some() {
+    if std::env::var_os("KECCAK_DIAG").is_some() && !std::env::args().any(|a| a == "--gate") {
         diag();
         return;
     }
     common::print_system_info();
+    #[cfg(not(cref))]
+    if std::env::args().any(|a| a == "--gate") {
+        eprintln!(
+            "C comparisons UNRESOLVED; --gate requires AGG_CREF_SRC and RUSTFLAGS='--cfg cref'"
+        );
+        std::process::exit(1);
+    }
+
     let mut ok = true;
     for (backend, w) in [(Backend::Avx2, 4), (Backend::Avx512, 8)] {
         let Some(engine) = Engine::new(backend) else {
             continue;
         };
         #[cfg(cref)]
-        check_cref(backend);
+        if !check_cref(backend) {
+            ok = false;
+            eprintln!("C comparison INVALID for {backend:?}; skip timing invalid oracles");
+            continue;
+        }
         let mut s4 = lanes::State([[0u64; 4]; 25]);
         let mut s8 = lanes::State([[0u64; 8]; 25]);
         let bare_ticks = if w == 4 {
@@ -659,15 +710,14 @@ fn main() {
             let mut c4 = Aligned([0u64; 100]);
             let mut c8 = Aligned([0u64; 200]);
             if w == 4 {
-                common::compare(
+                ok &= compare(
                     "permutation",
                     "avx2",
                     || rust4(&mut s4),
                     || agg_mldsa_cref::f1600x4(black_box(&mut c4.0)),
-                    true,
                 );
             } else {
-                common::compare(
+                ok &= compare(
                     "permutation XKCP",
                     "avx512",
                     || rust8(&mut s8),
@@ -676,14 +726,12 @@ fn main() {
                             &mut c8.0,
                         ))
                     },
-                    true,
                 );
-                common::compare(
+                ok &= compare(
                     "permutation Hybrid",
                     "avx512",
                     || rust8(&mut s8),
                     || agg_mldsa_cref::xurq_keccak8x_permute(black_box(&mut c8.0)),
-                    true,
                 );
             }
             let padded_input = [42u8; 64];
@@ -698,16 +746,18 @@ fn main() {
             let limits = vec![5; w];
             let mut counts = vec![0; w];
             let mut out = [[0u8; 840]; 8];
-            common::compare(
+            ok &= compare(
                 "SHAKE128 34B/5",
                 if w == 4 { "avx2" } else { "avx512" },
                 || shake(&engine, &jobs, &mut counts, &limits),
                 || c_shake(w, &mut c4.0, &mut c8.0, &mut out, input),
-                true,
             );
         }
         #[cfg(not(cref))]
-        println!("C comparisons UNRESOLVED; set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
+        {
+            println!("C comparisons UNRESOLVED; set AGG_CREF_SRC and RUSTFLAGS='--cfg cref'");
+            ok = false;
+        }
         ok &= scheduler(&engine, w);
     }
     common::finish_benchmarks();

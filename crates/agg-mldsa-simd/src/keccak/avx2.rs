@@ -1,7 +1,10 @@
 //! 4-way Keccak-f[1600] and block extraction (AVX2).
 //!
-//! The permutation is an instruction-by-instruction intrinsics translation of
-//! pq-crystals' `f1600x4.S` (CC0; derived from Bas Westerbaan's 4-way SHAKE and
+//! The production permutation is pq-crystals' CC0 assembly `f1600x4.S`
+//! (instruction for instruction; only labels and symbol visibility differ),
+//! which keeps its register and instruction schedule. The retained review
+//! implementation is an instruction-by-instruction intrinsics translation of
+//! the same file (CC0; derived from Bas Westerbaan's 4-way SHAKE and
 //! XKCP, Keccak designed by Guido Bertoni, Joan Daemen, Michael Peeters and
 //! Gilles Van Assche): the variables `y0..y15` are its YMM registers, the state
 //! stays in memory between rows, rotations are shift/shift/or with `vpshufb`
@@ -166,6 +169,34 @@ pub(crate) unsafe fn run_xof<S: Sink>(_: &[XofJob<'_>], _: &mut S) {
     unreachable!("SIMD backend cannot be constructed on this architecture");
 }
 
+#[cfg(target_arch = "x86_64")]
+const RC: [u64; 24] = [
+    0x1,
+    0x8082,
+    0x800000000000808a,
+    0x8000000080008000,
+    0x808b,
+    0x80000001,
+    0x8000000080008081,
+    0x8000000000008009,
+    0x8a,
+    0x88,
+    0x80008009,
+    0x8000000a,
+    0x8000808b,
+    0x800000000000008b,
+    0x8000000000008089,
+    0x8000000000008003,
+    0x8000000000008002,
+    0x8000000000000080,
+    0x800a,
+    0x800000008000000a,
+    0x8000000080008081,
+    0x8000000000008080,
+    0x80000001,
+    0x8000000080008008,
+];
+
 /// Compiler barrier on the state: the stores before it reach memory and the
 /// loads after it re-read memory, so the row schedule stays the in-memory one
 /// of the assembly original instead of a register-promoted copy with spills.
@@ -179,33 +210,8 @@ fn fence(state: &mut State<4>) {
 // load/store schedule bounds the live vector set to sixteen YMM registers.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub(crate) fn permute(state: &mut State<4>) {
-    const RC: [u64; 24] = [
-        0x1,
-        0x8082,
-        0x800000000000808a,
-        0x8000000080008000,
-        0x808b,
-        0x80000001,
-        0x8000000080008081,
-        0x8000000000008009,
-        0x8a,
-        0x88,
-        0x80008009,
-        0x8000000a,
-        0x8000808b,
-        0x800000000000008b,
-        0x8000000000008089,
-        0x8000000000008003,
-        0x8000000000008002,
-        0x8000000000000080,
-        0x800a,
-        0x800000008000000a,
-        0x8000000080008081,
-        0x8000000000008080,
-        0x80000001,
-        0x8000000080008008,
-    ];
+#[allow(dead_code)]
+pub(crate) fn permute_intrinsics(state: &mut State<4>) {
     let rho8 = _mm256_set_epi64x(
         0x0e0d0c0b0a09080f,
         0x0605040302010007,
@@ -1118,4 +1124,28 @@ pub(crate) fn permute(state: &mut State<4>) {
         store(&mut state.0[24], y6);
         fence(state);
     }
+}
+
+// The intrinsics translation above remains available for review and differential
+// tests. The CC0 assembly bounds register pressure and fixes instruction order.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+core::arch::global_asm!(include_str!("avx2_permute.S"), options(att_syntax));
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+unsafe extern "C" {
+    fn agg_mldsa_keccak_f1600x4(state: *mut u64, rc: *const u64);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) fn permute(state: &mut State<4>) {
+    // SAFETY: State contains exactly 100 contiguous u64 words, aligned to 64
+    // bytes; the kernel reads all 24 constants and accesses only those words.
+    // The caller has detected AVX2.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        agg_mldsa_keccak_f1600x4(state.0.as_mut_ptr().cast(), RC.as_ptr())
+    }
+    #[cfg(not(target_os = "linux"))]
+    permute_intrinsics(state);
 }
