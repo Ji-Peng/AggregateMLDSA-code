@@ -22,16 +22,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aerie_falcon::protocol::algebra::eq_table;
-use agg_witness::expand::{expand_a, MatrixCoeff};
+use agg_mldsa_simd::{Challenge39, ExpandedA, Form, Prime, Scale};
+use agg_witness::expand::MatrixCoeff;
 use agg_witness::instance::InstanceError;
-use agg_witness::native::{mu, pk_decode, sample_in_ball, tr, Challenge};
+use agg_witness::native::{pk_decode, Challenge};
 use agg_witness::padding::Geometry;
 use agg_witness::params::{C_TILDE_BYTES, D, D_COEF, D_POS, K, L, N, PK_BYTES, TR_BYTES};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::public_data::{
-    eq_correlation, inverse_ntt_matrix, sparse_ct, sparse_t, KeyCache, SplitWeights, VerifierKey,
+    eq_correlation, sparse_t, KeyCache, SplitWeights, VerifierKey,
 };
 use crate::OpeningField as E;
 
@@ -107,6 +108,8 @@ pub struct StreamRecord {
     /// `c~` from the aggregate.
     pub c_tilde: [u8; C_TILDE_BYTES],
     challenge: Challenge,
+    /// The same challenge in the packed form of the engine kernels.
+    packed: Challenge39,
 }
 
 /// What the public pass returns.
@@ -184,6 +187,35 @@ fn distinct_keys<'a>(inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])]) -> Disti
     (distinct, record_keys)
 }
 
+/// Converts a sparse `Challenge` to the packed SIMD representation `Challenge39`.
+#[cfg(test)]
+#[inline]
+fn challenge_to_c39(c: &Challenge) -> Challenge39 {
+    let mut pos = [0_u8; 39];
+    let mut neg = 0_u64;
+    for (k, &p) in c.positions.iter().enumerate() {
+        pos[k] = p;
+        if c.coeffs[p as usize] < 0 {
+            neg |= 1_u64 << k;
+        }
+    }
+    Challenge39 { pos, neg }
+}
+
+/// Converts a packed SIMD `Challenge39` to the standard `Challenge`.
+#[inline]
+fn challenge_from_c39(c39: &Challenge39) -> Challenge {
+    let mut coeffs = [0_i8; N];
+    let mut positions = Vec::with_capacity(39);
+    for (k, &pos) in c39.pos.iter().enumerate() {
+        let bit = (c39.neg >> k) & 1;
+        let sign = if bit != 0 { -1_i8 } else { 1_i8 };
+        coeffs[pos as usize] = sign;
+        positions.push(pos);
+    }
+    Challenge { coeffs, positions }
+}
+
 impl StreamedPublic {
     /// The light precomputation from `(pk, M, c~)` triples (pure mode, empty context): the
     /// distinct keys by full `pk` bytes ([`distinct_keys`]), `pkDecode` and `tr` per distinct
@@ -192,38 +224,113 @@ impl StreamedPublic {
         inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
         cache: Option<&KeyCache>,
     ) -> Result<Self, InstanceError> {
+        Self::prepare_with(agg_mldsa_simd::engine(), inputs, cache)
+    }
+
+    /// Prepares public data using the specified SIMD engine.
+    #[doc(hidden)]
+    pub fn prepare_with(
+        engine: &agg_mldsa_simd::Engine,
+        inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])],
+        cache: Option<&KeyCache>,
+    ) -> Result<Self, InstanceError> {
         let geom = Geometry::new(inputs.len()).map_err(InstanceError::Geometry)?;
-        let (distinct, record_keys) = distinct_keys(inputs);
-        let keys = distinct
-            .into_par_iter()
-            .map(|(pk, records)| {
-                let source = match cache.and_then(|c| c.get(pk)) {
-                    // The length check keeps the error of pkDecode for any cache content.
-                    Some(cached) if pk.len() == PK_BYTES => KeySource::Cached(cached),
-                    _ => {
-                        let decoded =
-                            pk_decode(pk).ok_or(InstanceError::PublicKey(records[0]))?;
-                        KeySource::Fresh(Box::new(FreshKey {
-                            pk: pk.to_vec(),
-                            rho: decoded.rho,
-                            t1: decoded.t1,
-                            tr: tr(pk),
-                        }))
+        let (mut distinct, record_keys) = distinct_keys(inputs);
+        let keys: Vec<StreamKey> = distinct
+            .par_chunks_mut(8)
+            .map(|tile| -> Result<Vec<StreamKey>, InstanceError> {
+                let mut tile_keys = Vec::with_capacity(tile.len());
+                // Positions in `tile_keys` of the keys that still need `tr`.
+                let mut fresh_at = [0_usize; 8];
+                let mut fresh_count = 0;
+                for (pk, records) in tile.iter_mut() {
+                    let source = match cache.and_then(|c| c.get(pk)) {
+                        // The length check keeps the error of pkDecode for any cache content.
+                        Some(cached) if pk.len() == PK_BYTES => KeySource::Cached(cached),
+                        _ => {
+                            let decoded =
+                                pk_decode(pk).ok_or(InstanceError::PublicKey(records[0]))?;
+                            fresh_at[fresh_count] = tile_keys.len();
+                            fresh_count += 1;
+                            KeySource::Fresh(Box::new(FreshKey {
+                                pk: pk.to_vec(),
+                                rho: decoded.rho,
+                                t1: decoded.t1,
+                                tr: [0; TR_BYTES],
+                            }))
+                        }
+                    };
+                    tile_keys.push(StreamKey {
+                        source,
+                        records: std::mem::take(records),
+                    });
+                }
+                if fresh_count > 0 {
+                    let mut tr_inputs = [[&[][..]; 4]; 8];
+                    for (slot, &at) in tr_inputs.iter_mut().zip(&fresh_at[..fresh_count]) {
+                        if let KeySource::Fresh(fresh) = &tile_keys[at].source {
+                            *slot = [&fresh.pk, &[], &[], &[]];
+                        }
                     }
-                };
-                Ok(StreamKey { source, records })
+                    let mut tr_out = [0_u8; 8 * TR_BYTES];
+                    engine.shake256_many(
+                        &tr_inputs[..fresh_count],
+                        TR_BYTES,
+                        &mut tr_out[..fresh_count * TR_BYTES],
+                    );
+                    for (digest, &at) in tr_out.chunks_exact(TR_BYTES).zip(&fresh_at[..fresh_count]) {
+                        if let KeySource::Fresh(fresh) = &mut tile_keys[at].source {
+                            fresh.tr.copy_from_slice(digest);
+                        }
+                    }
+                }
+                Ok(tile_keys)
             })
-            .collect::<Result<Vec<_>, InstanceError>>()?;
-        let records = inputs
-            .par_iter()
-            .zip(&record_keys)
-            .map(|(&(_, msg, c_tilde), &key)| StreamRecord {
-                key,
-                mu: mu(keys[key].tr(), msg, &[]),
-                c_tilde,
-                challenge: sample_in_ball(&c_tilde),
+            .collect::<Result<Vec<Vec<StreamKey>>, InstanceError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let records: Vec<StreamRecord> = inputs
+            .par_chunks(64)
+            .zip(record_keys.par_chunks(64))
+            .flat_map_iter(|(input_tile, key_tile)| {
+                let count = input_tile.len();
+                let mut mu_inputs = [[&[][..]; 4]; 64];
+                for j in 0..count {
+                    let key_idx = key_tile[j];
+                    let msg = input_tile[j].1;
+                    mu_inputs[j] = [keys[key_idx].tr(), &[0u8, 0u8], &[], msg];
+                }
+                let mut mu_out = [0u8; 64 * TR_BYTES];
+                engine.shake256_many(
+                    &mu_inputs[..count],
+                    TR_BYTES,
+                    &mut mu_out[..count * TR_BYTES],
+                );
+
+                let mut c_tildes = [[0u8; C_TILDE_BYTES]; 64];
+                for j in 0..count {
+                    c_tildes[j] = input_tile[j].2;
+                }
+                let mut c39_out = [Challenge39::zero(); 64];
+                engine.sample_in_ball_many(&c_tildes[..count], &mut c39_out[..count]);
+
+                (0..count).map(move |j| {
+                    let mut mu = [0u8; TR_BYTES];
+                    mu.copy_from_slice(&mu_out[j * TR_BYTES..(j + 1) * TR_BYTES]);
+                    let challenge = challenge_from_c39(&c39_out[j]);
+                    StreamRecord {
+                        key: key_tile[j],
+                        mu,
+                        c_tilde: input_tile[j].2,
+                        challenge,
+                        packed: c39_out[j],
+                    }
+                })
             })
             .collect();
+
         Ok(Self {
             geom,
             keys,
@@ -259,6 +366,18 @@ impl StreamedPublic {
     /// `T(r^(2))` and `w_A(r^(3))` in one streamed pass (module docs). New
     /// expansions are added to `cache` when one is given.
     pub fn pass(&self, r2: &[E], r3: &[E], cache: Option<&mut KeyCache>) -> PublicPass {
+        self.pass_with(agg_mldsa_simd::engine(), r2, r3, cache)
+    }
+
+    /// Executes the streamed public pass using the specified SIMD engine.
+    #[doc(hidden)]
+    pub fn pass_with(
+        &self,
+        engine: &agg_mldsa_simd::Engine,
+        r2: &[E],
+        r3: &[E],
+        cache: Option<&mut KeyCache>,
+    ) -> PublicPass {
         let d_main = self.geom.d_main() as usize;
         assert_eq!(r2.len(), d_main, "a main-domain point");
         assert_eq!(r3.len(), d_main, "a main-domain point");
@@ -275,7 +394,8 @@ impl StreamedPublic {
             .par_iter()
             .enumerate()
             .map(|(i, record)| {
-                let ct = sparse_ct(&record.challenge, self.keys[record.key].t1());
+                let mut ct = [[0_i32; N]; K];
+                engine.sparse_ct(&record.packed, self.keys[record.key].t1(), 0, &mut ct);
                 eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
             })
             .reduce(E::zero, |a, b| a + b)
@@ -290,44 +410,88 @@ impl StreamedPublic {
             std::array::from_fn(|s| eq_row[rho] * eq_col[s])
         });
         let keep = cache.is_some();
-        let per_key: Vec<(E, Option<Arc<VerifierKey>>)> = self
+
+        let per_tile: Vec<(E, Vec<Arc<VerifierKey>>)> = self
             .keys
-            .par_iter()
-            .map(|key| {
-                let signature_weight = key
-                    .records
-                    .iter()
-                    .fold(E::zero(), |sum, &i| sum + eq_sig2[i] * eq_sig3[i]);
-                let (weight, fresh) = match &key.source {
-                    KeySource::Cached(cached) => {
-                        (key_weight(&cached.a, &lambda, &entry_weights), None)
+            .par_chunks(8)
+            .map(|tile| {
+                let mut fresh_rhos = [[0u8; 32]; 8];
+                let mut k_fresh = 0;
+                for key in tile {
+                    if let KeySource::Fresh(fresh) = &key.source {
+                        fresh_rhos[k_fresh] = fresh.rho;
+                        k_fresh += 1;
                     }
-                    KeySource::Fresh(fresh) => {
-                        let a = inverse_ntt_matrix(&expand_a(&fresh.rho).0);
-                        let weight = key_weight(&a, &lambda, &entry_weights);
-                        let fresh = keep.then(|| {
-                            Arc::new(VerifierKey {
-                                pk: fresh.pk.clone(),
-                                a,
-                                t1: fresh.t1,
-                                tr: fresh.tr,
-                            })
-                        });
-                        (weight, fresh)
+                }
+
+                let mut expanded = vec![ExpandedA::zero(); k_fresh];
+                if k_fresh > 0 {
+                    engine.expand_a_many(&fresh_rhos[..k_fresh], &mut expanded);
+                }
+
+                let mut fresh_cur = 0;
+                let mut tile_fresh_keys = Vec::new();
+                let mut tile_weight = E::zero();
+
+                for key in tile {
+                    let signature_weight = key
+                        .records
+                        .iter()
+                        .fold(E::zero(), |sum, &i| sum + eq_sig2[i] * eq_sig3[i]);
+                    let (weight, fresh_key) = match &key.source {
+                        KeySource::Cached(cached) => {
+                            (key_weight(&cached.a, &lambda, &entry_weights), None)
+                        }
+                        KeySource::Fresh(fresh) => {
+                            let exp = &mut expanded[fresh_cur];
+                            fresh_cur += 1;
+                            for row in exp.a_hat.iter_mut() {
+                                for poly in row.iter_mut() {
+                                    engine.intt(Prime::Q, poly, Scale::Plain, Form::Centered);
+                                }
+                            }
+                            let weight = key_weight_by(
+                                |rho, s| &exp.a_hat[rho][s].0,
+                                &lambda,
+                                &entry_weights,
+                            );
+                            let fresh_key = keep.then(|| {
+                                Arc::new(VerifierKey {
+                                    pk: fresh.pk.clone(),
+                                    a: Box::new(std::array::from_fn(|rho| {
+                                        std::array::from_fn(|s| exp.a_hat[rho][s].0)
+                                    })),
+                                    t1: fresh.t1,
+                                    tr: fresh.tr,
+                                })
+                            });
+                            (weight, fresh_key)
+                        }
+                    };
+                    tile_weight += signature_weight * weight;
+                    if let Some(key) = fresh_key {
+                        tile_fresh_keys.push(key);
                     }
-                };
-                (signature_weight * weight, fresh)
+                }
+                (tile_weight, tile_fresh_keys)
             })
             .collect();
-        let ring_weight = per_key.iter().fold(E::zero(), |sum, (w, _)| sum + *w);
+
+        let mut ring_weight = E::zero();
         let expanded = self.keys.iter().filter(|key| !key.is_cached()).count();
         if let Some(cache) = cache {
-            for (_, fresh) in per_key {
-                if let Some(key) = fresh {
+            for (w, keys) in per_tile {
+                ring_weight += w;
+                for key in keys {
                     cache.insert(key);
                 }
             }
+        } else {
+            for (w, _) in per_tile {
+                ring_weight += w;
+            }
         }
+
         PublicPass {
             t_at_r2,
             ring_weight,
@@ -346,11 +510,21 @@ impl StreamedPublic {
 /// once ([`SplitWeights::dot`] with 22 bits; in `i128` terms the bound is
 /// `256 x 2^64 x 2^22 = 2^94 < 2^95`). Out-of-range entries take the exact `i128` path.
 fn key_weight(a: &MatrixCoeff, lambda: &SplitWeights, entry_weights: &[[E; L]; K]) -> E {
+    key_weight_by(|rho, s| &a[rho][s], lambda, entry_weights)
+}
+
+/// [`key_weight`] over entries given by an accessor, so that a transformed matrix can be
+/// read in place without a copy.
+fn key_weight_by<'a>(
+    entry: impl Fn(usize, usize) -> &'a [i32; N],
+    lambda: &SplitWeights,
+    entry_weights: &[[E; L]; K],
+) -> E {
     debug_assert_eq!(lambda.len(), N);
     let mut sum = E::zero();
-    for (a_row, weights) in a.iter().zip(entry_weights) {
-        for (poly, &weight) in a_row.iter().zip(weights) {
-            sum += weight * lambda.dot::<22>(poly);
+    for (rho, weights) in entry_weights.iter().enumerate() {
+        for (s, &weight) in weights.iter().enumerate() {
+            sum += weight * lambda.dot::<22>(entry(rho, s));
         }
     }
     sum
@@ -359,12 +533,12 @@ fn key_weight(a: &MatrixCoeff, lambda: &SplitWeights, entry_weights: &[[E; L]; K
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_data::PublicData;
+    use crate::public_data::{sparse_ct, PublicData};
     use crate::test_support::point;
     use crate::weights::ring_weight_at;
     use agg_witness::gen::{self, SplitMix64};
     use agg_witness::instance::PublicInstance;
-    use agg_witness::native::Challenge;
+    use agg_witness::native::{mu, sample_in_ball, Challenge};
     use agg_witness::params::{P_FIELD, Q, TAU};
     use jolt_field::Ring;
     use std::collections::HashMap;
@@ -743,6 +917,289 @@ mod tests {
         time("public_records_binding", || public_records_binding(&inputs));
     }
 
+    /// The pre-engine `prepare` and `pass` (reference for the end-to-end A/B).
+    fn baseline_prepare(inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<(Vec<u8>, [u8; TR_BYTES], [[u16; N]; K], [u8; 32])> {
+        use agg_witness::native::tr as base_tr;
+        let (distinct, record_keys) = distinct_keys(inputs);
+        let keys: Vec<_> = distinct
+            .into_par_iter()
+            .map(|(pk, _)| {
+                let d = pk_decode(pk).unwrap();
+                (pk.to_vec(), base_tr(pk), d.t1, d.rho)
+            })
+            .collect();
+        let sink: Vec<u8> = inputs
+            .par_iter()
+            .zip(&record_keys)
+            .map(|(&(_, msg, c), &key)| {
+                mu(&keys[key].1, msg, &[])[0] ^ sample_in_ball(&c).positions[0]
+            })
+            .collect();
+        black_box(sink);
+        keys
+    }
+
+    fn baseline_pass(
+        s: &StreamedPublic,
+        r2: &[E],
+        r3: &[E],
+    ) -> (E, E) {
+        use crate::public_data::{inverse_ntt_matrix, sparse_ct as base_sparse_ct};
+        use agg_witness::expand::expand_a;
+        let (coef, pos) = (D_COEF as usize, D_POS as usize);
+        let eq_pos2 = SplitWeights::new(&eq_table(&r2[..pos]));
+        let eq_sig2 = eq_table(&r2[pos..]);
+        let eq_sig3 = eq_table(&r3[pos..]);
+        let t = s
+            .records
+            .par_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let ct = base_sparse_ct(&r.challenge, s.keys[r.key].t1());
+                eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
+            })
+            .reduce(E::zero, |a, b| a + b);
+        let lambda = SplitWeights::new(&eq_correlation(&r2[..coef], &r3[..coef]));
+        let eq_row = eq_table(&r2[coef..pos]);
+        let eq_col = eq_table(&r3[coef..pos]);
+        let ew: [[E; L]; K] =
+            std::array::from_fn(|r| std::array::from_fn(|c| eq_row[r] * eq_col[c]));
+        let w = s
+            .keys
+            .par_iter()
+            .map(|key| {
+                let sw = key.records.iter().fold(E::zero(), |x, &i| x + eq_sig2[i] * eq_sig3[i]);
+                let KeySource::Fresh(f) = &key.source else { unreachable!() };
+                let a = inverse_ntt_matrix(&expand_a(&f.rho).0);
+                sw * key_weight(&a, &lambda, &ew)
+            })
+            .reduce(E::zero, |a, b| a + b);
+        (t, w)
+    }
+
+    /// The `T(r2)` part of the pass alone, through the pre-engine kernel (`None`) or an engine.
+    fn t_part(s: &StreamedPublic, eq: &SplitWeights, eq_sig2: &[E], e: Option<&agg_mldsa_simd::Engine>) -> E {
+        s.records
+            .par_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let ct = match e {
+                    None => crate::public_data::sparse_ct(&r.challenge, s.keys[r.key].t1()),
+                    Some(e) => {
+                        let mut ct = [[0_i32; N]; K];
+                        e.sparse_ct(&r.packed, s.keys[r.key].t1(), 0, &mut ct);
+                        ct
+                    }
+                };
+                eq_sig2[i] * eq.dot::<16>(ct.as_flattened())
+            })
+            .reduce(E::zero, |a, b| a + b)
+    }
+
+    /// End-to-end single-thread A/B of `prepare` and `pass` against the pre-engine code
+    /// (direction only; `RAYON_NUM_THREADS=1 cargo test --release -p agg-piop --lib
+    /// engine_e2e_microbench -- --ignored --nocapture` on one pinned CPU).
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn engine_e2e_microbench() {
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    f();
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        }
+        let n = 4096;
+        let mut rng = SplitMix64::new(10);
+        let keys: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let mut k = vec![0_u8; PK_BYTES];
+                rng.fill(&mut k);
+                k
+            })
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 80]).collect();
+        let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = (0..n)
+            .map(|i| {
+                let mut c = [0_u8; C_TILDE_BYTES];
+                rng.fill(&mut c);
+                (keys[i].as_slice(), msgs[i].as_slice(), c)
+            })
+            .collect();
+        let d_main = Geometry::new(n).unwrap().d_main() as usize;
+        let (r2, r3) = (point(&mut rng, d_main), point(&mut rng, d_main));
+        let old_prep = best(|| {
+            black_box(baseline_prepare(&inputs));
+        });
+        let s = StreamedPublic::prepare(&inputs, None).unwrap();
+        let old_pass = best(|| {
+            black_box(baseline_pass(&s, &r2, &r3));
+        });
+        let eq = SplitWeights::new(&eq_table(&r2[..D_POS as usize]));
+        let eq_sig2 = eq_table(&r2[D_POS as usize..]);
+        let old_t = best(|| {
+            black_box(t_part(&s, &eq, &eq_sig2, None));
+        });
+        eprintln!("n = {n}: baseline prepare {old_prep:.2} ms, pass {old_pass:.2} ms, T part {old_t:.2} ms");
+        for backend in [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ] {
+            let Some(e) = agg_mldsa_simd::Engine::new(backend) else {
+                continue;
+            };
+            let prep = best(|| {
+                black_box(StreamedPublic::prepare_with(&e, &inputs, None).unwrap());
+            });
+            let pass = best(|| {
+                black_box(s.pass_with(&e, &r2, &r3, None));
+            });
+            let t = best(|| {
+                black_box(t_part(&s, &eq, &eq_sig2, Some(&e)));
+            });
+            eprintln!("{backend:?}: prepare {prep:.2} ms, pass {pass:.2} ms, T part {t:.2} ms");
+        }
+    }
+
+    /// Single-thread A/B of the engine paths against the pre-engine computations, per
+    /// backend (direction only; `cargo test --release -p agg-piop --lib engine_ab_microbench
+    /// -- --ignored --nocapture` on one pinned CPU).
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn engine_ab_microbench() {
+        use crate::public_data::{inverse_ntt_matrix, sparse_ct as base_sparse_ct};
+        use agg_witness::expand::expand_a;
+        use agg_witness::native::tr as base_tr;
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            (0..7)
+                .map(|_| {
+                    let start = Instant::now();
+                    f();
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        }
+        let n = 256;
+        let mut rng = SplitMix64::new(77);
+        let pks: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let mut k = vec![0_u8; PK_BYTES];
+                rng.fill(&mut k);
+                k
+            })
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 80]).collect();
+        let cts: Vec<[u8; C_TILDE_BYTES]> = (0..n)
+            .map(|_| {
+                let mut c = [0_u8; C_TILDE_BYTES];
+                rng.fill(&mut c);
+                c
+            })
+            .collect();
+        let challenges: Vec<Challenge> = cts.iter().map(|c| sample_in_ball(c)).collect();
+        let t1s: Vec<[[u16; N]; K]> = pks.iter().map(|k| pk_decode(k).unwrap().t1).collect();
+        let rhos: Vec<[u8; 32]> = pks.iter().map(|k| k[..32].try_into().unwrap()).collect();
+        let trs: Vec<[u8; TR_BYTES]> = pks.iter().map(|k| base_tr(k)).collect();
+
+        let tr_old = best(|| {
+            for pk in &pks {
+                black_box(base_tr(pk));
+            }
+        });
+        let mu_old = best(|| {
+            for (t, m) in trs.iter().zip(&msgs) {
+                black_box(mu(t, m, &[]));
+            }
+        });
+        let ball_old = best(|| {
+            for c in &cts {
+                black_box(sample_in_ball(c));
+            }
+        });
+        let ct_old = best(|| {
+            for (c, t) in challenges.iter().zip(&t1s) {
+                black_box(base_sparse_ct(c, t));
+            }
+        });
+        let a_old = best(|| {
+            for rho in &rhos {
+                black_box(inverse_ntt_matrix(&expand_a(rho).0));
+            }
+        });
+        eprintln!(
+            "per {n} items, ms: base tr {tr_old:.2}, mu {mu_old:.2}, ball {ball_old:.2}, \
+             sparse_ct {ct_old:.2}, expand+intt {a_old:.2}"
+        );
+        for backend in [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ] {
+            let Some(e) = agg_mldsa_simd::Engine::new(backend) else {
+                continue;
+            };
+            let tr_new = best(|| {
+                let mut out = [0_u8; 8 * TR_BYTES];
+                for tile in pks.chunks(8) {
+                    let ins: Vec<[&[u8]; 4]> = tile.iter().map(|p| [&p[..], &[][..], &[][..], &[][..]]).collect();
+                    e.shake256_many(&ins, TR_BYTES, &mut out[..tile.len() * TR_BYTES]);
+                    black_box(&out);
+                }
+            });
+            let mu_new = best(|| {
+                let mut out = [0_u8; 64 * TR_BYTES];
+                for (tt, mt) in trs.chunks(64).zip(msgs.chunks(64)) {
+                    let ins: Vec<[&[u8]; 4]> = tt
+                        .iter()
+                        .zip(mt)
+                        .map(|(t, m)| [&t[..], &[0u8, 0u8][..], &[][..], &m[..]])
+                        .collect();
+                    e.shake256_many(&ins, TR_BYTES, &mut out[..tt.len() * TR_BYTES]);
+                    black_box(&out);
+                }
+            });
+            let ball_new = best(|| {
+                let mut out = [Challenge39::zero(); 64];
+                for ct in cts.chunks(64) {
+                    e.sample_in_ball_many(ct, &mut out[..ct.len()]);
+                    for o in &out[..ct.len()] {
+                        black_box(challenge_from_c39(o));
+                    }
+                }
+            });
+            let ct_new = best(|| {
+                for (c, t) in challenges.iter().zip(&t1s) {
+                    let mut ct = [[0_i32; N]; K];
+                    e.sparse_ct(&challenge_to_c39(c), t, 0, &mut ct);
+                    black_box(&ct);
+                }
+            });
+            let a_new = best(|| {
+                for tile in rhos.chunks(8) {
+                    let mut ex = vec![ExpandedA::zero(); tile.len()];
+                    e.expand_a_many(tile, &mut ex);
+                    for x in &mut ex {
+                        for r in 0..K {
+                            for s in 0..L {
+                                e.intt(Prime::Q, &mut x.a_hat[r][s], Scale::Plain, Form::Centered);
+                            }
+                        }
+                    }
+                    black_box(&ex);
+                }
+            });
+            eprintln!(
+                "{backend:?}: tr {tr_new:.2}, mu {mu_new:.2}, ball {ball_new:.2}, \
+                 sparse_ct {ct_new:.2}, expand+intt {a_new:.2}"
+            );
+        }
+    }
+
     /// Single-thread timings of the three kernels against the references (direction only;
     /// `cargo test --release -p agg-piop --lib kernel_microbench -- --ignored --nocapture`
     /// on CPUs 0,1,3-15).
@@ -887,5 +1344,108 @@ mod tests {
             StreamedPublic::prepare(&bad, None).unwrap_err(),
             InstanceError::PublicKey(4)
         );
+    }
+
+    #[test]
+    fn streamed_pass_matches_reference_across_all_available_backends() {
+        let backends = [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ];
+
+        for backend in backends {
+            let Some(engine) = agg_mldsa_simd::Engine::new(backend) else {
+                continue;
+            };
+
+            // Test all-distinct keys across various record counts (1, 7, 8, 9, 33).
+            for &n in &[1, 7, 8, 9, 33] {
+                let records = gen::records(100 + n as u64, n);
+                check_backend_streamed_pass(&engine, &records);
+            }
+
+            // Test keys sharing rho.
+            {
+                let (victim_sk, victim) = gen::keypair(&gen::key_seed(200, 0));
+                let rho: [u8; 32] = victim[..32].try_into().unwrap();
+                let (other_sk, other) = gen::keypair_with_rho(&gen::key_seed(200, 1), &rho);
+                assert_eq!(victim[..32], other[..32]);
+
+                let mut records = gen::records(201, 3);
+                for i in 0..6_u64 {
+                    let (sk, pk) = if i % 2 == 0 { (&victim_sk, &victim) } else { (&other_sk, &other) };
+                    let msg = gen::message(202, i);
+                    records.push(gen::Record {
+                        pk: pk.clone(),
+                        sig: gen::sign(sk, &msg, None),
+                        msg,
+                    });
+                }
+                check_backend_streamed_pass(&engine, &records);
+            }
+        }
+    }
+
+    fn check_backend_streamed_pass(engine: &agg_mldsa_simd::Engine, records: &[gen::Record]) {
+        let instance = PublicInstance::from_records(records).unwrap();
+        let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = instance
+            .records
+            .iter()
+            .zip(records)
+            .map(|(record, source)| (source.pk.as_slice(), source.msg.as_slice(), record.c_tilde))
+            .collect();
+        let stored = PublicData::from_instance(&instance);
+        let d_main = instance.geom.d_main() as usize;
+        let mut rng = SplitMix64::new(300 + records.len() as u64);
+        let (r2, r3) = (point(&mut rng, d_main), point(&mut rng, d_main));
+        let expected_t = stored.t_evaluation(&r2);
+        let expected_w = ring_weight_at(&stored, &r2, &r3);
+
+        // Without cache:
+        let uncached = StreamedPublic::prepare_with(engine, &inputs, None).unwrap();
+        for (i, record) in uncached.records().iter().enumerate() {
+            assert_eq!(record.mu, instance.records[i].mu);
+            assert_eq!(*uncached.t(i), *stored.t(i));
+        }
+        let pass = uncached.pass_with(engine, &r2, &r3, None);
+        assert_eq!(
+            pass.t_at_r2, expected_t,
+            "t_at_r2 mismatch without cache on backend {:?}",
+            engine.backend()
+        );
+        assert_eq!(
+            pass.ring_weight, expected_w,
+            "ring_weight mismatch without cache on backend {:?}",
+            engine.backend()
+        );
+        assert_eq!(pass.expanded, uncached.keys().len());
+
+        // With cache (first call populates, second call reuses):
+        let mut cache = KeyCache::default();
+        let first = StreamedPublic::prepare_with(engine, &inputs, Some(&cache)).unwrap();
+        assert!(first.keys().iter().all(|key| !key.is_cached()));
+        let pass_pop = first.pass_with(engine, &r2, &r3, Some(&mut cache));
+        assert_eq!(pass_pop.t_at_r2, expected_t);
+        assert_eq!(pass_pop.ring_weight, expected_w);
+        assert_eq!(cache.len(), uncached.keys().len());
+
+        let second = StreamedPublic::prepare_with(engine, &inputs, Some(&cache)).unwrap();
+        assert!(second.keys().iter().all(StreamKey::is_cached));
+        let pass_cached = second.pass_with(engine, &r2, &r3, Some(&mut cache));
+        assert_eq!(
+            pass_cached.t_at_r2, expected_t,
+            "t_at_r2 mismatch with cache on backend {:?}",
+            engine.backend()
+        );
+        assert_eq!(
+            pass_cached.ring_weight, expected_w,
+            "ring_weight mismatch with cache on backend {:?}",
+            engine.backend()
+        );
+        assert_eq!(pass_cached.expanded, 0);
+        for (i, record) in second.records().iter().enumerate() {
+            assert_eq!(record.mu, instance.records[i].mu);
+        }
     }
 }
