@@ -156,15 +156,6 @@ fn c_load(c: &'static AlignedConst<[i32; 8]>) -> V {
     unsafe { _mm256_load_si256(c.0.as_ptr().cast()) }
 }
 
-#[inline]
-#[target_feature(enable = "avx2,popcnt")]
-fn put_bytes(a: &mut [u8; 8], v: V) {
-    let words = _mm_packus_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
-    let b = _mm_packus_epi16(words, words);
-    // SAFETY: the store writes exactly eight bytes.
-    unsafe { _mm_storel_epi64(a.as_mut_ptr().cast(), b) }
-}
-
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
     let mut bad_q = splat(0);
@@ -178,7 +169,10 @@ pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Resu
     let q_half = c_load(&C_Q_HALF);
     let qv = c_load(&C_Q);
 
-    for i in (0..256).step_by(8) {
+    for blk in (0..256).step_by(32) {
+      let mut ws = [splat(0);4];
+      for j in 0..4 {
+        let i = blk + 8*j;
         let xq = load(row.xq[i..i+8].try_into().unwrap());
         let xp = load(row.xp[i..i+8].try_into().unwrap());
         let t = load(row.t[i..i+8].try_into().unwrap());
@@ -228,7 +222,11 @@ pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Resu
 
         store((&mut out.u[i..i+8]).try_into().unwrap(), u);
         store((&mut out.v[i..i+8]).try_into().unwrap(), v);
-        put_bytes((&mut out.w1[i..i+8]).try_into().unwrap(), w);
+        ws[j] = w;
+      }
+      // w1 values lie in [0,43], so the saturating packs are exact.
+      // SAFETY: blk + 32 <= 256 = out.w1.len().
+      unsafe { _mm256_storeu_si256(out.w1.as_mut_ptr().add(blk).cast(), pack32(ws[0],ws[1],ws[2],ws[3])) }
     }
 
     let exceeds = |acc: V, bound: i32| {

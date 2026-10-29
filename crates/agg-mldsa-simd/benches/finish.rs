@@ -47,7 +47,7 @@ fn pair(mut a: impl FnMut(),mut b: impl FnMut(),swap: bool)->(f64,f64) {
     aa.sort_by(f64::total_cmp); bb.sort_by(f64::total_cmp); (aa[15],bb[15])
 }
 fn gate(name: &str,b: Backend,mut a: impl FnMut(),mut reference: impl FnMut(),budget: f64,exists: bool)->bool {
-    if !exists { println!("{name:20} {b:?}: C unavailable (UNRESOLVED)"); return true; }
+    if !exists { println!("{name:20} {b:?}: C unavailable (UNRESOLVED; build with AGG_CREF_SRC=<dir holding dilithium/ and Hybrid-SHA-3/>)"); return true; }
     let (r,c)=pair(&mut a,&mut reference,false);
     let mut ratio=r/c/budget;
     if ratio>1.0 && ratio<=1.03 {
@@ -79,6 +79,9 @@ fn main() {
         passed &= gate("sparse_ct / 4xC",backend,||sparse(&e,&c,&t,&mut s),||c_sparse(backend,&cp,&tp,&mut cs),1.0,agg_mldsa_cref::available());
         // Verify the C sparse oracle before timing other kernels (C has no final shift).
         if agg_mldsa_cref::available() { for r in 0..4 { assert_eq!(s[r],cs[r].0.map(|v|v<<13)); } }
+        let mut ss=s;
+        passed &= gate("sparse / scalar",backend,||sparse(&e,&c,&t,&mut s),||sparse(&scalar,&c,&t,&mut ss),1.0,true);
+        assert_eq!(s,ss);
         let mut a=FinishOut::zero();let mut b=FinishOut::zero();let mut ch=Poly32::zero();
         passed &= gate("finish / C hint",backend,||finish(&e,row,&mut a),||c_hint(&xq,&hp,&mut ch),2.0,agg_mldsa_cref::available());
         passed &= gate("finish / scalar",backend,||finish(&e,row,&mut a),||finish(&scalar,row,&mut b),0.2,true);
