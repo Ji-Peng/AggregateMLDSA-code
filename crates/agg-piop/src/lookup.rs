@@ -344,10 +344,16 @@ pub fn multiplicities(stacks: &[LookupStack<'_>], tables: &[Table]) -> Result<Ve
             .ok_or_else(|| LookupError::Shape(format!("stack {s} names a missing table")))?;
         let len = table.len();
         let shift = stack.shape.shift;
+        // At most about two histograms per thread: each fold leaf takes at least
+        // `per_leaf` chunks. A histogram per chunk would zero and merge `len` counters per
+        // 2^16 cells (about the cost of the counting itself at |T_16| = 2^16).
+        let chunks = stack.stacked.len().div_ceil(CHUNK);
+        let per_leaf = chunks.div_ceil(2 * rayon::current_num_threads()).max(1);
         let counts = stack
             .stacked
             .par_chunks(CHUNK)
             .enumerate()
+            .with_min_len(per_leaf)
             .try_fold(
                 || vec![0_u64; len],
                 |mut acc, (chunk, cells)| {
