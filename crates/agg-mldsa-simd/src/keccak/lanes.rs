@@ -13,17 +13,20 @@ pub(crate) struct State<const W: usize>(pub [[u64; W]; 25]);
 pub(crate) trait Permutation<const W: usize> {
     fn permute(&mut self, state: &mut State<W>);
     fn extract(&self, state: &State<W>, blocks: &mut [Block; W], rate: usize);
+    fn clear(&self, state: &mut State<W>, mask: u8);
 }
 
-pub(crate) struct Kernel<P, E> {
+pub(crate) struct Kernel<P, E, Z> {
     pub permute: P,
     pub extract: E,
+    pub clear: Z,
 }
 
-impl<const W: usize, P, E> Permutation<W> for Kernel<P, E>
+impl<const W: usize, P, E, Z> Permutation<W> for Kernel<P, E, Z>
 where
     P: FnMut(&mut State<W>),
     E: Fn(&State<W>, &mut [Block; W], usize),
+    Z: Fn(&mut State<W>, u8),
 {
     #[inline]
     fn permute(&mut self, state: &mut State<W>) {
@@ -32,6 +35,10 @@ where
     #[inline]
     fn extract(&self, state: &State<W>, blocks: &mut [Block; W], rate: usize) {
         (self.extract)(state, blocks, rate);
+    }
+    #[inline]
+    fn clear(&self, state: &mut State<W>, mask: u8) {
+        (self.clear)(state, mask);
     }
 }
 
@@ -73,10 +80,15 @@ impl Lane {
         }
         if used < self.rate {
             block[used] = 0x1f;
-            block[self.rate - 1] |= 0x80;
+            state.0[self.rate / 8 - 1][lane] ^= 1u64 << 63;
             self.squeeze = true;
         }
-        for (word, bytes) in state.0.iter_mut().zip(block[..self.rate].chunks_exact(8)) {
+        let words = if self.squeeze {
+            (used + 8) / 8
+        } else {
+            self.rate / 8
+        };
+        for (word, bytes) in state.0.iter_mut().zip(block[..words * 8].chunks_exact(8)) {
             word[lane] ^= u64::from_le_bytes(bytes.try_into().unwrap());
         }
     }
@@ -116,14 +128,58 @@ pub(crate) fn run<const W: usize, S: Sink, P: Permutation<W>>(
             }
         }
         kernel.permute(&mut state);
-        let rate = lanes.iter().flatten().next().unwrap().rate;
+        let Some(rate) = lanes
+            .iter()
+            .flatten()
+            .find(|lane| lane.squeeze)
+            .map(|lane| lane.rate)
+        else {
+            continue;
+        };
+        if lanes
+            .iter()
+            .all(|lane| lane.is_some_and(|lane| lane.squeeze && lane.rate == rate))
+        {
+            loop {
+                kernel.extract(&state, &mut blocks, rate);
+                let mut finished = false;
+                let mut clear_mask = 0u8;
+                for (i, slot) in lanes.iter_mut().enumerate() {
+                    let job = slot.as_ref().unwrap().job;
+                    if sink.block(job, &blocks[i], rate) {
+                        finished = true;
+                        *slot = if next < jobs.len() {
+                            let new = Lane::new(next, jobs);
+                            next += 1;
+                            clear_mask |= 1 << i;
+                            Some(new)
+                        } else {
+                            None
+                        };
+                    }
+                }
+                if finished {
+                    if clear_mask != 0 {
+                        kernel.clear(&mut state, clear_mask);
+                    }
+                    break;
+                }
+                occupied += W;
+                total += W;
+                kernel.permute(&mut state);
+            }
+            continue;
+        }
+        // Absorbing lanes have no output yet; their transposed words are ignored.
         let uniform = lanes
             .iter()
             .flatten()
-            .all(|lane| lane.squeeze && lane.rate == rate);
+            .filter(|lane| lane.squeeze)
+            .all(|lane| lane.rate == rate);
         if uniform {
             kernel.extract(&state, &mut blocks, rate);
         }
+        let mut clear_mask = 0u8;
         for (i, slot) in lanes.iter_mut().enumerate() {
             let Some(lane) = slot else {
                 continue;
@@ -144,15 +200,16 @@ pub(crate) fn run<const W: usize, S: Sink, P: Permutation<W>>(
                 *slot = if next < jobs.len() {
                     let new = Lane::new(next, jobs);
                     next += 1;
-                    // A recycled lane must not retain capacity or rate words of its old job.
-                    for word in &mut state.0 {
-                        word[i] = 0;
-                    }
+                    clear_mask |= 1 << i;
                     Some(new)
                 } else {
                     None
                 };
             }
+        }
+        // Clear all recycled lanes in one vector pass, including their capacity words.
+        if clear_mask != 0 {
+            kernel.clear(&mut state, clear_mask);
         }
     }
     (occupied, total)

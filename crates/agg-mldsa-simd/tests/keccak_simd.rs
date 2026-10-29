@@ -1,12 +1,16 @@
+#![allow(unexpected_cfgs)]
 mod common;
 use agg_mldsa_simd::poly;
 
 use agg_mldsa_simd::{Backend, Block, Engine, Sink, Xof, XofJob};
 // Include the private kernels so permutation tests need no public testing API.
+#[allow(dead_code)]
 #[path = "../src/keccak/avx2.rs"]
 mod avx2;
+#[allow(dead_code)]
 #[path = "../src/keccak/avx512.rs"]
 mod avx512;
+#[allow(dead_code)]
 #[path = "../src/keccak/lanes.rs"]
 mod lanes;
 
@@ -158,4 +162,49 @@ fn expand_a_mixed_keys() {
         limits.push(1);
     }
     check(&jobs, &limits);
+}
+
+#[cfg(cref)]
+#[test]
+fn c_permutation_oracles() {
+    #[repr(C, align(64))]
+    struct Aligned<const N: usize>([u64; N]);
+    if Engine::new(Backend::Avx2).is_some() {
+        permutations::<4>(|state| {
+            let mut c = Aligned([0u64; 100]);
+            for word in 0..25 {
+                for lane in 0..4 {
+                    c.0[word * 4 + lane] = state.0[word][lane];
+                }
+            }
+            agg_mldsa_cref::f1600x4(&mut c.0);
+            for word in 0..25 {
+                for lane in 0..4 {
+                    state.0[word][lane] = c.0[word * 4 + lane];
+                }
+            }
+        });
+    }
+    if Engine::new(Backend::Avx512).is_some() {
+        for hybrid in [true] {
+            permutations::<8>(|state| {
+                let mut c = Aligned([0u64; 200]);
+                for word in 0..25 {
+                    for lane in 0..8 {
+                        c.0[word * 8 + lane] = state.0[word][lane];
+                    }
+                }
+                if hybrid {
+                    agg_mldsa_cref::xurq_keccak8x_permute(&mut c.0);
+                } else {
+                    agg_mldsa_cref::keccak_p1600_times8_permute_all_24rounds(&mut c.0);
+                }
+                for word in 0..25 {
+                    for lane in 0..8 {
+                        state.0[word][lane] = c.0[word * 8 + lane];
+                    }
+                }
+            });
+        }
+    }
 }

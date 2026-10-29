@@ -91,122 +91,127 @@ pub(crate) fn permute(state: &mut State<8>) {
                 $a19,
                 $a24,
             );
-            let t = rotate::<1>(c1);
-            $a0 = _mm512_ternarylogic_epi64::<0x96>($a0, c4, t);
-            $a5 = _mm512_ternarylogic_epi64::<0x96>($a5, c4, t);
-            $a10 = _mm512_ternarylogic_epi64::<0x96>($a10, c4, t);
-            $a15 = _mm512_ternarylogic_epi64::<0x96>($a15, c4, t);
-            $a20 = _mm512_ternarylogic_epi64::<0x96>($a20, c4, t);
-            let t = rotate::<1>(c2);
-            $a1 = _mm512_ternarylogic_epi64::<0x96>($a1, c0, t);
-            $a6 = _mm512_ternarylogic_epi64::<0x96>($a6, c0, t);
-            $a11 = _mm512_ternarylogic_epi64::<0x96>($a11, c0, t);
-            $a16 = _mm512_ternarylogic_epi64::<0x96>($a16, c0, t);
-            $a21 = _mm512_ternarylogic_epi64::<0x96>($a21, c0, t);
-            let t = rotate::<1>(c3);
-            $a2 = _mm512_ternarylogic_epi64::<0x96>($a2, c1, t);
-            $a7 = _mm512_ternarylogic_epi64::<0x96>($a7, c1, t);
-            $a12 = _mm512_ternarylogic_epi64::<0x96>($a12, c1, t);
-            $a17 = _mm512_ternarylogic_epi64::<0x96>($a17, c1, t);
-            $a22 = _mm512_ternarylogic_epi64::<0x96>($a22, c1, t);
-            let t = rotate::<1>(c4);
-            $a3 = _mm512_ternarylogic_epi64::<0x96>($a3, c2, t);
-            $a8 = _mm512_ternarylogic_epi64::<0x96>($a8, c2, t);
-            $a13 = _mm512_ternarylogic_epi64::<0x96>($a13, c2, t);
-            $a18 = _mm512_ternarylogic_epi64::<0x96>($a18, c2, t);
-            $a23 = _mm512_ternarylogic_epi64::<0x96>($a23, c2, t);
-            let t = rotate::<1>(c0);
-            $a4 = _mm512_ternarylogic_epi64::<0x96>($a4, c3, t);
-            $a9 = _mm512_ternarylogic_epi64::<0x96>($a9, c3, t);
-            $a14 = _mm512_ternarylogic_epi64::<0x96>($a14, c3, t);
-            $a19 = _mm512_ternarylogic_epi64::<0x96>($a19, c3, t);
-            $a24 = _mm512_ternarylogic_epi64::<0x96>($a24, c3, t);
-            $a6 = rotate::<44>($a6);
-            $a12 = rotate::<43>($a12);
+            let d0 = _mm512_xor_si512(c4, rotate::<1>(c1));
+            let d1 = _mm512_xor_si512(c0, rotate::<1>(c2));
+            let d2 = _mm512_xor_si512(c1, rotate::<1>(c3));
+            let d3 = _mm512_xor_si512(c2, rotate::<1>(c4));
+            let d4 = _mm512_xor_si512(c3, rotate::<1>(c0));
+            $a0 = _mm512_xor_si512($a0, d0);
+            $a6 = _mm512_xor_si512($a6, d1);
+            $a12 = _mm512_xor_si512($a12, d2);
+            $a18 = _mm512_xor_si512($a18, d3);
+            $a24 = _mm512_xor_si512($a24, d4);
+            let t1 = rotate::<44>($a6);
+            let t2 = rotate::<43>($a12);
             $a18 = rotate::<21>($a18);
             $a24 = rotate::<14>($a24);
-            let t0 = $a0;
-            let t1 = $a6;
-            $a0 = _mm512_ternarylogic_epi64::<0xd2>($a0, $a6, $a12);
-            $a6 = _mm512_ternarylogic_epi64::<0xd2>($a6, $a12, $a18);
-            $a12 = _mm512_ternarylogic_epi64::<0xd2>($a12, $a18, $a24);
-            $a18 = _mm512_ternarylogic_epi64::<0xd2>($a18, $a24, t0);
-            $a24 = _mm512_ternarylogic_epi64::<0xd2>($a24, t0, t1);
+            $a6 = _mm512_ternarylogic_epi64::<0xd2>(t1, t2, $a18);
+            $a12 = _mm512_ternarylogic_epi64::<0xd2>(t2, $a18, $a24);
+            $a18 = _mm512_ternarylogic_epi64::<0xd2>($a18, $a24, $a0);
+            $a24 = _mm512_ternarylogic_epi64::<0xd2>($a24, $a0, t1);
+            $a0 = _mm512_ternarylogic_epi64::<0xd2>($a0, t1, t2);
             $a0 = _mm512_xor_si512($a0, _mm512_set1_epi64($rc as i64));
-            $a3 = rotate::<28>($a3);
-            $a9 = rotate::<20>($a9);
-            $a10 = rotate::<3>($a10);
+            $a3 = _mm512_xor_si512($a3, d3);
+            $a9 = _mm512_xor_si512($a9, d4);
+            $a10 = _mm512_xor_si512($a10, d0);
+            $a16 = _mm512_xor_si512($a16, d1);
+            $a22 = _mm512_xor_si512($a22, d2);
+            let t1 = rotate::<20>($a9);
+            let t2 = rotate::<3>($a10);
             $a16 = rotate::<45>($a16);
             $a22 = rotate::<61>($a22);
-            let t0 = $a3;
-            let t1 = $a9;
-            $a3 = _mm512_ternarylogic_epi64::<0xd2>($a3, $a9, $a10);
-            $a9 = _mm512_ternarylogic_epi64::<0xd2>($a9, $a10, $a16);
-            $a10 = _mm512_ternarylogic_epi64::<0xd2>($a10, $a16, $a22);
-            $a16 = _mm512_ternarylogic_epi64::<0xd2>($a16, $a22, t0);
-            $a22 = _mm512_ternarylogic_epi64::<0xd2>($a22, t0, t1);
-            $a1 = rotate::<1>($a1);
-            $a7 = rotate::<6>($a7);
-            $a13 = rotate::<25>($a13);
+            $a3 = rotate::<28>($a3);
+            $a9 = _mm512_ternarylogic_epi64::<0xd2>(t1, t2, $a16);
+            $a10 = _mm512_ternarylogic_epi64::<0xd2>(t2, $a16, $a22);
+            $a16 = _mm512_ternarylogic_epi64::<0xd2>($a16, $a22, $a3);
+            $a22 = _mm512_ternarylogic_epi64::<0xd2>($a22, $a3, t1);
+            $a3 = _mm512_ternarylogic_epi64::<0xd2>($a3, t1, t2);
+            $a1 = _mm512_xor_si512($a1, d1);
+            $a7 = _mm512_xor_si512($a7, d2);
+            $a13 = _mm512_xor_si512($a13, d3);
+            $a19 = _mm512_xor_si512($a19, d4);
+            $a20 = _mm512_xor_si512($a20, d0);
+            let t1 = rotate::<6>($a7);
+            let t2 = rotate::<25>($a13);
             $a19 = rotate::<8>($a19);
             $a20 = rotate::<18>($a20);
-            let t0 = $a1;
-            let t1 = $a7;
-            $a1 = _mm512_ternarylogic_epi64::<0xd2>($a1, $a7, $a13);
-            $a7 = _mm512_ternarylogic_epi64::<0xd2>($a7, $a13, $a19);
-            $a13 = _mm512_ternarylogic_epi64::<0xd2>($a13, $a19, $a20);
-            $a19 = _mm512_ternarylogic_epi64::<0xd2>($a19, $a20, t0);
-            $a20 = _mm512_ternarylogic_epi64::<0xd2>($a20, t0, t1);
-            $a4 = rotate::<27>($a4);
-            $a5 = rotate::<36>($a5);
-            $a11 = rotate::<10>($a11);
+            $a1 = rotate::<1>($a1);
+            $a7 = _mm512_ternarylogic_epi64::<0xd2>(t1, t2, $a19);
+            $a13 = _mm512_ternarylogic_epi64::<0xd2>(t2, $a19, $a20);
+            $a19 = _mm512_ternarylogic_epi64::<0xd2>($a19, $a20, $a1);
+            $a20 = _mm512_ternarylogic_epi64::<0xd2>($a20, $a1, t1);
+            $a1 = _mm512_ternarylogic_epi64::<0xd2>($a1, t1, t2);
+            $a4 = _mm512_xor_si512($a4, d4);
+            $a5 = _mm512_xor_si512($a5, d0);
+            $a11 = _mm512_xor_si512($a11, d1);
+            $a17 = _mm512_xor_si512($a17, d2);
+            $a23 = _mm512_xor_si512($a23, d3);
+            let t1 = rotate::<36>($a5);
+            let t2 = rotate::<10>($a11);
             $a17 = rotate::<15>($a17);
             $a23 = rotate::<56>($a23);
-            let t0 = $a4;
-            let t1 = $a5;
-            $a4 = _mm512_ternarylogic_epi64::<0xd2>($a4, $a5, $a11);
-            $a5 = _mm512_ternarylogic_epi64::<0xd2>($a5, $a11, $a17);
-            $a11 = _mm512_ternarylogic_epi64::<0xd2>($a11, $a17, $a23);
-            $a17 = _mm512_ternarylogic_epi64::<0xd2>($a17, $a23, t0);
-            $a23 = _mm512_ternarylogic_epi64::<0xd2>($a23, t0, t1);
-            $a2 = rotate::<62>($a2);
-            $a8 = rotate::<55>($a8);
-            $a14 = rotate::<39>($a14);
+            $a4 = rotate::<27>($a4);
+            $a5 = _mm512_ternarylogic_epi64::<0xd2>(t1, t2, $a17);
+            $a11 = _mm512_ternarylogic_epi64::<0xd2>(t2, $a17, $a23);
+            $a17 = _mm512_ternarylogic_epi64::<0xd2>($a17, $a23, $a4);
+            $a23 = _mm512_ternarylogic_epi64::<0xd2>($a23, $a4, t1);
+            $a4 = _mm512_ternarylogic_epi64::<0xd2>($a4, t1, t2);
+            $a2 = _mm512_xor_si512($a2, d2);
+            $a8 = _mm512_xor_si512($a8, d3);
+            $a14 = _mm512_xor_si512($a14, d4);
+            $a15 = _mm512_xor_si512($a15, d0);
+            $a21 = _mm512_xor_si512($a21, d1);
+            let t1 = rotate::<55>($a8);
+            let t2 = rotate::<39>($a14);
             $a15 = rotate::<41>($a15);
             $a21 = rotate::<2>($a21);
-            let t0 = $a2;
-            let t1 = $a8;
-            $a2 = _mm512_ternarylogic_epi64::<0xd2>($a2, $a8, $a14);
-            $a8 = _mm512_ternarylogic_epi64::<0xd2>($a8, $a14, $a15);
-            $a14 = _mm512_ternarylogic_epi64::<0xd2>($a14, $a15, $a21);
-            $a15 = _mm512_ternarylogic_epi64::<0xd2>($a15, $a21, t0);
-            $a21 = _mm512_ternarylogic_epi64::<0xd2>($a21, t0, t1);
+            $a2 = rotate::<62>($a2);
+            $a8 = _mm512_ternarylogic_epi64::<0xd2>(t1, t2, $a15);
+            $a14 = _mm512_ternarylogic_epi64::<0xd2>(t2, $a15, $a21);
+            $a15 = _mm512_ternarylogic_epi64::<0xd2>($a15, $a21, $a2);
+            $a21 = _mm512_ternarylogic_epi64::<0xd2>($a21, $a2, t1);
+            $a2 = _mm512_ternarylogic_epi64::<0xd2>($a2, t1, t2);
         }};
     }
-    round!(0x0000000000000001u64; a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24);
-    round!(0x0000000000008082u64; a0, a6, a12, a18, a24, a3, a9, a10, a16, a22, a1, a7, a13, a19, a20, a4, a5, a11, a17, a23, a2, a8, a14, a15, a21);
-    round!(0x800000000000808au64; a0, a9, a13, a17, a21, a18, a22, a1, a5, a14, a6, a10, a19, a23, a2, a24, a3, a7, a11, a15, a12, a16, a20, a4, a8);
-    round!(0x8000000080008000u64; a0, a22, a19, a11, a8, a17, a14, a6, a3, a20, a9, a1, a23, a15, a12, a21, a18, a10, a7, a4, a13, a5, a2, a24, a16);
-    round!(0x000000000000808bu64; a0, a14, a23, a7, a16, a11, a20, a9, a18, a2, a22, a6, a15, a4, a13, a8, a17, a1, a10, a24, a19, a3, a12, a21, a5);
-    round!(0x0000000080000001u64; a0, a20, a15, a10, a5, a7, a2, a22, a17, a12, a14, a9, a4, a24, a19, a16, a11, a6, a1, a21, a23, a18, a13, a8, a3);
-    round!(0x8000000080008081u64; a0, a2, a4, a1, a3, a10, a12, a14, a11, a13, a20, a22, a24, a21, a23, a5, a7, a9, a6, a8, a15, a17, a19, a16, a18);
-    round!(0x8000000000008009u64; a0, a12, a24, a6, a18, a1, a13, a20, a7, a19, a2, a14, a21, a8, a15, a3, a10, a22, a9, a16, a4, a11, a23, a5, a17);
-    round!(0x000000000000008au64; a0, a13, a21, a9, a17, a6, a19, a2, a10, a23, a12, a20, a8, a16, a4, a18, a1, a14, a22, a5, a24, a7, a15, a3, a11);
-    round!(0x0000000000000088u64; a0, a19, a8, a22, a11, a9, a23, a12, a1, a15, a13, a2, a16, a5, a24, a17, a6, a20, a14, a3, a21, a10, a4, a18, a7);
-    round!(0x0000000080008009u64; a0, a23, a16, a14, a7, a22, a15, a13, a6, a4, a19, a12, a5, a3, a21, a11, a9, a2, a20, a18, a8, a1, a24, a17, a10);
-    round!(0x000000008000000au64; a0, a15, a5, a20, a10, a14, a4, a19, a9, a24, a23, a13, a3, a18, a8, a7, a22, a12, a2, a17, a16, a6, a21, a11, a1);
-    round!(0x000000008000808bu64; a0, a4, a3, a2, a1, a20, a24, a23, a22, a21, a15, a19, a18, a17, a16, a10, a14, a13, a12, a11, a5, a9, a8, a7, a6);
-    round!(0x800000000000008bu64; a0, a24, a18, a12, a6, a2, a21, a15, a14, a8, a4, a23, a17, a11, a5, a1, a20, a19, a13, a7, a3, a22, a16, a10, a9);
-    round!(0x8000000000008089u64; a0, a21, a17, a13, a9, a12, a8, a4, a20, a16, a24, a15, a11, a7, a3, a6, a2, a23, a19, a10, a18, a14, a5, a1, a22);
-    round!(0x8000000000008003u64; a0, a8, a11, a19, a22, a13, a16, a24, a2, a5, a21, a4, a7, a10, a18, a9, a12, a15, a23, a1, a17, a20, a3, a6, a14);
-    round!(0x8000000000008002u64; a0, a16, a7, a23, a14, a19, a5, a21, a12, a3, a8, a24, a10, a1, a17, a22, a13, a4, a15, a6, a11, a2, a18, a9, a20);
-    round!(0x8000000000000080u64; a0, a5, a10, a15, a20, a23, a3, a8, a13, a18, a16, a21, a1, a6, a11, a14, a19, a24, a4, a9, a7, a12, a17, a22, a2);
-    round!(0x000000000000800au64; a0, a3, a1, a4, a2, a15, a18, a16, a19, a17, a5, a8, a6, a9, a7, a20, a23, a21, a24, a22, a10, a13, a11, a14, a12);
-    round!(0x800000008000000au64; a0, a18, a6, a24, a12, a4, a17, a5, a23, a11, a3, a16, a9, a22, a10, a2, a15, a8, a21, a14, a1, a19, a7, a20, a13);
-    round!(0x8000000080008081u64; a0, a17, a9, a21, a13, a24, a11, a3, a15, a7, a18, a5, a22, a14, a1, a12, a4, a16, a8, a20, a6, a23, a10, a2, a19);
-    round!(0x8000000000008080u64; a0, a11, a22, a8, a19, a21, a7, a18, a4, a10, a17, a3, a14, a20, a6, a13, a24, a5, a16, a2, a9, a15, a1, a12, a23);
-    round!(0x0000000080000001u64; a0, a7, a14, a16, a23, a8, a10, a17, a24, a1, a11, a18, a20, a2, a9, a19, a21, a3, a5, a12, a22, a4, a6, a13, a15);
-    round!(0x8000000080008008u64; a0, a10, a20, a5, a15, a16, a1, a11, a21, a6, a7, a17, a2, a12, a22, a23, a8, a18, a3, a13, a14, a24, a9, a19, a4);
+    const RC: [u64; 24] = [
+        0x0000000000000001u64,
+        0x0000000000008082u64,
+        0x800000000000808au64,
+        0x8000000080008000u64,
+        0x000000000000808bu64,
+        0x0000000080000001u64,
+        0x8000000080008081u64,
+        0x8000000000008009u64,
+        0x000000000000008au64,
+        0x0000000000000088u64,
+        0x0000000080008009u64,
+        0x000000008000000au64,
+        0x000000008000808bu64,
+        0x800000000000008bu64,
+        0x8000000000008089u64,
+        0x8000000000008003u64,
+        0x8000000000008002u64,
+        0x8000000000000080u64,
+        0x000000000000800au64,
+        0x800000008000000au64,
+        0x8000000080008081u64,
+        0x8000000000008080u64,
+        0x0000000080000001u64,
+        0x8000000080008008u64,
+    ];
+    for r in (0..24).step_by(4) {
+        round!(RC[r + 0]; a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24);
+        round!(RC[r + 1]; a0, a6, a12, a18, a24, a3, a9, a10, a16, a22, a1, a7, a13, a19, a20, a4, a5, a11, a17, a23, a2, a8, a14, a15, a21);
+        round!(RC[r + 2]; a0, a9, a13, a17, a21, a18, a22, a1, a5, a14, a6, a10, a19, a23, a2, a24, a3, a7, a11, a15, a12, a16, a20, a4, a8);
+        round!(RC[r + 3]; a0, a22, a19, a11, a8, a17, a14, a6, a3, a20, a9, a1, a23, a15, a12, a21, a18, a10, a7, a4, a13, a5, a2, a24, a16);
+        (
+            a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18,
+            a19, a20, a21, a22, a23, a24,
+        ) = (
+            a0, a14, a23, a7, a16, a11, a20, a9, a18, a2, a22, a6, a15, a4, a13, a8, a17, a1, a10,
+            a24, a19, a3, a12, a21, a5,
+        );
+    }
     store(&mut state.0[0], a0);
     store(&mut state.0[1], a1);
     store(&mut state.0[2], a2);
@@ -237,6 +242,18 @@ pub(crate) fn permute(state: &mut State<8>) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 fn extract(state: &State<8>, blocks: &mut [Block; 8], rate: usize) {
+    if rate == 168 {
+        extract_rate::<168>(state, blocks);
+    } else {
+        extract_rate::<136>(state, blocks);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+fn extract_rate<const RATE: usize>(state: &State<8>, blocks: &mut [Block; 8]) {
+    let rate = RATE;
     // Transpose whole register tiles; handle the last one to five words separately.
     let words = rate / 8;
     let tiled = words / 8 * 8;
@@ -365,6 +382,7 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
             permute: |state: &mut State<8>| permute(state),
             // The same target features cover extraction.
             extract: |state: &State<8>, blocks: &mut [Block; 8], rate| extract(state, blocks, rate),
+            clear: |state: &mut State<8>, mask| clear(state, mask),
         },
     );
 }
@@ -372,4 +390,13 @@ pub(crate) unsafe fn run_xof<S: Sink>(jobs: &[XofJob<'_>], sink: &mut S) {
 #[cfg(not(target_arch = "x86_64"))]
 pub(crate) unsafe fn run_xof<S: Sink>(_: &[XofJob<'_>], _: &mut S) {
     unreachable!("SIMD backend cannot be constructed on this architecture");
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+fn clear(state: &mut State<8>, mask: u8) {
+    for word in &mut state.0 {
+        store(word, _mm512_maskz_mov_epi64(!mask, load(word)));
+    }
 }
