@@ -733,51 +733,66 @@ budgets. Aggregate identity and the release tests pass. These kernel results rem
 for the complete no-slower criterion; integrated speedups do not override them.
 
 
-Local direction only: N=4096, K=4096, H-u, CLMUL, CPU 3, default threads. Times in ms; ratios are current/main.
+Measured again on 2026-10-30 (one warmup and two measured runs per arm).
 
+Local direction only: N=4096, K=4096, H-u, CLMUL, CPU 3, default threads. Times in ms.
 | Metric | main | scalar | avx2 | avx512 |
 |---|---:|---:|---:|---:|
-| instance | 542.5 | 406.9 (0.750x) | 138.6 (0.255x) | 92.6 (0.171x) |
-| witness and tables | 502.6 | 186.7 (0.371x) | 77.2 (0.154x) | 40.1 (0.080x) |
-| Flock records | 83.1 | 80.8 (0.972x) | 82.0 (0.987x) | 80.2 (0.965x) |
-| prove total | 11630.5 | 10935.3 (0.940x) | 10533.5 (0.906x) | 10350.9 (0.890x) |
-| verify uncached | 789.2 | 749.3 (0.949x) | 546.0 (0.692x) | 522.3 (0.662x) |
-| verify cached | 503.6 | 504.1 (1.001x) | 489.8 (0.973x) | 493.1 (0.979x) |
-| public_data | 63.5 | 42.5 (0.670x) | 33.6 (0.530x) | 30.5 (0.480x) |
-| public_t | 26.4 | 26.5 (1.005x) | 9.1 (0.343x) | 7.9 (0.301x) |
-| public_a | 264.5 | 250.3 (0.946x) | 60.0 (0.227x) | 36.5 (0.138x) |
-| prover RSS MiB | 3830.0 | 3569.0 (0.932x) | 3548.0 (0.926x) | 3602.0 (0.940x) |
-| verifier RSS MiB | 2869.0 | 2679.0 (0.934x) | 2724.0 (0.949x) | 2725.0 (0.950x) |
+| instance | 557.0 | 410.7 (0.737x) | 165.0 (0.296x) | 105.9 (0.190x) |
+| witness and tables | 502.7 | 187.0 (0.372x) | 47.4 (0.094x) | 43.2 (0.086x) |
+| Flock records | 91.9 | 79.1 (0.861x) | 78.6 (0.855x) | 81.6 (0.888x) |
+| prove total | 12025.1 | 11212.1 (0.932x) | 10691.1 (0.889x) | 10579.5 (0.880x) |
+| verify uncached | 801.5 | 727.8 (0.908x) | 533.4 (0.666x) | 531.5 (0.663x) |
+| verify cached | 499.3 | 505.8 (1.013x) | 483.0 (0.967x) | 483.9 (0.969x) |
+| public_data | 61.5 | 43.3 (0.704x) | 34.9 (0.567x) | 30.5 (0.496x) |
+| public_t | 26.1 | 28.8 (1.104x) FLAG >5% | 8.9 (0.341x) | 7.3 (0.279x) |
+| public_a | 279.0 | 212.6 (0.762x) | 60.0 (0.215x) | 37.6 (0.135x) |
+| prover RSS MiB | 3710.0 | 3568.0 (0.962x) | 3568.0 (0.962x) | 3568.0 (0.962x) |
+| verifier RSS MiB | 2815.0 | 2678.0 (0.951x) | 2723.0 (0.967x) | 2872.0 (1.020x) |
 
-Local direction only: N=4096, K=16, H-u, CLMUL, CPU 3, default threads. Times in ms; ratios are current/main.
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.36x | 2.69x | 1.10x | 0.99x |
+| avx2 | 3.38x | 10.61x | 1.50x | 1.03x |
+| avx512 | 5.26x | 11.64x | 1.51x | 1.03x |
 
+Local direction only: N=4096, K=16, H-u, CLMUL, CPU 3, default threads. Times in ms.
 | Metric | main | scalar | avx2 | avx512 |
 |---|---:|---:|---:|---:|
-| instance | 68.1 | 50.5 (0.742x) | 30.3 (0.445x) | 30.5 (0.448x) |
-| witness and tables | 496.8 | 162.8 (0.328x) | 41.6 (0.084x) | 35.0 (0.070x) |
-| Flock records | 79.3 | 100.8 (1.271x) FLAG >5% | 81.3 (1.025x) | 81.7 (1.030x) |
-| prove total | 11072.3 | 10636.5 (0.961x) | 10475.2 (0.946x) | 10484.2 (0.947x) |
-| verify uncached | 482.9 | 492.1 (1.019x) | 469.2 (0.972x) | 473.0 (0.979x) |
-| verify cached | 473.8 | 492.0 (1.038x) | 462.9 (0.977x) | 468.5 (0.989x) |
-| public_data | 24.7 | 22.0 (0.891x) | 19.8 (0.799x) | 19.2 (0.779x) |
-| public_t | 25.9 | 25.6 (0.991x) | 8.7 (0.336x) | 7.1 (0.273x) |
-| public_a | 1.1 | 1.1 (1.019x) | 0.3 (0.296x) | 0.2 (0.204x) |
-| prover RSS MiB | 3257.0 | 3309.0 (1.016x) | 3376.0 (1.037x) | 3357.0 (1.031x) |
-| verifier RSS MiB | 2328.0 | 2441.0 (1.049x) | 2516.0 (1.081x) FLAG >5% | 2643.0 (1.135x) FLAG >5% |
+| instance | 67.3 | 51.5 (0.765x) | 31.4 (0.467x) | 27.7 (0.412x) |
+| witness and tables | 501.1 | 211.9 (0.423x) | 41.5 (0.083x) | 33.9 (0.068x) |
+| Flock records | 79.5 | 104.1 (1.309x) FLAG >5% | 84.7 (1.065x) FLAG >5% | 82.9 (1.043x) |
+| prove total | 11363.6 | 10837.3 (0.954x) | 10618.4 (0.934x) | 10687.9 (0.941x) |
+| verify uncached | 512.4 | 520.2 (1.015x) | 478.0 (0.933x) | 474.9 (0.927x) |
+| verify cached | 529.4 | 503.8 (0.952x) | 473.4 (0.894x) | 464.1 (0.877x) |
+| public_data | 24.8 | 21.9 (0.880x) | 20.3 (0.817x) | 19.4 (0.779x) |
+| public_t | 25.8 | 28.7 (1.111x) FLAG >5% | 10.5 (0.406x) | 7.5 (0.291x) |
+| public_a | 1.1 | 1.1 (0.991x) | 0.3 (0.318x) | 0.2 (0.234x) |
+| prover RSS MiB | 3291.0 | 3261.0 (0.991x) | 3358.0 (1.020x) | 3341.0 (1.015x) |
+| verifier RSS MiB | 2376.0 | 2367.0 (0.996x) | 2572.0 (1.082x) FLAG >5% | 2565.0 (1.080x) FLAG >5% |
+
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.31x | 2.36x | 0.99x | 1.05x |
+| avx2 | 2.14x | 12.07x | 1.07x | 1.12x |
+| avx512 | 2.43x | 14.78x | 1.08x | 1.14x |
 
 The verifier public-step columns are from the last uncached run. CPU affinity makes the
 default Rayon/opening pool one thread here; Flock runs without a fork. Shared-host local
 ratios cannot establish the design estimates for 32K on sixteen cloud threads.
+The script prints the deferred cloud commands without running them.
 
-The shared-key repeats (same 1+2 protocol) retain the scalar Flock-records regression and
-an AVX-512 verifier-RSS increase. AVX2 verifier RSS falls within 5% on repeat. Prover RSS
-and the small Flock phase vary between runs; flagged values remain visible below.
+Flags remain for scalar public_t at both key counts, shared-key scalar/AVX2 Flock
+records, and shared-key AVX2/AVX-512 verifier RSS. The public substep columns come
+from one run, so their flags need a separate repeat before attributing a regression.
+Scalar shared-key Flock records and AVX-512 shared-key verifier RSS were also
+flagged in the earlier local matrix. The integrated no-regression gate is not green.
 
-| K=16 repeat | main | scalar | AVX2 | AVX-512 |
-|---|---:|---:|---:|---:|
-| Flock records (ms) | 80.5 | 100.7 (+25.1%) | 79.8 (-0.9%) | 86.6 (+7.6%) |
-| Prover RSS (MiB) | 3261 | 3260 (0.0%) | 3445 (+5.6%) | 3416 (+4.8%) |
-| Verifier RSS (MiB) | 2493 | 2327 (-6.7%) | 2571 (+3.1%) | 2665 (+6.9%) |
-
-Scalar Flock records is slower in both comparisons (+27.1% / +25.1%). AVX-512 verifier RSS
-is higher in both (+13.5% / +6.9%). Those remain failures of the integrated regression gate.
+The kernel gate sweep also remains blocked: AVX2 composite ExpandA measures
+1.105/1.133 times C against the hard 1.00 budget, and AVX2 finish fails both
+composite budgets. AVX-512 SHAKE128 and sampler gates show small above-budget
+ratios and return nonzero. Finish's per-step alternative permits a zero exit status
+despite its printed composite failures. All six 1K aggregate comparisons against
+main pass; the full release suite passes. No performance threshold was relaxed.

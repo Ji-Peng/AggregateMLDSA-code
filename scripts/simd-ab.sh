@@ -8,6 +8,8 @@ unset RAYON_NUM_THREADS AGG_MLDSA_SIMD
 MAIN_WT="$ROOT/target/main-wt"
 export LOG_DIR="$ROOT/target/simd-ab-logs"
 mkdir -p "$LOG_DIR"
+# Equality results describe this invocation only.
+: > "$LOG_DIR/equality.log"
 TMP_DIR="$(mktemp -d "$ROOT/target/simd-ab.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 if [[ ! -d "$MAIN_WT" ]]; then
@@ -70,6 +72,7 @@ for keys in (4096, 16):
     print('| Metric | ' + ' | '.join(backends) + ' |')
     print('|---|' + '---:|' * len(backends))
     texts = [(root / f'{b}_{keys}.log').read_text() for b in backends]
+    measured = {}
     for label, pattern in metrics:
         values = []
         for text in texts:
@@ -78,12 +81,22 @@ for keys in (4096, 16):
             if not match:
                 raise SystemExit(f'Missing metric {label}; inspect logs')
             values.append(float(match[1].replace(',', '')))
+        measured[label] = values
         cells = [f'{values[0]:.1f}']
         for value in values[1:]:
             ratio = value / values[0] if values[0] else 1
             flag = ' FLAG >5%' if ratio > 1.05 else ''
             cells.append(f'{value:.1f} ({ratio:.3f}x){flag}')
         print('| ' + label + ' | ' + ' | '.join(cells) + ' |')
+    print('\nSpeedups (main/current; values above 1 are faster):')
+    print('| Backend | Instance | Witness/tables | Verify uncached | Verify cached |')
+    print('|---|---:|---:|---:|---:|')
+    for i, backend in enumerate(backends[1:], 1):
+        cells = []
+        for metric in ('instance', 'witness and tables', 'verify uncached', 'verify cached'):
+            values = measured[metric]
+            cells.append(f'{values[0] / values[i]:.2f}x' if values[i] else 'N/A')
+        print('| ' + backend + ' | ' + ' | '.join(cells) + ' |')
 PY
 printf '%s\n' "Cloud only (do not run locally; c4d-highmem-16, each supported backend):"
 for b in "${BACKENDS[@]}"; do

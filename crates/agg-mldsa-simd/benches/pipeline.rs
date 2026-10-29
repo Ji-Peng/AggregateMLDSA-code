@@ -115,6 +115,11 @@ fn main() {
 
     // ExpandA includes conversion to the backend NTT order on both sides.
     if let Some(e) = Engine::new(Backend::Avx2) {
+        if agg_mldsa_cref::available() {
+            rust_expand_a(&e, &rho, &mut out);
+            c_expand_a_avx2(&rho, &mut mat_c);
+            assert_eq!(out.a_hat, mat_c, "AVX2 ExpandA reference mismatch");
+        }
         common::compare(
             "expand_a",
             "avx2",
@@ -125,6 +130,11 @@ fn main() {
     }
 
     if let Some(e) = Engine::new(Backend::Avx512) {
+        if agg_mldsa_cref::available() {
+            rust_expand_a(&e, &rho, &mut out);
+            c_expand_a_avx512(&rho, &mut mat_c);
+            assert_eq!(out.a_hat, mat_c, "AVX-512 ExpandA reference mismatch");
+        }
         common::compare(
             "expand_a",
             "avx512",
