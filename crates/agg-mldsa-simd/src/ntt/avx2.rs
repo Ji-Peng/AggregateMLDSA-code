@@ -1,35 +1,10 @@
-//! AVX2 implementation of NTT operations.
-
+//! AVX2 polynomial transforms, with scalar compilation on other architectures.
+//! The x86-64 kernels derive from pq-crystals Dilithium (CC0/Apache-2.0).
 use super::{Form, Scale};
-use crate::params::Prime;
-use crate::poly::Poly32;
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn ntt(p: Prime, a: &mut Poly32) {
-    super::scalar::ntt(p, a)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
-    super::scalar::intt(p, a, s, f)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    super::scalar::dot4(p, a, b, out)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn reduce(p: Prime, a: &mut Poly32, f: Form) {
-    super::scalar::reduce(p, a, f)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn order_from_fips(a: &mut Poly32) {
-    super::scalar::order_from_fips(a)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
-    super::scalar::order_to_fips(a)
-}
+#[cfg(target_arch = "x86_64")]
+#[path = "avx2_x86.rs"]
+mod implementation;
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) use super::scalar::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use implementation::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};
