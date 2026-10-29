@@ -25,13 +25,24 @@
 //! pass plus the replicate fill. Output values are those of the interleaved transform of
 //! the same lanes (the Merkle rows are gathered from the groups, see
 //! `merkle::merkle_tree_lane_blocked`).
+//!
+//! The hashed variant ([`AdditiveNttF128::encode_lane_blocked_hashed`]) takes two more
+//! layers in pass 1 and runs pass 2 position-major: one task takes a position range of
+//! every group and absorbs each group's block into the BLAKE3 leaves of the range right
+//! after transforming it (a row's lane group is one message block of its leaf,
+//! `merkle::GroupLeafHasher`), so the Merkle pass no longer reads the codeword. It can also
+//! transform in a per-thread copy and write nothing back: the codeword then keeps the
+//! pass-1 state, and the opening recomputes the few queried positions from it.
 
 use std::cell::RefCell;
 
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut};
 
 use super::{AdditiveNttF128, kernels, log2_pow2};
-use crate::field::F128;
+use crate::{
+    field::F128,
+    merkle::{GroupLeafHasher, Hash},
+};
 
 /// Lanes per group: one 64-byte line of F128 words.
 pub const LANES_PER_GROUP: usize = 4;
@@ -39,6 +50,9 @@ pub const LANES_PER_GROUP: usize = 4;
 const TILE_LOG: usize = 14;
 /// Layers applied in pass 1 at most (two fused-four steps).
 const MAX_TOP_LAYERS: usize = 8;
+/// Pass-1 layers when pass 2 hashes the leaves: two more layers in the tile leave pass-2
+/// blocks of a quarter the size, so one position range of every group fits in L2.
+const FUSED_TOP_LAYERS: usize = 10;
 /// Rows per tile block at least: the row gather transposes four positions at a time.
 const MIN_ROWS_LOG: usize = 2;
 
@@ -51,6 +65,19 @@ pub fn lane_blocked_ok(log_d: usize, log_inv_rate: usize) -> bool {
 
 thread_local! {
     static TILE: RefCell<Vec<F128>> = const { RefCell::new(Vec::new()) };
+    /// Pass 2 with hashing: the block copy (when the final codeword is not kept) and the
+    /// leaf chaining state of one position range.
+    static PASS2: RefCell<(Vec<F128>, Vec<u32>)> = const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// The pass split chosen by pass 1.
+struct Pass1 {
+    /// Layers applied in pass 1.
+    b: usize,
+    /// Layers left for pass 2 (log2 of its block length in positions).
+    low: usize,
+    /// Groups holding a live lane.
+    live_groups: usize,
 }
 
 impl AdditiveNttF128 {
@@ -69,6 +96,182 @@ impl AdditiveNttF128 {
     ) {
         let n = d << log_inv_rate;
         let log_d = log2_pow2(n);
+        let Pass1 { b, low, live_groups } = self.lane_blocked_pass1(codeword, q, t, live, d, log_inv_rate, MAX_TOP_LAYERS);
+        if live_groups == 0 {
+            return;
+        }
+        let r = log_inv_rate;
+        let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+        let t_pass = std::time::Instant::now();
+        let group_len = LANES_PER_GROUP * n;
+
+        // Pass 2: layers r + b .. log_d, one layer-(r + b) block at a time.
+        let sub = 1usize << low;
+        let subs_per_group = n / sub;
+        codeword[..live_groups * group_len]
+            .par_chunks_mut(sub * LANES_PER_GROUP)
+            .enumerate()
+            .for_each(|(s, block)| {
+                let p0 = (s % subs_per_group) * sub;
+                self.deep_layers(block, p0, r + b, log_d, false);
+            });
+        if timing {
+            eprintln!("[commit-timing] lane-blocked pass 2 (low={low}): {:.2} ms", t_pass.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+
+    /// [`Self::encode_lane_blocked`] with the Merkle leaves hashed inside pass 2: one task
+    /// takes a position range of every group, transforms each group's block through the
+    /// remaining layers while it is in cache and absorbs it into the range's leaves
+    /// (`leaves[p]` = the chaining value of row `p`, `leaves.len()` = the positions per
+    /// group).
+    ///
+    /// With `keep_final` the transformed blocks are written back, so `codeword` ends as
+    /// [`Self::encode_lane_blocked`] leaves it. Without it they are transformed in a
+    /// per-thread copy and dropped after hashing: `codeword` keeps the pass-1 state, in
+    /// which layers from the returned index on are still to be applied
+    /// ([`Self::lane_blocked_finish_position`] recomputes any position from it,
+    /// [`Self::lane_blocked_finish`] the whole codeword).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_lane_blocked_hashed(
+        &self,
+        codeword: &mut [F128],
+        q: &[F128],
+        t: usize,
+        live: usize,
+        d: usize,
+        log_inv_rate: usize,
+        hasher: &GroupLeafHasher,
+        leaves: &mut [Hash],
+        keep_final: bool,
+    ) -> usize {
+        let n = d << log_inv_rate;
+        let log_d = log2_pow2(n);
+        let groups = t.div_ceil(LANES_PER_GROUP);
+        assert_eq!(hasher.groups(), groups);
+        assert_eq!(leaves.len(), n);
+        let Pass1 { b, low, live_groups } =
+            self.lane_blocked_pass1(codeword, q, t, live, d, log_inv_rate, FUSED_TOP_LAYERS);
+        let first = log_inv_rate + b;
+        let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+        let t_pass = std::time::Instant::now();
+        let sub = 1usize << low;
+        let words = sub * LANES_PER_GROUP;
+        let state_len = GroupLeafHasher::state_len(sub);
+        let base = Base(codeword.as_mut_ptr());
+        leaves.par_chunks_mut(sub).enumerate().for_each(|(s, out)| {
+            let p0 = s * sub;
+            PASS2.with_borrow_mut(|(scratch, state)| {
+                if state.len() < state_len {
+                    state.resize(state_len, 0);
+                }
+                if !keep_final && scratch.len() < words {
+                    scratch.resize(words, F128::ZERO);
+                }
+                for g in 0..groups {
+                    let at = base.at((g * n + p0) * LANES_PER_GROUP);
+                    if g >= live_groups {
+                        // SAFETY: a dead group is zero (pass 1) and no task writes it; the
+                        // range lies inside `codeword`.
+                        let lines = unsafe { core::slice::from_raw_parts(at, words) };
+                        hasher.absorb(state, g, lines);
+                    } else if keep_final {
+                        // SAFETY: positions [p0, p0 + sub) of group g belong to this task only
+                        // (tasks partition the positions) and lie inside `codeword`.
+                        let block = unsafe { core::slice::from_raw_parts_mut(at, words) };
+                        self.deep_layers(block, p0, first, log_d, true);
+                        hasher.absorb(state, g, block);
+                    } else {
+                        // SAFETY: no task writes `codeword` in this mode; the range lies
+                        // inside it.
+                        let src = unsafe { core::slice::from_raw_parts(at, words) };
+                        let block = &mut scratch[..words];
+                        block.copy_from_slice(src);
+                        self.deep_layers(block, p0, first, log_d, true);
+                        hasher.absorb(state, g, block);
+                    }
+                }
+                hasher.finish(state, out);
+            });
+        });
+        if timing {
+            eprintln!(
+                "[commit-timing] lane-blocked pass 2 + leaves (low={low}, keep={keep_final}): {:.2} ms",
+                t_pass.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        first
+    }
+
+    /// Position `pos` (its four words) after layers `first .. log_d` of the lane-blocked
+    /// block `block` (positions `p0 .. p0 + 2^(log_d - first)` of one group, state after
+    /// layer `first - 1`, as [`Self::encode_lane_blocked_hashed`] leaves the codeword
+    /// without `keep_final`); `work` is scratch. Equal to that position after the full
+    /// layers ([`Self::lane_blocked_finish`]), at a fraction of the work: a layer pairs the
+    /// halves of each block and the later layers stay inside one half, so only the half
+    /// holding `pos` is computed at each layer (one product per pair, `2^(log_d - first)
+    /// - 1` products per word in all).
+    pub fn lane_blocked_finish_position(
+        &self,
+        block: &[F128],
+        p0: usize,
+        first: usize,
+        log_d: usize,
+        pos: usize,
+        work: &mut Vec<F128>,
+    ) -> [F128; LANES_PER_GROUP] {
+        let sub = 1usize << (log_d - first);
+        assert_eq!(block.len(), sub * LANES_PER_GROUP);
+        assert!(p0.is_multiple_of(sub) && (p0..p0 + sub).contains(&pos));
+        work.clear();
+        work.extend_from_slice(block);
+        // `work[..len * 4]` holds positions `start .. start + len` after layer `l - 1`.
+        let (mut start, mut len) = (p0, sub);
+        for l in first..log_d {
+            let half = len / 2;
+            let tw = self.twiddle(l, start >> (log_d - l));
+            let top = pos < start + half;
+            for i in 0..half * LANES_PER_GROUP {
+                let (u, v) = (work[i], work[i + half * LANES_PER_GROUP]);
+                // The butterfly: top u + v t, bottom v + (u + v t).
+                let new_u = u + v * tw;
+                work[i] = if top { new_u } else { v + new_u };
+            }
+            if !top {
+                start += half;
+            }
+            len = half;
+        }
+        debug_assert_eq!(start, pos);
+        core::array::from_fn(|k| work[k])
+    }
+
+    /// Layers `first .. log_d` on every block of a lane-blocked codeword of `n = 2^log_d`
+    /// positions per group, in parallel.
+    pub fn lane_blocked_finish(&self, codeword: &mut [F128], n: usize, first: usize) {
+        let log_d = log2_pow2(n);
+        let sub = 1usize << (log_d - first);
+        assert!(codeword.len().is_multiple_of(LANES_PER_GROUP * n));
+        codeword.par_chunks_mut(sub * LANES_PER_GROUP).enumerate().for_each(|(s, block)| {
+            self.deep_layers(block, (s % (n / sub)) * sub, first, log_d, true);
+        });
+    }
+
+    /// Pass 1 (gather, layers `r .. r + b`, streaming store; `b` at most `max_top` unless
+    /// `FLOCK_LB_TOP` sets it) and the zero fill of the dead groups.
+    #[allow(clippy::too_many_arguments)]
+    fn lane_blocked_pass1(
+        &self,
+        codeword: &mut [F128],
+        q: &[F128],
+        t: usize,
+        live: usize,
+        d: usize,
+        log_inv_rate: usize,
+        max_top: usize,
+    ) -> Pass1 {
+        let n = d << log_inv_rate;
+        let log_d = log2_pow2(n);
         let groups = t.div_ceil(LANES_PER_GROUP);
         assert!(log_d <= self.log_domain_size());
         assert!(lane_blocked_ok(log_d, log_inv_rate), "shape too small for the lane-blocked encode");
@@ -76,19 +279,19 @@ impl AdditiveNttF128 {
         assert!(live <= t && q.len() >= live * d);
         let group_len = LANES_PER_GROUP * n;
         let live_groups = live.div_ceil(LANES_PER_GROUP);
+        let r = log_inv_rate;
+        let avail = log_d - r;
+        let env = |k: &str, dflt: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(dflt);
+        let (tile_log, max_top) = (env("FLOCK_LB_TILE_LOG", TILE_LOG), env("FLOCK_LB_TOP", max_top));
+        let b = max_top.min(avail - MIN_ROWS_LOG);
+        let low = avail - b;
         // Groups of dead lanes: their codeword is zero.
         codeword[live_groups * group_len..]
             .par_chunks_mut(1 << 16)
             .for_each(|c| c.fill(F128::ZERO));
         if live_groups == 0 {
-            return;
+            return Pass1 { b, low, live_groups };
         }
-        let r = log_inv_rate;
-        let avail = log_d - r;
-        let env = |k: &str, dflt: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(dflt);
-        let (tile_log, max_top) = (env("FLOCK_LB_TILE_LOG", TILE_LOG), env("FLOCK_LB_TOP", MAX_TOP_LAYERS));
-        let b = max_top.min(avail - MIN_ROWS_LOG);
-        let low = avail - b;
         let a = low.min(tile_log - b);
         let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
         let t_pass = std::time::Instant::now();
@@ -135,21 +338,20 @@ impl AdditiveNttF128 {
         if timing {
             eprintln!("[commit-timing] lane-blocked pass 1 (b={b} a={a}): {:.2} ms", t_pass.elapsed().as_secs_f64() * 1e3);
         }
-        let t_pass = std::time::Instant::now();
+        Pass1 { b, low, live_groups }
+    }
 
-        // Pass 2: layers r + b .. log_d, one layer-(r + b) block at a time.
-        let sub = 1usize << low;
-        let subs_per_group = n / sub;
-        codeword[..live_groups * group_len]
-            .par_chunks_mut(sub * LANES_PER_GROUP)
-            .enumerate()
-            .for_each(|(s, block)| {
-                let p0 = (s % subs_per_group) * sub;
-                self.deep_layers(block, p0, r + b, log_d);
-            });
-        if timing {
-            eprintln!("[commit-timing] lane-blocked pass 2 (low={low}): {:.2} ms", t_pass.elapsed().as_secs_f64() * 1e3);
+    /// The seven twiddles of the fused three-layer butterfly at `(layer, block)`.
+    fn fused3_twiddles(&self, layer: usize, block: usize) -> [F128; 7] {
+        let mut tw = [F128::ZERO; 7];
+        tw[0] = self.twiddle(layer, block);
+        for s in 0..2 {
+            tw[1 + s] = self.twiddle(layer + 1, 2 * block + s);
         }
+        for s in 0..4 {
+            tw[3 + s] = self.twiddle(layer + 2, 4 * block + s);
+        }
+        tw
     }
 
     /// The fifteen twiddles of the fused four-layer butterfly at `(layer, block)`.
@@ -228,8 +430,10 @@ impl AdditiveNttF128 {
     }
 
     /// Layers `first .. log_d` on one layer-`first` block of lane-blocked positions
-    /// starting at position `p0` of its group.
-    fn deep_layers(&self, block: &mut [F128], p0: usize, first: usize, log_d: usize) {
+    /// starting at position `p0` of its group. With `fused3` a remainder of three layers
+    /// takes one fused-three pass instead of a fused-two and a single-layer pass (the same
+    /// values).
+    fn deep_layers(&self, block: &mut [F128], p0: usize, first: usize, log_d: usize, fused3: bool) {
         let sub = block.len() / LANES_PER_GROUP;
         let mut l = first;
         while l < log_d {
@@ -248,6 +452,12 @@ impl AdditiveNttF128 {
                     }
                 }
                 l += 4;
+            } else if fused3 && log_d - l == 3 {
+                for lb in 0..nb {
+                    let tw = self.fused3_twiddles(l, gb0 + lb);
+                    kernels::blocked4_fused_3layer(&mut block[lb * len..(lb + 1) * len], &tw);
+                }
+                l += 3;
             } else if log_d - l >= 2 {
                 for lb in 0..nb {
                     let gb = gb0 + lb;
@@ -393,6 +603,77 @@ mod tests {
         }
     }
 
+    /// The hashed encode leaves the codeword of the stored encode (`keep_final`) or a
+    /// state that the finishing pass turns into it, and its leaves are the BLAKE3 leaf
+    /// hashes of the rows: every shape of the transform test, every SIMD mask.
+    #[test]
+    fn hashed_encode_matches_encode_and_leaves() {
+        use crate::merkle::{HashKind, hash_leaf};
+        let mut rng = Rng::new(0x1A4E_4A54);
+        for &(log_d, r, t, live) in &[
+            (6usize, 0usize, 1usize, 1usize),
+            (7, 1, 4, 4),
+            (8, 1, 5, 5),
+            (9, 2, 7, 3),
+            (10, 1, 9, 9),
+            (11, 1, 17, 17),
+            (12, 2, 6, 4),
+            (13, 1, 3, 0),
+            (15, 1, 5, 5),
+            (16, 2, 17, 13),
+            (17, 2, 34, 34),
+        ] {
+            let d = 1usize << (log_d - r);
+            let n = 1usize << log_d;
+            let groups = t.div_ceil(4);
+            let mut q = vec![F128::ZERO; t * d];
+            for w in q[..live * d].iter_mut() {
+                *w = rng.f128();
+            }
+            let ntt = AdditiveNttF128::standard(log_d);
+            let mut want = rng.f128_vec(groups * 4 * n);
+            ntt.encode_lane_blocked(&mut want, &q, t, live, d, r);
+            let want_leaves: Vec<Hash> = (0..n)
+                .map(|p| {
+                    let mut bytes = Vec::with_capacity(16 * t);
+                    for l in 0..t {
+                        let w = want[(l / 4 * n + p) * 4 + l % 4];
+                        bytes.extend_from_slice(&w.lo.to_le_bytes());
+                        bytes.extend_from_slice(&w.hi.to_le_bytes());
+                    }
+                    hash_leaf(&bytes, HashKind::Blake3)
+                })
+                .collect();
+            let hasher = GroupLeafHasher::new(t, HashKind::Blake3).expect("one chunk");
+            for mask in test_masks() {
+                for keep in [true, false] {
+                    let (mut cw, leaves, first) = with_mask(mask, || {
+                        let mut cw = rng.f128_vec(groups * 4 * n);
+                        let mut leaves = vec![[0u8; 32]; n];
+                        let first = ntt.encode_lane_blocked_hashed(&mut cw, &q, t, live, d, r, &hasher, &mut leaves, keep);
+                        (cw, leaves, first)
+                    });
+                    let what = format!("log_d={log_d} r={r} t={t} live={live} keep={keep} mask={mask:#x}");
+                    assert!(leaves == want_leaves, "leaves ({what})");
+                    if !keep {
+                        let sub = 1usize << (log_d - first);
+                        let mut work = Vec::new();
+                        for &p in &[0usize, 1, sub - 1, n / 2 + 3, n - 1] {
+                            let p0 = p / sub * sub;
+                            for g in 0..groups {
+                                let block = &cw[(g * n + p0) * 4..][..sub * 4];
+                                let line = ntt.lane_blocked_finish_position(block, p0, first, log_d, p, &mut work);
+                                assert_eq!(&line[..], &want[(g * n + p) * 4..][..4], "position {p} group {g} ({what})");
+                            }
+                        }
+                        ntt.lane_blocked_finish(&mut cw, n, first);
+                    }
+                    assert!(cw == want, "codeword ({what})");
+                }
+            }
+        }
+    }
+
     /// Single-thread, cache-resident cost of the pass-2 layers (cycles per line butterfly
     /// are what bound the encode where the carry-less multiply is slow):
     /// `cargo test --release --lib deep_layers_cost -- --ignored --nocapture`.
@@ -408,7 +689,7 @@ mod tests {
             let reps = 1usize << (24 - low);
             let t0 = std::time::Instant::now();
             for i in 0..reps {
-                ntt.deep_layers(&mut block, (i % 8) * sub, log_d - low, log_d);
+                ntt.deep_layers(&mut block, (i % 8) * sub, log_d - low, log_d, true);
             }
             let ns = t0.elapsed().as_secs_f64() * 1e9;
             let butterflies = (reps * sub / 2 * low) as f64;
@@ -452,5 +733,51 @@ mod tests {
             crate::scratch::give_f128(cw);
             crate::scratch::give_f128(iw);
         }
+    }
+
+    /// Direction-only timing of the stored encode plus the gathered Merkle leaves against
+    /// the hashed encode (final codeword kept and dropped), at the 4,096-record level-0
+    /// shape or `FLOCK_LB_TIMING_SHAPE=log_d,r,t`:
+    /// `cargo test --release --lib hashed_encode_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing"]
+    fn hashed_encode_timing() {
+        use crate::merkle::{HashKind, merkle_tree_lane_blocked};
+        let shape: Vec<usize> = std::env::var("FLOCK_LB_TIMING_SHAPE")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+            .unwrap_or_else(|| vec![20, 2, 17]);
+        let (log_d, r, t) = (shape[0], shape[1], shape[2]);
+        let d = 1usize << (log_d - r);
+        let n = 1usize << log_d;
+        let mut rng = Rng::new(0x71AF);
+        let q: Vec<F128> = (0..t * d).map(|_| rng.f128()).collect();
+        let ntt = AdditiveNttF128::standard(log_d);
+        let groups = t.div_ceil(4);
+        let hasher = GroupLeafHasher::new(t, HashKind::Blake3).expect("one chunk");
+        let ms = |t0: std::time::Instant| t0.elapsed().as_secs_f64() * 1e3;
+        let mut cw = crate::scratch::take_f128(groups * 4 * n);
+        cw.par_chunks_mut(256).for_each(|c| c[0] = F128::ZERO);
+        for rep in 0..3 {
+            let t0 = std::time::Instant::now();
+            ntt.encode_lane_blocked(&mut cw, &q, t, t, d, r);
+            let enc = ms(t0);
+            let t0 = std::time::Instant::now();
+            let tree = merkle_tree_lane_blocked(&cw, t, n, HashKind::Blake3);
+            let leaves = ms(t0);
+            drop(tree);
+            let mut tree = vec![[0u8; 32]; n];
+            let t0 = std::time::Instant::now();
+            ntt.encode_lane_blocked_hashed(&mut cw, &q, t, t, d, r, &hasher, &mut tree, true);
+            let keep = ms(t0);
+            let t0 = std::time::Instant::now();
+            ntt.encode_lane_blocked_hashed(&mut cw, &q, t, t, d, r, &hasher, &mut tree, false);
+            let discard = ms(t0);
+            eprintln!(
+                "rep {rep}: stored encode {enc:.1} + tree {leaves:.1} = {:.1} ms | hashed keep {keep:.1} ms | hashed discard {discard:.1} ms",
+                enc + leaves
+            );
+        }
+        crate::scratch::give_f128(cw);
     }
 }

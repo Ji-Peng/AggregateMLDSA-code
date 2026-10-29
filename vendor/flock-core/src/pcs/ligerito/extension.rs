@@ -2124,7 +2124,6 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     let claim_bits = |level: usize| config.claim_batch_grinding_bits[level] as u32;
     let consistency_bits = |level: usize| config.consistency_batch_grinding_bits[level] as u32;
     let ood_count = |level: usize| config.ood_samples[level];
-    let l0_row = |q: usize| l0_codeword.row(q);
 
     let mut ood_values = Vec::new();
     let mut claim_batch_grinding_nonces = Vec::new();
@@ -2484,7 +2483,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
         t_grind += _t.elapsed();
     }
     let _t = Instant::now();
-    let opened_rows_0: Vec<Vec<F128>> = queries_0.iter().map(|&q| l0_row(q)).collect();
+    let opened_rows_0: Vec<Vec<F128>> = l0_codeword.rows_at(&queries_0);
     let initial_proof = RecursiveProof {
         opened_rows: opened_rows_0.clone(),
         merkle_proof: merkle_paths_for(l0_tree, block_len_0, &queries_0, strat(0)),
