@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "aerie-keccak",
  "agg-bridge",
+ "agg-mldsa-simd",
  "agg-witness",
  "bincode",
  "flock-core",

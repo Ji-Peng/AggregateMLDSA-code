@@ -153,6 +153,48 @@ pub fn sponge_trace(mu: &[u8; TR_BYTES], w1_bytes: &[u8; W1_ENCODE_BYTES]) -> Sp
     }
 }
 
+/// [`sponge_trace`] of many records, eight sponges in lockstep on `engine`'s
+/// Keccak lanes (equal outputs on every backend).
+pub fn sponge_traces(
+    engine: &agg_mldsa_simd::Engine,
+    records: &[(&[u8; TR_BYTES], &[u8; W1_ENCODE_BYTES])],
+) -> Vec<SpongeTrace> {
+    let mut out = Vec::with_capacity(records.len());
+    for group in records.chunks(8) {
+        let blocks: Vec<[[u8; RATE]; PERMS]> =
+            group.iter().map(|(mu, w1)| sponge_blocks(mu, w1)).collect();
+        let mut traces: Vec<SpongeTrace> = blocks
+            .iter()
+            .map(|b| SpongeTrace {
+                blocks: *b,
+                inputs: [[0; 25]; PERMS],
+                outputs: [[0; 25]; PERMS],
+                c_tilde: [0; 32],
+            })
+            .collect();
+        // Word-major states: st[w][i] is lane w of sponge i (unused lanes stay zero).
+        let mut st = [[0u64; 8]; 25];
+        for m in 0..PERMS {
+            for (i, t) in traces.iter_mut().enumerate() {
+                for (w, chunk) in t.blocks[m].as_chunks::<8>().0.iter().enumerate() {
+                    st[w][i] ^= u64::from_le_bytes(*chunk);
+                }
+                t.inputs[m] = core::array::from_fn(|w| st[w][i]);
+            }
+            engine.keccak_f8(&mut st);
+            for (i, t) in traces.iter_mut().enumerate() {
+                t.outputs[m] = core::array::from_fn(|w| st[w][i]);
+            }
+        }
+        for t in &mut traces {
+            t.c_tilde
+                .copy_from_slice(&state_bytes(&t.outputs[PERMS - 1])[..32]);
+        }
+        out.extend(traces);
+    }
+    out
+}
+
 /// Position of a message bit in the sponge: permutation index m in [0, 7) and state bit in [0, 1088).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BitSlot {
@@ -222,6 +264,31 @@ mod tests {
             }
             // Capacity of the first input is zero.
             assert!(t.inputs[0][RATE / 8..].iter().all(|&x| x == 0));
+        }
+    }
+
+    /// The batched traces equal the per-record ones on every Keccak backend, for
+    /// counts that leave partial groups of eight.
+    #[test]
+    fn sponge_traces_match_sponge_trace_on_every_backend() {
+        use agg_mldsa_simd::{Backend, Engine};
+        let mut rng = SplitMix64::new(31);
+        let recs: Vec<([u8; TR_BYTES], [u8; W1_ENCODE_BYTES])> = (0..13)
+            .map(|_| {
+                let mut mu = [0u8; TR_BYTES];
+                let mut w1 = [0u8; W1_ENCODE_BYTES];
+                rng.fill(&mut mu);
+                rng.fill(&mut w1);
+                (mu, w1)
+            })
+            .collect();
+        let want: Vec<SpongeTrace> = recs.iter().map(|(mu, w1)| sponge_trace(mu, w1)).collect();
+        for b in [Backend::Scalar, Backend::Avx2, Backend::Avx512] {
+            let Some(e) = Engine::new(b) else { continue };
+            for n in [1, 8, 13] {
+                let refs: Vec<_> = recs[..n].iter().map(|(mu, w1)| (mu, w1)).collect();
+                assert_eq!(sponge_traces(&e, &refs), want[..n], "{b:?}, n = {n}");
+            }
         }
     }
 
