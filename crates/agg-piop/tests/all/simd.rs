@@ -72,12 +72,15 @@ fn main_tables_match_the_reference_build() {
     );
 }
 
+/// A named change to one signature.
+type Mutation = Box<dyn Fn(&mut Vec<u8>)>;
+
 #[test]
 fn a_bad_record_fails_identically_on_both_builds() {
     let records = gen::records_shared_keys(0xF6, 21, 4);
     let other = gen::record(0xF7, 0);
     let hint = C_TILDE_BYTES + L * 32 * Z_BITS;
-    let mutations: [(&str, Box<dyn Fn(&mut Vec<u8>)>); 6] = [
+    let mutations: [(&str, Mutation); 6] = [
         (
             "short",
             Box::new(|s| {
