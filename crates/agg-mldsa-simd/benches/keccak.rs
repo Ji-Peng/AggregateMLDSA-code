@@ -111,7 +111,7 @@ fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut(
     let mut ratio = initial;
     if initial > 1.00 && initial <= 1.03 {
         let mut ratios = [0.0f64; 3];
-        for k in 0..3 {
+        for (k, ratio_slot) in ratios.iter_mut().enumerate() {
             let swapped = k % 2 == 1;
             let mut pooled_rs = Vec::with_capacity(common::NUM_TRIALS);
             let mut pooled_cs = Vec::with_capacity(common::NUM_TRIALS);
@@ -126,7 +126,7 @@ fn compare(name: &str, backend: &str, mut rust: impl FnMut(), mut c: impl FnMut(
             }
             pooled_rs.sort_by(f64::total_cmp);
             pooled_cs.sort_by(f64::total_cmp);
-            ratios[k] = pooled_rs[pooled_rs.len() / 2] / pooled_cs[pooled_cs.len() / 2];
+            *ratio_slot = pooled_rs[pooled_rs.len() / 2] / pooled_cs[pooled_cs.len() / 2];
         }
         ratios.sort_by(f64::total_cmp);
         ratio = ratios[1];
@@ -939,7 +939,7 @@ fn main() {
             let limits = vec![5; w];
             let mut counts = vec![0; w];
             let mut out = [[0u8; 840]; 8];
-            ok &= compare_parity(
+            ok &= compare(
                 "SHAKE128 34B/5",
                 if w == 4 { "avx2" } else { "avx512" },
                 || shake(&engine, &jobs, &mut counts, &limits),

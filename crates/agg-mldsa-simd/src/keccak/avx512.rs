@@ -242,13 +242,10 @@ pub(crate) fn permute(state: &mut State<8>) {
             round!(RC[r + 1]; a0, a6, a12, a18, a24, a3, a9, a10, a16, a22, a1, a7, a13, a19, a20, a4, a5, a11, a17, a23, a2, a8, a14, a15, a21);
             round!(RC[r + 2]; a0, a9, a13, a17, a21, a18, a22, a1, a5, a14, a6, a10, a19, a23, a2, a24, a3, a7, a11, a15, a12, a16, a20, a4, a8);
             round!(RC[r + 3]; a0, a22, a19, a11, a8, a17, a14, a6, a3, a20, a9, a1, a23, a15, a12, a21, a18, a10, a7, a4, a13, a5, a2, a24, a16);
-            (
-                a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18,
-                a19, a20, a21, a22, a23, a24,
-            ) = (
-                a0, a14, a23, a7, a16, a11, a20, a9, a18, a2, a22, a6, a15, a4, a13, a8, a17, a1, a10,
-                a24, a19, a3, a12, a21, a5,
-            );
+            let t = a1; a1 = a14; a14 = a13; a13 = a4; a4 = a16; a16 = a17; a17 = t;
+            let t = a2; a2 = a23; a23 = a21; a21 = a3; a3 = a7; a7 = a9; a9 = t;
+            let t = a5; a5 = a11; a11 = a6; a6 = a20; a20 = a19; a19 = a24; a24 = t;
+            let t = a8; a8 = a18; a18 = a10; a10 = a22; a22 = a12; a12 = a15; a15 = t;
         }};
     }
     // An opaque bound keeps the loop rolled.
