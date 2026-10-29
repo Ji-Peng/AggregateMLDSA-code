@@ -6,6 +6,9 @@ use super::{FinishError, FinishOut, FinishRow, HuCols};
 use crate::{params::*, poly::{Challenge39, Poly32}};
 use std::mem::MaybeUninit;
 use std::arch::x86_64::*;
+const _: () = assert!(GAMMA1 == 1 << 17);
+/// f32 value of (1/63079) * (1 + 2^-20).
+const HU_RECIP: f32 = 1.5853151e-5;
 type V = __m512i;
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
@@ -24,25 +27,10 @@ fn mul(a: V, b: V) -> V { _mm512_mullo_epi32(a,b) }
 fn and(a: V, b: V) -> V { _mm512_and_si512(a,b) }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn or(a: V, b: V) -> V { _mm512_or_si512(a,b) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn gt(a: V, b: V) -> V { _mm512_maskz_set1_epi32(_mm512_cmpgt_epi32_mask(a,b), -1) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn eq(a: V, b: V) -> V { _mm512_maskz_set1_epi32(_mm512_cmpeq_epi32_mask(a,b), -1) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn sar<const K: u32>(a: V) -> V { _mm512_srai_epi32::<K>(a) }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn shr<const K: u32>(a: V) -> V { _mm512_srli_epi32::<K>(a) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn select(mask: V, yes: V, no: V) -> V { or(and(mask,yes), andnot(mask,no)) }
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-fn andnot(a: V,b: V) -> V { _mm512_andnot_si512(a,b) }
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn load(a: &[i32; 16]) -> V {
@@ -92,7 +80,8 @@ fn crt_mont(a: V) -> V {
     let odd = _mm512_sub_epi64(_mm512_mul_epi32(_mm512_srli_epi64::<32>(a),c),
         _mm512_mul_epi32(_mm512_srli_epi64::<32>(t),splat(P2)));
     // |a| < P2, |CRT_C| < P2/2: Montgomery output lies in (-P2,P2).
-    or(_mm512_srli_epi64::<32>(even), _mm512_slli_epi64::<32>(_mm512_srli_epi64::<32>(odd)))
+    // The result is the high half of each 64-bit difference: even lanes from `even`, odd lanes from `odd`.
+    _mm512_mask_blend_epi32(0xAAAA, _mm512_srli_epi64::<32>(even), odd)
 }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, out: &mut [[i32;256];4]) {
@@ -172,52 +161,77 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
         }
     }
 }
+/// Multiplies lanes in [0,44] by ALPHA = 93 * 2^11 with one 16-bit multiply and a shift.
+#[inline]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+fn times_alpha(a: V) -> V { _mm512_slli_epi32::<11>(_mm512_mullo_epi16(a,splat(93))) }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
-    let mut bad_q = splat(0);
-    let mut bad_u = splat(0);
-    let mut bad_v = splat(0);
-    for i in (0..256).step_by(16) {
+    let zero = splat(0);
+    let hq = splat((Q-1)/2);
+    let qv = splat(Q);
+    let p2 = splat(P2);
+    let mut bad_q = 0u16;
+    let mut bad_u = 0u16;
+    let mut bad_v = 0u16;
+    // The row step is expanded 2 times per iteration so that independent chains interleave.
+    macro_rules! step { ($i:expr) => {{
+        let i: usize = $i;
         let xq = load(row.xq[i..i+16].try_into().unwrap());
         let xp = load(row.xp[i..i+16].try_into().unwrap());
         let t = load(row.t[i..i+16].try_into().unwrap());
         let hint = bytes(row.h[i..i+16].try_into().unwrap());
         let k = crt_mont(sub(xp,xq));
-        let k = add(k,and(sar::<31>(k),splat(P2)));
-        let center = or(gt(k,splat((P2-1)/2)),and(eq(k,splat((P2-1)/2)),gt(xq,splat((Q-1)/2))));
-        let kc = sub(k,and(center,splat(P2)));
+        let k = _mm512_mask_add_epi32(k,_mm512_cmplt_epi32_mask(k,zero),k,p2);
+        let half = splat((P2-1)/2);
+        let center = _mm512_cmpgt_epi32_mask(k,half)
+            | _mm512_mask_cmpgt_epi32_mask(_mm512_cmpeq_epi32_mask(k,half),xq,hq);
+        let kc = _mm512_mask_sub_epi32(k,center,k,p2);
         // |xq-t| <= q-1+B_T < 2^29; reduce32 leaves (-q,q).
         let a = sub(xq,t);
-        let r = sub(a,mul(sar::<23>(add(a,splat(1<<22))),splat(Q)));
-        let r = add(r,and(sar::<31>(r),splat(Q)));
+        let r = sub(a,mul(sar::<23>(add(a,splat(1<<22))),qv));
+        let r = _mm512_mask_add_epi32(r,_mm512_cmplt_epi32_mask(r,zero),r,qv);
+        // (r+127)>>7 < 2^16, so the 16-bit multiply-high pair computes round(x*11275/2^24) exactly.
         let hi = shr::<7>(add(r,splat(127)));
-        let hi = shr::<24>(add(mul(hi,splat(11275)),splat(1<<23)));
-        let hi = andnot(gt(hi,splat(43)),hi);
-        let lo = sub(r,mul(hi,splat(ALPHA)));
-        let lo = sub(lo,and(gt(lo,splat((Q-1)/2)),splat(Q)));
-        let step = select(gt(lo,splat(0)),hint,sub(splat(0),hint));
-        let w = add(hi,step);
-        let w = select(gt(splat(0),w),splat(43),w);
-        let w = andnot(gt(w,splat(43)),w);
+        let hi = _mm512_mulhrs_epi16(_mm512_mulhi_epu16(hi,splat(11275)),splat(128));
+        let hi = _mm512_maskz_mov_epi32(_mm512_cmple_epi32_mask(hi,splat(43)),hi);
+        let lo = sub(r,times_alpha(hi));
+        // The centred low part is positive exactly when 0 < lo <= (q-1)/2.
+        let pos = _mm512_mask_cmpgt_epi32_mask(_mm512_cmple_epi32_mask(lo,hq),lo,zero);
+        let w = _mm512_mask_add_epi32(sub(hi,hint),pos,hi,hint);
+        let w = _mm512_mask_mov_epi32(w,_mm512_cmplt_epi32_mask(w,zero),splat(43));
+        let w = _mm512_maskz_mov_epi32(_mm512_cmple_epi32_mask(w,splat(43)),w);
         // r-ALPHA*w is in (-q,q), so two conditional corrections center it.
-        let u = sub(r,mul(w,splat(ALPHA)));
-        let u = sub(u,and(gt(u,splat((Q-1)/2)),splat(Q)));
-        let u = add(u,and(gt(splat(-(Q-1)/2),u),splat(Q)));
+        let wa = times_alpha(w);
+        let u = sub(r,wa);
+        let u = _mm512_mask_sub_epi32(u,_mm512_cmpgt_epi32_mask(u,hq),u,qv);
+        let u = _mm512_mask_add_epi32(u,_mm512_cmplt_epi32_mask(u,sub(zero,hq)),u,qv);
         // |e| <= B_T+2*q < 2^29 and e is divisible by q. Its quotient is in [-41,41].
-        let e = sub(sub(a,mul(w,splat(ALPHA))),u);
+        let e = sub(sub(a,wa),u);
         let ve = mul(e,splat(QINV32));
         let v = add(kc,ve);
-        bad_q = or(bad_q,gt(_mm512_abs_epi32(ve),splat(41)));
-        bad_u = or(bad_u,gt(_mm512_abs_epi32(u),splat(B_U)));
-        bad_v = or(bad_v,gt(_mm512_abs_epi32(v),splat(B_V)));
+        bad_q |= _mm512_cmpgt_epi32_mask(_mm512_abs_epi32(ve),splat(41));
+        bad_u |= _mm512_cmpgt_epi32_mask(_mm512_abs_epi32(u),splat(B_U));
+        bad_v |= _mm512_cmpgt_epi32_mask(_mm512_abs_epi32(v),splat(B_V));
         store((&mut out.u[i..i+16]).try_into().unwrap(),u);
         store((&mut out.v[i..i+16]).try_into().unwrap(),v);
         put_bytes((&mut out.w1[i..i+16]).try_into().unwrap(),w);
+    }}; }
+    for base in (0..256).step_by(32) {
+        step!(base+0);
+        step!(base+16);
     }
-    if _mm512_test_epi32_mask(bad_q,bad_q) != 0 { Err(FinishError::Quotient) }
-    else if _mm512_test_epi32_mask(bad_u,bad_u) != 0 { Err(FinishError::UBound) }
-    else if _mm512_test_epi32_mask(bad_v,bad_v) != 0 { Err(FinishError::VBound) }
+    if bad_q != 0 { Err(FinishError::Quotient) }
+    else if bad_u != 0 { Err(FinishError::UBound) }
+    else if bad_v != 0 { Err(FinishError::VBound) }
     else { Ok(()) }
+}
+#[inline]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+fn narrow64(a: &mut [MaybeUninit<i8>], v: __m512i) {
+    let a: &mut [MaybeUninit<i8>; 64] = a.try_into().unwrap();
+    // SAFETY: the destination chunk contains exactly 64 writable bytes.
+    unsafe { _mm512_storeu_si512(a.as_mut_ptr().cast(), v) }
 }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn hu_columns(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
@@ -227,24 +241,31 @@ pub(crate) unsafe fn hu_columns(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
         let z = load(z[i..i+16].try_into().unwrap());
         let u = load(out.u[i..i+16].try_into().unwrap());
         let v = load(out.v[i..i+16].try_into().unwrap());
-        let w = bytes(out.w1[i..i+16].try_into().unwrap());
-        let y = add(z,splat(GAMMA1));
-        wide(&mut cols.wide[0][i..i+16],sub(and(y,splat(65535)),splat(32768)));
-        narrow(&mut cols.narrow[0][i..i+16],sub(sar::<16>(y),splat(2)));
-        // Valid u gives y in [0,380930], H in [0,5], and a low digit in [-32768,30310].
+        // z + 2^17 shifts the high digit by exactly 2 and leaves the low 16 bits unchanged.
+        wide(&mut cols.wide[0][i..i+16],sub(and(z,splat(65535)),splat(32768)));
+        narrow(&mut cols.narrow[0][i..i+16],sar::<16>(z));
+        // Valid u gives y in [0,380930]. The digit H counts the thresholds below y and
+        // saturates at 5. The float estimate y * (1/63079) * (1 + 2^-20) never rounds below
+        // the true quotient and stays under the next integer on this range.
         let y = add(u,splat(B_U));
-        let mut h = splat(0);
-        for threshold in [63079,126158,189237,252316,315395] { h = sub(h,gt(y,splat(threshold-1))); }
+        let hf = _mm512_cvttps_epi32(_mm512_mul_ps(_mm512_cvtepi32_ps(y),_mm512_set1_ps(HU_RECIP)));
+        let h = _mm512_min_epi32(hf,splat(5));
         wide(&mut cols.wide[1][i..i+16],sub(sub(y,mul(h,splat(63079))),splat(32768)));
         narrow(&mut cols.narrow[1][i..i+16],sub(h,splat(3)));
-        let y = add(v,splat(i32::MIN));
-        wide(&mut cols.wide[2][i..i+16],sub(and(y,splat(65535)),splat(32768)));
-        wide(&mut cols.wide[3][i..i+16],sub(shr::<16>(y),splat(32768)));
-        narrow(&mut cols.narrow[2][i..i+16],and(shr::<0>(w),splat(1)));
-        narrow(&mut cols.narrow[3][i..i+16],and(shr::<1>(w),splat(1)));
-        narrow(&mut cols.narrow[4][i..i+16],and(shr::<2>(w),splat(1)));
-        narrow(&mut cols.narrow[5][i..i+16],and(shr::<3>(w),splat(1)));
-        narrow(&mut cols.narrow[6][i..i+16],and(shr::<4>(w),splat(1)));
-        narrow(&mut cols.narrow[7][i..i+16],and(shr::<5>(w),splat(1)));
+        // The low 16 bits minus 2^15 and the arithmetic high half give the two v digits.
+        wide(&mut cols.wide[2][i..i+16],sub(and(v,splat(65535)),splat(32768)));
+        wide(&mut cols.wide[3][i..i+16],sar::<16>(v));
+    }
+    // Bits of the w1 bytes are split in the byte domain: shift 16-bit lanes, keep bit 0.
+    let one = _mm512_set1_epi8(1);
+    for i in (0..256).step_by(64) {
+        // SAFETY: w1 has 256 bytes, so the 64-byte load at i is in bounds.
+        let w = unsafe { _mm512_loadu_si512(out.w1.as_ptr().add(i).cast()) };
+        narrow64(&mut cols.narrow[2][i..i+64],and(w,one));
+        narrow64(&mut cols.narrow[3][i..i+64],and(_mm512_srli_epi16::<1>(w),one));
+        narrow64(&mut cols.narrow[4][i..i+64],and(_mm512_srli_epi16::<2>(w),one));
+        narrow64(&mut cols.narrow[5][i..i+64],and(_mm512_srli_epi16::<3>(w),one));
+        narrow64(&mut cols.narrow[6][i..i+64],and(_mm512_srli_epi16::<4>(w),one));
+        narrow64(&mut cols.narrow[7][i..i+64],and(_mm512_srli_epi16::<5>(w),one));
     }
 }
