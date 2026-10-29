@@ -116,6 +116,7 @@ name = "agg-bench"
 version = "0.1.0"
 dependencies = [
  "agg-keccak",
+ "agg-mldsa-simd",
  "agg-piop",
  "agg-witness",
 ]
@@ -138,6 +139,7 @@ version = "0.1.0"
 dependencies = [
  "agg-bridge",
  "agg-keccak",
+ "agg-mldsa-simd",
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",
@@ -158,6 +160,25 @@ dependencies = [
  "flock-prover",
  "keccak 0.1.6",
  "rayon",
+ "sha3 0.10.9",
+]
+
+[[package]]
+name = "agg-mldsa-cref"
+version = "0.1.0"
+dependencies = [
+ "agg-witness",
+ "cc",
+ "keccak 0.1.6",
+]
+
+[[package]]
+name = "agg-mldsa-simd"
+version = "0.1.0"
+dependencies = [
+ "agg-mldsa-cref",
+ "agg-witness",
+ "keccak 0.1.6",
  "sha3 0.10.9",
 ]
 
@@ -188,6 +209,7 @@ dependencies = [
  "aerie-prover",
  "aerie-simd",
  "agg-bridge",
+ "agg-mldsa-simd",
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",
@@ -209,6 +231,7 @@ dependencies = [
 name = "agg-witness"
 version = "0.1.0"
 dependencies = [
+ "agg-mldsa-simd",
  "ml-dsa",
  "rayon",
  "sha3 0.10.9",
