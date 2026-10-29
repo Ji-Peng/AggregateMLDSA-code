@@ -28,7 +28,7 @@ fn records(n: usize, seed: u64) -> Vec<SpongeRecord> {
 
 /// `honest_parts` equals the reference packing of `instance_rows` on every Keccak
 /// backend, for record counts that are not multiples of the lane counts (4, 8) and
-/// that cross a scatter batch; the part's input bits do not depend on the backend.
+/// that cross a scatter batch (on a one-thread pool); the part's input bits do not depend on the backend.
 #[test]
 fn honest_parts_match_reference_packing() {
     let gate = sponge::sponge_gate();
@@ -36,6 +36,12 @@ fn honest_parts_match_reference_packing() {
         .into_iter()
         .filter_map(Engine::new)
         .collect();
+    // On one thread the witness builder scratches 128 instances at a time, so 300
+    // records span three batches; on the global pool the batch grows with the threads.
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     for (n, seed) in [(1usize, 1u64), (5, 2), (13, 3), (64, 4), (300, 5)] {
         let recs = records(n, seed);
         let d = TiedPart::d_seg_for(n);
@@ -46,13 +52,16 @@ fn honest_parts_match_reference_packing() {
         });
         let (_, want_bits) = part.honest_parts_with(&engines[0], &recs);
         for e in &engines {
-            let (got, bits) = part.honest_parts_with(e, &recs);
-            let tag = format!("{:?}, n = {n}", e.backend());
-            assert!(got.z == want.z, "z, {tag}");
-            assert!(got.a == want.a, "a, {tag}");
-            assert!(got.b == want.b, "b, {tag}");
-            assert!(got.stripe == want.stripe, "stripe, {tag}");
-            assert!(bits == want_bits, "bits, {tag}");
+            for pool in [None, Some(&one)] {
+                let run = || part.honest_parts_with(e, &recs);
+                let (got, bits) = pool.map_or_else(run, |p| p.install(run));
+                let tag = format!("{:?}, n = {n}, one thread {}", e.backend(), pool.is_some());
+                assert!(got.z == want.z, "z, {tag}");
+                assert!(got.a == want.a, "a, {tag}");
+                assert!(got.b == want.b, "b, {tag}");
+                assert!(got.stripe == want.stripe, "stripe, {tag}");
+                assert!(bits == want_bits, "bits, {tag}");
+            }
         }
     }
 }

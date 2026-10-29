@@ -149,9 +149,17 @@ where
     SlotBuffers { z, a, b, stripe }
 }
 
-/// Instances per scratch batch of [`pack_slot_groups`] (a multiple of 8): 16 groups,
-/// 4.4 MiB of sponge-gate tiles, which the scatter reads from the last-level cache.
+/// Instances per scratch batch of [`pack_slot_groups`] and Rayon thread (a multiple
+/// of 8): 16 groups per thread. On one thread a batch is 4.4 MiB of sponge-gate
+/// tiles, which the scatter reads from the last-level cache; on many threads the
+/// batch grows so that the tile pass has enough groups to balance and the column
+/// scatter (one pass over every column per batch) runs a few times, not once per
+/// 128 instances.
 const GROUP_BATCH: usize = 128;
+
+/// Upper bound on a scratch batch of [`pack_slot_groups`]: 512 groups, 141 MB of
+/// sponge-gate tiles.
+const GROUP_BATCH_MAX: usize = 4096;
 
 /// [`pack_slot`] of the honest rows of `n` instances, walked eight at a time in
 /// lockstep by [`ChainGate::instance_phi_many`] on `engine`'s round kernel. `inputs`
@@ -206,7 +214,8 @@ where
     let mut a: Vec<F128> = alloc_zeroed_vec(len);
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
     let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
-    let groups_max = GROUP_BATCH.min(n.next_multiple_of(8)) / 8;
+    let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
+    let groups_max = batch.min(n.next_multiple_of(8)) / 8;
     let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * w];
     let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let mut phase_ms = [0f64; 2];
@@ -214,7 +223,7 @@ where
     let n_col_blocks = useful_chunks.div_ceil(COLS);
     let mut j0 = 0;
     while j0 < n {
-        let cnt = GROUP_BATCH.min(n - j0);
+        let cnt = batch.min(n - j0);
         let groups = cnt.div_ceil(8);
         let t0 = std::time::Instant::now();
         // Tiles and stripe, one task per group of eight.
@@ -350,7 +359,8 @@ mod tests {
 
     /// `pack_slot_groups` equals `pack_slot` over `instance_rows` on every Keccak
     /// backend, for a one-round permutation gate and a chain with unaligned fields and
-    /// scattered outputs, with partial groups and more than one scratch batch.
+    /// scattered outputs, with partial groups, on the global pool and on one thread
+    /// (more than one scratch batch).
     #[test]
     fn group_packing_matches_instance_packing() {
         use agg_mldsa_simd::{Backend, Engine};
@@ -372,13 +382,28 @@ mod tests {
                 .into_iter()
                 .filter_map(Engine::new)
             {
-                let got = pack_slot_groups(&gate, &e, nu, n, &inputs, iw, |j, m, s| {
-                    gate.absorb_into(m, &inputs[j * iw..(j + 1) * iw], s);
-                });
-                assert!(got.z == want.z, "{:?} z", e.backend());
-                assert!(got.a == want.a, "{:?} a", e.backend());
-                assert!(got.b == want.b, "{:?} b", e.backend());
-                assert!(got.stripe == want.stripe, "{:?} stripe", e.backend());
+                // One thread: scratch batches of GROUP_BATCH instances (300 spans three).
+                let one = rayon::ThreadPoolBuilder::new()
+                    .num_threads(1)
+                    .build()
+                    .unwrap();
+                for threads in [0, 1] {
+                    let run = || {
+                        pack_slot_groups(&gate, &e, nu, n, &inputs, iw, |j, m, s| {
+                            gate.absorb_into(m, &inputs[j * iw..(j + 1) * iw], s);
+                        })
+                    };
+                    let got = if threads == 1 {
+                        one.install(run)
+                    } else {
+                        run()
+                    };
+                    let tag = format!("{:?}, threads {threads}", e.backend());
+                    assert!(got.z == want.z, "{tag} z");
+                    assert!(got.a == want.a, "{tag} a");
+                    assert!(got.b == want.b, "{tag} b");
+                    assert!(got.stripe == want.stripe, "{tag} stripe");
+                }
             }
         }
     }
