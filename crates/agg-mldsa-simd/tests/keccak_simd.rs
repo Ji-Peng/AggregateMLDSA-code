@@ -202,3 +202,101 @@ fn c_permutation_oracles() {
         });
     }
 }
+
+/// Accounting must describe the same schedule as the production instantiation:
+/// each input rate block adds one permutation before the first output block.
+#[test]
+fn scheduler_accounting_matches_execution() {
+    fn run<const W: usize, const STATS: bool>(jobs: &[XofJob<'_>], limits: &[usize]) {
+        let expected: Vec<_> = jobs
+            .iter()
+            .zip(limits)
+            .map(|(job, &n)| {
+                let mut out = vec![0; n * job.xof.rate()];
+                match job.xof {
+                    Xof::Shake128 => common::shake128_segments(&job.input, &mut out),
+                    Xof::Shake256 => common::shake256_segments(&job.input, &mut out),
+                }
+                out
+            })
+            .collect();
+        let mut sink = CheckSink {
+            expected,
+            counts: vec![0; jobs.len()],
+            limits: limits.to_vec(),
+        };
+        let mut calls = 0;
+        let (occupied, capacity) = lanes::run::<W, STATS, _, _>(
+            jobs,
+            &mut sink,
+            lanes::Kernel {
+                permute: |state: &mut lanes::State<W>| {
+                    calls += 1;
+                    for i in 0..W {
+                        let mut lane = std::array::from_fn(|w| state.0[w][i]);
+                        keccak::f1600(&mut lane);
+                        for (w, word) in lane.into_iter().enumerate() {
+                            state.0[w][i] = word;
+                        }
+                    }
+                },
+                extract: |state: &lanes::State<W>, blocks: &mut [Block; W], wide: u8| {
+                    for (i, block) in blocks.iter_mut().enumerate() {
+                        let words = if wide & (1 << i) != 0 { 21 } else { 17 };
+                        block.bytes.fill(0);
+                        for w in 0..words {
+                            block.bytes[w * 8..w * 8 + 8]
+                                .copy_from_slice(&state.0[w][i].to_le_bytes());
+                        }
+                    }
+                },
+                clear: |state: &mut lanes::State<W>, mask: u8| {
+                    for word in &mut state.0 {
+                        for (i, value) in word.iter_mut().enumerate() {
+                            if mask & (1 << i) != 0 {
+                                *value = 0;
+                            }
+                        }
+                    }
+                },
+                absorb: |l: &mut [lanes::Lane; W], j: &[XofJob<'_>], s: &mut lanes::State<W>, m| {
+                    lanes::absorb_with(l, j, m, |i, w, value| s.0[w][i] ^= value)
+                },
+            },
+        );
+        assert_eq!(sink.counts, limits);
+        if STATS {
+            let expected: usize = jobs
+                .iter()
+                .zip(limits)
+                .map(|(job, limit)| {
+                    job.input.iter().map(|s| s.len()).sum::<usize>() / job.xof.rate() + limit
+                })
+                .sum();
+            assert_eq!(occupied, expected);
+            assert_eq!(capacity, W * calls);
+        } else {
+            assert_eq!((occupied, capacity), (0, 0));
+        }
+    }
+    let input = [42; 400];
+    let jobs: Vec<_> = (0..33)
+        .map(|i| {
+            let len = (i * 137) % 401;
+            let split = len / 3;
+            XofJob {
+                xof: if i % 3 == 0 {
+                    Xof::Shake256
+                } else {
+                    Xof::Shake128
+                },
+                input: [&input[..split], &[], &input[split..len], &[]],
+            }
+        })
+        .collect();
+    let limits: Vec<_> = (0..jobs.len()).map(|i| 1 + i % 7).collect();
+    run::<4, false>(&jobs, &limits);
+    run::<4, true>(&jobs, &limits);
+    run::<8, false>(&jobs, &limits);
+    run::<8, true>(&jobs, &limits);
+}
