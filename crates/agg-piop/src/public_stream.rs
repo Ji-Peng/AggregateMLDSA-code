@@ -237,66 +237,49 @@ impl StreamedPublic {
             .par_chunks_mut(8)
             .map(|tile| -> Result<Vec<StreamKey>, InstanceError> {
                 let mut tile_keys = Vec::with_capacity(tile.len());
-                let mut fresh_pks: [&[u8]; 8] = [&[]; 8];
-                let mut fresh_rhos: [[u8; 32]; 8] = [[0u8; 32]; 8];
-                let mut fresh_t1s: [[[u16; N]; K]; 8] = [[[0u16; N]; K]; 8];
-                let mut is_fresh: [bool; 8] = [false; 8];
-                let mut cached_keys: [Option<Arc<VerifierKey>>; 8] =
-                    [None, None, None, None, None, None, None, None];
+                // Positions in `tile_keys` of the keys that still need `tr`.
+                let mut fresh_at = [0_usize; 8];
                 let mut fresh_count = 0;
-
-                for (idx, (pk, records)) in tile.iter().enumerate() {
-                    match cache.and_then(|c| c.get(pk)) {
-                        Some(cached) if pk.len() == PK_BYTES => {
-                            cached_keys[idx] = Some(cached);
-                        }
+                for (pk, records) in tile.iter_mut() {
+                    let source = match cache.and_then(|c| c.get(pk)) {
+                        // The length check keeps the error of pkDecode for any cache content.
+                        Some(cached) if pk.len() == PK_BYTES => KeySource::Cached(cached),
                         _ => {
                             let decoded =
                                 pk_decode(pk).ok_or(InstanceError::PublicKey(records[0]))?;
-                            fresh_pks[fresh_count] = pk;
-                            fresh_rhos[fresh_count] = decoded.rho;
-                            fresh_t1s[fresh_count] = decoded.t1;
-                            is_fresh[idx] = true;
+                            fresh_at[fresh_count] = tile_keys.len();
                             fresh_count += 1;
+                            KeySource::Fresh(Box::new(FreshKey {
+                                pk: pk.to_vec(),
+                                rho: decoded.rho,
+                                t1: decoded.t1,
+                                tr: [0; TR_BYTES],
+                            }))
                         }
-                    }
-                }
-
-                let mut tr_out = [0u8; 8 * TR_BYTES];
-                if fresh_count > 0 {
-                    let mut tr_inputs = [[&[][..]; 4]; 8];
-                    for j in 0..fresh_count {
-                        tr_inputs[j] = [fresh_pks[j], &[], &[], &[]];
-                    }
-                    engine.shake256_many(
-                        &tr_inputs[..fresh_count],
-                        TR_BYTES,
-                        &mut tr_out[..fresh_count * TR_BYTES],
-                    );
-                }
-
-                let mut fresh_cur = 0;
-                for (idx, (pk, records)) in tile.iter_mut().enumerate() {
-                    let source = if is_fresh[idx] {
-                        let mut tr = [0u8; TR_BYTES];
-                        tr.copy_from_slice(
-                            &tr_out[fresh_cur * TR_BYTES..(fresh_cur + 1) * TR_BYTES],
-                        );
-                        let key = FreshKey {
-                            pk: pk.to_vec(),
-                            rho: fresh_rhos[fresh_cur],
-                            t1: fresh_t1s[fresh_cur],
-                            tr,
-                        };
-                        fresh_cur += 1;
-                        KeySource::Fresh(Box::new(key))
-                    } else {
-                        KeySource::Cached(cached_keys[idx].take().unwrap())
                     };
                     tile_keys.push(StreamKey {
                         source,
                         records: std::mem::take(records),
                     });
+                }
+                if fresh_count > 0 {
+                    let mut tr_inputs = [[&[][..]; 4]; 8];
+                    for (slot, &at) in tr_inputs.iter_mut().zip(&fresh_at[..fresh_count]) {
+                        if let KeySource::Fresh(fresh) = &tile_keys[at].source {
+                            *slot = [&fresh.pk, &[], &[], &[]];
+                        }
+                    }
+                    let mut tr_out = [0_u8; 8 * TR_BYTES];
+                    engine.shake256_many(
+                        &tr_inputs[..fresh_count],
+                        TR_BYTES,
+                        &mut tr_out[..fresh_count * TR_BYTES],
+                    );
+                    for (digest, &at) in tr_out.chunks_exact(TR_BYTES).zip(&fresh_at[..fresh_count]) {
+                        if let KeySource::Fresh(fresh) = &mut tile_keys[at].source {
+                            fresh.tr.copy_from_slice(digest);
+                        }
+                    }
                 }
                 Ok(tile_keys)
             })
@@ -459,23 +442,22 @@ impl StreamedPublic {
                         KeySource::Fresh(fresh) => {
                             let exp = &mut expanded[fresh_cur];
                             fresh_cur += 1;
-                            let mut a = Box::new([[[0_i32; N]; L]; K]);
-                            for r in 0..K {
-                                for s in 0..L {
-                                    engine.intt(
-                                        Prime::Q,
-                                        &mut exp.a_hat[r][s],
-                                        Scale::Plain,
-                                        Form::Centered,
-                                    );
-                                    a[r][s] = exp.a_hat[r][s].0;
+                            for row in exp.a_hat.iter_mut() {
+                                for poly in row.iter_mut() {
+                                    engine.intt(Prime::Q, poly, Scale::Plain, Form::Centered);
                                 }
                             }
-                            let weight = key_weight(&a, &lambda, &entry_weights);
+                            let weight = key_weight_by(
+                                |rho, s| &exp.a_hat[rho][s].0,
+                                &lambda,
+                                &entry_weights,
+                            );
                             let fresh_key = keep.then(|| {
                                 Arc::new(VerifierKey {
                                     pk: fresh.pk.clone(),
-                                    a,
+                                    a: Box::new(std::array::from_fn(|rho| {
+                                        std::array::from_fn(|s| exp.a_hat[rho][s].0)
+                                    })),
                                     t1: fresh.t1,
                                     tr: fresh.tr,
                                 })
@@ -525,11 +507,21 @@ impl StreamedPublic {
 /// once ([`SplitWeights::dot`] with 22 bits; in `i128` terms the bound is
 /// `256 x 2^64 x 2^22 = 2^94 < 2^95`). Out-of-range entries take the exact `i128` path.
 fn key_weight(a: &MatrixCoeff, lambda: &SplitWeights, entry_weights: &[[E; L]; K]) -> E {
+    key_weight_by(|rho, s| &a[rho][s], lambda, entry_weights)
+}
+
+/// [`key_weight`] over entries given by an accessor, so that a transformed matrix can be
+/// read in place without a copy.
+fn key_weight_by<'a>(
+    entry: impl Fn(usize, usize) -> &'a [i32; N],
+    lambda: &SplitWeights,
+    entry_weights: &[[E; L]; K],
+) -> E {
     debug_assert_eq!(lambda.len(), N);
     let mut sum = E::zero();
-    for (a_row, weights) in a.iter().zip(entry_weights) {
-        for (poly, &weight) in a_row.iter().zip(weights) {
-            sum += weight * lambda.dot::<22>(poly);
+    for (rho, weights) in entry_weights.iter().enumerate() {
+        for (s, &weight) in weights.iter().enumerate() {
+            sum += weight * lambda.dot::<22>(entry(rho, s));
         }
     }
     sum
@@ -920,6 +912,262 @@ mod tests {
         time("prepare cached", || StreamedPublic::prepare(&inputs, Some(&cache)).unwrap());
         time("record_stream (parallel)", || record_stream(&inputs));
         time("public_records_binding", || public_records_binding(&inputs));
+    }
+
+    /// The pre-engine `prepare` and `pass` (reference for the end-to-end A/B).
+    fn baseline_prepare(inputs: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<(Vec<u8>, [u8; TR_BYTES], [[u16; N]; K], [u8; 32])> {
+        use agg_witness::native::tr as base_tr;
+        let (distinct, record_keys) = distinct_keys(inputs);
+        let keys: Vec<_> = distinct
+            .into_par_iter()
+            .map(|(pk, _)| {
+                let d = pk_decode(pk).unwrap();
+                (pk.to_vec(), base_tr(pk), d.t1, d.rho)
+            })
+            .collect();
+        let sink: Vec<u8> = inputs
+            .par_iter()
+            .zip(&record_keys)
+            .map(|(&(_, msg, c), &key)| {
+                mu(&keys[key].1, msg, &[])[0] ^ sample_in_ball(&c).positions[0]
+            })
+            .collect();
+        black_box(sink);
+        keys
+    }
+
+    fn baseline_pass(
+        s: &StreamedPublic,
+        r2: &[E],
+        r3: &[E],
+    ) -> (E, E) {
+        use crate::public_data::{inverse_ntt_matrix, sparse_ct as base_sparse_ct};
+        use agg_witness::expand::expand_a;
+        let (coef, pos) = (D_COEF as usize, D_POS as usize);
+        let eq_pos2 = SplitWeights::new(&eq_table(&r2[..pos]));
+        let eq_sig2 = eq_table(&r2[pos..]);
+        let eq_sig3 = eq_table(&r3[pos..]);
+        let t = s
+            .records
+            .par_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let ct = base_sparse_ct(&r.challenge, s.keys[r.key].t1());
+                eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
+            })
+            .reduce(E::zero, |a, b| a + b);
+        let lambda = SplitWeights::new(&eq_correlation(&r2[..coef], &r3[..coef]));
+        let eq_row = eq_table(&r2[coef..pos]);
+        let eq_col = eq_table(&r3[coef..pos]);
+        let ew: [[E; L]; K] =
+            std::array::from_fn(|r| std::array::from_fn(|c| eq_row[r] * eq_col[c]));
+        let w = s
+            .keys
+            .par_iter()
+            .map(|key| {
+                let sw = key.records.iter().fold(E::zero(), |x, &i| x + eq_sig2[i] * eq_sig3[i]);
+                let KeySource::Fresh(f) = &key.source else { unreachable!() };
+                let a = inverse_ntt_matrix(&expand_a(&f.rho).0);
+                sw * key_weight(&a, &lambda, &ew)
+            })
+            .reduce(E::zero, |a, b| a + b);
+        (t, w)
+    }
+
+    /// End-to-end single-thread A/B of `prepare` and `pass` against the pre-engine code
+    /// (direction only; `RAYON_NUM_THREADS=1 cargo test --release -p agg-piop --lib
+    /// engine_e2e_microbench -- --ignored --nocapture` on one pinned CPU).
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn engine_e2e_microbench() {
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    f();
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        }
+        let n = 1024;
+        let mut rng = SplitMix64::new(10);
+        let keys: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let mut k = vec![0_u8; PK_BYTES];
+                rng.fill(&mut k);
+                k
+            })
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 80]).collect();
+        let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = (0..n)
+            .map(|i| {
+                let mut c = [0_u8; C_TILDE_BYTES];
+                rng.fill(&mut c);
+                (keys[i].as_slice(), msgs[i].as_slice(), c)
+            })
+            .collect();
+        let d_main = Geometry::new(n).unwrap().d_main() as usize;
+        let (r2, r3) = (point(&mut rng, d_main), point(&mut rng, d_main));
+        let old_prep = best(|| {
+            black_box(baseline_prepare(&inputs));
+        });
+        let s = StreamedPublic::prepare(&inputs, None).unwrap();
+        let old_pass = best(|| {
+            black_box(baseline_pass(&s, &r2, &r3));
+        });
+        eprintln!("n = {n}: baseline prepare {old_prep:.2} ms, pass {old_pass:.2} ms");
+        for backend in [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ] {
+            let Some(e) = agg_mldsa_simd::Engine::new(backend) else {
+                continue;
+            };
+            let prep = best(|| {
+                black_box(StreamedPublic::prepare_with(&e, &inputs, None).unwrap());
+            });
+            let pass = best(|| {
+                black_box(s.pass_with(&e, &r2, &r3, None));
+            });
+            eprintln!("{backend:?}: prepare {prep:.2} ms, pass {pass:.2} ms");
+        }
+    }
+
+    /// Single-thread A/B of the engine paths against the pre-engine computations, per
+    /// backend (direction only; `cargo test --release -p agg-piop --lib engine_ab_microbench
+    /// -- --ignored --nocapture` on one pinned CPU).
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn engine_ab_microbench() {
+        use crate::public_data::{inverse_ntt_matrix, sparse_ct as base_sparse_ct};
+        use agg_witness::expand::expand_a;
+        use agg_witness::native::tr as base_tr;
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            (0..7)
+                .map(|_| {
+                    let start = Instant::now();
+                    f();
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        }
+        let n = 256;
+        let mut rng = SplitMix64::new(77);
+        let pks: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let mut k = vec![0_u8; PK_BYTES];
+                rng.fill(&mut k);
+                k
+            })
+            .collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i as u8; 80]).collect();
+        let cts: Vec<[u8; C_TILDE_BYTES]> = (0..n)
+            .map(|_| {
+                let mut c = [0_u8; C_TILDE_BYTES];
+                rng.fill(&mut c);
+                c
+            })
+            .collect();
+        let challenges: Vec<Challenge> = cts.iter().map(|c| sample_in_ball(c)).collect();
+        let t1s: Vec<[[u16; N]; K]> = pks.iter().map(|k| pk_decode(k).unwrap().t1).collect();
+        let rhos: Vec<[u8; 32]> = pks.iter().map(|k| k[..32].try_into().unwrap()).collect();
+        let trs: Vec<[u8; TR_BYTES]> = pks.iter().map(|k| base_tr(k)).collect();
+
+        let tr_old = best(|| {
+            for pk in &pks {
+                black_box(base_tr(pk));
+            }
+        });
+        let mu_old = best(|| {
+            for (t, m) in trs.iter().zip(&msgs) {
+                black_box(mu(t, m, &[]));
+            }
+        });
+        let ball_old = best(|| {
+            for c in &cts {
+                black_box(sample_in_ball(c));
+            }
+        });
+        let ct_old = best(|| {
+            for (c, t) in challenges.iter().zip(&t1s) {
+                black_box(base_sparse_ct(c, t));
+            }
+        });
+        let a_old = best(|| {
+            for rho in &rhos {
+                black_box(inverse_ntt_matrix(&expand_a(rho).0));
+            }
+        });
+        eprintln!(
+            "per {n} items, ms: base tr {tr_old:.2}, mu {mu_old:.2}, ball {ball_old:.2}, \
+             sparse_ct {ct_old:.2}, expand+intt {a_old:.2}"
+        );
+        for backend in [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ] {
+            let Some(e) = agg_mldsa_simd::Engine::new(backend) else {
+                continue;
+            };
+            let tr_new = best(|| {
+                let mut out = [0_u8; 8 * TR_BYTES];
+                for tile in pks.chunks(8) {
+                    let ins: Vec<[&[u8]; 4]> = tile.iter().map(|p| [&p[..], &[][..], &[][..], &[][..]]).collect();
+                    e.shake256_many(&ins, TR_BYTES, &mut out[..tile.len() * TR_BYTES]);
+                    black_box(&out);
+                }
+            });
+            let mu_new = best(|| {
+                let mut out = [0_u8; 64 * TR_BYTES];
+                for (tt, mt) in trs.chunks(64).zip(msgs.chunks(64)) {
+                    let ins: Vec<[&[u8]; 4]> = tt
+                        .iter()
+                        .zip(mt)
+                        .map(|(t, m)| [&t[..], &[0u8, 0u8][..], &[][..], &m[..]])
+                        .collect();
+                    e.shake256_many(&ins, TR_BYTES, &mut out[..tt.len() * TR_BYTES]);
+                    black_box(&out);
+                }
+            });
+            let ball_new = best(|| {
+                let mut out = [Challenge39::zero(); 64];
+                for ct in cts.chunks(64) {
+                    e.sample_in_ball_many(ct, &mut out[..ct.len()]);
+                    for o in &out[..ct.len()] {
+                        black_box(challenge_from_c39(o));
+                    }
+                }
+            });
+            let ct_new = best(|| {
+                for (c, t) in challenges.iter().zip(&t1s) {
+                    let mut ct = [[0_i32; N]; K];
+                    e.sparse_ct(&challenge_to_c39(c), t, 0, &mut ct);
+                    black_box(&ct);
+                }
+            });
+            let a_new = best(|| {
+                for tile in rhos.chunks(8) {
+                    let mut ex = vec![ExpandedA::zero(); tile.len()];
+                    e.expand_a_many(tile, &mut ex);
+                    for x in &mut ex {
+                        for r in 0..K {
+                            for s in 0..L {
+                                e.intt(Prime::Q, &mut x.a_hat[r][s], Scale::Plain, Form::Centered);
+                            }
+                        }
+                    }
+                    black_box(&ex);
+                }
+            });
+            eprintln!(
+                "{backend:?}: tr {tr_new:.2}, mu {mu_new:.2}, ball {ball_new:.2}, \
+                 sparse_ct {ct_new:.2}, expand+intt {a_new:.2}"
+            );
+        }
     }
 
     /// Single-thread timings of the three kernels against the references (direction only;
