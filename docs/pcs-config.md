@@ -135,7 +135,7 @@ byte for byte).
 Planning run (`update_catalog_rows`, one process for all sizes in the order 8, 10, 3, 6, 9,
 11, 5, 4, 7, 12, 13, 14, 15, 3 scalar workers, `taskset -c 0,1,3-15`, a shared machine). Wall
 time per size
-(scalar rows not yet planned, then the grouped row); the proof and setup figures are the
+(missing scalar rows, then the grouped row); the proof and setup figures are the
 planner's estimates for the grouped row.
 
 | `d_sig` | Wall time (s) | Est. opening proof (B) | Setup (field elements) | Base-16 layout est. (B) |
@@ -158,13 +158,12 @@ Total 2,666 s (44 minutes).
 
 H-exact rows (`update_catalog_rows` with `AGG_CATALOG_RELATION=h-exact`, 3 scalar workers,
 `taskset -c 0,1,3-15`, a shared machine): `d_sig` 3 to 10 in 732 s, 11 to 15 in 885 s, 1,617 s
-(27
-minutes) for the 26 rows, within the 20 to 35 minutes estimated in `docs/h-exact.md` 2.3.
+(27 minutes) for the 26 rows.
 The planner's opening estimate of every H-exact grouped row equals the H-u row's (61,707 B
 at `d_sig` 3 to 8, 63,197, 63,273, 64,573, 64,692, 64,842, 64,958 and 65,282 B at 9 to 15);
 the setup sizes differ slightly (563,200 field elements at `d_sig` 9 to 11, 794,112,
 912,384, 1,892,352 and 2,838,528 at 12 to 15). Measured at `N = 1,024`: H-exact's Akita
-opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/cli.md` Section 4). The
+opening is 16 B longer than H-u's (61,010 against 60,994 B, `docs/perf.md` Section 16). The
 Akita grinding plans of the H-exact rows are pinned in `tests/all/akita_grinding.rs`. The rows of `d_sig` 3 and 4 have equal
 plan digests (`e9ec8b52...`). This is benign: Akita's
 `GrindingPlan::canonical_bytes` covers only the policy, the challenge order and the runs, not
@@ -217,7 +216,7 @@ changed session and swapped commitments; and the admission bounds of both famili
 ## 6. Regenerating the catalogs
 
 The harness is `crates/agg-pcs-config/tests/all/schedule_catalog_regen.rs`, adapted from
-Aerie's `tests/schedule_catalog_regen.rs`: same `akita_planner` entry points
+Aerie's catalog regeneration harness: same `akita_planner` entry points
 (`find_schedule`, `EmitSpec`, `render_schedule_artifact_outputs_with_validation`), same
 estimate cross-check against `akita_schedules`, key lists from `catalogs.rs`; it plans the
 scalar rows of each family with its own preset and the grouped rows (in the width-4

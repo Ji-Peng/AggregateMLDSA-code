@@ -77,9 +77,8 @@ the proven range the top digit absorbs the excess and leaves its alphabet.
 The matrices are inputs (`BridgeMatrices`; seed derivation is `agg-bridge`'s, Section 9.1;
 tests use `random_for_tests`). Index maps: zeta_1 = x mod 2^19, beta_1 = x >> 19, D_1 index
 rho_1 + 2^13 beta_1; zeta_2 = (D_1 index) mod 2^17, sigma = (D_1 index) >> 17, D_2 index
-rho_2 + 2^13 sigma; zeta_3 = t + 6 rho_2; D_3 index rho_3 + 2^12 sigma. Columns: G_1 =
-kappa1_{t,k} at 3 t + k (18); G_2 = y2_t at t, then kappa2_{t,k} at 6 + 3 t + k (24);
-G_3 = kappa3_0, kappa3_1. Y is public (D_3).
+rho_2 + 2^13 sigma; zeta_3 = t + 6 rho_2; D_3 index rho_3 + 2^12 sigma. The committed bridge columns are specified in
+[piop.md](piop.md), Section 2. `Y` is public on `D_3`.
 
 ## 6. Keccak sponge (Section 8)
 

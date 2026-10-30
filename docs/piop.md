@@ -226,8 +226,7 @@ depend on them; `kernel/mod.rs` holds the schedule, `kernel/plan.rs` the compile
   (row blocks filled lane by lane, after a parallel first touch); a quartic lane read only
   by its polynomial is stored translated by `s = -c_3 / (4 c_4)` (Aerie's depressed
   quartic: nine products per lane and pair instead of fourteen).
-- *Dense rounds* (level 3 on): per pair over the table; folds in place (Aerie's
-  `fold_rows_in_place`).
+- *Dense rounds* (level 3 on): per pair over the table; folds in place.
 - *Arithmetic.* From level 1 on, the constant coefficient of the inner polynomial is not
   evaluated but recovered from the running claim, which is the group's own exact sum
   (`claim / lift = scalar q(0) + l(1) (q(1) - q(0))`; `scalar` the equality factor's running
@@ -338,7 +337,7 @@ stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity 
 `r^(3)`, manifest order; these are the opening claims together with the multiplicity digits
 at `pi_m`.
 
-### 7.3 Relation H-exact (`docs/h-exact.md` step B)
+### 7.3 Relation H-exact (`docs/h-exact.md` Section 9)
 
 The relation (`manifest::Relation`) is a field of the manifest and selects, through it,
 everything below; the verifier takes it from its caller (`verifier::verify(..., relation,

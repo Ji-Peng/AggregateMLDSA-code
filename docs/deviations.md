@@ -15,8 +15,8 @@ exactly 4, one balanced base-16 digit; source class `BalancedSignedDigit`; SIS p
 the equality field by field against `aerie_pcs_config::configs::Fp64SignedWidth4`.
 
 Why: Akita binds a generated schedule catalog to the configuration type and its family
-name. Aerie's catalog `aerie_fp64_signed_width4` holds Falcon layouts only, so our
-four-group layouts need their own catalog, `agg_mldsa_fp64_signed_width4`
+name. Aerie's catalog holds Falcon layouts only, so our
+six-group layouts need their own catalog, `agg_mldsa_fp64_signed_width4`
 (`crates/agg-pcs-config/src/schedules/`). The family name enters the catalog digest
 that event 0 binds; the protocol is otherwise unchanged. See `docs/pcs-config.md`.
 Under lookup layout L16 (entry L1) this catalog holds the scalar rows of
@@ -133,16 +133,6 @@ selects its block-first opening, whose cost is fixed by the 2,155 used columns (
 with CLMUL at any `n`, 26 s without). A function of `n`, so prover and verifier agree;
 at a full 2^13-record segment the block-first path is kept.
 
-## K6. Bridge words wired only in the bridged segment (superseded by K11, K21)
-
-Spec Section 8: the bridge slot copies "every live record's 48 w1Encode words".
-
-Code: the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) keeps the IO schema
-`mu`, `c~` and its digests. The bridged segment registered the sponge type with the 48
-w1Encode words added as `In` schema words after `mu` and wired them to the bridge slot's
-words, `48 n` wire classes of two `In` cells each (docs/bridge.md Section 2); that code was
-removed in favour of the parity chain (K21), which ties the bits by an evaluation claim.
-
 ## K7. Commit, then prove; the Flock commitment travels at event 2 only (spec Sections 8, 10)
 
 Spec: event 2 absorbs the "S Flock commitments (Ligerito roots ...)", then `sd` (event 3)
@@ -181,47 +171,8 @@ Section 6). The slot buffers of all `S` sub-batches stay in memory from event 2 
 commit needs a Flock entry that takes the commitment and its `ProverData`.
 
 For the tied part of the mode-A driver K14 applies instead: the commitment is computed once and
-its prover data kept from event 2 to event 6; the paragraphs above remain true of the
+its prover data kept from event 2 to the join; the paragraphs above remain true of the
 standalone sponge path (`GateBatch`, `SpongeProver`).
-
-## K8. `Y_sigma` as a coefficient of the bridge rows, not a committed word (spec Section 8)
-
-The one-row bridge slot design: columns `6 Lambda + 128 + rho_3` hold `Y_sigma[rho_3]` as committed
-`Out` schema words wired to public words, with rows `(sum_c M[rho_3, c] z_c) * 1 = z_Y`; and
-the slot's "witness is copies of the bits, so it is committed before sd".
-
-Code (the one-row bridge slot, removed in favour of the parity chain, K21): the two
-requirements contradict each other, since
-`Y_sigma` is a function of `sd` and a committed `Y` column would make the event-2
-commitment depend on `sd`. The columns `y_o = lanes Lambda + 128 + o` are committed zeros,
-and row `y_o` is `(sum_c M[o, c] z_c + Y_o z_one) * z_one = z_{y_o}`: `Y_o` enters `A_0` as
-the coefficient of the constant column (pinned to 1 by Flock). On an honest block these
-rows have `a = 0`, `b = 1`, so the bridge witness (the bit copies, the constant, zeros) and
-even its `a`, `b` buffers are independent of `sd` and `Y`. The type has no `Out` words; the
-Flock public words are `[mu_i, c~_i]` only. Binding: the verifier rebuilds the relation from
-its own `sd`, matrices and `Y_sigma` (another `Y` changes `xi_A` at the constant column by
-`sum_o (Y_o + Y'_o) eq[y_o]`, so the lincheck fails), and the slot's digest covered `Y`.
-The slot's walker is unchanged except `xi_A[one] += sum_o Y_o eq[y_o]`.
-
-## K9. Full-segment bridged union under Flock's uniform row capacity (resolved by K10, K11)
-
-Not in the spec. A Flock registry gives every type the same `2^nu` rows. At a full segment
-(`n = 2^13`, `nu = 13`) the bridge type's `k_log = 26` makes its slot `2^39` bits, so the
-union has `M = 40` variables: Flock's prover allocates the padded buffers `z`, `a`, `b` with
-`2^33` words each (128 GiB each, zero-filled on the prebuilt-slot path this code uses, and
-the bridge slot's own buffers are `2^32` words; only the dense commitment is
-count-proportional), and the
-wiring argument's cell space is `2^nu` cells per schema word, `393,216 + 54` words, so
-`mu = 13 + 19 = 32` (`2^32` cells, and the verifier's `s_sigma` discharge is `O(2^mu)`).
-The one-row bridge slot design (spec Section 8, B.13) therefore does not fit 64 to 128 GB at a full
-segment with Flock `83f963e` (estimate from the formulas above; not run). Local sizes are
-unaffected: at 64 records `M = 27`, `mu = 19`.
-
-Resolution: K10 splits a segment into Flock parts, each with its own bridge slot proving the
-partial vector `Y_{sigma,s} = M^{(sigma)} b'_s`, and the verifier checks
-`XOR_s Y_{sigma,s} = Y_sigma` (the bound of docs/bridge.md Section 7 is unchanged); K11
-removes the cause (the bridge slot has its own instance), so the default part is the whole
-segment.
 
 ## P1. Manifest part of event 0 (spec Section 10)
 
@@ -251,7 +202,7 @@ there is no projection seed, Rice section, reverse map or stage-1 projection ins
 Aerie's `projection/` is not used. The quotient's range (`v` digits, Section 4.3) is what
 lifts `Delta = 0` to (3.1).
 
-## P3. Grinding (resolved; spec Sections 10 and 12.1)
+## P3. Grinding ( spec Sections 10 and 12.1)
 
 Spec: "the scheduled grinding [is] Aerie's; the work plan per admitted shape is an
 obligation of `agg-pcs-config`."
@@ -264,7 +215,7 @@ challenge after it; the nonces travel in one packed stream (`AggregateProof::wor
 556 bytes); the plan (tie sites, then PIOP sites) is bound in event 0 by its SHA3-256 digest
 (`agg_piop::pow::PowPlan`). The sites of a tied part grind on the tie challenger
 (tied-part proof version 5, `docs/soundness.md` 3.6). Akita's opening already ran its own plan
-(`akita_config::transcript_instance_descriptor`, pinned by
+(Akita's instance descriptor, pinned by
 `agg-pcs-config/tests/all/akita_grinding.rs`). Remaining differences from Aerie: (1) the nonce is a fixed-width field of a packed stream, not a LEB128 atom in a
 Spongefish argument string (our PIOP has no argument string; the stream's width per site is
 public, so the encoding is canonical); (2) the plan is a function of `N*`, the Flock profile
@@ -444,210 +395,43 @@ Code: `KeccakSide::prove(bridge_seed, matrices, seeds, final_vectors)` and
 `SegmentContext::bridge_seed` pass the transcript's `sd` (event 3) and its matrices to the
 Keccak side. Wire format, transcript and the mode-B and profile-0 sides are unchanged
 (they ignore both). The mode-A driver (A1) runs the F_p side and the Flock side in one
-transcript through these hooks; its end-to-end tests (`agg-cli/tests/mode_a.rs`) check that
+transcript through these hooks; its end-to-end tests (`agg-cli/tests/all/mode_a.rs`) check that
 the aggregate verifies with the Flock sub-proof checked inside the PIOP verifier and that one
 flipped `w1Encode` bit fails exactly the side that holds it.
 
-## K10. Flock parts within a segment (spec Sections 1, 8, 10; resolves K9)
+## K10. Flock parts within a segment (spec Sections 1, 8, 10)
 
-Spec: "A segment is both one Keccak sub-batch ... and one parity-bridge chain"; one Flock
-commitment (event 2) and one Flock proof (event 6) per segment, the bridge slot proving
-`Y_sigma = M_3 M_2 M_1 b'` over the whole segment.
+A segment's Flock argument may use at most two tied parts. Each part proves its share
+of the segment's final vector; the shares XOR to `Y_sigma` by linearity over GF(2).
+The part layout and share identity are specified in [bridge.md](bridge.md), Section 5a.
+The current share framing, seeds and transcript order are specified in K22.
+Part-size options and defaults are in [cli.md](cli.md).
 
-Code (`agg_cli::mode_a`, `agg_keccak::tied::TiedPart::new_part`,
-`agg_bridge::gf2_walker::SegmentLayout::part`): the parity-bridge chain stays one per segment
-(the F_p side, `Y_sigma` and the matrices are unchanged), but the segment's Flock argument is
-split into parts of `2^{d_part}` record positions, `d_part = min(part_log2, d_seg)` with
-`part_log2` chosen by the prover (default 13, K11) and `3 <= d_part`. Part `s` holds the
-segment's records `[2^{d_part} s, 2^{d_part} (s + 1))` that are live; parts without live
-records do not exist (an all-padded segment has none, and the verifier then requires
-`Y_sigma = 0`). Each part is one Flock union proof of its sponges and of a bridge slot whose
-layout is the segment's restricted to the part (`SegmentLayout::part`: local position `p` is
-segment position `2^{10 + d_part} s + p`, so its level-1 block, in-block index and level-2
-input are the segment's). The slot proves the part's share
-`Y_{sigma, s} = M^{(sigma)} b'_s`; by linearity over GF(2) the shares XOR to
-`M^{(sigma)} b' = Y_sigma`, so the bound of spec 9.4 is unchanged (the difference `b XOR b'`
-and the matrices are those of the whole segment).
+## K11. Tied parts (spec Section 8; docs/bridge.md Section 5a)
 
-Wire (`agg_cli::wire`): the event-2 item of a segment is `version || d_part || LE32(parts)`
-followed by the framed part commitments; the event-6 proof item is the packed shares of all
-parts but the last (512 bytes each) followed by the framed part proofs. The last share is
-`Y_sigma` XOR the others, so the XOR identity holds by construction. Both items are
-absorbed where the spec absorbs the single Flock commitment and proof, so `d_part`, the
-commitments, the shares and the proofs are bound in the PIOP transcript. Part `s` seeds its
-challenger with `SHA3-256(len || "agg-mldsa/v1/flock-part-seed" || fs_sigma || LE64(s))`, and
-the tied part's geometry digest covers the part index (and the tie binds the share), so a
-part proof does not verify at another index. The verifier rejects `d_part` outside `[3, d_seg]` and a part count
-other than `ceil(live / 2^{d_part})`. (With the proof-of-work schedule the admitted range is
-`[max(3, d_seg - 1), d_seg]`, at most two parts per segment: `docs/soundness.md` 3.5, K20.) Its Flock work grows with the number of parts (and so
-with the proof size); a floor on `d_part` per `N` is a possible later policy.
+A part is one sponge instance and a virtual parity chain. The public evaluation claim,
+regions and soundness argument are specified in [bridge.md](bridge.md), Section 5a.
+The chain and its opening claim are specified in [parity-chain.md](parity-chain.md).
 
-Why: K9. A Flock registry gives every type the same `2^nu` rows, so the bridged union of
-`2^d` records has about `2^{13 + 2d}` bits; at a full segment that is `2^40` bits (128 GiB
-per buffer). Parts of `2^{d_part}` records cost `2^{13 - d_part}` Flock proofs per full
-segment. Measured locally (default build): a part of 128, 256 and
-512 records takes 3.2, 5.5 and 11.5 GiB prover peak RSS and 408, 522 and 676 KB of proof,
-at about the same time per record. At `N = 2^15` that is (estimate from these sizes) 43 MB
-of Flock proofs at `d_part = 9` and 67 MB at `d_part = 8`; `d_part = 10` (about 23 GiB per
-part, extrapolated) is for the cloud machine to calibrate. With `d_part = d_seg`
-(every local batch at the default) a segment has exactly one part, as in the spec, except
-for the part seed and the item framing.
+## K12. Vendored Flock patches (spec Section 8; pinned dependencies)
 
-Memory: the driver commits the parts one after the other at event 2 and keeps only their
-commitments; at event 6 it rebuilds each part's witness from the records
-(`TiedPart::reattach`, no second commitment: Flock's prover commits internally, K7,
-and the cap is checked against the absorbed one), proves, and drops it. This removes the
-K7 cost of keeping all slot buffers from event 2 to event 6, for one witness rebuild per
-part (cheap next to the proof).
+The workspace patches `flock-core` and `flock-field` through `Cargo.toml`.
+The pinned revision, patch details, exactness arguments and regeneration instructions
+are in [flock-core/PATCH.md](../vendor/flock-core/PATCH.md) and
+[flock-field/PATCH.md](../vendor/flock-field/PATCH.md).
+The list-aware work schedule and canonical nonce checks are verifier-visible.
+Proofs do not interoperate with upstream Flock.
 
-## K11. Tied parts: two Flock instances per part, tied by evaluation claims (spec Section 8; docs/bridge.md Section 5a)
-
-Spec Section 8: one Flock union proof per segment holding the sponge
-slots and the bridge slot, the bridge slot's bit copies "tied to the records' `Input` words
-by Flock's word-level copy constraints".
-
-Code (`agg_keccak::tied`, `agg_keccak::flock_union`; the mode-A driver `agg_cli::mode_a`): a
-part is two single-type Flock proofs, the sponge instance (its records' gates, row capacity
-`capacity_log(n, 19)`, K5) and the bridge instance (the bridge slot of K8 alone, one live row
-of `2^max(3, 22 - k_b)`), and the copies are tied by evaluation claims on the two committed
-polynomials at a point derived from the part's Flock seed (five packed-direct claims carried
-by Flock's merged opening: the public region of the sponge block against the verifier's
-table of `(mu_i, c~_i, 1, 0)`, and the two lane groups of the w1Encode words against the same
-groups of the bridge block). Neither proof has a circuit, a wiring argument or public words;
-the statement words are bound by a digest in the challenger. Each lane-group tie failed with
-probability at most `(d + 5) / 2^128` per claim, the point fixed after both commitments;
-docs/bridge.md Section 5a has the public claim, which version 5 keeps.
-
-To make the lane groups aligned word subcubes, the sponge gate's block puts the w1Encode
-field first (words 0..47, lane `t` at `8 t`), then mu (48..51), `c~` (52..53), the constant
-(word 54) and the chi words from word 56 (`GateLayout` aligns the chi words to an 8-word
-boundary): 275,968 useful bits per record instead of 275,776 (2,156 committed words instead
-of 2,155), and 42,496 instead of 41,792 for the single-permutation gate. `W1_INPUT_BASE` is 0
-and `MU_INPUT_BASE` 6,144 in the packed gate inputs.
-
-Why: a profile of the two-type union in mode A. Flock's copy constraints cost one cell-slot,
-one gather claim and 16 proof bytes per schema word of a type, and a one-row bridge slot
-has one schema word per copied word: 768 proof bytes and about 1.4 ms of opening time per
-signature at 512 records, 25 MB of gather values at `N = 2^15`; and the uniform row capacity
-gave the bridge slot `2^(k_b + nu)` bits of address space, `2^(2 d + 14)` per part, which is
-what capped parts at `2^9` records (K9, K10). Neither can be reduced inside the wiring
-argument (a cross-record linear relation needs its inputs in one block). With the tie, the
-bridge instance's cost no longer depends on the sponge rows and a part may be the whole
-segment (`DEFAULT_PART_LOG2 = 13`; every local batch is one part).
-
-Flock entry: `flock_union::UnionGeometry::{prove, verify}` compose Flock's public building
-blocks (`bind_statement`, `zerocheck::prove_packed_padded_capture_s_hat_v_c_with_grinding`,
-`lincheck::prove_union_capture_z_vec_with_grinding`, `pcs::open_batch_merged` and their
-verifiers) in the order of `flock_prover::prover::prove_fast_ligerito_union`, for one
-boolean type, plus the caller's claims; Flock 83f963e is unmodified. The one `unsafe` of
-`agg-keccak` (a byte view of the `F128` buffers for the zerocheck, as Flock's own prover
-does) lives there. The mode-A driver and its wire items (version 2) use the tied part.
-
-Test-plan differences: the tampering cases run on the tied
-part (`tests/all/tied.rs`) with the tie's error names: a bit flipped in the bridge copy only
-fails the lane-group tie, a bit flipped in both copies with the stale `c~` fails the public
-claim, a sponge input bit flipped with the stale chi witness fails Flock's sponge rows; a
-flipped share, another seed, another `fs`, a flipped proof byte and swapped caps are
-rejected; parts' shares XOR to the segment's `Y` as in K10.
-
-K13 makes the bridge instance a two-type bridge union and K21 replaces it by the virtual
-parity chain; the event-2 item of a part is the sponge cap alone, and the sponge commitment
-is computed once (K14). The sponge instance, its claims, the public check, the lane-group tie
-and its error names are as above.
-
-## K12. Vendored `flock-core` with a prover-only opening patch (spec Section 8; pinned-dependency rule; see K19 for the verifier-visible list-aware schedule)
-
-Rule: dependencies are pinned git revisions (Flock `83f963e`, recorded in `README.md`).
-
-Code: `vendor/flock-core` is a verbatim copy of `crates/flock-core` at that revision with
-one change in `pcs/jagged.rs::build_merged_weight_and_prime` (`vendor/flock-core/PATCH.md`),
-wired in by `[patch."https://github.com/succinctlabs/flock"]` in the root `Cargo.toml`; the
-other Flock crates stay the pinned git dependencies. The change: the merged opening bakes a
-16 x 256-entry fold table (64 KB, 4,096 fold evaluations) per used word column for every
-ring-switched claim, whatever the column's height; the patch evaluates the claim per slot
-(`phi(eq_col[c] r)`, one multiply and one lookup) when the stack averages fewer than 64 live
-rows per used column. Flock's own shapes (hundreds of rows per column) are unaffected.
-
-Why: the bridge instance of K11 is one row of `48 x 2^d + 33` word columns (49,185 at
-`d = 10`, 393,249 at a full segment). Measured: the bake took
-3.4 s and 6.4 GiB of the bridge instance's 4.2 s and 7.8 GiB at 1,024 records, and would
-take 51 GiB at a full segment; Flock's block-first transport (about `128^2` field
-operations per column) is no alternative for a wide one-row stack. The patch is exact and
-prover-only: `x -> phi(eq_col[c] x)` is F_2-linear, so the baked byte decomposition and the
-direct evaluation give the same weight vector bit for bit, the transcript and the proof
-bytes are unchanged, and proofs made with the vendored crate verify with upstream Flock
-(and the other way round). `vendor/flock-core/PATCH.md` is the record of the revision and
-the diff (upstreaming the patch, or a fork, would remove the copy).
-
-Second prover-only change (`PATCH.md` Section 3): Flock's x86 kernels (additive
-NTT butterflies with the fused-4 schedule, zerocheck rounds 1 and 2, the inverse-NTT table
-apply) are chosen at run time (`is_x86_feature_detected!`: AVX-512F, VPCLMULQDQ, GFNI,
-AVX512-VBMI) instead of by `cfg(target_feature)`, so the CLMUL build uses them on a CPU that
-has them while the default build stays portable and runs everywhere. Why: upstream only
-enables them under `target-cpu=native`, which our builds cannot use (a global
-`x86-64-v4` breaks Akita), and the portable kernels were the top of the Flock profile. Exact: same field values on every path, so the proof
-bytes are unchanged (byte-identical aggregates; per-path tests listed in `PATCH.md`).
-`FLOCK_SIMD=portable|gfni` caps the level for A/B runs. The merged opening's block
-statistics have an AVX-512 path of the same kind (`PATCH.md` Section 4).
-
-Third change, in a second vendored crate (`vendor/flock-field/PATCH.md`): the x86
-scalar GF(2^128) multiply, unreduced multiply and square of `flock-field` get `#[inline]` and
-need only `pclmulqdq` (upstream: not inline, `pclmulqdq,sse4.1`), so the `+pclmulqdq` CLMUL
-build inlines them into flock-core instead of calling them out of line. Exact (same
-instructions on the same values), proof bytes unchanged, upstream interoperability kept;
-`docs/perf.md` Section 10.
-
-## K13. Two-type bridge union as the bridge instance of a tied part (spec Section 8)
-
-Spec Section 8: one bridge slot per segment, one block whose rows prove
-`Y_sigma = M_3 M_2 M_1 b'`, intermediate parities not materialized; K11: that slot as its own
-one-row Flock instance of the tied part, committed at event 2.
-
-Code (`agg_keccak::tied`, tied-part proof version 2; mode-A item version 3; the bridge
-union was removed in favour of the parity chain, K21):
-the bridge instance is a Flock union of two boolean types. Level 1: one row per (lane,
-level-1 block) of the part (`6 x 2^max(0, d - 9)` live rows) whose `A_0` is `M_1` itself,
-committing the block's input bits and its level-1 parities `y1 = M_1 b'(t, beta)`. Levels 2-3:
-one row whose inputs are the parities of all level-1 rows and whose rows are `(sum_c (M_3
-M_2)[o, c] z_c + Y_o one) * one = z_{y_o}` (`Y` a coefficient, K8). Ties, as packed-direct
-claims in the union's merged opening: the level-1 inputs against the sponge's lane groups
-(tie 1, the error names of K11), the parities against their copies (tie 2), and the output
-columns `z_y` against zero.
-
-Two departures from the design note: (1) the parities depend on `sd`, so the union cannot be committed at event 2; it is
-committed at event 6, its cap travels in the part's proof, the event-2 item of a part is the
-sponge cap alone, and the tie challenges are derived from `fs` and both caps (the union's
-content is forced by the sponge's `b'`, fixed at event 2, so the bridge bound (9.3) is
-unchanged); (2) a row with `C = I` only defines its output column, so a union committed after
-`sd` needs the claim `z_y = 0` (the output region moved to the aligned base `6 G + 4096`); the
-one-row slot of K8 did without it only because its `z_y` was fixed before `sd`.
-
-Why: a profile of the one-row bridge instance. Every cost of the one-row slot was linear in
-its `2^(13 + d)` columns: `7.2 x 10^8` walker entries per fold and 1 GiB vectors at a full
-segment, and a verifier discharge of 0.26 / 0.50 / 1.43 s at `d = 10 / 11 / 13`. The union
-reads `1.9 x 10^7` entries over `2^20`-entry tables at a full segment (`M = 28`, 97 live rows,
-411,712 committed words). Measured (CLMUL build, 7 threads,
-medians of 5): at 2,048 records the mode-A prover takes 4.80 s instead of 6.59 s (Flock part
-1.90 s instead of 3.70 s, the bridge instance about 0.23 s instead of 1.73 s), the verifier
-0.30 s instead of 0.75 s uncached (Flock part 63 ms instead of 505 ms), the prover's peak RSS
-1.94 GiB instead of 3.10 GiB; the aggregate is 7,781 bytes (0.9%) larger (the union's cap
-moved from event 2 into the proof, and a slightly larger opening). A part with the
-full-segment bridge geometry (`d = 13`, 8 live records) proves in 0.45 s instead of 6.77 s
-and verifies in 83 ms instead of 1.87 s, with 0.8 GiB instead of 6.1 GiB peak.
-
-## K14. The Flock commitment computed once (updates K7)
-
-K7: Flock 83f963e's prover has no entry that takes a precomputed commitment, so the event-2
-commitment was computed twice, before event 2 and again inside Flock's prover.
+## K14. The Flock commitment computed once
 
 Code: `flock_union::UnionGeometry::commit_data` returns Flock's `Commitment` with its
 `ProverData` (the Reed-Solomon codeword and the Merkle tree); `UnionGeometry::prove(...,
 pre: Some(data))` opens that commitment without committing again (the Ligerito commit is
 deterministic, so the data is what the prover would recompute; tests show byte-identical
 proofs with and without it). `TiedCommitted` keeps the sponge instance's data;
-`agg_cli::mode_a` keeps it per part from event 2 to event 6, while the witness buffers are
-still dropped after event 2 and rebuilt at event 6 (with lever W1, below, only in a batch of
-more than one part). The standalone sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
+`agg_cli::mode_a` keeps it per part from event 2 to the join, while the witness buffers are
+dropped after event 2 and rebuilt for the join only in a batch of
+more than one part. The standalone sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
 
 Cost (measured locally): the kept data is the sponge instance's codeword and Merkle
 tree, 19 / 52 / 84 / 152 MiB at 256 / 512 / 1,024 / 2,048 records with `Fast` (twice that
@@ -692,49 +476,17 @@ data (K14). Measurements and the default: `docs/keccak.md` Section 12. By defaul
 accepts either `Fast` or `Slim` because both meet the same documented level in upstream Flock;
 `Slim8` (K18) is an opt-in mode-A profile; `Secure` (120 bits) is not a mode-A profile.
 
-## K16. Spans: one tied part over all segments; the final vectors as the output claim (spec Sections 8, 9, 10; docs/bridge.md Section 5c)
+## K16. Spans (spec Sections 8, 9, 10; docs/bridge.md Section 5c)
 
-Spec and K10, K11, K13: one Flock argument per segment (at least one tied part per segment),
-the bridge union's levels-2-3 row proving the part's share with `Y` a coefficient of its
-composite rows (K8) and its output columns pinned to zero by a claim.
-
-Code (`agg_keccak::tied::TiedPart::new_span`,
-tied-part proof version 3; `agg_cli::mode_a`, `AggregatorConfig::span`, CLI `--flock-span
-on|off`, default on): a batch of `S >= 2` segments whose parts are whole segments
-(`d_part = d_seg = 13`) is proven by ONE tied part over all segments: one sponge instance of
-all `N` records (record `i` of segment `sigma` is row `2^13 sigma + i`) and one bridge union
-covering `2^ceil(log2 S)` segments (level-1 row `sigma + 2^span_log (beta + blocks t)`,
-levels-2-3 row `sigma`; segments without records are zero rows). Every tie point gains the
-segment coordinates `rho_sigma`. In every tied part (also `S = 1`) the levels-2-3 rows are
-proven with a zero coefficient, so their output columns hold `M_3 M_2 y1`, and the output
-claim's value is the multilinear extension of the public table of the final vectors (the
-share for a part of one segment, the `Y_sigma` for a span), computed by the verifier; the
-table's digest is absorbed before the tie challenges. Wire: segment 0's event-2 item has
-span byte `S` and the span's cap, its event-6 item the span's proof (no shares); the items
-of segments `1..S` have span byte 0, no commitment and an empty proof item; the verifier
-gathers the segments' statements, `Y_sigma` and seeds and checks the span at the last
-segment, seeded by `span_seed(fs_0, .., fs_{S-1})`. docs/bridge.md Section 5c has the
-span layout and seeds as kept in version 5.
-
-Why: every tied part pays two Ligerito openings (about 300 KB each with `Fast`, 200 KB with
-`Slim`) whatever its size, so at `N = 2^15` four parts pay eight; a span pays two, of
-polynomials four times larger, whose openings grow by a few levels only (`docs/keccak.md`
-Section 12: Flock bytes per signature at `N = 2^15` from 94.6 measured with `Fast` parts to
-about 16 with a `Slim` span, an estimate). The output claim replaces the `Y` coefficient
-because the rows of one levels-2-3 type share one `A_0`, so different `Y_sigma` per row
-cannot be coefficients. Prover and verifier work are the sums of the parts' (the instances
-are linear in their rows); the prover's peak memory is that of one instance of all `N`
-records (to be measured on the cloud machine). Local tests cover spans at the tied-part level
-(`d = 3, 6`, two and three segments, an empty segment); mode A has more than one segment only
-above `2^13` records, so the span path of `agg_cli::mode_a` is covered locally by the item
-logic without proofs (`span_items_open_gather_and_close_at_the_last_segment`) and awaits the
-cloud run.
+`AggregatorConfig::span` defaults on. A batch of more than one segment with
+whole-segment parts uses one tied part over all segments: one sponge instance and
+one parity chain. The layout, seeds and wire items are specified in
+[bridge.md](bridge.md), Section 5c. Sharing one opening limits proof size growth.
 
 ## K17. The Ligerito level-0 cap is not serialized (docs/keccak.md Sections 4, 12)
 
 Flock's `LigeritoProof` carries `initial_cap`, the level-0 Merkle cap, which is the
-commitment itself (the event-2 cap of the sponge instance, the framed cap of the bridge
-union); Flock's verifier rejects a proof whose `initial_cap` differs from the commitment's.
+commitment itself (the event-2 cap of the sponge instance); Flock's verifier rejects a proof whose `initial_cap` differs from the commitment's.
 
 Code: `agg_keccak::flock_union::UnionProof::to_bytes` serializes the proof with an empty
 `initial_cap`, `from_bytes` refuses a proof that carries one, and `UnionGeometry::verify` puts
@@ -742,10 +494,10 @@ the commitment's cap in its place before Flock's verifier runs. Prover, transcri
 verification are otherwise unchanged: an accepted proof is exactly one whose cap equals the
 commitment's, so substituting it accepts the same proofs.
 
-Why: the cap was sent twice, 4,096 bytes (`Fast`) or 2,048 bytes (`Slim`) per Flock
+Why: sending the cap twice costs 4,096 bytes (`Fast`) or 2,048 bytes (`Slim`) per Flock
 instance.
 
-## K18. A rate-1/8 Ligerito parameter set, `Slim8`, in the vendored Flock core (spec Section 8; updates K12)
+## K18. A rate-1/8 Ligerito parameter set, `Slim8`, in the vendored Flock core (spec Section 8)
 
 K12: the vendored `flock-core` differs from Flock `83f963e` by a prover-only patch; Flock
 ships the Ligerito profiles `Fast` (rate 1/2), `Slim` (rate 1/4) and `Secure`, plus two
@@ -769,7 +521,7 @@ It is a parameter set of the documented analysis, not a profile Flock ships: pro
 verify with this vendored copy (or upstream with the same configs). Measurements and the
 choice of the default: `docs/keccak.md` Section 12.
 
-## K19. List-aware work at Flock's outer sites in the vendored core (spec 12.1; docs/soundness.md 4.3, 4.4; updates K12, K18)
+## K19. List-aware work at Flock's outer sites in the vendored core (spec 12.1; docs/soundness.md 4.3, 4.4)
 
 Flock `83f963e`: under `Fast`, `Slim` (and our `Slim8`) every outer challenge of a Flock
 proof (zerocheck initial and skip points and rounds, lincheck `alpha`, `beta`, rounds and
@@ -794,8 +546,8 @@ path) keep upstream's bits. No byte changes (Flock nonces are 8-byte words).
 
 Consequence: the transcript validity rule of the Flock verifier changes, so the vendored
 core is no longer prover-only: our Flock proofs do not verify with upstream `83f963e` and
-upstream's do not verify here (mode A rejects the old format anyway: tied-part proof version
-4, K20). The finding should be raised with the Flock authors, who may have an argument for
+upstream's do not verify here (mode A uses tied-part proof version
+5, K21). The finding should be raised with the Flock authors, who may have an argument for
 the outer sites that their audit document does not state; if so this patch can be dropped.
 
 Canonical nonce width (`vendor/flock-core/PATCH.md` Section 6): the vendored
@@ -805,23 +557,12 @@ do (`docs/soundness.md` 6.1 to 6.3). Upstream accepts any passing `u64`. Honest 
 unchanged except when Flock's smallest passing nonce is `2^(g + 7)` or more (probability at
 most `2^-184.66` per site), which is a completeness failure (`docs/soundness.md` 6.5).
 
-## K20. Tie work and the tie binding (tied-part proof version 4; docs/soundness.md 3.6, 4.5, 6.3)
+## K20. Tie work and the tie binding (tied-part proof version 5; docs/soundness.md 3.6, 4.5, 6.3)
 
-Version 3: the tie challenges `rho` were drawn without work, with the
-bound `95 / 2^128` at a span of four segments, and the two instance challengers absorbed
-neither the union's cap (the sponge instance) nor the final-vector digest.
-
-Code (`agg_keccak::tied`, version 4): the tie bound carries the Johnson-list sizes of both
-Ligerito commitments (the level-0 binding happens inside the openings, after `rho`):
-`[2 L^2 (d + s + 5) + 2 L (log2 blocks + s + 9) + L (5 + s) + L (nu_s + 3)] / 2^128`
-(`agg_bridge::pow::tie_numerator`), so the tie challenger grinds 16 / 17 / 18 bits (`Fast` /
-`Slim` / `Slim8`) at a full segment or span with Flock's `grind_pow` before the first
-coordinate; the nonce (below `2^(g + 7)`) travels as `LE32` in the proof header. After the
-coordinates the tie challenger squeezes a 32-byte tie binding that both instance
-challengers absorb (label `agg-keccak/v4/tie-binding`) before Flock binds its statement.
-The difficulty is a function of the part's public geometry (`TiedPart::plan_tie_bits`), so
-the plan of event 0 names it before the part exists. Cost: about `2^17` BLAKE3 evaluations
-and 4 bytes per tied part.
+The tie challenger grinds before drawing coordinates and squeezes a 32-byte binding
+that the sponge challenger absorbs before Flock binds its statement.
+The current site numerators and nonce format are in [parity-chain.md](parity-chain.md),
+Sections 6–8. The label is `agg-keccak/v4/tie-binding`.
 
 Parts per segment (mode A, `agg_cli::mode_a::MAX_PARTS_LOG2`): at most two tied parts per
 segment, `d_part >= max(3, d_seg - 1)`. The bridge seed `sd` is drawn while each part's
@@ -832,19 +573,11 @@ range, and the verifier refuses a smaller `d_part` while deriving the plan of ev
 (`VerifyError::Plan`).
 
 Exhausted tie search: if Flock's smallest passing tie nonce is `2^(g + 7)` or more
-(probability below `2^-184.6` per part), `TieChallenges::derive` returns
-`KeccakError::Work` instead of panicking; `TiedPart::{tie, prove, prove_with_blocks,
-prove_with_final_vectors}` return it and mode A's Keccak side maps it to
+(probability below `2^-184.6` per part), the nonce check returns
+`KeccakError::Work` instead of panicking; `TiedPart::prove` and `prove_with_final_vectors` return it and mode A's Keccak side maps it to
 `ProveError::Keccak` (`agg_piop::prover::KeccakSide::prove` returns a `Result`).
 
-## K21. The virtual parity chain replaces the bridge union (tied-part proof version 5; spec Section 8; docs/bridge.md Section 5d; `docs/parity-chain.md`)
-
-Versions 2 to 4: a tied part proved `Y_sigma = M_3 M_2 M_1 b'_sigma`
-over GF(2) with a second Flock instance, the bridge union (level-1 rows holding `y1 = M_1 x`,
-one levels-2-3 row per segment), committed after `sd`, tied to the sponge instance by two
-lane-group claims (tie 1), to itself by two parity-copy claims (tie 2) and to the public final
-vectors by an output claim; its cap and proof travelled in the part's proof (203,052 B at
-`8@13/4` with `Slim`, plus a 2,048 B cap and 8 B of framing, docs/keccak.md 12.3).
+## K21. The virtual parity chain (tied-part proof version 5; spec Section 8; docs/bridge.md Section 5d; `docs/parity-chain.md`)
 
 Code (`agg_keccak::tied`, version 5; `agg_bridge::parity_chain`): no bridge union. The tie
 challenger draws `eq_Y = eq(r_o, rho_3) eq(r_y, sigma)` (12 + `span_log` coordinates) after the
@@ -866,30 +599,13 @@ nonce) || rounds (q(1) || q(inf) || LE32(nonce)) || v || LE32(len) || sponge pro
 Work (docs/soundness.md 3.6): the tie site carries `L_s (nu_s + 3)` (the public claim only),
 the `eq_Y` site `L_s (12 + span_log)`, every round `2 L_s` (`agg_bridge::pow::part_work`);
 the plan of event 0 names all of them per tied part (site classes 9 and 10,
-`agg_piop::pow::KeccakPlan::parts`). Why: the union cost a second Flock commitment and
-opening per part (about 205 KB per span, the larger part of the GF(2) side's bytes) and its
-circuit and instance were part of assumptions (K) and (F); the chain costs about 1 KB of
-rounds and one more ring-switched claim (about 4 KB: `s_hat_v` and 128 multipoint dual values;
-measured: 200,008 B less per span at `8@13/4`, `docs/keccak.md` 12.7). Prover cost: the chain
-itself is small (178.5 ms locally at the 32K shape), but at a full-height sponge Flock's
-block-first opening needs the bit claim's full column bit-bank (one pass over the sponge
-stack, as for Flock's own C claim; 174 to 222 ms locally at 8,192 records) and one more claim
-in its statistics; at one full segment this about cancels the union's cost (measured locally),
-so the 32K prover gain is open until the cloud A/B. The vendored core's bake skips the bit
-claim's zero-weight columns (prover-only, PATCH.md Section 1).
-The F_p side of the bridge is unchanged; the bridge union code is removed.
+`agg_piop::pow::KeccakPlan::parts`). The chain uses about 1 KB of rounds and one ring-switched claim (about 4 KB).
+Its bit claim uses the full sponge column bit-bank. The vendored core skips
+zero-weight columns when baking weights (PATCH.md Section 1).
 
-Wire version: PIOP wire version 4, shared with the fork-join transcript of K22 (nothing was
-released between the two changes); aggregates made with K21 alone do not verify under K22
-(they fail at the event-6 share item).
+Wire versions: PIOP 4, tied-part proof 5.
 
-## K22. Fork-join transcript: the Flock proofs at a join after stage 3 (spec Sections 10, 11; docs/soundness.md 12; lever P1 of docs/perf.md)
-
-Spec Section 10 without this change: event 6 absorbs the final vectors `Y_sigma`, then the
-`S` Flock proof items (mode A: the shares of a segment's parts but the last, then one
-tied-part proof per part), before the lookup challenge `X`. The prover then runs the Flock
-proofs (about 5.1 s of the 15.0 s prove at 32K on the cloud machine) before the lookup and
-the stages, although no PIOP check reads a Flock value in mode A.
+## K22. Fork-join transcript: the Flock proofs at a join after stage 3 (spec Sections 10, 11; docs/soundness.md 12)
 
 Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}`):
 
@@ -916,23 +632,20 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   its own OS thread, 64 MiB worker stacks) while the parity tables, the lookup, the
   pre-stage claims and the three stages run on the global pool; the join then absorbs the
   proofs (`prover::fork_join`). The pool has `AGG_FLOCK_THREADS` threads if set (`0`: no
-  fork, the old serial order), else 3/8 of the global pool rounded up: 6 of 16 on the cloud
-  machine (the fork itself: -1.15 s at 32K with 8 threads, -1.11 s with 16; a global
-  8-thread pool alone was 13% slower; the 6-thread default follows the pool sweeps of
-  `docs/perf.md` 12.1 and 13).
+  fork, serial execution), else 3/8 of the global pool rounded up: 6 of 16 on the cloud
+  machine.
   On a rayon worker or with a one-thread pool there is no fork (the P12 pattern), nor for
   a side whose proof items are empty (`KeccakSide::proves_concurrently`: mode B, profile
   0). A non-numeric `AGG_FLOCK_THREADS` is reported once on stderr and replaced by the
   default; larger values are clamped to the larger of the logical CPUs and the global pool
   (`prover::max_flock_threads`).
   Both schedules give the same proof bytes (test `agg-piop/tests/fork_join.rs`).
-- Verifier: it checks the Keccak side right after replaying event 6, as before (the verdict
+- Verifier: it checks the Keccak side right after replaying event 6 (the verdict
   does not depend on the order of the checks, and the early check keeps precise rejection
   reasons), and absorbs the proof items at the join.
 - Wire: the share items follow the final vectors, the proof items follow the stage-3 claims
   (before the nonce stream); `+4 S` bytes of framing for the share items. Item version 4,
-  tied-part proof version 5 and PIOP wire version 4 are kept (shared with K21, nothing
-  released in between); aggregates made with K21 alone do not verify under it.
+  tied-part proof version 5 and PIOP wire version 4 identify the format.
 
 Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 12.3, 12.3,
 12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
@@ -942,12 +655,7 @@ masses and the work plan are unchanged. The extractor runs that list decoder (Ak
 checkpoint node evaluates its test once per invocation), so its polynomial cost enters the
 cost of one run, `T_run`, and the Module-SIS reductions, not the run count or the error
 (soundness.md 12.6); the decoder's fit to Ligerito's level-0 code is cited, not checked
-(12.7 item 9). Measured: local 8K (15 logical CPUs) -0.93 /
--1.03 s (-13%), prover peak +0.8 to +1.1 GiB, uncached verify 156.7 / 164.9 ms -> 167.4 /
-168.6 ms (within the local noise, but quote verifier numbers of this change only from a
-cloud run); a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and
-15 (6.76 s) in one round, direction only, but a rerun tied them (6.34 s each), so the default
-stays the cloud-measured half.
+(12.7 item 9). Measurements are in [perf.md](perf.md).
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
@@ -1028,27 +736,17 @@ sum, so a tampered witness under the test-only unchecked provers still yields th
 polynomials of its tables. Why: stages 1-3 were 1.82 s of the 2.73 s mode-B prover at
 `N = 2,048` (`7ed4a32`, same session) and 0.65 s with this kernel.
 
-## L1. Lookup layout L16 adopted; the base-16 digit path removed (spec Sections 4 to 7, 10 to 12; was Appendix C)
+## L1. Lookup layout L16 (spec Sections 4–7, 10–12)
 
-Spec (wire version 0): 23 committed columns per position (`z`, `u`, `v` in base-16 digits,
-the six bits) and 40 base-16 digits on the bridge domains, ranged by `b16_prod` (stage 1),
-95 leaves (stage 2) and 55 links (stage 3).
-
-Code (wire version 1, `docs/lookup.md`): the lookup layout L16, normative in spec Sections 4, 7, 10, 11 and 12: 12 committed columns per position, every
-16-bit value and every carry looked up in `T_16 = [0, 2^16)` by LogUp-GKR with two
-independent challenges, `Z_hi` and `U_hi` kept on small leaves (base 4 and, since L8, base 6). The base-16
-digit layout is removed, not kept behind a configuration switch. Why: a switch would have
-duplicated the manifest, the three stage tables, the claim vectors, the transcript
-registry, the wire format, the verifier and the catalogs (the four-group width-4 rows next
-to the six-group two-family rows), so every protocol file would carry two layouts; measured
-against it (mode B, 256 to 2,048 signatures), the lookup layout halves the committed cells and
-makes the main-domain commitments 2 to 3x faster. The old layout stays reproducible at code
-`4247f61`; its wire version 0 is refused by the parser.
+The lookup layout is specified in [lookup.md](lookup.md). It uses 12 committed columns
+per position. Every 16-bit value and carry is looked up in `T_16 = [0, 2^16)` by
+LogUp-GKR with two independent challenges. `Z_hi` and `U_hi` use small leaves
+(base 4 and base 6). A single layout avoids duplicating the manifest, stage tables,
+claim vectors, transcript registry, wire format, verifier and catalogs.
 
 ## L2. Carries stored balanced like every looked-up column (docs/lookup.md Section 1)
 
-`docs/lookup.md` Section 1 (proposal) stored the carries as they are (`0 <= kappa <= 1023`
-honestly). Code: every looked-up column, carries included, stores `K = f - 2^15` and is
+every looked-up column, carries included, stores `K = f - 2^15` and is
 looked up as `f = K + 2^15` (`manifest::LOOKUP_SHIFT`; the carry layout is one unsigned
 base-`2^16` digit, `kappa = K + 2^15`); the padding slots of the carry stacks hold `-2^15`
 (looked-up value 0). Why: one storage shift for all four stacks gives one leaf formula
@@ -1059,8 +757,7 @@ negative carries that only the lookup rejects). Soundness is unchanged: the look
 
 ## L3. One forced balanced base-`2^16` inner digit for the width-16 preset (docs/pcs-config.md Section 2)
 
-`docs/lookup.md` Section 6 left open whether the width-16 preset should take Dense's
-cost-optimal inner digits or one forced base-`2^16` digit. Planner probe: at `(18, 4)` and `(20, 4)` Dense's search (`3..=16`)
+Planner probe: at `(18, 4)` and `(20, 4)` Dense's search (`3..=16`)
 selects two base-`2^9` digits, a forced `(16, 16)` one digit and a forced `(8, 8)` three,
 with the same estimated opening proof (60,877 B and 61,707 B). Code: inner range `(16, 16)`,
 the fewest inner digits (12 per position in all), hence the least commit work for the same
@@ -1068,8 +765,7 @@ estimated proof bytes.
 
 ## L4. Six groups, two families, `G_m` as Akita's final group (spec Section 4.1)
 
-`docs/lookup.md` Section 6 item 1 left the group split of `D_2` and the final group open.
-Code: `G_main16` (width 16), `G_main4` (width 4), `G_1`, `G_2` (parities and carries in one
+`G_main16` (width 16), `G_main4` (width 4), `G_1`, `G_2` (parities and carries in one
 width-16 group), `G_3` (width 16), `G_m` (width 4) in this wire order; `G_m` is the final
 group (committed against the five precommitted profiles), so the grouped rows
 (`mldsa-44-l16-batch-<N*>-mult-final`) live in the width-4 catalog (D2). The multiplicity
@@ -1107,32 +803,15 @@ lookup (`claims::MultiplicityClaims`, 112 bytes); the verifier checks
 seven claims of `G_m` at `pi_m`. No range check of the digits: Lemma 5 of LogUp holds for any
 `m` in `F_p` (`docs/lookup.md` Section 2).
 
-## L8. Relation H-u replaces relaxed H; `u` by one six-valued digit (spec Sections 3, 4.3, 7.4, 10, 12; Appendix A; `docs/h-exact.md` step A)
+## L8. Relation H-u (spec Sections 3, 4.3, 7.4, 10, 12; Appendix A)
 
-Spec (revision 4, wire version 2): the relaxed relation H with `(bar B_z, bar B_u) = (2^17,
-2^18)`, `u = U_lo + 2^16 U_hi + 2^15` with a base-8 `U_hi` on `leaf8` (degree 5), so
-`zeta' = 421,888`; Appendix A's H-exact `u` form `118,787 a_u + b_u - 190,465` needs two small
-columns. Code (wire version 3): relation H-u, `z` unchanged and `u =
-U_lo + 63,079 U_hi + 31,540` with `U_lo` looked up (`B_ulo = U_lo + 2^15`) and `U_hi = H_u - 3
-in [-3, 2]` on `leaf6` (`Q_6 = P (P - 2)(P - 6)`, degree 4), which covers exactly `[-190,465,
-190,465]` because `5 * 63,079 + 2^16 = 2 B_u + 1`; hence `zeta' = zeta = 350,209`. The relaxed
-`u` path is removed, not kept behind a flag (as for L1: a flag would duplicate the stage-2
-degree, the leaf and the encoder for a dominated variant). Same columns, groups, alphabets'
-widths and catalog rows; event 0 changes only in the version (3), the relation byte (0 =
-H-u, `manifest::Relation`; 1 is reserved for H-exact, step B) and the alphabet code of
-`U_hi` (8 -> 6). Stage 2 drops from degree 5 to 4 (16 B per round less: 5,616 B of stage
-messages and claims at `2^15` instead of 6,016); every proof-of-work difficulty and plan
-digest is unchanged (`bit_length(4) = bit_length(5)`), the round-by-round ledger falls from
-`1,434/|K|` to `1,409/|K|` at `2^15` (`docs/soundness.md` Section 10). Why the default changed: H-u dominates relaxed H in security (ML-DSA-44's
-own SelfTargetMSIS instance, core-SVP 123.5 instead of 119.7)
-and in cost (no extra column, cheaper stage 2).
+H-u is the default relation. Its value forms and six-valued `u` digit are specified
+in [h-exact.md](h-exact.md), Section 8. It proves the exact `u` bound without an
+extra committed column and uses ML-DSA-44's SelfTargetMSIS instance.
 
-## L9. Relation H-exact as a runtime relation: exact `z` by a bit-slack form, one six-valued `u` digit, Booleanity at `r^(2)` (spec Sections 3.1, 4.1, 4.3, 7.4, 7.5, 10, 12; Appendix A; `docs/h-exact.md` step B)
+## L9. Relation H-exact as a runtime relation: exact `z` by a bit-slack form, one six-valued `u` digit, Booleanity at `r^(2)` (spec Sections 3.1, 4.1, 4.3, 7.4, 7.5, 10, 12; Appendix A; `docs/h-exact.md` Section 9)
 
-Spec (Appendix A before revision 6): H-exact behind a feature flag with `z = 130,915 a_z +
-b_z - 130,993` and `u = 118,787 a_u + b_u - 190,465`, i.e. two Boolean columns `a_z, a_u`
-checked in stage 1 and a base-4 digit of `b_u` on `leaf4` (+2,048 committed elements per
-signature). Code (design X1 of `docs/h-exact.md`): a runtime relation
+H-exact is a runtime relation
 (`manifest::Relation::HExact`, relation byte 1, bound in the proof header and byte 3 of
 event 0) next to the default H-u, so one binary proves and verifies both results:
 
@@ -1157,12 +836,10 @@ event 0) next to the default H-u, so one binary proves and verifies both results
 * The verifier takes the relation from its caller (`verifier::verify(..., relation, ...)`,
   `AggregateVerifier::relation`, `agg verify --relation`) and rejects a header that names
   another relation before event 0 (`VerifyError::Relation`), as `docs/h-exact.md` 1.3
-  requires (there called `RelationPolicy::Exactly`; a plain `Relation` argument is the same
-  policy). No wire-version bump beyond L8's version 3: H-u proofs are byte-identical.
+  requires.
 
 Why: the project reports two results (H-u and H-exact); a runtime relation
-lets one build benchmark both back to back, and X1 is the cheaper layout where the prover
-spends its time (`docs/h-exact.md` Appendix X).
+lets one build benchmark both back to back, and the layout uses one extra committed column.
 
 ## L10. Relation H-FIPS: relation byte 2, `u_h` in `G_2`, the sign as a bit, five zero-checks (spec Sections 3.1, 4.1, 7.4, 7.5, 10, 12; Appendix A; `docs/h-exact.md` Section 10)
 
