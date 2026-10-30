@@ -6,8 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn agg(args: &[&str]) -> (i32, String) {
+    agg_env(args, &[])
+}
+
+fn agg_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_agg"))
         .args(args)
+        .envs(env.iter().copied())
         .output()
         .expect("run agg");
     let text = format!(
@@ -210,5 +215,52 @@ fn keygen_sign_aggregate_verify_and_bench() {
         "B per signature",
     ] {
         assert!(out.contains(needle), "{needle}: {out}");
+    }
+}
+
+/// Thread donation at the fork's join (`AGG_SCHED_DONATE`) moves the Flock opening to a
+/// larger pool without changing a byte: the aggregate is the same with donation off, on and
+/// forced, on four threads (a fork) and on one.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn donating_threads_to_the_flock_opening_keeps_the_bytes() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agg-cli-donate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (keys, recs) = (dir.join("keys.bin"), dir.join("records.bin"));
+    let (code, out) = agg(&["keygen-batch", "--count", "3", "--seed", "7", "--out", s(&keys)]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = agg(&[
+        "sign-batch", "--keys", s(&keys), "--count", "16", "--seed", "7", "--out", s(&recs),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let mut reference: Option<Vec<u8>> = None;
+    for threads in ["4", "1"] {
+        for donate in ["0", "1", "force"] {
+            let aggregate = dir.join(format!("aggregate-{threads}-{donate}.bin"));
+            let (code, out) = agg_env(
+                &["aggregate", "--records", s(&recs), "--out", s(&aggregate), "--part-log2", "3"],
+                &[
+                    ("RAYON_NUM_THREADS", threads),
+                    ("AGG_SCHED_DONATE", donate),
+                    ("AGG_SCHED_TRACE", "1"),
+                ],
+            );
+            assert_eq!(code, 0, "{out}");
+            if threads == "4" {
+                match donate {
+                    "0" => assert!(!out.contains("item=donate"), "{out}"),
+                    "force" => assert!(out.contains("donated=1 pool_threads=4"), "{out}"),
+                    _ => assert!(out.contains("item=donate mode=Finished"), "{out}"),
+                }
+            }
+            let bytes = std::fs::read(&aggregate).unwrap();
+            match &reference {
+                None => reference = Some(bytes),
+                Some(r) => assert!(*r == bytes, "{threads} threads, donate {donate}: other bytes"),
+            }
+        }
     }
 }

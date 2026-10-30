@@ -19,7 +19,7 @@ proof-of-work nonces of wire version 2/3.
 | P5 stage parity tables built while the Flock span is proven | done |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) |
 | instance `T` reused in the witness; vectorized `public_t` | done |
-| P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
+| P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default ceil(3/8 of the global pool)); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
 | W1 keep the event-2 Flock witness of a one-part batch until the join (Section 9) | done; cloud 32K: -0.66 s (Section 12) |
 | B inline Flock's scalar GF(2^128) multiply via a vendored `flock-field` (Section 10) | done; cloud 32K: -0.26 s prover, Flock verifier 29.0 -> 22.6 ms (Section 12) |
 | A move the one-vCPU windows off the serial path (Section 11) | done; cloud 32K: -0.21 s (Section 12) |
@@ -830,3 +830,35 @@ ML-DSA SIMD dispatch (`auto`, AVX-512 on this VM) and the Flock commit levers of
 One-round runs of `cfc566b` with the engine forced: `AGG_MLDSA_SIMD=avx2` prove 8,570.0 ms,
 `scalar` 8,795.0 ms. Aggregates (1,469,874 B) are byte-identical across the builds, and every
 verifier run accepts.
+
+## Pool schedule presets
+
+`AGG_SCHED_PRESET=auto` (opt-in) chooses a Flock pool size when the available logical
+CPU count and Rayon pool size match a row below. `off` restores the 3/8 default;
+`AGG_FLOCK_THREADS` overrides either choice. Flock and PIOP pools remain additive.
+
+| Logical CPUs / Rayon threads | Flock workers | Policy and evidence |
+| --- | ---: | --- |
+| 1 / 1 | 0 | No fork; Flock precedes PIOP. |
+| 16 / 16 | 6 | Retain the existing default pending a 32K cloud re-sweep. `AGG_SCHED_16_FIX=off` selects the previous preset of 4 for comparison. |
+| 32 / 32 | 12 | Unmeasured, cloud sweep needed. |
+| Other | ceil(3 Rayon / 8) | Existing default. |
+
+On WSL (i7-11700K, 16 logical CPUs), the 4K A/B had one in-process warmup and one
+measured run per launch, alternating off/on/off/on. Mean fork wall was 1720.2 / 1717.8 ms,
+Flock proofs 1188.8 / 1200.9 ms, PIOP branch approximately 1720.2 / 1717.7 ms, and total
+prove 3222.2 / 3186.9 ms (0.989x). Individual totals were 2577.7, 3866.6 / 2460.2,
+3913.5 ms; the spread makes this directional only. The PIOP interval uses phase stamps
+from shares to stage 3. One-thread 1K fresh aggregates took 4308.5 ms before and 4075.2 ms
+after; proof bytes matched at 1, 4, 16 and 32 Rayon threads. The one-thread path was
+unchanged. The 32-thread row is an extrapolation, and the separate IFMA implementation is
+not present in this branch: an IFMA-aware physical-core pool needs integration and a cloud
+sweep before it can be selected here.
+
+The subsequent default correction compared four against six Flock workers on WSL,
+alternating four launches with one warmup and one measured run each. Mean fork wall was
+1,427.0 / 1,389.0 ms, Flock proofs 1,155.1 / 989.7 ms, PIOP branch 1,426.8 /
+1,388.9 ms, and total prove 2,725.1 / 2,723.3 ms (0.999x). These 4K results are
+directional; the 32K cloud sweep remains open.
+
+The default Flock pool remains ceil(3/8 of the Rayon pool). The optional preset has not been measured on c4d and awaits the cloud sweep.

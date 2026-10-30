@@ -2102,6 +2102,8 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
 
     // Phase accounting behind LIG_PROVE_TRACE, mirroring the F128 impl's
     // [lig-prove] report so the two ladders stay comparable.
+    let sched_trace = var("AGG_SCHED_TRACE").as_deref() == Ok("1");
+    let sched_l0 = Instant::now();
     let trace = var("LIG_PROVE_TRACE").is_ok();
     let t_total = Instant::now();
     let mut t_l0_ood = Duration::ZERO;
@@ -2503,8 +2505,14 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
         t_induce += _t.elapsed();
     }
 
+    if sched_trace {
+        eprintln!("[sched] item=ligerito level=0 rows={} lanes={} ms={:.3}", block_len_0, l0_num_lanes, sched_l0.elapsed().as_secs_f64() * 1e3);
+    }
     let mut recursive_proofs = Vec::new();
     for i in 0..r {
+        let sched_level = Instant::now();
+        let sched_rows = previous.block_len;
+        let sched_lanes = 1usize << config.recursive_ks[i];
         let k = config.recursive_ks[i];
         assert!(current_split_dim >= k);
         let mut level_challenges = Vec::with_capacity(k);
@@ -2639,6 +2647,10 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
                     t_folds.as_secs_f64() * 1e3
                 );
             }
+            let merkle_proof = merkle_paths_for(&previous.tree, previous.block_len, &queries, strat(level));
+            if sched_trace {
+                eprintln!("[sched] item=ligerito level={} rows={} lanes={} ms={:.3}", i + 1, sched_rows, sched_lanes, sched_level.elapsed().as_secs_f64() * 1e3);
+            }
             return LigeritoProof {
                 initial_cap,
                 initial_proof,
@@ -2647,12 +2659,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
                 final_proof: FinalProof {
                     yr,
                     opened_rows,
-                    merkle_proof: merkle_paths_for(
-                        &previous.tree,
-                        previous.block_len,
-                        &queries,
-                        strat(level),
-                    ),
+                    merkle_proof,
                 },
                 sumcheck_transcript: Vec::new(),
                 sumcheck_transcript_f256: sumcheck.transcript().to_vec(),
@@ -2733,6 +2740,9 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
         sumcheck.glue(beta);
         if trace {
             t_induce += _t.elapsed();
+        }
+        if sched_trace {
+            eprintln!("[sched] item=ligerito level={} rows={} lanes={} ms={:.3}", i + 1, sched_rows, sched_lanes, sched_level.elapsed().as_secs_f64() * 1e3);
         }
         previous = next;
     }

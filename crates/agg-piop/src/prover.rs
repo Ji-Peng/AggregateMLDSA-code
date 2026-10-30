@@ -17,8 +17,11 @@
 //! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agg_bridge::sched::{set_opening_runner, OpeningRunner};
 use agg_pcs_config::commit::{CommitError, GroupCommitment};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
@@ -174,22 +177,36 @@ impl KeccakSide for NoKeccak {
     }
 }
 
-/// Threads of the Flock pool of the fork-join: `AGG_FLOCK_THREADS` if set (`0`: no fork,
-/// the Flock proofs and then the PIOP on the caller's pool), else 3/8 of the global pool
-/// rounded up (6 of 16 threads: the PIOP branch is the longer one. On main's 32K cloud sweep
-/// 4 threads were 0.7% faster than 6, within noise, and 8 slower; at 4K locally 4 and 6
-/// overlap and 8 is slower; a 32K re-sweep of this prover decides. A global pool of 8 threads
-/// alone is slower). A value that is not a number is reported once on stderr
-/// and replaced by the default (a measurement must not silently run another pool size; the
-/// bench report prints the size used); a larger value than [`max_flock_threads`] is clamped
-/// to it. `0` on a rayon worker or with a one-thread global pool, where an extra pool gains
-/// nothing or a blocked worker could deadlock.
+/// Threads of the Flock fork pool. `AGG_FLOCK_THREADS` overrides the preset (0 disables
+/// the fork). The automatic preset selects 12 on a 32-thread host; other sizes use
+/// 3/8 of the current pool rounded up. `AGG_SCHED_16_FIX=off` selects 4 on a
+/// 16-thread host for comparison with the previous preset. `AGG_SCHED_PRESET=auto`
+/// enables the preset; the default is the 3/8 rule. Values are capped at [`max_flock_threads`]. A Rayon
+/// worker or a one-thread pool disables the fork to avoid blocking the pool.
 #[must_use]
 pub fn flock_pool_threads() -> usize {
     if crate::pcs::on_calling_thread() {
         return 0;
     }
-    let default = || (3 * rayon::current_num_threads()).div_ceil(8);
+    let default = || {
+        let global = rayon::current_num_threads();
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if match std::env::var("AGG_SCHED_PRESET").as_deref() {
+            Ok("auto") => true,
+            Ok("off") | Err(std::env::VarError::NotPresent) => false,
+            _ => {
+                warn_once("unknown AGG_SCHED_PRESET; using off");
+                false
+            }
+        } {
+            match (cpus, global) {
+                (16, 16) if std::env::var("AGG_SCHED_16_FIX").as_deref() == Ok("off") => return 4,
+                (32, 32) => return 12,
+                _ => {}
+            }
+        }
+        (3 * global).div_ceil(8)
+    };
     match std::env::var("AGG_FLOCK_THREADS") {
         Err(std::env::VarError::NotPresent) => default(),
         Ok(v) => match v.trim().parse::<usize>() {
@@ -285,15 +302,105 @@ fn warn_once(message: &str) {
 /// reservation, as Flock's own 8 MiB pool and the commit threads).
 const FLOCK_POOL_STACK: usize = 64 << 20;
 
+/// Thread donation at the fork's join (`AGG_SCHED_DONATE`): whether the Flock opening may
+/// run on a pool of all threads instead of the Flock pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Donate {
+    /// The opening stays on the Flock pool (the default, `0` or `off`).
+    Off,
+    /// `1` or `on`: the opening moves to a pool of the global pool's size when the PIOP
+    /// branch has finished by the time Flock reaches it and that pool is larger.
+    Finished,
+    /// `force` (tests and debugging): the opening always moves, whatever the PIOP branch
+    /// is doing and whatever the pool sizes.
+    Force,
+}
+
+fn donate_mode() -> Donate {
+    match std::env::var("AGG_SCHED_DONATE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0" | "off") => Donate::Off,
+        Ok("1" | "on") => Donate::Finished,
+        Ok("force") => Donate::Force,
+        _ => {
+            warn_once("unknown AGG_SCHED_DONATE; using off");
+            Donate::Off
+        }
+    }
+}
+
+/// The opening runner of the Flock pool's workers (`agg_bridge::sched`) under `mode`, or
+/// `None` without donation. At each opening it reads `piop_done` once (no waiting on the
+/// PIOP branch) and either runs the opening in place or builds a pool of `total` threads and
+/// installs the opening there. That pool is local to the call, so nothing installs into a
+/// pool being dropped; its workers never wait on the Flock pool, so the Flock worker that
+/// blocks in `install` cannot deadlock it. The bytes do not depend on the pool
+/// (`agg_bridge::sched`).
+fn opening_runner(
+    mode: Donate,
+    piop_done: &Arc<AtomicBool>,
+    flock_threads: usize,
+    total: usize,
+    trace: bool,
+) -> Option<OpeningRunner> {
+    if mode == Donate::Off {
+        return None;
+    }
+    let piop_done = Arc::clone(piop_done);
+    Some(Arc::new(move |job: &mut (dyn FnMut() + Send)| {
+        let finished = piop_done.load(Ordering::Acquire);
+        let donate = match mode {
+            Donate::Force => true,
+            _ => finished && total > flock_threads,
+        };
+        let start = Instant::now();
+        let pool = donate
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(total)
+                    .stack_size(FLOCK_POOL_STACK)
+                    .thread_name(|i| format!("agg-open-{i}"))
+                    .build()
+                    .ok()
+            })
+            .flatten();
+        let threads = if let Some(pool) = &pool {
+            pool.install(|| job());
+            total
+        } else {
+            job();
+            flock_threads
+        };
+        if trace {
+            eprintln!(
+                "[sched] item=donate mode={mode:?} piop_done={} donated={} pool_threads={threads} flock_threads={flock_threads} opening_ms={:.3}",
+                u8::from(finished),
+                u8::from(pool.is_some()),
+                start.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    }))
+}
+
 /// Run `flock` on a fresh rayon pool of `threads` threads (on its own OS thread) while
 /// `piop` runs on the caller (its parallel loops on the global pool); return both results
 /// and the wall time of `flock`. The caller is not a rayon worker ([`flock_pool_threads`]
-/// is 0 there), so no worker blocks on the OS thread.
-fn fork_join<A: Send, B>(
+/// is 0 there), so no worker blocks on the OS thread. With `AGG_SCHED_DONATE`, the Flock
+/// opening moves to a pool of the global pool's size once the PIOP branch has finished
+/// ([`opening_runner`]).
+fn fork_join<A: Send, B: Send>(
     threads: usize,
     flock: impl FnOnce() -> A + Send,
-    piop: impl FnOnce() -> B,
+    piop: impl FnOnce() -> B + Send,
 ) -> ((A, Duration), B) {
+    let trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
+    let piop_done = Arc::new(AtomicBool::new(false));
+    let runner = opening_runner(
+        donate_mode(),
+        &piop_done,
+        threads,
+        rayon::current_num_threads(),
+        trace,
+    );
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
@@ -304,17 +411,42 @@ fn fork_join<A: Send, B>(
                     .num_threads(threads)
                     .stack_size(FLOCK_POOL_STACK)
                     .thread_name(|i| format!("agg-flock-{i}"))
+                    .start_handler(move |_| set_opening_runner(runner.clone()))
                     .build()
                 {
                     Ok(pool) => pool.install(flock),
                     // No pool: the Flock side's loops run on the global pool instead.
                     Err(_) => flock(),
                 };
-                (out, start.elapsed())
+                (out, start.elapsed(), Instant::now())
             })
             .expect("spawn the Flock thread");
-        let b = piop();
-        (crate::pcs::join_os_thread(handle), b)
+        let piop_start = Instant::now();
+        let piop_threads = std::env::var("AGG_PIOP_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0);
+        let b = if let Some(n) = piop_threads {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .stack_size(FLOCK_POOL_STACK)
+                .thread_name(|i| format!("agg-piop-{i}"))
+                .build()
+            {
+                Ok(pool) => pool.install(piop),
+                Err(_) => piop(),
+            }
+        } else {
+            piop()
+        };
+        piop_done.store(true, Ordering::Release);
+        let piop_end = Instant::now();
+        let (a, flock_busy, flock_end) = crate::pcs::join_os_thread(handle);
+        let join = Instant::now();
+        if trace {
+            eprintln!("[sched] item=fork piop_busy_ms={:.3} piop_idle_ms={:.3} flock_busy_ms={:.3} flock_idle_ms={:.3}", (piop_end - piop_start).as_secs_f64() * 1e3, (join - piop_end).as_secs_f64() * 1e3, flock_busy.as_secs_f64() * 1e3, (join - flock_end).as_secs_f64() * 1e3);
+        }
+        ((a, flock_busy), b)
     })
 }
 
@@ -834,27 +966,48 @@ pub fn prove_with_tables_using(
     // closure's, so in mode A the two overlap in wall time. `overlap`, not `rayon::join`:
     // the commit side must not run on a rayon worker that then blocks on its commit threads
     // (a one-thread pool would deadlock).
-    let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
+    let sched_trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
+    let (
+        (round1, round1_time, akita_start, akita_end),
+        (flock_commitments, keccak_time, flock_start, flock_end),
+    ) = crate::pcs::overlap(
         || {
             let start = Instant::now();
             let out = committer.commit_round1(main);
             phase_stamp("round1-commit");
-            (out, start.elapsed())
+            let end = Instant::now();
+            (out, end - start, start, end)
         },
         || {
             let start = Instant::now();
             let out = keccak.commitments(segments);
             phase_stamp("flock-commit");
-            (out, start.elapsed())
+            let end = Instant::now();
+            (out, end - start, start, end)
         },
     );
+    if sched_trace {
+        let overlap = akita_end
+            .min(flock_end)
+            .saturating_duration_since(akita_start.max(flock_start));
+        let wall = akita_end.max(flock_end) - akita_start.min(flock_start);
+        eprintln!(
+            "[sched] item=commits akita_ms={:.3} flock_ms={:.3} overlap_ms={:.3} wall_ms={:.3}",
+            round1_time.as_secs_f64() * 1e3,
+            keccak_time.as_secs_f64() * 1e3,
+            overlap.as_secs_f64() * 1e3,
+            wall.as_secs_f64() * 1e3
+        );
+    }
     let [main16_round1, main_round1] = round1?;
     let main16_commitment = main16_round1.serialized()?;
     let main_commitment = main_round1.serialized()?;
     transcript.absorb(commitment_site(GroupRole::Main16), 1, &main16_commitment)?;
     transcript.absorb(commitment_site(GroupRole::Main), 1, &main_commitment)?;
     if flock_commitments.len() != segments {
-        return Err(ProveError::Internal("one Flock commitment per segment".into()));
+        return Err(ProveError::Internal(
+            "one Flock commitment per segment".into(),
+        ));
     }
     transcript.absorb_items(FLOCK_COMMIT_SITE, &flock_commitments)?;
     let bridge_seed: [u8; 32] = transcript
@@ -917,6 +1070,7 @@ pub fn prove_with_tables_using(
     };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
+        let unchecked = hooks.unchecked;
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
             let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
             phase_stamp("parity-tables");
@@ -927,7 +1081,7 @@ pub fn prove_with_tables_using(
                 &matrices,
                 &public,
                 &mut transcript,
-                hooks.unchecked,
+                unchecked,
             )
         });
         timings.fork_join = fork.elapsed();
