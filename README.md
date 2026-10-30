@@ -35,20 +35,21 @@ goal; `docs/h-exact.md`).
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory |
 
-Other files: `docs/` (`spec.md` and `docs/scripts/spec_checks.py`; `soundness.md` with
-`docs/scripts/pow_plan.py` and `docs/scripts/fold_support.py` for the proof-of-work schedule and the
+Other files: `docs/` (`spec.md` and `scripts/spec_checks.py`; `soundness.md` with
+`scripts/pow_plan.py` and `scripts/fold_support.py` for the proof-of-work schedule and the
 theorem; `h-exact.md` for relations H-u and H-exact; `witness.md`; `pcs-config.md` for the
 Akita presets, catalog status and regeneration; `piop.md` for the PIOP tables and
 commitments; `lookup.md` for the range lookup; `bridge.md` and `keccak.md` for the parity
 bridge and the Flock side; `cli.md` for mode A end to end and the `agg` tool;
-`perf.md` for performance measurements;
+`perf.md` for the local prover profile, the speed levers and the verifier kernels
+(direction only);
 `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
 ## Pinned revisions
 
 All pins live in `[workspace.dependencies]` of `Cargo.toml`; `Cargo.lock` is committed
-and shared transitive crates match Aerie's lockfile.
+and was seeded from Aerie's lockfile so shared transitive crates match Aerie's.
 
 | Dependency | Source | Revision |
 | --- | --- | --- |
@@ -69,14 +70,14 @@ come along too (and can be added directly if needed).
 
 | Crate | Importable | Notes |
 | --- | --- | --- |
-| `aerie-falcon` | yes | with feature `internals` (exports `BaseField`, `OpeningField`, openings); `default-features = false`, `parallel` forwarded from `agg-piop` |
+| `aerie-falcon` | yes | with feature `internals` (exports `BaseField`, `OpeningField`, `PublicInputs`, openings); `default-features = false`, `parallel` forwarded from `agg-piop` |
 | `aerie-prover` | yes | with `internals` it re-exports the protocol machinery we reuse: `projection`, `stage1`..`stage3`, `transcript`, `pcs`, `openings`, `ring`, `wire`, `manifest` |
 | `aerie-pcs-config` | yes | default feature `schedules-fp64-aerie` (generated catalogs); `configs::Fp64SignedWidth4` |
 | `aerie-keccak` | yes | runtime-dispatched batched SHAKE256 (`shake256_64_batch`, etc.) |
 | `aerie-simd` | yes | runtime ISA ceiling `Backend::selected()`; `backend-override` is test-only upstream |
 
 Aerie's test-only features (`honest-vectors`, `test-fixtures`, `backend-override`)
-exist upstream but are not enabled here.
+exist upstream but are not enabled here (not yet tried as git features).
 
 ## Build and test
 
@@ -90,6 +91,7 @@ scripts/bench.sh --bench mode_b -- 256 512 1024 [--warmup 1] [--reps 5]   # mode
 AGG_KECCAK_WARMUP=1 AGG_KECCAK_REPS=5 taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge   # Keccak sponge proof
 AVX512=1 scripts/bench.sh       # opt-in AVX-512 build in target/avx512
 ./target/release/agg            # mode-A tool: keygen-batch, sign-batch, aggregate, verify, bench (docs/cli.md)
+./target/release/agg bench --count 1024 [--warmup 1] [--reps 5]   # mode A: median of 5 after 1 warmup
 ```
 
 If the stable toolchain from `rust-toolchain.toml` is not what rustup resolves, set
@@ -111,13 +113,17 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
   `target/clmul`): only Flock's carry-less path changes; Akita, Jolt and Aerie keep the
   baseline codegen. Do not add `+sse4.1`: it slows our lookup and stage 3 by 6-7% locally
   (`docs/perf.md`); the vendored `flock-field` needs only `pclmulqdq` to inline its scalar
-  GF(2^128) multiply (`vendor/flock-field/PATCH.md`). Measurements are in [docs/perf.md](docs/perf.md).
+  GF(2^128) multiply (`vendor/flock-field/PATCH.md`). Locally, mode A proves and verifies
+  about an order of magnitude faster than in the default build at N = 1,024, and the Keccak
+  bench alone reaches most of the throughput of the full AVX-512 build.
 - `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,
   `target/avx512`) is broken for everything that commits with Akita: with x86-64-v4 Akita's
   compile-time `avx512bw` path (`akita-cpu-backend/src/sources/poly_helpers/windowed_accum.rs`)
   makes its prover self-check fail ("relation session final claim disagrees with its folded
-  oracle"), on this i7-11700K and on a Zen 5 VM; `x86-64-v3` passes. Use it only for the Keccak-only bench. A bare `+avx512f,...` feature
+  oracle"), on this i7-11700K and on a Zen 5 VM; `AKITA_SCALAR_NTT=1` does not help,
+  `x86-64-v3` passes. Use it only for the Keccak-only bench. A bare `+avx512f,...` feature
   list makes rustc 1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
+- Our own AVX-512 kernels (none yet) go behind `#[cfg(feature = "avx512")]`.
 
 ## Machine rules
 

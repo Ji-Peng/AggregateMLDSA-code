@@ -6,11 +6,13 @@ at that revision (`src/`, `configs/`).
 
 ## 1. Prover-only: the merged opening's weight vector (`src/pcs/jagged.rs`)
 
-`build_merged_weight_and_prime` computes the merged opening's weight vector `W`.
+Only `build_merged_weight_and_prime` (the merged opening's weight vector `W`) is changed.
 
 Why: Flock bakes, for every ring-switched claim, a 16 x 256-entry fold table (64 KB,
 4,096 fold evaluations) per used word column of the committed stack, whatever the column's
-height. The patch evaluates such
+height. A one-row table type with `2^16` word columns (the bridge instance of
+`agg-keccak`, `docs/keccak.md`) then spends 3.4 s and 6.4 GiB in this step for a
+stack of `2^16` words, and a full segment would need 51 GiB. The patch evaluates such
 claims per slot instead, `φ(eq_col[c]·r)` with one multiply and one fold-table lookup,
 whenever the stack averages fewer than `BAKE_MIN_HEIGHT = 64` live rows per used column
 (`ColSide::Short`). Flock's own shapes (hundreds of rows per column) keep the bake.
@@ -19,7 +21,7 @@ Prover-only and exact: `x ↦ φ(eq_col[c]·x)` is F₂-linear, so the baked byt
 and the direct evaluation compute the same `W` bit for bit; the proof bytes, the transcript
 and the verifier are unchanged, and proofs made with this copy verify with upstream Flock.
 
-Zero-weight columns: a ring-switched claim's column whose factor `eq_col[c]` is zero
+Addition (agg-mldsa): a ring-switched claim's column whose factor `eq_col[c]` is zero
 contributes the zero map, so it is neither baked (`bake` returns early) nor swept (the
 segment sweep skips it, writing zeros if the claim is the first). The bit claim of the
 parity chain addresses 64 of the sponge's 2,156 used word columns. Exact for the same
@@ -42,7 +44,7 @@ same derivation reproduces the shipped `m*_slim.toml` byte for byte). Level-0 qu
 This is a verifier-visible addition (a new parameter set of an unchanged protocol): proofs
 under `Slim8` verify with this copy only, or with upstream Flock given the same configs.
 
-To regenerate Sections 1 and 2: copy `crates/flock-core/{src,configs}` of the revision above here, write the
+To regenerate (Sections 1 and 2; Sections 3 to 5 below have their own lists): copy `crates/flock-core/{src,configs}` of the revision above here, write the
 `Cargo.toml` of this directory, re-apply the `ColSide::Short` hunk (three edits in
 `build_merged_weight_and_prime`: the enum variant and the `bake_columns` decision, the
 `Folded` claim arm, and the segment sweep arm), re-apply the `Slim8` arms, create empty
@@ -52,7 +54,8 @@ To regenerate Sections 1 and 2: copy `crates/flock-core/{src,configs}` of the re
 
 Upstream selects its x86 kernels with `cfg(target_feature = ...)`: they run only in a
 build with `-C target-cpu=native` (Flock's own `.cargo/config.toml`). Our default build
-must not rely on SIMD, and a global `x86-64-v4` build breaks Akita, so this copy checks the CPU once at
+must not rely on SIMD, and a global `x86-64-v4` build breaks Akita, so the CLMUL timing
+build ran Flock's portable kernels in its hottest loops. This copy checks the CPU once at
 run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and calls the same
 `#[target_feature(enable = ...)]` kernels when the CPU has them:
 
@@ -66,7 +69,7 @@ run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and ca
 The AVX-512 GF(2^128) helpers those kernels use (`ghash_mul_x4`, `f128x4_loadu`,
 `f128x4_set`, `WideGhashX4`) are copied from `flock-field` 83f963e
 (`gf2_128/x86_64.rs`) into `simd::x86` without their `cfg(target_feature)` gates;
-`flock-field` has its own [patch](../flock-field/PATCH.md). Kernel bodies are
+`flock-field` itself is unchanged and stays the pinned git dependency. Kernel bodies are
 upstream's; the dispatchers add bounds asserts the upstream callers relied on implicitly
 (the fused shift-reduce reads 8 bytes per K-row offset; the fold + message kernel needs
 `a_in = 2 a_out = 4 eq_lo` and an even `eq_lo` length).
@@ -102,7 +105,8 @@ and copy `src/simd.rs`.
 `pcs.rs::block_first_phase` computes, per ring-switched claim, term `j` (128 of them)
 and block `e`, `S_j[e] = frob(kappa * sum_b pw[b][kinv_j] * bank[e][b], j)`: one scalar
 multiply per `(j, e, b)` and `j` scalar squarings, plus a dot product per column for the
-scalar claim groups. `src/pcs/block_stats_x86.rs` computes the same values when
+scalar claim groups. At 8,192 records (516 terms x 2,048 blocks) this was about 1 s of
+the sponge opening. `src/pcs/block_stats_x86.rs` computes the same values when
 `simd::has(AVX512_CLMUL)`: the inner products four terms at a time with lane-wise
 deferred reduction (`simd::x86::LaneAccX4`; reduction is F_2-linear, so the reduced
 sum equals the sum of reduced products), `kappa` and the squarings with `ghash_mul_x4`
@@ -204,7 +208,7 @@ To regenerate: add the variant and the arms named above.
 
 Pure evaluation-order and data-layout changes; every route computes the same field elements
 (canonical residues, exact XOR sums), so proofs, transcripts and the verifier are unchanged and
-aggregate bytes are identical across evaluation routes.
+aggregates are byte-identical to main.
 
 - Diagnostics: `FLOCK_ZC_TIMING` reports the zerocheck tail per route (sparse, expansion, fused,
   naive; `FLOCK_ZC_ROUNDS` per round), `FLOCK_NTT_TRACE` the interleaved NTT's top/deep split,
