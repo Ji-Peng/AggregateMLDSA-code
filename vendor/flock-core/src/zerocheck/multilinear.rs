@@ -1293,6 +1293,39 @@ pub fn sparse_round2_message_only(
     (challenges[0] * s1, si, store)
 }
 
+/// Fold four packed rows, with one pair each from `a` and `b`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+unsafe fn round3_fold_pair(table: &UniSkipFoldTable, a: &[u8], b: &[u8], row: usize) -> [F128; 4] {
+    // Slicing checks the complete two-row input before the unchecked table walk.
+    let a = &a[16 * row..16 * (row + 2)];
+    let b = &b[16 * row..16 * (row + 2)];
+    unsafe {
+        let ptr = table.data.as_ptr();
+        let lo = fold_round2_pair_x86_unchecked_8(ptr, a.as_ptr(), a.as_ptr().add(16), b.as_ptr(), b.as_ptr().add(16));
+        let hi = fold_round2_pair_x86_unchecked_8(ptr.add(8 * 256), a.as_ptr().add(8), a.as_ptr().add(24), b.as_ptr().add(8), b.as_ptr().add(24));
+        [lo[0] + hi[0], lo[1] + hi[1], lo[2] + hi[2], lo[3] + hi[3]]
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+unsafe fn round3_message_x4(eq: &[F128], av: &[[F128; 2]; 4], bv: &[[F128; 2]; 4]) -> (F256Unreduced, F256Unreduced) {
+    unsafe {
+        let a1 = f128x4_set(av[0][1], av[1][1], av[2][1], av[3][1]);
+        let b1 = f128x4_set(bv[0][1], bv[1][1], bv[2][1], bv[3][1]);
+        let ax = f128x4_set(av[0][0] + av[0][1], av[1][0] + av[1][1], av[2][0] + av[2][1], av[3][0] + av[3][1]);
+        let bx = f128x4_set(bv[0][0] + bv[0][1], bv[1][0] + bv[1][1], bv[2][0] + bv[2][1], bv[3][0] + bv[3][1]);
+        let weights = f128x4_loadu(eq.as_ptr());
+        let mut p = WideGhashX4::zero();
+        let mut q = WideGhashX4::zero();
+        // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
+        p.mul_acc(weights, ghash_mul_x4(a1, b1));
+        q.mul_acc(weights, ghash_mul_x4(ax, bx));
+        (p.fold(), q.fold())
+    }
+}
+
 /// Fold directly from the packed rows and compute the following message.
 pub fn sparse_round3_from_bits(
     a: &[u8],
@@ -1339,25 +1372,73 @@ pub fn sparse_round3_from_bits(
             let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
             let mut cursor = store_in.seek(4 * part[0].0);
             let mut out = 0;
+            #[cfg(target_arch = "x86_64")]
+            let simd = has(AVX512_CLMUL);
             for &(ps, pe) in part {
-                for t in ps..pe {
-                    let mut av = [F128::ZERO; 2];
-                    let mut bv = [F128::ZERO; 2];
-                    for lane in 0..2 {
-                        let row = 2 * t + lane;
-                    // Round-2 live intervals contain whole adjacent row pairs.
-                    if store_in.rank(&mut cursor, 2 * row).is_some() {
-                            let pos = 16 * row;
-                            av[lane] = joint.fold_one_row(&a[pos..pos + 16]);
-                            bv[lane] = joint.fold_one_row(&b[pos..pos + 16]);
+                let mut t = ps;
+                while t < pe {
+                    let end = pe.min(((t >> eq.n_lo) + 1) << eq.n_lo);
+                    let mut p = F256Unreduced::ZERO;
+                    let mut q = F256Unreduced::ZERO;
+                    while t < end {
+                        let count = (end - t).min(4);
+                        let mut av = [[F128::ZERO; 2]; 4];
+                        let mut bv = [[F128::ZERO; 2]; 4];
+                        for lane in 0..count {
+                            let row = 2 * (t + lane);
+                            let live0 = store_in.rank(&mut cursor, 2 * row).is_some();
+                            let live1 = store_in.rank(&mut cursor, 2 * (row + 1)).is_some();
+                            #[cfg(target_arch = "x86_64")]
+                            if simd && live0 && live1 {
+                                // SAFETY: runtime feature detection and the checked input slices in the helper.
+                                let f = unsafe { round3_fold_pair(&joint, a, b, row) };
+                                av[lane] = [f[0], f[1]];
+                                bv[lane] = [f[2], f[3]];
+                            } else {
+                                for (i, live) in [live0, live1].into_iter().enumerate() {
+                                    if live {
+                                        let pos = 16 * (row + i);
+                                        av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
+                                        bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            for (i, live) in [live0, live1].into_iter().enumerate() {
+                                if live {
+                                    let pos = 16 * (row + i);
+                                    av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
+                                    bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
+                                }
+                            }
+                            ao[out..out + 2].copy_from_slice(&av[lane]);
+                            bo[out..out + 2].copy_from_slice(&bv[lane]);
+                            out += 2;
                         }
-                        ao[out + lane] = av[lane];
-                        bo[out + lane] = bv[lane];
+                        let lo = t & ((1 << eq.n_lo) - 1);
+                        #[cfg(target_arch = "x86_64")]
+                        if simd && count == 4 {
+                            // SAFETY: feature detection succeeded and this run stays in the eq block.
+                            let (x, y) = unsafe { round3_message_x4(&eq.lo[lo..lo + 4], &av, &bv) };
+                            p ^= x;
+                            q ^= y;
+                        } else {
+                            for lane in 0..count {
+                                // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
+                                p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
+                                q ^= eq.lo[lo + lane].mul_unreduced((av[lane][0] + av[lane][1]) * (bv[lane][0] + bv[lane][1]));
+                            }
+                        }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        for lane in 0..count {
+                            // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
+                            p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
+                            q ^= eq.lo[lo + lane].mul_unreduced((av[lane][0] + av[lane][1]) * (bv[lane][0] + bv[lane][1]));
+                        }
+                        t += count;
                     }
-                    out += 2;
-                    let weight = eq.hi[t >> eq.n_lo] * eq.lo[t & ((1 << eq.n_lo) - 1)];
-                    s1 += weight * (av[1] * bv[1]);
-                    si += weight * ((av[0] + av[1]) * (bv[0] + bv[1]));
+                    s1 += eq.hi[(t - 1) >> eq.n_lo] * p.reduce();
+                    si += eq.hi[(t - 1) >> eq.n_lo] * q.reduce();
                 }
             }
             (s1, si)
@@ -1481,8 +1562,6 @@ pub fn fold_and_compute_round_pair_into(
             // run time.
             #[cfg(target_arch = "x86_64")]
             let simd = has(AVX512_CLMUL);
-            #[cfg(not(target_arch = "x86_64"))]
-            let simd = false;
             let (p1, pinf) = if simd {
                 // SAFETY: chunk geometry supplies two inputs per output and two
                 // outputs per eq_lo value; features are checked at run time.
