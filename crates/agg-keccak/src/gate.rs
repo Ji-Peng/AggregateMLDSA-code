@@ -10,7 +10,11 @@
 //!
 //! Committed columns: the input bits, the materialized output bits, one
 //! constant-one column, and the 1,600 chi AND outputs `t_r` of every round of
-//! every permutation. Nothing else is committed: theta, rho, pi, iota, the
+//! every permutation except the last round of the last permutation, which keeps
+//! only the lanes `0 .. L` that hold an output bit (`L` = 1 + the highest output
+//! lane; 4 of 25 for the SHAKE256 sponge, whose output `c~` is lanes `(0..3, 0)`).
+//! The other lanes of that round feed nothing, so their AND bits are neither
+//! committed nor constrained. Nothing else is committed: theta, rho, pi, iota, the
 //! absorptions and the chaining are virtual XOR expressions, so every state is
 //! implicit, `state_{r+1} = phi(state_r) XOR t_r XOR RC_r`. The R1CS has
 //! `C = I` and one row per committed column:
@@ -123,6 +127,9 @@ pub struct GateLayout {
     /// u64 index of the first chi word: `t_m,r` lane `L` is u64 `t_base + (m R + r) 25 + L`.
     /// A multiple of 16 (the chi words start at an 8-word boundary).
     pub t_base: usize,
+    /// Committed lanes `0 .. last_lanes` of the last round of the last permutation
+    /// (every other round commits all 25): 1 + the highest lane holding an output bit.
+    pub last_lanes: usize,
     /// Columns `[0, useful_bits)` carry data.
     pub useful_bits: usize,
 }
@@ -148,7 +155,16 @@ impl GateLayout {
         // tied part's evaluation claims, `crate::tied`, docs/keccak.md).
         let chi_col = (const_col / 128 + 1).next_multiple_of(8) * 128;
         let t_base = chi_col / 64;
-        let useful_bits = 64 * (t_base + spec.n_perms() * spec.n_rounds * N_LANES);
+        // The final state is read only by the output rows, so the last round's AND
+        // bits are needed only on the lanes that hold an output bit.
+        let last_lanes = spec
+            .outputs
+            .iter()
+            .map(|&o| usize::from(o) / 64 + 1)
+            .max()
+            .unwrap_or(N_LANES);
+        let useful_bits =
+            64 * (t_base + (spec.n_perms() * spec.n_rounds - 1) * N_LANES + last_lanes);
         let k_log = useful_bits.next_power_of_two().trailing_zeros() as usize;
         Self {
             k_log: k_log.max(7),
@@ -157,8 +173,28 @@ impl GateLayout {
             output_base,
             const_col,
             t_base,
+            last_lanes,
             useful_bits,
         }
+    }
+
+    /// Committed chi lanes of round `r` of permutation `m`: 25, or
+    /// [`Self::last_lanes`] for the last round of the last permutation.
+    #[inline]
+    #[must_use]
+    pub fn round_lanes(&self, n_perms: usize, n_rounds: usize, m: usize, r: usize) -> usize {
+        if m + 1 == n_perms && r + 1 == n_rounds {
+            self.last_lanes
+        } else {
+            N_LANES
+        }
+    }
+
+    /// u64 words of chi outputs of every round in full (25 lanes each): the
+    /// length of the round-major `phi` tile of [`ChainGate::instance_phi_many`].
+    #[must_use]
+    pub fn full_chi_words(&self, n_perms: usize, n_rounds: usize) -> usize {
+        n_perms * n_rounds * N_LANES
     }
 
     /// Column of global input bit `i`.
@@ -391,6 +427,14 @@ impl ChainGate {
         &self.spec
     }
 
+    /// Committed chi lanes of round `r` of permutation `m` ([`GateLayout::round_lanes`]).
+    #[inline]
+    #[must_use]
+    pub fn round_lanes(&self, m: usize, r: usize) -> usize {
+        self.layout
+            .round_lanes(self.spec.n_perms(), self.spec.n_rounds, m, r)
+    }
+
     #[must_use]
     pub fn layout(&self) -> &GateLayout {
         &self.layout
@@ -512,15 +556,20 @@ impl ChainGate {
             for r in 0..r_n {
                 let bl = keccak::phi(&s);
                 let base = lay.t_base + (m * r_n + r) * N_LANES;
+                let kept = self.round_lanes(m, r);
                 for y in 0..5 {
                     for x in 0..5 {
                         let l = keccak::lane(x, y);
                         let al = !bl[keccak::lane((x + 1) % 5, y)];
                         let bv = bl[keccak::lane((x + 2) % 5, y)];
                         let t = al & bv;
-                        a[base + l] = al;
-                        b[base + l] = bv;
-                        z[base + l] = t;
+                        // Lanes past `kept` of the last round are not committed; the
+                        // returned final state still carries them in full.
+                        if l < kept {
+                            a[base + l] = al;
+                            b[base + l] = bv;
+                            z[base + l] = t;
+                        }
                         s[l] = bl[l] ^ t;
                     }
                 }
@@ -586,14 +635,35 @@ impl ChainGate {
                 }
             }
             let base = lay.t_base + m * per_perm;
-            let range = base..base + per_perm;
-            engine.chi_rounds(
-                &mut st,
-                0,
-                &mut z[range.clone()],
-                &mut a[range.clone()],
-                &mut b[range],
-            );
+            let kept = self.round_lanes(m, r_n - 1);
+            if kept == N_LANES {
+                let range = base..base + per_perm;
+                engine.chi_rounds(
+                    &mut st,
+                    0,
+                    &mut z[range.clone()],
+                    &mut a[range.clone()],
+                    &mut b[range],
+                );
+            } else {
+                // Pruned last round: the full rounds in place, the last one through a
+                // 25-word scratch of which the committed lanes `0 .. kept` are copied.
+                let range = base..base + per_perm - N_LANES;
+                engine.chi_rounds(
+                    &mut st,
+                    0,
+                    &mut z[range.clone()],
+                    &mut a[range.clone()],
+                    &mut b[range],
+                );
+                let mut last = [[[0u64; 8]; N_LANES]; 3];
+                let [lz, la, lb] = &mut last;
+                engine.chi_rounds(&mut st, r_n - 1, lz, la, lb);
+                let u = base + per_perm - N_LANES;
+                z[u..u + kept].copy_from_slice(&lz[..kept]);
+                a[u..u + kept].copy_from_slice(&la[..kept]);
+                b[u..u + kept].copy_from_slice(&lb[..kept]);
+            }
         }
         let t = lay.t_base;
         let mut finals = [[0u64; N_LANES]; 8];
@@ -618,13 +688,15 @@ impl ChainGate {
 
     /// The compact form of [`Self::instance_rows_many`]: per group of eight, only the
     /// non-chi words of `z` (`head`, [`GateLayout::t_base`] words; `a` equals them
-    /// and `b` is [`Self::head_b`]) and `phi` of every round (`phi`, the chi words
-    /// `[t_base, useful_words)`, round by round as [`Engine::phi_rounds`] writes
-    /// them), from which the chi words of `a`, `b` and `z` follow:
-    /// `a = !phi[x + 1, y]`, `b = phi[x + 2, y]`, `z = a & b`. The chi words of `z`
-    /// pass through `chi(u, words)` per round (`u` the first word index, 25
-    /// words, lanes `live..8` zero) and are not stored. Lanes `live..8` of `head`
-    /// come out zero; their `phi` is unspecified. Returns the final states.
+    /// and `b` is [`Self::head_b`]) and `phi` of every round in full (`phi`,
+    /// [`GateLayout::full_chi_words`] words, round by round as [`Engine::phi_rounds`]
+    /// writes them), from which the chi words `[t_base, useful_words)` of `a`, `b`
+    /// and `z` follow: `a = !phi[x + 1, y]`, `b = phi[x + 2, y]`, `z = a & b` (the
+    /// pruned last round reads row `y = 0` of its `phi` only). The chi words of `z`
+    /// pass through `chi(u, words)` per round (`u` the first word index, the
+    /// round's committed lanes, [`Self::round_lanes`] words; lanes `live..8` zero)
+    /// and are not stored. Lanes `live..8` of `head` come out zero; their `phi` is
+    /// unspecified. Returns the final states.
     ///
     /// # Panics
     /// As [`Self::instance_rows_many`].
@@ -642,16 +714,16 @@ impl ChainGate {
     where
         I: Fn(usize) -> &'x [u64],
         A: FnMut(usize, usize, &mut Lanes),
-        C: FnMut(usize, &[Words8; 25]),
+        C: FnMut(usize, &[Words8]),
     {
         let lay = &self.layout;
         let t = lay.t_base;
+        let r_n = self.spec.n_rounds;
         assert!((1..=8).contains(&live), "one to eight live instances");
         assert!(
-            head.len() == t && phi.len() == lay.useful_words() - t,
+            head.len() == t && phi.len() == lay.full_chi_words(self.spec.n_perms(), r_n),
             "row lengths"
         );
-        let r_n = self.spec.n_rounds;
         let per_perm = r_n * N_LANES;
         let mut st: [Words8; N_LANES] = [[0u64; 8]; N_LANES];
         let mut zt = [[0u64; 8]; N_LANES];
@@ -671,15 +743,16 @@ impl ChainGate {
                 &mut zt,
                 |k, z| {
                     let u = t + base + k * N_LANES;
+                    let kept = self.round_lanes(m, k);
                     if live == 8 {
-                        chi(u, z);
+                        chi(u, &z[..kept]);
                     } else {
                         // Dead lanes of z are zero for the stripe.
                         let mut masked = *z;
                         for row in &mut masked {
                             row[live..].fill(0);
                         }
-                        chi(u, &masked);
+                        chi(u, &masked[..kept]);
                     }
                 },
             );
@@ -727,7 +800,8 @@ impl ChainGate {
             for r in 0..r_n {
                 let t = keccak::round(&mut s, r);
                 let base = lay.t_base + (m * r_n + r) * N_LANES;
-                z[base..base + N_LANES].copy_from_slice(&t);
+                let kept = self.round_lanes(m, r);
+                z[base..base + kept].copy_from_slice(&t[..kept]);
             }
         }
         for (j, &o) in self.spec.outputs.iter().enumerate() {
@@ -767,12 +841,18 @@ impl ChainGate {
             for r in 0..r_n {
                 let bl = keccak::phi(&s);
                 let base = lay.t_base + (m * r_n + r) * N_LANES;
+                let kept = self.round_lanes(m, r);
                 for y in 0..5 {
                     for x in 0..5 {
                         let l = keccak::lane(x, y);
-                        a[base + l] = bl[keccak::lane((x + 1) % 5, y)] ^ one_mask;
-                        b[base + l] = bl[keccak::lane((x + 2) % 5, y)];
-                        s[l] = bl[l] ^ z[base + l];
+                        if l < kept {
+                            a[base + l] = bl[keccak::lane((x + 1) % 5, y)] ^ one_mask;
+                            b[base + l] = bl[keccak::lane((x + 2) % 5, y)];
+                            s[l] = bl[l] ^ z[base + l];
+                        } else {
+                            // Uncommitted lane of the last round: no output row reads it.
+                            s[l] = bl[l];
+                        }
                     }
                 }
                 s[0] ^= ROUND_CONSTANTS[r] & one_mask;
@@ -850,6 +930,7 @@ impl ChainGate {
         put(&mut h, self.layout.const_col);
         put(&mut h, self.layout.output_base);
         put(&mut h, self.layout.t_base);
+        put(&mut h, self.layout.last_lanes);
         put(&mut h, self.spec.input_fields.len());
         for (f, field) in self.spec.input_fields.iter().enumerate() {
             put(&mut h, field.bits);
@@ -879,13 +960,15 @@ impl ChainGate {
     pub fn cost(&self) -> GateCost {
         let n_in = self.spec.n_inputs();
         let n_out = self.spec.outputs.len();
-        let chi_bits = self.spec.n_perms() * self.spec.n_rounds * STATE_BITS;
+        let chi_bits = 64 * (self.layout.useful_words() - self.layout.t_base);
+        let pruned_bits = self.spec.n_perms() * self.spec.n_rounds * STATE_BITS - chi_bits;
         let rows = 1 + n_in + n_out + chi_bits;
         // C = I: one nonzero per row. Constant row: A, B one each. Input rows: A, B one each.
         // Output rows: A = one state bit (1 expression reference), B = const.
         // AND rows: A = (B[x+1] + 1): 2 references; B = B[x+2]: 1 reference.
         // Virtual expressions, per round: theta column parities 320 x 5, theta
-        // D 320 x 2, theta output 1600 x 2, chi XOR 1600 x 2, iota <= 64;
+        // D 320 x 2, theta output 1600 x 2, chi XOR 1600 x 2 (2 per committed AND
+        // bit in the pruned last round), iota <= 64;
         // per absorbed bit 2 (the XOR with the previous output, none for the first).
         let rc_bits: usize = (0..self.spec.n_rounds)
             .map(|r| ROUND_CONSTANTS[r].count_ones() as usize)
@@ -893,6 +976,7 @@ impl ChainGate {
             * self.spec.n_perms();
         let xor_terms =
             self.spec.n_perms() * self.spec.n_rounds * (320 * 5 + 320 * 2 + 1600 * 2 + 1600 * 2)
+                - 2 * pruned_bits
                 + 2 * rc_bits
                 + self
                     .spec
@@ -949,8 +1033,12 @@ impl LincheckCircuit for ChainGate {
         for m in (0..self.spec.n_perms()).rev() {
             for r in (0..r_n).rev() {
                 // state_{r+1} = B_r + t_r + RC_r: scatter K onto the t_r columns and the constant.
+                // The pruned last round commits lanes `0 .. kept` only; K is zero on the
+                // other lanes there (the output rows read no other lane of the final state).
                 let t0 = lay.t_col(r_n, m, r, 0);
-                for s in 0..STATE_BITS {
+                let kept = self.round_lanes(m, r);
+                debug_assert!(kv[64 * kept..].iter().all(|&v| v == F128::ZERO));
+                for s in 0..64 * kept {
                     comb[t0 + s] += kv[s];
                 }
                 let rc = ROUND_CONSTANTS[r];
@@ -964,6 +1052,9 @@ impl LincheckCircuit for ChainGate {
                 for y in 0..5 {
                     for x in 0..5 {
                         let l = keccak::lane(x, y);
+                        if l >= kept {
+                            continue;
+                        }
                         let l1 = 64 * keccak::lane((x + 1) % 5, y);
                         let l2 = 64 * keccak::lane((x + 2) % 5, y);
                         for zz in 0..64 {
@@ -1029,6 +1120,7 @@ pub(crate) mod tests {
             ChainGate::new(ChainSpec::permutation()),
             crate::sponge::sponge_gate(),
             ChainGate::new(mini_chain(3)),
+            ChainGate::new(mini_chain_pruned(3)),
         ] {
             let w = gate.layout().useful_words();
             for _ in 0..4 {
@@ -1061,6 +1153,7 @@ pub(crate) mod tests {
             crate::sponge::sponge_gate(),
             ChainGate::new(mini_chain(3)),
             ChainGate::new(mini_chain(24)),
+            ChainGate::new(mini_chain_pruned(3)),
         ] {
             let w = gate.layout().useful_words();
             for live in [8usize, 1, 5] {
@@ -1081,7 +1174,10 @@ pub(crate) mod tests {
                         &mut b,
                     );
                     let t = gate.layout().t_base;
-                    let (mut head, mut phi) = (vec![[fill; 8]; t], vec![[fill; 8]; w - t]);
+                    let full = gate
+                        .layout()
+                        .full_chi_words(gate.spec().n_perms(), gate.spec().n_rounds);
+                    let (mut head, mut phi) = (vec![[fill; 8]; t], vec![[fill; 8]; full]);
                     let mut z_chi = vec![[fill; 8]; w - t];
                     let finals_phi = gate.instance_phi_many(
                         e,
@@ -1090,7 +1186,7 @@ pub(crate) mod tests {
                         |i, m, s| gate.absorb_into(m, &inputs[i], s),
                         &mut head,
                         &mut phi,
-                        |u, zr| z_chi[u - t..u - t + 25].copy_from_slice(zr),
+                        |u, zr| z_chi[u - t..u - t + zr.len()].copy_from_slice(zr),
                     );
                     assert_eq!(finals_phi, finals);
                     for u in 0..t {
@@ -1180,6 +1276,31 @@ pub(crate) mod tests {
         check_walker_adjoint(&crate::sponge::sponge_gate(), 24, 23);
     }
 
+    #[test]
+    fn walker_is_adjoint_of_forward_rows_pruned_chain() {
+        check_walker_adjoint(&ChainGate::new(mini_chain_pruned(3)), 24, 24);
+    }
+
+    /// The sponge gate commits lanes `(0..3, 0)` of the last round of P7 only: the
+    /// lanes of `c~`; every other round keeps its 25 lanes.
+    #[test]
+    fn sponge_last_round_keeps_the_output_lanes() {
+        let gate = crate::sponge::sponge_gate();
+        let lay = gate.layout();
+        assert_eq!(lay.last_lanes, 4);
+        assert_eq!(gate.round_lanes(6, 23), 4);
+        assert_eq!(gate.round_lanes(6, 22), 25);
+        assert_eq!(gate.round_lanes(5, 23), 25);
+        assert_eq!(lay.useful_words(), lay.t_base + (7 * 24 - 1) * 25 + 4);
+        let pruned = ChainGate::new(mini_chain_pruned(2));
+        assert_eq!(pruned.layout().last_lanes, 3);
+        assert_eq!(ChainGate::new(mini_chain(2)).layout().last_lanes, 25);
+        assert_eq!(
+            ChainGate::new(ChainSpec::permutation()).layout().last_lanes,
+            25
+        );
+    }
+
     /// A small chain exercising chaining, constant absorptions and partial outputs.
     pub(crate) fn mini_chain(n_rounds: usize) -> ChainSpec {
         ChainSpec {
@@ -1207,6 +1328,16 @@ pub(crate) mod tests {
                     .collect(),
             ],
             outputs: vec![0, 5, 64, 1000, 1599, 77, 300],
+        }
+    }
+
+    /// [`mini_chain`] with outputs in lanes 0..2 only, so the last round keeps 3 of
+    /// its 25 lanes (the pruning the sponge gate applies to `c~`).
+    pub(crate) fn mini_chain_pruned(n_rounds: usize) -> ChainSpec {
+        ChainSpec {
+            label: "mini-chain-pruned",
+            outputs: vec![0, 5, 64, 77, 130, 191],
+            ..mini_chain(n_rounds)
         }
     }
 
@@ -1282,18 +1413,21 @@ pub(crate) mod tests {
                         }
                     }
                 }
-                // chi rows and the next state
+                // chi rows and the next state (committed lanes only)
+                let kept = gate.round_lanes(m, r);
                 for y in 0..5 {
                     for x in 0..5 {
                         for zz in 0..64 {
                             let s = keccak::bit(x, y, zz);
-                            let row = lay.t_col(spec.n_rounds, m, r, s);
-                            let mut av = bb[keccak::bit((x + 1) % 5, y, zz)].clone();
-                            xor_into(&mut av, &unit(c));
-                            a_rows[row] = to_cols(&av);
-                            b_rows[row] = to_cols(&bb[keccak::bit((x + 2) % 5, y, zz)]);
                             let mut nv = bb[s].clone();
-                            xor_into(&mut nv, &unit(row));
+                            if keccak::lane(x, y) < kept {
+                                let row = lay.t_col(spec.n_rounds, m, r, s);
+                                let mut av = bb[keccak::bit((x + 1) % 5, y, zz)].clone();
+                                xor_into(&mut av, &unit(c));
+                                a_rows[row] = to_cols(&av);
+                                b_rows[row] = to_cols(&bb[keccak::bit((x + 2) % 5, y, zz)]);
+                                xor_into(&mut nv, &unit(row));
+                            }
                             if x == 0 && y == 0 && (ROUND_CONSTANTS[r] >> zz) & 1 == 1 {
                                 xor_into(&mut nv, &unit(c));
                             }
@@ -1316,7 +1450,11 @@ pub(crate) mod tests {
     #[test]
     fn walker_matches_flock_sparse_fold_on_explicit_matrices() {
         use flock_core::lincheck::SparseMatrixCircuit;
-        for spec in [ChainSpec::permutation_rounds(2), mini_chain(2)] {
+        for spec in [
+            ChainSpec::permutation_rounds(2),
+            mini_chain(2),
+            mini_chain_pruned(2),
+        ] {
             let gate = ChainGate::new(spec);
             let lay = gate.layout().clone();
             let k = 1usize << lay.k_log;
@@ -1416,8 +1554,12 @@ pub(crate) mod tests {
                         }
                     }
                 }
+                let kept = gate.round_lanes(m, r);
                 for y in 0..5 {
                     for x in 0..5 {
+                        if keccak::lane(x, y) >= kept {
+                            continue;
+                        }
                         for zz in 0..64 {
                             let mut av = bb[keccak::bit((x + 1) % 5, y, zz)].clone();
                             flip(&mut av, c);
@@ -1428,7 +1570,9 @@ pub(crate) mod tests {
                 }
                 for s in 0..STATE_BITS {
                     let mut v = std::mem::take(&mut bb[s]);
-                    flip(&mut v, lay.t_col(spec.n_rounds, m, r, s));
+                    if s < 64 * kept {
+                        flip(&mut v, lay.t_col(spec.n_rounds, m, r, s));
+                    }
                     if s < 64 && (ROUND_CONSTANTS[r] >> s) & 1 == 1 {
                         flip(&mut v, c);
                     }
@@ -1467,7 +1611,11 @@ pub(crate) mod tests {
 
     #[test]
     fn flattened_nonzeros_match_explicit_rows() {
-        for spec in [ChainSpec::permutation_rounds(2), mini_chain(2)] {
+        for spec in [
+            ChainSpec::permutation_rounds(2),
+            mini_chain(2),
+            mini_chain_pruned(2),
+        ] {
             let gate = ChainGate::new(spec);
             let (a_rows, b_rows) = explicit_rows(&gate);
             let na: usize = a_rows.iter().map(Vec::len).sum();

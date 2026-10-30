@@ -165,6 +165,69 @@ fn flipped_input_bit_with_stale_witness_is_rejected() {
     assert!(batch.verify(&public, &commitment, &proof, &FS).is_err());
 }
 
+/// The pruned last round of P7 (round 23, lanes `(0..3, 0)` only) is still
+/// constrained: flip one of its committed AND bits, `t_23[1, 0, 5]`, alone (the
+/// output row of `c~` bit 69 then breaks too) and together with that `c~` column
+/// and the public `c~` (only the AND row breaks). Both proofs are rejected. The pruned lanes have no
+/// column: lane `(4, 0)` of round 23 lies past the useful bits.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "heavy Flock proof; run with --release")]
+fn flipped_last_round_chi_bit_is_rejected() {
+    let prover = SpongeProver::new(KeccakParams::default());
+    let n = 64;
+    let recs = records(n, 0xF13);
+    let gate = prover.gate();
+    let lay = gate.layout();
+    let batch = prover.batch(n);
+    let c_tilde: Vec<[u8; 32]> = recs.iter().map(SpongeRecord::c_tilde).collect();
+    let mu: Vec<[u8; 64]> = recs.iter().map(|r| r.mu).collect();
+    let public = SpongeProver::public_words(&mu, &c_tilde);
+    let inputs: Vec<Vec<u64>> = recs.iter().map(SpongeRecord::input_bits).collect();
+    let target = 23;
+    let mut c_flipped = c_tilde.clone();
+    c_flipped[target][69 / 8] ^= 1 << (69 % 8);
+    let public_flipped = SpongeProver::public_words(&mu, &c_flipped);
+    let r_n = gate.spec().n_rounds;
+    let t_col = lay.t_col(r_n, sponge::N_PERMS - 1, r_n - 1, 64 + 5);
+    assert!(t_col < lay.useful_bits);
+    assert_eq!(
+        lay.t_col(r_n, sponge::N_PERMS - 1, r_n - 1, 4 * 64),
+        lay.useful_bits
+    );
+    let out_col = lay.output_base + 64 + 5;
+    for flip_output in [false, true] {
+        let public = if flip_output {
+            &public_flipped
+        } else {
+            &public
+        };
+        let buffers = pack_slot(gate, batch.nu(), n, |j, z, a, b| {
+            gate.honest_z(&inputs[j], z);
+            if j == target {
+                z[t_col / 64] ^= 1 << (t_col % 64);
+                if flip_output {
+                    z[out_col / 64] ^= 1 << (out_col % 64);
+                }
+            }
+            gate.apply_ab(z, a, b);
+        });
+        let (commitment, proof) = batch.prove_buffers(buffers, public, &FS);
+        assert!(
+            batch.verify(public, &commitment, &proof, &FS).is_err(),
+            "flip_output = {flip_output}"
+        );
+    }
+    // The honest witness through the same path verifies.
+    let buffers = pack_slot(gate, batch.nu(), n, |j, z, a, b| {
+        gate.honest_z(&inputs[j], z);
+        gate.apply_ab(z, a, b);
+    });
+    let (commitment, proof) = batch.prove_buffers(buffers, &public, &FS);
+    batch
+        .verify(&public, &commitment, &proof, &FS)
+        .expect("honest proof");
+}
+
 /// A flipped w1Encode bit with a consistent witness: the sponge then outputs a
 /// different c~, and claiming the original c~ breaks the public wiring.
 #[test]
