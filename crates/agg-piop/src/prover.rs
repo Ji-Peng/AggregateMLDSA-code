@@ -1123,11 +1123,11 @@ fn prove_stages_branch<'a>(
     points.r2 = stage2.point.clone();
     let stage2_time = clock.lap();
     phase_stamp("stage2");
-    // Stage 3's inputs that need no stage-3 challenge: `w_A` (from `r^(2)` and the public
-    // matrices, spec Section 7.6) and `T(r^(2))` (from `r^(2)` and the public table). Both
-    // depend only on data fixed when stage 2 ends, so they run at the tail of branch S
-    // instead of after the join. The transcript does not see them, and the bytes are the
-    // same: this is a scheduling move, not a change of the messages.
+    // Stage 3's inputs that need no stage-3 challenge: `w_A`, the ring weight built from
+    // `r^(2)` and the public matrices, and `T(r^(2))`, the public T table's multilinear
+    // extension at `r^(2)`. Both depend only on data fixed when stage 2 ends, so they run
+    // at the tail of branch S instead of after the join. The transcript does not see them,
+    // and the bytes are the same: this is a scheduling move, not a change of the messages.
     let tail_clock = Instant::now();
     prover_tables.set_r2(public, &points.r2);
     let t_at_r2 = public.t_evaluation(&points.r2);
