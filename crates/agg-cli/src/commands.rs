@@ -452,9 +452,13 @@ pub fn bench_records(
     let reps = reps.max(1);
     let aggregator = Aggregator::new(config);
     let signed = signed(records);
+    agg_piop::alloc::release_cache();
     let reset = rss::reset_peak();
     let mut bytes = Vec::new();
     let proves = timed_runs(warmup, reps, || {
+        // Start each prove without blocks cached by the previous one, as a new
+        // process would.
+        agg_piop::alloc::release_cache();
         let aggregate = aggregator.aggregate(&signed).map_err(|e| e.to_string())?;
         // Every run's aggregate has the same size; keep the latest (a timed run's at the end).
         bytes = aggregate.bytes;
@@ -465,6 +469,8 @@ pub fn bench_records(
     let prove_times: Vec<Duration> = proves.iter().map(|r| r.total).collect();
     let prove = proves[median_index(&prove_times)].clone();
     drop(proves);
+    // The verifier's peak must not count blocks the prover left in the cache.
+    agg_piop::alloc::release_cache();
     let reset = rss::reset_peak();
     let verifier = AggregateVerifier::new()
         .require(config.profile)
