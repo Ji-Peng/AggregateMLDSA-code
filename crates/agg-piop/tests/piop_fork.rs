@@ -2,7 +2,8 @@
 //! lookup) and branch S (`tau` through stage 2) run on two clones of the sponge, and the
 //! join absorbs their digests, L's then S's, before stage 3. The prover's schedules (the
 //! branches side by side off a pool, inside a pool by `rayon::join`, on a one-thread pool,
-//! or one after the other with `AGG_PIOP_FORK=0`) give the same proof. A changed lookup
+//! with branch S on its own pool, or one after the other with `AGG_PIOP_FORK=0`) give the
+//! same proof. A changed lookup
 //! message, a changed stage-2 message, the digests joined in the wrong order and the two
 //! branches' nonces exchanged in the stream are each rejected.
 //!
@@ -100,6 +101,11 @@ fn forked_transcript_schedules_agree_and_tampering_is_rejected() {
         let serial = prove_now();
         std::env::remove_var("AGG_PIOP_FORK");
         assert_eq!(serial.proof.to_bytes(), bytes, "sequential branches");
+        // Branch S on its own pool (`AGG_PIOP_S_THREADS`): L keeps the main pool.
+        std::env::set_var("AGG_PIOP_S_THREADS", "2");
+        let own_pool = prove_now();
+        std::env::remove_var("AGG_PIOP_S_THREADS");
+        assert_eq!(own_pool.proof.to_bytes(), bytes, "stage-branch pool");
         check(&forked.proof).expect("verify the forked proof");
 
         // A changed lookup message (a GKR round of branch L).

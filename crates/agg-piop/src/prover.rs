@@ -455,6 +455,31 @@ fn donation_pool(threads: usize) -> Option<&'static rayon::ThreadPool> {
     Some(pool)
 }
 
+/// Branch S's own pools, keyed by `AGG_PIOP_S_THREADS`, built on the first use of each
+/// count and kept for the process lifetime (range: one pool per distinct `k`, at most one
+/// pool per prove). The entries are leaked because a branch holds `&'static` without
+/// keeping the map locked.
+static STAGES_POOLS: OnceLock<Mutex<HashMap<usize, &'static rayon::ThreadPool>>> =
+    OnceLock::new();
+
+/// The pool of `threads` workers that runs branch S, built on first use.
+fn stages_pool(threads: usize) -> Option<&'static rayon::ThreadPool> {
+    let pools = STAGES_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pools = pools.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&pool) = pools.get(&threads) {
+        return Some(pool);
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(FLOCK_POOL_STACK)
+        .thread_name(|i| format!("agg-piop-s-{i}"))
+        .build()
+        .ok()?;
+    let pool: &'static rayon::ThreadPool = Box::leak(Box::new(pool));
+    pools.insert(threads, pool);
+    Some(pool)
+}
+
 /// The PIOP pool size for the fork under the scheduling knobs, or `None` for the caller's
 /// pool. `AGG_PIOP_THREADS` sets it; an invalid value is reported and ignored. With
 /// `AGG_SCHED_PRESET=auto` and no explicit count, the PIOP takes the logical CPUs that the
@@ -878,14 +903,38 @@ fn piop_fork_on() -> bool {
     !matches!(std::env::var("AGG_PIOP_FORK").as_deref(), Ok("0" | "off"))
 }
 
+/// Threads of branch S's own pool (`AGG_PIOP_S_THREADS`), or `None` for the shared pool
+/// (the default). `0`, an empty value or a value that is not a count reports once and keeps
+/// the shared pool. A separate pool leaves every worker of the main PIOP pool to branch L,
+/// so the lookup's round barriers do not wait behind stage jobs in the same injector.
+fn piop_s_threads() -> Option<usize> {
+    match std::env::var("AGG_PIOP_S_THREADS") {
+        Err(_) => None,
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(0) => {
+                warn_once("AGG_PIOP_S_THREADS=0 is not a thread count; using the shared pool");
+                None
+            }
+            Ok(n) => Some(n),
+            Err(_) => {
+                warn_once(&format!(
+                    "AGG_PIOP_S_THREADS={v:?} is not a thread count; using the shared pool"
+                ));
+                None
+            }
+        },
+    }
+}
+
 /// Run branch L (`lookup`) and branch S (`stages`) of the forked transcript, concurrently
-/// unless [`piop_fork_on`] says otherwise. Both feed the pool the PIOP runs on: inside a
-/// rayon pool (the PIOP pool of the scheduler preset) by `rayon::join`; off the pool (the
-/// caller's thread, which carries a large stack) with S on a scoped thread whose stack is
-/// that of the PIOP pool's workers, so that neither branch's sequential driver lands on a
-/// global-pool worker with rayon's default stack. Off the pool with a one-thread global
-/// pool, both branches run on the caller: an OS thread for S would add a second core's
-/// worth of work on one core and no parallelism.
+/// unless [`piop_fork_on`] says otherwise. With `AGG_PIOP_S_THREADS=k`, S runs on its own
+/// pool of `k` workers and L keeps every worker of the main PIOP pool; otherwise both feed
+/// the pool the PIOP runs on: inside a rayon pool (the PIOP pool of the scheduler preset)
+/// by `rayon::join`; off the pool (the caller's thread, which carries a large stack) with S
+/// on a scoped thread whose stack is that of the PIOP pool's workers, so that neither
+/// branch's sequential driver lands on a global-pool worker with rayon's default stack.
+/// Off the pool with a one-thread global pool, both branches run on the caller: an OS
+/// thread for S would add a second core's worth of work on one core and no parallelism.
 fn run_branches<A: Send, B: Send>(
     lookup: impl FnOnce() -> A + Send,
     stages: impl FnOnce() -> B + Send,
@@ -898,6 +947,17 @@ fn run_branches<A: Send, B: Send>(
     if !on_worker && rayon::current_num_threads() <= 1 {
         let a = lookup();
         return (a, stages());
+    }
+    if let Some(s_pool) = piop_s_threads().and_then(stages_pool) {
+        return std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("agg-piop-stages-driver".into())
+                .stack_size(FLOCK_POOL_STACK)
+                .spawn_scoped(scope, move || s_pool.install(stages))
+                .expect("spawn the stage branch");
+            let a = lookup();
+            (a, crate::pcs::join_os_thread(handle))
+        });
     }
     if on_worker {
         return rayon::join(lookup, stages);
