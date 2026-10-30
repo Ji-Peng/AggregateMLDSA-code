@@ -133,3 +133,8 @@ writers.
 
 The 1K aggregate is byte-identical under scalar and avx512 and under one and
 sixteen rayon threads; the constructors are not otherwise timed on this box.
+
+`attach_small_i16` checks the signed-16 range and writes the mirror in one pass
+instead of a min/max reduction followed by a second write; each chunk reports
+its range and its first offending cell, and the chunks combine in order, so the
+error still names the first out-of-range cell.

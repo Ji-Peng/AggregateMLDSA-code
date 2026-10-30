@@ -633,42 +633,79 @@ impl DensePoly<jolt_field::Prime64Offset59> {
             });
         }
         let physical_len = expected.max(MIN_FLAT_COEFF_LEN);
-        let bounds_i32 = chunked_min_max(cells);
-        if let Some((low, high)) = bounds_i32 {
-            if low < i32::from(i16::MIN) || high > i32::from(i16::MAX) {
-                let cell = cells
-                    .iter()
-                    .copied()
-                    .find(|&cell| i16::try_from(cell).is_err())
-                    .unwrap_or(0);
-                return Err(AkitaError::InvalidInput(format!(
-                    "width-16 source cell {cell} does not fit a signed 16-bit digit"
-                )));
+        // One pass over the live cells writes the mirror and records the range and
+        // the first out-of-range cell. The zero padding beyond `cells.len()` is
+        // written without contributing to the bounds, exactly as before.
+        let mut mirror = Vec::with_capacity(physical_len);
+        let partials = {
+            let spare = &mut mirror.spare_capacity_mut()[..physical_len];
+            if physical_len <= MIN_MAX_CHUNK {
+                vec![write_i16_chunk(cells, spare)]
+            } else {
+                cfg_chunks_mut!(spare, MIN_MAX_CHUNK)
+                    .enumerate()
+                    .map(|(chunk, part)| {
+                        let start = chunk * MIN_MAX_CHUNK;
+                        write_i16_chunk(cells.get(start..).unwrap_or_default(), part)
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+        let mut bounds: Option<(i32, i32)> = None;
+        let mut first_bad: Option<i32> = None;
+        for (low, high, bad) in partials {
+            bounds = Some(match bounds {
+                None => (low, high),
+                Some((low_before, high_before)) => (low_before.min(low), high_before.max(high)),
+            });
+            if first_bad.is_none() {
+                first_bad = bad;
             }
         }
-        let bounds = bounds_i32.map(|(low, high)| (i64::from(low), i64::from(high)));
-        // The spare capacity is written chunk by chunk, so first touch happens
-        // in the parallel writer instead of in a single-threaded zero fill.
-        let mut mirror = Vec::with_capacity(physical_len);
-        {
-            let spare = &mut mirror.spare_capacity_mut()[..physical_len];
-            cfg_chunks_mut!(spare, MIN_MAX_CHUNK)
-                .enumerate()
-                .for_each(|(chunk_index, chunk)| {
-                    let start = chunk_index * MIN_MAX_CHUNK;
-                    for (offset, slot) in chunk.iter_mut().enumerate() {
-                        let value = cells.get(start + offset).map_or(0, |&cell| cell as i16);
-                        slot.write(value);
-                    }
-                });
+        if let Some(cell) = first_bad {
+            return Err(AkitaError::InvalidInput(format!(
+                "width-16 source cell {cell} does not fit a signed 16-bit digit"
+            )));
         }
-        // SAFETY: the loop above writes every element of the `physical_len`
-        // spare slots, and `physical_len <= mirror.capacity()`.
+        let bounds = bounds
+            .filter(|_| !cells.is_empty())
+            .map(|(low, high)| (i64::from(low), i64::from(high)));
+        // SAFETY: `write_i16_chunk` initializes every slot it is given, and the
+        // disjoint chunks above cover the `physical_len` spare slots, which fit
+        // in `mirror`'s capacity by construction.
         unsafe { mirror.set_len(physical_len) };
         self.small_i16_coeffs = Some(mirror);
         self.small_bounds = bounds;
         Ok(self)
     }
+}
+
+/// Write `cells` into `part` as signed 16-bit values, zero-filling beyond the
+/// cells, and return the cell range and the first cell that does not fit `i16`.
+///
+/// `part` starts at the index `cells` was sliced from, so the live prefix is
+/// `cells.len().min(part.len())`; the range covers only that prefix.
+fn write_i16_chunk(
+    cells: &[i32],
+    part: &mut [std::mem::MaybeUninit<i16>],
+) -> (i32, i32, Option<i32>) {
+    let live = cells.len().min(part.len());
+    let (mut low, mut high) = (i32::MAX, i32::MIN);
+    let mut first_bad = None;
+    for (offset, slot) in part.iter_mut().enumerate() {
+        if offset < live {
+            let cell = cells[offset];
+            low = low.min(cell);
+            high = high.max(cell);
+            if first_bad.is_none() && i16::try_from(cell).is_err() {
+                first_bad = Some(cell);
+            }
+            slot.write(cell as i16);
+        } else {
+            slot.write(0);
+        }
+    }
+    (low, high, first_bad)
 }
 
 /// Write `cells` into `part`, zero-filling beyond the cells.

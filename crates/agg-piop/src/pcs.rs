@@ -491,6 +491,37 @@ mod tests {
     }
 
     #[test]
+    fn wide_constructor_spans_parallel_mirror_chunks() {
+        const N: usize = 1 << 16;
+        let encode = |cells: &[i32]| -> Vec<BaseField> {
+            cells
+                .iter()
+                .map(|&value| BaseField::from_i64(i64::from(value)))
+                .collect()
+        };
+        let mut wide = vec![0_i32; N];
+        wide[1] = -32_768;
+        wide[N / 2] = 17;
+        wide[N - 2] = 32_767;
+        let polynomial = DensePoly::from_wide_field_evals(16, encode(&wide), &wide).unwrap();
+        let mirror = polynomial.small_i16_mirror().unwrap();
+        assert_eq!(mirror.len(), N);
+        assert_eq!(mirror[1], -32_768);
+        assert_eq!(mirror[N / 2], 17);
+        assert_eq!(mirror[N - 2], 32_767);
+        assert!(mirror
+            .iter()
+            .enumerate()
+            .all(|(index, &value)| matches!(index, 1 | 32_768 | 65_534) || value == 0));
+        assert_eq!(polynomial.small_mirror_bounds(), Some((-32_768, 32_767)));
+
+        let mut bad = wide;
+        bad[7] = 32_768;
+        let error = DensePoly::from_wide_field_evals(16, encode(&bad), &bad).unwrap_err();
+        assert!(error.to_string().contains("32768"));
+    }
+
+    #[test]
     fn group_points_follow_the_group_domains() {
         let manifest = CommitmentManifest::for_batch(1 << 15).unwrap();
         let point: Vec<OpeningField> = (0..25)
