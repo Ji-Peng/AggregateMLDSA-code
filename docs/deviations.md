@@ -1003,6 +1003,65 @@ the linear order so that `X` keeps a complete-prefix input; that order does not 
 the byte order of the join, and any fixed order of the digests is sound. The join order
 `d_L || d_S` is fixed so that prover and verifier compute the same trunk input.
 
+## K24. A `{0,1}` projection of `v` replaces the range check of its digits (spec Sections 3.1, 4.1, 4.3, 6, 7.0, 7.4, 7.5, 10, 12.1, 12.2; docs/soundness.md 2, 3.1, 3.5, 5, 10, 12.2, 12.4; docs/lookup.md 1)
+
+Spec without this change: `V_lo`, `V_hi` were looked up in `T_16` (stack
+`[Z_lo | U_lo | V_lo | V_hi]`, `2^26` of the `138.7M` looked-up cells at `2^15`) only so that
+(6.1) lifts; `v` enters no other identity, SelfTargetMSIS or the SUF instance.
+
+Code (`agg_piop::{projection, manifest, transcript, source_tables, stage2, stage3, prover,
+verifier, wire, opening}`, `agg_pcs_config::catalogs`):
+
+- The site `agg-mldsa/v1/proj/psi` follows `sd` (its own `H_P` query, before the round-2
+  commitments): `Transcript::challenge_psi` absorbs the 21 raw label bytes of the site (so the
+  query input is not `sd`'s) and `challenge_bytes(PROJ_SITE, 512)` squeezes the 16 KiB of
+  `Psi in {0,1}^(128 x 1024)` directly (row `o`, position `x` is bit `x mod 8` of byte
+  `128 o + x / 8`). No seed is expanded, so the site's mass is exactly `2^-128` and `g = 0`
+  (an expanded seed would lose a factor 2 in a density lemma and need `g = 1`).
+- Round 2 commits `G_k = (K_0, K_1, K_2)` on `D_k` (`o` 7 bits, `i` `d_sig` bits), the digits
+  of `k_{o,i} = <Psi_o, v_i>`, `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` over exactly
+  `[-2^33, 2^33)` (`manifest::K16_DIGITS`; bases `2^16, 2^16, 4`, signed). The honest prover
+  computes `k` from the committed `V_lo, V_hi` with per-byte subset sums (`projection::outputs`)
+  and aborts on an output outside the range, naming the record
+  (`SourceTableError::ProjectionRange { record, row, value }`). `BridgeGroupTables` keeps `Psi` beside the digits.
+- Lookup: five stacks, `[Z_lo | U_lo]` (the first half of the stacked `G_main16` lane, depth
+  `d_main + 1`), the three carry stacks and `[K_0 | K_1]` (depth `d_k + 1`). `D = max(d_main
+  + 1, 16)`: one GKR session fewer, `L = 79,970,304` at `2^15` (was `138,690,560`).
+  `V_lo`, `V_hi` stay in `G_main16`, stored as before, alphabet code `0x10 | 16`
+  ("unchecked"); digit layout id 2.
+- Stage 2: `leaf4[K_2]` on `D_k` at the `D_k` suffix of `r^(1)` (one group per domain); after
+  the terminal claims the prover sends `c = k~(r')` (site `agg-mldsa/v1/proj/claim`, end of
+  branch S), `r'` the `D_k` suffix of `r^(2)`. `gamma^(2)`: 9 / 8 / 8 coefficients (H-u /
+  H-exact / H-FIPS), `g = 4` in every relation.
+- Stage 3: `link[K_2]`, the fifth stack reduction, and the two sides of the projection
+  identity with the one claim `c`: `W (V_lo + 2^16 V_hi + 2^15)` on the main domain with the
+  rank-one weight `W(x, i) = P(x) eq(r'_sig, i)` (`WeightId::Proj`, materialized after
+  `r^(2)` beside `w_A`, the `WeightIntGroup` path), and `K_0 + 2^16 K_1 + 2^32 K_2 + C_k` on
+  `D_k` at `r'`. `gamma^(3)`: 48 / 49 / 55; the verifier evaluates `W(r^(3))` from `Psi`.
+- `G_3` takes `G_2`'s Akita layout: after `K^(3)` it holds zero polynomials (`Column::Zero`)
+  up to `G_2`'s count and has `G_2`'s physical variables. Reason: Akita's planner enumerates
+  the root openings of the precommitted groups as a Cartesian product over their distinct
+  profile classes, capped at 256 assignments (`MAX_PRECOMMIT_OPENING_PRODUCTS` at the pin);
+  with `G_k` as a sixth distinct class the grouped row of `N* = 2^15` had no schedule
+  ("no multi-group schedule in the audited fold domain for num_vars=16"). With `G_3` in
+  `G_2`'s class the row plans (estimated opening 65,398 B against 65,282 B before). The zero
+  polynomials carry no stage-3 claim; their opening claim is zero (`opening::opening_claims`).
+  Groups: seven in wire order `G_main16, G_main4, G_1, G_2, G_3, G_k, G_m`; 52 / 53 / 58
+  polynomials. Catalog rows `mldsa-44-p16{,x,f}-batch-<N*>-mult-final`, regenerated.
+- The proof-of-work plan: one GKR session fewer, the new `gamma` sizes; the plans of the
+  three relations are equal (`docs/soundness.md` 10). PIOP wire version 4 is kept
+  (unreleased); aggregates made before this change do not verify under it.
+
+Soundness: `docs/soundness.md` 3.5 (Lemma P, site `proj.psi`, `e = 2^-128`, `g = 0`) and 12.4
+(the pending claim `C1` becomes `C1*` at the projection stage of the segment of `sd`;
+`R_PIOP` implies `C1*`). The projection identity is tested at a point of `r^(2)` and rides on
+the stage-2 rounds like the ring identity (3.4). (F) and (K) are untouched.
+
+Tests: `tests/all/projection.rs` (the unbounded-quotient attack rejected by the lookup of
+`K_1`; `K_0 + 1` and `v` moved with `k` kept at stage 3; `K_2 = 2` at stage 2; a changed `c`;
+`V_lo + 2^16` with `V_hi - 1` accepted and `V_hi = 2^16` rejected by the ring; the honest
+abort), `projection::tests` (outputs, digit ranges, `W`), updated lookup and stage tests.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):

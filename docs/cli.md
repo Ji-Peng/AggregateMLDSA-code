@@ -9,7 +9,7 @@ profiles `Fast`, `Slim` and `Slim8`), K16 (one span over all segments), K17 and 
 
 `agg_cli::mode_a::Aggregator::aggregate(&[(pk, M, signature)])` returns an `Aggregate`:
 the wire bytes of `agg_piop::wire::AggregateProof` (header, the `c~_i` list, then the proof
-blob: the six Akita commitments, the mode-A segment items, `Y_sigma`, the PIOP rounds and
+blob: the seven Akita commitments, the mode-A segment items, `Y_sigma`, the PIOP rounds and
 claims, the Akita opening) and a `ProveReport` (step times, per Flock part times and sizes,
 the byte size of every part of the aggregate). Steps:
 
@@ -21,13 +21,14 @@ the byte size of every part of the aggregate). Steps:
    Section 10 with the seed-derived matrices (`SeededMatrices`) and the Flock side
    `FlockProver` (Flock profile `AggregatorConfig::profile`: `Slim` by default, `Fast` or
    `Slim8`; bound at event 0, K15, K18): event 1 `G_main16, G_main4`, event 2 the parts' Flock
-   commitments, event 3 `sd`, event 4 `G_1, G_2, G_3, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
+   commitments, event 3 `sd` and the projection matrix `Psi` (K24), event 4 `G_1, G_2, G_3,
+   G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
    default 3/8 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the
    global pool, a non-numeric value warned about on stderr and replaced by the default,
-   while the prover runs events 7 to 12), event 13 the opening. There is no projection seed
-   (deviation P2).
+   while the prover runs events 7 to 12), event 13 the opening. There is no divisibility projection seed
+   (deviation P2); the `{0,1}` projection of `v` (K24) bounds the quotient.
 
 `agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
 `VerifyCostReport`: accept or the first failing check, the 15 step times of

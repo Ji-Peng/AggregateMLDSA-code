@@ -1,10 +1,10 @@
 # Lookup-based range argument for the ML-DSA-44 aggregator
 
 The lookup into `T_16` is the range mechanism of relation H in mode A and mode B: `crates/agg-piop/src/lookup.rs`
-runs inside the PIOP transcript (event 7), the six Akita groups of Section 6 are committed
+runs inside the PIOP transcript (event 7), the seven Akita groups of Section 6 are committed
 under two presets with generated catalogs. The
 normative text is `docs/spec.md` Sections 4, 7, 10 to 12; departures
-are `docs/deviations.md` L1 to L7, D2. Sections 1 to 6 are the argument, its soundness
+are `docs/deviations.md` L1 to L7, D2 and K24 (the projection of `v`). Sections 1 to 6 are the argument, its soundness
 (with the comparison of remedies for the identity term, Section 2.1), the column counts, the
 costs, the module and the integration as implemented.
 
@@ -26,34 +26,39 @@ intermediate. Aerie-style structured range tables (`Q_16` on `P_Z`) do not reach
 (degree `2^16`).
 
 **Layout L16.** Every range is a 16-bit lookup into the single table `T_16 = [0, 2^16)`,
-except the two small top digits, which keep the cheap coded leaf path:
+except the small top digits, which keep the cheap coded leaf path. The quotient `v` has no
+range check of its own: its projection outputs `k` are range-checked instead (deviation K24,
+spec Section 6):
 
 | Value | Decomposition | Proven range | Columns per position | Range mechanism |
 | --- | --- | --- | ---: | --- |
 | `z` | `z + 2^17 = z_lo + 2^16 z_hi` | `z_lo in [0, 2^16)`, `z_hi in [0, 4)`, so `z in [-2^17, 2^17)` | 2 | lookup; `leaf4` + `link` |
 | `u` | `u + 190,465 = u_lo + 63,079 u_hi` (relation H-u, deviation L8) | `u_lo in [0, 2^16)`, `u_hi in [0, 6)`, so `u in [-190,465, 190,465]` exactly | 2 | lookup; `leaf6` + `link` |
-| `v` | `v + 2^31 = v_lo + 2^16 v_hi` | both in `[0, 2^16)`, so `v in [-2^31, 2^31)` | 2 | two lookups |
+| `v` | `v + 2^31 = v_lo + 2^16 v_hi` (honest encoding) | none; `|v|_c <= 2^34` through `k` | 2 | none (committed, not looked up) |
+| `k = <Psi_o, v_i>` | `k + 2^33 = k_0 + 2^16 k_1 + 2^32 k_2` | `k_0, k_1 in [0, 2^16)`, `k_2 in [0, 4)`, so `k in [-2^33, 2^33)` | 3 per (row, signature), on `D_k` | two lookups; `leaf4` + `link` |
 | `b_0..b_5` | bits | Boolean, `w_1' < 44` | 6 | unchanged (`bool_b`, `range_w1`) |
 | `kappa^(1)_t, kappa^(2)_t` | one column each | `[0, 2^16)` | per lane, on `D_1, D_2` | lookup |
 | `kappa^(3)` | one column | `[0, 2^16)` | on `D_3` | lookup |
 
 Committed values are stored balanced so that the honest producer fits a signed width-16
 Akita preset: `Z_lo = z_lo - 2^15`, `U_lo = u_lo - 2^15`, `V_lo = v_lo - 2^15`,
-`V_hi = v_hi - 2^15`, `Z_hi = z_hi - 2` (base 4), `U_hi = u_hi - 3` (base 6), and the carries
-`K = kappa - 2^15` (`docs/deviations.md` L2). Every looked-up value is the affine shift
+`V_hi = v_hi - 2^15`, `Z_hi = z_hi - 2` (base 4), `U_hi = u_hi - 3` (base 6), the carries
+`K = kappa - 2^15` (`docs/deviations.md` L2) and the projection digits `K_0 = k_0 - 2^15`,
+`K_1 = k_1 - 2^15`, `K_2 = k_2 - 2` (base 4). Every looked-up value is the affine shift
 `f = stored + 2^15`, so a claim on the stored lane is a claim on the committed column; the
 tree leaves are `1 / ((X - 2^15) - stored)`. Spec (4.1) holds with bases `(2^16, 4)`,
 `(2^16, 2^16)` and `(2^16)` (unsigned): `z = Z_lo + 2^16 Z_hi + 2^15`,
 `v = V_lo + 2^16 V_hi + 2^15`, `kappa = K + 2^15` (constant `C = 2^15` each); `u` takes the
-step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`. Padded rows hold the digits of zero:
+step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`; `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 +
+2^15` (bases `(2^16, 2^16, 4)`, signed). Padded rows hold the digits of zero:
 `Z_lo = V_lo = -2^15`, `U_lo = -31,540` (`u_lo = 1,228`, `u_hi = 3`), `Z_hi = U_hi = V_hi = 0`;
 padded carries are `K = -2^15`, and so are the padding slots of the carry stacks (looked-up
-value 0).
+value 0); padded records project to `k = 0`, digits `(K_0, K_1, K_2) = (-2^15, -2^15, 0)`.
 
 Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
 is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
 `z_lo` (stored `S_zlo = B_zlo - 2^15`, column `bz_lo`) and the bits `B_zhi`, `a_z` proven by
-two Booleanity zero-checks in stage 3, so the four stacks, `L` and every lookup site are the
+two Booleanity zero-checks in stage 3, so the five stacks, `L` and every lookup site are the
 same; only the honest multiplicities move (padded cells look up 65,457 instead of 0).
 Relation H-FIPS (`docs/h-exact.md` Section 10.7, deviation L10) puts `l_lo` (`L_lo - 2^15`)
 in the slot of `u_lo` and the hint slack `u_h` (stored `u_h - 2^15`) in the free slot 6 of the
@@ -71,8 +76,10 @@ Two design rules, both forced by soundness:
    identity per table (test `two_tables_verify_and_a_cross_table_value_is_rejected`
    books a `T_8` cell valued 300 under `T_16`, which the shared identity would accept).
 2. *No `T_11` at all.* `v` needs no exact range: spec (6.1) lifts `Delta = 0` to the
-   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. With `v + 2^31 = v_lo + 2^16 v_hi`,
-   both halves 16 bits, `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^31 < 2^54.1 < p/2`.
+   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^34`
+   (Lemma P), so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^34 < 2^57.01 < p/2`; the
+   outputs `k` (at most `2^31.4` for every `z` in the box, est.) fit two `T_16` digits and a
+   base-4 leaf digit.
    The carries need no exact range either (`docs/bridge.md` Section 4: any carry range
    below `(p - W_t)/2` is sound; `y + 2 kappa <= 1 + 2^17` keeps (9.2) an integer
    equation), so they are looked up in `T_16` directly and need no `T_10`, `T_8` tables
@@ -86,9 +93,10 @@ value zero, stored `-2^15`; zero is an entry, so the honest prover counts them i
 the integrated code the stacked lane is the storage itself (`G_main16` is one `i32` lane of
 four columns, each carry level one lane of eight slots), so the lookup reads it without a
 copy. The L16 stacks:
-`[Z_lo | U_lo | V_lo | V_hi]` on the main domain (`depth = d_main + 2`, no padding),
-`kappa^(1)` (6 lanes in 8 slots on `D_1`), `kappa^(2)` (6 in 8 on `D_2`), `kappa^(3)`
-(1 on `D_3`).
+`[Z_lo | U_lo]` on the main domain (the first half of the `G_main16` lane, `depth = d_main +
+1`, no padding), `kappa^(1)` (6 lanes in 8 slots on `D_1`), `kappa^(2)` (6 in 8 on `D_2`),
+`kappa^(3)` (1 on `D_3`) and `[K_0 | K_1]` on the projection domain `D_k` (`depth = d_k + 1`,
+`d_k = 7 + d_sig`).
 
 **Identity.** For the challenge `X in K` (sampled after the commitments of every
 looked-up column and of `m`), with `L` looked-up cells `g_i` (padding included) and
@@ -155,9 +163,10 @@ evaluations, one `expected_terminal` per group, one `eq` evaluation per session 
 
 **Proof size.** Per tree `4` layer-1 elements; per session `3(s - 1)` round elements,
 `4` per continuing tree and `2` per ending stack or table; 16 bytes per element
-(`LookupShape::proof_elements`). Layout L16, one challenge: 1,015 elements (16,240 B) at
-`N = 1,024`, 1,246 (19,936 B) at 8,192 and 1,431 (22,896 B, 0.70 B per signature) at
-`N = 2^15`; two challenges: 1,327 (21,232 B), 1,582 (25,312 B) and 1,799 (28,784 B).
+(`LookupShape::proof_elements`). Layout L16 with the projection (K24), two challenges:
+1,394 elements (22,304 B) at `N = 1,024`, 1,664 (26,624 B) at 8,192 and 1,891 (30,256 B,
+0.92 B per signature) at `N = 2^15` (before K24: 1,327, 1,582 and 1,799 elements; the fifth
+stack adds two trees and the main stack's depth falls by one).
 The integrated protocol adds the seven digit evaluations of `m` (112 B); the stage-3
 reductions join stage 3's existing rounds and add no terminal value (their columns are
 opened at `r^(3)` anyway).
@@ -169,15 +178,16 @@ Section 12.1. `L` = looked-up cells (padding included), `M = 2^16`, `D = D_max`.
 
 | Term | Bound | `N = 1,024` | `N = 8,192` | `N = 2^15` |
 | --- | --- | ---: | ---: | ---: |
-| LogUp identity, one `X` (Lemma 5 + Schwartz-Zippel, LogUp-GKR Prop. 2) | `(L + M - 1)/(|K| - M)` | `2^-105.9` | `2^-103.0` | `2^-101.0` |
-| same, two independent `X_1, X_2` | square of the above | `2^-211.8` | `2^-205.9` | `2^-201.9` |
-| GKR (rounds `3/|K|` each, one `gamma` vector and one `mu` per session, `mu_1`) | `(3 D(D-1)/2 + 2(D-1) + 1)/|K|` | `736/|K|` | `949/|K|` | `1,106/|K|` |
+| LogUp identity, one `X` (Lemma 5 + Schwartz-Zippel, LogUp-GKR Prop. 2) | `(L + M - 1)/(|K| - M)` | `2^-106.7` | `2^-103.8` | `2^-101.8` |
+| same, two independent `X_1, X_2` | square of the above | `2^-213.4` | `2^-207.5` | `2^-203.5` |
+| GKR (rounds `3/|K|` each, one `gamma` vector and one `mu` per session, `mu_1`) | `(3 D(D-1)/2 + 2(D-1) + 1)/|K|` | `671/|K|` | `875/|K|` | `1,026/|K|` |
 | Four new evaluation reductions in stage 3 (Section 6) | `4 d_main/|K|` | | | `100/|K|` |
 
-`L` is `4 2^d_main + 8 |D_1| + 8 |D_2| + |D_3|`: 4,395,008, 34,672,640 and 138,690,560;
-`D = D_max = max(d_main + 2, 16)` (`LookupShape::max_depth`): the main stack, except at
-`N* = 8` (`d_main = 13`), where the 16-variable table tree is the deepest and the GKR term
-is `391/|K|` (`344/|K|` with `d_main + 2`). Lemma 5 needs `char F_p = p > L` (by a factor of
+`L` is `2 2^d_main + 8 |D_1| + 8 |D_2| + |D_3| + 2 |D_k|` (K24; before it `4 2^d_main + ...`
+without `D_k`): 2,560,000, 19,992,576 and 79,970,304;
+`D = D_max = max(d_main + 1, 16)` (`LookupShape::max_depth`): the main stack, except up to
+`N* = 32` (`d_main <= 15`), where the 16-variable table tree is the deepest and the GKR term
+is `391/|K|`. Lemma 5 needs `char F_p = p > L` (by a factor of
 `2^36`) and pairwise distinct table entries; it holds for *any* `m in F_p`, so the multiplicities need
 no range proof and their seven Akita digits no alphabet check. The GKR term follows
 Proposition 1 of LogUp-GKR with independent coefficients per claim (one `1/|K|` per
@@ -243,11 +253,11 @@ in session `D - 1` instead of storing it (Section 4.6 item 1). Both change only 
 
 **Extraction** (spec 12.2 with L16). Akita yields `F_p` values for every committed column
 (Remark 10.41). Except with the terms above: every looked-up cell is an entry of `T_16`,
-so `Z_lo + 2^15, U_lo + 2^15, V_lo + 2^15, V_hi + 2^15, kappa in [0, 2^16)` as integers;
-`leaf4`/`link` and `leaf6`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`; by (4.1) and
-spec (4.2), `z in [-2^17, 2^17)`, `u in [-190,465, 190,465]` (relation H-u, `zeta' = zeta =
-350,209`) and
-`v in [-2^31, 2^31)`, enough for (6.1); every
+so `Z_lo + 2^15, U_lo + 2^15, K_0 + 2^15, K_1 + 2^15, kappa in [0, 2^16)` as integers;
+`leaf4`/`link` and `leaf6`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`, `K_2 in [-2, 1]`;
+by (4.1) and spec (4.2), `z in [-2^17, 2^17)`, `u in [-190,465, 190,465]` (relation H-u,
+`zeta' = zeta = 350,209`) and `k in [-2^33, 2^33)`, so `|v|_c <= 2^34` by the projection
+(spec Section 6, Lemma P; `V_lo`, `V_hi` are not looked up), enough for (6.1); every
 carry is an integer in `[0, 2^16)`, enough for (9.2) (`docs/bridge.md` Section 4).
 `m` is unconstrained and need not be constrained.
 
@@ -262,9 +272,11 @@ Committed elements per signature:
 | `D_1` carries (`N = 2^15`, `2^19` cells) | 96 (6 columns) |
 | `D_2` parities and carries (`2^15` cells) | 12 (6 + 6) |
 | `D_3` carries (`2^14` cells) | 0.5 (1) |
+| `G_3` zero polynomials (11 x `2^14` cells, K24) | 5.5 |
+| Projection digits `K_0, K_1, K_2` (`D_k`, 128 rows) | 384 |
 | Multiplicities `m` (7 digits x `2^16` cells) | 14 |
-| **Total at `N = 2^15`** | **12,410.5** |
-| Total at `N = 1,024` (physical cells, 13-variable minimum) | 12,936 |
+| **Total at `N = 2^15`** | **12,800** |
+| Total at `N = 1,024` (physical cells, 13-variable minimum) | 13,408 |
 
 At `N = 1,024`, `m` costs 448 elements per signature (7 x `2^16` / 1,024); it is
 independent of `N`. Akita inner digits per position: one per width-4 column, and one forced
@@ -444,7 +456,8 @@ The construction, driven by the PIOP transcript:
 
 1. *PCS* (`agg-pcs-config`, `docs/pcs-config.md`). Preset `AggFp64SignedWidth16` with one
    forced balanced base-`2^16` inner digit (deviation L3: the planner's estimate is the same
-   for one, two or three digits). Six groups in wire order `G_main16` (width 16), `G_main4`
+   for one, two or three digits). Six groups in wire order (seven since K24, which adds the
+   width-16 projection group `G_k` after `G_3` and gives `G_3` the layout of `G_2`) `G_main16` (width 16), `G_main4`
    (width 4), `G_1`, `G_2` (one width-16 group for the parities and the carries), `G_3`
    (width 16), `G_m` (width 4, Akita's final group; deviation L4). Two catalogs: the width-16
    one with the scalar rows of its four groups, the width-4 one with the scalar rows of
@@ -460,11 +473,11 @@ The construction, driven by the PIOP transcript:
    derive every count from `N` (`session_counts`). Wire version 1 carries the six
    commitments (two at event 1, four at event 4), the `LookupProof` and the 7 digit
    claims; version 0 is refused.
-4. *Stages.* Stage 1: 26 instances. Stage 2: `def_y1` (6), `leaf4[Z_hi]`, `leaf6[U_hi]`;
-   6 `K^(1)` claims before it. Stage 3: `ring` with (4.1) of
-   Section 1, 2 links, 37 reductions and the 4 stack reductions (one gamma per stack, one
-   part per column with the scale `eq(pi_top, c)`, deviation L6); 44 instances, 31 terminal
-   claims. The prover and verifier share `prover::prove_piop` / `verifier::verify_piop`.
+4. *Stages.* Stage 1: 26 instances. Stage 2: `def_y1` (6), `leaf4[Z_hi]`, `leaf6[U_hi]`,
+   `leaf4[K_2]` (K24); 6 `K^(1)` claims before it, the projection claim `c` after it. Stage 3:
+   `ring` with (4.1) of Section 1, 3 links, 37 reductions, the 5 stack reductions (one gamma
+   per stack, one part per column with the scale `eq(pi_top, c)`, deviation L6) and the two
+   sides of the projection identity; 48 instances, 34 terminal claims. The prover and verifier share `prover::prove_piop` / `verifier::verify_piop`.
 5. *Ledger*: spec Section 12.1 (normative; Section 2 above).
 6. *Kernel*: unchanged API; the 16-bit columns are `Source::Ints` lanes (uncoded, generic
    path). A 16-bit coded lane (two `2^16`-entry tables per fold) is the next prover-side
@@ -472,16 +485,20 @@ The construction, driven by the PIOP transcript:
 
 Integrated tests (`cargo test -p agg-piop --release`): `tests/all/stages.rs` (honest PIOP at
 256 and 10 signatures with every claim against the table extensions; the lookup rejects
-16-bit cells out of `T_16` with `z` unchanged (`Z_lo +- 2^16`, `Z_hi -+ 1`), `V_hi = 2^16`,
-carries `2^16` and negative at every level, a wrong multiplicity (moved and added), a
+16-bit cells out of `T_16` with `z` unchanged (`Z_lo +- 2^16`, `Z_hi -+ 1`),
+carries `2^16` and negative at every level, while `V_hi = 2^16` (no longer looked up) is
+rejected by the ring identity at stage 3, a wrong multiplicity (moved and added), a
 tampered layer-1 value, GKR round message, layer terminal, table leaf pair, swapped
 multiplicity-digit claims and a truncated session; swapped stage-3 column claims rejected
 at stage 3; a value valid only for another range (`Z_hi = 2`, valid for `U_hi`; `U_hi = 4,
 -5`; a carry stored unshifted, valid in `T_16` but meaning `kappa + 2^15`; a padding slot
 holding a table entry) rejected at the leaf, the bridge identity or the stack reduction;
-a low part valid only for the wider range `[0, 2^17)` (`U_lo + 2^16` with `U_hi - 1`,
-`V_lo + 2^16` with `V_hi - 1`: `u`, `v` unchanged) rejected by the lookup; every old witness
-tampering at its stage), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
+a low part valid only for the wider range `[0, 2^17)` (`U_lo + 63,079` with `U_hi - 1`: `u`
+unchanged) rejected by the lookup, and `V_lo + 2^16` with `V_hi - 1` (`v` unchanged)
+accepted; every old witness tampering at its stage), `tests/all/projection.rs` (deviation
+K24: the unbounded-quotient attack with `Delta = 0` in `F_p` rejected by the lookup of
+`K_1`, `k` unbound to `v` at stage 3, `K_2 = 2` at stage 2, a changed claim `c`, the honest
+abort on `|k| >= 2^33`), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
 tampering including a wrong multiplicity; a stored 16-bit value outside the width-16
 interval is refused by Akita's commit, so the prover fails and no aggregate exists: the
 verifier's rejection of a looked-up value outside `T_16` is tested only at the PIOP level,

@@ -40,15 +40,17 @@ TARGET = 128
 SLACK = 7  # nonce width = g + 7 (Aerie, Akita)
 M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
-# Relation H-u (default, docs/h-exact.md): stage 2 holds leaf4[Z_hi] (degree 3) and
-# leaf6[U_hi] (degree 4), so its rounds have degree 4.
-# Relation H-exact: stage 2 holds leaf6[U_hi] only (7 coefficients, g = 3), stage 3
-# one link and two Booleanity zero-checks (45 coefficients, g = 6); the degrees are the same.
-# Relation H-FIPS: stage 2 holds def_y1 and F3 (7 coefficients, g = 3),
-# stage 3 51 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
+# Relation H-u (default, docs/h-exact.md): stage 2 holds leaf4[Z_hi] (degree 3),
+# leaf6[U_hi] (degree 4) and leaf4[K_2] of the projection digits of v (degree 3), so its
+# rounds have degree 4 (9 coefficients, g = 4); stage 3 48 coefficients (g = 6): the ring,
+# three links, 37 reductions, the projection group and the k reduction, five stack reductions.
+# Relation H-exact: stage 2 holds leaf6[U_hi] and leaf4[K_2] (8 coefficients, g = 4), stage 3
+# two links and two Booleanity zero-checks (49 coefficients, g = 6); the degrees are the same.
+# Relation H-FIPS: stage 2 holds def_y1, leaf4[K_2] and F3 (8 coefficients, g = 4),
+# stage 3 55 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
 # (the relation is bound by the manifest bytes of event 0, not by the plan encoding).
 STAGE_DEGREES = (4, 4, 3)
-RELATION_GAMMAS = {"h-u": (26, 8, 44), "h-exact": (26, 7, 45), "h-fips": (26, 7, 51)}
+RELATION_GAMMAS = {"h-u": (26, 9, 48), "h-exact": (26, 8, 49), "h-fips": (26, 8, 55)}
 STAGE_GAMMAS = RELATION_GAMMAS["h-u"]
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
@@ -80,7 +82,7 @@ CLASS_ID = {
 
 
 # Akita's capped transcript proof-of-work searches at 2^15 (docs/soundness.md).
-AKITA_SITES_2_15 = 459
+AKITA_SITES_2_15 = 461
 
 
 def grind_bits(num: int, den: int) -> int:
@@ -115,9 +117,11 @@ def geometry(d_sig: int) -> dict:
     d1 = 13 + max(0, d_sig - 9)
     d2 = 13 + max(0, d_sig - 13)
     d3 = 12 + max(0, d_sig - 13)
-    stacks = [d_main + 2, d1 + 3, d2 + 3, d3]
+    d_k = 7 + d_sig  # the projection domain (o, i): 128 rows times N*
+    # [Z_lo | U_lo], kappa^(1) and kappa^(2) in 8 slots, kappa^(3), [K_0 | K_1].
+    stacks = [d_main + 1, d1 + 3, d2 + 3, d3, d_k + 1]
     trees = (stacks + [16]) * CHALLENGES
-    lookups = 4 * 2**d_main + 8 * 2**d1 + 8 * 2**d2 + 2**d3
+    lookups = 2 * 2**d_main + 8 * 2**d1 + 8 * 2**d2 + 2**d3 + 2 * 2**d_k
     return {
         "d_sig": d_sig,
         "d_main": d_main,
@@ -288,7 +292,7 @@ def print_summary(args) -> None:
             f"{d_sig:>5}  {1 << d_sig:>6}  {geo['d_main']:>6}  {geo['D']:>2}  {geo['L']:>11}  {x_log2:>12.1f}  {len(sites):>5}  {s['nonces']:>6}  {s['bits']:>4}  {s['bytes']:>5}  {s['work']:>13}  {s['work'] * PREVIEW_NS / 1e6:>6.2f}  2^{s['max_weight_log2']:.2f}  {s['union_nu']}/|K| = 2^{math.log2(Fraction(s['union_nu'], K)):.1f}"
         )
     print()
-    print("== PIOP site classes at N* = 2^15 (d_main = 25, D = 27) ==")
+    print("== PIOP site classes at N* = 2^15 (d_main = 25, D = 26) ==")
     print("class         count  nu      e_t               g   nonce bits")
     geo = geometry(15)
     for (cls, nu, num, g), count in class_table(piop_sites(geo)):
@@ -444,11 +448,12 @@ def self_check() -> None:
     assert (t["tie"], t["g"], t["eq"], t["g_eq"], t["round"], t["g_round"], t["rounds"]) == (
         900, 10, 700, 10, 100, 7, 28), t
     assert chain_rounds(13, 0) == 26 and chain_rounds(3, 0) == 16 and chain_rounds(8, 0) == 21
-    # The spec's ledger: GKR 1,106/|K| at 2^15 and 391/|K| at N* = 8; L at 2^15.
+    # The spec's ledger: GKR 1,026/|K| at 2^15 and 391/|K| at N* = 8; L at 2^15 (the
+    # projection of v: V_lo, V_hi leave the main stack, [K_0 | K_1] is a fifth stack).
     g15 = geometry(15)
-    assert g15["L"] == 138_690_560 and g15["D"] == 27
-    assert sorted(set(g15["trees"]), reverse=True) == [27, 22, 18, 16, 14]
-    for d_sig, want in ((15, 1106), (3, 391)):
+    assert g15["L"] == 79_970_304 and g15["D"] == 26
+    assert sorted(set(g15["trees"]), reverse=True) == [26, 23, 22, 18, 16, 14]
+    for d_sig, want in ((15, 1026), (3, 391)):
         geo = geometry(d_sig)
         gkr = sum(nu for (cls, _i, _j, nu, _n, _d) in piop_sites(geo) if cls.startswith("lookup") and nu is not None)
         assert gkr == want, (d_sig, gkr)
@@ -456,29 +461,30 @@ def self_check() -> None:
     assert [list_size(r) for r in (1, 2, 3)] == [35, 50, 70]
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
-    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has g = 3 (7
-    # coefficients) instead of 4, so one stream bit and 8 units of work fewer; gamma^(3) keeps
-    # g = 6 (45 < 64); the totals and the Slim/span-on and mode-B digests at 2^15.
-    assert grind_bits(7, K) == 3 and grind_bits(8, K) == 4 and grind_bits(45, K) == grind_bits(44, K) == 6
+    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 8 coefficients
+    # (leaf6[U_hi], leaf4[K_2]) and H-u's 9, both g = 4; gamma^(3) keeps g = 6 (48, 49 < 64).
+    # So every difficulty, total and digest equals H-u's; the totals and the Slim/span-on and
+    # mode-B digests at 2^15.
+    assert grind_bits(7, K) == 3 and grind_bits(8, K) == grind_bits(9, K) == 4
+    assert grind_bits(48, K) == grind_bits(49, K) == grind_bits(55, K) == 6
     exact = RELATION_GAMMAS["h-exact"]
-    for d_sig, bits, work in ((3, 1810, 1356), (10, 3123, 2040), (13, 3888, 2430), (15, 4443, 2710)):
+    for d_sig, bits, work in ((3, 1810, 1348), (10, 2918, 1962), (13, 3656, 2340), (15, 4195, 2644)):
         s = with_gammas(exact, lambda: summarize(piop_sites(geometry(d_sig))))
         assert (s["bits"], s["work"]) == (bits, work), (d_sig, s)
     g15 = geometry(15)
     digest = with_gammas(exact, lambda: plan_digest(g15, piop_sites(g15), [], "modeB", 0, 0))
-    assert digest.startswith("e4b1dffc"), digest
+    assert digest.startswith("0433fcf7"), digest
     digest = with_gammas(exact, lambda: plan_digest(
         g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
-    assert digest.startswith("1f8e7aba"), digest
-    # Relation H-FIPS: 51 < 64 keeps g = 6 at stage 3 and 7 coefficients keep g = 3 at stage 2,
-    # so the plan equals H-exact's at every size.
-    fips = RELATION_GAMMAS["h-fips"]
-    assert grind_bits(51, K) == 6
-    for d_sig in (3, 10, 13, 15):
-        geo = geometry(d_sig)
-        a = with_gammas(fips, lambda: summarize(piop_sites(geo)))
-        b = with_gammas(exact, lambda: summarize(piop_sites(geo)))
-        assert (a["bits"], a["work"]) == (b["bits"], b["work"]), (d_sig, a, b)
+    assert digest.startswith("ad2054a1"), digest
+    # Relations H-u and H-FIPS: the same difficulties at every site, so the plans equal
+    # H-exact's at every size.
+    for gammas in (RELATION_GAMMAS["h-u"], RELATION_GAMMAS["h-fips"]):
+        for d_sig in (3, 10, 13, 15):
+            geo = geometry(d_sig)
+            a = with_gammas(gammas, lambda: summarize(piop_sites(geo)))
+            b = with_gammas(exact, lambda: summarize(piop_sites(geo)))
+            assert (a["bits"], a["work"]) == (b["bits"], b["work"]), (d_sig, a, b)
 
 
 def main() -> None:

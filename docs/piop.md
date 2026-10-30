@@ -16,7 +16,7 @@ transcript, the proof wire format, the prover and verifier drivers; spec Section
 
 | Module | Content | Spec | Aerie counterpart |
 | --- | --- | --- | --- |
-| `manifest` | `CommitmentManifest`: the six groups (role, round, family, logical and physical variables, polynomial order and alphabets) under the batch's relation, the columns and their value forms, the lookup shape, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
+| `manifest` | `CommitmentManifest`: the seven groups (role, round, family, logical and physical variables, polynomial order and alphabets) under the batch's relation, the columns and their value forms, the lookup shape, event-0 binding bytes | 4.1, 4.3, 10 | `aerie-falcon/src/protocol/manifest.rs` |
 | `source_tables` | `MainTables` (round 1, `G_main16` and `G_main4`), `BridgeGroupTables` (round 2, `G_1, G_2, G_3, G_m` and public `Y`, from `agg_bridge::parity` at `Shape::PRODUCTION`, with the multiplicities of `T_16`), `Cells`, `SourceTables` view | 4.1, 4.2, 9.2 | `aerie-prover/src/protocol/source_tables.rs` |
 | `pcs` | `group_polynomials`, `TableCommitter` (two rounds, the groups of a round committed concurrently, batched opening from given claims `open_claims` or table evaluations `open`), `opening_claims`, `group_points`, `verifier_for` | 4.1, 7.5, 10 | `aerie-prover/src/protocol/pcs/group.rs` |
 | `public_data` | `PublicData` (expanded keys, `mu`, `c~`, `T`), `KeyCache`, `t_evaluation`, `a_row_combination`, `negacyclic_kernel` and the allocation-free `negacyclic_kernel_into` (7.8), `eq_correlation` (Aerie (8.8)-(8.10)) | 2, 7.6 | `aerie-falcon/src/protocol/ring/functional.rs` |
@@ -43,15 +43,16 @@ polynomials; `commit_group` delegates to it.
 
 ## 2. Manifest and the event-0 bytes
 
-Six groups (spec Section 4.1), in wire order, under relation H-u:
+Seven groups (spec Section 4.1), in wire order, under relation H-u:
 
 | Group | Columns (manifest order) | Width | Storage | Round |
 | --- | --- | ---: | --- | ---: |
-| `G_main16` | `Z_lo, U_lo, V_lo, V_hi` | 16 | one stacked `i32` lane (`MainTables::wide`), column `c` at `c 2^d_main` | 1 |
+| `G_main16` | `Z_lo, U_lo, V_lo, V_hi` (`V_lo, V_hi` not looked up, deviation K24) | 16 | one stacked `i32` lane (`MainTables::wide`), column `c` at `c 2^d_main` | 1 |
 | `G_main4` | `Z_hi, U_hi, b_0..b_5` | 4 | `i8` columns (`MainTables::columns`) | 1 |
 | `G_1` | `kappa1_0..5` (stored `K = kappa - 2^15`) | 16 | stacked `i32`, 8 slots, slots 6, 7 hold `-2^15` | 2 |
 | `G_2` | `y2_0..5`, `kappa2_0..5` | 16 | `i8` parities, stacked `i32` carries | 2 |
-| `G_3` | `kappa3` | 16 | `i32` | 2 |
+| `G_3` | `kappa3`, `zero_1..zero_11` (`G_2`'s Akita layout, K24) | 16 | `i32`; one shared `i8` zero column | 2 |
+| `G_k` | `k_0, k_1, k_2`: the digits of the projection outputs `k_{o,i} = <Psi_o, v_i>` on `D_k` (cell `o + 128 i`) | 16 | stacked `i32` `k_0 | k_1`, `i8` `k_2` (`projection::ProjectionTables`) | 2 |
 | `G_m` | `m_0..m_6` (digits of the multiplicities of `T_16`) | 4 | `i8` | 2 |
 
 `G_m` is Akita's final group. The relation changes the columns (`manifest::group_columns`):
@@ -297,14 +298,14 @@ their columns and `w_1'` as `sum 2^t b_t`.
 
 ### 7.1 The lookup (event 7)
 
-Shape (`CommitmentManifest::lookup_shape`): stacks `[Z_lo | U_lo | V_lo | V_hi]` (depth
-`d_main + 2`), `kappa1` (8 slots, `d_1 + 3`), `kappa2` (8 slots, `d_2 + 3`), `kappa3`
-(`d_3`); table `T_16`; challenges `X_1, X_2`; storage shift `2^15` (leaves
+Shape (`CommitmentManifest::lookup_shape`): stacks `[Z_lo | U_lo]` (depth
+`d_main + 1`, the first half of the `G_main16` lane), `kappa1` (8 slots, `d_1 + 3`), `kappa2`
+(8 slots, `d_2 + 3`), `kappa3` (`d_3`), `[k_0 | k_1]` (`d_k + 1`); table `T_16`; challenges `X_1, X_2`; storage shift `2^15` (leaves
 `1 / ((X - 2^15) - stored)`). `prover::prove_piop` runs `lookup::prove_in` on the PIOP
 transcript, sends the seven digit claims `m_k(pi_m)`, then `tau`, the pre-stage claims and
 the stages; `verifier::verify_piop` mirrors it (`VerifyError::Lookup` for the lookup and
-the digit check). Lookup proof elements: 1,015 + 312 = 1,327 at `N = 1,024` with two
-challenges (21,232 B), 1,799 at `2^15` (28,784 B), plus 112 B of digit claims.
+the digit check). Lookup proof elements: 1,394 at `N = 1,024` with two
+challenges (22,304 B), 1,891 at `2^15` (30,256 B), plus 112 B of digit claims.
 
 ### 7.2 Stages under relation H-u
 
@@ -314,29 +315,35 @@ main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`},
 {`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
 `b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
 
-Stage 2 (degree 4, `gamma^(2) in K^8`, point `r^(1)`; before `gamma^(2)` the 6 claims
+Stage 2 (degree 4, `gamma^(2) in K^9`, point `r^(1)`; before `gamma^(2)` the 6 claims
 `K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7)
-(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}). Terminal (8): `b_t(r2)`, `P_Z(r2)`.
+(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}), `leaf4[K_2]` (8; `D_k` `eq(r1_k)` {`P_{K_2}`}).
+Terminal (9): `b_t(r2)`, `P_Z(r2)`; then the projection claim `c = k~(r')` (`r'` the `D_k`
+suffix of `r^(2)`, site `proj/claim`).
 
-Stage 3 (degree 3, `gamma^(3) in K^44`, point `r^(2)`):
+Stage 3 (degree 3, `gamma^(3) in K^48`, point `r^(2)`):
 
 | Instance | Gamma | Domain | Equality / weight | Summand |
 | --- | ---: | --- | --- | --- |
 | `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A (Z_lo + 2^16 Z_hi + 2^15) - eq (2 gamma_2 w_1' + u + q v)` |
-| `link[Z_hi]`, `link[U_hi]` | 1, 2 | main | `eq(r2, .)` | `Z (Z + 1)` |
-| `b_t` from `r1`, from `r2` | 3..9, 9..15 | main | `eq(r1)`, `eq(r2)` | `b_t` |
-| `y2_t` from `tau_2`, from `r1_2` | 15..21, 21..27 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
-| `K2_t` from `tau_2` | 27..33 | `D_2` | `eq(tau_2)` | `K2_t` |
-| `K3` from `tau_3` | 33 | `D_3` | `eq(tau_3)` | `K3` |
-| `K1_t` from `r1_1` | 34..40 | `D_1` | `eq(r1_1)` | `K1_t` |
-| stack `j` | 40 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
+| `link[Z_hi]`, `link[U_hi]`, `link[K_2]` | 1, 2, 3 | main; `D_k` for `K_2` | `eq(r2, .)`; `eq(r', .)` | `Z (Z + 1)` |
+| `b_t` from `r1`, from `r2` | 4..10, 10..16 | main | `eq(r1)`, `eq(r2)` | `b_t` |
+| `y2_t` from `tau_2`, from `r1_2` | 16..22, 22..28 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
+| `K2_t` from `tau_2` | 28..34 | `D_2` | `eq(tau_2)` | `K2_t` |
+| `K3` from `tau_3` | 34 | `D_3` | `eq(tau_3)` | `K3` |
+| `K1_t` from `r1_1` | 35..41 | `D_1` | `eq(r1_1)` | `K1_t` |
+| stack `j` | 41 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
+| `proj_v` | 46 | main | lane `W` | `W (V_lo + 2^16 V_hi + 2^15)`, claim `c` |
+| `proj_k` | 47 | `D_k` | `eq(r', .)` | `K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15`, claim `c` |
 
 Groups: main `eq(r2)` {`U_lo, V_lo, V_hi, Z_hi, U_hi`, 6 bits}, main {`w_A`, `Z_lo`,
 `Z_hi`}, main `eq(r1)` {6 bits}, `D_1` `eq(r1_1)` {6 `K1`}, `D_2` `eq(tau_2)` {6 `y2`, 6
-`K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, and one `eq(pi_j,low)` group per
-stack. Terminal (31, `Stage3Claims`): every column of the five non-multiplicity groups at
-`r^(3)`, manifest order; these are the opening claims together with the multiplicity digits
-at `pi_m`.
+`K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, main {`W`, `V_lo`, `V_hi`},
+`D_k` `eq(r')` {`k_0, k_1, k_2`}, and one `eq(pi_j,low)` group per stack. Terminal (34,
+`Stage3Claims`): every column of the six non-multiplicity groups at `r^(3)` but the zero
+polynomials of `G_3`, manifest order; these are the opening claims together with zero for
+the zero polynomials and the multiplicity digits at `pi_m`. The verifier evaluates
+`W(r^(3)) = P~(r3_pos) eq(r'_sig, r3_sig)` from `Psi` (`projection::weight_at`).
 
 ### 7.3 Relation H-exact (`docs/h-exact.md` step B)
 
@@ -573,12 +580,13 @@ the 1,024-signature round trip is ignored in debug builds):
   (200 own keys, 56 on 3 shared keys) the claims equal the extensions of the committed and
   virtual tables, and a changed round message, terminal claim or pre-stage claim is rejected
   at its stage. Tampering (50 records, unchecked prover): main cells looked up outside
-  `T_16` (`Z_lo` moved by `2^16` against `Z_hi`, `V_hi = 2^16`), carries outside `T_16` and
+  `T_16` (`Z_lo` moved by `2^16` against `Z_hi`), carries outside `T_16` and
   a wrong multiplicity at the lookup, a padding slot of the level-1 stack at stage 3;
   tampered lookup messages, layer terminals, table leaves and digit claims at the lookup,
   a swapped stack leaf pair; swapped column claims at stage 3; values valid only for
   another range (`Z_hi = 2` and `U_hi = 3, -4` at stage 2, an unshifted carry at stage 1,
-  `U_lo + 63,079` with `U_hi - 1` and `V_lo + 2^16` with `V_hi - 1` at the lookup); a
+  `U_lo + 63,079` with `U_hi - 1` at the lookup; `V_hi = 2^16` at stage 3 and `V_lo + 2^16`
+  with `V_hi - 1` accepted, since `V_lo, V_hi` are not looked up); a
   16-bit column or `Z_hi` changed inside its range and a flipped bit at stage 3; a
   non-Boolean bit and `w_1' = 44` at stage 1; changed carries of every level, a level-2
   parity and a `Y` bit at stage 1; a padded batch of 10 records round-trips.
@@ -632,7 +640,11 @@ the 1,024-signature round trip is ignored in debug builds):
   digest), and both prover schedules give the same proof.
 - `tests/single_thread.rs`: a prover and verifier run with a one-thread rayon pool, from a
   plain thread and from a pool worker.
-- `tests/all/commit_open.rs` (the six groups commit and open in one batch, also for a padded
+- `tests/all/projection.rs` (deviation K24): the unbounded-quotient attack (`Delta = 0` in
+  `F_p` with `|v| ~ 2^41` at one position) rejected by the lookup of `k_1`; `k_0 + 1` and `v`
+  moved with `k` kept at stage 3; `k_2 = 2` at stage 2; a changed claim `c`; the honest abort
+  on `|k| >= 2^33`.
+- `tests/all/commit_open.rs` (the seven groups commit and open in one batch, also for a padded
   batch at independent points), `tests/all/source_tables.rs` (shapes, alphabets,
   multiplicities, heavy rows, malformed tables refused before Akita, the H-exact `z` form),
   `tests/all/virtual_checker.rs` (the integer relation on the Boolean domain, single-cell
