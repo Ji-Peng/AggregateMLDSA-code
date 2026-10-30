@@ -950,6 +950,49 @@ cost of one run, `T_run`, and the Module-SIS reductions, not the run count or th
 cloud run); a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and
 15 (6.76 s) in one round, direction only, but a rerun tied them (6.34 s each).
 
+## K23. Forked PIOP transcript: the lookup beside `tau` and stages 1-2 (spec Sections 7.0, 7.1, 10, 11; docs/soundness.md 2, 5, 12.2, 12.3)
+
+Spec Section 10 without this change: events 7 to 12 run on one sponge, so `tau` and stages
+1 and 2 wait for the lookup, although they read none of its data (only stage 3 reads the
+stack claims, 7.7). The lookup has the lowest parallel efficiency of the PIOP phases.
+
+Code (`agg_piop::{transcript, prover, verifier, pow}`):
+
+- `Transcript::fork` after event 6 clones the sponge into branch L (registry events from
+  the label `agg-mldsa/v1/fork/lookup` through the multiplicity claims) and branch S (the
+  label `agg-mldsa/v1/fork/stages`, `tau` through the stage-2 terminal). Each branch absorbs
+  its label first (event kind 3), so the two clones diverge before their first challenge;
+  a branch can take only its own registry events. `Transcript::join` absorbs the 32-byte
+  squeezes of L's and S's final states, in this order (site `agg-mldsa/v1/fork/join`, 64
+  bytes, not on the wire), then stage 3 continues on the trunk. A join of exchanged or
+  unfinished branches is refused.
+- Nonces: the prover's branches write their own streams, appended at the join in the order
+  L, S (`WorkWriter::append`); the verifier splits L's and S's slices off the packed stream
+  at the fork (`WorkReader::split`). The stream is the registry order, as before, so the
+  proof-of-work plan and its digest, the wire layout and every fixed-size section of the
+  proof are unchanged; only challenge values move (and with them the Akita opening's
+  length, which depends on them: 61,031 B to 60,976 B at 1K on the integ3 records).
+- Prover (`prover::{run_branches, prove_lookup_branch, prove_stages_branch}`): the branches
+  run concurrently on the PIOP's pool: `rayon::join` inside a pool (the PIOP pool of the
+  scheduler preset), else branch S on a scoped thread with the PIOP pool's worker stack
+  (64 MiB) beside branch L on the caller's thread, both feeding the global pool.
+  `AGG_PIOP_FORK=0` (or `off`) runs L, then S, on the caller's thread. All schedules give
+  the same bytes (`tests/piop_fork.rs`; 1K aggregates identical across `AGG_MLDSA_SIMD`,
+  `RAYON_NUM_THREADS=1|16`, `AGG_SCHED_PRESET=auto` and `AGG_PIOP_FORK=0`).
+- Verifier: replays L, then S, on the two clones, then joins; the order of the checks does
+  not affect the verdict.
+- `ProveHooks::swap_join` (test only) joins the digests as S, L; the verifier rejects the
+  proof (`tests/piop_fork.rs`, with a changed lookup message, a changed stage-2 message and
+  the branch nonces exchanged in the stream).
+- PIOP wire version 4 is kept (unreleased); aggregates made before this change do not
+  verify under it.
+
+Soundness: docs/soundness.md 12.2 ("Branch S of the forked PIOP transcript"): the sites of
+S are plain stages of the segment of `X` with projected addresses that encode the prefix
+through event 6; Lemma 12.3 (a) and (b) hold, every site keeps its bad set, mass and
+difficulty, and the branch digests are hashed entries counted in `R_coord`. L must precede
+S in the linear order so that `X` keeps a complete-prefix input; hence the fixed join order.
+
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
 Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
