@@ -50,7 +50,7 @@ step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`. Padded rows hold the digits 
 padded carries are `K = -2^15`, and so are the padding slots of the carry stacks (looked-up
 value 0).
 
-Relation H-exact (`docs/h-exact.md` Section 9, deviation L9) keeps this lookup unchanged: `z`
+Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
 is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
 `z_lo` (stored `S_zlo = B_zlo - 2^15`, column `bz_lo`) and the bits `B_zhi`, `a_z` proven by
 two Booleanity zero-checks in stage 3, so the four stacks, `L` and every lookup site are the
@@ -310,9 +310,25 @@ at the `X` site:
 The nonce is about 7x dearer than the second challenge even with a parallel search, and
 above 25 bits it is not expressible in the pinned Akita transcript. Hence option (ii).
 
-### 4.5 Measurements
+### 4.5 One against two challenges, and the integrated protocol
 
-See [perf.md](perf.md), Section 20.
+Standalone (`timing_at_1024_and_8192_signatures` with `AGG_LOOKUP_SIGS=1024,2048`, the
+CLMUL build, 7 threads, warmup plus five runs, medians;
+load average 6.6 to 6.8 including the run and another agent's tests):
+
+| `N` | `X` | Prove | per signature | trees | sessions | bottom session | verify | proof | stored layers | peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,024 | 1 | 221.4 ms | 216 us | 26.0 | 196.3 | 65.1 | 0.51 ms | 16,240 B | 136 MiB | 255 MiB |
+| 1,024 | 2 | 312.0 ms | 305 us | 44.5 | 265.3 | 59.0 | 0.57 ms | 21,232 B | 272 MiB | 464 MiB |
+| 2,048 | 1 | 401.5 ms | 196 us | 48.6 | 354.2 | 118.6 | 0.55 ms | 17,424 B | 268 MiB | 576 MiB |
+| 2,048 | 2 | 617.1 ms | 301 us | 97.6 | 519.4 | 122.8 | 0.61 ms | 22,544 B | 536 MiB | 756 MiB |
+
+The second challenge costs 1.41x at 1,024 and 1.54x at 2,048, not 2x, because the bottom
+session is shared.
+
+Integrated (mode B): committed cells per signature 14,672, 12,932 and 12,658 at 256, 1,024
+and 2,048 signatures. Stage 3 takes about 0.12 ms per signature locally (CLMUL build): its
+four 16-bit columns are generic `Ints` lanes.
 
 ### 4.6 Dedicated prover paths
 
@@ -355,7 +371,25 @@ dedicated group with `kernel::Group` message by message.
 4. *Tree build.* The branch-free product of the kernel (`fm`) and blocks filled in place
    after a parallel first touch, instead of a parallel `unzip` of the generic product.
 
-Measurements are in [perf.md](perf.md), Section 20.
+Measured (lookup timing test, 2 challenges, interleaved runs of the generic and the
+dedicated paths in one process, `AGG_LOOKUP_AB=1`; local, shared machine, direction only):
+
+| `N` | threads | load average | generic | dedicated | trees | `s = D` | `s = D - 1` | `s = D - 2` |
+| ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- |
+| 1,024 | 1 | 5.4 to 7.7 | 1,261.9 ms | 909.9 ms | 207.9 -> 160.0 | 259.0 -> 245.7 | 373.0 -> 185.8 | 178.9 -> 135.9 |
+| 8,192 | 3 | 7.6 to 8.3 | 4,519.4 ms | 2,823.4 ms | 798.9 -> 564.5 | 840.2 -> 593.3 | 1,275.0 -> 475.9 | 667.6 -> 555.9 |
+
+(The first row is before the integer first round of item 2, which brought the bottom session
+at 1,024 from 246 to 203 ms in a later pair of runs.) In mode A at 8,192 signatures (CLMUL
+build, 3 threads, `agg bench --warmup 1 --reps 3`, load average 4.6 to 5.7, revisions
+`be398d8` and `9a53721`), event 7 went from 3,822.5 to 2,270.0 ms. The remaining cost is
+close to the arithmetic of the protocol: the tree build (about 0.5 s at 8,192 on 3 threads),
+the bottom session (one pass per round over `2^(D-1)` integer pairs) and the layer sessions
+`D - 2, D - 3` (two trees each). Levers not taken, with their estimates: session `D - 2`
+on the integer lanes `e_1 .. e_4` (a 5 x 5 bilinear form; the first round gets cheaper but
+the first fold dearer, net about 15% of that session plus 1 GiB of stored layers at 8,192,
+estimate); the small-value rounds 1 and 2 of the bottom session from the integers (about
+20% of that session, estimate); multi-way SIMD for the folds.
 
 ## 5. The module (`crates/agg-piop/src/lookup.rs`)
 
@@ -446,7 +480,7 @@ at stage 3; a value valid only for another range (`Z_hi = 2`, valid for `U_hi`; 
 -5`; a carry stored unshifted, valid in `T_16` but meaning `kappa + 2^15`; a padding slot
 holding a table entry) rejected at the leaf, the bridge identity or the stack reduction;
 a low part valid only for the wider range `[0, 2^17)` (`U_lo + 2^16` with `U_hi - 1`,
-`V_lo + 2^16` with `V_hi - 1`: `u`, `v` unchanged) rejected by the lookup; every witness
+`V_lo + 2^16` with `V_hi - 1`: `u`, `v` unchanged) rejected by the lookup; every old witness
 tampering at its stage), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
 tampering including a wrong multiplicity; a stored 16-bit value outside the width-16
 interval is refused by Akita's commit, so the prover fails and no aggregate exists: the
@@ -457,4 +491,4 @@ and verifier run with a one-thread rayon pool, called from a plain thread and fr
 worker, under a timeout: the regression test of the round-1 deadlock, deviation P12),
 `tests/all/prove_verify.rs`, `tests/all/bridge.rs`, `tests/all/source_tables.rs`,
 `tests/all/virtual_checker.rs` (the L16 tables against the integer relation), `tests/all/commit_open.rs`;
-`agg-cli` `tests/all/mode_a.rs` (mode A round trips and tampering).
+`agg-cli` `tests/mode_a.rs` (mode A round trips and tampering).

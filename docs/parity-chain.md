@@ -120,7 +120,7 @@ About `1.0 x 10^7` additions and `1.3 x 10^6` multiplications per part (derived)
 
 ## 6. Transcript (tie challenger, version 5)
 
-The tie challenger (domain `agg-mldsa/v3/tie`) absorbs `fs`, `d`, `nu_s`, `log2 blocks`,
+`TieChallenges` (domain `agg-mldsa/v3/tie`) absorbs `fs`, `d`, `nu_s`, `log2 blocks`,
 `span_log`, the final-vector digest and the framed sponge cap, then:
 
 1. tie work (`g_tie` bits), then `rho_r` (`nu_s`), `rho_c` (3): the public claim's point;
@@ -137,7 +137,11 @@ region, bit point) and `v'` are fixed before any Flock challenge.
 `AGGKCT || 5 || profile || LE32(n) || d || S || LE32(tie nonce) || LE32(eq nonce) || R x
 (q(1) || q(inf) || LE32(round nonce)) || v' || LE32(len) || sponge proof`, the sponge proof a
 `flock_union::UnionProof` with one packed-direct value (`v_pub`) and three ring-switched
-claims in its merged opening (ab, c, and the bit claim).
+claims in its merged opening (ab, c, and the bit claim). Est. added bytes at `8@13/4`:
+`4 + 28 x 36 + 16 = 1,028` B of chain, about 2,056 B of ring switch (`s_hat_v`, 128 values,
+and its nonce) and 2,048 B of multipoint dual values (128 per ring-switched claim in Flock's
+twisted assist), minus 32 B of the two dropped
+lane-group values; total est. 5.1 KB against 205,108 B removed.
 
 ## 8. Sites and work (`docs/soundness.md` 3.6, 10)
 
@@ -179,10 +183,18 @@ depends only on the multilinear suffix). Two routes:
 The multilinear variant is cheaper to validate and smaller; it is a verifier-visible change
 of the vendored core (a new skip basis), recorded in K21.
 
-## 10. Costs
+## 10. Costs (estimates before measurement)
 
-Measurements are in [perf.md](perf.md), Section 18. The full-height sponge opening
-uses the full column bit-bank ([keccak.md](keccak.md), Section 12.7).
+Prover at `8@13/4` (four full-segment geometries): `G'` 1.1e7 additions, `G` 4.2e6
+multiplications, block rounds about 1.2e7 multiplications, `bf` 1.3e8 masked additions,
+`w` 7.3e6 additions, in-block rounds about 3e6 multiplications, level-1 parities of 8 lanes
+(`Level1Layout::parities` work plus two lanes); one more ring-switched claim in the sponge
+opening (its `s_hat_v` and block-first bank over the 64 word columns, the per-claim block
+statistics and the twisted assist). Est. 0.1 to 0.3 s against the union's measured share
+(at `8@13/4` the part proved in 1,994.1 ms with `Slim`, the sponge instance of 8 records
+being small, `docs/keccak.md` 12.3). Verifier: est. 10 to 30 ms for `W~(r)` plus one ring
+switch, against about 70 ms for the union. Memory: `G` and `y1` tables of 64 MiB each at
+`8@13/4` (est.), released after the block phase.
 
 ## 11. Tests
 
@@ -200,6 +212,26 @@ and fails Flock's ring-switch claim check (`ClaimMismatch`), end to end at 5 and
 and, ignored by default (about 83 s), at 2,048; the full-height sponge test also rejects a
 false bit value directly, so the block-first path is pinned in every suite run.
 
-## 12. Measurements
+## 12. Measurements and corrections (local, direction only)
 
-See [perf.md](perf.md), Section 18.
+Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7 and 10:
+
+* Bytes as predicted: at `8@13/4` the proof is 150,758 B (predicted 150.8 KB), 200,008 B less
+  than version 4: 205,108 B removed, 5,100 B added.
+* The chain's prover work as estimated: 178.5 ms at the 32K span on dense random bits (7
+  threads, loaded machine), the verifier's `W~(r)` and claim 7 ms.
+* Not foreseen: Flock's block-first opening (taken for a full-height sponge, `n = 2^nu_s`, so
+  for every power-of-two batch from 2,048 records on) folds each ring-switched claim's column
+  bit-bank in its block rounds, so the bit claim needs the FULL bank of the sponge stack (all
+  2,156 word columns), not just its 64 columns (a partial bank suffices for `s_hat_v` and
+  gave failing proofs at 2,048 records). The full bank costs one pass over
+  the stack (174 to 222 ms at 8,192 records, measured), and the opening's block statistics
+  and `W'` fold grow by one claim. At one full segment these costs about cancel the union's;
+  at 32K the prover work changes by about 0.0 to -0.8 s locally (estimate, `docs/keccak.md`
+  12.7).
+* Verifier: the Flock part's verification drops from about 80 to 110 ms to 25 to 45 ms per
+  part (measured, all sizes).
+* Memory (fresh process, measured at 2,048 and 8,192 records, `docs/keccak.md` 12.7): the
+  verifier's peak goes down; the prover's rises by about 7% with glibc's default allocator
+  but by under 1% with a fixed mmap threshold, so the rise is heap retention after the
+  Flock part, not live data.

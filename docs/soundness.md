@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
-| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` Section 8), H-exact (relation byte 1; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16; PIOP wire version 4 (the parity chain's sites in the plan; the fork-join transcript of K22) and tied-part proof version 5 |
+| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16; PIOP wire version 4 (the parity chain's sites in the plan; the fork-join transcript of K22) and tied-part proof version 5 |
 | Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound (Section 5); resolves deviation P3 |
@@ -300,15 +300,15 @@ by its digest before `eq_Y`.
 
 ### 3.7 Akita opening sites (inherited, already protected)
 
-Akita's plan (derived from the public shape) assigns
+Akita's plan (`akita_params::derive_transcript_grinding_plan_from_public_shape`) assigns
 every field site of the opening a loss factor and a target by Akita Eq. (146) priced over
-the exact cardinality `p^2` (field-order calculation): evaluation
+the exact cardinality `p^2` (`ChallengeFieldOrder::from_field`, PR #104): evaluation
 batch (loss = claims, 38), extension-opening point and batch, every sum-check round
 (stage 1, 2, physical L2, extension-opening reduction; loss = degree), ring-switch
 `alpha` (loss `2d' - 1`, Akita Theorem 10.36), `tau0`, `tau1` points, interstage, L2
 merge and virtual batches, compression and stage-2 batches. Sparse fold challenges carry
 no nonce: each coordinate stream has weight `1/C_{j,g}`, and Akita refuses any fold
-family below its 128-bit entropy floor (Akita's sparse-challenge validation,
+family below its 128-bit entropy floor (`SparseChallengeConfig::validate_for_ring_dim`,
 `MIN_FOLD_CHALLENGE_ENTROPY_BITS`). Dumped for our catalogs (Section 4.1):
 
 | `d_sig` | PoW sites | `sum g` | max `g` | expected work `sum 2^g` | nonce bits | max nonce bytes (LEB128, inline) |
@@ -356,7 +356,7 @@ fix of Section 4.3 only widens existing ones.
   challenges by exact field cardinality (#104)", "Price EvaluationBatch grinding at its
   coordinate-wise tree charge (#130)" and "fix(grinding)!: price ring-switch alpha by the
   native inner ring (#209)".
-* There is no switch. Akita's instance descriptor derives "the only
+* There is no switch. `akita_config::transcript_instance_descriptor` derives "the only
   accepted grinding plan" from the selected schedule and the opening layout and binds its
   digest (`TranscriptGrindingBinding`, 32 bytes) into the instance descriptor; both
   `akita_prover` (`prove/root.rs`) and `AkitaVerifier::batched_verify`
@@ -451,14 +451,29 @@ rate 1/8) has `log2 L_max = 6.14`, and its own Ligerito level-0 claim batch alre
 bits (`m*_slim8.toml`). The transport batch is short by 0.14 bits. Fix: 7 bits for
 `Slim8` (subsumed by 4.3). `Slim8` is opt-in, not the default.
 
-### 4.5 The tied part: claim points bound into the instance challenger
+### 4.5 The tied part: points not bound into the instance challengers (finding)
 
-Flock's merged opening absorbs packed-direct claim values only: its points are
-transcript-derived and verifier-recomputed (`pcs.rs`, `verify_batch_merged_core`).
-The tie points come from a separate transcript. The sponge challenger MUST absorb
-the framed tie digest, label `agg-keccak/v4/tie-binding`, before `bind_statement`.
+`TieChallenges::derive` absorbs `fs`, `d`, `nu_s`, `log2 blocks`, `span_log`, the
+final-vector digest, the sponge cap and the union cap. The sponge instance's challenger
+(`TiedPart::sponge_challenger`) absorbs `fs`, its label, the gate digest, the public
+digest and the tie-geometry digest, then Flock binds its own cap; it never sees the
+union's cap or the final-vector digest. The union's challenger absorbs neither the
+final-vector digest nor (except through `fs`) the sponge cap. Flock's merged opening
+absorbs packed-direct claim values only, "the points are transcript-derived and
+verifier-recomputed" (`pcs.rs`, `verify_batch_merged_core`); here the points come from a
+different transcript. So the sponge opening's claim-batch coefficients are drawn from an
+input that does not encode the tie points, contrary to the requirement of Section 1, and
+Proposition 10.3's hypothesis (bad set fixed before the query) fails formally: a prover
+may query the coefficients first and re-derive `rho` by committing a different union
+afterwards. No concrete attack below `2^128` is known to us (the tie checks tie the values
+to the union's own, list-bound evaluations), but the theorem needs the binding.
+**Normative fix (tied-part proof version 4):** after drawing the tie coordinates, the tie
+challenger squeezes a 32-byte tie digest (two more `F128` words), and both instance
+challengers MUST absorb it (framed, label `agg-keccak/v4/tie-binding`) right after their
+construction and before `bind_statement`. This binds the union cap, the final-vector
+digest, the sponge cap, the geometry and the tie nonce into both instances.
 
-The version-5 tie challenger absorbs `fs`, the part's
+**Version 5.** The bridge union is gone; the tie challenger absorbs `fs`, the part's
 geometry digest, the final-vector digest and the sponge cap, runs the tie site, `eq_Y` and
 the chain rounds, absorbs the claimed bit value `v` and then squeezes the tie digest, which
 the sponge challenger absorbs before `bind_statement`. Both claim points of the sponge
@@ -469,7 +484,8 @@ before any Flock challenge of the instance.
 
 **Requirement.** A fold coordinate of group `g` at level `h` is an indexed address of weight
 `1/|C^acc_{h,g}|` (Akita Definition 10.16, (159); Theorem 10.46, (211)), and Aerie Eq. (19)
-needs every `|C^acc| >= 2^128`. Akita's runtime floor (Akita's sparse-challenge validation, `MIN_FOLD_CHALLENGE_ENTROPY_BITS = 128`, the floors of
+needs every `|C^acc| >= 2^128`. Akita's runtime floor (`SparseChallengeConfig::
+validate_for_ring_dim`, `MIN_FOLD_CHALLENGE_ENTROPY_BITS = 128`, the floors of
 `PRODUCTION_FOLD_CHALLENGE_LADDER`) bounds the raw family `C_0` only. Where the sampler rejects
 by operator norm the raw size is not a valid denominator (Aerie C.3); the accepted size is.
 
@@ -502,7 +518,7 @@ at least `2^128`: exactly, in integers, for an unrestricted family; by the certi
 count `ceil(N_raw p0)` for a rejected one (`p0` the certificate's exact lower bound on the
 accepted fraction of the strict runtime predicate). `docs/scripts/fold_support.py` recomputes
 the family sizes and the certified counts from the certificate files of the pinned tree, and
-Akita's exact checkers (for dimensions 64 and 128) print
+Akita's exact checkers (`scripts/operator_norm/d64/check_cert.py`, `d128/check_cert.py`) print
 `ALL CHECKS PASS` for both certificates.
 
 | Draw | `D` | `(a, b)` (signs on `+-1`, `+-2`) | Rejection | `log2 |C_0|` | `log2 |C^acc|` | Draws (width 4 / width 16) |
@@ -888,7 +904,7 @@ difficulty changes, the script and these anchors change with it.
 
 ### 10.1 Relation H-exact (`python3 -I docs/scripts/pow_plan.py --relation h-exact`)
 
-Relation H-exact (`docs/h-exact.md` Section 9, relation byte 1) has the same stage degrees
+Relation H-exact (`docs/h-exact.md` step B, relation byte 1) has the same stage degrees
 (4, 4, 3) and the batching vectors `gamma^(1..3)` of 26, 7, 45 coefficients: stage 2 holds
 `def_y1[t]` and one `leaf6[D_u]` (the Boolean `B_zhi` needs no leaf), stage 3 one link and
 the two Booleanity zero-checks `bool[B_zhi]`, `bool[a_z]` at `r^(2)`. The zero-checks add no
@@ -1095,7 +1111,9 @@ The segment of `l_1` runs from `sd` to the last stage before `X`: `sd` and `fs`,
 messages of events 4 and 6. The segment of `l_2` runs from `X` to the last stage before the
 root fold challenge, whose input is `xi_f`: the PIOP sites, the tied parts' stages and the
 evaluation batch. Every plain stage lies in one segment. The tied parts' stages sit after the
-stage-3 rounds, where the join absorbs their messages (deviation K22). `X`'s input does not contain them, and a checkpoint input must
+stage-3 rounds, where the join absorbs their messages (deviation K22). Before the
+fork-join they sat in the segment of `l_1`, between `fs` and `X`, because event 6 absorbed
+their proofs before `X`; now `X`'s input does not contain them, and a checkpoint input must
 encode the complete preceding prefix (Lemma 12.3's proof), so no part stage may precede `X`.
 
 **Projected addresses.** In this linear order the stages of part `p` follow the stage-3
