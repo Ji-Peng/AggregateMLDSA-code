@@ -62,34 +62,35 @@ const D_TILE: usize = 256;
 
 /// The `eq(r, .)` table over `2^r.len()` indices (bit `j` of the index selects `r[j]`).
 ///
-/// Every level is written into freshly allocated uninitialised storage, so no level pays a
-/// serial zero fill of a field-element newtype, and the large levels are filled in parallel.
-#[allow(unsafe_code)]
+/// The table is built as the product of a table over the low twelve variables and one over
+/// the remaining variables: only the two small tables are filled level by level, and the
+/// full table is written once, in parallel, with one multiplication per entry.
 fn eq_table(r: &[E]) -> Vec<E> {
-    const BLOCK: usize = 1 << 12;
-    let mut table = vec![E::one()];
-    for &challenge in r {
-        let len = table.len();
-        let complement = E::one() - challenge;
-        let next = crate::kernel::buf::uninit::<E>(2 * len);
-        // SAFETY: the closure writes every slot of every block; the halves read from
-        // `table` are the previous level and stay initialized until the call returns.
-        table = unsafe {
-            crate::kernel::buf::fill_par(next, BLOCK, |block, slots| {
-                let base = block * BLOCK;
-                for (i, slot) in slots.iter_mut().enumerate() {
-                    let index = base + i;
-                    let value = if index < len {
-                        table[index] * complement
-                    } else {
-                        table[index - len] * challenge
-                    };
-                    slot.write(value);
-                }
-            })
-        };
+    const LOW_VARS: usize = 12;
+
+    fn levels(challenges: &[E]) -> Vec<E> {
+        let mut table = vec![E::one()];
+        for &challenge in challenges {
+            let len = table.len();
+            let complement = E::one() - challenge;
+            let mut next = vec![E::zero(); 2 * len];
+            for (i, &value) in table.iter().enumerate() {
+                next[i] = value * complement;
+                next[len + i] = value * challenge;
+            }
+            table = next;
+        }
+        table
     }
-    table
+
+    let split = r.len().min(LOW_VARS);
+    let low = levels(&r[..split]);
+    let high = levels(&r[split..]);
+    let mask = low.len() - 1;
+    (0..1_usize << r.len())
+        .into_par_iter()
+        .map(|index| low[index & mask] * high[index >> split])
+        .collect()
 }
 
 /// The bit pattern of at most eight 0/1 cells (bit `j` from cell `j`). With the
@@ -206,48 +207,45 @@ impl<'a> SplitGroup<'a> {
         // unreduced sum is below `blocks * p < 2^64 * blocks`; workloads have
         // `blocks <= 2^6`, and the low `u128` slot stays exact for any `blocks < 2^64`.
         debug_assert!(tables.len() < 1 << 32);
-        let d = {
-            let buf = crate::kernel::buf::uninit::<E>(rows);
-            // SAFETY: every slot of the output is written once below.
-            unsafe {
-                crate::kernel::buf::fill_par(buf, D_TILE, |chunk, out| {
-                    let lo0 = chunk * D_TILE;
-                    let n = out.len();
-                    let mut acc = vec![Acc::zero(); n];
-                    let mut bad = 0_u64;
-                    // One 1 KiB slice of `D` stays in L1 while the 64 block terms land in
-                    // `acc`; the reduced pass is one add per cell instead of 64.
-                    for (hi, table) in tables.iter().enumerate() {
-                        let base = (hi << z) + lo0;
-                        let mut pattern = [0_u8; D_TILE];
-                        for (t, (cells, map)) in bits.iter().enumerate() {
-                            let source = &cells[base..base + n];
-                            if identity {
-                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
-                                    bad |= u64::from(cell as u8 > 1);
-                                    *slot |= (cell as u8 & 1) << t;
-                                }
-                            } else {
-                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
-                                    let v = map[cell as u8 as usize];
-                                    bad |= (v as u64 > 1) as u64;
-                                    *slot |= ((v as u8) & 1) << t;
-                                }
-                            }
+        // Every slot of `d` is overwritten by the walk below; the initial fill only makes
+        // the buffer safe to write in place (one 8 MiB pass, not a serial concat).
+        let mut d = vec![E::zero(); rows];
+        d.par_chunks_mut(D_TILE).enumerate().for_each(|(chunk, out)| {
+            let lo0 = chunk * D_TILE;
+            let n = out.len();
+            let mut acc = vec![Acc::zero(); n];
+            let mut bad = 0_u64;
+            // One 1 KiB slice of `D` stays in L1 while the 64 block terms land in `acc`;
+            // the reduced pass is one add per cell instead of 64.
+            for (hi, table) in tables.iter().enumerate() {
+                let base = (hi << z) + lo0;
+                let mut pattern = [0_u8; D_TILE];
+                for (t, (cells, map)) in bits.iter().enumerate() {
+                    let source = &cells[base..base + n];
+                    if identity {
+                        for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                            bad |= u64::from(cell as u8 > 1);
+                            *slot |= (cell as u8 & 1) << t;
                         }
-                        for (slot, &p) in acc.iter_mut().zip(&pattern[..n]) {
-                            lift_canonical(slot, table[p as usize]);
+                    } else {
+                        for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                            let v = map[cell as u8 as usize];
+                            bad |= (v as u64 > 1) as u64;
+                            *slot |= ((v as u8) & 1) << t;
                         }
                     }
-                    for (slot, value) in out.iter_mut().zip(acc) {
-                        slot.write(E::reduce_product(value));
-                    }
-                    if bad != 0 {
-                        invalid.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                })
+                }
+                for (slot, &p) in acc.iter_mut().zip(&pattern[..n]) {
+                    lift_canonical(slot, table[p as usize]);
+                }
             }
-        };
+            for (slot, value) in out.iter_mut().zip(acc) {
+                *slot = E::reduce_product(value);
+            }
+            if bad != 0 {
+                invalid.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
         if invalid.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
