@@ -1,6 +1,23 @@
 # Akita vendor record
 
-Upstream: https://github.com/LayerZero-Labs/akita at `e023b6a46143f7b23199ccecb2684192baf7b640`. The `third_party/lattice-estimator` submodule is copied at `c667a48546f140c3a5454c7503c3ca44a264cce2`.
+Upstream: https://github.com/LayerZero-Labs/akita at
+`e023b6a46143f7b23199ccecb2684192baf7b640`.
+
+## 0. Pruned trees
+
+This copy keeps only the files the workspace builds, tests or benches read. Removed:
+`book/`, `third_party/` (including the `lattice-estimator` submodule copy),
+`.github/`, `docs/`, `bench-data/`, `profile/`, `fuzz/`, `hooks/` and `.gitmodules`;
+under `scripts/` everything except `sis_golden/`; under `artifacts/` the
+`schedule-catalog*.tsv` snapshots; and under `specs/` everything except
+`evidence/subring-coefficient-packing/`. The kept files are those read at build or
+test time: `scripts/sis_golden/*.csv` by the `akita-sis-estimator` golden tests and
+benches, `artifacts/schedules*/` by the trusted-catalog tests,
+`fixtures/jolt-field-cutover/` by the serialization fixtures, and
+`specs/evidence/subring-coefficient-packing/` by the planner's catalog snapshot
+test. The `exclude` entries for `profile/akita-recursion` and `fuzz` are gone with
+those trees. Every removed file is unchanged upstream content and is restorable
+from https://github.com/LayerZero-Labs/akita at `e023b6a`.
 
 ## 1. Prewarm a root commit's NTT slots
 

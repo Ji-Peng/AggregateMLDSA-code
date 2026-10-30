@@ -23,11 +23,6 @@ members = [
   "crates/akita-labinius-verifier",
   "crates/akita-labinius-prover",
 ]
-# `profile/akita-recursion/` is a standalone sub-workspace: it pins its own
-# `rust-toolchain.toml` (channel 1.95 + RISC-V targets) and applies Jolt's
-# `[patch.crates-io]` overrides for `arkworks-algebra`. Keep it out of this
-# workspace's resolution graph.
-exclude = ["profile/akita-recursion", "fuzz"]
 resolver = "2"
 
 [workspace.metadata.cargo-machete]
