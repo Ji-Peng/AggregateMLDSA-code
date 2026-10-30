@@ -253,12 +253,45 @@ pub fn opening_pool_threads() -> usize {
     }
 }
 
-/// Physical cores of the machine from the Linux CPU topology (distinct sibling lists of the
-/// online CPUs), or `None` where it cannot be read.
+/// The CPUs this process may run on, from the `Cpus_allowed_list` line of
+/// `/proc/self/status`, or `None` where the file cannot be read or parsed.
+fn allowed_cpus() -> Option<Vec<u32>> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let list = status.lines().find_map(|line| line.strip_prefix("Cpus_allowed_list:"))?.trim();
+    parse_cpu_list(list)
+}
+
+/// A `Cpus_allowed_list` value (`0-3,5,7-9`) as a CPU list, or `None` when malformed.
+fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
+    let mut cpus = Vec::new();
+    for part in list.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: u32 = lo.parse().ok()?;
+                let hi: u32 = hi.parse().ok()?;
+                if hi < lo || hi - lo > 1 << 16 {
+                    return None;
+                }
+                cpus.extend(lo..=hi);
+            }
+            None => cpus.push(part.parse().ok()?),
+        }
+    }
+    (!cpus.is_empty()).then_some(cpus)
+}
+
+/// Physical cores among the CPUs the process may use (distinct sibling lists in the Linux
+/// CPU topology), or `None` where it cannot be read. The affinity set matters under
+/// `taskset`, Slurm and cgroups: counting `cpu0..N-1` includes cores outside the allocation
+/// and can miss allowed ones.
 fn physical_cores() -> Option<usize> {
-    let cpus = std::thread::available_parallelism().ok()?.get();
+    let allowed = allowed_cpus()?;
     let mut cores = std::collections::BTreeSet::new();
-    for cpu in 0..cpus {
+    for cpu in allowed {
         let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
         cores.insert(std::fs::read_to_string(path).ok()?.trim().to_owned());
     }
@@ -1308,5 +1341,16 @@ mod tests {
         let fixed = FixedMatrices(BridgeMatrices::random_for_tests(3));
         assert_eq!(*fixed.matrices(&[0; 32]), *fixed.matrices(&[1; 32]));
         assert!(!fixed.seed_derived());
+    }
+
+    #[test]
+    fn cpu_lists_parse_ranges_and_singletons() {
+        assert_eq!(parse_cpu_list("0-3,5,7-9"), Some(vec![0, 1, 2, 3, 5, 7, 8, 9]));
+        assert_eq!(parse_cpu_list("8"), Some(vec![8]));
+        assert_eq!(parse_cpu_list("4-6"), Some(vec![4, 5, 6]));
+        assert_eq!(parse_cpu_list(""), None);
+        assert_eq!(parse_cpu_list("3-1"), None);
+        assert_eq!(parse_cpu_list("0-x"), None);
+        assert!(allowed_cpus().is_some_and(|cpus| !cpus.is_empty()));
     }
 }
