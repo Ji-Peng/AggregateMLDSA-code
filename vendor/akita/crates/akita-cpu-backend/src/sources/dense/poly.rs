@@ -27,6 +27,43 @@ const MAX_DENSE_DIGIT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const MIN_FLAT_COEFF_LEN: usize =
     SUPPORTED_COMMITMENT_RING_DIMS[SUPPORTED_COMMITMENT_RING_DIMS.len() - 1];
 
+/// Elements per chunk of a parallel min/max reduction.
+const MIN_MAX_CHUNK: usize = 1 << 15;
+
+/// Inclusive `(min, max)` of a nonempty slice.
+///
+/// The range is split into fixed-size chunks and reduced with the conditional
+/// parallelism helpers, so both the chunk scan and the reduction run on the
+/// caller's pool when it exists and fall back to one thread otherwise. Each
+/// chunk uses slice `min`/`max`, which the compiler vectorises; the previous
+/// `Option`-state fold did not.
+fn chunked_min_max<T: Copy + Ord + Send + Sync>(values: &[T]) -> Option<(T, T)> {
+    let first = *values.first()?;
+    // A single chunk is not worth a parallel reduction; small groups take
+    // this path and stay entirely serial.
+    if values.len() <= MIN_MAX_CHUNK {
+        return Some((
+            *values.iter().min().unwrap_or(&first),
+            *values.iter().max().unwrap_or(&first),
+        ));
+    }
+    let num_chunks = values.len().div_ceil(MIN_MAX_CHUNK);
+    Some(cfg_fold_reduce!(
+        0..num_chunks,
+        || (first, first),
+        |(low, high), chunk| {
+            let start = chunk * MIN_MAX_CHUNK;
+            let end = (start + MIN_MAX_CHUNK).min(values.len());
+            let part = &values[start..end];
+            (
+                low.min(*part.iter().min().unwrap_or(&first)),
+                high.max(*part.iter().max().unwrap_or(&first)),
+            )
+        },
+        |a, b| (a.0.min(b.0), a.1.max(b.1))
+    ))
+}
+
 /// Backing store of a digit-plane cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DenseDigitPlanes {
@@ -466,13 +503,8 @@ impl DensePoly<jolt_field::Prime64Offset59> {
                 actual: cells.len(),
             });
         }
-        let small_bounds: Option<(i64, i64)> = cells.iter().fold(None, |bounds, &value| {
-            let value = i64::from(value);
-            Some(match bounds {
-                None => (value, value),
-                Some((low, high)) => (low.min(value), high.max(value)),
-            })
-        });
+        let small_bounds =
+            chunked_min_max(&cells).map(|(low, high)| (i64::from(low), i64::from(high)));
         cells.resize(expected.max(MIN_FLAT_COEFF_LEN), 0);
         let coeffs = super::small::expand(&cells);
         Ok(Self {
@@ -508,22 +540,38 @@ impl DensePoly<jolt_field::Prime64Offset59> {
             });
         }
         let physical_len = expected.max(MIN_FLAT_COEFF_LEN);
-        let mut mirror = Vec::with_capacity(physical_len);
-        let mut bounds: Option<(i64, i64)> = None;
-        for &cell in cells {
-            let digit = i16::try_from(cell).map_err(|_| {
-                AkitaError::InvalidInput(format!(
+        let bounds_i32 = chunked_min_max(cells);
+        if let Some((low, high)) = bounds_i32 {
+            if low < i32::from(i16::MIN) || high > i32::from(i16::MAX) {
+                let cell = cells
+                    .iter()
+                    .copied()
+                    .find(|&cell| i16::try_from(cell).is_err())
+                    .unwrap_or(0);
+                return Err(AkitaError::InvalidInput(format!(
                     "width-16 source cell {cell} does not fit a signed 16-bit digit"
-                ))
-            })?;
-            let value = i64::from(digit);
-            bounds = Some(match bounds {
-                None => (value, value),
-                Some((low, high)) => (low.min(value), high.max(value)),
-            });
-            mirror.push(digit);
+                )));
+            }
         }
-        mirror.resize(physical_len, 0);
+        let bounds = bounds_i32.map(|(low, high)| (i64::from(low), i64::from(high)));
+        // The spare capacity is written chunk by chunk, so first touch happens
+        // in the parallel writer instead of in a single-threaded zero fill.
+        let mut mirror = Vec::with_capacity(physical_len);
+        {
+            let spare = &mut mirror.spare_capacity_mut()[..physical_len];
+            cfg_chunks_mut!(spare, MIN_MAX_CHUNK)
+                .enumerate()
+                .for_each(|(chunk_index, chunk)| {
+                    let start = chunk_index * MIN_MAX_CHUNK;
+                    for (offset, slot) in chunk.iter_mut().enumerate() {
+                        let value = cells.get(start + offset).map_or(0, |&cell| cell as i16);
+                        slot.write(value);
+                    }
+                });
+        }
+        // SAFETY: the loop above writes every element of the `physical_len`
+        // spare slots, and `physical_len <= mirror.capacity()`.
+        unsafe { mirror.set_len(physical_len) };
         self.small_i16_coeffs = Some(mirror);
         self.small_bounds = bounds;
         Ok(self)

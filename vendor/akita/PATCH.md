@@ -42,6 +42,20 @@ end of the opening, with identical plane bytes. At 8K a narrow column is only
 aggregate remains byte-identical under scalar and avx512 and under one and
 sixteen rayon threads.
 
+Bounds and the signed-16 mirror are now scanned with the conditional
+parallelism helpers instead of the previous serial `Option`-state fold and
+per-cell `push`. `chunked_min_max` splits a slice into 32K-element chunks,
+reduces each with slice `min`/`max` (vectorised), and combines the partials on
+the pool; slices of at most one chunk stay serial to avoid nesting overhead on
+small groups. `attach_small_i16` first range-checks the cells through the same
+reduction, then writes the mirror into `spare_capacity_mut` chunk by chunk, so
+the 64 MiB first touch per wide column at 32K is spread over the pool. The
+error path still names the first out-of-range cell. Three tests cover minima and
+maxima at both ends of two chunks, the signed-16 mirror at both interval ends,
+and the rejection of the first out-of-range cell. At 8K a column is 8K cells, so
+event 1 is unchanged within noise (adjacent pairs 551/562 vs 566/552 ms); the
+lever targets the 2^25 cells per column at 32K.
+
 `commitment/source.rs` and `commitment/source/builtins.rs`:
 `DenseCoefficientSource` exposes the signed-16 mirror, and
 `committed_centered_reach` answers from the mirror bounds when the admission

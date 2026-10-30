@@ -576,3 +576,58 @@ mod batch_only {
         assert!(backend.import_source(vec![BatchOnlySource(poly)]).is_ok());
     }
 }
+
+#[test]
+fn small_i8_bounds_span_parallel_chunks() {
+    use jolt_field::Prime64Offset59;
+
+    const N: usize = 1 << 16;
+    let mut cells = vec![0i8; N];
+    cells[3] = -100;
+    cells[N / 2] = 64;
+    cells[N - 5] = 127;
+    let poly = DensePoly::<Prime64Offset59>::from_small_i8(16, cells).unwrap();
+    assert_eq!(poly.small_mirror_bounds(), Some((-100, 127)));
+}
+
+#[test]
+fn small_i16_mirror_spans_parallel_chunks() {
+    use jolt_field::{Prime64Offset59, Ring};
+
+    const N: usize = 1 << 16;
+    let mut cells = vec![0i32; N];
+    cells[1] = -32_768;
+    cells[N / 2] = 17;
+    cells[N - 2] = 32_767;
+    let evals: Vec<Prime64Offset59> = cells
+        .iter()
+        .map(|&cell| Prime64Offset59::from_i64(i64::from(cell)))
+        .collect();
+    let poly = DensePoly::<Prime64Offset59>::from_field_evals(16, evals)
+        .unwrap()
+        .attach_small_i16(&cells)
+        .unwrap();
+    let mirror = poly.small_i16_mirror().unwrap();
+    assert_eq!(mirror.len(), N);
+    assert_eq!(mirror[1], -32_768);
+    assert_eq!(mirror[N / 2], 17);
+    assert_eq!(mirror[N - 2], 32_767);
+    assert!(mirror
+        .iter()
+        .enumerate()
+        .all(|(index, &value)| { matches!(index, 1 | 32_768 | 65_534) || value == 0 }));
+    assert_eq!(poly.small_mirror_bounds(), Some((-32_768, 32_767)));
+}
+
+#[test]
+fn small_i16_mirror_rejects_the_first_out_of_range_cell() {
+    use jolt_field::{Prime64Offset59, Ring};
+
+    const N: usize = 1 << 16;
+    let mut cells = vec![0i32; N];
+    cells[7] = 32_768;
+    let evals = vec![Prime64Offset59::from_i64(0); N];
+    let poly = DensePoly::<Prime64Offset59>::from_field_evals(16, evals).unwrap();
+    let error = poly.attach_small_i16(&cells).unwrap_err();
+    assert!(error.to_string().contains("32768"));
+}
