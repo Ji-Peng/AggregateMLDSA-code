@@ -13,7 +13,7 @@ members = [
 ]
 # The vendored, patched Flock core and field crates (vendor/flock-*/PATCH.md) are
 # `[patch]` sources, not members.
-exclude = ["vendor/flock-core", "vendor/flock-field"]
+exclude = ["vendor/flock-core", "vendor/flock-field", "vendor/akita"]
 
 [workspace.package]
 version = "0.1.0"
@@ -95,3 +95,21 @@ flock-core = { path = "vendor/flock-core" }
 # flock-field with `#[inline]` on the x86 scalar GF(2^128) multiply and without its `sse4.1`
 # requirement (vendor/flock-field/PATCH.md), so that the CLMUL build (`+pclmulqdq`) inlines it.
 flock-field = { path = "vendor/flock-field" }
+
+[patch."https://github.com/LayerZero-Labs/akita.git"]
+akita-algebra = { path = "vendor/akita/crates/akita-algebra" }
+akita-challenges = { path = "vendor/akita/crates/akita-challenges" }
+akita-config = { path = "vendor/akita/crates/akita-config" }
+akita-cpu-backend = { path = "vendor/akita/crates/akita-cpu-backend" }
+akita-error = { path = "vendor/akita/crates/akita-error" }
+akita-params = { path = "vendor/akita/crates/akita-params" }
+akita-pcs = { path = "vendor/akita/crates/akita-pcs" }
+akita-planner = { path = "vendor/akita/crates/akita-planner" }
+akita-prover = { path = "vendor/akita/crates/akita-prover" }
+akita-schedules = { path = "vendor/akita/crates/akita-schedules" }
+akita-serialization = { path = "vendor/akita/crates/akita-serialization" }
+akita-setup = { path = "vendor/akita/crates/akita-setup" }
+akita-sumcheck = { path = "vendor/akita/crates/akita-sumcheck" }
+akita-transcript = { path = "vendor/akita/crates/akita-transcript" }
+akita-types = { path = "vendor/akita/crates/akita-types" }
+akita-verifier = { path = "vendor/akita/crates/akita-verifier" }
