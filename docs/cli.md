@@ -106,7 +106,8 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
 | `AGG_PARITY_EARLY` | any value: build the parity tables beside the round-2 commitment |
 
-The vendored Flock core's profiling knobs (`FLOCK_*`) are listed in `docs/perf.md`.
+The vendored Flock core's remaining `FLOCK_*` knobs are described in
+`vendor/flock-core/PATCH.md` and `docs/perf.md`.
 
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
 `h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
