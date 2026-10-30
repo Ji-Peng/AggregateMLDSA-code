@@ -17,8 +17,11 @@
 //! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agg_bridge::sched::{set_opening_runner, OpeningRunner};
 use agg_pcs_config::commit::{CommitError, GroupCommitment};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
@@ -299,16 +302,105 @@ fn warn_once(message: &str) {
 /// reservation, as Flock's own 8 MiB pool and the commit threads).
 const FLOCK_POOL_STACK: usize = 64 << 20;
 
+/// Thread donation at the fork's join (`AGG_SCHED_DONATE`): whether the Flock opening may
+/// run on a pool of all threads instead of the Flock pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Donate {
+    /// The opening stays on the Flock pool (the default, `0` or `off`).
+    Off,
+    /// `1` or `on`: the opening moves to a pool of the global pool's size when the PIOP
+    /// branch has finished by the time Flock reaches it and that pool is larger.
+    Finished,
+    /// `force` (tests and debugging): the opening always moves, whatever the PIOP branch
+    /// is doing and whatever the pool sizes.
+    Force,
+}
+
+fn donate_mode() -> Donate {
+    match std::env::var("AGG_SCHED_DONATE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0" | "off") => Donate::Off,
+        Ok("1" | "on") => Donate::Finished,
+        Ok("force") => Donate::Force,
+        _ => {
+            warn_once("unknown AGG_SCHED_DONATE; using off");
+            Donate::Off
+        }
+    }
+}
+
+/// The opening runner of the Flock pool's workers (`agg_bridge::sched`) under `mode`, or
+/// `None` without donation. At each opening it reads `piop_done` once (no waiting on the
+/// PIOP branch) and either runs the opening in place or builds a pool of `total` threads and
+/// installs the opening there. That pool is local to the call, so nothing installs into a
+/// pool being dropped; its workers never wait on the Flock pool, so the Flock worker that
+/// blocks in `install` cannot deadlock it. The bytes do not depend on the pool
+/// (`agg_bridge::sched`).
+fn opening_runner(
+    mode: Donate,
+    piop_done: &Arc<AtomicBool>,
+    flock_threads: usize,
+    total: usize,
+    trace: bool,
+) -> Option<OpeningRunner> {
+    if mode == Donate::Off {
+        return None;
+    }
+    let piop_done = Arc::clone(piop_done);
+    Some(Arc::new(move |job: &mut (dyn FnMut() + Send)| {
+        let finished = piop_done.load(Ordering::Acquire);
+        let donate = match mode {
+            Donate::Force => true,
+            _ => finished && total > flock_threads,
+        };
+        let start = Instant::now();
+        let pool = donate
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(total)
+                    .stack_size(FLOCK_POOL_STACK)
+                    .thread_name(|i| format!("agg-open-{i}"))
+                    .build()
+                    .ok()
+            })
+            .flatten();
+        let threads = if let Some(pool) = &pool {
+            pool.install(|| job());
+            total
+        } else {
+            job();
+            flock_threads
+        };
+        if trace {
+            eprintln!(
+                "[sched] item=donate mode={mode:?} piop_done={} donated={} pool_threads={threads} flock_threads={flock_threads} opening_ms={:.3}",
+                u8::from(finished),
+                u8::from(pool.is_some()),
+                start.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    }))
+}
+
 /// Run `flock` on a fresh rayon pool of `threads` threads (on its own OS thread) while
 /// `piop` runs on the caller (its parallel loops on the global pool); return both results
 /// and the wall time of `flock`. The caller is not a rayon worker ([`flock_pool_threads`]
-/// is 0 there), so no worker blocks on the OS thread.
+/// is 0 there), so no worker blocks on the OS thread. With `AGG_SCHED_DONATE`, the Flock
+/// opening moves to a pool of the global pool's size once the PIOP branch has finished
+/// ([`opening_runner`]).
 fn fork_join<A: Send, B: Send>(
     threads: usize,
     flock: impl FnOnce() -> A + Send,
     piop: impl FnOnce() -> B + Send,
 ) -> ((A, Duration), B) {
     let trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
+    let piop_done = Arc::new(AtomicBool::new(false));
+    let runner = opening_runner(
+        donate_mode(),
+        &piop_done,
+        threads,
+        rayon::current_num_threads(),
+        trace,
+    );
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
@@ -319,6 +411,7 @@ fn fork_join<A: Send, B: Send>(
                     .num_threads(threads)
                     .stack_size(FLOCK_POOL_STACK)
                     .thread_name(|i| format!("agg-flock-{i}"))
+                    .start_handler(move |_| set_opening_runner(runner.clone()))
                     .build()
                 {
                     Ok(pool) => pool.install(flock),
@@ -346,6 +439,7 @@ fn fork_join<A: Send, B: Send>(
         } else {
             piop()
         };
+        piop_done.store(true, Ordering::Release);
         let piop_end = Instant::now();
         let (a, flock_busy, flock_end) = crate::pcs::join_os_thread(handle);
         let join = Instant::now();
