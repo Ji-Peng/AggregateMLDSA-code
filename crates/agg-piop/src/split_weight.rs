@@ -14,7 +14,7 @@
 
 use rayon::prelude::*;
 
-use crate::kernel::{Group, GroupInstance, Lane, Source, Term};
+use crate::kernel::{Group, GroupInstance, Lane, Source, Term, IDENTITY_MAP};
 use crate::OpeningField as E;
 use jolt_field::{One, Zero};
 
@@ -50,6 +50,57 @@ impl SplitWeight {
 
 /// Cells per task of the passes over the bit lanes (in-block positions).
 const CHUNK: usize = 1 << 13;
+
+/// The `eq(r, .)` table over `2^r.len()` indices (bit `j` of the index selects `r[j]`).
+///
+/// Every level is written into freshly allocated uninitialised storage, so no level pays a
+/// serial zero fill of a field-element newtype, and the large levels are filled in parallel.
+#[allow(unsafe_code)]
+fn eq_table(r: &[E]) -> Vec<E> {
+    const BLOCK: usize = 1 << 12;
+    let mut table = vec![E::one()];
+    for &challenge in r {
+        let len = table.len();
+        let complement = E::one() - challenge;
+        let next = crate::kernel::buf::uninit::<E>(2 * len);
+        // SAFETY: the closure writes every slot of every block; the halves read from
+        // `table` are the previous level and stay initialized until the call returns.
+        table = unsafe {
+            crate::kernel::buf::fill_par(next, BLOCK, |block, slots| {
+                let base = block * BLOCK;
+                for (i, slot) in slots.iter_mut().enumerate() {
+                    let index = base + i;
+                    let value = if index < len {
+                        table[index] * complement
+                    } else {
+                        table[index - len] * challenge
+                    };
+                    slot.write(value);
+                }
+            })
+        };
+    }
+    table
+}
+
+/// The bit pattern of at most eight 0/1 cells (bit `j` from cell `j`). With the
+/// identity map the pattern comes from one multiply instead of eight table loads.
+#[inline(always)]
+fn bit_pattern(cells: &[i8], map: &[i64; 256], identity: bool) -> usize {
+    if identity {
+        let mut packed = 0_u64;
+        for (j, &cell) in cells.iter().enumerate() {
+            packed |= u64::from(cell as u8 & 1) << (8 * j);
+        }
+        (packed.wrapping_mul(0x0102_0408_1020_4080) >> 56) as usize
+    } else {
+        let mut pattern = 0_usize;
+        for (j, &cell) in cells.iter().enumerate() {
+            pattern |= ((map[cell as u8 as usize] as usize) & 1) << j;
+        }
+        pattern
+    }
+}
 
 /// `w_1 * sum_t gamma_t b_t` of stage 2, as a [`Group`] pair (prover only).
 pub struct SplitGroup<'a> {
@@ -201,37 +252,40 @@ impl<'a> SplitGroup<'a> {
         let z = self.zeta_vars;
         let c_at = self.low.terminal_values()[0];
         // eq(r_low, lo), coordinate j on index bit j (the low variable is bound first).
-        let mut eq = vec![E::one()];
-        for &r in &self.challenges[..z] {
-            let len = eq.len();
-            let mut next = vec![E::zero(); 2 * len];
-            let (lo, hi) = next.split_at_mut(len);
-            for ((l, h), &e) in lo.iter_mut().zip(hi.iter_mut()).zip(&eq) {
-                let scaled = e * r;
-                *h = scaled;
-                *l = e - scaled;
-            }
-            eq = next;
-        }
+        let eq = eq_table(&self.challenges[..z]);
         let lanes_n = self.bits.len();
         let blocks = self.blocks.len();
         let rows = 1_usize << z;
         let chunks = rows.div_ceil(CHUNK);
-        // partial[hi * chunks + chunk][t] = sum over the chunk's lo of eq[lo] b_t[lo, hi].
-        let partial: Vec<Vec<E>> = (0..blocks * chunks)
+        let identity = self.bits.iter().all(|(_, map)| std::ptr::eq(*map, &IDENTITY_MAP));
+        // partial[chunk][hi * lanes_n + t] = sum over the chunk's lo of eq[lo] b_t[lo, hi].
+        // Eight `lo` share one 256-entry subset-sum table of their eq values, and every
+        // block and lane reads that table with its own 8-bit pattern: one field addition per
+        // eight cells instead of one per cell, with no branch on the witness bits.
+        let partial: Vec<Vec<E>> = (0..chunks)
             .into_par_iter()
-            .map(|job| {
-                let (hi, chunk) = (job / chunks, job % chunks);
+            .map(|chunk| {
                 let lo0 = chunk * CHUNK;
                 let lo1 = (lo0 + CHUNK).min(rows);
-                let mut acc = vec![E::zero(); lanes_n];
-                for lo in lo0..lo1 {
-                    for (t, (cells, map)) in self.bits.iter().enumerate() {
-                        // The cells are 0/1 (checked when the group was built).
-                        if map[cells[(hi << z) + lo] as u8 as usize] == 1 {
-                            acc[t] += eq[lo];
+                let mut acc = vec![E::zero(); blocks * lanes_n];
+                let mut lo = lo0;
+                while lo < lo1 {
+                    let n = (lo1 - lo).min(8);
+                    let patterns = 1_usize << n;
+                    let mut subset = [E::zero(); 256];
+                    for p in 1..patterns {
+                        let low = p & (p - 1);
+                        subset[p] = subset[low] + eq[lo + (p ^ low).trailing_zeros() as usize];
+                    }
+                    for hi in 0..blocks {
+                        let base = (hi << z) + lo;
+                        for (t, (cells, map)) in self.bits.iter().enumerate() {
+                            // The cells are 0/1 (checked when the group was built).
+                            let p = bit_pattern(&cells[base..base + n], map, identity);
+                            acc[hi * lanes_n + t] += subset[p];
                         }
                     }
+                    lo += n;
                 }
                 acc
             })
@@ -240,11 +294,7 @@ impl<'a> SplitGroup<'a> {
         lanes.push(Lane::Folded(self.blocks.iter().map(|&b| c_at * b).collect()));
         for t in 0..lanes_n {
             let column: Vec<E> = (0..blocks)
-                .map(|hi| {
-                    partial[hi * chunks..(hi + 1) * chunks]
-                        .iter()
-                        .fold(E::zero(), |acc, p| acc + p[t])
-                })
+                .map(|hi| partial.iter().fold(E::zero(), |acc, p| acc + p[hi * lanes_n + t]))
                 .collect();
             lanes.push(Lane::Folded(column));
         }
@@ -268,7 +318,7 @@ mod tests {
     #[test]
     fn split_rounds_match_the_generic_group() {
         let mut rng = SplitMix64::new(77);
-        for (z, h, used) in [(4_usize, 3_usize, 16_usize), (5, 1, 11), (3, 4, 8)] {
+        for (z, h, used) in [(4_usize, 3_usize, 16_usize), (5, 1, 11), (3, 4, 8), (2, 3, 4)] {
             let len = 1_usize << (z + h);
             let split = SplitWeight {
                 c: (0..used).map(|_| field(&mut rng)).collect(),
@@ -318,5 +368,71 @@ mod tests {
         let instances =
             [GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![0, 1])] }];
         assert!(SplitGroup::new(&split, &lanes, &instances, 4).is_none());
+    }
+
+    /// The packed identity pattern and the generic map path agree.
+    #[test]
+    fn bit_pattern_matches_the_map() {
+        let mut rng = SplitMix64::new(79);
+        let mut square = IDENTITY_MAP;
+        for (v, slot) in square.iter_mut().enumerate() {
+            *slot = ((v * v) & 1) as i64;
+        }
+        for n in 1..=8 {
+            let cells: Vec<i8> = (0..n).map(|_| (rng.next_u64() & 1) as i8).collect();
+            let identity = bit_pattern(&cells, &IDENTITY_MAP, true);
+            let generic = bit_pattern(&cells, &IDENTITY_MAP, false);
+            let want = cells.iter().enumerate().fold(0, |p, (j, &c)| p | ((c as usize) << j));
+            assert_eq!(identity, want);
+            assert_eq!(generic, want);
+            assert_eq!(bit_pattern(&cells, &square, false), want);
+        }
+    }
+
+    /// Single-thread micro-benchmark of the two hot split-weight passes at a 32K-like
+    /// shape: `z = 19`, 64 blocks, six bit lanes and `2^25` cells. Run with
+    /// `RAYON_NUM_THREADS=1 cargo test -p agg-piop --release --lib split_weight_bench --
+    /// --ignored --nocapture` under `taskset`.
+    #[test]
+    #[ignore = "micro-benchmark"]
+    fn split_weight_bench() {
+        let mut rng = SplitMix64::new(2026);
+        let (z, h, lanes_n) = (19_usize, 6_usize, 6_usize);
+        let blocks = 1_usize << h;
+        let len = blocks << z;
+        let split = SplitWeight {
+            c: (0..1_usize << z).map(|_| field(&mut rng)).collect(),
+            zeta_vars: z,
+            blocks: (0..blocks).map(|_| field(&mut rng)).collect(),
+            len,
+        };
+        let cells: Vec<Vec<i8>> =
+            (0..lanes_n).map(|_| (0..len).map(|_| (rng.next_u64() & 1) as i8).collect()).collect();
+        let lanes: Vec<Lane<'_>> = cells.iter().map(|c| Lane::column(c)).collect();
+        let instances: Vec<GroupInstance> = (0..lanes_n)
+            .map(|t| GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![0, 1 + t])] })
+            .collect();
+
+        let start = std::time::Instant::now();
+        let mut group = SplitGroup::new(&split, &lanes, &instances, 4).expect("the shape applies");
+        let new_ms = start.elapsed().as_secs_f64() * 1e3;
+
+        let start = std::time::Instant::now();
+        for round in 0..z - 1 {
+            let _ = group.round_message(round);
+            group.bind(round, field(&mut rng));
+        }
+        let low_ms = start.elapsed().as_secs_f64() * 1e3;
+
+        let start = std::time::Instant::now();
+        let _ = group.round_message(z - 1);
+        group.bind(z - 1, field(&mut rng));
+        let build_ms = start.elapsed().as_secs_f64() * 1e3;
+
+        println!(
+            "split-weight bench z={z} blocks={blocks} lanes={lanes_n} cells={len} \
+             new_ms={new_ms:.3} low_ms={low_ms:.3} last_message_plus_build_ms={build_ms:.3}"
+        );
+        std::hint::black_box(group.claim());
     }
 }
