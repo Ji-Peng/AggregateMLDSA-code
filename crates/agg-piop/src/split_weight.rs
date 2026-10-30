@@ -14,9 +14,9 @@
 
 use rayon::prelude::*;
 
-use crate::kernel::{Group, GroupInstance, Lane, Source, Term, IDENTITY_MAP};
+use crate::kernel::{Acc, Group, GroupInstance, Lane, Source, Term, IDENTITY_MAP};
 use crate::OpeningField as E;
-use jolt_field::{One, Zero};
+use jolt_field::{One, Unreduced, Zero};
 
 /// The factors of the level-1 weight table.
 #[derive(Clone, Debug)]
@@ -50,6 +50,10 @@ impl SplitWeight {
 
 /// Cells per task of the passes over the bit lanes (in-block positions).
 const CHUNK: usize = 1 << 13;
+
+/// Cells per tile of the `D` pass, where the 64 block terms of one `lo` accumulate
+/// unreduced in a 16 KiB array (the 64 `Acc` values are `u128` quadruples).
+const D_TILE: usize = 256;
 
 /// The `eq(r, .)` table over `2^r.len()` indices (bit `j` of the index selects `r[j]`).
 ///
@@ -102,6 +106,14 @@ fn bit_pattern(cells: &[i8], map: &[i64; 256], identity: bool) -> usize {
     }
 }
 
+/// `acc += value` for a canonical extension-field element: each coordinate is below `p`, so
+/// it is added to the accumulator's low slot and no carry can reach the high slot.
+#[inline(always)]
+fn lift_canonical(acc: &mut Acc, value: E) {
+    acc.0[0] += u128::from(value.c0().to_canonical_u64());
+    acc.0[2] += u128::from(value.c1().to_canonical_u64());
+}
+
 /// `w_1 * sum_t gamma_t b_t` of stage 2, as a [`Group`] pair (prover only).
 pub struct SplitGroup<'a> {
     /// The rounds over the in-block variables.
@@ -123,6 +135,7 @@ impl<'a> SplitGroup<'a> {
     /// lane. `None` when the shape is not that, a lane is not a 0/1 byte table of the main
     /// domain, or the split does not apply.
     #[must_use]
+    #[allow(unsafe_code)]
     pub fn new(
         split: &SplitWeight,
         lanes: &[Lane<'a>],
@@ -164,26 +177,53 @@ impl<'a> SplitGroup<'a> {
             .collect();
         let rows = 1_usize << z;
         let invalid = std::sync::atomic::AtomicBool::new(false);
-        let mut d = vec![E::zero(); rows];
-        d.par_chunks_mut(CHUNK).enumerate().for_each(|(chunk, out)| {
-            let lo0 = chunk * CHUNK;
-            let mut bad = 0_u64;
-            for (hi, table) in tables.iter().enumerate() {
-                let base = (hi << z) + lo0;
-                for (i, slot) in out.iter_mut().enumerate() {
-                    let mut p = 0_usize;
-                    for (t, (cells, map)) in bits.iter().enumerate() {
-                        let v = map[cells[base + i] as u8 as usize];
-                        bad |= (v as u64 > 1) as u64;
-                        p |= ((v as usize) & 1) << t;
+        let identity = bits.iter().all(|(_, map)| std::ptr::eq(*map, &IDENTITY_MAP));
+        // Each cell contributes one canonical table entry per block, so a coordinate of the
+        // unreduced sum is below `blocks * p < 2^64 * blocks`; workloads have
+        // `blocks <= 2^6`, and the low `u128` slot stays exact for any `blocks < 2^64`.
+        debug_assert!(tables.len() < 1 << 32);
+        let d = {
+            let buf = crate::kernel::buf::uninit::<E>(rows);
+            // SAFETY: every slot of the output is written once below.
+            unsafe {
+                crate::kernel::buf::fill_par(buf, D_TILE, |chunk, out| {
+                    let lo0 = chunk * D_TILE;
+                    let n = out.len();
+                    let mut acc = vec![Acc::zero(); n];
+                    let mut bad = 0_u64;
+                    // One 1 KiB slice of `D` stays in L1 while the 64 block terms land in
+                    // `acc`; the reduced pass is one add per cell instead of 64.
+                    for (hi, table) in tables.iter().enumerate() {
+                        let base = (hi << z) + lo0;
+                        let mut pattern = [0_u8; D_TILE];
+                        for (t, (cells, map)) in bits.iter().enumerate() {
+                            let source = &cells[base..base + n];
+                            if identity {
+                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                                    bad |= u64::from(cell as u8 > 1);
+                                    *slot |= (cell as u8 & 1) << t;
+                                }
+                            } else {
+                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                                    let v = map[cell as u8 as usize];
+                                    bad |= (v as u64 > 1) as u64;
+                                    *slot |= ((v as u8) & 1) << t;
+                                }
+                            }
+                        }
+                        for (slot, &p) in acc.iter_mut().zip(&pattern[..n]) {
+                            lift_canonical(slot, table[p as usize]);
+                        }
                     }
-                    *slot += table[p];
-                }
+                    for (slot, value) in out.iter_mut().zip(acc) {
+                        slot.write(E::reduce_product(value));
+                    }
+                    if bad != 0 {
+                        invalid.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                })
             }
-            if bad != 0 {
-                invalid.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
+        };
         if invalid.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
