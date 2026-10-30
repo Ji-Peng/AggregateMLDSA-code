@@ -164,6 +164,83 @@ pub(super) unsafe fn butterfly_fused_4layer_row(
     }
 }
 
+/// [`butterfly_fused_4layer_row`] reading the sixteen rows from `src` and writing the
+/// results to the same rows of `dst` (`src` is left unchanged unless it is `dst`).
+///
+/// # Safety
+/// The caller guarantees target features, pointer validity of both buffers over the whole
+/// row geometry, and that `dst` either equals `src` or does not overlap it.
+#[target_feature(enable = "avx512f,vpclmulqdq")]
+pub(super) unsafe fn butterfly_fused_4layer_row_from(
+    src: *const F128,
+    dst: *mut F128,
+    sixteenth: usize,
+    num_ntts: usize,
+    r: usize,
+    twiddles: &[F128; 15],
+) {
+    // SAFETY: caller provides target features and pointer geometry.
+    unsafe {
+        let broadcast =
+            |value: F128| _mm512_broadcast_i32x4(_mm_set_epi64x(value.hi as i64, value.lo as i64));
+        let offset = |i: usize| (i * sixteenth + r) * num_ntts;
+        let lanes = num_ntts & !3;
+        let mut lane = 0;
+        while lane < lanes {
+            let mut values = [_mm512_setzero_si512(); 16];
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = _mm512_loadu_si512(src.add(offset(i) + lane) as *const __m512i);
+            }
+
+            macro_rules! butterfly {
+                ($u:expr, $v:expr, $twiddle:expr) => {{
+                    let new_u = _mm512_xor_si512(values[$u], ghash_mul_x4($twiddle, values[$v]));
+                    values[$v] = _mm512_xor_si512(values[$v], new_u);
+                    values[$u] = new_u;
+                }};
+            }
+
+            let outer = broadcast(twiddles[0]);
+            for i in 0..8 {
+                butterfly!(i, i + 8, outer);
+            }
+            for s in 0..2 {
+                let twiddle = broadcast(twiddles[1 + s]);
+                for i in 0..4 {
+                    butterfly!(8 * s + i, 8 * s + i + 4, twiddle);
+                }
+            }
+            for s in 0..4 {
+                let twiddle = broadcast(twiddles[3 + s]);
+                for i in 0..2 {
+                    butterfly!(4 * s + i, 4 * s + i + 2, twiddle);
+                }
+            }
+            for s in 0..8 {
+                let twiddle = broadcast(twiddles[7 + s]);
+                butterfly!(2 * s, 2 * s + 1, twiddle);
+            }
+
+            for (i, value) in values.iter().enumerate() {
+                _mm512_storeu_si512(dst.add(offset(i) + lane) as *mut __m512i, *value);
+            }
+            lane += 4;
+        }
+
+        while lane < num_ntts {
+            let mut values = [F128::ZERO; 16];
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = *src.add(offset(i) + lane);
+            }
+            butterfly_fused_4layer(&mut values, twiddles);
+            for (i, value) in values.iter().enumerate() {
+                *dst.add(offset(i) + lane) = *value;
+            }
+            lane += 1;
+        }
+    }
+}
+
 /// In-place fused-3-layer (8-point) butterfly across one row group of 8 rows.
 ///
 /// # Safety

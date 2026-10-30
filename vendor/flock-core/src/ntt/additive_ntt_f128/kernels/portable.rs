@@ -229,3 +229,32 @@ pub(super) unsafe fn butterfly_fused_4layer_row(
         }
     }
 }
+
+/// [`butterfly_fused_4layer_row`] reading the sixteen rows from `src` and writing the
+/// results to the same rows of `dst`.
+///
+/// # Safety
+/// The caller guarantees that every selected row and lane is valid in both buffers and
+/// that `dst` either equals `src` or does not overlap it.
+pub(super) unsafe fn butterfly_fused_4layer_row_from(
+    src: *const F128,
+    dst: *mut F128,
+    sixteenth: usize,
+    num_ntts: usize,
+    r: usize,
+    twiddles: &[F128; 15],
+) {
+    // SAFETY: caller supplies the pointer geometry and disjointness contract.
+    unsafe {
+        for lane in 0..num_ntts {
+            let mut values = [F128::ZERO; 16];
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = *src.add((i * sixteenth + r) * num_ntts + lane);
+            }
+            butterfly_fused_4layer(&mut values, twiddles);
+            for (i, value) in values.iter().enumerate() {
+                *dst.add((i * sixteenth + r) * num_ntts + lane) = *value;
+            }
+        }
+    }
+}

@@ -25,6 +25,7 @@ use rayon::prelude::{IntoParallelRefMutIterator, ParallelIterator, ParallelSlice
 use crate::{
     alloc_uninit_vec, alloc_zeroed_vec,
     field::{F128, F256},
+    merkle::Hash,
 };
 
 /// Retained buffers. Contents are stale and never trusted: every take
@@ -437,8 +438,96 @@ fn prewarm_sets(sets: &[(usize, usize, usize)]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Merkle tree pool.
+//
+// The level-0 tree is 2^24 hashes (512 MiB) at 32K signatures. A fresh allocation faults
+// every page during the leaf pass and the parent levels (65K soft faults from many
+// threads on one address-space lock); a recycled tree is resident. A tree taken from the
+// pool holds stale hashes, so only callers that write every node may use it.
+// ---------------------------------------------------------------------------
+
+static HASH_POOL: Mutex<Vec<Vec<Hash>>> = Mutex::new(Vec::new());
+
+/// Max trees retained.
+const MAX_POOLED_HASH: usize = 2;
+
+/// Take a length-`n` hash vector, preferring a pooled one (smallest capacity at least
+/// `n`); the flag tells whether it came from the pool.
+///
+/// Contents are UNINITIALIZED in both cases: the caller MUST write every node before
+/// reading it.
+pub fn take_hashes(n: usize) -> (Vec<Hash>, bool) {
+    let mut pool = HASH_POOL.lock().unwrap();
+    let mut best: Option<usize> = None;
+    for (i, v) in pool.iter().enumerate() {
+        if v.capacity() >= n && best.is_none_or(|b| v.capacity() < pool[b].capacity()) {
+            best = Some(i);
+        }
+    }
+    if let Some(i) = best {
+        let mut v = pool.swap_remove(i);
+        drop(pool);
+        v.clear();
+        // SAFETY: capacity >= n was checked above; `Hash` is a byte array (no Drop, every
+        // bit pattern valid), so exposing stale bytes is sound to hold. The caller upholds
+        // write-before-read per this function's contract.
+        unsafe { v.set_len(n) };
+        return (v, true);
+    }
+    drop(pool);
+    (alloc_uninit_vec(n), false)
+}
+
+/// Return a tree to the pool for reuse (smallest-capacity eviction, as [`give_f128`]).
+pub fn give_hashes(v: Vec<Hash>) {
+    if v.capacity() == 0 {
+        return;
+    }
+    let mut pool = HASH_POOL.lock().unwrap();
+    pool.push(v);
+    if pool.len() > MAX_POOLED_HASH {
+        let smallest = pool
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| v.capacity())
+            .map(|(i, _)| i)
+            .expect("pool non-empty");
+        pool.swap_remove(smallest);
+    }
+}
+
+/// Ask the kernel to back `buf` with transparent huge pages (`madvise(MADV_HUGEPAGE)`,
+/// Linux), so first-touch faults take 2 MiB at a time instead of 4 KiB. Only the 2 MiB
+/// aligned interior is advised; call it before the first touch (pages already resident
+/// stay as they are). A no-op elsewhere, and when `FLOCK_HUGEPAGE=0`.
+pub fn advise_hugepage<T>(buf: &mut [T]) {
+    #[cfg(target_os = "linux")]
+    {
+        const HUGE: usize = 2 << 20;
+        const MADV_HUGEPAGE: i32 = 14;
+        unsafe extern "C" {
+            fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+        }
+        if var_os("FLOCK_HUGEPAGE").is_some_and(|v| v == "0") {
+            return;
+        }
+        let start = buf.as_mut_ptr() as usize;
+        let end = start + core::mem::size_of_val(buf);
+        let (lo, hi) = (start.next_multiple_of(HUGE), end & !(HUGE - 1));
+        if hi > lo {
+            // SAFETY: [lo, hi) lies inside `buf`, a live allocation of this process; the
+            // advice changes page backing only, never contents. A failure is ignored.
+            unsafe { madvise(lo as *mut core::ffi::c_void, hi - lo, MADV_HUGEPAGE) };
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = buf;
+}
+
 /// Release every pooled buffer back to the OS.
 pub fn clear() {
+    HASH_POOL.lock().unwrap().clear();
     POOL.lock().unwrap().clear();
     U8_POOL.lock().unwrap().clear();
     ZERO_POOL.lock().unwrap().clear();

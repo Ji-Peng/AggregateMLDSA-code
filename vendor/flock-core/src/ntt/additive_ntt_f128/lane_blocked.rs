@@ -34,7 +34,10 @@
 //! transform in a per-thread copy and write nothing back: the codeword then keeps the
 //! pass-1 state, and the opening recomputes the few queried positions from it.
 
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut};
 
@@ -55,6 +58,20 @@ const MAX_TOP_LAYERS: usize = 8;
 const FUSED_TOP_LAYERS: usize = 10;
 /// Rows per tile block at least: the row gather transposes four positions at a time.
 const MIN_ROWS_LOG: usize = 2;
+
+/// Minor page faults of this process so far (field 10 of `/proc/self/stat`); 0 when
+/// unreadable. A diagnostic for `FLOCK_COMMIT_TIMING`, which reports the faults each commit
+/// phase takes.
+pub(crate) fn minor_faults() -> u64 {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            // The command name may hold spaces; the fields after it start at the state.
+            let rest = &s[s.rfind(')')? + 1..];
+            rest.split_whitespace().nth(7)?.parse().ok()
+        })
+        .unwrap_or(0)
+}
 
 /// Whether [`AdditiveNttF128::encode_lane_blocked`] supports a transform of `2^log_d`
 /// positions at rate `1 / 2^log_inv_rate` (pass 1 needs four layers over at least four
@@ -156,10 +173,23 @@ impl AdditiveNttF128 {
         let first = log_inv_rate + b;
         let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
         let t_pass = std::time::Instant::now();
+        let faults_before = if timing { minor_faults() } else { 0 };
+        // Thread-summed nanoseconds of the pass-2 steps (copy, layers, absorb, finish).
+        let cpu_ns: [AtomicU64; 4] = Default::default();
         let sub = 1usize << low;
         let words = sub * LANES_PER_GROUP;
         let state_len = GroupLeafHasher::state_len(sub);
         let base = Base(codeword.as_mut_ptr());
+        // Without `keep_final`, the first pass-2 layers read the codeword block and write the
+        // per-thread copy, so the block is not copied first; `FLOCK_LB_PASS2_COPY=1` copies
+        // it and transforms in place (the same values).
+        let copy_block = std::env::var_os("FLOCK_LB_PASS2_COPY").is_some_and(|v| v != "0");
+        let lap = |slot: usize, since: &mut Option<std::time::Instant>| {
+            if let Some(t) = since {
+                cpu_ns[slot].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+                *t = std::time::Instant::now();
+            }
+        };
         leaves.par_chunks_mut(sub).enumerate().for_each(|(s, out)| {
             let p0 = s * sub;
             PASS2.with_borrow_mut(|(scratch, state)| {
@@ -171,6 +201,7 @@ impl AdditiveNttF128 {
                 }
                 for g in 0..groups {
                     let at = base.at((g * n + p0) * LANES_PER_GROUP);
+                    let mut clock = timing.then(std::time::Instant::now);
                     if g >= live_groups {
                         // SAFETY: a dead group is zero (pass 1) and no task writes it; the
                         // range lies inside `codeword`.
@@ -181,24 +212,41 @@ impl AdditiveNttF128 {
                         // (tasks partition the positions) and lie inside `codeword`.
                         let block = unsafe { core::slice::from_raw_parts_mut(at, words) };
                         self.deep_layers(block, p0, first, log_d, true);
+                        lap(1, &mut clock);
                         hasher.absorb(state, g, block);
+                        lap(2, &mut clock);
                     } else {
                         // SAFETY: no task writes `codeword` in this mode; the range lies
                         // inside it.
                         let src = unsafe { core::slice::from_raw_parts(at, words) };
                         let block = &mut scratch[..words];
-                        block.copy_from_slice(src);
-                        self.deep_layers(block, p0, first, log_d, true);
+                        if copy_block {
+                            block.copy_from_slice(src);
+                            lap(0, &mut clock);
+                            self.deep_layers(block, p0, first, log_d, true);
+                        } else {
+                            self.deep_layers_from(src, block, p0, first, log_d, true);
+                        }
+                        lap(1, &mut clock);
                         hasher.absorb(state, g, block);
+                        lap(2, &mut clock);
                     }
                 }
+                let mut clock = timing.then(std::time::Instant::now);
                 hasher.finish(state, out);
+                lap(3, &mut clock);
             });
         });
         if timing {
+            let ms = |i: usize| cpu_ns[i].load(Relaxed) as f64 * 1e-6;
             eprintln!(
-                "[commit-timing] lane-blocked pass 2 + leaves (low={low}, keep={keep_final}): {:.2} ms",
-                t_pass.elapsed().as_secs_f64() * 1e3
+                "[commit-timing] lane-blocked pass 2 + leaves (low={low}, keep={keep_final}): {:.2} ms | faults {} | thread-summed ms: copy {:.0}, layers {:.0}, absorb {:.0}, finish {:.0}",
+                t_pass.elapsed().as_secs_f64() * 1e3,
+                minor_faults() - faults_before,
+                ms(0),
+                ms(1),
+                ms(2),
+                ms(3)
             );
         }
         first
@@ -287,6 +335,9 @@ impl AdditiveNttF128 {
         assert!(tile_log >= MIN_ROWS_LOG, "FLOCK_LB_TILE_LOG ({tile_log}) must be at least {MIN_ROWS_LOG}");
         let b = max_top.min(avail - MIN_ROWS_LOG).min(tile_log - MIN_ROWS_LOG);
         let low = avail - b;
+        let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+        let faults_before = if timing { minor_faults() } else { 0 };
+        let t_dead = std::time::Instant::now();
         // Groups of dead lanes: their codeword is zero.
         codeword[live_groups * group_len..]
             .par_chunks_mut(1 << 16)
@@ -295,7 +346,7 @@ impl AdditiveNttF128 {
             return Pass1 { b, low, live_groups };
         }
         let a = low.min(tile_log - b);
-        let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+        let t_dead = t_dead.elapsed();
         let t_pass = std::time::Instant::now();
         let (rows, blocks) = (1usize << a, 1usize << b);
         let width = rows * LANES_PER_GROUP;
@@ -338,7 +389,12 @@ impl AdditiveNttF128 {
         });
         sfence();
         if timing {
-            eprintln!("[commit-timing] lane-blocked pass 1 (b={b} a={a}): {:.2} ms", t_pass.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "[commit-timing] lane-blocked pass 1 (b={b} a={a}): {:.2} ms | dead-group fill {:.2} ms | faults {}",
+                t_pass.elapsed().as_secs_f64() * 1e3,
+                t_dead.as_secs_f64() * 1e3,
+                minor_faults() - faults_before
+            );
         }
         Pass1 { b, low, live_groups }
     }
@@ -429,6 +485,35 @@ impl AdditiveNttF128 {
                 k += 1;
             }
         }
+    }
+
+    /// [`Self::deep_layers`] on a copy: `block` receives the result of layers `first ..
+    /// log_d` applied to `src` (the same length as `block`, left unchanged). The first
+    /// fused-four step reads `src` and writes `block`, so the block is not copied first;
+    /// a remainder shorter than four layers copies, then runs in place.
+    fn deep_layers_from(&self, src: &[F128], block: &mut [F128], p0: usize, first: usize, log_d: usize, fused3: bool) {
+        debug_assert_eq!(src.len(), block.len());
+        if log_d - first < 4 {
+            block.copy_from_slice(src);
+            self.deep_layers(block, p0, first, log_d, fused3);
+            return;
+        }
+        let sub = block.len() / LANES_PER_GROUP;
+        let bs = 1usize << (log_d - first);
+        let nb = sub / bs;
+        let gb0 = p0 >> (log_d - first);
+        let len = bs * LANES_PER_GROUP;
+        let sixteenth = bs >> 4;
+        for lb in 0..nb {
+            let tw = self.fused4_twiddles(first, gb0 + lb);
+            let (s, d) = (src[lb * len..].as_ptr(), block[lb * len..].as_mut_ptr());
+            for rr in 0..sixteenth {
+                // SAFETY: the sixteen rows of row group rr lie in both slices (each holds the
+                // `len` words of block `lb`), and `block` does not overlap `src`.
+                unsafe { kernels::butterfly_fused_4layer_row_from(s, d, sixteenth, LANES_PER_GROUP, rr, &tw) };
+            }
+        }
+        self.deep_layers(block, p0, first + 4, log_d, fused3);
     }
 
     /// Layers `first .. log_d` on one layer-`first` block of lane-blocked positions
@@ -557,6 +642,36 @@ mod tests {
     /// The lane-blocked encode holds, per lane, the interleaved transform of the
     /// zero-padded message: every (log_d, rate, t, live) shape including partial last
     /// groups, dead groups and the smallest supported transform, on every SIMD mask.
+    /// `deep_layers_from` equals a copy followed by `deep_layers`, for remainders of one to
+    /// eleven layers (so the first step is a fused-four step or a plain copy), blocks past
+    /// the first of a group, and both fused-three settings, on every SIMD mask.
+    #[test]
+    fn deep_layers_from_matches_copy_then_in_place() {
+        let mut rng = Rng::new(0x5EED_0C0D);
+        for &(log_d, first) in &[(12usize, 11usize), (12, 10), (12, 9), (12, 8), (12, 7), (13, 8), (14, 4), (14, 3)] {
+            let sub = 1usize << (log_d - first);
+            let ntt = AdditiveNttF128::standard(log_d);
+            for p0 in [0, sub, 3 * sub] {
+                if p0 + sub > 1 << log_d {
+                    continue;
+                }
+                for fused3 in [false, true] {
+                    for mask in test_masks() {
+                        let src = rng.f128_vec(sub * LANES_PER_GROUP);
+                        let (got, want) = with_mask(mask, || {
+                            let mut got = rng.f128_vec(sub * LANES_PER_GROUP);
+                            ntt.deep_layers_from(&src, &mut got, p0, first, log_d, fused3);
+                            let mut want = src.clone();
+                            ntt.deep_layers(&mut want, p0, first, log_d, fused3);
+                            (got, want)
+                        });
+                        assert_eq!(got, want, "log_d={log_d} first={first} p0={p0} fused3={fused3} mask={mask:#x}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn matches_interleaved_transform() {
         let mut rng = Rng::new(0x1A4E_B10C);
