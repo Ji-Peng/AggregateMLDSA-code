@@ -454,6 +454,15 @@ pub fn timed_runs<T, E>(
     (0..reps).map(|_| run()).collect()
 }
 
+/// Release every reusable buffer a previous run left behind: wait for detached drops, empty
+/// the allocator cache and clear the Flock scratch pools. A timed run then starts like a new
+/// process.
+fn cold_start() {
+    agg_pcs_config::sched::wait_background_drops();
+    agg_piop::alloc::release_cache();
+    agg_keccak::flock_core::scratch::clear();
+}
+
 /// Aggregate `records` `warmup + reps` times, then verify the aggregate of a timed run
 /// `warmup + reps` times uncached and `warmup + reps` times with cached keys (after one
 /// extra run that fills the cache); warmup runs are discarded. `reps` is at least 1.
@@ -469,25 +478,25 @@ pub fn bench_records(
     let reps = reps.max(1);
     let aggregator = Aggregator::new(config);
     let signed = signed(records);
-    agg_piop::alloc::release_cache();
+    cold_start();
     let reset = rss::reset_peak();
     let mut bytes = Vec::new();
     let proves = timed_runs(warmup, reps, || {
-        // Start each prove without blocks cached by the previous one, as a new
-        // process would.
-        agg_piop::alloc::release_cache();
+        // Start each prove without blocks cached by the previous one, as a new process would.
+        cold_start();
         let aggregate = aggregator.aggregate(&signed).map_err(|e| e.to_string())?;
         // Every run's aggregate has the same size; keep the latest (a timed run's at the end).
         bytes = aggregate.bytes;
         Ok::<_, String>(aggregate.report)
     })?;
+    agg_pcs_config::sched::wait_background_drops();
     let prove_peak_kib = rss::peak_kib().filter(|_| reset);
     drop(aggregator);
     let prove_times: Vec<Duration> = proves.iter().map(|r| r.total).collect();
     let prove = proves[median_index(&prove_times)].clone();
     drop(proves);
-    // The verifier's peak must not count blocks the prover left in the cache.
-    agg_piop::alloc::release_cache();
+    // The verifier's peak must not count blocks the prover left in the caches.
+    cold_start();
     let reset = rss::reset_peak();
     let verifier = AggregateVerifier::new()
         .require(config.profile)

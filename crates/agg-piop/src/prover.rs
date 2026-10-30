@@ -1127,9 +1127,10 @@ fn prove_piop_with<'a>(
         &lookup.inputs,
         transcript,
     )?;
-    // The owned buffers (parities and weights, several GiB at 32K) are unmapped on a
-    // detached thread, off the PIOP branch's critical path; `prover_tables` itself only
-    // borrows the committed tables.
+    // The owned buffers (parities and weights, several GiB at 32K) are released on a
+    // detached thread, off the PIOP branch's critical path. Large blocks go back to the
+    // allocator cache (up to its cap) rather than being unmapped, so a later prove can
+    // reuse them; `prover_tables` itself only borrows the committed tables.
     let ProverTables {
         parity1,
         w1,
