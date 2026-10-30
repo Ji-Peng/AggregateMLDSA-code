@@ -883,7 +883,9 @@ fn piop_fork_on() -> bool {
 /// rayon pool (the PIOP pool of the scheduler preset) by `rayon::join`; off the pool (the
 /// caller's thread, which carries a large stack) with S on a scoped thread whose stack is
 /// that of the PIOP pool's workers, so that neither branch's sequential driver lands on a
-/// global-pool worker with rayon's default stack.
+/// global-pool worker with rayon's default stack. Off the pool with a one-thread global
+/// pool, both branches run on the caller: an OS thread for S would add a second core's
+/// worth of work on one core and no parallelism.
 fn run_branches<A: Send, B: Send>(
     lookup: impl FnOnce() -> A + Send,
     stages: impl FnOnce() -> B + Send,
@@ -892,7 +894,12 @@ fn run_branches<A: Send, B: Send>(
         let a = lookup();
         return (a, stages());
     }
-    if rayon::current_thread_index().is_some() {
+    let on_worker = rayon::current_thread_index().is_some();
+    if !on_worker && rayon::current_num_threads() <= 1 {
+        let a = lookup();
+        return (a, stages());
+    }
+    if on_worker {
         return rayon::join(lookup, stages);
     }
     std::thread::scope(|scope| {
