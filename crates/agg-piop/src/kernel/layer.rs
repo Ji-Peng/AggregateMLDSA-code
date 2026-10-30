@@ -602,6 +602,41 @@ impl<S: Level0> Engine<S> {
 // The layer group.
 // ---------------------------------------------------------------------------------------
 
+/// The projective `(p, q)` of layer `depth - 2` node `z` of a stack from its four leaves
+/// `stacked[z + j quarter] - center`, `j = 0..4`, and `powers = [X', X'^2, X'^3, X'^4]`:
+/// with the elementary symmetric polynomials `e_1 .. e_4` of the recentred leaves,
+/// `q = X'^4 - e_1 X'^3 + e_2 X'^2 - e_3 X' + e_4` and `p = dq/dX' =
+/// 4 X'^3 - 3 e_1 X'^2 + 2 e_2 X' - e_3`. Exact in `i64` within the caller's spread gate
+/// (`crate::lookup::SYM_SPREAD`).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn upper_node(stacked: &[i32], center: i32, quarter: usize, z: usize, powers: [E; 4]) -> (E, E) {
+    let v = |j: usize| i64::from(stacked[z + j * quarter]) - i64::from(center);
+    // Children A = (v0, v2), B = (v1, v3) of layer depth - 1.
+    let (sa, ma) = (v(0) + v(2), v(0) * v(2));
+    let (sb, mb) = (v(1) + v(3), v(1) * v(3));
+    let e1 = sa + sb;
+    let e2 = ma + mb + sa * sb;
+    let e3 = sa * mb + sb * ma;
+    let e4 = ma * mb;
+    let [x, x2, x3, x4] = powers;
+    // |e1| <= 2^17, |e2| <= 2^32 + 2^31, |e3| <= 2^47, |e4| <= 2^60, all below p. At
+    // most four integer products per accumulator: each split slot is below 4 * 2^64, far
+    // below the u128 accumulator limit.
+    let mut q = Acc::zero();
+    mad_int(&mut q, x4, 1);
+    mad_int(&mut q, x3, -e1);
+    mad_int(&mut q, x2, e2);
+    mad_int(&mut q, x, -e3);
+    let q = E::reduce_product(q) + E::from_i64(e4);
+    let mut p = Acc::zero();
+    mad_int(&mut p, x3, 4);
+    mad_int(&mut p, x2, -3 * e1);
+    mad_int(&mut p, x, 2 * e2);
+    let p = E::reduce_product(p) - E::from_i64(e3);
+    (p, q)
+}
+
 /// One tree of a layer group: the stored layer `s` (`2^s` cells of `p` and `q`, whose
 /// halves are `P_0, P_1` and `Q_0, Q_1`) and its batching coefficients.
 #[derive(Clone, Copy, Debug)]
@@ -616,8 +651,32 @@ pub struct LayerTree<'a> {
     pub gamma_q: E,
 }
 
+/// One challenge of a stack whose layer `s` is not stored: its layer-`s` cells are computed
+/// from the four leaves below every cell ([`upper_node`]).
+#[derive(Clone, Copy, Debug)]
+pub struct LayerLeaves<'a> {
+    /// The stacked lane of the columns (`4 * quarter` cells).
+    pub stacked: &'a [i32],
+    /// The centre subtracted from every leaf (the [`crate::lookup`] integer path).
+    pub center: i32,
+    /// `[X', X'^2, X'^3, X'^4]` of the challenge, `X'` already shifted and centred.
+    pub powers: [E; 4],
+    /// The coefficient of the `p`-claim.
+    pub gamma_p: E,
+    /// The coefficient of the `q`-claim.
+    pub gamma_q: E,
+}
+
+/// The level-0 rows of a layer group: stored layer halves or cells computed from the leaves.
+enum LayerRows<'a> {
+    /// Stored layers.
+    Stored(Vec<LayerTree<'a>>),
+    /// Layer `s = depth - 2` of integer-path stacks, one tree per challenge.
+    Leaves(Vec<LayerLeaves<'a>>),
+}
+
 struct LayerSource<'a> {
-    trees: Vec<LayerTree<'a>>,
+    rows: LayerRows<'a>,
     /// `gamma_q / gamma_p` and `1 / gamma_p` per tree.
     ratio: Vec<(E, E)>,
     products: Vec<(usize, usize, usize)>,
@@ -627,26 +686,58 @@ struct LayerSource<'a> {
 }
 
 impl LayerSource<'_> {
+    /// The number of trees (one per challenge on the leaf path).
+    #[inline(always)]
+    fn len(&self) -> usize {
+        match &self.rows {
+            LayerRows::Stored(trees) => trees.len(),
+            LayerRows::Leaves(leaves) => leaves.len(),
+        }
+    }
+
     /// The transformed lanes of one tree from `P_0, P_1, Q_0, Q_1`.
     #[inline(always)]
     fn transform(tree: &LayerTree<'_>, ratio: E, [p0, p1, q0, q1]: [E; 4]) -> [E; 4] {
-        [fm(tree.gamma_p, p0), q1, fm(tree.gamma_p, q0), p1 + fm(ratio, q1)]
+        transform_parts(tree.gamma_p, ratio, [p0, p1, q0, q1])
     }
 
     #[inline(always)]
     fn cell(&self, t: usize, i: usize) -> [E; 4] {
-        let tree = &self.trees[t];
-        Self::transform(
-            tree,
-            self.ratio[t].0,
-            [tree.p[i], tree.p[self.half + i], tree.q[i], tree.q[self.half + i]],
-        )
+        match &self.rows {
+            LayerRows::Stored(trees) => {
+                let tree = &trees[t];
+                Self::transform(
+                    tree,
+                    self.ratio[t].0,
+                    [tree.p[i], tree.p[self.half + i], tree.q[i], tree.q[self.half + i]],
+                )
+            }
+            LayerRows::Leaves(leaves) => {
+                let leaf = &leaves[t];
+                let quarter = 2 * self.half;
+                let (p0, q0) = upper_node(leaf.stacked, leaf.center, quarter, i, leaf.powers);
+                let (p1, q1) = upper_node(leaf.stacked, leaf.center, quarter, self.half + i, leaf.powers);
+                transformed_leaf(leaf, self.ratio[t].0, [p0, p1, q0, q1])
+            }
+        }
     }
+}
+
+/// The transformed lanes of one tree from `P_0, P_1, Q_0, Q_1` with `gamma_p`.
+#[inline(always)]
+fn transform_parts(gamma_p: E, ratio: E, [p0, p1, q0, q1]: [E; 4]) -> [E; 4] {
+    [fm(gamma_p, p0), q1, fm(gamma_p, q0), p1 + fm(ratio, q1)]
+}
+
+/// The transformed lanes of a computed tree from `P_0, P_1, Q_0, Q_1`.
+#[inline(always)]
+fn transformed_leaf(leaf: &LayerLeaves<'_>, ratio: E, lanes: [E; 4]) -> [E; 4] {
+    transform_parts(leaf.gamma_p, ratio, lanes)
 }
 
 impl Level0 for LayerSource<'_> {
     fn width(&self) -> usize {
-        4 * self.trees.len()
+        4 * self.len()
     }
 
     fn rows(&self) -> usize {
@@ -659,7 +750,7 @@ impl Level0 for LayerSource<'_> {
 
     fn first_item(&self, k: usize, full: bool, sums: &mut [[Acc; 3]]) {
         let sums = &mut sums[0];
-        for t in 0..self.trees.len() {
+        for t in 0..self.len() {
             let a = self.cell(t, 2 * k);
             let b = self.cell(t, 2 * k + 1);
             mad(&mut sums[0], a[0], a[1]);
@@ -679,14 +770,41 @@ impl Level0 for LayerSource<'_> {
 
     fn folded_row(&self, _: E, context: &<E as Fold>::Ctx, i: usize, out: &mut [E]) {
         let (even, odd, half) = (2 * i, 2 * i + 1, self.half);
-        for ((tree, &(ratio, _)), lanes) in self.trees.iter().zip(&self.ratio).zip(out.as_chunks_mut::<4>().0) {
+        let stored = match &self.rows {
+            LayerRows::Stored(trees) => Some(trees),
+            LayerRows::Leaves(_) => None,
+        };
+        if let Some(trees) = stored {
+            for ((tree, &(ratio, _)), lanes) in trees.iter().zip(&self.ratio).zip(out.as_chunks_mut::<4>().0) {
+                let raw = [
+                    fold(context, tree.p[even], tree.p[odd]),
+                    fold(context, tree.p[half + even], tree.p[half + odd]),
+                    fold(context, tree.q[even], tree.q[odd]),
+                    fold(context, tree.q[half + even], tree.q[half + odd]),
+                ];
+                *lanes = Self::transform(tree, ratio, raw);
+            }
+            return;
+        }
+        let LayerRows::Leaves(leaves) = &self.rows else {
+            unreachable!("the stored rows returned above");
+        };
+        let quarter = 2 * half;
+        for ((leaf, &(ratio, _)), lanes) in leaves.iter().zip(&self.ratio).zip(out.as_chunks_mut::<4>().0) {
+            // Node `j` of layer `s` uses the four leaves `j + k quarter`; folding nodes
+            // `2 i` and `2 i + 1` gives the same raw cells as a stored layer.
+            let node = |j: usize| upper_node(leaf.stacked, leaf.center, quarter, j, leaf.powers);
+            let (pa, qa) = node(even);
+            let (pb, qb) = node(odd);
+            let (pc, qc) = node(half + even);
+            let (pd, qd) = node(half + odd);
             let raw = [
-                fold(context, tree.p[even], tree.p[odd]),
-                fold(context, tree.p[half + even], tree.p[half + odd]),
-                fold(context, tree.q[even], tree.q[odd]),
-                fold(context, tree.q[half + even], tree.q[half + odd]),
+                fold(context, pa, pb),
+                fold(context, pc, pd),
+                fold(context, qa, qb),
+                fold(context, qc, qd),
             ];
-            *lanes = Self::transform(tree, ratio, raw);
+            *lanes = transformed_leaf(leaf, ratio, raw);
         }
     }
 
@@ -731,7 +849,34 @@ impl<'a> LayerGroup<'a> {
             .collect::<Option<Vec<(E, E)>>>()?;
         let products = (0..trees.len()).flat_map(|t| [(4 * t, 4 * t + 1, 0), (4 * t + 2, 4 * t + 3, 0)]).collect();
         let source = LayerSource {
-            trees,
+            rows: LayerRows::Stored(trees),
+            ratio,
+            products,
+            half,
+            unit: [E::one()],
+        };
+        Engine::new(source, eq_point).map(Self)
+    }
+
+    /// A group over `leaves` (one per challenge of one stack), whose layer
+    /// `s = depth - 2` is computed from the stack's leaves instead of being stored. `None`
+    /// when a `gamma_p` is zero, the leaf counts disagree, or the row count does not match
+    /// `eq_point`.
+    #[must_use]
+    pub fn from_leaves(leaves: Vec<LayerLeaves<'a>>, eq_point: &[E]) -> Option<Self> {
+        let half = 1_usize << eq_point.len();
+        // Layer `s = depth - 2` has `2^s` cells and every cell four leaves: the stacked
+        // lane holds `8 * half` cells.
+        if leaves.is_empty() || leaves.iter().any(|l| l.stacked.len() != 8 * half) {
+            return None;
+        }
+        let ratio = leaves
+            .iter()
+            .map(|l| l.gamma_p.inverse().map(|inverse| (l.gamma_q * inverse, inverse)))
+            .collect::<Option<Vec<(E, E)>>>()?;
+        let products = (0..leaves.len()).flat_map(|t| [(4 * t, 4 * t + 1, 0), (4 * t + 2, 4 * t + 3, 0)]).collect();
+        let source = LayerSource {
+            rows: LayerRows::Leaves(leaves),
             ratio,
             products,
             half,

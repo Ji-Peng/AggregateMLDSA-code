@@ -363,10 +363,15 @@ dedicated group with `kernel::Group` message by message.
    group of four integer lanes replaces two trees of four field lanes, and layer `D - 1` is
    never stored: layer `D - 2` is built for every challenge in one pass over the leaves from
    the elementary symmetric polynomials `e_1 .. e_4` of its four leaves (`q = X'^4 - e_1
-   X'^3 + e_2 X'^2 - e_3 X' + e_4`, `p = dq/dX'`, exact in `i64`). Stored layers halve
-   (8,192 signatures: 2,120 -> 1,062 MiB; `2^15`: about 8.3 -> 4.2 GiB, estimate). A
-   stack whose values spread over more than `2^16` (a dishonest witness) or of depth below 3
-   keeps the stored-layer path.
+   X'^3 + e_2 X'^2 - e_3 X' + e_4`, `p = dq/dX'`, exact in `i64`). Layer `D - 2` is not
+   stored either: the tree build writes layer `D - 3` straight from the leaves (each node
+   the parent of two layer-`(D - 2)` nodes computed in cache from their four leaves,
+   `stack_upper_parents`), and session `D - 2` computes its lanes `P_c, Q_c` again from the
+   leaves in round 0 and in the first fold (`LayerGroup::from_leaves`). The two leaf changes
+   halve the stored layers twice (8,192 signatures: 2,120 -> 1,062 MiB for the first; the
+   second removes the largest remaining layer, 2 GiB at `2^15`); `AGG_LOOKUP_LEAF_UPPER=0`
+   restores the stored layer `D - 2`. A stack whose values spread over more than `2^16` (a
+   dishonest witness) or of depth below 5 keeps the stored-layer path.
 2. *Bottom session and session `D - 1` on `kernel::IntPairGroup`.* The first round sums
    exact `i64` products of the integer lanes weighted by the equality table without
    reduction (`mad_int`: two `64 x 64` products per term); the table from the first fold on
@@ -431,8 +436,9 @@ The construction, driven by the PIOP transcript:
 - `FractionTree`: layers `0 .. depth - 1` stored as `K` pairs, built in parallel from the
   leaves (the bottom layer straight from the `i32` cells: `1` `K`-multiplication per node;
   upper layers `3`); layer `s` is freed after session `s`. For a stack on the integer path
-  (Section 4.6, `SymLanes`) the layers stop at `depth - 2`, built for every challenge in one
-  pass (`stack_upper_bottoms`).
+  (Section 4.6, `SymLanes`) the layers stop at `depth - 3`, built for every challenge in one
+  pass over the leaves (`stack_upper_parents`; `stack_upper_bottoms` with layer `depth - 2`
+  stored under `AGG_LOOKUP_LEAF_UPPER=0`).
 - `prove_in(stacks, tables, multiplicities, challenges, transcript, check)` and
   `verify_in(shape, proof, transcript) -> LookupClaims`, Section 1 exactly; the verifier
   through `kernel::{Group, GroupInstance, Lane::Source(Source::Field | Source::Ints),
