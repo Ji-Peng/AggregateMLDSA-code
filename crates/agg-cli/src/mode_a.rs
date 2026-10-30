@@ -61,7 +61,7 @@ use agg_piop::prover::{
     main_tables, prove_with_tables_using, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
     ProveHooks, ProveTimings, ProverInputs, SeededMatrices,
 };
-use agg_piop::public_data::KeyCache;
+use agg_piop::public_data::{KeyCache, PublicData};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
 use agg_piop::verifier::{verify_timed, KeccakVerifier, SegmentContext, VerifyReport};
 use agg_piop::wire::{pack_final_vector, unpack_final_vector, AggregateProof, ProofSize};
@@ -1491,16 +1491,23 @@ impl Aggregator {
         if keccak_profile(profile).is_none() {
             return Err(AggregateError::Profile(profile));
         }
-        // The Akita prover setup depends on the record count and the relation only: it is
-        // built on its own thread while the instance and the tables are computed. Any failure
-        // here leaves it to `prove_with_tables_using`, which builds it and reports the error.
+        // The Akita prover setup and the public data depend only on the record count, the
+        // relation and the instance: the setup is built on its own thread while the instance
+        // is computed, then the same thread builds the public data while the tables are
+        // computed. Any failure here leaves both to `prove_with_tables_using`.
         let relation = self.config.relation;
+        let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance>>();
         let early_setup = std::thread::Builder::new()
             .name("agg-setup".into())
             .spawn(move || {
-                CommitmentManifest::for_relation(n, relation)
+                let committer = CommitmentManifest::for_relation(n, relation)
                     .ok()
-                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok())
+                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+                let public = public_rx
+                    .recv()
+                    .ok()
+                    .map(|instance| PublicData::from_instance(&instance));
+                (committer, public)
             })
             .ok();
         for (i, (pk, _, sig)) in records.iter().enumerate() {
@@ -1516,10 +1523,11 @@ impl Aggregator {
             .map(|&(pk, msg, sig)| (pk, msg, sig[..C_TILDE_BYTES].try_into().expect("32 bytes")))
             .collect();
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.2).collect();
-        let instance = PublicInstance::new(&inputs).map_err(|e| match e {
+        let instance = Arc::new(PublicInstance::new(&inputs).map_err(|e| match e {
             InstanceError::PublicKey(i) => AggregateError::Malformed(i, "public key"),
             InstanceError::Geometry(_) => AggregateError::Count(n),
-        })?;
+        })?);
+        let _ = public_tx.send(Arc::clone(&instance));
         let instance_time = start.elapsed();
         agg_piop::prover::phase_stamp("instance");
         let prover_inputs = ProverInputs {
@@ -1583,10 +1591,13 @@ impl Aggregator {
             },
             swap_join: false,
         };
-        let committer = early_setup.and_then(|h| h.join().ok()).flatten();
+        let (committer, public) = early_setup
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or((None, None));
         let mut output = if hooks.stale_bridge {
             prove_with_tables_using(
                 committer,
+                public,
                 &prover_inputs,
                 &manifest,
                 main,
@@ -1598,6 +1609,7 @@ impl Aggregator {
         } else {
             prove_with_tables_using(
                 committer,
+                public,
                 &prover_inputs,
                 &manifest,
                 main,

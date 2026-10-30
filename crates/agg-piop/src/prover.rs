@@ -1273,16 +1273,17 @@ pub fn prove_with_tables(
     flock: FlockProfile,
     hooks: &ProveHooks<'_>,
 ) -> Result<ProverOutput, ProveError> {
-    prove_with_tables_using(None, inputs, manifest, main, bridge, keccak, flock, hooks)
+    prove_with_tables_using(None, None, inputs, manifest, main, bridge, keccak, flock, hooks)
 }
 
-/// [`prove_with_tables`] with the Akita prover setup built beforehand: it depends on the
-/// record count and the relation only, so a caller can build it on its own thread while
-/// the instance and the tables are computed.
-/// `None`, or a setup of another manifest, builds it here.
+/// [`prove_with_tables`] with the Akita prover setup and the public data built
+/// beforehand. Both depend only on the records and the instance, so a caller can build
+/// them on its own thread while the tables are computed. `None`, or a setup of another
+/// manifest, builds it here.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn prove_with_tables_using(
     committer: Option<TableCommitter>,
+    public: Option<PublicData>,
     inputs: &ProverInputs<'_>,
     manifest: &CommitmentManifest,
     main: &MainTables,
@@ -1300,7 +1301,7 @@ pub fn prove_with_tables_using(
     }
     check_bridge(bridge, flock)?;
     let segments = manifest.segments();
-    let public = PublicData::from_instance(inputs.instance);
+    let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
     let committer = match committer {
         Some(prebuilt) if prebuilt.manifest() == manifest => prebuilt,
         _ => TableCommitter::new(manifest.clone())?,
