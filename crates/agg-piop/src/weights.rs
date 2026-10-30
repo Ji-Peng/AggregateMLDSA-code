@@ -60,6 +60,14 @@ pub fn level1_weight_table(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> Vec<
     bridge::level1_table(&Shape::PRODUCTION, &bridge_domains(geom), m1, p1)
 }
 
+/// The factors of `w_1` (see [`crate::split_weight`]) for the point `p1` on `D_1`.
+#[must_use]
+pub fn level1_weight_split(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> crate::split_weight::SplitWeight {
+    assert_eq!(p1.len(), geom.d1() as usize, "a D_1 point");
+    let (c, zeta_vars, blocks) = bridge::level1_split(&Shape::PRODUCTION, &bridge_domains(geom), m1, p1);
+    crate::split_weight::SplitWeight { c, zeta_vars, blocks, len: geom.main_len() }
+}
+
 /// `w_1(r)` at a main-domain point `r`.
 #[must_use]
 pub fn level1_weight_at(geom: &Geometry, m1: &SparseMatrix, p1: &[E], r: &[E]) -> E {

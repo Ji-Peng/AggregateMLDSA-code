@@ -31,6 +31,7 @@ pub mod public_data;
 pub mod public_stream;
 pub mod range;
 pub mod source_tables;
+pub mod split_weight;
 pub mod stage;
 pub mod stage1;
 pub mod stage2;

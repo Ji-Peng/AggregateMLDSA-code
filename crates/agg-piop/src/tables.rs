@@ -18,7 +18,8 @@ use crate::range::square_map;
 use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
 use crate::virtual_polys::parity1_tables;
-use crate::weights::{level1_weight_table, level2_weight_table, level3_weight_tables, ring_weight_table};
+use crate::split_weight::SplitWeight;
+use crate::weights::{level1_weight_split, level1_weight_table, level2_weight_table, level3_weight_tables, ring_weight_table};
 use crate::OpeningField as E;
 
 /// The level-1 parities `y^(1)_t` on `D_1`.
@@ -76,6 +77,8 @@ pub struct ProverTables<'a> {
     pub parity1: Parity1,
     /// `w_1` on the main domain (after `r^(1)`).
     pub w1: Option<Vec<E>>,
+    /// `w_1` as its two factors instead of the table (`AGG_W1_SPLIT=0` builds the table).
+    pub w1_split: Option<SplitWeight>,
     /// `w_2` on `D_1` (after `tau`).
     pub w2: Option<Vec<E>>,
     /// `w_{3,t}` on `D_2` (after `tau`).
@@ -100,7 +103,7 @@ impl<'a> ProverTables<'a> {
     }
 
     fn with_parity1(tables: SourceTables<'a>, parity1: Parity1) -> Self {
-        Self { tables, parity1, w1: None, w2: None, w3: None, wa: None }
+        Self { tables, parity1, w1: None, w1_split: None, w2: None, w3: None, wa: None }
     }
 
     /// Materialize the parities of the committed bits under the bridge matrices.
@@ -111,6 +114,7 @@ impl<'a> ProverTables<'a> {
             tables,
             parity1,
             w1: None,
+            w1_split: None,
             w2: None,
             w3: None,
             wa: None,
@@ -132,12 +136,19 @@ impl<'a> ProverTables<'a> {
         let r1_1 = &r1[r1.len() - geom.d1() as usize..];
         self.w2 = None;
         self.w3 = None;
-        self.w1 = Some(level1_weight_table(&geom, &matrices.m1, r1_1));
+        let split_on = std::env::var_os("AGG_W1_SPLIT").is_none_or(|v| v != "0");
+        let split = split_on.then(|| level1_weight_split(&geom, &matrices.m1, r1_1)).filter(SplitWeight::usable);
+        if split.is_some() {
+            self.w1_split = split;
+        } else {
+            self.w1 = Some(level1_weight_table(&geom, &matrices.m1, r1_1));
+        }
     }
 
     /// Build `w_A` from `r^(2)` and drop `w_1`.
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
+        self.w1_split = None;
         self.wa = Some(ring_weight_table(public, r2));
     }
 
@@ -150,7 +161,12 @@ impl<'a> ProverTables<'a> {
             LaneId::DigitSquare(c) => Lane::mapped(column(c).narrow(), square_map()),
             LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
             LaneId::Weight(WeightId::Level1) => {
-                Lane::Source(Source::Field(self.w1.as_deref().expect("w_1 after r^(1)")))
+                match (&self.w1, &self.w1_split) {
+                    (Some(table), _) => Lane::Source(Source::Field(table)),
+                    // The stage takes the factors; the table only backs the fallback.
+                    (None, Some(_)) => Lane::Folded(Vec::new()),
+                    (None, None) => panic!("w_1 after r^(1)"),
+                }
             }
             LaneId::Weight(WeightId::Level2) => {
                 Lane::Source(Source::Field(self.w2.as_deref().expect("w_2 after tau")))

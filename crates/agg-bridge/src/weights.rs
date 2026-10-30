@@ -163,9 +163,23 @@ pub fn level1_table<F: Ring>(
     m1: &SparseMatrix,
     p1: &[F],
 ) -> Vec<F> {
+    let (c1, zeta_vars, blocks) = level1_split(shape, domains, m1, p1);
+    spread(&c1, zeta_vars, &blocks, domains.input_len)
+}
+
+/// The factors of [`level1_table`]: the in-block vector `c_1`, the in-block variable count
+/// and the block weights, with `w_1(x) = c_1[x mod 2^zeta_vars] blocks[x >> zeta_vars]`
+/// (zero where the in-block index is beyond `c_1`).
+#[must_use]
+pub fn level1_split<F: Ring>(
+    shape: &Shape,
+    domains: &Domains,
+    m1: &SparseMatrix,
+    p1: &[F],
+) -> (Vec<F>, usize, Vec<F>) {
     let c1 = level1_columns(shape, domains, m1, p1);
     let blocks = eq_table(&p1[rho_vars(shape, 1)..]);
-    spread(&c1, zeta1_vars(shape, domains), &blocks, domains.input_len)
+    (c1, zeta1_vars(shape, domains), blocks)
 }
 
 /// `w_1(r)` at an input-domain point `r` (the verifier's terminal formula).
