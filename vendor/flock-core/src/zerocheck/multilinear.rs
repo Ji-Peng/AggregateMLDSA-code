@@ -622,7 +622,7 @@ fn kill_pair(a: &mut [F128], b: &mut [F128], x0l: usize, x1l: usize, write_dead:
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 #[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-unsafe fn fold_pair_run_x86_avx512<D>(
+unsafe fn fold_pair_run_x86_avx512<D, const STORE: bool>(
     a_packed: &[u8],
     b_packed: &[u8],
     table: &UniSkipFoldTable,
@@ -661,7 +661,7 @@ where
                 let x0l = 2 * (p - out_base);
                 let x1l = x0l + 1;
                 if is_dead(p) {
-                    kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                    if STORE { kill_pair(a_out, b_out, x0l, x1l, write_dead); }
                     continue;
                 }
 
@@ -675,10 +675,12 @@ where
                     b_pkt_ptr.add(x1g * 8),
                 );
                 [a0[lane], a1[lane], b0[lane], b1[lane]] = folded;
-                a_out[x0l] = a0[lane];
-                a_out[x1l] = a1[lane];
-                b_out[x0l] = b0[lane];
-                b_out[x1l] = b1[lane];
+                if STORE {
+                    a_out[x0l] = a0[lane];
+                    a_out[x1l] = a1[lane];
+                    b_out[x0l] = b0[lane];
+                    b_out[x1l] = b1[lane];
+                }
             }
 
             let a1x4 = f128x4_loadu(a1.as_ptr());
@@ -700,7 +702,7 @@ where
             let x0l = 2 * (pair - out_base);
             let x1l = x0l + 1;
             if is_dead(pair) {
-                kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                if STORE { kill_pair(a_out, b_out, x0l, x1l, write_dead); }
                 pair += 1;
                 continue;
             }
@@ -714,10 +716,12 @@ where
                 b_pkt_ptr.add(x0g * 8),
                 b_pkt_ptr.add(x1g * 8),
             );
-            a_out[x0l] = a0;
-            a_out[x1l] = a1;
-            b_out[x0l] = b0;
-            b_out[x1l] = b1;
+            if STORE {
+                a_out[x0l] = a0;
+                a_out[x1l] = a1;
+                b_out[x0l] = b0;
+                b_out[x1l] = b1;
+            }
             let eq_l = eq_lo[pair & lo_mask];
             p1_acc ^= eq_l.mul_unreduced(a1 * b1);
             pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
@@ -771,7 +775,7 @@ where
         // SAFETY: the runtime check guarantees the kernel's target features; the
         // caller's geometry contract is forwarded unchanged.
         return unsafe {
-            fold_pair_run_x86_avx512(
+            fold_pair_run_x86_avx512::<D, true>(
                 a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
                 a_out, b_out,
             )
@@ -1258,15 +1262,30 @@ pub fn sparse_round2_message_only(
         .into_par_iter()
         .map(|task| {
             let task_pieces = &pieces[task];
-            // Two 2,048-element buffers hold at most 1,024 pairs each.
-            let mut aa = take_f128(2 * 1024);
-            let mut bb = take_f128(2 * 1024);
+            #[cfg(target_arch = "x86_64")]
+            let simd = has(AVX512_CLMUL);
+            #[cfg(not(target_arch = "x86_64"))]
+            let simd = false;
+            // The portable kernel still needs scratch for at most 1,024 pairs.
+            let mut aa = if simd { Vec::new() } else { take_f128(2 * 1024) };
+            let mut bb = if simd { Vec::new() } else { take_f128(2 * 1024) };
             let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
             for &(ps, pe) in task_pieces {
                 let mut t = ps;
                 while t < pe {
                     let end = (((t >> eq.n_lo) + 1) << eq.n_lo).min(pe).min(t + 1024);
-                    let (p1, pi) = fold_pair_run(
+                    #[cfg(target_arch = "x86_64")]
+                    let vector_result = if simd {
+                        // SAFETY: the runtime check supplies the kernel features and this
+                        // run stays within the equality block and packed input slices.
+                        Some(unsafe { fold_pair_run_x86_avx512::<_, false>(
+                            a, b, table, &eq.lo, lo_size, &|_| false, false,
+                            t, end, t, &mut aa, &mut bb,
+                        ) })
+                    } else { None };
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let vector_result = None;
+                    let (p1, pi) = vector_result.unwrap_or_else(|| fold_pair_run(
                         a,
                         b,
                         table,
@@ -1279,14 +1298,16 @@ pub fn sparse_round2_message_only(
                         t,
                         &mut aa,
                         &mut bb,
-                    );
+                    ));
                     s1 += eq.hi[t >> eq.n_lo] * p1.reduce();
                     si += eq.hi[t >> eq.n_lo] * pi.reduce();
                     t = end;
                 }
             }
-            crate::scratch::give_f128(aa);
-            crate::scratch::give_f128(bb);
+            if !simd {
+                crate::scratch::give_f128(aa);
+                crate::scratch::give_f128(bb);
+            }
             (s1, si)
         })
         .reduce(|| (F128::ZERO, F128::ZERO), |(a, b), (c, d)| (a + c, b + d));
@@ -3829,6 +3850,60 @@ mod tests {
             let expected = crate::simd::with_mask(0, run);
             let actual = crate::simd::with_mask(0xff, run);
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn round2_without_stores_matches_storing_kernel() {
+        if !crate::simd::has(crate::simd::AVX512_CLMUL) { return; }
+        let mut rng = Rng::new(120);
+        let a: Vec<u8> = (0..16 * 257).map(|_| rng.next_u64() as u8).collect();
+        let b: Vec<u8> = (0..16 * 257).map(|_| rng.next_u64() as u8).collect();
+        let table = UniSkipFoldTable::new(6, rng.f128());
+        let eq = rng.f128_vec(512);
+        let mut aa = vec![F128::ZERO; 514];
+        let mut bb = vec![F128::ZERO; 514];
+        let dead = |i| i % 7 == 0;
+        // SAFETY: runtime detection provides the required features and all slices
+        // cover the tested runs, including a one-pair tail.
+        unsafe {
+            for end in [1, 4, 257] {
+                let expected = super::fold_pair_run_x86_avx512::<_, true>(
+                    &a, &b, &table, &eq, 512, &dead, true, 0, end, 0, &mut aa, &mut bb);
+                let actual = super::fold_pair_run_x86_avx512::<_, false>(
+                    &a, &b, &table, &eq, 512, &dead, false, 0, end, 0, &mut [], &mut []);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    /// Single-thread round-2 folding at a large opening shape.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_round2_message() {
+        let pairs = 1 << 20;
+        let a = vec![0x35u8; 16 * pairs];
+        let b = vec![0xa6u8; 16 * pairs];
+        let table = UniSkipFoldTable::new(6, F128::new(3, 7));
+        let eq = vec![F128::new(5, 11); 1024];
+        let mut aa = vec![F128::ZERO; 2048];
+        let mut bb = vec![F128::ZERO; 2048];
+        for run in 0..6 {
+            let start = std::time::Instant::now();
+            for t in (0..pairs).step_by(1024) {
+                #[cfg(target_arch = "x86_64")]
+                if crate::simd::has(crate::simd::AVX512_CLMUL) {
+                    // SAFETY: runtime detection provides the required features.
+                    std::hint::black_box(unsafe { super::fold_pair_run_x86_avx512::<_, false>(
+                        &a, &b, &table, &eq, 1024, &|_| false, false,
+                        t, t + 1024, t, &mut aa, &mut bb) });
+                    continue;
+                }
+                std::hint::black_box(super::fold_pair_run(&a, &b, &table, &eq, 1024,
+                    &|_| false, false, t, t + 1024, t, &mut aa, &mut bb));
+            }
+            eprintln!("round2 run={run} ms={:.3}", start.elapsed().as_secs_f64() * 1000.0);
         }
     }
 

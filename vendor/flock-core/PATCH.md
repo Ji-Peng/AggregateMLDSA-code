@@ -65,6 +65,7 @@ run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and ca
 | zerocheck round 1: `shift_reduce_inner_ab` (GFNI AVX-512, else GFNI SSE), `bit_transpose_64bytes` (`avx512vbmi`), `accumulate_convert_with_s_hat_v` (VPCLMULQDQ) | as listed | `zerocheck/univariate_skip_optimized/kernels.rs` |
 | inverse-NTT table `apply` (`ell = 64`) | `avx512f` | `ntt/inv_table.rs` |
 | zerocheck round 2 (`fold_pair_run`; the upstream inline block moved verbatim into `fold_pair_run_x86_avx512`) and the fused fold + message (`fold_and_message_x86_avx512`, given its `#[target_feature]`) | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
+| zerocheck round 2 message-only (`fold_pair_run_x86_avx512::<_, false>`), without output stores or scratch buffers | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
 | zerocheck packed round 3 (`round3_task_avx512`), with wide products reduced once per equality block | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
 
 The AVX-512 GF(2^128) helpers those kernels use (`ghash_mul_x4`, `f128x4_loadu`,
@@ -270,3 +271,4 @@ under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows, each
 `FLOCK_LB_FUSED_MERKLE` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
+
