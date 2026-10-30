@@ -32,8 +32,9 @@ the byte size of every part of the aggregate). Steps:
 
 The stages (branch S of the transcript fork) run on their own pool when
 `AGG_PIOP_S_THREADS` is set, and by default while the Flock fork runs and the PIOP pool has
-four threads or more: 16 threads on a 32-thread pool, 6 on a 16-thread pool, otherwise 3/8 of
-the pool rounded to nearest and at least 2; `AGG_PIOP_S_THREADS=0` keeps the shared pool.
+four threads or more: half at 32 threads or more, 3/8 of the pool rounded to nearest and at
+least 2 below. The defaults are 16 threads on a 32-thread pool and 6 on a 16-thread pool; there
+the three pools add up to 60 and 28 threads. `AGG_PIOP_S_THREADS=0` keeps the shared pool.
 
 `agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
 `VerifyCostReport`: accept or the first failing check, the 15 step times of
@@ -89,6 +90,24 @@ taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [-
 AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
 ```
 
+Environment knobs (all optional; none changes the proof bytes):
+
+| Variable | Effect |
+| --- | --- |
+| `AGG_FLOCK_THREADS` | threads of the Flock pool beside the PIOP; default `ceil(3/8)` of the rayon pool, `0` serial |
+| `AGG_PIOP_S_THREADS` | threads of the stage branch's own pool; default as above, `0` shares the rayon pool |
+| `AGG_PIOP_THREADS` | threads of the PIOP pool beside the Flock fork; PIOP + Flock capped at the logical CPUs |
+| `AGG_PIOP_FORK` | `0`: run the two transcript branches one after the other |
+| `AGG_OPENING_THREADS` | threads of the Akita opening pool; default one per physical core |
+| `AGG_HUGEPAGE` | `0`: turn the huge-page advice off |
+| `AGG_ALLOC_CACHE` | cap the cache of freed large blocks in GiB (default 6, `0` disables it) |
+| `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
+| `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
+| `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
+| `AGG_PARITY_EARLY` | any value: build the parity tables beside the round-2 commitment |
+
+The vendored Flock core's profiling knobs (`FLOCK_*`) are listed in `docs/perf.md`.
+
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
 `h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
 (relation byte 1: the FIPS 204 bounds `|z| <= 130,993`, `|u| <= 190,465`, one more
@@ -103,8 +122,10 @@ header print the relation. The Keccak side does not depend on it.
 rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work-normalized in
 Flock's accounting, with the level-0 list priced at the outer sites (K19) and at the tie
 (K20); default `fast`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
-12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. `--flock-span off` proves every segment
-on its own (K10 parts) instead of one span over all segments (K16).
+12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. A profile
+outside the default set (`fast`, `slim`) is rejected with a message naming
+`--flock-profile slim8`, not verified under another profile. `--flock-span off` proves every
+segment on its own (K10 parts) instead of one span over all segments (K16).
 
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on
 reject, 2 on a usage or file error. `bench` generates the records in memory and follows

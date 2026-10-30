@@ -55,16 +55,29 @@ commands:
 
 environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
-                        (aggregate, bench; default half the rayon pool; 0: one after the other;
-                        at most the logical CPUs or the rayon pool; a value that is not a
-                        number warns and falls back to the default).
+                        (aggregate, bench; default 3/8 of the rayon pool rounded up, 12 on a
+                        32-thread host; 0: one after the other; at most the logical CPUs or
+                        the rayon pool; a value that is not a number warns and falls back to
+                        the default).
   AGG_PIOP_S_THREADS=K  threads of the stage branch's own pool beside the Flock fork
-                        (aggregate, bench; default 16 on a 32-thread rayon pool, 6 on 16,
-                        3/8 of the pool rounded and at least 2 below, only with a running
-                        fork and at least 4 PIOP threads; 0: the shared rayon pool).
+                        (aggregate, bench; default half at 32 threads or more, 3/8 rounded
+                        to nearest and at least 2 below; only with a running fork and at
+                        least 4 PIOP threads; 0: the shared rayon pool). At 16 and 32
+                        threads the defaults are 6 and 16, and the three pools add up to 28
+                        and 60 threads.
+  AGG_PIOP_THREADS=K    threads of the PIOP pool beside the Flock fork (aggregate, bench;
+                        default the rayon pool; PIOP + Flock capped at the logical CPUs).
+  AGG_PIOP_FORK=0       run the transcript branches one after the other (the proof is the
+                        same).
   AGG_OPENING_THREADS=K threads of the pool that runs the Akita opening (aggregate, bench;
                         default one per physical core, at most the rayon pool; 0 or at least
                         the rayon pool: the rayon pool itself).
+  AGG_HUGEPAGE=0        turn the huge-page advice off (memory behaviour only; the proof is
+                        the same).
+  AGG_ALLOC_CACHE=GiB   cap the cache of freed large blocks (default 6; 0 disables it).
+  AGG_ALLOC_POISON=1    fill reused blocks with 0xA5 (a test mode for uninitialised reads).
+  AGG_W1_SPLIT=0        build the level-1 weight table instead of its two factors (memory and
+                        time only; the proof is the same).
   AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
                         end of every prover step (diagnostics; the aggregate is the same).
   AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2

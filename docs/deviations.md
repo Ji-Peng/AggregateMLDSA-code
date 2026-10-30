@@ -975,12 +975,16 @@ Code (`agg_piop::{transcript, prover, verifier, pow}`):
   proof-of-work plan and its digest, the wire layout and every fixed-size section of the
   proof are unchanged; only challenge values move (and with them the Akita opening's
   length, which depends on them: 61,031 B to 60,976 B at 1K on the integ3 records).
-- Prover (`prover::{run_branches, prove_lookup_branch, prove_stages_branch}`): the branches
-  run concurrently on the PIOP's pool: `rayon::join` inside a pool (`AGG_PIOP_THREADS`
-  sets one), else branch S on a scoped thread with the PIOP pool's worker stack
-  (64 MiB) beside branch L on the caller's thread, both feeding the global pool.
-  `AGG_PIOP_FORK=0` (or `off`) runs L, then S, on the caller's thread. All schedules give
-  the same bytes (`tests/piop_fork.rs`; 1K aggregates identical across `AGG_MLDSA_SIMD`,
+- Prover (`prover::{run_branches, prove_lookup_branch, prove_stages_branch}`): when the
+  Flock fork runs and the PIOP pool has at least four threads, branch S runs concurrently
+  on its own pool beside branch L on the PIOP pool: half the PIOP pool at 32 threads or
+  more and 3/8 rounded to nearest (at least 2) below, i.e. 16 and 6 threads on a 16C32T
+  host, overridable with `AGG_PIOP_S_THREADS` (`0` shares the PIOP pool). Without a
+  separate pool the branches run concurrently on the PIOP's pool (`rayon::join` inside a
+  pool, `AGG_PIOP_THREADS` sets one), else branch S on a scoped thread with the PIOP pool's
+  worker stack (64 MiB) beside branch L on the caller's thread, both feeding the global
+  pool. `AGG_PIOP_FORK=0` (or `off`) runs L, then S, on the caller's thread. All schedules
+  give the same bytes (`tests/piop_fork.rs`; 1K aggregates identical across `AGG_MLDSA_SIMD`,
   `RAYON_NUM_THREADS=1|16` and `AGG_PIOP_FORK=0`).
 - Verifier: replays L, then S, on the two clones, then joins; the order of the checks does
   not affect the verdict.
