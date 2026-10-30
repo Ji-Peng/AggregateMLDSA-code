@@ -1562,6 +1562,8 @@ pub fn fold_and_compute_round_pair_into(
             // run time.
             #[cfg(target_arch = "x86_64")]
             let simd = has(AVX512_CLMUL);
+            #[cfg(not(target_arch = "x86_64"))]
+            let simd = false;
             let (p1, pinf) = if simd {
                 // SAFETY: chunk geometry supplies two inputs per output and two
                 // outputs per eq_lo value; features are checked at run time.

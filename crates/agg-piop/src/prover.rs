@@ -434,7 +434,8 @@ fn piop_pool_size(flock_threads: usize) -> Option<usize> {
     };
     let cpus = logical_cpus();
     if threads + flock_threads > cpus {
-        let capped = cpus.saturating_sub(flock_threads);
+        // At least one PIOP thread: 0 would mean the full global pool.
+        let capped = cpus.saturating_sub(flock_threads).max(1);
         warn_once(&format!(
             "PIOP {threads} + Flock {flock_threads} threads exceed {cpus} logical CPUs; \
              capping the PIOP pool at {capped}"
