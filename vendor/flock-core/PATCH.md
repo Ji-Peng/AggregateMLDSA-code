@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Eight changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Nine changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -274,3 +274,27 @@ under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
 
 The `FLOCK_INDUCE_CHUNK_LOG` knob selects the induced-basis chunk size; `0` selects the reference implementation. The default chunk log is 11. The SIMD kernel is selected once per chunk through the existing runtime feature dispatch.
+
+**9. Non-temporal stores for the zerocheck fold outputs** (`src/zerocheck/multilinear.rs`:
+`NT_STORE_MIN_BYTES`, `nt_store_enabled`, `nt_store_eligible`,
+`fold_and_compute_round_pair_into`, `fold_and_round_pair_sparse_into`; kernels
+`src/zerocheck/multilinear/kernels/x86_64.rs`: `FoldStore`, `fold_store_for`,
+`store_fold_x4`, `fold_and_message_impl`). Prover-only, byte-identical. The multilinear tail's
+fold outputs are re-read in full by the next round, and at the 32K shape each ping-pong buffer
+is about a GiB, far beyond the cache: an ordinary store's read-for-ownership is traffic that no
+later read can use (2.26 GB over the tail, est.). Output slices of at least 32 MiB that start on
+a 64-byte boundary are therefore written with `vmovntdq`: `_mm512_stream_si512` when both
+output bases are 64-byte aligned, `_mm256_stream_si256` when a task starts 32 bytes off a cache
+line (task slices advance by live pair counts, so both occur), and cached stores otherwise. The
+AVX-512 fused kernel carries a const-generic store arm so the choice costs no branch in its
+loop; the tail's two message pairs now come from the store registers instead of a readback. Each
+worker issues `_mm_sfence` after its stores and before the fold's join, so the next round never
+reads a non-temporal store that has not become globally visible. The kernel keeps its own
+`#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1,avx2,avx")]` and is called only when
+`crate::simd::has(AVX512_CLMUL)` selected it at run time, so a build without AVX-512 target
+features uses the streaming arm only on a CPU that has the instructions and cached stores
+elsewhere. `FLOCK_ZC_NT=0` restores cached stores for A/B; the `FLOCK_ZC_TIMING` line
+`[zc-timing] fold {sparse,dense}: out=… MiB streaming=on` prints when the arm engages. Oracle
+test: `zerocheck::multilinear::tests::streaming_fold_stores_match_cached` (the sparse and dense
+folds under forced streaming and forced cached stores, 64-byte-aligned buffers, a task boundary
+32 bytes off a cache line; buffers, layout and both messages equal).
