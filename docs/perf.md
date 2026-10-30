@@ -830,3 +830,27 @@ ML-DSA SIMD dispatch (`auto`, AVX-512 on this VM) and the Flock commit levers of
 One-round runs of `cfc566b` with the engine forced: `AGG_MLDSA_SIMD=avx2` prove 8,570.0 ms,
 `scalar` 8,795.0 ms. Aggregates (1,469,874 B) are byte-identical across the builds, and every
 verifier run accepts.
+
+## Pool schedule presets
+
+`AGG_SCHED_PRESET=auto` (default) chooses a Flock pool size when the available logical
+CPU count and Rayon pool size match a row below. `off` restores the 3/8 default;
+`AGG_FLOCK_THREADS` overrides either choice. Flock and PIOP pools remain additive.
+
+| Logical CPUs / Rayon threads | Flock workers | Policy and evidence |
+| --- | ---: | --- |
+| 1 / 1 | 0 | No fork; Flock precedes PIOP. |
+| 16 / 16 | 4 | No pinning or donation: both experiments failed their local gates. Local 4K F=4 versus F=6 is noisy; see below. |
+| 32 / 32 | 12 | Unmeasured, cloud sweep needed. |
+| Other | ceil(3 Rayon / 8) | Existing default. |
+
+On WSL (i7-11700K, 16 logical CPUs), the 4K A/B had one in-process warmup and one
+measured run per launch, alternating off/on/off/on. Mean fork wall was 1720.2 / 1717.8 ms,
+Flock proofs 1188.8 / 1200.9 ms, PIOP branch approximately 1720.2 / 1717.7 ms, and total
+prove 3222.2 / 3186.9 ms (0.989x). Individual totals were 2577.7, 3866.6 / 2460.2,
+3913.5 ms; the spread makes this directional only. The PIOP interval uses phase stamps
+from shares to stage 3. One-thread 1K fresh aggregates took 4308.5 ms before and 4075.2 ms
+after; proof bytes matched at 1, 4, 16 and 32 Rayon threads. The one-thread path was
+unchanged. The 32-thread row is an extrapolation, and the separate IFMA implementation is
+not present in this branch: an IFMA-aware physical-core pool needs integration and a cloud
+sweep before it can be selected here.

@@ -174,22 +174,28 @@ impl KeccakSide for NoKeccak {
     }
 }
 
-/// Threads of the Flock pool of the fork-join: `AGG_FLOCK_THREADS` if set (`0`: no fork,
-/// the Flock proofs and then the PIOP on the caller's pool), else 3/8 of the global pool
-/// rounded up (6 of 16 threads: the PIOP branch is the longer one. On main's 32K cloud sweep
-/// 4 threads were 0.7% faster than 6, within noise, and 8 slower; at 4K locally 4 and 6
-/// overlap and 8 is slower; a 32K re-sweep of this prover decides. A global pool of 8 threads
-/// alone is slower). A value that is not a number is reported once on stderr
-/// and replaced by the default (a measurement must not silently run another pool size; the
-/// bench report prints the size used); a larger value than [`max_flock_threads`] is clamped
-/// to it. `0` on a rayon worker or with a one-thread global pool, where an extra pool gains
-/// nothing or a blocked worker could deadlock.
+/// Threads of the Flock fork pool. `AGG_FLOCK_THREADS` overrides the preset (0 disables
+/// the fork). The automatic preset selects 4 on a 16-thread host and 12 on a 32-thread
+/// host; other sizes use 3/8 of the current pool rounded up. `AGG_SCHED_PRESET=off`
+/// always uses the latter default. Values are capped at [`max_flock_threads`]. A Rayon
+/// worker or a one-thread pool disables the fork to avoid blocking the pool.
 #[must_use]
 pub fn flock_pool_threads() -> usize {
     if crate::pcs::on_calling_thread() {
         return 0;
     }
-    let default = || (3 * rayon::current_num_threads()).div_ceil(8);
+    let default = || {
+        let global = rayon::current_num_threads();
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if std::env::var("AGG_SCHED_PRESET").as_deref() != Ok("off") {
+            match (cpus, global) {
+                (16, 16) => return 4,
+                (32, 32) => return 12,
+                _ => {}
+            }
+        }
+        (3 * global).div_ceil(8)
+    };
     match std::env::var("AGG_FLOCK_THREADS") {
         Err(std::env::VarError::NotPresent) => default(),
         Ok(v) => match v.trim().parse::<usize>() {
