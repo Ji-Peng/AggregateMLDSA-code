@@ -126,6 +126,7 @@ name = "agg-bridge"
 version = "0.1.0"
 dependencies = [
  "agg-witness",
+ "flock-core",
  "flock-field",
  "jolt-field",
  "keccak 0.1.6",

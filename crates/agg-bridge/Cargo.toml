@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 agg-witness = { workspace = true }
+flock-core = { workspace = true }
 flock-field = { workspace = true }
 jolt-field = { workspace = true }
 keccak = "0.1.6"
