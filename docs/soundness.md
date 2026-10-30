@@ -361,7 +361,7 @@ by its digest before `eq_Y`.
 Akita's plan (`akita_params::derive_transcript_grinding_plan_from_public_shape`) assigns
 every field site of the opening a loss factor and a target by Akita Eq. (146) priced over
 the exact cardinality `p^2` (`ChallengeFieldOrder::from_field`, PR #104): evaluation
-batch (loss = claims, 38), extension-opening point and batch, every sum-check round
+batch (loss = claims, 52), extension-opening point and batch, every sum-check round
 (stage 1, 2, physical L2, extension-opening reduction; loss = degree), ring-switch
 `alpha` (loss `2d' - 1`, Akita Theorem 10.36), `tau0`, `tau1` points, interstage, L2
 merge and virtual batches, compression and stage-2 batches. Sparse fold challenges carry
@@ -650,8 +650,9 @@ the tie sites the bad sets are those of Section 12.4, built on Sections 3.5 and 
    Section 2); the assigned bound keeps Aerie's `l/|K|`.
 
 Before work, the round-by-round union bound (sum of `nu_t/|F_t|`, which is also the
-interactive soundness error of the PIOP, plus the `X`, `sd` and `proj.psi` terms `2^-203.5`, about
-`2^-139`) is `(11 d_main + d_main + 3 + GKR)/|K|` (the stage degrees sum to 11 in H-u):
+interactive soundness error of the PIOP, plus the `X` term `2^-203.5`, the `sd` term (`<=
+2^-131.4`) and the `proj.psi` term `2^-128`) is `(11 d_main + d_main + 3 + GKR)/|K|` (the
+stage degrees sum to 11 in H-u):
 `914/|K| = 2^-118.2` at `2^10`, `1,154/|K| = 2^-117.8` at `2^13`, `1,329/|K| = 2^-117.6`
 at `2^15`, against the per-instance ledger's `2,594`, `3,086`, `3,429` over `|K|`. This is still not
 128 bits; the schedule makes every site `<= 2^-128` per address, which is the statement of
@@ -829,7 +830,9 @@ with the sponge lists on the segment of `sd` (12.4), with Lemma 12.4 for the see
 the tied parts' sites (tie, `eq_Y`, chain rounds) with the list factor and Flock's per-site
 bounds under (F), and the evaluation batch on the segment of `X` (12.3, 12.4). (4) Every address weighs at most `2^-128` (Section 3,
 the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi` exactly
-`2^-128` by Lemma P; Flock with 4.3/4.4
+`2^-128` by Lemma P, the worst site: the plan alone gives `2^-128.36`, so the global `rho` of
+Aerie Eq. (18) is attained there and any further factor 2 at that site would break the
+128-bit claim; Flock with 4.3/4.4
 under (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
 Akita Theorem 10.17 with Aerie Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <=
 2^-128`. (5) The witness map returns the round-1 tables, which satisfy the caller's relation by the

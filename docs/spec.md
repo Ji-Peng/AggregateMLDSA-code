@@ -472,7 +472,7 @@ address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Propositio
 | tied part's tie site (public claim), GF($`2^{128}`$), with the sponge list size $`L_s`$ (35, 50, 70) | 1 (span) | $`L_s(\nu_s+3)`$ | $`L_s(\nu_s+3)/2^{128}`$ | 10 / 10 / 11 (`Fast`/`Slim`/`Slim8`, span of four) | $`g+7`$ |
 | tied part's $`\mathrm{eq}_Y`$ site (parity chain, K21) | 1 (span) | $`L_s(12+s)`$ | $`L_s(12+s)/2^{128}`$ | 9 / 10 / 10 | $`g+7`$ |
 | tied part's chain rounds (degree 2) | $`13+d+s`$ (28) | $`2L_s`$ | $`2L_s/2^{128}`$ | 7 / 7 / 8 | $`g+7`$ |
-| Akita opening sites | 459 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
+| Akita opening sites | 461 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
 | Flock internal sites | | Flock's | Flock's per-site schedule; outer sites with the level-0 list factor (PATCH.md 5) | | 8-byte words (already in the Flock proofs) |
 
 At $`N^\star=2^{15}`$ the PIOP plan has 456 sites and 455 nonces, 4,195 bits in one packed
@@ -496,7 +496,7 @@ $`(R_f+R_{\rm coord}+R_F)2^{-128}`$ (about $`2^{-117}`$, the claim is 128 bits p
 **Lemma (lookup identity).** Let the committed looked-up values be $`f_1,\ldots,f_L\in\mathbb F_p`$ ($`f=S+2^{15}`$ for a stored cell $`S`$; the padding slots are public, $`f=0`$) and $`m\in\mathbb F_p^{T_{16}}`$, all fixed by the commitments before $`X_1,X_2`$. If some $`f_i\notin T_{16}`$, then $`R(X)=\sum_i1/(X-f_i)-\sum_{t\in T_{16}}m(t)/(X-t)\ne0`$: the coefficient of $`1/(X-f_i)`$ is a count in $`[1,L]`$, nonzero in $`\mathbb F_p`$ since $`p\gt L`$ (LogUp Lemma 5, any $`m`$). Its numerator $`N`$ over $`\prod_{a\in S}(X-a)`$, $`S=\{f_i\}\cup T_{16}`$, is nonzero of degree at most $`L+M-1`$, and a challenge passes the root check (all root denominators nonzero, so $`X\notin S`$) only if $`N(X)=0`$. For independent uniform $`X_1,X_2`$, $`\Pr[N(X_1)=N(X_2)=0]\le((L+M-1)/|K|)^2`$. Otherwise some tree set's true root violates its identity, the prover's layer-1 values for it are false, and the batched GKR sessions accept a false claim only with the GKR term (Proposition 1 of LogUp-GKR with independent coefficients per claim; the second tree set adds claims, not sessions). With one challenge the identity term would be $`2^{-101.0}`$ at $`N=2^{15}`$ ($`2^{-105.9}`$ at 1,024), which no remedy cheaper than the second challenge brings to $`2^{-128}`$ (`docs/lookup.md` Section 2.1: a 28-bit work nonce costs about 7 times the second challenge and exceeds Akita's 25-bit cap; an $`\mathbb F_{p^4}`$ challenge triples the tree arithmetic).
 
 With the schedule every field site above weighs at most $`2^{-128}`$ per address (the
-identity term $`2^{-201.9}`$ needs no work; the lookup's GKR rounds, each $`3/|K|\approx2^{-126.4}`$
+identity term $`2^{-203.5}`$ needs no work; the lookup's GKR rounds, each $`3/|K|\approx2^{-126.4}`$
 before work, get 2 bits). Point reuse ($`\tau`$ for all zero-checks, $`r^{(1)}`$ for the leaves, $`r^{(2)}`$ for the links and the ring identity, the stack points $`\pi_j`$ for their reductions) is sound because every tested table is committed before the point is sampled (Aerie 9.6).
 
 ### 12.2 Extraction

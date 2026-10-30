@@ -199,8 +199,8 @@ because one false claim suffices to carry on.
 
 Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `11 d_main` (degrees
 4, 4, 3, set by `range_w1` in stage 1 and `leaf6[U_hi]` in stage 2), the zero-check point
-`tau` `d_main`, the three stage batching vectors 3: `303/|K|`; plus GKR `1,106/|K|`:
-`1,409/|K| = 2^-117.5` for every field term except the LogUp one.
+`tau` `d_main`, the three stage batching vectors 3: `303/|K|`; plus GKR `1,026/|K|`:
+`1,329/|K| = 2^-117.6` for every field term except the LogUp one.
 
 **The LogUp term is the critical one** (`2^-101` at `2^15` with one challenge, above every
 other term). Decision: two independent challenges. Section 2.1 records the bounded search;
@@ -242,9 +242,9 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 The only remedies that bring the identity term to 128 bits at `N = 2^15` are (i), (ii)
 and (iii); (ii) is the cheapest of the three by the measurements of Section 4 and needs
 neither grinding for that term nor a kernel field change. This is not 128 bits for the
-lookup: its GKR sessions are `1,106/|K| ~ 2^-117.9` at `2^15` and each degree-3 round is
+lookup: its GKR sessions are `1,026/|K| ~ 2^-118.0` at `2^15` and each degree-3 round is
 `3/|K| ~ 2^-126.4`, above `2^-128`, so the lookup, like the other field terms
-(`1,409/|K| = 2^-117.5` in all), reaches `2^-128` per site only with grinding to Aerie's
+(`1,329/|K| = 2^-117.6` in all), reaches `2^-128` per site only with grinding to Aerie's
 schedule (`docs/soundness.md`: 2 bits per GKR round, a merge 1
 bit, a batching vector `bit_length(2 active)`; deviation P3). Implementation-level savings that keep the soundness of (ii),
 both implemented in Section 4.6: build both tree sets in one pass over the stacked lanes (the leaves are read
@@ -424,7 +424,7 @@ The construction, driven by the PIOP transcript:
 - `LookupShape` (public layout, `challenges` 1 to 4, `validate`, `max_depth`,
   `tree_count`, `session_counts(s)` for the registry and the wire parser, `lookups`,
   `identity_error_log2`, `proof_elements`); the integrated shape is
-  `CommitmentManifest::lookup_shape` (four stacks, `T_16`, two challenges, shift `2^15`).
+  `CommitmentManifest::lookup_shape` (five stacks, `T_16`, two challenges, shift `2^15`).
 - `LookupTranscript` (absorb, challenges at a `LookupSite`): implemented by the PIOP
   transcript (sites `agg-mldsa/v1/lookup/<site>`, `docs/deviations.md` L5); the unit tests
   and timings use a SHAKE256 test transcript bound to the layout.
