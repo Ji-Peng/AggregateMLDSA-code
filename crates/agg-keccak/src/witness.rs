@@ -161,6 +161,18 @@ const GROUP_BATCH: usize = 128;
 /// sponge-gate tiles.
 const GROUP_BATCH_MAX: usize = 4096;
 
+/// Minor page faults of this process so far (field 10 of `/proc/self/stat`); 0 when
+/// unreadable. A diagnostic for the trace only.
+fn minor_faults() -> u64 {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            let rest = &s[s.rfind(')')? + 1..];
+            rest.split_whitespace().nth(7)?.parse().ok()
+        })
+        .unwrap_or(0)
+}
+
 /// [`pack_slot`] of the honest rows of `n` instances, walked eight at a time in
 /// lockstep by [`ChainGate::instance_phi_many`] on `engine`'s round kernel. `inputs`
 /// holds `input_words` packed input words per instance; `absorb(j, m, s)` XORs
@@ -213,13 +225,17 @@ where
         .collect();
     let b_head = gate.head_b();
     let len = (k / 128) << nu;
+    let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
+    let faults_before = if trace { minor_faults() } else { 0 };
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
+    flock_core::scratch::advise_hugepage(&mut z);
     let mut a: Vec<F128> = alloc_zeroed_vec(len);
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
+    flock_core::scratch::advise_hugepage(&mut a);
+    flock_core::scratch::advise_hugepage(&mut b);
     let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
     let groups_max = batch.min(n.next_multiple_of(8)) / 8;
     let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * tw];
-    let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let mut phase_ms = [0f64; 2];
     const COLS: usize = 4;
     let n_col_blocks = useful_chunks.div_ceil(COLS);
@@ -300,10 +316,11 @@ where
     }
     if trace {
         eprintln!(
-            "  [tied] pack_slot_groups ({:?}): rows {:.1} ms, scatter {:.1} ms",
+            "  [tied] pack_slot_groups ({:?}): rows {:.1} ms, scatter {:.1} ms, page faults {}",
             engine.backend(),
             phase_ms[0],
-            phase_ms[1]
+            phase_ms[1],
+            minor_faults() - faults_before
         );
     }
     SlotBuffers { z, a, b }
