@@ -1683,6 +1683,9 @@ pub fn fold_and_round_pair_sparse_into(
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    let simd = has(AVX512_CLMUL)
+        && std::env::var_os("FLOCK_ZC_SPARSE_SIMD").as_deref() != Some(std::ffi::OsStr::new("0"));
     let (sum1, sum_inf) = work
         .into_par_iter()
         .map(|(task_pieces, a_task, b_task)| {
@@ -1712,6 +1715,8 @@ pub fn fold_and_round_pair_sparse_into(
                     let run_end = (((t >> eq.n_lo) + 1) << eq.n_lo).min(piece_e);
                     let mut p1 = F256Unreduced::ZERO;
                     let mut p_inf = F256Unreduced::ZERO;
+                    // The SIMD kernel's (already reduced) share of this run.
+                    let mut k_red = (F128::ZERO, F128::ZERO);
                     // Advance the cursor exactly as the first `rank` of this
                     // run would; when the run's whole read span then sits in
                     // ONE stored interval — the common case away from
@@ -1731,7 +1736,39 @@ pub fn fold_and_round_pair_sparse_into(
                         .is_some_and(|&(s, e)| s <= y0 && y1 <= e);
                     if contig {
                         let base = store_in.offset_of(cur) + (y0 - store_in.intervals()[cur].0);
-                        for tt in t..run_end {
+                        // agg-mldsa patch (PATCH.md): the contiguous run on the
+                        // dense path's AVX-512 fused fold + message kernel (four
+                        // pairs per zmm) for its multiple-of-4 prefix; the same
+                        // products, reduced the same way (the kernel's sums are the
+                        // run's unreduced sums, reduced once), so the message is
+                        // byte-identical. The remainder runs below.
+                        let mut t_s = t;
+                        #[cfg(target_arch = "x86_64")]
+                        if simd {
+                            let l4 = (run_end - t) & !3;
+                            if l4 > 0 {
+                                let o0 = piece_base + 2 * (t - piece_s);
+                                let e0 = t & lo_mask;
+                                // SAFETY: AVX512_CLMUL checked at run time; 4·l4
+                                // contiguous inputs from `base`, 2·l4 outputs from
+                                // `o0` inside the task's slices, l4 eq_lo entries
+                                // from `e0` inside one eq_lo block (the run does
+                                // not cross a 2^n_lo boundary).
+                                let (k1, ki) = unsafe {
+                                    fold_and_message_x86_avx512(
+                                        &a[base..base + 4 * l4],
+                                        &b[base..base + 4 * l4],
+                                        &mut a_task[o0..o0 + 2 * l4],
+                                        &mut b_task[o0..o0 + 2 * l4],
+                                        r_fold,
+                                        &eq.lo[e0..e0 + l4],
+                                    )
+                                };
+                                k_red = (k_red.0 + k1, k_red.1 + ki);
+                                t_s = t + l4;
+                            }
+                        }
+                        for tt in t_s..run_end {
                             let i = base + 4 * (tt - t);
                             let (a00, b00) = (a[i], b[i]);
                             let (a01, b01) = (a[i + 1], b[i + 1]);
@@ -1772,8 +1809,8 @@ pub fn fold_and_round_pair_sparse_into(
                         }
                     }
                     let eq_h = eq.hi[t >> eq.n_lo];
-                    s1 += eq_h * p1.reduce();
-                    s_inf += eq_h * p_inf.reduce();
+                    s1 += eq_h * (p1.reduce() + k_red.0);
+                    s_inf += eq_h * (p_inf.reduce() + k_red.1);
                     t = run_end;
                 }
                 local += 2 * (piece_e - piece_s);

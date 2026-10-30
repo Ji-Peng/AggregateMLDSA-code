@@ -2387,6 +2387,59 @@ mod tests {
     /// support is too dense to trigger them), including the mid-tail
     /// switch-back to the dense kernels (zeroing dead scratch) once the live
     /// fraction crosses the threshold.
+    /// The union's production shape (one live run of word columns, one dead run) at a
+    /// domain where the sparse tail runs its contiguous SIMD runs: the padded proof equals
+    /// the dense one under every kernel mask.
+    #[test]
+    fn prove_sparse_two_run_tail_matches_dense_under_masks() {
+        let m = 22usize;
+        // 2^4 rows of 2^14-bit blocks: 9 live blocks with 2156/4096-like fill, then dead.
+        let padding = PaddingSpec::from_runs(vec![
+            PaddingRun {
+                k_log: 14,
+                useful_bits_per_block: 9000,
+                n_blocks: 160,
+            },
+            PaddingRun {
+                k_log: 14,
+                useful_bits_per_block: 0,
+                n_blocks: 96,
+            },
+        ]);
+        assert!(padding.as_single_run().is_none(), "must exercise multi-run");
+        let mut rng = Rng::new(0x2_7A11);
+        let mut a = rng.bits(1 << m);
+        let mut b = rng.bits(1 << m);
+        zero_outside_useful(&padding, &mut a);
+        zero_outside_useful(&padding, &mut b);
+        let c: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x & *y).collect();
+        let (a_p, b_p, c_p) = pack_abc(&a, &b, &c);
+        let mut want = None;
+        for mask in crate::simd::test_masks() {
+            let got = crate::simd::with_mask(mask, || {
+                let mut ch = FsChallenger::new(b"flock-test-v0");
+                let dense = prove_packed_padded_capture_s_hat_v_c(
+                    &a_p,
+                    &b_p,
+                    &c_p,
+                    m,
+                    &PaddingSpec::dense(m),
+                    &mut ch,
+                );
+                let mut ch = FsChallenger::new(b"flock-test-v0");
+                let padded =
+                    prove_packed_padded_capture_s_hat_v_c(&a_p, &b_p, &c_p, m, &padding, &mut ch);
+                assert_eq!(dense.0, padded.0, "proof mismatch, mask {mask:#x}");
+                assert_eq!(dense.1, padded.1, "claim mismatch, mask {mask:#x}");
+                padded.0
+            });
+            match &want {
+                None => want = Some(got),
+                Some(w) => assert_eq!(&got, w, "mask {mask:#x} differs from portable"),
+            }
+        }
+    }
+
     #[test]
     fn prove_padded_sparse_multi_run_matches_dense() {
         let m = 16usize;
