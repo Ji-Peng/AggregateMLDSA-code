@@ -916,7 +916,7 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   its own OS thread, 64 MiB worker stacks) while the parity tables, the lookup, the
   pre-stage claims and the three stages run on the global pool; the join then absorbs the
   proofs (`prover::fork_join`). The pool has `AGG_FLOCK_THREADS` threads if set (`0`: no
-  fork, the old serial order), else 3/8 of the global pool rounded up: 6 of 16 on the cloud
+  fork, the serial order), else 3/8 of the global pool rounded up: 6 of 16 on the cloud
   machine (the fork itself: -1.15 s at 32K with 8 threads, -1.11 s with 16; a global
   8-thread pool alone was 13% slower; the 6-thread default follows the pool sweeps of
   `docs/perf.md` 12.1 and 13).
@@ -946,8 +946,7 @@ cost of one run, `T_run`, and the Module-SIS reductions, not the run count or th
 -1.03 s (-13%), prover peak +0.8 to +1.1 GiB, uncached verify 156.7 / 164.9 ms -> 167.4 /
 168.6 ms (within the local noise, but quote verifier numbers of this change only from a
 cloud run); a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and
-15 (6.76 s) in one round, direction only, but a rerun tied them (6.34 s each), so the default
-stays the cloud-measured half.
+15 (6.76 s) in one round, direction only, but a rerun tied them (6.34 s each).
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 
