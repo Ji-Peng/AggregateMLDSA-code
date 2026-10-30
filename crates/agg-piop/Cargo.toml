@@ -25,6 +25,7 @@ test-hooks = []
 agg-witness = { workspace = true }
 agg-pcs-config = { workspace = true }
 agg-bridge = { workspace = true }
+agg-mldsa-simd = { workspace = true }
 aerie-falcon = { workspace = true }
 aerie-prover = { workspace = true }
 aerie-simd = { workspace = true }

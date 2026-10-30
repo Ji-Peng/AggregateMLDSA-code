@@ -25,6 +25,7 @@
 //! [`LincheckCircuit`] with a backward transpose walk, `K_r = phi^T(K_{r+1} + W_r)`,
 //! extended across the permutation boundaries of the chain.
 
+use agg_mldsa_simd::{keccak::Words8, Engine};
 use flock_core::{
     lincheck::LincheckCircuit,
     r1cs::SparseBinaryMatrix,
@@ -207,6 +208,138 @@ pub struct ChainGate {
     absorb_cols: Vec<Vec<(usize, usize)>>,
     /// Per permutation: state bits XORed with the constant 1.
     absorb_ones: Vec<Vec<usize>>,
+    /// Word-level form of the absorptions and of the non-chi rows.
+    plan: WordPlan,
+}
+
+/// One word-level absorption step: `s[state] ^= rotl(inputs[input] & mask, rot)`.
+#[derive(Clone, Copy, Debug)]
+struct AbsorbStep {
+    state: usize,
+    input: usize,
+    rot: u32,
+    mask: u64,
+}
+
+/// A run of whole words copied from a source to row words, the last one masked.
+#[derive(Clone, Copy, Debug)]
+struct WordRun {
+    src: usize,
+    dst: usize,
+    words: usize,
+    last_mask: u64,
+}
+
+impl WordRun {
+    fn new(src_bit: usize, dst_bit: usize, bits: usize) -> Option<Self> {
+        (src_bit.is_multiple_of(64) && dst_bit.is_multiple_of(64) && bits > 0).then(|| Self {
+            src: src_bit / 64,
+            dst: dst_bit / 64,
+            words: bits.div_ceil(64),
+            last_mask: if bits.is_multiple_of(64) {
+                u64::MAX
+            } else {
+                (1u64 << (bits % 64)) - 1
+            },
+        })
+    }
+
+    fn copy(&self, src: &[u64], dst: &mut [u64]) {
+        let (s, d) = (&src[self.src..self.src + self.words], &mut dst[self.dst..]);
+        for (k, &x) in s.iter().enumerate() {
+            d[k] |= if k + 1 == self.words {
+                x & self.last_mask
+            } else {
+                x
+            };
+        }
+    }
+}
+
+/// The gate's absorptions grouped by `(state word, input word, rotation)`, and the
+/// non-chi rows (inputs, outputs, constant) as word copies where the layout allows.
+#[derive(Clone, Debug)]
+struct WordPlan {
+    /// Per permutation: input steps and the lanes of the constant-one bits.
+    absorb: Vec<(Vec<AbsorbStep>, Lanes)>,
+    /// Per input field: its word run, if its bits start at a word boundary.
+    input_runs: Vec<Option<WordRun>>,
+    /// The output bits as one run of state words, if they are consecutive and aligned.
+    output_run: Option<WordRun>,
+    /// `b` of the non-chi words `[0, t_base)`: every input, output and the constant column.
+    b_head: Vec<u64>,
+}
+
+impl WordPlan {
+    fn new(spec: &ChainSpec, layout: &GateLayout) -> Self {
+        let absorb = spec
+            .absorbs
+            .iter()
+            .map(|list| {
+                let mut steps: std::collections::BTreeMap<(usize, usize, u32), u64> =
+                    std::collections::BTreeMap::new();
+                let mut ones = [0u64; N_LANES];
+                for &(st, src) in list {
+                    let st = st as usize;
+                    match src {
+                        Absorb::One => ones[st / 64] ^= 1 << (st % 64),
+                        Absorb::Input(i) => {
+                            let i = i as usize;
+                            let rot = ((st % 64) as u32).wrapping_sub((i % 64) as u32) % 64;
+                            *steps.entry((st / 64, i / 64, rot)).or_insert(0) |= 1 << (i % 64);
+                        }
+                    }
+                }
+                let steps = steps
+                    .into_iter()
+                    .map(|((state, input, rot), mask)| AbsorbStep {
+                        state,
+                        input,
+                        rot,
+                        mask,
+                    })
+                    .collect();
+                (steps, ones)
+            })
+            .collect();
+        let input_runs = spec
+            .input_fields
+            .iter()
+            .enumerate()
+            .map(|(f, field)| {
+                WordRun::new(layout.field_offset[f], layout.field_base[f], field.bits)
+            })
+            .collect();
+        let consecutive = spec
+            .outputs
+            .iter()
+            .enumerate()
+            .all(|(j, &o)| usize::from(o) == usize::from(spec.outputs[0]) + j);
+        let output_run = if consecutive && !spec.outputs.is_empty() {
+            WordRun::new(
+                usize::from(spec.outputs[0]),
+                layout.output_base,
+                spec.outputs.len(),
+            )
+        } else {
+            None
+        };
+        let mut b_head = vec![0u64; layout.t_base];
+        let mut set = |col: usize| b_head[col / 64] |= 1 << (col % 64);
+        set(layout.const_col);
+        for i in 0..spec.n_inputs() {
+            set(layout.input_col(i));
+        }
+        for j in 0..spec.outputs.len() {
+            set(layout.output_base + j);
+        }
+        Self {
+            absorb,
+            input_runs,
+            output_run,
+            b_head,
+        }
+    }
 }
 
 impl ChainGate {
@@ -243,11 +376,13 @@ impl ChainGate {
         for &o in &spec.outputs {
             assert!((o as usize) < STATE_BITS);
         }
+        let plan = WordPlan::new(&spec, &layout);
         Self {
             spec,
             layout,
             absorb_cols,
             absorb_ones,
+            plan,
         }
     }
 
@@ -290,6 +425,11 @@ impl ChainGate {
     }
 
     fn absorb(&self, m: usize, inputs: &[u64], s: &mut Lanes) {
+        self.absorb_into(m, inputs, s);
+    }
+
+    /// [`Self::absorb_into`] bit by bit from the spec (the reference of [`Self::honest_z`]).
+    fn absorb_bits(&self, m: usize, inputs: &[u64], s: &mut Lanes) {
         let n_in = self.spec.n_inputs();
         for &(st, src) in &self.spec.absorbs[m] {
             let v = match src {
@@ -301,6 +441,47 @@ impl ChainGate {
                 }
             };
             s[st as usize / 64] ^= v << (st % 64);
+        }
+    }
+
+    /// XOR the bits absorbed before permutation `m` into `s`, from packed input bits.
+    pub fn absorb_into(&self, m: usize, inputs: &[u64], s: &mut Lanes) {
+        let (steps, ones) = &self.plan.absorb[m];
+        for st in steps {
+            s[st.state] ^= (inputs[st.input] & st.mask).rotate_left(st.rot);
+        }
+        for (x, o) in s.iter_mut().zip(ones) {
+            *x ^= o;
+        }
+    }
+
+    /// The non-chi words `[0, t_base)` of `z` (equal to `a` there): the input bits,
+    /// the output bits of the final state `s` and the constant. Overwrites `head`.
+    fn head_z(&self, inputs: &[u64], s: &Lanes, head: &mut [u64]) {
+        let lay = &self.layout;
+        head.fill(0);
+        let c = lay.const_col;
+        head[c / 64] |= 1 << (c % 64);
+        for (f, run) in self.plan.input_runs.iter().enumerate() {
+            match run {
+                Some(run) => run.copy(inputs, head),
+                None => {
+                    let (off, bits) = (lay.field_offset[f], self.spec.input_fields[f].bits);
+                    for i in off..off + bits {
+                        let col = lay.input_col(i);
+                        head[col / 64] |= ((inputs[i / 64] >> (i % 64)) & 1) << (col % 64);
+                    }
+                }
+            }
+        }
+        match &self.plan.output_run {
+            Some(run) => run.copy(s, head),
+            None => {
+                for (j, &o) in self.spec.outputs.iter().enumerate() {
+                    let col = lay.output_base + j;
+                    head[col / 64] |= ((s[o as usize / 64] >> (o % 64)) & 1) << (col % 64);
+                }
+            }
         }
     }
 
@@ -324,19 +505,6 @@ impl ChainGate {
         let lay = &self.layout;
         let n_in = self.spec.n_inputs();
         assert!(inputs.len() >= n_in.div_ceil(64));
-        // Constant row: A = B = e_const, z_const = 1.
-        let c = lay.const_col;
-        z[c / 64] |= 1 << (c % 64);
-        a[c / 64] |= 1 << (c % 64);
-        b[c / 64] |= 1 << (c % 64);
-        // Input rows: A = e_i (the input bit), B = e_const.
-        for i in 0..n_in {
-            let col = lay.input_col(i);
-            let bit = ((inputs[i / 64] >> (i % 64)) & 1) << (col % 64);
-            z[col / 64] |= bit;
-            a[col / 64] |= bit;
-            b[col / 64] |= 1 << (col % 64);
-        }
         let r_n = self.spec.n_rounds;
         let mut s = [0u64; N_LANES];
         for m in 0..self.spec.n_perms() {
@@ -359,15 +527,185 @@ impl ChainGate {
                 s[0] ^= ROUND_CONSTANTS[r];
             }
         }
-        // Output rows: z and A = final state bit, B = e_const.
-        for (j, &o) in self.spec.outputs.iter().enumerate() {
-            let col = lay.output_base + j;
-            let bit = ((s[o as usize / 64] >> (o % 64)) & 1) << (col % 64);
-            z[col / 64] |= bit;
-            a[col / 64] |= bit;
-            b[col / 64] |= 1 << (col % 64);
+        // Constant row: A = B = e_const, z_const = 1. Input and output rows: z and
+        // A = the bit, B = e_const. The rounds wrote only words from t_base on,
+        // so the head words of z are still the zeros of entry and head_z can
+        // write them in place (no scratch row per call).
+        let t = lay.t_base;
+        let head = &mut z[..t];
+        self.head_z(inputs, &s, head);
+        for (x, &h) in a[..t].iter_mut().zip(head.iter()) {
+            *x |= h;
+        }
+        for (x, &bh) in b[..t].iter_mut().zip(&self.plan.b_head) {
+            *x |= bh;
         }
         s
+    }
+
+    /// [`Self::instance_rows`] for up to eight instances in lockstep, word-major:
+    /// `z[u][i]` is word `u` of instance `i` (likewise `a`, `b`), each slice
+    /// [`GateLayout::useful_words`] long with any contents on entry. `inputs(i)`
+    /// are instance `i`'s packed input bits; `absorb(i, m, s)` XORs the bits it
+    /// absorbs before permutation `m` into `s` and must equal
+    /// [`Self::absorb_into`] on `inputs(i)` (callers holding the absorbed bytes
+    /// pass a faster equal one). Lanes `live..8` of `z` come out zero (the
+    /// lincheck stripe reads whole groups of eight); their `a` and `b` are
+    /// unspecified. Returns the final states (zero for the dead lanes).
+    ///
+    /// # Panics
+    /// If `live` is not in `1..=8` or a slice has the wrong length.
+    #[allow(clippy::too_many_arguments)]
+    pub fn instance_rows_many<'x, I, A>(
+        &self,
+        engine: &Engine,
+        live: usize,
+        inputs: I,
+        mut absorb: A,
+        z: &mut [Words8],
+        a: &mut [Words8],
+        b: &mut [Words8],
+    ) -> [Lanes; 8]
+    where
+        I: Fn(usize) -> &'x [u64],
+        A: FnMut(usize, usize, &mut Lanes),
+    {
+        let lay = &self.layout;
+        let w = lay.useful_words();
+        assert!((1..=8).contains(&live), "one to eight live instances");
+        assert!(z.len() == w && a.len() == w && b.len() == w, "row lengths");
+        let r_n = self.spec.n_rounds;
+        let per_perm = r_n * N_LANES;
+        let mut st: [Words8; N_LANES] = [[0u64; 8]; N_LANES];
+        for m in 0..self.spec.n_perms() {
+            for i in 0..live {
+                let mut s: Lanes = std::array::from_fn(|l| st[l][i]);
+                absorb(i, m, &mut s);
+                for (l, x) in s.iter().enumerate() {
+                    st[l][i] = *x;
+                }
+            }
+            let base = lay.t_base + m * per_perm;
+            let range = base..base + per_perm;
+            engine.chi_rounds(
+                &mut st,
+                0,
+                &mut z[range.clone()],
+                &mut a[range.clone()],
+                &mut b[range],
+            );
+        }
+        let t = lay.t_base;
+        let mut finals = [[0u64; N_LANES]; 8];
+        let mut head = vec![0u64; t];
+        for i in 0..8 {
+            if i < live {
+                finals[i] = std::array::from_fn(|l| st[l][i]);
+                self.head_z(inputs(i), &finals[i], &mut head);
+                for u in 0..t {
+                    z[u][i] = head[u];
+                    a[u][i] = head[u];
+                    b[u][i] = self.plan.b_head[u];
+                }
+            } else {
+                for row in z.iter_mut() {
+                    row[i] = 0;
+                }
+            }
+        }
+        finals
+    }
+
+    /// The compact form of [`Self::instance_rows_many`]: per group of eight, only the
+    /// non-chi words of `z` (`head`, [`GateLayout::t_base`] words; `a` equals them
+    /// and `b` is [`Self::head_b`]) and `phi` of every round (`phi`, the chi words
+    /// `[t_base, useful_words)`, round by round as [`Engine::phi_rounds`] writes
+    /// them), from which the chi words of `a`, `b` and `z` follow:
+    /// `a = !phi[x + 1, y]`, `b = phi[x + 2, y]`, `z = a & b`. The chi words of `z`
+    /// pass through `chi(u, words)` per round (`u` the first word index, 25
+    /// words, lanes `live..8` zero) and are not stored. Lanes `live..8` of `head`
+    /// come out zero; their `phi` is unspecified. Returns the final states.
+    ///
+    /// # Panics
+    /// As [`Self::instance_rows_many`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn instance_phi_many<'x, I, A, C>(
+        &self,
+        engine: &Engine,
+        live: usize,
+        inputs: I,
+        mut absorb: A,
+        head: &mut [Words8],
+        phi: &mut [Words8],
+        mut chi: C,
+    ) -> [Lanes; 8]
+    where
+        I: Fn(usize) -> &'x [u64],
+        A: FnMut(usize, usize, &mut Lanes),
+        C: FnMut(usize, &[Words8; 25]),
+    {
+        let lay = &self.layout;
+        let t = lay.t_base;
+        assert!((1..=8).contains(&live), "one to eight live instances");
+        assert!(
+            head.len() == t && phi.len() == lay.useful_words() - t,
+            "row lengths"
+        );
+        let r_n = self.spec.n_rounds;
+        let per_perm = r_n * N_LANES;
+        let mut st: [Words8; N_LANES] = [[0u64; 8]; N_LANES];
+        let mut zt = [[0u64; 8]; N_LANES];
+        for m in 0..self.spec.n_perms() {
+            for i in 0..live {
+                let mut s: Lanes = std::array::from_fn(|l| st[l][i]);
+                absorb(i, m, &mut s);
+                for (l, x) in s.iter().enumerate() {
+                    st[l][i] = *x;
+                }
+            }
+            let base = m * per_perm;
+            engine.phi_rounds(
+                &mut st,
+                0,
+                &mut phi[base..base + per_perm],
+                &mut zt,
+                |k, z| {
+                    let u = t + base + k * N_LANES;
+                    if live == 8 {
+                        chi(u, z);
+                    } else {
+                        // Dead lanes of z are zero for the stripe.
+                        let mut masked = *z;
+                        for row in &mut masked {
+                            row[live..].fill(0);
+                        }
+                        chi(u, &masked);
+                    }
+                },
+            );
+        }
+        let mut finals = [[0u64; N_LANES]; 8];
+        let mut h = vec![0u64; t];
+        for i in 0..8 {
+            if i < live {
+                finals[i] = std::array::from_fn(|l| st[l][i]);
+                self.head_z(inputs(i), &finals[i], &mut h);
+                for u in 0..t {
+                    head[u][i] = h[u];
+                }
+            } else {
+                for row in head.iter_mut() {
+                    row[i] = 0;
+                }
+            }
+        }
+        finals
+    }
+
+    /// `b` of the non-chi words `[0, t_base)` (the same for every instance).
+    #[must_use]
+    pub fn head_b(&self) -> &[u64] {
+        &self.plan.b_head
     }
 
     /// The honest committed bits for packed inputs (`z` zeroed on entry).
@@ -385,7 +723,7 @@ impl ChainGate {
         let r_n = self.spec.n_rounds;
         let mut s = [0u64; N_LANES];
         for m in 0..self.spec.n_perms() {
-            self.absorb(m, inputs, &mut s);
+            self.absorb_bits(m, inputs, &mut s);
             for r in 0..r_n {
                 let t = keccak::round(&mut s, r);
                 let base = lay.t_base + (m * r_n + r) * N_LANES;
@@ -704,6 +1042,87 @@ pub(crate) mod tests {
                 assert_eq!(z, z2);
                 assert_eq!(a, a2);
                 assert_eq!(b, b2);
+            }
+        }
+    }
+
+    /// `instance_rows_many` equals `instance_rows` lane by lane on every Keccak backend, with
+    /// the gate's own absorption, for full and partial groups; dead lanes of `z` are zero.
+    #[test]
+    fn instance_rows_many_match_instance_rows_on_every_backend() {
+        use agg_mldsa_simd::{Backend, Engine};
+        let engines: Vec<Engine> = [Backend::Scalar, Backend::Avx2, Backend::Avx512]
+            .into_iter()
+            .filter_map(Engine::new)
+            .collect();
+        let mut rng = Rng::new(0x6A0F);
+        for gate in [
+            ChainGate::new(ChainSpec::permutation()),
+            crate::sponge::sponge_gate(),
+            ChainGate::new(mini_chain(3)),
+            ChainGate::new(mini_chain(24)),
+        ] {
+            let w = gate.layout().useful_words();
+            for live in [8usize, 1, 5] {
+                let inputs: Vec<Vec<u64>> = (0..live)
+                    .map(|_| (0..gate.input_words()).map(|_| rng.next_u64()).collect())
+                    .collect();
+                for e in &engines {
+                    let fill = rng.next_u64();
+                    let (mut z, mut a, mut b) =
+                        (vec![[fill; 8]; w], vec![[fill; 8]; w], vec![[fill; 8]; w]);
+                    let finals = gate.instance_rows_many(
+                        e,
+                        live,
+                        |i| &inputs[i][..],
+                        |i, m, s| gate.absorb_into(m, &inputs[i], s),
+                        &mut z,
+                        &mut a,
+                        &mut b,
+                    );
+                    let t = gate.layout().t_base;
+                    let (mut head, mut phi) = (vec![[fill; 8]; t], vec![[fill; 8]; w - t]);
+                    let mut z_chi = vec![[fill; 8]; w - t];
+                    let finals_phi = gate.instance_phi_many(
+                        e,
+                        live,
+                        |i| &inputs[i][..],
+                        |i, m, s| gate.absorb_into(m, &inputs[i], s),
+                        &mut head,
+                        &mut phi,
+                        |u, zr| z_chi[u - t..u - t + 25].copy_from_slice(zr),
+                    );
+                    assert_eq!(finals_phi, finals);
+                    for u in 0..t {
+                        assert_eq!(head[u], z[u], "{:?} head word {u}", e.backend());
+                    }
+                    for q in 0..w - t {
+                        let (g, l) = (q / 25, q % 25);
+                        let (x, y) = (l % 5, l / 5);
+                        let p1 = 25 * g + (x + 1) % 5 + 5 * y;
+                        let p2 = 25 * g + (x + 2) % 5 + 5 * y;
+                        for i in 0..live {
+                            assert_eq!(!phi[p1][i], a[t + q][i], "{:?} a from phi", e.backend());
+                            assert_eq!(phi[p2][i], b[t + q][i], "{:?} b from phi", e.backend());
+                        }
+                        assert_eq!(z_chi[q], z[t + q], "{:?} chi z word {q}", e.backend());
+                    }
+                    for i in 0..8 {
+                        if i >= live {
+                            assert!(z.iter().all(|row| row[i] == 0), "dead lane {i}");
+                            continue;
+                        }
+                        let (mut zi, mut ai, mut bi) =
+                            (vec![0u64; w], vec![0u64; w], vec![0u64; w]);
+                        let out = gate.instance_rows(&inputs[i], &mut zi, &mut ai, &mut bi);
+                        assert_eq!(finals[i], out, "{:?} final state", e.backend());
+                        for u in 0..w {
+                            assert_eq!(z[u][i], zi[u], "{:?} z word {u}", e.backend());
+                            assert_eq!(a[u][i], ai[u], "{:?} a word {u}", e.backend());
+                            assert_eq!(b[u][i], bi[u], "{:?} b word {u}", e.backend());
+                        }
+                    }
+                }
             }
         }
     }

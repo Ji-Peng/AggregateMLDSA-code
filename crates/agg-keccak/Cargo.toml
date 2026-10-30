@@ -16,6 +16,7 @@ avx512 = []
 [dependencies]
 aerie-keccak = { workspace = true }
 agg-bridge = { workspace = true }
+agg-mldsa-simd = { workspace = true }
 agg-witness = { workspace = true }
 flock-core = { workspace = true }
 flock-field = { workspace = true }

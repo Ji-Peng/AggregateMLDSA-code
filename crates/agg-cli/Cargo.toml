@@ -17,6 +17,7 @@ agg-pcs-config = { workspace = true }
 agg-piop = { workspace = true }
 agg-keccak = { workspace = true }
 agg-bridge = { workspace = true }
+agg-mldsa-simd = { workspace = true }
 sha3 = { workspace = true }
 rayon = { workspace = true }
 

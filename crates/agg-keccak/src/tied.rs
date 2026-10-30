@@ -57,8 +57,9 @@ use crate::{
         SpongeRecord, CHI_WORD_BASE, CONST_WORD, CTILDE_BYTES, CTILDE_WORD_BASE, MU_BYTES,
         MU_WORD_BASE, PUBLIC_WORDS_LOG2, PUBLIC_WORD_BASE, W1_INPUT_BASE, W1_WORD_BASE,
     },
-    witness::{pack_slot, SlotBuffers},
+    witness::{pack_slot_groups, SlotBuffers},
 };
+use agg_mldsa_simd::Engine;
 
 /// Magic prefix of a tied-part proof.
 pub const MAGIC: &[u8; 6] = b"AGGKCT";
@@ -101,6 +102,52 @@ fn trace(phase: &str, start: &std::time::Instant) {
             start.elapsed().as_secs_f64() * 1e3,
             peak_rss_mib().unwrap_or(0)
         );
+    }
+}
+
+/// `c~ = SHAKE256(mu || w1Encode, 32)` of every record, batched on the engine's
+/// Keccak lanes in parallel chunks (same values as [`SpongeRecord::c_tilde`]).
+fn c_tildes(engine: &Engine, records: &[SpongeRecord]) -> Vec<[u8; CTILDE_BYTES]> {
+    const CHUNK: usize = 64;
+    let mut out = vec![[0u8; CTILDE_BYTES]; records.len()];
+    out.par_chunks_mut(CHUNK)
+        .zip(records.par_chunks(CHUNK))
+        .for_each(|(out, recs)| {
+            let inputs: Vec<[&[u8]; 4]> = recs
+                .iter()
+                .map(|r| [&r.mu[..], &r.w1_encode[..], &[][..], &[][..]])
+                .collect();
+            let mut flat = vec![0u8; recs.len() * CTILDE_BYTES];
+            engine.shake256_many(&inputs, CTILDE_BYTES, &mut flat);
+            for (o, c) in out.iter_mut().zip(flat.as_chunks::<CTILDE_BYTES>().0) {
+                *o = *c;
+            }
+        });
+    out
+}
+
+/// XOR the lanes the sponge gate absorbs before permutation `m` into `s`: words
+/// `17 m .. 17 m + 17` of the padded message `mu || w1Encode || 0x1F 0^* 0x80` (seven
+/// 136-byte blocks; the sponge gate's absorption of `record.input_bits()`).
+fn absorb_message(record: &SpongeRecord, m: usize, s: &mut crate::keccak::Lanes) {
+    const RATE_WORDS: usize = crate::sponge::RATE_BYTES / 8;
+    const MU_WORDS: usize = MU_BYTES / 8;
+    const MSG_WORDS: usize = MU_WORDS + crate::sponge::W1_BYTES / 8;
+    debug_assert_eq!(crate::sponge::N_PERMS * RATE_WORDS, MSG_WORDS + 15);
+    let word = |bytes: &[u8], q: usize| {
+        u64::from_le_bytes(bytes[8 * q..8 * q + 8].try_into().expect("eight bytes"))
+    };
+    for (l, x) in s[..RATE_WORDS].iter_mut().enumerate() {
+        let q = RATE_WORDS * m + l;
+        *x ^= if q < MU_WORDS {
+            word(&record.mu, q)
+        } else if q < MSG_WORDS {
+            word(&record.w1_encode, q - MU_WORDS)
+        } else {
+            // SHAKE suffix 0x1F right after the message, 0x80 in the last byte.
+            (u64::from(q == MSG_WORDS) * 0x1F)
+                | (u64::from(q == crate::sponge::N_PERMS * RATE_WORDS - 1) << 63)
+        };
     }
 }
 
@@ -758,6 +805,17 @@ impl<'g> TiedPart<'g> {
     /// 1024 i`, padded records zero).
     #[must_use]
     pub fn honest_parts(&self, records: &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) {
+        self.honest_parts_with(agg_mldsa_simd::engine(), records)
+    }
+
+    /// [`Self::honest_parts`] on a given Keccak round kernel (every backend gives the
+    /// same buffers).
+    #[must_use]
+    pub fn honest_parts_with(
+        &self,
+        engine: &Engine,
+        records: &[SpongeRecord],
+    ) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
         let start = std::time::Instant::now();
         // Per record and independent: parallel (same values in the same order).
@@ -766,9 +824,24 @@ impl<'g> TiedPart<'g> {
         inputs.par_chunks_mut(input_words).zip(records.par_iter())
             .for_each(|(out, record)| record.input_bits_into(out));
         trace("witness input bits", &start);
-        let sponge = pack_slot(self.gate, self.sponge.nu(), self.n, |j, z, a, b| {
-            self.gate.instance_rows(&inputs[j * input_words..(j + 1) * input_words], z, a, b);
-        });
+        // The sponge gate absorbs the padded message `mu || w1Encode || 0x1F 0^* 0x80`
+        // (crate::sponge), so its lanes come straight from the record's bytes; checked
+        // against the gate's own absorption of the first record's input bits.
+        for m in 0..self.gate.spec().n_perms() {
+            let (mut want, mut got) = ([0u64; 25], [0u64; 25]);
+            self.gate.absorb_into(m, &inputs[..input_words], &mut want);
+            absorb_message(&records[0], m, &mut got);
+            assert_eq!(got, want, "the sponge gate absorbs the padded message");
+        }
+        let sponge = pack_slot_groups(
+            self.gate,
+            engine,
+            self.sponge.nu(),
+            self.n,
+            &inputs,
+            input_words,
+            |j, m, s| absorb_message(&records[j], m, s),
+        );
         trace("witness packed", &start);
         let seg = self.segment();
         let words = self.segment_words();
@@ -789,9 +862,7 @@ impl<'g> TiedPart<'g> {
     }
 
     fn statement(records: &[SpongeRecord]) -> (Vec<F128>, Vec<[u8; CTILDE_BYTES]>) {
-        // One SHAKE256 per record: parallel, order preserved.
-        let c_tilde: Vec<[u8; CTILDE_BYTES]> =
-            records.par_iter().map(SpongeRecord::c_tilde).collect();
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         let public = records
             .iter()
             .zip(&c_tilde)

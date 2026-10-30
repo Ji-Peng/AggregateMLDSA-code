@@ -37,9 +37,11 @@
 
 use agg_bridge::{parity, Shape};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
+use agg_mldsa_simd::{Engine, HuCols};
 use agg_witness::derive::{derive_with_t, DeriveError};
+use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
 use agg_witness::hfips::honest_coeff;
-use agg_witness::instance::PublicInstance;
+use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
 use agg_witness::padding::{main_index, Geometry, GeometryError};
 use agg_witness::params::{GAMMA2, K, L, N, OMEGA, POSITIONS, W1_BITS};
@@ -49,8 +51,9 @@ use crate::kernel::{Lane, Source};
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
     value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupDescriptor, GroupRole,
-    LOOKUP_SHIFT, STACK_DOMAINS,
+    Relation, LOOKUP_SHIFT, STACK_DOMAINS,
 };
+use std::mem::MaybeUninit;
 use agg_witness::digits::ValueForm;
 use crate::OpeningField as E;
 
@@ -438,6 +441,58 @@ impl Encoder {
     }
 }
 
+/// The final-column views of one record: the `G_main16` columns, then the `G_main4` columns
+/// (manifest order, `POSITIONS` cells each).
+type RecordViews<'a> = (Vec<&'a mut [MaybeUninit<i32>]>, Vec<&'a mut [MaybeUninit<i8>]>);
+
+/// Relation H-u's manifest slots in the column order of the engine's digit kernel:
+/// `Z_lo, U_lo, V_lo, V_hi` (wide) and `Z_hi, U_hi, b_0..b_5` (narrow).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HuSlots {
+    wide: [usize; 4],
+    narrow: [usize; 2 + W1_BITS],
+}
+
+impl HuSlots {
+    fn new(manifest: &CommitmentManifest) -> Self {
+        assert_eq!(manifest.relation(), Relation::Hu, "the digit kernel encodes relation H-u");
+        let at = |column: Column, role: GroupRole| match manifest.locate(column) {
+            (r, position) if r == role => position,
+            (r, _) => panic!("{} is in {r:?}", column.name()),
+        };
+        let narrow = [Column::Z_HI, Column::U_HI]
+            .into_iter()
+            .chain((0..W1_BITS as u8).map(Column::W1Bit));
+        Self {
+            wide: [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI].map(|c| at(c, GroupRole::Main16)),
+            narrow: std::array::from_fn({
+                let slots: Vec<usize> = narrow.map(|c| at(c, GroupRole::Main)).collect();
+                move |k| slots[k]
+            }),
+        }
+    }
+
+    /// Every cell of one live record (row `rho` at cells `256 rho ..` of each column).
+    fn write(
+        &self,
+        engine: &Engine,
+        w: &FastWitness,
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
+    ) {
+        for (rho, (z, out)) in w.z.iter().zip(&w.rows).enumerate() {
+            let cells = rho * N..(rho + 1) * N;
+            let wide = wide.get_disjoint_mut(self.wide).expect("distinct wide slots");
+            let narrow = narrow.get_disjoint_mut(self.narrow).expect("distinct narrow slots");
+            let cols = HuCols {
+                wide: wide.map(|c| &mut c[cells.clone()]),
+                narrow: narrow.map(|c| &mut c[cells.clone()]),
+            };
+            engine.hu_columns(z, out, cols);
+        }
+    }
+}
+
 /// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns), and
 /// under H-FIPS the hint slack of every record (committed in round 2, `G_2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,12 +510,29 @@ impl MainTables {
         Self::encode_records(manifest, values.len(), |i| Ok(values[i].clone()))
     }
 
-    /// Allocate final columns and give each worker disjoint views of one record.
-    #[allow(unsafe_code)]
+    /// Encode record by record (live records from `record`, padded rows the zero witness).
     fn encode_records(
         manifest: &CommitmentManifest,
         count: usize,
         record: impl Fn(usize) -> Result<RecordValues, SourceTableError> + Sync,
+    ) -> Result<Self, SourceTableError> {
+        Self::encode_tiles(manifest, count, 1, |encoder, i, views| {
+            let (wide, narrow) = &mut views[0];
+            let values = if i < count { record(i)? } else { RecordValues::zero() };
+            Ok(vec![encoder.encode(&values, wide, narrow)?])
+        })
+    }
+
+    /// Allocate final columns and give each worker the disjoint views of a tile of `tile`
+    /// consecutive records (the last tile may be shorter); `fill(encoder, first, views)`
+    /// writes every cell of records `first..first + views.len()` (live and padded) and
+    /// returns their hint slacks.
+    #[allow(unsafe_code)]
+    fn encode_tiles(
+        manifest: &CommitmentManifest,
+        count: usize,
+        tile: usize,
+        fill: impl Fn(&Encoder, usize, &mut [RecordViews<'_>]) -> Result<Vec<i64>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
         let encoder = Encoder::new(manifest);
         let geom = Geometry::new(count).map_err(SourceTableError::Geometry)?;
@@ -470,7 +542,7 @@ impl MainTables {
         let cells = geom.main_len();
         let mut wide = crate::kernel::buf::uninit::<i32>(4 * cells);
         let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| crate::kernel::buf::uninit::<i8>(cells)).collect();
-        let mut views: Vec<(Vec<&mut [std::mem::MaybeUninit<i32>]>, Vec<&mut [std::mem::MaybeUninit<i8>]>)> =
+        let mut views: Vec<RecordViews<'_>> =
             (0..geom.n_star).map(|_| (Vec::with_capacity(4), Vec::with_capacity(encoder.narrow))).collect();
         for column in wide.chunks_exact_mut(cells) {
             for (i, chunk) in column.chunks_exact_mut(POSITIONS).enumerate() {
@@ -482,10 +554,12 @@ impl MainTables {
                 views[i].1.push(chunk);
             }
         }
-        let hint_slack = views.into_par_iter().enumerate().map(|(i, (mut wide, mut narrow))| {
-            let values = if i < geom.n { record(i)? } else { RecordValues::zero() };
-            encoder.encode(&values, &mut wide, &mut narrow)
-        }).collect::<Result<Vec<_>, _>>()?;
+        let tiles = views
+            .par_chunks_mut(tile)
+            .enumerate()
+            .map(|(t, views)| fill(&encoder, t * tile, views))
+            .collect::<Result<Vec<_>, _>>()?;
+        let hint_slack: Vec<i64> = tiles.into_iter().flatten().collect();
         // SAFETY: successful encoding writes every digit, bit and FIPS cell of every
         // record, including padding. On error the MaybeUninit allocations just drop.
         let wide = unsafe { wide.assume_init().into_vec() };
@@ -498,8 +572,67 @@ impl MainTables {
         Ok(tables)
     }
 
-    /// Derive witnesses and encode them directly into their final columns.
+    /// Derive witnesses and encode them directly into their final columns, on the
+    /// process-wide SIMD engine (see [`MainTables::build_with`]).
     pub fn build(
+        manifest: &CommitmentManifest,
+        instance: &PublicInstance,
+        signatures: &[&[u8]],
+    ) -> Result<Self, SourceTableError> {
+        Self::build_with(agg_mldsa_simd::engine(), manifest, instance, signatures)
+    }
+
+    /// [`MainTables::build`] on `engine`: records in tiles of [`TILE`] through the batched
+    /// derivation of [`derive_tile_with`] (its errors are the legacy derivation's); under
+    /// H-u the engine writes the digits of each row straight into the record's final
+    /// column views, under H-exact and H-FIPS the generic encoder takes the values.
+    /// Identical to [`MainTables::build_reference`].
+    #[doc(hidden)]
+    pub fn build_with(
+        engine: &Engine,
+        manifest: &CommitmentManifest,
+        instance: &PublicInstance,
+        signatures: &[&[u8]],
+    ) -> Result<Self, SourceTableError> {
+        if signatures.len() != instance.records.len() {
+            return Err(SourceTableError::Records {
+                expected: instance.records.len(), actual: signatures.len(),
+            });
+        }
+        let count = instance.records.len();
+        let hu = (manifest.relation() == Relation::Hu).then(|| HuSlots::new(manifest));
+        Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+            // Live records of the tile; a tile past the last record is all padding.
+            let live = first.min(count)..(first + views.len()).min(count);
+            let records: Vec<&PublicRecord> = instance.records[live.clone()].iter().collect();
+            let mut derived = vec![FastWitness::zero(); live.len()];
+            derive_tile_with(engine, &records, &signatures[live], &mut derived)
+                .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
+            let mut slack = Vec::with_capacity(views.len());
+            for (k, (wide, narrow)) in views.iter_mut().enumerate() {
+                let Some(w) = derived.get(k) else {
+                    slack.push(encoder.encode(&RecordValues::zero(), wide, narrow)?);
+                    continue;
+                };
+                match &hu {
+                    Some(slots) => {
+                        slots.write(engine, w, wide, narrow);
+                        slack.push(OMEGA as i64);
+                    }
+                    None => {
+                        let values = RecordValues { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
+                        slack.push(encoder.encode(&values, wide, narrow)?);
+                    }
+                }
+            }
+            Ok(slack)
+        })
+    }
+
+    /// The record-by-record build on the legacy derivation (`derive_with_t`) and the generic
+    /// encoder: the test oracle of [`MainTables::build`].
+    #[doc(hidden)]
+    pub fn build_reference(
         manifest: &CommitmentManifest,
         instance: &PublicInstance,
         signatures: &[&[u8]],
@@ -968,5 +1101,35 @@ impl<'a> SourceTables<'a> {
     #[must_use]
     pub fn stack_cells(&self, stack: usize) -> Vec<Cells<'a>> {
         self.manifest.stack_columns(stack).into_iter().map(|c| self.column(c)).collect()
+    }
+}
+
+#[cfg(test)]
+mod hu_slot_tests {
+    use super::*;
+
+    #[test]
+    fn hu_slots_follow_the_digit_kernel_order() {
+        for records in [1, 20, 1 << 10] {
+            let manifest = CommitmentManifest::for_relation(records, Relation::Hu).unwrap();
+            let slots = HuSlots::new(&manifest);
+            let main16 = manifest.group(GroupRole::Main16);
+            let main = manifest.group(GroupRole::Main);
+            let wide = [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI];
+            for (&slot, column) in slots.wide.iter().zip(wide) {
+                assert_eq!(main16.columns[slot], column);
+            }
+            let narrow: Vec<Column> = [Column::Z_HI, Column::U_HI]
+                .into_iter()
+                .chain((0..W1_BITS as u8).map(Column::W1Bit))
+                .collect();
+            for (&slot, &column) in slots.narrow.iter().zip(&narrow) {
+                assert_eq!(main.columns[slot], column);
+            }
+            assert_eq!(main.polynomial_count(), slots.narrow.len());
+            // Today's manifest order is the kernel's.
+            assert_eq!(slots.wide, [0, 1, 2, 3]);
+            assert_eq!(slots.narrow, std::array::from_fn(|k| k));
+        }
     }
 }

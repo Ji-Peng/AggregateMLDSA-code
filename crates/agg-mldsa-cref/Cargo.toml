@@ -1,0 +1,15 @@
+[package]
+name = "agg-mldsa-cref"
+description = "C reference implementations harness for benchmarks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+cc = { workspace = true }
+
+[dev-dependencies]
+agg-witness = { workspace = true }
+keccak = { workspace = true }

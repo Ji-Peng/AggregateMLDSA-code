@@ -548,12 +548,25 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         )
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
+    let mldsa_engine = agg_mldsa_simd::engine();
+    let mldsa_backend = match mldsa_engine.backend() {
+        agg_mldsa_simd::dispatch::Backend::Scalar => "scalar",
+        agg_mldsa_simd::dispatch::Backend::Avx2 => "avx2",
+        agg_mldsa_simd::dispatch::Backend::Avx512 => {
+            if mldsa_engine.has_vbmi() {
+                "avx512+vbmi"
+            } else {
+                "avx512"
+            }
+        }
+    };
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}",
+        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
         n_keys.min(count),
         std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
-        agg_piop::aerie_simd_backend()
+        agg_piop::aerie_simd_backend(),
+        mldsa_backend
     );
     println!(
         "record generation {:.1} ms (not part of the measurements)",

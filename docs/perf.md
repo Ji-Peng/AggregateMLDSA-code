@@ -693,3 +693,190 @@ about 2.6-2.8 s instead of 4.49 s, the PIOP branch about 3.8 s and the Flock pro
 on 6 threads, so the Flock branch may be the critical one, and a total of about 6.5-7.0 s
 instead of 11.34 s (1.6-1.75x, est.). The cloud matrix and the 4 / 6 / 8 pool sweep of
 Section 13 decide.
+
+## 15. ML-DSA SIMD dispatch
+
+`AGG_MLDSA_SIMD=auto|scalar|avx2|avx512` selects the ML-DSA engine once per process.
+The default, `auto`, selects the best supported tier. An invalid or unsupported forced
+value fails at startup. Scalar is portable; AVX2 requires AVX2 and POPCNT; AVX-512 requires
+AVX512F/BW/VL, AVX2 and POPCNT. VBMI optionally accelerates AVX-512 rejection sampling;
+it is reported as `avx512+vbmi` in the `agg bench` header.
+
+The engine covers public-instance expansion and hashes, challenge sampling, sparse products,
+and witness transforms, CRT reconstruction, rounding, encoding and commitment hashes.
+The streamed verifier uses it for public data, public T and uncached matrix expansion.
+The Flock event-2 lane integration also uses these Keccak kernels. This setting is independent
+of the Aerie field backend and the compile-time `avx512` feature. Aggregate and key-cache
+bytes are unchanged across engines.
+
+Run `scripts/simd-ab.sh` for the local comparison against a detached `main` checkout under
+`target/main-wt`. It builds both binaries with `-C target-feature=+pclmulqdq`, compares 1K
+H-u aggregates at one and sixteen threads, then measures 4K records over 4096 and 16 keys
+with one warmup and two repetitions. Runtime gates use the shared benchmark lock and CPU 3;
+the thread count is left at its default. Logs, revisions and the table are retained under
+`target/simd-ab-logs`. Ratios above 1.05 are flagged for review, including RSS. These shared-host
+measurements indicate local direction only; they do not replace the 32K cloud measurements.
+
+The longer backend equality test covers H-u at 1024 records over 64 and 1024 keys,
+and H-exact/H-FIPS at 256 records. It verifies uncached, fills a fresh cache, verifies a cache
+hit, and compares aggregate and cache bytes across every available engine at 1/16 threads:
+
+```sh
+CARGO_BUILD_JOBS=3 RUSTFLAGS='-C target-feature=+pclmulqdq' \
+  cargo test --release -p agg-cli --test simd_backends -- --ignored
+```
+
+The local performance gates are not all green. Repeated measurements fail the strict AVX2
+one-key ExpandA comparison (1.078 / 1.112 times C), AVX-512 SHAKE128 (1.021 / 1.027 times C),
+and AVX2 finish budgets. The optional AVX-512/AVX2 dot4 comparisons also fail their 0.60
+budgets. Aggregate identity and the release tests pass. These kernel results remain blockers
+for the complete no-slower criterion; integrated speedups do not override them.
+
+
+Measured again on 2026-10-30 (one warmup and two measured runs per arm).
+
+Local direction only: N=4096, K=4096, H-u, CLMUL, CPU 3, default threads. Times in ms.
+| Metric | main | scalar | avx2 | avx512 |
+|---|---:|---:|---:|---:|
+| instance | 557.0 | 410.7 (0.737x) | 165.0 (0.296x) | 105.9 (0.190x) |
+| witness and tables | 502.7 | 187.0 (0.372x) | 47.4 (0.094x) | 43.2 (0.086x) |
+| Flock records | 91.9 | 79.1 (0.861x) | 78.6 (0.855x) | 81.6 (0.888x) |
+| prove total | 12025.1 | 11212.1 (0.932x) | 10691.1 (0.889x) | 10579.5 (0.880x) |
+| verify uncached | 801.5 | 727.8 (0.908x) | 533.4 (0.666x) | 531.5 (0.663x) |
+| verify cached | 499.3 | 505.8 (1.013x) | 483.0 (0.967x) | 483.9 (0.969x) |
+| public_data | 61.5 | 43.3 (0.704x) | 34.9 (0.567x) | 30.5 (0.496x) |
+| public_t | 26.1 | 28.8 (1.104x) FLAG >5% | 8.9 (0.341x) | 7.3 (0.279x) |
+| public_a | 279.0 | 212.6 (0.762x) | 60.0 (0.215x) | 37.6 (0.135x) |
+| prover RSS MiB | 3710.0 | 3568.0 (0.962x) | 3568.0 (0.962x) | 3568.0 (0.962x) |
+| verifier RSS MiB | 2815.0 | 2678.0 (0.951x) | 2723.0 (0.967x) | 2872.0 (1.020x) |
+
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.36x | 2.69x | 1.10x | 0.99x |
+| avx2 | 3.38x | 10.61x | 1.50x | 1.03x |
+| avx512 | 5.26x | 11.64x | 1.51x | 1.03x |
+
+Local direction only: N=4096, K=16, H-u, CLMUL, CPU 3, default threads. Times in ms.
+| Metric | main | scalar | avx2 | avx512 |
+|---|---:|---:|---:|---:|
+| instance | 67.3 | 51.5 (0.765x) | 31.4 (0.467x) | 27.7 (0.412x) |
+| witness and tables | 501.1 | 211.9 (0.423x) | 41.5 (0.083x) | 33.9 (0.068x) |
+| Flock records | 79.5 | 104.1 (1.309x) FLAG >5% | 84.7 (1.065x) FLAG >5% | 82.9 (1.043x) |
+| prove total | 11363.6 | 10837.3 (0.954x) | 10618.4 (0.934x) | 10687.9 (0.941x) |
+| verify uncached | 512.4 | 520.2 (1.015x) | 478.0 (0.933x) | 474.9 (0.927x) |
+| verify cached | 529.4 | 503.8 (0.952x) | 473.4 (0.894x) | 464.1 (0.877x) |
+| public_data | 24.8 | 21.9 (0.880x) | 20.3 (0.817x) | 19.4 (0.779x) |
+| public_t | 25.8 | 28.7 (1.111x) FLAG >5% | 10.5 (0.406x) | 7.5 (0.291x) |
+| public_a | 1.1 | 1.1 (0.991x) | 0.3 (0.318x) | 0.2 (0.234x) |
+| prover RSS MiB | 3291.0 | 3261.0 (0.991x) | 3358.0 (1.020x) | 3341.0 (1.015x) |
+| verifier RSS MiB | 2376.0 | 2367.0 (0.996x) | 2572.0 (1.082x) FLAG >5% | 2565.0 (1.080x) FLAG >5% |
+
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.31x | 2.36x | 0.99x | 1.05x |
+| avx2 | 2.14x | 12.07x | 1.07x | 1.12x |
+| avx512 | 2.43x | 14.78x | 1.08x | 1.14x |
+
+The verifier public-step columns are from the last uncached run. CPU affinity makes the
+default Rayon/opening pool one thread here; Flock runs without a fork. Shared-host local
+ratios cannot establish the design estimates for 32K on sixteen cloud threads.
+The script prints the deferred cloud commands without running them.
+
+Flags remain for scalar public_t at both key counts, shared-key scalar/AVX2 Flock
+records, and shared-key AVX2/AVX-512 verifier RSS. The public substep columns come
+from one run, so their flags need a separate repeat before attributing a regression.
+Scalar shared-key Flock records and AVX-512 shared-key verifier RSS were also
+flagged in the earlier local matrix. The integrated no-regression gate is not green.
+
+The kernel gate sweep also remains blocked: AVX2 composite ExpandA measures
+1.105/1.133 times C against the hard 1.00 budget, and AVX2 finish fails both
+composite budgets. AVX-512 SHAKE128 and sampler gates show small above-budget
+ratios and return nonzero. Finish's per-step alternative permits a zero exit status
+despite its printed composite failures. All six 1K aggregate comparisons against
+main pass; the full release suite passes. No performance threshold was relaxed.
+
+The third verification round adds independent AVX2 finish composite gates to the
+pipeline executable. It compares one finish call with three C hint calls, and
+nine finish calls with two scalar calls (the existing 4.5x speedup budget).
+These grouped comparisons retain the shared harness's strict 1.00 threshold
+and repeat policy. Diagnostic per-step passes cannot override their failures.
+Both finish budgets still fail: the dedicated benchmark reports normalized
+ratios 1.071/1.069 against C and 1.210/1.197 against scalar. Composite ExpandA
+is 1.107/1.085 times C on AVX2 and 0.460/0.456 on AVX-512. Thus the performance
+gate remains blocked; no production kernel change is included in this round.
+
+AVX-512 SHAKE128 passes twice (0.994/0.998), while the marginal AVX2 SHAKE128
+result changes from FAIL (1.003) to PASS (0.981 after the internal repeat).
+The AVX2 NTT P2 Plain/Mont row passes at 0.998 against its 1.02 budget.
+All six 1K aggregate comparisons against main pass again. With CPU affinity
+retained throughout, the release workspace passes 419 tests and vendored Flock
+passes 466 tests. Two invocations through scripts/test.sh stop at the C timing
+harness's 2% spread assertion (2.19% and 2.18%); that script widens the supplied
+CPU-3 affinity to CPUs 0,1,3–15. These failures are recorded separately from the
+fully pinned suite and from the confirmed kernel budget failures.
+
+A final `scripts/test.sh --release` run with `RUST_TEST_THREADS=1` passes
+both complete suites (419 workspace and 466 vendored tests). Serial execution
+also passes the timing self-check; the two earlier spread failures remain
+recorded as concurrent-test timing noise.
+
+Third-round local A/B results (4096 records, CLMUL, CPU 3, default threads;
+one warmup and two repetitions per arm):
+
+
+Local direction only: N=4096, K=4096, H-u, CLMUL, CPU 3, default threads. Times in ms.
+| Metric | main | scalar | avx2 | avx512 |
+|---|---:|---:|---:|---:|
+| instance | 523.3 | 407.7 (0.779x) | 126.8 (0.242x) | 93.1 (0.178x) |
+| witness and tables | 496.8 | 166.8 (0.336x) | 48.4 (0.097x) | 40.5 (0.082x) |
+| Flock records | 85.5 | 78.8 (0.922x) | 81.6 (0.954x) | 111.8 (1.308x) FLAG >5% |
+| prove total | 11669.3 | 11062.1 (0.948x) | 10515.9 (0.901x) | 10538.5 (0.903x) |
+| verify uncached | 809.9 | 722.5 (0.892x) | 543.6 (0.671x) | 522.2 (0.645x) |
+| verify cached | 502.3 | 498.0 (0.991x) | 476.5 (0.949x) | 512.4 (1.020x) |
+| public_data | 57.2 | 42.9 (0.750x) | 33.6 (0.588x) | 34.4 (0.601x) |
+| public_t | 34.4 | 26.9 (0.781x) | 10.0 (0.292x) | 8.1 (0.236x) |
+| public_a | 270.8 | 223.5 (0.825x) | 64.5 (0.238x) | 37.6 (0.139x) |
+| prover RSS MiB | 3740.0 | 3568.0 (0.954x) | 3568.0 (0.954x) | 3568.0 (0.954x) |
+| verifier RSS MiB | 2952.0 | 2678.0 (0.907x) | 2873.0 (0.973x) | 2678.0 (0.907x) |
+
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.28x | 2.98x | 1.12x | 1.01x |
+| avx2 | 4.13x | 10.26x | 1.49x | 1.05x |
+| avx512 | 5.62x | 12.27x | 1.55x | 0.98x |
+
+Local direction only: N=4096, K=16, H-u, CLMUL, CPU 3, default threads. Times in ms.
+| Metric | main | scalar | avx2 | avx512 |
+|---|---:|---:|---:|---:|
+| instance | 69.3 | 55.9 (0.807x) | 31.0 (0.447x) | 28.9 (0.417x) |
+| witness and tables | 516.7 | 172.7 (0.334x) | 47.8 (0.093x) | 36.4 (0.070x) |
+| Flock records | 79.2 | 82.6 (1.043x) | 86.2 (1.088x) FLAG >5% | 90.9 (1.148x) FLAG >5% |
+| prove total | 11294.7 | 10808.7 (0.957x) | 10543.2 (0.933x) | 10489.0 (0.929x) |
+| verify uncached | 498.1 | 482.1 (0.968x) | 478.6 (0.961x) | 459.8 (0.923x) |
+| verify cached | 496.2 | 485.5 (0.978x) | 462.4 (0.932x) | 457.6 (0.922x) |
+| public_data | 25.0 | 21.7 (0.867x) | 20.1 (0.806x) | 19.3 (0.773x) |
+| public_t | 26.0 | 25.6 (0.986x) | 8.8 (0.339x) | 7.7 (0.297x) |
+| public_a | 1.1 | 0.9 (0.822x) | 0.3 (0.290x) | 0.2 (0.215x) |
+| prover RSS MiB | 3339.0 | 3257.0 (0.975x) | 3405.0 (1.020x) | 3354.0 (1.004x) |
+| verifier RSS MiB | 2535.0 | 2325.0 (0.917x) | 2599.0 (1.025x) | 2520.0 (0.994x) |
+
+Speedups (main/current; values above 1 are faster):
+| Backend | Instance | Witness/tables | Verify uncached | Verify cached |
+|---|---:|---:|---:|---:|
+| scalar | 1.24x | 2.99x | 1.03x | 1.02x |
+| avx2 | 2.24x | 10.81x | 1.04x | 1.07x |
+| avx512 | 2.40x | 14.20x | 1.08x | 1.08x |
+
+All six aggregate byte comparisons pass. The Flock-record flags (+30.8% for
+distinct-key AVX-512, +8.8%/+14.8% for shared-key AVX2/AVX-512) prevent a clean
+no-regression verdict. All memory columns are within 5% of main.
+
+The shared-key AVX2 Flock-record comparison was repeated with a fresh main arm
+and the same one-warmup/two-repetition protocol. Main measures 81.8 ms and AVX2
+87.3 ms, a 1.067 ratio; the >5% flag persists. The other repeated AVX2 timings
+are instance 30.6 ms (main 67.0), witness/tables 41.1 ms (524.8), prove
+10670.4 ms (11320.5), verify uncached 470.6 ms (504.9), and cached 490.2 ms
+(482.3). These results do not establish a clean integrated performance gate.

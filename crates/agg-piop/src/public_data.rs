@@ -784,7 +784,7 @@ mod tests {
                     assert!(i64::from(t[rho][j]).abs() <= agg_witness::params::B_T);
                 }
             }
-            assert_eq!(*inverse_ntt_matrix(&record.key.a_hat), *record.key.a);
+            assert_eq!(*inverse_ntt_matrix(&record.key.a_hat()), *record.key.a);
             let key = VerifierKey::from_bytes(&source.pk).unwrap();
             assert_eq!(key, VerifierKey::from_expanded(&record.key));
         }
