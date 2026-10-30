@@ -972,12 +972,6 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
         } else {
             (vec![[0u8; 32]; 2 * n - 1], false)
         };
-        if !tree_hit {
-            crate::scratch::advise_hugepage(&mut tree);
-        }
-        if !pool_hit {
-            crate::scratch::advise_hugepage(&mut codeword);
-        }
         let t_tree = t_tree.elapsed();
         if timing {
             eprintln!(

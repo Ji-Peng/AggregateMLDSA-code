@@ -497,35 +497,6 @@ pub fn give_hashes(v: Vec<Hash>) {
     }
 }
 
-/// Ask the kernel to back `buf` with transparent huge pages (`madvise(MADV_HUGEPAGE)`,
-/// Linux), so first-touch faults take 2 MiB at a time instead of 4 KiB. Only the 2 MiB
-/// aligned interior is advised; call it before the first touch (pages already resident
-/// stay as they are). Off unless `FLOCK_HUGEPAGE=1`: the `agg` binary's global allocator
-/// already advises every large block, and the extra advice measured slightly slower.
-pub fn advise_hugepage<T>(buf: &mut [T]) {
-    #[cfg(target_os = "linux")]
-    {
-        const HUGE: usize = 2 << 20;
-        const MADV_HUGEPAGE: i32 = 14;
-        unsafe extern "C" {
-            fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
-        }
-        if !var_os("FLOCK_HUGEPAGE").is_some_and(|v| v == "1") {
-            return;
-        }
-        let start = buf.as_mut_ptr() as usize;
-        let end = start + core::mem::size_of_val(buf);
-        let (lo, hi) = (start.next_multiple_of(HUGE), end & !(HUGE - 1));
-        if hi > lo {
-            // SAFETY: [lo, hi) lies inside `buf`, a live allocation of this process; the
-            // advice changes page backing only, never contents. A failure is ignored.
-            unsafe { madvise(lo as *mut core::ffi::c_void, hi - lo, MADV_HUGEPAGE) };
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = buf;
-}
-
 /// Release every pooled buffer back to the OS.
 pub fn clear() {
     HASH_POOL.lock().unwrap().clear();

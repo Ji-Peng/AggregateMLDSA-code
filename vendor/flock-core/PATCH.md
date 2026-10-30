@@ -274,3 +274,13 @@ under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
 
 The `FLOCK_INDUCE_CHUNK_LOG` knob selects the induced-basis chunk size; `0` selects the reference implementation. The default chunk log is 11. The SIMD kernel is selected once per chunk through the existing runtime feature dispatch.
+
+## 9. Removed experiment switches
+
+The default path is byte-for-byte unchanged in every case; the switch and its
+non-default arm are gone.
+
+- `FLOCK_HUGEPAGE` and `scratch::advise_hugepage`: opt-in
+  `madvise(MADV_HUGEPAGE)` on Flock's codeword and tree allocations. It measured
+  slightly slower than the `agg` binary's global allocator advice, which already
+  covers large blocks.

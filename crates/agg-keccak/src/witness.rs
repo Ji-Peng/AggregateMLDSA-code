@@ -228,11 +228,8 @@ where
     let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let faults_before = if trace { minor_faults() } else { 0 };
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
-    flock_core::scratch::advise_hugepage(&mut z);
     let mut a: Vec<F128> = alloc_zeroed_vec(len);
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
-    flock_core::scratch::advise_hugepage(&mut a);
-    flock_core::scratch::advise_hugepage(&mut b);
     let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
     let groups_max = batch.min(n.next_multiple_of(8)) / 8;
     let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * tw];
