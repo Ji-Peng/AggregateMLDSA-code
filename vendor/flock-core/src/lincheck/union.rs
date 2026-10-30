@@ -251,21 +251,76 @@ pub fn union_bitbank_fold(
     z_vec
 }
 
-/// Row groups of eight whose subset-sum tables are built together in
-/// [`union_bitbank_fold_multi`] (`32 × points × 4 KB` of tables per task, L2-resident).
-const BANK_ROW_GROUPS: usize = 32;
+/// Bytes of subset-sum tables per row tile of [`union_bitbank_fold_multi`]: half of a
+/// 512 KB L2, so that the tables of two SMT siblings share one core's L2.
+const BANK_TABLE_BYTES: usize = 256 << 10;
+/// Fewest and most row groups of eight per row tile (the transposed bytes, `128 B` per
+/// group, stay in L1).
+const BANK_ROW_GROUPS_MIN: usize = 8;
+const BANK_ROW_GROUPS_MAX: usize = 64;
 /// Word columns per task of [`union_bitbank_fold_multi`]: the task's output is
 /// `points × 32 × 128` F128 (64 KB per point), touched once per row tile.
 const BANK_COL_TILE: usize = 32;
 
 /// Raw output pointers of [`union_bitbank_fold_multi`]; every task writes a disjoint
 /// column range of each output.
-struct BankOut(Vec<*mut F128>);
+struct BankOut {
+    ptrs: Vec<*mut F128>,
+    /// Length of each output in F128.
+    len: usize,
+}
 // SAFETY: tasks write disjoint ranges (see the caller); the vectors outlive the scope.
 unsafe impl Sync for BankOut {}
 impl BankOut {
-    fn get(&self, p: usize) -> *mut F128 {
-        self.0[p]
+    fn ptrs(&self) -> &[*mut F128] {
+        &self.ptrs
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// One 64-byte-aligned line of four F128: the unit of the interleaved subset-sum tables.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct Line([F128; 4]);
+
+/// Subset-sum tables of one row tile with the row points interleaved: for group `g` and
+/// byte value `s`, the entry `entry(g, s)` of [`Self::stride`] consecutive F128 holds the
+/// sum for point `p` at position `p`. Four points fill one 64-byte line, so one byte
+/// selects one line for four points.
+struct BankTables {
+    lines: Vec<Line>,
+    /// F128 per entry: the point count for one or two points, else the count rounded up
+    /// to a multiple of four (padding lanes stay zero).
+    stride: usize,
+}
+
+impl BankTables {
+    /// F128 per entry for `np` points.
+    fn stride_for(np: usize) -> usize {
+        if np <= 2 { np } else { np.next_multiple_of(4) }
+    }
+
+    fn new(np: usize, groups: usize) -> Self {
+        let stride = Self::stride_for(np);
+        let f128s = groups * 256 * stride;
+        Self {
+            lines: vec![Line([F128::ZERO; 4]); f128s.div_ceil(4)],
+            stride,
+        }
+    }
+
+    fn as_slice(&self) -> &[F128] {
+        // SAFETY: Line is repr(C) over [F128; 4], so the lines are a contiguous F128 array.
+        unsafe { std::slice::from_raw_parts(self.lines.as_ptr().cast(), self.lines.len() * 4) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [F128] {
+        // SAFETY: as in `as_slice`.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.lines.len() * 4)
+        }
     }
 }
 
@@ -277,12 +332,14 @@ impl BankOut {
 /// [`union_bitbank_fold`] at each point, without the lincheck stripe.
 ///
 /// Per task (a tile of [`BANK_COL_TILE`] word columns of one slot) and per row tile of
-/// [`BANK_ROW_GROUPS`] groups of eight rows, the 256-entry subset-sum table of each
-/// group's eight eq weights is built per point (dead rows past `n_t` get weight zero, so
-/// their bits contribute nothing); then per column the eight-word runs
-/// `z[(c << ν) + 8g ..][..8]` are bit-transposed (byte `b` = bit `b` of the eight words)
-/// and each byte selects one table entry per point, XORed into a register accumulator
-/// over the row tile.
+/// groups of eight rows, the 256-entry subset-sum table of each group's eight eq weights
+/// is built for all points together (dead rows past `n_t` get weight zero, so their bits
+/// contribute nothing), with the points interleaved ([`BankTables`]); then per column the
+/// eight-word runs `z[(c << ν) + 8g ..][..8]` are bit-transposed (byte `b` = bit `b` of
+/// the eight words) and each byte selects one table entry holding every point, XORed into
+/// a register accumulator over the row tile. The row tile holds as many groups as keep the
+/// tables within [`BANK_TABLE_BYTES`]. XOR is exact and order-free, so the outputs do not
+/// depend on the tiling.
 pub fn union_bitbank_fold_multi(
     union: &UnionInstance,
     z: &[F128],
@@ -331,40 +388,51 @@ pub fn union_bitbank_fold_multi(
             ));
         }
     }
-    let ptrs = BankOut(outs.iter_mut().map(|o| o.as_mut_ptr()).collect());
+    let ptrs = BankOut {
+        ptrs: outs.iter_mut().map(|o| o.as_mut_ptr()).collect(),
+        len: 1usize << col_vars,
+    };
     let use_x86 = bank_transpose_x86();
+    let use_lookup512 = bank_lookup_x86();
+    let stride = BankTables::stride_for(np);
+    let rg = (BANK_TABLE_BYTES / (stride * 256 * 16))
+        .clamp(BANK_ROW_GROUPS_MIN, BANK_ROW_GROUPS_MAX);
     tasks.par_iter().for_each_init(
-        || vec![F128::ZERO; BANK_ROW_GROUPS * np * 256],
+        || BankTables::new(np, rg),
         |tables, &(zw, oc, ncols, live, n_t)| {
             let groups = n_t.div_ceil(8);
-            let mut buf = [0u8; BANK_ROW_GROUPS * 128];
-            let mut eq8 = [F128::ZERO; 8];
-            for gt in (0..groups).step_by(BANK_ROW_GROUPS) {
-                let gn = BANK_ROW_GROUPS.min(groups - gt);
+            let mut buf = [0u8; BANK_ROW_GROUPS_MAX * 128];
+            let mut eq8 = vec![[F128::ZERO; 8]; np];
+            for gt in (0..groups).step_by(rg) {
+                let gn = rg.min(groups - gt);
                 for g in 0..gn {
                     let row0 = 8 * (gt + g);
-                    for (p, eq) in eqs.iter().enumerate() {
-                        for (r, e) in eq8.iter_mut().enumerate() {
+                    for (e8, eq) in eq8.iter_mut().zip(&eqs) {
+                        for (r, e) in e8.iter_mut().enumerate() {
                             *e = if row0 + r < n_t { eq[row0 + r] } else { F128::ZERO };
                         }
-                        let t = &mut tables[(g * np + p) * 256..(g * np + p + 1) * 256];
-                        build_sum_table8(&eq8, t);
                     }
+                    let t = &mut tables.as_mut_slice()[g * 256 * stride..(g + 1) * 256 * stride];
+                    build_sum_table8(use_lookup512, &eq8, stride, t);
                 }
                 for c in 0..ncols {
                     let col = &z[zw + (c << nu)..zw + ((c + 1) << nu)];
                     let runs = &col[8 * gt..8 * (gt + gn)];
                     bank_transpose(use_x86, runs, &mut buf[..gn * 128]);
                     let nb = 128.min(live - 128 * c);
-                    for p in 0..np {
-                        let op = ptrs.get(p);
-                        // SAFETY: output column oc + c < 2^(col_vars - 7) belongs to this
-                        // task only; nb <= 128 bits of it.
-                        let out = unsafe {
-                            std::slice::from_raw_parts_mut(op.add(128 * (oc + c)), nb)
-                        };
-                        bank_lookup(tables, np, p, &buf[..gn * 128], gn, out);
-                    }
+                    let base = 128 * (oc + c);
+                    // The output column oc + c < 2^(col_vars - 7) belongs to this task only.
+                    assert!(base + nb <= ptrs.len(), "bit-bank output column out of range");
+                    bank_lookup(
+                        use_lookup512,
+                        tables,
+                        np,
+                        &buf[..gn * 128],
+                        gn,
+                        nb,
+                        ptrs.ptrs(),
+                        base,
+                    );
                 }
             }
         },
@@ -373,47 +441,128 @@ pub fn union_bitbank_fold_multi(
     outs
 }
 
-/// `out[b] += Σ_{g < gn} tables[g][p][bytes[128 g + b]]` for `b < out.len()`.
+/// For every point `p < np` and bit `b < nb`:
+/// `outs[p][base + b] ^= XOR_{g < gn} entry(g, bytes[128 g + b])[p]`, where `tables` is
+/// interleaved as in [`BankTables`].
+///
+/// The caller guarantees `base + nb <= len` of every output and that no other task touches
+/// `outs[p][base .. base + nb]`.
 #[inline]
-fn bank_lookup(tables: &[F128], np: usize, p: usize, bytes: &[u8], gn: usize, out: &mut [F128]) {
-    let nb = out.len();
-    let mut b = 0;
-    // Four independent accumulator chains per step.
-    while b + 4 <= nb {
-        let (mut a0, mut a1, mut a2, mut a3) = (out[b], out[b + 1], out[b + 2], out[b + 3]);
-        for g in 0..gn {
-            let t = &tables[(g * np + p) * 256..(g * np + p + 1) * 256];
-            let by = &bytes[128 * g + b..128 * g + b + 4];
-            a0 += t[by[0] as usize];
-            a1 += t[by[1] as usize];
-            a2 += t[by[2] as usize];
-            a3 += t[by[3] as usize];
-        }
-        out[b] = a0;
-        out[b + 1] = a1;
-        out[b + 2] = a2;
-        out[b + 3] = a3;
-        b += 4;
+#[allow(clippy::too_many_arguments)]
+fn bank_lookup(
+    use_512: bool,
+    tables: &BankTables,
+    np: usize,
+    bytes: &[u8],
+    gn: usize,
+    nb: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    let stride = tables.stride;
+    let t = tables.as_slice();
+    // These bounds are what the unchecked loads below rely on: a byte value is below 256,
+    // so group g's entries are `t[g * 256 * stride ..][.. 256 * stride]`.
+    assert!(t.len() >= gn * 256 * stride && bytes.len() >= gn * 128 && nb <= 128);
+    assert!(np <= stride.max(1) && outs.len() >= np);
+    #[cfg(target_arch = "x86_64")]
+    if use_512 && stride.is_multiple_of(4) {
+        // SAFETY: AVX-512F was checked (`bank_lookup_x86`); stride is a multiple of four;
+        // the table and byte ranges are asserted above; the tables start on a 64-byte
+        // line; the output range is the caller's contract.
+        unsafe {
+            crate::lincheck::kernels::bank_lookup_avx512(
+                t.as_ptr(),
+                stride,
+                np,
+                bytes.as_ptr(),
+                gn,
+                nb,
+                outs,
+                base,
+            )
+        };
+        return;
     }
-    while b < nb {
-        let mut a = out[b];
-        for g in 0..gn {
-            a += tables[(g * np + p) * 256 + bytes[128 * g + b] as usize];
+    let _ = use_512;
+    // Portable path: up to four points at a time, four bits in flight.
+    for q0 in (0..np).step_by(4) {
+        let cnt = (np - q0).min(4);
+        let mut b = 0;
+        while b < nb {
+            let w = 4.min(nb - b);
+            let mut acc = [[F128::ZERO; 4]; 4];
+            for g in 0..gn {
+                for (j, a) in acc.iter_mut().enumerate().take(w) {
+                    let s = bytes[128 * g + b + j] as usize;
+                    let e = &t[(g * 256 + s) * stride + q0..][..cnt];
+                    for (x, y) in a.iter_mut().zip(e) {
+                        *x += *y;
+                    }
+                }
+            }
+            for (j, a) in acc.iter().enumerate().take(w) {
+                for (i, v) in a.iter().enumerate().take(cnt) {
+                    // SAFETY: base + b + j < base + nb <= len; disjoint per the contract.
+                    unsafe { *outs[q0 + i].add(base + b + j) += *v };
+                }
+            }
+            b += w;
         }
-        out[b] = a;
-        b += 1;
     }
 }
 
-/// `table[s] = Σ_{r: bit r of s set} eq8[r]` (255 additions, doubling).
-#[inline]
-fn build_sum_table8(eq8: &[F128; 8], table: &mut [F128]) {
-    table[0] = F128::ZERO;
-    for (i, &e) in eq8.iter().enumerate() {
+/// Interleaved subset-sum table of one group: entry `s` (F128 `s * stride ..`), position
+/// `p < eq8.len()`, is `Σ_{r: bit r of s set} eq8[p][r]` (255 vector additions, doubling).
+/// Positions past `eq8.len()` stay zero.
+#[inline(always)]
+fn build_sum_table8_body(eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
+    debug_assert!(table.len() >= 256 * stride && eq8.len() <= stride);
+    table[..stride].fill(F128::ZERO);
+    for i in 0..8 {
         let len = 1usize << i;
-        for j in 0..len {
-            table[len + j] = table[j] + e;
+        // Entries 0 .. len are final; entries len .. 2 len are those plus the weight of row i.
+        let (done, rest) = table[..2 * len * stride].split_at_mut(len * stride);
+        for (src, dst) in done.chunks_exact(stride).zip(rest.chunks_exact_mut(stride)) {
+            for (p, (d, s)) in dst.iter_mut().zip(src).enumerate() {
+                *d = *s + eq8.get(p).map_or(F128::ZERO, |e| e[i]);
+            }
         }
+    }
+}
+
+/// [`build_sum_table8_body`] compiled for AVX-512 (one zmm per four points).
+///
+/// # Safety
+/// AVX-512F available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn build_sum_table8_avx512(eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
+    build_sum_table8_body(eq8, stride, table)
+}
+
+/// Fill `table` (`256 * stride` F128) as in [`build_sum_table8_body`], vectorized when
+/// `avx512` is set.
+fn build_sum_table8(avx512: bool, eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
+    #[cfg(target_arch = "x86_64")]
+    if avx512 {
+        // SAFETY: AVX-512F was checked by the caller (`bank_lookup_x86`).
+        unsafe { build_sum_table8_avx512(eq8, stride, table) };
+        return;
+    }
+    let _ = avx512;
+    build_sum_table8_body(eq8, stride, table);
+}
+
+/// Whether the AVX-512 table lookup may run.
+fn bank_lookup_x86() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::simd::has(crate::simd::AVX512F)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
     }
 }
 
@@ -1319,7 +1468,9 @@ mod tests {
                         .iter()
                         .map(|s| UnionLincheckSlot { z_lincheck: s, circuit: &circ })
                         .collect();
-                    let points: Vec<Vec<F128>> = (0..3).map(|_| rng.f128_vec(nu)).collect();
+                    // One to five points: table strides 1, 2, 4, 4 and 8.
+                    let points: Vec<Vec<F128>> =
+                        (0..1 + (nu + k_log) % 5).map(|_| rng.f128_vec(nu)).collect();
                     let want: Vec<Vec<F128>> =
                         points.iter().map(|p| union_bitbank_fold(&union, &slots, p)).collect();
                     let refs: Vec<&[F128]> = points.iter().map(Vec::as_slice).collect();
