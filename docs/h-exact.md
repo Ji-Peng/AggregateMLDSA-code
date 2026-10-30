@@ -92,12 +92,13 @@ checked-in catalogs hold the rows of every relation.
    * the `G_main4` descriptor: polynomial count 9 instead of 8, alphabet codes
      `[0, 6, 0, 0, 0, 0, 0, 0, 0]` (`B_zhi` Boolean, `D_u` six-valued leaf digit, six bits,
      `a_z` Boolean) instead of H-u's `[4, 6, 0, 0, 0, 0, 0, 0]`; the `G_main16` codes stay
-     `[0x90; 4]`;
-   * the catalog row id `mldsa-44-l16x-batch-<N*>-mult-final` instead of
-     `mldsa-44-l16-batch-<N*>-mult-final`;
-   * the PIOP plan digest of `docs/soundness.md` 6.4 (the proof-of-work plan), which differs
-     because the plan's stage-2 batching site has `g = 3` (Section 3.7).
-   The digit layout id stays `1` (it names the lookup layout L16, which is unchanged), and the
+     `[0x90, 0x90, 0x10|16, 0x10|16]` (`S_zlo` and `S_ulo` looked up, `V_lo` and `V_hi`
+     unchecked);
+   * the catalog row id `mldsa-44-p16x-batch-<N*>-mult-final` instead of
+     `mldsa-44-p16-batch-<N*>-mult-final`;
+   * the PIOP plan digest of `docs/soundness.md` 6.4 (the proof-of-work plan), which equals
+     H-u's because the stage-2 batching size (8 instead of 9) has four bits in both.
+   The digit layout id is `2` (lookup layout L16 with the projected quotient), and the
    lookup layout bytes are unchanged (Section 3.1). The affine value forms of Section 2.3 are
    a function of the relation id (normative constants), not separately encoded.
 3. **Verifier policy.** An H-u proof is a valid proof of a weaker statement, so the relation
@@ -153,9 +154,11 @@ which is harmless because only the value enters an identity): `a_z = [w >= 2^17]
 
 | Group | Family (preset) | H-u | H-exact | Polys |
 | --- | --- | --- | --- | ---: |
-| `G_main16` | width 16 (`AggFp64SignedWidth16`) | `Z_lo, U_lo, V_lo, V_hi` | `S_zlo, S_ulo, V_lo, V_hi` (same slots, same alphabet `[-2^15, 2^15)`, all looked up) | 4 |
+| `G_main16` | width 16 (`AggFp64SignedWidth16`) | `Z_lo, U_lo, V_lo, V_hi` | `S_zlo, S_ulo, V_lo, V_hi` (same slots, same alphabet `[-2^15, 2^15)`; `S_zlo`, `S_ulo` looked up, `V_lo`, `V_hi` unchecked) | 4 |
 | `G_main4` | width 4 (`AggFp64SignedWidth4`) | `Z_hi` (base 4, `[-2, 1]`), `U_hi` (base 6, `[-3, 2]`), `b_0..b_5` | `B_zhi` (`{0, 1}`), `D_u` (base 6, `[-3, 2]`), `b_0..b_5`, `a_z` (`{0, 1}`) | 8 -> 9 |
-| `G_1, G_2, G_3, G_m` | unchanged | unchanged | unchanged | 6, 12, 1, 7 |
+| `G_1, G_2, G_3` | unchanged | unchanged | unchanged | 6, 12, 12 |
+| `G_k` | projection | `K_0, K_1, K_2` | unchanged | 3 |
+| `G_m` | unchanged | unchanged | unchanged | 7 |
 
 `a_z` is appended after the bits so that `b_t` keeps positions 2..7 of `G_main4` (code that
 locates bits by position keeps working; everything else locates through `manifest.locate`).
@@ -390,7 +393,7 @@ From an accepting transcript the Akita extractor yields the 53 committed tables 
 values with no range guarantee (Akita Remark 10.41). Except with the terms of 4.1:
 
 1. Lookup: every looked-up cell is an integer entry of `T_16` after the shift, so `S_zlo,
-   S_ulo, V_lo, V_hi in [-2^15, 2^15)` and every carry in `[0, 2^16)` (unchanged).
+   S_ulo, K_0, K_1 in [-2^15, 2^15)` and every carry in `[0, 2^16)` (unchanged).
 2. `bool[B_zhi]`, `bool[a_z]`: `B(x)(B(x) - 1) = 0` on the main domain, so `B_zhi, a_z in
    {0, 1}` (a field element with `b^2 = b` is 0 or 1).
 3. `leaf6[D_u]` and `link[D_u]`: the link ties the leaf's terminal claim to the multilinear
@@ -400,10 +403,10 @@ values with no range guarantee (Akita Remark 10.41). Except with the terms of 4.
    `u = S_ulo + 63,079 D_u + 31,540` are integers with `z in [-130,993, 130,993]` and
    `u in [-190,465, 190,465]` (the union of the blocks is exactly these intervals, and all are
    far below `p/2`, so the field element is the integer).
-5. Unchanged: `v in [-2^31, 2^31)`, `b_t, y^(2)_t in {0, 1}`, (3.4) on every position, (9.2)
-   over `Z`, `Delta = 0` in `F_p`; the lifting bound (6.1) holds a fortiori (`|Delta^Z| <
-   2^54.05 < p/2` with the H-exact bounds), so (3.1) holds over `Z`; the Flock extractor and the
-   bridge give (3.3).
+5. Unchanged: `b_t, y^(2)_t in {0, 1}`, (3.4) on every position, (9.2) over `Z`, `Delta = 0`
+   in `F_p`. By Lemma P `|v|_c <= 2^34` outside `Bad_proj` (mass `2^-128`,
+   `docs/soundness.md` 3.5 and 12.4), so the lifting bound (6.1) gives `|Delta^Z| < 2^57.01 <
+   p/2` and (3.1) holds over `Z`; the Flock extractor and the bridge give (3.3).
 
 Hence every live record satisfies `H(130,993, 190,465)`, i.e. H-exact.
 
@@ -448,7 +451,7 @@ Exact integer checks (`docs/scripts/spec_checks.py` items 12 and 13, `python3 -I
 * `C_z = -98,225`, `C_u = 31,540`; the canonical decomposition round-trips for every `z` and
   `u` in range with every digit in its alphabet; padded and edge encodings as in 2.1;
 * `Q_6(Z (Z + 1)) = 0` iff `Z in [-3, 2]` on `[-200, 200)`;
-* lifting: `|Delta^Z| < 2^54.05 < 2^63`;
+* lifting: `|Delta^Z| < 2^57.01 < 2^63`;
 * `zeta', zeta` as above; `B_z, B_u, gamma_2, beta` from FIPS 204 Table 1;
 * the proof-of-work totals and digests of 3.7 with `docs/scripts/pow_plan.py`.
 
@@ -498,7 +501,7 @@ slack, `G_main4` count 9, catalogs: Section 9).
 * `agg-piop` mode B: H-exact at 64, 256, 1,024 records (`tests/all/mode_b.rs`), also with
   `N` not a power of two (padding) and `N = 1`; H-u unchanged at the same sizes (pinned
   digests of H-u MUST NOT move).
-* `agg-cli` mode A: H-exact at 256 and 1,024 locally (`tests/mode_a.rs`, `tests/cli.rs`),
+* `agg-cli` mode A: H-exact at 256 and 1,024 locally (`tests/all/mode_a.rs`, `tests/all/cli.rs`),
   cached and uncached verifier paths agree; 32,768 on the cloud VM (both relations back to
   back, same VM, medians of 5).
 * Edge records: the pinned `|z| = B_z` record and the Decompose edge record prove and verify
@@ -565,9 +568,10 @@ Catalog: `checked_in_catalog_holds_exactly_the_requested_rows` with both relatio
 4. **Plan encoding.** Keep `docs/soundness.md` 6.4 unchanged (chosen; the relation is bound by
    the manifest bytes in the same event) or add a relation byte to the plan body (moves H-u's
    anchors).
-5. **`v` exactness.** H-exact keeps `v in [-2^31, 2^31)` (the honest bound is `|v| <=
-   67,068,447 < 2^26`). `v` is not part of any FIPS 204 check or of `zeta`; a tighter `v` only
-   matters for (6.1), which has 9 bits of slack. No change proposed.
+5. **`v` exactness.** H-exact bounds `v` only through Lemma P (`|v|_c <= 2^34` outside
+   `Bad_proj`; the honest bound is `|v| <= 67,068,447 < 2^26`). `v` is not part of any FIPS
+   204 check or of `zeta`; a tighter `v` only matters for (6.1), which has 6 bits of slack.
+   No change proposed.
 6. **ML-DSA-65/87.** The same construction applies with their `gamma_1, gamma_2, beta`: for
    each set, search the single-digit `u` form (`(c - 1) A = 2 B_u + 1 - 2^16`, `A <= 2^16`,
    even `c`) and the `z` slack; not done here.
@@ -840,7 +844,7 @@ departs from it as follows:
    (spec Section 1); at `d_sig >= 13` it is the signature domain. Below, the honest table holds
    `u_h(i)` at `D_2` index `i 2^(d_2 - d_sig)` and 0 elsewhere, and the weight identity sums
    the `D_2` cells of a signature (all in `[0, 2^16)` by the lookup, so `sum delta^2 <= 80`
-   still follows). The six-group contract (`GROUP_COUNT` arrays in the PCS driver, the
+   still follows). The seven-group contract (`GROUP_COUNT` arrays in the PCS driver, the
    verifier, Akita's grouped rows with five precommitted profiles) and the lookup shape (four
    stacks, `L` unchanged) stay; the committed cost is the same as a seventh group's (one
    element per signature at `2^15`, the `2^13`-cell floor below). Round 2 is early enough:

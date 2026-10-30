@@ -393,7 +393,7 @@ def print_summary(args) -> None:
     print()
     # Honest completeness: per site (1 - 2^-g)^(2^(g+7)) <= exp(-2^7).
     # Capped searches: PIOP sites, tied-part sites (at most 2 parts x 4 segments, each a tie, an
-    # eq_Y and at most 28 rounds), Akita's 459.
+    # eq_Y and at most 28 rounds), Akita's 461.
     part_sites = 8 * (2 + chain_rounds(D_SEG_MAX, 2))
     worst = max(len(piop_sites(geometry(d))) for d in range(3, 16)) + part_sites + AKITA_SITES_2_15
     print(

@@ -96,6 +96,9 @@ flock-core = { path = "vendor/flock-core" }
 # requirement (vendor/flock-field/PATCH.md), so that the CLMUL build (`+pclmulqdq`) inlines it.
 flock-field = { path = "vendor/flock-field" }
 
+# Akita with the prover-only changes of vendor/akita/PATCH.md (NTT-slot prewarm,
+# mirror-backed commit, concurrent opening passes and chunked column construction); no
+# arithmetic, wire-format or verifier change.
 [patch."https://github.com/LayerZero-Labs/akita.git"]
 akita-algebra = { path = "vendor/akita/crates/akita-algebra" }
 akita-challenges = { path = "vendor/akita/crates/akita-challenges" }

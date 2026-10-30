@@ -231,7 +231,7 @@ same batched sessions, not sessions). Union bound: `eps_X^2 + eps_GKR`.
 | --- | ---: | --- | ---: | --- |
 | one `X` | `(L + M - 1)/|K| = 2^-101.0` | 1 | 22,896 | below the 128-bit ledger |
 | (i) one `X` and a 28-bit work nonce | `2^-129.0` (difficulty 28) | `+27.6 s` nonce search on 7 threads (Section 4.4), about 7x the second challenge | 22,896 + nonce | above Akita's 25-bit cap (the nonce format of wire version 2 caps targets at 25 bits) |
-| (ii) two independent `X_1, X_2` (adopted) | `2^-201.9` | 1.41x (1,024) to 1.54x (2,048) of the lookup prover (Section 4.5) | 28,784 | the identity term needs no grinding; the GKR rounds are ground to Aerie's schedule in wire version 2 (`docs/soundness.md`); before grinding the lookup is at about `2^-117.9` (`1,106/|K|`) |
+| (ii) two independent `X_1, X_2` (adopted) | `2^-203.5` | 1.41x (1,024) to 1.54x (2,048) of the lookup prover (Section 4.5) | 28,784 | the identity term needs no grinding; the GKR rounds are ground to Aerie's schedule in wire version 2 (`docs/soundness.md`); before grinding the lookup is at about `2^-117.9` (`1,026/|K|`) |
 | (iii) `X` in `F_{p^4}` (trees over the degree-4 extension, challenges of the sessions in `K`) | `(L + M - 1)/p^4 = 2^-229` | every tree node and lane product in `F_{p^4}`: 3 `K`-multiplications per product (Karatsuba) plus a constant, about 3x the arithmetic of one challenge, i.e. 2x that of (ii); a kernel field change | about 2x of one `X` (every layer value and message in `F_{p^4}`) | rejected: dearer than (ii) |
 | (iv) tighter counting (bound `deg N` by the distinct out-of-table values) | none: an adversary can make every `f_i` distinct, `deg N = L + M - 1` is reachable | 0 | 22,896 | no improvement in the worst case |
 | (v) the conjugate `X^p` as a second point | none: `N` has coefficients in `F_p`, so `N(X) = 0` implies `N(X^p) = 0` | 0 | 22,896 | no information |
@@ -300,11 +300,11 @@ one weight product per point, one fold per lane and pair):
 | Bottom session `s = D` | 9 | 9 | 16 per pair plus 2 `Ints` folds; shared by the challenges |
 | **Total per leaf** | **21** | **33** | |
 
-Leaves per signature (main stack 4,096, carry stacks with their padding slots, table
-`2^16 / N`): 4,356 at `N = 1,024`, 4,240.5 at 8,192, 4,234.5 at `2^15`. Per signature:
-about 91K `K`-multiplications with one challenge and 144K with two at 1,024 (89K and 140K
-at `2^15`), i.e. 270K to 430K `F_p` multiplications. The four stage-3 stack reductions
-cost about 4K per signature (4 linear lanes, degree 2).
+Leaves per signature (main stack 2,048, carry stacks with their padding slots, table
+`2^16 / N`): 2,308 at `N = 1,024`, 2,192.5 at 8,192, 2,186.5 at `2^15`. Per signature:
+about 48K `K`-multiplications with one challenge and 76K with two at 1,024 (46K and 72K
+at `2^15`), i.e. 145K to 229K `F_p` multiplications. The five stage-3 stack reductions
+cost about 5K per signature (5 linear lanes, degree 2).
 
 ### 4.4 Option (i): the work nonce (measured)
 
@@ -508,4 +508,4 @@ and verifier run with a one-thread rayon pool, called from a plain thread and fr
 worker, under a timeout: the regression test of the round-1 deadlock, deviation P12),
 `tests/all/prove_verify.rs`, `tests/all/bridge.rs`, `tests/all/source_tables.rs`,
 `tests/all/virtual_checker.rs` (the L16 tables against the integer relation), `tests/all/commit_open.rs`;
-`agg-cli` `tests/mode_a.rs` (mode A round trips and tampering).
+`agg-cli` `tests/all/mode_a.rs` (mode A round trips and tampering).

@@ -28,7 +28,7 @@ goal; `docs/h-exact.md`).
 | Crate | Kind | Content |
 | --- | --- | --- |
 | `crates/agg-witness` | lib | ML-DSA-44 native verify, key expansion, (z,u,v,b) derivation, digit and value forms, CRT product, padding geometry, H-FIPS witness and checker |
-| `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset and the width-16 preset `AggFp64SignedWidth16`, six-group catalogs in two families for both relations (`Relation`), two-round commit driver, work plan |
+| `crates/agg-pcs-config` | lib | Aerie's `Fp64SignedWidth4` preset and the width-16 preset `AggFp64SignedWidth16`, seven-group catalogs in two families for all three relations (`Relation`), two-round commit driver, work plan |
 | `crates/agg-piop` | lib | the LogUp-GKR lookup into `T_16` (`docs/lookup.md`), stages 1-3, the two remaining range leaves and links, weight tables, the proof-of-work schedule (`pow`), verifier, Akita openings |
 | `crates/agg-bridge` | lib | bridge shapes (production, toy), seed to matrices, Fp parities and quotient (carry) columns, public weights and their verifier evaluation, final vector, GF(2) composite walker, the virtual parity chain (`parity_chain`), soundness constants and work |
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, tied parts (version 5: the sponge instance whose opening proves the parity chain's bit claim, `flock_union`, `tied`; spans over several segments); `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs |
@@ -56,7 +56,7 @@ and was seeded from Aerie's lockfile so shared transitive crates match Aerie's.
 | Dependency | Source | Revision |
 | --- | --- | --- |
 | Aerie (`aerie-falcon`, `aerie-prover`, `aerie-pcs-config`, `aerie-keccak`, `aerie-simd`) | https://github.com/a16z/aerie | `49b6c212c209286c536196f53618823ffdf0e899` |
-| Akita (`akita-*`) | https://github.com/LayerZero-Labs/akita | `e023b6a46143f7b23199ccecb2684192baf7b640` (the rev Aerie 49b6c21 pins; vendored without source changes in `vendor/akita` and applied through `[patch]`; `akita-config` with `dev-protocol`, transcripts with `transcript-blake2b`) |
+| Akita (`akita-*`) | https://github.com/LayerZero-Labs/akita | `e023b6a46143f7b23199ccecb2684192baf7b640` (the rev Aerie 49b6c21 pins; vendored at `vendor/akita` with the prover-only changes of `vendor/akita/PATCH.md` — no arithmetic, wire-format or verifier change — and applied through `[patch]`; `akita-config` with `dev-protocol`, transcripts with `transcript-blake2b`) |
 | Jolt (`jolt-field` with `solinas`, `jolt-poly`) | https://github.com/a16z/jolt | `c7c2d08d5bb0c7c80501f29f723e595af7fcff3c` (as Aerie) |
 | Spongefish | https://github.com/arkworks-rs/spongefish | `ef9741346a150039427d9e0c02d6b2d73e93ec81` (as Aerie) |
 | Flock (`flock-core`, `flock-prover`, `flock-field`) | https://github.com/succinctlabs/flock | `83f963e8ede6d9a85ec4762b0c018943b6f6542b` (HEAD circuit language); `flock-core` is the vendored copy `vendor/flock-core` of that revision with the prover-only opening patch, runtime-dispatched x86 SIMD kernels, the derived rate-1/8 Ligerito parameter set `Slim8`, the verifier-visible list-aware work at the outer sites and the canonical work-nonce width of `vendor/flock-core/PATCH.md` (`docs/deviations.md`; our Flock proofs do not verify with upstream), applied through `[patch]` in `Cargo.toml`; `flock-field` is the vendored copy `vendor/flock-field` with `#[inline]` on the x86 scalar GF(2^128) multiply (exact, speed only, `vendor/flock-field/PATCH.md`) |

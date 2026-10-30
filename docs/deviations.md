@@ -20,8 +20,8 @@ four-group layouts need their own catalog, `agg_mldsa_fp64_signed_width4`
 (`crates/agg-pcs-config/src/schedules/`). The family name enters the catalog digest
 that event 0 binds; the protocol is otherwise unchanged. See `docs/pcs-config.md`.
 Under lookup layout L16 (entry L1) this catalog holds the scalar rows of
-`G_main4` and the grouped rows of the six-group batches; the width-16 groups have their
-own family (D2).
+`G_main4` and the grouped rows of the pre-K24 six-group batches (superseded by K24: seven
+groups, five lookup stacks); the width-16 groups have their own family (D2).
 
 ## D2. Second catalog family for the width-16 preset (spec Section 4.1, L16)
 
@@ -232,7 +232,7 @@ id and the bridge parameters, without a byte encoding.
 
 Code (`agg_piop::manifest::CommitmentManifest::binding_bytes`, `docs/piop.md` Section 2):
 a fixed little-endian encoding of the wire version (1), parameter set, relation flag, `N`,
-`N*`, digit layout id (1 = L16), then per group (six) its role, round, PCS family (0 width 4,
+`N*`, digit layout id (2 = L16 with the projected quotient), then per group (seven) its role, round, PCS family (0 width 4,
 1 width 16), logical and physical variable counts, polynomial count and one alphabet byte per
 polynomial (4 or 8 for a leaf-checked digit, `0x90` for a column looked up in `T_16`,
 `0x50` for a multiplicity digit, 0 for a Boolean), then one catalog row id, then
@@ -446,7 +446,7 @@ Code: `KeccakSide::prove(bridge_seed, matrices, seeds, final_vectors)` and
 `SegmentContext::bridge_seed` pass the transcript's `sd` (event 3) and its matrices to the
 Keccak side. Wire format, transcript and the mode-B and profile-0 sides are unchanged
 (they ignore both). The mode-A driver (A1) runs the F_p side and the Flock side in one
-transcript through these hooks; its end-to-end tests (`agg-cli/tests/mode_a.rs`) check that
+transcript through these hooks; its end-to-end tests (`agg-cli/tests/all/mode_a.rs`) check that
 the aggregate verifies with the Flock sub-proof checked inside the PIOP verifier and that one
 flipped `w1Encode` bit fails exactly the side that holds it.
 
@@ -1157,7 +1157,8 @@ independent challenges, `Z_hi` and `U_hi` kept on small leaves (base 4 and, sinc
 digit layout is removed, not kept behind a configuration switch. Why: a switch would have
 duplicated the manifest, the three stage tables, the claim vectors, the transcript
 registry, the wire format, the verifier and the catalogs (the four-group width-4 rows next
-to the six-group two-family rows), so every protocol file would carry two layouts; measured
+to the pre-K24 six-group two-family rows; superseded by K24: seven groups and five lookup
+stacks), so every protocol file would carry two layouts; measured
 against it (mode B, 256 to 2,048 signatures), the lookup layout halves the committed cells and
 makes the main-domain commitments 2 to 3x faster. The old layout stays reproducible at code
 `4247f61`; its wire version 0 is refused by the parser.
@@ -1296,7 +1297,7 @@ signature domain" in "a seventh Akita group". Code (`docs/h-exact.md` 10.6, 10.7
   takes the free slot 6 of lookup stack 2. `D_2`'s last `d_sig` variables are the signature
   index; below `d_sig = 13` the honest table holds `u_h(i)` at index `i 2^(d_2 - d_sig)` and
   0 elsewhere, and the weight identity sums the cells of a signature. Same committed cost as
-  a seventh group; the six-group contract and the lookup shape (`L`, sites) are unchanged.
+  a separate group; the seven-group contract and the lookup shape (`L`, sites) are unchanged.
 * The PIOP commits the bit `s = (1 + sigma)/2` instead of `sigma`, and uses
   `r0 = gamma_2 s + L + 1 - gamma_2` (`L = (r0 - 1) mod gamma_2`) instead of
   `r0 = sigma L + (1 + sigma)/2`: the same pairs `(sigma, r0)` under another labelling of `L`,
@@ -1312,7 +1313,7 @@ signature domain" in "a seventh Akita group". Code (`docs/h-exact.md` 10.6, 10.7
 * Catalog rows `mldsa-44-l16f-batch-<N*>-mult-final` (13 grouped, 13 width-4 scalar at
   `(13..25, 12)`, 3 width-16 scalar for `G_2` at `(13|14|15, 13)`).
 
-Why: a seventh group would turn every fixed six-group array of the PCS driver, the verifier
+Why: a dedicated `u_h` group would turn the fixed seven-group arrays of the PCS driver, the verifier
 and Akita's grouped rows into a per-relation shape for no saving in committed cells; the
 affine `r0` keeps the 16-bit `l_lo` lane on the kernel's linear fast path; the merged wrap check and the stage-3 placement keep stage 3 at degree 3 and need two cheap
 reductions instead of new lanes; the stage-1 vector and the `tau` site stay as they are. No

@@ -442,7 +442,7 @@ fix of Section 4.3 only widens existing ones.
 ### 4.2 Flock: what the documented 128-bit level covers
 
 Read from `vendor/flock-core` (identical to `83f963e` except K12/K18) and Flock's
-`docs/128-bit-grinding-audit.md`: under `Fast`, `Slim` and `Slim8` the policies
+`docs/128-bit-grinding-audit.md` at that upstream revision: under `Fast`, `Slim` and `Slim8` the policies
 `zerocheck_grinding`, `lincheck_grinding`, `opening_grinding`
 (`OpeningGrinding::per_challenge_128`) are enabled, and `flock_union::UnionGeometry::
 {prove, verify}` uses exactly these policies, so every outer challenge on our code path
@@ -1647,7 +1647,8 @@ eps_hash + eps_fs + eps_br + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] 
 ```
 
 with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
-<= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, both relations), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
+<= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, every relation),
+`proj.psi` exactly `2^-128` (Lemma P), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
 coordinates `<= 2^-128.088` (4.6). `eps_hash` covers the hashed entries of 12.1 item 1;
 the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
@@ -1690,8 +1691,10 @@ fails, and `D(xi_X; sigma_1) = 1` with no site in between (`fs` has no bad set).
 of `X` is 12.3 unchanged; the bit check `b_t(r^(3)) = b'_t(r^(3))` after stage 3 (P9) is an
 additional verifier check and is not used in this bound (the seeded matrices bind on their
 own; the check is P9's matrix-independent second binding).
-Assumption (K) is not needed (SHAKE256 is computed natively). Every address weighs at most `2^-128` (PIOP sites as in Section 10, `sd` at most
-`2^-143.64`, Akita by its plan and 4.6), so the bound of 12.6 holds with `R_F = 0`.
+Assumption (K) is not needed (SHAKE256 is computed natively). Every address weighs at most
+`2^-128` (PIOP sites as in Section 10, `proj.psi` exactly `2^-128` as in 12.4, `sd` at most
+`2^-143.64`, Akita by its plan and 4.6), so the bound of 12.6 holds with `R_F = 0`. The
+`proj.psi` stage of 12.4 is unchanged in mode B, since `v` is committed in round 1 there too.
 
 ### 12.7 What is not proved here
 

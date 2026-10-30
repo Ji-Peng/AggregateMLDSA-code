@@ -110,7 +110,7 @@ is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-bind
    (event 1); `pcs::overlap` runs the pair on the calling thread while the Keccak side's
    commitments run on a scoped OS thread.
 3. After the bridge seed: `BridgeGroupTables::build(manifest, main, matrices)` (honest abort
-   on a row weight above the cap or a cell outside `T_16`), `commit_round2` commits the four
+   on a row weight above the cap or a cell outside `T_16`), `commit_round2` commits the five
    round-2 groups concurrently (event 4), each commit on its own scoped OS thread
    (`pcs::concurrent_commits`): Akita's lazily built NTT slots sit behind a `OnceLock` whose
    initializer runs rayon loops, so commits joined as rayon jobs can deadlock (deviation
@@ -119,7 +119,7 @@ is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-bind
    commit is transcript-free and the final group is committed against the plan's
    precommitted profiles; the prover absorbs the commitments in wire order.
 4. After stage 3: `open_claims(commitments, claims, session)` proves one batched opening of
-   the stage-3 claims (31 under H-u, 32 under H-exact, 36 under H-FIPS) at the suffixes of
+   the stage-3 claims (34 under H-u, 35 under H-exact, 39 under H-FIPS) at the suffixes of
    `r^(3)` and of the 7 multiplicity-digit claims at the lookup's table point `pi_m`
    (`pcs::group_points`). The claims are the stage-3 terminal values (the multilinear
    extensions of the committed tables) and the digit claims of the lookup; a debug assertion
@@ -407,22 +407,26 @@ the other relations):
 | 1 | `commit/main16`, `commit/main` | proof | 1 each | Akita native encodings of `G_main16`, `G_main4` |
 | 2 | `commit/flock` | proof | `S` | `S` framed (`LE64` length) Flock commitments |
 | 3 | `bridge/seed` | challenge | 1 | 32 squeezed bytes `sd` |
-| 4 | `commit/level1`, `level2`, `level3`, `mult` | proof | 1 each | the round-2 commitments |
+| 3b | `proj/psi` | public; challenge | 1; 512 | the 21-byte label; 16 KiB `Psi` |
+| 4 | `commit/level1`, `level2`, `level3`, `proj`, `mult` | proof | 1 each | the round-2 commitments |
 | 5 | `flock/seeds` | challenge | `S` | `32 S` squeezed bytes `fs_sigma` |
 | 6 | `flock/final-vectors`; `flock/shares` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed share items (deviation K22) |
-| 7 | `lookup/x`; `lookup/layer1`; `lookup/mu/1`; per session `s = 2 .. D`: `lookup/gamma/s`, `lookup/round/s/k` and `lookup/r/s/k`, `lookup/terminals/s`, `lookup/leaves/s`, `lookup/mu/s`; `lookup/multiplicities` | challenge; proof; challenge; (challenge, proof and challenge, proof, proof, challenge); proof | 2; 40; 1; (2 per active tree, 3 and 1, 4 per continuing tree, 2 per ending stack or table, 1); 7 | the lookup, then the digit claims `m_k(pi_m)` |
+| fork L | `fork/lookup` | branch | 1 | the 24-byte label |
+| 7 | `lookup/x`; `lookup/layer1`; `lookup/mu/1`; per session `s = 2 .. D`: `lookup/gamma/s`, `lookup/round/s/k` and `lookup/r/s/k`, `lookup/terminals/s`, `lookup/leaves/s`, `lookup/mu/s`; `lookup/multiplicities` | challenge; proof; challenge; (challenge, proof and challenge, proof, proof, challenge); proof | 2; 48; 1; (2 per active tree, 3 and 1, 4 per continuing tree, 2 per ending stack or table, 1); 7 | the lookup, then the digit claims `m_k(pi_m)` |
+| fork S | `fork/stages` | branch | 1 | the 24-byte label |
 | 8 | `tau` | challenge | `d_main` | `tau` |
 | 9 | `prestage/claims` | proof | 13 | pre-stage claims |
 | 10 | `stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 26; 4, 1; 18 | |
-| 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal | proof; challenge; (4, 1); proof | 6; 8; ; 8 | |
-| 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 44; ; 31 | |
+| 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal; `proj/claim` | proof; challenge; (4, 1); proof; proof | 6; 9; ; 9; 1 | |
+| join label | `fork/join` | branch | 2 | the 32-byte digests `d_L`, `d_S` |
+| 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 48; ; 34 | |
 | join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
 | 13 | `pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone, the seed of the Akita opening |
 
 Grinding (`docs/soundness.md` Section 6): every field-challenge event carries a difficulty
 from Aerie's assigned bounds (`Registry::work_sites`: `X` 0, a merge 1, a GKR batching
 vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the stage batching
-vectors 5, 4, 6 (H-exact and H-FIPS: 5, 3, 6), the stage rounds 3, 3, 2). With `g > 0` the
+vectors 5, 4, 6 in every relation, the stage rounds 3, 3, 2). With `g > 0` the
 transcript absorbs `LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose
 low `g` bits must be zero and then the challenge; the prover searches the smallest passing
 nonce and packs it into the work stream (`Transcript::new`, `work_stream`), the verifier reads

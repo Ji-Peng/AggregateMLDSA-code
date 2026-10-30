@@ -249,7 +249,7 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 4. **Weight-2 survival rate** (spec Section 13, present: `agg-bridge/tests/all/production.rs`, columns drawn by the seed derivation, 51 equal pairs): at $`(m,k)=(64,3)`$, $`2\times10^6`$ random column pairs from a fixed PRNG seed; the number with equal row sets (expected $`2\times10^6/\binom{64}{3}=48.0`$) lies in $`[27,69]`$, three standard deviations.
 5. **Lifting at the range boundary** (present in `agg-witness` and, for both shapes, in `agg-bridge/tests/all/toy.rs`): rows of weight exactly $`W_t`$ with all-one inputs give parity 1 and the top carry $`\lfloor W_t/2\rfloor`$ (1,023 at level 1); weight $`W_t+1`$ makes `compute` return `RowWeight`.
 6. **Flock side** (`agg-keccak`): the tied-part tests of Sections 5c and 5d (`tied`, `tests/all/tied.rs`).
-7. **End to end** (present for mode B and for the Fp side with seed-derived matrices in `agg-piop/tests/all/bridge.rs`, and for mode A in `agg-cli/tests/mode_a.rs`, where a single-bit flip on either side fails exactly that side): honest aggregates at $`N=256`$ and $`1{,}024`$ verify; a single w1Encode bit changed in one copy is rejected; the verifier's bridge-weight evaluation agrees with the prover's weight tables at the terminal points.
+7. **End to end** (present for mode B and for the Fp side with seed-derived matrices in `agg-piop/tests/all/bridge.rs`, and for mode A in `agg-cli/tests/all/mode_a.rs`, where a single-bit flip on either side fails exactly that side): honest aggregates at $`N=256`$ and $`1{,}024`$ verify; a single w1Encode bit changed in one copy is rejected; the verifier's bridge-weight evaluation agrees with the prover's weight tables at the terminal points.
 
 ## 10. Decisions and open items
 
