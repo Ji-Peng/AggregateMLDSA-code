@@ -303,10 +303,10 @@ const FLOCK_POOL_STACK: usize = 64 << 20;
 /// `piop` runs on the caller (its parallel loops on the global pool); return both results
 /// and the wall time of `flock`. The caller is not a rayon worker ([`flock_pool_threads`]
 /// is 0 there), so no worker blocks on the OS thread.
-fn fork_join<A: Send, B>(
+fn fork_join<A: Send, B: Send>(
     threads: usize,
     flock: impl FnOnce() -> A + Send,
-    piop: impl FnOnce() -> B,
+    piop: impl FnOnce() -> B + Send,
 ) -> ((A, Duration), B) {
     let trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
     std::thread::scope(|scope| {
@@ -329,7 +329,23 @@ fn fork_join<A: Send, B>(
             })
             .expect("spawn the Flock thread");
         let piop_start = Instant::now();
-        let b = piop();
+        let piop_threads = std::env::var("AGG_PIOP_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0);
+        let b = if let Some(n) = piop_threads {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .stack_size(FLOCK_POOL_STACK)
+                .thread_name(|i| format!("agg-piop-{i}"))
+                .build()
+            {
+                Ok(pool) => pool.install(piop),
+                Err(_) => piop(),
+            }
+        } else {
+            piop()
+        };
         let piop_end = Instant::now();
         let (a, flock_busy, flock_end) = crate::pcs::join_os_thread(handle);
         let join = Instant::now();
@@ -960,6 +976,7 @@ pub fn prove_with_tables_using(
     };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
+        let unchecked = hooks.unchecked;
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
             let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
             phase_stamp("parity-tables");
@@ -970,7 +987,7 @@ pub fn prove_with_tables_using(
                 &matrices,
                 &public,
                 &mut transcript,
-                hooks.unchecked,
+                unchecked,
             )
         });
         timings.fork_join = fork.elapsed();
