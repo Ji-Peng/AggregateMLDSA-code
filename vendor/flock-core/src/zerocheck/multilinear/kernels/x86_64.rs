@@ -1,9 +1,8 @@
 use core::{
     arch::x86_64::{
-        __m128i, __m256i, __m512i, _mm_load_si128, _mm_set_epi64x, _mm_setzero_si128,
-        _mm_xor_si128, _mm256_stream_si256, _mm512_broadcast_i32x4, _mm512_castsi512_si256,
-        _mm512_extracti64x4_epi64, _mm512_loadu_si512, _mm512_permutex2var_epi64, _mm512_set_epi64,
-        _mm512_storeu_si512, _mm512_stream_si512, _mm512_xor_si512,
+        __m128i, __m512i, _mm_load_si128, _mm_set_epi64x, _mm_setzero_si128, _mm_xor_si128,
+        _mm512_broadcast_i32x4, _mm512_loadu_si512, _mm512_permutex2var_epi64, _mm512_set_epi64,
+        _mm512_storeu_si512, _mm512_xor_si512,
     },
     mem::transmute,
 };
@@ -15,68 +14,6 @@ use crate::{
     field::{F128, F256Unreduced},
     simd::x86::{WideGhashX4, f128x4_loadu, ghash_mul_x4},
 };
-
-/// How [`fold_and_message_x86_avx512`] writes the folded `a`/`b` outputs.
-///
-/// The caller picks one mode for a whole output slice; every store then uses
-/// the same instruction. `Stream512` and `Stream256` are the Z2 non-temporal
-/// stores: the outputs are too large to stay cached until the next round reads
-/// them, so the read-for-ownership traffic of an ordinary store is wasted.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FoldStore {
-    /// Ordinary cached stores.
-    Cached,
-    /// `_mm512_stream_si512`; every destination address is 64-byte aligned.
-    Stream512,
-    /// `_mm256_stream_si256`; every destination address is 32-byte aligned
-    /// but may sit 32 bytes off a cache line.
-    Stream256,
-}
-
-/// Pick the store mode for the two output slices starting at `a_dst` and
-/// `b_dst`; `nt` is the caller's decision (buffer size and `FLOCK_ZC_NT`).
-///
-/// Both fold kernels write whole 4-value groups at 32-byte-multiple offsets
-/// from the slice base, so a 64-byte-aligned base supports 64-byte stores and
-/// a 32-byte-aligned base supports 32-byte stores. A base that is not even
-/// 32-byte aligned falls back to cached stores (the large allocator never
-/// produces one, but a test may). Both outputs are written with the same store
-/// width, so the less aligned of the two decides it.
-#[inline]
-pub(crate) fn fold_store_for(a_dst: *const F128, b_dst: *const F128, nt: bool) -> FoldStore {
-    if !nt {
-        return FoldStore::Cached;
-    }
-    match (a_dst as usize | b_dst as usize) & 63 {
-        0 => FoldStore::Stream512,
-        32 => FoldStore::Stream256,
-        _ => FoldStore::Cached,
-    }
-}
-
-/// Store one ZMM of folded values under `STORE` (`0` cached, `1` 64-byte
-/// non-temporal, `2` 32-byte non-temporal).
-///
-/// # Safety
-/// `dst` is valid for four `F128` writes and meets `STORE`'s alignment: 64
-/// bytes for `1`, 32 bytes for `2`.
-#[inline]
-#[target_feature(enable = "avx512f,avx2,avx")]
-unsafe fn store_fold_x4<const STORE: u8>(dst: *mut F128, v: __m512i) {
-    // SAFETY: the caller supplies the bounds and alignment stated above.
-    unsafe {
-        match STORE {
-            1 => _mm512_stream_si512(dst.cast::<__m512i>(), v),
-            2 => {
-                let lo = _mm512_castsi512_si256(v);
-                let hi = _mm512_extracti64x4_epi64(v, 1);
-                _mm256_stream_si256(dst.cast::<__m256i>(), lo);
-                _mm256_stream_si256(dst.add(2).cast::<__m256i>(), hi);
-            }
-            _ => _mm512_storeu_si512(dst.cast::<__m512i>(), v),
-        }
-    }
-}
 
 /// Fold the four rows for one round-2 pair in parallel x86 SIMD registers.
 /// Returns `[a0, a1, b0, b1]`.
@@ -123,43 +60,10 @@ pub(crate) unsafe fn fold_round2_pair_x86_unchecked_8(
 ///
 /// # Safety
 /// Input/output lengths must satisfy `input.len() == 2 * output.len()` and
-/// `output.len() == 2 * eq_lo.len()`, with `eq_lo.len()` even; `mode` meets
-/// its alignment contract for every store address (see [`store_fold_x4`]).
-/// The CPU has AVX-512F, VPCLMULQDQ, AVX2 and SSE4.1.
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1,avx2,avx")]
+/// `output.len() == 2 * eq_lo.len()`, with `eq_lo.len()` even. The CPU has
+/// AVX-512F, VPCLMULQDQ and SSE4.1.
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
 pub(crate) unsafe fn fold_and_message_x86_avx512(
-    a_in: &[F128],
-    b_in: &[F128],
-    a_out: &mut [F128],
-    b_out: &mut [F128],
-    r_fold: F128,
-    eq_lo: &[F128],
-    mode: FoldStore,
-) -> (F128, F128) {
-    // SAFETY: the caller checked AVX-512; the const arms differ only in the
-    // store instruction, and the wrapper has verified `mode`'s alignment.
-    unsafe {
-        match mode {
-            FoldStore::Cached => {
-                fold_and_message_impl::<0>(a_in, b_in, a_out, b_out, r_fold, eq_lo)
-            }
-            FoldStore::Stream512 => {
-                fold_and_message_impl::<1>(a_in, b_in, a_out, b_out, r_fold, eq_lo)
-            }
-            FoldStore::Stream256 => {
-                fold_and_message_impl::<2>(a_in, b_in, a_out, b_out, r_fold, eq_lo)
-            }
-        }
-    }
-}
-
-/// Body of [`fold_and_message_x86_avx512`]; `STORE` selects the output store
-/// (see [`store_fold_x4`]).
-///
-/// # Safety
-/// As [`fold_and_message_x86_avx512`], with the store mode fixed by `STORE`.
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1,avx2,avx")]
-unsafe fn fold_and_message_impl<const STORE: u8>(
     a_in: &[F128],
     b_in: &[F128],
     a_out: &mut [F128],
@@ -211,10 +115,10 @@ unsafe fn fold_and_message_impl<const STORE: u8>(
             let b_lo = fold_x4(b_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
             let b_hi = fold_x4(b_in.as_ptr().add(2 * (output + 4)), r, even_idx, odd_idx);
 
-            store_fold_x4::<STORE>(a_out.as_mut_ptr().add(output), a_lo);
-            store_fold_x4::<STORE>(a_out.as_mut_ptr().add(output + 4), a_hi);
-            store_fold_x4::<STORE>(b_out.as_mut_ptr().add(output), b_lo);
-            store_fold_x4::<STORE>(b_out.as_mut_ptr().add(output + 4), b_hi);
+            _mm512_storeu_si512(a_out.as_mut_ptr().add(output).cast::<__m512i>(), a_lo);
+            _mm512_storeu_si512(a_out.as_mut_ptr().add(output + 4).cast::<__m512i>(), a_hi);
+            _mm512_storeu_si512(b_out.as_mut_ptr().add(output).cast::<__m512i>(), b_lo);
+            _mm512_storeu_si512(b_out.as_mut_ptr().add(output + 4).cast::<__m512i>(), b_hi);
 
             let a0 = _mm512_permutex2var_epi64(a_lo, even_idx, a_hi);
             let a1 = _mm512_permutex2var_epi64(a_lo, odd_idx, a_hi);
@@ -234,20 +138,15 @@ unsafe fn fold_and_message_impl<const STORE: u8>(
             let output = 2 * x_lo;
             let a_folded = fold_x4(a_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
             let b_folded = fold_x4(b_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
-            store_fold_x4::<STORE>(a_out.as_mut_ptr().add(output), a_folded);
-            store_fold_x4::<STORE>(b_out.as_mut_ptr().add(output), b_folded);
+            _mm512_storeu_si512(a_out.as_mut_ptr().add(output).cast::<__m512i>(), a_folded);
+            _mm512_storeu_si512(b_out.as_mut_ptr().add(output).cast::<__m512i>(), b_folded);
 
-            // Read the two pairs out of the registers, not back from the
-            // stores: a non-temporal store may not be forwarded to a load.
-            // SAFETY: `__m512i` and `[F128; 4]` are both 64 bytes, and F128
-            // accepts every bit pattern.
-            let a_vals: [F128; 4] = transmute(a_folded);
-            let b_vals: [F128; 4] = transmute(b_folded);
             for lane in 0..2 {
-                let a0 = a_vals[2 * lane];
-                let a1 = a_vals[2 * lane + 1];
-                let b0 = b_vals[2 * lane];
-                let b1 = b_vals[2 * lane + 1];
+                let o = output + 2 * lane;
+                let a0 = a_out[o];
+                let a1 = a_out[o + 1];
+                let b0 = b_out[o];
+                let b1 = b_out[o + 1];
                 let eq = eq_lo[x_lo + lane];
                 p1_tail ^= eq.mul_unreduced(a1 * b1);
                 pinf_tail ^= eq.mul_unreduced((a0 + a1) * (b0 + b1));

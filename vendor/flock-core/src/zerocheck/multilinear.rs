@@ -33,14 +33,7 @@
 //! Verifier reconstructs `G(0)` from the running claim via
 //! `current_claim = (1+r_now)·G(0) + r_now·G(1)`.
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::{
-    array::from_fn,
-    mem::{size_of, take},
-    ops::Range,
-    sync::OnceLock,
-};
+use std::{array::from_fn, mem::take, ops::Range, sync::OnceLock};
 
 use flock_multilinear::{eq_eval as multilinear_eq_eval, fold_low};
 use rayon::{
@@ -54,7 +47,7 @@ use {
         x86::{WideGhashX4, f128x4_loadu, f128x4_set, ghash_mul_x4},
     },
     crate::zerocheck::multilinear::kernels::x86_64::{
-        FoldStore, fold_and_message_x86_avx512, fold_round2_pair_x86_unchecked_8, fold_store_for,
+        fold_and_message_x86_avx512, fold_round2_pair_x86_unchecked_8,
     },
 };
 
@@ -79,50 +72,6 @@ use crate::{
     },
 };
 mod kernels;
-
-/// Fold outputs at or above this many bytes are written with non-temporal
-/// (streaming) stores. Below it the output fits the cache that the next round
-/// reads it from; at 32 MiB and up the next round's read comes from DRAM
-/// either way, so the ordinary store's read-for-ownership is pure traffic.
-pub(crate) const NT_STORE_MIN_BYTES: usize = 32 << 20;
-
-/// Whether the zerocheck fold outputs may use non-temporal stores.
-/// `FLOCK_ZC_NT=0` disables them (the A/B arm); any other value keeps the
-/// default, enabled.
-pub(crate) fn nt_store_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("FLOCK_ZC_NT").is_none_or(|v| v != "0"))
-}
-
-/// `FLOCK_ZC_TIMING` gates the zerocheck phase stamps (`zerocheck.rs` reads
-/// the same variable for its own lines); cached after the first read.
-pub(crate) fn zc_timing_trace() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("FLOCK_ZC_TIMING").is_some())
-}
-
-/// Test-only override: `0` follows `FLOCK_ZC_NT`, `1` forces cached stores,
-/// `2` forces streaming stores.
-#[cfg(test)]
-static NT_STORE_FORCE: AtomicU8 = AtomicU8::new(0);
-
-/// Whether a fold output of `len` `F128` values at `dst` is large enough for
-/// streaming stores and starts on the 64-byte boundary the fold kernels'
-/// store layout (`2` values per pair, `4` per store group) expects.
-///
-/// The test override `2` drops the size threshold (an output of any size is
-/// streamed, which is still byte-identical) so the store arms can be compared
-/// without allocating 32 MiB buffers.
-#[inline]
-fn nt_store_eligible(dst: *const F128, len: usize) -> bool {
-    #[cfg(test)]
-    match NT_STORE_FORCE.load(Ordering::Relaxed) {
-        1 => return false,
-        2 => return (dst as usize) % 64 == 0,
-        _ => {}
-    }
-    len * size_of::<F128>() >= NT_STORE_MIN_BYTES && (dst as usize) % 64 == 0 && nt_store_enabled()
-}
 
 /// Returns `(pair_in_block_mask, useful_pairs_inclusive)` for the round-2
 /// fused-fold kernel, from a **single-run** padding spec (the multi-run case
@@ -1650,22 +1599,6 @@ pub fn fold_and_compute_round_pair_into(
     let eq_lo = &eq.lo;
     let eq_hi = &eq.hi;
 
-    // Z2: a large fold output is re-read from DRAM next round, so write it
-    // with streaming stores and skip the read-for-ownership. Every chunk is a
-    // multiple of `chunk_out`, itself a multiple of 64 bytes, so a
-    // 64-byte-aligned output stays 64-byte aligned per chunk. Both outputs are
-    // written with one store width, so `b_out` must be aligned too.
-    #[cfg(target_arch = "x86_64")]
-    let nt = nt_store_eligible(a_out.as_ptr(), a_out.len())
-        && b_out.as_ptr() as usize & 63 == 0;
-    #[cfg(target_arch = "x86_64")]
-    if nt && zc_timing_trace() {
-        eprintln!(
-            "[zc-timing] fold dense: out={:.1} MiB streaming=on",
-            a_out.len() as f64 * size_of::<F128>() as f64 / (1 << 20) as f64,
-        );
-    }
-
     let (sum1, sum_inf) = a_out
         .par_chunks_mut(chunk_out)
         .zip(b_out.par_chunks_mut(chunk_out))
@@ -1688,23 +1621,7 @@ pub fn fold_and_compute_round_pair_into(
                     assert!(lo_size & 1 == 0, "lo_size must be even");
                     assert!(a_in.len() == 2 * a_out.len() && b_in.len() == 2 * b_out.len());
                     assert!(a_out.len() == 2 * eq_lo.len() && b_out.len() == a_out.len());
-                    debug_assert!(
-                        !nt || a_out.as_ptr() as usize & 63 == 0,
-                        "streaming fold chunk alignment"
-                    );
-                    let mode = fold_store_for(a_out.as_ptr(), b_out.as_ptr(), nt);
-                    let out = unsafe {
-                        fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo, mode)
-                    };
-                    // ORDER: the worker's non-temporal stores must be globally
-                    // visible before the fold's join lets any thread read the
-                    // output again; `_mm_sfence` orders exactly those stores.
-                    if mode != FoldStore::Cached {
-                        // SAFETY: SFENCE is baseline x86_64; the call orders
-                        // this thread's preceding stores before the join.
-                        unsafe { core::arch::x86_64::_mm_sfence() };
-                    }
-                    out
+                    unsafe { fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo) }
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 unreachable!()
@@ -1985,25 +1902,6 @@ pub fn fold_and_round_pair_sparse_into(
     let store_out = LiveLayout::new(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
     assert!(a_out.len() >= store_out.len() && b_out.len() >= store_out.len());
 
-    // Z2: the output span is roughly the live volume (2.26 GB over the 32K
-    // tail, est.), far beyond the cache that the next round's read could hit,
-    // so write it with streaming stores and drop the read-for-ownership.
-    // Task slices are 2-value aligned within a 64-byte-aligned buffer, so a
-    // task's run may be only 32-byte aligned; the call site picks the store
-    // width per run.
-    #[cfg(target_arch = "x86_64")]
-    let simd = has(AVX512_CLMUL)
-        && std::env::var_os("FLOCK_ZC_SPARSE_SIMD").as_deref() != Some(std::ffi::OsStr::new("0"));
-    #[cfg(target_arch = "x86_64")]
-    let nt = nt_store_eligible(a_out.as_ptr(), store_out.len()) && simd;
-    #[cfg(target_arch = "x86_64")]
-    if nt && zc_timing_trace() {
-        eprintln!(
-            "[zc-timing] fold sparse: out={:.1} MiB streaming=on",
-            store_out.len() as f64 * size_of::<F128>() as f64 / (1 << 20) as f64,
-        );
-    }
-
     // The pair cover split into tasks of roughly equal LIVE work, each with
     // its own disjoint output slices — parallel like the dense kernel,
     // instead of one scalar walk (measured ~3x per element at low
@@ -2043,6 +1941,9 @@ pub fn fold_and_round_pair_sparse_into(
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    let simd = has(AVX512_CLMUL)
+        && std::env::var_os("FLOCK_ZC_SPARSE_SIMD").as_deref() != Some(std::ffi::OsStr::new("0"));
     let (sum1, sum_inf) = work
         .into_par_iter()
         .map(|(task_pieces, a_task, b_task)| {
@@ -2106,21 +2007,11 @@ pub fn fold_and_round_pair_sparse_into(
                             if l4 > 0 {
                                 let o0 = piece_base + 2 * (t - piece_s);
                                 let e0 = t & lo_mask;
-                                // 2-value-aligned slices inside the two
-                                // 64-byte-aligned output buffers; the helper
-                                // downgrades to 32-byte stores when a run
-                                // starts 32 bytes off a cache line, and to
-                                // cached stores if either is odd.
-                                debug_assert!(!nt || a_task.as_ptr() as usize & 31 == 0);
-                                debug_assert!(!nt || b_task.as_ptr() as usize & 31 == 0);
-                                let mode =
-                                    fold_store_for(a_task[o0..].as_ptr(), b_task[o0..].as_ptr(), nt);
                                 // SAFETY: AVX512_CLMUL checked at run time; 4·l4
                                 // contiguous inputs from `base`, 2·l4 outputs from
                                 // `o0` inside the task's slices, l4 eq_lo entries
                                 // from `e0` inside one eq_lo block (the run does
-                                // not cross a 2^n_lo boundary); `mode` matches
-                                // the output alignment.
+                                // not cross a 2^n_lo boundary).
                                 let (k1, ki) = unsafe {
                                     fold_and_message_x86_avx512(
                                         &a[base..base + 4 * l4],
@@ -2129,7 +2020,6 @@ pub fn fold_and_round_pair_sparse_into(
                                         &mut b_task[o0..o0 + 2 * l4],
                                         r_fold,
                                         &eq.lo[e0..e0 + l4],
-                                        mode,
                                     )
                                 };
                                 k_red = (k_red.0 + k1, k_red.1 + ki);
@@ -2182,15 +2072,6 @@ pub fn fold_and_round_pair_sparse_into(
                     t = run_end;
                 }
                 local += 2 * (piece_e - piece_s);
-            }
-            // ORDER: publish this worker's non-temporal stores before the
-            // fold's join lets any thread (this one included) read the output
-            // buffers again in the next round.
-            #[cfg(target_arch = "x86_64")]
-            if nt {
-                // SAFETY: SFENCE is baseline x86_64 and orders this thread's
-                // preceding stores before the fold's join.
-                unsafe { core::arch::x86_64::_mm_sfence() };
             }
             (s1, s_inf)
         })
@@ -4255,141 +4136,6 @@ mod tests {
             assert_eq!(m1_fused, m1_unf, "msg_1 mismatch at log_n={log_n}");
             assert_eq!(minf_fused, minf_unf, "msg_inf mismatch at log_n={log_n}");
         }
-    }
-
-    /// Z2: the non-temporal store arm of both fold kernels produces exactly
-    /// the cached arm's output buffers, live layout and round message.
-    ///
-    /// The output buffers are 64-byte aligned by hand (the production large
-    /// allocator returns 2 MiB-aligned blocks; the test allocator does not),
-    /// and the size threshold is overridden so the arm runs on a small shape.
-    /// Tasks are cut so that at least one task starts 32 bytes off a cache
-    /// line, which exercises the 32-byte store arm as well as the 64-byte one.
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn streaming_fold_stores_match_cached() {
-        if !crate::simd::has(crate::simd::AVX512_CLMUL) {
-            return;
-        }
-
-        /// One `F128` buffer whose first element is 64-byte aligned.
-        struct AlignedF128 {
-            ptr: *mut F128,
-            len: usize,
-        }
-        impl AlignedF128 {
-            fn new(len: usize) -> Self {
-                let layout =
-                    std::alloc::Layout::from_size_align(len * std::mem::size_of::<F128>(), 64)
-                        .expect("test buffer layout");
-                // SAFETY: the layout is non-zero-sized for every call here.
-                let ptr = unsafe { std::alloc::alloc(layout) }.cast::<F128>();
-                assert!(!ptr.is_null(), "test buffer allocation");
-                let mut out = Self { ptr, len };
-                out.slice_mut().fill(F128::ZERO);
-                out
-            }
-            fn slice(&self) -> &[F128] {
-                // SAFETY: `ptr` owns `len` initialised elements for `self`'s life.
-                unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-            }
-            fn slice_mut(&mut self) -> &mut [F128] {
-                // SAFETY: as `slice`, and `&mut self` gives unique access.
-                unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
-            }
-        }
-        impl Drop for AlignedF128 {
-            fn drop(&mut self) {
-                let layout =
-                    std::alloc::Layout::from_size_align(self.len * std::mem::size_of::<F128>(), 64)
-                        .expect("test buffer layout");
-                // SAFETY: `ptr` came from `alloc` with this very layout.
-                unsafe { std::alloc::dealloc(self.ptr.cast(), layout) };
-            }
-        }
-
-        /// Sets the test override and clears it again, panic included.
-        struct Force;
-        impl Force {
-            fn new(force: u8) -> Self {
-                super::NT_STORE_FORCE.store(force, std::sync::atomic::Ordering::Relaxed);
-                Self
-            }
-        }
-        impl Drop for Force {
-            fn drop(&mut self) {
-                super::NT_STORE_FORCE.store(0, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        let mut rng = Rng::new(1234);
-
-        // Sparse fold: an odd-length live interval leaves a task boundary
-        // 32 bytes off a cache line.
-        let log_n = 13;
-        let domain = 1usize << log_n;
-        let live = LiveLayout::new(vec![(0, 3001), (3500, 6000)]);
-        let a: Vec<F128> = (0..live.len()).map(|_| rng.f128()).collect();
-        let b: Vec<F128> = (0..live.len()).map(|_| rng.f128()).collect();
-        let r_fold = rng.f128();
-        let r_next = rng.f128_vec(log_n - 1);
-        let run_sparse = |force: u8| {
-            let mut a_out = AlignedF128::new(domain);
-            let mut b_out = AlignedF128::new(domain);
-            let _force = Force::new(force);
-            let (m1, mi, layout) = super::fold_and_round_pair_sparse_into(
-                &a,
-                &b,
-                a_out.slice_mut(),
-                b_out.slice_mut(),
-                r_fold,
-                &r_next,
-                &live,
-                domain,
-            );
-            (
-                a_out.slice().to_vec(),
-                b_out.slice().to_vec(),
-                m1,
-                mi,
-                layout.intervals().to_vec(),
-            )
-        };
-        let cached = run_sparse(1);
-        let streamed = run_sparse(2);
-        assert_eq!(cached.2, streamed.2, "streaming changed the round message");
-        assert_eq!(cached.3, streamed.3, "streaming changed G(inf)");
-        assert_eq!(cached.4, streamed.4, "streaming changed the live layout");
-        assert_eq!(cached.0, streamed.0, "streaming changed a");
-        assert_eq!(cached.1, streamed.1, "streaming changed b");
-
-        // Dense fold: every chunk starts 64-byte aligned.
-        let log_n = 11;
-        let n = 1usize << log_n;
-        let a: Vec<F128> = (0..n).map(|_| rng.f128()).collect();
-        let b: Vec<F128> = (0..n).map(|_| rng.f128()).collect();
-        let r_fold = rng.f128();
-        let r_next = rng.f128_vec(log_n - 1);
-        let run_dense = |force: u8| {
-            let mut a_out = AlignedF128::new(n / 2);
-            let mut b_out = AlignedF128::new(n / 2);
-            let _force = Force::new(force);
-            let (m1, mi) = super::fold_and_compute_round_pair_into(
-                &a,
-                &b,
-                a_out.slice_mut(),
-                b_out.slice_mut(),
-                r_fold,
-                &r_next,
-            );
-            (a_out.slice().to_vec(), b_out.slice().to_vec(), m1, mi)
-        };
-        let cached = run_dense(1);
-        let streamed = run_dense(2);
-        assert_eq!(cached.2, streamed.2, "streaming changed the dense message");
-        assert_eq!(cached.3, streamed.3, "streaming changed the dense G(inf)");
-        assert_eq!(cached.0, streamed.0, "streaming changed the dense a");
-        assert_eq!(cached.1, streamed.1, "streaming changed the dense b");
     }
 
     /// Parallel `uni_skip_fold_and_round_pair_optimized_packed` produces

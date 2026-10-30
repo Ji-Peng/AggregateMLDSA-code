@@ -865,14 +865,13 @@ fn prove_packed_padded_inner<C: Challenger>(
     let tail_cascade = use_r2_lookahead || use_compact_k;
     if zc_timing {
         eprintln!(
-            "[zc-timing] gates: sparse={} single_run={} runs={:?} n_mlv={} compact_k={} r2_la={} nt={}",
+            "[zc-timing] gates: sparse={} single_run={} runs={:?} n_mlv={} compact_k={} r2_la={}",
             sparse_from_round2,
             dense_single_run,
             padding.runs().len(),
             n_mlv,
             use_compact_k,
-            use_r2_lookahead,
-            multilinear::nt_store_enabled(),
+            use_r2_lookahead
         );
     }
 
