@@ -128,11 +128,6 @@ pub trait KeccakSide {
         true
     }
 
-    /// Prepare optional work to run on the PIOP pool at fork start.
-    fn prepare_fork(&self) -> Option<Box<dyn FnOnce() + Send + '_>> {
-        None
-    }
-
     /// The `S` Flock proofs of the join event. They may be computed concurrently with the
     /// PIOP, so they depend on nothing after event 6: `bridge_seed` is `sd`
     /// (event 3) and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
@@ -1430,35 +1425,20 @@ pub fn prove_with_tables_using(
     };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
-        let row_job = keccak.prepare_fork();
         let (unchecked, swap_join) = (hooks.unchecked, hooks.swap_join);
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            // `in_place_scope` keeps the PIOP body on the calling thread (its large
-            // stack, and the stage branch's schedule); the row job goes to a worker.
-            // A one-thread pool would run the job only after the PIOP: drop it, and
-            // the Flock side builds the rows itself.
-            rayon::in_place_scope(|scope| {
-                if let Some(job) = row_job.filter(|_| rayon::current_num_threads() >= 2) {
-                    scope.spawn(move |_| {
-                        phase_stamp("flock-ab-start");
-                        job();
-                        phase_stamp("flock-ab-end");
-                    });
-                }
-                let prover_tables =
-                    ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
-                phase_stamp("parity-tables");
-                prove_piop_with(
-                    manifest,
-                    tables,
-                    Some(prover_tables),
-                    &matrices,
-                    &public,
-                    &mut transcript,
-                    unchecked,
-                    swap_join,
-                )
-            })
+            let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
+            phase_stamp("parity-tables");
+            prove_piop_with(
+                manifest,
+                tables,
+                Some(prover_tables),
+                &matrices,
+                &public,
+                &mut transcript,
+                unchecked,
+                swap_join,
+            )
         });
         timings.fork_join = fork.elapsed();
         phase_stamp("join");

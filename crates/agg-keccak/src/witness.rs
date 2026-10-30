@@ -17,133 +17,21 @@ use crate::keccak::{Lanes, N_LANES};
 /// Instances whose rows are generated together before scattering.
 const BATCH: usize = 1024;
 
-/// Receiver for rows built from a committed sponge witness.
-pub type RowReceiver = std::sync::mpsc::Receiver<(Vec<F128>, Vec<F128>)>;
-
-/// One slot's prover buffers: the committed witness `z` and, when already built, the
-/// row values `a = A z`, `b = B z` (all BatchMajor). The group generator leaves `ab`
-/// empty; [`Self::ensure_ab`] fills it from `z` where the proof needs it.
+/// One slot's prover buffers: `z`, `a = A z`, `b = B z` (BatchMajor).
 pub struct SlotBuffers {
-    pub z: std::sync::Arc<Vec<F128>>,
-    pub ab: Option<(Vec<F128>, Vec<F128>)>,
+    pub z: Vec<F128>,
+    pub a: Vec<F128>,
+    pub b: Vec<F128>,
 }
 
 impl SlotBuffers {
-    /// Build the row values `a = A z`, `b = B z` from the committed witness if the
-    /// generator deferred them.
-    pub fn ensure_ab(&mut self, gate: &ChainGate, nu: usize, n: usize) {
-        if self.ab.is_none() {
-            self.ab = Some(pack_ab(gate, nu, n, &self.z));
-        }
-    }
-
     /// The tuple `UnionSlotProverInput::new` takes, with the lincheck stripe of `z` built
     /// here (block width `2^k_log` bits, `2^nu` rows).
-    ///
-    /// # Panics
-    /// If the row values were never built ([`Self::ensure_ab`]).
     #[must_use]
     pub fn into_parts(self, k_log: usize, nu: usize) -> (Vec<F128>, Vec<F128>, Vec<F128>, Vec<u8>) {
-        let (a, b) = self
-            .ab
-            .expect("row values a, b not built (SlotBuffers::ensure_ab)");
-        let z = std::sync::Arc::unwrap_or_clone(self.z);
-        let stripe = lincheck_stripe(&z, k_log, nu);
-        (z, a, b, stripe)
+        let stripe = lincheck_stripe(&self.z, k_log, nu);
+        (self.z, self.a, self.b, stripe)
     }
-}
-
-/// Build the row values `a = A z`, `b = B z` of a BatchMajor slot buffer from its
-/// committed witness. [`ChainGate::apply_ab`] rebuilds the implicit states from the
-/// committed chi bits, so this is a pass over `z`, not a second Keccak walk.
-///
-/// # Panics
-/// If `nu < 3`, `n > 2^nu`, or `z` is not a slot buffer of this gate's shape.
-#[must_use]
-pub fn pack_ab(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> (Vec<F128>, Vec<F128>) {
-    let lay = gate.layout();
-    let (k_log, useful_bits) = (lay.k_log, lay.useful_bits);
-    assert!(nu >= 3, "Flock's lincheck fold needs at least 8 rows");
-    assert!(n <= 1 << nu, "count exceeds the row capacity");
-    assert!(k_log >= 7 && useful_bits <= 1 << k_log, "block geometry");
-    let k = 1usize << k_log;
-    let w = useful_bits.div_ceil(64);
-    let useful_chunks = useful_bits.div_ceil(128);
-    let len = (k / 128) << nu;
-    assert_eq!(z.len(), len, "slot buffer length");
-    let mut a: Vec<F128> = alloc_zeroed_vec(len);
-    let mut b: Vec<F128> = alloc_zeroed_vec(len);
-    flock_core::scratch::advise_hugepage(&mut a);
-    flock_core::scratch::advise_hugepage(&mut b);
-    // Three word vectors per row: the committed words reassembled from the BatchMajor
-    // columns, then the row maps. A row's words are scattered back below.
-    let mut scratch = vec![0u64; BATCH * 3 * w];
-    const COLS: usize = 4;
-    let n_col_blocks = useful_chunks.div_ceil(COLS);
-    let mut j0 = 0;
-    while j0 < n {
-        let cnt = BATCH.min(n - j0);
-        let scratch = &mut scratch[..cnt * 3 * w];
-        scratch
-            .par_chunks_mut(3 * w)
-            .enumerate()
-            .for_each(|(i, buf)| {
-                buf.fill(0);
-                let (zb, rest) = buf.split_at_mut(w);
-                let (ab, bb) = rest.split_at_mut(w);
-                for (u, dst) in zb.iter_mut().enumerate() {
-                    // Column `u / 2` of row `j0 + i` is one `z` word (BatchMajor).
-                    let word = z[((u / 2) << nu) + j0 + i];
-                    *dst = if u % 2 == 0 { word.lo } else { word.hi };
-                }
-                gate.apply_ab(zb, ab, bb);
-            });
-        scatter_ab(
-            &mut a, &mut b, &scratch, nu, n_col_blocks, useful_chunks, w, cnt, j0,
-        );
-        j0 += cnt;
-    }
-    (a, b)
-}
-
-/// BatchMajor scatter of the row values in `scratch` (three word vectors per row:
-/// `z`, `a`, `b`) into `a` and `b`, parallel over blocks of four columns.
-#[allow(clippy::too_many_arguments)]
-fn scatter_ab(
-    a: &mut [F128],
-    b: &mut [F128],
-    scratch: &[u64],
-    nu: usize,
-    n_col_blocks: usize,
-    useful_chunks: usize,
-    w: usize,
-    cnt: usize,
-    j0: usize,
-) {
-    const COLS: usize = 4;
-    let word = |i: usize, part: usize, u: usize| -> u64 {
-        if u < w {
-            scratch[i * 3 * w + (part + 1) * w + u]
-        } else {
-            0
-        }
-    };
-    a.par_chunks_mut(COLS << nu)
-        .zip(b.par_chunks_mut(COLS << nu))
-        .take(n_col_blocks)
-        .enumerate()
-        .for_each(|(cb, (ac, bc))| {
-            let c0 = cb * COLS;
-            let c1 = (c0 + COLS).min(useful_chunks);
-            for (part, cols) in [ac, bc].into_iter().enumerate() {
-                for c in c0..c1 {
-                    let col = &mut cols[(c - c0) << nu..((c - c0) + 1) << nu];
-                    for i in 0..cnt {
-                        col[j0 + i] = F128::new(word(i, part, 2 * c), word(i, part, 2 * c + 1));
-                    }
-                }
-            }
-        });
 }
 
 /// The byte stripe of `flock_core::lincheck::pack_z_lincheck` of a BatchMajor slot buffer:
@@ -258,10 +146,7 @@ where
             phase_ms[0], phase_ms[1]
         );
     }
-    SlotBuffers {
-        z: std::sync::Arc::new(z),
-        ab: Some((a, b)),
-    }
+    SlotBuffers { z, a, b }
 }
 
 /// Instances per scratch batch of [`pack_slot_groups`] and Rayon thread (a multiple
@@ -297,8 +182,8 @@ fn minor_faults() -> u64 {
 ///
 /// Each group of eight keeps a word-major tile (word `u` of the eight instances
 /// is one 64-byte line): the non-chi words of `z` and `phi` of every round, a
-/// third of the three rows. The BatchMajor scatter writes the committed `z` from
-/// `phi`; [`pack_ab`] derives the row values `a`, `b` from `z` at first use.
+/// third of the three rows. The BatchMajor scatter derives `a`, `b`, `z`
+/// from `phi` and writes eight adjacent union words per group and column.
 ///
 /// # Panics
 /// If `n > 2^nu`, `nu < 3` or `inputs` is shorter than `n * input_words`.
@@ -338,11 +223,16 @@ where
             [row + (x + 1) % 5, row + (x + 2) % 5]
         })
         .collect();
+    let b_head = gate.head_b();
     let len = (k / 128) << nu;
     let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let faults_before = if trace { minor_faults() } else { 0 };
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
     flock_core::scratch::advise_hugepage(&mut z);
+    let mut a: Vec<F128> = alloc_zeroed_vec(len);
+    let mut b: Vec<F128> = alloc_zeroed_vec(len);
+    flock_core::scratch::advise_hugepage(&mut a);
+    flock_core::scratch::advise_hugepage(&mut b);
     let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
     let groups_max = batch.min(n.next_multiple_of(8)) / 8;
     let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * tw];
@@ -379,36 +269,45 @@ where
         phase_ms[0] += t0.elapsed().as_secs_f64() * 1e3;
         let t0 = std::time::Instant::now();
         let scratch = &scratch[..groups * tw];
-        // BatchMajor scatter of z only: the row values `a`, `b` are built from `z`
-        // at first use (or by the fork's PIOP-pool job), not during this walk.
+        // BatchMajor scatter of z, a, b, parallel over blocks of COLS columns.
         z.par_chunks_mut(COLS << nu)
+            .zip(a.par_chunks_mut(COLS << nu))
+            .zip(b.par_chunks_mut(COLS << nu))
             .take(n_col_blocks)
             .enumerate()
-            .for_each(|(cb, zc)| {
+            .for_each(|(cb, ((zc, ac), bc))| {
                 let c0 = cb * COLS;
                 let c1 = (c0 + COLS).min(useful_chunks);
                 for c in c0..c1 {
                     let r = ((c - c0) << nu)..((c - c0 + 1) << nu);
-                    let zcol = &mut zc[r];
+                    let (zcol, acol, bcol) = (&mut zc[r.clone()], &mut ac[r.clone()], &mut bc[r]);
                     let (u0, u1) = (2 * c, 2 * c + 1);
                     for g in 0..groups {
                         let tile = &scratch[g * tw..(g + 1) * tw];
                         let first = j0 + 8 * g;
                         let live = 8.min(n - first);
-                        let zw: [F128; 8] = if u0 < t {
+                        let (zw, aw, bw): ([F128; 8], [F128; 8], [F128; 8]) = if u0 < t {
                             let (lo, hi) = (&tile[u0], &tile[u1]);
-                            std::array::from_fn(|i| F128::new(lo[i], hi[i]))
+                            let zw = std::array::from_fn(|i| F128::new(lo[i], hi[i]));
+                            (zw, zw, [F128::new(b_head[u0], b_head[u1]); 8])
                         } else {
                             let [l1, l2] = sources[u0 - t];
                             let (l1, l2) = (&tile[l1], &tile[l2]);
-                            // Past the last word: !h1 & h2 = 0.
+                            // Past the last word: !h1 & h2 = 0, !h1 = 0, h2 = 0.
                             let (h1, h2) = match sources.get(u1 - t) {
                                 Some(&[h1, h2]) => (&tile[h1], &tile[h2]),
                                 None => (&[u64::MAX; 8], &[0u64; 8]),
                             };
-                            std::array::from_fn(|i| F128::new(!l1[i] & l2[i], !h1[i] & h2[i]))
+                            (
+                                std::array::from_fn(|i| F128::new(!l1[i] & l2[i], !h1[i] & h2[i])),
+                                std::array::from_fn(|i| F128::new(!l1[i], !h1[i])),
+                                std::array::from_fn(|i| F128::new(l2[i], h2[i])),
+                            )
                         };
-                        zcol[first..first + live].copy_from_slice(&zw[..live]);
+                        let rows = first..first + live;
+                        zcol[rows.clone()].copy_from_slice(&zw[..live]);
+                        acol[rows.clone()].copy_from_slice(&aw[..live]);
+                        bcol[rows].copy_from_slice(&bw[..live]);
                     }
                 }
             });
@@ -424,10 +323,7 @@ where
             minor_faults() - faults_before
         );
     }
-    SlotBuffers {
-        z: std::sync::Arc::new(z),
-        ab: None,
-    }
+    SlotBuffers { z, a, b }
 }
 
 /// `out[bit] = sum_r bit(v[r], bit) << r` for `bit < 64`: eight 8x8 bit-matrix
@@ -514,15 +410,15 @@ mod tests {
                             gate.absorb_into(m, &inputs[j * iw..(j + 1) * iw], s);
                         })
                     };
-                    let mut got = if threads == 1 {
+                    let got = if threads == 1 {
                         one.install(run)
                     } else {
                         run()
                     };
-                    got.ensure_ab(&gate, nu, n);
                     let tag = format!("{:?}, threads {threads}", e.backend());
                     assert!(got.z == want.z, "{tag} z");
-                    assert!(got.ab == want.ab, "{tag} a, b");
+                    assert!(got.a == want.a, "{tag} a");
+                    assert!(got.b == want.b, "{tag} b");
                 }
             }
         }
@@ -569,10 +465,7 @@ mod tests {
         for j in n..1 << nu {
             for c in 0..k / 128 {
                 assert_eq!(bufs.z[(c << nu) + j], F128::ZERO);
-                assert_eq!(
-                    bufs.ab.as_ref().expect("a, b built").0[(c << nu) + j],
-                    F128::ZERO
-                );
+                assert_eq!(bufs.a[(c << nu) + j], F128::ZERO);
             }
         }
     }
