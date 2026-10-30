@@ -1029,9 +1029,12 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             panic!("Akita refuses a stored value outside the width-16 interval");
         };
         eprintln!("u_lo = 2^15: the prover fails ({error})");
+        // The base branch's width-16 mirror check rejects the cell while the mirror is built;
+        // the scheduled coefficient bound is the older path to the same refusal.
         assert!(
             matches!(error, AggregateError::Prove(ProveError::Pcs(_)))
-                && error.to_string().contains("exceeds the scheduled coefficient bound"),
+                && (error.to_string().contains("exceeds the scheduled coefficient bound")
+                    || error.to_string().contains("does not fit a signed 16-bit digit")),
             "{error}"
         );
         // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = -4
