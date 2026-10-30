@@ -17,8 +17,9 @@
 //! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use agg_bridge::sched::{set_opening_runner, OpeningRunner};
@@ -381,20 +382,18 @@ fn donate_mode() -> Donate {
 
 /// The opening runner of the Flock pool's workers (`agg_bridge::sched`) under `mode`, or
 /// `None` without donation. At each opening it reads `piop_done` once (no waiting on the
-/// PIOP branch) and either runs the opening in place or installs it on `donated`. The
-/// donated pool of `total` threads is built once, before the Flock work starts, and reused
-/// by every opening; its workers never wait on the Flock pool, so the Flock worker that
-/// blocks in `install` cannot deadlock it. The opening hook receives one job for the whole
-/// ring switch and Ligerito proof, so there is no level boundary at which to re-read
-/// `piop_done`; each sub-proof opening re-reads it. The bytes do not depend on the pool
-/// (`agg_bridge::sched`).
+/// PIOP branch) and either runs the opening in place or installs it on the process-wide
+/// donated pool ([`donation_pool`]), which is built on the first donation. Its workers never
+/// wait on the Flock pool, so the Flock worker that blocks in `install` cannot deadlock it.
+/// The opening hook receives one job for the whole ring switch and Ligerito proof, so there
+/// is no level boundary at which to re-read `piop_done`; each sub-proof opening re-reads it.
+/// The bytes do not depend on the pool (`agg_bridge::sched`).
 fn opening_runner(
     mode: Donate,
     piop_done: &Arc<AtomicBool>,
     flock_threads: usize,
     total: usize,
     trace: bool,
-    donated: Arc<std::sync::OnceLock<Option<rayon::ThreadPool>>>,
 ) -> Option<OpeningRunner> {
     if mode == Donate::Off {
         return None;
@@ -407,7 +406,7 @@ fn opening_runner(
             _ => finished && total > flock_threads,
         };
         let start = Instant::now();
-        let pool = donate.then(|| donated.get_or_init(|| build_donation_pool(total))).and_then(Option::as_ref);
+        let pool = if donate { donation_pool(total) } else { None };
         let threads = if let Some(pool) = &pool {
             pool.install(|| job());
             total
@@ -434,6 +433,26 @@ fn build_donation_pool(threads: usize) -> Option<rayon::ThreadPool> {
         .thread_name(|i| format!("agg-open-{i}"))
         .build()
         .ok()
+}
+
+/// The donated opening pools, built on the first donation and kept for the process
+/// lifetime. The key is the thread count, so a prove in a differently sized pool never
+/// reuses a pool of the wrong size. The entries are leaked because an opening holds
+/// `&'static` without keeping the map locked, and concurrent sub-proof openings share them.
+static DONATION_POOLS: OnceLock<Mutex<HashMap<usize, &'static rayon::ThreadPool>>> =
+    OnceLock::new();
+
+/// The donated pool of `threads` workers, built on first use (range: one pool per distinct
+/// thread count, reused across proves).
+fn donation_pool(threads: usize) -> Option<&'static rayon::ThreadPool> {
+    let pools = DONATION_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pools = pools.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&pool) = pools.get(&threads) {
+        return Some(pool);
+    }
+    let pool: &'static rayon::ThreadPool = Box::leak(Box::new(build_donation_pool(threads)?));
+    pools.insert(threads, pool);
+    Some(pool)
 }
 
 /// The PIOP pool size for the fork under the scheduling knobs, or `None` for the caller's
@@ -493,26 +512,12 @@ fn fork_join<A: Send, B: Send>(
     let piop_done = Arc::new(AtomicBool::new(false));
     let mode = donate_mode();
     let total = donation_threads();
-    let donated = Arc::new(std::sync::OnceLock::new());
-    let runner = opening_runner(
-        mode,
-        &piop_done,
-        threads,
-        total,
-        trace,
-        Arc::clone(&donated),
-    );
-    let warm_donation = mode != Donate::Off;
+    let runner = opening_runner(mode, &piop_done, threads, total, trace);
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
             .stack_size(crate::pcs::COMMIT_THREAD_STACK)
             .spawn_scoped(scope, move || {
-                // Build the donated pool on this thread before the Flock work starts, so
-                // its workers and thread-locals are warm when an opening asks for them.
-                if warm_donation {
-                    let _ = donated.get_or_init(|| build_donation_pool(total));
-                }
                 let start = Instant::now();
                 let out = match rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
@@ -1352,5 +1357,12 @@ mod tests {
         assert_eq!(parse_cpu_list("3-1"), None);
         assert_eq!(parse_cpu_list("0-x"), None);
         assert!(allowed_cpus().is_some_and(|cpus| !cpus.is_empty()));
+    }
+
+    #[test]
+    fn the_donated_pool_is_shared_between_calls() {
+        let first = donation_pool(1).expect("a one-thread pool");
+        let second = donation_pool(1).expect("the same pool");
+        assert!(std::ptr::eq(first, second));
     }
 }
