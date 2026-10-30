@@ -856,21 +856,28 @@ fn quick() {
 fn rounds_rows() -> bool {
     let scalar = Engine::new(Backend::Scalar).expect("scalar engine");
     let mut ok = true;
-    let mut st = [[0x0123_4567_89AB_CDEFu64; 8]; 25];
+    // Every measured call starts from the same state, and every stripe reads the
+    // same rows (the zero-word skip of the transpose makes its time depend on
+    // the data), so all backends time identical work.
+    let st0 = [[0x0123_4567_89AB_CDEFu64; 8]; 25];
     let (mut z, mut a, mut b) = (
         vec![[0u64; 8]; 600],
         vec![[0u64; 8]; 600],
         vec![[0u64; 8]; 600],
     );
+    let mut z0 = z.clone();
+    scalar.chi_rounds(&mut st0.clone(), 0, &mut z0, &mut a, &mut b);
     let mut out = vec![0u8; 64 * 600];
     let mut ticks = |e: &Engine| {
         let walk = common::measure_kernel(|| {
+            let mut st = st0;
             e.chi_rounds(black_box(&mut st), 0, &mut z, &mut a, &mut b);
-            black_box((&z, &a, &b));
+            black_box((&st, &z, &a, &b));
         })
         .median;
+        assert_eq!(z, z0);
         let stripe = common::measure_kernel(|| {
-            e.transpose_bits8(black_box(&z), &mut out);
+            e.transpose_bits8(black_box(&z0), &mut out);
             black_box(&out);
         })
         .median;

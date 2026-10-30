@@ -528,14 +528,17 @@ impl ChainGate {
             }
         }
         // Constant row: A = B = e_const, z_const = 1. Input and output rows: z and
-        // A = the bit, B = e_const.
+        // A = the bit, B = e_const. The rounds wrote only words from t_base on,
+        // so the head words of z are still the zeros of entry and head_z can
+        // write them in place (no scratch row per call).
         let t = lay.t_base;
-        let mut head = vec![0u64; t];
-        self.head_z(inputs, &s, &mut head);
-        for (u, &h) in head.iter().enumerate() {
-            z[u] |= h;
-            a[u] |= h;
-            b[u] |= self.plan.b_head[u];
+        let head = &mut z[..t];
+        self.head_z(inputs, &s, head);
+        for (x, &h) in a[..t].iter_mut().zip(head.iter()) {
+            *x |= h;
+        }
+        for (x, &bh) in b[..t].iter_mut().zip(&self.plan.b_head) {
+            *x |= bh;
         }
         s
     }
