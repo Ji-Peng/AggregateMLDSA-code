@@ -36,7 +36,7 @@ use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
 use crate::public_data::PublicData;
 use crate::source_tables::{BridgeGroupTables, MainTables, SourceTableError, SourceTables};
-use crate::stage::{suffix, Points, StageError};
+use crate::stage::{suffix, LaneId, Points, StageError, WeightId};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::{LookupInputs, Stage3Proof};
@@ -919,6 +919,23 @@ fn prove_piop_with<'a>(
     if trace {
         eprintln!("weights: w_1 {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
     }
+    // The split replaces `w_1` with an empty placeholder lane in `ProverTables::lane`; only
+    // stage 2's first group may read it, because the split driver substitutes its factors
+    // there. Any other position would silently use the empty table.
+    let stage2_spec = stage2::spec(manifest);
+    assert_eq!(
+        stage2_spec.groups[0].lanes.first(),
+        Some(&LaneId::Weight(WeightId::Level1)),
+        "stage 2's first group must read w_1 in lane 0"
+    );
+    assert!(
+        stage2_spec.groups.iter().all(|group| group
+            .lanes
+            .iter()
+            .position(|&lane| lane == LaneId::Weight(WeightId::Level1))
+            .is_none_or(|position| position == 0)),
+        "w_1 may only appear as the first lane of a stage-2 group"
+    );
     let (stage2_proof, stage2) = if unchecked {
         stage2::prove_unchecked(manifest, &prover_tables, &points, &stage1, transcript)?
     } else {
