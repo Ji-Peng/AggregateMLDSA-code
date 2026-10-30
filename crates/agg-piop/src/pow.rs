@@ -227,6 +227,13 @@ impl WorkWriter {
         self.bits
     }
 
+    /// Append every bit of `other` (a branch's nonces after this stream's).
+    pub fn append(&mut self, other: &Self) {
+        for at in 0..other.bits {
+            self.push(u32::from((other.bytes[at / 8] >> (at % 8)) & 1), 1);
+        }
+    }
+
     /// The stream (padding bits zero).
     #[must_use]
     pub fn finish(self) -> Vec<u8> {
@@ -293,6 +300,24 @@ impl WorkReader {
         }
         self.bits += width;
         Ok(value)
+    }
+
+    /// Split off the next `bits` bits as a reader of their own (a branch's nonces) and skip
+    /// them here.
+    ///
+    /// # Errors
+    /// When fewer than `bits` bits are left.
+    pub fn split(&mut self, bits: usize) -> Result<Self, WorkStreamError> {
+        if self.bits + bits > self.total {
+            return Err(WorkStreamError::Exhausted);
+        }
+        let branch = Self {
+            bytes: self.bytes.clone(),
+            bits: self.bits,
+            total: self.bits + bits,
+        };
+        self.bits += bits;
+        Ok(branch)
     }
 
     /// Confirm every nonce was read.
@@ -632,6 +657,49 @@ mod tests {
         };
         assert_eq!(none(1000), none(1024));
         assert_ne!(none(1000), none(1025));
+    }
+
+    #[test]
+    fn branch_streams_concatenate_and_split_back() {
+        // A trunk, two branches written apart and appended in order, equals one writer.
+        let parts: [&[(u32, u8)]; 3] = [&[(3, 8), (100, 9)], &[(7, 11)], &[(1, 8), (300, 10), (0, 8)]];
+        let mut serial = WorkWriter::default();
+        for part in parts {
+            for &(v, w) in part {
+                serial.push(v, w);
+            }
+        }
+        let mut writers: Vec<WorkWriter> = parts
+            .iter()
+            .map(|part| {
+                let mut w = WorkWriter::default();
+                for &(v, width) in *part {
+                    w.push(v, width);
+                }
+                w
+            })
+            .collect();
+        let tail = writers.pop().unwrap();
+        let middle = writers.pop().unwrap();
+        let mut joined = writers.pop().unwrap();
+        joined.append(&middle);
+        joined.append(&tail);
+        assert_eq!(joined.bits(), serial.bits());
+        let total = serial.bits();
+        let bytes = serial.finish();
+        assert_eq!(joined.finish(), bytes);
+        // The reader splits the middle part off and skips it.
+        let mut trunk = WorkReader::new(&bytes, total).unwrap();
+        assert_eq!(trunk.read(8).unwrap(), 3);
+        assert_eq!(trunk.read(9).unwrap(), 100);
+        let mut branch = trunk.split(11).unwrap();
+        assert_eq!(trunk.read(8).unwrap(), 1);
+        assert_eq!(branch.finish(), Err(WorkStreamError::Unread));
+        assert_eq!(branch.read(11).unwrap(), 7);
+        assert!(branch.finish().is_ok());
+        assert_eq!(branch.read(1), Err(WorkStreamError::Exhausted));
+        assert_eq!(trunk.split(19).err(), Some(WorkStreamError::Exhausted));
+        assert_eq!(trunk.read(10).unwrap(), 300);
     }
 
     #[test]

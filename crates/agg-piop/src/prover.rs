@@ -741,6 +741,8 @@ pub struct ProveHooks<'a> {
     pub unchecked: bool,
     /// Change the honest round-2 tables before they are committed.
     pub tamper_bridge: Option<BridgeTamper<'a>>,
+    /// Absorb the two branch digests at the join in the wrong order (S, then L).
+    pub swap_join: bool,
 }
 
 /// A running clock for step timings.
@@ -866,26 +868,73 @@ pub fn prove_piop(
     transcript: &mut Transcript,
     unchecked: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
-    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked)
+    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked, false)
 }
 
-/// [`prove_piop`] with the challenge-independent prover tables (the parities `y^(1)`)
-/// built beforehand, e.g. while the Flock span is proven (prover only).
-#[allow(clippy::too_many_lines)]
-fn prove_piop_with<'a>(
+/// Whether the two transcript branches run concurrently (`AGG_PIOP_FORK`, default on; `0`
+/// or `off` runs L, then S, on the calling thread). The transcript and the proof bytes are
+/// the same either way.
+fn piop_fork_on() -> bool {
+    !matches!(std::env::var("AGG_PIOP_FORK").as_deref(), Ok("0" | "off"))
+}
+
+/// Run branch L (`lookup`) and branch S (`stages`) of the forked transcript, concurrently
+/// unless [`piop_fork_on`] says otherwise. Both feed the pool the PIOP runs on: inside a
+/// rayon pool (the PIOP pool of the scheduler preset) by `rayon::join`; off the pool (the
+/// caller's thread, which carries a large stack) with S on a scoped thread whose stack is
+/// that of the PIOP pool's workers, so that neither branch's sequential driver lands on a
+/// global-pool worker with rayon's default stack.
+fn run_branches<A: Send, B: Send>(
+    lookup: impl FnOnce() -> A + Send,
+    stages: impl FnOnce() -> B + Send,
+) -> (A, B) {
+    if !piop_fork_on() {
+        let a = lookup();
+        return (a, stages());
+    }
+    if rayon::current_thread_index().is_some() {
+        return rayon::join(lookup, stages);
+    }
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name("agg-piop-stages".into())
+            .stack_size(FLOCK_POOL_STACK)
+            .spawn_scoped(scope, stages)
+            .expect("spawn the stage branch");
+        let a = lookup();
+        (a, crate::pcs::join_os_thread(handle))
+    })
+}
+
+/// What branch L (event 7) hands to the join.
+struct LookupBranch {
+    proof: LookupProof,
+    multiplicities: MultiplicityClaims,
+    pi_m: Vec<E>,
+    inputs: LookupInputs,
+    stack_points: Vec<Vec<E>>,
+    time: Duration,
+}
+
+/// What branch S (events 8 to 11) hands to the join.
+struct StagesBranch<'a> {
+    points: Points,
+    prestage: PreStageClaims,
+    tables: ProverTables<'a>,
+    stage1: (Stage1Proof, crate::stage1::Stage1Output),
+    stage2: (Stage2Proof, crate::stage2::Stage2Output),
+    times: [Duration; 3],
+}
+
+/// Branch L: the lookup into `T_16` and the digit claims of `m`.
+fn prove_lookup_branch(
     manifest: &CommitmentManifest,
-    tables: SourceTables<'a>,
-    prebuilt: Option<ProverTables<'a>>,
-    matrices: &BridgeMatrices,
-    public: &PublicData,
+    tables: SourceTables<'_>,
     transcript: &mut Transcript,
     unchecked: bool,
-) -> Result<(PiopProof, PiopRun), ProveError> {
-    let mut clock = Lap::new();
-    let mut run = PiopRun::default();
-    let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
-
-    // Event 7: the lookup into T_16 and the digit claims of m.
+    trace: bool,
+) -> Result<LookupBranch, ProveError> {
+    let clock = Instant::now();
     let stacks = tables.lookup_stacks()?;
     let multiplicity = vec![tables.bridge.multiplicity().to_vec()];
     let output = prove_in(
@@ -905,7 +954,7 @@ fn prove_piop_with<'a>(
         return Err(ProveError::Internal("multiplicity digits disagree with m".into()));
     }
     transcript.absorb_extensions(MULTIPLICITY_SITE, &multiplicities.0)?;
-    let (lookup_inputs, stack_points) = LookupInputs::new(manifest, &output.claims);
+    let (inputs, stack_points) = LookupInputs::new(manifest, &output.claims);
     if trace {
         let sessions: f64 = output.stats.sessions.iter().sum();
         eprintln!(
@@ -915,13 +964,32 @@ fn prove_piop_with<'a>(
             output.stats.layer_bytes as f64 / f64::from(1 << 20)
         );
     }
-    run.lookup = clock.lap();
     phase_stamp("lookup");
+    Ok(LookupBranch {
+        proof: output.proof,
+        multiplicities,
+        pi_m,
+        inputs,
+        stack_points,
+        time: clock.elapsed(),
+    })
+}
 
+/// Branch S: `tau`, the pre-stage claims, stages 1 and 2.
+#[allow(clippy::too_many_arguments)]
+fn prove_stages_branch<'a>(
+    manifest: &CommitmentManifest,
+    tables: SourceTables<'a>,
+    prebuilt: Option<ProverTables<'a>>,
+    matrices: &BridgeMatrices,
+    transcript: &mut Transcript,
+    unchecked: bool,
+    trace: bool,
+) -> Result<StagesBranch<'a>, ProveError> {
+    let mut clock = Lap::new();
     // Events 8 and 9: tau and the pre-stage claims.
     let mut points = Points {
         tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
-        lookup: stack_points,
         ..Points::default()
     };
     let prestage = PreStageClaims::evaluate(manifest, tables, &points.tau);
@@ -930,10 +998,10 @@ fn prove_piop_with<'a>(
         tables.bridge.public_y(),
         &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
     );
-    run.prestage = clock.lap();
+    let prestage_time = clock.lap();
     phase_stamp("prestage");
 
-    // Stages 1 to 3.
+    // Stages 1 and 2.
     let weights_clock = Instant::now();
     let mut prover_tables = prebuilt.unwrap_or_else(|| ProverTables::new(tables, matrices));
     let parity_time = weights_clock.elapsed();
@@ -951,7 +1019,7 @@ fn prove_piop_with<'a>(
         stage1::prove(manifest, &prover_tables, &points, &prestage, y_at_tau3, transcript)?
     };
     points.r1 = stage1.point.clone();
-    run.stage1 = clock.lap();
+    let stage1_time = clock.lap();
     phase_stamp("stage1");
     let weights_clock = Instant::now();
     prover_tables.set_r1(matrices, &points.r1);
@@ -981,8 +1049,85 @@ fn prove_piop_with<'a>(
         stage2::prove(manifest, &prover_tables, &points, &stage1, transcript)?
     };
     points.r2 = stage2.point.clone();
-    run.stage2 = clock.lap();
+    let stage2_time = clock.lap();
     phase_stamp("stage2");
+    Ok(StagesBranch {
+        points,
+        prestage,
+        tables: prover_tables,
+        stage1: (stage1_proof, stage1),
+        stage2: (stage2_proof, stage2),
+        times: [prestage_time, stage1_time, stage2_time],
+    })
+}
+
+/// [`prove_piop`] with the challenge-independent prover tables (the parities `y^(1)`)
+/// built beforehand, e.g. while the Flock span is proven (prover only). The transcript
+/// forks after event 6: branch L (the lookup) and branch S (`tau` through stage 2) run
+/// side by side ([`run_branches`]), the join absorbs their digests, stage 3 follows on the
+/// trunk. `swap_join` is a test hook that absorbs the digests in the wrong order.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn prove_piop_with<'a>(
+    manifest: &CommitmentManifest,
+    tables: SourceTables<'a>,
+    prebuilt: Option<ProverTables<'a>>,
+    matrices: &BridgeMatrices,
+    public: &PublicData,
+    transcript: &mut Transcript,
+    unchecked: bool,
+    swap_join: bool,
+) -> Result<(PiopProof, PiopRun), ProveError> {
+    let fork_clock = Instant::now();
+    let mut run = PiopRun::default();
+    let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+
+    // The fork: events 7 (L) and 8 to 11 (S) on two clones of the sponge.
+    let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
+    let (lookup, stages) = run_branches(
+        || prove_lookup_branch(manifest, tables, &mut lookup_transcript, unchecked, trace),
+        || {
+            prove_stages_branch(
+                manifest,
+                tables,
+                prebuilt,
+                matrices,
+                &mut stages_transcript,
+                unchecked,
+                trace,
+            )
+        },
+    );
+    let (lookup, stages) = (lookup?, stages?);
+    if swap_join {
+        transcript.join_swapped(lookup_transcript, stages_transcript)?;
+    } else {
+        transcript.join(lookup_transcript, stages_transcript)?;
+    }
+    let fork_wall = fork_clock.elapsed();
+    if trace {
+        let stages_time: Duration = stages.times.iter().sum();
+        eprintln!(
+            "fork: lookup {:.1} ms, tau to stage 2 {:.1} ms, wall {:.1} ms (concurrent: {})",
+            lookup.time.as_secs_f64() * 1e3,
+            stages_time.as_secs_f64() * 1e3,
+            fork_wall.as_secs_f64() * 1e3,
+            piop_fork_on()
+        );
+    }
+    run.lookup = lookup.time;
+    [run.prestage, run.stage1, run.stage2] = stages.times;
+    let StagesBranch {
+        mut points,
+        prestage,
+        tables: mut prover_tables,
+        stage1: (stage1_proof, stage1),
+        stage2: (stage2_proof, stage2),
+        ..
+    } = stages;
+    points.lookup = lookup.stack_points;
+
+    // Event 12: stage 3 on the trunk.
+    let clock = Instant::now();
     let weights_clock = Instant::now();
     prover_tables.set_r2(public, &points.r2);
     if trace {
@@ -1001,7 +1146,7 @@ fn prove_piop_with<'a>(
         &prestage,
         &stage1,
         &stage2,
-        &lookup_inputs,
+        &lookup.inputs,
         transcript,
     )?;
     // The owned buffers (parities and weights, several GiB at 32K) are unmapped on a
@@ -1016,15 +1161,15 @@ fn prove_piop_with<'a>(
         ..
     } = prover_tables;
     agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa));
-    run.stage3 = clock.lap();
+    run.stage3 = clock.elapsed();
     phase_stamp("stage3");
     run.points = points;
     run.r3 = stage3.point;
-    run.pi_m = pi_m;
+    run.pi_m = lookup.pi_m;
     Ok((
         PiopProof {
-            lookup: output.proof,
-            multiplicities,
+            lookup: lookup.proof,
+            multiplicities: lookup.multiplicities,
             prestage,
             stage1: stage1_proof,
             stage2: stage2_proof,
@@ -1196,7 +1341,7 @@ pub fn prove_with_tables_using(
     };
     let (flock_proofs, piop) = if flock_threads > 0 {
         let fork = Instant::now();
-        let unchecked = hooks.unchecked;
+        let (unchecked, swap_join) = (hooks.unchecked, hooks.swap_join);
         let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
             let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
             phase_stamp("parity-tables");
@@ -1208,6 +1353,7 @@ pub fn prove_with_tables_using(
                 &public,
                 &mut transcript,
                 unchecked,
+                swap_join,
             )
         });
         timings.fork_join = fork.elapsed();
@@ -1242,6 +1388,7 @@ pub fn prove_with_tables_using(
             &public,
             &mut transcript,
             hooks.unchecked,
+            hooks.swap_join,
         );
         clock.lap();
         (Ok(flock_proofs), piop)

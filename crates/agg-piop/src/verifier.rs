@@ -685,9 +685,13 @@ pub fn verify_piop(
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
     let outcome = (|| {
-        // The lookup and the digits of m.
-        let lookup = verify_in(&manifest.lookup_shape(), &proof.lookup, transcript)?;
-        transcript.absorb_extensions(MULTIPLICITY_SITE, &proof.multiplicities.0)?;
+        // The fork after event 6: the verifier replays branch L, then branch S, each on its
+        // own clone of the sponge, then joins them (L's digest, then S's) as the prover did.
+        let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
+
+        // Branch L: the lookup and the digits of m.
+        let lookup = verify_in(&manifest.lookup_shape(), &proof.lookup, &mut lookup_transcript)?;
+        lookup_transcript.absorb_extensions(MULTIPLICITY_SITE, &proof.multiplicities.0)?;
         let (pi_m, m_at_pi) = lookup.multiplicities[0].clone();
         if proof.multiplicities.compose() != m_at_pi {
             return Err(VerifyError::Lookup(LookupError::Terminal(0)));
@@ -695,13 +699,13 @@ pub fn verify_piop(
         let (lookup_inputs, stack_points) = LookupInputs::new(manifest, &lookup);
         timings.lookup = clock.lap();
 
-        // tau, the pre-stage claims, Y(tau_3).
+        // Branch S: tau, the pre-stage claims, Y(tau_3), stages 1 and 2.
+        let transcript_s = &mut stages_transcript;
         let mut points = Points {
-            tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
-            lookup: stack_points,
+            tau: transcript_s.challenge_extensions(TAU_SITE, manifest.d_main())?,
             ..Points::default()
         };
-        transcript.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
+        transcript_s.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
         let y_at_tau3 = agg_bridge::final_vector::evaluate(
             y_table,
             &suffix(&points.tau, manifest.group(GroupRole::Level3).logical_vars),
@@ -715,13 +719,17 @@ pub fn verify_piop(
             &proof.prestage,
             y_at_tau3,
             &proof.stage1,
-            transcript,
+            transcript_s,
         )?;
         points.r1 = stage1.point.clone();
         timings.stage1 = clock.lap();
-        let stage2 = stage2::verify(manifest, matrices, &points, &stage1, &proof.stage2, transcript)?;
+        let stage2 = stage2::verify(manifest, matrices, &points, &stage1, &proof.stage2, transcript_s)?;
         points.r2 = stage2.point.clone();
         timings.stage2 = clock.lap();
+
+        // The join, then stage 3 on the trunk.
+        transcript.join(lookup_transcript, stages_transcript)?;
+        points.lookup = stack_points;
         stage3_start = clock.0;
         let stage3 = stage3::verify_streamed(
             manifest,

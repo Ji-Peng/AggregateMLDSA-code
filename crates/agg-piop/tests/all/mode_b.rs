@@ -588,6 +588,7 @@ fn prove_tampered(
     let hooks = ProveHooks {
         unchecked: true,
         tamper_bridge,
+        swap_join: false,
     };
     prove_with_tables(
         &prover_inputs,

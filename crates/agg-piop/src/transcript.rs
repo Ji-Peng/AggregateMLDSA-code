@@ -10,6 +10,15 @@
 //! `K`. The ordered registry rejects a missing, extra or out-of-order event before it
 //! reaches the sponge. Prover and verifier run the same state machine.
 //!
+//! Forked transcript (`docs/spec.md` Section 10): after event 6 the sponge is cloned into
+//! branch L (event 7, the lookup) and branch S (events 8 to 11: `tau`, the pre-stage claims,
+//! stages 1 and 2). Each branch first absorbs its own label ([`FORK_LOOKUP_SITE`],
+//! [`FORK_STAGES_SITE`]), so the two clones diverge before their first challenge. The join
+//! ([`FORK_JOIN_SITE`]) absorbs the 32-byte squeeze of each branch's final state, L's then
+//! S's, into the trunk, which continues with stage 3. Neither digest travels in the proof;
+//! the verifier recomputes both. The packed nonce stream keeps registry order: the trunk's
+//! nonces through event 6, then L's, then S's, then the trunk's after the join.
+//!
 //! Grinding (`docs/soundness.md`): every field-challenge event
 //! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
 //! public message `LE32(v)`; the 32-byte predicate squeezed next must have its low `g` bits
@@ -20,6 +29,7 @@
 //! work.
 
 use std::num::NonZeroU8;
+use std::sync::Arc;
 
 use agg_bridge::pow::grind_bits_k;
 use akita_transcript::{grinding_predicate_accepts, TranscriptSponge, GRINDING_PREDICATE_LEN};
@@ -93,10 +103,20 @@ pub const MULTIPLICITY_SITE: &str = "agg-mldsa/v1/lookup/multiplicities";
 /// Prefix of the lookup sites (`agg-mldsa/v1/lookup/<LookupSite::label>`).
 pub const LOOKUP_PREFIX: &str = "agg-mldsa/v1/lookup/";
 pub const PCS_SESSION_SITE: &str = "agg-mldsa/v1/pcs/session";
+/// Label of branch L (the lookup), absorbed by the branch's clone of the sponge before `X`.
+pub const FORK_LOOKUP_SITE: &str = "agg-mldsa/v1/fork/lookup";
+/// Label of branch S (`tau`, the pre-stage claims, stages 1 and 2), absorbed by the branch's
+/// clone of the sponge before `tau`.
+pub const FORK_STAGES_SITE: &str = "agg-mldsa/v1/fork/stages";
+/// The join of the two branches: the 32-byte digests of L and S, in this order.
+pub const FORK_JOIN_SITE: &str = "agg-mldsa/v1/fork/join";
+/// Bytes of one branch digest.
+pub const BRANCH_DIGEST_BYTES: usize = 32;
 
 const PUBLIC_KIND: u8 = 0;
 const PROOF_KIND: u8 = 1;
 const CHALLENGE_KIND: u8 = 2;
+const BRANCH_KIND: u8 = 3;
 const EXPORT_KIND: u8 = 4;
 
 const fn protocol_tag() -> [u8; 64] {
@@ -183,6 +203,9 @@ pub enum TranscriptError {
     },
     /// The packed nonce stream is malformed.
     WorkStream(WorkStreamError),
+    /// A fork on a branch or off the fork event, or a join of the wrong or unfinished
+    /// branches.
+    Branch,
 }
 
 impl std::fmt::Display for TranscriptError {
@@ -198,6 +221,7 @@ impl std::fmt::Display for TranscriptError {
                 write!(f, "transcript event {index}: nonce search exhausted")
             }
             Self::WorkStream(e) => write!(f, "nonce stream: {e:?}"),
+            Self::Branch => write!(f, "fork or join out of place"),
         }
     }
 }
@@ -253,6 +277,8 @@ impl Builder {
 #[derive(Clone, Debug)]
 pub struct Registry {
     events: Vec<RegistryEvent>,
+    /// Registry indices of the label of branch L, the label of branch S and the join.
+    fork: [usize; 3],
 }
 
 impl Registry {
@@ -289,8 +315,10 @@ impl Registry {
             PayloadSize::Exact(FINAL_VECTOR_BYTES * segments),
         );
         b.push(FLOCK_SHARES_SITE, PROOF_KIND, segments, PayloadSize::Variable);
-        // The lookup: X, layer 1, mu_1, the sessions, then the
+        // Branch L: its label, then the lookup: X, layer 1, mu_1, the sessions, then the
         // multiplicity-digit claims.
+        let fork_lookup = b.0.len();
+        b.push(FORK_LOOKUP_SITE, BRANCH_KIND, 1, PayloadSize::Exact(FORK_LOOKUP_SITE.len()));
         let shape = manifest.lookup_shape();
         let challenges = shape.challenges;
         let proof = |b: &mut Builder, site: LookupSite, atoms: usize| {
@@ -325,6 +353,9 @@ impl Registry {
             b.challenge(&lookup_site(LookupSite::Mu(s)), 1, SiteClass::LookupMu, s, 0, count(1));
         }
         b.push(MULTIPLICITY_SITE, PROOF_KIND, MULTIPLICITY_CLAIMS, elements(MULTIPLICITY_CLAIMS));
+        // Branch S: its label, tau, the pre-stage claims, stages 1 and 2.
+        let fork_stages = b.0.len();
+        b.push(FORK_STAGES_SITE, BRANCH_KIND, 1, PayloadSize::Exact(FORK_STAGES_SITE.len()));
         b.challenge(TAU_SITE, rounds, SiteClass::Tau, 0, 0, count(rounds));
         b.push(
             PRESTAGE_SITE,
@@ -333,7 +364,18 @@ impl Registry {
             PayloadSize::Exact(16 * PRESTAGE_CLAIMS),
         );
         let (stage_gammas, stage_terminals) = (stage_gammas(manifest), stage_terminals(manifest));
+        let mut join = 0;
         for stage in 1..=3 {
+            if stage == 3 {
+                // The join: the trunk absorbs the digests of L and S, then runs stage 3.
+                join = b.0.len();
+                b.push(
+                    FORK_JOIN_SITE,
+                    BRANCH_KIND,
+                    2,
+                    PayloadSize::Exact(2 * BRANCH_DIGEST_BYTES),
+                );
+            }
             if stage == 2 {
                 b.push(
                     KAPPA1_SITE,
@@ -362,7 +404,19 @@ impl Registry {
         // before the PCS session digest, which therefore binds every Flock byte.
         b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
-        Self { events: b.0 }
+        Self {
+            events: b.0,
+            fork: [fork_lookup, fork_stages, join],
+        }
+    }
+
+    /// Nonce bits of the protected sites among the events `range`.
+    fn work_bits_in(&self, range: std::ops::Range<usize>) -> usize {
+        self.events[range]
+            .iter()
+            .filter_map(|e| e.work)
+            .map(|w| usize::from(w.nonce_bits()))
+            .sum()
     }
 
     /// The protected field-challenge sites in event order (the PIOP part of the plan).
@@ -485,9 +539,23 @@ pub fn frame_items(items: &[Vec<u8>]) -> Vec<u8> {
 /// messages; no Spongefish argument string is produced).
 pub struct Transcript {
     state: VerifierState<'static, TranscriptSponge>,
-    registry: Registry,
+    registry: Arc<Registry>,
     next: usize,
+    /// One past the last registry event this stream may take: the registry's length on the
+    /// trunk, the next branch's label (L) or the join (S) on a branch.
+    end: usize,
+    /// `None` on the trunk.
+    branch: Option<Branch>,
     work: Work,
+}
+
+/// The two branches of the forked transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Branch {
+    /// Event 7, the lookup.
+    Lookup,
+    /// Events 8 to 11: `tau`, the pre-stage claims, stages 1 and 2.
+    Stages,
 }
 
 /// The nonce stream: written by the prover's search, read by the verifier.
@@ -543,10 +611,14 @@ impl Transcript {
             .session(LengthPrefixedBytes(PROTOCOL_DOMAIN))
             .instance(&instance);
         let state = domain.to_verifier(TranscriptSponge::default(), &[]);
+        let registry = Arc::new(Registry::new(manifest));
+        let end = registry.len();
         let mut this = Self {
             state,
-            registry: Registry::new(manifest),
+            registry,
             next: 0,
+            end,
+            branch: None,
             work,
         };
         this.absorb_kind(PUBLIC_KIND, INSTANCE_SITE, 1, record)?;
@@ -605,7 +677,7 @@ impl Transcript {
         payload_bytes: usize,
     ) -> Result<usize, TranscriptError> {
         let index = self.next;
-        let Some(expected) = self.registry.events.get(index) else {
+        let Some(expected) = self.registry.events.get(index).filter(|_| index < self.end) else {
             return Err(TranscriptError::Incomplete { index });
         };
         if expected.site != site || expected.kind != kind {
@@ -718,11 +790,116 @@ impl Transcript {
     /// Confirm every registered event ran (and, on the verifier's stream, that every
     /// nonce was read).
     pub fn ensure_complete(&self) -> Result<(), TranscriptError> {
+        if self.branch.is_some() {
+            return Err(TranscriptError::Branch);
+        }
         self.require_next(self.registry.len())?;
         match &self.work {
             Work::Search(_) => Ok(()),
             Work::Replay(reader) => reader.finish().map_err(TranscriptError::WorkStream),
         }
+    }
+
+    /// Fork the trunk after event 6 into branch L (the lookup) and branch S (`tau`, the
+    /// pre-stage claims, stages 1 and 2). Both start from a clone of the sponge and absorb
+    /// their own label first. The trunk then waits at the join ([`Self::join`]). On the
+    /// verifier's stream each branch reads its own slice of the nonce stream: L's nonces
+    /// first, then S's.
+    ///
+    /// # Errors
+    /// On a branch, or when the trunk is not at the fork.
+    pub fn fork(&mut self) -> Result<(Self, Self), TranscriptError> {
+        let [lookup_at, stages_at, join_at] = self.registry.fork;
+        if self.branch.is_some() || self.next != lookup_at {
+            return Err(TranscriptError::Branch);
+        }
+        let (lookup_work, stages_work) = match &mut self.work {
+            Work::Search(_) => (
+                Work::Search(WorkWriter::default()),
+                Work::Search(WorkWriter::default()),
+            ),
+            Work::Replay(reader) => {
+                let split = |reader: &mut WorkReader, bits| {
+                    reader.split(bits).map(Work::Replay).map_err(TranscriptError::WorkStream)
+                };
+                let lookup = split(reader, self.registry.work_bits_in(lookup_at..stages_at))?;
+                let stages = split(reader, self.registry.work_bits_in(stages_at..join_at))?;
+                (lookup, stages)
+            }
+        };
+        let open = |branch, start, end, work, label: &str| -> Result<Self, TranscriptError> {
+            let mut stream = Self {
+                state: VerifierState::from_parts(self.state.duplex_sponge_state.clone(), &[]),
+                registry: Arc::clone(&self.registry),
+                next: start,
+                end,
+                branch: Some(branch),
+                work,
+            };
+            stream.absorb_kind(BRANCH_KIND, label, 1, label.as_bytes())?;
+            Ok(stream)
+        };
+        let lookup = open(Branch::Lookup, lookup_at, stages_at, lookup_work, FORK_LOOKUP_SITE)?;
+        let stages = open(Branch::Stages, stages_at, join_at, stages_work, FORK_STAGES_SITE)?;
+        self.next = join_at;
+        Ok((lookup, stages))
+    }
+
+    /// The 32-byte squeeze of a finished branch's final state, and its nonces.
+    fn finish_branch(mut self, branch: Branch) -> Result<([u8; BRANCH_DIGEST_BYTES], Work), TranscriptError> {
+        if self.branch != Some(branch) || self.next != self.end {
+            return Err(TranscriptError::Branch);
+        }
+        if let Work::Replay(reader) = &self.work {
+            reader.finish().map_err(TranscriptError::WorkStream)?;
+        }
+        let mut digest = [0; BRANCH_DIGEST_BYTES];
+        self.squeeze(&mut digest);
+        Ok((digest, self.work))
+    }
+
+    /// Join the finished branches: the trunk absorbs the digest of L, then that of S
+    /// (`swap` reverses them: a prover test hook whose proofs the verifier rejects), and
+    /// appends their nonces in the same fixed order L, S.
+    fn join_in_order(&mut self, lookup: Self, stages: Self, swap: bool) -> Result<(), TranscriptError> {
+        if self.branch.is_some() || self.next != self.registry.fork[2] {
+            return Err(TranscriptError::Branch);
+        }
+        let (lookup_digest, lookup_work) = lookup.finish_branch(Branch::Lookup)?;
+        let (stages_digest, stages_work) = stages.finish_branch(Branch::Stages)?;
+        if let Work::Search(trunk) = &mut self.work {
+            for branch in [lookup_work, stages_work] {
+                let Work::Search(writer) = branch else {
+                    return Err(TranscriptError::Branch);
+                };
+                trunk.append(&writer);
+            }
+        }
+        let (first, second) = if swap {
+            (stages_digest, lookup_digest)
+        } else {
+            (lookup_digest, stages_digest)
+        };
+        let mut payload = [0; 2 * BRANCH_DIGEST_BYTES];
+        payload[..BRANCH_DIGEST_BYTES].copy_from_slice(&first);
+        payload[BRANCH_DIGEST_BYTES..].copy_from_slice(&second);
+        self.absorb_kind(BRANCH_KIND, FORK_JOIN_SITE, 2, &payload)
+    }
+
+    /// Join the finished branches L and S (in this order) into the trunk.
+    ///
+    /// # Errors
+    /// When a branch is unfinished, the branches are exchanged, or the trunk is not waiting
+    /// at the join; on the verifier's stream also when a branch left nonces unread.
+    pub fn join(&mut self, lookup: Self, stages: Self) -> Result<(), TranscriptError> {
+        self.join_in_order(lookup, stages, false)
+    }
+
+    /// [`Self::join`] with the digests absorbed in the wrong order (S, then L): for the
+    /// negative test only; the verifier never accepts the resulting proof.
+    #[doc(hidden)]
+    pub fn join_swapped(&mut self, lookup: Self, stages: Self) -> Result<(), TranscriptError> {
+        self.join_in_order(lookup, stages, true)
     }
 }
 
@@ -762,15 +939,17 @@ mod tests {
         let registry = Registry::new(&manifest);
         let rounds = 17;
         let lookup = lookup_events(&manifest);
-        // Leading events, the lookup, tau and the pre-stage claims, the kappa1 absorb,
-        // three stages of gamma + rounds + terminal, the join, the PCS export.
+        // Leading events, L's label and the lookup, S's label, tau and the pre-stage
+        // claims, the kappa1 absorb, three stages of gamma + rounds + terminal, the branch
+        // join before stage 3, the Flock join, the PCS export.
         assert_eq!(
             registry.len(),
-            LEADING + lookup + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1
+            LEADING + 1 + lookup + 1 + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1 + 1
         );
+        assert_eq!(registry.fork[0], LEADING);
         let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
         assert_eq!(
-            &sites[..LEADING + 2],
+            &sites[..LEADING + 3],
             &[
                 INSTANCE_SITE,
                 "agg-mldsa/v1/commit/main16",
@@ -784,17 +963,26 @@ mod tests {
                 FLOCK_SEEDS_SITE,
                 FINAL_VECTORS_SITE,
                 FLOCK_SHARES_SITE,
+                FORK_LOOKUP_SITE,
                 "agg-mldsa/v1/lookup/x",
                 "agg-mldsa/v1/lookup/layer1",
             ]
         );
-        let after = LEADING + lookup;
+        let after = LEADING + 1 + lookup;
         assert_eq!(sites[after - 1], MULTIPLICITY_SITE);
-        assert_eq!(&sites[after..after + 2], &[TAU_SITE, PRESTAGE_SITE]);
+        assert_eq!(registry.fork[1], after);
+        assert_eq!(&sites[after..after + 3], &[FORK_STAGES_SITE, TAU_SITE, PRESTAGE_SITE]);
+        let after = after + 1;
         assert_eq!(sites[after + 2], "agg-mldsa/v1/stage1/gamma");
         assert_eq!(sites[after + 3], "agg-mldsa/v1/stage1/round/0/message");
         assert_eq!(sites[after + 3 + 2 * rounds], "agg-mldsa/v1/stage1/terminal");
         assert_eq!(sites[after + 4 + 2 * rounds], KAPPA1_SITE);
+        // The branch join: after the stage-2 terminal, before gamma^(3).
+        let join = registry.fork[2];
+        assert_eq!(sites[join - 1], "agg-mldsa/v1/stage2/terminal");
+        assert_eq!(sites[join], FORK_JOIN_SITE);
+        assert_eq!(sites[join + 1], "agg-mldsa/v1/stage3/gamma");
+        assert_eq!(registry.events[join].size, PayloadSize::Exact(64));
         // The join: the Flock proofs after the stage-3 terminal, right before the export.
         assert_eq!(sites[registry.len() - 3], "agg-mldsa/v1/stage3/terminal");
         assert_eq!(sites[registry.len() - 2], FLOCK_PROOFS_SITE);
@@ -806,8 +994,8 @@ mod tests {
         assert_eq!(registry.events[4].size, PayloadSize::Exact(32));
         assert_eq!(registry.events[9].atoms, 1, "one segment at N = 100");
         // Two lookup challenges, 4 layer-1 values per tree (2 x (4 stacks + 1 table)).
-        assert_eq!(registry.events[LEADING].atoms, 2);
-        assert_eq!(registry.events[LEADING + 1].atoms, 40);
+        assert_eq!(registry.events[LEADING + 1].atoms, 2);
+        assert_eq!(registry.events[LEADING + 2].atoms, 40);
         assert_eq!(registry.events[after].atoms, rounds);
         let full = Registry::new(&CommitmentManifest::for_batch(1 << 15).unwrap());
         assert_eq!(full.events[9].size, PayloadSize::Exact(128));
@@ -942,8 +1130,9 @@ mod tests {
         let manifest = manifest();
         let record = manifest.binding_bytes();
         // The prover through X and mu_1 (1 bit of work, a nonce of 8 bits).
-        let mut prover = Transcript::new(&manifest, &record).unwrap();
-        to_lookup(&mut prover);
+        let mut trunk = Transcript::new(&manifest, &record).unwrap();
+        to_lookup(&mut trunk);
+        let (mut prover, _) = trunk.fork().unwrap();
         let x = LookupTranscript::challenges(&mut prover, LookupSite::X, 2).unwrap();
         prover.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40]).unwrap();
         let mu = LookupTranscript::challenges(&mut prover, LookupSite::Mu(1), 1).unwrap();
@@ -957,8 +1146,9 @@ mod tests {
             bytes
         };
         let replay = |first: u8| -> Result<(Vec<OpeningField>, Vec<OpeningField>), TranscriptError> {
-            let mut t = Transcript::replay(&manifest, &record, &full(first))?;
-            to_lookup(&mut t);
+            let mut trunk = Transcript::replay(&manifest, &record, &full(first))?;
+            to_lookup(&mut trunk);
+            let (mut t, _) = trunk.fork()?;
             let x = t.challenge_extensions(&lookup_site(LookupSite::X), 2)?;
             t.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40])?;
             let mu = t.challenge_extensions(&lookup_site(LookupSite::Mu(1)), 1)?;
@@ -966,7 +1156,7 @@ mod tests {
         };
         assert_eq!(replay(nonce).unwrap(), (x.clone(), mu));
         // The prover's nonce is the smallest passing one: every smaller one fails.
-        let mu_index = LEADING + 2;
+        let mu_index = LEADING + 3;
         for wrong in 0..nonce {
             assert_eq!(replay(wrong), Err(TranscriptError::Work { index: mu_index }));
         }
@@ -1051,10 +1241,129 @@ mod tests {
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
         t.absorb_items(FLOCK_SHARES_SITE, &[vec![]]).unwrap();
-        // The lookup's challenges come first: tau out of order is refused.
+        // The PIOP challenges are drawn on the branches only: on the trunk tau and X are
+        // refused.
         assert!(t.challenge_extensions(TAU_SITE, 17).is_err());
+        assert!(t.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
+        let (mut t, _) = t.fork().unwrap();
         let x = LookupTranscript::challenges(&mut t, LookupSite::X, 2).unwrap();
         assert_eq!(x.len(), 2);
         assert!(x.iter().all(|c| *c != OpeningField::from_u64(0)));
+    }
+
+    /// Drive branch L or S to its end with fixed messages (verifier side: nonces from the
+    /// stream).
+    fn run_branch(t: &mut Transcript, manifest: &CommitmentManifest) {
+        let registry = Arc::clone(&t.registry);
+        while t.next < t.end {
+            let event = &registry.events[t.next];
+            match event.kind {
+                CHALLENGE_KIND => {
+                    t.challenge_extensions(&event.site, event.atoms).unwrap();
+                }
+                PROOF_KIND => {
+                    let values = vec![OpeningField::from_u64(t.next as u64); event.atoms];
+                    t.absorb_extensions(&event.site, &values).unwrap();
+                }
+                kind => panic!("unexpected kind {kind} inside a branch"),
+            }
+        }
+        let _ = manifest;
+    }
+
+    #[test]
+    fn fork_and_join_follow_the_registry() {
+        let manifest = manifest();
+        let record = manifest.binding_bytes();
+        let forked = |swap: bool| -> (Vec<OpeningField>, Vec<u8>, [Vec<OpeningField>; 2]) {
+            let mut trunk = Transcript::new(&manifest, &record).unwrap();
+            // Not before event 6 is complete.
+            assert_eq!(trunk.fork().err(), Some(TranscriptError::Branch));
+            to_lookup(&mut trunk);
+            let (mut l, mut s) = trunk.fork().unwrap();
+            // The two branches diverge at once: their labels differ.
+            let probe = |t: &Transcript| {
+                let mut sponge = t.state.duplex_sponge_state.clone();
+                let mut out = [0; 32];
+                sponge.squeeze(&mut out);
+                out
+            };
+            assert_ne!(probe(&l), probe(&s));
+            // A branch is not a trunk: no second fork, no completion, no events of the other.
+            assert_eq!(l.fork().err(), Some(TranscriptError::Branch));
+            assert!(l.challenge_extensions(TAU_SITE, 17).is_err());
+            assert!(s.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
+            // The trunk waits at the join: stage 3 cannot start, a join of unfinished
+            // branches is refused.
+            assert!(trunk.challenge_extensions(&gamma_site(3), 44).is_err());
+            let first = [
+                l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(),
+                s.challenge_extensions(TAU_SITE, 17).unwrap(),
+            ];
+            run_branch(&mut l, &manifest);
+            // L cannot run into S's events.
+            assert!(matches!(
+                l.challenge_extensions(TAU_SITE, 17),
+                Err(TranscriptError::Incomplete { .. })
+            ));
+            run_branch(&mut s, &manifest);
+            if swap {
+                trunk.join_swapped(l, s).unwrap();
+            } else {
+                trunk.join(l, s).unwrap();
+            }
+            let work = trunk.work_stream();
+            let gamma = trunk.challenge_extensions(&gamma_site(3), 44).unwrap();
+            (gamma, work, first)
+        };
+        let (gamma, work, first) = forked(false);
+        assert_ne!(first[0][0], first[1][0]);
+        let (gamma_swapped, work_swapped, first_swapped) = forked(true);
+        assert_eq!(first, first_swapped, "the branches do not depend on the join");
+        assert_eq!(work, work_swapped, "nonces before the join are the branches' own");
+        assert_ne!(gamma, gamma_swapped, "the join order changes stage 3");
+
+        // Exchanged branches or an unfinished one are refused.
+        let start = || {
+            let mut trunk = Transcript::new(&manifest, &record).unwrap();
+            to_lookup(&mut trunk);
+            let (l, s) = trunk.fork().unwrap();
+            (trunk, l, s)
+        };
+        let (mut trunk, mut l, mut s) = start();
+        run_branch(&mut l, &manifest);
+        run_branch(&mut s, &manifest);
+        assert_eq!(trunk.join(s, l).err(), Some(TranscriptError::Branch));
+        let (mut trunk, mut l, s) = start();
+        run_branch(&mut l, &manifest);
+        assert_eq!(trunk.join(l, s).err(), Some(TranscriptError::Branch));
+
+        // The verifier replays from the prover's stream; the branches read L's nonces, then
+        // S's; a stream with the wrong length is refused at the start.
+        let mut trunk = Transcript::new(&manifest, &record).unwrap();
+        to_lookup(&mut trunk);
+        let (mut l, mut s) = trunk.fork().unwrap();
+        run_branch(&mut l, &manifest);
+        run_branch(&mut s, &manifest);
+        trunk.join(l, s).unwrap();
+        trunk.challenge_extensions(&gamma_site(3), 44).unwrap();
+        let mut stream = trunk.work_stream();
+        let bits = Registry::new(&manifest).work_bits();
+        let stage3: usize = Registry::new(&manifest)
+            .work_sites()
+            .filter(|w| w.i == 3 && w.class == SiteClass::StageRound)
+            .map(|w| usize::from(w.nonce_bits()))
+            .sum();
+        assert_eq!(stream.len(), (bits - stage3).div_ceil(8));
+        stream.resize(bits.div_ceil(8), 0);
+        let mut replay = Transcript::replay(&manifest, &record, &stream).unwrap();
+        to_lookup(&mut replay);
+        let (mut l, mut s) = replay.fork().unwrap();
+        assert_eq!(l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(), first[0]);
+        assert_eq!(s.challenge_extensions(TAU_SITE, 17).unwrap(), first[1]);
+        run_branch(&mut l, &manifest);
+        run_branch(&mut s, &manifest);
+        replay.join(l, s).unwrap();
+        assert_eq!(replay.challenge_extensions(&gamma_site(3), 44).unwrap(), gamma);
     }
 }

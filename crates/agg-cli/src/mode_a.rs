@@ -1581,6 +1581,7 @@ impl Aggregator {
             } else {
                 hooks.tamper_bridge
             },
+            swap_join: false,
         };
         let committer = early_setup.and_then(|h| h.join().ok()).flatten();
         let mut output = if hooks.stale_bridge {

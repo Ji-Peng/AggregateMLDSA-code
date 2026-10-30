@@ -114,6 +114,7 @@ impl Fixture {
         let hooks = ProveHooks {
             unchecked: true,
             tamper_bridge: tamper,
+            swap_join: false,
         };
         prove_with_tables(
             &prover_inputs,
