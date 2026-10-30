@@ -261,6 +261,16 @@ unsafe impl GlobalAlloc for HugePageAlloc {
             // without MREMAP_MAYMOVE the kernel either extends it in place or fails.
             let grown = unsafe { sys::mremap(ptr as *mut _, old_len, new_len, 0) };
             if grown != sys::MAP_FAILED {
+                if POISON.load(Ordering::Relaxed) {
+                    // SAFETY: the grown tail belongs to this block's new mapping.
+                    unsafe {
+                        core::ptr::write_bytes(
+                            (ptr as usize + old_len) as *mut u8,
+                            0xA5,
+                            new_len - old_len,
+                        );
+                    }
+                }
                 if ADVISE.load(Ordering::Relaxed) {
                     // SAFETY: the grown tail is part of this block's mapping.
                     unsafe { sys::madvise((ptr as usize + old_len) as *mut _, new_len - old_len, sys::MADV_HUGEPAGE) };

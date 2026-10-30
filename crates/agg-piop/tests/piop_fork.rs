@@ -13,6 +13,7 @@ mod common;
 
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
+use agg_piop::lookup::LookupError;
 use agg_piop::pow::{SiteClass, WorkReader, WorkWriter};
 use agg_piop::prover::{main_tables, prove, prove_with_tables, FixedMatrices, NoKeccak, ProveHooks, ProverInputs};
 use agg_piop::stage::StageError;
@@ -174,7 +175,8 @@ fn forked_transcript_schedules_agree_and_tampering_is_rejected() {
         assert!(
             matches!(
                 check(&exchanged),
-                Err(VerifyError::Lookup(_) | VerifyError::Stage(_) | VerifyError::Transcript(_))
+                Err(VerifyError::Lookup(LookupError::Transcript(ref why)))
+                    if why.contains("work nonce rejected")
             ),
             "exchanged nonces: {:?}",
             check(&exchanged)

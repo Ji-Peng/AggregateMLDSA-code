@@ -87,8 +87,8 @@ pub struct WorkPlan {
     pub padded: usize,
     /// The ordered seven-group layout (it carries the relation).
     pub layout: BatchLayout,
-    /// Producer profiles of the precommitted groups `G_main16, G_main4, G_1, G_2, G_3`,
-    /// each from the scalar row of its family's catalog.
+    /// Producer profiles of the precommitted groups `G_main16, G_main4, G_1, G_2, G_3,
+    /// G_k`, each from the scalar row of its family's catalog.
     pub precommitted: Vec<GroupCommitPhaseParams>,
     /// Profile of the final group `G_m`, from the grouped row of the width-4 catalog.
     pub final_profile: GroupCommitPhaseParams,

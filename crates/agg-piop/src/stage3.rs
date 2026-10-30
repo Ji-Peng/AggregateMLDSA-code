@@ -45,7 +45,6 @@ use crate::manifest::{
     value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupRole, K16_DIGITS, L16_SLACK, LOOKUP_SHIFT,
     PROJ_BYTES, STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
 };
-use crate::public_data::PublicData;
 use crate::range::digits;
 use crate::stage::{
     check_terminal, prove_stage, prove_stage_unchecked, replay_stage, EqPoint, GroupSpec, InstanceSpec, LaneId, Points,
@@ -55,7 +54,6 @@ use crate::stage1::Stage1Output;
 use crate::stage2::Stage2Output;
 use crate::tables::ProverTables;
 use crate::transcript::{terminal_site, Transcript};
-use crate::weights::ring_weight_at;
 use crate::OpeningField as E;
 
 /// Stage number.
@@ -716,36 +714,6 @@ fn prove_with(
             claims,
         },
     ))
-}
-
-/// Verify stage 3 against stored public data; `T(r^(2))` and `w_A(r^(3))` are the
-/// verifier's own evaluations (through [`verify_streamed`]).
-#[allow(dead_code)] // the public-shaped helper; the drivers use `verify_streamed`
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn verify(
-    manifest: &CommitmentManifest,
-    public: &PublicData,
-    points: &Points,
-    prestage: &PreStageClaims,
-    stage1: &Stage1Output,
-    stage2: &Stage2Output,
-    lookup: &LookupInputs,
-    psi: &[u8],
-    proof: &Stage3Proof,
-    transcript: &mut Transcript,
-) -> Result<Stage3Output, StageError> {
-    verify_streamed(
-        manifest,
-        points,
-        prestage,
-        stage1,
-        stage2,
-        lookup,
-        psi,
-        proof,
-        transcript,
-        |r2, r3| (public.t_evaluation(r2), ring_weight_at(public, r2, r3)),
-    )
 }
 
 /// Verify stage 3 with the public pass deferred: the rounds are

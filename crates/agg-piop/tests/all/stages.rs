@@ -380,19 +380,13 @@ fn values_valid_only_for_another_range_are_rejected() {
             .map(|p| main_index(p % 256, (p / 256) % 4, p / 1024))
             .find(|&x| u_hi_cells.value(x) > -3 && u_cells.value(x) + i64::from(LOOKUP_SHIFT) + 63_079 >= 1 << 16)
             .expect("a matching cell");
-        for (lo, hi, x, step) in [(Column::U_LO, Column::U_HI, u_cell, 63_079_i32)] {
-            let mut main = batch.main.clone();
-            *main.wide_cell_mut(manifest, lo, x) += step;
-            if hi == Column::V_HI {
-                *main.wide_cell_mut(manifest, hi, x) -= 1;
-            } else {
-                main.columns_mut()[manifest.locate(hi).1][x] -= 1;
-            }
-            let f = main.column(manifest, lo).value(x) + i64::from(LOOKUP_SHIFT);
-            assert!((1 << 16..1 << 17).contains(&f), "{}: looked-up value {f}", lo.name());
-            let bridge = lenient(&batch, &main, batch.bridge.clone());
-            assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0), "{}", lo.name());
-        }
+        let mut main = batch.main.clone();
+        *main.wide_cell_mut(manifest, Column::U_LO, u_cell) += 63_079;
+        main.columns_mut()[manifest.locate(Column::U_HI).1][u_cell] -= 1;
+        let f = main.column(manifest, Column::U_LO).value(u_cell) + i64::from(LOOKUP_SHIFT);
+        assert!((1 << 16..1 << 17).contains(&f), "looked-up value {f}");
+        let bridge = lenient(&batch, &main, batch.bridge.clone());
+        assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0));
     });
 }
 

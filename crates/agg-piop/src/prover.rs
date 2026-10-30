@@ -17,7 +17,7 @@
 //! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -311,8 +311,12 @@ pub fn phase_stamp(name: &str) {
 }
 
 fn warn_once(message: &str) {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| eprintln!("agg-piop: {message}"));
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut warned = warned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if warned.insert(message.to_owned()) {
+        eprintln!("agg-piop: {message}");
+    }
 }
 
 /// Stack size of the Flock pool's workers (the Flock prover nests large frames; a virtual
@@ -357,7 +361,7 @@ fn piop_pool_size(flock_threads: usize) -> Option<usize> {
                 warn_once("AGG_PIOP_THREADS=0 is not a thread count; using the default");
                 None
             }
-            Ok(n) => Some(n),
+            Ok(n) => Some(n.min(max_flock_threads())),
             Err(_) => {
                 warn_once(&format!(
                     "AGG_PIOP_THREADS={v:?} is not a thread count; using the default"
@@ -368,7 +372,7 @@ fn piop_pool_size(flock_threads: usize) -> Option<usize> {
     };
     let mut threads = requested?;
     let cpus = logical_cpus();
-    if threads + flock_threads > cpus {
+    if threads.saturating_add(flock_threads) > cpus {
         // At least one PIOP thread: 0 would mean the full global pool.
         let capped = cpus.saturating_sub(flock_threads).max(1);
         warn_once(&format!(
@@ -735,22 +739,20 @@ fn check_lookup_shape(manifest: &CommitmentManifest, shape: &LookupShape) -> Res
 }
 
 /// Prove the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6 (the
-/// commitments, the seeds, the final vectors and the Keccak side's share items). `unchecked` skips the honest prover's self-checks
-/// (lookup root identity and session claims, stage claimed sums) so that tests can hand a
-/// tampered witness to the verifier.
+/// commitments, the seeds, the final vectors and the Keccak side's share items). `Psi` is
+/// read from the transcript, so the projection matrix cannot disagree with event 3.
+/// `unchecked` skips the honest prover's self-checks (lookup root identity and session
+/// claims, stage claimed sums) so that tests can hand a tampered witness to the verifier.
 #[allow(clippy::too_many_arguments)]
 pub fn prove_piop(
     manifest: &CommitmentManifest,
     tables: SourceTables<'_>,
     matrices: &BridgeMatrices,
-    psi: &[u8],
     public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
-    prove_piop_with(
-        manifest, tables, None, matrices, psi, public, transcript, unchecked, false, false,
-    )
+    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked, false, false)
 }
 
 /// Whether the two transcript branches run concurrently (`AGG_PIOP_FORK`, default on; `0`
@@ -763,13 +765,24 @@ fn piop_fork_on() -> bool {
 /// Threads of branch S's own pool (`AGG_PIOP_S_THREADS`), or `None` for the shared pool.
 /// An explicit count wins; `0` selects the shared pool. Unset, the default of
 /// [`default_stage_threads`] applies, and so does a value that is not a count after one
-/// report.
+/// report. An explicit count is capped at [`max_flock_threads`], the machine's logical CPUs
+/// or the global pool size, whichever is larger; a larger value only oversubscribes the
+/// cores, and each distinct count keeps a leaked pool for the process lifetime.
 fn piop_s_threads(flock_forks: bool) -> Option<usize> {
     match std::env::var("AGG_PIOP_S_THREADS") {
         Err(_) => default_stage_threads(flock_forks, rayon::current_num_threads()),
         Ok(v) => match v.trim().parse::<usize>() {
             Ok(0) => None,
-            Ok(n) => Some(n),
+            Ok(n) => {
+                let capped = n.min(max_flock_threads());
+                if capped != n {
+                    warn_once(&format!(
+                        "AGG_PIOP_S_THREADS={n} exceeds the logical CPU count; \
+                         capping the stage pool at {capped}"
+                    ));
+                }
+                Some(capped)
+            }
             Err(_) => {
                 warn_once(&format!(
                     "AGG_PIOP_S_THREADS={v:?} is not a thread count; using the default"
@@ -1049,7 +1062,6 @@ fn prove_piop_with<'a>(
     tables: SourceTables<'a>,
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
-    psi: &[u8],
     public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
@@ -1059,6 +1071,7 @@ fn prove_piop_with<'a>(
     let fork_clock = Instant::now();
     let mut run = PiopRun::default();
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+    let psi = transcript.psi()?.to_vec();
 
     // The fork: events 7 (L) and 8 to 11 (S) on two clones of the sponge.
     let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
@@ -1070,7 +1083,7 @@ fn prove_piop_with<'a>(
                 tables,
                 prebuilt,
                 matrices,
-                psi,
+                &psi,
                 public,
                 &mut stages_transcript,
                 unchecked,
@@ -1333,7 +1346,6 @@ pub fn prove_with_tables_using(
                 tables,
                 Some(prover_tables),
                 &matrices,
-                &psi,
                 &public,
                 &mut transcript,
                 unchecked,
@@ -1371,7 +1383,6 @@ pub fn prove_with_tables_using(
             tables,
             Some(prover_tables),
             &matrices,
-            &psi,
             &public,
             &mut transcript,
             hooks.unchecked,

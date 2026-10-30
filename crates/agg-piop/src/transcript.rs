@@ -788,7 +788,10 @@ impl Transcript {
 
     /// Draw `atoms * 32` raw bytes under one challenge event (no field sampling).
     pub fn challenge_bytes(&mut self, site: &str, atoms: usize) -> Result<Vec<u8>, TranscriptError> {
-        self.take(site, CHALLENGE_KIND, atoms, 32 * atoms)?;
+        let index = self.take(site, CHALLENGE_KIND, atoms, 32 * atoms)?;
+        if let Some(work) = self.registry.events[index].work {
+            self.grind(index, work)?;
+        }
         let mut out = vec![0; 32 * atoms];
         self.squeeze(&mut out);
         Ok(out)

@@ -142,8 +142,10 @@ impl<'a> ProverTables<'a> {
         let split_on = std::env::var_os("AGG_W1_SPLIT").is_none_or(|v| v != "0");
         let split = split_on.then(|| level1_weight_split(&geom, &matrices.m1, r1_1)).filter(SplitWeight::usable);
         if split.is_some() {
+            self.w1 = None;
             self.w1_split = split;
         } else {
+            self.w1_split = None;
             self.w1 = Some(level1_weight_table(&geom, &matrices.m1, r1_1));
         }
     }

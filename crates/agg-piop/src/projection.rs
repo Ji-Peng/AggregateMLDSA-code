@@ -36,6 +36,9 @@ pub fn test_psi(seed: u64) -> Vec<u8> {
 }
 
 /// Bit `pos` of row `o` of `Psi`.
+///
+/// # Panics
+/// If `psi` does not have [`PROJ_BYTES`] bytes.
 #[must_use]
 pub fn psi_bit(psi: &[u8], o: usize, pos: usize) -> bool {
     (psi[o * ROW_BYTES + pos / 8] >> (pos % 8)) & 1 == 1
@@ -159,6 +162,7 @@ impl ProjectionTables {
 /// coordinates.
 #[must_use]
 pub fn row_weights(psi: &[u8], r_o: &[E]) -> Vec<E> {
+    assert_eq!(psi.len(), PROJ_BYTES, "Psi has 128 rows of 1,024 bits");
     assert_eq!(r_o.len(), PROJ_ROWS.trailing_zeros() as usize);
     let eq = eq_table(r_o);
     let mut p = vec![E::zero(); POSITIONS];

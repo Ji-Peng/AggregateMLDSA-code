@@ -144,7 +144,7 @@ pub fn prove_tables(
 ) -> Result<(PiopProof, PiopRun), ProveError> {
     let public = PublicData::from_instance(&batch.instance);
     let mut transcript = transcript_after_commitments(&batch.manifest);
-    prove_piop(&batch.manifest, tables, &batch.matrices, tables.bridge.psi(), &public, &mut transcript, unchecked)
+    prove_piop(&batch.manifest, tables, &batch.matrices, &public, &mut transcript, unchecked)
 }
 
 /// Verify the PIOP part against the public `Y` of `y_table` (the opening is not run: the

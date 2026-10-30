@@ -583,7 +583,13 @@ impl StageGroup<'_> {
 
     fn consistent(&self) -> bool {
         match self {
-            Self::Generic(_) | Self::Split(_) => true,
+            Self::Generic(_) => true,
+            // The split group keeps its factors rather than the materialized `w_1` lane, so
+            // the prover cannot recompute the terminal values without undoing the split.
+            // The verifier checks them independently through `level1_weight_at`, and the
+            // equivalence test in `split_weight` pins the messages, claim and terminals
+            // against the materialized generic group.
+            Self::Split(_) => true,
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
         }

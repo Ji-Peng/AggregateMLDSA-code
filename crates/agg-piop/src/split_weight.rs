@@ -38,12 +38,14 @@ impl SplitWeight {
         agg_bridge::weights::spread(&self.c, self.zeta_vars, &self.blocks, self.len)
     }
 
-    /// True when the split path applies: whole blocks and more than one block.
+    /// True when the split path applies: whole blocks, a power-of-two block count and more
+    /// than one block.
     #[must_use]
     pub fn usable(&self) -> bool {
         self.zeta_vars > 0
             && self.len == self.blocks.len() << self.zeta_vars
             && self.blocks.len() > 1
+            && self.blocks.len().is_power_of_two()
             && self.c.len() <= 1 << self.zeta_vars
     }
 }
@@ -415,7 +417,14 @@ mod tests {
     #[test]
     fn split_rounds_match_the_generic_group() {
         let mut rng = SplitMix64::new(77);
-        for (z, h, used) in [(4_usize, 3_usize, 16_usize), (5, 1, 11), (3, 4, 8), (2, 3, 4)] {
+        for (z, h, used) in [
+            (4_usize, 3_usize, 16_usize),
+            (5, 1, 11),
+            (3, 4, 8),
+            (2, 3, 4),
+            // The production shape crosses many chunks and tiles of both split passes.
+            (13, 6, 64),
+        ] {
             let len = 1_usize << (z + h);
             let split = SplitWeight {
                 c: (0..used).map(|_| field(&mut rng)).collect(),
