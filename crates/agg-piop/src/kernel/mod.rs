@@ -50,7 +50,9 @@ use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
 pub(crate) use self::field::{fm, fmi, mad_int, Acc};
-pub use self::layer::{IntPairGroup, LayerGroup, LayerLeaves, LayerTree, LinearIntGroup, WeightIntGroup};
+pub use self::layer::{
+    IntPairGroup, LayerGroup, LayerLeaves, LayerPlanes, LayerTree, LinearIntGroup, WeightIntGroup,
+};
 pub(crate) use self::layer::upper_node;
 use self::coded::{code_column, masses, Column, ItemWeights, SegmentShape};
 use self::field::{fold, lift, mad, plain_sum, split_sum, MIN_PARALLEL_ITEMS};
@@ -79,6 +81,13 @@ const MAX_QUARTET_LUT: usize = 1 << 12;
 /// A read-only integer or field table, the state of a lane before its first fold.
 #[derive(Clone, Copy, Debug)]
 pub enum Source<'a> {
+    /// A borrowed interval of canonical extension coordinate planes.
+    Planes {
+        /// The low limb of every cell.
+        c0: &'a [u64],
+        /// The high limb of every cell.
+        c1: &'a [u64],
+    },
     /// Committed `i8` cells seen through a per-cell integer map (`map[cell as u8]`).
     Bytes {
         /// The cells.
@@ -116,6 +125,7 @@ impl Source<'_> {
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
+            Self::Planes { c0, .. } => c0.len(),
             Self::Bytes { cells, .. } => cells.len(),
             Self::Ints(cells) => cells.len(),
             Self::Field(cells) => cells.len(),
@@ -133,6 +143,9 @@ impl Source<'_> {
     #[must_use]
     pub fn value(&self, index: usize) -> E {
         match self {
+            Self::Planes { c0, c1 } => {
+                E::new(crate::BaseField::from_u64(c0[index]), crate::BaseField::from_u64(c1[index]))
+            }
             Self::Bytes { cells, map } => E::from_i64(map[cells[index] as u8 as usize]),
             Self::Ints(cells) => E::from_i64(i64::from(cells[index])),
             Self::Field(cells) => cells[index],
@@ -144,6 +157,12 @@ impl Source<'_> {
         let half = self.len() / 2;
         let context = E::precompute(challenge);
         let fold_pair = |k: usize| match self {
+            Self::Planes { c0, c1 } => {
+                let low = E::new(crate::BaseField::from_u64(c0[2 * k]), crate::BaseField::from_u64(c1[2 * k]));
+                let high =
+                    E::new(crate::BaseField::from_u64(c0[2 * k + 1]), crate::BaseField::from_u64(c1[2 * k + 1]));
+                fold(&context, low, high)
+            }
             Self::Bytes { cells, map } => {
                 let low = map[cells[2 * k] as u8 as usize];
                 let high = map[cells[2 * k + 1] as u8 as usize];
@@ -237,7 +256,7 @@ impl<'a> Lane<'a> {
 
     /// True for a lane over field values (a weight or a materialized table).
     fn is_field(&self) -> bool {
-        matches!(self, Self::Source(Source::Field(_)) | Self::Folded(_))
+        matches!(self, Self::Source(Source::Field(_) | Source::Planes { .. }) | Self::Folded(_))
     }
 }
 
