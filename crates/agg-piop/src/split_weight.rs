@@ -161,7 +161,6 @@ impl<'a> SplitGroup<'a> {
     /// lane. `None` when the shape is not that, a lane is not a 0/1 byte table of the main
     /// domain, or the split does not apply.
     #[must_use]
-    #[allow(unsafe_code)]
     pub fn new(
         split: &SplitWeight,
         lanes: &[Lane<'a>],
@@ -210,7 +209,7 @@ impl<'a> SplitGroup<'a> {
         debug_assert!(tables.len() < 1 << 32);
         // Range: all `rows` slots (8 MiB at z = 19). Every slot is overwritten by the walk
         // below; the initial fill only makes the buffer safe to write in place, and is one
-        // pass, not the serial concat of the old port.
+        // pass.
         let mut d = vec![E::zero(); rows];
         d.par_chunks_mut(D_TILE).enumerate().for_each(|(chunk, out)| {
             let lo0 = chunk * D_TILE;

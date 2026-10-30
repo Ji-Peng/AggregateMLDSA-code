@@ -179,7 +179,7 @@ fn the_unbounded_quotient_attack_is_rejected_by_the_k_range() {
 }
 
 /// The digits of `v` are not range-checked: `V_lo + 2^16` with `V_hi - 1` keeps `v` and is
-/// accepted (the lookup used to reject it), and `V_hi = 2^16` moves `v` by about `2^32`,
+/// accepted (the lookup does not range-check the digits), and `V_hi = 2^16` moves `v` by about `2^32`,
 /// which the ring identity rejects (stage 3).
 #[test]
 fn the_digits_of_v_are_bound_only_through_v() {

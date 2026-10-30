@@ -79,7 +79,7 @@ use crate::wire::{SegmentCommitments, SegmentProofs, SegmentShares};
 /// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]): Ligerito
 /// `Fast`, the measured best at 32K (2.97 s on the general build, 2.76 s on the IFMA build
 /// at 16C32T for 49.2 B/sig); `Slim` saves 36% of the Flock bytes for 3% more prover time
-/// at 2,048 records (`docs/keccak.md`, `ref/notes/bench-cloud.md` Phases 15-24).
+/// at 2,048 records (`docs/keccak.md`).
 pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
 /// The Flock profiles of mode A: Ligerito `Fast`, `Slim` and `Slim8`, all 128 bits
 /// work-normalized in Flock's accounting (`docs/keccak.md`).

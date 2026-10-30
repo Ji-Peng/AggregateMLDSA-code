@@ -106,7 +106,7 @@ pub const K16_DIGITS: DigitLayout = DigitLayout {
 };
 /// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md` 6).
 pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
-/// Bytes of `Psi`, squeezed as the answer of the site `proj/seed` (16 KiB).
+/// Bytes of `Psi`, squeezed as the answer of the site `proj/psi` (16 KiB).
 pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
 /// The bound `B` of the projection outputs: `k in [-B, B)`.
 pub const PROJ_BOUND: i64 = 1 << 33;
