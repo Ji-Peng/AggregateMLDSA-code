@@ -1,5 +1,5 @@
 //! Akita commit + open alone: setup, the two-round commit of dummy
-//! tables of all six groups, one batched opening, and the verifier, at `N` records
+//! tables of all seven groups, one batched opening, and the verifier, at `N` records
 //! (default 1,024). Medians over `AGG_AKITA_REPS` runs (default 5); the opening proof
 //! size is printed. Run pinned, never on CPU 2:
 //! `taskset -c 0,1,3-15 cargo bench -p agg-pcs-config --bench commit_open -- [N]`.
@@ -41,14 +41,15 @@ fn run(records: usize, reps: usize) {
         let (main16, main) = (commit(Group::Main16), commit(Group::Main));
         r1.push(t.elapsed());
         let t = Instant::now();
-        let [l1, l2, l3, mult] = [Group::Level1, Group::Level2, Group::Level3, Group::Mult].map(commit);
+        let [l1, l2, l3, proj, mult] =
+            [Group::Level1, Group::Level2, Group::Level3, Group::Proj, Group::Mult].map(commit);
         r2.push(t.elapsed());
-        let groups = [main16, main, l1, l2, l3, mult];
+        let groups = [main16, main, l1, l2, l3, proj, mult];
         commit_bytes = groups
             .iter()
             .map(|g| g.serialized().expect("encoding").len())
             .sum();
-        let commitments: [_; 6] = std::array::from_fn(|i| groups[i].commitment().clone());
+        let commitments: [_; 7] = std::array::from_fn(|i| groups[i].commitment().clone());
         let t = Instant::now();
         let proof = prover.open(groups, &claims, &session).expect("opening");
         open.push(t.elapsed());
