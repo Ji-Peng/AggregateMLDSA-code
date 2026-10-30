@@ -244,9 +244,8 @@ aggregates are byte-identical to main.
   layers inside a 1 MiB tile and writes it with SSE2 streaming stores; pass 2 transforms
   cache-resident blocks through the remaining layers with the existing butterfly kernels. The
   Merkle leaves are the rows as before (gathered sixteen per batch); the Ligerito level-0 opens
-  read rows through `CodewordRows`. `FLOCK_COMMIT_INTERLEAVED=1` selects the interleaved path
-  (also used below six layers past the replicate); `FLOCK_LB_TILE_LOG`, `FLOCK_LB_TOP` tune
-  pass 1.
+  read rows through `CodewordRows`. The interleaved path stays as the fallback for shapes too
+  small for the tiling; `FLOCK_LB_TILE_LOG`, `FLOCK_LB_TOP` tune pass 1.
 - Level-0 leaves hashed in the encode (`AdditiveNttF128::encode_lane_blocked_hashed`,
   `merkle::GroupLeafHasher`, `CodewordLayout::LaneBlocked4Pending`,
   `CodewordRows::rows_at`): for BLAKE3 rows of at most 64 lanes, pass 1 takes ten layers and
@@ -254,9 +253,9 @@ aggregates are byte-identical to main.
   into the range's leaves (a lane group is one BLAKE3 message block; sixteen leaves per
   AVX-512F call, a scalar compression otherwise). By default the final codeword is not
   stored: the buffer keeps the pass-1 state and the level-0 opening recomputes each queried
-  row with only the butterflies that reach it. `FLOCK_LB_FUSED_MERKLE=1` stores the final
-  codeword, `FLOCK_LB_FUSED_MERKLE=0` restores the separate Merkle pass. Same tree, cap and
-  opened rows in all three.
+  row with only the butterflies that reach it. The `Keep` and `Off` arms remain as the test
+  oracle (`lane_blocked_commit_matches_interleaved`). Same tree, cap and opened rows in all
+  three.
 
 - **Union lincheck fold and bit banks in one pass over `z`** (`lincheck/union.rs`,
   `lincheck/kernels/x86_64.rs`): `union_bitbank_fold_multi` reads the BatchMajor `z` once, builds
@@ -270,7 +269,7 @@ Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`
 under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `ntt::additive_ntt_f128::lane_blocked::tests::matches_interleaved_transform`,
 `pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows, each
-`FLOCK_LB_FUSED_MERKLE` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
+`FusedMerkle` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
 
 The `FLOCK_INDUCE_CHUNK_LOG` knob selects the induced-basis chunk size; `0` selects the reference implementation. The default chunk log is 11. The SIMD kernel is selected once per chunk through the existing runtime feature dispatch.
@@ -296,3 +295,15 @@ non-default arm are gone.
   The closed-form message stays and the fallback body is removed.
 - `FLOCK_NO_PREFAULT`: benchmark toggle that disabled hiding the codeword
   allocation behind witness generation. The single-threaded guard stays.
+- `FLOCK_LIG_BLOCKED`, `FLOCK_LIG_FUSED_MERKLE`, `FLOCK_LIG_DISCARD`: Ligerito
+  level-0 encode A/B switches. The blocked, fused and discard paths stay
+  selected by shape and hash kind; the `FusedMerkle::Off`/`Keep` arms remain
+  for the commit oracle.
+- `FLOCK_LB_FUSED_MERKLE`: the same choice for the lane-blocked level-0 commit.
+  `commit_lane_major` takes `FusedMerkle::Discard`; the enum arms stay for the
+  test oracle.
+- `FLOCK_COMMIT_INTERLEAVED`: forced the interleaved encoder. The lane-blocked
+  encoder stays the shipped path; the interleaved path stays for shapes too
+  small for the tiling.
+- `FLOCK_TREE_PREFAULT`: A/B toggle for recycling the Merkle tree from the
+  scratch pool. The pooled tree stays; the per-commit `vec!` arm is gone.

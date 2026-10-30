@@ -3283,11 +3283,9 @@ pub fn ligero_commit(
     // RS-encode every lane in one call (each lane is one independent NTT).
     let lig_timing = std::env::var_os("FLOCK_LIG_TIMING").is_some();
     let t_enc = std::time::Instant::now();
-    let blocked = num_interleaved == 16 && log_msg_cols >= 18
-        && std::env::var("FLOCK_LIG_BLOCKED").as_deref() != Ok("0");
-    let fused = blocked && kind == HashKind::Blake3
-        && std::env::var("FLOCK_LIG_FUSED_MERKLE").as_deref() != Ok("0");
-    let discard = fused && std::env::var("FLOCK_LIG_DISCARD").as_deref() != Ok("0");
+    let blocked = num_interleaved == 16 && log_msg_cols >= 18;
+    let fused = blocked && kind == HashKind::Blake3;
+    let discard = fused;
     let mut prehashed = if fused { vec![[0u8; 32]; 2 * block_len - 1] } else { Vec::new() };
     let mut pending = None;
     if blocked {

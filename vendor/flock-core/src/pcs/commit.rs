@@ -838,9 +838,10 @@ pub fn lane_grid_from_lane_major(q: &[F128], log_batch_size: usize) -> Vec<F128>
     grid
 }
 
-/// How the lane-blocked level-0 commit treats the Merkle leaves
-/// (`FLOCK_LB_FUSED_MERKLE`: `0` [`Self::Off`], `1` [`Self::Keep`], unset or anything else
-/// [`Self::Discard`]). All three give the same commitment and openings.
+/// How the lane-blocked level-0 commit treats the Merkle leaves. The shipped
+/// path is [`Self::Discard`]; the other two are the oracle arms of
+/// `lane_blocked_commit_matches_interleaved`. All three give the same
+/// commitment and openings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FusedMerkle {
     /// Encode, then gather the rows from the stored codeword and hash them.
@@ -850,16 +851,6 @@ enum FusedMerkle {
     /// Hash the rows inside the encode's last pass and keep only the state before it;
     /// the opening recomputes the queried rows.
     Discard,
-}
-
-impl FusedMerkle {
-    fn from_env() -> Self {
-        match std::env::var("FLOCK_LB_FUSED_MERKLE").as_deref() {
-            Ok("0") => Self::Off,
-            Ok("1") => Self::Keep,
-            _ => Self::Discard,
-        }
-    }
 }
 
 /// [`commit`] for a LANE-MAJOR message: `q` is the full `2^log_msg_len`-word
@@ -872,7 +863,7 @@ impl FusedMerkle {
 /// message `extract[p·t + l] = q[l·D + p]`, but the transpose happens inside
 /// the codeword fill, so it costs no extra pass and no intermediate buffer.
 pub fn commit_lane_major(q: &[F128], params: &PcsParams) -> (Commitment, ProverData) {
-    commit_lane_major_with(q, params, FusedMerkle::from_env())
+    commit_lane_major_with(q, params, FusedMerkle::Discard)
 }
 
 /// Minor page faults of the process so far (diagnostic for `FLOCK_COMMIT_TIMING`).
@@ -935,12 +926,10 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
     // Lane-blocked layout (agg-mldsa patch, PATCH.md section 8): the codeword is
     // encoded in groups of four lanes straight from `q` and the Merkle rows are
     // gathered from the groups; the values, the tree and the cap are those of the
-    // interleaved path below, which `FLOCK_COMMIT_INTERLEAVED=1` selects (the A/B and
-    // certification knob) and which serves the shapes too small for the tiling.
+    // interleaved path below, which serves the shapes too small for the tiling.
     let leaf_hasher = merkle::GroupLeafHasher::new(t, params.merkle_hash);
     let t_hasher = t_setup.elapsed();
-    if var_os("FLOCK_COMMIT_INTERLEAVED").is_none()
-        && lane_blocked_ok(params.k_code(), params.log_inv_rate)
+    if lane_blocked_ok(params.k_code(), params.log_inv_rate)
         && fused != FusedMerkle::Off
         && let Some(hasher) = leaf_hasher
     {
@@ -961,17 +950,11 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
         let t_ntt = t_ntt.elapsed();
         // The tree comes from the pool when an earlier commit's tree was given back (every node
         // is rewritten: leaves by pass 2, parents by the inner levels), so its pages are
-        // resident. A fresh tree and a codeword that missed the pool are asked for huge pages
-        // and left lazy, as before: the pass-2 tasks and the inner levels fault them in, and
-        // writing them up front costs more than it saves. `FLOCK_TREE_PREFAULT=0` keeps the
-        // per-commit lazily zeroed `vec!` and does not recycle trees.
+        // resident. A fresh tree and a codeword that missed the pool are left lazy: the
+        // pass-2 tasks and the inner levels fault them in, and writing them up front costs
+        // more than it saves.
         let t_tree = std::time::Instant::now();
-        let pooled = std::env::var("FLOCK_TREE_PREFAULT").as_deref() != Ok("0");
-        let (mut tree, tree_hit) = if pooled {
-            crate::scratch::take_hashes(2 * n - 1)
-        } else {
-            (vec![[0u8; 32]; 2 * n - 1], false)
-        };
+        let (mut tree, tree_hit) = crate::scratch::take_hashes(2 * n - 1);
         let t_tree = t_tree.elapsed();
         if timing {
             eprintln!(
@@ -1033,7 +1016,7 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
             },
         );
     }
-    if var_os("FLOCK_COMMIT_INTERLEAVED").is_none() && lane_blocked_ok(params.k_code(), params.log_inv_rate) {
+    if lane_blocked_ok(params.k_code(), params.log_inv_rate) {
         let n = params.n_positions();
         let groups = t.div_ceil(LANES_PER_GROUP);
         let t_enc = std::time::Instant::now();
