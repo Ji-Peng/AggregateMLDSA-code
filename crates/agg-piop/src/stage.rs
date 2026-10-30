@@ -16,6 +16,7 @@ use crate::kernel::{
     evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term, WeightIntGroup,
 };
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
+use crate::split_weight::{SplitGroup, SplitWeight};
 use crate::transcript::{gamma_site, round_sites, Transcript, TranscriptError};
 use crate::OpeningField as E;
 
@@ -310,7 +311,7 @@ pub fn prove_stage<'a>(
     resolve: impl Fn(LaneId) -> Lane<'a>,
     transcript: &mut Transcript,
 ) -> Result<StageRun, StageError> {
-    prove_stage_with(spec, manifest, points, claims, resolve, transcript, true)
+    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, true)
 }
 
 /// [`prove_stage`] without the prover's claim self-check.
@@ -323,19 +324,38 @@ pub fn prove_stage_unchecked<'a>(
     resolve: impl Fn(LaneId) -> Lane<'a>,
     transcript: &mut Transcript,
 ) -> Result<StageRun, StageError> {
-    prove_stage_with(spec, manifest, points, claims, resolve, transcript, false)
+    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, false)
 }
 
 /// The groups of a round run concurrently while the main domain has at least this many
 /// unbound variables (`2^12` rows); below it the hand-off costs more than the overlap saves.
 const CONCURRENT_ROUNDS_MIN_VARS: usize = 12;
 
+/// [`prove_stage`] (or its unchecked variant) with `w_1` given as its factors: a group
+/// whose first lane is the level-1 weight then runs the split rounds of
+/// [`crate::split_weight`] when its shape allows, and otherwise on the materialized table.
+#[doc(hidden)]
+pub fn prove_stage_split<'a>(
+    spec: &StageSpec,
+    manifest: &CommitmentManifest,
+    points: &Points,
+    claims: &[E],
+    resolve: impl Fn(LaneId) -> Lane<'a>,
+    split: Option<&SplitWeight>,
+    transcript: &mut Transcript,
+    check: bool,
+) -> Result<StageRun, StageError> {
+    prove_stage_with(spec, manifest, points, claims, resolve, split, transcript, check)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prove_stage_with<'a>(
     spec: &StageSpec,
     manifest: &CommitmentManifest,
     points: &Points,
     claims: &[E],
     resolve: impl Fn(LaneId) -> Lane<'a>,
+    split: Option<&SplitWeight>,
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<StageRun, StageError> {
@@ -351,7 +371,7 @@ fn prove_stage_with<'a>(
     let mut build_times = vec![0_f64; spec.groups.len()];
     for (g, group) in spec.groups.iter().enumerate() {
         let build = std::time::Instant::now();
-        let lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
+        let mut lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
         let instances: Vec<GroupInstance> = group
             .instances
             .iter()
@@ -361,6 +381,18 @@ fn prove_stage_with<'a>(
             })
             .collect();
         let eq_point = points.eq_point(group.eq, manifest, group.domain);
+        if let (Some(split), Some(&LaneId::Weight(WeightId::Level1))) = (split, group.lanes.first()) {
+            if group.domain == GroupRole::Main && eq_point.is_none() {
+                if let Some(grouped) = SplitGroup::new(split, &lanes[1..], &instances, spec.degree) {
+                    groups.push(StageGroup::Split(grouped));
+                    owner.push(g);
+                    build_times[g] = build.elapsed().as_secs_f64();
+                    continue;
+                }
+            }
+            // The generic kernel needs the table the placeholder lane stands for.
+            lanes[0] = Lane::Folded(split.materialize());
+        }
         if let Some(linear) = linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds) {
             groups.push(StageGroup::Linear(linear));
             owner.push(g);
@@ -508,6 +540,8 @@ enum StageGroup<'a> {
     Extra(LinearIntGroup<'a>),
     /// A weight times an integer combination ([`weight_group`]).
     Weight(WeightIntGroup<'a>),
+    /// The level-1 weight as its factors ([`SplitGroup`]).
+    Split(SplitGroup<'a>),
 }
 
 impl StageGroup<'_> {
@@ -516,6 +550,7 @@ impl StageGroup<'_> {
             Self::Generic(g) => g.set_arena(arena),
             Self::Linear(g) | Self::Extra(g) => g.set_arena(arena),
             Self::Weight(g) => g.set_arena(arena),
+            Self::Split(g) => g.set_arena(arena),
         }
     }
 
@@ -524,6 +559,7 @@ impl StageGroup<'_> {
             Self::Generic(g) => g.round_message(round),
             Self::Linear(g) | Self::Extra(g) => g.round_message(round),
             Self::Weight(g) => g.round_message(round),
+            Self::Split(g) => g.round_message(round),
         }
     }
 
@@ -532,6 +568,7 @@ impl StageGroup<'_> {
             Self::Generic(g) => g.bind(round, challenge),
             Self::Linear(g) | Self::Extra(g) => g.bind(round, challenge),
             Self::Weight(g) => g.bind(round, challenge),
+            Self::Split(g) => g.bind(round, challenge),
         }
     }
 
@@ -540,12 +577,13 @@ impl StageGroup<'_> {
             Self::Generic(g) => g.claim(),
             Self::Linear(g) | Self::Extra(g) => g.claim(),
             Self::Weight(g) => g.claim(),
+            Self::Split(g) => g.claim(),
         }
     }
 
     fn consistent(&self) -> bool {
         match self {
-            Self::Generic(_) => true,
+            Self::Generic(_) | Self::Split(_) => true,
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
         }
@@ -556,6 +594,7 @@ impl StageGroup<'_> {
             Self::Generic(g) => Some(g.terminal_values()),
             Self::Linear(_) | Self::Extra(_) => None,
             Self::Weight(g) => Some(g.terminal_values()),
+            Self::Split(g) => Some(g.terminal_values()),
         }
     }
 }

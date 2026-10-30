@@ -22,7 +22,7 @@ use crate::kernel::{LeafPoly, Term};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::range::{digits, Digit};
 use crate::stage::{
-    check_terminal, prove_stage, prove_stage_unchecked, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
+    check_terminal, prove_stage_split, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
 };
 use crate::stage1::Stage1Output;
@@ -203,9 +203,9 @@ fn prove_with(
     let spec = spec(manifest);
     let claims = claimed_sums(manifest, &stage1.claims, &kappa1);
     let run = if check {
-        prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
+        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.w1_split.as_ref(), transcript, true)?
     } else {
-        prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
+        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.w1_split.as_ref(), transcript, false)?
     };
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {

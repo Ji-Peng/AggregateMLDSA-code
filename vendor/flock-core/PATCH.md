@@ -255,6 +255,12 @@ aggregates are byte-identical to main.
   codeword, `FLOCK_LB_FUSED_MERKLE=0` restores the separate Merkle pass. Same tree, cap and
   opened rows in all three.
 
+- **Union lincheck fold and bit banks in one pass over `z`** (`lincheck/union.rs`,
+  `lincheck/kernels/x86_64.rs`): `union_bitbank_fold_multi` reads the BatchMajor `z` once, builds
+  the subset-sum tables of every row point per row tile and bit-transposes each run of eight
+  rows in registers (no byte stripe is stored). `prove_union_with_z_vec_with_grinding` takes the
+  lincheck's fold from it. Same vectors as the stripe fold, same proof bytes.
+
 Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`,
 `pcs::block_stats_portable::tests`, `pcs::block_round_tests`,
 `lincheck::tests::partial_fold_iblock_matches_row_prefix_and_dense`, the NTT path tests (also

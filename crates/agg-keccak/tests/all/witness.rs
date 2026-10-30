@@ -59,7 +59,6 @@ fn honest_parts_match_reference_packing() {
                 assert!(got.z == want.z, "z, {tag}");
                 assert!(got.a == want.a, "a, {tag}");
                 assert!(got.b == want.b, "b, {tag}");
-                assert!(got.stripe == want.stripe, "stripe, {tag}");
                 assert!(bits == want_bits, "bits, {tag}");
             }
         }

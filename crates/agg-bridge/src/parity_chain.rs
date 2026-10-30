@@ -40,6 +40,18 @@ use crate::gf2_walker::SegmentLayout;
 /// Below this many entries the serial paths are used.
 const MIN_PARALLEL: usize = 1 << 12;
 
+/// Whether the block phase runs fused (fold and next message in one pass over ping-pong
+/// buffers with a parallel first touch). `AGG_CHAIN_FUSED=0` selects the two-pass path.
+fn chain_fused() -> bool {
+    std::env::var("AGG_CHAIN_FUSED").map_or(true, |v| v != "0")
+}
+
+/// A zero-filled vector from the allocator's zeroed path. Large buffers come back as fresh
+/// zero pages, so the first touch happens in the parallel writer instead of a serial fill.
+fn zeroed_f128(n: usize) -> Vec<F128> {
+    flock_core::alloc_zeroed_vec::<F128>(n)
+}
+
 /// `eq(point, bits(i))` for every `i < 2^|point|` over `GF(2^128)`, coordinate `j` on index
 /// bit `j`.
 #[must_use]
@@ -399,7 +411,11 @@ impl ChainLayout {
                 m
             })
             .collect();
-        let mut out = vec![F128::ZERO; n_blocks * rows1];
+        let mut out = if chain_fused() {
+            zeroed_f128(n_blocks * rows1)
+        } else {
+            vec![F128::ZERO; n_blocks * rows1]
+        };
         out.par_chunks_mut(rows1)
             .enumerate()
             .for_each(|(beta, row)| {
@@ -492,7 +508,12 @@ impl ChainLayout {
         let g2 = self.level2_weights(mats, &eq_y.r_o);
         let e_s = eq_table(&eq_y.r_y);
         let n_blocks = 1usize << self.block_vars();
-        let mut gt = vec![F128::ZERO; n_blocks * rows1];
+        let fused = chain_fused();
+        let mut gt = if fused {
+            zeroed_f128(n_blocks * rows1)
+        } else {
+            vec![F128::ZERO; n_blocks * rows1]
+        };
         gt.par_chunks_mut(rows1)
             .enumerate()
             .for_each(|(beta, row)| {
@@ -512,16 +533,58 @@ impl ChainLayout {
         let mut rs = Vec::with_capacity(self.rounds());
         let mut running = claim;
         let mut len = n_blocks;
-        for round in 0..self.block_vars() {
-            let half = len / 2;
-            let (q1, qinf) = block_message(&gt[..len * rows1], &yt[..len * rows1], rows1);
-            let r = challenge(round, (q1, qinf))?;
-            running = round_value(running, q1, qinf, r);
-            messages.push((q1, qinf));
-            rs.push(r);
-            gt = fold_blocks(&gt, len, rows1, r);
-            yt = fold_blocks(&yt, len, rows1, r);
-            len = half;
+        if fused && self.block_vars() > 0 {
+            // Ping-pong buffers of the first fold's size, allocated once.
+            let half0 = n_blocks / 2 * rows1;
+            let (mut ga, mut ya) = (zeroed_f128(half0), zeroed_f128(half0));
+            let (mut gb, mut yb) = (zeroed_f128(half0 / 2), zeroed_f128(half0 / 2));
+            let mut msg = block_message(&gt[..len * rows1], &yt[..len * rows1], rows1);
+            for round in 0..self.block_vars() {
+                let (q1, qinf) = msg;
+                let r = challenge(round, (q1, qinf))?;
+                running = round_value(running, q1, qinf, r);
+                messages.push((q1, qinf));
+                rs.push(r);
+                let half = len / 2;
+                // Fold into the (free) output pair; the next message comes from the same
+                // pass. Round 0 reads the initial tables, later rounds alternate.
+                let (gi, yi, go, yo): (&[F128], &[F128], &mut Vec<F128>, &mut Vec<F128>) =
+                    if round == 0 {
+                        (&gt, &yt, &mut ga, &mut ya)
+                    } else if round % 2 == 1 {
+                        (&ga, &ya, &mut gb, &mut yb)
+                    } else {
+                        (&gb, &yb, &mut ga, &mut ya)
+                    };
+                msg = fold_blocks_message(
+                    &gi[..len * rows1],
+                    &yi[..len * rows1],
+                    &mut go[..half * rows1],
+                    &mut yo[..half * rows1],
+                    rows1,
+                    r,
+                );
+                len = half;
+                if round == 0 {
+                    drop(std::mem::take(&mut gt));
+                    drop(std::mem::take(&mut yt));
+                }
+            }
+            // The last fold wrote `ga` (odd round count) or `gb`.
+            gt = if self.block_vars() % 2 == 1 { ga } else { gb };
+            yt = if self.block_vars() % 2 == 1 { ya } else { yb };
+        } else {
+            for round in 0..self.block_vars() {
+                let half = len / 2;
+                let (q1, qinf) = block_message(&gt[..len * rows1], &yt[..len * rows1], rows1);
+                let r = challenge(round, (q1, qinf))?;
+                running = round_value(running, q1, qinf, r);
+                messages.push((q1, qinf));
+                rs.push(r);
+                gt = fold_blocks(&gt, len, rows1, r);
+                yt = fold_blocks(&yt, len, rows1, r);
+                len = half;
+            }
         }
         drop(yt);
         gt.truncate(rows1);
@@ -674,6 +737,68 @@ fn fold_blocks(t: &[F128], len: usize, rows: usize, r: F128) -> Vec<F128> {
         }
     });
     out
+}
+
+/// Fold the lowest block variable of both `[beta][rho_1]` tables (`len` blocks, `len` even)
+/// into `g_out`/`y_out` (`len / 2` blocks) with the challenge `r`, and return the next
+/// round's message `(q(1), q(inf))` of the folded tables (zero when they are a single block,
+/// where no further round follows). Same sums as `fold_blocks` followed by `block_message`;
+/// the field is characteristic 2, so the grouping of the sums does not change the result.
+fn fold_blocks_message(
+    g: &[F128],
+    y: &[F128],
+    g_out: &mut [F128],
+    y_out: &mut [F128],
+    rows: usize,
+    r: F128,
+) -> (F128, F128) {
+    let out_blocks = g_out.len() / rows;
+    if out_blocks < 2 {
+        g_out
+            .par_chunks_mut(rows)
+            .zip(y_out.par_chunks_mut(rows))
+            .enumerate()
+            .for_each(|(k, (gd, yd))| {
+                for i in 0..rows {
+                    let (a, b) = (g[2 * k * rows + i], g[(2 * k + 1) * rows + i]);
+                    gd[i] = a + r * (a + b);
+                    let (a, b) = (y[2 * k * rows + i], y[(2 * k + 1) * rows + i]);
+                    yd[i] = a + r * (a + b);
+                }
+            });
+        return (F128::ZERO, F128::ZERO);
+    }
+    // Output blocks come in pairs (2j, 2j + 1) built from the input blocks 4j..4j + 3.
+    g_out
+        .par_chunks_mut(2 * rows)
+        .zip(y_out.par_chunks_mut(2 * rows))
+        .enumerate()
+        .map(|(j, (gd, yd))| {
+            let (gd0, gd1) = gd.split_at_mut(rows);
+            let (yd0, yd1) = yd.split_at_mut(rows);
+            let base = 4 * j * rows;
+            let mut q1 = F128::ZERO;
+            let mut qi = F128::ZERO;
+            for i in 0..rows {
+                let at = |t: &[F128], b: usize| t[base + b * rows + i];
+                let (a, b) = (at(g, 0), at(g, 1));
+                let g0 = a + r * (a + b);
+                let (a, b) = (at(g, 2), at(g, 3));
+                let g1 = a + r * (a + b);
+                let (a, b) = (at(y, 0), at(y, 1));
+                let y0 = a + r * (a + b);
+                let (a, b) = (at(y, 2), at(y, 3));
+                let y1 = a + r * (a + b);
+                gd0[i] = g0;
+                gd1[i] = g1;
+                yd0[i] = y0;
+                yd1[i] = y1;
+                q1 += g1 * y1;
+                qi += (g0 + g1) * (y0 + y1);
+            }
+            (q1, qi)
+        })
+        .reduce(|| (F128::ZERO, F128::ZERO), |p, q| (p.0 + q.0, p.1 + q.1))
 }
 
 #[cfg(test)]

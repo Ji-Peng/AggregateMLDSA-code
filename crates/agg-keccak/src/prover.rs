@@ -443,7 +443,10 @@ impl<'g> GateBatch<'g> {
         );
         let union = UnionInstance::new(&self.registry, vec![self.n]);
         let slot =
-            UnionSlotProverInput::new(buffers.into_parts(), self.gate as &dyn LincheckCircuit);
+            UnionSlotProverInput::new(
+            buffers.into_parts(self.gate.layout().k_log, self.nu()),
+            self.gate as &dyn LincheckCircuit,
+        );
         let mut ch = self.challenger(fs);
         let (proof, commitment, _claims) = prove_fast_ligerito_union_circuit(
             &union,
@@ -890,7 +893,9 @@ mod tests {
                 batch.commitment_len()
             );
             let slot = UnionSlotProverInput::new(
-                batch.honest_buffers(&inputs).into_parts(),
+                batch
+                    .honest_buffers(&inputs)
+                    .into_parts(gate.layout().k_log, batch.nu()),
                 &gate as &dyn LincheckCircuit,
             );
             let mut ch = batch.challenger(&[1; 32]);

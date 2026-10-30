@@ -155,3 +155,60 @@ pub fn partial_fold_packed_z_x86_tiled_padded(
             },
         )
 }
+
+/// Byte permutation of the 8×64 bit transpose: destination byte `8 k + p` takes source
+/// byte `8 (7 - p) + k` (byte `k` of row `7 - p`).
+const BANK_GATHER: [u8; 64] = {
+    let mut idx = [0u8; 64];
+    let mut k = 0;
+    while k < 8 {
+        let mut p = 0;
+        while p < 8 {
+            idx[8 * k + p] = (8 * (7 - p) + k) as u8;
+            p += 1;
+        }
+        k += 1;
+    }
+    idx
+};
+
+/// Bit transpose of eight-word runs on AVX-512 (the union bit-bank fold): run `g` of
+/// `words` (8 F128 = 2 zmm) is split into its lo and hi qword planes by two
+/// `vpermt2q`; each plane (eight rows of 64 bits) is transposed by one `vpermb`
+/// (byte `k` of every row into qword `k`, row `r` at byte `7 - r`) and one
+/// `vgf2p8affineqb` with the identity bytes as data, so byte `b` of the result holds bit
+/// `b` of every row (bit `r` = row `r`). Output `out[128 g ..][..64]` from the lo plane,
+/// `[64..128]` from the hi plane.
+///
+/// # Safety
+/// AVX-512 F/BW/VBMI and GFNI available; `out.len() == 16 * words.len()`, `words.len()`
+/// a multiple of 8.
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi,gfni")]
+pub(crate) unsafe fn bank_transpose_avx512(words: &[F128], out: &mut [u8]) {
+    use core::arch::x86_64::{
+        _mm512_gf2p8affine_epi64_epi8, _mm512_loadu_si512, _mm512_permutex2var_epi64,
+        _mm512_permutexvar_epi8, _mm512_set1_epi64, _mm512_set_epi64, _mm512_storeu_si512,
+    };
+    debug_assert_eq!(out.len(), 16 * words.len());
+    debug_assert!(words.len().is_multiple_of(8));
+    // SAFETY: BANK_GATHER is 64 readable bytes.
+    let gidx = unsafe { _mm512_loadu_si512(BANK_GATHER.as_ptr().cast()) };
+    let ident = _mm512_set1_epi64(0x8040_2010_0804_0201_u64 as i64);
+    let lo_idx = _mm512_set_epi64(14, 12, 10, 8, 6, 4, 2, 0);
+    let hi_idx = _mm512_set_epi64(15, 13, 11, 9, 7, 5, 3, 1);
+    for g in 0..words.len() / 8 {
+        // SAFETY: 8 F128 (128 bytes) readable at run g, 128 bytes writable at out[128 g].
+        unsafe {
+            let p = words.as_ptr().add(8 * g).cast::<u8>();
+            let v0 = _mm512_loadu_si512(p.cast());
+            let v1 = _mm512_loadu_si512(p.add(64).cast());
+            let lo = _mm512_permutex2var_epi64(v0, lo_idx, v1);
+            let hi = _mm512_permutex2var_epi64(v0, hi_idx, v1);
+            let tl = _mm512_gf2p8affine_epi64_epi8::<0>(ident, _mm512_permutexvar_epi8(gidx, lo));
+            let th = _mm512_gf2p8affine_epi64_epi8::<0>(ident, _mm512_permutexvar_epi8(gidx, hi));
+            let o = out.as_mut_ptr().add(128 * g);
+            _mm512_storeu_si512(o.cast(), tl);
+            _mm512_storeu_si512(o.add(64).cast(), th);
+        }
+    }
+}

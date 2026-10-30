@@ -61,6 +61,7 @@
 
 use std::{env::var, time::Instant};
 use crate::challenger::CanonicalPow;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
     challenger::Challenger,
@@ -68,8 +69,7 @@ use crate::{
     lincheck::{
         LincheckCircuit, LincheckClaim, LincheckError, LincheckGrinding, LincheckProof,
         QuirkyPoint, SkipPoint, build_eq_table, build_quirky_eq_table_from_weights,
-        column_sumcheck_prove, iblock_wins, inner_product, partial_fold_packed_z_rows_best,
-        partial_fold_packed_z_rows_iblock,
+        column_sumcheck_prove, inner_product, partial_fold_packed_z_rows_best,
     },
     matrix_fold::{MatrixClaim, Weight},
     schedule::Registry,
@@ -251,65 +251,222 @@ pub fn union_bitbank_fold(
     z_vec
 }
 
-/// [`union_bitbank_fold`] at several row points in one pass over each slot's
-/// stripe (one subset-sum table set per point, every stripe byte read once
-/// for all points). Same vectors as calling [`union_bitbank_fold`] per point.
+/// Row groups of eight whose subset-sum tables are built together in
+/// [`union_bitbank_fold_multi`] (`32 × points × 4 KB` of tables per task, L2-resident).
+const BANK_ROW_GROUPS: usize = 32;
+/// Word columns per task of [`union_bitbank_fold_multi`]: the task's output is
+/// `points × 32 × 128` F128 (64 KB per point), touched once per row tile.
+const BANK_COL_TILE: usize = 32;
+
+/// Raw output pointers of [`union_bitbank_fold_multi`]; every task writes a disjoint
+/// column range of each output.
+struct BankOut(Vec<*mut F128>);
+// SAFETY: tasks write disjoint ranges (see the caller); the vectors outlive the scope.
+unsafe impl Sync for BankOut {}
+impl BankOut {
+    fn get(&self, p: usize) -> *mut F128 {
+        self.0[p]
+    }
+}
+
+/// The column bit-banks of the union buffer `z` (BatchMajor, `z[(c << ν) | j]` per slot)
+/// at several row points in ONE pass over `z`: output `p` is, for every boolean slot `t`
+/// at its aligned column offset,
+/// `out[p][128 c + b] = Σ_{j < n_t} eq(points[p], j) · bit_b(z_t[(c << ν) | j])`, zero
+/// for bits `≥ useful_bits` and for the gaps between slots — exactly
+/// [`union_bitbank_fold`] at each point, without the lincheck stripe.
+///
+/// Per task (a tile of [`BANK_COL_TILE`] word columns of one slot) and per row tile of
+/// [`BANK_ROW_GROUPS`] groups of eight rows, the 256-entry subset-sum table of each
+/// group's eight eq weights is built per point (dead rows past `n_t` get weight zero, so
+/// their bits contribute nothing); then per column the eight-word runs
+/// `z[(c << ν) + 8g ..][..8]` are bit-transposed (byte `b` = bit `b` of the eight words)
+/// and each byte selects one table entry per point, XORed into a register accumulator
+/// over the row tile.
 pub fn union_bitbank_fold_multi(
     union: &UnionInstance,
-    slots: &[UnionLincheckSlot<'_>],
-    x_outers: &[&[F128]],
+    z: &[F128],
+    points: &[&[F128]],
 ) -> Vec<Vec<F128>> {
     let registry = union.registry();
     let nu = union.n_log();
+    assert!(nu >= 3, "bit-bank fold needs at least 8 rows");
     let col_vars = union.m_bool() - nu;
-    let single = registry.num_boolean() == 1 && registry.slots()[0].m_slot == registry.m_bool();
-    let eqs: Vec<Vec<F128>> = x_outers.iter().map(|x| build_eq_table(x)).collect();
-    let mut z_vecs: Vec<Vec<F128>> = if single {
-        vec![Vec::new(); x_outers.len()]
-    } else {
-        vec![vec![F128::ZERO; 1usize << col_vars]; x_outers.len()]
-    };
-    for (((ty, slot), slot_in), &n_t) in registry
+    let np = points.len();
+    let eqs: Vec<Vec<F128>> = points
+        .iter()
+        .map(|p| {
+            assert_eq!(p.len(), nu, "bit-bank row point length");
+            build_eq_table(p)
+        })
+        .collect();
+    let mut outs: Vec<Vec<F128>> = (0..np)
+        .map(|_| crate::alloc_zeroed_vec(1usize << col_vars))
+        .collect();
+    if np == 0 {
+        return outs;
+    }
+    // (z word offset of column c0, output column of c0, columns, live bits from c0, rows)
+    let mut tasks: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for ((ty, slot), &n_t) in registry
         .boolean_types()
         .iter()
         .zip(registry.slots())
-        .zip(slots)
         .zip(union.counts())
     {
-        let ys: Vec<Vec<F128>> = if iblock_wins(nu + ty.k_log, ty.k_log) {
-            let refs: Vec<&[F128]> = eqs.iter().map(Vec::as_slice).collect();
-            partial_fold_packed_z_rows_iblock(
-                slot_in.z_lincheck,
-                nu + ty.k_log,
-                ty.k_log,
-                ty.useful_bits,
-                &refs,
+        assert!(ty.k_log >= 7 && slot.m_slot == nu + ty.k_log, "slot geometry");
+        assert!(n_t <= 1usize << nu, "count exceeds the row capacity");
+        let words = 1usize << (slot.m_slot - 7);
+        let base = slot.offset >> 7;
+        assert!(base + words <= z.len(), "union buffer too short for slot");
+        let cols = ty.useful_bits.div_ceil(128);
+        let out_col = slot.prefix << (ty.k_log - 7);
+        for c0 in (0..cols).step_by(BANK_COL_TILE) {
+            tasks.push((
+                base + (c0 << nu),
+                out_col + c0,
+                BANK_COL_TILE.min(cols - c0),
+                ty.useful_bits - 128 * c0,
                 n_t,
-            )
-        } else {
-            eqs.iter()
-                .map(|eq| {
-                    partial_fold_packed_z_rows_best(
-                        slot_in.z_lincheck,
-                        nu + ty.k_log,
-                        ty.k_log,
-                        ty.useful_bits,
-                        eq,
-                        n_t,
-                    )
-                })
-                .collect()
-        };
-        for (z_vec, y_t) in z_vecs.iter_mut().zip(ys) {
-            if single {
-                *z_vec = y_t;
-            } else {
-                let off = slot.prefix << ty.k_log;
-                z_vec[off..off + y_t.len()].copy_from_slice(&y_t);
-            }
+            ));
         }
     }
-    z_vecs
+    let ptrs = BankOut(outs.iter_mut().map(|o| o.as_mut_ptr()).collect());
+    let use_x86 = bank_transpose_x86();
+    tasks.par_iter().for_each_init(
+        || vec![F128::ZERO; BANK_ROW_GROUPS * np * 256],
+        |tables, &(zw, oc, ncols, live, n_t)| {
+            let groups = n_t.div_ceil(8);
+            let mut buf = [0u8; BANK_ROW_GROUPS * 128];
+            let mut eq8 = [F128::ZERO; 8];
+            for gt in (0..groups).step_by(BANK_ROW_GROUPS) {
+                let gn = BANK_ROW_GROUPS.min(groups - gt);
+                for g in 0..gn {
+                    let row0 = 8 * (gt + g);
+                    for (p, eq) in eqs.iter().enumerate() {
+                        for (r, e) in eq8.iter_mut().enumerate() {
+                            *e = if row0 + r < n_t { eq[row0 + r] } else { F128::ZERO };
+                        }
+                        let t = &mut tables[(g * np + p) * 256..(g * np + p + 1) * 256];
+                        build_sum_table8(&eq8, t);
+                    }
+                }
+                for c in 0..ncols {
+                    let col = &z[zw + (c << nu)..zw + ((c + 1) << nu)];
+                    let runs = &col[8 * gt..8 * (gt + gn)];
+                    bank_transpose(use_x86, runs, &mut buf[..gn * 128]);
+                    let nb = 128.min(live - 128 * c);
+                    for p in 0..np {
+                        let op = ptrs.get(p);
+                        // SAFETY: output column oc + c < 2^(col_vars - 7) belongs to this
+                        // task only; nb <= 128 bits of it.
+                        let out = unsafe {
+                            std::slice::from_raw_parts_mut(op.add(128 * (oc + c)), nb)
+                        };
+                        bank_lookup(tables, np, p, &buf[..gn * 128], gn, out);
+                    }
+                }
+            }
+        },
+    );
+    drop(ptrs);
+    outs
+}
+
+/// `out[b] += Σ_{g < gn} tables[g][p][bytes[128 g + b]]` for `b < out.len()`.
+#[inline]
+fn bank_lookup(tables: &[F128], np: usize, p: usize, bytes: &[u8], gn: usize, out: &mut [F128]) {
+    let nb = out.len();
+    let mut b = 0;
+    // Four independent accumulator chains per step.
+    while b + 4 <= nb {
+        let (mut a0, mut a1, mut a2, mut a3) = (out[b], out[b + 1], out[b + 2], out[b + 3]);
+        for g in 0..gn {
+            let t = &tables[(g * np + p) * 256..(g * np + p + 1) * 256];
+            let by = &bytes[128 * g + b..128 * g + b + 4];
+            a0 += t[by[0] as usize];
+            a1 += t[by[1] as usize];
+            a2 += t[by[2] as usize];
+            a3 += t[by[3] as usize];
+        }
+        out[b] = a0;
+        out[b + 1] = a1;
+        out[b + 2] = a2;
+        out[b + 3] = a3;
+        b += 4;
+    }
+    while b < nb {
+        let mut a = out[b];
+        for g in 0..gn {
+            a += tables[(g * np + p) * 256 + bytes[128 * g + b] as usize];
+        }
+        out[b] = a;
+        b += 1;
+    }
+}
+
+/// `table[s] = Σ_{r: bit r of s set} eq8[r]` (255 additions, doubling).
+#[inline]
+fn build_sum_table8(eq8: &[F128; 8], table: &mut [F128]) {
+    table[0] = F128::ZERO;
+    for (i, &e) in eq8.iter().enumerate() {
+        let len = 1usize << i;
+        for j in 0..len {
+            table[len + j] = table[j] + e;
+        }
+    }
+}
+
+/// Whether the AVX-512 VBMI + GFNI bit transpose may run.
+fn bank_transpose_x86() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::simd::has(crate::simd::AVX512_VBMI | crate::simd::AVX512_GFNI)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Bit transpose of eight-word runs: run `g` (`words[8 g ..][..8]`, rows `r = 0..8`) to
+/// 128 bytes `out[128 g + b]` whose bit `r` is bit `b` of word `r` (`b < 64` from `lo`,
+/// `b ≥ 64` from `hi`) — the lincheck stripe bytes of one column of eight rows.
+fn bank_transpose(use_x86: bool, words: &[F128], out: &mut [u8]) {
+    debug_assert_eq!(words.len() * 16, out.len());
+    #[cfg(target_arch = "x86_64")]
+    if use_x86 {
+        // SAFETY: the features were checked (`bank_transpose_x86`); lengths asserted above.
+        unsafe { crate::lincheck::kernels::bank_transpose_avx512(words, out) };
+        return;
+    }
+    let _ = use_x86;
+    for (run, o) in words.chunks_exact(8).zip(out.chunks_exact_mut(128)) {
+        let lo: [u64; 8] = std::array::from_fn(|r| run[r].lo);
+        let hi: [u64; 8] = std::array::from_fn(|r| run[r].hi);
+        transpose_8x64(&lo, &mut o[..64]);
+        transpose_8x64(&hi, &mut o[64..]);
+    }
+}
+
+/// `out[bit] = Σ_r bit(v[r], bit) << r` for `bit < 64`: eight 8×8 bit-matrix transposes
+/// (byte `k` of every `v[r]` forms one matrix), three delta swaps each.
+#[inline]
+pub(crate) fn transpose_8x64(v: &[u64; 8], out: &mut [u8]) {
+    debug_assert_eq!(out.len(), 64);
+    for k in 0..8 {
+        let mut x = 0u64;
+        for (r, &w) in v.iter().enumerate() {
+            x |= ((w >> (8 * k)) & 0xff) << (8 * r);
+        }
+        let t = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
+        x ^= t ^ (t << 7);
+        let t = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
+        x ^= t ^ (t << 14);
+        let t = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
+        x ^= t ^ (t << 28);
+        out[8 * k..8 * k + 8].copy_from_slice(&x.to_le_bytes());
+    }
 }
 
 pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
@@ -320,33 +477,69 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
     challenger: &mut Ch,
 ) -> (LincheckProof, LincheckClaim, Vec<F128>) {
     let registry = union.registry();
+    let nu = union.n_log();
+    assert!(nu >= 3, "lincheck stripe fold needs n_outer ≥ 8 (nu ≥ 3)");
+    for (ty, slot_in) in registry.boolean_types().iter().zip(slots) {
+        assert_eq!(
+            slot_in.z_lincheck.len(),
+            1usize << (nu + ty.k_log - 3),
+            "slot lincheck stripe length mismatch"
+        );
+    }
+    // 3. Per-slot row folds against the SHARED standard eq table of the row
+    //    block r|_R (uniform capacity: one table, all slots), placed at the
+    //    slots' aligned column offsets — the union generalization of today's
+    //    single partial fold. Dummy rows are honest zeros, so folding only
+    //    the DECLARED rows equals the full-capacity fold byte for byte —
+    //    the row-aware dispatch makes the fold count-proportional (M6).
+    let t_fold = var("LINCHECK_TRACE").is_ok().then(Instant::now);
+    let z_vec = union_bitbank_fold(union, slots, &x_ab.x_outer);
+    if let Some(t) = t_fold {
+        eprintln!(
+            "[lc] {:<26} {:>7.2} ms",
+            "union partial folds",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    let circuits: Vec<&dyn LincheckCircuit> = slots.iter().map(|s| s.circuit).collect();
+    prove_union_with_z_vec_with_grinding(union, &circuits, x_ab, z_vec, grinding, challenger)
+}
+
+/// [`prove_union_capture_z_vec_with_grinding`] with the union fold `z_vec` supplied by
+/// the caller: the column bit-bank of the union witness at `x_ab.x_outer`
+/// ([`union_bitbank_fold`] or one point of [`union_bitbank_fold_multi`]), so the
+/// lincheck needs no stripe copy of the witness. Same transcript and bytes.
+pub fn prove_union_with_z_vec_with_grinding<Ch: Challenger>(
+    union: &UnionInstance<'_>,
+    circuits: &[&dyn LincheckCircuit],
+    x_ab: &QuirkyPoint,
+    z_vec: Vec<F128>,
+    grinding: LincheckGrinding,
+    challenger: &mut Ch,
+) -> (LincheckProof, LincheckClaim, Vec<F128>) {
+    let registry = union.registry();
     let k_skip = K_SKIP;
     let nu = union.n_log();
     let col_vars = union.m_bool() - nu;
     let inner_rest_len = col_vars - k_skip;
-    assert!(nu >= 3, "lincheck stripe fold needs n_outer ≥ 8 (nu ≥ 3)");
     assert_eq!(
-        slots.len(),
+        circuits.len(),
         registry.num_boolean(),
         "one lincheck input per BOOLEAN registry type (element slots have their own PIOP)"
     );
     assert_eq!(x_ab.x_inner_rest.len(), inner_rest_len);
     assert_eq!(x_ab.x_outer.len(), nu);
-    for (ty, slot_in) in registry.boolean_types().iter().zip(slots) {
+    assert_eq!(z_vec.len(), 1usize << col_vars, "union fold length");
+    for (ty, circuit) in registry.boolean_types().iter().zip(circuits) {
         assert_eq!(
-            slot_in.circuit.n_cols(),
+            circuit.n_cols(),
             1usize << ty.k_log,
             "circuit width must match the registry type"
         );
         assert_eq!(
-            slot_in.circuit.const_pin_col(),
+            circuit.const_pin_col(),
             ty.const_pin,
             "circuit const_pin must match the registry type"
-        );
-        assert_eq!(
-            slot_in.z_lincheck.len(),
-            1usize << (nu + ty.k_log - 3),
-            "slot lincheck stripe length mismatch"
         );
     }
 
@@ -355,9 +548,9 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
     let mut grinding_nonces = Vec::with_capacity(
         grinding.nonce_count(
             inner_rest_len,
-            slots
+            circuits
                 .iter()
-                .filter(|slot| slot.circuit.const_pin_col().is_some())
+                .filter(|c| c.const_pin_col().is_some())
                 .count(),
             k_skip,
         ),
@@ -393,11 +586,11 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
     };
     // Per-type (ξ_A, ξ_B), kept for the matrix-eval report after the sumcheck.
     let mut split_combs: Vec<(Vec<F128>, Vec<F128>)> = Vec::with_capacity(registry.num_boolean());
-    for ((ty, slot), slot_in) in registry
+    for ((ty, slot), circuit) in registry
         .boolean_types()
         .iter()
         .zip(registry.slots())
-        .zip(slots)
+        .zip(circuits)
     {
         let inner = ty.k_log - k_skip;
         let eq_inner = build_quirky_eq_table_from_weights(
@@ -406,7 +599,7 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
         );
         // Split, so the per-matrix bilinear values can be reported below.
         // Same nonzeros as the α-batched fold; only the accumulation differs.
-        let (comb_a, comb_b) = slot_in.circuit.fold_split(&eq_inner);
+        let (comb_a, comb_b) = circuit.fold_split(&eq_inner);
         let comb_t: Vec<F128> = comb_a
             .iter()
             .zip(&comb_b)
@@ -428,8 +621,8 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
     //     added UNSCALED at the pin's union column. The verifier's target
     //     gains the count-derived β_t · Σ_{row<n_t} eq(x_outer, row) — see
     //     `verify_union` and the module docs.
-    for (slot, slot_in) in registry.slots().iter().zip(slots) {
-        if let Some(col) = slot_in.circuit.const_pin_col() {
+    for (slot, circuit) in registry.slots().iter().zip(circuits) {
+        if let Some(col) = circuit.const_pin_col() {
             let beta = if let Some(bits) = grinding.beta_bits() {
                 let (nonce, beta) = challenger.grind_pow_and_sample_f128(bits);
                 grinding_nonces.push(nonce);
@@ -445,27 +638,6 @@ pub fn prove_union_capture_z_vec_with_grinding<Ch: Challenger>(
         eprintln!(
             "[lc] {:<26} {:>7.2} ms",
             "union comb build",
-            t.elapsed().as_secs_f64() * 1e3
-        );
-    }
-
-    // 3. Per-slot row folds against the SHARED standard eq table of the row
-    //    block r|_R (uniform capacity: one table, all slots), placed at the
-    //    slots' aligned column offsets — the union generalization of today's
-    //    single partial fold. Dummy rows are honest zeros, so folding only
-    //    the DECLARED rows equals the full-capacity fold byte for byte —
-    //    the row-aware dispatch makes the fold count-proportional (M6).
-    let t_fold = if trace {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
-    let z_vec = union_bitbank_fold(union, slots, &x_ab.x_outer);
-
-    if let Some(t) = t_fold {
-        eprintln!(
-            "[lc] {:<26} {:>7.2} ms",
-            "union partial folds",
             t.elapsed().as_secs_f64() * 1e3
         );
     }
@@ -1091,6 +1263,72 @@ mod tests {
                 }
             }
             assert_eq!(eq_prefix_sum(&point, 1 << d), F128::ONE);
+        }
+    }
+
+    /// The one-pass multi-point bit-bank fold equals the stripe fold
+    /// [`union_bitbank_fold`] at every point, on one- and two-slot registries with
+    /// partial counts and partial last columns, under every kernel mask.
+    #[test]
+    fn union_bitbank_fold_multi_matches_stripe_fold() {
+        use crate::{
+            lincheck::{SparseMatrixCircuit, UnionLincheckSlot, pack_z_lincheck, union_bitbank_fold},
+            lincheck::union::union_bitbank_fold_multi,
+            simd::{test_masks, with_mask},
+            union::UnionInstance,
+        };
+        let mut rng = Rng::new(0xBA_4C);
+        let st = stub();
+        for nu in 3..=6usize {
+            for k_log in 7..=9usize {
+                let cap = 1usize << nu;
+                let k = 1usize << k_log;
+                let useful = k - 37;
+                let regs = [
+                    (Registry::new(vec![ty(k_log, useful)], nu), vec![cap - 3]),
+                    (Registry::new(vec![ty(k_log, useful), ty(k_log, k - 128)], nu), vec![cap, 5]),
+                    (Registry::new(vec![ty(k_log, k)], nu), vec![cap]),
+                ];
+                for (reg, counts) in regs {
+                    let union = UnionInstance::new(&reg, counts.clone());
+                    let mut z = vec![F128::ZERO; union.packed_len()];
+                    // Random bits on the declared rows and live bits of every slot.
+                    let mut stripes = Vec::new();
+                    for ((t, slot), &n_t) in reg.boolean_types().iter().zip(reg.slots()).zip(&counts) {
+                        let base = slot.offset >> 7;
+                        let mut logical = vec![false; k << nu];
+                        for c in 0..k / 128 {
+                            for j in 0..n_t {
+                                let mut w = F128::new(rng.next_u64(), rng.next_u64());
+                                for b in 0..128 {
+                                    if 128 * c + b >= t.useful_bits {
+                                        if b < 64 { w.lo &= !(1 << b) } else { w.hi &= !(1 << (b - 64)) }
+                                    }
+                                }
+                                z[base + (c << nu) + j] = w;
+                                for b in 0..128 {
+                                    let bit = if b < 64 { (w.lo >> b) & 1 } else { (w.hi >> (b - 64)) & 1 };
+                                    logical[128 * c + b + j * k] = bit == 1;
+                                }
+                            }
+                        }
+                        stripes.push(pack_z_lincheck(&logical, nu + k_log, k_log));
+                    }
+                    let circ = SparseMatrixCircuit::new(&st, &st);
+                    let slots: Vec<UnionLincheckSlot<'_>> = stripes
+                        .iter()
+                        .map(|s| UnionLincheckSlot { z_lincheck: s, circuit: &circ })
+                        .collect();
+                    let points: Vec<Vec<F128>> = (0..3).map(|_| rng.f128_vec(nu)).collect();
+                    let want: Vec<Vec<F128>> =
+                        points.iter().map(|p| union_bitbank_fold(&union, &slots, p)).collect();
+                    let refs: Vec<&[F128]> = points.iter().map(Vec::as_slice).collect();
+                    for mask in test_masks() {
+                        let got = with_mask(mask, || union_bitbank_fold_multi(&union, &z, &refs));
+                        assert_eq!(got, want, "nu {nu} k_log {k_log} mask {mask:#x}");
+                    }
+                }
+            }
         }
     }
 

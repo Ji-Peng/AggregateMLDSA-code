@@ -145,8 +145,8 @@ pub use crate::lincheck::kernels::{
 };
 pub use crate::lincheck::union::{
     MatrixAssertion, UnionLincheckSlot, eq_prefix_sum, eq_prefix_weight, prove_union_capture_z_vec,
-    prove_union_capture_z_vec_with_grinding, union_bitbank_fold, union_bitbank_fold_multi,
-    union_comb_partial, verify_union,
+    prove_union_capture_z_vec_with_grinding, prove_union_with_z_vec_with_grinding,
+    union_bitbank_fold, union_bitbank_fold_multi, union_comb_partial, verify_union,
     verify_union_deferred, verify_union_deferred_with_grinding, verify_union_with_grinding,
 };
 use crate::{

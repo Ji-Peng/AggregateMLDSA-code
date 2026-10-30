@@ -54,6 +54,9 @@ use crate::OpeningField as E;
 
 /// Message degree of every session (equality factor times a bilinear summand).
 pub const DEGREE: usize = 3;
+
+/// A session round runs its groups concurrently while at least this many rounds remain.
+const CONCURRENT_GROUP_ROUNDS_MIN_VARS: usize = 12;
 /// Largest number of independent challenges `X` (the timing test measures 1 and 2).
 pub const MAX_CHALLENGES: usize = 4;
 /// Balanced base-16 digits of one multiplicity (`m < 7 (16^7 - 1) / 15 ~ 2^26.9`).
@@ -1573,18 +1576,34 @@ fn prove_with(
         for (_, group) in &mut groups { group.set_arena(&arena); }
         let mut rounds = Vec::with_capacity(s - 1);
         let mut rho = Vec::with_capacity(s - 1);
+        // While the tables are large, the groups' messages are computed concurrently (each
+        // group is parallel inside, so the groups' barriers overlap); the late rounds are too
+        // small to pay for the task hand-off and run in order. Either way the parts are summed
+        // in the fixed group order, so the message does not depend on the scheduling.
+        // `AGG_LOOKUP_SERIAL=1` runs every round in order.
+        let serial_groups = std::env::var_os("AGG_LOOKUP_SERIAL").is_some_and(|v| v != "0");
         for round in 0..s - 1 {
+            let concurrent = !serial_groups && groups.len() > 1 && s - 1 - round >= CONCURRENT_GROUP_ROUNDS_MIN_VARS;
+            let parts: Vec<Vec<E>> = if concurrent {
+                groups.par_iter_mut().map(|(_, group)| group.round_message(round)).collect()
+            } else {
+                groups.iter_mut().map(|(_, group)| group.round_message(round)).collect()
+            };
             let mut message = vec![E::zero(); DEGREE];
-            for (_, group) in &mut groups {
-                for (slot, value) in message.iter_mut().zip(group.round_message(round)) {
+            for part in parts {
+                for (slot, value) in message.iter_mut().zip(part) {
                     *slot += value;
                 }
             }
             fs.absorb(LookupSite::Round(s, round), &message)?;
             let challenge = one(fs, LookupSite::RoundChallenge(s, round))?;
             claim = evaluate_compressed(&message, claim, challenge);
-            for (_, group) in &mut groups {
-                group.bind(round, challenge);
+            if concurrent {
+                groups.par_iter_mut().for_each(|(_, group)| group.bind(round, challenge));
+            } else {
+                for (_, group) in &mut groups {
+                    group.bind(round, challenge);
+                }
             }
             rounds.push(message);
             rho.push(challenge);
