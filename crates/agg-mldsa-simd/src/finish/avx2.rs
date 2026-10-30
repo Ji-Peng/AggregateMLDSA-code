@@ -166,114 +166,129 @@ fn c_load(c: &'static AlignedConst<[i32; 8]>) -> V {
     unsafe { _mm256_load_si256(c.0.as_ptr().cast()) }
 }
 
+/// `k = ((xp - xq) q^-1) mod P2` centred as the CRT of `(xq, xp)` requires
+/// (see the scalar kernel): a signed Montgomery product by `CRT_C`, one
+/// conditional `+ P2`, then `- P2` iff `k > (P2-1)/2` or (`k = (P2-1)/2` and
+/// `xq > (q-1)/2`), computed as `k - [xq > (q-1)/2] > (P2-1)/2`.
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+fn crt_k(xq: V, xp: V, c: V, c_pinv: V, p2: V, p2_half: V, q_half: V) -> V {
+    let a = sub(xp, xq);
+    let m = mul(a, c_pinv);
+    // Products of the even and the odd lanes; their high halves are the
+    // Montgomery results, |k| < P2 for |xp - xq| < 2^28.
+    let even = _mm256_sub_epi64(_mm256_mul_epi32(a, c), _mm256_mul_epi32(m, p2));
+    let odd = _mm256_sub_epi64(
+        _mm256_mul_epi32(_mm256_srli_epi64::<32>(a), c),
+        _mm256_mul_epi32(_mm256_srli_epi64::<32>(m), p2),
+    );
+    let k = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(even), odd);
+    let k = _mm256_min_epu32(k, add(k, p2));
+    let center = gt(sub(k, gt(xq, q_half)), p2_half);
+    sub(k, and(center, p2))
+}
+
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
-    // Stage 1: CRT Montgomery reduction and centring into out.v.
-    // 5 constants in registers; loop executes 16-coeff blocks with zero stack spills.
-    let c = c_load(&C_CRT_C);
-    let c_pinv = c_load(&C_CRT_C_PINV);
-    let p2 = c_load(&C_P2);
-    let p2_half = c_load(&C_P2_HALF);
-    let q_half = c_load(&C_Q_HALF);
-
-    for i in (0..256).step_by(16) {
-        let xq0 = load(row.xq[i..i+8].try_into().unwrap());
-        let xp0 = load(row.xp[i..i+8].try_into().unwrap());
-        let xq1 = load(row.xq[i+8..i+16].try_into().unwrap());
-        let xp1 = load(row.xp[i+8..i+16].try_into().unwrap());
-
-        let a_p0 = sub(xp0, xq0);
-        let a_p1 = sub(xp1, xq1);
-
-        let m0 = mul(a_p0, c_pinv);
-        let m1 = mul(a_p1, c_pinv);
-
-        let even0 = _mm256_sub_epi64(_mm256_mul_epi32(a_p0, c), _mm256_mul_epi32(m0, p2));
-        let even1 = _mm256_sub_epi64(_mm256_mul_epi32(a_p1, c), _mm256_mul_epi32(m1, p2));
-
-        let odd0 = _mm256_sub_epi64(
-            _mm256_mul_epi32(_mm256_srli_epi64::<32>(a_p0), c),
-            _mm256_mul_epi32(_mm256_srli_epi64::<32>(m0), p2),
-        );
-        let odd1 = _mm256_sub_epi64(
-            _mm256_mul_epi32(_mm256_srli_epi64::<32>(a_p1), c),
-            _mm256_mul_epi32(_mm256_srli_epi64::<32>(m1), p2),
-        );
-
-        let k0 = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(even0), odd0);
-        let k1 = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(even1), odd1);
-
-        let k0 = _mm256_min_epu32(k0, add(k0, p2));
-        let k1 = _mm256_min_epu32(k1, add(k1, p2));
-
-        let center0 = gt(sub(k0, gt(xq0, q_half)), p2_half);
-        let center1 = gt(sub(k1, gt(xq1, q_half)), p2_half);
-
-        let kc0 = sub(k0, and(center0, p2));
-        let kc1 = sub(k1, and(center1, p2));
-
-        store((&mut out.v[i..i+8]).try_into().unwrap(), kc0);
-        store((&mut out.v[i+8..i+16]).try_into().unwrap(), kc1);
+    // Four short passes through L1-resident rows instead of one loop: a fused
+    // iteration is one ~75-cycle dependency chain, and the scheduler then holds
+    // too few iterations to fill the ports (measured 25% slower). `r` holds
+    // r = (xq - t) mod q, later r - u; `w` holds w1 as i32; `out.v` holds kc
+    // until the last pass adds ve.
+    let mut r = MaybeUninit::<Poly32>::uninit();
+    let mut w = MaybeUninit::<Poly32>::uninit();
+    {
+        // Pass 1: CRT quotient kc and r; two independent short chains.
+        let c = c_load(&C_CRT_C);
+        let c_pinv = c_load(&C_CRT_C_PINV);
+        let p2 = c_load(&C_P2);
+        let p2_half = c_load(&C_P2_HALF);
+        let q_half = c_load(&C_Q_HALF);
+        let qv = c_load(&C_Q);
+        let round_q = c_load(&C_ROUND_Q);
+        for i in (0..256).step_by(8) {
+            let xq = load(row.xq[i..i+8].try_into().unwrap());
+            let xp = load(row.xp[i..i+8].try_into().unwrap());
+            store((&mut out.v[i..i+8]).try_into().unwrap(), crt_k(xq, xp, c, c_pinv, p2, p2_half, q_half));
+            // a = xq - t, |a| < 2^28.4. Subtracting round(a / 2^23) q, with
+            // t q = (t << 23) - (t << 13) + t (shorter latency than a
+            // multiply; equal modulo 2^32), leaves (-q, q); then add q to
+            // negatives (unsigned minimum).
+            let a = sub(xq, load(row.t[i..i+8].try_into().unwrap()));
+            let tq = sar::<23>(add(a, round_q));
+            let x = add(sub(a, _mm256_slli_epi32::<23>(tq)), sub(_mm256_slli_epi32::<13>(tq), tq));
+            // SAFETY: i + 8 <= 256 coefficients of the aligned scratch row.
+            unsafe {
+                _mm256_store_si256(r.as_mut_ptr().cast::<i32>().add(i).cast(), _mm256_min_epu32(x, add(x, qv)))
+            };
+        }
     }
-
-    // Stage 2: Reduction, decompose, hint, centered u, exact ve, v = kc + ve, bounds.
+    // SAFETY: pass 1 wrote all 256 coefficients.
+    let r = unsafe { r.assume_init_mut() };
+    {
+        // Pass 2: Decompose and UseHint (gamma2 = (q-1)/88), w1 in [0, 43].
+        let off127 = c_load(&C_OFF127);
+        let mul11275 = c_load(&C_MUL11275);
+        let shift128 = c_load(&C_SHIFT128);
+        let max43 = c_load(&C_MAX43);
+        let alpha_93 = c_load(&C_ALPHA_93);
+        let one = c_load(&C_ONE);
+        let q_half = c_load(&C_Q_HALF);
+        let mod44 = c_load(&C_MOD44);
+        for i in (0..256).step_by(8) {
+            let f = load(r[i..i+8].try_into().unwrap());
+            let hint = bytes(row.h[i..i+8].try_into().unwrap());
+            let hi = shr::<7>(add(f, off127));
+            let hi = _mm256_mulhrs_epi16(_mm256_mulhi_epu16(hi, mul11275), shift128);
+            let hi = andnot(gt(hi, max43), hi);
+            let lo = sub(f, times_alpha_with(hi, alpha_93));
+            let neg = or(gt(one, lo), gt(lo, q_half));
+            // hi + 1 or hi - 1 with a hint (in [-1, 44]), wrapped into [0, 43].
+            let x = add(hi, sub(_mm256_xor_si256(hint, neg), neg));
+            let x = _mm256_min_epu32(x, add(x, mod44));
+            let x = _mm256_min_epu32(x, sub(x, mod44));
+            // SAFETY: i + 8 <= 256 coefficients of the aligned scratch row.
+            unsafe { _mm256_store_si256(w.as_mut_ptr().cast::<i32>().add(i).cast(), x) };
+        }
+    }
+    // SAFETY: pass 2 wrote all 256 coefficients.
+    let w = unsafe { w.assume_init_ref() };
+    let qinv32 = c_load(&C_QINV32);
+    let b_q = c_load(&C_B_Q);
+    let b_v = c_load(&C_B_V);
     let mut bad_q = splat(0);
     let mut bad_u = splat(0);
     let mut bad_v = splat(0);
-
-    let qv = c_load(&C_Q);
-    let round_q = c_load(&C_ROUND_Q);
-    let off127 = c_load(&C_OFF127);
-    let mul11275 = c_load(&C_MUL11275);
-    let shift128 = c_load(&C_SHIFT128);
-    let max43 = c_load(&C_MAX43);
-    let alpha_93 = c_load(&C_ALPHA_93);
-    let one = c_load(&C_ONE);
-    let mod44 = c_load(&C_MOD44);
-    let neg_q_half = c_load(&C_NEG_Q_HALF);
-    let qinv32 = c_load(&C_QINV32);
-    let b_q = c_load(&C_B_Q);
-    let b_u = c_load(&C_B_U);
-    let b_v = c_load(&C_B_V);
-
+    {
+        // Pass 3: u = centred (r - 2 gamma2 w1) from (-q, q); w1 bytes.
+        let alpha_93 = c_load(&C_ALPHA_93);
+        let qv = c_load(&C_Q);
+        let q_half = c_load(&C_Q_HALF);
+        let neg_q_half = c_load(&C_NEG_Q_HALF);
+        let b_u = c_load(&C_B_U);
+        for i in (0..256).step_by(8) {
+            let rv = load(r[i..i+8].try_into().unwrap());
+            let wv = load(w[i..i+8].try_into().unwrap());
+            let wa = times_alpha_with(wv, alpha_93);
+            let u = sub(rv, wa);
+            let u = sub(u, and(gt(u, q_half), qv));
+            let u = add(u, and(gt(neg_q_half, u), qv));
+            bad_u = _mm256_max_epu32(bad_u, add(u, b_u));
+            store((&mut out.u[i..i+8]).try_into().unwrap(), u);
+            store((&mut r[i..i+8]).try_into().unwrap(), add(wa, u));
+            put_bytes((&mut out.w1[i..i+8]).try_into().unwrap(), wv);
+        }
+    }
+    // Pass 4: e = (xq - t) - (2 gamma2 w1 + u), |e| < 2^28.4; ve = e / q exact
+    // when q divides e (QINV32 = q^-1 mod 2^32); v = kc + ve.
     for i in (0..256).step_by(8) {
-        let xq = load(row.xq[i..i+8].try_into().unwrap());
-        let t = load(row.t[i..i+8].try_into().unwrap());
-        let hint = bytes(row.h[i..i+8].try_into().unwrap());
-        let kc = load(out.v[i..i+8].try_into().unwrap());
-
-        // Reduction modulo q of (xq - t)
-        let a = sub(xq, t);
-        let r = sub(a, mul(sar::<23>(add(a, round_q)), qv));
-        let r = _mm256_min_epu32(r, add(r, qv));
-
-        // Decompose / Hint for gamma2 = (q-1)/88
-        let hi = shr::<7>(add(r, off127));
-        let hi = _mm256_mulhrs_epi16(_mm256_mulhi_epu16(hi, mul11275), shift128);
-        let hi = andnot(gt(hi, max43), hi);
-
-        let lo = sub(r, times_alpha_with(hi, alpha_93));
-        let neg = or(gt(one, lo), gt(lo, q_half));
-        let w = add(hi, sub(_mm256_xor_si256(hint, neg), neg));
-        let w = _mm256_min_epu32(w, add(w, mod44));
-        let w = _mm256_min_epu32(w, sub(w, mod44));
-
-        let wa = times_alpha_with(w, alpha_93);
-        let u = sub(r, wa);
-        let u = sub(u, and(gt(u, q_half), qv));
-        let u = add(u, and(gt(neg_q_half, u), qv));
-
-        let e = sub(sub(a, wa), u);
+        let a = sub(load(row.xq[i..i+8].try_into().unwrap()), load(row.t[i..i+8].try_into().unwrap()));
+        let e = sub(a, load(r[i..i+8].try_into().unwrap()));
         let ve = mul(e, qinv32);
-        let v = add(kc, ve);
-
+        let v = add(load(out.v[i..i+8].try_into().unwrap()), ve);
         bad_q = _mm256_max_epu32(bad_q, add(ve, b_q));
-        bad_u = _mm256_max_epu32(bad_u, add(u, b_u));
         bad_v = _mm256_max_epu32(bad_v, add(v, b_v));
-
-        store((&mut out.u[i..i+8]).try_into().unwrap(), u);
         store((&mut out.v[i..i+8]).try_into().unwrap(), v);
-        put_bytes((&mut out.w1[i..i+8]).try_into().unwrap(), w);
     }
 
     let exceeds = |acc: V, bound: i32| {

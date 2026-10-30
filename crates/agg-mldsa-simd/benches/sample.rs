@@ -9,8 +9,15 @@ mod common;
 
 use agg_mldsa_simd::dispatch::{Backend, Engine};
 use agg_mldsa_simd::params::Q;
-use agg_mldsa_simd::poly::{Block, Poly32, RejState};
+use agg_mldsa_simd::poly::{self, Block, Poly32, RejState};
+use agg_mldsa_simd::{ExpandedA, Sink, XofJob};
 use std::hint::black_box;
+#[allow(dead_code)]
+#[path = "../src/keccak/avx2.rs"]
+mod keccak_avx2;
+#[allow(dead_code)]
+#[path = "../src/keccak/lanes.rs"]
+mod lanes;
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
@@ -207,7 +214,192 @@ unsafe fn bench_vbmi_step<const COMPRESS_STORE: bool>(block: &Block, st: &mut Re
     ctr >= 256
 }
 
+/// Counts down a fixed number of blocks per job.
+struct CountSink([u8; 16]);
+impl Sink for CountSink {
+    fn block(&mut self, job: usize, _: &Block, _: usize) -> bool {
+        self.0[job] -= 1;
+        self.0[job] == 0
+    }
+}
+
+/// Per-step TSC ticks of one key's AVX2 ExpandA (16 polynomials, 20 four-way
+/// permutations), each step next to its pq-crystals counterpart.
+#[cfg(cref)]
+fn expand_steps() {
+    let Some(e) = Engine::new(Backend::Avx2) else {
+        return;
+    };
+    let row = |name: &str, r: f64, c: f64| {
+        println!("{name:<28} {r:>10.1} {c:>10.1} {:>8.3}", r / c);
+    };
+    // Rust and C trials alternate, as in the gate harness.
+    let pair = |name: &str, mut rf: &mut dyn FnMut(), mut cf: &mut dyn FnMut()| {
+        for _ in 0..300 {
+            rf();
+            cf();
+        }
+        let time = |f: &mut dyn FnMut()| {
+            let start = common::start_tsc();
+            for _ in 0..common::CALLS_PER_TRIAL {
+                f();
+            }
+            (common::end_tsc() - start) as f64 / common::CALLS_PER_TRIAL as f64
+        };
+        let (mut rs, mut cs) = (Vec::new(), Vec::new());
+        for i in 0..common::NUM_TRIALS {
+            if i % 2 == 0 {
+                rs.push(time(&mut rf));
+                cs.push(time(&mut cf));
+            } else {
+                cs.push(time(&mut cf));
+                rs.push(time(&mut rf));
+            }
+        }
+        rs.sort_by(f64::total_cmp);
+        cs.sort_by(f64::total_cmp);
+        row(name, rs[rs.len() / 2], cs[cs.len() / 2]);
+    };
+    println!(
+        "{:<28} {:>10} {:>10} {:>8}",
+        "AVX2 ExpandA step (per key)", "rust", "c", "ratio"
+    );
+    let rho = [0x42u8; 32];
+    let mut st = lanes::State([[0u64; 4]; 25]);
+    let mut cs = [0u64; 100];
+    pair(
+        "20 permutations",
+        &mut || {
+            for _ in 0..20 {
+                // SAFETY: AVX2 was detected above.
+                unsafe { keccak_avx2::permute(black_box(&mut st)) };
+            }
+        },
+        &mut || {
+            for _ in 0..20 {
+                agg_mldsa_cref::f1600x4(black_box(&mut cs));
+            }
+        },
+    );
+    let mut st = lanes::State([[0u64; 4]; 25]);
+    let mut cs = [0u64; 100];
+    let mut lane_bufs = [[0u8; 848]; 4];
+    let mut buf = vec![[0u8; 840]; 4];
+    pair(
+        "20 squeezes",
+        &mut || {
+            for k in 0..20 {
+                // SAFETY: AVX2 was detected above.
+                unsafe {
+                    keccak_avx2::permute(&mut st);
+                    keccak_avx2::extract_at(&st, black_box(&mut lane_bufs), 168 * (k % 5));
+                }
+            }
+        },
+        &mut || {
+            for _ in 0..4 {
+                let [b0, b1, b2, b3] = &mut buf[..] else {
+                    unreachable!()
+                };
+                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs);
+                black_box(&buf);
+            }
+        },
+    );
+    let nonces: [[u8; 2]; 16] = core::array::from_fn(|i| [(i % 4) as u8, (i / 4) as u8]);
+    let jobs: Vec<XofJob> = nonces
+        .iter()
+        .map(|n| XofJob {
+            xof: agg_mldsa_simd::Xof::Shake128,
+            input: [&rho, n, &[], &[]],
+        })
+        .collect();
+    let inputs: [[u8; 34]; 4] = core::array::from_fn(|s| {
+        let mut x = [0u8; 34];
+        x[..32].copy_from_slice(&rho);
+        x[32] = s as u8;
+        x
+    });
+    pair(
+        "scheduler 16 x 5 / absorb+sq",
+        &mut || {
+            let mut sink = CountSink([5; 16]);
+            e.run_xof(black_box(&jobs), &mut sink);
+        },
+        &mut || {
+            for _ in 0..4 {
+                agg_mldsa_cref::shake128x4_absorb_once(
+                    &mut cs, &inputs[0], &inputs[1], &inputs[2], &inputs[3],
+                );
+                let [b0, b1, b2, b3] = &mut buf[..] else {
+                    unreachable!()
+                };
+                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs);
+                black_box(&buf);
+            }
+        },
+    );
+    let mut rng = SimpleRng::new(7);
+    let mut five = [Block::zero(); 5];
+    let mut c840 = [0u8; 848];
+    for (i, b) in five.iter_mut().enumerate() {
+        rng.fill_bytes(&mut b.bytes[..168]);
+        c840[168 * i..168 * (i + 1)].copy_from_slice(&b.bytes[..168]);
+    }
+    let mut rs = RejState::new();
+    let mut r = [0i32; 256];
+    pair(
+        "16 rejection samplings",
+        &mut || {
+            for _ in 0..16 {
+                run_rust_rej(&e, &five, &mut rs);
+            }
+        },
+        &mut || {
+            for _ in 0..16 {
+                agg_mldsa_cref::rej_uniform_avx(black_box(&mut r), &c840);
+            }
+        },
+    );
+    let mut p = Poly32::zero();
+    let mut pc = Poly32::zero();
+    pair(
+        "16 order maps",
+        &mut || {
+            for _ in 0..16 {
+                e.order_from_fips(black_box(&mut p));
+            }
+        },
+        &mut || {
+            for _ in 0..16 {
+                agg_mldsa_cref::nttunpack_avx(black_box(&mut pc.0));
+            }
+        },
+    );
+    let mut out = ExpandedA::zero();
+    let mut mat = [[[0i32; 256]; 4]; 4];
+    pair(
+        "complete ExpandA",
+        &mut || {
+            e.expand_a_many(
+                black_box(std::slice::from_ref(&rho)),
+                std::slice::from_mut(&mut out),
+            );
+            black_box(&out);
+        },
+        &mut || {
+            agg_mldsa_cref::polyvec_matrix_expand(black_box(&mut mat), &rho);
+            black_box(&mat);
+        },
+    );
+}
+
 fn main() {
+    #[cfg(cref)]
+    if std::env::var_os("EXPANDA_STEPS").is_some() && !std::env::args().any(|a| a == "--gate") {
+        expand_steps();
+        return;
+    }
     common::print_system_info();
     let c_avail = cfg!(cref) && agg_mldsa_cref::available();
     if !c_avail {

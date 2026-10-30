@@ -124,6 +124,68 @@ pub(crate) fn extract(state: &State<4>, blocks: &mut [Block; 4], wide: u8) {
     }
 }
 
+/// Writes the 168 rate bytes of lane `i` to `out[i][off..off + 168]` (all
+/// four lanes SHAKE128), so consecutive blocks of a lane end up contiguous.
+///
+/// # Panics
+/// If `off + 168 > N`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+pub(crate) fn extract_at<const N: usize>(state: &State<4>, out: &mut [[u8; N]; 4], off: usize) {
+    assert!(off + 168 <= N);
+    let s = &state.0;
+    let [o0, o1, o2, o3] = out;
+    let rows = [
+        o0.as_mut_ptr(),
+        o1.as_mut_ptr(),
+        o2.as_mut_ptr(),
+        o3.as_mut_ptr(),
+    ];
+    for t in 0..5 {
+        let (a, b, c, d) = (
+            load(&s[4 * t]),
+            load(&s[4 * t + 1]),
+            load(&s[4 * t + 2]),
+            load(&s[4 * t + 3]),
+        );
+        let t0 = _mm256_unpacklo_epi64(a, b);
+        let t1 = _mm256_unpackhi_epi64(a, b);
+        let t2 = _mm256_unpacklo_epi64(c, d);
+        let t3 = _mm256_unpackhi_epi64(c, d);
+        let at = off + 32 * t;
+        // SAFETY: at + 32 <= off + 160 <= N bytes of each row.
+        unsafe {
+            _mm256_storeu_si256(
+                rows[0].add(at).cast(),
+                _mm256_permute2x128_si256::<0x20>(t0, t2),
+            );
+            _mm256_storeu_si256(
+                rows[1].add(at).cast(),
+                _mm256_permute2x128_si256::<0x20>(t1, t3),
+            );
+            _mm256_storeu_si256(
+                rows[2].add(at).cast(),
+                _mm256_permute2x128_si256::<0x31>(t0, t2),
+            );
+            _mm256_storeu_si256(
+                rows[3].add(at).cast(),
+                _mm256_permute2x128_si256::<0x31>(t1, t3),
+            );
+        }
+    }
+    let w20 = load(&s[20]);
+    let lo = _mm_castsi128_pd(_mm256_castsi256_si128(w20));
+    let hi = _mm_castsi128_pd(_mm256_extracti128_si256::<1>(w20));
+    // SAFETY: bytes off + 160 .. off + 168 <= N of each row.
+    unsafe {
+        _mm_storel_pd(rows[0].add(off + 160).cast(), lo);
+        _mm_storeh_pd(rows[1].add(off + 160).cast(), lo);
+        _mm_storel_pd(rows[2].add(off + 160).cast(), hi);
+        _mm_storeh_pd(rows[3].add(off + 160).cast(), hi);
+    }
+}
+
 /// Zeroes the columns of `lanes`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]

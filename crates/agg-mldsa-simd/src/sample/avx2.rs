@@ -92,6 +92,72 @@ pub(crate) unsafe fn rej_uniform(block: &Block, st: &mut RejState) -> bool {
     ctr >= 256
 }
 
+/// Rejection sampling of `nblocks` consecutive 168-byte rate blocks straight
+/// into a polynomial.
+///
+/// Continues from `ctr` accepted coefficients and returns the new count (at
+/// most 256) and the number of blocks read up to the candidate that completed
+/// the polynomial (`nblocks` if it is still open). As in pq-crystals
+/// `rej_uniform_avx`, the 8-wide steps run while a full 8-lane store still
+/// fits (`ctr <= 248`); the remaining candidates are taken one at a time, so no
+/// store passes index 255. Steps of 24 bytes never straddle a block, so the
+/// accepted coefficients and block counts equal those of [`rej_uniform`]
+/// applied block by block.
+///
+/// # Panics
+/// If `bytes` is shorter than `168 nblocks + 8` (the last step loads 32 bytes).
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+pub(crate) fn rej_uniform_into(
+    bytes: &[u8],
+    nblocks: usize,
+    out: &mut [i32; 256],
+    mut ctr: usize,
+) -> (usize, usize) {
+    let len = 168 * nblocks;
+    assert!(bytes.len() >= len + 8);
+    let bound = _mm256_set1_epi32(Q);
+    let mask = _mm256_set1_epi32(0x7FFFFF);
+    #[rustfmt::skip]
+    let idx8 = _mm256_set_epi8(
+        -1, 15, 14, 13, -1, 12, 11, 10,
+        -1, 9, 8, 7, -1, 6, 5, 4,
+        -1, 11, 10, 9, -1, 8, 7, 6,
+        -1, 5, 4, 3, -1, 2, 1, 0,
+    );
+    let mut pos = 0;
+    while pos < len && ctr <= 248 {
+        // SAFETY: pos <= len - 24, so the 32-byte load ends at len + 8 <= bytes.len().
+        let mut d = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(pos).cast()) };
+        d = _mm256_permute4x64_epi64(d, 0x94);
+        d = _mm256_shuffle_epi8(d, idx8);
+        d = _mm256_and_si256(d, mask);
+        let good = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_sub_epi32(d, bound))) as usize;
+        // SAFETY: good < 256 indexes the 256-entry table of 8-byte rows.
+        let lut = unsafe { _mm_loadl_epi64(IDXLUT.as_ptr().add(good).cast()) };
+        d = _mm256_permutevar8x32_epi32(d, _mm256_cvtepu8_epi32(lut));
+        // SAFETY: ctr <= 248, so the 8 stored lanes end at index 255 or before.
+        unsafe { _mm256_storeu_si256(out.as_mut_ptr().add(ctr).cast(), d) };
+        ctr += good.count_ones() as usize;
+        pos += 24;
+    }
+    while pos < len && ctr < 256 {
+        let b = &bytes[pos..pos + 3];
+        let x = (i32::from(b[0]) | i32::from(b[1]) << 8 | i32::from(b[2]) << 16) & 0x7FFFFF;
+        if x < Q {
+            out[ctr] = x;
+            ctr += 1;
+        }
+        pos += 3;
+    }
+    let used = if ctr == 256 {
+        pos.div_ceil(168)
+    } else {
+        nblocks
+    };
+    (ctr, used)
+}
+
 /// Decodes 4 polynomials of response vector z from 2,304 packed bytes in AVX2.
 ///
 /// Unpacks 18-bit signed coefficients into standard representation `GAMMA1 - raw_bits`.
