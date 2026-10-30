@@ -1,4 +1,6 @@
 //! Backend-independent batching over the engine's transform and sponge kernels.
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 pub use crate::poly::ExpandedA;
 use crate::poly::{Block, Challenge39, Poly32, RejState};
 use crate::{
@@ -96,6 +98,14 @@ impl Engine {
     /// Expands seeds into sampled matrix entries and their consumed block counts.
     pub fn expand_a_many(&self, rhos: &[[u8; 32]], out: &mut [ExpandedA]) {
         assert_eq!(rhos.len(), out.len());
+        #[cfg(target_arch = "x86_64")]
+        if self.backend() == crate::dispatch::Backend::Avx2 {
+            for (rho, out) in rhos.iter().zip(out.iter_mut()) {
+                // SAFETY: an AVX2 engine exists only if AVX2 and POPCNT were detected.
+                unsafe { avx2::expand_a(rho, out) };
+            }
+            return;
+        }
         // Bound scratch memory independently of the caller's batch size.
         for (rhos, out) in rhos.chunks(8).zip(out.chunks_mut(8)) {
             let suffix: [[u8; 2]; 16] = std::array::from_fn(|i| [(i % 4) as u8, (i / 4) as u8]);
