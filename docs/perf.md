@@ -19,7 +19,7 @@ proof-of-work nonces of wire version 2/3.
 | P5 stage parity tables built while the Flock span is proven | done |
 | lookup tree build (fast product, parallel fills); stage-3 main-stack reduction on one lane | done (related to P2/P4, not the coded bottom session of P2) |
 | instance `T` reused in the witness; vectorized `public_t` | done |
-| P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default half the global pool); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
+| P1 overlap the Flock span with the lookup and stages | done (deviation K22): the Flock proofs at a join after stage 3, proven on their own pool (`AGG_FLOCK_THREADS`, default ceil(3/8 of the global pool)); composition argument in `docs/soundness.md` 12. Cloud dry run at 32K: -1.11 s (pool 16) and -1.15 s (pool 8). Local 8K (measured, direction): -0.93 / -1.03 s, prover peak +0.8 to +1.1 GiB; pool sweep at 8K: 4 / 8 / 15 threads 6.03 / 6.37 / 6.76 s, a rerun: 4 / 8 threads 6.34 / 6.35 s against 7.31 s without the fork |
 | W1 keep the event-2 Flock witness of a one-part batch until the join (Section 9) | done; cloud 32K: -0.66 s (Section 12) |
 | B inline Flock's scalar GF(2^128) multiply via a vendored `flock-field` (Section 10) | done; cloud 32K: -0.26 s prover, Flock verifier 29.0 -> 22.6 ms (Section 12) |
 | A move the one-vCPU windows off the serial path (Section 11) | done; cloud 32K: -0.21 s (Section 12) |
@@ -833,7 +833,7 @@ verifier run accepts.
 
 ## Pool schedule presets
 
-`AGG_SCHED_PRESET=auto` (default) chooses a Flock pool size when the available logical
+`AGG_SCHED_PRESET=auto` (opt-in) chooses a Flock pool size when the available logical
 CPU count and Rayon pool size match a row below. `off` restores the 3/8 default;
 `AGG_FLOCK_THREADS` overrides either choice. Flock and PIOP pools remain additive.
 
@@ -860,3 +860,5 @@ alternating four launches with one warmup and one measured run each. Mean fork w
 1,427.0 / 1,389.0 ms, Flock proofs 1,155.1 / 989.7 ms, PIOP branch 1,426.8 /
 1,388.9 ms, and total prove 2,725.1 / 2,723.3 ms (0.999x). These 4K results are
 directional; the 32K cloud sweep remains open.
+
+The default Flock pool remains ceil(3/8 of the Rayon pool). The optional preset has not been measured on c4d and awaits the cloud sweep.
