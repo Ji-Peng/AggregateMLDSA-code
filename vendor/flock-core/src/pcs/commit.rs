@@ -464,6 +464,7 @@ fn lane_blocked_row(data: &[F128], lanes: usize, n: usize, pos: usize) -> Vec<F1
 impl Drop for ProverData {
     fn drop(&mut self) {
         give_f128(take(&mut self.codeword));
+        crate::scratch::give_hashes(take(&mut self.merkle_tree));
     }
 }
 
@@ -958,20 +959,36 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
         let t_ntt = std::time::Instant::now();
         let ntt = AdditiveNttF128::standard(params.k_code());
         let t_ntt = t_ntt.elapsed();
-        // `vec!` of zero arrays takes the calloc path: lazy zero pages, first touched by
-        // the pass-2 tasks that write the leaves.
+        // The tree comes from the pool when an earlier commit's tree was given back (every node
+        // is rewritten: leaves by pass 2, parents by the inner levels), so its pages are
+        // resident. A fresh tree and a codeword that missed the pool are asked for huge pages
+        // and left lazy, as before: the pass-2 tasks and the inner levels fault them in, and
+        // writing them up front costs more than it saves. `FLOCK_TREE_PREFAULT=0` keeps the
+        // per-commit lazily zeroed `vec!` and does not recycle trees.
         let t_tree = std::time::Instant::now();
-        let mut tree: Vec<Hash> = vec![[0u8; 32]; 2 * n - 1];
+        let pooled = std::env::var("FLOCK_TREE_PREFAULT").as_deref() != Ok("0");
+        let (mut tree, tree_hit) = if pooled {
+            crate::scratch::take_hashes(2 * n - 1)
+        } else {
+            (vec![[0u8; 32]; 2 * n - 1], false)
+        };
+        if !tree_hit {
+            crate::scratch::advise_hugepage(&mut tree);
+        }
+        if !pool_hit {
+            crate::scratch::advise_hugepage(&mut codeword);
+        }
         let t_tree = t_tree.elapsed();
         if timing {
             eprintln!(
-                "[commit-timing] set-up (before pass 1): total {:.2} ms = dead-lane scan {:.2} (live {live} of {t}) + hasher {:.2} + codeword take {:.2} (pool {}) + ntt tables {:.2} + tree alloc {:.2} | faults {} | THP {}",
+                "[commit-timing] set-up (before pass 1): total {:.2} ms = dead-lane scan {:.2} (live {live} of {t}) + hasher {:.2} + codeword take {:.2} (pool {}) + ntt tables {:.2} + tree {} {:.2} | faults {} | THP {}",
                 t_setup.elapsed().as_secs_f64() * 1e3,
                 t_scan.as_secs_f64() * 1e3,
                 (t_hasher - t_scan).as_secs_f64() * 1e3,
                 t_take.as_secs_f64() * 1e3,
                 if pool_hit { "hit" } else { "MISS" },
                 t_ntt.as_secs_f64() * 1e3,
+                if tree_hit { "pool hit" } else { "fresh" },
                 t_tree.as_secs_f64() * 1e3,
                 lane_blocked_faults() - faults_setup,
                 thp_state()
@@ -1715,6 +1732,42 @@ mod tests {
                 assert_eq!(pd_ref.merkle_tree, pd_grid.merkle_tree, "tree diverged");
             }
         }
+    }
+
+    /// Micro-benchmark of the lane-major commit at a 32K-like shape per lane group (a message
+    /// of `2^FLOCK_MICRO_LOG_D` words per lane, four live lanes, rate 1/4), steady state: each
+    /// commit's data is dropped before the next, so the scratch pools are warm. Prints the best
+    /// of `FLOCK_MICRO_REPS` (default 5) after one warm-up commit. Run single-threaded:
+    /// `RAYON_NUM_THREADS=1 cargo test --release -- --ignored --nocapture commit_micro_bench`.
+    #[test]
+    #[ignore = "micro-benchmark"]
+    fn commit_micro_bench() {
+        let env = |k: &str, dflt: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(dflt);
+        let (log_d, reps) = (env("FLOCK_MICRO_LOG_D", 21), env("FLOCK_MICRO_REPS", 5));
+        let log_batch_size = 2;
+        let m = log_d + log_batch_size + LOG_PACKING;
+        let params = PcsParams {
+            m,
+            log_inv_rate: 2,
+            log_batch_size,
+            profile: Default::default(),
+            num_lanes: Some(4),
+            merkle_hash: Default::default(),
+        };
+        let mut rng = Rng::new(0xBE4C_0001);
+        let q = rng.f128_vec(1usize << (m - LOG_PACKING));
+        let mut best = f64::MAX;
+        for rep in 0..=reps {
+            let t = std::time::Instant::now();
+            let (c, pd) = commit_lane_major(&q, &params);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            std::hint::black_box(&c);
+            drop(pd);
+            if rep > 0 {
+                best = best.min(ms);
+            }
+        }
+        eprintln!("[micro] commit_lane_major log_d={log_d} 4 lanes: best of {reps} = {best:.1} ms");
     }
 
     /// The lane-blocked commit of random lane-major stacks at m = 22 and 24 (several
