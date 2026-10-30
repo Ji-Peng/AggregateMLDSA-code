@@ -10,7 +10,9 @@ mod rotated_accum;
 mod windowed_accum;
 
 pub use decompose_fold_partitioned::balanced_ring_decompose_fold_partitioned;
-pub(crate) use decompose_fold_partitioned::cached_digit_decompose_fold_partitioned;
+pub(crate) use decompose_fold_partitioned::{
+    cached_digit_decompose_fold_partitioned, cached_i16_decompose_fold_partitioned,
+};
 pub(crate) use decompose_fold_partitioned::packed_tight_digit_fold_partitioned;
 
 use crate::kernels::linear::try_centered_i8;

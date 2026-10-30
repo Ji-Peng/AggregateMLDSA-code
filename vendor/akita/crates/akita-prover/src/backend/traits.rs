@@ -21,7 +21,7 @@ where
     type CommitmentHandle: super::CommitmentHandleMetadata + Clone + Send + Sync + 'static;
     type EorPreparationHandle: Send;
     type EorSessionHandle: Send;
-    type PreparedOpeningHandle: Send + 'static;
+    type PreparedOpeningHandle: Send + Sync + 'static;
     type CommitmentMaterialHandle: crate::backend::CommitmentRelationMaterial<F> + Send + 'static;
     type AcceptedFoldHandle: AcceptedFoldHandle;
     type AcceptedTerminalFoldHandle: Send + 'static;

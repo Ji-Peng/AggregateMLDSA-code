@@ -203,6 +203,47 @@ impl<const D: usize> FoldSource<D> for CachedDigits<'_, D> {
     }
 }
 
+/// Signed-16 digit planes kept ring-major by the source.
+struct CachedDigits16<'a, const D: usize> {
+    digit_planes: &'a [[i16; D]],
+    num_rings: usize,
+    digit_abs_bound: u64,
+}
+
+impl<const D: usize> FoldSource<D> for CachedDigits16<'_, D> {
+    type Scratch = ();
+    type Planes<'a>
+        = DigitPlanes<'a, D>
+    where
+        Self: 'a;
+
+    fn num_rings(&self) -> usize {
+        self.num_rings
+    }
+
+    fn digit_abs_bound(&self) -> u64 {
+        self.digit_abs_bound
+    }
+
+    fn i8_digit_span(&self) -> Option<I8DigitSpan> {
+        // The window-gathered narrow kernel reads i8 storage only.
+        None
+    }
+
+    fn scratch(&self, _num_digits: usize) {}
+
+    #[inline]
+    fn digit_planes<'a>(
+        &'a self,
+        ring_idx: usize,
+        num_digits: usize,
+        _scratch: &'a mut (),
+    ) -> Self::Planes<'a> {
+        let start = ring_idx * num_digits;
+        DigitPlanes::I16(&self.digit_planes[start..start + num_digits])
+    }
+}
+
 struct LiveRings<'a, F: Field + CanonicalEncoding, const D: usize> {
     coeffs: &'a [CyclotomicRing<F, D>],
     params: &'a BalancedDecomposePow2Params<F>,
@@ -733,6 +774,31 @@ pub fn balanced_ring_decompose_fold_partitioned<F: Field + CanonicalEncoding, co
         challenges,
         num_positions_per_block,
         params.levels(),
+    )
+}
+
+/// Element-partitioned accumulation for predecomposed signed-16 digit planes.
+///
+/// The digits are already the balanced decomposition at `log_basis`; the bound
+/// only sizes the i16→i32 flush chunks, exactly as it does for live rings.
+pub(crate) fn cached_i16_decompose_fold_partitioned<const D: usize>(
+    digit_planes: &[[i16; D]],
+    challenges: &[SparseChallenge],
+    num_positions_per_block: usize,
+    log_basis: u32,
+) -> Result<Vec<[i32; D]>, AkitaError> {
+    let digit_abs_bound = 1_u64
+        .checked_shl(log_basis.saturating_sub(1))
+        .unwrap_or(u64::MAX);
+    element_partitioned_decompose_fold(
+        CachedDigits16 {
+            digit_planes,
+            num_rings: digit_planes.len(),
+            digit_abs_bound,
+        },
+        challenges,
+        num_positions_per_block,
+        1,
     )
 }
 

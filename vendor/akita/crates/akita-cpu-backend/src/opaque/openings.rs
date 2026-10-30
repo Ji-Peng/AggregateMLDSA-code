@@ -6,6 +6,7 @@ use akita_error::AkitaError;
 use akita_params::*;
 use akita_serialization::AkitaSerialize;
 use akita_types::*;
+use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, ExtField, Field, Fold, MulBaseUnreduced, Ring, Unreduced};
 use std::sync::Arc;
 
@@ -42,8 +43,10 @@ where
         session: &Self::ProofSessionHandle,
         requests: &[GroupOpeningRequest<'_, E, Self::CommitmentHandle, Self::WitnessHandle>],
     ) -> Result<Vec<PreparedGroupOpening<E, Self::PreparedOpeningHandle>>, AkitaError> {
-        requests
-            .iter()
+        // Groups are independent until the caller absorbs their messages: each
+        // opening owns its source, plan and binding. Running them together keeps
+        // every group's block tasks in flight instead of serializing the groups.
+        cfg_iter!(requests)
             .map(|request| {
                 let context = &request.context;
                 let source = request.source;

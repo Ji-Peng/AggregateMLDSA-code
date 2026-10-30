@@ -7,8 +7,8 @@ use super::poly::DensePoly;
 use crate::opaque::DecomposeFoldWitness;
 use crate::sources::poly_helpers::{
     balanced_ring_decompose_fold_chunked, balanced_ring_decompose_fold_partitioned,
-    cached_digit_decompose_fold_partitioned, sparse_mul_acc, SignedDigitBasis,
-    ValidatedSparseChallenges,
+    cached_digit_decompose_fold_partitioned, cached_i16_decompose_fold_partitioned,
+    sparse_mul_acc, SignedDigitBasis, ValidatedSparseChallenges,
 };
 use akita_algebra::ring::cyclotomic::BalancedDecomposePow2Params;
 use akita_algebra::CyclotomicRing;
@@ -45,6 +45,25 @@ where
         validate_digit_shape(num_digits, log_basis)?;
         let coeffs = self.ring_coeffs::<D>()?;
         let Some((planes, basis)) = self.digit_planes_for::<D>(num_digits, log_basis) else {
+            if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+                if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
+                    return chunk_ranges
+                        .iter()
+                        .map(|range| {
+                            let ring_start = range.start * num_positions_per_block;
+                            let ring_end =
+                                (range.end * num_positions_per_block).min(planes.len());
+                            let coefficients = cached_i16_decompose_fold_partitioned::<D>(
+                                &planes[ring_start.min(planes.len())..ring_end],
+                                &challenges[range.clone()],
+                                num_positions_per_block,
+                                log_basis,
+                            )?;
+                            Ok(DecomposeFoldWitness::from_centered_rows(coefficients))
+                        })
+                        .collect::<Result<Vec<_>, AkitaError>>();
+                }
+            }
             return balanced_ring_decompose_fold_chunked(
                 coeffs,
                 challenges,
@@ -223,6 +242,22 @@ where
             };
 
             return Ok(DecomposeFoldWitness::from_centered_rows(coeff_accum));
+        }
+
+        // A signed-16 mirror holds the single balanced digit of every live
+        // coefficient, so the probe reads 2 B/cell rather than the 8 B/cell
+        // field plane. The accumulation plan and flushing are the same as for
+        // the live-ring decomposition.
+        if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+            if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
+                let coeff_accum = cached_i16_decompose_fold_partitioned::<D>(
+                    planes,
+                    challenges,
+                    num_positions_per_block,
+                    log_basis,
+                )?;
+                return Ok(DecomposeFoldWitness::from_centered_rows(coeff_accum));
+            }
         }
 
         let centered_coeffs = {

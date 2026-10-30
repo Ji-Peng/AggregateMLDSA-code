@@ -25,7 +25,7 @@ pub struct GroupOpeningRequest<'a, E: Field, C, W> {
     pub plan: super::ValidatedRecursiveGroupOpeningPlan<'a, E>,
 }
 pub trait OpaqueOpeningKernel<F: Field + CanonicalEncoding, E: Field>:
-    ProverHandleFamily<F, E> + super::ProofScopeConsumer
+    ProverHandleFamily<F, E> + super::ProofScopeConsumer + Sync
 {
     /// Prepare every group, returning results in request order regardless of execution order.
     fn prepare_openings(

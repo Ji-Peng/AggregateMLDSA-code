@@ -14,6 +14,7 @@ use crate::opaque::{
 };
 use crate::opaque::{OpeningBatchKernel, OpeningFoldKernel, OpeningFoldOutput};
 use akita_error::AkitaError;
+use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, ExtField, Field, MulBaseUnreduced};
 
 impl<F, E, const D: usize> OpeningFoldKernel<DenseView<'_, F, D>, F, D> for CpuBackend<F, E>
@@ -125,18 +126,24 @@ where
         match plan {
             DecomposeFoldBatchPlan::Sparse { challenges, .. } => Ok(CpuFoldResponses::sparse(
                 aggregate_decompose_fold_witnesses::<D>(
-                    source
-                        .polys
-                        .iter()
-                        .zip(challenges.chunks_exact(challenges_per_poly))
-                        .map(|(poly, poly_challenges)| {
-                            poly.decompose_fold::<D>(
-                                poly_challenges,
-                                num_positions_per_block,
-                                num_digits,
-                                log_basis,
-                            )
-                        }),
+                    // The caches are built serially first, so no task can enter a
+                    // lazy slot build while the others are already running.
+                    {
+                        for poly in source.polys {
+                            poly.prime_digit_cache(D, num_digits, log_basis)?;
+                        }
+                        cfg_into_iter!(0..source.polys.len())
+                            .map(|index| {
+                                let start = index * challenges_per_poly;
+                                source.polys[index].decompose_fold::<D>(
+                                    &challenges[start..start + challenges_per_poly],
+                                    num_positions_per_block,
+                                    num_digits,
+                                    log_basis,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    },
                 )?,
             )),
             DecomposeFoldBatchPlan::SparseChunked {
@@ -184,9 +191,7 @@ where
     E: ExtField<F> + akita_types::FpExtEncoding<F> + MulBaseUnreduced<F>,
 {
     let point = fused_weights.point();
-    source
-        .polys
-        .iter()
+    cfg_iter!(source.polys)
         .map(|poly| {
             let rings = poly.ring_coeffs::<D>()?;
             // Dense roots authenticate the complete Boolean hypercube, so

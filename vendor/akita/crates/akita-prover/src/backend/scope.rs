@@ -17,7 +17,7 @@ impl ProofScopeId {
 /// Scope lifecycle implemented by an opaque prover consumer.
 pub trait ProofScopeConsumer {
     /// Backend-issued authority for one admitted proof lifetime.
-    type ProofSessionHandle: Send;
+    type ProofSessionHandle: Send + Sync;
 
     /// Finish a successfully completed scope.
     fn finish_scope(&self, session: &Self::ProofSessionHandle) -> Result<(), AkitaError>;

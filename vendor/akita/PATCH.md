@@ -49,8 +49,34 @@ instead of the 256 MiB field plane. The new unit test
 `dense_i16_mirror_commit_matches_coefficient_commit` compares both paths on two
 rings covering the full signed-16 interval.
 
-On the IFMA line, 8K local, two adjacent alternating pairs: event 1 898/765 ->
-620/692 ms, round 2 168/183 -> 100/155 ms, opening 1038/808 -> 736/796 ms,
-total 4552/4043 -> 3452/4007 ms (shared noisy box: direction only). The 1K
+## 3. Concurrent opening passes and a signed-16 probe cache
+
+`sources/dense/kernels.rs`: the packing pass iterates columns in parallel, and
+the sparse decompose-fold batch primes every digit cache serially before it
+decomposes the columns in parallel; both collect in column order.
+
+`sources/poly_helpers/decompose_fold_partitioned.rs` and its `mod.rs`:
+`CachedDigits16` and `cached_i16_decompose_fold_partitioned` run the existing
+element-partitioned accumulation over the signed-16 mirror. The challenge plan
+and the i16-to-i32 flush bounds are the same as for live rings.
+
+`sources/dense/ops.rs`: the sparse and chunked fold probes read the signed-16
+mirror when the source has one and the basis is wider than `i8`, instead of
+decomposing the 8 B/cell field plane on every nonce.
+
+`opaque/openings.rs`: `prepare_openings` runs the groups concurrently.
+
+`akita-prover/src/protocol/fold_grind.rs`: challenges are still drawn in group
+order on the preview transcript, then the probes of one nonce run concurrently.
+A rejected nonce now probes every group instead of stopping at the first, which
+is rare at the scheduled grind difficulty.
+
+`akita-prover/src/backend/{opening,scope,traits}.rs`: `OpaqueOpeningKernel` is
+`Sync`, and `ProofSessionHandle` and `PreparedOpeningHandle` are `Send + Sync`,
+so the parallel tasks can share the backend, the session and the prepared
+openings. No arithmetic or wire-format change.
+
+On the IFMA line, 8K local, two adjacent pairs: opening 1161/889 -> 975/716 ms,
+total 5208/4752 -> 4969/3767 ms (shared noisy box: direction only). The 1K
 aggregate is byte-identical under scalar and avx512 and under one and sixteen
 rayon threads.

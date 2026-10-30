@@ -19,6 +19,7 @@ use akita_types::GrindingReplay;
 use akita_types::GroupFoldChallenges;
 #[cfg(test)]
 use akita_types::OpeningFamily;
+use jolt_field::solinas::parallel::*;
 use jolt_field::Unreduced;
 use jolt_field::{CanonicalEncoding, Field, Ring};
 
@@ -249,9 +250,11 @@ where
     let site = akita_params::GrindingSite::FoldResponse { level };
     let (nonce, mut candidate_outputs) =
         first_jointly_accepted_nonce(max_grind_attempts, |nonce| {
-            let mut candidate_outputs = Vec::with_capacity(groups.len());
+            // Challenges are drawn in group order because each draw advances the
+            // preview transcript; the probes themselves read only their group.
+            let mut preview_state = grinding.preview_fold_response(site, nonce)?;
+            let mut prepared = Vec::with_capacity(groups.len());
             {
-                let mut preview_state = grinding.preview_fold_response(site, nonce)?;
                 let mut preview = PreviewFoldDraw::new(&mut preview_state);
                 for prepared_group in groups {
                     let group = &prepared_group.input;
@@ -269,6 +272,12 @@ where
                             )
                         })
                         .transpose()?;
+                    prepared.push((group, challenges, ranges, prepared_group.acceptance));
+                }
+            }
+            let outputs = cfg_iter!(prepared)
+                .map(|(group, challenges, ranges, acceptance)| {
+                    let challenges = challenges.clone();
                     let geometry = ranges
                         .as_deref()
                         .map_or(FoldProbeGeometry::Sparse, |chunk_ranges| {
@@ -289,7 +298,7 @@ where
                                 group.params.num_digits_inner(),
                                 group.params.log_basis_inner(),
                                 group.params.opening_method(),
-                                prepared_group.acceptance,
+                                *acceptance,
                             )?;
                             opening_ctx.backend().probe_opening_fold(
                                 context.proof_context(),
@@ -298,20 +307,23 @@ where
                             )
                         }
                     )?;
-                    let output = match outcome {
-                        FoldProbeOutcome::Rejected => return Ok(None),
+                    Ok(match outcome {
+                        FoldProbeOutcome::Rejected => None,
                         FoldProbeOutcome::Accepted {
                             fold_handle,
                             diagnostics,
-                        } => FoldProbeOutput {
+                        } => Some(FoldProbeOutput {
                             fold_handle,
                             challenges,
                             diagnostics,
-                        },
-                    };
-                    candidate_outputs.push(output);
-                }
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, AkitaError>>()?;
+            if outputs.iter().any(Option::is_none) {
+                return Ok(None);
             }
+            let candidate_outputs = outputs.into_iter().flatten().collect::<Vec<_>>();
             Ok(Some(candidate_outputs))
         })?;
 
