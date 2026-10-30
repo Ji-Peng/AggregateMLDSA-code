@@ -51,7 +51,7 @@ claim; the part and span seeds bind the digest of the event-6 record (K22). At m
 part's Flock buffers are alive: parts are committed one by one at event 2 (the cap and the
 sponge commit data are kept, K14) and rebuilt, proven and dropped one by one for the join.
 A batch of exactly one part (a span, or one part at `N <= 2^13`) keeps its committed witness
-from event 2 instead and proves it without a rebuild (lever W1, `docs/perf.md` Section 9).
+from event 2 instead and proves it without a rebuild (K14).
 
 Span (K16, `AggregatorConfig::span`, default on): a batch of more than one segment whose
 parts are whole segments is one tied part over all segments (one sponge instance of all `N`
@@ -75,6 +75,7 @@ over tampered round-1 bits).
 | key cache | `"AGGKCACH" \|\| version \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A as LE32)*`, entries checked on load |
 
 ```sh
+# Build the binary as described in ../README.md.
 A=target/release/agg
 taskset -c 0,1,3-15 $A keygen-batch --count 16 --seed 1 --out keys.bin
 taskset -c 0,1,3-15 $A sign-batch --keys keys.bin --count 256 --seed 1 --out records.bin
@@ -84,9 +85,10 @@ AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--ke
 ```
 
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
-`h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
+`h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`), `h-exact`
 (relation byte 1: the FIPS 204 bounds `|z| <= 130,993`, `|u| <= 190,465`, one more
-committed column). `aggregate` and `bench` prove the chosen relation
+committed column), or `h-fips` (relation byte 2, also the hint; the extracted witness
+is a FIPS 204 signature). `aggregate` and `bench` prove the chosen relation
 (`AggregatorConfig::relation`); `verify` verifies under the chosen relation
 (`AggregateVerifier::relation`) and rejects an aggregate whose header names another one
 ("the proof claims relation H-exact, the verifier expects H-u"), so verifying an H-exact
@@ -110,12 +112,19 @@ split) and of the last verifier runs, the median and the min prove time, the ver
 medians, all marked "(median of R, W warmup)", the prover's and the verifier's peak RSS
 over all runs (`VmHWM`, reset in
 between through `/proc/self/clear_refs`, which affects only the process's own accounting)
-and the aggregate bytes per signature with the size of every part. Benchmarks proper run on
-CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
+and the aggregate bytes per signature with the size of every part. Performance measurements and their machine labels are in [perf.md](perf.md).
+
+`AGG_MLDSA_SIMD=auto|scalar|avx2|avx512` selects the ML-DSA engine once per process.
+The default, `auto`, selects the best supported tier. An invalid or unsupported forced
+value fails at startup. Scalar is portable; AVX2 requires AVX2 and POPCNT; AVX-512 requires
+AVX512F/BW/VL, AVX2 and POPCNT. VBMI optionally accelerates AVX-512 rejection sampling;
+the `agg bench` header reports it as `avx512+vbmi`. This setting is independent of the
+Aerie field backend and the compile-time `avx512` feature. Aggregate and key-cache bytes
+are identical across engines.
 
 ## 3. Tests
 
-`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/{mode_a,cli}.rs`):
+`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,cli}.rs`):
 
 - unit: part tiling of every segment (also with an all-padded trailing segment), part seeds
   and span seeds, an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the
@@ -155,17 +164,4 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 - the binary: `keygen-batch`, `sign-batch`, `aggregate`, `verify` (uncached, with a new and
   a filled cache file, on other messages), usage errors, `bench`.
 
-## 4. Local measurements
-
-Relation sanity runs (revision `f526097`, CLMUL build `RUSTFLAGS="-C
-target-feature=+pclmulqdq"`, `agg bench --count 1024 --warmup 1 --reps 1 --flock-profile slim`,
-span on, CPUs 0,1,3-15 with `RAYON_NUM_THREADS=3` while a catalog generation ran with 3
-workers: single noisy runs, not benchmarks):
-
-| Relation | Aggregate | PIOP rounds and claims | Work nonces | Akita opening | Prove | Stage 2 / stage 3 | Verify uncached / cached |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| H-u | 522,138 B (509.9 B/sig) | 4,736 B | 391 B | 60,994 B | 2,901 ms | 67.5 / 181.1 ms | 352 / 296 ms |
-| H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
-
-Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
-with `16 (76 + 11 d_main)` at `d_main = 20` for both relations (8 + 31 and 7 + 32 claims).
+Performance measurements are in [perf.md](perf.md).
