@@ -60,6 +60,14 @@ def check(name,bases,signed,lo,hi,exhaustive=True):
 check("z",(16,16,16,16,4),True,-2**17,2**17-1)
 check("u",(16,16,16,16,8),True,-2**18,2**18-1)
 check("v",(16,)*6+(8,),True,-2**26,2**26-1,exhaustive=False)
+# Projection outputs k = K_0 + 2^16 K_1 + 2^32 K_2 + C_k with C_k = 2^31 + 2^15, a bijection
+# onto [-2^33, 2^33 - 1]; the digits of zero are (-2^15, -2^15, 0), as the encoder stores them.
+check("k",(2**16,2**16,4),True,-2**33,2**33-1,exhaustive=False)
+k0,k1,k2=-2**15,-2**15,0
+assert (layout((2**16,2**16,4),True)[2])==2**31+2**15
+assert k0+2**16*k1+2**32*k2+2**31+2**15==0
+assert -2**15<=k0<2**15 and -2**15<=k1<2**15 and -2<=k2<2
+print("k digits of 0",(k0,k1,k2),"C_k",2**31+2**15,"values",-2**33,"..",2**33-1)
 check("kappa1/2",(16,16,4),False,0,1023)
 check("kappa3",(16,16),False,0,255)
 check("b_z H-exact",(16,16,16,16,2),False,0,2**17-1)
@@ -72,7 +80,8 @@ def Q(b,P):
 for b in (4,6,8,16):
     print("Q",b,"exact on balanced alphabet",all((Q(b,Z*(Z+1))==0)==(-b//2<=Z<b//2) for Z in range(-4*b,4*b)))
 # (10) lifting bound with the digit ranges, and the v ceiling
-Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**26
+# |v|_c <= 2^34 from Lemma P (K24), so the quotient term is q 2^34, not q 2^26.
+Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**34
 print("Delta lift log2",round(math.log2(D),2),"<63:",D<2**63,"v ceiling log2",round(math.log2((2**63-D0)//q),2))
 # (11) committed elements per signature at N=2^15 (main 23 columns; D1 18; D2 24; D3 2)
 main=23*1024; d1=18*2**19/2**15; d2=24*2**15/2**15; d3=2*2**14/2**15
@@ -195,4 +204,4 @@ print("H-FIPS corner (q - gamma2, h = 0): sigma, L, delta, e =", -1, (q-g2)-(q-g
 # F4 and F5 merge into F45 = 2 e w1' + 43 e^2 - 43 e once e in {-1, 0, 1} (the PIOP's form).
 ok=all(((e*(e+1)*w==0) and (e*(e-1)*(w-43)==0))==(2*e*w+43*e*e-43*e==0) for e in (-1,0,1) for w in range(64))
 print("H-FIPS F45 equivalent to F4 and F5 for e in {-1,0,1}, w1' in [0,64):", ok)
-print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+122.5+1, "(H-u 12,288+122.5 = 12,410.5; 16 main columns, bridge and multiplicities 122.5, u_h 1)")
+print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+513.5, "(H-u 12,288+512 = 12,800; 16 main columns, bridge, multiplicities, projection digits and G_3's 11 zeros 512, plus 0.5 for G_3's twelfth zero polynomial and 1 for u_h)")
