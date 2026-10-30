@@ -2714,6 +2714,130 @@ pub fn induce_sumcheck_poly(
         table.into_iter().take(n_queries).collect()
     };
 
+    if std::env::var("FLOCK_INDUCE_CHUNK_LOG").as_deref() == Ok("0") {
+        return induce_sumcheck_poly_reference(
+            log_msg_cols,
+            sks_vks,
+            opened_rows,
+            v_challenges,
+            queries,
+            alpha,
+        );
+    }
+
+    let enforced_sum = opened_rows
+        .iter()
+        .zip(&alpha_pows)
+        .map(|(row, &ap)| {
+            let dot = row
+                .iter()
+                .zip(eq.iter())
+                .map(|(&r, &e)| r * e)
+                .fold(F128::ZERO, |a, v| a + v);
+            dot * ap
+        })
+        .fold(F128::ZERO, |a, v| a + v);
+
+    // Precompute inv_sks_vks once across all queries and threads.
+    let inv_sks_vks: Vec<F128> = sks_vks
+        .iter()
+        .map(|&v| if v.is_zero() { F128::ZERO } else { v.inv() })
+        .collect();
+
+    // The basis is the sum over the queries of the
+    // tensors `α_i ⊗_k (1, ŝ_k(q_i))`, accumulated by index chunks instead of query by
+    // query. Chunk `H` of `2^c` consecutive indices `u` holds `α_i P_i(H) T_i[u mod 2^c]`,
+    // with `T_i` the tensor of the low `c` factors and `P_i(H)` the product of the high
+    // factors selected by the bits of `H`; the chunk of the output stays in cache while
+    // every query is added to it, and the threads own disjoint chunks, so no per-thread
+    // copy of the basis and no final reduction exist. Multiplies: `n` per query, as before.
+    let c = log_msg_cols.min(
+        std::env::var("FLOCK_INDUCE_CHUNK_LOG")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(INDUCE_CHUNK_LOG),
+    );
+    let chunk = 1usize << c;
+    // ŝ_k(q_i) for k < log_msg_cols, normalised; `log_msg_cols` entries per query.
+    let s_at: Vec<F128> = queries
+        .par_iter()
+        .flat_map_iter(|&q| {
+            let mut s = vec![F128::ZERO; log_msg_cols];
+            if log_msg_cols > 0 {
+                s[0] = F128::new(q as u64, 0);
+                for i in 1..log_msg_cols {
+                    s[i] = next_s(s[i - 1], sks_vks[i - 1]);
+                }
+                for i in 0..log_msg_cols {
+                    s[i] *= inv_sks_vks[i];
+                }
+            }
+            s
+        })
+        .collect();
+    // T_i: the low-bit tensors, `chunk` words per query, seeded with α_i.
+    let tables: Vec<F128> = (0..n_queries)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut t = vec![F128::ZERO; chunk];
+            t[0] = alpha_pows[i];
+            for k in 0..c {
+                let s = s_at[i * log_msg_cols + k];
+                let len = 1usize << k;
+                for u in 0..len {
+                    t[u + len] = s * t[u];
+                }
+            }
+            t
+        })
+        .collect();
+    let mut basis_poly = vec![F128::ZERO; n];
+    basis_poly
+        .par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(h, acc)| {
+            for i in 0..n_queries {
+                // P_i(H): the high factors selected by the bits of the chunk index.
+                let mut scale = F128::ONE;
+                for k in c..log_msg_cols {
+                    if (h >> (k - c)) & 1 == 1 {
+                        scale *= s_at[i * log_msg_cols + k];
+                    }
+                }
+                scaled_xor_into(acc, &tables[i * chunk..(i + 1) * chunk], scale);
+            }
+        });
+
+    (basis_poly, enforced_sum)
+}
+
+/// Indices per chunk of the induced basis (`2^11` words = 32 KiB per array).
+const INDUCE_CHUNK_LOG: usize = 11;
+
+/// `acc[u] += scale * src[u]` for every `u`.
+fn scaled_xor_into(acc: &mut [F128], src: &[F128], scale: F128) {
+    for (a, &v) in acc.iter_mut().zip(src) {
+        *a += scale * v;
+    }
+}
+
+fn induce_sumcheck_poly_reference(
+    log_msg_cols: usize,
+    sks_vks: &[F128],
+    opened_rows: &[Vec<F128>],
+    v_challenges: &[F128],
+    queries: &[usize],
+    alpha: &[F128],
+) -> (Vec<F128>, F128) {
+    let n = 1usize << log_msg_cols;
+    let n_queries = queries.len();
+    let eq = build_eq_table(v_challenges);
+    let alpha_pows: Vec<F128> = if n_queries == 0 {
+        Vec::new()
+    } else {
+        build_eq_table(alpha).into_iter().take(n_queries).collect()
+    };
+
     // Precompute inv_sks_vks once across all queries and threads.
     let inv_sks_vks: Vec<F128> = sks_vks
         .iter()
@@ -6771,6 +6895,68 @@ mod tests {
             t_r,
             "residual inner product != t_r"
         );
+    }
+
+    /// Single-thread induced basis at the 32K opening shape.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_induce_l0() {
+        let log_cols = 21;
+        let sks_vks = eval_sk_at_vks(log_cols);
+        let queries: Vec<usize> = (0..119).map(|i| i * 7919).collect();
+        let rows = vec![vec![F128::new(3, 7); 32]; queries.len()];
+        let v = vec![F128::new(5, 11); 5];
+        let alpha = vec![F128::new(13, 17); 7];
+        for run in 0..6 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(induce_sumcheck_poly(
+                log_cols, &sks_vks, &rows, &v, &queries, &alpha,
+            ));
+            eprintln!(
+                "induce run={run} ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    #[test]
+    fn induce_sumcheck_poly_matches_reference() {
+        use super::induce_sumcheck_poly_reference;
+        use crate::simd::{test_masks, with_mask};
+        use crate::test_rng::Rng;
+        let mut rng = Rng::new(0x1_4DC0_CE);
+        for &(log_cols, n_queries, lanes_log) in &[
+            (0usize, 3usize, 1usize),
+            (3, 1, 2),
+            (10, 7, 3),
+            (11, 5, 4),
+            (12, 9, 4),
+            (14, 33, 5),
+            (13, 0, 2),
+        ] {
+            let block_len = 1usize << (log_cols + 2);
+            let sks_vks = eval_sk_at_vks(log_cols);
+            let lanes = 1usize << lanes_log;
+            let v: Vec<F128> = rng.f128_vec(lanes_log);
+            let alpha: Vec<F128> = rng.f128_vec(ceil_log2(n_queries.max(1)));
+            let queries: Vec<usize> = (0..n_queries).map(|_| rng.below(block_len)).collect();
+            let rows: Vec<Vec<F128>> = (0..n_queries).map(|_| rng.f128_vec(lanes)).collect();
+            let want =
+                induce_sumcheck_poly_reference(log_cols, &sks_vks, &rows, &v, &queries, &alpha);
+            for mask in test_masks() {
+                let got = with_mask(mask, || {
+                    induce_sumcheck_poly(log_cols, &sks_vks, &rows, &v, &queries, &alpha)
+                });
+                assert_eq!(
+                    got.1, want.1,
+                    "sum log_cols={log_cols} q={n_queries} mask={mask:#x}"
+                );
+                assert!(
+                    got.0 == want.0,
+                    "basis log_cols={log_cols} q={n_queries} mask={mask:#x}"
+                );
+            }
+        }
     }
 
     /// `induce_sumcheck_poly` is consistent with the codeword:

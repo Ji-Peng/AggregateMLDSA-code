@@ -1763,11 +1763,13 @@ struct StatTerm {
 
 /// `G_t[e] = Σ_h f[e·d + h]·within_t[h]` for every term in ONE sweep over
 /// `f`; task = (block, h-chunk), XOR-additive so the chunk order is free.
-fn block_statistics(f: &[F128], withins: &[&[F128]], d: usize) -> Vec<Vec<F128>> {
+/// Blocks at or above `live` are zero-padded lanes.
+fn block_statistics(f: &[F128], withins: &[&[F128]], d: usize, live: usize) -> Vec<Vec<F128>> {
     let n_e = f.len() / d;
+    let live = live.min(n_e);
     const CH: usize = 1 << 12;
     let n_ch = d.div_ceil(CH);
-    let partial: Vec<Vec<F128>> = (0..n_e * n_ch)
+    let partial: Vec<Vec<F128>> = (0..live * n_ch)
         .into_par_iter()
         .map(|task| {
             let (e, c) = (task / n_ch, task % n_ch);
@@ -1787,7 +1789,13 @@ fn block_statistics(f: &[F128], withins: &[&[F128]], d: usize) -> Vec<Vec<F128>>
     (0..withins.len())
         .map(|t| {
             (0..n_e)
-                .map(|e| (0..n_ch).fold(F128::ZERO, |acc, c| acc + partial[e * n_ch + c][t]))
+                .map(|e| {
+                    if e < live {
+                        (0..n_ch).fold(F128::ZERO, |acc, c| acc + partial[e * n_ch + c][t])
+                    } else {
+                        F128::ZERO
+                    }
+                })
                 .collect()
         })
         .collect()
@@ -1832,15 +1840,16 @@ fn fold_block_pairs(v: &mut Vec<F256>, r: F256) {
 /// `(f'[h].c0, 0), (f'[h].c1, 0)` at `2h, 2h+1`, i.e. what
 /// `split_coordinates` and the promotion produced from a materialized `f'`,
 /// minus those two passes and their allocations.
-fn fold_blocks_by_eq_split(f: &[F128], w: &[F256], d: usize) -> Vec<F256> {
+fn fold_blocks_by_eq_split(f: &[F128], w: &[F256], d: usize, live: usize) -> Vec<F256> {
     debug_assert_eq!(f.len(), w.len() * d);
+    let live = live.min(w.len());
     let mut out = crate::scratch::take_f256(2 * d);
     const CH: usize = 1 << 11;
     out.par_chunks_mut(2 * CH).enumerate().for_each(|(c, oc)| {
         let h0 = c * CH;
         let n = oc.len() / 2;
         let mut acc = [F256::ZERO; CH];
-        for (e, &we) in w.iter().enumerate() {
+        for (e, &we) in w[..live].iter().enumerate() {
             let fs = &f[e * d + h0..e * d + h0 + n];
             for (a, &x) in acc[..n].iter_mut().zip(fs) {
                 *a += we * x;
@@ -1887,6 +1896,7 @@ fn init_phase_statistics<Ch: Challenger>(
     claim_bits_0: u32,
     d: usize,
     initial_k: usize,
+    live_blocks: usize,
     ood_values: &mut Vec<F128>,
     claim_batch_grinding_nonces: &mut Vec<u64>,
     challenger: &mut Ch,
@@ -1956,7 +1966,7 @@ fn init_phase_statistics<Ch: Challenger>(
     let mut stats = if withins.is_empty() {
         Vec::new()
     } else {
-        block_statistics(&packed_witness, &withins, d)
+        block_statistics(&packed_witness, &withins, d, live_blocks)
     };
     let t_sweep = t0.elapsed();
     let s_g = match seeded_stats {
@@ -1988,7 +1998,7 @@ fn init_phase_statistics<Ch: Challenger>(
     for _ in 1..ood_samples {
         let z = challenger.sample_f128_vec(log_n);
         let (within, _) = split(&z);
-        let g = block_statistics(&packed_witness, &[&within], d).remove(0);
+        let g = block_statistics(&packed_witness, &[&within], d, live_blocks).remove(0);
         push_ood(
             z,
             g,
@@ -2022,7 +2032,7 @@ fn init_phase_statistics<Ch: Challenger>(
     let t_rounds = t1.elapsed();
     let t2 = std::time::Instant::now();
     let w = build_eq_table256(&lane_challenges);
-    let f = fold_blocks_by_eq_split(&packed_witness, &w, d);
+    let f = fold_blocks_by_eq_split(&packed_witness, &w, d, live_blocks);
     crate::scratch::give_f128(packed_witness);
     let t_fold = t2.elapsed();
     let t3 = std::time::Instant::now();
@@ -2167,6 +2177,11 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
             claim_bits(0),
             fold_block,
             initial_k,
+            if std::env::var("FLOCK_L0_LIVE_SKIP").as_deref() == Ok("0") {
+                1 << initial_k
+            } else {
+                l0_num_lanes
+            },
             &mut ood_values,
             &mut claim_batch_grinding_nonces,
             challenger,
@@ -3388,6 +3403,111 @@ mod tests {
             split_inner_product,
         },
     };
+
+    #[test]
+    fn live_blocks_match_full_ladder_kernels() {
+        let d = 128;
+        let mut f = vec![F128::ZERO; 64 * d];
+        for (i, x) in f[..34 * d].iter_mut().enumerate() {
+            *x = F128::new(i as u64 + 1, (i * 7) as u64);
+        }
+        let within: Vec<_> = (0..d).map(|i| F128::new(i as u64 + 3, 7)).collect();
+        let w: Vec<_> = (0..64)
+            .map(|i| F256::new(F128::new(i + 1, 5), F128::new(i + 2, 9)))
+            .collect();
+        assert_eq!(
+            super::block_statistics(&f, &[&within], d, 34),
+            super::block_statistics(&f, &[&within], d, 64)
+        );
+        assert_eq!(
+            super::fold_blocks_by_eq_split(&f, &w, d, 34),
+            super::fold_blocks_by_eq_split(&f, &w, d, 64)
+        );
+    }
+
+    /// Single-thread level-zero statistics and fold at the 32K witness shape.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_l0_ladder_kernels() {
+        let d = 1usize
+            << std::env::var("FLOCK_BENCH_LOG_D")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(21);
+        let live = if std::env::var("FLOCK_L0_LIVE_SKIP").as_deref() == Ok("0") {
+            64
+        } else {
+            34
+        };
+        let mut f = vec![F128::ZERO; 64 * d];
+        for (i, x) in f[..34 * d].iter_mut().enumerate() {
+            *x = F128::new(i as u64 + 1, (i as u64).wrapping_mul(7));
+        }
+        let within = vec![F128::new(3, 7); d];
+        let w: Vec<_> = (0..64)
+            .map(|i| F256::new(F128::new(i + 1, 5), F128::new(i + 2, 9)))
+            .collect();
+        for run in 0..6 {
+            let t = std::time::Instant::now();
+            let stats = super::block_statistics(&f, &[&within], d, live);
+            let fold = super::fold_blocks_by_eq_split(&f, &w, d, live);
+            std::hint::black_box((stats, fold));
+            eprintln!(
+                "l0_kernel run={run} live={live} ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    /// Single-thread statistics ladder at the 32K opening shape.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_l0_statistics_ladder() {
+        let log_d = std::env::var("FLOCK_BENCH_LOG_D")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(21);
+        let d = 1usize << log_d;
+        let live = if std::env::var("FLOCK_L0_LIVE_SKIP").as_deref() == Ok("0") {
+            64
+        } else {
+            34
+        };
+        for run in 0..6 {
+            let mut f = crate::scratch::take_f128(64 * d);
+            for (i, x) in f.iter_mut().enumerate() {
+                *x = if i < 34 * d {
+                    F128::new(i as u64 + 1, (i as u64).wrapping_mul(7))
+                } else {
+                    F128::ZERO
+                };
+            }
+            let mut rng = RandomChallenger::new(0x1057);
+            let seeded = VirtualEqBasis::new(vec![F128::new(3, 7); log_d + 6], F128::ONE);
+            let mut target = F128::ZERO;
+            let t = std::time::Instant::now();
+            let out = super::init_phase_statistics(
+                f,
+                seeded,
+                Some(vec![F128::ZERO; 64]),
+                &mut target,
+                1,
+                0,
+                d,
+                6,
+                live,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut rng,
+                false,
+            );
+            std::hint::black_box(out);
+            eprintln!(
+                "l0_ladder run={run} live={live} ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
 
     fn random_f256(challenger: &mut RandomChallenger) -> F256 {
         F256::new(challenger.sample_f128(), challenger.sample_f128())
