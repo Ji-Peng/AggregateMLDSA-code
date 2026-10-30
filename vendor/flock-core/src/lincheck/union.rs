@@ -1332,6 +1332,36 @@ mod tests {
         }
     }
 
+    /// Single-thread micro-benchmark of the one-pass bit-bank fold at a 32K-like row
+    /// geometry (`nu = 15`: 512 KiB between the columns of a word column) with four row
+    /// points, 64 live word columns. Run with
+    /// `RAYON_NUM_THREADS=1 taskset -c 3 cargo test --release bitbank_fold_multi_bench
+    /// -- --ignored --nocapture`; prints the best of five runs and an output checksum.
+    #[test]
+    #[ignore]
+    fn bitbank_fold_multi_bench() {
+        use crate::{lincheck::union::union_bitbank_fold_multi, union::UnionInstance};
+        let (nu, k_log, np) = (15usize, 13usize, 4usize);
+        let reg = Registry::new(vec![ty(k_log, 1 << k_log)], nu);
+        let union = UnionInstance::new(&reg, vec![1 << nu]);
+        let mut rng = Rng::new(0xBE_4C);
+        let mut z = vec![F128::ZERO; union.packed_len()];
+        for w in z.iter_mut() {
+            *w = F128::new(rng.next_u64(), rng.next_u64());
+        }
+        let points: Vec<Vec<F128>> = (0..np).map(|_| rng.f128_vec(nu)).collect();
+        let refs: Vec<&[F128]> = points.iter().map(Vec::as_slice).collect();
+        let mut best = f64::MAX;
+        let mut sum = F128::ZERO;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let outs = union_bitbank_fold_multi(&union, &z, &refs);
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            sum = outs.iter().flatten().fold(F128::ZERO, |a, &x| a + x);
+        }
+        eprintln!("bitbank_fold_multi: best of 5 {best:.1} ms, checksum {:x}{:x}", sum.hi, sum.lo);
+    }
+
     /// The closed-form [`union_comb_partial`] against a dense union-column
     /// vector folded with the full eq tensor, on a two-type registry with
     /// random per-type "comb" vectors (no circuits needed — the closed form
