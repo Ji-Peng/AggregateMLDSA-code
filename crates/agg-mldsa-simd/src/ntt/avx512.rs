@@ -61,8 +61,10 @@ fn opaque(t: &'static tables::Tables) -> &'static tables::Tables {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn mont(x: __m512i, z: __m512i, zi: __m512i, zo: __m512i, zio: __m512i, p: __m512i) -> __m512i {
-    // Odd lanes moved to the even dwords, where vpmuldq reads its operands.
-    let h = _mm512_shuffle_epi32::<0xf5>(x);
+    // Odd lanes moved to the even dwords, where vpmuldq reads its operands. A
+    // qword shift instead of a dword shuffle: vpmuldq ignores the high dwords, and
+    // shifts and blends issue on more ports than shuffles on Zen 5.
+    let h = _mm512_srli_epi64::<32>(x);
     let e = _mm512_mul_epi32(x, z);
     let o = _mm512_mul_epi32(h, zo);
     let te = _mm512_mul_epi32(_mm512_mul_epi32(x, zi), p);
@@ -72,7 +74,7 @@ fn mont(x: __m512i, z: __m512i, zi: __m512i, zo: __m512i, zio: __m512i, p: __m51
     let e = _mm512_sub_epi32(e, te);
     let o = _mm512_sub_epi32(o, to);
     // Even results come from the high dwords of `e`; odd ones are in place in `o`.
-    _mm512_mask_shuffle_epi32::<0xf5>(o, 0x5555, e)
+    _mm512_mask_blend_epi32(0x5555, o, _mm512_srli_epi64::<32>(e))
 }
 // These exchanges are involutions; they preserve the coefficient storage layout.
 #[cfg(target_arch = "x86_64")]
