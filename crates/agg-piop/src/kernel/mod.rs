@@ -50,8 +50,7 @@ use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
 pub(crate) use self::field::{fm, fmi, mad_int, Acc};
-pub use self::layer::{IntPairGroup, LayerGroup, LayerLeaves, LayerTree, LinearIntGroup, WeightIntGroup};
-pub(crate) use self::layer::upper_node;
+pub use self::layer::{IntPairGroup, LayerGroup, LayerTree, LinearIntGroup, WeightIntGroup};
 use self::coded::{code_column, masses, Column, ItemWeights, SegmentShape};
 use self::field::{fold, lift, mad, plain_sum, split_sum, MIN_PARALLEL_ITEMS};
 use self::plan::{Pieces, Plan};

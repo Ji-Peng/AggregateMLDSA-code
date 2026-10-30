@@ -47,8 +47,8 @@ use jolt_field::{Unreduced, Field, One, Ring, Zero};
 use rayon::prelude::*;
 
 use crate::kernel::{
-    evaluate_compressed, expected_terminal, fm, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerLeaves,
-    LayerTree, Source, Term,
+    evaluate_compressed, expected_terminal, fm, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerTree, Source,
+    Term,
 };
 use crate::OpeningField as E;
 
@@ -866,10 +866,39 @@ impl SymLanes {
 #[allow(unsafe_code)]
 fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     let quarter = stacked.len() / 4;
-    let powers = powers4(xs);
+    let powers: Vec<[E; 4]> = xs
+        .iter()
+        .map(|&x| {
+            let x2 = x * x;
+            let x3 = x2 * x;
+            [x, x2, x3, x3 * x]
+        })
+        .collect();
     let node = |z: usize, out: &mut [(E, E)]| {
-        for (slot, &powers) in out.iter_mut().zip(&powers) {
-            *slot = crate::kernel::upper_node(stacked, center, quarter, z, powers);
+        let v = |j: usize| i64::from(stacked[z + j * quarter]) - i64::from(center);
+        // Children A = (v0, v2), B = (v1, v3) of layer depth - 1.
+        let (sa, ma) = (v(0) + v(2), v(0) * v(2));
+        let (sb, mb) = (v(1) + v(3), v(1) * v(3));
+        let e1 = sa + sb;
+        let e2 = ma + mb + sa * sb;
+        let e3 = sa * mb + sb * ma;
+        let e4 = ma * mb;
+        for (slot, &[x, x2, x3, x4]) in out.iter_mut().zip(&powers) {
+            // |e1| <= 2^17, |e2| <= 2^32 + 2^31, |e3| <= 2^47, |e4| <= 2^60,
+            // all below p. At most four integer products per accumulator: each
+            // split slot is below 4 * 2^64, far below the u128 accumulator limit.
+            let mut q = crate::kernel::Acc::zero();
+            crate::kernel::mad_int(&mut q, x4, 1);
+            crate::kernel::mad_int(&mut q, x3, -e1);
+            crate::kernel::mad_int(&mut q, x2, e2);
+            crate::kernel::mad_int(&mut q, x, -e3);
+            let q = E::reduce_product(q) + E::from_i64(e4);
+            let mut p = crate::kernel::Acc::zero();
+            crate::kernel::mad_int(&mut p, x3, 4);
+            crate::kernel::mad_int(&mut p, x2, -3 * e1);
+            crate::kernel::mad_int(&mut p, x, 2 * e2);
+            let p = E::reduce_product(p) - E::from_i64(e3);
+            *slot = (p, q);
         }
     };
     let challenges = xs.len();
@@ -909,84 +938,6 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     layers.into_iter().map(|(p, q)| unsafe {
         Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() }
     }).collect()
-}
-
-/// Layer `depth - 3` of a stack for every challenge straight from the leaves: every node is
-/// the parent of the two layer-`depth - 2` nodes computed in cache from their four leaves,
-/// so layer `depth - 2` is not stored (its session recomputes it, [`LayerGroup::from_leaves`]).
-#[allow(unsafe_code)]
-fn stack_upper_parents(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
-    let quarter = stacked.len() / 4;
-    let half = quarter / 2;
-    let powers = powers4(xs);
-    let node = |z: usize, out: &mut [(E, E)]| {
-        for (slot, &x) in out.iter_mut().zip(&powers) {
-            // The children of layer `depth - 3` node `z` are layer-`depth - 2` nodes `z`
-            // and `z + half`; each uses its four leaves (the leaves of the second child
-            // start `half` cells later).
-            let (pa, qa) = crate::kernel::upper_node(stacked, center, quarter, z, x);
-            let (pb, qb) = crate::kernel::upper_node(stacked, center, quarter, z + half, x);
-            // Two `K` products: each high accumulator slot stays below 6 * 2^64.
-            let p = E::reduce_product(pa.mul_unreduced(qb) + pb.mul_unreduced(qa));
-            *slot = (p, fm(qa, qb));
-        }
-    };
-    let mut layers: Vec<_> =
-        (0..xs.len()).map(|_| (crate::kernel::buf::uninit::<E>(half), crate::kernel::buf::uninit::<E>(half))).collect();
-    // Blocks of nodes: every output lane split at the same boundaries.
-    const BLOCK: usize = 1 << 10;
-    let mut blocks: Vec<Vec<&mut [std::mem::MaybeUninit<E>]>> = Vec::new();
-    for layer in &mut layers {
-        for lane in [&mut layer.0, &mut layer.1] {
-            for (b, chunk) in lane.chunks_mut(BLOCK).enumerate() {
-                if blocks.len() <= b {
-                    blocks.push(Vec::with_capacity(2 * xs.len()));
-                }
-                blocks[b].push(chunk);
-            }
-        }
-    }
-    let fill = |(b, mut lanes): (usize, Vec<&mut [std::mem::MaybeUninit<E>]>) | {
-        let mut values = vec![(E::zero(), E::zero()); xs.len()];
-        let count = lanes[0].len();
-        for i in 0..count {
-            node(b * BLOCK + i, &mut values);
-            for (pair, &(p, q)) in lanes.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
-                pair[0][i].write(p);
-                pair[1][i].write(q);
-            }
-        }
-    };
-    if half >= PARALLEL_NODES {
-        blocks.into_par_iter().enumerate().for_each(fill);
-    } else {
-        blocks.into_iter().enumerate().for_each(fill);
-    }
-    // SAFETY: each node writes both coordinates of every challenge, including tails.
-    layers.into_iter().map(|(p, q)| unsafe {
-        Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() }
-    }).collect()
-}
-
-/// `[X, X^2, X^3, X^4]` per challenge.
-fn powers4(xs: &[E]) -> Vec<[E; 4]> {
-    xs.iter()
-        .map(|&x| {
-            let x2 = x * x;
-            let x3 = x2 * x;
-            [x, x2, x3, x3 * x]
-        })
-        .collect()
-}
-
-/// Default of [`leaf_upper`].
-const LEAF_UPPER: bool = true;
-
-/// Whether layer `depth - 2` of an integer-path stack is recomputed from the leaves in its
-/// session instead of being stored (prover only; the messages are the same either way).
-/// `AGG_LOOKUP_LEAF_UPPER=0` stores it.
-fn leaf_upper() -> bool {
-    std::env::var("AGG_LOOKUP_LEAF_UPPER").map_or(LEAF_UPPER, |v| v != "0")
 }
 
 /// The stored layers `0 .. depth - 1` of one tree (the leaves are read from the columns).
@@ -1433,20 +1384,12 @@ fn prove_with(
     let centred = |j: usize, x: usize| {
         shifted(j, x) - E::from_i64(i64::from(sym[j].as_ref().map_or(0, |lanes| lanes.center)))
     };
-    // Whether layer `depth - 2` of an integer-path stack is recomputed in its session.
-    let leaf_upper = dedicated && leaf_upper();
-    let leaf_upper_stack = |j: usize| leaf_upper && sym[j].is_some() && stacks[j].shape.depth() >= 5;
-    // Layer `depth - 2` of every challenge in one pass over the leaves of a stack, or layer
-    // `depth - 3` when layer `depth - 2` is recomputed in its session.
+    // Layer `depth - 2` of every challenge in one pass over the leaves of a stack.
     let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
         .map(|j| {
             if let Some(lanes) = &sym[j] {
                 let xs_j: Vec<E> = (0..challenges).map(|x| centred(j, x)).collect();
-                if leaf_upper_stack(j) {
-                    stack_upper_parents(&stacks[j].stacked, lanes.center, &xs_j)
-                } else {
-                    stack_upper_bottoms(&stacks[j].stacked, lanes.center, &xs_j)
-                }
+                stack_upper_bottoms(&stacks[j].stacked, lanes.center, &xs_j)
             } else {
                 Vec::new()
             }
@@ -1514,8 +1457,6 @@ fn prove_with(
                     // integer lanes; the others on their stored layer.
                     let mut stored = Vec::new();
                     let mut by_stack: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
-                    // Trees whose layer `s` is recomputed from the leaves, per stack.
-                    let mut from_leaves: Vec<Vec<(usize, E, E, E)>> = vec![Vec::new(); stacks.len()];
                     for &id in ids {
                         let (x, tree_kind) = shape.tree(id);
                         match tree_kind {
@@ -1523,33 +1464,8 @@ fn prove_with(
                                 let (gp, gq) = gamma_of(id);
                                 by_stack[j].push((id, centred(j, x), gp, gq));
                             }
-                            TreeKind::Stack(j) if leaf_upper_stack(j) && stacks[j].shape.depth() == s + 2 => {
-                                let (gp, gq) = gamma_of(id);
-                                from_leaves[j].push((id, centred(j, x), gp, gq));
-                            }
                             _ => stored.push(id),
                         }
-                    }
-                    for (j, list) in from_leaves.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
-                        let centre = sym[j].as_ref().expect("an integer-path stack").center;
-                        let leaves: Vec<LayerLeaves<'_>> = list
-                            .iter()
-                            .map(|&(_, x, gamma_p, gamma_q)| {
-                                let x2 = x * x;
-                                let x3 = x2 * x;
-                                LayerLeaves {
-                                    stacked: &stacks[j].stacked,
-                                    center: centre,
-                                    powers: [x, x2, x3, x3 * x],
-                                    gamma_p,
-                                    gamma_q,
-                                }
-                            })
-                            .collect();
-                        // The centre gate (depth >= 5, spread <= 2^16) guarantees the group.
-                        let group = LayerGroup::from_leaves(leaves, &point)
-                            .expect("a centred stack of depth s + 2 fits the leaf-computed layer group");
-                        groups.push((Role::Trees(list.iter().map(|&(id, ..)| id).collect()), SessionGroup::Layer(group)));
                     }
                     for (j, list) in by_stack.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
                         let sym_lanes = &sym[j].as_ref().expect("an integer-path stack").lanes;
