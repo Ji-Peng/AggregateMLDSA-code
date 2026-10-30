@@ -79,9 +79,7 @@ environment:
   AGG_W1_SPLIT=0        build the level-1 weight table instead of its two factors (memory and
                         time only; the proof is the same).
   AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
-                        end of every prover step (diagnostics; the aggregate is the same).
-  AGG_PARITY_EARLY      (any value) build the stages' parity tables beside the round-2
-                        commitment instead of in the fork (opt-in; the aggregate is the same).";
+                        end of every prover step (diagnostics; the aggregate is the same).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

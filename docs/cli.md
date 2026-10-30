@@ -104,7 +104,6 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
-| `AGG_PARITY_EARLY` | any value: build the parity tables beside the round-2 commitment |
 
 The vendored Flock core's remaining `FLOCK_*` knobs are described in
 `vendor/flock-core/PATCH.md` and `docs/perf.md`.
@@ -143,7 +142,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 
 ## 3. Tests
 
-`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/{mode_a,cli}.rs`):
+`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,cli}.rs`):
 
 - unit: part tiling of every segment (also with an all-padded trailing segment), part seeds
   and span seeds, an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the
@@ -196,4 +195,4 @@ workers: single noisy runs, not benchmarks):
 | H-exact | 522,154 B (509.9 B/sig) | 4,736 B | 391 B | 61,010 B | 2,981 ms | 60.9 / 198.0 ms | 316 / 290 ms |
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
-with `16 (76 + 11 d_main)` at `d_main = 20` for both relations (8 + 31 and 7 + 32 claims).
+with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claims).

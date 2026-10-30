@@ -281,7 +281,7 @@ back to `dot_wide`: per-coordinate `i128` accumulation, exact for any `i32` valu
 - Two genuine keys sharing `rho` (`agg_witness::gen::keypair_with_rho` builds the second key
   under the first one's matrix seed and signs through `ml-dsa`'s skDecode): two distinct keys
   in `prepare`, each record's `T` from its own `t1`, cached or not
-  (`keys_sharing_rho_stay_distinct`); end to end (`agg-cli/tests/mode_a.rs`
+  (`keys_sharing_rho_stay_distinct`); end to end (`agg-cli/tests/all/mode_a.rs`
   `keys_sharing_rho_verify_only_against_their_own_t1`): the aggregate verifies uncached, with
   only the first key cached and fully cached; naming the other key for a record is rejected,
   cached or not.
@@ -506,8 +506,8 @@ unmap, 166-197 ms; (c) the release of the six committed sources inside Akita's o
   `opaque/eor.rs:175`), so the clones trigger no copy.
 - On the PIOP branch, which W1 made critical: the stage-3 `ProverTables` buffers and each
   finished lookup layer are dropped on detached threads.
-- Opt-in, `AGG_PARITY_EARLY`: build the stages' parity tables beside the round-2 commitment
-  instead of in the fork.
+- Measured with `AGG_PARITY_EARLY`, since removed: build the stages' parity tables beside
+  the round-2 commitment instead of in the fork.
 
 `AGG_STAGE_TRACE` prints the time of each detached drop.
 
@@ -585,8 +585,8 @@ measured on the VM.
   12,775.9 ms; + W1 12,112.9 ms; + B (main with `AGG_SCHED_SERIAL=1`) 11,855.8 ms; + A (main)
   11,680.4 / 11,604.4 ms. W1 -0.66 s, B -0.26 s, A -0.21 s (setup -66 ms, opening -123 ms);
   together -1.13 s (-8.9%). `AGG_FLOCK_REBUILD=1` on main: +0.65 s. All three inside the
-  estimates of Sections 9.4, 10.3 and 11.4. `AGG_PARITY_EARLY=1`: -47 ms, under the 50 ms bar,
-  so it stays opt-in. Every arm's aggregate is byte-identical.
+  estimates of Sections 9.4, 10.3 and 11.4. `AGG_PARITY_EARLY=1` measured -47 ms, under the
+  50 ms bar, but the switch has since been removed. Every arm's aggregate is byte-identical.
 - Flock pool (H-u 32K): 4 threads 11,262.0 ms (1+5), 6 threads 11,336.3 ms (1+5), 8 threads
   11,688.6 ms (1+5), 10 threads 11,944.5 ms (1+2). With W1 the PIOP branch is critical at 6 or
   more Flock threads (fork wall 6,850.6 ms against Flock proofs 6,279.5 ms at 6) and the Flock
