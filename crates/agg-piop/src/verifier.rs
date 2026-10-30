@@ -19,7 +19,7 @@
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check; the join absorbs the proof items |
 //! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
-//! | `opening` | the batched Akita opening of the 38 claims |
+//! | `opening` | the batched Akita opening of the 52 claims (H-u) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
@@ -523,7 +523,9 @@ fn run(
         .challenge_bytes(BRIDGE_SEED_SITE, 1)?
         .try_into()
         .expect("32 bytes");
-    let psi = transcript.challenge_psi()?;
+    // Draw `Psi` at its own site to advance the transcript; the PIOP entry point reads the
+    // same bytes back from the transcript, so no caller can substitute another matrix.
+    transcript.challenge_psi()?;
     timings.transcript = clock.lap();
     let matrices = bridge.matrices(&bridge_seed);
     timings.matrices = clock.lap();
@@ -591,7 +593,6 @@ fn run(
         &manifest,
         &matrices,
         &y_table,
-        &psi,
         &piop,
         &mut transcript,
         timings,
@@ -673,13 +674,13 @@ pub struct PiopVerified {
 /// multiplicity-digit claims (`sum_k 16^k m_k(pi_m) = m(pi_m)`), `tau`, the pre-stage claims
 /// with `Y(tau_3)` from `y_table`, and stages 1 to 3 with the public pass deferred
 /// (`public_pass(r^(2), r^(3)) = (T(r^(2)), w_A(r^(3)))`). The stage-3 claims and the
-/// digit claims are then the opening claims; the caller verifies the opening.
+/// digit claims are then the opening claims; the caller verifies the opening. `Psi` is read
+/// from the transcript's event-3 answer, so it cannot be supplied or reused by a caller.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_piop(
     manifest: &CommitmentManifest,
     matrices: &BridgeMatrices,
     y_table: &[u8],
-    psi: &[u8],
     proof: &PiopProof,
     transcript: &mut Transcript,
     timings: &mut VerifyTimings,
@@ -688,6 +689,9 @@ pub fn verify_piop(
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
     let outcome = (|| {
+        // `Psi` is transcript-owned: event 3 drew it before the round-2 commitments, and
+        // the verifier reads it back instead of accepting one from the caller.
+        let psi = transcript.psi().map_err(VerifyError::Transcript)?.to_vec();
         // The fork after event 6: the verifier replays branch L, then branch S, each on its
         // own clone of the sponge, then joins them (L's digest, then S's) as the prover did.
         let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
@@ -741,7 +745,7 @@ pub fn verify_piop(
             &stage1,
             &stage2,
             &lookup_inputs,
-            psi,
+            &psi,
             &proof.stage3,
             transcript,
             public_pass,

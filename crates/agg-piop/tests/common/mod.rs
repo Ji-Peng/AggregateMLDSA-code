@@ -161,7 +161,6 @@ pub fn verify_tables(
         &batch.manifest,
         &batch.matrices,
         y_table,
-        batch.bridge.psi(),
         proof,
         &mut transcript,
         &mut timings,

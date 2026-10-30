@@ -225,8 +225,8 @@ impl Stage2Claims {
 }
 
 /// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3` at
-/// `r^(3)` restricted to its group, in manifest order (group by group): 31 under H-u, 32
-/// under H-exact. `G_m` is opened at the lookup's table point instead
+/// `r^(3)` restricted to its group, in manifest order (group by group): 34 under H-u, 35
+/// under H-exact (39 under H-FIPS). `G_m` is opened at the lookup's table point instead
 /// ([`MultiplicityClaims`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage3Claims(pub Vec<E>);

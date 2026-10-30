@@ -219,6 +219,8 @@ pub enum TranscriptError {
     /// A fork on a branch or off the fork event, or a join of the wrong or unfinished
     /// branches.
     Branch,
+    /// The projection matrix of event 3 was not drawn before it was requested.
+    MissingPsi,
 }
 
 impl std::fmt::Display for TranscriptError {
@@ -235,6 +237,7 @@ impl std::fmt::Display for TranscriptError {
             }
             Self::WorkStream(e) => write!(f, "nonce stream: {e:?}"),
             Self::Branch => write!(f, "fork or join out of place"),
+            Self::MissingPsi => write!(f, "the projection matrix of event 3 was not drawn"),
         }
     }
 }
@@ -565,6 +568,9 @@ pub struct Transcript {
     /// `None` on the trunk.
     branch: Option<Branch>,
     work: Work,
+    /// The projection matrix drawn at event 3 ([`Self::challenge_psi`]), kept so that the
+    /// verifier's PIOP entry point reads it from the transcript rather than from a caller.
+    psi: Option<Vec<u8>>,
 }
 
 /// The two branches of the forked transcript.
@@ -638,6 +644,7 @@ impl Transcript {
             end,
             branch: None,
             work,
+            psi: None,
         };
         this.absorb_kind(PUBLIC_KIND, INSTANCE_SITE, 1, record)?;
         Ok(this)
@@ -792,7 +799,18 @@ impl Transcript {
     /// then squeeze the [`PROJ_ATOMS`] 32-byte blocks of `Psi` at that new input.
     pub fn challenge_psi(&mut self) -> Result<Vec<u8>, TranscriptError> {
         self.absorb_kind(PUBLIC_KIND, PROJ_SITE, 1, PROJ_SITE.as_bytes())?;
-        self.challenge_bytes(PROJ_SITE, PROJ_ATOMS)
+        let psi = self.challenge_bytes(PROJ_SITE, PROJ_ATOMS)?;
+        self.psi = Some(psi.clone());
+        Ok(psi)
+    }
+
+    /// The projection matrix drawn at event 3, if [`Self::challenge_psi`] has run on this
+    /// stream (or on the trunk it was forked from).
+    ///
+    /// # Errors
+    /// Before event 3.
+    pub fn psi(&self) -> Result<&[u8], TranscriptError> {
+        self.psi.as_deref().ok_or(TranscriptError::MissingPsi)
     }
 
     /// Export the 32-byte PCS session digest after the stage-3 terminal (a clone of the
@@ -861,6 +879,7 @@ impl Transcript {
                 end,
                 branch: Some(branch),
                 work,
+                psi: self.psi.clone(),
             };
             stream.absorb_kind(BRANCH_KIND, label, 1, label.as_bytes())?;
             Ok(stream)

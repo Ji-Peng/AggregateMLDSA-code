@@ -43,7 +43,7 @@ use crate::kernel::Term;
 use crate::lookup::LookupClaims;
 use crate::manifest::{
     value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupRole, K16_DIGITS, L16_SLACK, LOOKUP_SHIFT,
-    STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
+    PROJ_BYTES, STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
 };
 use crate::public_data::PublicData;
 use crate::range::digits;
@@ -720,8 +720,9 @@ fn prove_with(
 
 /// Verify stage 3 against stored public data; `T(r^(2))` and `w_A(r^(3))` are the
 /// verifier's own evaluations (through [`verify_streamed`]).
+#[allow(dead_code)] // the public-shaped helper; the drivers use `verify_streamed`
 #[allow(clippy::too_many_arguments)]
-pub fn verify(
+pub(crate) fn verify(
     manifest: &CommitmentManifest,
     public: &PublicData,
     points: &Points,
@@ -755,7 +756,7 @@ pub fn verify(
 /// `g(x) = claim x + terms free of the claim`), so the deferred claim enters as
 /// `gamma_ring T(r^(2)) prod_k r^(3)_k`.
 #[allow(clippy::too_many_arguments)]
-pub fn verify_streamed(
+pub(crate) fn verify_streamed(
     manifest: &CommitmentManifest,
     points: &Points,
     prestage: &PreStageClaims,
@@ -767,6 +768,11 @@ pub fn verify_streamed(
     transcript: &mut Transcript,
     public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
 ) -> Result<Stage3Output, StageError> {
+    assert_eq!(
+        psi.len(),
+        PROJ_BYTES,
+        "Psi has {PROJ_BYTES} bytes (128 rows of 1,024 bits)"
+    );
     let spec = spec(manifest, &lookup.weights);
     let claims = claimed_sums(
         manifest,
@@ -868,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn h_exact_stage_three_has_forty_five_instances_with_two_bool_checks() {
+    fn h_exact_stage_three_has_forty_nine_instances_with_two_bool_checks() {
         let manifest =
             CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
         let spec = check_spec(&manifest, 49);
