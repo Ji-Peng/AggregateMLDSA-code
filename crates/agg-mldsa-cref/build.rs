@@ -83,13 +83,15 @@ fn main() {
 "#;
     std::fs::write(&hyb2_rename_path, hyb2_content).expect("write hyb2_rename.h");
 
-    // 2. Build pq-crystals avx2 static library
+    // 2. Build pq-crystals avx2 static library. The ISA is pinned to the Rust backend it is
+    // compared with (x86-64-v3 = AVX2, no AVX-512); `-march=native` would let GCC use
+    // AVX-512 encodings on AVX-512 hosts. Tuning stays native.
     let pq_avx2 = dilithium_dir.join("avx2");
     let pq_ref = dilithium_dir.join("ref");
     let mut pq_build = cc::Build::new();
     pq_build
         .opt_level(3)
-        .flag("-march=native")
+        .flag("-march=x86-64-v3")
         .flag("-mtune=native")
         .flag("-mavx2")
         .flag("-mpopcnt")
@@ -146,7 +148,7 @@ fn main() {
     let mut hyb512_build = cc::Build::new();
     hyb512_build
         .opt_level(3)
-        .flag("-march=native")
+        .flag("-march=x86-64-v4")
         .flag("-mtune=native")
         .flag("-mavx2")
         .flag("-mpopcnt")
@@ -187,7 +189,7 @@ fn main() {
     let mut hyb2_build = cc::Build::new();
     hyb2_build
         .opt_level(3)
-        .flag("-march=native")
+        .flag("-march=x86-64-v3")
         .flag("-mtune=native")
         .flag("-mavx2")
         .flag("-mpopcnt")

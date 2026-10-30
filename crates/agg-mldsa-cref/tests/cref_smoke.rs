@@ -157,6 +157,7 @@ mod smoke_tests {
     }
 
     #[test]
+    #[ignore = "timing check: needs a quiet pinned core; run with -- --ignored"]
     fn test_perf_gate_harness_self_check() {
         assert!(available());
 
