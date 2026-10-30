@@ -75,7 +75,7 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         {
             let (manifest, main) = main_tables(&prover_inputs).unwrap();
             let matrices = BridgeMatrices::random_for_tests(0xe2e);
-            let bridge_tables = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
+            let bridge_tables = BridgeGroupTables::build(&manifest, &main, &matrices, &output.psi).unwrap();
             let tables = SourceTables {
                 manifest: &manifest,
                 main: &main,

@@ -122,7 +122,7 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
     let manifest = CommitmentManifest::for_batch(16).unwrap();
     let (_, main) = instance_and_main(&records, &manifest);
     let mut matrices = BridgeMatrices::random_for_tests(0x78);
-    let honest = BridgeGroupTables::build(&manifest, &main, &matrices).expect("honest bridge");
+    let honest = BridgeGroupTables::build(&manifest, &main, &matrices, &agg_piop::projection::test_psi(1)).expect("honest bridge");
     assert_eq!(honest.public_y().len(), 1 << 12);
     assert_eq!(honest.segment_y(0), honest.public_y());
     // m counts every looked-up cell, padding slots included, and its digits compose to it.
@@ -143,7 +143,10 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
     // The 16-bit carry groups and the parities.
     assert_eq!(honest.group(&manifest, GroupRole::Level1).len(), 6);
     assert_eq!(honest.group(&manifest, GroupRole::Level2).len(), 12);
-    assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 1);
+    // G_3: the carry, then zero polynomials up to G_2's count; G_k: the projection digits.
+    assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 12);
+    assert!(honest.group(&manifest, GroupRole::Level3)[1..].iter().all(|c| c.to_i64().iter().all(|&v| v == 0)));
+    assert_eq!(honest.group(&manifest, GroupRole::Proj).len(), 3);
     honest.validate(&manifest).unwrap();
     let mut bad_y = honest.clone();
     bad_y.public_y_mut()[9] = 2;
@@ -178,7 +181,7 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
     }
     matrices.m3 = SparseMatrix::new(m3.rows, m3.cols, m3.k, entries);
     assert_eq!(
-        BridgeGroupTables::build(&manifest, &main, &matrices).unwrap_err(),
+        BridgeGroupTables::build(&manifest, &main, &matrices, &agg_piop::projection::test_psi(1)).unwrap_err(),
         SourceTableError::Bridge(BridgeError::RowWeight)
     );
 }

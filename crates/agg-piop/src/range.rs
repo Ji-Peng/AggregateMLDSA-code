@@ -1,6 +1,6 @@
-//! Range proofs of the two small digits: the per-cell
+//! Range proofs of the small digits: the per-cell
 //! map of the virtual table `P_Z = Z (Z + 1)` and the order of the leaf and link instances
-//! of `Z_hi` (base 4) and `U_hi` (base 6, relation H-u). Every other range is the lookup into `T_16`
+//! of `Z_hi` (base 4), `U_hi` (base 6, relation H-u) and the projection digit `K_2` (base 4). Every other range is the lookup into `T_16`
 //! (`lookup`, `docs/lookup.md`).
 //!
 //! The map is exact over the integers for every `i8` cell, so the lifted table equals the
@@ -40,7 +40,7 @@ pub(crate) fn hi_map() -> &'static [i64; 256] {
 /// A leaf-checked digit with its position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Digit {
-    /// The group (`G_main4`).
+    /// The group (`G_main4`, or `G_k` for `K_2`).
     pub group: GroupRole,
     /// Polynomial position in the group.
     pub position: usize,
@@ -50,7 +50,8 @@ pub struct Digit {
     pub base: u32,
 }
 
-/// The two leaf-checked digits `Z_hi`, `U_hi` in the order of the leaf and link instances.
+/// The leaf-checked digits `Z_hi`, `U_hi`, `K_2` (H-u) in the order of the leaf and link
+/// instances.
 #[must_use]
 pub fn digits(manifest: &CommitmentManifest) -> Vec<Digit> {
     manifest
@@ -84,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn leaf_digits_are_z_hi_and_u_hi() {
+    fn leaf_digits_are_z_hi_u_hi_and_k_2() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let all = digits(&manifest);
         let shape: Vec<(String, u32, GroupRole, usize)> = all
@@ -95,7 +96,8 @@ mod tests {
             shape,
             [
                 ("z_hi".to_owned(), 4, GroupRole::Main, 0),
-                ("u_hi".to_owned(), 6, GroupRole::Main, 1)
+                ("u_hi".to_owned(), 6, GroupRole::Main, 1),
+                ("k_2".to_owned(), 4, GroupRole::Proj, 2)
             ]
         );
     }

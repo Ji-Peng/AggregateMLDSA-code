@@ -1893,20 +1893,18 @@ mod tests {
             .collect()
     }
 
-    /// The main-domain stack `[z_lo | u_lo | v_lo | v_hi]` with honest-looking values
-    /// (the encoder of `docs/lookup.md`: `z + 2^17`, `v + 2^31`; relation H-u's
-    /// `B_ulo = u + 190,465 - 63,079 H_u`).
+    /// The main-domain stack `[z_lo | u_lo]` with honest-looking values (the encoder of
+    /// `docs/lookup.md`: `z + 2^17`; relation H-u's `B_ulo = u + 190,465 - 63,079 H_u`).
     fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
-        let mut columns: Vec<Vec<i32>> = (0..4).map(|_| Vec::with_capacity(cells)).collect();
+        let mut columns: Vec<Vec<i32>> = (0..2).map(|_| Vec::with_capacity(cells)).collect();
         for _ in 0..cells {
             let z = rng.below(2 * 130_993 + 1).cast_signed() - 130_993;
             let u = rng.below(2 * 190_465 + 1).cast_signed() - 190_465;
-            let v = rng.below(2 * 67_068_447 + 1).cast_signed() - 67_068_447;
-            let (zs, vs) = (z + (1 << 17), v + (1 << 31));
+            let zs = z + (1 << 17);
             let ulo = crate::manifest::U16_DIGITS.decompose(u)[0] + (1 << 15);
-            assert!((zs >> 16) < 4 && (0..1 << 16).contains(&ulo) && (vs >> 16) < 1 << 16);
-            for (c, value) in [zs & 0xffff, ulo, vs & 0xffff, vs >> 16].into_iter().enumerate() {
+            assert!((zs >> 16) < 4 && (0..1 << 16).contains(&ulo));
+            for (c, value) in [zs & 0xffff, ulo].into_iter().enumerate() {
                 columns[c].push(i32::try_from(value).expect("16 bits"));
             }
         }
@@ -2094,10 +2092,10 @@ mod tests {
         assert!(matches!(prove(&stacks, &tables, &m, 1, b"test"), Err(LookupError::Identity { .. })));
         let output = prove_unchecked(&stacks, &tables, &m, 1, b"test").expect("unchecked");
         assert!(matches!(verify(&shape, &output.proof, b"test"), Err(LookupError::Identity { .. })));
-        // v_hi = 2^16 (the cell of column 3 at position 7) with the honest multiplicities
+        // u_lo = 2^16 (the cell of column 1 at position 7) with the honest multiplicities
         // of the replaced value: the identity fails for every multiplicity column.
         let cells = 1 << 10;
-        let index = 3 * cells + 7;
+        let index = cells + 7;
         let old = usize::try_from(stacks[0].stacked()[index]).expect("entry");
         stacks[0].stacked_mut()[index] = 1 << 16;
         assert!(matches!(multiplicities(&stacks, &tables), Err(LookupError::OutOfTable { .. })));
@@ -2129,9 +2127,10 @@ mod tests {
             .map_or(0.0, |kb| kb / 1024.0)
     }
 
-    /// The lookups of `n` signatures: the main stack `[z_lo | u_lo | v_lo | v_hi]` on
-    /// `d_main = 10 + d_sig` variables and the carry stacks `kappa^(1)` (6 columns on
-    /// `D_1`), `kappa^(2)` (6 on `D_2`), `kappa^(3)` (1 on `D_3`), all in `T_16`.
+    /// The lookups of `n` signatures: the main stack `[z_lo | u_lo]` on
+    /// `d_main = 10 + d_sig` variables, the carry stacks `kappa^(1)` (6 columns on
+    /// `D_1`), `kappa^(2)` (6 on `D_2`), `kappa^(3)` (1 on `D_3`) and the projection digits
+    /// `[k_0 | k_1]` (2 on `D_k`, `7 + d_sig` variables), all in `T_16`.
     fn layout(rng: &mut SplitMix64, n: usize) -> Vec<LookupStack<'static>> {
         let d_sig = n.next_power_of_two().max(8).trailing_zeros() as usize;
         let d1 = 13 + d_sig.saturating_sub(9);
@@ -2147,6 +2146,7 @@ mod tests {
             carries(rng, 6, d1, 1024),
             carries(rng, 6, d2, 1024),
             carries(rng, 1, d3, 256),
+            carries(rng, 2, 7 + d_sig, 1 << 16),
         ]
     }
 
@@ -2309,12 +2309,12 @@ mod tests {
         let mut bad = proof.clone();
         bad.sessions[3].terminals[0].swap(0, 1);
         assert!(verify(&shape, &bad, b"test").is_err());
-        // A swapped leaf pair (v_0 <-> v_1) of the main stack, which ends at session 12:
-        // the leaf terms are symmetric in v_0, v_1, so session 12 passes, but the changed
-        // transcript breaks session 13 (the table tree continues).
+        // A swapped leaf pair (v_0 <-> v_1) of the main stack, which ends at session 11:
+        // the leaf terms are symmetric in v_0, v_1, so session 11 passes, but the changed
+        // transcript breaks session 12 (the table tree continues).
         let mut bad = proof.clone();
-        bad.sessions[10].leaves[0].swap(0, 1);
-        assert_eq!(verify(&shape, &bad, b"test"), Err(LookupError::Terminal(13)));
+        bad.sessions[9].leaves[0].swap(0, 1);
+        assert_eq!(verify(&shape, &bad, b"test"), Err(LookupError::Terminal(12)));
         // When the stack ends in the last session, only its opening claim catches the swap.
         let small: Vec<Vec<i32>> = (0..4).map(|_| column(&mut rng, 8, 256)).collect();
         let refs: Vec<&[i32]> = small.iter().map(Vec::as_slice).collect();

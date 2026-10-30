@@ -80,7 +80,8 @@ impl Batch {
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
         let main = MainTables::build(&manifest, &instance, &signatures).expect("round 1 tables");
         let matrices = BridgeMatrices::random_for_tests(seed);
-        let bridge = BridgeGroupTables::build(&manifest, &main, &matrices).expect("round 2 tables");
+        let psi = transcript_psi(&manifest);
+        let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &psi).expect("round 2 tables");
         Self {
             records,
             instance,
@@ -100,17 +101,32 @@ impl Batch {
     }
 }
 
-/// A transcript driven through events 0 to 6 (the final vectors and empty share items) with
-/// fixed dummy payloads, for isolated PIOP tests (prover and verifier replay the same
-/// prefix; the join follows the stages).
-pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {
+/// The transcript of [`transcript_after_commitments`] up to and including the bridge seed.
+fn transcript_to_seed(manifest: &CommitmentManifest) -> Transcript {
     let segments = manifest.segments();
     let mut t = Transcript::new(manifest, &manifest.binding_bytes()).unwrap();
     t.absorb(commitment_site(GroupRole::Main16), 1, &[1]).unwrap();
     t.absorb(commitment_site(GroupRole::Main), 1, &[1]).unwrap();
     t.absorb_items(FLOCK_COMMIT_SITE, &vec![vec![]; segments]).unwrap();
     t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
-    for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+    t
+}
+
+/// The projection matrix `Psi` that [`transcript_after_commitments`] draws (the dummy
+/// prefix fixes it), so the isolated tests build the round-2 tables under the transcript's
+/// own `Psi`.
+pub fn transcript_psi(manifest: &CommitmentManifest) -> Vec<u8> {
+    transcript_to_seed(manifest).challenge_psi().unwrap()
+}
+
+/// A transcript driven through events 0 to 6 (the final vectors and empty share items) with
+/// fixed dummy payloads, for isolated PIOP tests (prover and verifier replay the same
+/// prefix; the join follows the stages).
+pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {
+    let segments = manifest.segments();
+    let mut t = transcript_to_seed(manifest);
+    t.challenge_psi().unwrap();
+    for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
         t.absorb(commitment_site(role), 1, &[2]).unwrap();
     }
     t.challenge_bytes(FLOCK_SEEDS_SITE, segments).unwrap();
@@ -128,7 +144,7 @@ pub fn prove_tables(
 ) -> Result<(PiopProof, PiopRun), ProveError> {
     let public = PublicData::from_instance(&batch.instance);
     let mut transcript = transcript_after_commitments(&batch.manifest);
-    prove_piop(&batch.manifest, tables, &batch.matrices, &public, &mut transcript, unchecked)
+    prove_piop(&batch.manifest, tables, &batch.matrices, tables.bridge.psi(), &public, &mut transcript, unchecked)
 }
 
 /// Verify the PIOP part against the public `Y` of `y_table` (the opening is not run: the
@@ -145,6 +161,7 @@ pub fn verify_tables(
         &batch.manifest,
         &batch.matrices,
         y_table,
+        batch.bridge.psi(),
         proof,
         &mut transcript,
         &mut timings,

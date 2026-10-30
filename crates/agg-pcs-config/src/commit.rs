@@ -1,4 +1,4 @@
-//! Two-round commit driver and the batched opening of the six groups
+//! Two-round commit driver and the batched opening of the seven groups
 //! (`docs/spec.md`).
 //!
 //! Round 1 commits `G_main16` and `G_main4` before the bridge seed; round 2 commits
@@ -297,7 +297,7 @@ impl PcsProver {
         })
     }
 
-    /// Prove the batched opening of all six groups, in wire order, under the
+    /// Prove the batched opening of all seven groups, in wire order, under the
     /// 32-byte PIOP session digest.
     pub fn open(
         &self,
@@ -400,7 +400,7 @@ impl PcsVerifier {
         &self.plan
     }
 
-    /// Verify the batched opening of the six groups. Group profiles and the
+    /// Verify the batched opening of the seven groups. Group profiles and the
     /// schedule selection come from the work plan, never from the proof.
     pub fn verify(
         &self,

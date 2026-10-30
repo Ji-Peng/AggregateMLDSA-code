@@ -85,6 +85,8 @@ pub struct ProverTables<'a> {
     pub w3: Option<[Vec<E>; W1_BITS]>,
     /// `w_A` on the main domain (after `r^(2)`).
     pub wa: Option<Vec<E>>,
+    /// The projection weight `W` on the main domain (after `r^(2)`).
+    pub wp: Option<Vec<E>>,
 }
 
 impl<'a> ProverTables<'a> {
@@ -103,7 +105,7 @@ impl<'a> ProverTables<'a> {
     }
 
     fn with_parity1(tables: SourceTables<'a>, parity1: Parity1) -> Self {
-        Self { tables, parity1, w1: None, w1_split: None, w2: None, w3: None, wa: None }
+        Self { tables, parity1, w1: None, w1_split: None, w2: None, w3: None, wa: None, wp: None }
     }
 
     /// Materialize the parities of the committed bits under the bridge matrices.
@@ -118,6 +120,7 @@ impl<'a> ProverTables<'a> {
             w2: None,
             w3: None,
             wa: None,
+            wp: None,
         }
     }
 
@@ -152,6 +155,11 @@ impl<'a> ProverTables<'a> {
         self.wa = Some(ring_weight_table(public, r2));
     }
 
+    /// Build the projection weight `W` from `Psi` and `r^(2)`.
+    pub fn set_projection(&mut self, psi: &[u8], r2: &[E]) {
+        self.wp = Some(crate::projection::weight_table(self.tables.manifest, psi, r2));
+    }
+
     /// The lane of a table.
     #[must_use]
     pub fn lane(&self, id: LaneId) -> Lane<'_> {
@@ -176,6 +184,9 @@ impl<'a> ProverTables<'a> {
             )),
             LaneId::Weight(WeightId::Ring) => {
                 Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)")))
+            }
+            LaneId::Weight(WeightId::Proj) => {
+                Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)")))
             }
         }
     }
@@ -216,7 +227,7 @@ mod tests {
         let manifest = CommitmentManifest::for_batch(3).unwrap();
         let main = MainTables::from_values(&manifest, &vec![RecordValues::zero(); 3]).unwrap();
         let matrices = BridgeMatrices::random_for_tests(939);
-        let mut bridge = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
+        let mut bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &crate::projection::test_psi(1)).unwrap();
         {
             let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
             let cache = bridge.parity1_cached().cloned();

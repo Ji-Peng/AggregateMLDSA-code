@@ -738,6 +738,8 @@ pub struct ProverOutput {
     pub proof: AggregateProof,
     /// The bridge seed `sd` (event 3).
     pub bridge_seed: [u8; 32],
+    /// The projection matrix `Psi` (the answer of the site `proj/psi`, after `sd`).
+    pub psi: Vec<u8>,
     /// The Flock challenger seeds `fs_sigma` (event 5).
     pub flock_seeds: Vec<[u8; 32]>,
     /// The PCS session digest (event 12).
@@ -885,15 +887,17 @@ fn check_lookup_shape(manifest: &CommitmentManifest, shape: &LookupShape) -> Res
 /// commitments, the seeds, the final vectors and the Keccak side's share items). `unchecked` skips the honest prover's self-checks
 /// (lookup root identity and session claims, stage claimed sums) so that tests can hand a
 /// tampered witness to the verifier.
+#[allow(clippy::too_many_arguments)]
 pub fn prove_piop(
     manifest: &CommitmentManifest,
     tables: SourceTables<'_>,
     matrices: &BridgeMatrices,
+    psi: &[u8],
     public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
-    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked, false)
+    prove_piop_with(manifest, tables, None, matrices, psi, public, transcript, unchecked, false)
 }
 
 /// Whether the two transcript branches run concurrently (`AGG_PIOP_FORK`, default on; `0`
@@ -1053,6 +1057,7 @@ fn prove_stages_branch<'a>(
     tables: SourceTables<'a>,
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
+    psi: &[u8],
     public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
@@ -1130,10 +1135,11 @@ fn prove_stages_branch<'a>(
     // and the bytes are the same: this is a scheduling move, not a change of the messages.
     let tail_clock = Instant::now();
     prover_tables.set_r2(public, &points.r2);
+    prover_tables.set_projection(psi, &points.r2);
     let t_at_r2 = public.t_evaluation(&points.r2);
     let tail = tail_clock.elapsed();
     if trace {
-        eprintln!("weights: w_A and T(r^(2)) {:.1} ms", tail.as_secs_f64() * 1e3);
+        eprintln!("weights: w_A, W and T(r^(2)) {:.1} ms", tail.as_secs_f64() * 1e3);
     }
     Ok(StagesBranch {
         points,
@@ -1158,6 +1164,7 @@ fn prove_piop_with<'a>(
     tables: SourceTables<'a>,
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
+    psi: &[u8],
     public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
@@ -1177,6 +1184,7 @@ fn prove_piop_with<'a>(
                 tables,
                 prebuilt,
                 matrices,
+                psi,
                 public,
                 &mut stages_transcript,
                 unchecked,
@@ -1241,9 +1249,10 @@ fn prove_piop_with<'a>(
         w2,
         w3,
         wa,
+        wp,
         ..
     } = prover_tables;
-    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa));
+    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa, wp));
     run.stage3 = clock.elapsed();
     phase_stamp("stage3");
     run.points = points;
@@ -1369,6 +1378,8 @@ pub fn prove_with_tables_using(
         .challenge_bytes(BRIDGE_SEED_SITE, 1)?
         .try_into()
         .expect("32 bytes");
+    // The projection matrix of v, drawn directly as the site's answer (`projection`).
+    let psi = transcript.challenge_psi()?;
     clock.lap();
     phase_stamp("events1-3");
     timings.round1 = round1_time;
@@ -1376,7 +1387,7 @@ pub fn prove_with_tables_using(
 
     // Events 4 to 6: round-2 commitments, Flock seeds, final vectors and share items.
     let matrices = bridge.matrices(&bridge_seed);
-    let mut bridge_tables = BridgeGroupTables::build(manifest, main, &matrices)?;
+    let mut bridge_tables = BridgeGroupTables::build(manifest, main, &matrices, &psi)?;
     if let Some(tamper) = hooks.tamper_bridge {
         tamper(manifest, &mut bridge_tables);
         // A tampered (or replaced) table set no longer matches `main`: the parities are
@@ -1391,7 +1402,7 @@ pub fn prove_with_tables_using(
         bridge: &bridge_tables,
     };
     let round2 = committer.commit_round2(&bridge_tables)?;
-    let mut bridge_commitments: [Vec<u8>; 4] = Default::default();
+    let mut bridge_commitments: [Vec<u8>; 5] = Default::default();
     for (slot, group) in bridge_commitments.iter_mut().zip(&round2) {
         *slot = group.serialized()?;
         transcript.absorb(commitment_site(group.group), 1, slot)?;
@@ -1434,6 +1445,7 @@ pub fn prove_with_tables_using(
                 tables,
                 Some(prover_tables),
                 &matrices,
+                &psi,
                 &public,
                 &mut transcript,
                 unchecked,
@@ -1469,6 +1481,7 @@ pub fn prove_with_tables_using(
             tables,
             Some(prover_tables),
             &matrices,
+            &psi,
             &public,
             &mut transcript,
             hooks.unchecked,
@@ -1507,9 +1520,9 @@ pub fn prove_with_tables_using(
                 .is_ok_and(|recomputed| recomputed == claims),
         "stage-3 terminal values differ from the table evaluations"
     );
-    let commitments: [GroupCommitment; 6] = {
-        let [l1, l2, l3, m] = round2;
-        [main16_round1, main_round1, l1, l2, l3, m]
+    let commitments: [GroupCommitment; 7] = {
+        let [l1, l2, l3, k, m] = round2;
+        [main16_round1, main_round1, l1, l2, l3, k, m]
     };
     let opening_threads = opening_pool_threads();
     timings.opening_threads = if opening_threads == 0 {
@@ -1546,6 +1559,7 @@ pub fn prove_with_tables_using(
     Ok(ProverOutput {
         proof,
         bridge_seed,
+        psi,
         flock_seeds,
         session,
         points: (run.points, run.r3),

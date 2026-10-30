@@ -1,4 +1,4 @@
-//! Akita commitments of the six groups and their batched opening (events 1, 4 and 13).
+//! Akita commitments of the seven groups and their batched opening (events 1, 4 and 13).
 //!
 //! Mirrors `aerie-prover/src/protocol/pcs/group.rs`: narrow signed tables stay `i8` (or
 //! `i32` for the 16-bit lookup columns) until commitment, and each polynomial is
@@ -361,23 +361,24 @@ impl TableCommitter {
         Ok([wide?, narrow?])
     }
 
-    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2`, `G_3` and the final group
-    /// `G_m`. The four commits are independent (the final group is committed against the
+    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2`, `G_3`, `G_k` and the final
+    /// group `G_m`. The five commits are independent (the final group is committed against the
     /// precommitted profiles of the work plan, not against the other commitments), so they
     /// run in parallel; an Akita commit is memory bound and does not use every thread on
     /// its own. The caller absorbs them in wire order.
-    pub fn commit_round2(&self, bridge: &BridgeGroupTables) -> Result<[GroupCommitment; 4], PcsError> {
+    pub fn commit_round2(&self, bridge: &BridgeGroupTables) -> Result<[GroupCommitment; 5], PcsError> {
         let commit = |role: GroupRole| self.commit(role, &bridge.group(&self.manifest, role));
-        let [level1, level2, level3, mult] = concurrent_commits([
+        let [level1, level2, level3, proj, mult] = concurrent_commits([
             &|| commit(GroupRole::Level1),
             &|| commit(GroupRole::Level2),
             &|| commit(GroupRole::Level3),
+            &|| commit(GroupRole::Proj),
             &|| commit(GroupRole::Mult),
         ]);
-        Ok([level1?, level2?, level3?, mult?])
+        Ok([level1?, level2?, level3?, proj?, mult?])
     }
 
-    /// The batched opening of all six groups at `points` under the 32-byte PIOP session
+    /// The batched opening of all seven groups at `points` under the 32-byte PIOP session
     /// digest; returns the proof and the claims it authenticates (evaluated from the
     /// tables, one streaming pass per polynomial).
     pub fn open(
@@ -392,7 +393,7 @@ impl TableCommitter {
         Ok((proof, claims))
     }
 
-    /// The batched opening of all six groups for claims the caller already holds (the
+    /// The batched opening of all seven groups for claims the caller already holds (the
     /// prover's stage-3 terminal values and multiplicity-digit claims, which equal the
     /// table evaluations).
     pub fn open_claims(
@@ -532,9 +533,10 @@ mod tests {
             .collect();
         let points = group_points(&manifest, &point, &pi_m).unwrap();
         let lengths = points.each_ref().map(Vec::len);
-        assert_eq!(lengths, [25, 25, 19, 15, 14, 16]);
+        assert_eq!(lengths, [25, 25, 19, 15, 14, 22, 16]);
         assert_eq!(points[4][0], point[11]);
-        assert_eq!(points[5], pi_m);
+        assert_eq!(points[5][0], point[3]);
+        assert_eq!(points[6], pi_m);
         assert!(group_points(&manifest, &point[1..], &pi_m).is_err());
         assert!(group_points(&manifest, &point, &pi_m[1..]).is_err());
     }

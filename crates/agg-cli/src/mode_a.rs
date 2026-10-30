@@ -1580,7 +1580,8 @@ impl Aggregator {
         let recording = RecordingMatrices::default();
         let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
             let matrices = recording.0.lock().expect("matrices").clone();
-            *tables = BridgeGroupTables::build(manifest, &honest, &matrices.expect("derived"))
+            let psi = tables.psi().to_vec();
+            *tables = BridgeGroupTables::build(manifest, &honest, &matrices.expect("derived"), &psi)
                 .expect("honest round-2 tables");
         };
         let prove_hooks = ProveHooks {
@@ -2121,13 +2122,13 @@ mod tests {
         let gate = sponge_gate();
         let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         for (d_sig, profile, span, want) in [
-            (3, FlockProfile::Slim, true, "a56daef1067736a1465e21e1099da13ad3dc355f90594e4f401251071f845328"),
-            (10, FlockProfile::Slim, true, "11b035262a5b998594b795e346241abec1b953a14cb4b8afa6d52a444634c960"),
-            (13, FlockProfile::Slim, true, "ca232ca0195b87274440b1745808795c896ef4ceaa4e39d32c08f137f54d75db"),
-            (15, FlockProfile::Fast, true, "98ed5d446d68fe2416580acc5469c29c90d53e1d88937a6c381773b89aa98d00"),
-            (15, FlockProfile::Slim, true, "911303030ad4a06781f89ceff4f373ffdbfe6da1946ae54c30a6a965b3c28cb2"),
-            (15, FlockProfile::Slim, false, "7aa378b470947b1f64a8ae049c4c3741f4ebb493583c305e552750f448f79896"),
-            (15, FlockProfile::Slim8, true, "1467d650376c39e30bde4f7ad9d12ecee8c4f5b3f580ae81ea7364e840b8d8d8"),
+            (3, FlockProfile::Slim, true, "7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f"),
+            (10, FlockProfile::Slim, true, "698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f"),
+            (13, FlockProfile::Slim, true, "5bd3fe07e771dcaa85e92a2997a9fda66e5f1887cbeb64fb0b22682d5fb77d66"),
+            (15, FlockProfile::Fast, true, "5436b95bfe5a7af40ea8d0258d1e15501828fb119442bed0bd29435386a4d666"),
+            (15, FlockProfile::Slim, true, "ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61"),
+            (15, FlockProfile::Slim, false, "6984c30280af6885ffce7c1aac73b59be7eaba8c23d077fc09421fc7d49ca7b0"),
+            (15, FlockProfile::Slim8, true, "66f2907b8f0150c55e8519ea169cb01250cf3cf4cdcfd424607a78d07054369f"),
         ] {
             let n = 1 << d_sig;
             let geometry = Geometry::new(n).unwrap();

@@ -161,7 +161,7 @@ fn bridge_identities_in_the_256_signature_run_with_seed_derived_matrices() {
 
         // The honest round-2 tables: agg-bridge equals the agg-witness reference, the
         // identities hold at every Boolean point, and the published Y is the GF(2) composite.
-        let tables = BridgeGroupTables::build(&manifest, &main, &matrices).unwrap();
+        let tables = BridgeGroupTables::build(&manifest, &main, &matrices, &agg_piop::projection::test_psi(1)).unwrap();
         let expected = reference::compute(&geom, &lanes, &matrices).unwrap();
         assert_eq!(tables.carry_values(&manifest, 1), expected.kappa1.to_vec());
         assert_eq!(tables.carry_values(&manifest, 2), expected.kappa2.to_vec());
@@ -266,7 +266,7 @@ fn bridge_tampering_is_rejected_at_stage_one() {
         assert_eq!(run(&main, Some(carry3)), Some(1));
         // A committed bit flipped in G_main under the stale honest round-2 tables: the level-1
         // parities of the committed bits leave {0, 1} (bool_y1, def_y1).
-        let honest = BridgeGroupTables::build(&manifest, &main, &fixed.0).unwrap();
+        let honest = BridgeGroupTables::build(&manifest, &main, &fixed.0, &agg_piop::projection::test_psi(1)).unwrap();
         let stale: BridgeTamper<'_> = &|_, tables| *tables = honest.clone();
         let mut flipped = main.clone();
         let (_, position) = manifest.locate(Column::W1Bit(2));

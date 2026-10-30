@@ -53,7 +53,8 @@ pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
 /// both).
 pub const STAGE_DEGREES: [usize; 3] = [4, 4, 3];
 
-/// Batching coefficients per stage: `(26, 8, 44)` under H-u, `(26, 7, 45)` under H-exact.
+/// Batching coefficients per stage: `(26, 9, 48)` under H-u, `(26, 8, 49)` under H-exact,
+/// `(26, 8, 55)` under H-FIPS.
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -63,7 +64,7 @@ pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     ]
 }
 
-/// Terminal claims per stage: `(18, 8, 31)` under H-u, `(18, 7, 32)` under H-exact.
+/// Terminal claims per stage: `(18, 9, 34)` under H-u, `(18, 8, 35)` under H-exact.
 #[must_use]
 pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -85,6 +86,17 @@ pub const FINAL_VECTOR_BYTES: usize =
 pub const INSTANCE_SITE: &str = "agg-mldsa/v1/instance";
 pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";
 pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
+/// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v` (`docs/spec.md` 6): one
+/// challenge event after the bridge seed and before the round-2 commitments, whose answer is
+/// `Psi` itself ([`PROJ_ATOMS`] blocks of 32 bytes, 16 KiB, no field sampling, no work).
+/// [`Transcript::challenge_psi`] absorbs the 21 raw bytes of this site name first, so that
+/// `Psi` is drawn at its own sponge input, not as a continuation of the squeeze of `sd`.
+pub const PROJ_SITE: &str = "agg-mldsa/v1/proj/psi";
+/// 32-byte blocks of the projection site's answer.
+pub const PROJ_ATOMS: usize = crate::manifest::PROJ_BYTES / 32;
+/// The shared claimed value `c` of the two sides of the projection identity (end of branch
+/// S, after the stage-2 terminal claims).
+pub const PROJ_CLAIM_SITE: &str = "agg-mldsa/v1/proj/claim";
 pub const FLOCK_SEEDS_SITE: &str = "agg-mldsa/v1/flock/seeds";
 pub const FINAL_VECTORS_SITE: &str = "agg-mldsa/v1/flock/final-vectors";
 /// Event 6 (after the final vectors): the `S` framed share items of the Keccak side (empty
@@ -139,6 +151,7 @@ pub const fn commitment_site(role: GroupRole) -> &'static str {
         GroupRole::Level1 => "agg-mldsa/v1/commit/level1",
         GroupRole::Level2 => "agg-mldsa/v1/commit/level2",
         GroupRole::Level3 => "agg-mldsa/v1/commit/level3",
+        GroupRole::Proj => "agg-mldsa/v1/commit/proj",
         GroupRole::Mult => "agg-mldsa/v1/commit/mult",
     }
 }
@@ -299,7 +312,9 @@ impl Registry {
         }
         b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        b.push(PROJ_SITE, PUBLIC_KIND, 1, PayloadSize::Exact(PROJ_SITE.len()));
+        b.push(PROJ_SITE, CHALLENGE_KIND, PROJ_ATOMS, PayloadSize::Exact(32 * PROJ_ATOMS));
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
         b.push(
@@ -399,6 +414,9 @@ impl Registry {
                 terminals,
                 PayloadSize::Exact(16 * terminals),
             );
+            if stage == 2 {
+                b.push(PROJ_CLAIM_SITE, PROOF_KIND, 1, PayloadSize::Exact(16));
+            }
         }
         // The join: the Keccak side's proofs, after every PIOP challenge and
         // before the PCS session digest, which therefore binds every Flock byte.
@@ -769,6 +787,14 @@ impl Transcript {
         Ok(out)
     }
 
+    /// The projection matrix `Psi` (event 3, after `sd`): absorb the raw bytes of
+    /// [`PROJ_SITE`] as one public message (no length frame; the registry fixes the event),
+    /// then squeeze the [`PROJ_ATOMS`] 32-byte blocks of `Psi` at that new input.
+    pub fn challenge_psi(&mut self) -> Result<Vec<u8>, TranscriptError> {
+        self.absorb_kind(PUBLIC_KIND, PROJ_SITE, 1, PROJ_SITE.as_bytes())?;
+        self.challenge_bytes(PROJ_SITE, PROJ_ATOMS)
+    }
+
     /// Export the 32-byte PCS session digest after the stage-3 terminal (a clone of the
     /// sponge, so the native PCS stream is separately domain-separated).
     pub fn pcs_session(&mut self) -> Result<[u8; 32], TranscriptError> {
@@ -926,7 +952,7 @@ mod tests {
 
     /// The events before the lookup: instance, two round-1 commitments, Flock commitments,
     /// seed, four round-2 commitments, Flock seeds, final vectors, Flock shares.
-    const LEADING: usize = 12;
+    const LEADING: usize = 15;
 
     fn lookup_events(manifest: &CommitmentManifest) -> usize {
         let shape = manifest.lookup_shape();
@@ -940,11 +966,12 @@ mod tests {
         let rounds = 17;
         let lookup = lookup_events(&manifest);
         // Leading events, L's label and the lookup, S's label, tau and the pre-stage
-        // claims, the kappa1 absorb, three stages of gamma + rounds + terminal, the branch
-        // join before stage 3, the Flock join, the PCS export.
+        // claims, the kappa1 absorb, three stages of gamma + rounds + terminal, the
+        // projection claim after stage 2, the branch join before stage 3, the Flock join,
+        // the PCS export.
         assert_eq!(
             registry.len(),
-            LEADING + 1 + lookup + 1 + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1 + 1
+            LEADING + 1 + lookup + 1 + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1 + 1 + 1
         );
         assert_eq!(registry.fork[0], LEADING);
         let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
@@ -956,9 +983,12 @@ mod tests {
                 "agg-mldsa/v1/commit/main",
                 FLOCK_COMMIT_SITE,
                 BRIDGE_SEED_SITE,
+                PROJ_SITE,
+                PROJ_SITE,
                 "agg-mldsa/v1/commit/level1",
                 "agg-mldsa/v1/commit/level2",
                 "agg-mldsa/v1/commit/level3",
+                "agg-mldsa/v1/commit/proj",
                 "agg-mldsa/v1/commit/mult",
                 FLOCK_SEEDS_SITE,
                 FINAL_VECTORS_SITE,
@@ -977,9 +1007,12 @@ mod tests {
         assert_eq!(sites[after + 3], "agg-mldsa/v1/stage1/round/0/message");
         assert_eq!(sites[after + 3 + 2 * rounds], "agg-mldsa/v1/stage1/terminal");
         assert_eq!(sites[after + 4 + 2 * rounds], KAPPA1_SITE);
-        // The branch join: after the stage-2 terminal, before gamma^(3).
+        // The branch join: after the stage-2 terminal and the projection claim, before
+        // gamma^(3).
         let join = registry.fork[2];
-        assert_eq!(sites[join - 1], "agg-mldsa/v1/stage2/terminal");
+        assert_eq!(sites[join - 2], "agg-mldsa/v1/stage2/terminal");
+        assert_eq!(sites[join - 1], PROJ_CLAIM_SITE);
+        assert_eq!(registry.events[join - 1].size, PayloadSize::Exact(16));
         assert_eq!(sites[join], FORK_JOIN_SITE);
         assert_eq!(sites[join + 1], "agg-mldsa/v1/stage3/gamma");
         assert_eq!(registry.events[join].size, PayloadSize::Exact(64));
@@ -990,16 +1023,19 @@ mod tests {
         assert_eq!(sites[registry.len() - 1], PCS_SESSION_SITE);
         assert_eq!(sites.iter().filter(|s| **s == FLOCK_PROOFS_SITE).count(), 1);
         let kinds: Vec<u8> = registry.events.iter().map(|e| e.kind).collect();
-        assert_eq!(&kinds[..5], &[0, 1, 1, 1, 2]);
+        assert_eq!(&kinds[..7], &[0, 1, 1, 1, 2, 0, 2]);
         assert_eq!(registry.events[4].size, PayloadSize::Exact(32));
-        assert_eq!(registry.events[9].atoms, 1, "one segment at N = 100");
-        // Two lookup challenges, 4 layer-1 values per tree (2 x (4 stacks + 1 table)).
+        // Psi: its 21-byte label, then 128 rows of 1,024 bits in 512 blocks of 32 bytes.
+        assert_eq!(registry.events[5].size, PayloadSize::Exact(21));
+        assert_eq!((registry.events[6].atoms, registry.events[6].size), (512, PayloadSize::Exact(16_384)));
+        assert_eq!(registry.events[12].atoms, 1, "one segment at N = 100");
+        // Two lookup challenges, 4 layer-1 values per tree (2 x (5 stacks + 1 table)).
         assert_eq!(registry.events[LEADING + 1].atoms, 2);
-        assert_eq!(registry.events[LEADING + 2].atoms, 40);
+        assert_eq!(registry.events[LEADING + 2].atoms, 48);
         assert_eq!(registry.events[after].atoms, rounds);
         let full = Registry::new(&CommitmentManifest::for_batch(1 << 15).unwrap());
-        assert_eq!(full.events[9].size, PayloadSize::Exact(128));
-        assert_eq!(full.events[10].size, PayloadSize::Exact(4 * 512));
+        assert_eq!(full.events[12].size, PayloadSize::Exact(128));
+        assert_eq!(full.events[13].size, PayloadSize::Exact(4 * 512));
     }
 
     /// Absorb events 1 to 3 with dummy payloads.
@@ -1035,6 +1071,18 @@ mod tests {
         let seed = t.challenge_bytes(BRIDGE_SEED_SITE, 1).unwrap();
         assert_eq!(seed.len(), 32);
         assert!(t.require_next(5).is_ok());
+        // Psi is drawn after its separation label, as the site's answer: 16 KiB, no other
+        // size, and not directly after the seed.
+        assert!(matches!(
+            t.challenge_bytes(PROJ_SITE, PROJ_ATOMS),
+            Err(TranscriptError::EventOrder { index: 5, .. })
+        ));
+        t.absorb_kind(PUBLIC_KIND, PROJ_SITE, 1, PROJ_SITE.as_bytes()).unwrap();
+        assert!(matches!(
+            t.challenge_bytes(PROJ_SITE, 1),
+            Err(TranscriptError::EventShape { index: 6 })
+        ));
+        assert_eq!(t.challenge_bytes(PROJ_SITE, PROJ_ATOMS).unwrap().len(), 16_384);
         assert!(t.ensure_complete().is_err());
     }
 
@@ -1057,7 +1105,8 @@ mod tests {
     /// Events 1 to 6 with dummy payloads.
     fn to_lookup(t: &mut Transcript) {
         to_seed(t, &[0]);
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        t.challenge_psi().unwrap();
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             t.absorb(commitment_site(role), 1, &[0]).unwrap();
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
@@ -1070,16 +1119,17 @@ mod tests {
         // The difficulties of `docs/soundness.md` at N = 100 (N* = 128): d_main = 17.
         let registry = Registry::new(&manifest());
         let sites: Vec<WorkSite> = registry.work_sites().collect();
-        assert_eq!(sites.len(), 264);
+        assert_eq!(sites.len(), 244);
         assert_eq!((sites[0].class, sites[0].bits), (SiteClass::LookupX, 0));
         assert_eq!((sites[1].class, sites[1].i, sites[1].bits), (SiteClass::LookupMu, 1, 1));
-        // Session 2: all ten trees active, 20 coefficients, 5 bits; one round of 2 bits.
+        // Session 2: all twelve trees active, 24 coefficients, 5 bits; one round of 2 bits.
         assert_eq!((sites[2].class, sites[2].i, sites[2].bits), (SiteClass::LookupGamma, 2, 5));
         assert_eq!((sites[3].class, sites[3].i, sites[3].j, sites[3].bits), (SiteClass::LookupRound, 2, 0, 2));
         let tau = sites.iter().find(|s| s.class == SiteClass::Tau).unwrap();
         assert_eq!(tau.bits, 5);
         let gammas: Vec<u8> = sites.iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
         assert_eq!(gammas, [5, 4, 6]);
+        assert_eq!(sites.iter().filter(|s| s.class == SiteClass::LookupMu).count(), 18);
         for (stage, bits) in [(1, 3), (2, 3), (3, 2)] {
             let rounds: Vec<&WorkSite> = sites
                 .iter()
@@ -1089,37 +1139,38 @@ mod tests {
             assert!(rounds.iter().all(|s| s.bits == bits));
             assert_eq!(rounds[16].j, 16);
         }
-        // 2,442 stream bits at N* = 2^7.
-        assert_eq!(registry.work_bits(), 2442);
-        assert_eq!(work_bytes(&manifest()), 306);
-        // H-exact: gamma^(2) has 7 coefficients (g = 3), gamma^(3) 45
-        // (g = 6), the rounds keep their difficulties; one stream bit fewer.
+        // 2,262 stream bits at N* = 2^7 (D = 18: one GKR session fewer than with V_lo,
+        // V_hi looked up).
+        assert_eq!(registry.work_bits(), 2262);
+        assert_eq!(work_bytes(&manifest()), 283);
+        // H-exact: gamma^(2) has 8 coefficients (g = 4), gamma^(3) 49
+        // (g = 6), the rounds keep their difficulties: the plan is H-u's.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
-        assert_eq!(stage_gammas(&exact), [26, 7, 45]);
-        assert_eq!(stage_terminals(&exact), [18, 7, 32]);
-        assert_eq!(stage_gammas(&manifest()), [26, 8, 44]);
-        assert_eq!(stage_terminals(&manifest()), [18, 8, 31]);
+        assert_eq!(stage_gammas(&exact), [26, 8, 49]);
+        assert_eq!(stage_terminals(&exact), [18, 8, 35]);
+        assert_eq!(stage_gammas(&manifest()), [26, 9, 48]);
+        assert_eq!(stage_terminals(&manifest()), [18, 9, 34]);
         let exact_registry = Registry::new(&exact);
         let gammas: Vec<u8> = exact_registry
             .work_sites()
             .filter(|s| s.class == SiteClass::StageGamma)
             .map(|s| s.bits)
             .collect();
-        assert_eq!(gammas, [5, 3, 6]);
-        assert_eq!(exact_registry.work_bits(), 2441);
-        assert_eq!(work_bytes(&exact), 306);
-        // H-FIPS: gamma^(2) has 7 coefficients (def_y1 and F3, g = 3),
-        // gamma^(3) 51 (g = 6); stage-2 terminals add delta and e, stage 3 opens 36 claims.
+        assert_eq!(gammas, [5, 4, 6]);
+        assert_eq!(exact_registry.work_bits(), 2262);
+        assert_eq!(work_bytes(&exact), 283);
+        // H-FIPS: gamma^(2) has 8 coefficients (def_y1, leaf4[K_2] and F3, g = 4),
+        // gamma^(3) 55 (g = 6); stage-2 terminals add delta and e, stage 3 opens 39 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
-        assert_eq!(stage_gammas(&fips), [26, 7, 51]);
-        assert_eq!(stage_terminals(&fips), [18, 8, 36]);
+        assert_eq!(stage_gammas(&fips), [26, 8, 55]);
+        assert_eq!(stage_terminals(&fips), [18, 9, 39]);
         let fips_registry = Registry::new(&fips);
         let gammas: Vec<u8> = fips_registry
             .work_sites()
             .filter(|s| s.class == SiteClass::StageGamma)
             .map(|s| s.bits)
             .collect();
-        assert_eq!(gammas, [5, 3, 6]);
+        assert_eq!(gammas, [5, 4, 6]);
         assert_eq!(fips_registry.work_bits(), exact_registry.work_bits());
         // The challenge field is K = F_{p^2} with p = 2^64 - 59, as the difficulties assume.
         assert_eq!(BaseField::from_u64(agg_bridge::pow::P), BaseField::from_u64(0));
@@ -1134,7 +1185,7 @@ mod tests {
         to_lookup(&mut trunk);
         let (mut prover, _) = trunk.fork().unwrap();
         let x = LookupTranscript::challenges(&mut prover, LookupSite::X, 2).unwrap();
-        prover.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40]).unwrap();
+        prover.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 48]).unwrap();
         let mu = LookupTranscript::challenges(&mut prover, LookupSite::Mu(1), 1).unwrap();
         let stream = prover.work_stream();
         assert_eq!(stream.len(), 1, "X carries no nonce, mu_1 one of 8 bits");
@@ -1150,7 +1201,7 @@ mod tests {
             to_lookup(&mut trunk);
             let (mut t, _) = trunk.fork()?;
             let x = t.challenge_extensions(&lookup_site(LookupSite::X), 2)?;
-            t.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 40])?;
+            t.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 48])?;
             let mu = t.challenge_extensions(&lookup_site(LookupSite::Mu(1)), 1)?;
             Ok((x, mu))
         };
@@ -1174,7 +1225,7 @@ mod tests {
             Err(TranscriptError::WorkStream(WorkStreamError::Length))
         ));
         let mut padded = bytes.clone();
-        *padded.last_mut().unwrap() |= 0x80; // 2,442 bits: the last 6 bits are padding
+        *padded.last_mut().unwrap() |= 0x80; // 2,262 bits: the last 2 bits are padding
         assert!(matches!(
             Transcript::replay(&manifest, &record, &padded),
             Err(TranscriptError::WorkStream(WorkStreamError::Padding))
@@ -1189,14 +1240,15 @@ mod tests {
         let manifest = manifest();
         let mut t = Transcript::new(&manifest, &manifest.binding_bytes()).unwrap();
         to_seed(&mut t, &[0]);
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        t.challenge_psi().unwrap();
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             t.absorb(commitment_site(role), 1, &[0]).unwrap();
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
         assert!(matches!(
             t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]),
-            Err(TranscriptError::EventOrder { index: 11, .. })
+            Err(TranscriptError::EventOrder { index: 14, .. })
         ));
     }
 
@@ -1235,7 +1287,8 @@ mod tests {
         assert!(decode_extensions(&bad).is_none());
         let mut t = Transcript::new(&manifest(), &[1, 2]).unwrap();
         to_seed(&mut t, &[0]);
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        t.challenge_psi().unwrap();
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             t.absorb(commitment_site(role), 1, &[0]).unwrap();
         }
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
@@ -1295,7 +1348,7 @@ mod tests {
             assert!(s.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
             // The trunk waits at the join: stage 3 cannot start, a join of unfinished
             // branches is refused.
-            assert!(trunk.challenge_extensions(&gamma_site(3), 44).is_err());
+            assert!(trunk.challenge_extensions(&gamma_site(3), 48).is_err());
             let first = [
                 l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(),
                 s.challenge_extensions(TAU_SITE, 17).unwrap(),
@@ -1313,7 +1366,7 @@ mod tests {
                 trunk.join(l, s).unwrap();
             }
             let work = trunk.work_stream();
-            let gamma = trunk.challenge_extensions(&gamma_site(3), 44).unwrap();
+            let gamma = trunk.challenge_extensions(&gamma_site(3), 48).unwrap();
             (gamma, work, first)
         };
         let (gamma, work, first) = forked(false);
@@ -1346,7 +1399,7 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         trunk.join(l, s).unwrap();
-        trunk.challenge_extensions(&gamma_site(3), 44).unwrap();
+        trunk.challenge_extensions(&gamma_site(3), 48).unwrap();
         let mut stream = trunk.work_stream();
         let bits = Registry::new(&manifest).work_bits();
         let stage3: usize = Registry::new(&manifest)
@@ -1364,6 +1417,6 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         replay.join(l, s).unwrap();
-        assert_eq!(replay.challenge_extensions(&gamma_site(3), 44).unwrap(), gamma);
+        assert_eq!(replay.challenge_extensions(&gamma_site(3), 48).unwrap(), gamma);
     }
 }

@@ -21,8 +21,10 @@
 //!   `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e` (after `a_z`); each record's
 //!   hint slack `u_h = 80 - sum delta^2` is kept for `G_2`. Padded rows: `(s, L, delta, e) =
 //!   (0, gamma_2 - 1, 0, 0)`, `u_h = 80`.
-//! * [`BridgeGroupTables`], round 2: the carries `kappa^(1)_t, kappa^(2)_t, kappa^(3)` as
-//!   balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
+//! * [`BridgeGroupTables`], round 2: the projection digits of `v` under `Psi` (`G_k`,
+//!   `projection::ProjectionTables`; the honest prover aborts on an output outside
+//!   `[-2^33, 2^33)`), the zero polynomials of `G_3`, the carries `kappa^(1)_t, kappa^(2)_t,
+//!   kappa^(3)` as balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
 //!   the multiplicity column `m` of `T_16` over every looked-up cell with its seven balanced
 //!   base-16 digits (`G_m`). Parities and carries come from `agg_bridge::parity` at the
@@ -32,8 +34,8 @@
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
-//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, the
-//! zero-checks of `bz_hi`, `a_z`).
+//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, `K_2`, the
+//! zero-checks of `bz_hi`, `a_z`); `V_lo`, `V_hi` have none (the projection bounds `v`).
 
 use agg_bridge::{parity, Shape};
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
@@ -48,6 +50,7 @@ use agg_witness::params::{GAMMA2, K, L, N, OMEGA, POSITIONS, W1_BITS};
 use rayon::prelude::*;
 
 use crate::kernel::{Lane, Source};
+use crate::projection::ProjectionTables;
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
     value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupDescriptor, GroupRole,
@@ -110,6 +113,16 @@ pub enum SourceTableError {
     Bridge(BridgeError),
     /// A looked-up cell is outside `T_16` (honest abort) or the multiplicities overflow.
     Lookup(LookupError),
+    /// A projection output `k = <Psi_o, v_i>` of record `record` is outside `[-2^33, 2^33)`
+    /// (honest abort, completeness only: the aggregator can drop the record and retry).
+    ProjectionRange {
+        /// The record (`i`).
+        record: usize,
+        /// The row (`o`).
+        row: usize,
+        /// The output.
+        value: i64,
+    },
 }
 
 impl std::fmt::Display for SourceTableError {
@@ -838,6 +851,11 @@ pub struct BridgeGroupTables {
     level2: Vec<i32>,
     level3: Vec<i32>,
     y: Vec<u8>,
+    proj: ProjectionTables,
+    /// The projection matrix the digits were built under (public, not committed content).
+    psi: Vec<u8>,
+    /// The cells of `G_3`'s zero polynomials (shared by all of them).
+    zeros: Vec<i8>,
     multiplicity: Vec<i32>,
     digits: Vec<Vec<i8>>,
 }
@@ -851,6 +869,7 @@ impl PartialEq for BridgeGroupTables {
             && self.level2 == other.level2
             && self.level3 == other.level3
             && self.y == other.y
+            && self.proj == other.proj
             && self.multiplicity == other.multiplicity
             && self.digits == other.digits
     }
@@ -860,13 +879,20 @@ impl Eq for BridgeGroupTables {}
 
 impl BridgeGroupTables {
     /// The honest round-2 tables for the committed bits of `main` and the matrices derived
-    /// from the bridge seed, with the multiplicities of every
-    /// looked-up cell of both rounds.
+    /// from the bridge seed, the projection digits of the committed `v` under `psi`
+    /// (`projection`), with the multiplicities of every looked-up cell of both rounds.
     pub fn build(
         manifest: &CommitmentManifest,
         main: &MainTables,
         matrices: &BridgeMatrices,
+        psi: &[u8],
     ) -> Result<Self, SourceTableError> {
+        let proj = ProjectionTables::build(
+            manifest,
+            main.column(manifest, Column::V_LO).wide(),
+            main.column(manifest, Column::V_HI).wide(),
+            psi,
+        )?;
         let shape = Shape::PRODUCTION;
         let witness = parity::compute(&shape, &main.bit_lanes(manifest), matrices)
             .map_err(SourceTableError::Bridge)?;
@@ -888,6 +914,9 @@ impl BridgeGroupTables {
             level2: stack_carries(&level2_columns, 8)?,
             level3: stack_carries(std::slice::from_ref(&witness.kappa3), 1)?,
             y: witness.y_bits(),
+            proj,
+            psi: psi.to_vec(),
+            zeros: vec![0; manifest.group(GroupRole::Level3).logical_cells()],
             multiplicity: Vec::new(),
             digits: Vec::new(),
         };
@@ -917,9 +946,10 @@ impl BridgeGroupTables {
         self.multiplicity = m;
     }
 
-    /// The shape and alphabet self-check of the four round-2 groups.
+    /// The shape and alphabet self-check of the five round-2 groups (`G_1`, `G_2`, `G_3`,
+    /// `G_k`, `G_m`).
     pub fn validate(&self, manifest: &CommitmentManifest) -> Result<(), SourceTableError> {
-        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult] {
+        for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             validate_group(manifest.group(role), &self.group(manifest, role))?;
         }
         if self.y.len() != manifest.group(GroupRole::Level3).logical_cells() || self.y.iter().any(|&bit| bit > 1) {
@@ -943,7 +973,14 @@ impl BridgeGroupTables {
                 .map(|p| Cells::Narrow(p))
                 .chain(carries(&self.level2, cells, manifest.stack_columns(2).len()))
                 .collect(),
-            GroupRole::Level3 => carries(&self.level3, cells, 1),
+            GroupRole::Level3 => {
+                let zeros = manifest.group(role).polynomial_count() - 1;
+                carries(&self.level3, cells, 1)
+                    .into_iter()
+                    .chain(std::iter::repeat_n(Cells::Narrow(&self.zeros), zeros))
+                    .collect()
+            }
+            GroupRole::Proj => self.proj.columns(),
             GroupRole::Mult => self.digits.iter().map(|d| Cells::Narrow(d)).collect(),
             GroupRole::Main16 | GroupRole::Main => panic!("a round-1 group"),
         }
@@ -987,6 +1024,24 @@ impl BridgeGroupTables {
     /// Forget the cached level-1 parities (the tables were changed after `build`).
     pub(crate) fn drop_parity1_cache(&mut self) {
         self.parity1 = None;
+    }
+
+    /// The projection digits (`G_k`).
+    #[must_use]
+    pub fn projection(&self) -> &ProjectionTables {
+        &self.proj
+    }
+
+    /// The projection matrix `Psi` the digits were built under.
+    #[must_use]
+    pub fn psi(&self) -> &[u8] {
+        &self.psi
+    }
+
+    /// Mutable projection digits (adversarial tests; `m` is not recounted).
+    #[doc(hidden)]
+    pub fn projection_mut(&mut self) -> &mut ProjectionTables {
+        &mut self.proj
     }
 
     /// The level-2 parities `y^(2)_t`.
@@ -1039,15 +1094,23 @@ impl BridgeGroupTables {
     }
 }
 
-/// The four lookup stacks of the batch (`docs/lookup.md`), borrowed from the
-/// tables: `[Z_lo | U_lo | V_lo | V_hi]` and the stacked carries of levels 1 to 3.
+/// The five lookup stacks of the batch (`docs/lookup.md`), borrowed from the
+/// tables: `[Z_lo | U_lo]` (the first half of the stacked `G_main16` lane), the stacked
+/// carries of levels 1 to 3 and `[K_0 | K_1]` on the projection domain.
 pub fn lookup_stacks<'a>(
     manifest: &CommitmentManifest,
     main: &'a MainTables,
     bridge: &'a BridgeGroupTables,
 ) -> Result<Vec<LookupStack<'a>>, LookupError> {
     let shape = manifest.lookup_shape();
-    let lanes: [&[i32]; 4] = [main.wide(), bridge.carries(1), bridge.carries(2), bridge.carries(3)];
+    let main_stack = &main.wide()[..shape.stacks[0].leaves()];
+    let lanes: [&[i32]; 5] = [
+        main_stack,
+        bridge.carries(1),
+        bridge.carries(2),
+        bridge.carries(3),
+        &bridge.projection().stacked,
+    ];
     shape
         .stacks
         .iter()
@@ -1092,7 +1155,7 @@ impl<'a> SourceTables<'a> {
         value_columns(value).into_iter().map(|c| self.column(c)).collect()
     }
 
-    /// The four lookup stacks.
+    /// The five lookup stacks.
     pub fn lookup_stacks(&self) -> Result<Vec<LookupStack<'a>>, LookupError> {
         lookup_stacks(self.manifest, self.main, self.bridge)
     }

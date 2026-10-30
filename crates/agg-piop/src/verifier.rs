@@ -523,10 +523,11 @@ fn run(
         .challenge_bytes(BRIDGE_SEED_SITE, 1)?
         .try_into()
         .expect("32 bytes");
+    let psi = transcript.challenge_psi()?;
     timings.transcript = clock.lap();
     let matrices = bridge.matrices(&bridge_seed);
     timings.matrices = clock.lap();
-    for (role, bytes) in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Mult]
+    for (role, bytes) in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
         .into_iter()
         .zip(&proof.bridge_commitments)
     {
@@ -590,6 +591,7 @@ fn run(
         &manifest,
         &matrices,
         &y_table,
+        &psi,
         &piop,
         &mut transcript,
         timings,
@@ -642,7 +644,7 @@ fn run(
     )
     .map_err(VerifyError::Opening)?;
     let commitments: [Commitment<BaseField>; GROUP_COUNT] =
-        commitments.try_into().expect("six commitments");
+        commitments.try_into().expect("seven commitments");
     pcs.verify(&commitments, &claims, &proof.opening, &session)
         .map_err(|e| VerifyError::Opening(PcsError::Commit(e)))?;
     timings.opening = clock.lap();
@@ -677,6 +679,7 @@ pub fn verify_piop(
     manifest: &CommitmentManifest,
     matrices: &BridgeMatrices,
     y_table: &[u8],
+    psi: &[u8],
     proof: &PiopProof,
     transcript: &mut Transcript,
     timings: &mut VerifyTimings,
@@ -738,6 +741,7 @@ pub fn verify_piop(
             &stage1,
             &stage2,
             &lookup_inputs,
+            psi,
             &proof.stage3,
             transcript,
             public_pass,

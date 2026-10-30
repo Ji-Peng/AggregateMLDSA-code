@@ -61,7 +61,7 @@ fn rejection(error: &VerifyError) -> Option<usize> {
 /// accepted.
 fn rejecting_place_with(batch: &Batch, main: &MainTables, uh_cell: Option<(usize, i32)>) -> Option<usize> {
     // An out-of-table main cell makes the honest recount abort: keep the honest round 2.
-    let mut bridge = BridgeGroupTables::build(&batch.manifest, main, &batch.matrices)
+    let mut bridge = BridgeGroupTables::build(&batch.manifest, main, &batch.matrices, batch.bridge.psi())
         .unwrap_or_else(|_| batch.bridge.clone());
     if let Some((index, stored)) = uh_cell {
         let cells = batch.manifest.group(GroupRole::Level2).logical_cells();
@@ -190,14 +190,15 @@ fn h_fips_piop_round_trip_matches_the_tables_and_the_pointwise_identities() {
         check_pointwise(&batch);
         let tables = batch.tables();
         let (proof, _) = prove_tables(&batch, tables, false).expect("honest prover");
-        assert!(proof.stage2.claims.squares.is_empty());
+        // The only leaf digit is the projection digit K_2.
+        assert_eq!(proof.stage2.claims.squares.len(), 1);
         assert_eq!(proof.stage2.claims.fips.len(), 2);
-        assert_eq!(proof.stage3.claims.0.len(), 36);
+        assert_eq!(proof.stage3.claims.0.len(), 39);
         assert_eq!(proof.stage2.rounds[0].len(), 4);
         let (points, stage3, _) = verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
         for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
             let point = suffix(&stage3.point, group.logical_vars);
-            for &column in &group.columns {
+            for &column in group.columns.iter().filter(|c| !c.is_zero()) {
                 assert_eq!(
                     stage3.claims.column(manifest, column),
                     tables.column(column).evaluate(&point),

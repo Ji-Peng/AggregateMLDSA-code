@@ -47,7 +47,7 @@ fn rejection(error: &VerifyError) -> Option<usize> {
 /// Prove (self-checks skipped) and verify the PIOP part of `main` with honest round-2
 /// tables whose multiplicities count the in-table cells only; `None` when accepted.
 fn rejecting_place(batch: &Batch, main: &MainTables) -> Option<usize> {
-    let mut bridge = BridgeGroupTables::build(&batch.manifest, main, &batch.matrices)
+    let mut bridge = BridgeGroupTables::build(&batch.manifest, main, &batch.matrices, batch.bridge.psi())
         .unwrap_or_else(|_| batch.bridge.clone());
     let m = lenient_multiplicities(SourceTables {
         manifest: &batch.manifest,
@@ -161,13 +161,13 @@ fn h_exact_piop_round_trip_matches_the_tables_and_the_pointwise_identities() {
         assert!(w1_table(&batch.main.bit_lanes(manifest)).iter().all(|&w| (0..44).contains(&w)));
         // The honest PIOP verifies and every claim is the extension of its table.
         let (proof, _) = prove_tables(&batch, tables, false).expect("honest prover");
-        assert_eq!(proof.stage2.claims.squares.len(), 1);
-        assert_eq!(proof.stage3.claims.0.len(), 32);
+        assert_eq!(proof.stage2.claims.squares.len(), 2);
+        assert_eq!(proof.stage3.claims.0.len(), 35);
         assert_eq!(proof.stage2.rounds[0].len(), 4);
         let (points, stage3, _) = verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
         for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
             let point = suffix(&stage3.point, group.logical_vars);
-            for &column in &group.columns {
+            for &column in group.columns.iter().filter(|c| !c.is_zero()) {
                 assert_eq!(stage3.claims.column(manifest, column), tables.column(column).evaluate(&point), "{}", column.name());
             }
         }

@@ -66,8 +66,8 @@ pub struct AggregateProof {
     pub main_commitment: Vec<u8>,
     /// Event 2: `S` Flock commitments.
     pub flock_commitments: Vec<Vec<u8>>,
-    /// Event 4: the round-2 Akita commitments (`G_1, G_2, G_3, G_m`).
-    pub bridge_commitments: [Vec<u8>; 4],
+    /// Event 4: the round-2 Akita commitments (`G_1, G_2, G_3, G_k, G_m`).
+    pub bridge_commitments: [Vec<u8>; 5],
     /// Event 6: `Y_sigma`, 4,096 bits packed least significant first.
     pub final_vectors: Vec<[u8; FINAL_VECTOR_BYTES]>,
     /// Event 6: `S` share items of the Keccak side (mode A: the shares of a segment's parts
@@ -189,6 +189,7 @@ impl AggregateProof {
         w.elements(&self.stage2.kappa1.to_vec());
         w.rounds(&self.stage2.rounds);
         w.elements(&self.stage2.claims.to_vec());
+        w.elements(&[self.stage2.projection]);
         w.rounds(&self.stage3.rounds);
         w.elements(&self.stage3.claims.0);
         for item in &self.flock_proofs {
@@ -228,7 +229,7 @@ impl AggregateProof {
         let flock_commitments = (0..segments)
             .map(|_| r.framed())
             .collect::<Result<Vec<_>, _>>()?;
-        let bridge_commitments = [r.framed()?, r.framed()?, r.framed()?, r.framed()?];
+        let bridge_commitments = [r.framed()?, r.framed()?, r.framed()?, r.framed()?, r.framed()?];
         let final_vectors = (0..segments)
             .map(|_| r.array::<FINAL_VECTOR_BYTES>())
             .collect::<Result<Vec<_>, _>>()?;
@@ -251,6 +252,7 @@ impl AggregateProof {
             rounds: r.rounds(rounds, STAGE_DEGREES[1])?,
             claims: Stage2Claims::from_slice(&manifest, &r.elements(Stage2Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 2 claims"))?,
+            projection: r.elements(1)?[0],
         };
         let stage3 = Stage3Proof {
             rounds: r.rounds(rounds, STAGE_DEGREES[2])?,
@@ -302,6 +304,7 @@ impl AggregateProof {
             + Stage1Claims::LEN
             + Kappa1Claims::LEN
             + self.stage2.claims.to_vec().len()
+            + 1
             + self.stage3.claims.0.len()
             + rounds * (STAGE_DEGREES[0] + STAGE_DEGREES[1] + STAGE_DEGREES[2]))
     }
@@ -314,7 +317,7 @@ pub struct ProofSize {
     pub header: usize,
     /// The `32 N` bytes of `c~_i`.
     pub c_tilde: usize,
-    /// Events 1 and 4: the six Akita commitments.
+    /// Events 1 and 4: the seven Akita commitments.
     pub akita_commitments: usize,
     /// Event 2: the Keccak-side items (Flock commitments; mode B: the public bits).
     pub keccak_commitments: usize,
@@ -449,7 +452,7 @@ mod tests {
             main16_commitment: vec![1, 2],
             main_commitment: vec![1, 2, 3],
             flock_commitments: vec![vec![4; 10]; segments],
-            bridge_commitments: [vec![5], vec![], vec![6, 7], vec![8]],
+            bridge_commitments: [vec![5], vec![], vec![6, 7], vec![10, 11, 12], vec![8]],
             final_vectors: vec![[8; 512]; segments],
             flock_shares: vec![vec![]; segments],
             flock_proofs: vec![vec![3; 5]; segments],
@@ -465,6 +468,7 @@ mod tests {
                 rounds: rounds_of(STAGE_DEGREES[1], rng),
                 claims: Stage2Claims::from_slice(&manifest, &point(rng, Stage2Claims::len(&manifest)))
                     .unwrap(),
+                projection: point(rng, 1)[0],
             },
             stage3: Stage3Proof {
                 rounds: rounds_of(3, rng),
@@ -491,8 +495,9 @@ mod tests {
             let segments = proof.flock_proofs.len();
             let join = &bytes[bytes.len() - tail - 9 * segments..bytes.len() - tail];
             assert_eq!(join, [5, 0, 0, 0, 3, 3, 3, 3, 3].repeat(segments));
-            // Relation H-u: stage degrees 4, 4, 3 (11 elements per round).
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 31 + 11 * proof.stage1.rounds.len()));
+            // Relation H-u: stage degrees 4, 4, 3 (11 elements per round); the shared
+            // projection claim after the stage-2 terminal.
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 9 + 1 + 34 + 11 * proof.stage1.rounds.len()));
             let shape = CommitmentManifest::for_batch(records).unwrap().lookup_shape();
             assert_eq!(size.lookup, 16 * (shape.proof_elements() + 7));
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
@@ -512,7 +517,7 @@ mod tests {
             assert!(size.work >= 227);
             // Relation byte: 0 (H-u), 1 (H-exact), 2 (H-FIPS); 3 and above are unknown. The
             // parser reads the relation from the header (H-u and H-exact proofs have equally
-            // many stage claims, 8 + 31 = 7 + 32, so a rewritten flag may still parse; the
+            // many stage claims, 9 + 34 = 8 + 35, so a rewritten flag may still parse; the
             // verifier compares it with the relation it expects).
             assert_eq!(bytes[2], 0);
             for (flag, relation) in [(1_u8, Relation::HExact), (2, Relation::HFips)] {
@@ -532,7 +537,8 @@ mod tests {
             n[3..11].copy_from_slice(&0_u64.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&n), Err(WireError::Records(0)));
             // A non-canonical limb in the first lookup element.
-            let offset = 11 + 32 * records + (4 + 2) + (4 + 3) + 4 + 4 + 10 + (4 + 1) + 4 + (4 + 2) + (4 + 1) + 512 + 4;
+            let offset =
+                11 + 32 * records + (4 + 2) + (4 + 3) + 4 + 4 + 10 + (4 + 1) + 4 + (4 + 2) + (4 + 3) + (4 + 1) + 512 + 4;
             let mut limb = bytes.clone();
             limb[offset..offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
             assert_eq!(AggregateProof::from_bytes(&limb), Err(WireError::Encoding));
@@ -558,17 +564,17 @@ mod tests {
             let parsed = AggregateProof::from_bytes(&bytes).unwrap();
             assert_eq!(parsed, proof);
             assert_eq!(parsed.relation, Relation::HExact);
-            assert_eq!(parsed.stage2.claims.squares.len(), 1);
-            assert_eq!(parsed.stage3.claims.0.len(), 32);
-            // H-exact: 13 + 18 + 6 + 7 + 32 claims and 11 elements per round.
+            assert_eq!(parsed.stage2.claims.squares.len(), 2);
+            assert_eq!(parsed.stage3.claims.0.len(), 35);
+            // H-exact: 13 + 18 + 6 + 8 + 1 + 35 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 7 + 32 + 11 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 1 + 35 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             // A truncated proof is rejected.
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 5,616 bytes (25 rounds).
-        assert_eq!(16 * (13 + 18 + 6 + 7 + 32 + 11 * 25), 5_616);
+        // At 2^15 the stage messages and claims take 5,696 bytes (25 rounds), as under H-u.
+        assert_eq!(16 * (13 + 18 + 6 + 8 + 1 + 35 + 11 * 25), 5_696);
     }
 
     #[test]
@@ -581,17 +587,17 @@ mod tests {
             let parsed = AggregateProof::from_bytes(&bytes).unwrap();
             assert_eq!(parsed, proof);
             assert_eq!(parsed.relation, Relation::HFips);
-            assert!(parsed.stage2.claims.squares.is_empty());
+            assert_eq!(parsed.stage2.claims.squares.len(), 1);
             assert_eq!(parsed.stage2.claims.fips.len(), 2);
-            assert_eq!(parsed.stage3.claims.0.len(), 36);
-            // H-FIPS: 13 + 18 + 6 + 8 + 36 claims and 11 elements per round.
+            assert_eq!(parsed.stage3.claims.0.len(), 39);
+            // H-FIPS: 13 + 18 + 6 + 9 + 1 + 39 claims and 11 elements per round.
             let rounds = proof.stage1.rounds.len();
-            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 8 + 36 + 11 * rounds));
+            assert_eq!(proof.piop_bytes(), 16 * (13 + 18 + 6 + 9 + 1 + 39 + 11 * rounds));
             assert_eq!(proof.size().total(), bytes.len());
             assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 200]), Err(WireError::Truncated));
         }
-        // At 2^15 the stage messages and claims take 5,696 bytes (25 rounds).
-        assert_eq!(16 * (13 + 18 + 6 + 8 + 36 + 11 * 25), 5_696);
+        // At 2^15 the stage messages and claims take 5,776 bytes (25 rounds).
+        assert_eq!(16 * (13 + 18 + 6 + 9 + 1 + 39 + 11 * 25), 5_776);
     }
 
     #[test]

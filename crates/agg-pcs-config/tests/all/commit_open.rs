@@ -1,5 +1,5 @@
 //! Two-round commit of a dummy batch of every group (two families, width 4 and
-//! width 16) and one batched Akita opening of all six groups, at `N = 2^8` and
+//! width 16) and one batched Akita opening of all seven groups, at `N = 2^8` and
 //! `N = 2^10` signatures.
 #![cfg(feature = "schedules")]
 
@@ -105,14 +105,15 @@ fn malformed_tables_are_rejected_before_akita() {
     let plan = WorkPlan::for_records(1 << 8, Relation::Hu).expect("work plan");
     let prover = PcsProver::new(plan.clone()).expect("prover setup");
     let cells = plan.logical_cells(Group::Level3);
+    let count = plan.num_polynomials(Group::Level3);
     assert!(prover
-        .commit_group(Group::Level3, &[vec![0_i32; cells], vec![0; cells]])
+        .commit_group(Group::Level3, &vec![vec![0_i32; cells]; count + 1])
         .is_err());
     assert!(prover
-        .commit_group(Group::Level3, &[vec![0_i32; cells - 1]])
+        .commit_group(Group::Level3, &vec![vec![0_i32; cells - 1]; count])
         .is_err());
     // Width 16 admits [-2^15, 2^15 - 1]; width 4 admits [-8, 7].
-    let mut out_of_range = vec![vec![0_i32; cells]];
+    let mut out_of_range = vec![vec![0_i32; cells]; count];
     out_of_range[0][3] = 1 << 15;
     assert!(prover.commit_group(Group::Level3, &out_of_range).is_err());
     out_of_range[0][3] = (1 << 15) - 1;

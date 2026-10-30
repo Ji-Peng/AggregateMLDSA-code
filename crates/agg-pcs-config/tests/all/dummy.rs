@@ -28,7 +28,7 @@ impl Rng {
 }
 
 /// The honest alphabet of each group's polynomials:
-/// `0` marks a Boolean column, `b > 0` a balanced base-`b` digit, so a 16-bit lookup column
+/// `0` marks a Boolean column, `1` a zero polynomial, `b > 1` a balanced base-`b` digit, so a 16-bit lookup column
 /// is base `2^16`, a multiplicity digit base 16. `G_main4` is `Z_hi` (base 4), `U_hi`
 /// (base 6) and six bits under H-u, and `B_zhi` (bit), `D_u` (base 6), six bits and `a_z`
 /// (bit) under H-exact.
@@ -52,7 +52,14 @@ pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
             }
             bases
         }
-        Group::Level3 => vec![wide],
+        // The carry, then zero polynomials up to G_2's count (base 1: every cell 0).
+        Group::Level3 => {
+            let mut bases = vec![wide];
+            bases.resize(Group::Level3.num_polynomials(relation), 1);
+            bases
+        }
+        // K_0, K_1 (16-bit digits) and K_2 (base 4).
+        Group::Proj => vec![wide, wide, 4],
         Group::Mult => vec![16; 7],
     }
 }
@@ -86,7 +93,7 @@ pub fn dummy_tables(plan: &WorkPlan, group: Group, rng: &mut Rng) -> Vec<Vec<i32
         .collect()
 }
 
-pub fn claims(plan: &WorkPlan, tables: &[Vec<Vec<i32>>; 6], rng: &mut Rng) -> [GroupClaim; 6] {
+pub fn claims(plan: &WorkPlan, tables: &[Vec<Vec<i32>>; 7], rng: &mut Rng) -> [GroupClaim; 7] {
     // Both main groups share one point (the stage-3 terminal), as in the protocol.
     let main_point: Vec<OpeningField> = (0..plan.logical_vars(Group::Main)).map(|_| rng.field()).collect();
     Group::ALL.map(|group| {

@@ -31,6 +31,9 @@ pub enum WeightId {
     Level3(u8),
     /// `w_A` on the main domain in order `(j', s, i)`.
     Ring,
+    /// The projection weight `W(pos, i) = P(pos) eq(r'_sig, i)` on the main domain
+    /// (`projection`).
+    Proj,
 }
 
 /// A table read by a stage.
@@ -53,7 +56,7 @@ impl LaneId {
         match self {
             Self::Column(c) | Self::DigitSquare(c) => c.domain(),
             Self::Parity1(_) => GroupRole::Level1,
-            Self::Weight(WeightId::Level1 | WeightId::Ring) => GroupRole::Main,
+            Self::Weight(WeightId::Level1 | WeightId::Ring | WeightId::Proj) => GroupRole::Main,
             Self::Weight(WeightId::Level2) => GroupRole::Level1,
             Self::Weight(WeightId::Level3(_)) => GroupRole::Level2,
         }

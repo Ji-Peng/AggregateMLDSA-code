@@ -8,6 +8,7 @@ mod commit_open;
 mod h_exact;
 mod h_fips;
 mod mode_b;
+mod projection;
 mod simd;
 mod prove_verify;
 mod source_tables;

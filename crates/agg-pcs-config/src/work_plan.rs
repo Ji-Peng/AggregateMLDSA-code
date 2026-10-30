@@ -85,7 +85,7 @@ pub struct WorkPlan {
     pub records: usize,
     /// `N*`.
     pub padded: usize,
-    /// The ordered six-group layout (it carries the relation).
+    /// The ordered seven-group layout (it carries the relation).
     pub layout: BatchLayout,
     /// Producer profiles of the precommitted groups `G_main16, G_main4, G_1, G_2, G_3`,
     /// each from the scalar row of its family's catalog.

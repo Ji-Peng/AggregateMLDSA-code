@@ -1,10 +1,11 @@
 //! Group layouts (16-bit lookup digits, `docs/lookup.md`) and the
 //! generated fold-schedule catalogs.
 //!
-//! The six witness groups, in wire and catalog order, are `G_main16` and `G_main4`
-//! (round 1) and `G_1`, `G_2`, `G_3`, `G_m` (round 2); `G_m` (the multiplicity digits of
-//! the lookup table `T_16`) is Akita's final group and the others are precommitted groups.
-//! Two presets share one batch: the width-16 family (`G_main16`, `G_1`, `G_2`, `G_3`) and
+//! The seven witness groups, in wire and catalog order, are `G_main16` and `G_main4`
+//! (round 1) and `G_1`, `G_2`, `G_3`, `G_k`, `G_m` (round 2); `G_m` (the multiplicity
+//! digits of the lookup table `T_16`) is Akita's final group and the others are precommitted
+//! groups. `G_k` holds the digits of the projection outputs of `v` (`docs/spec.md` 4.3).
+//! Two presets share one batch: the width-16 family (`G_main16`, `G_1`, `G_2`, `G_3`, `G_k`) and
 //! the width-4 family (`G_main4`, `G_m`). Akita freezes the source bound into each group's
 //! own profile, so a precommitted group of either family enters the final family's grouped
 //! row by its scalar producer profile (Akita's mixed-bound batches; the fp128 test
@@ -43,7 +44,9 @@ pub const TABLE_VARS: usize = 16;
 /// Balanced base-16 digits of one multiplicity (`m < 7 (16^7 - 1) / 15`).
 pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Groups of one batch.
-pub const GROUP_COUNT: usize = 6;
+pub const GROUP_COUNT: usize = 7;
+/// Rows of the `{0,1}` projection of `v` (`docs/spec.md` 4.3), log2: `128 = 2^7`.
+pub const PROJ_ROW_VARS: usize = 7;
 
 /// Batch sizes (`d_sig`) whose relation-H-u catalog rows are generated and checked in:
 /// every `N* = 2^3 .. 2^15` of the wire version.
@@ -192,11 +195,12 @@ impl Family {
     }
 }
 
-/// The six committed groups, in wire order.
+/// The seven committed groups, in wire order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
-    /// `Z_lo, U_lo, V_lo, V_hi` on the main domain (round 1, width 16): the 16-bit
-    /// lookup columns.
+    /// `Z_lo, U_lo, V_lo, V_hi` on the main domain (round 1, width 16): the 16-bit parts of
+    /// `z, u, v`; `Z_lo, U_lo` are looked up, `V_lo, V_hi` are not (the projection of `v`
+    /// bounds `v`).
     Main16,
     /// `Z_hi, U_hi, b_0..b_5` on the main domain (round 1, width 4); H-exact appends `a_z`.
     Main,
@@ -204,8 +208,12 @@ pub enum Group {
     Level1,
     /// Level-2 parities `y^(2)_t` and carries `kappa^(2)_t` on `D_2` (round 2, width 16).
     Level2,
-    /// The level-3 carry `kappa^(3)` on `D_3` (round 2, width 16).
+    /// The level-3 carry `kappa^(3)` on `D_3` and zero polynomials, in `G_2`'s layout (round 2,
+    /// width 16).
     Level3,
+    /// The digits `K_0, K_1, K_2` of the projection outputs `k = <Psi_o, v_i>` on the
+    /// projection domain `(o, i)` (round 2, width 16).
+    Proj,
     /// The seven balanced base-16 digits of the multiplicity column `m` of `T_16`
     /// (round 2, width 4, Akita final group).
     Mult,
@@ -219,6 +227,7 @@ impl Group {
         Self::Level1,
         Self::Level2,
         Self::Level3,
+        Self::Proj,
         Self::Mult,
     ];
 
@@ -231,7 +240,8 @@ impl Group {
             Self::Level1 => 2,
             Self::Level2 => 3,
             Self::Level3 => 4,
-            Self::Mult => 5,
+            Self::Proj => 5,
+            Self::Mult => 6,
         }
     }
 
@@ -240,7 +250,7 @@ impl Group {
     pub const fn round(self) -> u8 {
         match self {
             Self::Main16 | Self::Main => 1,
-            Self::Level1 | Self::Level2 | Self::Level3 | Self::Mult => 2,
+            Self::Level1 | Self::Level2 | Self::Level3 | Self::Proj | Self::Mult => 2,
         }
     }
 
@@ -255,14 +265,17 @@ impl Group {
     pub const fn family(self) -> Family {
         match self {
             Self::Main | Self::Mult => Family::Width4,
-            Self::Main16 | Self::Level1 | Self::Level2 | Self::Level3 => Family::Width16,
+            Self::Main16 | Self::Level1 | Self::Level2 | Self::Level3 | Self::Proj => {
+                Family::Width16
+            }
         }
     }
 
     /// Number of committed polynomials:
     /// `4 + 8` on the main domain (`4 + 9` under H-exact, `4 + 12` under H-FIPS), 6 carries,
-    /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry, and the 7
-    /// multiplicity digits.
+    /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry and
+    /// zero polynomials up to `G_2`'s count, the 3 projection digits and the 7 multiplicity
+    /// digits.
     #[must_use]
     pub const fn num_polynomials(self, relation: Relation) -> usize {
         match self {
@@ -277,14 +290,17 @@ impl Group {
                 Relation::Hu | Relation::HExact => 6 + 6,
                 Relation::HFips => 6 + 6 + 1,
             },
-            Self::Level3 => 1,
+            // The carry and zero polynomials up to G_2's count (see `physical_vars`).
+            Self::Level3 => Self::Level2.num_polynomials(relation),
+            Self::Proj => 3,
             Self::Mult => MULTIPLICITY_DIGITS,
         }
     }
 
     /// Logical variable count of the group's domain at `d_sig`
     /// `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
-    /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`; 16 for `G_m`.
+    /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`,
+    /// `d_k = 7 + d_sig`; 16 for `G_m`.
     #[must_use]
     pub const fn logical_vars(self, d_sig: usize) -> usize {
         match self {
@@ -292,14 +308,23 @@ impl Group {
             Self::Level1 => 13 + d_sig.saturating_sub(9),
             Self::Level2 => 13 + d_sig.saturating_sub(D_SEG_MAX),
             Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
+            Self::Proj => PROJ_ROW_VARS + d_sig,
             Self::Mult => TABLE_VARS,
         }
     }
 
     /// Physical (committed) variable count: the logical count raised to the
-    /// PCS floor.
+    /// PCS floor. `G_3` takes `G_2`'s layout (its carry zero-extended by one trailing
+    /// variable from `2^14` cells on, and zero polynomials up to `G_2`'s count): two groups of
+    /// one Akita profile are one class of the planner's root opening search, which keeps
+    /// the product of the classes' coefficient-packing domains within Akita's bound at
+    /// `N* = 2^15` once the projection group `G_k` is a sixth precommitted group
+    /// (`docs/pcs-config.md`).
     #[must_use]
     pub const fn physical_vars(self, d_sig: usize) -> usize {
+        if matches!(self, Self::Level3) {
+            return Self::Level2.physical_vars(d_sig);
+        }
         let logical = self.logical_vars(d_sig);
         if logical < PCS_MIN_CELLS_LOG2 {
             PCS_MIN_CELLS_LOG2
@@ -323,19 +348,20 @@ impl Group {
             Self::Level1 => "level1",
             Self::Level2 => "level2",
             Self::Level3 => "level3",
+            Self::Proj => "proj",
             Self::Mult => "mult",
         }
     }
 }
 
-/// The ordered six-group layout of one batch size `N* = 2^d_sig` under one relation.
+/// The ordered seven-group layout of one batch size `N* = 2^d_sig` under one relation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchLayout {
     /// `log2 N*`.
     pub d_sig: usize,
     /// The relation (it fixes the polynomial counts of `G_main4` and `G_2`).
     pub relation: Relation,
-    /// Physical layouts of `G_main16, G_main4, G_1, G_2, G_3, G_m`.
+    /// Physical layouts of `G_main16, G_main4, G_1, G_2, G_3, G_k, G_m`.
     pub groups: [PolynomialGroupLayout; GROUP_COUNT],
 }
 
@@ -371,7 +397,8 @@ impl BatchLayout {
         self.groups[GROUP_COUNT - 1]
     }
 
-    /// Total committed polynomials (38 for H-u, 39 for H-exact).
+    /// Total committed polynomials (52 for H-u, 53 for H-exact, 58 for H-FIPS; 11 or 12 of
+    /// them the zero polynomials of `G_3`).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -387,17 +414,17 @@ impl BatchLayout {
             .iter()
             .map(|group| group.num_vars())
             .max()
-            .expect("six groups")
+            .expect("seven groups")
     }
 
-    /// Catalog row name of the grouped row (`l16` for H-u, `l16x` for H-exact, `l16f` for
-    /// H-FIPS).
+    /// Catalog row name of the grouped row (`p16` for H-u, `p16x` for H-exact, `p16f` for
+    /// H-FIPS: the L16 lookup with the projected `v`).
     #[must_use]
     pub fn row_name(&self) -> String {
         let layout = match self.relation {
-            Relation::Hu => "l16",
-            Relation::HExact => "l16x",
-            Relation::HFips => "l16f",
+            Relation::Hu => "p16",
+            Relation::HExact => "p16x",
+            Relation::HFips => "p16f",
         };
         format!("mldsa-44-{layout}-batch-{}-mult-final", 1_usize << self.d_sig)
     }
@@ -464,12 +491,12 @@ mod tests {
     #[test]
     fn group_shapes_match_spec_section_4() {
         let counts = |relation| Group::ALL.map(|group| group.num_polynomials(relation));
-        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 1, 7]);
-        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 1, 7]);
-        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 1, 7]);
+        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 12, 3, 7]);
+        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 12, 3, 7]);
+        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 13, 3, 7]);
         let total = |relation| counts(relation).iter().sum::<usize>();
-        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (38, 39));
-        assert_eq!(total(Relation::HFips), 43);
+        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (52, 53));
+        assert_eq!(total(Relation::HFips), 58);
         for relation in Relation::ALL {
             assert_eq!(Relation::from_id(relation.id()), Some(relation));
             assert_eq!(Relation::parse(relation.flag()), Some(relation));
@@ -483,10 +510,17 @@ mod tests {
         assert_eq!(Group::Level1.logical_vars(15), 19);
         assert_eq!(Group::Level2.logical_vars(15), 15);
         assert_eq!(Group::Level3.logical_vars(15), 14);
+        assert_eq!(Group::Proj.logical_vars(15), 22);
         assert_eq!(Group::Mult.logical_vars(3), 16);
-        // Level 3 sits below the floor up to one segment.
+        // Level 3 takes G_2's physical layout: one trailing pad variable at every size.
         assert_eq!(Group::Level3.logical_vars(13), 12);
         assert_eq!(Group::Level3.physical_vars(13), 13);
+        assert_eq!(Group::Level3.physical_vars(15), 15);
+        for d_sig in MIN_D_SIG..=MAX_D_SIG {
+            for relation in Relation::ALL {
+                assert_eq!(Group::Level3.layout(d_sig, relation), Group::Level2.layout(d_sig, relation));
+            }
+        }
         assert_eq!(Group::Main.physical_vars(3), 13);
         for group in Group::ALL {
             assert_eq!(Group::ALL[group.index()], group);
@@ -497,6 +531,7 @@ mod tests {
             [
                 Family::Width16,
                 Family::Width4,
+                Family::Width16,
                 Family::Width16,
                 Family::Width16,
                 Family::Width16,
@@ -515,30 +550,30 @@ mod tests {
         };
         assert_eq!(
             shape(8),
-            [(18, 4), (18, 8), (13, 6), (13, 12), (13, 1), (16, 7)]
+            [(18, 4), (18, 8), (13, 6), (13, 12), (13, 12), (15, 3), (16, 7)]
         );
         assert_eq!(
             shape(15),
-            [(25, 4), (25, 8), (19, 6), (15, 12), (14, 1), (16, 7)]
+            [(25, 4), (25, 8), (19, 6), (15, 12), (15, 12), (22, 3), (16, 7)]
         );
         assert!(BatchLayout::new(2, Relation::Hu).is_none());
         assert!(BatchLayout::new(16, Relation::HExact).is_none());
         let layout = BatchLayout::new(10, Relation::Hu).unwrap();
-        assert_eq!(layout.total_polynomials(), 38);
+        assert_eq!(layout.total_polynomials(), 52);
         assert_eq!(layout.max_physical_vars(), 20);
-        assert_eq!(layout.row_name(), "mldsa-44-l16-batch-1024-mult-final");
-        assert_eq!(layout.precommitted().len(), 5);
+        assert_eq!(layout.row_name(), "mldsa-44-p16-batch-1024-mult-final");
+        assert_eq!(layout.precommitted().len(), 6);
         assert_eq!(layout.final_group(), PolynomialGroupLayout::new(16, 7));
         // H-exact: G_main4 at 9 polynomials, its own row name, every other group unchanged.
         let exact = BatchLayout::new(15, Relation::HExact).unwrap();
         assert_eq!(
             exact.groups.map(|group| (group.num_vars(), group.num_polynomials())),
-            [(25, 4), (25, 9), (19, 6), (15, 12), (14, 1), (16, 7)]
+            [(25, 4), (25, 9), (19, 6), (15, 12), (15, 12), (22, 3), (16, 7)]
         );
-        assert_eq!(exact.total_polynomials(), 39);
-        assert_eq!(exact.row_name(), "mldsa-44-l16x-batch-32768-mult-final");
+        assert_eq!(exact.total_polynomials(), 53);
+        assert_eq!(exact.row_name(), "mldsa-44-p16x-batch-32768-mult-final");
         let hu = BatchLayout::new(15, Relation::Hu).unwrap();
-        for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Mult] {
+        for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Proj, Group::Mult] {
             assert_eq!(exact.groups[group.index()], hu.groups[group.index()]);
         }
         assert_eq!(
@@ -562,7 +597,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(shapes(&[Relation::Hu], Family::Width4), vec![(18, 8), (20, 8)]);
-        let width16 = vec![(13, 1), (13, 6), (13, 12), (14, 6), (18, 4), (20, 4)];
+        let width16 = vec![(13, 6), (13, 12), (14, 6), (15, 3), (17, 3), (18, 4), (20, 4)];
         assert_eq!(shapes(&[Relation::Hu], Family::Width16), width16);
         // H-u and H-exact: the width-4 family gains the 9-polynomial rows, the width-16
         // family is shared.
@@ -579,7 +614,7 @@ mod tests {
         );
         assert_eq!(
             shapes(&Relation::ALL, Family::Width16),
-            vec![(13, 1), (13, 6), (13, 12), (13, 13), (14, 6), (18, 4), (20, 4)]
+            vec![(13, 6), (13, 12), (13, 13), (14, 6), (15, 3), (17, 3), (18, 4), (20, 4)]
         );
     }
 }

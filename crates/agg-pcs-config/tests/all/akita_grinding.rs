@@ -12,7 +12,7 @@ use agg_pcs_config::work_plan::WorkPlan;
 use akita_config::derive_transcript_grinding_plan;
 use akita_params::{GrindingPlan, GrindingQueryKind, OpeningClaimsLayout};
 
-/// The plan of the grouped row of `N* = 2^d_sig` for the opening of its six groups.
+/// The plan of the grouped row of `N* = 2^d_sig` for the opening of its seven groups.
 fn row_plan(d_sig: usize, relation: Relation) -> GrindingPlan {
     let plan = WorkPlan::for_records(1 << d_sig, relation).expect("work plan");
     let row = AggFp64SignedWidth4::catalog()
@@ -70,18 +70,19 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
         (4, 401, 984, 9, 3_888, 3_863),
         (5, 401, 984, 9, 3_888, 3_863),
         (6, 401, 985, 10, 4_400, 3_864),
-        (7, 401, 985, 10, 4_400, 3_864),
-        (8, 401, 985, 10, 4_400, 3_864),
-        (9, 406, 980, 10, 5_120, 3_894),
+        (7, 406, 980, 10, 5_120, 3_894),
+        (8, 406, 980, 10, 5_120, 3_894),
+        (9, 388, 966, 10, 5_132, 3_754),
         (10, 388, 967, 12, 7_692, 3_755),
-        (11, 430, 1_053, 12, 7_868, 4_135),
-        (12, 452, 1_121, 12, 8_304, 4_369),
-        (13, 455, 1_129, 12, 8_832, 4_398),
-        (14, 457, 1_132, 12, 8_076, 4_415),
-        (15, 459, 1_137, 12, 9_872, 4_434),
+        (11, 452, 1_121, 12, 8_304, 4_369),
+        (12, 452, 1_120, 12, 8_048, 4_368),
+        (13, 457, 1_133, 12, 8_332, 4_416),
+        (14, 459, 1_137, 12, 9_872, 4_434),
+        (15, 461, 1_142, 12, 9_884, 4_453),
     ];
     assert_eq!(CATALOG_D_SIG, (3..=15).collect::<Vec<_>>().as_slice());
     let mut digests = Vec::new();
+    let (mut got, mut want) = (Vec::new(), Vec::new());
     for (d_sig, sites, sum, max, work, bits) in table {
         let plan = row_plan(d_sig, Relation::Hu);
         let digest = plan.digest().expect("digest");
@@ -90,16 +91,17 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
             summary(&plan),
             hex(&digest)
         );
-        let got = summary(&plan);
-        assert_eq!(got, (sites, sum, max, work, bits), "d_sig {d_sig}");
+        got.push((d_sig, summary(&plan)));
+        want.push((d_sig, (sites, sum, max, work, bits)));
         // Every target within Akita's transition cap and 7 bits of slack.
         assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
             && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
         digests.push(hex(&digest));
     }
+    assert_eq!(got, want);
     // The first plan-digest bytes reported in `docs/soundness.md`.
-    assert!(digests[0].starts_with("225708cb"), "{}", digests[0]);
-    assert!(digests[12].starts_with("4f5a6026"), "{}", digests[12]);
+    assert!(digests[0].starts_with("28f85737"), "{}", digests[0]);
+    assert!(digests[12].starts_with("42566443"), "{}", digests[12]);
     assert_eq!(
         PINNED,
         digests
@@ -112,22 +114,22 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
 
 /// The plan digests of the 13 grouped rows (`d_sig` 3 to 15) at the pinned Akita revision.
 const PINNED: &[&str] = &[
-    "225708cbc2955271cbe9c9357de749875aeda1900a94bc4c7593a9f961bfcb62",
-    "7c4431eaa095aa5315c240f30f983907d524361347e09fd39f3b7b4858171981",
-    "132e4ad7819008d25e5b30c86847b5eef066005e72afe5a8297916dcb6a2e638",
-    "e85c8ab87d42fe87951ce90da10ae83aa7dea5c4508608c22894cb4277b663c7",
-    "f2a0bdaeed29a12b04d39a0455c994e1e859476d21c364ccd2462e59ee621d9e",
-    "3ac4bfba35af9f76e29b5effdf85416aa46706cb437cfc4e9a024935cb6f015f",
-    "d3977f7c94b23825ddd5ea088c1ec81cf13089128514d5e213808144b53b737e",
-    "8611ed83429b3773e36f0abc4d471d75d06ec20d2a1eed59c02a98b2cbfbd379",
-    "b0eff2da80859051953f3de5e2d49f75962c5c2504de008ccdd9031abbc0cfdc",
-    "3384fcb6875813fa60058ed4625d2b4cef2529d1aeda0befb114495554405ad1",
-    "79772eef3ee392501ab8f6055d00e627008f3b0182f5c138d6a1b7d78f2d23bd",
-    "5bca18a0a4efeee42d646b6b72c94baf1542843b75f6b805cf1e7775e15f6a31",
-    "4f5a6026543ff6e0b2a80c74e633110d1f0bfd6fd8606413c6a4300284cd6eb2",
+    "28f85737d91c69f8e2bf28311672f537cc4fe8318a7889666afec42f3006ebb6",
+    "28f85737d91c69f8e2bf28311672f537cc4fe8318a7889666afec42f3006ebb6",
+    "6190c528bbb8013bf984831bd67d2776ed07bf4962a6988fc766d4e9ff4de3c6",
+    "57cf539168b29bf5370ce1182e76598735e1b140356dbcf84884ea5a7e57fc23",
+    "e84823700fef62202066116dc63dcf743b24faecd59297d26c9000d7b57aef30",
+    "64a048ff368e4959c802ba143b877bd02aefdc8c750c4bf19a8d8c3f46129b8a",
+    "472ee9543d4812f90960d053b4d924b303eebd4a0e998bbad6344fda246f3290",
+    "d17c54ac71bf131f68a119f0d20dabba4dcad5529f3385a7234cf6a4ccbb7d0a",
+    "cd03815e65126ec59718522c11ca248682840d61c2c2f66ca094ef88a16ce26e",
+    "a5f3bc210d8473d7ab61d4da25293efd637b84c1b5700585d4ecbb4215c86e8d",
+    "7376c898144090fde30641d0c42fd58b148453402c38874949a1b4547bb3397b",
+    "54cfa6ce2bce0bee8f4b6dbac9095510471dc965a144b10a1336f0f33090cd1b",
+    "4256644335744082d053ec61cdccb3b36b0b094ba8824b0a3a23cff98e0dc433",
 ];
 
-/// The Akita plans of the 13 H-exact grouped rows (`mldsa-44-l16x-batch-<N*>-mult-final`,
+/// The Akita plans of the 13 H-exact grouped rows (`mldsa-44-p16x-batch-<N*>-mult-final`,
 /// `G_main4` at 9 polynomials): the same checks as for H-u, the
 /// pinned digests below, and every digest distinct from the H-u row's.
 #[test]
@@ -156,7 +158,7 @@ fn akita_plans_of_the_h_exact_rows_are_pinned() {
     );
 }
 
-/// The Akita plans of the 13 H-FIPS grouped rows (`mldsa-44-l16f-batch-<N*>-mult-final`,
+/// The Akita plans of the 13 H-FIPS grouped rows (`mldsa-44-p16f-batch-<N*>-mult-final`,
 /// `G_main4` at 12 polynomials and `G_2` at 13), printed for the
 /// record: every row stays within Akita's transition cap with 7 bits of nonce slack, and
 /// every digest differs from the H-u and H-exact rows' of the same size.
@@ -166,6 +168,7 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
         agg_pcs_config::catalogs::CATALOG_D_SIG_H_FIPS,
         (3..=15).collect::<Vec<_>>().as_slice()
     );
+    let mut digests = Vec::new();
     for d_sig in 3..=15 {
         let plan = row_plan(d_sig, Relation::HFips);
         let digest = hex(&plan.digest().expect("digest"));
@@ -174,44 +177,44 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
             && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
         assert_ne!(digest, PINNED[d_sig - 3], "H-FIPS and H-u rows differ");
         assert_ne!(digest, PINNED_H_EXACT[d_sig - 3], "H-FIPS and H-exact rows differ");
-        assert_eq!(digest, PINNED_H_FIPS[d_sig - 3], "d_sig {d_sig}");
+        digests.push(digest);
     }
+    assert_eq!(PINNED_H_FIPS, digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice());
 }
 
 /// The plan digests of the 13 H-FIPS grouped rows at the pinned Akita revision.
 const PINNED_H_FIPS: &[&str] = &[
-    "27cd35e561b702708c6f59a648340120943865e0f7c90cc8d6f28ebc1791c810",
-    "39a7949f7c18473cc94914f9edb84d4632e32f3fef1e306998991695630c30f0",
-    "f61d584694fe23ffd63dc0e15eda04d82c4e12b6b17ab7f066f405074db400bd",
-    "f11081519e9ea15314efcdf0a99299d58a79c505729050a385fb86be5d1305b3",
-    "deb430b8a76ba9e61aa266441100928bd969ac4aea3e6aa33773742512d2e2b0",
-    "9088cf643bb2b4f1ec60c3a69903c335c0d392e5e428b6b010f3b2bd5e83c3a5",
-    "e8df53a5ad4a91d875f85596f42e09b14da1b6a78e12befe0f1ee321c6e92b03",
-    "77cdddab3f6076f791172ed1147111282d9368c311014af9f72d9608e7ee403d",
-    "9e4eb72b4b4cfcba3493d98d58bfb939882b8232e3e1f9d553629a967d810313",
-    "74ac4db6052a0d45d63046dac72dab3db676430eddd97cb96a1c43f8d9cae224",
-    "fe542c447373deb49b8a7248ecfe2ccd80f59adeca8a1823267fd41cc2d3f006",
-    "82de9cccb9fb1b4514f9c2d7ed8dd707e2911f80c5a10b1ef166ff053fbcfe43",
-    "bce905c59fdcec79df5367d170a70be9c9c87cb20cbcddf1a8789a3b11c3d4b2",
+    "c2cab4d90a7334f98832722b02df3d105edec29d6bc4fb21e6a55b543e120dd4",
+    "c2cab4d90a7334f98832722b02df3d105edec29d6bc4fb21e6a55b543e120dd4",
+    "8621dc3d473dd9e92ba85ead4bbf99fb12a87c4269990e037b9c1192b0f4e69e",
+    "79aef977898df6cc5187605af45f3a168db3ebe2c3de276c5bdeb6ed08213bf3",
+    "b9b799639628f6f42f99f7d4cb61666b5fed514fe2cd2bc29d743da094330e49",
+    "4a70b936032eb69db5bf8d68422cc8ba6b36ff175d661a6f5402537d0e876e1c",
+    "03a70014fe8da1e0cb5005fdfe3789c65039a8575bc2c9926b04b7ebbf6c4f52",
+    "a3aedf74f90e5cfe076f4b5cf7daf67695dc321875f74793a6a11563f679f755",
+    "e0f050e56f2cebce23e60d6225e25887f8286f727ab133de025b5708511a307c",
+    "2c9816f25bd6e427892b42e33db34cff39c29dbe94a955f2bb92b1e1c6650bf8",
+    "a64100f497537c1d6155269a68112ba52615deae827f0ee48e609381fa7a6038",
+    "724665515e0941a6cc8d7fd032985f7402bb85311c8d020fe489074620e44271",
+    "f8b3865877528f9372196be74f8a1127687e17ac27de080e595b96ffaab55f8c",
 ];
 
 /// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the H-exact rows, `d_sig` 3 to 15: the
-/// H-u values except at `2^15` (sum g 1,135 instead of 1,137, work 8,336 instead of 9,872,
-/// nonce bits 4,432 instead of 4,434).
+/// H-u values at every size in the seven-group layout (deviation K24).
 const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
     (401, 984, 9, 3_888, 3_863),
     (401, 984, 9, 3_888, 3_863),
     (401, 984, 9, 3_888, 3_863),
     (401, 985, 10, 4_400, 3_864),
-    (401, 985, 10, 4_400, 3_864),
-    (401, 985, 10, 4_400, 3_864),
     (406, 980, 10, 5_120, 3_894),
+    (406, 980, 10, 5_120, 3_894),
+    (388, 966, 10, 5_132, 3_754),
     (388, 967, 12, 7_692, 3_755),
-    (430, 1_053, 12, 7_868, 4_135),
     (452, 1_121, 12, 8_304, 4_369),
-    (455, 1_129, 12, 8_832, 4_398),
-    (457, 1_132, 12, 8_076, 4_415),
-    (459, 1_135, 12, 8_336, 4_432),
+    (452, 1_120, 12, 8_048, 4_368),
+    (457, 1_133, 12, 8_332, 4_416),
+    (459, 1_137, 12, 9_872, 4_434),
+    (461, 1_142, 12, 9_884, 4_453),
 ];
 
 /// The plan digests of the 13 H-exact grouped rows at the pinned Akita revision. The rows of
@@ -222,17 +225,17 @@ const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
 /// the schedule key, the row name and Akita's instance descriptor, and all 52 width-4
 /// catalog schedules hash differently.
 const PINNED_H_EXACT: &[&str] = &[
-    "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
-    "e9ec8b52fe504ac3061f426755012d82039ff9bb0ac7dfc6cffc7d25b3fe8351",
-    "3c7f512de2158f5a52f220bf935bba6820de5d928ed5d084c1605bcdcb7101be",
-    "01185ae60bede81716c9608108ff2f6fc1bc41af94439ca31c7a9579678bf75f",
-    "ba2caee4c3d80e55a959751cb48cd6075ad7dccd2b28406040b9fb112f2705b6",
-    "f0153fed842c41e57911c8ecdf379119ea8fa08b93c77dc71593c9535730c494",
-    "9160115448d61de194c42b1369e9626e6d30fa6b51100b65664538662a969234",
-    "a7d8e7e50e9b0402ba72af0345305a0d1c070b0483f53944ba0a33c41a2c8c11",
-    "67e98f69ea11397cf4c4abbfe1a3fa456e497985d98369efacd4b62265fb16ad",
-    "55c675e6d4c45961d664df219d6941b12e347f4ce776c4dcdaa0675eb83ced46",
-    "53d03cbb93960880cda4c7682edb9f70ebd62f51a6cc6482b5d3af454df34258",
-    "afac26e97405f1ea1d5f78763334e8eb94bcedbef6e2eb1b49ded43632ad7f5c",
-    "c3b8d59f1a2f75d62e1df74d33ca8fb96b44f4f066701805d819b052670f6355",
+    "dc0079ce937139db5790f740d90fde865c9f906550c2420a832927bea745be23",
+    "dc0079ce937139db5790f740d90fde865c9f906550c2420a832927bea745be23",
+    "8e417b227644ffe94429bd6dfd42c4c68ead0dea2dd7f21c3af039d59107a84a",
+    "60075e649a96878bfdc0702dd450165a3df07e9c84f2f7dc4ed35ced7b016891",
+    "0610d751990aa40f65f76781c6cb07cdec7e0f7d2ffc84a4ce57cc04d083ff1d",
+    "a2e3ef144d1d5e97581e9bc12d08a6faadab3b8eeb482ff293d0e3b9c51cac5c",
+    "ee90f304f41fb187b9e50478748ce5ec5866ddb0c0d6a31a549836919f1d0572",
+    "b0311507b12e4cd2083c9fb830a73df402243a0692b34ce60d10eebbc8f21eab",
+    "89a821f5945b5129dbc66083ebfeceea7b283ce60ae7136aab450e301acc2c28",
+    "df8c01781862024ee953d7e4d02c32a7b7ecbc3bd2406b42c848e531e41d5879",
+    "c1bfe3fe7306ac5f58fcfe278cee58ab103a952e13748421b431699074c97823",
+    "a13565f0ba77f732f6d857b21a868858ab5181b7df5b42a22cad1b5bd3dd61ee",
+    "01b4c2c0397ce3dcb606ff686d4a04fcdef9df265fc3ff19db8ce55bec2ed74b",
 ];

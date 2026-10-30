@@ -59,7 +59,7 @@ fn rejecting_place(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables)
 /// Honest round-2 tables for (possibly tampered) round-1 tables whose looked-up cells are
 /// in `T_16`.
 fn rebuilt(batch: &Batch, main: &MainTables) -> BridgeGroupTables {
-    BridgeGroupTables::build(&batch.manifest, main, &batch.matrices).expect("honest round 2")
+    BridgeGroupTables::build(&batch.manifest, main, &batch.matrices, batch.bridge.psi()).expect("honest round 2")
 }
 
 /// The honest round-2 tables with the multiplicities of the in-table cells only.
@@ -77,7 +77,7 @@ fn mle_of(cells: &[i64], point: &[E]) -> E {
     evaluate_mle(&lift_table(cells), point)
 }
 
-/// Every claim the honest PIOP leaves equals the extension of its table: the 31 stage-3
+/// Every claim the honest PIOP leaves equals the extension of its table: the 34 stage-3
 /// claims, the multiplicity digits at `pi_m`, the lookup's column claims at the stack
 /// points, and the stage-1 and stage-2 terminals of the virtual tables.
 fn check_honest(batch: &Batch, proof: &PiopProof) {
@@ -87,7 +87,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
     // Stage-3 claims: the committed columns at the suffixes of r^(3).
     for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
         let point = suffix(&stage3.point, group.logical_vars);
-        for &column in &group.columns {
+        for &column in group.columns.iter().filter(|c| !c.is_zero()) {
             assert_eq!(
                 stage3.claims.column(manifest, column),
                 tables.column(column).evaluate(&point),
@@ -135,7 +135,8 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
     }
     for (k, column) in manifest.leaf_digits().into_iter().enumerate() {
         let square: Vec<i64> = tables.column(column).to_i64().iter().map(|&z| z * (z + 1)).collect();
-        assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &points.r2));
+        let r2 = suffix(&points.r2, manifest.domain_vars(column.domain()));
+        assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &r2));
     }
     // The kappa^(1) claims before stage 2.
     for t in 0..W1_BITS {
@@ -151,7 +152,7 @@ fn piop_round_trip_on_256_signatures_matches_the_tables() {
     on_large_stack(|| {
         let batch = Batch::build(common::records(0x256, 200, 56), 0x256);
         let (proof, run) = prove_tables(&batch, batch.tables(), false).expect("honest prover");
-        assert_eq!(run.points.lookup.len(), 4);
+        assert_eq!(run.points.lookup.len(), 5);
         assert_eq!(run.pi_m.len(), 16);
         check_honest(&batch, &proof);
         // A changed round message or terminal claim is rejected at its stage.
@@ -202,11 +203,12 @@ fn lookup_rejects_main_cells_outside_the_table() {
             let bridge = lenient(&batch, &main, batch.bridge.clone());
             assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0), "delta {delta}");
         }
-        // v_hi = 2^16 (stored 2^15): out of the table.
+        // v_hi = 2^16 (stored 2^15) is no longer looked up: v moves by about 2^31, and with
+        // the outputs k recomputed the ring identity rejects (stage 3).
         let mut main = batch.main.clone();
         *main.wide_cell_mut(manifest, Column::V_HI, 77) = LOOKUP_SHIFT;
-        let bridge = lenient(&batch, &main, batch.bridge.clone());
-        assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0));
+        let bridge = rebuilt(&batch, &main);
+        assert_eq!(rejecting_place(&batch, &main, &bridge), Some(3));
     });
 }
 
@@ -366,21 +368,19 @@ fn values_valid_only_for_another_range_are_rejected() {
         bridge.recount(manifest, &batch.main).expect("in the table");
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(1));
         // A low part valid only for a wider range: U_lo + 63,079 with U_hi - 1 keeps u
-        // (relation H-u's step form) and V_lo + 2^16 with V_hi - 1 keeps v, U_hi in
-        // its base-6 alphabet and V_hi in T_16, so the leaves and the ring identity hold;
-        // when the looked-up value lands in [2^16, 2^17) only the lookup sees it. (A value
-        // booked under another table is the lookup.rs unit test
+        // (relation H-u's step form), U_hi in its base-6 alphabet, so the leaves and the
+        // ring identity hold; when the looked-up value lands in [2^16, 2^17) only the lookup
+        // sees it. (A value booked under another table is the lookup.rs unit test
         // `two_tables_verify_and_a_cross_table_value_is_rejected`; there is one table here.)
+        // V_lo + 2^16 with V_hi - 1 keeps v and is accepted: the digits of v are not
+        // range-checked (tests/all/projection.rs).
         let u_cells = batch.main.column(manifest, Column::U_LO);
         let u_hi_cells = batch.main.column(manifest, Column::U_HI);
         let u_cell = (0..1024 * 50)
             .map(|p| main_index(p % 256, (p / 256) % 4, p / 1024))
             .find(|&x| u_hi_cells.value(x) > -3 && u_cells.value(x) + i64::from(LOOKUP_SHIFT) + 63_079 >= 1 << 16)
             .expect("a matching cell");
-        for (lo, hi, x, step) in [
-            (Column::U_LO, Column::U_HI, u_cell, 63_079_i32),
-            (Column::V_LO, Column::V_HI, cell_with(&batch, Column::V_HI, |v| v > -i64::from(LOOKUP_SHIFT)), 1 << 16),
-        ] {
+        for (lo, hi, x, step) in [(Column::U_LO, Column::U_HI, u_cell, 63_079_i32)] {
             let mut main = batch.main.clone();
             *main.wide_cell_mut(manifest, lo, x) += step;
             if hi == Column::V_HI {

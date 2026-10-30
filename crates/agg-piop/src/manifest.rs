@@ -3,14 +3,16 @@
 //! Mirrors `aerie-falcon/src/protocol/manifest.rs`: the manifest fixes the canonical wire
 //! order, the commitment round, the preset family, the logical and physical domain of every
 //! Akita group, and the role and alphabet of each committed polynomial, and serializes the
-//! public profile bound in event 0 before any commitment. The six groups are `G_main16`
+//! public profile bound in event 0 before any commitment. The seven groups are `G_main16`
 //! (`Z_lo, U_lo, V_lo, V_hi`, width 16) and `G_main4` (`Z_hi, U_hi, b_0..b_5`, width 4) in
 //! round 1, before the bridge seed, and `G_1` (`kappa^(1)_t`), `G_2` (`y^(2)_t`,
-//! `kappa^(2)_t`), `G_3` (`kappa^(3)`), all width 16, and `G_m` (the seven digits of the
-//! multiplicity column of `T_16`, width 4) in round 2; `G_m` is Akita's final group, so PCS
-//! execution follows wire order. The alphabets listed here are the honest producer's; the
-//! ranges are proven inside the PIOP (the lookup into `T_16`, the base-4 and base-6 leaves),
-//! never by Akita.
+//! `kappa^(2)_t`), `G_3` (`kappa^(3)` and zero polynomials up to `G_2`'s layout), `G_k` (the
+//! digits `K_0, K_1, K_2` of the projection outputs `k = <Psi_o, v_i>`), all width 16, and
+//! `G_m` (the seven digits of the multiplicity column of `T_16`, width 4) in round 2; `G_m` is
+//! Akita's final group, so PCS execution follows wire order. The alphabets listed here are
+//! the honest producer's; the ranges are proven inside the PIOP (the lookup into `T_16`, the
+//! base-4 and base-6 leaves), never by Akita. `V_lo, V_hi` have no range check: the
+//! projection bounds `v` through `k` (`docs/spec.md` 6).
 //!
 //! Relation H-u (the default, `docs/h-exact.md`): `z` relaxed to `[-2^17, 2^17)`, `u`
 //! exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
@@ -40,7 +42,7 @@ use agg_witness::params::{B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
 use crate::lookup::{LookupShape, StackShape, Table};
 
-/// Role of a committed group; the six groups in wire order.
+/// Role of a committed group; the seven groups in wire order.
 pub type GroupRole = Group;
 
 /// PCS preset family of a group (`agg_pcs_config::catalogs::Family`).
@@ -51,9 +53,10 @@ pub type PcsFamily = Family;
 pub const WIRE_VERSION: u16 = 4;
 /// Parameter-set byte of ML-DSA-44 (event 0).
 pub const PARAMETER_SET: u8 = 0x44;
-/// Identifier of the digit layout: 1 is the lookup layout (ranges by the lookup into
-/// `T_16`).
-pub const DIGIT_LAYOUT_ID: u8 = 1;
+/// Identifier of the digit layout: 2 is the lookup layout with the projected quotient
+/// (ranges by the lookup into `T_16`; `v` bounded through the digits of its projection
+/// outputs `k`, `docs/spec.md` 4.3). Layout 1 (`V_lo`, `V_hi` looked up) is retired.
+pub const DIGIT_LAYOUT_ID: u8 = 2;
 /// Number of committed groups.
 pub const GROUP_COUNT: usize = agg_pcs_config::catalogs::GROUP_COUNT;
 /// Independent lookup challenges `X_1, X_2` (`docs/lookup.md`).
@@ -86,12 +89,27 @@ pub const U16_DIGITS: StepLayout = StepLayout {
     top_base: U_TOP_BASE,
     offset: B_U,
 };
-/// `v + 2^31 = v_lo + 2^16 v_hi` (bases `2^16, 2^16`, signed).
+/// `v + 2^31 = v_lo + 2^16 v_hi` (bases `2^16, 2^16`, signed). The honest encoding only:
+/// `V_lo`, `V_hi` are not range-checked; the projection outputs `k` bound `v` (`K16_DIGITS`).
 pub const V16_DIGITS: DigitLayout = DigitLayout {
     name: "v",
     bases: &[1 << 16, 1 << 16],
     signed: true,
 };
+/// The projection outputs `k_{o,i} = <Psi_o, v_i>`: `k + 2^33 = k_0 + 2^16 k_1 + 2^32 k_2`
+/// (bases `2^16, 2^16, 4`, signed), so `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` over
+/// exactly `[-2^33, 2^33)`; `K_0, K_1` looked up, `K_2` leaf `leaf4` and link.
+pub const K16_DIGITS: DigitLayout = DigitLayout {
+    name: "k",
+    bases: &[1 << 16, 1 << 16, 4],
+    signed: true,
+};
+/// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md` 6).
+pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
+/// Bytes of `Psi`, squeezed as the answer of the site `proj/seed` (16 KiB).
+pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
+/// The bound `B` of the projection outputs: `k in [-B, B)`.
+pub const PROJ_BOUND: i64 = 1 << 33;
 /// Relation H-FIPS: `L = L_lo + 29,696 L_hi` with `L_lo = S_lo + 2^15` looked up and the bit
 /// `L_hi`, so `L = S_lo + 29,696 L_hi + 2^15` over exactly `[0, gamma_2 - 1]`.
 pub const L16_SLACK: SlackLayout = L_SLACK;
@@ -110,6 +128,11 @@ pub const LOOKUP_ALPHABET_CODE: u8 = 0x80 | 16;
 pub const MULTIPLICITY_ALPHABET_CODE: u8 = 0x40 | 16;
 /// Alphabet code of a ternary column (`{-1, 0, 1}`: H-FIPS's `delta` and `e`).
 pub const TERNARY_ALPHABET_CODE: u8 = 0x20 | 3;
+/// Alphabet code of a 16-bit column that no range check reads (`V_lo`, `V_hi`: the
+/// projection bounds `v` instead).
+pub const UNCHECKED_ALPHABET_CODE: u8 = 0x10 | 16;
+/// Alphabet code of a zero polynomial (`G_3`'s padding to `G_2`'s layout).
+pub const ZERO_ALPHABET_CODE: u8 = 0x08;
 
 /// Canonical transcript byte of a group role (its wire position).
 #[must_use]
@@ -129,8 +152,10 @@ pub enum DigitValue {
     /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` (main domain): `l_lo` (looked
     /// up), `l_hi` (bit).
     L,
-    /// The ring quotient `v` (main domain).
+    /// The ring quotient `v` (main domain; its digits are not range-checked).
     V,
+    /// The projection outputs `k_{o,i} = <Psi_o, v_i>` on the projection domain `(o, i)`.
+    K,
     /// Relation H-FIPS's hint slack `u_h = omega - sum delta^2` on `D_2` (looked up).
     HintSlack,
     /// Level-1 carry `kappa^(1)_t` (domain `D_1`).
@@ -152,6 +177,7 @@ impl DigitValue {
             Self::U => ValueForm::Step(U16_DIGITS),
             Self::L => ValueForm::Slack(L16_SLACK),
             Self::V => ValueForm::Radix(V16_DIGITS),
+            Self::K => ValueForm::Radix(K16_DIGITS),
             Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
                 ValueForm::Radix(CARRY16_DIGITS)
             }
@@ -165,6 +191,7 @@ impl DigitValue {
             Self::Z | Self::Zx | Self::U | Self::L if digit == 0 => Group::Main16,
             Self::Z | Self::Zx | Self::U | Self::L => Group::Main,
             Self::V => Group::Main16,
+            Self::K => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
             Self::Kappa2(_) | Self::HintSlack => Group::Level2,
             Self::Kappa3 => Group::Level3,
@@ -207,6 +234,10 @@ pub enum Column {
     Multiplicity(u8),
     /// A per-coefficient column of relation H-FIPS (main domain, `G_main4`).
     Fips(FipsColumn),
+    /// A zero polynomial of `G_3` (`k >= 1`), committed so that `G_3` has `G_2`'s Akita
+    /// layout (`agg_pcs_config::catalogs::Group::physical_vars`); no stage reads it and its
+    /// opening claim is zero.
+    Zero(u8),
 }
 
 impl Column {
@@ -276,6 +307,21 @@ impl Column {
         value: DigitValue::V,
         digit: 1,
     };
+    /// `K_0` (projection outputs, looked up).
+    pub const K_0: Self = Self::Digit {
+        value: DigitValue::K,
+        digit: 0,
+    };
+    /// `K_1` (projection outputs, looked up).
+    pub const K_1: Self = Self::Digit {
+        value: DigitValue::K,
+        digit: 1,
+    };
+    /// `K_2` (projection outputs, base 4, leaf and link).
+    pub const K_2: Self = Self::Digit {
+        value: DigitValue::K,
+        digit: 2,
+    };
 
     /// The carry column `kappa^(l)_t` (`l = 1, 2`) or `kappa^(3)` (`l = 3`).
     #[must_use]
@@ -293,7 +339,7 @@ impl Column {
     pub fn alphabet(self) -> Alphabet {
         match self {
             Self::Digit { value, digit } => value.layout().alphabet(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) => Alphabet::Bool,
+            Self::W1Bit(_) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) | Self::Zero(_) => Alphabet::Bool,
             Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => Alphabet::Ternary,
             Self::Multiplicity(_) => Alphabet::Balanced(16),
         }
@@ -304,14 +350,22 @@ impl Column {
     pub fn base(self) -> Option<u32> {
         match self {
             Self::Digit { value, digit } => value.layout().base(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) => None,
+            Self::W1Bit(_) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) | Self::Zero(_) => None,
         }
     }
 
-    /// True for a column looked up in `T_16` (stored balanced, `f = stored + 2^15`).
+    /// True for a column looked up in `T_16` (stored balanced, `f = stored + 2^15`). The
+    /// digits of `v` have base `2^16` but are not looked up.
     #[must_use]
     pub fn is_lookup(self) -> bool {
-        self.base() == Some(LOOKUP_BASE)
+        self.base() == Some(LOOKUP_BASE) && !self.is_unchecked()
+    }
+
+    /// True for the digits of `v`: committed, read by the ring identity and the projection
+    /// identity, and range-checked by neither the lookup nor a leaf.
+    #[must_use]
+    pub const fn is_unchecked(self) -> bool {
+        matches!(self, Self::Digit { value: DigitValue::V, .. })
     }
 
     /// True for a digit range-checked by a leaf and a link (`Z_hi` base 4, `U_hi` base 6).
@@ -320,10 +374,10 @@ impl Column {
         matches!(self.base(), Some(4 | 6))
     }
 
-    /// True when the column is stored as `i32` cells (every looked-up column).
+    /// True when the column is stored as `i32` cells (every 16-bit column).
     #[must_use]
     pub fn is_wide(self) -> bool {
-        self.is_lookup()
+        self.base() == Some(LOOKUP_BASE)
     }
 
     /// The group holding the column.
@@ -334,7 +388,14 @@ impl Column {
             Self::W1Bit(_) | Self::Fips(_) => Group::Main,
             Self::Parity2(_) => Group::Level2,
             Self::Multiplicity(_) => Group::Mult,
+            Self::Zero(_) => Group::Level3,
         }
+    }
+
+    /// True for a zero polynomial of `G_3` (not read by any stage, opening claim zero).
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        matches!(self, Self::Zero(_))
     }
 
     /// The domain the column lives on (the main domain for both main groups).
@@ -364,6 +425,7 @@ impl Column {
                 DigitValue::U => format!("u_{}", half(digit)),
                 DigitValue::L => format!("l_{}", half(digit)),
                 DigitValue::V => format!("v_{}", half(digit)),
+                DigitValue::K => format!("k_{digit}"),
                 DigitValue::HintSlack => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
                 DigitValue::Kappa2(t) => format!("kappa2_{t}"),
@@ -375,6 +437,7 @@ impl Column {
             Self::Fips(FipsColumn::Sign) => "s".to_owned(),
             Self::Fips(FipsColumn::Delta) => "delta".to_owned(),
             Self::Fips(FipsColumn::Wrap) => "e".to_owned(),
+            Self::Zero(k) => format!("zero_{k}"),
         }
     }
 
@@ -386,7 +449,9 @@ impl Column {
     pub fn alphabet_code(self) -> u8 {
         match self {
             Self::Multiplicity(_) => MULTIPLICITY_ALPHABET_CODE,
+            Self::Zero(_) => ZERO_ALPHABET_CODE,
             Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => TERNARY_ALPHABET_CODE,
+            column if column.is_unchecked() => UNCHECKED_ALPHABET_CODE,
             column if column.is_lookup() => LOOKUP_ALPHABET_CODE,
             column => column.base().map_or(0, |base| base as u8),
         }
@@ -445,7 +510,10 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
             .chain(lanes.map(|t| Column::carry(2, t)))
             .chain(std::iter::once(Column::HINT_SLACK).filter(|_| fips))
             .collect(),
-        Group::Level3 => vec![Column::carry(3, 0)],
+        Group::Level3 => std::iter::once(Column::carry(3, 0))
+            .chain((1..Group::Level3.num_polynomials(relation) as u8).map(Column::Zero))
+            .collect(),
+        Group::Proj => value_columns(DigitValue::K),
         Group::Mult => (0..MULTIPLICITY_DIGITS as u8)
             .map(Column::Multiplicity)
             .collect(),
@@ -499,6 +567,13 @@ impl GroupDescriptor {
         self.columns.len()
     }
 
+    /// The polynomials opened through stage-3 claims (every polynomial but the zero ones),
+    /// in group order.
+    #[must_use]
+    pub fn claimed_count(&self) -> usize {
+        self.columns.iter().filter(|c| !c.is_zero()).count()
+    }
+
     /// Position of `column` in the group, if it belongs to it.
     #[must_use]
     pub fn position(&self, column: Column) -> Option<usize> {
@@ -507,24 +582,32 @@ impl GroupDescriptor {
 }
 
 /// The looked-up columns of one lookup stack (`docs/lookup.md`), in slot order
-/// (H-FIPS puts `u_h` in slot 6 of stack 2).
+/// (H-FIPS puts `u_h` in slot 6 of stack 2): `[Z_lo | U_lo]` (the first two `G_main16`
+/// columns, so the stack is the first half of the stacked lane), the carries of levels 1 to
+/// 3, and `[K_0 | K_1]` on the projection domain.
 #[must_use]
 pub fn stack_columns(stack: usize, relation: Relation) -> Vec<Column> {
     let lanes = 0..W1_BITS as u8;
     match stack {
-        0 => group_columns(Group::Main16, relation),
+        0 => group_columns(Group::Main16, relation)
+            .into_iter()
+            .filter(|c| c.is_lookup())
+            .collect(),
         1 => lanes.map(|t| Column::carry(1, t)).collect(),
         2 => lanes
             .map(|t| Column::carry(2, t))
             .chain(std::iter::once(Column::HINT_SLACK).filter(|_| relation == Relation::HFips))
             .collect(),
         3 => vec![Column::carry(3, 0)],
-        _ => panic!("four lookup stacks"),
+        4 => vec![Column::K_0, Column::K_1],
+        _ => panic!("five lookup stacks"),
     }
 }
 
-/// The domain of each lookup stack: the main domain, `D_1`, `D_2`, `D_3`.
-pub const STACK_DOMAINS: [GroupRole; 4] = [Group::Main, Group::Level1, Group::Level2, Group::Level3];
+/// The domain of each lookup stack: the main domain, `D_1`, `D_2`, `D_3` and the projection
+/// domain `D_k`.
+pub const STACK_DOMAINS: [GroupRole; 5] =
+    [Group::Main, Group::Level1, Group::Level2, Group::Level3, Group::Proj];
 
 /// Complete public commitment manifest of one batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -675,16 +758,20 @@ impl CommitmentManifest {
             .collect()
     }
 
-    /// Committed polynomials opened at `r^(3)` (every group but `G_m`): 31 under H-u, 32
-    /// under H-exact.
+    /// Committed polynomials opened at `r^(3)` through stage-3 claims (every group but `G_m`,
+    /// without `G_3`'s zero polynomials): 34 under H-u, 35 under H-exact, 39 under H-FIPS.
     #[must_use]
     pub fn stage3_polynomials(&self) -> usize {
-        self.total_polynomials() - MULTIPLICITY_DIGITS
+        self.groups
+            .iter()
+            .filter(|g| g.role != Group::Mult)
+            .map(GroupDescriptor::claimed_count)
+            .sum()
     }
 
-    /// The public shape of the lookup (`docs/lookup.md`): the four stacks
-    /// `[Z_lo | U_lo | V_lo | V_hi]` on the main domain, `kappa^(1)` (6 columns in 8 slots)
-    /// on `D_1`, `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, one table `T_16`, two
+    /// The public shape of the lookup (`docs/lookup.md`): the five stacks
+    /// `[Z_lo | U_lo]` on the main domain, `kappa^(1)` (6 columns in 8 slots) on `D_1`,
+    /// `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, `[K_0 | K_1]` on `D_k`, one table `T_16`, two
     /// challenges.
     #[must_use]
     pub fn lookup_shape(&self) -> LookupShape {
@@ -704,7 +791,7 @@ impl CommitmentManifest {
         }
     }
 
-    /// Total committed polynomials (38 under H-u, 39 under H-exact).
+    /// Total committed polynomials (52 under H-u, 53 under H-exact, 58 under H-FIPS).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -803,9 +890,22 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 8, 6, 12, 1, 7]);
-        assert_eq!(manifest.total_polynomials(), 38);
-        assert_eq!(manifest.stage3_polynomials(), 31);
+        assert_eq!(counts, [4, 8, 6, 12, 12, 3, 7]);
+        assert_eq!(manifest.total_polynomials(), 52);
+        assert_eq!(manifest.stage3_polynomials(), 34);
+        // G_3: the carry, then 11 zero polynomials (G_2's layout).
+        let level3 = &manifest.group(Group::Level3).columns;
+        assert_eq!((level3[0], level3[1], level3[11]), (Column::carry(3, 0), Column::Zero(1), Column::Zero(11)));
+        assert_eq!(manifest.group(Group::Level3).claimed_count(), 1);
+        assert_eq!(Column::Zero(1).alphabet_code(), ZERO_ALPHABET_CODE);
+        // G_k: K_0, K_1 (looked up), K_2 (base 4, leaf and link); V_lo, V_hi unchecked.
+        assert_eq!(manifest.group(Group::Proj).columns, [Column::K_0, Column::K_1, Column::K_2]);
+        assert!(Column::K_0.is_lookup() && Column::K_1.is_lookup() && Column::K_2.is_leaf_digit());
+        assert!(!Column::V_LO.is_lookup() && Column::V_LO.is_wide() && Column::V_HI.is_unchecked());
+        assert_eq!(Column::V_HI.alphabet_code(), UNCHECKED_ALPHABET_CODE);
+        assert_eq!(K16_DIGITS.range(), (-PROJ_BOUND, PROJ_BOUND - 1));
+        assert_eq!(K16_DIGITS.constant(), (1 << 31) + (1 << 15));
+        assert_eq!(K16_DIGITS.decompose(0), vec![-(1 << 15), -(1 << 15), 0]);
         assert!(manifest.bool_digits().is_empty());
         assert_eq!(manifest.z_value(), DigitValue::Z);
         let lookups: Vec<Column> = manifest
@@ -814,10 +914,10 @@ mod tests {
             .flat_map(|g| g.columns.clone())
             .filter(|c| c.is_lookup())
             .collect();
-        // 4 main-domain columns and 6 + 6 + 1 carries.
+        // 2 main-domain columns, 6 + 6 + 1 carries and K_0, K_1.
         assert_eq!(lookups.len(), 17);
         let names: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
-        assert_eq!(names, ["z_hi", "u_hi"]);
+        assert_eq!(names, ["z_hi", "u_hi", "k_2"]);
         assert_eq!(Column::Z_HI.base(), Some(4));
         assert_eq!(Column::U_HI.base(), Some(6));
         assert_eq!(Column::U_HI.alphabet(), Alphabet::Balanced(6));
@@ -853,8 +953,8 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 9, 6, 12, 1, 7]);
-        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (39, 32));
+        assert_eq!(counts, [4, 9, 6, 12, 12, 3, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (53, 35));
         let names = |role| -> Vec<String> {
             manifest.group(role).columns.iter().map(|c| c.name()).collect()
         };
@@ -865,7 +965,7 @@ mod tests {
         );
         let leaf: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
         let bools: Vec<String> = manifest.bool_digits().iter().map(|c| c.name()).collect();
-        assert_eq!((leaf, bools), (vec!["u_hi".to_owned()], vec!["bz_hi".to_owned(), "a_z".to_owned()]));
+        assert_eq!((leaf, bools), (vec!["u_hi".to_owned(), "k_2".to_owned()], vec!["bz_hi".to_owned(), "a_z".to_owned()]));
         assert_eq!(manifest.z_value(), DigitValue::Zx);
         assert_eq!(value_columns(DigitValue::Zx), [Column::ZX_LO, Column::ZX_HI, Column::A_Z]);
         assert!(Column::ZX_LO.is_lookup() && !Column::ZX_HI.is_lookup());
@@ -873,7 +973,7 @@ mod tests {
         assert_eq!((Column::ZX_HI.alphabet_code(), Column::A_Z.alphabet_code()), (0, 0));
         assert!(Column::ZX_HI.is_bool_digit() && !Column::W1Bit(0).is_bool_digit());
         // The lookup stacks keep their shapes: bz_lo takes the slot of z_lo.
-        assert_eq!(manifest.stack_columns(0), [Column::ZX_LO, Column::U_LO, Column::V_LO, Column::V_HI]);
+        assert_eq!(manifest.stack_columns(0), [Column::ZX_LO, Column::U_LO]);
         assert_eq!(
             manifest.lookup_shape(),
             CommitmentManifest::for_batch(256).unwrap().lookup_shape()
@@ -906,8 +1006,8 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 12, 6, 13, 1, 7]);
-        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (43, 36));
+        assert_eq!(counts, [4, 12, 6, 13, 13, 3, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (58, 39));
         let names = |role| -> Vec<String> {
             manifest.group(role).columns.iter().map(|c| c.name()).collect()
         };
@@ -917,7 +1017,7 @@ mod tests {
             ["bz_hi", "l_hi", "b_0", "b_1", "b_2", "b_3", "b_4", "b_5", "a_z", "s", "delta", "e"]
         );
         assert_eq!(names(Group::Level2).last().map(String::as_str), Some("u_h"));
-        assert!(manifest.leaf_digits().is_empty());
+        assert_eq!(manifest.leaf_digits(), [Column::K_2]);
         let bools: Vec<String> = manifest.bool_digits().iter().map(|c| c.name()).collect();
         assert_eq!(bools, ["bz_hi", "l_hi", "a_z"]);
         assert_eq!((manifest.z_value(), manifest.u_slot_value()), (DigitValue::Zx, DigitValue::L));
@@ -952,11 +1052,12 @@ mod tests {
         let form = DigitValue::L.layout();
         assert_eq!((form.weights(), form.constant()), (vec![1, 29_696], 1 << 15));
         assert_eq!(form.range(), (0, 95_231));
-        // 16 main-domain columns, u_h one element per signature at 2^15: 16,507.5.
+        // 16 main-domain columns, u_h one element per signature, 3 * 128 projection digits
+        // and G_3's 12 zero polynomials (2^14 logical cells each) at 2^15: 16,897.5.
         let full = CommitmentManifest::for_relation(1 << 15, Relation::HFips).unwrap();
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 16_507.5).abs() < 1e-9, "{per_signature}");
-        assert_eq!(full.catalog_row(), "mldsa-44-l16f-batch-32768-mult-final");
+        assert!((per_signature - 16_897.5).abs() < 1e-9, "{per_signature}");
+        assert_eq!(full.catalog_row(), "mldsa-44-p16f-batch-32768-mult-final");
         // Event 0: relation byte 2, G_main4 at 12 polynomials with the ternary codes.
         let bytes = manifest.binding_bytes();
         assert_eq!(bytes[3], RELATION_H_FIPS);
@@ -1015,28 +1116,36 @@ mod tests {
 
     #[test]
     fn committed_elements_per_signature() {
-        // 12,288 main-domain elements, 96 + 12 + 0.5 bridge
-        // elements and the 7 * 2^16 multiplicity cells (14 per signature) at N = 2^15.
+        // 12,288 main-domain elements, 96 + 12 + 0.5 bridge elements, 5.5 for G_3's 11 zero
+        // polynomials, 3 * 128 projection digits and the 7 * 2^16 multiplicity cells (14 per
+        // signature) at N = 2^15.
         let full = CommitmentManifest::for_batch(1 << 15).unwrap();
         assert_eq!(full.d_main(), 25);
         assert_eq!(full.segments(), 4);
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 12_410.5).abs() < 1e-9, "{per_signature}");
+        assert!((per_signature - 12_800.0).abs() < 1e-9, "{per_signature}");
         let small = CommitmentManifest::for_batch(256).unwrap();
         assert_eq!(small.d_main(), 18);
         assert_eq!(small.segments(), 1);
         let logical: Vec<usize> = small.groups().iter().map(|g| g.logical_vars).collect();
         let physical: Vec<usize> = small.groups().iter().map(|g| g.physical_vars).collect();
-        assert_eq!(logical, [18, 18, 13, 13, 12, 16]);
-        assert_eq!(physical, [18, 18, 13, 13, 13, 16]);
+        assert_eq!(logical, [18, 18, 13, 13, 12, 15, 16]);
+        assert_eq!(physical, [18, 18, 13, 13, 13, 15, 16]);
         assert_eq!(small.group(Group::Level3).pad_vars(), 1);
-        assert_eq!(small.catalog_row(), "mldsa-44-l16-batch-256-mult-final");
-        // H-exact: one more main-domain column, 13,434.5 elements per signature at 2^15;
-        // 13,960 physical at N = 1,024.
+        assert_eq!(small.catalog_row(), "mldsa-44-p16-batch-256-mult-final");
+        // G_3 has G_2's physical layout at every size (one trailing pad variable).
+        for d_sig in 3..=15 {
+            let m = CommitmentManifest::for_batch(1 << d_sig).unwrap();
+            let (l2, l3) = (m.group(Group::Level2), m.group(Group::Level3));
+            assert_eq!((l3.physical_vars, l3.polynomial_count()), (l2.physical_vars, l2.polynomial_count()));
+            assert_eq!(l3.pad_vars(), 1);
+        }
+        // H-exact: one more main-domain column, 13,824 elements per signature at 2^15;
+        // 14,432 physical at N = 1,024.
         let exact = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
         let per_signature = exact.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 13_434.5).abs() < 1e-9, "{per_signature}");
-        assert_eq!(exact.catalog_row(), "mldsa-44-l16x-batch-32768-mult-final");
+        assert!((per_signature - 13_824.0).abs() < 1e-9, "{per_signature}");
+        assert_eq!(exact.catalog_row(), "mldsa-44-p16x-batch-32768-mult-final");
         let physical = |m: &CommitmentManifest| -> usize {
             m.groups()
                 .iter()
@@ -1044,8 +1153,8 @@ mod tests {
                 .sum()
         };
         let k = CommitmentManifest::for_relation(1024, Relation::HExact).unwrap();
-        assert_eq!(physical(&k) / 1024, 13_960);
-        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 12_936);
+        assert_eq!(physical(&k) / 1024, 14_432);
+        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 13_408);
     }
 
     #[test]
@@ -1054,9 +1163,10 @@ mod tests {
         let shape = manifest.lookup_shape();
         shape.validate().unwrap();
         let depths: Vec<usize> = shape.stacks.iter().map(|s| s.depth()).collect();
-        assert_eq!(depths, [27, 22, 18, 14]);
-        assert_eq!(shape.lookups(0), 138_690_560);
-        for (stack, columns) in (0..4).map(|s| (s, stack_columns(s, Relation::Hu))) {
+        assert_eq!(depths, [26, 22, 18, 14, 23]);
+        assert_eq!(shape.lookups(0), 79_970_304);
+        assert_eq!(shape.max_depth(), 26);
+        for (stack, columns) in (0..5).map(|s| (s, stack_columns(s, Relation::Hu))) {
             assert_eq!(shape.stacks[stack].columns, columns.len());
             for column in columns {
                 assert!(column.is_lookup());
@@ -1093,12 +1203,13 @@ mod tests {
         let mut expected = vec![4, 0, 0x44, 0];
         expected.extend_from_slice(&200_u64.to_le_bytes());
         expected.extend_from_slice(&256_u64.to_le_bytes());
-        expected.extend_from_slice(&[1, 6]);
+        expected.extend_from_slice(&[2, 7]);
         assert_eq!(&bytes[..expected.len()], expected.as_slice());
-        // G_main16: role 0, round 1, family 1, 18 logical and physical vars, 4 polys.
+        // G_main16: role 0, round 1, family 1, 18 logical and physical vars, 4 polys: z_lo and
+        // u_lo looked up, v_lo and v_hi unchecked.
         let main16 = &bytes[expected.len()..];
         assert_eq!(&main16[..6], &[0, 1, 1, 18, 18, 4]);
-        assert_eq!(&main16[6..10], &[0x90; 4]);
+        assert_eq!(&main16[6..10], &[0x90, 0x90, 0x10 | 16, 0x10 | 16]);
         // G_main4: role 1, round 1, family 0, then z_hi (4), u_hi (6, H-u) and six bits.
         let main4 = &main16[10..];
         assert_eq!(&main4[..14], &[1, 1, 0, 18, 18, 8, 4, 6, 0, 0, 0, 0, 0, 0]);
@@ -1114,7 +1225,7 @@ mod tests {
         let row = manifest.catalog_row().len();
         assert_eq!(
             bytes.len(),
-            expected.len() + 6 * 6 + 38 + 2 + row + 3 * 17 + 3 + 1 + 4 * 7
+            expected.len() + 7 * 6 + 52 + 2 + row + 3 * 17 + 3 + 1 + 5 * 7
         );
         // Live count, padded count and the catalog row all enter the binding.
         let full = CommitmentManifest::for_batch(256).unwrap();
@@ -1141,7 +1252,7 @@ mod tests {
         assert_eq!(xrow, row + 1);
         assert_eq!(
             xbytes.len(),
-            expected.len() + 6 * 6 + 39 + 2 + xrow + 3 * 17 + 3 + 1 + 4 * 7
+            expected.len() + 7 * 6 + 53 + 2 + xrow + 3 * 17 + 3 + 1 + 5 * 7
         );
         assert_ne!(xbytes, bytes);
     }

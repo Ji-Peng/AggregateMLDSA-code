@@ -272,7 +272,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let manifest = CommitmentManifest::for_batch(256).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
         assert_eq!(output.proof.work.len(), plan.work_bits().div_ceil(8));
-        assert_eq!(output.proof.size().work, 333, "2,660 bits at N* = 2^8");
+        assert_eq!(output.proof.size().work, 309, "2,471 bits at N* = 2^8");
         let mut offset = 0;
         let mut seen = std::collections::HashSet::new();
         for site in plan.sites() {
@@ -410,10 +410,11 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
         let _ = round_trip_as(Relation::HExact, 60, 4, 0xe064);
         let (fixture, bridge, output, bytes) = round_trip_as(Relation::HExact, 200, 56, 0xe256);
         let public = fixture.public();
-        assert_eq!(output.proof.stage2.claims.squares.len(), 1);
-        assert_eq!(output.proof.stage3.claims.0.len(), 32);
-        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 76 claims.
-        assert_eq!(output.proof.size().piop, 16 * (76 + 11 * 18));
+        assert_eq!(output.proof.stage2.claims.squares.len(), 2);
+        assert_eq!(output.proof.stage3.claims.0.len(), 35);
+        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 8 + 1 + 35
+        // claims (the projection claim c after stage 2).
+        assert_eq!(output.proof.size().piop, 16 * (81 + 11 * 18));
         let as_hu = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
         assert!(matches!(
             rejected(as_hu),
@@ -457,13 +458,14 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
         let mut promoted = hu_bytes.clone();
         promoted[2] = Relation::HExact.id();
         assert!(!verify_mode_b(&public, &promoted, &bridge, Relation::HExact, None).accepted());
-        // A wrong nonce at the stage-2 gamma site (10 bits under H-exact) is rejected.
+        // A wrong nonce at the stage-2 gamma site (11 bits under H-exact: 8 coefficients,
+        // g = 4) is rejected.
         let manifest = CommitmentManifest::for_relation(256, Relation::HExact).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
         let mut offset = 0;
         for site in plan.sites() {
             if site.class == SiteClass::StageGamma && site.i == 2 {
-                assert_eq!((site.bits, site.nonce_bits()), (3, 10));
+                assert_eq!((site.bits, site.nonce_bits()), (4, 11));
                 let mut wrong = output.proof.clone();
                 wrong.work[offset / 8] ^= 1 << (offset % 8);
                 assert!(!verify_mode_b(&public, &wrong.to_bytes(), &bridge, Relation::HExact, None)
@@ -501,11 +503,11 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
         let bytes = output.proof.to_bytes();
         let public = fixture.public();
         assert_eq!(bytes[2], 2);
-        assert!(output.proof.stage2.claims.squares.is_empty());
+        assert_eq!(output.proof.stage2.claims.squares.len(), 1);
         assert_eq!(output.proof.stage2.claims.fips.len(), 2);
-        assert_eq!(output.proof.stage3.claims.0.len(), 36);
-        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 8 + 36 claims.
-        assert_eq!(output.proof.size().piop, 16 * (81 + 11 * 18));
+        assert_eq!(output.proof.stage3.claims.0.len(), 39);
+        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 9 + 1 + 39 claims.
+        assert_eq!(output.proof.size().piop, 16 * (86 + 11 * 18));
         eprintln!("N = 256, H-FIPS (with two weight-80 corner records): aggregate {} bytes, prover {}", bytes.len(), output.timings);
         let report = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         report_line("N = 256 H-FIPS: verifier uncached", &report);
@@ -542,13 +544,13 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
         let mut promoted = exact_bytes;
         promoted[2] = Relation::HFips.id();
         assert!(!verify_mode_b(&public, &promoted, &bridge, Relation::HFips, None).accepted());
-        // A wrong nonce at the stage-2 gamma site (g = 3, 10-bit nonce) is rejected.
+        // A wrong nonce at the stage-2 gamma site (g = 4, 11-bit nonce) is rejected.
         let manifest = CommitmentManifest::for_relation(256, Relation::HFips).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
         let mut offset = 0;
         for site in plan.sites() {
             if site.class == SiteClass::StageGamma && site.i == 2 {
-                assert_eq!((site.bits, site.nonce_bits()), (3, 10));
+                assert_eq!((site.bits, site.nonce_bits()), (4, 11));
                 let mut wrong = output.proof.clone();
                 wrong.work[offset / 8] ^= 1 << (offset % 8);
                 assert!(!verify_mode_b(&public, &wrong.to_bytes(), &bridge, Relation::HFips, None).accepted());

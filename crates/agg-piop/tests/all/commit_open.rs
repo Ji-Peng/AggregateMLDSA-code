@@ -1,5 +1,6 @@
 //! Round-1 and round-2 tables of real ML-DSA-44 batches (two main groups of widths 16 and
-//! 4, three width-16 bridge groups and the width-4 multiplicity group) commit through
+//! 4, three width-16 bridge groups, the width-16 projection group and the width-4
+//! multiplicity group) commit through
 //! agg-pcs-config and open in one batched Akita proof.
 
 use crate::common;
@@ -26,7 +27,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 /// of the composed tables at the opening points.
 fn check_virtual_claims(
     batch: &Batch,
-    points: &[Vec<OpeningField>; 6],
+    points: &[Vec<OpeningField>; 7],
     values: &[Vec<OpeningField>],
 ) {
     let manifest = &batch.manifest;
@@ -62,14 +63,14 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
     let committer = TableCommitter::new(manifest.clone()).expect("setup");
     // Round 1 (event 1) before the bridge seed, round 2 (event 4) after it.
     let [main16, main] = committer.commit_round1(&batch.main).expect("round 1");
-    let [level1, level2, level3, mult] = committer.commit_round2(&batch.bridge).expect("round 2");
+    let [level1, level2, level3, proj, mult] = committer.commit_round2(&batch.bridge).expect("round 2");
     let [_, again] = committer.commit_round1(&batch.main).expect("round 1 again");
     assert_eq!(
         main.serialized().unwrap(),
         again.serialized().unwrap(),
         "the event-1 payload is deterministic"
     );
-    let groups = [&main16, &main, &level1, &level2, &level3, &mult];
+    let groups = [&main16, &main, &level1, &level2, &level3, &proj, &mult];
     let commitments = groups.map(|c| c.commitment().clone());
     for group in groups {
         assert!(!group.serialized().unwrap().is_empty());
@@ -93,7 +94,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
     let session = [0x3c; 32];
     let (proof, claims) = committer
         .open(
-            [main16, main, level1, level2, level3, mult],
+            [main16, main, level1, level2, level3, proj, mult],
             batch.tables(),
             &points,
             &session,
@@ -105,7 +106,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         claims.iter().map(|c| c.values.len()).sum::<usize>(),
         proof.len()
     );
-    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 38);
+    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 52);
     let values: Vec<Vec<OpeningField>> = claims.iter().map(|c| c.values.clone()).collect();
     check_virtual_claims(&batch, &points, &values);
 
@@ -121,7 +122,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         .expect("prover-derived verifier accepts");
 
     // A changed claim, a changed session and swapped commitments are rejected.
-    for group in 0..6 {
+    for group in 0..7 {
         let mut wrong = claims.clone();
         wrong[group].values[0] += OpeningField::lift_base(BaseField::from_u64(1));
         assert!(verifier
