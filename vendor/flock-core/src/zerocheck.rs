@@ -15,12 +15,12 @@
 //! is tested on honest witnesses; verify also rejects byte-mutated proofs and
 //! shape-corrupted ones.
 
+use crate::challenger::CanonicalPow;
 use std::{
     env::var_os,
     mem::{replace, swap},
     time::Instant,
 };
-use crate::challenger::CanonicalPow;
 
 use ag_skip::R1_POW_BITS;
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,9 @@ impl ZerocheckGrinding {
     /// `2^(K_SKIP + 1) - 1`.
     pub const fn skip_bits(self) -> Option<u32> {
         if self.enabled {
-            Some(Self::bits_for_numerator(((1usize << (K_SKIP + 1)) - 1) * self.list))
+            Some(Self::bits_for_numerator(
+                ((1usize << (K_SKIP + 1)) - 1) * self.list,
+            ))
         } else {
             None
         }
@@ -897,21 +899,57 @@ fn prove_packed_padded_inner<C: Challenger>(
     let mut domain = 1usize << n_mlv;
     let (mut a_mlv, mut b_mlv, mut store, mut rho_prev, mut pending2, mut i);
     if sparse_from_round2 {
-        let (a, b, m1, mi, st) = multilinear::uni_skip_fold_and_round_pair_runs_sparse(
-            a_packed,
-            b_packed,
-            m,
-            k_skip,
-            &fold_table,
-            &mlv_arg,
-            padding,
-        );
-        multilinear_msgs.push((m1, mi));
-        challenger.observe_f128(m1);
-        challenger.observe_f128(mi);
-        let rho = sample_rho!();
-        mlv_rhos.push(rho);
-        (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 0);
+        if n_mlv >= 10
+            && std::env::var_os("FLOCK_ZC_BITS_ROUNDS").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        {
+            let (m1, mi, st) = multilinear::sparse_round2_message_only(
+                a_packed,
+                b_packed,
+                k_skip,
+                &fold_table,
+                &mlv_arg,
+                padding,
+            );
+            multilinear_msgs.push((m1, mi));
+            challenger.observe_f128(m1);
+            challenger.observe_f128(mi);
+            let rho = sample_rho!();
+            mlv_rhos.push(rho);
+            let mut r_next = vec![F128::ONE; n_mlv - 1];
+            r_next[1..].copy_from_slice(&r[k_skip + 2..]);
+            let (a, b, m1, mi, st) = multilinear::sparse_round3_from_bits(
+                a_packed,
+                b_packed,
+                &fold_table,
+                rho,
+                &r_next,
+                &st,
+            );
+            multilinear_msgs.push((m1, mi));
+            challenger.observe_f128(m1);
+            challenger.observe_f128(mi);
+            let rho = sample_rho!();
+            mlv_rhos.push(rho);
+            domain /= 2;
+            (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 1);
+        } else {
+            let (a, b, m1, mi, st) = multilinear::uni_skip_fold_and_round_pair_runs_sparse(
+                a_packed,
+                b_packed,
+                m,
+                k_skip,
+                &fold_table,
+                &mlv_arg,
+                padding,
+            );
+            multilinear_msgs.push((m1, mi));
+            challenger.observe_f128(m1);
+            challenger.observe_f128(mi);
+            let rho = sample_rho!();
+            mlv_rhos.push(rho);
+            (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 0);
+        }
     } else if use_compact_k {
         let cp = cascade_padding
             .as_ref()
@@ -1025,8 +1063,17 @@ fn prove_packed_padded_inner<C: Challenger>(
     }
 
     if zc_timing && !use_compact_k {
+        let packed_round3 = sparse_from_round2
+            && n_mlv >= 10
+            && std::env::var_os("FLOCK_ZC_BITS_ROUNDS").as_deref()
+                != Some(std::ffi::OsStr::new("0"));
+        let label = if packed_round3 {
+            "round2+3 packed"
+        } else {
+            "round2 fused fold"
+        };
         eprintln!(
-            "[zc-timing] round2 fused fold: {:.2} ms",
+            "[zc-timing] {label}: {:.2} ms",
             t_round2.elapsed().as_secs_f64() * 1e3
         );
     }
@@ -1169,7 +1216,13 @@ fn prove_packed_padded_inner<C: Challenger>(
             route_n[1] += 1;
         }
         let t_route = std::time::Instant::now();
-        let route = if use_sparse { 0 } else if log_n_before >= 10 { 2 } else { 3 };
+        let route = if use_sparse {
+            0
+        } else if log_n_before >= 10 {
+            2
+        } else {
+            3
+        };
 
         let (m1, mi) = if use_sparse {
             let st = store.as_ref().expect("use_sparse implies store");
@@ -1284,7 +1337,14 @@ fn prove_packed_padded_inner<C: Challenger>(
     if zc_timing {
         eprintln!(
             "[zc-timing] tail routes (ms/rounds): sparse {:.2}/{} expand {:.2}/{} fused {:.2}/{} naive {:.2}/{}",
-            route_ms[0], route_n[0], route_ms[1], route_n[1], route_ms[2], route_n[2], route_ms[3], route_n[3]
+            route_ms[0],
+            route_n[0],
+            route_ms[1],
+            route_n[1],
+            route_ms[2],
+            route_n[2],
+            route_ms[3],
+            route_n[3]
         );
         eprintln!(
             "[zc-timing] rounds 3+ tail: {:.2} ms",
@@ -1381,7 +1441,11 @@ pub fn verify_with_grinding<C: Challenger>(
     // ---- Re-derive r (in lockstep with prove_packed) ----
     let r_skip = if let Some(bits) = grinding.initial_bits(m) {
         let r_skip = challenger
-            .verify_pow_and_sample_f128_vec_canonical(proof.grinding_nonces[nonce_idx], bits, k_skip)
+            .verify_pow_and_sample_f128_vec_canonical(
+                proof.grinding_nonces[nonce_idx],
+                bits,
+                k_skip,
+            )
             .ok_or(ZerocheckError::InvalidGrindingNonce { which: "initial" })?;
         nonce_idx += 1;
         r_skip

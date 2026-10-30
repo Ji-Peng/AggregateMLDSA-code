@@ -772,8 +772,8 @@ where
         // caller's geometry contract is forwarded unchanged.
         return unsafe {
             fold_pair_run_x86_avx512(
-                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe,
-                out_base, a_out, b_out,
+                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
+                a_out, b_out,
             )
         };
     }
@@ -1236,6 +1236,137 @@ pub fn uni_skip_fold_and_round_pair_runs_sparse(
     );
     debug_assert_eq!(a.len(), store.len(), "compacted output length");
     (a, b, msg1, msg_inf, store)
+}
+
+/// Compute the first multilinear message with task-local fold buffers.
+pub fn sparse_round2_message_only(
+    a: &[u8],
+    b: &[u8],
+    k_skip: usize,
+    table: &UniSkipFoldTable,
+    challenges: &[F128],
+    padding: &PaddingSpec,
+) -> (F128, F128, LiveLayout) {
+    let iv = padding.useful_block_intervals(k_skip + 1);
+    let store = LiveLayout::new(iv.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
+    let eq = SplitEqGhash::new(&challenges[1..]);
+    let lo_size = 1usize << eq.n_lo;
+    let live: usize = iv.iter().map(|&(s, e)| e - s).sum();
+    let target = (live / (4 * current_num_threads().max(1))).clamp(1 << 10, 1 << 16);
+    let (pieces, tasks) = balanced_interval_tasks(&iv, target);
+    let (s1, si) = tasks
+        .into_par_iter()
+        .map(|task| {
+            let task_pieces = &pieces[task];
+            let len: usize = task_pieces.iter().map(|&(s, e)| 2 * (e - s)).sum();
+            let mut aa = take_f128(len);
+            let mut bb = take_f128(len);
+            let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
+            let mut local = 0;
+            for &(ps, pe) in task_pieces {
+                let out_base = ps - local / 2;
+                let mut t = ps;
+                while t < pe {
+                    let end = (((t >> eq.n_lo) + 1) << eq.n_lo).min(pe);
+                    let (p1, pi) = fold_pair_run(
+                        a,
+                        b,
+                        table,
+                        &eq.lo,
+                        lo_size,
+                        &|_| false,
+                        false,
+                        t,
+                        end,
+                        out_base,
+                        &mut aa,
+                        &mut bb,
+                    );
+                    s1 += eq.hi[t >> eq.n_lo] * p1.reduce();
+                    si += eq.hi[t >> eq.n_lo] * pi.reduce();
+                    t = end;
+                }
+                local += 2 * (pe - ps);
+            }
+            crate::scratch::give_f128(aa);
+            crate::scratch::give_f128(bb);
+            (s1, si)
+        })
+        .reduce(|| (F128::ZERO, F128::ZERO), |(a, b), (c, d)| (a + c, b + d));
+    (challenges[0] * s1, si, store)
+}
+
+/// Fold directly from the packed rows and compute the following message.
+pub fn sparse_round3_from_bits(
+    a: &[u8],
+    b: &[u8],
+    table: &UniSkipFoldTable,
+    rho: F128,
+    r_next: &[F128],
+    store_in: &LiveLayout,
+) -> (Vec<F128>, Vec<F128>, F128, F128, LiveLayout) {
+    assert_eq!(table.n_chunks, 8);
+    // Linearity gives fold(x0, x1, rho) = (1 + rho)x0 + rho*x1.
+    // Bake the two coefficients into the byte tables for the packed rows.
+    let mut joint = UniSkipFoldTable {
+        n_chunks: 16,
+        data: vec![F128::ZERO; 16 * 256],
+    };
+    for j in 0..8 * 256 {
+        let hi = rho * table.data[j];
+        joint.data[j] = table.data[j] + hi;
+        joint.data[8 * 256 + j] = hi;
+    }
+    let live_out = shrink_intervals(store_in.intervals());
+    let pair_cover = shrink_intervals(&live_out);
+    let store_out = LiveLayout::new(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
+    let mut aa = take_f128(store_out.len());
+    let mut bb = take_f128(store_out.len());
+    let eq = SplitEqGhash::new(&r_next[1..]);
+    let live: usize = pair_cover.iter().map(|&(s, e)| e - s).sum();
+    let target = (live / (4 * current_num_threads().max(1))).clamp(1 << 8, 1 << 12);
+    let (pieces, tasks) = balanced_interval_tasks(&pair_cover, target);
+    let mut work = Vec::with_capacity(tasks.len());
+    let (mut ar, mut br) = (&mut aa[..], &mut bb[..]);
+    for task in &tasks {
+        let len: usize = pieces[task.clone()].iter().map(|&(s, e)| 2 * (e - s)).sum();
+        let (x, rest) = take(&mut ar).split_at_mut(len);
+        ar = rest;
+        let (y, rest) = take(&mut br).split_at_mut(len);
+        br = rest;
+        work.push((&pieces[task.clone()], x, y));
+    }
+    let (s1, si) = work
+        .into_par_iter()
+        .map(|(part, ao, bo)| {
+            let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
+            let mut cursor = store_in.seek(4 * part[0].0);
+            let mut out = 0;
+            for &(ps, pe) in part {
+                for t in ps..pe {
+                    let mut av = [F128::ZERO; 2];
+                    let mut bv = [F128::ZERO; 2];
+                    for lane in 0..2 {
+                        let row = 2 * t + lane;
+                    // Round-2 live intervals contain whole adjacent row pairs.
+                    if store_in.rank(&mut cursor, 2 * row).is_some() {
+                            let pos = 16 * row;
+                            av[lane] = joint.fold_one_row(&a[pos..pos + 16]);
+                            bv[lane] = joint.fold_one_row(&b[pos..pos + 16]);
+                        }
+                        ao[out + lane] = av[lane];
+                        bo[out + lane] = bv[lane];
+                    }
+                    out += 2;
+                    let weight = eq.hi[t >> eq.n_lo] * eq.lo[t & ((1 << eq.n_lo) - 1)];
+                    s1 += weight * (av[1] * bv[1]);
+                    si += weight * ((av[0] + av[1]) * (bv[0] + bv[1]));
+                }
+            }
+            (s1, si)
+        })
+        .reduce(|| (F128::ZERO, F128::ZERO), |(a, b), (c, d)| (a + c, b + d));
+    (aa, bb, r_next[0] * s1, si, store_out)
 }
 
 // ---------------------------------------------------------------------------
