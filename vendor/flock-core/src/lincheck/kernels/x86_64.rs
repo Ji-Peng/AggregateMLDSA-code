@@ -212,3 +212,105 @@ pub(crate) unsafe fn bank_transpose_avx512(words: &[F128], out: &mut [u8]) {
         }
     }
 }
+
+/// Bit-bank table lookups on AVX-512 for points interleaved four to a 64-byte line.
+///
+/// `tables` holds, for each row group `g < gn` and each byte value `s < 256`, an entry of
+/// `stride` consecutive F128 (`stride` a multiple of four): entry `(g, s)` starts at
+/// `tables[(256 g + s) * stride]`, and F128 `p` of it is the subset-sum for point `p`
+/// (padding lanes `np ..` are never stored to the output). `bytes[128 g + b]` is the
+/// transposed byte of group `g` and output bit `b`. For every point `p < np` and
+/// `b < nb`, `outs[p][base + b] ^= XOR_g tables[(256 g + bytes[128 g + b]) * stride + p]`.
+///
+/// Each point quad `q` (points `4 q ..`) is one zmm per lookup: a byte selects one 64-byte
+/// line, loaded and XORed into one of `B` independent accumulators. Accumulators start at
+/// zero and are folded into the output once per call, so the output sees `gn` XORs per
+/// bit in one read-modify-write.
+///
+/// # Safety
+/// AVX-512F available; `stride % 4 == 0`; `tables` readable for `gn * 256 * stride` F128,
+/// 64-byte aligned (an unaligned base is correct but loses the single-line loads);
+/// `bytes` readable for `128 * gn` bytes; `nb <= 128`; `outs.len() >= np`, and
+/// `outs[p].add(base)` writable for `nb` F128 for each `p < np`, with no other thread
+/// touching them.
+#[target_feature(enable = "avx512f")]
+pub(crate) unsafe fn bank_lookup_avx512(
+    tables: *const F128,
+    stride: usize,
+    np: usize,
+    bytes: *const u8,
+    gn: usize,
+    nb: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    debug_assert!(stride.is_multiple_of(4) && np <= stride && nb <= 128 && outs.len() >= np);
+    for q in 0..stride / 4 {
+        if 4 * q >= np {
+            break;
+        }
+        let cnt = (np - 4 * q).min(4);
+        let mut b = 0;
+        while b + 8 <= nb {
+            // SAFETY: forwarded from this function's contract (b + 8 <= nb).
+            unsafe { bank_lookup_quad::<8>(tables, stride, q, cnt, bytes, gn, b, outs, base) };
+            b += 8;
+        }
+        while b < nb {
+            // SAFETY: forwarded from this function's contract (b < nb).
+            unsafe { bank_lookup_quad::<1>(tables, stride, q, cnt, bytes, gn, b, outs, base) };
+            b += 1;
+        }
+    }
+}
+
+/// `B` consecutive output bits `b ..` of point quad `q` (`cnt <= 4` live points): see
+/// [`bank_lookup_avx512`].
+///
+/// # Safety
+/// The contract of [`bank_lookup_avx512`] with `b + B <= nb`.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn bank_lookup_quad<const B: usize>(
+    tables: *const F128,
+    stride: usize,
+    q: usize,
+    cnt: usize,
+    bytes: *const u8,
+    gn: usize,
+    b: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    use core::arch::x86_64::{
+        __m512i, _mm512_loadu_si512, _mm512_setzero_si512, _mm512_storeu_si512, _mm512_xor_si512,
+    };
+    // Bytes per table entry and per group of 256 entries.
+    let entry = 16 * stride;
+    let mut acc = [_mm512_setzero_si512(); B];
+    for g in 0..gn {
+        // SAFETY: group g's 256 entries and its 128 bytes lie inside the caller's ranges;
+        // a byte value is < 256, so the entry is inside the group; the quad offset
+        // 64 q + 64 <= entry.
+        unsafe {
+            let tg = tables.cast::<u8>().add(g * 256 * entry + 64 * q);
+            let bp = bytes.add(128 * g + b);
+            for (j, a) in acc.iter_mut().enumerate() {
+                let s = *bp.add(j) as usize;
+                *a = _mm512_xor_si512(*a, _mm512_loadu_si512(tg.add(s * entry).cast()));
+            }
+        }
+    }
+    for (j, a) in acc.iter().enumerate() {
+        let mut lanes = [F128::ZERO; 4];
+        // SAFETY: lanes is 64 writable bytes; outs[4 q + i].add(base + b + j) is writable
+        // by the caller's contract for i < cnt.
+        unsafe {
+            _mm512_storeu_si512(lanes.as_mut_ptr().cast::<__m512i>(), *a);
+            for (i, l) in lanes.iter().enumerate().take(cnt) {
+                let o = outs[4 * q + i].add(base + b + j);
+                *o += *l;
+            }
+        }
+    }
+}
