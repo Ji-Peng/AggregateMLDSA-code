@@ -796,3 +796,23 @@ composite budgets. AVX-512 SHAKE128 and sampler gates show small above-budget
 ratios and return nonzero. Finish's per-step alternative permits a zero exit status
 despite its printed composite failures. All six 1K aggregate comparisons against
 main pass; the full release suite passes. No performance threshold was relaxed.
+
+The third verification round adds independent AVX2 finish composite gates to the
+pipeline executable. It compares one finish call with three C hint calls, and
+nine finish calls with two scalar calls (the existing 4.5x speedup budget).
+These grouped comparisons retain the shared harness's strict 1.00 threshold
+and repeat policy. Diagnostic per-step passes cannot override their failures.
+Both finish budgets still fail: the dedicated benchmark reports normalized
+ratios 1.071/1.069 against C and 1.210/1.197 against scalar. Composite ExpandA
+is 1.107/1.085 times C on AVX2 and 0.460/0.456 on AVX-512. Thus the performance
+gate remains blocked; no production kernel change is included in this round.
+
+AVX-512 SHAKE128 passes twice (0.994/0.998), while the marginal AVX2 SHAKE128
+result changes from FAIL (1.003) to PASS (0.981 after the internal repeat).
+The AVX2 NTT P2 Plain/Mont row passes at 0.998 against its 1.02 budget.
+All six 1K aggregate comparisons against main pass again. With CPU affinity
+retained throughout, the release workspace passes 419 tests and vendored Flock
+passes 466 tests. Two invocations through scripts/test.sh stop at the C timing
+harness's 2% spread assertion (2.19% and 2.18%); that script widens the supplied
+CPU-3 affinity to CPUs 0,1,3–15. These failures are recorded separately from the
+fully pinned suite and from the confirmed kernel budget failures.

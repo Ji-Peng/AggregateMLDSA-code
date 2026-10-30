@@ -60,6 +60,73 @@ fn c_expand_a_avx512(rho: &[u8; 32], mat: &mut [[Poly32; 4]; 4]) {
 fn c_expand_a_avx512(_rho: &[u8; 32], _mat: &mut [[Poly32; 4]; 4]) {}
 
 #[inline(never)]
+fn finish_rows(e: &Engine, row: FinishRow<'_>, out: &mut FinishOut, calls: usize) {
+    for _ in 0..calls {
+        black_box(e.finish_row(black_box(row), black_box(&mut *out))).unwrap();
+    }
+}
+
+#[inline(never)]
+fn three_c_hints(xq: &Poly32, h: &Poly32, out: &mut Poly32) {
+    #[cfg(cref)]
+    for _ in 0..3 {
+        // SAFETY: the caller detected AVX2; all three polynomials are aligned,
+        // initialized arrays of 256 coefficients, and xq is canonical.
+        unsafe {
+            agg_mldsa_cref::ffi::pqcrystals_dilithium2_avx2_poly_use_hint(
+                black_box(out.as_mut_ptr()),
+                black_box(xq.as_ptr()),
+                black_box(h.as_ptr()),
+            );
+        }
+    }
+    black_box((xq, h, out));
+}
+
+// Enforce the complete finish budgets independently of diagnostic per-step
+// comparisons. Integer call groups express 3*C and scalar/4.5 without changing
+// the shared harness's strict ratio or its alternating-trial policy.
+fn avx2_finish_gates() {
+    let Some(e) = Engine::new(Backend::Avx2) else {
+        return;
+    };
+    let scalar = Engine::new(Backend::Scalar).unwrap();
+    let xq = Poly32(std::array::from_fn(|i| (i * 7919) as i32));
+    let xp = xq;
+    let t = [0; 256];
+    let h = std::array::from_fn(|i| u8::from(i % 3 == 0));
+    let hp = Poly32(h.map(i32::from));
+    let row = FinishRow {
+        xq: &xq,
+        xp: &xp,
+        t: &t,
+        h: &h,
+    };
+    let mut out = FinishOut::zero();
+    let mut reference = FinishOut::zero();
+    let mut hint = Poly32::zero();
+    e.finish_row(row, &mut out).unwrap();
+    scalar.finish_row(row, &mut reference).unwrap();
+    assert_eq!(out.w1, reference.w1);
+    assert_eq!(out.u, reference.u);
+    assert_eq!(out.v, reference.v);
+    common::compare(
+        "finish / 3 C hints",
+        "avx2",
+        || finish_rows(&e, row, &mut out, 1),
+        || three_c_hints(&xq, &hp, &mut hint),
+        agg_mldsa_cref::available(),
+    );
+    common::compare(
+        "9 finish / 2 scalar",
+        "avx2",
+        || finish_rows(&e, row, &mut out, 9),
+        || finish_rows(&scalar, row, &mut reference, 2),
+        true,
+    );
+}
+
+#[inline(never)]
 fn run_step2_chain_8(
     e: &Engine,
     z_bytes: &[&[u8; 2304]; 8],
@@ -108,6 +175,7 @@ fn run_step2_chain_8(
 
 fn main() {
     common::print_system_info();
+    avx2_finish_gates();
 
     let rho = [0x42u8; 32];
     let mut out = ExpandedA::default();
