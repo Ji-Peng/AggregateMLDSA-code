@@ -194,6 +194,35 @@ pub(super) unsafe fn butterfly_fused_4layer_row(
     }
 }
 
+/// [`butterfly_fused_4layer_row`] reading the sixteen rows from `src` and writing the
+/// results to the same rows of `dst` (the pass-2 first layer of the lane-blocked encode,
+/// which then needs no separate copy of the block).
+///
+/// # Safety
+/// The caller must ensure the 16 row slices selected by `r` are valid in both buffers,
+/// that `dst` does not overlap `src`, and that no concurrent call touches `dst`.
+#[inline]
+pub(super) unsafe fn butterfly_fused_4layer_row_from(
+    src: *const F128,
+    dst: *mut F128,
+    sixteenth: usize,
+    num_ntts: usize,
+    r: usize,
+    twiddles: &[F128; 15],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: target features are checked at run time; the caller owns the row
+        // geometry and disjointness contract.
+        unsafe { x86_64::butterfly_fused_4layer_row_from(src, dst, sixteenth, num_ntts, r, twiddles) };
+        return;
+    }
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        portable::butterfly_fused_4layer_row_from(src, dst, sixteenth, num_ntts, r, twiddles);
+    }
+}
+
 /// In-place radix-8 (fused-3-layer) rows of one block; `zero_root` selects
 /// the block-0 XOR-only spine. NEON-only entry (the ranked top pass).
 ///

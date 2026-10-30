@@ -180,6 +180,10 @@ impl AdditiveNttF128 {
         let words = sub * LANES_PER_GROUP;
         let state_len = GroupLeafHasher::state_len(sub);
         let base = Base(codeword.as_mut_ptr());
+        // Without `keep_final`, the first pass-2 layers read the codeword block and write the
+        // per-thread copy, so the block is not copied first; `FLOCK_LB_PASS2_COPY=1` copies
+        // it and transforms in place (the same values).
+        let copy_block = std::env::var_os("FLOCK_LB_PASS2_COPY").is_some_and(|v| v != "0");
         let lap = |slot: usize, since: &mut Option<std::time::Instant>| {
             if let Some(t) = since {
                 cpu_ns[slot].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
@@ -216,9 +220,13 @@ impl AdditiveNttF128 {
                         // inside it.
                         let src = unsafe { core::slice::from_raw_parts(at, words) };
                         let block = &mut scratch[..words];
-                        block.copy_from_slice(src);
-                        lap(0, &mut clock);
-                        self.deep_layers(block, p0, first, log_d, true);
+                        if copy_block {
+                            block.copy_from_slice(src);
+                            lap(0, &mut clock);
+                            self.deep_layers(block, p0, first, log_d, true);
+                        } else {
+                            self.deep_layers_from(src, block, p0, first, log_d, true);
+                        }
                         lap(1, &mut clock);
                         hasher.absorb(state, g, block);
                         lap(2, &mut clock);
@@ -479,6 +487,35 @@ impl AdditiveNttF128 {
         }
     }
 
+    /// [`Self::deep_layers`] on a copy: `block` receives the result of layers `first ..
+    /// log_d` applied to `src` (the same length as `block`, left unchanged). The first
+    /// fused-four step reads `src` and writes `block`, so the block is not copied first;
+    /// a remainder shorter than four layers copies, then runs in place.
+    fn deep_layers_from(&self, src: &[F128], block: &mut [F128], p0: usize, first: usize, log_d: usize, fused3: bool) {
+        debug_assert_eq!(src.len(), block.len());
+        if log_d - first < 4 {
+            block.copy_from_slice(src);
+            self.deep_layers(block, p0, first, log_d, fused3);
+            return;
+        }
+        let sub = block.len() / LANES_PER_GROUP;
+        let bs = 1usize << (log_d - first);
+        let nb = sub / bs;
+        let gb0 = p0 >> (log_d - first);
+        let len = bs * LANES_PER_GROUP;
+        let sixteenth = bs >> 4;
+        for lb in 0..nb {
+            let tw = self.fused4_twiddles(first, gb0 + lb);
+            let (s, d) = (src[lb * len..].as_ptr(), block[lb * len..].as_mut_ptr());
+            for rr in 0..sixteenth {
+                // SAFETY: the sixteen rows of row group rr lie in both slices (each holds the
+                // `len` words of block `lb`), and `block` does not overlap `src`.
+                unsafe { kernels::butterfly_fused_4layer_row_from(s, d, sixteenth, LANES_PER_GROUP, rr, &tw) };
+            }
+        }
+        self.deep_layers(block, p0, first + 4, log_d, fused3);
+    }
+
     /// Layers `first .. log_d` on one layer-`first` block of lane-blocked positions
     /// starting at position `p0` of its group. With `fused3` a remainder of three layers
     /// takes one fused-three pass instead of a fused-two and a single-layer pass (the same
@@ -605,6 +642,36 @@ mod tests {
     /// The lane-blocked encode holds, per lane, the interleaved transform of the
     /// zero-padded message: every (log_d, rate, t, live) shape including partial last
     /// groups, dead groups and the smallest supported transform, on every SIMD mask.
+    /// `deep_layers_from` equals a copy followed by `deep_layers`, for remainders of one to
+    /// eleven layers (so the first step is a fused-four step or a plain copy), blocks past
+    /// the first of a group, and both fused-three settings, on every SIMD mask.
+    #[test]
+    fn deep_layers_from_matches_copy_then_in_place() {
+        let mut rng = Rng::new(0x5EED_0C0D);
+        for &(log_d, first) in &[(12usize, 11usize), (12, 10), (12, 9), (12, 8), (12, 7), (13, 8), (14, 4), (14, 3)] {
+            let sub = 1usize << (log_d - first);
+            let ntt = AdditiveNttF128::standard(log_d);
+            for p0 in [0, sub, 3 * sub] {
+                if p0 + sub > 1 << log_d {
+                    continue;
+                }
+                for fused3 in [false, true] {
+                    for mask in test_masks() {
+                        let src = rng.f128_vec(sub * LANES_PER_GROUP);
+                        let (got, want) = with_mask(mask, || {
+                            let mut got = rng.f128_vec(sub * LANES_PER_GROUP);
+                            ntt.deep_layers_from(&src, &mut got, p0, first, log_d, fused3);
+                            let mut want = src.clone();
+                            ntt.deep_layers(&mut want, p0, first, log_d, fused3);
+                            (got, want)
+                        });
+                        assert_eq!(got, want, "log_d={log_d} first={first} p0={p0} fused3={fused3} mask={mask:#x}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn matches_interleaved_transform() {
         let mut rng = Rng::new(0x1A4E_B10C);
