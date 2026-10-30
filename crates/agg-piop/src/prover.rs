@@ -780,23 +780,35 @@ fn piop_s_threads(flock_forks: bool) -> Option<usize> {
     }
 }
 
-/// The default size of branch S's own pool on a PIOP pool of `threads` workers, or `None`
-/// for the shared pool. Branch S gets its own pool only while the Flock fork runs and the
-/// PIOP pool has at least four threads: 16 workers on a 32-thread pool (`threads / 2`,
-/// the measured best at 16C32T) and 3/8 of the pool rounded to nearest, at least 2, below
-/// (`ref/notes/bench-cloud.md` Phases 15-24). A separate pool leaves every worker of the
-/// main PIOP pool to branch L, so the lookup's round barriers do not wait behind stage jobs
-/// in the same injector.
-fn default_stage_threads(flock_forks: bool, threads: usize) -> Option<usize> {
+/// The default size of branch S's own pool on a PIOP pool of `threads` workers and a Flock
+/// pool of `flock` threads, or `None` for the shared pool. Branch S gets its own pool only
+/// while the Flock fork runs and the PIOP pool has at least four threads. At the two
+/// measured PIOP sizes, 16 and 32 workers, the default is 3/8 of the pool rounded to
+/// nearest (at least 2) below 32 and half at 32 or more: 6 and 16 workers on a 16C32T host.
+/// Elsewhere the default is capped so that PIOP + stage + Flock stays within the `cpus`
+/// logical CPUs, and the pool is shared when that leaves fewer than two workers. A separate
+/// pool leaves every worker of the main PIOP pool to branch L, so the lookup's round
+/// barriers do not wait behind stage jobs in the same injector.
+fn stage_threads(flock_forks: bool, threads: usize, flock: usize, cpus: usize) -> Option<usize> {
     if !flock_forks || threads < 4 {
         return None;
     }
-    Some(if threads >= 32 {
+    let stage = if threads >= 32 {
         threads / 2
     } else {
         // round(threads * 3 / 8) in integers; 16 gives 6 and 4 gives 2.
         ((3 * threads + 4) / 8).max(2)
-    })
+    };
+    if matches!(threads, 16 | 32) {
+        return Some(stage);
+    }
+    let budget = cpus.saturating_sub(threads.saturating_add(flock));
+    (budget >= 2).then(|| stage.min(budget))
+}
+
+/// [`stage_threads`] with the running Flock pool and the logical CPU count.
+fn default_stage_threads(flock_forks: bool, threads: usize) -> Option<usize> {
+    stage_threads(flock_forks, threads, flock_pool_threads(), logical_cpus())
 }
 
 /// Run branch L (`lookup`) and branch S (`stages`) of the forked transcript, concurrently
@@ -1486,16 +1498,21 @@ mod tests {
     fn the_default_stage_pool_follows_the_piop_pool() {
         // No fork, or fewer than four PIOP threads: the shared pool.
         for threads in [1, 2, 3, 4, 8, 16, 32, 64] {
-            assert_eq!(default_stage_threads(false, threads), None);
+            assert_eq!(stage_threads(false, threads, 8, 64), None);
         }
-        assert_eq!(default_stage_threads(true, 1), None);
-        assert_eq!(default_stage_threads(true, 2), None);
-        assert_eq!(default_stage_threads(true, 3), None);
-        assert_eq!(default_stage_threads(true, 4), Some(2));
-        assert_eq!(default_stage_threads(true, 8), Some(3));
-        assert_eq!(default_stage_threads(true, 16), Some(6));
-        assert_eq!(default_stage_threads(true, 24), Some(9));
-        assert_eq!(default_stage_threads(true, 32), Some(16));
-        assert_eq!(default_stage_threads(true, 64), Some(32));
+        assert_eq!(stage_threads(true, 1, 1, 64), None);
+        assert_eq!(stage_threads(true, 2, 1, 64), None);
+        assert_eq!(stage_threads(true, 3, 2, 64), None);
+        assert_eq!(stage_threads(true, 4, 2, 64), Some(2));
+        assert_eq!(stage_threads(true, 8, 3, 64), Some(3));
+        assert_eq!(stage_threads(true, 24, 9, 64), Some(9));
+        // The measured PIOP sizes keep their pools even on a 16-CPU host.
+        assert_eq!(stage_threads(true, 16, 6, 16), Some(6));
+        assert_eq!(stage_threads(true, 32, 12, 32), Some(16));
+        // Elsewhere the pool is capped to fit PIOP + stage + Flock in the CPU count.
+        assert_eq!(stage_threads(true, 36, 14, 60), Some(10));
+        assert_eq!(stage_threads(true, 36, 14, 48), None);
+        assert_eq!(stage_threads(true, 64, 24, 64), None);
+        assert_eq!(stage_threads(true, 64, 24, 128), Some(32));
     }
 }
