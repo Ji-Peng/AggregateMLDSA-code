@@ -4,7 +4,7 @@
 | --- | --- |
 | Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
 | Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16; PIOP wire version 4 (the parity chain's sites in the plan; the fork-join transcript of K22; the forked PIOP transcript of K23) and tied-part proof version 5 |
-| Base | code `be398d8`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
+| Base | code `a30ed97`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound (Section 5); resolves deviation P3 |
 
@@ -80,9 +80,13 @@ the PIOP Spongefish `Blake2b512` duplex (`agg_piop::transcript`), the tie challe
 the two Flock instance challengers (Flock's `FsChallenger`, BLAKE3), Akita's native stream
 (seeded by the 32-byte PIOP session digest), the setup oracle, and the hashed-entry
 oracles (instance digest, public-record digest, PCS session digest, Flock seeds and span
-seed with the event-6 record digest they bind, tie digests). Every challenge input MUST injectively encode the complete preceding
-transcript, directly or through a hashed entry (Aerie C.1); Section 4.5 records the one
-place where the code does not.
+seed with the event-6 record digest they bind, tie digests). The branch digests `d_L` and
+`d_S` of the forked PIOP transcript (deviation K23) are `H_P` answers, not entries of these
+oracles: the trunk absorbs them as compressed prefixes of the two branches (Lemma 12.1b). Every challenge input MUST injectively encode the complete preceding
+transcript, directly, through a hashed entry or through a branch digest (Aerie C.1); Section 4.5 records the one
+place where the code does not. The tied parts' sites and the sites of branch S (K23)
+encode the input of `X` and their own messages, not the complete linear prefix; Lemma 12.3
+covers them.
 
 **Sites and bad sets.** A *site* is one challenge query: a scalar or a vector drawn from
 one oracle stream (Aerie C.1: "we treat each vector as one field challenge"). For a site
@@ -725,7 +729,10 @@ are settled:
   enter the round-by-round bits through their Johnson lists, and the test at `X` through a
   list decoder, which the extractor runs, 12.6), with a checkpoint at `sd` (round-1
   candidate) and one at `X` (all six groups and, with the fork-join of K22, the tied parts'
-  pending claims), and Lemma 12.3 for the parallel Flock transcripts.
+  pending claims), and Lemma 12.3 for the parallel Flock transcripts and for branch S of
+  the forked PIOP transcript (K23). With K23 the lemma also carries 53 core PIOP sites at
+  `2^15` (`tau`, `gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds); it has had
+  internal review only (12.7 item 3).
 
 The theorem is conditional on the assumptions of Section 12.5: **(F)** Flock's documented
 round-by-round analysis of its instances (per-site bounds as validated by its configs, the
@@ -744,7 +751,7 @@ most
 
 ```text
 eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + eps_fs
-           + eps_merkle + delta_X + delta_samp + sum_I Adv^MSIS_I(T_I)
+           + eps_br + eps_merkle + delta_X + delta_samp + sum_I Adv^MSIS_I(T_I)
 ```
 
 where `R_f` is the number of field sites of the PIOP and of Akita read by the verifier
@@ -754,17 +761,19 @@ part, outer and Ligerito, queries included), `eps_bind, eps_pk, eps_dig` the has
 Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock part and
 span seeds, the event-6 record digest `rec` that they bind (K22), final-vector digests, tie
 bindings, Flock statement digests, the BLAKE3 chaining of Flock's challenger), `eps_fs` the
-Flock-seed term of Lemma 12.1, `eps_merkle` the
+Flock-seed term of Lemma 12.1, `eps_br <= 5 Q_P^2 / 2^257 + Q_P / 2^191` the term of the branch digests
+`d_L`, `d_S` of K23 (Lemma 12.1b; `Q_P` the `H_P` queries), `eps_merkle` the
 Ligerito Merkle term of Lemma 12.2, `delta_X < 2^-(2^110)` the seed-density term of Lemma
 12.4, `delta_samp = 0` for the exact samplers, and the Module-SIS terms those of Akita
 Lemma 10.20 for the schedule's occurrences.
 
-*Proof (Section 12).* (1) Hashed entries, the Flock seeds and the Ligerito caps are expanded
-(Akita Lemma 10.47, Lemmas 12.1, 12.2): `eps_bind + eps_pk + eps_dig + eps_fs + eps_merkle`.
+*Proof (Section 12).* (1) Hashed entries, the Flock seeds, the branch digests and the
+Ligerito caps are expanded (Akita Lemma 10.47, Lemmas 12.1, 12.1b, 12.2): `eps_bind + eps_pk
++ eps_dig + eps_fs + eps_br + eps_merkle`.
 (2) A checkpoint structure for the expanded protocol (12.2): checkpoints at `sd` (candidate
 the round-1 sources, test the caller's relation H-u, H-exact or H-FIPS) and at `X` (candidate all six groups, test the PIOP
 relation and the tied parts' claims `C4_p`), Akita's opening suffix (Proposition 10.44) after the root fold, and Lemma 12.3 for
-the tied parts' own challengers. (3) Item (vii) of Akita Definition 10.16: the bridge seed
+the tied parts' own challengers and for the sites of branch S (K23). (3) Item (vii) of Akita Definition 10.16: the bridge seed
 with the sponge lists on the segment of `sd` (12.4), with Lemma 12.4 for the seed; Lemma S,
 the tied parts' sites (tie, `eq_Y`, chain rounds) with the list factor and Flock's per-site
 bounds under (F), and the evaluation batch on the segment of `X` (12.3, 12.4). (4) Every address weighs at most `2^-128` (Section 3,
@@ -776,7 +785,8 @@ test at `sd` (spec 12.2: lookup, leaves, the Booleanity zero-checks of `B_zhi` a
 under H-exact, the bridge with `b = b'`).
 
 *What is not proved here* (Section 12.7): assumption (F), which the Flock paper presents
-as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17 and should be checked
+as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17, now carries PIOP
+stages 1 and 2 as well (branch S, K23), has had internal review only and should be checked
 by a reviewer of Akita's proof, together with the decider of the test at `X` (12.7 item 9),
 which is cited, not checked against Ligerito's level-0 code; `R_F` is not counted exactly;
 Akita's Module-SIS estimates exclude the extractor's run count and the cost of one run as in
@@ -997,10 +1007,13 @@ grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 4
    committed vector and a Flock transcript change. Grinding costs well under a millisecond
    and is recommended.
 3. **Composition proof (written, Section 12).** No second extractor is needed; the proof
-   uses checkpoints at `sd` and `X`, the Merkle expansion and Lemma 12.3 for the parallel
-   Flock transcripts. It rests on assumptions (F) (Flock's round-by-round analysis, a sketch
+   uses checkpoints at `sd` and `X`, the Merkle and branch-digest expansions (Lemmas 12.2,
+   12.1b) and Lemma 12.3 for the parallel Flock transcripts and for branch S of the forked
+   PIOP transcript (K23: 53 core PIOP sites at `2^15`, `tau` through the stage-2 rounds). It
+   rests on assumptions (F) (Flock's round-by-round analysis, a sketch
    in the Flock paper) and (K) (circuit correctness), and Lemma 12.3 extends Akita's Theorem
-   10.17; these three items remain for the review and the paper.
+   10.17 and has had internal review only; these three items remain for the review and the
+   paper.
 4. **`R_F`** (Flock sites read by the verifier) is not counted exactly here; it enters only
    the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tied-part site; its Keccak side is
@@ -1018,10 +1031,15 @@ the tied parts run on their own challengers, in parallel, so their challenge inp
 encode the complete preceding transcript. The fork-join transcript (deviation K22) adds a
 fourth: the PIOP stream absorbs the Flock proofs only at the join, after the stage-3 claims,
 so the lookup challenge `X` and every later PIOP challenge are drawn while the Flock
-messages are absent from it, and the parts' claims are still open at `X`. Sections 12.1 to
-12.4 build a checkpoint structure for the expanded protocol that handles all four: the
+messages are absent from it, and the parts' claims are still open at `X`. The forked PIOP
+transcript (deviation K23) adds a fifth: after event 6 the PIOP stream forks into branch L
+(the lookup) and branch S (`tau`, stages 1 and 2), so the inputs of the 53 sites of S at
+`2^15` omit branch L, and the trunk encodes both branches only through two 32-byte digests
+`d_L`, `d_S`. Sections 12.1 to
+12.4 build a checkpoint structure for the expanded protocol that handles all five: the
 tied parts' stages lie in the segment of `X`, after the stage-3 messages, and the test at
-`X` decides their pending claims. Section 12.5 lists exactly what is assumed, 12.6 states
+`X` decides their pending claims; the sites of S are plain stages of the same segment with
+projected addresses (Lemma 12.3), and the branch digests are expanded (Lemma 12.1b). Section 12.5 lists exactly what is assumed, 12.6 states
 the bound, and 12.7 lists what is not proved. Section 12.8 uses the theorem for aggregate
 unforgeability (spec 12.3): signing queries asked only in rewound runs, by strong
 unforgeability of the relaxed scheme.
@@ -1051,7 +1069,9 @@ XOF as Akita 10.1), the bridge expansion `H_X` (cSHAKE256 `agg-mldsa/v1/bridge`,
 setup oracle, the hashed-entry oracles (public-records tree, plan digest, PCS session digest,
 part and span seeds, the event-6 record digest `rec` that they bind (K22), final-vector
 digests `y_digest`, tie bindings, Flock statement digests, the BLAKE3 chaining inside
-`FsChallenger`), and the Ligerito Merkle hash `H_M` (BLAKE3, 256-bit nodes, caps). `Pi_H` is the real protocol. The expanded protocol `Pi` differs in three ways:
+`FsChallenger`), and the Ligerito Merkle hash `H_M` (BLAKE3, 256-bit nodes, caps). The
+branch digests `d_L`, `d_S` of the forked PIOP transcript (K23) are `H_P` answers that the
+trunk absorbs as compressed prefixes, like the `fs` chunks in `H_F` inputs. `Pi_H` is the real protocol. The expanded protocol `Pi` differs in four ways:
 
 1. every hashed entry is sent in full (Akita Lemma 10.47; error `eps_hash = eps_bind + eps_pk
    + eps_dig`, Aerie Definition 5.8, with the entries listed above);
@@ -1059,9 +1079,13 @@ digests `y_digest`, tie bindings, Flock statement digests, the BLAKE3 chaining i
    contains instead the PIOP input of the `fs` site, i.e. the complete PIOP prefix through
    event 5 (Lemma 12.1);
 3. every Ligerito Merkle cap (level 0 and every recursive level of every instance) is replaced
-   by the committed word, and every authentication path by a read of that word (Lemma 12.2).
+   by the committed word, and every authentication path by a read of that word (Lemma 12.2);
+4. every `H_P` input from the branch join on (the trunk) contains, in place of `d_L` and
+   `d_S`, the inputs of the branch-final queries that produced them, i.e. the complete inputs
+   of branches L and S (Lemma 12.1b).
 
-In `Pi` every challenge address of a part encodes the PIOP prefix through `fs` and, through
+In `Pi` every trunk input from `gamma^(3)` on, and through it the PCS session digest,
+encodes both branches in full (item 4). Every challenge address of a part encodes the PIOP prefix through `fs` and, through
 `rec` in its part or span seed, the event-6 record (every `Y_sigma` and every share item, as
 absorbed): together, the input of `X`. Every committed Flock word, hence its Johnson list
 `Lambda(C) = Lambda_gamma(C)` at the profile's level-0 radius (`|Lambda| <= L = 35, 50, 70`,
@@ -1082,7 +1106,41 @@ chunk and an `H_F` query (or the output) containing a chunk that an `fs`-site an
 only later; without them the forwarded queries are injective and the verifier of the second
 protocol reads the same answers. The count gives `eps_fs`.
 
-**Lemma 12.2 (Merkle expansion).** A prover `P'` for the protocol with items 1 and 2
+**Lemma 12.1b (the branch digests as compressed prefixes).** A prover for the protocol with
+items 1 and 2 converts into a prover for the protocol with items 1, 2 and 4 that runs it
+once, outputs the same statement and makes no more challenge queries, such that the first
+accepts while the second rejects with probability at most
+
+```text
+eps_br = Q_B^2 / 2^257 + Q_J Q_B / 2^255 + Q_B / 2^191  <=  5 Q_P^2 / 2^257 + Q_P / 2^191,
+```
+
+where `Q_B` counts the `H_P` queries at branch-final inputs (the complete input of branch L
+or of branch S, whose first 32 output bytes are `d_L` or `d_S`), `Q_J` the `H_P` queries
+whose input contains a join payload `d_L || d_S` (the trunk from the join on, the PCS
+session digest's input included), both counting the verifier's queries on the output, and
+`Q_P >= max(Q_B, Q_J)` all `H_P` queries.
+
+*Proof.* The proof of Lemma 12.1 with the 32-byte branch digests in the role of the `fs`
+chunks: the converted prover forwards a trunk query with each digest replaced by the
+branch-final input that produced it, and answers a query that contains a digest never
+produced by a fresh local answer. A query that continues the prefix through event 6 with
+one of the two 24-byte branch labels is treated as a branch query and forwarded unchanged.
+Its bad events are (i) two distinct branch-final inputs
+whose answers have the same first 32 bytes, at most `(Q_B choose 2) / 2^256 <= Q_B^2 / 2^257`;
+(ii) a trunk query (or the output) that contains, at one of its two digest positions, a
+32-byte value that a branch-final query outputs only later: each fresh branch-final answer
+hits one of at most `2 Q_J` such values with probability at most `2 Q_J / 2^256`, so at most
+`Q_J Q_B / 2^255` in all; and (iii) a branch-final answer whose first 24 bytes equal one of
+the two labels, so that a trunk input carrying it as `d_L` would read as a branch input
+(the join absorbs no label of its own, 12.2): at most `2 Q_B / 2^192 = Q_B / 2^191`. Without
+them the forwarded queries are injective, trunk and branch queries are told apart, and the
+verifier of the second protocol reads the same answers. The sum is `eps_br`, and
+`Q_B, Q_J <= Q_P` gives `(1 + 4) Q_P^2 / 2^257 + Q_P / 2^191`. Its quadratic part has the
+form of `eps_fs` (one chunk per answer, two per trunk input). Equal digests `d_L = d_S` on one transcript are a case of (i),
+since the two branch-final inputs differ in their labels.
+
+**Lemma 12.2 (Merkle expansion).** A prover `P'` for the protocol with items 1, 2 and 4
 converts into a prover `P` for `Pi` that runs `P'` once, outputs the same statement and makes
 no more challenge queries, such that `P'` is accepted while `P` is rejected with probability
 at most `eps_merkle = (Q_M choose 2) / 2^256 + Q_M V_M / 2^256`, where `Q_M` counts the `H_M`
@@ -1149,10 +1207,13 @@ bound over the queried addresses gives Claim 1 with `N_{i,j}` counting addresses
 count of inputs). By (a) every address lies in exactly one `Sub(i)`, which is Claim 2.
 Extraction stages and checkpoints keep inputs that encode the complete prefix: `sd` and `X`
 are PIOP sites, `X` is the first site of branch L, which precedes branch S in the linear
-order (so `X`'s input is the prefix through event 6 and L's label, a constant), and no part
-stage precedes `X` in the linear order; the Akita stream is
+order (so `X`'s input is the prefix through event 6 followed by L's label, and only the
+label is a constant), and no part
+stage precedes `X` in the linear order; in `Pi` the trunk inputs from `gamma^(3)` on contain
+the complete inputs of both branches (item 4, Lemma 12.1b), so the stage-3 sites read
+complete-prefix inputs; the Akita stream is
 seeded by the PCS session digest, which binds every Flock byte absorbed at the join (after
-the stage-3 messages, deviation K22), so the evaluation batch and the opening suffix read
+the stage-3 messages, deviation K22) and, in `Pi`, both branches, so the evaluation batch and the opening suffix read
 inputs that encode the parts' messages and, through them and the parts' addresses, their
 challenges. The rest of the proof is unchanged.
 
@@ -1169,7 +1230,12 @@ part's own data, the PIOP prefix through `fs` and the event-6 record).
 
 **Branch S of the forked PIOP transcript (deviation K23).** The sites `tau`, `gamma^(1)`,
 the stage-1 rounds, `gamma^(2)` and the stage-2 rounds are plain stages of the segment of
-`X`, and Lemma 12.3 applies to them as it is; no new site, assumption or term arises.
+`X`, and Lemma 12.3 applies to them with its statement unchanged. No new site and no new
+difficulty arise, but two things change. The lemma's scope grows: before K23 every PIOP site
+after `X` had a complete-prefix input, and now the 53 sites of S at `2^15` (`tau`,
+`gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds) rest on it; the lemma has
+had internal review only (12.7 item 3). And the branch digests add the term `eps_br` of
+Lemma 12.1b to the bound (12.6).
 
 * (a): the address of a site of S is branch S's sponge input. It encodes events 0 to 6
   (the clone is taken there) and S's label, hence `xi_X`, which is that prefix followed by
@@ -1191,14 +1257,35 @@ the stage-1 rounds, `gamma^(2)` and the stage-2 rounds are plain stages of the s
   it read the trunk, which absorbed both branch digests: the pending claims at the join are
   the union of L's (the four stack claims and the seven digit claims) and S's (the stage-2
   terminal claims and the reductions of 7.5), carried by `gamma^(3)` and the stage-3 rounds
-  as in Section 5. A digest is a 32-byte squeeze of a branch sponge, a hashed entry like the
-  instance digest; two branches with the same digest are a collision of the transcript
-  hash, counted in the existing `R_coord` term (Aerie C.1).
+  as in Section 5. A digest is the first 32 bytes of the `H_P` answer at a branch's final
+  input. In `Pi_H` the trunk encodes L and S only through `d_L` and `d_S` (compressed prefixes in the sense of Aerie C.1); in `Pi` they are
+  replaced by the two branch-final inputs (12.1 item 4), so `gamma^(3)`, the stage-3 rounds,
+  the PCS session digest and the Akita stages read inputs that encode both branches in
+  full. The conversion costs `eps_br <= 5 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). Its bad events are
+  two distinct branch-final inputs with equal digests, a trunk query that contains a digest
+  before the branch-final query that outputs it, and a digest `d_L` that begins with a branch
+  label. `R_coord` (Akita's sparse fold coordinates) is unrelated to them.
+* The join absorbs no label of its own: `agg-mldsa/v1/fork/join` is a registry name, and
+  neither registry names nor event kinds are absorbed. The trunk stays apart from both
+  branches without one. Every trunk input from the join on is the prefix through event 6
+  followed by `d_L || d_S` (64 bytes) and stage-3 data. Every branch input is the same
+  prefix followed by a 24-byte label and that branch's events, whose lengths the registry
+  fixes. The only branch challenge inputs shorter than the trunk's first one (prefix plus 64
+  bytes, plus 4 with `gamma^(3)`'s nonce) are those of `X` and `tau` (prefix plus 24 bytes,
+  plus 4 with a nonce). Every later branch input follows a first absorb of at least 64 bytes
+  (L: the layer-1 values, 4 elements of 16 bytes per tree; S: the 13 pre-stage claims, 208
+  bytes), so it exceeds the prefix by more than 68 bytes. Branch inputs therefore never have
+  the length of `gamma^(3)`'s input. A later trunk input could equal a branch input only if
+  the first 24 bytes of its `d_L` equalled a label; Lemma 12.1b charges that case as event
+  (iii) (`Q_B / 2^191`).
 
 The argument is the one for the tied parts (K22) with the projected stages inside the PIOP.
-It needs L before S in the linear order: with S first, `X`'s input would omit S's messages
-and would not be a complete-prefix checkpoint input. The digests are therefore joined as
-`d_L || d_S`, and a proof joined in the other order is rejected. Note that the linear
+It places L before S in the linear order: with S first, `X`'s input would omit S's messages
+and would not be a complete-prefix checkpoint input. This order is a device of the analysis
+and does not depend on the byte order of the join. Each digest sits at a fixed position of
+the trunk input and item 4 expands each in place, so any fixed order of `d_L` and `d_S` is
+sound. The code fixes `d_L || d_S` so that prover and verifier compute the same trunk
+input; a proof joined in the other order gets other stage-3 challenges and is rejected. Note that the linear
 transcript also made a retried lookup site re-run every stage of S (their inputs encoded
 L); the fork removes that coupling. The bound above never used it: Claim 1 is a union over
 queried addresses with the weight of each address, which the fork leaves unchanged.
@@ -1473,20 +1560,22 @@ supports (4.6), Lemmas 12.1 to 12.4.
 ### 12.6 The bound
 
 Let `P` make `Q` queries (every oracle of 12.1, nonce probes included; `Q_wrap = Q + V_ver`
-after the conversions of Lemmas 10.47, 12.1, 12.2, as Aerie C.5). Theorem 10.17 with Lemma
+after the conversions of Lemmas 10.47, 12.1, 12.1b, 12.2, as Aerie C.5). Theorem 10.17 with Lemma
 12.3, the structure of 12.2 to 12.4, `Good` the event of Lemma 12.4, and the setup,
 extraction and Module-SIS steps of the proof of Akita Theorem 10.45 give an extractor that runs
 `P` at most `(Q_wrap + 2) 4 Tree0_ck(sch)` times in expectation and fails on an accepting
 execution with probability at most
 
 ```text
-eps_hash + eps_fs + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] + sum_I Adv^MSIS_I(B_I)
+eps_hash + eps_fs + eps_br + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] + sum_I Adv^MSIS_I(B_I)
 ```
 
 with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, both relations), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
-coordinates `<= 2^-128.088` (4.6). This is the bound of Section 7.
+coordinates `<= 2^-128.088` (4.6). `eps_hash` covers the hashed entries of 12.1 item 1;
+the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
+Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). This is the bound of Section 7.
 
 *Cost.* Akita Theorem 10.17 bounds the extractor's expected cost by `(Q_wrap + 2) 4
 Tree0_ck(sch) T_run`, with `T_run` the expected cost of one run of `P` and the verifier
@@ -1538,7 +1627,11 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
    Keccak side).
 3. Lemma 12.3 extends Akita's Theorem 10.17; its proof above modifies Claims 1 and 2 of
    Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof, together with
-   item 9.
+   item 9. It has had internal review only. Since deviation K23 it carries the PIOP core as
+   well as the Flock parts: PIOP stages 1 and 2 rest on it, i.e. the 53 sites of branch S at
+   `2^15` (`tau`, `gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds), where
+   before K23 every PIOP site after `X` had a complete-prefix input. The paper MUST state
+   Lemma 12.3 as a new extension of Akita Theorem 10.17.
 4. `R_F` is not counted exactly (open 4); the `Q = 0` term stays about `2^-117` (estimate).
 5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
    C.4 tabulates its `K`); it bounds the running time only, not the error. Nor is the cost

@@ -950,7 +950,7 @@ cost of one run, `T_run`, and the Module-SIS reductions, not the run count or th
 cloud run); a local pool sweep at 8K favoured 4 Flock threads (6.03 s) over 8 (6.37 s) and
 15 (6.76 s) in one round, direction only, but a rerun tied them (6.34 s each).
 
-## K23. Forked PIOP transcript: the lookup beside `tau` and stages 1-2 (spec Sections 7.0, 7.1, 10, 11; docs/soundness.md 2, 5, 12.2, 12.3)
+## K23. Forked PIOP transcript: the lookup beside `tau` and stages 1-2 (spec Sections 7.0, 7.1, 10, 11; docs/soundness.md 2, 5, 12.1, 12.2, 12.3, 12.6)
 
 Spec Section 10 without this change: events 7 to 12 run on one sponge, so `tau` and stages
 1 and 2 wait for the lookup, although they read none of its data (only stage 3 reads the
@@ -961,10 +961,13 @@ Code (`agg_piop::{transcript, prover, verifier, pow}`):
 - `Transcript::fork` after event 6 clones the sponge into branch L (registry events from
   the label `agg-mldsa/v1/fork/lookup` through the multiplicity claims) and branch S (the
   label `agg-mldsa/v1/fork/stages`, `tau` through the stage-2 terminal). Each branch absorbs
-  its label first (event kind 3), so the two clones diverge before their first challenge;
+  the 24 raw bytes of its label first (no length frame; event kind 3 is a registry tag, and
+  kinds are never absorbed, so the label bytes alone separate the branches), so the two
+  clones diverge before their first challenge;
   a branch can take only its own registry events. `Transcript::join` absorbs the 32-byte
   squeezes of L's and S's final states, in this order (site `agg-mldsa/v1/fork/join`, 64
-  bytes, not on the wire), then stage 3 continues on the trunk. A join of exchanged or
+  bytes, not on the wire; the site name is not absorbed, so the join has no label of its
+  own, docs/soundness.md 12.2), then stage 3 continues on the trunk. A join of exchanged or
   unfinished branches is refused.
 - Nonces: the prover's branches write their own streams, appended at the join in the order
   L, S (`WorkWriter::append`); the verifier splits L's and S's slices off the packed stream
@@ -990,8 +993,15 @@ Code (`agg_piop::{transcript, prover, verifier, pow}`):
 Soundness: docs/soundness.md 12.2 ("Branch S of the forked PIOP transcript"): the sites of
 S are plain stages of the segment of `X` with projected addresses that encode the prefix
 through event 6; Lemma 12.3 (a) and (b) hold, every site keeps its bad set, mass and
-difficulty, and the branch digests are hashed entries counted in `R_coord`. L must precede
-S in the linear order so that `X` keeps a complete-prefix input; hence the fixed join order.
+difficulty. The branch digests are compressed prefixes of the two branches, not hashed
+entries of item 1 of 12.1, and are not part of `R_coord` (Akita's sparse fold coordinates):
+Lemma 12.1b expands them at the error `eps_br <= 5 Q_P^2 / 2^257 + Q_P / 2^191`, a new term
+of the bound. Lemma 12.3 now carries the 53 sites of S at `2^15` (`tau` through the stage-2
+rounds), where before every PIOP site after `X` had a complete-prefix input; the lemma has
+had internal review only (docs/soundness.md 12.7 item 3). The analysis places L before S in
+the linear order so that `X` keeps a complete-prefix input; that order does not depend on
+the byte order of the join, and any fixed order of the digests is sound. The join order
+`d_L || d_S` is fixed so that prover and verifier compute the same trunk input.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

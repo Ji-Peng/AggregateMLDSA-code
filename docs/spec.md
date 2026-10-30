@@ -388,13 +388,13 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 | 4 | absorb | round-2 Akita commitments $`G_1,G_2,G_3,G_m`$ in group order |
 | 5 | challenge | $`\mathsf{fs}_\sigma`$: 32 bytes per segment, the challenger seed of the Flock sub-proof $`\sigma`$ (its challenger is initialized with $`\mathsf{fs}_\sigma`$) |
 | 6 | absorb | $`Y_0,\ldots,Y_{S-1}`$ (512 bytes each), then the $`S`$ share items of the Keccak side, each framed by `B()` (mode A: the shares of a segment's parts but the last; empty for a span, a one-part segment and mode B) |
-| fork | clone | the sponge is cloned into branch L (event 7) and branch S (events 8 to 11); L absorbs the label `B("agg-mldsa/v1/fork/lookup")`, S the label `B("agg-mldsa/v1/fork/stages")` |
+| fork | clone | the sponge is cloned into branch L (event 7) and branch S (events 8 to 11); L absorbs the 24 raw bytes of the label `agg-mldsa/v1/fork/lookup`, S the 24 raw bytes of `agg-mldsa/v1/fork/stages`, as one public message each, without the `B()` length frame (the labels have equal length and differ) |
 | 7 | challenge/absorb (L) | the lookup (7.0): $`X_1,X_2\in K`$; the layer-1 values (4 per tree); $`\mu_1`$; per session $`s=2,\ldots,D`$ ($`D=\max(d_{\rm main}+2,16)`$, 7.0): $`\gamma`$ (2 per active tree), $`s-1`$ rounds of 3 elements and their challenges, the terminals (4 per continuing tree), the leaves (2 per ending stack or table), $`\mu_s`$; then the 7 claims $`m_k(\pi_m)`$ |
 | 8 | challenge (S) | $`\tau\in K^{d_{\rm main}}`$ |
 | 9 | absorb (S) | 13 pre-stage claims (7.2) |
 | 10 | challenge (S) | $`\gamma^{(1)}\in K^{26}`$; then the stage-1 rounds of 4 elements each and the 18 stage-1 claims |
 | 11 | absorb/challenge (S) | 6 claims $`K^{(1)}_t(r^{(1)}_1)`$; $`\gamma^{(2)}\in K^{8}`$; stage-2 rounds of 4 elements; 8 stage-2 claims |
-| branch join | absorb | $`d_L\Vert d_S`$, in this order, where $`d_L`$ and $`d_S`$ are 32-byte squeezes of the final sponge states of branches L and S (not on the wire; the verifier recomputes them) |
+| branch join | absorb | $`d_L\Vert d_S`$, in this order (64 bytes, one public message, no label), where $`d_L`$ and $`d_S`$ are 32-byte squeezes of the final sponge states of branches L and S (not on the wire; the verifier recomputes them) |
 | 12 | challenge | $`\gamma^{(3)}\in K^{44}`$; stage-3 rounds of 3 elements; the 31 stage-3 opening claims |
 | join | absorb | the $`S`$ Flock proof byte strings, each framed by `B()` (deviation K22); their challengers are seeded from $`\mathsf{fs}_\sigma`$ and $`\mathsf{rec}`$, the cSHAKE256 digest of the event-6 record (customization `agg-mldsa/v1/flock/record`) |
 | 13 | PCS | Akita native stream seeded by the 32-byte PIOP session digest, as Aerie 12.3 |
