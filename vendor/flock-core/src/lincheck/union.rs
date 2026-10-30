@@ -402,18 +402,21 @@ pub fn union_bitbank_fold_multi(
         |tables, &(zw, oc, ncols, live, n_t)| {
             let groups = n_t.div_ceil(8);
             let mut buf = [0u8; BANK_ROW_GROUPS_MAX * 128];
-            let mut eq8 = vec![[F128::ZERO; 8]; np];
+            // Weight vectors of the current group: position p of vector r is the eq weight
+            // of row 8 g + r at point p; padding positions stay zero.
+            let mut w = vec![F128::ZERO; 8 * stride];
             for gt in (0..groups).step_by(rg) {
                 let gn = rg.min(groups - gt);
                 for g in 0..gn {
                     let row0 = 8 * (gt + g);
-                    for (e8, eq) in eq8.iter_mut().zip(&eqs) {
-                        for (r, e) in e8.iter_mut().enumerate() {
-                            *e = if row0 + r < n_t { eq[row0 + r] } else { F128::ZERO };
+                    for (p, eq) in eqs.iter().enumerate() {
+                        for r in 0..8 {
+                            w[r * stride + p] =
+                                if row0 + r < n_t { eq[row0 + r] } else { F128::ZERO };
                         }
                     }
                     let t = &mut tables.as_mut_slice()[g * 256 * stride..(g + 1) * 256 * stride];
-                    build_sum_table8(use_lookup512, &eq8, stride, t);
+                    build_sum_table8(use_lookup512, &w, stride, t);
                 }
                 for c in 0..ncols {
                     let col = &z[zw + (c << nu)..zw + ((c + 1) << nu)];
@@ -513,19 +516,20 @@ fn bank_lookup(
 }
 
 /// Interleaved subset-sum table of one group: entry `s` (F128 `s * stride ..`), position
-/// `p < eq8.len()`, is `Σ_{r: bit r of s set} eq8[p][r]` (255 vector additions, doubling).
-/// Positions past `eq8.len()` stay zero.
+/// `p`, is `Σ_{r: bit r of s set} w[r * stride + p]` (255 vector additions, doubling).
+/// `w` holds the eight weight vectors of `stride` F128 each, zero past the live points.
 #[inline(always)]
-fn build_sum_table8_body(eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
-    debug_assert!(table.len() >= 256 * stride && eq8.len() <= stride);
+fn build_sum_table8_body(w: &[F128], stride: usize, table: &mut [F128]) {
+    debug_assert!(table.len() >= 256 * stride && w.len() == 8 * stride);
     table[..stride].fill(F128::ZERO);
-    for i in 0..8 {
+    for (i, wi) in w.chunks_exact(stride).enumerate() {
         let len = 1usize << i;
-        // Entries 0 .. len are final; entries len .. 2 len are those plus the weight of row i.
+        // Entries 0 .. len are final; entries len .. 2 len are those plus weight vector i.
         let (done, rest) = table[..2 * len * stride].split_at_mut(len * stride);
         for (src, dst) in done.chunks_exact(stride).zip(rest.chunks_exact_mut(stride)) {
-            for (p, (d, s)) in dst.iter_mut().zip(src).enumerate() {
-                *d = *s + eq8.get(p).map_or(F128::ZERO, |e| e[i]);
+            for ((d, s), e) in dst.iter_mut().zip(src).zip(wi) {
+                d.lo = s.lo ^ e.lo;
+                d.hi = s.hi ^ e.hi;
             }
         }
     }
@@ -537,21 +541,21 @@ fn build_sum_table8_body(eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
 /// AVX-512F available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn build_sum_table8_avx512(eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
-    build_sum_table8_body(eq8, stride, table)
+unsafe fn build_sum_table8_avx512(w: &[F128], stride: usize, table: &mut [F128]) {
+    build_sum_table8_body(w, stride, table)
 }
 
 /// Fill `table` (`256 * stride` F128) as in [`build_sum_table8_body`], vectorized when
 /// `avx512` is set.
-fn build_sum_table8(avx512: bool, eq8: &[[F128; 8]], stride: usize, table: &mut [F128]) {
+fn build_sum_table8(avx512: bool, w: &[F128], stride: usize, table: &mut [F128]) {
     #[cfg(target_arch = "x86_64")]
     if avx512 {
         // SAFETY: AVX-512F was checked by the caller (`bank_lookup_x86`).
-        unsafe { build_sum_table8_avx512(eq8, stride, table) };
+        unsafe { build_sum_table8_avx512(w, stride, table) };
         return;
     }
     let _ = avx512;
-    build_sum_table8_body(eq8, stride, table);
+    build_sum_table8_body(w, stride, table);
 }
 
 /// Whether the AVX-512 table lookup may run.
