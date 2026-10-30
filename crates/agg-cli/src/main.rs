@@ -15,8 +15,13 @@ fn main() -> ExitCode {
     if std::env::var_os("AGG_HUGEPAGE").is_some_and(|v| v == "0") {
         agg_piop::alloc::set_enabled(false);
     }
-    if let Some(gib) = std::env::var("AGG_ALLOC_CACHE").ok().and_then(|v| v.parse::<usize>().ok()) {
-        agg_piop::alloc::set_cache_bytes(gib << 30);
+    if let Ok(value) = std::env::var("AGG_ALLOC_CACHE") {
+        match value.trim().parse::<usize>() {
+            Ok(gib) => agg_piop::alloc::set_cache_bytes(gib.saturating_mul(1 << 30)),
+            Err(_) => eprintln!(
+                "agg: AGG_ALLOC_CACHE={value:?} is not a whole number of GiB; using the default"
+            ),
+        }
     }
     if std::env::var_os("AGG_ALLOC_POISON").is_some_and(|v| v == "1") {
         agg_piop::alloc::set_poison(true);
