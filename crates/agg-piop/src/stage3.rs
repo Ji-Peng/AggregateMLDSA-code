@@ -561,12 +561,13 @@ impl LookupInputs {
 }
 
 /// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
-/// `tables` holds `w_A`.
+/// `tables` holds `w_A`; `t_at_r2` is `T(r^(2))`, which the caller may compute before the
+/// join because it depends only on `r^(2)` and public data.
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    public: &PublicData,
+    t_at_r2: E,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -574,7 +575,7 @@ pub fn prove(
     lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, public, points, prestage, stage1, stage2, lookup, transcript, true)
+    prove_with(manifest, tables, t_at_r2, points, prestage, stage1, stage2, lookup, transcript, true)
 }
 
 /// [`prove`] without the prover's claim self-check (tests).
@@ -583,7 +584,7 @@ pub fn prove(
 pub fn prove_unchecked(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    public: &PublicData,
+    t_at_r2: E,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -591,14 +592,14 @@ pub fn prove_unchecked(
     lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, public, points, prestage, stage1, stage2, lookup, transcript, false)
+    prove_with(manifest, tables, t_at_r2, points, prestage, stage1, stage2, lookup, transcript, false)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prove_with(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    public: &PublicData,
+    t_at_r2: E,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -608,7 +609,6 @@ fn prove_with(
     check: bool,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
     let spec = spec(manifest, &lookup.weights);
-    let t_at_r2 = public.t_evaluation(&stage2.point);
     let claims = claimed_sums(
         manifest,
         t_at_r2,

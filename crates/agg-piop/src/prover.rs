@@ -930,7 +930,11 @@ struct StagesBranch<'a> {
     tables: ProverTables<'a>,
     stage1: (Stage1Proof, crate::stage1::Stage1Output),
     stage2: (Stage2Proof, crate::stage2::Stage2Output),
+    /// `T(r^(2))` for stage 3's claimed sums: a function of public data and `r^(2)` only.
+    t_at_r2: E,
     times: [Duration; 3],
+    /// Wall time of the stage-3 precomputation (`w_A` and `T(r^(2))`).
+    tail: Duration,
 }
 
 /// Branch L: the lookup into `T_16` and the digit claims of `m`.
@@ -989,6 +993,7 @@ fn prove_stages_branch<'a>(
     tables: SourceTables<'a>,
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
+    public: &PublicData,
     transcript: &mut Transcript,
     unchecked: bool,
     trace: bool,
@@ -1058,13 +1063,27 @@ fn prove_stages_branch<'a>(
     points.r2 = stage2.point.clone();
     let stage2_time = clock.lap();
     phase_stamp("stage2");
+    // Stage 3's inputs that need no stage-3 challenge: `w_A` (from `r^(2)` and the public
+    // matrices, spec Section 7.6) and `T(r^(2))` (from `r^(2)` and the public table). Both
+    // depend only on data fixed when stage 2 ends, so they run at the tail of branch S
+    // instead of after the join. The transcript does not see them, and the bytes are the
+    // same: this is a scheduling move, not a change of the messages.
+    let tail_clock = Instant::now();
+    prover_tables.set_r2(public, &points.r2);
+    let t_at_r2 = public.t_evaluation(&points.r2);
+    let tail = tail_clock.elapsed();
+    if trace {
+        eprintln!("weights: w_A and T(r^(2)) {:.1} ms", tail.as_secs_f64() * 1e3);
+    }
     Ok(StagesBranch {
         points,
         prestage,
         tables: prover_tables,
         stage1: (stage1_proof, stage1),
         stage2: (stage2_proof, stage2),
+        t_at_r2,
         times: [prestage_time, stage1_time, stage2_time],
+        tail,
     })
 }
 
@@ -1098,6 +1117,7 @@ fn prove_piop_with<'a>(
                 tables,
                 prebuilt,
                 matrices,
+                public,
                 &mut stages_transcript,
                 unchecked,
                 trace,
@@ -1112,9 +1132,9 @@ fn prove_piop_with<'a>(
     }
     let fork_wall = fork_clock.elapsed();
     if trace {
-        let stages_time: Duration = stages.times.iter().sum();
+        let stages_time: Duration = stages.times.iter().sum::<Duration>() + stages.tail;
         eprintln!(
-            "fork: lookup {:.1} ms, tau to stage 2 {:.1} ms, wall {:.1} ms (concurrent: {})",
+            "fork: lookup {:.1} ms, tau to T(r^(2)) {:.1} ms, wall {:.1} ms (concurrent: {})",
             lookup.time.as_secs_f64() * 1e3,
             stages_time.as_secs_f64() * 1e3,
             fork_wall.as_secs_f64() * 1e3,
@@ -1126,20 +1146,16 @@ fn prove_piop_with<'a>(
     let StagesBranch {
         mut points,
         prestage,
-        tables: mut prover_tables,
+        tables: prover_tables,
         stage1: (stage1_proof, stage1),
         stage2: (stage2_proof, stage2),
+        t_at_r2,
         ..
     } = stages;
     points.lookup = lookup.stack_points;
 
     // Event 12: stage 3 on the trunk.
     let clock = Instant::now();
-    let weights_clock = Instant::now();
-    prover_tables.set_r2(public, &points.r2);
-    if trace {
-        eprintln!("weights: w_A {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
-    }
     let prove3 = if unchecked {
         stage3::prove_unchecked
     } else {
@@ -1148,7 +1164,7 @@ fn prove_piop_with<'a>(
     let (stage3_proof, stage3) = prove3(
         manifest,
         &prover_tables,
-        public,
+        t_at_r2,
         &points,
         &prestage,
         &stage1,
