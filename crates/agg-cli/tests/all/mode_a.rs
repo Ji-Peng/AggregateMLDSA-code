@@ -171,9 +171,11 @@ fn round_trip_as(
         let rejected = default_verifier.verify(&statements, &aggregate.bytes, None);
         assert!(!rejected.accepted(), "default verifier must reject Slim8 without opt-in");
         assert!(matches!(
-            rejected.rejection,
-            Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == FlockProfile::Slim8 as u8
+            rejected.report.outcome,
+            Err(VerifyError::ProfileNotAccepted(FlockProfile::Slim8))
         ));
+        assert_eq!(rejected.profile, FlockProfile::Slim8, "the profile read from the aggregate");
+        assert!(rejected.rejection.is_none(), "no Flock part run on rejected Slim8");
         assert!(rejected.parts.is_empty(), "no Flock part run on rejected Slim8");
     }
 

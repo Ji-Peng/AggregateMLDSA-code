@@ -217,6 +217,8 @@ pub fn check_configuration(
 pub enum VerifyError {
     /// The verifier's own configuration is refused (nothing was checked).
     Configuration(ConfigurationError),
+    /// The aggregate names a mode-A Flock profile that a default verifier does not accept.
+    ProfileNotAccepted(FlockProfile),
     /// Malformed proof bytes.
     Wire(WireError),
     /// The proof's relation byte differs from the relation the caller expects (checked
@@ -255,6 +257,15 @@ impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Configuration(e) => write!(f, "configuration: {e}"),
+            Self::ProfileNotAccepted(profile) => write!(
+                f,
+                "Flock profile {profile:?} is not accepted by default; pass --flock-profile {}",
+                match profile {
+                    FlockProfile::Slim8 => "slim8",
+                    FlockProfile::Slim => "slim",
+                    _ => "fast",
+                }
+            ),
             Self::Wire(e) => write!(f, "wire: {e}"),
             Self::Relation { expected, found } => {
                 write!(f, "the proof claims relation {found}, the verifier expects {expected}")

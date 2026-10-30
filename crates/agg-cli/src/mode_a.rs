@@ -63,7 +63,9 @@ use agg_piop::prover::{
 };
 use agg_piop::public_data::{KeyCache, PublicData};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
-use agg_piop::verifier::{verify_timed, KeccakVerifier, SegmentContext, VerifyReport};
+use agg_piop::verifier::{
+    verify_timed, KeccakVerifier, SegmentContext, VerifyError, VerifyReport, VerifyTimings,
+};
 use agg_piop::wire::{pack_final_vector, unpack_final_vector, AggregateProof, ProofSize};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::{InstanceError, PublicInstance};
@@ -1804,8 +1806,10 @@ impl AggregateVerifier {
         self
     }
 
-    /// The profile to verify `aggregate` under: the required one, else the default-accepted
-    /// profile its event-2 items name, else the default (an unparsable aggregate is rejected later).
+    /// The profile to verify `aggregate` under: the required one, else the mode-A profile its
+    /// event-2 items name, else the default (an unparsable aggregate is rejected later). A
+    /// named profile that is not accepted by default is returned as is, so that [`Self::verify`]
+    /// can refuse it with a message naming `--flock-profile`.
     fn profile_of(&self, aggregate: &[u8]) -> FlockProfile {
         if let Some(p) = self.require {
             return p;
@@ -1814,7 +1818,7 @@ impl AggregateVerifier {
             .ok()
             .and_then(|proof| crate::wire::flock_profile(&proof.flock_commitments))
             .and_then(FlockProfile::from_id)
-            .filter(|p| DEFAULT_ACCEPTED_PROFILES.contains(p))
+            .filter(|profile| profile.is_mode_a())
             .unwrap_or(FLOCK_PROFILE)
     }
 
@@ -1836,15 +1840,22 @@ impl AggregateVerifier {
         };
         let keccak = FlockVerifier::with_profile(&self.gate, profile);
         let cached = cache.is_some();
-        let report = verify_timed(
-            statements,
-            aggregate,
-            &SeededMatrices,
-            &keccak,
-            profile,
-            self.relation,
-            cache,
-        );
+        let report = if self.require.is_some() || DEFAULT_ACCEPTED_PROFILES.contains(&profile) {
+            verify_timed(
+                statements,
+                aggregate,
+                &SeededMatrices,
+                &keccak,
+                profile,
+                self.relation,
+                cache,
+            )
+        } else {
+            VerifyReport {
+                outcome: Err(VerifyError::ProfileNotAccepted(profile)),
+                timings: VerifyTimings::default(),
+            }
+        };
         VerifyCostReport {
             report,
             profile,
