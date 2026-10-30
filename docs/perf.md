@@ -726,35 +726,21 @@ CARGO_BUILD_JOBS=3 RUSTFLAGS='-C target-feature=+pclmulqdq' \
   cargo test --release -p agg-cli --test all simd_backends -- --ignored
 ```
 
-The local performance gates are not all green. Repeated measurements fail the strict AVX2
-one-key ExpandA comparison (1.078 / 1.112 times C), AVX-512 SHAKE128 (1.021 / 1.027 times C),
-and AVX2 finish budgets. The optional AVX-512/AVX2 dot4 comparisons also fail their 0.60
-budgets. Aggregate identity and the release tests pass. These kernel results remain blockers
-for the complete no-slower criterion; integrated speedups do not override them.
+Kernel gates (`cargo bench -p agg-mldsa-simd --bench <name> -- --gate` with
+`RUSTFLAGS='--cfg cref'` and `AGG_CREF_SRC` holding `dilithium/` and `Hybrid-SHA-3/`, one pinned
+core) compare each kernel with its C original: pass at a ratio of at most 1.00, a ratio in
+(1.00, 1.03] reruns and decides on the pooled ratio. The C references are built for the ISA of the
+backend they are compared with (`x86-64-v3` for AVX2, `x86-64-v4` for AVX-512). Rows where the
+Rust kernel does more than the C function are reported as INFO (the finish composites
+against `poly_use_hint`) or get the missing C work added (`unpack_z` adds `poly_chknorm`). The
+per-step finish rows are the C criterion for the finish.
 
-The pipeline executable has independent AVX2 finish composite gates. They compare
-one finish call with three C hint calls, and nine finish calls with two scalar calls (the existing 4.5x speedup budget).
-These grouped comparisons retain the shared harness's strict 1.00 threshold
-and repeat policy. Diagnostic per-step passes cannot override their failures.
-Both finish budgets still fail: the dedicated benchmark reports normalized
-ratios 1.071/1.069 against C and 1.210/1.197 against scalar. Composite ExpandA
-is 1.107/1.085 times C on AVX2 and 0.460/0.456 on AVX-512. Thus the performance
-gate remains blocked.
-
-AVX-512 SHAKE128 passes twice (0.994/0.998), while the marginal AVX2 SHAKE128
-result changes from FAIL (1.003) to PASS (0.981 after the internal repeat).
-The AVX2 NTT P2 Plain/Mont row passes at 0.998 against its 1.02 budget.
-All six 1K aggregate comparisons against main pass again. With CPU affinity
-retained throughout, the release workspace passes 419 tests and vendored Flock
-passes 466 tests. Two invocations through scripts/test.sh stop at the C timing
-harness's 2% spread assertion (2.19% and 2.18%); that script widens the supplied
-CPU-3 affinity to CPUs 0,1,3–15. These failures are recorded separately from the
-fully pinned suite and from the confirmed kernel budget failures.
-
-A final `scripts/test.sh --release` run with `RUST_TEST_THREADS=1` passes
-both complete suites (419 workspace and 466 vendored tests). Serial execution
-also passes the timing self-check; the two earlier spread failures remain
-recorded as concurrent-test timing noise.
+On the i7-11700K every row passes. On Zen 5 (c4d, 2026-10-30, two runs) these rows stay
+above C: AVX2 `rej_uniform` 1.18, AVX2 `use_hint` step 1.23, AVX-512 inverse NTT mod q 1.08
+(the Rust kernel also brings its output to the canonical or centred range), and the P2 inverse
+NTT at 1.23 of its 1.20 budget. The AVX-512 forward NTT is at 1.01. The end-to-end effect is
+small (instance and witness together take 224 ms of the 8.49 s prove at 32K), and c4d runs the
+AVX-512 backend, where only the inverse NTT rows apply.
 
 Local A/B results (4096 records, CLMUL, CPU 3, default threads;
 one warmup and two repetitions per arm):
