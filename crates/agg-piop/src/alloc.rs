@@ -55,7 +55,8 @@ pub fn set_poison(on: bool) {
 }
 
 /// Cap the bytes held by the cache of freed blocks (default 6 GiB; 0 disables
-/// the cache and releases what it holds).
+/// the cache and releases what it holds). Lowering a nonzero cap applies to
+/// future frees; blocks already held stay until they are taken or released.
 pub fn set_cache_bytes(bytes: usize) {
     CACHE_CAP.store(bytes, Ordering::Relaxed);
     if bytes == 0 {
@@ -288,8 +289,16 @@ unsafe impl GlobalAlloc for HugePageAlloc {
 mod tests {
     use super::*;
 
+    /// The allocator's cache and poison flag are process-global, so the tests below hold
+    /// this lock while they observe them.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn large_blocks_round_trip_through_cache_and_realloc() {
+        let _serial = serial();
         let a = HugePageAlloc;
         let big = Layout::from_size_align(5 << 20, 64).unwrap();
         // SAFETY: layouts are non-zero; every block is freed with its own layout.
@@ -315,6 +324,119 @@ mod tests {
             assert!(core::slice::from_raw_parts(t, 4096).iter().all(|&b| b == 9));
             a.dealloc(t, Layout::from_size_align(6 << 20, 8).unwrap());
         }
+        release_cache();
+    }
+
+    /// A grow that `mremap` cannot extend in place falls back to allocating a new block and
+    /// copying. A live block directly after the block under test forces that fallback.
+    #[test]
+    fn a_grow_that_cannot_extend_in_place_copies_into_a_new_block() {
+        let _serial = serial();
+        let a = HugePageAlloc;
+        let big = Layout::from_size_align(4 << 20, 64).unwrap();
+        let grown = Layout::from_size_align(8 << 20, 64).unwrap();
+        release_cache();
+        let mut adjacent = None;
+        for _ in 0..64 {
+            // SAFETY: fresh blocks of `big`, freed below with the same layout.
+            unsafe {
+                let x = a.alloc(big);
+                let y = a.alloc(big);
+                assert!(!x.is_null() && !y.is_null());
+                if x as usize + big.size() == y as usize {
+                    adjacent = Some((x, y));
+                    break;
+                }
+                if y as usize + big.size() == x as usize {
+                    adjacent = Some((y, x));
+                    break;
+                }
+                a.dealloc(x, big);
+                a.dealloc(y, big);
+            }
+            // Fresh mappings are placed next to each other more reliably than cached blocks.
+            release_cache();
+        }
+        let Some((grown_from, blocker)) = adjacent else {
+            // The address layout did not give two adjacent mappings in this run.
+            release_cache();
+            return;
+        };
+        // SAFETY: `grown_from` and `blocker` are live 4 MiB mappings with an adjacent
+        // address range, so `mremap` without MREMAP_MAYMOVE fails and the copy path runs.
+        unsafe {
+            grown_from.write_bytes(0x5A, big.size());
+            let moved = a.realloc(grown_from, big, grown.size());
+            assert!(!moved.is_null());
+            assert_ne!(moved, grown_from, "the grow must copy, not extend in place");
+            assert!(core::slice::from_raw_parts(moved, big.size()).iter().all(|&b| b == 0x5A));
+            a.dealloc(moved, grown);
+            a.dealloc(blocker, big);
+        }
+        release_cache();
+    }
+
+    /// Freeing more blocks than the cache has slots, or more bytes than its cap, evicts
+    /// older blocks; the allocator keeps working and returns aligned blocks.
+    #[test]
+    fn cache_eviction_paths_keep_the_allocator_usable() {
+        let _serial = serial();
+        let a = HugePageAlloc;
+        let big = Layout::from_size_align(4 << 20, 64).unwrap();
+        release_cache();
+        set_cache_bytes(usize::MAX);
+        // More frees than slots: the oldest blocks are unmapped on insertion.
+        let blocks: Vec<*mut u8> = (0..SLOTS + 4)
+            .map(|_| {
+                // SAFETY: fresh block, freed below with `big`.
+                unsafe { a.alloc(big) }
+            })
+            .collect();
+        assert!(blocks.iter().all(|p| !p.is_null()));
+        for block in blocks {
+            // SAFETY: allocated above with `big`.
+            unsafe { a.dealloc(block, big) };
+        }
+        // More bytes than the cap: inserting a second block evicts the first.
+        set_cache_bytes(big.size());
+        for _ in 0..4 {
+            // SAFETY: fresh block, freed below with `big`.
+            unsafe {
+                let p = a.alloc(big);
+                assert!(!p.is_null() && p as usize % (2 << 20) == 0);
+                a.dealloc(p, big);
+            }
+        }
+        set_cache_bytes(6 << 30);
+        release_cache();
+    }
+
+    /// Poison mode fills a reused block, including when the reuse must satisfy a large
+    /// alignment; a fresh zeroed block is unaffected.
+    #[test]
+    fn poison_fills_reused_blocks() {
+        let _serial = serial();
+        let a = HugePageAlloc;
+        let big = Layout::from_size_align(4 << 20, 64).unwrap();
+        let aligned = Layout::from_size_align(4 << 20, 2 << 20).unwrap();
+        release_cache();
+        set_poison(true);
+        // SAFETY: fresh blocks, each freed with the layout it was allocated under.
+        unsafe {
+            let zeroed = a.alloc_zeroed(big);
+            assert!(!zeroed.is_null());
+            assert!(core::slice::from_raw_parts(zeroed, big.size()).iter().all(|&b| b == 0));
+            zeroed.write_bytes(0x11, big.size());
+            a.dealloc(zeroed, big);
+            let reused = a.alloc(aligned);
+            assert!(!reused.is_null() && reused as usize % (2 << 20) == 0);
+            assert!(
+                core::slice::from_raw_parts(reused, aligned.size()).iter().all(|&b| b == 0xA5),
+                "a reused block must carry the poison pattern"
+            );
+            a.dealloc(reused, aligned);
+        }
+        set_poison(false);
         release_cache();
     }
 }
