@@ -34,6 +34,8 @@ goal; `docs/h-exact.md`).
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, tied parts (version 5: the sponge instance whose opening proves the parity chain's bit claim, `flock_union`, `tied`; spans over several segments); `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory |
+| `crates/agg-mldsa-simd` | lib + benches | ML-DSA-44 steps 1-2 kernels (ExpandA, NTTs mod q and P2, samplers, finish, Keccak lanes) with scalar, AVX2 and AVX-512 backends behind one runtime-dispatched engine; all `unsafe` of the SIMD path lives here |
+| `crates/agg-mldsa-cref` | lib (benches only) | C reference harness (pq-crystals AVX2, Hybrid-SHA-3 AVX2/AVX-512) for the kernel gates, built with `--cfg cref` and `AGG_CREF_SRC` |
 
 Other files: `docs/` (`spec.md` and `scripts/spec_checks.py`; `soundness.md` with
 `scripts/pow_plan.py` and `scripts/fold_support.py` for the proof-of-work schedule and the
@@ -123,7 +125,9 @@ feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
   oracle"), on this i7-11700K and on a Zen 5 VM; `AKITA_SCALAR_NTT=1` does not help,
   `x86-64-v3` passes. Use it only for the Keccak-only bench. A bare `+avx512f,...` feature
   list makes rustc 1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
-- Our own AVX-512 kernels (none yet) go behind `#[cfg(feature = "avx512")]`.
+- Our own AVX2/AVX-512 kernels (`crates/agg-mldsa-simd`) are selected at run time with
+  `is_x86_feature_detected!` and `#[target_feature]`, never by a compile-time feature
+  (`AGG_MLDSA_SIMD`, `docs/perf.md` Section 15); results are bit-identical to the scalar path.
 
 ## Machine rules
 
