@@ -64,7 +64,8 @@ const D_TILE: usize = 256;
 ///
 /// The table is built as the product of a table over the low twelve variables and one over
 /// the remaining variables: only the two small tables are filled level by level, and the
-/// full table is written once, in parallel, with one multiplication per entry.
+/// full table (range: all `2^r.len()` entries) is written once, in parallel, with one
+/// multiplication per entry.
 fn eq_table(r: &[E]) -> Vec<E> {
     const LOW_VARS: usize = 12;
 
@@ -207,8 +208,9 @@ impl<'a> SplitGroup<'a> {
         // unreduced sum is below `blocks * p < 2^64 * blocks`; workloads have
         // `blocks <= 2^6`, and the low `u128` slot stays exact for any `blocks < 2^64`.
         debug_assert!(tables.len() < 1 << 32);
-        // Every slot of `d` is overwritten by the walk below; the initial fill only makes
-        // the buffer safe to write in place (one 8 MiB pass, not a serial concat).
+        // Range: all `rows` slots (8 MiB at z = 19). Every slot is overwritten by the walk
+        // below; the initial fill only makes the buffer safe to write in place, and is one
+        // pass, not the serial concat of the old port.
         let mut d = vec![E::zero(); rows];
         d.par_chunks_mut(D_TILE).enumerate().for_each(|(chunk, out)| {
             let lo0 = chunk * D_TILE;
