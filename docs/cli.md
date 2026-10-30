@@ -19,7 +19,7 @@ the byte size of every part of the aggregate). Steps:
    its index) and the round-1 tables `G_main16` (`i32` cells) and `G_main4` (`i8` cells) built.
 3. The PIOP prover `agg_piop::prover::prove_with_tables` runs the one transcript of spec
    Section 10 with the seed-derived matrices (`SeededMatrices`) and the Flock side
-   `FlockProver` (Flock profile `AggregatorConfig::profile`: `Slim` by default, `Fast` or
+   `FlockProver` (Flock profile `AggregatorConfig::profile`: `Fast` by default, `Slim` or
    `Slim8`; bound at event 0, K15, K18): event 1 `G_main16, G_main4`, event 2 the parts' Flock
    commitments, event 3 `sd` and the projection matrix `Psi` (K24), event 4 `G_1, G_2, G_3,
    G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
@@ -97,7 +97,7 @@ header print the relation. The Keccak side does not depend on it.
 `--flock-profile` selects the Ligerito profile of the Flock parts (`fast`: rate 1/2, `slim`:
 rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work-normalized in
 Flock's accounting, with the level-0 list priced at the outer sites (K19) and at the tie
-(K20); default `slim`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
+(K20); default `fast`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
 12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. `--flock-span off` proves every segment
 on its own (K10 parts) instead of one span over all segments (K16).
 

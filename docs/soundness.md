@@ -852,7 +852,7 @@ estimate); the claim is 128 bits per query, Aerie's notion.
 
 *Mode B* (public bits, no Flock): Corollary 12.5 gives the same statement without (F).
 
-## 8. Costs at `N = 2^15` (default: `Slim`, span on)
+## 8. Costs at `N = 2^15` (profile `Slim`, span on)
 
 | Item | Proof bytes | Prover hashes (expected) |
 | --- | ---: | ---: |

@@ -34,7 +34,7 @@ commands:
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
       Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
-      Flock's accounting; default: the build's FLOCK_PROFILE); with --flock-span on (default) a
+      Flock's accounting; default fast); with --flock-span on (default) a
       batch of more than one segment in whole-segment parts is one tied part over all
       segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465), h-exact
       (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465) or h-fips (also the hint:

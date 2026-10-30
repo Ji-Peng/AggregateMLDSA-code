@@ -5,9 +5,9 @@ ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock 
 (`succinctlabs/flock` `83f963e`, vendored `flock-core`, K12) and its Ligerito PCS. Deviations
 from the spec are listed in `docs/deviations.md` (the K entries). Sections 1 to 6 describe
 the sponge gate and the standalone sponge proof, Section 9 the tied part that mode A uses,
-Section 12 the Flock bytes: the `Slim` profile in mode A, spans over all segments, the
-level-0 cap, the options measured or estimated, and (12.7) tied-part proof version 5, the
-virtual parity chain.
+Section 12 the Flock bytes: the mode-A profile (`Fast` by default, or `Slim`), spans over all
+segments, the level-0 cap, the options measured or estimated, and (12.7) tied-part proof
+version 5, the virtual parity chain.
 
 ## 1. The chi-only Keccak-f gate
 
@@ -322,7 +322,8 @@ depths, and by the NUMBER of openings: one per tied part, whatever its size.
 ### 12.2 What was implemented
 
 1. **`Slim` in mode A** (K15): `FlockProfile::Slim = 4`, bound at event 0, named in the
-   event-2 item (item version 4), `--flock-profile`. Default of mode A.
+   event-2 item (item version 4), `--flock-profile`. Default of mode A is `Fast`, the
+   measured best at 32K; `Slim` is the smaller-profile option.
 2. **Spans** (K16, docs/bridge.md Section 5c): a batch of `S >= 2` segments is ONE tied part
    (one sponge instance of all records, one parity chain over all segments), so it pays one
    opening instead of `S`. `--flock-span on|off`, default on.
@@ -429,7 +430,7 @@ post-K17 it predicts 775,046 B against ~766.8 KB).
 | Slim8 | 50.2 | 13.3 |
 | Slim with 24-bit query PoW | 58.4 | 15.0 |
 
-With the default (`Slim`, span) the Flock side would be about 16 bytes per signature at 32K
+With `Slim` and spans the Flock side would be about 16 bytes per signature at 32K
 instead of 94.6 (pre-K17 cloud run), the aggregate about 51 instead of 129.4 bytes per signature
 (the other components as measured on the cloud). Prover time and memory: in a local sample at
 `S = 2` (`count = 8193`, 7 threads), the span path took ~7% more prove time (Flock parts 9,513
@@ -441,7 +442,8 @@ of four parts (4 x 69 ms on the cloud).
 
 ### 12.6 Decisions and open points
 
-- Default `Slim`, span on. `Slim8` is ready behind `--flock-profile slim8` (another 17% at
+- Default `Fast`, span on (`Fast` is the measured best at 32K; `Slim` saves the bytes above).
+  `Slim8` is ready behind `--flock-profile slim8` (another 17% at
   32K, estimate); making it the default is a project decision: it is a parameter set derived
   and validated with Flock's analysis but not one Flock ships, so its proofs verify only with
   the vendored core (or upstream given the same configs).
