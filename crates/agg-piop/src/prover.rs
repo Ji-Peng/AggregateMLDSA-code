@@ -175,8 +175,9 @@ impl KeccakSide for NoKeccak {
 }
 
 /// Threads of the Flock fork pool. `AGG_FLOCK_THREADS` overrides the preset (0 disables
-/// the fork). The automatic preset selects 4 on a 16-thread host and 12 on a 32-thread
-/// host; other sizes use 3/8 of the current pool rounded up. `AGG_SCHED_PRESET=off`
+/// the fork). The automatic preset selects 12 on a 32-thread host; other sizes use
+/// 3/8 of the current pool rounded up. `AGG_SCHED_16_FIX=off` selects 4 on a
+/// 16-thread host for comparison with the previous preset. `AGG_SCHED_PRESET=off`
 /// always uses the latter default. Values are capped at [`max_flock_threads`]. A Rayon
 /// worker or a one-thread pool disables the fork to avoid blocking the pool.
 #[must_use]
@@ -189,7 +190,7 @@ pub fn flock_pool_threads() -> usize {
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         if std::env::var("AGG_SCHED_PRESET").as_deref() != Ok("off") {
             match (cpus, global) {
-                (16, 16) => return 4,
+                (16, 16) if std::env::var("AGG_SCHED_16_FIX").as_deref() == Ok("off") => return 4,
                 (32, 32) => return 12,
                 _ => {}
             }

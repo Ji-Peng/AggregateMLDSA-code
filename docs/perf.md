@@ -840,7 +840,7 @@ CPU count and Rayon pool size match a row below. `off` restores the 3/8 default;
 | Logical CPUs / Rayon threads | Flock workers | Policy and evidence |
 | --- | ---: | --- |
 | 1 / 1 | 0 | No fork; Flock precedes PIOP. |
-| 16 / 16 | 4 | No pinning or donation: both experiments failed their local gates. Local 4K F=4 versus F=6 is noisy; see below. |
+| 16 / 16 | 6 | Retain the existing default pending a 32K cloud re-sweep. `AGG_SCHED_16_FIX=off` selects the previous preset of 4 for comparison. |
 | 32 / 32 | 12 | Unmeasured, cloud sweep needed. |
 | Other | ceil(3 Rayon / 8) | Existing default. |
 
@@ -854,3 +854,9 @@ after; proof bytes matched at 1, 4, 16 and 32 Rayon threads. The one-thread path
 unchanged. The 32-thread row is an extrapolation, and the separate IFMA implementation is
 not present in this branch: an IFMA-aware physical-core pool needs integration and a cloud
 sweep before it can be selected here.
+
+The subsequent default correction compared four against six Flock workers on WSL,
+alternating four launches with one warmup and one measured run each. Mean fork wall was
+1,427.0 / 1,389.0 ms, Flock proofs 1,155.1 / 989.7 ms, PIOP branch 1,426.8 /
+1,388.9 ms, and total prove 2,725.1 / 2,723.3 ms (0.999x). These 4K results are
+directional; the 32K cloud sweep remains open.
