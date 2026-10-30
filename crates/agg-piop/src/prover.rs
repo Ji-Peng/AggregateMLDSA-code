@@ -359,8 +359,8 @@ const FLOCK_POOL_STACK: usize = 64 << 20;
 enum Donate {
     /// The opening stays on the Flock pool (the default, `0` or `off`).
     Off,
-    /// `1` or `on`: the opening moves to a pool of the global pool's size when the PIOP
-    /// branch has finished by the time Flock reaches it and that pool is larger.
+    /// `1` or `on`: the opening moves to a pool of one thread per physical core when the
+    /// PIOP branch has finished by the time Flock reaches it and that pool is larger.
     Finished,
     /// `force` (tests and debugging): the opening always moves, whatever the PIOP branch
     /// is doing and whatever the pool sizes.
