@@ -31,9 +31,9 @@ flock-field's object code: a non-generic, non-`#[inline]` function of another cr
 only under LTO, and LLVM never inlines a callee whose target features exceed the caller's.
 Upstream benches with `lto = "thin"` and `-C target-cpu=native` (its `[profile.bench]` and
 `.cargo/config.toml`), so it does not see this. Our CLMUL build has no LTO and only
-`+pclmulqdq`, so every `F128` multiply in flock-core was an out-of-line call (3.87% self time
+`+pclmulqdq`, so upstream's `F128` multiply requires an out-of-line call (3.87% self time
 in a local 8K profile). Thin LTO plus a global `+sse4.1` would inline them too, but a global
-`+sse4.1` slows our lookup and stage 3 by 6-7% locally (measured, perf.md Section 10). With
+`+sse4.1` slows our lookup and stage 3 by 6-7% locally (measured, docs/perf.md Section 10). With
 this patch the bodies inline into every caller of the `+pclmulqdq` build: 6,903 pclmul
 instruction lines in `agg` instead of 461; the unreduced multiply and the square have no
 out-of-line copy left; the Karatsuba multiply keeps 18 out-of-line calls, all in verifier
@@ -41,7 +41,7 @@ functions.
 
 Exact: the same carry-less products and XORs compute the same field elements, so proofs,
 transcripts and the verifier are unchanged and interoperate with upstream Flock (aggregates
-byte-identical to main, perf.md Section 10). The default build (no `pclmulqdq`) does not
+byte-identical to main, docs/perf.md Section 10). The default build (no `pclmulqdq`) does not
 reach these functions and is unchanged. The crate's own tests pass under `+pclmulqdq`
 (`cargo test --release --manifest-path vendor/flock-field/Cargo.toml`: 29 passed).
 
@@ -58,7 +58,7 @@ To regenerate: copy `crates/flock-field/src` of the revision above here, write t
 
 Why: the forms of section 1 move every operand qword into an XMM register for `pclmulqdq`
 and every partial product back into general-purpose registers for the XORs and the
-shift-based reduction, about ten cross-domain moves per multiply. The new forms reinterpret
+shift-based reduction, about ten cross-domain moves per multiply. The register forms reinterpret
 `F128` (`repr(C, align(16))`, `lo` first) as an `__m128i`, select the qwords with the CLMUL
 immediate (schoolbook, four products) and reduce with two CLMULs by `0x87`. Measured on the
 i7-11700K, one core: butterfly 3.2 -> 1.7 ns, unreduced dot product 2.1 -> 1.0 ns per term.
