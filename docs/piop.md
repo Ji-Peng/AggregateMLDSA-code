@@ -436,17 +436,19 @@ export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part site
 
 `LE16` version 4 (`manifest::WIRE_VERSION`), `u8` relation byte (0 = H-u, 1 = H-exact,
 2 = H-FIPS), `LE64 N`; `32 N` bytes `c~`; the `G_main16` and `G_main4` commitments framed
-(`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: four framed items; event
+(`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: five framed items; event
 6: `512 S` bytes then `S` framed share items (deviation K22); the lookup (layer-1 values,
 then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
 to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
-round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 8 claims;
-`3 d_main` round elements and 31 claims); the join: `S` framed Flock proof items (K22); the
-packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227 at `N* = 8` to 556 at
+round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 9 claims;
+the shared claim `c`; `3 d_main` round elements and 34 claims); the join: `S` framed Flock
+proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227
+at `N* = 8` to 525 at
 `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
 the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
-`16 (76 + 11 d_main)` under H-u and H-exact (8 + 31 and 7 + 32 stage-2 and stage-3 claims),
-`16 (81 + 11 d_main)` under H-FIPS; 5,616 B at `N = 2^15` under H-u. `AggregateProof::size()`
+`16 (81 + 11 d_main)` under H-u and H-exact (9 + 34 and 8 + 35 stage-2 and stage-3 claims,
+plus one element for `c`), `16 (86 + 11 d_main)` under H-FIPS; 5,696 B at `N = 2^15` under
+H-u. `AggregateProof::size()`
 (`ProofSize`) splits the serialized length into header, `c~`, Akita commitments, Keccak-side
 items (event 2), final vectors, Keccak-side shares and proofs (event 6 and the join), lookup,
 PIOP, work nonces and opening, framing included.
@@ -491,7 +493,7 @@ provers and may change the honest round-2 tables before they are committed.
 | `public_t`, `public_a` | 6 | `StreamedPublic::pass`: `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded and inverse-NTT'd, or cached; `Lambda` products) |
 | `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added, the links and the stack reductions |
 | `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B |
-| `opening` | 7 | the batched Akita opening of the 38 claims (H-u) at the six group points |
+| `opening` | 7 | the batched Akita opening of the 52 claims (H-u) at the six group points |
 
 A rejected run stops at its failing step (later timings stay zero); a trailing segment that
 holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
