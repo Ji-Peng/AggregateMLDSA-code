@@ -19,7 +19,7 @@
 //! See [DP24](https://eprint.iacr.org/2024/504) (ring-switching) and the
 //! ligerito module docs for the recursion.
 
-use std::{env::var, sync::atomic::AtomicU8, time::Instant};
+use std::{env::var, time::Instant};
 use crate::challenger::CanonicalPow;
 
 pub use commit::{
@@ -171,36 +171,6 @@ pub struct PackedDirectClaim {
     /// match the claim's `point` — the contribution to `b_combined` is read
     /// directly from this tensor.
     pub eq_ind: DirectEqInd,
-}
-
-/// In-process A/B override for the VIRTUAL BASIS (see
-/// [`ligerito::VirtualEqBasis`]): `0` follows the `FLOCK_NO_VIRTUAL_B` env
-/// knob, `1` forces the virtual basis on, `2` forces the pre-virtualization
-/// path (round-0-only JIT fill). A few-ms effect only resolves under an
-/// ALTERNATING in-process instrument over identical inputs — process-level
-/// arms on this box carry ±4-8 ms of interference per sample.
-pub static VIRTUAL_B_OVERRIDE: AtomicU8 = AtomicU8::new(0);
-
-/// In-process A/B override for the STATISTICS LADDER (see
-/// `ligerito::extension::init_phase_statistics`): `0` follows the
-/// `FLOCK_NO_STATS_LADDER` env knob, `1` forces it on, `2` forces the
-/// incremental L0 fold ladder. Both arms produce byte-identical proofs.
-pub static STATS_LADDER_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub(crate) fn virtual_b_enabled() -> bool {
-    match VIRTUAL_B_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var_os("FLOCK_NO_VIRTUAL_B").is_none(),
-    }
-}
-
-pub(crate) fn stats_ladder_enabled() -> bool {
-    match STATS_LADDER_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => std::env::var_os("FLOCK_NO_STATS_LADDER").is_none(),
-    }
 }
 
 /// Fiat--Shamir grinding policy for the PCS transport that sits before the
@@ -417,18 +387,18 @@ pub fn open_batch_mixed_ligerito_seeded<Ch: Challenger>(
         round0_prime,
         round1_lookahead,
     } = combined;
-    // Factored EqPoint basis. DEFAULT (virtual): the basis stays factored
+    // Factored EqPoint basis. The basis stays factored
     // across EVERY L0 fold — an eq tensor folds to an eq tensor, so no round
     // writes or reads a half-size basis array; it materializes once, at the
     // last L0 round, at the size the recursion takes over
-    // ([`ligerito::VirtualEqBasis`]). `FLOCK_NO_VIRTUAL_B=1` falls back to
-    // the round-0-only JIT fill (the pre-virtualization behavior) — the
-    // CERTIFICATION knob for alternating A/B runs; both settings produce the
-    // same b values, hence byte-identical proofs.
+    // ([`ligerito::VirtualEqBasis`]). The round-0-only JIT fill remains the
+    // fallback when the claim has no eq basis or the layout is not
+    // lane-major; both produce the same b values, hence byte-identical
+    // proofs.
     // Lane-major only: the virtual basis rides the BLOCKED L0 fold, which is
     // what every shipped merged-transport open runs (a pow2-lane inner keeps
     // the tuned element-pairing kernel and its round-0 JIT).
-    let virtual_b = eq_basis.is_some() && lane_major && virtual_b_enabled();
+    let virtual_b = eq_basis.is_some() && lane_major;
     let vbasis = if virtual_b {
         // The point IS the claim's, and γ is its single transcript scalar —
         // the same (γ, ρ) the split tables above were seeded with.
@@ -682,10 +652,10 @@ fn compute_combined_basis_and_target<Ch: Challenger>(
         // STATISTICS LADDER: the lane-major inner open derives its round-0
         // message and every later L0 round from block statistics inside the
         // recursive prover (one sweep there covers this term AND the L0 OOD
-        // term), so the O(L) prime + lookahead sweep below is skipped. Same
-        // gate as the prover's: `virtual_b` = eq basis + lane-major, which
-        // is exactly this branch with `blk > 1`.
-        if blk > 1 && virtual_b_enabled() && stats_ladder_enabled() {
+        // term), so the O(L) prime + lookahead sweep below is skipped. The
+        // gate is eq basis + lane-major, which is exactly this branch with
+        // `blk > 1`.
+        if blk > 1 {
             if trace {
                 eprintln!("  [open_batch] combine (seeded EqPoint, statistics ladder): no sweep");
             }

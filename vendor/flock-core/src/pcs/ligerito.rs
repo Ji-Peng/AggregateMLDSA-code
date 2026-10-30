@@ -37,7 +37,6 @@ use std::{
     collections::HashMap,
     env::var,
     mem::{replace, take},
-    sync::atomic::AtomicU8,
     time::{Duration, Instant},
 };
 
@@ -3675,15 +3674,6 @@ pub struct FoldLookahead {
     u0: [F128; 3],
     u2: [F128; 3],
 }
-
-/// In-process A/B override for the F256 ladder's WHOLE alternating fold
-/// schedule — the round-1 lookahead skip AND every mid-ladder `La256`
-/// production + skip round it seeds, through the initial folds and all
-/// recursive levels: `0` follows the `FLOCK_NO_FOLD_LOOKAHEAD` env knob,
-/// `1` forces the schedule on, `2` forces the plain per-round folds.
-/// Byte-identical either way (exact polynomial identity) — the oracle
-/// tests alternate this to prove it.
-pub static FOLD_LOOKAHEAD_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 impl FoldLookahead {
     #[inline]

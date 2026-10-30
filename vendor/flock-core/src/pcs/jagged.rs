@@ -78,7 +78,7 @@
 
 use std::{
     collections::BTreeMap,
-    env::{var, var_os},
+    env::var,
     mem::{replace, swap},
     sync::{
         OnceLock,
@@ -3128,16 +3128,14 @@ pub fn prove_multipoint_twisted_with_grinding<C: Challenger>(
                 .iter()
                 .map(|c| (c.z_row.to_vec(), F128::ONE))
                 .collect();
-            let closed = closed_rs_on().then(|| {
-                ClosedRs::build(
-                    &coltabs,
-                    &rows,
-                    &gpow,
-                    rho_pows.as_ref().expect("RS claims carry the conjugates"),
-                    params.n,
-                    used.len(),
-                )
-            });
+            let closed = ClosedRs::build(
+                &coltabs,
+                &rows,
+                &gpow,
+                rho_pows.as_ref().expect("RS claims carry the conjugates"),
+                params.n,
+                used.len(),
+            );
             let ar = AlignedRsPair {
                 coltabs,
                 rows,
@@ -3148,7 +3146,7 @@ pub fn prove_multipoint_twisted_with_grinding<C: Challenger>(
                 n_used: used.len(),
                 closed,
             };
-            let msg = ar.round0_msg(&eq0);
+            let msg = ar.round0_msg();
             msg0 = (msg0.0 + msg.0, msg0.1 + msg.1);
             pairs.push(Pair::AlignedRs(ar));
         } else if virtual_a_on() && claims.len() <= LAZY_RS_MAX_SIDES {
@@ -3219,10 +3217,7 @@ pub fn prove_multipoint_twisted_with_grinding<C: Challenger>(
     }
     let mut sparse_support: Option<u64> = None;
     let mut dense_group_support: Option<u64> = None;
-    if n_g > 0
-        && closed_rs_on()
-        && let Some(used) = aligned.as_ref()
-    {
+    if n_g > 0 && let Some(used) = aligned.as_ref() {
         // THE SAME CLOSED FORM, one conjugate. A group's weight is
         // `scale·cols[y]·eq(z_row, row)` — the RS side's shape exactly — and
         // its partner is a SINGLE scaled `eq(ρ,·)` rather than 128 twisted
@@ -3252,9 +3247,9 @@ pub fn prove_multipoint_twisted_with_grinding<C: Challenger>(
             round: 0,
             nu: params.n,
             n_used: used.len(),
-            closed: Some(closed),
+            closed,
         };
-        let msg = ar.round0_msg(&eq0);
+        let msg = ar.round0_msg();
         msg0 = (msg0.0 + msg.0, msg0.1 + msg.1);
         pairs.push(Pair::AlignedRs(ar));
     } else if n_g > 0 {
@@ -3520,67 +3515,6 @@ impl VirtualPair {
     }
 }
 
-/// One column's message contribution for the aligned RS closed form:
-/// pairs over the column's `b` positions of
-/// `ā = Σ_i a_i·row_eq_i(row)` against the partner. The row-eq hi factor
-/// is constant across each `2^n_lo` run, so `a_i·hi` hoists per run and
-/// each position pays one multiply per claim — exact (field algebra), the
-/// same field elements as the unhoisted product.
-#[inline]
-fn column_pair_msg(
-    a: &[F128],
-    row_eqs: &[SplitEq],
-    partner: &Partner,
-    eq: &SplitEq,
-    base: usize,
-    b: usize,
-) -> (F128, F128) {
-    let mut g1 = F128::ZERO;
-    let mut gi = F128::ZERO;
-    let n_lo = row_eqs[0].n_lo;
-    debug_assert!(row_eqs.iter().all(|e| e.n_lo == n_lo));
-    if n_lo >= 1 {
-        let mask = (1usize << n_lo) - 1;
-        let mut ah: Vec<F128> = vec![F128::ZERO; a.len()];
-        let mut cur_hi = usize::MAX;
-        for t2 in (0..b).step_by(2) {
-            let h = t2 >> n_lo;
-            if h != cur_hi {
-                cur_hi = h;
-                for (dst, (&ai, e)) in ah.iter_mut().zip(a.iter().zip(row_eqs)) {
-                    *dst = ai * e.hi[h];
-                }
-            }
-            let mut a0 = F128::ZERO;
-            let mut a1 = F128::ZERO;
-            for (&ahi, e) in ah.iter().zip(row_eqs) {
-                a0 += ahi * e.lo[t2 & mask];
-                a1 += ahi * e.lo[(t2 + 1) & mask];
-            }
-            let p0 = partner.at(eq, base + t2);
-            let p1 = partner.at(eq, base + t2 + 1);
-            g1 += a1 * p1;
-            gi += (a0 + a1) * (p0 + p1);
-        }
-    } else {
-        // One (or zero) remaining row bits: runs are single positions, no
-        // hoist — fall back to direct evaluation.
-        for t2 in (0..b).step_by(2) {
-            let mut a0 = F128::ZERO;
-            let mut a1 = F128::ZERO;
-            for (&ai, e) in a.iter().zip(row_eqs) {
-                a0 += ai * e.at(t2);
-                a1 += ai * e.at(t2 + 1);
-            }
-            let p0 = partner.at(eq, base + t2);
-            let p1 = partner.at(eq, base + t2 + 1);
-            g1 += a1 * p1;
-            gi += (a0 + a1) * (p0 + p1);
-        }
-    }
-    (g1, gi)
-}
-
 /// The used-column list when EVERY used column is FULL (height `2^n`) — the
 /// full-count shape whose dense stack is column-aligned at `2^n`
 /// boundaries: position `d` splits as `(rank j, row) = (d >> n, d & mask)`
@@ -3731,14 +3665,6 @@ impl ClosedRs {
     }
 }
 
-/// `FLOCK_NO_CLOSED_RS=1` restores the pointwise message (one partner
-/// evaluation per position) — the certification knob for the byte-identity
-/// A/B, since the two paths must produce the same field elements.
-fn closed_rs_on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| var_os("FLOCK_NO_CLOSED_RS").is_none())
-}
-
 struct AlignedRsPair {
     /// Per claim: γ-baked column factors in used-rank order
     /// (`gpow[128 i]·eq_col_i[y_j]`).
@@ -3750,35 +3676,16 @@ struct AlignedRsPair {
     round: usize,
     nu: usize,
     n_used: usize,
-    /// The closed-form message state. `None` under `FLOCK_NO_CLOSED_RS`.
-    closed: Option<ClosedRs>,
+    /// The closed-form message state.
+    closed: ClosedRs,
 }
 
 impl AlignedRsPair {
     /// The round-0 message — the weight-pass replacement: no fill, no
     /// 2^m buffer, pure closed-form evaluation against the partner.
-    fn round0_msg(&self, eq0: &SplitEq) -> (F128, F128) {
+    fn round0_msg(&self) -> (F128, F128) {
         debug_assert_eq!(self.round, 0);
-        if let Some(c) = &self.closed {
-            return c.msg(0, &self.rows);
-        }
-        let row_eqs: Vec<SplitEq> = self
-            .rows
-            .iter()
-            .map(|(z, _)| SplitEq::new(&z[..self.nu]))
-            .collect();
-        let b = 1usize << self.nu;
-        (0..self.n_used)
-            .into_par_iter()
-            .map(|j| {
-                let a: Vec<F128> = self.coltabs.iter().map(|ct| ct[j]).collect();
-                let base = j * b;
-                column_pair_msg(&a, &row_eqs, &self.partner, eq0, base, b)
-            })
-            .reduce(
-                || (F128::ZERO, F128::ZERO),
-                |(x1, xi), (y1, yi)| (x1 + y1, xi + yi),
-            )
+        self.closed.msg(0, &self.rows)
     }
 
     /// Fold (in closed form: advance the scalars) and return the next
@@ -3790,41 +3697,9 @@ impl AlignedRsPair {
         for (z, s) in self.rows.iter_mut() {
             *s *= F128::ONE + z[self.round] + r;
         }
-        if let Some(c) = &mut self.closed {
-            c.advance(self.round, r);
-        }
+        self.closed.advance(self.round, r);
         self.round += 1;
-        if let Some(c) = &self.closed {
-            return c.msg(self.round, &self.rows);
-        }
-        let s_rem = self.nu - self.round;
-        debug_assert!(
-            s_rem >= 1,
-            "the dispatch densifies before the columns collapse"
-        );
-        let eq = SplitEq::new(&self.rho[self.round..]);
-        let row_eqs: Vec<SplitEq> = self
-            .rows
-            .iter()
-            .map(|(z, _)| SplitEq::new(&z[self.round..self.nu]))
-            .collect();
-        let b = 1usize << s_rem;
-        (0..self.n_used)
-            .into_par_iter()
-            .map(|j| {
-                let a: Vec<F128> = self
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (_, s))| self.coltabs[i][j] * *s)
-                    .collect();
-                let base = j * b;
-                column_pair_msg(&a, &row_eqs, &self.partner, &eq, base, b)
-            })
-            .reduce(
-                || (F128::ZERO, F128::ZERO),
-                |(x1, xi), (y1, yi)| (x1 + y1, xi + yi),
-            )
+        self.closed.msg(self.round, &self.rows)
     }
 
     /// Materialize the (by now tiny) per-column state into a
@@ -4214,16 +4089,15 @@ const SPARSE_SERIAL_WORDS: usize = 1 << 12;
 /// back to the materialized path.
 const LAZY_RS_MAX_SIDES: usize = 8;
 
-/// In-process override for the lazy (virtual-ā) dense RS pair: 0 = env
-/// (`FLOCK_NO_VIRTUAL_A` disables), 1 = force on, 2 = force off — the
-/// alternating-arm contract of [`crate::pcs::VIRTUAL_B_OVERRIDE`].
+/// In-process override for the lazy (virtual-ā) dense RS pair: `0` keeps the
+/// shipped path, `1` forces it on, `2` forces the materialized arm — the
+/// alternating in-process contract used by the byte oracle and bench.
 pub static VIRTUAL_A_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 fn virtual_a_on() -> bool {
     match VIRTUAL_A_OVERRIDE.load(Ordering::Relaxed) {
-        1 => true,
         2 => false,
-        _ => var_os("FLOCK_NO_VIRTUAL_A").is_none(),
+        _ => true,
     }
 }
 

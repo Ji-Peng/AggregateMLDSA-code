@@ -12,9 +12,8 @@
 
 use crate::pcs::commit::CodewordRows;
 use std::{
-    env::{var, var_os},
+    env::var,
     mem::replace,
-    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 use crate::challenger::CanonicalPow;
@@ -26,7 +25,7 @@ use crate::{
     merkle::cap_layer,
     pcs::{
         ligerito::{
-            AdditiveNttF128, BasisWindowFn, Challenger, F128, F256, FOLD_LOOKAHEAD_OVERRIDE,
+            AdditiveNttF128, BasisWindowFn, Challenger, F128, F256,
             FinalProof, FoldLookahead, Hash, IndexedParallelIterator, IntoParallelIterator,
             IntoParallelRefIterator, IntoParallelRefMutIterator, LigeritoProof, ParallelIterator,
             ParallelSliceMut, ProverConfig, RecursiveProof, SumcheckMessage, SumcheckMessage256,
@@ -1744,8 +1743,7 @@ fn base_table(values: &[F256]) -> Vec<F128> {
 // instead of O(L), and the `initial_k` array folds collapse into ONE pass
 // `f'[h] = Σ_e eq(r, e)·f[e·d + h]`. Every message and table value is the
 // field element the incremental ladder produces (field arithmetic is exact;
-// the sums merely reassociate), so the transcript is byte-identical —
-// `STATS_LADDER_OVERRIDE` is the same-binary A/B (tests/stats_ladder.rs).
+// the sums merely reassociate), so the transcript is byte-identical.
 // This is the challenge tree's "direct fold" idea re-derived onto the f256
 // ladder: contract the rank-1 basis once, never materialize or fold it.
 // ---------------------------------------------------------------------------
@@ -2152,21 +2150,14 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     // fold-0 into fold 1's pass. Consumed on the materialized (d = 1,
     // compression-proof) path AND the virtual-basis lane-major path (the
     // merged-transport inner opens — the seeded EqPoint combine emits
-    // blocked coefficients); the jit fallback (FLOCK_NO_VIRTUAL_B) keeps
-    // the plain first fold. The double fold needs two initial rounds and a
+    // blocked coefficients); the non-factored fallback keeps the plain
+    // first fold. The double fold needs two initial rounds and a
     // quarter table that still supports the blocked message pairing
-    // (len ≥ 8·d). FLOCK_NO_FOLD_LOOKAHEAD=1 / FOLD_LOOKAHEAD_OVERRIDE is
-    // the A/B knob — value-identical either way (exact polynomial
-    // identity), so proofs are byte-equal.
-    let alternation = match FOLD_LOOKAHEAD_OVERRIDE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => var_os("FLOCK_NO_FOLD_LOOKAHEAD").is_none(),
-    };
+    // (len ≥ 8·d).
     // THE STATISTICS LADDER (see `init_phase_statistics`): lane-major with
     // the factored basis. The combine skipped its O(L) sweep under the same
     // gate, so `first_msg`/`round1_lookahead` carry nothing here.
-    let stats_path = virtual_basis.is_some() && l0_lane_major && crate::pcs::stats_ladder_enabled();
+    let stats_path = virtual_basis.is_some() && l0_lane_major;
     let (mut sumcheck, lane_challenges) = if stats_path {
         let seeded = virtual_basis.take().expect("gated on Some");
         let _t = std::time::Instant::now();
@@ -2196,7 +2187,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     } else {
         let mut lookahead = round1_lookahead.filter(|_| {
             let kind_ok = virtual_basis.is_some() || (l0_jit_basis.is_none() && fold_block == 1);
-            alternation && kind_ok && initial_k >= 2 && packed_witness.len() >= 8 * fold_block
+            kind_ok && initial_k >= 2 && packed_witness.len() >= 8 * fold_block
         });
         let _t = std::time::Instant::now();
         for _ in 0..ood_count(0) {
@@ -2300,7 +2291,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
             // La production pays only when the NEXT round exists to consume it
             // as a skip — the last round drains into the switch, so producing
             // there is pure waste (+4 F256 muls per output quad).
-            let want_la = alternation && j + 2 < initial_k;
+            let want_la = j + 2 < initial_k;
             let path;
             if last {
                 // Materialize through any deferred challenge, then switch; the
@@ -2549,7 +2540,7 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
             // As in the init loop: produce La only when the NEXT round
             // consumes it — the pre-switch round of a non-final level
             // drains, so its predecessor's La would be dead weight.
-            let want_la = alternation && (j + 2 < k || i + 1 == r);
+            let want_la = j + 2 < k || i + 1 == r;
             if switching {
                 // No message of this round's own survives (the switch's
                 // replaces it) — materialize through the deferred and

@@ -284,3 +284,15 @@ non-default arm are gone.
   `madvise(MADV_HUGEPAGE)` on Flock's codeword and tree allocations. It measured
   slightly slower than the `agg` binary's global allocator advice, which already
   covers large blocks.
+- `FLOCK_NO_VIRTUAL_A` and `FLOCK_NO_VIRTUAL_B`: certification knobs that forced
+  the materialized/round-0-JIT arms of the virtual eq basis. The shipped
+  virtual basis stays; `VIRTUAL_A_OVERRIDE` still lets the byte oracle and bench
+  alternate the lazy and materialized RS arms.
+- `FLOCK_NO_STATS_LADDER`: forced the incremental L0 fold ladder instead of the
+  block-statistics ladder. The block-statistics ladder stays.
+- `FLOCK_NO_FOLD_LOOKAHEAD`: forced plain per-round folds instead of the
+  alternating lookahead schedule. The alternating schedule stays.
+- `FLOCK_NO_CLOSED_RS`: restored the pointwise message for aligned RS shapes.
+  The closed-form message stays and the fallback body is removed.
+- `FLOCK_NO_PREFAULT`: benchmark toggle that disabled hiding the codeword
+  allocation behind witness generation. The single-threaded guard stays.
