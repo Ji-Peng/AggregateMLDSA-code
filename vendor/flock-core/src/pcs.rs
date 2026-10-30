@@ -828,12 +828,11 @@ fn compute_combined_basis_and_target<Ch: Challenger>(
     // vs ~18 ms total at m=30 on 4 P-threads), and its flat block-parallel
     // shape drains cleanly around slow cores — run it on the all-core (P+E)
     // pool (−29% on the probe on 4P+4E; a wash-to-slight-loss on 10P+4E, so
-    // gated on [`crate::ecore_rich_topology`], `FLOCK_ALLCORE=1` overrides).
-    // PCS_COMBINE_PCORES_ONLY=1 keeps it on the caller's pool (A/B toggle).
+    // gated on [`crate::ecore_rich_topology`]).
     // Thread count never changes the output bits: every slot is written
     // deterministically and the prime is an XOR reduction (associative +
     // commutative, exact).
-    let combine_all_cores = var("PCS_COMBINE_PCORES_ONLY").is_err() && ecore_rich_topology();
+    let combine_all_cores = ecore_rich_topology();
     // The fast path's block tail can also accumulate Ligerito's round-1
     // message coefficients (groups of 4; +1 unreduced mul per slot) — the
     // round-0 prime falls out of the same accumulators. Sparse post-combine

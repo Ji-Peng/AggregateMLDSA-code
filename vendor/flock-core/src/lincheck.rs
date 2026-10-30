@@ -120,7 +120,7 @@ use std::{
     env::var,
     fmt::{Debug, Formatter, Result as FmtResult},
     mem::take,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
     time::Instant,
 };
 use crate::challenger::CanonicalPow;
@@ -176,37 +176,22 @@ mod union;
 /// ~8.5× vs iblock's ~6.5× on 10 P-cores at m=32. See `benches/lincheck.rs` (FOLD_AB=1).
 pub static FOLD_IBLOCK: AtomicBool = AtomicBool::new(false);
 
-/// A/B toggle: when set, lincheck's two heavy passes (the z partial fold and
-/// `fold_alpha_batched`) stay on the caller's (P-core) rayon pool instead of
-/// [`crate::all_core_pool`]. Both passes are flat parallel-fors with dynamic
-/// work assignment, so the work-stealing scheduler drains around the slower
-/// E-cores and the extra cores are a straight throughput win (same shape as
-/// the PCS combine's −29%). Thread count / pool choice cannot change output
-/// bits: the alpha fold writes every slot deterministically and the partial
-/// fold is an XOR reduction of per-worker partials. `LINCHECK_PCORES_ONLY=1`
-/// in the environment forces the same fallback (production kill-switch);
-/// the AtomicBool exists for paired within-process A/B (see
-/// `benches/lincheck.rs`, `ALLCORE_AB=1`).
-pub static LC_PCORES_ONLY: AtomicBool = AtomicBool::new(false);
-
-/// True when lincheck's passes may hop to the all-core (P+E) pool at all:
-/// not disabled (atomic or env), and the all-core pool actually has more
-/// threads than the caller's pool (under `RAYON_NUM_THREADS=1` both are 1,
-/// so ST parity conventions hold automatically). The prover's partial fold
+/// True when lincheck's passes may hop to the all-core (P+E) pool at all,
+/// i.e. the all-core pool actually has more threads than the caller's pool
+/// (under `RAYON_NUM_THREADS=1` both are 1, so ST parity conventions hold
+/// automatically). The prover's partial fold
 /// additionally requires an E-rich topology (see [`lincheck_use_all_cores`]);
 /// the alpha fold does not — from the verify context the P-pool runs it at
 /// ~11 ms vs ~2.3 ms all-core on 4P+4E, and the same ~10.2 → ~2.9 ms verify
 /// win reproduces on 10P+4E, so the hop pays on every measured topology.
 fn lincheck_all_cores_enabled() -> bool {
-    !LC_PCORES_ONLY.load(Ordering::Relaxed)
-        && var("LINCHECK_PCORES_ONLY").is_err()
-        && all_core_pool().current_num_threads() > current_num_threads()
+    all_core_pool().current_num_threads() > current_num_threads()
 }
 
 /// [`lincheck_all_cores_enabled`] plus the E-rich topology requirement — the
 /// gate for the prover's z partial fold, where the hop measures as a win only
 /// with a large-enough E-cluster (see [`crate::ecore_rich_topology`] — on
-/// 10P+4E it is a ~13% LOSS, `FLOCK_ALLCORE=1` overrides).
+/// 10P+4E it is a ~13% LOSS).
 // Only consulted by the aarch64 partial-fold dispatch; dead elsewhere.
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 fn lincheck_use_all_cores() -> bool {

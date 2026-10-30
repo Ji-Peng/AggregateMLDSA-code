@@ -281,7 +281,7 @@ fn fold_borrowed(src: &[F128], rho: F128) -> Vec<F128> {
 /// gives the buffers an explicit lifecycle and one allocation per prove, but it
 /// is **not** what made the fold phase scale: measured on its own it was within
 /// noise. The fold's poor thread scaling (1.06× on ten cores) turned out to be
-/// the sub-gate fan-out rule, not page faults — see [`crate::fold_sqrt_rule`].
+/// the sub-gate serial rule, not page faults.
 fn fold_into(src: &[F128], rho: F128, dst: &mut [F128]) {
     let half = src.len() / 2;
     let one_minus = F128::ONE + rho;

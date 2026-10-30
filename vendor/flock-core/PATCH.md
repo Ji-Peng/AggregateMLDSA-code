@@ -307,3 +307,8 @@ non-default arm are gone.
   small for the tiling.
 - `FLOCK_TREE_PREFAULT`: A/B toggle for recycling the Merkle tree from the
   scratch pool. The pooled tree stays; the per-commit `vec!` arm is gone.
+- `FLOCK_FOLD_RULE=sqrt`: capped √-rule fan-out for sub-gate folds, measured
+  slower than serial (about 5.0 -> 4.6 ms at μ=20). Sub-gate folds stay serial.
+- `FLOCK_ALLCORE`, `PCS_COMBINE_PCORES_ONLY`, `LINCHECK_PCORES_ONLY`: topology
+  overrides for the all-core hops. The `ecore_rich_topology` gate is the only
+  policy; the all-core pool still wins on 4P+4E and loses on 10P+4E.

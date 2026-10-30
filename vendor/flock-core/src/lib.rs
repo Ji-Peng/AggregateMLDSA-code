@@ -164,8 +164,8 @@ pub(crate) fn sumcheck_round_min_len(pairs: usize, n_blocks: usize) -> Option<us
     }
 }
 
-/// At/above this fold width a fold uses the full thread pool; below it,
-/// [`fold_min_len`] caps the fan-out.
+/// At/above this fold width a fold uses the full thread pool; below it, the
+/// fold runs serial.
 ///
 /// Overridable via `FLOCK_FOLD_GATE` for tuning. On an M4 Max with ten
 /// performance cores, the full split ran 3.2× faster at 2^17 outputs. The capped
@@ -185,34 +185,16 @@ pub(crate) fn fold_par_threshold() -> usize {
 }
 
 /// Rayon `with_min_len` value for the fold/bind step over `half` outputs, or
-/// `None` to run serial. Folds at or above [`fold_par_threshold`] take the full
-/// split; narrower ones run serial by default, or cap the job count via the
-/// √-rule when [`fold_sqrt_rule`] is on. The fold is a lighter, more
-/// bandwidth-bound kernel than a round message (~2 muls + 1 write per output vs
-/// ~10 muls/pair), so for a given width it saturates at fewer threads — hence
-/// the √-rule constant of ~1024 (`T ≈ √(half/1024)`) against 128 for rounds.
+/// `None` to run serial. Folds at or above [`fold_par_threshold`] take the
+/// full split; narrower ones run serial. The fold is a lighter, more
+/// bandwidth-bound kernel than a round message (~2 muls + 1 write per output
+/// vs ~10 muls/pair), so for a given width it saturates at fewer threads.
 pub(crate) fn fold_min_len(half: usize) -> Option<usize> {
     if half >= fold_par_threshold() {
         Some(1)
-    } else if fold_sqrt_rule() {
-        match (half / 1024).isqrt().clamp(1, current_num_threads()) {
-            0 | 1 => None,
-            t => Some(half.div_ceil(t)),
-        }
     } else {
         None
     }
-}
-
-/// Whether sub-gate folds use the capped √-rule fan-out (`FLOCK_FOLD_RULE=sqrt`)
-/// rather than running serial.
-///
-/// Serial is the default because capped work was slower for `product_gkr`.
-/// Serial execution reduced the fold phase from about 5.0 ms to 4.6 ms at
-/// μ=20 on an M4 Max. The option remains available for machine-specific tuning.
-pub(crate) fn fold_sqrt_rule() -> bool {
-    static RULE: OnceLock<bool> = OnceLock::new();
-    *RULE.get_or_init(|| var("FLOCK_FOLD_RULE").is_ok_and(|v| v == "sqrt"))
 }
 
 /// Types whose all-zero bit pattern is a valid, initialized value.
@@ -417,12 +399,7 @@ fn apple_sysctl_usize(key: &std::ffi::CStr) -> Option<usize> {
 /// SHA units / cache-resident compute scale with any extra core) and are NOT
 /// gated on this predicate.
 ///
-/// `FLOCK_ALLCORE=1` forces the gated hops onto the all-core pool regardless
-/// of topology (for re-measurement on new machines; pair against the sites'
-/// `*_PCORES_ONLY` switches for A/B).
 pub(crate) fn ecore_rich_topology() -> bool {
     static B: OnceLock<bool> = OnceLock::new();
-    *B.get_or_init(|| {
-        var("FLOCK_ALLCORE").is_ok() || 2 * efficiency_core_count() >= perf_core_count_cached()
-    })
+    *B.get_or_init(|| 2 * efficiency_core_count() >= perf_core_count_cached())
 }
