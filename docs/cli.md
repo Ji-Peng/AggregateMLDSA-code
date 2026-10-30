@@ -30,6 +30,11 @@ the byte size of every part of the aggregate). Steps:
    while the prover runs events 7 to 12), event 13 the opening. There is no divisibility projection seed
    (deviation P2); the `{0,1}` projection of `v` (K24) bounds the quotient.
 
+The stages (branch S of the transcript fork) run on their own pool when
+`AGG_PIOP_S_THREADS` is set, and by default while the Flock fork runs and the PIOP pool has
+four threads or more: 16 threads on a 32-thread pool, 6 on a 16-thread pool, otherwise 3/8 of
+the pool rounded to nearest and at least 2; `AGG_PIOP_S_THREADS=0` keeps the shared pool.
+
 `agg_cli::mode_a::AggregateVerifier::verify(&[(pk, M)], aggregate, cache)` returns a
 `VerifyCostReport`: accept or the first failing check, the 15 step times of
 `agg_piop::verifier::VerifyTimings`, per Flock part the setup and verification time, and the

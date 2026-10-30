@@ -897,7 +897,9 @@ pub fn prove_piop(
     transcript: &mut Transcript,
     unchecked: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
-    prove_piop_with(manifest, tables, None, matrices, psi, public, transcript, unchecked, false)
+    prove_piop_with(
+        manifest, tables, None, matrices, psi, public, transcript, unchecked, false, false,
+    )
 }
 
 /// Whether the two transcript branches run concurrently (`AGG_PIOP_FORK`, default on; `0`
@@ -907,41 +909,60 @@ fn piop_fork_on() -> bool {
     !matches!(std::env::var("AGG_PIOP_FORK").as_deref(), Ok("0" | "off"))
 }
 
-/// Threads of branch S's own pool (`AGG_PIOP_S_THREADS`), or `None` for the shared pool
-/// (the default). `0`, an empty value or a value that is not a count reports once and keeps
-/// the shared pool. A separate pool leaves every worker of the main PIOP pool to branch L,
-/// so the lookup's round barriers do not wait behind stage jobs in the same injector.
-fn piop_s_threads() -> Option<usize> {
+/// Threads of branch S's own pool (`AGG_PIOP_S_THREADS`), or `None` for the shared pool.
+/// An explicit count wins; `0` selects the shared pool. Unset, the default of
+/// [`default_stage_threads`] applies, and so does a value that is not a count after one
+/// report.
+fn piop_s_threads(flock_forks: bool) -> Option<usize> {
     match std::env::var("AGG_PIOP_S_THREADS") {
-        Err(_) => None,
+        Err(_) => default_stage_threads(flock_forks, rayon::current_num_threads()),
         Ok(v) => match v.trim().parse::<usize>() {
-            Ok(0) => {
-                warn_once("AGG_PIOP_S_THREADS=0 is not a thread count; using the shared pool");
-                None
-            }
+            Ok(0) => None,
             Ok(n) => Some(n),
             Err(_) => {
                 warn_once(&format!(
-                    "AGG_PIOP_S_THREADS={v:?} is not a thread count; using the shared pool"
+                    "AGG_PIOP_S_THREADS={v:?} is not a thread count; using the default"
                 ));
-                None
+                default_stage_threads(flock_forks, rayon::current_num_threads())
             }
         },
     }
 }
 
+/// The default size of branch S's own pool on a PIOP pool of `threads` workers, or `None`
+/// for the shared pool. Branch S gets its own pool only while the Flock fork runs and the
+/// PIOP pool has at least four threads: 16 workers on a 32-thread pool (`threads / 2`,
+/// the measured best at 16C32T) and 3/8 of the pool rounded to nearest, at least 2, below
+/// (`ref/notes/bench-cloud.md` Phases 15-24). A separate pool leaves every worker of the
+/// main PIOP pool to branch L, so the lookup's round barriers do not wait behind stage jobs
+/// in the same injector.
+fn default_stage_threads(flock_forks: bool, threads: usize) -> Option<usize> {
+    if !flock_forks || threads < 4 {
+        return None;
+    }
+    Some(if threads >= 32 {
+        threads / 2
+    } else {
+        // round(threads * 3 / 8) in integers; 16 gives 6 and 4 gives 2.
+        ((3 * threads + 4) / 8).max(2)
+    })
+}
+
 /// Run branch L (`lookup`) and branch S (`stages`) of the forked transcript, concurrently
-/// unless [`piop_fork_on`] says otherwise. With `AGG_PIOP_S_THREADS=k`, S runs on its own
-/// pool of `k` workers and L keeps every worker of the main PIOP pool; otherwise both feed
-/// the pool the PIOP runs on: inside a rayon pool (the PIOP pool of the scheduler preset)
+/// unless [`piop_fork_on`] says otherwise. With `AGG_PIOP_S_THREADS=k` (or the default of
+/// [`default_stage_threads`] while `flock_forks`), S runs on its own pool of `k` workers
+/// and L keeps every worker of the main PIOP pool; otherwise both feed the pool the PIOP
+/// runs on: inside a rayon pool (the PIOP pool of the scheduler preset)
 /// by `rayon::join`; off the pool (the caller's thread, which carries a large stack) with S
 /// on a scoped thread whose stack is that of the PIOP pool's workers, so that neither
 /// branch's sequential driver lands on a global-pool worker with rayon's default stack.
 /// Off the pool with a one-thread global pool, both branches run on the caller: an OS
 /// thread for S would add a second core's worth of work on one core and no parallelism.
+/// `flock_forks` reports whether the Flock proofs run beside the PIOP.
 fn run_branches<A: Send, B: Send>(
     lookup: impl FnOnce() -> A + Send,
     stages: impl FnOnce() -> B + Send,
+    flock_forks: bool,
 ) -> (A, B) {
     if !piop_fork_on() {
         let a = lookup();
@@ -952,7 +973,7 @@ fn run_branches<A: Send, B: Send>(
         let a = lookup();
         return (a, stages());
     }
-    if let Some(s_pool) = piop_s_threads().and_then(stages_pool) {
+    if let Some(s_pool) = piop_s_threads(flock_forks).and_then(stages_pool) {
         return std::thread::scope(|scope| {
             let handle = std::thread::Builder::new()
                 .name("agg-piop-stages-driver".into())
@@ -1157,7 +1178,8 @@ fn prove_stages_branch<'a>(
 /// built beforehand, e.g. while the Flock span is proven (prover only). The transcript
 /// forks after event 6: branch L (the lookup) and branch S (`tau` through stage 2) run
 /// side by side ([`run_branches`]), the join absorbs their digests, stage 3 follows on the
-/// trunk. `swap_join` is a test hook that absorbs the digests in the wrong order.
+/// trunk. `swap_join` is a test hook that absorbs the digests in the wrong order, and
+/// `flock_forks` reports whether the Flock proofs run beside the PIOP.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn prove_piop_with<'a>(
     manifest: &CommitmentManifest,
@@ -1169,6 +1191,7 @@ fn prove_piop_with<'a>(
     transcript: &mut Transcript,
     unchecked: bool,
     swap_join: bool,
+    flock_forks: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
     let fork_clock = Instant::now();
     let mut run = PiopRun::default();
@@ -1191,6 +1214,7 @@ fn prove_piop_with<'a>(
                 trace,
             )
         },
+        flock_forks,
     );
     let (lookup, stages) = (lookup?, stages?);
     if swap_join {
@@ -1450,6 +1474,8 @@ pub fn prove_with_tables_using(
                 &mut transcript,
                 unchecked,
                 swap_join,
+                // The stage pool default applies only beside a running Flock fork.
+                true,
             )
         });
         timings.fork_join = fork.elapsed();
@@ -1486,6 +1512,7 @@ pub fn prove_with_tables_using(
             &mut transcript,
             hooks.unchecked,
             hooks.swap_join,
+            false,
         );
         clock.lap();
         (Ok(flock_proofs), piop)
@@ -1609,5 +1636,22 @@ mod tests {
         let first = donation_pool(1).expect("a one-thread pool");
         let second = donation_pool(1).expect("the same pool");
         assert!(std::ptr::eq(first, second));
+    }
+
+    #[test]
+    fn the_default_stage_pool_follows_the_piop_pool() {
+        // No fork, or fewer than four PIOP threads: the shared pool.
+        for threads in [1, 2, 3, 4, 8, 16, 32, 64] {
+            assert_eq!(default_stage_threads(false, threads), None);
+        }
+        assert_eq!(default_stage_threads(true, 1), None);
+        assert_eq!(default_stage_threads(true, 2), None);
+        assert_eq!(default_stage_threads(true, 3), None);
+        assert_eq!(default_stage_threads(true, 4), Some(2));
+        assert_eq!(default_stage_threads(true, 8), Some(3));
+        assert_eq!(default_stage_threads(true, 16), Some(6));
+        assert_eq!(default_stage_threads(true, 24), Some(9));
+        assert_eq!(default_stage_threads(true, 32), Some(16));
+        assert_eq!(default_stage_threads(true, 64), Some(32));
     }
 }

@@ -58,6 +58,10 @@ environment:
                         (aggregate, bench; default half the rayon pool; 0: one after the other;
                         at most the logical CPUs or the rayon pool; a value that is not a
                         number warns and falls back to the default).
+  AGG_PIOP_S_THREADS=K  threads of the stage branch's own pool beside the Flock fork
+                        (aggregate, bench; default 16 on a 32-thread rayon pool, 6 on 16,
+                        3/8 of the pool rounded and at least 2 below, only with a running
+                        fork and at least 4 PIOP threads; 0: the shared rayon pool).
   AGG_OPENING_THREADS=K threads of the pool that runs the Akita opening (aggregate, bench;
                         default one per physical core, at most the rayon pool; 0 or at least
                         the rayon pool: the rayon pool itself).
