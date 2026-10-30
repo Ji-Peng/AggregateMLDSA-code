@@ -35,17 +35,15 @@ const MIN_MAX_CHUNK: usize = 1 << 15;
 /// The range is split into fixed-size chunks and reduced with the conditional
 /// parallelism helpers, so both the chunk scan and the reduction run on the
 /// caller's pool when it exists and fall back to one thread otherwise. Each
-/// chunk uses slice `min`/`max`, which the compiler vectorises; the previous
-/// `Option`-state fold did not.
+/// chunk is scanned once by `slice_min_max`, a copied two-accumulator fold
+/// that the compiler vectorises (slice `min`/`max` and an `Option`-state fold
+/// do not).
 fn chunked_min_max<T: Copy + Ord + Send + Sync>(values: &[T]) -> Option<(T, T)> {
     let first = *values.first()?;
     // A single chunk is not worth a parallel reduction; small groups take
     // this path and stay entirely serial.
     if values.len() <= MIN_MAX_CHUNK {
-        return Some((
-            *values.iter().min().unwrap_or(&first),
-            *values.iter().max().unwrap_or(&first),
-        ));
+        return Some(slice_min_max(values, first));
     }
     let num_chunks = values.len().div_ceil(MIN_MAX_CHUNK);
     Some(cfg_fold_reduce!(
@@ -54,14 +52,21 @@ fn chunked_min_max<T: Copy + Ord + Send + Sync>(values: &[T]) -> Option<(T, T)> 
         |(low, high), chunk| {
             let start = chunk * MIN_MAX_CHUNK;
             let end = (start + MIN_MAX_CHUNK).min(values.len());
-            let part = &values[start..end];
-            (
-                low.min(*part.iter().min().unwrap_or(&first)),
-                high.max(*part.iter().max().unwrap_or(&first)),
-            )
+            let (part_low, part_high) = slice_min_max(&values[start..end], first);
+            (low.min(part_low), high.max(part_high))
         },
         |a, b| (a.0.min(b.0), a.1.max(b.1))
     ))
+}
+
+/// One-pass min/max of `values`, seeded with `seed` (an element of the
+/// whole range, so the result is unchanged).
+#[inline]
+fn slice_min_max<T: Copy + Ord>(values: &[T], seed: T) -> (T, T) {
+    values
+        .iter()
+        .copied()
+        .fold((seed, seed), |(low, high), x| (low.min(x), high.max(x)))
 }
 
 /// Backing store of a digit-plane cache.

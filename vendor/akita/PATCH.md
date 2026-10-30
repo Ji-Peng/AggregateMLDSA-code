@@ -45,7 +45,8 @@ sixteen rayon threads.
 Bounds and the signed-16 mirror are now scanned with the conditional
 parallelism helpers instead of the previous serial `Option`-state fold and
 per-cell `push`. `chunked_min_max` splits a slice into 32K-element chunks,
-reduces each with slice `min`/`max` (vectorised), and combines the partials on
+reduces each in one pass with a copied two-accumulator fold (slice `min`/`max`
+compile to a scalar select loop; the fold vectorises), and combines the partials on
 the pool; slices of at most one chunk stay serial to avoid nesting overhead on
 small groups. `attach_small_i16` first range-checks the cells through the same
 reduction, then writes the mirror into `spare_capacity_mut` chunk by chunk, so
