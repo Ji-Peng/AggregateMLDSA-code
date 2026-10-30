@@ -21,13 +21,24 @@ columns of one instance (one row of the Flock union, one `A_0` block):
 | constant one | 1 | `1 * 1 = 1`, pinned to 1 by Flock's lincheck (`const_pin_col`) |
 | input bits | `n_in` | `z_i * 1 = z_i` |
 | output bits | `n_out` | `out[s] * 1 = z_o` (linear row on the implicit final state) |
-| chi AND outputs `t_r`, 1,600 per round | `24 * 1,600 * P` | `(B_r[x+1,y,z] + 1) * B_r[x+2,y,z] = t_r[x,y,z]` |
+| chi AND outputs `t_r`, 1,600 per round | `(24 P - 1) * 1,600 + 64 L` | `(B_r[x+1,y,z] + 1) * B_r[x+2,y,z] = t_r[x,y,z]` |
 
 `B_r = phi(state_r)` with `phi = pi o rho o theta`, and
 `state_{r+1} = B_r + t_r + RC_r` (chi is `B + t`, iota adds the round constant through
 the constant column). theta, rho, pi, iota, the absorptions and the chaining are virtual
 XOR expressions: no state is committed, so a permutation commits exactly its 38,400 chi
 bits. All rows have degree 2.
+
+Pruned last round. The final state is read only by the output rows, so the last round of
+the last permutation commits only the lanes `0 .. L` that hold an output bit,
+`L = 1 + max_s floor(s / 64)` over the output bits `s` (`GateLayout::last_lanes`,
+`ChainGate::round_lanes`): its other `25 - L` lanes have no column and no row, and the
+walker, the row evaluator and the witness writers skip them. Round 22 cannot be pruned:
+every bit of `B_23` depends, through the theta column parities, on all of `state_23`. The
+removed AND bits are unconstrained variables that nothing reads, so (K) holds by
+construction. The Keccak-f gate outputs all 1,600 bits (`L = 25`, nothing pruned); the
+sponge outputs `c~`, lanes `(0..3, 0)`, so `L = 4` and round 23 of P7 commits 256 of its
+1,600 AND bits.
 
 Lincheck. Substituting the implicit states makes `A_0` and `B_0` dense (table below), so
 they are never materialized. `ChainGate` implements Flock's `LincheckCircuit` by one
@@ -40,7 +51,7 @@ comb[t_r] += K;  const += K . RC_r;  G = K + W_r (chi rows: alpha*e on B_r[x+1],
 
 round by round and permutation by permutation (at a boundary `K` lands on the absorbed
 input columns and constants and carries on to the previous output). Cost per fold:
-`P * 24 * (1,600 + 1,600)` multiplications by `alpha` and about `P * 24 * 9,600` additions
+`(24 P - 1) * 3,200 + 128 L` multiplications by `alpha` and about `P * 24 * 9,600` additions
 in GF(2^128), plus reading `eq` (`2^k_log` entries).
 
 Registry type: `k_log = ceil(log2(useful_bits))`, empty matrix stubs (Flock's walker
@@ -66,8 +77,9 @@ State bit `s = 64 L + z` is bit `z` of lane `L = x + 5y` (FIPS 202 byte order: b
 layout (128-bit words, `sponge::*_WORD_BASE`): w1Encode words 0..47, `mu` words 48..51, `c~`
 words 52..53, the constant at bit 6,912 (word 54), word 55 zero, the chi bits from u64 112
 on (`t_{m,r}` lane `L` is u64 `112 + 25 (24 m + r) + L`; `GateLayout` starts the chi words
-at the next 8-word boundary after the constant). Useful bits 275,968 of 2^19 (2,156 words
-per record). The w1Encode bits are in `(t, j, rho)` order, lane `t` outermost: column
+at the next 8-word boundary after the constant). Round 23 of P7 keeps lanes 0..3 (the
+lanes of `c~`, Section 1), so the chi words end at u64 `112 + 25 * 167 + 4 = 4,291`.
+Useful bits 274,624 of 2^19 (2,146 128-bit words per record, the last one half used). The w1Encode bits are in `(t, j, rho)` order, lane `t` outermost: column
 `1024 t + 256 rho + j` holds stream bit `1536 rho + 6 j + t` (FIPS 204 Algorithms 16 and
 28), so lane `t` is the 8 aligned words `8 t .. 8 t + 8` (`sponge::w1_column`), lanes 0..3
 are words 0..31 and lanes 4, 5 words 32..47, and words 48..55 are the public region (K11).
@@ -82,16 +94,18 @@ implicit states (computed by GF(2) support propagation, never materialized).
 | | Keccak-f gate (1 permutation) | Sponge gate (1 signature) | Sponge, per permutation |
 | --- | ---: | ---: | ---: |
 | block width | 2^16 | 2^19 | |
-| useful bits (committed, dense stack) | 42,496 | 275,968 | 39,424 |
-| rows = committed data bits | 41,601 | 275,713 | 39,388 |
-| of which chi AND bits | 38,400 | 268,800 | 38,400 |
+| useful bits (committed, dense stack) | 42,496 | 274,624 | 39,232 |
+| rows = committed data bits | 41,601 | 274,369 | 39,196 |
+| of which chi AND bits | 38,400 | 267,456 | 38,208 |
 | inputs / outputs | 1,600 / 1,600 | 512 + 6,144 / 256 | |
-| structural nonzeros (A + B + C) | 370,735 | 2,559,811 | 365,687 |
-| flattened nonzeros A / B | 3.51e8 / 3.23e8 | 1.81e10 / 1.81e10 | 2.6e9 / 2.6e9 |
+| structural nonzeros (A + B + C) | 370,735 | 2,551,747 | 364,535 |
+| flattened nonzeros A / B | 3.51e8 / 3.23e8 | 1.79e10 / 1.79e10 | 2.6e9 / 2.6e9 |
 
-Flock's dense-stack commitment holds `ceil(useful_bits / 128)` words per live row (2,156
-for the sponge), so the block padding up to 2^19 is never committed. Per signature the
-spec counts 6,144 + 7 * 38,400 = 274,944 bits; the gate adds 512 (`mu`), 256 (`c~`) and the
+The sponge's per-permutation column is the mean over its 7 permutations (P7 commits
+38,400 - 1,344 = 37,056 chi bits, Section 1). Flock's dense-stack commitment holds
+`ceil(useful_bits / 128)` words per live row (2,146 for the sponge), so the block padding
+up to 2^19 is never committed. Per signature the spec counts 6,144 + 7 * 38,400 = 274,944
+bits; the gate prunes 1,344 of round 23 of P7 and adds 512 (`mu`), 256 (`c~`) and the
 constant (K1).
 
 ## 4. Flock integration and API
@@ -101,7 +115,7 @@ Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit
 - Registry: the one gate type, capacity `2^nu`,
   `nu = max(ceil(log2 n), 3, 22 - k_log)`, plus one when `n = 2^nu < 2^11` (the full-height
   stack would select Flock's block-first opening, whose cost is about `128^2` field
-  operations per used column, 2,155 columns here, independent of `n`). Dummy rows
+  operations per used column, 2,146 columns here, independent of `n`). Dummy rows
   `[n, 2^nu)` are identically zero; Flock's count-derived constant-pin target accepts them.
 - Circuit: per live instance `j` and schema word `w`, one wire class
   `{cell(w, j), public word 6 j + w}` (sponge: 4 `mu` words, then 2 `c~` words).
@@ -467,7 +481,7 @@ Prover: the chain itself is cheap (the timing test `parity_chain::tests::
 chain_timing_at_production_shapes` on dense random bits: 32.8 / 59.8 / 178.5 ms at `d` 11 /
 13 / the 32K span `13/2`; the verifier's weight and claim 7 ms), but the third ring-switched
 claim is not: at a full-height sponge (every power-of-two batch from 2,048 records on) Flock's
-block-first opening needs the claim's full column bit-bank (all 2,156 word columns, Flock's
+block-first opening needs the claim's full column bit-bank (all 2,146 word columns, Flock's
 `union_bitbank_fold`, measured 174 to 222 ms at 8,192 records under load), and the opening's
 block statistics and `W'` fold grow by one claim (about +60 ms at 8,192). At 8,192 records
 these costs about cancel the full-segment union (v5 within the noise of v4); at `8@13/4` and

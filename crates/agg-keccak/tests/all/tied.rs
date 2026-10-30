@@ -658,7 +658,7 @@ fn tied_part_shapes() {
     // The chain: 17 in-block coordinates (2^17 positions), 3 lane coordinates; its input is
     // eight lanes of 2^17 bits.
     assert_eq!((cost.chain_rounds, cost.chain_input_bits), (20, 8 << 17));
-    assert_eq!(cost.sponge_committed_words, 100 * 2_156);
+    assert_eq!(cost.sponge_committed_words, 100 * 2_146);
     // A full segment: sponge M = 32; the chain has 19 + 4 + 3 = 26 rounds.
     let full = TiedPart::new(&gate, 1 << 13, 13, Profile::Fast);
     let cost = full.cost();

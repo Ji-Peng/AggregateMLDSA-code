@@ -16,14 +16,21 @@ use flock_core::circuit::boolean::{
     ColumnRole, ColumnSchema, ColumnVisitor, CompiledColumns, LinearExpr, Var,
 };
 
-use crate::gate::{Absorb, ChainSpec};
+use crate::gate::{Absorb, ChainGate, ChainSpec};
 use crate::keccak::{self, ROUND_CONSTANTS, STATE_BITS};
 
 pub(crate) struct ChainSchema(pub ChainSpec);
 
+/// Committed chi bits of round `r` of permutation `m`: 1,600, or the output lanes'
+/// bits for the pruned last round ([`ChainGate::round_lanes`]).
+fn round_bits(gate: &ChainGate, m: usize, r: usize) -> usize {
+    64 * gate.round_lanes(m, r)
+}
+
 pub(crate) struct ChainCols<T> {
     pub inputs: Vec<Vec<T>>,
-    /// Per `(m, r)`, `m * n_rounds + r`: the 1,600 chi bits.
+    /// Per `(m, r)`, `m * n_rounds + r`: the committed chi bits (1,600, fewer in the
+    /// pruned last round).
     pub t: Vec<Vec<T>>,
     pub out: Vec<T>,
 }
@@ -37,10 +44,12 @@ impl ColumnSchema for ChainSchema {
             .iter()
             .map(|f| v.bits(&format!("in.{}", f.name), ColumnRole::Input, f.bits, 128))
             .collect();
+        let gate = ChainGate::new(spec.clone());
         let mut t = Vec::new();
         for m in 0..spec.n_perms() {
             for r in 0..spec.n_rounds {
-                t.push(v.bits(&format!("t.{m}.{r}"), ColumnRole::Witness, STATE_BITS, 1));
+                let bits = round_bits(&gate, m, r);
+                t.push(v.bits(&format!("t.{m}.{r}"), ColumnRole::Witness, bits, 1));
             }
         }
         let out = v.bits("out", ColumnRole::Output, spec.outputs.len(), 128);
@@ -49,6 +58,7 @@ impl ColumnSchema for ChainSchema {
 }
 
 fn eval(spec: &ChainSpec, b: &mut CircuitBuilder, cols: &ChainCols<Var>) {
+    let gate = ChainGate::new(spec.clone());
     let one: LinearExpr = b.one().into();
     let mut field_of = Vec::new();
     for (f, field) in spec.input_fields.iter().enumerate() {
@@ -100,12 +110,18 @@ fn eval(spec: &ChainSpec, b: &mut CircuitBuilder, cols: &ChainCols<Var>) {
                     }
                 }
             }
-            // chi (AND columns) and iota
+            // chi (AND columns of the committed lanes) and iota; an uncommitted lane
+            // of the pruned last round keeps its theta-rho-pi value (no output reads it)
             let tcols = &cols.t[m * spec.n_rounds + r];
+            let kept = round_bits(&gate, m, r);
             for y in 0..5 {
                 for x in 0..5 {
                     for z in 0..64 {
                         let s = keccak::bit(x, y, z);
+                        if s >= kept {
+                            st[s] = bb[s];
+                            continue;
+                        }
                         let lhs = b.xor2(bb[keccak::bit((x + 1) % 5, y, z)], one);
                         b.define_and(tcols[s], lhs, bb[keccak::bit((x + 2) % 5, y, z)]);
                         let mut next = b.xor2(bb[s], tcols[s]);
@@ -132,7 +148,7 @@ pub(crate) fn compile(spec: &ChainSpec) -> CompiledColumns<ChainSchema> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::{tests::mini_chain, ChainGate};
+    use crate::gate::tests::{mini_chain, mini_chain_pruned};
     use flock_core::{lincheck::LincheckCircuit, test_rng::Rng};
     use flock_field::F128;
 
@@ -162,7 +178,7 @@ mod tests {
         }
         for m in 0..spec.n_perms() {
             for r in 0..spec.n_rounds {
-                for s in 0..STATE_BITS {
+                for s in 0..64 * gate.round_lanes(m, r) {
                     map.push((
                         lay.t_col(spec.n_rounds, m, r, s),
                         pos(cols.t[m * spec.n_rounds + r][s]),
@@ -250,6 +266,13 @@ mod tests {
     #[test]
     fn gate_agrees_with_flock_dsl_lowering_chain() {
         cross_check(mini_chain(1), 42);
+    }
+
+    /// The last round keeps lanes 0..2 only: the pruning the sponge gate applies.
+    #[test]
+    fn gate_agrees_with_flock_dsl_lowering_pruned_chain() {
+        cross_check(mini_chain_pruned(1), 43);
+        cross_check(mini_chain_pruned(2), 44);
     }
 
     /// Normalized support terms of the DSL authoring per round count: the

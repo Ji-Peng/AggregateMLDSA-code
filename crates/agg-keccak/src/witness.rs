@@ -195,6 +195,10 @@ where
     assert!(inputs.len() >= n * input_words, "input words");
     let k = 1usize << k_log;
     let (w, t) = (lay.useful_words(), lay.t_base);
+    // A group's tile: the head words, then `phi` of every round in full (the pruned
+    // last round of the last permutation still has 25 `phi` words; its committed
+    // lanes read row `y = 0` of them).
+    let tw = t + lay.full_chi_words(gate.spec().n_perms(), gate.spec().n_rounds);
     assert!(t % 2 == 0, "chi words start at a 128-bit column");
     // An odd last word pairs with zero (columns past the useful bits are zero).
     let useful_chunks = w.div_ceil(2);
@@ -214,7 +218,7 @@ where
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
     let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
     let groups_max = batch.min(n.next_multiple_of(8)) / 8;
-    let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * w];
+    let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * tw];
     let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let mut phase_ms = [0f64; 2];
     const COLS: usize = 4;
@@ -225,8 +229,8 @@ where
         let groups = cnt.div_ceil(8);
         let t0 = std::time::Instant::now();
         // Tiles, one task per group of eight.
-        scratch[..groups * w]
-            .par_chunks_mut(w)
+        scratch[..groups * tw]
+            .par_chunks_mut(tw)
             .enumerate()
             .for_each(|(g, tile)| {
                 let first = j0 + 8 * g;
@@ -248,7 +252,7 @@ where
             });
         phase_ms[0] += t0.elapsed().as_secs_f64() * 1e3;
         let t0 = std::time::Instant::now();
-        let scratch = &scratch[..groups * w];
+        let scratch = &scratch[..groups * tw];
         // BatchMajor scatter of z, a, b, parallel over blocks of COLS columns.
         z.par_chunks_mut(COLS << nu)
             .zip(a.par_chunks_mut(COLS << nu))
@@ -263,7 +267,7 @@ where
                     let (zcol, acol, bcol) = (&mut zc[r.clone()], &mut ac[r.clone()], &mut bc[r]);
                     let (u0, u1) = (2 * c, 2 * c + 1);
                     for g in 0..groups {
-                        let tile = &scratch[g * w..(g + 1) * w];
+                        let tile = &scratch[g * tw..(g + 1) * tw];
                         let first = j0 + 8 * g;
                         let live = 8.min(n - first);
                         let (zw, aw, bw): ([F128; 8], [F128; 8], [F128; 8]) = if u0 < t {

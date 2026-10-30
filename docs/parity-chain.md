@@ -223,7 +223,7 @@ Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7
 * Not foreseen: Flock's block-first opening (taken for a full-height sponge, `n = 2^nu_s`, so
   for every power-of-two batch from 2,048 records on) folds each ring-switched claim's column
   bit-bank in its block rounds, so the bit claim needs the FULL bank of the sponge stack (all
-  2,156 word columns), not just its 64 columns (a partial bank suffices for `s_hat_v` and
+  2,146 word columns), not just its 64 columns (a partial bank suffices for `s_hat_v` and
   gave failing proofs at 2,048 records). The full bank costs one pass over
   the stack (174 to 222 ms at 8,192 records, measured), and the opening's block statistics
   and `W'` fold grow by one claim. At one full segment these costs about cancel the union's;

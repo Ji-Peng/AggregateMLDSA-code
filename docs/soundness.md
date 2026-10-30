@@ -1400,7 +1400,8 @@ including those that depend on `H_X`.
   invariant for every list element and multiplies each step by `L_max`); the Flock paper
   presents the analysis as a sketch, and we do not re-derive it.
 * **(K) Circuit correctness.** Every assignment satisfying the sponge gate's rows (`docs/
-  keccak.md` Sections 1, 2: each chi output is forced by its own row, the linear layers, the
+  keccak.md` Sections 1, 2: each committed chi output is forced by its own row, round 23 of
+  the last permutation commits only the four lanes that `c~` reads, the linear layers, the
   absorption and the chain are XOR expressions) computes SHAKE256 on its input bits. A property
   of a fixed circuit, established by construction and by the crates' tests, not proved here.
   In tied-part proof version 5 the GF(2) side of the bridge has no circuit: `Chn_p` is an

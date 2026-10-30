@@ -76,8 +76,10 @@ Code (`agg_keccak::sponge`): one gate instance (one A_0 block, `k_log = 19`) hol
 record's whole sponge, the 7 chi-only permutations chained by virtual XOR expressions;
 the Flock union has one row per record (capacity 2^13 at a full segment, 57,344
 permutations). Committed per record: 1 constant + 512 `mu` + 6,144 w1Encode + 256 `c~` +
-268,800 chi bits = 275,713 (useful 275,968 of 2^19 with K11; the dense-stack
-commitment stores only the 2,156 used words per row). Dummy rows are identically zero (Flock's count-derived
+267,456 chi bits = 274,369 (useful 274,624 of 2^19 with K11; the dense-stack
+commitment stores only the 2,146 used words per row). Round 23 of P7 commits only the 256
+AND bits of the lanes `c~` reads (`docs/keccak.md` Section 1), 1,344 fewer than the spec's
+`7 * 38,400`. Dummy rows are identically zero (Flock's count-derived
 constant pin), not "a fixed all-zero permutation instance". Copy constraints are used for
 the public words only.
 

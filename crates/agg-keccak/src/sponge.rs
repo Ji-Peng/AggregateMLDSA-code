@@ -13,7 +13,8 @@
 //! constants and the chaining are virtual XOR expressions of the gate; the
 //! only committed bits are mu (512, wired to public words), the 6,144
 //! w1Encode bits, `c~` (256, wired to public words), the constant and
-//! `7 x 24 x 1,600` chi bits.
+//! `(7 x 24 - 1) x 1,600 + 256` chi bits: round 23 of P7 commits only lanes
+//! `(0..3, 0)`, the 256 AND bits that `c~` reads (`crate::gate`).
 //!
 //! Input column order of the w1Encode bits is `(t, j, rho)`, lane `t` outermost:
 //! column `1024 t + 256 rho + j` holds `b_t(j, rho)`, stream bit
@@ -316,8 +317,9 @@ mod tests {
         assert_eq!(lay.output_base, 128 * CTILDE_WORD_BASE);
         assert_eq!(lay.const_col, 128 * CONST_WORD);
         assert_eq!(lay.t_base, 2 * CHI_WORD_BASE);
-        assert_eq!(lay.useful_bits, 64 * (2 * CHI_WORD_BASE + 7 * 24 * 25));
-        assert_eq!(lay.useful_bits, 275_968);
+        assert_eq!(lay.last_lanes, 4);
+        assert_eq!(lay.useful_bits, 64 * (2 * CHI_WORD_BASE + (7 * 24 - 1) * 25 + 4));
+        assert_eq!(lay.useful_bits, 274_624);
         assert_eq!(PUBLIC_WORD_BASE + (1 << PUBLIC_WORDS_LOG2), CHI_WORD_BASE);
         assert_eq!(MU_WORD_BASE, PUBLIC_WORD_BASE);
         for t in 0..6 {
@@ -366,7 +368,8 @@ mod tests {
         }
         assert_eq!(got, rec.c_tilde());
         let cost = gate.cost();
-        assert_eq!(cost.chi_bits, 7 * 38_400);
-        assert_eq!(cost.committed_bits, 1 + 512 + 6_144 + 256 + 7 * 38_400);
+        assert_eq!(cost.chi_bits, 7 * 38_400 - 1_344);
+        assert_eq!(cost.committed_bits, 1 + 512 + 6_144 + 256 + 7 * 38_400 - 1_344);
+        assert_eq!(cost.rows, 275_713 - 1_344);
     }
 }
