@@ -244,10 +244,22 @@ aggregates are byte-identical to main.
   read rows through `CodewordRows`. `FLOCK_COMMIT_INTERLEAVED=1` selects the interleaved path
   (also used below six layers past the replicate); `FLOCK_LB_TILE_LOG`, `FLOCK_LB_TOP` tune
   pass 1.
+- Level-0 leaves hashed in the encode (`AdditiveNttF128::encode_lane_blocked_hashed`,
+  `merkle::GroupLeafHasher`, `CodewordLayout::LaneBlocked4Pending`,
+  `CodewordRows::rows_at`): for BLAKE3 rows of at most 64 lanes, pass 1 takes ten layers and
+  pass 2 runs over a position range of every group, absorbing each transformed group block
+  into the range's leaves (a lane group is one BLAKE3 message block; sixteen leaves per
+  AVX-512F call, a scalar compression otherwise). By default the final codeword is not
+  stored: the buffer keeps the pass-1 state and the level-0 opening recomputes each queried
+  row with only the butterflies that reach it. `FLOCK_LB_FUSED_MERKLE=1` stores the final
+  codeword, `FLOCK_LB_FUSED_MERKLE=0` restores the separate Merkle pass. Same tree, cap and
+  opened rows in all three.
 
 Tests: `zerocheck::univariate_skip_optimized::kernels::{portable::tests, tests}`,
 `pcs::block_stats_portable::tests`, `pcs::block_round_tests`,
 `lincheck::tests::partial_fold_iblock_matches_row_prefix_and_dense`, the NTT path tests (also
 under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `ntt::additive_ntt_f128::lane_blocked::tests::matches_interleaved_transform`,
-`pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows).
+`pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows, each
+`FLOCK_LB_FUSED_MERKLE` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
+`merkle::tests::group_leaf_hasher_matches_hash_leaf`.

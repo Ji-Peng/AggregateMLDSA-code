@@ -98,6 +98,86 @@ pub(super) fn butterfly_fused_3layer(
     }
 }
 
+/// Fused 3-layer butterfly on an 8-element array.
+#[inline]
+pub(super) fn butterfly_fused_3layer_values(values: &mut [F128; 8], twiddles: &[F128; 7]) {
+    #[inline(always)]
+    fn butterfly(values: &mut [F128; 8], u: usize, v: usize, twiddle: F128) {
+        let new_u = values[u] + values[v] * twiddle;
+        values[v] += new_u;
+        values[u] = new_u;
+    }
+
+    for i in 0..4 {
+        butterfly(values, i, i + 4, twiddles[0]);
+    }
+    for s in 0..2 {
+        for i in 0..2 {
+            butterfly(values, 4 * s + i, 4 * s + i + 2, twiddles[1 + s]);
+        }
+    }
+    for s in 0..4 {
+        butterfly(values, 2 * s, 2 * s + 1, twiddles[3 + s]);
+    }
+}
+
+/// In-place fused-3-layer (8-point) butterfly across one row group of 8 rows.
+///
+/// # Safety
+/// The caller guarantees that every selected row and lane is valid and that
+/// concurrent calls use disjoint row groups.
+pub(super) unsafe fn butterfly_fused_3layer_row(
+    ptr: *mut F128,
+    eighth: usize,
+    num_ntts: usize,
+    r: usize,
+    twiddles: &[F128; 7],
+) {
+    // SAFETY: caller supplies the pointer geometry and disjointness contract.
+    unsafe {
+        for lane in 0..num_ntts {
+            let mut values = [F128::ZERO; 8];
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = *ptr.add((i * eighth + r) * num_ntts + lane);
+            }
+            butterfly_fused_3layer_values(&mut values, twiddles);
+            for (i, value) in values.iter().enumerate() {
+                *ptr.add((i * eighth + r) * num_ntts + lane) = *value;
+            }
+        }
+    }
+}
+
+/// Three layers over a lane-blocked block of `8 eighth` positions: layer L pairs
+/// eighths (k, k+4) with `twiddles[0]`, layer L+1 pairs (k, k+2) in each half
+/// with `twiddles[1]` and `twiddles[2]`, layer L+2 pairs (k, k+1) in each quarter
+/// with `twiddles[3..7]`.
+pub(super) fn blocked4_fused_3layer(block: &mut [F128], twiddles: &[F128; 7]) {
+    debug_assert!(block.len().is_multiple_of(32));
+    let eighth = block.len() / 8;
+    for i in 0..eighth {
+        let mut v = [
+            block[i],
+            block[i + eighth],
+            block[i + 2 * eighth],
+            block[i + 3 * eighth],
+            block[i + 4 * eighth],
+            block[i + 5 * eighth],
+            block[i + 6 * eighth],
+            block[i + 7 * eighth],
+        ];
+        butterfly_fused_3layer_values(&mut v, twiddles);
+        block[i] = v[0];
+        block[i + eighth] = v[1];
+        block[i + 2 * eighth] = v[2];
+        block[i + 3 * eighth] = v[3];
+        block[i + 4 * eighth] = v[4];
+        block[i + 5 * eighth] = v[5];
+        block[i + 6 * eighth] = v[6];
+        block[i + 7 * eighth] = v[7];
+    }
+}
+
 #[inline]
 pub(super) fn butterfly_fused_4layer(values: &mut [F128; 16], twiddles: &[F128; 15]) {
     #[inline(always)]

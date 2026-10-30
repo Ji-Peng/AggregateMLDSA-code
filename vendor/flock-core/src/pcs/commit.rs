@@ -20,7 +20,7 @@ use std::{env::var_os, mem::take, ptr::write_bytes, thread::scope};
 use merkle::{cap_layer, merkle_tree};
 use rayon::{
     current_num_threads,
-    prelude::{IndexedParallelIterator, ParallelIterator, ParallelSliceMut},
+    prelude::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator, ParallelSliceMut},
 };
 use serde::{Deserialize, Serialize};
 
@@ -333,6 +333,11 @@ pub enum CodewordLayout {
     /// `ceil(lanes / 4)` groups, the lanes past `lanes` in the last group zero
     /// (`AdditiveNttF128::encode_lane_blocked`; `commit_lane_major`).
     LaneBlocked4,
+    /// [`Self::LaneBlocked4`] with the layers from `first` on not yet applied: the commit
+    /// hashed the final rows inside its last pass and kept the state before it
+    /// (`AdditiveNttF128::encode_lane_blocked_hashed`). A row is recomputed from the
+    /// `2^(k - first)`-position block holding it in each group (`k` = log2 positions).
+    LaneBlocked4Pending { first: usize },
 }
 
 /// A borrowed level-0 codeword with its layout: [`Self::row`] is Merkle leaf `pos`.
@@ -357,6 +362,16 @@ impl<'a> CodewordRows<'a> {
         Self { data, lanes, layout: CodewordLayout::LaneBlocked4 }
     }
 
+    /// Rows of a lane-blocked codeword of `lanes` committed lanes whose layers from
+    /// `first` on are still to be applied ([`CodewordLayout::LaneBlocked4Pending`]).
+    pub fn lane_blocked_pending(data: &'a [F128], lanes: usize, first: usize) -> Self {
+        let group = LANES_PER_GROUP * lanes.div_ceil(LANES_PER_GROUP);
+        assert!(lanes >= 1 && data.len().is_multiple_of(group));
+        let rows = Self { data, lanes, layout: CodewordLayout::LaneBlocked4Pending { first } };
+        assert!(rows.positions().is_power_of_two() && first <= rows.positions().trailing_zeros() as usize);
+        rows
+    }
+
     /// Words per row.
     pub fn lanes(&self) -> usize {
         self.lanes
@@ -366,7 +381,7 @@ impl<'a> CodewordRows<'a> {
     pub fn positions(&self) -> usize {
         match self.layout {
             CodewordLayout::Interleaved => self.data.len() / self.lanes,
-            CodewordLayout::LaneBlocked4 => {
+            CodewordLayout::LaneBlocked4 | CodewordLayout::LaneBlocked4Pending { .. } => {
                 self.data.len() / (LANES_PER_GROUP * self.lanes.div_ceil(LANES_PER_GROUP))
             }
         }
@@ -376,16 +391,47 @@ impl<'a> CodewordRows<'a> {
     pub fn row(&self, pos: usize) -> Vec<F128> {
         match self.layout {
             CodewordLayout::Interleaved => self.data[pos * self.lanes..(pos + 1) * self.lanes].to_vec(),
-            CodewordLayout::LaneBlocked4 => {
-                let n = self.positions();
+            CodewordLayout::LaneBlocked4 => lane_blocked_row(self.data, self.lanes, self.positions(), pos),
+            CodewordLayout::LaneBlocked4Pending { .. } => self.rows_at(&[pos]).pop().expect("one row"),
+        }
+    }
+
+    /// Rows `positions[i]`, in order. A pending layout recomputes each row from its
+    /// blocks (only the butterflies that reach the row), the rows in parallel.
+    pub fn rows_at(&self, positions: &[usize]) -> Vec<Vec<F128>> {
+        let CodewordLayout::LaneBlocked4Pending { first } = self.layout else {
+            return positions.iter().map(|&p| self.row(p)).collect();
+        };
+        let n = self.positions();
+        let log_d = n.trailing_zeros() as usize;
+        let sub = 1usize << (log_d - first);
+        let groups = self.lanes.div_ceil(LANES_PER_GROUP);
+        let ntt = AdditiveNttF128::standard(log_d);
+        let t0 = std::time::Instant::now();
+        let rows = positions
+            .par_iter()
+            .map(|&pos| {
+                assert!(pos < n, "row {pos} out of {n}");
+                let p0 = pos & !(sub - 1);
+                let mut work = Vec::with_capacity(sub * LANES_PER_GROUP);
                 let mut row = Vec::with_capacity(self.lanes);
-                for g in 0..self.lanes.div_ceil(LANES_PER_GROUP) {
+                for g in 0..groups {
+                    let block = &self.data[(g * n + p0) * LANES_PER_GROUP..][..sub * LANES_PER_GROUP];
+                    let line = ntt.lane_blocked_finish_position(block, p0, first, log_d, pos, &mut work);
                     let k = LANES_PER_GROUP.min(self.lanes - g * LANES_PER_GROUP);
-                    row.extend_from_slice(&self.data[(g * n + pos) * LANES_PER_GROUP..][..k]);
+                    row.extend_from_slice(&line[..k]);
                 }
                 row
-            }
+            })
+            .collect();
+        if positions.len() > 1 && var_os("FLOCK_COMMIT_TIMING").is_some() {
+            eprintln!(
+                "[commit-timing] level-0 rows recomputed: {} rows of {sub} positions x {groups} groups in {:.2} ms",
+                positions.len(),
+                t0.elapsed().as_secs_f64() * 1e3
+            );
         }
+        rows
     }
 
     /// Every row in order (positions x lanes), for comparisons across layouts.
@@ -393,8 +439,24 @@ impl<'a> CodewordRows<'a> {
         match self.layout {
             CodewordLayout::Interleaved => self.data.to_vec(),
             CodewordLayout::LaneBlocked4 => (0..self.positions()).flat_map(|p| self.row(p)).collect(),
+            CodewordLayout::LaneBlocked4Pending { first } => {
+                let n = self.positions();
+                let mut done = self.data.to_vec();
+                AdditiveNttF128::standard(n.trailing_zeros() as usize).lane_blocked_finish(&mut done, n, first);
+                CodewordRows::lane_blocked(&done, self.lanes).to_interleaved()
+            }
         }
     }
+}
+
+/// Row `pos` of a lane-blocked codeword of `n` positions per group.
+fn lane_blocked_row(data: &[F128], lanes: usize, n: usize, pos: usize) -> Vec<F128> {
+    let mut row = Vec::with_capacity(lanes);
+    for g in 0..lanes.div_ceil(LANES_PER_GROUP) {
+        let k = LANES_PER_GROUP.min(lanes - g * LANES_PER_GROUP);
+        row.extend_from_slice(&data[(g * n + pos) * LANES_PER_GROUP..][..k]);
+    }
+    row
 }
 
 // Recycle the codeword buffer (the prover's largest single allocation —
@@ -775,6 +837,30 @@ pub fn lane_grid_from_lane_major(q: &[F128], log_batch_size: usize) -> Vec<F128>
     grid
 }
 
+/// How the lane-blocked level-0 commit treats the Merkle leaves
+/// (`FLOCK_LB_FUSED_MERKLE`: `0` [`Self::Off`], `1` [`Self::Keep`], unset or anything else
+/// [`Self::Discard`]). All three give the same commitment and openings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FusedMerkle {
+    /// Encode, then gather the rows from the stored codeword and hash them.
+    Off,
+    /// Hash the rows inside the encode's last pass and store the final codeword.
+    Keep,
+    /// Hash the rows inside the encode's last pass and keep only the state before it;
+    /// the opening recomputes the queried rows.
+    Discard,
+}
+
+impl FusedMerkle {
+    fn from_env() -> Self {
+        match std::env::var("FLOCK_LB_FUSED_MERKLE").as_deref() {
+            Ok("0") => Self::Off,
+            Ok("1") => Self::Keep,
+            _ => Self::Discard,
+        }
+    }
+}
+
 /// [`commit`] for a LANE-MAJOR message: `q` is the full `2^log_msg_len`-word
 /// dense stack, lane `l` being its contiguous block `q[l·D .. (l+1)·D)`.
 /// Lanes `[t, 2^log_batch_size)` — the stack's zero tail, `t =
@@ -785,6 +871,11 @@ pub fn lane_grid_from_lane_major(q: &[F128], log_batch_size: usize) -> Vec<F128>
 /// message `extract[p·t + l] = q[l·D + p]`, but the transpose happens inside
 /// the codeword fill, so it costs no extra pass and no intermediate buffer.
 pub fn commit_lane_major(q: &[F128], params: &PcsParams) -> (Commitment, ProverData) {
+    commit_lane_major_with(q, params, FusedMerkle::from_env())
+}
+
+/// [`commit_lane_major`] with the leaf treatment given.
+fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) -> (Commitment, ProverData) {
     params.validate();
     let lanes = 1usize << params.log_batch_size;
     let t = params.num_ntts();
@@ -822,6 +913,64 @@ pub fn commit_lane_major(q: &[F128], params: &PcsParams) -> (Commitment, ProverD
     // gathered from the groups; the values, the tree and the cap are those of the
     // interleaved path below, which `FLOCK_COMMIT_INTERLEAVED=1` selects (the A/B and
     // certification knob) and which serves the shapes too small for the tiling.
+    let leaf_hasher = merkle::GroupLeafHasher::new(t, params.merkle_hash);
+    if var_os("FLOCK_COMMIT_INTERLEAVED").is_none()
+        && lane_blocked_ok(params.k_code(), params.log_inv_rate)
+        && fused != FusedMerkle::Off
+        && let Some(hasher) = leaf_hasher
+    {
+        // The leaves are hashed inside the encode's last pass (BLAKE3 rows of at most one
+        // chunk); by default the final codeword is not stored and the opening recomputes
+        // the queried rows. Same values, tree and cap as the path below.
+        let n = params.n_positions();
+        let groups = t.div_ceil(LANES_PER_GROUP);
+        let t_enc = std::time::Instant::now();
+        let mut codeword = crate::scratch::take_f128(groups * LANES_PER_GROUP * n);
+        let ntt = AdditiveNttF128::standard(params.k_code());
+        // `vec!` of zero arrays takes the calloc path: lazy zero pages, first touched by
+        // the pass-2 tasks that write the leaves.
+        let mut tree: Vec<Hash> = vec![[0u8; 32]; 2 * n - 1];
+        let keep = fused == FusedMerkle::Keep;
+        let first = ntt.encode_lane_blocked_hashed(
+            &mut codeword,
+            q,
+            t,
+            live,
+            d,
+            params.log_inv_rate,
+            &hasher,
+            &mut tree[..n],
+            keep,
+        );
+        let t_enc = t_enc.elapsed();
+        let t_tree = std::time::Instant::now();
+        let merkle_tree = merkle::merkle_tree_from_prehashed_level(tree, n, params.merkle_hash, 0);
+        let cap = cap_layer(&merkle_tree, n, params.level_zero_cap_depth()).to_vec();
+        if timing {
+            eprintln!(
+                "[commit-timing] lane-blocked fused encode + leaves: {:.2} ms | inner levels: {:.2} ms",
+                t_enc.as_secs_f64() * 1e3,
+                t_tree.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        let layout = if keep {
+            CodewordLayout::LaneBlocked4
+        } else {
+            CodewordLayout::LaneBlocked4Pending { first }
+        };
+        return (
+            Commitment {
+                cap,
+                params: params.clone(),
+            },
+            ProverData {
+                codeword,
+                merkle_tree,
+                layout,
+                num_lanes: t,
+            },
+        );
+    }
     if var_os("FLOCK_COMMIT_INTERLEAVED").is_none() && lane_blocked_ok(params.k_code(), params.log_inv_rate) {
         let n = params.n_positions();
         let groups = t.div_ceil(LANES_PER_GROUP);
@@ -1088,11 +1237,12 @@ mod tests {
         ntt::AdditiveNttF128,
         pcs::{
             commit::{
-                BatchedGrinding, CodewordLayout, F128, FoldGrinding, Grinding, HashKind, LOG_PACKING,
+                BatchedGrinding, CodewordLayout, F128, FoldGrinding, FusedMerkle, Grinding, HashKind, LOG_PACKING,
                 lane_blocked_ok,
                 LincheckGrinding, OpeningGrinding, PcsParams, ZerocheckGrinding, commit,
                 commit_encode, commit_into_pipelined, commit_lane_major, commit_merkle,
-                dense_lanes, finalize_commit, lane_grid_from_lane_major, replicate_lane_major_fill,
+                commit_lane_major_with, dense_lanes, finalize_commit, lane_grid_from_lane_major,
+                replicate_lane_major_fill,
             },
             ligerito::LigeritoProfile,
             pack::pack_witness,
@@ -1517,15 +1667,22 @@ mod tests {
     }
 
     /// The lane-blocked commit of random lane-major stacks at m = 22 and 24 (several
-    /// lane counts and rates) gives the cap, the whole Merkle tree and the rows of the
-    /// interleaved commit of the compacted message, on every SIMD mask.
+    /// lane counts and rates, both hashes) gives the cap, the whole Merkle tree and the
+    /// rows of the interleaved commit of the compacted message, on every SIMD mask and
+    /// with the leaves hashed after the encode, inside it with the final codeword kept,
+    /// and inside it with the rows recomputed from the pre-final state.
     #[test]
     fn lane_blocked_commit_matches_interleaved() {
         use crate::simd::{test_masks, with_mask};
         let mut rng = Rng::new(0x1A4E_C0DE);
-        for (m, log_inv_rate, log_batch_size, t) in
-            [(22usize, 2usize, 4usize, 13usize), (22, 1, 3, 8), (24, 2, 5, 17), (24, 1, 4, 5), (24, 3, 5, 32)]
-        {
+        for (m, log_inv_rate, log_batch_size, t, kind) in [
+            (22usize, 2usize, 4usize, 13usize, HashKind::Blake3),
+            (22, 1, 3, 8, HashKind::Blake3),
+            (24, 2, 5, 17, HashKind::Blake3),
+            (24, 1, 4, 5, HashKind::Blake3),
+            (24, 3, 5, 32, HashKind::Blake3),
+            (22, 2, 4, 13, HashKind::Sha256),
+        ] {
             let log_dim = (m - LOG_PACKING) - log_batch_size;
             let d = 1usize << log_dim;
             let params = PcsParams {
@@ -1534,11 +1691,13 @@ mod tests {
                 log_batch_size,
                 profile: Default::default(),
                 num_lanes: Some(t),
-                merkle_hash: HashKind::Blake3,
+                merkle_hash: kind,
             };
             assert!(lane_blocked_ok(params.k_code(), log_inv_rate));
             let mut q = vec![F128::ZERO; 1usize << (m - LOG_PACKING)];
-            let content = rng.f128_vec(t * d - d / 2);
+            // A dead group too where the lanes allow it (the last d / 2 + 4 d words zero).
+            let dead = if t > 8 { 4 * d } else { 0 };
+            let content = rng.f128_vec(t * d - d / 2 - dead);
             q[..content.len()].copy_from_slice(&content);
             let mut extract = vec![F128::ZERO; t * d];
             for p in 0..d {
@@ -1548,16 +1707,28 @@ mod tests {
             }
             let (c_ref, pd_ref) = commit(&extract, &params);
             let want_rows = pd_ref.rows().to_interleaved();
-            for mask in test_masks() {
-                let (c, pd) = with_mask(mask, || commit_lane_major(&q, &params));
-                assert_eq!(pd.layout, CodewordLayout::LaneBlocked4, "m={m} t={t}");
-                assert_eq!(c.cap, c_ref.cap, "cap (m={m}, t={t}, mask={mask:#x})");
-                assert!(pd.merkle_tree == pd_ref.merkle_tree, "tree (m={m}, t={t}, mask={mask:#x})");
-                let rows = pd.rows();
-                assert_eq!(rows.positions(), params.n_positions());
-                assert!(rows.to_interleaved() == want_rows, "rows (m={m}, t={t}, mask={mask:#x})");
-                for &p in &[0usize, 1, params.n_positions() / 3, params.n_positions() - 1] {
-                    assert_eq!(rows.row(p), pd_ref.rows().row(p));
+            let n = params.n_positions();
+            let probes = [0usize, 1, 15, 16, n / 3, n / 2 + 7, n - 1];
+            let want_probes: Vec<Vec<F128>> = probes.iter().map(|&p| pd_ref.rows().row(p)).collect();
+            for fused in [FusedMerkle::Off, FusedMerkle::Keep, FusedMerkle::Discard] {
+                let pending = fused == FusedMerkle::Discard && kind == HashKind::Blake3;
+                for mask in test_masks() {
+                    let (c, pd) = with_mask(mask, || commit_lane_major_with(&q, &params, fused));
+                    let what = format!("m={m} t={t} {kind:?} {fused:?} mask={mask:#x}");
+                    match pd.layout {
+                        CodewordLayout::LaneBlocked4 => assert!(!pending, "{what}"),
+                        CodewordLayout::LaneBlocked4Pending { .. } => assert!(pending, "{what}"),
+                        CodewordLayout::Interleaved => panic!("{what}: interleaved layout"),
+                    }
+                    assert_eq!(c.cap, c_ref.cap, "cap ({what})");
+                    assert!(pd.merkle_tree == pd_ref.merkle_tree, "tree ({what})");
+                    let rows = pd.rows();
+                    assert_eq!(rows.positions(), n);
+                    assert!(rows.to_interleaved() == want_rows, "rows ({what})");
+                    assert!(rows.rows_at(&probes) == want_probes, "rows_at ({what})");
+                    for (&p, want) in probes.iter().zip(&want_probes) {
+                        assert_eq!(&rows.row(p), want, "row {p} ({what})");
+                    }
                 }
             }
         }

@@ -9,12 +9,16 @@
 use crate::ntt::additive_ntt_f128::kernels::aarch64::{butterfly_block, butterfly_block_pair};
 use crate::ntt::additive_ntt_f128::kernels::portable::{
     butterfly_fused_2layer as butterfly_fused_2layer_portable,
+    blocked4_fused_3layer as blocked4_fused_3layer_portable,
+    butterfly_fused_3layer_row as butterfly_fused_3layer_row_portable,
     butterfly_fused_4layer_row as butterfly_fused_4layer_row_portable,
     butterfly_row_pair as butterfly_row_pair_portable,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::ntt::additive_ntt_f128::kernels::x86_64::{
     butterfly_fused_2layer as butterfly_fused_2layer_x86_64,
+    blocked4_fused_3layer as blocked4_fused_3layer_x86_64,
+    butterfly_fused_3layer_row as butterfly_fused_3layer_row_x86_64,
     butterfly_fused_4layer_row as butterfly_fused_4layer_row_x86_64,
     butterfly_row_pair as butterfly_row_pair_x86_64,
 };
@@ -117,6 +121,51 @@ pub(super) fn butterfly_fused_3layer(
     t2: &[F128; 4],
 ) {
     butterfly_fused_3layer_portable(rows, t0, t1, t2);
+}
+
+/// Process one fused-three-layer row group (8 rows) across every interleaved NTT lane:
+/// the remainder kernel for transforms whose layer count is not a multiple of four.
+///
+/// # Safety
+/// The caller must ensure the 8 row slices selected by `r` are valid and
+/// disjoint from any row group being processed concurrently.
+#[allow(dead_code)]
+#[inline]
+pub(super) unsafe fn butterfly_fused_3layer_row(
+    ptr: *mut F128,
+    eighth: usize,
+    num_ntts: usize,
+    r: usize,
+    twiddles: &[F128; 7],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: target features are checked at run time; the caller owns the row
+        // geometry and disjointness contract.
+        unsafe { butterfly_fused_3layer_row_x86_64(ptr, eighth, num_ntts, r, twiddles) };
+        return;
+    }
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        butterfly_fused_3layer_row_portable(ptr, eighth, num_ntts, r, twiddles);
+    }
+}
+
+/// Three layers over a lane-blocked block of `8 eighth` words (position `i` = words
+/// `4i .. 4i + 4`): layer L pairs eighths (k, k+4) with `twiddles[0]`, layer L+1 pairs
+/// (k, k+2) inside each half with `twiddles[1]`, `twiddles[2]`, layer L+2 pairs
+/// (k, k+1) inside each quarter with `twiddles[3..7]`.
+#[allow(dead_code)]
+#[inline]
+pub(super) fn blocked4_fused_3layer(block: &mut [F128], twiddles: &[F128; 7]) {
+    debug_assert!(block.len().is_multiple_of(32));
+    #[cfg(target_arch = "x86_64")]
+    if x86_avx512_clmul() {
+        // SAFETY: the runtime check guarantees the required target features.
+        unsafe { blocked4_fused_3layer_x86_64(block, twiddles) };
+        return;
+    }
+    blocked4_fused_3layer_portable(block, twiddles);
 }
 
 /// Process one fused-four-layer row group across every interleaved NTT lane.
@@ -273,6 +322,52 @@ mod tests {
                 }
             }
             assert_eq!(p, x, "fused_4layer_row sixteenth={sixteenth} num_ntts={num_ntts}");
+        }
+        // Fused-3 rows and the blocked variant against the portable kernels.
+        let tw3: [F128; 7] = core::array::from_fn(|_| rng.f128());
+        for (eighth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16), (3, 5)] {
+            let block = rng.f128_vec(8 * eighth * num_ntts);
+            let mut p = block.clone();
+            let mut x = block.clone();
+            for r in 0..eighth {
+                // SAFETY: the buffers hold 8 * eighth rows of num_ntts lanes;
+                // calls are sequential.
+                unsafe {
+                    portable::butterfly_fused_3layer_row(p.as_mut_ptr(), eighth, num_ntts, r, &tw3);
+                    x86_64::butterfly_fused_3layer_row(x.as_mut_ptr(), eighth, num_ntts, r, &tw3);
+                }
+            }
+            assert_eq!(p, x, "fused_3layer_row eighth={eighth} num_ntts={num_ntts}");
+        }
+        // The row kernel equals the slice-based fused-3 kernel on 8 equal slices.
+        for n in [1usize, 5, 16] {
+            let block = rng.f128_vec(8 * n);
+            let mut want = block.clone();
+            {
+                let mut it = want.chunks_mut(n);
+                let rows: [&mut [F128]; 8] = core::array::from_fn(|_| it.next().unwrap());
+                portable::butterfly_fused_3layer(
+                    rows,
+                    tw3[0],
+                    &[tw3[1], tw3[2]],
+                    &[tw3[3], tw3[4], tw3[5], tw3[6]],
+                );
+            }
+            let mut got = block.clone();
+            for r in 0..n {
+                // SAFETY: 8 rows of n words, one lane; sequential calls.
+                unsafe { portable::butterfly_fused_3layer_row(got.as_mut_ptr(), n, 1, r, &tw3) };
+            }
+            assert_eq!(want, got, "fused_3layer_row vs slices n={n}");
+        }
+        for words in [32usize, 64, 96, 256] {
+            let block = rng.f128_vec(words);
+            let mut p = block.clone();
+            let mut x = block.clone();
+            portable::blocked4_fused_3layer(&mut p, &tw3);
+            // SAFETY: features checked above; length is a multiple of 32.
+            unsafe { x86_64::blocked4_fused_3layer(&mut x, &tw3) };
+            assert_eq!(p, x, "blocked4_fused_3layer words={words}");
         }
     }
 }
