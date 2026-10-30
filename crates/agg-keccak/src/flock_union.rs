@@ -41,7 +41,7 @@
 use bincode::Options as _;
 use flock_core::{
     challenger::Challenger,
-    lincheck::{self, build_eq_table, LincheckCircuit, QuirkyPoint, SkipPoint, UnionLincheckSlot},
+    lincheck::{self, build_eq_table, LincheckCircuit, QuirkyPoint, SkipPoint},
     pcs::{
         commit, commit_lane_major, ligerito::embedded_initial_k_or_default, open_batch_merged,
         rectangular_prefix_columns,
@@ -578,16 +578,14 @@ impl UnionGeometry {
             by_slot[self.slot_of[i]] = Some((buf, circuit));
         }
         let mut witnesses = Vec::with_capacity(self.types());
-        let mut stripes = Vec::with_capacity(self.types());
         let mut slot_circuits = Vec::with_capacity(self.types());
         for entry in by_slot {
-            let (SlotBuffers { z, a, b, stripe }, circuit) = entry.expect("every slot");
+            let (SlotBuffers { z, a, b }, circuit) = entry.expect("every slot");
             witnesses.push(SlotWitness {
                 z_packed: z,
                 a_packed: a,
                 b_packed: b,
             });
-            stripes.push(stripe);
             slot_circuits.push(circuit);
         }
         // Single slot spanning the union: a passthrough, no copy.
@@ -646,20 +644,46 @@ impl UnionGeometry {
         let x_ab = union
             .x_ab_from_multilinear_values(SkipPoint::Phi8(zc_claim.z), &zc_claim.mlv_challenges);
 
+        let heights = union.jagged_heights();
+        // The column bit-banks of the union buffer at every row point known after the
+        // zerocheck, in one pass over `z`: the lincheck's `x_outer` (its union fold
+        // `z_vec`) and, with the block-first transport (a full-height stack), the C claim's
+        // row point and each bit claim's (the block rounds fold the bank's multilinear
+        // extension, so every column enters). Without the block-first transport only
+        // `s_hat_v` of a bit claim is needed, and the columns of nonzero weight suffice.
+        let block_first = rectangular_prefix_columns(&heights, nu).is_some();
+        if block_first {
+            assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
+        }
+        let t_banks = std::time::Instant::now();
+        let mut rows: Vec<&[F128]> = vec![x_ab.x_outer.as_slice()];
+        if block_first {
+            rows.push(&zc_claim.r_rest[1..1 + nu]);
+            rows.extend(bit_claims.iter().map(|c| &c.x_full[1..=nu]));
+        }
+        let mut banks_all = lincheck::union_bitbank_fold_multi(&union, &z, &rows).into_iter();
+        let z_vec = banks_all.next().expect("lincheck fold");
+        let bank_c = block_first.then(|| banks_all.next().expect("C claim bank"));
+        let bit_banks: Vec<Vec<F128>> = bit_claims
+            .iter()
+            .map(|_| banks_all.next().unwrap_or_default())
+            .collect();
+        if std::env::var_os("LINCHECK_TRACE").is_some() {
+            eprintln!(
+                "[lc] {:<26} {:>7.2} ms  ({} row points, one pass)",
+                "union partial folds",
+                t_banks.elapsed().as_secs_f64() * 1e3,
+                rows.len()
+            );
+        }
+        drop(rows);
         // Union-column lincheck over the slots in registry order (one slot: byte-identical to
         // the single-table lincheck).
-        let slots: Vec<UnionLincheckSlot<'_>> = stripes
-            .iter()
-            .zip(&slot_circuits)
-            .map(|(stripe, &circuit)| UnionLincheckSlot {
-                z_lincheck: stripe,
-                circuit,
-            })
-            .collect();
-        let (lc_proof, lc_claim, z_vec_pre) = lincheck::prove_union_capture_z_vec_with_grinding(
+        let (lc_proof, lc_claim, z_vec_pre) = lincheck::prove_union_with_z_vec_with_grinding(
             &union,
-            &slots,
+            &slot_circuits,
             &x_ab,
+            z_vec,
             self.pcs_params.lincheck_grinding(),
             ch,
         );
@@ -678,27 +702,7 @@ impl UnionGeometry {
         };
         let s_hat_v_ab = (m - nu >= LOG_PACKING)
             .then(|| s_hat_v_from_z_vec(&z_vec_pre, &lc_claim.r_inner_rest[1..]));
-        let heights = union.jagged_heights();
-        // Block-first transport inputs (a full-height stack): the column bit-bank at the C
-        // claim's row point, as Flock's union prover computes it.
-        // The caller's bit claims. With the block-first transport the bank must be the
-        // full column bit-bank of the stack at the claim's row point (the block rounds fold the
-        // bank's multilinear extension, so the columns of zero weight enter too), computed
-        // like the C claim's from the stripes, in the same pass over the stripes; otherwise
-        // only `s_hat_v` is needed, and the columns of nonzero weight suffice (`bit_bank`).
-        let t_banks = std::time::Instant::now();
-        let (bank_c, bit_banks): (Option<Vec<F128>>, Vec<Vec<F128>>) =
-            match rectangular_prefix_columns(&heights, nu) {
-                Some(_) => {
-                    assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
-                    let mut points: Vec<&[F128]> = vec![&zc_claim.r_rest[1..1 + nu]];
-                    points.extend(bit_claims.iter().map(|c| &c.x_full[1..=nu]));
-                    let mut banks = lincheck::union_bitbank_fold_multi(&union, &slots, &points);
-                    let bank_c = banks.remove(0);
-                    (Some(bank_c), banks)
-                }
-                None => (None, vec![Vec::new(); bit_claims.len()]),
-            };
+        let t_shat = std::time::Instant::now();
         let bit_s_hat: Vec<Vec<F128>> = bit_claims
             .iter()
             .zip(&bit_banks)
@@ -712,13 +716,11 @@ impl UnionGeometry {
             .collect();
         if !bit_claims.is_empty() && std::env::var_os("PCS_TRACE").is_some() {
             eprintln!(
-                "  [flock_union] C and bit claims' banks and s_hat_v ({}): {:6.2} ms",
+                "  [flock_union] bit claims' s_hat_v ({}, banks in the one-pass fold): {:6.2} ms",
                 if bank_c.is_some() { "full, block-first" } else { "region" },
-                t_banks.elapsed().as_secs_f64() * 1e3
+                t_shat.elapsed().as_secs_f64() * 1e3
             );
         }
-        drop(slots);
-        drop(stripes);
         flock_stamp("opening-inputs", &mut stamp_clock);
         let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
         pre.extend(bit_s_hat.iter().map(|v| Some(v.as_slice())));

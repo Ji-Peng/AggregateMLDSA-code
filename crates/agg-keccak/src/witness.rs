@@ -1,10 +1,10 @@
 //! Batch-major packing of gate instances into one Flock union slot.
 //!
 //! Flock's union stores a slot's witness BatchMajor: 128-bit word `c` of
-//! instance `j` is union word `(c << nu) + j`. The lincheck additionally needs
-//! the byte stripe of `pack_z_lincheck`: for every group of 8 instances, one
-//! byte per block column whose bit `r` is that column of instance `8g + r`.
-//! Rows `[n, 2^nu)` are dummy and identically zero in `z`, `a`, `b` and the stripe.
+//! instance `j` is union word `(c << nu) + j`. The lincheck reads `z` itself (one
+//! bit-transposing pass for all its row points, `flock_core::lincheck::union_bitbank_fold_multi`);
+//! only the legacy single-proof path ([`SlotBuffers::into_parts`]) builds the byte stripe
+//! of `pack_z_lincheck`. Rows `[n, 2^nu)` are dummy and identically zero in `z`, `a`, `b`.
 
 use agg_mldsa_simd::{keccak::Words8, Engine};
 use flock_core::alloc_zeroed_vec;
@@ -17,20 +17,48 @@ use crate::keccak::{Lanes, N_LANES};
 /// Instances whose rows are generated together before scattering.
 const BATCH: usize = 1024;
 
-/// One slot's prover buffers: `z`, `a = A z`, `b = B z` (BatchMajor) and the lincheck stripe.
+/// One slot's prover buffers: `z`, `a = A z`, `b = B z` (BatchMajor).
 pub struct SlotBuffers {
     pub z: Vec<F128>,
     pub a: Vec<F128>,
     pub b: Vec<F128>,
-    pub stripe: Vec<u8>,
 }
 
 impl SlotBuffers {
-    /// The tuple `UnionSlotProverInput::new` takes.
+    /// The tuple `UnionSlotProverInput::new` takes, with the lincheck stripe of `z` built
+    /// here (block width `2^k_log` bits, `2^nu` rows).
     #[must_use]
-    pub fn into_parts(self) -> (Vec<F128>, Vec<F128>, Vec<F128>, Vec<u8>) {
-        (self.z, self.a, self.b, self.stripe)
+    pub fn into_parts(self, k_log: usize, nu: usize) -> (Vec<F128>, Vec<F128>, Vec<F128>, Vec<u8>) {
+        let stripe = lincheck_stripe(&self.z, k_log, nu);
+        (self.z, self.a, self.b, stripe)
     }
+}
+
+/// The byte stripe of `flock_core::lincheck::pack_z_lincheck` of a BatchMajor slot buffer:
+/// group `g` of eight rows is `2^k_log` bytes, byte `128 c + b` holding bit `b` of word
+/// column `c` of rows `8 g .. 8 g + 8` (bit `r` = row `8 g + r`).
+///
+/// # Panics
+/// If `nu < 3` or `z` has another length than `2^(k_log - 7 + nu)`.
+#[must_use]
+pub fn lincheck_stripe(z: &[F128], k_log: usize, nu: usize) -> Vec<u8> {
+    assert!(nu >= 3 && k_log >= 7, "stripe geometry");
+    let k = 1usize << k_log;
+    assert_eq!(z.len(), (k / 128) << nu, "slot buffer length");
+    let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
+    stripe.par_chunks_mut(k).enumerate().for_each(|(g, out)| {
+        for c in 0..k / 128 {
+            let run = &z[(c << nu) + 8 * g..(c << nu) + 8 * g + 8];
+            if run.iter().all(|w| *w == F128::ZERO) {
+                continue;
+            }
+            let lo: [u64; 8] = core::array::from_fn(|r| run[r].lo);
+            let hi: [u64; 8] = core::array::from_fn(|r| run[r].hi);
+            transpose_8x64(&lo, &mut out[128 * c..128 * c + 64]);
+            transpose_8x64(&hi, &mut out[128 * c + 64..128 * c + 128]);
+        }
+    });
+    stripe
 }
 
 /// Pack `n <= 2^nu` instances. `rows(j, z, a, b)` writes instance `j`'s
@@ -45,7 +73,7 @@ where
 {
     let lay = gate.layout();
     let (k_log, useful_bits) = (lay.k_log, lay.useful_bits);
-    assert!(nu >= 3, "Flock's lincheck stripe needs at least 8 rows");
+    assert!(nu >= 3, "Flock's lincheck fold needs at least 8 rows");
     assert!(n <= 1 << nu, "count exceeds the row capacity");
     assert!(k_log >= 7 && useful_bits <= 1 << k_log, "block geometry");
     let k = 1usize << k_log;
@@ -55,10 +83,9 @@ where
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
     let mut a: Vec<F128> = alloc_zeroed_vec(len);
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
-    let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
     let mut scratch = vec![0u64; BATCH * 3 * w];
-    // AGG_TIED_TRACE: time per phase (instance rows; BatchMajor scatter and
-    // the lincheck stripe) summed over the batches.
+    // AGG_TIED_TRACE: time per phase (instance rows; BatchMajor scatter)
+    // summed over the batches.
     let trace = std::env::var_os("AGG_TIED_TRACE").is_some();
     let mut phase_ms = [0f64; 2];
     // Columns per scatter task: one 64-byte line (eight words) of every
@@ -110,43 +137,16 @@ where
                     }
                 }
             });
-        // Stripe: groups of 8 instances (j0 and BATCH are multiples of 8),
-        // parallel over groups and over runs of 8 words, so each task reads
-        // one line of each of its 8 instance rows.
-        let g0 = j0 / 8;
-        stripe
-            .par_chunks_mut(k)
-            .skip(g0)
-            .take(cnt.div_ceil(8))
-            .enumerate()
-            .for_each(|(g, out)| {
-                let lanes = 8 * g..(8 * g + 8).min(cnt);
-                out[..64 * w]
-                    .par_chunks_mut(64 * 8)
-                    .enumerate()
-                    .for_each(|(ub, run)| {
-                        for (du, o) in run.chunks_exact_mut(64).enumerate() {
-                            let u = 8 * ub + du;
-                            let mut v = [0u64; 8];
-                            for (r, i) in lanes.clone().enumerate() {
-                                v[r] = word(i, 0, u);
-                            }
-                            if v != [0u64; 8] {
-                                transpose_8x64(&v, o);
-                            }
-                        }
-                    });
-            });
         phase_ms[1] += t0.elapsed().as_secs_f64() * 1e3;
         j0 += cnt;
     }
     if trace {
         eprintln!(
-            "  [tied] pack_slot: rows {:.1} ms, scatter and stripe {:.1} ms",
+            "  [tied] pack_slot: rows {:.1} ms, scatter {:.1} ms",
             phase_ms[0], phase_ms[1]
         );
     }
-    SlotBuffers { z, a, b, stripe }
+    SlotBuffers { z, a, b }
 }
 
 /// Instances per scratch batch of [`pack_slot_groups`] and Rayon thread (a multiple
@@ -170,8 +170,7 @@ const GROUP_BATCH_MAX: usize = 4096;
 ///
 /// Each group of eight keeps a word-major tile (word `u` of the eight instances
 /// is one 64-byte line): the non-chi words of `z` and `phi` of every round, a
-/// third of the three rows. The lincheck stripe bytes are written from the chi
-/// outputs while they are in L1; the BatchMajor scatter derives `a`, `b`, `z`
+/// third of the three rows. The BatchMajor scatter derives `a`, `b`, `z`
 /// from `phi` and writes eight adjacent union words per group and column.
 ///
 /// # Panics
@@ -190,7 +189,7 @@ where
 {
     let lay = gate.layout();
     let (k_log, useful_bits) = (lay.k_log, lay.useful_bits);
-    assert!(nu >= 3, "Flock's lincheck stripe needs at least 8 rows");
+    assert!(nu >= 3, "Flock's lincheck fold needs at least 8 rows");
     assert!(n <= 1 << nu, "count exceeds the row capacity");
     assert!(k_log >= 7 && useful_bits <= 1 << k_log, "block geometry");
     assert!(inputs.len() >= n * input_words, "input words");
@@ -213,7 +212,6 @@ where
     let mut z: Vec<F128> = alloc_zeroed_vec(len);
     let mut a: Vec<F128> = alloc_zeroed_vec(len);
     let mut b: Vec<F128> = alloc_zeroed_vec(len);
-    let mut stripe: Vec<u8> = alloc_zeroed_vec(k << (nu - 3));
     let batch = (GROUP_BATCH * rayon::current_num_threads()).min(GROUP_BATCH_MAX);
     let groups_max = batch.min(n.next_multiple_of(8)) / 8;
     let mut scratch: Vec<Words8> = vec![[0u64; 8]; groups_max * w];
@@ -226,12 +224,11 @@ where
         let cnt = batch.min(n - j0);
         let groups = cnt.div_ceil(8);
         let t0 = std::time::Instant::now();
-        // Tiles and stripe, one task per group of eight.
+        // Tiles, one task per group of eight.
         scratch[..groups * w]
             .par_chunks_mut(w)
-            .zip(stripe.par_chunks_mut(k).skip(j0 / 8).take(groups))
             .enumerate()
-            .for_each(|(g, (tile, out))| {
+            .for_each(|(g, tile)| {
                 let first = j0 + 8 * g;
                 let live = 8.min(n - first);
                 let (head, phi) = tile.split_at_mut(t);
@@ -246,9 +243,8 @@ where
                     |i, m, s| absorb(first + i, m, s),
                     head,
                     phi,
-                    |u, zr| engine.transpose_bits8(zr, &mut out[64 * u..64 * (u + N_LANES)]),
+                    |_, _| {},
                 );
-                engine.transpose_bits8(head, &mut out[..64 * t]);
             });
         phase_ms[0] += t0.elapsed().as_secs_f64() * 1e3;
         let t0 = std::time::Instant::now();
@@ -300,13 +296,13 @@ where
     }
     if trace {
         eprintln!(
-            "  [tied] pack_slot_groups ({:?}): rows and stripe {:.1} ms, scatter {:.1} ms",
+            "  [tied] pack_slot_groups ({:?}): rows {:.1} ms, scatter {:.1} ms",
             engine.backend(),
             phase_ms[0],
             phase_ms[1]
         );
     }
-    SlotBuffers { z, a, b, stripe }
+    SlotBuffers { z, a, b }
 }
 
 /// `out[bit] = sum_r bit(v[r], bit) << r` for `bit < 64`: eight 8x8 bit-matrix
@@ -402,7 +398,6 @@ mod tests {
                     assert!(got.z == want.z, "{tag} z");
                     assert!(got.a == want.a, "{tag} a");
                     assert!(got.b == want.b, "{tag} b");
-                    assert!(got.stripe == want.stripe, "{tag} stripe");
                 }
             }
         }
@@ -443,7 +438,7 @@ mod tests {
             }
         }
         assert_eq!(
-            bufs.stripe,
+            lincheck_stripe(&bufs.z, lay.k_log, nu),
             pack_z_lincheck(&logical, nu + lay.k_log, lay.k_log)
         );
         for j in n..1 << nu {
