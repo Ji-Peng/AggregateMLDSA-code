@@ -275,7 +275,7 @@ where
                     prepared.push((group, challenges, ranges, prepared_group.acceptance));
                 }
             }
-            let outputs = cfg_iter!(prepared)
+            let outputs: Vec<Result<Option<FoldProbeOutput<_>>, AkitaError>> = cfg_iter!(prepared)
                 .map(|(group, challenges, ranges, acceptance)| {
                     let challenges = challenges.clone();
                     let geometry = ranges
@@ -319,11 +319,17 @@ where
                         }),
                     })
                 })
-                .collect::<Result<Vec<_>, AkitaError>>()?;
-            if outputs.iter().any(Option::is_none) {
+                .collect();
+            // A rejected nonce wins over a group's error: the serial loop moves on to the
+            // next nonce whenever any group rejects it.
+            if outputs.iter().any(|outcome| matches!(outcome, Ok(None))) {
                 return Ok(None);
             }
-            let candidate_outputs = outputs.into_iter().flatten().collect::<Vec<_>>();
+            // Otherwise the first error in group order, as the serial loop would report.
+            let candidate_outputs = outputs
+                .into_iter()
+                .map(|outcome| outcome.map(Option::unwrap))
+                .collect::<Result<Vec<_>, AkitaError>>()?;
             Ok(Some(candidate_outputs))
         })?;
 

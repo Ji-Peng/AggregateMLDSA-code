@@ -255,6 +255,13 @@ aggregates are byte-identical to main.
   Merkle leaves are the rows as before (gathered sixteen per batch); the Ligerito level-0 opens
   read rows through `CodewordRows`. The interleaved path stays as the fallback for shapes too
   small for the tiling; `FLOCK_LB_TILE_LOG`, `FLOCK_LB_TOP` tune pass 1.
+- Blocked level-1 Ligerito encode (`ntt/additive_ntt_f128/blocked.rs`:
+  `encode_blocked`, `blocked_deep_layers`, `stream_copy`; `pcs/ligerito.rs`: `ligero_commit`
+  and `LigeroWitness::row`): at a level with sixteen lanes and at least `2^18` message
+  columns, one call gathers the message rows and applies the first layers inside a block;
+  the BLAKE3 leaves are hashed in the same pass and the transformed level is discarded, so
+  the opening recomputes a queried row through `blocked_deep_layers`. Smaller levels keep
+  the interleaved encoder. Same codeword, tree and opened rows.
 - Level-0 leaves hashed in the encode (`AdditiveNttF128::encode_lane_blocked_hashed`,
   `merkle::GroupLeafHasher`, `CodewordLayout::LaneBlocked4Pending`,
   `CodewordRows::rows_at`): for BLAKE3 rows of at most 64 lanes, pass 1 takes ten layers and
@@ -280,6 +287,11 @@ under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `pcs::commit::tests::lane_blocked_commit_matches_interleaved` (cap, whole tree and rows, each
 `FusedMerkle` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
+
+The changed files this section describes also include `src/merkle.rs` (the grouped leaf
+hasher and `merkle_tree_from_prehashed_level`), `src/ntt/additive_ntt_f128.rs` (the
+`blocked` module) and `src/lincheck/kernels.rs` (the `bank_lookup_avx512` and
+`bank_transpose_avx512` re-exports).
 
 `AGG_ALLOC_POISON=1` also fills a buffer handed out from `take_f128`, `take_hashes` and
 `take_u8` with `0xA5`. The pools' contents are unspecified, so a caller that reads a slot
@@ -326,3 +338,10 @@ non-default arm are gone.
 - `FLOCK_ALLCORE`, `PCS_COMBINE_PCORES_ONLY`, `LINCHECK_PCORES_ONLY`: topology
   overrides for the all-core hops. The `ecore_rich_topology` gate is the only
   policy; the all-core pool still wins on 4P+4E and loses on 10P+4E.
+
+Remaining diagnostics and A/B switches in the shipped tree (the defaults keep the shipped
+path): `FLOCK_L0_LIVE_SKIP=0` restores the full `2^initial_k` level-0 ladder instead of
+working on the live lanes; `FLOCK_LB_PASS2_COPY=1` copies a pass-2 block before the in-place
+transform; `FLOCK_ZC_BITS_ROUNDS=0` disables the packed round-2/round-3 zerocheck path;
+`FLOCK_ZC_SPARSE_SIMD=0` disables the AVX-512 sparse fold; `FLOCK_LB_TIMING_SHAPE=log_d,r,t`
+and `FLOCK_BENCH_LOG_D` select the ignored timing tests' shapes.

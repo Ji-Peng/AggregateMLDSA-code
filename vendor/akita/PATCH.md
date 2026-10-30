@@ -32,7 +32,7 @@ format or verifier check changes: the commit finds the same slots and skips only
 their lazy `OnceLock` build.
 
 Callers are outside this copy: `PcsProver::prewarm_groups` (`agg-pcs-config`) and
-`TableCommitter::warm` (`agg-piop`) run it for all six groups on the `agg-setup`
+`TableCommitter::warm` (`agg-piop`) run it for all seven groups on the `agg-setup`
 thread. On the IFMA line, 4K local, adjacent alternating pairs: round 2
 268/194 -> 167/142 ms, event 1 687/576 -> 478/417 ms, total 3772/3280 ->
 3181/2667 ms (shared, noisy box: direction only). The 1K aggregate is
@@ -76,7 +76,8 @@ reduction, then writes the mirror into `spare_capacity_mut` chunk by chunk, so
 the 64 MiB first touch per wide column at 32K is spread over the pool. The
 error path still names the first out-of-range cell. Three tests cover minima and
 maxima at both ends of two chunks, the signed-16 mirror at both interval ends,
-and the rejection of the first out-of-range cell. At 8K a column is 8K cells, so
+and the rejection of the first out-of-range cell (`sources/dense/tests.rs`;
+`sources/dense/mod.rs` declares the test module). At 8K a column is 8K cells, so
 event 1 is unchanged within noise (adjacent pairs 551/562 vs 566/552 ms); the
 lever targets the 2^25 cells per column at 32K.
 
@@ -95,7 +96,7 @@ paths request the same A transform key. With a primed i8 cache the source
 advertises `PredecomposedDigits` first, so the commit reads 32 MiB per column
 instead of the 256 MiB field plane. The new unit test
 `dense_i16_mirror_commit_matches_coefficient_commit` compares both paths on two
-rings covering the full signed-16 interval.
+rings covering the full signed-16 interval (`arithmetic/exact_i16_tests.rs`).
 
 ## 3. Concurrent opening passes and a signed-16 probe cache
 
@@ -117,7 +118,9 @@ decomposing the 8 B/cell field plane on every nonce.
 `akita-prover/src/protocol/fold_grind.rs`: challenges are still drawn in group
 order on the preview transcript, then the probes of one nonce run concurrently.
 A rejected nonce now probes every group instead of stopping at the first, which
-is rare at the scheduled grind difficulty.
+is rare at the scheduled grind difficulty. The parallel result is reconsidered
+in group order: a group's rejection wins over another group's error, and an
+error is reported only when no group rejected the nonce.
 
 `akita-prover/src/backend/{opening,scope,traits}.rs`: `OpaqueOpeningKernel` is
 `Sync`, and `ProofSessionHandle` and `PreparedOpeningHandle` are `Send + Sync`,

@@ -599,6 +599,17 @@ impl DensePoly<jolt_field::Prime64Offset59> {
             expected.max(MIN_FLAT_COEFF_LEN),
             jolt_field::Prime64Offset59::from_u64(0),
         );
+        // The mirror below commits a different table than the field plane the packing
+        // pass and the evaluation read, so a caller that builds them from different
+        // cells would commit one polynomial and open another.
+        #[cfg(debug_assertions)]
+        for (i, &cell) in cells.iter().enumerate() {
+            debug_assert_eq!(
+                evals[i],
+                jolt_field::Prime64Offset59::from_i64(i64::from(cell)),
+                "field plane and signed-16 mirror disagree at cell {i}"
+            );
+        }
         let polynomial = Self {
             num_vars,
             coeffs: RingVec::from_coeffs(evals),
