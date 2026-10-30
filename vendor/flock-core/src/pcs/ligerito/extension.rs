@@ -3459,6 +3459,56 @@ mod tests {
         }
     }
 
+    /// Single-thread statistics ladder at the 32K opening shape.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_l0_statistics_ladder() {
+        let log_d = std::env::var("FLOCK_BENCH_LOG_D")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(21);
+        let d = 1usize << log_d;
+        let live = if std::env::var("FLOCK_L0_LIVE_SKIP").as_deref() == Ok("0") {
+            64
+        } else {
+            34
+        };
+        for run in 0..6 {
+            let mut f = crate::scratch::take_f128(64 * d);
+            for (i, x) in f.iter_mut().enumerate() {
+                *x = if i < 34 * d {
+                    F128::new(i as u64 + 1, (i as u64).wrapping_mul(7))
+                } else {
+                    F128::ZERO
+                };
+            }
+            let mut rng = RandomChallenger::new(0x1057);
+            let seeded = VirtualEqBasis::new(vec![F128::new(3, 7); log_d + 6], F128::ONE);
+            let mut target = F128::ZERO;
+            let t = std::time::Instant::now();
+            let out = super::init_phase_statistics(
+                f,
+                seeded,
+                Some(vec![F128::ZERO; 64]),
+                &mut target,
+                1,
+                0,
+                d,
+                6,
+                live,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut rng,
+                false,
+            );
+            std::hint::black_box(out);
+            eprintln!(
+                "l0_ladder run={run} live={live} ms={:.3}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
     fn random_f256(challenger: &mut RandomChallenger) -> F256 {
         F256::new(challenger.sample_f128(), challenger.sample_f128())
     }
