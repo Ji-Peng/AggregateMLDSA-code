@@ -13,7 +13,7 @@
 //!
 //! Run with:
 //! ```sh
-//! RUSTFLAGS="-C target-feature=+pclmulqdq" cargo test --release -p agg-cli --test simd_backends -- --ignored
+//! RUSTFLAGS="-C target-feature=+pclmulqdq" cargo test --release -p agg-cli --test all simd_backends -- --ignored
 //! ```
 
 use std::path::Path;
@@ -48,7 +48,7 @@ struct Scenario {
 }
 
 #[test]
-#[ignore = "Multi-backend e2e test can exceed two minutes; run with: cargo test --release -p agg-cli --test simd_backends -- --ignored"]
+#[ignore = "Multi-backend e2e test can exceed two minutes; run with: cargo test --release -p agg-cli --test all simd_backends -- --ignored"]
 fn test_simd_backends_e2e_equality_and_verification() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

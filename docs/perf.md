@@ -723,7 +723,7 @@ hit, and compares aggregate and cache bytes across every available engine at 1/1
 
 ```sh
 CARGO_BUILD_JOBS=3 RUSTFLAGS='-C target-feature=+pclmulqdq' \
-  cargo test --release -p agg-cli --test simd_backends -- --ignored
+  cargo test --release -p agg-cli --test all simd_backends -- --ignored
 ```
 
 The local performance gates are not all green. Repeated measurements fail the strict AVX2
