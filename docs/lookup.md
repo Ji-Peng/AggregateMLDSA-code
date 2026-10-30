@@ -384,7 +384,7 @@ dedicated group with `kernel::Group` message by message.
    after a parallel first touch, instead of a parallel `unzip` of the generic product.
 
 Measured (lookup timing test, 2 challenges, interleaved runs of the generic and the
-dedicated paths in one process, `AGG_LOOKUP_AB=1`; local, shared machine, direction only):
+dedicated paths in one process; local, shared machine, direction only):
 
 | `N` | threads | load average | generic | dedicated | trees | `s = D` | `s = D - 1` | `s = D - 2` |
 | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- |
@@ -449,8 +449,8 @@ The construction, driven by the PIOP transcript:
   integrated tests are in `tests/all/stages.rs` (Section 6).
 - Ignored timing tests: `timing_at_1024_and_8192_signatures` (Section 4; sizes from
   `AGG_LOOKUP_SIGS`, threads from `RAYON_NUM_THREADS` (default 7), challenge counts from
-  `AGG_LOOKUP_CHALLENGES` (default `1,2`), `AGG_LOOKUP_AB=1` alternates the generic and the
-  dedicated paths run by run; warmup plus five runs) and `grinding_rate`.
+  `AGG_LOOKUP_CHALLENGES` (default `1,2`), the dedicated path only; warmup plus five runs)
+  and `grinding_rate`.
 
 ## 6. Integration (as implemented)
 

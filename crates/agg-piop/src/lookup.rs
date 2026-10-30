@@ -1585,10 +1585,8 @@ fn prove_with(
         // group is parallel inside, so the groups' barriers overlap); the late rounds are too
         // small to pay for the task hand-off and run in order. Either way the parts are summed
         // in the fixed group order, so the message does not depend on the scheduling.
-        // `AGG_LOOKUP_SERIAL=1` runs every round in order.
-        let serial_groups = std::env::var_os("AGG_LOOKUP_SERIAL").is_some_and(|v| v != "0");
         for round in 0..s - 1 {
-            let concurrent = !serial_groups && groups.len() > 1 && s - 1 - round >= CONCURRENT_GROUP_ROUNDS_MIN_VARS;
+            let concurrent = groups.len() > 1 && s - 1 - round >= CONCURRENT_GROUP_ROUNDS_MIN_VARS;
             let parts: Vec<Vec<E>> = if concurrent {
                 groups.par_iter_mut().map(|(_, group)| group.round_message(round)).collect()
             } else {
@@ -2183,9 +2181,7 @@ mod tests {
                     m_time * 1e3,
                     LookupShape::of(&stacks, &tables, 1).identity_error_log2(0)
                 );
-                // AGG_LOOKUP_AB=1: the generic-kernel reference and the dedicated paths,
-                // alternating run by run (the same load for both).
-                let variants: &[bool] = if std::env::var("AGG_LOOKUP_AB").is_ok() { &[false, true] } else { &[true] };
+                let variants: &[bool] = &[true];
                 for &challenges in &counts {
                     let shape = LookupShape::of(&stacks, &tables, challenges);
                     // Per variant: trees, sessions, bottom, next, total, verify.

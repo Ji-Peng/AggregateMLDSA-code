@@ -40,12 +40,6 @@ use crate::gf2_walker::SegmentLayout;
 /// Below this many entries the serial paths are used.
 const MIN_PARALLEL: usize = 1 << 12;
 
-/// Whether the block phase runs fused (fold and next message in one pass over ping-pong
-/// buffers with a parallel first touch). `AGG_CHAIN_FUSED=0` selects the two-pass path.
-fn chain_fused() -> bool {
-    std::env::var("AGG_CHAIN_FUSED").map_or(true, |v| v != "0")
-}
-
 /// A zero-filled vector from the allocator's zeroed path. Large buffers come back as fresh
 /// zero pages, so the first touch happens in the parallel writer instead of a serial fill.
 fn zeroed_f128(n: usize) -> Vec<F128> {
@@ -411,11 +405,7 @@ impl ChainLayout {
                 m
             })
             .collect();
-        let mut out = if chain_fused() {
-            zeroed_f128(n_blocks * rows1)
-        } else {
-            vec![F128::ZERO; n_blocks * rows1]
-        };
+        let mut out = zeroed_f128(n_blocks * rows1);
         out.par_chunks_mut(rows1)
             .enumerate()
             .for_each(|(beta, row)| {
@@ -508,12 +498,7 @@ impl ChainLayout {
         let g2 = self.level2_weights(mats, &eq_y.r_o);
         let e_s = eq_table(&eq_y.r_y);
         let n_blocks = 1usize << self.block_vars();
-        let fused = chain_fused();
-        let mut gt = if fused {
-            zeroed_f128(n_blocks * rows1)
-        } else {
-            vec![F128::ZERO; n_blocks * rows1]
-        };
+        let mut gt = zeroed_f128(n_blocks * rows1);
         gt.par_chunks_mut(rows1)
             .enumerate()
             .for_each(|(beta, row)| {
@@ -533,7 +518,7 @@ impl ChainLayout {
         let mut rs = Vec::with_capacity(self.rounds());
         let mut running = claim;
         let mut len = n_blocks;
-        if fused && self.block_vars() > 0 {
+        if self.block_vars() > 0 {
             // Ping-pong buffers of the first fold's size, allocated once.
             let half0 = n_blocks / 2 * rows1;
             let (mut ga, mut ya) = (zeroed_f128(half0), zeroed_f128(half0));
@@ -573,18 +558,6 @@ impl ChainLayout {
             // The last fold wrote `ga` (odd round count) or `gb`.
             gt = if self.block_vars() % 2 == 1 { ga } else { gb };
             yt = if self.block_vars() % 2 == 1 { ya } else { yb };
-        } else {
-            for round in 0..self.block_vars() {
-                let half = len / 2;
-                let (q1, qinf) = block_message(&gt[..len * rows1], &yt[..len * rows1], rows1);
-                let r = challenge(round, (q1, qinf))?;
-                running = round_value(running, q1, qinf, r);
-                messages.push((q1, qinf));
-                rs.push(r);
-                gt = fold_blocks(&gt, len, rows1, r);
-                yt = fold_blocks(&yt, len, rows1, r);
-                len = half;
-            }
         }
         drop(yt);
         gt.truncate(rows1);
@@ -725,25 +698,12 @@ fn block_message(g: &[F128], y: &[F128], rows: usize) -> (F128, F128) {
         .reduce(|| (F128::ZERO, F128::ZERO), |p, q| (p.0 + q.0, p.1 + q.1))
 }
 
-/// Fold the lowest block variable of a `[beta][rho_1]` table of `len` blocks: block `k` of the
-/// result is `T[2k] + r (T[2k] + T[2k + 1])` (parallel over the result's blocks).
-fn fold_blocks(t: &[F128], len: usize, rows: usize, r: F128) -> Vec<F128> {
-    let mut out = vec![F128::ZERO; len / 2 * rows];
-    out.par_chunks_mut(rows).enumerate().for_each(|(k, dst)| {
-        let src0 = &t[2 * k * rows..(2 * k + 1) * rows];
-        let src1 = &t[(2 * k + 1) * rows..(2 * k + 2) * rows];
-        for ((d, &a), &b) in dst.iter_mut().zip(src0).zip(src1) {
-            *d = a + r * (a + b);
-        }
-    });
-    out
-}
-
 /// Fold the lowest block variable of both `[beta][rho_1]` tables (`len` blocks, `len` even)
 /// into `g_out`/`y_out` (`len / 2` blocks) with the challenge `r`, and return the next
 /// round's message `(q(1), q(inf))` of the folded tables (zero when they are a single block,
-/// where no further round follows). Same sums as `fold_blocks` followed by `block_message`;
-/// the field is characteristic 2, so the grouping of the sums does not change the result.
+/// where no further round follows). Same sums as a separate fold followed by
+/// `block_message`; the field is characteristic 2, so the grouping of the sums does not
+/// change the result.
 fn fold_blocks_message(
     g: &[F128],
     y: &[F128],

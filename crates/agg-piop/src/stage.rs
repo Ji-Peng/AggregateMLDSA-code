@@ -427,9 +427,6 @@ fn prove_stage_with<'a>(
     let mut messages = Vec::with_capacity(rounds);
     let mut point = Vec::with_capacity(rounds);
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
-    // `AGG_STAGE_SERIAL=1` runs the groups of every round in order (per-group trace times
-    // then do not overlap).
-    let serial = std::env::var_os("AGG_STAGE_SERIAL").is_some();
     // Per group: (message time, bind time) summed over rounds; per round: total.
     let mut group_times = vec![(0_f64, 0_f64); spec.groups.len()];
     let mut round_times = Vec::with_capacity(rounds);
@@ -441,7 +438,7 @@ fn prove_stage_with<'a>(
         // task hand-off and run in order. Either way the parts are summed in the fixed group
         // order, so the message does not depend on the scheduling. With concurrency the
         // per-group trace times overlap.
-        let concurrent = !serial && rounds - round >= CONCURRENT_ROUNDS_MIN_VARS;
+        let concurrent = rounds - round >= CONCURRENT_ROUNDS_MIN_VARS;
         let message_part = |group: &mut StageGroup<'a>| {
             let start = std::time::Instant::now();
             let part = group.round_message(round);

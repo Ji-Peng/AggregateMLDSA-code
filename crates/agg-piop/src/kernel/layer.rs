@@ -1443,12 +1443,6 @@ impl Level0 for LinearSource<'_> {
     }
 }
 
-/// `AGG_LINEAR_TABLE=1` keeps the materialized level-0 table for the linear groups (an
-/// A/B switch; the messages are the same either way).
-fn linear_prefix_disabled() -> bool {
-    std::env::var_os("AGG_LINEAR_TABLE").is_some()
-}
-
 /// `sum_x eq(point, x) sum_l c_l f_l(x)` over integer or byte lanes `f_l` (`|f_l| < 2^62`),
 /// as the single field lane `g = sum_l c_l f_l` (with `i32` lanes the first round runs on
 /// the cells and the first fold builds `g` at level 1 from them). The group yields no terminal
@@ -1473,7 +1467,7 @@ impl<'a> LinearIntGroup<'a> {
         {
             return None;
         }
-        let prefix = (lanes.len() <= LINEAR_PREFIX_LANES && !linear_prefix_disabled())
+        let prefix = (lanes.len() <= LINEAR_PREFIX_LANES)
             .then(|| {
                 lanes
                     .iter()
