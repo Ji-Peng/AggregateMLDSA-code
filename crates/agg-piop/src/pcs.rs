@@ -518,8 +518,12 @@ mod tests {
 
         let mut bad = wide;
         bad[7] = 32_768;
+        // A second bad cell in the next mirror chunk: the fold reports the earlier one.
+        bad[N / 2 + 1] = -32_769;
         let error = DensePoly::from_wide_field_evals(16, encode(&bad), &bad).unwrap_err();
-        assert!(error.to_string().contains("32768"));
+        let message = error.to_string();
+        assert!(message.contains("32768"), "{message}");
+        assert!(!message.contains("32769"), "the first bad cell must win: {message}");
     }
 
     #[test]

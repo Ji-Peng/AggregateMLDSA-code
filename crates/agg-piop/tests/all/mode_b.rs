@@ -700,12 +700,12 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         let error = prove_tampered(&fixture, &bridge, &wide, None)
             .expect_err("Akita refuses a stored value outside the width-16 interval");
         eprintln!("u_lo = 2^15: the prover fails ({error})");
-        // The base branch's width-16 mirror check rejects the cell while the mirror is built;
-        // the scheduled coefficient bound is the older path to the same refusal.
+        // The width-16 mirror check rejects the cell while the mirror is built, before the
+        // Akita admission. The scheduled coefficient bound is a separate check, exercised
+        // directly in the Akita backend (a cell that fits `i16` cannot reach it here).
         assert!(
             error.starts_with("pcs: commit: akita:")
-                && (error.contains("exceeds the scheduled coefficient bound")
-                    || error.contains("does not fit a signed 16-bit digit")),
+                && error.contains("does not fit a signed 16-bit digit"),
             "{error}"
         );
         // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = 3

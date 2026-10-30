@@ -611,3 +611,38 @@ fn imported_root_outer_image_matches_full_cpu_commitment() {
             .is_err());
     }
 }
+
+/// A source that fits the 16-bit mirror range can still exceed the interval a narrower
+/// schedule was priced for. That admission check is unreachable end to end with the
+/// shipped width-16 schedule, so it is exercised here on the commit plan directly.
+#[test]
+fn a_source_wider_than_the_scheduled_interval_is_refused() {
+    use akita_params::sis::CommittedSourceClass;
+    use akita_params::DecompositionParams;
+
+    // Balanced base-2^5 digits, two levels: representable in [-512, 511]. The declared
+    // bound matches, so the accepted interval is exactly that range.
+    let contract = CommittedSourceContract::try_new(
+        CommittedSourceClass::BalancedSignedDigit,
+        DecompositionParams {
+            log_basis: 5,
+            log_commit_bound: 10,
+            log_open_bound: Some(128),
+        },
+    )
+    .expect("valid balanced-digit contract");
+    let digits = GadgetDigits::new(5, 2);
+    let poly = |value: u64| {
+        let evals = vec![F::from_u64(value); 1 << 4];
+        DensePoly::<F>::from_field_evals(4, evals).expect("dense source")
+    };
+    let inside = poly(100);
+    assert!(ensure_sources_fit_accepted_interval::<F, _>(&[inside], digits, contract).is_ok());
+    let outside = poly(4096);
+    let error = ensure_sources_fit_accepted_interval::<F, _>(&[outside], digits, contract)
+        .expect_err("a coefficient beyond the scheduled interval");
+    assert!(
+        error.to_string().contains("exceeds the scheduled coefficient bound"),
+        "{error}"
+    );
+}

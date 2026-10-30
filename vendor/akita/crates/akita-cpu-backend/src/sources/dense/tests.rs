@@ -626,8 +626,13 @@ fn small_i16_mirror_rejects_the_first_out_of_range_cell() {
     const N: usize = 1 << 16;
     let mut cells = vec![0i32; N];
     cells[7] = 32_768;
+    // A second bad cell in the next mirror chunk: the parallel chunk fold must report the
+    // earlier one, not whichever chunk finishes first.
+    cells[(1 << 15) + 3] = -32_769;
     let evals = vec![Prime64Offset59::from_i64(0); N];
     let poly = DensePoly::<Prime64Offset59>::from_field_evals(16, evals).unwrap();
     let error = poly.attach_small_i16(&cells).unwrap_err();
-    assert!(error.to_string().contains("32768"));
+    let message = error.to_string();
+    assert!(message.contains("32768"), "{message}");
+    assert!(!message.contains("32769"), "the first bad cell must win: {message}");
 }
