@@ -308,6 +308,7 @@ fn fork_join<A: Send, B>(
     flock: impl FnOnce() -> A + Send,
     piop: impl FnOnce() -> B,
 ) -> ((A, Duration), B) {
+    let trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
@@ -324,11 +325,18 @@ fn fork_join<A: Send, B>(
                     // No pool: the Flock side's loops run on the global pool instead.
                     Err(_) => flock(),
                 };
-                (out, start.elapsed())
+                (out, start.elapsed(), Instant::now())
             })
             .expect("spawn the Flock thread");
+        let piop_start = Instant::now();
         let b = piop();
-        (crate::pcs::join_os_thread(handle), b)
+        let piop_end = Instant::now();
+        let (a, flock_busy, flock_end) = crate::pcs::join_os_thread(handle);
+        let join = Instant::now();
+        if trace {
+            eprintln!("[sched] item=fork piop_busy_ms={:.3} piop_idle_ms={:.3} flock_busy_ms={:.3} flock_idle_ms={:.3}", (piop_end - piop_start).as_secs_f64() * 1e3, (join - piop_end).as_secs_f64() * 1e3, flock_busy.as_secs_f64() * 1e3, (join - flock_end).as_secs_f64() * 1e3);
+        }
+        ((a, flock_busy), b)
     })
 }
 
@@ -848,27 +856,48 @@ pub fn prove_with_tables_using(
     // closure's, so in mode A the two overlap in wall time. `overlap`, not `rayon::join`:
     // the commit side must not run on a rayon worker that then blocks on its commit threads
     // (a one-thread pool would deadlock).
-    let ((round1, round1_time), (flock_commitments, keccak_time)) = crate::pcs::overlap(
+    let sched_trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
+    let (
+        (round1, round1_time, akita_start, akita_end),
+        (flock_commitments, keccak_time, flock_start, flock_end),
+    ) = crate::pcs::overlap(
         || {
             let start = Instant::now();
             let out = committer.commit_round1(main);
             phase_stamp("round1-commit");
-            (out, start.elapsed())
+            let end = Instant::now();
+            (out, end - start, start, end)
         },
         || {
             let start = Instant::now();
             let out = keccak.commitments(segments);
             phase_stamp("flock-commit");
-            (out, start.elapsed())
+            let end = Instant::now();
+            (out, end - start, start, end)
         },
     );
+    if sched_trace {
+        let overlap = akita_end
+            .min(flock_end)
+            .saturating_duration_since(akita_start.max(flock_start));
+        let wall = akita_end.max(flock_end) - akita_start.min(flock_start);
+        eprintln!(
+            "[sched] item=commits akita_ms={:.3} flock_ms={:.3} overlap_ms={:.3} wall_ms={:.3}",
+            round1_time.as_secs_f64() * 1e3,
+            keccak_time.as_secs_f64() * 1e3,
+            overlap.as_secs_f64() * 1e3,
+            wall.as_secs_f64() * 1e3
+        );
+    }
     let [main16_round1, main_round1] = round1?;
     let main16_commitment = main16_round1.serialized()?;
     let main_commitment = main_round1.serialized()?;
     transcript.absorb(commitment_site(GroupRole::Main16), 1, &main16_commitment)?;
     transcript.absorb(commitment_site(GroupRole::Main), 1, &main_commitment)?;
     if flock_commitments.len() != segments {
-        return Err(ProveError::Internal("one Flock commitment per segment".into()));
+        return Err(ProveError::Internal(
+            "one Flock commitment per segment".into(),
+        ));
     }
     transcript.absorb_items(FLOCK_COMMIT_SITE, &flock_commitments)?;
     let bridge_seed: [u8; 32] = transcript

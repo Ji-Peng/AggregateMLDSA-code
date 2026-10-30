@@ -2137,6 +2137,9 @@ pub fn open_batch_merged<Ch: Challenger>(
     } else {
         Vec::new()
     };
+    if var("AGG_SCHED_TRACE").as_deref() == Ok("1") {
+        eprintln!("[sched] item=ring_switch claims={} ms={:.3}", x_outers.len(), t.elapsed().as_secs_f64() * 1e3);
+    }
     if trace {
         eprintln!(
             "  [open_merged] ring_switch: {:6.2} ms",
