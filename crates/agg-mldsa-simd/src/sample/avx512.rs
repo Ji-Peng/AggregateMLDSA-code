@@ -292,24 +292,6 @@ pub(crate) unsafe fn rej_uniform_vbmi(block: &Block, st: &mut RejState) -> bool 
     unsafe { rej_uniform_vbmi_impl::<USE_COMPRESS_STORE>(block, st) }
 }
 
-/// Variant of VBMI rejection sampling using `_mm512_mask_compressstoreu_epi32`.
-#[allow(dead_code)]
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt,avx512vbmi")]
-pub(crate) unsafe fn rej_uniform_vbmi_compressstore(block: &Block, st: &mut RejState) -> bool {
-    // SAFETY: caller guarantees target features.
-    unsafe { rej_uniform_vbmi_impl::<true>(block, st) }
-}
-
-/// Variant of VBMI rejection sampling using `_mm512_maskz_compress_epi32` + `_mm512_storeu_si512`.
-#[allow(dead_code)]
-#[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt,avx512vbmi")]
-pub(crate) unsafe fn rej_uniform_vbmi_compress_reg(block: &Block, st: &mut RejState) -> bool {
-    // SAFETY: caller guarantees target features.
-    unsafe { rej_uniform_vbmi_impl::<false>(block, st) }
-}
-
 /// Uniform rejection sampling from a 168-byte rate block using AVX-512.
 ///
 /// Uses the VBMI vectorized sampler if VBMI is detected on the host; otherwise,
