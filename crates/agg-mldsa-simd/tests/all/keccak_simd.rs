@@ -1,17 +1,15 @@
-#![allow(unexpected_cfgs)]
-mod common;
-use agg_mldsa_simd::poly;
+use crate::common;
 
 use agg_mldsa_simd::{Backend, Block, Engine, Sink, Xof, XofJob};
 // Include the private kernels so permutation tests need no public testing API.
 #[allow(dead_code)]
-#[path = "../src/keccak/avx2.rs"]
+#[path = "../../src/keccak/avx2.rs"]
 mod avx2;
 #[allow(dead_code)]
-#[path = "../src/keccak/avx512.rs"]
+#[path = "../../src/keccak/avx512.rs"]
 mod avx512;
 #[allow(dead_code)]
-#[path = "../src/keccak/lanes.rs"]
+#[path = "../../src/keccak/lanes.rs"]
 mod lanes;
 
 fn permutations<const W: usize>(mut permute: impl FnMut(&mut lanes::State<W>)) {

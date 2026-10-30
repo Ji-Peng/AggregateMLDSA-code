@@ -1,5 +1,5 @@
 //! Keep every public operation covered when independently developed kernels replace stubs.
-mod common;
+use crate::common;
 use agg_mldsa_simd::*;
 use common::*;
 use std::mem::MaybeUninit;

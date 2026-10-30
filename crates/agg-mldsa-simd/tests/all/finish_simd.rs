@@ -1,5 +1,5 @@
 //! Independent integer and witness oracles for packed finishing.
-mod common;
+use crate::common;
 use agg_mldsa_simd::{params::*, *};
 use agg_witness::{crt, derive, digits::{DigitLayout, StepLayout, ValueForm}, expand, gen, native};
 use common::{engines, SplitMix64};

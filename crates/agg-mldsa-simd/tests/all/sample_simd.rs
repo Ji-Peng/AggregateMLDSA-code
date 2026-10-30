@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use agg_mldsa_simd::dispatch::{Backend, Engine};
 use agg_mldsa_simd::params::{GAMMA1, Q};

@@ -1,12 +1,11 @@
-mod common;
-use agg_mldsa_simd::params;
+use crate::common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},
     ntt::{Form, Scale},
     params::{consts, Prime},
     poly::Poly32,
 };
-#[path = "../src/ntt/avx2_tables.rs"]
+#[path = "../../src/ntt/avx2_tables.rs"]
 mod tables;
 fn engine() -> Option<Engine> {
     let e = Engine::new(Backend::Avx2);
