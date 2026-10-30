@@ -8,7 +8,7 @@
 mod common;
 
 use agg_mldsa_simd::dispatch::{Backend, Engine};
-use agg_mldsa_simd::params::Q;
+use agg_mldsa_simd::params::{BETA, GAMMA1, Q};
 use agg_mldsa_simd::poly::{self, Block, Poly32, RejState};
 use agg_mldsa_simd::{ExpandedA, Sink, XofJob};
 use std::hint::black_box;
@@ -90,6 +90,8 @@ fn run_c_unpack_z(z_padded: &[u8; 2304 + 32], out: &mut [Poly32; 4]) {
     for i in 0..4 {
         let chunk: &[u8; 576] = (&z_padded[i * 576..i * 576 + 576]).try_into().unwrap();
         agg_mldsa_cref::polyz_unpack(&mut out[i].0, chunk);
+        // The Rust kernel returns ||z||_inf in the same pass; C checks the bound separately.
+        black_box(agg_mldsa_cref::poly_chknorm(&out[i].0, GAMMA1 - BETA));
     }
     black_box(out);
 }

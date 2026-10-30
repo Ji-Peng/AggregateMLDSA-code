@@ -110,7 +110,7 @@ fn avx2_finish_gates() {
     assert_eq!(out.w1, reference.w1);
     assert_eq!(out.u, reference.u);
     assert_eq!(out.v, reference.v);
-    common::compare(
+    common::compare_info(
         "finish / 3 C hints",
         "avx2",
         || finish_rows(&e, row, &mut out, 1),

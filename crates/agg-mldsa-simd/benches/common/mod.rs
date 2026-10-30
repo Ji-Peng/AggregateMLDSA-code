@@ -127,6 +127,32 @@ pub fn print_system_info() {
 }
 
 /// Alternates Rust and C trials, evaluates performance ratio, and prints the result row.
+/// Like [`compare`], for a composite Rust kernel measured against C work that does only part
+/// of it: prints the ratio as INFO and never fails the gate.
+pub fn compare_info<R: FnMut(), C: FnMut()>(name: &str, backend: &str, mut rust_fn: R, mut c_fn: C, c_available: bool) {
+    if !c_available {
+        return;
+    }
+    let mut r = [0.0f64; NUM_TRIALS];
+    let mut c = [0.0f64; NUM_TRIALS];
+    for i in 0..NUM_TRIALS {
+        let t = start_tsc();
+        for _ in 0..CALLS_PER_TRIAL {
+            rust_fn();
+        }
+        r[i] = (end_tsc().wrapping_sub(t) as f64) / (CALLS_PER_TRIAL as f64);
+        let t = start_tsc();
+        for _ in 0..CALLS_PER_TRIAL {
+            c_fn();
+        }
+        c[i] = (end_tsc().wrapping_sub(t) as f64) / (CALLS_PER_TRIAL as f64);
+    }
+    r.sort_by(f64::total_cmp);
+    c.sort_by(f64::total_cmp);
+    let (rm, cm) = (r[NUM_TRIALS / 2], c[NUM_TRIALS / 2]);
+    println!("{:<20} {:<10} {:>10.2} {:>10.2} {:>8.3} {:>12}", name, backend, rm, cm, rm / cm, "INFO");
+}
+
 pub fn compare<R: FnMut(), C: FnMut()>(
     name: &str,
     backend: &str,

@@ -32,6 +32,7 @@ pub mod ffi {
             buf: *const u8,
         ) -> std::ffi::c_uint;
         pub fn pqcrystals_dilithium2_avx2_polyz_unpack(r: *mut i32, a: *const u8);
+        pub fn pqcrystals_dilithium2_avx2_poly_chknorm(a: *const i32, b: i32) -> i32;
         pub fn pqcrystals_dilithium2_avx2_polyw1_pack(r: *mut u8, a: *const i32);
         pub fn pqcrystals_dilithium2_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
         pub fn pqcrystals_dilithium2_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
@@ -257,6 +258,11 @@ mod safe_wrappers {
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
         }
+    }
+
+    /// Returns 1 if some coefficient has absolute value at least `b`, else 0.
+    pub fn poly_chknorm(a: &[i32; 256], b: i32) -> i32 {
+        unsafe { ffi::pqcrystals_dilithium2_avx2_poly_chknorm(a.as_ptr(), b) }
     }
 
     /// Packs high bits w1 into 192 bytes.
