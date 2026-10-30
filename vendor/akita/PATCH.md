@@ -26,11 +26,21 @@ byte-identical under scalar and avx512 and under one and sixteen rayon threads.
 `sources/dense/poly.rs`: `DensePoly` keeps the signed-16 mirror of a width-16
 source (`attach_small_i16`) and the inclusive bounds of either mirror.
 `prime_digit_cache` builds the ring-major digit planes at construction: for one
-digit in the basis range the planes are a copy of the centered mirror, otherwise
-the previous per-ring decomposition of the field coefficients.
+digit in the basis range the cache records that the centered mirror itself
+serves as the planes and resolves them through the owning polynomial, otherwise
+it owns the previous per-ring decomposition of the field coefficients.
 `small_i16_ring_coeffs` views the mirror per ring. This build has no SIMD
-encoder, so `sources/dense/small.rs` expands the centered bytes through the
+encoder, so the fixed-prime constructor expands the centered bytes through the
 portable `Field::from_i64` path.
+
+The mirror-backed form stores no bytes. With one digit the mirror is already in
+ring-major order, so resolving the cache is a live-prefix slice of
+`small_i8_coeffs`. This removes the 32 MiB per narrow column copy at 32K, and
+therefore 256-384 MiB of resident memory from the pre-fork commit through the
+end of the opening, with identical plane bytes. At 8K a narrow column is only
+8 KiB, so the change is below the noise of a fresh-process VmHWM; the 1K
+aggregate remains byte-identical under scalar and avx512 and under one and
+sixteen rayon threads.
 
 `commitment/source.rs` and `commitment/source/builtins.rs`:
 `DenseCoefficientSource` exposes the signed-16 mirror, and

@@ -27,6 +27,18 @@ const MAX_DENSE_DIGIT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const MIN_FLAT_COEFF_LEN: usize =
     SUPPORTED_COMMITMENT_RING_DIMS[SUPPORTED_COMMITMENT_RING_DIMS.len() - 1];
 
+/// Backing store of a digit-plane cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DenseDigitPlanes {
+    /// Ring-major planes decomposed from the field coefficients.
+    Owned(Vec<i8>),
+    /// With a single digit the centered-`i8` mirror already is the ring-major
+    /// planes, so the cache only records that the owning polynomial's mirror
+    /// can serve the planes. It is resolved through that polynomial and never
+    /// dereferenced on its own.
+    Mirror,
+}
+
 /// D-free digit-plane cache: `num_digits` planes of `ring_d` bytes per ring
 /// element, flattened in ring-major order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +47,7 @@ pub(super) struct DenseDigitCache {
     num_digits: usize,
     log_basis: u32,
     basis: SignedDigitBasis,
-    planes: Vec<i8>,
+    planes: DenseDigitPlanes,
 }
 
 /// Dense polynomial: all ring coefficients materialized in memory.
@@ -115,10 +127,22 @@ impl<F: Field> DensePoly<F> {
         log_basis: u32,
     ) -> Option<&[i8]> {
         let cache = self.digit_cache.get()?;
-        (cache.ring_d == ring_dimension
-            && cache.num_digits == num_digits
-            && cache.log_basis == log_basis)
-            .then_some(cache.planes.as_slice())
+        if cache.ring_d != ring_dimension
+            || cache.num_digits != num_digits
+            || cache.log_basis != log_basis
+        {
+            return None;
+        }
+        match &cache.planes {
+            DenseDigitPlanes::Owned(planes) => Some(planes.as_slice()),
+            DenseDigitPlanes::Mirror => {
+                let live_len = self
+                    .num_ring_elems_at(ring_dimension)
+                    .checked_mul(num_digits)?
+                    .checked_mul(ring_dimension)?;
+                self.small_i8_coeffs.as_deref()?.get(..live_len)
+            }
+        }
     }
 
     /// Ring-element count viewed at dimension `ring_d`.
@@ -314,14 +338,10 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             // A cache built at another dimension is not reused: returning
             // `None` falls back to the uncached path, exactly like a
             // too-large cache does. Under uniform-D this never triggers.
-            return (cache.ring_d == D
-                && cache.num_digits == num_digits
-                && cache.log_basis == log_basis)
-                .then(|| {
-                    let (chunks, remainder) = cache.planes.as_chunks::<D>();
-                    debug_assert!(remainder.is_empty());
-                    (chunks, cache.basis)
-                });
+            if cache.ring_d != D || cache.num_digits != num_digits || cache.log_basis != log_basis {
+                return None;
+            }
+            return self.cached_digit_planes::<D>(cache);
         }
 
         let basis = SignedDigitBasis::new(log_basis).ok()?;
@@ -344,8 +364,6 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             ring_dimension = D,
         )
         .entered();
-        let params = BalancedDecomposePow2Params::new(num_digits, log_basis);
-        let mut planes = vec![0i8; num_rings * num_digits * D];
         // One balanced digit in the basis range is the centered cell itself, so
         // the mirror already holds the ring-major planes and no decomposition
         // runs. Any other shape reads the field coefficients.
@@ -357,19 +375,23 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
                 (low >= -half && high < half).then_some(())
             })
             .and_then(|()| self.small_i8_coeffs.as_deref())
-            .and_then(|mirror| mirror.get(..num_rings * D));
-        if let Some(mirror) = mirrored {
-            planes.copy_from_slice(mirror);
-        } else {
-            let rings = self.ring_coeffs::<D>().ok()?;
-            cfg_chunks_mut!(planes, num_digits * D)
-                .zip(cfg_iter!(rings))
-                .for_each(|(dst, ring)| {
-                    let (dst_planes, remainder) = dst.as_chunks_mut::<D>();
-                    debug_assert!(remainder.is_empty());
-                    ring.balanced_decompose_pow2_i8_into_with_params(dst_planes, &params);
-                });
-        }
+            .and_then(|mirror| mirror.get(..num_rings * D).map(|_| ()));
+        let planes = match mirrored {
+            Some(()) => DenseDigitPlanes::Mirror,
+            None => {
+                let params = BalancedDecomposePow2Params::new(num_digits, log_basis);
+                let mut planes = vec![0i8; num_rings * num_digits * D];
+                let rings = self.ring_coeffs::<D>().ok()?;
+                cfg_chunks_mut!(planes, num_digits * D)
+                    .zip(cfg_iter!(rings))
+                    .for_each(|(dst, ring)| {
+                        let (dst_planes, remainder) = dst.as_chunks_mut::<D>();
+                        debug_assert!(remainder.is_empty());
+                        ring.balanced_decompose_pow2_i8_into_with_params(dst_planes, &params);
+                    });
+                DenseDigitPlanes::Owned(planes)
+            }
+        };
         let _ = self.digit_cache.set(DenseDigitCache {
             ring_d: D,
             num_digits,
@@ -378,13 +400,31 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             planes,
         });
         let cache = self.digit_cache.get()?;
-        (cache.ring_d == D && cache.num_digits == num_digits && cache.log_basis == log_basis).then(
-            || {
-                let (chunks, remainder) = cache.planes.as_chunks::<D>();
+        if cache.ring_d != D || cache.num_digits != num_digits || cache.log_basis != log_basis {
+            return None;
+        }
+        self.cached_digit_planes::<D>(cache)
+    }
+
+    /// Resolve an installed cache into ring-major digit planes.
+    ///
+    /// A mirror-backed cache yields the live prefix of the centered-`i8`
+    /// mirror; an owned cache yields its stored planes. Both are exactly
+    /// `num_ring_elems_at(D) * num_digits` chunks of `D` bytes.
+    fn cached_digit_planes<'a, const D: usize>(
+        &'a self,
+        cache: &'a DenseDigitCache,
+    ) -> Option<(&'a [[i8; D]], SignedDigitBasis)> {
+        match &cache.planes {
+            DenseDigitPlanes::Owned(planes) => {
+                let (chunks, remainder) = planes.as_chunks::<D>();
                 debug_assert!(remainder.is_empty());
-                (chunks, cache.basis)
-            },
-        )
+                Some((chunks, cache.basis))
+            }
+            DenseDigitPlanes::Mirror => self
+                .small_i8_ring_coeffs::<D>()
+                .map(|planes| (planes, cache.basis)),
+        }
     }
 
     /// Build the digit-plane cache now for the given ring dimension and
