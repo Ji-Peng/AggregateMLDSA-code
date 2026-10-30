@@ -1017,7 +1017,9 @@ pub fn partial_fold_packed_z_best(
             // n_log ≥ 16; below that the L1-resident `iblock` wins. `FOLD_IBLOCK` forces
             // iblock everywhere (bench A/B).
             let n_log = m - k_log;
-            if n_log >= OBLOCK_MIN_N_LOG && !FOLD_IBLOCK.load(Ordering::Relaxed) {
+            if n_log >= OBLOCK_MIN_N_LOG
+                && !FOLD_IBLOCK.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 // Large folds additionally hop to the all-core (P+E) pool —
                 // dynamic tile assignment drains around the slower E-cores.
                 if lincheck_use_all_cores() {
