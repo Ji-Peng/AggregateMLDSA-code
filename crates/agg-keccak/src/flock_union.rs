@@ -736,10 +736,8 @@ impl UnionGeometry {
         let x_refs: Vec<&[F128]> = x_fulls.iter().map(Vec::as_slice).collect();
         let padding = union.padding_spec();
         let grinding = self.pcs_params.opening_grinding();
-        // The opening (ring switch and Ligerito) through the thread's opening runner, which
-        // may move it to a larger pool (`agg_bridge::sched`); the bytes do not depend on it.
-        let pcs_open = agg_bridge::sched::run_opening(|| {
-            match q_owned {
+        // The opening (ring switch and Ligerito) on the calling Flock worker.
+        let pcs_open = match q_owned {
                 Some(q) => open_batch_merged(
                     q,
                     Some(&z),
@@ -772,8 +770,7 @@ impl UnionGeometry {
                     grinding,
                     ch,
                 ),
-            }
-        });
+        };
         flock_stamp("opening", &mut stamp_clock);
         (
             UnionProof {

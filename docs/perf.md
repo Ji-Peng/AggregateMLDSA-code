@@ -831,34 +831,15 @@ One-round runs of `cfc566b` with the engine forced: `AGG_MLDSA_SIMD=avx2` prove 
 `scalar` 8,795.0 ms. Aggregates (1,469,874 B) are byte-identical across the builds, and every
 verifier run accepts.
 
-## Pool schedule presets
+## Flock pool size
 
-`AGG_SCHED_PRESET=auto` (opt-in) chooses a Flock pool size when the available logical
-CPU count and Rayon pool size match a row below. `off` restores the 3/8 default;
-`AGG_FLOCK_THREADS` overrides either choice. Flock and PIOP pools remain additive.
+The Flock fork pool takes `ceil(3 Rayon / 8)` workers by default, capped at the logical
+CPUs; `AGG_FLOCK_THREADS` overrides the count and `0` runs Flock before the PIOP. Flock
+and PIOP pools remain additive.
 
-| Logical CPUs / Rayon threads | Flock workers | Policy and evidence |
-| --- | ---: | --- |
-| 1 / 1 | 0 | No fork; Flock precedes PIOP. |
-| 16 / 16 | 6 | Retain the existing default pending a 32K cloud re-sweep. `AGG_SCHED_16_FIX=off` selects the previous preset of 4 for comparison. |
-| 32 / 32 | 12 | Unmeasured, cloud sweep needed. |
-| Other | ceil(3 Rayon / 8) | Existing default. |
-
-On WSL (i7-11700K, 16 logical CPUs), the 4K A/B had one in-process warmup and one
-measured run per launch, alternating off/on/off/on. Mean fork wall was 1720.2 / 1717.8 ms,
-Flock proofs 1188.8 / 1200.9 ms, PIOP branch approximately 1720.2 / 1717.7 ms, and total
-prove 3222.2 / 3186.9 ms (0.989x). Individual totals were 2577.7, 3866.6 / 2460.2,
-3913.5 ms; the spread makes this directional only. The PIOP interval uses phase stamps
-from shares to stage 3. One-thread 1K fresh aggregates took 4308.5 ms before and 4075.2 ms
-after; proof bytes matched at 1, 4, 16 and 32 Rayon threads. The one-thread path was
-unchanged. The 32-thread row is an extrapolation, and the separate IFMA implementation is
-not present in this branch: an IFMA-aware physical-core pool needs integration and a cloud
-sweep before it can be selected here.
-
-The subsequent default correction compared four against six Flock workers on WSL,
-alternating four launches with one warmup and one measured run each. Mean fork wall was
-1,427.0 / 1,389.0 ms, Flock proofs 1,155.1 / 989.7 ms, PIOP branch 1,426.8 /
-1,388.9 ms, and total prove 2,725.1 / 2,723.3 ms (0.999x). These 4K results are
-directional; the 32K cloud sweep remains open.
-
-The default Flock pool remains ceil(3/8 of the Rayon pool). The optional preset has not been measured on c4d and awaits the cloud sweep.
+On WSL (i7-11700K, 16 logical CPUs), the 4K comparison of four against six Flock workers
+alternated four launches with one warmup and one measured run each. Mean fork wall was
+1,427.0 / 1,389.0 ms, Flock proofs 1,155.1 / 989.7 ms, PIOP branch 1,426.8 / 1,388.9 ms,
+and total prove 2,725.1 / 2,723.3 ms (0.999x). These 4K results are directional; a 32K
+cloud sweep remains open. One-thread 1K fresh aggregates matched at 1, 4, 16 and 32 Rayon
+threads.
