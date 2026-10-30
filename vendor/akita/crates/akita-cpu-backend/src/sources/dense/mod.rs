@@ -6,6 +6,7 @@
 mod kernels;
 mod ops;
 mod poly;
+mod small;
 #[cfg(test)]
 mod tests;
 mod views;

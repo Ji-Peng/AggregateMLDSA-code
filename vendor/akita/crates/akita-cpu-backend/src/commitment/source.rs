@@ -247,6 +247,13 @@ impl PolynomialTypeSelection {
 pub(crate) trait DenseCoefficientSource<F: Field>: Send + Sync {
     /// Physical coefficient buffer in canonical source order.
     fn coefficients(&self) -> &[F];
+
+    /// Flat signed-16 mirror of [`Self::coefficients`], when the source keeps
+    /// one. It has the same physical padding and is the single-digit
+    /// decomposition of every live coefficient.
+    fn small_i16_coefficients(&self) -> Option<&[i16]> {
+        None
+    }
 }
 
 /// Borrowed dense source representation.

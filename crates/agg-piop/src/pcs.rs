@@ -80,13 +80,29 @@ fn i8_field_values() -> &'static [BaseField; 256] {
     })
 }
 
+/// Ring dimension and inner decomposition of one dense group's commit.
+#[derive(Clone, Copy, Debug)]
+pub struct DenseShape {
+    /// Commitment ring dimension.
+    pub ring_dimension: usize,
+    /// Balanced digits per coefficient in the A-side decomposition.
+    pub num_digits: usize,
+    /// Logarithm of the balanced digit basis.
+    pub log_basis: u32,
+}
+
 /// Materialize one Akita polynomial per logical table (`i8` or `i32` cells), in group
 /// order, each zero-extended to `2^physical_vars` evaluations (index bits least significant
 /// first, so the pad variables are trailing).
+///
+/// With `shape`, each polynomial also receives the digit cache of the commit's
+/// inner decomposition and, for width-16 sources, the signed-16 mirror of its
+/// cells, so the commit reads the mirror instead of the field plane.
 #[allow(unsafe_code)]
 pub fn group_polynomials(
     columns: &[Cells<'_>],
     physical_vars: usize,
+    shape: Option<DenseShape>,
 ) -> Result<Vec<DensePoly<BaseField>>, AkitaError> {
     let physical_len = 1_usize << physical_vars;
     let values = i8_field_values();
@@ -113,7 +129,21 @@ pub fn group_polynomials(
                     }
                 })
             };
-            DensePoly::from_field_evals(physical_vars, evaluations)
+            let polynomial = match cells {
+                Cells::Narrow(_) => DensePoly::from_field_evals(physical_vars, evaluations)?,
+                Cells::Wide(cells) => {
+                    DensePoly::from_field_evals(physical_vars, evaluations)?
+                        .attach_small_i16(cells)?
+                }
+            };
+            if let Some(shape) = shape {
+                polynomial.prime_digit_cache(
+                    shape.ring_dimension,
+                    shape.num_digits,
+                    shape.log_basis,
+                )?;
+            }
+            Ok(polynomial)
         })
         .collect()
 }
@@ -317,7 +347,13 @@ impl TableCommitter {
             }
             .into());
         }
-        let polynomials = group_polynomials(columns, descriptor.physical_vars)?;
+        let profile = self.prover.plan().profile(role);
+        let shape = DenseShape {
+            ring_dimension: profile.inner.matrix.ring_dimension(),
+            num_digits: profile.inner.digits.num_digits,
+            log_basis: profile.inner.digits.log_basis,
+        };
+        let polynomials = group_polynomials(columns, descriptor.physical_vars, Some(shape))?;
         Ok(self.prover.commit_polynomials(role, polynomials)?)
     }
 
@@ -408,7 +444,7 @@ mod tests {
         let wide: Vec<i32> = (0..4096).map(|i| (i * 17) % 65_536 - 32_768).collect();
         let ones = vec![1_i8; 4096];
         let columns = [Cells::Narrow(&narrow), Cells::Wide(&wide), Cells::Narrow(&ones)];
-        let polynomials = group_polynomials(&columns, 13).unwrap();
+        let polynomials = group_polynomials(&columns, 13, None).unwrap();
         assert_eq!(polynomials.len(), 3);
         for (poly, cells) in polynomials.iter().zip(&columns) {
             let coeffs = poly.field_coeffs();
@@ -419,7 +455,31 @@ mod tests {
             }
         }
         let long = vec![0_i8; 1 << 14];
-        assert!(group_polynomials(&[Cells::Narrow(&long)], 13).is_err());
+        assert!(group_polynomials(&[Cells::Narrow(&long)], 13, None).is_err());
+    }
+
+    #[test]
+    fn dense_shape_attaches_the_width16_mirror() {
+        let narrow: Vec<i8> = (0..4096).map(|i| (i % 16) as i8 - 8).collect();
+        let wide: Vec<i32> = (0..4096).map(|i| (i % 65_536) as i32 - 32_768).collect();
+        let columns = [Cells::Narrow(&narrow), Cells::Wide(&wide)];
+        let shape = DenseShape {
+            ring_dimension: 64,
+            num_digits: 1,
+            log_basis: 16,
+        };
+        let polynomials = group_polynomials(&columns, 12, Some(shape)).unwrap();
+        let mirror = polynomials[1].small_i16_mirror().expect("width-16 mirror");
+        assert_eq!(mirror.len(), 4096);
+        assert_eq!(
+            mirror[..4096]
+                .iter()
+                .copied()
+                .map(i32::from)
+                .collect::<Vec<_>>(),
+            wide
+        );
+        assert!(polynomials[0].small_i16_mirror().is_none());
     }
 
     #[test]

@@ -65,6 +65,7 @@ fn dense_coeff_commit_selects_exact_i16_from_inner_basis_inner() {
                 1,
                 DenseCommitInput::CoeffBlocks {
                     block_slices: vec![block.as_slice()],
+                    i16_block_slices: None,
                     num_digits_inner: 1,
                     log_basis_inner,
                 },
@@ -78,6 +79,44 @@ fn dense_coeff_commit_selects_exact_i16_from_inner_basis_inner() {
 #[test]
 fn dense_i16_commit_matches_schoolbook_composition() {
     run_exact_i16_test(dense_i16_commit_matches_schoolbook_composition_inner);
+}
+
+#[test]
+fn dense_i16_mirror_commit_matches_coefficient_commit() {
+    run_exact_i16_test(dense_i16_mirror_commit_matches_coefficient_commit_inner);
+}
+
+fn dense_i16_mirror_commit_matches_coefficient_commit_inner() {
+    let prepared = prepared();
+    // Two rings covering the full signed-16 interval, including both ends.
+    let values: Vec<[i16; D]> = vec![
+        std::array::from_fn(|k| ((811 * k) % 65_536) as i16),
+        std::array::from_fn(|k| if k % 2 == 0 { 32_767 } else { -32_768 }),
+    ];
+    let block: Vec<CyclotomicRing<F, D>> = values
+        .iter()
+        .map(|digits| {
+            CyclotomicRing::from_coefficients(std::array::from_fn(|k| {
+                F::from_i64(i64::from(digits[k]))
+            }))
+        })
+        .collect();
+    let commit = |mirror: Option<Vec<&[[i16; D]]>>| {
+        CpuBackend::<F, F>::for_arithmetic_tests()
+            .dense_commit_rows::<D>(
+                &prepared,
+                2,
+                DenseCommitInput::CoeffBlocks {
+                    block_slices: vec![block.as_slice()],
+                    i16_block_slices: mirror,
+                    num_digits_inner: 1,
+                    log_basis_inner: 16,
+                },
+            )
+            .expect("dense i16 commit")
+    };
+
+    assert_eq!(commit(None), commit(Some(vec![values.as_slice()])));
 }
 
 fn run_exact_i16_test(test: fn()) {
@@ -115,6 +154,7 @@ fn dense_i16_commit_matches_schoolbook_composition_inner() {
                 n_a,
                 DenseCommitInput::CoeffBlocks {
                     block_slices: vec![block.as_slice()],
+                    i16_block_slices: None,
                     num_digits_inner,
                     log_basis_inner,
                 },

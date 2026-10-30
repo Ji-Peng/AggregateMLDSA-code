@@ -5,6 +5,10 @@ impl<F: Field> DenseCoefficientSource<F> for crate::DensePoly<F> {
     fn coefficients(&self) -> &[F] {
         self.field_coeffs()
     }
+
+    fn small_i16_coefficients(&self) -> Option<&[i16]> {
+        self.small_i16_mirror()
+    }
 }
 
 impl<F: Field> CommitmentSource<F> for crate::DensePoly<F> {
@@ -27,6 +31,17 @@ impl<F: Field> CommitmentSource<F> for crate::DensePoly<F> {
     where
         F: CanonicalEncoding,
     {
+        // A mirror holds the centered value of every live coefficient, and the
+        // physical zero padding is centered zero. The admission threshold of a
+        // single-digit decomposition is the centered half-modulus, so the reach
+        // is exactly the mirror's range split by sign.
+        if centering_threshold == modulus / 2 {
+            if let Some((low, high)) = self.small_mirror_bounds() {
+                let negative = if low < 0 { low.unsigned_abs() as u128 } else { 0 };
+                let positive = if high > 0 { high as u128 } else { 0 };
+                return Ok((negative, positive));
+            }
+        }
         Ok(crate::opaque::centered_reach_of_field_coeffs(
             self.field_coeffs(),
             modulus,

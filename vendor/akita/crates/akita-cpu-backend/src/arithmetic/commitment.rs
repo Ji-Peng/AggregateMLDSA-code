@@ -1,5 +1,6 @@
 use super::exact_i16::{
     dense_commit_cached_digit_rows as dense_commit_cached_digit_rows_i16,
+    dense_commit_i16_mirror_rows,
     dense_commit_rows as dense_commit_rows_i16,
     recursive_packed_witness_commit_rows as recursive_packed_witness_commit_rows_i16,
 };
@@ -245,11 +246,22 @@ impl<F: Field, E> CpuBackend<F, E> {
                 plan.num_live_blocks
             )));
         }
+        let i16_block_slices = source.small_i16_coefficients().and_then(|flat| {
+            let live = flat.get(..physical_len)?;
+            let (rings, remainder) = live.as_chunks::<D>();
+            debug_assert!(remainder.is_empty());
+            Some(
+                rings
+                    .chunks(plan.num_positions_per_block)
+                    .collect::<Vec<_>>(),
+            )
+        });
         self.dense_commit_rows(
             prepared,
             plan.n_a,
             DenseCommitInput::CoeffBlocks {
                 block_slices,
+                i16_block_slices,
                 num_digits_inner: plan.num_digits_inner,
                 log_basis_inner: plan.log_basis_inner,
             },
@@ -300,6 +312,7 @@ impl<F: Field, E> CpuBackend<F, E> {
             }
             DenseCommitInput::CoeffBlocks {
                 block_slices,
+                i16_block_slices,
                 num_digits_inner,
                 log_basis_inner,
             } => {
@@ -310,6 +323,17 @@ impl<F: Field, E> CpuBackend<F, E> {
                 })?;
                 let signed_digit_kernel =
                     signed_digit_kernel_for_setup(log_basis_inner, "for dense commitment")?;
+                if signed_digit_kernel == SignedDigitKernel::I16 && num_digits_inner == 1 {
+                    if let Some(i16_block_slices) = i16_block_slices.as_deref() {
+                        return dense_commit_i16_mirror_rows(
+                            prepared,
+                            n_a,
+                            row_width,
+                            i16_block_slices,
+                            log_basis_inner,
+                        );
+                    }
+                }
                 let use_exact_ifma52 = signed_digit_kernel == SignedDigitKernel::I8
                     && dense_i8_exact_ifma52_preferred::<F, D>(row_width, log_basis_inner)?;
                 if signed_digit_kernel == SignedDigitKernel::I16 || use_exact_ifma52 {

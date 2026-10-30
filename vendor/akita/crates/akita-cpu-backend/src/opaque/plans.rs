@@ -14,6 +14,9 @@ pub(crate) enum DenseCommitInput<'a, F: Field, const D: usize> {
     CoeffBlocks {
         /// Per-block coefficient slices.
         block_slices: Vec<&'a [CyclotomicRing<F, D>]>,
+        /// Per-block signed-16 mirrors of `block_slices`, in the same block
+        /// split, when the source keeps one.
+        i16_block_slices: Option<Vec<&'a [[i16; D]]>>,
         /// Number of balanced digits used for the A-side commit.
         num_digits_inner: usize,
         /// Logarithm of the gadget basis.
