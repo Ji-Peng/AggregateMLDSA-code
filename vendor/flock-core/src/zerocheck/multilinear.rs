@@ -1258,16 +1258,14 @@ pub fn sparse_round2_message_only(
         .into_par_iter()
         .map(|task| {
             let task_pieces = &pieces[task];
-            let len: usize = task_pieces.iter().map(|&(s, e)| 2 * (e - s)).sum();
-            let mut aa = take_f128(len);
-            let mut bb = take_f128(len);
+            // Two 2,048-element buffers hold at most 1,024 pairs each.
+            let mut aa = take_f128(2 * 1024);
+            let mut bb = take_f128(2 * 1024);
             let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
-            let mut local = 0;
             for &(ps, pe) in task_pieces {
-                let out_base = ps - local / 2;
                 let mut t = ps;
                 while t < pe {
-                    let end = (((t >> eq.n_lo) + 1) << eq.n_lo).min(pe);
+                    let end = (((t >> eq.n_lo) + 1) << eq.n_lo).min(pe).min(t + 1024);
                     let (p1, pi) = fold_pair_run(
                         a,
                         b,
@@ -1278,7 +1276,7 @@ pub fn sparse_round2_message_only(
                         false,
                         t,
                         end,
-                        out_base,
+                        t,
                         &mut aa,
                         &mut bb,
                     );
@@ -1286,7 +1284,6 @@ pub fn sparse_round2_message_only(
                     si += eq.hi[t >> eq.n_lo] * pi.reduce();
                     t = end;
                 }
-                local += 2 * (pe - ps);
             }
             crate::scratch::give_f128(aa);
             crate::scratch::give_f128(bb);
