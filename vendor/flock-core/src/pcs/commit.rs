@@ -874,6 +874,26 @@ pub fn commit_lane_major(q: &[F128], params: &PcsParams) -> (Commitment, ProverD
     commit_lane_major_with(q, params, FusedMerkle::from_env())
 }
 
+/// Minor page faults of the process so far (diagnostic for `FLOCK_COMMIT_TIMING`).
+fn lane_blocked_faults() -> u64 {
+    crate::ntt::additive_ntt_f128::minor_faults()
+}
+
+/// The transparent-huge-page mode of the system and the process's huge-page-backed bytes
+/// (diagnostic for `FLOCK_COMMIT_TIMING`).
+fn thp_state() -> String {
+    let mode = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled").unwrap_or_default();
+    let anon = std::fs::read_to_string("/proc/self/smaps_rollup")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("AnonHugePages:"))
+                .map(|l| l["AnonHugePages:".len()..].trim().to_string())
+        })
+        .unwrap_or_default();
+    format!("{} AnonHugePages {anon}", mode.trim())
+}
+
 /// [`commit_lane_major`] with the leaf treatment given.
 fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) -> (Commitment, ProverData) {
     params.validate();
@@ -901,19 +921,23 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
     // disables the skip (live = t, the pre-skip behavior) — the
     // CERTIFICATION knob for alternating A/B benches; the byte-identity
     // oracles pin that both settings produce the same commitment.
+    let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+    let t_setup = std::time::Instant::now();
+    let faults_setup = if timing { lane_blocked_faults() } else { 0 };
     let mut live = t;
     if var_os("FLOCK_NTT_NO_SKIP").is_none() {
         while live > 0 && q[(live - 1) * d..live * d].iter().all(|w| w.is_zero()) {
             live -= 1;
         }
     }
-    let timing = std::env::var_os("FLOCK_COMMIT_TIMING").is_some();
+    let t_scan = t_setup.elapsed();
     // Lane-blocked layout (agg-mldsa patch, PATCH.md section 8): the codeword is
     // encoded in groups of four lanes straight from `q` and the Merkle rows are
     // gathered from the groups; the values, the tree and the cap are those of the
     // interleaved path below, which `FLOCK_COMMIT_INTERLEAVED=1` selects (the A/B and
     // certification knob) and which serves the shapes too small for the tiling.
     let leaf_hasher = merkle::GroupLeafHasher::new(t, params.merkle_hash);
+    let t_hasher = t_setup.elapsed();
     if var_os("FLOCK_COMMIT_INTERLEAVED").is_none()
         && lane_blocked_ok(params.k_code(), params.log_inv_rate)
         && fused != FusedMerkle::Off
@@ -925,11 +949,34 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
         let n = params.n_positions();
         let groups = t.div_ceil(LANES_PER_GROUP);
         let t_enc = std::time::Instant::now();
-        let mut codeword = crate::scratch::take_f128(groups * LANES_PER_GROUP * n);
+        let t_take = std::time::Instant::now();
+        let (mut codeword, pool_hit) = match crate::scratch::try_take_f128(groups * LANES_PER_GROUP * n) {
+            Some(v) => (v, true),
+            None => (crate::scratch::take_f128(groups * LANES_PER_GROUP * n), false),
+        };
+        let t_take = t_take.elapsed();
+        let t_ntt = std::time::Instant::now();
         let ntt = AdditiveNttF128::standard(params.k_code());
+        let t_ntt = t_ntt.elapsed();
         // `vec!` of zero arrays takes the calloc path: lazy zero pages, first touched by
         // the pass-2 tasks that write the leaves.
+        let t_tree = std::time::Instant::now();
         let mut tree: Vec<Hash> = vec![[0u8; 32]; 2 * n - 1];
+        let t_tree = t_tree.elapsed();
+        if timing {
+            eprintln!(
+                "[commit-timing] set-up (before pass 1): total {:.2} ms = dead-lane scan {:.2} (live {live} of {t}) + hasher {:.2} + codeword take {:.2} (pool {}) + ntt tables {:.2} + tree alloc {:.2} | faults {} | THP {}",
+                t_setup.elapsed().as_secs_f64() * 1e3,
+                t_scan.as_secs_f64() * 1e3,
+                (t_hasher - t_scan).as_secs_f64() * 1e3,
+                t_take.as_secs_f64() * 1e3,
+                if pool_hit { "hit" } else { "MISS" },
+                t_ntt.as_secs_f64() * 1e3,
+                t_tree.as_secs_f64() * 1e3,
+                lane_blocked_faults() - faults_setup,
+                thp_state()
+            );
+        }
         let keep = fused == FusedMerkle::Keep;
         let first = ntt.encode_lane_blocked_hashed(
             &mut codeword,
@@ -944,13 +991,17 @@ fn commit_lane_major_with(q: &[F128], params: &PcsParams, fused: FusedMerkle) ->
         );
         let t_enc = t_enc.elapsed();
         let t_tree = std::time::Instant::now();
+        let faults_tree = if timing { lane_blocked_faults() } else { 0 };
         let merkle_tree = merkle::merkle_tree_from_prehashed_level(tree, n, params.merkle_hash, 0);
+        let t_inner = t_tree.elapsed();
         let cap = cap_layer(&merkle_tree, n, params.level_zero_cap_depth()).to_vec();
         if timing {
             eprintln!(
-                "[commit-timing] lane-blocked fused encode + leaves: {:.2} ms | inner levels: {:.2} ms",
+                "[commit-timing] lane-blocked fused encode + leaves: {:.2} ms | inner levels: {:.2} ms (faults {}) | cap {:.2} ms",
                 t_enc.as_secs_f64() * 1e3,
-                t_tree.elapsed().as_secs_f64() * 1e3
+                t_inner.as_secs_f64() * 1e3,
+                lane_blocked_faults() - faults_tree,
+                (t_tree.elapsed() - t_inner).as_secs_f64() * 1e3
             );
         }
         let layout = if keep {
