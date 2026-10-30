@@ -17,6 +17,8 @@
 //! the verifier's streamed public data. [`mode_b`] is the Keccak-free aggregate
 //! (`prove_mode_b`, `verify_mode_b`). `docs/piop.md` has the stage table.
 
+#[allow(unsafe_code)]
+pub mod alloc;
 pub mod binding;
 pub mod claims;
 pub mod kernel;
