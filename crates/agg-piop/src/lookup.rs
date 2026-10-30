@@ -1430,7 +1430,10 @@ fn prove_with(
     let mut stack_claims: Vec<Option<(Vec<E>, E)>> = vec![None; stacks.len()];
     let mut table_claims: Vec<Option<(Vec<E>, E)>> = vec![None; tables.len()];
     let mut sessions = Vec::new();
-    let arena = crate::kernel::TableArena::shared();
+    // Two shared arenas give the concurrent groups four spares in total (the shared pair
+    // can serve only two folds at once); they persist across sessions, so each size class
+    // is allocated once and reused.
+    let arenas = [crate::kernel::TableArena::shared(), crate::kernel::TableArena::shared()];
 
     for s in 2..=shape.max_depth() {
         let session_start = Instant::now();
@@ -1573,7 +1576,9 @@ fn prove_with(
                 }
             }
         }
-        for (_, group) in &mut groups { group.set_arena(&arena); }
+        for (i, (_, group)) in groups.iter_mut().enumerate() {
+            group.set_arena(&arenas[i % arenas.len()]);
+        }
         let mut rounds = Vec::with_capacity(s - 1);
         let mut rho = Vec::with_capacity(s - 1);
         // While the tables are large, the groups' messages are computed concurrently (each
