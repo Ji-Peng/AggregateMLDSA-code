@@ -25,7 +25,7 @@
 //! tag does not stop a column from matching another table's entries (`docs/lookup.md`).
 //!
 //! Every sum-check runs on [`crate::kernel::Group`] through its public constructors only:
-//! layer lanes are `Source::Planes` halves of the stored layers, leaf lanes are
+//! layer lanes are `Source::Field` halves of the stored layers, leaf lanes are
 //! `Source::Ints` halves of the stacked column (or of `m` and the public index), and the
 //! `X`-dependence of the leaf terms is folded into the instance coefficients, so one
 //! bottom group serves every challenge `X` at the cost of one.
@@ -48,7 +48,7 @@ use rayon::prelude::*;
 
 use crate::kernel::{
     evaluate_compressed, expected_terminal, fm, Group, GroupInstance, IntPairGroup, Lane, LayerGroup, LayerLeaves,
-    LayerPlanes, LayerTree, Source, Term,
+    LayerTree, Source, Term,
 };
 use crate::OpeningField as E;
 
@@ -668,90 +668,54 @@ fn one(transcript: &mut impl LookupTranscript, site: LookupSite) -> Result<E, Lo
 /// One layer of projective fractions.
 #[derive(Clone, Debug, Default)]
 struct Layer {
-    p: LayerPlanes,
-    q: LayerPlanes,
+    p: Vec<E>,
+    q: Vec<E>,
 }
 
 impl Layer {
     fn len(&self) -> usize {
-        self.p.rows()
+        self.p.len()
     }
 
     fn bytes(&self) -> usize {
-        self.p.bytes() + self.q.bytes()
+        32 * self.len()
     }
 }
 
-/// `rows` nodes for every challenge, written as canonical coordinate planes.
 #[allow(unsafe_code)]
-fn build_layers(
-    rows: usize,
-    challenges: usize,
-    node: impl Fn(usize, &mut [(E, E)]) + Sync + Send,
-) -> Vec<Layer> {
-    let mut planes: Vec<[Box<[std::mem::MaybeUninit<u64>]>; 4]> =
-        (0..challenges).map(|_| std::array::from_fn(|_| crate::kernel::buf::uninit::<u64>(rows))).collect();
-    const BLOCK: usize = 1 << 10;
-    let mut blocks: Vec<Vec<[&mut [std::mem::MaybeUninit<u64>]; 4]>> = Vec::new();
-    for lanes in &mut planes {
-        let [pc, pi, qc, qi] = lanes;
-        let mut b = 0;
-        for (((pc, pi), qc), qi) in pc
-            .chunks_mut(BLOCK)
-            .zip(pi.chunks_mut(BLOCK))
-            .zip(qc.chunks_mut(BLOCK))
-            .zip(qi.chunks_mut(BLOCK))
-        {
-            if blocks.len() <= b {
-                blocks.push(Vec::with_capacity(challenges));
-            }
-            blocks[b].push([pc, pi, qc, qi]);
-            b += 1;
-        }
-    }
-    let fill = |(b, mut lanes): (usize, Vec<[&mut [std::mem::MaybeUninit<u64>]; 4]>) | {
-        let mut values = vec![(E::zero(), E::zero()); challenges];
-        let count = lanes[0][0].len();
-        for i in 0..count {
-            node(b * BLOCK + i, &mut values);
-            for (lanes, &(p, q)) in lanes.iter_mut().zip(&values) {
-                lanes[0][i].write(p.c0().to_canonical_u64());
-                lanes[1][i].write(p.c1().to_canonical_u64());
-                lanes[2][i].write(q.c0().to_canonical_u64());
-                lanes[3][i].write(q.c1().to_canonical_u64());
-            }
-        }
-    };
-    if rows >= PARALLEL_NODES {
-        blocks.into_par_iter().enumerate().for_each(fill);
-    } else {
-        blocks.into_iter().enumerate().for_each(fill);
-    }
-    // SAFETY: every block writes both coordinates of every node and challenge, including
-    // tails; the four allocations of a challenge have equal lengths.
-    planes.into_iter().map(|lanes| unsafe {
-        let [pc, pi, qc, qi] = lanes;
-        Layer {
-            p: LayerPlanes::from_parts(pc.assume_init().into_vec(), pi.assume_init().into_vec()),
-            q: LayerPlanes::from_parts(qc.assume_init().into_vec(), qi.assume_init().into_vec()),
-        }
-    }).collect()
-}
-
-/// One layer from a node function.
 fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Layer {
-    let mut out = build_layers(half, 1, |i, values| values[0] = node(i));
-    out.pop().expect("one layer")
+    if half < PARALLEL_NODES {
+        let (p, q) = (0..half).map(node).unzip();
+        return Layer { p, q };
+    }
+    // A parallel first touch, then blocks of both lanes filled in parallel (a parallel
+    // `unzip` was measured slower).
+    const BLOCK: usize = 1 << 10;
+    let mut p = crate::kernel::buf::uninit::<E>(half);
+    let mut q = crate::kernel::buf::uninit::<E>(half);
+    p.par_chunks_mut(BLOCK)
+        .zip(q.par_chunks_mut(BLOCK))
+        .enumerate()
+        .for_each(|(b, (p, q))| {
+            for (i, (p, q)) in p.iter_mut().zip(q.iter_mut()).enumerate() {
+                let (pv, qv) = node(b * BLOCK + i);
+                p.write(pv);
+                q.write(qv);
+            }
+        });
+    // SAFETY: the zipped blocks have equal lengths and every slot was written.
+    unsafe { Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() } }
 }
 
 /// The parent layer: `p = p_0 q_1 + p_1 q_0`, `q = q_0 q_1` (3 `K`-multiplications per node).
 fn parent(child: &Layer) -> Layer {
     let half = child.len() / 2;
+    let (p0, p1) = child.p.split_at(half);
+    let (q0, q1) = child.q.split_at(half);
     build_nodes(half, |y| {
         // Two K products: each high accumulator slot is below 6 * 2^64.
-        let p = E::reduce_product(child.p.get(y).mul_unreduced(child.q.get(half + y))
-            + child.p.get(half + y).mul_unreduced(child.q.get(y)));
-        (p, fm(child.q.get(y), child.q.get(half + y)))
+        let p = E::reduce_product(p0[y].mul_unreduced(q1[y]) + p1[y].mul_unreduced(q0[y]));
+        (p, fm(q0[y], q1[y]))
     })
 }
 
@@ -908,7 +872,43 @@ fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
             *slot = crate::kernel::upper_node(stacked, center, quarter, z, powers);
         }
     };
-    build_layers(quarter, xs.len(), node)
+    let challenges = xs.len();
+    let mut layers: Vec<_> = (0..challenges)
+        .map(|_| (crate::kernel::buf::uninit::<E>(quarter), crate::kernel::buf::uninit::<E>(quarter)))
+        .collect();
+    // Blocks of nodes: every output lane split at the same boundaries.
+    const BLOCK: usize = 1 << 10;
+    let mut blocks: Vec<Vec<&mut [std::mem::MaybeUninit<E>]>> = Vec::new();
+    for layer in &mut layers {
+        for lane in [&mut layer.0, &mut layer.1] {
+            for (b, chunk) in lane.chunks_mut(BLOCK).enumerate() {
+                if blocks.len() <= b {
+                    blocks.push(Vec::with_capacity(2 * challenges));
+                }
+                blocks[b].push(chunk);
+            }
+        }
+    }
+    let fill = |(b, mut lanes): (usize, Vec<&mut [std::mem::MaybeUninit<E>]>)| {
+        let mut values = vec![(E::zero(), E::zero()); challenges];
+        let count = lanes[0].len();
+        for i in 0..count {
+            node(b * BLOCK + i, &mut values);
+            for (pair, &(p, q)) in lanes.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
+                pair[0][i].write(p);
+                pair[1][i].write(q);
+            }
+        }
+    };
+    if quarter >= PARALLEL_NODES {
+        blocks.into_par_iter().enumerate().for_each(fill);
+    } else {
+        blocks.into_iter().enumerate().for_each(fill);
+    }
+    // SAFETY: each node writes both coordinates of every challenge, including tails.
+    layers.into_iter().map(|(p, q)| unsafe {
+        Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() }
+    }).collect()
 }
 
 /// Layer `depth - 3` of a stack for every challenge straight from the leaves: every node is
@@ -931,7 +931,41 @@ fn stack_upper_parents(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
             *slot = (p, fm(qa, qb));
         }
     };
-    build_layers(half, xs.len(), node)
+    let mut layers: Vec<_> =
+        (0..xs.len()).map(|_| (crate::kernel::buf::uninit::<E>(half), crate::kernel::buf::uninit::<E>(half))).collect();
+    // Blocks of nodes: every output lane split at the same boundaries.
+    const BLOCK: usize = 1 << 10;
+    let mut blocks: Vec<Vec<&mut [std::mem::MaybeUninit<E>]>> = Vec::new();
+    for layer in &mut layers {
+        for lane in [&mut layer.0, &mut layer.1] {
+            for (b, chunk) in lane.chunks_mut(BLOCK).enumerate() {
+                if blocks.len() <= b {
+                    blocks.push(Vec::with_capacity(2 * xs.len()));
+                }
+                blocks[b].push(chunk);
+            }
+        }
+    }
+    let fill = |(b, mut lanes): (usize, Vec<&mut [std::mem::MaybeUninit<E>]>) | {
+        let mut values = vec![(E::zero(), E::zero()); xs.len()];
+        let count = lanes[0].len();
+        for i in 0..count {
+            node(b * BLOCK + i, &mut values);
+            for (pair, &(p, q)) in lanes.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
+                pair[0][i].write(p);
+                pair[1][i].write(q);
+            }
+        }
+    };
+    if half >= PARALLEL_NODES {
+        blocks.into_par_iter().enumerate().for_each(fill);
+    } else {
+        blocks.into_iter().enumerate().for_each(fill);
+    }
+    // SAFETY: each node writes both coordinates of every challenge, including tails.
+    layers.into_iter().map(|(p, q)| unsafe {
+        Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() }
+    }).collect()
 }
 
 /// `[X, X^2, X^3, X^4]` per challenge.
@@ -985,12 +1019,12 @@ impl FractionTree {
     }
 
     fn root(&self) -> (E, E) {
-        (self.layers[0].p.get(0), self.layers[0].q.get(0))
+        (self.layers[0].p[0], self.layers[0].q[0])
     }
 
     fn layer1(&self) -> [E; 4] {
         let layer = &self.layers[1];
-        [layer.p.get(0), layer.p.get(1), layer.q.get(0), layer.q.get(1)]
+        [layer.p[0], layer.p[1], layer.q[0], layer.q[1]]
     }
 
     fn bytes(&self) -> usize {
@@ -1572,15 +1606,9 @@ fn prove_with(
                                 .iter()
                                 .flat_map(|&id| {
                                     let layer = &trees[id].layers[s];
-                                    let (pc, pi) = layer.p.parts();
-                                    let (qc, qi) = layer.q.parts();
-                                    [
-                                        (&pc[..half], &pi[..half]),
-                                        (&pc[half..], &pi[half..]),
-                                        (&qc[..half], &qi[..half]),
-                                        (&qc[half..], &qi[half..]),
-                                    ]
-                                    .map(|(c0, c1)| Lane::Source(Source::Planes { c0, c1 }))
+                                    let (p0, p1) = layer.p.split_at(half);
+                                    let (q0, q1) = layer.q.split_at(half);
+                                    [p0, p1, q0, q1].map(|cells| Lane::Source(Source::Field(cells)))
                                 })
                                 .collect();
                             let instances = stored

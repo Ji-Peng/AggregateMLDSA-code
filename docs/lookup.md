@@ -433,10 +433,9 @@ The construction, driven by the PIOP transcript:
 - `LookupTranscript` (absorb, challenges at a `LookupSite`): implemented by the PIOP
   transcript (sites `agg-mldsa/v1/lookup/<site>`, `docs/deviations.md` L5); the unit tests
   and timings use a SHAKE256 test transcript bound to the layout.
-- `FractionTree`: layers `0 .. depth - 1` stored as canonical coordinate planes (SoA `c0`
-  and `c1` limbs, `LayerPlanes`), built in parallel from the leaves (the bottom layer
-  straight from the `i32` cells: `1` `K`-multiplication per node; upper layers `3`); layer
-  `s` is freed after session `s`. For a stack on the integer path
+- `FractionTree`: layers `0 .. depth - 1` stored as `K` pairs, built in parallel from the
+  leaves (the bottom layer straight from the `i32` cells: `1` `K`-multiplication per node;
+  upper layers `3`); layer `s` is freed after session `s`. For a stack on the integer path
   (Section 4.6, `SymLanes`) the layers stop at `depth - 3`, built for every challenge in one
   pass over the leaves (`stack_upper_parents`; `stack_upper_bottoms` with layer `depth - 2`
   stored under `AGG_LOOKUP_LEAF_UPPER=0`).

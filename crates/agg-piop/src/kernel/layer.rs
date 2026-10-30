@@ -641,66 +641,14 @@ pub(crate) fn upper_node(stacked: &[i32], center: i32, quarter: usize, z: usize,
 /// halves are `P_0, P_1` and `Q_0, Q_1`) and its batching coefficients.
 #[derive(Clone, Copy, Debug)]
 pub struct LayerTree<'a> {
-    /// The numerators of layer `s` in canonical coordinate planes.
-    pub p: &'a LayerPlanes,
-    /// The denominators of layer `s` in canonical coordinate planes.
-    pub q: &'a LayerPlanes,
+    /// The numerators of layer `s`.
+    pub p: &'a [E],
+    /// The denominators of layer `s`.
+    pub q: &'a [E],
     /// The coefficient of the `p`-claim.
     pub gamma_p: E,
     /// The coefficient of the `q`-claim.
     pub gamma_q: E,
-}
-
-/// One layer of canonical extension coordinates: both `c0` and then both `c1` limbs of
-/// every cell, as separate planes (SoA). The layer group and the generic fallback read the
-/// planes through [`Self::get`]; the tree build writes them directly.
-#[derive(Clone, Debug, Default)]
-pub struct LayerPlanes {
-    /// The low limb of every cell.
-    pub(crate) c0: Vec<u64>,
-    /// The high limb of every cell.
-    pub(crate) c1: Vec<u64>,
-}
-
-impl LayerPlanes {
-    /// Planes over `values`.
-    #[cfg(test)]
-    pub(crate) fn from_values(values: &[E]) -> Self {
-        Self {
-            c0: values.iter().map(|v| v.c0().to_canonical_u64()).collect(),
-            c1: values.iter().map(|v| v.c1().to_canonical_u64()).collect(),
-        }
-    }
-
-    /// Planes over already-canonical coordinates.
-    pub(crate) fn from_parts(c0: Vec<u64>, c1: Vec<u64>) -> Self {
-        debug_assert_eq!(c0.len(), c1.len());
-        Self { c0, c1 }
-    }
-
-    /// Number of cells.
-    #[must_use]
-    pub fn rows(&self) -> usize {
-        self.c0.len()
-    }
-
-    /// Cell `i` as a field element.
-    #[inline]
-    #[must_use]
-    pub fn get(&self, i: usize) -> E {
-        E::new(crate::BaseField::from_u64(self.c0[i]), crate::BaseField::from_u64(self.c1[i]))
-    }
-
-    /// Bytes of both planes.
-    #[must_use]
-    pub fn bytes(&self) -> usize {
-        8 * (self.c0.len() + self.c1.len())
-    }
-
-    /// The two planes.
-    pub(crate) fn parts(&self) -> (&[u64], &[u64]) {
-        (&self.c0, &self.c1)
-    }
 }
 
 /// One challenge of a stack whose layer `s` is not stored: its layer-`s` cells are computed
@@ -761,7 +709,7 @@ impl LayerSource<'_> {
                 Self::transform(
                     tree,
                     self.ratio[t].0,
-                    [tree.p.get(i), tree.p.get(self.half + i), tree.q.get(i), tree.q.get(self.half + i)],
+                    [tree.p[i], tree.p[self.half + i], tree.q[i], tree.q[self.half + i]],
                 )
             }
             LayerRows::Leaves(leaves) => {
@@ -829,10 +777,10 @@ impl Level0 for LayerSource<'_> {
         if let Some(trees) = stored {
             for ((tree, &(ratio, _)), lanes) in trees.iter().zip(&self.ratio).zip(out.as_chunks_mut::<4>().0) {
                 let raw = [
-                    fold(context, tree.p.get(even), tree.p.get(odd)),
-                    fold(context, tree.p.get(half + even), tree.p.get(half + odd)),
-                    fold(context, tree.q.get(even), tree.q.get(odd)),
-                    fold(context, tree.q.get(half + even), tree.q.get(half + odd)),
+                    fold(context, tree.p[even], tree.p[odd]),
+                    fold(context, tree.p[half + even], tree.p[half + odd]),
+                    fold(context, tree.q[even], tree.q[odd]),
+                    fold(context, tree.q[half + even], tree.q[half + odd]),
                 ];
                 *lanes = Self::transform(tree, ratio, raw);
             }
@@ -892,7 +840,7 @@ impl<'a> LayerGroup<'a> {
     #[must_use]
     pub fn new(trees: Vec<LayerTree<'a>>, eq_point: &[E]) -> Option<Self> {
         let half = 1_usize << eq_point.len();
-        if trees.is_empty() || trees.iter().any(|t| t.p.rows() != 2 * half || t.q.rows() != 2 * half) {
+        if trees.is_empty() || trees.iter().any(|t| t.p.len() != 2 * half || t.q.len() != 2 * half) {
             return None;
         }
         let ratio = trees
@@ -1546,7 +1494,7 @@ fn int_cell(lane: &super::Source<'_>, i: usize) -> i64 {
     match lane {
         super::Source::Ints(cells) => i64::from(cells[i]),
         super::Source::Bytes { cells, map } => map[cells[i] as u8 as usize],
-        super::Source::Field(_) | super::Source::Planes { .. } => unreachable!("integer lanes only"),
+        super::Source::Field(_) => unreachable!("integer lanes only"),
     }
 }
 
@@ -1666,7 +1614,7 @@ impl<'a> LinearIntGroup<'a> {
             || lanes.len() != coefficients.len()
             || lanes
                 .iter()
-                .any(|l| l.len() != rows || matches!(l, super::Source::Field(_) | super::Source::Planes { .. }))
+                .any(|l| l.len() != rows || matches!(l, super::Source::Field(_)))
         {
             return None;
         }
@@ -1898,7 +1846,7 @@ impl<'a> WeightIntGroup<'a> {
                 continue;
             }
             match lane {
-                super::Source::Field(_) | super::Source::Planes { .. } => return None,
+                super::Source::Field(_) => return None,
                 other => ints.push((*other, c)),
             }
         }

@@ -753,9 +753,7 @@ fn dedicated_layer_groups_match_the_generic_group() {
             instances.push(GroupInstance { gamma: gq, terms: vec![Term::Product(vec![c, d])] });
         }
         let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
-        let planes: Vec<(LayerPlanes, LayerPlanes)> =
-            layers.iter().map(|(p, q)| (LayerPlanes::from_values(p), LayerPlanes::from_values(q))).collect();
-        let trees = planes
+        let trees = layers
             .iter()
             .zip(&gammas)
             .map(|((p, q), &(gamma_p, gamma_q))| LayerTree { p, q, gamma_p, gamma_q })
