@@ -36,7 +36,7 @@ use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
 use crate::public_data::PublicData;
 use crate::source_tables::{BridgeGroupTables, MainTables, SourceTableError, SourceTables};
-use crate::stage::{suffix, Points, StageError};
+use crate::stage::{suffix, LaneId, Points, StageError, WeightId};
 use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::{LookupInputs, Stage3Proof};
@@ -190,15 +190,8 @@ pub fn flock_pool_threads() -> usize {
     }
     let default = || {
         let global = rayon::current_num_threads();
-        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        if match std::env::var("AGG_SCHED_PRESET").as_deref() {
-            Ok("auto") => true,
-            Ok("off") | Err(std::env::VarError::NotPresent) => false,
-            _ => {
-                warn_once("unknown AGG_SCHED_PRESET; using off");
-                false
-            }
-        } {
+        let cpus = logical_cpus();
+        if preset_on() {
             match (cpus, global) {
                 (16, 16) if std::env::var("AGG_SCHED_16_FIX").as_deref() == Ok("off") => return 4,
                 (32, 32) => return 12,
@@ -219,6 +212,24 @@ pub fn flock_pool_threads() -> usize {
         Err(std::env::VarError::NotUnicode(_)) => {
             warn_once("AGG_FLOCK_THREADS is not Unicode; using the default pool size");
             default()
+        }
+    }
+}
+
+/// Logical CPUs of the machine (`available_parallelism`, at least one).
+fn logical_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Whether the optional schedule preset is on (`AGG_SCHED_PRESET=auto`). An unknown value
+/// is reported once and treated as off, as it was before the preset existed.
+fn preset_on() -> bool {
+    match std::env::var("AGG_SCHED_PRESET").as_deref() {
+        Ok("auto") => true,
+        Ok("off") | Err(std::env::VarError::NotPresent) => false,
+        _ => {
+            warn_once("unknown AGG_SCHED_PRESET; using off");
+            false
         }
     }
 }
@@ -252,6 +263,13 @@ fn physical_cores() -> Option<usize> {
         cores.insert(std::fs::read_to_string(path).ok()?.trim().to_owned());
     }
     (!cores.is_empty()).then_some(cores.len())
+}
+
+/// Threads of the donated opening pool: one per physical core, capped by the global pool
+/// (the same default as [`opening_pool_threads`], without its override).
+fn donation_threads() -> usize {
+    let global = rayon::current_num_threads();
+    physical_cores().map_or(global, |cores| cores.min(global))
 }
 
 /// Run `f` on a pool of `threads` threads, or on the current pool when `threads` is 0 or not
@@ -330,10 +348,12 @@ fn donate_mode() -> Donate {
 
 /// The opening runner of the Flock pool's workers (`agg_bridge::sched`) under `mode`, or
 /// `None` without donation. At each opening it reads `piop_done` once (no waiting on the
-/// PIOP branch) and either runs the opening in place or builds a pool of `total` threads and
-/// installs the opening there. That pool is local to the call, so nothing installs into a
-/// pool being dropped; its workers never wait on the Flock pool, so the Flock worker that
-/// blocks in `install` cannot deadlock it. The bytes do not depend on the pool
+/// PIOP branch) and either runs the opening in place or installs it on `donated`. The
+/// donated pool of `total` threads is built once, before the Flock work starts, and reused
+/// by every opening; its workers never wait on the Flock pool, so the Flock worker that
+/// blocks in `install` cannot deadlock it. The opening hook receives one job for the whole
+/// ring switch and Ligerito proof, so there is no level boundary at which to re-read
+/// `piop_done`; each sub-proof opening re-reads it. The bytes do not depend on the pool
 /// (`agg_bridge::sched`).
 fn opening_runner(
     mode: Donate,
@@ -341,6 +361,7 @@ fn opening_runner(
     flock_threads: usize,
     total: usize,
     trace: bool,
+    donated: Arc<std::sync::OnceLock<Option<rayon::ThreadPool>>>,
 ) -> Option<OpeningRunner> {
     if mode == Donate::Off {
         return None;
@@ -353,16 +374,7 @@ fn opening_runner(
             _ => finished && total > flock_threads,
         };
         let start = Instant::now();
-        let pool = donate
-            .then(|| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(total)
-                    .stack_size(FLOCK_POOL_STACK)
-                    .thread_name(|i| format!("agg-open-{i}"))
-                    .build()
-                    .ok()
-            })
-            .flatten();
+        let pool = donate.then(|| donated.get_or_init(|| build_donation_pool(total))).and_then(Option::as_ref);
         let threads = if let Some(pool) = &pool {
             pool.install(|| job());
             total
@@ -381,12 +393,63 @@ fn opening_runner(
     }))
 }
 
+/// The pool donated to one opening: `threads` workers with the Flock stack size.
+fn build_donation_pool(threads: usize) -> Option<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(FLOCK_POOL_STACK)
+        .thread_name(|i| format!("agg-open-{i}"))
+        .build()
+        .ok()
+}
+
+/// The PIOP pool size for the fork under the scheduling knobs, or `None` for the caller's
+/// pool. `AGG_PIOP_THREADS` sets it; an invalid value is reported and ignored. With
+/// `AGG_SCHED_PRESET=auto` and no explicit count, the PIOP takes the logical CPUs that the
+/// Flock pool leaves (`cpus - flock`). In both cases the sum is capped at the logical CPU
+/// count, because Rayon workers that spin at a round barrier cost their sibling issue slots.
+/// Without either knob the caller's pool is kept (no default change).
+fn piop_pool_size(flock_threads: usize) -> Option<usize> {
+    let preset = preset_on();
+    let requested = match std::env::var("AGG_PIOP_THREADS") {
+        Err(_) => None,
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(0) => {
+                warn_once("AGG_PIOP_THREADS=0 is not a thread count; using the default");
+                None
+            }
+            Ok(n) => Some(n),
+            Err(_) => {
+                warn_once(&format!(
+                    "AGG_PIOP_THREADS={v:?} is not a thread count; using the default"
+                ));
+                None
+            }
+        },
+    };
+    let mut threads = match requested {
+        Some(n) => n,
+        None if preset => logical_cpus().saturating_sub(flock_threads),
+        None => return None,
+    };
+    let cpus = logical_cpus();
+    if threads + flock_threads > cpus {
+        let capped = cpus.saturating_sub(flock_threads);
+        warn_once(&format!(
+            "PIOP {threads} + Flock {flock_threads} threads exceed {cpus} logical CPUs; \
+             capping the PIOP pool at {capped}"
+        ));
+        threads = capped;
+    }
+    (threads > 0 && threads < rayon::current_num_threads()).then_some(threads)
+}
+
 /// Run `flock` on a fresh rayon pool of `threads` threads (on its own OS thread) while
 /// `piop` runs on the caller (its parallel loops on the global pool); return both results
 /// and the wall time of `flock`. The caller is not a rayon worker ([`flock_pool_threads`]
 /// is 0 there), so no worker blocks on the OS thread. With `AGG_SCHED_DONATE`, the Flock
-/// opening moves to a pool of the global pool's size once the PIOP branch has finished
-/// ([`opening_runner`]).
+/// opening moves to a pool of one thread per physical core once the PIOP branch has
+/// finished ([`opening_runner`]). The PIOP pool follows [`piop_pool_size`].
 fn fork_join<A: Send, B: Send>(
     threads: usize,
     flock: impl FnOnce() -> A + Send,
@@ -394,18 +457,28 @@ fn fork_join<A: Send, B: Send>(
 ) -> ((A, Duration), B) {
     let trace = std::env::var("AGG_SCHED_TRACE").as_deref() == Ok("1");
     let piop_done = Arc::new(AtomicBool::new(false));
+    let mode = donate_mode();
+    let total = donation_threads();
+    let donated = Arc::new(std::sync::OnceLock::new());
     let runner = opening_runner(
-        donate_mode(),
+        mode,
         &piop_done,
         threads,
-        rayon::current_num_threads(),
+        total,
         trace,
+        Arc::clone(&donated),
     );
+    let warm_donation = mode != Donate::Off;
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
             .stack_size(crate::pcs::COMMIT_THREAD_STACK)
             .spawn_scoped(scope, move || {
+                // Build the donated pool on this thread before the Flock work starts, so
+                // its workers and thread-locals are warm when an opening asks for them.
+                if warm_donation {
+                    let _ = donated.get_or_init(|| build_donation_pool(total));
+                }
                 let start = Instant::now();
                 let out = match rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
@@ -422,10 +495,7 @@ fn fork_join<A: Send, B: Send>(
             })
             .expect("spawn the Flock thread");
         let piop_start = Instant::now();
-        let piop_threads = std::env::var("AGG_PIOP_THREADS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0);
+        let piop_threads = piop_pool_size(threads);
         let b = if let Some(n) = piop_threads {
             match rayon::ThreadPoolBuilder::new()
                 .num_threads(n)
@@ -849,6 +919,23 @@ fn prove_piop_with<'a>(
     if trace {
         eprintln!("weights: w_1 {:.1} ms", weights_clock.elapsed().as_secs_f64() * 1e3);
     }
+    // The split replaces `w_1` with an empty placeholder lane in `ProverTables::lane`; only
+    // stage 2's first group may read it, because the split driver substitutes its factors
+    // there. Any other position would silently use the empty table.
+    let stage2_spec = stage2::spec(manifest);
+    assert_eq!(
+        stage2_spec.groups[0].lanes.first(),
+        Some(&LaneId::Weight(WeightId::Level1)),
+        "stage 2's first group must read w_1 in lane 0"
+    );
+    assert!(
+        stage2_spec.groups.iter().all(|group| group
+            .lanes
+            .iter()
+            .position(|&lane| lane == LaneId::Weight(WeightId::Level1))
+            .is_none_or(|position| position == 0)),
+        "w_1 may only appear as the first lane of a stage-2 group"
+    );
     let (stage2_proof, stage2) = if unchecked {
         stage2::prove_unchecked(manifest, &prover_tables, &points, &stage1, transcript)?
     } else {
