@@ -10,8 +10,6 @@
 //! claims: 31 at the suffixes of `r^(3)` and the 7 multiplicity digits at the lookup's
 //! table point.
 
-use std::sync::OnceLock;
-
 use agg_pcs_config::commit::{
     evaluate_signed_table, CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier,
 };
@@ -72,14 +70,6 @@ impl From<PlanError> for PcsError {
     }
 }
 
-static I8_FIELD_VALUES: OnceLock<[BaseField; 256]> = OnceLock::new();
-
-fn i8_field_values() -> &'static [BaseField; 256] {
-    I8_FIELD_VALUES.get_or_init(|| {
-        std::array::from_fn(|byte| BaseField::from_i64(i64::from(byte as u8 as i8)))
-    })
-}
-
 /// Ring dimension and inner decomposition of one dense group's commit.
 #[derive(Clone, Copy, Debug)]
 pub struct DenseShape {
@@ -105,7 +95,6 @@ pub fn group_polynomials(
     shape: Option<DenseShape>,
 ) -> Result<Vec<DensePoly<BaseField>>, AkitaError> {
     let physical_len = 1_usize << physical_vars;
-    let values = i8_field_values();
     columns
         .par_iter()
         .map(|cells| {
@@ -115,25 +104,27 @@ pub fn group_polynomials(
                     actual: cells.len(),
                 });
             }
-            // SAFETY: every physical slot is initialized, including zero padding.
-            let evaluations = unsafe {
-                crate::kernel::buf::fill_par(crate::kernel::buf::uninit(physical_len), FIELD_CONVERSION_CHUNK, |block, out| {
-                    let start = block * FIELD_CONVERSION_CHUNK;
-                    for (i, slot) in out.iter_mut().enumerate() {
-                        let index = start + i;
-                        let value = match cells {
-                            Cells::Narrow(c) => c.get(index).map_or(BaseField::zero(), |&v| values[v as u8 as usize]),
-                            Cells::Wide(c) => c.get(index).map_or(BaseField::zero(), |&v| BaseField::from_i64(i64::from(v))),
-                        };
-                        slot.write(value);
-                    }
-                })
-            };
             let polynomial = match cells {
-                Cells::Narrow(_) => DensePoly::from_field_evals(physical_vars, evaluations)?,
+                Cells::Narrow(cells) => DensePoly::from_small_i8_cells(physical_vars, cells)?,
                 Cells::Wide(cells) => {
-                    DensePoly::from_field_evals(physical_vars, evaluations)?
-                        .attach_small_i16(cells)?
+                    // SAFETY: every physical slot is initialized, including zero padding.
+                    let evaluations = unsafe {
+                        crate::kernel::buf::fill_par(
+                            crate::kernel::buf::uninit(physical_len),
+                            FIELD_CONVERSION_CHUNK,
+                            |block, out| {
+                                let start = block * FIELD_CONVERSION_CHUNK;
+                                for (i, slot) in out.iter_mut().enumerate() {
+                                    let index = start + i;
+                                    let value = cells.get(index).map_or(BaseField::zero(), |&v| {
+                                        BaseField::from_i64(i64::from(v))
+                                    });
+                                    slot.write(value);
+                                }
+                            },
+                        )
+                    };
+                    DensePoly::from_wide_field_evals(physical_vars, evaluations, cells)?
                 }
             };
             if let Some(shape) = shape {
@@ -480,6 +471,23 @@ mod tests {
             wide
         );
         assert!(polynomials[0].small_i16_mirror().is_none());
+    }
+
+    #[test]
+    fn wide_constructor_matches_field_evals() {
+        let wide: Vec<i32> = (0..4096).map(|i| (i % 65_536) as i32 - 32_768).collect();
+        let evals: Vec<BaseField> = wide
+            .iter()
+            .map(|&value| BaseField::from_i64(i64::from(value)))
+            .collect();
+        let direct = DensePoly::from_wide_field_evals(12, evals.clone(), &wide).unwrap();
+        let old = DensePoly::from_field_evals(12, evals)
+            .unwrap()
+            .attach_small_i16(&wide)
+            .unwrap();
+        assert_eq!(direct, old);
+        assert_eq!(direct.small_mirror_bounds(), old.small_mirror_bounds());
+        assert!(direct.small_mirror_bounds().is_some());
     }
 
     #[test]

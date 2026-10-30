@@ -105,3 +105,31 @@ On the IFMA line, 8K local, two adjacent pairs: opening 1161/889 -> 975/716 ms,
 total 5208/4752 -> 4969/3767 ms (shared noisy box: direction only). The 1K
 aggregate is byte-identical under scalar and avx512 and under one and sixteen
 rayon threads.
+
+## 4. Construct dense columns in chunked parallel writers
+
+`sources/dense/small.rs`: `expand` allocates the field plane once at its final
+length and fills it in chunks of 32K cells on the caller's pool; tables of at
+most one chunk stay serial. This build has no SIMD encoder, so the scalar
+`Field::from_i64` kernel runs per chunk.
+
+`sources/dense/poly.rs`: `from_small_i8_cells` takes the logical centered bytes,
+writes the physical-length mirror from them in the same chunked manner, and then
+builds the plane through `expand`. It removes the caller's `to_vec` plus
+`resize` copy, which reallocated because the copy's capacity equalled its
+logical length, and spreads the 32 MiB i8 copy and its page faults over the
+pool. `from_small_i8` keeps its exact-length contract and shares the common
+finish.
+
+`from_wide_field_evals` takes the already encoded field evaluations and the
+width-16 cells together. The cells of this path are known to lie outside the
+centered `i8` range, so the small-`i8` probe of `from_field_evals` is skipped
+and the polynomial starts without an i8 mirror; the signed-16 mirror is then
+attached as before. In both constructors the bounds are taken over exactly the
+same cells as in the previous code. Outside this copy, `agg-piop`'s wide
+column encoder (`kernel::buf::fill_par`) fills the field plane in chunks on
+the pool as well, so the wide column's 256 MiB plane is first touched by the
+writers.
+
+The 1K aggregate is byte-identical under scalar and avx512 and under one and
+sixteen rayon threads; the constructors are not otherwise timed on this box.

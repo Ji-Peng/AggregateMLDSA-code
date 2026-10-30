@@ -8,7 +8,7 @@ use akita_error::{checked, AkitaError};
 use akita_params::SUPPORTED_COMMITMENT_RING_DIMS;
 use akita_types::RingVec;
 use jolt_field::solinas::parallel::*;
-use jolt_field::{CanonicalEncoding, Field};
+use jolt_field::{CanonicalEncoding, Field, Ring};
 use std::borrow::Cow;
 use std::mem::size_of;
 use std::sync::OnceLock;
@@ -499,7 +499,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
 impl DensePoly<jolt_field::Prime64Offset59> {
     /// Construct the fixed-prime dense source from centered bytes without rediscovering
     /// the small-coefficient mirror. Both representations remain available to opening kernels.
-    pub fn from_small_i8(num_vars: usize, mut cells: Vec<i8>) -> Result<Self, AkitaError> {
+    pub fn from_small_i8(num_vars: usize, cells: Vec<i8>) -> Result<Self, AkitaError> {
         let expected = checked::pow2(num_vars)
             .ok_or_else(|| AkitaError::InvalidInput(format!("2^{num_vars} does not fit usize")))?;
         if cells.len() != expected {
@@ -508,18 +508,106 @@ impl DensePoly<jolt_field::Prime64Offset59> {
                 actual: cells.len(),
             });
         }
-        let small_bounds =
-            chunked_min_max(&cells).map(|(low, high)| (i64::from(low), i64::from(high)));
-        cells.resize(expected.max(MIN_FLAT_COEFF_LEN), 0);
-        let coeffs = super::small::expand(&cells);
+        Self::from_small_i8_mirror(num_vars, cells, expected)
+    }
+
+    /// Construct the fixed-prime dense source from a logical centered-byte table.
+    ///
+    /// The mirror is allocated once at the physical length and filled in chunks
+    /// on the caller's pool, so both the copy and the page faults happen in the
+    /// writers. A table of at most one min/max chunk, or a physical length
+    /// within one chunk, stays on the serial path. Tables shorter than
+    /// `2^num_vars` are zero-extended, as [`Self::from_small_i8`] expects.
+    pub fn from_small_i8_cells(num_vars: usize, cells: &[i8]) -> Result<Self, AkitaError> {
+        let expected = checked::pow2(num_vars)
+            .ok_or_else(|| AkitaError::InvalidInput(format!("2^{num_vars} does not fit usize")))?;
+        if cells.len() > expected {
+            return Err(AkitaError::InvalidSize {
+                expected,
+                actual: cells.len(),
+            });
+        }
+        let physical_len = expected.max(MIN_FLAT_COEFF_LEN);
+        let mut mirror = Vec::with_capacity(physical_len);
+        {
+            let spare = &mut mirror.spare_capacity_mut()[..physical_len];
+            if physical_len <= MIN_MAX_CHUNK {
+                write_i8_chunk(cells, spare);
+            } else {
+                cfg_chunks_mut!(spare, MIN_MAX_CHUNK)
+                    .enumerate()
+                    .for_each(|(chunk, part)| {
+                        let start = chunk * MIN_MAX_CHUNK;
+                        write_i8_chunk(cells.get(start..).unwrap_or_default(), part);
+                    });
+            }
+        }
+        // SAFETY: `write_i8_chunk` initializes every slot it is given, and the
+        // disjoint chunks above cover the `physical_len` spare slots, which fit
+        // in `mirror`'s capacity by construction.
+        unsafe { mirror.set_len(physical_len) };
+        Self::from_small_i8_mirror(num_vars, mirror, expected)
+    }
+
+    /// Build the polynomial of an already padded centered-byte mirror.
+    ///
+    /// `mirror[..expected]` is the logical table, including the zero extension
+    /// to `2^num_vars`; the bounds are taken over exactly that prefix, as the
+    /// caller of [`Self::from_small_i8`] specified before padding.
+    fn from_small_i8_mirror(
+        num_vars: usize,
+        mut mirror: Vec<i8>,
+        expected: usize,
+    ) -> Result<Self, AkitaError> {
+        debug_assert!(mirror.len() >= expected);
+        let small_bounds = chunked_min_max(&mirror[..expected])
+            .map(|(low, high)| (i64::from(low), i64::from(high)));
+        mirror.resize(expected.max(MIN_FLAT_COEFF_LEN), 0);
+        let coeffs = super::small::expand(&mirror);
         Ok(Self {
             num_vars,
             coeffs: RingVec::from_coeffs(coeffs),
-            small_i8_coeffs: Some(cells),
+            small_i8_coeffs: Some(mirror),
             small_i16_coeffs: None,
             small_bounds,
             digit_cache: OnceLock::new(),
         })
+    }
+
+    /// Construct the fixed-prime dense source of a width-16 table from its
+    /// already-encoded field evaluations and attach the signed-16 mirror.
+    ///
+    /// The caller knows the cells are wide (at least one lies outside the
+    /// centered `i8` range), so the centered-`i8` mirror of
+    /// [`Self::from_field_evals`] is neither probed nor built. The i16 mirror is
+    /// written, and its bounds taken, by [`Self::attach_small_i16`].
+    pub fn from_wide_field_evals(
+        num_vars: usize,
+        mut evals: Vec<jolt_field::Prime64Offset59>,
+        cells: &[i32],
+    ) -> Result<Self, AkitaError> {
+        let expected = checked::pow2(num_vars)
+            .ok_or_else(|| AkitaError::InvalidInput(format!("2^{num_vars} does not fit usize")))?;
+        if evals.len() != expected {
+            return Err(AkitaError::InvalidSize {
+                expected,
+                actual: evals.len(),
+            });
+        }
+        // No-op for the production shapes, where `expected >= MIN_FLAT_COEFF_LEN`.
+        evals.resize(
+            expected.max(MIN_FLAT_COEFF_LEN),
+            jolt_field::Prime64Offset59::from_u64(0),
+        );
+        let polynomial = Self {
+            num_vars,
+            coeffs: RingVec::from_coeffs(evals),
+            small_i8_coeffs: None,
+            small_i16_coeffs: None,
+            small_bounds: None,
+            digit_cache: OnceLock::new(),
+        };
+        polynomial.attach_small_i16(cells)
     }
 
     /// Attach the signed-16 mirror of a width-16 source.
@@ -580,6 +668,16 @@ impl DensePoly<jolt_field::Prime64Offset59> {
         self.small_i16_coeffs = Some(mirror);
         self.small_bounds = bounds;
         Ok(self)
+    }
+}
+
+/// Write `cells` into `part`, zero-filling beyond the cells.
+///
+/// `part` starts at the index `cells` was sliced from, so the live prefix is
+/// `cells.len().min(part.len())`.
+fn write_i8_chunk(cells: &[i8], part: &mut [std::mem::MaybeUninit<i8>]) {
+    for (index, slot) in part.iter_mut().enumerate() {
+        slot.write(cells.get(index).copied().unwrap_or(0));
     }
 }
 
