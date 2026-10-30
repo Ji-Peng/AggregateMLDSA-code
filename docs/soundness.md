@@ -1111,10 +1111,8 @@ The segment of `l_1` runs from `sd` to the last stage before `X`: `sd` and `fs`,
 messages of events 4 and 6. The segment of `l_2` runs from `X` to the last stage before the
 root fold challenge, whose input is `xi_f`: the PIOP sites, the tied parts' stages and the
 evaluation batch. Every plain stage lies in one segment. The tied parts' stages sit after the
-stage-3 rounds, where the join absorbs their messages (deviation K22). Before the
-fork-join they sat in the segment of `l_1`, between `fs` and `X`, because event 6 absorbed
-their proofs before `X`; now `X`'s input does not contain them, and a checkpoint input must
-encode the complete preceding prefix (Lemma 12.3's proof), so no part stage may precede `X`.
+stage-3 rounds, where the join absorbs their messages (deviation K22). `X`'s input does not
+contain them, and a checkpoint input must encode the complete preceding prefix (Lemma 12.3's proof), so no part stage may precede `X`.
 
 **Projected addresses.** In this linear order the stages of part `p` follow the stage-3
 rounds and those of part `p - 1`, but the input of a part's site (its address) encodes the

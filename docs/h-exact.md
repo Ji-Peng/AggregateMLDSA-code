@@ -996,7 +996,7 @@ Cloud estimate at `2^15` (weak estimate). Two calibrations of this box against
 mode-A delta (+0.21 s) gives about +0.5 s for H-FIPS. (b) The
 relative overhead in mode B (+13% at 8K, +16% at 16K) applied to about 7.3 s of non-Flock
 prove time at 32K on the cloud gives about +1.0 to +1.2 s. So +0.5 to +1.2 s (+3% to
-+8% of 15.0 s), against the earlier +0.75 to +1.2 s (estimate). Both calibrations are weak.
++8% of 15.0 s). Both calibrations are weak.
 Calibration (a) rests on H-exact's local 8K delta, which is smaller than the drift of H-u
 itself between sessions on this box (4.120 s for the first layout, 4.335 and 4.367 s for the
 final one).
@@ -1005,8 +1005,7 @@ both relations at 32K can settle the number.
 
 Prover RSS at `2^15` (estimate). The local delta grows linearly with `N` (+0.34 GiB at 8K,
 +0.67 GiB at 16K), as expected: the four extra main-domain columns, the `HalfR2` group and
-`u_h` all scale with `N`. Scaling by 2 gives about +1.3 to +1.4 GiB at 32K, about twice the
-earlier estimate of +0.7 GiB and about +5% over H-u's 25.8 GiB on the cloud. This holds if the
+`u_h` all scale with `N`. Scaling by 2 gives about +1.3 to +1.4 GiB at 32K, about +5% over H-u's 25.8 GiB on the cloud. This holds if the
 mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should measure it.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
