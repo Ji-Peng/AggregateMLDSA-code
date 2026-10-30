@@ -281,6 +281,11 @@ under `FLOCK_SIMD=portable` with a 4 KiB deep budget),
 `FusedMerkle` mode), `ntt::additive_ntt_f128::lane_blocked::tests::hashed_encode_matches_encode_and_leaves`,
 `merkle::tests::group_leaf_hasher_matches_hash_leaf`.
 
+`AGG_ALLOC_POISON=1` also fills a buffer handed out from `take_f128`, `take_hashes` and
+`take_u8` with `0xA5`. The pools' contents are unspecified, so a caller that reads a slot
+before writing it otherwise silently consumes a previous prove's bytes; the poison mode makes
+that visible to the byte gates.
+
 The `FLOCK_INDUCE_CHUNK_LOG` knob selects the induced-basis chunk size; `0` selects the reference implementation. The default chunk log is 11. The SIMD kernel is selected once per chunk through the existing runtime feature dispatch.
 
 ## 9. Removed experiment switches

@@ -18,7 +18,12 @@
 //! e.g. after the last prove of a batch.
 
 use core::{mem::size_of, ops::Range};
-use std::{env::var_os, mem::ManuallyDrop, ptr::write_bytes, sync::Mutex};
+use std::{
+    env::var_os,
+    mem::ManuallyDrop,
+    ptr::write_bytes,
+    sync::{Mutex, OnceLock},
+};
 
 use rayon::prelude::{IntoParallelRefMutIterator, ParallelIterator, ParallelSliceMut};
 
@@ -31,6 +36,13 @@ use crate::{
 /// Retained buffers. Contents are stale and never trusted: every take
 /// hands out uninitialized scratch (see the module docs).
 static POOL: Mutex<Vec<Vec<F128>>> = Mutex::new(Vec::new());
+
+/// Whether a buffer taken from a pool is filled with `0xA5` before it is handed out
+/// (`AGG_ALLOC_POISON=1`, a test mode that exposes a reader of stale contents).
+fn poison_hits() -> bool {
+    static POISON: OnceLock<bool> = OnceLock::new();
+    *POISON.get_or_init(|| var_os("AGG_ALLOC_POISON").is_some_and(|v| v == "1"))
+}
 
 /// Max buffers retained. The m=29 prove cycle gives ~18 distinct buffers:
 /// witness z/a/b, the L0 codeword, zerocheck's 2 fold outputs + 2 ping-pong
@@ -113,6 +125,11 @@ pub(crate) fn try_take_f128(n: usize) -> Option<Vec<F128>> {
         // exposing uninit/stale elements is sound to *hold* — the caller
         // upholds write-before-read per this function's contract.
         unsafe { v.set_len(n) };
+        if poison_hits() {
+            // SAFETY: the vector holds `n` slots of `F128`, and every bit pattern of
+            // `F128` is a valid value.
+            unsafe { write_bytes(v.as_mut_ptr().cast::<u8>(), 0xA5, n * size_of::<F128>()) };
+        }
         return Some(v);
     }
     if var_os("FLOCK_POOL_TRACE").is_some() {
@@ -339,6 +356,10 @@ pub fn take_u8(n: usize) -> Vec<u8> {
         // pattern is valid, so exposing stale bytes is sound to hold — the
         // caller upholds write-or-zero-before-read per this contract.
         unsafe { v.set_len(n) };
+        if poison_hits() {
+            // SAFETY: the vector holds `n` initialized bytes.
+            unsafe { write_bytes(v.as_mut_ptr(), 0xA5, n) };
+        }
         return v;
     }
     drop(pool);
@@ -473,6 +494,10 @@ pub fn take_hashes(n: usize) -> (Vec<Hash>, bool) {
         // bit pattern valid), so exposing stale bytes is sound to hold. The caller upholds
         // write-before-read per this function's contract.
         unsafe { v.set_len(n) };
+        if poison_hits() {
+            // SAFETY: the vector holds `n` slots of `Hash`, and every bit pattern is valid.
+            unsafe { write_bytes(v.as_mut_ptr().cast::<u8>(), 0xA5, n * size_of::<Hash>()) };
+        }
         return (v, true);
     }
     drop(pool);

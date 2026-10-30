@@ -66,6 +66,24 @@ fn signed(records: &[Record]) -> Vec<(&[u8], &[u8], &[u8])> {
         .collect()
 }
 
+/// Two aggregations of the same records in one process must produce identical bytes. The
+/// second prove reuses the allocator cache and the Flock scratch pools, so a missed write
+/// into a recycled buffer changes the proof or is caught by `AGG_ALLOC_POISON=1`.
+#[test]
+fn aggregating_twice_reuses_pools_without_changing_the_bytes() {
+    on_large_stack(|| {
+        let records = records(0x2424, 24, 16);
+        let signed = signed(&records);
+        let aggregator = Aggregator::new(AggregatorConfig::default());
+        let first = aggregator.aggregate(&signed).expect("first aggregate");
+        let second = aggregator.aggregate(&signed).expect("second aggregate");
+        assert_eq!(
+            first.bytes, second.bytes,
+            "the second aggregate must be byte-identical when the pools are reused"
+        );
+    });
+}
+
 fn statements(records: &[Record]) -> Vec<(&[u8], &[u8])> {
     records
         .iter()
