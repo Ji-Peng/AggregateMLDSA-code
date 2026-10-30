@@ -57,7 +57,7 @@ use crate::{
         SpongeRecord, CHI_WORD_BASE, CONST_WORD, CTILDE_BYTES, CTILDE_WORD_BASE, MU_BYTES,
         MU_WORD_BASE, PUBLIC_WORDS_LOG2, PUBLIC_WORD_BASE, W1_INPUT_BASE, W1_WORD_BASE,
     },
-    witness::{pack_slot_groups, SlotBuffers},
+    witness::{RowReceiver, SlotBuffers, pack_slot_groups},
 };
 use agg_mldsa_simd::Engine;
 
@@ -307,6 +307,12 @@ pub struct TiedCommitted {
 }
 
 impl TiedCommitted {
+    /// Share the committed sponge witness with a concurrent row builder.
+    #[must_use]
+    pub fn row_witness(&self) -> Option<std::sync::Arc<Vec<F128>>> {
+        self.sponge.ab.is_none().then(|| self.sponge.z.clone())
+    }
+
     /// The commitment to absorb at event 2.
     #[must_use]
     pub fn commitment(&self) -> &TiedCommitment {
@@ -889,7 +895,7 @@ impl<'g> TiedPart<'g> {
         );
         let start = std::time::Instant::now();
         trace("commit: start", &start);
-        let data = self.sponge.commit_data(&[&sponge.z]);
+        let data = self.sponge.commit_data(&[sponge.z.as_slice()]);
         trace("sponge committed", &start);
         let (public, c_tilde) = Self::statement(records);
         TiedCommitted {
@@ -1016,6 +1022,20 @@ impl<'g> TiedPart<'g> {
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
     ) -> Result<KeccakProof, KeccakError> {
+        self.prove_with_prepared_rows(committed, _sd, matrices, ys, fs, None)
+    }
+
+    /// Prove with row values `a`, `b` computed concurrently from this commitment, if a
+    /// builder was started ([`TiedCommitted::row_witness`]); otherwise build them here.
+    pub fn prove_with_prepared_rows(
+        &self,
+        committed: TiedCommitted,
+        _sd: [u8; 32],
+        matrices: &BridgeMatrices,
+        ys: Vec<Vec<u8>>,
+        fs: &[u8; 32],
+        rows: Option<RowReceiver>,
+    ) -> Result<KeccakProof, KeccakError> {
         assert_eq!(committed.n, self.n, "committed part of another shape");
         assert_eq!(ys.len(), self.segments, "one final vector per segment");
         let m3 = self.segment().output_bits();
@@ -1025,7 +1045,7 @@ impl<'g> TiedPart<'g> {
             "final vectors are m_3-bit vectors"
         );
         let TiedCommitted {
-            sponge,
+            mut sponge,
             sponge_data,
             bits,
             public,
@@ -1076,6 +1096,18 @@ impl<'g> TiedPart<'g> {
         let binding = squeeze_binding(&mut ch);
         trace("bit value", &start);
         let sponge_start = std::time::Instant::now();
+        // The row values a = A z, b = B z are consumed by the zerocheck. Wait for
+        // the fork's builder here, or build them on the caller's pool if none was started.
+        if sponge.ab.is_none() {
+            // A dropped sender (no builder was started) falls back to the local build.
+            if let Some(ab) = rows.and_then(|rows| rows.recv().ok()) {
+                sponge.ab = Some(ab);
+                trace("a/b rows received", &start);
+            } else {
+                sponge.ensure_ab(self.gate, nu_s, self.n);
+                trace("a/b rows built", &start);
+            }
+        }
         let mut sch = self.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         let (sponge_proof, cap) = self.sponge.prove(
@@ -1541,7 +1573,7 @@ mod tests {
         let label = "64 columns";
         let claims = vec![rand_claim(&mut rng, 6)];
         let (sponge, _) = part.honest_parts(&records);
-        let data = part.sponge().commit_data(&[&sponge.z]);
+        let data = part.sponge().commit_data(&[sponge.z.as_slice()]);
         let cap = data.commitment();
         let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
         let rho_r: Vec<F128> = (0..nu).map(|_| rand_f(&mut rng)).collect();

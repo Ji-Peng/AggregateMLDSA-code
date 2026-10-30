@@ -580,9 +580,10 @@ impl UnionGeometry {
         let mut witnesses = Vec::with_capacity(self.types());
         let mut slot_circuits = Vec::with_capacity(self.types());
         for entry in by_slot {
-            let (SlotBuffers { z, a, b }, circuit) = entry.expect("every slot");
+            let (SlotBuffers { z, ab }, circuit) = entry.expect("every slot");
+            let (a, b) = ab.expect("row values a, b not built (SlotBuffers::ensure_ab)");
             witnesses.push(SlotWitness {
-                z_packed: z,
+                z_packed: std::sync::Arc::unwrap_or_clone(z),
                 a_packed: a,
                 b_packed: b,
             });

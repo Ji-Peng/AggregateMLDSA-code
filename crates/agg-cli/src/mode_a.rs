@@ -53,7 +53,7 @@ use agg_keccak::gate::ChainGate;
 use agg_keccak::prover::{KeccakProof, Profile};
 use agg_keccak::sponge::{sponge_gate, SpongeRecord};
 use agg_keccak::tied::{TiedCommitment, TiedCommitted, TiedPart};
-use agg_keccak::witness::SlotBuffers;
+use agg_keccak::witness::{RowReceiver, SlotBuffers, pack_ab};
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
 use agg_piop::pow::KeccakPlan;
@@ -342,6 +342,8 @@ struct ProverState<'g> {
     /// [`KeccakSide::shares`].
     shares: Vec<Vec<Vec<u8>>>,
     log: Vec<PartProveLog>,
+    /// Rows built concurrently at fork start by [`KeccakSide::prepare_fork`].
+    rows: Option<RowReceiver>,
 }
 
 impl<'g, 'h> FlockProver<'g, 'h> {
@@ -540,12 +542,13 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         );
         let proof = part
             .seg
-            .prove_with_final_vectors(
+            .prove_with_prepared_rows(
                 committed,
                 *bridge_seed,
                 matrices,
                 final_vectors.to_vec(),
                 &span_seed(seeds, record),
+                state.rows.take(),
             )
             .map_err(|e| ProveError::Keccak(e.to_string()))?;
         let log = &mut state.log[0];
@@ -562,6 +565,30 @@ impl<'g, 'h> FlockProver<'g, 'h> {
 }
 
 impl KeccakSide for FlockProver<'_, '_> {
+    fn prepare_fork(&self) -> Option<Box<dyn FnOnce() + Send + '_>> {
+        let mut state = self.state.lock().expect("state");
+        let (z, nu, n) = {
+            let part = if let Some(part) = state.span.as_ref() {
+                part
+            } else if state.segments.len() == 1 && state.segments[0].len() == 1 {
+                &state.segments[0][0]
+            } else {
+                return None;
+            };
+            let z = part.committed.as_ref()?.row_witness()?;
+            (z, part.seg.nu(), part.range.len())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.rows = Some(rx);
+        let gate = self.gate;
+        Some(Box::new(move || {
+            let rows = pack_ab(gate, nu, n, &z);
+            // Release the shared witness before the receiver moves it into the proof.
+            drop(z);
+            let _ = tx.send(rows);
+        }))
+    }
+
     /// The sites of every tied part ([`keccak_plan`]).
     fn plan(&self, segments: usize) -> KeccakPlan {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
@@ -582,6 +609,7 @@ impl KeccakSide for FlockProver<'_, '_> {
         state.span = None;
         state.shares.clear();
         state.log.clear();
+        state.rows = None;
         if spans_with_floor(&self.geometry, self.part_log2, self.span, self.part_floor) {
             return self.commit_span(&mut state, segments);
         }
@@ -749,12 +777,13 @@ impl KeccakSide for FlockProver<'_, '_> {
                 };
                 let proof = part
                     .seg
-                    .prove_with_final_vectors(
+                    .prove_with_prepared_rows(
                         committed,
                         *bridge_seed,
                         matrices,
                         vec![share],
                         &part_seed(&seeds[sigma], s, record),
+                        state.rows.take(),
                     )
                     .map_err(|e| ProveError::Keccak(e.to_string()))?;
                 let log = &mut state.log[entry];

@@ -54,11 +54,11 @@ fn honest_parts_match_reference_packing() {
         for e in &engines {
             for pool in [None, Some(&one)] {
                 let run = || part.honest_parts_with(e, &recs);
-                let (got, bits) = pool.map_or_else(run, |p| p.install(run));
+                let (mut got, bits) = pool.map_or_else(run, |p| p.install(run));
+                got.ensure_ab(&gate, part.nu(), n);
                 let tag = format!("{:?}, n = {n}, one thread {}", e.backend(), pool.is_some());
                 assert!(got.z == want.z, "z, {tag}");
-                assert!(got.a == want.a, "a, {tag}");
-                assert!(got.b == want.b, "b, {tag}");
+                assert!(got.ab == want.ab, "a, b, {tag}");
                 assert!(bits == want_bits, "bits, {tag}");
             }
         }
