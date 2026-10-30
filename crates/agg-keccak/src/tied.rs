@@ -1049,6 +1049,7 @@ impl<'g> TiedPart<'g> {
         let input = self.chain_input(&bits, &sponge.z);
         drop(bits);
         trace("chain input", &start);
+        let chain_start = std::time::Instant::now();
         let mut nonces = Vec::with_capacity(self.chain.rounds());
         let chain = self.chain.prove(matrices, &input, &eq_y, claim, |_, (q1, qinf)| {
             ch.observe_f128(q1);
@@ -1063,11 +1064,18 @@ impl<'g> TiedPart<'g> {
         })?;
         drop(input);
         trace("parity chain", &start);
+        if std::env::var_os("AGG_FLOCK_STAMPS").is_some() {
+            eprintln!(
+                "flock-stamp parity-chain {:.1}",
+                chain_start.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let bit_claim = self.bit_claim(&chain.point);
         let value = bit_value(&sponge.z, &bit_claim, nu_s);
         ch.observe_f128(value);
         let binding = squeeze_binding(&mut ch);
         trace("bit value", &start);
+        let sponge_start = std::time::Instant::now();
         let mut sch = self.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         let (sponge_proof, cap) = self.sponge.prove(
@@ -1083,6 +1091,12 @@ impl<'g> TiedPart<'g> {
             "Flock's prover committed to a different sponge cap than TiedPart::commit"
         );
         trace("sponge instance proven", &start);
+        if std::env::var_os("AGG_FLOCK_STAMPS").is_some() {
+            eprintln!(
+                "flock-stamp sponge-instance-total {:.1}",
+                sponge_start.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let rounds = chain
             .messages
             .iter()

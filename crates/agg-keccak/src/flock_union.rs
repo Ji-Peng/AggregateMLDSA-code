@@ -558,6 +558,7 @@ impl UnionGeometry {
         ch: &mut Ch,
         pre: Option<CommitData>,
     ) -> (UnionProof, KeccakCommitment) {
+        let mut stamp_clock = std::time::Instant::now();
         let union = self.union();
         assert_eq!(
             self.pcs_params.m,
@@ -623,6 +624,7 @@ impl UnionGeometry {
             None => self.commit_stack(q_owned.as_deref().unwrap_or(&z)),
         };
         union.bind_statement(ch, &commitment);
+        flock_stamp("prepare", &mut stamp_clock);
 
         // Zerocheck over the padded address space (`M_bool = M`: boolean types only), run-list
         // gated on the declared rows; `c` aliases `z` (`C = I`).
@@ -640,6 +642,7 @@ impl UnionGeometry {
             );
         drop(a);
         drop(b);
+        flock_stamp("zerocheck", &mut stamp_clock);
         let x_ab = union
             .x_ab_from_multilinear_values(SkipPoint::Phi8(zc_claim.z), &zc_claim.mlv_challenges);
 
@@ -660,6 +663,7 @@ impl UnionGeometry {
             self.pcs_params.lincheck_grinding(),
             ch,
         );
+        flock_stamp("lincheck", &mut stamp_clock);
         let ab = ZClaim {
             point: union.ab_claim_point(
                 lc_claim.r_inner_skip,
@@ -715,6 +719,7 @@ impl UnionGeometry {
         }
         drop(slots);
         drop(stripes);
+        flock_stamp("opening-inputs", &mut stamp_clock);
         let mut pre: Vec<Option<&[F128]>> = vec![s_hat_v_ab.as_deref(), Some(s_hat_v_c.as_slice())];
         pre.extend(bit_s_hat.iter().map(|v| Some(v.as_slice())));
         let banks: Vec<Option<&[F128]>> = match &bank_c {
@@ -763,6 +768,7 @@ impl UnionGeometry {
                 ch,
             ),
         };
+        flock_stamp("opening", &mut stamp_clock);
         (
             UnionProof {
                 flock: R1csProofMergedLigerito {
@@ -956,4 +962,14 @@ mod tests {
             Err(KeccakError::Malformed("union proof length"))
         ));
     }
+}
+
+/// With `AGG_FLOCK_STAMPS` set, print the wall time since the previous stamp of a Flock
+/// sub-step on stderr (`flock-stamp <step> <ms>`) and restart the clock.
+fn flock_stamp(step: &str, last: &mut std::time::Instant) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("AGG_FLOCK_STAMPS").is_some()) {
+        eprintln!("flock-stamp {step} {:.1}", last.elapsed().as_secs_f64() * 1e3);
+    }
+    *last = std::time::Instant::now();
 }
