@@ -45,7 +45,7 @@ where
         validate_digit_shape(num_digits, log_basis)?;
         let coeffs = self.ring_coeffs::<D>()?;
         let Some((planes, basis)) = self.digit_planes_for::<D>(num_digits, log_basis) else {
-            if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+            if num_digits == 1 && log_basis == akita_params::MAX_I16_LOG_BASIS {
                 if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
                     return chunk_ranges
                         .iter()
@@ -248,7 +248,7 @@ where
         // coefficient, so the probe reads 2 B/cell rather than the 8 B/cell
         // field plane. The accumulation plan and flushing are the same as for
         // the live-ring decomposition.
-        if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+        if num_digits == 1 && log_basis == akita_params::MAX_I16_LOG_BASIS {
             if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
                 let coeff_accum = cached_i16_decompose_fold_partitioned::<D>(
                     planes,

@@ -1184,6 +1184,18 @@ fn uni_skip_fold_and_round_pair_runs(
     )
 }
 
+/// Refuse a live-pair interval list that does not fit the packed inputs: pair `p` reads the
+/// 16 bytes at offset `16p` of both inputs.
+fn assert_packed_rows_cover(intervals: &[(usize, usize)], a: &[u8], b: &[u8]) {
+    let bytes = 16 * intervals.last().map_or(0, |&(_, end)| end);
+    assert!(
+        bytes <= a.len().min(b.len()),
+        "packed rows need {bytes} bytes, the inputs hold {} and {}",
+        a.len(),
+        b.len()
+    );
+}
+
 /// [`uni_skip_fold_and_round_pair_optimized_packed_padded`]'s multi-run path
 /// WITHOUT the dead-pair zero writes (M6): for sparse-support instances whose
 /// tail runs the support-proportional folds from the first round, the dead
@@ -1217,11 +1229,12 @@ pub fn uni_skip_fold_and_round_pair_runs_sparse(
     // `useful_block_intervals` at block size `2^(k_skip+1)` (merged, so
     // intervals that share a boundary pair are never processed twice).
     let pair_intervals = padding.useful_block_intervals(k_skip + 1);
+    assert_packed_rows_cover(&pair_intervals, a_packed, b_packed);
     // Each live pair contributes the two adjacent output positions 2k, 2k+1,
     // so the stored set is the pair list doubled — pair-aligned by
     // construction, which is what keeps the NEXT round's fold pairs
     // well-defined under compaction.
-    let store = LiveLayout::new(
+    let store = LiveLayout::new_pair_aligned(
         pair_intervals
             .iter()
             .map(|&(s, e)| (2 * s, 2 * e))
@@ -1252,7 +1265,12 @@ pub fn sparse_round2_message_only(
     padding: &PaddingSpec,
 ) -> (F128, F128, LiveLayout) {
     let iv = padding.useful_block_intervals(k_skip + 1);
-    let store = LiveLayout::new(iv.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
+    assert!(
+        padding.as_single_run().is_none(),
+        "the sparse round-2 variant is for multi-run specs only"
+    );
+    assert_packed_rows_cover(&iv, a, b);
+    let store = LiveLayout::new_pair_aligned(iv.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
     let eq = SplitEqGhash::new(&challenges[1..]);
     let lo_size = 1usize << eq.n_lo;
     let live: usize = iv.iter().map(|&(s, e)| e - s).sum();
@@ -1344,7 +1362,7 @@ unsafe fn round3_task_avx512(
                         cursor += 1;
                     }
                     let (live0, live1) = match store_in.intervals.get(cursor) {
-                        Some(&(start, end)) if start <= y && y + 2 < end => (true, true),
+                        Some(&(start, end)) if start <= y && y + 4 <= end => (true, true),
                         _ => (store_in.rank(&mut cursor, y).is_some(),
                               store_in.rank(&mut cursor, y + 2).is_some()),
                     };
@@ -1425,7 +1443,8 @@ pub fn sparse_round3_from_bits(
     }
     let live_out = shrink_intervals(store_in.intervals());
     let pair_cover = shrink_intervals(&live_out);
-    let store_out = LiveLayout::new(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
+    let store_out =
+        LiveLayout::new_pair_aligned(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
     let mut aa = take_f128(store_out.len());
     let mut bb = take_f128(store_out.len());
     let eq = SplitEqGhash::new(&r_next[1..]);
@@ -1790,6 +1809,19 @@ impl LiveLayout {
         }
     }
 
+    /// Build a pair-aligned layout: every interval starts and ends on an even position.
+    /// The round-3 fold reads two packed rows per live position and moves four positions
+    /// at a time, so the layouts it consumes must be pair-aligned; this constructor makes
+    /// that invariant explicit. [`Self::new`] stays available for the interval-rank tests
+    /// that exercise arbitrary (odd) layouts.
+    pub fn new_pair_aligned(intervals: Vec<(usize, usize)>) -> Self {
+        debug_assert!(
+            intervals.iter().all(|&(s, e)| s % 2 == 0 && e % 2 == 0),
+            "pair-aligned intervals required (even start and end)"
+        );
+        Self::new(intervals)
+    }
+
     /// Compacted buffer length.
     pub fn len(&self) -> usize {
         self.len
@@ -1899,7 +1931,8 @@ pub fn fold_and_round_pair_sparse_into(
     // dead half folds from zero-substituted reads to an honest ZERO, so
     // storing it costs one slot and keeps the layout pair-aligned for the next
     // round. Superset of `live_out`, and every extra slot holds a true zero.
-    let store_out = LiveLayout::new(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
+    let store_out =
+        LiveLayout::new_pair_aligned(pair_cover.iter().map(|&(s, e)| (2 * s, 2 * e)).collect());
     assert!(a_out.len() >= store_out.len() && b_out.len() >= store_out.len());
 
     // The pair cover split into tasks of roughly equal LIVE work, each with

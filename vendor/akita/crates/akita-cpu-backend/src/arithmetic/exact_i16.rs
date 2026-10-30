@@ -102,6 +102,13 @@ pub(super) fn dense_commit_i16_mirror_rows<F: Field + CanonicalEncoding, const D
     block_slices: &[&[[i16; D]]],
     log_basis_inner: u32,
 ) -> Result<Vec<Vec<CyclotomicRing<F, D>>>, AkitaError> {
+    // The mirror stores one balanced digit per coefficient, so it is exact only at the
+    // full signed-16 basis. A narrower basis needs the balanced decomposition.
+    assert_eq!(
+        log_basis_inner,
+        akita_params::MAX_I16_LOG_BASIS,
+        "the i16 mirror kernel folds at the signed-16 basis"
+    );
     let rhs_abs_bound = balanced_signed_digit_abs_bound(log_basis_inner)
         .ok_or_else(|| AkitaError::InvalidSetup("invalid signed digit basis".into()))?;
     prepared.with_shared_ntt::<D, _>(

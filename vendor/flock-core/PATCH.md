@@ -85,6 +85,15 @@ the environment caps the level for A/B runs: `portable` (or `off`) disables ever
 kernel, `gfni` keeps only the SSE GFNI one. On a CPU without the features (or another
 architecture) the portable code runs as before.
 
+### 3.1 Pair-aligned round 3 and packed-row bounds
+
+The AVX-512 round-3 fast path moves four packed rows at a time and takes the both-pairs-live
+shortcut only when `y + 4 <= end` (not `y + 2 < end`, which put only the first of the two
+positions inside the interval). Its layouts are built with `LiveLayout::new_pair_aligned`,
+which asserts even interval bounds; the generic `LiveLayout::new` still serves the interval
+rank tests. The sparse round-2 entry points also assert that the live-pair list fits both
+packed inputs (`16` bytes per pair) before the first raw read.
+
 Tests (every path available on the CPU against the portable one; `simd::with_mask` limits
 the features for one closure): `ntt::additive_ntt_f128::kernels::tests::x86_kernels_match_portable`,
 `ntt::additive_ntt_f128::tests::every_kernel_path_matches_scalar` (whole transforms incl. the

@@ -323,7 +323,10 @@ impl<F: Field, E> CpuBackend<F, E> {
                 })?;
                 let signed_digit_kernel =
                     signed_digit_kernel_for_setup(log_basis_inner, "for dense commitment")?;
-                if signed_digit_kernel == SignedDigitKernel::I16 && num_digits_inner == 1 {
+                if signed_digit_kernel == SignedDigitKernel::I16
+                    && num_digits_inner == 1
+                    && log_basis_inner == akita_params::MAX_I16_LOG_BASIS
+                {
                     if let Some(i16_block_slices) = i16_block_slices.as_deref() {
                         return dense_commit_i16_mirror_rows(
                             prepared,

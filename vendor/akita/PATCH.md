@@ -59,6 +59,12 @@ end of the opening, with identical plane bytes. At 8K a narrow column is only
 aggregate remains byte-identical under scalar and avx512 and under one and
 sixteen rayon threads.
 
+`ops.rs` uses the mirror-backed fold only when `num_digits == 1` and
+`log_basis == MAX_I16_LOG_BASIS`, and `dense_commit_i16_mirror_rows` asserts the same. The
+mirror stores one balanced digit per coefficient, so it is exact only at the full signed-16
+basis; a narrower basis inside the `i16` range would fold an unbalanced digit and disagree
+with `balanced_ring_decompose_fold_chunked`, so it falls back to the balanced decomposition.
+
 Bounds and the signed-16 mirror are now scanned with the conditional
 parallelism helpers instead of the previous serial `Option`-state fold and
 per-cell `push`. `chunked_min_max` splits a slice into 32K-element chunks,
