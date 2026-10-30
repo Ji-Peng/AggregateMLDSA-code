@@ -137,7 +137,7 @@ region, bit point) and `v'` are fixed before any Flock challenge.
 `AGGKCT || 5 || profile || LE32(n) || d || S || LE32(tie nonce) || LE32(eq nonce) || R x
 (q(1) || q(inf) || LE32(round nonce)) || v' || LE32(len) || sponge proof`, the sponge proof a
 `flock_union::UnionProof` with one packed-direct value (`v_pub`) and three ring-switched
-claims in its merged opening (ab, c, and the bit claim)..
+claims in its merged opening (ab, c, and the bit claim).
 
 ## 8. Sites and work (`docs/soundness.md` 3.6, 10)
 

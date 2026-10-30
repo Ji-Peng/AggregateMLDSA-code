@@ -202,7 +202,7 @@ there is no projection seed, Rice section, reverse map or stage-1 projection ins
 Aerie's `projection/` is not used. The quotient's range (`v` digits, Section 4.3) is what
 lifts `Delta = 0` to (3.1).
 
-## P3. Grinding ( spec Sections 10 and 12.1)
+## P3. Grinding (spec Sections 10 and 12.1)
 
 Spec: "the scheduled grinding [is] Aerie's; the work plan per admitted shape is an
 obligation of `agg-pcs-config`."
@@ -214,7 +214,7 @@ bits of a 32-byte predicate with Akita's `grinding_predicate_accepts` and squeez
 challenge after it; the nonces travel in one packed stream (`AggregateProof::work`, 227 to
 556 bytes); the plan (tie sites, then PIOP sites) is bound in event 0 by its SHA3-256 digest
 (`agg_piop::pow::PowPlan`). The sites of a tied part grind on the tie challenger
-(tied-part proof version 5, `docs/soundness.md` 3.6). Akita's opening already ran its own plan
+(tied-part proof version 5, `docs/soundness.md` 3.6). Akita's opening runs its own plan
 (Akita's instance descriptor, pinned by
 `agg-pcs-config/tests/all/akita_grinding.rs`). Remaining differences from Aerie: (1) the nonce is a fixed-width field of a packed stream, not a LEB128 atom in a
 Spongefish argument string (our PIOP has no argument string; the stream's width per site is
