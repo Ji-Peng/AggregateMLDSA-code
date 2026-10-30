@@ -189,6 +189,20 @@ impl PcsProver {
         })
     }
 
+    /// Warm every group's shared NTT slots on the calling thread.
+    ///
+    /// Akita initializes a matrix transform lazily inside the first commit that
+    /// requests it. Both the coefficient and cached-digit representations of a
+    /// dense source request the same transform, so the plan alone determines the
+    /// slots; warming them before the commit stages keeps the build off the
+    /// commit's critical path.
+    pub fn prewarm_groups(&self) -> Result<(), CommitError> {
+        for group in Group::ALL {
+            self.backend.prewarm_commit(*self.plan.profile(group))?;
+        }
+        Ok(())
+    }
+
     /// The work plan.
     #[must_use]
     pub const fn plan(&self) -> &WorkPlan {

@@ -4,7 +4,7 @@ use super::{
     CommitmentStateBinding, CommitmentStatePolicy, CompiledCommitmentRequest,
     CompressionOperationCapabilities, FullCommitmentOutput, InnerCommitOutput, PolynomialType,
     PreparedCommitmentResources, PreparedCompression, PreparedFusedCommitment,
-    PreparedInnerCommitment, PreparedOuterCommitment, ResidentStatePolicy,
+    DenseType, PreparedInnerCommitment, PreparedOuterCommitment, ResidentStatePolicy,
     StageDimensionCapabilities, StageResources, UncompressedCommitmentOutput,
 };
 use super::{InnerRelationStateMaterial, PortableCommitmentHandle, PortableStatePolicy};
@@ -210,16 +210,25 @@ where
     ) -> Result<(), AkitaError> {
         self.validate_plan_capabilities(plan)?;
         for requirement in self.request_ntt_requirements(plan, compiled)? {
-            if let Some(fused) = self.fused_for_plan(plan) {
-                fused.stage.ensure_ntt_slot(requirement)?;
-            } else {
-                match requirement.stage() {
-                    super::CommitmentNttStage::Inner => {
-                        self.split_inner()?.stage.ensure_ntt_slot(requirement)?
-                    }
-                    super::CommitmentNttStage::Outer => {
-                        self.split_outer()?.stage.ensure_ntt_slot(requirement)?
-                    }
+            self.ensure_requirement(plan, requirement)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_requirement(
+        &self,
+        plan: &CommitmentExecutionPlan,
+        requirement: super::CommitmentNttRequirement,
+    ) -> Result<(), AkitaError> {
+        if let Some(fused) = self.fused_for_plan(plan) {
+            fused.stage.ensure_ntt_slot(requirement)?;
+        } else {
+            match requirement.stage() {
+                super::CommitmentNttStage::Inner => {
+                    self.split_inner()?.stage.ensure_ntt_slot(requirement)?
+                }
+                super::CommitmentNttStage::Outer => {
+                    self.split_outer()?.stage.ensure_ntt_slot(requirement)?
                 }
             }
         }
@@ -378,6 +387,47 @@ where
         let compiled =
             compile_commitment_request(plan.inner(), sources, self.request_capabilities(plan)?)?;
         self.prepare_request_resources(plan, &compiled)
+    }
+
+    /// Warm the retained NTT slots of a checked root commitment plan without
+    /// materializing a source.
+    ///
+    /// The coefficient and cached-digit dense representations request the same
+    /// A transform: the key is fixed by the ring dimension, the A row count, the
+    /// digit row width and the basis, not by where the digits are stored. Warming
+    /// either selection therefore covers the commit, and the B transform is
+    /// warmed for every route with an outer stage.
+    pub(crate) fn prewarm_plan_resources(
+        &self,
+        plan: &CommitmentExecutionPlan,
+    ) -> Result<(), AkitaError> {
+        self.validate_plan_capabilities(plan)?;
+        let mut requirements = Vec::new();
+        let inner_resources = self.stage_resources(plan, super::CommitmentNttStage::Inner)?;
+        if inner_resources.is_controlled() {
+            for selected in [
+                PolynomialType::Dense(DenseType::Coefficients),
+                PolynomialType::Dense(DenseType::PredecomposedDigits),
+            ] {
+                if let Some(requirement) = plan.inner_ntt_requirement(selected)? {
+                    if !requirements.contains(&requirement) {
+                        requirements.push(requirement);
+                    }
+                }
+            }
+        }
+        if plan.uncompressed().is_some() {
+            let outer_resources = self.stage_resources(plan, super::CommitmentNttStage::Outer)?;
+            if outer_resources.is_controlled() {
+                if let Some(requirement) = plan.outer_ntt_requirement()? {
+                    requirements.push(requirement);
+                }
+            }
+        }
+        for requirement in requirements {
+            self.ensure_requirement(plan, requirement)?;
+        }
+        Ok(())
     }
 
     /// Validate a complete portable-export route before commitment arithmetic.

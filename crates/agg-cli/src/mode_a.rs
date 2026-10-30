@@ -1503,6 +1503,9 @@ impl Aggregator {
                 let committer = CommitmentManifest::for_relation(n, relation)
                     .ok()
                     .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+                if let Some(committer) = &committer {
+                    let _ = committer.warm();
+                }
                 let public = public_rx
                     .recv()
                     .ok()

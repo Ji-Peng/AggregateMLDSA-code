@@ -286,6 +286,16 @@ impl TableCommitter {
         &self.prover
     }
 
+    /// Warm every group's shared NTT slots on the calling thread.
+    ///
+    /// The slots are otherwise built lazily by the first commit that requests
+    /// them; a caller with spare time before the commit stages (the setup
+    /// thread) can run those builds there.
+    pub fn warm(&self) -> Result<(), PcsError> {
+        self.prover.prewarm_groups()?;
+        Ok(())
+    }
+
     fn commit(&self, role: GroupRole, columns: &[Cells<'_>]) -> Result<GroupCommitment, PcsError> {
         let descriptor = self.manifest.group(role);
         if columns.len() != descriptor.polynomial_count() {
