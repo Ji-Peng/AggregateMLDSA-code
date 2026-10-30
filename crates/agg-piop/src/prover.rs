@@ -17,8 +17,9 @@
 //! the `test-hooks` feature (`docs/deviations.md`).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use agg_bridge::sched::{set_opening_runner, OpeningRunner};
@@ -253,12 +254,45 @@ pub fn opening_pool_threads() -> usize {
     }
 }
 
-/// Physical cores of the machine from the Linux CPU topology (distinct sibling lists of the
-/// online CPUs), or `None` where it cannot be read.
+/// The CPUs this process may run on, from the `Cpus_allowed_list` line of
+/// `/proc/self/status`, or `None` where the file cannot be read or parsed.
+fn allowed_cpus() -> Option<Vec<u32>> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let list = status.lines().find_map(|line| line.strip_prefix("Cpus_allowed_list:"))?.trim();
+    parse_cpu_list(list)
+}
+
+/// A `Cpus_allowed_list` value (`0-3,5,7-9`) as a CPU list, or `None` when malformed.
+fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
+    let mut cpus = Vec::new();
+    for part in list.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: u32 = lo.parse().ok()?;
+                let hi: u32 = hi.parse().ok()?;
+                if hi < lo || hi - lo > 1 << 16 {
+                    return None;
+                }
+                cpus.extend(lo..=hi);
+            }
+            None => cpus.push(part.parse().ok()?),
+        }
+    }
+    (!cpus.is_empty()).then_some(cpus)
+}
+
+/// Physical cores among the CPUs the process may use (distinct sibling lists in the Linux
+/// CPU topology), or `None` where it cannot be read. The affinity set matters under
+/// `taskset`, Slurm and cgroups: counting `cpu0..N-1` includes cores outside the allocation
+/// and can miss allowed ones.
 fn physical_cores() -> Option<usize> {
-    let cpus = std::thread::available_parallelism().ok()?.get();
+    let allowed = allowed_cpus()?;
     let mut cores = std::collections::BTreeSet::new();
-    for cpu in 0..cpus {
+    for cpu in allowed {
         let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
         cores.insert(std::fs::read_to_string(path).ok()?.trim().to_owned());
     }
@@ -326,8 +360,8 @@ const FLOCK_POOL_STACK: usize = 64 << 20;
 enum Donate {
     /// The opening stays on the Flock pool (the default, `0` or `off`).
     Off,
-    /// `1` or `on`: the opening moves to a pool of the global pool's size when the PIOP
-    /// branch has finished by the time Flock reaches it and that pool is larger.
+    /// `1` or `on`: the opening moves to a pool of one thread per physical core when the
+    /// PIOP branch has finished by the time Flock reaches it and that pool is larger.
     Finished,
     /// `force` (tests and debugging): the opening always moves, whatever the PIOP branch
     /// is doing and whatever the pool sizes.
@@ -348,20 +382,18 @@ fn donate_mode() -> Donate {
 
 /// The opening runner of the Flock pool's workers (`agg_bridge::sched`) under `mode`, or
 /// `None` without donation. At each opening it reads `piop_done` once (no waiting on the
-/// PIOP branch) and either runs the opening in place or installs it on `donated`. The
-/// donated pool of `total` threads is built once, before the Flock work starts, and reused
-/// by every opening; its workers never wait on the Flock pool, so the Flock worker that
-/// blocks in `install` cannot deadlock it. The opening hook receives one job for the whole
-/// ring switch and Ligerito proof, so there is no level boundary at which to re-read
-/// `piop_done`; each sub-proof opening re-reads it. The bytes do not depend on the pool
-/// (`agg_bridge::sched`).
+/// PIOP branch) and either runs the opening in place or installs it on the process-wide
+/// donated pool ([`donation_pool`]), which is built on the first donation. Its workers never
+/// wait on the Flock pool, so the Flock worker that blocks in `install` cannot deadlock it.
+/// The opening hook receives one job for the whole ring switch and Ligerito proof, so there
+/// is no level boundary at which to re-read `piop_done`; each sub-proof opening re-reads it.
+/// The bytes do not depend on the pool (`agg_bridge::sched`).
 fn opening_runner(
     mode: Donate,
     piop_done: &Arc<AtomicBool>,
     flock_threads: usize,
     total: usize,
     trace: bool,
-    donated: Arc<std::sync::OnceLock<Option<rayon::ThreadPool>>>,
 ) -> Option<OpeningRunner> {
     if mode == Donate::Off {
         return None;
@@ -374,7 +406,7 @@ fn opening_runner(
             _ => finished && total > flock_threads,
         };
         let start = Instant::now();
-        let pool = donate.then(|| donated.get_or_init(|| build_donation_pool(total))).and_then(Option::as_ref);
+        let pool = if donate { donation_pool(total) } else { None };
         let threads = if let Some(pool) = &pool {
             pool.install(|| job());
             total
@@ -401,6 +433,26 @@ fn build_donation_pool(threads: usize) -> Option<rayon::ThreadPool> {
         .thread_name(|i| format!("agg-open-{i}"))
         .build()
         .ok()
+}
+
+/// The donated opening pools, built on the first donation and kept for the process
+/// lifetime. The key is the thread count, so a prove in a differently sized pool never
+/// reuses a pool of the wrong size. The entries are leaked because an opening holds
+/// `&'static` without keeping the map locked, and concurrent sub-proof openings share them.
+static DONATION_POOLS: OnceLock<Mutex<HashMap<usize, &'static rayon::ThreadPool>>> =
+    OnceLock::new();
+
+/// The donated pool of `threads` workers, built on first use (range: one pool per distinct
+/// thread count, reused across proves).
+fn donation_pool(threads: usize) -> Option<&'static rayon::ThreadPool> {
+    let pools = DONATION_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pools = pools.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&pool) = pools.get(&threads) {
+        return Some(pool);
+    }
+    let pool: &'static rayon::ThreadPool = Box::leak(Box::new(build_donation_pool(threads)?));
+    pools.insert(threads, pool);
+    Some(pool)
 }
 
 /// The PIOP pool size for the fork under the scheduling knobs, or `None` for the caller's
@@ -460,26 +512,12 @@ fn fork_join<A: Send, B: Send>(
     let piop_done = Arc::new(AtomicBool::new(false));
     let mode = donate_mode();
     let total = donation_threads();
-    let donated = Arc::new(std::sync::OnceLock::new());
-    let runner = opening_runner(
-        mode,
-        &piop_done,
-        threads,
-        total,
-        trace,
-        Arc::clone(&donated),
-    );
-    let warm_donation = mode != Donate::Off;
+    let runner = opening_runner(mode, &piop_done, threads, total, trace);
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("agg-flock".into())
             .stack_size(crate::pcs::COMMIT_THREAD_STACK)
             .spawn_scoped(scope, move || {
-                // Build the donated pool on this thread before the Flock work starts, so
-                // its workers and thread-locals are warm when an opening asks for them.
-                if warm_donation {
-                    let _ = donated.get_or_init(|| build_donation_pool(total));
-                }
                 let start = Instant::now();
                 let out = match rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
@@ -1308,5 +1346,23 @@ mod tests {
         let fixed = FixedMatrices(BridgeMatrices::random_for_tests(3));
         assert_eq!(*fixed.matrices(&[0; 32]), *fixed.matrices(&[1; 32]));
         assert!(!fixed.seed_derived());
+    }
+
+    #[test]
+    fn cpu_lists_parse_ranges_and_singletons() {
+        assert_eq!(parse_cpu_list("0-3,5,7-9"), Some(vec![0, 1, 2, 3, 5, 7, 8, 9]));
+        assert_eq!(parse_cpu_list("8"), Some(vec![8]));
+        assert_eq!(parse_cpu_list("4-6"), Some(vec![4, 5, 6]));
+        assert_eq!(parse_cpu_list(""), None);
+        assert_eq!(parse_cpu_list("3-1"), None);
+        assert_eq!(parse_cpu_list("0-x"), None);
+        assert!(allowed_cpus().is_some_and(|cpus| !cpus.is_empty()));
+    }
+
+    #[test]
+    fn the_donated_pool_is_shared_between_calls() {
+        let first = donation_pool(1).expect("a one-thread pool");
+        let second = donation_pool(1).expect("the same pool");
+        assert!(std::ptr::eq(first, second));
     }
 }

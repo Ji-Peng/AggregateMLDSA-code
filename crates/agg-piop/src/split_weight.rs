@@ -48,8 +48,13 @@ impl SplitWeight {
     }
 }
 
-/// Cells per task of the passes over the bit lanes (in-block positions).
-const CHUNK: usize = 1 << 13;
+/// Cells per task of the partial pass over the bit lanes (in-block positions). Each task
+/// keeps the 384 stream positions of its window live in L2 instead of one line per stream.
+const CHUNK: usize = 1 << 11;
+
+/// Cells per subset-table tile of the partial pass. The 64 tables of one tile are 256 KiB
+/// and stay in L2 while every stream reads its 512 contiguous bytes.
+const TILE: usize = 512;
 
 /// Cells per tile of the `D` pass, where the 64 block terms of one `lo` accumulate
 /// unreduced in a 16 KiB array (the 64 `Acc` values are `u128` quadruples).
@@ -57,34 +62,36 @@ const D_TILE: usize = 256;
 
 /// The `eq(r, .)` table over `2^r.len()` indices (bit `j` of the index selects `r[j]`).
 ///
-/// Every level is written into freshly allocated uninitialised storage, so no level pays a
-/// serial zero fill of a field-element newtype, and the large levels are filled in parallel.
-#[allow(unsafe_code)]
+/// The table is built as the product of a table over the low twelve variables and one over
+/// the remaining variables: only the two small tables are filled level by level, and the
+/// full table (range: all `2^r.len()` entries) is written once, in parallel, with one
+/// multiplication per entry.
 fn eq_table(r: &[E]) -> Vec<E> {
-    const BLOCK: usize = 1 << 12;
-    let mut table = vec![E::one()];
-    for &challenge in r {
-        let len = table.len();
-        let complement = E::one() - challenge;
-        let next = crate::kernel::buf::uninit::<E>(2 * len);
-        // SAFETY: the closure writes every slot of every block; the halves read from
-        // `table` are the previous level and stay initialized until the call returns.
-        table = unsafe {
-            crate::kernel::buf::fill_par(next, BLOCK, |block, slots| {
-                let base = block * BLOCK;
-                for (i, slot) in slots.iter_mut().enumerate() {
-                    let index = base + i;
-                    let value = if index < len {
-                        table[index] * complement
-                    } else {
-                        table[index - len] * challenge
-                    };
-                    slot.write(value);
-                }
-            })
-        };
+    const LOW_VARS: usize = 12;
+
+    fn levels(challenges: &[E]) -> Vec<E> {
+        let mut table = vec![E::one()];
+        for &challenge in challenges {
+            let len = table.len();
+            let complement = E::one() - challenge;
+            let mut next = vec![E::zero(); 2 * len];
+            for (i, &value) in table.iter().enumerate() {
+                next[i] = value * complement;
+                next[len + i] = value * challenge;
+            }
+            table = next;
+        }
+        table
     }
-    table
+
+    let split = r.len().min(LOW_VARS);
+    let low = levels(&r[..split]);
+    let high = levels(&r[split..]);
+    let mask = low.len() - 1;
+    (0..1_usize << r.len())
+        .into_par_iter()
+        .map(|index| low[index & mask] * high[index >> split])
+        .collect()
 }
 
 /// The bit pattern of at most eight 0/1 cells (bit `j` from cell `j`). With the
@@ -104,6 +111,25 @@ fn bit_pattern(cells: &[i8], map: &[i64; 256], identity: bool) -> usize {
         }
         pattern
     }
+}
+
+/// The pattern of a full group of eight 0/1 cells read as one little-endian word. The
+/// multiply gathers bit `j` of byte `j` into bit `j` of the result; the lower terms sum to
+/// less than `2^56`, so none carries into the top byte.
+#[inline(always)]
+fn word_pattern(word: u64) -> usize {
+    ((word & 0x0101_0101_0101_0101).wrapping_mul(0x0102_0408_1020_4080) >> 56) as usize
+}
+
+/// The eight cells as a word. The cells are 0/1 (checked when the group was built).
+#[inline(always)]
+fn cell_word(cells: &[i8]) -> u64 {
+    debug_assert_eq!(cells.len(), 8);
+    let mut bytes = [0_u8; 8];
+    for (byte, &cell) in bytes.iter_mut().zip(cells) {
+        *byte = cell as u8;
+    }
+    u64::from_le_bytes(bytes)
 }
 
 /// `acc += value` for a canonical extension-field element: each coordinate is below `p`, so
@@ -182,48 +208,46 @@ impl<'a> SplitGroup<'a> {
         // unreduced sum is below `blocks * p < 2^64 * blocks`; workloads have
         // `blocks <= 2^6`, and the low `u128` slot stays exact for any `blocks < 2^64`.
         debug_assert!(tables.len() < 1 << 32);
-        let d = {
-            let buf = crate::kernel::buf::uninit::<E>(rows);
-            // SAFETY: every slot of the output is written once below.
-            unsafe {
-                crate::kernel::buf::fill_par(buf, D_TILE, |chunk, out| {
-                    let lo0 = chunk * D_TILE;
-                    let n = out.len();
-                    let mut acc = vec![Acc::zero(); n];
-                    let mut bad = 0_u64;
-                    // One 1 KiB slice of `D` stays in L1 while the 64 block terms land in
-                    // `acc`; the reduced pass is one add per cell instead of 64.
-                    for (hi, table) in tables.iter().enumerate() {
-                        let base = (hi << z) + lo0;
-                        let mut pattern = [0_u8; D_TILE];
-                        for (t, (cells, map)) in bits.iter().enumerate() {
-                            let source = &cells[base..base + n];
-                            if identity {
-                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
-                                    bad |= u64::from(cell as u8 > 1);
-                                    *slot |= (cell as u8 & 1) << t;
-                                }
-                            } else {
-                                for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
-                                    let v = map[cell as u8 as usize];
-                                    bad |= (v as u64 > 1) as u64;
-                                    *slot |= ((v as u8) & 1) << t;
-                                }
-                            }
+        // Range: all `rows` slots (8 MiB at z = 19). Every slot is overwritten by the walk
+        // below; the initial fill only makes the buffer safe to write in place, and is one
+        // pass, not the serial concat of the old port.
+        let mut d = vec![E::zero(); rows];
+        d.par_chunks_mut(D_TILE).enumerate().for_each(|(chunk, out)| {
+            let lo0 = chunk * D_TILE;
+            let n = out.len();
+            let mut acc = vec![Acc::zero(); n];
+            let mut bad = 0_u64;
+            // One 1 KiB slice of `D` stays in L1 while the 64 block terms land in `acc`;
+            // the reduced pass is one add per cell instead of 64.
+            for (hi, table) in tables.iter().enumerate() {
+                let base = (hi << z) + lo0;
+                let mut pattern = [0_u8; D_TILE];
+                for (t, (cells, map)) in bits.iter().enumerate() {
+                    let source = &cells[base..base + n];
+                    if identity {
+                        for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                            bad |= u64::from(cell as u8 > 1);
+                            *slot |= (cell as u8 & 1) << t;
                         }
-                        for (slot, &p) in acc.iter_mut().zip(&pattern[..n]) {
-                            lift_canonical(slot, table[p as usize]);
+                    } else {
+                        for (slot, &cell) in pattern[..n].iter_mut().zip(source) {
+                            let v = map[cell as u8 as usize];
+                            bad |= (v as u64 > 1) as u64;
+                            *slot |= ((v as u8) & 1) << t;
                         }
                     }
-                    for (slot, value) in out.iter_mut().zip(acc) {
-                        slot.write(E::reduce_product(value));
-                    }
-                    if bad != 0 {
-                        invalid.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                })
+                }
+                for (slot, &p) in acc.iter_mut().zip(&pattern[..n]) {
+                    lift_canonical(slot, table[p as usize]);
+                }
             }
-        };
+            for (slot, value) in out.iter_mut().zip(acc) {
+                *slot = E::reduce_product(value);
+            }
+            if bad != 0 {
+                invalid.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
         if invalid.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
@@ -297,38 +321,72 @@ impl<'a> SplitGroup<'a> {
         let blocks = self.blocks.len();
         let rows = 1_usize << z;
         let chunks = rows.div_ceil(CHUNK);
+        let groups_per_tile = rows.min(TILE).div_ceil(8);
         let identity = self.bits.iter().all(|(_, map)| std::ptr::eq(*map, &IDENTITY_MAP));
         // partial[chunk][hi * lanes_n + t] = sum over the chunk's lo of eq[lo] b_t[lo, hi].
         // Eight `lo` share one 256-entry subset-sum table of their eq values, and every
         // block and lane reads that table with its own 8-bit pattern: one field addition per
-        // eight cells instead of one per cell, with no branch on the witness bits.
+        // eight cells instead of one per cell, with no branch on the witness bits. A task
+        // covers `CHUNK` cells, processed as `TILE`-cell tiles: the tile's 64 tables are
+        // built once, then each of the 384 streams reads its 512 contiguous bytes line by
+        // line, so no stream line is evicted before its eight patterns are used.
         let partial: Vec<Vec<E>> = (0..chunks)
             .into_par_iter()
-            .map(|chunk| {
-                let lo0 = chunk * CHUNK;
-                let lo1 = (lo0 + CHUNK).min(rows);
-                let mut acc = vec![E::zero(); blocks * lanes_n];
-                let mut lo = lo0;
-                while lo < lo1 {
-                    let n = (lo1 - lo).min(8);
-                    let patterns = 1_usize << n;
-                    let mut subset = [E::zero(); 256];
-                    for p in 1..patterns {
-                        let low = p & (p - 1);
-                        subset[p] = subset[low] + eq[lo + (p ^ low).trailing_zeros() as usize];
-                    }
-                    for hi in 0..blocks {
-                        let base = (hi << z) + lo;
-                        for (t, (cells, map)) in self.bits.iter().enumerate() {
-                            // The cells are 0/1 (checked when the group was built).
-                            let p = bit_pattern(&cells[base..base + n], map, identity);
-                            acc[hi * lanes_n + t] += subset[p];
+            .map_init(
+                // One 256 KiB table buffer per worker (64 groups of 256 entries), kept
+                // across the chunks the worker takes.
+                || vec![E::zero(); groups_per_tile * 256],
+                |subset, chunk| {
+                    let lo0 = chunk * CHUNK;
+                    let lo1 = (lo0 + CHUNK).min(rows);
+                    let mut acc = vec![E::zero(); blocks * lanes_n];
+                    // The subset tables of one tile: `groups_per_tile` groups of eight `eq`
+                    // values, 256 entries each. Every group rewrites the entries below its
+                    // pattern count on each tile, and reads stay below that count, so only
+                    // entry 0 needs an explicit zero.
+                    let mut tile = lo0;
+                    while tile < lo1 {
+                        let tile_n = (lo1 - tile).min(TILE);
+                        let groups = tile_n.div_ceil(8);
+                        for g in 0..groups {
+                            let lo = tile + 8 * g;
+                            let n = (tile_n - 8 * g).min(8);
+                            let patterns = 1_usize << n;
+                            let base = g * 256;
+                            subset[base] = E::zero();
+                            for p in 1..patterns {
+                                let low = p & (p - 1);
+                                subset[base + p] =
+                                    subset[base + low] + eq[lo + (p ^ low).trailing_zeros() as usize];
+                            }
                         }
+                        for hi in 0..blocks {
+                            let base = (hi << z) + tile;
+                            for (t, (cells, map)) in self.bits.iter().enumerate() {
+                                let source = &cells[base..base + tile_n];
+                                let slot = &mut acc[hi * lanes_n + t];
+                                let full = tile_n / 8 * 8;
+                                for (g, cells) in source[..full].chunks_exact(8).enumerate() {
+                                    let p = if identity {
+                                        word_pattern(cell_word(cells))
+                                    } else {
+                                        bit_pattern(cells, map, false)
+                                    };
+                                    *slot += subset[g * 256 + p];
+                                }
+                                let tail = &source[full..];
+                                if !tail.is_empty() {
+                                    let p = bit_pattern(tail, map, identity);
+                                    let g = full / 8;
+                                    *slot += subset[g * 256 + p];
+                                }
+                            }
+                        }
+                        tile += tile_n;
                     }
-                    lo += n;
-                }
-                acc
-            })
+                    acc
+                },
+            )
             .collect();
         let mut lanes: Vec<Lane<'a>> = Vec::with_capacity(lanes_n + 1);
         lanes.push(Lane::Folded(self.blocks.iter().map(|&b| c_at * b).collect()));
