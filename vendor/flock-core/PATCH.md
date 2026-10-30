@@ -65,6 +65,7 @@ run time (`src/simd.rs`: `is_x86_feature_detected!`, cached in an atomic) and ca
 | zerocheck round 1: `shift_reduce_inner_ab` (GFNI AVX-512, else GFNI SSE), `bit_transpose_64bytes` (`avx512vbmi`), `accumulate_convert_with_s_hat_v` (VPCLMULQDQ) | as listed | `zerocheck/univariate_skip_optimized/kernels.rs` |
 | inverse-NTT table `apply` (`ell = 64`) | `avx512f` | `ntt/inv_table.rs` |
 | zerocheck round 2 (`fold_pair_run`; the upstream inline block moved verbatim into `fold_pair_run_x86_avx512`) and the fused fold + message (`fold_and_message_x86_avx512`, given its `#[target_feature]`) | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
+| zerocheck packed round 3 (`round3_task_avx512`), with wide products reduced once per equality block | `avx512f`, `vpclmulqdq`, `sse4.1` | `zerocheck/multilinear.rs` |
 
 The AVX-512 GF(2^128) helpers those kernels use (`ghash_mul_x4`, `f128x4_loadu`,
 `f128x4_set`, `WideGhashX4`) are copied from `flock-field` 83f963e

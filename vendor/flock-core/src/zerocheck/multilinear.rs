@@ -1293,37 +1293,92 @@ pub fn sparse_round2_message_only(
     (challenges[0] * s1, si, store)
 }
 
-/// Fold four packed rows, with one pair each from `a` and `b`.
+/// Fold and accumulate a task while keeping the wide products in registers.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-unsafe fn round3_fold_pair(table: &UniSkipFoldTable, a: &[u8], b: &[u8], row: usize) -> [F128; 4] {
-    // Slicing checks the complete two-row input before the unchecked table walk.
-    let a = &a[16 * row..16 * (row + 2)];
-    let b = &b[16 * row..16 * (row + 2)];
-    unsafe {
-        let ptr = table.data.as_ptr();
-        let lo = fold_round2_pair_x86_unchecked_8(ptr, a.as_ptr(), a.as_ptr().add(16), b.as_ptr(), b.as_ptr().add(16));
-        let hi = fold_round2_pair_x86_unchecked_8(ptr.add(8 * 256), a.as_ptr().add(8), a.as_ptr().add(24), b.as_ptr().add(8), b.as_ptr().add(24));
-        [lo[0] + hi[0], lo[1] + hi[1], lo[2] + hi[2], lo[3] + hi[3]]
+unsafe fn round3_task_avx512(
+    part: &[(usize, usize)], ao: &mut [F128], bo: &mut [F128],
+    a: &[u8], b: &[u8], joint: &UniSkipFoldTable, eq: &SplitEqGhash,
+    store_in: &LiveLayout,
+) -> (F128, F128) {
+    let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
+    let mut cursor = store_in.seek(4 * part[0].0);
+    let mut out = 0;
+    for &(ps, pe) in part {
+        let mut t = ps;
+        while t < pe {
+            let end = pe.min(((t >> eq.n_lo) + 1) << eq.n_lo);
+            let mut p = F256Unreduced::ZERO;
+            let mut q = F256Unreduced::ZERO;
+            let mut pw = WideGhashX4::zero();
+            let mut qw = WideGhashX4::zero();
+            while t < end {
+                let count = (end - t).min(4);
+                let mut av = [[F128::ZERO; 2]; 4];
+                let mut bv = [[F128::ZERO; 2]; 4];
+                for lane in 0..count {
+                    let row = 2 * (t + lane);
+                    let y = 2 * row;
+                    while cursor < store_in.intervals.len() && store_in.intervals[cursor].1 <= y {
+                        cursor += 1;
+                    }
+                    let (live0, live1) = match store_in.intervals.get(cursor) {
+                        Some(&(start, end)) if start <= y && y + 2 < end => (true, true),
+                        _ => (store_in.rank(&mut cursor, y).is_some(),
+                              store_in.rank(&mut cursor, y + 2).is_some()),
+                    };
+                    if live0 && live1 {
+                        let aa = &a[16 * row..16 * (row + 2)];
+                        let bb = &b[16 * row..16 * (row + 2)];
+                        let ptr = joint.data.as_ptr();
+                        // SAFETY: the slices contain two rows and the table has 16 chunks.
+                        let (lo, hi) = unsafe {
+                            (fold_round2_pair_x86_unchecked_8(ptr, aa.as_ptr(), aa.as_ptr().add(16), bb.as_ptr(), bb.as_ptr().add(16)),
+                             fold_round2_pair_x86_unchecked_8(ptr.add(8 * 256), aa.as_ptr().add(8), aa.as_ptr().add(24), bb.as_ptr().add(8), bb.as_ptr().add(24)))
+                        };
+                        av[lane] = [lo[0] + hi[0], lo[1] + hi[1]];
+                        bv[lane] = [lo[2] + hi[2], lo[3] + hi[3]];
+                    } else {
+                        for (i, live) in [live0, live1].into_iter().enumerate() {
+                            if live {
+                                let pos = 16 * (row + i);
+                                av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
+                                bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
+                            }
+                        }
+                    }
+                    ao[out..out + 2].copy_from_slice(&av[lane]);
+                    bo[out..out + 2].copy_from_slice(&bv[lane]);
+                    out += 2;
+                }
+                let lo = t & ((1 << eq.n_lo) - 1);
+                if count == 4 {
+                    unsafe {
+                        let a1 = f128x4_set(av[0][1], av[1][1], av[2][1], av[3][1]);
+                        let b1 = f128x4_set(bv[0][1], bv[1][1], bv[2][1], bv[3][1]);
+                        let ax = f128x4_set(av[0][0]+av[0][1], av[1][0]+av[1][1], av[2][0]+av[2][1], av[3][0]+av[3][1]);
+                        let bx = f128x4_set(bv[0][0]+bv[0][1], bv[1][0]+bv[1][1], bv[2][0]+bv[2][1], bv[3][0]+bv[3][1]);
+                        let weights = f128x4_loadu(eq.lo[lo..lo + 4].as_ptr());
+                        // XOR of degree-at-most-254 carryless products remains within 256 bits.
+                        pw.mul_acc(weights, ghash_mul_x4(a1, b1));
+                        qw.mul_acc(weights, ghash_mul_x4(ax, bx));
+                    }
+                } else {
+                    for lane in 0..count {
+                        // XOR of degree-at-most-254 carryless products remains within 256 bits.
+                        p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
+                        q ^= eq.lo[lo + lane].mul_unreduced((av[lane][0] + av[lane][1]) * (bv[lane][0] + bv[lane][1]));
+                    }
+                }
+                t += count;
+            }
+            p ^= pw.fold();
+            q ^= qw.fold();
+            s1 += eq.hi[(t - 1) >> eq.n_lo] * p.reduce();
+            si += eq.hi[(t - 1) >> eq.n_lo] * q.reduce();
+        }
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-unsafe fn round3_message_x4(eq: &[F128], av: &[[F128; 2]; 4], bv: &[[F128; 2]; 4]) -> (F256Unreduced, F256Unreduced) {
-    unsafe {
-        let a1 = f128x4_set(av[0][1], av[1][1], av[2][1], av[3][1]);
-        let b1 = f128x4_set(bv[0][1], bv[1][1], bv[2][1], bv[3][1]);
-        let ax = f128x4_set(av[0][0] + av[0][1], av[1][0] + av[1][1], av[2][0] + av[2][1], av[3][0] + av[3][1]);
-        let bx = f128x4_set(bv[0][0] + bv[0][1], bv[1][0] + bv[1][1], bv[2][0] + bv[2][1], bv[3][0] + bv[3][1]);
-        let weights = f128x4_loadu(eq.as_ptr());
-        let mut p = WideGhashX4::zero();
-        let mut q = WideGhashX4::zero();
-        // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
-        p.mul_acc(weights, ghash_mul_x4(a1, b1));
-        q.mul_acc(weights, ghash_mul_x4(ax, bx));
-        (p.fold(), q.fold())
-    }
+    (s1, si)
 }
 
 /// Fold directly from the packed rows and compute the following message.
@@ -1369,11 +1424,14 @@ pub fn sparse_round3_from_bits(
     let (s1, si) = work
         .into_par_iter()
         .map(|(part, ao, bo)| {
+            #[cfg(target_arch = "x86_64")]
+            if has(AVX512_CLMUL) {
+                // SAFETY: the runtime check provides the target features.
+                return unsafe { round3_task_avx512(part, ao, bo, a, b, &joint, &eq, store_in) };
+            }
             let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
             let mut cursor = store_in.seek(4 * part[0].0);
             let mut out = 0;
-            #[cfg(target_arch = "x86_64")]
-            let simd = has(AVX512_CLMUL);
             for &(ps, pe) in part {
                 let mut t = ps;
                 while t < pe {
@@ -1388,22 +1446,6 @@ pub fn sparse_round3_from_bits(
                             let row = 2 * (t + lane);
                             let live0 = store_in.rank(&mut cursor, 2 * row).is_some();
                             let live1 = store_in.rank(&mut cursor, 2 * (row + 1)).is_some();
-                            #[cfg(target_arch = "x86_64")]
-                            if simd && live0 && live1 {
-                                // SAFETY: runtime feature detection and the checked input slices in the helper.
-                                let f = unsafe { round3_fold_pair(&joint, a, b, row) };
-                                av[lane] = [f[0], f[1]];
-                                bv[lane] = [f[2], f[3]];
-                            } else {
-                                for (i, live) in [live0, live1].into_iter().enumerate() {
-                                    if live {
-                                        let pos = 16 * (row + i);
-                                        av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
-                                        bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
-                                    }
-                                }
-                            }
-                            #[cfg(not(target_arch = "x86_64"))]
                             for (i, live) in [live0, live1].into_iter().enumerate() {
                                 if live {
                                     let pos = 16 * (row + i);
@@ -1416,20 +1458,6 @@ pub fn sparse_round3_from_bits(
                             out += 2;
                         }
                         let lo = t & ((1 << eq.n_lo) - 1);
-                        #[cfg(target_arch = "x86_64")]
-                        if simd && count == 4 {
-                            // SAFETY: feature detection succeeded and this run stays in the eq block.
-                            let (x, y) = unsafe { round3_message_x4(&eq.lo[lo..lo + 4], &av, &bv) };
-                            p ^= x;
-                            q ^= y;
-                        } else {
-                            for lane in 0..count {
-                                // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
-                                p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
-                                q ^= eq.lo[lo + lane].mul_unreduced((av[lane][0] + av[lane][1]) * (bv[lane][0] + bv[lane][1]));
-                            }
-                        }
-                        #[cfg(not(target_arch = "x86_64"))]
                         for lane in 0..count {
                             // XOR accumulation stays within 256 bits: each carryless product has degree at most 254.
                             p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
@@ -3785,6 +3813,40 @@ mod tests {
         assert!(b_mlv.iter().all(|v| v.is_zero()));
         assert_eq!(msg_1, F128::ZERO);
         assert_eq!(msg_inf, F128::ZERO);
+    }
+
+    #[test]
+    fn packed_round3_matches_portable_with_interval_edges() {
+        let mut rng = Rng::new(119);
+        let a: Vec<u8> = (0..32 * 256).map(|_| rng.next_u64() as u8).collect();
+        let b: Vec<u8> = (0..32 * 256).map(|_| rng.next_u64() as u8).collect();
+        let table = UniSkipFoldTable::new(6, rng.f128());
+        let rho = rng.f128();
+        let r = rng.f128_vec(9);
+        for layout in [LiveLayout::new(vec![(0, 1024)]),
+                       LiveLayout::new(vec![(1, 75), (79, 507), (510, 1021)])] {
+            let run = || super::sparse_round3_from_bits(&a, &b, &table, rho, &r, &layout);
+            let expected = crate::simd::with_mask(0, run);
+            let actual = crate::simd::with_mask(0xff, run);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    /// Single-thread packed third round with a large live interval.
+    #[test]
+    #[ignore = "large single-thread microbenchmark"]
+    fn bench_packed_round3() {
+        let pairs = 1 << 20;
+        let a = vec![0x35u8; 32 * pairs];
+        let b = vec![0xa6u8; 32 * pairs];
+        let table = UniSkipFoldTable::new(6, F128::new(3, 7));
+        let r = vec![F128::new(5, 11); 21];
+        let layout = LiveLayout::new(vec![(0, 4 * pairs)]);
+        for run in 0..6 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(super::sparse_round3_from_bits(&a, &b, &table, F128::new(7, 13), &r, &layout));
+            eprintln!("round3 run={run} ms={:.3}", start.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     #[test]
