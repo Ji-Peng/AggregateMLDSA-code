@@ -2791,11 +2791,14 @@ pub fn induce_sumcheck_poly(
             t
         })
         .collect();
-    let mut basis_poly = vec![F128::ZERO; n];
+    // Zeroed pages are faulted by the parallel chunk writers.
+    let mut basis_poly = crate::alloc_zeroed_vec::<F128>(n);
     basis_poly
         .par_chunks_mut(chunk)
         .enumerate()
         .for_each(|(h, acc)| {
+            #[cfg(target_arch = "x86_64")]
+            let simd = crate::simd::has(crate::simd::AVX512_CLMUL);
             for i in 0..n_queries {
                 // P_i(H): the high factors selected by the bits of the chunk index.
                 let mut scale = F128::ONE;
@@ -2804,7 +2807,14 @@ pub fn induce_sumcheck_poly(
                         scale *= s_at[i * log_msg_cols + k];
                     }
                 }
-                scaled_xor_into(acc, &tables[i * chunk..(i + 1) * chunk], scale);
+                let src = &tables[i * chunk..(i + 1) * chunk];
+                #[cfg(target_arch = "x86_64")]
+                if simd {
+                    // SAFETY: the runtime check supplies the kernel features.
+                    unsafe { scaled_xor_into_avx512(acc, src, scale) };
+                    continue;
+                }
+                scaled_xor_into(acc, src, scale);
             }
         });
 
@@ -2819,6 +2829,27 @@ fn scaled_xor_into(acc: &mut [F128], src: &[F128], scale: F128) {
     for (a, &v) in acc.iter_mut().zip(src) {
         *a += scale * v;
     }
+}
+
+/// Four independent field products per vector, followed by XOR into the basis.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,vpclmulqdq")]
+unsafe fn scaled_xor_into_avx512(acc: &mut [F128], src: &[F128], scale: F128) {
+    use crate::simd::x86::{f128x4_loadu, f128x4_splat, f128x4_storeu, ghash_mul_x4};
+    use core::arch::x86_64::_mm512_xor_si512;
+    assert_eq!(acc.len(), src.len());
+    let scale_vec = f128x4_splat(scale);
+    let mut i = 0;
+    while i + 4 <= acc.len() {
+        // SAFETY: both slices contain four elements starting at i.
+        unsafe {
+            let product = ghash_mul_x4(f128x4_loadu(src.as_ptr().add(i)), scale_vec);
+            let result = _mm512_xor_si512(f128x4_loadu(acc.as_ptr().add(i)), product);
+            f128x4_storeu(acc.as_mut_ptr().add(i), result);
+        }
+        i += 4;
+    }
+    scaled_xor_into(&mut acc[i..], &src[i..], scale);
 }
 
 fn induce_sumcheck_poly_reference(
@@ -6895,6 +6926,23 @@ mod tests {
             t_r,
             "residual inner product != t_r"
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn scaled_xor_avx512_matches_scalar_for_tails() {
+        if !crate::simd::has(crate::simd::AVX512_CLMUL) { return; }
+        for n in 0..20 {
+            let src: Vec<_> = (0..n).map(|i| F128::new(i as u64 * 17, i as u64 * 29)).collect();
+            let mut expected = vec![F128::new(3, 5); n];
+            let mut actual = expected.clone();
+            for scale in [F128::ZERO, F128::ONE, F128::new(123, 456)] {
+                super::scaled_xor_into(&mut expected, &src, scale);
+                // SAFETY: runtime detection provides the kernel features.
+                unsafe { super::scaled_xor_into_avx512(&mut actual, &src, scale) };
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     /// Single-thread induced basis at the 32K opening shape.

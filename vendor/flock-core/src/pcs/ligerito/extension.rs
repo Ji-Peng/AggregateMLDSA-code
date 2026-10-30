@@ -1767,6 +1767,7 @@ struct StatTerm {
 fn block_statistics(f: &[F128], withins: &[&[F128]], d: usize, live: usize) -> Vec<Vec<F128>> {
     let n_e = f.len() / d;
     let live = live.min(n_e);
+    debug_assert!(f[live * d..].iter().all(|v| v.is_zero()));
     const CH: usize = 1 << 12;
     let n_ch = d.div_ceil(CH);
     let partial: Vec<Vec<F128>> = (0..live * n_ch)
@@ -1843,6 +1844,7 @@ fn fold_block_pairs(v: &mut Vec<F256>, r: F256) {
 fn fold_blocks_by_eq_split(f: &[F128], w: &[F256], d: usize, live: usize) -> Vec<F256> {
     debug_assert_eq!(f.len(), w.len() * d);
     let live = live.min(w.len());
+    debug_assert!(f[live * d..].iter().all(|v| v.is_zero()));
     let mut out = crate::scratch::take_f256(2 * d);
     const CH: usize = 1 << 11;
     out.par_chunks_mut(2 * CH).enumerate().for_each(|(c, oc)| {
