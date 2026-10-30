@@ -8,22 +8,33 @@ unset RAYON_NUM_THREADS AGG_MLDSA_SIMD
 MAIN_WT="$ROOT/target/main-wt"
 export LOG_DIR="$ROOT/target/simd-ab-logs"
 mkdir -p "$LOG_DIR"
+LOCK="$ROOT/target/simd-ab.lock"
 # Equality results describe this invocation only.
 : > "$LOG_DIR/equality.log"
 TMP_DIR="$(mktemp -d "$ROOT/target/simd-ab.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
-if [[ ! -d "$MAIN_WT" ]]; then
-    git worktree add --detach "$MAIN_WT" main
+trap 'git worktree remove --force "$MAIN_WT" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
+# Compare against the fetched upstream branch, not whatever local `main` points at.
+if ! git fetch --quiet origin main; then
+    echo 'Could not fetch origin/main; using the local origin/main ref.' >&2
 fi
-[[ "$(git -C "$MAIN_WT" rev-parse HEAD)" == "$(git rev-parse main)" ]] || {
-    echo 'Baseline worktree differs from main; inspect target/main-wt before rerunning.' >&2
+BASE_REV="$(git rev-parse origin/main)"
+if [[ ! -d "$MAIN_WT" ]]; then
+    git worktree add --detach "$MAIN_WT" "$BASE_REV"
+fi
+[[ "$(git -C "$MAIN_WT" rev-parse HEAD)" == "$BASE_REV" ]] || {
+    echo 'Baseline worktree differs from origin/main; removing and recreating it.' >&2
+    git worktree remove --force "$MAIN_WT"
+    git worktree add --detach "$MAIN_WT" "$BASE_REV"
+}
+[[ "$(git -C "$MAIN_WT" rev-parse HEAD)" == "$BASE_REV" ]] || {
+    echo 'Baseline worktree still differs from origin/main; inspect target/main-wt.' >&2
     exit 1
 }
 (cd "$MAIN_WT" && CARGO_TARGET_DIR="$MAIN_WT/target" cargo build --release -p agg-cli --bin agg)
 cargo build --release -p agg-cli --bin agg
 MAIN_BIN="$MAIN_WT/target/release/agg"
 CURRENT_BIN="$ROOT/target/release/agg"
-git rev-parse main HEAD > "$LOG_DIR/revisions.txt"
+printf 'origin/main %s\nHEAD %s\n' "$BASE_REV" "$(git rev-parse HEAD)" > "$LOG_DIR/revisions.txt"
 # Detect the same feature conjunctions as Engine::new, including OS-enabled flags.
 BACKENDS=(scalar)
 flags=" $(awk '/^flags/{print; exit}' /proc/cpuinfo) "
@@ -34,8 +45,14 @@ if [[ "$flags" == *' avx2 '* && "$flags" == *' popcnt '* ]]; then
     fi
 fi
 export AB_BACKENDS="${BACKENDS[*]}"
-# Every runtime gate shares the machine-wide benchmark lock and CPU affinity.
-gate() { flock /home/jipengzhang/agy_out/mldsa-simd/bench.lock taskset -c 3 "$@"; }
+# Every runtime gate shares the benchmark lock and CPU affinity.
+gate() {
+    if command -v flock >/dev/null; then
+        flock "$LOCK" taskset -c 3 "$@"
+    else
+        taskset -c 3 "$@"
+    fi
+}
 gate "$CURRENT_BIN" keygen-batch --count 64 --seed 42 --out "$TMP_DIR/keys.bin"
 gate "$CURRENT_BIN" sign-batch --keys "$TMP_DIR/keys.bin" --count 1024 --seed 42 --out "$TMP_DIR/records.bin"
 gate "$MAIN_BIN" aggregate --records "$TMP_DIR/records.bin" --out "$TMP_DIR/main.bin" --relation h-u
@@ -47,7 +64,7 @@ for b in "${BACKENDS[@]}"; do
     done
 done
 for keys in 4096 16; do
-    gate env AGG_GIT_REV="$(git rev-parse main)" "$MAIN_BIN" bench --count 4096 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/main_${keys}.log" 2>&1
+    gate env AGG_GIT_REV="$BASE_REV" "$MAIN_BIN" bench --count 4096 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/main_${keys}.log" 2>&1
     for b in "${BACKENDS[@]}"; do
         gate env AGG_GIT_REV="$(git rev-parse HEAD)" AGG_MLDSA_SIMD="$b" "$CURRENT_BIN" bench --count 4096 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/${b}_${keys}.log" 2>&1
     done
