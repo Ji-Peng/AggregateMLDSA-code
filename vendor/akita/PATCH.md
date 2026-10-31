@@ -336,8 +336,19 @@ Every run-time detector in the three crates consults it:
 
 `AKITA_SCALAR_NTT` and `AKITA_AVX512_NTT` still apply on top. The CRTD NTT keeps its AVX2
 kernels under `AGG_ISA=avx2`; `ifma52_enabled()` is false, so the AVX-512IFMA NTT cannot
-run. The compile-time `cfg(target_feature = "avx512bw")` tile in
-`akita-cpu-backend/src/sources/poly_helpers/windowed_accum.rs` is outside the runtime cap;
-the general build does not enable AVX-512 target features, so it compiles the 256-bit
-variant. `akita_algebra::simd_report()` (with the two sibling crates' `simd_report()`)
+run. `akita_algebra::simd_report()` (with the two sibling crates' `simd_report()`)
 prints the cap and the selected tiers.
+
+## 9. Runtime dispatch of the AVX2 poly helpers
+
+`sources/poly_helpers/windowed_accum.rs`: the 32-coefficient AVX-512BW gather is
+deleted. It changed `GATHER` from one 16-coefficient window to two, a table
+layout change, and its self-check failed on both Rocket Lake and Zen 5. `GATHER`
+is one window under every target, and the kernel always uses 256-bit vectors.
+
+`kernels/decompose_fold_avx.rs`, `sources/poly_helpers/mod.rs` and
+`sources/poly_helpers/windowed_accum.rs`: the AVX2 kernels compile under every
+x86-64 build (each entry point carries `#[target_feature(enable = "avx2")]`)
+and are selected by `AGG_ISA >= avx2` plus
+`is_x86_feature_detected!("avx2")`. A global `x86-64-v3` build is no longer
+needed for them. `AKITA_SCALAR_NTT=1` still selects the scalar paths.

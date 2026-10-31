@@ -20,6 +20,7 @@ pub use commands::{parse_command, Command, USAGE};
 pub fn simd_report() -> Vec<String> {
     vec![
         agg_mldsa_simd::dispatch::report(),
+        agg_simd::detect::report(),
         flock_core::simd_report(),
         akita_algebra::simd_report(),
         akita_challenges::simd_report(),

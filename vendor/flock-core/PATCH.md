@@ -442,3 +442,11 @@ reload. Two targeted edits:
 
 Both bodies are selected through the same runtime feature checks, are byte-identical to the
 portable kernels, and keep the SSE2 and portable bodies for CPUs below the AVX2 tier.
+
+## 10. Prover-only: serial Frobenius table build
+
+`src/pcs/block_stats_portable.rs::frob_tables` builds its 8 MiB table inside a
+`OnceLock::get_or_init`. The build is serial: with `into_par_iter`, several
+workers entering the initializer at once occupy the Rayon pool that the
+initializer's parallel build needs, and the process deadlocks. The tables are
+built once, so the serial build costs a few milliseconds per process.

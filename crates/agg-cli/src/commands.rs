@@ -85,6 +85,9 @@ environment:
   AGG_ISA=LEVEL         cap every run-time SIMD detector: avx512ifma, avx512, avx2 (x86-64-v3
                         plus PCLMULQDQ) or scalar; unset detects. A cap only lowers a level,
                         and the proof is the same at every level.
+  AGG_PIOP_LAYOUT=KIND  sum-check table layout: plane or row. Unset selects plane exactly
+                        when the IFMA backend is selected, row otherwise; the proof is the
+                        same either way.
   AGG_SIMD_REPORT=1     print, before the command, the level each crate selected (diagnostics).";
 
 /// A subcommand.

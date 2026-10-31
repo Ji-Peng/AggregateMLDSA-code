@@ -19,9 +19,9 @@ fi
 if [[ "${AVX512:-0}" == "1" ]]; then
   # x86-64-v4 = AVX-512 F/BW/CD/DQ/VL. A bare `+avx512f,...` feature list makes
   # rustc 1.99.1 (LLVM 23) crash with SIGILL while compiling aerie-prover.
-  # With x86-64-v4, Akita's compile-time avx512bw path (windowed_accum.rs) makes its
-  # prover self-check fail ("relation session final claim disagrees with its folded
-  # oracle"); mode A and the Akita bench do not run. Kept for Keccak-only measurements.
+  # This is a separate, non-shipped target: shipped builds use the one baseline in
+  # `.cargo/config.toml` and select every higher level at run time. Kept for
+  # codegen A/B measurements and the Keccak-only bench.
   export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/avx512}"
   exec taskset -c 0,1,3-15 cargo bench -p agg-bench --features avx512 "$@"

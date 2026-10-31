@@ -115,14 +115,21 @@ notes do not record a separate A/B for it.
 
 ## 4. AVX-512IFMA kernels for F_p and F_{p^2}
 
-On the `ifma` line, the base field and its quadratic extension have slice kernels that keep
+The base field and its quadratic extension have slice kernels that keep
 canonical `u64` storage: `&[F]` is read as `&[u64]`, and limbs are split in registers only.
 `crates/agg-simd/src/fp.rs` (`fp_mul`), `k.rs` (`k_mul`, `k_mul_base`), `dot.rs` (`fp_dot`,
 `k_dot`, `k_base_dot`) and `x86.rs` (the IFMA primitives and the radix-2^52/2^51 split and
 reduction) implement the kernels; `fused.rs` provides the fold-and-evaluate forms used by
-the sum-check groups. `detect.rs` selects the backend once per process:
-`AGG_SIMD=portable` forces the scalar path, `AGG_SIMD=avx512` requires
-AVX-512F/DQ/BW/VL/IFMA, and the default uses IFMA when the CPU has it.
+the sum-check groups. `detect.rs` selects the backend once per process from the CPU,
+under the process-wide `AGG_ISA` cap: `avx512ifma` (or unset on an IFMA CPU) takes the
+IFMA kernels, and `avx512`, `avx2` or `scalar` take the portable kernels.
+`AGG_SIMD=portable|avx512` names a backend below that cap. The other run-time kernels of
+the unified build follow the same cap: `crates/agg-mldsa-simd` (scalar/AVX2/AVX-512),
+`crates/agg-keccak/src/simd` (8-way Keccak-f), `vendor/flock-field/src/f128_slice/rounds.rs`,
+the vendored Flock kernels and the Akita decompose-fold, window-gather and NTT kernels.
+The Akita AVX2 kernels are compiled under every x86-64 build and selected by
+`is_x86_feature_detected!("avx2")`, so retiring the global `x86-64-v3` target did not
+remove them.
 
 The kernels use four interleaved blocks of eight F_p elements, 7 IFMA multiply-adds for the
 product and 2 for the fold by 59, and schoolbook products with two lazy reductions for K.
@@ -151,14 +158,21 @@ Stage 3 proves the ring identity, the range links, the Booleanity checks, the re
 `r^(3)`, the lookup stacks and the two sides of the projection identity. Its two dedicated
 groups are `WeightIntGroup` for `w_A z` and `LinearIntGroup` for the lookup-stack and bit
 reductions. Both are bilinear forms with coefficient slots: the first round reads the
-integer cells, and the first fold writes the group's own table. On the `ifma` line,
+integer cells, and the first fold writes the group's own table.
 `crates/agg-piop/src/kernel/plane.rs` runs these groups on lane-major `K` planes, where
 round `t + 1` is one fused pass over blocks of 512 output rows: every lane is folded by the
 bound challenge into the spare buffer, and the next round is evaluated on the pairs just
 written. `crates/agg-simd/src/fused.rs` holds the kernel. `crates/agg-piop/src/kernel/tail.rs`
-does the same for the generic dense groups from the third bind on. The default build uses
-the row-major dedicated groups in `crates/agg-piop/src/kernel/layer.rs`, which fold four
-rows into two and accumulate `q(0)` and `q_2` in one read.
+does the same for the generic dense groups from the third bind on. The lookup sessions use
+the same plane path (`crates/agg-piop/src/lookup/plane.rs`): fraction trees are stored as
+coordinate planes, and a centred integer stack recomputes its upper layer from four
+quarters of the stacked column.
+
+`AGG_PIOP_LAYOUT=plane|row` selects the layout independently of `AGG_ISA`; it defaults to
+`plane` when the IFMA backend is selected and `row` otherwise. The row-major dedicated
+groups in `crates/agg-piop/src/kernel/layer.rs` fold four rows into two and accumulate
+`q(0)` and `q_2` in one read. They win on the AVX2 and AVX-512 non-IFMA tiers, and both
+layouts send the same round messages.
 
 Before a lane is dense it stays a small integer. A committed `i8` column is coded when its
 cells fall into at most 16 classes under the maps of the lanes that read it (8 for a digit

@@ -34,7 +34,8 @@ goal; `docs/h-exact.md`).
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, tied parts (version 5: the sponge instance whose opening proves the parity chain's bit claim, `flock_union`, `tied`; spans over several segments); `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory |
-| `crates/agg-mldsa-simd` | lib + benches | ML-DSA-44 steps 1-2 kernels (ExpandA, NTTs mod q and P2, samplers, finish, Keccak lanes) with scalar, AVX2 and AVX-512 backends behind one runtime-dispatched engine; all `unsafe` of the SIMD path lives here |
+| `crates/agg-simd` | lib | runtime-dispatched AVX-512 IFMA and portable kernels for the Solinas field and its quadratic extension, bit/plane buffers and the large-block pool |
+| `crates/agg-mldsa-simd` | lib + benches | ML-DSA-44 steps 1-2 kernels (ExpandA, NTTs mod q and P2, samplers, finish, Keccak lanes) with scalar, AVX2 and AVX-512 backends behind one runtime-dispatched engine |
 | `crates/agg-mldsa-cref` | lib (benches only) | C reference harness (pq-crystals AVX2, Hybrid-SHA-3 AVX2/AVX-512) for the kernel gates, built with `--cfg cref` and `AGG_CREF_SRC` |
 
 Other files: `docs/` (`spec.md` and `scripts/spec_checks.py`; `soundness.md` with
@@ -106,33 +107,45 @@ If the stable toolchain from `rust-toolchain.toml` is not what rustup resolves, 
 
 ### SIMD policy
 
-The default build has no `target-cpu`/`target-feature` flags. The `avx512` cargo
-feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is opt-in:
+There is one release build. `.cargo/config.toml` sets
+`-C target-feature=+pclmulqdq`, the only feature the compile-time scalar GF(2^128)
+multiply needs. Every kernel above it is selected at run time from the CPU; no
+`target-cpu=native`, no global `x86-64-v3`/`v4`.
 
-- Aerie's kernels (`aerie-simd`, `aerie-keccak`) are runtime-dispatched with a scalar
-  fallback, independent of our flags; the selected ceiling is reported by
-  `agg_piop::aerie_simd_backend()` and printed by every benchmark.
-- Flock's scalar GF(2^128) multiply is compile-time (`target_feature`); its x86 SIMD
-  kernels (AVX-512/VPCLMULQDQ NTT and zerocheck, GFNI) are runtime-dispatched in the
-  vendored `flock-core` (`vendor/flock-core/PATCH.md`; `FLOCK_SIMD=portable|gfni`
-  caps them for A/B runs). The recommended opt-in
-  build is `CLMUL=1 scripts/bench.sh` (`-C target-feature=+pclmulqdq`, target dir
-  `target/clmul`): only Flock's carry-less path changes; Akita, Jolt and Aerie keep the
-  baseline codegen. Do not add `+sse4.1`: it slows our lookup and stage 3 by 6-7% locally
-  (`docs/perf.md`); the vendored `flock-field` needs only `pclmulqdq` to inline its scalar
-  GF(2^128) multiply (`vendor/flock-field/PATCH.md`). Locally, mode A proves and verifies
-  about an order of magnitude faster than in the default build at N = 1,024, and the Keccak
-  bench alone reaches most of the throughput of the full AVX-512 build.
-- `AVX512=1 scripts/bench.sh` (`-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq`,
-  `target/avx512`) is broken for everything that commits with Akita: with x86-64-v4 Akita's
-  compile-time `avx512bw` path (`akita-cpu-backend/src/sources/poly_helpers/windowed_accum.rs`)
-  makes its prover self-check fail ("relation session final claim disagrees with its folded
-  oracle"), on this i7-11700K and on a Zen 5 VM; `AKITA_SCALAR_NTT=1` does not help,
-  `x86-64-v3` passes. Use it only for the Keccak-only bench. A bare `+avx512f,...` feature
-  list makes rustc 1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
-- Our own AVX2/AVX-512 kernels (`crates/agg-mldsa-simd`) are selected at run time with
-  `is_x86_feature_detected!` and `#[target_feature]`, never by a compile-time feature
-  (`AGG_MLDSA_SIMD`, `docs/perf.md` Section 15); results are bit-identical to the scalar path.
+`AGG_ISA=avx512ifma|avx512|avx2|scalar` is a process-wide upper bound for every
+run-time detector. A cap only lowers the selected level; unset leaves the choice to
+the CPU. `AGG_SIMD_REPORT=1` prints the cap and every selected kernel at startup.
+
+| `AGG_ISA` | Selected level |
+| --- | --- |
+| `avx512ifma`, or unset on an IFMA CPU | IFMA kernels of `agg-simd`, AVX-512 Flock/Akita/ML-DSA kernels, and the plane PIOP layout |
+| `avx512` | the same except the IFMA kernels: AVX-512 without IFMA, and the row PIOP layout |
+| `avx2` | AVX2 and SSE kernels only, row PIOP layout |
+| `scalar` | portable kernels only |
+
+The PIOP table layout is a separate knob because it wins where the ISA does not:
+`AGG_PIOP_LAYOUT=plane|row`. It defaults to `plane` exactly when the IFMA backend is
+selected, and `row` otherwise. The lookup sessions, stage-3 weights and the dense
+sum-check tail all read the selected layout. Both layouts compute the same round
+polynomials, so the proof bytes do not depend on either knob.
+
+- `crates/agg-simd` (IFMA field and extension kernels, plane buffers), `crates/agg-keccak/src/simd`
+  (8-way Keccak-f and the 8x64 transpose) and `vendor/flock-field/src/f128_slice/rounds.rs`
+  check `AGG_ISA` next to their CPU features. `AGG_SIMD=portable|avx512` still names a
+  backend below the cap.
+- `crates/agg-mldsa-simd` selects scalar, AVX2 or AVX-512 under `AGG_MLDSA_SIMD=auto|scalar|avx2|avx512`.
+- The vendored Flock and Akita kernels are runtime-dispatched (`vendor/flock-core/src/simd.rs`,
+  `vendor/akita/crates/akita-cpu-backend/src/isa.rs`); `FLOCK_SIMD=portable|gfni` and
+  `AKITA_SCALAR_NTT=1` remain narrower A/B knobs below `AGG_ISA`.
+- The `avx512` cargo feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is a
+  no-op marker kept for old command lines. `AVX512=1 scripts/bench.sh` still builds a
+  separate `x86-64-v4` target for Keccak-only measurements; do not use it for proofs.
+  A bare `+avx512f,...` feature list makes rustc 1.99.1 crash (SIGILL in LLVM DAG combine)
+  while compiling `aerie-prover`.
+
+Every kernel family is value-identical to its scalar oracle; the 1K aggregate is compared
+byte for byte under each `AGG_ISA` level and both layouts (`scripts/gate.sh` and the
+per-step gates).
 
 ## Machine rules
 
