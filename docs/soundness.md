@@ -1257,6 +1257,19 @@ evaluation batch. Every plain stage lies in one segment. The tied parts' stages 
 stage-3 rounds, where the join absorbs their messages (deviation K22). `X`'s input does not
 contain them, and a checkpoint input must encode the complete preceding prefix (Lemma 12.3's proof), so no part stage may precede `X`.
 
+**Alternative order (used by the paper's proof).** The requirement above holds for
+complete-prefix checkpoint inputs. With projected addresses (Lemma 12.3) the tied parts' stages
+may instead precede `X`, analysed after event 6, where the verifier also checks the Flock
+sub-proofs (spec Section 11, step 3). Every Flock entry precedes `X` and the Flock transcript lies
+outside `Sub(a_X)`, so every rerun from `X` keeps it and `D(xi_X; .)` is constant on the rerun's
+probability space. The test at `X` then needs no list decoder, and item 9 of Section 12.7 does not
+arise. Two statements left implicit here are made explicit in that proof: the extraction stages
+satisfy Akita's Lemma 10.14 conditional-answer sampling hypothesis (Proposition 10.44 for the
+opening suffix; the application segment has no extraction stage), and the cost recurrence counts
+the verifier's `V_l` stage-`l` addresses, `C_l <= 2 C_{l+1} + (Q_l + V_l)`, which sums to
+`(Q+R+2) K_hat` runs and `(Q+R) 2^-128`. The union of Lemma 12.4 over a batch's `S <= 4`
+segments adds at most two bits to the exponent and keeps `delta_X < 2^-(2^110)`.
+
 **Projected addresses.** In this linear order the stages of part `p` follow the stage-3
 rounds and those of part `p - 1`, but the input of a part's site (its address) encodes the
 PIOP prefix through `fs` (item 2), the event-6 record (through `rec`, item 1) and part `p`'s
