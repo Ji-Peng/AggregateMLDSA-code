@@ -327,7 +327,7 @@ where
 /// transposes (byte `k` of every `v[r]` forms one matrix), three delta swaps each,
 /// instead of 512 single-bit moves.
 #[inline]
-fn transpose_8x64(v: &[u64; 8], out: &mut [u8]) {
+pub(crate) fn transpose_8x64(v: &[u64; 8], out: &mut [u8]) {
     debug_assert_eq!(out.len(), 64);
     for k in 0..8 {
         // Byte r of x is byte k of v[r]: row r, column c = bit 8k + c of v[r].

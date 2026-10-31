@@ -22,6 +22,7 @@ avx512 = []
 test-hooks = []
 
 [dependencies]
+agg-simd = { workspace = true }
 agg-witness = { workspace = true }
 agg-pcs-config = { workspace = true }
 agg-bridge = { workspace = true }

@@ -41,6 +41,8 @@ mod coded;
 mod field;
 mod layer;
 mod plan;
+mod plane;
+mod tail;
 #[cfg(test)]
 mod tests;
 
@@ -51,10 +53,55 @@ use rayon::prelude::*;
 
 pub(crate) use self::field::{fm, fmi, mad_int, Acc};
 pub use self::layer::{IntPairGroup, LayerGroup, LayerTree, LinearIntGroup, WeightIntGroup};
+pub use self::plane::{
+    LayerGroup as PlaneLayerGroup, LayerTree as PlaneLayerTree, LeafGroup as PlaneLeafGroup,
+    LinearIntGroup as PlaneLinearIntGroup, WeightIntGroup as PlaneWeightIntGroup,
+};
 use self::coded::{code_column, masses, Column, ItemWeights, SegmentShape};
 use self::field::{fold, lift, mad, plain_sum, split_sum, MIN_PARALLEL_ITEMS};
 use self::plan::{Pieces, Plan};
+use self::tail::{Tail, TailTerms};
 use crate::OpeningField as E;
+
+/// The layout of the sum-check kernel tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// Row-major tables and the dedicated groups over integer rows.
+    Row,
+    /// Lane-major `K` planes and the fused passes.
+    Plane,
+}
+
+/// The layout this process uses.
+///
+/// `AGG_PIOP_LAYOUT=plane|row` names one; unset selects planes only when the
+/// AVX-512 IFMA kernels are selected, and rows otherwise.
+///
+/// # Panics
+/// When `AGG_PIOP_LAYOUT` names an unknown layout.
+#[must_use]
+pub fn layout() -> Layout {
+    use std::sync::OnceLock;
+    static LAYOUT: OnceLock<Layout> = OnceLock::new();
+    *LAYOUT.get_or_init(|| {
+        match std::env::var("AGG_PIOP_LAYOUT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .as_deref()
+        {
+            Some("plane") => Layout::Plane,
+            Some("row") => Layout::Row,
+            Some(other) => panic!("invalid AGG_PIOP_LAYOUT '{other}': expected plane or row"),
+            None => {
+                if agg_simd::detect::backend() == agg_simd::detect::Backend::Avx512 {
+                    Layout::Plane
+                } else {
+                    Layout::Row
+                }
+            }
+        }
+    })
+}
 
 /// Bucketing pays only when the items outnumber the pattern space by this factor
 /// (Aerie's `BUCKET_MIN_RATIO`).
@@ -78,6 +125,10 @@ const MAX_QUARTET_LUT: usize = 1 << 12;
 /// A read-only integer or field table, the state of a lane before its first fold.
 #[derive(Clone, Copy, Debug)]
 pub enum Source<'a> {
+    /// A borrowed interval of canonical extension planes.
+    PlaneSlice((&'a [u64], &'a [u64])),
+    /// Canonical extension coordinate planes, produced directly by a public weight builder.
+    Planes(&'a agg_simd::buf::KPlanes),
     /// Committed `i8` cells seen through a per-cell integer map (`map[cell as u8]`).
     Bytes {
         /// The cells.
@@ -118,6 +169,8 @@ impl Source<'_> {
             Self::Bytes { cells, .. } => cells.len(),
             Self::Ints(cells) => cells.len(),
             Self::Field(cells) => cells.len(),
+            Self::Planes(cells) => cells.rows,
+            Self::PlaneSlice(cells) => cells.0.len(),
         }
     }
 
@@ -135,6 +188,8 @@ impl Source<'_> {
             Self::Bytes { cells, map } => E::from_i64(map[cells[index] as u8 as usize]),
             Self::Ints(cells) => E::from_i64(i64::from(cells[index])),
             Self::Field(cells) => cells[index],
+            Self::Planes(cells) => cells.get(index),
+            Self::PlaneSlice(cells) => agg_simd::scalar::get(*cells, index),
         }
     }
 
@@ -153,6 +208,12 @@ impl Source<'_> {
                 E::from_i64(low) + fmi(challenge, high - low)
             }
             Self::Field(cells) => fold(&context, cells[2 * k], cells[2 * k + 1]),
+            Self::Planes(cells) => fold(&context, cells.get(2 * k), cells.get(2 * k + 1)),
+            Self::PlaneSlice(cells) => fold(
+                &context,
+                agg_simd::scalar::get(*cells, 2 * k),
+                agg_simd::scalar::get(*cells, 2 * k + 1),
+            ),
         };
         if half >= MIN_PARALLEL_ITEMS {
             (0..half).into_par_iter().map(fold_pair).collect()
@@ -236,7 +297,11 @@ impl<'a> Lane<'a> {
 
     /// True for a lane over field values (a weight or a materialized table).
     fn is_field(&self) -> bool {
-        matches!(self, Self::Source(Source::Field(_)) | Self::Folded(_))
+        matches!(
+            self,
+            Self::Source(Source::Field(_) | Source::Planes(_) | Source::PlaneSlice(_))
+                | Self::Folded(_)
+        )
     }
 }
 
@@ -647,6 +712,10 @@ pub struct Group<'a> {
     dense: Vec<E>,
     dense_stride: usize,
     dense_rows: usize,
+    /// The term lists of the plane path, until bind 2 builds the table.
+    tail_terms: Option<TailTerms>,
+    /// The dense rounds on lane-major planes (plane layout only).
+    tail: Option<Tail>,
     arena: Option<SharedArena>,
     challenges: Vec<E>,
     /// Quartet masses of the bucketed segments (the two-round prefix), kept for level 1.
@@ -902,6 +971,15 @@ impl<'a> Group<'a> {
             ..direct_source.clone()
         };
         let lane_count = lanes.len();
+        // The tail on planes needs an equality factor (so a cell's constant enters once),
+        // a degree at least three, and lanes without a shift.
+        let tail_terms = (layout() == Layout::Plane
+            && eq.is_some()
+            && degree >= 3
+            && local_vars >= 4
+            && plan.shifts.iter().all(Zero::is_zero))
+        .then(|| TailTerms::compile(&plan.dense, lane_count))
+        .flatten();
         let mut group = Self {
             eq,
             tau: eq_point.map(<[E]>::to_vec).unwrap_or_default(),
@@ -920,6 +998,8 @@ impl<'a> Group<'a> {
             dense: Vec::new(),
             dense_stride: 0,
             dense_rows: 0,
+            tail_terms,
+            tail: None,
             arena: None,
             challenges: Vec::new(),
             masses: None,
@@ -1019,7 +1099,8 @@ impl<'a> Group<'a> {
         // constant coefficient of `q` follows from the others (exact field arithmetic: the
         // same polynomial as a direct evaluation).
         let level = self.level();
-        let recovery = if level == 0 { None } else { self.recovery() };
+        let on_planes = level >= 3 && self.tail.is_some();
+        let recovery = if level == 0 || on_planes { None } else { self.recovery() };
         let upper = recovery.is_some();
         let mut q = match level {
             0 => match self.cached_level0.take() {
@@ -1028,6 +1109,7 @@ impl<'a> Group<'a> {
             },
             1 => self.level1(upper),
             2 => self.level2(upper),
+            _ if on_planes => self.plane_round(),
             _ => {
                 let mut q = match self.cached_next.take() {
                     Some(q) => q,
@@ -1057,6 +1139,27 @@ impl<'a> Group<'a> {
         let message = compress(&full, self.degree);
         self.pending = message.clone();
         message
+    }
+
+    /// A round over the dense planes: the coefficients of the inner polynomial `q`, the
+    /// linear one from the evaluation at one, or from the running claim when the equality
+    /// factor allows it.
+    fn plane_round(&mut self) -> Vec<E> {
+        let eq = self.eq.as_ref().expect("plane groups have an equality factor");
+        let tail = self.tail.as_mut().expect("the plane table");
+        let full = !eq.can_recover_linear_q_term_from_claim();
+        let [q0, at_one, q2] = tail.message(eq, full, self.plan.constant);
+        let q1 = if full {
+            at_one - q0 - q2
+        } else {
+            // claim / lift = l(0) q(0) + l(1) q(1).
+            let (l0, l1) = eq.linear_factor_evals();
+            let unscaled = self.claim * self.scale.inverse().expect("nonzero lift");
+            (unscaled - l0 * q0) * l1.inverse().expect("recoverable round") - q0 - q2
+        };
+        let mut q = vec![E::zero(); self.coefficient_count()];
+        q[..3].copy_from_slice(&[q0, q1, q2]);
+        q
     }
 
     /// The constant of every cell, summed over the pairs with their weights.
@@ -1249,7 +1352,10 @@ impl<'a> Group<'a> {
     fn value_at(&self, l: usize, cell: usize) -> E {
         match &self.states[l] {
             State::Source => self.sources[l].value(cell),
-            State::Dense => self.dense[l * self.dense_stride + cell] + self.plan.shifts[l],
+            State::Dense => match &self.tail {
+                Some(tail) => tail.get(l, cell),
+                None => self.dense[l * self.dense_stride + cell] + self.plan.shifts[l],
+            },
             _ => self.reader(l).at(cell),
         }
     }
@@ -1602,7 +1708,13 @@ impl<'a> Group<'a> {
             0 => self.bind_first(challenge),
             1 => self.bind_second(challenge),
             2 => self.bind_third(challenge),
-            _ => self.bind_dense(challenge),
+            _ => match &mut self.tail {
+                Some(tail) => {
+                    let last = self.bound == self.inactive + self.local_vars;
+                    tail.bind(challenge, last);
+                }
+                None => self.bind_dense(challenge),
+            },
         }
     }
 
@@ -1722,6 +1834,25 @@ impl<'a> Group<'a> {
         let context = E::precompute(challenge);
         let lanes = self.sources.len();
         let rows = 1 << (self.local_vars - 3);
+        if let Some(terms) = self.tail_terms.take() {
+            // The plane path has no lane shifts (checked when the tail was compiled).
+            let readers: Vec<Reader<'_>> = (0..lanes).map(|l| self.reader(l)).collect();
+            let table = Tail::new_filled(terms, lanes, rows, |l, row| {
+                let (even, odd) = readers[l].item(row);
+                let x = fold(&context, even, odd);
+                (x.c0().to_canonical_u64(), x.c1().to_canonical_u64())
+            });
+            drop(readers);
+            self.tail = Some(table);
+            self.dense = Vec::new();
+            self.dense_stride = 0;
+            self.dense_rows = 0;
+            self.states = vec![State::Dense; lanes];
+            for column in &mut self.columns {
+                column.pairs = Vec::new();
+            }
+            return;
+        }
         self.dense_stride = rows;
         self.dense_rows = rows;
         let readers: Vec<Reader<'_>> = (0..lanes).map(|l| self.reader(l)).collect();
