@@ -346,3 +346,51 @@ working on the live lanes; `FLOCK_LB_PASS2_COPY=1` copies a pass-2 block before 
 transform; `FLOCK_ZC_BITS_ROUNDS=0` disables the packed round-2/round-3 zerocheck path;
 `FLOCK_ZC_SPARSE_SIMD=0` disables the AVX-512 sparse fold; `FLOCK_LB_TIMING_SHAPE=log_d,r,t`
 and `FLOCK_BENCH_LOG_D` select the ignored timing tests' shapes.
+
+### 3.2 The AVX2 tier and the `AGG_ISA` cap
+
+`src/simd.rs` also parses `AGG_ISA=avx512ifma|avx512|avx2|scalar` once per process and uses
+it as an upper bound on the feature bits. `scalar` clears every bit; `avx2` keeps the
+AVX2 tier (x86-64-v3 plus PCLMULQDQ) and the optional 256-bit VPCLMULQDQ and GFNI
+extensions, and clears every `avx512*` bit; `avx512` allows AVX-512 without IFMA; unset (or
+`avx512ifma`) detects everything. `FLOCK_SIMD` still applies on top and can only lower the
+result. `ghash_width()` chooses, in order, 512-bit VPCLMULQDQ, 256-bit VPCLMULQDQ,
+128-bit PCLMULQDQ, or the portable kernels. `flock_core::simd_report()` states the cap and
+the selected width.
+
+The GF(2^128) primitive modules are `simd::ghash4` (512-bit, re-exports `simd::x86`),
+`simd::ghash2` (256-bit VPCLMULQDQ) and `simd::ghash1` (128-bit PCLMULQDQ). Each exposes
+the same functions (`loadu`, `storeu`, `splat`, `set_from`, `xor`, `mul`, `even_odd`,
+`wide_zero`, `wide_acc`, `wide_fold`). The kernels below are generated once per family from
+a macro and instantiated for all three widths, so every width computes the same field
+elements:
+
+| Kernel | Widths | Call site |
+| --- | --- | --- |
+| additive NTT butterflies and the fused-4 schedule decision (`x86_ntt_simd`) | 4, 2, 1 lanes | `ntt/additive_ntt_f128/kernels/x86_64.rs`, `kernels.rs` |
+| zerocheck round 1 window accumulation | 4, 2, 1 lanes | `zerocheck/univariate_skip_optimized/kernels/x86_64.rs` |
+| zerocheck round 2 fold (`fold_pair_run_x86_*`) and fold + message (`fold_and_message_x86_*`) | 4, 2, 1 lanes | `zerocheck/multilinear.rs`, `.../kernels/x86_64.rs` |
+| zerocheck packed round 3 (`round3_task_*`) | 4, 2, 1 lanes | `zerocheck/multilinear.rs` |
+| Ligerito induced basis (`scaled_xor_into_*`) | 4, 2, 1 lanes | `pcs/ligerito.rs` |
+| lincheck bank lookup (`bank_lookup_avx2`) and subset-sum table build (`build_sum_table8_avx2`) | 2 lanes (AVX-512 keeps its 4-lane kernel) | `lincheck/union.rs`, `lincheck/kernels/x86_64.rs` |
+| 64-byte bit transpose (`bit_transpose_64bytes_sse2`) | SSE2 (AVX2 tier) | `zerocheck/univariate_skip_optimized/kernels.rs` |
+| BLAKE3 group leaf hasher (`blake3_groups::absorb8`) | 8 lanes (the AVX-512 kernel stays at 16) | `merkle.rs` |
+
+The x8 hasher writes two eight-lane batches into the existing 16-wide state rows, so
+`state_len` and `finish` are unchanged. The AVX-512 arm of every dispatcher is guarded by
+the `avx512*` bits, which `AGG_ISA=avx2` clears, so no AVX-512 instruction of this crate
+executes under that cap (`crates/agg-cli/tests/all/isa_cap.rs` checks the startup report).
+
+Tests: `ntt::additive_ntt_f128::kernels::tests::{x86_128,x86_256,x86_512}_kernels_match_portable`
+(odd lane counts and every block shape), `zerocheck::multilinear::tests::
+avx2_round2_kernels_match_portable_with_odd_lengths`, `pcs::ligerito::tests::
+scaled_xor_kernels_match_scalar_for_tails`, the mask-driven `merkle::tests::
+group_leaf_hasher_matches_hash_leaf` and `lincheck::union::tests::
+union_bitbank_fold_multi_matches_stripe_fold`, and the round-1 tests that iterate every
+mask. The 1,024-record gate is byte-identical with `AGG_ISA` unset, `avx2` and `scalar`,
+and with `AGG_ALLOC_POISON=1`.
+
+To regenerate: keep section 3's edits, add the `ghash2`/`ghash1`/`ghash4` modules to
+`src/simd.rs`, replace each AVX-512-only kernel body by a `macro_rules!` body instantiated
+for the three widths, and replace the `has(AVX512_CLMUL)` call sites by the width
+dispatchers (`*_best` helpers or `match ghash_width()`).

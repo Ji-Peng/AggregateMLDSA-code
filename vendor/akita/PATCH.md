@@ -312,3 +312,32 @@ rayon threads, and with the allocation poison enabled. On `agg aggregate` over
 `p1p8/records.bin` with eight rayon threads, peak RSS fell from 1,970-1,979 MiB
 to 1,883-1,898 MiB (two before and five after runs; direction only). No
 arithmetic, wire format or verifier check changes.
+
+## 8. Instruction-set cap from `AGG_ISA`
+
+`akita-algebra/src/isa.rs`, `akita-challenges/src/isa.rs` and `akita-cpu-backend/src/isa.rs`
+are one small module each (the vendored crates do not depend on each other for this): a
+`Level { Scalar, Avx2, Avx512, Avx512Ifma }` parsed once from `AGG_ISA`, with `avx2()`,
+`avx512()` and `ifma()` predicates. An unknown value panics; an unset value leaves every
+check at feature detection. The module only ever lowers a level.
+
+Every run-time detector in the three crates consults it:
+
+| Site | Cap |
+| --- | --- |
+| `binary/host.rs`, `binary/product.rs`, `binary/packed.rs` PCLMUL kernels | AVX2 |
+| the same files' `avx512f` kernels (4-lane equality, packed `x86_512`) | AVX-512 |
+| `binary/field_switch/kernels.rs` (Gfni512 / Gfni256) | AVX-512 / AVX2 |
+| `ntt/avx/runtime.rs` (`detect_cpu_features`, `use_avx2_transform_ntt`) | AVX2 and AVX-512 |
+| `ntt/ifma52.rs` (`ifma52_available`) | AVX-512IFMA |
+| `ntt/digit_validation.rs`, `ring/cyclotomic/decomposition.rs`, `ring/cyclotomic/shift_windows.rs` | AVX2 / AVX-512 |
+| `akita-challenges/sampler/op_norm_accumulate.rs` | AVX2 |
+| `akita-cpu-backend/sources/packed_digits/x86_64.rs` (BMI2 + AVX2) | AVX2 |
+
+`AKITA_SCALAR_NTT` and `AKITA_AVX512_NTT` still apply on top. The CRTD NTT keeps its AVX2
+kernels under `AGG_ISA=avx2`; `ifma52_enabled()` is false, so the AVX-512IFMA NTT cannot
+run. The compile-time `cfg(target_feature = "avx512bw")` tile in
+`akita-cpu-backend/src/sources/poly_helpers/windowed_accum.rs` is outside the runtime cap;
+the general build does not enable AVX-512 target features, so it compiles the 256-bit
+variant. `akita_algebra::simd_report()` (with the two sibling crates' `simd_report()`)
+prints the cap and the selected tiers.

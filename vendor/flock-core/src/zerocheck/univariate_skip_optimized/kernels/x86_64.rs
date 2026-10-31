@@ -63,44 +63,15 @@ pub(crate) unsafe fn bit_transpose_64bytes_avx512(input: &[u8; 64], output: &mut
 /// x86-64; the input and output are 64 bytes and do not overlap.
 #[target_feature(enable = "sse2")]
 pub(crate) unsafe fn bit_transpose_64bytes_sse2(input: &[u8; 64], output: &mut [u8; 64]) {
-    use core::arch::x86_64::{
-        __m128i, _mm_and_si128, _mm_loadl_epi64, _mm_set1_epi64x, _mm_slli_epi64, _mm_srli_epi64,
-        _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpacklo_epi16,
-        _mm_unpacklo_epi32, _mm_unpacklo_epi8, _mm_xor_si128,
-    };
-    // SAFETY: the caller supplies two separate 64-byte arrays.
-    unsafe {
-        let row = |i: usize| _mm_loadl_epi64(input.as_ptr().add(8 * i).cast::<__m128i>());
-        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
-        let (r4, r5, r6, r7) = (row(4), row(5), row(6), row(7));
-        let t0 = _mm_unpacklo_epi8(r0, r1);
-        let t1 = _mm_unpacklo_epi8(r2, r3);
-        let t2 = _mm_unpacklo_epi8(r4, r5);
-        let t3 = _mm_unpacklo_epi8(r6, r7);
-        let u0 = _mm_unpacklo_epi16(t0, t1);
-        let u1 = _mm_unpackhi_epi16(t0, t1);
-        let u2 = _mm_unpacklo_epi16(t2, t3);
-        let u3 = _mm_unpackhi_epi16(t2, t3);
-        let columns = [
-            _mm_unpacklo_epi32(u0, u2),
-            _mm_unpackhi_epi32(u0, u2),
-            _mm_unpacklo_epi32(u1, u3),
-            _mm_unpackhi_epi32(u1, u3),
-        ];
-
-        let mask1 = _mm_set1_epi64x(0x00AA_00AA_00AA_00AAu64 as i64);
-        let mask2 = _mm_set1_epi64x(0x0000_CCCC_0000_CCCCu64 as i64);
-        let mask3 = _mm_set1_epi64x(0x0000_0000_F0F0_F0F0u64 as i64);
-        for (k, mut g) in columns.into_iter().enumerate() {
-            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<7>(g)), mask1);
-            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<7>(t)));
-            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<14>(g)), mask2);
-            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<14>(t)));
-            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<28>(g)), mask3);
-            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<28>(t)));
-            _mm_storeu_si128(output.as_mut_ptr().add(16 * k).cast::<__m128i>(), g);
-        }
+    // SAFETY: [u8; 64] and [u64; 8] have the same size, alignment 1 vs 8 is
+    // satisfied by reading through a u64 pointer only if the source is
+    // 8-aligned; the transpose copies the bytes into registers first, so read
+    // the rows through an unaligned copy instead.
+    let mut words = [0u64; 8];
+    for (w, chunk) in words.iter_mut().zip(input.chunks_exact(8)) {
+        *w = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
     }
+    crate::simd::x86::bit_transpose_8x64_sse2(&words, output);
 }
 
 /// SSE/GFNI x86 kernel. The inverse-NTT apply uses its best available x86 path,
