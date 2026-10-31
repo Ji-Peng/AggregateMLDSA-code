@@ -25,9 +25,9 @@
 //! The constraint `e (e - 1)(e - delta) = 0` (not `e (e - delta) = 0`) is what makes the honest
 //! pair `w' = q - gamma2, h = 0` representable with `delta = 0`: its only witness under
 //! `e (e - delta) = 0` has `delta = 1`, so a signature of hint weight 80 with such a coefficient
-//! would fail the weight identity (`docs/scripts/spec_checks.py` item 14).
+//! would fail the weight identity (`docs/scripts/spec_checks.py`, the exhaustive witness check).
 //!
-//! Soundness (exhaustive over all 17,236,992 witnesses, `spec_checks.py` item 14 and the unit
+//! Soundness (exhaustive over all 17,236,992 witnesses, `spec_checks.py` and the unit
 //! test `every_witness_is_sound`): with `w' = 2 gamma2 w1' + u mod q` and
 //! `h* = [HighBits(w') != w1']`, `UseHint(h*, w') = w1'`, `h* <= delta^2` and `|u| <= B_u`. So
 //! the extracted `(c~, z, h*)` with the canonical HintBitPack is a FIPS 204 Algorithm 8
@@ -45,7 +45,7 @@ use crate::native::{decompose, high_bits, mod_q, use_hint, SmallK, VecK, VecL};
 use crate::padding::main_index;
 use crate::params::*;
 
-/// Relation byte of H-FIPS (the proof header's flags byte and byte 3 of event 0).
+/// Relation byte of H-FIPS (the proof header's flags byte and byte 3 of the instance record).
 pub const RELATION_H_FIPS: u8 = 2;
 /// Weight of the bit `L_hi`: `L = L_lo + 29,696 L_hi` with `L_lo in [0, 2^16)`. The two blocks
 /// `[0, 2^16)` and `[29,696, 29,696 + 2^16)` cover `[0, gamma2 - 1]` exactly.
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn every_witness_is_sound() {
-        // spec_checks.py item 14: 181 combinations times gamma2 values of L = 17,236,992
+        // The exhaustive check: 181 combinations times gamma2 values of L = 17,236,992
         // witnesses; for each, h* = [HighBits(w') != w1'] reaches w1' and h* <= delta^2.
         let cs = combos();
         assert_eq!(cs.len(), 181);

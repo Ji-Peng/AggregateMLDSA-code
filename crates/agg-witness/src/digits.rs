@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn bijections_by_enumeration() {
         // The mixed-radix map is a bijection from the digit alphabets onto the proven range
-        // (spec_checks.py item 8).
+        // (checked by `spec_checks.py`).
         for layout in [UNSIGNED, UNSIGNED2, SIGNED] {
             let vals = enumerate(&layout);
             let (lo, hi) = layout.range();
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn leaf_predicates_exact_on_balanced_alphabets() {
-        // spec_checks.py item 9, extended to base 2.
+        // `spec_checks.py`'s predicate check, extended to base 2.
         for base in [2u32, 4, 6, 8, 16] {
             let a = Alphabet::Balanced(base);
             for z in -4 * i64::from(base)..4 * i64::from(base) {
