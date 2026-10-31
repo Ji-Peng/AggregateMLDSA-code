@@ -77,7 +77,7 @@ pub(crate) unsafe fn bit_transpose_64bytes_sse2(input: &[u8; 64], output: &mut [
 
 /// 64-byte bit transpose with AVX2: the same 8x8 byte transpose, but the three
 /// mask/shift rounds run on two `__m256i` (four 64-bit lanes each) instead of
-/// four `__m128i`, and the rows are read straight from the input.
+/// four `__m128i`.
 ///
 /// # Safety
 /// x86-64 with `avx2`; the input and output are 64 bytes and do not overlap.
