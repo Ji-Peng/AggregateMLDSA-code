@@ -52,7 +52,7 @@ pub fn unpack(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// The public table `Y` on `D_3` from the event-6 bytes of `segments` segments; rejects any
+/// The public table `Y` on `D_3` from the final-vector bytes of `segments` segments; rejects any
 /// length other than `segments m_3 / 8`.
 pub fn parse(shape: &Shape, bytes: &[u8], segments: usize) -> Result<Vec<u8>, FinalVectorLength> {
     let expected = segments * segment_bytes(shape);

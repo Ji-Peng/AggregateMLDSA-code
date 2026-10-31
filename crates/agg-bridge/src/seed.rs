@@ -5,7 +5,7 @@
 //! `cSHAKE256(sd || LE64(t) || LE64(zeta), *, "", "agg-mldsa/v1/bridge")`, keep the low
 //! `e_t` bits of each word, skip a row already chosen for the column, and stop after `k_t`
 //! distinct rows. Rows are stored in the order drawn. Prover and verifier both derive the
-//! matrices from the transcript's `sd` (event 3); neither transmits them.
+//! matrices from the transcript's `sd`; neither transmits them.
 
 use agg_witness::bridge::{BridgeMatrices, SparseMatrix, M1, M2, M3};
 use rayon::prelude::*;
@@ -20,7 +20,7 @@ pub const NAME: &str = "agg-bridge seed";
 /// cSHAKE256 customization string `S` of the derivation (the function name `N` is empty).
 pub const BRIDGE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/bridge";
 
-/// Length of the bridge seed `sd` (transcript event 3).
+/// Length of the bridge seed `sd` (drawn at the bridge-seed step).
 pub const SEED_BYTES: usize = 32;
 
 /// Shape of one bridge matrix: level number, rows `2^rows_log2`, columns, column weight.
