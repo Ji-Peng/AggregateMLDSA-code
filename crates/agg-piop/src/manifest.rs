@@ -1,9 +1,9 @@
-//! Exact commitment manifest of one batch (event 0; `docs/lookup.md`).
+//! Exact commitment manifest of one batch (the instance record; `docs/lookup.md`).
 //!
 //! Mirrors `aerie-falcon/src/protocol/manifest.rs`: the manifest fixes the canonical wire
 //! order, the commitment round, the preset family, the logical and physical domain of every
 //! Akita group, and the role and alphabet of each committed polynomial, and serializes the
-//! public profile bound in event 0 before any commitment. The seven groups are `G_main16`
+//! public profile bound in the instance record before any commitment. The seven groups are `G_main16`
 //! (`Z_lo, U_lo, V_lo, V_hi`, width 16) and `G_main4` (`Z_hi, U_hi, b_0..b_5`, width 4) in
 //! round 1, before the bridge seed, and `G_1` (`kappa^(1)_t`), `G_2` (`y^(2)_t`,
 //! `kappa^(2)_t`), `G_3` (`kappa^(3)` and zero polynomials up to `G_2`'s layout), `G_k` (the
@@ -12,7 +12,7 @@
 //! Akita's final group, so PCS execution follows wire order. The alphabets listed here are
 //! the honest producer's; the ranges are proven inside the PIOP (the lookup into `T_16`, the
 //! base-4 and base-6 leaves), never by Akita. `V_lo, V_hi` have no range check: the
-//! projection bounds `v` through `k` (`docs/spec.md` 6).
+//! projection bounds `v` through `k` (`docs/spec.md`, the projection definition).
 //!
 //! Relation H-u (the default, `docs/h-exact.md`): `z` relaxed to `[-2^17, 2^17)`, `u`
 //! exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
@@ -51,11 +51,11 @@ pub type PcsFamily = Family;
 /// Wire version of this protocol (the Keccak side's tied parts of proof version 5 with the
 /// virtual parity chain and its work sites in the plan).
 pub const WIRE_VERSION: u16 = 4;
-/// Parameter-set byte of ML-DSA-44 (event 0).
+/// Parameter-set byte of ML-DSA-44 (the instance record).
 pub const PARAMETER_SET: u8 = 0x44;
 /// Identifier of the digit layout: 2 is the lookup layout with the projected quotient
 /// (ranges by the lookup into `T_16`; `v` bounded through the digits of its projection
-/// outputs `k`, `docs/spec.md` 4.3). Layout 1 (`V_lo`, `V_hi` looked up) is retired.
+/// outputs `k`, `docs/spec.md`, the projection definition). Layout 1 (`V_lo`, `V_hi` looked up) is retired.
 pub const DIGIT_LAYOUT_ID: u8 = 2;
 /// Number of committed groups.
 pub const GROUP_COUNT: usize = agg_pcs_config::catalogs::GROUP_COUNT;
@@ -104,7 +104,7 @@ pub const K16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16, 1 << 16, 4],
     signed: true,
 };
-/// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md` 6).
+/// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md`, the projection definition).
 pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
 /// Bytes of `Psi`, squeezed as the answer of the site `proj/psi` (16 KiB).
 pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
@@ -121,7 +121,7 @@ pub const CARRY16_DIGITS: DigitLayout = DigitLayout {
 };
 /// The base of a column looked up in `T_16`.
 pub const LOOKUP_BASE: u32 = 1 << 16;
-/// Alphabet code of a looked-up column in the event-0 bytes (`log2 |T_16|` with the high
+/// Alphabet code of a looked-up column in the instance-record bytes (`log2 |T_16|` with the high
 /// bit set).
 pub const LOOKUP_ALPHABET_CODE: u8 = 0x80 | 16;
 /// Alphabet code of a multiplicity digit (base 16, not range-checked).
@@ -677,7 +677,7 @@ impl CommitmentManifest {
         1 << self.d_sig.saturating_sub(13)
     }
 
-    /// The grouped catalog row id bound in event 0.
+    /// The grouped catalog row id bound in the instance record.
     #[must_use]
     pub fn catalog_row(&self) -> &str {
         &self.catalog_row
@@ -825,7 +825,7 @@ impl CommitmentManifest {
             && plan.layout.row_name() == self.catalog_row
     }
 
-    /// Canonical byte encoding of the manifest part of event 0.
+    /// Canonical byte encoding of the manifest part of the instance record.
     ///
     /// `LE16` wire version, parameter-set byte `0x44`, relation byte ([`Relation::id`],
     /// `0` = H-u, `1` = H-exact), `LE64` `N`, `LE64` `N*`, digit layout id (1 = the lookup
@@ -835,7 +835,7 @@ impl CommitmentManifest {
     /// the bridge parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`, `LE64`, `U8`); the
     /// lookup layout (challenge count, table width, and per stack the column count,
     /// variables and storage shift, `U8, U8, U8, U8, LE32`). The public-record digest and
-    /// the Flock profile id complete event 0 elsewhere.
+    /// the Flock profile id complete the instance record elsewhere.
     #[must_use]
     pub fn binding_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(160);
@@ -1058,7 +1058,7 @@ mod tests {
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
         assert!((per_signature - 16_897.5).abs() < 1e-9, "{per_signature}");
         assert_eq!(full.catalog_row(), "mldsa-44-p16f-batch-32768-mult-final");
-        // Event 0: relation byte 2, G_main4 at 12 polynomials with the ternary codes.
+        // Relation byte 2, G_main4 at 12 polynomials with the ternary codes.
         let bytes = manifest.binding_bytes();
         assert_eq!(bytes[3], RELATION_H_FIPS);
         let main4 = &bytes[4 + 16 + 2 + 10..];

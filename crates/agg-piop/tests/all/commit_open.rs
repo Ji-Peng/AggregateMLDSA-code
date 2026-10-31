@@ -61,7 +61,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
     let manifest = batch.manifest.clone();
 
     let committer = TableCommitter::new(manifest.clone()).expect("setup");
-    // Round 1 (event 1) before the bridge seed, round 2 (event 4) after it.
+    // Round 1 (the round-1 commitment step) before the bridge seed, round 2 after it.
     let [main16, main] = committer.commit_round1(&batch.main).expect("round 1");
     let [level1, level2, level3, proj, mult] = committer.commit_round2(&batch.bridge).expect("round 2");
     let [_, again] = committer.commit_round1(&batch.main).expect("round 1 again");

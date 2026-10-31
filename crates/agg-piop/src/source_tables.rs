@@ -1074,7 +1074,7 @@ impl BridgeGroupTables {
         &mut self.y
     }
 
-    /// `Y_sigma`, the 4,096 bits of segment `sigma` (event-6 payload, 512 bytes packed).
+    /// `Y_sigma`, the 4,096 bits of segment `sigma` (final-vector payload, 512 bytes packed).
     #[must_use]
     pub fn segment_y(&self, sigma: usize) -> &[u8] {
         &self.y[sigma * M3..(sigma + 1) * M3]

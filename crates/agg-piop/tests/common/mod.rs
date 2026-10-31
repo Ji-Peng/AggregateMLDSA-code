@@ -119,7 +119,7 @@ pub fn transcript_psi(manifest: &CommitmentManifest) -> Vec<u8> {
     transcript_to_seed(manifest).challenge_psi().unwrap()
 }
 
-/// A transcript driven through events 0 to 6 (the final vectors and empty share items) with
+/// A transcript driven through the transcript through the final-vector step (the final vectors and empty share items) with
 /// fixed dummy payloads, for isolated PIOP tests (prover and verifier replay the same
 /// prefix; the join follows the stages).
 pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {

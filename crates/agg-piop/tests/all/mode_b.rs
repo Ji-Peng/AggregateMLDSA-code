@@ -328,7 +328,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let mut long = output.proof.clone();
         long.work.push(0);
         assert!(matches!(rejected(verify(&long)), VerifyError::Wire(_)));
-        // Event 0 binds the plan: a verifier whose plan has a tie site derives another sd.
+        // The instance record binds the plan: a verifier whose plan has a tie site derives another sd.
         let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, Relation::Hu, None);
         assert!(matches!(rejected(other_plan), VerifyError::Keccak(0)));
 
@@ -340,7 +340,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             rejected(verify_mode_b(&public[1..], &bytes, &bridge, Relation::Hu, None)),
             VerifyError::RecordCount
         ));
-        // Event 0 binds the profile: under profile 0 the transcript, hence sd and the
+        // The instance record binds the profile: under profile 0 the transcript, hence sd and the
         // seed-derived matrices, change, and the projection of the public bits no longer
         // matches Y_sigma.
         let other_profile = verify_timed(
@@ -414,7 +414,7 @@ fn mode_b_round_trip_at_64_signatures() {
 
 /// Relation H-exact (`docs/h-exact.md`, protocol level): honest round trips at
 /// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
-/// proof verified as H-u and an H-u proof verified as H-exact are rejected before event 0,
+/// proof verified as H-u and an H-u proof verified as H-exact are rejected before the instance record,
 /// a rewritten relation byte fails, and an unknown relation byte is malformed.
 #[test]
 fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
@@ -436,7 +436,7 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
                 found: Relation::HExact
             }
         ));
-        // The H-exact header rewritten to H-u: verified as H-u the transcript (event 0,
+        // The H-exact header rewritten to H-u: verified as H-u the transcript (the instance record,
         // the catalog row, the plan) differs; verified as H-exact the flag mismatches.
         let mut rewritten = bytes.clone();
         rewritten[2] = Relation::Hu.id();
@@ -495,7 +495,7 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
 /// 1, 64 and 256 records (the 256-record batch includes the synthetic weight-80 records with
 /// the coefficient `w' = q - gamma2, h = 0`), the claim counts, and cross-relation
 /// verification: an H-FIPS proof verified as H-u or H-exact and an H-exact proof verified as
-/// H-FIPS are rejected before event 0, a rewritten relation byte fails.
+/// H-FIPS are rejected before the instance record, a rewritten relation byte fails.
 #[test]
 fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
     on_large_stack(|| {
@@ -538,7 +538,7 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
                 assert!(!verify_mode_b(&public, &rewritten, &bridge, expected, None).accepted());
             }
         }
-        // The same records proved under H-exact, verified as H-FIPS (rejected before event 0)
+        // The same records proved under H-exact, verified as H-FIPS (rejected before the instance record)
         // and promoted to H-FIPS (rejected).
         let exact = Fixture {
             records: fixture.records.clone(),

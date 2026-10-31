@@ -4,20 +4,20 @@
 //! domain: backend Spongefish `Blake2b512` (`akita_transcript::TranscriptSponge`), protocol
 //! tag `agg-mldsa/v1/piop/blake2b` zero-padded to 64 bytes, session `B("agg-mldsa/v1")`,
 //! instance `B(digest)` with the cSHAKE256 digest of the canonical instance record, which
-//! event 0 then absorbs. Every proof payload is absorbed as one public message (the proof
+//! the transcript then absorbs as the instance record. Every proof payload is absorbed as one public message (the proof
 //! bytes travel in the wire format, not in a Spongefish argument string); challenges are
 //! rejection-sampled per 64-bit limb from eight squeezed bytes, two limbs per element of
 //! `K`. The ordered registry rejects a missing, extra or out-of-order event before it
 //! reaches the sponge. Prover and verifier run the same state machine.
 //!
-//! Forked transcript (`docs/spec.md` Section 10): after event 6 the sponge is cloned into
-//! branch L (event 7, the lookup) and branch S (events 8 to 11: `tau`, the pre-stage claims,
+//! Forked transcript (`docs/spec.md`, the forked transcript): after the final-vector step the sponge is cloned into
+//! branch L (the lookup) and branch S (`tau`, the pre-stage claims,
 //! stages 1 and 2). Each branch first absorbs its own label ([`FORK_LOOKUP_SITE`],
 //! [`FORK_STAGES_SITE`]), so the two clones diverge before their first challenge. The join
 //! ([`FORK_JOIN_SITE`]) absorbs the 32-byte squeeze of each branch's final state, L's then
 //! S's, into the trunk, which continues with stage 3. Neither digest travels in the proof;
 //! the verifier recomputes both. The packed nonce stream keeps registry order: the trunk's
-//! nonces through event 6, then L's, then S's, then the trunk's after the join.
+//! nonces through the final-vector step, then L's, then S's, then the trunk's after the join.
 //!
 //! Grinding (`docs/soundness.md`): every protected event
 //! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
@@ -87,7 +87,7 @@ pub const FINAL_VECTOR_BYTES: usize =
 pub const INSTANCE_SITE: &str = "agg-mldsa/v1/instance";
 pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";
 pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
-/// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v` (`docs/spec.md` 6): one
+/// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v` (`docs/spec.md`, the projection definition): one
 /// challenge event after the bridge seed and before the round-2 commitments, whose answer is
 /// `Psi` itself ([`PROJ_ATOMS`] blocks of 32 bytes, 16 KiB, no field sampling).
 /// [`Transcript::challenge_psi`] absorbs the 21 raw bytes of this site name first, so that
@@ -104,14 +104,14 @@ pub const PROJ_PSI_BITS: u8 = 1;
 pub const PROJ_CLAIM_SITE: &str = "agg-mldsa/v1/proj/claim";
 pub const FLOCK_SEEDS_SITE: &str = "agg-mldsa/v1/flock/seeds";
 pub const FINAL_VECTORS_SITE: &str = "agg-mldsa/v1/flock/final-vectors";
-/// Event 6 (after the final vectors): the `S` framed share items of the Keccak side (empty
+/// After the final vectors: the `S` framed share items of the Keccak side (empty
 /// for a span or a segment of one tied part; mode B: empty).
 pub const FLOCK_SHARES_SITE: &str = "agg-mldsa/v1/flock/shares";
-/// The join event (fork-join transcript): the `S` framed proof items of the Keccak side,
+/// The join (fork-join transcript): the `S` framed proof items of the Keccak side,
 /// absorbed after the stage-3 terminal claims and before the PCS session export, so the
 /// Flock sub-proofs follow the lookup challenge `X`.
 pub const FLOCK_PROOFS_SITE: &str = "agg-mldsa/v1/flock/proofs";
-/// cSHAKE256 customization of the digest of the event-6 record ([`flock_record_digest`]).
+/// cSHAKE256 customization of the digest of the final-vector record ([`flock_record_digest`]).
 pub const FLOCK_RECORD_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/flock/record";
 pub const TAU_SITE: &str = "agg-mldsa/v1/tau";
 pub const PRESTAGE_SITE: &str = "agg-mldsa/v1/prestage/claims";
@@ -224,7 +224,7 @@ pub enum TranscriptError {
     /// A fork on a branch or off the fork event, or a join of the wrong or unfinished
     /// branches.
     Branch,
-    /// The projection matrix of event 3 was not drawn before it was requested.
+    /// The projection matrix of the bridge-seed step was requested before it was drawn.
     MissingPsi,
 }
 
@@ -487,7 +487,7 @@ pub fn cshake256(customization: &[u8], data: &[u8], out_len: usize) -> Vec<u8> {
     out
 }
 
-/// The digest of the event-6 record: `LE64(S)`, the packed final vectors `Y_0..Y_{S-1}` and
+/// The digest of the final-vector record: `LE64(S)`, the packed final vectors `Y_0..Y_{S-1}` and
 /// the `S` share items framed as absorbed (`LE64(len) || bytes`), cSHAKE256 with
 /// customization [`FLOCK_RECORD_CUSTOMIZATION`]. The Keccak side binds it into every tied
 /// part's challengers (mode A: through the part and span seeds), so that every Flock
@@ -581,7 +581,7 @@ pub struct Transcript {
     /// `None` on the trunk.
     branch: Option<Branch>,
     work: Work,
-    /// The projection matrix drawn at event 3 ([`Self::challenge_psi`]), kept so that the
+    /// The projection matrix drawn at the bridge-seed step ([`Self::challenge_psi`]), kept so that the
     /// verifier's PIOP entry point reads it from the transcript rather than from a caller.
     psi: Option<Vec<u8>>,
 }
@@ -589,9 +589,9 @@ pub struct Transcript {
 /// The two branches of the forked transcript.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Branch {
-    /// Event 7, the lookup.
+    /// The lookup.
     Lookup,
-    /// Events 8 to 11: `tau`, the pre-stage claims, stages 1 and 2.
+    /// Branch S: `tau`, the pre-stage claims, stages 1 and 2.
     Stages,
 }
 
@@ -618,7 +618,7 @@ pub fn work_bytes(manifest: &CommitmentManifest) -> usize {
 
 impl Transcript {
     /// The prover's stream: initialize from the canonical instance record and absorb
-    /// event 0; the work nonces are searched and recorded ([`Self::work_stream`]).
+    /// the instance record; the work nonces are searched and recorded ([`Self::work_stream`]).
     pub fn new(manifest: &CommitmentManifest, record: &[u8]) -> Result<Self, TranscriptError> {
         Self::with_work(manifest, record, Work::Search(WorkWriter::default()))
     }
@@ -810,7 +810,7 @@ impl Transcript {
         Ok(out)
     }
 
-    /// The projection matrix `Psi` (event 3, after `sd`): absorb the raw bytes of
+    /// The projection matrix `Psi` (the bridge-seed step, after `sd`): absorb the raw bytes of
     /// [`PROJ_SITE`] as one public message (no length frame; the registry fixes the event),
     /// then squeeze the [`PROJ_ATOMS`] 32-byte blocks of `Psi` at that new input.
     pub fn challenge_psi(&mut self) -> Result<Vec<u8>, TranscriptError> {
@@ -820,11 +820,11 @@ impl Transcript {
         Ok(psi)
     }
 
-    /// The projection matrix drawn at event 3, if [`Self::challenge_psi`] has run on this
+    /// The projection matrix drawn at the bridge-seed step, if [`Self::challenge_psi`] has run on this
     /// stream (or on the trunk it was forked from).
     ///
     /// # Errors
-    /// Before event 3.
+    /// Before the bridge-seed step.
     pub fn psi(&self) -> Result<&[u8], TranscriptError> {
         self.psi.as_deref().ok_or(TranscriptError::MissingPsi)
     }
@@ -860,7 +860,7 @@ impl Transcript {
         }
     }
 
-    /// Fork the trunk after event 6 into branch L (the lookup) and branch S (`tau`, the
+    /// Fork the trunk after the final-vector step into branch L (the lookup) and branch S (`tau`, the
     /// pre-stage claims, stages 1 and 2). Both start from a clone of the sponge and absorb
     /// their own label first. The trunk then waits at the join ([`Self::join`]). On the
     /// verifier's stream each branch reads its own slice of the nonce stream: L's nonces
@@ -1073,7 +1073,7 @@ mod tests {
         assert_eq!(full.events[13].size, PayloadSize::Exact(4 * 512));
     }
 
-    /// Absorb events 1 to 3 with dummy payloads.
+    /// Absorb the commitments and the bridge-seed step with dummy payloads.
     fn to_seed(t: &mut Transcript, commitment: &[u8]) -> Vec<u8> {
         t.absorb(commitment_site(GroupRole::Main16), 1, commitment).unwrap();
         t.absorb(commitment_site(GroupRole::Main), 1, &[1]).unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
         assert_ne!(base, run(&other, &[7; 40]));
     }
 
-    /// Events 1 to 6 with dummy payloads.
+    /// The commitments through the final-vector step with dummy payloads.
     fn to_lookup(t: &mut Transcript) {
         to_seed(t, &[0]);
         t.challenge_psi().unwrap();
@@ -1405,7 +1405,7 @@ mod tests {
         let record = manifest.binding_bytes();
         let forked = |swap: bool| -> (Vec<OpeningField>, Vec<u8>, [Vec<OpeningField>; 2]) {
             let mut trunk = Transcript::new(&manifest, &record).unwrap();
-            // Not before event 6 is complete.
+            // Not before the final-vector step is complete.
             assert_eq!(trunk.fork().err(), Some(TranscriptError::Branch));
             to_lookup(&mut trunk);
             let (mut l, mut s) = trunk.fork().unwrap();

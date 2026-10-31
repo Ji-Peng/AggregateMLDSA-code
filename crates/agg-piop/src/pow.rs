@@ -7,7 +7,7 @@
 //! in registry order ([`crate::transcript::Registry`]: the projection matrix `psi`, the lookup
 //! vector `X` included with difficulty 0). Every site carries its class, two indices and its
 //! difficulty `g` ([`agg_bridge::pow`]); the canonical encoding is hashed with
-//! SHA3-256 and the digest completes the instance record of event 0
+//! SHA3-256 and the digest completes the instance record
 //! ([`crate::binding::instance_record`]), so the transcript binds the plan before its first
 //! site.
 //!
@@ -514,7 +514,7 @@ mod tests {
                 .unwrap();
             assert_eq!((gamma2.bits, gamma2.nonce_bits()), (4, 11));
         }
-        // The anchors of `docs/soundness.md` 10.1 (mode B = PublicBits; Slim, span on); the
+        // The anchors of `docs/soundness.md`, the pinned anchors (mode B = PublicBits; Slim, span on); the
         // H-u plan is the same.
         for (d_sig, profile, want) in [
             (3, FlockProfile::PublicBits, "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5"),
@@ -541,7 +541,7 @@ mod tests {
         use crate::manifest::Relation;
         // H-FIPS's stage batching vectors (26, 8, 55) give the same
         // difficulties as H-exact's (26, 8, 49): bit_length(55) = bit_length(49) = 6. The plan,
-        // its stream and its digest are H-exact's; the relation is bound by event 0's
+        // its stream and its digest are H-exact's; the relation is bound by the instance record's
         // manifest bytes (relation byte, G_main4 and G_2 descriptors, catalog row).
         for d_sig in [3, 10, 13, 15] {
             for profile in [FlockProfile::PublicBits, FlockProfile::Slim] {
@@ -656,7 +656,7 @@ mod tests {
                 }
             )
         );
-        // The plan depends on N* (N itself is bound by the manifest bytes of event 0).
+        // The plan depends on N* (N itself is bound by the manifest bytes of the instance record).
         let none = |n: usize| {
             let m = CommitmentManifest::for_batch(n).unwrap();
             PowPlan::new(&m, FlockProfile::None, &KeccakPlan::default()).digest()

@@ -1,6 +1,6 @@
 //! Proof wire format (wire version 4): header (version, flags = relation byte, `N`), the
-//! `32N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6 (the final vectors and the
-//! Keccak side's share items), the lookup (event 7), the stages (events 9 to 12) and the join
+//! `32N` bytes of `c~_i`, then the payloads of the commitments, the final vectors and the
+//! Keccak side's share items, the lookup, the sum-check stages and the join
 //! (the Keccak side's proof items, after stage 3) in transcript order, the packed PIOP nonce
 //! stream (`docs/soundness.md`, its exact length a function of `N`), then the Akita opening.
 //! Variable-length items carry a `LE32` length; field elements use the canonical atom
@@ -60,36 +60,36 @@ pub struct AggregateProof {
     pub records: usize,
     /// `c~_i` per live record.
     pub c_tilde: Vec<[u8; C_TILDE_BYTES]>,
-    /// Event 1: the round-1 Akita commitment of `G_main16`.
+    /// The round-1 Akita commitment of `G_main16`.
     pub main16_commitment: Vec<u8>,
-    /// Event 1: the round-1 Akita commitment of `G_main4`.
+    /// The round-1 Akita commitment of `G_main4`.
     pub main_commitment: Vec<u8>,
-    /// Event 2: `S` Flock commitments.
+    /// `S` Flock commitments.
     pub flock_commitments: Vec<Vec<u8>>,
-    /// Event 4: the round-2 Akita commitments (`G_1, G_2, G_3, G_k, G_m`).
+    /// The round-2 Akita commitments (`G_1, G_2, G_3, G_k, G_m`).
     pub bridge_commitments: [Vec<u8>; 5],
-    /// Event 6: `Y_sigma`, 4,096 bits packed least significant first.
+    /// `Y_sigma`, 4,096 bits packed least significant first.
     pub final_vectors: Vec<[u8; FINAL_VECTOR_BYTES]>,
-    /// Event 6: `S` share items of the Keccak side (mode A: the shares of a segment's parts
+    /// `S` share items of the Keccak side (mode A: the shares of a segment's parts
     /// but the last; empty for a span, a one-part segment and mode B).
     pub flock_shares: Vec<Vec<u8>>,
-    /// The join event (after stage 3): `S` Flock proof byte strings.
+    /// The join (after stage 3): `S` Flock proof byte strings.
     pub flock_proofs: Vec<Vec<u8>>,
-    /// Event 7: the lookup (layer 1 and the sessions).
+    /// The lookup (layer 1 and the sessions).
     pub lookup: LookupProof,
-    /// Event 7: the multiplicity-digit claims at the table point.
+    /// The multiplicity-digit claims at the table point.
     pub multiplicities: MultiplicityClaims,
-    /// Event 9.
+    /// The pre-stage claims.
     pub prestage: PreStageClaims,
-    /// Event 9.
+    /// Stage 1.
     pub stage1: Stage1Proof,
-    /// Event 10.
+    /// Stage 2.
     pub stage2: Stage2Proof,
-    /// Event 11.
+    /// Stage 3.
     pub stage3: Stage3Proof,
     /// The packed PIOP work nonces in plan order (`docs/soundness.md`).
     pub work: Vec<u8>,
-    /// Event 12: the Akita opening.
+    /// The Akita opening.
     pub opening: Vec<u8>,
 }
 
@@ -289,14 +289,14 @@ impl AggregateProof {
         })
     }
 
-    /// The lookup part of the proof in bytes (event 7: layer 1, the sessions and the
+    /// The lookup part of the proof in bytes (layer 1, the sessions and the
     /// multiplicity-digit claims).
     #[must_use]
     pub fn lookup_bytes(&self) -> usize {
         self.lookup.byte_len() + 16 * MultiplicityClaims::LEN
     }
 
-    /// The PIOP part of the proof in bytes (events 9 to 12, without the lookup).
+    /// The PIOP part of the proof in bytes (the sum-check stages, without the lookup).
     #[must_use]
     pub fn piop_bytes(&self) -> usize {
         let rounds = self.stage1.rounds.len();
@@ -317,21 +317,21 @@ pub struct ProofSize {
     pub header: usize,
     /// The `32 N` bytes of `c~_i`.
     pub c_tilde: usize,
-    /// Events 1 and 4: the seven Akita commitments.
+    /// The seven Akita commitments.
     pub akita_commitments: usize,
-    /// Event 2: the Keccak-side items (Flock commitments; mode B: the public bits).
+    /// The Keccak-side items (Flock commitments; mode B: the public bits).
     pub keccak_commitments: usize,
-    /// Event 6: the final vectors `Y_sigma`.
+    /// The final vectors `Y_sigma`.
     pub final_vectors: usize,
-    /// Event 6 and the join: the Keccak side's share and proof items.
+    /// The final-vector step and the join: the Keccak side's share and proof items.
     pub keccak_proofs: usize,
-    /// Event 7: the lookup and the multiplicity claims.
+    /// The lookup and the multiplicity claims.
     pub lookup: usize,
-    /// Events 9 to 12: claims and round messages.
+    /// Claims and round messages.
     pub piop: usize,
     /// The packed PIOP work nonces.
     pub work: usize,
-    /// Event 12: the Akita opening.
+    /// The Akita opening.
     pub opening: usize,
 }
 

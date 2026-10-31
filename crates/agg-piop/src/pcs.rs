@@ -1,4 +1,4 @@
-//! Akita commitments of the seven groups and their batched opening (events 1, 4 and 13).
+//! Akita commitments of the seven groups and their batched opening (the round-1 and round-2 commitments and the Akita opening).
 //!
 //! Mirrors `aerie-prover/src/protocol/pcs/group.rs`: narrow signed tables stay `i8` (or
 //! `i32` for the 16-bit lookup columns) until commitment, and each polynomial is
@@ -349,7 +349,7 @@ impl TableCommitter {
         Ok(self.prover.commit_polynomials(role, polynomials)?)
     }
 
-    /// Round 1 (event 1, before the bridge seed): `G_main16` and `G_main4`, concurrently
+    /// Round 1 (before the bridge seed): `G_main16` and `G_main4`, concurrently
     /// (each commit is transcript-free; see [`concurrent_commits`]). Call it from outside
     /// the rayon pool to get the concurrency; on a worker the two commit in turn.
     pub fn commit_round1(&self, main: &MainTables) -> Result<[GroupCommitment; 2], PcsError> {
@@ -362,7 +362,7 @@ impl TableCommitter {
         Ok([wide?, narrow?])
     }
 
-    /// Round 2 (event 4, after the bridge seed): `G_1`, `G_2`, `G_3`, `G_k` and the final
+    /// Round 2 (after the bridge seed): `G_1`, `G_2`, `G_3`, `G_k` and the final
     /// group `G_m`. The five commits are independent (the final group is committed against the
     /// precommitted profiles of the work plan, not against the other commitments), so they
     /// run in parallel; an Akita commit is memory bound and does not use every thread on

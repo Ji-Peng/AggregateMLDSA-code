@@ -1,8 +1,8 @@
 //! The fork-join transcript (`docs/soundness.md`): the Keccak side's proof
 //! items are absorbed at the join, after the stage-3 claims and before the PCS session
 //! digest. So no PIOP challenge depends on them, while the session (and with it the Akita
-//! opening) binds every byte; the side's challengers receive the digest of the event-6
-//! record. The share items are absorbed at event 6, before the lookup challenge `X`, so every
+//! opening) binds every byte; the side's challengers receive the digest of the final-vector
+//! record. The share items are absorbed at the final-vector step, before the lookup challenge `X`, so every
 //! PIOP challenge depends on them. The prover's two schedules (the Flock proofs on their own
 //! pool beside the PIOP, or one after the other) produce the same proof.
 //!
@@ -22,7 +22,7 @@ use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
 
 /// A Keccak side without commitments whose share and proof items are fixed bytes; it
-/// records the event-6 record digest it was given.
+/// records the final-vector record digest it was given.
 struct FixedProofs {
     share: Vec<u8>,
     proof: Vec<u8>,
@@ -142,7 +142,7 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
         assert_eq!(serial.timings.flock_threads, 0);
         assert_eq!(forked.proof.to_bytes(), serial.proof.to_bytes(), "same proof either way");
         assert_eq!(forked.proof.flock_proofs, vec![vec![1, 2, 3]]);
-        // The side was given the digest of the event-6 record (final vectors, share items).
+        // The side was given the digest of the final-vector record (final vectors, share items).
         assert_eq!(
             record,
             flock_record_digest(&forked.proof.final_vectors, &forked.proof.flock_shares)
@@ -189,7 +189,7 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
         share.flock_shares[0] = vec![0];
         assert!(matches!(check(&share), Err(VerifyError::Keccak(0))), "AnyProof refuses shares");
 
-        // The share items are bound at event 6, before `X`: a side that sends a share item
+        // The share items are bound at the final-vector step, before `X`: a side that sends a share item
         // gets another record digest and other PIOP challenges, from the lookup on.
         let shared_side = FixedProofs::with_share(&[7, 7], &[1, 2, 3]);
         let shared = run("2", &shared_side);

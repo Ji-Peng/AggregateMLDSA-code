@@ -9,7 +9,7 @@
 //! | --- | --- |
 //! | `parse` | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
 //! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
-//! | `transcript` | events 0 to 6: the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
+//! | `transcript` | the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
 //! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks), on the proof items the join absorbs later |
 //! | `lookup` | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
@@ -63,11 +63,11 @@ pub struct SegmentContext<'a> {
     pub sigma: usize,
     /// Batch geometry.
     pub geometry: Geometry,
-    /// The segment's event-2 item (a Flock commitment; mode B: the public bits).
+    /// The segment's commitment-phase item (a Flock commitment; mode B: the public bits).
     pub commitment: &'a [u8],
-    /// The challenger seed `fs_sigma` (event 5).
+    /// The challenger seed `fs_sigma` (the Flock seed step).
     pub seed: &'a [u8; 32],
-    /// The bridge seed `sd` (event 3), whose matrices define the parity chain's weight
+    /// The bridge seed `sd`, whose matrices define the parity chain's weight
     /// (`docs/bridge.md`, `docs/parity-chain.md`).
     pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
@@ -76,12 +76,12 @@ pub struct SegmentContext<'a> {
     pub c_tilde: &'a [[u8; C_TILDE_BYTES]],
     /// `Y_sigma`, 4,096 bits, one per byte.
     pub final_vector: &'a [u8],
-    /// The segment's event-6 share item.
+    /// The segment's share item.
     pub shares: &'a [u8],
-    /// The digest of the event-6 record (`crate::transcript::flock_record_digest`), which
+    /// The digest of the final-vector record (`crate::transcript::flock_record_digest`), which
     /// the sub-proofs' challengers bind.
     pub record: &'a [u8; 32],
-    /// The segment's proof item (the join event).
+    /// The segment's proof item (the join).
     pub proof: &'a [u8],
     /// The bridge matrices of `sd`.
     pub matrices: &'a BridgeMatrices,
@@ -91,7 +91,7 @@ pub struct SegmentContext<'a> {
 pub struct BitsContext<'a> {
     /// Batch geometry.
     pub geometry: Geometry,
-    /// The `S` event-2 items.
+    /// The `S` commitment-phase items.
     pub commitments: &'a [Vec<u8>],
     /// The stage-3 terminal point `r^(3)` (the opening point of `G_main`).
     pub point: &'a [E],
@@ -101,21 +101,21 @@ pub struct BitsContext<'a> {
 
 /// The Keccak argument's verifier side.
 pub trait KeccakVerifier {
-    /// The Flock profile this side verifies (bound in event 0). [`verify`] refuses to run
+    /// The Flock profile this side verifies (bound in the instance record). [`verify`] refuses to run
     /// with a different requested profile.
     fn profile(&self) -> FlockProfile;
 
     /// The Keccak side's part of the proof-of-work plan (`docs/soundness.md`)
-    /// from the batch geometry and the `S` event-2 items (the tied parts' geometry), before
-    /// event 0; `None` refuses the items. The default (no tied parts) fits a side without
+    /// from the batch geometry and the `S` commitment-phase items (the tied parts' geometry), before
+    /// the instance record; `None` refuses the items. The default (no tied parts) fits a side without
     /// Flock sub-proofs.
     fn plan(&self, _geometry: &Geometry, _commitments: &[Vec<u8>]) -> Option<KeccakPlan> {
         Some(KeccakPlan::default())
     }
 
     /// Verify segment `sigma`: the sub-proof (absorbed at the join, after stage 3) against its
-    /// commitment, challenger seed, public inputs, final vector, share item and the event-6
-    /// record digest. The verifier calls it right after replaying event 6: the outcome does
+    /// commitment, challenger seed, public inputs, final vector, share item and the final-vector
+    /// record digest. The verifier calls it right after replaying the final-vector step: the outcome does
     /// not depend on the PIOP, and an early check gives a precise rejection.
     fn verify(&self, segment: &SegmentContext<'_>) -> bool;
 
@@ -147,7 +147,7 @@ impl KeccakVerifier for NoKeccakVerifier {
 pub enum ConfigurationError {
     /// The [`KeccakVerifier`] verifies another Flock profile than the requested one.
     ProfileMismatch {
-        /// The profile passed to [`verify`] (bound in event 0).
+        /// The profile passed to [`verify`] (bound in the instance record).
         requested: FlockProfile,
         /// [`KeccakVerifier::profile`].
         keccak: FlockProfile,
@@ -222,7 +222,7 @@ pub enum VerifyError {
     /// Malformed proof bytes.
     Wire(WireError),
     /// The proof's relation byte differs from the relation the caller expects (checked
-    /// before event 0: a proof of a weaker relation is no proof of
+    /// before the instance record: a proof of a weaker relation is no proof of
     /// the stronger one, and the relation is never trusted from the proof).
     Relation {
         /// The caller's relation.
@@ -238,7 +238,7 @@ pub enum VerifyError {
     Commitment(GroupRole),
     /// Transcript replay fault.
     Transcript(TranscriptError),
-    /// The Keccak side refused the event-2 items while deriving the proof-of-work plan.
+    /// The Keccak side refused the commitment-phase items while deriving the proof-of-work plan.
     Plan,
     /// The Keccak side of a segment was rejected.
     Keccak(usize),
@@ -328,11 +328,11 @@ pub struct VerifyTimings {
     pub parse: Duration,
     /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding.
     pub public_data: Duration,
-    /// Events 0 to 6 without the matrices.
+    /// The transcript through the final-vector step without the matrices.
     pub transcript: Duration,
     /// The bridge matrices from `sd`.
     pub matrices: Duration,
-    /// The Keccak side per segment (checked after event 6; its proof items are absorbed at
+    /// The Keccak side per segment (checked after the final-vector step; its proof items are absorbed at
     /// the join).
     pub keccak: Duration,
     /// The lookup and the multiplicity-digit claims.
@@ -411,7 +411,7 @@ impl VerifyReport {
 
 /// Verify `proof_bytes` for the records `(pk_i, M_i)` under `relation`, the relation the
 /// caller expects (never read from the proof: a proof whose header names another relation
-/// is rejected before event 0); the `c~_i` come from the proof. An unsound configuration
+/// is rejected before the instance record); the `c~_i` come from the proof. An unsound configuration
 /// ([`check_configuration`]) is refused before the proof is read.
 pub fn verify(
     records: &[(&[u8], &[u8])],
@@ -477,7 +477,7 @@ fn run(
     check_configuration(bridge, keccak, flock).map_err(VerifyError::Configuration)?;
     let mut clock = Lap(Instant::now());
 
-    // Parse: the header's relation must be the caller's, and the manifest (event 0, the
+    // Parse: the header's relation must be the caller's, and the manifest (the instance record, the
     // catalog row, the plan) comes from the caller's relation.
     let proof = AggregateProof::from_bytes(proof_bytes)?;
     if proof.relation != relation {
@@ -511,8 +511,8 @@ fn run(
     let digest = public_records_binding(&inputs);
     timings.public_data = clock.lap();
 
-    // Events 0 to 6; event 0 binds the proof-of-work plan, derived from the public
-    // geometry and the tied parts named by the event-2 items.
+    // The transcript through the final-vector step; the instance record binds the proof-of-work plan, derived from the public
+    // geometry and the tied parts named by the commitment-phase items.
     let keccak_plan = keccak
         .plan(&geometry, &proof.flock_commitments)
         .ok_or(VerifyError::Plan)?;
@@ -561,7 +561,7 @@ fn run(
     let final_bits: Vec<Vec<u8>> = proof.final_vectors.iter().map(unpack_final_vector).collect();
     let y_table: Vec<u8> = final_bits.concat();
     timings.transcript += clock.lap();
-    // The Keccak side per segment, on event 6 and the proof items of the join (its outcome
+    // The Keccak side per segment, on the final-vector step and the proof items of the join (its outcome
     // does not depend on the PIOP's challenges, so it is checked first).
     let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
     for (sigma, bits) in final_bits.iter().enumerate() {
@@ -644,7 +644,7 @@ fn run(
     }
     timings.bits = clock.lap();
 
-    // Event 13: the opening.
+    // The opening.
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
     let claims: [GroupClaim; GROUP_COUNT] = opening_claims(
@@ -679,14 +679,14 @@ pub struct PiopVerified {
     pub stage3_end: Instant,
 }
 
-/// Verify the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6 (the
+/// Verify the PIOP part (the lookup and the sum-check stages) on a transcript that has absorbed the instance record through the final-vector step (the
 /// final vectors and the share items; the Flock proofs follow at the join):
 /// the lookup (`lookup::verify_in`, the claims on the stacked lanes and on `m`), the
 /// multiplicity-digit claims (`sum_k 16^k m_k(pi_m) = m(pi_m)`), `tau`, the pre-stage claims
 /// with `Y(tau_3)` from `y_table`, and stages 1 to 3 with the public pass deferred
 /// (`public_pass(r^(2), r^(3)) = (T(r^(2)), w_A(r^(3)))`). The stage-3 claims and the
 /// digit claims are then the opening claims; the caller verifies the opening. `Psi` is read
-/// from the transcript's event-3 answer, so it cannot be supplied or reused by a caller.
+/// from the transcript's bridge-seed answer, so it cannot be supplied or reused by a caller.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_piop(
     manifest: &CommitmentManifest,
@@ -700,10 +700,10 @@ pub fn verify_piop(
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
     let outcome = (|| {
-        // `Psi` is transcript-owned: event 3 drew it before the round-2 commitments, and
+        // `Psi` is transcript-owned: the bridge-seed step drew it before the round-2 commitments, and
         // the verifier reads it back instead of accepting one from the caller.
         let psi = transcript.psi().map_err(VerifyError::Transcript)?.to_vec();
-        // The fork after event 6: the verifier replays branch L, then branch S, each on its
+        // The fork after the final-vector step: the verifier replays branch L, then branch S, each on its
         // own clone of the sponge, then joins them (L's digest, then S's) as the prover did.
         let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
 

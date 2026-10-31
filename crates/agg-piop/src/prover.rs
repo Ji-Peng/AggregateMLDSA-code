@@ -3,9 +3,9 @@
 //! [`prove_piop`] is the PIOP part after the commitments (lookup, pre-stage claims, stages
 //! 1 to 3), shared with the stage tests.
 //!
-//! Fork-join (`docs/perf.md`): event 6 absorbs the final vectors and the Keccak side's
-//! share items only; the Flock proofs are absorbed at the join event after the stage-3
-//! claims. No PIOP challenge depends on them, so after event 6 the prover runs
+//! Fork-join (`docs/perf.md`): the final-vector step absorbs the final vectors and the Keccak side's
+//! share items only; the Flock proofs are absorbed at the join after the stage-3
+//! claims. No PIOP challenge depends on them, so after the final-vector step the prover runs
 //! [`KeccakSide::prove`] on its own rayon pool ([`flock_pool_threads`]) while the PIOP
 //! (lookup, pre-stage claims, stages) runs on the global pool, then absorbs the proofs.
 //!
@@ -91,11 +91,11 @@ impl BridgeDerivation for FixedMatrices {
     }
 }
 
-/// The Keccak argument's transcript contributions (events 2 and 6 and the join event).
+/// The Keccak argument's transcript contributions (the commitment phase, the final-vector step and the join).
 pub trait KeccakSide {
     /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites,
     /// `docs/soundness.md`), a function of the public batch geometry, needed
-    /// before event 0. The default (no tied parts) fits a side without Flock sub-proofs.
+    /// before the instance record. The default (no tied parts) fits a side without Flock sub-proofs.
     fn plan(&self, _segments: usize) -> KeccakPlan {
         KeccakPlan::default()
     }
@@ -103,7 +103,7 @@ pub trait KeccakSide {
     /// The `S` Flock commitments, before the bridge seed.
     fn commitments(&self, segments: usize) -> Vec<Vec<u8>>;
 
-    /// The `S` share items of event 6, absorbed after the final vectors `Y_sigma` (one bit
+    /// The `S` share items of the final-vector step, absorbed after the final vectors `Y_sigma` (one bit
     /// per byte in `final_vectors`) and before the lookup: data the Flock proofs are checked
     /// against that is not a function of `Y_sigma` (mode A: the shares of a segment's parts
     /// but the last, under the matrices of `sd`). The default is `S` empty items.
@@ -126,11 +126,11 @@ pub trait KeccakSide {
         true
     }
 
-    /// The `S` Flock proofs of the join event. They may be computed concurrently with the
-    /// PIOP, so they depend on nothing after event 6: `bridge_seed` is `sd`
-    /// (event 3) and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
-    /// `fs_sigma` (event 5), `final_vectors` the `Y_sigma` and `record` the digest of the
-    /// event-6 record ([`crate::transcript::flock_record_digest`]: the final vectors and the
+    /// The `S` Flock proofs of the join. They may be computed concurrently with the
+    /// PIOP, so they depend on nothing after the final-vector step: `bridge_seed` is `sd`
+    /// and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
+    /// `fs_sigma` (the Flock seed step), `final_vectors` the `Y_sigma` and `record` the digest of the
+    /// final-vector record ([`crate::transcript::flock_record_digest`]: the final vectors and the
     /// share items), which the side MUST bind into every challenger of its sub-proofs, so
     /// that their challenge addresses encode the input of the lookup challenge `X`
     /// (`docs/soundness.md`).
@@ -207,7 +207,7 @@ fn logical_cpus() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
-/// Threads of the pool that runs the Akita opening (event 13): `AGG_OPENING_THREADS` if set
+/// Threads of the pool that runs the Akita opening: `AGG_OPENING_THREADS` if set
 /// (`0` or a value of at least the global pool: the global pool itself), else one per
 /// physical core, capped by the global pool. The opening is a chain of small parallel
 /// loops; on SMT hosts a second thread per core adds idle spinning and futex wake-ups
@@ -524,9 +524,9 @@ pub struct ProveTimings {
     pub tables: Duration,
     /// Akita setup from the work plan.
     pub setup: Duration,
-    /// Event 1: the round-1 commitments (concurrent with the event-2 commitments).
+    /// The round-1 commitments (concurrent with the Flock commitments).
     pub round1: Duration,
-    /// Events 2, 6 and the join: the Keccak side (commitments, shares and proofs; the proofs
+    /// The commitment phase, the final-vector step and the join: the Keccak side (commitments, shares and proofs; the proofs
     /// overlap the PIOP steps under the fork-join).
     pub keccak: Duration,
     /// The Flock proofs alone (on their own pool under the fork-join).
@@ -537,11 +537,11 @@ pub struct ProveTimings {
     /// Threads of the Flock pool (0: no fork, [`flock_pool_threads`]).
     pub flock_threads: usize,
     /// Matrices, the round-2 tables (parities, carries, multiplicities) and their
-    /// commitments (event 4).
+    /// commitments.
     pub round2: Duration,
-    /// Event 7: the lookup (fraction trees, sessions, multiplicity claims).
+    /// The lookup (fraction trees, sessions, multiplicity claims).
     pub lookup: Duration,
-    /// Events 8 and 9: `tau` and the pre-stage claims.
+    /// `tau` and the pre-stage claims.
     pub prestage: Duration,
     /// Stage 1, including the `w_2, w_3` weight tables.
     pub stage1: Duration,
@@ -549,7 +549,7 @@ pub struct ProveTimings {
     pub stage2: Duration,
     /// Stage 3, including the `w_A` weight table.
     pub stage3: Duration,
-    /// Event 13: the finish part of the batched Akita opening. The prepare part runs earlier,
+    /// The finish part of the batched Akita opening. The prepare part runs earlier,
     /// in the PIOP branch; under the fork it is inside [`Self::fork_join`].
     pub opening: Duration,
     /// Threads of the pool of the opening's finish part ([`opening_pool_threads`]; the global
@@ -592,13 +592,13 @@ impl std::fmt::Display for ProveTimings {
 pub struct ProverOutput {
     /// The proof.
     pub proof: AggregateProof,
-    /// The bridge seed `sd` (event 3).
+    /// The bridge seed `sd`.
     pub bridge_seed: [u8; 32],
     /// The projection matrix `Psi` (the answer of the site `proj/psi`, after `sd`).
     pub psi: Vec<u8>,
-    /// The Flock challenger seeds `fs_sigma` (event 5).
+    /// The Flock challenger seeds `fs_sigma` (the Flock seed step).
     pub flock_seeds: Vec<[u8; 32]>,
-    /// The PCS session digest (event 12).
+    /// The PCS session digest (drawn after stage 3).
     pub session: [u8; 32],
     /// The stage points `(tau, r^(1), r^(2), lookup points; r^(3))`.
     pub points: (Points, Vec<crate::OpeningField>),
@@ -692,21 +692,21 @@ pub fn main_tables(inputs: &ProverInputs<'_>) -> Result<(CommitmentManifest, Mai
     Ok((manifest, main))
 }
 
-/// The PIOP part of a proof (events 7 to 12): the lookup, the multiplicity-digit claims,
+/// The PIOP part of a proof (the lookup and the sum-check stages): the lookup, the multiplicity-digit claims,
 /// the pre-stage claims and the three stages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PiopProof {
-    /// Event 7: the lookup.
+    /// The lookup.
     pub lookup: LookupProof,
-    /// Event 7: `m_k(pi_m)`.
+    /// `m_k(pi_m)`.
     pub multiplicities: MultiplicityClaims,
-    /// Event 9.
+    /// The pre-stage claims.
     pub prestage: PreStageClaims,
-    /// Event 10.
+    /// Stage 1.
     pub stage1: Stage1Proof,
-    /// Event 11.
+    /// Stage 2.
     pub stage2: Stage2Proof,
-    /// Event 12.
+    /// Stage 3.
     pub stage3: Stage3Proof,
 }
 
@@ -719,7 +719,7 @@ pub struct PiopRun {
     pub r3: Vec<E>,
     /// The table point `pi_m`.
     pub pi_m: Vec<E>,
-    /// The lookup (event 7).
+    /// The lookup.
     pub lookup: Duration,
     /// `tau` and the pre-stage claims.
     pub prestage: Duration,
@@ -739,9 +739,9 @@ fn check_lookup_shape(manifest: &CommitmentManifest, shape: &LookupShape) -> Res
     Ok(())
 }
 
-/// Prove the PIOP part (events 7 to 12) on a transcript that has absorbed events 0 to 6 (the
+/// Prove the PIOP part (the lookup and the sum-check stages) on a transcript that has absorbed the instance record through the final-vector step (the
 /// commitments, the seeds, the final vectors and the Keccak side's share items). `Psi` is
-/// read from the transcript, so the projection matrix cannot disagree with event 3.
+/// read from the transcript, so the projection matrix cannot disagree with the bridge-seed step.
 /// `unchecked` skips the honest prover's self-checks (lookup root identity and session
 /// claims, stage claimed sums) so that tests can hand a tampered witness to the verifier.
 #[allow(clippy::too_many_arguments)]
@@ -875,7 +875,7 @@ fn run_branches<A: Send, B: Send>(
     })
 }
 
-/// What branch L (event 7) hands to the join.
+/// What branch L hands to the join.
 struct LookupBranch {
     proof: LookupProof,
     multiplicities: MultiplicityClaims,
@@ -885,7 +885,7 @@ struct LookupBranch {
     time: Duration,
 }
 
-/// What branch S (events 8 to 11) hands to the join.
+/// What branch S hands to the join.
 struct StagesBranch<'a> {
     points: Points,
     prestage: PreStageClaims,
@@ -962,7 +962,7 @@ fn prove_stages_branch<'a>(
     trace: bool,
 ) -> Result<StagesBranch<'a>, ProveError> {
     let mut clock = Lap::new();
-    // Events 8 and 9: tau and the pre-stage claims.
+    // Tau and the pre-stage claims.
     let mut points = Points {
         tau: transcript.challenge_extensions(TAU_SITE, manifest.d_main())?,
         ..Points::default()
@@ -1053,7 +1053,7 @@ fn prove_stages_branch<'a>(
 
 /// [`prove_piop`] with the challenge-independent prover tables (the parities `y^(1)`)
 /// built beforehand, e.g. while the Flock span is proven (prover only). The transcript
-/// forks after event 6: branch L (the lookup) and branch S (`tau` through stage 2) run
+/// forks after the final-vector step: branch L (the lookup) and branch S (`tau` through stage 2) run
 /// side by side ([`run_branches`]), the join absorbs their digests, stage 3 follows on the
 /// trunk. `swap_join` is a test hook that absorbs the digests in the wrong order, and
 /// `flock_forks` reports whether the Flock proofs run beside the PIOP.
@@ -1074,7 +1074,7 @@ fn prove_piop_with<'a>(
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
     let psi = transcript.psi()?.to_vec();
 
-    // The fork: events 7 (L) and 8 to 11 (S) on two clones of the sponge.
+    // The fork: branch L (the lookup) and branch S on two clones of the sponge.
     let (mut lookup_transcript, mut stages_transcript) = transcript.fork()?;
     let (lookup, stages) = run_branches(
         || prove_lookup_branch(manifest, tables, &mut lookup_transcript, unchecked, trace),
@@ -1123,7 +1123,7 @@ fn prove_piop_with<'a>(
     } = stages;
     points.lookup = lookup.stack_points;
 
-    // Event 12: stage 3 on the trunk.
+    // Stage 3 on the trunk.
     let clock = Instant::now();
     let prove3 = if unchecked {
         stage3::prove_unchecked
@@ -1173,7 +1173,7 @@ fn prove_piop_with<'a>(
     ))
 }
 
-/// Prove from given round-1 tables (events 0 to 13 with the join). `hooks` are for
+/// Prove from given round-1 tables (the whole transcript with the join). `hooks` are for
 /// adversarial tests; an honest caller passes `ProveHooks::default()`.
 pub fn prove_with_tables(
     inputs: &ProverInputs<'_>,
@@ -1245,7 +1245,7 @@ pub fn prove_with_tables_using(
     timings.setup = clock.lap();
     phase_stamp("setup");
 
-    // Events 0 to 3: instance (with the proof-of-work plan's digest),
+    // The instance record (with the proof-of-work plan's digest),
     // round-1 commitments, Flock commitments, bridge seed.
     let digest = public_records_binding(inputs.records);
     let plan = PowPlan::new(manifest, flock, &keccak.plan(segments));
@@ -1312,7 +1312,7 @@ pub fn prove_with_tables_using(
     timings.round1 = round1_time;
     timings.keccak = keccak_time;
 
-    // Events 4 to 6: round-2 commitments, Flock seeds, final vectors and share items.
+    // Round-2 commitments, Flock seeds, final vectors and share items.
     let matrices = bridge.matrices(&bridge_seed);
     let mut bridge_tables = BridgeGroupTables::build(manifest, main, &matrices, &psi)?;
     if let Some(tamper) = hooks.tamper_bridge {
@@ -1355,10 +1355,10 @@ pub fn prove_with_tables_using(
         let [l1, l2, l3, k, m] = round2;
         [main16_round1, main_round1, l1, l2, l3, k, m]
     };
-    // The fork: the Flock proofs depend on nothing after event 6, and no
+    // The fork: the Flock proofs depend on nothing after the final-vector step, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
-    // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
-    // (events 10 to 12) run on the global pool; the join absorbs them after stage 3.
+    // tables, the lookup, the pre-stage claims and the stages
+    // (stages 1 to 3) run on the global pool; the join absorbs them after stage 3.
     let flock_threads = if keccak.proves_concurrently() { flock_pool_threads() } else { 0 };
     let prove_flock = || {
         let out = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
@@ -1458,7 +1458,7 @@ pub fn prove_with_tables_using(
     }
     transcript.absorb_items(FLOCK_PROOFS_SITE, &flock_proofs)?;
 
-    // Event 13: the opening.
+    // The opening.
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
     let work = transcript.work_stream();

@@ -1,7 +1,7 @@
 //! Stage 3 (degree 3): the ring identity with `(A z)` pulled back through the public
 //! matrices, the range links, the Booleanity zero-checks of H-exact's bit digits, the
 //! evaluation reductions to `r^(3)`, the five lookup-stack reductions (`docs/lookup.md`) and
-//! the two sides of the projection identity of `v` (`projection`, `docs/spec.md` 6).
+//! the two sides of the projection identity of `v` (`projection`, `docs/spec.md`, the projection definition).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
 //! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3; H-exact:

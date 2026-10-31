@@ -1,6 +1,6 @@
-//! The Akita opening of the seven groups (event 13): six groups at
+//! The Akita opening of the seven groups: six groups at
 //! `r^(3)` and its suffixes, `G_m` at the lookup's table point; and the parsing of the
-//! commitments absorbed at events 1 and 4.
+//! commitments absorbed in rounds 1 and 2.
 
 use agg_pcs_config::commit::GroupClaim;
 use agg_pcs_config::work_plan::WorkPlan;

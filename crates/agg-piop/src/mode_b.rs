@@ -4,10 +4,10 @@
 //! the public ones.
 //!
 //! The public bits take the place of the Keccak side in the transcript (`docs/deviations.md`):
-//! the event-2 item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
+//! the commitment-phase item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
 //! (768 bytes, FIPS 204 Algorithm 28) of the segment's live records in record order, so
 //! the bits are bound before the bridge seed `sd`, as the Flock commitment would be; the
-//! event-6 share items and the join's proof items are empty and event 0 carries Flock profile id 3
+//! final-vector share items and the join's proof items are empty and the instance record carries Flock profile id 3
 //! ([`FlockProfile::PublicBits`]). The verifier side ([`PublicBitsVerifier`]) checks, per
 //! segment:
 //!
@@ -84,7 +84,7 @@ pub fn w1_encodings(
         .collect()
 }
 
-/// The prover's Keccak side in mode B: the public bits as the event-2 items.
+/// The prover's Keccak side in mode B: the public bits as the commitment-phase items.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicBits {
     segments: Vec<Vec<u8>>,
@@ -111,7 +111,7 @@ impl PublicBits {
         Self::new(&main.geometry(), &w1_encodings(manifest, main))
     }
 
-    /// The event-2 items.
+    /// The commitment-phase items.
     #[must_use]
     pub fn segments(&self) -> &[Vec<u8>] {
         &self.segments
@@ -208,7 +208,7 @@ pub fn segment_projection(
 }
 
 /// The multilinear extensions `b'_t(r)`, `t < 6`, of the public bit tables on the main
-/// domain at `point` (zero on padded rows), from the event-2 items; `None` on a malformed
+/// domain at `point` (zero on padded rows), from the commitment-phase items; `None` on a malformed
 /// item. Per record the 1,024 equality weights are bucketed by the 6-bit value (64
 /// buckets), then each lane sums its 32 buckets.
 #[must_use]

@@ -1,4 +1,4 @@
-//! The `{0, 1}` projection of the ring quotient `v` (`docs/spec.md` 4.3 and 6).
+//! The `{0, 1}` projection of the ring quotient `v` (`docs/spec.md`, the projection definition).
 //!
 //! After the bridge seed the verifier draws `Psi in {0, 1}^(128 x 1024)` directly as the
 //! answer of the site `proj/psi` (16 KiB of the PIOP duplex; row `o`, position `pos` is bit
@@ -10,9 +10,9 @@
 //! `sum_x W(x) v(x) = c = sum_y eq(r', y) k(y)` with `r'` the `D_k` suffix of `r^(2)` and the
 //! rank-one weight `W(pos, i) = P(pos) eq(r'_sig, i)`, `P(pos) = sum_o eq(r'_o, o) Psi_o(pos)`.
 //!
-//! Soundness (`docs/soundness.md`, Lemma P): `k in [-2^33, 2^33)` for every row certifies
+//! Soundness (`docs/soundness.md`, the projection bound): `k in [-2^33, 2^33)` for every row certifies
 //! `|v|_c <= 2^34` except with probability `2^-128` over `Psi`, enough for the lifting
-//! bound (6.1).
+//! bound.
 
 use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table};
 use agg_witness::params::POSITIONS;
@@ -83,7 +83,7 @@ pub struct ProjectionTables {
 impl ProjectionTables {
     /// The honest digits of the outputs `k` (record-major, `PROJ_ROWS` per record); the
     /// prover aborts when some `k` leaves `[-2^33, 2^33)` (completeness only:
-    /// `docs/spec.md` 6) and names the first such record.
+    /// `docs/spec.md`, the projection definition) and names the first such record.
     ///
     /// # Errors
     /// [`SourceTableError::ProjectionRange`] for an output outside the range.

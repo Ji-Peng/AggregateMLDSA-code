@@ -1,10 +1,10 @@
-//! Public-record binding and the canonical instance record of event 0.
+//! Public-record binding and the canonical instance record.
 //!
 //! The transcript binds `X = LE64(N) || ||_i (pk_i || LE64(|M_i|) || M_i || c~_i)` with a
 //! 16-KiB-leaf cSHAKE256 tree: leaf `i` is `cSHAKE256(block_i, 32)` under
 //! `agg-mldsa/v1/record-leaf`, the root `cSHAKE256(LE64(blocks) || leaves, 32)` under
 //! `agg-mldsa/v1/public-records-binding`. The instance record is the manifest binding
-//! bytes of event 0 (`docs/piop.md`) followed by this digest, the Flock
+//! bytes (`docs/piop.md`) followed by this digest, the Flock
 //! profile id and the 32-byte proof-of-work plan digest
 //! ([`crate::pow::PowPlan::digest`], `docs/soundness.md`).
 
@@ -19,7 +19,7 @@ pub const BINDING_BLOCK_BYTES: usize = 16 * 1024;
 const LEAF_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/record-leaf";
 const BINDING_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/public-records-binding";
 
-/// Flock profile ids bound in event 0.
+/// Flock profile ids bound in the instance record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FlockProfile {
@@ -27,7 +27,7 @@ pub enum FlockProfile {
     None = 0,
     /// Ligerito `Fast` (engineering baseline).
     Fast = 1,
-    /// Mode B: the `w_1'` bits in the clear as the event-2 items (`crate::mode_b`).
+    /// Mode B: the `w_1'` bits in the clear as the commitment-phase items (`crate::mode_b`).
     PublicBits = 3,
     /// Ligerito `Slim` (rate 1/4, Flock's 128-bit work-normalized accounting as `Fast`):
     /// about two thirds of the `Fast` Flock bytes for about twice the level-0 encoding work.
@@ -123,7 +123,7 @@ pub fn public_records_binding(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -
         .expect("32 bytes")
 }
 
-/// The canonical instance record of event 0: the manifest bytes, the public-record digest,
+/// The canonical instance record: the manifest bytes, the public-record digest,
 /// the Flock profile id and the plan digest.
 #[must_use]
 pub fn instance_record(
