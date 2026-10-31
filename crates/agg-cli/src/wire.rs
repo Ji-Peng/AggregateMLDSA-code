@@ -1,18 +1,18 @@
-//! Mode-A segment items of the aggregate wire format (transcript events 2 and 6 and the
-//! join).
+//! Mode-A segment items of the aggregate wire format (the commitment and final-vector
+//! items and the join).
 //!
 //! The aggregate itself is `agg_piop::wire::AggregateProof`: header (version, flags, `N`),
-//! the `32 N` bytes of `c~_i`, then the payloads of events 1, 2, 4, 6, 7 to 12, the join and
-//! the Akita opening. In mode A the event-2 item, the event-6 share item and the join's proof
+//! the `32 N` bytes of `c~_i`, then the payloads of the commitments, the final vectors, the lookup and the sum-check stages, the join and
+//! the Akita opening. In mode A the commitment-phase item, the share item and the join's proof
 //! item of segment `sigma` are the byte strings defined here, because a segment's Flock
 //! argument is split into parts of `2^{d_part}` records (sub-batches), each with its own Flock
 //! commitment and proof:
 //!
-//! - event 2, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || span
+//! - the commitment item, [`SegmentCommitments`]: `version (u8) || profile (u8) || d_part (u8) || span
 //!   (u8) || parts (LE32)`, then per part `LE32(len) || commitment`, the part's
 //!   `agg_keccak::tied::TiedCommitment` bytes
 //!   (the framed Ligerito level-0 cap of its sponge instance);
-//! - event 6, [`SegmentShares`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
+//! - the share item, [`SegmentShares`]: the shares `Y_{sigma, s}` of parts `s < parts - 1`, 512
 //!   bytes each (4,096 bits packed least significant first, like `Y_sigma`). The last part's
 //!   share is not sent: it is `Y_sigma` XOR the others, so the shares XOR to `Y_sigma` by
 //!   construction;
@@ -21,25 +21,25 @@
 //!
 //! The span byte is 1 for a segment proven on its own (the layout above);
 //! `S >= 2` in segment 0's item of a batch of `S` segments proven as ONE tied part over all
-//! of them (one part, `d_part = d_seg`: its cap at event 2 and its proof, of every
+//! of them (one part, `d_part = d_seg`: its cap at the commitment phase and its proof, of every
 //! `Y_sigma`, at the join, without shares); 0 in the items of segments `1..S` of such a batch
 //! (no commitment, empty share and proof items: covered by segment 0's span).
 //!
-//! All items are absorbed by the PIOP transcript (event 2 before the bridge seed `sd`, the
-//! shares at event 6 before the lookup challenge `X`, the proofs at the join before the PCS
+//! All items are absorbed by the PIOP transcript (the commitment phase before the bridge seed `sd`, the
+//! shares at the final-vector step before the lookup challenge `X`, the proofs at the join before the PCS
 //! session digest), so `d_part`, the commitments, the shares and the proofs are bound; the
-//! part and span seeds also bind the digest of the event-6 record (`crate::mode_a::part_seed`).
-//! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at event 0
+//! part and span seeds also bind the digest of the final-vector record (`crate::mode_a::part_seed`).
+//! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at the instance record
 //! (1 `Fast`, 4 `Slim`, 5 `Slim8`): the verifier reads it to select its Flock parameters
 //! ([`flock_profile`]) and runs the transcript with it, so an aggregate whose items name
-//! another profile than event 0 fails at event 0's replay, and a segment item whose profile
+//! another profile than the instance record fails at the instance record's replay, and a segment item whose profile
 //! differs from the verifier's is rejected ([`ItemError::Profile`]).
 
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
 
-/// Version byte of the segment items (4: the event-2 item names the Flock profile, so mode A
+/// Version byte of the segment items (4: the commitment-phase item names the Flock profile, so mode A
 /// runs `Fast`, `Slim` or `Slim8`, and the span of its part; the shares and the proofs are
-/// separate items, at event 6 and at the join).
+/// separate items, at the final-vector step and at the join).
 pub const ITEM_VERSION: u8 = 4;
 
 /// A malformed segment item.
@@ -115,11 +115,11 @@ fn put_framed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// The event-2 item of one segment: the Flock profile, the part size and one Flock
+/// The commitment-phase item of one segment: the Flock profile, the part size and one Flock
 /// commitment per part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentCommitments {
-    /// The `agg_piop::binding::FlockProfile` id of the parts (bound at event 0).
+    /// The `agg_piop::binding::FlockProfile` id of the parts (bound at the instance record).
     pub profile: u8,
     /// `log2` of the record positions per part.
     pub d_part: u32,
@@ -182,7 +182,7 @@ impl SegmentCommitments {
     }
 }
 
-/// The Flock profile id named by the event-2 items of an aggregate (`items` are the `S`
+/// The Flock profile id named by the commitment-phase items of an aggregate (`items` are the `S`
 /// items of `agg_piop::wire::AggregateProof::flock_commitments`): the profile of the first
 /// item that parses, or `None` when none does (the verifier then rejects the aggregate under
 /// its default profile).
@@ -194,7 +194,7 @@ pub fn flock_profile(items: &[Vec<u8>]) -> Option<u8> {
         .map(|c| c.profile)
 }
 
-/// The event-6 share item of one segment: the shares of all parts but the last.
+/// The share item of one segment: the shares of all parts but the last.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentShares {
     /// `Y_{sigma, s}` for `s < parts - 1`, packed (512 bytes each).

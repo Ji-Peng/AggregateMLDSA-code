@@ -3,14 +3,14 @@
 //! Flock Keccak sub-proofs (`agg-keccak`) and the bridge data; the verifier takes `(pk_i, M_i)`
 //! and the aggregate and returns accept or reject with the cost of every step.
 //!
-//! Transcript (one Spongefish stream run by `agg_piop::prover`): event 0 instance (record
+//! Transcript (one Spongefish stream run by `agg_piop::prover`): the instance record (record
 //! digest over `(pk_i, M_i, c~_i)`, the Flock profile: `Fast`, `Slim` or `Slim8`,
-//! [`AggregatorConfig::profile`]), event 1 the round-1 Akita commitment `G_main`, event 2 the
-//! Flock commitments, event 3 the bridge seed `sd`, event 4 the round-2 Akita commitments,
-//! event 5 the Flock seeds `fs_sigma`, event 6 the final vectors `Y_sigma` and the part shares,
-//! events 7 to 12 the lookup and the three sum-check stages, the join the Flock proofs (proven
-//! on their own thread pool while the prover runs events 7 to 12), event 13 the batched Akita
-//! opening. There is no projection seed: the residual is proven through the committed quotient.
+//! [`AggregatorConfig::profile`]), then the round-1 Akita commitment `G_main`, the Flock
+//! commitments, the bridge seed `sd`, the round-2 Akita commitments, the Flock seeds
+//! `fs_sigma`, the final vectors `Y_sigma` and the part shares, the lookup and the three
+//! sum-check stages, and the join the Flock proofs (proven on their own thread pool while
+//! the prover runs the lookup and the stages), then the batched Akita opening. There is
+//! no projection seed: the residual is proven through the committed quotient.
 //!
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions)
 //! is split into parts of `2^{d_part}` record positions, `d_part = clamp(part_log2,
@@ -20,9 +20,9 @@
 //! the bit claim of the virtual parity chain, a sum-check that reduces the part's share
 //! `Y_{sigma, s} = M^{(sigma)} b'_s` to that claim (`docs/parity-chain.md`). The shares XOR to
 //! `Y_sigma` (the last share is implied), which the F_p side proves for the committed bits `b`.
-//! The event-2 item carries one cap per part (the sponge instance's), the event-6 item the
+//! The commitment-phase item carries one cap per part (the sponge instance's), the share item the
 //! shares, the join's item one proof per part ([`crate::wire`]). Part `s` seeds its Flock
-//! challengers with [`part_seed`]`(fs_sigma, s, rec)`, `rec` the digest of the event-6 record
+//! challengers with [`part_seed`]`(fs_sigma, s, rec)`, `rec` the digest of the final-vector record
 //! (`agg_piop::transcript::flock_record_digest`).
 //!
 //! Span ([`AggregatorConfig::span`], the default): a batch of more than one segment whose parts
@@ -34,15 +34,15 @@
 //! ([`crate::wire`]); the verifier checks the span when it reaches the last segment, seeded by
 //! [`span_seed`]`(fs_0, .., fs_{S-1}, rec)`.
 //!
-//! Memory: the parts are committed one after the other at event 2; each keeps its commitment
+//! Memory: the parts are committed one after the other at the commitment phase; each keeps its commitment
 //! and the sponge commitment's Flock prover data (its Reed-Solomon codeword and Merkle tree),
 //! so that the proof opens it without committing again. When the batch has exactly one tied
 //! part (a span, or one part in a one-segment batch), its committed witness (sponge buffers,
-//! input bits, statement) is kept from event 2 until the join and proven without a rebuild.
-//! With more than one part the witness buffers are dropped after event 2 and rebuilt
+//! input bits, statement) is kept from the commitment phase until the join and proven without a rebuild.
+//! With more than one part the witness buffers are dropped after the commitment phase and rebuilt
 //! from the records for the proof, proven and dropped, so at most one part's Flock buffers are
 //! alive (the input bits of a part whose share is sent are kept, `6 * 2^(d + 7)` bytes, to
-//! compute the share at event 6). The PIOP tables are `i8` columns (`agg_piop::source_tables`).
+//! compute the share at the final-vector step). The PIOP tables are `i8` columns (`agg_piop::source_tables`).
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -76,7 +76,7 @@ use sha3::{Digest, Sha3_256};
 
 use crate::wire::{SegmentCommitments, SegmentProofs, SegmentShares};
 
-/// The default Flock profile of mode A (event 0; [`AggregatorConfig::profile`]): Ligerito
+/// The default Flock profile of mode A (the instance record; [`AggregatorConfig::profile`]): Ligerito
 /// `Fast`, the measured best at 32K (2.97 s on the general build, 2.76 s on the IFMA build
 /// at 16C32T for 49.2 B/sig); `Slim` saves 36% of the Flock bytes for 3% more prover time
 /// at 2,048 records (`docs/keccak.md`).
@@ -134,8 +134,8 @@ pub const SPAN_SEED_LABEL: &[u8] = b"agg-mldsa/v1/flock-span-seed";
 #[cfg(test)]
 const Y_BITS: usize = 4096;
 
-/// The Flock challenger seed of part `part` of a segment whose seed is `fs` (event 5), bound
-/// to the digest `record` of the event-6 record (`agg_piop::transcript::flock_record_digest`):
+/// The Flock challenger seed of part `part` of a segment whose seed is `fs` (the Flock seed step), bound
+/// to the digest `record` of the final-vector record (`agg_piop::transcript::flock_record_digest`):
 /// `SHA3-256(label || fs || LE64(part) || record)`. Both challengers of the part (tie and
 /// sponge) absorb it first, so every Flock challenge address encodes the input of the
 /// lookup challenge `X` (`docs/soundness.md`).
@@ -150,8 +150,8 @@ pub fn part_seed(fs: &[u8; 32], part: usize, record: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// The Flock challenger seed of a span over the segments whose seeds are `fs` (event 5),
-/// bound to the event-6 record digest `record` as [`part_seed`]:
+/// The Flock challenger seed of a span over the segments whose seeds are `fs` (the Flock seed step),
+/// bound to the final-vector record digest `record` as [`part_seed`]:
 /// `SHA3-256(label || LE64(S) || fs_0 || .. || fs_{S-1} || record)`.
 #[must_use]
 pub fn span_seed(fs: &[[u8; 32]], record: &[u8; 32]) -> [u8; 32] {
@@ -284,7 +284,7 @@ impl SegmentParts {
 
 /// Builds the Flock witness (sponge slot buffers and the part's lane-major input bits, the
 /// parity chain's copy of `b'`) of one part from its records; the honest builder is
-/// `TiedPart::honest_parts`. Called at event 2 and again for the proof (unless the batch has
+/// `TiedPart::honest_parts`. Called at the commitment phase and again for the proof (unless the batch has
 /// one part, whose witness is kept), so it must be deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
 pub type PartWitness<'a> =
     &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
@@ -298,12 +298,12 @@ pub struct PartProveLog {
     pub part: usize,
     /// Live records.
     pub records: usize,
-    /// Event 2: context, witness and commitment.
+    /// The commitment phase: context, witness and commitment.
     pub commit: Duration,
     /// Heap bytes of the kept commit data (codeword and Merkle tree; 0 when not kept).
     pub kept_bytes: usize,
     /// The join's proof (witness rebuilt unless kept, Flock proof; the share is computed at
-    /// event 6).
+    /// the final-vector step).
     pub prove: Duration,
     /// Proof bytes.
     pub proof_bytes: usize,
@@ -328,11 +328,11 @@ struct PartState<'g> {
     range: Range<usize>,
     commitment: TiedCommitment,
     commit_data: Option<CommitData>,
-    /// The committed witness, kept from event 2 for the join when the batch has exactly one
+    /// The committed witness, kept from the commitment phase for the join when the batch has exactly one
     /// part; `None`: rebuilt for the proof.
     committed: Option<TiedCommitted>,
     /// The part's input bits when its share is sent (every part of a segment but the last):
-    /// the share is computed from them at event 6, before the proofs.
+    /// the share is computed from them at the final-vector step, before the proofs.
     share_bits: Option<Vec<u64>>,
 }
 
@@ -407,7 +407,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         self
     }
 
-    /// The committed witness and commit data to keep from event 2 (module docs): the whole
+    /// The committed witness and commit data to keep from the commitment phase (module docs): the whole
     /// witness if `keep` (one part in the batch), otherwise the commit data alone.
     fn split_committed(
         mut committed: TiedCommitted,
@@ -424,8 +424,8 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         }
     }
 
-    /// The part's committed witness for its proof: the one kept at event 2, or rebuilt from
-    /// the records with the commitment (and commit data) of event 2.
+    /// The part's committed witness for its proof: the one kept at the commitment phase, or rebuilt from
+    /// the records with the commitment (and commit data) of the commitment phase.
     fn committed_for_proof(
         &self,
         seg: &TiedPart<'_>,
@@ -465,7 +465,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         }
     }
 
-    /// Event 2 of a span: one tied part over all `segments` (module docs); segment 0's item
+    /// The commitment phase of a span: one tied part over all `segments` (module docs); segment 0's item
     /// holds its cap, the others are covered.
     fn commit_span(&self, state: &mut ProverState<'g>, segments: usize) -> Vec<Vec<u8>> {
         let start = Instant::now();
@@ -656,8 +656,8 @@ impl KeccakSide for FlockProver<'_, '_> {
         items
     }
 
-    /// Event 6: the shares of every segment's parts but the last, under the matrices of `sd`,
-    /// from the input bits kept at event 2 (empty items for a span and one-part segments).
+    /// The shares of every segment's parts but the last, under the matrices of `sd`,
+    /// from the input bits kept at the commitment phase (empty items for a span and one-part segments).
     fn shares(
         &self,
         matrices: &BridgeMatrices,
@@ -972,7 +972,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
         self.profile
     }
 
-    /// The tie sites of the tied parts the event-2 items name: one for
+    /// The tie sites of the tied parts the commitment-phase items name: one for
     /// a span (segment 0's item opens it), else one per part with live records of every
     /// segment; `None` on an item that does not parse or names an inadmissible geometry
     /// (the per-segment checks of [`Self::verify`] reject it as well).
@@ -1136,7 +1136,7 @@ pub struct AggregatorConfig {
     /// Requested `log2` of the record positions per Flock part (clamped per segment to
     /// `[min_part_log2, d_seg]`: at most two parts per segment, [`MAX_PARTS_LOG2`]).
     pub part_log2: u32,
-    /// The Flock profile ([`MODE_A_PROFILES`], bound at event 0).
+    /// The Flock profile ([`MODE_A_PROFILES`], bound at the instance record).
     pub profile: FlockProfile,
     /// Prove a batch of more than one segment as one span over all segments when the parts
     /// are whole segments (module docs; default on).
@@ -1213,9 +1213,9 @@ impl From<ProveError> for AggregateError {
 pub struct ProveReport {
     /// Live records `N`.
     pub records: usize,
-    /// The Flock profile (event 0).
+    /// The Flock profile (bound in the instance record).
     pub profile: FlockProfile,
-    /// The relation proven (event 0 and the proof header).
+    /// The relation proven (bound in the instance record and the proof header).
     pub relation: Relation,
     /// The public instance: key expansion (`ExpandA`, inverse NTTs), `tr`, `mu`, `c`, `T`.
     pub instance: Duration,
@@ -1447,10 +1447,10 @@ pub struct Aggregator {
 
 impl Aggregator {
     /// An aggregator with the given configuration. It keeps each Flock part's sponge commit
-    /// data from event 2 until the part is proven for the join (about the size of the sponge
+    /// data from the commitment phase until the part is proven for the join (about the size of the sponge
     /// instance's codeword and Merkle tree per part), and a batch with exactly one Flock part
-    /// (a span, or a one-segment batch of one part) keeps its committed witness from event 2
-    /// until the join (about 4.2-4.5 GiB held through events 3 to 6 at 32K, est.).
+    /// (a span, or a one-segment batch of one part) keeps its committed witness from the commitment phase
+    /// until the join (about 4.2-4.5 GiB held from the bridge-seed step through the final-vector step at 32K, est.).
     #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         Self {
@@ -1661,7 +1661,7 @@ pub struct VerifyCostReport {
     pub profile: FlockProfile,
     /// The relation the aggregate was verified under (the verifier's, never the proof's).
     pub relation: Relation,
-    /// Reading the profile from the aggregate's event-2 items (a parse of the aggregate,
+    /// Reading the profile from the aggregate's commitment-phase items (a parse of the aggregate,
     /// outside the PIOP verifier's steps; zero when the profile was given).
     pub profile_probe: Duration,
     /// Per Flock part (in verification order; a rejected run stops at the failing part).
@@ -1760,9 +1760,9 @@ impl std::fmt::Display for VerifyCostReport {
 }
 
 /// The mode-A verifier (holds the sponge gate, built once). It verifies an aggregate under
-/// the Flock profile its event-2 items name when that is a default-accepted mode-A profile
+/// the Flock profile named by its commitment-phase items when that is a default-accepted mode-A profile
 /// ([`DEFAULT_ACCEPTED_PROFILES`]: `Fast` or `Slim`; the transcript binds the profile at
-/// event 0, so the items cannot name another one than the prover bound), or under the profile
+/// the instance record, so the items cannot name another one than the prover bound), or under the profile
 /// fixed by [`Self::require`] (which also admits `Slim8`).
 pub struct AggregateVerifier {
     gate: ChainGate,
@@ -1807,7 +1807,7 @@ impl AggregateVerifier {
     }
 
     /// The profile to verify `aggregate` under: the required one, else the mode-A profile its
-    /// event-2 items name, else the default (an unparsable aggregate is rejected later). A
+    /// commitment-phase items name, else the default (an unparsable aggregate is rejected later). A
     /// named profile that is not accepted by default is returned as is, so that [`Self::verify`]
     /// can refuse it with a message naming `--flock-profile`.
     fn profile_of(&self, aggregate: &[u8]) -> FlockProfile {
@@ -2168,7 +2168,7 @@ mod tests {
         assert_ne!(a, part_seed(&[1; 32], 1, &rec));
         assert_ne!(a, part_seed(&[2; 32], 0, &rec));
         assert_eq!(a, part_seed(&[1; 32], 0, &rec));
-        // The event-6 record digest changes every seed.
+        // The final-vector record digest changes every seed.
         assert_ne!(a, part_seed(&[1; 32], 0, &[8; 32]));
         // The span seed depends on every segment seed, their order and the record digest.
         let s = span_seed(&[[1; 32], [2; 32]], &rec);

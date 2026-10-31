@@ -151,7 +151,7 @@ fn round_trip(
 }
 
 /// [`round_trip`] under `relation`; a verifier of the other relation rejects the aggregate
-/// before event 0.
+/// before the instance record is absorbed.
 fn round_trip_as(
     relation: Relation,
     n_own: usize,
@@ -278,7 +278,7 @@ fn round_trip_as(
         peak_mib()
     );
     // Pinned verifiers: the aggregate's own profile accepts, the other one rejects at the
-    // profile byte of the event-2 item (before any Flock work).
+    // profile byte of the commitment-phase item (before any Flock work).
     let pinned = AggregateVerifier::new().require(profile).relation(relation);
     assert!(pinned.verify(&statements, &aggregate.bytes, None).accepted());
     let other_relation = match relation {
@@ -353,7 +353,7 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
 }
 
 /// Relation H-FIPS (`docs/h-exact.md`) in mode A at 64 records (Slim, one Flock
-/// part) and 256 records (two parts); the cross-relation verifier rejects before event 0.
+/// part) and 256 records (two parts); the cross-relation verifier rejects before the instance record.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -460,7 +460,7 @@ fn keccak(e: &VerifyError) -> bool {
     matches!(e, VerifyError::Keccak(0))
 }
 
-/// Re-encode segment 0's items of a proof (event 2, the event-6 shares, the join's proofs)
+/// Re-encode segment 0's items of a proof (the commitment phase, the share items, the join's proofs)
 /// after `f` changed them.
 fn with_all_items(
     proof: &AggregateProof,
@@ -478,7 +478,7 @@ fn with_all_items(
     out
 }
 
-/// [`with_all_items`] on the event-2 item and the join's proof item.
+/// [`with_all_items`] on the commitment-phase item and the join's proof item.
 fn with_items(
     proof: &AggregateProof,
     f: impl Fn(&mut SegmentCommitments, &mut SegmentProofs),
@@ -510,7 +510,7 @@ impl agg_piop::verifier::KeccakVerifier for Lenient<'_> {
 }
 
 /// The mode-A verifier with every tie difficulty of its plan raised by one (a plan-digest
-/// mismatch in event 0).
+/// mismatch in the instance record).
 struct OtherPlan<'g>(agg_cli::mode_a::FlockVerifier<'g>);
 
 impl agg_piop::verifier::KeccakVerifier for OtherPlan<'_> {
@@ -622,7 +622,7 @@ fn corrupted_aggregates_are_rejected() {
         p.final_vectors[0][100] ^= 4;
         let r = verify(&p);
         expect_rejected("Y_sigma bit", &r, keccak);
-        // Event 6 changed, so the record digest in every part seed changed: part 0
+        // The final-vector step changed, so the record digest in every part seed changed: part 0
         // fails first, before the implied last share of part 1 is reached.
         assert!(part(0)(&r), "every part seed binds the event-6 record");
         let p = with_all_items(&honest, |_, s, _| s.shares[0][3] ^= 1);
@@ -644,7 +644,7 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("byte of part 1's commitment", &verify(&p), keccak);
 
         // The segment items' structure. The profile byte: another mode-A profile makes the
-        // verifier run under it, against the profile event 0 bound; an unknown id is refused.
+        // verifier run under it, against the profile bound in the instance record; an unknown id is refused.
         let p = with_items(&honest, |c, _| c.profile = other(FLOCK_PROFILE) as u8);
         expect_rejected("profile byte of the item", &verify(&p), psi_work);
         let p = with_items(&honest, |c, _| c.profile = FlockProfile::PublicBits as u8);
@@ -661,7 +661,7 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("part size 2^5", &r, psi_work);
         assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
         // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
-        // is refused while the plan of event 0 is derived.
+        // is refused while the instance record's plan is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
         expect_rejected("part size 2^2", &verify(&p), |e| matches!(e, VerifyError::Plan));
         let p = with_items(&honest, |c, _| c.d_part = 3);
@@ -863,7 +863,7 @@ fn corrupted_aggregates_are_rejected() {
 
 /// The fork-join transcript with real Flock parts. The join absorbs the
 /// Flock proof items after the stage-3 claims and before the PCS session digest, and every
-/// part's challengers are seeded from `fs_sigma` and the digest of the event-6 record. A
+/// part's challengers are seeded from `fs_sigma` and the digest of the final-vector record. A
 /// tampered proof item, or the proof item of another aggregate of the same geometry, is
 /// rejected by the Flock verifier; with a Flock verifier that accepts every part, the PIOP
 /// stages still pass (no PIOP challenge depends on the items) and the join rejects it at the
@@ -927,7 +927,7 @@ fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
             assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(0, _)))));
             let r = lenient(&moved);
             assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
-            // With two parts, b's shares as well: event 6 changes, so the record digest in
+            // With two parts, b's shares as well: the final-vector step changes, so the record digest in
             // the part seeds and the PIOP transcript change; still rejected.
             if parts == 2 {
                 let mut both = moved.clone();
