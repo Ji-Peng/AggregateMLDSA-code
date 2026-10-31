@@ -64,8 +64,9 @@ environment:
                         (aggregate, bench; default half at 32 threads or more, 3/8 rounded
                         to nearest and at least 2 below; only with a running fork and at
                         least 4 PIOP threads; 0: the shared rayon pool). At 16 and 32
-                        threads the defaults are 6 and 16, and the three pools add up to 28
-                        and 60 threads.
+                        threads the stage defaults are 6 and 16; all three pools then add
+                        up to 28 and 60 threads with an AVX-512 Flock pool, and 30 and 64
+                        with the wider AVX2 share.
   AGG_PIOP_THREADS=K    threads of the PIOP pool beside the Flock fork (aggregate, bench;
                         default the rayon pool; PIOP + Flock capped at the logical CPUs).
   AGG_PIOP_FORK=0       run the transcript branches one after the other (the proof is the
