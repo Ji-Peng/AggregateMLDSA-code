@@ -17,8 +17,10 @@ use crate::zerocheck::univariate_skip_optimized::kernels::portable::bit_transpos
 use crate::zerocheck::univariate_skip_optimized::kernels::portable::{
     accumulate_convert as accumulate_convert_portable,
     accumulate_convert_with_s_hat_v as accumulate_convert_with_s_hat_v_portable,
-    bit_transpose_64bytes_words, shift_reduce_inner_ab_bitsliced, shift_reduce_inner_ab_logexp,
+    shift_reduce_inner_ab_bitsliced, shift_reduce_inner_ab_logexp,
 };
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+use crate::zerocheck::univariate_skip_optimized::kernels::portable::bit_transpose_64bytes_words;
 // agg-mldsa patch (PATCH.md): the x86 kernels below are chosen at run
 // time (`crate::simd`) instead of by `cfg(target_feature)`.
 #[cfg(target_arch = "x86_64")]
@@ -27,7 +29,7 @@ use crate::{
     zerocheck::univariate_skip_optimized::kernels::x86_64::{
         accumulate_convert_with_s_hat_v_x86_avx2, accumulate_convert_with_s_hat_v_x86_avx512,
         accumulate_convert_with_s_hat_v_x86_pclmul, bit_transpose_64bytes_avx512,
-        bit_transpose_64bytes_sse2, shift_reduce_inner_ab_x86_avx2,
+        bit_transpose_64bytes_avx2, bit_transpose_64bytes_sse2, shift_reduce_inner_ab_x86_avx2,
         shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
     },
 };
@@ -94,12 +96,19 @@ pub(super) fn bit_transpose_64bytes(input: &[u8; 64], output: &mut [u8; 64]) {
 
     #[cfg(target_arch = "x86_64")]
     if has(crate::simd::AVX2) {
-        // SAFETY: SSE2 is baseline on x86-64 and the arrays are 64 bytes.
-        unsafe { bit_transpose_64bytes_sse2(input, output) };
+        // SAFETY: the runtime check guarantees avx2 and the arrays are 64 bytes.
+        unsafe { bit_transpose_64bytes_avx2(input, output) };
         return;
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: SSE2 is baseline on x86-64 and the arrays are 64 bytes.
+    unsafe {
+        bit_transpose_64bytes_sse2(input, output);
+        return;
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     bit_transpose_64bytes_words(input, output);
 }
 

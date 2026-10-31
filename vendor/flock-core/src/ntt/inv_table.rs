@@ -24,9 +24,9 @@
 use core::arch::aarch64::{veorq_u8, vextq_u8, vld1q_u8, vst1q_u8};
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m128i, __m512i, _mm_loadu_si128, _mm_shuffle_epi32, _mm_storeu_si128, _mm_xor_si128,
-    _mm512_loadu_si512, _mm512_shuffle_epi32, _mm512_shuffle_i64x2, _mm512_storeu_si512,
-    _mm512_xor_si512,
+    __m128i, __m256i, __m512i, _mm_loadu_si128, _mm_shuffle_epi32, _mm_storeu_si128,
+    _mm_xor_si128, _mm512_loadu_si512, _mm512_shuffle_epi32, _mm512_shuffle_i64x2,
+    _mm512_storeu_si512, _mm512_xor_si512,
 };
 
 use crate::{bits::lowest_one, field::F8, ntt::AdditiveNttGf8};
@@ -468,6 +468,60 @@ impl InvNttTableByteSingleGf8 {
             }
             _mm256_storeu_si256(out_ptr.cast(), acc0);
             _mm256_storeu_si256(out_ptr.add(32).cast(), acc1);
+        }
+    }
+
+    /// Register-returning AVX2 inverse-NTT apply for the production
+    /// `ell = 64`, `n_chunks = 8` case: the same computation as
+    /// [`Self::apply_x86_avx2_unchecked`] without the final store, so a fused
+    /// consumer keeps the 64 F_8 outputs in two YMM registers.
+    ///
+    /// # Safety
+    /// Caller must have `avx2`, `self.ell == 64`, `self.n_chunks == 8`, and
+    /// `bytes` must point to eight readable bytes.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn apply_x86_avx2_register_unchecked(
+        &self,
+        bytes: *const u8,
+    ) -> (__m256i, __m256i) {
+        use core::arch::x86_64::{
+            _mm256_loadu_si256, _mm256_permute2x128_si256, _mm256_shuffle_epi32,
+            _mm256_xor_si256,
+        };
+        debug_assert_eq!(self.ell, 64, "avx2 apply is specialized for ell = 64");
+        debug_assert_eq!(self.n_chunks, 8, "avx2 apply expects eight input bytes");
+        let base = self.data_ptr();
+        // SAFETY: the caller guarantees eight readable input bytes. Every table
+        // index is a u8 and each table row contains exactly 64 readable bytes.
+        unsafe {
+            let row0 = base.add(*bytes as usize * 64);
+            let mut acc0 = _mm256_loadu_si256(row0.cast());
+            let mut acc1 = _mm256_loadu_si256(row0.add(32).cast());
+            for b in 1..8 {
+                let high = b >> 1;
+                let row_b = base.add(*bytes.add(b) as usize * 64);
+                let mut v0 = _mm256_loadu_si256(row_b.cast());
+                let mut v1 = _mm256_loadu_si256(row_b.add(32).cast());
+                // Output chunk pair `(2k, 2k+1)` reads chunk pair
+                // `(2k, 2k+1) ^ high`.
+                if high & 1 != 0 {
+                    v0 = _mm256_permute2x128_si256::<0x01>(v0, v0);
+                    v1 = _mm256_permute2x128_si256::<0x01>(v1, v1);
+                }
+                if high & 2 != 0 {
+                    core::mem::swap(&mut v0, &mut v1);
+                }
+                if b & 1 != 0 {
+                    // Odd b copies the 8-byte half swap of the 16-byte chunks.
+                    v0 = _mm256_shuffle_epi32::<0x4E>(v0);
+                    v1 = _mm256_shuffle_epi32::<0x4E>(v1);
+                }
+                acc0 = _mm256_xor_si256(acc0, v0);
+                acc1 = _mm256_xor_si256(acc1, v1);
+            }
+            (acc0, acc1)
         }
     }
 

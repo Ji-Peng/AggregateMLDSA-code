@@ -62,19 +62,28 @@ impl Isa {
 /// The `AGG_ISA` cap, parsed once.
 fn isa_cap() -> Isa {
     static CAP: std::sync::OnceLock<Isa> = std::sync::OnceLock::new();
-    *CAP.get_or_init(|| match std::env::var("AGG_ISA") {
-        Ok(value) => Isa::parse(&value).unwrap_or_else(|| {
-            panic!(
-                "invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar"
-            )
-        }),
-        Err(_) => Isa::Avx512Ifma,
+    *CAP.get_or_init(|| {
+        // An empty value is treated like an unset variable.
+        match std::env::var("AGG_ISA")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => Isa::parse(&value).unwrap_or_else(|| {
+                panic!(
+                    "invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar"
+                )
+            }),
+            None => Isa::Avx512Ifma,
+        }
     })
 }
 
 /// The AGG_ISA value this process was given, for reports.
 fn isa_requested() -> Option<&'static str> {
-    let value = std::env::var("AGG_ISA").ok()?;
+    // An empty value is treated like an unset variable.
+    let value = std::env::var("AGG_ISA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
     Some(Isa::parse(&value)?.name())
 }
 
@@ -434,6 +443,59 @@ pub(crate) mod x86 {
                 let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<28>(g)), mask3);
                 g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<28>(t)));
                 _mm_storeu_si128(out.as_mut_ptr().add(16 * k).cast::<__m128i>(), g);
+            }
+        }
+    }
+
+    /// [`bit_transpose_8x64_sse2`] with the byte transpose kept in two
+    /// `__m256i`: the three mask/shift rounds run on four 64-bit lanes at a
+    /// time instead of two, and only the final two stores leave registers.
+    ///
+    /// # Safety
+    /// x86-64 with `avx2`; `v` and `out` are 64 bytes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn bit_transpose_8x64_avx2(v: &[u64; 8], out: &mut [u8; 64]) {
+        use core::arch::x86_64::{
+            __m128i, __m256i, _mm_loadl_epi64, _mm_unpackhi_epi16, _mm_unpackhi_epi32,
+            _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi8, _mm256_and_si256,
+            _mm256_set1_epi64x, _mm256_set_m128i, _mm256_slli_epi64, _mm256_srli_epi64,
+            _mm256_storeu_si256, _mm256_xor_si256,
+        };
+        // SAFETY: `v` and `out` are 64 bytes; the row loads stay inside `v`
+        // and the two 32-byte stores inside `out`.
+        unsafe {
+            let row = |i: usize| _mm_loadl_epi64(v.as_ptr().add(i).cast::<__m128i>());
+            let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+            let (r4, r5, r6, r7) = (row(4), row(5), row(6), row(7));
+            let t0 = _mm_unpacklo_epi8(r0, r1);
+            let t1 = _mm_unpacklo_epi8(r2, r3);
+            let t2 = _mm_unpacklo_epi8(r4, r5);
+            let t3 = _mm_unpacklo_epi8(r6, r7);
+            let u0 = _mm_unpacklo_epi16(t0, t1);
+            let u1 = _mm_unpackhi_epi16(t0, t1);
+            let u2 = _mm_unpacklo_epi16(t2, t3);
+            let u3 = _mm_unpackhi_epi16(t2, t3);
+            let y0 = _mm256_set_m128i(
+                _mm_unpackhi_epi32(u0, u2),
+                _mm_unpacklo_epi32(u0, u2),
+            );
+            let y1 = _mm256_set_m128i(
+                _mm_unpackhi_epi32(u1, u3),
+                _mm_unpacklo_epi32(u1, u3),
+            );
+
+            let mask1 = _mm256_set1_epi64x(0x00AA_00AA_00AA_00AAu64 as i64);
+            let mask2 = _mm256_set1_epi64x(0x0000_CCCC_0000_CCCCu64 as i64);
+            let mask3 = _mm256_set1_epi64x(0x0000_0000_F0F0_F0F0u64 as i64);
+            for (k, mut g) in [y0, y1].into_iter().enumerate() {
+                let t = _mm256_and_si256(_mm256_xor_si256(g, _mm256_srli_epi64::<7>(g)), mask1);
+                g = _mm256_xor_si256(g, _mm256_xor_si256(t, _mm256_slli_epi64::<7>(t)));
+                let t = _mm256_and_si256(_mm256_xor_si256(g, _mm256_srli_epi64::<14>(g)), mask2);
+                g = _mm256_xor_si256(g, _mm256_xor_si256(t, _mm256_slli_epi64::<14>(t)));
+                let t = _mm256_and_si256(_mm256_xor_si256(g, _mm256_srli_epi64::<28>(g)), mask3);
+                g = _mm256_xor_si256(g, _mm256_xor_si256(t, _mm256_slli_epi64::<28>(t)));
+                _mm256_storeu_si256(out.as_mut_ptr().add(32 * k).cast::<__m256i>(), g);
             }
         }
     }

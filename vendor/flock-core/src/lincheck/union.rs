@@ -635,6 +635,25 @@ fn bank_transpose(use_x86: bool, words: &[F128], out: &mut [u8]) {
         for (run, o) in words.chunks_exact(8).zip(out.chunks_exact_mut(128)) {
             let lo: [u64; 8] = std::array::from_fn(|r| run[r].lo);
             let hi: [u64; 8] = std::array::from_fn(|r| run[r].hi);
+            // SAFETY: the runtime check guarantees avx2 and the slices are 64 bytes.
+            unsafe {
+                crate::simd::x86::bit_transpose_8x64_avx2(
+                    &lo,
+                    (&mut o[..64]).try_into().expect("64 bytes"),
+                );
+                crate::simd::x86::bit_transpose_8x64_avx2(
+                    &hi,
+                    (&mut o[64..]).try_into().expect("64 bytes"),
+                );
+            }
+        }
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        for (run, o) in words.chunks_exact(8).zip(out.chunks_exact_mut(128)) {
+            let lo: [u64; 8] = std::array::from_fn(|r| run[r].lo);
+            let hi: [u64; 8] = std::array::from_fn(|r| run[r].hi);
             // SAFETY: SSE2 is baseline on x86-64 and the slices are 64 bytes.
             unsafe {
                 crate::simd::x86::bit_transpose_8x64_sse2(
@@ -649,6 +668,7 @@ fn bank_transpose(use_x86: bool, words: &[F128], out: &mut [u8]) {
         }
         return;
     }
+    #[cfg(not(target_arch = "x86_64"))]
     for (run, o) in words.chunks_exact(8).zip(out.chunks_exact_mut(128)) {
         let lo: [u64; 8] = std::array::from_fn(|r| run[r].lo);
         let hi: [u64; 8] = std::array::from_fn(|r| run[r].hi);

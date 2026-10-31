@@ -419,3 +419,26 @@ Three kernels were still paying for the narrower width at 4K, and each now has a
 
 `flock_core::f128_avx512_kernels()` exposes the selected GF(2^128) width to callers that
 size a thread pool by it.
+
+### 3.4 The round-1 inverse-NTT apply and bit transpose
+
+Round 1 was the largest AVX2 loss at 32K, and most of it was not arithmetic width but call
+overhead: `zerocheck/univariate_skip_optimized/kernels/x86_64.rs`'s AVX2 shift-reduce kernel
+called the generic `InvNttTableByteSingleGf8::apply` eight times per input byte row, so
+every call paid the runtime dispatch, the slice asserts and a 64-byte store followed by a
+reload. Two targeted edits:
+
+* `ntt/inv_table.rs::apply_x86_avx2_register_unchecked` is the AVX2 counterpart of the
+  existing AVX-512 register-returning apply: it returns the 64 F_8 outputs in two
+  `__m256i` and never leaves registers. The AVX2 shift-reduce kernel now calls it twice per
+  `K` row (once for `a`, once for `b`) and keeps the product and the `x^K` scaling in
+  registers. Single-thread, one `(b_med, chunk)` call: 178 ns -> 47 ns.
+* `simd.rs::bit_transpose_8x64_avx2` keeps the 8x8 byte transpose in two `__m256i`, so the
+  three mask/shift rounds run four 64-bit lanes at a time. It serves both
+  `zerocheck::univariate_skip_optimized`'s 64-byte transpose and the lincheck bank fold
+  (`lincheck/union.rs::bank_transpose`), which previously fell back to two SSE2 calls per
+  eight-row run. Single-thread: 13.9 ns -> 4.4 ns per 64-byte transpose (the AVX-512 VBMI
+  body measures 2.7 ns).
+
+Both bodies are selected through the same runtime feature checks, are byte-identical to the
+portable kernels, and keep the SSE2 and portable bodies for CPUs below the AVX2 tier.

@@ -2,11 +2,11 @@
 // `#[target_feature(enable = ...)]` and is chosen at run time by the caller
 // (`crate::simd`), so no item is gated on `cfg(target_feature)`.
 use core::arch::x86_64::{
-    __m128i, __m512i, _mm_gf2p8mul_epi8, _mm_loadu_si128, _mm_set1_epi8, _mm_setzero_si128,
-    _mm_storeu_si128, _mm_xor_si128, _mm512_and_si512, _mm512_gf2p8mul_epi8,
-    _mm512_loadu_si512, _mm512_permutexvar_epi8, _mm512_set1_epi8, _mm512_set1_epi64,
-    _mm512_setzero_si512, _mm512_slli_epi64, _mm512_srli_epi64, _mm512_storeu_si512,
-    _mm512_xor_si512,
+    __m128i, __m512i, _mm_gf2p8mul_epi8, _mm_loadu_si128, _mm_set1_epi8,
+    _mm_setzero_si128, _mm_storeu_si128, _mm_xor_si128,
+    _mm512_and_si512, _mm512_gf2p8mul_epi8, _mm512_loadu_si512, _mm512_permutexvar_epi8,
+    _mm512_set1_epi8, _mm512_set1_epi64, _mm512_setzero_si512, _mm512_slli_epi64,
+    _mm512_srli_epi64, _mm512_storeu_si512, _mm512_xor_si512,
 };
 
 use crate::{
@@ -75,6 +75,23 @@ pub(crate) unsafe fn bit_transpose_64bytes_sse2(input: &[u8; 64], output: &mut [
     unsafe { crate::simd::x86::bit_transpose_8x64_sse2(&words, output) };
 }
 
+/// 64-byte bit transpose with AVX2: the same 8x8 byte transpose, but the three
+/// mask/shift rounds run on two `__m256i` (four 64-bit lanes each) instead of
+/// four `__m128i`, and the rows are read straight from the input.
+///
+/// # Safety
+/// x86-64 with `avx2`; the input and output are 64 bytes and do not overlap.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn bit_transpose_64bytes_avx2(input: &[u8; 64], output: &mut [u8; 64]) {
+    let mut words = [0u64; 8];
+    for (w, chunk) in words.iter_mut().zip(input.chunks_exact(8)) {
+        *w = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+    }
+    // SAFETY: avx2 is part of this kernel's target features and both arrays
+    // are 64 bytes.
+    unsafe { crate::simd::x86::bit_transpose_8x64_avx2(&words, output) };
+}
+
 /// SSE/GFNI x86 kernel. The inverse-NTT apply uses its best available x86 path,
 /// writes two 64-byte columns, and this kernel multiplies them four XMM chunks
 /// at a time. Kept as the fallback for GFNI CPUs without AVX-512.
@@ -120,8 +137,9 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_sse(
     }
 }
 
-/// AVX2/GFNI x86 kernel: the same computation as the SSE kernel with two
-/// 32-byte chunks in flight, so one `vgf2p8mulb` covers two `F_8` chunks.
+/// Fused AVX2/GFNI x86 kernel: each inverse-NTT apply returns all 64 F_8
+/// evaluations in two YMM registers, so the product and the `x^k` scaling stay
+/// register-resident and one `vgf2p8mulb` covers 32 lanes.
 #[inline]
 #[target_feature(enable = "gfni,avx2")]
 pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx2(
@@ -135,30 +153,33 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx2(
     b_col: &mut [F8],
 ) {
     use core::arch::x86_64::{
-        __m256i, _mm256_gf2p8mul_epi8, _mm256_loadu_si256, _mm256_set1_epi8,
-        _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+        __m256i, _mm256_gf2p8mul_epi8, _mm256_set1_epi8, _mm256_setzero_si256, _mm256_storeu_si256,
+        _mm256_xor_si256,
     };
+    let _ = (a_col, b_col);
     let byte_base_b = chunk_byte_base + b_med * N_CHUNKS * 8;
 
-    // SAFETY: the caller's packed-input bounds guarantee the eight-byte slices,
-    // `a_col`/`b_col` are ELL = 64 bytes, and `out` is 64 writable bytes.
+    // SAFETY: the caller's packed-input bounds guarantee eight readable bytes at
+    // every K-row offset and `out` is 64 writable bytes; the table has the
+    // protocol-fixed ell = 64, n_chunks = 8 shape.
     unsafe {
         let mut acc0 = _mm256_setzero_si256();
         let mut acc1 = _mm256_setzero_si256();
         for k in 0..8usize {
-            let chunk_off = byte_base_b + k * N_CHUNKS;
-            inv_table.apply(&a_packed[chunk_off..chunk_off + N_CHUNKS], a_col);
-            inv_table.apply(&b_packed[chunk_off..chunk_off + N_CHUNKS], b_col);
-            let a_ptr = a_col.as_ptr() as *const u8;
-            let b_ptr = b_col.as_ptr() as *const u8;
+            let off = byte_base_b + k * N_CHUNKS;
+            let (a0, a1) = inv_table.apply_x86_avx2_register_unchecked(a_packed.as_ptr().add(off));
+            let (b0, b1) = inv_table.apply_x86_avx2_register_unchecked(b_packed.as_ptr().add(off));
             // x^k as an F_8 byte; k = 0 makes the second multiply the identity.
-            let xk = _mm256_set1_epi8((1u8 << k) as i8);
-            let av = _mm256_loadu_si256(a_ptr.cast::<__m256i>());
-            let bv = _mm256_loadu_si256(b_ptr.cast::<__m256i>());
-            acc0 = _mm256_xor_si256(acc0, _mm256_gf2p8mul_epi8(_mm256_gf2p8mul_epi8(av, bv), xk));
-            let av = _mm256_loadu_si256(a_ptr.add(32).cast::<__m256i>());
-            let bv = _mm256_loadu_si256(b_ptr.add(32).cast::<__m256i>());
-            acc1 = _mm256_xor_si256(acc1, _mm256_gf2p8mul_epi8(_mm256_gf2p8mul_epi8(av, bv), xk));
+            let p0 = _mm256_gf2p8mul_epi8(a0, b0);
+            let p1 = _mm256_gf2p8mul_epi8(a1, b1);
+            let (p0, p1) = if k == 0 {
+                (p0, p1)
+            } else {
+                let xk = _mm256_set1_epi8((1u8 << k) as i8);
+                (_mm256_gf2p8mul_epi8(p0, xk), _mm256_gf2p8mul_epi8(p1, xk))
+            };
+            acc0 = _mm256_xor_si256(acc0, p0);
+            acc1 = _mm256_xor_si256(acc1, p1);
         }
         let out_ptr = out.as_mut_ptr();
         _mm256_storeu_si256(out_ptr.cast::<__m256i>(), acc0);
