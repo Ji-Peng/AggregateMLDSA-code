@@ -336,9 +336,12 @@ pub(crate) unsafe fn bank_lookup_avx2(
     outs: &[*mut F128],
     base: usize,
 ) {
-    debug_assert!(
-        stride.is_multiple_of(2) && np <= stride && nb <= 128 && outs.len() >= np
-    );
+    debug_assert!(stride.is_multiple_of(2) && np <= stride && nb <= 128 && outs.len() >= np);
+    if stride.is_multiple_of(4) {
+        // SAFETY: this function's contract supplies the feature and the bounds.
+        unsafe { bank_lookup_quads_avx2(tables, stride, np, bytes, gn, nb, outs, base) };
+        return;
+    }
     for q in 0..stride / 2 {
         if 2 * q >= np {
             break;
@@ -354,6 +357,106 @@ pub(crate) unsafe fn bank_lookup_avx2(
             // SAFETY: forwarded from this function's contract (b < nb).
             unsafe { bank_lookup_quad_avx2::<1>(tables, stride, q, cnt, bytes, gn, b, outs, base) };
             b += 1;
+        }
+    }
+}
+
+/// The four-point layout: both 256-bit halves of a table line feed the same
+/// byte selection, so the pair loop shares the byte load and the address
+/// computation.
+///
+/// # Safety
+/// The contract of [`bank_lookup_avx2`] with `stride % 4 == 0`.
+#[target_feature(enable = "avx2")]
+unsafe fn bank_lookup_quads_avx2(
+    tables: *const F128,
+    stride: usize,
+    np: usize,
+    bytes: *const u8,
+    gn: usize,
+    nb: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    for q in (0..stride / 4).map(|q| 2 * q) {
+        if 2 * q >= np {
+            break;
+        }
+        let mut b = 0;
+        while b + 4 <= nb {
+            // SAFETY: forwarded from this function's contract (b + 4 <= nb).
+            unsafe {
+                bank_lookup_pair_avx2::<4>(tables, stride, q, np, bytes, gn, b, outs, base);
+            }
+            b += 4;
+        }
+        while b < nb {
+            // SAFETY: forwarded from this function's contract (b < nb).
+            unsafe {
+                bank_lookup_pair_avx2::<1>(tables, stride, q, np, bytes, gn, b, outs, base);
+            }
+            b += 1;
+        }
+    }
+}
+
+/// `B` consecutive output bits of point quads `q` and `q + 1` (`cnt` live
+/// points each): one byte selects both 32-byte table halves.
+///
+/// # Safety
+/// The contract of [`bank_lookup_avx2`] with `stride % 4 == 0` and
+/// `b + B <= nb`; `2 q < np`.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn bank_lookup_pair_avx2<const B: usize>(
+    tables: *const F128,
+    stride: usize,
+    q: usize,
+    np: usize,
+    bytes: *const u8,
+    gn: usize,
+    b: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+    let entry = 16 * stride;
+    let q0 = 2 * q;
+    let q1 = q0 + 2;
+    let cnt0 = (np - q0).min(2);
+    let cnt1 = if q1 < np { (np - q1).min(2) } else { 0 };
+    let mut acc0 = [_mm256_setzero_si256(); B];
+    let mut acc1 = [_mm256_setzero_si256(); B];
+    // SAFETY: group g's 256 entries and its 128 bytes lie inside the caller's
+    // ranges; the byte value is below 256; the quad offset stays inside the
+    // entry (`32 q + 64 <= 16 stride` for `2 q + 2 <= stride`).
+    unsafe {
+        for g in 0..gn {
+            let tg = tables.cast::<u8>().add(g * 256 * entry + 32 * q);
+            let bp = bytes.add(128 * g + b);
+            for (j, (a0, a1)) in acc0.iter_mut().zip(acc1.iter_mut()).enumerate() {
+                let s = *bp.add(j) as usize;
+                let off = s * entry;
+                *a0 = _mm256_xor_si256(*a0, _mm256_loadu_si256(tg.add(off).cast()));
+                if cnt1 > 0 {
+                    *a1 = _mm256_xor_si256(*a1, _mm256_loadu_si256(tg.add(off + 32).cast()));
+                }
+            }
+        }
+        for (j, (a0, a1)) in acc0.iter().zip(acc1.iter()).enumerate() {
+            let mut lanes = [F128::ZERO; 2];
+            _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), *a0);
+            for (i, l) in lanes.iter().enumerate().take(cnt0) {
+                *outs[q0 + i].add(base + b + j) += *l;
+            }
+            if cnt1 > 0 {
+                _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), *a1);
+                for (i, l) in lanes.iter().enumerate().take(cnt1) {
+                    *outs[q1 + i].add(base + b + j) += *l;
+                }
+            }
         }
     }
 }

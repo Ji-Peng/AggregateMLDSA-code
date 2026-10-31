@@ -98,7 +98,7 @@ use crate::{
     alloc_uninit_f128_vec,
     bits::lowest_one,
     challenger::{Challenger, grinding_bits_for_degree},
-    field::F128,
+    field::{F128, F256Unreduced},
     lincheck::build_eq_table,
     scratch::{give_f128, take_f128},
 };
@@ -4734,31 +4734,142 @@ pub(crate) fn fold_and_round_oop_par(
         .zip(bo.par_chunks_mut(CO))
         .zip(a.par_chunks(2 * CO))
         .zip(b.par_chunks(2 * CO))
-        .map(|(((oa, ob), ain), bin)| {
-            let mut g1 = F128::ZERO;
-            let mut gi = F128::ZERO;
-            for (((op, opb), aq), bq) in oa
-                .as_chunks_mut::<2>()
-                .0
-                .iter_mut()
-                .zip(ob.as_chunks_mut::<2>().0.iter_mut())
-                .zip(ain.as_chunks::<4>().0.iter())
-                .zip(bin.as_chunks::<4>().0.iter())
-            {
-                let na0 = aq[0] + r * (aq[1] + aq[0]);
-                let na1 = aq[2] + r * (aq[3] + aq[2]);
-                let nb0 = bq[0] + r * (bq[1] + bq[0]);
-                let nb1 = bq[2] + r * (bq[3] + bq[2]);
-                op[0] = na0;
-                op[1] = na1;
-                opb[0] = nb0;
-                opb[1] = nb1;
-                g1 += na1 * nb1;
-                gi += (na0 + na1) * (nb0 + nb1);
-            }
-            (g1, gi)
-        })
+        .map(|(((oa, ob), ain), bin)| fold_and_round_chunk(ain, bin, r, oa, ob))
         .reduce(|| (F128::ZERO, F128::ZERO), |(p, q), (s, t)| (p + s, q + t))
+}
+
+/// One worker chunk of [`fold_and_round_oop_par`]: the 256-bit VPCLMULQDQ
+/// kernel on the AVX2 tier, the portable pair loop otherwise.
+fn fold_and_round_chunk(
+    a: &[F128],
+    b: &[F128],
+    r: F128,
+    ao: &mut [F128],
+    bo: &mut [F128],
+) -> (F128, F128) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::ghash_width() == crate::simd::GhashWidth::Vpclmul256 {
+        // SAFETY: the width check implies avx2 and vpclmulqdq; the chunk
+        // geometry is `a.len() == 2 * ao.len()` from the caller.
+        return unsafe { fold_and_round_avx2(a, b, r, ao, bo) };
+    }
+    let mut g1 = F128::ZERO;
+    let mut gi = F128::ZERO;
+    for (((op, opb), aq), bq) in ao
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(bo.as_chunks_mut::<2>().0.iter_mut())
+        .zip(a.as_chunks::<4>().0.iter())
+        .zip(b.as_chunks::<4>().0.iter())
+    {
+        let na0 = aq[0] + r * (aq[1] + aq[0]);
+        let na1 = aq[2] + r * (aq[3] + aq[2]);
+        let nb0 = bq[0] + r * (bq[1] + bq[0]);
+        let nb1 = bq[2] + r * (bq[3] + bq[2]);
+        op[0] = na0;
+        op[1] = na1;
+        opb[0] = nb0;
+        opb[1] = nb1;
+        g1 += na1 * nb1;
+        gi += (na0 + na1) * (nb0 + nb1);
+    }
+    (g1, gi)
+}
+
+/// 256-bit fused fold and round message: four outputs per pass, with the
+/// two-lane products accumulated unreduced and reduced once per chunk.
+///
+/// # Safety
+/// `a.len() == 2 * ao.len()`, `b.len() == 2 * bo.len()`, and the CPU has
+/// `avx2` and `vpclmulqdq`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,vpclmulqdq")]
+unsafe fn fold_and_round_avx2(
+    a: &[F128],
+    b: &[F128],
+    r: F128,
+    ao: &mut [F128],
+    bo: &mut [F128],
+) -> (F128, F128) {
+    use crate::simd::ghash2::{
+        LANES, V, even_odd, splat, storeu, wide_acc, wide_fold, wide_zero, xor,
+    };
+
+    debug_assert_eq!(a.len(), 2 * ao.len());
+    debug_assert_eq!(b.len(), 2 * bo.len());
+    let n = ao.len();
+    let rv = splat(r);
+    let mut g1 = wide_zero();
+    let mut gi = wide_zero();
+    let mut g1_tail = F256Unreduced::ZERO;
+    let mut gi_tail = F256Unreduced::ZERO;
+
+    // Fold `2 * LANES` inputs into `LANES` outputs.
+    //
+    // # Safety
+    // `2 * LANES` readable F128 at `src`.
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    unsafe fn fold(src: *const F128, rv: V) -> V {
+        use crate::simd::ghash2::{LANES, even_odd, loadu, mul, xor};
+        // SAFETY: the caller supplies `2 * LANES` readable inputs.
+        unsafe {
+            let (even, odd) = even_odd(loadu(src), loadu(src.add(LANES)));
+            xor(even, mul(rv, xor(even, odd)))
+        }
+    }
+
+    // SAFETY: the caller's geometry bounds every load and store; the tail
+    // below handles fewer than `2 * LANES` remaining outputs.
+    unsafe {
+        let mut o = 0;
+        while o + 2 * LANES <= n {
+            let a_lo = fold(a.as_ptr().add(2 * o), rv);
+            let a_hi = fold(a.as_ptr().add(2 * (o + LANES)), rv);
+            let b_lo = fold(b.as_ptr().add(2 * o), rv);
+            let b_hi = fold(b.as_ptr().add(2 * (o + LANES)), rv);
+            storeu(ao.as_mut_ptr().add(o), a_lo);
+            storeu(ao.as_mut_ptr().add(o + LANES), a_hi);
+            storeu(bo.as_mut_ptr().add(o), b_lo);
+            storeu(bo.as_mut_ptr().add(o + LANES), b_hi);
+
+            let (a0, a1) = even_odd(a_lo, a_hi);
+            let (b0, b1) = even_odd(b_lo, b_hi);
+            wide_acc(&mut g1, a1, b1);
+            wide_acc(&mut gi, xor(a0, a1), xor(b0, b1));
+            o += 2 * LANES;
+        }
+
+        // Fewer than `2 * LANES` outputs remain: one pair per iteration.
+        let mut k = o / 2;
+        while k < n / 2 {
+            let (i, w) = (4 * k, 2 * k);
+            let na0 = a[i] + r * (a[i + 1] + a[i]);
+            let na1 = a[i + 2] + r * (a[i + 3] + a[i + 2]);
+            let nb0 = b[i] + r * (b[i + 1] + b[i]);
+            let nb1 = b[i + 2] + r * (b[i + 3] + b[i + 2]);
+            ao[w] = na0;
+            ao[w + 1] = na1;
+            bo[w] = nb0;
+            bo[w + 1] = nb1;
+            g1_tail ^= na1.mul_unreduced(nb1);
+            gi_tail ^= (na0 + na1).mul_unreduced(nb0 + nb1);
+            k += 1;
+        }
+        // An odd output count leaves one unpaired fold with no message term.
+        if n % 2 == 1 {
+            let i = n - 1;
+            ao[i] = a[2 * i] + r * (a[2 * i + 1] + a[2 * i]);
+            bo[i] = b[2 * i] + r * (b[2 * i + 1] + b[2 * i]);
+        }
+    }
+
+    let mut p1 = wide_fold(g1);
+    let mut pinf = wide_fold(gi);
+    p1 ^= g1_tail;
+    pinf ^= gi_tail;
+    (p1.reduce(), pinf.reduce())
 }
 
 #[cfg(test)]
@@ -4804,6 +4915,82 @@ mod tests {
 
     fn sample_vec(ch: &mut RandomChallenger, n: usize) -> Vec<F128> {
         (0..n).map(|_| ch.sample_f128()).collect()
+    }
+
+    /// The 256-bit fused fold and message match the scalar reference for
+    /// lengths on both sides of the vector width.
+    #[test]
+    fn avx2_fold_and_round_matches_scalar() {
+        use crate::simd;
+
+        if !simd::has(simd::VPCLMUL256) {
+            eprintln!("skipped: no avx2+vpclmulqdq on this CPU");
+            return;
+        }
+        type Folded = (Vec<F128>, Vec<F128>, (F128, F128));
+
+        fn scalar(a: &[F128], b: &[F128], r: F128, out: usize) -> Folded {
+            let mut ao = vec![F128::ZERO; out];
+            let mut bo = vec![F128::ZERO; out];
+            let (mut g1, mut gi) = (F128::ZERO, F128::ZERO);
+            for k in 0..out / 2 {
+                let (i, w) = (4 * k, 2 * k);
+                let na0 = a[i] + r * (a[i + 1] + a[i]);
+                let na1 = a[i + 2] + r * (a[i + 3] + a[i + 2]);
+                let nb0 = b[i] + r * (b[i + 1] + b[i]);
+                let nb1 = b[i + 2] + r * (b[i + 3] + b[i + 2]);
+                ao[w] = na0;
+                ao[w + 1] = na1;
+                bo[w] = nb0;
+                bo[w + 1] = nb1;
+                g1 += na1 * nb1;
+                gi += (na0 + na1) * (nb0 + nb1);
+            }
+            if out % 2 == 1 {
+                let i = out - 1;
+                ao[i] = a[2 * i] + r * (a[2 * i + 1] + a[2 * i]);
+                bo[i] = b[2 * i] + r * (b[2 * i + 1] + b[2 * i]);
+            }
+            (ao, bo, (g1, gi))
+        }
+
+        let mut rng = Rng::new(0xFA1D_2560);
+        for out in [2usize, 3, 4, 5, 6, 9, 10, 17, 34, 130] {
+            let n = 2 * out;
+            let a = rng.f128_vec(n);
+            let b = rng.f128_vec(n);
+            let r = rng.f128();
+            let (want_a, want_b, want) = scalar(&a, &b, r, out);
+            let mut ao = vec![F128::ZERO; out];
+            let mut bo = vec![F128::ZERO; out];
+            // SAFETY: the features were checked above; `ao`/`bo` are half the
+            // input length.
+            let got = unsafe { super::fold_and_round_avx2(&a, &b, r, &mut ao, &mut bo) };
+            assert_eq!(ao, want_a, "outputs a, out={out}");
+            assert_eq!(bo, want_b, "outputs b, out={out}");
+            assert_eq!(got, want, "message, out={out}");
+        }
+    }
+
+    /// Parallel microbenchmark of the fused fold kernel.
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn fold_and_round_speed() {
+        use std::time::Instant;
+
+        let mut rng = Rng::new(0xFA1D_2561);
+        let out = 1usize << 23;
+        let a = rng.f128_vec(2 * out);
+        let b = rng.f128_vec(2 * out);
+        let r = rng.f128();
+        let mut ao = vec![F128::ZERO; out];
+        let mut bo = vec![F128::ZERO; out];
+        for _ in 0..3 {
+            let t = Instant::now();
+            let got = super::fold_and_round_oop_par(&a, &b, r, &mut ao, &mut bo);
+            black_box((got, &ao, &bo));
+            eprintln!("par: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
     }
 
     /// Direct MLE of `f_t` in the index variable: brute-force reference for

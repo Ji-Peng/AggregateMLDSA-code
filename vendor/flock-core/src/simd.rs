@@ -638,6 +638,13 @@ pub(crate) mod ghash2 {
         acc.mid = _mm256_xor_si256(acc.mid, m);
     }
 
+    /// Reduce each lane of the accumulator, keeping the two lanes separate.
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    pub(crate) fn wide_reduce(acc: Wide) -> __m256i {
+        reduce(acc.lo, reduce(acc.mid, acc.hi))
+    }
+
     /// Fold both lanes of the accumulator into one unreduced product.
     #[inline]
     #[target_feature(enable = "avx2,vpclmulqdq")]

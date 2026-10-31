@@ -1738,12 +1738,10 @@ fn block_first_phase<Ch: Challenger>(
 
     // Rank-1 terms on the block cube.
     let mut terms: Vec<(Vec<F128>, Vec<F128>)> = Vec::new();
-    // agg-mldsa patch (PATCH.md): AVX-512 block statistics, chosen at run
-    // time; the same terms in the same order as the portable loop below.
+    // agg-mldsa patch (PATCH.md): AVX-512 or AVX2 block statistics, chosen at
+    // run time; the same terms in the same order as the portable loop below.
     #[cfg(target_arch = "x86_64")]
-    let simd = crate::simd::has(crate::simd::AVX512_CLMUL);
-    #[cfg(not(target_arch = "x86_64"))]
-    let simd = false;
+    let simd = crate::simd::ghash_width();
     for cl in rs {
         let z0 = cl.z_col[0];
         let z_hi = &cl.z_col[1..];
@@ -1752,12 +1750,22 @@ fn block_first_phase<Ch: Challenger>(
             .map(|c0| {
                 let kappa = if c0 == 0 { F128::ONE + z0 } else { z0 };
                 #[cfg(target_arch = "x86_64")]
-                if simd {
-                    // SAFETY: AVX512_CLMUL checked at run time (it implies sse4.1 on
-                    // every AVX-512 CPU; the kernel only uses sse4.1 lane extracts).
-                    return unsafe {
-                        block_stats_x86::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw)
-                    };
+                match simd {
+                    crate::simd::GhashWidth::Avx512 => {
+                        // SAFETY: AVX512_CLMUL checked at run time (it implies sse4.1
+                        // on every AVX-512 CPU; the kernel only uses sse4.1 lane
+                        // extracts).
+                        return unsafe {
+                            block_stats_x86::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw)
+                        };
+                    }
+                    crate::simd::GhashWidth::Vpclmul256 => {
+                        // SAFETY: the AVX2 tier checked avx2 and vpclmulqdq.
+                        return unsafe {
+                            block_stats_x86::s_vectors_avx2(cl.bank, NB, n_e, c0, kappa, &js, &pw)
+                        };
+                    }
+                    _ => {}
                 }
                 block_stats_portable::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw)
             })
@@ -1795,11 +1803,20 @@ fn block_first_phase<Ch: Challenger>(
             .map(|c| {
                 if c < live_cols {
                     #[cfg(target_arch = "x86_64")]
-                    if simd {
-                        // SAFETY: AVX512_CLMUL checked at run time (see above).
-                        return unsafe {
-                            block_stats_x86::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
-                        };
+                    match simd {
+                        crate::simd::GhashWidth::Avx512 => {
+                            // SAFETY: AVX512_CLMUL checked at run time (see above).
+                            return unsafe {
+                                block_stats_x86::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
+                            };
+                        }
+                        crate::simd::GhashWidth::Vpclmul256 => {
+                            // SAFETY: the AVX2 tier checked avx2 and vpclmulqdq.
+                            return unsafe {
+                                block_stats_x86::dot_avx2(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
+                            };
+                        }
+                        _ => {}
                     }
                     block_stats_portable::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
                 } else {

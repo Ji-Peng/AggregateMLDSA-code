@@ -124,9 +124,14 @@ the sponge opening. `src/pcs/block_stats_x86.rs` computes the same values when
 deferred reduction (`simd::x86::LaneAccX4`; reduction is F_2-linear, so the reduced
 sum equals the sum of reduced products), `kappa` and the squarings with `ghash_mul_x4`
 across four blocks (field-identical to the scalar multiply), the dot products with
-`WideGhashX4`. The terms are pushed in the portable order. Measured locally (CLMUL build,
-3 threads, load 6-7): block statistics 800-1,000 ms -> 77-95 ms at 8,192 records;
-aggregates unchanged. Test: `pcs::block_stats_x86::tests::kernels_match_portable`.
+`WideGhashX4`. At the AVX2 width `s_vectors_avx2` and `dot_avx2` run the same inner
+products two terms at a time through `simd::ghash2::Wide` and keep the portable byte-table
+Frobenius, which does one lookup per byte instead of `j` dependent squarings. The terms
+are pushed in the portable order. Measured locally (CLMUL build, 3 threads, load 6-7):
+block statistics 800-1,000 ms -> 77-95 ms at 8,192 records; at 4K with six Flock threads
+the AVX2 tier went from 113 ms to 93 ms (portable to two-lane kernels). Aggregates are
+unchanged. Tests: `pcs::block_stats_x86::tests::{kernels_match_portable,
+avx2_kernels_match_portable}`.
 
 ## 5. Verifier-visible: list-aware work at the outer sites
 
@@ -394,3 +399,23 @@ To regenerate: keep section 3's edits, add the `ghash2`/`ghash1`/`ghash4` module
 `src/simd.rs`, replace each AVX-512-only kernel body by a `macro_rules!` body instantiated
 for the three widths, and replace the `has(AVX512_CLMUL)` call sites by the width
 dispatchers (`*_best` helpers or `match ghash_width()`).
+
+### 3.3 The AVX2 tier's remaining hot kernels
+
+Three kernels were still paying for the narrower width at 4K, and each now has a dedicated
+256-bit body:
+
+* `pcs/jagged.rs::fold_and_round_oop_par` (the merged sumcheck's per-round fold and
+  message) was scalar. Its AVX2 arm (`fold_and_round_avx2`) folds four outputs per pass
+  with `ghash2`, accumulates both message products unreduced, and reduces once per
+  chunk. It is about 1.3x faster than the scalar chunk on six threads, where memory
+  traffic caps the gain; the scalar body remains for every other width.
+* `lincheck/kernels/x86_64.rs::bank_lookup_avx2` reloaded each byte for the two
+  point pairs of a four-point table line. `bank_lookup_pair_avx2` now shares the byte
+  load and the table offset across both 256-bit halves; the 32K-shape single-thread
+  bit-bank fold went from 45.7 ms to 35.7 ms (the AVX-512 kernel measures 28.1 ms).
+* `simd::ghash2::wide_reduce` keeps the two lanes separate, which the block statistics
+  above need.
+
+`flock_core::f128_avx512_kernels()` exposes the selected GF(2^128) width to callers that
+size a thread pool by it.
