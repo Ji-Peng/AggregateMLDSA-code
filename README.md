@@ -48,6 +48,11 @@ bridge and the Flock side; `cli.md` for mode A end to end and the `agg` tool;
 `deviations.md`), `scripts/test.sh`, `scripts/bench.sh`,
 `rust-toolchain.toml` (stable), `.cargo/config.toml` (no `target-cpu=native`).
 
+[`docs/engineering.md`](docs/engineering.md) describes the prover's engineering
+techniques — the fork-join schedule, the huge-page allocator, parallel first touch, the
+SIMD kernels, the vendored Akita and Flock changes, and the byte-identity gates — with
+their code locations, environment knobs and measured effects.
+
 ## Pinned revisions
 
 All pins live in `[workspace.dependencies]` of `Cargo.toml`; `Cargo.lock` is committed
