@@ -99,6 +99,10 @@ signed-16 mirror in chunks of 32K cells on the caller's pool. Flock's
 `alloc_zeroed_vec` (`vendor/flock-core/src/lib.rs`) uses `alloc_zeroed`, whose zero pages are
 likewise faulted in by the parallel writers rather than memset by one thread.
 
+Buffers from the stage-3 pool (`Pool::take`, IFMA line) are handed out as uninitialised
+storage: every caller writes the rows it later reads, and `AGG_ALLOC_POISON=1` fills fresh
+blocks with a pattern so the byte-identity gate checks that contract.
+
 The pitfall is `vec![T::zero(); n]`. For a newtype such as a field element it does not take
 the `calloc` path: it clones a zero value `n` times, which is a single-threaded fill with a
 page fault per 4 KiB page. For a buffer that is fully overwritten, allocate
@@ -199,6 +203,13 @@ changes; arithmetic, wire format and verifier are untouched. The record is
   own pool (`AGG_OPENING_THREADS`). The backend, session and prepared-opening handles are
   `Send + Sync` (`backend/{opening,scope,traits}.rs`), and the prepared state is `Send` so
   that it can cross the join.
+- **Narrow columns without a field plane.** Packing (`dense_coefficient_packing_partials`) and the
+  opening's evaluation and fold (`evaluate_and_fold`) read the i8 and i16 mirrors
+  (`sources/dense/kernels.rs`), so the 8 B/cell field plane of a narrow column is built only
+  on demand by the few remaining readers (`sources/dense/poly.rs`, a `OnceLock`). A test
+  (`crates/agg-piop/tests/lazy_field_plane.rs`) asserts that a default aggregate builds none.
+  Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads: -93 ms and
+  -3.2 GiB of prover peak memory on the general build.
 - **Digit caches.** `CachedDigits16` and `cached_i16_decompose_fold_partitioned`
   (`sources/poly_helpers/decompose_fold_partitioned.rs`) fold from the signed-16 mirror,
   and the sparse and chunked probes read the mirror instead of decomposing the field plane
