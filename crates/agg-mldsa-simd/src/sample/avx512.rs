@@ -30,6 +30,9 @@ static IDX_U: Align64<[u8; 64]> = Align64([
 fn host_has_vbmi() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
+        if !crate::isa::allows(crate::isa::IsaLevel::Avx512) {
+            return false;
+        }
         static CACHED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
         let val = CACHED.load(core::sync::atomic::Ordering::Relaxed);
         if val != 0 {

@@ -26,6 +26,11 @@ fn main() -> ExitCode {
     if std::env::var_os("AGG_ALLOC_POISON").is_some_and(|v| v == "1") {
         agg_piop::alloc::set_poison(true);
     }
+    if std::env::var_os("AGG_SIMD_REPORT").is_some_and(|v| v == "1") {
+        for line in agg_cli::simd_report() {
+            eprintln!("agg: {line}");
+        }
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = agg_cli::parse_command(args.first().map(String::as_str)) else {
         eprintln!("{}", agg_cli::USAGE);

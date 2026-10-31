@@ -263,8 +263,9 @@ fn detect() -> PackedKernels {
         };
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("pclmulqdq") {
-        if std::arch::is_x86_feature_detected!("avx2")
+    if crate::isa::avx2() && std::arch::is_x86_feature_detected!("pclmulqdq") {
+        if crate::isa::avx512()
+            && std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("vpclmulqdq")

@@ -1,9 +1,14 @@
 //! Hardware backend dispatch and engine initialization.
+//!
+//! `AGG_ISA` caps the backend this crate may select; `AGG_MLDSA_SIMD` names a
+//! backend below that cap (see [`crate::isa`]).
 
 use std::sync::OnceLock;
 
+use crate::isa::{self, IsaLevel};
+
 /// Available implementation backends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Backend {
     /// Scalar reference implementation.
     Scalar,
@@ -24,8 +29,19 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Creates a new engine instance for the requested backend if supported by hardware.
+    /// Creates a new engine instance for the requested backend.
+    ///
+    /// Returns `None` when the hardware lacks the backend's features or when
+    /// `AGG_ISA` caps the process below it.
     pub fn new(b: Backend) -> Option<Engine> {
+        if !cap_allows(b) {
+            return None;
+        }
+        Engine::hardware(b)
+    }
+
+    /// The backend the hardware supports, ignoring `AGG_ISA`.
+    fn hardware(b: Backend) -> Option<Engine> {
         match b {
             Backend::Scalar => Some(Engine {
                 backend: Backend::Scalar,
@@ -77,6 +93,38 @@ impl Engine {
     }
 }
 
+/// Whether `AGG_ISA` admits `backend`.
+fn cap_allows(backend: Backend) -> bool {
+    match backend {
+        Backend::Scalar => true,
+        Backend::Avx2 => isa::allows(IsaLevel::Avx2),
+        Backend::Avx512 => isa::allows(IsaLevel::Avx512),
+    }
+}
+
+/// The highest backend `AGG_ISA` admits.
+fn cap_backend() -> Backend {
+    match isa::cap().limit() {
+        IsaLevel::Scalar => Backend::Scalar,
+        IsaLevel::Avx2 => Backend::Avx2,
+        IsaLevel::Avx512 | IsaLevel::Avx512Ifma => Backend::Avx512,
+    }
+}
+
+/// The highest backend the CPU supports, before the cap.
+fn detected_backend() -> Backend {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if Engine::hardware(Backend::Avx512).is_some() {
+            return Backend::Avx512;
+        }
+        if Engine::hardware(Backend::Avx2).is_some() {
+            return Backend::Avx2;
+        }
+    }
+    Backend::Scalar
+}
+
 /// Checks whether a given backend is supported on the current CPU.
 pub fn available(b: Backend) -> bool {
     Engine::new(b).is_some()
@@ -99,6 +147,9 @@ pub fn parse_backend(s: &str) -> Result<Option<Backend>, String> {
 }
 
 /// Returns the globally configured engine according to AGG_MLDSA_SIMD.
+///
+/// A request above the `AGG_ISA` cap runs at the cap; a request the hardware
+/// does not support is a panic.
 pub fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| {
@@ -106,24 +157,24 @@ pub fn engine() -> &'static Engine {
         let selection = parse_backend(&env_val).unwrap_or_else(|err| {
             panic!("Invalid AGG_MLDSA_SIMD environment variable: {err}");
         });
-        match selection {
-            None => {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if let Some(e) = Engine::new(Backend::Avx512) {
-                        return e;
-                    }
-                    if let Some(e) = Engine::new(Backend::Avx2) {
-                        return e;
-                    }
-                }
-                Engine::new(Backend::Scalar).expect("Scalar backend is always available")
-            }
-            Some(backend) => Engine::new(backend).unwrap_or_else(|| {
-                panic!("AGG_MLDSA_SIMD requested backend {backend:?}, but required CPU features are not available");
-            }),
-        }
+        let requested = selection.unwrap_or_else(detected_backend);
+        let backend = requested.min(cap_backend());
+        Engine::new(backend).unwrap_or_else(|| {
+            panic!(
+                "AGG_MLDSA_SIMD requested backend {requested:?}, but the CPU or AGG_ISA does not allow it"
+            );
+        })
     })
+}
+
+/// One line describing the backend and the detected extension this crate uses.
+pub fn report() -> String {
+    let engine = engine();
+    format!(
+        "agg-mldsa-simd: backend={:?} vbmi={}",
+        engine.backend(),
+        engine.has_vbmi()
+    )
 }
 
 #[cfg(test)]

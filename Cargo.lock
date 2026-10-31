@@ -144,6 +144,10 @@ dependencies = [
  "agg-pcs-config",
  "agg-piop",
  "agg-witness",
+ "akita-algebra",
+ "akita-challenges",
+ "akita-cpu-backend",
+ "flock-core",
  "rayon",
  "sha3 0.10.9",
 ]

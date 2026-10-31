@@ -46,7 +46,10 @@ pub(super) fn accumulate_transposed_chunk(
 
     #[cfg(target_arch = "x86_64")]
     {
-        if len == FUSED_CHUNK_FREQS && std::arch::is_x86_feature_detected!("avx2") {
+        if len == FUSED_CHUNK_FREQS
+            && crate::isa::avx2()
+            && std::arch::is_x86_feature_detected!("avx2")
+        {
             return unsafe {
                 accumulate_transposed_chunk_avx2(table, positions, coeffs, start_k, half_d)
             };

@@ -15,7 +15,7 @@ pub fn i16_values_in_balanced_range(values: &[i16], bound: i16) -> bool {
     #[cfg(target_arch = "aarch64")]
     let values_valid = super::neon::i16_values_in_balanced_range(values, bound);
     #[cfg(target_arch = "x86_64")]
-    let values_valid = if std::is_x86_feature_detected!("avx2") {
+    let values_valid = if crate::isa::avx2() && std::is_x86_feature_detected!("avx2") {
         // SAFETY: AVX2 support was detected at runtime.
         unsafe { i16_values_in_balanced_range_avx2(values, bound) }
     } else {

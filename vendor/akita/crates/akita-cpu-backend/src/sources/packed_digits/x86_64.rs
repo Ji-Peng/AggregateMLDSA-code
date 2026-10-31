@@ -10,7 +10,9 @@ pub(super) fn try_decode_full_block(
     bit_width: u8,
     output: &mut [i8; DIGITS_PER_BLOCK],
 ) -> bool {
-    if !std::arch::is_x86_feature_detected!("bmi2") || !std::arch::is_x86_feature_detected!("avx2")
+    if !crate::isa::avx2()
+        || !std::arch::is_x86_feature_detected!("bmi2")
+        || !std::arch::is_x86_feature_detected!("avx2")
     {
         return false;
     }

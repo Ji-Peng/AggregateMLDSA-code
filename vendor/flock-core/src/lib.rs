@@ -50,6 +50,12 @@ pub mod r1cs;
 pub mod schedule;
 pub mod scratch;
 pub(crate) mod simd;
+
+/// One line describing the `AGG_ISA` cap and the x86 kernels this crate selected.
+#[must_use]
+pub fn simd_report() -> String {
+    simd::report()
+}
 pub mod suboptimal;
 pub mod test_rng;
 pub mod transcript_record;

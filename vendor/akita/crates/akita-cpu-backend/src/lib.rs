@@ -7,6 +7,7 @@
 pub(crate) mod arithmetic;
 pub(crate) mod commitment;
 pub(crate) mod kernels;
+mod isa;
 pub(crate) mod opaque;
 mod portable_witness;
 pub(crate) mod setup;
@@ -126,3 +127,14 @@ pub(crate) fn typed_inner_rows<F: Field, const D: usize>(
 
 #[cfg(test)]
 mod tests;
+
+/// One line describing the `AGG_ISA` cap for this crate's x86 kernels.
+#[must_use]
+pub fn simd_report() -> String {
+    format!(
+        "akita-cpu-backend: cap={} ({}) avx2={}",
+        isa::cap().name(),
+        isa::requested().unwrap_or("detected"),
+        isa::avx2(),
+    )
+}

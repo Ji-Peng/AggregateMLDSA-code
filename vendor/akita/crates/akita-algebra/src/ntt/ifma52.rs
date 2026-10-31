@@ -225,7 +225,8 @@ impl<const D: usize> Ifma52Twiddles<D> {
 pub fn ifma52_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        std::is_x86_feature_detected!("avx512f")
+        crate::isa::ifma()
+            && std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512dq")
             && std::is_x86_feature_detected!("avx512ifma")
     }

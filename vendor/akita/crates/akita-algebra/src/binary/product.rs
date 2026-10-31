@@ -70,7 +70,7 @@ fn detect() -> Kernels {
         };
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("pclmulqdq") {
+    if crate::isa::avx2() && std::arch::is_x86_feature_detected!("pclmulqdq") {
         let dot_product: DotKernel = if std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("vpclmulqdq")
         {

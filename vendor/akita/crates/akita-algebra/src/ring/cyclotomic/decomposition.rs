@@ -228,7 +228,7 @@ pub fn balanced_decompose_coefficients_pow2_i8_into<F: Field + CanonicalEncoding
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if coefficients.len().is_multiple_of(8) && params.digit_bits() <= 64 {
         if let Some(canonical) = F::canonical_u32_slice(coefficients) {
-            if std::is_x86_feature_detected!("avx2") {
+            if crate::isa::avx2() && std::is_x86_feature_detected!("avx2") {
                 // SAFETY: runtime feature detection guarantees AVX2, and the
                 // length check guarantees every load/store covers eight lanes.
                 unsafe {
@@ -278,7 +278,8 @@ fn balanced_decompose_coefficients_pow2_signed_into<
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if std::is_x86_feature_detected!("avx512f")
+        if crate::isa::avx512()
+            && std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512bw")
             && std::is_x86_feature_detected!("avx512vl")
             && std::is_x86_feature_detected!("avx512dq")
@@ -289,7 +290,7 @@ fn balanced_decompose_coefficients_pow2_signed_into<
             };
             return;
         }
-        if std::is_x86_feature_detected!("avx2") {
+        if crate::isa::avx2() && std::is_x86_feature_detected!("avx2") {
             // SAFETY: runtime feature detection guarantees AVX2.
             unsafe {
                 x86::balanced_decompose_coefficients_pow2_signed_avx2(coefficients, out, params)

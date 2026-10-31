@@ -6,6 +6,7 @@
 pub mod dispatch;
 pub mod finish;
 pub mod hash;
+pub mod isa;
 pub mod keccak;
 pub mod ntt;
 pub mod params;

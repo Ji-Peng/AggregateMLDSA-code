@@ -7,9 +7,15 @@
 //! computes the same field elements as its portable counterpart (exact GF(2^8) and
 //! GF(2^128) arithmetic), so proofs are byte-identical whichever path runs.
 //!
-//! `FLOCK_SIMD` in the environment caps the level, read once per process:
-//! `portable` (or `off`) disables every x86 kernel, `gfni` allows only the SSE GFNI
-//! kernels, anything else (or unset) allows all detected features.
+//! Two environment variables cap the level, both read once per process:
+//!
+//! * `FLOCK_SIMD`: `portable` (or `off`) disables every x86 kernel and `gfni` allows only
+//!   the SSE GFNI kernels; anything else (or unset) allows all detected features.
+//! * `AGG_ISA`: the process-wide instruction-set cap. `scalar` behaves like
+//!   `FLOCK_SIMD=portable`; `avx2` allows the AVX2 tier (x86-64-v3 plus PCLMULQDQ; the
+//!   256-bit VPCLMULQDQ and GFNI extensions are used when the CPU has them); `avx512`
+//!   allows AVX-512 without IFMA; `avx512ifma` (or unset) allows every detected feature.
+//!   A cap only lowers the level.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -19,7 +25,58 @@ pub(crate) const AVX512_GFNI: u8 = 1 << 1; // gfni + avx512f + avx512bw
 pub(crate) const GFNI: u8 = 1 << 2; // gfni (SSE)
 pub(crate) const AVX512_VBMI: u8 = 1 << 3; // avx512f + avx512bw + avx512vbmi
 pub(crate) const AVX512F: u8 = 1 << 4; // avx512f
+pub(crate) const AVX2: u8 = 1 << 5; // avx2 + pclmulqdq
+pub(crate) const VPCLMUL256: u8 = 1 << 6; // avx2 + vpclmulqdq (256-bit vectors)
 const INIT: u8 = 1 << 7;
+
+/// Instruction-set levels of `AGG_ISA`, ordered upwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Isa {
+    Scalar,
+    Avx2,
+    Avx512,
+    Avx512Ifma,
+}
+
+impl Isa {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "scalar" => Some(Self::Scalar),
+            "avx2" => Some(Self::Avx2),
+            "avx512" | "avx-512" => Some(Self::Avx512),
+            "avx512ifma" | "avx512-ifma" | "ifma" => Some(Self::Avx512Ifma),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Avx2 => "avx2",
+            Self::Avx512 => "avx512",
+            Self::Avx512Ifma => "avx512ifma",
+        }
+    }
+}
+
+/// The `AGG_ISA` cap, parsed once.
+fn isa_cap() -> Isa {
+    static CAP: std::sync::OnceLock<Isa> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| match std::env::var("AGG_ISA") {
+        Ok(value) => Isa::parse(&value).unwrap_or_else(|| {
+            panic!(
+                "invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar"
+            )
+        }),
+        Err(_) => Isa::Avx512Ifma,
+    })
+}
+
+/// The AGG_ISA value this process was given, for reports.
+fn isa_requested() -> Option<&'static str> {
+    let value = std::env::var("AGG_ISA").ok()?;
+    Some(Isa::parse(&value)?.name())
+}
 
 /// Detected features after the `FLOCK_SIMD` cap.
 static DETECTED: AtomicU8 = AtomicU8::new(0);
@@ -33,21 +90,32 @@ fn detect() -> u8 {
     #[cfg(target_arch = "x86_64")]
     {
         use std::arch::is_x86_feature_detected as has;
-        let avx512f = has!("avx512f");
-        if avx512f {
-            bits |= AVX512F;
-        }
-        if avx512f && has!("vpclmulqdq") {
-            bits |= AVX512_CLMUL;
-        }
-        if has!("gfni") {
-            bits |= GFNI;
-            if avx512f && has!("avx512bw") {
-                bits |= AVX512_GFNI;
+        let cap = isa_cap();
+        if cap >= Isa::Avx2 {
+            if has!("avx2") && has!("pclmulqdq") {
+                bits |= AVX2;
+                if has!("vpclmulqdq") {
+                    bits |= VPCLMUL256;
+                }
+            }
+            if has!("gfni") {
+                bits |= GFNI;
             }
         }
-        if avx512f && has!("avx512bw") && has!("avx512vbmi") {
-            bits |= AVX512_VBMI;
+        if cap >= Isa::Avx512 {
+            let avx512f = has!("avx512f");
+            if avx512f {
+                bits |= AVX512F;
+                if has!("vpclmulqdq") {
+                    bits |= AVX512_CLMUL;
+                }
+            }
+            if has!("gfni") && avx512f && has!("avx512bw") {
+                bits |= AVX512_GFNI;
+            }
+            if avx512f && has!("avx512bw") && has!("avx512vbmi") {
+                bits |= AVX512_VBMI;
+            }
         }
     }
     match std::env::var("FLOCK_SIMD").as_deref() {
@@ -96,13 +164,67 @@ pub(crate) fn test_masks() -> Vec<u8> {
         if d & INIT == 0 { detect() } else { d & !INIT }
     };
     let mut out = vec![0u8];
-    for m in [GFNI, GFNI | AVX512F, AVX512F | AVX512_CLMUL, all] {
+    for m in [
+        GFNI,
+        AVX2,
+        AVX2 | VPCLMUL256,
+        GFNI | AVX2 | VPCLMUL256,
+        GFNI | AVX2 | AVX512F,
+        AVX512F | AVX512_CLMUL | AVX2 | VPCLMUL256,
+        all,
+    ] {
         let m = m & all;
         if !out.contains(&m) {
             out.push(m);
         }
     }
     out
+}
+
+/// The GF(2^128) vector width the kernels use, best first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GhashWidth {
+    /// AVX-512 with 512-bit VPCLMULQDQ.
+    Avx512,
+    /// AVX2 with 256-bit VPCLMULQDQ.
+    Vpclmul256,
+    /// AVX2 with the 128-bit PCLMULQDQ.
+    Pclmul,
+    /// Portable.
+    Portable,
+}
+
+/// The best GF(2^128) width the cap and the CPU allow.
+#[inline]
+pub(crate) fn ghash_width() -> GhashWidth {
+    if has(AVX512_CLMUL) {
+        GhashWidth::Avx512
+    } else if has(VPCLMUL256) {
+        GhashWidth::Vpclmul256
+    } else if has(AVX2) {
+        GhashWidth::Pclmul
+    } else {
+        GhashWidth::Portable
+    }
+}
+
+/// One line describing the cap and the selected x86 kernels.
+pub(crate) fn report() -> String {
+    let bits = features();
+    let cap = isa_cap();
+    format!(
+        "flock-core: cap={} ({}) avx2={} vpclmul256={} gfni={} avx512f={} avx512clmul={} avx512gfni={} avx512vbmi={} gf2-width={:?}",
+        cap.name(),
+        isa_requested().unwrap_or("detected"),
+        bits & AVX2 == AVX2,
+        bits & VPCLMUL256 == VPCLMUL256,
+        bits & GFNI == GFNI,
+        bits & AVX512F == AVX512F,
+        bits & AVX512_CLMUL == AVX512_CLMUL,
+        bits & AVX512_GFNI == AVX512_GFNI,
+        bits & AVX512_VBMI == AVX512_VBMI,
+        ghash_width(),
+    )
 }
 
 /// AVX-512 GF(2^128) primitives, copied from `flock-field` 83f963e
@@ -306,6 +428,376 @@ pub(crate) mod x86 {
                 r3: hi_hi,
             }
         }
+    }
+}
+
+/// Two-lane GF(2^128) primitives in 256-bit registers (VPCLMULQDQ).
+///
+/// The function set mirrors [`x86`] so a kernel body can be instantiated for
+/// either width by a macro. Every function carries its own
+/// `#[target_feature]`; callers check [`VPCLMUL256`].
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod ghash2 {
+    use core::arch::x86_64::{
+        __m256i, _mm_extract_epi64, _mm_xor_si128, _mm256_bslli_epi128,
+        _mm256_clmulepi64_epi128, _mm256_extracti128_si256, _mm256_loadu_si256,
+        _mm256_set_epi64x, _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+
+    use crate::field::{F128, F256Unreduced};
+
+    /// Lanes per vector.
+    pub(crate) const LANES: usize = 2;
+
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    fn ghash_poly() -> __m256i {
+        _mm256_set_epi64x(0x87, 0, 0x87, 0)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    fn reduce(t0: __m256i, t1: __m256i) -> __m256i {
+        let poly = ghash_poly();
+        let shifted = _mm256_bslli_epi128::<8>(t1);
+        let folded = _mm256_clmulepi64_epi128::<0x01>(t1, poly);
+        _mm256_xor_si256(_mm256_xor_si256(t0, shifted), folded)
+    }
+
+    /// Two independent GF(2^128) products, lane-wise.
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    pub(crate) fn mul(x: __m256i, y: __m256i) -> __m256i {
+        let t1 = _mm256_xor_si256(
+            _mm256_clmulepi64_epi128::<0x01>(x, y),
+            _mm256_clmulepi64_epi128::<0x10>(x, y),
+        );
+        let t2 = _mm256_clmulepi64_epi128::<0x11>(x, y);
+        let high = reduce(t1, t2);
+        reduce(_mm256_clmulepi64_epi128::<0x00>(x, y), high)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn xor(a: __m256i, b: __m256i) -> __m256i {
+        _mm256_xor_si256(a, b)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn zero() -> __m256i {
+        _mm256_setzero_si256()
+    }
+
+    /// Broadcast one `F128` to both lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn splat(a: F128) -> __m256i {
+        _mm256_set_epi64x(a.hi as i64, a.lo as i64, a.hi as i64, a.lo as i64)
+    }
+
+    /// Pack two `F128` (lane 0 = `a`).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn set(a: F128, b: F128) -> __m256i {
+        _mm256_set_epi64x(b.hi as i64, b.lo as i64, a.hi as i64, a.lo as i64)
+    }
+
+    /// Pack the lanes of `a` in order.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn set_from(a: &[F128]) -> __m256i {
+        debug_assert_eq!(a.len(), LANES);
+        set(a[0], a[1])
+    }
+
+    /// Load two contiguous `F128`.
+    ///
+    /// # Safety
+    /// Two readable `F128` at `p`; the caller checked [`super::VPCLMUL256`].
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn loadu(p: *const F128) -> __m256i {
+        // SAFETY: caller guarantees two readable F128 at p.
+        unsafe { _mm256_loadu_si256(p as *const __m256i) }
+    }
+
+    /// Store two `F128`.
+    ///
+    /// # Safety
+    /// Two writable `F128` at `p`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn storeu(p: *mut F128, v: __m256i) {
+        // SAFETY: caller guarantees two writable F128 at p.
+        unsafe { _mm256_storeu_si256(p as *mut __m256i, v) }
+    }
+
+    /// Lane-wise deferred-reduction accumulator over 256-bit products.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Wide {
+        lo: __m256i,
+        mid: __m256i,
+        hi: __m256i,
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    pub(crate) fn wide_zero() -> Wide {
+        Wide {
+            lo: zero(),
+            mid: zero(),
+            hi: zero(),
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    pub(crate) fn wide_acc(acc: &mut Wide, x: __m256i, y: __m256i) {
+        acc.lo = _mm256_xor_si256(acc.lo, _mm256_clmulepi64_epi128::<0x00>(x, y));
+        acc.hi = _mm256_xor_si256(acc.hi, _mm256_clmulepi64_epi128::<0x11>(x, y));
+        let m = _mm256_xor_si256(
+            _mm256_clmulepi64_epi128::<0x01>(x, y),
+            _mm256_clmulepi64_epi128::<0x10>(x, y),
+        );
+        acc.mid = _mm256_xor_si256(acc.mid, m);
+    }
+
+    /// Fold both lanes of the accumulator into one unreduced product.
+    #[inline]
+    #[target_feature(enable = "avx2,vpclmulqdq")]
+    pub(crate) fn wide_fold(acc: Wide) -> F256Unreduced {
+        let lane = |v: __m256i| {
+            _mm_xor_si128(
+                _mm256_extracti128_si256::<0>(v),
+                _mm256_extracti128_si256::<1>(v),
+            )
+        };
+        let lo = lane(acc.lo);
+        let mid = lane(acc.mid);
+        let hi = lane(acc.hi);
+        let (lo_lo, lo_hi, mid_lo, mid_hi, hi_lo, hi_hi) = (
+            _mm_extract_epi64::<0>(lo) as u64,
+            _mm_extract_epi64::<1>(lo) as u64,
+            _mm_extract_epi64::<0>(mid) as u64,
+            _mm_extract_epi64::<1>(mid) as u64,
+            _mm_extract_epi64::<0>(hi) as u64,
+            _mm_extract_epi64::<1>(hi) as u64,
+        );
+        F256Unreduced {
+            r0: lo_lo,
+            r1: lo_hi ^ mid_lo,
+            r2: hi_lo ^ mid_hi,
+            r3: hi_hi,
+        }
+    }
+}
+
+/// One-lane GF(2^128) primitives in 128-bit registers (PCLMULQDQ).
+///
+/// The function set mirrors [`x86`] and [`ghash2`]. Callers check [`AVX2`].
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod ghash1 {
+    use core::arch::x86_64::{
+        __m128i, _mm_clmulepi64_si128, _mm_extract_epi64, _mm_loadu_si128, _mm_set_epi64x,
+        _mm_setzero_si128, _mm_slli_si128, _mm_storeu_si128, _mm_xor_si128,
+    };
+
+    use crate::field::{F128, F256Unreduced};
+
+    /// Lanes per vector.
+    pub(crate) const LANES: usize = 1;
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    fn ghash_poly() -> __m128i {
+        _mm_set_epi64x(0x87, 0)
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    fn reduce(t0: __m128i, t1: __m128i) -> __m128i {
+        let poly = ghash_poly();
+        let folded = _mm_clmulepi64_si128::<0x01>(t1, poly);
+        _mm_xor_si128(_mm_xor_si128(t0, _mm_slli_si128::<8>(t1)), folded)
+    }
+
+    /// One GF(2^128) product.
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn mul(x: __m128i, y: __m128i) -> __m128i {
+        let t1 = _mm_xor_si128(
+            _mm_clmulepi64_si128::<0x01>(x, y),
+            _mm_clmulepi64_si128::<0x10>(x, y),
+        );
+        let t2 = _mm_clmulepi64_si128::<0x11>(x, y);
+        let high = reduce(t1, t2);
+        reduce(_mm_clmulepi64_si128::<0x00>(x, y), high)
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn xor(a: __m128i, b: __m128i) -> __m128i {
+        _mm_xor_si128(a, b)
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn zero() -> __m128i {
+        _mm_setzero_si128()
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn splat(a: F128) -> __m128i {
+        _mm_set_epi64x(a.hi as i64, a.lo as i64)
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn set(a: F128) -> __m128i {
+        _mm_set_epi64x(a.hi as i64, a.lo as i64)
+    }
+
+    /// Pack the lanes of `a` in order.
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn set_from(a: &[F128]) -> __m128i {
+        debug_assert_eq!(a.len(), LANES);
+        set(a[0])
+    }
+
+    /// Load one `F128`.
+    ///
+    /// # Safety
+    /// One readable `F128` at `p`; the caller checked [`super::AVX2`].
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) unsafe fn loadu(p: *const F128) -> __m128i {
+        // SAFETY: caller guarantees one readable F128 at p.
+        unsafe { _mm_loadu_si128(p as *const __m128i) }
+    }
+
+    /// Store one `F128`.
+    ///
+    /// # Safety
+    /// One writable `F128` at `p`.
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) unsafe fn storeu(p: *mut F128, v: __m128i) {
+        // SAFETY: caller guarantees one writable F128 at p.
+        unsafe { _mm_storeu_si128(p as *mut __m128i, v) }
+    }
+
+    /// Deferred-reduction accumulator over one lane.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Wide {
+        lo: __m128i,
+        mid: __m128i,
+        hi: __m128i,
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn wide_zero() -> Wide {
+        Wide {
+            lo: zero(),
+            mid: zero(),
+            hi: zero(),
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn wide_acc(acc: &mut Wide, x: __m128i, y: __m128i) {
+        acc.lo = _mm_xor_si128(acc.lo, _mm_clmulepi64_si128::<0x00>(x, y));
+        acc.hi = _mm_xor_si128(acc.hi, _mm_clmulepi64_si128::<0x11>(x, y));
+        let m = _mm_xor_si128(
+            _mm_clmulepi64_si128::<0x01>(x, y),
+            _mm_clmulepi64_si128::<0x10>(x, y),
+        );
+        acc.mid = _mm_xor_si128(acc.mid, m);
+    }
+
+    /// Fold the accumulator into one unreduced product.
+    ///
+    /// # Safety
+    /// The four 64-bit words of each accumulator member are readable.
+    #[inline]
+    #[target_feature(enable = "pclmulqdq,sse4.1")]
+    pub(crate) fn wide_fold(acc: Wide) -> F256Unreduced {
+        let (lo_lo, lo_hi, mid_lo, mid_hi, hi_lo, hi_hi) = (
+            _mm_extract_epi64::<0>(acc.lo) as u64,
+            _mm_extract_epi64::<1>(acc.lo) as u64,
+            _mm_extract_epi64::<0>(acc.mid) as u64,
+            _mm_extract_epi64::<1>(acc.mid) as u64,
+            _mm_extract_epi64::<0>(acc.hi) as u64,
+            _mm_extract_epi64::<1>(acc.hi) as u64,
+        );
+        F256Unreduced {
+            r0: lo_lo,
+            r1: lo_hi ^ mid_lo,
+            r2: hi_lo ^ mid_hi,
+            r3: hi_hi,
+        }
+    }
+}
+
+/// Four-lane GF(2^128) primitives with the uniform interface of [`ghash2`].
+///
+/// Re-exports [`x86`] behind the names a width-generic kernel body uses.
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod ghash4 {
+    use core::arch::x86_64::{__m512i, _mm512_setzero_si512, _mm512_xor_si512};
+
+    use crate::field::{F128, F256Unreduced};
+
+    #[allow(unused_imports)]
+    pub(crate) use super::x86::WideGhashX4 as Wide;
+    #[allow(unused_imports)]
+    pub(crate) use super::x86::{f128x4_loadu as loadu, f128x4_splat as splat};
+    #[allow(unused_imports)]
+    pub(crate) use super::x86::{f128x4_set, f128x4_storeu as storeu, ghash_mul_x4 as mul};
+
+    /// Lanes per vector.
+    pub(crate) const LANES: usize = 4;
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn xor(a: __m512i, b: __m512i) -> __m512i {
+        _mm512_xor_si512(a, b)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn zero() -> __m512i {
+        _mm512_setzero_si512()
+    }
+
+    /// Pack the lanes of `a` in order.
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn set_from(a: &[F128]) -> __m512i {
+        debug_assert_eq!(a.len(), LANES);
+        f128x4_set(a[0], a[1], a[2], a[3])
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn wide_zero() -> Wide {
+        Wide::zero()
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,vpclmulqdq")]
+    pub(crate) unsafe fn wide_acc(acc: &mut Wide, x: __m512i, y: __m512i) {
+        acc.mul_acc(x, y)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+    pub(crate) unsafe fn wide_fold(acc: Wide) -> F256Unreduced {
+        acc.fold()
     }
 }
 

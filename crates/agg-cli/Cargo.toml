@@ -18,6 +18,10 @@ agg-piop = { workspace = true }
 agg-keccak = { workspace = true }
 agg-bridge = { workspace = true }
 agg-mldsa-simd = { workspace = true }
+flock-core = { workspace = true }
+akita-algebra = { workspace = true }
+akita-challenges = { workspace = true }
+akita-cpu-backend = { workspace = true }
 sha3 = { workspace = true }
 rayon = { workspace = true }
 

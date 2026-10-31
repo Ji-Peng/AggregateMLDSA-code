@@ -21,6 +21,7 @@ pub(super) struct AvxCpuFeatures {
 /// AVX2 is the default backend: the 512-bit kernels measured no faster on the
 /// available hosts. `AKITA_AVX512_NTT=1` opts into them on hosts with
 /// AVX-512F/DQ/BW, and `AKITA_SCALAR_NTT=1` disables x86 SIMD globally.
+/// `AGG_ISA` caps both the AVX2 and the AVX-512 tiers (see `crate::isa`).
 /// The result is cached because this function sits on hot dispatch boundaries.
 pub fn avx_ntt_mode() -> Option<AvxNttMode> {
     static MODE: OnceLock<Option<AvxNttMode>> = OnceLock::new();
@@ -35,7 +36,7 @@ pub fn avx_ntt_mode() -> Option<AvxNttMode> {
 
 /// Whether the host may use x86 `i32` transform kernels at all.
 pub fn use_avx2_transform_ntt() -> bool {
-    avx_ntt_mode().is_some() && std::is_x86_feature_detected!("avx2")
+    avx_ntt_mode().is_some() && crate::isa::avx2() && std::is_x86_feature_detected!("avx2")
 }
 
 #[inline]
@@ -59,8 +60,9 @@ pub(super) fn select_avx_ntt_mode(
 #[inline]
 pub(super) fn detect_cpu_features() -> AvxCpuFeatures {
     AvxCpuFeatures {
-        avx2: std::is_x86_feature_detected!("avx2"),
-        avx512: std::is_x86_feature_detected!("avx512f")
+        avx2: crate::isa::avx2() && std::is_x86_feature_detected!("avx2"),
+        avx512: crate::isa::avx512()
+            && std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512dq")
             && std::is_x86_feature_detected!("avx512bw"),
     }

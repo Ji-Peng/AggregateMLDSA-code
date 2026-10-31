@@ -23,6 +23,7 @@ mod challenge;
 mod challenges;
 mod config;
 mod fold_draw;
+mod isa;
 mod sampler;
 
 #[cfg(feature = "labinius-challenges")]
@@ -45,3 +46,14 @@ pub use fold_draw::{
     fold_challenge_sample_label, FoldChallengeDrawDomain, FoldDraw, PreviewFoldDraw,
     ProverFoldDraw, VerifierFoldDraw,
 };
+
+/// One line describing the `AGG_ISA` cap for this crate's x86 kernels.
+#[must_use]
+pub fn simd_report() -> String {
+    format!(
+        "akita-challenges: cap={} ({}) avx2={}",
+        isa::cap().name(),
+        isa::requested().unwrap_or("detected"),
+        isa::avx2(),
+    )
+}

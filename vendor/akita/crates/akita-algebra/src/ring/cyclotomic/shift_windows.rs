@@ -58,7 +58,7 @@ impl<F: WithCommitAccumulator, const D: usize> NegacyclicShiftWindows<F, D> {
         shifts: &[usize],
     ) {
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx2") {
+        if crate::isa::avx2() && std::is_x86_feature_detected!("avx2") {
             // SAFETY: runtime feature detection guarantees AVX2.
             unsafe { self.accumulate_shifts_into_avx2(dst, shifts) };
             return;

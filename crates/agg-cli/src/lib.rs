@@ -11,3 +11,18 @@ pub mod rss;
 pub mod wire;
 
 pub use commands::{parse_command, Command, USAGE};
+
+/// One line per crate with the `AGG_ISA` cap and the kernels it selected.
+///
+/// The lines come from the same detectors the prover uses, so a run with
+/// `AGG_SIMD_REPORT=1` states which instruction set every backend chose.
+#[must_use]
+pub fn simd_report() -> Vec<String> {
+    vec![
+        agg_mldsa_simd::dispatch::report(),
+        flock_core::simd_report(),
+        akita_algebra::simd_report(),
+        akita_challenges::simd_report(),
+        akita_cpu_backend::simd_report(),
+    ]
+}

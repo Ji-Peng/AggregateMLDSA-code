@@ -16,11 +16,25 @@
 pub mod binary;
 pub mod eq_poly;
 pub mod fft;
+mod isa;
 pub mod ntt;
 pub mod offset_eq;
 pub mod poly;
 pub mod ring;
 pub mod split_eq;
+
+/// One line describing the `AGG_ISA` cap and the x86 kernels this crate may use.
+#[must_use]
+pub fn simd_report() -> String {
+    let cap = isa::cap();
+    format!(
+        "akita-algebra: cap={} ({}) crt-ntt-ifma={} crt-ntt-avx512={}",
+        cap.name(),
+        isa::requested().unwrap_or("detected"),
+        isa::ifma(),
+        isa::avx512(),
+    )
+}
 
 // Flat re-exports for convenience.
 pub use eq_poly::{EqPolynomial, SplitEqEvals};

@@ -52,7 +52,7 @@ fn detect() -> Kernels {
         };
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("pclmulqdq") {
+    if crate::isa::avx2() && std::arch::is_x86_feature_detected!("pclmulqdq") {
         let mut equality128: Equality128 = |point, output| {
             // SAFETY: this closure is installed only after detecting PCLMUL.
             unsafe { x86::equality128(point, output) }
@@ -61,7 +61,8 @@ fn detect() -> Kernels {
             // SAFETY: this closure is installed only after detecting PCLMUL.
             unsafe { x86::equality192(point, output) }
         };
-        if std::arch::is_x86_feature_detected!("avx512f")
+        if crate::isa::avx512()
+            && std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("vpclmulqdq")
         {
             equality128 = |point, output| {

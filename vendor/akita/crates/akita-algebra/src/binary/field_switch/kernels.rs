@@ -46,7 +46,8 @@ fn selected() -> &'static StageBackends {
     static SELECTED: OnceLock<StageBackends> = OnceLock::new();
     SELECTED.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx512f")
+        if crate::isa::avx512()
+            && std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("avx512vbmi")
             && std::arch::is_x86_feature_detected!("gfni")
@@ -57,7 +58,8 @@ fn selected() -> &'static StageBackends {
             };
         }
         #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2")
+        if crate::isa::avx2()
+            && std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("gfni")
         {
             return StageBackends {
