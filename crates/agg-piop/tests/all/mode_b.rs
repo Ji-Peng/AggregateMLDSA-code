@@ -202,33 +202,30 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         };
 
         // The public bits: a flipped bit breaks the hash, a value of 44 or more the range.
-        // (The changed event-2 item also changes `sd`, so the projection site's work nonce
-        // is rejected before the Keccak check; either rejection is correct.)
+        // A changed Flock commitment also changes the bridge seed, so the projection site's
+        // work nonce is rejected before the Keccak check; either rejection is correct.
+        // The projection challenge follows the instance, the commitments, the Flock
+        // commitments, the bridge seed and the site's label.
+        const PSI_EVENT: usize = 6;
         let mut flipped = output.proof.clone();
         flipped.flock_commitments[0][5 * 768 + 300] ^= 0x10;
         assert!(matches!(
             rejected(verify(&flipped)),
-            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
         ));
         let mut wide = output.proof.clone();
         wide.flock_commitments[0][9 * 768] |= 0x3f;
         assert!(matches!(
             rejected(verify(&wide)),
-            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
         ));
         let mut short = output.proof.clone();
         short.flock_commitments[0].truncate(768 * 255);
-        assert!(matches!(
-            rejected(verify(&short)),
-            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
-        ));
+        assert!(matches!(rejected(verify(&short)), VerifyError::Keccak(0)));
         // A changed c~ fails the hash; a changed final vector fails the projection.
         let mut c_tilde = output.proof.clone();
         c_tilde.c_tilde[17][3] ^= 1;
-        assert!(matches!(
-            rejected(verify(&c_tilde)),
-            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
-        ));
+        assert!(matches!(rejected(verify(&c_tilde)), VerifyError::Keccak(0)));
         let mut final_vector = output.proof.clone();
         final_vector.final_vectors[0][100] ^= 4;
         assert!(matches!(
@@ -310,10 +307,9 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
                 }
                 assert_eq!(read(&tampered.work), wrong);
                 let err = rejected(verify(&tampered));
-                if honest > 0 {
-                    // The predicate fails at the site itself.
-                    assert!(format!("{err}").contains("work nonce rejected"), "{site:?}: {err}");
-                }
+                // The predicate fails at the site itself, whether the honest nonce was zero
+                // (then `wrong = 1`) or above it (then `wrong = honest - 1`).
+                assert!(format!("{err}").contains("work nonce rejected"), "{site:?}: {err}");
             }
             offset += width;
         }
@@ -358,7 +354,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             rejected(other_profile),
-            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
         ));
         // A Keccak verifier for another profile is refused before the proof is read.
         let mismatch = verify_timed(

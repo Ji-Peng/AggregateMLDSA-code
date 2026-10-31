@@ -455,7 +455,8 @@ most $`\nu_t/|F_t|`$ given the first false pending claim, Aerie Lemma C.1), an a
 $`e_t\ge\nu_t/|F_t|`$ (Aerie C.4: a vector of $`l`$ coefficients $`l/|F|`$, a round its degree,
 a merge $`1/|F|`$), and the difficulty $`g_t=\min\{g\ge0:2^{128}e_t\le2^g\}`$ computed with the
 exact field size ($`g=\mathrm{bit\_length}(n)`$ for $`e_t=n/|K|`$, $`\lceil\log_2n\rceil`$ for
-$`n/2^{128}`$). A site with $`g_t>0`$ is preceded by a work nonce of $`g_t+7`$ bits; every
+$`n/2^{128}`$); the one exception is the projection matrix site `proj/psi`, where $`g_t=1`$
+by policy. A site with $`g_t>0`$ is preceded by a work nonce of $`g_t+7`$ bits; every
 address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Proposition 10.3).
 
 | Site class | Count at $`2^{15}`$ | $`\nu_t`$ | Assigned $`e_t`$ | $`g_t`$ | Nonce bits |

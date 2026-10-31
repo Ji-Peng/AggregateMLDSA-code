@@ -126,22 +126,27 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         .expect("verify with cached keys");
         eprintln!("verifier (cached keys) {:.2?}", start.elapsed());
 
-        // The proj.psi work nonce (deviation K24) is the first site of the packed stream
-        // (8 bits, one bit of grinding). A wrong value either fails the site's predicate or
-        // fixes another Psi; either way the verifier rejects.
+        // The work nonce of the projection matrix Psi is the first 8 bits of the packed
+        // stream (one bit of grinding). The prover searches from zero, so the nonce below
+        // the honest one fails the predicate at the projection challenge, which follows the
+        // instance, the commitments, the Flock commitments, the bridge seed and the label.
+        const PSI_EVENT: usize = 6;
         let honest_psi = u32::from(output.proof.work[0]);
+        assert!(honest_psi > 0, "the fixture's projection nonce is above zero");
         let mut psi = output.proof.clone();
-        psi.work[0] = if honest_psi > 0 { (honest_psi - 1) as u8 } else { 1 };
-        assert!(verify(
-            &public,
-            &psi.to_bytes(),
-            &bridge,
-            &NoKeccakVerifier,
-            FlockProfile::None,
-            Relation::Hu,
-            None,
-        )
-        .is_err());
+        psi.work[0] = (honest_psi - 1) as u8;
+        assert!(matches!(
+            verify(
+                &public,
+                &psi.to_bytes(),
+                &bridge,
+                &NoKeccakVerifier,
+                FlockProfile::None,
+                Relation::Hu,
+                None,
+            ),
+            Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+        ));
 
         // A wrong record list, a wrong c~, other matrices, a different Flock profile.
         let mut fewer = public.clone();

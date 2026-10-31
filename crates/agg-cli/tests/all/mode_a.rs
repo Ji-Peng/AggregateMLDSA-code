@@ -112,9 +112,23 @@ fn other(profile: FlockProfile) -> FlockProfile {
     }
 }
 
+/// The projection challenge follows the instance, the two round-1 commitments, the Flock
+/// commitments, the bridge seed and the site's label.
+const PSI_EVENT: usize = 6;
+
+/// Where a verifier pinned to the other Flock profile rejects the aggregate.
+#[derive(Clone, Copy)]
+enum ProfileRejection {
+    /// At the item's profile byte.
+    Item,
+    /// At the projection site's work nonce, which the changed instance record invalidates.
+    Work,
+}
+
 /// An honest round trip under `profile`: aggregate, check the `c~_i` list and the size
 /// report, verify uncached, then with an in-memory and a persisted key cache; a verifier
-/// pinned to the other profile rejects the aggregate at the item's profile byte.
+/// pinned to the other profile rejects the aggregate before any Flock work, at the item's
+/// profile byte or at the projection work nonce.
 fn round_trip(
     n_own: usize,
     n_shared: usize,
@@ -122,8 +136,18 @@ fn round_trip(
     part_log2: u32,
     parts: usize,
     profile: FlockProfile,
+    profile_rejection: ProfileRejection,
 ) {
-    round_trip_as(Relation::Hu, n_own, n_shared, seed, part_log2, parts, profile);
+    round_trip_as(
+        Relation::Hu,
+        n_own,
+        n_shared,
+        seed,
+        part_log2,
+        parts,
+        profile,
+        profile_rejection,
+    );
 }
 
 /// [`round_trip`] under `relation`; a verifier of the other relation rejects the aggregate
@@ -136,6 +160,7 @@ fn round_trip_as(
     part_log2: u32,
     parts: usize,
     profile: FlockProfile,
+    profile_rejection: ProfileRejection,
 ) {
     let records = records(seed, n_own, n_shared);
     let n = records.len();
@@ -265,23 +290,32 @@ fn round_trip_as(
         matches!(rejected(&crossed), VerifyError::Relation { expected, found } if *expected == other_relation && *found == relation),
         "{crossed}"
     );
+    let other_profile = other(profile);
     let wrong = AggregateVerifier::new()
-        .require(other(profile))
+        .require(other_profile)
         .relation(relation)
         .verify(&statements, &aggregate.bytes, None);
-    // The other profile also changes the event-0 record, so the transcript (and the
-    // projection site's work nonce) may reject before the item's profile byte; either
-    // failure happens before any Flock work.
-    expect_rejected("verifier pinned to the other profile", &wrong, |e| {
-        keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
-    });
-    assert!(
-        wrong.rejection.is_none()
-            || matches!(
-                wrong.rejection,
-                Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
-            )
-    );
+    // The other profile also changes the instance record that starts the transcript. If the
+    // projection work nonce still passes, the item's profile byte rejects the aggregate;
+    // otherwise the work nonce rejects it first. Both happen before any Flock work.
+    match profile_rejection {
+        ProfileRejection::Item => {
+            expect_rejected("verifier pinned to the other profile", &wrong, keccak);
+            assert!(
+                matches!(
+                    wrong.rejection,
+                    Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
+                ),
+                "the item names another profile: {wrong}"
+            );
+        }
+        ProfileRejection::Work => {
+            expect_rejected("verifier pinned to the other profile", &wrong, |e| {
+                matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+            });
+            assert!(wrong.rejection.is_none(), "the transcript fails before the item is examined");
+        }
+    }
     assert!(wrong.parts.is_empty(), "no Flock part was run");
 }
 
@@ -291,7 +325,9 @@ fn round_trip_as(
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_64_signatures() {
-    on_large_stack(|| round_trip(48, 16, 0xa064, DEFAULT_PART_LOG2, 1, FlockProfile::Fast));
+    on_large_stack(|| {
+        round_trip(48, 16, 0xa064, DEFAULT_PART_LOG2, 1, FlockProfile::Fast, ProfileRejection::Item)
+    });
 }
 
 #[test]
@@ -300,7 +336,9 @@ fn round_trip_at_64_signatures() {
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_64_signatures_slim() {
-    on_large_stack(|| round_trip(48, 16, 0xb064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim));
+    on_large_stack(|| {
+        round_trip(48, 16, 0xb064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim, ProfileRejection::Item)
+    });
 }
 
 #[test]
@@ -309,7 +347,9 @@ fn round_trip_at_64_signatures_slim() {
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
-    on_large_stack(|| round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim));
+    on_large_stack(|| {
+        round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim, ProfileRejection::Work)
+    });
 }
 
 /// Relation H-FIPS (`docs/h-exact.md`) in mode A at 64 records (Slim, one Flock
@@ -321,8 +361,26 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
 )]
 fn h_fips_round_trips_at_64_and_256_signatures_slim() {
     on_large_stack(|| {
-        round_trip_as(Relation::HFips, 48, 16, 0xf064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim);
-        round_trip_as(Relation::HFips, 200, 56, 0xf256, 7, 2, FlockProfile::Slim);
+        round_trip_as(
+            Relation::HFips,
+            48,
+            16,
+            0xf064,
+            DEFAULT_PART_LOG2,
+            1,
+            FlockProfile::Slim,
+            ProfileRejection::Work,
+        );
+        round_trip_as(
+            Relation::HFips,
+            200,
+            56,
+            0xf256,
+            7,
+            2,
+            FlockProfile::Slim,
+            ProfileRejection::Item,
+        );
     });
 }
 
@@ -333,8 +391,26 @@ fn h_fips_round_trips_at_64_and_256_signatures_slim() {
 )]
 fn h_exact_round_trips_at_64_and_256_signatures_slim() {
     on_large_stack(|| {
-        round_trip_as(Relation::HExact, 48, 16, 0xe064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim);
-        round_trip_as(Relation::HExact, 200, 56, 0xe256, 7, 2, FlockProfile::Slim);
+        round_trip_as(
+            Relation::HExact,
+            48,
+            16,
+            0xe064,
+            DEFAULT_PART_LOG2,
+            1,
+            FlockProfile::Slim,
+            ProfileRejection::Item,
+        );
+        round_trip_as(
+            Relation::HExact,
+            200,
+            56,
+            0xe256,
+            7,
+            2,
+            FlockProfile::Slim,
+            ProfileRejection::Item,
+        );
     });
 }
 
@@ -344,7 +420,9 @@ fn h_exact_round_trips_at_64_and_256_signatures_slim() {
     ignore = "Flock and Akita proofs: run with --release"
 )]
 fn round_trip_at_64_signatures_slim8() {
-    on_large_stack(|| round_trip(48, 16, 0xc064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim8));
+    on_large_stack(|| {
+        round_trip(48, 16, 0xc064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim8, ProfileRejection::Item)
+    });
 }
 
 /// Expect a rejection matching `check`, print it.
@@ -531,6 +609,8 @@ fn corrupted_aggregates_are_rejected() {
         assert_eq!(honest_report.parts.len(), 2);
         let verify = |proof: &AggregateProof| verifier.verify(&public, &proof.to_bytes(), None);
         let part = |k: usize| move |r: &VerifyCostReport| matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == k);
+        let psi_work =
+            |e: &VerifyError| matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }));
 
         // The c~ list: bound by the record digest and the Flock statement.
         let mut p = honest.clone();
@@ -566,7 +646,7 @@ fn corrupted_aggregates_are_rejected() {
         // The segment items' structure. The profile byte: another mode-A profile makes the
         // verifier run under it, against the profile event 0 bound; an unknown id is refused.
         let p = with_items(&honest, |c, _| c.profile = other(FLOCK_PROFILE) as u8);
-        expect_rejected("profile byte of the item", &verify(&p), |_| true);
+        expect_rejected("profile byte of the item", &verify(&p), psi_work);
         let p = with_items(&honest, |c, _| c.profile = FlockProfile::PublicBits as u8);
         let r = verify(&p);
         expect_rejected("profile byte 3 (mode B)", &r, keccak);
@@ -576,23 +656,10 @@ fn corrupted_aggregates_are_rejected() {
         ));
         let p = with_items(&honest, |c, _| c.d_part = 5);
         let r = verify(&p);
-        // The part size is in the plan digest of event 0, so the transcript (and the
-        // projection site's work nonce) may reject before the item's part count.
-        expect_rejected("part size 2^5", &r, |e| {
-            keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
-        });
-        assert!(
-            matches!(
-                r.rejection,
-                Some((
-                    0,
-                    SegmentRejection::Item(ItemError::Parts {
-                        expected: 1,
-                        actual: 2
-                    })
-                ))
-            ) || r.rejection.is_none()
-        );
+        // The part size enters the proof-of-work plan digest in the instance record, so the
+        // projection site's work nonce may reject before the item's part count.
+        expect_rejected("part size 2^5", &r, psi_work);
+        assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
         // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
         // is refused while the plan of event 0 is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
@@ -605,23 +672,10 @@ fn corrupted_aggregates_are_rejected() {
             s.shares.pop();
         });
         let r = verify(&p);
-        // Dropping a part changes the event-2 commitments, so the projection site's work
-        // nonce may reject before the item's part count.
-        expect_rejected("last part dropped", &r, |e| {
-            keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
-        });
-        assert!(
-            matches!(
-                r.rejection,
-                Some((
-                    0,
-                    SegmentRejection::Item(ItemError::Parts {
-                        expected: 2,
-                        actual: 1
-                    })
-                ))
-            ) || r.rejection.is_none()
-        );
+        // Dropping a part changes the absorbed Flock commitments, so the projection site's
+        // work nonce may reject before the item's part count.
+        expect_rejected("last part dropped", &r, psi_work);
+        assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
         let mut p = honest.clone();
         p.flock_proofs[0].truncate(100);
         let r = verify(&p);
@@ -667,10 +721,10 @@ fn corrupted_aggregates_are_rejected() {
         // The PIOP work nonces: a changed byte of the stream is rejected.
         let mut p = honest.clone();
         p.work[0] ^= 0x01;
-        expect_rejected("PIOP work nonce", &verify(&p), |_| true);
-        // Event 0 binds the plan: a verifier whose plan names other tie difficulties derives
-        // another transcript (the projection site's work nonce, then sd and the parity
-        // chain's matrices differ).
+        expect_rejected("PIOP work nonce", &verify(&p), psi_work);
+        // The instance record binds the plan: a verifier whose plan names other tie
+        // difficulties derives another transcript (the projection site's work nonce, then sd
+        // and the parity chain's matrices differ).
         let gate = sponge_gate();
         let other_plan = verify_timed(
             &public,
@@ -683,7 +737,7 @@ fn corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             other_plan.outcome,
-            Err(VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. }))
+            Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
         ));
 
         // PIOP and opening.
@@ -800,7 +854,7 @@ fn corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             mode_b.outcome,
-            Err(VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. }))
+            Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
         ));
         // The honest aggregate still verifies after all this.
         assert!(verifier.verify(&public, &bytes, None).accepted());

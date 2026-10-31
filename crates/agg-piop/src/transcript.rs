@@ -25,8 +25,9 @@
 //! zero (Akita's `grinding_predicate_accepts`), and the challenge is squeezed after it from
 //! the same stream. The prover searches `v = 0, 1, ..` and records the winner in the packed
 //! nonce stream ([`crate::pow::WorkWriter`]); the verifier reads and checks it
-//! ([`crate::pow::WorkReader`]). The projection site `psi` grinds one bit (deviation K24);
-//! the seeds `sd`, `fs_sigma` and the PCS export carry no work.
+//! ([`crate::pow::WorkReader`]). The projection site `psi` grinds one bit, so that its
+//! `2^-128` bad set weighs `2^-129` per query; the seeds `sd`, `fs_sigma` and the PCS export
+//! carry no work.
 
 use std::num::NonZeroU8;
 use std::sync::Arc;
@@ -94,8 +95,9 @@ pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
 pub const PROJ_SITE: &str = "agg-mldsa/v1/proj/psi";
 /// 32-byte blocks of the projection site's answer.
 pub const PROJ_ATOMS: usize = crate::manifest::PROJ_BYTES / 32;
-/// Grinding difficulty of the projection site: its bad set has mass `2^-128` exactly
-/// (Lemma P, `docs/soundness.md` 3.5), so one bit of work gives `2^-129` (deviation K24).
+/// Grinding difficulty of the projection site. `Psi` is squeezed directly (no seed
+/// expansion), so the matrices that keep a large coordinate of `v` small have mass at most
+/// `2^-128`; one bit of work makes each query weigh `2^-129`.
 pub const PROJ_PSI_BITS: u8 = 1;
 /// The shared claimed value `c` of the two sides of the projection identity (end of branch
 /// S, after the stage-2 terminal claims).
@@ -308,11 +310,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry of `manifest`, with the difficulty of every protected site
-    /// (`docs/soundness.md`: Aerie's assigned bounds, a vector of `l`
-    /// coefficients `l / |K|`, a round its degree over `|K|`, a merge `1 / |K|`, the point
-    /// `tau` `d_main / |K|`; `X` carries none, its joint bound is `((L + M - 1) / |K|)^2`;
-    /// the byte site `psi` carries one bit, deviation K24).
+    /// The registry of `manifest`, with the difficulty of every protected site: Aerie's
+    /// assigned bounds (a vector of `l` coefficients `l / |K|`, a round its degree over
+    /// `|K|`, a merge `1 / |K|`, the point `tau` `d_main / |K|`); `X` carries none, its
+    /// joint bound is `((L + M - 1) / |K|)^2`; the byte site `psi` carries one bit, chosen
+    /// by policy because its bound is not a field numerator.
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
         let rounds = manifest.d_main();
@@ -1219,7 +1221,7 @@ mod tests {
             (SiteClass::ProjPsi, 0, 0, PROJ_PSI_BITS, 8)
         );
         // Its nonce precedes the fork, so the verifier reads it from the trunk.
-        assert!(registry.work_sites().skip(1).next().unwrap().class == SiteClass::LookupX);
+        assert_eq!(registry.work_sites().nth(1).unwrap().class, SiteClass::LookupX);
     }
 
     #[test]
@@ -1239,14 +1241,14 @@ mod tests {
         assert_eq!(stream.len(), 1, "X carries no nonce, mu_1 one of 8 bits");
         let nonce = stream[0];
         // A full-length stream for the replay (the remaining nonces zero).
-        let full = |first: u8| {
+        let full = |psi: u8, first: u8| {
             let mut bytes = vec![0; work_bytes(&manifest)];
-            bytes[0] = psi_nonce;
+            bytes[0] = psi;
             bytes[1] = first;
             bytes
         };
-        let replay = |first: u8| -> Result<(Vec<OpeningField>, Vec<OpeningField>), TranscriptError> {
-            let mut trunk = Transcript::replay(&manifest, &record, &full(first))?;
+        let replay = |psi: u8, first: u8| -> Result<(Vec<OpeningField>, Vec<OpeningField>), TranscriptError> {
+            let mut trunk = Transcript::replay(&manifest, &record, &full(psi, first))?;
             to_lookup(&mut trunk);
             let (mut t, _) = trunk.fork()?;
             let x = t.challenge_extensions(&lookup_site(LookupSite::X), 2)?;
@@ -1254,14 +1256,38 @@ mod tests {
             let mu = t.challenge_extensions(&lookup_site(LookupSite::Mu(1)), 1)?;
             Ok((x, mu))
         };
-        assert_eq!(replay(nonce).unwrap(), (x.clone(), mu));
+        assert_eq!(replay(psi_nonce, nonce).unwrap(), (x.clone(), mu));
         // The prover's nonce is the smallest passing one: every smaller one fails.
         let mu_index = LEADING + 3;
         for wrong in 0..nonce {
-            assert_eq!(replay(wrong), Err(TranscriptError::Work { index: mu_index }));
+            assert_eq!(replay(psi_nonce, wrong), Err(TranscriptError::Work { index: mu_index }));
         }
+        // The projection site grinds one bit. Every value below the honest nonce fails; when
+        // the honest nonce is zero, use the first value above it whose predicate fails.
+        let psi_index = Registry::new(&manifest)
+            .events
+            .iter()
+            .position(|e| matches!(e.work, Some(w) if w.class == SiteClass::ProjPsi))
+            .expect("the projection site is in the plan");
+        let replay_psi = |psi: u8| -> Result<(), TranscriptError> {
+            let mut t = Transcript::replay(&manifest, &record, &full(psi, nonce))?;
+            to_seed(&mut t, &[0]);
+            t.challenge_psi()?;
+            Ok(())
+        };
+        let bad_psi = if psi_nonce > 0 {
+            psi_nonce - 1
+        } else {
+            (1..=u8::MAX)
+                .find(|&v| matches!(replay_psi(v), Err(TranscriptError::Work { index }) if index == psi_index))
+                .expect("some nonce fails the projection predicate")
+        };
+        assert_eq!(
+            replay_psi(bad_psi),
+            Err(TranscriptError::Work { index: psi_index })
+        );
         // The stream's length and padding are exact.
-        let bytes = full(nonce);
+        let bytes = full(psi_nonce, nonce);
         let short = &bytes[..bytes.len() - 1];
         assert!(matches!(
             Transcript::replay(&manifest, &record, short),

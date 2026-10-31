@@ -14,8 +14,8 @@ What it computes, with exact integer arithmetic:
   (crates/agg-piop/src/transcript.rs Registry::new) for every N* = 2^3 .. 2^15, each with its
   round-by-round numerator nu_t, its assigned bound e_t (>= nu_t / |F|), the difficulty
   g_t = min{g >= 0 : 2^128 e_t <= 2^g} (Aerie) and the nonce width g_t + 7
-  (0 when g_t = 0: no nonce); the projection site proj.psi (deviation K24) leads them with
-  its exact 2^-128 bound and one bit of assigned work (2^-129);
+  (0 when g_t = 0: no nonce); the projection site proj.psi (a 16 KiB byte challenge with an
+  exact 2^-128 bound) leads them with one bit of assigned work (2^-129);
 * the sites of every tied part (tied-part proof version 5, docs/parity-chain.md:
   the tie site of the public claim, the eq_Y site and the parity-chain rounds) for part
   sizes d = 3 .. 13 and span lengths S = 1, 2, 4, with the Johnson-list factor of the
@@ -82,8 +82,9 @@ CLASS_ID = {
     "chain.round": 10,
 }
 
-# Deviation K24: proj.psi is a 16 KiB byte challenge whose bad set has mass exactly 2^-128
-# (Lemma P), so the schedule assigns it one bit of work: e = 2^-128, g = 1, 2^-129 per query.
+# proj.psi is a 16 KiB byte challenge (Psi squeezed directly, no seed expansion) whose bad
+# set has mass at most 2^-128, so the schedule assigns it one bit: e = 2^-128, g = 1,
+# 2^-129 per query.
 PSI_BITS = 1
 
 
@@ -463,7 +464,7 @@ def self_check() -> None:
     # GF(2^128): ceil(log2 nu), 1/2^128 needs no work.
     assert grind_bits(1, F2_128) == 0 and grind_bits(95, F2_128) == 7
     # proj.psi is a byte challenge with the exact bound 2^-128; the schedule assigns it one
-    # bit (deviation K24), so its weight is 2^-129 without changing the |K| ledger.
+    # bit, so its weight is 2^-129 and the |K| ledger is unchanged.
     assert site_bits("proj.psi", 1, F2_128) == 1
     assert site_bits("lookup.x", 1, F2_128) == 0
     # Version 5 (docs/parity-chain.md): a span of four full segments under Slim.

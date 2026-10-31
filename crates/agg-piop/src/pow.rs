@@ -51,8 +51,9 @@ pub enum SiteClass {
     ChainEq = 9,
     /// A round challenge of a tied part's parity chain (degree 2).
     ChainRound = 10,
-    /// The projection matrix `Psi` (event 3, deviation K24): a 16 KiB byte challenge whose
-    /// bad set has mass `2^-128`, ground by one bit to `2^-129`.
+    /// The projection matrix `Psi` that bounds `v`: a 16 KiB byte challenge drawn right
+    /// after the bridge seed. Its bad set has mass at most `2^-128`, and one bit of work
+    /// lowers each query to `2^-129`.
     ProjPsi = 11,
 }
 
