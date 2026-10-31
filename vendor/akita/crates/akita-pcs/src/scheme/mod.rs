@@ -4,7 +4,10 @@ use akita_config::{CommitmentConfig, TrustedScheduleCatalog};
 use akita_cpu_backend::{AkitaProverSetup, CommitmentHandle, CpuBackend};
 use akita_error::AkitaError;
 use akita_params::{BasisMode, FoldSchedule, OpeningClaimsLayout, SetupMatrixCapacity};
-use akita_prover::{BackendRegistry, FixedFoldRoute, ProverBackend, SelectedProverOpeningData};
+use akita_prover::{
+    BackendRegistry, FixedFoldRoute, PreparedBatchedProve, ProverBackend,
+    SelectedProverOpeningData,
+};
 use akita_serialization::{AkitaDeserialize, AkitaSerialize, Valid};
 use akita_types::AkitaVerifierSetup;
 use akita_types::FpExtEncoding;
@@ -166,6 +169,98 @@ where
             basis,
             &mut route,
         )?;
+        tracing::info!(
+            proof_bytes = proof.len(),
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "akita batched prove complete"
+        );
+        Ok(proof)
+    }
+
+    /// Compute the transcript-free part of a batched opening.
+    ///
+    /// The returned state owns the admitted proof lifetime and the prepared
+    /// backend handles, so the caller may hold it while other work completes.
+    /// [`Self::finish_batched_prove`] then binds it to the transcript session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for mismatched ownership, setup, claims, or an invalid
+    /// protocol transition.
+    #[allow(clippy::type_complexity)]
+    pub fn prepare_batched_prove<'a>(
+        &self,
+        setup: &AkitaProverSetup<Cfg::Field>,
+        opening: SelectedProverOpeningData<
+            'a,
+            Cfg::ExtField,
+            CommitmentHandle<Cfg::Field, Cfg::ExtField>,
+            Cfg::Field,
+        >,
+        backend: &CpuBackend<Cfg::Field, Cfg::ExtField>,
+        basis: BasisMode,
+    ) -> Result<
+        PreparedBatchedProve<'a, Cfg, CpuBackend<Cfg::Field, Cfg::ExtField>>,
+        AkitaError,
+    >
+    where
+        Cfg::Field: WithCommitAccumulator + 'static,
+        Cfg::ExtField: jolt_field::MulBaseUnreduced<Cfg::Field> + 'static,
+        <Cfg::Field as Unreduced>::Wide: From<Cfg::Field> + AdditiveGroup,
+        CpuBackend<Cfg::Field, Cfg::ExtField>: ProverBackend<
+            Cfg::Field,
+            Cfg::ExtField,
+            CommitmentHandle = CommitmentHandle<Cfg::Field, Cfg::ExtField>,
+        >,
+    {
+        let resolved = self.schedules.resolve_selection(opening.selection())?;
+        let required_prefix_ids = akita_config::required_setup_prefix_slot_ids_for_schedule(
+            resolved.schedule(),
+            opening.opening_layout(),
+        )?;
+        let prefix_slots = backend.import_setup_prefixes(&setup.prefix_slots, &required_prefix_ids)?;
+        akita_prover::prepare_batched_prove::<Cfg, CpuBackend<Cfg::Field, Cfg::ExtField>>(
+            setup.expanded.descriptor(),
+            &self.schedules,
+            backend,
+            prefix_slots,
+            opening,
+            basis,
+        )
+    }
+
+    /// Finish a batched opening prepared by [`Self::prepare_batched_prove`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prepared state belongs to another setup or the
+    /// proof transition fails.
+    #[allow(clippy::type_complexity)]
+    pub fn finish_batched_prove(
+        &self,
+        prepared: PreparedBatchedProve<
+            '_,
+            Cfg,
+            CpuBackend<Cfg::Field, Cfg::ExtField>,
+        >,
+        backend: &CpuBackend<Cfg::Field, Cfg::ExtField>,
+        session: &[u8],
+    ) -> Result<Vec<u8>, AkitaError>
+    where
+        Cfg::Field: WithCommitAccumulator + 'static,
+        Cfg::ExtField: jolt_field::MulBaseUnreduced<Cfg::Field> + 'static,
+        <Cfg::Field as Unreduced>::Wide: From<Cfg::Field> + AdditiveGroup,
+        CpuBackend<Cfg::Field, Cfg::ExtField>: ProverBackend<
+            Cfg::Field,
+            Cfg::ExtField,
+            CommitmentHandle = CommitmentHandle<Cfg::Field, Cfg::ExtField>,
+        >,
+    {
+        let started = Instant::now();
+        let proof = akita_prover::finish_batched_prove::<
+            Cfg,
+            CpuBackend<Cfg::Field, Cfg::ExtField>,
+        >(prepared, &self.schedules, backend, session)?;
         tracing::info!(
             proof_bytes = proof.len(),
             elapsed_s = started.elapsed().as_secs_f64(),

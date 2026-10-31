@@ -116,6 +116,19 @@ pub fn validate_chunked_witness_cfg(lp: &CommittedGroupParams) -> Result<(), Aki
     lp.witness_chunk.validate()
 }
 
+/// Transcript-free relation inputs: prepared openings, the public payload and
+/// the backend's private witness build state.
+pub(crate) struct PreparedRingRelationInput<F: Field + CanonicalEncoding, E: Field, OpeningHandle, BuildHandle> {
+    pub(crate) level_params: CommittedGroupParams,
+    pub(crate) opening_batch: akita_params::OpeningClaimsLayout,
+    pub(crate) prepared_opening_handles: Vec<OpeningHandle>,
+    pub(crate) prepared_relation_groups: Vec<PreparedRelationGroupPublic<F, E>>,
+    pub(crate) opening_payload: RingVec<F>,
+    pub(crate) opening_payload_ring_dimension: usize,
+    pub(crate) build_handle: BuildHandle,
+    pub(crate) group_commitments: Vec<RingVec<F>>,
+}
+
 /// Prover-side builder for the ring relation $M(x) \cdot z = y(x) + (X^D + 1) \cdot r(x)$.
 pub struct RingRelationProver;
 
@@ -134,7 +147,7 @@ impl RingRelationProver {
     #[allow(private_bounds)]
     #[tracing::instrument(skip_all, name = "RingRelationProver::prepare")]
     #[inline(never)]
-    pub(in crate::protocol) fn prepare<'claims, 'source, F, PointF, B>(
+    pub(in crate::protocol) fn begin<'claims, 'source, F, PointF, B>(
         opening_ctx: &OperationCtx<'_, F, B>,
         prepared_group_openings: Vec<PreparedGroupOpening<PointF, B::PreparedOpeningHandle>>,
         commitment_material: Vec<B::CommitmentMaterialHandle>,
@@ -145,14 +158,17 @@ impl RingRelationProver {
             F,
         >,
         lp: CommittedGroupParams,
-        grinding: &mut akita_types::ProverGrinding<'_>,
-        level: u32,
-        reduction: &Option<crate::protocol::prove::ExtensionOpeningReduction<PointF>>,
+        _level: u32,
         scalar_openings: &[PointF],
-        trace_opening_batch: &akita_params::OpeningClaimsLayout,
-        expected_witness_len: usize,
-        commitment_ring_dimension: usize,
-    ) -> Result<PreparedRingRelationOutput<F, PointF, B::WitnessHandle>, AkitaError>
+    ) -> Result<
+        PreparedRingRelationInput<
+            F,
+            PointF,
+            B::PreparedOpeningHandle,
+            B::WitnessBuildHandle,
+        >,
+        AkitaError,
+    >
     where
         F: Field
             + CanonicalEncoding
@@ -177,7 +193,6 @@ impl RingRelationProver {
             "for i8 prover opening decomposition",
         )?;
         validate_chunked_witness_cfg(&lp)?;
-        let dims = lp.role_dims();
         let opening_batch = block_claims.opening_layout().clone();
         let num_groups = block_claims.opening_claims().num_groups();
         if prepared_opening_handles.len() != num_groups {
@@ -209,15 +224,6 @@ impl RingRelationProver {
         }
         drop(prepare_span);
 
-        // Bind only the scheduled opening payload; uncompressed private rows
-        // stay in the backend's build state.
-        let opening_rows_span = tracing::info_span!(
-            "ring_relation_opening_rows",
-            groups = num_groups,
-            claims = num_claims,
-            d_d = dims.d_d(),
-        )
-        .entered();
         let build_start =
             crate::backend::OpaqueRecursiveWitnessBuildKernel::begin_recursive_witness(
                 consumer,
@@ -252,6 +258,74 @@ impl RingRelationProver {
                     .into(),
             ));
         }
+        Ok(PreparedRingRelationInput {
+            level_params: lp,
+            opening_batch,
+            prepared_opening_handles,
+            prepared_relation_groups,
+            opening_payload,
+            opening_payload_ring_dimension,
+            build_handle,
+            group_commitments,
+        })
+    }
+
+    /// Continue a relation whose transcript-free inputs are already prepared.
+    pub(in crate::protocol) fn finish<F, PointF, B>(
+        input: PreparedRingRelationInput<
+            F,
+            PointF,
+            B::PreparedOpeningHandle,
+            B::WitnessBuildHandle,
+        >,
+        opening_ctx: &OperationCtx<'_, F, B>,
+        grinding: &mut akita_types::ProverGrinding<'_>,
+        level: u32,
+        reduction: &Option<crate::protocol::prove::ExtensionOpeningReduction<PointF>>,
+        scalar_openings: &[PointF],
+        expected_witness_len: usize,
+        commitment_ring_dimension: usize,
+    ) -> Result<PreparedRingRelationOutput<F, PointF, B::WitnessHandle>, AkitaError>
+    where
+        F: Field
+            + CanonicalEncoding
+            + akita_serialization::AkitaSerialize
+            + Ring
+            + Unreduced
+            + 'static,
+        <F as Unreduced>::Wide: From<F>,
+        PointF: akita_types::FpExtEncoding<F>
+            + jolt_field::ExtField<F>
+            + akita_serialization::AkitaSerialize,
+        B: crate::backend::ProverBackend<F, PointF>,
+    {
+        let consumer = opening_ctx.backend();
+        let PreparedRingRelationInput {
+            level_params: lp,
+            opening_batch,
+            prepared_opening_handles,
+            prepared_relation_groups,
+            opening_payload,
+            opening_payload_ring_dimension,
+            build_handle,
+            group_commitments,
+        } = input;
+        let dims = lp.role_dims();
+        let num_groups = opening_batch.num_groups();
+        let num_claims = opening_batch.num_total_polynomials();
+        let trace_opening_batch = &opening_batch;
+        let relation_geometry =
+            akita_params::RelationWitnessGeometry::for_level(&lp, &opening_batch, PointF::DEGREE)?;
+        let relation_rhs_layout = relation_geometry.rhs_layout();
+        // Bind only the scheduled opening payload; uncompressed private rows
+        // stay in the backend's build state.
+        let opening_rows_span = tracing::info_span!(
+            "ring_relation_opening_rows",
+            groups = num_groups,
+            claims = num_claims,
+            d_d = dims.d_d(),
+        )
+        .entered();
         akita_transcript::send_field_group(
             grinding.state_mut(),
             akita_types::FoldSite::OpeningPayload {
@@ -471,6 +545,8 @@ impl RingRelationProver {
             row_coefficients,
         })
     }
+
+
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use agg_pcs_config::commit::{CommitError, GroupCommitment};
+use agg_pcs_config::commit::{CommitError, GroupClaim, GroupCommitment, PreparedOpening};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
 use agg_witness::params::C_TILDE_BYTES;
@@ -29,7 +29,7 @@ use agg_witness::params::C_TILDE_BYTES;
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::{MultiplicityClaims, PreStageClaims};
 use crate::lookup::{prove_in, LookupError, LookupProof, LookupShape, Table};
-use crate::manifest::{CommitmentManifest, GroupRole, Relation, LOOKUP_CHALLENGES};
+use crate::manifest::{CommitmentManifest, GroupRole, Relation, GROUP_COUNT, LOOKUP_CHALLENGES};
 use crate::opening::opening_claims;
 use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
@@ -1186,6 +1186,27 @@ pub fn prove_with_tables(
     prove_with_tables_using(None, None, inputs, manifest, main, bridge, keccak, flock, hooks)
 }
 
+/// Compute the part of the opening that depends only on the commitments and
+/// the stage-3 points. It can run beside the Flock proofs because it reads no
+/// transcript challenge beyond the points already fixed by stage 3.
+fn prepare_opening(
+    committer: &TableCommitter,
+    manifest: &CommitmentManifest,
+    commitments: [GroupCommitment; GROUP_COUNT],
+    proof: &PiopProof,
+    run: &PiopRun,
+) -> Result<([GroupClaim; GROUP_COUNT], PreparedOpening), ProveError> {
+    let claims = opening_claims(
+        manifest,
+        &run.r3,
+        &proof.stage3.claims,
+        &run.pi_m,
+        &proof.multiplicities,
+    )?;
+    let prepared = committer.prepare_open_claims(commitments, &claims)?;
+    Ok((claims, prepared))
+}
+
 /// [`prove_with_tables`] with the Akita prover setup and the public data built
 /// beforehand. Both depend only on the records and the instance, so a caller can build
 /// them on its own thread while the tables are computed. `None`, or a setup of another
@@ -1325,6 +1346,10 @@ pub fn prove_with_tables_using(
     timings.keccak += clock.lap();
     phase_stamp("shares");
 
+    let commitments: [GroupCommitment; GROUP_COUNT] = {
+        let [l1, l2, l3, k, m] = round2;
+        [main16_round1, main_round1, l1, l2, l3, k, m]
+    };
     // The fork: the Flock proofs depend on nothing after event 6, and no
     // PIOP challenge depends on them, so they are proven on their own pool while the parity
     // tables, the lookup (event 7), the pre-stage claims (events 8, 9) and the stages
@@ -1335,31 +1360,41 @@ pub fn prove_with_tables_using(
         phase_stamp("flock-prove");
         out
     };
-    let (flock_proofs, piop) = if flock_threads > 0 {
+    let (flock_proofs, piop, opening_prepared) = if flock_threads > 0 {
         let fork = Instant::now();
         let (unchecked, swap_join) = (hooks.unchecked, hooks.swap_join);
-        let ((flock_proofs, flock_time), piop) = fork_join(flock_threads, prove_flock, || {
-            let prover_tables = ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
-            phase_stamp("parity-tables");
-            prove_piop_with(
-                manifest,
-                tables,
-                Some(prover_tables),
-                &matrices,
-                &public,
-                &mut transcript,
-                unchecked,
-                swap_join,
-                // The stage pool default applies only beside a running Flock fork.
-                true,
-            )
-        });
+        let ((flock_proofs, flock_time), (piop, prepared)) =
+            fork_join(flock_threads, prove_flock, || {
+                let prover_tables =
+                    ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
+                phase_stamp("parity-tables");
+                let piop = prove_piop_with(
+                    manifest,
+                    tables,
+                    Some(prover_tables),
+                    &matrices,
+                    &public,
+                    &mut transcript,
+                    unchecked,
+                    swap_join,
+                    // The stage pool default applies only beside a running Flock fork.
+                    true,
+                );
+                let prepared = match &piop {
+                    Ok((proof, run)) => {
+                        Some(prepare_opening(&committer, manifest, commitments, proof, run))
+                    }
+                    Err(_) => None,
+                };
+                phase_stamp("opening-prepare");
+                (piop, prepared)
+            });
         timings.fork_join = fork.elapsed();
         phase_stamp("join");
         timings.flock_prove = flock_time;
         timings.keccak += flock_time;
         clock.lap();
-        (flock_proofs, piop)
+        (flock_proofs, piop, prepared)
     } else {
         // No fork: the Flock proofs first, with the parity tables of the stages (which need
         // no challenge) built beside them, then the PIOP.
@@ -1389,12 +1424,21 @@ pub fn prove_with_tables_using(
             hooks.swap_join,
             false,
         );
+        let opening_prepared = match &piop {
+            Ok((proof, run)) => {
+                Some(prepare_opening(&committer, manifest, commitments, proof, run))
+            }
+            Err(_) => None,
+        };
+        phase_stamp("opening-prepare");
         clock.lap();
-        (Ok(flock_proofs), piop)
+        (Ok(flock_proofs), piop, opening_prepared)
     };
     timings.flock_threads = flock_threads;
     let (piop, run) = piop?;
     let flock_proofs = flock_proofs?;
+    let (claims, prepared) = opening_prepared
+        .ok_or_else(|| ProveError::Internal("opening prepared without a PIOP result".into()))??;
     timings.lookup = run.lookup;
     timings.prestage = run.prestage;
     timings.stage1 = run.stage1;
@@ -1411,7 +1455,6 @@ pub fn prove_with_tables_using(
     let session = transcript.pcs_session()?;
     transcript.ensure_complete()?;
     let work = transcript.work_stream();
-    let claims = opening_claims(manifest, &run.r3, &piop.stage3.claims, &run.pi_m, &piop.multiplicities)?;
     // The stage-3 terminal values are the multilinear extensions of the committed tables at
     // the group points (the kernel's terminal values; `tests/all/prove_verify.rs` checks them
     // against the table evaluations), so the opening takes them directly instead of
@@ -1422,19 +1465,22 @@ pub fn prove_with_tables_using(
                 .is_ok_and(|recomputed| recomputed == claims),
         "stage-3 terminal values differ from the table evaluations"
     );
-    let commitments: [GroupCommitment; 7] = {
-        let [l1, l2, l3, k, m] = round2;
-        [main16_round1, main_round1, l1, l2, l3, k, m]
-    };
     let opening_threads = opening_pool_threads();
     timings.opening_threads = if opening_threads == 0 {
         rayon::current_num_threads()
     } else {
         opening_threads.min(rayon::current_num_threads())
     };
+    let finish_start = Instant::now();
     let opening = on_pool(opening_threads, "agg-open", || {
-        committer.open_claims(commitments, &claims, &session)
+        committer.finish_open_claims(prepared, &session)
     })?;
+    if std::env::var_os("AGG_PHASE_STAMPS").is_some() {
+        eprintln!(
+            "[pcs] opening_finish_ms={:.3}",
+            finish_start.elapsed().as_secs_f64() * 1e3
+        );
+    }
     timings.opening = clock.lap();
     phase_stamp("opening");
     let proof = AggregateProof {

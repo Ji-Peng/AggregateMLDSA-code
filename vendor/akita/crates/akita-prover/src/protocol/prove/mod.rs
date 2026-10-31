@@ -44,8 +44,13 @@ mod registry;
 mod root;
 mod suffix;
 
-pub use execution::batched_prove;
-pub(in crate::protocol::prove) use fold::{prepare_fold, prove_fold, PreparedFold};
+pub use execution::{
+    batched_prove, finish_batched_prove, prepare_batched_prove, PreparedBatchedProve,
+};
+pub(in crate::protocol::prove) use fold::{
+    finish_fold_part, prepare_fold, prepare_fold_part, prove_fold, PreparedFold,
+    PreparedRootFold,
+};
 pub(in crate::protocol) use fold_kernels::*;
 pub(crate) use opening_reduction::*;
 pub(crate) use suffix::FoldPublicState;

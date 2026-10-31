@@ -164,3 +164,37 @@ sixteen rayon threads; the constructors are not otherwise timed on this box.
 instead of a min/max reduction followed by a second write; each chunk reports
 its range and its first offending cell, and the chunks combine in order, so the
 error still names the first out-of-range cell.
+
+## 5. Split a batched opening into prepare and finish
+
+`akita-prover`: `prove_root` is now `prepare_root` plus `finish_root`.
+`prepare_root` resolves the root claims, validates every commitment and builds
+the point-only part of the root fold: the opening plans, `prepare_openings`
+(coefficient packing), the per-group digit material and the public relation
+payload. `finish_root` replays the public commitment, point, opening and
+payload messages on the session transcript, draws the fold grind challenges,
+finishes the recursive witness and runs `prove_fold`.
+
+`prepare_fold` is split the same way: `prepare_fold_part` consumes the claims
+and commitment material without a transcript, and `finish_fold_part` absorbs
+the prepared messages and finishes the relation. `RingRelationProver` gains
+`begin` and `finish` around the previous monolithic `prepare`;
+`append_opening_messages` is the transcript-only part of
+`ProverOpeningData::append_to`.
+
+`BackendRegistry` can own its imported setup-prefix slots through an `Arc`
+(`register_shared`) and exposes `take_session` / `adopt_session`, so an
+admitted proof lifetime can move across a scheduling boundary and be resumed
+by a new registry. Public prefix slots are stored by value rather than
+borrowed.
+
+`akita-pcs`: `AkitaCommitmentScheme::prepare_batched_prove` imports the
+prefixes and returns a `PreparedBatchedProve`; `finish_batched_prove` takes the
+transcript session and produces the proof. `batched_prove` keeps its previous
+one-call contract.
+
+Nothing absorbed depends on the new split: the prepared part reads only the
+commitments and the opening points, and the finish replays the same messages
+in the same order before drawing the same challenges. The 1K aggregate is
+byte-identical under scalar and avx512, one and sixteen rayon threads, and
+with the allocation poison enabled.

@@ -41,7 +41,8 @@ pub use backend::{
 };
 pub use opening::{ProverOpeningData, SelectedProverOpeningData};
 pub use protocol::{
-    batched_prove, ProveLevelOutput, RingRelationInstance, RingRelationProver, RingSwitchOutput,
+    batched_prove, finish_batched_prove, prepare_batched_prove, PreparedBatchedProve,
+    ProveLevelOutput, RingRelationInstance, RingRelationProver, RingSwitchOutput,
     SuffixProverState,
 };
 pub use setup::{PreparedSetupPrefix, SetupPrefixProverRegistry};

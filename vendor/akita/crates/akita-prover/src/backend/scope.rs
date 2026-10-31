@@ -17,7 +17,7 @@ impl ProofScopeId {
 /// Scope lifecycle implemented by an opaque prover consumer.
 pub trait ProofScopeConsumer {
     /// Backend-issued authority for one admitted proof lifetime.
-    type ProofSessionHandle: Send + Sync;
+    type ProofSessionHandle: Send + Sync + 'static;
 
     /// Finish a successfully completed scope.
     fn finish_scope(&self, session: &Self::ProofSessionHandle) -> Result<(), AkitaError>;
@@ -29,7 +29,9 @@ pub trait ProofScopeConsumer {
 /// RAII guard ensuring rejected or incomplete proofs trigger cleanup.
 pub struct ProofScope<'a, Consumer: ProofScopeConsumer> {
     consumer: &'a Consumer,
-    session: Consumer::ProofSessionHandle,
+    // `None` only after the caller has moved the proof lifetime out to resume
+    // it later, for example across a scheduling boundary.
+    session: Option<Consumer::ProofSessionHandle>,
     finished: bool,
 }
 
@@ -38,19 +40,39 @@ impl<'a, Consumer: ProofScopeConsumer> ProofScope<'a, Consumer> {
     pub fn admitted(consumer: &'a Consumer, session: Consumer::ProofSessionHandle) -> Self {
         Self {
             consumer,
-            session,
+            session: Some(session),
             finished: false,
         }
     }
 
     /// Borrow the authority for this admitted proof lifetime.
     pub fn session(&self) -> &Consumer::ProofSessionHandle {
-        &self.session
+        // The scope is admitted with a session and only `into_session` removes it.
+        self.session
+            .as_ref()
+            .expect("admitted proof scope owns its session")
+    }
+
+    /// Move the admitted proof lifetime out so another scope can resume it.
+    ///
+    /// Dropping the returned handle without rebuilding a scope aborts the
+    /// proof lifetime, exactly as dropping the original scope would.
+    pub fn into_session(mut self) -> Consumer::ProofSessionHandle {
+        let session = self
+            .session
+            .take()
+            .expect("admitted proof scope owns its session");
+        self.finished = true;
+        session
     }
 
     /// Mark the scope complete and release consumer bookkeeping.
     pub fn finish(mut self) -> Result<(), AkitaError> {
-        self.consumer.finish_scope(&self.session)?;
+        let session = self
+            .session
+            .take()
+            .expect("admitted proof scope owns its session");
+        self.consumer.finish_scope(&session)?;
         self.finished = true;
         Ok(())
     }
@@ -59,7 +81,9 @@ impl<'a, Consumer: ProofScopeConsumer> ProofScope<'a, Consumer> {
 impl<Consumer: ProofScopeConsumer> Drop for ProofScope<'_, Consumer> {
     fn drop(&mut self) {
         if !self.finished {
-            self.consumer.abort_scope_best_effort(&self.session);
+            if let Some(session) = self.session.take() {
+                self.consumer.abort_scope_best_effort(&session);
+            }
         }
     }
 }

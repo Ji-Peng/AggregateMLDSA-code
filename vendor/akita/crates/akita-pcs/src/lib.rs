@@ -58,7 +58,8 @@ pub use akita_cpu_backend::{
 };
 pub use akita_params::{BasisMode, OpeningClaimsLayout, PrecommittedGroupProfiles};
 pub use akita_prover::{
-    CommitmentHandleMetadata, ProverBackend, ProverOpeningData, SelectedProverOpeningData,
+    CommitmentHandleMetadata, PreparedBatchedProve, ProverBackend, ProverOpeningData,
+    SelectedProverOpeningData,
 };
 pub use akita_serialization::{AkitaDeserialize, AkitaSerialize};
 pub use akita_setup::new_prover_setup;
@@ -78,5 +79,6 @@ pub use jolt_field::{
 pub use scheme::AkitaCommitmentScheme;
 
 pub use akita_prover::{
-    batched_prove, BackendId, BackendRegistry, FixedFoldRoute, FoldExecutionPolicy,
+    batched_prove, finish_batched_prove, prepare_batched_prove, BackendId, BackendRegistry,
+    FixedFoldRoute, FoldExecutionPolicy,
 };

@@ -16,6 +16,7 @@ use jolt_field::{
     Unreduced,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::{
     any::{Any, TypeId},
     cell::{Cell, RefCell},
@@ -123,8 +124,30 @@ pub(super) trait Executor<Cfg: CommitmentConfig> {
         handles: &dyn Any,
         basis: BasisMode,
     ) -> Result<ExecutionContinuation<Cfg>, AkitaError>;
+    /// Run the transcript-free part of the root fold: commitment admission,
+    /// source opening, coefficient packing and relation-row assembly.
+    fn prepare_root(
+        &self,
+        request: &ProofRequest<'_, Cfg>,
+        claims: &OpeningClaims<'_, Cfg::ExtField, Commitment<Cfg::Field>>,
+        handles: &dyn Any,
+        basis: BasisMode,
+    ) -> Result<Box<dyn Any + Send>, AkitaError>;
+    /// Continue the root fold on the session prepared by `prepare_root`.
+    fn finish_root(
+        &self,
+        request: &ProofRequest<'_, Cfg>,
+        handoff: &mut FoldHandoff<'_, '_, '_, Cfg>,
+        grinding: &mut ProverGrinding<'_>,
+        claims: &OpeningClaims<'_, Cfg::ExtField, Commitment<Cfg::Field>>,
+        prepared: Box<dyn Any + Send>,
+    ) -> Result<ExecutionContinuation<Cfg>, AkitaError>;
     fn prepare_executor(&self, request: &ProofRequest<'_, Cfg>) -> Result<(), AkitaError>;
     fn begin_fold(&self, request: &ProofRequest<'_, Cfg>, level: usize) -> Result<(), AkitaError>;
+    /// Move the admitted proof lifetime out of this executor.
+    fn take_session(&self) -> Result<Box<dyn Any + Send>, AkitaError>;
+    /// Resume an admitted proof lifetime in this executor.
+    fn adopt_session(&self, session: Box<dyn Any + Send>) -> Result<(), AkitaError>;
     fn import_packet(
         &self,
         id: BackendId,
@@ -157,7 +180,7 @@ pub(super) struct TypedExecutor<
     B: ProverBackend<Cfg::Field, Cfg::ExtField>,
 > {
     pub(super) backend: &'a B,
-    pub(super) prefixes: &'a SetupPrefixProverRegistry<Cfg::Field, B::CommitmentHandle>,
+    pub(super) prefixes: Arc<SetupPrefixProverRegistry<Cfg::Field, B::CommitmentHandle>>,
     pub(super) session: RefCell<Option<ProofScope<'a, B>>>,
 }
 
@@ -167,7 +190,7 @@ pub struct BackendRegistry<'a, Cfg: CommitmentConfig> {
     pub(super) slots: Vec<Box<dyn Executor<Cfg> + 'a>>,
     bridges: HashMap<(TypeId, TypeId), Box<ErasedBridge<Cfg>>>,
     pub(super) public_prefixes:
-        BTreeMap<SetupPrefixSlotId, &'a SetupPrefixVerifierSlot<Cfg::Field>>,
+        BTreeMap<SetupPrefixSlotId, SetupPrefixVerifierSlot<Cfg::Field>>,
     pub(super) active: Cell<bool>,
 }
 
@@ -249,6 +272,22 @@ where
     where
         B: ProverBackend<Cfg::Field, Cfg::ExtField> + 'static,
     {
+        self.register_shared(backend, Arc::new(prefixes.clone()))
+    }
+
+    /// Register an instance that keeps its imported prefix slots alive itself.
+    ///
+    /// This is the entry point for a prover that prepares an opening in one
+    /// scope and finishes it in another: the registry does not borrow the
+    /// imported slots, so the caller can hold them across the boundary.
+    pub fn register_shared<B>(
+        &mut self,
+        backend: &'a B,
+        prefixes: Arc<SetupPrefixProverRegistry<Cfg::Field, B::CommitmentHandle>>,
+    ) -> Result<BackendId, AkitaError>
+    where
+        B: ProverBackend<Cfg::Field, Cfg::ExtField> + 'static,
+    {
         if self
             .slots
             .iter()
@@ -262,7 +301,7 @@ where
             if self
                 .public_prefixes
                 .get(&public.id)
-                .is_some_and(|existing| *existing != public)
+                .is_some_and(|existing| existing != public)
             {
                 return Err(AkitaError::InvalidSetup(
                     "registered backends disagree on a setup-prefix slot".into(),
@@ -272,7 +311,7 @@ where
         for public in prefixes.public_slots() {
             self.public_prefixes
                 .entry(public.id.clone())
-                .or_insert(public);
+                .or_insert_with(|| public.clone());
         }
         let id = BackendId {
             registry: self.identity,

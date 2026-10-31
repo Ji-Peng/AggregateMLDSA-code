@@ -21,7 +21,8 @@ use akita_error::AkitaError;
 use akita_params::BasisMode;
 use akita_pcs::{
     new_prover_setup, AkitaCommitmentScheme, AkitaProverSetup, CommitmentHandle, CpuBackend,
-    DensePoly, GroupContext, PrecommittedGroupProfiles, SelectedProverOpeningData,
+    DensePoly, GroupContext, PrecommittedGroupProfiles, PreparedBatchedProve,
+    SelectedProverOpeningData,
 };
 use akita_serialization::{AkitaSerialize, Compress, Valid};
 use akita_types::{
@@ -175,6 +176,16 @@ pub struct PcsProver {
     backend: CpuBackend<BaseField, OpeningField>,
 }
 
+/// A batched opening whose transcript-free work is already complete.
+///
+/// The state depends only on the commitments and the opening points; it holds
+/// no transcript session. [`PcsProver::finish_open`] binds it to the 32-byte
+/// session digest and returns the proof.
+pub struct PreparedOpening {
+    akita: PreparedBatchedProve<'static, Cfg, CpuBackend<BaseField, OpeningField>>,
+    keep: Vec<CommitmentHandle<BaseField, OpeningField>>,
+}
+
 impl PcsProver {
     /// Allocate the seed-derived setup sized for `plan`.
     pub fn new(plan: WorkPlan) -> Result<Self, CommitError> {
@@ -305,6 +316,21 @@ impl PcsProver {
         claims: &[GroupClaim; GROUP_COUNT],
         session: &[u8; 32],
     ) -> Result<Vec<u8>, CommitError> {
+        let prepared = self.prepare_open(commitments, claims)?;
+        self.finish_open(prepared, session)
+    }
+
+    /// Compute the part of the batched opening that depends only on the
+    /// commitments and the opening points.
+    ///
+    /// This is the expensive part of the opening: commitment admission,
+    /// coefficient packing and the per-group digit materialization. A caller
+    /// may run it while other transcript-independent work is still in flight.
+    pub fn prepare_open(
+        &self,
+        commitments: [GroupCommitment; GROUP_COUNT],
+        claims: &[GroupClaim; GROUP_COUNT],
+    ) -> Result<PreparedOpening, CommitError> {
         let mut groups = Vec::with_capacity(GROUP_COUNT);
         let mut handles = Vec::with_capacity(GROUP_COUNT);
         for (commitment, (group, claim)) in
@@ -338,12 +364,29 @@ impl PcsProver {
             )
             .into());
         }
-        let proof = AkitaCommitmentScheme::new(catalog.clone()).batched_prove(
+        let prepared = AkitaCommitmentScheme::new(catalog.clone()).prepare_batched_prove(
             &self.setup,
             opening,
             &self.backend,
-            session,
             BasisMode::Lagrange,
+        )?;
+        Ok(PreparedOpening {
+            akita: prepared,
+            keep,
+        })
+    }
+
+    /// Finish a batched opening under the 32-byte PIOP session digest.
+    pub fn finish_open(
+        &self,
+        prepared: PreparedOpening,
+        session: &[u8; 32],
+    ) -> Result<Vec<u8>, CommitError> {
+        let PreparedOpening { akita, keep } = prepared;
+        let proof = AkitaCommitmentScheme::new(Cfg::catalog()?.clone()).finish_batched_prove(
+            akita,
+            &self.backend,
+            session,
         );
         crate::sched::drop_in_background("opening sources", keep);
         Ok(proof?)

@@ -12,6 +12,7 @@
 
 use agg_pcs_config::commit::{
     evaluate_signed_table, CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier,
+    PreparedOpening,
 };
 use agg_pcs_config::work_plan::{PlanError, WorkPlan};
 use akita_error::AkitaError;
@@ -402,12 +403,32 @@ impl TableCommitter {
         claims: &[GroupClaim; GROUP_COUNT],
         session: &[u8; 32],
     ) -> Result<Vec<u8>, PcsError> {
+        let prepared = self.prepare_open_claims(commitments, claims)?;
+        self.finish_open_claims(prepared, session)
+    }
+
+    /// Compute the part of the opening that depends only on the commitments and
+    /// the opening points. It holds no transcript session.
+    pub fn prepare_open_claims(
+        &self,
+        commitments: [GroupCommitment; GROUP_COUNT],
+        claims: &[GroupClaim; GROUP_COUNT],
+    ) -> Result<PreparedOpening, PcsError> {
         for (group, claim) in self.manifest.groups().iter().zip(claims) {
             if claim.point.len() != group.logical_vars {
                 return Err(PcsError::PointShape(group.role));
             }
         }
-        Ok(self.prover.open(commitments, claims, session)?)
+        Ok(self.prover.prepare_open(commitments, claims)?)
+    }
+
+    /// Bind a prepared opening to the 32-byte PIOP session digest.
+    pub fn finish_open_claims(
+        &self,
+        prepared: PreparedOpening,
+        session: &[u8; 32],
+    ) -> Result<Vec<u8>, PcsError> {
+        Ok(self.prover.finish_open(prepared, session)?)
     }
 
     /// The verifier derived from this prover's setup.

@@ -148,52 +148,60 @@ impl<'a, PointF: Clone, G, CommitF: Field> ProverOpeningData<'a, PointF, G, Comm
             .map(PolynomialGroupClaims::commitment)
             .collect()
     }
-    pub(crate) fn append_to(
-        &self,
-        root_params: &CommittedGroupParams,
-        grinding: &mut akita_types::ProverGrinding<'_>,
-    ) -> Result<(), AkitaError>
-    where
-        CommitF: CanonicalEncoding,
-        PointF: ExtField<CommitF>,
-    {
-        let relation_geometry = akita_params::RelationWitnessGeometry::for_level(
-            root_params,
-            self.opening_layout(),
-            PointF::DEGREE,
-        )?;
-        let relation_layout = relation_geometry.rhs_layout();
-        for (group_index, commitment) in self.commitments().into_iter().enumerate() {
-            let compression = relation_layout.compression_plan_for_group(group_index)?;
-            if commitment.rows().coeff_len() != compression.terminal_coefficients() {
-                return Err(AkitaError::InvalidInput(
-                    "root compressed commitment does not match scheduled root params".into(),
-                ));
+}
+
+/// Bind the public commitment rows and opening points of a root batch.
+///
+/// These messages depend only on the commitments and the opening points, so a
+/// caller can compute the opening before the transcript that absorbs them
+/// exists and replay this exact sequence later.
+pub(crate) fn append_opening_messages<PointF, CommitF>(
+    opening_claims: &OpeningClaims<'_, PointF, Commitment<CommitF>>,
+    opening_layout: &OpeningClaimsLayout,
+    root_params: &CommittedGroupParams,
+    grinding: &mut akita_types::ProverGrinding<'_>,
+) -> Result<(), AkitaError>
+where
+    PointF: ExtField<CommitF>,
+    CommitF: CanonicalEncoding + Field,
+{
+    let relation_geometry = akita_params::RelationWitnessGeometry::for_level(
+        root_params,
+        opening_layout,
+        PointF::DEGREE,
+    )?;
+    let relation_layout = relation_geometry.rhs_layout();
+    for (group_index, group_claims) in opening_claims.groups().iter().enumerate() {
+        let commitment = group_claims.commitment();
+        let compression = relation_layout.compression_plan_for_group(group_index)?;
+        if commitment.rows().coeff_len() != compression.terminal_coefficients() {
+            return Err(AkitaError::InvalidInput(
+                "root compressed commitment does not match scheduled root params".into(),
+            ));
+        }
+        let ring_dim = compression
+            .maps()
+            .last()
+            .ok_or_else(|| {
+                AkitaError::Internal("root commitment compression plan has no final map".into())
+            })?
+            .ring_dimension();
+        akita_transcript::public_fields_prover(
+            grinding.state_mut(),
+            akita_types::FoldSite::RootCommitment {
+                group: group_index,
+                ring_dimension: ring_dim,
             }
-            let ring_dim = compression
-                .maps()
-                .last()
-                .ok_or_else(|| {
-                    AkitaError::Internal("root commitment compression plan has no final map".into())
-                })?
-                .ring_dimension();
-            akita_transcript::public_fields_prover(
-                grinding.state_mut(),
-                akita_types::FoldSite::RootCommitment {
-                    group: group_index,
-                    ring_dimension: ring_dim,
-                }
-                .id()?,
-                commitment.rows().coeffs(),
-            )?;
-        }
-        for (group_index, group_claims) in self.opening_claims.groups().iter().enumerate() {
-            akita_transcript::public_extensions::<CommitF, PointF, _>(
-                grinding.state_mut(),
-                akita_types::FoldSite::RootPoint { group: group_index }.id()?,
-                group_claims.point(),
-            )?;
-        }
-        Ok(())
+            .id()?,
+            commitment.rows().coeffs(),
+        )?;
     }
+    for (group_index, group_claims) in opening_claims.groups().iter().enumerate() {
+        akita_transcript::public_extensions::<CommitF, PointF, _>(
+            grinding.state_mut(),
+            akita_types::FoldSite::RootPoint { group: group_index }.id()?,
+            group_claims.point(),
+        )?;
+    }
+    Ok(())
 }

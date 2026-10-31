@@ -83,7 +83,6 @@ where
     B: ProverBackend<F, E>,
 {
     let trace_opening_batch = block_claims.opening_layout().clone();
-    let trace_opening_batch = &trace_opening_batch;
     let context = backend.proof_context(session, level)?;
     let (protocol_points, reduction) = if run_eor {
         let groups = (0..trace_opening_batch.num_groups())
@@ -92,7 +91,7 @@ where
                     source: *block_claims.group(index)?,
                     point: block_claims.opening_claims().group_point(index)?,
                     ring_dimension: level_params
-                        .group_role_dims(trace_opening_batch, index)?
+                        .group_role_dims(&trace_opening_batch, index)?
                         .d_a(),
                 })
             })
@@ -107,7 +106,7 @@ where
             backend,
             session,
             &context,
-            trace_opening_batch,
+            &trace_opening_batch,
             &groups,
             grinding,
             level,
@@ -125,13 +124,82 @@ where
             None,
         )
     };
+    let opening_ctx = OperationCtx::new(backend, session, context);
+    let part = prepare_fold_part::<F, E, B>(
+        &opening_ctx,
+        block_claims,
+        commitment_material,
+        protocol_points,
+        reduction,
+        pad_base_evals,
+        level,
+        level_params,
+        basis,
+    )?;
+    finish_fold_part::<F, E, B>(
+        part,
+        &opening_ctx,
+        grinding,
+        expected_witness_len,
+        commitment_ring_dimension,
+    )
+}
 
-    let opening = &OperationCtx::new(backend, session, context);
+/// Transcript-free part of a fold: prepared openings, coefficient packing,
+/// digit materialization and the public relation payload.
+pub(in crate::protocol::prove) struct PreparedFoldPart<F: Field + CanonicalEncoding, E: Field, OpeningHandle, BuildHandle> {
+    pub(in crate::protocol::prove) protocol_points: Vec<Vec<E>>,
+    pub(in crate::protocol::prove) reduction: Option<ExtensionOpeningReduction<E>>,
+    pub(in crate::protocol::prove) scalar_openings: Vec<E>,
+    pub(in crate::protocol::prove) relation_input:
+        crate::protocol::ring_relation::PreparedRingRelationInput<F, E, OpeningHandle, BuildHandle>,
+    pub(in crate::protocol::prove) level: u32,
+    pub(in crate::protocol::prove) pad_base_evals: bool,
+    pub(in crate::protocol::prove) basis: BasisMode,
+}
+
+/// Compute everything a fold needs before the transcript exists.
+///
+/// The returned state depends only on the opening point and the committed
+/// source. The caller may hold it while other work completes and then pass it
+/// to [`finish_fold_part`] with the real transcript.
+#[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
+pub(in crate::protocol::prove) fn prepare_fold_part<'claims, 'source, F, E, B>(
+    opening_ctx: &OperationCtx<'_, F, B>,
+    block_claims: ProverOpeningData<
+        'claims,
+        E,
+        OpeningSource<'source, B::CommitmentHandle, B::WitnessHandle>,
+        F,
+    >,
+    commitment_material: Vec<B::CommitmentMaterialHandle>,
+    protocol_points: Vec<Vec<E>>,
+    reduction: Option<ExtensionOpeningReduction<E>>,
+    pad_base_evals: bool,
+    level: u32,
+    level_params: &CommittedGroupParams,
+    basis: BasisMode,
+) -> Result<PreparedFoldPart<F, E, B::PreparedOpeningHandle, B::WitnessBuildHandle>, AkitaError>
+where
+    F: Field + CanonicalEncoding + AkitaSerialize + Ring + Unreduced + PseudoMersenne + 'static,
+    <F as Unreduced>::Wide: From<F> + AdditiveGroup,
+    E: FpExtEncoding<F>
+        + ExtField<F>
+        + Unreduced
+        + Fold
+        + Ring
+        + MulBaseUnreduced<F>
+        + AkitaSerialize
+        + 'static,
+    B: ProverBackend<F, E>,
+{
+    let backend = opening_ctx.backend();
+    let session = opening_ctx.proof_session();
     // A-role operation: prepare each group at its native A dimension,
     // fold-evaluate its claim polynomials, and derive scalar openings before
     // leaving the typed dispatch arm. Typed fold outputs cross the boundary
     // only through D-free `PreparedOpeningPoint` / `RingVec` carriers.
-    let opening_batch = trace_opening_batch.clone();
+    let opening_batch = block_claims.opening_layout().clone();
     let opening_method = level_params.opening_method();
     if !matches!(opening_method, akita_params::OpeningMethod::EvaluationTrace)
         && reduction.is_some()
@@ -190,7 +258,7 @@ where
             logical_len,
         );
         requests.push(crate::backend::GroupOpeningRequest {
-            context: context.for_group(group_index),
+            context: opening_ctx.proof_context().for_group(group_index),
             source,
             plan,
         });
@@ -232,18 +300,66 @@ where
                 });
             }
         }
-        if pad_base_evals {
+        scalar_openings.extend_from_slice(prepared.scalar_openings());
+    }
+    let relation_input = RingRelationProver::begin::<F, E, B>(
+        opening_ctx,
+        prepared_group_openings,
+        commitment_material,
+        &block_claims,
+        level_params.clone(),
+        level,
+        &scalar_openings,
+    )?;
+    Ok(PreparedFoldPart {
+        protocol_points,
+        reduction,
+        scalar_openings,
+        relation_input,
+        level,
+        pad_base_evals,
+        basis,
+    })
+}
+
+/// Bind the prepared fold to the live transcript and finish its private witness.
+pub(in crate::protocol::prove) fn finish_fold_part<F, E, B>(
+    part: PreparedFoldPart<F, E, B::PreparedOpeningHandle, B::WitnessBuildHandle>,
+    opening_ctx: &OperationCtx<'_, F, B>,
+    grinding: &mut akita_types::ProverGrinding<'_>,
+    expected_witness_len: usize,
+    commitment_ring_dimension: usize,
+) -> Result<PreparedFold<F, E, B::WitnessHandle>, AkitaError>
+where
+    F: Field + CanonicalEncoding + AkitaSerialize + Ring + Unreduced + PseudoMersenne + 'static,
+    <F as Unreduced>::Wide: From<F> + AdditiveGroup,
+    E: FpExtEncoding<F>
+        + ExtField<F>
+        + Unreduced
+        + Fold
+        + Ring
+        + MulBaseUnreduced<F>
+        + AkitaSerialize
+        + 'static,
+    B: ProverBackend<F, E>,
+{
+    let PreparedFoldPart {
+        protocol_points,
+        reduction,
+        scalar_openings,
+        relation_input,
+        level,
+        pad_base_evals,
+        basis,
+    } = part;
+    if pad_base_evals {
+        for (group_index, point) in protocol_points.iter().enumerate() {
             akita_transcript::public_extensions::<F, E, _>(
                 grinding.state_mut(),
-                akita_types::FoldSite::GroupPoint {
-                    level,
-                    group: group_index,
-                }
-                .id()?,
-                requests[group_index].plan.point(),
+                akita_types::FoldSite::GroupPoint { level, group: group_index }.id()?,
+                point,
             )?;
         }
-        scalar_openings.extend_from_slice(prepared.scalar_openings());
     }
     if reduction.is_none() {
         akita_transcript::public_extensions::<F, E, _>(
@@ -252,6 +368,7 @@ where
             &scalar_openings,
         )?;
     }
+    let clear_recursive_trace = pad_base_evals && !relation_input.level_params.has_preceding_groups();
     let crate::protocol::ring_relation::PreparedRingRelationOutput {
         relation:
             crate::protocol::ring_relation::PreparedRingRelation {
@@ -261,17 +378,13 @@ where
             },
         trace_claim,
         row_coefficients,
-    } = RingRelationProver::prepare::<F, E, B>(
-        opening,
-        prepared_group_openings,
-        commitment_material,
-        &block_claims,
-        level_params.clone(),
+    } = RingRelationProver::finish::<F, E, B>(
+        relation_input,
+        opening_ctx,
         grinding,
         level,
         &reduction,
         &scalar_openings,
-        trace_opening_batch,
         expected_witness_len,
         commitment_ring_dimension,
     )?;
@@ -279,7 +392,6 @@ where
     // Recursive suffixes still omit the public row coefficients from ring-switch
     // finalization. Evaluation-trace coefficients are normalized independently and
     // therefore do not inherit that path distinction.
-    let clear_recursive_trace = pad_base_evals && !level_params.has_preceding_groups();
     let row_coefficients = if clear_recursive_trace {
         None
     } else {
@@ -295,6 +407,11 @@ where
         row_coefficients,
     })
 }
+
+/// Root-specific prepared folder: its point comes from the caller, not from a
+/// transcript challenge, so it can be prepared before the session exists.
+pub(in crate::protocol::prove) type PreparedRootFold<F, E, OpeningHandle, BuildHandle> =
+    PreparedFoldPart<F, E, OpeningHandle, BuildHandle>;
 
 /// Typed commitment parameters for the witness produced by a non-terminal
 /// fold. The terminal variant exposes only its inner commitment.
