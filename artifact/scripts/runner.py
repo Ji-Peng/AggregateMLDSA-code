@@ -173,6 +173,12 @@ class Runner:
             + "\n",
             encoding="utf-8",
         )
+        warnings = self.machine.get("warnings", [])
+        (self.result_dir / "warnings.txt").write_text(
+            "".join(f"{w}\n" for w in warnings), encoding="utf-8"
+        )
+        for warning in warnings:
+            print(f"warning: {warning}")
 
     def load_machine(self):
         path = self.result_dir / "machine.json"
