@@ -52,7 +52,7 @@ pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
 /// Stage message degrees: the same in relations H-u and H-exact (stage 2 has degree 4 in
 /// both).
-pub const STAGE_DEGREES: [usize; 3] = [4, 4, 3];
+pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
 
 /// Batching coefficients per stage: `(26, 9, 48)` under H-u, `(26, 8, 49)` under H-exact,
 /// `(26, 8, 55)` under H-FIPS.
@@ -1179,13 +1179,13 @@ mod tests {
         // V_hi looked up).
         assert_eq!(registry.work_bits(), 2270);
         assert_eq!(work_bytes(&manifest()), 284);
-        // H-exact: gamma^(2) has 8 coefficients (g = 4), gamma^(3) 49
+        // H-exact: gamma^(2) has 9 coefficients (g = 4), gamma^(3) 50
         // (g = 6), the rounds keep their difficulties: the plan is H-u's.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
-        assert_eq!(stage_gammas(&exact), [26, 8, 49]);
-        assert_eq!(stage_terminals(&exact), [18, 8, 35]);
-        assert_eq!(stage_gammas(&manifest()), [26, 9, 48]);
-        assert_eq!(stage_terminals(&manifest()), [18, 9, 34]);
+        assert_eq!(stage_gammas(&exact), [26, 9, 50]);
+        assert_eq!(stage_terminals(&exact), [18, 9, 36]);
+        assert_eq!(stage_gammas(&manifest()), [26, 10, 49]);
+        assert_eq!(stage_terminals(&manifest()), [18, 10, 35]);
         let exact_registry = Registry::new(&exact);
         let gammas: Vec<u8> = exact_registry
             .work_sites()
@@ -1195,11 +1195,11 @@ mod tests {
         assert_eq!(gammas, [5, 4, 6]);
         assert_eq!(exact_registry.work_bits(), 2270);
         assert_eq!(work_bytes(&exact), 284);
-        // H-FIPS: gamma^(2) has 8 coefficients (def_y1, leaf4[K_2] and F3, g = 4),
-        // gamma^(3) 55 (g = 6); stage-2 terminals add delta and e, stage 3 opens 39 claims.
+        // H-FIPS: gamma^(2) has 9 coefficients (def_y1, leaf8[K_2], leaf8[K_3] and F3, g = 4),
+        // gamma^(3) 56 (g = 6); stage-2 terminals add delta and e, stage 3 opens 40 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
-        assert_eq!(stage_gammas(&fips), [26, 8, 55]);
-        assert_eq!(stage_terminals(&fips), [18, 9, 39]);
+        assert_eq!(stage_gammas(&fips), [26, 9, 56]);
+        assert_eq!(stage_terminals(&fips), [18, 10, 40]);
         let fips_registry = Registry::new(&fips);
         let gammas: Vec<u8> = fips_registry
             .work_sites()
@@ -1423,7 +1423,7 @@ mod tests {
             assert!(s.challenge_extensions(&lookup_site(LookupSite::X), 2).is_err());
             // The trunk waits at the join: stage 3 cannot start, a join of unfinished
             // branches is refused.
-            assert!(trunk.challenge_extensions(&gamma_site(3), 48).is_err());
+            assert!(trunk.challenge_extensions(&gamma_site(3), 49).is_err());
             let first = [
                 l.challenge_extensions(&lookup_site(LookupSite::X), 2).unwrap(),
                 s.challenge_extensions(TAU_SITE, 17).unwrap(),
@@ -1441,7 +1441,7 @@ mod tests {
                 trunk.join(l, s).unwrap();
             }
             let work = trunk.work_stream();
-            let gamma = trunk.challenge_extensions(&gamma_site(3), 48).unwrap();
+            let gamma = trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
             (gamma, work, first)
         };
         let (gamma, work, first) = forked(false);
@@ -1474,7 +1474,7 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         trunk.join(l, s).unwrap();
-        trunk.challenge_extensions(&gamma_site(3), 48).unwrap();
+        trunk.challenge_extensions(&gamma_site(3), 49).unwrap();
         let mut stream = trunk.work_stream();
         let bits = Registry::new(&manifest).work_bits();
         let stage3: usize = Registry::new(&manifest)
@@ -1492,6 +1492,6 @@ mod tests {
         run_branch(&mut l, &manifest);
         run_branch(&mut s, &manifest);
         replay.join(l, s).unwrap();
-        assert_eq!(replay.challenge_extensions(&gamma_site(3), 48).unwrap(), gamma);
+        assert_eq!(replay.challenge_extensions(&gamma_site(3), 49).unwrap(), gamma);
     }
 }

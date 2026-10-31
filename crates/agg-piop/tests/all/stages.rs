@@ -77,7 +77,7 @@ fn mle_of(cells: &[i64], point: &[E]) -> E {
     evaluate_mle(&lift_table(cells), point)
 }
 
-/// Every claim the honest PIOP leaves equals the extension of its table: the 34 stage-3
+/// Every claim the honest PIOP leaves equals the extension of its table: the 35 stage-3
 /// claims, the multiplicity digits at `pi_m`, the lookup's column claims at the stack
 /// points, and the stage-1 and stage-2 terminals of the virtual tables.
 fn check_honest(batch: &Batch, proof: &PiopProof) {

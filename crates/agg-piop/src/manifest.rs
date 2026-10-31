@@ -7,7 +7,7 @@
 //! (`Z_lo, U_lo, V_lo, V_hi`, width 16) and `G_main4` (`Z_hi, U_hi, b_0..b_5`, width 4) in
 //! round 1, before the bridge seed, and `G_1` (`kappa^(1)_t`), `G_2` (`y^(2)_t`,
 //! `kappa^(2)_t`), `G_3` (`kappa^(3)` and zero polynomials up to `G_2`'s layout), `G_k` (the
-//! digits `K_0, K_1, K_2` of the projection outputs `k = <Psi_o, v_i>`), all width 16, and
+//! digits `K_0, K_1, K_2, K_3` of the projection outputs `k = <Psi_o, v_i>`), all width 16, and
 //! `G_m` (the seven digits of the multiplicity column of `T_16`, width 4) in round 2; `G_m` is
 //! Akita's final group, so PCS execution follows wire order. The alphabets listed here are
 //! the honest producer's; the ranges are proven inside the PIOP (the lookup into `T_16`, the
@@ -96,12 +96,13 @@ pub const V16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16, 1 << 16],
     signed: true,
 };
-/// The projection outputs `k_{o,i} = <Psi_o, v_i>`: `k + 2^33 = k_0 + 2^16 k_1 + 2^32 k_2`
-/// (bases `2^16, 2^16, 4`, signed), so `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` over
-/// exactly `[-2^33, 2^33)`; `K_0, K_1` looked up, `K_2` leaf `leaf4` and link.
+/// The projection outputs `k_{o,i} = <Psi_o, v_i>`: `k + 2^37 = k_0 + 2^16 k_1 + 2^32 k_2 +
+/// 2^35 k_3` (bases `2^16, 2^16, 8, 8`, signed), so
+/// `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15` over exactly
+/// `[-2^37, 2^37)`; `K_0, K_1` looked up in `T_16`, `K_2, K_3` leaves `leaf8` and links.
 pub const K16_DIGITS: DigitLayout = DigitLayout {
     name: "k",
-    bases: &[1 << 16, 1 << 16, 4],
+    bases: &[1 << 16, 1 << 16, 8, 8],
     signed: true,
 };
 /// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md`, the projection definition).
@@ -109,7 +110,7 @@ pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
 /// Bytes of `Psi`, squeezed as the answer of the site `proj/psi` (16 KiB).
 pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
 /// The bound `B` of the projection outputs: `k in [-B, B)`.
-pub const PROJ_BOUND: i64 = 1 << 33;
+pub const PROJ_BOUND: i64 = 1 << 37;
 /// Relation H-FIPS: `L = L_lo + 29,696 L_hi` with `L_lo = S_lo + 2^15` looked up and the bit
 /// `L_hi`, so `L = S_lo + 29,696 L_hi + 2^15` over exactly `[0, gamma_2 - 1]`.
 pub const L16_SLACK: SlackLayout = L_SLACK;
@@ -317,10 +318,15 @@ impl Column {
         value: DigitValue::K,
         digit: 1,
     };
-    /// `K_2` (projection outputs, base 4, leaf and link).
+    /// `K_2` (projection outputs, base 8, leaf and link).
     pub const K_2: Self = Self::Digit {
         value: DigitValue::K,
         digit: 2,
+    };
+    /// `K_3` (projection outputs, base 8, leaf and link).
+    pub const K_3: Self = Self::Digit {
+        value: DigitValue::K,
+        digit: 3,
     };
 
     /// The carry column `kappa^(l)_t` (`l = 1, 2`) or `kappa^(3)` (`l = 3`).
@@ -368,10 +374,11 @@ impl Column {
         matches!(self, Self::Digit { value: DigitValue::V, .. })
     }
 
-    /// True for a digit range-checked by a leaf and a link (`Z_hi` base 4, `U_hi` base 6).
+    /// True for a digit range-checked by a leaf and a link (`Z_hi` base 4, `U_hi` base 6,
+    /// the projection digits `K_2, K_3` base 8).
     #[must_use]
     pub fn is_leaf_digit(self) -> bool {
-        matches!(self.base(), Some(4 | 6))
+        matches!(self.base(), Some(4 | 6 | 8))
     }
 
     /// True when the column is stored as `i32` cells (every 16-bit column).
@@ -736,8 +743,8 @@ impl CommitmentManifest {
         stack_columns(stack, self.relation)
     }
 
-    /// The leaf-checked digits in the order of the leaf and link instances: `Z_hi` (base 4)
-    /// and `U_hi` (base 6) under H-u, `U_hi` alone under H-exact.
+    /// The leaf-checked digits in the order of the leaf and link instances: `Z_hi` (base 4),
+    /// `U_hi` (base 6) and `K_2, K_3` (base 8) under H-u; `U_hi, K_2, K_3` under H-exact.
     #[must_use]
     pub fn leaf_digits(&self) -> Vec<Column> {
         self.groups
@@ -759,7 +766,7 @@ impl CommitmentManifest {
     }
 
     /// Committed polynomials opened at `r^(3)` through stage-3 claims (every group but `G_m`,
-    /// without `G_3`'s zero polynomials): 34 under H-u, 35 under H-exact, 39 under H-FIPS.
+    /// without `G_3`'s zero polynomials): 35 under H-u, 36 under H-exact, 40 under H-FIPS.
     #[must_use]
     pub fn stage3_polynomials(&self) -> usize {
         self.groups
@@ -791,7 +798,7 @@ impl CommitmentManifest {
         }
     }
 
-    /// Total committed polynomials (52 under H-u, 53 under H-exact, 58 under H-FIPS).
+    /// Total committed polynomials (53 under H-u, 54 under H-exact, 59 under H-FIPS).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -890,22 +897,26 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 8, 6, 12, 12, 3, 7]);
-        assert_eq!(manifest.total_polynomials(), 52);
-        assert_eq!(manifest.stage3_polynomials(), 34);
+        assert_eq!(counts, [4, 8, 6, 12, 12, 4, 7]);
+        assert_eq!(manifest.total_polynomials(), 53);
+        assert_eq!(manifest.stage3_polynomials(), 35);
         // G_3: the carry, then 11 zero polynomials (G_2's layout).
         let level3 = &manifest.group(Group::Level3).columns;
         assert_eq!((level3[0], level3[1], level3[11]), (Column::carry(3, 0), Column::Zero(1), Column::Zero(11)));
         assert_eq!(manifest.group(Group::Level3).claimed_count(), 1);
         assert_eq!(Column::Zero(1).alphabet_code(), ZERO_ALPHABET_CODE);
-        // G_k: K_0, K_1 (looked up), K_2 (base 4, leaf and link); V_lo, V_hi unchecked.
-        assert_eq!(manifest.group(Group::Proj).columns, [Column::K_0, Column::K_1, Column::K_2]);
-        assert!(Column::K_0.is_lookup() && Column::K_1.is_lookup() && Column::K_2.is_leaf_digit());
+        // G_k: K_0, K_1 (looked up), K_2, K_3 (base 8, leaf and link); V_lo, V_hi unchecked.
+        assert_eq!(
+            manifest.group(Group::Proj).columns,
+            [Column::K_0, Column::K_1, Column::K_2, Column::K_3]
+        );
+        assert!(Column::K_0.is_lookup() && Column::K_1.is_lookup());
+        assert!(Column::K_2.is_leaf_digit() && Column::K_3.is_leaf_digit());
         assert!(!Column::V_LO.is_lookup() && Column::V_LO.is_wide() && Column::V_HI.is_unchecked());
         assert_eq!(Column::V_HI.alphabet_code(), UNCHECKED_ALPHABET_CODE);
         assert_eq!(K16_DIGITS.range(), (-PROJ_BOUND, PROJ_BOUND - 1));
-        assert_eq!(K16_DIGITS.constant(), (1 << 31) + (1 << 15));
-        assert_eq!(K16_DIGITS.decompose(0), vec![-(1 << 15), -(1 << 15), 0]);
+        assert_eq!(K16_DIGITS.constant(), (1 << 34) + (1 << 31) + (1 << 15));
+        assert_eq!(K16_DIGITS.decompose(0), vec![-(1 << 15), -(1 << 15), -4, 0]);
         assert!(manifest.bool_digits().is_empty());
         assert_eq!(manifest.z_value(), DigitValue::Z);
         let lookups: Vec<Column> = manifest
@@ -917,7 +928,7 @@ mod tests {
         // 2 main-domain columns, 6 + 6 + 1 carries and K_0, K_1.
         assert_eq!(lookups.len(), 17);
         let names: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
-        assert_eq!(names, ["z_hi", "u_hi", "k_2"]);
+        assert_eq!(names, ["z_hi", "u_hi", "k_2", "k_3"]);
         assert_eq!(Column::Z_HI.base(), Some(4));
         assert_eq!(Column::U_HI.base(), Some(6));
         assert_eq!(Column::U_HI.alphabet(), Alphabet::Balanced(6));
@@ -953,8 +964,8 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 9, 6, 12, 12, 3, 7]);
-        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (53, 35));
+        assert_eq!(counts, [4, 9, 6, 12, 12, 4, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (54, 36));
         let names = |role| -> Vec<String> {
             manifest.group(role).columns.iter().map(|c| c.name()).collect()
         };
@@ -965,7 +976,13 @@ mod tests {
         );
         let leaf: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
         let bools: Vec<String> = manifest.bool_digits().iter().map(|c| c.name()).collect();
-        assert_eq!((leaf, bools), (vec!["u_hi".to_owned(), "k_2".to_owned()], vec!["bz_hi".to_owned(), "a_z".to_owned()]));
+        assert_eq!(
+            (leaf, bools),
+            (
+                vec!["u_hi".to_owned(), "k_2".to_owned(), "k_3".to_owned()],
+                vec!["bz_hi".to_owned(), "a_z".to_owned()]
+            )
+        );
         assert_eq!(manifest.z_value(), DigitValue::Zx);
         assert_eq!(value_columns(DigitValue::Zx), [Column::ZX_LO, Column::ZX_HI, Column::A_Z]);
         assert!(Column::ZX_LO.is_lookup() && !Column::ZX_HI.is_lookup());
@@ -1006,8 +1023,8 @@ mod tests {
             .iter()
             .map(GroupDescriptor::polynomial_count)
             .collect();
-        assert_eq!(counts, [4, 12, 6, 13, 13, 3, 7]);
-        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (58, 39));
+        assert_eq!(counts, [4, 12, 6, 13, 13, 4, 7]);
+        assert_eq!((manifest.total_polynomials(), manifest.stage3_polynomials()), (59, 40));
         let names = |role| -> Vec<String> {
             manifest.group(role).columns.iter().map(|c| c.name()).collect()
         };
@@ -1017,7 +1034,7 @@ mod tests {
             ["bz_hi", "l_hi", "b_0", "b_1", "b_2", "b_3", "b_4", "b_5", "a_z", "s", "delta", "e"]
         );
         assert_eq!(names(Group::Level2).last().map(String::as_str), Some("u_h"));
-        assert_eq!(manifest.leaf_digits(), [Column::K_2]);
+        assert_eq!(manifest.leaf_digits(), [Column::K_2, Column::K_3]);
         let bools: Vec<String> = manifest.bool_digits().iter().map(|c| c.name()).collect();
         assert_eq!(bools, ["bz_hi", "l_hi", "a_z"]);
         assert_eq!((manifest.z_value(), manifest.u_slot_value()), (DigitValue::Zx, DigitValue::L));
@@ -1052,11 +1069,11 @@ mod tests {
         let form = DigitValue::L.layout();
         assert_eq!((form.weights(), form.constant()), (vec![1, 29_696], 1 << 15));
         assert_eq!(form.range(), (0, 95_231));
-        // 16 main-domain columns, u_h one element per signature, 3 * 128 projection digits
-        // and G_3's 12 zero polynomials (2^14 logical cells each) at 2^15: 16,897.5.
+        // 16 main-domain columns, u_h one element per signature, 4 * 128 projection digits
+        // and G_3's 12 zero polynomials (2^14 logical cells each) at 2^15: 17,025.5.
         let full = CommitmentManifest::for_relation(1 << 15, Relation::HFips).unwrap();
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 16_897.5).abs() < 1e-9, "{per_signature}");
+        assert!((per_signature - 17_025.5).abs() < 1e-9, "{per_signature}");
         assert_eq!(full.catalog_row(), "mldsa-44-p16f-batch-32768-mult-final");
         // Relation byte 2, G_main4 at 12 polynomials with the ternary codes.
         let bytes = manifest.binding_bytes();
@@ -1117,13 +1134,13 @@ mod tests {
     #[test]
     fn committed_elements_per_signature() {
         // 12,288 main-domain elements, 96 + 12 + 0.5 bridge elements, 5.5 for G_3's 11 zero
-        // polynomials, 3 * 128 projection digits and the 7 * 2^16 multiplicity cells (14 per
+        // polynomials, 4 * 128 projection digits and the 7 * 2^16 multiplicity cells (14 per
         // signature) at N = 2^15.
         let full = CommitmentManifest::for_batch(1 << 15).unwrap();
         assert_eq!(full.d_main(), 25);
         assert_eq!(full.segments(), 4);
         let per_signature = full.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 12_800.0).abs() < 1e-9, "{per_signature}");
+        assert!((per_signature - 12_928.0).abs() < 1e-9, "{per_signature}");
         let small = CommitmentManifest::for_batch(256).unwrap();
         assert_eq!(small.d_main(), 18);
         assert_eq!(small.segments(), 1);
@@ -1140,11 +1157,11 @@ mod tests {
             assert_eq!((l3.physical_vars, l3.polynomial_count()), (l2.physical_vars, l2.polynomial_count()));
             assert_eq!(l3.pad_vars(), 1);
         }
-        // H-exact: one more main-domain column, 13,824 elements per signature at 2^15;
-        // 14,432 physical at N = 1,024.
+        // H-exact: one more main-domain column, 13,952 elements per signature at 2^15;
+        // 14,560 physical at N = 1,024.
         let exact = CommitmentManifest::for_relation(1 << 15, Relation::HExact).unwrap();
         let per_signature = exact.total_logical_cells() as f64 / f64::from(1 << 15);
-        assert!((per_signature - 13_824.0).abs() < 1e-9, "{per_signature}");
+        assert!((per_signature - 13_952.0).abs() < 1e-9, "{per_signature}");
         assert_eq!(exact.catalog_row(), "mldsa-44-p16x-batch-32768-mult-final");
         let physical = |m: &CommitmentManifest| -> usize {
             m.groups()
@@ -1153,8 +1170,8 @@ mod tests {
                 .sum()
         };
         let k = CommitmentManifest::for_relation(1024, Relation::HExact).unwrap();
-        assert_eq!(physical(&k) / 1024, 14_432);
-        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 13_408);
+        assert_eq!(physical(&k) / 1024, 14_560);
+        assert_eq!(physical(&CommitmentManifest::for_batch(1024).unwrap()) / 1024, 13_536);
     }
 
     #[test]
@@ -1225,7 +1242,7 @@ mod tests {
         let row = manifest.catalog_row().len();
         assert_eq!(
             bytes.len(),
-            expected.len() + 7 * 6 + 52 + 2 + row + 3 * 17 + 3 + 1 + 5 * 7
+            expected.len() + 7 * 6 + 53 + 2 + row + 3 * 17 + 3 + 1 + 5 * 7
         );
         // Live count, padded count and the catalog row all enter the binding.
         let full = CommitmentManifest::for_batch(256).unwrap();
@@ -1252,7 +1269,7 @@ mod tests {
         assert_eq!(xrow, row + 1);
         assert_eq!(
             xbytes.len(),
-            expected.len() + 7 * 6 + 53 + 2 + xrow + 3 * 17 + 3 + 1 + 5 * 7
+            expected.len() + 7 * 6 + 54 + 2 + xrow + 3 * 17 + 3 + 1 + 5 * 7
         );
         assert_ne!(xbytes, bytes);
     }

@@ -492,7 +492,7 @@ mod tests {
     fn h_exact_plans_reproduce_docs_h_exact_section_3_7() {
         use crate::manifest::Relation;
         // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g). With the projection of v the
-        // stage-2 gamma site has 8 coefficients under H-exact (leaf6[U_hi], leaf4[K_2]) and 9
+        // stage-2 gamma site has 9 coefficients under H-exact (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and 10
         // under H-u, both g = 4 (nonce 11 bits), so the plans of H-u and H-exact are equal.
         for (d_sig, sites, nonces, bits, bytes, work) in [
             (3, 196, 195, 1818, 228, 1350),

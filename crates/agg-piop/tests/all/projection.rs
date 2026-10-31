@@ -96,8 +96,8 @@ fn k_of(batch: &Batch, main: &MainTables) -> Vec<i64> {
     })
 }
 
-/// Digits of `k` with `K_0` the centered low 16 bits, `K_2 = 0` and the rest in `K_1` (a
-/// cheating prover's choice when `k` is outside `[-2^33, 2^33)`).
+/// Digits of `k` with `K_0` the centered low 16 bits, `K_2 = K_3 = 0` and the rest in `K_1`
+/// (a cheating prover's choice when `k` is outside `[-2^37, 2^37)`).
 fn cheating_digits(k: &[i64]) -> ProjectionTables {
     let cells = k.len();
     let constant = agg_piop::manifest::K16_DIGITS.constant();
@@ -108,7 +108,7 @@ fn cheating_digits(k: &[i64]) -> ProjectionTables {
         stacked[y] = low as i32;
         stacked[cells + y] = i32::try_from((rest - low) >> 16).expect("K_1 fits i32");
     }
-    let tables = ProjectionTables { stacked, top: vec![0; cells] };
+    let tables = ProjectionTables { stacked, top: vec![0; 2 * cells] };
     for (y, &value) in k.iter().enumerate() {
         assert_eq!(tables.value(y), E::from_i64(value));
     }
@@ -119,9 +119,9 @@ fn cheating_digits(k: &[i64]) -> ProjectionTables {
 /// record by `D = delta_u + 2 gamma_2 delta_w`, with `D = p mod q` (centered), and set
 /// `v' = v + (p - D)/q` there. Then `Delta = -p = 0` in `F_p`: the ring identity holds at
 /// every position, every range of `z, u, w_1'` holds, and `|v'| ~ 2^41`. The outputs `k` of
-/// that record leave `[-2^33, 2^33)`, so whatever digits the prover commits, the lookup of
-/// `K_0, K_1` or the leaf of `K_2` rejects; with `K_2 = 0` (an `i8` cannot carry the
-/// excess of about `2^8`) `K_1 ~ 2^25` is outside `T_16`: the lookup.
+/// that record leave `[-2^37, 2^37)`, so whatever digits the prover commits, the lookup of
+/// `K_0, K_1` or the leaves of `K_2, K_3` rejects; with `K_2 = K_3 = 0` (an `i8` cannot
+/// carry the excess of about `2^8`) `K_1 ~ 2^25` is outside `T_16`: the lookup.
 #[test]
 fn the_unbounded_quotient_attack_is_rejected_by_the_k_range() {
     on_large_stack(|| {
@@ -161,7 +161,7 @@ fn the_unbounded_quotient_attack_is_rejected_by_the_k_range() {
         assert_eq!((P - d) % q, 0);
         // Delta' = 2 gamma_2 (w1 - w1') + (u - u') + q (v - v') = -D - (p - D) = -p.
         assert_eq!(-d - q * (v_attack - i128::from(v)), -P, "Delta = 0 in F_p");
-        assert!(v_attack.abs() > 1 << 40, "|v'| = {v_attack} is far above 2^34");
+        assert!(v_attack.abs() > 1 << 40, "|v'| = {v_attack} is far above 2^38");
         set_value(&batch, &mut main, DigitValue::V, x, i64::try_from(v_attack).expect("i64"));
         assert_eq!(i128::from(value_at(&batch, &main, DigitValue::V, x)), v_attack);
         let k = k_of(&batch, &main);
@@ -203,7 +203,8 @@ fn the_digits_of_v_are_bound_only_through_v() {
 }
 
 /// `k` bound to `v`: an output changed inside its range (`K_0 + 1`) or `v` changed with `k`
-/// kept fails the projection identity (stage 3); `K_2 = 2` fails `leaf4[K_2]` (stage 2).
+/// kept fails the projection identity (stage 3); `K_2 = 4` and `K_3 = 4` fail `leaf8`
+/// (stage 2).
 #[test]
 fn outputs_unbound_to_v_or_outside_the_k_alphabet_are_rejected() {
     on_large_stack(|| {
@@ -221,9 +222,14 @@ fn outputs_unbound_to_v_or_outside_the_k_alphabet_are_rejected() {
         let x = main_index(3, 0, 7);
         *main.wide_cell_mut(manifest, Column::V_LO, x) += 1;
         assert_eq!(rejecting_place(&batch, &main, &batch.bridge), Some(3));
-        // K_2 = 2: outside [-2, 1], the leaf of stage 2.
+        // K_2 = 4: outside [-4, 3], the leaf of stage 2.
         let mut bridge = batch.bridge.clone();
-        bridge.projection_mut().top[y] = 2;
+        bridge.projection_mut().top[y] = 4;
+        assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(2));
+        // K_3 = 4: the second leaf, also stage 2.
+        let mut bridge = batch.bridge.clone();
+        let cells = manifest.group(GroupRole::Proj).logical_cells();
+        bridge.projection_mut().top[cells + y] = 4;
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(2));
         // The honest tables pass.
         assert_eq!(rejecting_place(&batch, &batch.main, &batch.bridge), None);
@@ -248,25 +254,25 @@ fn the_shared_projection_claim_is_checked() {
     });
 }
 
-/// The honest prover aborts when an output would leave `[-2^33, 2^33)`: a record whose `v`
-/// has every coordinate at `2^25` (a valid digit encoding) projects to about `2^34` per row.
+/// The honest prover aborts when an output would leave `[-2^37, 2^37)`: a record whose `v`
+/// has every coordinate at `2^29` (a valid digit encoding) projects to about `2^39` per row.
 #[test]
 fn the_honest_prover_aborts_on_an_output_outside_the_range() {
     let manifest = agg_piop::manifest::CommitmentManifest::for_relation(3, Relation::Hu).unwrap();
     let mut large = RecordValues::zero();
     for row in large.v.iter_mut() {
-        row.fill(1 << 25);
+        row.fill(1 << 29);
     }
     let main = MainTables::from_values(&manifest, &[RecordValues::zero(), large, RecordValues::zero()]).unwrap();
     let matrices = agg_witness::bridge::BridgeMatrices::random_for_tests(3);
     assert!(matches!(
         BridgeGroupTables::build(&manifest, &main, &matrices, &agg_piop::projection::test_psi(3)).unwrap_err(),
-        SourceTableError::ProjectionRange { record: 1, value, .. } if value >= 1 << 33
+        SourceTableError::ProjectionRange { record: 1, value, .. } if value >= 1 << 37
     ));
-    // At 2^22 per coordinate the outputs stay inside (at most 1,024 * 2^22 = 2^32).
+    // At 2^26 per coordinate the outputs stay inside (at most 1,024 * 2^26 = 2^36).
     let mut small = RecordValues::zero();
     for row in small.v.iter_mut() {
-        row.fill(1 << 22);
+        row.fill(1 << 26);
     }
     let main = MainTables::from_values(&manifest, &[RecordValues::zero(), small, RecordValues::zero()]).unwrap();
     assert!(BridgeGroupTables::build(&manifest, &main, &matrices, &agg_piop::projection::test_psi(3)).is_ok());

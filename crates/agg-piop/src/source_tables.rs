@@ -23,7 +23,7 @@
 //!   (0, gamma_2 - 1, 0, 0)`, `u_h = 80`.
 //! * [`BridgeGroupTables`], round 2: the projection digits of `v` under `Psi` (`G_k`,
 //!   `projection::ProjectionTables`; the honest prover aborts on an output outside
-//!   `[-2^33, 2^33)`), the zero polynomials of `G_3`, the carries `kappa^(1)_t, kappa^(2)_t,
+//!   `[-2^37, 2^37)`), the zero polynomials of `G_3`, the carries `kappa^(1)_t, kappa^(2)_t,
 //!   kappa^(3)` as balanced 16-bit columns (`K = kappa - 2^15`, stacked: 6 lanes in 8 slots on `D_1` and
 //!   `D_2`, the padding slots holding `-2^15`), the level-2 parities, the public `Y`, and
 //!   the multiplicity column `m` of `T_16` over every looked-up cell with its seven balanced
@@ -34,7 +34,7 @@
 //!
 //! Construction validates the shape and the honest alphabet of every polynomial. This is
 //! an encoder self-check (the honest builder cannot fail it), not a soundness check: the
-//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, `K_2`, the
+//! PIOP proves every range (the lookup into `T_16`, the leaves of `Z_hi`, `U_hi`, `K_2`, `K_3`, the
 //! zero-checks of `bz_hi`, `a_z`); `V_lo`, `V_hi` have none (the projection bounds `v`).
 
 use agg_bridge::{parity, Shape};
@@ -113,7 +113,7 @@ pub enum SourceTableError {
     Bridge(BridgeError),
     /// A looked-up cell is outside `T_16` (honest abort) or the multiplicities overflow.
     Lookup(LookupError),
-    /// A projection output `k = <Psi_o, v_i>` of record `record` is outside `[-2^33, 2^33)`
+    /// A projection output `k = <Psi_o, v_i>` of record `record` is outside `[-2^37, 2^37)`
     /// (honest abort, completeness only: the aggregator can drop the record and retry).
     ProjectionRange {
         /// The record (`i`).

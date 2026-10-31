@@ -14,7 +14,7 @@ use crate::pcs::{group_points, PcsError};
 use crate::{BaseField, OpeningField as E};
 use jolt_field::Zero;
 
-/// The opening claims of the 52 polynomials (H-u): the 34 stage-3 claims at the group points
+/// The opening claims of the 53 polynomials (H-u): the 35 stage-3 claims at the group points
 /// induced by `r3`, zero for the 11 zero polynomials of `G_3`, the multiplicity digits at
 /// the table point `pi_m`.
 pub fn opening_claims(

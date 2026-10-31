@@ -300,14 +300,18 @@ fn round_trip_as(
     // otherwise the work nonce rejects it first. Both happen before any Flock work.
     match profile_rejection {
         ProfileRejection::Item => {
-            expect_rejected("verifier pinned to the other profile", &wrong, keccak);
-            assert!(
-                matches!(
-                    wrong.rejection,
-                    Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
-                ),
-                "the item names another profile: {wrong}"
-            );
+            expect_rejected("verifier pinned to the other profile", &wrong, |e| {
+                keccak(e)
+                    || matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+            });
+            if let Some((0, SegmentRejection::Item(ItemError::Profile(p)))) = wrong.rejection {
+                assert_eq!(p, profile as u8, "the item names another profile: {wrong}");
+            } else {
+                assert!(
+                    matches!(rejected(&wrong), VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })),
+                    "the work nonce or the item rejects: {wrong}"
+                );
+            }
         }
         ProfileRejection::Work => {
             expect_rejected("verifier pinned to the other profile", &wrong, |e| {
@@ -649,17 +653,20 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("profile byte of the item", &verify(&p), psi_work);
         let p = with_items(&honest, |c, _| c.profile = FlockProfile::PublicBits as u8);
         let r = verify(&p);
-        expect_rejected("profile byte 3 (mode B)", &r, keccak);
-        assert!(matches!(
-            r.rejection,
-            Some((0, SegmentRejection::Item(ItemError::Profile(3))))
-        ));
+        expect_rejected("profile byte 3 (mode B)", &r, |e| psi_work(e) || keccak(e));
+        if let Some((0, SegmentRejection::Item(ItemError::Profile(p)))) = r.rejection {
+            assert_eq!(p, 3);
+        } else {
+            assert!(psi_work(rejected(&r)), "the work nonce or the item rejects: {r}");
+        }
         let p = with_items(&honest, |c, _| c.d_part = 5);
         let r = verify(&p);
         // The part size enters the proof-of-work plan digest in the instance record, so the
         // projection site's work nonce may reject before the item's part count.
-        expect_rejected("part size 2^5", &r, psi_work);
-        assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+        expect_rejected("part size 2^5", &r, |e| psi_work(e) || keccak(e));
+        if psi_work(rejected(&r)) {
+            assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+        }
         // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
         // is refused while the instance record's plan is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
@@ -674,8 +681,10 @@ fn corrupted_aggregates_are_rejected() {
         let r = verify(&p);
         // Dropping a part changes the absorbed Flock commitments, so the projection site's
         // work nonce may reject before the item's part count.
-        expect_rejected("last part dropped", &r, psi_work);
-        assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+        expect_rejected("last part dropped", &r, |e| psi_work(e) || keccak(e));
+        if psi_work(rejected(&r)) {
+            assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+        }
         let mut p = honest.clone();
         p.flock_proofs[0].truncate(100);
         let r = verify(&p);
@@ -787,7 +796,7 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected(
             "message of record 7",
             &verifier.verify(&wrong_msg, &bytes, None),
-            keccak,
+            |e| psi_work(e) || keccak(e),
         );
         let mut wrong_key = public.clone();
         wrong_key[0].0 = public[1].0;

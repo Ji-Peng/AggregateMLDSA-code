@@ -19,7 +19,7 @@
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check; the join absorbs the proof items |
 //! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
-//! | `opening` | the batched Akita opening of the 52 claims (H-u) |
+//! | `opening` | the batched Akita opening of the 53 claims (H-u) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a

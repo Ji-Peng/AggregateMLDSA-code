@@ -211,7 +211,7 @@ pub enum Group {
     /// The level-3 carry `kappa^(3)` on `D_3` and zero polynomials, in `G_2`'s layout (round 2,
     /// width 16).
     Level3,
-    /// The digits `K_0, K_1, K_2` of the projection outputs `k = <Psi_o, v_i>` on the
+    /// The digits `K_0, K_1, K_2, K_3` of the projection outputs `k = <Psi_o, v_i>` on the
     /// projection domain `(o, i)` (round 2, width 16).
     Proj,
     /// The seven balanced base-16 digits of the multiplicity column `m` of `T_16`
@@ -274,7 +274,7 @@ impl Group {
     /// Number of committed polynomials:
     /// `4 + 8` on the main domain (`4 + 9` under H-exact, `4 + 12` under H-FIPS), 6 carries,
     /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry and
-    /// zero polynomials up to `G_2`'s count, the 3 projection digits and the 7 multiplicity
+    /// zero polynomials up to `G_2`'s count, the 4 projection digits and the 7 multiplicity
     /// digits.
     #[must_use]
     pub const fn num_polynomials(self, relation: Relation) -> usize {
@@ -292,7 +292,7 @@ impl Group {
             },
             // The carry and zero polynomials up to G_2's count (see `physical_vars`).
             Self::Level3 => Self::Level2.num_polynomials(relation),
-            Self::Proj => 3,
+            Self::Proj => 4,
             Self::Mult => MULTIPLICITY_DIGITS,
         }
     }
@@ -397,7 +397,7 @@ impl BatchLayout {
         self.groups[GROUP_COUNT - 1]
     }
 
-    /// Total committed polynomials (52 for H-u, 53 for H-exact, 58 for H-FIPS; 11 or 12 of
+    /// Total committed polynomials (53 for H-u, 54 for H-exact, 59 for H-FIPS; 11 or 12 of
     /// them the zero polynomials of `G_3`).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
@@ -491,12 +491,12 @@ mod tests {
     #[test]
     fn group_shapes_match_spec_section_4() {
         let counts = |relation| Group::ALL.map(|group| group.num_polynomials(relation));
-        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 12, 3, 7]);
-        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 12, 3, 7]);
-        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 13, 3, 7]);
+        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 12, 4, 7]);
+        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 12, 4, 7]);
+        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 13, 4, 7]);
         let total = |relation| counts(relation).iter().sum::<usize>();
-        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (52, 53));
-        assert_eq!(total(Relation::HFips), 58);
+        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (53, 54));
+        assert_eq!(total(Relation::HFips), 59);
         for relation in Relation::ALL {
             assert_eq!(Relation::from_id(relation.id()), Some(relation));
             assert_eq!(Relation::parse(relation.flag()), Some(relation));
@@ -550,16 +550,16 @@ mod tests {
         };
         assert_eq!(
             shape(8),
-            [(18, 4), (18, 8), (13, 6), (13, 12), (13, 12), (15, 3), (16, 7)]
+            [(18, 4), (18, 8), (13, 6), (13, 12), (13, 12), (15, 4), (16, 7)]
         );
         assert_eq!(
             shape(15),
-            [(25, 4), (25, 8), (19, 6), (15, 12), (15, 12), (22, 3), (16, 7)]
+            [(25, 4), (25, 8), (19, 6), (15, 12), (15, 12), (22, 4), (16, 7)]
         );
         assert!(BatchLayout::new(2, Relation::Hu).is_none());
         assert!(BatchLayout::new(16, Relation::HExact).is_none());
         let layout = BatchLayout::new(10, Relation::Hu).unwrap();
-        assert_eq!(layout.total_polynomials(), 52);
+        assert_eq!(layout.total_polynomials(), 53);
         assert_eq!(layout.max_physical_vars(), 20);
         assert_eq!(layout.row_name(), "mldsa-44-p16-batch-1024-mult-final");
         assert_eq!(layout.precommitted().len(), 6);
@@ -568,9 +568,9 @@ mod tests {
         let exact = BatchLayout::new(15, Relation::HExact).unwrap();
         assert_eq!(
             exact.groups.map(|group| (group.num_vars(), group.num_polynomials())),
-            [(25, 4), (25, 9), (19, 6), (15, 12), (15, 12), (22, 3), (16, 7)]
+            [(25, 4), (25, 9), (19, 6), (15, 12), (15, 12), (22, 4), (16, 7)]
         );
-        assert_eq!(exact.total_polynomials(), 53);
+        assert_eq!(exact.total_polynomials(), 54);
         assert_eq!(exact.row_name(), "mldsa-44-p16x-batch-32768-mult-final");
         let hu = BatchLayout::new(15, Relation::Hu).unwrap();
         for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Proj, Group::Mult] {
@@ -597,7 +597,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(shapes(&[Relation::Hu], Family::Width4), vec![(18, 8), (20, 8)]);
-        let width16 = vec![(13, 6), (13, 12), (14, 6), (15, 3), (17, 3), (18, 4), (20, 4)];
+        let width16 = vec![(13, 6), (13, 12), (14, 6), (15, 4), (17, 4), (18, 4), (20, 4)];
         assert_eq!(shapes(&[Relation::Hu], Family::Width16), width16);
         // H-u and H-exact: the width-4 family gains the 9-polynomial rows, the width-16
         // family is shared.
@@ -614,7 +614,16 @@ mod tests {
         );
         assert_eq!(
             shapes(&Relation::ALL, Family::Width16),
-            vec![(13, 6), (13, 12), (13, 13), (14, 6), (15, 3), (17, 3), (18, 4), (20, 4)]
+            vec![
+                (13, 6),
+                (13, 12),
+                (13, 13),
+                (14, 6),
+                (15, 4),
+                (17, 4),
+                (18, 4),
+                (20, 4)
+            ]
         );
     }
 }

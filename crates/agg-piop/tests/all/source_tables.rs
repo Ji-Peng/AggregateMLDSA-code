@@ -146,7 +146,7 @@ fn bridge_tables_count_the_multiplicities_and_abort_on_heavy_rows() {
     // G_3: the carry, then zero polynomials up to G_2's count; G_k: the projection digits.
     assert_eq!(honest.group(&manifest, GroupRole::Level3).len(), 12);
     assert!(honest.group(&manifest, GroupRole::Level3)[1..].iter().all(|c| c.to_i64().iter().all(|&v| v == 0)));
-    assert_eq!(honest.group(&manifest, GroupRole::Proj).len(), 3);
+    assert_eq!(honest.group(&manifest, GroupRole::Proj).len(), 4);
     honest.validate(&manifest).unwrap();
     let mut bad_y = honest.clone();
     bad_y.public_y_mut()[9] = 2;

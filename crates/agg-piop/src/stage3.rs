@@ -4,8 +4,8 @@
 //! the two sides of the projection identity of `v` (`projection`, `docs/spec.md`, the projection definition).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
-//! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3; H-exact:
-//! `link[U_hi]` 1, `link[K_2]` 2), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
+//! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3, `link[K_3]` 4;
+//! H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
 //! 3, `bool[a_z]` 4; claim 0, `docs/h-exact.md`), then the reductions: `b_t` from `r^(1)`
 //! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
@@ -13,7 +13,8 @@
 //! w_{j,c}` with `w_{j,c} = eq(pi_top, c)` (`StackShape::column_claim`), one part per column
 //! with scale `w_{j,c}`, and last `proj_v`, `proj_k`: `sum_x W(x) (V_lo + 2^16 V_hi + 2^15)(x)`
 //! on the main domain (the weight lane `W`, no equality factor) and `sum_y eq(r', y) (K_0 +
-//! 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15)(y)` on `D_k` at the `D_k` suffix `r'` of `r^(2)`, both
+//! 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15)(y)` on `D_k` at the `D_k` suffix
+//! `r'` of `r^(2)`, both
 //! with the claim `c` sent after stage 2, so that `k` is bound to `v`. H-u has 48
 //! coefficients, H-exact 49.
 //!
@@ -23,7 +24,7 @@
 //! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
 //! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
 //!
-//! Relation H-FIPS (`docs/h-exact.md`): `link[K_2]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
+//! Relation H-FIPS (`docs/h-exact.md`): `link[K_2]`, `link[K_3]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
 //! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F1 = s (s - 1)`,
 //! `F2 = delta (delta - 2 s + 1)` (`delta (delta - sigma)` with `sigma = 2 s - 1`),
 //! `F45 = 2 e w_1' + 43 e^2 - 43 e` (equivalent to `e (e + 1) w_1' = 0` and
@@ -74,8 +75,8 @@ pub const FIPS_CHECKS: usize = 4;
 /// H-FIPS reductions of stage 3 (stage 2's `delta(r^(2))`, `e(r^(2))`).
 pub const FIPS_REDUCTIONS: usize = 2;
 
-/// The `gamma^(3)` layout of one relation: `links` leaf-checked digits (2 under H-u, 1 under
-/// H-exact, 0 under H-FIPS), `bools` Boolean value digits (0 under H-u, 2 under H-exact, 3
+/// The `gamma^(3)` layout of one relation: `links` leaf-checked digits (4 under H-u, 3 under
+/// H-exact, 2 under H-FIPS), `bools` Boolean value digits (0 under H-u, 2 under H-exact, 3
 /// under H-FIPS) and the H-FIPS checks and reductions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gammas {
@@ -119,7 +120,7 @@ impl Gammas {
         1 + self.links + self.bools + self.fips_checks()
     }
 
-    /// Batching coefficients: 48 under H-u, 49 under H-exact, 55 under H-FIPS.
+    /// Batching coefficients: 49 under H-u, 50 under H-exact, 56 under H-FIPS.
     #[must_use]
     pub const fn count(self) -> usize {
         self.first_reduction() + 6 * W1_BITS + 1 + self.fips_reductions() + STACKS + PROJ_INSTANCES
@@ -798,14 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn stage_three_has_forty_eight_instances_in_spec_order() {
-        let spec = check_spec(&CommitmentManifest::for_batch(8).unwrap(), 48);
+    fn stage_three_has_forty_nine_instances_in_spec_order() {
+        let spec = check_spec(&CommitmentManifest::for_batch(8).unwrap(), 49);
         let gammas = Gammas::new(&CommitmentManifest::for_batch(8).unwrap());
-        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (40, 34, 45));
-        assert_eq!((gammas.link(2), gammas.proj_v(), gammas.proj_k()), (3, 46, 47));
+        assert_eq!((gammas.kappa1_r1(5), gammas.kappa3_tau(), gammas.stack(4)), (41, 35, 46));
+        assert_eq!((gammas.link(2), gammas.link(3), gammas.proj_v(), gammas.proj_k()), (3, 4, 47, 48));
         // The projection identity: W (V_lo + 2^16 V_hi + 2^15) on the main domain without an
-        // equality factor; K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15 and the link of K_2 on the
-        // projection domain at r^(2).
+        // equality factor; K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 and the
+        // links of K_2, K_3 on the projection domain at r^(2).
         let v_side = spec.groups.iter().find(|g| g.lanes.first() == Some(&LaneId::Weight(WeightId::Proj))).unwrap();
         assert_eq!((v_side.domain, v_side.eq), (GroupRole::Main, EqPoint::None));
         assert_eq!(
@@ -817,7 +818,15 @@ mod tests {
             k_side.instances.iter().map(|i| (i.gamma, i.terms.clone())).collect::<Vec<_>>(),
             vec![
                 (3, vec![Term::Link(2)]),
-                (47, vec![Term::Affine { weight: None, lanes: vec![(0, 1), (1, 1 << 16), (2, 1 << 32)], constant: (1 << 31) + (1 << 15) }]),
+                (4, vec![Term::Link(3)]),
+                (
+                    48,
+                    vec![Term::Affine {
+                        weight: None,
+                        lanes: vec![(0, 1), (1, 1 << 16), (2, 1 << 32), (3, 1 << 35)],
+                        constant: (1 << 34) + (1 << 31) + (1 << 15)
+                    }]
+                ),
             ]
         );
     }
@@ -842,16 +851,16 @@ mod tests {
     }
 
     #[test]
-    fn h_exact_stage_three_has_forty_nine_instances_with_two_bool_checks() {
+    fn h_exact_stage_three_has_fifty_instances_with_two_bool_checks() {
         let manifest =
             CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
-        let spec = check_spec(&manifest, 49);
+        let spec = check_spec(&manifest, 50);
         let gammas = Gammas::new(&manifest);
-        assert_eq!((gammas.links, gammas.bools), (2, 2));
-        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.b_r1(0)), (3, 4, 5));
-        assert_eq!((gammas.kappa3_tau(), gammas.stack(4)), (35, 46));
-        // H-exact: link[u_hi] at 1 (link[k_2] at 2 is on the projection domain),
-        // bool[bz_hi] at 3, bool[a_z] at 4, all in the eq(r^(2)) group; the w_A group reads
+        assert_eq!((gammas.links, gammas.bools), (3, 2));
+        assert_eq!((gammas.bool(0), gammas.bool(1), gammas.b_r1(0)), (4, 5, 6));
+        assert_eq!((gammas.kappa3_tau(), gammas.stack(4)), (36, 47));
+        // H-exact: link[u_hi] at 1 (link[k_2], link[k_3] at 2, 3 are on the projection
+        // domain), bool[bz_hi] at 4, bool[a_z] at 5, all in the eq(r^(2)) group; the w_A group reads
         // bz_lo, bz_hi, a_z with weights (1, 2^16, 130,915) and constant -98,225.
         let main = &spec.groups[0];
         let lane = |c| main.lane(LaneId::Column(c));
@@ -861,8 +870,8 @@ mod tests {
             terms,
             [
                 (1, vec![Term::Link(lane(Column::U_HI))]),
-                (3, vec![Term::Bool(lane(Column::ZX_HI))]),
-                (4, vec![Term::Bool(lane(Column::A_Z))]),
+                (4, vec![Term::Bool(lane(Column::ZX_HI))]),
+                (5, vec![Term::Bool(lane(Column::A_Z))]),
             ]
         );
         let ring = &spec.groups[1];
@@ -878,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn h_fips_stage_three_has_fifty_five_instances() {
+    fn h_fips_stage_three_has_fifty_six_instances() {
         let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
         let mut rng = SplitMix64::new(4);
         let weights: Vec<Vec<E>> = (0..STACKS)
@@ -887,19 +896,20 @@ mod tests {
         let spec = spec(&manifest, &weights);
         spec.validate().unwrap();
         let gammas = Gammas::new(&manifest);
-        assert_eq!((gammas.links, gammas.bools, gammas.fips), (1, 3, true));
-        assert_eq!(gammas.count(), 55);
-        assert_eq!(spec.gamma_count, 55);
-        // ring 0, link[k_2] 1, bool[bz_hi, l_hi, a_z] 2..4, F1, F2, F45, F7 5..8, reductions
-        // from 9, the delta and e reductions 46, 47, the stacks 48..52, the projection 53, 54.
-        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (5, 8, 9));
-        assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (46, 47));
-        assert_eq!((gammas.stack(0), gammas.stack(4)), (48, 52));
-        assert_eq!((gammas.proj_v(), gammas.proj_k()), (53, 54));
+        assert_eq!((gammas.links, gammas.bools, gammas.fips), (2, 3, true));
+        assert_eq!(gammas.count(), 56);
+        assert_eq!(spec.gamma_count, 56);
+        // ring 0, link[k_2, k_3] 1, 2, bool[bz_hi, l_hi, a_z] 3..5, F1, F2, F45, F7 6..9,
+        // reductions from 10, the delta and e reductions 47, 48, the stacks 49..53, the
+        // projection 54, 55.
+        assert_eq!((gammas.fips_check(0), gammas.fips_check(3), gammas.b_r1(0)), (6, 9, 10));
+        assert_eq!((gammas.fips_reduction(0), gammas.fips_reduction(1)), (47, 48));
+        assert_eq!((gammas.stack(0), gammas.stack(4)), (49, 53));
+        assert_eq!((gammas.proj_v(), gammas.proj_k()), (54, 55));
         // Parts per gamma index: the ring spans the eq(r^(2)) group (one affine part) and the
         // w_A group; F2 two parts, F45 eight, F7 two (main and D_2), the stacks one per column
         // (u_h is stack 2's seventh column).
-        let mut counts = vec![0; 55];
+        let mut counts = vec![0; 56];
         for group in &spec.groups {
             for instance in &group.instances {
                 counts[instance.gamma] += 1;

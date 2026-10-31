@@ -190,11 +190,11 @@ fn h_fips_piop_round_trip_matches_the_tables_and_the_pointwise_identities() {
         check_pointwise(&batch);
         let tables = batch.tables();
         let (proof, _) = prove_tables(&batch, tables, false).expect("honest prover");
-        // The only leaf digit is the projection digit K_2.
-        assert_eq!(proof.stage2.claims.squares.len(), 1);
+        // The leaf digits are the projection digits K_2 and K_3.
+        assert_eq!(proof.stage2.claims.squares.len(), 2);
         assert_eq!(proof.stage2.claims.fips.len(), 2);
-        assert_eq!(proof.stage3.claims.0.len(), 39);
-        assert_eq!(proof.stage2.rounds[0].len(), 4);
+        assert_eq!(proof.stage3.claims.0.len(), 40);
+        assert_eq!(proof.stage2.rounds[0].len(), 5);
         let (points, stage3, _) = verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
         for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
             let point = suffix(&stage3.point, group.logical_vars);

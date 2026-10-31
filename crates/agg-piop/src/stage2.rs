@@ -1,17 +1,19 @@
-//! Stage 2 (degree 4 in relations H-u and H-exact): the level-1 definition and the range
+//! Stage 2 (degree 5 in relations H-u and H-exact): the level-1 definition and the range
 //! leaves of the small digits on the virtual tables `P_Z` (every other range is the lookup
 //! into `T_16` or, for the Boolean digits of H-exact, a zero-check in stage 3).
 //!
 //! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-u has
-//! `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7) and `leaf4[K_2]` (8), H-exact `leaf6[U_hi]` (6) and
-//! `leaf4[K_2]` (7) (`docs/h-exact.md`). `K_2` is the top digit of the projection outputs of
-//! `v` (`projection`); its leaf is on the projection domain at the suffix of `r^(1)`. After
+//! `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7) and `leaf8[K_2]`, `leaf8[K_3]` (8, 9), H-exact
+//! `leaf6[U_hi]` (6) and `leaf8[K_2]`, `leaf8[K_3]` (7, 8) (`docs/h-exact.md`). `K_2, K_3`
+//! are the top digits of the projection outputs of `v` (`projection`); their leaves are on the
+//! projection domain at the suffix of `r^(1)`. After
 //! the terminal claims the prover sends the shared claim `c` of the projection identity.
-//! The leaf of the six-valued `U_hi` (`Q_6`, degree 3 in `P_Z`) sets the stage degree
-//! `1 + 3 = 4` in both relations.
+//! The leaf of the eight-valued `K_2, K_3` (`Q_8`, degree 4 in `P_Z`) sets the stage degree
+//! `1 + 4 = 5` in both relations.
 //!
-//! Relation H-FIPS (`docs/h-exact.md`) has `leaf4[K_2]` (gamma 6) as its only leaf and adds
-//! one instance after it (gamma 7): the degree-3 zero-check `F3 = e (e - 1)(e - delta)` at `r^(1)`
+//! Relation H-FIPS (`docs/h-exact.md`) has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
+//! leaves and adds one instance after them (gamma 8): the degree-3 zero-check
+//! `F3 = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
 //! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
 //! stage 3.
@@ -36,13 +38,13 @@ use crate::OpeningField as E;
 
 /// Stage number.
 pub const STAGE: usize = 2;
-/// Message degree (`leaf6[U_hi]`: the `eq` factor times `Q_6(P_Z)`).
-pub const DEGREE: usize = 4;
+/// Message degree (`leaf8[K_2]`: the `eq` factor times `Q_8(P_Z)`).
+pub const DEGREE: usize = 5;
 /// H-FIPS instances of stage 2 (`F3`).
 pub const FIPS_INSTANCES: usize = 1;
 
-/// Batching coefficients: 9 under H-u, 8 under H-exact and H-FIPS (the leaf of `K_2` in
-/// each).
+/// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
+/// and `K_3` in each).
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
     W1_BITS + manifest.leaf_digits().len() + if manifest.is_fips() { FIPS_INSTANCES } else { 0 }
@@ -112,6 +114,7 @@ pub struct Stage2Output {
 fn leaf_poly(digit: &Digit) -> LeafPoly {
     match digit.base {
         6 => LeafPoly::Q6,
+        8 => LeafPoly::Q8,
         4 => LeafPoly::Q4,
         other => panic!("unsupported leaf base {other}"),
     }
@@ -308,13 +311,13 @@ mod tests {
     use jolt_field::Ring;
 
     #[test]
-    fn h_exact_stage_two_has_eight_instances_leaf6_and_the_k_leaf() {
+    fn h_exact_stage_two_has_nine_instances_leaf6_and_the_k_leaves() {
         let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(gamma_count(&manifest), 8);
+        assert_eq!(gamma_count(&manifest), 9);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 8);
+        assert_eq!(instances, 9);
         let leaves = &spec.groups[1];
         let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
         assert_eq!(leaves.instances.len(), 1);
@@ -322,9 +325,11 @@ mod tests {
         assert_eq!(leaves.instances[0].terms, vec![Term::Leaf(u_hi, LeafPoly::Q6)]);
         let k_leaf = &spec.groups[2];
         assert_eq!((k_leaf.domain, k_leaf.eq), (GroupRole::Proj, EqPoint::R1));
-        assert_eq!(k_leaf.lanes, vec![LaneId::DigitSquare(Column::K_2)]);
+        assert_eq!(k_leaf.lanes, vec![LaneId::DigitSquare(Column::K_2), LaneId::DigitSquare(Column::K_3)]);
         assert_eq!(k_leaf.instances[0].gamma, 7);
-        assert_eq!(k_leaf.instances[0].terms, vec![Term::Leaf(0, LeafPoly::Q4)]);
+        assert_eq!(k_leaf.instances[0].terms, vec![Term::Leaf(0, LeafPoly::Q8)]);
+        assert_eq!(k_leaf.instances[1].gamma, 8);
+        assert_eq!(k_leaf.instances[1].terms, vec![Term::Leaf(1, LeafPoly::Q8)]);
         assert_eq!(spec.degree, DEGREE);
     }
 
@@ -333,18 +338,18 @@ mod tests {
         let manifest = CommitmentManifest::for_relation(8, crate::manifest::Relation::HFips).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
-        assert_eq!(gamma_count(&manifest), 8);
-        // def_y1, the leaf of K_2 on the projection domain (H-FIPS has no main-domain leaf
-        // digit) and F3 at r^(1).
+        assert_eq!(gamma_count(&manifest), 9);
+        // def_y1, the leaves of K_2, K_3 on the projection domain (H-FIPS has no
+        // main-domain leaf digit) and F3 at r^(1).
         assert_eq!(spec.groups.len(), 3);
-        assert_eq!(spec.groups[1].lanes, vec![LaneId::DigitSquare(Column::K_2)]);
+        assert_eq!(spec.groups[1].lanes, vec![LaneId::DigitSquare(Column::K_2), LaneId::DigitSquare(Column::K_3)]);
         assert_eq!(spec.groups[1].instances[0].gamma, 6);
         let f3 = &spec.groups[2];
         assert_eq!(f3.eq, EqPoint::R1);
         assert_eq!(f3.lanes, vec![LaneId::Column(Column::DELTA), LaneId::Column(Column::WRAP)]);
-        assert_eq!(f3.instances[0].gamma, 7);
+        assert_eq!(f3.instances[0].gamma, 8);
         assert_eq!(f3.instances[0].terms, vec![fips_edge_term()]);
-        assert_eq!(fips_edge_term().degree() + 1, DEGREE);
+        assert!(fips_edge_term().degree() + 1 <= DEGREE);
         // F3 vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
         for delta in -1_i64..=1 {
             for e in -3_i64..=3 {
@@ -356,18 +361,20 @@ mod tests {
     }
 
     #[test]
-    fn stage_two_has_nine_instances_in_spec_order() {
+    fn stage_two_has_ten_instances_in_spec_order() {
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let spec = spec(&manifest);
         spec.validate().unwrap();
         assert_eq!(spec.groups.len(), 3);
         let instances: usize = spec.groups.iter().map(|g| g.instances.len()).sum();
-        assert_eq!(instances, 9);
-        // leaf4[K_2] on the projection domain at the suffix of r^(1), gamma 8.
+        assert_eq!(instances, 10);
+        // leaf8[K_2], leaf8[K_3] on the projection domain at the suffix of r^(1), gamma 8, 9.
         let k_leaf = &spec.groups[2];
         assert_eq!((k_leaf.domain, k_leaf.eq), (GroupRole::Proj, EqPoint::R1));
         assert_eq!(k_leaf.instances[0].gamma, gamma_leaf(2));
-        assert_eq!(k_leaf.instances[0].terms, vec![Term::Leaf(0, LeafPoly::Q4)]);
+        assert_eq!(k_leaf.instances[0].terms, vec![Term::Leaf(0, LeafPoly::Q8)]);
+        assert_eq!(k_leaf.instances[1].gamma, gamma_leaf(3));
+        assert_eq!(k_leaf.instances[1].terms, vec![Term::Leaf(1, LeafPoly::Q8)]);
         let leaves = &spec.groups[1];
         let z_hi = leaves.lane(LaneId::DigitSquare(Column::Z_HI));
         let u_hi = leaves.lane(LaneId::DigitSquare(Column::U_HI));
@@ -384,7 +391,7 @@ mod tests {
                 }
             }
         }
-        // The degree is tight: leaf6[U_hi] reaches it.
+        // The degree is tight: leaf8[K_2] reaches it.
         assert_eq!(max, DEGREE);
         assert_eq!(DEGREE, crate::transcript::STAGE_DEGREES[STAGE - 1]);
     }

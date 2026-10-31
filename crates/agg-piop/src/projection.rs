@@ -5,13 +5,14 @@
 //! `pos mod 8` of byte `128 o + pos / 8`). The prover commits, in round 2, the outputs
 //! `k_{o,i} = sum_pos Psi_o(pos) v(pos, i)` on the projection domain `D_k` (cell
 //! `o + 128 i`, `7 + d_sig` variables) through their digits
-//! `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` (`manifest::K16_DIGITS`): `K_0, K_1` are
-//! looked up in `T_16` (stack 4), `K_2 in [-2, 1]` has a leaf and a link. Stage 3 proves
+//! `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15`
+//! (`manifest::K16_DIGITS`): `K_0, K_1` are looked up in `T_16` (stack 4), `K_2, K_3 in
+//! [-4, 3]` have a leaf and a link each. Stage 3 proves
 //! `sum_x W(x) v(x) = c = sum_y eq(r', y) k(y)` with `r'` the `D_k` suffix of `r^(2)` and the
 //! rank-one weight `W(pos, i) = P(pos) eq(r'_sig, i)`, `P(pos) = sum_o eq(r'_o, o) Psi_o(pos)`.
 //!
-//! Soundness (`docs/soundness.md`, the projection bound): `k in [-2^33, 2^33)` for every row certifies
-//! `|v|_c <= 2^34` except with probability `2^-128` over `Psi`, enough for the lifting
+//! Soundness (`docs/soundness.md`, the projection bound): `k in [-2^37, 2^37)` for every row certifies
+//! `|v|_c <= 2^38` except with probability `2^-128` over `Psi`, enough for the lifting
 //! bound.
 
 use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table};
@@ -71,18 +72,18 @@ pub fn outputs(psi: &[u8], records: usize, v: impl Fn(usize, usize) -> i64 + Syn
 }
 
 /// The committed digits of the projection outputs: `K_0 | K_1` stacked (lookup stack 4,
-/// `2 * 2^d_k` cells) and `K_2` (`2^d_k` cells), at cell `o + 128 i`.
+/// `2 * 2^d_k` cells) and `K_2 | K_3` (`2 * 2^d_k` cells), at cell `o + 128 i`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionTables {
     /// `K_0` then `K_1` (stored balanced, looked up as `K + 2^15`).
     pub stacked: Vec<i32>,
-    /// `K_2 in [-2, 1]`.
+    /// `K_2` then `K_3` (`[-4, 3]` each, leaf and link).
     pub top: Vec<i8>,
 }
 
 impl ProjectionTables {
     /// The honest digits of the outputs `k` (record-major, `PROJ_ROWS` per record); the
-    /// prover aborts when some `k` leaves `[-2^33, 2^33)` (completeness only:
+    /// prover aborts when some `k` leaves `[-2^37, 2^37)` (completeness only:
     /// `docs/spec.md`, the projection definition) and names the first such record.
     ///
     /// # Errors
@@ -99,19 +100,22 @@ impl ProjectionTables {
             });
         }
         let mut stacked = vec![0_i32; 2 * cells];
-        let mut top = vec![0_i8; cells];
+        let mut top = vec![0_i8; 2 * cells];
         let (low, high) = stacked.split_at_mut(cells);
+        let (k2, k3) = top.split_at_mut(cells);
         low.par_iter_mut()
             .zip(high.par_iter_mut())
-            .zip(top.par_iter_mut())
+            .zip(k2.par_iter_mut())
+            .zip(k3.par_iter_mut())
             .zip(k.par_iter())
-            .for_each(|(((k0, k1), k2), &value)| {
-                let mut digits = [0_i64; 3];
+            .for_each(|((((k0, k1), k2), k3), &value)| {
+                let mut digits = [0_i64; 4];
                 K16_DIGITS.decompose_into(value, &mut digits);
                 debug_assert!(K16_DIGITS.in_alphabets(&digits), "k in range has in-alphabet digits");
                 *k0 = digits[0] as i32;
                 *k1 = digits[1] as i32;
                 *k2 = digits[2] as i8;
+                *k3 = digits[3] as i8;
             });
         Ok(Self { stacked, top })
     }
@@ -136,24 +140,26 @@ impl ProjectionTables {
         Self::encode(manifest, &k)
     }
 
-    /// The three `G_k` polynomials in manifest order.
+    /// The four `G_k` polynomials in manifest order.
     #[must_use]
     pub fn columns(&self) -> Vec<Cells<'_>> {
-        let cells = self.top.len();
+        let cells = self.stacked.len() / 2;
         vec![
             Cells::Wide(&self.stacked[..cells]),
             Cells::Wide(&self.stacked[cells..]),
-            Cells::Narrow(&self.top),
+            Cells::Narrow(&self.top[..cells]),
+            Cells::Narrow(&self.top[cells..]),
         ]
     }
 
     /// The outputs recomposed from the digits (any cell values), as field elements.
     #[must_use]
     pub fn value(&self, y: usize) -> E {
-        let cells = self.top.len();
+        let cells = self.stacked.len() / 2;
         E::from_i64(i64::from(self.stacked[y]))
             + E::from_i64(i64::from(self.stacked[cells + y]) << 16)
             + E::from_i64(i64::from(self.top[y]) << 32)
+            + E::from_i64(i64::from(self.top[cells + y]) << 35)
             + E::from_i64(K16_DIGITS.constant())
     }
 }
@@ -259,10 +265,18 @@ mod tests {
         for (y, &value) in k.iter().enumerate() {
             assert_eq!(tables.value(y), E::from_i64(value));
         }
-        // The digits of zero: (-2^15, -2^15, 0).
+        // The digits of zero: (-2^15, -2^15, -4, 0).
         let zero = probes.len();
-        assert_eq!((tables.stacked[zero], tables.stacked[cells + zero], tables.top[zero]), (-(1 << 15), -(1 << 15), 0));
-        assert_eq!(K16_DIGITS.constant(), (1 << 31) + (1 << 15));
+        assert_eq!(
+            (
+                tables.stacked[zero],
+                tables.stacked[cells + zero],
+                tables.top[zero],
+                tables.top[cells + zero]
+            ),
+            (-(1 << 15), -(1 << 15), -4, 0)
+        );
+        assert_eq!(K16_DIGITS.constant(), (1 << 34) + (1 << 31) + (1 << 15));
         assert_eq!(K16_DIGITS.range(), (-bound, bound - 1));
         for outside in [bound, -bound - 1, 1 << 40] {
             k[PROJ_ROWS + 5] = outside;
@@ -271,6 +285,57 @@ mod tests {
                 Err(SourceTableError::ProjectionRange { record: 1, row: 5, value: outside })
             );
         }
+    }
+
+    #[test]
+    fn the_projection_digits_round_trip_the_full_range() {
+        let manifest = CommitmentManifest::for_batch(8).unwrap();
+        let cells = manifest.group(GroupRole::Proj).logical_cells();
+        let bound = crate::manifest::PROJ_BOUND;
+        let probes = [-bound, -bound + 1, -(1 << 32), -1, 0, 1, bound - 2, bound - 1];
+        let mut k = vec![0_i64; cells];
+        k[..probes.len()].copy_from_slice(&probes);
+        let tables = ProjectionTables::encode(&manifest, &k).unwrap();
+        for (y, &value) in probes.iter().enumerate() {
+            assert_eq!(tables.value(y), E::from_i64(value));
+            let digits = [
+                i64::from(tables.stacked[y]),
+                i64::from(tables.stacked[cells + y]),
+                i64::from(tables.top[y]),
+                i64::from(tables.top[cells + y]),
+            ];
+            assert_eq!(K16_DIGITS.compose(&digits), value);
+            assert!(K16_DIGITS.in_alphabets(&digits));
+        }
+        for outside in [bound, bound + 1, -bound - 1] {
+            k[PROJ_ROWS + 3] = outside;
+            assert!(matches!(
+                ProjectionTables::encode(&manifest, &k),
+                Err(SourceTableError::ProjectionRange { record: 1, row: 3, value }) if value == outside
+            ));
+        }
+    }
+
+    #[test]
+    fn a_coordinate_above_the_certified_bound_leaves_the_range_with_probability_one_half() {
+        // `v` differs from zero at one coordinate whose value exceeds 2B = 2^38, so a row
+        // passes only if that coordinate's bit is 0; at most half of the 128 rows pass and
+        // the batch fails except with probability 2^-128.
+        let psi = test_psi(5);
+        let x0 = 37;
+        let v = 2_i64.pow(38) + 1;
+        let bound = crate::manifest::PROJ_BOUND;
+        let manifest = CommitmentManifest::for_batch(1).unwrap();
+        let records = manifest.padded_records();
+        let k = outputs(&psi, records, |i, pos| if i == 0 && pos == x0 { v } else { 0 });
+        let passing = k.iter().filter(|&&value| value.abs() <= bound).count();
+        let ones = (0..PROJ_ROWS).filter(|&o| psi_bit(&psi, o, x0)).count();
+        assert_eq!(passing, (records - 1) * PROJ_ROWS + (PROJ_ROWS - ones));
+        assert!(k.iter().any(|&value| value.abs() > bound));
+        assert!(matches!(
+            ProjectionTables::encode(&manifest, &k),
+            Err(SourceTableError::ProjectionRange { record: 0, .. })
+        ));
     }
 
     #[test]

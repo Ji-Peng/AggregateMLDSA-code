@@ -312,24 +312,25 @@ mod tests {
         assert_eq!(Stage1Claims::from_slice(&s1.to_vec()), Some(s1.clone()));
         let manifest = CommitmentManifest::for_batch(8).unwrap();
         let exact = CommitmentManifest::for_relation(8, crate::manifest::Relation::HExact).unwrap();
-        assert_eq!((Stage2Claims::len(&manifest), Stage2Claims::len(&exact)), (9, 8));
-        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (34, 35));
+        assert_eq!((Stage2Claims::len(&manifest), Stage2Claims::len(&exact)), (10, 9));
+        assert_eq!((Stage3Claims::len(&manifest), Stage3Claims::len(&exact)), (35, 36));
         for m in [&manifest, &exact] {
             let s2 = Stage2Claims::from_slice(m, &point(&mut rng, Stage2Claims::len(m))).unwrap();
             assert_eq!(Stage2Claims::from_slice(m, &s2.to_vec()), Some(s2.clone()));
         }
-        assert!(Stage2Claims::from_slice(&exact, &point(&mut rng, 9)).is_none());
-        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 34)).unwrap();
+        assert!(Stage2Claims::from_slice(&exact, &point(&mut rng, 8)).is_none());
+        let s3 = Stage3Claims::from_slice(&manifest, &point(&mut rng, 35)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&manifest, GroupRole::Level2), 18);
-        // G_3 has one claim (its zero polynomials have none), then G_k's three.
+        // G_3 has one claim (its zero polynomials have none), then G_k's four.
         assert_eq!(s3.group(&manifest, GroupRole::Level3), &s3.0[30..31]);
         assert_eq!(s3.group(&manifest, GroupRole::Proj), &s3.0[31..]);
         assert_eq!(s3.column(&manifest, Column::K_2), s3.0[33]);
+        assert_eq!(s3.column(&manifest, Column::K_3), s3.0[34]);
         assert_eq!(s3.column(&manifest, Column::Parity2(1)), s3.0[19]);
         assert_eq!(s3.column(&manifest, Column::W1Bit(0)), s3.0[6]);
-        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..33]).is_none());
+        assert!(Stage3Claims::from_slice(&manifest, &s3.0[..34]).is_none());
         // H-exact: a_z is the last main-domain claim, every later group moves by one.
-        let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 35)).unwrap();
+        let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 36)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&exact, GroupRole::Level2), 19);
         assert_eq!(x3.column(&exact, Column::A_Z), x3.0[12]);
         assert_eq!(x3.column(&exact, Column::W1Bit(0)), x3.0[6]);

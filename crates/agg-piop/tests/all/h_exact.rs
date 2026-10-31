@@ -161,9 +161,9 @@ fn h_exact_piop_round_trip_matches_the_tables_and_the_pointwise_identities() {
         assert!(w1_table(&batch.main.bit_lanes(manifest)).iter().all(|&w| (0..44).contains(&w)));
         // The honest PIOP verifies and every claim is the extension of its table.
         let (proof, _) = prove_tables(&batch, tables, false).expect("honest prover");
-        assert_eq!(proof.stage2.claims.squares.len(), 2);
-        assert_eq!(proof.stage3.claims.0.len(), 35);
-        assert_eq!(proof.stage2.rounds[0].len(), 4);
+        assert_eq!(proof.stage2.claims.squares.len(), 3);
+        assert_eq!(proof.stage3.claims.0.len(), 36);
+        assert_eq!(proof.stage2.rounds[0].len(), 5);
         let (points, stage3, _) = verify_tables(&batch, batch.bridge.public_y(), &proof).expect("verifies");
         for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
             let point = suffix(&stage3.point, group.logical_vars);

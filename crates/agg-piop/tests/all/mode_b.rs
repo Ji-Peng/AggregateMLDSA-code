@@ -209,19 +209,24 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         const PSI_EVENT: usize = 6;
         let mut flipped = output.proof.clone();
         flipped.flock_commitments[0][5 * 768 + 300] ^= 0x10;
+        // The changed commitment moves the bridge seed, so either the projection site's
+        // work nonce or the Keccak check rejects.
         assert!(matches!(
             rejected(verify(&flipped)),
-            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
         ));
         let mut wide = output.proof.clone();
         wide.flock_commitments[0][9 * 768] |= 0x3f;
         assert!(matches!(
             rejected(verify(&wide)),
-            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
         ));
         let mut short = output.proof.clone();
         short.flock_commitments[0].truncate(768 * 255);
-        assert!(matches!(rejected(verify(&short)), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(verify(&short)),
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
+        ));
         // A changed c~ fails the hash; a changed final vector fails the projection.
         let mut c_tilde = output.proof.clone();
         c_tilde.c_tilde[17][3] ^= 1;
@@ -330,7 +335,10 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         assert!(matches!(rejected(verify(&long)), VerifyError::Wire(_)));
         // The instance record binds the plan: a verifier whose plan has a tie site derives another sd.
         let other_plan = verify_timed(&public, &bytes, &bridge, &WithTie, FlockProfile::PublicBits, Relation::Hu, None);
-        assert!(matches!(rejected(other_plan), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(other_plan),
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
+        ));
 
         // Records, profile and framing.
         let mut swapped = public.clone();
@@ -354,7 +362,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             rejected(other_profile),
-            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+            VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }) | VerifyError::Keccak(0)
         ));
         // A Keccak verifier for another profile is refused before the proof is read.
         let mismatch = verify_timed(
@@ -423,11 +431,11 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
         let _ = round_trip_as(Relation::HExact, 60, 4, 0xe064);
         let (fixture, bridge, output, bytes) = round_trip_as(Relation::HExact, 200, 56, 0xe256);
         let public = fixture.public();
-        assert_eq!(output.proof.stage2.claims.squares.len(), 2);
-        assert_eq!(output.proof.stage3.claims.0.len(), 35);
-        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 8 + 1 + 35
+        assert_eq!(output.proof.stage2.claims.squares.len(), 3);
+        assert_eq!(output.proof.stage3.claims.0.len(), 36);
+        // 256 records: d_main = 18 rounds of 4 + 5 + 3 elements, 13 + 18 + 6 + 9 + 1 + 36
         // claims (the projection claim c after stage 2).
-        assert_eq!(output.proof.size().piop, 16 * (81 + 11 * 18));
+        assert_eq!(output.proof.size().piop, 16 * (83 + 12 * 18));
         let as_hu = verify_mode_b(&public, &bytes, &bridge, Relation::Hu, None);
         assert!(matches!(
             rejected(as_hu),
@@ -516,11 +524,11 @@ fn mode_b_h_fips_round_trips_and_cross_relation_rejections() {
         let bytes = output.proof.to_bytes();
         let public = fixture.public();
         assert_eq!(bytes[2], 2);
-        assert_eq!(output.proof.stage2.claims.squares.len(), 1);
+        assert_eq!(output.proof.stage2.claims.squares.len(), 2);
         assert_eq!(output.proof.stage2.claims.fips.len(), 2);
-        assert_eq!(output.proof.stage3.claims.0.len(), 39);
-        // 256 records: d_main = 18 rounds of 4 + 4 + 3 elements, 13 + 18 + 6 + 9 + 1 + 39 claims.
-        assert_eq!(output.proof.size().piop, 16 * (86 + 11 * 18));
+        assert_eq!(output.proof.stage3.claims.0.len(), 40);
+        // 256 records: d_main = 18 rounds of 4 + 5 + 3 elements, 13 + 18 + 6 + 10 + 1 + 40 claims.
+        assert_eq!(output.proof.size().piop, 16 * (88 + 12 * 18));
         eprintln!("N = 256, H-FIPS (with two weight-80 corner records): aggregate {} bytes, prover {}", bytes.len(), output.timings);
         let report = verify_mode_b(&public, &bytes, &bridge, Relation::HFips, None);
         report_line("N = 256 H-FIPS: verifier uncached", &report);

@@ -106,7 +106,7 @@ fn commit_and_open(n_own: usize, n_shared: usize, seed: u64, suffix: bool) {
         claims.iter().map(|c| c.values.len()).sum::<usize>(),
         proof.len()
     );
-    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 52);
+    assert_eq!(claims.iter().map(|c| c.values.len()).sum::<usize>(), 53);
     let values: Vec<Vec<OpeningField>> = claims.iter().map(|c| c.values.clone()).collect();
     check_virtual_claims(&batch, &points, &values);
 

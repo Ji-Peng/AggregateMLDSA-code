@@ -58,8 +58,8 @@ pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
             bases.resize(Group::Level3.num_polynomials(relation), 1);
             bases
         }
-        // K_0, K_1 (16-bit digits) and K_2 (base 4).
-        Group::Proj => vec![wide, wide, 4],
+        // K_0, K_1 (16-bit digits) and K_2, K_3 (base 8).
+        Group::Proj => vec![wide, wide, 8, 8],
         Group::Mult => vec![16; 7],
     }
 }

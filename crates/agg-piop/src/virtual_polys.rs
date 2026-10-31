@@ -200,7 +200,7 @@ fn shifted_product(p: E, roots: &[i64]) -> E {
         .fold(E::from_i64(1), |acc, &root| acc * (p - E::from_i64(root)))
 }
 
-/// The leaf predicate `Q_b(P)` of a base-4 or base-6 digit: zero on
+/// The leaf predicate `Q_b(P)` of a base-4, base-6 or base-8 digit: zero on
 /// `P = Z (Z + 1)` exactly when `Z` is in the balanced alphabet.
 ///
 /// # Panics
@@ -210,7 +210,8 @@ pub fn leaf(base: u32, p: E) -> E {
     match base {
         4 => shifted_product(p, &[0, 2]),
         6 => shifted_product(p, &[0, 2, 6]),
-        _ => panic!("leaf-checked digits have base 4 or 6, not {base}"),
+        8 => shifted_product(p, &[0, 2, 6, 12]),
+        _ => panic!("leaf-checked digits have base 4, 6 or 8, not {base}"),
     }
 }
 
@@ -378,7 +379,7 @@ mod tests {
         for z in i64::from(i8::MIN)..=i64::from(i8::MAX) {
             let p = digit_square(lift(z));
             assert_eq!(p, E::from_i128(p_of(z)));
-            for base in [4_u32, 6] {
+            for base in [4_u32, 6, 8] {
                 let inside = Alphabet::Balanced(base).contains(z);
                 assert_eq!(leaf(base, p) == E::zero(), inside, "base {base} digit {z}");
                 assert_eq!(leaf_vanishes(base, p_of(z)), inside);
