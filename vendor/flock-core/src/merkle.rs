@@ -134,6 +134,23 @@ impl GroupLeafHasher {
             blake3_groups::absorb_portable(state, lines, 16 * full, positions, words, flags, g == 0);
             return;
         }
+        #[cfg(target_arch = "x86_64")]
+        if blake3_groups::x8_available() {
+            // Two eight-lane batches per sixteen-position state block, so the
+            // state layout stays the one `state_len` and `finish` use.
+            let full = positions / 16;
+            for b in 0..full {
+                let st: &mut [u32; 128] = (&mut state[128 * b..128 * (b + 1)]).try_into().expect("128 words");
+                // SAFETY: AVX2 is available (checked above); the sixteen lines of
+                // batch b are `lines[64 b .. 64 (b + 1)]`, inside the slice.
+                unsafe {
+                    blake3_groups::absorb8(st, lines[64 * b..].as_ptr(), words, flags, g == 0, LANES_PER_GROUP, 0);
+                    blake3_groups::absorb8(st, lines[64 * b + 32..].as_ptr(), words, flags, g == 0, LANES_PER_GROUP, 8);
+                }
+            }
+            blake3_groups::absorb_portable(state, lines, 16 * full, positions, words, flags, g == 0);
+            return;
+        }
         blake3_groups::absorb_portable(state, lines, 0, positions, words, flags, g == 0);
     }
 
@@ -159,6 +176,24 @@ impl GroupLeafHasher {
                     // SAFETY: feature detection passed; sixteen strided group lines are
                     // inside the batch. The final partial group is masked by words.
                     unsafe { blake3_groups::absorb16(&mut state, batch[g * 4..].as_ptr(), words, flags, g == 0, self.lanes) };
+                    continue;
+                }
+                #[cfg(target_arch = "x86_64")]
+                if hashes.len() == 16 && blake3_groups::x8_available() {
+                    // SAFETY: feature detection passed; two eight-lane batches of
+                    // strided group lines are inside the batch.
+                    unsafe {
+                        blake3_groups::absorb8(&mut state, batch[g * 4..].as_ptr(), words, flags, g == 0, self.lanes, 0);
+                        blake3_groups::absorb8(
+                            &mut state,
+                            batch[g * 4 + 8 * self.lanes..].as_ptr(),
+                            words,
+                            flags,
+                            g == 0,
+                            self.lanes,
+                            8,
+                        );
+                    }
                     continue;
                 }
                 for i in 0..hashes.len() {
@@ -198,6 +233,183 @@ mod blake3_groups {
     pub(super) const CHUNK_START: u32 = 1;
     pub(super) const CHUNK_END: u32 = 2;
     const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+    /// Whether the eight-lane AVX2 path may run (`FLOCK_SIMD` and test masks apply).
+    pub(super) fn x8_available() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::simd::has(crate::simd::AVX2)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_epi32, _mm256_loadu_si256, _mm256_maskload_epi32,
+        _mm256_or_si256, _mm256_permute2x128_si256, _mm256_set1_epi32, _mm256_storeu_si256,
+        _mm256_setzero_si256, _mm256_slli_epi32, _mm256_srli_epi32, _mm256_unpackhi_epi32,
+        _mm256_unpackhi_epi64, _mm256_unpacklo_epi32, _mm256_unpacklo_epi64, _mm256_xor_si256,
+    };
+
+    /// Rotate each 32-bit lane right by a constant (AVX2 has no `vprord`).
+    #[cfg(target_arch = "x86_64")]
+    macro_rules! ror8 {
+        ($x:expr, $n:literal) => {
+            _mm256_or_si256(
+                _mm256_srli_epi32::<$n>($x),
+                _mm256_slli_epi32::<{ 32 - $n }>($x),
+            )
+        };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn g8(v: &mut [__m256i; 16], a: usize, b: usize, c: usize, d: usize, mx: __m256i, my: __m256i) {
+        v[a] = _mm256_add_epi32(_mm256_add_epi32(v[a], v[b]), mx);
+        v[d] = ror8!(_mm256_xor_si256(v[d], v[a]), 16);
+        v[c] = _mm256_add_epi32(v[c], v[d]);
+        v[b] = ror8!(_mm256_xor_si256(v[b], v[c]), 12);
+        v[a] = _mm256_add_epi32(_mm256_add_epi32(v[a], v[b]), my);
+        v[d] = ror8!(_mm256_xor_si256(v[d], v[a]), 8);
+        v[c] = _mm256_add_epi32(v[c], v[d]);
+        v[b] = ror8!(_mm256_xor_si256(v[b], v[c]), 7);
+    }
+
+    /// [`compress`] of eight states at once.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn compress8(cv: &[__m256i; 8], m: &[__m256i; 16], block_len: u32, flags: u32) -> [__m256i; 8] {
+        let mut v = [_mm256_setzero_si256(); 16];
+        v[..8].copy_from_slice(cv);
+        for i in 0..4 {
+            v[8 + i] = _mm256_set1_epi32(IV[i] as i32);
+        }
+        v[14] = _mm256_set1_epi32(block_len as i32);
+        v[15] = _mm256_set1_epi32(flags as i32);
+        let mut m = *m;
+        for round in 0..7 {
+            g8(&mut v, 0, 4, 8, 12, m[0], m[1]);
+            g8(&mut v, 1, 5, 9, 13, m[2], m[3]);
+            g8(&mut v, 2, 6, 10, 14, m[4], m[5]);
+            g8(&mut v, 3, 7, 11, 15, m[6], m[7]);
+            g8(&mut v, 0, 5, 10, 15, m[8], m[9]);
+            g8(&mut v, 1, 6, 11, 12, m[10], m[11]);
+            g8(&mut v, 2, 7, 8, 13, m[12], m[13]);
+            g8(&mut v, 3, 4, 9, 14, m[14], m[15]);
+            if round < 6 {
+                let p = m;
+                for i in 0..16 {
+                    m[i] = p[MSG_PERMUTATION[i]];
+                }
+            }
+        }
+        core::array::from_fn(|i| _mm256_xor_si256(v[i], v[i + 8]))
+    }
+
+    /// 8 x 8 transpose of 32-bit words: on return `r[w]` lane `i` is input `r[i]`
+    /// lane `w`.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn transpose8(r: &mut [__m256i; 8]) {
+        let t0 = _mm256_unpacklo_epi32(r[0], r[1]);
+        let t1 = _mm256_unpackhi_epi32(r[0], r[1]);
+        let t2 = _mm256_unpacklo_epi32(r[2], r[3]);
+        let t3 = _mm256_unpackhi_epi32(r[2], r[3]);
+        let t4 = _mm256_unpacklo_epi32(r[4], r[5]);
+        let t5 = _mm256_unpackhi_epi32(r[4], r[5]);
+        let t6 = _mm256_unpacklo_epi32(r[6], r[7]);
+        let t7 = _mm256_unpackhi_epi32(r[6], r[7]);
+        let u0 = _mm256_unpacklo_epi64(t0, t2);
+        let u1 = _mm256_unpackhi_epi64(t0, t2);
+        let u2 = _mm256_unpacklo_epi64(t1, t3);
+        let u3 = _mm256_unpackhi_epi64(t1, t3);
+        let u4 = _mm256_unpacklo_epi64(t4, t6);
+        let u5 = _mm256_unpackhi_epi64(t4, t6);
+        let u6 = _mm256_unpacklo_epi64(t5, t7);
+        let u7 = _mm256_unpackhi_epi64(t5, t7);
+        r[0] = _mm256_permute2x128_si256::<0x20>(u0, u4);
+        r[4] = _mm256_permute2x128_si256::<0x31>(u0, u4);
+        r[1] = _mm256_permute2x128_si256::<0x20>(u1, u5);
+        r[5] = _mm256_permute2x128_si256::<0x31>(u1, u5);
+        r[2] = _mm256_permute2x128_si256::<0x20>(u2, u6);
+        r[6] = _mm256_permute2x128_si256::<0x31>(u2, u6);
+        r[3] = _mm256_permute2x128_si256::<0x20>(u3, u7);
+        r[7] = _mm256_permute2x128_si256::<0x31>(u3, u7);
+    }
+
+    /// One batch of eight consecutive leaves of one lane group: `lines` points at
+    /// their eight 64-byte lines, `stride` F128 apart; the results are written to
+    /// positions `k0 .. k0 + 8` of each 16-wide state row.
+    ///
+    /// # Safety
+    /// AVX2 is available; eight lines separated by `stride` words are readable;
+    /// `k0` is 0 or 8 and `state` holds 8 x 16 words.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn absorb8(
+        state: &mut [u32; 128],
+        lines: *const F128,
+        words: usize,
+        flags: u32,
+        first: bool,
+        stride: usize,
+        k0: usize,
+    ) {
+        debug_assert!((1..=16).contains(&words) && (k0 == 0 || k0 == 8));
+        let mask = |n: usize| -> __m256i {
+            let bits: [i32; 8] = core::array::from_fn(|i| if i < n { -1 } else { 0 });
+            // SAFETY: the array is eight readable 32-bit words.
+            unsafe { _mm256_loadu_si256(bits.as_ptr().cast()) }
+        };
+        let lo_words = words.min(8);
+        let hi_words = words.saturating_sub(8).min(8);
+        let mut lo = [_mm256_setzero_si256(); 8];
+        let mut hi = [_mm256_setzero_si256(); 8];
+        // SAFETY: line i is four F128 words (64 bytes) inside the caller's range.
+        unsafe {
+            for i in 0..8 {
+                let p = lines.add(i * stride).cast::<i32>();
+                lo[i] = if lo_words == 8 {
+                    _mm256_loadu_si256(p.cast())
+                } else {
+                    _mm256_maskload_epi32(p, mask(lo_words))
+                };
+                hi[i] = if hi_words == 8 {
+                    _mm256_loadu_si256(p.add(8).cast())
+                } else if hi_words == 0 {
+                    _mm256_setzero_si256()
+                } else {
+                    _mm256_maskload_epi32(p.add(8), mask(hi_words))
+                };
+            }
+        }
+        transpose8(&mut lo);
+        transpose8(&mut hi);
+        let mut m = [_mm256_setzero_si256(); 16];
+        m[..8].copy_from_slice(&lo);
+        m[8..].copy_from_slice(&hi);
+        let mut cv = [_mm256_setzero_si256(); 8];
+        for (w, c) in cv.iter_mut().enumerate() {
+            // SAFETY: `state` holds 8 x 16 words and k0 + 8 <= 16.
+            *c = if first {
+                _mm256_set1_epi32(IV[w] as i32)
+            } else {
+                unsafe { _mm256_loadu_si256(state[16 * w + k0..].as_ptr().cast()) }
+            };
+        }
+        let out = compress8(&cv, &m, 4 * words as u32, flags);
+        for (w, o) in out.iter().enumerate() {
+            // SAFETY: as above.
+            unsafe { _mm256_storeu_si256(state[16 * w + k0..].as_mut_ptr().cast(), *o) };
+        }
+    }
 
     /// Whether the sixteen-lane AVX-512 path may run (`FLOCK_SIMD` and test masks apply).
     pub(super) fn x16_available() -> bool {

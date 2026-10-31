@@ -23,10 +23,12 @@ use crate::zerocheck::univariate_skip_optimized::kernels::portable::{
 // time (`crate::simd`) instead of by `cfg(target_feature)`.
 #[cfg(target_arch = "x86_64")]
 use crate::{
-    simd::{AVX512_CLMUL, AVX512_GFNI, AVX512_VBMI, GFNI, has},
+    simd::{AVX512_GFNI, AVX512_VBMI, GFNI, has},
     zerocheck::univariate_skip_optimized::kernels::x86_64::{
-        accumulate_convert_with_s_hat_v_x86_avx512, bit_transpose_64bytes_avx512,
-        shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
+        accumulate_convert_with_s_hat_v_x86_avx2, accumulate_convert_with_s_hat_v_x86_avx512,
+        accumulate_convert_with_s_hat_v_x86_pclmul, bit_transpose_64bytes_avx512,
+        bit_transpose_64bytes_sse2, shift_reduce_inner_ab_x86_avx512,
+        shift_reduce_inner_ab_x86_sse,
     },
 };
 use crate::{
@@ -87,6 +89,13 @@ pub(super) fn bit_transpose_64bytes(input: &[u8; 64], output: &mut [u8; 64]) {
     if has(AVX512_VBMI) {
         // SAFETY: the runtime check guarantees the kernel's target features.
         unsafe { bit_transpose_64bytes_avx512(input, output) };
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    if has(crate::simd::AVX2) {
+        // SAFETY: SSE2 is baseline on x86-64 and the arrays are 64 bytes.
+        unsafe { bit_transpose_64bytes_sse2(input, output) };
         return;
     }
 
@@ -246,25 +255,62 @@ pub(super) fn accumulate_convert_with_s_hat_v(
     }
 
     #[cfg(target_arch = "x86_64")]
-    if has(AVX512_CLMUL) {
+    {
         // The kernel indexes `convert` without bounds checks in release builds of
         // upstream; keep the table-size precondition explicit.
         assert!(n_b_med <= 16 && convert.len() >= n_b_med * 256);
-        // SAFETY: the runtime check guarantees the SIMD features and the fixed
-        // arrays cover every four-lane load/store.
-        unsafe {
-            accumulate_convert_with_s_hat_v_x86_avx512(
-                chunk_ab_bytes,
-                chunk_c_bytes,
-                n_b_med,
-                convert,
-                eq_lo_val,
-                &mut acc_ab.red,
-                &mut acc_c_0.red,
-                &mut acc_c_1.red,
-            );
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => {
+                // SAFETY: the runtime check guarantees the SIMD features and the
+                // fixed arrays cover every lane load/store.
+                unsafe {
+                    accumulate_convert_with_s_hat_v_x86_avx512(
+                        chunk_ab_bytes,
+                        chunk_c_bytes,
+                        n_b_med,
+                        convert,
+                        eq_lo_val,
+                        &mut acc_ab.red,
+                        &mut acc_c_0.red,
+                        &mut acc_c_1.red,
+                    );
+                }
+                return;
+            }
+            crate::simd::GhashWidth::Vpclmul256 => {
+                // SAFETY: as above, for the 256-bit kernel.
+                unsafe {
+                    accumulate_convert_with_s_hat_v_x86_avx2(
+                        chunk_ab_bytes,
+                        chunk_c_bytes,
+                        n_b_med,
+                        convert,
+                        eq_lo_val,
+                        &mut acc_ab.red,
+                        &mut acc_c_0.red,
+                        &mut acc_c_1.red,
+                    );
+                }
+                return;
+            }
+            crate::simd::GhashWidth::Pclmul => {
+                // SAFETY: as above, for the 128-bit kernel.
+                unsafe {
+                    accumulate_convert_with_s_hat_v_x86_pclmul(
+                        chunk_ab_bytes,
+                        chunk_c_bytes,
+                        n_b_med,
+                        convert,
+                        eq_lo_val,
+                        &mut acc_ab.red,
+                        &mut acc_c_0.red,
+                        &mut acc_c_1.red,
+                    );
+                }
+                return;
+            }
+            crate::simd::GhashWidth::Portable => {}
         }
-        return;
     }
 
     #[cfg(not(target_arch = "aarch64"))]

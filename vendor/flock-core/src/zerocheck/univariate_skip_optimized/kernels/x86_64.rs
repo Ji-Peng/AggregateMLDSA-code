@@ -10,7 +10,6 @@ use core::arch::x86_64::{
 };
 
 use crate::{
-    simd::x86::{f128x4_set, ghash_mul_x4},
     zerocheck::univariate_skip_optimized::{
         ELL, F8, F128, InvNttTableByteSingleGf8, N_CHUNKS, N_MEDIUM,
     },
@@ -50,6 +49,57 @@ pub(crate) unsafe fn bit_transpose_64bytes_avx512(input: &[u8; 64], output: &mut
         y = _mm512_xor_si512(y, _mm512_xor_si512(t, _mm512_slli_epi64::<28>(t)));
 
         _mm512_storeu_si512(output.as_mut_ptr() as *mut __m512i, y);
+    }
+}
+
+/// 64-byte bit transpose with SSE2: an 8x8 byte transpose (`punpck` ladder)
+/// followed by the three mask/shift rounds on each 64-bit lane.
+///
+/// One 64-bit word per output column, the same layout as
+/// [`bit_transpose_64bytes_words`]. SSE2 is baseline on x86-64, so this runs on
+/// the AVX2 tier even when the CPU has no AVX-512 VBMI.
+///
+/// # Safety
+/// x86-64; the input and output are 64 bytes and do not overlap.
+#[target_feature(enable = "sse2")]
+pub(crate) unsafe fn bit_transpose_64bytes_sse2(input: &[u8; 64], output: &mut [u8; 64]) {
+    use core::arch::x86_64::{
+        __m128i, _mm_and_si128, _mm_loadl_epi64, _mm_set1_epi64x, _mm_slli_epi64, _mm_srli_epi64,
+        _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpacklo_epi16,
+        _mm_unpacklo_epi32, _mm_unpacklo_epi8, _mm_xor_si128,
+    };
+    // SAFETY: the caller supplies two separate 64-byte arrays.
+    unsafe {
+        let row = |i: usize| _mm_loadl_epi64(input.as_ptr().add(8 * i).cast::<__m128i>());
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+        let (r4, r5, r6, r7) = (row(4), row(5), row(6), row(7));
+        let t0 = _mm_unpacklo_epi8(r0, r1);
+        let t1 = _mm_unpacklo_epi8(r2, r3);
+        let t2 = _mm_unpacklo_epi8(r4, r5);
+        let t3 = _mm_unpacklo_epi8(r6, r7);
+        let u0 = _mm_unpacklo_epi16(t0, t1);
+        let u1 = _mm_unpackhi_epi16(t0, t1);
+        let u2 = _mm_unpacklo_epi16(t2, t3);
+        let u3 = _mm_unpackhi_epi16(t2, t3);
+        let columns = [
+            _mm_unpacklo_epi32(u0, u2),
+            _mm_unpackhi_epi32(u0, u2),
+            _mm_unpacklo_epi32(u1, u3),
+            _mm_unpackhi_epi32(u1, u3),
+        ];
+
+        let mask1 = _mm_set1_epi64x(0x00AA_00AA_00AA_00AAu64 as i64);
+        let mask2 = _mm_set1_epi64x(0x0000_CCCC_0000_CCCCu64 as i64);
+        let mask3 = _mm_set1_epi64x(0x0000_0000_F0F0_F0F0u64 as i64);
+        for (k, mut g) in columns.into_iter().enumerate() {
+            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<7>(g)), mask1);
+            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<7>(t)));
+            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<14>(g)), mask2);
+            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<14>(t)));
+            let t = _mm_and_si128(_mm_xor_si128(g, _mm_srli_epi64::<28>(g)), mask3);
+            g = _mm_xor_si128(g, _mm_xor_si128(t, _mm_slli_epi64::<28>(t)));
+            _mm_storeu_si128(output.as_mut_ptr().add(16 * k).cast::<__m128i>(), g);
+        }
     }
 }
 
@@ -138,62 +188,82 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx512(
 /// x86 AVX-512 convert-table fold for the two-bank C path. Table lookups stay
 /// scalar because their byte-selected addresses are irregular, while four
 /// lanes of each resulting F128 accumulator are multiplied by `eq_lo_val` in
-/// one VPCLMULQDQ batch before being XORed into the worker partials.
-#[target_feature(enable = "avx512f,vpclmulqdq")]
-pub(crate) unsafe fn accumulate_convert_with_s_hat_v_x86_avx512(
-    chunk_ab_bytes: &[[u8; ELL]; 1 << N_MEDIUM],
-    chunk_c_bytes: &[[u8; ELL]; 1 << N_MEDIUM],
-    n_b_med: usize,
-    convert: &[F128],
-    eq_lo_val: F128,
-    partial_ab: &mut [F128; ELL],
-    partial_c_0: &mut [F128; ELL],
-    partial_c_1: &mut [F128; ELL],
-) {
-    debug_assert!(n_b_med <= 1 << N_MEDIUM);
-    debug_assert_eq!(ELL % 4, 0);
+/// Generates the window accumulation for one vector width.
+macro_rules! accumulate_convert_kernel {
+    ($name:ident, $lanes:path, $feat:literal) => {
+        /// Window accumulation: per lane, the convert-table sums times
+        /// `eq_lo_val`, XORed into the reduced partials.
+        ///
+        /// # Safety
+        /// `n_b_med <= 16` and `convert.len() >= n_b_med * 256`; the partial
+        /// arrays are `ELL` long and writable; the CPU has the features of
+        /// this width.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $feat)]
+        pub(crate) unsafe fn $name(
+            chunk_ab_bytes: &[[u8; ELL]; 1 << N_MEDIUM],
+            chunk_c_bytes: &[[u8; ELL]; 1 << N_MEDIUM],
+            n_b_med: usize,
+            convert: &[F128],
+            eq_lo_val: F128,
+            partial_ab: &mut [F128; ELL],
+            partial_c_0: &mut [F128; ELL],
+            partial_c_1: &mut [F128; ELL],
+        ) {
+            use $lanes as lanes;
+            debug_assert!(n_b_med <= 1 << N_MEDIUM);
+            debug_assert_eq!(ELL % lanes::LANES, 0);
 
-    // SAFETY: the fixed-size input/partial arrays contain every four-lane load
-    // and store below. Convert indices are `b_med * 256 + u8`, bounded by the
-    // 16*256-entry table. The caller checked both required target features at run time.
-    unsafe {
-        let eq = f128x4_set(eq_lo_val, eq_lo_val, eq_lo_val, eq_lo_val);
-        for lane in (0..ELL).step_by(4) {
-            let mut cf_ab = [F128::ZERO; 4];
-            let mut cf_c_0 = [F128::ZERO; 4];
-            let mut cf_c_1 = [F128::ZERO; 4];
-            for b_med in 0..n_b_med {
-                let table_base = b_med * 256;
-                for j in 0..4 {
-                    let v_ab = chunk_ab_bytes[b_med][lane + j] as usize;
-                    let v_c = chunk_c_bytes[b_med][lane + j] as usize;
-                    cf_ab[j] += convert[table_base + v_ab];
-                    cf_c_0[j] += convert[table_base + (v_c & 0x55)];
-                    cf_c_1[j] += convert[table_base + (v_c & 0xAA)];
+            // SAFETY: the fixed-size arrays contain every lane load and store;
+            // convert indices are `b_med * 256 + u8`, inside the caller's range.
+            unsafe {
+                let eq = lanes::splat(eq_lo_val);
+                for lane in (0..ELL).step_by(lanes::LANES) {
+                    let mut cf_ab = [F128::ZERO; lanes::LANES];
+                    let mut cf_c_0 = [F128::ZERO; lanes::LANES];
+                    let mut cf_c_1 = [F128::ZERO; lanes::LANES];
+                    for b_med in 0..n_b_med {
+                        let table_base = b_med * 256;
+                        for j in 0..lanes::LANES {
+                            let v_ab = chunk_ab_bytes[b_med][lane + j] as usize;
+                            let v_c = chunk_c_bytes[b_med][lane + j] as usize;
+                            cf_ab[j] += convert[table_base + v_ab];
+                            cf_c_0[j] += convert[table_base + (v_c & 0x55)];
+                            cf_c_1[j] += convert[table_base + (v_c & 0xAA)];
+                        }
+                    }
+
+                    let scaled_ab = lanes::mul(lanes::set_from(&cf_ab), eq);
+                    let scaled_c_0 = lanes::mul(lanes::set_from(&cf_c_0), eq);
+                    let scaled_c_1 = lanes::mul(lanes::set_from(&cf_c_1), eq);
+
+                    let ab_ptr = partial_ab.as_mut_ptr().add(lane);
+                    let c0_ptr = partial_c_0.as_mut_ptr().add(lane);
+                    let c1_ptr = partial_c_1.as_mut_ptr().add(lane);
+                    lanes::storeu(ab_ptr, lanes::xor(lanes::loadu(ab_ptr), scaled_ab));
+                    lanes::storeu(c0_ptr, lanes::xor(lanes::loadu(c0_ptr), scaled_c_0));
+                    lanes::storeu(c1_ptr, lanes::xor(lanes::loadu(c1_ptr), scaled_c_1));
                 }
             }
-
-            let scaled_ab = ghash_mul_x4(f128x4_set(cf_ab[0], cf_ab[1], cf_ab[2], cf_ab[3]), eq);
-            let scaled_c_0 =
-                ghash_mul_x4(f128x4_set(cf_c_0[0], cf_c_0[1], cf_c_0[2], cf_c_0[3]), eq);
-            let scaled_c_1 =
-                ghash_mul_x4(f128x4_set(cf_c_1[0], cf_c_1[1], cf_c_1[2], cf_c_1[3]), eq);
-
-            let ab_ptr = partial_ab.as_mut_ptr().add(lane) as *mut __m512i;
-            let c0_ptr = partial_c_0.as_mut_ptr().add(lane) as *mut __m512i;
-            let c1_ptr = partial_c_1.as_mut_ptr().add(lane) as *mut __m512i;
-            _mm512_storeu_si512(
-                ab_ptr,
-                _mm512_xor_si512(_mm512_loadu_si512(ab_ptr), scaled_ab),
-            );
-            _mm512_storeu_si512(
-                c0_ptr,
-                _mm512_xor_si512(_mm512_loadu_si512(c0_ptr), scaled_c_0),
-            );
-            _mm512_storeu_si512(
-                c1_ptr,
-                _mm512_xor_si512(_mm512_loadu_si512(c1_ptr), scaled_c_1),
-            );
         }
-    }
+    };
 }
+
+#[cfg(target_arch = "x86_64")]
+accumulate_convert_kernel!(
+    accumulate_convert_with_s_hat_v_x86_avx512,
+    crate::simd::ghash4,
+    "avx512f,vpclmulqdq,sse4.1"
+);
+#[cfg(target_arch = "x86_64")]
+accumulate_convert_kernel!(
+    accumulate_convert_with_s_hat_v_x86_avx2,
+    crate::simd::ghash2,
+    "avx2,vpclmulqdq"
+);
+#[cfg(target_arch = "x86_64")]
+accumulate_convert_kernel!(
+    accumulate_convert_with_s_hat_v_x86_pclmul,
+    crate::simd::ghash1,
+    "pclmulqdq,sse4.1"
+);

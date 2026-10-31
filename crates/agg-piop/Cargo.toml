@@ -28,7 +28,7 @@ agg-bridge = { workspace = true }
 agg-mldsa-simd = { workspace = true }
 aerie-falcon = { workspace = true }
 aerie-prover = { workspace = true }
-aerie-simd = { workspace = true }
+aerie-simd = { workspace = true, features = ["backend-override"] }
 akita-algebra = { workspace = true }
 akita-error = { workspace = true }
 akita-params = { workspace = true }

@@ -6952,21 +6952,41 @@ mod tests {
         );
     }
 
+    /// Every width matches the scalar loop, including lengths that are not a
+    /// multiple of the vector width.
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn scaled_xor_avx512_matches_scalar_for_tails() {
-        if !crate::simd::has(crate::simd::AVX512_CLMUL) { return; }
-        for n in 0..20 {
-            let src: Vec<_> = (0..n).map(|i| F128::new(i as u64 * 17, i as u64 * 29)).collect();
-            let mut expected = vec![F128::new(3, 5); n];
-            let mut actual = expected.clone();
-            for scale in [F128::ZERO, F128::ONE, F128::new(123, 456)] {
-                super::scaled_xor_into(&mut expected, &src, scale);
-                // SAFETY: runtime detection provides the kernel features.
-                unsafe { super::scaled_xor_into_avx512(&mut actual, &src, scale) };
-                assert_eq!(actual, expected);
-            }
+    fn scaled_xor_kernels_match_scalar_for_tails() {
+        macro_rules! check {
+            ($k:ident, $available:expr) => {
+                if $available {
+                    for n in 0..20 {
+                        let src: Vec<_> =
+                            (0..n).map(|i| F128::new(i as u64 * 17, i as u64 * 29)).collect();
+                        let mut expected = vec![F128::new(3, 5); n];
+                        let mut actual = expected.clone();
+                        for scale in [F128::ZERO, F128::ONE, F128::new(123, 456)] {
+                            super::scaled_xor_into(&mut expected, &src, scale);
+                            // SAFETY: the guard checks this width's features.
+                            unsafe { super::$k(&mut actual, &src, scale) };
+                            assert_eq!(actual, expected, "{} n={n}", stringify!($k));
+                        }
+                    }
+                }
+            };
         }
+        check!(
+            scaled_xor_into_avx512,
+            crate::simd::has(crate::simd::AVX512_CLMUL)
+        );
+        check!(
+            scaled_xor_into_avx2,
+            crate::simd::has(crate::simd::VPCLMUL256)
+        );
+        check!(
+            scaled_xor_into_pclmul,
+            std::is_x86_feature_detected!("pclmulqdq")
+        );
     }
 
     /// Single-thread induced basis at the 32K opening shape.

@@ -4108,6 +4108,76 @@ mod tests {
         }
     }
 
+    /// The 256-bit round-2 kernels match the portable path on lengths that are
+    /// not a multiple of the vector width (odd pair counts, odd eq blocks).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_round2_kernels_match_portable_with_odd_lengths() {
+        if !(std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("vpclmulqdq"))
+        {
+            eprintln!("skipped: no avx2+vpclmulqdq on this CPU");
+            return;
+        }
+        let mut rng = Rng::new(122);
+        let table = UniSkipFoldTable::new(6, rng.f128());
+        let eq = rng.f128_vec(512);
+        for pairs in [1usize, 3, 5, 7, 13] {
+            let a: Vec<u8> = (0..16 * (pairs + 2)).map(|_| rng.next_u64() as u8).collect();
+            let b: Vec<u8> = (0..16 * (pairs + 2)).map(|_| rng.next_u64() as u8).collect();
+            let mut want_a = vec![F128::ZERO; 2 * pairs];
+            let mut want_b = vec![F128::ZERO; 2 * pairs];
+            let want = super::fold_pair_run(
+                &a, &b, &table, &eq, 512, &|_| false, true, 0, pairs, 0, &mut want_a, &mut want_b,
+            );
+            let mut got_a = vec![F128::ZERO; 2 * pairs];
+            let mut got_b = vec![F128::ZERO; 2 * pairs];
+            // SAFETY: the features were checked and the slices cover the runs.
+            let got = unsafe {
+                super::fold_pair_run_x86_avx2::<_, true>(
+                    &a, &b, &table, &eq, 512, &|_| false, true, 0, pairs, 0, &mut got_a, &mut got_b,
+                )
+            };
+            assert_eq!(got, want, "pairs={pairs}");
+            assert_eq!((got_a, got_b), (want_a, want_b), "outputs pairs={pairs}");
+        }
+
+        for eq_len in [1usize, 3, 5, 9] {
+            let a_in = rng.f128_vec(4 * eq_len);
+            let b_in = rng.f128_vec(4 * eq_len);
+            let eq_lo = rng.f128_vec(eq_len);
+            let r = rng.f128();
+            let mut want_a = vec![F128::ZERO; 2 * eq_len];
+            let mut want_b = vec![F128::ZERO; 2 * eq_len];
+            let mut p1 = crate::field::F256Unreduced::ZERO;
+            let mut pinf = crate::field::F256Unreduced::ZERO;
+            for x in 0..eq_len {
+                for k in 0..2 {
+                    let o = 2 * x + k;
+                    let a0 = a_in[2 * o];
+                    let a1 = a_in[2 * o + 1];
+                    let b0 = b_in[2 * o];
+                    let b1 = b_in[2 * o + 1];
+                    want_a[o] = a0 + r * (a1 + a0);
+                    want_b[o] = b0 + r * (b1 + b0);
+                }
+                let o = 2 * x;
+                p1 ^= eq_lo[x].mul_unreduced(want_a[o + 1] * want_b[o + 1]);
+                pinf ^= eq_lo[x].mul_unreduced((want_a[o] + want_a[o + 1]) * (want_b[o] + want_b[o + 1]));
+            }
+            let mut got_a = vec![F128::ZERO; 2 * eq_len];
+            let mut got_b = vec![F128::ZERO; 2 * eq_len];
+            // SAFETY: the features were checked and the lengths satisfy the contract.
+            let (g1, gi) = unsafe {
+                super::kernels::x86_64::fold_and_message_x86_avx2(
+                    &a_in, &b_in, &mut got_a, &mut got_b, r, &eq_lo,
+                )
+            };
+            assert_eq!((g1, gi), (p1.reduce(), pinf.reduce()), "eq_len={eq_len}");
+            assert_eq!((got_a, got_b), (want_a, want_b), "outputs eq_len={eq_len}");
+        }
+    }
+
     /// Single-thread round-2 folding at a large opening shape.
     #[test]
     #[ignore = "large single-thread microbenchmark"]

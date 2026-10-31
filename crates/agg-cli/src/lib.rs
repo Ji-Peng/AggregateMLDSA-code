@@ -24,5 +24,6 @@ pub fn simd_report() -> Vec<String> {
         akita_algebra::simd_report(),
         akita_challenges::simd_report(),
         akita_cpu_backend::simd_report(),
+        format!("aerie-simd: backend={}", agg_piop::aerie_simd_backend()),
     ]
 }
