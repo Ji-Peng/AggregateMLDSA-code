@@ -177,7 +177,7 @@ trees; `D = max(d_main + 1, 16)`; `L = 2 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3 + 
 | `lookup.round` (4) | `D (D - 1)/2` | 3 | `3/|K|` | 2 | 9 | 325 sites |
 | `tau` (5) | 1 | `d_main` | `d_main/|K|` | `bit_length(d_main)` | `g + 7` | 25: `g = 5` |
 | `stage.gamma` (6) | 3 | 1 | `26, 10, 49 / |K|` (H-exact: `26, 9, 50`; H-FIPS: `26, 9, 56`) | 5, 4, 6 (every relation) | 12, 11, 13 | |
-| `stage.round` (7) | `3 d_main` | 4, 4, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
+| `stage.round` (7) | `3 d_main` | 4, 5, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
 
 Totals per `N*` are in Section 10 (from 195 nonces / 228 bytes at `N* = 8` to 456 /
 526 bytes at `2^15`). The byte site `proj.psi` (Section 3.5) is the first entry of the plan
@@ -247,7 +247,7 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   `(o, i) -> <Psi_o, v_i>` at `r'`, so before `r^(2)` the pending identity is `D~(r') = 0` for
   the table `D = k - <Psi, v>` on `D_k` (fixed by events 1, 3 and 4, all before the fork);
   each of the 22 stage-2 rounds that binds a coordinate of `r'` can falsify a nonzero partial
-  polynomial for one value only, inside the round's `nu = 4`. No extra site. With two
+  polynomial for one value only, inside the round's `nu = 5`. No extra site. With two
   separately sent claims nothing would bind `k` to `v`; the one claim `c` makes a false
   `D~(r') = 0` a false stage-3 input claim, which `gamma^(3)` and the rounds carry.
 * evaluation reductions and the five lookup-stack reductions are stage-3 instances: a

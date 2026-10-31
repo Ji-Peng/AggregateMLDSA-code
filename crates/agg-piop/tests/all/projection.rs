@@ -202,18 +202,25 @@ fn the_digits_of_v_are_bound_only_through_v() {
     });
 }
 
-/// `k` bound to `v`: an output changed inside its range (`K_0 + 1`) or `v` changed with `k`
-/// kept fails the projection identity (stage 3); `K_2 = 4` and `K_3 = 4` fail `leaf8`
-/// (stage 2).
+/// `k` bound to `v`: an output changed inside its range (`K_0 + 1`, `K_1 + 1`) or `v`
+/// changed with `k` kept fails the projection identity (stage 3); `K_2 = 4` and `K_3 = 4`
+/// fail `leaf8` (stage 2).
 #[test]
 fn outputs_unbound_to_v_or_outside_the_k_alphabet_are_rejected() {
     on_large_stack(|| {
         let batch = small_batch();
         let manifest = &batch.manifest;
         let y = 5 + PROJ_ROWS * 7;
+        let cells = manifest.group(GroupRole::Proj).logical_cells();
         // K_0 + 1 inside T_16 (multiplicities recounted): only the k side moves.
         let mut bridge = batch.bridge.clone();
         let cell = &mut bridge.projection_mut().stacked[y];
+        *cell = if *cell < LOOKUP_SHIFT - 1 { *cell + 1 } else { *cell - 1 };
+        bridge.recount(manifest, &batch.main).unwrap();
+        assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(3));
+        // K_1 + 1 inside T_16 (multiplicities recounted): only the k side moves.
+        let mut bridge = batch.bridge.clone();
+        let cell = &mut bridge.projection_mut().stacked[cells + y];
         *cell = if *cell < LOOKUP_SHIFT - 1 { *cell + 1 } else { *cell - 1 };
         bridge.recount(manifest, &batch.main).unwrap();
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(3));
@@ -228,7 +235,6 @@ fn outputs_unbound_to_v_or_outside_the_k_alphabet_are_rejected() {
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(2));
         // K_3 = 4: the second leaf, also stage 2.
         let mut bridge = batch.bridge.clone();
-        let cells = manifest.group(GroupRole::Proj).logical_cells();
         bridge.projection_mut().top[cells + y] = 4;
         assert_eq!(rejecting_place(&batch, &batch.main, &bridge), Some(2));
         // The honest tables pass.

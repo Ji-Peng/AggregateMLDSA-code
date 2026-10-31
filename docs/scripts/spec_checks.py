@@ -81,7 +81,7 @@ def Q(b,P):
 for b in (4,6,8,16):
     print("Q",b,"exact on balanced alphabet",all((Q(b,Z*(Z+1))==0)==(-b//2<=Z<b//2) for Z in range(-4*b,4*b)))
 # (10) lifting bound with the digit ranges, and the v ceiling
-# |k| < 2^37 from the digits, so Lemma P certifies |v|_c <= 2^38 and the quotient term is
+# |k| < 2^37 from the digits, so the projection anti-concentration certifies |v|_c <= 2^38 and the quotient term is
 # q 2^38, still below p/2; the exact ceiling (p/2 - D0)/q is about 2^40.
 Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**38
 p_half=(2**64-59)//2

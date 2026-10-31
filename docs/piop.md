@@ -417,7 +417,7 @@ the other relations):
 | 8 | `tau` | challenge | `d_main` | `tau` |
 | 9 | `prestage/claims` | proof | 13 | pre-stage claims |
 | 10 | `stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 26; 4, 1; 18 | |
-| 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal; `proj/claim` | proof; challenge; (4, 1); proof; proof | 6; 9; ; 9; 1 | |
+| 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal; `proj/claim` | proof; challenge; (5, 1); proof; proof | 6; 10; ; 10; 1 | |
 | join label | `fork/join` | branch | 2 | the 32-byte digests `d_L`, `d_S` |
 | 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 49; ; 35 | |
 | join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
@@ -445,15 +445,15 @@ export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part site
 6: `512 S` bytes then `S` framed share items (deviation K22); the lookup (layer-1 values,
 then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
 to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
-round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 9 claims;
+round elements and 18 claims; 6 `kappa1` claims, `5 d_main` round elements and 10 claims;
 the shared claim `c`; `3 d_main` round elements and 35 claims); the join: `S` framed Flock
 proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 228
 at `N* = 8` to 526 at
 `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
 the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
 `16 (83 + 12 d_main)` under H-u and H-exact (10 + 35 and 9 + 36 stage-2 and stage-3 claims,
-plus one element for `c`), `16 (86 + 11 d_main)` under H-FIPS; 5,696 B at `N = 2^15` under
-H-u. `AggregateProof::size()`
+plus one element for `c`), `16 (88 + 12 d_main)` under H-FIPS; 6,128 B at `N = 2^15` under
+H-u (6,208 B under H-FIPS). `AggregateProof::size()`
 (`ProofSize`) splits the serialized length into header, `c~`, Akita commitments, Keccak-side
 items (event 2), final vectors, Keccak-side shares and proofs (event 6 and the join), lookup,
 PIOP, work nonces and opening, framing included.

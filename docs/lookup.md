@@ -76,10 +76,10 @@ Two design rules, both forced by soundness:
    identity per table (test `two_tables_verify_and_a_cross_table_value_is_rejected`
    books a `T_8` cell valued 300 under `T_16`, which the shared identity would accept).
 2. *No `T_11` at all.* `v` needs no exact range: spec (6.1) lifts `Delta = 0` to the
-   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^38`
-   (Lemma P), so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^38 < 2^61.01 < p/2`; the
-   outputs `k` (at most `2^31.4` for every `z` in the box, est.) fit two `T_16` digits and a
-   base-4 leaf digit.
+   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^38`,
+   so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^38 < 2^61.01 < p/2`; the
+   outputs `k` (at most `2^36` for every valid key) fit two `T_16` digits and two
+   base-8 leaf digits in `[-2^37, 2^37)`.
    The carries need no exact range either (`docs/bridge.md` Section 4: any carry range
    below `(p - W_t)/2` is sound; `y + 2 kappa <= 1 + 2^17` keeps (9.2) an integer
    equation), so they are looked up in `T_16` directly and need no `T_10`, `T_8` tables

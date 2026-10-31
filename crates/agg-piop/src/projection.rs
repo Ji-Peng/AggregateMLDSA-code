@@ -213,7 +213,7 @@ pub fn weight_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) 
 }
 
 /// The honest shared claim `c = sum_y eq(r', y) k(y) = K_0(r') + 2^16 K_1(r') +
-/// 2^32 K_2(r') + C_k` from the committed digits.
+/// 2^32 K_2(r') + 2^35 K_3(r') + C_k` from the committed digits.
 #[must_use]
 pub fn claim(columns: &[Cells<'_>], r2: &[E], vars: usize) -> E {
     let point = &r2[r2.len() - vars..];

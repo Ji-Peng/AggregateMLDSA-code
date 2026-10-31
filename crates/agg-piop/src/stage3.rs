@@ -496,8 +496,8 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
 
     // The projection identity (`projection`), both sides with the shared claim c: on the
     // main domain without an equality factor, W (V_lo + 2^16 V_hi + 2^15); on the projection
-    // domain at the suffix r' of r^(2), K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15, beside the
-    // link of K_2.
+    // domain at the suffix r' of r^(2), K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15,
+    // beside the links of K_2, K_3.
     let v_form = V16_DIGITS;
     groups.push(GroupSpec {
         domain: GroupRole::Main,

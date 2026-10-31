@@ -168,8 +168,8 @@ impl Stage1Claims {
 }
 
 /// The stage-2 terminal claims: `b_t(r^(2))` and `P_Z(r^(2))` for each
-/// leaf-checked digit (`Z_hi`, `U_hi` under H-u: 8 claims; `U_hi` under H-exact: 7); under
-/// H-FIPS no leaf but `delta(r^(2))` and `e(r^(2))` (8 claims, `stage2::FIPS_TERMINALS`).
+/// leaf-checked digit (10 under H-u: 6 bits, 4 squares; 9 under H-exact: 6 bits, 3 squares); under
+/// H-FIPS 10 claims (6 bits, 2 squares for `K_2, K_3`, plus `delta(r^(2))` and `e(r^(2))`, `stage2::FIPS_TERMINALS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage2Claims {
     /// `b_t(r^(2))`.
@@ -224,9 +224,9 @@ impl Stage2Claims {
     }
 }
 
-/// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3` at
-/// `r^(3)` restricted to its group, in manifest order (group by group): 34 under H-u, 35
-/// under H-exact (39 under H-FIPS). `G_m` is opened at the lookup's table point instead
+/// The stage-3 terminal claims: every polynomial of `G_main16, G_main4, G_1, G_2, G_3, G_k` at
+/// `r^(3)` restricted to its group, in manifest order (group by group): 35 under H-u, 36
+/// under H-exact (40 under H-FIPS). `G_m` is opened at the lookup's table point instead
 /// ([`MultiplicityClaims`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage3Claims(pub Vec<E>);

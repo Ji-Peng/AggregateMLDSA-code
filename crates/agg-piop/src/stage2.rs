@@ -138,7 +138,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             .collect(),
     });
     // The leaves, one group per domain (the main domain: Z_hi, U_hi; the projection domain:
-    // K_2), each at the domain's suffix of r^(1).
+    // K_2, K_3), each at the domain's suffix of r^(1).
     for domain in [GroupRole::Main, GroupRole::Proj] {
         let local: Vec<(usize, &Digit)> =
             all.iter().enumerate().filter(|(_, d)| d.column.domain() == domain).collect();
