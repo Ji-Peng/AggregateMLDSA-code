@@ -52,6 +52,8 @@ use crate::kernel::{
 };
 use crate::OpeningField as E;
 
+mod plane;
+
 /// Message degree of every session (equality factor times a bilinear summand).
 pub const DEGREE: usize = 3;
 
@@ -1361,6 +1363,9 @@ fn prove_with(
     check: bool,
     dedicated: bool,
 ) -> Result<LookupOutput, LookupError> {
+    if crate::kernel::layout() == crate::kernel::Layout::Plane {
+        return plane::prove_with(stacks, tables, multiplicities, challenges, fs, check, dedicated);
+    }
     let start = Instant::now();
     let shape = LookupShape::of(stacks, tables, challenges);
     shape.validate()?;

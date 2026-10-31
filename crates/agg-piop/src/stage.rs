@@ -13,7 +13,8 @@ use jolt_field::{Field, One, Ring, Zero};
 use rayon::prelude::*;
 
 use crate::kernel::{
-    evaluate_compressed, expected_terminal, Group, GroupInstance, Lane, LinearIntGroup, Source, Term, WeightIntGroup,
+    evaluate_compressed, expected_terminal, layout, Group, GroupInstance, Lane, Layout, LinearIntGroup,
+    PlaneWeightIntGroup, Source, Term, WeightIntGroup,
 };
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::split_weight::{SplitGroup, SplitWeight};
@@ -368,6 +369,8 @@ fn prove_stage_with<'a>(
     }
     let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
     let rounds = manifest.d_main();
+    // Buffers of the plane groups of this stage.
+    let mut pool = agg_simd::buf::Pool::default();
     let mut groups = Vec::with_capacity(spec.groups.len());
     // The spec group of every prover group, and the construction time per spec group.
     let mut owner = Vec::with_capacity(spec.groups.len());
@@ -403,7 +406,7 @@ fn prove_stage_with<'a>(
             continue;
         }
         if eq_point.is_none() {
-            if let Some(weighted) = weight_group(&lanes, &instances, rounds) {
+            if let Some(weighted) = weight_group(&lanes, &instances, rounds, &mut pool) {
                 groups.push(StageGroup::Weight(weighted));
                 owner.push(g);
                 build_times[g] = build.elapsed().as_secs_f64();
@@ -523,6 +526,9 @@ fn prove_stage_with<'a>(
         lane_values[g] = Some(values);
     }
     let lane_values = lane_values.into_iter().map(|v| v.expect("filled")).collect();
+    for group in groups {
+        group.recycle(&mut pool);
+    }
     Ok(StageRun {
         gammas,
         messages,
@@ -539,7 +545,7 @@ enum StageGroup<'a> {
     /// The linear integer part split off the preceding generic group ([`split_linear`]).
     Extra(LinearIntGroup<'a>),
     /// A weight times an integer combination ([`weight_group`]).
-    Weight(WeightIntGroup<'a>),
+    Weight(WeightGroup<'a>),
     /// The level-1 weight as its factors ([`SplitGroup`]).
     Split(SplitGroup<'a>),
 }
@@ -549,7 +555,8 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => g.set_arena(arena),
             Self::Linear(g) | Self::Extra(g) => g.set_arena(arena),
-            Self::Weight(g) => g.set_arena(arena),
+            Self::Weight(WeightGroup::Row(g)) => g.set_arena(arena),
+            Self::Weight(WeightGroup::Plane(_)) => {}
             Self::Split(g) => g.set_arena(arena),
         }
     }
@@ -603,6 +610,64 @@ impl StageGroup<'_> {
             Self::Split(g) => Some(g.terminal_values()),
         }
     }
+
+    /// Return the plane buffers of the group to `pool`.
+    fn recycle(self, pool: &mut agg_simd::buf::Pool) {
+        match self {
+            Self::Weight(group) => group.recycle(pool),
+            Self::Generic(_) | Self::Linear(_) | Self::Extra(_) | Self::Split(_) => {}
+        }
+    }
+}
+
+/// The weight-times-integer group of either kernel layout.
+enum WeightGroup<'a> {
+    Row(WeightIntGroup<'a>),
+    Plane(PlaneWeightIntGroup<'a>),
+}
+
+impl WeightGroup<'_> {
+    fn claim(&self) -> E {
+        match self {
+            Self::Row(g) => g.claim(),
+            Self::Plane(g) => g.claim(),
+        }
+    }
+
+    fn round_message(&mut self, round: usize) -> Vec<E> {
+        match self {
+            Self::Row(g) => g.round_message(round),
+            Self::Plane(g) => g.round_message(round),
+        }
+    }
+
+    fn bind(&mut self, round: usize, challenge: E) {
+        match self {
+            Self::Row(g) => g.bind(round, challenge),
+            Self::Plane(g) => g.bind(round, challenge),
+        }
+    }
+
+    fn terminal_values(&self) -> Vec<E> {
+        match self {
+            Self::Row(g) => g.terminal_values(),
+            Self::Plane(g) => g.terminal_values(),
+        }
+    }
+
+    fn terminal_consistent(&self) -> bool {
+        match self {
+            Self::Row(g) => g.terminal_consistent(),
+            Self::Plane(g) => g.terminal_consistent(),
+        }
+    }
+
+    fn recycle(self, pool: &mut agg_simd::buf::Pool) {
+        match self {
+            Self::Row(_) => {}
+            Self::Plane(g) => g.recycle(pool),
+        }
+    }
 }
 
 /// The linear path for group `g` (prover only; the round messages are the generic
@@ -652,7 +717,12 @@ fn linear_group<'a>(
 /// without an equality factor whose single instance is one weighted affine term
 /// `gamma w (sum_l c_l f_l + c)` with a field weight `w` and integer or byte lanes `f_l`
 /// (stage 3's `w_A z`).
-fn weight_group<'a>(lanes: &[Lane<'a>], instances: &[GroupInstance], rounds: usize) -> Option<WeightIntGroup<'a>> {
+fn weight_group<'a>(
+    lanes: &[Lane<'a>],
+    instances: &[GroupInstance],
+    rounds: usize,
+    pool: &mut agg_simd::buf::Pool,
+) -> Option<WeightGroup<'a>> {
     let [instance] = instances else { return None };
     let [Term::Affine {
         weight: Some(weight),
@@ -676,7 +746,15 @@ fn weight_group<'a>(lanes: &[Lane<'a>], instances: &[GroupInstance], rounds: usi
         }
         coefficients[l] += c;
     }
+    if layout() == Layout::Plane {
+        if let Some(group) =
+            PlaneWeightIntGroup::new(&sources, *weight, &coefficients, *constant, instance.gamma, rounds, pool)
+        {
+            return Some(WeightGroup::Plane(group));
+        }
+    }
     WeightIntGroup::new(&sources, *weight, &coefficients, *constant, instance.gamma, rounds)
+        .map(WeightGroup::Row)
 }
 
 /// Split the linear terms on integer lanes off an equality group on the full domain: a

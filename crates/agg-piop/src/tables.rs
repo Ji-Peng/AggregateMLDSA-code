@@ -85,6 +85,8 @@ pub struct ProverTables<'a> {
     pub w3: Option<[Vec<E>; W1_BITS]>,
     /// `w_A` on the main domain (after `r^(2)`).
     pub wa: Option<Vec<E>>,
+    /// `w_A` as canonical planes when the plane layout is selected.
+    pub wa_planes: Option<agg_simd::buf::KPlanes>,
     /// The projection weight `W` on the main domain (after `r^(2)`).
     pub wp: Option<Vec<E>>,
 }
@@ -105,7 +107,17 @@ impl<'a> ProverTables<'a> {
     }
 
     fn with_parity1(tables: SourceTables<'a>, parity1: Parity1) -> Self {
-        Self { tables, parity1, w1: None, w1_split: None, w2: None, w3: None, wa: None, wp: None }
+        Self {
+            tables,
+            parity1,
+            w1: None,
+            w1_split: None,
+            w2: None,
+            w3: None,
+            wa: None,
+            wa_planes: None,
+            wp: None,
+        }
     }
 
     /// Materialize the parities of the committed bits under the bridge matrices.
@@ -120,6 +132,7 @@ impl<'a> ProverTables<'a> {
             w2: None,
             w3: None,
             wa: None,
+            wa_planes: None,
             wp: None,
         }
     }
@@ -154,7 +167,14 @@ impl<'a> ProverTables<'a> {
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
         self.w1_split = None;
-        self.wa = Some(ring_weight_table(public, r2));
+        let table = ring_weight_table(public, r2);
+        if crate::kernel::layout() == crate::kernel::Layout::Plane {
+            self.wa_planes = Some(agg_simd::buf::KPlanes::from_fn(table.len(), |i| table[i]));
+            self.wa = None;
+        } else {
+            self.wa = Some(table);
+            self.wa_planes = None;
+        }
     }
 
     /// Build the projection weight `W` from `Psi` and `r^(2)`.
@@ -185,7 +205,10 @@ impl<'a> ProverTables<'a> {
                 &self.w3.as_ref().expect("w_3 after tau")[usize::from(t)],
             )),
             LaneId::Weight(WeightId::Ring) => {
-                Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)")))
+                match &self.wa_planes {
+                    Some(planes) => Lane::Source(Source::Planes(planes)),
+                    None => Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)"))),
+                }
             }
             LaneId::Weight(WeightId::Proj) => {
                 Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)")))
