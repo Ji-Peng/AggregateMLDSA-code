@@ -373,6 +373,12 @@ of every prover step. `scripts/cpusample.py` samples the busy share of all vCPUs
 share (medians over several runs). "Busy" counts SMT siblings: 100% busy is not twice the
 throughput of 50%.
 
+The `opening` step covers only the finish part of the Akita opening. Its prepare part runs on
+the PIOP branch, so it appears in the `opening-prepare` to `join` interval and in the
+fork-join wall when the fork runs; `AGG_OPENING_THREADS` sizes the finish pool only. Opening
+times quoted from older profiles span both parts and are not directly comparable with a run
+that splits them.
+
 ```sh
 python3 scripts/cpusample.py STOP 0.1 > run.cpu &      # busy share every 100 ms until STOP exists
 AGG_PHASE_STAMPS=1 agg aggregate --records rec32k.bin --out a.bin 2> run.err

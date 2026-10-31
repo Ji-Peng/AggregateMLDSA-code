@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use akita_config::TrustedScheduleCatalog;
 use akita_error::AkitaError;
 use akita_params::BasisMode;
 use akita_pcs::{
@@ -184,6 +185,7 @@ pub struct PcsProver {
 pub struct PreparedOpening {
     akita: PreparedBatchedProve<'static, Cfg, CpuBackend<BaseField, OpeningField>>,
     keep: Vec<CommitmentHandle<BaseField, OpeningField>>,
+    catalog: &'static TrustedScheduleCatalog<Cfg>,
 }
 
 impl PcsProver {
@@ -373,6 +375,7 @@ impl PcsProver {
         Ok(PreparedOpening {
             akita: prepared,
             keep,
+            catalog,
         })
     }
 
@@ -382,8 +385,12 @@ impl PcsProver {
         prepared: PreparedOpening,
         session: &[u8; 32],
     ) -> Result<Vec<u8>, CommitError> {
-        let PreparedOpening { akita, keep } = prepared;
-        let proof = AkitaCommitmentScheme::new(Cfg::catalog()?.clone()).finish_batched_prove(
+        let PreparedOpening {
+            akita,
+            keep,
+            catalog,
+        } = prepared;
+        let proof = AkitaCommitmentScheme::new(catalog.clone()).finish_batched_prove(
             akita,
             &self.backend,
             session,

@@ -158,7 +158,6 @@ impl RingRelationProver {
             F,
         >,
         lp: CommittedGroupParams,
-        _level: u32,
         scalar_openings: &[PointF],
     ) -> Result<
         PreparedRingRelationInput<
@@ -545,8 +544,6 @@ impl RingRelationProver {
             row_coefficients,
         })
     }
-
-
 }
 
 #[cfg(test)]

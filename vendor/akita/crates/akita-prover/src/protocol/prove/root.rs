@@ -252,7 +252,6 @@ where
         + 'static,
     B: ProverBackend<Cfg::Field, Cfg::ExtField> + 'static,
 {
-    let _ = prefix_slots;
     let prepared = prepare_root::<Cfg, B>(
         backend,
         claims,

@@ -37,7 +37,7 @@ its round barriers do not wait behind stage jobs.
 | `AGG_PIOP_THREADS` | the Rayon pool | Workers of the PIOP pool; with the Flock pool it is capped at the logical CPUs. |
 | `AGG_PIOP_S_THREADS` | 16 at 16C32T, 6 at 8C16T | Workers of branch S's own pool; `0` shares the PIOP pool. |
 | `AGG_PIOP_FORK` | on | `0` or `off` runs L and S sequentially. |
-| `AGG_OPENING_THREADS` | one per physical core | Workers of the Akita opening pool. |
+| `AGG_OPENING_THREADS` | one per physical core | Workers of the pool that runs the opening's finish part; prepare shares the PIOP pool. |
 
 Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the dedicated
 stage-branch pool is worth about 100 ms. At 8C16T the sweep found no gain from a separate
@@ -172,7 +172,7 @@ change, so this section quotes no separate saving for it.
 
 ## 6. Vendored Akita prover changes
 
-`vendor/akita` is a verbatim copy of the pinned Akita revision with four prover-only
+`vendor/akita` is a verbatim copy of the pinned Akita revision with five prover-only
 changes; arithmetic, wire format and verifier are untouched. The record is
 `vendor/akita/PATCH.md`.
 
@@ -191,10 +191,14 @@ changes; arithmetic, wire format and verifier are untouched. The record is
   instead of the 256 MiB field plane; with one digit the cache is a live-prefix slice of
   `small_i8_coeffs`, so the per-column copy disappears. This removes 256-384 MiB of
   resident memory at 32K from the pre-fork commit through the end of the opening.
-- **Spread opening passes.** `prepare_openings` (`opaque/openings.rs`) runs the groups
-  concurrently, and `fold_grind.rs` draws the challenges in group order and then probes the
-  groups of one nonce concurrently. The backend, session and prepared-opening handles are
-  `Send + Sync` (`backend/{opening,scope,traits}.rs`).
+- **Split opening, spread passes.** The opening is cut at the transcript session. The
+  point-only prepare (`prepare_openings` in `opaque/openings.rs`, the digit material and the
+  relation inputs) runs in the PIOP branch once stage 3 has fixed the opening points, and
+  the transcript-bound finish runs after the join. `fold_grind.rs` draws the challenges in
+  group order and then probes the groups of one nonce concurrently, and the finish keeps its
+  own pool (`AGG_OPENING_THREADS`). The backend, session and prepared-opening handles are
+  `Send + Sync` (`backend/{opening,scope,traits}.rs`), and the prepared state is `Send` so
+  that it can cross the join.
 - **Digit caches.** `CachedDigits16` and `cached_i16_decompose_fold_partitioned`
   (`sources/poly_helpers/decompose_fold_partitioned.rs`) fold from the signed-16 mirror,
   and the sparse and chunked probes read the mirror instead of decomposing the field plane

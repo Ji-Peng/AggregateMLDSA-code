@@ -185,8 +185,18 @@ the prepared messages and finishes the relation. `RingRelationProver` gains
 `BackendRegistry` can own its imported setup-prefix slots through an `Arc`
 (`register_shared`) and exposes `take_session` / `adopt_session`, so an
 admitted proof lifetime can move across a scheduling boundary and be resumed
-by a new registry. Public prefix slots are stored by value rather than
-borrowed.
+by a new registry. `register` keeps its signature and clones the imported
+prefix registry into an `Arc` (`Arc::new(prefixes.clone())`); the clone is
+cheap because the handles are `Arc`s and the public rows are small, and only
+the one-call paths reach it. Public prefix slots are stored by value rather
+than borrowed.
+
+`ProofScopeConsumer::ProofSessionHandle` gains a `'static` bound, which a
+session handle needs to travel as `Any` across the scope boundary.
+`ProofScope::into_session` moves the admitted session out of the guard and
+marks the scope finished, so the guard does not abort on drop. A session that
+is then dropped without being rebuilt into a new scope aborts the proof
+lifetime, exactly as dropping the original guard would.
 
 `akita-pcs`: `AkitaCommitmentScheme::prepare_batched_prove` imports the
 prefixes and returns a `PreparedBatchedProve`; `finish_batched_prove` takes the

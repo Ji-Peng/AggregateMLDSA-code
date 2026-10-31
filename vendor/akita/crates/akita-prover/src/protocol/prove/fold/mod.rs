@@ -308,7 +308,6 @@ where
         commitment_material,
         &block_claims,
         level_params.clone(),
-        level,
         &scalar_openings,
     )?;
     Ok(PreparedFoldPart {

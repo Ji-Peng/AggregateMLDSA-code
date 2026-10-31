@@ -27,8 +27,10 @@ the byte size of every part of the aggregate). Steps:
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
    default 3/8 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the
    global pool, a non-numeric value warned about on stderr and replaced by the default,
-   while the prover runs events 7 to 12), event 13 the opening. There is no divisibility projection seed
-   (deviation P2); the `{0,1}` projection of `v` (K24) bounds the quotient.
+   while the prover runs events 7 to 12), event 13 the finish of the opening. The point-only
+   prepare part runs on the PIOP pool, so under the fork the fork-join wall includes it.
+   There is no divisibility projection seed (deviation P2); the `{0,1}` projection of `v`
+   (K24) bounds the quotient.
 
 The stages (branch S of the transcript fork) run on their own pool when
 `AGG_PIOP_S_THREADS` is set, and by default while the Flock fork runs and the PIOP pool has
@@ -98,12 +100,18 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_PIOP_S_THREADS` | threads of the stage branch's own pool; default as above, `0` shares the rayon pool |
 | `AGG_PIOP_THREADS` | threads of the PIOP pool beside the Flock fork; PIOP + Flock capped at the logical CPUs |
 | `AGG_PIOP_FORK` | `0`: run the two transcript branches one after the other |
-| `AGG_OPENING_THREADS` | threads of the Akita opening pool; default one per physical core |
+| `AGG_OPENING_THREADS` | threads of the pool that runs the opening's finish part; the prepare part runs on the PIOP pool; default one per physical core |
 | `AGG_HUGEPAGE` | `0`: turn the huge-page advice off |
 | `AGG_ALLOC_CACHE` | cap the cache of freed large blocks in GiB (default 6, `0` disables it) |
 | `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
+
+The opening is split at the transcript session: `AGG_OPENING_THREADS` sizes only the
+transcript-bound finish, while the prepare part (registry, commitment admission,
+coefficient packing and digit material) runs on the PIOP branch. The `event 13: Akita
+opening` line of `ProveReport` therefore covers the finish only; under the fork, prepare is
+inside the fork-join wall.
 
 The vendored Flock core's remaining `FLOCK_*` knobs are described in
 `vendor/flock-core/PATCH.md` and `docs/perf.md`.

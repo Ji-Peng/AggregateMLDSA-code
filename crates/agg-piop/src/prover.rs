@@ -549,10 +549,11 @@ pub struct ProveTimings {
     pub stage2: Duration,
     /// Stage 3, including the `w_A` weight table.
     pub stage3: Duration,
-    /// Event 13: the batched Akita opening.
+    /// Event 13: the finish part of the batched Akita opening. The prepare part runs earlier,
+    /// in the PIOP branch; under the fork it is inside [`Self::fork_join`].
     pub opening: Duration,
-    /// Threads of the opening's pool ([`opening_pool_threads`]; the global pool's size when
-    /// the opening runs on it).
+    /// Threads of the pool of the opening's finish part ([`opening_pool_threads`]; the global
+    /// pool's size when the finish runs on it).
     pub opening_threads: usize,
     /// End to end.
     pub total: Duration,
@@ -1189,6 +1190,10 @@ pub fn prove_with_tables(
 /// Compute the part of the opening that depends only on the commitments and
 /// the stage-3 points. It can run beside the Flock proofs because it reads no
 /// transcript challenge beyond the points already fixed by stage 3.
+///
+/// This runs inside the PIOP branch, on the PIOP pool: `AGG_OPENING_THREADS` sizes only the
+/// finish part, and the time spent here is not part of `timings.opening` (under the fork it
+/// is inside `timings.fork_join`).
 fn prepare_opening(
     committer: &TableCommitter,
     manifest: &CommitmentManifest,
@@ -1386,6 +1391,8 @@ pub fn prove_with_tables_using(
                     }
                     Err(_) => None,
                 };
+                // Prepare runs on this pool, so it is part of the fork-join wall time; only
+                // the transcript-bound finish runs on the opening pool.
                 phase_stamp("opening-prepare");
                 (piop, prepared)
             });
@@ -1475,13 +1482,7 @@ pub fn prove_with_tables_using(
     let opening = on_pool(opening_threads, "agg-open", || {
         committer.finish_open_claims(prepared, &session)
     })?;
-    if std::env::var_os("AGG_PHASE_STAMPS").is_some() {
-        eprintln!(
-            "[pcs] opening_finish_ms={:.3}",
-            finish_start.elapsed().as_secs_f64() * 1e3
-        );
-    }
-    timings.opening = clock.lap();
+    timings.opening = finish_start.elapsed();
     phase_stamp("opening");
     let proof = AggregateProof {
         relation: manifest.relation(),
