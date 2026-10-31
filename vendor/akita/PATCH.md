@@ -208,3 +208,42 @@ commitments and the opening points, and the finish replays the same messages
 in the same order before drawing the same challenges. The 1K aggregate is
 byte-identical under scalar and avx512, one and sixteen rayon threads, and
 with the allocation poison enabled.
+
+## 6. Read the signed mirrors in packing and opening evaluation
+
+`sources/dense/poly.rs`: `DensePoly` stores the canonical field plane in a
+`OnceLock` beside its physical length. `from_small_i8_mirror` and the new
+`from_small_i16_cells` install only the signed mirror; `field_coeffs` expands
+that mirror on first use over the full physical length, including the zero
+padding. `live_ring_count` validates a `D`-view without touching the plane.
+`PartialEq` compares the logical planes, so a lazy and a materialized copy of
+the same coefficients stay equal.
+
+`sources/dense/kernels.rs`: coefficient packing reads the `i8` or `i16` mirror
+through the same position callback and the same shared loop as the field plane,
+converting each cell with `from_i8`/`from_i16` immediately before the weight is
+applied. `sources/dense/ops.rs` does the same for base evaluation, reproducing
+`scale_accumulate_into` with one `mul_add` per coefficient, and for subfield
+evaluation, where the canonical ring is reconstructed before
+`mul_accumulate_sparse_rhs_into`. Both fall back to the field plane only when
+the source has no mirror. `views.rs` and both decompose-fold paths validate
+through `live_ring_count`, so constructing an opening view does not materialize
+the plane.
+
+`commitment/source.rs`, `commitment/source/builtins.rs`,
+`commitment/source/compiler.rs` and `arithmetic/commitment.rs`: the source
+descriptor, the representation-length check and the width-16 commit decision
+use a length query that does not touch the plane. A single-digit width-16
+commit takes the mirror rows before the generic path asks for coefficients.
+
+Outside this copy, `agg-piop`'s `group_polynomials` calls
+`DensePoly::from_small_i16_cells`, so a width-16 column no longer encodes its
+field plane at construction. This removes the 8 B/cell plane write for every
+narrow column at event 1; the plane remains available if a later reader needs
+it.
+
+The 1K aggregate is byte-identical under scalar and avx512, one and sixteen
+rayon threads, and with the allocation poison enabled. On `agg aggregate` over
+`p1p8/records.bin` with eight rayon threads, peak RSS fell from 1,970-1,979 MiB
+to 1,883-1,912 MiB (two before and five after runs; direction only). No
+arithmetic, wire format or verifier check changes.

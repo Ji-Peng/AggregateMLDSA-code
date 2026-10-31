@@ -86,6 +86,42 @@ fn dense_i16_mirror_commit_matches_coefficient_commit() {
     run_exact_i16_test(dense_i16_mirror_commit_matches_coefficient_commit_inner);
 }
 
+#[test]
+fn dense_i16_mirror_commit_skips_the_field_plane() {
+    run_exact_i16_test(dense_i16_mirror_commit_skips_the_field_plane_inner);
+}
+
+fn dense_i16_mirror_commit_skips_the_field_plane_inner() {
+    let prepared = prepared();
+    const NUM_VARS: usize = 6;
+    let cells = (0..1usize << NUM_VARS)
+        .map(|index| ((index * 811) % 65_536) as i32 - 32_768)
+        .collect::<Vec<_>>();
+    let poly = crate::DensePoly::<F>::from_small_i16_cells(NUM_VARS, &cells).unwrap();
+    assert!(!poly.field_plane_is_materialized());
+
+    let descriptor = crate::commitment::CommitSourceDescriptor::new(
+        NUM_VARS,
+        1 << 10,
+        1 << NUM_VARS,
+        crate::commitment::CommitSourceClass::Dense,
+        "i16-mirror-test",
+    )
+    .unwrap();
+    let plan = crate::opaque::CommitInnerPlan {
+        ring_dimension: D,
+        num_live_blocks: 1,
+        n_a: 1,
+        num_positions_per_block: 1,
+        num_digits_inner: 1,
+        log_basis_inner: 16,
+    };
+    CpuBackend::<F, F>::for_arithmetic_tests()
+        .dense_coefficient_commit_rows::<D>(&prepared, &poly, &descriptor, plan)
+        .expect("i16 mirror commit");
+    assert!(!poly.field_plane_is_materialized());
+}
+
 fn dense_i16_mirror_commit_matches_coefficient_commit_inner() {
     let prepared = prepared();
     // Two rings covering the full signed-16 interval, including both ends.

@@ -17,15 +17,11 @@ use agg_pcs_config::commit::{
 use agg_pcs_config::work_plan::{PlanError, WorkPlan};
 use akita_error::AkitaError;
 use akita_pcs::DensePoly;
-use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::manifest::{CommitmentManifest, GroupRole, GROUP_COUNT};
 use crate::source_tables::{BridgeGroupTables, Cells, MainTables, SourceTables};
 use crate::{BaseField, OpeningField};
-
-/// Cells converted per parallel task.
-const FIELD_CONVERSION_CHUNK: usize = 1 << 12;
 
 /// A commitment or opening failure.
 #[derive(Debug)]
@@ -87,9 +83,8 @@ pub struct DenseShape {
 /// first, so the pad variables are trailing).
 ///
 /// With `shape`, each polynomial also receives the digit cache of the commit's
-/// inner decomposition and, for width-16 sources, the signed-16 mirror of its
-/// cells, so the commit reads the mirror instead of the field plane.
-#[allow(unsafe_code)]
+/// inner decomposition. Both cell widths keep only their signed mirror; the
+/// canonical field plane is expanded on the first reader that asks for it.
 pub fn group_polynomials(
     columns: &[Cells<'_>],
     physical_vars: usize,
@@ -107,26 +102,7 @@ pub fn group_polynomials(
             }
             let polynomial = match cells {
                 Cells::Narrow(cells) => DensePoly::from_small_i8_cells(physical_vars, cells)?,
-                Cells::Wide(cells) => {
-                    // SAFETY: every physical slot is initialized, including zero padding.
-                    let evaluations = unsafe {
-                        crate::kernel::buf::fill_par(
-                            crate::kernel::buf::uninit(physical_len),
-                            FIELD_CONVERSION_CHUNK,
-                            |block, out| {
-                                let start = block * FIELD_CONVERSION_CHUNK;
-                                for (i, slot) in out.iter_mut().enumerate() {
-                                    let index = start + i;
-                                    let value = cells.get(index).map_or(BaseField::zero(), |&v| {
-                                        BaseField::from_i64(i64::from(v))
-                                    });
-                                    slot.write(value);
-                                }
-                            },
-                        )
-                    };
-                    DensePoly::from_wide_field_evals(physical_vars, evaluations, cells)?
-                }
+                Cells::Wide(cells) => DensePoly::from_small_i16_cells(physical_vars, cells)?,
             };
             if let Some(shape) = shape {
                 polynomial.prime_digit_cache(
@@ -450,6 +426,7 @@ pub fn verifier_for(manifest: &CommitmentManifest) -> Result<PcsVerifier, PcsErr
 mod tests {
     use super::*;
     use jolt_field::ExtField;
+    use jolt_field::Ring;
 
     #[test]
     fn group_polynomials_zero_extend_and_convert_exactly() {

@@ -6,6 +6,10 @@ impl<F: Field> DenseCoefficientSource<F> for crate::DensePoly<F> {
         self.field_coeffs()
     }
 
+    fn coefficient_len(&self) -> usize {
+        self.physical_len()
+    }
+
     fn small_i16_coefficients(&self) -> Option<&[i16]> {
         self.small_i16_mirror()
     }
@@ -16,7 +20,7 @@ impl<F: Field> CommitmentSource<F> for crate::DensePoly<F> {
         let num_vars = crate::opaque::RootPolyMeta::<F>::num_vars(self);
         CommitSourceDescriptor::new(
             num_vars,
-            self.field_coeffs().len(),
+            self.physical_len(),
             checked_logical_len(num_vars)?,
             CommitSourceClass::Dense,
             "akita_dense",
@@ -37,7 +41,11 @@ impl<F: Field> CommitmentSource<F> for crate::DensePoly<F> {
         // is exactly the mirror's range split by sign.
         if centering_threshold == modulus / 2 {
             if let Some((low, high)) = self.small_mirror_bounds() {
-                let negative = if low < 0 { low.unsigned_abs() as u128 } else { 0 };
+                let negative = if low < 0 {
+                    low.unsigned_abs() as u128
+                } else {
+                    0
+                };
                 let positive = if high > 0 { high as u128 } else { 0 };
                 return Ok((negative, positive));
             }

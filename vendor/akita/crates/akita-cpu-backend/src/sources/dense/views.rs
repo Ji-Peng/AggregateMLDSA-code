@@ -61,13 +61,13 @@ where
         Self: 'a;
 
     fn opening_view(&self) -> Result<Self::OpeningView<'_>, AkitaError> {
-        self.ring_coeffs::<D>()?;
+        self.live_ring_count::<D>()?;
         Ok(DenseView { poly: self })
     }
 
     fn opening_batch<'a>(polys: &'a [&'a Self]) -> Result<Self::OpeningBatchView<'a>, AkitaError> {
         for poly in polys {
-            poly.ring_coeffs::<D>()?;
+            poly.live_ring_count::<D>()?;
         }
         Ok(DenseBatchView { polys })
     }

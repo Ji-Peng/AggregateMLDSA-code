@@ -35,8 +35,7 @@ where
         }
         let num_live_blocks = source
             .poly
-            .ring_coeffs::<D>()?
-            .len()
+            .live_ring_count::<D>()?
             .div_ceil(num_positions_per_block);
         plan.validate::<D>(num_live_blocks)?;
         let (eval, folded) = match plan {
@@ -72,8 +71,7 @@ where
         }
         let num_live_blocks = source
             .poly
-            .ring_coeffs::<D>()?
-            .len()
+            .live_ring_count::<D>()?
             .div_ceil(plan.num_positions_per_block);
         if plan.challenges.len() != num_live_blocks {
             return Err(AkitaError::InvalidSize {
@@ -182,6 +180,36 @@ where
     }
 }
 
+/// Run the shared packing loop over one ring-position source.
+///
+/// `ring_at` returns the `D` canonical coefficients of a live position and
+/// `to_field` converts one stored cell to its field element. Both the field
+/// plane and the signed mirrors use the same loop and the same position order.
+fn packing_partials_from_cells<'a, F, E, T, const D: usize>(
+    poly: &DensePoly<F>,
+    fused_weights: &FusedPackingWeights<'_, E>,
+    ring_at: impl Fn(usize) -> Result<&'a [T; D], AkitaError> + Sync,
+    to_field: impl Fn(T) -> F + Sync,
+) -> Result<SubringCoefficientPackingPartials<F>, AkitaError>
+where
+    F: Field + CanonicalEncoding,
+    E: ExtField<F> + akita_types::FpExtEncoding<F> + MulBaseUnreduced<F>,
+    T: Copy + Send + Sync + 'a,
+{
+    let point = fused_weights.point();
+    let coordinates = coefficient_packing_partials_from_position_source::<F, E, _, D>(
+        fused_weights,
+        RootPolyMeta::<F>::num_vars(poly),
+        ring_at,
+        |_, coefficient, ring| to_field(ring[coefficient]),
+    )?;
+    SubringCoefficientPackingPartials::new(point.geometry(), point.num_live_blocks(), coordinates)
+}
+
+fn missing_packing_position() -> AkitaError {
+    AkitaError::Internal("dense coefficient-packing position is outside its admitted source".into())
+}
+
 pub(crate) fn dense_coefficient_packing_partials<F, E, const D: usize>(
     source: DenseBatchView<'_, F, D>,
     fused_weights: &FusedPackingWeights<'_, E>,
@@ -193,36 +221,43 @@ where
     let point = fused_weights.point();
     cfg_iter!(source.polys)
         .map(|poly| {
-            let rings = poly.ring_coeffs::<D>()?;
             // Dense roots authenticate the complete Boolean hypercube, so
             // every stored ring is live. Exact-prefix storage is reserved
             // for recursive witness views.
-            if rings.len() != point.num_live_positions() {
+            let live_positions = poly.live_ring_count::<D>()?;
+            if live_positions != point.num_live_positions() {
                 return Err(AkitaError::InvalidSize {
                     expected: point.num_live_positions(),
-                    actual: rings.len(),
+                    actual: live_positions,
                 });
             }
-            let coordinates = coefficient_packing_partials_from_position_source::<F, E, _, D>(
+            if let Some(rings) = poly.small_i8_ring_coeffs::<D>() {
+                return packing_partials_from_cells::<F, E, i8, D>(
+                    poly,
+                    fused_weights,
+                    |position| rings.get(position).ok_or_else(missing_packing_position),
+                    F::from_i8,
+                );
+            }
+            if let Some(rings) = poly.small_i16_ring_coeffs::<D>() {
+                return packing_partials_from_cells::<F, E, i16, D>(
+                    poly,
+                    fused_weights,
+                    |position| rings.get(position).ok_or_else(missing_packing_position),
+                    F::from_i16,
+                );
+            }
+            let rings = poly.ring_coeffs::<D>()?;
+            packing_partials_from_cells::<F, E, F, D>(
+                poly,
                 fused_weights,
-                RootPolyMeta::<F>::num_vars(*poly),
                 |position| {
                     rings
                         .get(position)
                         .map(|ring| ring.coefficients())
-                        .ok_or_else(|| {
-                            AkitaError::Internal(
-                                "dense coefficient-packing position is outside its admitted source"
-                                    .into(),
-                            )
-                        })
+                        .ok_or_else(missing_packing_position)
                 },
-                |_, coefficient, source| source[coefficient],
-            )?;
-            SubringCoefficientPackingPartials::new(
-                point.geometry(),
-                point.num_live_blocks(),
-                coordinates,
+                |value| value,
             )
         })
         .collect()

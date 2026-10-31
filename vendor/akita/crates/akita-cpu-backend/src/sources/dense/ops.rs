@@ -7,8 +7,8 @@ use super::poly::DensePoly;
 use crate::opaque::DecomposeFoldWitness;
 use crate::sources::poly_helpers::{
     balanced_ring_decompose_fold_chunked, balanced_ring_decompose_fold_partitioned,
-    cached_digit_decompose_fold_partitioned, cached_i16_decompose_fold_partitioned,
-    sparse_mul_acc, SignedDigitBasis, ValidatedSparseChallenges,
+    cached_digit_decompose_fold_partitioned, cached_i16_decompose_fold_partitioned, sparse_mul_acc,
+    SignedDigitBasis, ValidatedSparseChallenges,
 };
 use akita_algebra::ring::cyclotomic::BalancedDecomposePow2Params;
 use akita_algebra::CyclotomicRing;
@@ -30,6 +30,70 @@ fn validate_digit_shape(num_digits: usize, log_basis: u32) -> Result<(), AkitaEr
     Ok(())
 }
 
+/// Fold ring blocks from signed cells with base-field weights.
+///
+/// The accumulation order matches [`CyclotomicRing::scale_accumulate_into`]:
+/// within a block, positions run in order and each coefficient receives
+/// `cell * weight + accumulator`.
+fn fold_blocks_from_cells<F, T, const D: usize>(
+    planes: &[[T; D]],
+    scalars: &[F],
+    num_positions_per_block: usize,
+    to_field: impl Fn(T) -> F + Sync,
+) -> Vec<CyclotomicRing<F, D>>
+where
+    F: Field,
+    T: Copy + Send + Sync,
+{
+    let num_live_blocks = planes.len().div_ceil(num_positions_per_block);
+    cfg_into_iter!(0..num_live_blocks)
+        .map(|block_index| {
+            let start = block_index * num_positions_per_block;
+            let end = (start + num_positions_per_block).min(planes.len());
+            let mut accumulator = CyclotomicRing::<F, D>::zero();
+            for (cells, &weight) in planes[start..end].iter().zip(scalars.iter()) {
+                for (destination, &cell) in
+                    accumulator.coefficients_mut().iter_mut().zip(cells.iter())
+                {
+                    *destination = to_field(cell).mul_add(weight, *destination);
+                }
+            }
+            accumulator
+        })
+        .collect()
+}
+
+/// Fold ring blocks from signed cells with sparse ring multipliers.
+///
+/// The per-position ring carries the same canonical coefficients the field
+/// plane would supply, so `mul_accumulate_sparse_rhs_into` sees identical
+/// inputs and produces identical accumulations.
+fn fold_blocks_ring_from_cells<F, T, const D: usize>(
+    planes: &[[T; D]],
+    scalars: &[CyclotomicRing<F, D>],
+    num_positions_per_block: usize,
+    to_field: impl Fn(T) -> F + Sync,
+) -> Vec<CyclotomicRing<F, D>>
+where
+    F: Field + CanonicalEncoding,
+    T: Copy + Send + Sync,
+{
+    let num_live_blocks = planes.len().div_ceil(num_positions_per_block);
+    cfg_into_iter!(0..num_live_blocks)
+        .map(|block_index| {
+            let start = block_index * num_positions_per_block;
+            let end = (start + num_positions_per_block).min(planes.len());
+            let mut accumulator = CyclotomicRing::<F, D>::zero();
+            for (cells, multiplier) in planes[start..end].iter().zip(scalars.iter()) {
+                let coefficients: [F; D] = std::array::from_fn(|index| to_field(cells[index]));
+                CyclotomicRing::from_coefficients(coefficients)
+                    .mul_accumulate_sparse_rhs_into(multiplier, &mut accumulator);
+            }
+            accumulator
+        })
+        .collect()
+}
+
 impl<F> DensePoly<F>
 where
     F: Field + CanonicalEncoding,
@@ -43,7 +107,7 @@ where
         log_basis: u32,
     ) -> Result<Vec<DecomposeFoldWitness>, AkitaError> {
         validate_digit_shape(num_digits, log_basis)?;
-        let coeffs = self.ring_coeffs::<D>()?;
+        let num_rings = self.live_ring_count::<D>()?;
         let Some((planes, basis)) = self.digit_planes_for::<D>(num_digits, log_basis) else {
             if num_digits == 1 && log_basis == akita_params::MAX_I16_LOG_BASIS {
                 if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
@@ -51,8 +115,7 @@ where
                         .iter()
                         .map(|range| {
                             let ring_start = range.start * num_positions_per_block;
-                            let ring_end =
-                                (range.end * num_positions_per_block).min(planes.len());
+                            let ring_end = (range.end * num_positions_per_block).min(planes.len());
                             let coefficients = cached_i16_decompose_fold_partitioned::<D>(
                                 &planes[ring_start.min(planes.len())..ring_end],
                                 &challenges[range.clone()],
@@ -64,6 +127,7 @@ where
                         .collect::<Result<Vec<_>, AkitaError>>();
                 }
             }
+            let coeffs = self.ring_coeffs::<D>()?;
             return balanced_ring_decompose_fold_chunked(
                 coeffs,
                 challenges,
@@ -76,9 +140,9 @@ where
             .iter()
             .map(|range| {
                 let ring_start = range.start * num_positions_per_block;
-                let ring_end = (range.end * num_positions_per_block).min(coeffs.len());
+                let ring_end = (range.end * num_positions_per_block).min(num_rings);
                 let coefficients = cached_digit_decompose_fold_partitioned::<D>(
-                    &planes[ring_start.min(coeffs.len()) * num_digits..ring_end * num_digits],
+                    &planes[ring_start.min(num_rings) * num_digits..ring_end * num_digits],
                     &challenges[range.clone()],
                     num_positions_per_block,
                     num_digits,
@@ -94,13 +158,32 @@ where
         scalars: &[F],
         num_positions_per_block: usize,
     ) -> Result<Vec<CyclotomicRing<F, D>>, AkitaError> {
+        let num_rings = self.live_ring_count::<D>()?;
+        if let Some(planes) = self.small_i8_ring_coeffs::<D>() {
+            debug_assert_eq!(planes.len(), num_rings);
+            return Ok(fold_blocks_from_cells(
+                planes,
+                scalars,
+                num_positions_per_block,
+                F::from_i8,
+            ));
+        }
+        if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
+            debug_assert_eq!(planes.len(), num_rings);
+            return Ok(fold_blocks_from_cells(
+                planes,
+                scalars,
+                num_positions_per_block,
+                F::from_i16,
+            ));
+        }
         let coeffs = self.ring_coeffs::<D>()?;
-        let n = coeffs.len();
-        let num_live_blocks = n.div_ceil(num_positions_per_block);
+        debug_assert_eq!(coeffs.len(), num_rings);
+        let num_live_blocks = num_rings.div_ceil(num_positions_per_block);
         Ok(cfg_into_iter!(0..num_live_blocks)
             .map(|i| {
                 let start = i * num_positions_per_block;
-                let end = (start + num_positions_per_block).min(n);
+                let end = (start + num_positions_per_block).min(num_rings);
                 let block = &coeffs[start..end];
                 let mut acc = CyclotomicRing::<F, D>::zero();
                 for (b_j, &a_j) in block.iter().zip(scalars.iter()) {
@@ -116,13 +199,32 @@ where
         scalars: &[CyclotomicRing<F, D>],
         num_positions_per_block: usize,
     ) -> Result<Vec<CyclotomicRing<F, D>>, AkitaError> {
+        let num_rings = self.live_ring_count::<D>()?;
+        if let Some(planes) = self.small_i8_ring_coeffs::<D>() {
+            debug_assert_eq!(planes.len(), num_rings);
+            return Ok(fold_blocks_ring_from_cells(
+                planes,
+                scalars,
+                num_positions_per_block,
+                F::from_i8,
+            ));
+        }
+        if let Some(planes) = self.small_i16_ring_coeffs::<D>() {
+            debug_assert_eq!(planes.len(), num_rings);
+            return Ok(fold_blocks_ring_from_cells(
+                planes,
+                scalars,
+                num_positions_per_block,
+                F::from_i16,
+            ));
+        }
         let coeffs = self.ring_coeffs::<D>()?;
-        let n = coeffs.len();
-        let num_live_blocks = n.div_ceil(num_positions_per_block);
+        debug_assert_eq!(coeffs.len(), num_rings);
+        let num_live_blocks = num_rings.div_ceil(num_positions_per_block);
         Ok(cfg_into_iter!(0..num_live_blocks)
             .map(|i| {
                 let start = i * num_positions_per_block;
-                let end = (start + num_positions_per_block).min(n);
+                let end = (start + num_positions_per_block).min(num_rings);
                 let block = &coeffs[start..end];
                 let mut acc = CyclotomicRing::<F, D>::zero();
                 for (b_j, &a_j) in block.iter().zip(scalars.iter()) {
@@ -169,8 +271,7 @@ where
         log_basis: u32,
     ) -> Result<DecomposeFoldWitness, AkitaError> {
         validate_digit_shape(num_digits, log_basis)?;
-        let coeffs = self.ring_coeffs::<D>()?;
-        let n = coeffs.len();
+        let num_rings = self.live_ring_count::<D>()?;
 
         if let Some((digit_planes, basis)) = self.digit_planes_for::<D>(num_digits, log_basis) {
             let coeff_accum = {
@@ -190,8 +291,11 @@ where
 
         // The single-digit scratch is i8; wider bases need the checked i16 kernel below.
         if num_digits == 1 && log_basis <= akita_params::MAX_I8_LOG_BASIS {
-            let challenges =
-                ValidatedSparseChallenges::<D>::new(challenges, n, num_positions_per_block)?;
+            let challenges = ValidatedSparseChallenges::<D>::new(
+                challenges,
+                num_rings,
+                num_positions_per_block,
+            )?;
             if let Some(small_coeffs) = self.small_i8_ring_coeffs::<D>() {
                 let coeff_accum: Vec<[i32; D]> = {
                     let _span =
@@ -216,6 +320,7 @@ where
                 return Ok(DecomposeFoldWitness::from_centered_rows(coeff_accum));
             }
 
+            let coeffs = self.ring_coeffs::<D>()?;
             let coeff_accum: Vec<[i32; D]> = {
                 let _span = tracing::info_span!("dense_single_digit_accumulate").entered();
                 cfg_into_iter!(0..num_positions_per_block)
@@ -225,7 +330,7 @@ where
 
                         for (block_idx, c_i) in challenges.iter().enumerate() {
                             let global_idx = block_idx * num_positions_per_block + elem_idx;
-                            if global_idx >= n {
+                            if global_idx >= num_rings {
                                 continue;
                             }
                             let ring = &coeffs[global_idx];
@@ -260,6 +365,7 @@ where
             }
         }
 
+        let coeffs = self.ring_coeffs::<D>()?;
         let centered_coeffs = {
             let _span = tracing::info_span!("dense_multi_digit_accumulate").entered();
             balanced_ring_decompose_fold_partitioned::<F, D>(

@@ -1,10 +1,255 @@
 use super::poly::DensePoly;
 use crate::commitment::CommitmentSource;
+use crate::opaque::RootOpeningSource;
 use crate::opaque::RootPolyMeta;
 use akita_algebra::CyclotomicRing;
 use akita_error::AkitaError;
 use jolt_field::Prime128OffsetA7F7 as F;
 use jolt_field::{CanonicalEncoding, Ring, Zero};
+
+/// Deterministic centered `i8` cells.
+fn random_i8_cells(len: usize, seed: u64) -> Vec<i8> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (((state >> 56) as i16) - 128) as i8
+        })
+        .collect()
+}
+
+/// Deterministic centered `i16` cells spanning the full signed range.
+fn random_i16_cells(len: usize, seed: u64) -> Vec<i32> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 48) as u32 & 0xFFFF) as i32 - 32_768
+        })
+        .collect()
+}
+
+/// Copy a polynomial and force its canonical field plane, then drop the
+/// mirrors so every kernel takes the field-plane path.
+fn field_plane_copy<F: jolt_field::Field>(poly: &DensePoly<F>) -> DensePoly<F> {
+    let mut copy = poly.clone();
+    let _ = copy.field_coeffs();
+    copy.small_i8_coeffs = None;
+    copy.small_i16_coeffs = None;
+    copy
+}
+
+#[test]
+fn small_mirror_fold_matches_the_field_plane() {
+    use jolt_field::{Prime64Offset59 as SmallF, Ring};
+
+    const D: usize = 64;
+    const NUM_VARS: usize = 11;
+    // A partial last block: 32 rings split into blocks of three.
+    const POSITIONS_PER_BLOCK: usize = 3;
+    let num_rings = (1usize << NUM_VARS) / D;
+
+    let scalars = (0..num_rings)
+        .map(|index| SmallF::from_u64(index as u64 * 7 + 3))
+        .collect::<Vec<_>>();
+    let rings = (0..num_rings)
+        .map(|index| {
+            CyclotomicRing::<SmallF, D>::from_coefficients(std::array::from_fn(|slot| {
+                SmallF::from_u64((index * 131 + slot * 17 + 5) as u64)
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    let i8_poly = DensePoly::<SmallF>::from_small_i8_cells(
+        NUM_VARS,
+        &random_i8_cells(1 << NUM_VARS, 0x5eed_1234),
+    )
+    .unwrap();
+    let i16_poly = DensePoly::<SmallF>::from_small_i16_cells(
+        NUM_VARS,
+        &random_i16_cells(1 << NUM_VARS, 0xbeef_5678),
+    )
+    .unwrap();
+    assert!(!i8_poly.field_plane_is_materialized());
+    assert!(!i16_poly.field_plane_is_materialized());
+
+    for poly in [&i8_poly, &i16_poly] {
+        let reference = field_plane_copy(poly);
+        assert_eq!(
+            poly.fold_blocks::<D>(&scalars, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            reference
+                .fold_blocks::<D>(&scalars, POSITIONS_PER_BLOCK)
+                .unwrap(),
+        );
+        assert_eq!(
+            poly.fold_blocks_ring::<D>(&rings, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            reference
+                .fold_blocks_ring::<D>(&rings, POSITIONS_PER_BLOCK)
+                .unwrap(),
+        );
+    }
+    assert!(!i8_poly.field_plane_is_materialized());
+    assert!(!i16_poly.field_plane_is_materialized());
+}
+
+#[test]
+fn small_mirror_packing_matches_the_field_plane() {
+    use crate::arithmetic::coefficient_packing::FusedPackingWeights;
+    use akita_params::{BasisMode, SubringCoefficientPackingGeometry};
+    use akita_types::PreparedSubringCoefficientPackingPoint;
+    use jolt_field::{Prime64Offset59 as SmallF, Ring};
+
+    const D: usize = 64;
+    const NUM_VARS: usize = 10;
+    // One partial block: 16 rings filled into a 32-position domain.
+    const POSITIONS_PER_BLOCK: usize = 32;
+    let num_rings = (1usize << NUM_VARS) / D;
+
+    let geometry = SubringCoefficientPackingGeometry::try_new(1, D, 64).unwrap();
+    let point_values = (0..NUM_VARS)
+        .map(|index| SmallF::from_u64(index as u64 * 3 + 5))
+        .collect::<Vec<_>>();
+    let point = PreparedSubringCoefficientPackingPoint::<SmallF>::new(
+        geometry,
+        BasisMode::Lagrange,
+        num_rings,
+        POSITIONS_PER_BLOCK,
+        NUM_VARS,
+        &point_values,
+    )
+    .unwrap();
+    let weights = FusedPackingWeights::<SmallF>::new(&point).unwrap();
+
+    let pack = |polys: &[&DensePoly<SmallF>]| {
+        let batch =
+            <DensePoly<SmallF> as RootOpeningSource<SmallF, D>>::opening_batch(polys).unwrap();
+        super::dense_coefficient_packing_partials::<SmallF, SmallF, D>(batch, &weights)
+            .unwrap()
+            .into_iter()
+            .map(|partials| partials.coordinates().to_vec())
+            .collect::<Vec<_>>()
+    };
+
+    for (poly, cells) in [
+        (
+            DensePoly::<SmallF>::from_small_i8_cells(
+                NUM_VARS,
+                &random_i8_cells(1 << NUM_VARS, 0x1357_9bdf),
+            )
+            .unwrap(),
+            "i8",
+        ),
+        (
+            DensePoly::<SmallF>::from_small_i16_cells(
+                NUM_VARS,
+                &random_i16_cells(1 << NUM_VARS, 0x2468_ace0),
+            )
+            .unwrap(),
+            "i16",
+        ),
+    ] {
+        assert!(!poly.field_plane_is_materialized(), "{cells}");
+        let reference = field_plane_copy(&poly);
+        assert_eq!(pack(&[&poly]), pack(&[&reference]), "{cells}");
+        assert!(
+            !poly.field_plane_is_materialized(),
+            "{cells} packing materialized the field plane"
+        );
+    }
+}
+
+#[test]
+fn small_mirror_fold_pads_the_last_ring() {
+    use jolt_field::{Prime64Offset59 as SmallF, Ring};
+
+    // 64 live cells fill a quarter of the single 256-coefficient ring, so the
+    // mirror and the field plane both rely on the physical zero padding.
+    const D: usize = 256;
+    const NUM_VARS: usize = 6;
+    const POSITIONS_PER_BLOCK: usize = 2;
+    let scalars = vec![SmallF::from_u64(11), SmallF::from_u64(29)];
+    let multipliers = vec![CyclotomicRing::<SmallF, D>::from_coefficients(
+        std::array::from_fn(|slot| SmallF::from_u64((slot * 7 + 1) as u64)),
+    )];
+
+    for (poly, kind) in [
+        (
+            DensePoly::<SmallF>::from_small_i8_cells(
+                NUM_VARS,
+                &random_i8_cells(1 << NUM_VARS, 0x0ddc_0ffe),
+            )
+            .unwrap(),
+            "i8",
+        ),
+        (
+            DensePoly::<SmallF>::from_small_i16_cells(
+                NUM_VARS,
+                &random_i16_cells(1 << NUM_VARS, 0x0bad_f00d),
+            )
+            .unwrap(),
+            "i16",
+        ),
+    ] {
+        let reference = field_plane_copy(&poly);
+        assert_eq!(
+            poly.fold_blocks::<D>(&scalars, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            reference
+                .fold_blocks::<D>(&scalars, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            "{kind}",
+        );
+        assert_eq!(
+            poly.fold_blocks_ring::<D>(&multipliers, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            reference
+                .fold_blocks_ring::<D>(&multipliers, POSITIONS_PER_BLOCK)
+                .unwrap(),
+            "{kind}",
+        );
+    }
+}
+
+#[test]
+fn narrow_commit_representation_does_not_materialize_the_field_plane() {
+    use crate::commitment::{DenseType, PolynomialType};
+    use crate::opaque::CommitInnerPlan;
+    use jolt_field::Prime64Offset59 as SmallF;
+
+    const D: usize = 64;
+    const NUM_VARS: usize = 10;
+    const NUM_RINGS: usize = (1 << NUM_VARS) / D;
+    let poly = DensePoly::<SmallF>::from_small_i8_cells(
+        NUM_VARS,
+        &random_i8_cells(1 << NUM_VARS, 0x2468_1357),
+    )
+    .unwrap();
+    assert!(poly.prime_digit_cache(D, 1, 8).unwrap());
+    assert!(!poly.field_plane_is_materialized());
+
+    let plan = CommitInnerPlan {
+        ring_dimension: D,
+        num_live_blocks: NUM_RINGS,
+        n_a: 1,
+        num_positions_per_block: 1,
+        num_digits_inner: 1,
+        log_basis_inner: 8,
+    };
+    let available =
+        <DensePoly<SmallF> as CommitmentSource<SmallF>>::available_polynomial_types(&poly, &plan)
+            .unwrap();
+    assert_eq!(
+        available.as_slice().first().copied(),
+        Some(PolynomialType::Dense(DenseType::PredecomposedDigits)),
+    );
+    assert!(!poly.field_plane_is_materialized());
+}
 
 #[test]
 fn chunked_fold_matches_windowed_reference_and_global() {
@@ -634,5 +879,8 @@ fn small_i16_mirror_rejects_the_first_out_of_range_cell() {
     let error = poly.attach_small_i16(&cells).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("32768"), "{message}");
-    assert!(!message.contains("32769"), "the first bad cell must win: {message}");
+    assert!(
+        !message.contains("32769"),
+        "the first bad cell must win: {message}"
+    );
 }

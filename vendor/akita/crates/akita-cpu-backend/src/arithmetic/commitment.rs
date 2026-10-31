@@ -1,7 +1,6 @@
 use super::exact_i16::{
     dense_commit_cached_digit_rows as dense_commit_cached_digit_rows_i16,
-    dense_commit_i16_mirror_rows,
-    dense_commit_rows as dense_commit_rows_i16,
+    dense_commit_i16_mirror_rows, dense_commit_rows as dense_commit_rows_i16,
     recursive_packed_witness_commit_rows as recursive_packed_witness_commit_rows_i16,
 };
 use super::{CpuBackend, CpuPreparedSetup};
@@ -222,27 +221,11 @@ impl<F: Field, E> CpuBackend<F, E> {
             .ok_or_else(|| AkitaError::InvalidInput("dense ring extent is invalid".into()))?;
         let physical_len = akita_error::checked::product([ring_count, D])
             .ok_or_else(|| AkitaError::InvalidInput("dense physical extent overflow".into()))?;
-        let coefficients =
-            source
-                .coefficients()
-                .get(..physical_len)
-                .ok_or_else(|| AkitaError::InvalidSize {
-                    expected: physical_len,
-                    actual: source.coefficients().len(),
-                })?;
-        // SAFETY: `CyclotomicRing<F, D>` is transparent over `[F; D]`, and the
-        // checked source prefix contains an integral number of D-sized rings.
-        let rings = unsafe {
-            std::slice::from_raw_parts(
-                coefficients.as_ptr() as *const CyclotomicRing<F, D>,
-                ring_count,
-            )
-        };
-        let block_slices = dense_coefficient_block_slices(rings, plan.num_positions_per_block);
-        if block_slices.len() != plan.num_live_blocks {
+        let block_count = akita_error::checked::div_ceil(ring_count, plan.num_positions_per_block)
+            .ok_or_else(|| AkitaError::InvalidInput("dense block extent is invalid".into()))?;
+        if block_count != plan.num_live_blocks {
             return Err(AkitaError::Internal(format!(
-                "dense source produced {} live blocks, expected {}",
-                block_slices.len(),
+                "dense source produced {block_count} live blocks, expected {}",
                 plan.num_live_blocks
             )));
         }
@@ -256,6 +239,46 @@ impl<F: Field, E> CpuBackend<F, E> {
                     .collect::<Vec<_>>(),
             )
         });
+        // A width-16 mirror is exact at the full signed-16 basis, so the commit
+        // can run before the canonical field plane is ever materialized.
+        if signed_digit_kernel_for_setup(plan.log_basis_inner, "for dense commitment")?
+            == SignedDigitKernel::I16
+            && plan.num_digits_inner == 1
+            && plan.log_basis_inner == akita_params::MAX_I16_LOG_BASIS
+        {
+            if let Some(i16_block_slices) = i16_block_slices.as_deref() {
+                let first_block_len = ring_count.min(plan.num_positions_per_block);
+                let row_width =
+                    akita_error::checked::product([first_block_len, plan.num_digits_inner])
+                        .ok_or_else(|| {
+                            AkitaError::InvalidSetup("dense coefficient row width overflow".into())
+                        })?;
+                return dense_commit_i16_mirror_rows(
+                    prepared,
+                    plan.n_a,
+                    row_width,
+                    i16_block_slices,
+                    plan.log_basis_inner,
+                );
+            }
+        }
+        let coefficients =
+            source
+                .coefficients()
+                .get(..physical_len)
+                .ok_or_else(|| AkitaError::InvalidSize {
+                    expected: physical_len,
+                    actual: source.coefficient_len(),
+                })?;
+        // SAFETY: `CyclotomicRing<F, D>` is transparent over `[F; D]`, and the
+        // checked source prefix contains an integral number of D-sized rings.
+        let rings = unsafe {
+            std::slice::from_raw_parts(
+                coefficients.as_ptr() as *const CyclotomicRing<F, D>,
+                ring_count,
+            )
+        };
+        let block_slices = dense_coefficient_block_slices(rings, plan.num_positions_per_block);
         self.dense_commit_rows(
             prepared,
             plan.n_a,

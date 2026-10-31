@@ -248,6 +248,14 @@ pub(crate) trait DenseCoefficientSource<F: Field>: Send + Sync {
     /// Physical coefficient buffer in canonical source order.
     fn coefficients(&self) -> &[F];
 
+    /// Physical coefficient length, without requiring the buffer.
+    ///
+    /// Sources that can report the length without materializing a canonical
+    /// plane override this so representation checks stay allocation-free.
+    fn coefficient_len(&self) -> usize {
+        self.coefficients().len()
+    }
+
     /// Flat signed-16 mirror of [`Self::coefficients`], when the source keeps
     /// one. It has the same physical padding and is the single-digit
     /// decomposition of every live coefficient.

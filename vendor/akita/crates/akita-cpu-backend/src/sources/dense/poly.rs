@@ -103,7 +103,14 @@ pub struct DensePoly<F: Field> {
     pub(super) num_vars: usize,
     /// Flat field coefficients in sequential block order (untagged compact
     /// [`RingVec`]; see [`MIN_FLAT_COEFF_LEN`] for the physical padding).
-    coeffs: RingVec<F>,
+    ///
+    /// A narrow source installs a mirror and leaves this unset; the canonical
+    /// plane then covers the full physical length `field_len` and is written
+    /// once, on the first reader that needs field coefficients.
+    coeffs: OnceLock<RingVec<F>>,
+    /// Physical coefficient length, including the zero padding described by
+    /// [`MIN_FLAT_COEFF_LEN`].
+    field_len: usize,
     /// Flat centered-`i8` mirror of `coeffs` (same physical length and
     /// padding), present only when every live coefficient is small.
     pub(super) small_i8_coeffs: Option<Vec<i8>>,
@@ -121,6 +128,7 @@ impl<F: Field + Clone> Clone for DensePoly<F> {
         Self {
             num_vars: self.num_vars,
             coeffs: self.coeffs.clone(),
+            field_len: self.field_len,
             small_i8_coeffs: self.small_i8_coeffs.clone(),
             small_i16_coeffs: self.small_i16_coeffs.clone(),
             small_bounds: self.small_bounds,
@@ -132,7 +140,7 @@ impl<F: Field + Clone> Clone for DensePoly<F> {
 impl<F: Field + PartialEq> PartialEq for DensePoly<F> {
     fn eq(&self, other: &Self) -> bool {
         self.num_vars == other.num_vars
-            && self.coeffs == other.coeffs
+            && self.field_coeffs() == other.field_coeffs()
             && self.small_i8_coeffs == other.small_i8_coeffs
             && self.small_i16_coeffs == other.small_i16_coeffs
     }
@@ -159,7 +167,62 @@ fn as_ring_view<F: Field, const D: usize>(flat: &[F]) -> &[CyclotomicRing<F, D>]
 impl<F: Field> DensePoly<F> {
     /// Full physical (zero-padded) flat coefficient buffer.
     pub fn field_coeffs(&self) -> &[F] {
-        self.coeffs.coeffs()
+        self.materialized_coeffs().coeffs()
+    }
+
+    /// Materialize the field plane if a narrow source has not done so yet.
+    ///
+    /// The expansion covers the full physical length `field_len`, including the
+    /// trailing zero padding, so every `D`-sized ring view through the last live
+    /// coefficient stays in bounds.
+    fn materialized_coeffs(&self) -> &RingVec<F> {
+        self.coeffs.get_or_init(|| {
+            let plane = if let Some(mirror) = self.small_i8_coeffs.as_deref() {
+                super::small::expand_i8(mirror)
+            } else if let Some(mirror) = self.small_i16_coeffs.as_deref() {
+                super::small::expand_i16(mirror)
+            } else {
+                unreachable!(
+                    "a dense polynomial always stores a coefficient plane or a signed mirror"
+                )
+            };
+            RingVec::from_coeffs(plane)
+        })
+    }
+
+    /// Physical coefficient length, including the zero padding.
+    #[inline]
+    pub(crate) fn physical_len(&self) -> usize {
+        self.field_len
+    }
+
+    /// Whether the canonical field plane has already been written.
+    #[cfg(test)]
+    pub(crate) fn field_plane_is_materialized(&self) -> bool {
+        self.coeffs.get().is_some()
+    }
+
+    /// Count the live rings at dimension `D` without materializing the plane.
+    ///
+    /// The check requires a power-of-two degree and a ring view that stays
+    /// inside the physical coefficient buffer.
+    pub(super) fn live_ring_count<const D: usize>(&self) -> Result<usize, AkitaError> {
+        if D == 0 || !D.is_power_of_two() {
+            return Err(AkitaError::InvalidInput(format!(
+                "ring degree D={D} is not a power of two"
+            )));
+        }
+        let rings = self.num_ring_elems_at(D);
+        let needed = rings
+            .checked_mul(D)
+            .ok_or_else(|| AkitaError::InvalidInput("dense ring view overflow".to_string()))?;
+        if needed > self.field_len {
+            return Err(AkitaError::InvalidInput(format!(
+                "dense ring view at D={D} needs {needed} coefficients but only {} are stored",
+                self.field_len
+            )));
+        }
+        Ok(rings)
     }
 
     pub(crate) fn cached_digit_parts(
@@ -205,26 +268,19 @@ impl<F: Field> DensePoly<F> {
     /// Returns an error if `D` is not a power of two or the view exceeds the
     /// physical buffer (unsupported ring dimension for this arity).
     pub fn ring_coeffs<const D: usize>(&self) -> Result<&[CyclotomicRing<F, D>], AkitaError> {
-        if D == 0 || !D.is_power_of_two() {
-            return Err(AkitaError::InvalidInput(format!(
-                "ring degree D={D} is not a power of two"
-            )));
-        }
-        let needed = self
-            .num_ring_elems_at(D)
+        let rings = self.live_ring_count::<D>()?;
+        let needed = rings
             .checked_mul(D)
             .ok_or_else(|| AkitaError::InvalidInput("dense ring view overflow".to_string()))?;
         let flat = self.field_coeffs();
-        let live = flat.get(..needed).ok_or_else(|| {
-            AkitaError::InvalidInput(format!(
-                "dense ring view at D={D} needs {needed} coefficients but only {} are stored",
-                flat.len()
-            ))
-        })?;
+        let live = &flat[..needed];
         Ok(as_ring_view::<F, D>(live))
     }
 
     /// Live small-i8 mirror viewed as per-ring coefficient planes at `D`.
+    ///
+    /// The view is the prefix `[..num_ring_elems_at(D) * D]` of the physical
+    /// mirror, so it covers exactly the live rings and their `D` coefficients.
     pub(super) fn small_i8_ring_coeffs<const D: usize>(&self) -> Option<&[[i8; D]]> {
         let flat = self.small_i8_coeffs.as_deref()?;
         let needed = self.num_ring_elems_at(D).checked_mul(D)?;
@@ -234,6 +290,9 @@ impl<F: Field> DensePoly<F> {
     }
 
     /// Live signed-i16 mirror viewed as per-ring coefficient planes at `D`.
+    ///
+    /// The view is the prefix `[..num_ring_elems_at(D) * D]` of the physical
+    /// mirror, so it covers exactly the live rings and their `D` coefficients.
     pub(super) fn small_i16_ring_coeffs<const D: usize>(&self) -> Option<&[[i16; D]]> {
         let flat = self.small_i16_coeffs.as_deref()?;
         let needed = self.num_ring_elems_at(D).checked_mul(D)?;
@@ -309,7 +368,8 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
 
         Ok(Self {
             num_vars,
-            coeffs: RingVec::from_coeffs(coeffs),
+            coeffs: OnceLock::from(RingVec::from_coeffs(coeffs)),
+            field_len: physical_len,
             small_i8_coeffs: all_small_i8.then_some(small_i8_coeffs),
             small_i16_coeffs: None,
             small_bounds: all_small_i8.then_some(small_bounds).flatten(),
@@ -363,7 +423,8 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
 
         Ok(Self {
             num_vars: total.trailing_zeros() as usize,
-            coeffs: RingVec::from_coeffs(flat),
+            coeffs: OnceLock::from(RingVec::from_coeffs(flat)),
+            field_len: physical_len,
             small_i8_coeffs,
             small_i16_coeffs: None,
             small_bounds,
@@ -491,7 +552,7 @@ impl<F: Field + CanonicalEncoding> DensePoly<F> {
             akita_params::ProtocolDispatchSlot::Role(akita_params::RingRole::Inner),
             F,
             ring_dimension,
-            |D| { Ok(self.digit_planes_for::<D>(num_digits, log_basis).is_some()) }
+            |D| Ok(self.digit_planes_for::<D>(num_digits, log_basis).is_some())
         )
     }
 }
@@ -563,15 +624,48 @@ impl DensePoly<jolt_field::Prime64Offset59> {
         let small_bounds = chunked_min_max(&mirror[..expected])
             .map(|(low, high)| (i64::from(low), i64::from(high)));
         mirror.resize(expected.max(MIN_FLAT_COEFF_LEN), 0);
-        let coeffs = super::small::expand(&mirror);
+        let field_len = mirror.len();
         Ok(Self {
             num_vars,
-            coeffs: RingVec::from_coeffs(coeffs),
+            coeffs: OnceLock::new(),
+            field_len,
             small_i8_coeffs: Some(mirror),
             small_i16_coeffs: None,
             small_bounds,
             digit_cache: OnceLock::new(),
         })
+    }
+
+    /// Construct the fixed-prime dense source of a width-16 table from its cells.
+    ///
+    /// The signed-16 mirror is written and range-checked here; the canonical
+    /// field plane covers the same physical length and is expanded only if a
+    /// later reader asks for field coefficients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `cells` is longer than `2^num_vars` or holds a value
+    /// that does not fit a signed 16-bit digit.
+    pub fn from_small_i16_cells(num_vars: usize, cells: &[i32]) -> Result<Self, AkitaError> {
+        let expected = checked::pow2(num_vars)
+            .ok_or_else(|| AkitaError::InvalidInput(format!("2^{num_vars} does not fit usize")))?;
+        if cells.len() > expected {
+            return Err(AkitaError::InvalidSize {
+                expected,
+                actual: cells.len(),
+            });
+        }
+        let field_len = expected.max(MIN_FLAT_COEFF_LEN);
+        Self {
+            num_vars,
+            coeffs: OnceLock::new(),
+            field_len,
+            small_i8_coeffs: None,
+            small_i16_coeffs: None,
+            small_bounds: None,
+            digit_cache: OnceLock::new(),
+        }
+        .attach_small_i16(cells)
     }
 
     /// Construct the fixed-prime dense source of a width-16 table from its
@@ -612,7 +706,8 @@ impl DensePoly<jolt_field::Prime64Offset59> {
         }
         let polynomial = Self {
             num_vars,
-            coeffs: RingVec::from_coeffs(evals),
+            coeffs: OnceLock::from(RingVec::from_coeffs(evals)),
+            field_len: expected.max(MIN_FLAT_COEFF_LEN),
             small_i8_coeffs: None,
             small_i16_coeffs: None,
             small_bounds: None,
@@ -623,10 +718,9 @@ impl DensePoly<jolt_field::Prime64Offset59> {
 
     /// Attach the signed-16 mirror of a width-16 source.
     ///
-    /// `cells` are the committed table's logical cells, already materialized as
-    /// field coefficients by the caller. The mirror has the same physical
-    /// padding as those coefficients and is the single-digit decomposition of
-    /// every live cell.
+    /// `cells` are the committed table's logical cells. The mirror has the same
+    /// physical padding as the coefficient plane and is the single-digit
+    /// decomposition of every live cell.
     ///
     /// # Errors
     ///
