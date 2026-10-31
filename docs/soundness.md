@@ -93,7 +93,7 @@ covers them.
 
 **Sites and bad sets.** A *site* is one challenge query: a scalar or a vector drawn from
 one oracle stream (Aerie C.1: "we treat each vector as one field challenge"). For a site
-`t`, fix the objects the extractor will return (the 52 Akita polynomials `f`, 53 under H-exact and 58 under H-FIPS, the Flock
+`t`, fix the objects the extractor will return (the 53 Akita polynomials `f`, 54 under H-exact and 59 under H-FIPS, the Flock
 word vector `z_s` of each tied part up to its Johnson list) and the transcript prefix; the
 *bad set* `Bad_t` is the set of answers after which a doomed transcript (one with a failed
 check or a false pending claim) may stop being doomed. `nu_t` is the numerator of its
@@ -176,7 +176,7 @@ trees; `D = max(d_main + 1, 16)`; `L = 2 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3 + 
 | `lookup.gamma` (3) | `D - 1` | 1 | `2 active_s / |K|` | `bit_length(2 active_s)` | `g + 7` | 24, 20, 16, 12, 8, 4 coefficients: `g` = 5, 5, 5, 4, 4, 3 (13, 2, 2, 4, 1, 3 sites) |
 | `lookup.round` (4) | `D (D - 1)/2` | 3 | `3/|K|` | 2 | 9 | 325 sites |
 | `tau` (5) | 1 | `d_main` | `d_main/|K|` | `bit_length(d_main)` | `g + 7` | 25: `g = 5` |
-| `stage.gamma` (6) | 3 | 1 | `26, 9, 48 / |K|` (H-exact: `26, 8, 49`; H-FIPS: `26, 8, 55`) | 5, 4, 6 (every relation) | 12, 11, 13 | |
+| `stage.gamma` (6) | 3 | 1 | `26, 10, 49 / |K|` (H-exact: `26, 9, 50`; H-FIPS: `26, 9, 56`) | 5, 4, 6 (every relation) | 12, 11, 13 | |
 | `stage.round` (7) | `3 d_main` | 4, 4, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
 
 Totals per `N*` are in Section 10 (from 195 nonces / 228 bytes at `N* = 8` to 456 /
@@ -230,11 +230,11 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   `sum_x eq(tau_t, x) phi(x)` is a nonzero multilinear polynomial in at most `d_main`
   coordinates of `tau`; `nu = d_main` (Aerie Lemma C.1, "the point tau"). The pre-stage
   claims sent after `tau` are pending evaluation claims, reduced in stage 3.
-* `gamma^(s)` (26, 9, 48 coefficients; 26, 8, 49 under H-exact; 26, 8, 55 under H-FIPS):
+* `gamma^(s)` (26, 10, 49 coefficients; 26, 9, 50 under H-exact; 26, 9, 56 under H-FIPS):
   `nu = 1` as in 3.3.
-* stage rounds: `nu` = the round polynomial's degree, 4, 4, 3 (`STAGE_DEGREES`; the `eq`
-  factor is included: `range_w1` has degree 4, `leaf6` of the H-u digit `U_hi` degree 4
-  (`leaf4` of `Z_hi` and of the projection digit `K_2` degree 3), `link` degree 3).
+* stage rounds: `nu` = the round polynomial's degree, 4, 5, 3 (`STAGE_DEGREES`; the `eq`
+  factor is included: `range_w1` has degree 4, `leaf8` of the projection digits `K_2, K_3` degree 5
+  (`leaf4` of `Z_hi` degree 3 and `leaf6` of `U_hi` degree 4), `link` degree 3).
 * identities tested at a point drawn by the preceding stage (the leaves at `r^(1)`, the
   ring identity, the links and the projection identity (spec 6.3) at `r^(2)` or its `D_k`
   suffix `r'`): while the earlier stage draws the point, the
@@ -287,8 +287,8 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   the raw label `agg-mldsa/v1/proj/psi`, so its input differs from `sd`'s (a squeeze directly
   after `sd` would continue `sd`'s output stream, one query); `Psi` is uniform at its
   address and no expansion oracle intervenes. Bad set (12.4):
-  `Bad_proj = {Psi : for all o < 128, |<Psi_o, v_{i*}>|_c <= 2^33}` for the first record
-  `i*` with a coordinate `|v_{i*}(x_0)|_c > 2^34` (a function of the round-1 candidate
+  `Bad_proj = {Psi : for all o < 128, |<Psi_o, v_{i*}>|_c <= 2^37}` for the first record
+  `i*` with a coordinate `|v_{i*}(x_0)|_c > 2^38` (a function of the round-1 candidate
   `f_1`, fixed before the query), mass `<= 2^-128` by Lemma P, exactly (no density loss):
   `e = 2^-128` exactly. The site is a byte challenge, so its difficulty is set by policy
   rather than by a field numerator: it grinds one bit (`g = 1`, the 8-bit nonce of
@@ -306,14 +306,23 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   `|a|, |b| <= B`, so `|v(x_0)|_c <= 2B` since `2B < p/2`. So the row passes with probability
   at most 1/2. The bits `Psi_o(x_0)` are independent across `o`, which gives `2^-R` for
   record `i*`; that record alone bounds the batch, so no union over records enters. With
-  `R = 128`, `B = 2^33` the certified bound is `|v|_c <= 2^34`, below the `(p/2 - 2^50)/q ~
+  `R = 128`, `B = 2^37` the certified bound is `|v|_c <= 2^38`, below the `(p/2 - 2^50)/q ~
   2^40` that (6.1) needs (6 bits of margin). The bound is tight: `v = (v_0, 0, ..., 0)` with
   `|v_0|_c > 2B` passes a row iff its bit is 0. Rows over `{-1, 0, 1}` pass with probability
   up to 2/3 per row (219 rows for `2^-128`); rows over `[-2, 2]` admit `v(x_0)` near `p/2`.
 
+  **Completeness for every key.** A valid signature has `|z|_inf <= B_z = 130,993` and
+  `|u|_inf <= B_u = 190,465`, so the quotient definition (3.4) gives
+  `|v|_inf <= B_v = floor((2^10 ((q-1)/2) B_z + 2^d tau (2^10 - 1) + 2 gamma_2 43 + B_u)/q)
+  = 67,068,447 < 2^26`. Hence `||v_i||_2 <= 32 B_v < 2^31`, and every row of `Psi` has at
+  most `2^10` ones, so `|k_{o,i}| <= ||Psi_o||_2 ||v_i||_2 <= 32 * 2^31 = 2^36`. Every honest
+  output therefore lies inside the proven `[-2^37, 2^37)`: the prover never aborts at this
+  check, for any key and any valid signature. This replaces the earlier simulation estimate
+  (`|k| <= 2^31.4` for uniform `A`), which did not cover an adversarially chosen key.
+
   **Lemma P' (density; only if `Psi = Expand(seed)` with a fixed oracle `H_Psi`; not used).**
   Except with probability `delta_Psi < 2^-(2^125)` over `H_Psi`, every `v in F_p^1024` with a
-  coordinate above `2^34` in absolute value is passed by at most a fraction
+  coordinate above `2^38` in absolute value is passed by at most a fraction
   `theta_Psi = 2^-127` of the 256-bit seeds (as Lemma 12.4: for a fixed `v` the number of
   passing seeds is dominated by `Bin(2^256, 2^-128)`, which exceeds `2^129` with probability
   at most `exp(-2^128/3)`, and a union over the `p^1024 < 2^65536` vectors and the batch
@@ -365,7 +374,7 @@ by its digest before `eq_Y`.
 Akita's plan (`akita_params::derive_transcript_grinding_plan_from_public_shape`) assigns
 every field site of the opening a loss factor and a target by Akita Eq. (146) priced over
 the exact cardinality `p^2` (`ChallengeFieldOrder::from_field`, PR #104): evaluation
-batch (loss = claims, 52), extension-opening point and batch, every sum-check round
+batch (loss = claims, 53), extension-opening point and batch, every sum-check round
 (stage 1, 2, physical L2, extension-opening reduction; loss = degree), ring-switch
 `alpha` (loss `2d' - 1`, Akita Theorem 10.36), `tau0`, `tau1` points, interstage, L2
 merge and virtual batches, compression and stage-2 batches. Sparse fold challenges carry
@@ -379,7 +388,7 @@ family below its 128-bit entropy floor (`SparseChallengeConfig::validate_for_rin
 | 6 | 401 | 985 | 10 | 4,400 | 3,864 |
 | 7, 8 | 406 | 980 | 10 | 5,120 | 3,894 |
 | 9 | 388 | 966 | 10 | 5,132 | 3,754 |
-| 10 | 388 | 967 | 12 | 7,692 | 3,755 |
+| 10 | 388 | 966 | 12 | 7,436 | 3,754 |
 | 11 | 452 | 1,121 | 12 | 8,304 | 4,369 |
 | 12 | 452 | 1,120 | 12 | 8,048 | 4,368 |
 | 13 | 457 | 1,133 | 12 | 8,332 | 4,416 |
@@ -389,7 +398,7 @@ family below its 128-bit entropy floor (`SparseChallengeConfig::validate_for_rin
 These are the seven-group rows of deviation K24 (`G_k` and `G_3` in `G_2`'s layout,
 `docs/pcs-config.md` 4.1); before K24 the table read 401 sites at `d_sig` 3 to 8, 406 at 9,
 388 at 10, 430 at 11, 452 at 12, 455 at 13, 457 at 14 and 459 at `2^15` (`sum g` 1,137, work
-9,872, 4,434 nonce bits). The evaluation batch now has 52 claims (H-u; 53 under H-exact, 58
+9,872, 4,434 nonce bits). The evaluation batch now has 53 claims (H-u; 54 under H-exact, 59
 under H-FIPS, the zero claims of `G_3` included), still `g = 6`. These nonces are already in
 the measured opening (65,282 B planner estimate at 32K before K24, 65,398 B after).
 
@@ -570,8 +579,8 @@ Conditioned on success the output is uniform on `C^acc` (Akita Lemma 10.1); exha
 completeness event.
 
 **Check (test `crates/agg-pcs-config/tests/all/akita_fold_support.rs`).** Every row of both
-catalogs: width 4, 52 rows (per relation H-u and H-exact, the 13 grouped rows and the 13
-scalar rows of `G_main4`, 26 grouped in all); width 16, 25 rows (shared by both relations) (the scalar rows of `G_main16`, `G_1`, `G_2`, `G_3` at every size, equal layouts
+catalogs: width 4, 78 rows (per relation H-u, H-exact and H-FIPS, the 13 grouped rows and
+the 13 scalar rows of `G_main4`); width 16, 26 rows (shared by the three relations) (the scalar rows of `G_main16`, `G_1`, `G_2`, `G_3` at every size, equal layouts
 sharing a row). For every level, every group and the terminal the test runs the pinned
 dispatch with a recording `FoldDraw`, which reads `D`, the family, the packing domain and the
 rejection policy from the draw's absorb payload and answers a fixed seed, so that the real
@@ -611,7 +620,7 @@ alters a family fails it.
 
 ## 5. Tighter accounting (round-by-round), with the argument
 
-**Lemma S (checks of fixed objects).** Fix the 52 Akita polynomials `f` (53 under H-exact, 58 under H-FIPS) (values in `F_p`
+**Lemma S (checks of fixed objects).** Fix the 53 Akita polynomials `f` (54 under H-exact, 59 under H-FIPS) (values in `F_p`
 on their Boolean domains) and a statement. For every challenge input `u` of a PIOP site from
 `X` (event 7) to the PCS export, let
 `D(u) = 1` iff a verifier check determined by `u` fails or a pending claim is false,
@@ -988,12 +997,13 @@ difficulty changes, the script and these anchors change with it.
 ### 10.1 Relation H-exact (`python3 -I docs/scripts/pow_plan.py --relation h-exact`)
 
 Relation H-exact (`docs/h-exact.md` step B, relation byte 1) has the same stage degrees
-(4, 4, 3) and the batching vectors `gamma^(1..3)` of 26, 8, 49 coefficients: stage 2 holds
-`def_y1[t]`, one `leaf6[D_u]` (the Boolean `B_zhi` needs no leaf) and `leaf4[K_2]` (K24),
-stage 3 two links and the two Booleanity zero-checks `bool[B_zhi]`, `bool[a_z]` at `r^(2)`.
+(4, 5, 3) and the batching vectors `gamma^(1..3)` of 26, 9, 50 coefficients: stage 2 holds
+`def_y1[t]`, one `leaf6[D_u]` (the Boolean `B_zhi` needs no leaf) and `leaf8[K_2]`,
+`leaf8[K_3]` (K24), stage 3 three links and the two Booleanity zero-checks `bool[B_zhi]`,
+`bool[a_z]` at `r^(2)`.
 The zero-checks add no site: they are identities tested at a point drawn by the preceding
 stage (3.4), pending during the stage-2 rounds, and enter through `gamma^(3)`.
-`bit_length(8) = bit_length(9) = 4` and `bit_length(49) = bit_length(48) = 6`, so every
+`bit_length(9) = bit_length(10) = 4` and `bit_length(49) = bit_length(50) = 6`, so every
 difficulty, the stream, the work and the plan digest are H-u's (before the projection the
 stage-2 site had 7 coefficients and `g = 3`, so the plans differed); the round-by-round
 ledger is H-u's (it depends on the stage degrees only). The plan encoding (6.4) has no
@@ -1026,9 +1036,10 @@ extraction of the exact bounds.
 ### 10.2 Relation H-FIPS (`python3 -I docs/scripts/pow_plan.py --relation h-fips`)
 
 Relation H-FIPS (`docs/h-exact.md` Section 10, relation byte 2, deviation L10) keeps the stage
-degrees (4, 4, 3) and has batching vectors of 26, 8, 55 coefficients: stage 2 holds
-`def_y1[t]`, `leaf4[K_2]` (K24) and the degree-3 zero-check `F3 = e (e - 1)(e - delta)` at
-`r^(1)` (degree 4 with `eq`), stage 3 the ring identity, `link[K_2]`, the two sides of the
+degrees (4, 5, 3) and has batching vectors of 26, 9, 56 coefficients: stage 2 holds
+`def_y1[t]`, `leaf8[K_2]`, `leaf8[K_3]` (K24) and the degree-3 zero-check
+`F3 = e (e - 1)(e - delta)` at `r^(1)` (degree 4 with `eq`), stage 3 the ring identity,
+`link[K_2]`, `link[K_3]`, the two sides of the
 projection identity, the Booleanity of `bz_hi`, `l_hi`, `a_z` and the sign bit
 `s`, `F2 = delta (delta - 2 s + 1)`, `F45 = 2 e w1' + 43 e^2 - 43 e` and the hint-weight
 identity `F7` at `r^(2)` (`F7` at the point `(1/2, ..., 1/2, r^(2)_sig)`, two parts on the main
@@ -1038,8 +1049,8 @@ tables fixed before its point (`s, delta, e, l_lo, l_hi` in round 1, `u_h` in ro
 before `X`, `tau` and the stages; 3.4), `F3` is pending during the stage-1 rounds that draw
 `r^(1)`, the others during the stage-2 rounds that draw `r^(2)` (`F7`'s identity
 `sum_i eq(r^(2)_sig, i) G(i) = 0` is multilinear in `r^(2)_sig`; its `1/2` coordinates only
-sum over positions and carry no randomness). `bit_length(8) = 4` and `bit_length(55) =
-bit_length(49) = 6`, so every difficulty, the stream (4,203 bits, 526 bytes, 2,646 units of
+sum over positions and carry no randomness). `bit_length(9) = 4` and `bit_length(56) =
+bit_length(50) = 6`, so every difficulty, the stream (4,203 bits, 526 bytes, 2,646 units of
 work at `2^15`), the round-by-round ledger (`1,329/|K| = 2^-117.6` at `2^15`) and the plan
 digest are H-exact's (and H-u's) (`agg_piop::pow::tests::h_fips_plans_equal_h_exact_plans`; the
 `pow_plan.py` self-check). Equal digests are benign, as for Akita's rows of `d_sig` 3 and 4
@@ -1375,7 +1386,7 @@ it determines, with a root weak opening `omega_y` of the seven groups; all stage
   `R_PIOP` is the conjunction of the Boolean-domain identities the
   PIOP proves from `X` on: lookup membership of every looked-up cell and the leaves (4.3), the
   digit reconstructions (4.1), (4.2) (and the bit-slack form (4.3) under H-exact), "`K_0, K_1`
-  in `T_16 - 2^15`, `K_2 in [-2, 1]`, `k` by (4.1) with `C_k = 2^31 + 2^15`, and
+  in `T_16 - 2^15`, `K_2, K_3 in [-4, 3]`, `k` by (4.1) with `C_k = 2^34 + 2^31 + 2^15`, and
   `<Psi_o, v_i> = k_{o,i}` on the projection domain" (with the `Psi` of `xi_X`; K24) in place
   of the former "(6.1) with the range of `v`", `Delta = 0` in `F_p`, Booleanity and (3.4), under H-exact the Booleanity zero-checks of `B_zhi`
   and `a_z` at `r^(2)` (Section 10.1), and (9.2) with the `M_t` of `sd` and the `Y_sigma` of
@@ -1400,7 +1411,7 @@ All maps are polynomial time. Spec 12.2 gives `R_PIOP(f; xi_X) => C1*(f_1; Psi)`
 b_sigma(f_1) = Y_sigma` over GF(2) for every segment, where `A_1(f_1)` is the relation `H` without
 (3.3) ((3.1), (3.2), `w_1' in [0, 44)`, Boolean `b`), `A_1^-(f_1)` is `A_1(f_1)` without (3.1),
 `C1*(f_1; Psi) = A_1^-(f_1) and Delta(f_1) = 0 in F_p and Prj(Psi, f_1)` with
-`Prj(Psi, f_1)`: `|<Psi_o, v_i>|_c <= 2^33` for all `o < 128`, `i < N*` (12.4), and
+`Prj(Psi, f_1)`: `|<Psi_o, v_i>|_c <= 2^37` for all `o < 128`, `i < N*` (12.4), and
 `M^(sigma) = M_3 M_2 M_1` (spec 9.2). `R_PIOP` no longer implies `A_1(f_1)` deterministically:
 (3.1) follows from `C1*` only outside the bad set of `proj.psi` (Lemma P), which the segment of
 `sd` charges (12.4).
@@ -1495,7 +1506,7 @@ stage-3 messages).
 **Item (vii)(a)** holds by definition. **Item (vii)(c):** a certificate in `Y_X` passes the
 test `Good_{l_2} = R_PIOP(f; xi_X) and (for all p) C4_p`; `R_PIOP` implies `C1*` (the
 lookup and leaf of `K`, (4.1) for `k`, the projection identity and `Delta = 0`; `Prj` follows
-from `k in [-2^33, 2^33)`) and every `C3_sigma` (12.2), the second conjunct is every `C4_p`, and its prefix passes every check, so
+from `k in [-2^37, 2^37)`) and every `C3_sigma` (12.2), the second conjunct is every `C4_p`, and its prefix passes every check, so
 `D(xi_X; sigma_1) = 0`. **Item (vii)(b)**, stage by stage. The two PIOP sites `sd` and `fs`
 read the complete linear prefix, so their bad sets may use all of it:
 
@@ -1517,8 +1528,8 @@ read the complete linear prefix, so their bad sets may use all of it:
   replaced by `C1*`. If `A_1^-(f_1)` fails or `Delta(f_1) != 0` in `F_p`, `C1*` is false for
   every answer (empty bad set). Otherwise (3.1) fails over `Z` for a live record while
   `Delta = 0` in `F_p`, so by (6.1) the first such record `i*` (a function of `f_1`) has a
-  coordinate `|v_{i*}(x_0)|_c >= (p/2 - 2^50)/q > 2^34`. `Bad_proj = {Psi : for all o,
-  |<Psi_o, v_{i*}>|_c <= 2^33}` has mass at most `2^-128` (Lemma P, Section 3.5; exact for the
+  coordinate `|v_{i*}(x_0)|_c >= (p/2 - 2^50)/q > 2^38`. `Bad_proj = {Psi : for all o,
+  |<Psi_o, v_{i*}>|_c <= 2^37}` has mass at most `2^-128` (Lemma P, Section 3.5; exact for the
   squeezed `Psi`, so one bit of work gives `2^-129` without a density loss; deviation K24).
   Outside `Bad_proj`, `Prj(Psi, f_1)` is false, hence `C1*` is false. If (3.1) holds, `C1*`
   holds with `C1` for every answer, and the false claim (if any) is `C2_sigma*`, which this

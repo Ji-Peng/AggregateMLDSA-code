@@ -42,16 +42,18 @@ SLACK = 7  # nonce width = g + 7 (Aerie, Akita)
 M_TABLE = 2**16  # |T_16|
 CHALLENGES = 2  # LOOKUP_CHALLENGES
 # Relation H-u (default, docs/h-exact.md): stage 2 holds leaf4[Z_hi] (degree 3),
-# leaf6[U_hi] (degree 4) and leaf4[K_2] of the projection digits of v (degree 3), so its
-# rounds have degree 4 (9 coefficients, g = 4); stage 3 48 coefficients (g = 6): the ring,
-# three links, 37 reductions, the projection group and the k reduction, five stack reductions.
-# Relation H-exact: stage 2 holds leaf6[U_hi] and leaf4[K_2] (8 coefficients, g = 4), stage 3
-# two links and two Booleanity zero-checks (49 coefficients, g = 6); the degrees are the same.
-# Relation H-FIPS: stage 2 holds def_y1, leaf4[K_2] and F3 (8 coefficients, g = 4),
-# stage 3 55 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
+# leaf6[U_hi] (degree 4) and leaf8[K_2], leaf8[K_3] of the projection digits of v (degree 5),
+# so its rounds have degree 5 (10 coefficients, g = 4); stage 3 49 coefficients (g = 6): the
+# ring, four links, 37 reductions, the projection group and the k reduction, five stack
+# reductions.
+# Relation H-exact: stage 2 holds leaf6[U_hi], leaf8[K_2], leaf8[K_3] (9 coefficients,
+# g = 4), stage 3 three links and two Booleanity zero-checks (50 coefficients, g = 6); the
+# degrees are the same.
+# Relation H-FIPS: stage 2 holds def_y1, leaf8[K_2], leaf8[K_3] and F3 (9 coefficients,
+# g = 4), stage 3 56 coefficients (g = 6); every difficulty, total and plan digest equals H-exact's
 # (the relation is bound by the manifest bytes of event 0, not by the plan encoding).
-STAGE_DEGREES = (4, 4, 3)
-RELATION_GAMMAS = {"h-u": (26, 9, 48), "h-exact": (26, 8, 49), "h-fips": (26, 8, 55)}
+STAGE_DEGREES = (4, 5, 3)
+RELATION_GAMMAS = {"h-u": (26, 10, 49), "h-exact": (26, 9, 50), "h-fips": (26, 9, 56)}
 STAGE_GAMMAS = RELATION_GAMMAS["h-u"]
 SPONGE_K_LOG = 19
 MIN_DENSE_M = 22
@@ -486,7 +488,7 @@ def self_check() -> None:
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
     # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 8 coefficients
-    # (leaf6[U_hi], leaf4[K_2]) and H-u's 9, both g = 4; gamma^(3) keeps g = 6 (48, 49 < 64).
+    # (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and H-u's 10, both g = 4; gamma^(3) keeps g = 6 (49, 50, 56 < 64).
     # So every difficulty, total and digest equals H-u's; the totals and the Slim/span-on and
     # mode-B digests at 2^15.
     assert grind_bits(7, K) == 3 and grind_bits(8, K) == grind_bits(9, K) == 4

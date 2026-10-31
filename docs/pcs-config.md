@@ -23,7 +23,7 @@ Two presets, one per family:
 | Admitted values | `[-8, 7]` | `[-2^15, 2^15 - 1]` |
 | Source class | `CommittedSourceClass::BalancedSignedDigit` | same |
 | Family name | `agg_mldsa_fp64_signed_width4` | `agg_mldsa_fp64_signed_width16` |
-| Groups | `G_main4` (`Z_hi, U_hi, b_0..b_5`), `G_m` (7 multiplicity digits) | `G_main16` (`Z_lo, U_lo, V_lo, V_hi`), `G_1`, `G_2`, `G_3` (in `G_2`'s layout), `G_k` (`K_0, K_1, K_2`) |
+| Groups | `G_main4` (`Z_hi, U_hi, b_0..b_5`), `G_m` (7 multiplicity digits) | `G_main16` (`Z_lo, U_lo, V_lo, V_hi`), `G_1`, `G_2`, `G_3` (in `G_2`'s layout), `G_k` (`K_0, K_1, K_2, K_3`) |
 
 The width-4 parameters are Aerie's `Fp64SignedWidth4`, checked field by field in
 `preset::tests::preset_matches_aerie_width4_parameters` (deviation D1); the width-16
@@ -114,12 +114,13 @@ table point.
 All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three
 relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact,
 `CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are keyed by `(d_sig, relation)`,
-`catalogs::catalog_batches`); none is pending. Two artifacts (width 16: 246,510 B with 28
-rows; width 4: 996,253 B with 78 rows; the H-FIPS rows are listed at the end of this section):
+`catalogs::catalog_batches`); none is pending. Two artifacts (width 16: 235,809 B with 26
+rows; width 4: 1,047,316 B with 78 rows; the H-FIPS rows are listed at the end of this section):
 
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks`:
   25 scalar producer rows, `G_main16` at 13..=25 variables, `G_1` at 13..=19, `G_2` at
-  13..=15, `G_3` at 13..=14;
+  13..=15, `G_3` at 13..=14, plus the three `G_k` rows at `(10..=12, 4)` (the larger
+  `G_k` layouts coincide with `G_main16` rows);
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks`: per relation 13
   scalar producer rows (`G_main4` at 13..=25
   variables with 8 polynomials for H-u, 9 for H-exact) and 13 grouped rows, one per batch
@@ -189,8 +190,9 @@ Every H-FIPS grouped row keeps at least `2^128.0881` of accepted fold support (`
 
 ### 4.1 The seven-group layout of deviation K24 (projection of `v`)
 
-K24 adds the width-16 group `G_k = (K_0, K_1, K_2)` on `D_k` (`7 + d_sig` variables, 3
-polynomials) after `G_3`, and gives `G_3` the layout of `G_2` (its carry, then zero
+K24 adds the width-16 group `G_k = (K_0, K_1, K_2, K_3)` on `D_k` (`7 + d_sig` variables, 4
+polynomials; the range widening split the top projection digit into two base-8 digits)
+after `G_3`, and gives `G_3` the layout of `G_2` (its carry, then zero
 polynomials up to `G_2`'s count, `G_2`'s physical variables). The reason is the planner's
 root opening search: the coefficient-packing openings of the precommitted groups are
 enumerated as a Cartesian product over their distinct profile classes, capped at
@@ -200,16 +202,18 @@ had no schedule (`UnsupportedSchedule("no multi-group schedule in the audited fo
 for num_vars=16; 6 distinct precommitted classes can exceed the 256-assignment root opening
 bound ...")`); with `G_3` in `G_2`'s class (equal layouts give equal producer profiles) the
 row plans. Rows `mldsa-44-p16{,x,f}-batch-<N*>-mult-final`, regenerated with
-`update_catalog_rows` (3 scalar workers, all relations, a shared machine): new width-16
-scalar rows for `G_k` at `(10..=22, 3)` (physical `max(13, 7 + d_sig)`), the `G_3` rows
-coincide with `G_2`'s, the width-4 scalar rows are unchanged, and 39 new grouped rows. The
+`update_catalog_rows` (3 scalar workers, all relations, a shared machine; the widened
+`G_k` re-plans every row): new width-16 scalar rows for `G_k` at `(10..=22, 4)` (physical
+`max(13, 7 + d_sig)`), the `G_3` rows coincide with `G_2`'s, the width-4 scalar rows are
+unchanged, and 39 new grouped rows. The
 planner's opening estimates (H-u): 61,707 B at `d_sig` 3 to 6, 63,197 at 7 and 8, 63,265 at
 9, 63,273 at 10, 64,692 at 11 and 12, 64,958 at 13, 65,282 at 14 and 65,398 at 15 (before
 K24: 61,707 at 3 to 8, 63,197 at 9, 63,273 at 10, 64,573 at 11, 64,692 at 12, 64,842 at 13,
 64,958 at 14 and 65,282 at 15; estimates). The H-exact rows have H-u's estimates; the
 H-FIPS rows reach each step one size earlier (63,197 at 7, 63,265 at 8, 63,273 at 9, 64,573
 at 10, 64,692 at 11, 64,842 at 12, 64,958 at 13, 65,282 at 14, 65,398 at 15). Planning took
-4,658 s (78 minutes) for all relations, plus 286 s for the H-u row of `2^15`.
+4,376 s (73 minutes) for all relations in one run (the widened `G_k` re-planned the
+grouped row of every batch size).
 
 ## 5. Commit driver and test
 

@@ -52,7 +52,7 @@ Seven groups (spec Section 4.1), in wire order, under relation H-u:
 | `G_1` | `kappa1_0..5` (stored `K = kappa - 2^15`) | 16 | stacked `i32`, 8 slots, slots 6, 7 hold `-2^15` | 2 |
 | `G_2` | `y2_0..5`, `kappa2_0..5` | 16 | `i8` parities, stacked `i32` carries | 2 |
 | `G_3` | `kappa3`, `zero_1..zero_11` (`G_2`'s Akita layout, K24) | 16 | `i32`; one shared `i8` zero column | 2 |
-| `G_k` | `k_0, k_1, k_2`: the digits of the projection outputs `k_{o,i} = <Psi_o, v_i>` on `D_k` (cell `o + 128 i`) | 16 | stacked `i32` `k_0 | k_1`, `i8` `k_2` (`projection::ProjectionTables`) | 2 |
+| `G_k` | `k_0, k_1, k_2, k_3`: the digits of the projection outputs `k_{o,i} = <Psi_o, v_i>` on `D_k` (cell `o + 128 i`) | 16 | stacked `i32` `k_0 | k_1`, `i8` `k_2 | k_3` (`projection::ProjectionTables`) | 2 |
 | `G_m` | `m_0..m_6` (digits of the multiplicities of `T_16`) | 4 | `i8` | 2 |
 
 `G_m` is Akita's final group. The relation changes the columns (`manifest::group_columns`):
@@ -119,7 +119,7 @@ is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-bind
    commit is transcript-free and the final group is committed against the plan's
    precommitted profiles; the prover absorbs the commitments in wire order.
 4. After stage 3: `open_claims(commitments, claims, session)` proves one batched opening of
-   the stage-3 claims (34 under H-u, 35 under H-exact, 39 under H-FIPS) at the suffixes of
+   the stage-3 claims (35 under H-u, 36 under H-exact, 40 under H-FIPS) at the suffixes of
    `r^(3)` and of the 7 multiplicity-digit claims at the lookup's table point `pi_m`
    (`pcs::group_points`). The claims are the stage-3 terminal values (the multilinear
    extensions of the committed tables) and the digit claims of the lookup; a debug assertion
@@ -315,31 +315,31 @@ main `eq(tau)` {6 bits}, `D_1` `eq(tau_1)` {6 `y1`}, `D_2` `eq(tau_2)` {6 `y2`},
 {`w_2`, 6 `y1`}, `D_2` {6 `w_3`, 6 `y2`}. Terminal (18): `y1_t(r1_1)`, `y2_t(r1_2)`,
 `b_t(r1)`. Pre-stage (13): `y2_t(tau_2)`, `K2_t(tau_2)`, `K3(tau_3)`.
 
-Stage 2 (degree 4, `gamma^(2) in K^9`, point `r^(1)`; before `gamma^(2)` the 6 claims
+Stage 2 (degree 5, `gamma^(2) in K^10`, point `r^(1)`; before `gamma^(2)` the 6 claims
 `K1_t(r1_1)`): `def_y1[t]` (0..6, main, lane `w_1`), `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7)
-(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}), `leaf4[K_2]` (8; `D_k` `eq(r1_k)` {`P_{K_2}`}).
-Terminal (9): `b_t(r2)`, `P_Z(r2)`; then the projection claim `c = k~(r')` (`r'` the `D_k`
+(main `eq(r1)` {`P_{Z_hi}`, `P_{U_hi}`}), `leaf8[K_2]`, `leaf8[K_3]` (8, 9; `D_k` `eq(r1_k)`
+{`P_{K_2}`, `P_{K_3}`}). Terminal (10): `b_t(r2)`, `P_Z(r2)`; then the projection claim `c = k~(r')` (`r'` the `D_k`
 suffix of `r^(2)`, site `proj/claim`).
 
-Stage 3 (degree 3, `gamma^(3) in K^48`, point `r^(2)`):
+Stage 3 (degree 3, `gamma^(3) in K^49`, point `r^(2)`):
 
 | Instance | Gamma | Domain | Equality / weight | Summand |
 | --- | ---: | --- | --- | --- |
 | `ring` | 0 | main | lane `w_A`; and `eq(r2, .)` | `w_A (Z_lo + 2^16 Z_hi + 2^15) - eq (2 gamma_2 w_1' + u + q v)` |
-| `link[Z_hi]`, `link[U_hi]`, `link[K_2]` | 1, 2, 3 | main; `D_k` for `K_2` | `eq(r2, .)`; `eq(r', .)` | `Z (Z + 1)` |
-| `b_t` from `r1`, from `r2` | 4..10, 10..16 | main | `eq(r1)`, `eq(r2)` | `b_t` |
-| `y2_t` from `tau_2`, from `r1_2` | 16..22, 22..28 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
-| `K2_t` from `tau_2` | 28..34 | `D_2` | `eq(tau_2)` | `K2_t` |
-| `K3` from `tau_3` | 34 | `D_3` | `eq(tau_3)` | `K3` |
-| `K1_t` from `r1_1` | 35..41 | `D_1` | `eq(r1_1)` | `K1_t` |
-| stack `j` | 41 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
-| `proj_v` | 46 | main | lane `W` | `W (V_lo + 2^16 V_hi + 2^15)`, claim `c` |
-| `proj_k` | 47 | `D_k` | `eq(r', .)` | `K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15`, claim `c` |
+| `link[Z_hi]`, `link[U_hi]`, `link[K_2]`, `link[K_3]` | 1, 2, 3, 4 | main; `D_k` for `K_2, K_3` | `eq(r2, .)`; `eq(r', .)` | `Z (Z + 1)` |
+| `b_t` from `r1`, from `r2` | 5..11, 11..17 | main | `eq(r1)`, `eq(r2)` | `b_t` |
+| `y2_t` from `tau_2`, from `r1_2` | 17..23, 23..29 | `D_2` | `eq(tau_2)`, `eq(r1_2)` | `y2_t` |
+| `K2_t` from `tau_2` | 29..35 | `D_2` | `eq(tau_2)` | `K2_t` |
+| `K3` from `tau_3` | 35 | `D_3` | `eq(tau_3)` | `K3` |
+| `K1_t` from `r1_1` | 36..42 | `D_1` | `eq(r1_1)` | `K1_t` |
+| stack `j` | 42 + j | stack domain | `eq(pi_j,low)` | `sum_c w_{j,c} f_{j,c}` (one part per column, scale `w_{j,c}`) |
+| `proj_v` | 47 | main | lane `W` | `W (V_lo + 2^16 V_hi + 2^15)`, claim `c` |
+| `proj_k` | 48 | `D_k` | `eq(r', .)` | `K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15`, claim `c` |
 
 Groups: main `eq(r2)` {`U_lo, V_lo, V_hi, Z_hi, U_hi`, 6 bits}, main {`w_A`, `Z_lo`,
 `Z_hi`}, main `eq(r1)` {6 bits}, `D_1` `eq(r1_1)` {6 `K1`}, `D_2` `eq(tau_2)` {6 `y2`, 6
 `K2`}, `D_2` `eq(r1_2)` {6 `y2`}, `D_3` `eq(tau_3)` {`K3`}, main {`W`, `V_lo`, `V_hi`},
-`D_k` `eq(r')` {`k_0, k_1, k_2`}, and one `eq(pi_j,low)` group per stack. Terminal (34,
+`D_k` `eq(r')` {`k_0, k_1, k_2, k_3`}, and one `eq(pi_j,low)` group per stack. Terminal (35,
 `Stage3Claims`): every column of the six non-multiplicity groups at `r^(3)` but the zero
 polynomials of `G_3`, manifest order; these are the opening claims together with zero for
 the zero polynomials and the multiplicity digits at `pi_m`. The verifier evaluates
@@ -419,7 +419,7 @@ the other relations):
 | 10 | `stage1/gamma`; `.../round/{r}/message`, `.../challenge`; `.../terminal` | challenge; proof, challenge; proof | 26; 4, 1; 18 | |
 | 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal; `proj/claim` | proof; challenge; (4, 1); proof; proof | 6; 9; ; 9; 1 | |
 | join label | `fork/join` | branch | 2 | the 32-byte digests `d_L`, `d_S` |
-| 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 48; ; 34 | |
+| 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 49; ; 35 | |
 | join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
 | 13 | `pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone, the seed of the Akita opening |
 
@@ -446,12 +446,12 @@ export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part site
 then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
 to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
 round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 9 claims;
-the shared claim `c`; `3 d_main` round elements and 34 claims); the join: `S` framed Flock
+the shared claim `c`; `3 d_main` round elements and 35 claims); the join: `S` framed Flock
 proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 228
 at `N* = 8` to 526 at
 `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
 the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
-`16 (81 + 11 d_main)` under H-u and H-exact (9 + 34 and 8 + 35 stage-2 and stage-3 claims,
+`16 (83 + 12 d_main)` under H-u and H-exact (10 + 35 and 9 + 36 stage-2 and stage-3 claims,
 plus one element for `c`), `16 (86 + 11 d_main)` under H-FIPS; 5,696 B at `N = 2^15` under
 H-u. `AggregateProof::size()`
 (`ProofSize`) splits the serialized length into header, `c~`, Akita commitments, Keccak-side
@@ -649,8 +649,8 @@ the 1,024-signature round trip is ignored in debug builds):
   plain thread and from a pool worker.
 - `tests/all/projection.rs` (deviation K24): the unbounded-quotient attack (`Delta = 0` in
   `F_p` with `|v| ~ 2^41` at one position) rejected by the lookup of `k_1`; `k_0 + 1` and `v`
-  moved with `k` kept at stage 3; `k_2 = 2` at stage 2; a changed claim `c`; the honest abort
-  on `|k| >= 2^33`.
+  moved with `k` kept at stage 3; `k_2 = 4`, `k_3 = 4` at stage 2; a changed claim
+  `c`; the honest abort on `|k| >= 2^37`.
 - `tests/all/commit_open.rs` (the seven groups commit and open in one batch, also for a padded
   batch at independent points), `tests/all/source_tables.rs` (shapes, alphabets,
   multiplicities, heavy rows, malformed tables refused before Akita, the H-exact `z` form),

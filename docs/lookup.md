@@ -34,8 +34,8 @@ spec Section 6):
 | --- | --- | --- | ---: | --- |
 | `z` | `z + 2^17 = z_lo + 2^16 z_hi` | `z_lo in [0, 2^16)`, `z_hi in [0, 4)`, so `z in [-2^17, 2^17)` | 2 | lookup; `leaf4` + `link` |
 | `u` | `u + 190,465 = u_lo + 63,079 u_hi` (relation H-u, deviation L8) | `u_lo in [0, 2^16)`, `u_hi in [0, 6)`, so `u in [-190,465, 190,465]` exactly | 2 | lookup; `leaf6` + `link` |
-| `v` | `v + 2^31 = v_lo + 2^16 v_hi` (honest encoding) | none; `|v|_c <= 2^34` through `k` | 2 | none (committed, not looked up) |
-| `k = <Psi_o, v_i>` | `k + 2^33 = k_0 + 2^16 k_1 + 2^32 k_2` | `k_0, k_1 in [0, 2^16)`, `k_2 in [0, 4)`, so `k in [-2^33, 2^33)` | 3 per (row, signature), on `D_k` | two lookups; `leaf4` + `link` |
+| `v` | `v + 2^31 = v_lo + 2^16 v_hi` (honest encoding) | none; `|v|_c <= 2^38` through `k` | 2 | none (committed, not looked up) |
+| `k = <Psi_o, v_i>` | `k + 2^37 = k_0 + 2^16 k_1 + 2^32 k_2 + 2^35 k_3` | `k_0, k_1 in [0, 2^16)`, `k_2, k_3 in [0, 8)`, so `k in [-2^37, 2^37)` | 4 per (row, signature), on `D_k` | two lookups; two `leaf8` + links |
 | `b_0..b_5` | bits | Boolean, `w_1' < 44` | 6 | unchanged (`bool_b`, `range_w1`) |
 | `kappa^(1)_t, kappa^(2)_t` | one column each | `[0, 2^16)` | per lane, on `D_1, D_2` | lookup |
 | `kappa^(3)` | one column | `[0, 2^16)` | on `D_3` | lookup |
@@ -44,16 +44,16 @@ Committed values are stored balanced so that the honest producer fits a signed w
 Akita preset: `Z_lo = z_lo - 2^15`, `U_lo = u_lo - 2^15`, `V_lo = v_lo - 2^15`,
 `V_hi = v_hi - 2^15`, `Z_hi = z_hi - 2` (base 4), `U_hi = u_hi - 3` (base 6), the carries
 `K = kappa - 2^15` (`docs/deviations.md` L2) and the projection digits `K_0 = k_0 - 2^15`,
-`K_1 = k_1 - 2^15`, `K_2 = k_2 - 2` (base 4). Every looked-up value is the affine shift
+`K_1 = k_1 - 2^15`, `K_2 = k_2 - 4`, `K_3 = k_3 - 4` (base 8). Every looked-up value is the affine shift
 `f = stored + 2^15`, so a claim on the stored lane is a claim on the committed column; the
 tree leaves are `1 / ((X - 2^15) - stored)`. Spec (4.1) holds with bases `(2^16, 4)`,
 `(2^16, 2^16)` and `(2^16)` (unsigned): `z = Z_lo + 2^16 Z_hi + 2^15`,
 `v = V_lo + 2^16 V_hi + 2^15`, `kappa = K + 2^15` (constant `C = 2^15` each); `u` takes the
-step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`; `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 +
-2^15` (bases `(2^16, 2^16, 4)`, signed). Padded rows hold the digits of zero:
+step form (4.2), `u = U_lo + 63,079 U_hi + 31,540`; `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 +
+2^34 + 2^31 + 2^15` (bases `(2^16, 2^16, 8, 8)`, signed). Padded rows hold the digits of zero:
 `Z_lo = V_lo = -2^15`, `U_lo = -31,540` (`u_lo = 1,228`, `u_hi = 3`), `Z_hi = U_hi = V_hi = 0`;
 padded carries are `K = -2^15`, and so are the padding slots of the carry stacks (looked-up
-value 0); padded records project to `k = 0`, digits `(K_0, K_1, K_2) = (-2^15, -2^15, 0)`.
+value 0); padded records project to `k = 0`, digits `(K_0, K_1, K_2, K_3) = (-2^15, -2^15, -4, 0)`.
 
 Relation H-exact (`docs/h-exact.md` step B, deviation L9) keeps this lookup unchanged: `z`
 is `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` with `B_zlo` looked up in the slot of
@@ -76,8 +76,8 @@ Two design rules, both forced by soundness:
    identity per table (test `two_tables_verify_and_a_cross_table_value_is_rejected`
    books a `T_8` cell valued 300 under `T_16`, which the shared identity would accept).
 2. *No `T_11` at all.* `v` needs no exact range: spec (6.1) lifts `Delta = 0` to the
-   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^34`
-   (Lemma P), so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^34 < 2^57.01 < p/2`; the
+   integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^38`
+   (Lemma P), so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^38 < 2^61.01 < p/2`; the
    outputs `k` (at most `2^31.4` for every `z` in the box, est.) fit two `T_16` digits and a
    base-4 leaf digit.
    The carries need no exact range either (`docs/bridge.md` Section 4: any carry range
@@ -254,9 +254,9 @@ in session `D - 1` instead of storing it (Section 4.6 item 1). Both change only 
 **Extraction** (spec 12.2 with L16). Akita yields `F_p` values for every committed column
 (Remark 10.41). Except with the terms above: every looked-up cell is an entry of `T_16`,
 so `Z_lo + 2^15, U_lo + 2^15, K_0 + 2^15, K_1 + 2^15, kappa in [0, 2^16)` as integers;
-`leaf4`/`link` and `leaf6`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`, `K_2 in [-2, 1]`;
+`leaf4`/`link`, `leaf6`/`link` and `leaf8`/`link` give `Z_hi in [-2, 1]`, `U_hi in [-3, 2]`, `K_2, K_3 in [-4, 3]`;
 by (4.1) and spec (4.2), `z in [-2^17, 2^17)`, `u in [-190,465, 190,465]` (relation H-u,
-`zeta' = zeta = 350,209`) and `k in [-2^33, 2^33)`, so `|v|_c <= 2^34` by the projection
+`zeta' = zeta = 350,209`) and `k in [-2^37, 2^37)`, so `|v|_c <= 2^38` by the projection
 (spec Section 6, Lemma P; `V_lo`, `V_hi` are not looked up), enough for (6.1); every
 carry is an integer in `[0, 2^16)`, enough for (9.2) (`docs/bridge.md` Section 4).
 `m` is unconstrained and need not be constrained.
@@ -273,10 +273,10 @@ Committed elements per signature:
 | `D_2` parities and carries (`2^15` cells) | 12 (6 + 6) |
 | `D_3` carries (`2^14` cells) | 0.5 (1) |
 | `G_3` zero polynomials (11 x `2^14` cells, K24) | 5.5 |
-| Projection digits `K_0, K_1, K_2` (`D_k`, 128 rows) | 384 |
+| Projection digits `K_0, K_1, K_2, K_3` (`D_k`, 128 rows) | 512 |
 | Multiplicities `m` (7 digits x `2^16` cells) | 14 |
-| **Total at `N = 2^15`** | **12,800** |
-| Total at `N = 1,024` (physical cells, 13-variable minimum) | 13,408 |
+| **Total at `N = 2^15`** | **12,928** |
+| Total at `N = 1,024` (physical cells, 13-variable minimum) | 13,536 |
 
 At `N = 1,024`, `m` costs 448 elements per signature (7 x `2^16` / 1,024); it is
 independent of `N`. Akita inner digits per position: one per width-4 column, and one forced
@@ -338,7 +338,7 @@ load average 6.6 to 6.8 including the run and another agent's tests):
 The second challenge costs 1.41x at 1,024 and 1.54x at 2,048, not 2x, because the bottom
 session is shared.
 
-Integrated (mode B): committed cells per signature 14,672, 12,932 and 12,658 at 256, 1,024
+Integrated (mode B): committed cells per signature 14,800, 13,060 and 12,786 at 256, 1,024
 and 2,048 signatures. Stage 3 takes about 0.12 ms per signature locally (CLMUL build): its
 four 16-bit columns are generic `Ints` lanes.
 
@@ -474,10 +474,10 @@ The construction, driven by the PIOP transcript:
    commitments (two at event 1, four at event 4), the `LookupProof` and the 7 digit
    claims; version 0 is refused.
 4. *Stages.* Stage 1: 26 instances. Stage 2: `def_y1` (6), `leaf4[Z_hi]`, `leaf6[U_hi]`,
-   `leaf4[K_2]` (K24); 6 `K^(1)` claims before it, the projection claim `c` after it. Stage 3:
-   `ring` with (4.1) of Section 1, 3 links, 37 reductions, the 5 stack reductions (one gamma
+   `leaf8[K_2]`, `leaf8[K_3]`; 6 `K^(1)` claims before it, the projection claim `c` after it. Stage 3:
+   `ring` with (4.1) of Section 1, 4 links, 37 reductions, the 5 stack reductions (one gamma
    per stack, one part per column with the scale `eq(pi_top, c)`, deviation L6) and the two
-   sides of the projection identity; 48 instances, 34 terminal claims. The prover and verifier share `prover::prove_piop` / `verifier::verify_piop`.
+   sides of the projection identity; 49 instances, 35 terminal claims. The prover and verifier share `prover::prove_piop` / `verifier::verify_piop`.
 5. *Ledger*: spec Section 12.1 (normative; Section 2 above).
 6. *Kernel*: unchanged API; the 16-bit columns are `Source::Ints` lanes (uncoded, generic
    path). A 16-bit coded lane (two `2^16`-entry tables per fold) is the next prover-side
@@ -497,8 +497,8 @@ a low part valid only for the wider range `[0, 2^17)` (`U_lo + 63,079` with `U_h
 unchanged) rejected by the lookup, and `V_lo + 2^16` with `V_hi - 1` (`v` unchanged)
 accepted; every old witness tampering at its stage), `tests/all/projection.rs` (deviation
 K24: the unbounded-quotient attack with `Delta = 0` in `F_p` rejected by the lookup of
-`K_1`, `k` unbound to `v` at stage 3, `K_2 = 2` at stage 2, a changed claim `c`, the honest
-abort on `|k| >= 2^33`), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
+`K_1`, `k` unbound to `v` at stage 3, `K_2 = 4` and `K_3 = 4` at stage 2, a changed claim `c`, the honest
+abort on `|k| >= 2^37`), `tests/all/mode_b.rs` (round trips at 64, 256, 1,024; end-to-end
 tampering including a wrong multiplicity; a stored 16-bit value outside the width-16
 interval is refused by Akita's commit, so the prover fails and no aggregate exists: the
 verifier's rejection of a looked-up value outside `T_16` is tested only at the PIOP level,

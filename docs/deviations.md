@@ -1025,9 +1025,18 @@ verifier, wire, opening}`, `agg_pcs_config::catalogs`):
   nonce checked before `Psi` is squeezed), so its per-query error is `2^-129` and no site
   sits at the `2^-128` target with zero margin (an expanded seed would first lose a factor 2
   in a density lemma and need `g = 2` for the same margin).
-- Round 2 commits `G_k = (K_0, K_1, K_2)` on `D_k` (`o` 7 bits, `i` `d_sig` bits), the digits
-  of `k_{o,i} = <Psi_o, v_i>`, `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` over exactly
-  `[-2^33, 2^33)` (`manifest::K16_DIGITS`; bases `2^16, 2^16, 4`, signed). The honest prover
+- Round 2 commits `G_k = (K_0, K_1, K_2, K_3)` on `D_k` (`o` 7 bits, `i` `d_sig` bits), the
+  digits of `k_{o,i} = <Psi_o, v_i>`, `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 +
+  2^31 + 2^15` over exactly `[-2^37, 2^37)` (`manifest::K16_DIGITS`; bases `2^16, 2^16, 8,
+  8`, signed). The two 16-bit digits are looked up in `T_16`; the two base-8 digits have
+  `leaf8` and links, so the looked-up cells are unchanged and only one committed polynomial
+  is added. The top digit is split rather than widened to base 64 because a single base-64
+  leaf has degree 32 in `P_Z`, while two base-8 leaves have degree 4. The wider range is
+  needed for completeness: for every valid key, `|z|_inf <= B_z` and `|u|_inf <= B_u` give
+  `|v|_inf <= B_v = 67,068,447 < 2^26`, hence `||v_i||_2 < 2^31` and `|k| <= 2^36`; the
+  earlier `2^33` check could abort the honest prover for an adversarially chosen key. Lemma P
+  with `B = 2^37` certifies `|v|_c <= 2^38`, and (6.1) becomes `< 2^61 < p/2` (about two
+  bits of margin). The honest prover
   computes `k` from the committed `V_lo, V_hi` with per-byte subset sums (`projection::outputs`)
   and aborts on an output outside the range, naming the record
   (`SourceTableError::ProjectionRange { record, row, value }`). `BridgeGroupTables` keeps `Psi` beside the digits.
@@ -1036,15 +1045,17 @@ verifier, wire, opening}`, `agg_pcs_config::catalogs`):
   + 1, 16)`: one GKR session fewer, `L = 79,970,304` at `2^15` (was `138,690,560`).
   `V_lo`, `V_hi` stay in `G_main16`, stored as before, alphabet code `0x10 | 16`
   ("unchecked"); digit layout id 2.
-- Stage 2: `leaf4[K_2]` on `D_k` at the `D_k` suffix of `r^(1)` (one group per domain); after
-  the terminal claims the prover sends `c = k~(r')` (site `agg-mldsa/v1/proj/claim`, end of
-  branch S), `r'` the `D_k` suffix of `r^(2)`. `gamma^(2)`: 9 / 8 / 8 coefficients (H-u /
-  H-exact / H-FIPS), `g = 4` in every relation.
-- Stage 3: `link[K_2]`, the fifth stack reduction, and the two sides of the projection
-  identity with the one claim `c`: `W (V_lo + 2^16 V_hi + 2^15)` on the main domain with the
-  rank-one weight `W(x, i) = P(x) eq(r'_sig, i)` (`WeightId::Proj`, materialized after
-  `r^(2)` beside `w_A`, the `WeightIntGroup` path), and `K_0 + 2^16 K_1 + 2^32 K_2 + C_k` on
-  `D_k` at `r'`. `gamma^(3)`: 48 / 49 / 55; the verifier evaluates `W(r^(3))` from `Psi`.
+- Stage 2: `leaf8[K_2]`, `leaf8[K_3]` on `D_k` at the `D_k` suffix of `r^(1)` (one group per
+  domain); after the terminal claims the prover sends `c = k~(r')` (site
+  `agg-mldsa/v1/proj/claim`, end of branch S), `r'` the `D_k` suffix of `r^(2)`.
+  `gamma^(2)`: 10 / 9 / 9 coefficients (H-u / H-exact / H-FIPS), `g = 4` in every relation;
+  the stage degree is 5.
+- Stage 3: `link[K_2]`, `link[K_3]`, the fifth stack reduction, and the two sides of the
+  projection identity with the one claim `c`: `W (V_lo + 2^16 V_hi + 2^15)` on the main
+  domain with the rank-one weight `W(x, i) = P(x) eq(r'_sig, i)` (`WeightId::Proj`,
+  materialized after `r^(2)` beside `w_A`, the `WeightIntGroup` path), and
+  `K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + C_k` on `D_k` at `r'`. `gamma^(3)`:
+  49 / 50 / 56; the verifier evaluates `W(r^(3))` from `Psi`.
 - `G_3` takes `G_2`'s Akita layout: after `K^(3)` it holds zero polynomials (`Column::Zero`)
   up to `G_2`'s count and has `G_2`'s physical variables. Reason: Akita's planner enumerates
   the root openings of the precommitted groups as a Cartesian product over their distinct
@@ -1053,7 +1064,7 @@ verifier, wire, opening}`, `agg_pcs_config::catalogs`):
   ("no multi-group schedule in the audited fold domain for num_vars=16"). With `G_3` in
   `G_2`'s class the row plans (estimated opening 65,398 B against 65,282 B before). The zero
   polynomials carry no stage-3 claim; their opening claim is zero (`opening::opening_claims`).
-  Groups: seven in wire order `G_main16, G_main4, G_1, G_2, G_3, G_k, G_m`; 52 / 53 / 58
+  Groups: seven in wire order `G_main16, G_main4, G_1, G_2, G_3, G_k, G_m`; 53 / 54 / 59
   polynomials. Catalog rows `mldsa-44-p16{,x,f}-batch-<N*>-mult-final`, regenerated.
 - The proof-of-work plan: one GKR session fewer, the new `gamma` sizes; the plans of the
   three relations are equal (`docs/soundness.md` 10). PIOP wire version 4 is kept
@@ -1065,7 +1076,7 @@ Soundness: `docs/soundness.md` 3.5 (Lemma P, site `proj.psi`, `e = 2^-128`, `g =
 the stage-2 rounds like the ring identity (3.4). (F) and (K) are untouched.
 
 Tests: `tests/all/projection.rs` (the unbounded-quotient attack rejected by the lookup of
-`K_1`; `K_0 + 1` and `v` moved with `k` kept at stage 3; `K_2 = 2` at stage 2; a changed `c`;
+`K_1`; `K_0 + 1` and `v` moved with `k` kept at stage 3; `K_2 = 4` and `K_3 = 4` at stage 2; a changed `c`;
 `V_lo + 2^16` with `V_hi - 1` accepted and `V_hi = 2^16` rejected by the ring; the honest
 abort), `projection::tests` (outputs, digit ranges, `W`), updated lookup and stage tests.
 

@@ -60,14 +60,15 @@ def check(name,bases,signed,lo,hi,exhaustive=True):
 check("z",(16,16,16,16,4),True,-2**17,2**17-1)
 check("u",(16,16,16,16,8),True,-2**18,2**18-1)
 check("v",(16,)*6+(8,),True,-2**26,2**26-1,exhaustive=False)
-# Projection outputs k = K_0 + 2^16 K_1 + 2^32 K_2 + C_k with C_k = 2^31 + 2^15, a bijection
-# onto [-2^33, 2^33 - 1]; the digits of zero are (-2^15, -2^15, 0), as the encoder stores them.
-check("k",(2**16,2**16,4),True,-2**33,2**33-1,exhaustive=False)
-k0,k1,k2=-2**15,-2**15,0
-assert (layout((2**16,2**16,4),True)[2])==2**31+2**15
-assert k0+2**16*k1+2**32*k2+2**31+2**15==0
-assert -2**15<=k0<2**15 and -2**15<=k1<2**15 and -2<=k2<2
-print("k digits of 0",(k0,k1,k2),"C_k",2**31+2**15,"values",-2**33,"..",2**33-1)
+# Projection outputs k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + C_k with
+# C_k = 2^34 + 2^31 + 2^15, a bijection onto [-2^37, 2^37 - 1]; the digits of zero are
+# (-2^15, -2^15, -4, 0), as the encoder stores them.
+check("k",(2**16,2**16,8,8),True,-2**37,2**37-1,exhaustive=False)
+k0,k1,k2,k3=-2**15,-2**15,-4,0
+assert (layout((2**16,2**16,8,8),True)[2])==2**34+2**31+2**15
+assert k0+2**16*k1+2**32*k2+2**35*k3+2**34+2**31+2**15==0
+assert -2**15<=k0<2**15 and -2**15<=k1<2**15 and -4<=k2<4 and -4<=k3<4
+print("k digits of 0",(k0,k1,k2,k3),"C_k",2**34+2**31+2**15,"values",-2**37,"..",2**37-1)
 check("kappa1/2",(16,16,4),False,0,1023)
 check("kappa3",(16,16),False,0,255)
 check("b_z H-exact",(16,16,16,16,2),False,0,2**17-1)
@@ -80,9 +81,15 @@ def Q(b,P):
 for b in (4,6,8,16):
     print("Q",b,"exact on balanced alphabet",all((Q(b,Z*(Z+1))==0)==(-b//2<=Z<b//2) for Z in range(-4*b,4*b)))
 # (10) lifting bound with the digit ranges, and the v ceiling
-# |v|_c <= 2^34 from Lemma P (K24), so the quotient term is q 2^34, not q 2^26.
-Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**34
-print("Delta lift log2",round(math.log2(D),2),"<63:",D<2**63,"v ceiling log2",round(math.log2((2**63-D0)//q),2))
+# |k| < 2^37 from the digits, so Lemma P certifies |v|_c <= 2^38 and the quotient term is
+# q 2^38, still below p/2; the exact ceiling (p/2 - D0)/q is about 2^40.
+Az=1024*((q-1)//2)*2**17; D0=Az+T+W+2**18; D=D0+q*2**38
+p_half=(2**64-59)//2
+print("Delta lift log2",round(math.log2(D),2),"<p/2:",D<p_half,"margin bits",round(math.log2(p_half/D),2),"v ceiling log2",round(math.log2((p_half-D0)//q),2))
+# Completeness for every valid key: |z| <= B_z = 130,993 and |u| <= B_u, so the honest
+# quotient is at most B_v and every output is at most 1,024 B_v (rows of Psi have 1,024 ones).
+Bz=g1-beta-1; Dv=1024*((q-1)//2)*Bz+T+W+(2*g2+1); Bv=Dv//q
+print("honest B_v",Bv,"<2^26:",Bv<2**26,"|k| max",1024*Bv,"<2^36:",1024*Bv<2**36)
 # (11) committed elements per signature at N=2^15 (main 23 columns; D1 18; D2 24; D3 2)
 main=23*1024; d1=18*2**19/2**15; d2=24*2**15/2**15; d3=2*2**14/2**15
 print("elements/sig",main+d1+d2+d3,"main",main,"bridge",d1+d2+d3)
