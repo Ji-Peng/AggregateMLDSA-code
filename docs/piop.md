@@ -407,7 +407,7 @@ the other relations):
 | 1 | `commit/main16`, `commit/main` | proof | 1 each | Akita native encodings of `G_main16`, `G_main4` |
 | 2 | `commit/flock` | proof | `S` | `S` framed (`LE64` length) Flock commitments |
 | 3 | `bridge/seed` | challenge | 1 | 32 squeezed bytes `sd` |
-| 3b | `proj/psi` | public; challenge | 1; 512 | the 21-byte label; 16 KiB `Psi` |
+| 3b | `proj/psi` | public; challenge | 1; 512 | the 21-byte label; 16 KiB `Psi` (one bit of work, 8-bit nonce; K24) |
 | 4 | `commit/level1`, `level2`, `level3`, `proj`, `mult` | proof | 1 each | the round-2 commitments |
 | 5 | `flock/seeds` | challenge | `S` | `32 S` squeezed bytes `fs_sigma` |
 | 6 | `flock/final-vectors`; `flock/shares` | proof | `S`; `S` | `512 S` bytes `Y_sigma`; `S` framed share items (deviation K22) |
@@ -423,8 +423,9 @@ the other relations):
 | join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
 | 13 | `pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone, the seed of the Akita opening |
 
-Grinding (`docs/soundness.md` Section 6): every field-challenge event carries a difficulty
-from Aerie's assigned bounds (`Registry::work_sites`: `X` 0, a merge 1, a GKR batching
+Grinding (`docs/soundness.md` Section 6): every protected event carries a difficulty
+from Aerie's assigned bounds (`Registry::work_sites`: the byte site `proj.psi` 1 (K24),
+`X` 0, a merge 1, a GKR batching
 vector `bit_length(2 active)`, a GKR round 2, `tau` `bit_length(d_main)`, the stage batching
 vectors 5, 4, 6 in every relation, the stage rounds 3, 3, 2). With `g > 0` the
 transcript absorbs `LE32(nonce)` (`nonce < 2^(g + 7)`), squeezes a 32-byte predicate whose
@@ -433,7 +434,7 @@ nonce and packs it into the work stream (`Transcript::new`, `work_stream`), the 
 and checks it (`Transcript::replay`, `TranscriptError::Work`), the stream's exact length and
 zero padding checked up front and its exhaustion at `ensure_complete`. The seeds and the PCS
 export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part sites (tie,
-`eq_Y`, chain rounds), then these sites) is hashed into the instance record of event 0
+`eq_Y`, chain rounds), then these sites with `proj.psi` first) is hashed into the instance record of event 0
 (`binding::instance_record`).
 
 ## 10. Wire format (`wire::AggregateProof`)
@@ -446,8 +447,8 @@ then per session the rounds, the terminals and the leaves) and the 7 digit claim
 to 12 as raw atom encodings of 16 bytes per element (13 pre-stage claims; `4 d_main` stage-1
 round elements and 18 claims; 6 `kappa1` claims, `4 d_main` round elements and 9 claims;
 the shared claim `c`; `3 d_main` round elements and 34 claims); the join: `S` framed Flock
-proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 227
-at `N* = 8` to 525 at
+proof items (K22); the packed PIOP work nonces (`transcript::work_bytes(manifest)` bytes, 228
+at `N* = 8` to 526 at
 `2^15`); the opening framed; no trailing bytes. `from_bytes` derives every count from `N` and
 the relation byte and rejects non-canonical limbs. PIOP bytes (events 9 to 12):
 `16 (81 + 11 d_main)` under H-u and H-exact (9 + 34 and 8 + 35 stage-2 and stage-3 claims,

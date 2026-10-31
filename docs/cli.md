@@ -21,8 +21,8 @@ the byte size of every part of the aggregate). Steps:
    Section 10 with the seed-derived matrices (`SeededMatrices`) and the Flock side
    `FlockProver` (Flock profile `AggregatorConfig::profile`: `Fast` by default, `Slim` or
    `Slim8`; bound at event 0, K15, K18): event 1 `G_main16, G_main4`, event 2 the parts' Flock
-   commitments, event 3 `sd` and the projection matrix `Psi` (K24), event 4 `G_1, G_2, G_3,
-   G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
+   commitments, event 3 `sd` and the projection matrix `Psi` (K24; the site grinds one bit),
+   event 4 `G_1, G_2, G_3, G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
    default 3/8 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the

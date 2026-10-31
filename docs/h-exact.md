@@ -44,7 +44,7 @@ measurements.
    the number of zero-checks, round-by-round), the new zero-checks sit at `r^(2)` inside the
    stage-2 rounds (no new site). Against H-u: `gamma^(2)` has 8 coefficients (H-u: 9),
    `g = 4`; the stage-2 rounds (degree 4, `g = 3`) and `gamma^(3)` (49 coefficients, `g = 6`)
-   keep their difficulties. At `2^15`: 455 nonces, 4,195 bits, 525 bytes; round-by-round
+   keep their difficulties. At `2^15`: 456 nonces, 4,203 bits, 526 bytes; round-by-round
    ledger before work `1,329/|K| = 2^-117.6`, as for H-u. The plan and its digest equal
    H-u's at every `N*`.
 7. **Costs.** 13,824 committed elements per signature at `N = 2^15` (H-u: 12,800, +8.0%);
@@ -338,27 +338,27 @@ Totals (`docs/scripts/pow_plan.py`, run with `STAGE_DEGREES = (4, 4, 3)` and
 
 | `N*` | H-u: bits / bytes / work / ledger | H-exact: bits / bytes / work / ledger |
 | ---: | --- | --- |
-| `2^3` | 1,810 / 227 / 1,348 / `550/|K|` | 1,810 / 227 / 1,348 / `550/|K|` |
-| `2^10` | 2,918 / 365 / 1,962 / `914/|K|` | 2,918 / 365 / 1,962 / `914/|K|` |
-| `2^13` | 3,656 / 457 / 2,340 / `1,154/|K|` | 3,656 / 457 / 2,340 / `1,154/|K|` |
-| `2^15` | 4,195 / 525 / 2,644 / `1,329/|K|` | 4,195 / 525 / 2,644 / `1,329/|K|` |
+| `2^3` | 1,818 / 228 / 1,350 / `550/|K|` | 1,818 / 228 / 1,350 / `550/|K|` |
+| `2^10` | 2,926 / 366 / 1,964 / `914/|K|` | 2,926 / 366 / 1,964 / `914/|K|` |
+| `2^13` | 3,664 / 458 / 2,342 / `1,154/|K|` | 3,664 / 458 / 2,342 / `1,154/|K|` |
+| `2^15` | 4,203 / 526 / 2,646 / `1,329/|K|` | 4,203 / 526 / 2,646 / `1,329/|K|` |
 
-(`ledger` = round-by-round sum before work; nonce counts are equal, 194 to 455.) The plan
+(`ledger` = round-by-round sum before work; nonce counts are equal, 195 to 456.) The plan
 encoding of `docs/soundness.md` 6.4 needs no new field: the relation is bound by the manifest
 bytes in the same event, so the digests equal H-u's. Anchors (unchanged encoding, `N = N*`,
 default part size; `pow_plan.py --relation h-exact` prints them):
 
 ```text
-H-exact  N* = 2^3   modeB          bdfc5340e47e6a917f619e1453258fc3a56620bee91577a89047561cc102857d
-H-exact  N* = 2^3   slim span on   7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f
-H-exact  N* = 2^10  modeB          209fe12b4263d1ed146c404209bdb461f3fe2bbdf2860f90a0abdd56da1b0908
-H-exact  N* = 2^10  slim span on   698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f
-H-exact  N* = 2^15  modeB          0433fcf765866654fada2c17095afccbead97517c02b681e46c06e0cfd288807
-H-exact  N* = 2^15  slim span on   ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61
+H-exact  N* = 2^3   modeB          c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5
+H-exact  N* = 2^3   slim span on   9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437
+H-exact  N* = 2^10  modeB          aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd
+H-exact  N* = 2^10  slim span on   0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea
+H-exact  N* = 2^15  modeB          1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2
+H-exact  N* = 2^15  slim span on   ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303
 ```
 
 (The same computation reproduces the H-u anchors of `docs/soundness.md` Section 10, e.g.
-`ad2054a1...b16ff61` at `2^15` Slim span on; the plans are equal, so the digests above are
+`ef971095...e3e3303` at `2^15` Slim span on; the plans are equal, so the digests above are
 H-u's too.)
 
 ## 4. Knowledge soundness and the exact bounds
@@ -481,7 +481,7 @@ H-u's 2.90 s.
 ### 5.3 Proof bytes
 
 At `2^15` the `c~` list (1,048,576 B), the Keccak side, the lookup (30,256 B), the PIOP rounds
-and claims (5,696 B, exact, 3.5) and the proof-of-work stream (525 B) have H-u's sizes. The
+and claims (5,696 B, exact, 3.5) and the proof-of-work stream (526 B) have H-u's sizes. The
 planner's opening estimates of the H-exact rows equal H-u's; measured at `N = 1,024` the
 H-exact aggregate is 16 B longer, all in the Akita opening (Section 9).
 
@@ -590,10 +590,10 @@ H-u is the default relation.
   (26, 9, 48), stage-2 rounds of 4 elements, PIOP stage bytes 5,696 at `2^15` (4,816 at
   `N = 1,024`, measured in the mode-A sanity run).
 * Proof of work, checked against `docs/soundness.md` and `pow_plan.py`: with
-  `STAGE_DEGREES = (4, 4, 3)` and `STAGE_GAMMAS = (26, 9, 48)` the totals are 4,195 bits /
-  525 bytes / 2,644 work at `2^15`, the plan digests are the anchors of `docs/soundness.md`,
+  `STAGE_DEGREES = (4, 4, 3)` and `STAGE_GAMMAS = (26, 9, 48)` the totals are 4,203 bits /
+  526 bytes / 2,646 work at `2^15`, the plan digests are the anchors of `docs/soundness.md`,
   and the round-by-round ledger is `1,329/|K|` at `2^15` (`914` at `2^10`). The H-exact
-  figures of 3.7 (4,195 bits, 2,644 work, `1,329/|K|`, the six anchors) reproduce exactly with
+  figures of 3.7 (4,203 bits, 2,646 work, `1,329/|K|`, the six anchors) reproduce exactly with
   the script and `STAGE_GAMMAS = (26, 8, 49)`, so step B's schedule stands as written.
 ## 9. Step B as implemented (relation H-exact)
 
@@ -926,7 +926,7 @@ bytes `16 (13 + 18 + 6 + 9 + 1 + 39 + 11 d_main)`: 5,776 B at `2^15` (H-u and H-
 5,696 B).
 
 Proof of work: `bit_length(8) = 4` and `bit_length(55) = bit_length(49) = 6`, so every
-difficulty, the nonce stream (4,195 bits, 525 bytes, 2,644 units of work at `2^15`) and the
+difficulty, the nonce stream (4,203 bits, 526 bytes, 2,646 units of work at `2^15`) and the
 plan digest equal H-exact's and H-u's (`pow.rs` test `h_fips_plans_equal_h_exact_plans`,
 `pow_plan.py --relation h-fips` self-check). The relation is bound by event 0's manifest bytes
 (relation byte 2, the `G_main4` and `G_2` descriptors, the catalog row), as 3.7 argues for
@@ -1041,7 +1041,7 @@ mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should 
 | Stage degrees | (4, 4, 3) | (4, 4, 3) | (4, 3, 3) |
 | Stage instances | 26, 9, 48 | 26, 8, 49 | 26, 8, 50 |
 | PIOP stage bytes at `2^15` | 5,696 | 5,696 | 5,312 |
-| Proof-of-work bits / bytes at `2^15` | 4,195 / 525 | 4,195 / 525 | 4,195 / 525 |
+| Proof-of-work bits / bytes at `2^15` | 4,203 / 526 | 4,203 / 526 | 4,203 / 526 |
 | Round-by-round ledger at `2^15` | `1,329/|K|` | `1,329/|K|` | `1,304/|K|` |
 | Prove delta at `2^15` (estimate) | | about +0.1 s | about +0.2 to +0.4 s |
 

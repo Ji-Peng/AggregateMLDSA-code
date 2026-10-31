@@ -408,7 +408,7 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 | 0 | instance | wire version LE16 (4), parameter-set byte 0x44, relation byte (0 = H-u, 1 = H-exact, 2 = H-FIPS), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (2, Section 4.3), the seven group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
 | 1 | absorb | round-1 Akita commitments $`G_{\rm main16}`$, $`G_{\rm main4}`$ (native encoding) |
 | 2 | absorb | $`S`$ Flock commitments (Ligerito roots), segment order |
-| 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling; then, as its own site `proj/psi`, the 21 raw bytes of the label `agg-mldsa/v1/proj/psi` (one public message, no length frame, so that $`\Psi`$ is squeezed at its own sponge input and not as a continuation of $`\mathsf{sd}`$) and $`\Psi`$: 16,384 bytes (512 blocks of 32), no field sampling, no work (Section 6) |
+| 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling; then, as its own site `proj/psi`, the 21 raw bytes of the label `agg-mldsa/v1/proj/psi` (one public message, no length frame, so that $`\Psi`$ is squeezed at its own sponge input and not as a continuation of $`\mathsf{sd}`$) and $`\Psi`$: 16,384 bytes (512 blocks of 32), no field sampling, one bit of work with an 8-bit nonce (Section 6, K24) |
 | 4 | absorb | round-2 Akita commitments $`G_1,G_2,G_3,G_k,G_m`$ in group order |
 | 5 | challenge | $`\mathsf{fs}_\sigma`$: 32 bytes per segment, the challenger seed of the Flock sub-proof $`\sigma`$ (its challenger is initialized with $`\mathsf{fs}_\sigma`$) |
 | 6 | absorb | $`Y_0,\ldots,Y_{S-1}`$ (512 bytes each), then the $`S`$ share items of the Keccak side, each framed by `B()` (mode A: the shares of a segment's parts but the last; empty for a span, a one-part segment and mode B) |
@@ -461,7 +461,7 @@ address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Propositio
 | Site class | Count at $`2^{15}`$ | $`\nu_t`$ | Assigned $`e_t`$ | $`g_t`$ | Nonce bits |
 | --- | ---: | --- | --- | ---: | ---: |
 | lookup $`X=(X_1,X_2)`$, one vector site (Lemma below) | 1 | joint | $`((L+M-1)/|K|)^2=2^{-203.5}`$ | 0 | 0 |
-| projection matrix $`\Psi`$ (`proj/psi`, 16 KiB, after $`\mathsf{sd}`$; Lemma P, `docs/soundness.md` 3.5) | 1 | | $`2^{-128}`$ (exact, the answer is $`\Psi`$ itself) | 0 | 0 |
+| projection matrix $`\Psi`$ (`proj/psi`, 16 KiB, after $`\mathsf{sd}`$; Lemma P, `docs/soundness.md` 3.5) | 1 | | $`2^{-128}`$ (exact, the answer is $`\Psi`$ itself) | 1 | 8 |
 | lookup merges $`\mu_1..\mu_D`$ | 26 | 1 | $`1/|K|`$ | 1 | 8 |
 | GKR batching vectors $`\gamma_s`$ ($`2\cdot`$active trees coefficients) | 25 | 1 | $`24,20,16,12,8,4`$ over $`|K|`$ | 5, 5, 5, 4, 4, 3 | 12, 12, 12, 11, 11, 10 |
 | GKR rounds (degree 3) | 325 | 3 | $`3/|K|`$ | 2 | 9 |
@@ -475,12 +475,13 @@ address then weighs at most $`2^{-g_t}\nu_t/|F_t|\le2^{-128}`$ (Akita Propositio
 | Akita opening sites | 461 | Akita's loss factors | Akita Eq. (146) over $`p^2`$ | 1 to 12 | inline LEB128 (already in the opening) |
 | Flock internal sites | | Flock's | Flock's per-site schedule; outer sites with the level-0 list factor (PATCH.md 5) | | 8-byte words (already in the Flock proofs) |
 
-At $`N^\star=2^{15}`$ the PIOP plan has 456 sites and 455 nonces, 4,195 bits in one packed
-stream of 525 bytes (227 bytes at $`N^\star=8`$, 365 at $`2^{10}`$); the expected honest work is
-$`\sum2^{g_t}=2{,}644`$ predicate evaluations. Before work the round-by-round sum of the PIOP
+At $`N^\star=2^{15}`$ the PIOP plan has 457 sites and 456 nonces, 4,203 bits in one packed
+stream of 526 bytes (228 bytes at $`N^\star=8`$, 366 at $`2^{10}`$); the expected honest work is
+$`\sum2^{g_t}=2{,}646`$ predicate evaluations. Before work the round-by-round sum of the PIOP
 field terms is $`(11d_{\rm main}+d_{\rm main}+3+{\rm GKR})/|K|=1{,}329/|K|=2^{-117.6}`$ at
-$`2^{15}`$ (914/|K| at $`2^{10}`$). The byte site `proj/psi` is not in the plan (no field
-challenge, $`g=0`$, like $`\mathsf{sd}`$); the plans of H-u, H-exact and H-FIPS are equal. The plan (the tied parts' sites, then the PIOP sites in registry order)
+$`2^{15}`$ (914/|K| at $`2^{10}`$). The byte site `proj/psi` is the first entry of the plan
+(no field challenge, $`g=1`$, an 8-bit nonce; deviation K24); the plans of H-u, H-exact and
+H-FIPS are equal. The plan (the tied parts' sites, then the PIOP sites in registry order)
 is bound in event 0 by its SHA3-256 digest (Section 10). Mode A admits at most two tied parts
 per segment ($`d_{\rm part}\ge d_{\rm seg}-1`$; `docs/soundness.md` 3.5), so the $`\mathsf{sd}`$
 union stays below $`2^{-128}`$. The composition of Akita's extractor with the Flock

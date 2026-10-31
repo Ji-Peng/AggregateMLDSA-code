@@ -1020,8 +1020,11 @@ verifier, wire, opening}`, `agg_pcs_config::catalogs`):
   commitments): `Transcript::challenge_psi` absorbs the 21 raw label bytes of the site (so the
   query input is not `sd`'s) and `challenge_bytes(PROJ_SITE, 512)` squeezes the 16 KiB of
   `Psi in {0,1}^(128 x 1024)` directly (row `o`, position `x` is bit `x mod 8` of byte
-  `128 o + x / 8`). No seed is expanded, so the site's mass is exactly `2^-128` and `g = 0`
-  (an expanded seed would lose a factor 2 in a density lemma and need `g = 1`).
+  `128 o + x / 8`). No seed is expanded, so the site's mass is exactly `2^-128`. The schedule
+  gives `proj.psi` one bit of grinding (`g = 1`, an 8-bit
+  nonce checked before `Psi` is squeezed), so its per-query error is `2^-129` and no site
+  sits at the `2^-128` target with zero margin (an expanded seed would first lose a factor 2
+  in a density lemma and need `g = 2` for the same margin).
 - Round 2 commits `G_k = (K_0, K_1, K_2)` on `D_k` (`o` 7 bits, `i` `d_sig` bits), the digits
   of `k_{o,i} = <Psi_o, v_i>`, `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^31 + 2^15` over exactly
   `[-2^33, 2^33)` (`manifest::K16_DIGITS`; bases `2^16, 2^16, 4`, signed). The honest prover
@@ -1056,7 +1059,7 @@ verifier, wire, opening}`, `agg_pcs_config::catalogs`):
   three relations are equal (`docs/soundness.md` 10). PIOP wire version 4 is kept
   (unreleased); aggregates made before this change do not verify under it.
 
-Soundness: `docs/soundness.md` 3.5 (Lemma P, site `proj.psi`, `e = 2^-128`, `g = 0`) and 12.4
+Soundness: `docs/soundness.md` 3.5 (Lemma P, site `proj.psi`, `e = 2^-128`, `g = 1`) and 12.4
 (the pending claim `C1` becomes `C1*` at the projection stage of the segment of `sd`;
 `R_PIOP` implies `C1*`). The projection identity is tested at a point of `r^(2)` and rides on
 the stage-2 rounds like the ring identity (3.4). (F) and (K) are untouched.

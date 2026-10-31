@@ -18,13 +18,13 @@ the pinned code; estimates are marked.
    (`|K| = p^2`, `p = 2^64 - 59`): the lookup vector `X = (X_1, X_2)`, 26 merges `mu_s`,
    25 GKR batching vectors, 325 GKR rounds of degree 3, `tau`, `gamma^(1..3)` and
    `3 x 25` stage rounds of degrees 4, 4, 3 (every relation). With the assigned bounds of Section 3 every
-   site except `X` needs work: 455 nonces of 8 to 13 bits, 4,195 bits = **525 bytes** in
-   one packed stream, about 2,644 predicate evaluations of expected honest work
-   (about 2 ms serial at the measured 724 ns per Blake2b predicate, estimate).
-   `X` needs none: its joint bad set has mass `((L + M - 1)/|K|)^2 = 2^-203.5`.
-   One byte site precedes them, `proj.psi` (deviation K24): its answer is the projection
-   matrix `Psi` itself (16 KiB), its bad set has mass at most `2^-128` exactly (Lemma P,
-   Section 3.5), so it needs no work either.
+   field site except `X` needs work: 455 nonces of 8 to 13 bits, 4,195 bits of the packed
+   stream. The byte site `proj.psi` precedes them (deviation K24): its answer is the
+   projection matrix `Psi` itself (16 KiB), its bad set has mass at most `2^-128` exactly
+   (Lemma P, Section 3.5), so it grinds one bit and adds one 8-bit nonce. The packed stream
+   of the 456 nonces is 4,203 bits = **526 bytes**, about 2,646 predicate evaluations of
+   expected honest work (about 2 ms serial at the measured 724 ns per Blake2b predicate,
+   estimate). `X` needs none: its joint bad set has mass `((L + M - 1)/|K|)^2 = 2^-203.5`.
 2. **Tied-part sites (version 5).** A tied part is one Flock instance (the sponge) plus the
    virtual parity chain on its tie challenger (`docs/parity-chain.md`). Its challenges are
    drawn while the sponge commitment is bound only to its Johnson list, so each bound
@@ -133,7 +133,7 @@ sub-proofs and therefore no tied-part site):
 | --- | --- | --- |
 | 0 | PIOP | none; binds the instance record, which ends with the plan digest (Section 6.4) |
 | 1, 2 | PIOP | none (absorbs: round-1 Akita commitments; Flock sponge caps) |
-| 3 | PIOP | seed `sd` (32 bytes, no field sampling); then `proj.psi`, the projection matrix `Psi` (16 KiB, its own query, no field sampling; K24) |
+| 3 | PIOP | seed `sd` (32 bytes, no field sampling); then `proj.psi`, the projection matrix `Psi` (16 KiB, its own query, no field sampling, one bit of work; K24) |
 | 4 | PIOP | none (round-2 Akita commitments, `G_k` among them) |
 | 5 | PIOP | seeds `fs_sigma` (32 bytes each); the span seed is a hash of them |
 | 6 | PIOP absorbs `Y_sigma`, then the share items (deviation K22: no Flock proof bytes here); no site |
@@ -170,6 +170,7 @@ trees; `D = max(d_main + 1, 16)`; `L = 2 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3 + 
 
 | Class (id) | Count | `nu_t` | Assigned `e_t` | `g_t` | Nonce bits | At `2^15` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `proj.psi` (11) | 1 | byte site | `2^-128` (exact, Lemma P) | 1 | 8 | `2^-129` |
 | `lookup.x` (1) | 1 | joint (3.2) | `((L + M - 1)/|K|)^2` | 0 | 0 | `2^-203.5` |
 | `lookup.mu` (2) | `D` (`mu_1 .. mu_D`) | 1 | `1/|K|` | 1 | 8 | 26 sites |
 | `lookup.gamma` (3) | `D - 1` | 1 | `2 active_s / |K|` | `bit_length(2 active_s)` | `g + 7` | 24, 20, 16, 12, 8, 4 coefficients: `g` = 5, 5, 5, 4, 4, 3 (13, 2, 2, 4, 1, 3 sites) |
@@ -178,9 +179,10 @@ trees; `D = max(d_main + 1, 16)`; `L = 2 2^d_main + 8 2^d_1 + 8 2^d_2 + 2^d_3 + 
 | `stage.gamma` (6) | 3 | 1 | `26, 9, 48 / |K|` (H-exact: `26, 8, 49`; H-FIPS: `26, 8, 55`) | 5, 4, 6 (every relation) | 12, 11, 13 | |
 | `stage.round` (7) | `3 d_main` | 4, 4, 3 | `deg/|K|` | 3, 3, 2 | 10, 10, 9 | 75 sites |
 
-Totals per `N*` are in Section 10 (from 194 nonces / 227 bytes at `N* = 8` to 455 /
-525 bytes at `2^15`). The byte site `proj.psi` (Section 3.5) has `g = 0` and no nonce; like
-`sd` it is not an entry of the plan (Section 6.4), which lists the field-challenge sites. The largest PIOP difficulty is 6 bits (`gamma^(3)`), far below
+Totals per `N*` are in Section 10 (from 195 nonces / 228 bytes at `N* = 8` to 456 /
+526 bytes at `2^15`). The byte site `proj.psi` (Section 3.5) is the first entry of the plan
+(Section 6.4) with `g = 1`; every other entry is a field challenge. The largest field
+difficulty is 6 bits (`gamma^(3)`), far below
 Akita's 25-bit transition cap.
 
 ### 3.2 The lookup challenge `X = (X_1, X_2)`: one site with the joint bound
@@ -252,7 +254,7 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   false input claim makes the instance false, which `gamma^(3)` and the stage-3 rounds
   carry (Section 5). No extra site.
 
-### 3.5 Seed sites and exports (no work)
+### 3.5 Seed sites, the projection site and exports
 
 * `sd` (event 3): bad set "`M_3 M_2 M_1 delta = 0` for the fixed `delta = b xor b'`"
   (spec 9.4), mass `theta = 2^-144.64` per segment check. Because each part's `b'_s` is
@@ -288,8 +290,10 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   `Bad_proj = {Psi : for all o < 128, |<Psi_o, v_{i*}>|_c <= 2^33}` for the first record
   `i*` with a coordinate `|v_{i*}(x_0)|_c > 2^34` (a function of the round-1 candidate
   `f_1`, fixed before the query), mass `<= 2^-128` by Lemma P, exactly (no density loss):
-  `e = 2^-128`, `g = 0`, no nonce. An expanded 32-byte seed would need Lemma P' below with
-  `theta_Psi = 2^-127` and `g = 1`.
+  `e = 2^-128` exactly. The site is a byte challenge, so its difficulty is set by policy
+  rather than by a field numerator: it grinds one bit (`g = 1`, the 8-bit nonce of
+  Section 6.1) and weighs `2^-129` per address. An expanded 32-byte seed would need
+  Lemma P' below with `theta_Psi = 2^-127` and `g = 2` for the same `2^-129`.
 
   **Lemma P (one-coordinate anti-concentration).** Let `R, n >= 1`, `B >= 0` with `4B < p`,
   and let `Psi in {0,1}^(R x n)` have iid uniform entries. For every `v in F_p^n` with
@@ -718,7 +722,8 @@ in the vendored verifier (`vendor/flock-core/PATCH.md` Section 6, deviation K19)
 
 The plan of a proof is the ordered list of its tied parts' sites (per tied part, in segment
 and part order: the tie site, the `eq_Y` site, then the `R` chain rounds) followed by the
-PIOP field-challenge sites in registry order (`X` included with `g = 0`). The tied parts come
+PIOP sites in registry order (the byte site `proj.psi` with `g = 1`, then the field-challenge
+sites, `X` included with `g = 0`). The tied parts come
 first by convention of the encoding: with the fork-join of deviation K22 their sites follow
 the stage-3 rounds in the transcript. It is a function of public data only: `N` (hence `N*`), the Flock profile,
 and the tied-part geometry (span byte, part size) of the event-2 items, which the verifier
@@ -728,11 +733,13 @@ parses before replaying event 0. Canonical encoding:
 body  = LE64(N*) || u8(profile id: 1 Fast, 4 Slim, 5 Slim8, 3 mode B)
         || u8(S, the span length; 0 in mode B) || u8(d_part; 0 in mode B)
         || LE32(site count) || entries
-entry = u8(class id, Section 3.1; 8 = tie, 9 = chain eq_Y, 10 = chain round) || LE16(i)
+entry = u8(class id, Section 3.1; 8 = tie, 9 = chain eq_Y, 10 = chain round,
+        11 = proj.psi) || LE16(i)
         || LE16(j) || u8(g) || u8(nonce bits)
         (i, j) = (s, 0) for lookup.mu and lookup.gamma, (s, r) for lookup.round,
                  (stage, 0) / (stage, r) for stage sites, (part index, 0) for the tie and
-                 eq_Y sites, (part index, k) for chain round k, (0, 0) for lookup.x and tau
+                 eq_Y sites, (part index, k) for chain round k, (0, 0) for proj.psi,
+                 lookup.x and tau
 digest = SHA3-256("agg-mldsa/v2/pow-plan" || LE64(len(body)) || body)
 ```
 
@@ -747,7 +754,7 @@ part in `nu_s`; the vectors use full batches.)
 The prover tries `v = 0, 1, ...` and takes the first passing value, at most `2^(g + 7)`
 candidates (deterministic proofs). A site fails with probability
 `(1 - 2^-g)^(2^(g + 7)) <= exp(-2^7) = 2^-184.66`. The capped searches of a proof are the
-PIOP sites (at most 456), the tied parts' sites (per part a tie, an `eq_Y` and at most 28
+PIOP sites (at most 457, the byte site `proj.psi` included), the tied parts' sites (per part a tie, an `eq_Y` and at most 28
 round sites: at most `8 x 30 = 240` with the two-part cap of 3.5), Akita's capped
 transcript searches (461 at `2^15`) and, since the
 vendored Flock verifier rejects nonces of `g + 7` or more bits (`vendor/flock-core/PATCH.md`
@@ -757,8 +764,8 @@ with the same probability per site. Flock has fewer than `2^10` sites with work 
 (estimate from the round counts: one instance, a zerocheck, a lincheck, the
 opening's three ring switches, claim batch and merged rounds, and at most six Ligerito
 levels with two batches and one query nonce each, at `m <= 45` variables), so at most
-`2^13` for eight parts. The completeness error is therefore at most `(456 + 240 + 461 +
-2^13) 2^-184.66 < 2^-171.4` (the Flock count an estimate; without it `< 2^-174.4`). A search
+`2^13` for eight parts. The completeness error is therefore at most `(457 + 240 + 461 +
+2^13) 2^-184.66 < 2^-171.5` (the Flock count an estimate; without it `< 2^-174.5`). A search
 that exhausts its allowance returns `KeccakError::Work` (no panic). Expected work per site `2^g` predicate
 evaluations.
 
@@ -807,7 +814,8 @@ eps_ext <= (Q + R_f + R_coord + R_F) 2^-128 + eps_bind + eps_pk + eps_dig + eps_
 ```
 
 where `R_f` is the number of field sites of the PIOP and of Akita read by the verifier
-(456 + 461 at `2^15`, plus the seeds, `proj.psi` and the tied parts' sites), `R_coord` Akita's sparse fold coordinates read by
+(457 + 461 at `2^15`, the byte site `proj.psi` and the 456 field challenges, plus the seeds
+and the tied parts' sites), `R_coord` Akita's sparse fold coordinates read by
 the verifier, `R_F` the Flock sites read by the verifier (the sponge instance of every tied
 part, outer and Ligerito, queries included), `eps_bind, eps_pk, eps_dig` the hashed-entry terms of Aerie
 Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock part and
@@ -829,10 +837,11 @@ the tied parts' own challengers and for the sites of branch S (K23). (3) Item (v
 with the sponge lists on the segment of `sd` (12.4), with Lemma 12.4 for the seed; Lemma S,
 the tied parts' sites (tie, `eq_Y`, chain rounds) with the list factor and Flock's per-site
 bounds under (F), and the evaluation batch on the segment of `X` (12.3, 12.4). (4) Every address weighs at most `2^-128` (Section 3,
-the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi` exactly
-`2^-128` by Lemma P, the worst site: the plan alone gives `2^-128.36`, so the global `rho` of
-Aerie Eq. (18) is attained there and any further factor 2 at that site would break the
-128-bit claim; Flock with 4.3/4.4
+the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi`
+`2^-129` by Lemma P and its one-bit grind (K24), below the field sites; the largest PIOP
+plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`, so the global `rho` of
+Aerie Eq. (18) is attained at `tau` for `N* = 32` and any further factor 2 there would
+break the 128-bit claim; Flock with 4.3/4.4
 under (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
 Akita Theorem 10.17 with Aerie Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <=
 2^-128`. (5) The witness map returns the round-1 tables, which satisfy the caller's relation by the
@@ -856,7 +865,7 @@ estimate); the claim is 128 bits per query, Aerie's notion.
 
 | Item | Proof bytes | Prover hashes (expected) |
 | --- | ---: | ---: |
-| PIOP packed stream (455 nonces, 4,195 bits) | 525 | 2,644 Blake2b predicates (about 2 ms serial, estimate) |
+| PIOP packed stream (456 nonces, 4,203 bits) | 526 | 2,646 Blake2b predicates (about 2 ms serial, estimate) |
 | Tied-part nonces (version 5: tie `g = 10`, `eq_Y` `g = 10`, 28 rounds `g = 7`) | 120 | `2^10 + 2^10 + 28 x 2^7 = 5,632` BLAKE3 (well under 1 ms, estimate) |
 | Akita (already in the opening) | 0 added | 0 added (9,884 at `2^15` with K24) |
 | Flock fix of 4.3 | 0 (nonces are 8-byte words already) | about 100 sites per instance at `2^7` to `2^14` (estimate, milliseconds) |
@@ -881,7 +890,7 @@ minimum of each set: 3,898, 4,025, 4,000 ms), consistent with the estimated few 
 of hashing; the Flock fix adds no measurable time. Verify medians 442 / 434 / 425 ms
 (uncached keys).
 
-Span off at `2^15`: four tied parts of 26 rounds each, `525 + 4 x 112 = 973` B in all.
+Span off at `2^15`: four tied parts of 26 rounds each, `526 + 4 x 112 = 974` B in all.
 
 ## 10. Script output summary (`python3 -I docs/scripts/pow_plan.py`)
 
@@ -896,19 +905,19 @@ sum before work):
 
 ```text
 d_sig  N*      d_main  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)
-    3       8      13  16       153600        -220.5    195     194  1810    227           1348    0.98  2^-128.30  550/|K| = 2^-118.9
-    4      16      14  16       172032        -220.3    198     197  1840    230           1384    1.00  2^-128.19  562/|K| = 2^-118.9
-    5      32      15  16       208896        -219.9    201     200  1870    234           1420    1.03  2^-128.09  574/|K| = 2^-118.8
-    6      64      16  17       282624        -219.2    222     221  2062    258           1530    1.11  2^-128.42  636/|K| = 2^-118.7
-    7     128      17  18       430080        -218.2    244     243  2262    283           1628    1.18  2^-128.42  701/|K| = 2^-118.5
-    8     256      18  19       724992        -216.8    267     266  2471    309           1730    1.25  2^-128.42  769/|K| = 2^-118.4
-    9     512      19  20      1314816        -215.2    291     290  2690    337           1844    1.34  2^-128.42  840/|K| = 2^-118.3
-   10    1024      20  21      2560000        -213.4    316     315  2918    365           1962    1.42  2^-128.42  914/|K| = 2^-118.2
-   11    2048      21  22      5050368        -211.4    342     341  3155    395           2084    1.51  2^-128.42  991/|K| = 2^-118.0
-   12    4096      22  23     10031104        -209.5    369     368  3401    426           2210    1.60  2^-128.42  1071/|K| = 2^-117.9
-   13    8192      23  24     19992576        -207.5    397     396  3656    457           2340    1.69  2^-128.42  1154/|K| = 2^-117.8
-   14   16384      24  25     39985152        -205.5    426     425  3921    491           2490    1.80  2^-128.42  1240/|K| = 2^-117.7
-   15   32768      25  26     79970304        -203.5    456     455  4195    525           2644    1.91  2^-128.36  1329/|K| = 2^-117.6
+    3       8      13  16       153600        -220.5    196     195  1818    228           1350    0.98  2^-128.30  550/|K| = 2^-118.9
+    4      16      14  16       172032        -220.3    199     198  1848    231           1386    1.00  2^-128.19  562/|K| = 2^-118.9
+    5      32      15  16       208896        -219.9    202     201  1878    235           1422    1.03  2^-128.09  574/|K| = 2^-118.8
+    6      64      16  17       282624        -219.2    223     222  2070    259           1532    1.11  2^-128.42  636/|K| = 2^-118.7
+    7     128      17  18       430080        -218.2    245     244  2270    284           1630    1.18  2^-128.42  701/|K| = 2^-118.5
+    8     256      18  19       724992        -216.8    268     267  2479    310           1732    1.25  2^-128.42  769/|K| = 2^-118.4
+    9     512      19  20      1314816        -215.2    292     291  2698    338           1846    1.34  2^-128.42  840/|K| = 2^-118.3
+   10    1024      20  21      2560000        -213.4    317     316  2926    366           1964    1.42  2^-128.42  914/|K| = 2^-118.2
+   11    2048      21  22      5050368        -211.4    343     342  3163    396           2086    1.51  2^-128.42  991/|K| = 2^-118.0
+   12    4096      22  23     10031104        -209.5    370     369  3409    427           2212    1.60  2^-128.42  1071/|K| = 2^-117.9
+   13    8192      23  24     19992576        -207.5    398     397  3664    458           2342    1.70  2^-128.42  1154/|K| = 2^-117.8
+   14   16384      24  25     39985152        -205.5    427     426  3929    492           2492    1.80  2^-128.42  1240/|K| = 2^-117.7
+   15   32768      25  26     79970304        -203.5    457     456  4203    526           2646    1.92  2^-128.36  1329/|K| = 2^-117.6
 ```
 
 Sites of one tied part, version 5, full parts (`n = 2^d S`), selected rows (the script prints
@@ -947,11 +956,11 @@ parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` 
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Per-instance ledger vs
 round-by-round at `2^15`: `3,429/|K| = 2^-116.3` vs `1,329/|K| = 2^-117.6` (stages 275,
 `tau` 25, gammas 3, GKR 1,026). Honest failure per site `< 2^-184.6`, per proof
-`< 2^-174.5` (1,157 capped searches: PIOP, 240 tied-part, 461 Akita; with the Flock sites of
-the canonical nonce width `< 2^-171.4`, Section 6.5).
+`< 2^-174.5` (1,158 capped searches: PIOP, 240 tied-part, 461 Akita; with the Flock sites of
+the canonical nonce width `< 2^-171.5`, Section 6.5).
 
-Totals with the tied parts' nonces (`N = N*`, `Slim`): `2^10` 465 B (0.454 B/sig), `2^13`
-569 B (0.069 B/sig), `2^15` 645 B (0.020 B/sig) with the span, 973 B with span off.
+Totals with the tied parts' nonces (`N = N*`, `Slim`): `2^10` 466 B (0.455 B/sig), `2^13`
+570 B (0.070 B/sig), `2^15` 646 B (0.020 B/sig) with the span, 974 B with span off.
 Expected tied-part work at `2^15`, span on: 5,120 /
 5,632 / 10,240 BLAKE3 evaluations (`Fast / Slim / Slim8`).
 
@@ -959,16 +968,16 @@ Plan digests (Section 6.4 encoding, `N = N*`, default part size; the script prin
 sizes and every profile, these are the anchors the implementation tests MUST reproduce):
 
 ```text
-N* = 2^3  modeB          bdfc5340e47e6a917f619e1453258fc3a56620bee91577a89047561cc102857d
-N* = 2^3  slim   span on  7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f
-N* = 2^10 modeB          209fe12b4263d1ed146c404209bdb461f3fe2bbdf2860f90a0abdd56da1b0908
-N* = 2^10 slim   span on  698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f
-N* = 2^13 slim   span on  5bd3fe07e771dcaa85e92a2997a9fda66e5f1887cbeb64fb0b22682d5fb77d66
-N* = 2^15 modeB          0433fcf765866654fada2c17095afccbead97517c02b681e46c06e0cfd288807
-N* = 2^15 fast   span on  5436b95bfe5a7af40ea8d0258d1e15501828fb119442bed0bd29435386a4d666
-N* = 2^15 slim   span on  ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61
-N* = 2^15 slim   span off 6984c30280af6885ffce7c1aac73b59be7eaba8c23d077fc09421fc7d49ca7b0
-N* = 2^15 slim8  span on  66f2907b8f0150c55e8519ea169cb01250cf3cf4cdcfd424607a78d07054369f
+N* = 2^3  modeB          c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5
+N* = 2^3  slim   span on  9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437
+N* = 2^10 modeB          aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd
+N* = 2^10 slim   span on  0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea
+N* = 2^13 slim   span on  aa72651e90b32c908db52ec832790d72e685c4493c7fd3e80bebe60cd506b5c9
+N* = 2^15 modeB          1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2
+N* = 2^15 fast   span on  deb090a48d8057c6aed064b95bf6fb8a1499207935005fc0d98b40ab5de3864c
+N* = 2^15 slim   span on  ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303
+N* = 2^15 slim   span off fe42263b92bff80e6c367e2b44d7673d274f454841e1784332f5971a03e136c8
+N* = 2^15 slim8  span on  0ba687fbd3b201e24c3776d9ee689dfcfb81ea841de12aa7cbbb3157199ccad8
 ```
 
 The digests depend on the tied parts' difficulties and round counts of Section 3.6 and the
@@ -993,13 +1002,15 @@ the `G_main4` descriptor); equal digests are benign, as for Akita's rows of `d_s
 
 ```text
 d_sig  N*      sites  nonces  bits  bytes  work(sum 2^g)  ledger(before work)
-    3       8    195     194  1810    227           1348  550/|K| = 2^-118.9
-   10    1024    316     315  2918    365           1962  914/|K| = 2^-118.2
-   13    8192    397     396  3656    457           2340  1154/|K| = 2^-117.8
-   15   32768    456     455  4195    525           2644  1329/|K| = 2^-117.6
+    3       8    196     195  1818    228           1350  550/|K| = 2^-118.9
+   10    1024    317     316  2926    366           1964  914/|K| = 2^-118.2
+   13    8192    398     397  3664    458           2342  1154/|K| = 2^-117.8
+   15   32768    457     456  4203    526           2646  1329/|K| = 2^-117.6
 ```
 
-The maximum site weight is H-u's (`2^-128.36` at `2^15`, `2^-128.42` from `2^6` to `2^14`).
+The maximum site weight is H-u's (`2^-128.09` at `N* = 32`, `2^-128.36` at `2^15`,
+`2^-128.42` from `2^6` to `2^14`). The exact maximum is the `tau` site's
+`15/(16|K|) = 2^-128.0931` at `N* = 32`.
 Plan digests (`N = N*`, default part size; pinned by
 `agg_piop::pow::tests::h_exact_plans_reproduce_docs_h_exact_section_3_7`, which also checks
 that H-u's equal them): those of Section 10.
@@ -1024,7 +1035,7 @@ before `X`, `tau` and the stages; 3.4), `F3` is pending during the stage-1 round
 `r^(1)`, the others during the stage-2 rounds that draw `r^(2)` (`F7`'s identity
 `sum_i eq(r^(2)_sig, i) G(i) = 0` is multilinear in `r^(2)_sig`; its `1/2` coordinates only
 sum over positions and carry no randomness). `bit_length(8) = 4` and `bit_length(55) =
-bit_length(49) = 6`, so every difficulty, the stream (4,195 bits, 525 bytes, 2,644 units of
+bit_length(49) = 6`, so every difficulty, the stream (4,203 bits, 526 bytes, 2,646 units of
 work at `2^15`), the round-by-round ledger (`1,329/|K| = 2^-117.6` at `2^15`) and the plan
 digest are H-exact's (and H-u's) (`agg_piop::pow::tests::h_fips_plans_equal_h_exact_plans`; the
 `pow_plan.py` self-check). Equal digests are benign, as for Akita's rows of `d_sig` 3 and 4
@@ -1301,7 +1312,7 @@ Lemma 12.1b to the bound (12.6).
   (which no answer of S touches) was already true, so the false claim was one of S's and the
   answer lies in `Bad_t`.
 * Masses and the work schedule: each site keeps its bad set, its `nu_t` and its assigned
-  bound, and therefore its difficulty `g_t`; the 456 PIOP sites, the ledger
+  bound, and therefore its difficulty `g_t`; the 457 PIOP sites, the ledger
   (`1,329/|K|` before grinding at `2^15`) and the per-address weight `<= 2^-128` of every
   site are those of the linear transcript. The nonce stream lists the sites in the same
   order (L, S, stage 3), so the plan of Section 6.4 and its digest do not change.
@@ -1504,11 +1515,12 @@ read the complete linear prefix, so their bad sets may use all of it:
   `Delta = 0` in `F_p`, so by (6.1) the first such record `i*` (a function of `f_1`) has a
   coordinate `|v_{i*}(x_0)|_c >= (p/2 - 2^50)/q > 2^34`. `Bad_proj = {Psi : for all o,
   |<Psi_o, v_{i*}>|_c <= 2^33}` has mass at most `2^-128` (Lemma P, Section 3.5; exact for the
-  squeezed `Psi`, so `g = 0` meets `2^-128` without a density loss). Outside `Bad_proj`,
-  `Prj(Psi, f_1)` is false, hence `C1*` is false. If (3.1) holds, `C1*` holds with `C1` for
-  every answer, and the false claim (if any) is `C2_sigma*`, which this answer does not touch:
-  it stays false. The site needs no nonce and is not in the plan; its mass is charged once,
-  for the first bad record, not per record.
+  squeezed `Psi`, so one bit of work gives `2^-129` without a density loss; deviation K24).
+  Outside `Bad_proj`, `Prj(Psi, f_1)` is false, hence `C1*` is false. If (3.1) holds, `C1*`
+  holds with `C1` for every answer, and the false claim (if any) is `C2_sigma*`, which this
+  answer does not touch: it stays false. The site is the first entry of the plan and its
+  nonce is checked before `Psi` is squeezed; its mass is charged once, for the first bad
+  record, not per record.
 * `fs`. No bad set: `D` stays 1 for every answer and every message of event 6. If `C1*` or a
   check fails, it persists. Otherwise `C2_sigma*` is false. If `M^(sigma*) b_sigma*(f_1) !=
   Y_sigma*`, `C3_sigma*` is false. Otherwise, if every part `p` of `sigma*` had `C4_p` with a
@@ -1648,7 +1660,7 @@ eps_hash + eps_fs + eps_br + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] 
 
 with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, every relation),
-`proj.psi` exactly `2^-128` (Lemma P), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
+`proj.psi` `2^-129` (Lemma P and one bit of work, K24), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
 coordinates `<= 2^-128.088` (4.6). `eps_hash` covers the hashed entries of 12.1 item 1;
 the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
@@ -1692,7 +1704,7 @@ of `X` is 12.3 unchanged; the bit check `b_t(r^(3)) = b'_t(r^(3))` after stage 3
 additional verifier check and is not used in this bound (the seeded matrices bind on their
 own; the check is P9's matrix-independent second binding).
 Assumption (K) is not needed (SHAKE256 is computed natively). Every address weighs at most
-`2^-128` (PIOP sites as in Section 10, `proj.psi` exactly `2^-128` as in 12.4, `sd` at most
+`2^-128` (PIOP sites as in Section 10, `proj.psi` `2^-129` as in 12.4, `sd` at most
 `2^-143.64`, Akita by its plan and 4.6), so the bound of 12.6 holds with `R_F = 0`. The
 `proj.psi` stage of 12.4 is unchanged in mode B, since `v` is committed in round 1 there too.
 
