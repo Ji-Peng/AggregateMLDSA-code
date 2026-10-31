@@ -307,7 +307,7 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   at most 1/2. The bits `Psi_o(x_0)` are independent across `o`, which gives `2^-R` for
   record `i*`; that record alone bounds the batch, so no union over records enters. With
   `R = 128`, `B = 2^37` the certified bound is `|v|_c <= 2^38`, below the `(p/2 - 2^50)/q ~
-  2^40` that (6.1) needs (6 bits of margin). The bound is tight: `v = (v_0, 0, ..., 0)` with
+  2^40` that (6.1) needs (2 bits of margin). The bound is tight: `v = (v_0, 0, ..., 0)` with
   `|v_0|_c > 2B` passes a row iff its bit is 0. Rows over `{-1, 0, 1}` pass with probability
   up to 2/3 per row (219 rows for `2^-128`); rows over `[-2, 2]` admit `v(x_0)` near `p/2`.
 
