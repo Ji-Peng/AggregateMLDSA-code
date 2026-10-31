@@ -47,8 +47,9 @@ digit in the basis range the cache records that the centered mirror itself
 serves as the planes and resolves them through the owning polynomial, otherwise
 it owns the previous per-ring decomposition of the field coefficients.
 `small_i16_ring_coeffs` views the mirror per ring. This build has no SIMD
-encoder, so the fixed-prime constructor expands the centered bytes through the
-portable `Field::from_i64` path.
+encoder, so the fixed-prime path expands the centered bytes through the
+portable `Field::from_i64` path on first use of the plane (section 6 makes
+that expansion lazy).
 
 The mirror-backed form stores no bytes. With one digit the mirror is already in
 ring-major order, so resolving the cache is a live-prefix slice of
@@ -134,14 +135,20 @@ rayon threads.
 
 ## 4. Construct dense columns in chunked parallel writers
 
-`sources/dense/small.rs`: `expand` allocates the field plane once at its final
-length and fills it in chunks of 32K cells on the caller's pool; tables of at
-most one chunk stay serial. This build has no SIMD encoder, so the scalar
-`Field::from_i64` kernel runs per chunk.
+Section 6 supersedes the eager-plane statements below: the dense constructors
+now install only the signed mirror, and the canonical field plane is expanded
+on first use. The chunked writer and mirror construction described here are
+unchanged.
+
+`sources/dense/small.rs`: `expand_i8` and `expand_i16` allocate the canonical
+plane once at its final length and fill it in chunks of 32K cells on the
+caller's pool; tables of at most one chunk stay serial. This build has no SIMD
+encoder, so the scalar `Field::from_i8`/`from_i16` kernel runs per chunk.
+Section 6 calls both functions only from the lazy expansion.
 
 `sources/dense/poly.rs`: `from_small_i8_cells` takes the logical centered bytes,
-writes the physical-length mirror from them in the same chunked manner, and then
-builds the plane through `expand`. It removes the caller's `to_vec` plus
+writes the physical-length mirror from them in the same chunked manner, and
+leaves the canonical plane to section 6. It removes the caller's `to_vec` plus
 `resize` copy, which reallocated because the copy's capacity equalled its
 logical length, and spreads the 32 MiB i8 copy and its page faults over the
 pool. `from_small_i8` keeps its exact-length contract and shares the common
@@ -150,12 +157,13 @@ finish.
 `from_wide_field_evals` takes the already encoded field evaluations and the
 width-16 cells together. The cells of this path are known to lie outside the
 centered `i8` range, so the small-`i8` probe of `from_field_evals` is skipped
-and the polynomial starts without an i8 mirror; the signed-16 mirror is then
+and the polynomial starts without an i8 mirror; the signed-16 mirror is
 attached as before. In both constructors the bounds are taken over exactly the
-same cells as in the previous code. Outside this copy, `agg-piop`'s wide
-column encoder (`kernel::buf::fill_par`) fills the field plane in chunks on
-the pool as well, so the wide column's 256 MiB plane is first touched by the
-writers.
+same cells as in the previous code. Section 6 routes production width-16
+columns through `from_small_i16_cells` instead, so this constructor now has no
+caller outside tests. `agg-piop`'s wide column encoder
+(`kernel::buf::fill_par`) is unchanged and still writes other tables, but it no
+longer feeds the wide dense column.
 
 The 1K aggregate is byte-identical under scalar and avx512 and under one and
 sixteen rayon threads; the constructors are not otherwise timed on this box.
@@ -211,13 +219,26 @@ with the allocation poison enabled.
 
 ## 6. Read the signed mirrors in packing and opening evaluation
 
+This section supersedes the eager-plane text of section 4.
+
 `sources/dense/poly.rs`: `DensePoly` stores the canonical field plane in a
 `OnceLock` beside its physical length. `from_small_i8_mirror` and the new
 `from_small_i16_cells` install only the signed mirror; `field_coeffs` expands
 that mirror on first use over the full physical length, including the zero
-padding. `live_ring_count` validates a `D`-view without touching the plane.
-`PartialEq` compares the logical planes, so a lazy and a materialized copy of
-the same coefficients stay equal.
+padding. The plane is expanded before the `OnceLock` is set, so a parallel
+expansion cannot re-enter the lock; two concurrent first readers may both
+expand and the loser's plane is dropped. `live_ring_count` validates a `D`-view
+without touching the plane and is used by the opening views and by
+`evaluate_root_polynomial`. `PartialEq` compares materialized planes first,
+then same-kind mirrors, and materializes only when neither fast path applies,
+so a lazy and a materialized copy of the same coefficients stay equal without
+building a plane when both sides carry a mirror.
+
+`sources/dense/small.rs`: the single `expand` became `expand_i8` and
+`expand_i16`, both generic over the commitment field and converting with
+`Field::from_i8` or `Field::from_i16`. Both share `expand_cells`, which
+allocates the plane once at the physical length and writes it in 32K-cell
+chunks on the caller's pool.
 
 `sources/dense/kernels.rs`: coefficient packing reads the `i8` or `i16` mirror
 through the same position callback and the same shared loop as the field plane,
@@ -226,7 +247,9 @@ applied. `sources/dense/ops.rs` does the same for base evaluation, reproducing
 `scale_accumulate_into` with one `mul_add` per coefficient, and for subfield
 evaluation, where the canonical ring is reconstructed before
 `mul_accumulate_sparse_rhs_into`. Both fall back to the field plane only when
-the source has no mirror. `views.rs` and both decompose-fold paths validate
+the source has no mirror. The decompose-fold paths likewise read a centered-`i8`
+mirror directly at any single-digit signed-16 basis, where every cell is already
+one exact balanced digit. `views.rs` and both decompose-fold paths validate
 through `live_ring_count`, so constructing an opening view does not materialize
 the plane.
 
@@ -234,7 +257,49 @@ the plane.
 `commitment/source/compiler.rs` and `arithmetic/commitment.rs`: the source
 descriptor, the representation-length check and the width-16 commit decision
 use a length query that does not touch the plane. A single-digit width-16
-commit takes the mirror rows before the generic path asks for coefficients.
+commit takes the mirror rows before the generic path asks for coefficients;
+one helper holds the dispatch rule and both commit entry points call it. An
+`i8` mirror feeds the same signed-16 kernel and widens each cell per
+coefficient, so an `i8` column in a signed-16-basis group also skips the plane.
+
+`arithmetic/exact_i16_tests.rs` adds `dense_i16_mirror_commit_skips_the_field_plane`,
+which commits a width-16 source and checks that its plane is still absent, and
+`dense_i8_mirror_commit_at_the_i16_basis_skips_the_field_plane`, which compares
+the mirror commit with the coefficient commit and checks the same absence.
+`sources/dense/tests.rs` adds `small_mirror_fold_matches_the_field_plane`,
+`small_mirror_packing_matches_the_field_plane`,
+`small_mirror_fold_pads_the_last_ring`,
+`small_mirror_decompose_fold_at_the_i16_basis_matches_the_field_plane` and
+`narrow_commit_representation_does_not_materialize_the_field_plane`; the first
+four compare each mirror kernel with a forced-plane copy, and the last checks
+that representation selection stays lazy. `crates/agg-piop` adds
+`tests/lazy_field_plane.rs`, which proves a default aggregate at 64 records and
+asserts that the process-wide counter of lazily installed planes does not move.
+
+The readers that still build the plane on demand are:
+
+- `opaque/owned.rs` `SourceCoefficients::source_coefficients`, reached by EOR
+  `extension`/`begin_eor` (`opaque/owned.rs`, `opaque/eor.rs`) and by the
+  dense-polynomial import. Root EOR runs only under `run_eor`.
+- `commitment/source/builtins.rs`, the centered-reach fallback used when the
+  threshold is not the half modulus.
+- `sources/dense/poly.rs` `digit_planes_for`, outside the mirror case: a
+  multi-digit shape, an i16 poly at an i8 basis, or `shape = None`.
+- `sources/dense/ops.rs`, the decompose-fold fallbacks that run without a
+  digit cache and outside the single-digit mirror cases (multi-digit shapes or
+  a basis below the mirror's exact range).
+- `arithmetic/commitment.rs`, the generic `coefficients()` path taken when
+  neither mirror early return nor `PredecomposedDigits` applies.
+- `crates/agg-piop/src/pcs.rs`, a test only.
+
+The verifier side builds no `DensePoly`, and `from_wide_field_evals` keeps its
+plane because it is now test-only.
+
+The vendored diff also carries rustfmt-only reformatting of
+`commitment/source/builtins.rs` (the `negative` if/else),
+`sources/dense/ops.rs` (the `poly_helpers` import list),
+`arithmetic/commitment.rs` (the `exact_i16` import list) and
+`sources/dense/poly.rs` (the `digit_planes_for` closure). No behavior changes.
 
 Outside this copy, `agg-piop`'s `group_polynomials` calls
 `DensePoly::from_small_i16_cells`, so a width-16 column no longer encodes its
@@ -245,5 +310,5 @@ it.
 The 1K aggregate is byte-identical under scalar and avx512, one and sixteen
 rayon threads, and with the allocation poison enabled. On `agg aggregate` over
 `p1p8/records.bin` with eight rayon threads, peak RSS fell from 1,970-1,979 MiB
-to 1,883-1,912 MiB (two before and five after runs; direction only). No
+to 1,883-1,898 MiB (two before and five after runs; direction only). No
 arithmetic, wire format or verifier check changes.

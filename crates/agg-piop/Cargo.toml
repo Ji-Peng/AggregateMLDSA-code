@@ -45,6 +45,8 @@ sha3 = { workspace = true }
 [dev-dependencies]
 # The integration tests (tests/*.rs) use the stand-ins of the `test-hooks` feature.
 agg-piop = { path = ".", features = ["test-hooks"] }
+# Reads the lazy field-plane counter of the vendored CPU backend.
+akita-cpu-backend = { workspace = true }
 
 [lints.rust]
 unsafe_code = "deny"

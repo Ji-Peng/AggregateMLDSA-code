@@ -127,6 +127,28 @@ where
                         .collect::<Result<Vec<_>, AkitaError>>();
                 }
             }
+            // A centered-i8 mirror is one exact balanced digit at every basis
+            // of at least eight bits, including the signed-16 bases.
+            if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+                if let Some(planes) = self.small_i8_ring_coeffs::<D>() {
+                    let basis = SignedDigitBasis::new(log_basis)?;
+                    return chunk_ranges
+                        .iter()
+                        .map(|range| {
+                            let ring_start = range.start * num_positions_per_block;
+                            let ring_end = (range.end * num_positions_per_block).min(planes.len());
+                            let coefficients = cached_digit_decompose_fold_partitioned::<D>(
+                                &planes[ring_start.min(planes.len())..ring_end],
+                                &challenges[range.clone()],
+                                num_positions_per_block,
+                                1,
+                                basis,
+                            )?;
+                            Ok(DecomposeFoldWitness::from_centered_rows(coefficients))
+                        })
+                        .collect::<Result<Vec<_>, AkitaError>>();
+                }
+            }
             let coeffs = self.ring_coeffs::<D>()?;
             return balanced_ring_decompose_fold_chunked(
                 coeffs,
@@ -360,6 +382,22 @@ where
                     challenges,
                     num_positions_per_block,
                     log_basis,
+                )?;
+                return Ok(DecomposeFoldWitness::from_centered_rows(coeff_accum));
+            }
+        }
+
+        // The same single-digit argument holds for a centered-i8 mirror at
+        // any signed-16 basis: every cell is already one balanced digit.
+        if num_digits == 1 && log_basis > akita_params::MAX_I8_LOG_BASIS {
+            if let Some(planes) = self.small_i8_ring_coeffs::<D>() {
+                let basis = SignedDigitBasis::new(log_basis)?;
+                let coeff_accum = cached_digit_decompose_fold_partitioned::<D>(
+                    planes,
+                    challenges,
+                    num_positions_per_block,
+                    1,
+                    basis,
                 )?;
                 return Ok(DecomposeFoldWitness::from_centered_rows(coeff_accum));
             }

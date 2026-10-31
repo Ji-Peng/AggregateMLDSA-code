@@ -10,6 +10,10 @@ impl<F: Field> DenseCoefficientSource<F> for crate::DensePoly<F> {
         self.physical_len()
     }
 
+    fn small_i8_coefficients(&self) -> Option<&[i8]> {
+        self.small_i8_mirror()
+    }
+
     fn small_i16_coefficients(&self) -> Option<&[i16]> {
         self.small_i16_mirror()
     }

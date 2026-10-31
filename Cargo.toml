@@ -59,6 +59,7 @@ aerie-simd = { git = "https://github.com/a16z/aerie", rev = "49b6c212c209286c536
 akita-algebra = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-challenges = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-config = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false, features = ["dev-protocol"] }
+akita-cpu-backend = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640", default-features = false }
 akita-error = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-params = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }
 akita-planner = { git = "https://github.com/LayerZero-Labs/akita.git", rev = "e023b6a46143f7b23199ccecb2684192baf7b640" }

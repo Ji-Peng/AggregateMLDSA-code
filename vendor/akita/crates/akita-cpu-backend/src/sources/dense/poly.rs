@@ -139,10 +139,28 @@ impl<F: Field + Clone> Clone for DensePoly<F> {
 
 impl<F: Field + PartialEq> PartialEq for DensePoly<F> {
     fn eq(&self, other: &Self) -> bool {
-        self.num_vars == other.num_vars
-            && self.field_coeffs() == other.field_coeffs()
-            && self.small_i8_coeffs == other.small_i8_coeffs
-            && self.small_i16_coeffs == other.small_i16_coeffs
+        if self.num_vars != other.num_vars {
+            return false;
+        }
+        // Two narrow sources can be compared through their mirrors without
+        // expanding either plane. A materialized plane is canonical, so it
+        // stays authoritative when both sides already hold one.
+        if let (Some(mine), Some(theirs)) = (self.coeffs.get(), other.coeffs.get()) {
+            return mine == theirs;
+        }
+        if let (Some(mine), Some(theirs)) = (
+            self.small_i8_coeffs.as_deref(),
+            other.small_i8_coeffs.as_deref(),
+        ) {
+            return mine == theirs;
+        }
+        if let (Some(mine), Some(theirs)) = (
+            self.small_i16_coeffs.as_deref(),
+            other.small_i16_coeffs.as_deref(),
+        ) {
+            return mine == theirs;
+        }
+        self.field_coeffs() == other.field_coeffs()
     }
 }
 
@@ -175,19 +193,29 @@ impl<F: Field> DensePoly<F> {
     /// The expansion covers the full physical length `field_len`, including the
     /// trailing zero padding, so every `D`-sized ring view through the last live
     /// coefficient stays in bounds.
+    ///
+    /// The plane is expanded before the lock is set. A parallel expansion inside
+    /// `OnceLock::get_or_init` could be stolen by another task that waits on the
+    /// same lock and re-enters this polynomial; expanding first keeps that case
+    /// harmless. Two concurrent first readers may both expand, and the plane
+    /// that loses the `set` race is dropped.
     fn materialized_coeffs(&self) -> &RingVec<F> {
-        self.coeffs.get_or_init(|| {
-            let plane = if let Some(mirror) = self.small_i8_coeffs.as_deref() {
-                super::small::expand_i8(mirror)
-            } else if let Some(mirror) = self.small_i16_coeffs.as_deref() {
-                super::small::expand_i16(mirror)
-            } else {
-                unreachable!(
-                    "a dense polynomial always stores a coefficient plane or a signed mirror"
-                )
-            };
-            RingVec::from_coeffs(plane)
-        })
+        if let Some(coeffs) = self.coeffs.get() {
+            return coeffs;
+        }
+        let plane = if let Some(mirror) = self.small_i8_coeffs.as_deref() {
+            super::small::expand_i8(mirror)
+        } else if let Some(mirror) = self.small_i16_coeffs.as_deref() {
+            super::small::expand_i16(mirror)
+        } else {
+            unreachable!("a dense polynomial always stores a coefficient plane or a signed mirror")
+        };
+        if self.coeffs.set(RingVec::from_coeffs(plane)).is_ok() {
+            crate::diagnostics::note_lazy_field_plane_build();
+        }
+        self.coeffs
+            .get()
+            .expect("a coefficient plane was just stored")
     }
 
     /// Physical coefficient length, including the zero padding.
@@ -206,7 +234,7 @@ impl<F: Field> DensePoly<F> {
     ///
     /// The check requires a power-of-two degree and a ring view that stays
     /// inside the physical coefficient buffer.
-    pub(super) fn live_ring_count<const D: usize>(&self) -> Result<usize, AkitaError> {
+    pub(crate) fn live_ring_count<const D: usize>(&self) -> Result<usize, AkitaError> {
         if D == 0 || !D.is_power_of_two() {
             return Err(AkitaError::InvalidInput(format!(
                 "ring degree D={D} is not a power of two"
@@ -824,6 +852,12 @@ fn write_i8_chunk(cells: &[i8], part: &mut [std::mem::MaybeUninit<i8>]) {
 }
 
 impl<F: Field> DensePoly<F> {
+    /// Flat centered-`i8` mirror of the coefficients, when the producer kept one.
+    #[must_use]
+    pub fn small_i8_mirror(&self) -> Option<&[i8]> {
+        self.small_i8_coeffs.as_deref()
+    }
+
     /// Flat signed-16 mirror of the coefficients, when the producer kept one.
     #[must_use]
     pub fn small_i16_mirror(&self) -> Option<&[i16]> {

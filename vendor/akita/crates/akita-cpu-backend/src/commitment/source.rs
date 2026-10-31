@@ -256,6 +256,13 @@ pub(crate) trait DenseCoefficientSource<F: Field>: Send + Sync {
         self.coefficients().len()
     }
 
+    /// Flat centered-`i8` mirror of [`Self::coefficients`], when the source
+    /// keeps one. It has the same physical padding and holds one exact
+    /// balanced digit per coefficient at every basis of at least eight bits.
+    fn small_i8_coefficients(&self) -> Option<&[i8]> {
+        None
+    }
+
     /// Flat signed-16 mirror of [`Self::coefficients`], when the source keeps
     /// one. It has the same physical padding and is the single-digit
     /// decomposition of every live coefficient.

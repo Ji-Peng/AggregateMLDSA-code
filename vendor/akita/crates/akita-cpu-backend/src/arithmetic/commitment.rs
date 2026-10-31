@@ -28,6 +28,56 @@ use jolt_field::solinas::parallel::*;
 use jolt_field::{CanonicalEncoding, Field, Unreduced, WithCommitAccumulator};
 use std::array::from_fn;
 
+/// Commit a dense single-digit source from a signed mirror.
+///
+/// A signed-16 mirror is exact at the full signed-16 basis. A centered-`i8`
+/// mirror is exact at every signed-16 basis, because its cells fit the smaller
+/// range as well. The i16 kernel accepts the i8 cells directly and widens them
+/// per coefficient, so neither mirror needs a canonical field plane. Returns
+/// `None` when the plan or the source does not qualify.
+fn dense_commit_mirror_if_ready<F, const D: usize>(
+    prepared: &CpuPreparedSetup<F>,
+    n_a: usize,
+    row_width: usize,
+    num_digits_inner: usize,
+    log_basis_inner: u32,
+    i16_block_slices: Option<&[&[[i16; D]]]>,
+    i8_block_slices: Option<&[&[[i8; D]]]>,
+) -> Result<Option<Vec<Vec<CyclotomicRing<F, D>>>>, AkitaError>
+where
+    F: Field + CanonicalEncoding,
+{
+    if num_digits_inner != 1
+        || signed_digit_kernel_for_setup(log_basis_inner, "for dense commitment")?
+            != SignedDigitKernel::I16
+    {
+        return Ok(None);
+    }
+    if log_basis_inner == akita_params::MAX_I16_LOG_BASIS {
+        if let Some(block_slices) = i16_block_slices {
+            return dense_commit_i16_mirror_rows(
+                prepared,
+                n_a,
+                row_width,
+                block_slices,
+                log_basis_inner,
+            )
+            .map(Some);
+        }
+    }
+    if let Some(block_slices) = i8_block_slices {
+        return dense_commit_cached_digit_rows_i16(
+            prepared,
+            n_a,
+            row_width,
+            block_slices,
+            log_basis_inner,
+        )
+        .map(Some);
+    }
+    Ok(None)
+}
+
 impl<F: Field, E> CpuBackend<F, E> {
     /// Execute the standard CPU inner stage over request-compiled sources.
     ///
@@ -239,28 +289,34 @@ impl<F: Field, E> CpuBackend<F, E> {
                     .collect::<Vec<_>>(),
             )
         });
+        let i8_block_slices = source.small_i8_coefficients().and_then(|flat| {
+            let live = flat.get(..physical_len)?;
+            let (rings, remainder) = live.as_chunks::<D>();
+            debug_assert!(remainder.is_empty());
+            Some(
+                rings
+                    .chunks(plan.num_positions_per_block)
+                    .collect::<Vec<_>>(),
+            )
+        });
         // A width-16 mirror is exact at the full signed-16 basis, so the commit
-        // can run before the canonical field plane is ever materialized.
-        if signed_digit_kernel_for_setup(plan.log_basis_inner, "for dense commitment")?
-            == SignedDigitKernel::I16
-            && plan.num_digits_inner == 1
-            && plan.log_basis_inner == akita_params::MAX_I16_LOG_BASIS
-        {
-            if let Some(i16_block_slices) = i16_block_slices.as_deref() {
-                let first_block_len = ring_count.min(plan.num_positions_per_block);
-                let row_width =
-                    akita_error::checked::product([first_block_len, plan.num_digits_inner])
-                        .ok_or_else(|| {
-                            AkitaError::InvalidSetup("dense coefficient row width overflow".into())
-                        })?;
-                return dense_commit_i16_mirror_rows(
-                    prepared,
-                    plan.n_a,
-                    row_width,
-                    i16_block_slices,
-                    plan.log_basis_inner,
-                );
-            }
+        // can run before the canonical field plane is ever materialized. A
+        // centered-i8 mirror covers every signed-16 basis.
+        let first_block_len = ring_count.min(plan.num_positions_per_block);
+        let row_width = akita_error::checked::product([first_block_len, plan.num_digits_inner])
+            .ok_or_else(|| {
+                AkitaError::InvalidSetup("dense coefficient row width overflow".into())
+            })?;
+        if let Some(rows) = dense_commit_mirror_if_ready(
+            prepared,
+            plan.n_a,
+            row_width,
+            plan.num_digits_inner,
+            plan.log_basis_inner,
+            i16_block_slices.as_deref(),
+            i8_block_slices.as_deref(),
+        )? {
+            return Ok(rows);
         }
         let coefficients =
             source
@@ -346,19 +402,16 @@ impl<F: Field, E> CpuBackend<F, E> {
                 })?;
                 let signed_digit_kernel =
                     signed_digit_kernel_for_setup(log_basis_inner, "for dense commitment")?;
-                if signed_digit_kernel == SignedDigitKernel::I16
-                    && num_digits_inner == 1
-                    && log_basis_inner == akita_params::MAX_I16_LOG_BASIS
-                {
-                    if let Some(i16_block_slices) = i16_block_slices.as_deref() {
-                        return dense_commit_i16_mirror_rows(
-                            prepared,
-                            n_a,
-                            row_width,
-                            i16_block_slices,
-                            log_basis_inner,
-                        );
-                    }
+                if let Some(rows) = dense_commit_mirror_if_ready(
+                    prepared,
+                    n_a,
+                    row_width,
+                    num_digits_inner,
+                    log_basis_inner,
+                    i16_block_slices.as_deref(),
+                    None,
+                )? {
+                    return Ok(rows);
                 }
                 let use_exact_ifma52 = signed_digit_kernel == SignedDigitKernel::I8
                     && dense_i8_exact_ifma52_preferred::<F, D>(row_width, log_basis_inner)?;

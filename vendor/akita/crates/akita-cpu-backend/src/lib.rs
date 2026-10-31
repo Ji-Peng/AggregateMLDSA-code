@@ -34,6 +34,31 @@ pub use opaque::{CommitOutput, CommitmentHandle, CpuSource, SourceHandle};
 pub use setup::AkitaProverSetup;
 pub use sources::{DensePoly, OneHotIndex, OneHotPoly, OneHotSource};
 
+/// Process-wide counters that let tests check a production path stays lazy.
+#[doc(hidden)]
+pub mod diagnostics {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LAZY_FIELD_PLANE_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Number of canonical field planes expanded from a signed mirror on demand.
+    ///
+    /// A polynomial that already stores a plane at construction never counts.
+    pub fn lazy_field_plane_builds() -> usize {
+        LAZY_FIELD_PLANE_BUILDS.load(Ordering::Relaxed)
+    }
+
+    /// Reset [`lazy_field_plane_builds`].
+    pub fn reset_lazy_field_plane_builds() {
+        LAZY_FIELD_PLANE_BUILDS.store(0, Ordering::Relaxed);
+    }
+
+    /// Record one lazily installed field plane.
+    pub(crate) fn note_lazy_field_plane_build() {
+        LAZY_FIELD_PLANE_BUILDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Extension contracts for application-owned CPU polynomial sources.
 ///
 /// Sources imported through this module are still consumed and retained behind

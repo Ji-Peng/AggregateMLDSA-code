@@ -216,6 +216,7 @@ dependencies = [
  "agg-piop",
  "agg-witness",
  "akita-algebra",
+ "akita-cpu-backend",
  "akita-error",
  "akita-params",
  "akita-pcs",

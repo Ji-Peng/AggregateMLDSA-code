@@ -1,4 +1,4 @@
-//! Direct canonical expansion for the fixed 64-bit commitment field.
+//! Direct canonical expansion of signed cells into the commitment field.
 use jolt_field::solinas::parallel::*;
 use jolt_field::Field;
 use std::mem::MaybeUninit;

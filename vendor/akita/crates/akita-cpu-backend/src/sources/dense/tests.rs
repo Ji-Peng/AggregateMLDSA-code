@@ -165,6 +165,58 @@ fn small_mirror_packing_matches_the_field_plane() {
 }
 
 #[test]
+fn small_mirror_decompose_fold_at_the_i16_basis_matches_the_field_plane() {
+    use akita_challenges::SparseChallenge;
+    use jolt_field::Prime64Offset59 as SmallF;
+
+    const D: usize = 64;
+    const NUM_VARS: usize = 11;
+    const POSITIONS: usize = 3;
+    let challenges = (0..3)
+        .map(|block| SparseChallenge {
+            positions: vec![(block * 2) as u32, (block * 2 + 1) as u32].into(),
+            coeffs: vec![1, -1].into(),
+        })
+        .collect::<Vec<_>>();
+
+    for poly in [
+        DensePoly::<SmallF>::from_small_i8_cells(
+            NUM_VARS,
+            &random_i8_cells(1 << NUM_VARS, 0x0ddc_1234),
+        )
+        .unwrap(),
+        DensePoly::<SmallF>::from_small_i16_cells(
+            NUM_VARS,
+            &random_i16_cells(1 << NUM_VARS, 0x0ddc_5678),
+        )
+        .unwrap(),
+    ] {
+        assert!(!poly.field_plane_is_materialized());
+        let reference = field_plane_copy(&poly);
+        let global = poly
+            .decompose_fold::<D>(&challenges, POSITIONS, 1, 16)
+            .unwrap();
+        let expected = reference
+            .decompose_fold::<D>(&challenges, POSITIONS, 1, 16)
+            .unwrap();
+        assert_eq!(
+            global.centered_coeffs_flat(),
+            expected.centered_coeffs_flat()
+        );
+
+        let ranges = [0..challenges.len()];
+        let chunked = poly
+            .decompose_fold_chunked::<D>(&challenges, &ranges, POSITIONS, 1, 16)
+            .unwrap();
+        assert_eq!(
+            chunked[0].centered_coeffs_flat(),
+            expected.centered_coeffs_flat()
+        );
+        assert!(!poly.field_plane_is_materialized());
+    }
+}
+
+#[test]
 fn small_mirror_fold_pads_the_last_ring() {
     use jolt_field::{Prime64Offset59 as SmallF, Ring};
 

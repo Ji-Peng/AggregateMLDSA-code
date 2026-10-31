@@ -91,6 +91,57 @@ fn dense_i16_mirror_commit_skips_the_field_plane() {
     run_exact_i16_test(dense_i16_mirror_commit_skips_the_field_plane_inner);
 }
 
+#[test]
+fn dense_i8_mirror_commit_at_the_i16_basis_skips_the_field_plane() {
+    run_exact_i16_test(dense_i8_mirror_commit_at_the_i16_basis_skips_the_field_plane_inner);
+}
+
+fn dense_i8_mirror_commit_at_the_i16_basis_skips_the_field_plane_inner() {
+    let prepared = prepared();
+    const NUM_VARS: usize = 6;
+    let cells = (0..1usize << NUM_VARS)
+        .map(|index| ((index * 37) % 256) as u8 as i8)
+        .collect::<Vec<_>>();
+    let poly = crate::DensePoly::<F>::from_small_i8_cells(NUM_VARS, &cells).unwrap();
+    assert!(!poly.field_plane_is_materialized());
+
+    let descriptor = crate::commitment::CommitSourceDescriptor::new(
+        NUM_VARS,
+        1 << 10,
+        1 << NUM_VARS,
+        crate::commitment::CommitSourceClass::Dense,
+        "i8-mirror-i16-basis-test",
+    )
+    .unwrap();
+    let plan = crate::opaque::CommitInnerPlan {
+        ring_dimension: D,
+        num_live_blocks: 1,
+        n_a: 1,
+        num_positions_per_block: 1,
+        num_digits_inner: 1,
+        log_basis_inner: 16,
+    };
+    let backend = CpuBackend::<F, F>::for_arithmetic_tests();
+    let from_mirror = backend
+        .dense_coefficient_commit_rows::<D>(&prepared, &poly, &descriptor, plan)
+        .expect("i8 mirror commit at the signed-16 basis");
+    assert!(!poly.field_plane_is_materialized());
+
+    let reference = backend
+        .dense_commit_rows::<D>(
+            &prepared,
+            1,
+            DenseCommitInput::CoeffBlocks {
+                block_slices: vec![poly.ring_coeffs::<D>().unwrap()],
+                i16_block_slices: None,
+                num_digits_inner: 1,
+                log_basis_inner: 16,
+            },
+        )
+        .expect("coefficient commit");
+    assert_eq!(from_mirror, reference);
+}
+
 fn dense_i16_mirror_commit_skips_the_field_plane_inner() {
     let prepared = prepared();
     const NUM_VARS: usize = 6;
