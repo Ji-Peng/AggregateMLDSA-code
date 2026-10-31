@@ -10,10 +10,12 @@ impl Context {pub fn new(r:K)->Self {Self {r,scalar:K::precompute(r)}}}
 pub fn kernel_into(a:Planes<'_>,contexts:&[Context],out:PlanesMut<'_>) {
  assert_eq!(a.0.len(),256);assert_eq!(a.1.len(),256);assert_eq!(contexts.len(),8);
  assert_eq!(out.0.len(),256);assert_eq!(out.1.len(),256);
+ // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
  unsafe {kernel_raw(a,contexts,out.0.as_mut_ptr(),out.1.as_mut_ptr());}
 }
 unsafe fn kernel_raw(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {
  #[cfg(target_arch="x86_64")]
+ // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return vector(a,contexts,out0,out1);}}
  let mut current:[K;256]=std::array::from_fn(|i|crate::scalar::get(a,i));
  let mut next=[K::zero();256];
@@ -27,6 +29,7 @@ unsafe fn kernel_raw(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u6
   std::mem::swap(&mut current,&mut next);
  }
  for (i,x) in current.iter().enumerate() {let j=(i as u8).reverse_bits() as usize;
+  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
   unsafe {out0.add(j).write(x.c0().to_canonical_u64());out1.add(j).write(x.c1().to_canonical_u64());}
  }
 }
@@ -42,13 +45,16 @@ pub fn ring_weights(matrices:&[&Matrix],eq_sig:&[K],row:&[K],coef:&[K],rows:usiz
   for s in 0..4 {
    let mut a0=[0u64;256];let mut a1=[0u64;256];
    combine_dagger(matrices[i],s,&weights,(&mut a0,&mut a1));
+   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
    unsafe {kernel_raw((&a0,&a1),&contexts,out0.as_mut_ptr().add(s*256).cast(),out1.as_mut_ptr().add(s*256).cast());}
   }
  });
+ // SAFETY: the call is guarded by the backend check and the length assertions above.
  KPlanes{buf:unsafe {raw.assume_init()},rows}
 }
 fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
  #[cfg(target_arch="x86_64")]
+ // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return combine_vector(a,s,weights,out);}}
  for j in 0..256 {let k=if j==0 {0} else {256-j};let sign=if j==0 {1} else {-1};
   let x=(0..4).fold(K::zero(),|sum,rho|sum+weights[rho]*K::from_i64(sign*i64::from(a[rho][s][k])));
@@ -57,6 +63,7 @@ fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
 }
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
+// SAFETY: the call is guarded by the backend check and the length assertions above.
 unsafe fn combine_vector(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let lanes=_mm512_set_epi64(7,6,5,4,3,2,1,0);
@@ -81,6 +88,7 @@ unsafe fn combine_vector(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {un
 }}
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
+// SAFETY: the call is guarded by the backend check and the length assertions above.
 unsafe fn vector(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let mut x0=[0u64;256];let mut x1=[0u64;256];let mut y0=[0u64;256];let mut y1=[0u64;256];

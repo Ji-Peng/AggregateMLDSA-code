@@ -33,6 +33,7 @@ pub const MAX_SLOTS: usize = 32;
 
 #[inline]
 unsafe fn write(out: OutLane, row: usize, x: K) {
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe {
         (out.0 as *mut u64).add(row).write(x.c0().to_canonical_u64());
         (out.1 as *mut u64).add(row).write(x.c1().to_canonical_u64());
@@ -48,10 +49,12 @@ pub unsafe fn fold_rows(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize
     assert_eq!(lanes.len(), out.len());
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return fold_vector(r, lanes, out, row0, row1);
         }
     }
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { fold_scalar(r, lanes, out, row0, row1) }
 }
 
@@ -60,6 +63,7 @@ unsafe fn fold_scalar(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, 
         for row in row0..row1 {
             let a = scalar::get(*lane, 2 * row);
             let b = scalar::get(*lane, 2 * row + 1);
+            // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
             unsafe { write(o, row, a + r * (b - a)) };
         }
     }
@@ -149,6 +153,7 @@ impl EvalScratch {
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn zeros(width: usize, slots: usize) -> Self {
         use crate::x86::*;
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             Self {
                 even: vec![(split52(z()), split52(z())); width],
@@ -225,6 +230,7 @@ fn eval_items_with(
     }
     #[cfg(target_arch = "x86_64")]
     if k1 - k0 >= 8 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return eval_vector(lanes, terms, order, scratch, weights, k0, k1, full, out);
         }
@@ -285,6 +291,7 @@ fn eval_scalar(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fold_vector(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let rk = bck(r);
@@ -318,6 +325,7 @@ unsafe fn eval_vector(
     full: bool,
     out: &mut [[K; 3]],
 ) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let width = lanes.len();
@@ -520,6 +528,7 @@ pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: u
     assert_eq!(lanes.len(), out.len());
     for (lane, &o) in lanes.iter().zip(out) {
         match lane {
+            // SAFETY: the call is guarded by the backend check and the length assertions above.
             MixedLane::Planes(p) => unsafe { fold_rows(r, &[*p], &[o], row0, row1) },
             MixedLane::Ints(g) => {
                 let mut lo = [0_i64; 64];
@@ -531,7 +540,9 @@ pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: u
                         lo[i] = g(2 * (row + i));
                         hi[i] = g(2 * (row + i) + 1);
                     }
+                    // SAFETY: the call is guarded by the backend check and the length assertions above.
                     let c0 = unsafe { std::slice::from_raw_parts_mut((o.0 as *mut u64).add(row), n) };
+                    // SAFETY: the call is guarded by the backend check and the length assertions above.
                     let c1 = unsafe { std::slice::from_raw_parts_mut((o.1 as *mut u64).add(row), n) };
                     crate::fold::int_fold(r, &lo[..n], &hi[..n], (c0, c1));
                     row += n;
@@ -743,9 +754,11 @@ unsafe fn fused_pass_uninit<L: Leaves>(
             let mut local: Vec<Planes<'_>> = Vec::new();
             if let Some((r, source)) = computed {
                 let rows = scale * (block_end - block_start);
+                // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
                 unsafe { source.fill(scale * block_start, scale * block_end, &scratch_lanes) };
                 local = scratch_lanes
                     .iter()
+                    // SAFETY: the call is guarded by the backend check and the length assertions above.
                     .map(|&(c0, c1)| unsafe {
                         (
                             std::slice::from_raw_parts(c0 as *const u64, rows),
@@ -757,15 +770,20 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                     // Output rows from `block_start` on: the addresses stay inside the table.
                     let shifted: Vec<OutLane> =
                         addresses.iter().map(|&(c0, c1)| (c0 + 8 * block_start, c1 + 8 * block_start)).collect();
+                    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
                     unsafe { fold_rows(r, &local, &shifted, 0, block_end - block_start) };
                 }
             }
             match &fill {
+                // SAFETY: the call is guarded by the backend check and the length assertions above.
                 Some(Fill::Fold(r, lanes)) => unsafe { fold_rows(*r, lanes, &addresses, block_start, block_end) },
+                // SAFETY: the call is guarded by the backend check and the length assertions above.
                 Some(Fill::Mixed(r, lanes)) => unsafe { fold_mixed(*r, lanes, &addresses, block_start, block_end) },
+                // SAFETY: the call is guarded by the backend check and the length assertions above.
                 Some(Fill::Pattern(e, leaves)) => unsafe {
                     crate::pattern::fill_rows(*leaves, *e, &addresses, block_start, block_end);
                 },
+                // SAFETY: the call is guarded by the backend check and the length assertions above.
                 Some(Fill::PatternCombined(weights, leaves)) => unsafe {
                     crate::pattern::fill_combined(*leaves, weights, addresses[0], block_start, block_end);
                 },
@@ -783,6 +801,7 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                         // multiples of 512 rows).
                         let rows = block_end - block_start;
                         written.clear();
+                        // SAFETY: the call is guarded by the backend check and the length assertions above.
                         written.extend(addresses.iter().map(|&(c0, c1)| unsafe {
                             (
                                 std::slice::from_raw_parts((c0 as *const u64).add(block_start), rows),

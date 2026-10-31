@@ -65,21 +65,25 @@ pub(crate) unsafe fn hi(c: V, a: V, b: V) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn load(p: *const u64) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { _mm512_loadu_si512(p.cast()) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn store(p: *mut u64, x: V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { _mm512_storeu_si512(p.cast(), x) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn canon(x: V) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { _mm512_min_epu64(x, sub(x, bc(crate::P))) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn add_mod(a: V, b: V) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let s = add(a, b);
         canon(_mm512_mask_add_epi64(
@@ -93,6 +97,7 @@ pub(crate) unsafe fn add_mod(a: V, b: V) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn sub_mod(a: V, b: V) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let s = sub(a, b);
         _mm512_mask_sub_epi64(s, _mm512_cmplt_epu64_mask(a, b), s, bc(59))
@@ -101,6 +106,7 @@ pub(crate) unsafe fn sub_mod(a: V, b: V) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn split52(a: V) -> L52 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         L52 {
             l: and(a, bc((1 << 52) - 1)),
@@ -111,6 +117,7 @@ pub(crate) unsafe fn split52(a: V) -> L52 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn split51(a: V) -> L51 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let l = and(a, bc((1 << 51) - 1));
         let h = _mm512_srli_epi64::<51>(a);
@@ -120,6 +127,7 @@ pub(crate) unsafe fn split51(a: V) -> L51 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn double52(a: L52) -> L52 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let t = add(a.l, a.l);
         L52 {
@@ -131,6 +139,7 @@ pub(crate) unsafe fn double52(a: L52) -> L52 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn add51(a: L51, b: L51) -> L51 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let t = add(a.l, b.l);
         let l = and(t, bc((1 << 51) - 1));
@@ -141,6 +150,7 @@ pub(crate) unsafe fn add51(a: L51, b: L51) -> L51 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn a3() -> A3 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         A3 {
             a: z(),
@@ -152,6 +162,7 @@ pub(crate) unsafe fn a3() -> A3 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn a5() -> A5 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         A5 {
             a: z(),
@@ -165,6 +176,7 @@ pub(crate) unsafe fn a5() -> A5 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn add5(a: A5, b: A5) -> A5 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         A5 {
             a: add(a.a, b.a),
@@ -178,6 +190,7 @@ pub(crate) unsafe fn add5(a: A5, b: A5) -> A5 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn sub5(a: A5, b: A5) -> A5 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         A5 {
             a: sub(a.a, b.a),
@@ -193,6 +206,7 @@ pub(crate) unsafe fn sub5(a: A5, b: A5) -> A5 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn mac7(c: &mut A3, a: L52, b: L52) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         c.a = lo(c.a, a.l, b.l);
         c.b = hi(c.b, a.l, b.l);
@@ -208,6 +222,7 @@ pub(crate) unsafe fn mac7(c: &mut A3, a: L52, b: L52) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn mac5(c: &mut A5, a: L51, b: L51) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         c.a = lo(c.a, a.l, b.l);
         c.b = hi(c.b, a.l, b.l);
@@ -220,6 +235,7 @@ pub(crate) unsafe fn mac5(c: &mut A5, a: L51, b: L51) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn red3(c: A3) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let mask = bc((1 << 52) - 1);
         let m12 = bc((1 << 12) - 1);
@@ -245,6 +261,7 @@ pub(crate) unsafe fn red3(c: A3) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn red5(c: A5) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let mask = bc((1 << 52) - 1);
         let c59 = bc(59);
@@ -276,6 +293,7 @@ pub(crate) unsafe fn red5(c: A5) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn mul(a: V, b: V) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let mut c = a3();
         mac7(&mut c, split52(a), split52(b));
@@ -285,6 +303,7 @@ pub(crate) unsafe fn mul(a: V, b: V) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn kmul(a: V, b: V, c: V, d: V) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let a = split52(a);
         let b = split52(b);
@@ -302,6 +321,7 @@ pub(crate) unsafe fn kmul(a: V, b: V, c: V, d: V) -> (V, V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn hsum(a: V) -> u64 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let mut lanes = [0u64; 8];
         store(lanes.as_mut_ptr(), a);
@@ -317,6 +337,7 @@ pub(crate) unsafe fn hsum(a: V) -> u64 {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn deinterleave(x0: V, x1: V) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let even = _mm512_set_epi64(14, 12, 10, 8, 6, 4, 2, 0);
         let odd = _mm512_set_epi64(15, 13, 11, 9, 7, 5, 3, 1);
@@ -329,6 +350,7 @@ pub(crate) unsafe fn deinterleave(x0: V, x1: V) -> (V, V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn mac_int(acc: &mut A3, w: L52, k: V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         acc.a = lo(acc.a, w.l, k);
         acc.b = hi(acc.b, w.l, k);
@@ -340,6 +362,7 @@ pub(crate) unsafe fn mac_int(acc: &mut A3, w: L52, k: V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn lift52(acc: &mut A3, x: L52) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         acc.a = add(acc.a, x.l);
         acc.b = add(acc.b, x.h);
@@ -349,6 +372,7 @@ pub(crate) unsafe fn lift52(acc: &mut A3, x: L52) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn splitk(x: (V, V)) -> (L52, L52) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (split52(x.0), split52(x.1)) }
 }
 /// `acc += x y` in `K` without reduction (`re += ac + 2bd`, `im += ad + bc`): per term limb
@@ -358,6 +382,7 @@ pub(crate) unsafe fn splitk(x: (V, V)) -> (L52, L52) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn kmac7(acc: &mut (A3, A3), x: (L52, L52), y: (L52, L52)) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         mac7(&mut acc.0, x.0, y.0);
         mac7(&mut acc.0, x.1, double52(y.1));
@@ -372,6 +397,7 @@ pub(crate) unsafe fn kmac7(acc: &mut (A3, A3), x: (L52, L52), y: (L52, L52)) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn sqk(acc: &mut (A3, A3), x: (L52, L52)) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         mac7(&mut acc.0, x.0, x.0);
         mac7(&mut acc.0, x.1, double52(x.1));
@@ -382,17 +408,20 @@ pub(crate) unsafe fn sqk(acc: &mut (A3, A3), x: (L52, L52)) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn redk(acc: (A3, A3)) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (red3(acc.0), red3(acc.1)) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn a3k() -> (A3, A3) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (a3(), a3()) }
 }
 /// The eight lanes of a canonical `K` vector summed into one element.
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn hsum_k(x: (V, V)) -> crate::K {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use jolt_field::Ring;
         crate::K::new(crate::F::from_u64(hsum(x.0)), crate::F::from_u64(hsum(x.1)))
@@ -402,24 +431,28 @@ pub(crate) unsafe fn hsum_k(x: (V, V)) -> crate::K {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn bck(x: crate::K) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (bc(x.c0().to_canonical_u64()), bc(x.c1().to_canonical_u64())) }
 }
 /// `a + b` lane-wise in `K` (canonical in, canonical out).
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn addk(a: (V, V), b: (V, V)) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (add_mod(a.0, b.0), add_mod(a.1, b.1)) }
 }
 /// `a b` lane-wise in `K` (canonical in, canonical out).
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn mulk(a: (V, V), b: (V, V)) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { kmul(a.0, a.1, b.0, b.1) }
 }
 /// Eight consecutive `K` lanes loaded from coordinate planes at `i`.
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn loadk(planes: (&[u64], &[u64]), i: usize) -> (V, V) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe { (load(planes.0.as_ptr().add(i)), load(planes.1.as_ptr().add(i))) }
 }
 /// Eight `i8` lanes at stride four (`pattern + 4 l`, `l = 0..8`) of thirty-two consecutive
@@ -427,6 +460,7 @@ pub(crate) unsafe fn loadk(planes: (&[u64], &[u64]), i: usize) -> (V, V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn strided4_i8(cells: *const i8, pattern: i32) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         // Each 32-bit word holds the four patterns of one cell quartet; the pattern's byte is
         // moved to the top of its 64-bit lane and sign-extended by an arithmetic shift.
@@ -440,6 +474,7 @@ pub(crate) unsafe fn strided4_i8(cells: *const i8, pattern: i32) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn strided4_i32(cells: *const i32, pattern: i32) -> V {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         let x0 = _mm512_loadu_si512(cells.cast());
         let x1 = _mm512_loadu_si512(cells.add(16).cast());

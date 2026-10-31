@@ -15,6 +15,7 @@ pub fn fp_dot(a: &[u64], b: &[u64]) -> u64 {
     assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     if a.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return fp_vector(a, b);
         }
@@ -25,6 +26,7 @@ pub fn k_dot(a: Planes<'_>, b: Planes<'_>) -> K {
     check(a, b);
     #[cfg(target_arch = "x86_64")]
     if a.0.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return k_vector(a, b);
         }
@@ -35,6 +37,7 @@ pub fn k_base_dot(a: Planes<'_>, b: &[u64]) -> K {
     check(a, (b, b));
     #[cfg(target_arch = "x86_64")]
     if b.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return base_vector(a, b);
         }
@@ -48,6 +51,7 @@ pub fn k_int_dot_parts(a: Planes<'_>, b: &[i64]) -> (K, K) {
     assert!(b.iter().all(|&x| x > -(1i64 << 51) && x < (1i64 << 51)));
     #[cfg(target_arch = "x86_64")]
     if b.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return int_vector(a, b.as_ptr().cast(), b.len(), 1 << 51);
         }
@@ -76,6 +80,7 @@ pub fn k_int2_dot(a: Planes<'_>, lo: &[u64], hi: &[i64]) -> K {
         && backend() == Backend::Avx512
         && hi.iter().all(|&x| x > -(1i64 << 51) && x < (1i64 << 51))
     {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let (l, _) = int_vector(a, lo.as_ptr(), lo.len(), 0);
             let (h, c) = int_vector(a, hi.as_ptr().cast(), hi.len(), 1 << 51);
@@ -87,6 +92,7 @@ pub fn k_int2_dot(a: Planes<'_>, lo: &[u64], hi: &[i64]) -> K {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn fp_vector(a: &[u64], b: &[u64]) -> u64 {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = a.len() / 8 * 8;
@@ -124,6 +130,7 @@ unsafe fn fp_vector(a: &[u64], b: &[u64]) -> u64 {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn k_vector(a: Planes<'_>, b: Planes<'_>) -> K {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = a.0.len() / 8 * 8;
@@ -155,6 +162,7 @@ unsafe fn k_vector(a: Planes<'_>, b: Planes<'_>) -> K {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn base_vector(a: Planes<'_>, b: &[u64]) -> K {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = b.len() / 8 * 8;
@@ -181,6 +189,7 @@ unsafe fn base_vector(a: Planes<'_>, b: &[u64]) -> K {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn int_vector(a: Planes<'_>, b: *const u64, len: usize, shift: u64) -> (K, K) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = len / 8 * 8;
@@ -235,6 +244,7 @@ unsafe fn int_vector(a: Planes<'_>, b: *const u64, len: usize, shift: u64) -> (K
 pub fn weight_round(w:Planes<'_>,g:&[i64])->[K;3] {
  check(w,(w.0,w.1));assert_eq!(w.0.len(),g.len());assert_eq!(g.len()%2,0);
  #[cfg(target_arch="x86_64")]
+ // SAFETY: the call is guarded by the backend check and the length assertions above.
  if g.len()>=64 && backend()==Backend::Avx512 {unsafe {return weight_vector(w,g);}}
  let mut out=[K::from_u64(0);3];
  for i in (0..g.len()).step_by(2) {let a=scalar::get(w,i);let b=scalar::get(w,i+1);let ga=K::from_i64(g[i]);let gb=K::from_i64(g[i+1]);out[0]+=a*ga;out[1]+=b*gb;out[2]+=(b-a)*(gb-ga);}
@@ -242,6 +252,7 @@ pub fn weight_round(w:Planes<'_>,g:&[i64])->[K;3] {
 }
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
+// SAFETY: the call is guarded by the backend check and the length assertions above.
 unsafe fn weight_vector(w:Planes<'_>,g:&[i64])->[K;3] {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let idx=_mm512_set_epi64(14,12,10,8,6,4,2,0);let n=g.len()/16*16;let mut out=[K::from_u64(0);3];

@@ -8,6 +8,7 @@ pub fn fp_mul(a: &[u64], b: &[u64], out: &mut [u64]) {
     assert_eq!(a.len(), out.len());
     #[cfg(target_arch = "x86_64")]
     if a.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return vector(a, b, out);
         }
@@ -17,6 +18,7 @@ pub fn fp_mul(a: &[u64], b: &[u64], out: &mut [u64]) {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn vector(a: &[u64], b: &[u64], out: &mut [u64]) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = a.len() / 32 * 32;

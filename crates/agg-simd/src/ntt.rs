@@ -310,6 +310,7 @@ impl NttTable {
 pub fn ntt16(table: &NttTable, w: &[u64; N]) -> [u64; N] {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { ntt16_avx512(table, w) };
     }
     table.ntt_scalar(w)
@@ -320,6 +321,7 @@ pub fn ntt16(table: &NttTable, w: &[u64; N]) -> [u64; N] {
 pub fn intt16(table: &NttTable, w_hat: &[u64; N]) -> [u64; N] {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { intt16_avx512(table, w_hat) };
     }
     table.intt_scalar(w_hat)
@@ -330,6 +332,7 @@ pub fn intt16(table: &NttTable, w_hat: &[u64; N]) -> [u64; N] {
 pub fn ntt_signed16(table: &NttTable, w: &[i64; N]) -> [u64; N] {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { ntt_signed16_avx512(table, w) };
     }
     table.ntt_signed_scalar(w)
@@ -340,6 +343,7 @@ pub fn ntt_signed16(table: &NttTable, w: &[i64; N]) -> [u64; N] {
 pub fn pointwise16(table: &NttTable, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { pointwise16_avx512(table, a, b) };
     }
     table.pointwise_scalar(a, b)
@@ -354,6 +358,7 @@ pub fn pointwise16(table: &NttTable, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
 pub fn pointwise_dot4(table: &NttTable, a: &[[u64; N]; 4], b: &[[u64; N]; 4]) -> [u64; N] {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { pointwise_dot4_avx512(table, a, b) };
     }
     std::array::from_fn(|j| {
@@ -381,6 +386,7 @@ pub fn crt_centered_scalar(x1: u64, x2: u64) -> i64 {
 pub fn crt16(x1: &[u64; N], x2: &[u64; N], out: &mut [i64; N]) {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe { crt16_avx512(x1, x2, out) };
         return;
     }
@@ -406,6 +412,7 @@ pub fn public_t16_into(
     assert_eq!(out.len(), 4 * N);
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe { avx512::public_t16_avx512(coeffs, positions, t1, d, out) };
         return;
     }
@@ -451,12 +458,14 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn load_idx(idx: &[i32; 16]) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe { _mm512_loadu_si512(idx.as_ptr().cast()) }
     }
 
     /// `a + b mod p` for `a, b in [0, p)` (`p < 2^31`, so `a + b < 2p < 2^32`).
     #[inline(always)]
     unsafe fn add_mod(a: __m512i, b: __m512i, p: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let s = _mm512_add_epi32(a, b);
             _mm512_min_epu32(s, _mm512_sub_epi32(s, p))
@@ -466,6 +475,7 @@ mod avx512 {
     /// `a - b mod p` for `a, b in [0, p)` (`p < 2^31`).
     #[inline(always)]
     unsafe fn sub_mod(a: __m512i, b: __m512i, p: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let d = _mm512_sub_epi32(a, b);
             _mm512_min_epu32(d, _mm512_add_epi32(d, p))
@@ -475,6 +485,7 @@ mod avx512 {
     /// Unreduced `a + p - b` in `[1, 2p - 1] subset [0, 2^32)` for `a, b in [0, p)`.
     #[inline(always)]
     unsafe fn sub_unreduced(a: __m512i, b: __m512i, p: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe { _mm512_sub_epi32(_mm512_add_epi32(a, p), b) }
     }
 
@@ -495,6 +506,7 @@ mod avx512 {
         wp_odd: __m512i,
         p: __m512i,
     ) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let x_odd = _mm512_shuffle_epi32::<0xF5>(x);
             let even = _mm512_mul_epu32(x, w);
@@ -510,6 +522,7 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn mont_mul_const(x: __m512i, c: MontConst, p: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let w = _mm512_set1_epi32(c.w as i32);
             let wp = _mm512_set1_epi32(c.w_pinv as i32);
@@ -519,6 +532,7 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn mont_mul_tw16(x: __m512i, tw: &MontVec16, p: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let w = _mm512_load_si512(tw.w.as_ptr().cast());
             let wp = _mm512_load_si512(tw.w_pinv.as_ptr().cast());
@@ -531,6 +545,7 @@ mod avx512 {
     /// Variable-by-variable Montgomery product `a * b * 2^{-32} mod p` in `[0, p)` for `a, b in [0, p)`.
     #[inline(always)]
     unsafe fn mont_mul_var(a: __m512i, b: __m512i, p: __m512i, pinv: __m512i) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let a_odd = _mm512_shuffle_epi32::<0xF5>(a);
             let b_odd = _mm512_shuffle_epi32::<0xF5>(b);
@@ -547,6 +562,7 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn load_u64_as_u32_16(ptr: *const u64) -> __m512i {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let lo = _mm512_cvtepi64_epi32(_mm512_loadu_si512(ptr.cast()));
             let hi = _mm512_cvtepi64_epi32(_mm512_loadu_si512(ptr.add(8).cast()));
@@ -556,6 +572,7 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn store_u32_16_as_u64(ptr: *mut u64, v: __m512i) {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let lo = _mm512_castsi512_si256(v);
             let hi = _mm512_extracti64x4_epi64::<1>(v);
@@ -566,6 +583,7 @@ mod avx512 {
 
     #[inline(always)]
     unsafe fn ntt16_core_to_u64(table: &NttTable, a: &mut [u32; N], out: &mut [u64; N]) {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let p = _mm512_set1_epi32(table.p as i32);
             let ptr = a.as_mut_ptr();
@@ -682,6 +700,7 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn ntt16_avx512(table: &NttTable, w: &[u64; N]) -> [u64; N] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let mut a = [0u32; N];
             for j in (0..N).step_by(16) {
@@ -696,6 +715,7 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn ntt_signed16_avx512(table: &NttTable, w: &[i64; N]) -> [u64; N] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let p_i64 = i64::from(table.p);
             let p_u64_vec = _mm512_set1_epi64((table.p - 1) as i64);
@@ -733,6 +753,7 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn intt16_avx512(table: &NttTable, w_hat: &[u64; N]) -> [u64; N] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let p = _mm512_set1_epi32(table.p as i32);
             let mut a = [0u32; N];
@@ -850,6 +871,7 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn pointwise16_avx512(table: &NttTable, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let p = _mm512_set1_epi32(table.p as i32);
             let pinv = _mm512_set1_epi32(table.pinv as i32);
@@ -872,6 +894,7 @@ mod avx512 {
         a: &[[u64; N]; 4],
         b: &[[u64; N]; 4],
     ) -> [u64; N] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let p = _mm512_set1_epi32(table.p as i32);
             let pinv = _mm512_set1_epi32(table.pinv as i32);
@@ -930,6 +953,7 @@ mod avx512 {
     ///   when `x > (Q * P_2) / 2`.
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn crt16_avx512(x1: &[u64; N], x2: &[u64; N], out: &mut [i64; N]) {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             const M: i64 = (Q as i64) * (P2 as i64);
             const HALF_M: i64 = M / 2;
@@ -987,6 +1011,7 @@ mod avx512 {
         d: u32,
         out: &mut [i32],
     ) {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let zero = _mm512_setzero_si512();
             let shift = _mm_cvtsi32_si128(d as i32);

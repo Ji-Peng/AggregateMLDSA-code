@@ -102,6 +102,7 @@ impl Leaves for Bottom<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             use crate::x86::*;
             let v0 = self.v0.as_ptr().add(4 * row);
@@ -141,6 +142,7 @@ impl Leaves for Symmetric<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             use crate::x86::*;
             use std::arch::x86_64::*;
@@ -171,6 +173,7 @@ pub fn prefix_sums<L: Leaves>(leaves: &L, first: &[K], second: &[K]) -> PrefixSu
         #[cfg(target_arch = "x86_64")]
         if first.len() >= 8 && backend() == Backend::Avx512 {
             let planes = crate::buf::KPlanes::from_fn(first.len(), |i| first[i]);
+            // SAFETY: the call is guarded by the backend check and the length assertions above.
             return unsafe { sums_vector(leaves, planes.planes(), second, range) };
         }
         sums_scalar(leaves, first, second, range)
@@ -237,10 +240,12 @@ pub unsafe fn fill_rows<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0:
     assert_eq!(out.len(), L::LANES);
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return fill_vector(leaves, e, out, row0, row1);
         }
     }
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { fill_scalar(leaves, e, out, row0, row1) }
 }
 
@@ -249,6 +254,7 @@ unsafe fn fill_scalar<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: u
         let cells: [[i64; 4]; 4] = std::array::from_fn(|a| leaves.values(4 * hi + a));
         for (l, &o) in out.iter().enumerate() {
             let value = (0..4).fold(K::zero(), |acc, a| acc + e[a] * K::from_i64(cells[a][l]));
+            // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
             unsafe {
                 (o.0 as *mut u64).add(hi).write(value.c0().to_canonical_u64());
                 (o.1 as *mut u64).add(hi).write(value.c1().to_canonical_u64());
@@ -267,10 +273,12 @@ pub unsafe fn fill_combined<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutL
     assert_eq!(weights.len(), L::LANES);
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return fill_combined_vector(leaves, weights, out, row0, row1);
         }
     }
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { fill_combined_scalar(leaves, weights, out, row0, row1) }
 }
 
@@ -283,6 +291,7 @@ unsafe fn fill_combined_scalar<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
                 value += w[a] * K::from_i64(cells[l]);
             }
         }
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             (out.0 as *mut u64).add(row).write(value.c0().to_canonical_u64());
             (out.1 as *mut u64).add(row).write(value.c1().to_canonical_u64());
@@ -293,6 +302,7 @@ unsafe fn fill_combined_scalar<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fill_combined_vector<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let stop = row0 + (row1 - row0) / 8 * 8;
@@ -342,6 +352,7 @@ impl Leaves for Columns<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             use crate::x86::*;
             let mut out = [[z(); 4]; 4];
@@ -375,6 +386,7 @@ impl Leaves for ByteColumns<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             use crate::x86::*;
             let mut out = [[z(); 4]; 4];
@@ -412,6 +424,7 @@ unsafe fn sums_vector<L: Leaves>(
     second: &[K],
     blocks: std::ops::Range<usize>,
 ) -> PrefixSums {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         use std::arch::x86_64::*;
@@ -544,6 +557,7 @@ unsafe fn sums_vector<L: Leaves>(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fill_vector<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let stop = row0 + (row1 - row0) / 8 * 8;

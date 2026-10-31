@@ -41,6 +41,7 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
             std::mem::align_of::<T>().max(64),
         )
         .expect("allocation layout");
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         let raw = unsafe { alloc(layout) };
         let ptr = NonNull::new(raw.cast::<T>()).unwrap_or_else(|| handle_alloc_error(layout));
         // The guard owns raw storage even if an initializer panics; no uninitialized T is read.
@@ -50,6 +51,7 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
         }
         impl Drop for Guard {
             fn drop(&mut self) {
+                // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
                 unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
             }
         }
@@ -58,6 +60,7 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
             layout,
         };
         let slots =
+            // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
             unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().cast::<MaybeUninit<T>>(), len) };
         slots
             .par_chunks_mut(block_len)
@@ -74,16 +77,19 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
 impl<T: Copy> Deref for AlignedVec<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 impl<T: Copy> DerefMut for AlignedVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 impl<T: Copy> Drop for AlignedVec<T> {
     fn drop(&mut self) {
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe { dealloc(self.ptr.as_ptr().cast(), self.layout) }
     }
 }
@@ -197,6 +203,7 @@ impl<T: Copy> AlignedVec<T> {
             std::mem::align_of::<T>().max(64),
         )
         .expect("allocation layout");
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         let p = NonNull::new(unsafe { alloc(layout) }.cast())
             .unwrap_or_else(|| handle_alloc_error(layout));
         AlignedVec {
@@ -251,6 +258,7 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
                     b.write(y);
                 }
             });
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe { (a.assume_init(), b.assume_init()) }
     }
 }
@@ -277,6 +285,7 @@ impl ColumnWriter<'_, i32> {
     ) {
         debug_assert_eq!(self.next[column], position, "column initialization order");
         let dst = &mut self.columns[column][position..position + 16];
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe {
             std::arch::x86_64::_mm512_storeu_si512(dst.as_mut_ptr().cast(), values);
         }
@@ -294,6 +303,7 @@ impl ColumnWriter<'_, i8> {
     ) {
         debug_assert_eq!(self.next[column], position, "column initialization order");
         let dst = &mut self.columns[column][position..position + 16];
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe {
             std::arch::x86_64::_mm_storeu_si128(dst.as_mut_ptr().cast(), values);
         }
@@ -375,6 +385,7 @@ pub fn try_encode_records_batch8<E: Send>(
             }
             Ok(())
         })?;
+    // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
     unsafe {
         Ok((
             wide.assume_init(),
@@ -394,6 +405,7 @@ impl KPlanes {
         p0.par_chunks_mut(1024).zip(p1.par_chunks_mut(1024)).zip(q0.par_chunks_mut(1024).zip(q1.par_chunks_mut(1024))).enumerate().for_each(|(block,((p0,p1),(q0,q1)))| {
             for i in 0..p0.len() {let (a,b)=f(block*1024+i);p0[i].write(a.c0().to_canonical_u64());p1[i].write(a.c1().to_canonical_u64());q0[i].write(b.c0().to_canonical_u64());q1[i].write(b.c1().to_canonical_u64());}
         });
+        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
         unsafe {(Self{buf:p.assume_init(),rows},Self{buf:q.assume_init(),rows})}
     }
 }

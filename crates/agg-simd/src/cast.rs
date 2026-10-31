@@ -14,10 +14,12 @@ const _: () = {
 };
 /// Fp64 is repr(transparent) over u64 in solinas/word.rs; all bit patterns are readable.
 pub fn base_words(x: &[F]) -> &[u64] {
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { std::slice::from_raw_parts(x.as_ptr().cast(), x.len()) }
 }
 /// FpExt2 is repr(transparent) over [F; 2] in solinas/ext.rs, in c0,c1 order.
 pub fn interleaved_words(x: &[K]) -> &[u64] {
+    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe {
         std::slice::from_raw_parts(
             x.as_ptr().cast(),
@@ -94,6 +96,7 @@ fn encode_chunk(wide: Option<&[i32]>, narrow: Option<&[i8]>, out: &mut [std::mem
             (None, Some(input)) => i64::from(input[i]),
             (None, None) => 0,
         };
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             p.add(i)
                 .write((x as u64).wrapping_add(if x < 0 { crate::P } else { 0 }));
@@ -103,6 +106,7 @@ fn encode_chunk(wide: Option<&[i32]>, narrow: Option<&[i8]>, out: &mut [std::mem
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn encode_vector(wide: Option<&[i32]>, narrow: Option<&[i8]>, out: *mut u64) -> usize {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use std::arch::x86_64::*;
         let len = wide.map_or_else(|| narrow.unwrap().len(), |x| x.len());

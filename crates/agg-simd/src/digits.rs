@@ -39,6 +39,7 @@ const V_MAX: i64 = (1 << 31) - 1;
 pub fn decompose_u_step_16(u: &[i32; 16]) -> ([i32; 16], [i8; 16]) {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe { avx512::decompose_u_step_16_avx512(u) };
     }
     let mut u_lo = [0i32; 16];
@@ -103,6 +104,7 @@ pub fn encode_record_hu(
 ) -> Result<(), &'static str> {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe {
             avx512::encode_record_hu_avx512(
                 z,
@@ -136,6 +138,7 @@ pub fn encode_record_hexact(
 ) -> Result<(), &'static str> {
     #[cfg(target_arch = "x86_64")]
     if backend() == Backend::Avx512 {
+        // SAFETY: the call is guarded by the backend check and the length assertions above.
         return unsafe {
             avx512::encode_record_hexact_avx512(
                 z,
@@ -258,6 +261,7 @@ mod avx512 {
         min_v: __m512i,
         max_v: __m512i,
     ) -> (__m512i, u16) {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let v0 = _mm512_loadu_si512(ptr.cast());
             let v1 = _mm512_loadu_si512(ptr.add(8).cast());
@@ -275,6 +279,7 @@ mod avx512 {
     /// `U_lo = (y - 63,079 * h) - 32,768`, `U_hi = h - 3`.
     #[inline(always)]
     unsafe fn decompose_u_step_vec(u: __m512i) -> (__m512i, __m512i) {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             let y = _mm512_add_epi32(u, _mm512_set1_epi32(B_U as i32));
             let magic = _mm512_set1_epi32(U_MAGIC as i32);
@@ -295,6 +300,7 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     pub unsafe fn decompose_u_step_16_avx512(u: &[i32; 16]) -> ([i32; 16], [i8; 16]) {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let uv = _mm512_loadu_si512(u.as_ptr().cast());
             let (u_lo_v, u_hi_v) = decompose_u_step_vec(uv);
@@ -318,6 +324,7 @@ mod avx512 {
         wide: &mut ColumnWriter<'_, i32>,
         narrow: &mut ColumnWriter<'_, i8>,
     ) -> Result<(), &'static str> {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let z_min = _mm512_set1_epi64(Z_HU_MIN);
             let z_max = _mm512_set1_epi64(Z_HU_MAX);
@@ -421,6 +428,7 @@ mod avx512 {
         wide: &mut ColumnWriter<'_, i32>,
         narrow: &mut ColumnWriter<'_, i8>,
     ) -> Result<(), &'static str> {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let z_min = _mm512_set1_epi64(-Z_HEXACT_BOUND);
             let z_max = _mm512_set1_epi64(Z_HEXACT_BOUND);
@@ -525,6 +533,7 @@ mod avx512 {
         start: usize,
         out: &mut [u8],
     ) -> bool {
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe {
             let one = _mm512_set1_epi8(1);
             let len = out.len();
@@ -596,6 +605,7 @@ pub fn pack_six_bits(lanes: &[&[i8]; 6]) -> Option<Vec<u8>> {
         let start = chunk_idx * (1 << 16);
         #[cfg(target_arch = "x86_64")]
         if simd {
+            // SAFETY: the call is guarded by the backend check and the length assertions above.
             let chunk_ok = unsafe { avx512::pack_six_bits_chunk_avx512(lanes, start, dst) };
             if !chunk_ok {
                 ok.store(false, Ordering::Relaxed);

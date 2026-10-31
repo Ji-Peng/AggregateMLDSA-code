@@ -168,12 +168,39 @@ mod x86 {
 
     use super::{F128, F256Unreduced, portable};
 
-    /// Whether the AVX-512 kernels run (`avx512f` and `vpclmulqdq`, detected once).
+    /// Whether the AVX-512 kernels run (`avx512f` and `vpclmulqdq`, detected
+    /// once, and allowed by `AGG_ISA` and `FLOCK_SIMD`).
     pub(super) fn enabled() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| {
-            std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("vpclmulqdq")
+            let flock_capped = matches!(
+                std::env::var("FLOCK_SIMD").as_deref(),
+                Ok("portable") | Ok("off")
+            );
+            let isa_capped = !agg_isa_allows_avx512();
+            !flock_capped
+                && !isa_capped
+                && std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("vpclmulqdq")
         })
+    }
+
+    /// Whether the process-wide `AGG_ISA` cap admits the AVX-512 level.
+    fn agg_isa_allows_avx512() -> bool {
+        // An empty value is treated like an unset variable.
+        let some = std::env::var("AGG_ISA")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        match some.as_deref() {
+            None => true,
+            Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "avx512ifma" | "avx512-ifma" | "ifma" | "avx512" | "avx-512" => true,
+                "avx2" | "scalar" => false,
+                _ => panic!(
+                    "invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar"
+                ),
+            },
+        }
     }
 
     #[inline]

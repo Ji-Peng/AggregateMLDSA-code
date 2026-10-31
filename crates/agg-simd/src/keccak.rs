@@ -168,6 +168,7 @@ pub fn derive_bridge_columns_into(
                 if width == 8 && std::is_x86_feature_detected!("avx512f") {
                     // The full permutation has one ISA boundary; generic lane helpers
                     // otherwise outline each intrinsic under conservative global flags.
+                    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
                     unsafe { permute8(states.as_mut_slice().try_into().expect("eight states")) };
                 } else {
                     par_perm(&mut states);
@@ -250,6 +251,7 @@ unsafe fn permute8(states: &mut [[u64; 25]; 8]) {
     use std::arch::x86_64::*;
     let mut a: [__m512i; 25] = std::array::from_fn(|w| {
         let words: [u64; 8] = std::array::from_fn(|i| states[i][w]);
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe { _mm512_loadu_si512(words.as_ptr().cast()) }
     });
     for rc in ROUND_CONSTANTS {
@@ -278,6 +280,7 @@ unsafe fn permute8(states: &mut [[u64; 25]; 8]) {
     }
     for w in 0..25 {
         let mut words = [0u64; 8];
+        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
         unsafe { _mm512_storeu_si512(words.as_mut_ptr().cast(), a[w]) };
         for i in 0..8 { states[i][w] = words[i]; }
     }

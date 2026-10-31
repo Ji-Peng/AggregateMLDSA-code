@@ -2,8 +2,9 @@
 //!
 //! Every kernel is a `#[target_feature]` function; [`avx512`] says whether the CPU has the
 //! features they need (AVX-512 F/BW/VBMI, GFNI, BMI2) and whether `FLOCK_SIMD` allows
-//! them (`portable` or `off` disables them, as for the vendored Flock kernels). The
-//! callers keep the portable code as the fallback and as the tests' oracle.
+//! them (`portable` or `off` disables them, as for the vendored Flock kernels) and the
+//! process-wide `AGG_ISA` cap admits the `avx512` level. The callers keep the portable
+//! code as the fallback and as the tests' oracle.
 //!
 //! - [`keccak8`]: Keccak-f[1600] rounds on eight lane-sliced states (`[__m512i; 25]`,
 //!   qword `r` of every vector is instance `r`).
@@ -42,8 +43,9 @@ pub fn detected() -> bool {
 }
 
 fn capped() -> bool {
-    matches!(
+    let flock = matches!(
         std::env::var("FLOCK_SIMD").as_deref(),
         Ok("portable") | Ok("off")
-    )
+    );
+    flock || !agg_mldsa_simd::isa::allows(agg_mldsa_simd::isa::IsaLevel::Avx512)
 }

@@ -17,6 +17,7 @@ pub fn k_mul(a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
     check(a, b, &out);
     #[cfg(target_arch = "x86_64")]
     if a.0.len() >= 64 && backend() == Backend::Avx512 {
+        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return vector(a, b, out);
         }
@@ -30,6 +31,7 @@ pub fn k_mul_base(a: Planes<'_>, b: &[u64], out: PlanesMut<'_>) {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn vector(a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
+    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
     unsafe {
         use crate::x86::*;
         let n = a.0.len() / 8 * 8;
