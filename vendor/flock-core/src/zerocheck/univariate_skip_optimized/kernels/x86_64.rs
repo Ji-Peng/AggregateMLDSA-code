@@ -71,7 +71,8 @@ pub(crate) unsafe fn bit_transpose_64bytes_sse2(input: &[u8; 64], output: &mut [
     for (w, chunk) in words.iter_mut().zip(input.chunks_exact(8)) {
         *w = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
     }
-    crate::simd::x86::bit_transpose_8x64_sse2(&words, output);
+    // SAFETY: SSE2 is baseline on x86-64 and both arrays hold 64 bytes.
+    unsafe { crate::simd::x86::bit_transpose_8x64_sse2(&words, output) };
 }
 
 /// SSE/GFNI x86 kernel. The inverse-NTT apply uses its best available x86 path,
