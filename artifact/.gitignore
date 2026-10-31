@@ -1,0 +1,8 @@
+# Build products and measurements are recreated by run.sh.
+build/
+results/
+vendor/
+natver/build/
+natver/natver
+__pycache__/
+*.pyc

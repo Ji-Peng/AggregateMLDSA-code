@@ -1,0 +1,66 @@
+# Pinned inputs of the reproduction package.
+#
+# `fetch` clones the two external trees under `artifact/vendor/`, verifies the
+# full commit below, and checks that Cargo.lock names the same revisions for
+# the crates cargo resolves. The archive URL of this repository is a
+# placeholder until the anonymous artifact is deposited.
+
+[[source]]
+name = "ours"
+url = "https://github.com/Ji-Peng/AggregateMLDSA-code"
+archive_url = "PLACEHOLDER (anonymous archive URL and DOI to be filled at submission)"
+commit = "ad45ef7391ca355c153bca47a4fc94415292903e"
+license = "MIT OR Apache-2.0"
+role = "prover, verifier"
+in_repo = true
+path = "."
+note = "The artifact lives in this tree; `commit` is the main revision the artifact is based on."
+
+[[source]]
+name = "aerie"
+url = "https://github.com/a16z/aerie"
+commit = "49b6c212c209286c536196f53618823ffdf0e899"
+tag = "v0.2.0"
+toolchain = "1.95.0"
+license = "MIT OR Apache-2.0"
+role = "baseline and dependency"
+path = "artifact/vendor/aerie"
+
+[[source]]
+name = "dilithium"
+url = "https://github.com/pq-crystals/dilithium"
+commit = "d35ba3fe5449bee3e6d43e1f296c3ca818bd36be"
+license = "CC0-1.0 or Apache-2.0 or GPL-2.0"
+role = "native baseline"
+path = "artifact/vendor/dilithium"
+note = "Current master at pin time; matches the revision used for the paper's native baseline."
+
+[[source]]
+name = "akita"
+url = "https://github.com/LayerZero-Labs/akita"
+commit = "e023b6a46143f7b23199ccecb2684192baf7b640"
+license = "MIT OR Apache-2.0"
+role = "dependency (vendored with PATCH.md)"
+path = "vendor/akita"
+
+[[source]]
+name = "flock"
+url = "https://github.com/succinctlabs/flock"
+commit = "83f963e8ede6d9a85ec4762b0c018943b6f6542b"
+license = "MIT OR Apache-2.0"
+role = "dependency (vendored with PATCH.md)"
+path = "vendor/flock-core"
+
+[[source]]
+name = "jolt"
+url = "https://github.com/a16z/jolt"
+commit = "c7c2d08d5bb0c7c80501f29f723e595af7fcff3c"
+license = "MIT OR Apache-2.0"
+role = "dependency"
+
+[[source]]
+name = "spongefish"
+url = "https://github.com/arkworks-rs/spongefish"
+commit = "ef9741346a150039427d9e0c02d6b2d73e93ec81"
+license = "MIT OR Apache-2.0"
+role = "dependency"

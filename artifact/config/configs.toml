@@ -1,0 +1,72 @@
+# Kernel configurations and build flags.
+#
+# Every knob lives here and nowhere else. A build that does not declare a knob
+# ignores it; the run records the environment it set, and the tables show what
+# the binary reported.
+
+[build]
+toolchain = "1.99.1"
+aerie_toolchain = "1.95.0"
+jobs = 6
+# The release build every row starts from. Row-specific flags extend this.
+base_rustflags = "-C target-feature=+pclmulqdq"
+package = "agg-cli"
+bin = "agg"
+
+[build.binaries.agg-v3]
+rustflags = "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
+features = []
+avx512_check = false
+description = "x86-64-v3 baseline with CLMUL; run-time dispatch picks AVX-512 and IFMA when present."
+
+[build.binaries.agg-noavx512]
+rustflags = "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq,-avx512f"
+features = ["no-avx512"]
+requires_feature = "no-avx512"
+avx512_check = true
+description = "v3 without AVX-512 code; falls back to the v3 binary when the feature is absent."
+
+[build.binaries.agg-v1]
+rustflags = "-C target-feature=+pclmulqdq,-avx512f"
+features = ["no-avx512"]
+requires_feature = "no-avx512"
+avx512_check = true
+description = "x86-64-v1 with CLMUL and no AVX-512; falls back to the v3 binary when the feature is absent."
+
+[rows.ifma]
+binary = "agg-v3"
+label = "IFMA"
+requires = ["pclmulqdq", "avx2", "avx512f", "avx512ifma"]
+env = {}
+note = "Every detected kernel, including the IFMA field and NTT kernels."
+
+[rows.avx512]
+binary = "agg-v3"
+label = "AVX-512"
+requires = ["pclmulqdq", "avx2", "avx512f"]
+env = { AGG_SIMD = "portable" }
+note = "AVX-512 everywhere except the IFMA field and NTT kernels."
+
+[rows.avx2]
+binary = "agg-noavx512"
+label = "AVX2"
+requires = ["pclmulqdq", "avx2", "popcnt"]
+env = { AGG_SIMD = "portable", AGG_MLDSA_SIMD = "avx2", FLOCK_SIMD = "portable" }
+note = "No AVX-512 instruction; GFNI off; AVX2 ML-DSA kernels."
+
+[rows.scalar]
+binary = "agg-v1"
+label = "scalar"
+requires = ["pclmulqdq"]
+env = { AGG_SIMD = "portable", AGG_MLDSA_SIMD = "scalar", FLOCK_SIMD = "portable", AKITA_SCALAR_NTT = "1" }
+note = "Scalar everywhere except the CLMUL GF(2^128) multiply."
+
+[topology]
+# Tried in this order when a row asks for an allocation the machine lacks.
+fallbacks = { "16C32T" = "8C16T", "8C16T" = "1T" }
+avoid_cpu0 = true
+
+[runtime]
+# Set explicitly for every measurement.
+thread_env = ["RAYON_NUM_THREADS", "OMP_NUM_THREADS"]
+extra_omp = { OMP_PROC_BIND = "close", OMP_PLACES = "threads" }

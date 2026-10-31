@@ -1,0 +1,31 @@
+{
+  "commit": "ad45ef7391ca355c153bca47a4fc94415292903e",
+  "relation": "h-u",
+  "aggregates": {
+    "1024": {
+      "h-u": {
+        "bytes": 426895,
+        "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+      }
+    }
+  },
+  "per_configuration": {
+    "ifma": {
+      "bytes": 426895,
+      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+    },
+    "avx512": {
+      "bytes": 426895,
+      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+    },
+    "avx2": {
+      "bytes": 426895,
+      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+    },
+    "scalar": {
+      "bytes": 426895,
+      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+    }
+  },
+  "note": "Generated from the pinned commit by ./run.sh gates --write-expected. Every configuration must reproduce these bytes."
+}

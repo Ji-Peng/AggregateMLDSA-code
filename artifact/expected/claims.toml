@@ -1,0 +1,48 @@
+# Claim -> table cell -> command -> expected value and tolerance.
+# The generated claims-measured.csv in a results directory holds the values
+# the evaluator measured.
+
+[[claim]]
+id = "C1"
+statement = "The aggregate takes 49.2 bytes per signature at 32,768 signatures."
+table = "tab-bytes.tex"
+cell = "N = 2^15, B/sig"
+command = "./run.sh quick   (then read artifact/paper-tables/tab-bytes.tex)"
+expected = "49.2 B/sig"
+tolerance = "exact (the aggregate is a deterministic byte string)"
+
+[[claim]]
+id = "C2"
+statement = "Every kernel configuration and thread count produces the same aggregate; verification accepts it."
+table = "tab-e2e.tex"
+cell = "all rows: identical bytes and accept"
+command = "./run.sh gates"
+expected = "one sha256 for all four configurations, verify exit status 0"
+tolerance = "exact"
+
+[[claim]]
+id = "C3"
+statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's medians."
+table = "tab-e2e.tex"
+cell = "IFMA / AVX2 prove and verify"
+command = "./run.sh full"
+expected = "paper medians (2.60 s and 2.88 s at 32K on 16C32T)"
+tolerance = "+-10% on the same CPU class; other microarchitectures differ"
+
+[[claim]]
+id = "C4"
+statement = "The ISA ladder has the paper's order: IFMA <= AVX-512 <= AVX2 <= scalar."
+table = "tab-ablation.tex"
+cell = "ISA ladder rows"
+command = "./run.sh quick --smoke"
+expected = "nondecreasing prove time down the ladder"
+tolerance = "order and +-15% on an AVX-512IFMA CPU"
+
+[[claim]]
+id = "C5"
+statement = "Our prover and verifier compare with Aerie and with native ML-DSA verification as reported."
+table = "tab-baselines.tex"
+cell = "Aerie and native rows against ours"
+command = "./run.sh quick"
+expected = "ratios of the paper's baselines"
+tolerance = "+-20% on the evaluator's machine"

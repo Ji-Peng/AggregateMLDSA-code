@@ -1,0 +1,118 @@
+# Full mode: the experiment matrix of the evaluation, without a scheduler.
+# Configurations are interleaved by round; the runs below are executed in the
+# order the paper reports them.
+
+mode = "full"
+
+[[runs]]
+kind = "ours"
+tag = "headline"
+configs = ["ifma", "avx512", "avx2", "scalar"]
+allocations = ["16C32T", "8C16T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 10
+
+[[runs]]
+kind = "ours"
+tag = "headline-1t"
+configs = ["ifma", "avx2", "scalar"]
+allocations = ["1T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "ours"
+tag = "relations"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [32768]
+relations = ["h-exact", "h-fips"]
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "ours"
+tag = "scaling"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [1024, 2048, 4096, 8192, 16384, 32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "ablations"
+tag = "ablation"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relation = "h-u"
+rounds = 3
+arms = [
+  { tag = "defaults", env = {} },
+  { tag = "no-hugepage", env = { AGG_HUGEPAGE = "0" } },
+  { tag = "no-alloc-cache", env = { AGG_ALLOC_CACHE = "0" } },
+  { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
+  { tag = "stage-branch-main-pool", env = { AGG_PIOP_S_THREADS = "0" } },
+  { tag = "gfni", env = { FLOCK_SIMD = "gfni" } },
+]
+
+[[runs]]
+kind = "ours"
+tag = "timeline"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 1
+traced = true
+
+[[runs]]
+kind = "fresh"
+tag = "prover-memory"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [32768]
+relation = "h-u"
+reps = 3
+mode = "aggregate"
+
+[[runs]]
+kind = "fresh"
+tag = "verifier-memory"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [32768]
+relation = "h-u"
+reps = 5
+mode = "verify"
+
+[[runs]]
+kind = "aerie"
+tag = "aerie"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [8192, 32768]
+warmup = 1
+reps = 10
+
+[[runs]]
+kind = "aerie"
+tag = "aerie-avx2"
+backend = "avx2"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [8192, 32768]
+warmup = 1
+reps = 10
+
+[[runs]]
+kind = "native"
+tag = "native"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [32768]
+warmup = 1
+reps = 10

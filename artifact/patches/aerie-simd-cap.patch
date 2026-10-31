@@ -1,0 +1,21 @@
+# Aerie v0.2.0: make AERIE_SIMD_BACKEND effective without the test-only
+# backend-override feature. Applies to the AVX2 row of the evaluation; it can
+# only lower the instruction-set ceiling. Apply with `git apply` inside
+# artifact/vendor/aerie.
+diff --git a/crates/aerie-simd/src/backend.rs b/crates/aerie-simd/src/backend.rs
+index 4a0e014..74898d2 100644
+--- a/crates/aerie-simd/src/backend.rs
++++ b/crates/aerie-simd/src/backend.rs
+@@ -63,12 +63,6 @@ impl Backend {
+     }
+ }
+ 
+-#[cfg(not(feature = "backend-override"))]
+-fn select() -> Backend {
+-    Backend::detected()
+-}
+-
+-#[cfg(feature = "backend-override")]
+ fn select() -> Backend {
+     let requested = std::env::var("AERIE_SIMD_BACKEND").ok();
+     let backend = match requested.as_deref() {
