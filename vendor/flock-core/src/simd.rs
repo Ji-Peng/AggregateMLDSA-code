@@ -17,17 +17,18 @@
 //!   allows AVX-512 without IFMA; `avx512ifma` (or unset) allows every detected feature.
 //!   A cap only lowers the level.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 /// Feature bits.
-pub(crate) const AVX512_CLMUL: u8 = 1 << 0; // avx512f + vpclmulqdq
-pub(crate) const AVX512_GFNI: u8 = 1 << 1; // gfni + avx512f + avx512bw
-pub(crate) const GFNI: u8 = 1 << 2; // gfni (SSE)
-pub(crate) const AVX512_VBMI: u8 = 1 << 3; // avx512f + avx512bw + avx512vbmi
-pub(crate) const AVX512F: u8 = 1 << 4; // avx512f
-pub(crate) const AVX2: u8 = 1 << 5; // avx2 + pclmulqdq
-pub(crate) const VPCLMUL256: u8 = 1 << 6; // avx2 + vpclmulqdq (256-bit vectors)
-const INIT: u8 = 1 << 7;
+pub(crate) const AVX512_CLMUL: u16 = 1 << 0; // avx512f + vpclmulqdq
+pub(crate) const AVX512_GFNI: u16 = 1 << 1; // gfni + avx512f + avx512bw
+pub(crate) const GFNI: u16 = 1 << 2; // gfni (SSE)
+pub(crate) const AVX512_VBMI: u16 = 1 << 3; // avx512f + avx512bw + avx512vbmi
+pub(crate) const AVX512F: u16 = 1 << 4; // avx512f
+pub(crate) const AVX2: u16 = 1 << 5; // avx2 + pclmulqdq
+pub(crate) const VPCLMUL256: u16 = 1 << 6; // avx2 + vpclmulqdq (256-bit vectors)
+pub(crate) const AVX512BW: u16 = 1 << 7; // avx512f + avx512bw (16-way BLAKE3 leaves)
+const INIT: u16 = 1 << 15;
 
 /// Instruction-set levels of `AGG_ISA`, ordered upwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,14 +89,14 @@ fn isa_requested() -> Option<&'static str> {
 }
 
 /// Detected features after the `FLOCK_SIMD` cap.
-static DETECTED: AtomicU8 = AtomicU8::new(0);
-/// Test-only override mask, ANDed with the detected features (`0xff` = no override).
-static MASK: AtomicU8 = AtomicU8::new(0xff);
+static DETECTED: AtomicU16 = AtomicU16::new(0);
+/// Test-only override mask, ANDed with the detected features (`!0` = no override).
+static MASK: AtomicU16 = AtomicU16::new(!0);
 
 #[cold]
-fn detect() -> u8 {
+fn detect() -> u16 {
     #[allow(unused_mut)]
-    let mut bits = 0u8;
+    let mut bits = 0u16;
     #[cfg(target_arch = "x86_64")]
     {
         use std::arch::is_x86_feature_detected as has;
@@ -125,6 +126,9 @@ fn detect() -> u8 {
             if avx512f && has!("avx512bw") && has!("avx512vbmi") {
                 bits |= AVX512_VBMI;
             }
+            if avx512f && has!("avx512bw") {
+                bits |= AVX512BW;
+            }
         }
     }
     match std::env::var("FLOCK_SIMD").as_deref() {
@@ -138,7 +142,7 @@ fn detect() -> u8 {
 
 /// The features the kernels may use (detected, capped by `FLOCK_SIMD` and the test mask).
 #[inline]
-pub(crate) fn features() -> u8 {
+pub(crate) fn features() -> u16 {
     let d = DETECTED.load(Ordering::Relaxed);
     let d = if d & INIT == 0 { detect() } else { d & !INIT };
     d & MASK.load(Ordering::Relaxed)
@@ -146,7 +150,7 @@ pub(crate) fn features() -> u8 {
 
 /// True when every bit of `want` is available.
 #[inline]
-pub(crate) fn has(want: u8) -> bool {
+pub(crate) fn has(want: u16) -> bool {
     features() & want == want
 }
 
@@ -154,7 +158,7 @@ pub(crate) fn has(want: u8) -> bool {
 /// portable one). Serialized by a lock; other threads see the mask while it is set,
 /// which only changes which (equal-valued) kernel they run.
 #[cfg(test)]
-pub(crate) fn with_mask<T>(mask: u8, f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_mask<T>(mask: u16, f: impl FnOnce() -> T) -> T {
     use std::sync::Mutex;
     static LOCK: Mutex<()> = Mutex::new(());
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -167,12 +171,12 @@ pub(crate) fn with_mask<T>(mask: u8, f: impl FnOnce() -> T) -> T {
 /// The masks the machine supports, from portable (0) up to all detected features;
 /// used by tests to run every available path.
 #[cfg(test)]
-pub(crate) fn test_masks() -> Vec<u8> {
+pub(crate) fn test_masks() -> Vec<u16> {
     let all = {
         let d = DETECTED.load(Ordering::Relaxed);
         if d & INIT == 0 { detect() } else { d & !INIT }
     };
-    let mut out = vec![0u8];
+    let mut out = vec![0u16];
     for m in [
         GFNI,
         AVX2,
@@ -180,6 +184,7 @@ pub(crate) fn test_masks() -> Vec<u8> {
         GFNI | AVX2 | VPCLMUL256,
         GFNI | AVX2 | AVX512F,
         AVX512F | AVX512_CLMUL | AVX2 | VPCLMUL256,
+        AVX512F | AVX512BW,
         all,
     ] {
         let m = m & all;
@@ -233,7 +238,7 @@ pub(crate) fn report() -> String {
     let bits = features();
     let cap = isa_cap();
     format!(
-        "flock-core: cap={} ({}) avx2={} vpclmul256={} gfni={} avx512f={} avx512clmul={} avx512gfni={} avx512vbmi={} gf2-width={:?}",
+        "flock-core: cap={} ({}) avx2={} vpclmul256={} gfni={} avx512f={} avx512clmul={} avx512gfni={} avx512vbmi={} avx512bw={} gf2-width={:?}",
         cap.name(),
         isa_requested().unwrap_or("detected"),
         bits & AVX2 == AVX2,
@@ -243,6 +248,7 @@ pub(crate) fn report() -> String {
         bits & AVX512_CLMUL == AVX512_CLMUL,
         bits & AVX512_GFNI == AVX512_GFNI,
         bits & AVX512_VBMI == AVX512_VBMI,
+        bits & AVX512BW == AVX512BW,
         ghash_width(),
     )
 }

@@ -24,6 +24,7 @@ pub mod flock_union;
 pub mod gate;
 pub mod keccak;
 pub mod prover;
+pub mod simd;
 pub mod sponge;
 pub mod tied;
 pub mod witness;

@@ -1,5 +1,7 @@
 //! Architecture-selected kernels over contiguous [`F128`] slices.
 
+pub mod rounds;
+
 use crate::F128;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use crate::f128_slice::aarch64::fold_pairs as fold_pairs_aarch64;

@@ -8,6 +8,7 @@ members = [
   "crates/agg-bridge",
   "crates/agg-cli",
   "crates/agg-bench",
+  "crates/agg-simd",
   "crates/agg-mldsa-simd",
   "crates/agg-mldsa-cref",
 ]
@@ -44,6 +45,7 @@ agg-keccak = { path = "crates/agg-keccak" }
 agg-bridge = { path = "crates/agg-bridge" }
 agg-mldsa-simd = { path = "crates/agg-mldsa-simd" }
 agg-mldsa-cref = { path = "crates/agg-mldsa-cref" }
+agg-simd = { path = "crates/agg-simd" }
 keccak = "=0.1.6"
 cc = "=1.4.4"
 

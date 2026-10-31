@@ -143,6 +143,7 @@ dependencies = [
  "agg-mldsa-simd",
  "agg-pcs-config",
  "agg-piop",
+ "agg-simd",
  "agg-witness",
  "akita-algebra",
  "akita-challenges",
@@ -218,6 +219,7 @@ dependencies = [
  "agg-mldsa-simd",
  "agg-pcs-config",
  "agg-piop",
+ "agg-simd",
  "agg-witness",
  "akita-algebra",
  "akita-cpu-backend",
@@ -233,6 +235,15 @@ dependencies = [
  "rayon",
  "sha3 0.10.9",
  "spongefish",
+]
+
+[[package]]
+name = "agg-simd"
+version = "0.1.0"
+dependencies = [
+ "aerie-keccak",
+ "jolt-field",
+ "rayon",
 ]
 
 [[package]]
