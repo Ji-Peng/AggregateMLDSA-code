@@ -151,7 +151,7 @@ fn main() {
         let t0 = Instant::now();
         let buffers = batch.honest_buffers(&inputs);
         let t1 = Instant::now();
-        // Event 2 (commit before the seed), then the Flock proof with fs_sigma;
+        // Commit before the seed, then the Flock proof with fs_sigma;
         // Flock's prover commits once more internally.
         let committed = batch.commit(buffers);
         let commitment = committed.commitment().clone();

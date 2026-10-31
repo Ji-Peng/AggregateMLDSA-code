@@ -5,8 +5,8 @@
 //! 10`, two level-1 blocks per lane), spans, the tampering cases of docs/parity-chain.md
 //! with their error names, the precomputed commitment, and a segment split into parts whose
 //! shares XOR to the segment's `Y`. The bridge seed is
-//! derived from the event-2 commitments, so the sponge witnesses and the part's bits are
-//! fixed before the seed exists (events 2 and 3). Run with `--release`.
+//! derived from the Flock commitments, so the sponge witnesses and the part's bits are
+//! fixed before the seed exists (the commitment phase and the bridge-seed step). Run with `--release`.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -26,8 +26,8 @@ use flock_core::test_rng::Rng;
 use flock_field::F128;
 use sha3::{Digest, Sha3_256};
 
-/// The bridge seed of a test transcript: a hash of the absorbed commitment (event 2 then
-/// event 3), so it cannot be known before the witnesses are committed.
+/// The bridge seed of a test transcript: a hash of the absorbed commitment (the commitment phase then
+/// the bridge-seed step), so it cannot be known before the witnesses are committed.
 fn seed_after(commitment: &TiedCommitment) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"test/sd");
@@ -138,7 +138,7 @@ impl Ctx<'_> {
         self.part.verify(mu, c, com, sd, &mats, ys, fs, &r.proof)
     }
 
-    /// Commit `sponge` and `bits` (event 2) with the statement of the honest records,
+    /// Commit `sponge` and `bits` (the commitment phase) with the statement of the honest records,
     /// derive `sd` and `fs` from the commitment, and prove against the chosen final vectors.
     fn run(&self, sponge: agg_keccak::witness::SlotBuffers, bits: Vec<u64>, share: Share) -> Run {
         let committed = self.part.commit_parts(sponge, bits, &self.records);
@@ -329,7 +329,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         };
         assert!(ctx.verify(&r).is_err(), "flipped proof byte {at}");
     }
-    // Another sponge cap in place of the event-2 one.
+    // Another sponge cap in place of the one committed at the commitment phase.
     let mut other_cap = commitment.sponge.as_bytes().to_vec();
     other_cap[0] ^= 1;
     let swapped = TiedCommitment {
@@ -717,7 +717,7 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
         .collect();
     assert_eq!(segs[2].len(), 4);
     assert_eq!(segs[1].segment().offset, 1 << 13);
-    // Event 2: commit every part, keep only the commitments and the commit data.
+    // Commit every part, keep only the commitments and the commit data.
     let mut kept = Vec::new();
     let commitments: Vec<TiedCommitment> = segs
         .iter()
@@ -739,7 +739,7 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
     let lanes = main_domain_lanes(&records, geom.main_len());
     let b: [&[i8]; 6] = std::array::from_fn(|t| lanes[t].as_slice());
     let y_segment = gf2_composite(&geom, &b, &mats);
-    // Event 6: rebuild each part, prove its share; the last share is Y XOR the others.
+    // Rebuild each part, prove its share; the last share is Y XOR the others.
     let fs = |k: usize| -> [u8; 32] { std::array::from_fn(|i| (i + 7 * k) as u8) };
     let mut shares = Vec::new();
     let mut acc = vec![0_u8; 4096];
@@ -796,7 +796,7 @@ fn tied_parts_prove_shares_that_xor_to_the_segment_vector() {
 /// `AGG_TIED_SIZES` (default `256,512,1024,2048`; an entry `n@d` is a part of `2^d` record
 /// positions with `n` live records, e.g. `8@13` for a full segment with a
 /// small sponge instance) and per Ligerito profile in
-/// `AGG_TIED_PROFILES` (default `fast,slim,secure`): event-2 commit, prove (with
+/// `AGG_TIED_PROFILES` (default `fast,slim,secure`): commit at the commitment phase, then prove (with
 /// the sponge commitment's prover data kept), verify, median of `AGG_TIED_REPS` (default 3)
 /// runs after one warmup; the proof bytes split into the header and chain and
 /// the sponge proof; the kept commit data's heap bytes. Matrices are derived outside the

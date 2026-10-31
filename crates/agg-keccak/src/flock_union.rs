@@ -35,7 +35,7 @@
 //! Proof bytes ([`UnionProof::to_bytes`]): bincode of Flock's `R1csProofMergedLigerito`
 //! (zerocheck, lincheck, merged opening) framed by its length, then the claim values, 16
 //! bytes each (little-endian `lo`, `hi`). The Ligerito proof's level-0 cap is not sent: it
-//! is the commitment the verifier already holds (event 2), and Flock's verifier rejects any
+//! is the commitment the verifier already holds (committed at the commitment phase), and Flock's verifier rejects any
 //! other cap, so [`UnionGeometry::verify`] puts the commitment's cap in its place.
 
 use bincode::Options as _;
@@ -309,14 +309,14 @@ pub fn eval_packed(z: &[F128], point: &[F128], nu: usize) -> F128 {
 /// Reed-Solomon codeword and Merkle tree of the dense stack), so that
 /// [`UnionGeometry::prove`] opens it without committing a second time (the
 /// Ligerito commit is deterministic, so the data is exactly what the prover would
-/// recompute). The caller keeps it from event 2 to event 6.
+/// recompute). The caller keeps it from the commitment phase to the final-vector step.
 pub struct CommitData {
     commitment: Commitment,
     prover_data: ProverData,
 }
 
 impl CommitData {
-    /// The event-2 bytes (the Ligerito level-0 cap).
+    /// The commitment-phase bytes (the Ligerito level-0 cap).
     #[must_use]
     pub fn commitment(&self) -> KeccakCommitment {
         KeccakCommitment::from_flock(&self.commitment)
@@ -519,7 +519,7 @@ impl UnionGeometry {
     }
 
     /// Flock's commitment to the per-type slot buffers `z` (caller order) with its prover
-    /// data (event 2, before any seed): the map [`Self::prove`] applies, so a proof may
+    /// data (the commitment phase, before any seed): the map [`Self::prove`] applies, so a proof may
     /// open it without committing again.
     #[must_use]
     pub fn commit_data(&self, slot_zs: &[&[F128]]) -> CommitData {
@@ -543,7 +543,7 @@ impl UnionGeometry {
     /// Prove the slots' rows under `circuits` (caller order, one per type) with the
     /// packed-direct claims at `points`, whose values the prover computes from the
     /// assembled union buffer, with the challenger `ch` (already seeded and bound to the
-    /// caller's statement). With `pre` the commitment of event 2 is opened as is;
+    /// caller's statement). With `pre` the Flock commitment is opened as is;
     /// otherwise Flock commits here. Returns the proof and the commitment Flock bound.
     ///
     /// # Panics
@@ -785,7 +785,7 @@ impl UnionGeometry {
         )
     }
 
-    /// Verify a proof against the commitment of event 2, the circuits (caller order) and
+    /// Verify a proof against the Flock commitment, the circuits (caller order) and
     /// the claim `points` (recomputed by the caller), with a challenger in the prover's
     /// state. Returns the claimed values, which the caller checks against its own
     /// expectations.

@@ -14,7 +14,7 @@
 //! the public region and the first chi words, with weight zero.
 //!
 //! Transcript. From the part's Flock seed `fs`, its geometry, the digest of
-//! the final vectors and the sponge's event-2 cap, the tie challenger draws (each site after
+//! the final vectors and the sponge's commitment-phase cap, the tie challenger draws (each site after
 //! its proof of work): the public claim's point `(rho_r, rho_c)`; `eq_Y = (r_o, r_y)`; one
 //! challenge per chain round after absorbing its message `(q(1), q(inf))`; then it absorbs
 //! the claimed bit value `v` and squeezes a 32-byte tie binding, which the sponge challenger
@@ -254,7 +254,7 @@ fn squeeze_binding(ch: &mut FsChallenger) -> [u8; 32] {
     binding
 }
 
-/// The event-2 commitment of a tied part: the sponge instance's Ligerito cap.
+/// The commitment of a tied part: the sponge instance's Ligerito cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TiedCommitment {
     /// The sponge instance's Ligerito cap.
@@ -262,7 +262,7 @@ pub struct TiedCommitment {
 }
 
 impl TiedCommitment {
-    /// `LE32(len) || sponge`: the event-2 payload of the part.
+    /// `LE32(len) || sponge`: the commitment-phase payload of the part.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let b = self.sponge.as_bytes();
@@ -307,7 +307,7 @@ pub struct TiedCommitted {
 }
 
 impl TiedCommitted {
-    /// The commitment to absorb at event 2.
+    /// The commitment to absorb at the commitment phase.
     #[must_use]
     pub fn commitment(&self) -> &TiedCommitment {
         &self.commitment
@@ -505,7 +505,7 @@ impl<'g> TiedPart<'g> {
     }
 
     /// The tie geometry of a part of `n` records, `2^d` positions per segment and `segments`
-    /// segments, from the public numbers alone (the proof-of-work plan of event 0 needs it
+    /// segments, from the public numbers alone (the instance record's proof-of-work plan needs it
     /// before the part exists; [`Self::new_span`] checks it against the part's own).
     #[must_use]
     pub fn plan_geometry(gate: &ChainGate, n: usize, d: u32, segments: usize) -> TieGeometry {
@@ -905,7 +905,7 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// Commit to the honest witness of `records` (event 2: before `sd` and `fs`).
+    /// Commit to the honest witness of `records` (the commitment phase: before `sd` and `fs`).
     #[must_use]
     pub fn commit(&self, records: &[SpongeRecord]) -> TiedCommitted {
         let (sponge, bits) = self.honest_parts(records);
@@ -914,7 +914,7 @@ impl<'g> TiedPart<'g> {
 
     /// Rebuild a committed part from its witnesses and the commitment computed earlier by
     /// [`Self::commit_parts`] on the same witnesses (the driver drops the buffers between
-    /// events 2 and 6), with the commitment's prover data if it was kept. Without
+    /// the commitment phase and the final-vector step), with the commitment's prover data if it was kept. Without
     /// the data the proof commits again and panics if Flock's cap differs from
     /// `commitment`.
     #[must_use]
@@ -954,7 +954,7 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// Bytes of the event-2 commitment (the sponge cap).
+    /// Bytes of the commitment (the sponge cap).
     #[must_use]
     pub fn commitment_len(&self) -> usize {
         self.sponge.commitment_len()
@@ -973,7 +973,7 @@ impl<'g> TiedPart<'g> {
 
     /// [`Self::final_vectors`] from the part's lane-major input bits (as returned by
     /// [`Self::honest_parts`] and kept by [`TiedCommitted::bits`]), without the sponge
-    /// witness: the event-6 shares of a segment's parts are computed before the Flock proofs
+    /// witness: the share items of a segment's parts are computed before the Flock proofs
     /// (fork-join transcript: the Flock proofs run at a join after stage 3).
     ///
     /// # Panics
@@ -998,8 +998,8 @@ impl<'g> TiedPart<'g> {
     /// tests pass wrong ones) under the matrices of `sd`, seeded by `fs` (the part's Flock
     /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (lanes 0..5) and the
     /// sponge's word columns 48..63 (lanes 6, 7), the claimed bit value, then the sponge
-    /// instance's Flock proof with the public claim and the bit claim (opening the event-2
-    /// commitment). `sd` is bound through `fs` (event 5 follows event 3).
+    /// instance's Flock proof with the public claim and the bit claim (opening the commitment-phase
+    /// commitment). `sd` is bound through `fs` (the Flock seed step follows the bridge-seed step).
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
@@ -1007,7 +1007,7 @@ impl<'g> TiedPart<'g> {
     ///
     /// # Panics
     /// If `committed` belongs to another part shape, `ys` has the wrong shape, or Flock
-    /// commits to another sponge cap than the event-2 one.
+    /// commits to another sponge cap than the one committed at the commitment phase.
     pub fn prove_with_final_vectors(
         &self,
         committed: TiedCommitted,
@@ -1247,7 +1247,7 @@ impl<'g> TiedPart<'g> {
         acc
     }
 
-    /// Verify a part proof against `(mu_i, c~_i)` of the span's records, the event-2
+    /// Verify a part proof against `(mu_i, c~_i)` of the span's records, the commitment-phase
     /// commitment, the bridge seed and its matrices, the final vectors `ys` (one per segment
     /// of the span) and the part's Flock seed `fs`.
     ///

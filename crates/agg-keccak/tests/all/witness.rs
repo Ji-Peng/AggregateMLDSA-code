@@ -1,4 +1,4 @@
-//! The event-2 witness build of a tied part: equality of the batched builder with the
+//! The commitment-phase witness build of a tied part: equality of the batched builder with the
 //! per-instance reference (`pack_slot` over `ChainGate::instance_rows`) and an ignored
 //! timing run. Run with `--release`.
 
@@ -65,7 +65,7 @@ fn honest_parts_match_reference_packing() {
     }
 }
 
-/// Wall time of the event-2 witness build (`TiedPart::honest_parts`) and of the
+/// Wall time of the commitment-phase witness build (`TiedPart::honest_parts`) and of the
 /// per-instance reference. `AGG_WITNESS_N` records (default 4,096), one warmup and
 /// `AGG_WITNESS_REPS` runs (default 2).
 #[test]

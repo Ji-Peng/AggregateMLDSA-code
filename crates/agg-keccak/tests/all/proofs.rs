@@ -247,8 +247,8 @@ fn flipped_input_bit_with_consistent_witness_is_rejected() {
 }
 
 /// A stand-in for the PIOP transcript: absorb the `S`
-/// Flock commitments (event 2), derive `sd` (event 3), then one `fs_sigma`
-/// per sub-proof (event 5). Every seed depends on every commitment.
+/// Flock commitments (the commitment phase), derive `sd`, then one `fs_sigma`
+/// per sub-proof (the Flock seed step). Every seed depends on every commitment.
 fn transcript_seeds(commitments: &[KeccakCommitment]) -> ([u8; 32], Vec<[u8; 32]>) {
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
@@ -270,7 +270,7 @@ fn transcript_seeds(commitments: &[KeccakCommitment]) -> ([u8; 32], Vec<[u8; 32]
     (sd, fs)
 }
 
-/// Regression for the commit-then-prove order (events 2, 3 and 5): the `S`
+/// Regression for the commit-then-prove order (the commitment phase, the bridge-seed step and the Flock seed step): the `S`
 /// commitments exist before any seed, the seeds are derived from them, and each
 /// proof verifies only against the commitment that was absorbed for its sub-batch.
 /// Sub-batching: a target of 500 permutations gives 64 records per proof (the
@@ -288,7 +288,7 @@ fn commitments_are_absorbed_before_the_seeds_and_bound() {
     let prover = SpongeProver::new(params);
     let recs = records(100, 0x5B);
 
-    // Event 2: commit to both sub-batches; no seed exists yet.
+    // Commit to both sub-batches; no seed exists yet.
     let committed = prover.commit_all(&recs);
     assert_eq!(committed.len(), 2);
     assert_eq!((committed[0].len(), committed[1].len()), (64, 36));
@@ -313,7 +313,7 @@ fn commitments_are_absorbed_before_the_seeds_and_bound() {
     );
     let c_tilde: Vec<Vec<[u8; 32]>> = committed.iter().map(|c| c.c_tilde().to_vec()).collect();
 
-    // Events 3 and 5: seeds from the transcript, then the Flock proofs.
+    // Seeds from the transcript, then the Flock proofs.
     let (_sd, fs) = transcript_seeds(&commitments);
     let proofs = prover.prove_all(committed, &fs);
     assert_eq!(proofs.len(), 2);
@@ -371,7 +371,7 @@ fn commitments_are_absorbed_before_the_seeds_and_bound() {
         ));
     }
 
-    // Seeds bound to a different event-2 payload do not verify.
+    // Seeds bound to a different commitment-phase payload do not verify.
     let (_, wrong_fs) = transcript_seeds(&[commitments[1].clone(), commitments[0].clone()]);
     assert!(prover
         .verify_batch(

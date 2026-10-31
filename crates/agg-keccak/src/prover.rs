@@ -8,18 +8,18 @@
 //! `[n, 2^nu)` are identically zero, which satisfies the relation with the
 //! constant pinned to 0 (Flock's count-derived pin target).
 //!
-//! Commit, then prove (PIOP transcript events 2 to 6):
+//! Commit, then prove (PIOP transcript from the commitment phase through the final-vector step):
 //! [`GateBatch::commit`] fixes the witness and returns its [`KeccakCommitment`]
-//! before any PIOP challenge that depends on it (the PIOP absorbs it at event
-//! 2 and then draws `sd` and `fs_sigma`); [`GateBatch::prove_committed`] runs
+//! before any PIOP challenge that depends on it (the PIOP absorbs it at the
+//! commitment phase and then draws `sd` and `fs_sigma`); [`GateBatch::prove_committed`] runs
 //! the Flock prover with `fs_sigma` and checks that Flock commits to the same
 //! cap; [`GateBatch::verify`] takes the commitment the PIOP absorbed and hands
 //! exactly that to Flock's verifier. The proof bytes do not repeat the
-//! commitment, so there is no second copy that could differ from event 2.
+//! commitment, so there is no second copy that could differ from the commitment phase.
 //!
 //! Fiat-Shamir: the Flock challenger is created with the domain
-//! `agg-mldsa/v1/keccak`, then absorbs the 32-byte seed `fs` (PIOP
-//! event 5) and the gate digest (the registry type carries empty matrix stubs,
+//! `agg-mldsa/v1/keccak`, then absorbs the 32-byte seed `fs` (the PIOP's
+//! Flock seed step) and the gate digest (the registry type carries empty matrix stubs,
 //! so the relation is bound here), then Flock binds the registry, counts,
 //! commitment, circuit digest and public words.
 
@@ -167,7 +167,7 @@ impl std::error::Error for KeccakError {}
 
 /// A serialized Flock union-circuit proof (header, then the proof body). It
 /// does not contain the commitment: the verifier takes that from the PIOP
-/// transcript (event 2) and passes it to [`GateBatch::verify`].
+/// transcript (the commitment phase) and passes it to [`GateBatch::verify`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeccakProof {
     pub bytes: Vec<u8>,
@@ -177,14 +177,14 @@ pub struct KeccakProof {
 /// `2^c` nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`), which is
 /// exactly what Flock's `bind_statement` absorbs (the PCS parameters are not
 /// transmitted; both sides derive them from `n` and the profile).
-/// [`Self::as_bytes`] is the event-2 payload of the PIOP transcript.
+/// [`Self::as_bytes`] is the commitment-phase payload of the PIOP transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeccakCommitment {
     bytes: Vec<u8>,
 }
 
 impl KeccakCommitment {
-    /// Wrap received bytes (the event-2 payload). The length is checked
+    /// Wrap received bytes (the commitment-phase payload). The length is checked
     /// against the sub-proof's parameters by [`GateBatch::verify`].
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
@@ -216,7 +216,7 @@ pub struct CommittedBatch {
 }
 
 impl CommittedBatch {
-    /// The commitment to absorb at event 2.
+    /// The commitment to absorb at the commitment phase.
     #[must_use]
     pub fn commitment(&self) -> &KeccakCommitment {
         &self.commitment
@@ -476,7 +476,7 @@ impl<'g> GateBatch<'g> {
     /// Commit and prove in one call, for callers whose `fs` does not depend
     /// on the commitment (tests, benches); the aggregation driver uses
     /// [`Self::commit`] and [`Self::prove_committed`] around the PIOP's
-    /// events 2 to 5.
+    /// the commitment phase through the Flock seed step.
     #[must_use]
     pub fn prove_buffers(
         &self,
@@ -517,7 +517,7 @@ impl<'g> GateBatch<'g> {
     }
 
     /// Verify a proof against the public words and the commitment the PIOP
-    /// absorbed at event 2 (Flock's verifier binds and opens exactly this cap).
+    /// absorbed at the commitment phase (Flock's verifier binds and opens exactly this cap).
     ///
     /// # Errors
     /// On a malformed proof or commitment, a statement of the wrong length,
@@ -688,7 +688,7 @@ impl SpongeProver {
     }
 
     /// Verify one sub-batch proof against `(mu_i, c~_i)` and the commitment
-    /// absorbed at event 2.
+    /// absorbed at the commitment phase.
     ///
     /// # Errors
     /// See [`GateBatch::verify`].
@@ -709,7 +709,7 @@ impl SpongeProver {
     }
 
     /// Split `records` into sub-batches of `records_per_proof` and commit to
-    /// each (the `S` commitments of event 2, in sub-batch order).
+    /// each (the `S` commitments of the commitment phase, in sub-batch order).
     #[must_use]
     pub fn commit_all(&self, records: &[SpongeRecord]) -> Vec<SpongeCommitted> {
         records
@@ -719,7 +719,7 @@ impl SpongeProver {
     }
 
     /// Prove the committed sub-batches of [`Self::commit_all`]; sub-batch `s`
-    /// uses the seed `fs[s]` (event 5).
+    /// uses the seed `fs[s]` (the Flock seed step).
     ///
     /// # Panics
     /// If `fs` does not hold exactly one seed per sub-batch.
@@ -747,7 +747,7 @@ pub struct SpongeCommitted {
 }
 
 impl SpongeCommitted {
-    /// The commitment to absorb at event 2.
+    /// The commitment to absorb at the commitment phase.
     #[must_use]
     pub fn commitment(&self) -> &KeccakCommitment {
         self.inner.commitment()
@@ -775,9 +775,9 @@ impl SpongeCommitted {
 /// The result of [`SpongeProver::prove_batch`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpongeSubProof {
-    /// The event-2 commitment.
+    /// The Flock commitment.
     pub commitment: KeccakCommitment,
-    /// The event-6 proof bytes.
+    /// The part's proof bytes.
     pub proof: KeccakProof,
     /// The published `c~_i`.
     pub c_tilde: Vec<[u8; CTILDE_BYTES]>,
