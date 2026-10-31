@@ -839,9 +839,10 @@ the tied parts' sites (tie, `eq_Y`, chain rounds) with the list factor and Flock
 bounds under (F), and the evaluation batch on the segment of `X` (12.3, 12.4). (4) Every address weighs at most `2^-128` (Section 3,
 the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi`
 `2^-129` by Lemma P and its one-bit grind (K24), below the field sites; the largest PIOP
-plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`, so the global `rho` of
-Aerie Eq. (18) is attained at `tau` for `N* = 32` and any further factor 2 there would
-break the 128-bit claim; Flock with 4.3/4.4
+plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`;
+the global maximum is Akita's fold-coordinate weight `2^-128.0881` (4.6), where the global
+`rho` of Aerie Eq. (18) is attained, and any further factor 2 there would break the
+128-bit claim; Flock with 4.3/4.4
 under (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
 Akita Theorem 10.17 with Aerie Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <=
 2^-128`. (5) The witness map returns the round-1 tables, which satisfy the caller's relation by the
@@ -1008,9 +1009,10 @@ d_sig  N*      sites  nonces  bits  bytes  work(sum 2^g)  ledger(before work)
    15   32768    457     456  4203    526           2646  1329/|K| = 2^-117.6
 ```
 
-The maximum site weight is H-u's (`2^-128.09` at `N* = 32`, `2^-128.36` at `2^15`,
-`2^-128.42` from `2^6` to `2^14`). The exact maximum is the `tau` site's
-`15/(16|K|) = 2^-128.0931` at `N* = 32`.
+The largest PIOP site weight is H-u's (`2^-128.09` at `N* = 32`, `2^-128.36` at `2^15`,
+`2^-128.42` from `2^6` to `2^14`); exactly, `tau` weighs `15/(16|K|) = 2^-128.0931` at
+`N* = 32`. Across all sites the maximum is Akita's fold-coordinate weight `2^-128.0881`
+(4.6), slightly above the PIOP maximum.
 Plan digests (`N = N*`, default part size; pinned by
 `agg_piop::pow::tests::h_exact_plans_reproduce_docs_h_exact_section_3_7`, which also checks
 that H-u's equal them): those of Section 10.
@@ -1662,7 +1664,7 @@ with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho 
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, every relation),
 `proj.psi` `2^-129` (Lemma P and one bit of work, K24), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6), `sd <=
 2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
-coordinates `<= 2^-128.088` (4.6). `eps_hash` covers the hashed entries of 12.1 item 1;
+coordinates `<= 2^-128.088` (4.6, the global maximum). `eps_hash` covers the hashed entries of 12.1 item 1;
 the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). This is the bound of Section 7.
 
