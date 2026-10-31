@@ -1,4 +1,10 @@
 //! Eight-lane primitives. Canonical storage is split only in registers.
+//!
+//! Every function here is `unsafe` because the caller must guarantee two
+//! things: the CPU has AVX-512 F/DQ/BW/VL/IFMA (checked once by
+//! [`crate::detect::backend`], which gates every call), and every pointer
+//! argument addresses the number of `u64` elements the caller's slice has.
+//! Register-only functions need only the feature guarantee.
 #![allow(unused_unsafe)]
 use std::arch::x86_64::*;
 pub(crate) type V = __m512i;
