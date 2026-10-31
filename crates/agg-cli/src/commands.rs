@@ -3,6 +3,9 @@
 //! ([`crate::mode_a`]).
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -46,12 +49,13 @@ commands:
       aggregate of another relation is rejected). With --cache, expanded keys are read
       from and added to the cache file. Exit status 0 on accept, 1 on reject.
   bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
-        [--flock-profile P] [--flock-span on|off] [--relation R]
+        [--flock-profile P] [--flock-span on|off] [--relation R] [--json PATH]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
       prover and of the verifier (max over all runs), and the aggregate size per
-      signature. Set AGG_GIT_REV to print the revision.
+      signature. With --json, also write every timed run, the aggregate size and
+      SHA-256, and the selected kernels as JSON. Set AGG_GIT_REV to print the revision.
 
 environment:
   AGG_FLOCK_THREADS=K   threads of the pool that proves the Flock parts beside the PIOP
@@ -416,6 +420,10 @@ pub struct BenchResult {
     pub verify_cached: Vec<Duration>,
     /// Verifier peak RSS (KiB) over all verifier runs, if measurable.
     pub verify_peak_kib: Option<u64>,
+    /// Size of the aggregate in bytes.
+    pub aggregate_bytes: usize,
+    /// SHA-256 of the aggregate, lower-case hexadecimal.
+    pub aggregate_sha256: String,
     /// The step report of the last uncached run.
     pub uncached_report: String,
     /// The step report of the last cached run.
@@ -500,6 +508,8 @@ pub fn bench_records(
     let prove_peak_kib = rss::peak_kib().filter(|_| reset);
     drop(aggregator);
     let prove_times: Vec<Duration> = proves.iter().map(|r| r.total).collect();
+    let aggregate_bytes = bytes.len();
+    let aggregate_sha256 = sha256_hex(&bytes);
     let prove = proves[median_index(&prove_times)].clone();
     drop(proves);
     // The verifier's peak must not count blocks the prover left in the caches.
@@ -541,9 +551,185 @@ pub fn bench_records(
         verify_uncached,
         verify_cached,
         verify_peak_kib,
+        aggregate_bytes,
+        aggregate_sha256,
         uncached_report,
         cached_report,
     })
+}
+
+/// Lower-case SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let mut out = String::with_capacity(64);
+    for byte in sha2::Sha256::digest(bytes) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// The ML-DSA engine selected for this process.
+fn mldsa_backend_name() -> &'static str {
+    let engine = agg_mldsa_simd::engine();
+    match engine.backend() {
+        agg_mldsa_simd::dispatch::Backend::Scalar => "scalar",
+        agg_mldsa_simd::dispatch::Backend::Avx2 => "avx2",
+        agg_mldsa_simd::dispatch::Backend::Avx512 => {
+            if engine.has_vbmi() {
+                "avx512+vbmi"
+            } else {
+                "avx512"
+            }
+        }
+    }
+}
+
+/// An environment variable as a JSON value: a string when set, `null` otherwise.
+fn json_env(name: &str) -> String {
+    match std::env::var(name) {
+        Ok(value) => json_string(&value),
+        Err(_) => "null".to_string(),
+    }
+}
+
+/// A JSON string. The benchmark values are ASCII, but escape the characters
+/// that would make the output invalid if an environment variable held them.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A JSON array of millisecond values.
+fn json_ms(samples: &[Duration]) -> String {
+    let values: Vec<String> = samples.iter().map(|d| format!("{:.3}", ms(*d))).collect();
+    format!("[{}]", values.join(", "))
+}
+
+/// Write the machine-readable form of a benchmark result.
+///
+/// The document holds every timed run (not only the medians), the aggregate size
+/// and hash, and the kernels each dispatcher selected. The caller passes the
+/// settings so that the file describes the whole invocation.
+#[allow(clippy::too_many_arguments)]
+fn write_bench_json(
+    path: &Path,
+    count: usize,
+    n_keys: usize,
+    seed: u64,
+    part_log2: u32,
+    profile: FlockProfile,
+    span: bool,
+    relation: Relation,
+    result: &BenchResult,
+) -> std::io::Result<()> {
+    let mut out = String::new();
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(out, "  \"tool\": \"agg bench\",");
+    let _ = writeln!(out, "  \"json_version\": 1,");
+    let _ = writeln!(out, "  \"count\": {count},");
+    let _ = writeln!(out, "  \"keys\": {n_keys},");
+    let _ = writeln!(out, "  \"seed\": {seed},");
+    let _ = writeln!(out, "  \"part_log2\": {part_log2},");
+    let _ = writeln!(
+        out,
+        "  \"flock_profile\": {},",
+        json_string(&format!("{profile:?}"))
+    );
+    let _ = writeln!(out, "  \"flock_span\": {span},");
+    let _ = writeln!(
+        out,
+        "  \"relation\": {},",
+        json_string(&relation.to_string().to_lowercase())
+    );
+    let _ = writeln!(out, "  \"warmup\": {},", result.warmup);
+    let _ = writeln!(out, "  \"reps\": {},", result.prove_times.len());
+    let _ = writeln!(out, "  \"revision\": {},", json_env("AGG_GIT_REV"));
+    let _ = writeln!(out, "  \"kernels\": {{");
+    let _ = writeln!(
+        out,
+        "    \"avx512_feature\": {},",
+        agg_piop::avx512_enabled()
+    );
+    let _ = writeln!(
+        out,
+        "    \"keccak_avx512_feature\": {},",
+        agg_keccak::avx512_enabled()
+    );
+    let _ = writeln!(
+        out,
+        "    \"aerie_simd_backend\": {},",
+        json_string(agg_piop::aerie_simd_backend())
+    );
+    let _ = writeln!(
+        out,
+        "    \"mldsa_backend\": {},",
+        json_string(mldsa_backend_name())
+    );
+    let _ = writeln!(out, "    \"AGG_SIMD\": {},", json_env("AGG_SIMD"));
+    let _ = writeln!(
+        out,
+        "    \"AGG_MLDSA_SIMD\": {},",
+        json_env("AGG_MLDSA_SIMD")
+    );
+    let _ = writeln!(out, "    \"FLOCK_SIMD\": {},", json_env("FLOCK_SIMD"));
+    let _ = writeln!(
+        out,
+        "    \"AKITA_SCALAR_NTT\": {}",
+        json_env("AKITA_SCALAR_NTT")
+    );
+    let _ = writeln!(out, "  }},");
+    let _ = writeln!(out, "  \"prove_ms\": {},", json_ms(&result.prove_times));
+    let _ = writeln!(
+        out,
+        "  \"verify_uncached_ms\": {},",
+        json_ms(&result.verify_uncached)
+    );
+    let _ = writeln!(
+        out,
+        "  \"verify_cached_ms\": {},",
+        json_ms(&result.verify_cached)
+    );
+    let optional = |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
+    let _ = writeln!(
+        out,
+        "  \"prove_peak_kib\": {},",
+        optional(result.prove_peak_kib)
+    );
+    let _ = writeln!(
+        out,
+        "  \"verify_peak_kib\": {},",
+        optional(result.verify_peak_kib)
+    );
+    let _ = writeln!(out, "  \"aggregate_bytes\": {},", result.aggregate_bytes);
+    let _ = writeln!(
+        out,
+        "  \"bytes_per_signature\": {:.3},",
+        result.prove.bytes_per_signature()
+    );
+    let _ = writeln!(
+        out,
+        "  \"aggregate_sha256\": {},",
+        json_string(&result.aggregate_sha256)
+    );
+    let _ = writeln!(out, "  \"accepted\": true");
+    let _ = writeln!(out, "}}");
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(out.as_bytes())
 }
 
 fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
@@ -556,6 +742,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     let span = opts.switch("flock-span", true)?;
     let relation = opts.relation("relation")?;
+    let json_path = opts.take("json").map(PathBuf::from);
     opts.finish()?;
     if n_keys == 0 || count == 0 {
         return Err("--count and --keys must be positive".into());
@@ -587,18 +774,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         )
     };
     let protocol = format!("median of {reps}, {warmup} warmup");
-    let mldsa_engine = agg_mldsa_simd::engine();
-    let mldsa_backend = match mldsa_engine.backend() {
-        agg_mldsa_simd::dispatch::Backend::Scalar => "scalar",
-        agg_mldsa_simd::dispatch::Backend::Avx2 => "avx2",
-        agg_mldsa_simd::dispatch::Backend::Avx512 => {
-            if mldsa_engine.has_vbmi() {
-                "avx512+vbmi"
-            } else {
-                "avx512"
-            }
-        }
-    };
+    let mldsa_backend = mldsa_backend_name();
     println!(
         "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
         n_keys.min(count),
@@ -666,6 +842,19 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         result.prove.bytes_per_signature()
     );
     println!("{}", size_lines(&result.prove.size, count));
+    if let Some(path) = json_path {
+        write_bench_json(
+            &path,
+            count,
+            n_keys.min(count),
+            seed,
+            part_log2,
+            profile,
+            span,
+            relation,
+            &result,
+        )?;
+    }
     Ok(0)
 }
 
@@ -755,6 +944,18 @@ mod tests {
         assert_eq!(o.number("warmup", Some(DEFAULT_WARMUP)), Ok(0usize));
         assert_eq!(o.number("reps", Some(DEFAULT_REPS)), Ok(2usize));
         assert!(o.finish().is_ok());
+    }
+
+    #[test]
+    fn sha256_is_the_standard_digest() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

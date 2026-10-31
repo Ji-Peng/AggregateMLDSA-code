@@ -24,6 +24,7 @@ akita-algebra = { workspace = true }
 akita-challenges = { workspace = true }
 akita-cpu-backend = { workspace = true }
 sha3 = { workspace = true }
+sha2 = { workspace = true }
 rayon = { workspace = true }
 
 [lints.rust]
