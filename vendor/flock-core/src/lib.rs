@@ -56,6 +56,14 @@ pub(crate) mod simd;
 pub fn simd_report() -> String {
     simd::report()
 }
+
+/// True when the GF(2^128) kernels run at the AVX-512 width (four elements per vector).
+/// False at the AVX2 tier, where the widest vector holds two elements, and on the
+/// portable path.
+#[must_use]
+pub fn f128_avx512_kernels() -> bool {
+    simd::ghash_width() == simd::GhashWidth::Avx512
+}
 pub mod suboptimal;
 pub mod test_rng;
 pub mod transcript_record;

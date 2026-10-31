@@ -227,6 +227,7 @@ dependencies = [
  "akita-serialization",
  "akita-transcript",
  "akita-types",
+ "flock-core",
  "jolt-field",
  "jolt-poly",
  "rayon",
