@@ -81,6 +81,14 @@ fn unset_cap_detects() {
 }
 
 #[test]
+fn empty_cap_is_treated_as_unset() {
+    let text = report(Some(""));
+    assert!(text.contains("cap=avx512ifma (detected)"), "{text}");
+    assert!(!text.contains("invalid AGG_ISA"), "{text}");
+    assert_eq!(text, report(None));
+}
+
+#[test]
 fn invalid_cap_is_an_error() {
     let text = report(Some("avx4"));
     assert!(text.contains("invalid AGG_ISA 'avx4'"), "{text}");

@@ -38,17 +38,26 @@ impl Level {
 /// The process-wide cap; `Avx512Ifma` when `AGG_ISA` is unset.
 pub(crate) fn cap() -> Level {
     static CAP: OnceLock<Level> = OnceLock::new();
-    *CAP.get_or_init(|| match std::env::var("AGG_ISA") {
-        Ok(value) => Level::parse(&value).unwrap_or_else(|| {
-            panic!("invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar")
-        }),
-        Err(_) => Level::Avx512Ifma,
+    *CAP.get_or_init(|| {
+        // An empty value is treated like an unset variable.
+        match std::env::var("AGG_ISA")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => Level::parse(&value).unwrap_or_else(|| {
+                panic!("invalid AGG_ISA '{value}': expected avx512ifma, avx512, avx2 or scalar")
+            }),
+            None => Level::Avx512Ifma,
+        }
     })
 }
 
 /// The `AGG_ISA` value, for reports.
 pub(crate) fn requested() -> Option<&'static str> {
-    let value = std::env::var("AGG_ISA").ok()?;
+    // An empty value is treated like an unset variable.
+    let value = std::env::var("AGG_ISA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
     Some(Level::parse(&value)?.name())
 }
 

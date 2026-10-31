@@ -81,7 +81,11 @@ impl IsaCap {
 pub fn cap() -> IsaCap {
     static CAP: OnceLock<IsaCap> = OnceLock::new();
     *CAP.get_or_init(|| {
-        let Some(value) = std::env::var("AGG_ISA").ok() else {
+        // An empty value is treated like an unset variable.
+        let Some(value) = std::env::var("AGG_ISA")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
             return IsaCap {
                 limit: IsaLevel::Avx512Ifma,
                 requested: None,

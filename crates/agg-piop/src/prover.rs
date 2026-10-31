@@ -207,9 +207,10 @@ pub fn flock_pool_threads() -> usize {
 
 /// [`flock_pool_threads`] on a pool of `threads` workers: the share that
 /// Flock's proof kernels need. The AVX-512 kernels process four GF(2^128)
-/// elements per instruction and take 3/8 of the pool; the narrower AVX2 and
-/// portable kernels take half, because they need twice the instructions per
-/// element to keep the fork-join wall short.
+/// elements per instruction and take 3/8 of the pool. The narrower AVX2 and
+/// portable kernels need more instructions per element, but a pool of half the
+/// workers starves the PIOP that runs beside them; 7/16 keeps the fork-join
+/// wall short without that starvation.
 fn default_flock_threads(threads: usize) -> usize {
     flock_default_for(threads, flock_core::f128_avx512_kernels())
 }
@@ -219,7 +220,7 @@ fn flock_default_for(threads: usize, avx512: bool) -> usize {
     if avx512 {
         (3 * threads).div_ceil(8)
     } else {
-        threads.div_ceil(2)
+        (7 * threads).div_ceil(16)
     }
 }
 
@@ -1600,13 +1601,13 @@ mod tests {
     fn the_default_flock_pool_follows_the_kernel_width() {
         for threads in [1, 4, 8, 16, 32, 64, 96] {
             assert_eq!(flock_default_for(threads, true), (3 * threads).div_ceil(8));
-            assert_eq!(flock_default_for(threads, false), threads.div_ceil(2));
+            assert_eq!(flock_default_for(threads, false), (7 * threads).div_ceil(16));
         }
-        // The measured sizes: 12 (AVX-512) or 16 (AVX2) at 32 threads,
-        // and 6 or 8 at 16 threads.
+        // The measured sizes: 12 (AVX-512) or 14 (AVX2) at 32 threads,
+        // and 6 or 7 at 16 threads.
         assert_eq!(flock_default_for(32, true), 12);
-        assert_eq!(flock_default_for(32, false), 16);
+        assert_eq!(flock_default_for(32, false), 14);
         assert_eq!(flock_default_for(16, true), 6);
-        assert_eq!(flock_default_for(16, false), 8);
+        assert_eq!(flock_default_for(16, false), 7);
     }
 }

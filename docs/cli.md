@@ -25,7 +25,8 @@ the byte size of every part of the aggregate). Steps:
    event 4 `G_1, G_2, G_3, G_k, G_m`, event 5 `fs_sigma`, event 6 `Y_sigma`
    and the parts' shares, events 7 to 12 the lookup and the stages, the join the parts'
    proofs (deviation K22: proven on their own thread pool, `AGG_FLOCK_THREADS` threads,
-   default 3/8 of the global pool rounded up, `0` for the serial order, at most the logical CPUs or the
+   default 3/8 of the global pool rounded up, or 7/16 when Flock's GF(2^128) kernels run
+   below AVX-512, `0` for the serial order, at most the logical CPUs or the
    global pool, a non-numeric value warned about on stderr and replaced by the default,
    while the prover runs events 7 to 12), event 13 the finish of the opening. The point-only
    prepare part runs on the PIOP pool, so under the fork the fork-join wall includes it.
@@ -96,7 +97,7 @@ Environment knobs (all optional; none changes the proof bytes):
 
 | Variable | Effect |
 | --- | --- |
-| `AGG_FLOCK_THREADS` | threads of the Flock pool beside the PIOP; default `ceil(3/8)` of the rayon pool, `0` serial |
+| `AGG_FLOCK_THREADS` | threads of the Flock pool beside the PIOP; default `ceil(3/8)` of the rayon pool (`ceil(7/16)` below AVX-512), `0` serial |
 | `AGG_PIOP_S_THREADS` | threads of the stage branch's own pool; default as above, `0` shares the rayon pool |
 | `AGG_PIOP_THREADS` | threads of the PIOP pool beside the Flock fork; PIOP + Flock capped at the logical CPUs |
 | `AGG_PIOP_FORK` | `0`: run the two transcript branches one after the other |
