@@ -21,11 +21,10 @@ use akita_challenges::SparseChallenge;
 /// Coefficients per gathered window: one 128-bit vector of `i8` digits.
 pub(super) const WINDOW: usize = 16;
 
-/// Coefficients gathered per table entry: two neighbouring windows for the
-/// AVX-512 kernel, which holds 32 `i16` sums in one register, else one.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
-const GATHER: usize = 2 * WINDOW;
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512bw")))]
+/// Coefficients gathered per table entry: one window, which one 256-bit
+/// `i16` register holds. A 32-coefficient AVX-512 layout was measurably
+/// wrong (its self-check failed), so the gather width never depends on the
+/// compile-time target.
 const GATHER: usize = WINDOW;
 
 /// Source offsets packed into one table word, 16 bits each.
@@ -437,17 +436,11 @@ mod x86 {
     }
 
     /// [`GATHER`] `i16` lanes.
-    #[cfg(target_feature = "avx512bw")]
-    type Lanes = __m512i;
-    #[cfg(not(target_feature = "avx512bw"))]
     type Lanes = __m256i;
 
     #[inline(always)]
     unsafe fn zero() -> Lanes {
-        #[cfg(target_feature = "avx512bw")]
-        return _mm512_setzero_si512();
-        #[cfg(not(target_feature = "avx512bw"))]
-        return _mm256_setzero_si256();
+        _mm256_setzero_si256()
     }
 
     /// # Safety
@@ -455,18 +448,12 @@ mod x86 {
     /// `source` must address [`GATHER`] readable `i16` values.
     #[inline(always)]
     unsafe fn load(source: *const i16) -> Lanes {
-        #[cfg(target_feature = "avx512bw")]
-        return _mm512_loadu_si512(source.cast());
-        #[cfg(not(target_feature = "avx512bw"))]
-        return _mm256_loadu_si256(source.cast());
+        _mm256_loadu_si256(source.cast())
     }
 
     #[inline(always)]
     unsafe fn add(left: Lanes, right: Lanes) -> Lanes {
-        #[cfg(target_feature = "avx512bw")]
-        return _mm512_add_epi16(left, right);
-        #[cfg(not(target_feature = "avx512bw"))]
-        return _mm256_add_epi16(left, right);
+        _mm256_add_epi16(left, right)
     }
 
     /// # Safety
@@ -474,9 +461,6 @@ mod x86 {
     /// `target` must address [`GATHER`] writable `i16` values.
     #[inline(always)]
     unsafe fn store(target: *mut i16, lanes: Lanes) {
-        #[cfg(target_feature = "avx512bw")]
-        _mm512_storeu_si512(target.cast(), lanes);
-        #[cfg(not(target_feature = "avx512bw"))]
         _mm256_storeu_si256(target.cast(), lanes);
     }
 
@@ -504,8 +488,7 @@ mod x86 {
     /// # Safety
     ///
     /// `challenge` must hold the table `WindowedChallenge::new::<D>` built,
-    /// and the build must enable AVX2 (and AVX-512BW when [`GATHER`] is two
-    /// windows).
+    /// and the caller must have checked AVX2 support.
     #[inline(always)]
     pub(super) unsafe fn accumulate<const D: usize>(
         digit_plane: &[i8; D],

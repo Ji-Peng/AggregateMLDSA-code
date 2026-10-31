@@ -1,4 +1,8 @@
-# No `target-cpu=native` and no `target-feature` flags here: the default build
-# must not rely on SIMD. AVX-512 builds go through the `avx512`
-# cargo feature plus scripts/bench.sh AVX512=1 (separate target dir).
+# One baseline for every shipped build: SSE2 plus carry-less multiplication.
+# `+pclmulqdq` is the only feature Flock's scalar GF(2^128) multiply needs at
+# compile time. AVX2, AVX-512 and IFMA kernels are selected at run time from
+# the CPU, capped by `AGG_ISA`. Do not add `target-cpu=native` or a global
+# `x86-64-v3`/`v4`: the former breaks rustc 1.99, and a global AVX-512 target
+# changes Akita's window-gather layout.
 [build]
+rustflags = ["-C", "target-feature=+pclmulqdq"]
