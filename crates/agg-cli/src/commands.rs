@@ -79,7 +79,11 @@ environment:
   AGG_W1_SPLIT=0        build the level-1 weight table instead of its two factors (memory and
                         time only; the proof is the same).
   AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
-                        end of every prover step (diagnostics; the aggregate is the same).";
+                        end of every prover step (diagnostics; the aggregate is the same).
+  AGG_ISA=LEVEL         cap every run-time SIMD detector: avx512ifma, avx512, avx2 (x86-64-v3
+                        plus PCLMULQDQ) or scalar; unset detects. A cap only lowers a level,
+                        and the proof is the same at every level.
+  AGG_SIMD_REPORT=1     print, before the command, the level each crate selected (diagnostics).";
 
 /// A subcommand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
