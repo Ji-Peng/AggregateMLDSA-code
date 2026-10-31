@@ -120,6 +120,52 @@ pub(crate) unsafe fn shift_reduce_inner_ab_x86_sse(
     }
 }
 
+/// AVX2/GFNI x86 kernel: the same computation as the SSE kernel with two
+/// 32-byte chunks in flight, so one `vgf2p8mulb` covers two `F_8` chunks.
+#[inline]
+#[target_feature(enable = "gfni,avx2")]
+pub(crate) unsafe fn shift_reduce_inner_ab_x86_avx2(
+    a_packed: &[u8],
+    b_packed: &[u8],
+    inv_table: &InvNttTableByteSingleGf8,
+    chunk_byte_base: usize,
+    b_med: usize,
+    out: &mut [u8; 64],
+    a_col: &mut [F8],
+    b_col: &mut [F8],
+) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_gf2p8mul_epi8, _mm256_loadu_si256, _mm256_set1_epi8,
+        _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+    let byte_base_b = chunk_byte_base + b_med * N_CHUNKS * 8;
+
+    // SAFETY: the caller's packed-input bounds guarantee the eight-byte slices,
+    // `a_col`/`b_col` are ELL = 64 bytes, and `out` is 64 writable bytes.
+    unsafe {
+        let mut acc0 = _mm256_setzero_si256();
+        let mut acc1 = _mm256_setzero_si256();
+        for k in 0..8usize {
+            let chunk_off = byte_base_b + k * N_CHUNKS;
+            inv_table.apply(&a_packed[chunk_off..chunk_off + N_CHUNKS], a_col);
+            inv_table.apply(&b_packed[chunk_off..chunk_off + N_CHUNKS], b_col);
+            let a_ptr = a_col.as_ptr() as *const u8;
+            let b_ptr = b_col.as_ptr() as *const u8;
+            // x^k as an F_8 byte; k = 0 makes the second multiply the identity.
+            let xk = _mm256_set1_epi8((1u8 << k) as i8);
+            let av = _mm256_loadu_si256(a_ptr.cast::<__m256i>());
+            let bv = _mm256_loadu_si256(b_ptr.cast::<__m256i>());
+            acc0 = _mm256_xor_si256(acc0, _mm256_gf2p8mul_epi8(_mm256_gf2p8mul_epi8(av, bv), xk));
+            let av = _mm256_loadu_si256(a_ptr.add(32).cast::<__m256i>());
+            let bv = _mm256_loadu_si256(b_ptr.add(32).cast::<__m256i>());
+            acc1 = _mm256_xor_si256(acc1, _mm256_gf2p8mul_epi8(_mm256_gf2p8mul_epi8(av, bv), xk));
+        }
+        let out_ptr = out.as_mut_ptr();
+        _mm256_storeu_si256(out_ptr.cast::<__m256i>(), acc0);
+        _mm256_storeu_si256(out_ptr.add(32).cast::<__m256i>(), acc1);
+    }
+}
+
 /// Fused AVX-512/GFNI x86 kernel. Each inverse-NTT apply returns all 64 F_8
 /// evaluations in one ZMM register; the product and x^k scaling stay 64-wide
 /// and register-resident through the final XOR accumulation.

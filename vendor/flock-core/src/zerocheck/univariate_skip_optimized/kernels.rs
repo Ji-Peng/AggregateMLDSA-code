@@ -27,8 +27,8 @@ use crate::{
     zerocheck::univariate_skip_optimized::kernels::x86_64::{
         accumulate_convert_with_s_hat_v_x86_avx2, accumulate_convert_with_s_hat_v_x86_avx512,
         accumulate_convert_with_s_hat_v_x86_pclmul, bit_transpose_64bytes_avx512,
-        bit_transpose_64bytes_sse2, shift_reduce_inner_ab_x86_avx512,
-        shift_reduce_inner_ab_x86_sse,
+        bit_transpose_64bytes_sse2, shift_reduce_inner_ab_x86_avx2,
+        shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
     },
 };
 use crate::{
@@ -142,6 +142,26 @@ pub(super) fn shift_reduce_inner_ab(
                 chunk_byte_base,
                 b_med,
                 out,
+            );
+        }
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    if has(GFNI) && has(crate::simd::AVX2) && inv_table.ell == 64 && inv_table.n_chunks == 8 {
+        let end = chunk_byte_base + (b_med + 1) * 64;
+        assert!(end <= a_packed.len() && end <= b_packed.len());
+        // SAFETY: the runtime check guarantees gfni and AVX2; bounds above.
+        unsafe {
+            shift_reduce_inner_ab_x86_avx2(
+                a_packed,
+                b_packed,
+                inv_table,
+                chunk_byte_base,
+                b_med,
+                out,
+                a_col,
+                b_col,
             );
         }
         return;

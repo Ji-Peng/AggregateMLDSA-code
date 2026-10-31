@@ -950,6 +950,8 @@ mod tests {
     use crate::zerocheck::univariate_skip_optimized::N_CHUNKS;
     use crate::zerocheck::univariate_skip_optimized::shift_reduce_inner_ab_scalar;
     #[cfg(target_arch = "x86_64")]
+    use crate::zerocheck::univariate_skip_optimized::kernels::x86_64::shift_reduce_inner_ab_x86_avx2;
+    #[cfg(target_arch = "x86_64")]
     use crate::zerocheck::univariate_skip_optimized::{
         shift_reduce_inner_ab_x86_avx512, shift_reduce_inner_ab_x86_sse,
     };
@@ -1478,6 +1480,61 @@ mod tests {
             assert_eq!(
                 out_scalar, out_x86,
                 "gfni disagrees with scalar at (base={chunk_byte_base}, b_med={b_med})"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_gfni_avx2_inner_matches_scalar_inner() {
+        if !(crate::simd::has(crate::simd::GFNI) && crate::simd::has(crate::simd::AVX2)) {
+            eprintln!("skipped: no gfni+avx2 on this CPU");
+            return;
+        }
+        let mut rng = Rng::new(0xF0_2A);
+        let m = 14;
+        let table = make_inv_table();
+        let a_bits = rng.bits(1 << m);
+        let b_bits = rng.bits(1 << m);
+        let a_packed = pack_bits(&a_bits);
+        let b_packed = pack_bits(&b_bits);
+
+        let mut a_col = vec![F8::ZERO; ELL];
+        let mut b_col = vec![F8::ZERO; ELL];
+
+        for &(chunk_byte_base, b_med) in &[(0usize, 0usize), (64, 5), (1024, 7), (4096, 15)] {
+            let needed = chunk_byte_base + b_med * N_CHUNKS * 8 + 8 * N_CHUNKS;
+            if needed > a_packed.len() {
+                continue;
+            }
+            let mut out_scalar = [0u8; 64];
+            let mut out_x86 = [0u8; 64];
+            shift_reduce_inner_ab_scalar(
+                &a_packed,
+                &b_packed,
+                &table,
+                chunk_byte_base,
+                b_med,
+                &mut out_scalar,
+                &mut a_col,
+                &mut b_col,
+            );
+            // SAFETY: gfni and avx2 checked at run time above.
+            unsafe {
+                shift_reduce_inner_ab_x86_avx2(
+                    &a_packed,
+                    &b_packed,
+                    &table,
+                    chunk_byte_base,
+                    b_med,
+                    &mut out_x86,
+                    &mut a_col,
+                    &mut b_col,
+                );
+            }
+            assert_eq!(
+                out_scalar, out_x86,
+                "gfni+avx2 disagrees with scalar at (base={chunk_byte_base}, b_med={b_med})"
             );
         }
     }
