@@ -1,6 +1,6 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Eight changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Nine changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -44,7 +44,8 @@ same derivation reproduces the shipped `m*_slim.toml` byte for byte). Level-0 qu
 This is a verifier-visible addition (a new parameter set of an unchanged protocol): proofs
 under `Slim8` verify with this copy only, or with upstream Flock given the same configs.
 
-To regenerate (Sections 1 and 2; Sections 3 to 5 below have their own lists): copy `crates/flock-core/{src,configs}` of the revision above here, write the
+To regenerate (Sections 1 and 2; Sections 3 to 9 below have their own lists, including the
+level-1 `blocked.rs` encoder): copy `crates/flock-core/{src,configs}` of the revision above here, write the
 `Cargo.toml` of this directory, re-apply the `ColSide::Short` hunk (three edits in
 `build_merged_weight_and_prime`: the enum variant and the `bake_columns` decision, the
 `Folded` claim arm, and the segment sweep arm), re-apply the `Slim8` arms, create empty
