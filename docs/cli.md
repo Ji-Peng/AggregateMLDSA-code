@@ -196,3 +196,6 @@ workers: single noisy runs, not benchmarks):
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
 with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claims).
+
+The `Work nonces` column is the measurement at revision `f526097`; the current schedule adds
+the one-bit `proj.psi` nonce, one more byte in the packed stream (`docs/soundness.md` 10).
