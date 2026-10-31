@@ -523,8 +523,8 @@ fn grouped_rows_by_batch_size() {
     use agg_pcs_config::catalogs::Relation;
     use agg_pcs_config::work_plan::WorkPlan;
     // (d_sig, draws, minimum accepted support in bits, rounded down
-    // to 4 decimals) of the grouped row of N* = 2^d_sig, per relation (the seven-group layout
-    // of deviation K24).
+    // to 4 decimals) of the grouped row of N* = 2^d_sig, per relation (the seven-group
+    // layout).
     let expected_h_u: [(usize, usize, f64); 13] = [
         (3, 12, 128.0881),
         (4, 12, 128.0881),

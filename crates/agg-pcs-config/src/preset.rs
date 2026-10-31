@@ -44,7 +44,7 @@ pub const OPENING_LOG_BASIS: u32 = 3;
 pub const OPENING_BASIS_RANGE: (u32, u32) = (3, 6);
 /// Opening bound in bits (field width).
 pub const LOG_OPEN_BOUND: u32 = 64;
-/// Schedule family name; it is part of the catalog digest bound in event 0.
+/// Schedule family name; it is part of the catalog digest bound in the instance record.
 pub const WIDTH4_FAMILY: &str = "agg_mldsa_fp64_signed_width4";
 
 /// Fp64 preset for signed width-4 sources in `[-8, 7]`, with its own catalog.

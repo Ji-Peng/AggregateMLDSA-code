@@ -200,7 +200,7 @@ const PINNED_H_FIPS: &[&str] = &[
 ];
 
 /// (PoW sites, sum g, max g, sum 2^g, nonce bits) of the H-exact rows, `d_sig` 3 to 15: the
-/// H-u values at every size in the seven-group layout (deviation K24).
+/// H-u values at every size in the seven-group layout.
 const H_EXACT_TABLE: [(u64, u64, u8, u64, u64); 13] = [
     (401, 984, 9, 3_888, 3_863),
     (401, 984, 9, 3_888, 3_863),

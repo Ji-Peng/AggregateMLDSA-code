@@ -4,7 +4,7 @@
 //! The seven witness groups, in wire and catalog order, are `G_main16` and `G_main4`
 //! (round 1) and `G_1`, `G_2`, `G_3`, `G_k`, `G_m` (round 2); `G_m` (the multiplicity
 //! digits of the lookup table `T_16`) is Akita's final group and the others are precommitted
-//! groups. `G_k` holds the digits of the projection outputs of `v` (`docs/spec.md` 4.3).
+//! groups. `G_k` holds the digits of the projection outputs of `v` (`docs/spec.md`, the projection definition).
 //! Two presets share one batch: the width-16 family (`G_main16`, `G_1`, `G_2`, `G_3`, `G_k`) and
 //! the width-4 family (`G_main4`, `G_m`). Akita freezes the source bound into each group's
 //! own profile, so a precommitted group of either family enters the final family's grouped
@@ -45,7 +45,7 @@ pub const TABLE_VARS: usize = 16;
 pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Groups of one batch.
 pub const GROUP_COUNT: usize = 7;
-/// Rows of the `{0,1}` projection of `v` (`docs/spec.md` 4.3), log2: `128 = 2^7`.
+/// Rows of the `{0,1}` projection of `v` (`docs/spec.md`, the projection definition), log2: `128 = 2^7`.
 pub const PROJ_ROW_VARS: usize = 7;
 
 /// Batch sizes (`d_sig`) whose relation-H-u catalog rows are generated and checked in:
@@ -58,7 +58,7 @@ pub const CATALOG_D_SIG_H_EXACT: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1
 /// Batch sizes (`d_sig`) whose relation-H-FIPS rows are generated and checked in.
 pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-/// Relation byte of H-u: the proof header's flags byte and byte 3 of the event-0 bytes.
+/// Relation byte of H-u: the proof header's flags byte and byte 3 of the instance-record bytes.
 pub const RELATION_HU: u8 = 0;
 /// Relation byte of H-exact (`docs/h-exact.md`).
 pub const RELATION_H_EXACT: u8 = 1;
@@ -66,7 +66,7 @@ pub const RELATION_H_EXACT: u8 = 1;
 pub const RELATION_H_FIPS: u8 = 2;
 
 /// The relation a proof certifies (`docs/h-exact.md`). Its id is bound twice: as
-/// the proof header's flags byte and in the event-0 manifest bytes; it selects the layout of
+/// the proof header's flags byte and in the instance-record manifest bytes; it selects the layout of
 /// `G_main4` and hence the catalog rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Relation {
@@ -167,7 +167,7 @@ impl Family {
     /// Both families.
     pub const ALL: [Self; 2] = [Self::Width4, Self::Width16];
 
-    /// Canonical transcript byte (event 0).
+    /// Canonical transcript byte (the instance record).
     #[must_use]
     pub const fn transcript_id(self) -> u8 {
         match self {

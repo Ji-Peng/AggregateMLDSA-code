@@ -135,7 +135,7 @@ impl GroupCommitment {
     }
 
     /// Akita's native compressed encoding, the transcript payload of
-    /// events 1 and 4.
+    /// the round-1 and round-2 commitments.
     pub fn serialized(&self) -> Result<Vec<u8>, CommitError> {
         let mut bytes = Vec::new();
         self.commitment()
