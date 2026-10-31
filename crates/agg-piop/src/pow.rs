@@ -3,8 +3,8 @@
 //!
 //! The plan is the ordered list of the proof's protected challenge sites: the sites of every
 //! tied part of the Keccak side ([`KeccakPlan`], in segment and part order: the tie site, the
-//! `eq_Y` site and the parity-chain rounds of tied-part proof version 5), then the
-//! PIOP field-challenge sites in registry order ([`crate::transcript::Registry`], the lookup
+//! `eq_Y` site and the parity-chain rounds of tied-part proof version 5), then the PIOP sites
+//! in registry order ([`crate::transcript::Registry`]: the projection matrix `psi`, the lookup
 //! vector `X` included with difficulty 0). Every site carries its class, two indices and its
 //! difficulty `g` ([`agg_bridge::pow`]); the canonical encoding is hashed with
 //! SHA3-256 and the digest completes the instance record of event 0
@@ -51,6 +51,9 @@ pub enum SiteClass {
     ChainEq = 9,
     /// A round challenge of a tied part's parity chain (degree 2).
     ChainRound = 10,
+    /// The projection matrix `Psi` (event 3, deviation K24): a 16 KiB byte challenge whose
+    /// bad set has mass `2^-128`, ground by one bit to `2^-129`.
+    ProjPsi = 11,
 }
 
 impl SiteClass {
@@ -385,61 +388,61 @@ mod tests {
                 3,
                 FlockProfile::PublicBits,
                 None,
-                "bdfc5340e47e6a917f619e1453258fc3a56620bee91577a89047561cc102857d",
+                "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5",
             ),
             (
                 3,
                 FlockProfile::Slim,
                 Some(true),
-                "7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f",
+                "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437",
             ),
             (
                 10,
                 FlockProfile::PublicBits,
                 None,
-                "209fe12b4263d1ed146c404209bdb461f3fe2bbdf2860f90a0abdd56da1b0908",
+                "aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd",
             ),
             (
                 10,
                 FlockProfile::Slim,
                 Some(true),
-                "698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f",
+                "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea",
             ),
             (
                 13,
                 FlockProfile::Slim,
                 Some(true),
-                "5bd3fe07e771dcaa85e92a2997a9fda66e5f1887cbeb64fb0b22682d5fb77d66",
+                "aa72651e90b32c908db52ec832790d72e685c4493c7fd3e80bebe60cd506b5c9",
             ),
             (
                 15,
                 FlockProfile::PublicBits,
                 None,
-                "0433fcf765866654fada2c17095afccbead97517c02b681e46c06e0cfd288807",
+                "1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2",
             ),
             (
                 15,
                 FlockProfile::Fast,
                 Some(true),
-                "5436b95bfe5a7af40ea8d0258d1e15501828fb119442bed0bd29435386a4d666",
+                "deb090a48d8057c6aed064b95bf6fb8a1499207935005fc0d98b40ab5de3864c",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(true),
-                "ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61",
+                "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303",
             ),
             (
                 15,
                 FlockProfile::Slim,
                 Some(false),
-                "6984c30280af6885ffce7c1aac73b59be7eaba8c23d077fc09421fc7d49ca7b0",
+                "fe42263b92bff80e6c367e2b44d7673d274f454841e1784332f5971a03e136c8",
             ),
             (
                 15,
                 FlockProfile::Slim8,
                 Some(true),
-                "66f2907b8f0150c55e8519ea169cb01250cf3cf4cdcfd424607a78d07054369f",
+                "0ba687fbd3b201e24c3776d9ee689dfcfb81ea841de12aa7cbbb3157199ccad8",
             ),
         ];
         for (d_sig, profile, span, want) in cases {
@@ -464,10 +467,10 @@ mod tests {
     fn plan_totals_match_the_soundness_doc() {
         // Sites, nonces, bits, bytes and sum 2^g of the PIOP part.
         for (d_sig, sites, nonces, bits, work) in [
-            (3, 195, 194, 1810, 1348),
-            (10, 316, 315, 2918, 1962),
-            (13, 397, 396, 3656, 2340),
-            (15, 456, 455, 4195, 2644),
+            (3, 196, 195, 1818, 1350),
+            (10, 317, 316, 2926, 1964),
+            (13, 398, 397, 3664, 2342),
+            (15, 457, 456, 4203, 2646),
         ] {
             let manifest = CommitmentManifest::for_batch(1 << d_sig).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
@@ -475,13 +478,13 @@ mod tests {
             assert_eq!(plan.sites().iter().filter(|s| s.bits > 0).count(), nonces);
             assert_eq!(plan.work_bits(), bits);
             assert_eq!(plan.expected_work(), work);
-            assert_eq!(plan.sites()[0].class, SiteClass::LookupX);
-            assert_eq!(plan.sites()[0].bits, 0);
+            assert_eq!((plan.sites()[0].class, plan.sites()[0].bits), (SiteClass::ProjPsi, 1));
+            assert_eq!((plan.sites()[1].class, plan.sites()[1].bits), (SiteClass::LookupX, 0));
             assert!(plan.sites().iter().all(|s| s.bits <= 6));
         }
         let manifest = CommitmentManifest::for_batch(1 << 15).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
-        assert_eq!(plan.work_bits().div_ceil(8), 525);
+        assert_eq!(plan.work_bits().div_ceil(8), 526);
     }
 
     #[test]
@@ -491,10 +494,10 @@ mod tests {
         // stage-2 gamma site has 8 coefficients under H-exact (leaf6[U_hi], leaf4[K_2]) and 9
         // under H-u, both g = 4 (nonce 11 bits), so the plans of H-u and H-exact are equal.
         for (d_sig, sites, nonces, bits, bytes, work) in [
-            (3, 195, 194, 1810, 227, 1348),
-            (10, 316, 315, 2918, 365, 1962),
-            (13, 397, 396, 3656, 457, 2340),
-            (15, 456, 455, 4195, 525, 2644),
+            (3, 196, 195, 1818, 228, 1350),
+            (10, 317, 316, 2926, 366, 1964),
+            (13, 398, 397, 3664, 458, 2342),
+            (15, 457, 456, 4203, 526, 2646),
         ] {
             let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
             let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
@@ -513,12 +516,12 @@ mod tests {
         // The anchors of `docs/soundness.md` 10.1 (mode B = PublicBits; Slim, span on); the
         // H-u plan is the same.
         for (d_sig, profile, want) in [
-            (3, FlockProfile::PublicBits, "bdfc5340e47e6a917f619e1453258fc3a56620bee91577a89047561cc102857d"),
-            (3, FlockProfile::Slim, "7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f"),
-            (10, FlockProfile::PublicBits, "209fe12b4263d1ed146c404209bdb461f3fe2bbdf2860f90a0abdd56da1b0908"),
-            (10, FlockProfile::Slim, "698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f"),
-            (15, FlockProfile::PublicBits, "0433fcf765866654fada2c17095afccbead97517c02b681e46c06e0cfd288807"),
-            (15, FlockProfile::Slim, "ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61"),
+            (3, FlockProfile::PublicBits, "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5"),
+            (3, FlockProfile::Slim, "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437"),
+            (10, FlockProfile::PublicBits, "aa465458415c67707b10cc7e91ddb1eac2f8a4182edf90db1d14f3e74107ecbd"),
+            (10, FlockProfile::Slim, "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea"),
+            (15, FlockProfile::PublicBits, "1634c0b863ed46dd376f873caf5dafaa838fb4a3cda274e4be7c3eca1f8665e2"),
+            (15, FlockProfile::Slim, "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303"),
         ] {
             let manifest = CommitmentManifest::for_relation(1 << d_sig, Relation::HExact).unwrap();
             let keccak = match profile {

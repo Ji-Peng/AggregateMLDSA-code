@@ -19,14 +19,14 @@
 //! the verifier recomputes both. The packed nonce stream keeps registry order: the trunk's
 //! nonces through event 6, then L's, then S's, then the trunk's after the join.
 //!
-//! Grinding (`docs/soundness.md`): every field-challenge event
+//! Grinding (`docs/soundness.md`): every protected event
 //! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
 //! public message `LE32(v)`; the 32-byte predicate squeezed next must have its low `g` bits
 //! zero (Akita's `grinding_predicate_accepts`), and the challenge is squeezed after it from
 //! the same stream. The prover searches `v = 0, 1, ..` and records the winner in the packed
 //! nonce stream ([`crate::pow::WorkWriter`]); the verifier reads and checks it
-//! ([`crate::pow::WorkReader`]). The seeds `sd`, `fs_sigma` and the PCS export carry no
-//! work.
+//! ([`crate::pow::WorkReader`]). The projection site `psi` grinds one bit (deviation K24);
+//! the seeds `sd`, `fs_sigma` and the PCS export carry no work.
 
 use std::num::NonZeroU8;
 use std::sync::Arc;
@@ -88,12 +88,15 @@ pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";
 pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
 /// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v` (`docs/spec.md` 6): one
 /// challenge event after the bridge seed and before the round-2 commitments, whose answer is
-/// `Psi` itself ([`PROJ_ATOMS`] blocks of 32 bytes, 16 KiB, no field sampling, no work).
+/// `Psi` itself ([`PROJ_ATOMS`] blocks of 32 bytes, 16 KiB, no field sampling).
 /// [`Transcript::challenge_psi`] absorbs the 21 raw bytes of this site name first, so that
 /// `Psi` is drawn at its own sponge input, not as a continuation of the squeeze of `sd`.
 pub const PROJ_SITE: &str = "agg-mldsa/v1/proj/psi";
 /// 32-byte blocks of the projection site's answer.
 pub const PROJ_ATOMS: usize = crate::manifest::PROJ_BYTES / 32;
+/// Grinding difficulty of the projection site: its bad set has mass `2^-128` exactly
+/// (Lemma P, `docs/soundness.md` 3.5), so one bit of work gives `2^-129` (deviation K24).
+pub const PROJ_PSI_BITS: u8 = 1;
 /// The shared claimed value `c` of the two sides of the projection identity (end of branch
 /// S, after the stage-2 terminal claims).
 pub const PROJ_CLAIM_SITE: &str = "agg-mldsa/v1/proj/claim";
@@ -287,6 +290,13 @@ impl Builder {
             bits: numerator.map_or(0, grind_bits_k),
         });
     }
+
+    /// A byte-challenge event with an explicit difficulty (the projection site, whose bound
+    /// is not a field-challenge numerator), protected as site `(class, 0, 0)`.
+    fn challenge_bits(&mut self, site: &str, atoms: usize, class: SiteClass, bits: u8) {
+        self.push(site, CHALLENGE_KIND, atoms, PayloadSize::Exact(32 * atoms));
+        self.0.last_mut().expect("pushed").work = Some(WorkSite { class, i: 0, j: 0, bits });
+    }
 }
 
 /// The ordered event list of one batch.
@@ -298,10 +308,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry of `manifest`, with the difficulty of every field-challenge site
+    /// The registry of `manifest`, with the difficulty of every protected site
     /// (`docs/soundness.md`: Aerie's assigned bounds, a vector of `l`
     /// coefficients `l / |K|`, a round its degree over `|K|`, a merge `1 / |K|`, the point
-    /// `tau` `d_main / |K|`; `X` carries none, its joint bound is `((L + M - 1) / |K|)^2`).
+    /// `tau` `d_main / |K|`; `X` carries none, its joint bound is `((L + M - 1) / |K|)^2`;
+    /// the byte site `psi` carries one bit, deviation K24).
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
         let rounds = manifest.d_main();
@@ -316,7 +327,7 @@ impl Registry {
         b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
         b.push(PROJ_SITE, PUBLIC_KIND, 1, PayloadSize::Exact(PROJ_SITE.len()));
-        b.push(PROJ_SITE, CHALLENGE_KIND, PROJ_ATOMS, PayloadSize::Exact(32 * PROJ_ATOMS));
+        b.challenge_bits(PROJ_SITE, PROJ_ATOMS, SiteClass::ProjPsi, PROJ_PSI_BITS);
         for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
@@ -440,7 +451,7 @@ impl Registry {
             .sum()
     }
 
-    /// The protected field-challenge sites in event order (the PIOP part of the plan).
+    /// The protected sites in event order (the PIOP part of the plan).
     pub fn work_sites(&self) -> impl Iterator<Item = WorkSite> + '_ {
         self.events.iter().filter_map(|e| e.work)
     }
@@ -1141,12 +1152,13 @@ mod tests {
         // The difficulties of `docs/soundness.md` at N = 100 (N* = 128): d_main = 17.
         let registry = Registry::new(&manifest());
         let sites: Vec<WorkSite> = registry.work_sites().collect();
-        assert_eq!(sites.len(), 244);
-        assert_eq!((sites[0].class, sites[0].bits), (SiteClass::LookupX, 0));
-        assert_eq!((sites[1].class, sites[1].i, sites[1].bits), (SiteClass::LookupMu, 1, 1));
+        assert_eq!(sites.len(), 245);
+        assert_eq!((sites[0].class, sites[0].bits), (SiteClass::ProjPsi, 1));
+        assert_eq!((sites[1].class, sites[1].bits), (SiteClass::LookupX, 0));
+        assert_eq!((sites[2].class, sites[2].i, sites[2].bits), (SiteClass::LookupMu, 1, 1));
         // Session 2: all twelve trees active, 24 coefficients, 5 bits; one round of 2 bits.
-        assert_eq!((sites[2].class, sites[2].i, sites[2].bits), (SiteClass::LookupGamma, 2, 5));
-        assert_eq!((sites[3].class, sites[3].i, sites[3].j, sites[3].bits), (SiteClass::LookupRound, 2, 0, 2));
+        assert_eq!((sites[3].class, sites[3].i, sites[3].bits), (SiteClass::LookupGamma, 2, 5));
+        assert_eq!((sites[4].class, sites[4].i, sites[4].j, sites[4].bits), (SiteClass::LookupRound, 2, 0, 2));
         let tau = sites.iter().find(|s| s.class == SiteClass::Tau).unwrap();
         assert_eq!(tau.bits, 5);
         let gammas: Vec<u8> = sites.iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
@@ -1161,10 +1173,10 @@ mod tests {
             assert!(rounds.iter().all(|s| s.bits == bits));
             assert_eq!(rounds[16].j, 16);
         }
-        // 2,262 stream bits at N* = 2^7 (D = 18: one GKR session fewer than with V_lo,
+        // 2,270 stream bits at N* = 2^7 (D = 18: one GKR session fewer than with V_lo,
         // V_hi looked up).
-        assert_eq!(registry.work_bits(), 2262);
-        assert_eq!(work_bytes(&manifest()), 283);
+        assert_eq!(registry.work_bits(), 2270);
+        assert_eq!(work_bytes(&manifest()), 284);
         // H-exact: gamma^(2) has 8 coefficients (g = 4), gamma^(3) 49
         // (g = 6), the rounds keep their difficulties: the plan is H-u's.
         let exact = CommitmentManifest::for_relation(100, crate::manifest::Relation::HExact).unwrap();
@@ -1179,8 +1191,8 @@ mod tests {
             .map(|s| s.bits)
             .collect();
         assert_eq!(gammas, [5, 4, 6]);
-        assert_eq!(exact_registry.work_bits(), 2262);
-        assert_eq!(work_bytes(&exact), 283);
+        assert_eq!(exact_registry.work_bits(), 2270);
+        assert_eq!(work_bytes(&exact), 284);
         // H-FIPS: gamma^(2) has 8 coefficients (def_y1, leaf4[K_2] and F3, g = 4),
         // gamma^(3) 55 (g = 6); stage-2 terminals add delta and e, stage 3 opens 39 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
@@ -1199,12 +1211,26 @@ mod tests {
     }
 
     #[test]
+    fn proj_psi_is_a_regular_one_bit_site() {
+        let registry = Registry::new(&manifest());
+        let psi = registry.work_sites().next().expect("the plan is not empty");
+        assert_eq!(
+            (psi.class, psi.i, psi.j, psi.bits, psi.nonce_bits()),
+            (SiteClass::ProjPsi, 0, 0, PROJ_PSI_BITS, 8)
+        );
+        // Its nonce precedes the fork, so the verifier reads it from the trunk.
+        assert!(registry.work_sites().skip(1).next().unwrap().class == SiteClass::LookupX);
+    }
+
+    #[test]
     fn work_nonces_are_searched_recorded_and_checked() {
         let manifest = manifest();
         let record = manifest.binding_bytes();
         // The prover through X and mu_1 (1 bit of work, a nonce of 8 bits).
         let mut trunk = Transcript::new(&manifest, &record).unwrap();
         to_lookup(&mut trunk);
+        // The projection site's nonce precedes the fork (one byte, 8 bits).
+        let psi_nonce = trunk.work_stream()[0];
         let (mut prover, _) = trunk.fork().unwrap();
         let x = LookupTranscript::challenges(&mut prover, LookupSite::X, 2).unwrap();
         prover.absorb_extensions(&lookup_site(LookupSite::Layer1), &vec![OpeningField::from_u64(3); 48]).unwrap();
@@ -1215,7 +1241,8 @@ mod tests {
         // A full-length stream for the replay (the remaining nonces zero).
         let full = |first: u8| {
             let mut bytes = vec![0; work_bytes(&manifest)];
-            bytes[0] = first;
+            bytes[0] = psi_nonce;
+            bytes[1] = first;
             bytes
         };
         let replay = |first: u8| -> Result<(Vec<OpeningField>, Vec<OpeningField>), TranscriptError> {
@@ -1247,7 +1274,7 @@ mod tests {
             Err(TranscriptError::WorkStream(WorkStreamError::Length))
         ));
         let mut padded = bytes.clone();
-        *padded.last_mut().unwrap() |= 0x80; // 2,262 bits: the last 2 bits are padding
+        *padded.last_mut().unwrap() |= 0x80; // 2,270 bits: the last 6 bits are padding
         assert!(matches!(
             Transcript::replay(&manifest, &record, &padded),
             Err(TranscriptError::WorkStream(WorkStreamError::Padding))

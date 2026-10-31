@@ -202,19 +202,33 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         };
 
         // The public bits: a flipped bit breaks the hash, a value of 44 or more the range.
+        // (The changed event-2 item also changes `sd`, so the projection site's work nonce
+        // is rejected before the Keccak check; either rejection is correct.)
         let mut flipped = output.proof.clone();
         flipped.flock_commitments[0][5 * 768 + 300] ^= 0x10;
-        assert!(matches!(rejected(verify(&flipped)), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(verify(&flipped)),
+            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+        ));
         let mut wide = output.proof.clone();
         wide.flock_commitments[0][9 * 768] |= 0x3f;
-        assert!(matches!(rejected(verify(&wide)), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(verify(&wide)),
+            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+        ));
         let mut short = output.proof.clone();
         short.flock_commitments[0].truncate(768 * 255);
-        assert!(matches!(rejected(verify(&short)), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(verify(&short)),
+            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+        ));
         // A changed c~ fails the hash; a changed final vector fails the projection.
         let mut c_tilde = output.proof.clone();
         c_tilde.c_tilde[17][3] ^= 1;
-        assert!(matches!(rejected(verify(&c_tilde)), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(verify(&c_tilde)),
+            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+        ));
         let mut final_vector = output.proof.clone();
         final_vector.final_vectors[0][100] ^= 4;
         assert!(matches!(
@@ -272,7 +286,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
         let manifest = CommitmentManifest::for_batch(256).unwrap();
         let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
         assert_eq!(output.proof.work.len(), plan.work_bits().div_ceil(8));
-        assert_eq!(output.proof.size().work, 309, "2,471 bits at N* = 2^8");
+        assert_eq!(output.proof.size().work, 310, "2,479 bits at N* = 2^8");
         let mut offset = 0;
         let mut seen = std::collections::HashSet::new();
         for site in plan.sites() {
@@ -304,7 +318,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             offset += width;
         }
         assert_eq!(offset, plan.work_bits());
-        assert_eq!(seen.len(), 4 + 3 + 3 + 1, "every class (X has no nonce)");
+        assert_eq!(seen.len(), 4 + 3 + 3 + 1 + 1, "every class (X has no nonce)");
         // The stream's padding bits are zero and its length exact.
         let mut padded = output.proof.clone();
         *padded.work.last_mut().unwrap() |= 0x80;
@@ -342,7 +356,10 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             Relation::Hu,
             None,
         );
-        assert!(matches!(rejected(other_profile), VerifyError::Keccak(0)));
+        assert!(matches!(
+            rejected(other_profile),
+            VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. })
+        ));
         // A Keccak verifier for another profile is refused before the proof is read.
         let mismatch = verify_timed(
             &public,

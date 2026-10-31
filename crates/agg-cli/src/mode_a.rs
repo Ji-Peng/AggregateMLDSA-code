@@ -2134,13 +2134,13 @@ mod tests {
         let gate = sponge_gate();
         let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         for (d_sig, profile, span, want) in [
-            (3, FlockProfile::Slim, true, "7d2bb75f858f6ffebe6915ee3282f430c3ffc6e36241af70cbc036f78063215f"),
-            (10, FlockProfile::Slim, true, "698e55862a06388ba3e032e7b47cd61128c934c57c8f7dfa72e04d2ec4ce261f"),
-            (13, FlockProfile::Slim, true, "5bd3fe07e771dcaa85e92a2997a9fda66e5f1887cbeb64fb0b22682d5fb77d66"),
-            (15, FlockProfile::Fast, true, "5436b95bfe5a7af40ea8d0258d1e15501828fb119442bed0bd29435386a4d666"),
-            (15, FlockProfile::Slim, true, "ad2054a11ac9937ceb9d12953ee0777d798279e2262ab2b30010fd4d2b16ff61"),
-            (15, FlockProfile::Slim, false, "6984c30280af6885ffce7c1aac73b59be7eaba8c23d077fc09421fc7d49ca7b0"),
-            (15, FlockProfile::Slim8, true, "66f2907b8f0150c55e8519ea169cb01250cf3cf4cdcfd424607a78d07054369f"),
+            (3, FlockProfile::Slim, true, "9757c063ae3b3a704330367ea2552dcfd41c9f20841abccce47a9a720cf69437"),
+            (10, FlockProfile::Slim, true, "0aa41fd0c4c2a9bd0df0b63d86e57787cb31c6d7cedec0ac9edd626cd2fb3eea"),
+            (13, FlockProfile::Slim, true, "aa72651e90b32c908db52ec832790d72e685c4493c7fd3e80bebe60cd506b5c9"),
+            (15, FlockProfile::Fast, true, "deb090a48d8057c6aed064b95bf6fb8a1499207935005fc0d98b40ab5de3864c"),
+            (15, FlockProfile::Slim, true, "ef9710959f30286f422e170d9112bca67e7526e17382660675061256ef3e3303"),
+            (15, FlockProfile::Slim, false, "fe42263b92bff80e6c367e2b44d7673d274f454841e1784332f5971a03e136c8"),
+            (15, FlockProfile::Slim8, true, "0ba687fbd3b201e24c3776d9ee689dfcfb81ea841de12aa7cbbb3157199ccad8"),
         ] {
             let n = 1 << d_sig;
             let geometry = Geometry::new(n).unwrap();

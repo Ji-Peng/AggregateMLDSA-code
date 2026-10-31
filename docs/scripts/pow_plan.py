@@ -14,7 +14,8 @@ What it computes, with exact integer arithmetic:
   (crates/agg-piop/src/transcript.rs Registry::new) for every N* = 2^3 .. 2^15, each with its
   round-by-round numerator nu_t, its assigned bound e_t (>= nu_t / |F|), the difficulty
   g_t = min{g >= 0 : 2^128 e_t <= 2^g} (Aerie) and the nonce width g_t + 7
-  (0 when g_t = 0: no nonce);
+  (0 when g_t = 0: no nonce); the projection site proj.psi (deviation K24) leads them with
+  its exact 2^-128 bound and one bit of assigned work (2^-129);
 * the sites of every tied part (tied-part proof version 5, docs/parity-chain.md:
   the tie site of the public claim, the eq_Y site and the parity-chain rounds) for part
   sizes d = 3 .. 13 and span lengths S = 1, 2, 4, with the Johnson-list factor of the
@@ -68,6 +69,7 @@ L0_RATE = {"fast": 1, "slim": 2, "slim8": 3}
 PREVIEW_NS = 724.0
 
 CLASS_ID = {
+    "proj.psi": 11,
     "lookup.x": 1,
     "lookup.mu": 2,
     "lookup.gamma": 3,
@@ -79,6 +81,10 @@ CLASS_ID = {
     "chain.eq": 9,
     "chain.round": 10,
 }
+
+# Deviation K24: proj.psi is a 16 KiB byte challenge whose bad set has mass exactly 2^-128
+# (Lemma P), so the schedule assigns it one bit of work: e = 2^-128, g = 1, 2^-129 per query.
+PSI_BITS = 1
 
 
 # Akita's capped transcript proof-of-work searches at 2^15 (docs/soundness.md).
@@ -93,6 +99,11 @@ def grind_bits(num: int, den: int) -> int:
     while (num << TARGET) > (den << g):
         g += 1
     return g
+
+
+def site_bits(cls: str, num: int, den: int) -> int:
+    """Difficulty of a site: the Aerie bound for a field challenge, PSI_BITS for proj.psi."""
+    return PSI_BITS if cls == "proj.psi" else grind_bits(num, den)
 
 
 def width(g: int) -> int:
@@ -135,8 +146,12 @@ def geometry(d_sig: int) -> dict:
 
 
 def piop_sites(geo: dict) -> list:
-    """The PIOP field-challenge sites in registry order: (class, i, j, nu, e_num, e_den)."""
-    sites = []
+    """The PIOP sites in registry order: (class, i, j, nu, e_num, e_den).
+
+    `proj.psi` is a byte challenge (nu = None, e = 2^-128) with one assigned bit of work; it
+    precedes the field-challenge sites, which begin with the joint-bound site `X` (nu = None).
+    """
+    sites = [("proj.psi", 0, 0, None, 1, F2_128)]
     L, D, trees, d_main = geo["L"], geo["D"], geo["trees"], geo["d_main"]
     x_num = (L + M_TABLE - 1) ** 2
     sites.append(("lookup.x", 0, 0, None, x_num, K * K))
@@ -220,7 +235,7 @@ def plan_digest(geo: dict, sites: list, ties: list, profile: str, span_count: in
         for k in range(t["rounds"]):
             entries.append((CLASS_ID["chain.round"], p, k, t["g_round"], width(t["g_round"])))
     for cls, i, j, nu, num, den in sites:
-        g = grind_bits(num, den)
+        g = site_bits(cls, num, den)
         entries.append((CLASS_ID[cls], i, j, g, width(g)))
     body = bytearray()
     body += (1 << geo["d_sig"]).to_bytes(8, "little")
@@ -239,7 +254,7 @@ def summarize(sites: list) -> dict:
     weights = []
     union_nu = 0
     for cls, i, j, nu, num, den in sites:
-        g = grind_bits(num, den)
+        g = site_bits(cls, num, den)
         w = width(g)
         total_bits += w
         nonces += 1 if g else 0
@@ -262,7 +277,7 @@ def class_table(sites: list) -> list:
     rows = {}
     order = []
     for cls, i, j, nu, num, den in sites:
-        g = grind_bits(num, den)
+        g = site_bits(cls, num, den)
         key = (cls, nu, num if cls != "lookup.x" else None, g)
         if key not in rows:
             rows[key] = 0
@@ -272,6 +287,8 @@ def class_table(sites: list) -> list:
 
 
 def fmt_e(cls, nu, num) -> str:
+    if cls == "proj.psi":
+        return "2^-128"
     if cls == "lookup.x":
         return "((L+M-1)/|K|)^2"
     return f"{num}/|K|"
@@ -286,7 +303,8 @@ def print_summary(args) -> None:
         geo = geometry(d_sig)
         sites = piop_sites(geo)
         s = summarize(sites)
-        x_log2 = math.log2(Fraction(sites[0][4], sites[0][5]))
+        x_site = next(site for site in sites if site[0] == "lookup.x")
+        x_log2 = math.log2(Fraction(x_site[4], x_site[5]))
         assert s["max_weight_log2"] <= -TARGET, "a site exceeds 2^-128"
         print(
             f"{d_sig:>5}  {1 << d_sig:>6}  {geo['d_main']:>6}  {geo['D']:>2}  {geo['L']:>11}  {x_log2:>12.1f}  {len(sites):>5}  {s['nonces']:>6}  {s['bits']:>4}  {s['bytes']:>5}  {s['work']:>13}  {s['work'] * PREVIEW_NS / 1e6:>6.2f}  2^{s['max_weight_log2']:.2f}  {s['union_nu']}/|K| = 2^{math.log2(Fraction(s['union_nu'], K)):.1f}"
@@ -296,7 +314,8 @@ def print_summary(args) -> None:
     print("class         count  nu      e_t               g   nonce bits")
     geo = geometry(15)
     for (cls, nu, num, g), count in class_table(piop_sites(geo)):
-        print(f"{cls:<12}  {count:>5}  {str(nu) if nu is not None else 'joint':<6}  {fmt_e(cls, nu, num):<16}  {g:>2}  {width(g):>3}")
+        label = "byte" if cls == "proj.psi" else ("joint" if cls == "lookup.x" else str(nu))
+        print(f"{cls:<12}  {count:>5}  {label:<6}  {fmt_e(cls, nu, num):<16}  {g:>2}  {width(g):>3}")
     print()
     print("== Old ledger (spec 12.1, union bound per instance) vs round-by-round numerators, before work ==")
     for d_sig in (10, 13, 15):
@@ -417,8 +436,8 @@ def print_details(d_sig: int) -> None:
             print(f"{idx:<4} chain.round  {p:>2}  {k:>2}  2       {t['round']}/2^128  {t['g_round']:>2}  {width(t['g_round']):>2}")
             idx += 1
     for cls, i, j, nu, num, den in piop_sites(geo):
-        g = grind_bits(num, den)
-        e = f"{num}/|K|" if cls != "lookup.x" else "((L+M-1)/|K|)^2"
+        g = site_bits(cls, num, den)
+        e = "2^-128" if cls == "proj.psi" else (f"{num}/|K|" if cls != "lookup.x" else "((L+M-1)/|K|)^2")
         print(f"{idx:<4} {cls:<12} {i:>2}  {j:>2}  {str(nu) if nu is not None else '-':<6}  {e:<16}  {g:>2}  {width(g):>2}")
         idx += 1
 
@@ -443,6 +462,10 @@ def self_check() -> None:
     assert all(grind_bits(nu, K) == nu.bit_length() for nu in range(1, 5000))
     # GF(2^128): ceil(log2 nu), 1/2^128 needs no work.
     assert grind_bits(1, F2_128) == 0 and grind_bits(95, F2_128) == 7
+    # proj.psi is a byte challenge with the exact bound 2^-128; the schedule assigns it one
+    # bit (deviation K24), so its weight is 2^-129 without changing the |K| ledger.
+    assert site_bits("proj.psi", 1, F2_128) == 1
+    assert site_bits("lookup.x", 1, F2_128) == 0
     # Version 5 (docs/parity-chain.md): a span of four full segments under Slim.
     t = tie_terms(13, 2, 15, "slim")
     assert (t["tie"], t["g"], t["eq"], t["g_eq"], t["round"], t["g_round"], t["rounds"]) == (
@@ -468,15 +491,15 @@ def self_check() -> None:
     assert grind_bits(7, K) == 3 and grind_bits(8, K) == grind_bits(9, K) == 4
     assert grind_bits(48, K) == grind_bits(49, K) == grind_bits(55, K) == 6
     exact = RELATION_GAMMAS["h-exact"]
-    for d_sig, bits, work in ((3, 1810, 1348), (10, 2918, 1962), (13, 3656, 2340), (15, 4195, 2644)):
+    for d_sig, bits, work in ((3, 1818, 1350), (10, 2926, 1964), (13, 3664, 2342), (15, 4203, 2646)):
         s = with_gammas(exact, lambda: summarize(piop_sites(geometry(d_sig))))
         assert (s["bits"], s["work"]) == (bits, work), (d_sig, s)
     g15 = geometry(15)
     digest = with_gammas(exact, lambda: plan_digest(g15, piop_sites(g15), [], "modeB", 0, 0))
-    assert digest.startswith("0433fcf7"), digest
+    assert digest.startswith("1634c0b8"), digest
     digest = with_gammas(exact, lambda: plan_digest(
         g15, piop_sites(g15), tie_parts(g15, "slim", True, 1 << 15), "slim", g15["segments"], g15["d_seg"]))
-    assert digest.startswith("ad2054a1"), digest
+    assert digest.startswith("ef971095"), digest
     # Relations H-u and H-FIPS: the same difficulties at every site, so the plans equal
     # H-exact's at every size.
     for gammas in (RELATION_GAMMAS["h-u"], RELATION_GAMMAS["h-fips"]):

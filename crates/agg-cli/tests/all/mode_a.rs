@@ -269,11 +269,19 @@ fn round_trip_as(
         .require(other(profile))
         .relation(relation)
         .verify(&statements, &aggregate.bytes, None);
-    expect_rejected("verifier pinned to the other profile", &wrong, keccak);
-    assert!(matches!(
-        wrong.rejection,
-        Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
-    ));
+    // The other profile also changes the event-0 record, so the transcript (and the
+    // projection site's work nonce) may reject before the item's profile byte; either
+    // failure happens before any Flock work.
+    expect_rejected("verifier pinned to the other profile", &wrong, |e| {
+        keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
+    });
+    assert!(
+        wrong.rejection.is_none()
+            || matches!(
+                wrong.rejection,
+                Some((0, SegmentRejection::Item(ItemError::Profile(p)))) if p == profile as u8
+            )
+    );
     assert!(wrong.parts.is_empty(), "no Flock part was run");
 }
 
@@ -568,17 +576,23 @@ fn corrupted_aggregates_are_rejected() {
         ));
         let p = with_items(&honest, |c, _| c.d_part = 5);
         let r = verify(&p);
-        expect_rejected("part size 2^5", &r, keccak);
-        assert!(matches!(
-            r.rejection,
-            Some((
-                0,
-                SegmentRejection::Item(ItemError::Parts {
-                    expected: 1,
-                    actual: 2
-                })
-            ))
-        ));
+        // The part size is in the plan digest of event 0, so the transcript (and the
+        // projection site's work nonce) may reject before the item's part count.
+        expect_rejected("part size 2^5", &r, |e| {
+            keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
+        });
+        assert!(
+            matches!(
+                r.rejection,
+                Some((
+                    0,
+                    SegmentRejection::Item(ItemError::Parts {
+                        expected: 1,
+                        actual: 2
+                    })
+                ))
+            ) || r.rejection.is_none()
+        );
         // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
         // is refused while the plan of event 0 is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
@@ -591,17 +605,23 @@ fn corrupted_aggregates_are_rejected() {
             s.shares.pop();
         });
         let r = verify(&p);
-        expect_rejected("last part dropped", &r, keccak);
-        assert!(matches!(
-            r.rejection,
-            Some((
-                0,
-                SegmentRejection::Item(ItemError::Parts {
-                    expected: 2,
-                    actual: 1
-                })
-            ))
-        ));
+        // Dropping a part changes the event-2 commitments, so the projection site's work
+        // nonce may reject before the item's part count.
+        expect_rejected("last part dropped", &r, |e| {
+            keccak(e) || matches!(e, VerifyError::Transcript(TranscriptError::Work { .. }))
+        });
+        assert!(
+            matches!(
+                r.rejection,
+                Some((
+                    0,
+                    SegmentRejection::Item(ItemError::Parts {
+                        expected: 2,
+                        actual: 1
+                    })
+                ))
+            ) || r.rejection.is_none()
+        );
         let mut p = honest.clone();
         p.flock_proofs[0].truncate(100);
         let r = verify(&p);
@@ -649,7 +669,8 @@ fn corrupted_aggregates_are_rejected() {
         p.work[0] ^= 0x01;
         expect_rejected("PIOP work nonce", &verify(&p), |_| true);
         // Event 0 binds the plan: a verifier whose plan names other tie difficulties derives
-        // another transcript (here sd, so the parity chain's matrices differ).
+        // another transcript (the projection site's work nonce, then sd and the parity
+        // chain's matrices differ).
         let gate = sponge_gate();
         let other_plan = verify_timed(
             &public,
@@ -660,7 +681,10 @@ fn corrupted_aggregates_are_rejected() {
             Relation::Hu,
             None,
         );
-        assert!(matches!(other_plan.outcome, Err(VerifyError::Keccak(0))));
+        assert!(matches!(
+            other_plan.outcome,
+            Err(VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. }))
+        ));
 
         // PIOP and opening.
         let mut p = honest.clone();
@@ -774,7 +798,10 @@ fn corrupted_aggregates_are_rejected() {
             Relation::Hu,
             None,
         );
-        assert!(matches!(mode_b.outcome, Err(VerifyError::Keccak(0))));
+        assert!(matches!(
+            mode_b.outcome,
+            Err(VerifyError::Keccak(0) | VerifyError::Transcript(TranscriptError::Work { .. }))
+        ));
         // The honest aggregate still verifies after all this.
         assert!(verifier.verify(&public, &bytes, None).accepted());
     });

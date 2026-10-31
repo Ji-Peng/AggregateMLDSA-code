@@ -49,12 +49,19 @@ fn branches_exchanged(manifest: &CommitmentManifest, work: &[u8]) -> Vec<u8> {
         matches!(c, SiteClass::LookupX | SiteClass::LookupMu | SiteClass::LookupGamma | SiteClass::LookupRound)
     });
     let stages = width(&|c, i| c == SiteClass::Tau || (matches!(c, SiteClass::StageGamma | SiteClass::StageRound) && i < 3));
+    // The trunk's projection nonce precedes the fork and stays in place.
+    let trunk = width(&|c, _| c == SiteClass::ProjPsi);
     let total = registry.work_bits();
     let mut reader = WorkReader::new(work, total).expect("the honest stream");
     let mut bits = |n: usize| -> Vec<u32> { (0..n).map(|_| reader.read(1).unwrap()).collect() };
-    let (l, s, rest) = (bits(lookup), bits(stages), bits(total - lookup - stages));
+    let (pre, l, s, rest) = (
+        bits(trunk),
+        bits(lookup),
+        bits(stages),
+        bits(total - trunk - lookup - stages),
+    );
     let mut out = WorkWriter::default();
-    for bit in s.iter().chain(&l).chain(&rest) {
+    for bit in pre.iter().chain(s.iter()).chain(&l).chain(&rest) {
         out.push(*bit, 1);
     }
     out.finish()

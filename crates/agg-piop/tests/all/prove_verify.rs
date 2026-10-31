@@ -126,6 +126,23 @@ fn full_prover_run_at_256_signatures_verifies_and_corruptions_are_rejected() {
         .expect("verify with cached keys");
         eprintln!("verifier (cached keys) {:.2?}", start.elapsed());
 
+        // The proj.psi work nonce (deviation K24) is the first site of the packed stream
+        // (8 bits, one bit of grinding). A wrong value either fails the site's predicate or
+        // fixes another Psi; either way the verifier rejects.
+        let honest_psi = u32::from(output.proof.work[0]);
+        let mut psi = output.proof.clone();
+        psi.work[0] = if honest_psi > 0 { (honest_psi - 1) as u8 } else { 1 };
+        assert!(verify(
+            &public,
+            &psi.to_bytes(),
+            &bridge,
+            &NoKeccakVerifier,
+            FlockProfile::None,
+            Relation::Hu,
+            None,
+        )
+        .is_err());
+
         // A wrong record list, a wrong c~, other matrices, a different Flock profile.
         let mut fewer = public.clone();
         fewer.pop();
