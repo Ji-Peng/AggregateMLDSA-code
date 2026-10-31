@@ -434,7 +434,7 @@ impl AdditiveNttF128 {
         // x86 fused-4 pass not claiming these layers (it fuses 4 at a time
         // starting at `start_layer`, which the src-copy wrapper doesn't
         // implement — x86 keeps the replicate path).
-        let fused4_ok = kernels::x86_avx512_clmul();
+        let fused4_ok = kernels::x86_ntt_simd();
         let fuse_fill =
             !fused4_ok && log_d >= 8 && n_top > 0 && start_layer + 2 <= n_top && block_size >= 4;
         if !fuse_fill {
@@ -730,7 +730,7 @@ impl AdditiveNttF128 {
         // fused-3 tier. `FLOCK_NTT_NO_FUSED4=1` restores fused-3 (A/B knob).
         let portable_fused4 = cfg!(all(target_arch = "x86_64", target_feature = "pclmulqdq"));
         let fused4_ok = live == num_ntts
-            && (kernels::x86_avx512_clmul()
+            && (kernels::x86_ntt_simd()
                 || (portable_fused4 && var_os("FLOCK_NTT_NO_FUSED4").is_none()));
         // Fused-3 (8-point): the aarch64 middle tier — a third fewer full-
         // buffer passes than fused-2 on the layers it covers, with 8 values

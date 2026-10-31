@@ -469,23 +469,49 @@ fn bank_lookup(
     assert!(t.len() >= gn * 256 * stride && bytes.len() >= gn * 128 && nb <= 128);
     assert!(np <= stride.max(1) && outs.len() >= np);
     #[cfg(target_arch = "x86_64")]
-    if use_512 && stride.is_multiple_of(4) {
-        // SAFETY: AVX-512F was checked (`bank_lookup_x86`); stride is a multiple of four;
-        // the table and byte ranges are asserted above; the tables start on a 64-byte
-        // line; the output range is the caller's contract.
-        unsafe {
-            crate::lincheck::kernels::bank_lookup_avx512(
-                t.as_ptr(),
-                stride,
-                np,
-                bytes.as_ptr(),
-                gn,
-                nb,
-                outs,
-                base,
-            )
-        };
-        return;
+    if use_512 {
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 if stride.is_multiple_of(4) => {
+                // SAFETY: AVX-512F was checked (`bank_lookup_x86`); stride is a
+                // multiple of four; the table and byte ranges are asserted above;
+                // the tables start on a 64-byte line; the output range is the
+                // caller's contract.
+                unsafe {
+                    crate::lincheck::kernels::bank_lookup_avx512(
+                        t.as_ptr(),
+                        stride,
+                        np,
+                        bytes.as_ptr(),
+                        gn,
+                        nb,
+                        outs,
+                        base,
+                    )
+                };
+                return;
+            }
+            crate::simd::GhashWidth::Vpclmul256 | crate::simd::GhashWidth::Pclmul
+                if stride.is_multiple_of(2) =>
+            {
+                // SAFETY: AVX2 was checked; stride is even; the table and byte
+                // ranges are asserted above; the output range is the caller's
+                // contract.
+                unsafe {
+                    crate::lincheck::kernels::bank_lookup_avx2(
+                        t.as_ptr(),
+                        stride,
+                        np,
+                        bytes.as_ptr(),
+                        gn,
+                        nb,
+                        outs,
+                        base,
+                    )
+                };
+                return;
+            }
+            _ => {}
+        }
     }
     let _ = use_512;
     // Portable path: up to four points at a time, four bits in flight.
@@ -550,19 +576,29 @@ unsafe fn build_sum_table8_avx512(w: &[F128], stride: usize, table: &mut [F128])
 fn build_sum_table8(avx512: bool, w: &[F128], stride: usize, table: &mut [F128]) {
     #[cfg(target_arch = "x86_64")]
     if avx512 {
-        // SAFETY: AVX-512F was checked by the caller (`bank_lookup_x86`).
-        unsafe { build_sum_table8_avx512(w, stride, table) };
-        return;
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => {
+                // SAFETY: AVX-512F was checked by the caller (`bank_lookup_x86`).
+                unsafe { build_sum_table8_avx512(w, stride, table) };
+                return;
+            }
+            crate::simd::GhashWidth::Vpclmul256 | crate::simd::GhashWidth::Pclmul => {
+                // SAFETY: AVX2 was checked by the caller.
+                unsafe { crate::lincheck::kernels::build_sum_table8_avx2(w, stride, table) };
+                return;
+            }
+            crate::simd::GhashWidth::Portable => {}
+        }
     }
     let _ = avx512;
     build_sum_table8_body(w, stride, table);
 }
 
-/// Whether the AVX-512 table lookup may run.
+/// Whether a vectorized table lookup (AVX-512 or AVX2) may run.
 fn bank_lookup_x86() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::simd::has(crate::simd::AVX512F)
+        crate::simd::ghash_width() != crate::simd::GhashWidth::Portable
     }
     #[cfg(not(target_arch = "x86_64"))]
     {

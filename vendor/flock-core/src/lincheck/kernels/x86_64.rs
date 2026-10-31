@@ -314,3 +314,130 @@ unsafe fn bank_lookup_quad<const B: usize>(
         }
     }
 }
+
+/// Two points per vector of the interleaved bank lookup, for an AVX2 host.
+///
+/// This is the 256-bit counterpart of [`bank_lookup_avx512`]: the same
+/// table layout, the same accumulators, two `F128` points per load.
+///
+/// # Safety
+/// AVX2 available; `stride` even; `tables` readable for `gn * 256 * stride`
+/// F128; `bytes` readable for `128 * gn` bytes; `nb <= 128`; `outs.len() >= np`,
+/// and `outs[p].add(base)` writable for `nb` F128 for each `p < np`, with no
+/// other thread touching them.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn bank_lookup_avx2(
+    tables: *const F128,
+    stride: usize,
+    np: usize,
+    bytes: *const u8,
+    gn: usize,
+    nb: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    debug_assert!(
+        stride.is_multiple_of(2) && np <= stride && nb <= 128 && outs.len() >= np
+    );
+    for q in 0..stride / 2 {
+        if 2 * q >= np {
+            break;
+        }
+        let cnt = (np - 2 * q).min(2);
+        let mut b = 0;
+        while b + 8 <= nb {
+            // SAFETY: forwarded from this function's contract (b + 8 <= nb).
+            unsafe { bank_lookup_quad_avx2::<8>(tables, stride, q, cnt, bytes, gn, b, outs, base) };
+            b += 8;
+        }
+        while b < nb {
+            // SAFETY: forwarded from this function's contract (b < nb).
+            unsafe { bank_lookup_quad_avx2::<1>(tables, stride, q, cnt, bytes, gn, b, outs, base) };
+            b += 1;
+        }
+    }
+}
+
+/// `B` consecutive output bits of point pair `q` (`cnt <= 2` live points); see
+/// [`bank_lookup_avx2`].
+///
+/// # Safety
+/// The contract of [`bank_lookup_avx2`] with `b + B <= nb`.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn bank_lookup_quad_avx2<const B: usize>(
+    tables: *const F128,
+    stride: usize,
+    q: usize,
+    cnt: usize,
+    bytes: *const u8,
+    gn: usize,
+    b: usize,
+    outs: &[*mut F128],
+    base: usize,
+) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_storeu_si256,
+        _mm256_xor_si256,
+    };
+    // Bytes per table entry and per group of 256 entries.
+    let entry = 16 * stride;
+    let mut acc = [_mm256_setzero_si256(); B];
+    // SAFETY: group g's 256 entries and its 128 bytes lie inside the caller's
+    // ranges; the byte value is below 256, and the pair offset is inside the
+    // entry (`32 q + 32 <= entry`).
+    unsafe {
+        for g in 0..gn {
+            let tg = tables.cast::<u8>().add(g * 256 * entry + 32 * q);
+            let bp = bytes.add(128 * g + b);
+            for (j, a) in acc.iter_mut().enumerate() {
+                let s = *bp.add(j) as usize;
+                *a = _mm256_xor_si256(*a, _mm256_loadu_si256(tg.add(s * entry).cast()));
+            }
+        }
+        for (j, a) in acc.iter().enumerate() {
+            let mut lanes = [F128::ZERO; 2];
+            _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), *a);
+            for (i, l) in lanes.iter().enumerate().take(cnt) {
+                let o = outs[2 * q + i].add(base + b + j);
+                *o += *l;
+            }
+        }
+    }
+}
+
+/// XOR-copies one group's eight weight vectors into a subset-sum table, two
+/// `F128` per operation.
+///
+/// # Safety
+/// AVX2 available; `table.len() >= 256 * stride`; `w.len() == 8 * stride`.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn build_sum_table8_avx2(w: &[F128], stride: usize, table: &mut [F128]) {
+    use core::arch::x86_64::{_mm256_loadu_si256, _mm256_storeu_si256, _mm256_xor_si256};
+    // SAFETY: the caller supplies the table and weight lengths; every access
+    // below stays inside `table` and `w`.
+    unsafe {
+        table[..stride].fill(F128::ZERO);
+        for (i, wi) in w.chunks_exact(stride).enumerate() {
+            let len = 1usize << i;
+            let (done, rest) = table[..2 * len * stride].split_at_mut(len * stride);
+            for (src, dst) in done.chunks_exact(stride).zip(rest.chunks_exact_mut(stride)) {
+                let pairs = stride / 2;
+                for k in 0..pairs {
+                    let s = _mm256_loadu_si256(src.as_ptr().add(2 * k).cast());
+                    let e = _mm256_loadu_si256(wi.as_ptr().add(2 * k).cast());
+                    _mm256_storeu_si256(
+                        dst.as_mut_ptr().add(2 * k).cast(),
+                        _mm256_xor_si256(s, e),
+                    );
+                }
+                if stride % 2 == 1 {
+                    dst[2 * pairs] = F128 {
+                        lo: src[2 * pairs].lo ^ wi[2 * pairs].lo,
+                        hi: src[2 * pairs].hi ^ wi[2 * pairs].hi,
+                    };
+                }
+            }
+        }
+    }
+}

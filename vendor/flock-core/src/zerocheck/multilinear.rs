@@ -41,15 +41,45 @@ use rayon::{
     prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator, ParallelSliceMut},
 };
 #[cfg(target_arch = "x86_64")]
-use {
-    crate::simd::{
-        AVX512_CLMUL, has,
-        x86::{WideGhashX4, f128x4_loadu, f128x4_set, ghash_mul_x4},
-    },
-    crate::zerocheck::multilinear::kernels::x86_64::{
-        fold_and_message_x86_avx512, fold_round2_pair_x86_unchecked_8,
-    },
+use crate::zerocheck::multilinear::kernels::x86_64::{
+    fold_and_message_x86_avx2, fold_and_message_x86_avx512, fold_and_message_x86_pclmul,
+    fold_round2_pair_x86_unchecked_8,
 };
+
+/// Fold one worker chunk and accumulate its message with the widest available
+/// GF(2^128) kernel.
+///
+/// Returns `None` on the portable path; every kernel computes the same folded
+/// outputs and the same unreduced sums.
+///
+/// # Safety
+/// `a_in.len() == 2 * a_out.len()`, `b_in.len() == 2 * b_out.len()` and
+/// `a_out.len() == 2 * eq_lo.len()`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn fold_and_message_best(
+    a_in: &[F128],
+    b_in: &[F128],
+    a_out: &mut [F128],
+    b_out: &mut [F128],
+    r_fold: F128,
+    eq_lo: &[F128],
+) -> Option<(F128, F128)> {
+    match crate::simd::ghash_width() {
+        // SAFETY: each arm forwards this function's contract and the width's
+        // features were checked when the width was selected.
+        crate::simd::GhashWidth::Avx512 => Some(unsafe {
+            fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo)
+        }),
+        crate::simd::GhashWidth::Vpclmul256 => Some(unsafe {
+            fold_and_message_x86_avx2(a_in, b_in, a_out, b_out, r_fold, eq_lo)
+        }),
+        crate::simd::GhashWidth::Pclmul => Some(unsafe {
+            fold_and_message_x86_pclmul(a_in, b_in, a_out, b_out, r_fold, eq_lo)
+        }),
+        crate::simd::GhashWidth::Portable => None,
+    }
+}
 
 use crate::field::f128_slice::fold_pairs;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
@@ -612,17 +642,179 @@ fn kill_pair(a: &mut [F128], b: &mut [F128], x0l: usize, x1l: usize, write_dead:
     }
 }
 
-/// The x86 AVX-512/VPCLMULQDQ body of [`fold_pair_run`] (upstream's
-/// `cfg(target_feature)` block, moved into a `#[target_feature]` function so it
-/// can be chosen at run time; agg-mldsa patch, PATCH.md).
+/// Generates the fold-and-message body of [`fold_pair_run`] for one vector
+/// width (agg-mldsa patch, PATCH.md).
+///
+/// `$lanes` names the primitive module (`ghash4`, `ghash2` or `ghash1`).
+macro_rules! fold_pair_run_kernel {
+    ($name:ident, $lanes:path, $v:ty, $feat:literal) => {
+        /// The x86 body of [`fold_pair_run`]: tables folded four, two or one
+        /// pair at a time, with the message products kept in vector registers.
+        ///
+        /// # Safety
+        /// The CPU has the features of this width; the geometry contract of
+        /// [`fold_pair_run`] holds.
+        #[cfg(target_arch = "x86_64")]
+        #[allow(clippy::too_many_arguments)]
+        #[target_feature(enable = $feat)]
+        unsafe fn $name<D, const STORE: bool>(
+            a_packed: &[u8],
+            b_packed: &[u8],
+            table: &UniSkipFoldTable,
+            eq_lo: &[F128],
+            lo_size: usize,
+            is_dead: &D,
+            write_dead: bool,
+            ps: usize,
+            pe: usize,
+            out_base: usize,
+            a_out: &mut [F128],
+            b_out: &mut [F128],
+        ) -> (F256Unreduced, F256Unreduced)
+        where
+            D: Fn(usize) -> bool + Sync,
+        {
+            use $lanes as lanes;
+            const N: usize = lanes::LANES;
+
+            let lo_mask = lo_size - 1;
+            let mut p1_acc = F256Unreduced::ZERO;
+            let mut pinf_acc = F256Unreduced::ZERO;
+            // SAFETY: the caller's geometry contract bounds every table read,
+            // packet read and output store below.
+            unsafe {
+                let table_ptr = table.data.as_ptr();
+                let a_pkt_ptr = a_packed.as_ptr();
+                let b_pkt_ptr = b_packed.as_ptr();
+                let mut p1_wide = lanes::wide_zero();
+                let mut pinf_wide = lanes::wide_zero();
+                let mut pair = ps;
+
+                while pair + N <= pe {
+                    let mut a0 = [F128::ZERO; N];
+                    let mut a1 = [F128::ZERO; N];
+                    let mut b0 = [F128::ZERO; N];
+                    let mut b1 = [F128::ZERO; N];
+
+                    for lane in 0..N {
+                        let p = pair + lane;
+                        let x0l = 2 * (p - out_base);
+                        let x1l = x0l + 1;
+                        if is_dead(p) {
+                            if STORE {
+                                kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                            }
+                            continue;
+                        }
+
+                        let x0g = 2 * p;
+                        let x1g = x0g + 1;
+                        let folded = fold_round2_pair_x86_unchecked_8(
+                            table_ptr,
+                            a_pkt_ptr.add(x0g * 8),
+                            a_pkt_ptr.add(x1g * 8),
+                            b_pkt_ptr.add(x0g * 8),
+                            b_pkt_ptr.add(x1g * 8),
+                        );
+                        [a0[lane], a1[lane], b0[lane], b1[lane]] = folded;
+                        if STORE {
+                            a_out[x0l] = a0[lane];
+                            a_out[x1l] = a1[lane];
+                            b_out[x0l] = b0[lane];
+                            b_out[x1l] = b1[lane];
+                        }
+                    }
+
+                    let a1x = lanes::set_from(&a1);
+                    let b1x = lanes::set_from(&b1);
+                    let a_sum = core::array::from_fn::<F128, N, _>(|lane| a0[lane] + a1[lane]);
+                    let b_sum = core::array::from_fn::<F128, N, _>(|lane| b0[lane] + b1[lane]);
+                    let g1x = lanes::mul(a1x, b1x);
+                    let g_inf_x = lanes::mul(
+                        lanes::set_from(&a_sum),
+                        lanes::set_from(&b_sum),
+                    );
+                    // The run never crosses an x_hi boundary, so these `N` eq
+                    // weights are in bounds whenever `N` pairs remain.
+                    let eqx = lanes::loadu(eq_lo[pair & lo_mask..].as_ptr());
+                    lanes::wide_acc(&mut p1_wide, eqx, g1x);
+                    lanes::wide_acc(&mut pinf_wide, eqx, g_inf_x);
+                    pair += N;
+                }
+
+                // Small instances (and short live runs) can leave fewer than
+                // `N` pairs.
+                while pair < pe {
+                    let x0l = 2 * (pair - out_base);
+                    let x1l = x0l + 1;
+                    if is_dead(pair) {
+                        if STORE {
+                            kill_pair(a_out, b_out, x0l, x1l, write_dead);
+                        }
+                        pair += 1;
+                        continue;
+                    }
+
+                    let x0g = 2 * pair;
+                    let x1g = x0g + 1;
+                    let [a0, a1, b0, b1] = fold_round2_pair_x86_unchecked_8(
+                        table_ptr,
+                        a_pkt_ptr.add(x0g * 8),
+                        a_pkt_ptr.add(x1g * 8),
+                        b_pkt_ptr.add(x0g * 8),
+                        b_pkt_ptr.add(x1g * 8),
+                    );
+                    if STORE {
+                        a_out[x0l] = a0;
+                        a_out[x1l] = a1;
+                        b_out[x0l] = b0;
+                        b_out[x1l] = b1;
+                    }
+                    let eq_l = eq_lo[pair & lo_mask];
+                    p1_acc ^= eq_l.mul_unreduced(a1 * b1);
+                    pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
+                    pair += 1;
+                }
+
+                p1_acc ^= lanes::wide_fold(p1_wide);
+                pinf_acc ^= lanes::wide_fold(pinf_wide);
+            }
+
+            (p1_acc, pinf_acc)
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+fold_pair_run_kernel!(
+    fold_pair_run_x86_avx512,
+    crate::simd::ghash4,
+    core::arch::x86_64::__m512i,
+    "avx512f,vpclmulqdq,sse4.1"
+);
+#[cfg(target_arch = "x86_64")]
+fold_pair_run_kernel!(
+    fold_pair_run_x86_avx2,
+    crate::simd::ghash2,
+    core::arch::x86_64::__m256i,
+    "avx2,vpclmulqdq"
+);
+#[cfg(target_arch = "x86_64")]
+fold_pair_run_kernel!(
+    fold_pair_run_x86_pclmul,
+    crate::simd::ghash1,
+    core::arch::x86_64::__m128i,
+    "pclmulqdq,sse4.1"
+);
+
+/// Runs the fold-and-message body on the widest available width.
 ///
 /// # Safety
-/// The CPU has `avx512f`, `vpclmulqdq` and `sse4.1`; the geometry contract of
-/// [`fold_pair_run`] holds.
+/// The geometry contract of [`fold_pair_run`] and this process's width
+/// features hold.
 #[cfg(target_arch = "x86_64")]
-#[allow(clippy::too_many_arguments)]
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-unsafe fn fold_pair_run_x86_avx512<D, const STORE: bool>(
+#[inline]
+unsafe fn fold_pair_run_best<D, const STORE: bool>(
     a_packed: &[u8],
     b_packed: &[u8],
     table: &UniSkipFoldTable,
@@ -635,104 +827,29 @@ unsafe fn fold_pair_run_x86_avx512<D, const STORE: bool>(
     out_base: usize,
     a_out: &mut [F128],
     b_out: &mut [F128],
-) -> (F256Unreduced, F256Unreduced)
+) -> Option<(F256Unreduced, F256Unreduced)>
 where
     D: Fn(usize) -> bool + Sync,
 {
-    let lo_mask = lo_size - 1;
-    let mut p1_acc = F256Unreduced::ZERO;
-    let mut pinf_acc = F256Unreduced::ZERO;
+    // SAFETY: each arm forwards this function's contract after the run-time
+    // width check selected its features.
     unsafe {
-        let table_ptr = table.data.as_ptr();
-        let a_pkt_ptr = a_packed.as_ptr();
-        let b_pkt_ptr = b_packed.as_ptr();
-        let mut p1_wide = WideGhashX4::zero();
-        let mut pinf_wide = WideGhashX4::zero();
-        let mut pair = ps;
-
-        while pair + 4 <= pe {
-            let mut a0 = [F128::ZERO; 4];
-            let mut a1 = [F128::ZERO; 4];
-            let mut b0 = [F128::ZERO; 4];
-            let mut b1 = [F128::ZERO; 4];
-
-            for lane in 0..4 {
-                let p = pair + lane;
-                let x0l = 2 * (p - out_base);
-                let x1l = x0l + 1;
-                if is_dead(p) {
-                    if STORE { kill_pair(a_out, b_out, x0l, x1l, write_dead); }
-                    continue;
-                }
-
-                let x0g = 2 * p;
-                let x1g = x0g + 1;
-                let folded = fold_round2_pair_x86_unchecked_8(
-                    table_ptr,
-                    a_pkt_ptr.add(x0g * 8),
-                    a_pkt_ptr.add(x1g * 8),
-                    b_pkt_ptr.add(x0g * 8),
-                    b_pkt_ptr.add(x1g * 8),
-                );
-                [a0[lane], a1[lane], b0[lane], b1[lane]] = folded;
-                if STORE {
-                    a_out[x0l] = a0[lane];
-                    a_out[x1l] = a1[lane];
-                    b_out[x0l] = b0[lane];
-                    b_out[x1l] = b1[lane];
-                }
-            }
-
-            let a1x4 = f128x4_loadu(a1.as_ptr());
-            let b1x4 = f128x4_loadu(b1.as_ptr());
-            let a_sum_x4 = f128x4_set(a0[0] + a1[0], a0[1] + a1[1], a0[2] + a1[2], a0[3] + a1[3]);
-            let b_sum_x4 = f128x4_set(b0[0] + b1[0], b0[1] + b1[1], b0[2] + b1[2], b0[3] + b1[3]);
-            let g1x4 = ghash_mul_x4(a1x4, b1x4);
-            let g_inf_x4 = ghash_mul_x4(a_sum_x4, b_sum_x4);
-            // The run never crosses an x_hi boundary, so these 4 eq weights
-            // are in bounds whenever 4 pairs remain.
-            let eqx4 = f128x4_loadu(eq_lo[pair & lo_mask..].as_ptr());
-            p1_wide.mul_acc(eqx4, g1x4);
-            pinf_wide.mul_acc(eqx4, g_inf_x4);
-            pair += 4;
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => Some(fold_pair_run_x86_avx512::<D, STORE>(
+                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
+                a_out, b_out,
+            )),
+            crate::simd::GhashWidth::Vpclmul256 => Some(fold_pair_run_x86_avx2::<D, STORE>(
+                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
+                a_out, b_out,
+            )),
+            crate::simd::GhashWidth::Pclmul => Some(fold_pair_run_x86_pclmul::<D, STORE>(
+                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
+                a_out, b_out,
+            )),
+            crate::simd::GhashWidth::Portable => None,
         }
-
-        // Small instances (and short live runs) can leave a 1- to 3-pair tail.
-        while pair < pe {
-            let x0l = 2 * (pair - out_base);
-            let x1l = x0l + 1;
-            if is_dead(pair) {
-                if STORE { kill_pair(a_out, b_out, x0l, x1l, write_dead); }
-                pair += 1;
-                continue;
-            }
-
-            let x0g = 2 * pair;
-            let x1g = x0g + 1;
-            let [a0, a1, b0, b1] = fold_round2_pair_x86_unchecked_8(
-                table_ptr,
-                a_pkt_ptr.add(x0g * 8),
-                a_pkt_ptr.add(x1g * 8),
-                b_pkt_ptr.add(x0g * 8),
-                b_pkt_ptr.add(x1g * 8),
-            );
-            if STORE {
-                a_out[x0l] = a0;
-                a_out[x1l] = a1;
-                b_out[x0l] = b0;
-                b_out[x1l] = b1;
-            }
-            let eq_l = eq_lo[pair & lo_mask];
-            p1_acc ^= eq_l.mul_unreduced(a1 * b1);
-            pinf_acc ^= eq_l.mul_unreduced((a0 + a1) * (b0 + b1));
-            pair += 1;
-        }
-
-        p1_acc ^= p1_wide.fold();
-        pinf_acc ^= pinf_wide.fold();
     }
-
-    (p1_acc, pinf_acc)
 }
 
 /// Round-2's inner loop: fold the pairs `[ps, pe)` — which must all share one
@@ -769,17 +886,17 @@ fn fold_pair_run<D>(
 where
     D: Fn(usize) -> bool + Sync,
 {
-    // agg-mldsa patch (PATCH.md): the AVX-512 body is chosen at run time.
+    // agg-mldsa patch (PATCH.md): the x86 body is chosen at run time.
     #[cfg(target_arch = "x86_64")]
-    if has(AVX512_CLMUL) {
-        // SAFETY: the runtime check guarantees the kernel's target features; the
+    if let Some(result) = unsafe {
+        // SAFETY: the run-time width check supplies the kernel's features; the
         // caller's geometry contract is forwarded unchanged.
-        return unsafe {
-            fold_pair_run_x86_avx512::<D, true>(
-                a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
-                a_out, b_out,
-            )
-        };
+        fold_pair_run_best::<D, true>(
+            a_packed, b_packed, table, eq_lo, lo_size, is_dead, write_dead, ps, pe, out_base,
+            a_out, b_out,
+        )
+    } {
+        return result;
     }
     let lo_mask = lo_size - 1;
     let mut p1_acc = F256Unreduced::ZERO;
@@ -1281,7 +1398,7 @@ pub fn sparse_round2_message_only(
         .map(|task| {
             let task_pieces = &pieces[task];
             #[cfg(target_arch = "x86_64")]
-            let simd = has(AVX512_CLMUL);
+            let simd = crate::simd::ghash_width() != crate::simd::GhashWidth::Portable;
             #[cfg(not(target_arch = "x86_64"))]
             let simd = false;
             // The portable kernel still needs scratch for at most 1,024 pairs.
@@ -1296,10 +1413,10 @@ pub fn sparse_round2_message_only(
                     let vector_result = if simd {
                         // SAFETY: the runtime check supplies the kernel features and this
                         // run stays within the equality block and packed input slices.
-                        Some(unsafe { fold_pair_run_x86_avx512::<_, false>(
+                        unsafe { fold_pair_run_best::<_, false>(
                             a, b, table, &eq.lo, lo_size, &|_| false, false,
                             t, end, t, &mut aa, &mut bb,
-                        ) })
+                        ) }
                     } else { None };
                     #[cfg(not(target_arch = "x86_64"))]
                     let vector_result = None;
@@ -1332,92 +1449,171 @@ pub fn sparse_round2_message_only(
     (challenges[0] * s1, si, store)
 }
 
-/// Fold and accumulate a task while keeping the wide products in registers.
+/// Generates the round-3 task body for one vector width.
+///
+/// `$lanes` names the primitive module (`ghash4`, `ghash2` or `ghash1`).
+macro_rules! round3_task_kernel {
+    ($name:ident, $lanes:path, $feat:literal) => {
+        /// Fold and accumulate a task while keeping the wide products in
+        /// registers.
+        ///
+        /// # Safety
+        /// `store_in` describes the live rows of `a` and `b`; the task's output
+        /// slices are writable; the CPU has the features of this width.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $feat)]
+        unsafe fn $name(
+            part: &[(usize, usize)], ao: &mut [F128], bo: &mut [F128],
+            a: &[u8], b: &[u8], joint: &UniSkipFoldTable, eq: &SplitEqGhash,
+            store_in: &LiveLayout,
+        ) -> (F128, F128) {
+            use $lanes as lanes;
+            const N: usize = lanes::LANES;
+
+            let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
+            let mut cursor = store_in.seek(4 * part[0].0);
+            let mut out = 0;
+            // SAFETY: `store_in` bounds every row read and the task slices
+            // bound every store; the widths' features were checked.
+            unsafe {
+                for &(ps, pe) in part {
+                    let mut t = ps;
+                    while t < pe {
+                        let end = pe.min(((t >> eq.n_lo) + 1) << eq.n_lo);
+                        let mut p = F256Unreduced::ZERO;
+                        let mut q = F256Unreduced::ZERO;
+                        let mut pw = lanes::wide_zero();
+                        let mut qw = lanes::wide_zero();
+                        while t < end {
+                            let count = (end - t).min(N);
+                            let mut av = [[F128::ZERO; 2]; N];
+                            let mut bv = [[F128::ZERO; 2]; N];
+                            for lane in 0..count {
+                                let row = 2 * (t + lane);
+                                let y = 2 * row;
+                                while cursor < store_in.intervals.len()
+                                    && store_in.intervals[cursor].1 <= y
+                                {
+                                    cursor += 1;
+                                }
+                                let (live0, live1) = match store_in.intervals.get(cursor) {
+                                    Some(&(start, end)) if start <= y && y + 4 <= end => (true, true),
+                                    _ => (store_in.rank(&mut cursor, y).is_some(),
+                                          store_in.rank(&mut cursor, y + 2).is_some()),
+                                };
+                                if live0 && live1 {
+                                    let aa = &a[16 * row..16 * (row + 2)];
+                                    let bb = &b[16 * row..16 * (row + 2)];
+                                    let ptr = joint.data.as_ptr();
+                                    let (lo, hi) = (
+                                        fold_round2_pair_x86_unchecked_8(
+                                            ptr, aa.as_ptr(), aa.as_ptr().add(16),
+                                            bb.as_ptr(), bb.as_ptr().add(16)),
+                                        fold_round2_pair_x86_unchecked_8(
+                                            ptr.add(8 * 256), aa.as_ptr().add(8),
+                                            aa.as_ptr().add(24), bb.as_ptr().add(8),
+                                            bb.as_ptr().add(24)),
+                                    );
+                                    av[lane] = [lo[0] + hi[0], lo[1] + hi[1]];
+                                    bv[lane] = [lo[2] + hi[2], lo[3] + hi[3]];
+                                } else {
+                                    for (i, live) in [live0, live1].into_iter().enumerate() {
+                                        if live {
+                                            let pos = 16 * (row + i);
+                                            av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
+                                            bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
+                                        }
+                                    }
+                                }
+                                ao[out..out + 2].copy_from_slice(&av[lane]);
+                                bo[out..out + 2].copy_from_slice(&bv[lane]);
+                                out += 2;
+                            }
+                            let lo = t & ((1 << eq.n_lo) - 1);
+                            if count == N {
+                                let a1 = core::array::from_fn::<F128, N, _>(|j| av[j][1]);
+                                let b1 = core::array::from_fn::<F128, N, _>(|j| bv[j][1]);
+                                let ax =
+                                    core::array::from_fn::<F128, N, _>(|j| av[j][0] + av[j][1]);
+                                let bx =
+                                    core::array::from_fn::<F128, N, _>(|j| bv[j][0] + bv[j][1]);
+                                let weights = lanes::loadu(eq.lo[lo..lo + N].as_ptr());
+                                // XOR of degree-at-most-254 carryless products
+                                // remains within 256 bits.
+                                lanes::wide_acc(
+                                    &mut pw,
+                                    weights,
+                                    lanes::mul(lanes::set_from(&a1), lanes::set_from(&b1)),
+                                );
+                                lanes::wide_acc(
+                                    &mut qw,
+                                    weights,
+                                    lanes::mul(lanes::set_from(&ax), lanes::set_from(&bx)),
+                                );
+                            } else {
+                                for lane in 0..count {
+                                    // XOR of degree-at-most-254 carryless products
+                                    // remains within 256 bits.
+                                    p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
+                                    q ^= eq.lo[lo + lane].mul_unreduced(
+                                        (av[lane][0] + av[lane][1])
+                                            * (bv[lane][0] + bv[lane][1]),
+                                    );
+                                }
+                            }
+                            t += count;
+                        }
+                        p ^= lanes::wide_fold(pw);
+                        q ^= lanes::wide_fold(qw);
+                        s1 += eq.hi[(t - 1) >> eq.n_lo] * p.reduce();
+                        si += eq.hi[(t - 1) >> eq.n_lo] * q.reduce();
+                    }
+                }
+            }
+            (s1, si)
+        }
+    };
+}
+
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-unsafe fn round3_task_avx512(
+round3_task_kernel!(
+    round3_task_avx512,
+    crate::simd::ghash4,
+    "avx512f,vpclmulqdq,sse4.1"
+);
+#[cfg(target_arch = "x86_64")]
+round3_task_kernel!(round3_task_avx2, crate::simd::ghash2, "avx2,vpclmulqdq");
+#[cfg(target_arch = "x86_64")]
+round3_task_kernel!(round3_task_pclmul, crate::simd::ghash1, "pclmulqdq,sse4.1");
+
+/// Runs the round-3 task on the widest available width.
+///
+/// # Safety
+/// The geometry contract of [`round3_task_avx512`] holds and the process's
+/// width features are present.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn round3_task_best(
     part: &[(usize, usize)], ao: &mut [F128], bo: &mut [F128],
     a: &[u8], b: &[u8], joint: &UniSkipFoldTable, eq: &SplitEqGhash,
     store_in: &LiveLayout,
-) -> (F128, F128) {
-    let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
-    let mut cursor = store_in.seek(4 * part[0].0);
-    let mut out = 0;
-    for &(ps, pe) in part {
-        let mut t = ps;
-        while t < pe {
-            let end = pe.min(((t >> eq.n_lo) + 1) << eq.n_lo);
-            let mut p = F256Unreduced::ZERO;
-            let mut q = F256Unreduced::ZERO;
-            let mut pw = WideGhashX4::zero();
-            let mut qw = WideGhashX4::zero();
-            while t < end {
-                let count = (end - t).min(4);
-                let mut av = [[F128::ZERO; 2]; 4];
-                let mut bv = [[F128::ZERO; 2]; 4];
-                for lane in 0..count {
-                    let row = 2 * (t + lane);
-                    let y = 2 * row;
-                    while cursor < store_in.intervals.len() && store_in.intervals[cursor].1 <= y {
-                        cursor += 1;
-                    }
-                    let (live0, live1) = match store_in.intervals.get(cursor) {
-                        Some(&(start, end)) if start <= y && y + 4 <= end => (true, true),
-                        _ => (store_in.rank(&mut cursor, y).is_some(),
-                              store_in.rank(&mut cursor, y + 2).is_some()),
-                    };
-                    if live0 && live1 {
-                        let aa = &a[16 * row..16 * (row + 2)];
-                        let bb = &b[16 * row..16 * (row + 2)];
-                        let ptr = joint.data.as_ptr();
-                        // SAFETY: the slices contain two rows and the table has 16 chunks.
-                        let (lo, hi) = unsafe {
-                            (fold_round2_pair_x86_unchecked_8(ptr, aa.as_ptr(), aa.as_ptr().add(16), bb.as_ptr(), bb.as_ptr().add(16)),
-                             fold_round2_pair_x86_unchecked_8(ptr.add(8 * 256), aa.as_ptr().add(8), aa.as_ptr().add(24), bb.as_ptr().add(8), bb.as_ptr().add(24)))
-                        };
-                        av[lane] = [lo[0] + hi[0], lo[1] + hi[1]];
-                        bv[lane] = [lo[2] + hi[2], lo[3] + hi[3]];
-                    } else {
-                        for (i, live) in [live0, live1].into_iter().enumerate() {
-                            if live {
-                                let pos = 16 * (row + i);
-                                av[lane][i] = joint.fold_one_row(&a[pos..pos + 16]);
-                                bv[lane][i] = joint.fold_one_row(&b[pos..pos + 16]);
-                            }
-                        }
-                    }
-                    ao[out..out + 2].copy_from_slice(&av[lane]);
-                    bo[out..out + 2].copy_from_slice(&bv[lane]);
-                    out += 2;
-                }
-                let lo = t & ((1 << eq.n_lo) - 1);
-                if count == 4 {
-                    unsafe {
-                        let a1 = f128x4_set(av[0][1], av[1][1], av[2][1], av[3][1]);
-                        let b1 = f128x4_set(bv[0][1], bv[1][1], bv[2][1], bv[3][1]);
-                        let ax = f128x4_set(av[0][0]+av[0][1], av[1][0]+av[1][1], av[2][0]+av[2][1], av[3][0]+av[3][1]);
-                        let bx = f128x4_set(bv[0][0]+bv[0][1], bv[1][0]+bv[1][1], bv[2][0]+bv[2][1], bv[3][0]+bv[3][1]);
-                        let weights = f128x4_loadu(eq.lo[lo..lo + 4].as_ptr());
-                        // XOR of degree-at-most-254 carryless products remains within 256 bits.
-                        pw.mul_acc(weights, ghash_mul_x4(a1, b1));
-                        qw.mul_acc(weights, ghash_mul_x4(ax, bx));
-                    }
-                } else {
-                    for lane in 0..count {
-                        // XOR of degree-at-most-254 carryless products remains within 256 bits.
-                        p ^= eq.lo[lo + lane].mul_unreduced(av[lane][1] * bv[lane][1]);
-                        q ^= eq.lo[lo + lane].mul_unreduced((av[lane][0] + av[lane][1]) * (bv[lane][0] + bv[lane][1]));
-                    }
-                }
-                t += count;
+) -> Option<(F128, F128)> {
+    // SAFETY: each arm forwards this function's contract after the run-time
+    // width check selected its features.
+    unsafe {
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => {
+                Some(round3_task_avx512(part, ao, bo, a, b, joint, eq, store_in))
             }
-            p ^= pw.fold();
-            q ^= qw.fold();
-            s1 += eq.hi[(t - 1) >> eq.n_lo] * p.reduce();
-            si += eq.hi[(t - 1) >> eq.n_lo] * q.reduce();
+            crate::simd::GhashWidth::Vpclmul256 => {
+                Some(round3_task_avx2(part, ao, bo, a, b, joint, eq, store_in))
+            }
+            crate::simd::GhashWidth::Pclmul => {
+                Some(round3_task_pclmul(part, ao, bo, a, b, joint, eq, store_in))
+            }
+            crate::simd::GhashWidth::Portable => None,
         }
     }
-    (s1, si)
 }
 
 /// Fold directly from the packed rows and compute the following message.
@@ -1465,9 +1661,11 @@ pub fn sparse_round3_from_bits(
         .into_par_iter()
         .map(|(part, ao, bo)| {
             #[cfg(target_arch = "x86_64")]
-            if has(AVX512_CLMUL) {
-                // SAFETY: the runtime check provides the target features.
-                return unsafe { round3_task_avx512(part, ao, bo, a, b, &joint, &eq, store_in) };
+            if let Some(result) = unsafe {
+                // SAFETY: the run-time width check provides the target features.
+                round3_task_best(part, ao, bo, a, b, &joint, &eq, store_in)
+            } {
+                return result;
             }
             let (mut s1, mut si) = (F128::ZERO, F128::ZERO);
             let mut cursor = store_in.seek(4 * part[0].0);
@@ -1628,22 +1826,18 @@ pub fn fold_and_compute_round_pair_into(
 
             // agg-mldsa patch (PATCH.md): the AVX-512 kernel is chosen at
             // run time.
+            assert!(lo_size & 1 == 0, "lo_size must be even");
+            assert!(a_in.len() == 2 * a_out.len() && b_in.len() == 2 * b_out.len());
+            assert!(a_out.len() == 2 * eq_lo.len() && b_out.len() == a_out.len());
             #[cfg(target_arch = "x86_64")]
-            let simd = has(AVX512_CLMUL);
+            let vector = {
+                // SAFETY: the asserts above supply the kernel's geometry.
+                unsafe { fold_and_message_best(a_in, b_in, a_out, b_out, r_fold, eq_lo) }
+            };
             #[cfg(not(target_arch = "x86_64"))]
-            let simd = false;
-            let (p1, pinf) = if simd {
-                // SAFETY: chunk geometry supplies two inputs per output and two
-                // outputs per eq_lo value; features are checked at run time.
-                #[cfg(target_arch = "x86_64")]
-                {
-                    assert!(lo_size & 1 == 0, "lo_size must be even");
-                    assert!(a_in.len() == 2 * a_out.len() && b_in.len() == 2 * b_out.len());
-                    assert!(a_out.len() == 2 * eq_lo.len() && b_out.len() == a_out.len());
-                    unsafe { fold_and_message_x86_avx512(a_in, b_in, a_out, b_out, r_fold, eq_lo) }
-                }
-                #[cfg(not(target_arch = "x86_64"))]
-                unreachable!()
+            let vector = None;
+            let (p1, pinf) = if let Some(result) = vector {
+                result
             } else {
                 // Fold a_in→a_out and b_in→b_out at r_fold. The field layer
                 // selects the architecture kernel; this loop only consumes
@@ -1975,7 +2169,7 @@ pub fn fold_and_round_pair_sparse_into(
     }
 
     #[cfg(target_arch = "x86_64")]
-    let simd = has(AVX512_CLMUL)
+    let simd = crate::simd::ghash_width() != crate::simd::GhashWidth::Portable
         && std::env::var_os("FLOCK_ZC_SPARSE_SIMD").as_deref() != Some(std::ffi::OsStr::new("0"));
     let (sum1, sum_inf) = work
         .into_par_iter()
@@ -2036,17 +2230,19 @@ pub fn fold_and_round_pair_sparse_into(
                         let mut t_s = t;
                         #[cfg(target_arch = "x86_64")]
                         if simd {
-                            let l4 = (run_end - t) & !3;
+                            // A whole multiple of the selected vector width;
+                            // the scalar loop below covers the rest.
+                            let l4 = (run_end - t) & !(crate::simd::ghash_lanes() - 1);
                             if l4 > 0 {
                                 let o0 = piece_base + 2 * (t - piece_s);
                                 let e0 = t & lo_mask;
-                                // SAFETY: AVX512_CLMUL checked at run time; 4·l4
+                                // SAFETY: the width was checked at run time; 4·l4
                                 // contiguous inputs from `base`, 2·l4 outputs from
                                 // `o0` inside the task's slices, l4 eq_lo entries
                                 // from `e0` inside one eq_lo block (the run does
                                 // not cross a 2^n_lo boundary).
                                 let (k1, ki) = unsafe {
-                                    fold_and_message_x86_avx512(
+                                    fold_and_message_best(
                                         &a[base..base + 4 * l4],
                                         &b[base..base + 4 * l4],
                                         &mut a_task[o0..o0 + 2 * l4],
@@ -2054,7 +2250,8 @@ pub fn fold_and_round_pair_sparse_into(
                                         r_fold,
                                         &eq.lo[e0..e0 + l4],
                                     )
-                                };
+                                }
+                                .expect("a kernel width is selected");
                                 k_red = (k_red.0 + k1, k_red.1 + ki);
                                 t_s = t + l4;
                             }

@@ -15,13 +15,7 @@ use crate::ntt::additive_ntt_f128::kernels::portable::{
     butterfly_row_pair as butterfly_row_pair_portable,
 };
 #[cfg(target_arch = "x86_64")]
-use crate::ntt::additive_ntt_f128::kernels::x86_64::{
-    butterfly_fused_2layer as butterfly_fused_2layer_x86_64,
-    blocked4_fused_3layer as blocked4_fused_3layer_x86_64,
-    butterfly_fused_3layer_row as butterfly_fused_3layer_row_x86_64,
-    butterfly_fused_4layer_row as butterfly_fused_4layer_row_x86_64,
-    butterfly_row_pair as butterfly_row_pair_x86_64,
-};
+use crate::ntt::additive_ntt_f128::kernels::x86_64::{x86_128, x86_256, x86_512};
 use crate::{
     field::F128,
     ntt::additive_ntt_f128::kernels::portable::butterfly_fused_3layer as butterfly_fused_3layer_portable,
@@ -34,13 +28,13 @@ mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-/// True when the x86 AVX-512 fused kernels run (the parent's schedule fuses four
-/// layers per pass only then).
+/// True when one of the x86 CLMUL kernels runs (the parent's schedule fuses
+/// four layers per pass only then).
 #[inline]
-pub(super) fn x86_avx512_clmul() -> bool {
+pub(super) fn x86_ntt_simd() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::simd::has(crate::simd::AVX512_CLMUL)
+        crate::simd::ghash_width() != crate::simd::GhashWidth::Portable
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -48,16 +42,36 @@ pub(super) fn x86_avx512_clmul() -> bool {
     }
 }
 
+/// Runs `$call` on the widest available CLMUL kernel, if any.
+macro_rules! dispatch_clmul {
+    ($($call:tt)*) => {{
+        #[cfg(target_arch = "x86_64")]
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => {
+                // SAFETY: the runtime check supplies the kernel's features.
+                unsafe { x86_512::$($call)* };
+                return;
+            }
+            crate::simd::GhashWidth::Vpclmul256 => {
+                // SAFETY: the runtime check supplies the kernel's features.
+                unsafe { x86_256::$($call)* };
+                return;
+            }
+            crate::simd::GhashWidth::Pclmul => {
+                // SAFETY: the runtime check supplies the kernel's features.
+                unsafe { x86_128::$($call)* };
+                return;
+            }
+            crate::simd::GhashWidth::Portable => {}
+        }
+    }};
+}
+
 #[inline]
 pub(super) fn butterfly_row_pair(top: &mut [F128], bot: &mut [F128], twiddle: F128) {
     debug_assert_eq!(top.len(), bot.len());
 
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: the runtime check guarantees the required target features.
-        unsafe { butterfly_row_pair_x86_64(top, bot, twiddle) };
-        return;
-    }
+    dispatch_clmul!(butterfly_row_pair(top, bot, twiddle));
     butterfly_row_pair_portable(top, bot, twiddle);
 }
 
@@ -76,12 +90,7 @@ pub(super) fn butterfly_fused_2layer(
     debug_assert_eq!(a.len(), c.len());
     debug_assert_eq!(a.len(), d.len());
 
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: the runtime check guarantees the required target features.
-        unsafe { butterfly_fused_2layer_x86_64(a, b, c, d, t_outer, t_inner_a, t_inner_b) };
-        return;
-    }
+    dispatch_clmul!(butterfly_fused_2layer(a, b, c, d, t_outer, t_inner_a, t_inner_b));
     butterfly_fused_2layer_portable(a, b, c, d, t_outer, t_inner_a, t_inner_b);
 }
 
@@ -138,13 +147,7 @@ pub(super) unsafe fn butterfly_fused_3layer_row(
     r: usize,
     twiddles: &[F128; 7],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: target features are checked at run time; the caller owns the row
-        // geometry and disjointness contract.
-        unsafe { butterfly_fused_3layer_row_x86_64(ptr, eighth, num_ntts, r, twiddles) };
-        return;
-    }
+    dispatch_clmul!(butterfly_fused_3layer_row(ptr, eighth, num_ntts, r, twiddles));
     // SAFETY: forwarded caller contract.
     unsafe {
         butterfly_fused_3layer_row_portable(ptr, eighth, num_ntts, r, twiddles);
@@ -159,12 +162,7 @@ pub(super) unsafe fn butterfly_fused_3layer_row(
 #[inline]
 pub(super) fn blocked4_fused_3layer(block: &mut [F128], twiddles: &[F128; 7]) {
     debug_assert!(block.len().is_multiple_of(32));
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: the runtime check guarantees the required target features.
-        unsafe { blocked4_fused_3layer_x86_64(block, twiddles) };
-        return;
-    }
+    dispatch_clmul!(blocked4_fused_3layer(block, twiddles));
     blocked4_fused_3layer_portable(block, twiddles);
 }
 
@@ -181,13 +179,7 @@ pub(super) unsafe fn butterfly_fused_4layer_row(
     r: usize,
     twiddles: &[F128; 15],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: target features are checked at run time; the caller owns the row
-        // geometry and disjointness contract.
-        unsafe { butterfly_fused_4layer_row_x86_64(ptr, sixteenth, num_ntts, r, twiddles) };
-        return;
-    }
+    dispatch_clmul!(butterfly_fused_4layer_row(ptr, sixteenth, num_ntts, r, twiddles));
     // SAFETY: forwarded caller contract.
     unsafe {
         butterfly_fused_4layer_row_portable(ptr, sixteenth, num_ntts, r, twiddles);
@@ -210,13 +202,7 @@ pub(super) unsafe fn butterfly_fused_4layer_row_from(
     r: usize,
     twiddles: &[F128; 15],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    if x86_avx512_clmul() {
-        // SAFETY: target features are checked at run time; the caller owns the row
-        // geometry and disjointness contract.
-        unsafe { x86_64::butterfly_fused_4layer_row_from(src, dst, sixteenth, num_ntts, r, twiddles) };
-        return;
-    }
+    dispatch_clmul!(butterfly_fused_4layer_row_from(src, dst, sixteenth, num_ntts, r, twiddles));
     // SAFETY: forwarded caller contract.
     unsafe {
         portable::butterfly_fused_4layer_row_from(src, dst, sixteenth, num_ntts, r, twiddles);
@@ -301,102 +287,139 @@ pub(super) unsafe fn butterfly_neon_block_pair_chunk(chunk: &mut [F128], t_a: F1
     unsafe { butterfly_block_pair(chunk, t_a, t_b) }
 }
 
-/// agg-mldsa patch (PATCH.md): each x86 kernel available on this CPU
-/// matches its portable counterpart bit for bit (lengths with and without a
-/// four-lane remainder).
+/// Each x86 width matches its portable counterpart bit for bit, including
+/// lengths that are not a multiple of the vector width.
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
-    use super::{portable, x86_64, x86_avx512_clmul};
+    use super::{portable, x86_128, x86_256, x86_512};
     use crate::{field::F128, test_rng::Rng};
 
+    macro_rules! check_width {
+        ($k:ident, $label:literal) => {{
+            let mut rng = Rng::new(0xB07);
+            for len in [1usize, 3, 4, 7, 8, 13, 64] {
+                let v: Vec<Vec<F128>> = (0..4).map(|_| rng.f128_vec(len)).collect();
+                let t = [rng.f128(), rng.f128(), rng.f128()];
+
+                let (mut p0, mut p1) = (v[0].clone(), v[1].clone());
+                let (mut x0, mut x1) = (v[0].clone(), v[1].clone());
+                portable::butterfly_row_pair(&mut p0, &mut p1, t[0]);
+                // SAFETY: the caller checked this width's features; equal lengths.
+                unsafe { $k::butterfly_row_pair(&mut x0, &mut x1, t[0]) };
+                assert_eq!((p0, p1), (x0, x1), "{} row_pair len={len}", $label);
+
+                let mut p = v.clone();
+                let mut x = v.clone();
+                let [pa, pb, pc, pd] = &mut p[..] else { unreachable!() };
+                portable::butterfly_fused_2layer(pa, pb, pc, pd, t[0], t[1], t[2]);
+                let [xa, xb, xc, xd] = &mut x[..] else { unreachable!() };
+                // SAFETY: the caller checked this width's features; equal lengths.
+                unsafe { $k::butterfly_fused_2layer(xa, xb, xc, xd, t[0], t[1], t[2]) };
+                assert_eq!(p, x, "{} fused_2layer len={len}", $label);
+            }
+
+            // Fused-4 rows: a 16 x sixteenth x num_ntts block, every row group r.
+            let tw: [F128; 15] = core::array::from_fn(|_| rng.f128());
+            for (sixteenth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16), (3, 5)] {
+                let block = rng.f128_vec(16 * sixteenth * num_ntts);
+                let mut p = block.clone();
+                let mut x = block.clone();
+                for r in 0..sixteenth {
+                    // SAFETY: the buffers hold 16 * sixteenth rows of num_ntts
+                    // lanes; calls are sequential and the features were checked.
+                    unsafe {
+                        portable::butterfly_fused_4layer_row(
+                            p.as_mut_ptr(), sixteenth, num_ntts, r, &tw,
+                        );
+                        $k::butterfly_fused_4layer_row(
+                            x.as_mut_ptr(), sixteenth, num_ntts, r, &tw,
+                        );
+                    }
+                }
+                assert_eq!(
+                    p, x,
+                    "{} fused_4layer_row sixteenth={sixteenth} num_ntts={num_ntts}",
+                    $label
+                );
+
+                // The from-source variant equals the in-place one.
+                let mut from = block.clone();
+                for r in 0..sixteenth {
+                    // SAFETY: the buffers hold 16 * sixteenth rows of num_ntts lanes.
+                    unsafe {
+                        $k::butterfly_fused_4layer_row_from(
+                            block.as_ptr(), from.as_mut_ptr(), sixteenth, num_ntts, r, &tw,
+                        );
+                    }
+                }
+                assert_eq!(from, x, "{} fused_4layer_row_from", $label);
+            }
+
+            // Fused-3 rows and the blocked variant against the portable kernels.
+            let tw3: [F128; 7] = core::array::from_fn(|_| rng.f128());
+            for (eighth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16), (3, 5)] {
+                let block = rng.f128_vec(8 * eighth * num_ntts);
+                let mut p = block.clone();
+                let mut x = block.clone();
+                for r in 0..eighth {
+                    // SAFETY: the buffers hold 8 * eighth rows of num_ntts lanes;
+                    // calls are sequential and the features were checked.
+                    unsafe {
+                        portable::butterfly_fused_3layer_row(
+                            p.as_mut_ptr(), eighth, num_ntts, r, &tw3,
+                        );
+                        $k::butterfly_fused_3layer_row(
+                            x.as_mut_ptr(), eighth, num_ntts, r, &tw3,
+                        );
+                    }
+                }
+                assert_eq!(
+                    p, x,
+                    "{} fused_3layer_row eighth={eighth} num_ntts={num_ntts}",
+                    $label
+                );
+            }
+
+            for words in [32usize, 64, 96, 256] {
+                let block = rng.f128_vec(words);
+                let mut p = block.clone();
+                let mut x = block.clone();
+                portable::blocked4_fused_3layer(&mut p, &tw3);
+                // SAFETY: the length is a multiple of 32 and the features were checked.
+                unsafe { $k::blocked4_fused_3layer(&mut x, &tw3) };
+                assert_eq!(p, x, "{} blocked4_fused_3layer words={words}", $label);
+            }
+        }};
+    }
+
     #[test]
-    fn x86_kernels_match_portable() {
-        if !x86_avx512_clmul() {
+    fn x86_128_kernels_match_portable() {
+        if !std::is_x86_feature_detected!("pclmulqdq") {
+            eprintln!("skipped: no pclmulqdq on this CPU");
+            return;
+        }
+        check_width!(x86_128, "avx2/pclmul");
+    }
+
+    #[test]
+    fn x86_256_kernels_match_portable() {
+        if !(std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("vpclmulqdq"))
+        {
+            eprintln!("skipped: no avx2+vpclmulqdq on this CPU");
+            return;
+        }
+        check_width!(x86_256, "avx2/vpclmul256");
+    }
+
+    #[test]
+    fn x86_512_kernels_match_portable() {
+        if !(std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("vpclmulqdq"))
+        {
             eprintln!("skipped: no avx512f+vpclmulqdq on this CPU");
             return;
         }
-        let mut rng = Rng::new(0xB07);
-        for len in [1usize, 3, 4, 8, 13, 64] {
-            let v: Vec<Vec<F128>> = (0..4).map(|_| rng.f128_vec(len)).collect();
-            let t = [rng.f128(), rng.f128(), rng.f128()];
-
-            let (mut p0, mut p1) = (v[0].clone(), v[1].clone());
-            let (mut x0, mut x1) = (v[0].clone(), v[1].clone());
-            portable::butterfly_row_pair(&mut p0, &mut p1, t[0]);
-            // SAFETY: features checked above; equal lengths.
-            unsafe { x86_64::butterfly_row_pair(&mut x0, &mut x1, t[0]) };
-            assert_eq!((p0, p1), (x0, x1), "row_pair len={len}");
-
-            let mut p = v.clone();
-            let mut x = v.clone();
-            let [pa, pb, pc, pd] = &mut p[..] else { unreachable!() };
-            portable::butterfly_fused_2layer(pa, pb, pc, pd, t[0], t[1], t[2]);
-            let [xa, xb, xc, xd] = &mut x[..] else { unreachable!() };
-            // SAFETY: features checked above; equal lengths.
-            unsafe { x86_64::butterfly_fused_2layer(xa, xb, xc, xd, t[0], t[1], t[2]) };
-            assert_eq!(p, x, "fused_2layer len={len}");
-        }
-        // Fused-4 rows: a 16 x sixteenth x num_ntts block, every row group r.
-        let tw: [F128; 15] = core::array::from_fn(|_| rng.f128());
-        for (sixteenth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16)] {
-            let block = rng.f128_vec(16 * sixteenth * num_ntts);
-            let mut p = block.clone();
-            let mut x = block.clone();
-            for r in 0..sixteenth {
-                // SAFETY: the buffers hold 16 * sixteenth rows of num_ntts lanes;
-                // calls are sequential.
-                unsafe {
-                    portable::butterfly_fused_4layer_row(p.as_mut_ptr(), sixteenth, num_ntts, r, &tw);
-                    x86_64::butterfly_fused_4layer_row(x.as_mut_ptr(), sixteenth, num_ntts, r, &tw);
-                }
-            }
-            assert_eq!(p, x, "fused_4layer_row sixteenth={sixteenth} num_ntts={num_ntts}");
-        }
-        // Fused-3 rows and the blocked variant against the portable kernels.
-        let tw3: [F128; 7] = core::array::from_fn(|_| rng.f128());
-        for (eighth, num_ntts) in [(1usize, 4usize), (2, 7), (4, 16), (3, 5)] {
-            let block = rng.f128_vec(8 * eighth * num_ntts);
-            let mut p = block.clone();
-            let mut x = block.clone();
-            for r in 0..eighth {
-                // SAFETY: the buffers hold 8 * eighth rows of num_ntts lanes;
-                // calls are sequential.
-                unsafe {
-                    portable::butterfly_fused_3layer_row(p.as_mut_ptr(), eighth, num_ntts, r, &tw3);
-                    x86_64::butterfly_fused_3layer_row(x.as_mut_ptr(), eighth, num_ntts, r, &tw3);
-                }
-            }
-            assert_eq!(p, x, "fused_3layer_row eighth={eighth} num_ntts={num_ntts}");
-        }
-        // The row kernel equals the slice-based fused-3 kernel on 8 equal slices.
-        for n in [1usize, 5, 16] {
-            let block = rng.f128_vec(8 * n);
-            let mut want = block.clone();
-            {
-                let mut it = want.chunks_mut(n);
-                let rows: [&mut [F128]; 8] = core::array::from_fn(|_| it.next().unwrap());
-                portable::butterfly_fused_3layer(
-                    rows,
-                    tw3[0],
-                    &[tw3[1], tw3[2]],
-                    &[tw3[3], tw3[4], tw3[5], tw3[6]],
-                );
-            }
-            let mut got = block.clone();
-            for r in 0..n {
-                // SAFETY: 8 rows of n words, one lane; sequential calls.
-                unsafe { portable::butterfly_fused_3layer_row(got.as_mut_ptr(), n, 1, r, &tw3) };
-            }
-            assert_eq!(want, got, "fused_3layer_row vs slices n={n}");
-        }
-        for words in [32usize, 64, 96, 256] {
-            let block = rng.f128_vec(words);
-            let mut p = block.clone();
-            let mut x = block.clone();
-            portable::blocked4_fused_3layer(&mut p, &tw3);
-            // SAFETY: features checked above; length is a multiple of 32.
-            unsafe { x86_64::blocked4_fused_3layer(&mut x, &tw3) };
-            assert_eq!(p, x, "blocked4_fused_3layer words={words}");
-        }
+        check_width!(x86_512, "avx512");
     }
 }

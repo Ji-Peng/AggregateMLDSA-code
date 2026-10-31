@@ -5,7 +5,9 @@ pub use crate::lincheck::kernels::aarch64::{
     partial_fold_packed_z_neon_single_padded,
 };
 #[cfg(target_arch = "x86_64")]
-pub(crate) use crate::lincheck::kernels::x86_64::{bank_lookup_avx512, bank_transpose_avx512};
+pub(crate) use crate::lincheck::kernels::x86_64::{
+    bank_lookup_avx2, bank_lookup_avx512, bank_transpose_avx512, build_sum_table8_avx2,
+};
 #[cfg(target_arch = "x86_64")]
 pub use crate::lincheck::kernels::x86_64::partial_fold_packed_z_x86_tiled_padded;
 #[cfg(target_arch = "aarch64")]

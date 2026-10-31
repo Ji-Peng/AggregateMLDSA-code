@@ -208,6 +208,17 @@ pub(crate) fn ghash_width() -> GhashWidth {
     }
 }
 
+/// Lanes per vector of the selected GF(2^128) width (1 on the portable path).
+#[inline]
+pub(crate) fn ghash_lanes() -> usize {
+    match ghash_width() {
+        GhashWidth::Avx512 => 4,
+        GhashWidth::Vpclmul256 => 2,
+        GhashWidth::Pclmul => 1,
+        GhashWidth::Portable => 1,
+    }
+}
+
 /// One line describing the cap and the selected x86 kernels.
 pub(crate) fn report() -> String {
     let bits = features();
@@ -441,18 +452,21 @@ pub(crate) mod ghash2 {
     use core::arch::x86_64::{
         __m256i, _mm_extract_epi64, _mm_xor_si128, _mm256_bslli_epi128,
         _mm256_clmulepi64_epi128, _mm256_extracti128_si256, _mm256_loadu_si256,
-        _mm256_set_epi64x, _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+        _mm256_permute2x128_si256, _mm256_set_epi64x, _mm256_setzero_si256,
+        _mm256_storeu_si256, _mm256_xor_si256,
     };
 
     use crate::field::{F128, F256Unreduced};
 
+    /// The vector type of this width.
+    pub(crate) type V = __m256i;
     /// Lanes per vector.
     pub(crate) const LANES: usize = 2;
 
     #[inline]
     #[target_feature(enable = "avx2,vpclmulqdq")]
     fn ghash_poly() -> __m256i {
-        _mm256_set_epi64x(0x87, 0, 0x87, 0)
+        _mm256_set_epi64x(0, 0x87, 0, 0x87)
     }
 
     #[inline]
@@ -509,6 +523,17 @@ pub(crate) mod ghash2 {
     pub(crate) fn set_from(a: &[F128]) -> __m256i {
         debug_assert_eq!(a.len(), LANES);
         set(a[0], a[1])
+    }
+
+    /// Split `2 * LANES` consecutive `F128` (two vectors) into its
+    /// even-indexed and odd-indexed halves, each in lane order.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(crate) fn even_odd(v0: __m256i, v1: __m256i) -> (__m256i, __m256i) {
+        (
+            _mm256_permute2x128_si256::<0x20>(v0, v1),
+            _mm256_permute2x128_si256::<0x31>(v0, v1),
+        )
     }
 
     /// Load two contiguous `F128`.
@@ -605,13 +630,15 @@ pub(crate) mod ghash1 {
 
     use crate::field::{F128, F256Unreduced};
 
+    /// The vector type of this width.
+    pub(crate) type V = __m128i;
     /// Lanes per vector.
     pub(crate) const LANES: usize = 1;
 
     #[inline]
     #[target_feature(enable = "pclmulqdq")]
     fn ghash_poly() -> __m128i {
-        _mm_set_epi64x(0x87, 0)
+        _mm_set_epi64x(0, 0x87)
     }
 
     #[inline]
@@ -665,6 +692,14 @@ pub(crate) mod ghash1 {
     pub(crate) fn set_from(a: &[F128]) -> __m128i {
         debug_assert_eq!(a.len(), LANES);
         set(a[0])
+    }
+
+    /// Split two consecutive `F128` into its even and odd element; with one
+    /// lane per vector the two inputs already are the halves.
+    #[inline]
+    #[target_feature(enable = "pclmulqdq")]
+    pub(crate) fn even_odd(v0: __m128i, v1: __m128i) -> (__m128i, __m128i) {
+        (v0, v1)
     }
 
     /// Load one `F128`.
@@ -748,7 +783,10 @@ pub(crate) mod ghash1 {
 /// Re-exports [`x86`] behind the names a width-generic kernel body uses.
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod ghash4 {
-    use core::arch::x86_64::{__m512i, _mm512_setzero_si512, _mm512_xor_si512};
+    use core::arch::x86_64::{
+        __m512i, _mm512_permutex2var_epi64, _mm512_set_epi64, _mm512_setzero_si512,
+        _mm512_xor_si512,
+    };
 
     use crate::field::{F128, F256Unreduced};
 
@@ -759,6 +797,8 @@ pub(crate) mod ghash4 {
     #[allow(unused_imports)]
     pub(crate) use super::x86::{f128x4_set, f128x4_storeu as storeu, ghash_mul_x4 as mul};
 
+    /// The vector type of this width.
+    pub(crate) type V = __m512i;
     /// Lanes per vector.
     pub(crate) const LANES: usize = 4;
 
@@ -780,6 +820,19 @@ pub(crate) mod ghash4 {
     pub(crate) unsafe fn set_from(a: &[F128]) -> __m512i {
         debug_assert_eq!(a.len(), LANES);
         f128x4_set(a[0], a[1], a[2], a[3])
+    }
+
+    /// Split `2 * LANES` consecutive `F128` (two vectors) into its
+    /// even-indexed and odd-indexed halves, each in lane order.
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    pub(crate) unsafe fn even_odd(v0: __m512i, v1: __m512i) -> (__m512i, __m512i) {
+        let even_idx = _mm512_set_epi64(13, 12, 9, 8, 5, 4, 1, 0);
+        let odd_idx = _mm512_set_epi64(15, 14, 11, 10, 7, 6, 3, 2);
+        (
+            _mm512_permutex2var_epi64(v0, even_idx, v1),
+            _mm512_permutex2var_epi64(v0, odd_idx, v1),
+        )
     }
 
     #[inline]

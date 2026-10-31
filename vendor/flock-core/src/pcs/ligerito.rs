@@ -2797,7 +2797,7 @@ pub fn induce_sumcheck_poly(
         .enumerate()
         .for_each(|(h, acc)| {
             #[cfg(target_arch = "x86_64")]
-            let simd = crate::simd::has(crate::simd::AVX512_CLMUL);
+            let simd = crate::simd::ghash_width() != crate::simd::GhashWidth::Portable;
             for i in 0..n_queries {
                 // P_i(H): the high factors selected by the bits of the chunk index.
                 let mut scale = F128::ONE;
@@ -2810,7 +2810,7 @@ pub fn induce_sumcheck_poly(
                 #[cfg(target_arch = "x86_64")]
                 if simd {
                     // SAFETY: the runtime check supplies the kernel features.
-                    unsafe { scaled_xor_into_avx512(acc, src, scale) };
+                    unsafe { scaled_xor_into_best(acc, src, scale) };
                     continue;
                 }
                 scaled_xor_into(acc, src, scale);
@@ -2830,25 +2830,61 @@ fn scaled_xor_into(acc: &mut [F128], src: &[F128], scale: F128) {
     }
 }
 
-/// Four independent field products per vector, followed by XOR into the basis.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,vpclmulqdq")]
-unsafe fn scaled_xor_into_avx512(acc: &mut [F128], src: &[F128], scale: F128) {
-    use crate::simd::x86::{f128x4_loadu, f128x4_splat, f128x4_storeu, ghash_mul_x4};
-    use core::arch::x86_64::_mm512_xor_si512;
-    assert_eq!(acc.len(), src.len());
-    let scale_vec = f128x4_splat(scale);
-    let mut i = 0;
-    while i + 4 <= acc.len() {
-        // SAFETY: both slices contain four elements starting at i.
-        unsafe {
-            let product = ghash_mul_x4(f128x4_loadu(src.as_ptr().add(i)), scale_vec);
-            let result = _mm512_xor_si512(f128x4_loadu(acc.as_ptr().add(i)), product);
-            f128x4_storeu(acc.as_mut_ptr().add(i), result);
+/// Generates `acc[u] += scale * src[u]` for one vector width.
+macro_rules! scaled_xor_kernel {
+    ($name:ident, $lanes:path, $feat:literal) => {
+        /// `LANES` independent field products per vector, XORed into the basis.
+        ///
+        /// # Safety
+        /// `acc.len() == src.len()`, both slices are fully readable and `acc`
+        /// is writable; the CPU has the features of this width.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $feat)]
+        unsafe fn $name(acc: &mut [F128], src: &[F128], scale: F128) {
+            use $lanes as lanes;
+            assert_eq!(acc.len(), src.len());
+            let scale_vec = lanes::splat(scale);
+            let aligned = acc.len() & !(lanes::LANES - 1);
+            // SAFETY: both slices hold `aligned <= len` elements and the loop
+            // reads and writes inside them.
+            unsafe {
+                let mut i = 0;
+                while i < aligned {
+                    let product = lanes::mul(lanes::loadu(src.as_ptr().add(i)), scale_vec);
+                    let result = lanes::xor(lanes::loadu(acc.as_ptr().add(i)), product);
+                    lanes::storeu(acc.as_mut_ptr().add(i), result);
+                    i += lanes::LANES;
+                }
+            }
+            scaled_xor_into(&mut acc[aligned..], &src[aligned..], scale);
         }
-        i += 4;
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+scaled_xor_kernel!(scaled_xor_into_avx512, crate::simd::ghash4, "avx512f,vpclmulqdq");
+#[cfg(target_arch = "x86_64")]
+scaled_xor_kernel!(scaled_xor_into_avx2, crate::simd::ghash2, "avx2,vpclmulqdq");
+#[cfg(target_arch = "x86_64")]
+scaled_xor_kernel!(scaled_xor_into_pclmul, crate::simd::ghash1, "pclmulqdq,sse4.1");
+
+/// Runs [`scaled_xor_into`] on the widest available width.
+///
+/// # Safety
+/// `acc.len() == src.len()`; the process's width features are present.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn scaled_xor_into_best(acc: &mut [F128], src: &[F128], scale: F128) {
+    // SAFETY: each arm forwards this function's contract after the run-time
+    // width check selected its features.
+    unsafe {
+        match crate::simd::ghash_width() {
+            crate::simd::GhashWidth::Avx512 => scaled_xor_into_avx512(acc, src, scale),
+            crate::simd::GhashWidth::Vpclmul256 => scaled_xor_into_avx2(acc, src, scale),
+            crate::simd::GhashWidth::Pclmul => scaled_xor_into_pclmul(acc, src, scale),
+            crate::simd::GhashWidth::Portable => scaled_xor_into(acc, src, scale),
+        }
     }
-    scaled_xor_into(&mut acc[i..], &src[i..], scale);
 }
 
 fn induce_sumcheck_poly_reference(

@@ -1,19 +1,15 @@
 use core::{
-    arch::x86_64::{
-        __m128i, __m512i, _mm_load_si128, _mm_set_epi64x, _mm_setzero_si128, _mm_xor_si128,
-        _mm512_broadcast_i32x4, _mm512_loadu_si512, _mm512_permutex2var_epi64, _mm512_set_epi64,
-        _mm512_storeu_si512, _mm512_xor_si512,
-    },
+    arch::x86_64::{__m128i, _mm_load_si128, _mm_setzero_si128, _mm_xor_si128},
     mem::transmute,
 };
 
-// agg-mldsa patch (PATCH.md): the GHASH primitives come from
-// `crate::simd::x86` (no `cfg(target_feature)` gate) and the AVX-512 kernel
-// carries its own `#[target_feature]`, so the caller can choose it at run time.
-use crate::{
-    field::{F128, F256Unreduced},
-    simd::x86::{WideGhashX4, f128x4_loadu, ghash_mul_x4},
-};
+// agg-mldsa patch (PATCH.md): the GHASH primitives come from `crate::simd`
+// (no `cfg(target_feature)` gate), and every kernel carries its own
+// `#[target_feature]`, so the caller chooses the vector width at run time.
+use crate::field::{F128, F256Unreduced};
+
+#[cfg(target_arch = "x86_64")]
+use crate::simd::{ghash1, ghash2, ghash4};
 
 /// Fold the four rows for one round-2 pair in parallel x86 SIMD registers.
 /// Returns `[a0, a1, b0, b1]`.
@@ -51,110 +47,140 @@ pub(crate) unsafe fn fold_round2_pair_x86_unchecked_8(
     }
 }
 
-/// x86 fused fold plus next-round message for one worker chunk.
+/// Fused fold and next-round message for one worker chunk.
 ///
-/// Each four-message iteration folds eight `a` and `b` outputs, stores them
-/// for the next round, and consumes the same ZMM registers for the current
+/// Each message iteration folds `2 * LANES` `a` and `b` outputs, stores them
+/// for the next round, and consumes the same vector registers for the current
 /// message before they leave registers. This removes the immediate output
-/// readback performed by the portable two-pass path.
+/// readback of the portable two-pass path.
 ///
-/// # Safety
-/// Input/output lengths must satisfy `input.len() == 2 * output.len()` and
-/// `output.len() == 2 * eq_lo.len()`, with `eq_lo.len()` even. The CPU has
-/// AVX-512F, VPCLMULQDQ and SSE4.1.
-#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
-pub(crate) unsafe fn fold_and_message_x86_avx512(
-    a_in: &[F128],
-    b_in: &[F128],
-    a_out: &mut [F128],
-    b_out: &mut [F128],
-    r_fold: F128,
-    eq_lo: &[F128],
-) -> (F128, F128) {
-    debug_assert_eq!(a_in.len(), 2 * a_out.len());
-    debug_assert_eq!(b_in.len(), 2 * b_out.len());
-    debug_assert_eq!(a_out.len(), 2 * eq_lo.len());
+/// The body is generated for 512-bit VPCLMULQDQ, 256-bit VPCLMULQDQ and
+/// 128-bit PCLMULQDQ; every width computes the same folded values and the same
+/// unreduced message sums.
+macro_rules! fold_and_message_kernels {
+    ($name:ident, $lanes:path, $v:ty, $feat:literal) => {
+        /// See [`fold_and_message_kernels`].
+        ///
+        /// # Safety
+        /// `a_in.len() == 2 * a_out.len()`, `b_in.len() == 2 * b_out.len()`,
+        /// `a_out.len() == 2 * eq_lo.len()`, and the CPU has the features of
+        /// this width.
+        #[target_feature(enable = $feat)]
+        pub(crate) unsafe fn $name(
+            a_in: &[F128],
+            b_in: &[F128],
+            a_out: &mut [F128],
+            b_out: &mut [F128],
+            r_fold: F128,
+            eq_lo: &[F128],
+        ) -> (F128, F128) {
+            use $lanes as lanes;
 
-    // Fold four adjacent output elements and return them in one ZMM.
-    #[inline]
-    #[target_feature(enable = "avx512f,vpclmulqdq")]
-    unsafe fn fold_x4(
-        src: *const F128,
-        r: __m512i,
-        even_idx: __m512i,
-        odd_idx: __m512i,
-    ) -> __m512i {
-        // SAFETY: caller supplies eight readable F128 values at src.
-        unsafe {
-            let lo = _mm512_loadu_si512(src.cast::<__m512i>());
-            let hi = _mm512_loadu_si512(src.add(4).cast::<__m512i>());
-            let even = _mm512_permutex2var_epi64(lo, even_idx, hi);
-            let odd = _mm512_permutex2var_epi64(lo, odd_idx, hi);
-            _mm512_xor_si512(even, ghash_mul_x4(r, _mm512_xor_si512(even, odd)))
-        }
-    }
+            debug_assert_eq!(a_in.len(), 2 * a_out.len());
+            debug_assert_eq!(b_in.len(), 2 * b_out.len());
+            debug_assert_eq!(a_out.len(), 2 * eq_lo.len());
+            let lanes = lanes::LANES;
 
-    // SAFETY: the function's length invariants bound all loads/stores and the
-    // caller checked every intrinsic feature at run time.
-    unsafe {
-        let r = _mm512_broadcast_i32x4(_mm_set_epi64x(r_fold.hi as i64, r_fold.lo as i64));
-        // Select even/odd F128 lanes from two concatenated ZMM inputs. The same
-        // selectors deinterleave fold inputs and gather message a0/a1 lanes.
-        let even_idx = _mm512_set_epi64(13, 12, 9, 8, 5, 4, 1, 0);
-        let odd_idx = _mm512_set_epi64(15, 14, 11, 10, 7, 6, 3, 2);
-        let mut p1_wide = WideGhashX4::zero();
-        let mut pinf_wide = WideGhashX4::zero();
-        let mut p1_tail = F256Unreduced::ZERO;
-        let mut pinf_tail = F256Unreduced::ZERO;
-        let mut x_lo = 0;
+            // Fold `2 * LANES` inputs into `LANES` outputs and return them in
+            // one vector.
+            //
+            // # Safety
+            // Eight readable `F128` at `src`; the width's features are enabled.
+            #[inline]
+            #[target_feature(enable = $feat)]
+            unsafe fn fold(src: *const F128, r: $v) -> $v {
+                use $lanes as lanes;
+                // SAFETY: the caller supplies `2 * LANES` readable inputs.
+                unsafe {
+                    let (even, odd) = lanes::even_odd(
+                        lanes::loadu(src),
+                        lanes::loadu(src.add(lanes::LANES)),
+                    );
+                    lanes::xor(even, lanes::mul(r, lanes::xor(even, odd)))
+                }
+            }
 
-        while x_lo + 4 <= eq_lo.len() {
-            let output = 2 * x_lo;
-            let a_lo = fold_x4(a_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
-            let a_hi = fold_x4(a_in.as_ptr().add(2 * (output + 4)), r, even_idx, odd_idx);
-            let b_lo = fold_x4(b_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
-            let b_hi = fold_x4(b_in.as_ptr().add(2 * (output + 4)), r, even_idx, odd_idx);
+            // SAFETY: the length invariants bound every load and store.
+            unsafe {
+                let r = lanes::splat(r_fold);
+                let mut p1_wide = lanes::wide_zero();
+                let mut pinf_wide = lanes::wide_zero();
+                let mut p1_tail = F256Unreduced::ZERO;
+                let mut pinf_tail = F256Unreduced::ZERO;
+                let mut x_lo = 0;
 
-            _mm512_storeu_si512(a_out.as_mut_ptr().add(output).cast::<__m512i>(), a_lo);
-            _mm512_storeu_si512(a_out.as_mut_ptr().add(output + 4).cast::<__m512i>(), a_hi);
-            _mm512_storeu_si512(b_out.as_mut_ptr().add(output).cast::<__m512i>(), b_lo);
-            _mm512_storeu_si512(b_out.as_mut_ptr().add(output + 4).cast::<__m512i>(), b_hi);
+                while x_lo + lanes <= eq_lo.len() {
+                    let output = 2 * x_lo;
+                    let a_lo = fold(a_in.as_ptr().add(2 * output), r);
+                    let a_hi = fold(a_in.as_ptr().add(2 * (output + lanes)), r);
+                    let b_lo = fold(b_in.as_ptr().add(2 * output), r);
+                    let b_hi = fold(b_in.as_ptr().add(2 * (output + lanes)), r);
 
-            let a0 = _mm512_permutex2var_epi64(a_lo, even_idx, a_hi);
-            let a1 = _mm512_permutex2var_epi64(a_lo, odd_idx, a_hi);
-            let b0 = _mm512_permutex2var_epi64(b_lo, even_idx, b_hi);
-            let b1 = _mm512_permutex2var_epi64(b_lo, odd_idx, b_hi);
-            let g1 = ghash_mul_x4(a1, b1);
-            let g_inf = ghash_mul_x4(_mm512_xor_si512(a0, a1), _mm512_xor_si512(b0, b1));
-            let eq = f128x4_loadu(eq_lo.as_ptr().add(x_lo));
-            p1_wide.mul_acc(eq, g1);
-            pinf_wide.mul_acc(eq, g_inf);
-            x_lo += 4;
-        }
+                    lanes::storeu(a_out.as_mut_ptr().add(output), a_lo);
+                    lanes::storeu(a_out.as_mut_ptr().add(output + lanes), a_hi);
+                    lanes::storeu(b_out.as_mut_ptr().add(output), b_lo);
+                    lanes::storeu(b_out.as_mut_ptr().add(output + lanes), b_hi);
 
-        // Power-of-two eq blocks leave either no tail or exactly two pairs.
-        if x_lo < eq_lo.len() {
-            debug_assert_eq!(eq_lo.len() - x_lo, 2);
-            let output = 2 * x_lo;
-            let a_folded = fold_x4(a_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
-            let b_folded = fold_x4(b_in.as_ptr().add(2 * output), r, even_idx, odd_idx);
-            _mm512_storeu_si512(a_out.as_mut_ptr().add(output).cast::<__m512i>(), a_folded);
-            _mm512_storeu_si512(b_out.as_mut_ptr().add(output).cast::<__m512i>(), b_folded);
+                    let (a0, a1) = lanes::even_odd(a_lo, a_hi);
+                    let (b0, b1) = lanes::even_odd(b_lo, b_hi);
+                    let g1 = lanes::mul(a1, b1);
+                    let g_inf = lanes::mul(lanes::xor(a0, a1), lanes::xor(b0, b1));
+                    let eq = lanes::loadu(eq_lo.as_ptr().add(x_lo));
+                    lanes::wide_acc(&mut p1_wide, eq, g1);
+                    lanes::wide_acc(&mut pinf_wide, eq, g_inf);
+                    x_lo += lanes;
+                }
 
-            for lane in 0..2 {
-                let o = output + 2 * lane;
-                let a0 = a_out[o];
-                let a1 = a_out[o + 1];
-                let b0 = b_out[o];
-                let b1 = b_out[o + 1];
-                let eq = eq_lo[x_lo + lane];
-                p1_tail ^= eq.mul_unreduced(a1 * b1);
-                pinf_tail ^= eq.mul_unreduced((a0 + a1) * (b0 + b1));
+                // Fold the remaining outputs one at a time; a power-of-two eq
+                // block leaves fewer than `LANES` entries here.
+                while x_lo < eq_lo.len() {
+                    let output = 2 * x_lo;
+                    for k in 0..2 {
+                        let o = output + k;
+                        let a0 = a_in[2 * o];
+                        let a1 = a_in[2 * o + 1];
+                        let b0 = b_in[2 * o];
+                        let b1 = b_in[2 * o + 1];
+                        a_out[o] = a0 + r_fold * (a1 + a0);
+                        b_out[o] = b0 + r_fold * (b1 + b0);
+                    }
+                    let o = 2 * x_lo;
+                    let a0 = a_out[o];
+                    let a1 = a_out[o + 1];
+                    let b0 = b_out[o];
+                    let b1 = b_out[o + 1];
+                    let eq = eq_lo[x_lo];
+                    p1_tail ^= eq.mul_unreduced(a1 * b1);
+                    pinf_tail ^= eq.mul_unreduced((a0 + a1) * (b0 + b1));
+                    x_lo += 1;
+                }
+
+                p1_tail ^= lanes::wide_fold(p1_wide);
+                pinf_tail ^= lanes::wide_fold(pinf_wide);
+                (p1_tail.reduce(), pinf_tail.reduce())
             }
         }
-
-        p1_tail ^= p1_wide.fold();
-        pinf_tail ^= pinf_wide.fold();
-        (p1_tail.reduce(), pinf_tail.reduce())
-    }
+    };
 }
+
+#[cfg(target_arch = "x86_64")]
+fold_and_message_kernels!(
+    fold_and_message_x86_avx512,
+    ghash4,
+    core::arch::x86_64::__m512i,
+    "avx512f,vpclmulqdq,sse4.1"
+);
+#[cfg(target_arch = "x86_64")]
+fold_and_message_kernels!(
+    fold_and_message_x86_avx2,
+    ghash2,
+    core::arch::x86_64::__m256i,
+    "avx2,vpclmulqdq"
+);
+#[cfg(target_arch = "x86_64")]
+fold_and_message_kernels!(
+    fold_and_message_x86_pclmul,
+    ghash1,
+    core::arch::x86_64::__m128i,
+    "pclmulqdq,sse4.1"
+);
