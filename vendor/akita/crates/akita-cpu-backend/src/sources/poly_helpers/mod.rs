@@ -26,7 +26,7 @@ use akita_error::AkitaError;
 use akita_types::SubfieldMultiplierOpeningPoint;
 use jolt_field::{CanonicalEncoding, Field};
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 use crate::kernels::avx_decompose_fold as decompose_fold_avx;
 
 /// Final basis facts shared by live decomposition and cached digit folds.
@@ -136,20 +136,21 @@ impl<'a, const D: usize> ValidatedSparseChallenges<'a, D> {
 /// the NEON decompose-fold for A/B benchmarks. On x86 we read the same env
 /// var locally (the NEON module isn't compiled, so we can't share the
 /// helper across crates without re-introducing a hoist into `akita-algebra`).
-#[cfg(any(
-    target_arch = "aarch64",
-    all(target_arch = "x86_64", target_feature = "avx2")
-))]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn use_simd_decompose_fold() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
         akita_algebra::ntt::neon::use_neon_ntt()
     }
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(target_arch = "x86_64")]
     {
         use std::sync::OnceLock;
         static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| std::env::var("AKITA_SCALAR_NTT").map_or(true, |v| v != "1"))
+        *ENABLED.get_or_init(|| {
+            crate::isa::avx2()
+                && std::arch::is_x86_feature_detected!("avx2")
+                && std::env::var("AKITA_SCALAR_NTT").map_or(true, |v| v != "1")
+        })
     }
 }
 
@@ -292,10 +293,7 @@ pub(crate) fn sparse_mul_acc<const D: usize>(
     acc: &mut [i32; D],
 ) {
     let challenge = challenge.challenge;
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    ))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     {
         if use_simd_decompose_fold()
             && challenge
@@ -313,7 +311,7 @@ pub(crate) fn sparse_mul_acc<const D: usize>(
                     &challenge.coeffs,
                 );
             }
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 decompose_fold_avx::sparse_mul_acc_avx(
                     digit_plane.as_ptr(),
@@ -339,10 +337,7 @@ pub(crate) fn sparse_mul_acc_pm1<const D: usize>(
         .iter()
         .chain(negative)
         .all(|&position| position < D as u32));
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    ))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     if use_simd_decompose_fold() {
         #[cfg(target_arch = "aarch64")]
         unsafe {
@@ -354,7 +349,7 @@ pub(crate) fn sparse_mul_acc_pm1<const D: usize>(
                 negative,
             );
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             decompose_fold_avx::sparse_mul_acc_pm1_avx(
                 digit_plane.as_ptr(),
@@ -382,10 +377,7 @@ pub(crate) fn sparse_mul_acc_i16<const D: usize>(
     acc: &mut [i32; D],
 ) {
     let challenge = challenge.challenge;
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    ))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     {
         if use_simd_decompose_fold()
             && challenge
@@ -403,7 +395,7 @@ pub(crate) fn sparse_mul_acc_i16<const D: usize>(
                     &challenge.coeffs,
                 );
             }
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 decompose_fold_avx::sparse_mul_acc_i16_avx(
                     digit_plane.as_ptr(),
@@ -429,10 +421,7 @@ pub(crate) fn sparse_mul_acc_i16_pm1<const D: usize>(
         .iter()
         .chain(negative)
         .all(|&position| position < D as u32));
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    ))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     if use_simd_decompose_fold() {
         #[cfg(target_arch = "aarch64")]
         unsafe {
@@ -444,7 +433,7 @@ pub(crate) fn sparse_mul_acc_i16_pm1<const D: usize>(
                 negative,
             );
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(target_arch = "x86_64")]
         unsafe {
             decompose_fold_avx::sparse_mul_acc_i16_pm1_avx(
                 digit_plane.as_ptr(),

@@ -31,11 +31,14 @@ pub(super) type FrobTable = [[F128; 256]; 16];
 
 /// Byte tables of `x -> x^(2^j)` for `j in 0..128` (8 MiB), built once per
 /// process. Universal: they depend only on the field.
+///
+/// Built serially: this runs inside `OnceLock::get_or_init`, and a parallel
+/// build there deadlocks when several workers enter it at once, because the
+/// waiting workers block the pool that the initializer's `par_iter` needs.
 pub(super) fn frob_tables() -> &'static [FrobTable] {
     static TABLES: OnceLock<Vec<FrobTable>> = OnceLock::new();
     TABLES.get_or_init(|| {
         (0..128usize)
-            .into_par_iter()
             .map(|j| {
                 // Images of the monomial basis x^k, k < 128.
                 let basis: Vec<F128> = (0..128)

@@ -49,7 +49,7 @@ pub(super) enum I8DigitSpan {
 /// wrap needs.
 ///
 /// The x86 kernels read the same layout from [`x86::WidePlane`] instead.
-#[cfg_attr(all(target_arch = "x86_64", target_feature = "avx2"), allow(dead_code))]
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[repr(C, align(16))]
 struct SignedPlane<const D: usize> {
     plane: [i8; D],
@@ -69,7 +69,7 @@ struct SignedPlane<const D: usize> {
 pub(super) struct WindowedChallenge {
     words: Vec<u64>,
     // The x86 kernels read negated sources, which need no correction.
-    #[cfg_attr(all(target_arch = "x86_64", target_feature = "avx2"), allow(dead_code))]
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     corrections: Vec<i16>,
     once_words: usize,
     words_per_window: usize,
@@ -171,17 +171,11 @@ impl WindowedChallenge {
 /// beat the term-at-a-time kernel, so other targets keep the existing narrow
 /// path.
 pub(super) fn gathers_windows() -> bool {
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    ))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     {
         super::use_simd_decompose_fold()
     }
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(target_arch = "x86_64", target_feature = "avx2")
-    )))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         false
     }
@@ -203,13 +197,15 @@ pub(super) fn windowed_mul_acc<const D: usize>(
         challenge.words.len(),
         D / GATHER * challenge.words_per_window
     );
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    // SAFETY: the length check above ties the table to this `D`, and the
-    // target features the kernel needs are enabled for this build.
-    unsafe {
-        x86::accumulate(digit_plane, challenge, acc);
+    #[cfg(target_arch = "x86_64")]
+    if gathers_windows() {
+        // SAFETY: the length check above ties the table to this `D`, and
+        // `gathers_windows` checks AVX2 and the `AGG_ISA` cap at run time.
+        unsafe {
+            x86::accumulate(digit_plane, challenge, acc);
+        }
+        return;
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     {
         let mut signed = SignedPlane {
             plane: *digit_plane,
@@ -415,7 +411,7 @@ mod neon {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 mod x86 {
     use super::{WindowedChallenge, GATHER, WINDOW, WORD_OFFSETS};
     use std::arch::x86_64::*;
