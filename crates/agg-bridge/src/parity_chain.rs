@@ -32,7 +32,7 @@
 //! (low first: `i_mid`, `t`, `sigma`), then those of `zeta` (low first).
 
 use agg_witness::bridge::{BridgeMatrices, SparseMatrix};
-use flock_field::F128;
+use flock_field::{F128, f128_slice::rounds};
 use rayon::prelude::*;
 
 use crate::gf2_walker::SegmentLayout;
@@ -572,15 +572,25 @@ impl ChainLayout {
             .collect();
         let mut bf = self.block_fold(bits, &eq_table(&rs));
         let nb = self.block_vars();
+        // The folds alternate between the tables and one scratch pair of half
+        // their length; each fold returns the next round's message.
+        let mut nw = vec![F128::ZERO; blen / 2];
+        let mut nbf = vec![F128::ZERO; blen / 2];
+        let mut len = blen;
+        let mut msg = pair_message(&w, &bf);
         for round in 0..self.zeta_vars() {
-            let (q1, qinf) = pair_message(&w, &bf);
-            let r = challenge(nb + round, (q1, qinf))?;
-            running = round_value(running, q1, qinf, r);
-            messages.push((q1, qinf));
+            let r = challenge(nb + round, msg)?;
+            running = round_value(running, msg.0, msg.1, r);
+            messages.push(msg);
             rs.push(r);
-            fold_pairs(&mut w, r);
-            fold_pairs(&mut bf, r);
+            let half = len / 2;
+            msg = fold_pairs_two(&w[..len], &bf[..len], &mut nw[..half], &mut nbf[..half], r);
+            std::mem::swap(&mut w, &mut nw);
+            std::mem::swap(&mut bf, &mut nbf);
+            len = half;
         }
+        w.truncate(1);
+        bf.truncate(1);
         debug_assert_eq!(w.len(), 1);
         debug_assert_eq!(w[0] * bf[0], running, "honest final claim");
         Ok(ChainProof {
@@ -651,23 +661,25 @@ fn gather(m: &SparseMatrix, col: usize, v: impl Fn(usize) -> F128) -> F128 {
 
 /// `(q(1), q(inf))` of the product of two tables over their lowest variable (pairs
 /// `(2k, 2k + 1)`).
+/// Pairs per task: the two source and one destination chunk of each table stay in L2.
+const PAIR_CHUNK: usize = 1 << 11;
+
+fn add_msg(p: (F128, F128), q: (F128, F128)) -> (F128, F128) {
+    (p.0 + q.0, p.1 + q.1)
+}
+
 fn pair_message(a: &[F128], b: &[F128]) -> (F128, F128) {
-    let f = |(x, y): (&[F128], &[F128])| (x[1] * y[1], (x[0] + x[1]) * (y[0] + y[1]));
-    let add = |p: (F128, F128), q: (F128, F128)| (p.0 + q.0, p.1 + q.1);
-    if a.len() >= MIN_PARALLEL {
-        a.par_chunks(2)
-            .zip(b.par_chunks(2))
-            .map(f)
-            .reduce(|| (F128::ZERO, F128::ZERO), add)
-    } else {
-        a.chunks(2)
-            .zip(b.chunks(2))
-            .map(f)
-            .fold((F128::ZERO, F128::ZERO), add)
+    if a.len() < MIN_PARALLEL {
+        return rounds::pair_message(a, b);
     }
+    a.par_chunks(2 * PAIR_CHUNK)
+        .zip(b.par_chunks(2 * PAIR_CHUNK))
+        .map(|(x, y)| rounds::pair_message(x, y))
+        .reduce(|| (F128::ZERO, F128::ZERO), add_msg)
 }
 
 /// `t[k] = t[2k] + r (t[2k] + t[2k + 1])` in place, halving the length.
+#[cfg(test)]
 fn fold_pairs(t: &mut Vec<F128>, r: F128) {
     let half = t.len() / 2;
     let folded: Vec<F128> = t
@@ -679,23 +691,34 @@ fn fold_pairs(t: &mut Vec<F128>, r: F128) {
     *t = folded;
 }
 
+/// Fold two pair tables by `r` into `dw`/`db` and return the message of the
+/// folded tables over their lowest variable.
+fn fold_pairs_two(
+    w: &[F128],
+    b: &[F128],
+    dw: &mut [F128],
+    db: &mut [F128],
+    r: F128,
+) -> (F128, F128) {
+    if dw.len() < MIN_PARALLEL / 2 {
+        rounds::fold_pairs_two_and_message(w, b, dw, db, r)
+    } else {
+        dw.par_chunks_mut(PAIR_CHUNK)
+            .zip(db.par_chunks_mut(PAIR_CHUNK))
+            .zip(w.par_chunks(2 * PAIR_CHUNK))
+            .zip(b.par_chunks(2 * PAIR_CHUNK))
+            .map(|(((dw, db), w), b)| rounds::fold_pairs_two_and_message(w, b, dw, db, r))
+            .reduce(|| (F128::ZERO, F128::ZERO), add_msg)
+    }
+}
+
 /// `(q(1), q(inf))` of the block phase: the product of two `[beta][rho_1]` tables over the
 /// lowest block variable, summed over `rho_1` and the other blocks.
 fn block_message(g: &[F128], y: &[F128], rows: usize) -> (F128, F128) {
     g.par_chunks(2 * rows)
         .zip(y.par_chunks(2 * rows))
-        .map(|(gp, yp)| {
-            let (g0, g1) = gp.split_at(rows);
-            let (y0, y1) = yp.split_at(rows);
-            let mut q1 = F128::ZERO;
-            let mut qi = F128::ZERO;
-            for i in 0..rows {
-                q1 += g1[i] * y1[i];
-                qi += (g0[i] + g1[i]) * (y0[i] + y1[i]);
-            }
-            (q1, qi)
-        })
-        .reduce(|| (F128::ZERO, F128::ZERO), |p, q| (p.0 + q.0, p.1 + q.1))
+        .map(|(gp, yp)| rounds::block_message(gp, yp, rows))
+        .reduce(|| (F128::ZERO, F128::ZERO), add_msg)
 }
 
 /// Fold the lowest block variable of both `[beta][rho_1]` tables (`len` blocks, `len` even)
