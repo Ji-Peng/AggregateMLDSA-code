@@ -277,3 +277,12 @@ constant once its rows exist), then `cargo test -p agg-pcs-config` (the default-
 test `checked_in_catalog_holds_exactly_the_requested_rows` fails on any missing or extra
 row and re-encodes both artifacts byte for byte). A change of the Akita pin requires a
 full `regenerate`.
+
+## ML-DSA-65 and ML-DSA-87 catalog layouts
+
+The H-u catalog has 13 batch rows per set, with names `mldsa-65-p16-batch-<N*>-mult-final` and `mldsa-87-p16-batch-<N*>-mult-final`. Group counts in catalog order are listed below; `crates/agg-pcs-config/src/catalogs.rs` defines the domains and row selection.
+
+| Set | main16 | main4 | level1 | level2 | level3 | projection | multiplicity | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 65 | 23 | 46 | 4 | 8 | 8 | 5 | 7 | 101 |
+| 87 | 31 | 62 | 4 | 8 | 8 | 5 | 7 | 125 |
