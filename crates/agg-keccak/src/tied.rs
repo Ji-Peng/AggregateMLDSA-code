@@ -50,7 +50,7 @@ use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
 use agg_witness::bridge::BridgeMatrices;
-use agg_witness::params::{ParamSet, Set44};
+use agg_witness::params::ParamSet;
 
 use crate::{
     flock_union::{bit_value, BitClaim, CommitData, UnionGeometry, UnionProof},
@@ -122,15 +122,6 @@ fn c_tildes<P: ParamSet>(engine: &Engine, records: &[SpongeRecord<P>]) -> Vec<u8
             engine.shake256_many(&inputs, width, out);
         });
     out
-}
-
-/// `records` as ML-DSA-44 records when `P` is [`Set44`] (the 8-way witness generator's type).
-#[allow(unsafe_code)]
-fn as_set44<P: ParamSet>(records: &[SpongeRecord<P>]) -> Option<&[SpongeRecord<Set44>]> {
-    (std::any::TypeId::of::<P>() == std::any::TypeId::of::<Set44>()).then(|| {
-        // SAFETY: `P` is `Set44`, so both slices have the same element type.
-        unsafe { &*(std::ptr::from_ref(records) as *const [SpongeRecord<Set44>]) }
-    })
 }
 
 /// XOR the lanes the sponge gate absorbs before permutation `m` into `s`: words
@@ -860,17 +851,15 @@ impl<'g> TiedPart<'g> {
         let words = self.segment_words();
         let mut bits = vec![0_u64; self.segments * words];
         // The 8-way generator writes the slot buffers and the lane bits in one pass.
-        if let Some(records) = as_set44(records) {
-            let lane_bits = LaneBits {
-                bits: &mut bits,
-                seg_words: words,
-                lane_len: seg.lane_len,
-                d: self.d,
-            };
-            if let Some(sponge) = sponge_slot(self.gate, self.sponge.nu(), records, Some(lane_bits)) {
-                trace("witness (8-way)", &start);
-                return (sponge, bits);
-            }
+        let lane_bits = LaneBits {
+            bits: &mut bits,
+            seg_words: words,
+            lane_len: seg.lane_len,
+            d: self.d,
+        };
+        if let Some(sponge) = sponge_slot(self.gate, self.sponge.nu(), records, Some(lane_bits)) {
+            trace("witness (8-way)", &start);
+            return (sponge, bits);
         }
         // Per record and independent: parallel (same values in the same order).
         let input_words = self.layout.input_bits() / 64;
