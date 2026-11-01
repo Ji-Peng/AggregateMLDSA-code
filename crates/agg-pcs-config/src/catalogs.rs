@@ -27,6 +27,8 @@
 
 use akita_params::PolynomialGroupLayout;
 
+pub use agg_witness::Set;
+
 /// Log2 of the PCS floor: every physical table has at least `2^13` cells
 /// (Aerie `PCS_MIN_CELLS_LOG2`); smaller logical tables are zero-extended
 /// with trailing pad variables.
@@ -271,61 +273,126 @@ impl Group {
         }
     }
 
-    /// Number of committed polynomials:
-    /// `4 + 8` on the main domain (`4 + 9` under H-exact, `4 + 12` under H-FIPS), 6 carries,
-    /// `6 + 6` parities and carries (`6 + 6 + 1` under H-FIPS, with `u_h`), 1 carry and
-    /// zero polynomials up to `G_2`'s count, the 4 projection digits and the 7 multiplicity
-    /// digits.
+    /// Number of committed polynomials for a parameter set and relation.
+    ///
+    /// For ML-DSA-44: 4 on the main domain (round 1, width 16); 8, 9, or 12
+    /// under relations H-u, H-exact, and H-FIPS (round 1, width 4); 6 carries on Level 1;
+    /// 12 parities and carries on Level 2 (13 under H-FIPS); Level 3 matches Level 2;
+    /// 4 projection digits and 7 multiplicity digits.
+    ///
+    /// For ML-DSA-65 (relation H-u): 23 on width-16 main domain (5 for z_lo, 6 each for
+    /// u_lo, v_lo, v_hi); 46 on width-4 main domain (5 each for z_mid and a_z, 6 each for
+    /// u_mid and a_u, 24 for 4 bit planes across 6 lanes); 4 carries on Level 1;
+    /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
+    /// 7 multiplicity digits.
+    ///
+    /// For ML-DSA-87 (relation H-u): 31 on width-16 main domain (7 for z_lo, 8 each for
+    /// u_lo, v_lo, v_hi); 62 on width-4 main domain (7 each for z_mid and a_z, 8 each for
+    /// u_mid and a_u, 32 for 4 bit planes across 8 lanes); 4 carries on Level 1;
+    /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
+    /// 7 multiplicity digits.
     #[must_use]
-    pub const fn num_polynomials(self, relation: Relation) -> usize {
-        match self {
-            Self::Main16 => 4,
-            Self::Main => match relation {
-                Relation::Hu => 2 + 6,
-                Relation::HExact => 2 + 6 + 1,
-                Relation::HFips => 2 + 6 + 1 + 3,
+    pub const fn num_polynomials(self, set: Set, relation: Relation) -> usize {
+        match set {
+            Set::S44 => match self {
+                Self::Main16 => 4,
+                Self::Main => match relation {
+                    Relation::Hu => 2 + 6,
+                    Relation::HExact => 2 + 6 + 1,
+                    Relation::HFips => 2 + 6 + 1 + 3,
+                },
+                Self::Level1 => 6,
+                Self::Level2 => match relation {
+                    Relation::Hu | Relation::HExact => 6 + 6,
+                    Relation::HFips => 6 + 6 + 1,
+                },
+                Self::Level3 => Self::Level2.num_polynomials(set, relation),
+                Self::Proj => 4,
+                Self::Mult => MULTIPLICITY_DIGITS,
             },
-            Self::Level1 => 6,
-            Self::Level2 => match relation {
-                Relation::Hu | Relation::HExact => 6 + 6,
-                Relation::HFips => 6 + 6 + 1,
+            Set::S65 => match self {
+                Self::Main16 => 5 + 3 * 6,
+                Self::Main => 5 + 5 + 6 + 6 + 4 * 6,
+                Self::Level1 => 4,
+                Self::Level2 => 4 + 4,
+                Self::Level3 => Self::Level2.num_polynomials(set, relation),
+                Self::Proj => 5,
+                Self::Mult => MULTIPLICITY_DIGITS,
             },
-            // The carry and zero polynomials up to G_2's count (see `physical_vars`).
-            Self::Level3 => Self::Level2.num_polynomials(relation),
-            Self::Proj => 4,
-            Self::Mult => MULTIPLICITY_DIGITS,
+            Set::S87 => match self {
+                Self::Main16 => 7 + 3 * 8,
+                Self::Main => 7 + 7 + 8 + 8 + 4 * 8,
+                Self::Level1 => 4,
+                Self::Level2 => 4 + 4,
+                Self::Level3 => Self::Level2.num_polynomials(set, relation),
+                Self::Proj => 5,
+                Self::Mult => MULTIPLICITY_DIGITS,
+            },
         }
     }
 
-    /// Logical variable count of the group's domain at `d_sig`
-    /// `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
+    /// Number of committed polynomials for ML-DSA-44.
+    #[must_use]
+    pub const fn num_polynomials_44(self, relation: Relation) -> usize {
+        self.num_polynomials(Set::S44, relation)
+    }
+
+    /// Logical variable count of the group's domain for a given parameter set and `d_sig`.
+    ///
+    /// For ML-DSA-44: `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
     /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`,
     /// `d_k = 7 + d_sig`; 16 for `G_m`.
+    ///
+    /// For ML-DSA-65: `d_main = 8 + d_sig`, `d_1 = 13 + max(0, d_sig - 8)`,
+    /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`,
+    /// `d_k = 7 + d_sig`; 16 for `G_m`.
+    ///
+    /// For ML-DSA-87: `d_main = 8 + d_sig`, `d_1 = 13 + max(0, d_sig - 8)`,
+    /// `d_2 = 13 + max(0, d_sig - 13)`, `d_3 = 12 + max(0, d_sig - 13)`,
+    /// `d_k = 8 + d_sig` (two projection row blocks); 16 for `G_m`.
     #[must_use]
-    pub const fn logical_vars(self, d_sig: usize) -> usize {
-        match self {
-            Self::Main16 | Self::Main => D_POS + d_sig,
-            Self::Level1 => 13 + d_sig.saturating_sub(9),
-            Self::Level2 => 13 + d_sig.saturating_sub(D_SEG_MAX),
-            Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
-            Self::Proj => PROJ_ROW_VARS + d_sig,
-            Self::Mult => TABLE_VARS,
+    pub const fn logical_vars(self, set: Set, d_sig: usize) -> usize {
+        match set {
+            Set::S44 => match self {
+                Self::Main16 | Self::Main => D_POS + d_sig,
+                Self::Level1 => 13 + d_sig.saturating_sub(9),
+                Self::Level2 => 13 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Proj => PROJ_ROW_VARS + d_sig,
+                Self::Mult => TABLE_VARS,
+            },
+            Set::S65 => match self {
+                Self::Main16 | Self::Main => 8 + d_sig,
+                Self::Level1 => 13 + d_sig.saturating_sub(8),
+                Self::Level2 => 13 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Proj => PROJ_ROW_VARS + d_sig,
+                Self::Mult => TABLE_VARS,
+            },
+            Set::S87 => match self {
+                Self::Main16 | Self::Main => 8 + d_sig,
+                Self::Level1 => 13 + d_sig.saturating_sub(8),
+                Self::Level2 => 13 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Level3 => 12 + d_sig.saturating_sub(D_SEG_MAX),
+                Self::Proj => PROJ_ROW_VARS + 1 + d_sig,
+                Self::Mult => TABLE_VARS,
+            },
         }
     }
 
-    /// Physical (committed) variable count: the logical count raised to the
-    /// PCS floor. `G_3` takes `G_2`'s layout (its carry zero-extended by one trailing
-    /// variable from `2^14` cells on, and zero polynomials up to `G_2`'s count): two groups of
-    /// one Akita profile are one class of the planner's root opening search, which keeps
-    /// the product of the classes' coefficient-packing domains within Akita's bound at
-    /// `N* = 2^15` once the projection group `G_k` is a sixth precommitted group
-    /// (`docs/pcs-config.md`).
+    /// Logical variable count for ML-DSA-44.
     #[must_use]
-    pub const fn physical_vars(self, d_sig: usize) -> usize {
+    pub const fn logical_vars_44(self, d_sig: usize) -> usize {
+        self.logical_vars(Set::S44, d_sig)
+    }
+
+    /// Physical (committed) variable count for a given parameter set and `d_sig`.
+    #[must_use]
+    pub const fn physical_vars(self, set: Set, d_sig: usize) -> usize {
         if matches!(self, Self::Level3) {
-            return Self::Level2.physical_vars(d_sig);
+            return Self::Level2.physical_vars(set, d_sig);
         }
-        let logical = self.logical_vars(d_sig);
+        let logical = self.logical_vars(set, d_sig);
         if logical < PCS_MIN_CELLS_LOG2 {
             PCS_MIN_CELLS_LOG2
         } else {
@@ -333,10 +400,22 @@ impl Group {
         }
     }
 
-    /// Akita group layout at `d_sig` under `relation`.
+    /// Physical variable count for ML-DSA-44.
     #[must_use]
-    pub const fn layout(self, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
-        PolynomialGroupLayout::new(self.physical_vars(d_sig), self.num_polynomials(relation))
+    pub const fn physical_vars_44(self, d_sig: usize) -> usize {
+        self.physical_vars(Set::S44, d_sig)
+    }
+
+    /// Akita group layout for a given parameter set at `d_sig` under `relation`.
+    #[must_use]
+    pub const fn layout(self, set: Set, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
+        PolynomialGroupLayout::new(self.physical_vars(set, d_sig), self.num_polynomials(set, relation))
+    }
+
+    /// Akita group layout for ML-DSA-44.
+    #[must_use]
+    pub const fn layout_44(self, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
+        self.layout(Set::S44, d_sig, relation)
     }
 
     /// Short label used in catalog row names and logs.
@@ -354,9 +433,12 @@ impl Group {
     }
 }
 
-/// The ordered seven-group layout of one batch size `N* = 2^d_sig` under one relation.
+/// The ordered seven-group layout of one batch size `N* = 2^d_sig` under one relation
+/// and parameter set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchLayout {
+    /// The parameter set (FIPS 204 ML-DSA-44, 65, or 87).
+    pub set: Set,
     /// `log2 N*`.
     pub d_sig: usize,
     /// The relation (it fixes the polynomial counts of `G_main4` and `G_2`).
@@ -366,14 +448,25 @@ pub struct BatchLayout {
 }
 
 impl BatchLayout {
-    /// The layout at `d_sig` under `relation`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`.
+    /// The layout for `set` at `d_sig` under `relation`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`
+    /// or if the relation is unsupported for `set` (ML-DSA-65 and 87 support H-u only).
     #[must_use]
-    pub fn new(d_sig: usize, relation: Relation) -> Option<Self> {
+    pub fn new(set: Set, d_sig: usize, relation: Relation) -> Option<Self> {
+        if !matches!(set, Set::S44) && relation != Relation::Hu {
+            return None;
+        }
         (MIN_D_SIG..=MAX_D_SIG).contains(&d_sig).then(|| Self {
+            set,
             d_sig,
             relation,
-            groups: Group::ALL.map(|group| group.layout(d_sig, relation)),
+            groups: Group::ALL.map(|group| group.layout(set, d_sig, relation)),
         })
+    }
+
+    /// The layout for ML-DSA-44 at `d_sig` under `relation`.
+    #[must_use]
+    pub fn new_44(d_sig: usize, relation: Relation) -> Option<Self> {
+        Self::new(Set::S44, d_sig, relation)
     }
 
     /// The precommitted groups (every group but `G_m`), in order.
@@ -397,8 +490,8 @@ impl BatchLayout {
         self.groups[GROUP_COUNT - 1]
     }
 
-    /// Total committed polynomials (53 for H-u, 54 for H-exact, 59 for H-FIPS; 11 or 12 of
-    /// them the zero polynomials of `G_3`).
+    /// Total committed polynomials (53 for H-u, 54 for H-exact, 59 for H-FIPS under ML-DSA-44;
+    /// 101 for ML-DSA-65; 125 for ML-DSA-87).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -426,28 +519,47 @@ impl BatchLayout {
             Relation::HExact => "p16x",
             Relation::HFips => "p16f",
         };
-        format!("mldsa-44-{layout}-batch-{}-mult-final", 1_usize << self.d_sig)
+        format!(
+            "mldsa-{}-{layout}-batch-{}-mult-final",
+            self.set.name(),
+            1_usize << self.d_sig
+        )
     }
 
-    /// Whether this batch size has checked-in catalog rows for its relation.
+    /// Whether this batch size has checked-in catalog rows for its set and relation.
     #[must_use]
     pub fn in_catalog(&self) -> bool {
-        self.relation.catalog_d_sigs().contains(&self.d_sig)
+        match self.set {
+            Set::S44 => self.relation.catalog_d_sigs().contains(&self.d_sig),
+            Set::S65 | Set::S87 => false,
+        }
     }
 }
 
-/// Every checked-in batch layout: the H-u sizes, then the H-exact and H-FIPS sizes.
+/// Every batch layout for a given parameter set whose catalog rows can be resolved.
+#[must_use]
+pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
+    match set {
+        Set::S44 => Relation::ALL
+            .iter()
+            .flat_map(|&relation| {
+                relation
+                    .catalog_d_sigs()
+                    .iter()
+                    .filter_map(move |&d_sig| BatchLayout::new(Set::S44, d_sig, relation))
+            })
+            .collect(),
+        Set::S65 | Set::S87 => CATALOG_D_SIG
+            .iter()
+            .filter_map(|&d_sig| BatchLayout::new(set, d_sig, Relation::Hu))
+            .collect(),
+    }
+}
+
+/// Every checked-in batch layout: currently the 39 ML-DSA-44 layouts across all relations.
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
-    Relation::ALL
-        .iter()
-        .flat_map(|&relation| {
-            relation
-                .catalog_d_sigs()
-                .iter()
-                .filter_map(move |&d_sig| BatchLayout::new(d_sig, relation))
-        })
-        .collect()
+    catalog_batches_for_set(Set::S44)
 }
 
 /// Every distinct scalar (precommitted-producer) layout of `family` needed by `batches`,
@@ -490,13 +602,17 @@ mod tests {
 
     #[test]
     fn group_shapes_match_spec_section_4() {
-        let counts = |relation| Group::ALL.map(|group| group.num_polynomials(relation));
-        assert_eq!(counts(Relation::Hu), [4, 8, 6, 12, 12, 4, 7]);
-        assert_eq!(counts(Relation::HExact), [4, 9, 6, 12, 12, 4, 7]);
-        assert_eq!(counts(Relation::HFips), [4, 12, 6, 13, 13, 4, 7]);
-        let total = |relation| counts(relation).iter().sum::<usize>();
-        assert_eq!((total(Relation::Hu), total(Relation::HExact)), (53, 54));
-        assert_eq!(total(Relation::HFips), 59);
+        let counts = |set, relation| Group::ALL.map(|group| group.num_polynomials(set, relation));
+        assert_eq!(counts(Set::S44, Relation::Hu), [4, 8, 6, 12, 12, 4, 7]);
+        assert_eq!(counts(Set::S44, Relation::HExact), [4, 9, 6, 12, 12, 4, 7]);
+        assert_eq!(counts(Set::S44, Relation::HFips), [4, 12, 6, 13, 13, 4, 7]);
+        assert_eq!(counts(Set::S65, Relation::Hu), [23, 46, 4, 8, 8, 5, 7]);
+        assert_eq!(counts(Set::S87, Relation::Hu), [31, 62, 4, 8, 8, 5, 7]);
+        let total = |set, relation| counts(set, relation).iter().sum::<usize>();
+        assert_eq!((total(Set::S44, Relation::Hu), total(Set::S44, Relation::HExact)), (53, 54));
+        assert_eq!(total(Set::S44, Relation::HFips), 59);
+        assert_eq!(total(Set::S65, Relation::Hu), 101);
+        assert_eq!(total(Set::S87, Relation::Hu), 125);
         for relation in Relation::ALL {
             assert_eq!(Relation::from_id(relation.id()), Some(relation));
             assert_eq!(Relation::parse(relation.flag()), Some(relation));
@@ -504,24 +620,50 @@ mod tests {
         assert_eq!(Relation::from_id(2), Some(Relation::HFips));
         assert_eq!(Relation::from_id(3), None);
         assert_eq!(Relation::parse("fips"), None);
-        // The domain sizes at N* = 2^15.
-        assert_eq!(Group::Main16.logical_vars(15), 25);
-        assert_eq!(Group::Main.logical_vars(15), 25);
-        assert_eq!(Group::Level1.logical_vars(15), 19);
-        assert_eq!(Group::Level2.logical_vars(15), 15);
-        assert_eq!(Group::Level3.logical_vars(15), 14);
-        assert_eq!(Group::Proj.logical_vars(15), 22);
-        assert_eq!(Group::Mult.logical_vars(3), 16);
+        // The domain sizes at N* = 2^15 for 44.
+        assert_eq!(Group::Main16.logical_vars(Set::S44, 15), 25);
+        assert_eq!(Group::Main.logical_vars(Set::S44, 15), 25);
+        assert_eq!(Group::Level1.logical_vars(Set::S44, 15), 19);
+        assert_eq!(Group::Level2.logical_vars(Set::S44, 15), 15);
+        assert_eq!(Group::Level3.logical_vars(Set::S44, 15), 14);
+        assert_eq!(Group::Proj.logical_vars(Set::S44, 15), 22);
+        assert_eq!(Group::Mult.logical_vars(Set::S44, 3), 16);
+        // The domain sizes at N* = 2^15 for 65 and 87.
+        assert_eq!(Group::Main16.logical_vars(Set::S65, 15), 23);
+        assert_eq!(Group::Main.logical_vars(Set::S65, 15), 23);
+        assert_eq!(Group::Level1.logical_vars(Set::S65, 15), 20);
+        assert_eq!(Group::Level2.logical_vars(Set::S65, 15), 15);
+        assert_eq!(Group::Level3.logical_vars(Set::S65, 15), 14);
+        assert_eq!(Group::Proj.logical_vars(Set::S65, 15), 22);
+
+        assert_eq!(Group::Main16.logical_vars(Set::S87, 15), 23);
+        assert_eq!(Group::Main.logical_vars(Set::S87, 15), 23);
+        assert_eq!(Group::Level1.logical_vars(Set::S87, 15), 20);
+        assert_eq!(Group::Level2.logical_vars(Set::S87, 15), 15);
+        assert_eq!(Group::Level3.logical_vars(Set::S87, 15), 14);
+        assert_eq!(Group::Proj.logical_vars(Set::S87, 15), 23);
+
         // Level 3 takes G_2's physical layout: one trailing pad variable at every size.
-        assert_eq!(Group::Level3.logical_vars(13), 12);
-        assert_eq!(Group::Level3.physical_vars(13), 13);
-        assert_eq!(Group::Level3.physical_vars(15), 15);
-        for d_sig in MIN_D_SIG..=MAX_D_SIG {
-            for relation in Relation::ALL {
-                assert_eq!(Group::Level3.layout(d_sig, relation), Group::Level2.layout(d_sig, relation));
+        assert_eq!(Group::Level3.logical_vars(Set::S44, 13), 12);
+        assert_eq!(Group::Level3.physical_vars(Set::S44, 13), 13);
+        assert_eq!(Group::Level3.physical_vars(Set::S44, 15), 15);
+        for set in Set::ALL {
+            let rels: &[Relation] = match set {
+                Set::S44 => &Relation::ALL,
+                Set::S65 | Set::S87 => &[Relation::Hu],
+            };
+            for d_sig in MIN_D_SIG..=MAX_D_SIG {
+                for &relation in rels {
+                    assert_eq!(Group::Level3.layout(set, d_sig, relation), Group::Level2.layout(set, d_sig, relation));
+                }
             }
         }
-        assert_eq!(Group::Main.physical_vars(3), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S44, 3), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S65, 3), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S87, 3), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S65, 4), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S65, 5), 13);
+        assert_eq!(Group::Main.physical_vars(Set::S65, 6), 14);
         for group in Group::ALL {
             assert_eq!(Group::ALL[group.index()], group);
             assert_eq!(group.is_final(), group == Group::Mult);
@@ -542,37 +684,53 @@ mod tests {
 
     #[test]
     fn batch_layouts_for_the_catalog_sizes() {
-        let shape = |d_sig| {
-            BatchLayout::new(d_sig, Relation::Hu)
+        let shape = |set, d_sig| {
+            BatchLayout::new(set, d_sig, Relation::Hu)
                 .unwrap()
                 .groups
                 .map(|group| (group.num_vars(), group.num_polynomials()))
         };
         assert_eq!(
-            shape(8),
+            shape(Set::S44, 8),
             [(18, 4), (18, 8), (13, 6), (13, 12), (13, 12), (15, 4), (16, 7)]
         );
         assert_eq!(
-            shape(15),
+            shape(Set::S44, 15),
             [(25, 4), (25, 8), (19, 6), (15, 12), (15, 12), (22, 4), (16, 7)]
         );
-        assert!(BatchLayout::new(2, Relation::Hu).is_none());
-        assert!(BatchLayout::new(16, Relation::HExact).is_none());
-        let layout = BatchLayout::new(10, Relation::Hu).unwrap();
+        assert_eq!(
+            shape(Set::S65, 8),
+            [(16, 23), (16, 46), (13, 4), (13, 8), (13, 8), (15, 5), (16, 7)]
+        );
+        assert_eq!(
+            shape(Set::S87, 8),
+            [(16, 31), (16, 62), (13, 4), (13, 8), (13, 8), (16, 5), (16, 7)]
+        );
+        assert!(BatchLayout::new(Set::S44, 2, Relation::Hu).is_none());
+        assert!(BatchLayout::new(Set::S44, 16, Relation::HExact).is_none());
+        assert!(BatchLayout::new(Set::S65, 8, Relation::HExact).is_none());
+        assert!(BatchLayout::new(Set::S87, 8, Relation::HFips).is_none());
+        let layout = BatchLayout::new(Set::S44, 10, Relation::Hu).unwrap();
         assert_eq!(layout.total_polynomials(), 53);
         assert_eq!(layout.max_physical_vars(), 20);
         assert_eq!(layout.row_name(), "mldsa-44-p16-batch-1024-mult-final");
         assert_eq!(layout.precommitted().len(), 6);
         assert_eq!(layout.final_group(), PolynomialGroupLayout::new(16, 7));
+        let layout_65 = BatchLayout::new(Set::S65, 10, Relation::Hu).unwrap();
+        assert_eq!(layout_65.total_polynomials(), 101);
+        assert_eq!(layout_65.row_name(), "mldsa-65-p16-batch-1024-mult-final");
+        let layout_87 = BatchLayout::new(Set::S87, 10, Relation::Hu).unwrap();
+        assert_eq!(layout_87.total_polynomials(), 125);
+        assert_eq!(layout_87.row_name(), "mldsa-87-p16-batch-1024-mult-final");
         // H-exact: G_main4 at 9 polynomials, its own row name, every other group unchanged.
-        let exact = BatchLayout::new(15, Relation::HExact).unwrap();
+        let exact = BatchLayout::new(Set::S44, 15, Relation::HExact).unwrap();
         assert_eq!(
             exact.groups.map(|group| (group.num_vars(), group.num_polynomials())),
             [(25, 4), (25, 9), (19, 6), (15, 12), (15, 12), (22, 4), (16, 7)]
         );
         assert_eq!(exact.total_polynomials(), 54);
         assert_eq!(exact.row_name(), "mldsa-44-p16x-batch-32768-mult-final");
-        let hu = BatchLayout::new(15, Relation::Hu).unwrap();
+        let hu = BatchLayout::new(Set::S44, 15, Relation::Hu).unwrap();
         for group in [Group::Main16, Group::Level1, Group::Level2, Group::Level3, Group::Proj, Group::Mult] {
             assert_eq!(exact.groups[group.index()], hu.groups[group.index()]);
         }
@@ -580,6 +738,9 @@ mod tests {
             catalog_batches().len(),
             CATALOG_D_SIG.len() + CATALOG_D_SIG_H_EXACT.len() + CATALOG_D_SIG_H_FIPS.len()
         );
+        assert_eq!(catalog_batches().len(), 39);
+        assert_eq!(catalog_batches_for_set(Set::S65).len(), 13);
+        assert_eq!(catalog_batches_for_set(Set::S87).len(), 13);
     }
 
     #[test]
@@ -588,7 +749,7 @@ mod tests {
             let batches: Vec<BatchLayout> = relations
                 .iter()
                 .flat_map(|&relation| {
-                    [8, 10].map(|d_sig| BatchLayout::new(d_sig, relation).unwrap())
+                    [8, 10].map(|d_sig| BatchLayout::new(Set::S44, d_sig, relation).unwrap())
                 })
                 .collect();
             scalar_layouts(&batches, family)

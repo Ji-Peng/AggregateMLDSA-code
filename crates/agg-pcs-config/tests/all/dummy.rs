@@ -1,7 +1,7 @@
 //! Dummy group tables and claims shared by `tests/all/commit_open.rs` and
 //! `benches/commit_open.rs` (included through `#[path]`).
 
-use agg_pcs_config::catalogs::{Group, Relation};
+use agg_pcs_config::catalogs::{Group, Relation, Set};
 use agg_pcs_config::commit::{evaluate_signed_table, GroupClaim};
 use agg_pcs_config::preset::{BaseField, OpeningField};
 use agg_pcs_config::work_plan::WorkPlan;
@@ -55,7 +55,7 @@ pub fn bases(group: Group, relation: Relation) -> Vec<i64> {
         // The carry, then zero polynomials up to G_2's count (base 1: every cell 0).
         Group::Level3 => {
             let mut bases = vec![wide];
-            bases.resize(Group::Level3.num_polynomials(relation), 1);
+            bases.resize(Group::Level3.num_polynomials(Set::S44, relation), 1);
             bases
         }
         // K_0, K_1 (16-bit digits) and K_2, K_3 (base 8).

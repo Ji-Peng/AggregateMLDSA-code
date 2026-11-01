@@ -196,6 +196,7 @@ name = "agg-pcs-config"
 version = "0.1.0"
 dependencies = [
  "aerie-pcs-config",
+ "agg-witness",
  "akita-challenges",
  "akita-config",
  "akita-error",

@@ -40,7 +40,9 @@
 //! `-- --ignored --exact schedule_catalog_regen::verify_rows`. `AKITA_SCHEDULE_GEN_JOBS` bounds the
 //! planner workers (default 3; the search is memory bound).
 
-use agg_pcs_config::catalogs::{catalog_batches, scalar_layouts, BatchLayout, Family, Relation};
+use agg_pcs_config::catalogs::{
+    catalog_batches, scalar_layouts, BatchLayout, Family, Relation, Set,
+};
 use agg_pcs_config::preset::{
     AggFp64SignedWidth16 as W16, AggFp64SignedWidth4 as Cfg, WIDTH16_FAMILY, WIDTH4_FAMILY,
 };
@@ -89,8 +91,24 @@ fn requested_relations() -> Vec<Relation> {
     }
 }
 
+/// Parameter sets requested by the environment (`AGG_CATALOG_SET=65`), default all.
+fn requested_sets() -> Vec<Set> {
+    match std::env::var("AGG_CATALOG_SET") {
+        Ok(value) if !value.trim().is_empty() && value.trim() != "all" => {
+            let set = match value.trim().to_ascii_lowercase().as_str() {
+                "44" | "s44" | "mldsa44" | "mldsa-44" => Set::S44,
+                "65" | "s65" | "mldsa65" | "mldsa-65" => Set::S65,
+                "87" | "s87" | "mldsa87" | "mldsa-87" => Set::S87,
+                _ => panic!("AGG_CATALOG_SET {value:?} is not a supported set"),
+            };
+            vec![set]
+        }
+        _ => Set::ALL.to_vec(),
+    }
+}
+
 /// Batches requested by the environment (`AGG_CATALOG_D_SIG=8,10` under the relations of
-/// `AGG_CATALOG_RELATION`), defaulting to every checked-in batch.
+/// `AGG_CATALOG_RELATION` and sets of `AGG_CATALOG_SET`), defaulting to every checked-in batch.
 fn requested_batches() -> Vec<BatchLayout> {
     match std::env::var("AGG_CATALOG_D_SIG") {
         Ok(value) if !value.trim().is_empty() => {
@@ -102,21 +120,46 @@ fn requested_batches() -> Vec<BatchLayout> {
                     })
                 })
                 .collect();
-            requested_relations()
-                .into_iter()
-                .flat_map(|relation| d_sigs.iter().map(move |&d_sig| batch(d_sig, relation)))
-                .collect()
+            let mut batches = Vec::new();
+            for set in requested_sets() {
+                for relation in requested_relations() {
+                    for &d_sig in &d_sigs {
+                        if let Some(layout) = BatchLayout::new(set, d_sig, relation) {
+                            batches.push(layout);
+                        }
+                    }
+                }
+            }
+            batches
         }
-        _ => catalog_batches()
-            .into_iter()
-            .filter(|layout| requested_relations().contains(&layout.relation))
-            .collect(),
+        _ => {
+            if std::env::var("AGG_CATALOG_SET").is_ok() {
+                let mut batches = Vec::new();
+                for set in requested_sets() {
+                    for layout in agg_pcs_config::catalogs::catalog_batches_for_set(set) {
+                        if requested_relations().contains(&layout.relation) {
+                            batches.push(layout);
+                        }
+                    }
+                }
+                batches
+            } else {
+                catalog_batches()
+                    .into_iter()
+                    .filter(|layout| {
+                        requested_sets().contains(&layout.set)
+                            && requested_relations().contains(&layout.relation)
+                    })
+                    .collect()
+            }
+        }
     }
 }
 
-fn batch(d_sig: usize, relation: Relation) -> BatchLayout {
-    BatchLayout::new(d_sig, relation)
-        .unwrap_or_else(|| panic!("d_sig {d_sig} is outside the wire range"))
+#[allow(dead_code)]
+fn batch(set: Set, d_sig: usize, relation: Relation) -> BatchLayout {
+    BatchLayout::new(set, d_sig, relation)
+        .unwrap_or_else(|| panic!("{set:?} d_sig {d_sig} {relation:?} is outside the wire range"))
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +444,7 @@ fn update_catalog_rows() {
         let (d_sig, relation) = (layout.d_sig, layout.relation);
         let started = Instant::now();
         for (slot, family) in rows.iter_mut().zip(Family::ALL) {
-            let missing: Vec<PolynomialGroupLayout> = layout
+            let mut missing: Vec<PolynomialGroupLayout> = layout
                 .precommitted_groups()
                 .into_iter()
                 .filter(|(group, _)| group.family() == family)
@@ -412,6 +455,8 @@ fn update_catalog_rows() {
                     })
                 })
                 .collect();
+            missing.sort_by_key(|shape| (shape.num_vars(), shape.num_polynomials()));
+            missing.dedup();
             let workers = offline_planning_worker_count(missing.len());
             let planned = bounded_parallel_filter_map(&missing, workers, |&shape| {
                 let schedule = preplanned_scalar(family, shape)

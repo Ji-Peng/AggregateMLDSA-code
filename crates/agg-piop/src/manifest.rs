@@ -34,7 +34,9 @@
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
 //! variables are the signature index) in the free slot 6 of lookup stack 2.
 
-use agg_pcs_config::catalogs::{BatchLayout, Family, Group, MULTIPLICITY_DIGITS, TABLE_VARS};
+use agg_pcs_config::catalogs::{
+    BatchLayout, Family, Group, Set, MULTIPLICITY_DIGITS, TABLE_VARS,
+};
 pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELATION_H_FIPS};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
 use agg_witness::digits::{Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK, Z_BIT_SLACK};
@@ -518,7 +520,7 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
             .chain(std::iter::once(Column::HINT_SLACK).filter(|_| fips))
             .collect(),
         Group::Level3 => std::iter::once(Column::carry(3, 0))
-            .chain((1..Group::Level3.num_polynomials(relation) as u8).map(Column::Zero))
+            .chain((1..Group::Level3.num_polynomials(Set::S44, relation) as u8).map(Column::Zero))
             .collect(),
         Group::Proj => value_columns(DigitValue::K),
         Group::Mult => (0..MULTIPLICITY_DIGITS as u8)
@@ -550,8 +552,8 @@ impl GroupDescriptor {
             role,
             round: role.round(),
             family: role.family(),
-            logical_vars: role.logical_vars(d_sig),
-            physical_vars: role.physical_vars(d_sig),
+            logical_vars: role.logical_vars(Set::S44, d_sig),
+            physical_vars: role.physical_vars(Set::S44, d_sig),
             columns: group_columns(role, relation),
         }
     }
@@ -637,7 +639,7 @@ impl CommitmentManifest {
     /// The manifest of a batch of `records` live records under `relation`.
     pub fn for_relation(records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(d_sig, relation).expect("d_sig within the wire range");
+        let layout = BatchLayout::new(Set::S44, d_sig, relation).expect("d_sig within the wire range");
         Ok(Self {
             records,
             padded,

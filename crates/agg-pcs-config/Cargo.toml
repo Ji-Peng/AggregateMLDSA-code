@@ -21,6 +21,7 @@ parallel = [
 
 [dependencies]
 aerie-pcs-config = { workspace = true }
+agg-witness = { workspace = true }
 akita-challenges = { workspace = true }
 akita-config = { workspace = true }
 akita-error = { workspace = true }

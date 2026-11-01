@@ -9,7 +9,7 @@ use akita_params::{GroupCommitPhaseParams, OpeningScheduleSelection, ScheduleLoo
 use akita_params::PolynomialGroupLayout;
 
 use crate::catalogs::{
-    BatchLayout, Family, Group, Relation, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
+    BatchLayout, Family, Group, Relation, Set, D_SEG_MAX, MAX_D_SIG, MIN_D_SIG, PCS_MIN_CELLS_LOG2,
 };
 use crate::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4, BaseField};
 
@@ -97,10 +97,16 @@ pub struct WorkPlan {
 }
 
 impl WorkPlan {
-    /// The plan for `records` live records under `relation`.
+    /// The plan for ML-DSA-44 with `records` live records under `relation`.
     pub fn for_records(records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_set(Set::S44, records, relation)
+    }
+
+    /// The plan for `set` with `records` live records under `relation`.
+    pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(d_sig, relation).expect("d_sig within the wire range");
+        let layout = BatchLayout::new(set, d_sig, relation)
+            .ok_or(PlanError::NotInCatalog { d_sig, relation })?;
         if !layout.in_catalog() {
             return Err(PlanError::NotInCatalog { d_sig, relation });
         }
@@ -124,6 +130,12 @@ impl WorkPlan {
         })
     }
 
+    /// The parameter set of the plan.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.layout.set
+    }
+
     /// `log2 N*`.
     #[must_use]
     pub const fn d_sig(&self) -> usize {
@@ -136,7 +148,7 @@ impl WorkPlan {
         self.layout.relation
     }
 
-    /// Committed polynomials of `group` (its layout's count under the plan's relation).
+    /// Committed polynomials of `group` (its layout's count under the plan's parameter set and relation).
     #[must_use]
     pub const fn num_polynomials(&self, group: Group) -> usize {
         self.layout.groups[group.index()].num_polynomials()
@@ -151,7 +163,7 @@ impl WorkPlan {
     /// Logical variables of `group` (its domain).
     #[must_use]
     pub const fn logical_vars(&self, group: Group) -> usize {
-        group.logical_vars(self.d_sig())
+        group.logical_vars(self.set(), self.d_sig())
     }
 
     /// Logical cells per polynomial of `group`.
@@ -163,7 +175,7 @@ impl WorkPlan {
     /// Committed (physical) variables of `group`.
     #[must_use]
     pub const fn physical_vars(&self, group: Group) -> usize {
-        group.physical_vars(self.d_sig())
+        group.physical_vars(self.set(), self.d_sig())
     }
 
     /// Trailing zero pad variables between the logical and physical tables.
@@ -224,14 +236,15 @@ mod tests {
     #[cfg(feature = "schedules")]
     #[test]
     fn plans_exist_for_every_catalog_size() {
-        for layout in crate::catalogs::catalog_batches() {
+        for layout in crate::catalogs::catalog_batches_for_set(Set::S44) {
             let (d_sig, relation) = (layout.d_sig, layout.relation);
             for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
                 let plan = WorkPlan::for_records(records, relation).expect("catalog plan");
                 assert_eq!((plan.d_sig(), plan.relation()), (d_sig, relation));
+                assert_eq!(plan.set(), Set::S44);
                 for group in Group::ALL {
-                    assert_eq!(plan.profile(group).group, group.layout(d_sig, relation));
-                    assert_eq!(plan.num_polynomials(group), group.num_polynomials(relation));
+                    assert_eq!(plan.profile(group).group, group.layout(Set::S44, d_sig, relation));
+                    assert_eq!(plan.num_polynomials(group), group.num_polynomials(Set::S44, relation));
                     assert_eq!(
                         plan.logical_vars(group) + plan.pad_vars(group),
                         plan.physical_vars(group)
