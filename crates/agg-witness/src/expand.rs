@@ -183,6 +183,44 @@ pub fn make_prepared_44(rho: &[u8; 32]) -> PreparedMatrices {
     }
 }
 
+/// [`ExpandedKey::from_bytes_reference`] on the process-wide SIMD engine, for the sets with
+/// polynomial lanes (`K x L` their matrix shape): `ExpandA` runs as one batch of SHAKE128
+/// streams, and each entry's centered coefficients come from the engine's inverse transform
+/// (the values of the reference path: canonical `A_hat` in, `ctr_q` coefficients out).
+pub fn expand_key_engine<P, const K2: usize, const L2: usize>(pk: &[u8]) -> Option<ExpandedKey<P>>
+where
+    P: ParamSet + agg_mldsa_simd::ParamSet,
+{
+    let decoded = crate::native::pk_decode_for::<P>(pk)?;
+    let engine = agg_mldsa_simd::engine_for::<P>();
+    let mut expanded = vec![ExpandedA::<K2, L2>::zero()];
+    engine.expand_a_many_kl::<K2, L2>(&[decoded.rho], &mut expanded);
+    let ex = &expanded[0];
+    let mut a = P::zero_matrix_coeff();
+    let mut expand_blocks = P::zero_expand_blocks();
+    for r in 0..K2 {
+        for s in 0..L2 {
+            let mut poly = ex.a_hat[r][s];
+            engine.intt(agg_mldsa_simd::Prime::Q, &mut poly, agg_mldsa_simd::Scale::Plain, agg_mldsa_simd::Form::Centered);
+            *P::get_coeff_mut(&mut a, r, s) = poly.0;
+            P::set_block(&mut expand_blocks, r, s, usize::from(ex.blocks[r][s]));
+        }
+    }
+    let mut tr = [0u8; TR_BYTES];
+    crate::native::shake256(&[pk], &mut tr);
+    let prepared = <P as ParamSet>::make_prepared(&decoded.rho);
+    Some(ExpandedKey {
+        pk: pk.to_vec(),
+        rho: decoded.rho,
+        t1: decoded.t1,
+        tr,
+        expand_blocks,
+        a,
+        prepared,
+        _marker: PhantomData,
+    })
+}
+
 impl<P: ParamSet> ExpandedKey<P> {
     /// Decodes and expands a public key for parameter set P.
     pub fn from_bytes_for(pk: &[u8]) -> Option<Self> {
@@ -330,6 +368,30 @@ mod tests {
     use super::*;
     use crate::gen;
     use crate::native::{mod_q, sample_in_ball};
+
+    /// The engine expansion of the sets with lanes equals the reference one.
+    #[test]
+    fn engine_key_expansion_matches_the_reference() {
+        fn check<P: ParamSet>(seed: u64)
+        where
+            P::T1: PartialEq,
+            P::MatrixCoeff: PartialEq,
+            P::ExpandBlocks: PartialEq,
+        {
+            for record in gen::records_for::<P>(seed, 3) {
+                let fast = ExpandedKey::<P>::from_bytes_for(&record.pk).unwrap();
+                let reference = ExpandedKey::<P>::from_bytes_reference(&record.pk).unwrap();
+                assert_eq!(fast.pk, reference.pk);
+                assert_eq!(fast.rho, reference.rho);
+                assert!(fast.t1 == reference.t1);
+                assert_eq!(fast.tr, reference.tr);
+                assert!(fast.expand_blocks == reference.expand_blocks, "ExpandA blocks");
+                assert!(*fast.a == *reference.a, "centered A");
+            }
+        }
+        check::<Set65>(651);
+        check::<Set87>(871);
+    }
 
     #[test]
     fn coeff_from_three_bytes_cases() {

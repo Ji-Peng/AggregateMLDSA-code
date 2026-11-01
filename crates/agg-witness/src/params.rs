@@ -411,6 +411,17 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     fn make_prepared(rho: &[u8; 32]) -> Self::Prepared;
     /// Expands an encoded public key for this parameter set.
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>>;
+    /// Strict witness derivation of a tile of records on the process-wide SIMD engine
+    /// ([`crate::fast_lanes::derive_tile`]; ML-DSA-44, whose tables run [`crate::fast`],
+    /// takes the legacy derivation here).
+    ///
+    /// # Errors
+    /// The lowest index whose signature the legacy derivation rejects, with its error.
+    fn derive_lane_tile(
+        records: &[&crate::instance::PublicRecord<Self>],
+        sigs: &[&[u8]],
+        out: &mut [crate::fast_lanes::LaneWitness],
+    ) -> Result<(), (usize, crate::derive::DeriveError)>;
 
     /// Reads entry (r, s) of the NTT matrix.
     fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256];
@@ -502,6 +513,13 @@ impl ParamSet for Set44 {
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
         crate::expand::ExpandedKey::<Set44>::many(&[pk]).pop().flatten()
     }
+    fn derive_lane_tile(
+        records: &[&crate::instance::PublicRecord<Self>],
+        sigs: &[&[u8]],
+        out: &mut [crate::fast_lanes::LaneWitness],
+    ) -> Result<(), (usize, crate::derive::DeriveError)> {
+        crate::fast_lanes::derive_tile_legacy(records, sigs, out)
+    }
 
     fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
     fn get_ntt_mut(m: &mut Self::MatrixNtt, r: usize, s: usize) -> &mut [u64; 256] { &mut m[r][s] }
@@ -589,7 +607,14 @@ impl ParamSet for Set65 {
     fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 5]; 6] }
     fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
-        crate::expand::ExpandedKey::<Set65>::from_bytes_reference(pk)
+        crate::expand::expand_key_engine::<Set65, 6, 5>(pk)
+    }
+    fn derive_lane_tile(
+        records: &[&crate::instance::PublicRecord<Self>],
+        sigs: &[&[u8]],
+        out: &mut [crate::fast_lanes::LaneWitness],
+    ) -> Result<(), (usize, crate::derive::DeriveError)> {
+        crate::fast_lanes::derive_tile(&agg_mldsa_simd::engine_for::<Self>(), records, sigs, out)
     }
 
     fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
@@ -678,7 +703,14 @@ impl ParamSet for Set87 {
     fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 7]; 8] }
     fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
-        crate::expand::ExpandedKey::<Set87>::from_bytes_reference(pk)
+        crate::expand::expand_key_engine::<Set87, 8, 7>(pk)
+    }
+    fn derive_lane_tile(
+        records: &[&crate::instance::PublicRecord<Self>],
+        sigs: &[&[u8]],
+        out: &mut [crate::fast_lanes::LaneWitness],
+    ) -> Result<(), (usize, crate::derive::DeriveError)> {
+        crate::fast_lanes::derive_tile(&agg_mldsa_simd::engine_for::<Self>(), records, sigs, out)
     }
 
     fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }

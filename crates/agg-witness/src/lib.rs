@@ -20,6 +20,7 @@ pub mod derive;
 pub mod digits;
 pub mod expand;
 pub mod fast;
+pub mod fast_lanes;
 pub mod gen;
 pub mod hfips;
 pub mod instance;

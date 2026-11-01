@@ -43,6 +43,7 @@ use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
 use agg_mldsa_simd::{Engine, HuCols};
 use agg_witness::derive::{derive_with_t, derive_with_t_for, DeriveError};
 use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
+use agg_witness::fast_lanes::LaneWitness;
 use agg_witness::hfips::honest_coeff;
 use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
@@ -806,18 +807,49 @@ impl MainTables {
             });
         }
         let count = instance.records.len();
+        if P::SET == Set::S44 {
+            return Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+                let mut slack = Vec::with_capacity(views.len());
+                for (k, (wide, narrow)) in views.iter_mut().enumerate() {
+                    let i = first + k;
+                    let values = match instance.records.get(i) {
+                        None => RecordValues::<P>::zeroed(),
+                        Some(record) => {
+                            let t: Vec<[i32; N]> = (0..P::K).map(|row| record.t[row]).collect();
+                            let witness =
+                                derive_with_t_for::<P>(&record.key, &record.mu, signatures[i], &record.c_tilde, &t)
+                                    .map_err(|e| SourceTableError::Derive(i, e))?;
+                            RecordValues::<P> { z: witness.z, u: witness.u, v: witness.v, w1: witness.w1 }
+                        }
+                    };
+                    slack.push(encoder.encode_values(&values, wide, narrow)?);
+                }
+                Ok(slack)
+            });
+        }
+        // The sets with polynomial lanes derive each tile on the SIMD engine
+        // (`agg_witness::fast_lanes`; its errors are the legacy derivation's).
         Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+            let live = first.min(count)..(first + views.len()).min(count);
+            let records: Vec<&PublicRecord<P>> = instance.records[live.clone()].iter().collect();
+            let mut derived = vec![LaneWitness::zero::<P>(); live.len()];
+            P::derive_lane_tile(&records, &signatures[live], &mut derived)
+                .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
             let mut slack = Vec::with_capacity(views.len());
             for (k, (wide, narrow)) in views.iter_mut().enumerate() {
-                let i = first + k;
-                let values = match instance.records.get(i) {
+                let values = match derived.get(k) {
                     None => RecordValues::<P>::zeroed(),
-                    Some(record) => {
-                        let t: Vec<[i32; N]> = (0..P::K).map(|row| record.t[row]).collect();
-                        let witness =
-                            derive_with_t_for::<P>(&record.key, &record.mu, signatures[i], &record.c_tilde, &t)
-                                .map_err(|e| SourceTableError::Derive(i, e))?;
-                        RecordValues::<P> { z: witness.z, u: witness.u, v: witness.v, w1: witness.w1 }
+                    Some(w) => {
+                        let mut values = RecordValues::<P>::zeroed();
+                        for (dest, src) in values.z.as_mut().iter_mut().zip(&w.z) {
+                            *dest = src.0.map(i64::from);
+                        }
+                        for (r, row) in w.rows.iter().enumerate() {
+                            values.u[r] = row.u.0.map(i64::from);
+                            values.v[r] = row.v.0.map(i64::from);
+                            values.w1[r] = row.w1;
+                        }
+                        values
                     }
                 };
                 slack.push(encoder.encode_values(&values, wide, narrow)?);
