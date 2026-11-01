@@ -35,7 +35,7 @@ use agg_witness::params::{ParamSet, Set, N, TR_BYTES};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::public_data::{eq_correlation, negacyclic_kernel_into};
+use crate::public_data::eq_correlation;
 use crate::OpeningField as E;
 
 /// Variables of the coefficient index `j`.
@@ -415,24 +415,15 @@ impl LanePublicData {
             )
     }
 
-    /// `A~_{s} = sum_rho gammas[rho] A[rho, s]` of key `key`, one polynomial per column.
-    fn combined(&self, key: usize, gammas: &[E]) -> Vec<Vec<E>> {
-        let a = &self.keys[key].a;
-        (0..self.l)
-            .map(|s| {
-                (0..N)
-                    .map(|j| {
-                        (0..self.k).fold(E::zero(), |acc, rho| {
-                            acc + gammas[rho].mul_i64(i64::from(a[(rho * self.l + s) * N + j]))
-                        })
-                    })
-                    .collect()
-            })
-            .collect()
+    /// The matrix of live record `i`, flat in `(rho, s, j)` order.
+    fn matrix(&self, i: usize) -> &[i32] {
+        &self.keys[self.key_of[i]].a
     }
 
     /// The ring weights `w_A^(s)` on the main domain `(j', i)` (`N* 256` cells each, zero on
-    /// padded records) for the point `r2 = r^(2)` and the row coefficients `gammas`.
+    /// padded records) for the point `r2 = r^(2)` and the row coefficients `gammas`: each
+    /// record combines its rows with `eq(r^(2)_sig, i) gamma_rho`, transforms and writes each
+    /// column once (`agg_simd::negacyclic::lane_ring_weight_rows`).
     ///
     /// # Panics
     /// If `gammas` does not have `k` entries or `r2` is not a main-domain point.
@@ -441,38 +432,23 @@ impl LanePublicData {
         assert_eq!(gammas.len(), self.k, "one coefficient per row");
         let (coef, sig) = self.split(r2);
         let eq_sig = eq_table(sig);
-        // One transform per distinct key and column; records scale it by eq(r_sig, i).
-        let kernels: Vec<Vec<Vec<E>>> = (0..self.keys.len())
-            .into_par_iter()
-            .map(|key| {
-                let mut scratch = vec![E::zero(); N];
-                self.combined(key, gammas)
-                    .into_iter()
-                    .map(|a| {
-                        let mut out = vec![E::zero(); N];
-                        negacyclic_kernel_into(&a, coef, &mut out, &mut scratch);
-                        out
-                    })
-                    .collect()
-            })
-            .collect();
-        let len = self.padded * N;
-        (0..self.l)
-            .map(|s| {
-                let mut table = vec![E::zero(); len];
-                table
-                    .par_chunks_mut(N)
-                    .take(self.records())
-                    .enumerate()
-                    .for_each(|(i, out)| {
-                        let kernel = &kernels[self.key_of[i]][s];
-                        for (slot, &value) in out.iter_mut().zip(kernel) {
-                            *slot = eq_sig[i] * value;
-                        }
-                    });
-                table
-            })
-            .collect()
+        let matrix = |i: usize| self.matrix(i);
+        agg_simd::negacyclic::lane_ring_weight_rows(self.records(), self.l, &matrix, &eq_sig, gammas, coef, self.padded * N)
+    }
+
+    /// [`Self::ring_weight_tables`] as lane-major canonical planes for the plane-layout
+    /// kernels: column `s` holds words `2 s N* 256 .. 2 (s + 1) N* 256`, its first coordinate
+    /// plane then its second (`agg_simd::negacyclic::lane_ring_weight_planes`).
+    ///
+    /// # Panics
+    /// As [`Self::ring_weight_tables`].
+    #[must_use]
+    pub fn ring_weight_planes(&self, r2: &[E], gammas: &[E]) -> agg_simd::buf::AlignedVec<u64> {
+        assert_eq!(gammas.len(), self.k, "one coefficient per row");
+        let (coef, sig) = self.split(r2);
+        let eq_sig = eq_table(sig);
+        let matrix = |i: usize| self.matrix(i);
+        agg_simd::negacyclic::lane_ring_weight_planes(self.records(), self.l, &matrix, &eq_sig, gammas, coef, self.padded * N)
     }
 
     /// `w_A^(s)(r3)` for every column `s` (the verifier's terminal values): one dot product
@@ -540,6 +516,16 @@ mod tests {
         let gammas = point(&mut rng, k);
         let tables = public.ring_weight_tables(&r2, &gammas);
         assert_eq!(tables.len(), l);
+        // The planes hold the same values, column after column.
+        let planes = public.ring_weight_planes(&r2, &gammas);
+        let rows = n_star * N;
+        assert_eq!(planes.len(), 2 * l * rows);
+        for (s, table) in tables.iter().enumerate() {
+            for (x, value) in table.iter().enumerate() {
+                let (c0, c1) = (planes[2 * s * rows + x], planes[(2 * s + 1) * rows + x]);
+                assert_eq!((value.c0().to_canonical_u64(), value.c1().to_canonical_u64()), (c0, c1), "w_A^({s})[{x}]");
+            }
+        }
         let z: Vec<Vec<i64>> = (0..l)
             .map(|_| (0..n_star * N).map(|_| rng.below(1 << 20) as i64 - (1 << 19)).collect())
             .collect();

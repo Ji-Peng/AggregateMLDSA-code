@@ -573,3 +573,41 @@ fn padded_fills_and_extreme_bottoms_match_direct_sums() {
         }
     }
 }
+#[test]
+fn lane_ring_weights_match_the_four_row_table_and_each_other() {
+ use agg_simd::negacyclic::{lane_ring_weight_planes,lane_ring_weight_rows,ring_weights,Matrix};
+ let mut seed=2027;
+ let mut rk=|s:&mut u64|K::new(F::from_u64(random(s)%P),F::from_u64(random(s)%P));
+ // Three records, the last with extreme coefficients, and one padded record.
+ let (records,rows)=(3,4*256);
+ for k in [4_usize,6,8] {
+  let l=if k==4 {4} else {k-1};
+  let flat:Vec<Vec<i32>>=(0..records).map(|i|(0..k*l*256).map(|x|{
+   if i==2 {if x%2==0 {(1<<23)-1} else {-(1<<23)+1}} else {(random(&mut seed)%(1<<24)) as i32-(1<<23)+1}
+  }).collect()).collect();
+  let eq_sig:Vec<K>=(0..4).map(|_|rk(&mut seed)).collect();
+  let mut gammas:Vec<K>=(0..k).map(|_|rk(&mut seed)).collect();
+  gammas[0]=K::new(F::from_u64(P-1),F::from_u64(P-1));
+  let coef:Vec<K>=(0..8).map(|_|rk(&mut seed)).collect();
+  let a=|i:usize|flat[i].as_slice();
+  let planes=lane_ring_weight_planes(records,l,&a,&eq_sig,&gammas,&coef,rows);
+  let tables=lane_ring_weight_rows(records,l,&a,&eq_sig,&gammas,&coef,rows);
+  for s in 0..l {for x in 0..rows {
+   assert_eq!(scalar::get((&planes[2*s*rows..(2*s+1)*rows],&planes[(2*s+1)*rows..(2*s+2)*rows]),x),tables[s][x],"k={k}, s={s}, x={x}");
+  }}
+  if k==4 {
+   // The four-row table of ML-DSA-44 with the row weights in place of the coefficients.
+   let matrices:Vec<Box<Matrix>>=flat.iter().map(|f|{
+    let mut m=Box::new([[[0_i32;256];4];4]);
+    for rho in 0..4 {for s in 0..4 {m[rho][s].copy_from_slice(&f[(rho*4+s)*256..(rho*4+s+1)*256]);}}
+    m
+   }).collect();
+   let refs:Vec<&Matrix>=matrices.iter().map(|m|&**m).collect();
+   let old=ring_weights(&refs,&eq_sig,&gammas,&coef,4*rows);
+   let (o0,o1)=old.planes();
+   for i in 0..4 {for s in 0..4 {for j in 0..256 {
+    assert_eq!(scalar::get((o0,o1),1024*i+256*s+j),tables[s][256*i+j],"record {i}, column {s}, coefficient {j}");
+   }}}
+  }
+ }
+}

@@ -47,7 +47,7 @@
 //! the projection identity, whose `v` side has one weight `W^(rho)` per lane of `v`
 //! (`projection::lane_weight_tables`): 105 coefficients for ML-DSA-65, 132 for ML-DSA-87.
 
-use agg_witness::params::{GAMMA2, OMEGA, Q, W1_BITS};
+use agg_witness::params::{GAMMA2, N, OMEGA, Q, W1_BITS};
 use jolt_field::{One, Ring, Zero};
 
 use crate::claims::{bit_columns, Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
@@ -732,6 +732,28 @@ impl RingInputs<'_> {
 }
 
 /// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
+/// The lane ring weights `w_A^(s)` of the sets with polynomial lanes, in the layout of the
+/// stage kernels.
+enum RingWeights {
+    /// One `K` table per column `s`.
+    Rows(Vec<Vec<E>>),
+    /// Lane-major canonical planes of `rows` rows per column.
+    Planes(agg_simd::buf::AlignedVec<u64>, usize),
+}
+
+impl RingWeights {
+    /// The lane of column `s`.
+    fn lane(&self, s: usize) -> Lane<'_> {
+        match self {
+            Self::Rows(tables) => Lane::Source(Source::Field(&tables[s])),
+            Self::Planes(buf, rows) => {
+                let (c0, c1) = buf[2 * s * rows..2 * (s + 1) * rows].split_at(*rows);
+                Lane::Source(Source::PlaneSlice((c0, c1)))
+            }
+        }
+    }
+}
+
 /// `tables` holds `w_A` (ML-DSA-44) and `W`; `ring` the ring inputs, which the caller may
 /// compute before the join because they depend only on `r^(2)` and public data.
 #[allow(clippy::too_many_arguments)]
@@ -799,9 +821,19 @@ fn prove_with(
             let gammas = draw_gammas(&spec, &claims, transcript)?;
             let rows = Gammas::new(manifest);
             let row_gammas: Vec<E> = (0..rows.rings).map(|rho| gammas[rows.ring(rho)]).collect();
-            let ring_tables = public.ring_weight_tables(&points.r2, &row_gammas);
+            let clock = std::time::Instant::now();
+            // The plane-layout kernels read the weights as canonical planes, built in place;
+            // the row layout reads one `K` table per column.
+            let ring = if crate::kernel::layout() == crate::kernel::Layout::Plane {
+                RingWeights::Planes(public.ring_weight_planes(&points.r2, &row_gammas), public.padded_records() * N)
+            } else {
+                RingWeights::Rows(public.ring_weight_tables(&points.r2, &row_gammas))
+            };
+            if std::env::var_os("AGG_STAGE_TRACE").is_some() {
+                eprintln!("weights: lane w_A {:.1} ms", clock.elapsed().as_secs_f64() * 1e3);
+            }
             let resolve = |id| match id {
-                LaneId::Weight(WeightId::Ring(s)) => Lane::Source(Source::Field(&ring_tables[usize::from(s)])),
+                LaneId::Weight(WeightId::Ring(s)) => ring.lane(usize::from(s)),
                 other => tables.lane(other),
             };
             prove_stage_drawn(&spec, manifest, points, &claims, gammas, resolve, None, transcript, check)?

@@ -306,3 +306,224 @@ unsafe fn kernel_wide<B:crate::wide::Simd>(a:Planes<'_>,contexts:&[Context],out0
 }
 #[cfg(target_arch="x86_64")]
 crate::wide::entry_points!(kernel_wide => kernel_w8, kernel_w4; (a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64));
+
+// ---------------------------------------------------------------------------------------
+// Lane ring weights: the parameter sets whose vector index is a polynomial lane combine `R`
+// rows of one column `s` per record (ML-DSA-65: 6, ML-DSA-87: 8) and write one table per
+// column. The kernels below are the `R`-row counterparts of `combine_dagger` and its
+// backends; ML-DSA-44 keeps the four-row functions above.
+// ---------------------------------------------------------------------------------------
+
+/// Rows of one column at most (the largest `k` of FIPS 204).
+pub const LANE_ROWS_MAX:usize=8;
+
+/// A raw plane pointer shared by the record tasks, each writing its own disjoint rows.
+#[derive(Clone,Copy)]
+struct Out(*mut u64);
+// SAFETY: the tasks write disjoint ranges of one allocation that outlives them.
+unsafe impl Send for Out {}
+// SAFETY: as above; the pointer is only written through, never read.
+unsafe impl Sync for Out {}
+impl Out {
+ /// The pointer `offset` words further (a method, so closures capture the whole wrapper).
+ fn at(self,offset:usize)->*mut u64 {self.0.wrapping_add(offset)}
+}
+
+/// The daggered combination `sum_rho w_rho rows[rho]` (`rows[rho]` is `A[rho][s]`) in scalar
+/// arithmetic, as [`combine_dagger_scalar`]: `R <= 8` products of a canonical weight and a
+/// shifted coefficient in `(0, 2^24]` sum below `2^91` in one `u128` per coordinate, and
+/// `reduce3` takes the high word below `2^27`; `correction = 2^23 sum_rho w_rho` is
+/// subtracted once.
+fn combine_lane_scalar<const R:usize>(rows:&[&[i32;256];R],weights:&[[u64;2];R],correction:[u64;2],out:(&mut [u64;256],&mut [u64;256])) {
+ for j in 0..256 {
+  let k=(256-j)&255;
+  let mut acc=[0u128;2];
+  for rho in 0..R {
+   let x=i64::from(rows[rho][k]);
+   let v=(if j==0 {x} else {-x}+(1<<23)) as u64;
+   acc[0]+=u128::from(weights[rho][0])*u128::from(v);
+   acc[1]+=u128::from(weights[rho][1])*u128::from(v);
+  }
+  out.0[j]=sub_mod(reduce3(acc[0] as u64,(acc[0]>>64) as u64,0),correction[0]);
+  out.1[j]=sub_mod(reduce3(acc[1] as u64,(acc[1]>>64) as u64,0),correction[1]);
+ }
+}
+fn lane_scalar_weights<const R:usize>(weights:&[K;R])->([[u64;2];R],[u64;2]) {
+ let c=|x:K|[x.c0().to_canonical_u64(),x.c1().to_canonical_u64()];
+ let correction=weights.iter().copied().fold(K::zero(),|a,b|a+b)*K::from_u64(1<<23);
+ (weights.map(c),c(correction))
+}
+fn combine_lane<const R:usize>(rows:&[&[i32;256];R],weights:&[K;R],out:PlanesMut<'_>) {
+ #[cfg(target_arch="x86_64")]
+ // SAFETY: the backend check guarantees IFMA; the output planes hold 256 words each.
+ if backend()==Backend::Avx512 {unsafe {return combine_lane_vector::<R>(rows,weights,out);}}
+ #[cfg(target_arch="x86_64")]
+ {let (o0,o1)=(out.0.as_mut_ptr(),out.1.as_mut_ptr());
+  match backend() {
+   // SAFETY: the backend check guarantees the entry point's features; 256 words per plane.
+   Backend::Avx512F=>{unsafe {combine_lane_w8::<R>(rows,weights,o0,o1);}return;}
+   // SAFETY: as above.
+   Backend::Avx2=>{unsafe {combine_lane_w4::<R>(rows,weights,o0,o1);}return;}
+   _=>{}
+  }}
+ let (w,correction)=lane_scalar_weights(weights);
+ let (o0,o1):(&mut [u64;256],&mut [u64;256])=(out.0.try_into().expect("256 coefficients"),out.1.try_into().expect("256 coefficients"));
+ combine_lane_scalar::<R>(rows,&w,correction,(o0,o1));
+}
+/// [`combine_vector`] for `R <= 8` rows: per term the low digit gains below `2^52`, the
+/// middle digit below `2^24 + 2^36` and the top digit nothing (the high 12-bit limb of a
+/// weight times a coefficient below `2^24` is below `2^36`), so eight terms keep every digit
+/// far inside 64 bits and below the input bound of `red3`.
+#[cfg(target_arch="x86_64")]
+#[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
+unsafe fn combine_lane_vector<const R:usize>(rows:&[&[i32;256];R],weights:&[K;R],out:PlanesMut<'_>) {unsafe {
+ use crate::x86::*;use std::arch::x86_64::*;
+ let lanes=_mm512_set_epi64(7,6,5,4,3,2,1,0);
+ let w0:[L52;R]=std::array::from_fn(|i|split52(bc(weights[i].c0().to_canonical_u64())));
+ let w1:[L52;R]=std::array::from_fn(|i|split52(bc(weights[i].c1().to_canonical_u64())));
+ let correction=weights.iter().copied().fold(K::zero(),|a,b|a+b)*K::from_u64(1<<23);
+ let c0=bc(correction.c0().to_canonical_u64());let c1=bc(correction.c1().to_canonical_u64());
+ for j in (0..256).step_by(8) {
+  let idx=and(sub(z(),add(bc(j as u64),lanes)),bc(255));let negative=_mm512_cmpneq_epi64_mask(idx,z());
+  let mut re=a3();let mut im=a3();
+  for rho in 0..R {
+   let x=_mm512_cvtepi32_epi64(_mm512_i64gather_epi32::<4>(idx,rows[rho].as_ptr()));
+   let x=_mm512_mask_sub_epi64(x,negative,z(),x);let k=add(x,bc(1<<23));
+   re.a=lo(re.a,w0[rho].l,k);re.b=hi(re.b,w0[rho].l,k);re.b=lo(re.b,w0[rho].h,k);re.c=hi(re.c,w0[rho].h,k);
+   im.a=lo(im.a,w1[rho].l,k);im.b=hi(im.b,w1[rho].l,k);im.b=lo(im.b,w1[rho].h,k);im.c=hi(im.c,w1[rho].h,k);
+  }
+  store(out.0.as_mut_ptr().add(j),sub_mod(red3(re),c0));store(out.1.as_mut_ptr().add(j),sub_mod(red3(im),c1));
+ }
+}}
+/// [`combine_wide`] for `R <= 8` rows: each [`crate::wide::mac32`] adds below `2^32` to a limb,
+/// far inside the accumulator's limit.
+#[cfg(target_arch="x86_64")]
+#[inline(always)]
+unsafe fn combine_lane_body<B:crate::wide::Simd,const R:usize>(rows:&[&[i32;256];R],weights:&[K;R],o0:*mut u64,o1:*mut u64) {
+ use crate::wide::*;
+ let mut dagger=[[0_u64;256];R];
+ for rho in 0..R {for j in 0..256 {
+  let k=if j==0 {0} else {256-j};let sign=if j==0 {1} else {-1};
+  dagger[rho][j]=(sign*i64::from(rows[rho][k])+I32_SHIFT as i64) as u64;
+ }}
+ let correction=weights.iter().copied().fold(K::zero(),|x,y|x+y)*K::from_u64(I32_SHIFT);
+ // SAFETY: the caller guarantees the backend's features and 256 writable words per plane.
+ unsafe {
+  let w:[_;R]=std::array::from_fn(|rho|{let x=bck::<B>(weights[rho]);(split::<B>(x.0),split::<B>(x.1))});
+  let correction=bck::<B>(correction);
+  for j in (0..256).step_by(B::LANES) {
+   let mut acc=acck::<B>();
+   for rho in 0..R {let k=B::load(dagger[rho].as_ptr().add(j));mac32::<B>(&mut acc.0,w[rho].0,k);mac32::<B>(&mut acc.1,w[rho].1,k);}
+   let v=subk::<B>(redk::<B>(acc),correction);
+   B::store(o0.add(j),v.0);B::store(o1.add(j),v.1);
+  }
+ }
+}
+#[cfg(target_arch="x86_64")]
+#[target_feature(enable="avx512f")]
+unsafe fn combine_lane_w8<const R:usize>(rows:&[&[i32;256];R],weights:&[K;R],o0:*mut u64,o1:*mut u64) {
+ // SAFETY: the caller guarantees AVX-512F and 256 writable words per plane.
+ unsafe {combine_lane_body::<crate::wide::W8,R>(rows,weights,o0,o1)}
+}
+#[cfg(target_arch="x86_64")]
+#[target_feature(enable="avx2")]
+unsafe fn combine_lane_w4<const R:usize>(rows:&[&[i32;256];R],weights:&[K;R],o0:*mut u64,o1:*mut u64) {
+ // SAFETY: the caller guarantees AVX2 and 256 writable words per plane.
+ unsafe {combine_lane_body::<crate::wide::W4,R>(rows,weights,o0,o1)}
+}
+
+/// The rows `A[rho][s]`, `rho < R`, of column `s` of a matrix stored flat in `(rho, s, j)`
+/// order with `l` columns.
+fn lane_rows<const R:usize>(a:&[i32],l:usize,s:usize)->[&[i32;256];R] {
+ std::array::from_fn(|rho|a[(rho*l+s)*256..(rho*l+s+1)*256].try_into().expect("256 coefficients"))
+}
+
+fn lane_planes_into<'a,const R:usize>(records:usize,l:usize,a:&(dyn Fn(usize)->&'a [i32]+Sync),eq_sig:&[K],gammas:&[K],contexts:&[Context],rows:usize,out:Out) {
+ (0..rows/256).into_par_iter().for_each(|i| {
+  let plane=|s:usize,c:usize|out.at(2*s*rows+c*rows+256*i);
+  if i>=records {
+   for s in 0..l {for c in 0..2 {
+    // SAFETY: record i owns rows 256 i .. 256 (i + 1) of every plane of every lane.
+    unsafe {std::ptr::write_bytes(plane(s,c),0,256);}
+   }}
+   return;
+  }
+  let matrix=a(i);
+  let weights:[K;R]=std::array::from_fn(|rho|eq_sig[i]*gammas[rho]);
+  let mut a0=[0u64;256];let mut a1=[0u64;256];
+  for s in 0..l {
+   combine_lane::<R>(&lane_rows::<R>(matrix,l,s),&weights,(&mut a0,&mut a1));
+   // SAFETY: record i owns rows 256 i .. 256 (i + 1) of lane s; kernel_raw dispatches on the
+   // backend and writes 256 words per plane.
+   unsafe {kernel_raw((&a0,&a1),contexts,plane(s,0),plane(s,1));}
+  }
+ });
+}
+
+/// The lane ring weights `w_A^(s)(j, i) = eq_sig[i] K_{A~_{i,s}, coef}[j]` with
+/// `A~_{i,s} = sum_rho gammas[rho] A_i[rho][s]`, for the `l` columns `s`, as lane-major
+/// canonical planes: lane `s` holds words `2 s rows .. 2 (s + 1) rows`, its first coordinate
+/// plane then its second, and record `i` sits at rows `256 i .. 256 (i + 1)`; the rows of
+/// records `i >= records` are zero. `a(i)` is the matrix of record `i` flat in `(rho, s, j)`
+/// order (`|A| < 2^23`), with `k = gammas.len()` rows of `l` columns. Each record is
+/// combined, transformed and written once per column, as [`ring_weights`] does for the
+/// four-row matrices of ML-DSA-44.
+///
+/// # Panics
+/// For `k` other than 4, 6 or 8, a `coef` of other than 8 coordinates, or `rows` not a
+/// multiple of 256 or below `256 records`.
+pub fn lane_ring_weight_planes<'a>(records:usize,l:usize,a:&(dyn Fn(usize)->&'a [i32]+Sync),eq_sig:&[K],gammas:&[K],coef:&[K],rows:usize)->AlignedVec<u64> {
+ assert_eq!(coef.len(),8);assert_eq!(rows%256,0);assert!(records<=rows/256);assert!(eq_sig.len()>=records);
+ let contexts:Vec<_>=coef.iter().copied().map(Context::new).collect();
+ let mut raw=AlignedVec::<u64>::uninit(rows.checked_mul(2*l).expect("ring table size"));
+ let out=Out(raw.as_mut_ptr().cast());
+ match gammas.len() {
+  4=>lane_planes_into::<4>(records,l,a,eq_sig,gammas,&contexts,rows,out),
+  6=>lane_planes_into::<6>(records,l,a,eq_sig,gammas,&contexts,rows,out),
+  8=>lane_planes_into::<8>(records,l,a,eq_sig,gammas,&contexts,rows,out),
+  k=>panic!("lane matrices of {k} rows"),
+ }
+ // SAFETY: every record task writes all 256 rows of both planes of every lane.
+ unsafe {raw.assume_init()}
+}
+
+fn lane_rows_into<'a,const R:usize>(records:usize,l:usize,a:&(dyn Fn(usize)->&'a [i32]+Sync),eq_sig:&[K],gammas:&[K],contexts:&[Context],tables:&mut [Box<[std::mem::MaybeUninit<K>]>]) {
+ let len=tables[0].len();
+ let ptrs:Vec<_>=tables.iter_mut().map(|t|Out(t.as_mut_ptr().cast())).collect();
+ (0..len/256).into_par_iter().for_each(|i| {
+  // SAFETY: record i owns entries 256 i .. 256 (i + 1) of every table.
+  let column=|s:usize|unsafe {std::slice::from_raw_parts_mut(ptrs[s].at(0).cast::<std::mem::MaybeUninit<K>>().add(256*i),256)};
+  if i>=records {for s in 0..l {for x in column(s) {x.write(K::zero());}}return;}
+  let matrix=a(i);
+  let (weights,correction)=lane_scalar_weights::<R>(&std::array::from_fn(|rho|eq_sig[i]*gammas[rho]));
+  let mut x0=[0u64;256];let mut x1=[0u64;256];
+  for s in 0..l {
+   combine_lane_scalar::<R>(&lane_rows::<R>(matrix,l,s),&weights,correction,(&mut x0,&mut x1));
+   transform_scalar(&mut x0,&mut x1,contexts);
+   let out=column(s);
+   for t in 0..256 {
+    let j=(t as u8).reverse_bits() as usize;
+    out[j].write(K::new(F::from_u64(x0[t]),F::from_u64(x1[t])));
+   }
+  }
+ });
+}
+
+/// [`lane_ring_weight_planes`] as one row-major `K` table per column (`rows` entries, record
+/// `i` at `256 i + j`) for the tiers without the plane layout, in scalar arithmetic.
+///
+/// # Panics
+/// As [`lane_ring_weight_planes`].
+pub fn lane_ring_weight_rows<'a>(records:usize,l:usize,a:&(dyn Fn(usize)->&'a [i32]+Sync),eq_sig:&[K],gammas:&[K],coef:&[K],rows:usize)->Vec<Vec<K>> {
+ assert_eq!(coef.len(),8);assert_eq!(rows%256,0);assert!(records<=rows/256);assert!(eq_sig.len()>=records);
+ let contexts:Vec<_>=coef.iter().copied().map(Context::new).collect();
+ let mut tables:Vec<_>=(0..l).map(|_|Box::<[K]>::new_uninit_slice(rows)).collect();
+ match gammas.len() {
+  4=>lane_rows_into::<4>(records,l,a,eq_sig,gammas,&contexts,&mut tables),
+  6=>lane_rows_into::<6>(records,l,a,eq_sig,gammas,&contexts,&mut tables),
+  8=>lane_rows_into::<8>(records,l,a,eq_sig,gammas,&contexts,&mut tables),
+  k=>panic!("lane matrices of {k} rows"),
+ }
+ // SAFETY: every record task writes all 256 entries of every table.
+ tables.into_iter().map(|t|unsafe {t.assume_init()}.into_vec()).collect()
+}
