@@ -899,19 +899,16 @@ impl BridgeGroupTables {
         let hint_slack = manifest
             .is_fips()
             .then(|| hint_slack_table(manifest, main.hint_slack()));
-        let direct = (agg_simd::detect::backend() == agg_simd::detect::Backend::Avx512)
-            .then(|| {
-                parity::compute_direct(
-                    &shape,
-                    &bit_lanes,
-                    matrices,
-                    LOOKUP_SHIFT,
-                    hint_slack.as_deref(),
-                )
-            })
-            .transpose()
-            .map_err(SourceTableError::Bridge)?
-            .flatten();
+        // The packed path runs on every tier (only its bit packing has per-tier kernels);
+        // the general path below takes inputs that are not bits.
+        let direct = parity::compute_direct(
+            &shape,
+            &bit_lanes,
+            matrices,
+            LOOKUP_SHIFT,
+            hint_slack.as_deref(),
+        )
+        .map_err(SourceTableError::Bridge)?;
         if let Some(direct) = direct {
             let mut tables = Self {
                 parity1: Some(direct.y1),

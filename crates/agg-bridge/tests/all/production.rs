@@ -42,10 +42,42 @@ fn check_against_reference(n: usize, matrices: &BridgeMatrices, seed: u64) -> Pa
         reference::gf2_composite(&geom, &array, matrices)
     );
     parity::check(&shape, &views, matrices, &w).unwrap();
+    check_direct(&shape, &array, matrices, &w);
     let domains = shape.domains(geom.main_len());
     assert_eq!(w.y.len(), domains.d3_len);
     assert_eq!(w.kappa1[0].len(), 1 << geom.d1());
     w
+}
+
+/// The packed tables equal the general witness in narrow and stacked balanced form.
+fn check_direct(shape: &Shape, lanes: &[&[i8]; W1_BITS], matrices: &BridgeMatrices, w: &ParityWitness) {
+    const SHIFT: i32 = 1 << 15;
+    let direct = parity::compute_direct(shape, lanes, matrices, SHIFT, None).unwrap().expect("bit inputs");
+    let narrow = |t: &[i64]| t.iter().map(|&b| b as i8).collect::<Vec<_>>();
+    let stacked = |columns: &[Vec<i64>], slots: usize| {
+        let cells = columns[0].len();
+        let mut out = vec![-SHIFT; slots * cells];
+        for (slot, column) in out.chunks_mut(cells).zip(columns) {
+            for (o, &k) in slot.iter_mut().zip(column) {
+                *o = k as i32 - SHIFT;
+            }
+        }
+        out
+    };
+    for t in 0..W1_BITS {
+        assert_eq!(direct.y1[t], narrow(&w.y1[t]), "y1 lane {t}");
+        assert_eq!(direct.y2[t], narrow(&w.y2[t]), "y2 lane {t}");
+    }
+    assert_eq!(direct.level1_carries, stacked(&w.kappa1, 8), "level-1 carries");
+    assert_eq!(direct.level2_carries, stacked(&w.kappa2, 8), "level-2 carries");
+    assert_eq!(direct.level3_carries, stacked(std::slice::from_ref(&w.kappa3), 1), "level-3 carries");
+    assert_eq!(direct.y, w.y_bits(), "Y");
+    // A non-bit input takes the general path.
+    let mut tampered = lanes[2].to_vec();
+    tampered[0] = 2;
+    let mut bad = *lanes;
+    bad[2] = &tampered;
+    assert!(parity::compute_direct(shape, &bad, matrices, SHIFT, None).unwrap().is_none());
 }
 
 #[test]

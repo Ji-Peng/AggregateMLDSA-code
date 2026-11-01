@@ -588,6 +588,57 @@ mod avx512 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use std::arch::x86_64::*;
+
+    /// [`super::avx512::pack_six_bits_chunk_avx512`] with 32-lane AVX2 operations.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn pack_six_bits_chunk_avx2(lanes: &[&[i8]; 6], start: usize, out: &mut [u8]) -> bool {
+        // SAFETY: the enclosing function enables AVX2; the caller checked it at run time and
+        // every lane holds at least `start + out.len()` bytes.
+        unsafe {
+            let len = out.len();
+            let vec_len = len / 32 * 32;
+            // A byte outside {0, 1} has a bit set in 0xFE.
+            let high = _mm256_set1_epi8(0xFE_u8 as i8);
+            let mut bad = _mm256_setzero_si256();
+            for offset in (0..vec_len).step_by(32) {
+                let idx = start + offset;
+                let load = |t: usize| _mm256_loadu_si256(lanes[t].as_ptr().add(idx).cast());
+                let (b0, b1, b2, b3, b4, b5) = (load(0), load(1), load(2), load(3), load(4), load(5));
+                let any = _mm256_or_si256(
+                    _mm256_or_si256(_mm256_or_si256(b0, b1), _mm256_or_si256(b2, b3)),
+                    _mm256_or_si256(b4, b5),
+                );
+                bad = _mm256_or_si256(bad, _mm256_and_si256(any, high));
+                // Each b_t is in {0, 1} (checked above), so 16-bit shifts never cross a byte.
+                let p01 = _mm256_or_si256(b0, _mm256_slli_epi16::<1>(b1));
+                let p23 = _mm256_or_si256(_mm256_slli_epi16::<2>(b2), _mm256_slli_epi16::<3>(b3));
+                let p45 = _mm256_or_si256(_mm256_slli_epi16::<4>(b4), _mm256_slli_epi16::<5>(b5));
+                let packed = _mm256_or_si256(p01, _mm256_or_si256(p23, p45));
+                _mm256_storeu_si256(out.as_mut_ptr().add(offset).cast(), packed);
+            }
+            if _mm256_testz_si256(bad, bad) == 0 {
+                return false;
+            }
+            for offset in vec_len..len {
+                let idx = start + offset;
+                let mut byte = 0u8;
+                for t in 0..6 {
+                    let b = lanes[t][idx] as u8;
+                    if b > 1 {
+                        return false;
+                    }
+                    byte |= b << t;
+                }
+                out[offset] = byte;
+            }
+            true
+        }
+    }
+}
+
 /// Pack 6 Boolean `i8` columns of equal length into a single `Vec<u8>` (`six_bits[i] = sum_t b_t[i] << t`).
 /// Returns `None` if any entry is outside `{0, 1}`.
 pub fn pack_six_bits(lanes: &[&[i8]; 6]) -> Option<Vec<u8>> {
@@ -596,7 +647,9 @@ pub fn pack_six_bits(lanes: &[&[i8]; 6]) -> Option<Vec<u8>> {
     let len = lanes[0].len();
     assert!(lanes.iter().all(|l| l.len() == len));
     let ok = AtomicBool::new(true);
-    let simd = backend() == Backend::Avx512;
+    // The kernels use byte compares and shifts only: AVX-512BW without IFMA, or AVX2.
+    let avx512 = crate::detect::avx512_int();
+    let avx2 = crate::detect::avx2();
     let out = crate::buf::fill_vec_par_chunks(len, 1 << 16, |chunk_idx, dst| {
         if !ok.load(Ordering::Relaxed) {
             dst.fill(0);
@@ -604,9 +657,16 @@ pub fn pack_six_bits(lanes: &[&[i8]; 6]) -> Option<Vec<u8>> {
         }
         let start = chunk_idx * (1 << 16);
         #[cfg(target_arch = "x86_64")]
-        if simd {
-            // SAFETY: the call is guarded by the backend check and the length assertions above.
-            let chunk_ok = unsafe { avx512::pack_six_bits_chunk_avx512(lanes, start, dst) };
+        if avx512 || avx2 {
+            // SAFETY: the detector checked the CPU features of the kernel, and every lane
+            // holds `len >= start + dst.len()` bytes (asserted above).
+            let chunk_ok = unsafe {
+                if avx512 {
+                    avx512::pack_six_bits_chunk_avx512(lanes, start, dst)
+                } else {
+                    avx2::pack_six_bits_chunk_avx2(lanes, start, dst)
+                }
+            };
             if !chunk_ok {
                 ok.store(false, Ordering::Relaxed);
             }
@@ -671,6 +731,75 @@ pub fn accumulate_six_lanes_strip(
                 let r = row as usize;
                 acc0[r] += w0;
                 acc5[r] += w5;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar_pack(lanes: &[&[i8]; 6]) -> Option<Vec<u8>> {
+        (0..lanes[0].len())
+            .map(|i| {
+                (0..6).try_fold(0_u8, |byte, t| {
+                    let b = lanes[t][i] as u8;
+                    (b <= 1).then_some(byte | b << t)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn six_bit_packing_matches_the_scalar_definition_on_every_kernel() {
+        // A length that is neither a multiple of 32 nor of 64 exercises the tails.
+        let len = 3 * 64 + 37;
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let columns: Vec<Vec<i8>> = (0..6)
+            .map(|_| {
+                (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        (state & 1) as i8
+                    })
+                    .collect()
+            })
+            .collect();
+        for bad in [None, Some((2, 5)), Some((4, len - 1)), Some((0, 100))] {
+            let mut columns = columns.clone();
+            if let Some((t, i)) = bad {
+                columns[t][i] = if i % 2 == 0 { 2 } else { -1 };
+            }
+            let lanes: [&[i8]; 6] = std::array::from_fn(|t| columns[t].as_slice());
+            let want = scalar_pack(&lanes);
+            assert_eq!(want.is_none(), bad.is_some());
+            assert_eq!(pack_six_bits(&lanes), want, "dispatched, {bad:?}");
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut out = vec![0_u8; len];
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: the CPU has AVX2 and every lane has `len` bytes.
+                    let ok = unsafe { avx2::pack_six_bits_chunk_avx2(&lanes, 0, &mut out) };
+                    assert_eq!(ok, want.is_some(), "AVX2, {bad:?}");
+                    if let Some(want) = &want {
+                        assert_eq!(&out, want, "AVX2");
+                    }
+                }
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512dq")
+                    && std::is_x86_feature_detected!("avx512bw")
+                    && std::is_x86_feature_detected!("avx512vl")
+                {
+                    // SAFETY: the CPU has AVX-512F/DQ/BW/VL and every lane has `len` bytes.
+                    let ok = unsafe { avx512::pack_six_bits_chunk_avx512(&lanes, 0, &mut out) };
+                    assert_eq!(ok, want.is_some(), "AVX-512, {bad:?}");
+                    if let Some(want) = &want {
+                        assert_eq!(&out, want, "AVX-512");
+                    }
+                }
             }
         }
     }

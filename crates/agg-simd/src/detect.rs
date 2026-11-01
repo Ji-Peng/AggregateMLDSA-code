@@ -82,6 +82,35 @@ pub fn available() -> bool {
     }
 }
 
+/// Whether the integer AVX-512 kernels (F/DQ/BW/VL, no IFMA) may run: the CPU has those
+/// features and the `AGG_ISA` cap admits the `avx512` level. Detected once per process.
+pub fn avx512_int() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        let has = std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512dq")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512vl");
+        #[cfg(not(target_arch = "x86_64"))]
+        let has = false;
+        has && cap() >= IsaLevel::Avx512
+    })
+}
+
+/// Whether the AVX2 integer kernels may run: the CPU has AVX2 and the `AGG_ISA` cap admits
+/// the `avx2` level. Detected once per process.
+pub fn avx2() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        let has = std::is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let has = false;
+        has && cap() >= IsaLevel::Avx2
+    })
+}
+
 /// The backend this process may use.
 pub fn backend() -> Backend {
     static BACKEND: OnceLock<Backend> = OnceLock::new();
