@@ -358,7 +358,9 @@ bad set is a union over the list, `L_s` elements. With `L = floor(1/(2 eta sqrt(
 Slim, Slim8` (`r = 1, 2, 3`). Every identity concerns one list element, so there are no pairs.
 
 * Assigned (normative): `e_tie = L_s (nu_s + 3) / 2^128`, `e_eq = L_s (12 + span_log) / 2^128`,
-  `e_round = 2 L_s / 2^128` (`agg_bridge::pow::part_work`).
+  `e_round = 2 L_s / 2^128` (`agg_bridge::pow::part_work`). ML-DSA-87: `e_tie = L_s (nu_s + 4) /
+  2^128` (its public region of mu, a 64-byte `c~` and the constant spans 16 words, so the
+  public claim has four word coordinates).
 * `g = ceil(log2(2^128 e))` per site; nonce `g + 7` bits.
 
 At four full segments (`d = 13`, `S = 4`, `nu_s = 15`, `R = 28`): tie `630 / 900 / 1,260`

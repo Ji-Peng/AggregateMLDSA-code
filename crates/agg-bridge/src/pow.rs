@@ -87,6 +87,9 @@ pub struct TieGeometry {
     pub blocks_log: usize,
     /// Row capacity `log2` of the sponge instance.
     pub nu_s: usize,
+    /// Word coordinates of the sponge's public region (`log2` of its width in words): 3 for
+    /// ML-DSA-44 and ML-DSA-65, 4 for ML-DSA-87 (mu, a 64-byte `c~` and the constant).
+    pub public_vars: usize,
 }
 
 /// `log2 m_3`: the output-row coordinates of `eq_Y`.
@@ -96,11 +99,11 @@ const OUT_VARS: usize = agg_witness::bridge::M3.trailing_zeros() as usize;
 /// ML-DSA-65 and ML-DSA-87, the same `2^13` for every parameter set.
 const RECORD_CHAIN_VARS: usize = 13;
 /// The assigned numerator of the tie site (over `2^128`) with list size `list` for the
-/// sponge commitment: `L (nu_s + 3)`, the public claim's free coordinates (tied-part proof
-/// version 5).
+/// sponge commitment: `L (nu_s + c)`, the public claim's free coordinates (`c` =
+/// [`TieGeometry::public_vars`]; tied-part proof version 5).
 #[must_use]
 pub fn tie_numerator(list: u64, geo: &TieGeometry) -> u64 {
-    list * (geo.nu_s as u64 + 3)
+    list * (geo.nu_s + geo.public_vars) as u64
 }
 
 /// The tie site's difficulty: [`grind_bits_f128`] of [`tie_numerator`].
@@ -203,6 +206,7 @@ mod tests {
             span_log: 2,
             blocks_log: 4,
             nu_s: 15,
+            public_vars: 3,
         };
         assert_eq!(tie_numerator(1, &four), 18);
         assert_eq!(
@@ -229,6 +233,7 @@ mod tests {
             span_log: 0,
             blocks_log: 4,
             nu_s: 13,
+            public_vars: 3,
         };
         assert_eq!(chain_rounds(&one), 26);
         assert_eq!(
@@ -259,6 +264,7 @@ mod tests {
             span_log: 0,
             blocks_log: 0,
             nu_s: 4,
+            public_vars: 3,
         };
         assert_eq!(chain_rounds(&small), 16);
         assert_eq!(tie_numerator(50, &small), 350);

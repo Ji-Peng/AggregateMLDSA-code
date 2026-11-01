@@ -33,7 +33,8 @@
 //! the final vectors of the segments `S..2^span_log` being zero.
 //!
 //! Work (docs/soundness.md): the sponge commitment is bound only to its Johnson list
-//! when these challenges are drawn, so the tie site carries `L_s (nu_s + 3)`, the `eq_Y` site
+//! when these challenges are drawn, so the tie site carries `L_s (nu_s + c)` (`c` the public
+//! region's word coordinates: 3, or 4 for ML-DSA-87), the `eq_Y` site
 //! `L_s (log2 m_3 + span_log)` and every round `2 L_s` ([`agg_bridge::pow::part_work`]); the
 //! nonces (`g + 7` bits, `LE32`) travel in the proof.
 
@@ -535,6 +536,7 @@ impl<'g> TiedPart<'g> {
             span_log: segments.next_power_of_two().trailing_zeros() as usize,
             blocks_log: (d as usize).saturating_sub(layout.block_records_log2()),
             nu_s: capacity_log(n, gate.layout().k_log),
+            public_vars: layout.public_words_log2,
         }
     }
 
@@ -574,6 +576,7 @@ impl<'g> TiedPart<'g> {
             span_log: self.chain.span_log,
             blocks_log: self.chain.mid_vars(),
             nu_s: self.sponge.nu(),
+            public_vars: self.layout.public_words_log2,
         }
     }
 

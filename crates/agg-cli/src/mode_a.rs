@@ -2203,6 +2203,39 @@ mod tests {
     }
 
     #[test]
+    fn plan_digests_of_65_and_87_reproduce_the_script() {
+        // python3 -I docs/scripts/pow_plan.py --set 65|87: mode A at N = N*, default part size,
+        // with the tied parts of the set's sponge gate (four chain lanes, P_pad = 2^11, a
+        // public region of 3 or 4 word coordinates).
+        use agg_keccak::sponge::sponge_gate_for;
+        use agg_piop::pow::PowPlan;
+        use agg_witness::params::Set;
+        let hex = |d: [u8; 32]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let cases: [(Set, u32, FlockProfile, bool, &str); 12] = [
+            (Set::S65, 3, FlockProfile::Slim, true, "09d0b47510834ab04d6b9eafc1b9afd61ff3ce538ea292b6ccc74f8384eaa3a1"),
+            (Set::S65, 10, FlockProfile::Fast, true, "482fb6d4668fcf08df8e3ebd90ba49536a647f7249f2d00eacd4fa29086137a5"),
+            (Set::S65, 13, FlockProfile::Slim, true, "6b31340ea7b8be4c7cdd2c8364f59a6b5c0c803bc557640cfba877f26dac1712"),
+            (Set::S65, 15, FlockProfile::Fast, true, "fa3b618068aab74000424181bc16a5ad9bc686f27856af2b86834ecacc000a4e"),
+            (Set::S65, 15, FlockProfile::Fast, false, "1298836050bd5679cb2fdda08aaad4e89503c96bbba35f5bfda99b06325b34fb"),
+            (Set::S65, 15, FlockProfile::Slim8, true, "1c4a6b3718ad4cd0e2cb768dbf604a1acd1d3b6355fe591bd3ab74f4b5fe2e94"),
+            (Set::S87, 3, FlockProfile::Slim, true, "f82fcfead3bf6d2bdbd26cc8a3f23ba4f178726626efa5204500e48573584754"),
+            (Set::S87, 10, FlockProfile::Fast, true, "470e31983acbea1b02fe0a1ce92792eb4d58a8c22398d9a5d9b684f119a22660"),
+            (Set::S87, 13, FlockProfile::Slim, true, "66dba96201af36606e5cc0715ff7addd2a1fb0b63d089cd6cbd540af3dfd2949"),
+            (Set::S87, 15, FlockProfile::Fast, true, "ffe87bdf123c773fd206afc67c59c3b81c00b1e8e70d837bc7f90fef9a3dccad"),
+            (Set::S87, 15, FlockProfile::Fast, false, "0052e6e8cad1587549889c3d0c81fffeb9b4b577ccf3bddaac25043c8eff1ed7"),
+            (Set::S87, 15, FlockProfile::Slim8, true, "2fcb99afb477f65e296189d5918cc79532fbfcee4e1a3f9c54b22f9cc774dfcb"),
+        ];
+        for (set, d_sig, profile, span, want) in cases {
+            let gate = sponge_gate_for(set);
+            let n = 1 << d_sig;
+            let keccak = keccak_plan(&gate, &Geometry::new(n).unwrap(), DEFAULT_PART_LOG2, span, profile);
+            let manifest = CommitmentManifest::for_set(set, n, Relation::Hu).unwrap();
+            let plan = PowPlan::new(&manifest, profile, &keccak);
+            assert_eq!(hex(plan.digest()), want, "{set} 2^{d_sig} {profile:?} span {span}");
+        }
+    }
+
+    #[test]
     fn part_seeds_are_distinct_per_part_segment_seed_and_record() {
         let rec = [9; 32];
         let a = part_seed(&[1; 32], 0, &rec);
