@@ -736,6 +736,88 @@ pub fn accumulate_six_lanes_strip(
     }
 }
 
+/// Pack 4 Boolean `i8` columns of equal length into one nibble per byte
+/// (`four_bits[i] = sum_t b_t[i] << t`), eight cells per `u64` step (a byte in `{0, 1}` shifted
+/// by at most 3 stays in its byte). Returns `None` if any entry is outside `{0, 1}`.
+pub fn pack_four_bits(lanes: &[&[i8]; 4]) -> Option<Vec<u8>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const NOT_BITS: u64 = 0xFEFE_FEFE_FEFE_FEFE;
+    let len = lanes[0].len();
+    assert!(lanes.iter().all(|l| l.len() == len));
+    let ok = AtomicBool::new(true);
+    let out = crate::buf::fill_vec_par_chunks(len, 1 << 16, |chunk_idx, dst: &mut [u8]| {
+        let start = chunk_idx * (1 << 16);
+        let word = |t: usize, at: usize| {
+            let bytes: [u8; 8] = std::array::from_fn(|b| lanes[t][at + b] as u8);
+            u64::from_le_bytes(bytes)
+        };
+        let full = dst.len() / 8 * 8;
+        let mut bad = 0_u64;
+        for (k, out) in dst[..full].chunks_exact_mut(8).enumerate() {
+            let at = start + 8 * k;
+            let (b0, b1, b2, b3) = (word(0, at), word(1, at), word(2, at), word(3, at));
+            bad |= (b0 | b1 | b2 | b3) & NOT_BITS;
+            out.copy_from_slice(&(b0 | (b1 << 1) | (b2 << 2) | (b3 << 3)).to_le_bytes());
+        }
+        for (offset, slot) in dst.iter_mut().enumerate().skip(full) {
+            let idx = start + offset;
+            let mut byte = 0u8;
+            for (t, lane) in lanes.iter().enumerate() {
+                let b = lane[idx] as u8;
+                bad |= u64::from(b & 0xFE);
+                byte |= (b & 1) << t;
+            }
+            *slot = byte;
+        }
+        if bad != 0 {
+            ok.store(false, Ordering::Relaxed);
+        }
+    });
+    ok.into_inner().then_some(out)
+}
+
+/// Lookup table mapping a nibble `b & 0xF` to four 16-bit lane increments at bit offsets
+/// `0, 16, 32, 48` of a `u64` accumulator.
+const EXPAND_4X16: [u64; 16] = {
+    let mut table = [0u64; 16];
+    let mut b = 0usize;
+    while b < 16 {
+        table[b] = (b as u64 & 1)
+            | (((b as u64 >> 1) & 1) << 16)
+            | (((b as u64 >> 2) & 1) << 32)
+            | (((b as u64 >> 3) & 1) << 48);
+        b += 1;
+    }
+    table
+};
+
+/// Accumulate packed 4-bit inputs `four_bits[zeta]` over the column range `col_start..col_end`
+/// of a sparse matrix (`entries` has `k` row indices per column) into `acc` (lane `t` in the
+/// 16-bit field at bit `16 t`).
+///
+/// Lazy range: each field holds `[0, 65535]`; the caller's row-weight cap (2,047 for the
+/// production bridge levels 1 and 2) keeps every row sum below it, so no carry crosses a field.
+#[inline]
+pub fn accumulate_four_lanes_strip(
+    four_bits: &[u8],
+    entries: &[u32],
+    k: usize,
+    col_start: usize,
+    col_end: usize,
+    acc: &mut [u64],
+) {
+    for (zeta, &b) in four_bits[col_start..col_end].iter().enumerate() {
+        if b != 0 {
+            let w = EXPAND_4X16[(b & 0xF) as usize];
+            let col_off = (col_start + zeta) * k;
+            for &row in &entries[col_off..col_off + k] {
+                acc[row as usize] += w;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +882,51 @@ mod tests {
                         assert_eq!(&out, want, "AVX-512");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn four_bit_packing_and_accumulation_match_the_definition() {
+        let len = 3 * 64 + 37;
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let columns: Vec<Vec<i8>> = (0..4)
+            .map(|_| {
+                (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        (state & 1) as i8
+                    })
+                    .collect()
+            })
+            .collect();
+        let lanes: [&[i8]; 4] = std::array::from_fn(|t| columns[t].as_slice());
+        let packed = pack_four_bits(&lanes).expect("bits");
+        for i in 0..len {
+            let want: u8 = (0..4).map(|t| (columns[t][i] as u8) << t).sum();
+            assert_eq!(packed[i], want);
+        }
+        for bad_at in [5, len - 1] {
+            let mut tampered = columns[2].clone();
+            tampered[bad_at] = 2;
+            let mut bad = lanes;
+            bad[2] = &tampered;
+            assert!(pack_four_bits(&bad).is_none());
+        }
+        // Two rows per column: rows (c mod 7, (c + 3) mod 7).
+        let k = 2;
+        let entries: Vec<u32> = (0..len).flat_map(|c| [(c % 7) as u32, ((c + 3) % 7) as u32]).collect();
+        let mut acc = vec![0u64; 7];
+        accumulate_four_lanes_strip(&packed, &entries, k, 0, len, &mut acc);
+        for row in 0..7 {
+            for t in 0..4 {
+                let want: u64 = (0..len)
+                    .filter(|&c| entries[2 * c] as usize == row || entries[2 * c + 1] as usize == row)
+                    .map(|c| columns[t][c] as u64)
+                    .sum();
+                assert_eq!((acc[row] >> (16 * t)) & 0xFFFF, want, "row {row}, lane {t}");
             }
         }
     }

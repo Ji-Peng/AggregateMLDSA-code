@@ -387,6 +387,134 @@ pub fn compute_direct(
     }))
 }
 
+/// Direct round-2 bridge tables of a four-lane shape (ML-DSA-65 and ML-DSA-87): the lanes of
+/// [`DirectParityTables`] as vectors and the carries stacked in the caller's slot counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectLaneTables {
+    /// `y^(1)_t` on `D_1` (`i8` bits), one per lane.
+    pub y1: Vec<Vec<i8>>,
+    /// Stacked balanced level-1 carries (`slots_1 * d1_len`, padding `-lookup_shift`).
+    pub level1_carries: Vec<i32>,
+    /// `y^(2)_t` on `D_2` (`i8` bits), one per lane.
+    pub y2: Vec<Vec<i8>>,
+    /// Stacked balanced level-2 carries (`slots_2 * d2_len`).
+    pub level2_carries: Vec<i32>,
+    /// Public `Y` on `D_3` (`u8` bits).
+    pub y: Vec<u8>,
+    /// Stacked balanced level-3 carries (`d3_len`).
+    pub level3_carries: Vec<i32>,
+}
+
+/// Sum one level's sparse matrix into four parity lanes and stacked carries: the four bit
+/// planes are packed one nibble per cell and summed in 16-bit fields of one `u64` per row.
+fn accumulate_level_four(
+    four_bits: &[u8],
+    m: &SparseMatrix,
+    blocks: usize,
+    cols_per_block: usize,
+    rows: usize,
+    lookup_shift: i32,
+    slots: usize,
+) -> (Vec<Vec<i8>>, Vec<i32>) {
+    let out_len = blocks * rows;
+    // Split each block into strips when blocks < 16 so all worker threads participate.
+    let strips_per_block = (16usize / blocks.max(1)).clamp(1, 8);
+    let strip_cols = cols_per_block.div_ceil(strips_per_block);
+    let strip_sums: Vec<Vec<u64>> = (0..blocks * strips_per_block)
+        .into_par_iter()
+        .map(|task| {
+            let (beta, s) = (task / strips_per_block, task % strips_per_block);
+            let block_start = beta * cols_per_block;
+            let block_end = (block_start + cols_per_block).min(four_bits.len());
+            let local_len = block_end.saturating_sub(block_start);
+            let col_start = (s * strip_cols).min(local_len);
+            let col_end = ((s + 1) * strip_cols).min(local_len);
+            let mut acc = vec![0u64; rows];
+            if col_start < col_end {
+                agg_simd::digits::accumulate_four_lanes_strip(
+                    &four_bits[block_start..block_end],
+                    m.entries.as_slice(),
+                    m.k,
+                    col_start,
+                    col_end,
+                    &mut acc,
+                );
+            }
+            acc
+        })
+        .collect();
+    let mut parities = vec![vec![0i8; out_len]; 4];
+    let mut carries = vec![-lookup_shift; slots * out_len];
+    for beta in 0..blocks {
+        let base = beta * rows;
+        for r in 0..rows {
+            // Disjoint column strips sum to at most the checked row cap, below 2^16 per field.
+            let v: u64 = (0..strips_per_block).map(|s| strip_sums[beta * strips_per_block + s][r]).sum();
+            for (t, lane) in parities.iter_mut().enumerate() {
+                let sum = ((v >> (16 * t)) & 0xFFFF) as i32;
+                lane[base + r] = (sum & 1) as i8;
+                carries[t * out_len + base + r] = (sum >> 1) - lookup_shift;
+            }
+        }
+    }
+    (parities, carries)
+}
+
+/// [`compute_direct`] for a four-lane shape: the parities and the carries stacked in
+/// `slots_1`, `slots_2` slots of `D_1`, `D_2` (the lookup stacks' slot counts) from the four
+/// bridge inputs; `Ok(None)` if an input is not a bit or the shape is not a four-lane shape
+/// whose level-1 and level-2 caps fit the packed fields.
+pub fn compute_direct_four(
+    shape: &Shape,
+    lanes: &[&[i8]; 4],
+    matrices: &BridgeMatrices,
+    lookup_shift: i32,
+    slots: [usize; 2],
+) -> Result<Option<DirectLaneTables>, BridgeError> {
+    if !shape.matches(matrices) {
+        return Err(BridgeError::Shape);
+    }
+    if !shape.row_weights_ok(matrices) {
+        return Err(BridgeError::RowWeight);
+    }
+    if shape.lanes != 4 || shape.levels[..2].iter().any(|l| l.weight_cap >= 1 << 16) || slots.iter().any(|&s| s < 4) {
+        return Ok(None);
+    }
+    let Some(four_bits) = agg_simd::digits::pack_four_bits(lanes) else {
+        return Ok(None);
+    };
+    let domains = shape.domains(lanes[0].len());
+    let (l1, l2, l3) = (shape.level(1), shape.level(2), shape.level(3));
+    let (y1, level1_carries) =
+        accumulate_level_four(&four_bits, &matrices.m1, domains.blocks1, l1.cols, l1.rows, lookup_shift, slots[0]);
+    let y1_refs: [&[i8]; 4] = std::array::from_fn(|t| y1[t].as_slice());
+    let four_d1 = agg_simd::digits::pack_four_bits(&y1_refs).expect("y1 parities are bits");
+    let (y2, level2_carries) =
+        accumulate_level_four(&four_d1, &matrices.m2, domains.segments, l2.used, l2.rows, lookup_shift, slots[1]);
+    let (rows2, rows3) = (l2.rows, l3.rows);
+    let mut y = vec![0u8; domains.d3_len];
+    let mut level3_carries = vec![-lookup_shift; domains.d3_len];
+    for sigma in 0..domains.segments {
+        // Bit inputs and the checked level-3 row cap bound every sum to [0, W_3].
+        let mut sums = vec![0i32; rows3];
+        for (t, lane) in y2.iter().enumerate() {
+            for (rho2, &val) in lane[sigma * rows2..(sigma + 1) * rows2].iter().enumerate() {
+                if val != 0 {
+                    for &row in matrices.m3.column(t + shape.lanes * rho2) {
+                        sums[row as usize] += 1;
+                    }
+                }
+            }
+        }
+        let base = sigma * rows3;
+        for (r, &s) in sums.iter().enumerate() {
+            y[base + r] = (s & 1) as u8;
+            level3_carries[base + r] = (s >> 1) - lookup_shift;
+        }
+    }
+    Ok(Some(DirectLaneTables { y1, level1_carries, y2, level2_carries, y, level3_carries }))
+}
+
 /// The first violated bridge condition found by [`check`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentityError {

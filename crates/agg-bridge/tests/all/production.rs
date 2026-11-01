@@ -196,3 +196,52 @@ fn final_vectors_pack_parse_and_evaluate() {
     let (y, k) = (F::from_u64(5), F::from_u64(7));
     assert_eq!(final_vector::level3_claimed_sum(y, k), F::from_u64(19));
 }
+
+/// The four-lane shape of ML-DSA-65 and ML-DSA-87: the packed path equals the general
+/// witness in narrow and stacked form, for one zero-padded level-1 block, two blocks and two
+/// segments, with the bits of rows 6 and 7 of every record zero (ML-DSA-65); a non-bit input
+/// takes the general path.
+#[test]
+fn four_lane_packed_tables_match_the_general_witness() {
+    const SHIFT: i32 = 1 << 15;
+    let shape = Shape::PRODUCTION_W4;
+    let matrices = agg_bridge::seed::derive_matrices_for(&shape, &[0x65; 32]);
+    let mut rng = SplitMix64::new(65);
+    for records in [5usize, 300, (1 << 13) + 40] {
+        let len = (records.next_power_of_two() * 2048).max(1 << 19);
+        let lanes: Vec<Vec<i8>> = (0..4)
+            .map(|_| {
+                (0..len)
+                    .map(|x| i8::from(x / 2048 < records && x % 2048 < 1536 && rng.next_u64() & 1 == 1))
+                    .collect()
+            })
+            .collect();
+        let views: [&[i8]; 4] = std::array::from_fn(|t| lanes[t].as_slice());
+        let w = parity::compute(&shape, &views, &matrices).unwrap();
+        let direct = parity::compute_direct_four(&shape, &views, &matrices, SHIFT, [4, 8]).unwrap().expect("bit inputs");
+        let narrow = |t: &[i64]| t.iter().map(|&b| b as i8).collect::<Vec<_>>();
+        let stacked = |columns: &[Vec<i64>], slots: usize| {
+            let cells = columns[0].len();
+            let mut out = vec![-SHIFT; slots * cells];
+            for (slot, column) in out.chunks_mut(cells).zip(columns) {
+                for (o, &k) in slot.iter_mut().zip(column) {
+                    *o = k as i32 - SHIFT;
+                }
+            }
+            out
+        };
+        for t in 0..4 {
+            assert_eq!(direct.y1[t], narrow(&w.y1[t]), "y1 lane {t}");
+            assert_eq!(direct.y2[t], narrow(&w.y2[t]), "y2 lane {t}");
+        }
+        assert_eq!(direct.level1_carries, stacked(&w.kappa1, 4));
+        assert_eq!(direct.level2_carries, stacked(&w.kappa2, 8));
+        assert_eq!(direct.level3_carries, stacked(std::slice::from_ref(&w.kappa3), 1));
+        assert_eq!(direct.y, w.y_bits(), "Y at {records} records");
+        let mut tampered = lanes[1].clone();
+        tampered[3] = -1;
+        let mut bad = views;
+        bad[1] = &tampered;
+        assert!(parity::compute_direct_four(&shape, &bad, &matrices, SHIFT, [4, 8]).unwrap().is_none());
+    }
+}
