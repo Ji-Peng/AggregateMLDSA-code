@@ -7,6 +7,5 @@
 # Benchmarks report medians; record `git rev-parse HEAD` with every result.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
 echo "git revision: $(git rev-parse HEAD 2>/dev/null || echo unknown)$(git diff --quiet 2>/dev/null || echo ' (dirty)')"
 exec taskset -c 0,1,3-15 cargo bench -p agg-bench "$@"
