@@ -1,4 +1,5 @@
 target/
+target-*/
 *.log
 vendor/flock-core/Cargo.lock
 vendor/flock-field/Cargo.lock
