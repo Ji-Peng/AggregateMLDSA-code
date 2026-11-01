@@ -919,6 +919,64 @@ fn prove_packed_padded_inner<C: Challenger>(
         if n_mlv >= 10
             && std::env::var_os("FLOCK_ZC_BITS_ROUNDS").as_deref()
                 != Some(std::ffi::OsStr::new("0"))
+            && sparse_lookahead_on()
+        {
+            // Rounds 2 and 3 from one message-only pass over the packed rows,
+            // rounds 4 and 5 from one pass that folds each row pair at both
+            // challenges; the tail starts with two challenges pending.
+            let q = multilinear::sparse_round2_lookahead_message_only(
+                a_packed,
+                b_packed,
+                k_skip,
+                &fold_table,
+                &r[k_skip + 2..],
+                padding,
+            );
+            let (m1a, mia) = lookahead_msg_first(&q, r[k_skip + 1]);
+            multilinear_msgs.push((m1a, mia));
+            challenger.observe_f128(m1a);
+            challenger.observe_f128(mia);
+            let rho1 = sample_rho!();
+            mlv_rhos.push(rho1);
+            let (m1b, mib) = lookahead_msg_second(&q, rho1);
+            multilinear_msgs.push((m1b, mib));
+            challenger.observe_f128(m1b);
+            challenger.observe_f128(mib);
+            let rho2 = sample_rho!();
+            mlv_rhos.push(rho2);
+            if zc_timing {
+                eprintln!(
+                    "[zc-timing] rounds 2+3 lookahead (message only): {:.2} ms",
+                    t_round2.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            let (a, b, q, st) = multilinear::sparse_round4_lookahead_from_bits(
+                a_packed,
+                b_packed,
+                k_skip,
+                &fold_table,
+                (rho1, rho2),
+                &r[k_skip + 4..],
+                padding,
+                domain / 4,
+            );
+            let (m1a, mia) = lookahead_msg_first(&q, r[k_skip + 3]);
+            multilinear_msgs.push((m1a, mia));
+            challenger.observe_f128(m1a);
+            challenger.observe_f128(mia);
+            let rho3 = sample_rho!();
+            mlv_rhos.push(rho3);
+            let (m1b, mib) = lookahead_msg_second(&q, rho3);
+            multilinear_msgs.push((m1b, mib));
+            challenger.observe_f128(m1b);
+            challenger.observe_f128(mib);
+            let rho4 = sample_rho!();
+            mlv_rhos.push(rho4);
+            domain /= 4;
+            (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho3, Some(rho4), 3);
+        } else if n_mlv >= 10
+            && std::env::var_os("FLOCK_ZC_BITS_ROUNDS").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
         {
             let (m1, mi, st) = multilinear::sparse_round2_message_only(
                 a_packed,
@@ -933,52 +991,29 @@ fn prove_packed_padded_inner<C: Challenger>(
             challenger.observe_f128(mi);
             let rho = sample_rho!();
             mlv_rhos.push(rho);
-            if sparse_lookahead_on() {
-                // Rounds 3 and 4 from one pass over the packed rows; the tail
-                // starts with both challenges pending.
-                let (a, b, q, st) = multilinear::sparse_round3_lookahead_from_bits(
-                    a_packed,
-                    b_packed,
-                    &fold_table,
-                    rho,
-                    &r[k_skip + 3..],
-                    &st,
-                    domain / 2,
+            if zc_timing {
+                eprintln!(
+                    "[zc-timing] round 2 (message only): {:.2} ms",
+                    t_round2.elapsed().as_secs_f64() * 1e3
                 );
-                let (m1a, mia) = lookahead_msg_first(&q, r[k_skip + 2]);
-                multilinear_msgs.push((m1a, mia));
-                challenger.observe_f128(m1a);
-                challenger.observe_f128(mia);
-                let rho_a = sample_rho!();
-                mlv_rhos.push(rho_a);
-                let (m1b, mib) = lookahead_msg_second(&q, rho_a);
-                multilinear_msgs.push((m1b, mib));
-                challenger.observe_f128(m1b);
-                challenger.observe_f128(mib);
-                let rho_b = sample_rho!();
-                mlv_rhos.push(rho_b);
-                domain /= 2;
-                (a_mlv, b_mlv, store, rho_prev, pending2, i) =
-                    (a, b, Some(st), rho_a, Some(rho_b), 2);
-            } else {
-                let mut r_next = vec![F128::ONE; n_mlv - 1];
-                r_next[1..].copy_from_slice(&r[k_skip + 2..]);
-                let (a, b, m1, mi, st) = multilinear::sparse_round3_from_bits(
-                    a_packed,
-                    b_packed,
-                    &fold_table,
-                    rho,
-                    &r_next,
-                    &st,
-                );
-                multilinear_msgs.push((m1, mi));
-                challenger.observe_f128(m1);
-                challenger.observe_f128(mi);
-                let rho = sample_rho!();
-                mlv_rhos.push(rho);
-                domain /= 2;
-                (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 1);
             }
+            let mut r_next = vec![F128::ONE; n_mlv - 1];
+            r_next[1..].copy_from_slice(&r[k_skip + 2..]);
+            let (a, b, m1, mi, st) = multilinear::sparse_round3_from_bits(
+                a_packed,
+                b_packed,
+                &fold_table,
+                rho,
+                &r_next,
+                &st,
+            );
+            multilinear_msgs.push((m1, mi));
+            challenger.observe_f128(m1);
+            challenger.observe_f128(mi);
+            let rho = sample_rho!();
+            mlv_rhos.push(rho);
+            domain /= 2;
+            (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 1);
         } else {
             let (a, b, m1, mi, st) = multilinear::uni_skip_fold_and_round_pair_runs_sparse(
                 a_packed,
@@ -1113,7 +1148,9 @@ fn prove_packed_padded_inner<C: Challenger>(
             && n_mlv >= 10
             && std::env::var_os("FLOCK_ZC_BITS_ROUNDS").as_deref()
                 != Some(std::ffi::OsStr::new("0"));
-        let label = if packed_round3 {
+        let label = if packed_round3 && sparse_lookahead_on() {
+            "round2-5 packed (lookahead)"
+        } else if packed_round3 {
             "round2+3 packed"
         } else {
             "round2 fused fold"
@@ -2669,6 +2706,49 @@ mod tests {
                 assert_eq!(one_round, lookahead, "mask {mask:#x}");
             });
         }
+    }
+
+    /// Single-thread cost of the sparse rounds 2+ with and without the
+    /// two-round lookahead, on the union's production shape (one live run of
+    /// word columns, one dead run). Run with `RAYON_NUM_THREADS=1
+    /// FLOCK_ZC_TIMING=1 cargo test --release sparse_lookahead_bench --
+    /// --ignored --nocapture`; prints the best of three proofs per route.
+    #[test]
+    #[ignore]
+    fn sparse_lookahead_bench() {
+        let m = 28usize;
+        let padding = PaddingSpec::from_runs(vec![
+            PaddingRun {
+                k_log: 14,
+                useful_bits_per_block: 9000,
+                n_blocks: 10_000,
+            },
+            PaddingRun {
+                k_log: 14,
+                useful_bits_per_block: 0,
+                n_blocks: 6384,
+            },
+        ]);
+        let mut rng = Rng::new(0x5EED_B1);
+        let mut a = rng.bits(1 << m);
+        let mut b = rng.bits(1 << m);
+        zero_outside_useful(&padding, &mut a);
+        zero_outside_useful(&padding, &mut b);
+        let c: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x & *y).collect();
+        let (a_p, b_p, c_p) = pack_abc(&a, &b, &c);
+        drop((a, b, c));
+        for disable in [true, false, true, false] {
+            super::ZC_SPARSE_LOOKAHEAD_DISABLE.store(disable, std::sync::atomic::Ordering::SeqCst);
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let mut ch = FsChallenger::new(b"flock-test-v0");
+                let t = std::time::Instant::now();
+                let _ = prove_packed_padded_capture_s_hat_v_c(&a_p, &b_p, &c_p, m, &padding, &mut ch);
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            eprintln!("lookahead {}: best proof {best:.1} ms", !disable);
+        }
+        super::ZC_SPARSE_LOOKAHEAD_DISABLE.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]

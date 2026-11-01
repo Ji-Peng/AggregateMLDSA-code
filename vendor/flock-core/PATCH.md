@@ -474,3 +474,26 @@ Messages are the same polynomial values (exact GF(2^128), regrouped sums), so th
 byte-identical; `FLOCK_ZC_TAIL_LA=0` selects the one-round route for A/B. Test:
 `zerocheck::tests::sparse_lookahead_tail_matches_one_round_tail` (every mask), plus the
 sparse-versus-dense proof tests, which now run the lookahead route.
+
+## 12. Prover-only: rounds 2-5 of the sparse zerocheck from the packed rows, two per pass
+
+Extends section 11 to the start of the multilinear rounds. The round-3 producer of section
+11 (`sparse_round3_lookahead_from_bits`) is replaced by two passes over the packed rows
+(`zerocheck/multilinear.rs`):
+
+* `sparse_round2_lookahead_message_only`: the lookahead sums of rounds 2 and 3 over quads
+  of the univariate-folded values `v` (two packed rows per quad), no writes.
+* `sparse_round4_lookahead_from_bits`: each output folds one `v` quad at the round-2 and
+  round-3 challenges (4 -> 1) through a 32-chunk table with the fold weights baked in
+  (`J[8g + c] = w_g * T[c]`, `kernels/x86_64.rs::fold4_rows_x86_unchecked`), so an output
+  costs the 32 lookups of its two rows; the pass stores the outputs (16-aligned layout) and
+  accumulates the lookahead sums of rounds 4 and 5.
+
+The tail then starts on a quarter of the row count with two challenges pending. Bytes moved
+by rounds 2+ at 32K (est., 35M live rows): one-round route 9 GB (rows read twice, half the
+rows written, then the tail), lookahead route 4.5 GB. Single-thread compute of rounds 2+
+rises about 15% (the lookahead sums cost 12 products per quad); the passes are memory-bound
+beside the PIOP. `FLOCK_ZC_TIMING` prints `rounds 2+3 lookahead (message only)` and
+`round2-5 packed (lookahead)` on this route. `FLOCK_ZC_TAIL_LA=0` selects the one-round
+route for rounds 2+; the proof is byte-identical. Ignored micro-benchmark:
+`zerocheck::tests::sparse_lookahead_bench` (single thread, both routes).

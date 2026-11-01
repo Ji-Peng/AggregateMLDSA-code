@@ -47,6 +47,33 @@ pub(crate) unsafe fn fold_round2_pair_x86_unchecked_8(
     }
 }
 
+/// [`fold_round2_pair_x86_unchecked_8`] over `C` chunks: four independent
+/// sums `Σ_{c < C} table[c][row_k[c]]`, returned in row order.
+///
+/// # Safety
+/// `table_data` must point to a `C × 256` `F128` table and every row pointer
+/// must expose `C` readable bytes.
+#[inline(always)]
+pub(crate) unsafe fn fold4_rows_x86_unchecked<const C: usize>(
+    table_data: *const F128,
+    rows: [*const u8; 4],
+) -> [F128; 4] {
+    // SAFETY: the caller guarantees all table and row bounds; every table
+    // entry is 16-byte aligned because F128 has align(16).
+    unsafe {
+        let mut acc = [_mm_setzero_si128(); 4];
+        for chunk in 0..C {
+            let table_chunk = table_data.add(chunk * 256);
+            for lane in 0..4 {
+                let entry = table_chunk.add(*rows[lane].add(chunk) as usize);
+                acc[lane] = _mm_xor_si128(acc[lane], _mm_load_si128(entry.cast::<__m128i>()));
+            }
+        }
+        // F128 is exactly two u64 words and accepts every bit pattern.
+        acc.map(|value| transmute::<__m128i, F128>(value))
+    }
+}
+
 /// Fused fold and next-round message for one worker chunk.
 ///
 /// Each message iteration folds `2 * LANES` `a` and `b` outputs, stores them
