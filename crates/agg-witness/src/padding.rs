@@ -4,17 +4,21 @@
 //! significant first). For the bridge domains D_1, D_2, D_3, their block/in-block indices and
 //! the level maps see `crate::bridge`.
 
-use crate::params::{D_COEF, D_POS, D_SEG_MAX, N_MAX, N_STAR_MIN, PCS_MIN_CELLS_LOG2};
+use crate::params::{
+    ParamSet, Set44, D_COEF, D_POS, D_SEG_MAX, N_MAX, N_STAR_MIN, PCS_MIN_CELLS_LOG2,
+};
+use core::marker::PhantomData;
 
-/// Batch geometry for N live records.
+/// Batch geometry for N live records, generic over parameter set P.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Geometry {
+pub struct Geometry<P: ParamSet = Set44> {
     /// Live records N.
     pub n: usize,
     /// N* = max(next_power_of_two(N), 8).
     pub n_star: usize,
     /// d_sig = log2 N*.
     pub d_sig: u32,
+    _marker: PhantomData<P>,
 }
 
 /// Geometry errors.
@@ -26,9 +30,16 @@ pub enum GeometryError {
     TooMany(usize),
 }
 
-impl Geometry {
-    /// Geometry for `n` live records, 1 <= n <= 2^15.
+impl Geometry<Set44> {
+    /// Geometry for `n` live records using ML-DSA-44 default parameters.
     pub fn new(n: usize) -> Result<Self, GeometryError> {
+        Self::new_for(n)
+    }
+}
+
+impl<P: ParamSet> Geometry<P> {
+    /// Geometry for `n` live records under parameter set P, 1 <= n <= 2^15.
+    pub fn new_for(n: usize) -> Result<Self, GeometryError> {
         if n == 0 {
             return Err(GeometryError::Empty);
         }
@@ -40,6 +51,7 @@ impl Geometry {
             n,
             n_star,
             d_sig: n_star.trailing_zeros(),
+            _marker: PhantomData,
         })
     }
 
@@ -50,7 +62,7 @@ impl Geometry {
 
     /// d_main = d_pos + d_sig.
     pub fn d_main(&self) -> u32 {
-        D_POS + self.d_sig
+        P::D_POS + self.d_sig
     }
 
     /// Main-domain size 2^{d_main}.
@@ -80,14 +92,14 @@ impl Geometry {
             .min(1 << D_SEG_MAX)
     }
 
-    /// Keccak permutations of segment sigma: 7 min(N - 2^13 sigma, 2^13).
+    /// Keccak permutations of segment sigma.
     pub fn keccak_perms_in_segment(&self, sigma: usize) -> usize {
-        7 * self.live_in_segment(sigma)
+        P::N_PERMS * self.live_in_segment(sigma)
     }
 
-    /// Variables of D_1: 13 + max(0, d_sig - 9).
+    /// Variables of D_1: 13 + max(0, d_sig - log2(B_1)).
     pub fn d1(&self) -> u32 {
-        13 + self.d_sig.saturating_sub(9)
+        13 + self.d_sig.saturating_sub(P::BLOCK_RECORDS_LOG2)
     }
 
     /// Variables of D_2: 13 + max(0, d_sig - 13).
@@ -100,22 +112,35 @@ impl Geometry {
         12 + self.d_sig.saturating_sub(13)
     }
 
-    /// Number of level-1 blocks (i_mid, sigma): 2^{max(0, d_sig - 9)}.
+    /// Number of level-1 blocks (i_mid, sigma): 2^{max(0, d_sig - log2(B_1))}.
     pub fn blocks1(&self) -> usize {
-        1 << self.d_sig.saturating_sub(9)
+        1 << self.d_sig.saturating_sub(P::BLOCK_RECORDS_LOG2)
     }
 }
 
-/// x = j + 256 rho + 1024 i.
+/// x = j + 256 rho + 1024 i for Set44.
 #[inline]
 pub fn main_index(j: usize, rho: usize, i: usize) -> usize {
     j | (rho << D_COEF) | (i << D_POS)
 }
 
-/// Inverse of `main_index`: (j, rho, i).
+/// Inverse of `main_index`: (j, rho, i) for Set44.
 #[inline]
 pub fn split_main(x: usize) -> (usize, usize, usize) {
     (x & 0xFF, (x >> D_COEF) & 3, x >> D_POS)
+}
+
+/// Canonical cell index for parameter set P: j | (rho_hi << 8) | (i << (8 + D_VEC)).
+#[inline]
+pub fn main_index_for<P: ParamSet>(j: usize, rho: usize, i: usize) -> usize {
+    j | (rho << D_COEF) | (i << P::D_POS)
+}
+
+/// Inverse of `main_index_for`: (j, rho, i) for parameter set P.
+#[inline]
+pub fn split_main_for<P: ParamSet>(x: usize) -> (usize, usize, usize) {
+    let mask_rho = if P::D_VEC == 0 { 0 } else { (1 << P::D_VEC) - 1 };
+    (x & 0xFF, (x >> D_COEF) & mask_rho, x >> P::D_POS)
 }
 
 /// Physical table size of a table with `log2` variables: zero-extended to at least 2^13 cells.
@@ -126,6 +151,7 @@ pub fn physical_len(log2: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::{Set65, Set87};
 
     #[test]
     fn geometry_values() {
@@ -159,9 +185,33 @@ mod tests {
     }
 
     #[test]
+    fn geometry_values_65_and_87() {
+        let g65 = Geometry::<Set65>::new_for(1000).unwrap();
+        assert_eq!((g65.n_star, g65.d_sig), (1024, 10));
+        // d_main = D_POS (8) + d_sig (10) = 18.
+        assert_eq!(g65.d_main(), 18);
+        // BLOCK_RECORDS_LOG2 = 8, so d1 = 13 + max(0, 10 - 8) = 15.
+        assert_eq!(g65.d1(), 15);
+        assert_eq!(g65.blocks1(), 4);
+        assert_eq!(g65.keccak_perms_in_segment(0), 7 * 1000);
+
+        let g87 = Geometry::<Set87>::new_for(1000).unwrap();
+        assert_eq!((g87.n_star, g87.d_sig), (1024, 10));
+        assert_eq!(g87.d_main(), 18);
+        assert_eq!(g87.d1(), 15);
+        assert_eq!(g87.blocks1(), 4);
+        // Set87 has 9 permutations.
+        assert_eq!(g87.keccak_perms_in_segment(0), 9 * 1000);
+    }
+
+    #[test]
     fn main_index_roundtrip() {
         for &(j, r, i) in &[(0, 0, 0), (255, 3, 7), (17, 2, 1023)] {
             assert_eq!(split_main(main_index(j, r, i)), (j, r, i));
+            assert_eq!(
+                split_main_for::<Set44>(main_index_for::<Set44>(j, r, i)),
+                (j, r, i)
+            );
         }
         assert_eq!(main_index(1, 1, 1), 1 + 256 + 1024);
     }

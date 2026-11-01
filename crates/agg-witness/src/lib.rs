@@ -29,6 +29,8 @@ pub mod ntt;
 pub mod padding;
 pub mod params;
 
+pub use params::{ParamSet, Set, Set44, Set65, Set87};
+
 /// Re-export of the RustCrypto ML-DSA crate used for key generation and signing.
 pub use ml_dsa;
 
