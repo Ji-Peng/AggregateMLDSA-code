@@ -9,7 +9,7 @@ source of truth; deviations are in `docs/deviations.md` (entries W1 to W3).
 
 | Module | Content | Spec |
 | --- | --- | --- |
-| `params` | FIPS 204 Table 1/2 values (ML-DSA-44) and the derived constants, recomputed in tests | 1 |
+| `params` | FIPS 204 Table 1/2 values (ML-DSA-44, 65 and 87) and the derived constants, recomputed in tests | 1 |
 | `ntt` | FIPS 204 Algorithms 41 to 43, generic over an NTT-friendly prime (zetas computed, checked against Appendix B) | 2 |
 | `native` | ctr_q, mod+-, Decompose/HighBits/LowBits/MakeHint/UseHint (Alg. 36 to 40), SimpleBitPack/BitPack/unpack (16 to 19), HintBitPack/Unpack (20, 21), pk/sig encode/decode (22, 23, 26, 27), w1Encode (28), tr, mu, SampleInBall (29), Verify_internal (8) with a trace | 2, 3 |
 | `expand` | CoeffFromThreeBytes (14), RejNTTPoly (30) with SHAKE128 block count, ExpandA (32), `ExpandedKey`, `public_t` | 2 |
@@ -101,3 +101,7 @@ under H-FIPS and re-encoded), `hfips` (`docs/h-exact.md` Section 10.5), `keccak`
 wiring for 128 signatures). Pinned edge records: `gen::record_hedged(0xED6E, 0, 783)`
 (w' coefficient = q - gamma2) and `gen::record_hedged(0x2A4A, 0, 290)` (|z| = B_z), found by
 the ignored test `edge_search`.
+
+## ML-DSA-65 and ML-DSA-87 witnesses
+
+The witness uses exact `(k, l)` dimensions `(6, 5)` and `(8, 7)` respectively, with per-polynomial lanes. Both use the H-u digit-slack forms in `docs/spec.md`, four w1 bits per coefficient, and 48-byte or 64-byte c~ respectively. The `ParamSet` constants and digit encoders in `crates/agg-witness/src/params.rs` and `digits.rs` define these layouts.
