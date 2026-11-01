@@ -158,9 +158,9 @@ Single-core, L1/L2-resident costs on Zen 5 are:
 | F_p^2 dot | 1.25 cycles/term | 4.8-5.9x |
 
 Streaming beyond L3 the gain falls to about 1.0x (est.), because memory traffic decides
-there. Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the IFMA
-build is about 0.2 s faster at 16C32T and about 1.1 s at 8C16T (2.76 s against 2.98 s, and
-4.43 s against 5.50 s).
+there. Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the
+`AGG_ISA=avx512ifma` tier is about 0.2 s faster at 16C32T and about 1.1 s at 8C16T than
+`AGG_ISA=avx2` (2.76 s against 2.98 s, and 4.43 s against 5.50 s).
 
 ## 5. Stage-3 plane groups and fused fold-and-round evaluation
 
@@ -233,17 +233,17 @@ changes; arithmetic, wire format and verifier are untouched. The record is
   on demand by the few remaining readers (`sources/dense/poly.rs`, a `OnceLock`). A test
   (`crates/agg-piop/tests/lazy_field_plane.rs`) asserts that a default aggregate builds none.
   Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads: -93 ms and
-  -3.2 GiB of prover peak memory on the general build.
+  -3.2 GiB of prover peak memory on `AGG_ISA=avx2`.
 - **Digit caches.** `CachedDigits16` and `cached_i16_decompose_fold_partitioned`
   (`sources/poly_helpers/decompose_fold_partitioned.rs`) fold from the signed-16 mirror,
   and the sparse and chunked probes read the mirror instead of decomposing the field plane
   on every nonce (`sources/dense/ops.rs`).
 
 Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the Akita
-changes are worth about 150 ms on the IFMA build. On the general build, with the allocator
+changes are worth about 150 ms on `AGG_ISA=avx512ifma`. On `AGG_ISA=avx2`, with the allocator
 in place, the same changes are worth about 600 ms. The 1K aggregate is byte-identical under
 scalar and AVX-512 and under one and sixteen threads; the 32K aggregate is byte-identical
-across the general and IFMA builds with reused blocks poisoned.
+across the `AGG_ISA=avx2` and `avx512ifma` tiers with reused blocks poisoned.
 
 ## 7. Flock changes
 
@@ -324,7 +324,7 @@ introduced. The backend equality gate is described in Section 9.
 
 ## 9. Byte-identity gates and cold-start benchmarking
 
-Byte identity is the acceptance test for every prover change. Two gates cover the builds
+Byte identity is the acceptance test for every prover change. Two gates cover the tiers
 and the dispatch:
 
 - `crates/agg-cli/tests/all/simd_backends.rs` runs `keygen-batch`, `sign-batch`,
@@ -346,8 +346,8 @@ median reported, so each quoted run starts like a new process.
 
 The cold reset changes no proof byte and leaves the medians unchanged beyond noise:
 measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, warm and cold
-Flock pools differ by less than 20 ms (about 2.99 s on the general build and 2.75 s on the
-IFMA build). Keeping the reset therefore does not inflate the quoted times.
+Flock pools differ by less than 20 ms (about 2.99 s on `AGG_ISA=avx2` and 2.75 s on
+`AGG_ISA=avx512ifma`). Keeping the reset therefore does not inflate the quoted times.
 
 ## 10. Techniques measured and not adopted
 

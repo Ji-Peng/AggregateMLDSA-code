@@ -97,7 +97,6 @@ scripts/test.sh --release       # for heavy tests
 scripts/bench.sh                # local calibration benches (agg-bench)
 scripts/bench.sh --bench mode_b -- 256 512 1024 [--warmup 1] [--reps 5]   # mode-B prove/verify/RSS/size (crates/agg-bench/benches/mode_b.rs)
 AGG_KECCAK_WARMUP=1 AGG_KECCAK_REPS=5 taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge   # Keccak sponge proof
-AVX512=1 scripts/bench.sh       # opt-in AVX-512 build in target/avx512
 ./target/release/agg            # mode-A tool: keygen-batch, sign-batch, aggregate, verify, bench (docs/cli.md)
 ./target/release/agg bench --count 1024 [--warmup 1] [--reps 5]   # mode A: median of 5 after 1 warmup
 ```
@@ -147,10 +146,8 @@ polynomials, so the proof bytes do not depend on either knob.
   `vendor/akita/crates/akita-cpu-backend/src/isa.rs`); `FLOCK_SIMD=portable|gfni` and
   `AKITA_SCALAR_NTT=1` remain narrower A/B knobs below `AGG_ISA`.
 - The `avx512` cargo feature (in `agg-piop`, `agg-keccak`, forwarded by `agg-bench`) is a
-  no-op marker kept for old command lines. `AVX512=1 scripts/bench.sh` still builds a
-  separate `x86-64-v4` target for Keccak-only measurements; do not use it for proofs.
-  A bare `+avx512f,...` feature list makes rustc 1.99.1 crash (SIGILL in LLVM DAG combine)
-  while compiling `aerie-prover`.
+  no-op marker kept for old command lines. A bare `+avx512f,...` feature list makes
+  rustc 1.99.1 crash (SIGILL in LLVM DAG combine) while compiling `aerie-prover`.
 
 Every kernel family is value-identical to its scalar oracle; the 1K aggregate is compared
 byte for byte under each `AGG_ISA` level and both layouts (`scripts/gate.sh` and the
@@ -161,6 +158,7 @@ per-step gates).
 - Local box (i7-11700K, 30 GB): tests and small calibrations only, never on CPU 2.
   Prefix every cargo/test/bench command with `taskset -c 0,1,3-15` (the scripts do).
 - Local batch sizes: at most 1K signatures and 2^14 Keccak permutations.
-- Never change machine settings. Large runs (32K signatures, 64-128 GB) run on a Google
-  Cloud C4D (AMD Zen 5) VM, deleted as soon as the run is done.
+- Never change machine settings. Large runs (32K signatures, 64-128 GB) run on the SoC xcni
+  cluster (EPYC 9355, Zen 5); Google Cloud c4d (`c4d-highmem-16`, EPYC 9B45) is the fallback
+  (delete the VM right after the run).
 - Benchmarks report medians and the exact git revision; never invent numbers.
