@@ -11,7 +11,7 @@ O="${GATE_DIR:-$ROOT/target/gate}"
 mkdir -p "$O"
 cd "$ROOT"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-export RUSTFLAGS="-C target-feature=+pclmulqdq"
+export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/gate}"
 echo "RUSTFLAGS=$RUSTFLAGS"
 cargo build --release -p agg-cli

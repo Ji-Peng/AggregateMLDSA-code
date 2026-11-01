@@ -1,8 +1,12 @@
-# One baseline for every shipped build: SSE2 plus carry-less multiplication.
-# `+pclmulqdq` is the only feature Flock's scalar GF(2^128) multiply needs at
-# compile time. AVX2, AVX-512 and IFMA kernels are selected at run time from
-# the CPU, capped by `AGG_ISA`. Do not add `target-cpu=native` or a global
-# `x86-64-v3`/`v4`: the former breaks rustc 1.99, and a global AVX-512 target
-# changes Akita's window-gather layout.
+# One baseline for every shipped build: x86-64-v3, which is AVX2, plus
+# carry-less multiplication. The baseline is a hard requirement: the binary
+# does not start on a CPU without AVX2. AVX-512F, IFMA and the remaining
+# instruction sets are selected at run time from the CPU, capped by
+# `AGG_ISA`. Do not add `target-cpu=native` (it breaks rustc 1.99) or a
+# global `x86-64-v4` target: the latter changes Akita's window-gather layout
+# and fails the prover self-check.
 [build]
-rustflags = ["-C", "target-feature=+pclmulqdq"]
+rustflags = [
+    "-C", "target-cpu=x86-64-v3",
+    "-C", "target-feature=+pclmulqdq",
+]

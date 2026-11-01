@@ -128,8 +128,15 @@ the unified build follow the same cap: `crates/agg-mldsa-simd` (scalar/AVX2/AVX-
 `crates/agg-keccak/src/simd` (8-way Keccak-f), `vendor/flock-field/src/f128_slice/rounds.rs`,
 the vendored Flock kernels and the Akita decompose-fold, window-gather and NTT kernels.
 The Akita AVX2 kernels are compiled under every x86-64 build and selected by
-`is_x86_feature_detected!("avx2")`, so retiring the global `x86-64-v3` target did not
-remove them.
+`is_x86_feature_detected!("avx2")` as well, so their dispatch does not depend on the
+global target.
+
+The release baseline is x86-64-v3 (AVX2) with `+pclmulqdq`, set in
+`.cargo/config.toml`. AVX-512F and AVX-512IFMA are detected at run time; a global
+`x86-64-v4` target is not supported because it changes Akita's window-gather layout.
+The x86-64-v3 baseline is a hard requirement, so the binary does not start on a CPU
+without AVX2; `AGG_ISA=scalar` selects the portable kernels for tests but does not
+remove the AVX2 instructions that the compiler may emit outside the dispatched paths.
 
 The kernels use four interleaved blocks of eight F_p elements, 7 IFMA multiply-adds for the
 product and 2 for the fold by 59, and schoolbook products with two lazy reductions for K.

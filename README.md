@@ -108,9 +108,15 @@ If the stable toolchain from `rust-toolchain.toml` is not what rustup resolves, 
 ### SIMD policy
 
 There is one release build. `.cargo/config.toml` sets
-`-C target-feature=+pclmulqdq`, the only feature the compile-time scalar GF(2^128)
-multiply needs. Every kernel above it is selected at run time from the CPU; no
-`target-cpu=native`, no global `x86-64-v3`/`v4`.
+`-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq`: the minimum machine is
+AVX2 (x86-64-v3), and the baseline also enables the carry-less multiply that the
+scalar GF(2^128) path uses. AVX-512F and AVX-512IFMA are detected at run time;
+there is no `target-cpu=native` and no global `x86-64-v4` target.
+
+The x86-64-v3 baseline is a hard requirement: the binary does not start on a CPU
+that lacks AVX2. `AGG_ISA=scalar` remains available for tests and for
+byte-identity checks on an AVX2-capable machine; it selects the portable kernels
+but cannot make the binary run on an older CPU.
 
 `AGG_ISA=avx512ifma|avx512|avx2|scalar` is a process-wide upper bound for every
 run-time detector. A cap only lowers the selected level; unset leaves the choice to
@@ -122,6 +128,9 @@ the CPU. `AGG_SIMD_REPORT=1` prints the cap and every selected kernel at startup
 | `avx512` | the same except the IFMA kernels: AVX-512 without IFMA, and the row PIOP layout |
 | `avx2` | AVX2 and SSE kernels only, row PIOP layout |
 | `scalar` | portable kernels only |
+
+`AGG_ISA=avx2` also gates every AVX-512 kernel: a capped process executes no
+AVX-512 instruction, including in the Flock, Akita and ML-DSA backends.
 
 The PIOP table layout is a separate knob because it wins where the ISA does not:
 `AGG_PIOP_LAYOUT=plane|row`. It defaults to `plane` exactly when the IFMA backend is

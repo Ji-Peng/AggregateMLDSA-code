@@ -446,10 +446,12 @@ locally,
 a global `+sse4.1` slows our lookup and stage 3 by 6-7% (it alone, without LTO, gives the same
 loss), which cancels the Flock gain once W1 makes the PIOP branch critical. The code therefore
 vendors `flock-field` (`vendor/flock-field/PATCH.md`): `#[inline]` on the three functions,
-`pclmulqdq` as their only target feature, SSE2 lane extracts. The CLMUL build line stays
-`-C target-feature=+pclmulqdq`, and the multiply inlines everywhere in the prover (pclmul
-instruction lines in `agg`: 461 -> 6,903; 18 out-of-line Karatsuba calls remain, all in
-verifier functions). Exact arithmetic; the default build is unchanged.
+`pclmulqdq` as their only target feature, SSE2 lane extracts. The build used here was
+`-C target-feature=+pclmulqdq`; the shipped baseline is now
+`-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq` (README "SIMD policy"). The
+multiply inlines everywhere in the prover (pclmul instruction lines in `agg`: 461 ->
+6,903; 18 out-of-line Karatsuba calls remain, all in verifier functions). Exact
+arithmetic; the proof bytes are unchanged.
 
 ### 10.2 Checks (measured, local)
 

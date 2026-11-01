@@ -13,10 +13,12 @@ than to one tree.
 ## Unified build changes
 
 - **One SIMD baseline.** `.cargo/config.toml` carries
-  `-C target-feature=+pclmulqdq`; every higher instruction set is selected at
-  run time under `AGG_ISA` (see README "SIMD policy"). The retired
-  `x86-64-v3` global target is replaced by run-time dispatch in
-  `vendor/akita/crates/akita-cpu-backend/src/sources/poly_helpers/`.
+  `-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq`; AVX-512F and IFMA
+  are selected at run time under `AGG_ISA` (see README "SIMD policy"). The
+  baseline is a hard requirement: the binary does not start on a CPU without
+  AVX2. The Akita kernels keep their run-time dispatch in
+  `vendor/akita/crates/akita-cpu-backend/src/sources/poly_helpers/`, so
+  `AGG_ISA=avx2` still executes no AVX-512.
 - **Akita window gather.** The compile-time `avx512bw` branch of
   `windowed_accum.rs` is deleted. It changed `GATHER` from one window to two,
   which failed the prover self-check; the gather width is now the same under
