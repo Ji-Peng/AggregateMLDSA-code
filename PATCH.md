@@ -43,3 +43,4 @@ than to one tree.
 - **Plane PIOP layout.** `AGG_PIOP_LAYOUT=plane|row` selects the sum-check
   table layout independently of `AGG_ISA`; `plane` is the default only with the
   IFMA backend. Both layouts send identical messages.
+  The linear reduction groups follow the selected layout as well.

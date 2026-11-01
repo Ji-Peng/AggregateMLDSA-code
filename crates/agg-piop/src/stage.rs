@@ -14,7 +14,7 @@ use rayon::prelude::*;
 
 use crate::kernel::{
     evaluate_compressed, expected_terminal, layout, Group, GroupInstance, Lane, Layout, LinearIntGroup,
-    PlaneWeightIntGroup, Source, Term, WeightIntGroup,
+    PlaneLinearIntGroup, PlaneWeightIntGroup, Source, Term, WeightIntGroup,
 };
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::split_weight::{SplitGroup, SplitWeight};
@@ -399,7 +399,9 @@ fn prove_stage_with<'a>(
             // The generic kernel needs the table the placeholder lane stands for.
             lanes[0] = Lane::Folded(split.materialize());
         }
-        if let Some(linear) = linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds) {
+        if let Some(linear) =
+            linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds, &mut pool)
+        {
             groups.push(StageGroup::Linear(linear));
             owner.push(g);
             build_times[g] = build.elapsed().as_secs_f64();
@@ -413,7 +415,8 @@ fn prove_stage_with<'a>(
                 continue;
             }
         }
-        let (instances, linear) = split_linear(&lanes, instances, eq_point.as_deref(), rounds);
+        let (instances, linear) =
+            split_linear(&lanes, instances, eq_point.as_deref(), rounds, &mut pool);
         groups.push(StageGroup::Generic(
             Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
         ));
@@ -541,9 +544,9 @@ fn prove_stage_with<'a>(
 #[allow(clippy::large_enum_variant)]
 enum StageGroup<'a> {
     Generic(Group<'a>),
-    Linear(LinearIntGroup<'a>),
+    Linear(LinearGroup<'a>),
     /// The linear integer part split off the preceding generic group ([`split_linear`]).
-    Extra(LinearIntGroup<'a>),
+    Extra(LinearGroup<'a>),
     /// A weight times an integer combination ([`weight_group`]).
     Weight(WeightGroup<'a>),
     /// The level-1 weight as its factors ([`SplitGroup`]).
@@ -554,7 +557,8 @@ impl StageGroup<'_> {
     fn set_arena(&mut self, arena: &crate::kernel::SharedArena) {
         match self {
             Self::Generic(g) => g.set_arena(arena),
-            Self::Linear(g) | Self::Extra(g) => g.set_arena(arena),
+            Self::Linear(LinearGroup::Row(g)) | Self::Extra(LinearGroup::Row(g)) => g.set_arena(arena),
+            Self::Linear(LinearGroup::Plane(_)) | Self::Extra(LinearGroup::Plane(_)) => {}
             Self::Weight(WeightGroup::Row(g)) => g.set_arena(arena),
             Self::Weight(WeightGroup::Plane(_)) => {}
             Self::Split(g) => g.set_arena(arena),
@@ -615,7 +619,49 @@ impl StageGroup<'_> {
     fn recycle(self, pool: &mut agg_simd::buf::Pool) {
         match self {
             Self::Weight(group) => group.recycle(pool),
-            Self::Generic(_) | Self::Linear(_) | Self::Extra(_) | Self::Split(_) => {}
+            Self::Linear(LinearGroup::Plane(group)) | Self::Extra(LinearGroup::Plane(group)) => {
+                group.recycle(pool)
+            }
+            Self::Generic(_)
+            | Self::Linear(LinearGroup::Row(_))
+            | Self::Extra(LinearGroup::Row(_))
+            | Self::Split(_) => {}
+        }
+    }
+}
+
+/// The linear integer group of either kernel layout.
+enum LinearGroup<'a> {
+    Row(LinearIntGroup<'a>),
+    Plane(PlaneLinearIntGroup<'a>),
+}
+
+impl LinearGroup<'_> {
+    fn claim(&self) -> E {
+        match self {
+            Self::Row(g) => g.claim(),
+            Self::Plane(g) => g.claim(),
+        }
+    }
+
+    fn round_message(&mut self, round: usize) -> Vec<E> {
+        match self {
+            Self::Row(g) => g.round_message(round),
+            Self::Plane(g) => g.round_message(round),
+        }
+    }
+
+    fn bind(&mut self, round: usize, challenge: E) {
+        match self {
+            Self::Row(g) => g.bind(round, challenge),
+            Self::Plane(g) => g.bind(round, challenge),
+        }
+    }
+
+    fn terminal_consistent(&self) -> bool {
+        match self {
+            Self::Row(g) => g.terminal_consistent(),
+            Self::Plane(g) => g.terminal_consistent(),
         }
     }
 }
@@ -681,7 +727,8 @@ fn linear_group<'a>(
     instances: &[GroupInstance],
     eq_point: Option<&[E]>,
     rounds: usize,
-) -> Option<LinearIntGroup<'a>> {
+    pool: &mut agg_simd::buf::Pool,
+) -> Option<LinearGroup<'a>> {
     let point = eq_point.filter(|p| p.len() == rounds && rounds > 0)?;
     let cells: Vec<Source<'a>> = lanes
         .iter()
@@ -710,7 +757,12 @@ fn linear_group<'a>(
     if !ids.iter().all(elsewhere) {
         return None;
     }
-    LinearIntGroup::new(cells, coefficients, point)
+    if layout() == Layout::Plane {
+        if let Some(group) = PlaneLinearIntGroup::new(cells.clone(), coefficients.clone(), point, pool) {
+            return Some(LinearGroup::Plane(group));
+        }
+    }
+    LinearIntGroup::new(cells, coefficients, point).map(LinearGroup::Row)
 }
 
 /// The weighted path (prover only; the generic kernel's messages): a full-domain group
@@ -767,7 +819,8 @@ fn split_linear<'a>(
     instances: Vec<GroupInstance>,
     eq_point: Option<&[E]>,
     rounds: usize,
-) -> (Vec<GroupInstance>, Option<LinearIntGroup<'a>>) {
+    pool: &mut agg_simd::buf::Pool,
+) -> (Vec<GroupInstance>, Option<LinearGroup<'a>>) {
     let Some(point) = eq_point.filter(|p| p.len() == rounds && rounds > 0) else {
         return (instances, None);
     };
@@ -841,7 +894,13 @@ fn split_linear<'a>(
             _ => unreachable!("candidates are integer lanes"),
         })
         .unzip();
-    let linear = LinearIntGroup::new(cells, coefficients, point);
+    let linear = if layout() == Layout::Plane {
+        PlaneLinearIntGroup::new(cells.clone(), coefficients.clone(), point, pool)
+            .map(LinearGroup::Plane)
+    } else {
+        None
+    };
+    let linear = linear.or_else(|| LinearIntGroup::new(cells, coefficients, point).map(LinearGroup::Row));
     // `new` refuses only lanes of the wrong length, which `Group::new` then reports.
     (instances, linear)
 }
