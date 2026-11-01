@@ -66,6 +66,23 @@ pub const K_SKIP: usize = 6;
 pub static ZC_COMPACT_K_DISABLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Switch for the two-round lookahead of the sparse tail (the round-3
+/// producer emits two messages and each tail pass folds 4 -> 1). Tests set it
+/// to run the one-round route as their oracle; `FLOCK_ZC_TAIL_LA=0` does the
+/// same for A/B timing. The transcript is identical either way.
+pub static ZC_SPARSE_LOOKAHEAD_DISABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Smallest logical domain a sparse lookahead pass runs on; below it the
+/// tail expands to the dense buffers (a few KiB) and finishes one round at a
+/// time.
+const SPARSE_LOOKAHEAD_MIN_DOMAIN: usize = 1 << 8;
+
+fn sparse_lookahead_on() -> bool {
+    !ZC_SPARSE_LOOKAHEAD_DISABLE.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var_os("FLOCK_ZC_TAIL_LA").as_deref() != Some(std::ffi::OsStr::new("0"))
+}
+
 /// Test-only oracle for the RS cascade tail (integrated round-2 lookahead +
 /// 4→1 tail passes). The lookahead messages are the same polynomial values,
 /// derived without the intermediate data pass — transcript identical, pinned
@@ -916,23 +933,52 @@ fn prove_packed_padded_inner<C: Challenger>(
             challenger.observe_f128(mi);
             let rho = sample_rho!();
             mlv_rhos.push(rho);
-            let mut r_next = vec![F128::ONE; n_mlv - 1];
-            r_next[1..].copy_from_slice(&r[k_skip + 2..]);
-            let (a, b, m1, mi, st) = multilinear::sparse_round3_from_bits(
-                a_packed,
-                b_packed,
-                &fold_table,
-                rho,
-                &r_next,
-                &st,
-            );
-            multilinear_msgs.push((m1, mi));
-            challenger.observe_f128(m1);
-            challenger.observe_f128(mi);
-            let rho = sample_rho!();
-            mlv_rhos.push(rho);
-            domain /= 2;
-            (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 1);
+            if sparse_lookahead_on() {
+                // Rounds 3 and 4 from one pass over the packed rows; the tail
+                // starts with both challenges pending.
+                let (a, b, q, st) = multilinear::sparse_round3_lookahead_from_bits(
+                    a_packed,
+                    b_packed,
+                    &fold_table,
+                    rho,
+                    &r[k_skip + 3..],
+                    &st,
+                    domain / 2,
+                );
+                let (m1a, mia) = lookahead_msg_first(&q, r[k_skip + 2]);
+                multilinear_msgs.push((m1a, mia));
+                challenger.observe_f128(m1a);
+                challenger.observe_f128(mia);
+                let rho_a = sample_rho!();
+                mlv_rhos.push(rho_a);
+                let (m1b, mib) = lookahead_msg_second(&q, rho_a);
+                multilinear_msgs.push((m1b, mib));
+                challenger.observe_f128(m1b);
+                challenger.observe_f128(mib);
+                let rho_b = sample_rho!();
+                mlv_rhos.push(rho_b);
+                domain /= 2;
+                (a_mlv, b_mlv, store, rho_prev, pending2, i) =
+                    (a, b, Some(st), rho_a, Some(rho_b), 2);
+            } else {
+                let mut r_next = vec![F128::ONE; n_mlv - 1];
+                r_next[1..].copy_from_slice(&r[k_skip + 2..]);
+                let (a, b, m1, mi, st) = multilinear::sparse_round3_from_bits(
+                    a_packed,
+                    b_packed,
+                    &fold_table,
+                    rho,
+                    &r_next,
+                    &st,
+                );
+                multilinear_msgs.push((m1, mi));
+                challenger.observe_f128(m1);
+                challenger.observe_f128(mi);
+                let rho = sample_rho!();
+                mlv_rhos.push(rho);
+                domain /= 2;
+                (a_mlv, b_mlv, store, rho_prev, pending2, i) = (a, b, Some(st), rho, None, 1);
+            }
         } else {
             let (a, b, m1, mi, st) = multilinear::uni_skip_fold_and_round_pair_runs_sparse(
                 a_packed,
@@ -1122,6 +1168,80 @@ fn prove_packed_padded_inner<C: Challenger>(
     // round-2 branch above (compact-K / integrated lookahead: two challenges
     // deferred; classic and sparse: one deferred, `pending2` = None).
     while i < n_mlv - 1 {
+        // Sparse lookahead: two pending challenges on live-span storage. One
+        // 4 -> 1 pass over the live span serves two rounds; once the domain
+        // is small (or fewer than two rounds remain) the span is expanded
+        // and the pending folds resolve below.
+        if let (Some(st), Some(r2)) = (store.as_ref(), pending2) {
+            if i + 2 < n_mlv && domain >= SPARSE_LOOKAHEAD_MIN_DOMAIN {
+                let t_route = std::time::Instant::now();
+                // Each interval's image widens by at most 15 slots per end.
+                let cap = (st.len() / 4 + 32 * st.intervals().len()).min(domain / 4);
+                if a_nxt.len() < cap {
+                    give_f128(a_nxt);
+                    give_f128(b_nxt);
+                    a_nxt = take_f128(cap);
+                    b_nxt = take_f128(cap);
+                }
+                let (q, st_out) = multilinear::fold2_lookahead_sparse_into(
+                    &a_mlv,
+                    &b_mlv,
+                    &mut a_nxt[..cap],
+                    &mut b_nxt[..cap],
+                    (rho_prev, r2),
+                    &r[k_skip + i + 3..],
+                    st,
+                    domain,
+                );
+                swap(&mut a_mlv, &mut a_nxt);
+                swap(&mut b_mlv, &mut b_nxt);
+                a_mlv.truncate(st_out.len());
+                b_mlv.truncate(st_out.len());
+                if zc_timing && std::env::var_os("FLOCK_ZC_ROUNDS").is_some() {
+                    eprintln!(
+                        "[zc-round] route la domain {} stored {} {:.3} ms",
+                        domain,
+                        st_out.len(),
+                        t_route.elapsed().as_secs_f64() * 1e3
+                    );
+                }
+                store = Some(st_out);
+                domain /= 4;
+                let (m1a, mia) = lookahead_msg_first(&q, r[k_skip + i + 2]);
+                multilinear_msgs.push((m1a, mia));
+                challenger.observe_f128(m1a);
+                challenger.observe_f128(mia);
+                let rho_a = sample_rho!();
+                mlv_rhos.push(rho_a);
+                let (m1b, mib) = lookahead_msg_second(&q, rho_a);
+                multilinear_msgs.push((m1b, mib));
+                challenger.observe_f128(m1b);
+                challenger.observe_f128(mib);
+                let rho_b = sample_rho!();
+                mlv_rhos.push(rho_b);
+                rho_prev = rho_a;
+                pending2 = Some(rho_b);
+                i += 2;
+                route_ms[0] += t_route.elapsed().as_secs_f64() * 1e3;
+                route_n[0] += 2;
+                continue;
+            }
+            let t_route = std::time::Instant::now();
+            let st = store.take().expect("matched above");
+            let a_full = expand_to_dense(&a_mlv, &st, domain);
+            let b_full = expand_to_dense(&b_mlv, &st, domain);
+            give_f128(replace(&mut a_mlv, a_full));
+            give_f128(replace(&mut b_mlv, b_full));
+            if a_nxt.len() < domain / 2 {
+                give_f128(a_nxt);
+                give_f128(b_nxt);
+                a_nxt = take_f128(domain / 2);
+                b_nxt = take_f128(domain / 2);
+            }
+            sparse_dirty = false;
+            route_ms[1] += t_route.elapsed().as_secs_f64() * 1e3;
+            route_n[1] += 1;
+        }
         // Cascade needs TWO more message rounds and the fused-size floor;
         // it never runs under live-span compaction (`store` stays None on
         // every cascade-eligible flow).
@@ -2501,6 +2621,53 @@ mod tests {
                 None => want = Some(got),
                 Some(w) => assert_eq!(&got, w, "mask {mask:#x} differs from portable"),
             }
+        }
+    }
+
+    /// The sparse tail's two-round lookahead (round-3 producer plus 4 -> 1
+    /// passes over fragmented, unaligned live intervals) and the one-round
+    /// route emit the same proof under every kernel mask.
+    #[test]
+    fn sparse_lookahead_tail_matches_one_round_tail() {
+        let m = 21usize;
+        let padding = PaddingSpec::from_runs(
+            (0..6)
+                .flat_map(|i| {
+                    [
+                        PaddingRun {
+                            k_log: 11,
+                            useful_bits_per_block: 700 + 37 * i,
+                            n_blocks: 40 + i,
+                        },
+                        PaddingRun {
+                            k_log: 11,
+                            useful_bits_per_block: 0,
+                            n_blocks: 3,
+                        },
+                    ]
+                })
+                .collect(),
+        );
+        let mut rng = Rng::new(0x51A7_0F2E);
+        let mut a = rng.bits(1 << m);
+        let mut b = rng.bits(1 << m);
+        zero_outside_useful(&padding, &mut a);
+        zero_outside_useful(&padding, &mut b);
+        let c: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x & *y).collect();
+        let (a_p, b_p, c_p) = pack_abc(&a, &b, &c);
+        let prove = |disable: bool| {
+            super::ZC_SPARSE_LOOKAHEAD_DISABLE.store(disable, std::sync::atomic::Ordering::SeqCst);
+            let mut ch = FsChallenger::new(b"flock-test-v0");
+            let out = prove_packed_padded_capture_s_hat_v_c(&a_p, &b_p, &c_p, m, &padding, &mut ch);
+            super::ZC_SPARSE_LOOKAHEAD_DISABLE.store(false, std::sync::atomic::Ordering::SeqCst);
+            (out, ch.sample_f128())
+        };
+        for mask in crate::simd::test_masks() {
+            crate::simd::with_mask(mask, || {
+                let one_round = prove(true);
+                let lookahead = prove(false);
+                assert_eq!(one_round, lookahead, "mask {mask:#x}");
+            });
         }
     }
 

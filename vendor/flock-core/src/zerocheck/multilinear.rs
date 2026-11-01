@@ -2327,6 +2327,720 @@ pub fn expand_to_dense(compact: &[F128], store: &LiveLayout, domain: usize) -> V
     out
 }
 
+// ---------------------------------------------------------------------------
+// Two-round lookahead on live-span storage (the sparse tail).
+//
+// The classic sparse tail runs one pass per round: it reads the live span,
+// writes half of it, and computes one message. The lookahead route instead
+// folds TWO pending challenges per pass (4 -> 1) and, from each quad of four
+// folded values, accumulates the eight sums of [`lookahead_accum`], which
+// give the next two messages (the second as a quadratic in the challenge
+// sampled after the first). One pass then serves two rounds: the reads per
+// round pair drop from 1 + 1/2 of the live span to 1, and the writes from
+// 1/2 + 1/4 to 1/4. The round-3 producer from the packed rows already emits
+// the lookahead sums, so the tail starts with two pending challenges and
+// never runs a one-round pass over the large tables.
+//
+// Layout invariant: every interval of a lookahead layout starts and ends on a
+// multiple of 16, so a pass reads whole groups of 16 inputs (four quads of
+// the 4 -> 1 fold) and writes whole quads. Widening an interval to that grid
+// stores a few extra slots, each an honest zero (a dead input group folds to
+// zero), so all sums are the dense prover's exactly: field arithmetic is
+// exact and the regrouping of the eq-weighted sums is pure reassociation.
+// ---------------------------------------------------------------------------
+
+/// Round `[s, e)` outward to multiples of 16, merge touching intervals and
+/// clamp to `domain` (a multiple of 16).
+fn widen16(live: impl IntoIterator<Item = (usize, usize)>, domain: usize) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in live {
+        let (s16, e16) = (s & !15, (e.div_ceil(16) * 16).min(domain));
+        match out.last_mut() {
+            Some((_, prev_e)) if *prev_e >= s16 => *prev_e = (*prev_e).max(e16),
+            _ => out.push((s16, e16)),
+        }
+    }
+    out
+}
+
+/// Fold 16 consecutive inputs at two challenges into one quad (4 -> 1 each).
+#[inline(always)]
+fn fold2_group(e: &[F128], r0: F128, r1: F128) -> [F128; 4] {
+    from_fn(|v| {
+        let x0 = e[4 * v] + r0 * (e[4 * v] + e[4 * v + 1]);
+        let x1 = e[4 * v + 2] + r0 * (e[4 * v + 2] + e[4 * v + 3]);
+        x0 + r1 * (x0 + x1)
+    })
+}
+
+/// The eight lookahead products of `L` quads, lane-parallel: `ga[k]` and
+/// `gb[k]` hold value `k` of each quad, `eq` one weight per quad. The same
+/// algebra as [`lookahead_accum`] (the `a` side is scaled by the weight
+/// first), so the unreduced sums are identical.
+#[cfg(target_arch = "x86_64")]
+macro_rules! lookahead_accum_lanes {
+    ($lanes:ident, $acc:ident, $eq:expr, $ga:expr, $gb:expr) => {{
+        let (ga, gb) = ($ga, $gb);
+        let eq = $eq;
+        let ea0 = $lanes::mul(eq, ga[0]);
+        let ea1 = $lanes::mul(eq, ga[1]);
+        let ea2 = $lanes::mul(eq, ga[2]);
+        let ea3 = $lanes::mul(eq, ga[3]);
+        let sxa0 = $lanes::xor(ea0, ea1);
+        let sxb0 = $lanes::xor(gb[0], gb[1]);
+        let sxa1 = $lanes::xor(ea2, ea3);
+        let sxb1 = $lanes::xor(gb[2], gb[3]);
+        let dca = $lanes::xor(ea0, ea2);
+        let dcb = $lanes::xor(gb[0], gb[2]);
+        let dsa = $lanes::xor(sxa0, sxa1);
+        let dsb = $lanes::xor(sxb0, sxb1);
+        $lanes::wide_acc(&mut $acc[0], ea1, gb[1]);
+        $lanes::wide_acc(&mut $acc[1], sxa0, sxb0);
+        $lanes::wide_acc(&mut $acc[2], ea2, gb[2]);
+        $lanes::wide_acc(&mut $acc[3], ea3, gb[3]);
+        $lanes::wide_acc(&mut $acc[4], sxa1, sxb1);
+        $lanes::wide_acc(&mut $acc[5], dca, dcb);
+        $lanes::wide_acc(&mut $acc[6], $lanes::xor(dca, dsa), $lanes::xor(dcb, dsb));
+        $lanes::wide_acc(&mut $acc[7], dsa, dsb);
+    }};
+}
+
+/// Generates the 4 -> 1 fold and lookahead kernel for one contiguous run of
+/// whole groups and one vector width.
+///
+/// `LANES` groups per step: each table's `16 · LANES` inputs fold to four
+/// vectors of `LANES` consecutive outputs, which are stored and then
+/// transposed into "value k of each quad" vectors for the products.
+macro_rules! fold2_lookahead_run_kernel {
+    ($name:ident, $lanes:ident, $v:ty, $feat:literal) => {
+        /// # Safety
+        /// `a_in.len() == b_in.len() == 16 · eq_lo.len()`,
+        /// `a_out.len() == b_out.len() == 4 · eq_lo.len()`, and the CPU has
+        /// the features of this width.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $feat)]
+        unsafe fn $name(
+            a_in: &[F128],
+            b_in: &[F128],
+            a_out: &mut [F128],
+            b_out: &mut [F128],
+            r0: F128,
+            r1: F128,
+            eq_lo: &[F128],
+        ) -> [F256Unreduced; 8] {
+            use crate::simd::$lanes;
+            const N: usize = $lanes::LANES;
+            let groups = eq_lo.len();
+            debug_assert_eq!(a_in.len(), 16 * groups);
+            debug_assert_eq!(b_in.len(), 16 * groups);
+            debug_assert_eq!(a_out.len(), 4 * groups);
+            debug_assert_eq!(b_out.len(), 4 * groups);
+
+            /// Fold `4 · N` inputs at `src` to `N` outputs.
+            ///
+            /// # Safety
+            /// `4 · N` readable `F128` at `src`; the width's features are on.
+            #[inline]
+            #[target_feature(enable = $feat)]
+            unsafe fn fold4(src: *const F128, r0: $v, r1: $v) -> $v {
+                // SAFETY: the caller supplies `4 · N` readable inputs.
+                unsafe {
+                    let (e, o) = $lanes::even_odd($lanes::loadu(src), $lanes::loadu(src.add(N)));
+                    let x01 = $lanes::xor(e, $lanes::mul(r0, $lanes::xor(e, o)));
+                    let (e, o) = $lanes::even_odd(
+                        $lanes::loadu(src.add(2 * N)),
+                        $lanes::loadu(src.add(3 * N)),
+                    );
+                    let x23 = $lanes::xor(e, $lanes::mul(r0, $lanes::xor(e, o)));
+                    let (x0, x1) = $lanes::even_odd(x01, x23);
+                    $lanes::xor(x0, $lanes::mul(r1, $lanes::xor(x0, x1)))
+                }
+            }
+
+            /// Fold `16 · N` inputs to `4 · N` outputs, store them, and
+            /// return them transposed: element `k` of each of the `N` quads.
+            ///
+            /// # Safety
+            /// `16 · N` readable inputs and `4 · N` writable outputs.
+            #[inline]
+            #[target_feature(enable = $feat)]
+            unsafe fn fold_quads(src: *const F128, dst: *mut F128, r0: $v, r1: $v) -> [$v; 4] {
+                // SAFETY: the caller bounds every load and store.
+                unsafe {
+                    let o0 = fold4(src, r0, r1);
+                    let o1 = fold4(src.add(4 * N), r0, r1);
+                    let o2 = fold4(src.add(8 * N), r0, r1);
+                    let o3 = fold4(src.add(12 * N), r0, r1);
+                    $lanes::storeu(dst, o0);
+                    $lanes::storeu(dst.add(N), o1);
+                    $lanes::storeu(dst.add(2 * N), o2);
+                    $lanes::storeu(dst.add(3 * N), o3);
+                    let (e01, d01) = $lanes::even_odd(o0, o1);
+                    let (e23, d23) = $lanes::even_odd(o2, o3);
+                    let (g0, g2) = $lanes::even_odd(e01, e23);
+                    let (g1, g3) = $lanes::even_odd(d01, d23);
+                    [g0, g1, g2, g3]
+                }
+            }
+
+            // SAFETY: the length contract bounds every access; the width's
+            // features were checked by the caller.
+            unsafe {
+                let (v0, v1) = ($lanes::splat(r0), $lanes::splat(r1));
+                let mut acc = [
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                    $lanes::wide_zero(),
+                ];
+                let mut g = 0;
+                while g + N <= groups {
+                    let ga = fold_quads(
+                        a_in.as_ptr().add(16 * g),
+                        a_out.as_mut_ptr().add(4 * g),
+                        v0,
+                        v1,
+                    );
+                    let gb = fold_quads(
+                        b_in.as_ptr().add(16 * g),
+                        b_out.as_mut_ptr().add(4 * g),
+                        v0,
+                        v1,
+                    );
+                    let eq = $lanes::loadu(eq_lo.as_ptr().add(g));
+                    lookahead_accum_lanes!($lanes, acc, eq, ga, gb);
+                    g += N;
+                }
+                let mut sums = [F256Unreduced::ZERO; 8];
+                while g < groups {
+                    let ga = fold2_group(&a_in[16 * g..16 * g + 16], r0, r1);
+                    let gb = fold2_group(&b_in[16 * g..16 * g + 16], r0, r1);
+                    a_out[4 * g..4 * g + 4].copy_from_slice(&ga);
+                    b_out[4 * g..4 * g + 4].copy_from_slice(&gb);
+                    lookahead_accum(&ga, &gb, eq_lo[g], &mut sums);
+                    g += 1;
+                }
+                for (s, w) in sums.iter_mut().zip(acc) {
+                    *s ^= $lanes::wide_fold(w);
+                }
+                sums
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+fold2_lookahead_run_kernel!(
+    fold2_lookahead_run_avx512,
+    ghash4,
+    core::arch::x86_64::__m512i,
+    "avx512f,vpclmulqdq,sse4.1"
+);
+#[cfg(target_arch = "x86_64")]
+fold2_lookahead_run_kernel!(
+    fold2_lookahead_run_avx2,
+    ghash2,
+    core::arch::x86_64::__m256i,
+    "avx2,vpclmulqdq"
+);
+#[cfg(target_arch = "x86_64")]
+fold2_lookahead_run_kernel!(
+    fold2_lookahead_run_pclmul,
+    ghash1,
+    core::arch::x86_64::__m128i,
+    "pclmulqdq,sse4.1"
+);
+
+/// Portable 4 -> 1 fold and lookahead sums of one contiguous run of groups.
+fn fold2_lookahead_run_scalar(
+    a_in: &[F128],
+    b_in: &[F128],
+    a_out: &mut [F128],
+    b_out: &mut [F128],
+    r0: F128,
+    r1: F128,
+    eq_lo: &[F128],
+) -> [F256Unreduced; 8] {
+    let mut sums = [F256Unreduced::ZERO; 8];
+    for (g, &eq) in eq_lo.iter().enumerate() {
+        let ga = fold2_group(&a_in[16 * g..16 * g + 16], r0, r1);
+        let gb = fold2_group(&b_in[16 * g..16 * g + 16], r0, r1);
+        a_out[4 * g..4 * g + 4].copy_from_slice(&ga);
+        b_out[4 * g..4 * g + 4].copy_from_slice(&gb);
+        lookahead_accum(&ga, &gb, eq, &mut sums);
+    }
+    sums
+}
+
+/// The widest 4 -> 1 lookahead run kernel; same contract as the scalar one.
+fn fold2_lookahead_run_best(
+    a_in: &[F128],
+    b_in: &[F128],
+    a_out: &mut [F128],
+    b_out: &mut [F128],
+    r0: F128,
+    r1: F128,
+    eq_lo: &[F128],
+) -> [F256Unreduced; 8] {
+    let groups = eq_lo.len();
+    assert!(a_in.len() == 16 * groups && b_in.len() == 16 * groups);
+    assert!(a_out.len() == 4 * groups && b_out.len() == 4 * groups);
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the asserts above are the kernels' geometry; each arm's
+        // features were checked when the width was selected.
+        unsafe {
+            match crate::simd::ghash_width() {
+                crate::simd::GhashWidth::Avx512 => {
+                    return fold2_lookahead_run_avx512(a_in, b_in, a_out, b_out, r0, r1, eq_lo);
+                }
+                crate::simd::GhashWidth::Vpclmul256 => {
+                    return fold2_lookahead_run_avx2(a_in, b_in, a_out, b_out, r0, r1, eq_lo);
+                }
+                crate::simd::GhashWidth::Pclmul => {
+                    return fold2_lookahead_run_pclmul(a_in, b_in, a_out, b_out, r0, r1, eq_lo);
+                }
+                crate::simd::GhashWidth::Portable => {}
+            }
+        }
+    }
+    fold2_lookahead_run_scalar(a_in, b_in, a_out, b_out, r0, r1, eq_lo)
+}
+
+/// Group tasks over a 16-aligned output layout: the output intervals in
+/// units of quads, cut into tasks of roughly equal size, each with its own
+/// contiguous output slices.
+fn quad_tasks<'a>(
+    store_out: &LiveLayout,
+    a_out: &'a mut [F128],
+    b_out: &'a mut [F128],
+    target: usize,
+) -> (Vec<(usize, usize)>, Vec<(Range<usize>, &'a mut [F128], &'a mut [F128])>) {
+    let quads: Vec<(usize, usize)> =
+        store_out.intervals().iter().map(|&(s, e)| (s / 4, e / 4)).collect();
+    let (pieces, tasks) = balanced_interval_tasks(&quads, target);
+    let mut work = Vec::with_capacity(tasks.len());
+    let mut a_rem: &mut [F128] = &mut a_out[..store_out.len()];
+    let mut b_rem: &mut [F128] = &mut b_out[..store_out.len()];
+    for t in tasks {
+        let span: usize = pieces[t.clone()].iter().map(|&(s, e)| 4 * (e - s)).sum();
+        let (a_task, rest) = take(&mut a_rem).split_at_mut(span);
+        a_rem = rest;
+        let (b_task, rest) = take(&mut b_rem).split_at_mut(span);
+        b_rem = rest;
+        work.push((t, a_task, b_task));
+    }
+    (pieces, work)
+}
+
+/// Add a task's eight sums.
+fn add8(mut x: [F128; 8], y: [F128; 8]) -> [F128; 8] {
+    for (a, b) in x.iter_mut().zip(y) {
+        *a += b;
+    }
+    x
+}
+
+/// Output layout of a 4 -> 1 pass over a 16-aligned input layout: each input
+/// interval's image, widened back to the 16-grid.
+pub fn lookahead_layout_after_fold2(store_in: &LiveLayout, domain: usize) -> LiveLayout {
+    LiveLayout::new(widen16(
+        store_in.intervals().iter().map(|&(s, e)| (s / 4, e / 4)),
+        domain / 4,
+    ))
+}
+
+/// One sparse-tail lookahead pass: fold the two pending challenges `rhos`
+/// (4 -> 1) over the live span and return the lookahead sums of the next two
+/// rounds with the output layout. `rest` holds the eq coordinates after the
+/// two lookahead variables (`log2(domain / 16)` of them).
+///
+/// `store_in` must be 16-aligned (as produced by
+/// [`sparse_round3_lookahead_from_bits`] or this function); input positions
+/// outside it are zero and never read. Every output slot of the returned
+/// layout is written.
+pub fn fold2_lookahead_sparse_into(
+    a: &[F128],
+    b: &[F128],
+    a_out: &mut [F128],
+    b_out: &mut [F128],
+    rhos: (F128, F128),
+    rest: &[F128],
+    store_in: &LiveLayout,
+    domain: usize,
+) -> (LookaheadSums, LiveLayout) {
+    assert!(domain.is_power_of_two() && domain >= 64);
+    assert_eq!(a.len(), store_in.len());
+    assert_eq!(b.len(), store_in.len());
+    assert_eq!(1usize << rest.len(), domain / 16, "one eq coordinate per group bit");
+    debug_assert!(
+        store_in.intervals().iter().all(|&(s, e)| s % 16 == 0 && e % 16 == 0),
+        "lookahead layouts are 16-aligned"
+    );
+    let store_out = lookahead_layout_after_fold2(store_in, domain);
+    assert!(a_out.len() >= store_out.len() && b_out.len() >= store_out.len());
+    let eq = SplitEqGhash::new(rest);
+    let lo_mask = (1usize << eq.n_lo) - 1;
+    let live_groups = store_out.len() / 4;
+    let target = (live_groups / (4 * current_num_threads().max(1))).clamp(1 << 6, 1 << 10);
+    let (pieces, work) = quad_tasks(&store_out, a_out, b_out, target);
+    let (r0, r1) = rhos;
+    let intervals = store_in.intervals();
+    let sums = work
+        .into_par_iter()
+        .map(|(task, a_task, b_task)| {
+            let task_pieces = &pieces[task];
+            let mut cur = store_in.seek(16 * task_pieces[0].0);
+            let mut out = 0usize;
+            let mut sums = [F128::ZERO; 8];
+            for &(gs, ge) in task_pieces {
+                let mut g = gs;
+                while g < ge {
+                    let y = 16 * g;
+                    while cur < intervals.len() && intervals[cur].1 <= y {
+                        cur += 1;
+                    }
+                    match intervals.get(cur) {
+                        Some(&(s, e)) if s <= y => {
+                            // A live run inside one stored interval and one
+                            // eq-lo block: contiguous input, one kernel call.
+                            let end = ge.min(e / 16).min(((g >> eq.n_lo) + 1) << eq.n_lo);
+                            let n = end - g;
+                            let base = store_in.offset_of(cur) + (y - s);
+                            let acc = fold2_lookahead_run_best(
+                                &a[base..base + 16 * n],
+                                &b[base..base + 16 * n],
+                                &mut a_task[out..out + 4 * n],
+                                &mut b_task[out..out + 4 * n],
+                                r0,
+                                r1,
+                                &eq.lo[g & lo_mask..(g & lo_mask) + n],
+                            );
+                            let eh = eq.hi[g >> eq.n_lo];
+                            for (s, w) in sums.iter_mut().zip(acc) {
+                                *s += eh * w.reduce();
+                            }
+                            out += 4 * n;
+                            g = end;
+                        }
+                        next => {
+                            // Dead groups fold to zero and add nothing.
+                            let end = next.map_or(ge, |&(s, _)| ge.min(s / 16));
+                            a_task[out..out + 4 * (end - g)].fill(F128::ZERO);
+                            b_task[out..out + 4 * (end - g)].fill(F128::ZERO);
+                            out += 4 * (end - g);
+                            g = end;
+                        }
+                    }
+                }
+            }
+            debug_assert_eq!(out, a_task.len());
+            sums
+        })
+        .reduce(|| [F128::ZERO; 8], add8);
+    (lookahead_finish(sums), store_out)
+}
+
+/// The two packed-row folds of output pair `t` (outputs `2t`, `2t + 1`) of
+/// the round-3 producer, zero where the round-2 layout is dead. `joint` has
+/// 16 chunks and `store_in` describes rows that `a` and `b` hold.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn round3_pair_values(
+    t: usize,
+    cursor: &mut usize,
+    a: &[u8],
+    b: &[u8],
+    joint: &UniSkipFoldTable,
+    store_in: &LiveLayout,
+) -> ([F128; 2], [F128; 2]) {
+    let row = 2 * t;
+    let y = 2 * row;
+    while *cursor < store_in.intervals.len() && store_in.intervals[*cursor].1 <= y {
+        *cursor += 1;
+    }
+    let (live0, live1) = match store_in.intervals.get(*cursor) {
+        Some(&(start, end)) if start <= y && y + 4 <= end => (true, true),
+        _ => (
+            store_in.rank(cursor, y).is_some(),
+            store_in.rank(cursor, y + 2).is_some(),
+        ),
+    };
+    let mut av = [F128::ZERO; 2];
+    let mut bv = [F128::ZERO; 2];
+    if live0 && live1 {
+        let aa = &a[16 * row..16 * (row + 2)];
+        let bb = &b[16 * row..16 * (row + 2)];
+        let ptr = joint.data.as_ptr();
+        // SAFETY: two 16-byte rows of each table were sliced above and the
+        // joint table holds 16 chunks of 256 entries.
+        let (lo, hi) = unsafe {
+            (
+                fold_round2_pair_x86_unchecked_8(
+                    ptr,
+                    aa.as_ptr(),
+                    aa.as_ptr().add(16),
+                    bb.as_ptr(),
+                    bb.as_ptr().add(16),
+                ),
+                fold_round2_pair_x86_unchecked_8(
+                    ptr.add(8 * 256),
+                    aa.as_ptr().add(8),
+                    aa.as_ptr().add(24),
+                    bb.as_ptr().add(8),
+                    bb.as_ptr().add(24),
+                ),
+            )
+        };
+        return ([lo[0] + hi[0], lo[1] + hi[1]], [lo[2] + hi[2], lo[3] + hi[3]]);
+    }
+    for (i, live) in [live0, live1].into_iter().enumerate() {
+        if live {
+            let pos = 16 * (row + i);
+            av[i] = joint.fold_one_row(&a[pos..pos + 16]);
+            bv[i] = joint.fold_one_row(&b[pos..pos + 16]);
+        }
+    }
+    (av, bv)
+}
+
+/// Generates the round-3 lookahead producer task for one vector width.
+macro_rules! round3_lookahead_task_kernel {
+    ($name:ident, $lanes:ident, $feat:literal) => {
+        /// Fold a task's quads from the packed rows, store them, and return
+        /// the task's eight eq-weighted lookahead sums (reduced, `eq_hi`
+        /// applied).
+        ///
+        /// # Safety
+        /// As [`round3_pair_values`]; the task slices hold four slots per
+        /// quad; the CPU has the features of this width.
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $feat)]
+        unsafe fn $name(
+            part: &[(usize, usize)],
+            ao: &mut [F128],
+            bo: &mut [F128],
+            a: &[u8],
+            b: &[u8],
+            joint: &UniSkipFoldTable,
+            eq: &SplitEqGhash,
+            store_in: &LiveLayout,
+        ) -> [F128; 8] {
+            use crate::simd::$lanes;
+            const N: usize = $lanes::LANES;
+            let mut sums = [F128::ZERO; 8];
+            let mut cursor = store_in.seek(8 * part[0].0);
+            let mut out = 0;
+            let lo_mask = (1usize << eq.n_lo) - 1;
+            // SAFETY: the layout bounds every row read, the task slices bound
+            // every store, and the width's features were checked.
+            unsafe {
+                for &(ps, pe) in part {
+                    let mut q = ps;
+                    while q < pe {
+                        let end = pe.min(((q >> eq.n_lo) + 1) << eq.n_lo);
+                        let mut acc = [
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                            $lanes::wide_zero(),
+                        ];
+                        let mut tail = [F256Unreduced::ZERO; 8];
+                        let eh = eq.hi[q >> eq.n_lo];
+                        while q < end {
+                            let count = (end - q).min(N);
+                            let mut av = [[F128::ZERO; 4]; N];
+                            let mut bv = [[F128::ZERO; 4]; N];
+                            for lane in 0..count {
+                                for h in 0..2 {
+                                    let (pa, pb) = round3_pair_values(
+                                        2 * (q + lane) + h,
+                                        &mut cursor,
+                                        a,
+                                        b,
+                                        joint,
+                                        store_in,
+                                    );
+                                    av[lane][2 * h..2 * h + 2].copy_from_slice(&pa);
+                                    bv[lane][2 * h..2 * h + 2].copy_from_slice(&pb);
+                                }
+                                ao[out..out + 4].copy_from_slice(&av[lane]);
+                                bo[out..out + 4].copy_from_slice(&bv[lane]);
+                                out += 4;
+                            }
+                            let lo = q & lo_mask;
+                            if count == N {
+                                let mut ga = [$lanes::zero(); 4];
+                                let mut gb = [$lanes::zero(); 4];
+                                for k in 0..4 {
+                                    let ak: [F128; N] = from_fn(|j| av[j][k]);
+                                    let bk: [F128; N] = from_fn(|j| bv[j][k]);
+                                    ga[k] = $lanes::set_from(&ak);
+                                    gb[k] = $lanes::set_from(&bk);
+                                }
+                                let w = $lanes::loadu(eq.lo[lo..lo + N].as_ptr());
+                                lookahead_accum_lanes!($lanes, acc, w, ga, gb);
+                            } else {
+                                for lane in 0..count {
+                                    lookahead_accum(&av[lane], &bv[lane], eq.lo[lo + lane], &mut tail);
+                                }
+                            }
+                            q += count;
+                        }
+                        for (s, w) in tail.iter_mut().zip(acc) {
+                            *s ^= $lanes::wide_fold(w);
+                        }
+                        for (s, t) in sums.iter_mut().zip(tail) {
+                            *s += eh * t.reduce();
+                        }
+                    }
+                }
+            }
+            sums
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+round3_lookahead_task_kernel!(round3_lookahead_task_avx512, ghash4, "avx512f,vpclmulqdq,sse4.1");
+#[cfg(target_arch = "x86_64")]
+round3_lookahead_task_kernel!(round3_lookahead_task_avx2, ghash2, "avx2,vpclmulqdq");
+#[cfg(target_arch = "x86_64")]
+round3_lookahead_task_kernel!(round3_lookahead_task_pclmul, ghash1, "pclmulqdq,sse4.1");
+
+/// Portable round-3 lookahead producer task (same contract and sums).
+#[allow(clippy::too_many_arguments)]
+fn round3_lookahead_task_scalar(
+    part: &[(usize, usize)],
+    ao: &mut [F128],
+    bo: &mut [F128],
+    a: &[u8],
+    b: &[u8],
+    joint: &UniSkipFoldTable,
+    eq: &SplitEqGhash,
+    store_in: &LiveLayout,
+) -> [F128; 8] {
+    let mut sums = [F128::ZERO; 8];
+    let mut cursor = store_in.seek(8 * part[0].0);
+    let mut out = 0;
+    let lo_mask = (1usize << eq.n_lo) - 1;
+    for &(ps, pe) in part {
+        let mut q = ps;
+        while q < pe {
+            let end = pe.min(((q >> eq.n_lo) + 1) << eq.n_lo);
+            let eh = eq.hi[q >> eq.n_lo];
+            let mut acc = [F256Unreduced::ZERO; 8];
+            for qq in q..end {
+                let mut av = [F128::ZERO; 4];
+                let mut bv = [F128::ZERO; 4];
+                for h in 0..2 {
+                    // The per-row path only: the scalar route must not touch
+                    // the x86 table kernel when SIMD is switched off.
+                    let t = 2 * qq + h;
+                    let row = 2 * t;
+                    let y = 2 * row;
+                    let live0 = store_in.rank(&mut cursor, y).is_some();
+                    let live1 = store_in.rank(&mut cursor, y + 2).is_some();
+                    for (i, live) in [live0, live1].into_iter().enumerate() {
+                        if live {
+                            let pos = 16 * (row + i);
+                            av[2 * h + i] = joint.fold_one_row(&a[pos..pos + 16]);
+                            bv[2 * h + i] = joint.fold_one_row(&b[pos..pos + 16]);
+                        }
+                    }
+                }
+                ao[out..out + 4].copy_from_slice(&av);
+                bo[out..out + 4].copy_from_slice(&bv);
+                out += 4;
+                lookahead_accum(&av, &bv, eq.lo[qq & lo_mask], &mut acc);
+            }
+            for (s, t) in sums.iter_mut().zip(acc) {
+                *s += eh * t.reduce();
+            }
+            q = end;
+        }
+    }
+    sums
+}
+
+/// Round-3 producer of the lookahead tail: fold the round-2 layout's packed
+/// rows at `rho` (as [`sparse_round3_from_bits`]) and, in the same pass,
+/// accumulate the lookahead sums of rounds 3 and 4 instead of round 3's
+/// message alone. `rest` holds the eq coordinates after the two lookahead
+/// variables (`log2(domain_out / 4)` of them, `domain_out` the folded logical
+/// size). The output layout is 16-aligned for [`fold2_lookahead_sparse_into`].
+pub fn sparse_round3_lookahead_from_bits(
+    a: &[u8],
+    b: &[u8],
+    table: &UniSkipFoldTable,
+    rho: F128,
+    rest: &[F128],
+    store_in: &LiveLayout,
+    domain_out: usize,
+) -> (Vec<F128>, Vec<F128>, LookaheadSums, LiveLayout) {
+    assert_eq!(table.n_chunks, 8);
+    assert!(domain_out.is_power_of_two() && domain_out >= 16);
+    assert_eq!(1usize << rest.len(), domain_out / 4, "one eq coordinate per quad bit");
+    // Linearity gives fold(x0, x1, rho) = (1 + rho)x0 + rho*x1.
+    let mut joint = UniSkipFoldTable {
+        n_chunks: 16,
+        data: vec![F128::ZERO; 16 * 256],
+    };
+    for j in 0..8 * 256 {
+        let hi = rho * table.data[j];
+        joint.data[j] = table.data[j] + hi;
+        joint.data[8 * 256 + j] = hi;
+    }
+    let store_out = LiveLayout::new(widen16(shrink_intervals(store_in.intervals()), domain_out));
+    let mut aa = take_f128(store_out.len());
+    let mut bb = take_f128(store_out.len());
+    let eq = SplitEqGhash::new(rest);
+    let live_quads = store_out.len() / 4;
+    let target = (live_quads / (4 * current_num_threads().max(1))).clamp(1 << 7, 1 << 11);
+    let (pieces, work) = quad_tasks(&store_out, &mut aa, &mut bb, target);
+    #[cfg(target_arch = "x86_64")]
+    let width = crate::simd::ghash_width();
+    let sums = work
+        .into_par_iter()
+        .map(|(task, ao, bo)| {
+            let part = &pieces[task];
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: the run-time width check provides the target features;
+            // the layout and task slices are the kernels' geometry.
+            unsafe {
+                match width {
+                    crate::simd::GhashWidth::Avx512 => {
+                        return round3_lookahead_task_avx512(
+                            part, ao, bo, a, b, &joint, &eq, store_in,
+                        );
+                    }
+                    crate::simd::GhashWidth::Vpclmul256 => {
+                        return round3_lookahead_task_avx2(
+                            part, ao, bo, a, b, &joint, &eq, store_in,
+                        );
+                    }
+                    crate::simd::GhashWidth::Pclmul => {
+                        return round3_lookahead_task_pclmul(
+                            part, ao, bo, a, b, &joint, &eq, store_in,
+                        );
+                    }
+                    crate::simd::GhashWidth::Portable => {}
+                }
+            }
+            round3_lookahead_task_scalar(part, ao, bo, a, b, &joint, &eq, store_in)
+        })
+        .reduce(|| [F128::ZERO; 8], add8);
+    (aa, bb, lookahead_finish(sums), store_out)
+}
+
 /// Serial reference — identical I/O contract to
 /// [`uni_skip_fold_and_round_pair_optimized_packed`], no rayon. Kept under
 /// `#[cfg(test)]` as the cross-check oracle for the parallel version.

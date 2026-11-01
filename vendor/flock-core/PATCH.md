@@ -450,3 +450,27 @@ portable kernels, and keep the SSE2 and portable bodies for CPUs below the AVX2 
 workers entering the initializer at once occupy the Rayon pool that the
 initializer's parallel build needs, and the process deadlocks. The tables are
 built once, so the serial build costs a few milliseconds per process.
+
+## 11. Prover-only: two-round lookahead in the sparse zerocheck tail
+
+The sparse (live-span) tail ran one pass per round: read the live span, write half of it,
+one message. At 32K the round-3 producer's output is about 35M words per table, so the
+tail moved about 4.5 GB of reads and 2.25 GB of writes (plus the write-allocate reads).
+`zerocheck/multilinear.rs` now has:
+
+* `sparse_round3_lookahead_from_bits`: the round-3 producer from the packed rows emits the
+  eight lookahead sums of `lookahead_accum` (rounds 3 and 4) instead of round 3's message,
+  so the tail starts with two pending challenges.
+* `fold2_lookahead_sparse_into`: one pass folds both pending challenges (4 -> 1) over the
+  live span and accumulates the next two rounds' lookahead sums; vector kernels for the
+  AVX-512, VPCLMUL-256 and PCLMUL widths (`fold2_lookahead_run_*`), portable fallback.
+* Lookahead layouts are 16-aligned (`widen16`): a pass reads whole groups of 16 inputs and
+  writes whole quads; the widened slots are honest zeros.
+
+`zerocheck.rs` takes this route on the packed-rows path; below a logical domain of 256 the
+span is expanded and the tail finishes one round at a time. Reads per round pair drop from
+1.5 to 1 live span and writes from 0.75 to 0.25 (est. at 32K: tail 9 GB -> 4.5 GB moved).
+Messages are the same polynomial values (exact GF(2^128), regrouped sums), so the proof is
+byte-identical; `FLOCK_ZC_TAIL_LA=0` selects the one-round route for A/B. Test:
+`zerocheck::tests::sparse_lookahead_tail_matches_one_round_tail` (every mask), plus the
+sparse-versus-dense proof tests, which now run the lookahead route.
