@@ -427,6 +427,12 @@ impl ChainGate {
         &self.spec
     }
 
+    /// Per permutation: the absorbed `(state bit, column)` pairs and the state bits
+    /// XORed with the constant (the row maps [`Self::apply_ab`] reads).
+    pub(crate) fn absorb_lists(&self) -> (&[Vec<(usize, usize)>], &[Vec<usize>]) {
+        (&self.absorb_cols, &self.absorb_ones)
+    }
+
     /// Committed chi lanes of round `r` of permutation `m` ([`GateLayout::round_lanes`]).
     #[inline]
     #[must_use]

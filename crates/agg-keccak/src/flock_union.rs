@@ -580,7 +580,8 @@ impl UnionGeometry {
         let mut witnesses = Vec::with_capacity(self.types());
         let mut slot_circuits = Vec::with_capacity(self.types());
         for entry in by_slot {
-            let (SlotBuffers { z, a, b }, circuit) = entry.expect("every slot");
+            let (buf, circuit) = entry.expect("every slot");
+            let (z, a, b) = buf.into_zab();
             witnesses.push(SlotWitness {
                 z_packed: z,
                 a_packed: a,

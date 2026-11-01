@@ -57,7 +57,7 @@ use crate::{
         SpongeRecord, CHI_WORD_BASE, CONST_WORD, CTILDE_BYTES, CTILDE_WORD_BASE, MU_BYTES,
         MU_WORD_BASE, PUBLIC_WORDS_LOG2, PUBLIC_WORD_BASE, W1_INPUT_BASE, W1_WORD_BASE,
     },
-    witness::{pack_slot_groups, SlotBuffers},
+    witness::{pack_slot_groups, sponge_slot, LaneBits, SlotBuffers},
 };
 use agg_mldsa_simd::Engine;
 
@@ -818,6 +818,20 @@ impl<'g> TiedPart<'g> {
     ) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
         let start = std::time::Instant::now();
+        let seg = self.segment();
+        let words = self.segment_words();
+        let mut bits = vec![0_u64; self.segments * words];
+        // The 8-way generator writes the slot buffers and the lane bits in one pass.
+        let lane_bits = LaneBits {
+            bits: &mut bits,
+            seg_words: words,
+            lane_len: seg.lane_len,
+            d: self.d,
+        };
+        if let Some(sponge) = sponge_slot(self.gate, self.sponge.nu(), records, Some(lane_bits)) {
+            trace("witness (8-way)", &start);
+            return (sponge, bits);
+        }
         // Per record and independent: parallel (same values in the same order).
         let input_words = crate::sponge::INPUT_BITS / 64;
         let mut inputs = vec![0_u64; records.len() * input_words];
@@ -843,9 +857,6 @@ impl<'g> TiedPart<'g> {
             |j, m, s| absorb_message(&records[j], m, s),
         );
         trace("witness packed", &start);
-        let seg = self.segment();
-        let words = self.segment_words();
-        let mut bits = vec![0_u64; self.segments * words];
         let lane = seg.lane_len;
         for (g, input) in inputs.chunks_exact(input_words).enumerate() {
             let (sigma, i) = (g >> self.d, g & ((1 << self.d) - 1));
@@ -1078,6 +1089,10 @@ impl<'g> TiedPart<'g> {
         let sponge_start = std::time::Instant::now();
         let mut sch = self.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
+        // The row values a = A z, b = B z are consumed by the zerocheck; build them here
+        // when the 8-way generator left them out.
+        let mut sponge = sponge;
+        sponge.ensure_ab(self.gate, nu_s, self.n);
         let (sponge_proof, cap) = self.sponge.prove(
             vec![sponge],
             &gate,
@@ -1540,7 +1555,8 @@ mod tests {
         };
         let label = "64 columns";
         let claims = vec![rand_claim(&mut rng, 6)];
-        let (sponge, _) = part.honest_parts(&records);
+        let (mut sponge, _) = part.honest_parts(&records);
+        sponge.ensure_ab(part.gate, nu, n);
         let data = part.sponge().commit_data(&[&sponge.z]);
         let cap = data.commitment();
         let values: Vec<F128> = claims.iter().map(|c| bit_value(&sponge.z, c, nu)).collect();
@@ -1626,6 +1642,8 @@ mod tests {
         let binding = squeeze_binding(&mut ch);
         let mut sch = part.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [part.gate];
+        let mut sponge = sponge;
+        sponge.ensure_ab(part.gate, nu_s, part.n);
         let (sponge_proof, _) = part.sponge.prove(
             vec![sponge],
             &gate,
