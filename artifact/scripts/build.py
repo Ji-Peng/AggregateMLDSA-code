@@ -78,6 +78,7 @@ def build_ours(offline):
     build_cfg = configs["build"]
     name = build_cfg["bin"]
     target = BUILD / "target-agg"
+    rev = pinned_commit() or git_rev(REPO)
     cmd = [
         "cargo",
         "build",
@@ -89,14 +90,17 @@ def build_ours(offline):
     if offline:
         cmd.append("--offline")
     print("building agg with the baseline in .cargo/config.toml")
+    env = {
+        "RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN,
+        "CARGO_TARGET_DIR": str(target),
+        "CARGO_BUILD_JOBS": str(build_cfg.get("jobs", 6)),
+    }
+    if rev:
+        env["AGG_GIT_REV"] = rev
     run(
         cmd,
         cwd=REPO,
-        env={
-            "RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN,
-            "CARGO_TARGET_DIR": str(target),
-            "CARGO_BUILD_JOBS": str(build_cfg.get("jobs", 6)),
-        },
+        env=env,
     )
     src = target / "release" / build_cfg["bin"]
     dst = BIN / build_cfg["bin"]
@@ -295,7 +299,7 @@ def main():
 
     result = {
         "timestamp_utc": utc_stamp(),
-        "commit": git_rev(REPO),
+        "commit": git_rev(REPO) or pinned_commit(),
         "source_commit": pinned_commit(),
         "toolchains": {
             "rustc": output(["rustc", "-V"], env={"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}),

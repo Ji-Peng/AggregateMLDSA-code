@@ -1,5 +1,6 @@
 # Quick mode: small batches, the configurations the CPU supports, one core
-# complex with SMT (or the largest available), and one thread at 1K.
+# complex with SMT (or the largest available), and one thread at 1K. Cells
+# split their runs into `processes` chunks.
 
 mode = "quick"
 warmup = 1
@@ -12,6 +13,7 @@ configs = ["ifma", "avx512", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024, 4096]
 relation = "h-u"
+processes = 2
 
 [[runs]]
 kind = "ours"
@@ -20,6 +22,7 @@ configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [1024]
 relation = "h-u"
+processes = 2
 
 [[runs]]
 kind = "aerie"

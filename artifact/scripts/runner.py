@@ -25,6 +25,7 @@ from common import (  # noqa: E402
     load_matrix,
     median,
     new_result_dir,
+    pinned_commit,
     read_json,
     run,
     utc_stamp,
@@ -53,6 +54,13 @@ def rotate(items, r):
         return items
     k = r % len(items)
     return items[k:] + items[:k]
+
+
+def process_chunks(reps, processes):
+    """Split `reps` timed runs into `processes` positive, balanced chunks."""
+    processes = max(1, min(int(processes or 1), int(reps)))
+    base, extra = divmod(int(reps), processes)
+    return [base + (1 if index < extra else 0) for index in range(processes)]
 
 
 def read_stat():
@@ -160,7 +168,9 @@ class Runner:
         (self.result_dir / "raw").mkdir(exist_ok=True)
         (self.result_dir / "logs").mkdir(exist_ok=True)
         (self.result_dir / "data").mkdir(exist_ok=True)
-        self.code_commit = git_rev(REPO)
+        # The archive build has no .git, so prefer the pin in sources.lock and
+        # fall back to the tree revision in a development checkout.
+        self.code_commit = pinned_commit() or git_rev(REPO)
         self.cells = []
         self.skipped = []
         self.reports = {}
@@ -335,8 +345,17 @@ class Runner:
         part = read_json(json_path)
         part["_cmd"] = " ".join(str(c) for c in cmd)
         part["_env"] = {k: v for k, v in env.items() if k not in ("PATH",)}
+        part["_json"] = str(json_path)
         part["_log"] = str(log_path)
         return part
+
+    def process_count(self, group, reps):
+        requested = (
+            self.args.processes
+            if self.args.processes is not None
+            else group.get("processes", 2)
+        )
+        return max(1, min(int(requested), int(reps)))
 
     def run_ours_group(self, group, rows, sizes, relations, reps, warmup):
         for requested, actual, allocation, note in self.allocation_plan(
@@ -360,26 +379,41 @@ class Runner:
     def run_ours_cell(self, group, rows, requested, actual, allocation, note, n, relation, reps, warmup):
         tag = group["tag"]
         trace = bool(group.get("traced"))
+        chunks = process_chunks(reps, self.process_count(group, reps))
         cells = {}
         for name in rows:
-            cells[name] = self.base_cell("ours", name, tag, requested, actual, allocation, note, n, relation)
-        # One untimed invocation per configuration.
-        for name in rows:
-            self.invoke_ours(name, allocation, n, relation, None, 0, 1, trace=trace)
+            cell = self.base_cell(
+                "ours", name, tag, requested, actual, allocation, note, n, relation
+            )
+            cell["warmup"] = warmup
+            cell["reps"] = reps
+            cell["protocol"] = "warm"
+            cell["process_count"] = len(chunks)
+            cells[name] = cell
         before = read_stat()
         sampler, freq_path = start_sampler(self.result_dir, allocation)
         started = utc_stamp()
         try:
-            for r in range(reps):
+            # One process per chunk, round-robin across tiers. Each process
+            # pays one warm-up and then contributes its timed runs.
+            for r in range(len(chunks)):
                 for name in rotate(rows, r):
                     part = self.invoke_ours(
-                        name, allocation, n, relation, None, 0, 1, trace=trace
+                        name, allocation, n, relation, None, warmup, chunks[r], trace=trace
                     )
                     cell = cells[name]
                     cell["times_ms"].extend(part["prove_ms"])
                     cell["verify_uncached_ms"].extend(part["verify_uncached_ms"])
                     cell["verify_cached_ms"].extend(part["verify_cached_ms"])
                     cell["parts"].append(part)
+                    cell["processes"].append(
+                        {
+                            "json": part["_json"],
+                            "warmup": warmup,
+                            "reps": chunks[r],
+                            "prove_ms": part["prove_ms"],
+                        }
+                    )
                     cell["aggregate_bytes"] = part["aggregate_bytes"]
                     cell["aggregate_sha256"] = part["aggregate_sha256"]
                     cell["kernels"] = part["kernels"]
@@ -423,8 +457,11 @@ class Runner:
             "n": n,
             "relation": relation,
             "knobs": spec.get("env", {}),
-            "warmup": 1,
+            "warmup": 0,
             "reps": 0,
+            "protocol": None,
+            "process_count": 0,
+            "processes": [],
             "times_ms": [],
             "verify_uncached_ms": [],
             "verify_cached_ms": [],
@@ -444,6 +481,7 @@ class Runner:
 
     def finish_cell(self, cell):
         cell["reps"] = len(cell["times_ms"])
+        cell["process_count"] = len(cell.get("processes", []))
         # Keep the per-invocation documents out of the raw cell; they are large.
         cell["parts"] = len(cell.get("parts", []))
         path = self.result_dir / "raw" / f"{cell['run_id']}.json"
@@ -795,8 +833,9 @@ class Runner:
         self.finish_cell(cell)
         self.cells.append(cell)
 
-    def run_ablations(self, group, rows, sizes, relation, rounds):
+    def run_ablations(self, group, rows, sizes, relation, reps, warmup):
         arms = group["arms"]
+        chunks = process_chunks(reps, self.process_count(group, reps))
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
@@ -805,26 +844,62 @@ class Runner:
                 cells = {}
                 for name, arm in pairs:
                     key = (name, arm["tag"])
-                    cells[key] = self.base_cell(
+                    cell = self.base_cell(
                         "ours", name, f"{group['tag']}-{arm['tag']}", requested, actual, allocation, note, n, relation
                     )
-                for name, arm in pairs:
-                    self.invoke_ours(name, allocation, n, relation, arm.get("env"), 0, 1)
-                for r in range(rounds):
-                    for name, arm in rotate(pairs, r):
-                        part = self.invoke_ours(name, allocation, n, relation, arm.get("env"), 0, 1)
-                        cell = cells[(name, arm["tag"])]
-                        cell["arm"] = arm["tag"]
-                        cell["times_ms"].extend(part["prove_ms"])
-                        cell["verify_uncached_ms"].extend(part["verify_uncached_ms"])
-                        cell["verify_cached_ms"].extend(part["verify_cached_ms"])
-                        cell["aggregate_bytes"] = part["aggregate_bytes"]
-                        cell["aggregate_sha256"] = part["aggregate_sha256"]
-                        cell["kernels"] = part["kernels"]
-                        peak = part.get("prove_peak_kib")
-                        if peak:
-                            cell["peak_rss_kib"] = max(cell.get("peak_rss_kib") or 0, peak)
+                    cell["arm"] = arm["tag"]
+                    cell["warmup"] = warmup
+                    cell["reps"] = reps
+                    cell["protocol"] = "warm"
+                    cell["process_count"] = len(chunks)
+                    cells[key] = cell
+                before = read_stat()
+                sampler, freq_path = start_sampler(self.result_dir, allocation)
+                started = utc_stamp()
+                try:
+                    for r in range(len(chunks)):
+                        for name, arm in rotate(pairs, r):
+                            part = self.invoke_ours(
+                                name,
+                                allocation,
+                                n,
+                                relation,
+                                arm.get("env"),
+                                warmup,
+                                chunks[r],
+                            )
+                            cell = cells[(name, arm["tag"])]
+                            cell["times_ms"].extend(part["prove_ms"])
+                            cell["verify_uncached_ms"].extend(part["verify_uncached_ms"])
+                            cell["verify_cached_ms"].extend(part["verify_cached_ms"])
+                            cell["parts"].append(part)
+                            cell["processes"].append(
+                                {
+                                    "json": part["_json"],
+                                    "warmup": warmup,
+                                    "reps": chunks[r],
+                                    "prove_ms": part["prove_ms"],
+                                }
+                            )
+                            cell["aggregate_bytes"] = part["aggregate_bytes"]
+                            cell["aggregate_sha256"] = part["aggregate_sha256"]
+                            cell["kernels"] = part["kernels"]
+                            peak = part.get("prove_peak_kib")
+                            if peak:
+                                cell["peak_rss_kib"] = max(
+                                    cell.get("peak_rss_kib") or 0, peak
+                                )
+                finally:
+                    stop_sampler(sampler)
+                after = read_stat()
                 for cell in cells.values():
+                    cell["start_utc"] = started
+                    cell["end_utc"] = utc_stamp()
+                    cell["freq_mhz"] = frequency(freq_path, set(allocation["cpus"]))
+                    cell["foreign_busy"] = foreign_fraction(
+                        before, after, set(allocation["cpus"])
+                    )
+                    cell["loadavg"] = self.load_before_after(before)
                     self.finish_cell(cell)
                     self.cells.append(cell)
 
@@ -844,6 +919,7 @@ class Runner:
                     "threads": cell["threads"],
                     "n": cell["n"],
                     "relation": cell["relation"],
+                    "protocol": cell.get("protocol") or "",
                     "prove_median_ms": prove["median"] if prove else "",
                     "prove_min_ms": prove["min"] if prove else "",
                     "prove_max_ms": prove["max"] if prove else "",
@@ -913,17 +989,33 @@ class Runner:
                 if not group_sizes:
                     print(f"skip {tag}: no batch size fits in memory")
                     continue
-            reps = requested_reps or group.get("reps") or 3
-            warmup = self.args.warmup if self.args.warmup is not None else group.get("warmup", 1)
+            reps = requested_reps or group.get("reps") or group.get("rounds") or 3
+            warmup = (
+                self.args.warmup
+                if self.args.warmup is not None
+                else group.get("warmup", 1)
+            )
+            processes = self.process_count(group, reps)
             if self.args.smoke:
                 reps = 1
                 warmup = 1
-            print(f"== {tag} ({kind}) sizes={group_sizes} reps={reps} warmup={warmup}")
+                processes = 1
+            print(
+                f"== {tag} ({kind}) sizes={group_sizes} reps={reps} "
+                f"warmup={warmup} processes={processes}"
+            )
             if kind == "ours":
                 relations = group.get("relations") or [group.get("relation", "h-u")]
                 self.run_ours_group(group, rows, group_sizes, relations, reps, warmup)
             elif kind == "ablations":
-                self.run_ablations(group, rows, group_sizes, group.get("relation", "h-u"), group.get("rounds", 3))
+                self.run_ablations(
+                    group,
+                    rows,
+                    group_sizes,
+                    group.get("relation", "h-u"),
+                    reps,
+                    warmup,
+                )
             elif kind == "aerie":
                 self.run_aerie_group(group, rows, group_sizes, reps, warmup)
             elif kind == "native":
@@ -988,6 +1080,11 @@ def main():
     parser.add_argument("--sizes")
     parser.add_argument("--reps", type=int)
     parser.add_argument("--warmup", type=int)
+    parser.add_argument(
+        "--processes",
+        type=int,
+        help="processes per warm cell (default: matrix value or 2)",
+    )
     parser.add_argument("--aerie-backend", default="auto")
     args = parser.parse_args()
     if args.configs:

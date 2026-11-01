@@ -587,9 +587,22 @@ fn mldsa_backend_name() -> &'static str {
 /// An environment variable as a JSON value: a string when set, `null` otherwise.
 fn json_env(name: &str) -> String {
     match std::env::var(name) {
-        Ok(value) => json_string(&value),
-        Err(_) => "null".to_string(),
+        Ok(value) if !value.is_empty() => json_string(&value),
+        _ => "null".to_string(),
     }
+}
+
+/// The source revision: from `AGG_GIT_REV` in the environment if set, or embedded
+/// from `AGG_GIT_REV` at build time if available.
+fn git_revision() -> Option<String> {
+    std::env::var("AGG_GIT_REV")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            option_env!("AGG_GIT_REV")
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+        })
 }
 
 /// A JSON string. The benchmark values are ASCII, but escape the characters
@@ -658,7 +671,8 @@ fn write_bench_json(
     );
     let _ = writeln!(out, "  \"warmup\": {},", result.warmup);
     let _ = writeln!(out, "  \"reps\": {},", result.prove_times.len());
-    let _ = writeln!(out, "  \"revision\": {},", json_env("AGG_GIT_REV"));
+    let revision_str = git_revision().map_or_else(|| "null".to_string(), |r| json_string(&r));
+    let _ = writeln!(out, "  \"revision\": {revision_str},");
     let _ = writeln!(out, "  \"kernels\": {{");
     let _ = writeln!(
         out,
@@ -784,7 +798,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     println!(
         "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
         n_keys.min(count),
-        std::env::var("AGG_GIT_REV").unwrap_or_else(|_| "unknown (set AGG_GIT_REV)".into()),
+        git_revision().unwrap_or_else(|| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
         agg_piop::aerie_simd_backend(),
         mldsa_backend

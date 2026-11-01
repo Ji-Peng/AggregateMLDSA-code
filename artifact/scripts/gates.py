@@ -138,7 +138,7 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir):
         env.update(spec.get("env", {}))
         env["RAYON_NUM_THREADS"] = str(allocation["threads"])
         env["OMP_NUM_THREADS"] = str(allocation["threads"])
-        env["AGG_GIT_REV"] = git_rev(REPO)
+        env["AGG_GIT_REV"] = pinned_commit() or git_rev(REPO)
         out = out_dir / f"gates-{name}.bin"
         proc = sh(
             prefix

@@ -62,10 +62,11 @@ the same pin for commands started inside this directory.
 | `gates` | 1K aggregates in every tier, verification, negative check, self-reports | 2--5 min |
 | `quick --smoke` | three tiers at 1K, one thread, Aerie and native at 1K, 1+1 runs | 5--15 min after the build |
 | `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie and native at 1K, 1+3 runs | 20--40 min after the build |
-| `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+10 runs | 3--5 h after the build |
+| `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+10 warm runs | about 1 h after the build |
 
 `full` writes about 125 MB of raw JSON at 32K. Its longest cells are 1T
-proving.
+proving. The full matrix took 51 minutes on one EPYC 9355 node (`xcni`) after
+the build (2026-11-01).
 
 ## What is measured
 
@@ -120,11 +121,17 @@ The aggregate is 1,612,232 bytes at 32K, or 49.2 bytes per signature, in every
 tier. Absolute times on another microarchitecture differ; the tier order and
 the byte identity are the portable parts of the result.
 
-Each measurement is one warm-up run followed by `reps` timed runs.
-Configurations are interleaved by round, and every individual run is kept in
-`results/<host>-<timestamp>/raw/*.json`. `summary.csv` has the median, minimum,
-maximum, the order-statistic interval of the median (97.9% for ten runs,
-93.75% for five) and a `noisy` or `co-tenant` flag.
+Warm cells follow the paper protocol: one process per cell with
+`--warmup 1 --reps N`, split into two processes of about N/2 so that the
+tiers still alternate (ablations use one process per cell and alternate the
+arms instead). Each process pays its own warm-up, and every timed run is read
+from its `--json` output.
+
+Every individual run is kept in `results/<host>-<timestamp>/raw/*.json`, and
+each cell records the JSON of every process that contributed to it.
+`summary.csv` has the median, minimum, maximum, the order-statistic interval
+of the median (97.9% for ten runs, 93.75% for five) and a `noisy` or
+`co-tenant` flag.
 
 The CPU sets come from sysfs: SMT siblings, L3 domains (`index3`) and NUMA
 nodes. `16C32T` is 16 cores with both siblings, filling whole L3 domains

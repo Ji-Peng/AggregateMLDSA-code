@@ -1,6 +1,7 @@
 # Full mode: the experiment matrix of the evaluation, without a scheduler.
-# Configurations are interleaved by round; the runs below are executed in the
-# order the paper reports them.
+# Cells run with --warmup 1 --reps N, split into `processes` chunks that
+# are launched round-robin across tiers. The runs below are executed in the order
+# the paper reports them.
 
 mode = "full"
 
@@ -13,6 +14,7 @@ sizes = [32768]
 relation = "h-u"
 warmup = 1
 reps = 10
+processes = 2
 
 [[runs]]
 kind = "ours"
@@ -23,6 +25,7 @@ sizes = [32768]
 relation = "h-u"
 warmup = 1
 reps = 5
+processes = 2
 
 [[runs]]
 kind = "ours"
@@ -33,6 +36,7 @@ sizes = [32768]
 relations = ["h-exact", "h-fips"]
 warmup = 1
 reps = 5
+processes = 2
 
 [[runs]]
 kind = "ours"
@@ -43,6 +47,7 @@ sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 relation = "h-u"
 warmup = 1
 reps = 5
+processes = 2
 
 [[runs]]
 kind = "ablations"
@@ -51,7 +56,9 @@ configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
 relation = "h-u"
-rounds = 3
+warmup = 1
+reps = 3
+processes = 1
 arms = [
   { tag = "defaults", env = {} },
   { tag = "no-hugepage", env = { AGG_HUGEPAGE = "0" } },
