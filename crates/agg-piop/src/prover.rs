@@ -34,6 +34,7 @@ use crate::manifest::{CommitmentManifest, GroupRole, Relation, GROUP_COUNT, LOOK
 use crate::opening::opening_claims;
 use crate::pcs::{PcsError, TableCommitter};
 use crate::pow::{KeccakPlan, PowPlan};
+use crate::lane_public::LanePublicData;
 use crate::public_data::PublicData;
 use crate::source_tables::{BridgeGroupTables, MainTables, SourceTableError, SourceTables};
 use crate::stage::{suffix, LaneId, Points, StageError, WeightId};
@@ -811,7 +812,29 @@ pub fn prove_piop(
     transcript: &mut Transcript,
     unchecked: bool,
 ) -> Result<(PiopProof, PiopRun), ProveError> {
-    prove_piop_with(manifest, tables, None, matrices, public, transcript, unchecked, false, false)
+    prove_piop_with(manifest, tables, None, matrices, PiopPublic::Rows(public), transcript, unchecked, false, false)
+}
+
+/// The public data the PIOP prover reads in stage 3.
+#[derive(Clone, Copy, Debug)]
+pub enum PiopPublic<'p> {
+    /// ML-DSA-44: the rows of `A` and `T` on the main domain `(j, rho, i)`.
+    Rows(&'p PublicData),
+    /// The sets with polynomial lanes.
+    Lanes(&'p LanePublicData),
+}
+
+/// [`prove_piop`] for a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_piop_lanes(
+    manifest: &CommitmentManifest,
+    tables: SourceTables<'_>,
+    matrices: &BridgeMatrices,
+    public: &LanePublicData,
+    transcript: &mut Transcript,
+    unchecked: bool,
+) -> Result<(PiopProof, PiopRun), ProveError> {
+    prove_piop_with(manifest, tables, None, matrices, PiopPublic::Lanes(public), transcript, unchecked, false, false)
 }
 
 /// Whether the two transcript branches run concurrently (`AGG_PIOP_FORK`, default on; `0`
@@ -950,8 +973,9 @@ struct StagesBranch<'a> {
     tables: ProverTables<'a>,
     stage1: (Stage1Proof, crate::stage1::Stage1Output),
     stage2: (Stage2Proof, crate::stage2::Stage2Output),
-    /// `T(r^(2))` for stage 3's claimed sums: a function of public data and `r^(2)` only.
-    t_at_r2: E,
+    /// `T(r^(2))` (`T~_rho(r^(2))` per row with lanes) for stage 3's claimed sums: a function
+    /// of public data and `r^(2)` only.
+    t_at_r2: Vec<E>,
     times: [Duration; 3],
     /// Wall time of the stage-3 precomputation (`w_A` and `T(r^(2))`).
     tail: Duration,
@@ -1014,7 +1038,7 @@ fn prove_stages_branch<'a>(
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
     psi: &[u8],
-    public: &PublicData,
+    public: PiopPublic<'_>,
     transcript: &mut Transcript,
     unchecked: bool,
     trace: bool,
@@ -1065,15 +1089,16 @@ fn prove_stages_branch<'a>(
     let stage2_spec = stage2::spec(manifest);
     assert_eq!(
         stage2_spec.groups[0].lanes.first(),
-        Some(&LaneId::Weight(WeightId::Level1)),
+        Some(&LaneId::Weight(WeightId::Level1(0))),
         "stage 2's first group must read w_1 in lane 0"
     );
     assert!(
-        stage2_spec.groups.iter().all(|group| group
-            .lanes
-            .iter()
-            .position(|&lane| lane == LaneId::Weight(WeightId::Level1))
-            .is_none_or(|position| position == 0)),
+        manifest.has_lanes()
+            || stage2_spec.groups.iter().all(|group| group
+                .lanes
+                .iter()
+                .position(|&lane| lane == LaneId::Weight(WeightId::Level1(0)))
+                .is_none_or(|position| position == 0)),
         "w_1 may only appear as the first lane of a stage-2 group"
     );
     let (stage2_proof, stage2) = if unchecked {
@@ -1090,9 +1115,17 @@ fn prove_stages_branch<'a>(
     // at the tail of branch S instead of after the join. The transcript does not see them,
     // and the bytes are the same: this is a scheduling move, not a change of the messages.
     let tail_clock = Instant::now();
-    prover_tables.set_r2(public, &points.r2);
+    let t_at_r2 = match public {
+        PiopPublic::Rows(public) => {
+            prover_tables.set_r2(public, &points.r2);
+            vec![public.t_evaluation(&points.r2)]
+        }
+        PiopPublic::Lanes(public) => {
+            prover_tables.drop_level1();
+            public.t_evaluations(&points.r2)
+        }
+    };
     prover_tables.set_projection(psi, &points.r2);
-    let t_at_r2 = public.t_evaluation(&points.r2);
     let tail = tail_clock.elapsed();
     if trace {
         eprintln!("weights: w_A, W and T(r^(2)) {:.1} ms", tail.as_secs_f64() * 1e3);
@@ -1121,7 +1154,7 @@ fn prove_piop_with<'a>(
     tables: SourceTables<'a>,
     prebuilt: Option<ProverTables<'a>>,
     matrices: &BridgeMatrices,
-    public: &PublicData,
+    public: PiopPublic<'_>,
     transcript: &mut Transcript,
     unchecked: bool,
     swap_join: bool,
@@ -1188,10 +1221,14 @@ fn prove_piop_with<'a>(
     } else {
         stage3::prove
     };
+    let ring = match public {
+        PiopPublic::Rows(_) => stage3::RingInputs::Rows(t_at_r2[0]),
+        PiopPublic::Lanes(public) => stage3::RingInputs::Lanes { t: &t_at_r2, public },
+    };
     let (stage3_proof, stage3) = prove3(
         manifest,
         &prover_tables,
-        t_at_r2,
+        ring,
         &points,
         &prestage,
         &stage1,
@@ -1206,13 +1243,15 @@ fn prove_piop_with<'a>(
     let ProverTables {
         parity1,
         w1,
+        w1_lanes,
         w2,
         w3,
         wa,
         wp,
+        wp_lanes,
         ..
     } = prover_tables;
-    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa, wp));
+    agg_pcs_config::sched::drop_in_background("stage tables", (parity1, w1, w2, w3, wa, wp, (w1_lanes, wp_lanes)));
     run.stage3 = clock.elapsed();
     phase_stamp("stage3");
     run.points = points;
@@ -1497,7 +1536,7 @@ pub fn prove_with_tables_using(
                     tables,
                     Some(prover_tables),
                     &matrices,
-                    &public,
+                    PiopPublic::Rows(&public),
                     &mut transcript,
                     unchecked,
                     swap_join,
@@ -1551,7 +1590,7 @@ pub fn prove_with_tables_using(
             tables,
             Some(prover_tables),
             &matrices,
-            &public,
+            PiopPublic::Rows(&public),
             &mut transcript,
             hooks.unchecked,
             hooks.swap_join,

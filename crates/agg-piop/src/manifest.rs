@@ -971,6 +971,19 @@ impl CommitmentManifest {
         SetShape::of(self.set)
     }
 
+    /// True when the vector index is a polynomial lane (ML-DSA-65 and ML-DSA-87): every
+    /// main-domain column is a family of `k` or `l` polynomials on `(j, i)`.
+    #[must_use]
+    pub const fn has_lanes(&self) -> bool {
+        self.shape().d_vec == 0
+    }
+
+    /// `gamma_2` of the parameter set (the weight `2 gamma_2` of `w_1'` in the ring identity).
+    #[must_use]
+    pub const fn gamma2(&self) -> i64 {
+        agg_witness::dispatch_set!(self.set, |P| P::GAMMA2)
+    }
+
     /// Cells of one main-domain polynomial per signature (`2^(d_main - d_sig)`).
     #[must_use]
     pub const fn lane_cells(&self) -> usize {

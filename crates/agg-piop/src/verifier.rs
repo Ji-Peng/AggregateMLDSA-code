@@ -696,6 +696,39 @@ pub fn verify_piop(
     timings: &mut VerifyTimings,
     public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
 ) -> PiopVerified {
+    verify_piop_with(manifest, matrices, y_table, proof, transcript, timings, |r2, r3, _| {
+        let (t, w) = public_pass(r2, r3);
+        (vec![t], vec![w])
+    })
+}
+
+/// [`verify_piop`] for a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87):
+/// `public_pass(r^(2), r^(3), gamma_rows)` returns `T~_rho(r^(2))` per row and
+/// `w_A^(s)(r^(3))` per lane of `z` for the ring coefficients `gamma_rows`
+/// (`lane_public::LanePublicData::{t_evaluations, ring_weights_at}`).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_piop_lanes(
+    manifest: &CommitmentManifest,
+    matrices: &BridgeMatrices,
+    y_table: &[u8],
+    proof: &PiopProof,
+    transcript: &mut Transcript,
+    timings: &mut VerifyTimings,
+    public_pass: impl FnOnce(&[E], &[E], &[E]) -> (Vec<E>, Vec<E>),
+) -> PiopVerified {
+    verify_piop_with(manifest, matrices, y_table, proof, transcript, timings, public_pass)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_piop_with(
+    manifest: &CommitmentManifest,
+    matrices: &BridgeMatrices,
+    y_table: &[u8],
+    proof: &PiopProof,
+    transcript: &mut Transcript,
+    timings: &mut VerifyTimings,
+    public_pass: impl FnOnce(&[E], &[E], &[E]) -> (Vec<E>, Vec<E>),
+) -> PiopVerified {
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
     let outcome = (|| {
@@ -722,6 +755,9 @@ pub fn verify_piop(
             tau: transcript_s.challenge_extensions(TAU_SITE, manifest.d_main())?,
             ..Points::default()
         };
+        if proof.prestage.y2.len() != manifest.shape().w1_bits || proof.prestage.kappa2.len() != manifest.shape().w1_bits {
+            return Err(VerifyError::Stage(StageError::Shape("pre-stage claims".into())));
+        }
         transcript_s.absorb_extensions(PRESTAGE_SITE, &proof.prestage.to_vec())?;
         let y_at_tau3 = agg_bridge::final_vector::evaluate(
             y_table,

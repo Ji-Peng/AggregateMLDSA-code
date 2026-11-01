@@ -20,7 +20,7 @@ use crate::stage1::Stage1Proof;
 use crate::stage2::Stage2Proof;
 use crate::stage3::Stage3Proof;
 use crate::transcript::{
-    decode_extensions, encode_extensions, work_bytes, FINAL_VECTOR_BYTES, STAGE_DEGREES,
+    decode_extensions, encode_extensions, stage_degrees, work_bytes, FINAL_VECTOR_BYTES,
 };
 use crate::OpeningField as E;
 
@@ -239,23 +239,24 @@ impl AggregateProof {
         let lookup = read_lookup(&mut r, &manifest.lookup_shape())?;
         let multiplicities = MultiplicityClaims::from_slice(&r.elements(MultiplicityClaims::LEN)?)
             .ok_or(WireError::Shape("multiplicity claims"))?;
-        let prestage = PreStageClaims::from_slice(&r.elements(PreStageClaims::LEN)?)
+        let degrees = stage_degrees(&manifest);
+        let prestage = PreStageClaims::from_slice_for(&manifest, &r.elements(PreStageClaims::len(&manifest))?)
             .ok_or(WireError::Shape("pre-stage claims"))?;
         let stage1 = Stage1Proof {
-            rounds: r.rounds(rounds, STAGE_DEGREES[0])?,
-            claims: Stage1Claims::from_slice(&r.elements(Stage1Claims::LEN)?)
+            rounds: r.rounds(rounds, degrees[0])?,
+            claims: Stage1Claims::from_slice_for(&manifest, &r.elements(Stage1Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 1 claims"))?,
         };
         let stage2 = Stage2Proof {
-            kappa1: Kappa1Claims::from_slice(&r.elements(Kappa1Claims::LEN)?)
+            kappa1: Kappa1Claims::from_slice_for(&manifest, &r.elements(Kappa1Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("kappa1 claims"))?,
-            rounds: r.rounds(rounds, STAGE_DEGREES[1])?,
+            rounds: r.rounds(rounds, degrees[1])?,
             claims: Stage2Claims::from_slice(&manifest, &r.elements(Stage2Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 2 claims"))?,
             projection: r.elements(1)?[0],
         };
         let stage3 = Stage3Proof {
-            rounds: r.rounds(rounds, STAGE_DEGREES[2])?,
+            rounds: r.rounds(rounds, degrees[2])?,
             claims: Stage3Claims::from_slice(&manifest, &r.elements(Stage3Claims::len(&manifest))?)
                 .ok_or(WireError::Shape("stage 3 claims"))?,
         };
@@ -299,14 +300,16 @@ impl AggregateProof {
     /// The PIOP part of the proof in bytes (the sum-check stages, without the lookup).
     #[must_use]
     pub fn piop_bytes(&self) -> usize {
-        let rounds = self.stage1.rounds.len();
-        16 * (PreStageClaims::LEN
-            + Stage1Claims::LEN
-            + Kappa1Claims::LEN
+        let width = |rounds: &[Vec<E>]| rounds.iter().map(Vec::len).sum::<usize>();
+        16 * (self.prestage.to_vec().len()
+            + self.stage1.claims.to_vec().len()
+            + self.stage2.kappa1.0.len()
             + self.stage2.claims.to_vec().len()
             + 1
             + self.stage3.claims.0.len()
-            + rounds * (STAGE_DEGREES[0] + STAGE_DEGREES[1] + STAGE_DEGREES[2]))
+            + width(&self.stage1.rounds)
+            + width(&self.stage2.rounds)
+            + width(&self.stage3.rounds))
     }
 }
 
@@ -415,6 +418,7 @@ pub fn unpack_final_vector(packed: &[u8; FINAL_VECTOR_BYTES]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::test_support::point;
+    use crate::transcript::STAGE_DEGREES;
     use agg_witness::gen::SplitMix64;
 
     fn sample_lookup(shape: &LookupShape, rng: &mut SplitMix64) -> LookupProof {

@@ -50,16 +50,22 @@ pub const PIOP_PROTOCOL_TAG: [u8; 64] = protocol_tag();
 pub const PROTOCOL_DOMAIN: &[u8] = b"agg-mldsa/v1";
 /// cSHAKE256 customization of the instance digest.
 pub const INSTANCE_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/instance";
-/// Stage message degrees: the same in relations H-u and H-exact (stage 2 has degree 4 in
-/// both).
+/// Stage message degrees of ML-DSA-44, the same in every relation ([`stage_degrees`]).
 pub const STAGE_DEGREES: [usize; 3] = [4, 5, 3];
+
+/// Stage message degrees of the manifest's parameter set: stage 1 has degree 4 with the
+/// six-bit range check of ML-DSA-44 and 3 otherwise.
+#[must_use]
+pub fn stage_degrees(manifest: &CommitmentManifest) -> [usize; 3] {
+    [crate::stage1::degree(manifest), crate::stage2::DEGREE, crate::stage3::DEGREE]
+}
 
 /// Batching coefficients per stage: `(26, 9, 48)` under H-u, `(26, 8, 49)` under H-exact,
 /// `(26, 8, 55)` under H-FIPS.
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
-        crate::stage1::GAMMA_COUNT,
+        crate::stage1::gamma_count(manifest),
         crate::stage2::gamma_count(manifest),
         crate::stage3::gamma_count(manifest),
     ]
@@ -69,14 +75,14 @@ pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
 #[must_use]
 pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
     [
-        crate::claims::Stage1Claims::LEN,
+        crate::claims::Stage1Claims::len(manifest),
         crate::claims::Stage2Claims::len(manifest),
         crate::claims::Stage3Claims::len(manifest),
     ]
 }
-/// Pre-stage claims.
+/// Pre-stage claims of ML-DSA-44 (`claims::PreStageClaims::len` for every set).
 pub const PRESTAGE_CLAIMS: usize = 13;
-/// Level-1 carry claims before stage 2.
+/// Level-1 carry claims before stage 2 of ML-DSA-44 (`claims::Kappa1Claims::len`).
 pub const KAPPA1_CLAIMS: usize = 6;
 /// Multiplicity-digit claims after the lookup.
 pub const MULTIPLICITY_CLAIMS: usize = agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
@@ -93,8 +99,14 @@ pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
 /// [`Transcript::challenge_psi`] absorbs the 21 raw bytes of this site name first, so that
 /// `Psi` is drawn at its own sponge input, not as a continuation of the squeeze of `sd`.
 pub const PROJ_SITE: &str = "agg-mldsa/v1/proj/psi";
-/// 32-byte blocks of the projection site's answer.
+/// 32-byte blocks of the projection site's answer for ML-DSA-44 ([`proj_atoms`]).
 pub const PROJ_ATOMS: usize = crate::manifest::PROJ_BYTES / 32;
+
+/// 32-byte blocks of the projection site's answer: `128 P / 256` (512, 768 or 1,024).
+#[must_use]
+pub const fn proj_atoms(manifest: &CommitmentManifest) -> usize {
+    manifest.proj_bytes() / 32
+}
 /// Grinding difficulty of the projection site. `Psi` is squeezed directly (no seed
 /// expansion), so the matrices that keep a large coordinate of `v` small have mass at most
 /// `2^-128`; one bit of work makes each query weigh `2^-129`.
@@ -301,6 +313,8 @@ impl Builder {
 #[derive(Clone, Debug)]
 pub struct Registry {
     events: Vec<RegistryEvent>,
+    /// 32-byte blocks of `Psi` ([`proj_atoms`]).
+    proj_atoms: usize,
     /// Registry indices of the label of branch L, the label of branch S and the join.
     fork: [usize; 3],
 }
@@ -325,7 +339,7 @@ impl Registry {
         b.push(FLOCK_COMMIT_SITE, PROOF_KIND, segments, PayloadSize::Variable);
         b.push(BRIDGE_SEED_SITE, CHALLENGE_KIND, 1, PayloadSize::Exact(32));
         b.push(PROJ_SITE, PUBLIC_KIND, 1, PayloadSize::Exact(PROJ_SITE.len()));
-        b.challenge_bits(PROJ_SITE, PROJ_ATOMS, SiteClass::ProjPsi, PROJ_PSI_BITS);
+        b.challenge_bits(PROJ_SITE, proj_atoms(manifest), SiteClass::ProjPsi, PROJ_PSI_BITS);
         for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
             b.push(commitment_site(role), PROOF_KIND, 1, PayloadSize::Variable);
         }
@@ -384,12 +398,10 @@ impl Registry {
         let fork_stages = b.0.len();
         b.push(FORK_STAGES_SITE, BRANCH_KIND, 1, PayloadSize::Exact(FORK_STAGES_SITE.len()));
         b.challenge(TAU_SITE, rounds, SiteClass::Tau, 0, 0, count(rounds));
-        b.push(
-            PRESTAGE_SITE,
-            PROOF_KIND,
-            PRESTAGE_CLAIMS,
-            PayloadSize::Exact(16 * PRESTAGE_CLAIMS),
-        );
+        let prestage = crate::claims::PreStageClaims::len(manifest);
+        b.push(PRESTAGE_SITE, PROOF_KIND, prestage, PayloadSize::Exact(16 * prestage));
+        let kappa1 = crate::claims::Kappa1Claims::len(manifest);
+        let degrees = stage_degrees(manifest);
         let (stage_gammas, stage_terminals) = (stage_gammas(manifest), stage_terminals(manifest));
         let mut join = 0;
         for stage in 1..=3 {
@@ -404,16 +416,11 @@ impl Registry {
                 );
             }
             if stage == 2 {
-                b.push(
-                    KAPPA1_SITE,
-                    PROOF_KIND,
-                    KAPPA1_CLAIMS,
-                    PayloadSize::Exact(16 * KAPPA1_CLAIMS),
-                );
+                b.push(KAPPA1_SITE, PROOF_KIND, kappa1, PayloadSize::Exact(16 * kappa1));
             }
             let gammas = stage_gammas[stage - 1];
             b.challenge(&gamma_site(stage), gammas, SiteClass::StageGamma, stage, 0, count(gammas));
-            let width = STAGE_DEGREES[stage - 1];
+            let width = degrees[stage - 1];
             for round in 0..rounds {
                 let (message, challenge) = round_sites(stage, round);
                 b.push(&message, PROOF_KIND, width, PayloadSize::Exact(16 * width));
@@ -436,6 +443,7 @@ impl Registry {
         b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
         Self {
             events: b.0,
+            proj_atoms: proj_atoms(manifest),
             fork: [fork_lookup, fork_stages, join],
         }
     }
@@ -811,7 +819,7 @@ impl Transcript {
     /// then squeeze the [`PROJ_ATOMS`] 32-byte blocks of `Psi` at that new input.
     pub fn challenge_psi(&mut self) -> Result<Vec<u8>, TranscriptError> {
         self.absorb_kind(PUBLIC_KIND, PROJ_SITE, 1, PROJ_SITE.as_bytes())?;
-        let psi = self.challenge_bytes(PROJ_SITE, PROJ_ATOMS)?;
+        let psi = self.challenge_bytes(PROJ_SITE, self.registry.proj_atoms)?;
         self.psi = Some(psi.clone());
         Ok(psi)
     }

@@ -22,6 +22,7 @@ pub mod alloc;
 pub mod binding;
 pub mod claims;
 pub mod kernel;
+pub mod lane_public;
 pub mod lookup;
 pub mod manifest;
 pub mod mode_b;

@@ -24,17 +24,18 @@ use crate::OpeningField as E;
 /// A public weight table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WeightId {
-    /// `w_1` on the main domain.
-    Level1,
+    /// `w_1` on the main domain, in polynomial lane `rho` (`w_1^(rho)`; lane 0 for ML-DSA-44).
+    Level1(u8),
     /// `w_2` on `D_1`.
     Level2,
     /// `w_{3,t}` on `D_2`.
     Level3(u8),
-    /// `w_A` on the main domain in order `(j', s, i)`.
-    Ring,
+    /// `w_A` on the main domain in order `(j', s, i)`; with polynomial lanes, the weight of
+    /// lane `s` of `z` (`w_A^(s)`, the rows combined by the stage-3 ring coefficients).
+    Ring(u8),
     /// The projection weight `W(pos, i) = P(pos) eq(r'_sig, i)` on the main domain
-    /// (`projection`).
-    Proj,
+    /// (`projection`), in polynomial lane `rho` of `v`.
+    Proj(u8),
 }
 
 /// A table read by a stage.
@@ -57,7 +58,7 @@ impl LaneId {
         match self {
             Self::Column(c) | Self::DigitSquare(c) => c.domain(),
             Self::Parity1(_) => GroupRole::Level1,
-            Self::Weight(WeightId::Level1 | WeightId::Ring | WeightId::Proj) => GroupRole::Main,
+            Self::Weight(WeightId::Level1(_) | WeightId::Ring(_) | WeightId::Proj(_)) => GroupRole::Main,
             Self::Weight(WeightId::Level2) => GroupRole::Level1,
             Self::Weight(WeightId::Level3(_)) => GroupRole::Level2,
         }
@@ -99,6 +100,12 @@ pub struct InstanceSpec {
     pub terms: Vec<Term>,
 }
 
+/// The `gamma` index of an instance part outside the batching vector: its coefficient is its
+/// scale alone, because the batching coefficients it belongs to are already folded into one
+/// of its public weight lanes (the ring weights `w_A^(s)` of the polynomial lanes, which
+/// combine the rows `rho` by the stage-3 coefficients of the instances `ring[rho]`).
+pub const UNBATCHED: usize = usize::MAX;
+
 impl InstanceSpec {
     /// An instance with scale one.
     #[must_use]
@@ -107,6 +114,22 @@ impl InstanceSpec {
             gamma,
             scale: E::one(),
             terms,
+        }
+    }
+
+    /// A part with coefficient one outside the batching vector ([`UNBATCHED`]).
+    #[must_use]
+    pub fn unbatched(terms: Vec<Term>) -> Self {
+        Self::new(UNBATCHED, terms)
+    }
+
+    /// The batched coefficient `gamma * scale` (the scale alone for an [`UNBATCHED`] part).
+    #[must_use]
+    pub fn coefficient(&self, gammas: &[E]) -> E {
+        if self.gamma == UNBATCHED {
+            self.scale
+        } else {
+            gammas[self.gamma] * self.scale
         }
     }
 }
@@ -159,7 +182,7 @@ impl StageSpec {
                     return Err(format!("lane {lane:?} is not on domain {:?}", group.domain));
                 }
             }
-            for instance in &group.instances {
+            for instance in group.instances.iter().filter(|i| i.gamma != UNBATCHED) {
                 let slot = seen
                     .get_mut(instance.gamma)
                     .ok_or_else(|| format!("gamma index {} out of range", instance.gamma))?;
@@ -363,11 +386,35 @@ fn prove_stage_with<'a>(
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<StageRun, StageError> {
+    let gammas = draw_gammas(spec, claims, transcript)?;
+    prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, transcript, check)
+}
+
+/// Validate a stage's table and claims and draw its batching coefficients `gamma` (the
+/// first event of every stage).
+pub fn draw_gammas(spec: &StageSpec, claims: &[E], transcript: &mut Transcript) -> Result<Vec<E>, StageError> {
     spec.validate().map_err(StageError::Internal)?;
     if claims.len() != spec.gamma_count {
         return Err(StageError::Internal("one claim per gamma".into()));
     }
-    let gammas = transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?;
+    Ok(transcript.challenge_extensions(&gamma_site(spec.stage), spec.gamma_count)?)
+}
+
+/// The rounds of a stage whose coefficients [`draw_gammas`] drew, so that the caller can
+/// build lanes that depend on them (the lane ring weights of stage 3) before `resolve` runs.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn prove_stage_drawn<'a>(
+    spec: &StageSpec,
+    manifest: &CommitmentManifest,
+    points: &Points,
+    claims: &[E],
+    gammas: Vec<E>,
+    resolve: impl Fn(LaneId) -> Lane<'a>,
+    split: Option<&SplitWeight>,
+    transcript: &mut Transcript,
+    check: bool,
+) -> Result<StageRun, StageError> {
     let rounds = manifest.d_main();
     // Buffers of the plane groups of this stage.
     let mut pool = agg_simd::buf::Pool::default();
@@ -382,12 +429,12 @@ fn prove_stage_with<'a>(
             .instances
             .iter()
             .map(|instance| GroupInstance {
-                gamma: gammas[instance.gamma] * instance.scale,
+                gamma: instance.coefficient(&gammas),
                 terms: instance.terms.clone(),
             })
             .collect();
         let eq_point = points.eq_point(group.eq, manifest, group.domain);
-        if let (Some(split), Some(&LaneId::Weight(WeightId::Level1))) = (split, group.lanes.first()) {
+        if let (Some(split), Some(&LaneId::Weight(WeightId::Level1(0)))) = (split, group.lanes.first()) {
             if group.domain == GroupRole::Main && eq_point.is_none() {
                 if let Some(grouped) = SplitGroup::new(split, &lanes[1..], &instances, spec.degree) {
                     groups.push(StageGroup::Split(grouped));
@@ -571,7 +618,8 @@ impl StageGroup<'_> {
         match self {
             Self::Generic(g) => g.set_arena(arena),
             Self::Linear(LinearGroup::Row(g)) | Self::Extra(LinearGroup::Row(g)) => g.set_arena(arena),
-            Self::Linear(LinearGroup::Plane(_)) | Self::Extra(LinearGroup::Plane(_)) => {}
+            Self::Linear(LinearGroup::Plane(_) | LinearGroup::Planes(_))
+            | Self::Extra(LinearGroup::Plane(_) | LinearGroup::Planes(_)) => {}
             Self::Weight(WeightGroup::Row(g)) => g.set_arena(arena),
             Self::Weight(WeightGroup::Plane(_)) => {}
             Self::Split(g) => g.set_arena(arena),
@@ -635,6 +683,11 @@ impl StageGroup<'_> {
             Self::Linear(LinearGroup::Plane(group)) | Self::Extra(LinearGroup::Plane(group)) => {
                 group.recycle(pool)
             }
+            Self::Linear(LinearGroup::Planes(groups)) | Self::Extra(LinearGroup::Planes(groups)) => {
+                for group in groups {
+                    group.recycle(pool);
+                }
+            }
             Self::Generic(_)
             | Self::Linear(LinearGroup::Row(_))
             | Self::Extra(LinearGroup::Row(_))
@@ -647,6 +700,32 @@ impl StageGroup<'_> {
 enum LinearGroup<'a> {
     Row(LinearIntGroup<'a>),
     Plane(PlaneLinearIntGroup<'a>),
+    /// More columns than one plane group holds: one plane group per run of
+    /// [`PLANE_LINEAR_COLUMNS`] columns, whose messages and claims add up.
+    Planes(Vec<PlaneLinearIntGroup<'a>>),
+}
+
+/// Columns of one plane-layout linear group (`kernel::plane::LinearIntGroup`).
+const PLANE_LINEAR_COLUMNS: usize = 4;
+
+/// The plane-layout linear group of `cells` with `coefficients`, split into runs of
+/// [`PLANE_LINEAR_COLUMNS`] columns when there are more (the eight-column main lookup
+/// stacks of ML-DSA-65 and ML-DSA-87); `None` when a run does not fit the plane group.
+fn plane_linear<'a>(
+    cells: &[Source<'a>],
+    coefficients: &[E],
+    point: &[E],
+    pool: &mut agg_simd::buf::Pool,
+) -> Option<LinearGroup<'a>> {
+    if cells.len() <= PLANE_LINEAR_COLUMNS {
+        return PlaneLinearIntGroup::new(cells.to_vec(), coefficients.to_vec(), point, pool).map(LinearGroup::Plane);
+    }
+    cells
+        .chunks(PLANE_LINEAR_COLUMNS)
+        .zip(coefficients.chunks(PLANE_LINEAR_COLUMNS))
+        .map(|(cells, coefficients)| PlaneLinearIntGroup::new(cells.to_vec(), coefficients.to_vec(), point, pool))
+        .collect::<Option<Vec<_>>>()
+        .map(LinearGroup::Planes)
 }
 
 impl LinearGroup<'_> {
@@ -654,6 +733,7 @@ impl LinearGroup<'_> {
         match self {
             Self::Row(g) => g.claim(),
             Self::Plane(g) => g.claim(),
+            Self::Planes(groups) => groups.iter().fold(E::zero(), |acc, g| acc + g.claim()),
         }
     }
 
@@ -661,6 +741,16 @@ impl LinearGroup<'_> {
         match self {
             Self::Row(g) => g.round_message(round),
             Self::Plane(g) => g.round_message(round),
+            Self::Planes(groups) => {
+                let mut parts = groups.iter_mut().map(|g| g.round_message(round));
+                let mut message = parts.next().expect("at least one part");
+                for part in parts {
+                    for (slot, value) in message.iter_mut().zip(part) {
+                        *slot += value;
+                    }
+                }
+                message
+            }
         }
     }
 
@@ -668,6 +758,11 @@ impl LinearGroup<'_> {
         match self {
             Self::Row(g) => g.bind(round, challenge),
             Self::Plane(g) => g.bind(round, challenge),
+            Self::Planes(groups) => {
+                for g in groups {
+                    g.bind(round, challenge);
+                }
+            }
         }
     }
 
@@ -675,6 +770,7 @@ impl LinearGroup<'_> {
         match self {
             Self::Row(g) => g.terminal_consistent(),
             Self::Plane(g) => g.terminal_consistent(),
+            Self::Planes(groups) => groups.iter().all(PlaneLinearIntGroup::terminal_consistent),
         }
     }
 }
@@ -771,8 +867,8 @@ fn linear_group<'a>(
         return None;
     }
     if layout() == Layout::Plane {
-        if let Some(group) = PlaneLinearIntGroup::new(cells.clone(), coefficients.clone(), point, pool) {
-            return Some(LinearGroup::Plane(group));
+        if let Some(group) = plane_linear(&cells, &coefficients, point, pool) {
+            return Some(group);
         }
     }
     LinearIntGroup::new(cells, coefficients, point).map(LinearGroup::Row)
@@ -908,8 +1004,7 @@ fn split_linear<'a>(
         })
         .unzip();
     let linear = if layout() == Layout::Plane {
-        PlaneLinearIntGroup::new(cells.clone(), coefficients.clone(), point, pool)
-            .map(LinearGroup::Plane)
+        plane_linear(&cells, &coefficients, point, pool)
     } else {
         None
     };
@@ -998,7 +1093,7 @@ pub fn check_terminal(
             .instances
             .iter()
             .map(|instance| GroupInstance {
-                gamma: replay.gammas[instance.gamma] * instance.scale,
+                gamma: instance.coefficient(&replay.gammas),
                 terms: instance.terms.clone(),
             })
             .collect();
@@ -1008,4 +1103,37 @@ pub fn check_terminal(
         return Err(StageError::Terminal(spec.stage));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{field, point};
+    use agg_witness::gen::SplitMix64;
+
+    /// Eight integer columns (the main lookup stack of ML-DSA-65 and ML-DSA-87) in two plane
+    /// groups of four give the messages, claim and binding of the row group over all eight.
+    #[test]
+    fn eight_linear_columns_run_as_two_plane_groups() {
+        let mut rng = SplitMix64::new(17);
+        let vars = 12;
+        let columns: Vec<Vec<i32>> = (0..8)
+            .map(|_| (0..1 << vars).map(|_| (rng.next_u64() % (1 << 16)) as i32 - (1 << 15)).collect())
+            .collect();
+        let cells: Vec<Source<'_>> = columns.iter().map(|c| Source::Ints(c)).collect();
+        let coefficients = point(&mut rng, 8);
+        let eq_point = point(&mut rng, vars);
+        let mut pool = agg_simd::buf::Pool::default();
+        let mut planes = plane_linear(&cells, &coefficients, &eq_point, &mut pool).expect("plane groups");
+        assert!(matches!(&planes, LinearGroup::Planes(groups) if groups.len() == 2));
+        let mut row = LinearGroup::Row(LinearIntGroup::new(cells, coefficients, &eq_point).expect("row group"));
+        assert_eq!(planes.claim(), row.claim());
+        for round in 0..vars {
+            assert_eq!(planes.round_message(round), row.round_message(round), "round {round}");
+            let r = field(&mut rng);
+            planes.bind(round, r);
+            row.bind(round, r);
+        }
+        assert!(planes.terminal_consistent() && row.terminal_consistent());
+    }
 }

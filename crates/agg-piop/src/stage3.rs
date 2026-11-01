@@ -35,21 +35,30 @@
 //! after the 37 reductions the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`. The ring
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
 //! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 55 coefficients.
+//!
+//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relation H-u): the main domain has no row
+//! coordinate, so the ring identity is `k` instances `ring[rho]` (`0..k`), each with the
+//! claimed sum `T~_rho(r^(2))` and the summand `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)^(rho)`;
+//! their `A z` parts are one unbatched part per lane `s` of `z`, `w_A^(s) z^(s)`, whose weight
+//! combines the rows by the coefficients `gamma_rho` of the instances (`lane_public`).
+//! Then `l + k + 3` links (`Z_mid^(s)`, `U_mid^(rho)`, `K_2`, `K_3`, `K_4`), `l + k` Booleanity
+//! checks (`a_z^(s)`, `a_u^(rho)`), the reductions of the `4 k` bit polynomials from `r^(1)`
+//! and from `r^(2)`, the level reductions over four bits, the stacks of the set (7 or 8), and
+//! the projection identity, whose `v` side has one weight `W^(rho)` per lane of `v`
+//! (`projection::lane_weight_tables`): 105 coefficients for ML-DSA-65, 132 for ML-DSA-87.
 
 use agg_witness::params::{GAMMA2, OMEGA, Q, W1_BITS};
 use jolt_field::{One, Ring, Zero};
 
-use crate::claims::{Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
-use crate::kernel::Term;
+use crate::claims::{bit_columns, Kappa1Claims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims};
+use crate::kernel::{Lane, Source, Term};
+use crate::lane_public::LanePublicData;
 use crate::lookup::LookupClaims;
-use crate::manifest::{
-    value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupRole, K16_DIGITS, L16_SLACK, LOOKUP_SHIFT,
-    PROJ_BYTES, STACK_DOMAINS, U16_DIGITS, V16_DIGITS,
-};
+use crate::manifest::{value_columns, Column, CommitmentManifest, FipsColumn, GroupRole, L16_SLACK, LOOKUP_SHIFT, V16_DIGITS};
 use crate::range::digits;
 use crate::stage::{
-    check_terminal, prove_stage, prove_stage_unchecked, replay_stage, EqPoint, GroupSpec, InstanceSpec, LaneId, Points,
-    StageError, StageSpec, WeightId,
+    check_terminal, draw_gammas, prove_stage, prove_stage_drawn, prove_stage_unchecked, replay_stage, EqPoint,
+    GroupSpec, InstanceSpec, LaneId, Points, StageError, StageSpec, WeightId,
 };
 use crate::stage1::Stage1Output;
 use crate::stage2::Stage2Output;
@@ -61,7 +70,7 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 3;
 /// Message degree.
 pub const DEGREE: usize = 3;
-/// Lookup stacks (reductions).
+/// Lookup stacks (reductions) of ML-DSA-44 ([`Gammas::stacks`] for every set).
 pub const STACKS: usize = 5;
 /// The two sides of the projection identity (`projection`): the weighted sum of `v` and the
 /// reduction of `k` at `r'`.
@@ -75,27 +84,43 @@ pub const FIPS_CHECKS: usize = 4;
 /// H-FIPS reductions of stage 3 (stage 2's `delta(r^(2))`, `e(r^(2))`).
 pub const FIPS_REDUCTIONS: usize = 2;
 
-/// The `gamma^(3)` layout of one relation: `links` leaf-checked digits (4 under H-u, 3 under
-/// H-exact, 2 under H-FIPS), `bools` Boolean value digits (0 under H-u, 2 under H-exact, 3
-/// under H-FIPS) and the H-FIPS checks and reductions.
+/// The `gamma^(3)` layout of one parameter set and relation: `rings` ring instances (one,
+/// or one per row `rho` with polynomial lanes), `links` leaf-checked digits (4 under H-u, 3
+/// under H-exact, 2 under H-FIPS; `l + k + 3` with lanes), `bools` Boolean value digits (0
+/// under H-u, 2 under H-exact, 3 under H-FIPS; `l + k` with lanes: `a_z^(s)`, `a_u^(rho)`),
+/// the H-FIPS checks and reductions, `bits` bits of `w_1'` in `bit_lanes` polynomials, and
+/// `stacks` lookup stacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gammas {
+    /// Ring instances (`LANES_K`).
+    pub rings: usize,
     /// Link instances.
     pub links: usize,
     /// Booleanity zero-checks.
     pub bools: usize,
     /// Relation H-FIPS.
     pub fips: bool,
+    /// Bits of `w_1'`.
+    pub bits: usize,
+    /// Bit polynomials `b_t^(rho)` (`bits` times the polynomial lanes).
+    pub bit_lanes: usize,
+    /// Lookup stacks.
+    pub stacks: usize,
 }
 
 impl Gammas {
-    /// The layout of `manifest`'s relation.
+    /// The layout of `manifest`'s parameter set and relation.
     #[must_use]
     pub fn new(manifest: &CommitmentManifest) -> Self {
+        let shape = manifest.shape();
         Self {
+            rings: shape.lanes_k,
             links: manifest.leaf_digits().len(),
             bools: manifest.bool_digits().len(),
             fips: manifest.is_fips(),
+            bits: shape.w1_bits,
+            bit_lanes: shape.w1_bits * shape.lanes_k,
+            stacks: manifest.lookup_shape().stacks.len(),
         }
     }
 
@@ -115,99 +140,112 @@ impl Gammas {
         }
     }
 
-    /// First reduction index `o = 1 + links + bools (+ 4 H-FIPS checks)`.
+    /// First reduction index `o = rings + links + bools (+ 4 H-FIPS checks)`.
     const fn first_reduction(self) -> usize {
-        1 + self.links + self.bools + self.fips_checks()
+        self.rings + self.links + self.bools + self.fips_checks()
     }
 
-    /// Batching coefficients: 49 under H-u, 50 under H-exact, 56 under H-FIPS.
+    /// The reductions of the level parities and carries start after the two bit reductions.
+    const fn level_reductions(self) -> usize {
+        self.first_reduction() + 2 * self.bit_lanes
+    }
+
+    /// Batching coefficients: 49 under H-u, 50 under H-exact, 56 under H-FIPS; 105 for
+    /// ML-DSA-65 and 132 for ML-DSA-87.
     #[must_use]
     pub const fn count(self) -> usize {
-        self.first_reduction() + 6 * W1_BITS + 1 + self.fips_reductions() + STACKS + PROJ_INSTANCES
+        self.stack(self.stacks) + PROJ_INSTANCES
+    }
+
+    /// Gamma index of `ring[rho]` (`ring` at 0 for ML-DSA-44).
+    #[must_use]
+    pub const fn ring(self, rho: usize) -> usize {
+        GAMMA_RING + rho
     }
 
     /// Gamma index of the projection identity's `v` side, `sum_x W(x) v(x) = c`.
     #[must_use]
     pub const fn proj_v(self) -> usize {
-        self.stack(STACKS)
+        self.stack(self.stacks)
     }
 
     /// Gamma index of the projection identity's `k` side, `sum_y eq(r', y) k(y) = c`.
     #[must_use]
     pub const fn proj_k(self) -> usize {
-        self.stack(STACKS) + 1
+        self.stack(self.stacks) + 1
     }
 
     /// Gamma index of H-FIPS check `k` (`F1, F2, F45, F7`).
     #[must_use]
     pub const fn fips_check(self, k: usize) -> usize {
-        1 + self.links + self.bools + k
+        self.rings + self.links + self.bools + k
     }
 
     /// Gamma index of H-FIPS reduction `k` (`delta`, `e` from `r^(2)`).
     #[must_use]
     pub const fn fips_reduction(self, k: usize) -> usize {
-        self.first_reduction() + 1 + 6 * W1_BITS + k
+        self.level_reductions() + 4 * self.bits + 1 + k
     }
 
     /// Gamma index of `link[k]`.
     #[must_use]
     pub const fn link(self, k: usize) -> usize {
-        1 + k
+        self.rings + k
     }
 
     /// Gamma index of `bool[k]`.
     #[must_use]
     pub const fn bool(self, k: usize) -> usize {
-        1 + self.links + k
+        self.rings + self.links + k
     }
 
-    /// Gamma index of the reduction of `b_t` from `r^(1)`.
+    /// Gamma index of the reduction of bit polynomial `i` (`claims::bit_columns` order)
+    /// from `r^(1)`.
     #[must_use]
-    pub const fn b_r1(self, t: usize) -> usize {
-        self.first_reduction() + t
+    pub const fn b_r1(self, i: usize) -> usize {
+        self.first_reduction() + i
     }
 
-    /// Gamma index of the reduction of `b_t` from `r^(2)`.
+    /// Gamma index of the reduction of bit polynomial `i` from `r^(2)`.
     #[must_use]
-    pub const fn b_r2(self, t: usize) -> usize {
-        self.first_reduction() + W1_BITS + t
+    pub const fn b_r2(self, i: usize) -> usize {
+        self.first_reduction() + self.bit_lanes + i
     }
 
     /// Gamma index of the reduction of `y^(2)_t` from `tau_2`.
     #[must_use]
     pub const fn y2_tau(self, t: usize) -> usize {
-        self.first_reduction() + 2 * W1_BITS + t
+        self.level_reductions() + t
     }
 
     /// Gamma index of the reduction of `y^(2)_t` from `r^(1)_2`.
     #[must_use]
     pub const fn y2_r1(self, t: usize) -> usize {
-        self.first_reduction() + 3 * W1_BITS + t
+        self.level_reductions() + self.bits + t
     }
 
     /// Gamma index of the reduction of `K^(2)_t` from `tau_2`.
     #[must_use]
     pub const fn kappa2_tau(self, t: usize) -> usize {
-        self.first_reduction() + 4 * W1_BITS + t
+        self.level_reductions() + 2 * self.bits + t
     }
 
     /// Gamma index of the reduction of `K^(3)` from `tau_3`.
     #[must_use]
     pub const fn kappa3_tau(self) -> usize {
-        self.first_reduction() + 5 * W1_BITS
+        self.level_reductions() + 3 * self.bits
     }
 
     /// Gamma index of the reduction of `K^(1)_t` from `r^(1)_1`.
     #[must_use]
     pub const fn kappa1_r1(self, t: usize) -> usize {
-        self.first_reduction() + 1 + 5 * W1_BITS + t
+        self.level_reductions() + 3 * self.bits + 1 + t
     }
 
     /// Gamma index of the reduction of lookup stack `j`.
     #[must_use]
     pub const fn stack(self, j: usize) -> usize {
-        self.first_reduction() + 1 + 6 * W1_BITS + self.fips_reductions() + j
+        self.level_reductions() + 4 * self.bits + 1 + self.fips_reductions() + j
     }
 }
 
@@ -276,60 +314,82 @@ fn column_lanes(columns: &[Column]) -> Vec<LaneId> {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
-    assert_eq!(weights.len(), STACKS, "one weight vector per lookup stack");
-    let lanes = 0..W1_BITS;
-    let all = digits(manifest);
     let gammas = Gammas::new(manifest);
-    let z_columns = value_columns(manifest.z_value());
+    assert_eq!(weights.len(), gammas.stacks, "one weight vector per lookup stack");
+    let shape = manifest.shape();
+    let (lanes_k, lanes_l) = (shape.lanes_k as u8, shape.lanes_l as u8);
+    let all = digits(manifest);
+    let (z_value, u_value) = (manifest.z_value(), manifest.u_slot_value());
+    let (z_form, u_form) = (z_value.layout(), u_value.layout());
+    let bits = bit_columns(manifest);
     let mut groups = Vec::new();
 
-    // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1'), the links, the
-    // Booleanity zero-checks and the b_t reductions from r^(2). The high digits of z
-    // (Z_hi under H-u; bz_hi, a_z under H-exact) ride along for the link or the zero-checks;
-    // H-FIPS reads l_lo, l_hi in the slots of U_lo, U_hi and adds s, delta, e.
-    let u_columns = value_columns(manifest.u_slot_value());
-    let mut main_columns = vec![u_columns[0], Column::V_LO, Column::V_HI, z_columns[1], u_columns[1]];
-    main_columns.extend(z_columns[2..].iter().copied());
-    main_columns.extend(lanes.clone().map(|t| Column::W1Bit(t as u8, 0)));
+    // Main domain, eq(r^(2)): the ring's committed part (u, v, w_1') per row, the links,
+    // the Booleanity zero-checks and the bit reductions from r^(2). The higher digits of z
+    // (Z_hi under H-u; bz_hi, a_z under H-exact; Z_mid, a_z per lane) ride along for the
+    // links or the zero-checks; H-FIPS reads l_lo, l_hi in the slots of U_lo, U_hi and adds
+    // s, delta, e. Lane order: (U_lo, V_lo, V_hi) per row lane, the second digits of z
+    // and u, their further digits, the bits.
+    let mut main_columns = Vec::new();
+    for lane in 0..lanes_k {
+        main_columns.extend([
+            Column::lane_digit(u_value, 0, lane),
+            Column::V_LO.in_lane(lane),
+            Column::V_HI.in_lane(lane),
+        ]);
+    }
+    main_columns.extend((0..lanes_l).map(|s| Column::lane_digit(z_value, 1, s)));
+    main_columns.extend((0..lanes_k).map(|rho| Column::lane_digit(u_value, 1, rho)));
+    for digit in 2..z_form.len() as u8 {
+        main_columns.extend((0..lanes_l).map(|s| Column::lane_digit(z_value, digit, s)));
+    }
+    for digit in 2..u_form.len() as u8 {
+        main_columns.extend((0..lanes_k).map(|rho| Column::lane_digit(u_value, digit, rho)));
+    }
+    main_columns.extend(bits.iter().copied());
     if gammas.fips {
         main_columns.extend(FipsColumn::ALL.map(Column::Fips));
     }
     let position = |column: Column| main_columns.iter().position(|&c| c == column).expect("lane");
     let v_weights = V16_DIGITS.weights();
-    let mut ring_b: Vec<(usize, i64)> = (0..W1_BITS)
-        .map(|t| (position(Column::W1Bit(t as u8, 0)), -((2 * GAMMA2) << t)))
-        .collect();
-    ring_b.push((position(Column::V_LO), -(Q * v_weights[0])));
-    ring_b.push((position(Column::V_HI), -(Q * v_weights[1])));
+    let two_gamma2 = 2 * manifest.gamma2();
     let mut instances = Vec::new();
-    if gammas.fips {
-        // -u = -(gamma_2 s + l_lo + 29,696 l_hi + 2^15 + 1 - gamma_2) + 2 gamma_2 delta + e.
-        let (sign, delta, wrap) = (position(Column::SIGN), position(Column::DELTA), position(Column::WRAP));
-        ring_b.push((position(Column::L_LO), -1));
-        ring_b.push((position(Column::L_HI), -L16_SLACK.slack_weight));
-        ring_b.push((sign, -GAMMA2));
-        ring_b.push((delta, 2 * GAMMA2));
-        ring_b.push((wrap, 1));
-        instances.push(InstanceSpec::new(
-            GAMMA_RING,
-            vec![Term::Affine {
-                weight: None,
-                lanes: ring_b,
-                constant: -(i64::from(LOOKUP_SHIFT) + 1 - GAMMA2) - Q * V16_DIGITS.constant(),
-            }],
-        ));
-    } else {
-        let u_weights = U16_DIGITS.weights();
-        ring_b.push((position(Column::U_LO), -u_weights[0]));
-        ring_b.push((position(Column::U_HI), -u_weights[1]));
-        instances.push(InstanceSpec::new(
-            GAMMA_RING,
-            vec![Term::Affine {
-                weight: None,
-                lanes: ring_b,
-                constant: -(U16_DIGITS.constant() + Q * V16_DIGITS.constant()),
-            }],
-        ));
+    for rho in 0..lanes_k {
+        // ring[rho]: -(2 gamma_2 w_1' + u + q v) of row lane rho.
+        let mut ring_b: Vec<(usize, i64)> = (0..shape.w1_bits as u8)
+            .map(|t| (position(Column::W1Bit(t, rho)), -(two_gamma2 << t)))
+            .collect();
+        ring_b.push((position(Column::V_LO.in_lane(rho)), -(Q * v_weights[0])));
+        ring_b.push((position(Column::V_HI.in_lane(rho)), -(Q * v_weights[1])));
+        if gammas.fips {
+            // -u = -(gamma_2 s + l_lo + 29,696 l_hi + 2^15 + 1 - gamma_2) + 2 gamma_2 delta + e.
+            let (sign, delta, wrap) = (position(Column::SIGN), position(Column::DELTA), position(Column::WRAP));
+            ring_b.push((position(Column::L_LO), -1));
+            ring_b.push((position(Column::L_HI), -L16_SLACK.slack_weight));
+            ring_b.push((sign, -GAMMA2));
+            ring_b.push((delta, 2 * GAMMA2));
+            ring_b.push((wrap, 1));
+            instances.push(InstanceSpec::new(
+                gammas.ring(usize::from(rho)),
+                vec![Term::Affine {
+                    weight: None,
+                    lanes: ring_b,
+                    constant: -(i64::from(LOOKUP_SHIFT) + 1 - GAMMA2) - Q * V16_DIGITS.constant(),
+                }],
+            ));
+        } else {
+            for (digit, weight) in u_form.weights().into_iter().enumerate() {
+                ring_b.push((position(Column::lane_digit(u_value, digit as u8, rho)), -weight));
+            }
+            instances.push(InstanceSpec::new(
+                gammas.ring(usize::from(rho)),
+                vec![Term::Affine {
+                    weight: None,
+                    lanes: ring_b,
+                    constant: -(u_form.constant() + Q * V16_DIGITS.constant()),
+                }],
+            ));
+        }
     }
     for (k, digit) in all.iter().enumerate() {
         if digit.column.domain() == GroupRole::Main {
@@ -378,9 +438,11 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
             instances.push(InstanceSpec::new(gammas.fips_reduction(k), vec![Term::Product(vec![lane])]));
         }
     }
-    instances.extend(lanes.clone().map(|t| {
-        InstanceSpec::new(gammas.b_r2(t), vec![Term::Product(vec![position(Column::W1Bit(t as u8, 0))])])
-    }));
+    instances.extend(
+        bits.iter()
+            .enumerate()
+            .map(|(i, &column)| InstanceSpec::new(gammas.b_r2(i), vec![Term::Product(vec![position(column)])])),
+    );
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R2,
@@ -420,38 +482,40 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     }
 
     // Main domain, no equality factor: w_A times z (z = Z_lo + 2^16 Z_hi + 2^15 under H-u,
-    // z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 under H-exact).
-    let z_form = manifest.z_value().layout();
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::None,
-        lanes: std::iter::once(LaneId::Weight(WeightId::Ring))
-            .chain(column_lanes(&z_columns))
-            .collect(),
-        instances: vec![InstanceSpec::new(
-            GAMMA_RING,
-            vec![Term::Affine {
-                weight: Some(0),
-                lanes: z_form.weights().into_iter().enumerate().map(|(k, w)| (1 + k, w)).collect(),
-                constant: z_form.constant(),
+    // z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 under H-exact), one group per lane of z.
+    // With polynomial lanes the weight w_A^(s) already carries the row coefficients
+    // gamma_rho of the instances ring[rho], so the part is unbatched.
+    for s in 0..lanes_l {
+        let terms = vec![Term::Affine {
+            weight: Some(0),
+            lanes: z_form.weights().into_iter().enumerate().map(|(k, w)| (1 + k, w)).collect(),
+            constant: z_form.constant(),
+        }];
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::None,
+            lanes: std::iter::once(LaneId::Weight(WeightId::Ring(s)))
+                .chain((0..z_form.len() as u8).map(|digit| LaneId::Column(Column::lane_digit(z_value, digit, s))))
+                .collect(),
+            instances: vec![if manifest.has_lanes() {
+                InstanceSpec::unbatched(terms)
+            } else {
+                InstanceSpec::new(GAMMA_RING, terms)
             }],
-        )],
-    });
+        });
+    }
 
-    // Main domain, eq(r^(1)): b_t reductions from r^(1).
-    let bits: Vec<LaneId> = lanes
-        .clone()
-        .map(|t| LaneId::Column(Column::W1Bit(t as u8, 0)))
-        .collect();
+    // Main domain, eq(r^(1)): bit reductions from r^(1).
+    let bit_ids = column_lanes(&bits);
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::R1,
-        instances: reductions(&bits, |t| gammas.b_r1(t)),
-        lanes: bits,
+        instances: reductions(&bit_ids, |i| gammas.b_r1(i)),
+        lanes: bit_ids,
     });
 
     // D_1, eq(r^(1)_1): K^(1)_t reductions.
-    let kappa1 = column_lanes(&manifest.stack_columns(1));
+    let kappa1 = column_lanes(&manifest.stack_columns(manifest.carry_stack(1)));
     groups.push(GroupSpec {
         domain: GroupRole::Level1,
         eq: EqPoint::R1,
@@ -460,17 +524,15 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     });
 
     // D_2, eq(tau_2): y^(2)_t and K^(2)_t reductions; eq(r^(1)_2): y^(2)_t.
-    let kappa2: Vec<LaneId> = lanes.clone().map(|t| LaneId::Column(Column::carry(2, t as u8))).collect();
-    let y2: Vec<LaneId> = lanes
-        .clone()
-        .map(|t| LaneId::Column(Column::Parity2(t as u8)))
-        .collect();
+    let levels = 0..gammas.bits as u8;
+    let kappa2: Vec<LaneId> = levels.clone().map(|t| LaneId::Column(Column::carry(2, t))).collect();
+    let y2: Vec<LaneId> = levels.map(|t| LaneId::Column(Column::Parity2(t))).collect();
     let mut tau2_lanes = y2.clone();
     tau2_lanes.extend_from_slice(&kappa2);
     let mut tau2_instances = reductions(&y2, |t| gammas.y2_tau(t));
     tau2_instances.extend(
         (0..kappa2.len())
-            .map(|l| InstanceSpec::new(gammas.kappa2_tau(l), vec![Term::Product(vec![W1_BITS + l])])),
+            .map(|l| InstanceSpec::new(gammas.kappa2_tau(l), vec![Term::Product(vec![gammas.bits + l])])),
     );
     groups.push(GroupSpec {
         domain: GroupRole::Level2,
@@ -486,7 +548,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     });
 
     // D_3, eq(tau_3): K^(3).
-    let kappa3 = column_lanes(&manifest.stack_columns(3));
+    let kappa3 = column_lanes(&manifest.stack_columns(manifest.carry_stack(3)));
     groups.push(GroupSpec {
         domain: GroupRole::Level3,
         eq: EqPoint::Tau,
@@ -495,24 +557,32 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     });
 
     // The projection identity (`projection`), both sides with the shared claim c: on the
-    // main domain without an equality factor, W (V_lo + 2^16 V_hi + 2^15); on the projection
-    // domain at the suffix r' of r^(2), K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15,
-    // beside the links of K_2, K_3.
+    // main domain without an equality factor, W^(rho) (V_lo + 2^16 V_hi + 2^15) per lane of v;
+    // on the projection domain at the suffix r' of r^(2), the composition of the digits of
+    // k (K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 for ML-DSA-44), beside the
+    // links of its leaf-checked digits.
     let v_form = V16_DIGITS;
-    groups.push(GroupSpec {
-        domain: GroupRole::Main,
-        eq: EqPoint::None,
-        lanes: vec![LaneId::Weight(WeightId::Proj), LaneId::Column(Column::V_LO), LaneId::Column(Column::V_HI)],
-        instances: vec![InstanceSpec::new(
-            gammas.proj_v(),
-            vec![Term::Affine {
-                weight: Some(0),
-                lanes: v_form.weights().into_iter().enumerate().map(|(k, w)| (1 + k, w)).collect(),
-                constant: v_form.constant(),
-            }],
-        )],
-    });
-    let k_columns = value_columns(DigitValue::K);
+    for lane in 0..lanes_k {
+        groups.push(GroupSpec {
+            domain: GroupRole::Main,
+            eq: EqPoint::None,
+            lanes: vec![
+                LaneId::Weight(WeightId::Proj(lane)),
+                LaneId::Column(Column::V_LO.in_lane(lane)),
+                LaneId::Column(Column::V_HI.in_lane(lane)),
+            ],
+            instances: vec![InstanceSpec::new(
+                gammas.proj_v(),
+                vec![Term::Affine {
+                    weight: Some(0),
+                    lanes: v_form.weights().into_iter().enumerate().map(|(k, w)| (1 + k, w)).collect(),
+                    constant: v_form.constant(),
+                }],
+            )],
+        });
+    }
+    let k_columns = value_columns(manifest.k_value());
+    let k_form = manifest.proj_digits();
     let mut proj_instances: Vec<InstanceSpec> = all
         .iter()
         .enumerate()
@@ -526,8 +596,8 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         gammas.proj_k(),
         vec![Term::Affine {
             weight: None,
-            lanes: K16_DIGITS.weights().into_iter().enumerate().collect(),
-            constant: K16_DIGITS.constant(),
+            lanes: k_form.weights().into_iter().enumerate().collect(),
+            constant: k_form.constant(),
         }],
     ));
     groups.push(GroupSpec {
@@ -539,11 +609,12 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
 
     // The lookup stacks: one equality group per stack at its low point, one part per column
     // with the column weight as scale.
+    let domains = manifest.stack_domains();
     for (j, stack_weights) in weights.iter().enumerate() {
         let columns = manifest.stack_columns(j);
         assert_eq!(stack_weights.len(), columns.len(), "one weight per stack column");
         groups.push(GroupSpec {
-            domain: STACK_DOMAINS[j],
+            domain: domains[j],
             eq: EqPoint::Lookup(j),
             lanes: column_lanes(&columns),
             instances: stack_weights
@@ -565,13 +636,14 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     }
 }
 
-/// The claimed sums in gamma order (the Booleanity zero-checks claim zero); `stacks[j]` is
-/// stack `j`'s column claim ([`stack_reductions`]).
+/// The claimed sums in gamma order (the Booleanity zero-checks claim zero); `t_at_r2[rho]`
+/// is `T~_rho(r^(2))` (one value, `T(r^(2))`, for ML-DSA-44) and `stacks[j]` stack `j`'s
+/// column claim ([`stack_reductions`]).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn claimed_sums(
     manifest: &CommitmentManifest,
-    t_at_r2: E,
+    t_at_r2: &[E],
     prestage: &PreStageClaims,
     stage1: &Stage1Claims,
     kappa1: &Kappa1Claims,
@@ -580,8 +652,11 @@ pub fn claimed_sums(
     stage2_projection: E,
 ) -> Vec<E> {
     let gammas = Gammas::new(manifest);
+    assert_eq!(t_at_r2.len(), gammas.rings, "one T claim per ring instance");
     let mut claims = vec![E::zero(); gammas.count()];
-    claims[GAMMA_RING] = t_at_r2;
+    for (rho, &t) in t_at_r2.iter().enumerate() {
+        claims[gammas.ring(rho)] = t;
+    }
     for (k, &square) in stage2.squares.iter().enumerate() {
         claims[gammas.link(k)] = square;
     }
@@ -591,9 +666,11 @@ pub fn claimed_sums(
             claims[gammas.fips_reduction(k)] = value;
         }
     }
-    for t in 0..W1_BITS {
-        claims[gammas.b_r1(t)] = stage1.b[t];
-        claims[gammas.b_r2(t)] = stage2.b[t];
+    for i in 0..gammas.bit_lanes {
+        claims[gammas.b_r1(i)] = stage1.b[i];
+        claims[gammas.b_r2(i)] = stage2.b[i];
+    }
+    for t in 0..gammas.bits {
         claims[gammas.y2_tau(t)] = prestage.y2[t];
         claims[gammas.y2_r1(t)] = stage1.y2[t];
         claims[gammas.kappa2_tau(t)] = prestage.kappa2[t];
@@ -627,14 +704,41 @@ impl LookupInputs {
     }
 }
 
+/// The ring inputs of stage 3 that depend only on `r^(2)` and public data.
+#[derive(Clone, Copy, Debug)]
+pub enum RingInputs<'p> {
+    /// ML-DSA-44: `T(r^(2))`; `w_A` is in the prover tables.
+    Rows(E),
+    /// Polynomial lanes: `T~_rho(r^(2))` per row, and the public data from which the ring
+    /// weights `w_A^(s)` are built once `gamma^(3)` is drawn (they combine the rows by the
+    /// coefficients of the instances `ring[rho]`).
+    Lanes {
+        /// `T~_rho(r^(2))`.
+        t: &'p [E],
+        /// The public matrices.
+        public: &'p LanePublicData,
+    },
+}
+
+impl RingInputs<'_> {
+    /// The claimed sums of the ring instances.
+    #[must_use]
+    pub fn t_values(&self) -> Vec<E> {
+        match self {
+            Self::Rows(t) => vec![*t],
+            Self::Lanes { t, .. } => t.to_vec(),
+        }
+    }
+}
+
 /// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
-/// `tables` holds `w_A`; `t_at_r2` is `T(r^(2))`, which the caller may compute before the
-/// join because it depends only on `r^(2)` and public data.
+/// `tables` holds `w_A` (ML-DSA-44) and `W`; `ring` the ring inputs, which the caller may
+/// compute before the join because they depend only on `r^(2)` and public data.
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    t_at_r2: E,
+    ring: RingInputs<'_>,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -642,7 +746,7 @@ pub fn prove(
     lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, t_at_r2, points, prestage, stage1, stage2, lookup, transcript, true)
+    prove_with(manifest, tables, ring, points, prestage, stage1, stage2, lookup, transcript, true)
 }
 
 /// [`prove`] without the prover's claim self-check (tests).
@@ -651,7 +755,7 @@ pub fn prove(
 pub fn prove_unchecked(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    t_at_r2: E,
+    ring: RingInputs<'_>,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -659,14 +763,14 @@ pub fn prove_unchecked(
     lookup: &LookupInputs,
     transcript: &mut Transcript,
 ) -> Result<(Stage3Proof, Stage3Output), StageError> {
-    prove_with(manifest, tables, t_at_r2, points, prestage, stage1, stage2, lookup, transcript, false)
+    prove_with(manifest, tables, ring, points, prestage, stage1, stage2, lookup, transcript, false)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn prove_with(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
-    t_at_r2: E,
+    ring: RingInputs<'_>,
     points: &Points,
     prestage: &PreStageClaims,
     stage1: &Stage1Output,
@@ -678,7 +782,7 @@ fn prove_with(
     let spec = spec(manifest, &lookup.weights);
     let claims = claimed_sums(
         manifest,
-        t_at_r2,
+        &ring.t_values(),
         prestage,
         &stage1.claims,
         &stage2.kappa1,
@@ -686,10 +790,22 @@ fn prove_with(
         &lookup.claims,
         stage2.projection,
     );
-    let run = if check {
-        prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
-    } else {
-        prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
+    let run = match ring {
+        RingInputs::Rows(_) if check => {
+            prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
+        }
+        RingInputs::Rows(_) => prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?,
+        RingInputs::Lanes { public, .. } => {
+            let gammas = draw_gammas(&spec, &claims, transcript)?;
+            let rows = Gammas::new(manifest);
+            let row_gammas: Vec<E> = (0..rows.rings).map(|rho| gammas[rows.ring(rho)]).collect();
+            let ring_tables = public.ring_weight_tables(&points.r2, &row_gammas);
+            let resolve = |id| match id {
+                LaneId::Weight(WeightId::Ring(s)) => Lane::Source(Source::Field(&ring_tables[usize::from(s)])),
+                other => tables.lane(other),
+            };
+            prove_stage_drawn(&spec, manifest, points, &claims, gammas, resolve, None, transcript, check)?
+        }
     };
     let values: Vec<E> = manifest
         .groups()
@@ -717,13 +833,16 @@ fn prove_with(
     ))
 }
 
-/// Verify stage 3 with the public pass deferred: the rounds are
-/// replayed with the ring claim `T(r^(2))` set to zero, the terminal claims absorbed, and
-/// only then `public_pass(r^(2), r^(3))` returns `(T(r^(2)), w_A(r^(3)))`, so both come
-/// from one pass over the public matrices. Compressed rounds make the final claim affine
-/// in the initial claim with slope `prod_k r^(3)_k` (each round is
-/// `g(x) = claim x + terms free of the claim`), so the deferred claim enters as
-/// `gamma_ring T(r^(2)) prod_k r^(3)_k`.
+/// The verifier's public pass of stage 3: `public_pass(r^(2), r^(3), gamma_rows)` returns
+/// `(T~_rho(r^(2)) per ring instance, w_A^(s)(r^(3)) per lane of z)`, with `gamma_rows` the
+/// coefficients of the instances `ring[rho]` (one value each for ML-DSA-44, whose `w_A`
+/// combines the rows by `eq(r^(2)_row, rho)` and ignores them).
+///
+/// The rounds are replayed with the ring claims set to zero, the terminal claims
+/// absorbed, and only then the pass runs, so that both public quantities come from one pass
+/// over the public matrices. Compressed rounds make the final claim affine in the initial
+/// claim with slope `prod_k r^(3)_k` (each round is `g(x) = claim x + terms free of the
+/// claim`), so the deferred claims enter as `sum_rho gamma_rho T~_rho(r^(2)) prod_k r^(3)_k`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_streamed(
     manifest: &CommitmentManifest,
@@ -735,17 +854,14 @@ pub(crate) fn verify_streamed(
     psi: &[u8],
     proof: &Stage3Proof,
     transcript: &mut Transcript,
-    public_pass: impl FnOnce(&[E], &[E]) -> (E, E),
+    public_pass: impl FnOnce(&[E], &[E], &[E]) -> (Vec<E>, Vec<E>),
 ) -> Result<Stage3Output, StageError> {
-    assert_eq!(
-        psi.len(),
-        PROJ_BYTES,
-        "Psi has {PROJ_BYTES} bytes (128 rows of 1,024 bits)"
-    );
+    assert_eq!(psi.len(), manifest.proj_bytes(), "Psi has 128 rows of P bits");
+    let gammas = Gammas::new(manifest);
     let spec = spec(manifest, &lookup.weights);
     let claims = claimed_sums(
         manifest,
-        E::zero(),
+        &vec![E::zero(); gammas.rings],
         prestage,
         &stage1.claims,
         &stage2.kappa1,
@@ -758,14 +874,24 @@ pub(crate) fn verify_streamed(
         return Err(StageError::Shape("stage 3 claims".into()));
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.0)?;
-    let (t_at_r2, ring_weight) = public_pass(&stage2.point, &replay.point);
+    let row_gammas: Vec<E> = (0..gammas.rings).map(|rho| replay.gammas[gammas.ring(rho)]).collect();
+    let (t_at_r2, ring_weights) = public_pass(&stage2.point, &replay.point, &row_gammas);
+    let lanes_l = manifest.shape().lanes_l;
+    if t_at_r2.len() != gammas.rings || ring_weights.len() != lanes_l {
+        return Err(StageError::Internal("public pass shape".into()));
+    }
     let slope = replay.point.iter().fold(E::one(), |acc, &r| acc * r);
-    replay.final_claim += replay.gammas[GAMMA_RING] * t_at_r2 * slope;
-    let proj_weight = crate::projection::weight_at(manifest, psi, &stage2.point, &replay.point);
+    let deferred = row_gammas.iter().zip(&t_at_r2).fold(E::zero(), |acc, (&g, &t)| acc + g * t);
+    replay.final_claim += deferred * slope;
+    let proj_weights = if manifest.has_lanes() {
+        crate::projection::lane_weights_at(manifest, psi, &stage2.point, &replay.point)
+    } else {
+        vec![crate::projection::weight_at(manifest, psi, &stage2.point, &replay.point)]
+    };
     check_terminal(&spec, manifest, points, &replay, |id| match id {
         LaneId::Column(c) => proof.claims.column(manifest, c),
-        LaneId::Weight(WeightId::Ring) => ring_weight,
-        LaneId::Weight(WeightId::Proj) => proj_weight,
+        LaneId::Weight(WeightId::Ring(s)) => ring_weights[usize::from(s)],
+        LaneId::Weight(WeightId::Proj(lane)) => proj_weights[usize::from(lane)],
         other => panic!("{other:?} is not a stage-3 lane"),
     })?;
     Ok(Stage3Output {
@@ -807,7 +933,7 @@ mod tests {
         // The projection identity: W (V_lo + 2^16 V_hi + 2^15) on the main domain without an
         // equality factor; K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15 and the
         // links of K_2, K_3 on the projection domain at r^(2).
-        let v_side = spec.groups.iter().find(|g| g.lanes.first() == Some(&LaneId::Weight(WeightId::Proj))).unwrap();
+        let v_side = spec.groups.iter().find(|g| g.lanes.first() == Some(&LaneId::Weight(WeightId::Proj(0)))).unwrap();
         assert_eq!((v_side.domain, v_side.eq), (GroupRole::Main, EqPoint::None));
         assert_eq!(
             v_side.instances[0].terms,
@@ -839,7 +965,7 @@ mod tests {
         let c = field(&mut rng);
         let claims = claimed_sums(
             &manifest,
-            E::zero(),
+            &[E::zero()],
             &PreStageClaims::from_slice(&point(&mut rng, PreStageClaims::LEN)).unwrap(),
             &Stage1Claims::from_slice(&point(&mut rng, Stage1Claims::LEN)).unwrap(),
             &Kappa1Claims::from_slice(&point(&mut rng, Kappa1Claims::LEN)).unwrap(),
@@ -1019,6 +1145,80 @@ mod tests {
                 let expected = (s == 0 || s == 1) && (delta == 0 || delta == 2 * s - 1);
                 assert_eq!(f1 && f2, expected, "s {s} delta {delta}");
             }
+        }
+    }
+
+    /// ML-DSA-65 and ML-DSA-87: `k` ring instances whose `A z` parts are the `l` unbatched
+    /// weight groups, `l + k + 3` links, `l + k` Booleanity checks, `4 k` bit polynomials
+    /// reduced from `r^(1)` and `r^(2)`, one `W^(rho)` group per lane of `v`, and every
+    /// committed polynomial read at `r^(3)`.
+    #[test]
+    fn lane_sets_have_one_ring_instance_per_row() {
+        use agg_witness::params::Set;
+        for (set, k, l, stacks, count) in [(Set::S65, 6, 5, 7, 105), (Set::S87, 8, 7, 8, 132)] {
+            let manifest = CommitmentManifest::for_set(set, 256, crate::manifest::Relation::Hu).unwrap();
+            let gammas = Gammas::new(&manifest);
+            assert_eq!(
+                (gammas.rings, gammas.links, gammas.bools, gammas.bits, gammas.bit_lanes, gammas.stacks),
+                (k, l + k + 3, l + k, 4, 4 * k, stacks)
+            );
+            assert_eq!(gammas.count(), count);
+            let mut rng = SplitMix64::new(11);
+            let weights: Vec<Vec<E>> = (0..stacks)
+                .map(|j| point(&mut rng, manifest.stack_columns(j).len()))
+                .collect();
+            let spec = spec(&manifest, &weights);
+            spec.validate().unwrap();
+            assert_eq!(spec.gamma_count, count);
+            let mut counts = vec![0; count];
+            let mut unbatched = 0;
+            for group in &spec.groups {
+                let inner = usize::from(group.eq != EqPoint::None);
+                for instance in &group.instances {
+                    if instance.gamma == crate::stage::UNBATCHED {
+                        unbatched += 1;
+                        assert_eq!(group.lanes[0], LaneId::Weight(WeightId::Ring(unbatched as u8 - 1)));
+                    } else {
+                        counts[instance.gamma] += 1;
+                    }
+                    for term in &instance.terms {
+                        assert!(term.degree() + inner <= DEGREE, "{term:?}");
+                    }
+                }
+            }
+            assert_eq!(unbatched, l);
+            // Each ring instance is one affine part in the eq(r^(2)) group; the v side of the
+            // projection one part per lane of v; each stack one part per column.
+            assert!((0..k).all(|rho| counts[gammas.ring(rho)] == 1));
+            assert_eq!(counts[gammas.proj_v()], k);
+            let sizes: Vec<usize> = (0..stacks).map(|j| manifest.stack_columns(j).len()).collect();
+            assert_eq!((0..stacks).map(|j| counts[gammas.stack(j)]).collect::<Vec<_>>(), sizes);
+            assert!(counts.iter().all(|&c| c >= 1));
+            for group in manifest.groups() {
+                for &column in &group.columns {
+                    assert_eq!(
+                        spec.lane_ids().contains(&LaneId::Column(column)),
+                        group.role != GroupRole::Mult && !column.is_zero(),
+                        "{}",
+                        column.name()
+                    );
+                }
+            }
+            // ring[rho] reads -(2 gamma_2 2^t) b_t^(rho), -q v^(rho) and -u^(rho) of its row only.
+            let main = &spec.groups[0];
+            let ring = main.instances.iter().find(|i| i.gamma == gammas.ring(2)).unwrap();
+            let Term::Affine { lanes, constant, .. } = &ring.terms[0] else { panic!("affine") };
+            let read: Vec<Column> = lanes
+                .iter()
+                .map(|&(lane, _)| match main.lanes[lane] {
+                    LaneId::Column(c) => c,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert!(read.iter().all(|c| c.lane() == 2), "{read:?}");
+            assert_eq!(lanes[3], (main.lane(LaneId::Column(Column::W1Bit(3, 2))), -(2 * 261_888) << 3));
+            // u = U_lo + 2^16 U_mid + 523,267 a_u - 228,865, v = V_lo + 2^16 V_hi + 2^15.
+            assert_eq!(*constant, 228_865 - Q * (1 << 15));
         }
     }
 

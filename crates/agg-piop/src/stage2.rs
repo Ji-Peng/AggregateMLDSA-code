@@ -11,6 +11,11 @@
 //! The leaf of the eight-valued `K_2, K_3` (`Q_8`, degree 4 in `P_Z`) sets the stage degree
 //! `1 + 4 = 5` in both relations.
 //!
+//! With polynomial lanes (ML-DSA-65, ML-DSA-87) `def_y1[t]` (`0..4`) is one instance with
+//! `k` products `w_1^(rho) b_t^(rho)`, one per lane of the bit, and the leaves follow the
+//! lanes in manifest order: `leaf8[Z_mid^(s)]` (`l`), `leaf8[U_mid^(rho)]` (`k`), then
+//! `leaf8[K_2]`, `leaf8[K_3]`, `leaf4[K_4]` on the projection domain (18 and 22 instances).
+//!
 //! Relation H-FIPS (`docs/h-exact.md`) has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
 //! leaves and adds one instance after them (gamma 8): the degree-3 zero-check
 //! `F3 = e (e - 1)(e - delta)` at `r^(1)`
@@ -22,7 +27,7 @@ use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
 use jolt_field::Zero;
 
-use crate::claims::{Kappa1Claims, Stage1Claims, Stage2Claims};
+use crate::claims::{bit_columns, Kappa1Claims, Stage1Claims, Stage2Claims};
 use crate::kernel::{LeafPoly, Term};
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
 use crate::range::{digits, Digit};
@@ -33,7 +38,7 @@ use crate::stage::{
 use crate::stage1::Stage1Output;
 use crate::tables::ProverTables;
 use crate::transcript::{terminal_site, Transcript, KAPPA1_SITE, PROJ_CLAIM_SITE};
-use crate::weights::level1_weight_at;
+use crate::weights::{level1_lane_weights_at, level1_weight_at};
 use crate::OpeningField as E;
 
 /// Stage number.
@@ -44,16 +49,21 @@ pub const DEGREE: usize = 5;
 pub const FIPS_INSTANCES: usize = 1;
 
 /// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
-/// and `K_3` in each).
+/// and `K_3` in each); 18 and 22 for ML-DSA-65 and ML-DSA-87.
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
-    W1_BITS + manifest.leaf_digits().len() + if manifest.is_fips() { FIPS_INSTANCES } else { 0 }
+    bits(manifest) + manifest.leaf_digits().len() + if manifest.is_fips() { FIPS_INSTANCES } else { 0 }
+}
+
+/// Bits of `w_1'` (the `def_y1` instances).
+fn bits(manifest: &CommitmentManifest) -> usize {
+    manifest.shape().w1_bits
 }
 
 /// Gamma index of H-FIPS's `F3`.
 #[must_use]
 pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
-    W1_BITS + manifest.leaf_digits().len()
+    bits(manifest) + manifest.leaf_digits().len()
 }
 
 /// The H-FIPS terminal lanes of stage 2 beyond the bits, in wire order: `delta`, `e` at
@@ -77,10 +87,17 @@ pub fn fips_edge_term() -> Term {
 pub const fn gamma_def_y1(t: usize) -> usize {
     t
 }
-/// Gamma index of the leaf of the `k`-th leaf-checked digit (`manifest.leaf_digits()`).
+/// Gamma index of the leaf of the `k`-th leaf-checked digit (`manifest.leaf_digits()`) for
+/// ML-DSA-44 ([`gamma_leaf_for`]).
 #[must_use]
 pub const fn gamma_leaf(k: usize) -> usize {
     W1_BITS + k
+}
+
+/// Gamma index of the leaf of the `k`-th leaf-checked digit of any parameter set.
+#[must_use]
+pub fn gamma_leaf_for(manifest: &CommitmentManifest, k: usize) -> usize {
+    bits(manifest) + k
 }
 
 /// The stage-2 proof.
@@ -123,18 +140,26 @@ fn leaf_poly(digit: &Digit) -> LeafPoly {
 /// The instance table.
 #[must_use]
 pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
-    let lanes = 0..W1_BITS;
     let all = digits(manifest);
     let mut groups = Vec::new();
-    // def_y1[t] on the main domain with the weight w_1.
+    // def_y1[t] on the main domain: the weights w_1^(rho), then the bits b_t^(rho)
+    // bit-major; instance t is sum_rho w_1^(rho) b_t^(rho).
+    let weight_lanes = manifest.shape().lanes_k;
+    let bit_lanes = bit_columns(manifest);
     groups.push(GroupSpec {
         domain: GroupRole::Main,
         eq: EqPoint::None,
-        lanes: std::iter::once(LaneId::Weight(WeightId::Level1))
-            .chain(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8, 0))))
+        lanes: (0..weight_lanes as u8)
+            .map(|rho| LaneId::Weight(WeightId::Level1(rho)))
+            .chain(bit_lanes.iter().map(|&c| LaneId::Column(c)))
             .collect(),
-        instances: lanes
-            .map(|t| InstanceSpec::new(gamma_def_y1(t), vec![Term::Product(vec![0, 1 + t])]))
+        instances: (0..bits(manifest))
+            .map(|t| {
+                let terms = (0..weight_lanes)
+                    .map(|rho| Term::Product(vec![rho, weight_lanes + t * weight_lanes + rho]))
+                    .collect();
+                InstanceSpec::new(gamma_def_y1(t), terms)
+            })
             .collect(),
     });
     // The leaves, one group per domain (the main domain: Z_hi, U_hi; the projection domain:
@@ -152,7 +177,9 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
             instances: local
                 .iter()
                 .enumerate()
-                .map(|(lane, &(k, digit))| InstanceSpec::new(gamma_leaf(k), vec![Term::Leaf(lane, leaf_poly(digit))]))
+                .map(|(lane, &(k, digit))| {
+                    InstanceSpec::new(gamma_leaf_for(manifest, k), vec![Term::Leaf(lane, leaf_poly(digit))])
+                })
                 .collect(),
         });
     }
@@ -178,7 +205,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];
-    for t in 0..W1_BITS {
+    for t in 0..bits(manifest) {
         let kappa = kappa1.value(t);
         claims[gamma_def_y1(t)] = stage1.y1[t] + kappa + kappa;
     }
@@ -227,7 +254,7 @@ fn prove_with(
     };
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {
-        b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8, 0)))),
+        b: bit_columns(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
         squares: digits(manifest)
             .iter()
             .map(|digit| value(LaneId::DigitSquare(digit.column)))
@@ -270,6 +297,9 @@ pub fn verify(
     proof: &Stage2Proof,
     transcript: &mut Transcript,
 ) -> Result<Stage2Output, StageError> {
+    if proof.kappa1.0.len() != Kappa1Claims::len(manifest) || proof.claims.b.len() != bit_columns(manifest).len() {
+        return Err(StageError::Shape("stage 2 bit claims".into()));
+    }
     transcript.absorb_extensions(KAPPA1_SITE, &proof.kappa1.to_vec())?;
     let spec = spec(manifest);
     let claims = claimed_sums(manifest, &stage1.claims, &proof.kappa1);
@@ -281,10 +311,16 @@ pub fn verify(
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
     transcript.absorb_extensions(PROJ_CLAIM_SITE, &[proof.projection])?;
-    let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
     let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
+    let level1 = if manifest.has_lanes() {
+        level1_lane_weights_at(manifest, &matrices.m1, &r1_1, &replay.point)
+    } else {
+        let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
+        vec![level1_weight_at(&geom, &matrices.m1, &r1_1, &replay.point)]
+    };
+    let lanes = manifest.shape().lanes_k;
     check_terminal(&spec, manifest, points, &replay, |id| match id {
-        LaneId::Column(Column::W1Bit(t, 0)) => proof.claims.b[usize::from(t)],
+        LaneId::Column(Column::W1Bit(t, lane)) => proof.claims.b[usize::from(t) * lanes + usize::from(lane)],
         LaneId::Column(c) if FIPS_TERMINALS.contains(&c) && manifest.is_fips() => {
             proof.claims.fips[FIPS_TERMINALS.iter().position(|&f| f == c).expect("listed")]
         }
@@ -292,9 +328,7 @@ pub fn verify(
             let k = all.iter().position(|d| d.column == c).expect("a digit");
             proof.claims.squares[k]
         }
-        LaneId::Weight(WeightId::Level1) => {
-            level1_weight_at(&geom, &matrices.m1, &r1_1, &replay.point)
-        }
+        LaneId::Weight(WeightId::Level1(lane)) => level1[usize::from(lane)],
         other => panic!("{other:?} is not a stage-2 lane"),
     })?;
     Ok(Stage2Output {

@@ -182,6 +182,27 @@ pub fn parity1_tables(tables: SourceTables<'_>, m1: &SparseMatrix) -> [Vec<i64>;
     out
 }
 
+/// [`parity1_tables`] for any parameter set: with polynomial lanes the level-1 sums run
+/// over the bridge inputs of `MainTables::bridge_lanes` (row `rho` of record `i` at
+/// `j + 256 rho + P_pad i`) under the set's bridge shape.
+#[must_use]
+pub fn parity1_tables_for(tables: SourceTables<'_>, m1: &SparseMatrix) -> Vec<Vec<i64>> {
+    let manifest = tables.manifest;
+    if !manifest.has_lanes() {
+        return parity1_tables(tables, m1).into();
+    }
+    let inputs = tables.main.bridge_lanes(manifest);
+    let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
+    let sums = level1_sums(&Shape::production(manifest.set()), &inputs, m1);
+    sums.into_iter()
+        .enumerate()
+        .map(|(t, sum)| {
+            let kappa = compose_table(&ValueForm::Radix(CARRY16_DIGITS), &[tables.column(Column::carry(1, t as u8))]);
+            sum.iter().zip(&kappa).map(|(s, k)| s - 2 * k).collect()
+        })
+        .collect()
+}
+
 /// The claimed sum of the `def_y1[t]` instance: `y^(1)_t(r) + 2 kappa^(1)_t(r)`.
 #[must_use]
 pub fn parity1_claimed_sum(y1: E, kappa1: E) -> E {

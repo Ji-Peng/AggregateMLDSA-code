@@ -189,6 +189,10 @@ enum Role {
 
 /// A prover group on planes, or the generic kernel when the shape does not fit.
 #[allow(clippy::large_enum_variant)]
+/// Trees of one dedicated layer group: two slots and four lanes per tree within the fused
+/// kernel's limits.
+const LAYER_GROUP_TREES: usize = agg_simd::fused::MAX_SLOTS / 2;
+
 enum SessionGroup<'a> {
     Generic(Group<'a>),
     Layer(PlaneLayerGroup<'a>),
@@ -429,59 +433,69 @@ pub(super) fn prove_with(
                     if stored.is_empty() {
                         continue;
                     }
-                    let dedicated_group = if dedicated {
-                        let layer_trees = stored
-                            .iter()
-                            .map(|&id| {
-                                let layer = &trees[id].layers[s];
-                                let (gamma_p, gamma_q) = gamma_of(id);
-                                PlaneLayerTree {
-                                    p: &layer.p,
-                                    q: &layer.q,
-                                    gamma_p,
-                                    gamma_q,
-                                }
-                            })
-                            .collect();
-                        PlaneLayerGroup::new(layer_trees, &point, &mut pool)
+                    // The dedicated layer group holds at most LAYER_GROUP_TREES trees (the
+                    // fused kernel's slot and lane limits); more trees (ML-DSA-87's eight
+                    // stacks) take one group per chunk, whose messages add up.
+                    let chunks: Vec<Vec<usize>> = if dedicated {
+                        stored.chunks(LAYER_GROUP_TREES).map(<[usize]>::to_vec).collect()
                     } else {
-                        None
+                        vec![stored]
                     };
-                    let group = match dedicated_group {
-                        Some(group) => SessionGroup::Layer(group),
-                        None => {
-                            let lanes: Vec<Lane<'_>> = stored
+                    for stored in chunks {
+                        let dedicated_group = if dedicated {
+                            let layer_trees = stored
                                 .iter()
-                                .flat_map(|&id| {
+                                .map(|&id| {
                                     let layer = &trees[id].layers[s];
-                                    let (p0, p1) = layer.p.planes();
-                                    let (q0, q1) = layer.q.planes();
-                                    [(p0, p1), (q0, q1)].into_iter().flat_map(|(a, b)| {
-                                        [
-                                            Lane::Source(Source::PlaneSlice((
-                                                &a[..half],
-                                                &b[..half],
-                                            ))),
-                                            Lane::Source(Source::PlaneSlice((
-                                                &a[half..],
-                                                &b[half..],
-                                            ))),
-                                        ]
-                                    })
+                                    let (gamma_p, gamma_q) = gamma_of(id);
+                                    PlaneLayerTree {
+                                        p: &layer.p,
+                                        q: &layer.q,
+                                        gamma_p,
+                                        gamma_q,
+                                    }
                                 })
                                 .collect();
-                            let instances = stored
-                                .iter()
-                                .enumerate()
-                                .flat_map(|(i, &id)| layer_instances(i, gamma_of(id)))
-                                .collect();
-                            SessionGroup::Generic(
-                                Group::new(lanes, instances, Some(&point), s - 1, DEGREE)
-                                    .map_err(LookupError::Kernel)?,
-                            )
-                        }
-                    };
-                    groups.push((Role::Trees(stored), group));
+                            PlaneLayerGroup::new(layer_trees, &point, &mut pool)
+                        } else {
+                            None
+                        };
+                        let group = match dedicated_group {
+                            Some(group) => SessionGroup::Layer(group),
+                            None => {
+                                let lanes: Vec<Lane<'_>> = stored
+                                    .iter()
+                                    .flat_map(|&id| {
+                                        let layer = &trees[id].layers[s];
+                                        let (p0, p1) = layer.p.planes();
+                                        let (q0, q1) = layer.q.planes();
+                                        [(p0, p1), (q0, q1)].into_iter().flat_map(|(a, b)| {
+                                            [
+                                                Lane::Source(Source::PlaneSlice((
+                                                    &a[..half],
+                                                    &b[..half],
+                                                ))),
+                                                Lane::Source(Source::PlaneSlice((
+                                                    &a[half..],
+                                                    &b[half..],
+                                                ))),
+                                            ]
+                                        })
+                                    })
+                                    .collect();
+                                let instances = stored
+                                    .iter()
+                                    .enumerate()
+                                    .flat_map(|(i, &id)| layer_instances(i, gamma_of(id)))
+                                    .collect();
+                                SessionGroup::Generic(
+                                    Group::new(lanes, instances, Some(&point), s - 1, DEGREE)
+                                        .map_err(LookupError::Kernel)?,
+                                )
+                            }
+                        };
+                        groups.push((Role::Trees(stored), group));
+                    }
                 }
                 GroupKind::Stack(j) => {
                     let (v0, v1) = stacks[*j].stacked.split_at(half);

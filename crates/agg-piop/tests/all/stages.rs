@@ -1,5 +1,5 @@
 //! The PIOP part (the lookup into `T_16` and the three sum-check stages)
-//! on real batches of ML-DSA-44 signatures: honest round trips whose claims equal the
+//! on real batches of ML-DSA-44, ML-DSA-65 and ML-DSA-87 signatures: honest round trips whose claims equal the
 //! extensions of the committed and virtual tables, and tampered witnesses and proofs
 //! rejected at the stated place (`docs/lookup.md`).
 #![allow(clippy::needless_range_loop)]
@@ -8,16 +8,15 @@ use crate::common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::LookupError;
-use agg_piop::manifest::{Column, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{Column, DigitValue, GroupRole, LOOKUP_SHIFT};
 use agg_piop::prover::PiopProof;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
 use agg_piop::stage::{suffix, StageError};
 use agg_piop::verifier::VerifyError;
-use agg_piop::virtual_polys::parity1_tables;
+use agg_piop::virtual_polys::parity1_tables_for;
 use agg_piop::OpeningField as E;
 use agg_witness::padding::main_index;
-use agg_witness::params::W1_BITS;
-use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
+use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch, LaneBatch, PiopBatch};
 use jolt_field::Ring;
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
@@ -39,14 +38,14 @@ fn rejection(error: &VerifyError) -> Option<usize> {
 }
 
 /// Prove (self-checks skipped) and verify the PIOP part of the given tables.
-fn rejecting_place(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables) -> Option<usize> {
+fn rejecting_place(batch: &impl PiopBatch, main: &MainTables, bridge: &BridgeGroupTables) -> Option<usize> {
     let tables = SourceTables {
-        manifest: &batch.manifest,
+        manifest: batch.manifest(),
         main,
         bridge,
     };
-    let (proof, _) = prove_tables(batch, tables, true).expect("the unchecked prover runs");
-    match verify_tables(batch, bridge.public_y(), &proof) {
+    let (proof, _) = batch.prove(tables, true).expect("the unchecked prover runs");
+    match batch.verify(bridge.public_y(), &proof) {
         Ok(_) => None,
         Err(error) => {
             let place = rejection(&error);
@@ -58,14 +57,14 @@ fn rejecting_place(batch: &Batch, main: &MainTables, bridge: &BridgeGroupTables)
 
 /// Honest round-2 tables for (possibly tampered) round-1 tables whose looked-up cells are
 /// in `T_16`.
-fn rebuilt(batch: &Batch, main: &MainTables) -> BridgeGroupTables {
-    BridgeGroupTables::build(&batch.manifest, main, &batch.matrices, batch.bridge.psi()).expect("honest round 2")
+fn rebuilt(batch: &impl PiopBatch, main: &MainTables) -> BridgeGroupTables {
+    BridgeGroupTables::build(batch.manifest(), main, batch.matrices(), batch.bridge().psi()).expect("honest round 2")
 }
 
 /// The honest round-2 tables with the multiplicities of the in-table cells only.
-fn lenient(batch: &Batch, main: &MainTables, mut bridge: BridgeGroupTables) -> BridgeGroupTables {
+fn lenient(batch: &impl PiopBatch, main: &MainTables, mut bridge: BridgeGroupTables) -> BridgeGroupTables {
     let m = lenient_multiplicities(SourceTables {
-        manifest: &batch.manifest,
+        manifest: batch.manifest(),
         main,
         bridge: &bridge,
     });
@@ -77,13 +76,13 @@ fn mle_of(cells: &[i64], point: &[E]) -> E {
     evaluate_mle(&lift_table(cells), point)
 }
 
-/// Every claim the honest PIOP leaves equals the extension of its table: the 35 stage-3
+/// Every claim the honest PIOP leaves equals the extension of its table: the stage-3
 /// claims, the multiplicity digits at `pi_m`, the lookup's column claims at the stack
 /// points, and the stage-1 and stage-2 terminals of the virtual tables.
-fn check_honest(batch: &Batch, proof: &PiopProof) {
-    let manifest = &batch.manifest;
+fn check_honest(batch: &impl PiopBatch, proof: &PiopProof) {
+    let manifest = batch.manifest();
     let tables = batch.tables();
-    let (points, stage3, pi_m) = verify_tables(batch, batch.bridge.public_y(), proof).expect("honest PIOP verifies");
+    let (points, stage3, pi_m) = batch.verify(batch.bridge().public_y(), proof).expect("honest PIOP verifies");
     // Stage-3 claims: the committed columns at the suffixes of r^(3).
     for group in manifest.groups().iter().filter(|g| g.role != GroupRole::Mult) {
         let point = suffix(&stage3.point, group.logical_vars);
@@ -101,7 +100,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
     for (k, cells) in digits.iter().enumerate() {
         assert_eq!(proof.multiplicities.0[k], cells.evaluate(&pi_m));
     }
-    let m: Vec<i64> = batch.bridge.multiplicity().iter().map(|&c| i64::from(c)).collect();
+    let m: Vec<i64> = batch.bridge().multiplicity().iter().map(|&c| i64::from(c)).collect();
     assert_eq!(proof.multiplicities.compose(), mle_of(&m, &pi_m));
     // Brute-force multiplicities: every looked-up cell (padding slots included) counted.
     let shape = manifest.lookup_shape();
@@ -120,26 +119,32 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
         assert!(columns.iter().all(|c| tables.column(*c).len() == 1 << low.len()));
     }
     // Stage 1 terminal: y^(1) (virtual), y^(2), b at r^(1); stage 2: b and P_Z at r^(2).
-    let y1 = parity1_tables(tables, &batch.matrices.m1);
+    let y1 = parity1_tables_for(tables, &batch.matrices().m1);
     let r1_1 = suffix(&points.r1, manifest.domain_vars(GroupRole::Level1));
     let r1_2 = suffix(&points.r1, manifest.domain_vars(GroupRole::Level2));
-    for t in 0..W1_BITS {
+    let bits = manifest.shape().w1_bits;
+    assert_eq!((y1.len(), proof.stage1.claims.y1.len()), (bits, bits));
+    for t in 0..bits {
         assert_eq!(proof.stage1.claims.y1[t], mle_of(&y1[t], &r1_1));
         assert_eq!(
             proof.stage1.claims.y2[t],
             tables.column(Column::Parity2(t as u8)).evaluate(&r1_2)
         );
-        let bit = tables.column(Column::W1Bit(t as u8, 0));
-        assert_eq!(proof.stage1.claims.b[t], bit.evaluate(&points.r1));
-        assert_eq!(proof.stage2.claims.b[t], bit.evaluate(&points.r2));
+    }
+    let bit_columns = agg_piop::claims::bit_columns(manifest);
+    assert_eq!(proof.stage1.claims.b.len(), bit_columns.len());
+    for (i, &column) in bit_columns.iter().enumerate() {
+        let bit = tables.column(column);
+        assert_eq!(proof.stage1.claims.b[i], bit.evaluate(&points.r1), "{}", column.name());
+        assert_eq!(proof.stage2.claims.b[i], bit.evaluate(&points.r2), "{}", column.name());
     }
     for (k, column) in manifest.leaf_digits().into_iter().enumerate() {
         let square: Vec<i64> = tables.column(column).to_i64().iter().map(|&z| z * (z + 1)).collect();
         let r2 = suffix(&points.r2, manifest.domain_vars(column.domain()));
-        assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &r2));
+        assert_eq!(proof.stage2.claims.squares[k], mle_of(&square, &r2), "{}", column.name());
     }
     // The kappa^(1) claims before stage 2.
-    for t in 0..W1_BITS {
+    for t in 0..bits {
         assert_eq!(
             proof.stage2.kappa1.0[t],
             tables.column(Column::carry(1, t as u8)).evaluate(&r1_1)
@@ -467,4 +472,117 @@ fn padded_batch_of_ten_records_round_trips() {
         let (proof, _) = prove_tables(&batch, batch.tables(), false).expect("honest prover");
         check_honest(&batch, &proof);
     });
+}
+
+/// ML-DSA-65 and ML-DSA-87 (polynomial lanes) at 256 signatures: the honest claims equal the
+/// extensions of the tables; a changed message or claim is rejected at its stage, and
+/// tampered witnesses at the stage that checks them (with honest round-2 tables).
+fn lane_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
+    let batch = LaneBatch::build::<P>(seed, 200, 56);
+    let manifest = &batch.manifest;
+    assert_eq!(manifest.padded_records(), 256);
+    let (proof, run) = batch.prove(batch.tables(), false).expect("honest prover");
+    assert_eq!(run.points.lookup.len(), manifest.lookup_shape().stacks.len());
+    check_honest(&batch, &proof);
+    let y = batch.bridge.public_y();
+    let rejected = |bad: &PiopProof| rejection(&batch.verify(y, bad).unwrap_err());
+    let mut bad = proof.clone();
+    bad.stage1.rounds[3][1] += E::from_u64(1);
+    assert_eq!(rejected(&bad), Some(1));
+    let mut bad = proof.clone();
+    bad.stage1.claims.b[7] += E::from_u64(1);
+    assert_eq!(rejected(&bad), Some(1));
+    let mut bad = proof.clone();
+    bad.stage2.claims.squares[4] += E::from_u64(1);
+    assert_eq!(rejected(&bad), Some(2));
+    let mut bad = proof.clone();
+    bad.stage2.claims.b[9] += E::from_u64(1);
+    assert_eq!(rejected(&bad), Some(2));
+    let mut bad = proof.clone();
+    bad.prestage.kappa2[2] += E::from_u64(1);
+    assert_eq!(rejected(&bad), Some(1));
+    for k in [0, 7, proof.stage3.claims.0.len() - 1] {
+        let mut bad = proof.clone();
+        bad.stage3.claims.0[k] += E::from_u64(1);
+        assert_eq!(rejected(&bad), Some(3), "stage-3 claim {k}");
+    }
+
+    // Witness tampering, cell (j, i) = (17, 5) of a lane.
+    let x = 17 + 256 * 5;
+    let case = |label: &str, main: MainTables, expected: Option<usize>| {
+        let bridge = rebuilt(&batch, &main);
+        assert_eq!(rejecting_place(&batch, &main, &bridge), expected, "{label}");
+    };
+    let narrow = |column: Column| manifest.locate(column).1;
+    let (z, u) = (DigitValue::Zd, DigitValue::Ud);
+    // A 16-bit column changed inside the table: the ring identity (stage 3).
+    for column in [
+        Column::lane_digit(z, 0, 3),
+        Column::lane_digit(u, 0, 1),
+        Column::V_LO.in_lane(4),
+        Column::V_HI.in_lane(0),
+    ] {
+        let mut main = batch.main.clone();
+        let cell = main.wide_cell_mut(manifest, column, x);
+        *cell = if *cell < LOOKUP_SHIFT - 1 { *cell + 1 } else { *cell - 1 };
+        case(&column.name(), main, Some(3));
+    }
+    // A middle digit changed inside its alphabet, and the slack bits flipped: the ring.
+    for column in [Column::lane_digit(z, 1, 2), Column::lane_digit(u, 1, 5)] {
+        let mut main = batch.main.clone();
+        let cell = &mut main.columns_mut()[narrow(column)][x];
+        *cell = if *cell < 3 { *cell + 1 } else { *cell - 1 };
+        case(&column.name(), main, Some(3));
+    }
+    for column in [Column::lane_digit(z, 2, 4), Column::lane_digit(u, 2, 3)] {
+        let mut main = batch.main.clone();
+        main.columns_mut()[narrow(column)][x] ^= 1;
+        case(&column.name(), main, Some(3));
+    }
+    // A middle digit outside its base-8 alphabet: its leaf (stage 2).
+    for (column, value) in [(Column::lane_digit(u, 1, 0), 4_i8), (Column::lane_digit(z, 1, 1), -5)] {
+        let mut main = batch.main.clone();
+        main.columns_mut()[narrow(column)][x] = value;
+        case(&column.name(), main, Some(2));
+    }
+    // A slack bit of 2: the Booleanity zero-check of stage 3 (the ring moves as well).
+    let mut main = batch.main.clone();
+    main.columns_mut()[narrow(Column::lane_digit(u, 2, 2))][x] = 2;
+    case("a_u = 2", main, Some(3));
+    // A flipped bit of one row: w_1' of that row changes, the ring identity fails.
+    let mut main = batch.main.clone();
+    main.columns_mut()[narrow(Column::W1Bit(2, 3))][x] ^= 1;
+    case("flipped bit", main, Some(3));
+    // A non-Boolean bit: stage 1.
+    let mut main = batch.main.clone();
+    let column = narrow(Column::W1Bit(1, 4));
+    let cell = (0..256).map(|j| j + 256 * 7).find(|&y| main.columns()[column][y] == 0).unwrap();
+    main.columns_mut()[column][cell] = 2;
+    case("bit = 2", main, Some(1));
+    // z unchanged: Z_lo + 2^16 with Z_mid - 1 (a looked-up value in [2^16, 2^17)): only the
+    // lookup sees it.
+    let z_lo = Column::lane_digit(z, 0, 2);
+    let z_mid = narrow(Column::lane_digit(z, 1, 2));
+    let cell = (0..256 * 200)
+        .find(|&y| batch.main.columns()[z_mid][y] > -4)
+        .expect("a cell with room below its middle digit");
+    let mut main = batch.main.clone();
+    *main.wide_cell_mut(manifest, z_lo, cell) += 1 << 16;
+    main.columns_mut()[z_mid][cell] -= 1;
+    let f = main.column(manifest, z_lo).value(cell) + i64::from(LOOKUP_SHIFT);
+    assert!(f >= 1 << 16, "looked-up value {f}");
+    let bridge = lenient(&batch, &main, batch.bridge.clone());
+    assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0));
+    // The honest tables pass.
+    case("honest", batch.main.clone(), None);
+}
+
+#[test]
+fn ml_dsa_65_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(0x65));
+}
+
+#[test]
+fn ml_dsa_87_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(0x87));
 }

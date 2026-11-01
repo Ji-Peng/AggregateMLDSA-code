@@ -1038,7 +1038,7 @@ fn stack_carries(columns: &[Vec<i64>], slots: usize) -> Result<Vec<i32>, SourceT
 pub struct BridgeGroupTables {
     /// Honest level-1 parities, invalidated when the committed level-1 carries change and
     /// moved out by the honest driver; not part of the committed content (`PartialEq`).
-    parity1: Option<[Vec<i8>; W1_BITS]>,
+    parity1: Option<Vec<Vec<i8>>>,
     level1: Vec<i32>,
     parities: Vec<Vec<i8>>,
     level2: Vec<i32>,
@@ -1108,7 +1108,7 @@ impl BridgeGroupTables {
         .map_err(SourceTableError::Bridge)?;
         if let Some(direct) = direct {
             let mut tables = Self {
-                parity1: Some(direct.y1),
+                parity1: Some(direct.y1.into()),
                 level1: direct.level1_carries,
                 parities: direct.y2,
                 level2: direct.level2_carries,
@@ -1131,7 +1131,7 @@ impl BridgeGroupTables {
 
     /// The tables of a general-path parity witness: the carries stacked in their lookup
     /// stacks' slots (`extra_level2` after the level-2 carries: H-FIPS's hint slack), the
-    /// level-1 parities cached when there are six lanes.
+    /// level-1 parities cached.
     fn from_witness(
         manifest: &CommitmentManifest,
         main: &MainTables,
@@ -1152,7 +1152,7 @@ impl BridgeGroupTables {
         level2_columns.extend(extra_level2);
         let parity1: Vec<Vec<i8>> = witness.y1.iter().map(narrow_bits).collect::<Result<_, _>>()?;
         let mut tables = Self {
-            parity1: <[Vec<i8>; W1_BITS]>::try_from(parity1).ok(),
+            parity1: Some(parity1),
             level1: stack_carries(&witness.kappa1, slots(1))?,
             parities: witness.y2.iter().map(narrow_bits).collect::<Result<_, _>>()?,
             level2: stack_carries(&level2_columns, slots(2))?,
@@ -1257,13 +1257,13 @@ impl BridgeGroupTables {
 
     /// Cached parities (unit tests; the honest driver moves them out with `take_parity1`).
     #[cfg(test)]
-    pub(crate) fn parity1_cached(&self) -> Option<&[Vec<i8>; W1_BITS]> {
+    pub(crate) fn parity1_cached(&self) -> Option<&Vec<Vec<i8>>> {
         self.parity1.as_ref()
     }
 
     /// Move the cached parities out (the honest driver's single use), so they are neither
     /// copied on the PIOP branch nor kept twice through the stages.
-    pub(crate) fn take_parity1(&mut self) -> Option<[Vec<i8>; W1_BITS]> {
+    pub(crate) fn take_parity1(&mut self) -> Option<Vec<Vec<i8>>> {
         self.parity1.take()
     }
 

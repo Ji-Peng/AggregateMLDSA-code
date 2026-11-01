@@ -29,6 +29,7 @@ use agg_witness::params::{D_COEF, D_POS, K, L, W1_BITS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
+use crate::manifest::CommitmentManifest;
 use crate::public_data::{eq_correlation, PublicData};
 use crate::OpeningField as E;
 
@@ -108,6 +109,107 @@ pub fn level3_weights_at(geom: &Geometry, m3: &SparseMatrix, p3: &[E], q: &[E]) 
     bridge::level3_at(&Shape::PRODUCTION, &bridge_domains(geom), m3, p3, q)
         .try_into()
         .expect("six lanes")
+}
+
+/// The bridge shape and domains of the manifest's parameter set: the input domain holds
+/// `P_pad N*` positions per bit (`P_pad = 1,024` for ML-DSA-44, so it is the main domain;
+/// `2,048` with polynomial lanes, where row `rho` of record `i` sits at `j + 256 rho +
+/// P_pad i` and the positions `256 k .. P_pad` are public zeros).
+#[must_use]
+pub fn bridge_view(manifest: &CommitmentManifest) -> (Shape, Domains) {
+    let shape = Shape::production(manifest.set());
+    let domains = shape.domains(manifest.shape().positions_pad * manifest.padded_records());
+    (shape, domains)
+}
+
+/// `w_2` on `D_1` for the point `p2` on `D_2` (any parameter set).
+#[must_use]
+pub fn level2_weight_table_for(manifest: &CommitmentManifest, m2: &SparseMatrix, p2: &[E]) -> Vec<E> {
+    let (shape, domains) = bridge_view(manifest);
+    bridge::level2_table(&shape, &domains, m2, p2)
+}
+
+/// `w_2(q)` at a `D_1` point `q` (any parameter set).
+#[must_use]
+pub fn level2_weight_at_for(manifest: &CommitmentManifest, m2: &SparseMatrix, p2: &[E], q: &[E]) -> E {
+    let (shape, domains) = bridge_view(manifest);
+    bridge::level2_at(&shape, &domains, m2, p2, q)
+}
+
+/// `w_{3,t}` on `D_2`, one table per bit `t` (any parameter set).
+#[must_use]
+pub fn level3_weight_tables_for(manifest: &CommitmentManifest, m3: &SparseMatrix, p3: &[E]) -> Vec<Vec<E>> {
+    let (shape, domains) = bridge_view(manifest);
+    bridge::level3_tables(&shape, &domains, m3, p3)
+}
+
+/// `w_{3,t}(q)` at a `D_2` point `q`, for every bit `t` (any parameter set).
+#[must_use]
+pub fn level3_weights_at_for(manifest: &CommitmentManifest, m3: &SparseMatrix, p3: &[E], q: &[E]) -> Vec<E> {
+    let (shape, domains) = bridge_view(manifest);
+    bridge::level3_at(&shape, &domains, m3, p3, q)
+}
+
+/// The bridge input position of cell `x` of polynomial lane `lane` of a main-domain column:
+/// `x mod 2^lane_vars + 2^lane_vars lane + P_pad (x >> lane_vars)`, with `2^lane_vars` the
+/// cells of one signature in a lane.
+#[inline]
+fn input_position(x: usize, lane: usize, lane_vars: usize, pad_vars: usize) -> usize {
+    (x & ((1 << lane_vars) - 1)) | (lane << lane_vars) | ((x >> lane_vars) << pad_vars)
+}
+
+/// `w_1^(rho)` on the main domain for every polynomial lane `rho` of the bits, for the point
+/// `p1` on `D_1`: the level-1 weight of the bridge input position of each cell
+/// ([`bridge_view`]), so that `sum_rho sum_x w_1^(rho)(x) b_t^(rho)(x)` is the level-1 sum of
+/// bit `t` (the zero positions beyond `256 k` contribute nothing).
+#[must_use]
+pub fn level1_lane_tables(manifest: &CommitmentManifest, m1: &SparseMatrix, p1: &[E]) -> Vec<Vec<E>> {
+    let (shape, domains) = bridge_view(manifest);
+    let (c1, zeta_vars, blocks) = bridge::level1_split(&shape, &domains, m1, p1);
+    let lane_vars = manifest.lane_cells().trailing_zeros() as usize;
+    let pad_vars = manifest.shape().positions_pad.trailing_zeros() as usize;
+    let len = 1_usize << manifest.d_main();
+    let mask = (1_usize << zeta_vars) - 1;
+    (0..manifest.shape().lanes_k)
+        .map(|lane| {
+            (0..len)
+                .into_par_iter()
+                .map(|x| {
+                    let y = input_position(x, lane, lane_vars, pad_vars);
+                    c1.get(y & mask).map_or_else(E::zero, |&c| c * blocks[y >> zeta_vars])
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `w_1^(rho)(r)` at a main-domain point `r` for every polynomial lane `rho`
+/// ([`level1_lane_tables`]): one pass over `c_1` sums `eq(r_j, j) eq(r_i, i_low) c_1` per
+/// value of the lane bits of the input position, and the block factor is shared.
+#[must_use]
+pub fn level1_lane_weights_at(manifest: &CommitmentManifest, m1: &SparseMatrix, p1: &[E], r: &[E]) -> Vec<E> {
+    let (shape, domains) = bridge_view(manifest);
+    assert_eq!(r.len(), manifest.d_main(), "a main-domain point");
+    let c1 = bridge::level1_columns(&shape, &domains, m1, p1);
+    let zeta_vars = bridge::zeta1_vars(&shape, &domains);
+    let lane_vars = manifest.lane_cells().trailing_zeros() as usize;
+    let pad_vars = manifest.shape().positions_pad.trailing_zeros() as usize;
+    let lane_bits = pad_vars - lane_vars;
+    // The in-block index is (position in the lane, lane bits, low signature bits); the high
+    // signature bits select the block.
+    let low_sig = zeta_vars - pad_vars;
+    let eq_pos = eq_table(&r[..lane_vars]);
+    let eq_low = eq_table(&r[lane_vars..lane_vars + low_sig]);
+    let block = bridge::eq_evaluation(&p1[shape.level(1).rows_log2() as usize..], &r[lane_vars + low_sig..]);
+    let mut per_lane = vec![E::zero(); 1 << lane_bits];
+    for (y, &c) in c1.iter().enumerate() {
+        let pos = y & ((1 << lane_vars) - 1);
+        let lane = (y >> lane_vars) & ((1 << lane_bits) - 1);
+        let low = y >> pad_vars;
+        per_lane[lane] += c * eq_pos[pos] * eq_low[low];
+    }
+    per_lane.truncate(manifest.shape().lanes_k);
+    per_lane.into_iter().map(|v| v * block).collect()
 }
 
 /// The ring weight `w_A(j', s, i)` on the main domain in order `(j', s, i)` for the point
@@ -310,6 +412,38 @@ mod tests {
             }
         }
         let _ = M3;
+    }
+
+    /// With polynomial lanes, `w_1^(rho)` is the flat level-1 weight at the bridge input
+    /// position `j + 256 rho + 2,048 i` of each cell, and the verifier's values are the
+    /// extensions of the lane tables (one level-1 block and four).
+    #[test]
+    fn lane_level1_weights_are_the_flat_weights_at_the_input_positions() {
+        use crate::manifest::{GroupRole, Relation};
+        use agg_witness::params::Set;
+        for set in [Set::S65, Set::S87] {
+            for records in [5, 600] {
+                let manifest = CommitmentManifest::for_set(set, records, Relation::Hu).unwrap();
+                let (shape, domains) = bridge_view(&manifest);
+                let level = shape.level(1);
+                let m1 = SparseMatrix::random_for_tests(7, level.rows, level.cols, level.k);
+                let mut rng = SplitMix64::new(9);
+                let p1 = point(&mut rng, manifest.domain_vars(GroupRole::Level1));
+                let flat = bridge::level1_table(&shape, &domains, &m1, &p1);
+                let lanes = level1_lane_tables(&manifest, &m1, &p1);
+                assert_eq!(lanes.len(), manifest.shape().lanes_k);
+                for (rho, table) in lanes.iter().enumerate() {
+                    for x in [0, 255, 256 * 3 + 7, table.len() - 1] {
+                        assert_eq!(table[x], flat[(x & 255) + 256 * rho + 2048 * (x >> 8)], "{set:?} lane {rho} cell {x}");
+                    }
+                }
+                let r = point(&mut rng, manifest.d_main());
+                let at = level1_lane_weights_at(&manifest, &m1, &p1, &r);
+                for (rho, table) in lanes.iter().enumerate() {
+                    assert_eq!(at[rho], evaluate_mle(table, &r), "{set:?} N = {records} lane {rho}");
+                }
+            }
+        }
     }
 
     #[test]

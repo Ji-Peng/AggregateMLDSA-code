@@ -342,6 +342,94 @@ pub fn weight_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) 
     p_at * eq_evaluation(&r_sig, sig)
 }
 
+/// `P(pos) = sum_o eq(r_o, o) Psi_o(pos)` for the `positions` positions of a `Psi` of
+/// `positions / 8` bytes per row ([`row_weights`] for ML-DSA-44).
+#[must_use]
+pub fn row_weights_in(psi: &[u8], positions: usize, r_o: &[E]) -> Vec<E> {
+    let row_bytes = positions / 8;
+    assert_eq!(psi.len(), PROJ_ROWS * row_bytes, "Psi has 128 rows of {positions} bits");
+    assert_eq!(r_o.len(), PROJ_ROWS.trailing_zeros() as usize);
+    let eq = eq_table(r_o);
+    (0..positions)
+        .into_par_iter()
+        .map(|pos| {
+            eq.iter()
+                .enumerate()
+                .filter(|&(o, _)| psi_bit_in(psi, row_bytes, o, pos))
+                .fold(E::zero(), |acc, (_, &w)| acc + w)
+        })
+        .collect()
+}
+
+/// The point `r'` of the projection identity split as `(r'_o, r'_b, r'_sig)`: 7 row
+/// coordinates, `log2 g` row-block coordinates and `d_sig` signature coordinates.
+#[must_use]
+pub fn split_point_blocks(manifest: &CommitmentManifest, r2: &[E]) -> (Vec<E>, Vec<E>, Vec<E>) {
+    let (rows, sig) = split_point(manifest, r2);
+    let o_vars = PROJ_ROWS.trailing_zeros() as usize;
+    (rows[..o_vars].to_vec(), rows[o_vars..].to_vec(), sig)
+}
+
+/// The row-block weight `eq(r'_b, b)` of every polynomial lane of `v`: lane `rho` holds the
+/// rows of block `rho / (k / g)` (one block for ML-DSA-44 and ML-DSA-65, so the weight is one).
+fn lane_block_weights(manifest: &CommitmentManifest, r_b: &[E]) -> Vec<E> {
+    let shape = manifest.shape();
+    let eq_b = eq_table(r_b);
+    assert_eq!(eq_b.len(), shape.proj_blocks, "one coordinate per row-block bit");
+    let rows_per_block = shape.k / shape.proj_blocks;
+    let rows_per_lane = 1_usize << shape.d_vec;
+    assert!(
+        shape.proj_blocks == 1 || rows_per_lane <= rows_per_block,
+        "a lane lies inside one row block"
+    );
+    (0..shape.lanes_k).map(|lane| eq_b[lane * rows_per_lane / rows_per_block]).collect()
+}
+
+/// The projection weights `W^(rho)(j, i) = P_rho(j) eq(r'_sig, i) eq(r'_b, blk(rho))` on the
+/// main domain, one per polynomial lane `rho` of `v`, with `P_rho(j) = P(j + 256 rho)`, so
+/// that `sum_rho sum_x W^(rho)(x) v^(rho)(x) = sum_y eq(r', y) k(y)` over `D_k = (o, b, i)`.
+/// For one lane this is [`weight_table`].
+#[must_use]
+pub fn lane_weight_tables(manifest: &CommitmentManifest, psi: &[u8], r2: &[E]) -> Vec<Vec<E>> {
+    let (r_o, r_b, r_sig) = split_point_blocks(manifest, r2);
+    let shape = manifest.shape();
+    let p = row_weights_in(psi, shape.positions, &r_o);
+    let blocks = eq_table(&r_sig);
+    let lane_cells = manifest.lane_cells();
+    let lane_vars = lane_cells.trailing_zeros() as usize;
+    lane_block_weights(manifest, &r_b)
+        .into_iter()
+        .enumerate()
+        .map(|(lane, eq_b)| {
+            let p_lane: Vec<E> = p[lane * lane_cells..(lane + 1) * lane_cells].iter().map(|&w| w * eq_b).collect();
+            agg_bridge::weights::spread(&p_lane, lane_vars, &blocks, 1 << manifest.d_main())
+        })
+        .collect()
+}
+
+/// `W^(rho)(r^(3))` for every polynomial lane `rho` of `v` (verifier; [`lane_weight_tables`]).
+#[must_use]
+pub fn lane_weights_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) -> Vec<E> {
+    let (r_o, r_b, r_sig) = split_point_blocks(manifest, r2);
+    let shape = manifest.shape();
+    let p = row_weights_in(psi, shape.positions, &r_o);
+    let lane_cells = manifest.lane_cells();
+    let (pos, sig) = r3.split_at(lane_cells.trailing_zeros() as usize);
+    let eq_pos = eq_table(pos);
+    let eq_sig = eq_evaluation(&r_sig, sig);
+    lane_block_weights(manifest, &r_b)
+        .into_iter()
+        .enumerate()
+        .map(|(lane, eq_b)| {
+            let p_at = p[lane * lane_cells..(lane + 1) * lane_cells]
+                .iter()
+                .zip(&eq_pos)
+                .fold(E::zero(), |acc, (&a, &b)| acc + a * b);
+            p_at * eq_b * eq_sig
+        })
+        .collect()
+}
+
 /// The honest shared claim `c = sum_y eq(r', y) k(y) = K_0(r') + 2^16 K_1(r') +
 /// 2^32 K_2(r') + 2^35 K_3(r') + C_k` from the committed digits.
 #[must_use]
@@ -365,6 +453,42 @@ mod tests {
 
     fn random_psi(rng: &mut SplitMix64) -> Vec<u8> {
         (0..PROJ_BYTES).map(|_| rng.next_u64() as u8).collect()
+    }
+
+    /// The lane weights pull the outputs back: `sum_rho <W^(rho), v^(rho)>` is the extension
+    /// of the outputs `k` at the `D_k` suffix of `r^(2)`, row blocks included, and the
+    /// verifier's values are the extensions of the tables.
+    #[test]
+    fn lane_weights_pull_the_outputs_back_per_row_block() {
+        use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
+        for set in [Set::S65, Set::S87] {
+            let manifest = CommitmentManifest::for_set(set, 5, crate::manifest::Relation::Hu).unwrap();
+            let shape = manifest.shape();
+            let psi = test_psi_for(set, 3);
+            let mut rng = SplitMix64::new(4);
+            let len = 1_usize << manifest.d_main();
+            let v: Vec<Vec<i64>> = (0..shape.lanes_k)
+                .map(|_| (0..len).map(|_| (rng.next_u64() % (1 << 29)) as i64 - (1 << 28)).collect())
+                .collect();
+            let records = manifest.padded_records();
+            let k = block_outputs(&psi, shape.positions, shape.proj_blocks, records, |i, pos| {
+                v[pos / 256][256 * i + pos % 256]
+            });
+            assert_eq!(k.len(), manifest.group(GroupRole::Proj).logical_cells());
+            let r2 = point(&mut rng, manifest.d_main());
+            let tables = lane_weight_tables(&manifest, &psi, &r2);
+            assert_eq!(tables.len(), shape.lanes_k);
+            let lhs = tables.iter().zip(&v).fold(E::zero(), |acc, (w, v)| {
+                acc + w.iter().zip(v).fold(E::zero(), |a, (&w, &v)| a + w.mul_i64(v))
+            });
+            let vars = manifest.group(GroupRole::Proj).logical_vars;
+            assert_eq!(lhs, evaluate_mle(&lift_table(&k), &r2[r2.len() - vars..]), "{set:?}");
+            let r3 = point(&mut rng, manifest.d_main());
+            let at = lane_weights_at(&manifest, &psi, &r2, &r3);
+            for (lane, table) in tables.iter().enumerate() {
+                assert_eq!(at[lane], evaluate_mle(table, &r3), "{set:?} lane {lane}");
+            }
+        }
     }
 
     /// ML-DSA-65 (one row block of 1,536 positions) and ML-DSA-87 (two blocks of 1,024): the

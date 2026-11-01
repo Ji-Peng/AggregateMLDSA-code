@@ -290,17 +290,31 @@ impl<P: ParamSet> PublicInstance<P> {
         Self::new_for(&inputs)
     }
 
-    /// The public table T(j, rho, i) on the main domain, zero on padded rows.
-    pub fn t_table(&self) -> Vec<i64> {
-        let mut out = vec![0i64; self.geom.main_len()];
+    /// The public table T(j, rho, i) on the main domain, zero on padded rows: one table per
+    /// polynomial lane, row `rho` in lane `rho >> D_VEC` at cell
+    /// `j + 256 (rho mod 2^D_VEC) + 2^(8 + D_VEC) i` (one table for ML-DSA-44, one per row
+    /// for the sets with `D_VEC = 0`).
+    pub fn t_lane_tables(&self) -> Vec<Vec<i64>> {
+        let lane_cells = N << P::D_VEC;
+        let mut out = vec![vec![0i64; self.geom.n_star * lane_cells]; P::LANES_K];
         for (i, r) in self.records.iter().enumerate() {
             for rho in 0..P::K {
+                let (lane, offset) = (rho >> P::D_VEC, (rho & ((1 << P::D_VEC) - 1)) * N);
                 for j in 0..N {
-                    let idx = j | (rho << 8) | (i << (8 + P::D_VEC));
-                    out[idx] = i64::from(r.t[rho][j]);
+                    out[lane][i * lane_cells + offset + j] = i64::from(r.t[rho][j]);
                 }
             }
         }
         out
+    }
+
+    /// The public table T(j, rho, i) on the main domain of ML-DSA-44 (one polynomial lane),
+    /// zero on padded rows.
+    ///
+    /// # Panics
+    /// For a parameter set with several polynomial lanes ([`Self::t_lane_tables`]).
+    pub fn t_table(&self) -> Vec<i64> {
+        assert_eq!(P::LANES_K, 1, "one main-domain table per polynomial lane");
+        self.t_lane_tables().pop().expect("one lane")
     }
 }

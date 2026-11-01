@@ -9,7 +9,6 @@
 //! only inside the kernel's compact rounds.
 
 use agg_witness::bridge::BridgeMatrices;
-use agg_witness::params::W1_BITS;
 
 use crate::kernel::{Lane, Source};
 use crate::manifest::Column;
@@ -17,11 +16,11 @@ use crate::public_data::PublicData;
 use crate::range::square_map;
 use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
-use crate::virtual_polys::parity1_tables;
+use crate::virtual_polys::parity1_tables_for;
 use crate::split_weight::SplitWeight;
 use crate::weights::{
-    level1_weight_split, level1_weight_table, level2_weight_table, level3_weight_tables,
-    ring_weight_planes, ring_weight_table,
+    level1_lane_tables, level1_weight_split, level1_weight_table, level2_weight_table, level2_weight_table_for,
+    level3_weight_tables, level3_weight_tables_for, ring_weight_planes, ring_weight_table,
 };
 use crate::OpeningField as E;
 
@@ -29,27 +28,32 @@ use crate::OpeningField as E;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parity1 {
     /// Every value fits an `i8` (the honest parities are bits): coded byte lanes.
-    Narrow([Vec<i8>; W1_BITS]),
+    Narrow(Vec<Vec<i8>>),
     /// Some value does not fit an `i8` (a tampered witness): `i32` lanes.
-    Wide([Vec<i32>; W1_BITS]),
+    Wide(Vec<Vec<i32>>),
 }
 
 impl Parity1 {
     /// The narrow tables when every value of `tables` fits an `i8`, else the wide ones.
     #[must_use]
-    pub fn from_values(tables: [Vec<i64>; W1_BITS]) -> Self {
+    pub fn from_values(tables: Vec<Vec<i64>>) -> Self {
         if tables
             .iter()
             .all(|table| table.iter().all(|&y| i8::try_from(y).is_ok()))
         {
-            Self::Narrow(tables.map(|table| table.into_iter().map(|y| y as i8).collect()))
+            Self::Narrow(tables.into_iter().map(|table| table.into_iter().map(|y| y as i8).collect()).collect())
         } else {
-            Self::Wide(tables.map(|table| {
-                table
+            Self::Wide(
+                tables
                     .into_iter()
-                    .map(|y| i32::try_from(y).expect("parity fits i32"))
-                    .collect()
-            }))
+                    .map(|table| {
+                        table
+                            .into_iter()
+                            .map(|y| i32::try_from(y).expect("parity fits i32"))
+                            .collect()
+                    })
+                    .collect(),
+            )
         }
     }
 
@@ -78,14 +82,16 @@ pub struct ProverTables<'a> {
     pub tables: SourceTables<'a>,
     /// `y^(1)_t` on `D_1`.
     pub parity1: Parity1,
-    /// `w_1` on the main domain (after `r^(1)`).
+    /// `w_1` on the main domain (after `r^(1)`; ML-DSA-44).
     pub w1: Option<Vec<E>>,
+    /// `w_1^(rho)` per polynomial lane of the bits (after `r^(1)`; the sets with lanes).
+    pub w1_lanes: Vec<Vec<E>>,
     /// `w_1` as its two factors instead of the table (`AGG_W1_SPLIT=0` builds the table).
     pub w1_split: Option<SplitWeight>,
     /// `w_2` on `D_1` (after `tau`).
     pub w2: Option<Vec<E>>,
     /// `w_{3,t}` on `D_2` (after `tau`).
-    pub w3: Option<[Vec<E>; W1_BITS]>,
+    pub w3: Option<Vec<Vec<E>>>,
     /// `w_A` on the main domain (after `r^(2)`).
     pub wa: Option<Vec<E>>,
     /// `w_A` as canonical planes when the plane layout is selected.
@@ -94,15 +100,18 @@ pub struct ProverTables<'a> {
     pub wp: Option<Vec<E>>,
     /// `W` as coordinate planes (plane layout), in place of `wp`.
     pub wp_planes: Option<agg_simd::buf::KPlanes>,
+    /// `W^(rho)` per polynomial lane of `v` (after `r^(2)`; the sets with lanes).
+    pub wp_lanes: Vec<Vec<E>>,
 }
 
 impl<'a> ProverTables<'a> {
     /// Reuse the parities that `BridgeGroupTables::build` derived from these main tables and
     /// matrices (moved out of the bridge tables by the honest driver). `None` (a carry
-    /// mutation or a tamper hook dropped the cache) takes the general path.
+    /// mutation or a tamper hook dropped the cache, or a set with polynomial lanes, whose
+    /// bridge keeps no cache) takes the general path.
     pub(crate) fn from_parity1_cache(
         tables: SourceTables<'a>,
-        cache: Option<[Vec<i8>; W1_BITS]>,
+        cache: Option<Vec<Vec<i8>>>,
         matrices: &BridgeMatrices,
     ) -> Self {
         match cache {
@@ -116,6 +125,7 @@ impl<'a> ProverTables<'a> {
             tables,
             parity1,
             w1: None,
+            w1_lanes: Vec::new(),
             w1_split: None,
             w2: None,
             w3: None,
@@ -123,42 +133,50 @@ impl<'a> ProverTables<'a> {
             wa_planes: None,
             wp: None,
             wp_planes: None,
+            wp_lanes: Vec::new(),
         }
     }
 
     /// Materialize the parities of the committed bits under the bridge matrices.
     #[must_use]
     pub fn new(tables: SourceTables<'a>, matrices: &BridgeMatrices) -> Self {
-        let parity1 = Parity1::from_values(parity1_tables(tables, &matrices.m1));
-        Self {
-            tables,
-            parity1,
-            w1: None,
-            w1_split: None,
-            w2: None,
-            w3: None,
-            wa: None,
-            wa_planes: None,
-            wp: None,
-            wp_planes: None,
-        }
+        Self::with_parity1(tables, Parity1::from_values(parity1_tables_for(tables, &matrices.m1)))
+    }
+
+    /// True for a parameter set whose vector index is a polynomial lane.
+    fn has_lanes(&self) -> bool {
+        self.tables.manifest.has_lanes()
     }
 
     /// Build `w_2` and `w_{3,t}` from `tau`.
     pub fn set_tau(&mut self, matrices: &BridgeMatrices, tau: &[E]) {
+        let manifest = self.tables.manifest;
+        if self.has_lanes() {
+            let tau2 = &tau[tau.len() - manifest.domain_vars(crate::manifest::GroupRole::Level2)..];
+            let tau3 = &tau[tau.len() - manifest.domain_vars(crate::manifest::GroupRole::Level3)..];
+            self.w2 = Some(level2_weight_table_for(manifest, &matrices.m2, tau2));
+            self.w3 = Some(level3_weight_tables_for(manifest, &matrices.m3, tau3));
+            return;
+        }
         let geom = self.tables.main.geometry();
         let tau2 = &tau[tau.len() - geom.d2() as usize..];
         let tau3 = &tau[tau.len() - geom.d3() as usize..];
         self.w2 = Some(level2_weight_table(&geom, &matrices.m2, tau2));
-        self.w3 = Some(level3_weight_tables(&geom, &matrices.m3, tau3));
+        self.w3 = Some(level3_weight_tables(&geom, &matrices.m3, tau3).into());
     }
 
     /// Build `w_1` from `r^(1)` and drop the stage-1 weights.
     pub fn set_r1(&mut self, matrices: &BridgeMatrices, r1: &[E]) {
-        let geom = self.tables.main.geometry();
-        let r1_1 = &r1[r1.len() - geom.d1() as usize..];
         self.w2 = None;
         self.w3 = None;
+        if self.has_lanes() {
+            let manifest = self.tables.manifest;
+            let r1_1 = &r1[r1.len() - manifest.domain_vars(crate::manifest::GroupRole::Level1)..];
+            self.w1_lanes = level1_lane_tables(manifest, &matrices.m1, r1_1);
+            return;
+        }
+        let geom = self.tables.main.geometry();
+        let r1_1 = &r1[r1.len() - geom.d1() as usize..];
         let split_on = std::env::var_os("AGG_W1_SPLIT").is_none_or(|v| v != "0");
         let split = split_on.then(|| level1_weight_split(&geom, &matrices.m1, r1_1)).filter(SplitWeight::usable);
         if split.is_some() {
@@ -174,6 +192,7 @@ impl<'a> ProverTables<'a> {
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
         self.w1_split = None;
+        self.w1_lanes = Vec::new();
         if crate::kernel::layout() == crate::kernel::Layout::Plane {
             self.wa_planes = Some(ring_weight_planes(public, r2));
             self.wa = None;
@@ -183,8 +202,21 @@ impl<'a> ProverTables<'a> {
         }
     }
 
-    /// Build the projection weight `W` from `Psi` and `r^(2)`.
+    /// Drop `w_1^(rho)` after `r^(2)` (the sets with lanes, whose ring weights depend on the
+    /// stage-3 coefficients and are built in stage 3).
+    pub fn drop_level1(&mut self) {
+        self.w1 = None;
+        self.w1_split = None;
+        self.w1_lanes = Vec::new();
+    }
+
+    /// Build the projection weight `W` from `Psi` and `r^(2)` (one weight per polynomial lane
+    /// of `v` for the sets with lanes).
     pub fn set_projection(&mut self, psi: &[u8], r2: &[E]) {
+        if self.has_lanes() {
+            self.wp_lanes = crate::projection::lane_weight_tables(self.tables.manifest, psi, r2);
+            return;
+        }
         if crate::kernel::layout() == crate::kernel::Layout::Plane {
             self.wp_planes = Some(crate::projection::weight_planes(self.tables.manifest, psi, r2));
             self.wp = None;
@@ -202,7 +234,10 @@ impl<'a> ProverTables<'a> {
             LaneId::Column(c) => column(c).lane(),
             LaneId::DigitSquare(c) => Lane::mapped(column(c).narrow(), square_map()),
             LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
-            LaneId::Weight(WeightId::Level1) => {
+            LaneId::Weight(WeightId::Level1(lane)) if self.has_lanes() => {
+                Lane::Source(Source::Field(&self.w1_lanes[usize::from(lane)]))
+            }
+            LaneId::Weight(WeightId::Level1(_)) => {
                 match (&self.w1, &self.w1_split) {
                     (Some(table), _) => Lane::Source(Source::Field(table)),
                     // The stage takes the factors; the table only backs the fallback.
@@ -216,13 +251,17 @@ impl<'a> ProverTables<'a> {
             LaneId::Weight(WeightId::Level3(t)) => Lane::Source(Source::Field(
                 &self.w3.as_ref().expect("w_3 after tau")[usize::from(t)],
             )),
-            LaneId::Weight(WeightId::Ring) => {
+            LaneId::Weight(WeightId::Ring(_)) => {
+                assert!(!self.has_lanes(), "the lane ring weights are built in stage 3");
                 match &self.wa_planes {
                     Some(planes) => Lane::Source(Source::Planes(planes)),
                     None => Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)"))),
                 }
             }
-            LaneId::Weight(WeightId::Proj) => match &self.wp_planes {
+            LaneId::Weight(WeightId::Proj(lane)) if self.has_lanes() => {
+                Lane::Source(Source::Field(&self.wp_lanes[usize::from(lane)]))
+            }
+            LaneId::Weight(WeightId::Proj(_)) => match &self.wp_planes {
                 Some(planes) => Lane::Source(Source::Planes(planes)),
                 None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),
             },
@@ -237,8 +276,7 @@ mod tests {
 
     #[test]
     fn parities_are_narrow_when_every_value_fits_and_wide_otherwise() {
-        let bits: [Vec<i64>; W1_BITS] =
-            std::array::from_fn(|t| (0..64).map(|i| ((i + t) % 2) as i64).collect());
+        let bits: Vec<Vec<i64>> = (0..6).map(|t| (0..64).map(|i| ((i + t) % 2) as i64).collect()).collect();
         let narrow = Parity1::from_values(bits.clone());
         assert!(matches!(narrow, Parity1::Narrow(_)));
         assert!(matches!(narrow.lane(3), Lane::Source(Source::Bytes { .. })));
