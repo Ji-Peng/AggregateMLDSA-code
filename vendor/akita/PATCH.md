@@ -352,3 +352,40 @@ x86-64 build (each entry point carries `#[target_feature(enable = "avx2")]`)
 and are selected by `AGG_ISA >= avx2` plus
 `is_x86_feature_detected!("avx2")`. A global `x86-64-v3` build is no longer
 needed for them. `AKITA_SCALAR_NTT=1` still selects the scalar paths.
+
+## 10. Root opening enumeration bound for five distinct precommitted classes
+
+`crates/akita-planner/src/schedule_params/suffix_dp/candidates.rs`:
+`MAX_PRECOMMIT_OPENING_PRODUCTS` is 512 instead of 256. The constant caps the
+Cartesian product, over the distinct precommitted classes of a grouped row, of the
+per-class coefficient-packing openings that the root fold enumerates for one opening
+ring dimension `d_d`; a product above the cap leaves that `d_d` without any
+coefficient-packing root candidate (`packing_precommit_opening_products`). It is a
+planner search limit only: it is `pub(crate)` to `akita-planner`, every admitted
+assignment is still materialized, sized and SIS-audited on its own
+(`PreparedRootProducers::prepare`, `root_level_candidates_for_prepared_producers`), and
+the catalog validation (`ValidatedScheduleCatalog`), the prover and the verifier never
+read it. Nothing in the wire format or in the soundness of a planned schedule depends on
+its value.
+
+The per-class domain at `d_d` is the number of production challenge subring dimensions
+`c` in `{64, ..., 2048}` with `2c | d_a` and `d_d | 2c` (extension degree 2): 4, 3 and 2
+for inner rings `d_a` of 2048, 1024 and 512 at `d_d = 256`; 5, 4 and 3 at `d_d` of 64
+or 128. The ML-DSA-44 grouped rows have five classes with inner rings
+`(2048, 1024, 512, 512, 2048)` at `2^15` signatures, so the product is 192 at
+`d_d = 256` and 900 at 64 or 128; every checked-in 44 row of `2^11` signatures or more
+was therefore planned from the `d_d = 256` packing openings alone, which is also what
+each of them selected. ML-DSA-65 commits its level-1 carries `(20, 4)` in a
+2048-dimensional inner ring (ML-DSA-44's `(19, 6)` uses 512), so its product at
+`d_d = 256` is `4 * 3 * 4 * 2 * 4 = 384` and the planner returned
+`UnsupportedSchedule` for `mldsa-65-p16-batch-32768-mult-final`; ML-DSA-87 has the
+same class structure. 512 is the smallest power of two above 384 and above the 512
+that five classes with inner rings `(2048, 2048, 2048, 512, 2048)` would reach at
+`d_d = 256` (the level-2 group `(15, 8)` never exceeds 512).
+
+For the checked-in ML-DSA-44 rows nothing changes: they are not re-planned, and the
+catalog bytes and the aggregate are unchanged. If a 44 row were re-planned, the three
+rows whose product at `d_d` of 64 or 128 is 360 (`2^11` signatures under H-u and
+H-exact, `2^12` under H-FIPS) would now also search those openings; the rows at 540 to
+900 would not. Planner time grows with the product; the ML-DSA-65 row at `2^15`
+signatures is reported in `~/agy_out/ps/akb-report.md`.

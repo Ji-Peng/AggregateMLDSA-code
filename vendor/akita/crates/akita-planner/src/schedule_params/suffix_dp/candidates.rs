@@ -99,7 +99,20 @@ pub(crate) const fn state_allows_terminal_seed(
 /// root openings for that dimension, as an unsupported dimension does. The root
 /// only folds by coefficient packing, so that dimension then offers no root
 /// candidate; other dimensions are unaffected.
-pub(crate) const MAX_PRECOMMIT_OPENING_PRODUCTS: usize = 256;
+///
+/// The bound only limits the offline planner's enumeration: every assignment it
+/// admits is still materialized, sized and audited on its own, so the value has
+/// no bearing on the soundness or the wire format of a planned schedule. The
+/// upstream value of 256 covers five classes whose inner rings are at most
+/// 2048, 1024, 512, 512 and 2048 at a 256-dimensional opening ring (192
+/// assignments), the largest ML-DSA-44 batch. ML-DSA-65 and ML-DSA-87 commit
+/// their level-1 carries in a 2048-dimensional inner ring and reach 384 (at
+/// most 512 if every main group also chose 2048) at that opening ring, so the
+/// bound is 512. At the 64- and 128-dimensional opening rings the ML-DSA-44
+/// batches of 2^11 signatures and more reach 360 to 900: the three rows at 360
+/// would gain root candidates if they were re-planned; the checked-in rows are
+/// not re-planned and stay as they are.
+pub(crate) const MAX_PRECOMMIT_OPENING_PRODUCTS: usize = 512;
 
 /// Enumerate the root precommit openings for one shared opening dimension.
 ///
