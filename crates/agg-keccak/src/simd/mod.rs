@@ -1,4 +1,5 @@
-//! AVX-512 kernels of the Keccak witness generator, selected once at run time.
+//! AVX-512 kernels of the Keccak witness generator, selected once at run time (the AVX2
+//! generator in `crate::witness` is selected by [`avx2`]).
 //!
 //! Every kernel is a `#[target_feature]` function; [`avx512`] says whether the CPU has the
 //! features they need (AVX-512 F/BW/VBMI, GFNI, BMI2) and whether `FLOCK_SIMD` allows
@@ -25,6 +26,26 @@ use std::sync::OnceLock;
 pub fn avx512() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| detected() && !capped())
+}
+
+/// Whether the AVX2 witness kernels may run (the x86-64-v3 baseline: AVX2 and BMI2): the CPU
+/// has them, `FLOCK_SIMD` is neither `portable` nor `off`, and the `AGG_ISA` cap admits the
+/// `avx2` level. Detected once per process.
+#[must_use]
+pub fn avx2() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        let has = std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let has = false;
+        let flock = matches!(
+            std::env::var("FLOCK_SIMD").as_deref(),
+            Ok("portable") | Ok("off")
+        );
+        has && !flock && agg_mldsa_simd::isa::allows(agg_mldsa_simd::isa::IsaLevel::Avx2)
+    })
 }
 
 /// The CPU features alone (ignores `FLOCK_SIMD`; tests use it to decide whether the vector
