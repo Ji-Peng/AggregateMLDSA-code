@@ -767,6 +767,94 @@ fn dedicated_layer_groups_match_the_generic_group() {
     }
 }
 
+/// The lookup sessions' groups compute two rounds per pass; with equality points that
+/// have zero and one coordinates (a round whose linear term cannot be recovered from the
+/// claim needs `q(1)`, and its pass falls back to one round) and at every domain size from
+/// one to ten variables they still match the generic group byte for byte.
+#[test]
+fn two_round_passes_match_the_generic_group() {
+    let mut rng = SplitMix64::new(1618);
+    for vars in 1_usize..=10 {
+        let rows = 1 << vars;
+        for degenerate in [false, true] {
+            let mut eq_point = point(&mut rng, vars);
+            if degenerate {
+                for (i, slot) in eq_point.iter_mut().enumerate() {
+                    if i % 3 == 1 {
+                        *slot = E::zero();
+                    } else if i % 3 == 2 {
+                        *slot = E::one();
+                    }
+                }
+            }
+            let challenges: Vec<E> = (0..vars).map(|_| field(&mut rng)).collect();
+            let ints = |rng: &mut SplitMix64, bound: u64| -> Vec<i32> {
+                (0..rows).map(|_| rng.below(2 * bound + 1) as i32 - bound as i32).collect()
+            };
+            macro_rules! check {
+                ($generic:expr, $group:expr, $label:expr) => {{
+                    for (round, &r) in challenges.iter().enumerate() {
+                        assert_eq!($generic.round_message(round), $group.round_message(round), "{}, round {round}, {vars} vars, degenerate {degenerate}", $label);
+                        $generic.bind(round, r);
+                        $group.bind(round, r);
+                        assert_eq!($generic.claim(), $group.claim());
+                    }
+                    assert_eq!($generic.terminal_values(), $group.terminal_values());
+                    assert!($group.terminal_consistent());
+                }};
+            }
+            // Integer pairs: prefix and table paths, without and with M lanes.
+            for (with_m, s_bound) in [(false, 1_u64 << 15), (false, 1 << 21), (true, 1 << 16), (true, 1 << 17)] {
+                let s = [ints(&mut rng, s_bound), ints(&mut rng, s_bound)];
+                let m = [ints(&mut rng, 1 << 30), ints(&mut rng, 1 << 30)];
+                let c: [E; 5] = std::array::from_fn(|_| field(&mut rng));
+                let mut lanes = vec![Lane::Source(Source::Ints(&s[0])), Lane::Source(Source::Ints(&s[1]))];
+                let mut instances = vec![
+                    GroupInstance { gamma: c[0], terms: vec![Term::Product(vec![])] },
+                    GroupInstance { gamma: c[1], terms: vec![Term::Product(vec![0]), Term::Product(vec![1])] },
+                    GroupInstance { gamma: c[2], terms: vec![Term::Product(vec![0, 1])] },
+                ];
+                if with_m {
+                    lanes.push(Lane::Source(Source::Ints(&m[0])));
+                    lanes.push(Lane::Source(Source::Ints(&m[1])));
+                    instances[2].terms.extend([Term::Product(vec![2]), Term::Product(vec![3])]);
+                    instances.push(GroupInstance { gamma: c[3], terms: vec![Term::Product(vec![0, 3]), Term::Product(vec![1, 2])] });
+                    instances.push(GroupInstance { gamma: c[4], terms: vec![Term::Product(vec![2, 3])] });
+                }
+                let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
+                let m_lanes = with_m.then(|| [m[0].as_slice(), m[1].as_slice()]);
+                let mut pair = IntPairGroup::new([&s[0], &s[1]], m_lanes, c, &eq_point).expect("pair");
+                check!(generic, pair, format!("pair, M {with_m}, S {s_bound}"));
+            }
+            // The layer group of one and of two trees.
+            for count in [1, 2] {
+                let layers: Vec<(Vec<E>, Vec<E>)> = (0..count)
+                    .map(|_| ((0..2 * rows).map(|_| field(&mut rng)).collect(), (0..2 * rows).map(|_| field(&mut rng)).collect()))
+                    .collect();
+                let gammas: Vec<(E, E)> = (0..count).map(|_| (field(&mut rng), field(&mut rng))).collect();
+                let mut lanes = Vec::new();
+                let mut instances = Vec::new();
+                for (t, ((p, q), &(gp, gq))) in layers.iter().zip(&gammas).enumerate() {
+                    let (p0, p1) = p.split_at(rows);
+                    let (q0, q1) = q.split_at(rows);
+                    lanes.extend([p0, p1, q0, q1].map(|c| Lane::Source(Source::Field(c))));
+                    let (a, b, c, d) = (4 * t, 4 * t + 1, 4 * t + 2, 4 * t + 3);
+                    instances.push(GroupInstance { gamma: gp, terms: vec![Term::Product(vec![a, d]), Term::Product(vec![b, c])] });
+                    instances.push(GroupInstance { gamma: gq, terms: vec![Term::Product(vec![c, d])] });
+                }
+                let mut generic = Group::new(lanes, instances, Some(&eq_point), vars, 3).expect("group");
+                let trees = layers
+                    .iter()
+                    .zip(&gammas)
+                    .map(|((p, q), &(gamma_p, gamma_q))| LayerTree { p, q, gamma_p, gamma_q })
+                    .collect();
+                let mut layer = LayerGroup::new(trees, &eq_point).expect("layer");
+                check!(generic, layer, format!("layer, {count} trees"));
+            }
+        }
+    }
+}
+
 /// Integer pair groups reject lanes whose pair differences would overflow the exact `i64`
 /// products of the table path (instead of wrapping in release builds).
 #[test]

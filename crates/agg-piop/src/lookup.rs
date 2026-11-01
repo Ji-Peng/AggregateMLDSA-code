@@ -43,7 +43,9 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 use aerie_falcon::protocol::algebra::eq_evaluation;
-use jolt_field::{Unreduced, Field, One, Ring, Zero};
+use jolt_field::{Field, One, Ring, Zero};
+#[cfg(test)]
+use jolt_field::Unreduced;
 use rayon::prelude::*;
 
 use crate::kernel::{

@@ -90,6 +90,21 @@ trait Level0: Sync {
     fn folded2_row(&self, _r: [E; 3], _i: usize, _out: &mut [E]) {
         unreachable!("no two-challenge fold from the source")
     }
+    /// Whether the engine computes two rounds per pass on this source's tables
+    /// ([`Engine::pass_ahead`]; the lookup sessions' groups).
+    fn two_rounds_per_pass(&self) -> bool {
+        false
+    }
+    /// Whether the source gives its level-0 rows ([`Self::level0_row`]) and folds two
+    /// challenges at once ([`Self::folded2_row`]): its first round then also computes the
+    /// second, and the second pass reads level 0 and writes level 2.
+    fn has_level0_rows(&self) -> bool {
+        false
+    }
+    /// Row `i` of level 0, transformed (only when [`Self::has_level0_rows`]).
+    fn level0_row(&self, _i: usize, _out: &mut [E]) {
+        unreachable!("no level-0 rows from the source")
+    }
 }
 
 /// `sum_k first[k mod |first|] second[k / |first|] values(k)` for `N` integer quantities per
@@ -169,6 +184,31 @@ fn weighted_int_sums_wide<const N: usize, const W: usize>(
     (total.0.map(E::reduce_product), total.1.map(E::reduce_product))
 }
 
+/// Lane `j` of row `row` of a table folded by two challenges `r = [r0, r1, r0 r1]` (rows
+/// `4 row .. 4 row + 4` of `previous`, `width` lanes each): `a + r0 (b - a) + r1 (c - a) +
+/// r0 r1 ((d - c) - (b - a))`, the two folds by `r0` then `r1`, from three unreduced
+/// products and one reduction.
+#[inline(always)]
+fn fold4(r: [E; 3], previous: &[E], width: usize, row: usize, j: usize) -> E {
+    let base = 4 * row * width + j;
+    let (a, b, c, d) = (previous[base], previous[base + width], previous[base + 2 * width], previous[base + 3 * width]);
+    // A lifted canonical element and three unreduced products: each product adds below
+    // 3 * 2^64 to a split slot, so the accumulator stays far below 2^128.
+    let mut acc = Acc::zero();
+    lift(&mut acc, a);
+    mad(&mut acc, r[0], b - a);
+    mad(&mut acc, r[1], c - a);
+    mad(&mut acc, r[2], (d - c) - (b - a));
+    E::reduce_product(acc)
+}
+
+/// Whether the lookup sessions' groups compute two rounds per pass (default on;
+/// `AGG_LOOKUP_LOOKAHEAD=0` runs one pass per round, the same messages).
+fn two_rounds_per_pass() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AGG_LOOKUP_LOOKAHEAD").map_or(true, |v| v.trim() != "0"))
+}
+
 /// The round driver shared by the dedicated groups.
 struct Engine<S: Level0> {
     source: S,
@@ -191,12 +231,20 @@ struct Engine<S: Level0> {
     arena: Option<super::SharedArena>,
     /// The products grouped by slot (each group reduced and weighted once per item).
     product_groups: Vec<(usize, Vec<(usize, usize)>)>,
+    /// The equality point (empty without an equality factor).
+    point: Vec<E>,
+    /// The next round's inner polynomial as a quadratic in this round's challenge, when
+    /// this round's pass computed it ([`Self::pass_ahead`]): the round it serves and
+    /// `[q(0)|_{r=0}, q(0)|_{r=1}, q(0)_2, q_2|_{r=0}, q_2|_{r=1}, (q_2)_2]`.
+    ahead: Option<(usize, [E; 6])>,
 }
 
 impl<S: Level0> Engine<S> {
     fn new(source: S, eq_point: &[E]) -> Option<Self> {
         let eq = GruenSplitEq::new(eq_point).ok()?;
-        Self::with_eq(source, Some(eq), eq_point.len(), E::one())
+        let mut engine = Self::with_eq(source, Some(eq), eq_point.len(), E::one())?;
+        engine.point = eq_point.to_vec();
+        Some(engine)
     }
 
     fn with_eq(source: S, eq: Option<GruenSplitEq<E>>, vars: usize, scale: E) -> Option<Self> {
@@ -224,6 +272,8 @@ impl<S: Level0> Engine<S> {
             challenges: Vec::new(),
             arena: None,
             product_groups,
+            point: Vec::new(),
+            ahead: None,
         })
     }
 
@@ -296,7 +346,7 @@ impl<S: Level0> Engine<S> {
     /// `out += sum_s c_s reduce(slots[s])` (the slot coefficients applied once), clearing
     /// the slots.
     #[inline]
-    fn combine_slots(coefficients: &[E], slots: &mut [[Acc; 3]], out: &mut [Acc; 3]) {
+    fn combine_slots<const N: usize>(coefficients: &[E], slots: &mut [[Acc; N]], out: &mut [Acc; N]) {
         for (acc, &c) in slots.iter_mut().zip(coefficients) {
             for (o, a) in out.iter_mut().zip(acc.iter()) {
                 let value = E::reduce_product(*a);
@@ -306,7 +356,7 @@ impl<S: Level0> Engine<S> {
                     mad(o, c, value);
                 }
             }
-            *acc = [Acc::zero(); 3];
+            *acc = [Acc::zero(); N];
         }
     }
 
@@ -318,6 +368,15 @@ impl<S: Level0> Engine<S> {
     fn pass(&mut self, evaluate: bool, full: bool) -> [E; 3] {
         let width = self.source.width();
         let challenges = std::mem::take(&mut self.unfolded);
+        if let Some((round, ahead)) = self.ahead.take() {
+            if evaluate && !full && round == self.bound {
+                // The previous pass computed this round as a quadratic in the previous
+                // challenge; its fold waits for this round's challenge.
+                let r = *challenges.last().expect("the previous round's challenge");
+                self.unfolded = challenges;
+                return Self::evaluate_ahead(&ahead, r);
+            }
+        }
         let from_source = self.table.is_empty();
         let rows_in = if from_source { self.source.rows() } else { self.table.len() / width };
         let rows_out = rows_in >> challenges.len();
@@ -347,7 +406,10 @@ impl<S: Level0> Engine<S> {
                 _ => {}
             }
         }
-        debug_assert!(from_source || challenges.len() <= 1, "one pending fold on a table");
+        if evaluate && self.looks_ahead(from_source, challenges.len(), rows_out) {
+            return self.pass_ahead(challenges, full);
+        }
+        debug_assert!(challenges.len() <= 2, "two pending folds at most");
         let context = challenges.first().map(|&r| E::precompute(r));
         let two = match challenges.as_slice() {
             [r0, r1] => Some([*r0, *r1, fm(*r0, *r1)]),
@@ -374,6 +436,10 @@ impl<S: Level0> Engine<S> {
                         Some(r) => this.source.folded2_row(r, row, scratch),
                     }
                     for (slot, &value) in out.iter_mut().zip(scratch.iter()) { slot.write(value); }
+                } else if let Some(r) = two {
+                    for (j, slot) in out.iter_mut().enumerate() {
+                        slot.write(fold4(r, &previous, width, row, j));
+                    }
                 } else {
                     let (even, odd) = (2 * row * width, (2 * row + 1) * width);
                     for (j, slot) in out.iter_mut().enumerate() {
@@ -511,6 +577,227 @@ impl<S: Level0> Engine<S> {
             }
         }
         sums
+    }
+
+    /// Whether this round's pass also computes the next round ([`Self::pass_ahead`]): with
+    /// an equality factor, at least two rounds left, and rows of the new level that the
+    /// pass can read or produce.
+    fn looks_ahead(&self, from_source: bool, pending: usize, rows_out: usize) -> bool {
+        if self.eq.is_none() || rows_out < 4 || self.point.len() != self.vars || !self.source.two_rounds_per_pass() {
+            return false;
+        }
+        match (from_source, pending) {
+            (true, 0) => self.source.has_level0_rows(),
+            (true, 1 | 2) | (false, 0..=2) => true,
+            _ => false,
+        }
+    }
+
+    /// `[q(0), 0, q_2]` of a round from the quadratic in the previous challenge `r` that the
+    /// previous pass stored.
+    fn evaluate_ahead(ahead: &[E; 6], r: E) -> [E; 3] {
+        let at = |at_zero: E, at_one: E, leading: E| at_zero + r * (at_one - at_zero - leading) + r * r * leading;
+        [at(ahead[0], ahead[1], ahead[2]), E::zero(), at(ahead[3], ahead[4], ahead[5])]
+    }
+
+    /// The sums of one quad of rows `a, b, c, d` of the new level (rows `4k .. 4k + 4`) into
+    /// the nine values per slot of [`Self::pass_ahead`], weighted by `weight`: at `X = 0`,
+    /// `1` and the difference for the pairs `(a, b)` and `(c, d)` of this round (`[0, 1, 2]`
+    /// and `[3, 4, 5]`; `4` only when `full`), and for the next round's leading
+    /// coefficient the products of `c - a`, `d - b` and `(d - c) - (b - a)` (`[6, 7, 8]`).
+    #[inline(always)]
+    fn quad_item(&self, rows: &[E], weight: E, full: bool, inner: &mut [[Acc; 9]]) {
+        let width = self.source.width();
+        let (a, rest) = rows.split_at(width);
+        let (b, rest) = rest.split_at(width);
+        let (c, d) = rest.split_at(width);
+        for &(l, s) in self.source.linear() {
+            mad(&mut inner[s][0], weight, a[l]);
+            mad(&mut inner[s][1], weight, b[l]);
+            mad(&mut inner[s][3], weight, c[l]);
+            if full {
+                mad(&mut inner[s][4], weight, d[l]);
+            }
+        }
+        for (s, list) in &self.product_groups {
+            // One unreduced product per pair and value (below 3 * 2^64 per split slot each),
+            // reduced once per quad before the weight; the weighted sums accumulate over at
+            // most one block of the first equality table, far below the 2^62-term limit.
+            let mut sums = [Acc::zero(); 9];
+            for &(i, j) in list {
+                let (da_i, da_j) = (b[i] - a[i], b[j] - a[j]);
+                let (dc_i, dc_j) = (d[i] - c[i], d[j] - c[j]);
+                mad(&mut sums[0], a[i], a[j]);
+                mad(&mut sums[1], b[i], b[j]);
+                mad(&mut sums[2], da_i, da_j);
+                mad(&mut sums[3], c[i], c[j]);
+                if full {
+                    mad(&mut sums[4], d[i], d[j]);
+                }
+                mad(&mut sums[5], dc_i, dc_j);
+                mad(&mut sums[6], c[i] - a[i], c[j] - a[j]);
+                mad(&mut sums[7], d[i] - b[i], d[j] - b[j]);
+                mad(&mut sums[8], dc_i - da_i, dc_j - da_j);
+            }
+            let slot = &mut inner[*s];
+            for v in 0..9 {
+                if v != 4 || full {
+                    mad(&mut slot[v], weight, E::reduce_product(sums[v]));
+                }
+            }
+        }
+    }
+
+    /// A pass that computes this round and the next one: the pass produces the new level
+    /// (folding the pending challenges, up to two at once, and writing the table) and
+    /// reads it in quads of rows `a, b, c, d`. The next level's rows `A = a + r (b - a)`
+    /// and `C = c + r (d - c)` are linear in this round's challenge `r`, so the next
+    /// round's inner polynomial at `0` (`A` products) and its leading coefficient (`(C -
+    /// A)` products) are quadratics in `r`, each given by its values at `r = 0, 1` and its
+    /// leading coefficient: sums of products of `a, b, c, d` and their differences. The
+    /// next round then needs no pass, and the pass after it folds four rows into one, so
+    /// a level is read and the level two rounds below it written once per two rounds.
+    ///
+    /// The equality weight of item `2k + t` of this round is `eq(tau_(j+1), t) W(k)`, with
+    /// `W` the weights of the next round and `tau_(j+1)` its point coordinate, so both
+    /// rounds are weighted by `W` per quad and this round's pair sums are combined by
+    /// `eq(tau_(j+1), t)` at the end. Every value is an exact field sum, so the messages
+    /// equal those of one pass per round.
+    #[allow(clippy::too_many_lines)]
+    #[allow(unsafe_code)]
+    fn pass_ahead(&mut self, challenges: Vec<E>, full: bool) -> [E; 3] {
+        let width = self.source.width();
+        let from_source = self.table.is_empty();
+        let rows_in = if from_source { self.source.rows() } else { self.table.len() / width };
+        let rows_out = rows_in >> challenges.len();
+        let quads = rows_out / 4;
+        let (first, second): (Vec<E>, Vec<E>) = {
+            let eq = self.eq.as_ref().expect("an equality factor");
+            let (f, s) = eq.remaining_eq_tables_after(1).expect("a next round");
+            (f.to_vec(), s.to_vec())
+        };
+        debug_assert_eq!(first.len() * second.len(), quads);
+        let tau = self.point[self.bound + 1];
+        let context = challenges.first().map(|&r| E::precompute(r));
+        let two = match challenges.as_slice() {
+            [r0, r1] => Some([*r0, *r1, fm(*r0, *r1)]),
+            _ => None,
+        };
+        let previous = std::mem::take(&mut self.table);
+        let first_bits = first.len().trailing_zeros();
+        let first_mask = first.len() - 1;
+        let keep = !challenges.is_empty();
+        let this = &*self;
+        let coefficients = self.source.slots();
+        let slot_count = coefficients.len();
+        // Row `row` of the new level into `out`.
+        let produce = |row: usize, out: &mut [std::mem::MaybeUninit<E>], scratch: &mut [E]| {
+            if from_source {
+                match two {
+                    None => this.source.folded_row(challenges[0], context.as_ref().expect("a fold"), row, scratch),
+                    Some(r) => this.source.folded2_row(r, row, scratch),
+                }
+                for (slot, &value) in out.iter_mut().zip(scratch.iter()) {
+                    slot.write(value);
+                }
+            } else if let Some(r) = two {
+                for (j, slot) in out.iter_mut().enumerate() {
+                    slot.write(fold4(r, &previous, width, row, j));
+                }
+            } else {
+                let context = context.as_ref().expect("a fold");
+                let (even, odd) = (2 * row * width, (2 * row + 1) * width);
+                for (j, slot) in out.iter_mut().enumerate() {
+                    slot.write(fold(context, previous[even + j], previous[odd + j]));
+                }
+            }
+        };
+        let quad_chunk = ITEM_CHUNK / 2;
+        let run = |task: usize, out: &mut [std::mem::MaybeUninit<E>]| -> [Acc; 9] {
+            let mut scratch = vec![E::zero(); 4 * width];
+            let start = task * quad_chunk;
+            let end = ((task + 1) * quad_chunk).min(quads);
+            let mut inner = vec![[Acc::zero(); 9]; slot_count];
+            let mut outer = [Acc::zero(); 9];
+            let mut block = start >> first_bits;
+            let flush = |inner: &mut [[Acc; 9]], outer: &mut [Acc; 9], block: usize| {
+                let mut total = [Acc::zero(); 9];
+                Self::combine_slots(coefficients, inner, &mut total);
+                for (o, t) in outer.iter_mut().zip(total) {
+                    mad(o, second[block], E::reduce_product(t));
+                }
+            };
+            for k in start..end {
+                if (k >> first_bits) != block {
+                    flush(&mut inner, &mut outer, block);
+                    block = k >> first_bits;
+                }
+                let weight = first[k & first_mask];
+                if keep {
+                    let rows = &mut out[(k - start) * 4 * width..(k - start + 1) * 4 * width];
+                    for (t, row) in rows.chunks_exact_mut(width).enumerate() {
+                        produce(4 * k + t, row, &mut scratch[..width]);
+                    }
+                    // SAFETY: `produce` initialized every slot of the four rows.
+                    let rows = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<E>(), rows.len()) };
+                    this.quad_item(rows, weight, full, &mut inner);
+                } else if from_source {
+                    for (t, row) in scratch.chunks_exact_mut(width).enumerate() {
+                        this.source.level0_row(4 * k + t, row);
+                    }
+                    this.quad_item(&scratch, weight, full, &mut inner);
+                } else {
+                    this.quad_item(&previous[4 * k * width..(4 * k + 4) * width], weight, full, &mut inner);
+                }
+            }
+            if start < end {
+                flush(&mut inner, &mut outer, block);
+            }
+            outer
+        };
+        let tasks = quads.div_ceil(quad_chunk);
+        let parallel = 2 * quads >= MIN_PARALLEL_ITEMS && tasks > 1;
+        let mut table = if keep {
+            match &self.arena {
+                Some(arena) => super::lock_arena(arena).take(rows_out * width),
+                None => super::buf::reuse(Vec::new(), rows_out * width),
+            }
+        } else {
+            Vec::new()
+        };
+        let add = |mut left: [Acc; 9], right: [Acc; 9]| {
+            for (l, r) in left.iter_mut().zip(right) {
+                *l += r;
+            }
+            left
+        };
+        let total = match (parallel, keep) {
+            (true, true) => table
+                .par_chunks_mut(quad_chunk * 4 * width)
+                .enumerate()
+                .map(|(task, out)| run(task, out))
+                .reduce(|| [Acc::zero(); 9], add),
+            (true, false) => (0..tasks).into_par_iter().map(|task| run(task, &mut [])).reduce(|| [Acc::zero(); 9], add),
+            (false, true) => run(0, &mut table),
+            (false, false) => run(0, &mut []),
+        };
+        if keep {
+            if let Some(arena) = &self.arena {
+                super::lock_arena(arena).put(previous);
+            }
+            // SAFETY: each output row is initialized exactly once by `produce`.
+            self.table = unsafe { super::buf::finish(table) };
+        } else {
+            self.table = previous;
+        }
+        let v = total.map(E::reduce_product);
+        // The weights of either round sum to one, so the constant joins each value at 0
+        // and 1 once.
+        let constant = self.source.constant();
+        let (e0, e1) = (E::one() - tau, tau);
+        self.ahead = Some((self.bound + 1, [v[0] + constant, v[1] + constant, v[2], v[6], v[7], v[8]]));
+        let at_one = if full { e0 * v[1] + e1 * v[4] + constant } else { E::zero() };
+        [e0 * v[0] + e1 * v[3] + constant, at_one, e0 * v[2] + e1 * v[5]]
     }
 
     fn round_message(&mut self, round: usize) -> Vec<E> {
@@ -687,6 +974,39 @@ impl Level0 for LayerSource<'_> {
                 fold(context, tree.q[half + even], tree.q[half + odd]),
             ];
             *lanes = Self::transform(tree, ratio, raw);
+        }
+    }
+
+    fn folded2_row(&self, r: [E; 3], i: usize, out: &mut [E]) {
+        let half = self.half;
+        // Cells `4i .. 4i + 4` of a lane folded by `r0` (the low bit) then `r1`.
+        let fold2 = |cells: &[E], base: usize| {
+            let (a, b, c, d) = (cells[base], cells[base + 1], cells[base + 2], cells[base + 3]);
+            // As in `fold4`: one lifted element and three unreduced products per slot.
+            let mut acc = Acc::zero();
+            lift(&mut acc, a);
+            mad(&mut acc, r[0], b - a);
+            mad(&mut acc, r[1], c - a);
+            mad(&mut acc, r[2], (d - c) - (b - a));
+            E::reduce_product(acc)
+        };
+        for ((tree, &(ratio, _)), lanes) in self.trees.iter().zip(&self.ratio).zip(out.as_chunks_mut::<4>().0) {
+            let raw = [fold2(tree.p, 4 * i), fold2(tree.p, half + 4 * i), fold2(tree.q, 4 * i), fold2(tree.q, half + 4 * i)];
+            *lanes = Self::transform(tree, ratio, raw);
+        }
+    }
+
+    fn two_rounds_per_pass(&self) -> bool {
+        two_rounds_per_pass()
+    }
+
+    fn has_level0_rows(&self) -> bool {
+        true
+    }
+
+    fn level0_row(&self, i: usize, out: &mut [E]) {
+        for (t, lanes) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *lanes = self.cell(t, i);
         }
     }
 
@@ -1120,6 +1440,10 @@ impl Level0 for IntSource<'_> {
                 ]
             }
         })
+    }
+
+    fn two_rounds_per_pass(&self) -> bool {
+        two_rounds_per_pass()
     }
 
     fn folded2_row(&self, r: [E; 3], i: usize, out: &mut [E]) {
