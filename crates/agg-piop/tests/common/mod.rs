@@ -105,8 +105,12 @@ impl Batch {
 
 /// The transcript of [`transcript_after_commitments`] up to and including the bridge seed.
 fn transcript_to_seed(manifest: &CommitmentManifest) -> Transcript {
+    drive_to_seed(manifest, Transcript::new(manifest, &manifest.binding_bytes()).unwrap())
+}
+
+/// Absorb the dummy round-1 and Flock commitments and draw the bridge seed.
+fn drive_to_seed(manifest: &CommitmentManifest, mut t: Transcript) -> Transcript {
     let segments = manifest.segments();
-    let mut t = Transcript::new(manifest, &manifest.binding_bytes()).unwrap();
     t.absorb(commitment_site(GroupRole::Main16), 1, &[1]).unwrap();
     t.absorb(commitment_site(GroupRole::Main), 1, &[1]).unwrap();
     t.absorb_items(FLOCK_COMMIT_SITE, &vec![vec![]; segments]).unwrap();
@@ -125,16 +129,39 @@ pub fn transcript_psi(manifest: &CommitmentManifest) -> Vec<u8> {
 /// fixed dummy payloads, for isolated PIOP tests (prover and verifier replay the same
 /// prefix; the join follows the stages).
 pub fn transcript_after_commitments(manifest: &CommitmentManifest) -> Transcript {
-    let segments = manifest.segments();
     let mut t = transcript_to_seed(manifest);
     t.challenge_psi().unwrap();
+    drive_after_psi(manifest, &mut t);
+    t
+}
+
+/// The prefix of [`transcript_after_commitments`] on the instance record `record`: a
+/// prover's transcript (`work = None`, its nonces searched) or a verifier's replaying the
+/// nonce stream `work`. Returns the transcript after the final-vector step and `Psi`.
+pub fn transcript_on_record(
+    manifest: &CommitmentManifest,
+    record: &[u8],
+    work: Option<&[u8]>,
+) -> Result<(Transcript, Vec<u8>), agg_piop::transcript::TranscriptError> {
+    let t = match work {
+        None => Transcript::new(manifest, record)?,
+        Some(work) => Transcript::replay(manifest, record, work)?,
+    };
+    let mut t = drive_to_seed(manifest, t);
+    let psi = t.challenge_psi()?;
+    drive_after_psi(manifest, &mut t);
+    Ok((t, psi))
+}
+
+/// The dummy round-2 commitments, the Flock seeds, zero final vectors and empty share items.
+fn drive_after_psi(manifest: &CommitmentManifest, t: &mut Transcript) {
+    let segments = manifest.segments();
     for role in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult] {
         t.absorb(commitment_site(role), 1, &[2]).unwrap();
     }
     t.challenge_bytes(FLOCK_SEEDS_SITE, segments).unwrap();
     t.absorb(FINAL_VECTORS_SITE, segments, &vec![0; 512 * segments]).unwrap();
     t.absorb_items(FLOCK_SHARES_SITE, &vec![vec![]; segments]).unwrap();
-    t
 }
 
 /// The PIOP part (lookup and stages) of `tables`, honest (`unchecked = false`) or with the
@@ -250,6 +277,7 @@ pub fn bridge_matrices_for(manifest: &CommitmentManifest, seed: u64) -> BridgeMa
 
 /// A batch of a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87), relation H-u.
 pub struct LaneBatch {
+    pub records: Vec<Record>,
     pub manifest: CommitmentManifest,
     pub main: MainTables,
     pub matrices: BridgeMatrices,
@@ -271,6 +299,7 @@ impl LaneBatch {
         let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &psi).expect("round 2 tables");
         Self {
             public: LanePublicData::from_instance(&instance),
+            records,
             manifest,
             main,
             matrices,

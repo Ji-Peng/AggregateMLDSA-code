@@ -1066,6 +1066,37 @@ for H-FIPS with "relation H-u" replaced by "relation H-FIPS" and Akita's plan of
 grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 58 Akita polynomials
 (39 claimed at `r^(3)`, 12 zero polynomials of `G_3`, 7 at `pi_m`) in place of 52.
 
+### 10.3 ML-DSA-65 and ML-DSA-87 (`python3 -I docs/scripts/pow_plan.py --set 65|87`)
+
+The lane sets (relation H-u only) follow the same per-site rule (`2^-128` per site after work,
+Aerie's convention). Their registry differs from ML-DSA-44's in four places: `d_main = 8 +
+d_sig`; the lookup has seven (65) or eight (87) stacks: the `l + k` looked-up `Z_lo`/`U_lo`
+lanes split as `[8, 2, 1]` or `[8, 4, 2, 1]`, the carries of levels 1 and 2 with four columns
+each (`d_1 = 13 + max(0, d_sig - 8)`), `kappa^(3)` and `[K_0 | K_1]` on `D_k` (87: two row
+blocks, `d_k = 8 + d_sig`); stage 1 has degree 3 (no six-bit range identity); and the batching
+vectors have 37, 18, 105 (65) and 45, 22, 132 (87) coefficients (stage 3 counts the `k` ring
+instances, the links and the Booleanity checks of the slack bits per lane), so `stage.gamma`
+grinds 6, 5, 7 (65) and 6, 5, 8 (87) bits. The `Psi` site keeps its one bit at 24 and 32 KiB.
+The per-lane ring identities add no site: they are batched by `gamma^(3)` like any other
+stage-3 instance. Totals of the PIOP part and the mode-B digests
+(`agg_piop::pow::tests::ml_dsa_65_and_87_plans_reproduce_the_script`):
+
+| Set | `N*` | sites | nonces | bits | bytes | `sum 2^g` | plan digest (mode B) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 65 | `2^3` | 190 | 189 | 1,761 | 221 | 1,690 | `ce924fd9...` |
+| 65 | `2^10` | 311 | 310 | 2,867 | 359 | 2,356 | `31e84bb3...` |
+| 65 | `2^13` | 392 | 391 | 3,605 | 451 | 2,770 | `97bd51e1...` |
+| 65 | `2^15` | 451 | 450 | 4,144 | 518 | 3,130 | `6ff0953b...` |
+| 87 | `2^3` | 190 | 189 | 1,763 | 221 | 1,850 | `7882abb9...` |
+| 87 | `2^10` | 311 | 310 | 2,873 | 360 | 2,604 | `c536004a...` |
+| 87 | `2^13` | 392 | 391 | 3,611 | 452 | 3,018 | `f7778510...` |
+| 87 | `2^15` | 451 | 450 | 4,149 | 519 | 3,346 | `b4385bc4...` |
+
+The mode-A digests the script prints for 65 and 87 assume the bridge of the lane sets (four
+chain lanes, 256 records per level-1 block, `P_pad = 2^11`, so a full part has
+`19 + max(0, d - 8) + 2 + log2 S` chain rounds); they are pinned once `agg_bridge::pow` takes
+the set's shape.
+
 ## 11. Open questions
 
 1. **Flock outer sites (4.3).** The vendored core is patched (K19); whether the outer

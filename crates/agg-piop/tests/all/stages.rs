@@ -586,3 +586,107 @@ fn ml_dsa_65_piop_round_trip_on_256_signatures() {
 fn ml_dsa_87_piop_round_trip_on_256_signatures() {
     on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(0x87));
 }
+
+/// The PIOP part of ML-DSA-65 and ML-DSA-87 on a transcript that starts from the real
+/// instance record (the manifest, the digest of the `(pk, M, c~)` records with the set's
+/// `c~` width, Flock profile 0 and the set's proof-of-work plan): the prover searches the
+/// nonces, the verifier replays them and builds its public data from `(pk, M, c~)` with an
+/// expanded-key cache. Both reach the same PCS session; a changed nonce or a changed `c~` is
+/// caught.
+fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(seed: u64, n_own: usize, n_shared: usize)
+where
+    P::CTilde: Sync,
+{
+    use agg_piop::binding::{instance_record, public_records_binding, FlockProfile};
+    use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
+    use agg_piop::pow::{KeccakPlan, PowPlan};
+    use agg_piop::prover::prove_piop_lanes;
+    use agg_piop::verifier::{verify_piop_lanes, VerifyTimings};
+    use common::transcript_on_record;
+
+    let batch = LaneBatch::build::<P>(seed, n_own, n_shared);
+    let manifest = &batch.manifest;
+    let inputs: Vec<(&[u8], &[u8], P::CTilde)> = batch
+        .records
+        .iter()
+        .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+        .collect();
+    let plan = PowPlan::new(manifest, FlockProfile::None, &KeccakPlan::default());
+    let record_of = |inputs: &[(&[u8], &[u8], P::CTilde)]| {
+        instance_record(manifest, &public_records_binding(inputs), FlockProfile::None, &plan.digest())
+    };
+    let record = record_of(&inputs);
+
+    // The prover: round-2 tables under the transcript's own Psi.
+    let (mut transcript, psi) = transcript_on_record(manifest, &record, None).expect("prover prefix");
+    let bridge = BridgeGroupTables::build(manifest, &batch.main, &batch.matrices, &psi).expect("round 2 tables");
+    let tables = SourceTables {
+        manifest,
+        main: &batch.main,
+        bridge: &bridge,
+    };
+    let (proof, run) =
+        prove_piop_lanes(manifest, tables, &batch.matrices, &batch.public, &mut transcript, false).expect("honest prover");
+    let session = transcript.pcs_session().expect("session");
+    transcript.ensure_complete().expect("every event");
+    let work = transcript.work_stream();
+    assert_eq!(work.len(), plan.work_bits().div_ceil(8));
+
+    // The verifier: the public data from (pk, M, c~), cold and then warm cache.
+    let mut cache = LaneKeyCache::new(P::SET);
+    let verify = |record: &[u8], work: &[u8], cache: &mut LaneKeyCache| -> Result<[u8; 32], String> {
+        let public = LanePublicData::prepare::<P>(&inputs, Some(cache)).map_err(|e| format!("{e:?}"))?;
+        let (mut transcript, _) = transcript_on_record(manifest, record, Some(work)).map_err(|e| format!("{e:?}"))?;
+        let mut timings = VerifyTimings::default();
+        let (_, stage3, _) = verify_piop_lanes(
+            manifest,
+            &batch.matrices,
+            bridge.public_y(),
+            &proof,
+            &mut transcript,
+            &mut timings,
+            |r2, r3, gammas| (public.t_evaluations(r2), public.ring_weights_at(r2, r3, gammas)),
+        )
+        .outcome
+        .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(stage3.point, run.r3);
+        let session = transcript.pcs_session().map_err(|e| format!("{e:?}"))?;
+        transcript.ensure_complete().map_err(|e| format!("{e:?}"))?;
+        Ok(session)
+    };
+    assert_eq!(verify(&record, &work, &mut cache), Ok(session), "cold cache");
+    assert!(!cache.is_empty());
+    assert_eq!(verify(&record, &work, &mut cache), Ok(session), "warm cache");
+
+    // A changed nonce: the replay rejects its site.
+    let mut bad_work = work.clone();
+    let last = bad_work.len() - 1;
+    bad_work[last / 2] ^= 0x10;
+    let outcome = verify(&record, &bad_work, &mut cache);
+    assert!(
+        outcome.as_ref().is_err_and(|e| e.contains("Work") || e.contains("Transcript")),
+        "{outcome:?}"
+    );
+    // A changed c~: another record digest, another transcript.
+    let mut other = inputs.clone();
+    let mut c_tilde = P::c_tilde_from_slice(&batch.records[1].sig);
+    c_tilde.as_mut()[0] ^= 1;
+    other[1].2 = c_tilde;
+    assert!(verify(&record_of(&other), &work, &mut cache).is_err());
+}
+
+#[test]
+fn ml_dsa_65_piop_round_trip_on_the_instance_record_at_256_and_1k() {
+    on_large_stack(|| {
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(0x650, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(0x651, 900, 124);
+    });
+}
+
+#[test]
+fn ml_dsa_87_piop_round_trip_on_the_instance_record_at_256_and_1k() {
+    on_large_stack(|| {
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(0x870, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(0x871, 900, 124);
+    });
+}

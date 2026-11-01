@@ -1639,9 +1639,10 @@ pub fn prove_with_tables_using(
     timings.opening_threads = opening_threads;
     timings.opening = opening_time;
     let proof = AggregateProof {
+        set: manifest.set(),
         relation: manifest.relation(),
         records: n,
-        c_tilde: inputs.records.iter().map(|r| r.2).collect(),
+        c_tilde: inputs.records.iter().map(|r| r.2.to_vec()).collect(),
         main16_commitment,
         main_commitment,
         flock_commitments,

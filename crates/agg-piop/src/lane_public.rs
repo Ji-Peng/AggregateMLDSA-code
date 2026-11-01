@@ -16,13 +16,22 @@
 //! verifier's `w_A^(s)(r^(3))` is `sum_i eq(r^(2)_sig, i) eq(r^(3)_sig, i) <A~_{i,s}, Lambda>`
 //! with the correlation `Lambda` of `(r^(2)_coef, r^(3)_coef)`, one dot product per key,
 //! row and column. Padded records carry zero weight and `T = 0`.
+//!
+//! The prover builds the data from its instance ([`LanePublicData::from_instance`], `T`
+//! stored). The verifier builds it from the `(pk, M, c~)` triples
+//! ([`LanePublicData::prepare`]): keys are expanded once per distinct `pk` (or taken from a
+//! [`LaneKeyCache`]), and `T` is not stored: [`LanePublicData::t_evaluations`] recomputes
+//! `T_i = 2^d (c_i * t1_i)` per record from the sparse challenge in its one pass.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use aerie_falcon::protocol::algebra::eq_table;
-use agg_witness::instance::PublicInstance;
-use agg_witness::params::{ParamSet, N};
+use agg_witness::expand::ExpandedKey;
+use agg_witness::instance::{InstanceError, PublicInstance};
+use agg_witness::native::{mu, sample_in_ball_for, Challenge};
+use agg_witness::padding::Geometry;
+use agg_witness::params::{ParamSet, Set, N, TR_BYTES};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
@@ -32,26 +41,227 @@ use crate::OpeningField as E;
 /// Variables of the coefficient index `j`.
 const COEF_VARS: usize = 8;
 
+/// The public part of one key that the lane identities read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneKey {
+    /// The parameter set.
+    pub set: Set,
+    /// The encoded public key.
+    pub pk: Vec<u8>,
+    /// `tr = H(pk, 64)`.
+    pub tr: [u8; TR_BYTES],
+    /// `t1`, one polynomial per row.
+    pub t1: Vec<[u16; N]>,
+    /// `A[rho][s]`, centered, flat `(rho, s, j)`.
+    pub a: Vec<i32>,
+}
+
+impl LaneKey {
+    /// The lane view of an expanded key.
+    #[must_use]
+    pub fn from_expanded<P: ParamSet>(key: &ExpandedKey<P>) -> Self {
+        let mut a = Vec::with_capacity(P::K * P::L * N);
+        for rho in 0..P::K {
+            for s in 0..P::L {
+                a.extend_from_slice(P::get_coeff(&key.a, rho, s));
+            }
+        }
+        Self {
+            set: P::SET,
+            pk: key.pk.clone(),
+            tr: key.tr,
+            t1: (0..P::K).map(|rho| key.t1[rho]).collect(),
+            a,
+        }
+    }
+}
+
+/// Expanded keys of one parameter set kept across verifications, keyed by the encoded key.
+#[derive(Clone, Debug)]
+pub struct LaneKeyCache {
+    set: Set,
+    keys: HashMap<Vec<u8>, Arc<LaneKey>>,
+}
+
+impl LaneKeyCache {
+    /// An empty cache for `set`.
+    #[must_use]
+    pub fn new(set: Set) -> Self {
+        Self {
+            set,
+            keys: HashMap::new(),
+        }
+    }
+
+    /// The parameter set.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
+    }
+
+    /// Cached keys.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// True when no key is cached.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The expansion of `pk`, if cached.
+    #[must_use]
+    pub fn get(&self, pk: &[u8]) -> Option<Arc<LaneKey>> {
+        self.keys.get(pk).cloned()
+    }
+
+    /// Adds an expansion of the cache's set (an existing entry for the same key is kept).
+    ///
+    /// # Panics
+    /// For a key of another parameter set.
+    pub fn insert(&mut self, key: Arc<LaneKey>) {
+        assert_eq!(key.set, self.set, "a key of the cache's parameter set");
+        self.keys.entry(key.pk.clone()).or_insert(key);
+    }
+
+    /// The cached expansions, in no particular order (to persist the cache).
+    pub fn entries(&self) -> impl Iterator<Item = &Arc<LaneKey>> {
+        self.keys.values()
+    }
+}
+
+/// `T` of the live records: stored (the prover's instance), or recomputed from the sparse
+/// challenges in each pass (the verifier).
+#[derive(Clone, Debug)]
+enum LaneT {
+    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`.
+    Stored(Vec<i32>),
+    /// `c_i = SampleInBall(c~_i)` of every live record.
+    Streamed(Vec<Challenge>),
+}
+
 /// The public data of a batch of a parameter set with polynomial lanes.
 #[derive(Clone, Debug)]
 pub struct LanePublicData {
+    set: Set,
     k: usize,
     l: usize,
     padded: usize,
-    /// `A[rho][s]` of every distinct key, centered, flat `(rho, s, j)`.
-    keys: Vec<Arc<Vec<i32>>>,
+    /// Every distinct key.
+    keys: Vec<Arc<LaneKey>>,
     /// The key of every live record.
     key_of: Vec<usize>,
-    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`.
-    t: Vec<i32>,
+    /// `mu_i` of every live record.
+    mu: Vec<[u8; TR_BYTES]>,
+    /// `T` of every live record.
+    t: LaneT,
+    /// Keys expanded while building (the rest came from the cache).
+    expanded: usize,
+}
+
+/// `out[rho] = 2^d (c * t1[rho])` over `Z[X]/(X^256 + 1)` (`agg_witness::expand::public_t_into_for`).
+fn t_rows_into(c: &Challenge, t1: &[[u16; N]], d: u32, out: &mut [[i32; N]]) {
+    for (row, t1_row) in out.iter_mut().zip(t1) {
+        row.fill(0);
+        for &pos in &c.positions {
+            let p = usize::from(pos);
+            let sign = i32::from(c.coeffs[p]);
+            let (low, high) = t1_row.split_at(N - p);
+            for (slot, &x) in row[p..].iter_mut().zip(low) {
+                *slot += sign * i32::from(x);
+            }
+            for (slot, &x) in row[..p].iter_mut().zip(high) {
+                *slot -= sign * i32::from(x);
+            }
+        }
+        for x in row.iter_mut() {
+            *x <<= d;
+        }
+    }
 }
 
 impl LanePublicData {
+    /// The verifier's data from `(pk, M, c~)` triples (pure mode, empty context): keys
+    /// expanded once per distinct `pk`, or taken from `cache` (new expansions are added to
+    /// it); `mu` and `SampleInBall(c~)` per record; `T` recomputed in each pass.
+    ///
+    /// # Errors
+    /// On a batch size outside `1..=2^15` or a public key of the wrong length (the first
+    /// such record).
+    ///
+    /// # Panics
+    /// If `cache` holds another parameter set.
+    pub fn prepare<P: ParamSet>(
+        inputs: &[(&[u8], &[u8], P::CTilde)],
+        mut cache: Option<&mut LaneKeyCache>,
+    ) -> Result<Self, InstanceError>
+    where
+        P::CTilde: Sync,
+    {
+        let geom = Geometry::<P>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
+        if let Some(cache) = cache.as_ref() {
+            assert_eq!(cache.set, P::SET, "a cache of the batch's parameter set");
+        }
+        let mut distinct: Vec<&[u8]> = Vec::new();
+        let mut first_record = Vec::new();
+        let mut index: HashMap<&[u8], usize> = HashMap::new();
+        let key_of: Vec<usize> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, &(pk, _, _))| {
+                *index.entry(pk).or_insert_with(|| {
+                    distinct.push(pk);
+                    first_record.push(i);
+                    distinct.len() - 1
+                })
+            })
+            .collect();
+        let cached: Vec<Option<Arc<LaneKey>>> =
+            distinct.iter().map(|&pk| cache.as_ref().and_then(|c| c.get(pk))).collect();
+        let expanded = cached.iter().filter(|hit| hit.is_none()).count();
+        let keys = distinct
+            .par_iter()
+            .zip(cached)
+            .zip(&first_record)
+            .map(|((pk, hit), &record)| match hit {
+                Some(key) => Ok(key),
+                None => ExpandedKey::<P>::from_bytes_for(pk)
+                    .map(|key| Arc::new(LaneKey::from_expanded(&key)))
+                    .ok_or(InstanceError::PublicKey(record)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(cache) = cache.as_mut() {
+            for key in &keys {
+                cache.insert(Arc::clone(key));
+            }
+        }
+        let (mu, challenges): (Vec<[u8; TR_BYTES]>, Vec<Challenge>) = inputs
+            .par_iter()
+            .zip(key_of.par_iter())
+            .map(|(&(_, msg, ref c_tilde), &key)| {
+                (mu(&keys[key].tr, msg, &[]), sample_in_ball_for::<P>(c_tilde.as_ref()))
+            })
+            .unzip();
+        Ok(Self {
+            set: P::SET,
+            k: P::K,
+            l: P::L,
+            padded: geom.n_star,
+            keys,
+            key_of,
+            mu,
+            t: LaneT::Streamed(challenges),
+            expanded,
+        })
+    }
+
     /// The data of the prover's instance (keys shared by `Arc` identity).
     #[must_use]
     pub fn from_instance<P: ParamSet>(instance: &PublicInstance<P>) -> Self {
         let (k, l) = (P::K, P::L);
-        let mut seen: HashMap<*const agg_witness::expand::ExpandedKey<P>, usize> = HashMap::new();
+        let mut seen: HashMap<*const ExpandedKey<P>, usize> = HashMap::new();
         let mut firsts = Vec::new();
         let key_of: Vec<usize> = instance
             .records
@@ -66,16 +276,7 @@ impl LanePublicData {
             .collect();
         let keys = firsts
             .par_iter()
-            .map(|&i| {
-                let a = &instance.records[i].key.a;
-                let mut flat = Vec::with_capacity(k * l * N);
-                for rho in 0..k {
-                    for s in 0..l {
-                        flat.extend_from_slice(P::get_coeff(a, rho, s));
-                    }
-                }
-                Arc::new(flat)
-            })
+            .map(|&i| Arc::new(LaneKey::from_expanded(&instance.records[i].key)))
             .collect();
         let mut t = Vec::with_capacity(instance.records.len() * k * N);
         for record in &instance.records {
@@ -84,13 +285,47 @@ impl LanePublicData {
             }
         }
         Self {
+            set: P::SET,
             k,
             l,
             padded: instance.geom.n_star,
             keys,
             key_of,
-            t,
+            mu: instance.records.iter().map(|r| r.mu).collect(),
+            t: LaneT::Stored(t),
+            expanded: 0,
         }
+    }
+
+    /// The parameter set.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
+    }
+
+    /// `N*`.
+    #[must_use]
+    pub const fn padded_records(&self) -> usize {
+        self.padded
+    }
+
+    /// `mu_i` of every live record.
+    #[must_use]
+    pub fn mu(&self) -> &[[u8; TR_BYTES]] {
+        &self.mu
+    }
+
+    /// Keys expanded while building (the rest came from the cache; 0 for the prover's
+    /// instance, whose keys were expanded with it).
+    #[must_use]
+    pub const fn expanded_keys(&self) -> usize {
+        self.expanded
+    }
+
+    /// Distinct keys.
+    #[must_use]
+    pub fn keys(&self) -> &[Arc<LaneKey>] {
+        &self.keys
     }
 
     /// Rows `k` of `A`.
@@ -115,14 +350,27 @@ impl LanePublicData {
     #[must_use]
     pub fn a(&self, i: usize, rho: usize, s: usize) -> &[i32] {
         let key = &self.keys[self.key_of[i]];
-        &key[(rho * self.l + s) * N..(rho * self.l + s + 1) * N]
+        &key.a[(rho * self.l + s) * N..(rho * self.l + s + 1) * N]
     }
 
-    /// `T_i[rho]` of live record `i`.
+    /// `f(T_i)` for live record `i`, `T_i` given as one row per `rho` (stored, or
+    /// recomputed into a scratch buffer).
+    fn with_t_rows<R>(&self, i: usize, f: impl FnOnce(&[[i32; N]]) -> R) -> R {
+        match &self.t {
+            LaneT::Stored(t) => f(t[i * self.k * N..(i + 1) * self.k * N].as_chunks::<N>().0),
+            LaneT::Streamed(challenges) => {
+                let mut rows = vec![[0_i32; N]; self.k];
+                let d = agg_witness::dispatch_set!(self.set, |P| P::D);
+                t_rows_into(&challenges[i], &self.keys[self.key_of[i]].t1, d, &mut rows);
+                f(&rows)
+            }
+        }
+    }
+
+    /// `T_i` of live record `i`, one row per `rho` (stored or recomputed).
     #[must_use]
-    pub fn t(&self, i: usize, rho: usize) -> &[i32] {
-        let start = (i * self.k + rho) * N;
-        &self.t[start..start + N]
+    pub fn t_rows(&self, i: usize) -> Vec<[i32; N]> {
+        self.with_t_rows(i, <[[i32; N]]>::to_vec)
     }
 
     /// The point split `(r_coef, r_sig)` of a main-domain point `(j, i)`.
@@ -144,16 +392,17 @@ impl LanePublicData {
         (0..self.records())
             .into_par_iter()
             .map(|i| {
-                (0..k)
-                    .map(|rho| {
-                        let inner = self
-                            .t(i, rho)
-                            .iter()
-                            .zip(&eq_coef)
-                            .fold(E::zero(), |acc, (&value, &w)| acc + w.mul_i64(i64::from(value)));
-                        eq_sig[i] * inner
-                    })
-                    .collect::<Vec<E>>()
+                self.with_t_rows(i, |rows| {
+                    rows.iter()
+                        .map(|row| {
+                            let inner = row
+                                .iter()
+                                .zip(&eq_coef)
+                                .fold(E::zero(), |acc, (&value, &w)| acc + w.mul_i64(i64::from(value)));
+                            eq_sig[i] * inner
+                        })
+                        .collect::<Vec<E>>()
+                })
             })
             .reduce(
                 || vec![E::zero(); k],
@@ -168,7 +417,7 @@ impl LanePublicData {
 
     /// `A~_{s} = sum_rho gammas[rho] A[rho, s]` of key `key`, one polynomial per column.
     fn combined(&self, key: usize, gammas: &[E]) -> Vec<Vec<E>> {
-        let a = &self.keys[key];
+        let a = &self.keys[key].a;
         (0..self.l)
             .map(|s| {
                 (0..N)
@@ -242,11 +491,11 @@ impl LanePublicData {
         let per_key: Vec<Vec<E>> = self
             .keys
             .par_iter()
-            .map(|a| {
+            .map(|key| {
                 (0..l)
                     .map(|s| {
                         (0..k).fold(E::zero(), |acc, rho| {
-                            let row = &a[(rho * l + s) * N..(rho * l + s + 1) * N];
+                            let row = &key.a[(rho * l + s) * N..(rho * l + s + 1) * N];
                             let dot = row
                                 .iter()
                                 .zip(&lambda)
@@ -329,6 +578,58 @@ mod tests {
             assert!(table[public.records() * N..].iter().all(|&v| v == 0));
             assert_eq!(t[rho], evaluate_mle(&aerie_falcon::protocol::algebra::lift_table(table), &r2));
         }
+    }
+
+    /// The verifier's data from `(pk, M, c~)` equals the prover's: the same keys, `mu`, `T`
+    /// rows and public evaluations, with and without a warm cache.
+    fn prepared_data_equals_the_instance_data<P: ParamSet>()
+    where
+        P::CTilde: Sync,
+    {
+        let mut records = gen::records_for::<P>(91, 4);
+        records.extend(gen::records_shared_keys_for::<P>(92, 5, 2));
+        let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
+        let prover = LanePublicData::from_instance(&instance);
+        let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+            .iter()
+            .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
+            .collect();
+        let mut cache = LaneKeyCache::new(P::SET);
+        let cold = LanePublicData::prepare::<P>(&inputs, Some(&mut cache)).unwrap();
+        assert_eq!((cold.expanded_keys(), cache.len()), (6, 6));
+        let warm = LanePublicData::prepare::<P>(&inputs, Some(&mut cache)).unwrap();
+        assert_eq!(warm.expanded_keys(), 0);
+        let mut rng = SplitMix64::new(93);
+        let vars = COEF_VARS + prover.padded_records().trailing_zeros() as usize;
+        let (r2, r3, gammas) = (point(&mut rng, vars), point(&mut rng, vars), point(&mut rng, P::K));
+        for verifier in [&cold, &warm] {
+            assert_eq!(verifier.set(), P::SET);
+            assert_eq!(verifier.mu(), prover.mu());
+            assert_eq!(verifier.keys().len(), prover.keys().len());
+            for (a, b) in verifier.keys().iter().zip(prover.keys()) {
+                assert_eq!(**a, **b);
+            }
+            for i in 0..records.len() {
+                assert_eq!(verifier.t_rows(i), prover.t_rows(i), "record {i}");
+            }
+            assert_eq!(verifier.t_evaluations(&r2), prover.t_evaluations(&r2));
+            assert_eq!(verifier.ring_weights_at(&r2, &r3, &gammas), prover.ring_weights_at(&r2, &r3, &gammas));
+        }
+        // A key of the wrong length is refused at its first record.
+        let mut bad = inputs.clone();
+        let short = &records[3].pk[..10];
+        bad[3].0 = short;
+        assert_eq!(LanePublicData::prepare::<P>(&bad, None).err(), Some(InstanceError::PublicKey(3)));
+    }
+
+    #[test]
+    fn ml_dsa_65_prepared_data_equals_the_instance_data() {
+        prepared_data_equals_the_instance_data::<Set65>();
+    }
+
+    #[test]
+    fn ml_dsa_87_prepared_data_equals_the_instance_data() {
+        prepared_data_equals_the_instance_data::<Set87>();
     }
 
     #[test]
