@@ -11,8 +11,7 @@
 //! table point.
 
 use agg_pcs_config::commit::{
-    evaluate_signed_table, CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier,
-    PreparedOpening,
+    CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier, PreparedOpening,
 };
 use agg_pcs_config::work_plan::{PlanError, WorkPlan};
 use akita_error::AkitaError;
@@ -114,13 +113,6 @@ pub fn group_polynomials(
             Ok(polynomial)
         })
         .collect()
-}
-
-/// Multilinear extension of a logical `i8` table at `point` (least significant variable
-/// first): the value an opening claim on that table carries.
-#[must_use]
-pub fn evaluate_column(cells: &[i8], point: &[OpeningField]) -> OpeningField {
-    evaluate_signed_table(cells, point)
 }
 
 /// The group points: every group but `G_m` at the suffix of the main-domain point `r3`,

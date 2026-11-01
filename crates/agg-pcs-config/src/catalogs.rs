@@ -331,12 +331,6 @@ impl Group {
         }
     }
 
-    /// Number of committed polynomials for ML-DSA-44.
-    #[must_use]
-    pub const fn num_polynomials_44(self, relation: Relation) -> usize {
-        self.num_polynomials(Set::S44, relation)
-    }
-
     /// Logical variable count of the group's domain for a given parameter set and `d_sig`.
     ///
     /// For ML-DSA-44: `d_main = 10 + d_sig`, `d_1 = 13 + max(0, d_sig - 9)`,
@@ -380,12 +374,6 @@ impl Group {
         }
     }
 
-    /// Logical variable count for ML-DSA-44.
-    #[must_use]
-    pub const fn logical_vars_44(self, d_sig: usize) -> usize {
-        self.logical_vars(Set::S44, d_sig)
-    }
-
     /// Physical (committed) variable count for a given parameter set and `d_sig`.
     #[must_use]
     pub const fn physical_vars(self, set: Set, d_sig: usize) -> usize {
@@ -400,22 +388,10 @@ impl Group {
         }
     }
 
-    /// Physical variable count for ML-DSA-44.
-    #[must_use]
-    pub const fn physical_vars_44(self, d_sig: usize) -> usize {
-        self.physical_vars(Set::S44, d_sig)
-    }
-
     /// Akita group layout for a given parameter set at `d_sig` under `relation`.
     #[must_use]
     pub const fn layout(self, set: Set, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
         PolynomialGroupLayout::new(self.physical_vars(set, d_sig), self.num_polynomials(set, relation))
-    }
-
-    /// Akita group layout for ML-DSA-44.
-    #[must_use]
-    pub const fn layout_44(self, d_sig: usize, relation: Relation) -> PolynomialGroupLayout {
-        self.layout(Set::S44, d_sig, relation)
     }
 
     /// Short label used in catalog row names and logs.
@@ -461,12 +437,6 @@ impl BatchLayout {
             relation,
             groups: Group::ALL.map(|group| group.layout(set, d_sig, relation)),
         })
-    }
-
-    /// The layout for ML-DSA-44 at `d_sig` under `relation`.
-    #[must_use]
-    pub fn new_44(d_sig: usize, relation: Relation) -> Option<Self> {
-        Self::new(Set::S44, d_sig, relation)
     }
 
     /// The precommitted groups (every group but `G_m`), in order.

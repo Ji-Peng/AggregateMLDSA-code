@@ -188,12 +188,6 @@ impl ChainLayout {
         self.block_vars() + self.zeta_vars()
     }
 
-    /// Coordinates of `eq_Y`: `log2 m_3 + span_log`.
-    #[must_use]
-    pub fn eq_vars(&self) -> usize {
-        self.out_vars() + self.span_log
-    }
-
     /// `log2 m_3`.
     #[must_use]
     pub fn out_vars(&self) -> usize {

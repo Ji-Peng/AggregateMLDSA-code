@@ -14,8 +14,6 @@ pub const RATE: usize = 136;
 pub const RATE_BITS: usize = RATE * 8;
 /// Number of permutations of the commitment hash.
 pub const PERMS: usize = 7;
-/// Total message bytes: mu (64) || w1Encode (768).
-pub const MSG_BYTES: usize = TR_BYTES + W1_ENCODE_BYTES;
 
 /// A Keccak state as 25 little-endian lanes, lane (x, y) at index x + 5 y.
 pub type State = [u64; 25];

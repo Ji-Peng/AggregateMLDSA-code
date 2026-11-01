@@ -107,38 +107,6 @@ impl BitClaim {
     }
 }
 
-/// The partial column bit-bank of a bit claim on the padded buffer `z` with `2^nu` rows per
-/// word column: `bank[128 c + b] = sum_j eq(x_row, j) bit_b(z[(c << nu) | j])` for every word
-/// column `c` whose column weight `eq(x_col, c)` is nonzero, zero elsewhere. Enough for
-/// `s_hat_v` ([`bit_s_hat_v`], where the other columns are multiplied by their zero weight),
-/// NOT for the block-first transport of `pcs::open_batch_merged`, whose block rounds fold the
-/// bank's multilinear extension and need every column ([`UnionGeometry::prove`] uses Flock's
-/// `union_bitbank_fold` there).
-///
-/// # Panics
-/// If the claim's length does not fit `z` and `nu`.
-#[must_use]
-pub fn bit_bank(z: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {
-    let vars = claim.x_full.len() - 1;
-    assert_eq!(z.len(), 1usize << vars, "padded buffer length");
-    assert!(nu <= vars, "row coordinates");
-    let eq_row = build_eq_table(&claim.x_full[1..=nu]);
-    let eq_col = build_eq_table(&claim.x_full[1 + nu..]);
-    let rows = 1usize << nu;
-    let mut bank = vec![F128::ZERO; eq_col.len() << LOG_PACKING];
-    for (c, chunk) in bank
-        .as_chunks_mut::<{ 1 << LOG_PACKING }>()
-        .0
-        .iter_mut()
-        .enumerate()
-    {
-        if eq_col[c] != F128::ZERO {
-            chunk.copy_from_slice(&fold_1b_rows_naive(&z[c * rows..(c + 1) * rows], &eq_row));
-        }
-    }
-    bank
-}
-
 /// `s_hat_v` of a bit claim from its bank: `sum_c eq(x_col, c) bank[c]`.
 #[must_use]
 pub fn bit_s_hat_v(bank: &[F128], claim: &BitClaim, nu: usize) -> Vec<F128> {

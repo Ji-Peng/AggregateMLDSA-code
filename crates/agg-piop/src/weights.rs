@@ -48,12 +48,6 @@ pub fn bridge_domains(geom: &Geometry) -> Domains {
     Shape::PRODUCTION.domains(geom.main_len())
 }
 
-/// `c[zeta] = sum_{rho in column zeta} eq_rows[rho]` for the first `cols` columns.
-#[must_use]
-pub fn column_sums(matrix: &SparseMatrix, eq_rows: &[E], cols: usize) -> Vec<E> {
-    bridge::column_weights(matrix, eq_rows, cols)
-}
-
 /// `w_1` on the main domain for the point `p1` on `D_1`.
 #[must_use]
 pub fn level1_weight_table(geom: &Geometry, m1: &SparseMatrix, p1: &[E]) -> Vec<E> {

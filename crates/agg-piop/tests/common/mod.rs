@@ -48,11 +48,6 @@ pub fn mle_i64(table: &[i64], point: &[OpeningField]) -> OpeningField {
     evaluate_mle(&lift_table(table), point)
 }
 
-/// Multilinear extension of an `i8` table.
-pub fn mle_i8(table: &[i8], point: &[OpeningField]) -> OpeningField {
-    evaluate_mle(&lift_table(table), point)
-}
-
 /// Own-key and shared-key honest records (`n_own + n_shared` in total).
 pub fn records(seed: u64, n_own: usize, n_shared: usize) -> Vec<Record> {
     let mut records = gen::records(seed, n_own);

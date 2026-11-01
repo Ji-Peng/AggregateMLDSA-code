@@ -160,16 +160,6 @@ fn derive_one(
     true
 }
 
-/// Strict derivation of a tile of records on the process-wide engine (see
-/// [`derive_tile_with`]).
-pub fn derive_tile(
-    records: &[&PublicRecord],
-    sigs: &[&[u8]],
-    out: &mut [FastWitness],
-) -> Result<(), (usize, DeriveError)> {
-    derive_tile_with(agg_mldsa_simd::engine(), records, sigs, out)
-}
-
 /// Strict derivation of `records[i]` with signature `sigs[i]` into `out[i]`, in tiles of
 /// [`TILE`]. On failure: the lowest index whose signature the legacy derivation rejects,
 /// with that derivation's error (the outputs of the other records are then unspecified).
