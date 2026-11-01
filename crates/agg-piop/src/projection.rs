@@ -54,21 +54,7 @@ pub fn psi_bit(psi: &[u8], o: usize, pos: usize) -> bool {
 /// If `psi` does not have [`PROJ_BYTES`] bytes.
 pub fn outputs(psi: &[u8], records: usize, v: impl Fn(usize, usize) -> i64 + Sync) -> Vec<i64> {
     assert_eq!(psi.len(), PROJ_BYTES, "Psi has 128 rows of 1,024 bits");
-    let mut out = vec![0_i64; records * PROJ_ROWS];
-    out.par_chunks_mut(PROJ_ROWS).enumerate().for_each(|(i, k)| {
-        let mut sums = [0_i64; 256];
-        for byte in 0..ROW_BYTES {
-            let values: [i64; 8] = std::array::from_fn(|bit| v(i, 8 * byte + bit));
-            for mask in 1..256_usize {
-                // The subset without its lowest position, plus that position.
-                sums[mask] = sums[mask & (mask - 1)] + values[mask.trailing_zeros() as usize];
-            }
-            for (o, acc) in k.iter_mut().enumerate() {
-                *acc += sums[usize::from(psi[o * ROW_BYTES + byte])];
-            }
-        }
-    });
-    out
+    agg_simd::mask::masked_row_sums(psi, records, PROJ_ROWS, ROW_BYTES, v)
 }
 
 /// The committed digits of the projection outputs: `K_0 | K_1` stacked (lookup stack 4,
