@@ -827,7 +827,9 @@ unsafe fn wide_drain<B: crate::wide::Simd>(acc: &mut WideAccs<B::V>, sums: &mut 
 
 /// [`prefix_sums`] on a backend without IFMA: every integer form (linear forms below 2^32 in
 /// magnitude, products below 2^62) is read as its canonical residue and multiplied by the
-/// weight in full; the block's sums are scaled by `second[block]` after the reduction.
+/// weight in full. The weight of a row is `first[i] second[block]` (one vector product per
+/// step), so the sums of all blocks share the accumulators and are reduced once at the end
+/// instead of per block.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
@@ -847,12 +849,12 @@ unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
     unsafe {
         let z = acck::<B>();
         let mut acc = WideAccs { total: z, linear: [[z; 4]; 4], products: [[z; 16]; 4] };
+        let mut steps = 0_usize;
         for block in blocks {
-            let mut sums = PrefixSums::zero(nl, np);
-            let mut steps = 0_usize;
+            let s = split_k::<B>(bck::<B>(second[block]));
             for i in (0..f).step_by(B::LANES) {
                 let row = block * f + i;
-                let (w0, w1) = loadk::<B>(first, i);
+                let (w0, w1) = kmul_s::<B>(loadk::<B>(first, i), s);
                 let w = (split::<B>(w0), split::<B>(w1));
                 lift::<B>(&mut acc.total.0, w0);
                 lift::<B>(&mut acc.total.1, w1);
@@ -880,19 +882,11 @@ unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
                 steps += 1;
                 if steps == flush_steps {
                     steps = 0;
-                    wide_drain::<B>(&mut acc, &mut sums, nl, np);
+                    wide_drain::<B>(&mut acc, &mut out, nl, np);
                 }
             }
-            wide_drain::<B>(&mut acc, &mut sums, nl, np);
-            let s = second[block];
-            out.total += sums.total * s;
-            for (o, x) in out.linear.iter_mut().flatten().zip(sums.linear.iter().flatten()) {
-                *o += *x * s;
-            }
-            for (o, x) in out.products.iter_mut().flatten().zip(sums.products.iter().flatten()) {
-                *o += *x * s;
-            }
         }
+        wide_drain::<B>(&mut acc, &mut out, nl, np);
     }
     out
 }

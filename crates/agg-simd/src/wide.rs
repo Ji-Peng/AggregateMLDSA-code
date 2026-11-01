@@ -57,6 +57,13 @@ pub trait Simd: Copy + Send + Sync + 'static {
     unsafe fn residue(k: Self::V) -> Self::V;
     /// Rows `2k` and `2k + 1` of `2 LANES` consecutive rows (`x0` the first `LANES`).
     unsafe fn deinterleave(x0: Self::V, x1: Self::V) -> (Self::V, Self::V);
+    /// [`Self::deinterleave`] with the items in the backend's lane order, which [`Self::reorder`]
+    /// applies to `LANES` consecutive per-item values (cheaper where the natural order costs
+    /// cross-lane permutes).
+    unsafe fn deinterleave_any(x0: Self::V, x1: Self::V) -> (Self::V, Self::V);
+    /// Puts `LANES` consecutive per-item values into the lane order of
+    /// [`Self::deinterleave_any`]; the order is an involution, so this also undoes it.
+    unsafe fn reorder(x: Self::V) -> Self::V;
     /// `LANES` consecutive `i32` values sign-extended to `i64` lanes.
     unsafe fn load_i32(p: *const i32) -> Self::V;
     /// The four patterns `a` of `LANES` cell quartets (`p[4 l + a]`, `l < LANES`) as
@@ -190,6 +197,17 @@ impl Simd for W8 {
         let even = _mm512_set_epi64(14, 12, 10, 8, 6, 4, 2, 0);
         let odd = _mm512_set_epi64(15, 13, 11, 9, 7, 5, 3, 1);
         (_mm512_permutex2var_epi64(x0, even, x1), _mm512_permutex2var_epi64(x0, odd, x1))
+    }
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn deinterleave_any(x0: __m512i, x1: __m512i) -> (__m512i, __m512i) {
+        // SAFETY: AVX-512F is enabled.
+        unsafe { Self::deinterleave(x0, x1) }
+    }
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn reorder(x: __m512i) -> __m512i {
+        x
     }
     #[inline]
     #[target_feature(enable = "avx512f")]
@@ -398,6 +416,17 @@ impl Simd for W4 {
         let lo = _mm256_unpacklo_epi64(x0, x1);
         let hi = _mm256_unpackhi_epi64(x0, x1);
         (_mm256_permute4x64_epi64::<0b11_01_10_00>(lo), _mm256_permute4x64_epi64::<0b11_01_10_00>(hi))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn deinterleave_any(x0: __m256i, x1: __m256i) -> (__m256i, __m256i) {
+        // Items in the order 0, 2, 1, 3: [r0 r4 r2 r6] and [r1 r5 r3 r7], no permute.
+        (_mm256_unpacklo_epi64(x0, x1), _mm256_unpackhi_epi64(x0, x1))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn reorder(x: __m256i) -> __m256i {
+        _mm256_permute4x64_epi64::<0b11_01_10_00>(x)
     }
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -980,6 +1009,15 @@ mod tests {
         let (even, odd) = unsafe { (B::lanes(even), B::lanes(odd)) };
         for j in 0..l {
             assert_eq!((even[j], odd[j]), (2 * j as u64, 2 * j as u64 + 1), "deinterleave");
+        }
+        // The unordered split puts item k where `reorder` puts per-item value k.
+        let items: Vec<u64> = (0..l as u64).collect();
+        let (even, odd) = unsafe { B::deinterleave_any(B::load(rows.as_ptr()), B::load(rows.as_ptr().add(l))) };
+        let (even, odd, order) = unsafe { (B::lanes(even), B::lanes(odd), B::lanes(B::reorder(B::load(items.as_ptr())))) };
+        let back = unsafe { B::lanes(B::reorder(B::reorder(B::load(items.as_ptr())))) };
+        for j in 0..l {
+            assert_eq!((even[j], odd[j]), (2 * order[j], 2 * order[j] + 1), "deinterleave_any");
+            assert_eq!(back[j], j as u64, "reorder is an involution");
         }
     }
 

@@ -77,11 +77,12 @@ unsafe fn fold_wide<B: crate::wide::Simd>(r: K, lanes: &[Planes<'_>], out: &[Out
         let rs = split_k::<B>(bck::<B>(r));
         for (lane, &o) in lanes.iter().zip(out) {
             for row in (row0..stop).step_by(l) {
-                let (e0, o0) = B::deinterleave(B::load(lane.0.as_ptr().add(2 * row)), B::load(lane.0.as_ptr().add(2 * row + l)));
-                let (e1, o1) = B::deinterleave(B::load(lane.1.as_ptr().add(2 * row)), B::load(lane.1.as_ptr().add(2 * row + l)));
+                // Rows in the backend's item order; the two outputs are put back in order.
+                let (e0, o0) = B::deinterleave_any(B::load(lane.0.as_ptr().add(2 * row)), B::load(lane.0.as_ptr().add(2 * row + l)));
+                let (e1, o1) = B::deinterleave_any(B::load(lane.1.as_ptr().add(2 * row)), B::load(lane.1.as_ptr().add(2 * row + l)));
                 let folded = kfold::<B>((e0, e1), (o0, o1), rs);
-                B::store((o.0 as *mut u64).add(row), folded.0);
-                B::store((o.1 as *mut u64).add(row), folded.1);
+                B::store((o.0 as *mut u64).add(row), B::reorder(folded.0));
+                B::store((o.1 as *mut u64).add(row), B::reorder(folded.1));
             }
         }
         fold_scalar(r, lanes, out, stop, row1);
@@ -676,8 +677,10 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
         for k in (k0..stop).step_by(l) {
             for li in 0..width {
                 let (c0, c1) = lanes[li];
-                let (e0, o0) = B::deinterleave(B::load(c0.as_ptr().add(2 * k)), B::load(c0.as_ptr().add(2 * k + l)));
-                let (e1, o1) = B::deinterleave(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
+                // Items in the backend's lane order (the sums do not depend on it; the
+                // weights are put in the same order).
+                let (e0, o0) = B::deinterleave_any(B::load(c0.as_ptr().add(2 * k)), B::load(c0.as_ptr().add(2 * k + l)));
+                let (e1, o1) = B::deinterleave_any(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
                 // Every term reads the split coordinates; only the second factor of a product
                 // reads the doubled second coordinate, and only products read the difference.
                 let bit = 1_u64 << li;
@@ -704,7 +707,10 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
                 }
             }
             let w = match weights {
-                Some(w) => Some(split_k::<B>(loadk::<B>(w, k - k0))),
+                Some(w) => {
+                    let (w0, w1) = loadk::<B>(w, k - k0);
+                    Some(split_k::<B>((B::reorder(w0), B::reorder(w1))))
+                }
                 None => None,
             };
             for s in 0..slots {
