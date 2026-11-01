@@ -1,4 +1,4 @@
-//! `agg`: ML-DSA-44 aggregate signatures, mode A (`docs/spec.md`).
+//! `agg`: ML-DSA aggregate signatures (ML-DSA-44, 65 and 87), mode A (`docs/spec.md`).
 //! Subcommands `keygen-batch`, `sign-batch`, `aggregate`, `verify` and `bench`; run
 //! `agg help` for the options.
 

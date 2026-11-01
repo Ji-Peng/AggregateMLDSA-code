@@ -52,26 +52,32 @@ use std::time::{Duration, Instant};
 use agg_keccak::flock_union::CommitData;
 use agg_keccak::gate::ChainGate;
 use agg_keccak::prover::{KeccakProof, Profile};
-use agg_keccak::sponge::{sponge_gate, SpongeRecord};
+use agg_keccak::prover::KeccakError;
+use agg_keccak::sponge::{sponge_gate, sponge_gate_for, SpongeRecord};
 use agg_keccak::tied::{TiedCommitment, TiedCommitted, TiedPart};
 use agg_keccak::witness::SlotBuffers;
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::{CommitmentManifest, Relation};
 use agg_piop::pow::KeccakPlan;
+use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
 use agg_piop::prover::{
-    main_tables, prove_with_tables_using, BridgeDerivation, BridgeTamper, KeccakSide, ProveError,
-    ProveHooks, ProveTimings, ProverInputs, SeededMatrices,
+    main_tables, main_tables_for, prove_lanes_with_tables_using, prove_with_tables_using,
+    BridgeDerivation, BridgeTamper, KeccakSide, ProveError, ProveHooks, ProveTimings,
+    ProverInputs, SeededMatrices,
 };
 use agg_piop::public_data::{KeyCache, PublicData};
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTableError};
 use agg_piop::verifier::{
-    verify_timed, KeccakVerifier, SegmentContext, VerifyError, VerifyReport, VerifyTimings,
+    verify_lanes_timed, verify_timed, KeccakVerifier, SegmentContext, VerifyError, VerifyReport,
+    VerifyTimings,
 };
 use agg_piop::wire::{pack_final_vector, unpack_final_vector, AggregateProof, ProofSize};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::{InstanceError, PublicInstance};
 use agg_witness::padding::{main_index, Geometry};
-use agg_witness::params::{C_TILDE_BYTES, K, N, PK_BYTES, SIG_BYTES, W1_ENCODE_BYTES};
+use agg_witness::params::{
+    ParamSet, Set, Set44, Set65, Set87, C_TILDE_BYTES, K, N, PK_BYTES, SIG_BYTES, W1_ENCODE_BYTES,
+};
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
@@ -287,8 +293,8 @@ impl SegmentParts {
 /// parity chain's copy of `b'`) of one part from its records; the honest builder is
 /// `TiedPart::honest_parts`. Called at the commitment phase and again for the proof (unless the batch has
 /// one part, whose witness is kept), so it must be deterministic. Arguments: the part's context, `sigma`, the part index, the part's records.
-pub type PartWitness<'a> =
-    &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) + Sync);
+pub type PartWitness<'a, P = Set44> =
+    &'a (dyn Fn(&TiedPart<'_>, usize, usize, &[SpongeRecord<P>]) -> (SlotBuffers, Vec<u64>) + Sync);
 
 /// Wall time and size of one Flock part on the prover side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -310,17 +316,17 @@ pub struct PartProveLog {
     pub proof_bytes: usize,
 }
 
-/// The prover's Keccak side of mode A (module docs).
-pub struct FlockProver<'g, 'h> {
+/// The prover's Keccak side of mode A (module docs) for the records of parameter set `P`.
+pub struct FlockProver<'g, 'h, P: ParamSet = Set44> {
     gate: &'g ChainGate,
     profile: FlockProfile,
     span: bool,
     geometry: Geometry,
-    records: Vec<SpongeRecord>,
+    records: Vec<SpongeRecord<P>>,
     part_log2: u32,
     /// Smallest `d_part` the prover uses (`min_part_log2` unless a test lowers it).
     part_floor: u32,
-    witness: Option<PartWitness<'h>>,
+    witness: Option<PartWitness<'h, P>>,
     state: Mutex<ProverState<'g>>,
 }
 
@@ -348,7 +354,7 @@ struct ProverState<'g> {
     log: Vec<PartProveLog>,
 }
 
-impl<'g, 'h> FlockProver<'g, 'h> {
+impl<'g, 'h, P: ParamSet> FlockProver<'g, 'h, P> {
     /// The Keccak side for the live records `(mu_i, w1Encode(w_1'_i))` of a batch.
     ///
     /// # Panics
@@ -357,9 +363,9 @@ impl<'g, 'h> FlockProver<'g, 'h> {
     pub fn new(
         gate: &'g ChainGate,
         geometry: Geometry,
-        records: Vec<SpongeRecord>,
+        records: Vec<SpongeRecord<P>>,
         part_log2: u32,
-        witness: Option<PartWitness<'h>>,
+        witness: Option<PartWitness<'h, P>>,
     ) -> Self {
         assert_eq!(
             records.len(),
@@ -431,7 +437,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         &self,
         seg: &TiedPart<'_>,
         (sigma, s): (usize, usize),
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<P>],
         commitment: TiedCommitment,
         commit_data: Option<CommitData>,
         kept: Option<TiedCommitted>,
@@ -458,7 +464,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
         seg: &TiedPart<'_>,
         sigma: usize,
         part: usize,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<P>],
     ) -> (SlotBuffers, Vec<u64>) {
         match self.witness {
             Some(f) => f(seg, sigma, part, records),
@@ -565,7 +571,7 @@ impl<'g, 'h> FlockProver<'g, 'h> {
     }
 }
 
-impl KeccakSide for FlockProver<'_, '_> {
+impl<P: ParamSet> KeccakSide for FlockProver<'_, '_, P> {
     /// The sites of every tied part ([`keccak_plan`]).
     fn plan(&self, segments: usize) -> KeccakPlan {
         assert_eq!(segments, self.geometry.segments(), "segments of the batch");
@@ -805,6 +811,8 @@ pub enum SegmentRejection {
 /// The verifier's Keccak side of mode A (module docs).
 pub struct FlockVerifier<'g> {
     gate: &'g ChainGate,
+    /// The parameter set of the gate (the width of `c~`).
+    set: Set,
     profile: FlockProfile,
     log: Mutex<Vec<PartVerifyLog>>,
     rejection: Mutex<Option<(usize, SegmentRejection)>>,
@@ -820,7 +828,8 @@ struct SpanStash {
     proof: Vec<u8>,
     record: [u8; 32],
     mu: Vec<[u8; 64]>,
-    c_tilde: Vec<[u8; C_TILDE_BYTES]>,
+    /// The `c~` of every covered record, concatenated.
+    c_tilde: Vec<u8>,
     final_vectors: Vec<Vec<u8>>,
     seeds: Vec<[u8; 32]>,
 }
@@ -839,9 +848,20 @@ impl<'g> FlockVerifier<'g> {
     /// If `profile` is not a mode-A profile.
     #[must_use]
     pub fn with_profile(gate: &'g ChainGate, profile: FlockProfile) -> Self {
+        Self::for_set(gate, Set::S44, profile)
+    }
+
+    /// The verifier side of parameter set `set` (`gate` is that set's sponge gate,
+    /// `agg_keccak::sponge::sponge_gate_for`) under the mode-A Flock profile `profile`.
+    ///
+    /// # Panics
+    /// If `profile` is not a mode-A profile.
+    #[must_use]
+    pub fn for_set(gate: &'g ChainGate, set: Set, profile: FlockProfile) -> Self {
         ligerito_of(profile);
         Self {
             gate,
+            set,
             profile,
             log: Mutex::new(Vec::new()),
             rejection: Mutex::new(None),
@@ -942,7 +962,9 @@ impl<'g> FlockVerifier<'g> {
         );
         let setup = start.elapsed();
         let outcome = TiedCommitment::from_bytes(&st.commitment).and_then(|commitment| {
-            seg.verify(
+            verify_tied(
+                &seg,
+                self.set,
                 &st.mu,
                 &st.c_tilde,
                 &commitment,
@@ -965,6 +987,32 @@ impl<'g> FlockVerifier<'g> {
             Ok(()) => true,
             Err(e) => self.reject(sigma, SegmentRejection::Part(0, e.to_string())),
         }
+    }
+}
+
+/// [`TiedPart::verify`] with the `c~` of `set` given concatenated.
+#[allow(clippy::too_many_arguments)]
+fn verify_tied(
+    part: &TiedPart<'_>,
+    set: Set,
+    mu: &[[u8; 64]],
+    c_tilde: &[u8],
+    commitment: &TiedCommitment,
+    bridge_seed: [u8; 32],
+    matrices: &BridgeMatrices,
+    final_vectors: &[Vec<u8>],
+    seed: &[u8; 32],
+    proof: &KeccakProof,
+) -> Result<(), KeccakError> {
+    fn chunks<const C: usize>(bytes: &[u8]) -> &[[u8; C]] {
+        let (chunks, rest) = bytes.as_chunks::<C>();
+        debug_assert!(rest.is_empty(), "whole c~ values");
+        chunks
+    }
+    match set {
+        Set::S44 => part.verify(mu, chunks::<32>(c_tilde), commitment, bridge_seed, matrices, final_vectors, seed, proof),
+        Set::S65 => part.verify(mu, chunks::<48>(c_tilde), commitment, bridge_seed, matrices, final_vectors, seed, proof),
+        Set::S87 => part.verify(mu, chunks::<64>(c_tilde), commitment, bridge_seed, matrices, final_vectors, seed, proof),
     }
 }
 
@@ -1100,9 +1148,12 @@ impl KeccakVerifier for FlockVerifier<'_> {
             };
             // Parts 0 .. count - 1 carry their share; the last one's is implied.
             let share = shares.get(s).unwrap_or(&last);
-            let outcome = seg.verify(
+            let width = agg_piop::wire::c_tilde_bytes(self.set);
+            let outcome = verify_tied(
+                &seg,
+                self.set,
                 &segment.mu[range.clone()],
-                &segment.c_tilde[range.clone()],
+                &segment.c_tilde[range.start * width..range.end * width],
                 &commitment,
                 *segment.bridge_seed,
                 segment.matrices,
@@ -1128,7 +1179,7 @@ impl KeccakVerifier for FlockVerifier<'_> {
     }
 }
 
-/// A signed record `(pk, M, signature)` (pure ML-DSA-44, empty context).
+/// A signed record `(pk, M, signature)` (pure ML-DSA, empty context).
 pub type SignedRecord<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 
 /// Aggregator configuration.
@@ -1143,8 +1194,11 @@ pub struct AggregatorConfig {
     /// are whole segments (module docs; default on).
     pub span: bool,
     /// The relation to prove (`docs/h-exact.md`; default H-u). The Keccak side
-    /// does not depend on it.
+    /// does not depend on it. ML-DSA-65 and ML-DSA-87 have H-u only.
     pub relation: Relation,
+    /// The parameter set of the records (default ML-DSA-44; bound in the instance record
+    /// and the proof header).
+    pub set: Set,
 }
 
 impl Default for AggregatorConfig {
@@ -1154,7 +1208,16 @@ impl Default for AggregatorConfig {
             profile: FLOCK_PROFILE,
             span: true,
             relation: Relation::Hu,
+            set: Set::S44,
         }
+    }
+}
+
+/// The production sponge gate of `set` (ML-DSA-44's is [`sponge_gate`]).
+fn gate_of(set: Set) -> ChainGate {
+    match set {
+        Set::S44 => sponge_gate(),
+        other => sponge_gate_for(other),
     }
 }
 
@@ -1172,7 +1235,8 @@ impl AggregatorConfig {
 /// An aggregator failure.
 #[derive(Debug)]
 pub enum AggregateError {
-    /// No record, or more than `2^15`.
+    /// No record, or more than `2^15` (ML-DSA-65 and ML-DSA-87: fewer than
+    /// `agg_piop::prover::LANE_MIN_RECORDS`).
     Count(usize),
     /// Record `i` has a public key or signature of the wrong length.
     Malformed(usize, &'static str),
@@ -1182,16 +1246,27 @@ pub enum AggregateError {
     Prove(ProveError),
     /// The configured Flock profile is not a mode-A profile.
     Profile(FlockProfile),
+    /// The relation is not defined for the parameter set (ML-DSA-65 and ML-DSA-87: H-u only).
+    Relation(Set, Relation),
 }
 
 impl std::fmt::Display for AggregateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Count(n) => write!(f, "{n} records: an aggregate holds 1 to 2^15"),
+            Self::Count(n) => write!(
+                f,
+                "{n} records: an aggregate holds 1 to 2^15 (ML-DSA-65 and ML-DSA-87: {} to 2^15)",
+                agg_piop::prover::LANE_MIN_RECORDS
+            ),
             Self::Malformed(i, what) => write!(f, "record {i}: {what}"),
             Self::Signature(i, why) => write!(f, "record {i}: signature rejected ({why})"),
             Self::Prove(e) => write!(f, "prover: {e}"),
             Self::Profile(p) => write!(f, "Flock profile {p:?} is not a mode-A profile"),
+            Self::Relation(set, relation) => write!(
+                f,
+                "relation {relation} is not available for ML-DSA-{} (H-u only)",
+                set.name()
+            ),
         }
     }
 }
@@ -1495,7 +1570,7 @@ impl Aggregator {
     #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         Self {
-            gate: sponge_gate(),
+            gate: gate_of(config.set),
             config,
         }
     }
@@ -1521,6 +1596,173 @@ impl Aggregator {
     /// As [`Self::aggregate`].
     #[doc(hidden)]
     pub fn aggregate_with(
+        &self,
+        records: &[SignedRecord<'_>],
+        hooks: &AggregateHooks<'_>,
+    ) -> Result<Aggregate, AggregateError> {
+        match self.config.set {
+            Set::S44 => self.aggregate_44(records, hooks),
+            Set::S65 => self.aggregate_lanes::<Set65>(records, hooks),
+            Set::S87 => self.aggregate_lanes::<Set87>(records, hooks),
+        }
+    }
+
+    /// The report and the aggregate of a prover run.
+    fn finish(
+        &self,
+        start: Instant,
+        n: usize,
+        instance_time: Duration,
+        tables_time: Duration,
+        flock_time: Duration,
+        mut output: agg_piop::prover::ProverOutput,
+        parts: Vec<PartProveLog>,
+    ) -> Aggregate {
+        output.timings.tables = tables_time;
+        output.timings.total += tables_time;
+        let bytes = output.proof.to_bytes();
+        let size = output.proof.size();
+        debug_assert_eq!(size.total(), bytes.len());
+        let report = ProveReport {
+            relation: self.config.relation,
+            records: n,
+            profile: self.config.profile,
+            instance: instance_time,
+            timings: output.timings,
+            flock_records: flock_time,
+            parts,
+            size,
+            bridge_seed: output.bridge_seed,
+            total: start.elapsed(),
+        };
+        agg_piop::prover::phase_stamp("end");
+        Aggregate {
+            proof: output.proof,
+            bytes,
+            report,
+        }
+    }
+
+    /// [`Self::aggregate_with`] for a parameter set with polynomial lanes (ML-DSA-65,
+    /// ML-DSA-87): the same steps on the set's instance, tables, sponge records and lane
+    /// public data. The hooks that build the Flock witness from ML-DSA-44 records
+    /// (`tamper_flock_records`, `flock_witness`, `stale_bridge`) are not available.
+    fn aggregate_lanes<P: ParamSet>(
+        &self,
+        records: &[SignedRecord<'_>],
+        hooks: &AggregateHooks<'_>,
+    ) -> Result<Aggregate, AggregateError>
+    where
+        P::CTilde: Sync,
+    {
+        assert!(
+            hooks.tamper_flock_records.is_none() && hooks.flock_witness.is_none() && !hooks.stale_bridge,
+            "the Flock-record hooks are ML-DSA-44 only"
+        );
+        let start = Instant::now();
+        agg_piop::prover::phase_stamp("start");
+        let n = records.len();
+        if !(agg_piop::prover::LANE_MIN_RECORDS..=1 << 15).contains(&n) {
+            return Err(AggregateError::Count(n));
+        }
+        let profile = self.config.profile;
+        if keccak_profile(profile).is_none() {
+            return Err(AggregateError::Profile(profile));
+        }
+        let relation = self.config.relation;
+        if relation != Relation::Hu {
+            return Err(AggregateError::Relation(P::SET, relation));
+        }
+        // The Akita setup and the lane public data on their own thread, as for ML-DSA-44.
+        let (public_tx, public_rx) = std::sync::mpsc::channel::<Arc<PublicInstance<P>>>();
+        let early_setup = std::thread::Builder::new()
+            .name("agg-setup".into())
+            .spawn(move || {
+                let committer = CommitmentManifest::for_set(P::SET, n, relation)
+                    .ok()
+                    .and_then(|m| agg_piop::pcs::TableCommitter::new(m).ok());
+                if let Some(committer) = &committer {
+                    let _ = committer.warm();
+                }
+                let public = public_rx
+                    .recv()
+                    .ok()
+                    .map(|instance| LanePublicData::from_instance(&instance));
+                (committer, public)
+            })
+            .ok();
+        for (i, (pk, _, sig)) in records.iter().enumerate() {
+            if pk.len() != P::PK_BYTES {
+                return Err(AggregateError::Malformed(i, "public key length"));
+            }
+            if sig.len() != P::SIG_BYTES {
+                return Err(AggregateError::Malformed(i, "signature length"));
+            }
+        }
+        let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+            .iter()
+            .map(|&(pk, msg, sig)| (pk, msg, P::c_tilde_from_slice(&sig[..P::C_TILDE_BYTES])))
+            .collect();
+        let signatures: Vec<&[u8]> = records.iter().map(|r| r.2).collect();
+        let instance = Arc::new(PublicInstance::<P>::new_for(&inputs).map_err(|e| match e {
+            InstanceError::PublicKey(i) => AggregateError::Malformed(i, "public key"),
+            InstanceError::Geometry(_) => AggregateError::Count(n),
+        })?);
+        let _ = public_tx.send(Arc::clone(&instance));
+        let instance_time = start.elapsed();
+        agg_piop::prover::phase_stamp("instance");
+        let prover_inputs = ProverInputs {
+            instance: &instance,
+            records: &inputs,
+            signatures: &signatures,
+            relation,
+        };
+        let clock = Instant::now();
+        let (manifest, honest) = main_tables_for(&prover_inputs)?;
+        let tables_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("tables");
+        let clock = Instant::now();
+        let tampered = hooks.tamper_main.map(|tamper| {
+            let mut main = honest.clone();
+            tamper(&manifest, &mut main);
+            main
+        });
+        let main = tampered.as_ref().unwrap_or(&honest);
+        let flock_records =
+            sponge_records_for(&instance, &manifest, if hooks.flock_from_tampered { main } else { &honest });
+        let flock_time = clock.elapsed();
+        agg_piop::prover::phase_stamp("flock-records");
+        let side = FlockProver::<P>::new(&self.gate, main.geometry(), flock_records, self.config.part_log2, None)
+            .profile(profile)
+            .span(self.config.span);
+        let side = match hooks.part_floor {
+            Some(floor) => side.part_floor(floor),
+            None => side,
+        };
+        let prove_hooks = ProveHooks {
+            unchecked: hooks.tamper_main.is_some() || hooks.tamper_bridge.is_some(),
+            tamper_bridge: hooks.tamper_bridge,
+            swap_join: false,
+        };
+        let (committer, public) = early_setup
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or((None, None));
+        let output = prove_lanes_with_tables_using(
+            committer,
+            public,
+            &prover_inputs,
+            &manifest,
+            main,
+            &SeededMatrices,
+            &side,
+            profile,
+            &prove_hooks,
+        )?;
+        Ok(self.finish(start, n, instance_time, tables_time, flock_time, output, side.log()))
+    }
+
+    /// [`Self::aggregate_with`] for ML-DSA-44.
+    fn aggregate_44(
         &self,
         records: &[SignedRecord<'_>],
         hooks: &AggregateHooks<'_>,
@@ -1642,7 +1884,7 @@ impl Aggregator {
         let (committer, public) = early_setup
             .and_then(|handle| handle.join().ok())
             .unwrap_or((None, None));
-        let mut output = if hooks.stale_bridge {
+        let output = if hooks.stale_bridge {
             prove_with_tables_using(
                 committer,
                 public,
@@ -1667,29 +1909,7 @@ impl Aggregator {
                 &prove_hooks,
             )?
         };
-        output.timings.tables = tables_time;
-        output.timings.total += tables_time;
-        let bytes = output.proof.to_bytes();
-        let size = output.proof.size();
-        debug_assert_eq!(size.total(), bytes.len());
-        let report = ProveReport {
-            relation: self.config.relation,
-            records: n,
-            profile,
-            instance: instance_time,
-            timings: output.timings,
-            flock_records: flock_time,
-            parts: side.log(),
-            size,
-            bridge_seed: output.bridge_seed,
-            total: start.elapsed(),
-        };
-        agg_piop::prover::phase_stamp("end");
-        Ok(Aggregate {
-            proof: output.proof,
-            bytes,
-            report,
-        })
+        Ok(self.finish(start, n, instance_time, tables_time, flock_time, output, side.log()))
     }
 }
 
@@ -1809,6 +2029,17 @@ pub struct AggregateVerifier {
     gate: ChainGate,
     require: Option<FlockProfile>,
     relation: Relation,
+    set: Set,
+}
+
+/// The verifier's key cache of the verified parameter set.
+pub enum KeyCacheMut<'c> {
+    /// No cache: every key is expanded.
+    None,
+    /// ML-DSA-44 keys.
+    Rows(&'c mut KeyCache),
+    /// ML-DSA-65 or ML-DSA-87 keys.
+    Lanes(&'c mut LaneKeyCache),
 }
 
 impl Default for AggregateVerifier {
@@ -1821,11 +2052,25 @@ impl AggregateVerifier {
     /// A verifier.
     #[must_use]
     pub fn new() -> Self {
+        Self::for_set(Set::S44)
+    }
+
+    /// A verifier of aggregates of parameter set `set`. The set is the verifier's choice,
+    /// like the relation: an aggregate whose header names another set is rejected.
+    #[must_use]
+    pub fn for_set(set: Set) -> Self {
         Self {
-            gate: sponge_gate(),
+            gate: gate_of(set),
             require: None,
             relation: Relation::Hu,
+            set,
         }
+    }
+
+    /// The parameter set verified.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
     }
 
     /// Verify under `relation` (default H-u). The relation is the verifier's choice: an
@@ -1866,11 +2111,27 @@ impl AggregateVerifier {
     /// Verify `aggregate` for the records `(pk_i, M_i)`. The verifier computes `tr_i`, `mu_i`,
     /// `c_i = SampleInBall(c~_i)`, `T_i` and the `ExpandA` data itself; with `cache`, keys
     /// found there are not expanded again and new expansions are added.
+    ///
+    /// # Panics
+    /// With a cache for a verifier of ML-DSA-65 or ML-DSA-87 (use [`Self::verify_with`]).
     pub fn verify(
         &self,
         statements: &[(&[u8], &[u8])],
         aggregate: &[u8],
         cache: Option<&mut KeyCache>,
+    ) -> VerifyCostReport {
+        self.verify_with(statements, aggregate, cache.map_or(KeyCacheMut::None, KeyCacheMut::Rows))
+    }
+
+    /// [`Self::verify`] with the key cache of any parameter set.
+    ///
+    /// # Panics
+    /// If the cache is of another parameter set than the verifier's.
+    pub fn verify_with(
+        &self,
+        statements: &[(&[u8], &[u8])],
+        aggregate: &[u8],
+        cache: KeyCacheMut<'_>,
     ) -> VerifyCostReport {
         let probe = Instant::now();
         let profile = self.profile_of(aggregate);
@@ -1879,18 +2140,52 @@ impl AggregateVerifier {
         } else {
             probe.elapsed()
         };
-        let keccak = FlockVerifier::with_profile(&self.gate, profile);
-        let cached = cache.is_some();
+        let keccak = FlockVerifier::for_set(&self.gate, self.set, profile);
+        let cached = !matches!(cache, KeyCacheMut::None);
         let report = if self.require.is_some() || DEFAULT_ACCEPTED_PROFILES.contains(&profile) {
-            verify_timed(
-                statements,
-                aggregate,
-                &SeededMatrices,
-                &keccak,
-                profile,
-                self.relation,
-                cache,
-            )
+            match (self.set, cache) {
+                (Set::S44, KeyCacheMut::None) => verify_timed(
+                    statements,
+                    aggregate,
+                    &SeededMatrices,
+                    &keccak,
+                    profile,
+                    self.relation,
+                    None,
+                ),
+                (Set::S44, KeyCacheMut::Rows(cache)) => verify_timed(
+                    statements,
+                    aggregate,
+                    &SeededMatrices,
+                    &keccak,
+                    profile,
+                    self.relation,
+                    Some(cache),
+                ),
+                (set, KeyCacheMut::None) if set != Set::S44 => verify_lanes_timed(
+                    set,
+                    statements,
+                    aggregate,
+                    &SeededMatrices,
+                    &keccak,
+                    profile,
+                    self.relation,
+                    None,
+                ),
+                (set, KeyCacheMut::Lanes(cache)) if set != Set::S44 && cache.set() == set => {
+                    verify_lanes_timed(
+                        set,
+                        statements,
+                        aggregate,
+                        &SeededMatrices,
+                        &keccak,
+                        profile,
+                        self.relation,
+                        Some(cache),
+                    )
+                }
+                (set, _) => panic!("a key cache of another parameter set than ML-DSA-{}", set.name()),
+            }
         } else {
             VerifyReport {
                 outcome: Err(VerifyError::ProfileNotAccepted(profile)),
@@ -2082,7 +2377,7 @@ mod tests {
                 seed: &[sigma as u8; 32],
                 bridge_seed: &[0; 32],
                 mu: &mu[..live[sigma]],
-                c_tilde: &c_tilde[..live[sigma]],
+                c_tilde: c_tilde[..live[sigma]].as_flattened(),
                 final_vector: &zero,
                 shares,
                 record: &[7; 32],

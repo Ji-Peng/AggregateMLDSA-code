@@ -272,9 +272,11 @@ impl KeccakVerifier for PublicBitsVerifier {
 
     fn verify(&self, segment: &SegmentContext<'_>) -> bool {
         let live = segment.mu.len();
+        let (c_tilde, rest) = segment.c_tilde.as_chunks::<{ agg_witness::params::C_TILDE_BYTES }>();
         if !segment.proof.is_empty()
             || !segment.shares.is_empty()
-            || segment.c_tilde.len() != live
+            || !rest.is_empty()
+            || c_tilde.len() != live
             || segment.commitment.len() != live * W1_RECORD_BYTES
             || segment.final_vector.len() != M3
         {
@@ -283,7 +285,7 @@ impl KeccakVerifier for PublicBitsVerifier {
         let values: Option<Vec<SmallK>> = segment
             .commitment
             .par_chunks_exact(W1_RECORD_BYTES)
-            .zip(segment.mu.par_iter().zip(segment.c_tilde))
+            .zip(segment.mu.par_iter().zip(c_tilde))
             .map(|(bytes, (mu, c_tilde))| {
                 let bytes: &[u8; W1_RECORD_BYTES] = bytes.try_into().expect("768 bytes");
                 let w1 = w1_decode(bytes);
@@ -518,7 +520,7 @@ mod tests {
                 seed: &[0; 32],
                 bridge_seed: &[0; 32],
                 mu: &mu,
-                c_tilde,
+                c_tilde: c_tilde.as_flattened(),
                 final_vector,
                 shares: &[],
                 record: &[0; 32],

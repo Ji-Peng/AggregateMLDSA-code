@@ -218,3 +218,90 @@ fn keygen_sign_aggregate_verify_and_bench() {
     }
 }
 
+
+/// `--params 65` and `--params 87`: keys, records, aggregate, verify (with the per-set key
+/// cache), tamper rejection, and the refusals across sets and relations.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Flock and Akita proofs: run with --release"
+)]
+fn ml_dsa_65_and_87_through_the_binary() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agg-cli-sets");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |name: &str| dir.join(name);
+    for (params, other) in [("65", "87"), ("87", "65")] {
+        let (keys, recs, aggregate, key_cache) = (
+            file(&format!("keys{params}.bin")),
+            file(&format!("records{params}.bin")),
+            file(&format!("aggregate{params}.bin")),
+            file(&format!("cache{params}.bin")),
+        );
+        let _ = std::fs::remove_file(&key_cache);
+        let run = |args: &[&str]| {
+            let mut all = args.to_vec();
+            all.extend(["--params", params]);
+            agg(&all)
+        };
+        let (code, out) = run(&["keygen-batch", "--count", "3", "--seed", "5", "--out", s(&keys)]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains(&format!("ML-DSA-{params} key pairs")), "{out}");
+        let (code, out) = run(&["sign-batch", "--keys", s(&keys), "--count", "20", "--seed", "5", "--out", s(&recs)]);
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&aggregate)]);
+        assert_eq!(code, 0, "{out}");
+        let c_tilde = if params == "65" { 960 } else { 1280 };
+        assert!(out.contains(&format!("{:<26} {c_tilde:>10} B", "c~ list")), "{out}");
+        // Batches of the lane sets hold at least 17 records.
+        let small = file(&format!("small{params}.bin"));
+        let (code, out) = run(&["sign-batch", "--keys", s(&keys), "--count", "16", "--out", s(&small)]);
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = run(&["aggregate", "--records", s(&small), "--out", s(&file("x.agg"))]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("17 to 2^15"), "{out}");
+        let verify = |args: &[&str]| {
+            let mut all = vec!["verify", "--records", s(&recs)];
+            all.extend_from_slice(args);
+            run(&all)
+        };
+        let (code, out) = verify(&["--aggregate", s(&aggregate)]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains(": accept") && out.contains("keys expanded in this run: 3"), "{out}");
+        let (code, out) = verify(&["--aggregate", s(&aggregate), "--cache", s(&key_cache)]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("3 keys (3 new)"), "{out}");
+        let (code, out) = verify(&["--aggregate", s(&aggregate), "--cache", s(&key_cache)]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("cached keys") && out.contains("keys expanded in this run: 0"), "{out}");
+        // A flipped byte in the middle of the aggregate is rejected.
+        let mut bytes = std::fs::read(&aggregate).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        let bad = file(&format!("bad{params}.bin"));
+        std::fs::write(&bad, &bytes).unwrap();
+        let (code, out) = verify(&["--aggregate", s(&bad)]);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains(": reject"), "{out}");
+        // Refusals: the records under another set, another relation, a cache of another set.
+        let (code, out) = agg(&["verify", "--records", s(&recs), "--aggregate", s(&aggregate), "--params", other]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains(&format!("--params {params}")), "{out}");
+        let (code, out) = agg(&["aggregate", "--records", s(&recs), "--out", s(&bad)]);
+        assert_eq!(code, 2, "{out}");
+        let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&bad), "--relation", "h-exact"]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("H-u only"), "{out}");
+        let (code, out) = verify(&["--aggregate", s(&aggregate), "--relation", "h-exact"]);
+        assert_ne!(code, 0, "{out}");
+        // An (empty) ML-DSA-44 cache file.
+        let cross = file("cache44.bin");
+        std::fs::write(&cross, [b"AGGKCACH".as_slice(), &[2, 0x44, 0, 0, 0, 0]].concat()).unwrap();
+        let (code, out) = verify(&["--aggregate", s(&aggregate), "--cache", s(&cross)]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains(&format!("ML-DSA-44 keys, not ML-DSA-{params}")), "{out}");
+    }
+    // An ML-DSA-65 aggregate verified as ML-DSA-87 with records whose keys pass the length
+    // check is impossible (the key lengths differ), so the header check is covered by the
+    // library tests; an unknown set name is a usage error.
+    assert_eq!(agg(&["keygen-batch", "--count", "1", "--params", "66", "--out", s(&file("x.bin"))]).0, 2);
+}

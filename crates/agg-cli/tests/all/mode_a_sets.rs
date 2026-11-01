@@ -5,8 +5,9 @@
 //! commitment is absorbed before the bridge seed, its final vector is the F_p side's public
 //! `Y` and is absorbed at the final-vector step, and the part's Flock seed is the span seed
 //! of the transcript's Flock seed and final-vector record. The verifier builds its public
-//! data from `(pk, M, c~)` only. What the full mode-A driver adds (the Akita opening and the
-//! wire format) is not exercised here. Run with `--release`.
+//! data from `(pk, M, c~)` only. The full mode-A driver (`Aggregator`, `AggregateVerifier`:
+//! the Akita opening and the wire format) runs at the end, with tampered witnesses and
+//! aggregates. Run with `--release`.
 
 use agg_bridge::seed::derive_matrices_for;
 use agg_bridge::Shape;
@@ -17,6 +18,7 @@ use agg_keccak::tied::TiedPart;
 use agg_piop::binding::{instance_record, public_records_binding, FlockProfile};
 use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
 use agg_piop::manifest::{CommitmentManifest, GroupRole, Relation};
+use agg_witness::params::Set;
 use agg_piop::pow::PowPlan;
 use agg_piop::prover::prove_piop_lanes;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
@@ -183,4 +185,93 @@ fn ml_dsa_65_end_to_end_without_the_opening_at_1k() {
 #[cfg_attr(debug_assertions, ignore = "Flock and PIOP proofs; run with --release")]
 fn ml_dsa_87_end_to_end_without_the_opening_at_1k() {
     on_large_stack(|| end_to_end::<Set87, 64>(0x8701, 1024));
+}
+
+/// The full mode-A driver for a set with lanes: `Aggregator` (instance, tables, Flock side,
+/// PIOP, Akita opening, wire bytes) and `AggregateVerifier` from `(pk, M)` only, uncached
+/// and with a warm `LaneKeyCache`; then tampered witnesses and aggregates are rejected.
+fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
+    use agg_cli::mode_a::{AggregateError, AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut};
+    use agg_piop::verifier::VerifyError;
+
+    let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n / 4);
+    let signed: Vec<(&[u8], &[u8], &[u8])> =
+        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+    let config = AggregatorConfig { set: P::SET, ..AggregatorConfig::default() };
+    let aggregator = Aggregator::new(config);
+    let aggregate = aggregator.aggregate(&signed).expect("aggregate");
+    assert_eq!(aggregate.proof.set, P::SET);
+    assert_eq!(aggregate.report.size.c_tilde, n * P::C_TILDE_BYTES);
+    for (c, r) in aggregate.c_tilde().iter().zip(&records) {
+        assert_eq!(c.as_slice(), &r.sig[..P::C_TILDE_BYTES]);
+    }
+    eprintln!(
+        "{} full driver at {n}: {} B ({:.1} B/sig)",
+        P::NAME,
+        aggregate.bytes.len(),
+        aggregate.report.bytes_per_signature()
+    );
+    // Deterministic: a second run gives the same bytes.
+    assert_eq!(aggregator.aggregate(&signed).expect("again").bytes, aggregate.bytes);
+
+    let verifier = AggregateVerifier::for_set(P::SET);
+    let report = verifier.verify(&statements, &aggregate.bytes, None);
+    assert!(report.accepted(), "{report}");
+    let mut cache = LaneKeyCache::new(P::SET);
+    let cold = verifier.verify_with(&statements, &aggregate.bytes, KeyCacheMut::Lanes(&mut cache));
+    assert!(cold.accepted(), "{cold}");
+    assert_eq!(cache.len(), n / 4);
+    let warm = verifier.verify_with(&statements, &aggregate.bytes, KeyCacheMut::Lanes(&mut cache));
+    assert_eq!(warm.report.outcome.as_ref().expect("warm").expanded_keys, 0);
+
+    // The verifier's set, never the header's: another set's verifier, and a rewritten set
+    // nibble, are rejected.
+    let wrong = AggregateVerifier::for_set(other).verify(&statements, &aggregate.bytes, None);
+    assert!(matches!(wrong.report.outcome, Err(VerifyError::ParamSet { .. })), "{wrong}");
+    let as_44 = AggregateVerifier::new().verify(&statements, &aggregate.bytes, None);
+    assert!(!as_44.accepted(), "{as_44}");
+    let mut renamed = aggregate.bytes.clone();
+    renamed[2] ^= 0x30;
+    assert!(!verifier.verify(&statements, &renamed, None).accepted());
+    // Another c~ in the list, another message, a flipped byte of the opening.
+    let mut other_c = aggregate.proof.clone();
+    other_c.c_tilde[n / 2][3] ^= 1;
+    assert!(!verifier.verify(&statements, &other_c.to_bytes(), None).accepted());
+    let mut moved = statements.clone();
+    let msg = b"another message".to_vec();
+    moved[1].1 = &msg;
+    assert!(!verifier.verify(&moved, &aggregate.bytes, None).accepted());
+    let mut flipped = aggregate.bytes.clone();
+    let last = flipped.len() - 100;
+    flipped[last] ^= 1;
+    assert!(!verifier.verify(&statements, &flipped, None).accepted());
+    // H-exact is refused for the set.
+    let exact = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..config }).aggregate(&signed);
+    assert!(matches!(exact, Err(AggregateError::Relation(set, Relation::HExact)) if set == P::SET));
+
+    // Tampered witnesses (the prover's self-checks off): a G_main16 cell and a G_main4 cell.
+    let wide = |_: &CommitmentManifest, t: &mut MainTables| {
+        let c = &mut t.wide_mut()[17];
+        *c = if *c < (1 << 15) - 1 { *c + 1 } else { *c - 1 };
+    };
+    let narrow = |_: &CommitmentManifest, t: &mut MainTables| t.columns_mut()[0][17] ^= 1;
+    for (name, tamper) in [("G_main16 cell", &wide as &dyn Fn(&CommitmentManifest, &mut MainTables)), ("G_main4 cell", &narrow)] {
+        let hooks = AggregateHooks { tamper_main: Some(tamper), ..AggregateHooks::default() };
+        let bad = aggregator.aggregate_with(&signed, &hooks).expect("tampered aggregate");
+        let report = verifier.verify(&statements, &bad.bytes, None);
+        assert!(!report.accepted(), "{name}: {report}");
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn ml_dsa_65_full_driver_with_the_opening() {
+    on_large_stack(|| full_driver::<Set65>(0x6511, 256, Set::S87));
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn ml_dsa_87_full_driver_with_the_opening() {
+    on_large_stack(|| full_driver::<Set87>(0x8711, 256, Set::S65));
 }

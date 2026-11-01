@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use agg_pcs_config::commit::{CommitError, GroupClaim, GroupCommitment, PreparedOpening};
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::PublicInstance;
-use agg_witness::params::C_TILDE_BYTES;
+use agg_witness::params::{ParamSet, Set, Set44};
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
 use crate::claims::{MultiplicityClaims, PreStageClaims};
@@ -62,6 +62,17 @@ pub trait BridgeDerivation {
     fn seed_derived(&self) -> bool {
         false
     }
+
+    /// The matrices of `seed` for a batch of parameter set `set` (the bridge shape depends
+    /// on the set: `agg_bridge::Shape::production`). ML-DSA-44 reads [`Self::matrices`]; a
+    /// derivation without a per-set shape refuses the other sets.
+    ///
+    /// # Panics
+    /// For a set other than ML-DSA-44 unless overridden.
+    fn matrices_for(&self, set: Set, seed: &[u8; 32]) -> Cow<'_, BridgeMatrices> {
+        assert_eq!(set, Set::S44, "this bridge derivation has ML-DSA-44's shape only");
+        self.matrices(seed)
+    }
 }
 
 /// The seed-derived matrices: `M_1, M_2, M_3` derived from `sd` with cSHAKE256
@@ -76,6 +87,16 @@ impl BridgeDerivation for SeededMatrices {
 
     fn seed_derived(&self) -> bool {
         true
+    }
+
+    fn matrices_for(&self, set: Set, seed: &[u8; 32]) -> Cow<'_, BridgeMatrices> {
+        match set {
+            Set::S44 => self.matrices(seed),
+            _ => Cow::Owned(agg_bridge::seed::derive_matrices_for(
+                &agg_bridge::Shape::production(set),
+                seed,
+            )),
+        }
     }
 }
 
@@ -561,12 +582,13 @@ impl From<LookupError> for ProveError {
     }
 }
 
-/// The prover's inputs: the public instance of the records and their signatures.
-pub struct ProverInputs<'a> {
+/// The prover's inputs: the public instance of the records and their signatures, for the
+/// parameter set `P` (ML-DSA-44 by default).
+pub struct ProverInputs<'a, P: ParamSet = Set44> {
     /// The public instance (keys expanded, `mu`, `c`, `T`).
-    pub instance: &'a PublicInstance,
+    pub instance: &'a PublicInstance<P>,
     /// `(pk, M, c~)` per live record, in order (bound by the record digest).
-    pub records: &'a [(&'a [u8], &'a [u8], [u8; C_TILDE_BYTES])],
+    pub records: &'a [(&'a [u8], &'a [u8], P::CTilde)],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
     /// The relation to prove (`docs/h-exact.md`): H-u, H-exact or H-FIPS.
@@ -748,6 +770,33 @@ pub fn main_tables(inputs: &ProverInputs<'_>) -> Result<(CommitmentManifest, Mai
     }
     let manifest = CommitmentManifest::for_relation(n, inputs.relation).map_err(PcsError::Plan)?;
     let main = MainTables::build(&manifest, inputs.instance, inputs.signatures)?;
+    Ok((manifest, main))
+}
+
+/// The smallest batch of a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87). Its
+/// main domain has `8 + d_sig` variables, and the stages read the 13-variable level-1 and
+/// level-2 bridge domains on suffixes of the main-domain points, so `d_sig >= 5` (`N* >= 32`,
+/// at least 17 records).
+pub const LANE_MIN_RECORDS: usize = 17;
+
+/// [`main_tables`] for any parameter set: the manifest of `P`'s batch and the round-1
+/// tables of the generic derivation (`MainTables::build_for`). ML-DSA-44 callers use
+/// [`main_tables`], which runs the SIMD engine.
+pub fn main_tables_for<P: ParamSet>(
+    inputs: &ProverInputs<'_, P>,
+) -> Result<(CommitmentManifest, MainTables), ProveError> {
+    let n = inputs.records.len();
+    if inputs.instance.records.len() != n || inputs.signatures.len() != n {
+        return Err(ProveError::Internal("record counts differ".into()));
+    }
+    if P::SET != Set::S44 && n < LANE_MIN_RECORDS {
+        return Err(ProveError::Internal(format!(
+            "{} batches hold at least {LANE_MIN_RECORDS} records",
+            P::NAME
+        )));
+    }
+    let manifest = CommitmentManifest::for_set(P::SET, n, inputs.relation).map_err(PcsError::Plan)?;
+    let main = MainTables::build_for(&manifest, inputs.instance, inputs.signatures)?;
     Ok((manifest, main))
 }
 
@@ -1385,15 +1434,96 @@ pub fn prove_with_tables_using(
     hooks: &ProveHooks<'_>,
 ) -> Result<ProverOutput, ProveError> {
     let total = Instant::now();
-    let mut clock = Lap::new();
-    let mut timings = ProveTimings::default();
     let n = inputs.records.len();
-    if manifest.records() != n || main.geometry().n != n {
+    if manifest.records() != n || main.geometry().n != n || manifest.set() != Set::S44 {
         return Err(ProveError::Internal("tables and records differ".into()));
     }
     check_bridge(bridge, flock)?;
-    let segments = manifest.segments();
     let public = public.unwrap_or_else(|| PublicData::from_instance(inputs.instance));
+    prove_core(
+        total,
+        committer,
+        PiopPublic::Rows(&public),
+        inputs.records,
+        manifest,
+        main,
+        bridge,
+        keccak,
+        flock,
+        hooks,
+    )
+}
+
+/// [`prove_with_tables_using`] for a parameter set with polynomial lanes (ML-DSA-65,
+/// ML-DSA-87): the public data is the instance's [`LanePublicData`] (built here unless
+/// given), the bridge matrices are the set's ([`BridgeDerivation::matrices_for`]).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_lanes_with_tables_using<P: ParamSet>(
+    committer: Option<TableCommitter>,
+    public: Option<LanePublicData>,
+    inputs: &ProverInputs<'_, P>,
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+    bridge: &impl BridgeDerivation,
+    keccak: &(impl KeccakSide + Sync),
+    flock: FlockProfile,
+    hooks: &ProveHooks<'_>,
+) -> Result<ProverOutput, ProveError>
+where
+    P::CTilde: Sync,
+{
+    let total = Instant::now();
+    let n = inputs.records.len();
+    if P::SET == Set::S44 {
+        return Err(ProveError::Internal("ML-DSA-44 has no polynomial lanes".into()));
+    }
+    if manifest.records() != n || main.geometry().n != n || manifest.set() != P::SET {
+        return Err(ProveError::Internal("tables and records differ".into()));
+    }
+    if n < LANE_MIN_RECORDS {
+        return Err(ProveError::Internal(format!(
+            "{} batches hold at least {LANE_MIN_RECORDS} records",
+            P::NAME
+        )));
+    }
+    check_bridge(bridge, flock)?;
+    let public = match public {
+        Some(public) if public.set() == P::SET && public.records() == n => public,
+        _ => LanePublicData::from_instance(inputs.instance),
+    };
+    prove_core(
+        total,
+        committer,
+        PiopPublic::Lanes(&public),
+        inputs.records,
+        manifest,
+        main,
+        bridge,
+        keccak,
+        flock,
+        hooks,
+    )
+}
+
+/// The prover after the public data: the Akita setup, the transcript from the instance
+/// record to the opening, the Flock fork and the proof. `total` is the caller's start.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn prove_core<C: AsRef<[u8]> + Sync>(
+    total: Instant,
+    committer: Option<TableCommitter>,
+    public: PiopPublic<'_>,
+    records: &[(&[u8], &[u8], C)],
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+    bridge: &impl BridgeDerivation,
+    keccak: &(impl KeccakSide + Sync),
+    flock: FlockProfile,
+    hooks: &ProveHooks<'_>,
+) -> Result<ProverOutput, ProveError> {
+    let mut clock = Lap(total);
+    let mut timings = ProveTimings::default();
+    let n = records.len();
+    let segments = manifest.segments();
     let committer = match committer {
         Some(prebuilt) if prebuilt.manifest() == manifest => prebuilt,
         _ => TableCommitter::new(manifest.clone())?,
@@ -1403,7 +1533,7 @@ pub fn prove_with_tables_using(
 
     // The instance record (with the proof-of-work plan's digest),
     // round-1 commitments, Flock commitments, bridge seed.
-    let digest = public_records_binding(inputs.records);
+    let digest = public_records_binding(records);
     let plan = PowPlan::new(manifest, flock, &keccak.plan(segments));
     let record = instance_record(manifest, &digest, flock, &plan.digest());
     let mut transcript = Transcript::new(manifest, &record)?;
@@ -1469,7 +1599,7 @@ pub fn prove_with_tables_using(
     timings.keccak = keccak_time;
 
     // Round-2 commitments, Flock seeds, final vectors and share items.
-    let matrices = bridge.matrices(&bridge_seed);
+    let matrices = bridge.matrices_for(manifest.set(), &bridge_seed);
     let mut bridge_tables = BridgeGroupTables::build(manifest, main, &matrices, &psi)?;
     if let Some(tamper) = hooks.tamper_bridge {
         tamper(manifest, &mut bridge_tables);
@@ -1536,7 +1666,7 @@ pub fn prove_with_tables_using(
                     tables,
                     Some(prover_tables),
                     &matrices,
-                    PiopPublic::Rows(&public),
+                    public,
                     &mut transcript,
                     unchecked,
                     swap_join,
@@ -1590,7 +1720,7 @@ pub fn prove_with_tables_using(
             tables,
             Some(prover_tables),
             &matrices,
-            PiopPublic::Rows(&public),
+            public,
             &mut transcript,
             hooks.unchecked,
             hooks.swap_join,
@@ -1642,7 +1772,7 @@ pub fn prove_with_tables_using(
         set: manifest.set(),
         relation: manifest.relation(),
         records: n,
-        c_tilde: inputs.records.iter().map(|r| r.2.to_vec()).collect(),
+        c_tilde: records.iter().map(|r| r.2.as_ref().to_vec()).collect(),
         main16_commitment,
         main_commitment,
         flock_commitments,

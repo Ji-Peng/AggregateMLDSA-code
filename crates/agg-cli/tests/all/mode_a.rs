@@ -260,8 +260,9 @@ fn round_trip_as(
         0
     );
     // The persisted cache (keyed by SHA3-256(pk)) gives the same cached path.
-    let mut reloaded = cache::from_bytes(&cache::to_bytes(&key_cache)).expect("cache file");
-    let from_file = verifier.verify(&statements, &aggregate.bytes, Some(&mut reloaded));
+    let mut reloaded = cache::from_bytes(&cache::to_bytes(&cache::KeyStore::Rows(key_cache.clone())))
+        .expect("cache file");
+    let from_file = verifier.verify_with(&statements, &aggregate.bytes, reloaded.as_mut());
     assert_eq!(
         from_file
             .report

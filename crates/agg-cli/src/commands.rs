@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 
 use agg_piop::binding::FlockProfile;
 use agg_piop::manifest::Relation;
-use agg_piop::public_data::KeyCache;
 use agg_witness::gen;
+use agg_witness::params::{dispatch_set, ParamSet, Set};
 use rayon::prelude::*;
 
 use crate::mode_a::{
-    size_lines, AggregateVerifier, Aggregator, AggregatorConfig, ProveReport, SignedRecord,
-    DEFAULT_PART_LOG2, FLOCK_PROFILE,
+    size_lines, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut, ProveReport,
+    SignedRecord, DEFAULT_PART_LOG2, FLOCK_PROFILE,
 };
 use crate::record::{self, KeyEntry, RecordEntry};
 use crate::{cache, rss};
@@ -26,14 +26,19 @@ use crate::{cache, rss};
 pub const USAGE: &str = "\
 usage: agg <command> [options]
 
+Every command takes --params 44|65|87, the ML-DSA parameter set (default 44). Key and
+record files of a set are refused by the commands of another set; an aggregate names its
+set, and verify rejects one of another set than --params.
+
 commands:
-  keygen-batch --count K [--seed S] --out KEYS
-      K ML-DSA-44 key pairs from seeds derived from S (test keys: the file holds the seeds).
-  sign-batch --keys KEYS --count N [--seed S] [--msg-len L] --out RECORDS
+  keygen-batch --count K [--seed S] [--params 44|65|87] --out KEYS
+      K ML-DSA key pairs from seeds derived from S (test keys: the file holds the seeds).
+  sign-batch --keys KEYS --count N [--seed S] [--msg-len L] [--params 44|65|87]
+             --out RECORDS
       N signed records (pure mode, empty context); record i is signed by key i mod K,
       messages are derived from S (length L, or pseudo-random in [0, 160)).
-  aggregate --records RECORDS --out AGGREGATE [--part-log2 D] [--flock-profile P]
-            [--flock-span on|off] [--relation R]
+  aggregate --records RECORDS --out AGGREGATE [--params 44|65|87] [--part-log2 D]
+            [--flock-profile P] [--flock-span on|off] [--relation R]
       Mode-A aggregate of the records (strict FIPS 204 verification of every signature);
       Flock parts of 2^D record positions (default 13, one tied part per segment); Flock
       profile P = fast, slim or slim8 (Ligerito rate 1/2, 1/4 or 1/8, all 128-bit in
@@ -41,15 +46,18 @@ commands:
       batch of more than one segment in whole-segment parts is one tied part over all
       segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465), h-exact
       (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465) or h-fips (also the hint:
-      the extracted (c~, z, h) is a FIPS 204 signature).
-  verify --records RECORDS --aggregate AGGREGATE [--cache CACHE] [--flock-profile P]
-         [--relation R]
+      the extracted (c~, z, h) is a FIPS 204 signature). ML-DSA-65 and ML-DSA-87 have
+      relation h-u only.
+  verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
+         [--flock-profile P] [--relation R]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the
-      Flock profile its items name (or only under P) and under relation R (default h-u; an
-      aggregate of another relation is rejected). With --cache, expanded keys are read
-      from and added to the cache file. Exit status 0 on accept, 1 on reject.
-  bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--part-log2 D]
-        [--flock-profile P] [--flock-span on|off] [--relation R] [--json PATH]
+      Flock profile its items name (or only under P), under relation R (default h-u; an
+      aggregate of another relation is rejected) and for the set of --params. With
+      --cache, expanded keys are read from and added to the cache file (one file per
+      set). Exit status 0 on accept, 1 on reject.
+  bench --count N [--keys K] [--seed S] [--warmup W] [--reps R] [--params 44|65|87]
+        [--part-log2 D] [--flock-profile P] [--flock-span on|off] [--relation R]
+        [--json PATH]
       Generate N records over K keys (default N); aggregate W + R times, verify W + R times
       uncached and W + R times with cached keys (W warmup runs discarded, default W = 1,
       R = 5); print the median (and min) prove time, the verify medians, peak RSS of the
@@ -187,6 +195,14 @@ impl Options {
         }
     }
 
+    /// `--name 44|65|87`: the ML-DSA parameter set, ML-DSA-44 when absent.
+    fn params(&mut self, name: &str) -> Result<Set, String> {
+        match self.take(name) {
+            None => Ok(Set::S44),
+            Some(v) => parse_params(&v).ok_or_else(|| format!("--{name}: 44, 65 or 87, not {v:?}")),
+        }
+    }
+
     /// `--name on|off`, `default` when absent.
     fn switch(&mut self, name: &str, default: bool) -> Result<bool, String> {
         match self.take(name).as_deref() {
@@ -203,6 +219,41 @@ impl Options {
             None => Ok(()),
         }
     }
+}
+
+/// An ML-DSA parameter set by name: `44`, `65` or `87` (or `ML-DSA-44` and so on).
+#[must_use]
+pub fn parse_params(name: &str) -> Option<Set> {
+    let short = name
+        .strip_prefix("ML-DSA-")
+        .or_else(|| name.strip_prefix("ml-dsa-"))
+        .unwrap_or(name);
+    Set::ALL.into_iter().find(|set| set.name() == short)
+}
+
+/// The encoded public-key length of `set` (FIPS 204 Table 2).
+#[must_use]
+pub const fn pk_bytes(set: Set) -> usize {
+    dispatch_set!(set, |P| P::PK_BYTES)
+}
+
+/// Refuses keys of another length than `set`'s, naming the set they look like.
+fn check_keys<'a>(set: Set, pks: impl IntoIterator<Item = &'a [u8]>, what: &str) -> Result<(), String> {
+    for (i, pk) in pks.into_iter().enumerate() {
+        if pk.len() != pk_bytes(set) {
+            let hint = Set::ALL
+                .into_iter()
+                .find(|s| pk_bytes(*s) == pk.len())
+                .map_or_else(String::new, |s| format!(" (an ML-DSA-{} key: --params {})", s.name(), s.name()));
+            return Err(format!(
+                "{what} {i}: a {}-byte public key, not ML-DSA-{}'s {}{hint}",
+                pk.len(),
+                set.name(),
+                pk_bytes(set)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A mode-A Flock profile by name: `fast`, `slim` or `slim8`.
@@ -234,17 +285,25 @@ pub fn run(command: Command, args: &[String]) -> Result<Status, Box<dyn std::err
     }
 }
 
-/// `K` key pairs from the seeds `gen::key_seed(seed, i)`.
+/// `K` ML-DSA-44 key pairs from the seeds `gen::key_seed(seed, i)`.
 #[must_use]
 pub fn generate_keys(count: usize, seed: u64) -> Vec<KeyEntry> {
-    (0..count as u64)
-        .into_par_iter()
-        .map(|i| {
-            let xi = gen::key_seed(seed, i);
-            let (_, pk) = gen::keypair(&xi);
-            KeyEntry { seed: xi, pk }
-        })
-        .collect()
+    generate_keys_for(Set::S44, count, seed)
+}
+
+/// `K` key pairs of `set` from the seeds `gen::key_seed(seed, i)`.
+#[must_use]
+pub fn generate_keys_for(set: Set, count: usize, seed: u64) -> Vec<KeyEntry> {
+    dispatch_set!(set, |P| {
+        (0..count as u64)
+            .into_par_iter()
+            .map(|i| {
+                let xi = gen::key_seed(seed, i);
+                let (_, pk) = gen::keypair_for::<P>(&xi);
+                KeyEntry { seed: xi, pk }
+            })
+            .collect()
+    })
 }
 
 /// The message of record `i`: `msg_len` bytes, or a pseudo-random length in `[0, 160)`.
@@ -260,7 +319,8 @@ pub fn message(seed: u64, i: u64, msg_len: Option<usize>) -> Vec<u8> {
     }
 }
 
-/// `N` records signed (hedged, randomness derived from the seed) round-robin by `keys`.
+/// `N` ML-DSA-44 records signed (hedged, randomness derived from the seed) round-robin by
+/// `keys`.
 #[must_use]
 pub fn sign_records(
     keys: &[KeyEntry],
@@ -268,34 +328,50 @@ pub fn sign_records(
     seed: u64,
     msg_len: Option<usize>,
 ) -> Vec<RecordEntry> {
+    sign_records_for(Set::S44, keys, count, seed, msg_len)
+}
+
+/// [`sign_records`] for the key pairs of `set` (re-derived from the key file's seeds).
+#[must_use]
+pub fn sign_records_for(
+    set: Set,
+    keys: &[KeyEntry],
+    count: usize,
+    seed: u64,
+    msg_len: Option<usize>,
+) -> Vec<RecordEntry> {
     assert!(!keys.is_empty(), "at least one key");
-    let signers: Vec<_> = keys.par_iter().map(|k| gen::keypair(&k.seed)).collect();
-    (0..count)
-        .into_par_iter()
-        .map(|i| {
-            let (sk, pk) = &signers[i % signers.len()];
-            let msg = message(seed, i as u64, msg_len);
-            let mut rnd = [0_u8; 32];
-            gen::derive_bytes(b"cli-rnd", &[seed, i as u64], &mut rnd);
-            RecordEntry {
-                pk: pk.clone(),
-                sig: gen::sign(sk, &msg, Some(&rnd)),
-                msg,
-            }
-        })
-        .collect()
+    dispatch_set!(set, |P| {
+        let signers: Vec<_> = keys.par_iter().map(|k| gen::keypair_for::<P>(&k.seed)).collect();
+        (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let (sk, pk) = &signers[i % signers.len()];
+                let msg = message(seed, i as u64, msg_len);
+                let mut rnd = [0_u8; 32];
+                gen::derive_bytes(b"cli-rnd", &[seed, i as u64], &mut rnd);
+                RecordEntry {
+                    pk: pk.clone(),
+                    sig: gen::sign_for::<P>(sk, &msg, Some(&rnd)),
+                    msg,
+                }
+            })
+            .collect()
+    })
 }
 
 fn keygen_batch(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let count: usize = opts.number("count", None)?;
     let seed: u64 = opts.number("seed", Some(1))?;
+    let set = opts.params("params")?;
     let out = opts.path("out")?;
     opts.finish()?;
     let start = Instant::now();
-    let keys = generate_keys(count, seed);
+    let keys = generate_keys_for(set, count, seed);
     std::fs::write(&out, record::keys_to_bytes(&keys))?;
     println!(
-        "wrote {count} key pairs to {} in {:.1} ms",
+        "wrote {count} ML-DSA-{} key pairs to {} in {:.1} ms",
+        set.name(),
         out.display(),
         ms(start.elapsed())
     );
@@ -310,13 +386,15 @@ fn sign_batch(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         .take("msg-len")
         .map(|v| v.parse::<usize>())
         .transpose()?;
+    let set = opts.params("params")?;
     let out = opts.path("out")?;
     opts.finish()?;
     if keys.is_empty() {
         return Err("the key file is empty".into());
     }
+    check_keys(set, keys.iter().map(|k| k.pk.as_slice()), "key")?;
     let start = Instant::now();
-    let records = sign_records(&keys, count, seed, msg_len);
+    let records = sign_records_for(set, &keys, count, seed, msg_len);
     std::fs::write(&out, record::records_to_bytes(&records))?;
     println!(
         "wrote {count} signed records ({} keys) to {} in {:.1} ms",
@@ -348,12 +426,15 @@ fn aggregate(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     let span = opts.switch("flock-span", true)?;
     let relation = opts.relation("relation")?;
+    let set = opts.params("params")?;
     opts.finish()?;
+    check_keys(set, records.iter().map(|r| r.pk.as_slice()), "record")?;
     let aggregator = Aggregator::new(AggregatorConfig {
         part_log2,
         profile,
         span,
         relation,
+        set,
     });
     let aggregate = run_large(move || aggregator.aggregate(&signed(&records)))?;
     std::fs::write(&out, &aggregate.bytes)?;
@@ -368,19 +449,22 @@ fn verify(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let cache_path = opts.take("cache").map(PathBuf::from);
     let require = opts.flock_profile("flock-profile")?;
     let relation = opts.relation("relation")?;
+    let set = opts.params("params")?;
     opts.finish()?;
+    check_keys(set, records.iter().map(|r| r.pk.as_slice()), "record")?;
     let mut key_cache = match &cache_path {
-        Some(p) => Some(cache::load(p)?),
+        Some(p) => Some(cache::load(p, set)?),
         None => None,
     };
-    let before = key_cache.as_ref().map_or(0, KeyCache::len);
+    let before = key_cache.as_ref().map_or(0, cache::KeyStore::len);
     let (report, key_cache) = run_large(move || {
         let verifier = match require {
-            Some(p) => AggregateVerifier::new().require(p),
-            None => AggregateVerifier::new(),
+            Some(p) => AggregateVerifier::for_set(set).require(p),
+            None => AggregateVerifier::for_set(set),
         }
         .relation(relation);
-        let report = verifier.verify(&statements(&records), &bytes, key_cache.as_mut());
+        let cache = key_cache.as_mut().map_or(KeyCacheMut::None, cache::KeyStore::as_mut);
+        let report = verifier.verify_with(&statements(&records), &bytes, cache);
         (report, key_cache)
     });
     println!("{report}");
@@ -515,7 +599,7 @@ pub fn bench_records(
     // The verifier's peak must not count blocks the prover left in the caches.
     cold_start();
     let reset = rss::reset_peak();
-    let verifier = AggregateVerifier::new()
+    let verifier = AggregateVerifier::for_set(config.set)
         .require(config.profile)
         .relation(config.relation);
     let statements = statements(records);
@@ -528,14 +612,14 @@ pub fn bench_records(
         uncached_report = report.to_string();
         Ok(report.total())
     })?;
-    let mut key_cache = KeyCache::default();
-    let fill = verifier.verify(&statements, &bytes, Some(&mut key_cache));
+    let mut key_cache = cache::KeyStore::new(config.set);
+    let fill = verifier.verify_with(&statements, &bytes, key_cache.as_mut());
     if !fill.accepted() {
         return Err(format!("the honest aggregate was rejected:\n{fill}"));
     }
     let mut cached_report = String::new();
     let verify_cached = timed_runs(warmup, reps, || {
-        let report = verifier.verify(&statements, &bytes, Some(&mut key_cache));
+        let report = verifier.verify_with(&statements, &bytes, key_cache.as_mut());
         if !report.accepted() {
             return Err(format!("the honest aggregate was rejected:\n{report}"));
         }
@@ -641,6 +725,7 @@ fn json_ms(samples: &[Duration]) -> String {
 #[allow(clippy::too_many_arguments)]
 fn write_bench_json(
     path: &Path,
+    set: Set,
     count: usize,
     n_keys: usize,
     seed: u64,
@@ -654,6 +739,7 @@ fn write_bench_json(
     let _ = writeln!(out, "{{");
     let _ = writeln!(out, "  \"tool\": \"agg bench\",");
     let _ = writeln!(out, "  \"json_version\": 1,");
+    let _ = writeln!(out, "  \"params\": {},", json_string(set.name()));
     let _ = writeln!(out, "  \"count\": {count},");
     let _ = writeln!(out, "  \"keys\": {n_keys},");
     let _ = writeln!(out, "  \"seed\": {seed},");
@@ -762,6 +848,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let profile = opts.flock_profile("flock-profile")?.unwrap_or(FLOCK_PROFILE);
     let span = opts.switch("flock-span", true)?;
     let relation = opts.relation("relation")?;
+    let set = opts.params("params")?;
     let json_path = opts.take("json").map(PathBuf::from);
     opts.finish()?;
     if n_keys == 0 || count == 0 {
@@ -771,8 +858,8 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
         return Err("--reps must be positive".into());
     }
     let start = Instant::now();
-    let keys = generate_keys(n_keys.min(count), seed);
-    let records = sign_records(&keys, count, seed, None);
+    let keys = generate_keys_for(set, n_keys.min(count), seed);
+    let records = sign_records_for(set, &keys, count, seed, None);
     let generated = start.elapsed();
     let result = run_large(move || {
         bench_records(
@@ -782,6 +869,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
                 profile,
                 span,
                 relation,
+                set,
             },
             warmup,
             reps,
@@ -796,7 +884,8 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let protocol = format!("median of {reps}, {warmup} warmup");
     let mldsa_backend = mldsa_backend_name();
     println!(
-        "agg bench: N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
+        "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
+        set.name(),
         n_keys.min(count),
         git_revision().unwrap_or_else(|| "unknown (set AGG_GIT_REV)".into()),
         agg_piop::avx512_enabled(),
@@ -865,6 +954,7 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     if let Some(path) = json_path {
         write_bench_json(
             &path,
+            set,
             count,
             n_keys.min(count),
             seed,

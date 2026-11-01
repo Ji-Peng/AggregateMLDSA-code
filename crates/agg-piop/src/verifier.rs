@@ -35,7 +35,7 @@ use agg_pcs_config::commit::GroupClaim;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::InstanceError;
 use agg_witness::padding::Geometry;
-use agg_witness::params::{Set, C_TILDE_BYTES, TR_BYTES, W1_BITS};
+use agg_witness::params::{ParamSet, Set, Set65, Set87, C_TILDE_BYTES, TR_BYTES, W1_BITS};
 use akita_types::Commitment;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
@@ -45,6 +45,7 @@ use crate::opening::{opening_claims, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
 use crate::pow::{KeccakPlan, PowPlan};
 use crate::prover::{BridgeDerivation, PiopProof};
+use crate::lane_public::{LaneKeyCache, LanePublicData};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
@@ -72,8 +73,9 @@ pub struct SegmentContext<'a> {
     pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
     pub mu: &'a [[u8; TR_BYTES]],
-    /// `c~_i` of the segment's live records.
-    pub c_tilde: &'a [[u8; C_TILDE_BYTES]],
+    /// `c~_i` of the segment's live records, concatenated (`lambda / 4` bytes each: 32,
+    /// 48 or 64 for ML-DSA-44, 65 and 87).
+    pub c_tilde: &'a [u8],
     /// `Y_sigma`, 4,096 bits, one per byte.
     pub final_vector: &'a [u8],
     /// The segment's share item.
@@ -157,6 +159,9 @@ pub enum ConfigurationError {
     UnseededMatrices(FlockProfile),
     /// Flock profile 0 (no Keccak argument) outside unit tests and the `test-hooks` feature.
     NoKeccakArgument,
+    /// Mode B (public bits) for a parameter set other than ML-DSA-44: its direct bit check
+    /// reads ML-DSA-44's six `w_1` bits per coefficient.
+    PublicBitsSet(Set),
 }
 
 impl std::fmt::Display for ConfigurationError {
@@ -173,6 +178,11 @@ impl std::fmt::Display for ConfigurationError {
             Self::NoKeccakArgument => write!(
                 f,
                 "Flock profile 0 ties no c~ to the committed bits (test-hooks builds only)"
+            ),
+            Self::PublicBitsSet(set) => write!(
+                f,
+                "mode B (public bits) is defined for ML-DSA-44 only, not ML-DSA-{}",
+                set.name()
             ),
         }
     }
@@ -449,17 +459,94 @@ pub fn verify_timed(
     let start = Instant::now();
     let mut timings = VerifyTimings::default();
     let outcome = run(
+        Set::S44,
         records,
         proof_bytes,
         bridge,
         keccak,
         flock,
         relation,
-        cache,
+        Keys::Rows(cache),
         &mut timings,
     );
     timings.total = start.elapsed();
     VerifyReport { outcome, timings }
+}
+
+/// [`verify_timed`] for an aggregate of a parameter set with polynomial lanes (ML-DSA-65 or
+/// ML-DSA-87, relation H-u only): `set` is the caller's, never read from the proof (a proof
+/// whose header names another set is rejected before the instance record). With `cache`
+/// (of `set`), keys found there are not expanded again and new expansions are added.
+///
+/// # Panics
+/// If `set` is ML-DSA-44 (use [`verify_timed`]) or `cache` holds another set.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_lanes_timed(
+    set: Set,
+    records: &[(&[u8], &[u8])],
+    proof_bytes: &[u8],
+    bridge: &impl BridgeDerivation,
+    keccak: &impl KeccakVerifier,
+    flock: FlockProfile,
+    relation: Relation,
+    cache: Option<&mut LaneKeyCache>,
+) -> VerifyReport {
+    assert_ne!(set, Set::S44, "ML-DSA-44 has no polynomial lanes");
+    if let Some(cache) = cache.as_ref() {
+        assert_eq!(cache.set(), set, "a key cache of the verified parameter set");
+    }
+    let start = Instant::now();
+    let mut timings = VerifyTimings::default();
+    let outcome = run(
+        set,
+        records,
+        proof_bytes,
+        bridge,
+        keccak,
+        flock,
+        relation,
+        Keys::Lanes(cache),
+        &mut timings,
+    );
+    timings.total = start.elapsed();
+    VerifyReport { outcome, timings }
+}
+
+/// The verifier's key cache for the expected parameter set.
+enum Keys<'c> {
+    /// ML-DSA-44.
+    Rows(Option<&'c mut KeyCache>),
+    /// A set with polynomial lanes.
+    Lanes(Option<&'c mut LaneKeyCache>),
+}
+
+/// The public data of the verified batch.
+enum Public<'c> {
+    /// ML-DSA-44: the streamed rows and the key cache the public pass fills.
+    Rows(StreamedPublic, Option<&'c mut KeyCache>),
+    /// A set with polynomial lanes (keys already expanded or taken from the cache).
+    Lanes(LanePublicData),
+}
+
+/// The lane public data of `(pk_i, M_i, c~_i)` and the record digest.
+fn prepare_lanes<P: ParamSet>(
+    records: &[(&[u8], &[u8])],
+    c_tilde: &[Vec<u8>],
+    cache: Option<&mut LaneKeyCache>,
+) -> Result<(LanePublicData, [u8; 32]), VerifyError>
+where
+    P::CTilde: Sync,
+{
+    let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+        .iter()
+        .zip(c_tilde)
+        .map(|(&(pk, msg), c)| (pk, msg, P::c_tilde_from_slice(c)))
+        .collect();
+    let public = LanePublicData::prepare::<P>(&inputs, cache).map_err(|e| match e {
+        InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
+        InstanceError::Geometry(_) => VerifyError::RecordCount,
+    })?;
+    Ok((public, public_records_binding(&inputs)))
 }
 
 /// A running clock for step timings.
@@ -476,25 +563,29 @@ impl Lap {
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run(
+    set: Set,
     records: &[(&[u8], &[u8])],
     proof_bytes: &[u8],
     bridge: &impl BridgeDerivation,
     keccak: &impl KeccakVerifier,
     flock: FlockProfile,
     relation: Relation,
-    cache: Option<&mut KeyCache>,
+    keys: Keys<'_>,
     timings: &mut VerifyTimings,
 ) -> Result<VerifiedAggregate, VerifyError> {
     check_configuration(bridge, keccak, flock).map_err(VerifyError::Configuration)?;
+    if set != Set::S44 && flock == FlockProfile::PublicBits {
+        return Err(VerifyError::Configuration(ConfigurationError::PublicBitsSet(set)));
+    }
     let mut clock = Lap(Instant::now());
 
     // Parse: the header's relation must be the caller's, and the manifest (the instance record, the
     // catalog row, the plan) comes from the caller's relation.
     let proof = AggregateProof::from_bytes(proof_bytes)?;
-    // This entry point verifies ML-DSA-44 aggregates.
-    if proof.set != Set::S44 {
+    // The parameter set is the caller's, like the relation.
+    if proof.set != set {
         return Err(VerifyError::ParamSet {
-            expected: Set::S44,
+            expected: set,
             found: proof.set,
         });
     }
@@ -508,7 +599,10 @@ fn run(
     if records.len() != n || proof.c_tilde.len() != n {
         return Err(VerifyError::RecordCount);
     }
-    let manifest = CommitmentManifest::for_relation(n, relation)
+    if set != Set::S44 && n < crate::prover::LANE_MIN_RECORDS {
+        return Err(VerifyError::RecordCount);
+    }
+    let manifest = CommitmentManifest::for_set(set, n, relation)
         .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
     let segments = manifest.segments();
     let pcs = verifier_for(&manifest).map_err(VerifyError::Opening)?;
@@ -516,22 +610,41 @@ fn run(
     timings.parse = clock.lap();
 
     // Light public data and the record binding.
-    let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
-        .c_tilde
-        .iter()
-        .map(|c| c.as_slice().try_into().expect("the parser reads 32 bytes per ML-DSA-44 record"))
-        .collect();
-    let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
-        .iter()
-        .zip(&c_tilde)
-        .map(|(&(pk, msg), &c)| (pk, msg, c))
-        .collect();
-    let public = StreamedPublic::prepare(&inputs, cache.as_deref()).map_err(|e| match e {
-        InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
-        InstanceError::Geometry(_) => VerifyError::RecordCount,
-    })?;
-    let geometry = public.geometry();
-    let digest = public_records_binding(&inputs);
+    let c_tilde: Vec<u8> = proof.c_tilde.concat();
+    let (public, geometry, digest, mu) = match keys {
+        Keys::Rows(cache) => {
+            let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
+                .c_tilde
+                .iter()
+                .map(|c| c.as_slice().try_into().expect("the parser reads 32 bytes per ML-DSA-44 record"))
+                .collect();
+            let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
+                .iter()
+                .zip(&c_tilde)
+                .map(|(&(pk, msg), &c)| (pk, msg, c))
+                .collect();
+            let public = StreamedPublic::prepare(&inputs, cache.as_deref()).map_err(|e| match e {
+                InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
+                InstanceError::Geometry(_) => VerifyError::RecordCount,
+            })?;
+            let geometry = public.geometry();
+            let digest = public_records_binding(&inputs);
+            let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
+            (Public::Rows(public, cache), geometry, digest, mu)
+        }
+        Keys::Lanes(cache) => {
+            let (public, digest) = match set {
+                Set::S65 => prepare_lanes::<Set65>(records, &proof.c_tilde, cache)?,
+                Set::S87 => prepare_lanes::<Set87>(records, &proof.c_tilde, cache)?,
+                Set::S44 => unreachable!("ML-DSA-44 is verified on its rows"),
+            };
+            // The Keccak side's geometry depends on the record count only.
+            let geometry = Geometry::new(n).map_err(|_| VerifyError::RecordCount)?;
+            let mu = public.mu().to_vec();
+            (Public::Lanes(public), geometry, digest, mu)
+        }
+    };
+    let width = crate::wire::c_tilde_bytes(set);
     timings.public_data = clock.lap();
 
     // The transcript through the final-vector step; the instance record binds the proof-of-work plan, derived from the public
@@ -561,7 +674,7 @@ fn run(
     // same bytes back from the transcript, so no caller can substitute another matrix.
     transcript.challenge_psi()?;
     timings.transcript = clock.lap();
-    let matrices = bridge.matrices(&bridge_seed);
+    let matrices = bridge.matrices_for(set, &bridge_seed);
     timings.matrices = clock.lap();
     for (role, bytes) in [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
         .into_iter()
@@ -586,7 +699,6 @@ fn run(
     timings.transcript += clock.lap();
     // The Keccak side per segment, on the final-vector step and the proof items (its outcome
     // does not depend on the PIOP's challenges, so it is checked first).
-    let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
     for (sigma, bits) in final_bits.iter().enumerate() {
         // A trailing segment may hold padded records only (`2^13 sigma >= N`).
         let first = (sigma << 13).min(n);
@@ -598,7 +710,7 @@ fn run(
             seed: &flock_seeds[sigma],
             bridge_seed: &bridge_seed,
             mu: &mu[live.clone()],
-            c_tilde: &c_tilde[live],
+            c_tilde: &c_tilde[live.start * width..live.end * width],
             final_vector: bits,
             shares: &proof.flock_shares[sigma],
             record: &flock_record,
@@ -621,48 +733,71 @@ fn run(
         stage2: proof.stage2.clone(),
         stage3: proof.stage3.clone(),
     };
+    // The public pass: its window and (T time, A time, keys expanded in this run).
     let mut pass_window = None;
-    let mut pass_result = None;
-    let verified = verify_piop(
-        &manifest,
-        &matrices,
-        &y_table,
-        &piop,
-        &mut transcript,
-        timings,
-        |r2, r3| {
-            let started = Instant::now();
-            let pass = public.pass(r2, r3, cache);
-            pass_window = Some((started, Instant::now()));
-            pass_result = Some(pass);
-            (pass.t_at_r2, pass.ring_weight)
-        },
-    );
+    let mut pass_result: Option<(Duration, Duration, usize)> = None;
+    let verified = match public {
+        Public::Rows(public, cache) => verify_piop(
+            &manifest,
+            &matrices,
+            &y_table,
+            &piop,
+            &mut transcript,
+            timings,
+            |r2, r3| {
+                let started = Instant::now();
+                let pass = public.pass(r2, r3, cache);
+                pass_window = Some((started, Instant::now()));
+                pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
+                (pass.t_at_r2, pass.ring_weight)
+            },
+        ),
+        Public::Lanes(public) => verify_piop_lanes(
+            &manifest,
+            &matrices,
+            &y_table,
+            &piop,
+            &mut transcript,
+            timings,
+            |r2, r3, gammas| {
+                let started = Instant::now();
+                let t = public.t_evaluations(r2);
+                let middle = Instant::now();
+                let w = public.ring_weights_at(r2, r3, gammas);
+                let finished = Instant::now();
+                pass_window = Some((started, finished));
+                pass_result = Some((middle - started, finished - middle, public.expanded_keys()));
+                (t, w)
+            },
+        ),
+    };
     clock.0 = verified.stage3_end;
     match (pass_window, pass_result) {
-        (Some((started, finished)), Some(pass)) => {
+        (Some((started, finished)), Some((t_time, a_time, _))) => {
             timings.stage3_rounds = started - verified.stage3_start;
-            timings.public_t = pass.t_time;
-            timings.public_a = pass.a_time;
+            timings.public_t = t_time;
+            timings.public_a = a_time;
             timings.stage3_terminal = verified.stage3_end - finished;
         }
         _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
     }
     let (_, stage3, pi_m) = verified.outcome?;
-    let expanded_keys = pass_result.map_or(0, |pass| pass.expanded);
+    let expanded_keys = pass_result.map_or(0, |pass| pass.2);
 
     // The Flock proofs, checked above by the Keccak side's verifier, are not absorbed: no
     // PIOP or Akita challenge depends on them, and their own challengers bind them.
 
-    // The Keccak side's check of the committed bits at r^(3).
-    let bits = BitsContext {
-        geometry,
-        commitments: &proof.flock_commitments,
-        point: &stage3.point,
-        claims: std::array::from_fn(|t| stage3.claims.column(&manifest, Column::W1Bit(t as u8, 0))),
-    };
-    if !keccak.check_bits(&bits) {
-        return Err(VerifyError::Bits);
+    // The Keccak side's check of the committed bits at r^(3) (mode B, ML-DSA-44 only).
+    if set == Set::S44 {
+        let bits = BitsContext {
+            geometry,
+            commitments: &proof.flock_commitments,
+            point: &stage3.point,
+            claims: std::array::from_fn(|t| stage3.claims.column(&manifest, Column::W1Bit(t as u8, 0))),
+        };
+        if !keccak.check_bits(&bits) {
+            return Err(VerifyError::Bits);
+        }
     }
     timings.bits = clock.lap();
 
