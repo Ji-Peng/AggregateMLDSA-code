@@ -868,18 +868,6 @@ impl<'a> LeafGroup<'a> {
 // Stage 3: a field weight times an integer combination, without an equality factor.
 // ---------------------------------------------------------------------------------------
 
-/// The integer value of cell `i` of an integer or byte lane.
-#[inline(always)]
-fn int_cell(lane: &super::Source<'_>, i: usize) -> i64 {
-    match lane {
-        super::Source::Ints(cells) => i64::from(cells[i]),
-        super::Source::Bytes { cells, map } => map[cells[i] as u8 as usize],
-        super::Source::Field(_) | super::Source::Planes(_) | super::Source::PlaneSlice(_) => {
-            unreachable!("integer lanes only")
-        }
-    }
-}
-
 /// The multilinear evaluation of an integer or byte lane at `point` (low variable first).
 fn int_lane_at(lane: &super::Source<'_>, point: &[E]) -> E {
     let (first, second) = split_eq_tables(point);
@@ -897,8 +885,9 @@ struct WeightSource<'a> {
     weight: Planes<'a>,
     /// The integer lanes in the group's lane order (without the weight).
     lanes: Vec<super::Source<'a>>,
-    /// `g(i) = sum_l c_l f_l(i) + constant` (exact: coefficients and cells are small).
-    combination: Box<dyn Fn(usize) -> i64 + Sync + Send + 'a>,
+    /// `g(i) = sum_l c_l f_l(i) + constant` (exact: coefficients and cells are small),
+    /// written for a block of cells (`fill(first, cells)`).
+    combination: Box<dyn Fn(usize, &mut [i64]) + Sync + Send + 'a>,
     /// The group lane of the weight.
     weight_lane: usize,
     vars: usize,
@@ -947,7 +936,8 @@ impl<'a> PlaneSource for WeightSource<'a> {
         let chunk = 1_usize << 14;
         let run = |start: usize| -> [E; 3] {
             let end = (start + chunk).min(rows);
-            let g: Vec<i64> = (start..end).map(|i| (self.combination)(i)).collect();
+            let mut g = vec![0_i64; end - start];
+            (self.combination)(start, &mut g);
             agg_simd::dot::weight_round((&self.weight.0[start..end], &self.weight.1[start..end]), &g)
         };
         let add = |mut a: [E; 3], b: [E; 3]| {
@@ -1013,7 +1003,34 @@ impl<'a> WeightIntGroup<'a> {
             }
         }
         let lanes_only: Vec<super::Source<'a>> = ints.iter().map(|(lane, _)| *lane).collect();
-        let combination = Box::new(move |i: usize| ints.iter().fold(constant, |acc, (lane, c)| acc + c * int_cell(lane, i)));
+        // Per lane one pass over the block: a byte lane through its map scaled by the
+        // coefficient, an `i32` lane times the coefficient.
+        let scaled: Vec<Option<Box<[i64; 256]>>> = ints
+            .iter()
+            .map(|(lane, c)| match lane {
+                super::Source::Bytes { map, .. } => Some(Box::new(std::array::from_fn(|b| c * map[b]))),
+                _ => None,
+            })
+            .collect();
+        let combination = Box::new(move |first: usize, cells: &mut [i64]| {
+            cells.fill(constant);
+            let range = first..first + cells.len();
+            for ((lane, c), scaled) in ints.iter().zip(&scaled) {
+                match (lane, scaled) {
+                    (super::Source::Ints(column), _) => {
+                        for (g, &x) in cells.iter_mut().zip(&column[range.clone()]) {
+                            *g += c * i64::from(x);
+                        }
+                    }
+                    (super::Source::Bytes { cells: column, .. }, Some(map)) => {
+                        for (g, &x) in cells.iter_mut().zip(&column[range.clone()]) {
+                            *g += map[x as u8 as usize];
+                        }
+                    }
+                    _ => unreachable!("integer lanes only"),
+                }
+            }
+        });
         let source = WeightSource {
             weight,
             lanes: lanes_only,

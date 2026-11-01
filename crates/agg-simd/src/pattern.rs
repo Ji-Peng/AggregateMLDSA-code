@@ -374,7 +374,14 @@ unsafe fn fill_combined_vector<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
     unsafe {
         use crate::x86::*;
         let stop = row0 + (row1 - row0) / 8 * 8;
-        let split: Vec<[(L52, L52); 4]> = weights.iter().map(|w| std::array::from_fn(|a| splitk(bck(w[a])))).collect();
+        // Lanes whose weights are all zero add nothing (and their shift cancels in the
+        // correction), so only the other lanes are read.
+        let split: Vec<(usize, [(L52, L52); 4])> = weights
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.iter().any(|x| !x.is_zero()))
+            .map(|(l, w)| (l, std::array::from_fn(|a| splitk(bck(w[a])))))
+            .collect();
         // Every one-limb term is shifted by 2^51; the shift is undone with the sum of the
         // weights (`4 LANES` terms per output, far below the bound).
         let total = weights.iter().flatten().fold(K::zero(), |s, &x| s + x);
@@ -383,7 +390,7 @@ unsafe fn fill_combined_vector<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
         for row in (row0..stop).step_by(8) {
             let cells = leaves.values8(row);
             let mut acc = a3k();
-            for (l, w) in split.iter().enumerate() {
+            for &(l, w) in &split {
                 for a in 0..4 {
                     let k = add(cells[l][a], shift);
                     mac_int(&mut acc.0, w[a].0, k);
@@ -712,7 +719,8 @@ unsafe fn fill_wide<B: crate::wide::Simd, L: Leaves>(leaves: &L, e: [K; 4], out:
             let w = bck::<B>(e[a]);
             weights[a] = (split::<B>(w.0), split::<B>(w.1));
         }
-        let correction = bck::<B>(K::from_u64(I32_SHIFT) * e.iter().fold(K::zero(), |s, &x| s + x));
+        // The shift is undone by adding `-2^31 sum_a e_a` before the reduction.
+        let correction = bck::<B>(-(K::from_u64(I32_SHIFT) * e.iter().fold(K::zero(), |s, &x| s + x)));
         let shift = B::splat(I32_SHIFT);
         for row in (row0..stop).step_by(B::LANES) {
             let cells = leaves.values_wide::<B>(row);
@@ -723,7 +731,9 @@ unsafe fn fill_wide<B: crate::wide::Simd, L: Leaves>(leaves: &L, e: [K; 4], out:
                     mac32::<B>(&mut acc.0, weights[a].0, k);
                     mac32::<B>(&mut acc.1, weights[a].1, k);
                 }
-                let v = subk::<B>(redk::<B>(acc), correction);
+                lift::<B>(&mut acc.0, correction.0);
+                lift::<B>(&mut acc.1, correction.1);
+                let v = redk::<B>(acc);
                 B::store((o.0 as *mut u64).add(row), v.0);
                 B::store((o.1 as *mut u64).add(row), v.1);
             }
@@ -741,27 +751,39 @@ unsafe fn combined_wide<B: crate::wide::Simd, L: Leaves>(leaves: &L, weights: &[
     let stop = row0 + (row1 - row0) / B::LANES * B::LANES;
     // SAFETY: the caller guarantees the backend's features and `row1` writable rows.
     unsafe {
+        // Lanes whose weights are all zero add nothing (and their shift cancels in the
+        // correction), so only the other lanes are read.
         let mut split_weights = [[(split::<B>(zero::<B>()), split::<B>(zero::<B>())); 4]; 4];
+        let mut active = [0_usize; 4];
+        let mut count = 0;
         for (l, w) in weights.iter().enumerate() {
+            if w.iter().all(|x| x.is_zero()) {
+                continue;
+            }
             for a in 0..4 {
                 let x = bck::<B>(w[a]);
-                split_weights[l][a] = (split::<B>(x.0), split::<B>(x.1));
+                split_weights[count][a] = (split::<B>(x.0), split::<B>(x.1));
             }
+            active[count] = l;
+            count += 1;
         }
+        // The shift is undone by adding `-2^31 sum w` before the reduction.
         let total = weights.iter().flatten().fold(K::zero(), |s, &x| s + x);
-        let correction = bck::<B>(K::from_u64(I32_SHIFT) * total);
+        let correction = bck::<B>(-(K::from_u64(I32_SHIFT) * total));
         let shift = B::splat(I32_SHIFT);
         for row in (row0..stop).step_by(B::LANES) {
             let cells = leaves.values_wide::<B>(row);
             let mut acc = acck::<B>();
-            for l in 0..weights.len() {
+            for (w, &l) in split_weights[..count].iter().zip(&active) {
                 for a in 0..4 {
                     let k = B::add(cells[l][a], shift);
-                    mac32::<B>(&mut acc.0, split_weights[l][a].0, k);
-                    mac32::<B>(&mut acc.1, split_weights[l][a].1, k);
+                    mac32::<B>(&mut acc.0, w[a].0, k);
+                    mac32::<B>(&mut acc.1, w[a].1, k);
                 }
             }
-            let v = subk::<B>(redk::<B>(acc), correction);
+            lift::<B>(&mut acc.0, correction.0);
+            lift::<B>(&mut acc.1, correction.1);
+            let v = redk::<B>(acc);
             B::store((out.0 as *mut u64).add(row), v.0);
             B::store((out.1 as *mut u64).add(row), v.1);
         }
@@ -778,7 +800,7 @@ struct WideAccs<V> {
     products: [[(crate::wide::Acc<V>, crate::wide::Acc<V>); 16]; 4],
 }
 
-/// Reduce the used accumulators of `acc` into `sums` (block-local `K` sums) and clear them.
+/// Reduce the used accumulators of `acc` into `sums` (running `K` sums) and clear them.
 /// A function, not a closure: closures do not inherit the entry point's target features.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -805,7 +827,9 @@ unsafe fn wide_drain<B: crate::wide::Simd>(acc: &mut WideAccs<B::V>, sums: &mut 
 
 /// [`prefix_sums`] on a backend without IFMA: every integer form (linear forms below 2^32 in
 /// magnitude, products below 2^62) is read as its canonical residue and multiplied by the
-/// weight in full; the block's sums are scaled by `second[block]` after the reduction.
+/// weight in full. The weight of a row is `first[i] second[block]` (one vector product per
+/// step), so the sums of all blocks share the accumulators and are reduced once at the end
+/// instead of per block.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
@@ -825,12 +849,12 @@ unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
     unsafe {
         let z = acck::<B>();
         let mut acc = WideAccs { total: z, linear: [[z; 4]; 4], products: [[z; 16]; 4] };
+        let mut steps = 0_usize;
         for block in blocks {
-            let mut sums = PrefixSums::zero(nl, np);
-            let mut steps = 0_usize;
+            let s = split_k::<B>(bck::<B>(second[block]));
             for i in (0..f).step_by(B::LANES) {
                 let row = block * f + i;
-                let (w0, w1) = loadk::<B>(first, i);
+                let (w0, w1) = kmul_s::<B>(loadk::<B>(first, i), s);
                 let w = (split::<B>(w0), split::<B>(w1));
                 lift::<B>(&mut acc.total.0, w0);
                 lift::<B>(&mut acc.total.1, w1);
@@ -858,19 +882,11 @@ unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
                 steps += 1;
                 if steps == flush_steps {
                     steps = 0;
-                    wide_drain::<B>(&mut acc, &mut sums, nl, np);
+                    wide_drain::<B>(&mut acc, &mut out, nl, np);
                 }
             }
-            wide_drain::<B>(&mut acc, &mut sums, nl, np);
-            let s = second[block];
-            out.total += sums.total * s;
-            for (o, x) in out.linear.iter_mut().flatten().zip(sums.linear.iter().flatten()) {
-                *o += *x * s;
-            }
-            for (o, x) in out.products.iter_mut().flatten().zip(sums.products.iter().flatten()) {
-                *o += *x * s;
-            }
         }
+        wide_drain::<B>(&mut acc, &mut out, nl, np);
     }
     out
 }

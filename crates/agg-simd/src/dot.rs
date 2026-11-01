@@ -466,9 +466,10 @@ unsafe fn weight_wide<B: crate::wide::Simd>(w: Planes<'_>, g: &[i64]) -> [K; 3] 
             let end = (start + CHUNK * 2 * l).min(n);
             let mut c = [acck::<B>(); 3];
             for i in (start..end).step_by(2 * l) {
-                let (e0, o0) = B::deinterleave(B::load(w.0.as_ptr().add(i)), B::load(w.0.as_ptr().add(i + l)));
-                let (e1, o1) = B::deinterleave(B::load(w.1.as_ptr().add(i)), B::load(w.1.as_ptr().add(i + l)));
-                let (ge, go) = B::deinterleave(B::load(g.as_ptr().add(i).cast()), B::load(g.as_ptr().add(i + l).cast()));
+                // Every stream is split in the same item order; the sums do not depend on it.
+                let (e0, o0) = B::deinterleave_any(B::load(w.0.as_ptr().add(i)), B::load(w.0.as_ptr().add(i + l)));
+                let (e1, o1) = B::deinterleave_any(B::load(w.1.as_ptr().add(i)), B::load(w.1.as_ptr().add(i + l)));
+                let (ge, go) = B::deinterleave_any(B::load(g.as_ptr().add(i).cast()), B::load(g.as_ptr().add(i + l).cast()));
                 let (ge, go) = (B::residue(ge), B::residue(go));
                 kmac_base::<B>(&mut c[0], (split::<B>(e0), split::<B>(e1)), split::<B>(ge));
                 kmac_base::<B>(&mut c[1], (split::<B>(o0), split::<B>(o1)), split::<B>(go));

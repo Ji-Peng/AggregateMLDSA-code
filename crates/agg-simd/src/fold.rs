@@ -54,10 +54,7 @@ unsafe fn k_wide<B: crate::wide::Simd>(r: K, a: Planes<'_>, b: Planes<'_>, o0: *
     unsafe {
         let rs = split_k::<B>(bck::<B>(r));
         for i in (0..stop).step_by(B::LANES) {
-            let x = loadk::<B>(a, i);
-            // Canonical difference, one reduced product, canonical sum.
-            let d = subk::<B>(loadk::<B>(b, i), x);
-            let (re, im) = addk::<B>(x, kmul_s::<B>(d, rs));
+            let (re, im) = kfold::<B>(loadk::<B>(a, i), loadk::<B>(b, i), rs);
             B::store(o0.add(i), re);
             B::store(o1.add(i), im);
         }
@@ -88,7 +85,7 @@ unsafe fn int_wide<B: crate::wide::Simd>(r: K, lower: &[i64], upper: &[i64], o0:
             let l = B::residue(B::load(lower.as_ptr().add(i).cast()));
             let h = B::residue(B::load(upper.as_ptr().add(i).cast()));
             let d = B::sub_mod(h, l);
-            B::store(o0.add(i), B::add_mod(l, mul_s::<B>(d, r0)));
+            B::store(o0.add(i), mul_add::<B>(l, d, r0));
             B::store(o1.add(i), mul_s::<B>(d, r1));
         }
         scalar::int_fold(

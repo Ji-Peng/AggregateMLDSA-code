@@ -77,12 +77,12 @@ unsafe fn fold_wide<B: crate::wide::Simd>(r: K, lanes: &[Planes<'_>], out: &[Out
         let rs = split_k::<B>(bck::<B>(r));
         for (lane, &o) in lanes.iter().zip(out) {
             for row in (row0..stop).step_by(l) {
-                let (e0, o0) = B::deinterleave(B::load(lane.0.as_ptr().add(2 * row)), B::load(lane.0.as_ptr().add(2 * row + l)));
-                let (e1, o1) = B::deinterleave(B::load(lane.1.as_ptr().add(2 * row)), B::load(lane.1.as_ptr().add(2 * row + l)));
-                // Canonical difference, one reduced product, canonical sum.
-                let folded = addk::<B>((e0, e1), kmul_s::<B>(subk::<B>((o0, o1), (e0, e1)), rs));
-                B::store((o.0 as *mut u64).add(row), folded.0);
-                B::store((o.1 as *mut u64).add(row), folded.1);
+                // Rows in the backend's item order; the two outputs are put back in order.
+                let (e0, o0) = B::deinterleave_any(B::load(lane.0.as_ptr().add(2 * row)), B::load(lane.0.as_ptr().add(2 * row + l)));
+                let (e1, o1) = B::deinterleave_any(B::load(lane.1.as_ptr().add(2 * row)), B::load(lane.1.as_ptr().add(2 * row + l)));
+                let folded = kfold::<B>((e0, e1), (o0, o1), rs);
+                B::store((o.0 as *mut u64).add(row), B::reorder(folded.0));
+                B::store((o.1 as *mut u64).add(row), B::reorder(folded.1));
             }
         }
         fold_scalar(r, lanes, out, stop, row1);
@@ -111,6 +111,11 @@ struct SlotOrder {
     lin_order: Vec<u32>,
     pro_off: Vec<usize>,
     pro_order: Vec<u32>,
+    /// Bit `l`: lane `l` is a factor of a product (its row difference is read).
+    in_product: u64,
+    /// Bit `l`: lane `l` is the second factor of a product or squared (its doubled second
+    /// coordinate is read).
+    doubled: u64,
 }
 
 impl SlotOrder {
@@ -146,7 +151,23 @@ impl SlotOrder {
                 next[s] += 1;
             }
         }
-        Self { lin_off, lin_order, pro_off, pro_order }
+        let (mut in_product, mut doubled) = (0_u64, 0_u64);
+        for &(i, j, _) in terms.products {
+            in_product |= (1 << i) | (1 << j);
+            doubled |= 1 << j;
+        }
+        Self { lin_off, lin_order, pro_off, pro_order, in_product, doubled }
+    }
+
+    /// Whether slot `s` has no terms (its sums stay zero).
+    fn empty(&self, s: usize) -> bool {
+        self.lin_off[s] == self.lin_off[s + 1] && self.pro_off[s] == self.pro_off[s + 1]
+    }
+
+    /// Whether slot `s` has products (component 2, the products of the differences, is
+    /// zero without them).
+    fn has_products(&self, s: usize) -> bool {
+        self.pro_off[s] < self.pro_off[s + 1]
     }
 }
 
@@ -423,7 +444,7 @@ unsafe fn eval_vector(
         debug_assert_eq!(scratch.even.len(), width);
         debug_assert_eq!(scratch.inner.len(), slots);
         let stop = k0 + (k1 - k0) / 8 * 8;
-        let SlotOrder { lin_off, lin_order, pro_off, pro_order } = order;
+        let SlotOrder { lin_off, lin_order, pro_off, pro_order, .. } = order;
         let EvalScratch { even, odd, diff, inner, wac, wbd, wsum, running, .. } = scratch;
         let has_products = !terms.products.is_empty();
         let weighted = weights.is_some();
@@ -459,6 +480,11 @@ unsafe fn eval_vector(
                 (wr, wi, add51(wr, wi))
             });
             for s in 0..slots {
+                // A slot without terms keeps zero sums.
+                if order.empty(s) {
+                    continue;
+                }
+                let products_in_slot = order.has_products(s);
                 // The slot's value on the pair. Its accumulator lives for one step, so the
                 // `mac7` and `lift52` bounds of a single term apply without a flush.
                 let mut value = [a3k(); 3];
@@ -490,7 +516,7 @@ unsafe fn eval_vector(
                     }
                 }
                 for c in 0..3 {
-                    if c == 1 && !full {
+                    if (c == 1 && !full) || (c == 2 && !products_in_slot) {
                         continue;
                     }
                     // A canonical value: limbs below 2^52 and 2^12 before the next multiply.
@@ -605,7 +631,9 @@ unsafe fn eval_w4(
 
 /// [`eval_items`] on the backends without IFMA, step by step over `LANES` items. Per slot the
 /// value on the pair is summed unreduced; without weights it is added to the slot's
-/// accumulator as it stands, with weights it is reduced once and multiplied by the weight.
+/// accumulator as it stands, with weights it is reduced to a multiplier operand (below 2^64,
+/// not canonical) and multiplied by the weight. Slots without terms, and the difference
+/// component of slots without products, are skipped (their sums are zero).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 #[allow(clippy::too_many_lines)]
@@ -630,9 +658,8 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
         debug_assert_eq!(scratch.even.len(), width);
         debug_assert_eq!(scratch.acc.len(), slots);
         let stop = k0 + (k1 - k0) / l * l;
-        let SlotOrder { lin_off, lin_order, pro_off, pro_order } = order;
+        let SlotOrder { lin_off, lin_order, pro_off, pro_order, in_product, doubled } = order;
         let WideScratch { even, odd, diff, acc, running } = scratch;
-        let has_products = !terms.products.is_empty();
         let weighted = weights.is_some();
         // Mac units a slot's accumulator takes per step: one per linear term (a lift) and two
         // per product and coordinate unweighted, two per coordinate weighted (one reduced
@@ -650,84 +677,113 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
         for k in (k0..stop).step_by(l) {
             for li in 0..width {
                 let (c0, c1) = lanes[li];
-                let (e0, o0) = B::deinterleave(B::load(c0.as_ptr().add(2 * k)), B::load(c0.as_ptr().add(2 * k + l)));
-                let (e1, o1) = B::deinterleave(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
-                // Products read the doubled second coordinate; linear terms read the values.
-                if has_products {
-                    even[li] = split_k::<B>((e0, e1));
-                    if full {
-                        odd[li] = split_k::<B>((o0, o1));
+                // Items in the backend's lane order (the sums do not depend on it; the
+                // weights are put in the same order).
+                let (e0, o0) = B::deinterleave_any(B::load(c0.as_ptr().add(2 * k)), B::load(c0.as_ptr().add(2 * k + l)));
+                let (e1, o1) = B::deinterleave_any(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
+                // Every term reads the split coordinates; only the second factor of a product
+                // reads the doubled second coordinate, and only products read the difference.
+                let bit = 1_u64 << li;
+                let x2 = doubled & bit != 0;
+                even[li].c0 = split::<B>(e0);
+                even[li].c1 = split::<B>(e1);
+                if x2 {
+                    even[li].c1x2 = split::<B>(B::add_mod(e1, e1));
+                }
+                if full {
+                    odd[li].c0 = split::<B>(o0);
+                    odd[li].c1 = split::<B>(o1);
+                    if x2 {
+                        odd[li].c1x2 = split::<B>(B::add_mod(o1, o1));
                     }
-                    diff[li] = split_k::<B>(subk::<B>((o0, o1), (e0, e1)));
-                } else {
-                    even[li].c0.l = e0;
-                    even[li].c1.l = e1;
-                    odd[li].c0.l = o0;
-                    odd[li].c1.l = o1;
+                }
+                if in_product & bit != 0 {
+                    let (d0, d1) = subk::<B>((o0, o1), (e0, e1));
+                    diff[li].c0 = split::<B>(d0);
+                    diff[li].c1 = split::<B>(d1);
+                    if x2 {
+                        diff[li].c1x2 = split::<B>(B::add_mod(d1, d1));
+                    }
                 }
             }
             let w = match weights {
-                Some(w) => Some(split_k::<B>(loadk::<B>(w, k - k0))),
+                Some(w) => {
+                    let (w0, w1) = loadk::<B>(w, k - k0);
+                    Some(split_k::<B>((B::reorder(w0), B::reorder(w1))))
+                }
                 None => None,
             };
             for s in 0..slots {
-                let mut value = [acck::<B>(); 3];
-                for &index in &lin_order[lin_off[s]..lin_off[s + 1]] {
-                    let (li, _) = terms.linear[index as usize];
-                    lift::<B>(&mut value[0].0, even[li].c0.l);
-                    lift::<B>(&mut value[0].1, even[li].c1.l);
+                if order.empty(s) {
+                    continue;
+                }
+                let lin = &lin_order[lin_off[s]..lin_off[s + 1]];
+                let pro = &pro_order[pro_off[s]..pro_off[s + 1]];
+                // One linear term and no product, weighted: the slot's value is the lane's
+                // canonical value, multiplied by the weight as it stands.
+                if let (Some(ws), [index], []) = (w, lin, pro) {
+                    let (li, _) = terms.linear[*index as usize];
+                    kmac::<B>(&mut acc[s][0], (even[li].c0, even[li].c1), ws);
                     if full {
-                        lift::<B>(&mut value[1].0, odd[li].c0.l);
-                        lift::<B>(&mut value[1].1, odd[li].c1.l);
+                        kmac::<B>(&mut acc[s][1], (odd[li].c0, odd[li].c1), ws);
                     }
+                    continue;
                 }
-                for &index in &pro_order[pro_off[s]..pro_off[s + 1]] {
-                    let (i, j, _) = terms.products[index as usize];
-                    if i == j {
-                        // x^2: re += a^2 + 2 b^2, im += 2ab (three products).
-                        for (c, x) in [(0, even[i]), (2, diff[i]), (1, odd[i])] {
-                            if c == 1 && !full {
-                                continue;
-                            }
-                            mac::<B>(&mut value[c].0, x.c0, x.c0);
-                            mac::<B>(&mut value[c].0, x.c1, x.c1x2);
-                            mac::<B>(&mut value[c].1, x.c0, x.c1x2);
-                        }
-                    } else {
-                        kmac::<B>(&mut value[0], (even[i].c0, even[i].c1), even[j]);
-                        kmac::<B>(&mut value[2], (diff[i].c0, diff[i].c1), diff[j]);
-                        if full {
-                            kmac::<B>(&mut value[1], (odd[i].c0, odd[i].c1), odd[j]);
-                        }
-                    }
-                }
+                // Component by component (0: even rows, 1: odd rows, 2: row differences), so
+                // that one value accumulator is live at a time.
                 for c in 0..3 {
-                    if c == 1 && !full {
+                    if (c == 1 && !full) || (c == 2 && pro.is_empty()) {
                         continue;
+                    }
+                    let rows: &[KS<B::V>] = match c {
+                        0 => even,
+                        1 => odd,
+                        _ => diff,
+                    };
+                    // Unweighted, the terms go straight into the slot's accumulator.
+                    let mut value = if w.is_some() { acck::<B>() } else { acc[s][c] };
+                    if c < 2 {
+                        for &index in lin {
+                            let (li, _) = terms.linear[index as usize];
+                            lift::<B>(&mut value.0, rows[li].c0.l);
+                            lift::<B>(&mut value.1, rows[li].c1.l);
+                        }
+                    }
+                    for &index in pro {
+                        let (i, j, _) = terms.products[index as usize];
+                        let x = rows[i];
+                        if i == j {
+                            // x^2: re += a^2 + 2 b^2, im += 2ab (three products).
+                            mac::<B>(&mut value.0, x.c0, x.c0);
+                            mac::<B>(&mut value.0, x.c1, x.c1x2);
+                            mac::<B>(&mut value.1, x.c0, x.c1x2);
+                        } else {
+                            kmac::<B>(&mut value, (x.c0, x.c1), rows[j]);
+                        }
                     }
                     match w {
                         Some(ws) => {
-                            // A canonical value before the multiply by the weight.
-                            let (vr, vi) = redk::<B>(value[c]);
+                            // A multiplier operand below 2^64 per coordinate.
+                            let (vr, vi) = (red_lazy::<B>(value.0), red_lazy::<B>(value.1));
                             kmac::<B>(&mut acc[s][c], (split::<B>(vr), split::<B>(vi)), ws);
                         }
-                        None => {
-                            acc[s][c].0 = add_acc::<B>(acc[s][c].0, value[c].0);
-                            acc[s][c].1 = add_acc::<B>(acc[s][c].1, value[c].1);
-                        }
+                        None => acc[s][c] = value,
                     }
                 }
             }
             steps += 1;
             if steps == flush_steps {
                 steps = 0;
-                wide_flush::<B>(&mut acc[..slots], &mut running[..slots], full);
+                wide_flush::<B>(order, &mut acc[..slots], &mut running[..slots], full);
             }
         }
-        wide_flush::<B>(&mut acc[..slots], &mut running[..slots], full);
+        wide_flush::<B>(order, &mut acc[..slots], &mut running[..slots], full);
         for s in 0..slots {
+            if order.empty(s) {
+                continue;
+            }
             for c in 0..3 {
-                if c == 1 && !full {
+                if (c == 1 && !full) || (c == 2 && !order.has_products(s)) {
                     continue;
                 }
                 out[s][c] += hsum_k::<B>(running[s][c]);
@@ -740,11 +796,12 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
     }
 }
 
-/// Reduce the slot accumulators into the running sums (a function, not a closure: closures
-/// do not inherit the entry point's target features).
+/// Reduce the slot accumulators in use into the running sums (a function, not a closure:
+/// closures do not inherit the entry point's target features).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn wide_flush<B: crate::wide::Simd>(
+    order: &SlotOrder,
     sums: &mut [[(crate::wide::Acc<B::V>, crate::wide::Acc<B::V>); 3]],
     running: &mut [[(B::V, B::V); 3]],
     full: bool,
@@ -752,9 +809,12 @@ unsafe fn wide_flush<B: crate::wide::Simd>(
     use crate::wide::*;
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
-        for (a, r) in sums.iter_mut().zip(running.iter_mut()) {
+        for (s, (a, r)) in sums.iter_mut().zip(running.iter_mut()).enumerate() {
+            if order.empty(s) {
+                continue;
+            }
             for c in 0..3 {
-                if c == 1 && !full {
+                if (c == 1 && !full) || (c == 2 && !order.has_products(s)) {
                     continue;
                 }
                 r[c] = addk::<B>(r[c], redk::<B>(a[c]));
@@ -771,8 +831,9 @@ use rayon::prelude::*;
 pub enum MixedLane<'a> {
     /// A `K` lane already held as planes.
     Planes(Planes<'a>),
-    /// An integer lane read cell by cell (`|value| < 2^62`).
-    Ints(&'a (dyn Fn(usize) -> i64 + Sync)),
+    /// An integer lane written block by block: `fill(first, cells)` writes the values of
+    /// cells `first .. first + cells.len()` (`|value| < 2^62`).
+    Ints(&'a (dyn Fn(usize, &mut [i64]) + Sync)),
 }
 
 /// Level-0 lanes computed block by block instead of being stored (the rows of a fraction
@@ -815,15 +876,18 @@ pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: u
         match lane {
             // SAFETY: the call is guarded by the backend check and the length assertions above.
             MixedLane::Planes(p) => unsafe { fold_rows(r, &[*p], &[o], row0, row1) },
-            MixedLane::Ints(g) => {
-                let mut lo = [0_i64; 64];
-                let mut hi = [0_i64; 64];
+            MixedLane::Ints(fill) => {
+                const CHUNK: usize = 256;
+                let mut cells = [0_i64; 2 * CHUNK];
+                let mut lo = [0_i64; CHUNK];
+                let mut hi = [0_i64; CHUNK];
                 let mut row = row0;
                 while row < row1 {
-                    let n = (row1 - row).min(64);
+                    let n = (row1 - row).min(CHUNK);
+                    fill(2 * row, &mut cells[..2 * n]);
                     for i in 0..n {
-                        lo[i] = g(2 * (row + i));
-                        hi[i] = g(2 * (row + i) + 1);
+                        lo[i] = cells[2 * i];
+                        hi[i] = cells[2 * i + 1];
                     }
                     // SAFETY: the call is guarded by the backend check and the length assertions above.
                     let c0 = unsafe { std::slice::from_raw_parts_mut((o.0 as *mut u64).add(row), n) };
@@ -1186,9 +1250,12 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                             &mut partial,
                         );
                         let s = e.second.get(block).copied().unwrap_or_else(|| K::from_u64(1));
+                        // Slots and components without terms have zero sums.
                         for (acc, p) in sums.iter_mut().zip(&partial) {
                             for c in 0..3 {
-                                acc[c] += s * p[c];
+                                if !p[c].is_zero() {
+                                    acc[c] += s * p[c];
+                                }
                             }
                         }
                         k = end;

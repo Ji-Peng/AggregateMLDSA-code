@@ -311,6 +311,26 @@ pub fn weight_table(manifest: &CommitmentManifest, psi: &[u8], r2: &[E]) -> Vec<
     agg_bridge::weights::spread(&p, agg_witness::params::D_POS as usize, &blocks, 1 << manifest.d_main())
 }
 
+/// [`weight_table`] as coordinate planes, for the plane-layout sum-check groups (the same
+/// products, written in parallel without the row-major table).
+#[must_use]
+pub fn weight_planes(manifest: &CommitmentManifest, psi: &[u8], r2: &[E]) -> agg_simd::buf::KPlanes {
+    let (r_o, r_sig) = split_point(manifest, r2);
+    let p = row_weights(psi, &r_o);
+    let blocks = eq_table(&r_sig);
+    let zeta_vars = agg_witness::params::D_POS as usize;
+    let mask = (1_usize << zeta_vars) - 1;
+    let rows = 1_usize << manifest.d_main();
+    let buf = agg_simd::buf::fill_lane_planes(1, rows, |_, x| {
+        let w = match p.get(x & mask) {
+            Some(&c) => c * blocks[x >> zeta_vars],
+            None => E::zero(),
+        };
+        (w.c0().to_canonical_u64(), w.c1().to_canonical_u64())
+    });
+    agg_simd::buf::KPlanes { buf, rows }
+}
+
 /// `W(r^(3))`: `P~(r^(3)_pos) eq(r'_sig, r^(3)_sig)` (verifier).
 #[must_use]
 pub fn weight_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) -> E {
