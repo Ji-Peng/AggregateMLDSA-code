@@ -57,6 +57,23 @@ pub struct InputField {
     pub bits: usize,
     /// Whether the field's words are wired to public words of the statement.
     pub public: bool,
+    /// Columns the field occupies: a multiple of 128 of at least `bits`. Columns past
+    /// `bits` are neither inputs nor outputs, so the gate pins them to zero (their rows have
+    /// `A = B = 0`).
+    pub cols: usize,
+}
+
+impl InputField {
+    /// A field of `bits` bits in the fewest whole 128-bit words.
+    #[must_use]
+    pub const fn new(name: &'static str, bits: usize, public: bool) -> Self {
+        Self {
+            name,
+            bits,
+            public,
+            cols: bits.div_ceil(128) * 128,
+        }
+    }
 }
 
 /// What one gate instance computes.
@@ -86,11 +103,7 @@ impl ChainSpec {
         Self {
             label: "keccak-f1600",
             n_rounds,
-            input_fields: vec![InputField {
-                name: "state_in",
-                bits: STATE_BITS,
-                public: true,
-            }],
+            input_fields: vec![InputField::new("state_in", STATE_BITS, true)],
             absorbs: vec![(0..STATE_BITS)
                 .map(|s| (s as u16, Absorb::Input(s as u32)))
                 .collect()],
@@ -143,7 +156,11 @@ impl GateLayout {
         for f in &spec.input_fields {
             field_base.push(col);
             field_offset.push(off);
-            col += f.bits.div_ceil(128) * 128;
+            assert!(
+                f.cols.is_multiple_of(128) && f.cols >= f.bits,
+                "a field spans whole words holding its bits"
+            );
+            col += f.cols;
             off += f.bits;
         }
         let output_base = col;
@@ -1313,16 +1330,8 @@ pub(crate) mod tests {
             label: "mini-chain",
             n_rounds,
             input_fields: vec![
-                InputField {
-                    name: "x",
-                    bits: 200,
-                    public: true,
-                },
-                InputField {
-                    name: "y",
-                    bits: 300,
-                    public: false,
-                },
+                InputField::new("x", 200, true),
+                InputField::new("y", 300, false),
             ],
             absorbs: vec![
                 (0..400u16)

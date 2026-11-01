@@ -26,6 +26,14 @@ use flock_field::F128;
 use rayon::prelude::*;
 
 use crate::shape::Shape;
+use agg_witness::params::{ParamSet, Set};
+
+/// Padded positions `P_pad` of one signature of `set` (1,024 for ML-DSA-44, 2,048 for
+/// ML-DSA-65 and ML-DSA-87).
+#[must_use]
+pub const fn positions_pad(set: Set) -> usize {
+    agg_witness::params::dispatch_set!(set, |P| P::P_PAD)
+}
 
 /// The input geometry of one segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,8 +95,19 @@ impl SegmentLayout {
     /// If `d_part > 13` or the part lies outside the segment.
     #[must_use]
     pub fn production_part(d_part: u32, index: usize) -> Self {
+        Self::production_part_for(Set::S44, d_part, index)
+    }
+
+    /// The production layout of part `index` of a segment of parameter set `set` split into
+    /// parts of `2^{d_part}` records (`lane_len = P_pad 2^{d_part}`, `P_pad` the padded
+    /// positions of a signature: record `i` of the part starts at position `P_pad i`).
+    ///
+    /// # Panics
+    /// If `d_part > 13` or the part lies outside the segment.
+    #[must_use]
+    pub fn production_part_for(set: Set, d_part: u32, index: usize) -> Self {
         assert!(d_part <= 13, "a segment has at most 2^13 records");
-        Self::part(Shape::PRODUCTION, 1 << (10 + d_part), index)
+        Self::part(Shape::production(set), positions_pad(set) << d_part, index)
     }
 
     /// Segment-level index of the layout's first level-1 block.

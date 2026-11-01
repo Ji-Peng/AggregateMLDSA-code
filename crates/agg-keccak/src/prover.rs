@@ -597,9 +597,10 @@ impl KeccakParams {
     }
 }
 
-/// Public words of one sponge record: `mu` (4 words) then `c~` (2 words).
+/// Public words of one sponge record: `mu` (4 words) then `c~` (`c~` bytes / 16 words: 2, 3
+/// or 4).
 #[must_use]
-pub fn sponge_public_words(mu: &[u8; MU_BYTES], c_tilde: &[u8; CTILDE_BYTES]) -> Vec<F128> {
+pub fn sponge_public_words(mu: &[u8; MU_BYTES], c_tilde: &[u8]) -> Vec<F128> {
     let mut w = sponge::bytes_to_words(mu);
     w.extend(sponge::bytes_to_words(c_tilde));
     w

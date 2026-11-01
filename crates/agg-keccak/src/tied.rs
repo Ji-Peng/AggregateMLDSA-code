@@ -7,11 +7,15 @@
 //! ([`crate::flock_union::BitClaim`]).
 //!
 //! Regions. The sponge instance commits its words BatchMajor: word column `c` of row `j` is
-//! the padded word `(c << nu_s) | j`. Lane `t` of a record is the eight words `8 t + w`, `w <
-//! 8` ([`crate::sponge::W1_WORD_BASE`]), bit `p & 127` of word `p >> 7` for the lane position
-//! `p = j + 256 rho`; the words `[48, 56)` are the public region (mu, `c~`, the constant, a
-//! zero word). The chain runs over eight lanes, the word columns `[0, 64)`: lanes 6 and 7 are
-//! the public region and the first chi words, with weight zero.
+//! the padded word `(c << nu_s) | j`. Lane `t` of a record is the `P_pad / 128` words
+//! `(P_pad / 128) t + w` ([`crate::sponge::SpongeLayout`]), bit `p & 127` of word `p >> 7`
+//! for the lane position `p = j + 256 rho < P_pad`. The chain runs over `2^lb` lanes of
+//! `P_pad` positions, the word columns `[0, 64)` for every parameter set. ML-DSA-44: six lanes
+//! of eight words, the words `[48, 56)` are the public region (mu, `c~`, the constant, a zero
+//! word), and the chain's lanes 6 and 7 are the public region and the first chi words, with
+//! weight zero. ML-DSA-65 and ML-DSA-87: four lanes of sixteen words and no junk lane; the
+//! positions `256 k .. P_pad` of a lane (ML-DSA-65: rows 6 and 7, words 12..15 of each lane)
+//! are columns the sponge gate pins to zero, as the F_p side's bridge inputs are zero there.
 //!
 //! Transcript. From the part's Flock seed `fs`, its geometry, the digest of
 //! the final vectors and the sponge's commitment-phase cap, the tie challenger draws (each site after
@@ -45,6 +49,7 @@ use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 
 use agg_witness::bridge::BridgeMatrices;
+use agg_witness::params::{ParamSet, Set44};
 
 use crate::{
     flock_union::{bit_value, BitClaim, CommitData, UnionGeometry, UnionProof},
@@ -53,10 +58,7 @@ use crate::{
         capacity_log, sponge_public_words, KeccakCommitment, KeccakError, KeccakProof, Profile,
         DOMAIN,
     },
-    sponge::{
-        SpongeRecord, CHI_WORD_BASE, CONST_WORD, CTILDE_BYTES, CTILDE_WORD_BASE, MU_BYTES,
-        MU_WORD_BASE, PUBLIC_WORDS_LOG2, PUBLIC_WORD_BASE, W1_INPUT_BASE, W1_WORD_BASE,
-    },
+    sponge::{SpongeLayout, SpongeRecord, MU_BYTES, RATE_BYTES, W1_INPUT_BASE},
     witness::{pack_slot_groups, sponge_slot, LaneBits, SlotBuffers},
 };
 use agg_mldsa_simd::Engine;
@@ -79,12 +81,10 @@ const Y_TABLE_LABEL: &[u8] = b"agg-keccak/v3/tied-final-vectors";
 pub const TIE_DOMAIN: &[u8] = b"agg-mldsa/v3/tie";
 /// Challenger label of the sponge instance (version 5).
 const SPONGE_LABEL: &[u8] = b"agg-keccak/v5/tied-sponge";
-/// Record positions per production level-1 block (`log2`): `2^19 / 1024`.
-const BLOCK_RECORDS_LOG2: usize = 9;
 /// Packed-direct claims of the sponge proof: the public region.
 const SPONGE_CLAIMS: usize = 1;
-/// Lanes of the chain (`2^lb`, junk lanes 6 and 7 included).
-const CHAIN_LANES: usize = 8;
+/// Word columns of the chain's lanes: `2^lb` lanes of `P_pad / 128` words.
+const CHAIN_WORDS: usize = 64;
 
 /// Peak resident set size (VmHWM, MiB) of this process, for the `AGG_TIED_TRACE` phase trace.
 fn peak_rss_mib() -> Option<u64> {
@@ -105,35 +105,42 @@ fn trace(phase: &str, start: &std::time::Instant) {
     }
 }
 
-/// `c~ = SHAKE256(mu || w1Encode, 32)` of every record, batched on the engine's
-/// Keccak lanes in parallel chunks (same values as [`SpongeRecord::c_tilde`]).
-fn c_tildes(engine: &Engine, records: &[SpongeRecord]) -> Vec<[u8; CTILDE_BYTES]> {
+/// `c~ = SHAKE256(mu || w1Encode, lambda / 4)` of every record, concatenated, batched on the
+/// engine's Keccak lanes in parallel chunks (same values as [`SpongeRecord::c_tilde`]).
+fn c_tildes<P: ParamSet>(engine: &Engine, records: &[SpongeRecord<P>]) -> Vec<u8> {
     const CHUNK: usize = 64;
-    let mut out = vec![[0u8; CTILDE_BYTES]; records.len()];
-    out.par_chunks_mut(CHUNK)
+    let width = P::C_TILDE_BYTES;
+    let mut out = vec![0u8; records.len() * width];
+    out.par_chunks_mut(CHUNK * width)
         .zip(records.par_chunks(CHUNK))
         .for_each(|(out, recs)| {
             let inputs: Vec<[&[u8]; 4]> = recs
                 .iter()
-                .map(|r| [&r.mu[..], &r.w1_encode[..], &[][..], &[][..]])
+                .map(|r| [&r.mu[..], r.w1_encode.as_ref(), &[][..], &[][..]])
                 .collect();
-            let mut flat = vec![0u8; recs.len() * CTILDE_BYTES];
-            engine.shake256_many(&inputs, CTILDE_BYTES, &mut flat);
-            for (o, c) in out.iter_mut().zip(flat.as_chunks::<CTILDE_BYTES>().0) {
-                *o = *c;
-            }
+            engine.shake256_many(&inputs, width, out);
         });
     out
 }
 
+/// `records` as ML-DSA-44 records when `P` is [`Set44`] (the 8-way witness generator's type).
+#[allow(unsafe_code)]
+fn as_set44<P: ParamSet>(records: &[SpongeRecord<P>]) -> Option<&[SpongeRecord<Set44>]> {
+    (std::any::TypeId::of::<P>() == std::any::TypeId::of::<Set44>()).then(|| {
+        // SAFETY: `P` is `Set44`, so both slices have the same element type.
+        unsafe { &*(std::ptr::from_ref(records) as *const [SpongeRecord<Set44>]) }
+    })
+}
+
 /// XOR the lanes the sponge gate absorbs before permutation `m` into `s`: words
-/// `17 m .. 17 m + 17` of the padded message `mu || w1Encode || 0x1F 0^* 0x80` (seven
+/// `17 m .. 17 m + 17` of the padded message `mu || w1Encode || 0x1F 0^* 0x80` (`N_PERMS`
 /// 136-byte blocks; the sponge gate's absorption of `record.input_bits()`).
-fn absorb_message(record: &SpongeRecord, m: usize, s: &mut crate::keccak::Lanes) {
-    const RATE_WORDS: usize = crate::sponge::RATE_BYTES / 8;
+fn absorb_message<P: ParamSet>(record: &SpongeRecord<P>, m: usize, s: &mut crate::keccak::Lanes) {
+    const RATE_WORDS: usize = RATE_BYTES / 8;
     const MU_WORDS: usize = MU_BYTES / 8;
-    const MSG_WORDS: usize = MU_WORDS + crate::sponge::W1_BYTES / 8;
-    debug_assert_eq!(crate::sponge::N_PERMS * RATE_WORDS, MSG_WORDS + 15);
+    let msg_words = MU_WORDS + P::W1_ENCODE_BYTES / 8;
+    debug_assert!(P::N_PERMS * RATE_WORDS > msg_words);
+    let w1: &[u8] = record.w1_encode.as_ref();
     let word = |bytes: &[u8], q: usize| {
         u64::from_le_bytes(bytes[8 * q..8 * q + 8].try_into().expect("eight bytes"))
     };
@@ -141,37 +148,38 @@ fn absorb_message(record: &SpongeRecord, m: usize, s: &mut crate::keccak::Lanes)
         let q = RATE_WORDS * m + l;
         *x ^= if q < MU_WORDS {
             word(&record.mu, q)
-        } else if q < MSG_WORDS {
-            word(&record.w1_encode, q - MU_WORDS)
+        } else if q < msg_words {
+            word(w1, q - MU_WORDS)
         } else {
             // SHAKE suffix 0x1F right after the message, 0x80 in the last byte.
-            (u64::from(q == MSG_WORDS) * 0x1F)
-                | (u64::from(q == crate::sponge::N_PERMS * RATE_WORDS - 1) << 63)
+            (u64::from(q == msg_words) * 0x1F) | (u64::from(q == P::N_PERMS * RATE_WORDS - 1) << 63)
         };
     }
 }
 
 /// The sponge gate's block layout must be the one the regions assume (`crate::sponge`,
-/// module docs).
-fn assert_tied_layout(gate: &ChainGate) {
+/// module docs); returns it.
+fn assert_tied_layout(gate: &ChainGate) -> SpongeLayout {
+    let layout = SpongeLayout::of_gate(gate)
+        .expect("the tied part needs a sponge gate of crate::sponge");
     let lay = gate.layout();
-    let spec = gate.spec();
+    let chain_lanes = layout.lanes.next_power_of_two();
+    let mut base: Vec<usize> = (0..lay.field_base.len() - 1)
+        .map(|f| f * layout.positions_pad)
+        .collect();
+    base.push(128 * layout.mu_word_base);
     assert!(
-        spec.input_fields.len() == 2
-            && !spec.input_fields[0].public
-            && spec.input_fields[0].bits == 6 * 1024
-            && spec.input_fields[1].public
-            && spec.input_fields[1].bits == 8 * MU_BYTES
-            && lay.field_base == [128 * W1_WORD_BASE, 128 * MU_WORD_BASE]
-            && lay.output_base == 128 * CTILDE_WORD_BASE
-            && lay.const_col == 128 * CONST_WORD
-            && lay.t_base == 2 * CHI_WORD_BASE
-            && PUBLIC_WORD_BASE + (1 << PUBLIC_WORDS_LOG2) == CHI_WORD_BASE
-            && PUBLIC_WORD_BASE.is_multiple_of(1 << PUBLIC_WORDS_LOG2)
-            && 8 * CHAIN_LANES <= CHI_WORD_BASE + 8
-            && W1_WORD_BASE == 0,
+        lay.field_base == base
+            && lay.output_base == 128 * layout.ctilde_word_base
+            && lay.const_col == 128 * layout.const_word
+            && lay.t_base == 2 * layout.chi_word_base
+            && layout.public_word_base + (1 << layout.public_words_log2) == layout.chi_word_base
+            && layout.public_word_base.is_multiple_of(1 << layout.public_words_log2)
+            && chain_lanes * layout.lane_words() == CHAIN_WORDS
+            && CHAIN_WORDS <= layout.chi_word_base + 8,
         "the tied part needs the sponge layout of crate::sponge"
     );
+    layout
 }
 
 /// `Y` (one bit per byte) packed least significant first, bit `o` at byte `o / 8`.
@@ -294,7 +302,7 @@ impl TiedCommitment {
 }
 
 /// A committed tied part: the sponge witness and its commitment data, the part's input
-/// bits (the chain's lanes 0..5, the prover's copy of `b'`), the statement words and the
+/// bits (the chain's live lanes, the prover's copy of `b'`), the statement words and the
 /// cap.
 pub struct TiedCommitted {
     n: usize,
@@ -302,7 +310,8 @@ pub struct TiedCommitted {
     sponge_data: Option<CommitData>,
     bits: Vec<u64>,
     public: Vec<F128>,
-    c_tilde: Vec<[u8; CTILDE_BYTES]>,
+    /// The records' `c~`, concatenated.
+    c_tilde: Vec<u8>,
     commitment: TiedCommitment,
 }
 
@@ -313,10 +322,15 @@ impl TiedCommitted {
         &self.commitment
     }
 
-    /// The published `c~_i`.
+    /// The published `c~_i` (`C` bytes each: 32, 48 or 64 by parameter set).
+    ///
+    /// # Panics
+    /// If `C` is not the records' `c~` width.
     #[must_use]
-    pub fn c_tilde(&self) -> &[[u8; CTILDE_BYTES]] {
-        &self.c_tilde
+    pub fn c_tilde<const C: usize>(&self) -> &[[u8; C]] {
+        let (chunks, rest) = self.c_tilde.as_chunks::<C>();
+        assert!(rest.is_empty() && chunks.len() == self.n, "c~ of {C} bytes");
+        chunks
     }
 
     /// The part's lane-major input bits.
@@ -412,6 +426,7 @@ pub struct TiedCost {
 /// segments (a span, module docs).
 pub struct TiedPart<'g> {
     gate: &'g ChainGate,
+    layout: SpongeLayout,
     n: usize,
     d: u32,
     index: usize,
@@ -474,11 +489,15 @@ impl<'g> TiedPart<'g> {
         assert!(segments >= 1, "a span of at least one segment");
         assert!(n >= 1 && n <= segments << d, "1 <= n <= segments 2^d");
         assert!((3..=13).contains(&d), "3 <= d <= 13");
-        assert_tied_layout(gate);
+        let layout = assert_tied_layout(gate);
         let span_log = segments.next_power_of_two().trailing_zeros() as usize;
-        let layout = SegmentLayout::production_part(d, index);
-        let chain = ChainLayout::new(layout, span_log);
-        assert_eq!(chain.lanes_padded(), CHAIN_LANES, "eight chain lanes");
+        let segment = SegmentLayout::production_part_for(layout.set, d, index);
+        let chain = ChainLayout::new(segment, span_log);
+        assert_eq!(
+            chain.lanes_padded() * layout.lane_words(),
+            CHAIN_WORDS,
+            "the chain's lanes are the word columns 0..64"
+        );
         let nu_s = capacity_log(n, gate.layout().k_log);
         let sponge = UnionGeometry::new(gate.table_type(), n, nu_s, profile);
         assert!(
@@ -487,6 +506,7 @@ impl<'g> TiedPart<'g> {
         );
         let part = Self {
             gate,
+            layout,
             n,
             d,
             index,
@@ -509,10 +529,11 @@ impl<'g> TiedPart<'g> {
     /// before the part exists; [`Self::new_span`] checks it against the part's own).
     #[must_use]
     pub fn plan_geometry(gate: &ChainGate, n: usize, d: u32, segments: usize) -> TieGeometry {
+        let layout = assert_tied_layout(gate);
         TieGeometry {
             d: d as usize,
             span_log: segments.next_power_of_two().trailing_zeros() as usize,
-            blocks_log: (d as usize).saturating_sub(BLOCK_RECORDS_LOG2),
+            blocks_log: (d as usize).saturating_sub(layout.block_records_log2()),
             nu_s: capacity_log(n, gate.layout().k_log),
         }
     }
@@ -580,7 +601,7 @@ impl<'g> TiedPart<'g> {
         self.n.saturating_sub(sigma << self.d).min(1 << self.d)
     }
 
-    /// u64 words of the lane-major input bits of one segment (six lanes).
+    /// u64 words of the lane-major input bits of one segment (its live lanes).
     fn segment_words(&self) -> usize {
         self.segment().input_bits() / 64
     }
@@ -597,7 +618,7 @@ impl<'g> TiedPart<'g> {
         false
     }
 
-    /// The part's input geometry (shape, lanes, `lane_len = 2^(10 + d)`, offset).
+    /// The part's input geometry (shape, lanes, `lane_len = P_pad 2^d`, offset).
     #[must_use]
     pub fn segment(&self) -> &SegmentLayout {
         &self.chain.layout
@@ -607,6 +628,12 @@ impl<'g> TiedPart<'g> {
     #[must_use]
     pub fn chain(&self) -> &ChainLayout {
         &self.chain
+    }
+
+    /// The sponge layout of the part's parameter set.
+    #[must_use]
+    pub fn layout(&self) -> &SpongeLayout {
+        &self.layout
     }
 
     /// `log2` of the part's record positions.
@@ -715,13 +742,15 @@ impl<'g> TiedPart<'g> {
         ch
     }
 
-    /// The public claim's point: rows `rho_r`, word columns `48 + c8` (`c8 = rho_c`).
+    /// The public claim's point: rows `rho_r`, word columns `public base + c` (`c = rho_c`,
+    /// `log2` of the public region's width coordinates).
     fn public_point(&self, rho_r: &[F128], rho_c: &[F128]) -> Vec<F128> {
         let nu_s = self.sponge.nu();
+        let base = self.layout.public_word_base;
         let mut p = rho_r.to_vec();
         p.extend_from_slice(rho_c);
-        for bit in PUBLIC_WORDS_LOG2..self.sponge.word_vars() - nu_s {
-            p.push(if (PUBLIC_WORD_BASE >> bit) & 1 == 1 {
+        for bit in self.layout.public_words_log2..self.sponge.word_vars() - nu_s {
+            p.push(if (base >> bit) & 1 == 1 {
                 F128::ONE
             } else {
                 F128::ZERO
@@ -731,9 +760,9 @@ impl<'g> TiedPart<'g> {
     }
 
     /// The record coordinates of a chain point: `i_lo` (the in-block coordinates above the
-    /// record position), `i_mid`, then `sigma` (`d + span_log` in all).
-    fn record_coords(point: &ChainPoint) -> Vec<F128> {
-        point.zeta[10..]
+    /// `log2 P_pad` position bits), `i_mid`, then `sigma` (`d + span_log` in all).
+    fn record_coords(&self, point: &ChainPoint) -> Vec<F128> {
+        point.zeta[self.layout.positions_log2()..]
             .iter()
             .chain(&point.i_mid)
             .chain(&point.sigma)
@@ -746,7 +775,7 @@ impl<'g> TiedPart<'g> {
     /// when the sponge instance has `nu_s < d + span_log` row coordinates (its records `>=
     /// 2^nu_s` do not exist, and the chain's are zero).
     fn row_factor(&self, point: &ChainPoint) -> F128 {
-        Self::record_coords(point)
+        self.record_coords(point)
             .iter()
             .skip(self.sponge.nu())
             .fold(F128::ONE, |acc, &x| acc * (F128::ONE + x))
@@ -754,14 +783,14 @@ impl<'g> TiedPart<'g> {
 
     /// The bit claim on the sponge commitment at a chain point: in-word bits
     /// 0..6 from `zeta[0..7]`, rows from the record coordinates (truncated or zero-padded to
-    /// `nu_s`), word columns `[zeta[7..10] | t | 0 ..]` (word `8 t + w`).
+    /// `nu_s`), word columns `[zeta[7..log2 P_pad] | t | 0 ..]` (word `(P_pad / 128) t + w`).
     fn bit_claim(&self, point: &ChainPoint) -> BitClaim {
         let nu_s = self.sponge.nu();
-        let rec = Self::record_coords(point);
+        let rec = self.record_coords(point);
         let mut x = Vec::with_capacity(self.sponge.word_vars() + 1);
         x.push(point.zeta[6]);
         x.extend((0..nu_s).map(|k| rec.get(k).copied().unwrap_or(F128::ZERO)));
-        x.extend_from_slice(&point.zeta[7..10]);
+        x.extend_from_slice(&point.zeta[7..self.layout.positions_log2()]);
         x.extend_from_slice(&point.t);
         x.resize(self.sponge.word_vars() + 1, F128::ZERO);
         BitClaim {
@@ -770,8 +799,9 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// The chain's input (`2^span_log` segments of eight lanes): lanes 0..5 from the part's
-    /// input bits, lanes 6, 7 from the sponge's word columns 48..63 (module docs).
+    /// The chain's input (`2^span_log` segments of `2^lb` lanes): the live lanes from the
+    /// part's input bits, the junk lanes (ML-DSA-44: lanes 6, 7) from the sponge's word
+    /// columns 48..63 (module docs).
     fn chain_input(&self, bits: &[u64], z: &[F128]) -> Vec<u64> {
         let chain = &self.chain;
         let lane_words = self.segment().lane_len / 64;
@@ -785,12 +815,13 @@ impl<'g> TiedPart<'g> {
             }
         }
         let nu = self.sponge.nu();
+        let (lane_words, pad) = (self.layout.lane_words(), self.layout.positions_pad);
         for g in 0..self.n {
             let (sigma, i) = (g >> self.d, g & ((1 << self.d) - 1));
-            for t in self.segment().lanes()..CHAIN_LANES {
-                for w in 0..8 {
-                    let word = z[((8 * t + w) << nu) | g];
-                    let dst = chain.bit_index(sigma, t, 1024 * i + 128 * w) / 64;
+            for t in self.segment().lanes()..chain.lanes_padded() {
+                for w in 0..lane_words {
+                    let word = z[((lane_words * t + w) << nu) | g];
+                    let dst = chain.bit_index(sigma, t, pad * i + 128 * w) / 64;
                     out[dst] = word.lo;
                     out[dst + 1] = word.hi;
                 }
@@ -800,40 +831,46 @@ impl<'g> TiedPart<'g> {
     }
 
     /// The honest sponge slot buffers of `records` (`n` of them) and the span's lane-major
-    /// input bits, one block of `6 * 2^(10 + d) / 64` words per segment (segment-major; in a
-    /// segment's block column `p + 2^(10 + d) t` is bit `t` of position `p = j + 256 rho +
-    /// 1024 i`, padded records zero).
+    /// input bits, one block of `lanes * P_pad 2^d / 64` words per segment (segment-major; in
+    /// a segment's block column `p + P_pad 2^d t` is bit `t` of position `p = j + 256 rho +
+    /// P_pad i`, padded positions and records zero).
+    ///
+    /// # Panics
+    /// If the records are of another parameter set than the part's gate.
     #[must_use]
-    pub fn honest_parts(&self, records: &[SpongeRecord]) -> (SlotBuffers, Vec<u64>) {
+    pub fn honest_parts<P: ParamSet>(&self, records: &[SpongeRecord<P>]) -> (SlotBuffers, Vec<u64>) {
         self.honest_parts_with(agg_mldsa_simd::engine(), records)
     }
 
     /// [`Self::honest_parts`] on a given Keccak round kernel (every backend gives the
     /// same buffers).
     #[must_use]
-    pub fn honest_parts_with(
+    pub fn honest_parts_with<P: ParamSet>(
         &self,
         engine: &Engine,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<P>],
     ) -> (SlotBuffers, Vec<u64>) {
         assert_eq!(records.len(), self.n, "one record per live position");
+        assert_eq!(P::SET, self.layout.set, "records of the gate's parameter set");
         let start = std::time::Instant::now();
         let seg = self.segment();
         let words = self.segment_words();
         let mut bits = vec![0_u64; self.segments * words];
         // The 8-way generator writes the slot buffers and the lane bits in one pass.
-        let lane_bits = LaneBits {
-            bits: &mut bits,
-            seg_words: words,
-            lane_len: seg.lane_len,
-            d: self.d,
-        };
-        if let Some(sponge) = sponge_slot(self.gate, self.sponge.nu(), records, Some(lane_bits)) {
-            trace("witness (8-way)", &start);
-            return (sponge, bits);
+        if let Some(records) = as_set44(records) {
+            let lane_bits = LaneBits {
+                bits: &mut bits,
+                seg_words: words,
+                lane_len: seg.lane_len,
+                d: self.d,
+            };
+            if let Some(sponge) = sponge_slot(self.gate, self.sponge.nu(), records, Some(lane_bits)) {
+                trace("witness (8-way)", &start);
+                return (sponge, bits);
+            }
         }
         // Per record and independent: parallel (same values in the same order).
-        let input_words = crate::sponge::INPUT_BITS / 64;
+        let input_words = self.layout.input_bits() / 64;
         let mut inputs = vec![0_u64; records.len() * input_words];
         inputs.par_chunks_mut(input_words).zip(records.par_iter())
             .for_each(|(out, record)| record.input_bits_into(out));
@@ -858,25 +895,27 @@ impl<'g> TiedPart<'g> {
         );
         trace("witness packed", &start);
         let lane = seg.lane_len;
+        let (live, pad) = (self.layout.positions(), self.layout.positions_pad);
         for (g, input) in inputs.chunks_exact(input_words).enumerate() {
             let (sigma, i) = (g >> self.d, g & ((1 << self.d) - 1));
-            // Lane t of a record is gate input bits W1_INPUT_BASE + 1024 t + (256 rho + j),
-            // 16 aligned u64 words (`SpongeRecord::input_bits`).
-            for t in 0..6 {
-                let src = (W1_INPUT_BASE + 1024 * t) / 64;
-                let dst = sigma * words + (lane * t + 1024 * i) / 64;
-                bits[dst..dst + 16].copy_from_slice(&input[src..src + 16]);
+            // Lane t of a record is gate input bits W1_INPUT_BASE + 256 k t + (256 rho + j),
+            // `4 k` aligned u64 words (`SpongeRecord::input_bits`); its padded positions stay
+            // zero.
+            for t in 0..self.layout.lanes {
+                let src = (W1_INPUT_BASE + live * t) / 64;
+                let dst = sigma * words + (lane * t + pad * i) / 64;
+                bits[dst..dst + live / 64].copy_from_slice(&input[src..src + live / 64]);
             }
         }
         trace("witness complete", &start);
         (sponge, bits)
     }
 
-    fn statement(records: &[SpongeRecord]) -> (Vec<F128>, Vec<[u8; CTILDE_BYTES]>) {
+    fn statement<P: ParamSet>(records: &[SpongeRecord<P>]) -> (Vec<F128>, Vec<u8>) {
         let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         let public = records
             .iter()
-            .zip(&c_tilde)
+            .zip(c_tilde.chunks_exact(P::C_TILDE_BYTES))
             .flat_map(|(r, c)| sponge_public_words(&r.mu, c))
             .collect();
         (public, c_tilde)
@@ -886,13 +925,14 @@ impl<'g> TiedPart<'g> {
     /// part's input bits; `records` give the statement words `[mu_i, c~_i]` (with `c~_i`
     /// computed natively). Keeps the sponge commitment's prover data.
     #[must_use]
-    pub fn commit_parts(
+    pub fn commit_parts<P: ParamSet>(
         &self,
         sponge: SlotBuffers,
         bits: Vec<u64>,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<P>],
     ) -> TiedCommitted {
         assert_eq!(records.len(), self.n, "one record per live position");
+        assert_eq!(P::SET, self.layout.set, "records of the gate's parameter set");
         assert_eq!(
             bits.len(),
             self.segments * self.segment_words(),
@@ -918,7 +958,7 @@ impl<'g> TiedPart<'g> {
 
     /// Commit to the honest witness of `records` (the commitment phase: before `sd` and `fs`).
     #[must_use]
-    pub fn commit(&self, records: &[SpongeRecord]) -> TiedCommitted {
+    pub fn commit<P: ParamSet>(&self, records: &[SpongeRecord<P>]) -> TiedCommitted {
         let (sponge, bits) = self.honest_parts(records);
         self.commit_parts(sponge, bits, records)
     }
@@ -929,15 +969,16 @@ impl<'g> TiedPart<'g> {
     /// the data the proof commits again and panics if Flock's cap differs from
     /// `commitment`.
     #[must_use]
-    pub fn reattach(
+    pub fn reattach<P: ParamSet>(
         &self,
         sponge: SlotBuffers,
         bits: Vec<u64>,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<P>],
         commitment: TiedCommitment,
         data: Option<CommitData>,
     ) -> TiedCommitted {
         assert_eq!(records.len(), self.n, "one record per live position");
+        assert_eq!(P::SET, self.layout.set, "records of the gate's parameter set");
         assert_eq!(
             bits.len(),
             self.segments * self.segment_words(),
@@ -1007,8 +1048,9 @@ impl<'g> TiedPart<'g> {
 
     /// Prove a committed part against the final vectors `ys` (one per segment of the span;
     /// tests pass wrong ones) under the matrices of `sd`, seeded by `fs` (the part's Flock
-    /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (lanes 0..5) and the
-    /// sponge's word columns 48..63 (lanes 6, 7), the claimed bit value, then the sponge
+    /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (its live lanes) and,
+    /// for ML-DSA-44, the sponge's word columns 48..63 (lanes 6, 7), the claimed bit value,
+    /// then the sponge
     /// instance's Flock proof with the public claim and the bit claim (opening the commitment-phase
     /// commitment). `sd` is bound through `fs` (the Flock seed step follows the bridge-seed step).
     ///
@@ -1050,7 +1092,7 @@ impl<'g> TiedPart<'g> {
         let mut ch = self.tie_start(fs, &Self::y_digest(&ys), &absorbed.sponge);
         let nonce = site_work(&mut ch, work.tie_bits, TieWork::Grind, "tie nonce")?;
         let rho_r = ch.sample_f128_vec(nu_s);
-        let rho_c = ch.sample_f128_vec(3);
+        let rho_c = ch.sample_f128_vec(self.layout.public_words_log2);
         let eq_nonce = site_work(&mut ch, work.eq_bits, TieWork::Grind, "eq_Y nonce")?;
         let eq_y = EqY {
             r_o: ch.sample_f128_vec(self.chain.out_vars()),
@@ -1240,13 +1282,15 @@ impl<'g> TiedPart<'g> {
     /// The verifier's value of the public claim: the multilinear extension of the public
     /// region's words (mu, `c~`, the constant 1, zero; zero on dummy rows) at the point.
     fn public_value(&self, public: &[F128], rho_r: &[F128], rho_c: &[F128]) -> F128 {
-        let words = 6; // mu (4) then c~ (2) per record, as `sponge_public_words`
+        // mu (4) then c~ (2, 3 or 4) per record, as `sponge_public_words`.
+        let lay = &self.layout;
+        let words = 4 + lay.ctilde_bytes / 16;
         assert_eq!(public.len(), words * self.n);
         let eq_rows = build_eq_table(rho_r);
         let eq_c = build_eq_table(rho_c);
-        let mu_at = MU_WORD_BASE - PUBLIC_WORD_BASE;
-        let ct_at = CTILDE_WORD_BASE - PUBLIC_WORD_BASE;
-        let const_at = CONST_WORD - PUBLIC_WORD_BASE;
+        let mu_at = lay.mu_word_base - lay.public_word_base;
+        let ct_at = lay.ctilde_word_base - lay.public_word_base;
+        let const_at = lay.const_word - lay.public_word_base;
         let mut acc = F128::ZERO;
         for (j, row) in eq_rows.iter().enumerate().take(self.n) {
             let rec = &public[words * j..words * (j + 1)];
@@ -1271,10 +1315,10 @@ impl<'g> TiedPart<'g> {
     /// a failed chain or public check (`KeccakError::Tie` with `"parity chain"`, `"public
     /// words"`).
     #[allow(clippy::too_many_arguments)]
-    pub fn verify(
+    pub fn verify<const C: usize>(
         &self,
         mu: &[[u8; MU_BYTES]],
-        c_tilde: &[[u8; CTILDE_BYTES]],
+        c_tilde: &[[u8; C]],
         commitment: &TiedCommitment,
         _sd: [u8; 32],
         matrices: &BridgeMatrices,
@@ -1284,6 +1328,9 @@ impl<'g> TiedPart<'g> {
     ) -> Result<(), KeccakError> {
         if mu.len() != self.n || c_tilde.len() != self.n {
             return Err(KeccakError::Statement("record count"));
+        }
+        if C != self.layout.ctilde_bytes {
+            return Err(KeccakError::Statement("c~ width"));
         }
         let m3 = self.segment().output_bits();
         if ys.len() != self.segments || ys.iter().any(|y| y.len() != m3 || y.iter().any(|&b| b > 1))
@@ -1308,7 +1355,7 @@ impl<'g> TiedPart<'g> {
         let mut ch = self.tie_start(fs, &Self::y_digest(ys), &commitment.sponge);
         site_work(&mut ch, work.tie_bits, TieWork::Check(parts.nonce), "tie nonce")?;
         let rho_r = ch.sample_f128_vec(nu_s);
-        let rho_c = ch.sample_f128_vec(3);
+        let rho_c = ch.sample_f128_vec(self.layout.public_words_log2);
         site_work(
             &mut ch,
             work.eq_bits,
@@ -1361,7 +1408,7 @@ impl<'g> TiedPart<'g> {
 mod tests {
     use super::*;
     use crate::flock_union::eval_packed;
-    use crate::sponge::sponge_gate;
+    use crate::sponge::{sponge_gate, CTILDE_BYTES};
     use agg_bridge::seed::derive_matrices_for;
     use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
@@ -1453,6 +1500,105 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn random_record_for<P: ParamSet>(rng: &mut Rng) -> SpongeRecord<P> {
+        let mut mu = [0u8; MU_BYTES];
+        let mut w1 = P::zero_w1_encode();
+        mu.iter_mut().for_each(|b| *b = rng.next_u32() as u8);
+        w1.as_mut().iter_mut().for_each(|b| *b = rng.next_u32() as u8);
+        SpongeRecord { mu, w1_encode: w1 }
+    }
+
+    /// ML-DSA-65 and ML-DSA-87: the four-lane chain input and its bit claim agree with the
+    /// sponge's committed words at random points (parts of one and of two level-1 blocks,
+    /// an offset part, spans), the chain input is zero at every padded position, the public
+    /// value is the verifier's table, and the honest final vectors are the F_p side's level
+    /// sums of the bridge inputs `j + 256 rho + P_pad i`.
+    fn check_lane_claims<P: ParamSet>(seed: u64) {
+        use agg_bridge::parity;
+        let gate = crate::sponge::sponge_gate_for(P::SET);
+        let shape = Shape::production(P::SET);
+        let mats = derive_matrices_for(&shape, &[seed as u8; 32]);
+        for (n, d, index, segments) in [
+            (5usize, 3u32, 0usize, 1usize),
+            (9, 6, 2, 1),
+            (300, 9, 0, 1),
+            (12, 3, 0, 2),
+            (19, 3, 1, 3),
+        ] {
+            let part = TiedPart::new_span(&gate, n, d, index, segments, Profile::Fast);
+            let lay = *part.layout();
+            assert_eq!(part.chain().lanes_padded(), 4);
+            assert_eq!(part.segment().lane_len, lay.positions_pad << d);
+            assert_eq!(part.chain().rounds(), 13 + d as usize + part.chain().span_log);
+            let mut rng = Rng::new(seed + n as u64 + u64::from(d));
+            let records: Vec<SpongeRecord<P>> = (0..n).map(|_| random_record_for::<P>(&mut rng)).collect();
+            let (sponge, bits) = part.honest_parts(&records);
+            let input = part.chain_input(&bits, &sponge.z);
+            let chain = part.chain();
+            for sigma in 0..1 << chain.span_log {
+                for t in 0..4 {
+                    for i in 0..1usize << d {
+                        for p in lay.positions()..lay.positions_pad {
+                            let c = chain.bit_index(sigma, t, lay.positions_pad * i + p);
+                            assert_eq!((input[c / 64] >> (c % 64)) & 1, 0, "padded position");
+                        }
+                    }
+                }
+            }
+            for _ in 0..3 {
+                let rs: Vec<F128> = (0..chain.rounds()).map(|_| rand_f(&mut rng)).collect();
+                let point = chain.split_point(&rs);
+                let claim = part.bit_claim(&point);
+                assert_eq!(claim.x_full.len(), part.sponge().word_vars() + 1);
+                assert_eq!(
+                    chain.input_value(&input, &point),
+                    part.row_factor(&point) * bit_value(&sponge.z, &claim, part.nu()),
+                    "n {n}, d {d}, index {index}, segments {segments}"
+                );
+            }
+            let (public, _) = TiedPart::statement(&records);
+            let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
+            let rho_c: Vec<F128> = (0..lay.public_words_log2).map(|_| rand_f(&mut rng)).collect();
+            let p = part.public_point(&rho_r, &rho_c);
+            assert_eq!(
+                eval_packed(&sponge.z, &p, part.nu()),
+                part.public_value(&public, &rho_r, &rho_c)
+            );
+            let committed = part.commit_parts(sponge, bits, &records);
+            let ys = part.final_vectors(&committed, &mats);
+            assert_eq!(ys.len(), segments);
+            if index != 0 {
+                continue;
+            }
+            // The F_p side: bit t of position j + 256 rho + P_pad i of every segment.
+            for (sigma, y) in ys.iter().enumerate() {
+                let len = (lay.positions_pad << d).max(1 << 19).min(shape.segment_input_bits());
+                let lanes: Vec<Vec<i8>> = (0..4)
+                    .map(|t| {
+                        let mut lane = vec![0_i8; len];
+                        for i in 0..part.live(sigma) {
+                            let w1: &[u8] = records[(sigma << d) + i].w1_encode.as_ref();
+                            for q in (t..lay.w1_bits()).step_by(4) {
+                                let (_, j, rho) = lay.w1_coordinates(q);
+                                lane[lay.positions_pad * i + 256 * rho + j] = ((w1[q / 8] >> (q % 8)) & 1) as i8;
+                            }
+                        }
+                        lane
+                    })
+                    .collect();
+                let lanes: Vec<&[i8]> = lanes.iter().map(Vec::as_slice).collect();
+                let witness = parity::compute(&shape, &lanes, &mats).expect("F_p parities");
+                assert_eq!(*y, witness.y_bits(), "Y of segment {sigma}");
+            }
+        }
+    }
+
+    #[test]
+    fn four_lane_bit_claims_are_the_chain_input_on_the_sponge() {
+        check_lane_claims::<agg_witness::params::Set65>(65);
+        check_lane_claims::<agg_witness::params::Set87>(87);
     }
 
     /// A prover that re-grinds every nonce after changing a round message (so every work
