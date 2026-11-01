@@ -506,6 +506,11 @@ class Runner:
 
     def run_aerie_group(self, group, rows, sizes, reps, warmup):
         backend = group.get("backend", self.args.aerie_backend)
+        degree = (
+            self.args.aerie_degree
+            if self.args.aerie_degree is not None
+            else int(group.get("degree", 512))
+        )
         binary = BIN / "aerie-falcon-bench"
         if backend == "avx2":
             binary = BIN / "aerie-falcon-bench-avx2"
@@ -520,10 +525,10 @@ class Runner:
         ):
             for n in sizes:
                 self.run_aerie_cell(
-                    group, binary, backend, requested, actual, allocation, note, n, reps, warmup
+                    group, binary, backend, requested, actual, allocation, note, n, reps, warmup, degree
                 )
 
-    def run_aerie_cell(self, group, binary, backend, requested, actual, allocation, note, n, reps, warmup):
+    def run_aerie_cell(self, group, binary, backend, requested, actual, allocation, note, n, reps, warmup, degree=512):
         env = {
             "RAYON_NUM_THREADS": str(allocation["threads"]),
             "AERIE_SIMD_BACKEND": backend,
@@ -535,6 +540,8 @@ class Runner:
             # does not follow AERIE_SIMD_BACKEND.
             env["AERIE_KECCAK_BACKEND"] = backend
         cmd = pin_prefix(self.topo, allocation) + [str(binary), "--bench", str(n)]
+        if degree != 512:
+            cmd.append(f"--degree={degree}")
         # One fixture run, then the timed runs.
         for _ in range(max(warmup, 0)):
             proc = sh(cmd, env)
@@ -561,7 +568,8 @@ class Runner:
             "system": "aerie",
             "tag": group["tag"],
             "config": "aerie",
-            "label": "Aerie v0.2.0 Falcon-512",
+            "label": f"Aerie v0.2.0 Falcon-{degree}",
+            "degree": degree,
             "threads": allocation["threads"],
             "allocation": actual,
             "allocation_requested": requested,
@@ -569,7 +577,7 @@ class Runner:
             "cpuset": allocation["cpuset"],
             "numa_node": allocation["numa_node"],
             "n": n,
-            "relation": "falcon",
+            "relation": f"falcon-{degree}",
             "knobs": {"AERIE_SIMD_BACKEND": backend, "AERIE_KECCAK_BACKEND": backend},
             "warmup": warmup,
             "reps": reps,
@@ -979,6 +987,9 @@ class Runner:
             tag = group.get("tag", group["kind"])
             if self.args.only and self.args.only not in tag:
                 continue
+            if self.args.aerie_degree is not None and group.get("kind") == "aerie":
+                if int(group.get("degree", 512)) != self.args.aerie_degree:
+                    continue
             kind = group["kind"]
             rows = self.rows(group.get("configs")) if kind != "native" else []
             group_sizes = sizes or group.get("sizes") or [1024]
@@ -1086,6 +1097,12 @@ def main():
         help="processes per warm cell (default: matrix value or 2)",
     )
     parser.add_argument("--aerie-backend", default="auto")
+    parser.add_argument(
+        "--aerie-degree",
+        type=int,
+        default=None,
+        help="override Aerie Falcon degree (512 or 1024)",
+    )
     args = parser.parse_args()
     if args.configs:
         args.configs = [c.strip() for c in args.configs.split(",") if c.strip()]

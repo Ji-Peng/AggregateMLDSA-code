@@ -340,6 +340,25 @@ def bytes_table(cells, directory, commit, machine):
     return out
 
 
+def falcon_degree(cell):
+    if cell.get("degree"):
+        try:
+            return int(cell["degree"])
+        except ValueError:
+            pass
+    for key in ("tag", "label", "relation"):
+        val = str(cell.get(key, ""))
+        if "1024" in val:
+            return 1024
+        if "512" in val:
+            return 512
+    return 512
+
+
+def falcon_category(deg):
+    return "1" if deg == 512 else ("5" if deg == 1024 else str(deg))
+
+
 def baselines_table(cells, directory, commit, machine, skipped):
     candidates = [
         c for c in cells
@@ -362,7 +381,7 @@ def baselines_table(cells, directory, commit, machine, skipped):
 
     aerie = dedup(
         [c for c in cells if c.get("system") == "aerie"],
-        lambda c: (c.get("tag"), c["allocation"], c["n"]),
+        lambda c: (c.get("tag"), falcon_degree(c), c["allocation"], c["n"]),
     )
     native = dedup(
         [c for c in cells if c.get("system") == "native"],
@@ -375,10 +394,11 @@ def baselines_table(cells, directory, commit, machine, skipped):
         "tab:ae-baselines",
         f"Baselines (measured on {machine}).",
         "Prove in s; verify in ms, uncached / cached keys. "
+        "Cat.: NIST security category. "
         "n/a: the CPU does not support the tier. --: not measured.",
-        "X[2.3,l] X[1.2,l] X[1,r] X[1.5,r] X[1,r]",
+        "X[2.3,l] X[0.7,c] X[1.2,l] X[1,r] X[1.5,r] X[1,r]",
     )
-    out += "System & Alloc. & Prove & Verify & B/sig \\\\\n"
+    out += "System & Cat. & Alloc. & Prove & Verify & B/sig \\\\\n"
     allocs = [a for a in ALLOC_ORDER if a != "all"]
     for allocation in allocs:
         for cell in native:
@@ -388,19 +408,39 @@ def baselines_table(cells, directory, commit, machine, skipped):
             if cell.get("verify_cached_ms"):
                 native_verify += " / " + fmt_ms(median(cell["verify_cached_ms"]))
             out += (
-                f"native, AVX2 & {allocation} & -- & "
+                f"native, AVX2 & 2 & {allocation} & -- & "
                 f"{native_verify} & 2420 \\\\\n"
             )
-        for cell in aerie:
-            if cell["allocation"] != allocation:
-                continue
+        aerie_cells = [c for c in aerie if c["allocation"] == allocation]
+        aerie_sorted = sorted(
+            aerie_cells,
+            key=lambda c: (
+                falcon_degree(c),
+                1 if "avx2" in str(c.get("tag", "")).lower() or c.get("knobs", {}).get("AERIE_SIMD_BACKEND") == "avx2" else 0,
+            ),
+        )
+        has_512 = any(falcon_degree(c) == 512 for c in aerie_cells)
+        has_1024 = any(falcon_degree(c) == 1024 for c in aerie_cells)
+
+        if aerie_cells and not has_512:
+            out += f"Aerie, Falcon-512 & 1 & {allocation} & -- & -- & -- \\\\\n"
+
+        for cell in aerie_sorted:
             verify = median(cell["verify_uncached_ms"]) if cell.get("verify_uncached_ms") else None
-            label = "Aerie (AVX2)" if cell.get("tag") == "aerie-avx2" else "Aerie"
+            deg = falcon_degree(cell)
+            cat = falcon_category(deg)
+            is_avx2 = "avx2" in str(cell.get("tag", "")).lower() or cell.get("knobs", {}).get("AERIE_SIMD_BACKEND") == "avx2"
+            avx2_suffix = " (AVX2)" if is_avx2 else ""
+            label = f"Aerie, Falcon-{deg}{avx2_suffix}"
             out += (
-                f"{label} & {allocation} & {fmt_seconds(median(cell['times_ms']))} & "
+                f"{label} & {cat} & {allocation} & {fmt_seconds(median(cell['times_ms']))} & "
                 f"{fmt_ms(verify)} & "
                 f"{(cell['aggregate_bytes'] / cell['n']):.1f} \\\\\n"
             )
+
+        if aerie_cells and not has_1024:
+            out += f"Aerie, Falcon-1024 & 5 & {allocation} & -- & -- & -- \\\\\n"
+
         for config in ORDER:
             matches = [
                 c for c in ours
@@ -408,13 +448,13 @@ def baselines_table(cells, directory, commit, machine, skipped):
             ]
             if not matches:
                 if config in skipped:
-                    out += f"ours, {LABEL[config]} & {allocation} & {NA} & {NA} & {NA} \\\\\n"
+                    out += f"ours, {LABEL[config]} & 2 & {allocation} & {NA} & {NA} & {NA} \\\\\n"
                 continue
             cell = matches[0]
             verify = fmt_ms(median(cell["verify_uncached_ms"])) if cell.get("verify_uncached_ms") else "--"
             cached = fmt_ms(median(cell["verify_cached_ms"])) if cell.get("verify_cached_ms") else "--"
             out += (
-                f"ours, {LABEL[config]} & {allocation} & "
+                f"ours, {LABEL[config]} & 2 & {allocation} & "
                 f"{fmt_seconds(median(cell['times_ms']))} & {verify} / {cached} & "
                 f"{fmt_bytes_per_sig(cell)} \\\\\n"
             )

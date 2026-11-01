@@ -6,7 +6,7 @@ root, or network access after `./run.sh fetch`.
 
 The package builds one source tree **once** and measures proving, verification
 and aggregate size at batch sizes up to 32,768 in three run-time tiers. It also
-runs two baselines: Aerie v0.2.0 on Falcon-512 and the pq-crystals ML-DSA-44
+runs two baselines: Aerie v0.2.0 on Falcon-512 and Falcon-1024, and the pq-crystals ML-DSA-44
 AVX2 implementation. The comparison baseline is a native batch verification,
 not an aggregate.
 
@@ -60,8 +60,8 @@ the same pin for commands started inside this directory.
 | `fetch` | two git clones and `cargo fetch` | 2--10 min, network |
 | `build` | one release build of ours, Aerie's bench, natver | 5--20 min; the first build is the long one |
 | `gates` | 1K aggregates in every tier, verification, negative check, self-reports | 2--5 min |
-| `quick --smoke` | three tiers at 1K, one thread, Aerie and native at 1K, 1+1 runs | 5--15 min after the build |
-| `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie and native at 1K, 1+3 runs | 20--40 min after the build |
+| `quick --smoke` | three tiers at 1K, one thread, Aerie (Falcon-512/1024) and native at 1K, 1+1 runs | 5--15 min after the build |
+| `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie (Falcon-512/1024) and native at 1K, 1+3 runs | 20--40 min after the build |
 | `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+5 warm runs | about 1 h after the build |
 
 `full` writes about 125 MB of raw JSON at 32K. Its longest cells are 1T

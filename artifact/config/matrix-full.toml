@@ -102,6 +102,7 @@ mode = "verify"
 [[runs]]
 kind = "aerie"
 tag = "aerie"
+degree = 512
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [8192, 32768]
 warmup = 1
@@ -110,6 +111,26 @@ reps = 5
 [[runs]]
 kind = "aerie"
 tag = "aerie-avx2"
+degree = 512
+backend = "avx2"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [8192, 32768]
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "aerie"
+tag = "aerie-1024"
+degree = 1024
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [8192, 32768]
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "aerie"
+tag = "aerie-1024-avx2"
+degree = 1024
 backend = "avx2"
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [8192, 32768]

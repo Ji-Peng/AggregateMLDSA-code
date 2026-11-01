@@ -174,7 +174,7 @@ def build_aerie(offline, capped):
         "CARGO_TARGET_DIR": str(target),
         "CARGO_BUILD_JOBS": str(6),
     }
-    print("building Aerie's Falcon-512 baseline")
+    print("building Aerie's Falcon baseline (Falcon-512 and Falcon-1024)")
     run(cmd, cwd=aerie, env=env)
     dst = BIN / "aerie-falcon-bench"
     shutil.copy2(find_bench(target), dst)

@@ -8,25 +8,27 @@
 \begin{talltblr}[
   caption = {Baselines (measured on 11th Gen Intel(R) Core(TM) i7-11700K @ 3.60GHz).},
   label = {tab:ae-baselines},
-  remark{Note} = {Prove in s; verify in ms, uncached / cached keys. n/a: the CPU does not support the tier. --: not measured.},
+  remark{Note} = {Prove in s; verify in ms, uncached / cached keys. Cat.: NIST security category. n/a: the CPU does not support the tier. --: not measured.},
 ]{
   width = \linewidth,
-  colspec = {X[2.3,l] X[1.2,l] X[1,r] X[1.5,r] X[1,r]},
+  colspec = {X[2.3,l] X[0.7,c] X[1.2,l] X[1,r] X[1.5,r] X[1,r]},
   colsep = 4pt,
   row{1} = {font=\bfseries},
   rows = {valign=m},
   hline{1,2,Z} = {1pt},
 }
-System & Alloc. & Prove & Verify & B/sig \\
-native, AVX2 & 8C16T & -- & 2.6 / 0.9 & 2420 \\
-Aerie & 8C16T & 0.67 & 11.5 & 101.8 \\
-ours, IFMA & 8C16T & 1.03 & 142 / 134 & 417.2 \\
-ours, AVX-512 & 8C16T & 1.08 & 137 / 137 & 417.2 \\
-ours, AVX2 & 8C16T & 1.07 & 136 / 137 & 417.2 \\
-native, AVX2 & 1T & -- & 19.1 / 6.9 & 2420 \\
-Aerie & 1T & 0.57 & 9.3 & 101.8 \\
-ours, IFMA & 1T & 2.96 & 449 / 445 & 417.2 \\
-ours, AVX-512 & 1T & 3.45 & 458 / 453 & 417.2 \\
-ours, AVX2 & 1T & 3.57 & 455 / 446 & 417.2 \\
+System & Cat. & Alloc. & Prove & Verify & B/sig \\
+native, AVX2 & 2 & 8C16T & -- & 2.6 / 0.9 & 2420 \\
+Aerie, Falcon-512 & 1 & 8C16T & 0.67 & 11.5 & 101.8 \\
+Aerie, Falcon-1024 & 5 & 8C16T & -- & -- & -- \\
+ours, IFMA & 2 & 8C16T & 1.03 & 142 / 134 & 417.2 \\
+ours, AVX-512 & 2 & 8C16T & 1.08 & 137 / 137 & 417.2 \\
+ours, AVX2 & 2 & 8C16T & 1.07 & 136 / 137 & 417.2 \\
+native, AVX2 & 2 & 1T & -- & 19.1 / 6.9 & 2420 \\
+Aerie, Falcon-512 & 1 & 1T & 0.57 & 9.3 & 101.8 \\
+Aerie, Falcon-1024 & 5 & 1T & -- & -- & -- \\
+ours, IFMA & 2 & 1T & 2.96 & 449 / 445 & 417.2 \\
+ours, AVX-512 & 2 & 1T & 3.45 & 458 / 453 & 417.2 \\
+ours, AVX2 & 2 & 1T & 3.57 & 455 / 446 & 417.2 \\
 \end{talltblr}
 \end{table}

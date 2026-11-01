@@ -27,6 +27,16 @@ processes = 2
 [[runs]]
 kind = "aerie"
 tag = "quick-aerie"
+degree = 512
+allocations = ["8C16T", "1T"]
+sizes = [1024]
+warmup = 1
+reps = 2
+
+[[runs]]
+kind = "aerie"
+tag = "quick-aerie-1024"
+degree = 1024
 allocations = ["8C16T", "1T"]
 sizes = [1024]
 warmup = 1
