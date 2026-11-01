@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Local CLMUL A/B against main. Logs and detached baseline stay under target/.
+# Local A/B of the release build against main. Logs and detached baseline stay under target/.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-export CARGO_BUILD_JOBS=3 RUSTFLAGS='-C target-feature=+pclmulqdq'
+# Both builds take their flags from `.cargo/config.toml`; an exported RUSTFLAGS
+# would replace them.
+export CARGO_BUILD_JOBS=3
+unset RUSTFLAGS
 unset RAYON_NUM_THREADS AGG_MLDSA_SIMD
 MAIN_WT="$ROOT/target/main-wt"
 export LOG_DIR="$ROOT/target/simd-ab-logs"
@@ -85,7 +88,7 @@ metrics = [
     ('prover RSS MiB', r'prover peak RSS'), ('verifier RSS MiB', r'verifier peak RSS'),
 ]
 for keys in (4096, 16):
-    print(f'\nLocal direction only: N=4096, K={keys}, H-u, CLMUL, CPU 3, default threads. Times in ms.')
+    print(f'\nLocal direction only: N=4096, K={keys}, H-u, CPU 3, default threads. Times in ms.')
     print('| Metric | ' + ' | '.join(backends) + ' |')
     print('|---|' + '---:|' * len(backends))
     texts = [(root / f'{b}_{keys}.log').read_text() for b in backends]
@@ -115,9 +118,9 @@ for keys in (4096, 16):
             cells.append(f'{values[0] / values[i]:.2f}x' if values[i] else 'N/A')
         print('| ' + backend + ' | ' + ' | '.join(cells) + ' |')
 PY
-printf '%s\n' "Cloud only (do not run locally; c4d-highmem-16, each supported backend):"
+printf '%s\n' "Cluster only (do not run locally; an idle xcni node, each supported backend):"
 for b in "${BACKENDS[@]}"; do
     for keys in 32768 16; do
-        printf "RUSTFLAGS='-C target-feature=+pclmulqdq' RAYON_NUM_THREADS=16 AGG_MLDSA_SIMD=%s cargo run --release -p agg-cli --bin agg -- bench --count 32768 --keys %s --warmup 1 --reps 5 --relation h-u\n" "$b" "$keys"
+        printf "RAYON_NUM_THREADS=16 AGG_MLDSA_SIMD=%s cargo run --release -p agg-cli --bin agg -- bench --count 32768 --keys %s --warmup 1 --reps 5 --relation h-u\n" "$b" "$keys"
     done
 done

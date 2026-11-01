@@ -13,7 +13,7 @@
 //!
 //! Run with:
 //! ```sh
-//! RUSTFLAGS="-C target-feature=+pclmulqdq" cargo test --release -p agg-cli --test all simd_backends -- --ignored
+//! cargo test --release -p agg-cli --test all simd_backends -- --ignored
 //! ```
 
 use std::path::Path;
