@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
-| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16 with the projection of `v` (K24); PIOP wire version 4 (the parity chain's sites in the plan; the fork-join transcript of K22; the forked PIOP transcript of K23) and tied-part proof version 5 |
+| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16 with the projection of `v` (K24); PIOP wire version 4 (the parity chain's sites in the plan; the late join of K25; the forked PIOP transcript of K23) and tied-part proof version 5 |
 | Base | code `a30ed97`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound (Section 5); resolves deviation P3 |
@@ -88,8 +88,8 @@ seed with the event-6 record digest they bind, tie digests). The branch digests 
 oracles: the trunk absorbs them as compressed prefixes of the two branches (Lemma 12.1b). Every challenge input MUST injectively encode the complete preceding
 transcript, directly, through a hashed entry or through a branch digest (Aerie C.1); Section 4.5 records the one
 place where the code does not. The tied parts' sites and the sites of branch S (K23)
-encode the input of `X` and their own messages, not the complete linear prefix; Lemma 12.3
-covers them.
+encode the input of `X` and their own messages, not the complete linear prefix, and Akita's
+sites omit the Flock proofs (K25); Lemma 12.3 covers them.
 
 **Sites and bad sets.** A *site* is one challenge query: a scalar or a vector drawn from
 one oracle stream (Aerie C.1: "we treat each vector as one field challenge"). For a site
@@ -143,7 +143,7 @@ sub-proofs and therefore no tied-part site):
 | 10, 11 | PIOP, branch S | `gamma^(1)` (26), 25 stage-1 rounds; `gamma^(2)` (9), stage-2 rounds (each stage `d_main` rounds); then the absorbed projection claim `c` |
 | branch join | PIOP (K23) | none; the trunk absorbs the 32-byte digests of L and S, in this order |
 | 12 | PIOP | `gamma^(3)` (48), `d_main` stage-3 rounds |
-| join | PIOP absorbs the Flock proof bytes (K22); inside each tied part (own oracles, seeded by the part or span seed, which binds `fs_sigma` and the event-6 record digest `rec`; the prover runs them concurrently with events 7 to 12): on the tie challenger the **tie site**, the **`eq_Y` site** and the **chain rounds** (version 5), then the sponge instance's Flock sites (zerocheck, lincheck, opening with the bit claim) |
+| join | no PIOP absorption (K25); inside each tied part (own oracles, seeded by the part or span seed, which binds `fs_sigma` and the event-6 record digest `rec`; the prover runs them concurrently with events 7 to 13): on the tie challenger the **tie site**, the **`eq_Y` site** and the **chain rounds** (version 5), then the sponge instance's Flock sites (zerocheck, lincheck, opening with the bit claim) |
 | 13 | PIOP export, then Akita | PCS session digest (no site); Akita's own sites under its plan (Section 3.7) |
 
 The code that draws them: `agg_piop::transcript::Transcript::{challenge_extensions,
@@ -628,8 +628,7 @@ where the pending claims are: at `X`, the relation identities of `f` (Sections 4
 with the absorbed `Y_sigma`; `R_PIOP` of Section 12.2); after each site, the claims listed
 in Section 3 (layer claims, stack and table leaf claims, stage input claims, terminal
 evaluation claims). (The sites before `X`, i.e. `sd` and `fs`, and the tied parts' sites,
-the tie sites and Flock's, which the fork-join of deviation K22 places after the stage-3
-messages, are treated in Section 12.4 with the round-1 polynomials and the Flock words'
+the tie sites and Flock's, which the analysis places before `X` (12.2), are treated in Section 12.4 with the round-1 polynomials and the Flock words'
 Johnson lists; a false tied-part claim is not acted on by any PIOP site. A site of branch S
 (deviation K23) defines `Bad_t` from the first false claim among those its address
 determines, the identities of `f` and branch S's own claims; a false claim of branch L is
@@ -694,8 +693,7 @@ At a PIOP challenge event with `g > 0` (prover and verifier run the same state m
    them): the contexts stay distinct because (i) the registry, hence the event sequence,
    is fixed by the manifest bound in event 0 together with the plan digest, (ii) every
    payload absorbed right before a nonce has a length fixed by the registry, and (iii) the
-   variable-length items (the event-2 Flock items, the event-6 share items, the join's
-   proof items, the `c~` list) are framed with their lengths. The absorbed prefixes are therefore injective in the transcript, which is
+   variable-length items (the event-2 Flock items, the event-6 share items, the `c~` list) are framed with their lengths. The absorbed prefixes are therefore injective in the transcript, which is
    the hypothesis of Akita Proposition 10.3.
 4. Sites with `g = 0` (only `X`) absorb nothing and squeeze no predicate.
 
@@ -733,8 +731,8 @@ The plan of a proof is the ordered list of its tied parts' sites (per tied part,
 and part order: the tie site, the `eq_Y` site, then the `R` chain rounds) followed by the
 PIOP sites in registry order (the byte site `proj.psi` with `g = 1`, then the field-challenge
 sites, `X` included with `g = 0`). The tied parts come
-first by convention of the encoding: with the fork-join of deviation K22 their sites follow
-the stage-3 rounds in the transcript. It is a function of public data only: `N` (hence `N*`), the Flock profile,
+first by convention of the encoding: the transcript sponge never absorbs their messages, and
+the analysis places their sites before `X` (12.2). It is a function of public data only: `N` (hence `N*`), the Flock profile,
 and the tied-part geometry (span byte, part size) of the event-2 items, which the verifier
 parses before replaying event 0. Canonical encoding:
 
@@ -794,10 +792,8 @@ are settled:
 * **(H2, proved in Section 12 under (F) and (K))** the composition of Akita's extractor with
   the Flock commitments: no second extractor is needed (the extractor returns Akita's
   round-1 sources; the Ligerito words are fixed straight-line by the Merkle expansion and
-  enter the round-by-round bits through their Johnson lists, and the test at `X` through a
-  list decoder, which the extractor runs, 12.6), with a checkpoint at `sd` (round-1
-  candidate) and one at `X` (all seven groups and, with the fork-join of K22, the tied parts'
-  pending claims), and Lemma 12.3 for the parallel Flock transcripts and for branch S of
+  enter the round-by-round bits through their Johnson lists), with a checkpoint at `sd`
+  (round-1 candidate) and one at `X` (all seven groups), and Lemma 12.3 for the parallel Flock transcripts and for branch S of
   the forked PIOP transcript (K23). With K23 the lemma also carries 53 core PIOP sites at
   `2^15` (`tau`, `gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds); it has had
   internal review only (12.7 item 3).
@@ -810,9 +806,7 @@ MUST NOT claim the theorem without them. For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 12.1, every nonce probe
 included) there is an extractor of expected cost at most `(Q_wrap + 2) 4 Tree0_ck(sch) T_run`
 (Section 12.6). Here `T_run` bounds one run of `P` and the verifier with the extractor's
-work attached to it. With deviation K22 that work includes, at most once per run, the test
-at `X` with a list decoder of every tied part's level-0 word, `poly(n_0, L)` per part
-(12.6, 12.7 item 9). The cost is thus polynomial in that of `P` and in the code parameters.
+work attached to it. The cost is thus polynomial in that of `P` and in the code parameters.
 The extractor returns the original execution and, whenever the verifier accepts, a witness
 of the caller's relation (H-u, H-exact or H-FIPS) for every live record, except with probability at
 most
@@ -841,11 +835,12 @@ Ligerito caps are expanded (Akita Lemma 10.47, Lemmas 12.1, 12.1b, 12.2): `eps_b
 + eps_dig + eps_fs + eps_br + eps_merkle`.
 (2) A checkpoint structure for the expanded protocol (12.2): checkpoints at `sd` (candidate
 the round-1 sources, test the caller's relation H-u, H-exact or H-FIPS) and at `X` (candidate all seven groups, test the PIOP
-relation and the tied parts' claims `C4_p`), Akita's opening suffix (Proposition 10.44) after the root fold, and Lemma 12.3 for
-the tied parts' own challengers and for the sites of branch S (K23). (3) Item (vii) of Akita Definition 10.16: the bridge seed
-with the sponge lists on the segment of `sd` (12.4), with Lemma 12.4 for the seed; Lemma S,
-the tied parts' sites (tie, `eq_Y`, chain rounds) with the list factor and Flock's per-site
-bounds under (F), and the evaluation batch on the segment of `X` (12.3, 12.4). (4) Every address weighs at most `2^-128` (Section 3,
+relation), Akita's opening suffix (Proposition 10.44) after the root fold, and Lemma 12.3 for
+the tied parts' own challengers, which precede `X` with addresses that omit it, for the
+sites of branch S (K23) and for the fold coordinates, whose addresses omit the parts (K25). (3) Item (vii) of Akita Definition 10.16: the bridge seed
+with the sponge lists and the tied parts' sites (tie, `eq_Y`, chain rounds) with the list
+factor and Flock's per-site bounds under (F) on the segment of `sd` (12.4), with Lemma 12.4
+for the seed; Lemma S and the evaluation batch on the segment of `X` (12.3). (4) Every address weighs at most `2^-128` (Section 3,
 the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi`
 `2^-129` by Lemma P and its one-bit grind (K24), below the field sites; the largest PIOP
 plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`;
@@ -861,11 +856,10 @@ under H-exact, the projection bound on `v` through Lemma P, the bridge with `b =
 *What is not proved here* (Section 12.7): assumption (F), which the Flock paper presents
 as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17, now carries PIOP
 stages 1 and 2 as well (branch S, K23), has had internal review only and should be checked
-by a reviewer of Akita's proof, together with the decider of the test at `X` (12.7 item 9),
-which is cited, not checked against Ligerito's level-0 code; `R_F` is not counted exactly;
+by a reviewer of Akita's proof; `R_F` is not counted exactly;
 Akita's Module-SIS estimates exclude the extractor's run count and the cost of one run as in
-Aerie, although the Module-SIS algorithms built from the collisions inherit `T_run`, the
-decoder included (12.6). As in Aerie, the term
+Aerie, although the Module-SIS algorithms built from the collisions inherit `T_run` (12.6).
+As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
 
@@ -1105,17 +1099,17 @@ of its Theorem 10.45, in the style of Aerie Section C. Akita's Theorem 10.45 can
 verbatim, for three reasons: the round-2 root commitments (event 4) are sent after the first
 application challenge `sd`; the Flock words are committed by Merkle caps, not by Akita; and
 the tied parts run on their own challengers, in parallel, so their challenge inputs do not
-encode the complete preceding transcript. The fork-join transcript (deviation K22) adds a
-fourth: the PIOP stream absorbs the Flock proofs only at the join, after the stage-3 claims,
-so the lookup challenge `X` and every later PIOP challenge are drawn while the Flock
-messages are absent from it, and the parts' claims are still open at `X`. The forked PIOP
+encode the complete preceding transcript. The late join (deviation K25) adds a fourth:
+neither the PIOP stream nor Akita's stream absorbs the Flock proofs, so `X`, every later
+PIOP challenge and every Akita challenge are drawn without them, and the parts' stages
+precede `X` in the analysis although `X`'s address omits them. The forked PIOP
 transcript (deviation K23) adds a fifth: after event 6 the PIOP stream forks into branch L
 (the lookup) and branch S (`tau`, stages 1 and 2), so the inputs of the 53 sites of S at
 `2^15` omit branch L, and the trunk encodes both branches only through two 32-byte digests
 `d_L`, `d_S`. Sections 12.1 to
 12.4 build a checkpoint structure for the expanded protocol that handles all five: the
-tied parts' stages lie in the segment of `X`, after the stage-3 messages, and the test at
-`X` decides their pending claims; the sites of S are plain stages of the same segment with
+tied parts' stages are plain stages of the segment of `sd`, with projected addresses, and
+their claims are settled by their own verifiers before `X`; the sites of S are plain stages of the same segment with
 projected addresses (Lemma 12.3), and the branch digests are expanded (Lemma 12.1b). Section 12.5 lists exactly what is assumed, 12.6 states
 the bound, and 12.7 lists what is not proved. Section 12.8 uses the theorem for aggregate
 unforgeability (spec 12.3): signing queries asked only in rewound runs, by strong
@@ -1128,14 +1122,9 @@ Section 10.2) constrains the round-1
 polynomials alone ((3.3) is a SHAKE256 computation on their bits `b`), so the extractor
 returns Akita's round-1 sources and never extracts a Flock witness. The Ligerito words are
 fixed straight-line by the Merkle expansion (Lemma 12.2), and the round-by-round bits
-quantify over their Johnson lists. They enter one test: the checkpoint test at `X` lists
-each tied part's sponge word to the Johnson radius and checks its pending claim `C4_p` on
-the list (12.2), a polynomial-time function of the transcript, as Akita Definition 10.16
-requires of every map. No rewinding is spent on it, but the extractor does run it: the
-checkpoint node at `X` (Akita Appendix E.2, procedure `E_l`, step 2) evaluates `Good_{l_2}`,
-the decoder included, on the certificate that each of its invocations receives. Its cost
-therefore enters the cost `T_run` of a run (12.6), not the run count and not the error. Every
-other test is a polynomial-time function of Akita candidates.
+quantify over their Johnson lists. They enter no test: a part's claim becomes its Flock
+verifier's verdict inside the segment of `sd` (12.4). Every test is a polynomial-time
+function of Akita candidates and the checkpoint's address; the extractor runs no decoder.
 
 ### 12.1 Oracles and the expanded protocol
 
@@ -1148,7 +1137,8 @@ part and span seeds, the event-6 record digest `rec` that they bind (K22), final
 digests `y_digest`, tie bindings, Flock statement digests, the BLAKE3 chaining inside
 `FsChallenger`), and the Ligerito Merkle hash `H_M` (BLAKE3, 256-bit nodes, caps). The
 branch digests `d_L`, `d_S` of the forked PIOP transcript (K23) are `H_P` answers that the
-trunk absorbs as compressed prefixes, like the `fs` chunks in `H_F` inputs. `Pi_H` is the real protocol. The expanded protocol `Pi` differs in four ways:
+trunk absorbs as compressed prefixes, like the `fs` chunks in `H_F` inputs. `Pi_H` is the real protocol. The expanded protocol `Pi` differs in four ways, and item 5
+records a property it shares with `Pi_H`:
 
 1. every hashed entry is sent in full (Akita Lemma 10.47; error `eps_hash = eps_bind + eps_pk
    + eps_dig`, Aerie Definition 5.8, with the entries listed above);
@@ -1159,10 +1149,12 @@ trunk absorbs as compressed prefixes, like the `fs` chunks in `H_F` inputs. `Pi_
    by the committed word, and every authentication path by a read of that word (Lemma 12.2);
 4. every `H_P` input from the branch join on (the trunk) contains, in place of `d_L` and
    `d_S`, the inputs of the branch-final queries that produced them, i.e. the complete inputs
-   of branches L and S (Lemma 12.1b).
+   of branches L and S (Lemma 12.1b);
+5. no `H_P` input and no `H_A` input contains a Flock proof byte (K25): the parts' messages
+   enter addresses of `H_F` only.
 
 In `Pi` every trunk input from `gamma^(3)` on, and through it the PCS session digest,
-encodes both branches in full (item 4). Every challenge address of a part encodes the PIOP prefix through `fs` and, through
+encodes both branches in full (item 4) and omits the Flock proofs (item 5). Every challenge address of a part encodes the PIOP prefix through `fs` and, through
 `rec` in its part or span seed, the event-6 record (every `Y_sigma` and every share item, as
 absorbed): together, the input of `X`. Every committed Flock word, hence its Johnson list
 `Lambda(C) = Lambda_gamma(C)` at the profile's level-0 radius (`|Lambda| <= L = 35, 50, 70`,
@@ -1244,27 +1236,29 @@ have the stated probabilities.
 | `sd` (event 3) | `H_P` | `H`: checkpoint `l_1` |
 | `proj.psi` (event 3, after `sd`; K24) | `H_P` | `N` |
 | `fs` (event 5) | `H_P` | `N` |
+| per tied part `p`, after event 6 and before `X`, in segment and part order: the tie site, the `eq_Y` site and the `R` chain rounds (tie challenger); the sponge instance's Flock sites | `H_F` | `N` |
 | `X` (event 7) | `H_P` | `H`: checkpoint `l_2` |
 | the PIOP sites after `X` (Section 3.1), through the stage-3 rounds: in linear order the rest of branch L, branch S, then stage 3 after the branch join (K23) | `H_P` | `N` |
-| per tied part `p`, in segment and part order: the tie site, the `eq_Y` site and the `R` chain rounds (tie challenger); the sponge instance's Flock sites | `H_F` | `N` |
-| Akita's evaluation batch of the 52 claims (53 under H-exact, 58 under H-FIPS, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after the join and the PCS session digest | `H_A` | `N` |
+| Akita's evaluation batch of the 52 claims (53 under H-exact, 58 under H-FIPS, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after stage 3 and the PCS session digest | `H_A` | `N` |
 | the opening suffix from the root fold challenge (Akita Proposition 10.44): fold challenges, ring-switch `alpha` of every nonterminal level, the rest | `H_A` | `E` (indexed), `H`, `N` |
 
-The segment of `l_1` runs from `sd` to the last stage before `X`: `sd`, `proj.psi` and `fs`,
-with the messages of events 4 and 6. The segment of `l_2` runs from `X` to the last stage before the
-root fold challenge, whose input is `xi_f`: the PIOP sites, the tied parts' stages and the
-evaluation batch. Every plain stage lies in one segment. The tied parts' stages sit after the
-stage-3 rounds, where the join absorbs their messages (deviation K22). `X`'s input does not
-contain them, and a checkpoint input must encode the complete preceding prefix (Lemma 12.3's proof), so no part stage may precede `X`.
+The segment of `l_1` runs from `sd` to the last stage before `X`: `sd`, `proj.psi`, `fs` and
+the tied parts' stages, with the messages of events 4 and 6 and the parts' messages. The segment of `l_2` runs from `X` to the last stage before the
+root fold challenge, whose input is `xi_f`: the PIOP sites and the
+evaluation batch. Every plain stage lies in one segment. The tied parts' stages precede `X`
+although `X`'s address omits them: Lemma 12.3 (iii) lets the test at `X` and `D` on its
+segment read `X`'s address `a_X` (the prefix through event 6 followed by L's label) and
+the candidate only. They cannot follow `X`: under K25 no
+address after `X` (the branches, the trunk, the session digest, Akita's stream) encodes
+them, so a part stage after `X` would violate (i).
 
-**Alternative order (used by the paper's proof).** The requirement above holds for
-complete-prefix checkpoint inputs. With projected addresses (Lemma 12.3) the tied parts' stages
-may instead precede `X`, analysed after event 6, where the verifier also checks the Flock
+With projected addresses (Lemma 12.3) the tied parts' stages
+precede `X`, analysed after event 6, where the verifier also checks the Flock
 sub-proofs (spec Section 11, step 3). The prover may choose the part's messages after seeing `X`,
 so a rerun from `X` may change them; the proof therefore lets the checkpoint test and `D` read the
 address only. The Flock verdict is a check of the segment of `sd`, which ends at `X`, so `D` at
-`X` reads `a_X` and the candidate only. The test at `X` then needs no list decoder, and item 9 of
-Section 12.7 does not arise. Two statements left implicit here are made explicit in that proof:
+`X` reads `a_X` and the candidate only. The test at `X` then needs no list decoder. Two
+statements are made explicit in the paper's proof and apply here:
 the extraction stages satisfy Akita's Lemma 10.14 conditional-answer sampling hypothesis
 (Proposition 10.44 for the opening suffix; the application segment has no extraction stage), and
 the verifier's `V_l` stage-`l` addresses enter only Claim 2's count and the success recurrence,
@@ -1273,54 +1267,62 @@ Together these give `(Q+R+2) K_hat` runs and `(Q+R) 2^-128`. The union of Lemma 
 batch's `S <= 4` segments adds at most two bits to the exponent and keeps
 `delta_X < 2^-(2^110)`.
 
-**Projected addresses.** In this linear order the stages of part `p` follow the stage-3
-rounds and those of part `p - 1`, but the input of a part's site (its address) encodes the
+**Projected addresses.** In this linear order the stages of part `p` follow event 6 and
+those of part `p - 1`, and precede `X`, but the input of a part's site (its address) encodes the
 PIOP prefix through `fs` (item 2), the event-6 record (through `rec`, item 1) and part `p`'s
 own messages only (the sponge instance encodes the tie challenger's messages only through the
-tie binding); it encodes neither the PIOP sites after `X` nor other parts' messages. The
+tie binding); it encodes neither `X` nor any later site nor other parts' messages. The
 sites of branch S of the forked PIOP transcript (deviation K23) are the second case: in the
 linear order they follow the whole of branch L, but their input is branch S's sponge, which
 encodes the prefix through event 6, the label of S and S's own messages and answers, and not
 branch L. Akita's framework assumes that a stage input encodes the complete preceding
-transcript. Lemma 12.3 removes that assumption for plain stages.
+transcript. Lemma 12.3 removes that assumption for plain stages and checkpoints and weakens
+it for extraction stages.
 
-**Lemma 12.3 (projected addresses).** Take a checkpoint structure whose plain stages `j` read
-their answer at an address `pi_j(xi)` of the stage input `xi` (the complete linear prefix)
-such that (a) `pi_j(xi)` encodes the input of the checkpoint whose segment contains `j`, and
-(b) `Bad_j(xi; w)` depends on `xi` only through `pi_j(xi)`; items (i) to (viii) of Definition
-10.16 hold with `D` evaluated on stage inputs. Then Theorem 10.17 holds, each queried address
-of stage `j` weighing `eps_j`.
+**Lemma 12.3 (projected addresses).** Take a checkpoint structure whose stages `j` read
+their answer at an address `pi_j(xi)` of the stage input `xi` (the complete linear prefix),
+with items (i) to (viii) of Definition 10.16, such that (i) for every checkpoint or
+extraction stage `l` and stage `j >= l` the map from a stage-`j` address to a stage-`l`
+address is well defined; (ii) the address of an extraction stage `r` encodes every message
+and answer read by `Comb_r`, by the checks of stages `r` and later, and by the maps `Cand`,
+`Good`, `Coll` of every checkpoint at or after `r`; a stage it omits is a plain stage of an
+earlier segment, and `Comb_r` returns the prefix of its first child; (iii) at a checkpoint
+`l` the test and `D(xi_l; .)` depend on `xi_l` through its address `a_l` only, and `Coll_l`
+applies to certificates with equal addresses; (iv) at a plain stage `j`, `Bad_j(xi; w)`
+depends on `xi` through its address only; (v) the extraction stages satisfy Lemma 10.14's
+conditional-answer sampling hypothesis. Then Theorem 10.17 holds, each queried address of
+stage `j` weighing `eps_j`, for the extractor that reruns a failed checkpoint with a fresh
+table on the addresses that encode its address and keeps an attempt with the same address.
 
 *Proof.* Akita's proof (Appendix E.2) touches the inputs of plain stages only in Claims 1 and
 2. Claim 1's path argument is a statement about `D` on the stage inputs of the output
 transcript and does not change: some stage `j` of the segment has `D(xi_j; w) = 1` and the
 answer `K(pi_j(xi_j))` in `Bad_j(xi_j; w)`. For the probability, sample the table lazily by
 address: when `A` first queries an address `a` of stage `j` in `Sub(i)`, the history, `c` and
-the fixed `w` determine `a` and, by (b), the set `Bad_j(a; w)`, while `K(a)` is fresh; a union
+the fixed `w` determine `a` and, by (iv), the set `Bad_j(a; w)`, while `K(a)` is fresh; a union
 bound over the queried addresses gives Claim 1 with `N_{i,j}` counting addresses (at most the
-count of inputs). By (a) every address lies in exactly one `Sub(i)`, which is Claim 2.
-Extraction stages and checkpoints keep inputs that encode the complete prefix: `sd` and `X`
-are PIOP sites, `X` is the first site of branch L, which precedes branch S in the linear
-order (so `X`'s input is the prefix through event 6 followed by L's label, and only the
-label is a constant), and no part
-stage precedes `X` in the linear order; in `Pi` the trunk inputs from `gamma^(3)` on contain
-the complete inputs of both branches (item 4, Lemma 12.1b), so the stage-3 sites read
-complete-prefix inputs; the Akita stream is
-seeded by the PCS session digest, which binds every Flock byte absorbed at the join (after
-the stage-3 messages, deviation K22) and, in `Pi`, both branches, so the evaluation batch and the opening suffix read
-inputs that encode the parts' messages and, through them and the parts' addresses, their
-challenges. The rest of the proof is unchanged.
+count of inputs). By (i) every address lies in exactly one `Sub(i)`, which is Claim 2.
+Checkpoints: `sd` reads the prefix through event 2; `X` reads the prefix through event 6
+followed by L's constant label, which omits the parts' stages; by (iii) its test and `D`
+read `a_X` and the candidate, and Corollary 10.25 binds two certificates with equal `a_X`
+(both rounds' commitments are in it). Extraction stages: a fold coordinate's address is
+Akita's stream input, seeded by the session digest, which in `Pi` encodes events 0 to 6,
+both branches (item 4) and stage 3, and Akita's own messages; it omits the parts' stages
+(item 5), which precede it in the order and are plain stages of the segment of `sd`.
+Akita's game at an indexed stage (Appendix E.2) redraws the one entry `(i, u)` with every
+other entry fixed; the children share `i` and may carry different part messages, which
+`Comb` (Proposition 10.44), the suffix's checks, the ring-switch maps and the tests at `X`
+and `sd` do not read. `Comb` returns the first child's prefix with the combined weak
+opening, a certificate of Proposition 10.44; the first child's first run is the node's, so
+invariant (2) of Akita's proof holds. The rest of the proof is unchanged. A rerun from `X`
+keeps the `H_F` table; the prover may then send other part messages at new addresses,
+which Claim 1 charges like any other queried address.
 
-The parts' sites lie in the segment of `X` and satisfy (a): their address encodes the input
-`xi_X` of `X`, the PIOP prefix through `fs` by item 2 and the event-6 record by item 1 through
-`rec` (every `Y_sigma` and every share item, as absorbed). Without `rec` the address would
-encode `xi_X` only when the batch has a single tied part whose table is all of event 6 (a
-span, or one segment of one part, with empty share items); with two parts in a segment, or
-span off with `S >= 2`, a part's address would miss the other parts' shares and final
-vectors, so it would not lie in exactly one `Sub(i)` of `X`. Mode A therefore binds `rec`
-into every part and span seed (`agg_cli::mode_a::{part_seed, span_seed}`), for every
-layout. (b) holds by the bad sets of 12.4, which are defined from the address alone (the
-part's own data, the PIOP prefix through `fs` and the event-6 record).
+The parts' sites lie in the segment of `sd` and satisfy (i): their address encodes the PIOP
+prefix through `fs` (item 2), hence `a_sd`, the prefix through event 2. (iv) holds by the
+bad sets of 12.4, defined from the address alone. The part and span seeds also bind `rec`
+(`agg_cli::mode_a::{part_seed, span_seed}`), so a part's address encodes `a_X` as well; (i)
+does not need it, and it binds the part's statement into its challenger at no cost.
 
 **Branch S of the forked PIOP transcript (deviation K23).** The sites `tau`, `gamma^(1)`,
 the stage-1 rounds, `gamma^(2)` and the stage-2 rounds are plain stages of the segment of
@@ -1331,10 +1333,10 @@ after `X` had a complete-prefix input, and now the 53 sites of S at `2^15` (`tau
 had internal review only (12.7 item 3). And the branch digests add the term `eps_br` of
 Lemma 12.1b to the bound (12.6).
 
-* (a): the address of a site of S is branch S's sponge input. It encodes events 0 to 6
+* (i): the address of a site of S is branch S's sponge input. It encodes events 0 to 6
   (the clone is taken there) and S's label, hence `xi_X`, which is that prefix followed by
   L's constant label. So every address of S lies in exactly one `Sub(i)` of `X`.
-* (b): the claims a site of S acts on are the zero-checks and level-2/3 identities on the
+* (iv): the claims a site of S acts on are the zero-checks and level-2/3 identities on the
   tables committed in events 1 and 4, with weights from `sd` and the `Y_sigma` of event 6
   (`tau`, Section 3.4), and the claims made by S's own earlier messages (the rounds and
   `gamma^(2)`). All of them are determined by the address and the fixed `w`, and so is
@@ -1355,7 +1357,7 @@ Lemma 12.1b to the bound (12.6).
   input. In `Pi_H` the trunk encodes L and S only through `d_L` and `d_S` (compressed prefixes in the sense of Aerie C.1); in `Pi` they are
   replaced by the two branch-final inputs (12.1 item 4), so `gamma^(3)`, the stage-3 rounds,
   the PCS session digest and the Akita stages read inputs that encode both branches in
-  full. The conversion costs `eps_br <= 5 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). Its bad events are
+  full and no Flock byte. The conversion costs `eps_br <= 5 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). Its bad events are
   two distinct branch-final inputs with equal digests, a trunk query that contains a digest
   before the branch-final query that outputs it, and a digest `d_L` that begins with a branch
   label. `R_coord` (Akita's sparse fold coordinates) is unrelated to them.
@@ -1398,7 +1400,7 @@ it determines, with a root weak opening `omega_y` of the seven groups; all stage
   certificates with the same input at `sd` have the same round-1 commitments, so different
   projections give a kernel vector (Akita Corollary 10.25).
 * `l_2 = X`: `Cand(y) = sigma(y) = Src(omega_y)`, all seven groups, `f = Dec(sigma)`;
-  `Good_{l_2}(y) = R_PIOP(f; xi_X(y)) and (for every tied part p) C4_p(xi_X(y))`.
+  `Good_{l_2}(y) = R_PIOP(f; a_X(y))`.
   `R_PIOP` is the conjunction of the Boolean-domain identities the
   PIOP proves from `X` on: lookup membership of every looked-up cell and the leaves (4.3), the
   digit reconstructions (4.1), (4.2) (and the bit-slack form (4.3) under H-exact), "`K_0, K_1`
@@ -1406,21 +1408,7 @@ it determines, with a root weak opening `omega_y` of the seven groups; all stage
   `<Psi_o, v_i> = k_{o,i}` on the projection domain" (with the `Psi` of `xi_X`; K24) in place
   of the former "(6.1) with the range of `v`", `Delta = 0` in `F_p`, Booleanity and (3.4), under H-exact the Booleanity zero-checks of `B_zhi`
   and `a_z` at `r^(2)` (Section 10.1), and (9.2) with the `M_t` of `sd` and the `Y_sigma` of
-  `xi_X`. `C4_p` (12.4) says that some codeword `z` of the Johnson list `Lambda(C_s^p)` of part
-  `p`'s sponge word satisfies `Val_p(z)` (sponge rows, public region, and the part's parity
-  identity `M^(sigma) b'_{p,sigma}(z) = Y^_{p,sigma}` for the `Y_sigma` and shares of event 6).
-  It is a function of `xi_X` alone (in `Pi` the words of event 2 are in the transcript,
-  item 3; `sd`, the records and event 6 are in `xi_X`), and it is decided in polynomial time:
-  list `Lambda(C_s^p)` by decoding the level-0 word to the Johnson radius (the interleaved
-  Reed-Solomon code of Ligerito's level 0: a list decoder for the base code, Guruswami-Sudan,
-  lifted to the interleaved code, 12.7), then check `Val_p` on each of the at most `L`
-  elements. The conjunct is needed because the fork-join verifies the parts after `X`: their
-  claims are still pending at `xi_X`, and item (vii)(c) of the segment of `sd` must hold for
-  every certificate passing this test (12.4). The extractor evaluates this test, decoder
-  included, once per invocation of the node at `X` that receives a certificate (12.6).
-  Binding: Corollary 10.25 (both rounds'
-  commitments are in `xi_X`; the conjunct `C4_p` depends on `xi_X` only, not on the
-  candidate).
+  `xi_X`. Binding: Corollary 10.25 (both rounds' commitments are in `a_X`).
 * `Wit(y) = f_1` on the original domains, i.e. `(z_i, u_i, v_i, b_i)` by (4.1) to (4.3).
 
 All maps are polynomial time. Spec 12.2 gives `R_PIOP(f; xi_X) => C1*(f_1; Psi)` and `M^(sigma)
@@ -1437,31 +1425,26 @@ geometry through the plan digest, 6.4), as Akita Remark 10.19 permits; every adm
 has `rho <= 2^-128`, so the bound holds with `R_f`, `R_coord`, `R_F` and the tree size
 maximized over them.
 
-### 12.3 The segment of `X` (PIOP, the tied parts and the evaluation batch)
+### 12.3 The segment of `X` (PIOP and the evaluation batch)
 
 For a fixed `sigma` put `D(xi; sigma) = 1` iff a check determined by `xi` fails or a pending
 claim is false, with the pending claims of Lemma S (Section 5), starting from `R_PIOP(f;
-xi_X)` at `X`, and the tied parts' claims of 12.4, starting from `C4_p` at `X` for every part
-`p`. Item (vii)(a) holds by definition: `Good_{l_2}` is the conjunction of exactly these
+xi_X)` at `X`. Item (vii)(a) holds by definition: `Good_{l_2}` is the conjunction of exactly these
 claims at `xi_X`. Item (vii)(b): Lemma S for the PIOP sites (for branch S with its projected
-addresses, 12.2), where a false claim of a tied
-part persists for every answer (it depends on no `H_P` answer after `X`); 12.4 for the tied
-parts' sites, where a false PIOP claim persists for every answer (it depends on no `H_F`
-answer); at Akita's evaluation batch a false claim `v_k != f_k(z_k)` makes the batched
+addresses, 12.2); at Akita's evaluation batch a false claim `v_k != f_k(z_k)` makes the batched
 equation false outside one hyperplane of the 52, 53 or 58 independent coefficients (H-u,
 H-exact or H-FIPS; mass `1/|K|`, Akita Remark 10.43; assigned `52/|K|`, `53/|K|` or `58/|K|`;
 the bit lengths of 52, 53 and 58 are all 6, so `g = 6` for every relation; a zero polynomial's
-claim zero is a claim like any other). Item (vii)(c): every tied part's stages precede the join and hence `xi_f`; at the end of
-a part its claims have turned into the outcome of its Flock verifier and value checks
-(12.4), which a certificate passes, since it passes every check it determines. So at `xi_f`
+claim zero is a claim like any other). Item (vii)(c): the tied parts' claims belong to the segment of `sd` (12.4), so at `xi_f`
 the only pending claim is the root row `sum_k eta_k v_k = sum_k eta_k f_k(z_k)` (Akita
 (202)), which a certificate's weak opening satisfies (Proposition 10.44, witness step), as in
 Aerie Lemma C.1 (ii).
 
-### 12.4 The segment of `sd` (the bridge seed) and the tied parts (segment of `X`)
+### 12.4 The segment of `sd`: the bridge seed and the tied parts
 
-(Tied-part proof version 5. With the fork-join of deviation K22 the parts' stages lie in the
-segment of `X`, and their claims are pending at `X`.)
+(Tied-part proof version 5. The parts' stages are plain stages of this segment, after event 6
+and before `X`, with projected addresses; the PIOP sponge and Akita's stream never absorb the
+Flock proofs, K25.)
 
 Fix `sigma_1` and `f_1 = Dec(sigma_1)`. For a tied part `p` with records in the segments
 `P^-1(p)`, let `C_s^p` be its sponge word (event 2, in the input of `sd`). For a codeword `z in
@@ -1497,8 +1480,7 @@ In the segment of `sd`, for its fixed `sigma_1`:
 * after `Y_sigma` and the shares (event 6): `C3_sigma`: `M^(sigma) b_sigma(f_1) = Y_sigma`;
   and per part `C4_p`: some `z in Lambda(C_s^p)` satisfies `Val_p(z)`.
 
-In the segment of `X`, for its fixed candidate (12.3), per part `p`: `C4_p` from `X` on, then
-along the part's own stages (placed after the stage-3 rounds):
+Per part `p`, along its own stages (after event 6, before `X`), for the fixed `sigma_1`:
 
 * on the part's tie challenger, for `z in Lambda(C_s^p)` with `Spg_p(z)`: after the tie site
   `C5_p`: some such `z` has `Chn_p(z)` and `z(P_pub) = table(P_pub)` (the public identity at
@@ -1514,15 +1496,15 @@ along the part's own stages (placed after the stage-3 rounds):
 
 In the segment of `sd`, `D(xi; sigma_1) = 1` iff a check determined by `xi` fails or a
 pending claim is false; at the input of `sd` the one pending claim is `H(f_1)`. At `xi_X`,
-`D = 1` iff a check fails, `C1*` is false, some `C3_sigma` is false or some `C4_p` is false
-(with the fork-join no Flock part is verified before `X`: its claim `C4_p` is still pending
-there; the verifier may check the parts at any time, but their transcript lies after the
-stage-3 messages).
+`D = 1` iff a check determined by `xi_X` fails (the Flock verifiers' verdicts and the parts'
+value checks among them), or `C1*` or some `C3_sigma` is false; no part claim is pending at
+`X`, each having turned into its verifier's verdict.
 
 **Item (vii)(a)** holds by definition. **Item (vii)(c):** a certificate in `Y_X` passes the
-test `Good_{l_2} = R_PIOP(f; xi_X) and (for all p) C4_p`; `R_PIOP` implies `C1*` (the
+test `R_PIOP(f; a_X)`, which implies `C1*` (the
 lookup and leaf of `K`, (4.1) for `k`, the projection identity and `Delta = 0`; `Prj` follows
-from `k in [-2^37, 2^37)`) and every `C3_sigma` (12.2), the second conjunct is every `C4_p`, and its prefix passes every check, so
+from `k in [-2^37, 2^37)`) and every `C3_sigma` (12.2), and its prefix passes every check it
+determines, the Flock verifiers' included, so
 `D(xi_X; sigma_1) = 0`. **Item (vii)(b)**, stage by stage. The two PIOP sites `sd` and `fs`
 read the complete linear prefix, so their bad sets may use all of it:
 
@@ -1559,24 +1541,27 @@ read the complete linear prefix, so their bad sets may use all of it:
   XOR to `Y_sigma*` (the verifier derives the last share from `Y_sigma*`; a span's table is `Y`
   itself), the parts' records partition the segment and `M^(sigma*)` is GF(2) linear, so
   `M^(sigma*) b'_sigma*(z) = Y_sigma* = M^(sigma*) b_sigma*(f_1)`, which makes `C2_sigma*` true.
-  Hence some `C4_p` is false, and it stays pending up to `xi_X`, the end of this segment.
+  Hence some `C4_p` is false; it reaches that part's first site unchanged (event 6 is a
+  message, and no site lies between `fs` and the parts in this order).
 
-This gives item (vii) for `l_1`. The masses are those of Section 3.5.
+This gives item (vii) for `l_1` up to the parts' stages. The masses are those of Section 3.5.
 
-**The tied parts in the segment of `X`.** Their stages read only their projected address, so
-their bad sets are defined from the address alone, for every input, as Lemma 12.3 (b)
-requires; the argument then shows that every other false claim persists for any answer. A
-false `C4_p` reaches the part's first site unchanged: it depends on `xi_X` only, and the PIOP
-sites between `X` and the join do not touch it (12.3).
+**The tied parts (plain stages of this segment).** Their stages read only their projected address, so
+their bad sets are defined from the address alone, for every input, as Lemma 12.3 (iv)
+requires; the argument then shows that every other false claim persists for any answer. The
+argument is the same whether the prover computes the part's messages before or after `X` and
+the Akita opening: its addresses, and hence its bad sets, are the same, and the answers are
+fresh.
 
 * The sites of part `p`'s tie challenger (address: the challenger's input, which encodes
   `C_s^p`, `y_digest`, the geometry, the earlier nonces, coordinates and messages, through
   item 2 the PIOP prefix through `fs` with the matrices of `sd` and the part's records, and
-  through `rec` in the part or span seed the event-6 record, so the input `xi_X` of `X`).
+  through `rec` in the part or span seed the event-6 record, so the input of `sd`).
   Every bad set below is a union over `z in Lambda(C_s^p)` with `Spg_p(z)` of an event in `z`
   and the address alone; it does not depend on the candidate `f`, on `R_PIOP` or the PIOP
   claims of Lemma S, on `C3_sigma` or on other parts. For persistence: a failed check, a false
-  PIOP claim and a false claim of another part do not depend on these answers and stay false.
+  `C1*` or `C3_sigma` and a false claim of another part do not depend on these answers and
+  stay false.
   * *Tie site.* `Bad_tie_p`: the `(rho_r, rho_c)` at which some `z` with `not Pub_p(z)` has
     `z(P_pub) = table(P_pub)` (two distinct multilinear polynomials in `nu_s + 3` free
     coordinates agree): mass `<= L_s (nu_s + 3) / 2^128`. Outside it, if `C4_p` is false then
@@ -1609,9 +1594,10 @@ sites between `X` and the join do not touch it (12.3).
   values are the sent ones, and the verifier's value check (`v_pub` = table) and the chain's
   final check then give `C7_p`. So a false `C7_p` at the end of the part makes the Flock
   verifier or a value check reject, which is a check determined by every later input; from
-  there on the part has no pending claim.
+  there on the part has no pending claim. In particular `D(xi_X; sigma_1) = 1` whenever a
+  part's `C4_p` was false and no bad answer occurred.
 
-With 12.3 this gives item (vii) for `l_2`, with Lemma 12.3's (a) and (b) for the part sites.
+This completes item (vii) for `l_1`, with Lemma 12.3 (i) and (iv) for the part sites.
 The masses are those of Section 3.6.
 
 **Lemma 12.4 (uniform seed density).** Except with probability `delta_X < 2^-(2^110)` over
@@ -1704,19 +1690,13 @@ together with the extractor's work attached to that run. The work includes the m
 `Good_l` in step 2 on the certificate returned by its first continuation, once per
 invocation that receives a certificate outside `T`; every invocation contains at least one
 run of `P`, so each test is attached to a run at most once. `Good_{l_1}` is the relation `H`
-on `f_1` (one SHAKE256 per live record). With deviation K22, `Good_{l_2}` is `R_PIOP` and,
-for every tied part, the decider of `C4_p`: list decoding of the part's level-0 word (`n_0`
-field elements: block length times interleaved rows) to Flock's radius, then `Val_p` on at
-most `L` codewords, `poly(n_0, L)` per part (12.7 item 9). This adds that cost to `T_run`; it
-changes neither the run count nor the error bound above. The Module-SIS algorithms `B_I` of
-the binding step run the extractor to obtain the collisions `Coll_l`, so they inherit
-`T_run`, decoder included (Akita Lemma 10.20 and Remark 10.50: the binding term grows with
-`(Q + 3) T_run`). Akita's Module-SIS estimates, as Aerie's, exclude the extractor's cost
-(Section 7), so the tabulated margins do not account for the decoder either.
+on `f_1` (one SHAKE256 per live record). `Good_{l_2}` is `R_PIOP` on `f` at `a_X`,
+polynomial in the instance; `T_run` is one run of `P` and the verifier plus these two
+tests. The Module-SIS algorithms `B_I` inherit `T_run` (Akita Lemma 10.20, Remark 10.50).
 
 **Corollary 12.5 (mode B).** Fix `N <= 2^15`, mode B (Flock profile id 3, deviation P9:
 the `w1Encode` strings of each segment's live records are the event-2 items, absorbed before
-`sd`; the event-6 share items and the join's proof items are empty), PIOP wire version 4 with the plan of Section 6
+`sd`; the event-6 share items and the Flock proof items are empty), PIOP wire version 4 with the plan of Section 6
 (profile id 3, no tied-part site) and Akita's plan for the selected row. Then the statement of
 Section 7 holds for mode B without assumption (F) and without the terms `eps_fs`,
 `eps_merkle` and `R_F`, with the same extractor bound otherwise. *Proof.* The structure of
@@ -1748,35 +1728,24 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
 2. Assumption (K), the correctness of the sponge circuit (the only fixed circuit of the
    Keccak side).
 3. Lemma 12.3 extends Akita's Theorem 10.17; its proof above modifies Claims 1 and 2 of
-   Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof, together with
-   item 9. It has had internal review only. Since deviation K23 it carries the PIOP core as
+   Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof. It has had
+   internal review only. Since deviation K23 it carries the PIOP core as
    well as the Flock parts: PIOP stages 1 and 2 rest on it, i.e. the 53 sites of branch S at
    `2^15` (`tau`, `gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds), where
    before K23 every PIOP site after `X` had a complete-prefix input. The paper MUST state
-   Lemma 12.3 as a new extension of Akita Theorem 10.17.
+   Lemma 12.3 as a new extension of Akita Theorem 10.17. Since deviation K25 its condition
+   (ii) also lets the fold coordinates omit the parts' stages; that step SHOULD be read
+   beside invariant (2) of Akita Appendix E.2.
 4. `R_F` is not counted exactly (open 4); the `Q = 0` term stays about `2^-117` (estimate).
 5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
    C.4 tabulates its `K`); it bounds the running time only, not the error. Nor is the cost
-   `T_run` of one run, which includes the decoder of item 9 (12.6).
+   `T_run` of one run (12.6).
 6. The classical ROM only, as Aerie and Akita.
 7. The CMA-to-NMA simulation step for FIPS 204's exact algorithms (12.8, Lemma 12.8 case
    (i)): the published corrected proofs cover round-3 Dilithium (UF-CMA) and generic
    Fiat-Shamir-with-aborts signatures (sUF-CMA), not ML-DSA as standardized (spec 12.3 (b)).
 8. The min-entropy `H_inf` of a fresh signature's `c~` (Lemma 12.7) is evaluated only
    heuristically, in the ROM for the signer's hash calls (about 253.9 bits, estimate).
-9. The polynomial-time decider of `C4_p` in the test at `X` (12.2, with the fork-join of
-   deviation K22): listing the Johnson list of a Ligerito level-0 word. We rely on the
-   Guruswami-Sudan list decoder for the base Reed-Solomon code and on the reduction of
-   Gopalan, Guruswami and Raghavendra (list decoding of interleaved codes) for the
-   interleaved code, at Flock's list radius, which lies below the Johnson radius
-   (Flock Eq. (10)). The extractor runs the decider: the node at `X` evaluates `Good_{l_2}`
-   once per invocation that receives a certificate (Akita Appendix E.2, `E_l` step 2), so
-   its cost `poly(n_0, L)` per tied part is part of `T_run` (12.6) and of the running
-   time of the Module-SIS algorithms built from the collisions; the run count and the
-   knowledge error do not change. The decider is not implemented here. That it applies to
-   the exact level-0 code of each profile (Ligerito's level 0, a packed binary-tower
-   Reed-Solomon code, interleaved, at Flock's radius for `Fast`, `Slim` and `Slim8`) is
-   cited, not checked; it SHOULD be checked externally together with Lemma 12.3 (item 3).
 
 ### 12.8 Aggregate unforgeability: signing queries in rewound runs (spec 12.3)
 
