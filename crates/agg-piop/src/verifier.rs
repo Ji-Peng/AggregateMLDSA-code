@@ -35,7 +35,7 @@ use agg_pcs_config::commit::GroupClaim;
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::instance::InstanceError;
 use agg_witness::padding::Geometry;
-use agg_witness::params::{C_TILDE_BYTES, TR_BYTES, W1_BITS};
+use agg_witness::params::{Set, C_TILDE_BYTES, TR_BYTES, W1_BITS};
 use akita_types::Commitment;
 
 use crate::binding::{instance_record, public_records_binding, FlockProfile};
@@ -230,6 +230,14 @@ pub enum VerifyError {
         /// The proof header's relation.
         found: Relation,
     },
+    /// The proof's parameter set differs from the one the verifier expects (checked before
+    /// the instance record, like the relation).
+    ParamSet {
+        /// The caller's parameter set.
+        expected: Set,
+        /// The proof header's parameter set.
+        found: Set,
+    },
     /// The record list does not match the proof's `N`.
     RecordCount,
     /// A public key failed to decode.
@@ -269,6 +277,9 @@ impl std::fmt::Display for VerifyError {
             Self::Wire(e) => write!(f, "wire: {e}"),
             Self::Relation { expected, found } => {
                 write!(f, "the proof claims relation {found}, the verifier expects {expected}")
+            }
+            Self::ParamSet { expected, found } => {
+                write!(f, "the proof is for ML-DSA-{found}, the verifier expects ML-DSA-{expected}")
             }
             Self::RecordCount => write!(f, "record count differs from the proof"),
             Self::PublicKey(i) => write!(f, "public key {i} is malformed"),
@@ -480,6 +491,13 @@ fn run(
     // Parse: the header's relation must be the caller's, and the manifest (the instance record, the
     // catalog row, the plan) comes from the caller's relation.
     let proof = AggregateProof::from_bytes(proof_bytes)?;
+    // This entry point verifies ML-DSA-44 aggregates.
+    if proof.set != Set::S44 {
+        return Err(VerifyError::ParamSet {
+            expected: Set::S44,
+            found: proof.set,
+        });
+    }
     if proof.relation != relation {
         return Err(VerifyError::Relation {
             expected: relation,
@@ -498,9 +516,14 @@ fn run(
     timings.parse = clock.lap();
 
     // Light public data and the record binding.
+    let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
+        .c_tilde
+        .iter()
+        .map(|c| c.as_slice().try_into().expect("the parser reads 32 bytes per ML-DSA-44 record"))
+        .collect();
     let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
         .iter()
-        .zip(&proof.c_tilde)
+        .zip(&c_tilde)
         .map(|(&(pk, msg), &c)| (pk, msg, c))
         .collect();
     let public = StreamedPublic::prepare(&inputs, cache.as_deref()).map_err(|e| match e {
@@ -575,7 +598,7 @@ fn run(
             seed: &flock_seeds[sigma],
             bridge_seed: &bridge_seed,
             mu: &mu[live.clone()],
-            c_tilde: &proof.c_tilde[live],
+            c_tilde: &c_tilde[live],
             final_vector: bits,
             shares: &proof.flock_shares[sigma],
             record: &flock_record,
@@ -705,7 +728,8 @@ pub fn verify_piop(
 /// [`verify_piop`] for a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87):
 /// `public_pass(r^(2), r^(3), gamma_rows)` returns `T~_rho(r^(2))` per row and
 /// `w_A^(s)(r^(3))` per lane of `z` for the ring coefficients `gamma_rows`
-/// (`lane_public::LanePublicData::{t_evaluations, ring_weights_at}`).
+/// (`lane_public::LanePublicData::{t_evaluations, ring_weights_at}` on the data that
+/// `LanePublicData::prepare` builds from the `(pk, M, c~)` triples).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_piop_lanes(
     manifest: &CommitmentManifest,
