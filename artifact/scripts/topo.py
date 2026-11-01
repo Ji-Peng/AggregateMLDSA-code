@@ -58,6 +58,11 @@ def read(path, default=None):
 def topology():
     online_text = read(SYS / "online", "0")
     online = sorted(parse_list(online_text))
+    # Only the CPUs this process may run on (cgroups, containers, batch
+    # schedulers): pinning outside them silently shrinks the core set.
+    if hasattr(os, "sched_getaffinity"):
+        allowed = os.sched_getaffinity(0)
+        online = [cpu for cpu in online if cpu in allowed] or online
     cores = {}
     l3_of_cpu = {}
     node_of_cpu = {}
