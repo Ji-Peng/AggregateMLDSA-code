@@ -127,6 +127,9 @@ def main():
         )
 
     if not args.no_cargo:
+        # Install the pinned toolchains if rustup lacks them (a no-op when present).
+        for toolchain in (RUST_TOOLCHAIN, AERIE_TOOLCHAIN):
+            run(["rustup", "toolchain", "install", "--profile", "minimal", toolchain])
         run(
             ["cargo", "fetch", "--locked"],
             cwd=REPO,
