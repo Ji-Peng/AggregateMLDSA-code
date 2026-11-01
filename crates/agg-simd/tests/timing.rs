@@ -24,7 +24,7 @@ fn measure(mut f: impl FnMut(), n: usize) -> f64 {
     samples[2]
 }
 #[test]
-#[ignore]
+#[ignore = "kernel timing benchmark; run with: cargo test --release -p agg-simd --test timing -- --ignored --nocapture"]
 #[cfg(target_arch = "x86_64")]
 fn timing() {
     println!(

@@ -23,7 +23,7 @@ fn find(
 }
 
 #[test]
-#[ignore]
+#[ignore = "brute-force search for witness edge cases; run with: cargo test --release -p agg-witness --test all edge_search -- --ignored --nocapture"]
 fn edge_search() {
     let residue = find(0xED6E, 200_000, |w| {
         w.w.iter().flatten().any(|&x| mod_q(x) == Q - GAMMA2)
