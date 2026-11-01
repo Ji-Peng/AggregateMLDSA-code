@@ -126,6 +126,11 @@ pub trait KeccakSide {
         true
     }
 
+    /// Prepare optional work to run on the PIOP pool at fork start.
+    fn prepare_fork(&self) -> Option<Box<dyn FnOnce() + Send + '_>> {
+        None
+    }
+
     /// The `S` Flock proofs of the join. They may be computed concurrently with the
     /// PIOP, so they depend on nothing after the final-vector step: `bridge_seed` is `sd`
     /// and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
@@ -1390,33 +1395,46 @@ pub fn prove_with_tables_using(
     let (flock_proofs, piop, opening_prepared) = if flock_threads > 0 {
         let fork = Instant::now();
         let (unchecked, swap_join) = (hooks.unchecked, hooks.swap_join);
+        let row_job = keccak.prepare_fork();
         let ((flock_proofs, flock_time), (piop, prepared)) =
             fork_join(flock_threads, prove_flock, || {
-                let prover_tables =
-                    ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
-                phase_stamp("parity-tables");
-                let piop = prove_piop_with(
-                    manifest,
-                    tables,
-                    Some(prover_tables),
-                    &matrices,
-                    &public,
-                    &mut transcript,
-                    unchecked,
-                    swap_join,
-                    // The stage pool default applies only beside a running Flock fork.
-                    true,
-                );
-                let prepared = match &piop {
-                    Ok((proof, run)) => {
-                        Some(prepare_opening(&committer, manifest, commitments, proof, run))
+                // `in_place_scope` keeps the PIOP body on the calling thread (its large
+                // stack); the row job goes to a worker. A one-thread pool would run the job
+                // only after the PIOP: drop it, and the Flock side builds the rows itself.
+                rayon::in_place_scope(|scope| {
+                    if let Some(job) = row_job.filter(|_| rayon::current_num_threads() >= 2) {
+                        scope.spawn(move |_| {
+                            phase_stamp("flock-ab-start");
+                            job();
+                            phase_stamp("flock-ab-end");
+                        });
                     }
-                    Err(_) => None,
-                };
-                // Prepare runs on this pool, so it is part of the fork-join wall time; only
-                // the transcript-bound finish runs on the opening pool.
-                phase_stamp("opening-prepare");
-                (piop, prepared)
+                    let prover_tables =
+                        ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
+                    phase_stamp("parity-tables");
+                    let piop = prove_piop_with(
+                        manifest,
+                        tables,
+                        Some(prover_tables),
+                        &matrices,
+                        &public,
+                        &mut transcript,
+                        unchecked,
+                        swap_join,
+                        // The stage pool default applies only beside a running Flock fork.
+                        true,
+                    );
+                    let prepared = match &piop {
+                        Ok((proof, run)) => {
+                            Some(prepare_opening(&committer, manifest, commitments, proof, run))
+                        }
+                        Err(_) => None,
+                    };
+                    // Prepare runs on this pool, so it is part of the fork-join wall time;
+                    // only the transcript-bound finish runs on the opening pool.
+                    phase_stamp("opening-prepare");
+                    (piop, prepared)
+                })
             });
         timings.fork_join = fork.elapsed();
         phase_stamp("join");
