@@ -38,6 +38,7 @@
 //! zero-checks of `bz_hi`, `a_z`); `V_lo`, `V_hi` have none (the projection bounds `v`).
 
 use agg_bridge::{parity, Shape};
+use agg_simd::buf::AlignedVec;
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
 use agg_mldsa_simd::{Engine, HuCols};
 use agg_witness::derive::{derive_with_t, DeriveError};
@@ -511,8 +512,8 @@ impl HuSlots {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MainTables {
     geom: Geometry,
-    wide: Vec<i32>,
-    narrow: Vec<Vec<i8>>,
+    wide: AlignedVec<i32>,
+    narrow: Vec<AlignedVec<i8>>,
     hint_slack: Vec<i64>,
 }
 
@@ -553,8 +554,8 @@ impl MainTables {
             return Err(SourceTableError::Records { expected: manifest.records(), actual: geom.n });
         }
         let cells = geom.main_len();
-        let mut wide = crate::kernel::buf::uninit::<i32>(4 * cells);
-        let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| crate::kernel::buf::uninit::<i8>(cells)).collect();
+        let mut wide = AlignedVec::<i32>::uninit(4 * cells);
+        let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| AlignedVec::<i8>::uninit(cells)).collect();
         let mut views: Vec<RecordViews<'_>> =
             (0..geom.n_star).map(|_| (Vec::with_capacity(4), Vec::with_capacity(encoder.narrow))).collect();
         for column in wide.chunks_exact_mut(cells) {
@@ -575,8 +576,8 @@ impl MainTables {
         let hint_slack: Vec<i64> = tiles.into_iter().flatten().collect();
         // SAFETY: successful encoding writes every digit, bit and FIPS cell of every
         // record, including padding. On error the MaybeUninit allocations just drop.
-        let wide = unsafe { wide.assume_init().into_vec() };
-        let narrow = narrow.into_iter().map(|column| unsafe { column.assume_init().into_vec() }).collect();
+        let wide = unsafe { wide.assume_init() };
+        let narrow = narrow.into_iter().map(|column| unsafe { column.assume_init() }).collect();
         let tables = Self {
             geom, wide, narrow,
             hint_slack: if encoder.fips.is_some() { hint_slack } else { Vec::new() },
@@ -708,7 +709,7 @@ impl MainTables {
     /// The eight (H-u) or nine (H-exact) `G_main4` polynomials in manifest order (`2^d_main`
     /// cells each).
     #[must_use]
-    pub fn columns(&self) -> &[Vec<i8>] {
+    pub fn columns(&self) -> &[AlignedVec<i8>] {
         &self.narrow
     }
 
@@ -771,7 +772,7 @@ impl MainTables {
 
     /// Mutable `G_main4` columns for adversarial tests (the alphabet is not rechecked).
     #[doc(hidden)]
-    pub fn columns_mut(&mut self) -> &mut [Vec<i8>] {
+    pub fn columns_mut(&mut self) -> &mut [AlignedVec<i8>] {
         &mut self.narrow
     }
 
@@ -894,7 +895,42 @@ impl BridgeGroupTables {
             psi,
         )?;
         let shape = Shape::PRODUCTION;
-        let witness = parity::compute(&shape, &main.bit_lanes(manifest), matrices)
+        let bit_lanes = main.bit_lanes(manifest);
+        let hint_slack = manifest
+            .is_fips()
+            .then(|| hint_slack_table(manifest, main.hint_slack()));
+        let direct = (agg_simd::detect::backend() == agg_simd::detect::Backend::Avx512)
+            .then(|| {
+                parity::compute_direct(
+                    &shape,
+                    &bit_lanes,
+                    matrices,
+                    LOOKUP_SHIFT,
+                    hint_slack.as_deref(),
+                )
+            })
+            .transpose()
+            .map_err(SourceTableError::Bridge)?
+            .flatten();
+        if let Some(direct) = direct {
+            let mut tables = Self {
+                parity1: Some(direct.y1),
+                level1: direct.level1_carries,
+                parities: direct.y2,
+                level2: direct.level2_carries,
+                level3: direct.level3_carries,
+                y: direct.y,
+                proj,
+                psi: psi.to_vec(),
+                zeros: vec![0; manifest.group(GroupRole::Level3).logical_cells()],
+                multiplicity: Vec::new(),
+                digits: Vec::new(),
+            };
+            tables.recount(manifest, main)?;
+            tables.validate(manifest)?;
+            return Ok(tables);
+        }
+        let witness = parity::compute(&shape, &bit_lanes, matrices)
             .map_err(SourceTableError::Bridge)?;
         let narrow_bits = |table: &Vec<i64>| -> Result<Vec<i8>, SourceTableError> {
             table
@@ -903,8 +939,8 @@ impl BridgeGroupTables {
                 .collect()
         };
         let mut level2_columns = witness.kappa2.clone();
-        if manifest.is_fips() {
-            level2_columns.push(hint_slack_table(manifest, main.hint_slack()));
+        if let Some(hint_slack) = hint_slack {
+            level2_columns.push(hint_slack);
         }
         let mut tables = Self {
             parity1: Some(witness.y1.iter().map(narrow_bits).collect::<Result<Vec<_>, _>>()?

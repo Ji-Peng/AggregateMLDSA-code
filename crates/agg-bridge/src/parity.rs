@@ -198,6 +198,195 @@ pub fn compute(
     })
 }
 
+/// Direct round-2 bridge tables in their final narrow (`i8` parity) and stacked balanced
+/// (`i32` carry `K = kappa - lookup_shift`) storage layouts, with no intermediate `i64`
+/// vectors or `split_lanes` passes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectParityTables {
+    /// `y^(1)_t` on `D_1` (`i8` bits).
+    pub y1: [Vec<i8>; W1_BITS],
+    /// Stacked balanced level-1 carries (`8 * d1_len`, `K = kappa - lookup_shift`, padding
+    /// `-lookup_shift`).
+    pub level1_carries: Vec<i32>,
+    /// `y^(2)_t` on `D_2` (`i8` bits).
+    pub y2: Vec<Vec<i8>>,
+    /// Stacked balanced level-2 carries (`8 * d2_len`).
+    pub level2_carries: Vec<i32>,
+    /// Public `Y` on `D_3` (`u8` bits).
+    pub y: Vec<u8>,
+    /// Stacked balanced level-3 carries (`d3_len`).
+    pub level3_carries: Vec<i32>,
+}
+
+/// Sum one level's sparse matrix into its parity lanes and stacked carries. The six bit
+/// planes are packed one lane per 12-bit field, so a row sum fits `u64` without a carry
+/// between fields (`acc0`) and the sixth lane in `acc5`.
+fn accumulate_level_packed(
+    six_bits: &[u8],
+    m: &SparseMatrix,
+    blocks: usize,
+    cols_per_block: usize,
+    rows: usize,
+    lookup_shift: i32,
+    slots: usize,
+) -> ([Vec<i8>; W1_BITS], Vec<i32>) {
+    let out_len = blocks * rows;
+    // Split each block into strips when blocks < 16 so all worker threads participate.
+    let strips_per_block = (16usize / blocks.max(1)).clamp(1, 8);
+    let strip_cols = cols_per_block.div_ceil(strips_per_block);
+    let strip_sums: Vec<(Vec<u64>, Vec<u16>)> = (0..blocks * strips_per_block)
+        .into_par_iter()
+        .map(|task| {
+            let beta = task / strips_per_block;
+            let s = task % strips_per_block;
+            let block_start = beta * cols_per_block;
+            let block_end = (block_start + cols_per_block).min(six_bits.len());
+            let local_len = block_end.saturating_sub(block_start);
+            let col_start = (s * strip_cols).min(local_len);
+            let col_end = ((s + 1) * strip_cols).min(local_len);
+            let mut acc0 = vec![0u64; rows];
+            let mut acc5 = vec![0u16; rows];
+            if col_start < col_end {
+                agg_simd::digits::accumulate_six_lanes_strip(
+                    &six_bits[block_start..block_end],
+                    m.entries.as_slice(),
+                    m.k,
+                    col_start,
+                    col_end,
+                    &mut acc0,
+                    &mut acc5,
+                );
+            }
+            (acc0, acc5)
+        })
+        .collect();
+
+    let mut parities: [Vec<i8>; W1_BITS] = std::array::from_fn(|_| vec![0i8; out_len]);
+    let mut carries = vec![-lookup_shift; slots * out_len];
+
+    for beta in 0..blocks {
+        let mut acc0 = vec![0u64; rows];
+        let mut acc5 = vec![0u16; rows];
+        for s in 0..strips_per_block {
+            let (ref s0, ref s5) = strip_sums[beta * strips_per_block + s];
+            for r in 0..rows {
+                // Disjoint column strips sum to at most the checked row cap (2047 in
+                // production), so no 12-bit field carries into the next one.
+                acc0[r] += s0[r];
+                acc5[r] += s5[r];
+            }
+        }
+        let base = beta * rows;
+        for r in 0..rows {
+            let v0 = acc0[r];
+            let sums = [
+                (v0 & 0xFFF) as i32,
+                ((v0 >> 12) & 0xFFF) as i32,
+                ((v0 >> 24) & 0xFFF) as i32,
+                ((v0 >> 36) & 0xFFF) as i32,
+                ((v0 >> 48) & 0xFFF) as i32,
+                i32::from(acc5[r]),
+            ];
+            for t in 0..W1_BITS {
+                let s = sums[t];
+                parities[t][base + r] = (s & 1) as i8;
+                carries[t * out_len + base + r] = (s >> 1) - lookup_shift;
+            }
+        }
+    }
+    (parities, carries)
+}
+
+/// Compute the production bridge parities and stacked balanced carries directly from the
+/// six bit columns without `i64` intermediates; returns `Ok(None)` if any input byte is
+/// outside `{0, 1}` (tampered witness fallback).
+pub fn compute_direct(
+    shape: &Shape,
+    lanes: &[&[i8]; W1_BITS],
+    matrices: &BridgeMatrices,
+    lookup_shift: i32,
+    hint_slack_d2: Option<&[i64]>,
+) -> Result<Option<DirectParityTables>, BridgeError> {
+    if !shape.matches(matrices) {
+        return Err(BridgeError::Shape);
+    }
+    if !shape.row_weights_ok(matrices) {
+        return Err(BridgeError::RowWeight);
+    }
+    // Packed fields hold at most 4095; other shapes use the general reference path.
+    if shape.lanes != W1_BITS || shape.levels[..2].iter().any(|l| l.weight_cap >= 4096) {
+        return Ok(None);
+    }
+    let Some(six_bits) = agg_simd::digits::pack_six_bits(lanes) else {
+        return Ok(None);
+    };
+    let domains = shape.domains(lanes[0].len());
+    let l1 = shape.level(1);
+    let l2 = shape.level(2);
+    let l3 = shape.level(3);
+
+    let (y1, level1_carries) = accumulate_level_packed(
+        &six_bits,
+        &matrices.m1,
+        domains.blocks1,
+        l1.cols,
+        l1.rows,
+        lookup_shift,
+        8,
+    );
+
+    let y1_refs: [&[i8]; W1_BITS] = std::array::from_fn(|t| y1[t].as_slice());
+    let six_bits_d1 = agg_simd::digits::pack_six_bits(&y1_refs).expect("y1 parities are bits");
+    let (y2_arr, mut level2_carries) = accumulate_level_packed(
+        &six_bits_d1,
+        &matrices.m2,
+        domains.segments,
+        l2.used,
+        l2.rows,
+        lookup_shift,
+        8,
+    );
+    if let Some(slack) = hint_slack_d2 {
+        assert_eq!(slack.len(), domains.d2_len);
+        let slot6 = &mut level2_carries[6 * domains.d2_len..7 * domains.d2_len];
+        for (dst, &v) in slot6.iter_mut().zip(slack) {
+            *dst = i32::try_from(v).expect("hint slack fits i32") - lookup_shift;
+        }
+    }
+
+    let (rows2, rows3) = (l2.rows, l3.rows);
+    let mut y = vec![0u8; domains.d3_len];
+    let mut level3_carries = vec![-lookup_shift; domains.d3_len];
+    for sigma in 0..domains.segments {
+        // Inputs are bits, and the checked production row cap bounds each exact sum to
+        // [0, 511]. Its carry is in [0, 255] before balancing by lookup_shift.
+        let mut sums = vec![0i32; rows3];
+        for (t, lane) in y2_arr.iter().enumerate() {
+            for (rho2, &val) in lane[sigma * rows2..(sigma + 1) * rows2].iter().enumerate() {
+                if val != 0 {
+                    for &row in matrices.m3.column(t + shape.lanes * rho2) {
+                        sums[row as usize] += i32::from(val);
+                    }
+                }
+            }
+        }
+        let base = sigma * rows3;
+        for (r, &s) in sums.iter().enumerate() {
+            y[base + r] = (s & 1) as u8;
+            level3_carries[base + r] = (s >> 1) - lookup_shift;
+        }
+    }
+
+    Ok(Some(DirectParityTables {
+        y1,
+        level1_carries,
+        y2: y2_arr.into(),
+        level2_carries,
+        y,
+        level3_carries,
+    }))
+}
+
 /// The first violated bridge condition found by [`check`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentityError {

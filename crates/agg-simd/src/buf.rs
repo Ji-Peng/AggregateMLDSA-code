@@ -194,7 +194,7 @@ impl<T: Copy> AlignedVec<T> {
         self.len = self.len.min(len);
     }
     /// Allocate slots without initializing them; callers must initialize each slot before reading.
-    pub(crate) fn uninit(len: usize) -> AlignedVec<MaybeUninit<T>> {
+    pub fn uninit(len: usize) -> AlignedVec<MaybeUninit<T>> {
         assert!(std::mem::size_of::<T>() > 0);
         let layout = Layout::from_size_align(
             len.checked_mul(std::mem::size_of::<T>())
@@ -216,7 +216,10 @@ impl<T: Copy> AlignedVec<T> {
 impl<T: Copy> AlignedVec<MaybeUninit<T>> {
     /// View the slots as initialized. The caller must write every element before any element
     /// is read; allocation and deallocation layouts agree.
-    pub(crate) unsafe fn assume_init(self) -> AlignedVec<T> {
+    ///
+    /// # Safety
+    /// Every slot must hold an initialized `T`.
+    pub unsafe fn assume_init(self) -> AlignedVec<T> {
         let result = AlignedVec {
             ptr: self.ptr.cast(),
             len: self.len,

@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+agg-simd = { workspace = true }
 agg-witness = { workspace = true }
 flock-core = { workspace = true }
 flock-field = { workspace = true }
