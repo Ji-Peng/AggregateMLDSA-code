@@ -836,7 +836,8 @@ fn prove_with(
                 LaneId::Weight(WeightId::Ring(s)) => ring.lane(usize::from(s)),
                 other => tables.lane(other),
             };
-            prove_stage_drawn(&spec, manifest, points, &claims, gammas, resolve, None, transcript, check)?
+            let rank_one = |id| tables.rank_one(id);
+            prove_stage_drawn(&spec, manifest, points, &claims, gammas, resolve, None, Some(&rank_one), transcript, check)?
         }
     };
     let values: Vec<E> = manifest

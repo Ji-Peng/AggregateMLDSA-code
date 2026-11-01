@@ -17,7 +17,7 @@ use crate::range::square_map;
 use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
 use crate::virtual_polys::parity1_tables_for;
-use crate::split_weight::{LaneSplitWeight, Level1Split, SplitWeight};
+use crate::split_weight::{LaneSplitWeight, Level1Split, RankOneWeight, SplitWeight};
 use crate::weights::{
     level1_lane_split, level1_lane_tables, level1_weight_split, level1_weight_table, level2_weight_table, level2_weight_table_for,
     level3_weight_tables, level3_weight_tables_for, ring_weight_planes, ring_weight_table,
@@ -103,8 +103,9 @@ pub struct ProverTables<'a> {
     pub wp: Option<Vec<E>>,
     /// `W` as coordinate planes (plane layout), in place of `wp`.
     pub wp_planes: Option<agg_simd::buf::KPlanes>,
-    /// `W^(rho)` per polynomial lane of `v` (after `r^(2)`; the sets with lanes).
-    pub wp_lanes: Vec<Vec<E>>,
+    /// `W^(rho)` per polynomial lane of `v` (after `r^(2)`; the sets with lanes), as their
+    /// factors: the in-lane factor per lane and the signature factor they share.
+    pub wp_lanes: (Vec<Vec<E>>, Vec<E>),
 }
 
 impl<'a> ProverTables<'a> {
@@ -137,7 +138,7 @@ impl<'a> ProverTables<'a> {
             wa_planes: None,
             wp: None,
             wp_planes: None,
-            wp_lanes: Vec::new(),
+            wp_lanes: (Vec::new(), Vec::new()),
         }
     }
 
@@ -228,7 +229,7 @@ impl<'a> ProverTables<'a> {
     /// of `v` for the sets with lanes).
     pub fn set_projection(&mut self, psi: &[u8], r2: &[E]) {
         if self.has_lanes() {
-            self.wp_lanes = crate::projection::lane_weight_tables(self.tables.manifest, psi, r2);
+            self.wp_lanes = crate::projection::lane_weight_factors(self.tables.manifest, psi, r2);
             return;
         }
         if crate::kernel::layout() == crate::kernel::Layout::Plane {
@@ -237,6 +238,18 @@ impl<'a> ProverTables<'a> {
         } else {
             self.wp = Some(crate::projection::weight_table(self.tables.manifest, psi, r2));
             self.wp_planes = None;
+        }
+    }
+
+    /// A weight lane kept as two factors (the projection weights of the sets with lanes).
+    #[must_use]
+    pub fn rank_one(&self, id: LaneId) -> Option<RankOneWeight<'_>> {
+        match id {
+            LaneId::Weight(WeightId::Proj(lane)) if self.has_lanes() => Some(RankOneWeight {
+                low: self.wp_lanes.0.get(usize::from(lane))?,
+                high: &self.wp_lanes.1,
+            }),
+            _ => None,
         }
     }
 
@@ -285,9 +298,9 @@ impl<'a> ProverTables<'a> {
                     None => Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)"))),
                 }
             }
-            LaneId::Weight(WeightId::Proj(lane)) if self.has_lanes() => {
-                Lane::Source(Source::Field(&self.wp_lanes[usize::from(lane)]))
-            }
+            // The stage takes the factors ([`Self::rank_one`]); a group that cannot use them
+            // materializes the table from them.
+            LaneId::Weight(WeightId::Proj(_)) if self.has_lanes() => Lane::Folded(Vec::new()),
             LaneId::Weight(WeightId::Proj(_)) => match &self.wp_planes {
                 Some(planes) => Lane::Source(Source::Planes(planes)),
                 None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),

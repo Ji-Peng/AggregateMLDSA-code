@@ -17,7 +17,7 @@ use crate::kernel::{
     PlaneLinearIntGroup, PlaneWeightIntGroup, Source, Term, WeightIntGroup,
 };
 use crate::manifest::{Column, CommitmentManifest, GroupRole};
-use crate::split_weight::{LaneSplitGroup, Level1Split, SplitGroup};
+use crate::split_weight::{LaneSplitGroup, Level1Split, RankOneGroup, RankOneWeight, SplitGroup};
 use crate::transcript::{gamma_site, round_sites, Transcript, TranscriptError};
 use crate::OpeningField as E;
 
@@ -387,7 +387,7 @@ fn prove_stage_with<'a>(
     check: bool,
 ) -> Result<StageRun, StageError> {
     let gammas = draw_gammas(spec, claims, transcript)?;
-    prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, transcript, check)
+    prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, None, transcript, check)
 }
 
 /// Validate a stage's table and claims and draw its batching coefficients `gamma` (the
@@ -412,6 +412,7 @@ pub fn prove_stage_drawn<'a>(
     gammas: Vec<E>,
     resolve: impl Fn(LaneId) -> Lane<'a>,
     split: Option<Level1Split<'_>>,
+    rank_one: Option<&dyn Fn(LaneId) -> Option<RankOneWeight<'a>>>,
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<StageRun, StageError> {
@@ -460,6 +461,21 @@ pub fn prove_stage_drawn<'a>(
                         *lane = Lane::Folded(split.materialize(rho));
                     }
                 }
+            }
+        }
+        // A weight kept as two factors: the rank-one group, else its materialized table.
+        if let Some(rank_one) = rank_one {
+            let factored = group.lanes.iter().enumerate().find_map(|(l, &id)| rank_one(id).map(|w| (l, w)));
+            if let Some((l, weight)) = factored {
+                if eq_point.is_none() {
+                    if let Some(grouped) = RankOneGroup::new(weight, l, &lanes, &instances, rounds, spec.degree) {
+                        groups.push(StageGroup::RankOne(grouped));
+                        owner.push(g);
+                        build_times[g] = build.elapsed().as_secs_f64();
+                        continue;
+                    }
+                }
+                lanes[l] = Lane::Folded(weight.materialize());
             }
         }
         if let Some(linear) =
@@ -629,6 +645,8 @@ enum StageGroup<'a> {
     Split(SplitGroup<'a>),
     /// The level-1 weights of polynomial lanes as their factors ([`LaneSplitGroup`]).
     LaneSplit(LaneSplitGroup<'a>),
+    /// A weight kept as two factors ([`RankOneGroup`]).
+    RankOne(RankOneGroup<'a>),
 }
 
 impl StageGroup<'_> {
@@ -642,6 +660,7 @@ impl StageGroup<'_> {
             Self::Weight(WeightGroup::Plane(_)) => {}
             Self::Split(g) => g.set_arena(arena),
             Self::LaneSplit(g) => g.set_arena(arena),
+            Self::RankOne(g) => g.set_arena(arena),
         }
     }
 
@@ -652,6 +671,7 @@ impl StageGroup<'_> {
             Self::Weight(g) => g.round_message(round),
             Self::Split(g) => g.round_message(round),
             Self::LaneSplit(g) => g.round_message(round),
+            Self::RankOne(g) => g.round_message(round),
         }
     }
 
@@ -662,6 +682,7 @@ impl StageGroup<'_> {
             Self::Weight(g) => g.bind(round, challenge),
             Self::Split(g) => g.bind(round, challenge),
             Self::LaneSplit(g) => g.bind(round, challenge),
+            Self::RankOne(g) => g.bind(round, challenge),
         }
     }
 
@@ -672,6 +693,7 @@ impl StageGroup<'_> {
             Self::Weight(g) => g.claim(),
             Self::Split(g) => g.claim(),
             Self::LaneSplit(g) => g.claim(),
+            Self::RankOne(g) => g.claim(),
         }
     }
 
@@ -683,7 +705,7 @@ impl StageGroup<'_> {
             // The verifier checks them independently through `level1_weight_at`, and the
             // equivalence test in `split_weight` pins the messages, claim and terminals
             // against the materialized generic group.
-            Self::Split(_) | Self::LaneSplit(_) => true,
+            Self::Split(_) | Self::LaneSplit(_) | Self::RankOne(_) => true,
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
         }
@@ -696,6 +718,7 @@ impl StageGroup<'_> {
             Self::Weight(g) => Some(g.terminal_values()),
             Self::Split(g) => Some(g.terminal_values()),
             Self::LaneSplit(g) => Some(g.terminal_values()),
+            Self::RankOne(g) => Some(g.terminal_values()),
         }
     }
 
@@ -715,7 +738,8 @@ impl StageGroup<'_> {
             | Self::Linear(LinearGroup::Row(_))
             | Self::Extra(LinearGroup::Row(_))
             | Self::Split(_)
-            | Self::LaneSplit(_) => {}
+            | Self::LaneSplit(_)
+            | Self::RankOne(_) => {}
         }
     }
 }

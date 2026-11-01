@@ -16,7 +16,7 @@ use rayon::prelude::*;
 
 use crate::kernel::{Acc, Group, GroupInstance, Lane, Source, Term, IDENTITY_MAP};
 use crate::OpeningField as E;
-use jolt_field::{One, Unreduced, Zero};
+use jolt_field::{One, Ring, Unreduced, Zero};
 
 /// The factors of the level-1 weight table.
 #[derive(Clone, Debug)]
@@ -680,6 +680,247 @@ impl<'a> LaneSplitGroup<'a> {
     }
 }
 
+/// A main-domain weight kept as its two factors, `w(x) = low[x mod 2^z] high[x >> z]` (the
+/// projection weights `W^(rho)(j, i) = P_rho(j) eq(r'_sig, i)` of the sets with polynomial
+/// lanes, `z = 8`).
+#[derive(Clone, Copy, Debug)]
+pub struct RankOneWeight<'s> {
+    /// The factor over the low `z` variables.
+    pub low: &'s [E],
+    /// The factor over the remaining variables.
+    pub high: &'s [E],
+}
+
+impl RankOneWeight<'_> {
+    /// The materialized table (the generic kernel's lane).
+    #[must_use]
+    pub fn materialize(&self) -> Vec<E> {
+        let z = self.low.len().trailing_zeros() as usize;
+        agg_bridge::weights::spread(self.low, z, self.high, self.low.len() * self.high.len())
+    }
+}
+
+/// Rows of the high factor per task of the two passes of [`RankOneGroup`].
+const RANK_ONE_CHUNK: usize = 1 << 9;
+
+/// The integer value `sum_l c_l f_l(x) + c` of the affine lanes at cell `x`.
+#[inline]
+fn affine_at(lanes: &[(Source<'_>, i64)], constant: i64, x: usize) -> i64 {
+    lanes.iter().fold(constant, |acc, (lane, c)| {
+        acc + c * match lane {
+            Source::Ints(cells) => i64::from(cells[x]),
+            Source::Bytes { cells, map } => map[cells[x] as u8 as usize],
+            _ => unreachable!("integer lanes only"),
+        }
+    })
+}
+
+/// `gamma sum_x w(x) (sum_l c_l f_l(x) + c)` for a weight `w` kept as its factors
+/// ([`RankOneWeight`]) and integer or byte lanes `f_l`, without an equality factor (prover
+/// only). With `g = sum_l c_l f_l + c` the sum is `sum_lo low[lo] D[lo]`,
+/// `D[lo] = sum_hi high[hi] g(lo, hi)`, so the first `z` rounds run on the two `2^z` tables
+/// `low, D`; the remaining rounds run on the weight `low(r_low) high` and the lanes folded by
+/// the low challenges, with the original instance. Round polynomials are unique, so the
+/// messages equal the generic kernel's on the materialized weight.
+pub struct RankOneGroup<'a> {
+    /// The rounds over the low variables.
+    low: Group<'a>,
+    /// The rounds over the high variables, built after the low rounds.
+    high: Option<Group<'a>>,
+    /// The group lane of the weight.
+    weight_lane: usize,
+    /// The other lanes in group order.
+    lanes: Vec<Source<'a>>,
+    instance: GroupInstance,
+    high_factor: Vec<E>,
+    zeta_vars: usize,
+    degree: usize,
+    challenges: Vec<E>,
+    arena: Option<crate::kernel::SharedArena>,
+}
+
+impl<'a> RankOneGroup<'a> {
+    /// The group for the weight `weight` at group lane `weight_lane`, the group's `lanes`
+    /// (the weight's entry is ignored) and one instance with one affine term weighted by
+    /// that lane. `None` when the shape is not that, a lane is not an integer or byte table
+    /// of `2^rounds` cells, a factor is not a power of two of at least two entries, or the
+    /// integer combination may leave `i64` (coefficients above `2^20`, a constant above
+    /// `2^40`).
+    #[must_use]
+    pub fn new(
+        weight: RankOneWeight<'_>,
+        weight_lane: usize,
+        lanes: &[Lane<'a>],
+        instances: &[GroupInstance],
+        rounds: usize,
+        degree: usize,
+    ) -> Option<Self> {
+        let [instance] = instances else { return None };
+        let [Term::Affine { weight: Some(w), lanes: affine, constant }] = instance.terms.as_slice() else {
+            return None;
+        };
+        let (z, h) = (weight.low.len(), weight.high.len());
+        if *w != weight_lane
+            || z < 2
+            || h < 2
+            || !z.is_power_of_two()
+            || !h.is_power_of_two()
+            || z * h != 1 << rounds
+            || constant.abs() > 1 << 40
+        {
+            return None;
+        }
+        let rows = 1_usize << rounds;
+        let mut others = Vec::with_capacity(lanes.len());
+        for (l, lane) in lanes.iter().enumerate() {
+            if l == weight_lane {
+                continue;
+            }
+            match lane {
+                Lane::Source(source @ (Source::Ints(_) | Source::Bytes { .. })) if source.len() == rows => {
+                    others.push(*source);
+                }
+                _ => return None,
+            }
+        }
+        // Coefficients by lane; the weight lane carries none.
+        let mut combination: Vec<(Source<'a>, i64)> = Vec::new();
+        for &(l, c) in affine {
+            if l == weight_lane || l >= lanes.len() || c.abs() > 1 << 20 {
+                return None;
+            }
+            let Lane::Source(source) = &lanes[l] else { return None };
+            combination.push((*source, c));
+        }
+        // D[lo] = sum_hi high[hi] g(lo, hi): |g| < 2^53, one reduced product per cell.
+        let d = (0..h)
+            .into_par_iter()
+            .step_by(RANK_ONE_CHUNK)
+            .map(|first| {
+                let mut part = vec![E::zero(); z];
+                for hi in first..(first + RANK_ONE_CHUNK).min(h) {
+                    let factor = weight.high[hi];
+                    for (lo, slot) in part.iter_mut().enumerate() {
+                        let g = affine_at(&combination, *constant, (hi * z) | lo);
+                        if g != 0 {
+                            *slot += factor.mul_i64(g);
+                        }
+                    }
+                }
+                part
+            })
+            .reduce(
+                || vec![E::zero(); z],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b) {
+                        *x += y;
+                    }
+                    a
+                },
+            );
+        let low = Group::new(
+            vec![Lane::Folded(weight.low.to_vec()), Lane::Folded(d)],
+            vec![GroupInstance { gamma: instance.gamma, terms: vec![Term::Product(vec![0, 1])] }],
+            None,
+            z.trailing_zeros() as usize,
+            degree,
+        )
+        .ok()?;
+        Some(Self {
+            low,
+            high: None,
+            weight_lane,
+            lanes: others,
+            instance: instance.clone(),
+            high_factor: weight.high.to_vec(),
+            zeta_vars: z.trailing_zeros() as usize,
+            degree,
+            challenges: Vec::new(),
+            arena: None,
+        })
+    }
+
+    pub(crate) fn set_arena(&mut self, arena: &crate::kernel::SharedArena) {
+        self.low.set_arena(arena);
+        self.arena = Some(arena.clone());
+    }
+
+    /// The current claim (the high group's, once the low rounds are bound).
+    #[must_use]
+    pub fn claim(&self) -> E {
+        self.high.as_ref().map_or_else(|| self.low.claim(), Group::claim)
+    }
+
+    /// The compressed message of `round`.
+    pub fn round_message(&mut self, round: usize) -> Vec<E> {
+        if round < self.zeta_vars {
+            self.low.round_message(round)
+        } else {
+            self.high.as_mut().expect("low rounds bound").round_message(round - self.zeta_vars)
+        }
+    }
+
+    /// Bind the round's variable to `challenge`.
+    pub fn bind(&mut self, round: usize, challenge: E) {
+        self.challenges.push(challenge);
+        if round < self.zeta_vars {
+            self.low.bind(round, challenge);
+            if round + 1 == self.zeta_vars {
+                self.build_high();
+            }
+        } else {
+            self.high.as_mut().expect("low rounds bound").bind(round - self.zeta_vars, challenge);
+        }
+    }
+
+    /// The lane values at the bound point, in group lane order.
+    #[must_use]
+    pub fn terminal_values(&self) -> Vec<E> {
+        self.high.as_ref().expect("all rounds bound").terminal_values()
+    }
+
+    /// The high rounds: the weight `low(r_low) high` and every other lane folded by the low
+    /// challenges, `F_l[hi] = sum_lo eq(r_low, lo) f_l(lo, hi)`.
+    fn build_high(&mut self) {
+        let z = 1_usize << self.zeta_vars;
+        let c_at = self.low.terminal_values()[0];
+        let eq = eq_table(&self.challenges[..self.zeta_vars]);
+        let h = self.high_factor.len();
+        let folded: Vec<Vec<E>> = self
+            .lanes
+            .iter()
+            .map(|lane| {
+                (0..h)
+                    .into_par_iter()
+                    .map(|hi| {
+                        let single = [(*lane, 1_i64)];
+                        eq.iter().enumerate().fold(E::zero(), |acc, (lo, &e)| {
+                            let f = affine_at(&single, 0, (hi * z) | lo);
+                            if f == 0 { acc } else { acc + e.mul_i64(f) }
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut folded = folded.into_iter();
+        let lanes: Vec<Lane<'a>> = (0..=self.lanes.len())
+            .map(|l| {
+                if l == self.weight_lane {
+                    Lane::Folded(self.high_factor.iter().map(|&b| c_at * b).collect())
+                } else {
+                    Lane::Folded(folded.next().expect("one folded table per lane"))
+                }
+            })
+            .collect();
+        let mut high = Group::new(lanes, vec![self.instance.clone()], None, h.trailing_zeros() as usize, self.degree)
+            .expect("high rounds of a valid rank-one group");
+        if let Some(arena) = &self.arena {
+            high.set_arena(arena);
+        }
+        self.high = Some(high);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +1002,44 @@ mod tests {
             for round in 0..z + h {
                 let (a, b) = (got.round_message(round), want.round_message(round));
                 assert_eq!(a, b, "message z={z} h={h} k={k} round {round}");
+                let r = field(&mut rng);
+                got.bind(round, r);
+                want.bind(round, r);
+            }
+            assert_eq!(got.claim(), want.claim());
+            assert_eq!(got.terminal_values(), want.terminal_values());
+        }
+    }
+
+    /// The rank-one rounds give the generic kernel's messages, claim and terminal values on
+    /// the materialized weight.
+    #[test]
+    fn rank_one_rounds_match_the_generic_group() {
+        let mut rng = SplitMix64::new(97);
+        for (z, h) in [(3_usize, 2_usize), (8, 3), (2, 5)] {
+            let len = 1_usize << (z + h);
+            let low: Vec<E> = (0..1_usize << z).map(|_| field(&mut rng)).collect();
+            let high: Vec<E> = (0..1_usize << h).map(|_| field(&mut rng)).collect();
+            let weight = RankOneWeight { low: &low, high: &high };
+            let v_lo: Vec<i32> = (0..len).map(|_| (rng.next_u64() % (1 << 16)) as i32 - (1 << 15)).collect();
+            let v_hi: Vec<i8> = (0..len).map(|_| (rng.next_u64() % 9) as i8 - 4).collect();
+            let lanes = vec![
+                Lane::Folded(Vec::new()),
+                Lane::Source(Source::Ints(&v_lo)),
+                Lane::Source(Source::Bytes { cells: &v_hi, map: &IDENTITY_MAP }),
+            ];
+            let instances = vec![GroupInstance {
+                gamma: field(&mut rng),
+                terms: vec![Term::Affine { weight: Some(0), lanes: vec![(1, 1), (2, 1 << 16)], constant: 1 << 15 }],
+            }];
+            let degree = 3;
+            let mut want_lanes = lanes.clone();
+            want_lanes[0] = Lane::Folded(weight.materialize());
+            let mut want = Group::new(want_lanes, instances.clone(), None, z + h, degree).unwrap();
+            let mut got = RankOneGroup::new(weight, 0, &lanes, &instances, z + h, degree).expect("applies");
+            assert_eq!(got.claim(), want.claim());
+            for round in 0..z + h {
+                assert_eq!(got.round_message(round), want.round_message(round), "z={z} h={h} round {round}");
                 let r = field(&mut rng);
                 got.bind(round, r);
                 want.bind(round, r);

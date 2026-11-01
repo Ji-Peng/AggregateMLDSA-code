@@ -407,6 +407,23 @@ pub fn lane_weight_tables(manifest: &CommitmentManifest, psi: &[u8], r2: &[E]) -
         .collect()
 }
 
+/// [`lane_weight_tables`] as their factors: `W^(rho)(j, i) = low_rho[j] blocks[i]` with
+/// `low_rho = P_rho eq(r'_b, blk(rho))` over the lane cells and `blocks = eq(r'_sig, .)`
+/// shared by every lane (prover; the stage-3 groups keep the weights factored).
+#[must_use]
+pub fn lane_weight_factors(manifest: &CommitmentManifest, psi: &[u8], r2: &[E]) -> (Vec<Vec<E>>, Vec<E>) {
+    let (r_o, r_b, r_sig) = split_point_blocks(manifest, r2);
+    let shape = manifest.shape();
+    let p = row_weights_in(psi, shape.positions, &r_o);
+    let lane_cells = manifest.lane_cells();
+    let lows = lane_block_weights(manifest, &r_b)
+        .into_iter()
+        .enumerate()
+        .map(|(lane, eq_b)| p[lane * lane_cells..(lane + 1) * lane_cells].iter().map(|&w| w * eq_b).collect())
+        .collect();
+    (lows, eq_table(&r_sig))
+}
+
 /// `W^(rho)(r^(3))` for every polynomial lane `rho` of `v` (verifier; [`lane_weight_tables`]).
 #[must_use]
 pub fn lane_weights_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) -> Vec<E> {
