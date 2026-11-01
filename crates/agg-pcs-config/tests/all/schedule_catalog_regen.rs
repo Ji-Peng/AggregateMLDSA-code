@@ -156,12 +156,6 @@ fn requested_batches() -> Vec<BatchLayout> {
     }
 }
 
-#[allow(dead_code)]
-fn batch(set: Set, d_sig: usize, relation: Relation) -> BatchLayout {
-    BatchLayout::new(set, d_sig, relation)
-        .unwrap_or_else(|| panic!("{set:?} d_sig {d_sig} {relation:?} is outside the wire range"))
-}
-
 // ---------------------------------------------------------------------------
 // Planner entry points (copied from Aerie's harness, generic over the family).
 

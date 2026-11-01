@@ -64,8 +64,6 @@ pub type PcsFamily = Family;
 /// Wire version of this protocol (the Keccak side's tied parts of proof version 5 with the
 /// virtual parity chain and its work sites in the plan).
 pub const WIRE_VERSION: u16 = 4;
-/// Parameter-set byte of ML-DSA-44 (the instance record).
-pub const PARAMETER_SET: u8 = 0x44;
 /// Identifier of the digit layout: 2 is the lookup layout with the projected quotient
 /// (ranges by the lookup into `T_16`; `v` bounded through the digits of its projection
 /// outputs `k`, `docs/spec.md`, the projection definition). Layout 1 (`V_lo`, `V_hi` looked up) is retired.
@@ -156,8 +154,9 @@ pub const MULTIPLICITY_ALPHABET_CODE: u8 = 0x40 | 16;
 /// Alphabet code of a ternary column (`{-1, 0, 1}`: H-FIPS's `delta` and `e`).
 pub const TERNARY_ALPHABET_CODE: u8 = 0x20 | 3;
 /// Alphabet code of a 16-bit column that no range check reads (`V_lo`, `V_hi`: the
-/// projection bounds `v` instead).
-pub const UNCHECKED_ALPHABET_CODE: u8 = 0x10 | 16;
+/// projection bounds `v` instead): the flag `0x10` with `log2 |T_16| = 16`, which is the same
+/// bit, so the code is `0x10`.
+pub const UNCHECKED_ALPHABET_CODE: u8 = 0x10;
 /// Alphabet code of a zero polynomial (`G_3`'s padding to `G_2`'s layout).
 pub const ZERO_ALPHABET_CODE: u8 = 0x08;
 

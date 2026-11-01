@@ -58,15 +58,6 @@ pub fn poly32_to_u64(poly: &Poly32, p: i32) -> [u64; 256] {
     out
 }
 
-/// Converts canonical `u64` coefficients in `[0, p)` to `Poly32`.
-pub fn u64_to_poly32(a: &[u64; 256]) -> Poly32 {
-    let mut out = Poly32::zero();
-    for (o, &val) in out.iter_mut().zip(a.iter()) {
-        *o = val as i32;
-    }
-    out
-}
-
 /// Asserts that two polynomials are congruent modulo `p`.
 pub fn assert_poly_eq_mod_p(a: &Poly32, b: &Poly32, p: i32) {
     for i in 0..256 {

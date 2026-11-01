@@ -922,23 +922,6 @@ impl ChainGate {
         schema
     }
 
-    /// Public input words per instance (the In prefix of [`Self::io_schema`]).
-    #[must_use]
-    pub fn public_input_words(&self) -> usize {
-        self.spec
-            .input_fields
-            .iter()
-            .filter(|f| f.public)
-            .map(|f| f.bits.div_ceil(128))
-            .sum()
-    }
-
-    /// Output words per instance.
-    #[must_use]
-    pub fn output_words(&self) -> usize {
-        self.spec.outputs.len().div_ceil(128)
-    }
-
     /// Digest of the relation: label, rounds, layout, absorptions and outputs.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {

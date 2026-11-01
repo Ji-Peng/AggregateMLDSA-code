@@ -80,10 +80,6 @@ pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
         crate::claims::Stage3Claims::len(manifest),
     ]
 }
-/// Pre-stage claims of ML-DSA-44 (`claims::PreStageClaims::len` for every set).
-pub const PRESTAGE_CLAIMS: usize = 13;
-/// Level-1 carry claims before stage 2 of ML-DSA-44 (`claims::Kappa1Claims::len`).
-pub const KAPPA1_CLAIMS: usize = 6;
 /// Multiplicity-digit claims after the lookup.
 pub const MULTIPLICITY_CLAIMS: usize = agg_pcs_config::catalogs::MULTIPLICITY_DIGITS;
 /// Bytes of one packed final vector `Y_sigma` (512, `agg_bridge::final_vector`).

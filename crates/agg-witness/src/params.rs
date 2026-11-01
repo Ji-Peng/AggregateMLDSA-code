@@ -48,15 +48,6 @@ impl Set {
             Self::S87 => "87",
         }
     }
-
-    /// Full FIPS 204 standard name.
-    pub const fn fips_name(self) -> &'static str {
-        match self {
-            Self::S44 => "ML-DSA-44",
-            Self::S65 => "ML-DSA-65",
-            Self::S87 => "ML-DSA-87",
-        }
-    }
 }
 
 impl TryFrom<u8> for Set {

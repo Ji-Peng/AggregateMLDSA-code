@@ -26,8 +26,6 @@ pub type MatrixCoeff = [[[i32; N]; L]; K];
 
 /// SHAKE128 rate in bytes (FIPS 202).
 pub const SHAKE128_RATE: usize = 168;
-/// SHAKE256 rate in bytes (FIPS 202).
-pub const SHAKE256_RATE: usize = 136;
 
 /// CoeffFromThreeBytes (FIPS 204 Algorithm 14); `None` is the symbol "bottom".
 pub fn coeff_from_three_bytes(b0: u8, b1: u8, b2: u8) -> Option<u32> {
@@ -292,12 +290,6 @@ impl ExpandedKey<Set44> {
     pub fn many_with(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<Self>> {
         let tiles: Vec<Vec<Option<Self>>> = pks.par_chunks(KEY_TILE).map(|tile| expand_tile(engine, tile)).collect();
         tiles.into_iter().flatten().collect()
-    }
-
-    /// An engine reading [`ExpandedKey::prepared`] (the backend that built it).
-    #[must_use]
-    pub fn prepared_engine(&self) -> Engine {
-        Engine::new(self.prepared.backend).expect("the backend that prepared the key")
     }
 
     /// NTT(A) modulo the legacy CRT prime [`crt::P2`] (reference form for [`crate::crt`],
