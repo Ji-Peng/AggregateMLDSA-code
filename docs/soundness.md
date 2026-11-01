@@ -1948,3 +1948,23 @@ without domain separation (Aerie C.7 notes the same overlap). The salt-free case
 in Aardal et al. (Lemma C.3) and Aerie C.7 through a partition argument with loss
 `e(Q_S + 1)`; SUF removes that loss and the cached-signer restriction, at the price of the
 `[A | I]` instance above (`2^121.8` instead of `2^123.5` core-SVP).
+
+## 13. Polynomial lanes (ML-DSA-65 and ML-DSA-87)
+
+With polynomial lanes (manifest sets 65 and 87) the main domain has no row coordinate and stage 3 holds `k` ring
+instances `ring[rho]`, `rho < k`, each the identity
+`Delta_rho = (A z)_rho - T_rho - (2 gamma_2 w_1' + u + q v)^(rho) = 0` on the main domain, tested at `r^(2)`, with
+the verifier-computed input claim `T~_rho(r^(2))`. These are identities tested at a point drawn by the preceding
+stage (3.4): each is pending during the stage-2 rounds as a multilinear polynomial in the undrawn coordinates of
+`r^(2)` and adds no site, whatever `k`; Lemma S takes the first false pending claim and is indifferent to their
+number.
+
+The `A z` parts of the `k` instances are `l` summands `w_A^(s) z^(s)` outside the batching vector
+(`stage::UNBATCHED`), whose public weight `w_A^(s)(j', i) = eq(r^(2)_sig, i) K_{A~_{i,s}, r^(2)_coef}[j']`,
+`A~_{i,s} = sum_rho gamma^(3)_rho A_i[rho, s]`, carries the row coefficients. The batched summand is
+`sum_rho gamma_rho ring_rho` by linearity of the kernel, and the verifier evaluates `w_A^(s)(r^(3))` and
+`sum_rho gamma_rho T~_rho(r^(2))` itself from the replayed `gamma^(3)` (`stage3::verify_streamed`, `lane_public`).
+
+Site classes and `nu_t` are those of 3.1 with the lane sets' geometry (`d_main = 8 + d_sig`) and stage degrees
+`(3, 5, 3)`. `stage.gamma` has `(37, 18, 105)` coefficients for 65 and `(45, 22, 132)` for 87, assigned `l/|K|`,
+difficulties `(6, 5, 7)` and `(6, 5, 8)`. The plan digests of the lane sets are pinned in `agg_piop::pow`.
