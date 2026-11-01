@@ -40,7 +40,8 @@ its round barriers do not wait behind stage jobs.
 | `AGG_PIOP_THREADS` | the Rayon pool | Workers of the PIOP pool; with the Flock pool it is capped at the logical CPUs. |
 | `AGG_PIOP_S_THREADS` | 16 at 16C32T, 6 at 8C16T | Workers of branch S's own pool; `0` shares the PIOP pool. |
 | `AGG_PIOP_FORK` | on | `0` or `off` runs L and S sequentially. |
-| `AGG_OPENING_THREADS` | one per physical core | Workers of the pool that runs the opening's finish part; prepare shares the PIOP pool. |
+| `AGG_OPENING_THREADS` | one per physical core, at most the PIOP's share beside the Flock pool | Workers of the pool that runs the opening's finish part; prepare shares the PIOP pool. |
+| `AGG_LATE_JOIN` | `1` | `0` runs the opening's finish after the Flock proofs join (same bytes). |
 
 Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the dedicated
 stage-branch pool is worth about 100 ms. At 8C16T the sweep found no gain from a separate

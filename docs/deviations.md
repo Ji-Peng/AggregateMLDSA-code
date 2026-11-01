@@ -936,6 +936,9 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
   tied-part proof version 5 and PIOP wire version 4 are kept (shared with K21, nothing
   released in between); aggregates made with K21 alone do not verify under it.
 
+K25 removes the join's absorption of the proof items; the prover schedule, the share items
+and the record digest `rec` above stay.
+
 Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 12.3, 12.3,
 12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
 the segment of `X`, after the stage-3 rounds; the checkpoint test at `X` becomes `R_PIOP and
@@ -1079,6 +1082,36 @@ Tests: `tests/all/projection.rs` (the unbounded-quotient attack rejected by the 
 `K_1`; `K_0 + 1` and `v` moved with `k` kept at stage 3; `K_2 = 4` and `K_3 = 4` at stage 2; a changed `c`;
 `V_lo + 2^16` with `V_hi - 1` accepted and `V_hi = 2^16` rejected by the ring; the honest
 abort), `projection::tests` (outputs, digit ranges, `W`), updated lookup and stage tests.
+
+## K25. Late join: the Flock proofs are not absorbed; the opening runs beside them (spec Sections 10, 11; docs/soundness.md 12; amends K22)
+
+K22 absorbed the `S` proof items at a join after the stage-3 claims and before the PCS
+session export, so the prover waited for the Flock tail before the Akita opening.
+
+Code (`agg_piop::{transcript, prover, verifier}`):
+
+- The registry has no `flock/proofs` event: the stage-3 terminal claims are followed by the
+  export `pcs/session` (event 13). Neither the PIOP sponge nor Akita's stream reads a Flock
+  proof byte; the part and span seeds (which bind `fs_sigma` and `rec`) bind the items to
+  the statement. The verifier checks the items with the Keccak side right after event 6, as
+  before, and no longer absorbs them.
+- Prover schedule: the opening (session export, `ensure_complete`, the finish of the
+  prepared opening) runs inside the PIOP closure of `prover::fork_join`, beside the Flock
+  tail. Its pool is the PIOP's share of the threads (the `AGG_PIOP_THREADS` pool, else the
+  global pool less the Flock pool), capped at `AGG_OPENING_THREADS`' default; an explicit
+  `AGG_OPENING_THREADS` is taken as given. `AGG_LATE_JOIN=0` runs the finish after the
+  join instead (K22's schedule); the transcript is the same, so both give the same bytes
+  (`agg-piop/tests/fork_join.rs`).
+- Wire: unchanged (the proof items stay after the stage-3 claims; PIOP wire version 4,
+  unreleased, kept). The session digest and the opening of every proof change; aggregates
+  made under K22 do not verify under it. The work plan and its digest are unchanged.
+- Property change: the transcript no longer binds the aggregate as one object; a valid
+  Flock sub-proof for the same statement and seeds verifies in place of another. The Flock
+  verifier still rejects a changed, moved or swapped item (`agg-cli/tests/all/mode_a.rs`).
+
+Soundness: docs/soundness.md Section 12 places the tied parts' stages in the segment of
+`sd`, before `X`, with addresses that omit `X`; the fold coordinates' addresses omit the
+parts (Lemma 12.3 (ii) weakened); no decoder at `X`.
 
 ## A1. Mode-A driver: inputs, checks and caches (spec Sections 2, 10, 11, 13)
 

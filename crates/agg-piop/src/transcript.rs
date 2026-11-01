@@ -107,10 +107,6 @@ pub const FINAL_VECTORS_SITE: &str = "agg-mldsa/v1/flock/final-vectors";
 /// After the final vectors: the `S` framed share items of the Keccak side (empty
 /// for a span or a segment of one tied part; mode B: empty).
 pub const FLOCK_SHARES_SITE: &str = "agg-mldsa/v1/flock/shares";
-/// The join (fork-join transcript): the `S` framed proof items of the Keccak side,
-/// absorbed after the stage-3 terminal claims and before the PCS session export, so the
-/// Flock sub-proofs follow the lookup challenge `X`.
-pub const FLOCK_PROOFS_SITE: &str = "agg-mldsa/v1/flock/proofs";
 /// cSHAKE256 customization of the digest of the final-vector record ([`flock_record_digest`]).
 pub const FLOCK_RECORD_CUSTOMIZATION: &[u8] = b"agg-mldsa/v1/flock/record";
 pub const TAU_SITE: &str = "agg-mldsa/v1/tau";
@@ -434,9 +430,9 @@ impl Registry {
                 b.push(PROJ_CLAIM_SITE, PROOF_KIND, 1, PayloadSize::Exact(16));
             }
         }
-        // The join: the Keccak side's proofs, after every PIOP challenge and
-        // before the PCS session digest, which therefore binds every Flock byte.
-        b.push(FLOCK_PROOFS_SITE, PROOF_KIND, segments, PayloadSize::Variable);
+        // The Keccak side's proof items are never absorbed: no PIOP or Akita challenge
+        // depends on them, and their own challengers bind them to the statement, so the
+        // prover may finish them after the opening.
         b.push(PCS_SESSION_SITE, EXPORT_KIND, 1, PayloadSize::Exact(32));
         Self {
             events: b.0,
@@ -1002,11 +998,11 @@ mod tests {
         let lookup = lookup_events(&manifest);
         // Leading events, L's label and the lookup, S's label, tau and the pre-stage
         // claims, the kappa1 absorb, three stages of gamma + rounds + terminal, the
-        // projection claim after stage 2, the branch join before stage 3, the Flock join,
-        // the PCS export.
+        // projection claim after stage 2, the branch join before stage 3, the PCS export (no
+        // event for the Flock proofs).
         assert_eq!(
             registry.len(),
-            LEADING + 1 + lookup + 1 + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1 + 1 + 1
+            LEADING + 1 + lookup + 1 + 2 + 1 + 3 * (2 + 2 * rounds) + 1 + 1 + 1
         );
         assert_eq!(registry.fork[0], LEADING);
         let sites: Vec<&str> = registry.events.iter().map(|e| e.site.as_str()).collect();
@@ -1051,12 +1047,10 @@ mod tests {
         assert_eq!(sites[join], FORK_JOIN_SITE);
         assert_eq!(sites[join + 1], "agg-mldsa/v1/stage3/gamma");
         assert_eq!(registry.events[join].size, PayloadSize::Exact(64));
-        // The join: the Flock proofs after the stage-3 terminal, right before the export.
-        assert_eq!(sites[registry.len() - 3], "agg-mldsa/v1/stage3/terminal");
-        assert_eq!(sites[registry.len() - 2], FLOCK_PROOFS_SITE);
-        assert_eq!(registry.events[registry.len() - 2].atoms, 1, "one segment at N = 100");
+        // The export follows the stage-3 terminal claims; no event absorbs the Flock proofs.
+        assert_eq!(sites[registry.len() - 2], "agg-mldsa/v1/stage3/terminal");
         assert_eq!(sites[registry.len() - 1], PCS_SESSION_SITE);
-        assert_eq!(sites.iter().filter(|s| **s == FLOCK_PROOFS_SITE).count(), 1);
+        assert!(!sites.iter().any(|s| s.starts_with("agg-mldsa/v1/flock/proofs")));
         let kinds: Vec<u8> = registry.events.iter().map(|e| e.kind).collect();
         assert_eq!(&kinds[..7], &[0, 1, 1, 1, 2, 0, 2]);
         assert_eq!(registry.events[4].size, PayloadSize::Exact(32));
@@ -1311,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn the_flock_proofs_cannot_be_absorbed_at_event_6() {
+    fn the_flock_proofs_cannot_be_absorbed() {
         let manifest = manifest();
         let mut t = Transcript::new(&manifest, &manifest.binding_bytes()).unwrap();
         to_seed(&mut t, &[0]);
@@ -1322,7 +1316,7 @@ mod tests {
         t.challenge_bytes(FLOCK_SEEDS_SITE, 1).unwrap();
         t.absorb(FINAL_VECTORS_SITE, 1, &[0; 512]).unwrap();
         assert!(matches!(
-            t.absorb_items(FLOCK_PROOFS_SITE, &[vec![]]),
+            t.absorb_items("agg-mldsa/v1/flock/proofs", &[vec![]]),
             Err(TranscriptError::EventOrder { index: 14, .. })
         ));
     }

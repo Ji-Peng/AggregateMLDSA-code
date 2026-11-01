@@ -1,12 +1,14 @@
-//! The fork-join transcript (`docs/soundness.md`): the Keccak side's proof
-//! items are absorbed at the join, after the stage-3 claims and before the PCS session
-//! digest. So no PIOP challenge depends on them, while the session (and with it the Akita
-//! opening) binds every byte; the side's challengers receive the digest of the final-vector
-//! record. The share items are absorbed at the final-vector step, before the lookup challenge `X`, so every
-//! PIOP challenge depends on them. The prover's two schedules (the Flock proofs on their own
-//! pool beside the PIOP, or one after the other) produce the same proof.
+//! The fork-join transcript (`docs/soundness.md`): the transcript never absorbs the Keccak
+//! side's proof items, so no PIOP challenge, no PCS session digest and no Akita challenge
+//! depends on them; the side's challengers receive the digest of the final-vector record,
+//! and the side's verifier is the only check on the items. The share items are absorbed at
+//! the final-vector step, before the lookup challenge `X`, so every PIOP challenge depends on
+//! them. The prover's three schedules (the Flock proofs on their own pool beside the PIOP and
+//! the opening, beside the PIOP with the opening after the join, or one after the other)
+//! produce the same proof.
 //!
-//! This binary sets `AGG_FLOCK_THREADS`, so it holds one test function only.
+//! This binary sets `AGG_FLOCK_THREADS` and `AGG_LATE_JOIN`, so it holds one test function
+//! only.
 
 mod common;
 
@@ -83,6 +85,20 @@ impl KeccakVerifier for AnyProof {
     }
 }
 
+/// Accepts exactly one proof item, with empty commitment and share items (profile 0, test
+/// hooks): a Keccak side that checks its items.
+struct ExactProof(Vec<u8>);
+
+impl KeccakVerifier for ExactProof {
+    fn profile(&self) -> FlockProfile {
+        FlockProfile::None
+    }
+
+    fn verify(&self, segment: &SegmentContext<'_>) -> bool {
+        segment.commitment.is_empty() && segment.shares.is_empty() && segment.proof == self.0
+    }
+}
+
 /// Accepts any share and proof item with an empty commitment (profile 0, test hooks), so
 /// that a changed share item reaches the PIOP checks.
 struct AnyShares;
@@ -107,7 +123,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
-fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
+fn no_piop_or_akita_challenge_depends_on_the_flock_proofs() {
     on_large_stack(|| {
         let records = common::records(0xf01, 24, 8);
         let instance = PublicInstance::from_records(&records).unwrap();
@@ -123,24 +139,34 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
             signatures: &signatures,
             relation: Relation::Hu,
         };
-        let run = |threads: &str, side: &FixedProofs| -> ProverOutput {
+        let run_with = |threads: &str, late_join: &str, side: &FixedProofs| -> ProverOutput {
             std::env::set_var("AGG_FLOCK_THREADS", threads);
+            std::env::set_var("AGG_LATE_JOIN", late_join);
             let output = prove(&prover_inputs, &bridge, side, FlockProfile::None).expect("prove");
             std::env::remove_var("AGG_FLOCK_THREADS");
+            std::env::remove_var("AGG_LATE_JOIN");
             output
         };
+        let run = |threads: &str, side: &FixedProofs| run_with(threads, "1", side);
 
-        // The fork (2 threads) and the serial schedule give the same proof.
+        // The fork (2 threads) with the opening beside the Flock proofs, the fork with the
+        // opening after the join, and the serial schedule give the same proof.
         let side = FixedProofs::new(&[1, 2, 3]);
         let forked = run("2", &side);
         let record = side.record.lock().unwrap().expect("the side proved");
+        let early = run_with("2", "0", &FixedProofs::new(&[1, 2, 3]));
         let serial = run("0", &FixedProofs::new(&[1, 2, 3]));
         if rayon::current_num_threads() > 1 {
             assert_eq!(forked.timings.flock_threads, 2);
             assert!(forked.timings.fork_join > std::time::Duration::ZERO);
+            // Beside the Flock proofs the opening runs inside the fork-join wall time.
+            assert!(forked.timings.fork_join >= forked.timings.opening);
+            assert!(forked.timings.opening_threads >= 1);
         }
         assert_eq!(serial.timings.flock_threads, 0);
         assert_eq!(forked.proof.to_bytes(), serial.proof.to_bytes(), "same proof either way");
+        assert_eq!(forked.proof.to_bytes(), early.proof.to_bytes(), "opening before or after the join");
+        assert_eq!(forked.session, early.session);
         assert_eq!(forked.proof.flock_proofs, vec![vec![1, 2, 3]]);
         // The side was given the digest of the final-vector record (final vectors, share items).
         assert_eq!(
@@ -148,8 +174,8 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
             flock_record_digest(&forked.proof.final_vectors, &forked.proof.flock_shares)
         );
 
-        // Other proof bytes: every PIOP challenge, message and nonce is the same, the PCS
-        // session digest and the opening differ.
+        // Other proof bytes: every PIOP challenge, message and nonce, the PCS session digest
+        // and the opening are the same.
         let other = run("2", &FixedProofs::new(&[9]));
         let (a, b) = (&forked, &other);
         assert_eq!(a.points.0.tau, b.points.0.tau);
@@ -162,13 +188,13 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
         assert_eq!(a.proof.stage1, b.proof.stage1);
         assert_eq!(a.proof.stage2, b.proof.stage2);
         assert_eq!(a.proof.stage3, b.proof.stage3);
-        assert_eq!(a.proof.work, b.proof.work, "the PIOP nonces precede the join");
-        assert_ne!(a.session, b.session, "the PCS session digest binds the proof items");
-        assert_ne!(a.proof.opening, b.proof.opening);
+        assert_eq!(a.proof.work, b.proof.work, "no nonce depends on the proof items");
+        assert_eq!(a.session, b.session, "the PCS session digest omits the proof items");
+        assert_eq!(a.proof.opening, b.proof.opening, "so does the Akita opening");
 
-        // The verifier accepts each proof as made, and rejects a proof whose items were
-        // replaced by the other proof's at the Akita opening: the PIOP stages pass (their
-        // challenges do not depend on the items), the session digest does not match.
+        // A verifier that accepts any proof item accepts each proof as made, and also a proof
+        // whose items were replaced or changed: the transcript does not bind them. A Keccak
+        // side that checks its items rejects them there, and only there.
         let public: Vec<(&[u8], &[u8])> = records
             .iter()
             .map(|r| (r.pk.as_slice(), r.msg.as_slice()))
@@ -180,10 +206,16 @@ fn the_join_binds_the_flock_proofs_and_no_piop_challenge_depends_on_them() {
         check(&b.proof).expect("verify the other proof");
         let mut moved = a.proof.clone();
         moved.flock_proofs = b.proof.flock_proofs.clone();
-        assert!(matches!(check(&moved), Err(VerifyError::Opening(_))), "items moved");
+        check(&moved).expect("items moved, not bound by the transcript");
         let mut tampered = a.proof.clone();
         tampered.flock_proofs[0][1] ^= 1;
-        assert!(matches!(check(&tampered), Err(VerifyError::Opening(_))), "one byte changed");
+        check(&tampered).expect("one byte changed, not bound by the transcript");
+        let strict = |proof: &agg_piop::wire::AggregateProof| {
+            verify(&public, &proof.to_bytes(), &bridge, &ExactProof(vec![1, 2, 3]), FlockProfile::None, Relation::Hu, None)
+        };
+        strict(&a.proof).expect("verify the forked proof against its own item");
+        assert!(matches!(strict(&moved), Err(VerifyError::Keccak(0))), "items moved");
+        assert!(matches!(strict(&tampered), Err(VerifyError::Keccak(0))), "one byte changed");
         // AnyProof refuses a non-empty share item at the Keccak side's check.
         let mut share = a.proof.clone();
         share.flock_shares[0] = vec![0];

@@ -4,10 +4,11 @@
 //! 1 to 3), shared with the stage tests.
 //!
 //! Fork-join (`docs/perf.md`): the final-vector step absorbs the final vectors and the Keccak side's
-//! share items only; the Flock proofs are absorbed at the join after the stage-3
-//! claims. No PIOP challenge depends on them, so after the final-vector step the prover runs
+//! share items only; the transcript never absorbs the Flock proofs. No PIOP or Akita
+//! challenge depends on them, so after the final-vector step the prover runs
 //! [`KeccakSide::prove`] on its own rayon pool ([`flock_pool_threads`]) while the PIOP
-//! (lookup, pre-stage claims, stages) runs on the global pool, then absorbs the proofs.
+//! (lookup, pre-stage claims, stages) and the Akita opening run on the rest of the threads;
+//! the join only collects the proofs (`AGG_LATE_JOIN=0` moves the opening after it).
 //!
 //! Two hooks connect the parts owned by other crates: [`BridgeDerivation`] maps the bridge
 //! seed `sd` to the matrices ([`SeededMatrices`] is the seed derivation,
@@ -42,7 +43,7 @@ use crate::stage3::{LookupInputs, Stage3Proof};
 use crate::tables::ProverTables;
 use crate::transcript::{
     commitment_site, flock_record_digest, Transcript, TranscriptError, BRIDGE_SEED_SITE,
-    FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE,
+    FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE,
     FLOCK_SHARES_SITE, MULTIPLICITY_SITE, PRESTAGE_SITE, TAU_SITE,
 };
 use crate::wire::{pack_final_vector, AggregateProof};
@@ -91,7 +92,7 @@ impl BridgeDerivation for FixedMatrices {
     }
 }
 
-/// The Keccak argument's transcript contributions (the commitment phase, the final-vector step and the join).
+/// The Keccak argument's contributions (the commitment phase, the final-vector step and the proof items).
 pub trait KeccakSide {
     /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites,
     /// `docs/soundness.md`), a function of the public batch geometry, needed
@@ -126,8 +127,8 @@ pub trait KeccakSide {
         true
     }
 
-    /// The `S` Flock proofs of the join. They may be computed concurrently with the
-    /// PIOP, so they depend on nothing after the final-vector step: `bridge_seed` is `sd`
+    /// The `S` Flock proofs, which the transcript never absorbs. They may be computed
+    /// concurrently with the PIOP and the Akita opening, so they depend on nothing after the final-vector step: `bridge_seed` is `sd`
     /// and `matrices` its `M_1, M_2, M_3`, `seeds` are the challenger seeds
     /// `fs_sigma` (the Flock seed step), `final_vectors` the `Y_sigma` and `record` the digest of the
     /// final-vector record ([`crate::transcript::flock_record_digest`]: the final vectors and the
@@ -246,6 +247,38 @@ pub fn opening_pool_threads() -> usize {
             default()
         }),
     }
+}
+
+/// Whether the Akita opening runs inside the PIOP branch of the fork, beside the tail of
+/// the Flock proofs (the default), or after both branches have joined (`AGG_LATE_JOIN=0`).
+/// The transcript never absorbs the Flock proofs, so the PCS session digest, the nonces and
+/// the opening do not depend on where the opening runs: both schedules give the same proof
+/// bytes, and the knob is an A/B switch of the schedule only.
+fn opening_beside_flock() -> bool {
+    match std::env::var("AGG_LATE_JOIN") {
+        Err(_) => true,
+        Ok(v) => match v.trim() {
+            "0" => false,
+            "1" | "" => true,
+            other => {
+                warn_once(&format!("AGG_LATE_JOIN={other:?} is neither 0 nor 1; using 1"));
+                true
+            }
+        },
+    }
+}
+
+/// The opening's finish pool when it runs beside the Flock proofs: the PIOP's share of the
+/// threads (the PIOP pool of `AGG_PIOP_THREADS`, else the global pool less the Flock pool,
+/// at least one), and no more than [`opening_pool_threads`]'s default. An explicit
+/// `AGG_OPENING_THREADS` is taken as given.
+fn opening_threads_beside(flock_threads: usize) -> usize {
+    if std::env::var_os("AGG_OPENING_THREADS").is_some() {
+        return opening_pool_threads();
+    }
+    let share = piop_pool_size(flock_threads)
+        .unwrap_or_else(|| rayon::current_num_threads().saturating_sub(flock_threads).max(1));
+    opening_pool_threads().min(share)
 }
 
 /// The CPUs this process may run on, from the `Cpus_allowed_list` line of
@@ -548,13 +581,14 @@ pub struct ProveTimings {
     pub setup: Duration,
     /// The round-1 commitments (concurrent with the Flock commitments).
     pub round1: Duration,
-    /// The commitment phase, the final-vector step and the join: the Keccak side (commitments, shares and proofs; the proofs
-    /// overlap the PIOP steps under the fork-join).
+    /// The Keccak side: commitments, shares and proofs (the proofs overlap the PIOP steps
+    /// and, by default, the opening under the fork-join).
     pub keccak: Duration,
     /// The Flock proofs alone (on their own pool under the fork-join).
     pub flock_prove: Duration,
     /// Wall time from the fork to the join (Flock proofs beside the parity tables, the
-    /// lookup, the pre-stage claims and the stages); zero without the fork.
+    /// lookup, the pre-stage claims, the stages and, unless `AGG_LATE_JOIN=0`, the
+    /// opening); zero without the fork.
     pub fork_join: Duration,
     /// Threads of the Flock pool (0: no fork, [`flock_pool_threads`]).
     pub flock_threads: usize,
@@ -571,11 +605,13 @@ pub struct ProveTimings {
     pub stage2: Duration,
     /// Stage 3, including the `w_A` weight table.
     pub stage3: Duration,
-    /// The finish part of the batched Akita opening. The prepare part runs earlier,
-    /// in the PIOP branch; under the fork it is inside [`Self::fork_join`].
+    /// The finish part of the batched Akita opening. The prepare part runs earlier, in the
+    /// PIOP branch; under the fork both are inside [`Self::fork_join`] unless
+    /// `AGG_LATE_JOIN=0` puts the finish after the join.
     pub opening: Duration,
-    /// Threads of the pool of the opening's finish part ([`opening_pool_threads`]; the global
-    /// pool's size when the finish runs on it).
+    /// Threads of the pool of the opening's finish part ([`opening_pool_threads`], capped
+    /// at the PIOP's share beside the Flock proofs; the current pool's size when the finish
+    /// runs on it).
     pub opening_threads: usize,
     /// End to end.
     pub total: Duration,
@@ -1234,6 +1270,65 @@ fn prepare_opening(
     Ok((claims, prepared))
 }
 
+/// The opening, before or after its transcript-bound finish.
+enum OpeningState {
+    /// Prepared; the finish runs after the join.
+    Prepared(PreparedOpening),
+    /// Finished inside the PIOP branch, beside the Flock proofs.
+    Finished(FinishedOpening),
+}
+
+/// The finished opening with what the prover reports about it.
+struct FinishedOpening {
+    session: [u8; 32],
+    work: Vec<u8>,
+    opening: Vec<u8>,
+    threads: usize,
+    time: Duration,
+}
+
+/// Export the PCS session digest (the transcript's last event) and run the opening's finish
+/// on a pool of `threads` workers (0: the current pool). The transcript must have absorbed
+/// the stage-3 claims; the Flock proofs are not part of it.
+fn finish_opening(
+    committer: &TableCommitter,
+    tables: SourceTables<'_>,
+    transcript: &mut Transcript,
+    claims: &[GroupClaim; GROUP_COUNT],
+    prepared: PreparedOpening,
+    threads: usize,
+    unchecked: bool,
+) -> Result<FinishedOpening, ProveError> {
+    let session = transcript.pcs_session()?;
+    transcript.ensure_complete()?;
+    let work = transcript.work_stream();
+    // The stage-3 terminal values are the multilinear extensions of the committed tables at
+    // the group points (the kernel's terminal values; `tests/all/prove_verify.rs` checks them
+    // against the table evaluations), so the opening takes them directly instead of
+    // evaluating every table again.
+    debug_assert!(
+        unchecked
+            || crate::pcs::opening_claims(tables, &claims.clone().map(|c| c.point))
+                .is_ok_and(|recomputed| recomputed == *claims),
+        "stage-3 terminal values differ from the table evaluations"
+    );
+    let pool = rayon::current_num_threads();
+    let used = if threads == 0 { pool } else { threads.min(pool) };
+    let start = Instant::now();
+    let opening = on_pool(threads, "agg-open", || {
+        committer.finish_open_claims(prepared, &session)
+    })?;
+    let time = start.elapsed();
+    phase_stamp("opening");
+    Ok(FinishedOpening {
+        session,
+        work,
+        opening,
+        threads: used,
+        time,
+    })
+}
+
 /// [`prove_with_tables`] with the Akita prover setup and the public data built
 /// beforehand. Both depend only on the records and the instance, so a caller can build
 /// them on its own thread while the tables are computed. `None`, or a setup of another
@@ -1377,25 +1472,27 @@ pub fn prove_with_tables_using(
         let [l1, l2, l3, k, m] = round2;
         [main16_round1, main_round1, l1, l2, l3, k, m]
     };
-    // The fork: the Flock proofs depend on nothing after the final-vector step, and no
-    // PIOP challenge depends on them, so they are proven on their own pool while the parity
-    // tables, the lookup, the pre-stage claims and the stages
-    // (stages 1 to 3) run on the global pool; the join absorbs them after stage 3.
+    // The fork: the Flock proofs depend on nothing after the final-vector step, and no PIOP
+    // or Akita challenge depends on them (the transcript never absorbs them; their own
+    // challengers bind them to the statement), so they are proven on their own pool while
+    // the parity tables, the lookup, the pre-stage claims, the stages (stages 1 to 3) and,
+    // by default, the Akita opening run on the PIOP's share of the threads.
     let flock_threads = if keccak.proves_concurrently() { flock_pool_threads() } else { 0 };
     let prove_flock = || {
         let out = keccak.prove(&bridge_seed, &matrices, &flock_seeds, &final_bits, &flock_record);
         phase_stamp("flock-prove");
         out
     };
-    let (flock_proofs, piop, opening_prepared) = if flock_threads > 0 {
+    let (flock_proofs, piop_side) = if flock_threads > 0 {
         let fork = Instant::now();
         let (unchecked, swap_join) = (hooks.unchecked, hooks.swap_join);
-        let ((flock_proofs, flock_time), (piop, prepared)) =
+        let beside = opening_beside_flock().then(|| opening_threads_beside(flock_threads));
+        let ((flock_proofs, flock_time), piop_side) =
             fork_join(flock_threads, prove_flock, || {
                 let prover_tables =
                     ProverTables::from_parity1_cache(tables, parity1_cache, &matrices);
                 phase_stamp("parity-tables");
-                let piop = prove_piop_with(
+                let (proof, run) = prove_piop_with(
                     manifest,
                     tables,
                     Some(prover_tables),
@@ -1406,24 +1503,31 @@ pub fn prove_with_tables_using(
                     swap_join,
                     // The stage pool default applies only beside a running Flock fork.
                     true,
-                );
-                let prepared = match &piop {
-                    Ok((proof, run)) => {
-                        Some(prepare_opening(&committer, manifest, commitments, proof, run))
-                    }
-                    Err(_) => None,
-                };
-                // Prepare runs on this pool, so it is part of the fork-join wall time; only
-                // the transcript-bound finish runs on the opening pool.
+                )?;
+                // Prepare runs on this pool, so it is part of the fork-join wall time.
+                let (claims, prepared) =
+                    prepare_opening(&committer, manifest, commitments, &proof, &run)?;
                 phase_stamp("opening-prepare");
-                (piop, prepared)
+                let state = match beside {
+                    Some(threads) => OpeningState::Finished(finish_opening(
+                        &committer,
+                        tables,
+                        &mut transcript,
+                        &claims,
+                        prepared,
+                        threads,
+                        unchecked,
+                    )?),
+                    None => OpeningState::Prepared(prepared),
+                };
+                Ok::<_, ProveError>((proof, run, claims, state))
             });
         timings.fork_join = fork.elapsed();
         phase_stamp("join");
         timings.flock_prove = flock_time;
         timings.keccak += flock_time;
         clock.lap();
-        (flock_proofs, piop, prepared)
+        (flock_proofs, piop_side)
     } else {
         // No fork: the Flock proofs first, with the parity tables of the stages (which need
         // no challenge) built beside them, then the PIOP.
@@ -1442,7 +1546,7 @@ pub fn prove_with_tables_using(
         timings.flock_prove = flock_time;
         timings.keccak += clock.lap();
         let flock_proofs = flock_proofs?;
-        let piop = prove_piop_with(
+        let piop_side = prove_piop_with(
             manifest,
             tables,
             Some(prover_tables),
@@ -1452,60 +1556,49 @@ pub fn prove_with_tables_using(
             hooks.unchecked,
             hooks.swap_join,
             false,
-        );
-        let opening_prepared = match &piop {
-            Ok((proof, run)) => {
-                Some(prepare_opening(&committer, manifest, commitments, proof, run))
-            }
-            Err(_) => None,
-        };
+        )
+        .and_then(|(proof, run)| {
+            let (claims, prepared) =
+                prepare_opening(&committer, manifest, commitments, &proof, &run)?;
+            Ok((proof, run, claims, OpeningState::Prepared(prepared)))
+        });
         phase_stamp("opening-prepare");
         clock.lap();
-        (Ok(flock_proofs), piop, opening_prepared)
+        (Ok(flock_proofs), piop_side)
     };
     timings.flock_threads = flock_threads;
-    let (piop, run) = piop?;
+    let (piop, run, claims, state) = piop_side?;
     let flock_proofs = flock_proofs?;
-    let (claims, prepared) = opening_prepared
-        .ok_or_else(|| ProveError::Internal("opening prepared without a PIOP result".into()))??;
     timings.lookup = run.lookup;
     timings.prestage = run.prestage;
     timings.stage1 = run.stage1;
     timings.stage2 = run.stage2;
     timings.stage3 = run.stage3;
-
-    // The join: the Flock proofs, after the stage-3 claims.
     if flock_proofs.len() != segments {
         return Err(ProveError::Internal("one Flock proof per segment".into()));
     }
-    transcript.absorb_items(FLOCK_PROOFS_SITE, &flock_proofs)?;
 
-    // The opening.
-    let session = transcript.pcs_session()?;
-    transcript.ensure_complete()?;
-    let work = transcript.work_stream();
-    // The stage-3 terminal values are the multilinear extensions of the committed tables at
-    // the group points (the kernel's terminal values; `tests/all/prove_verify.rs` checks them
-    // against the table evaluations), so the opening takes them directly instead of
-    // evaluating every table again.
-    debug_assert!(
-        hooks.unchecked
-            || crate::pcs::opening_claims(tables, &claims.clone().map(|c| c.point))
-                .is_ok_and(|recomputed| recomputed == claims),
-        "stage-3 terminal values differ from the table evaluations"
-    );
-    let opening_threads = opening_pool_threads();
-    timings.opening_threads = if opening_threads == 0 {
-        rayon::current_num_threads()
-    } else {
-        opening_threads.min(rayon::current_num_threads())
+    // The opening, unless it ran beside the Flock proofs.
+    let FinishedOpening {
+        session,
+        work,
+        opening,
+        threads: opening_threads,
+        time: opening_time,
+    } = match state {
+        OpeningState::Finished(finished) => finished,
+        OpeningState::Prepared(prepared) => finish_opening(
+            &committer,
+            tables,
+            &mut transcript,
+            &claims,
+            prepared,
+            opening_pool_threads(),
+            hooks.unchecked,
+        )?,
     };
-    let finish_start = Instant::now();
-    let opening = on_pool(opening_threads, "agg-open", || {
-        committer.finish_open_claims(prepared, &session)
-    })?;
-    timings.opening = finish_start.elapsed();
-    phase_stamp("opening");
+    timings.opening_threads = opening_threads;
+    timings.opening = opening_time;
     let proof = AggregateProof {
         relation: manifest.relation(),
         records: n,

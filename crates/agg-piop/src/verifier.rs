@@ -11,13 +11,13 @@
 //! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
 //! | `transcript` | the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
-//! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks), on the proof items the join absorbs later |
+//! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks); the transcript never absorbs the proof items |
 //! | `lookup` | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
 //! | `prestage` | `tau`, `Y(tau_3)`, pre-stage claims |
 //! | `stage1`, `stage2` | rounds and terminal checks with `w_2, w_3, w_1` and the leaf predicates |
 //! | `stage3_rounds` | stage-3 rounds and terminal claims, ring claim deferred |
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
-//! | `stage3_terminal` | the batched stage-3 terminal check; the join absorbs the proof items |
+//! | `stage3_terminal` | the batched stage-3 terminal check |
 //! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
 //! | `opening` | the batched Akita opening of the 53 claims (H-u) |
 //!
@@ -51,7 +51,7 @@ use crate::stage::{suffix, Points, StageError};
 use crate::stage3::{LookupInputs, Stage3Output};
 use crate::transcript::{
     commitment_site, flock_record_digest, Transcript, TranscriptError, BRIDGE_SEED_SITE,
-    FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE, FLOCK_PROOFS_SITE, FLOCK_SEEDS_SITE,
+    FINAL_VECTORS_SITE, FLOCK_COMMIT_SITE, FLOCK_SEEDS_SITE,
     FLOCK_SHARES_SITE, MULTIPLICITY_SITE, PRESTAGE_SITE, TAU_SITE,
 };
 use crate::wire::{unpack_final_vector, AggregateProof, WireError};
@@ -81,7 +81,7 @@ pub struct SegmentContext<'a> {
     /// The digest of the final-vector record (`crate::transcript::flock_record_digest`), which
     /// the sub-proofs' challengers bind.
     pub record: &'a [u8; 32],
-    /// The segment's proof item (the join).
+    /// The segment's proof item (never absorbed by the transcript).
     pub proof: &'a [u8],
     /// The bridge matrices of `sd`.
     pub matrices: &'a BridgeMatrices,
@@ -113,7 +113,7 @@ pub trait KeccakVerifier {
         Some(KeccakPlan::default())
     }
 
-    /// Verify segment `sigma`: the sub-proof (absorbed at the join, after stage 3) against its
+    /// Verify segment `sigma`: the sub-proof (which the transcript never absorbs) against its
     /// commitment, challenger seed, public inputs, final vector, share item and the final-vector
     /// record digest. The verifier calls it right after replaying the final-vector step: the outcome does
     /// not depend on the PIOP, and an early check gives a precise rejection.
@@ -332,8 +332,8 @@ pub struct VerifyTimings {
     pub transcript: Duration,
     /// The bridge matrices from `sd`.
     pub matrices: Duration,
-    /// The Keccak side per segment (checked after the final-vector step; its proof items are absorbed at
-    /// the join).
+    /// The Keccak side per segment (checked after the final-vector step; its proof items are
+    /// never absorbed).
     pub keccak: Duration,
     /// The lookup and the multiplicity-digit claims.
     pub lookup: Duration,
@@ -561,7 +561,7 @@ fn run(
     let final_bits: Vec<Vec<u8>> = proof.final_vectors.iter().map(unpack_final_vector).collect();
     let y_table: Vec<u8> = final_bits.concat();
     timings.transcript += clock.lap();
-    // The Keccak side per segment, on the final-vector step and the proof items of the join (its outcome
+    // The Keccak side per segment, on the final-vector step and the proof items (its outcome
     // does not depend on the PIOP's challenges, so it is checked first).
     let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
     for (sigma, bits) in final_bits.iter().enumerate() {
@@ -628,9 +628,8 @@ fn run(
     let (_, stage3, pi_m) = verified.outcome?;
     let expanded_keys = pass_result.map_or(0, |pass| pass.expanded);
 
-    // The join: the Flock proofs, checked above, absorbed after the stage-3
-    // claims and before the PCS session digest.
-    transcript.absorb_items(FLOCK_PROOFS_SITE, &proof.flock_proofs)?;
+    // The Flock proofs, checked above by the Keccak side's verifier, are not absorbed: no
+    // PIOP or Akita challenge depends on them, and their own challengers bind them.
 
     // The Keccak side's check of the committed bits at r^(3).
     let bits = BitsContext {
@@ -680,7 +679,7 @@ pub struct PiopVerified {
 }
 
 /// Verify the PIOP part (the lookup and the sum-check stages) on a transcript that has absorbed the instance record through the final-vector step (the
-/// final vectors and the share items; the Flock proofs follow at the join):
+/// final vectors and the share items; the Flock proofs are never absorbed):
 /// the lookup (`lookup::verify_in`, the claims on the stacked lanes and on `m`), the
 /// multiplicity-digit claims (`sum_k 16^k m_k(pi_m) = m(pi_m)`), `tau`, the pre-stage claims
 /// with `Y(tau_3)` from `y_table`, and stages 1 to 3 with the public pass deferred

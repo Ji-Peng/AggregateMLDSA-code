@@ -25,10 +25,12 @@
 //! `Y_sigma`, at the join, without shares); 0 in the items of segments `1..S` of such a batch
 //! (no commitment, empty share and proof items: covered by segment 0's span).
 //!
-//! All items are absorbed by the PIOP transcript (the commitment phase before the bridge seed `sd`, the
-//! shares at the final-vector step before the lookup challenge `X`, the proofs at the join before the PCS
-//! session digest), so `d_part`, the commitments, the shares and the proofs are bound; the
-//! part and span seeds also bind the digest of the final-vector record (`crate::mode_a::part_seed`).
+//! The PIOP transcript absorbs the commitment-phase items before the bridge seed `sd` and the
+//! shares at the final-vector step before the lookup challenge `X`, so `d_part`, the
+//! commitments and the shares are bound. The proof items are never absorbed: no PIOP or
+//! Akita challenge depends on them, and each part's own challengers bind them, its seeds
+//! binding the digest of the final-vector record (`crate::mode_a::part_seed`). The wire
+//! position of the proof items (after stage 3) is a layout choice only.
 //! The profile byte is the `agg_piop::binding::FlockProfile` id the prover bound at the instance record
 //! (1 `Fast`, 4 `Slim`, 5 `Slim8`): the verifier reads it to select its Flock parameters
 //! ([`flock_profile`]) and runs the transcript with it, so an aggregate whose items name

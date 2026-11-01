@@ -420,7 +420,6 @@ the other relations):
 | 11 | `stage2/kappa1`; `stage2/gamma`; rounds; terminal; `proj/claim` | proof; challenge; (5, 1); proof; proof | 6; 10; ; 10; 1 | |
 | join label | `fork/join` | branch | 2 | the 32-byte digests `d_L`, `d_S` |
 | 12 | `stage3/gamma`; rounds; terminal | challenge; (3, 1); proof | 49; ; 35 | |
-| join | `flock/proofs` | proof | `S` | `S` framed Flock proofs, after the stage-3 terminal claims (deviation K22) |
 | 13 | `pcs/session` | export | 1 | 32 bytes squeezed from a sponge clone, the seed of the Akita opening |
 
 Grinding (`docs/soundness.md` Section 6): every protected event carries a difficulty
@@ -473,7 +472,9 @@ lookup, `tau`, the pre-stage claims and the three stages run on the global pool,
 weight tables built between the stages (`ProverTables::set_tau/set_r1/set_r2`, each dropping
 the previous weights); `AGG_FLOCK_THREADS=0` (also on a rayon worker or with a one-thread
 pool) proves the Flock side first, with the parity tables built beside it, then the PIOP.
-The join absorbs the Flock proofs; the PCS session and the opening follow.
+The transcript never absorbs the Flock proofs (deviation K25): the PCS session and the
+opening follow stage 3 inside the PIOP branch, beside the Flock tail (`AGG_LATE_JOIN=0`: after
+the join, same bytes).
 `prove_with_tables_using` takes the Akita prover setup built beforehand (it depends on the
 record count and the relation only). `ProverOutput::timings` (`ProveTimings`) has the wall
 time of each step. `ProveHooks` (adversarial tests only) selects the stages' unchecked

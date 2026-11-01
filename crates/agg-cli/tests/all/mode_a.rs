@@ -873,20 +873,20 @@ fn corrupted_aggregates_are_rejected() {
     });
 }
 
-/// The fork-join transcript with real Flock parts. The join absorbs the
-/// Flock proof items after the stage-3 claims and before the PCS session digest, and every
-/// part's challengers are seeded from `fs_sigma` and the digest of the final-vector record. A
-/// tampered proof item, or the proof item of another aggregate of the same geometry, is
-/// rejected by the Flock verifier; with a Flock verifier that accepts every part, the PIOP
-/// stages still pass (no PIOP challenge depends on the items) and the join rejects it at the
-/// Akita opening (the session digest binds every item byte). Both relations, one part
-/// (64 records) and two parts per segment (256 records, `d_part = 7`).
+/// The Flock proofs with real Flock parts. The transcript never absorbs the proof items;
+/// every part's challengers are seeded from `fs_sigma` and the digest of the final-vector
+/// record, which bind them to the statement. A tampered proof item, or the proof item of
+/// another aggregate of the same geometry, is rejected by the Flock verifier; with a Flock
+/// verifier that accepts every part, the PIOP stages and the Akita opening pass (no PIOP or
+/// Akita challenge depends on the items), so the Flock verifier is the only check on them.
+/// Both relations, one part (64 records) and two parts per segment (256 records,
+/// `d_part = 7`).
 #[test]
 #[cfg_attr(
     debug_assertions,
     ignore = "Flock and Akita proofs: run with --release"
 )]
-fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
+fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggregates() {
     on_large_stack(|| {
         let gate = sponge_gate();
         for (own, shared, part_log2, relation) in [
@@ -929,7 +929,7 @@ fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
             expect_rejected("tampered Flock proof", &r, keccak);
             assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == parts - 1));
             let r = lenient(&tampered);
-            assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+            assert!(r.outcome.is_ok(), "the opening does not bind the items: {:?}", r.outcome);
             assert!(r.timings.stage3_rounds > std::time::Duration::ZERO, "the PIOP ran");
             // b's Flock proof item in a (same geometry, other records and transcript).
             let mut moved = a.proof.clone();
@@ -938,7 +938,7 @@ fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
             expect_rejected("Flock proof item of another aggregate", &r, keccak);
             assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(0, _)))));
             let r = lenient(&moved);
-            assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+            assert!(r.outcome.is_ok(), "{:?}", r.outcome);
             // With two parts, b's shares as well: the final-vector step changes, so the record digest in
             // the part seeds and the PIOP transcript change; still rejected.
             if parts == 2 {
@@ -950,8 +950,10 @@ fn flock_proofs_are_bound_at_the_join_and_cannot_move_between_aggregates() {
             // The proofs of the two parts swapped.
             if parts == 2 {
                 let swapped = with_items(&a.proof, |_, p| p.proofs.swap(0, 1));
+                let r = verifier.verify(&public, &swapped.to_bytes(), None);
+                expect_rejected("the two parts' proofs swapped", &r, keccak);
                 let r = lenient(&swapped);
-                assert!(matches!(r.outcome, Err(VerifyError::Opening(_))), "{:?}", r.outcome);
+                assert!(r.outcome.is_ok(), "{:?}", r.outcome);
             }
         }
     });

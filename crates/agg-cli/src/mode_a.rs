@@ -8,9 +8,10 @@
 //! [`AggregatorConfig::profile`]), then the round-1 Akita commitment `G_main`, the Flock
 //! commitments, the bridge seed `sd`, the round-2 Akita commitments, the Flock seeds
 //! `fs_sigma`, the final vectors `Y_sigma` and the part shares, the lookup and the three
-//! sum-check stages, and the join the Flock proofs (proven on their own thread pool while
-//! the prover runs the lookup and the stages), then the batched Akita opening. There is
-//! no projection seed: the residual is proven through the committed quotient.
+//! sum-check stages, then the batched Akita opening. The Flock proofs are never absorbed;
+//! they are proven on their own thread pool while the prover runs the lookup, the stages and
+//! the opening. There is no projection seed: the residual is proven through the committed
+//! quotient.
 //!
 //! Keccak side ([`FlockProver`], [`FlockVerifier`]): segment `sigma` (`2^13` record positions)
 //! is split into parts of `2^{d_part}` record positions, `d_part = clamp(part_log2,
