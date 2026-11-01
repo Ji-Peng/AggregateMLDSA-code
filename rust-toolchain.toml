@@ -1,5 +1,5 @@
-# Stable toolchain. Aerie pins 1.95 (its rust-version); any newer stable works.
+# Pinned stable toolchain (1.99.1). Aerie pins 1.95 (its rust-version).
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
