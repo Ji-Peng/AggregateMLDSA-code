@@ -261,12 +261,15 @@ compute the same field elements and leave the proof bytes unchanged.
   are neither committed nor constrained.
 - **Sum-check memory traffic.** The zerocheck folds and evaluates the next message in one
   pass (`fold_and_message_x86_avx512`, `zerocheck/multilinear.rs`), the packed round-3 path
-  reduces wide products once per equality block (`round3_task_avx512`), the merged opening
-  fuses fold and next message per term (`pcs.rs`, `pcs/block_stats_portable.rs`), and the
-  union lincheck folds and builds its bit banks in one pass over `z`
-  (`lincheck/union.rs`). The portable kernels accumulate unreduced products and reduce at
-  the flush boundary (`kernels::LaneAcc`). These are pure data-layout and
-  evaluation-order changes.
+  reduces wide products once per equality block (`round3_task_avx512`), and the union
+  lincheck folds and builds its bit banks in one pass over `z` (`lincheck/union.rs`). The
+  merged opening keeps its rank-1 terms in one arena (`pcs.rs`). The packed-direct block
+  values come from the union prover's column bit-banks, each block round fuses the fold
+  and the next message in one AVX-512 pass, and `q'` folds strided rows with the
+  block-statistics kernel (`pcs/block_stats_x86.rs`). The AVX2 tier reads the same arena
+  with its two-lane statistics and a portable message loop. The portable kernels
+  accumulate unreduced products and reduce at the flush boundary (`kernels::LaneAcc`).
+  These are pure data-layout and evaluation-order changes.
 - **AVX-512, VPCLMULQDQ and GFNI kernels.** `vendor/flock-core/src/simd.rs` checks the CPU
   once and caches the answer; the additive NTT, zerocheck and Ligerito kernels are called
   through it. The kernels cover the butterflies, the round-1 shift-reduce and bit

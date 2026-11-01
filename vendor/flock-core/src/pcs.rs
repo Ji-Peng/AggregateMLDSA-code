@@ -1683,6 +1683,88 @@ fn column_bitbank_reference(q: &[F128], z_row: &[F128], n_log: usize, k_cols: us
         .collect()
 }
 
+/// Σ_b β_b·row[b] over a 128-entry column bit-bank row: the column's value at
+/// the bank's row point (`β_b` the bit basis, `w = Σ_b bit_b(w)·β_b`). `β_b`
+/// is the monomial `x^b`, so each product is a shift; summed unreduced
+/// (exact in F_2[x] up to degree 254), reduced once.
+fn column_value_from_bank(row: &[F128]) -> F128 {
+    let mut acc = crate::field::F256Unreduced::ZERO;
+    for (b, &x) in row.iter().enumerate() {
+        acc ^= ring_switch::bit_basis(b).mul_unreduced(x);
+    }
+    acc.reduce()
+}
+
+/// One block round over every rank-1 term of the arena (`tw` entries per term:
+/// `a` at `[0, n_e)`, `s` at `[n_e, 2 n_e)` with `n_e = tw / 2`, each currently of
+/// length `cur`), parallel over the terms. With `r`, both parts are folded in
+/// place (`x[i] ← x[2i] + r·(x[2i] + x[2i+1])`, `i < cur/2`); with `msg`, the
+/// returned pair is the round message `(Σ a1·s1, Σ (a0+a1)(s0+s1))` over the
+/// (folded) pairs, otherwise zero. Field-identical to [`fold_pairs_in_place`] and
+/// [`round_message_terms`] (characteristic 2: the order of the sums is free).
+fn block_round_all(
+    arena: &mut [F128],
+    tw: usize,
+    cur: usize,
+    r: Option<F128>,
+    msg: bool,
+) -> (F128, F128) {
+    use rayon::prelude::{ParallelIterator, ParallelSliceMut};
+    let n_e = tw / 2;
+    debug_assert!(cur <= n_e && cur.is_power_of_two());
+    #[cfg(target_arch = "x86_64")]
+    let simd = crate::simd::ghash_width() == crate::simd::GhashWidth::Avx512;
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd = false;
+    arena
+        .par_chunks_mut(tw)
+        .map(|term| {
+            let (a, s) = term.split_at_mut(n_e);
+            let (a, s) = (&mut a[..cur], &mut s[..cur]);
+            #[cfg(target_arch = "x86_64")]
+            if simd && cur >= 16 {
+                // SAFETY: the AVX-512 tier was checked at run time (it implies
+                // sse4.1 on every AVX-512 CPU); equal lengths, a multiple of 16.
+                return unsafe { block_stats_x86::round_term(a, s, r, msg) };
+            }
+            let _ = simd;
+            block_round_term_portable(a, s, r, msg)
+        })
+        .reduce(|| (F128::ZERO, F128::ZERO), |x, y| (x.0 + y.0, x.1 + y.1))
+}
+
+/// Portable [`block_round_all`] on one term.
+fn block_round_term_portable(
+    a: &mut [F128],
+    s: &mut [F128],
+    r: Option<F128>,
+    msg: bool,
+) -> (F128, F128) {
+    let mut len = a.len();
+    if let Some(r) = r {
+        for i in 0..len / 2 {
+            let (a0, a1) = (a[2 * i], a[2 * i + 1]);
+            a[i] = a0 + r * (a0 + a1);
+            let (s0, s1) = (s[2 * i], s[2 * i + 1]);
+            s[i] = s0 + r * (s0 + s1);
+        }
+        len /= 2;
+    }
+    if !msg {
+        return (F128::ZERO, F128::ZERO);
+    }
+    // Unreduced 256-bit carry-less sums (exact in F_2[x] up to degree 254),
+    // reduced once per term.
+    let mut g_one = crate::field::F256Unreduced::ZERO;
+    let mut g_inf = crate::field::F256Unreduced::ZERO;
+    for i in 0..len / 2 {
+        let (a0, a1, s0, s1) = (a[2 * i], a[2 * i + 1], s[2 * i], s[2 * i + 1]);
+        g_one ^= a1.mul_unreduced(s1);
+        g_inf ^= (a0 + a1).mul_unreduced(s0 + s1);
+    }
+    (g_one.reduce(), g_inf.reduce())
+}
+
 /// The block-first phase of the merged sumcheck (docs, "direct transport").
 ///
 /// The dense index is `d = e·2^(n+1) + c0·2^n + r` (block `e` of two lane
@@ -1705,6 +1787,7 @@ fn block_first_phase<Ch: Challenger>(
     live_cols: usize,
     rs: &[BlockFirstClaim<'_>],
     pd_groups: &[(&[F128], Vec<F128>)],
+    pd_banks: &[Option<&[F128]>],
     grinding: OpeningGrinding,
     challenger: &mut Ch,
     merged_rounds: &mut Vec<(F128, F128)>,
@@ -1713,8 +1796,8 @@ fn block_first_phase<Ch: Challenger>(
     trace: bool,
 ) -> (Vec<F128>, Vec<F128>) {
     use rayon::prelude::{
-        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
-        ParallelSliceMut,
+        IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
+        ParallelIterator, ParallelSliceMut,
     };
     const NB: usize = 1 << LOG_PACKING;
     let t = std::time::Instant::now();
@@ -1736,122 +1819,176 @@ fn block_first_phase<Ch: Challenger>(
         })
         .collect();
 
-    // Rank-1 terms on the block cube.
-    let mut terms: Vec<(Vec<F128>, Vec<F128>)> = Vec::new();
-    // agg-mldsa patch (PATCH.md): AVX-512 or AVX2 block statistics, chosen at
-    // run time; the same terms in the same order as the portable loop below.
+    // Rank-1 terms on the block cube, stored as one arena `[term][a | s][n_e]`
+    // (claim `i`'s terms first, two per nonzero coefficient `j` (c0 = 0, 1),
+    // then two per packed-direct group). Every entry is written below.
+    let js_per: Vec<Vec<usize>> = rs
+        .iter()
+        .map(|cl| (0..NB).filter(|&j| cl.coeffs[j] != F128::ZERO).collect())
+        .collect();
+    let n_terms = js_per.iter().map(|js| 2 * js.len()).sum::<usize>() + 2 * pd_groups.len();
+    let tw = 2 * n_e;
+    let mut arena: Vec<F128> = crate::alloc_uninit_vec(n_terms * tw);
+    // The AVX-512 kernels are chosen at run time; the AVX2 tier keeps its
+    // two-lane statistics and the portable message loop, with the same terms
+    // in the same order.
     #[cfg(target_arch = "x86_64")]
-    let simd = crate::simd::ghash_width();
-    for cl in rs {
+    let width = crate::simd::ghash_width();
+    #[cfg(target_arch = "x86_64")]
+    let simd512 = width == crate::simd::GhashWidth::Avx512;
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd512 = false;
+    let mut t0 = 0usize;
+    for (cl, js) in rs.iter().zip(&js_per) {
         let z0 = cl.z_col[0];
         let z_hi = &cl.z_col[1..];
-        let js: Vec<usize> = (0..NB).filter(|&j| cl.coeffs[j] != F128::ZERO).collect();
-        let s_c: Vec<Vec<Vec<F128>>> = (0..2)
-            .map(|c0| {
-                let kappa = if c0 == 0 { F128::ONE + z0 } else { z0 };
-                #[cfg(target_arch = "x86_64")]
-                match simd {
-                    crate::simd::GhashWidth::Avx512 => {
-                        // SAFETY: AVX512_CLMUL checked at run time (it implies sse4.1
-                        // on every AVX-512 CPU; the kernel only uses sse4.1 lane
-                        // extracts).
-                        return unsafe {
-                            block_stats_x86::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw)
-                        };
-                    }
-                    crate::simd::GhashWidth::Vpclmul256 => {
-                        // SAFETY: the AVX2 tier checked avx2 and vpclmulqdq.
-                        return unsafe {
-                            block_stats_x86::s_vectors_avx2(cl.bank, NB, n_e, c0, kappa, &js, &pw)
-                        };
-                    }
-                    _ => {}
-                }
-                block_stats_portable::s_vectors(cl.bank, NB, n_e, c0, kappa, &js, &pw)
-            })
-            .collect();
-        let a_j: Vec<[Vec<F128>; 2]> = js
-            .par_iter()
-            .map(|&j| {
+        let region = &mut arena[t0 * tw..(t0 + 2 * js.len()) * tw];
+        // a-parts: A_j[e] = c_j·eq(z_col[1..]^(2^j), e) on the live blocks.
+        region
+            .par_chunks_mut(2 * tw)
+            .zip(js.par_iter())
+            .for_each(|(pair, &j)| {
                 let zj: Vec<F128> = z_hi.iter().map(|&z| frob(z, j)).collect();
                 let eq_hi = crate::lincheck::build_eq_table(&zj);
-                core::array::from_fn(|c0| {
+                for c0 in 0..2 {
                     let live = live_e(c0);
-                    (0..n_e)
-                        .map(|e| {
-                            if e < live {
-                                cl.coeffs[j] * eq_hi[e]
-                            } else {
-                                F128::ZERO
-                            }
-                        })
-                        .collect()
-                })
-            })
-            .collect();
-        // Terms in (j, c0) order.
-        let mut s_iter: Vec<_> = s_c.into_iter().map(Vec::into_iter).collect();
-        for [a0, a1] in a_j {
-            terms.push((a0, s_iter[0].next().expect("one s per term")));
-            terms.push((a1, s_iter[1].next().expect("one s per term")));
-        }
-    }
-    for (z_row, cols) in pd_groups {
-        let eq_row = crate::lincheck::build_eq_table(z_row);
-        let f: Vec<F128> = (0..1usize << k_cols)
-            .into_par_iter()
-            .map(|c| {
-                if c < live_cols {
-                    #[cfg(target_arch = "x86_64")]
-                    match simd {
-                        crate::simd::GhashWidth::Avx512 => {
-                            // SAFETY: AVX512_CLMUL checked at run time (see above).
-                            return unsafe {
-                                block_stats_x86::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
-                            };
-                        }
-                        crate::simd::GhashWidth::Vpclmul256 => {
-                            // SAFETY: the AVX2 tier checked avx2 and vpclmulqdq.
-                            return unsafe {
-                                block_stats_x86::dot_avx2(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
-                            };
-                        }
-                        _ => {}
+                    let a = &mut pair[c0 * tw..c0 * tw + n_e];
+                    for (e, x) in a.iter_mut().enumerate() {
+                        *x = if e < live {
+                            cl.coeffs[j] * eq_hi[e]
+                        } else {
+                            F128::ZERO
+                        };
                     }
-                    block_stats_portable::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
-                } else {
-                    F128::ZERO
                 }
-            })
-            .collect();
+            });
+        // s-parts: S_j[e] = (kappa·Σ_b β_b^(2^-j)·bank[(2e+c0)·128 + b])^(2^j).
+        for c0 in 0..2 {
+            let kappa = if c0 == 0 { F128::ONE + z0 } else { z0 };
+            #[cfg(target_arch = "x86_64")]
+            if simd512 {
+                let out = block_stats_x86::Rows {
+                    ptr: region.as_mut_ptr().wrapping_add(c0 * tw + n_e),
+                    stride: 2 * tw,
+                };
+                // SAFETY: AVX512_CLMUL checked at run time (it implies sse4.1 on
+                // every AVX-512 CPU; the kernel only uses sse4.1 lane extracts);
+                // row jx of `out` is the s-part of term (jx, c0) inside `region`.
+                unsafe {
+                    block_stats_x86::s_vectors_into(cl.bank, NB, n_e, c0, kappa, js, &pw, &out)
+                };
+                continue;
+            }
+            #[cfg(target_arch = "x86_64")]
+            let s_rows = match width {
+                // SAFETY: the AVX2 tier checked avx2 and vpclmulqdq.
+                crate::simd::GhashWidth::Vpclmul256 => unsafe {
+                    block_stats_x86::s_vectors_avx2(cl.bank, NB, n_e, c0, kappa, js, &pw)
+                },
+                _ => block_stats_portable::s_vectors(cl.bank, NB, n_e, c0, kappa, js, &pw),
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let s_rows = block_stats_portable::s_vectors(cl.bank, NB, n_e, c0, kappa, js, &pw);
+            region
+                .par_chunks_mut(2 * tw)
+                .zip(s_rows.par_iter())
+                .for_each(|(pair, s_row)| {
+                    pair[c0 * tw + n_e..(c0 + 1) * tw].copy_from_slice(s_row);
+                });
+        }
+        t0 += 2 * js.len();
+    }
+    // Packed-direct groups: S[e] = f[2e + c0], f[c] = Σ_r q[c][r]·eq(z_row, r) on the
+    // live columns. With the group's column bit-bank at z_row supplied, f[c] =
+    // Σ_b β_b·bank[c·128 + b] (q[c][r] = Σ_b bit_b(q[c][r])·β_b, F_2-linearly), no pass
+    // over q; otherwise the dot products over q (the reference).
+    for (gi, (z_row, cols)) in pd_groups.iter().enumerate() {
+        let region = &mut arena[t0 * tw..(t0 + 2) * tw];
+        let bank = pd_banks
+            .get(gi)
+            .copied()
+            .flatten()
+            .filter(|b| b.len() == 1usize << (k_cols + LOG_PACKING));
         for c0 in 0..2 {
             let live = live_e(c0);
-            let a: Vec<F128> = (0..n_e)
-                .map(|e| {
-                    if e < live {
-                        cols[2 * e + c0]
-                    } else {
-                        F128::ZERO
-                    }
-                })
-                .collect();
-            let s: Vec<F128> = (0..n_e).map(|e| f[2 * e + c0]).collect();
-            terms.push((a, s));
+            let (a, s) = region[c0 * tw..(c0 + 1) * tw].split_at_mut(n_e);
+            for (e, x) in a.iter_mut().enumerate() {
+                *x = if e < live {
+                    cols[2 * e + c0]
+                } else {
+                    F128::ZERO
+                };
+            }
+            match bank {
+                Some(bank) => {
+                    s.par_iter_mut().enumerate().for_each(|(e, x)| {
+                        *x = if e < live {
+                            let row = &bank[(2 * e + c0) * NB..(2 * e + c0 + 1) * NB];
+                            column_value_from_bank(row)
+                        } else {
+                            F128::ZERO
+                        };
+                    });
+                }
+                None => {
+                    let eq_row = crate::lincheck::build_eq_table(z_row);
+                    s.par_iter_mut().enumerate().for_each(|(e, x)| {
+                        let c = 2 * e + c0;
+                        *x = if e < live {
+                            #[cfg(target_arch = "x86_64")]
+                            {
+                                match width {
+                                    // SAFETY: the selected tier was checked at run time.
+                                    crate::simd::GhashWidth::Avx512 => unsafe {
+                                        block_stats_x86::dot(
+                                            &q[c * n_rows..(c + 1) * n_rows],
+                                            &eq_row,
+                                        )
+                                    },
+                                    crate::simd::GhashWidth::Vpclmul256 => unsafe {
+                                        block_stats_x86::dot_avx2(
+                                            &q[c * n_rows..(c + 1) * n_rows],
+                                            &eq_row,
+                                        )
+                                    },
+                                    _ => block_stats_portable::dot(
+                                        &q[c * n_rows..(c + 1) * n_rows],
+                                        &eq_row,
+                                    ),
+                                }
+                            }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            {
+                                block_stats_portable::dot(&q[c * n_rows..(c + 1) * n_rows], &eq_row)
+                            }
+                        } else {
+                            F128::ZERO
+                        };
+                    });
+                }
+            }
         }
+        t0 += 2;
     }
+    debug_assert_eq!(t0, n_terms);
     if trace {
         eprintln!(
-            "  [open_merged] block statistics ({} terms × {n_e}): {:6.2} ms",
-            terms.len(),
+            "  [open_merged] block statistics ({n_terms} terms × {n_e}{}): {:6.2} ms",
+            if pd_banks.iter().any(Option::is_some) {
+                ", packed-direct from banks"
+            } else {
+                ""
+            },
             t.elapsed().as_secs_f64() * 1e3
         );
     }
 
-    // The block rounds.
+    // The block rounds: one parallel pass over the terms per round folds
+    // every (a, s) by the round's challenge and accumulates the next round's
+    // message from the folded values.
     let t = std::time::Instant::now();
-    let (mut g_one, mut g_inf) = round_message_terms_par(&terms);
-    let mut fold_ms = t.elapsed().as_secs_f64() * 1e3;
-
+    let (mut g_one, mut g_inf) = block_round_all(&mut arena, tw, n_e, None, true);
+    let mut cur = n_e;
     for round in 0..kb {
         challenger.observe_f128(g_one);
         challenger.observe_f128(g_inf);
@@ -1864,20 +2001,39 @@ fn block_first_phase<Ch: Challenger>(
         };
         merged_rounds.push((g_one, g_inf));
         r_blk.push(r);
-        // Fold by r and the next round's message in one pass per term.
-        let t_fold = std::time::Instant::now();
-        (g_one, g_inf) = fold_terms_and_message(&mut terms, r, round + 1 < kb);
-        fold_ms += t_fold.elapsed().as_secs_f64() * 1e3;
-
+        (g_one, g_inf) = block_round_all(&mut arena, tw, cur, Some(r), round + 1 < kb);
+        cur /= 2;
     }
+    // Every a-part is now bound at r_blk: a_fin[t] = Σ_e eq(r_blk, e)·A_t[e]
+    // (the folds are x0 + r(x0 + x1) = eq(r, 0)x0 + eq(r, 1)x1, LSB first).
+    let a_fin: Vec<F128> = arena.chunks(tw).map(|t| t[0]).collect();
+    drop(arena);
+    if trace {
+        eprintln!(
+            "  [open_merged] block rounds ({kb}, fused fold + message): {:6.2} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    let t = std::time::Instant::now();
 
-    let rounds_ms = t.elapsed().as_secs_f64() * 1e3;
     // q' = q folded over the bound block coordinates.
     let eq_blk = crate::lincheck::build_eq_table(r_blk);
     let n_live_e = live_cols.div_ceil(2);
     let mut qp = vec![F128::ZERO; blk];
-    qp.par_chunks_mut(2048).enumerate().for_each(|(ci, chunk)| {
-        let off = ci * 2048;
+    // agg-mldsa patch (PATCH.md): 256-word chunks (more tasks than the
+    // 2048-word ones), each a strided-row fold over the live blocks on the
+    // AVX-512 kernel (unreduced sums of at most n_live_e products per word).
+    qp.par_chunks_mut(256).enumerate().for_each(|(ci, chunk)| {
+        let off = ci * 256;
+        #[cfg(target_arch = "x86_64")]
+        if simd512 && n_live_e > 0 {
+            // SAFETY: AVX512_CLMUL checked at run time; rows e < n_live_e of stride
+            // blk from off lie inside q.
+            unsafe {
+                block_stats_x86::fold_rows::<1, 8>(&q[off..], blk, n_live_e, [&eq_blk], [chunk]);
+            }
+            return;
+        }
         for e in 0..n_live_e {
             let w = eq_blk[e];
             let src = &q[e * blk + off..e * blk + off + chunk.len()];
@@ -1891,39 +2047,31 @@ fn block_first_phase<Ch: Challenger>(
     // form: the block factor folds into the linearized coefficients,
     // c'_{j,c0} = c_j·Σ_e eq(r_blk, e)·eq(z_col[1..]^(2^j), e), and the
     // column bit bakes eq(z_col[0], c0) into the per-c0 byte tables.
-    let qp_ms = t.elapsed().as_secs_f64() * 1e3 - rounds_ms;
     let eq_rows: Vec<Vec<F128>> = rs
         .iter()
         .map(|cl| crate::lincheck::build_eq_table(cl.z_row))
         .collect();
-    // Parallel over (claim, j); the sums over e and j accumulate unreduced
-    // 256-bit products (exact, no term bound) and reduce once each.
+    // c_j·Σ_{e live} eq(r_blk, e)·eq(z_col[1..]^(2^j), e) is the bound a-part of
+    // term (j, c0) (`a_fin`), so no eq table is rebuilt here.
+    let mut t_of: Vec<usize> = Vec::with_capacity(rs.len());
+    let mut t0 = 0usize;
+    for js in &js_per {
+        t_of.push(t0);
+        t0 += 2 * js.len();
+    }
     let tabs: Vec<[Vec<F128>; 2]> = rs
-        .iter()
-        .map(|cl| {
+        .par_iter()
+        .zip(js_per.par_iter().zip(t_of.par_iter()))
+        .map(|(cl, (js, &tb))| {
             let z0 = cl.z_col[0];
-            let z_hi = &cl.z_col[1..];
-            let kappa = [F128::ONE + z0, z0];
-            let cp: Vec<[F128; 2]> = (0..NB)
-                .into_par_iter()
-                .map(|j| {
-                    let zj: Vec<F128> = z_hi.iter().map(|&z| frob(z, j)).collect();
-                    let eq_hi = crate::lincheck::build_eq_table(&zj);
-                    [0usize, 1].map(|c0| {
-                        let s = block_stats_portable::dot(&eq_blk[..live_e(c0)], &eq_hi[..live_e(c0)]);
-                        cl.coeffs[j] * s * frob(kappa[c0], j)
-                    })
-                })
-                .collect();
             [0usize, 1].map(|c0| {
+                let kappa = if c0 == 0 { F128::ONE + z0 } else { z0 };
+                let mut cp = vec![F128::ZERO; NB];
+                for (jx, &j) in js.iter().enumerate() {
+                    cp[j] = a_fin[tb + 2 * jx + c0] * frob(kappa, j);
+                }
                 let w: Vec<F128> = (0..NB)
-                    .map(|b| {
-                        let mut acc = F256Unreduced::ZERO;
-                        for (cpj, &p) in cp.iter().zip(&pw[b]) {
-                            acc ^= cpj[c0].mul_unreduced(p);
-                        }
-                        acc.reduce()
-                    })
+                    .map(|b| (0..NB).fold(F128::ZERO, |acc, j| acc + cp[j] * pw[b][j]))
                     .collect();
                 ring_switch::build_fold_byte_table(&w)
             })
@@ -1931,15 +2079,14 @@ fn block_first_phase<Ch: Challenger>(
         .collect();
     let pd: Vec<(Vec<F128>, [F128; 2])> = pd_groups
         .iter()
-        .map(|(z_row, cols)| {
+        .enumerate()
+        .map(|(gi, (z_row, _))| {
             let eq_row = crate::lincheck::build_eq_table(z_row);
-            let s = [0usize, 1].map(|c0| {
-                (0..live_e(c0)).fold(F128::ZERO, |acc, e| acc + eq_blk[e] * cols[2 * e + c0])
-            });
+            // Σ_{e live} eq(r_blk, e)·cols[2e + c0]: the group's bound a-parts.
+            let s = [0usize, 1].map(|c0| a_fin[t0 + 2 * gi + c0]);
             (eq_row, s)
         })
         .collect();
-    let tabs_ms = t.elapsed().as_secs_f64() * 1e3 - rounds_ms - qp_ms;
     let mut wp = vec![F128::ZERO; blk];
     wp.par_chunks_mut(2048).enumerate().for_each(|(ci, chunk)| {
         let off = ci * 2048;
@@ -1959,14 +2106,17 @@ fn block_first_phase<Ch: Challenger>(
     });
     if trace {
         eprintln!(
-            "  [open_merged] block rounds ({kb}) + q'/W' (2^{}): {:6.2} ms \
-             (rounds {rounds_ms:.2}, of which folds {fold_ms:.2} | q' {qp_ms:.2} | W' tables {tabs_ms:.2})",
+            "  [open_merged] q'/W' (2^{}): {:6.2} ms",
             n_log + 1,
             t.elapsed().as_secs_f64() * 1e3
         );
     }
     (qp, wp)
 }
+
+/// The remaining rounds of the merged product sumcheck over `(a0, b0)`
+/// (LSB-first pairs), starting from the caller's round message. `live` bounds
+/// the non-zero prefix of `a0` (fold ranges shrink with it; `b0` must be zero
 
 /// The remaining rounds of the merged product sumcheck over `(a0, b0)`
 /// (LSB-first pairs), starting from the caller's round message. `live` bounds
@@ -2124,7 +2274,11 @@ pub fn open_batch_merged<Ch: Challenger>(
         Vec::new()
     };
     if var("AGG_SCHED_TRACE").as_deref() == Ok("1") {
-        eprintln!("[sched] item=ring_switch claims={} ms={:.3}", x_outers.len(), t.elapsed().as_secs_f64() * 1e3);
+        eprintln!(
+            "[sched] item=ring_switch claims={} ms={:.3}",
+            x_outers.len(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
     if trace {
         eprintln!(
@@ -2283,6 +2437,7 @@ pub fn open_batch_merged<Ch: Challenger>(
             live_cols,
             &rs,
             &pd_groups,
+            column_bitbanks.get(x_outers.len()..).unwrap_or(&[]),
             grinding,
             challenger,
             &mut merged_rounds,
@@ -2764,7 +2919,11 @@ fn verify_batch_merged_core<Ch: Challenger>(
     }
     let gammas_all = if batch_bits != 0 {
         challenger
-            .verify_pow_and_sample_f128_vec_canonical(proof.batching_nonces[0], batch_bits, n_rs + n_pd)
+            .verify_pow_and_sample_f128_vec_canonical(
+                proof.batching_nonces[0],
+                batch_bits,
+                n_rs + n_pd,
+            )
             .ok_or(PcsOpenError::Assist)?
     } else {
         challenger.sample_f128_vec(n_rs + n_pd)
@@ -2970,7 +3129,9 @@ fn verify_batch_merged_core<Ch: Challenger>(
 
 #[cfg(test)]
 mod block_round_tests {
-    use super::{fold_pairs_in_place, fold_terms_and_message, round_message_terms, round_message_terms_par};
+    use super::{
+        fold_pairs_in_place, fold_terms_and_message, round_message_terms, round_message_terms_par,
+    };
     use crate::{field::F128, test_rng::Rng};
 
     /// The fused fold + message and the parallel message give the reference
@@ -2978,8 +3139,9 @@ mod block_round_tests {
     #[test]
     fn fused_block_rounds_match_reference() {
         let mut rng = Rng::new(0xB10C_2);
-        let mut terms: Vec<(Vec<F128>, Vec<F128>)> =
-            (0..37).map(|_| (rng.f128_vec(256), rng.f128_vec(256))).collect();
+        let mut terms: Vec<(Vec<F128>, Vec<F128>)> = (0..37)
+            .map(|_| (rng.f128_vec(256), rng.f128_vec(256)))
+            .collect();
         let mut want = terms.clone();
         assert_eq!(round_message_terms_par(&terms), round_message_terms(&want));
         for round in 0..8 {

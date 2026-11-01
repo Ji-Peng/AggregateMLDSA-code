@@ -27,6 +27,15 @@ const GROUP: usize = 8;
 /// registers hold the coefficient vector and the broadcast row element).
 const GROUP_AVX2: usize = 4;
 
+/// Output rows of [`s_vectors_into`]: row `jx` is the `n_e` entries at
+/// `ptr + jx * stride` (rows disjoint, `stride >= n_e`).
+pub(super) struct Rows {
+    pub(super) ptr: *mut F128,
+    pub(super) stride: usize,
+}
+// SAFETY: the parallel chunks write disjoint block ranges of the rows.
+unsafe impl Sync for Rows {}
+
 /// `out[jx][e] = frob(kappa * sum_b coef[jx][b] * bank[(2e + c0) * nb + b], js[jx])` for
 /// `e < n_e`, where `coef[jx][b] = pw[b][(nb - js[jx]) % nb]`.
 ///
@@ -42,7 +51,37 @@ pub(super) unsafe fn s_vectors(
     js: &[usize],
     pw: &[Vec<F128>],
 ) -> Vec<Vec<F128>> {
+    let mut flat = vec![F128::ZERO; js.len() * n_e];
+    let out = Rows {
+        ptr: flat.as_mut_ptr(),
+        stride: n_e,
+    };
+    // SAFETY: forwarded features; `flat` holds every row.
+    unsafe { s_vectors_into(bank, nb, n_e, c0, kappa, js, pw, &out) };
+    flat.chunks(n_e.max(1))
+        .take(js.len())
+        .map(<[F128]>::to_vec)
+        .collect()
+}
+
+/// [`s_vectors`] written into caller rows (the block-first term arena).
+///
+/// # Safety
+/// The CPU has `avx512f`, `vpclmulqdq` and `sse4.1`; `out` has `js.len()` writable
+/// rows of `n_e` entries.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn s_vectors_into(
+    bank: &[F128],
+    nb: usize,
+    n_e: usize,
+    c0: usize,
+    kappa: F128,
+    js: &[usize],
+    pw: &[Vec<F128>],
+    out: &Rows,
+) {
     assert!(bank.len() >= 2 * n_e * nb, "bank covers every block");
+    assert!(out.stride >= n_e, "output rows overlap");
     let nj = js.len();
     // Coefficients b-major, the term index padded to a multiple of 4 lanes:
     // coef[b * njp + jx].
@@ -53,23 +92,13 @@ pub(super) unsafe fn s_vectors(
             coef[b * njp + jx] = pw[b][(nb - j) % nb];
         }
     }
-    let chunks: Vec<Vec<F128>> = (0..n_e.div_ceil(E_CHUNK))
-        .into_par_iter()
-        .map(|ch| {
-            let e0 = ch * E_CHUNK;
-            let ne = E_CHUNK.min(n_e - e0);
-            // SAFETY: forwarded features; the bank assert covers every row read.
-            unsafe { chunk(bank, nb, e0, ne, c0, kappa, js, &coef, njp) }
-        })
-        .collect();
-    let mut out: Vec<Vec<F128>> = (0..nj).map(|_| Vec::with_capacity(n_e)).collect();
-    for (ch, buf) in chunks.iter().enumerate() {
-        let ne = E_CHUNK.min(n_e - ch * E_CHUNK);
-        for (jx, o) in out.iter_mut().enumerate() {
-            o.extend_from_slice(&buf[jx * ne..(jx + 1) * ne]);
-        }
-    }
-    out
+    (0..n_e.div_ceil(E_CHUNK)).into_par_iter().for_each(|ch| {
+        let e0 = ch * E_CHUNK;
+        let ne = E_CHUNK.min(n_e - e0);
+        // SAFETY: forwarded features; the bank assert covers every row read;
+        // chunk `ch` writes entries [e0, e0 + ne) of each row only.
+        unsafe { chunk(bank, nb, e0, ne, c0, kappa, js, &coef, njp, out) }
+    });
 }
 
 /// Two-lane counterpart of [`s_vectors`] for the AVX2 tier: the inner products
@@ -119,7 +148,7 @@ pub(super) unsafe fn s_vectors_avx2(
     out
 }
 
-/// One chunk of `ne` blocks starting at `e0`; returns `[jx][e - e0]`.
+/// One chunk of `ne` blocks starting at `e0`, into `out[jx][e0..e0 + ne]`.
 #[allow(clippy::too_many_arguments)]
 #[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
 unsafe fn chunk(
@@ -132,9 +161,13 @@ unsafe fn chunk(
     js: &[usize],
     coef: &[F128],
     njp: usize,
-) -> Vec<F128> {
+    out: &Rows,
+) {
     let nj = js.len();
-    let mut buf = vec![F128::ZERO; nj * ne];
+    // SAFETY (row): rows jx < nj of `out`, entries [e0, e0 + ne) (caller).
+    let row_of = |jx: usize| unsafe {
+        core::slice::from_raw_parts_mut(out.ptr.add(jx * out.stride + e0), ne)
+    };
     let mut lanes = [F128::ZERO; 4];
     // Pass 1: the inner products, four terms per accumulator, GROUP accumulators
     // per sweep of the bank row.
@@ -159,7 +192,7 @@ unsafe fn chunk(
                 for (l, &v) in lanes.iter().enumerate() {
                     let jx = g0 + 4 * g + l;
                     if jx < nj {
-                        buf[jx * ne + el] = v;
+                        row_of(jx)[el] = v;
                     }
                 }
             }
@@ -170,7 +203,7 @@ unsafe fn chunk(
     // independent chains in flight.
     let kap = f128x4_splat(kappa);
     for (jx, &j) in js.iter().enumerate() {
-        let row = &mut buf[jx * ne..(jx + 1) * ne];
+        let row = row_of(jx);
         let mut e = 0;
         while e + 16 <= ne {
             // SAFETY: e + 16 <= ne = row.len().
@@ -198,7 +231,6 @@ unsafe fn chunk(
             e += 1;
         }
     }
-    buf
 }
 
 /// One chunk of `ne` blocks starting at `e0` for the AVX2 tier; returns
@@ -260,6 +292,116 @@ unsafe fn chunk_avx2(
         }
     }
     buf
+}
+
+/// Qword indices of the even (`EVEN`) and odd (`ODD`) F128 entries of two zmm
+/// `[x0..x3]`, `[x4..x7]`: `[x0, x2, x4, x6]` and `[x1, x3, x5, x7]`.
+const EVEN: [i64; 8] = [0, 1, 4, 5, 8, 9, 12, 13];
+const ODD: [i64; 8] = [2, 3, 6, 7, 10, 11, 14, 15];
+
+/// One block round on one rank-1 term (`block_round_all` in `pcs.rs`): with `r`,
+/// `x[i] ← x[2i] + r·(x[2i] + x[2i+1])` for `a` and `s` in place (`i < len/2`),
+/// four pairs per zmm; with `msg`, the message `(Σ a1·s1, Σ (a0+a1)(s0+s1))` of
+/// the (folded) pairs, accumulated from the values just computed (no second
+/// pass). Accumulators: unreduced 256-bit carry-less sums of at most `len/2`
+/// products per lane (exact in F_2[x] up to degree 254), reduced once.
+///
+/// # Safety
+/// The CPU has `avx512f`, `vpclmulqdq` and `sse4.1`; `a.len() == s.len()`, a
+/// multiple of 16.
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+pub(super) unsafe fn round_term(
+    a: &mut [F128],
+    s: &mut [F128],
+    r: Option<F128>,
+    msg: bool,
+) -> (F128, F128) {
+    use core::arch::x86_64::{_mm512_loadu_si512, _mm512_permutex2var_epi64, _mm512_xor_si512};
+    let len = a.len();
+    debug_assert!(len == s.len() && len.is_multiple_of(16));
+    // SAFETY: EVEN, ODD are 64 readable bytes.
+    let (ie, io) = unsafe {
+        (
+            _mm512_loadu_si512(EVEN.as_ptr().cast()),
+            _mm512_loadu_si512(ODD.as_ptr().cast()),
+        )
+    };
+    let mut g1 = WideGhashX4::zero();
+    let mut gi = WideGhashX4::zero();
+    let mut acc_msg = |a0: __m512i, a1: __m512i, s0: __m512i, s1: __m512i| {
+        let (ea, oa) = (
+            _mm512_permutex2var_epi64(a0, ie, a1),
+            _mm512_permutex2var_epi64(a0, io, a1),
+        );
+        let (es, os) = (
+            _mm512_permutex2var_epi64(s0, ie, s1),
+            _mm512_permutex2var_epi64(s0, io, s1),
+        );
+        g1.mul_acc(oa, os);
+        gi.mul_acc(_mm512_xor_si512(ea, oa), _mm512_xor_si512(es, os));
+    };
+    match r {
+        None => {
+            if msg {
+                for i in (0..len).step_by(8) {
+                    // SAFETY: i + 8 <= len for both parts.
+                    unsafe {
+                        acc_msg(
+                            f128x4_loadu(a.as_ptr().add(i)),
+                            f128x4_loadu(a.as_ptr().add(i + 4)),
+                            f128x4_loadu(s.as_ptr().add(i)),
+                            f128x4_loadu(s.as_ptr().add(i + 4)),
+                        );
+                    }
+                }
+            }
+        }
+        Some(r) => {
+            let rv = f128x4_splat(r);
+            // x[2i] + r (x[2i] + x[2i+1]) for 8 outputs from 16 inputs at `p`.
+            let fold8 = |p: *const F128| -> (__m512i, __m512i) {
+                // SAFETY: 16 readable F128 at p (callers).
+                unsafe {
+                    let v0 = f128x4_loadu(p);
+                    let v1 = f128x4_loadu(p.add(4));
+                    let v2 = f128x4_loadu(p.add(8));
+                    let v3 = f128x4_loadu(p.add(12));
+                    let (e0, o0) = (
+                        _mm512_permutex2var_epi64(v0, ie, v1),
+                        _mm512_permutex2var_epi64(v0, io, v1),
+                    );
+                    let (e1, o1) = (
+                        _mm512_permutex2var_epi64(v2, ie, v3),
+                        _mm512_permutex2var_epi64(v2, io, v3),
+                    );
+                    (
+                        _mm512_xor_si512(e0, ghash_mul_x4(rv, _mm512_xor_si512(e0, o0))),
+                        _mm512_xor_si512(e1, ghash_mul_x4(rv, _mm512_xor_si512(e1, o1))),
+                    )
+                }
+            };
+            for i in (0..len).step_by(16) {
+                // In place: outputs [i/2, i/2 + 8) are written after inputs
+                // [i, i + 16) are read, and i/2 + 8 <= i + 16.
+                // SAFETY: i + 16 <= len; i/2 + 8 <= len/2.
+                unsafe {
+                    let (fa0, fa1) = fold8(a.as_ptr().add(i));
+                    let (fs0, fs1) = fold8(s.as_ptr().add(i));
+                    f128x4_storeu(a.as_mut_ptr().add(i / 2), fa0);
+                    f128x4_storeu(a.as_mut_ptr().add(i / 2 + 4), fa1);
+                    f128x4_storeu(s.as_mut_ptr().add(i / 2), fs0);
+                    f128x4_storeu(s.as_mut_ptr().add(i / 2 + 4), fs1);
+                    if msg {
+                        acc_msg(fa0, fa1, fs0, fs1);
+                    }
+                }
+            }
+        }
+    }
+    if !msg {
+        return (F128::ZERO, F128::ZERO);
+    }
+    (g1.fold().reduce(), gi.fold().reduce())
 }
 
 /// `sum_r q[r] * eq[r]` (equal lengths).
@@ -332,9 +474,71 @@ pub(super) unsafe fn dot_avx2(q: &[F128], eq: &[F128]) -> F128 {
     tail.reduce()
 }
 
+/// `out[t][i] = Σ_{e < rows} ws[t][e]·src[e·stride + i]` for `i < out[t].len()` (all
+/// outputs the same length): a weighted sum of `rows` strided rows, `T` weight vectors
+/// at once. Per register block of `4·G` outputs the rows are streamed once; each output
+/// lane accumulates unreduced 256-bit carry-less sums of at most `rows` products (exact
+/// in F_2[x] up to degree 254), reduced once at the end of the block. `T·G·3 ≤ 24`
+/// accumulator registers.
+///
+/// # Safety
+/// The CPU has `avx512f`, `vpclmulqdq`; `src` holds `(rows - 1)·stride + len` entries.
+#[target_feature(enable = "avx512f,vpclmulqdq,sse4.1")]
+pub(crate) unsafe fn fold_rows<const T: usize, const G: usize>(
+    src: &[F128],
+    stride: usize,
+    rows: usize,
+    ws: [&[F128]; T],
+    out: [&mut [F128]; T],
+) {
+    let len = out[0].len();
+    debug_assert!(out.iter().all(|o| o.len() == len));
+    debug_assert!(ws.iter().all(|w| w.len() >= rows));
+    assert!(
+        rows == 0 || (rows - 1) * stride + len <= src.len(),
+        "rows inside src"
+    );
+    let blk = 4 * G;
+    let mut i0 = 0;
+    while i0 + blk <= len {
+        let mut acc = [[LaneAccX4::zero(); G]; T];
+        for e in 0..rows {
+            // SAFETY: e·stride + i0 + blk <= (rows-1)·stride + len (asserted).
+            let p = unsafe { src.as_ptr().add(e * stride + i0) };
+            let x: [__m512i; G] = core::array::from_fn(|g| unsafe { f128x4_loadu(p.add(4 * g)) });
+            for t in 0..T {
+                let w = f128x4_splat(ws[t][e]);
+                for g in 0..G {
+                    acc[t][g].mul_acc(x[g], w);
+                }
+            }
+        }
+        for t in 0..T {
+            for g in 0..G {
+                // SAFETY: i0 + 4g + 4 <= len = out[t].len().
+                unsafe { f128x4_storeu(out[t].as_mut_ptr().add(i0 + 4 * g), acc[t][g].reduce()) };
+            }
+        }
+        i0 += blk;
+    }
+    // Tail: fewer than 4·G outputs, scalar with unreduced sums.
+    for i in i0..len {
+        let mut acc = [F256Unreduced::ZERO; T];
+        for e in 0..rows {
+            let x = src[e * stride + i];
+            for t in 0..T {
+                acc[t] ^= ws[t][e].mul_unreduced(x);
+            }
+        }
+        for t in 0..T {
+            out[t][i] = acc[t].reduce();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dot, dot_avx2, s_vectors, s_vectors_avx2};
+    use super::{dot, dot_avx2, fold_rows, round_term, s_vectors, s_vectors_avx2};
     use crate::{field::F128, simd, test_rng::Rng};
 
     fn frob(mut x: F128, j: usize) -> F128 {
@@ -388,6 +592,81 @@ mod tests {
             let want = q.iter().zip(&eq).fold(F128::ZERO, |a, (&x, &y)| a + x * y);
             // SAFETY: features checked above.
             assert_eq!(unsafe { dot(&q, &eq) }, want, "n={n}");
+        }
+        // Strided row folds (one and two weight vectors, register and scalar tails).
+        for (rows, stride, len) in [
+            (0usize, 8usize, 8usize),
+            (1, 40, 37),
+            (5, 64, 64),
+            (33, 100, 70),
+        ] {
+            let src = rng.f128_vec(rows.max(1) * stride + len);
+            let w0 = rng.f128_vec(rows);
+            let w1 = rng.f128_vec(rows);
+            let want = |w: &[F128]| -> Vec<F128> {
+                (0..len)
+                    .map(|i| (0..rows).fold(F128::ZERO, |a, e| a + w[e] * src[e * stride + i]))
+                    .collect()
+            };
+            let (mut o0, mut o1) = (vec![F128::ZERO; len], vec![F128::ZERO; len]);
+            // SAFETY: features checked above; src covers every row.
+            unsafe { fold_rows::<2, 4>(&src, stride, rows, [&w0, &w1], [&mut o0, &mut o1]) };
+            assert_eq!(
+                (o0, o1),
+                (want(&w0), want(&w1)),
+                "fold_rows T=2 rows={rows}"
+            );
+            let mut o = vec![F128::ZERO; len];
+            // SAFETY: as above.
+            unsafe { fold_rows::<1, 8>(&src, stride, rows, [&w0], [&mut o]) };
+            assert_eq!(o, want(&w0), "fold_rows T=1 rows={rows}");
+        }
+        // One block round: fold plus the message from the folded values.
+        for len in [16usize, 32, 64, 256] {
+            let a0 = rng.f128_vec(len);
+            let s0 = rng.f128_vec(len);
+            let r = rng.f128();
+            let mut a = a0.clone();
+            let mut s = s0.clone();
+            let (g1, gi) = unsafe { round_term(&mut a, &mut s, None, true) };
+            let (want1, wanti) = a0
+                .chunks_exact(2)
+                .zip(s0.chunks_exact(2))
+                .fold((F128::ZERO, F128::ZERO), |(x, y), (ap, sp)| {
+                    (x + ap[1] * sp[1], y + (ap[0] + ap[1]) * (sp[0] + sp[1]))
+                });
+            assert_eq!((g1, gi), (want1, wanti), "round message len={len}");
+            let mut a = a0.clone();
+            let mut s = s0.clone();
+            unsafe { round_term(&mut a, &mut s, Some(r), false) };
+            let want: Vec<F128> = (0..len / 2)
+                .map(|i| a0[2 * i] + r * (a0[2 * i] + a0[2 * i + 1]))
+                .collect();
+            assert_eq!(a[..len / 2], want, "round fold len={len}");
+            let want: Vec<F128> = (0..len / 2)
+                .map(|i| s0[2 * i] + r * (s0[2 * i] + s0[2 * i + 1]))
+                .collect();
+            assert_eq!(s[..len / 2], want, "round fold s len={len}");
+            // Fused fold and message of the next round.
+            let fa: Vec<F128> = a[..len / 2].to_vec();
+            let fs: Vec<F128> = s[..len / 2].to_vec();
+            let mut a = a0.clone();
+            let mut s = s0.clone();
+            let (g1, gi) = unsafe { round_term(&mut a, &mut s, Some(r), true) };
+            assert_eq!(
+                (&a[..len / 2], &s[..len / 2]),
+                (&fa[..], &fs[..]),
+                "fused fold len={len}"
+            );
+            let (want1, wanti) = fa
+                .iter()
+                .step_by(2)
+                .zip(fs.iter().step_by(2))
+                .zip(fa[1..].iter().step_by(2).zip(fs[1..].iter().step_by(2)))
+                .fold((F128::ZERO, F128::ZERO), |(x, y), ((a0, s0), (a1, s1))| {
+                    (x + *a1 * *s1, y + (*a0 + *a1) * (*s0 + *s1))
+                });
+            assert_eq!((g1, gi), (want1, wanti), "fused message len={len}");
         }
     }
 

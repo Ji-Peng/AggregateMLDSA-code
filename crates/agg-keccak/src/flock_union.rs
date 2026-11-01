@@ -657,10 +657,23 @@ impl UnionGeometry {
             assert!(zc_claim.r_rest.len() > nu, "C claim point too short");
         }
         let t_banks = std::time::Instant::now();
+        // The packed-direct groups' column bit-banks at their row points (first
+        // occurrence order, matching `scalar_claim_groups`): the opening's block
+        // statistics read the banks instead of passing over `q`.
+        let mut pd_rows: Vec<&[F128]> = Vec::new();
+        if block_first {
+            for c in &packed_direct {
+                let r = &c.point[..nu];
+                if !pd_rows.contains(&r) {
+                    pd_rows.push(r);
+                }
+            }
+        }
         let mut rows: Vec<&[F128]> = vec![x_ab.x_outer.as_slice()];
         if block_first {
             rows.push(&zc_claim.r_rest[1..1 + nu]);
             rows.extend(bit_claims.iter().map(|c| &c.x_full[1..=nu]));
+            rows.extend(pd_rows.iter().copied());
         }
         let mut banks_all = lincheck::union_bitbank_fold_multi(&union, &z, &rows).into_iter();
         let z_vec = banks_all.next().expect("lincheck fold");
@@ -669,6 +682,7 @@ impl UnionGeometry {
             .iter()
             .map(|_| banks_all.next().unwrap_or_default())
             .collect();
+        let pd_banks: Vec<Vec<F128>> = banks_all.collect();
         if std::env::var_os("LINCHECK_TRACE").is_some() {
             eprintln!(
                 "[lc] {:<26} {:>7.2} ms  ({} row points, one pass)",
@@ -729,8 +743,9 @@ impl UnionGeometry {
             Some(bc) => [Some(z_vec_pre.as_slice()), Some(bc.as_slice())]
                 .into_iter()
                 .chain(bit_banks.iter().map(|b| Some(b.as_slice())))
+                .chain(pd_banks.iter().map(|b| Some(b.as_slice())))
                 .collect(),
-            None => vec![None; 2 + bit_claims.len()],
+            None => vec![None; 2 + bit_claims.len() + pd_banks.len()],
         };
         let mut x_fulls = vec![x_full(&ab.point), x_full(&c.point)];
         x_fulls.extend(bit_claims.iter().map(|c| c.x_full.clone()));

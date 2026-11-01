@@ -33,6 +33,13 @@ than to one tree.
 - **Flock 16-way BLAKE3 leaves.** The `AVX512BW` feature bit is part of the
   runtime mask; the leaf hasher itself is not adopted on this branch, because
   main's Merkle path already hashes whole groups with AVX-512F.
+- **Flock block-first arena.** The merged opening's block statistics are
+  written into one `[term][a | s]` arena, the packed-direct groups read their
+  block values from the union prover's column bit-banks instead of a pass over
+  `q`, each block round folds and messages in one AVX-512 pass over the arena,
+  and `q'` folds strided rows on the AVX-512 kernel. The AVX2 tier keeps its
+  two-lane statistics and the portable message loop; the terms and messages
+  are identical.
 - **Plane PIOP layout.** `AGG_PIOP_LAYOUT=plane|row` selects the sum-check
   table layout independently of `AGG_ISA`; `plane` is the default only with the
   IFMA backend. Both layouts send identical messages.
