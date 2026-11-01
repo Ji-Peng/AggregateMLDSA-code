@@ -250,16 +250,17 @@ workers: single noisy runs, not benchmarks):
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
 with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claims).
 
-ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, the artifact gate records: keys seed 42,
-records seed 43, `agg aggregate --params P`, all 16 CPUs of the WSL box with turbo and HT
-on; single runs, not benchmarks). The aggregates are byte-identical under
-`AGG_ISA=avx512ifma|avx512|avx2|scalar` and with `RAYON_NUM_THREADS=1` and 16
-(`artifact/expected/hashes.json`):
+ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, all 16 CPUs of the WSL box with turbo
+and HT on; not benchmarks). Sizes: the artifact gate records (keys seed 42, records seed
+43, `agg aggregate --params P`), byte-identical under `AGG_ISA=avx512ifma|avx512|avx2|scalar`
+and with `RAYON_NUM_THREADS=1` and 16 (`artifact/expected/hashes.json`). Times: in-process
+medians of `agg bench --params P --count 1024 --warmup 1 --reps 2` (1,024 keys; verify with
+uncached and with cached keys):
 
-| Set | Aggregate | `c~` list | Flock proofs | Lookup | PIOP rounds and claims | Akita opening | Prove | Verify uncached / cold cache / warm cache |
+| Set | Aggregate | `c~` list | Flock proofs | Lookup | PIOP rounds and claims | Akita opening | Prove | Verify uncached / cached |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 65 | 448,765 B (438.2 B/sig) | 49,152 B | 299,918 B | 26,832 B | 5,904 B | 61,033 B | 1.5-2.0 s | 281 / 270 / 173 ms |
-| 87 | 489,195 B (477.7 B/sig) | 65,536 B | 319,438 B | 29,424 B | 6,608 B | 62,262 B | 1.8-2.2 s | 345 / 349 / 185 ms |
+| 65 | 448,765 B (438.2 B/sig) | 49,152 B | 299,918 B | 26,832 B | 5,904 B | 61,033 B | 1,206 ms | 150 / 137 ms |
+| 87 | 489,195 B (477.7 B/sig) | 65,536 B | 319,438 B | 29,424 B | 6,608 B | 62,262 B | 1,432 ms | 172 / 151 ms |
 
 The `Work nonces` column is the measurement at revision `f526097`; the current schedule adds
 the one-bit `proj.psi` nonce, one more byte in the packed stream (`docs/soundness.md` 10).
