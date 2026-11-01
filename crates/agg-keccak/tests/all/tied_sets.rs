@@ -152,21 +152,45 @@ fn tied_proofs_are_bound_to_the_parameter_set() {
         .is_err());
 }
 
-/// Witness time of one full segment per set (2^13 records): ML-DSA-44 on the 8-way
-/// generator, ML-DSA-65 and ML-DSA-87 on the grouped engine path.
+/// Witness time of one full segment per set (2^13 records) and of the lincheck's row values
+/// `A z`, `B z` rebuilt from the committed buffer: the median of `AGG_WITNESS_REPS` runs
+/// (default 5) after one warmup.
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn tied_witness_times_per_set() {
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
     fn time<P: ParamSet>() {
+        let reps: usize = std::env::var("AGG_WITNESS_REPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
         let gate = sponge_gate_for(P::SET);
         let n = 1 << 13;
         let part = TiedPart::new_part(&gate, n, 13, 0, Profile::Fast);
         let mut rng = Rng::new(1);
         let records: Vec<SpongeRecord<P>> = (0..n).map(|_| random_record(&mut rng)).collect();
-        let _ = part.honest_parts(&records);
-        let t = std::time::Instant::now();
-        let _ = part.honest_parts(&records);
-        eprintln!("{} witness of 2^13 records: {:.1?}", P::NAME, t.elapsed());
+        let (mut wit, mut ab) = (Vec::new(), Vec::new());
+        for rep in 0..=reps {
+            let t = std::time::Instant::now();
+            let (mut sponge, _) = part.honest_parts(&records);
+            let t_wit = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            sponge.ensure_ab(&gate, part.nu(), n);
+            let t_ab = t.elapsed().as_secs_f64() * 1e3;
+            if rep > 0 {
+                wit.push(t_wit);
+                ab.push(t_ab);
+            }
+        }
+        eprintln!(
+            "{} 2^13 records: witness {:.1} ms, A/B rebuild {:.1} ms (median of {reps})",
+            P::NAME,
+            median(wit),
+            median(ab)
+        );
     }
     time::<agg_witness::params::Set44>();
     time::<Set65>();

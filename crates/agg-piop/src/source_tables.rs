@@ -573,6 +573,47 @@ impl HuSlots {
     }
 }
 
+/// The bridge inputs of the four bit lanes packed as nibbles: cell `j + 256 rho + P_pad i`
+/// holds `sum_t (b_t & 1) << t` of record `i`'s committed bit cells at that position, and
+/// the padded positions `256 k .. P_pad` are zero. One pass over the bit columns replaces
+/// four `i8` lanes ([`MainTables::bridge_lanes`]) and their packing.
+pub struct BridgeNibbles<'a> {
+    columns: [Vec<&'a [i8]>; 4],
+    shape: SetShape,
+    lane_cells: usize,
+    records: usize,
+}
+
+impl BridgeNibbles<'_> {
+    /// Record `i`'s `P_pad` cells into `out`; whether its cells are all bits.
+    pub fn record_into(&self, i: usize, out: &mut [u8]) -> bool {
+        let shape = self.shape;
+        assert_eq!(out.len(), shape.positions_pad, "one record's padded positions");
+        let mut ok = true;
+        for (row, dst) in out[..shape.positions].chunks_exact_mut(N).enumerate() {
+            let (lane, base) = shape.row_lane(row);
+            let start = i * self.lane_cells + base;
+            let src: [&[i8]; 4] = std::array::from_fn(|t| &self.columns[t][lane][start..start + N]);
+            ok &= agg_simd::digits::pack_four_bits_into(src, dst);
+        }
+        out[shape.positions..].fill(0);
+        ok
+    }
+
+    /// Every record's cells (`P_pad` per padded record) and whether they are all bits.
+    #[must_use]
+    pub fn all(&self) -> (Vec<u8>, bool) {
+        let pad = self.shape.positions_pad;
+        let mut out = vec![0_u8; pad * self.records];
+        let ok = out
+            .par_chunks_mut(pad)
+            .enumerate()
+            .map(|(i, record)| self.record_into(i, record))
+            .reduce(|| true, |a, b| a && b);
+        (out, ok)
+    }
+}
+
 /// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns), and
 /// under H-FIPS the hint slack of every record (committed in round 2, `G_2`). Every
 /// polynomial holds [`CommitmentManifest::lane_cells`] cells per record: 1,024 for ML-DSA-44
@@ -900,6 +941,19 @@ impl MainTables {
             .collect()
     }
 
+    /// The four bit lanes of an ML-DSA-65 or ML-DSA-87 table set as one nibble per bridge
+    /// position, read straight from the committed bit columns; `None` for six bit lanes.
+    #[must_use]
+    pub fn bridge_nibble_source(&self, manifest: &CommitmentManifest) -> Option<BridgeNibbles<'_>> {
+        let shape = manifest.shape();
+        (shape.w1_bits == 4).then(|| BridgeNibbles {
+            columns: std::array::from_fn(|t| self.bit_columns(manifest, t)),
+            shape,
+            lane_cells: self.lane_cells,
+            records: self.geom.n_star,
+        })
+    }
+
     /// The values `z, u, v` of one ML-DSA-44 record ([`MainTables::record_values_for`]).
     #[must_use]
     pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
@@ -1086,15 +1140,23 @@ impl BridgeGroupTables {
         let proj = ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?;
         let shape = Shape::production(manifest.set());
         if manifest.set() != Set::S44 {
-            // Four bit lanes over the padded bridge inputs: the packed path, or the general
-            // one for inputs that are not bits.
-            let inputs = main.bridge_lanes(manifest);
+            // Four bit lanes over the padded bridge inputs, packed as nibbles straight from
+            // the bit columns: the packed path, or the general one for inputs that are not
+            // bits.
             let lookup = manifest.lookup_shape();
             let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
-            if let Ok(four) = <&[Vec<i8>; 4]>::try_from(inputs.as_slice()) {
-                let views: [&[i8]; 4] = std::array::from_fn(|t| four[t].as_slice());
-                let direct = parity::compute_direct_four(&shape, &views, matrices, LOOKUP_SHIFT, [slots(1), slots(2)])
-                    .map_err(SourceTableError::Bridge)?;
+            // The packed path writes the level-3 carries as one slot: H-u only (no hint
+            // slack beside them).
+            assert_eq!(slots(3), 1, "the level-3 carries of a four-lane set fill one slot");
+            if let Some((nibbles, true)) = main.bridge_nibble_source(manifest).map(|src| src.all()) {
+                let direct = parity::compute_direct_four_packed(
+                    &shape,
+                    &nibbles,
+                    matrices,
+                    LOOKUP_SHIFT,
+                    [slots(1), slots(2)],
+                )
+                .map_err(SourceTableError::Bridge)?;
                 if let Some(direct) = direct {
                     let mut tables = Self {
                         parity1: Some(direct.y1),
@@ -1114,6 +1176,7 @@ impl BridgeGroupTables {
                     return Ok(tables);
                 }
             }
+            let inputs = main.bridge_lanes(manifest);
             let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
             let witness = parity::compute(&shape, &inputs, matrices).map_err(SourceTableError::Bridge)?;
             return Self::from_witness(manifest, main, witness, Vec::new(), proj, psi);
@@ -1571,6 +1634,24 @@ mod lane_tests {
             }
             assert!(input[shape.positions..shape.positions_pad].iter().all(|&b| b == 0));
         }
+        // The nibble source packs the same inputs; a non-bit cell keeps its low bit and clears
+        // the all-bits flag.
+        let nibbles_of = |tables: &MainTables| {
+            let lanes = tables.bridge_lanes(&manifest);
+            (0..lanes[0].len())
+                .map(|x| (0..4).map(|t| ((lanes[t][x] as u8) & 1) << t).sum::<u8>())
+                .collect::<Vec<u8>>()
+        };
+        let (nibbles, all_bits) = main.bridge_nibble_source(&manifest).expect("four lanes").all();
+        assert!(all_bits);
+        assert_eq!(nibbles, nibbles_of(&main));
+        let bit_col = manifest.locate(Column::W1Bit(2, 1)).1;
+        let mut not_bit = main.clone();
+        not_bit.columns_mut()[bit_col][300] = 3;
+        let (got, all_bits) = not_bit.bridge_nibble_source(&manifest).expect("four lanes").all();
+        assert!(!all_bits);
+        assert_eq!(got, nibbles_of(&not_bit));
+        assert_ne!(got, nibbles);
 
         // Round 2 under the four-lane shape: four carry lanes in four slots on D_1 and D_2.
         let bridge_shape = Shape::production(P::SET);

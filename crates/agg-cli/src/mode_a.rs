@@ -1515,10 +1515,16 @@ pub fn sponge_records(
         .collect()
 }
 
-/// [`sponge_records`] for any parameter set: the committed bits `b_t` read from the bridge
-/// inputs (`MainTables::bridge_lanes`, position `j + 256 rho + P_pad i`) and packed in
-/// `w1Encode` order, bit `256 W rho + W j + t` for `W`-bit coefficients (FIPS 204 Algorithms
-/// 16 and 28: `W = 4` for ML-DSA-65 and ML-DSA-87).
+/// [`sponge_records`] for any parameter set: the committed bits `b_t` at bridge position
+/// `j + 256 rho + P_pad i` packed in `w1Encode` order, bit `256 W rho + W j + t` for `W`-bit
+/// coefficients (FIPS 204 Algorithms 16 and 28: `W = 4` for ML-DSA-65 and ML-DSA-87). Only
+/// the low bit of a cell is read (`cell & 1`): an honest prover's cells are bits, and the
+/// F_p side's Booleanity constraint rejects tables whose cells are not, so a non-bit cell
+/// never reaches an accepted proof whatever bit is taken here.
+///
+/// For four-bit coefficients a record's positions are read as nibbles straight from the bit
+/// columns (`MainTables::bridge_nibble_source`, one 2 KiB buffer per record), and byte `m`
+/// of w1Encode is nibble `2 m` plus nibble `2 m + 1` shifted by four.
 ///
 /// # Panics
 /// If the manifest is of another parameter set than `P`.
@@ -1529,6 +1535,30 @@ pub fn sponge_records_for<P: agg_witness::params::ParamSet>(
     main: &MainTables,
 ) -> Vec<SpongeRecord<P>> {
     assert_eq!(manifest.set(), P::SET, "tables of the instance's parameter set");
+    if let Some(nibbles) = main.bridge_nibble_source(manifest) {
+        assert_eq!(P::W1_BITS, 4, "nibbles of four-bit coefficients");
+        return instance
+            .records
+            .par_iter()
+            .enumerate()
+            .map_init(
+                || vec![0_u8; P::P_PAD],
+                |cells, (i, record)| {
+                    // Non-bit cells keep their low bit (see above), so the flag is unused.
+                    let _ = nibbles.record_into(i, cells);
+                    let mut w1_encode = P::zero_w1_encode();
+                    let bytes = w1_encode.as_mut();
+                    for (byte, pair) in bytes.iter_mut().zip(cells[..P::P_POSITIONS].chunks_exact(2)) {
+                        *byte = pair[0] | pair[1] << 4;
+                    }
+                    SpongeRecord {
+                        mu: record.mu,
+                        w1_encode,
+                    }
+                },
+            )
+            .collect();
+    }
     let lanes = main.bridge_lanes(manifest);
     let width = P::W1_BITS;
     instance
