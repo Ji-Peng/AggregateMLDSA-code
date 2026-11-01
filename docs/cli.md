@@ -108,6 +108,8 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
+| `AGG_PIOP_LAYOUT` | `plane` or `row`: the PIOP table layout; default `plane` with a vector `agg-simd` backend (IFMA, AVX-512F, AVX2), `row` on the portable one |
+| `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`) |
 
 The opening is split at the transcript session: `AGG_OPENING_THREADS` sizes only the
 transcript-bound finish, while the prepare part (registry, commitment admission,

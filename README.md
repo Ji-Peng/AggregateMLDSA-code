@@ -34,7 +34,7 @@ goal; `docs/h-exact.md`).
 | `crates/agg-keccak` | lib | Flock HEAD Keccak gate port, sponge union circuit, tied parts (version 5: the sponge instance whose opening proves the parity chain's bit claim, `flock_union`, `tied`; spans over several segments); `examples/gen_slim8_configs.rs` regenerates the `Slim8` configs |
 | `crates/agg-cli` | bin `agg` + lib | mode-A aggregator and verifier (`mode_a`), Flock parts and segment items (`wire`), persistent key cache, batch files, the `agg` tool (`keygen-batch`, `sign-batch`, `aggregate`, `verify`, `bench`); `docs/cli.md` |
 | `crates/agg-bench` | lib + benches | prover, verifier (cached/uncached), memory |
-| `crates/agg-simd` | lib | runtime-dispatched AVX-512 IFMA and portable kernels for the Solinas field and its quadratic extension, bit/plane buffers and the large-block pool |
+| `crates/agg-simd` | lib | runtime-dispatched AVX-512 IFMA, AVX-512F, AVX2 and portable kernels for the Solinas field and its quadratic extension, bit/plane buffers and the large-block pool |
 | `crates/agg-mldsa-simd` | lib + benches | ML-DSA-44 steps 1-2 kernels (ExpandA, NTTs mod q and P2, samplers, finish, Keccak lanes) with scalar, AVX2 and AVX-512 backends behind one runtime-dispatched engine |
 | `crates/agg-mldsa-cref` | lib (benches only) | C reference harness (pq-crystals AVX2, Hybrid-SHA-3 AVX2/AVX-512) for the kernel gates, built with `--cfg cref` and `AGG_CREF_SRC` |
 
@@ -124,23 +124,25 @@ the CPU. `AGG_SIMD_REPORT=1` prints the cap and every selected kernel at startup
 | `AGG_ISA` | Selected level |
 | --- | --- |
 | `avx512ifma`, or unset on an IFMA CPU | IFMA kernels of `agg-simd`, AVX-512 Flock/Akita/ML-DSA kernels, and the plane PIOP layout |
-| `avx512` | the same except the IFMA kernels: AVX-512 without IFMA, and the row PIOP layout |
-| `avx2` | AVX2 and SSE kernels only, row PIOP layout |
-| `scalar` | portable kernels only |
+| `avx512` | the same except the IFMA kernels: the AVX-512F field kernels of `agg-simd`, and the plane PIOP layout |
+| `avx2` | AVX2 and SSE kernels only (the AVX2 field kernels of `agg-simd`), plane PIOP layout |
+| `scalar` | portable kernels only, row PIOP layout |
 
 `AGG_ISA=avx2` also gates every AVX-512 kernel: a capped process executes no
 AVX-512 instruction, including in the Flock, Akita and ML-DSA backends.
 
 The PIOP table layout is a separate knob because it wins where the ISA does not:
-`AGG_PIOP_LAYOUT=plane|row`. It defaults to `plane` exactly when the IFMA backend is
-selected, and `row` otherwise. The lookup sessions, stage-3 weights and the dense
+`AGG_PIOP_LAYOUT=plane|row`. It defaults to `plane` whenever a vector backend of
+`agg-simd` is selected (IFMA, AVX-512F or AVX2), and `row` on the portable backend. The lookup sessions, stage-3 weights and the dense
 sum-check tail all read the selected layout. Both layouts compute the same round
 polynomials, so the proof bytes do not depend on either knob.
 
-- `crates/agg-simd` (IFMA field and extension kernels, plane buffers), `crates/agg-keccak/src/simd`
-  (8-way Keccak-f and the 8x64 transpose) and `vendor/flock-field/src/f128_slice/rounds.rs`
-  check `AGG_ISA` next to their CPU features. `AGG_SIMD=portable|avx512` still names a
-  backend below the cap.
+- `crates/agg-simd` (IFMA, AVX-512F and AVX2 field and extension kernels, plane buffers),
+  `crates/agg-keccak/src/simd` (8-way Keccak-f and the 8x64 transpose) and
+  `vendor/flock-field/src/f128_slice/rounds.rs` check `AGG_ISA` next to their CPU features.
+  `AGG_SIMD=portable` turns the `agg-simd` vector kernels off (the A/B switch; the layout
+  default then falls back to `row`); `AGG_SIMD=avx512` names the IFMA backend and runs at
+  the cap.
 - `crates/agg-mldsa-simd` selects scalar, AVX2 or AVX-512 under `AGG_MLDSA_SIMD=auto|scalar|avx2|avx512`.
 - The vendored Flock and Akita kernels are runtime-dispatched (`vendor/flock-core/src/simd.rs`,
   `vendor/akita/crates/akita-cpu-backend/src/isa.rs`); `FLOCK_SIMD=portable|gfni` and

@@ -76,8 +76,9 @@ pub enum Layout {
 
 /// The layout this process uses.
 ///
-/// `AGG_PIOP_LAYOUT=plane|row` names one; unset selects planes only when the
-/// AVX-512 IFMA kernels are selected, and rows otherwise.
+/// `AGG_PIOP_LAYOUT=plane|row` names one; unset selects planes whenever a vector
+/// backend of `agg-simd` is selected (IFMA, AVX-512F or AVX2), and rows on the portable
+/// backend, where the row-major groups' scalar arithmetic is the faster form.
 ///
 /// # Panics
 /// When `AGG_PIOP_LAYOUT` names an unknown layout.
@@ -95,10 +96,10 @@ pub fn layout() -> Layout {
             Some("row") => Layout::Row,
             Some(other) => panic!("invalid AGG_PIOP_LAYOUT '{other}': expected plane or row"),
             None => {
-                if agg_simd::detect::backend() == agg_simd::detect::Backend::Avx512 {
-                    Layout::Plane
-                } else {
-                    Layout::Row
+                use agg_simd::detect::{backend, Backend};
+                match backend() {
+                    Backend::Avx512 | Backend::Avx512F | Backend::Avx2 => Layout::Plane,
+                    Backend::Portable => Layout::Row,
                 }
             }
         }

@@ -200,11 +200,18 @@ coordinate planes, and a centred integer stack recomputes its upper layer from f
 quarters of the stacked column.
 
 `AGG_PIOP_LAYOUT=plane|row` selects the layout independently of `AGG_ISA`; it defaults to
-`plane` when the IFMA backend is selected and `row` otherwise. The row-major dedicated
-groups in `crates/agg-piop/src/kernel/layer.rs` fold four rows into two and accumulate
-`q(0)` and `q_2` in one read. They won on the AVX2 and AVX-512 non-IFMA tiers while those
-tiers ran the plane kernels on scalar arithmetic; with the AVX-512F and AVX2 kernels the
-plane layout is to be re-measured there. Both layouts send the same round messages.
+`plane` whenever a vector backend of `agg-simd` is selected (IFMA, AVX-512F or AVX2) and to
+`row` on the portable backend. The row-major dedicated groups in
+`crates/agg-piop/src/kernel/layer.rs` fold four rows into two and accumulate `q(0)` and
+`q_2` in one read, in scalar arithmetic; they remain the faster form without vector
+kernels. With the AVX-512F and AVX2 kernels the plane layout wins on those tiers: on a Zen 5
+node (EPYC 9355), 32K signatures, 16 cores / 32 threads, three interleaved rounds, AVX-512F
+3,284 -> 3,010 ms (lookup 1,347 -> 776 ms) and AVX2 3,416 -> 3,209 ms (lookup
+1,374 -> 1,158 ms) against the row layout; the plane layout on scalar kernels
+(`AGG_SIMD=portable`) takes 3,693 and 3,777 ms. On the row layout w_A is built by the
+one-pass scalar `negacyclic::ring_weight_rows`; on the plane layout by
+`negacyclic::ring_weights` on the selected vector kernels. Both layouts send the same round
+messages.
 
 Before a lane is dense it stays a small integer. A committed `i8` column is coded when its
 cells fall into at most 16 classes under the maps of the lanes that read it (8 for a digit
