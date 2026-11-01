@@ -433,6 +433,9 @@ fn prove_stage_with<'a>(
     let mut messages = Vec::with_capacity(rounds);
     let mut point = Vec::with_capacity(rounds);
     let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+    if trace {
+        crate::alloc::take_stats();
+    }
     // Per group: (message time, bind time) summed over rounds; per round: total.
     let mut group_times = vec![(0_f64, 0_f64); spec.groups.len()];
     let mut round_times = Vec::with_capacity(rounds);
@@ -484,7 +487,17 @@ fn prove_stage_with<'a>(
         point.push(challenge);
     }
     if trace {
-        eprintln!("stage {} trace ({} rounds, degree {}):", spec.stage, rounds, spec.degree);
+        // Large blocks allocated during the stage, process-wide (stages 1 and 2 overlap
+        // the lookup branch, stage 3 overlaps the Flock branch).
+        let (fresh, reused) = crate::alloc::take_stats();
+        eprintln!(
+            "stage {} trace ({} rounds, degree {}): large blocks fresh {} MiB, reused {} MiB",
+            spec.stage,
+            rounds,
+            spec.degree,
+            fresh >> 20,
+            reused >> 20
+        );
         for (g, group) in spec.groups.iter().enumerate() {
             eprintln!(
                 "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms",

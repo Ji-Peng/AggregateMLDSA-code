@@ -32,6 +32,17 @@ const SLOTS: usize = 64;
 static ADVISE: AtomicBool = AtomicBool::new(true);
 static CACHE_CAP: AtomicUsize = AtomicUsize::new(6 << 30);
 static POISON: AtomicBool = AtomicBool::new(false);
+static SPLIT: AtomicBool = AtomicBool::new(true);
+/// Bytes of large blocks mapped fresh (first touch faults them in) and taken from the
+/// cache, since the last [`take_stats`].
+static FRESH_BYTES: AtomicUsize = AtomicUsize::new(0);
+static REUSED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// `(fresh, reused)` bytes of large allocations since the previous call (a trace aid:
+/// fresh bytes pay first-touch faults, reused ones do not), resetting both counters.
+pub fn take_stats() -> (usize, usize) {
+    (FRESH_BYTES.swap(0, Ordering::Relaxed), REUSED_BYTES.swap(0, Ordering::Relaxed))
+}
 
 /// Freed large blocks, oldest first: `(address, mapped length)`, the length a
 /// multiple of 2 MiB.
@@ -52,6 +63,12 @@ pub fn set_enabled(on: bool) {
 /// (a test mode that exposes any reader of uninitialised memory; off by default).
 pub fn set_poison(on: bool) {
     POISON.store(on, Ordering::Relaxed);
+}
+
+/// Serve a request from any larger cached block by splitting it (on by default);
+/// off, only cached blocks of up to 125% of the request are reused.
+pub fn set_split(on: bool) {
+    SPLIT.store(on, Ordering::Relaxed);
 }
 
 /// Cap the bytes held by the cache of freed blocks (default 6 GiB; 0 disables
@@ -108,30 +125,45 @@ mod sys {
     }
 }
 
-/// Take the smallest cached block of `len` to `len + len / 4` bytes whose
-/// address meets `align`, trimmed to `len` bytes.
+/// Take the smallest cached block of at least `len` bytes whose address meets
+/// `align`. A block with at least [`HUGE_MIN_BYTES`] to spare is split: the
+/// caller gets its head and the tail stays cached in the block's slot, so a
+/// request is served whenever any cached block is large enough, whatever the
+/// sizes freed before it. Otherwise the block is trimmed to `len` bytes. With
+/// splitting off (`AGG_ALLOC_SPLIT=0`) only blocks of `len` to `len + len / 4`
+/// bytes are taken, and they are trimmed.
 #[cfg(target_os = "linux")]
 fn take_cached(len: usize, align: usize) -> Option<*mut u8> {
+    let split = SPLIT.load(Ordering::Relaxed);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let mut best: Option<usize> = None;
     for i in 0..cache.len {
         let (addr, l) = cache.slots[i];
-        let fits = l >= len && l <= len + len / 4 && addr % align == 0;
+        let fits = l >= len && (split || l <= len + len / 4) && addr % align == 0;
         if fits && best.is_none_or(|b| l < cache.slots[b].1) {
             best = Some(i);
         }
     }
     let i = best?;
     let (addr, l) = cache.slots[i];
-    let n = cache.len;
-    cache.slots.copy_within(i + 1..n, i);
-    cache.len -= 1;
-    cache.bytes -= l;
+    let trim = if split && l - len >= HUGE_MIN_BYTES {
+        // The tail [addr + len, addr + l) is 2 MiB-aligned (`len` is a multiple
+        // of 2 MiB) and stays a cached block of its own.
+        cache.slots[i] = (addr + len, l - len);
+        cache.bytes -= len;
+        0
+    } else {
+        let n = cache.len;
+        cache.slots.copy_within(i + 1..n, i);
+        cache.len -= 1;
+        cache.bytes -= l;
+        l - len
+    };
     drop(cache);
-    if l > len {
+    if trim > 0 {
         // The block is freed later with the caller's layout, i.e. as `len` bytes.
         // SAFETY: [addr + len, addr + l) is the tail of a mapping the cache owned.
-        unsafe { sys::munmap((addr + len) as *mut _, l - len) };
+        unsafe { sys::munmap((addr + len) as *mut _, trim) };
     }
     if POISON.load(Ordering::Relaxed) {
         // SAFETY: the block is a live mapping of at least `len` bytes now owned by the caller.
@@ -212,7 +244,12 @@ unsafe impl GlobalAlloc for HugePageAlloc {
         #[cfg(target_os = "linux")]
         if is_large(&layout) {
             let len = mapped_len(layout.size());
-            return take_cached(len, layout.align()).unwrap_or_else(|| map_fresh(len));
+            if let Some(block) = take_cached(len, layout.align()) {
+                REUSED_BYTES.fetch_add(len, Ordering::Relaxed);
+                return block;
+            }
+            FRESH_BYTES.fetch_add(len, Ordering::Relaxed);
+            return map_fresh(len);
         }
         // SAFETY: forwarded caller contract.
         unsafe { System.alloc(layout) }
@@ -223,6 +260,7 @@ unsafe impl GlobalAlloc for HugePageAlloc {
         #[cfg(target_os = "linux")]
         if is_large(&layout) {
             // A fresh anonymous mapping reads as zero.
+            FRESH_BYTES.fetch_add(mapped_len(layout.size()), Ordering::Relaxed);
             return map_fresh(mapped_len(layout.size()));
         }
         // SAFETY: forwarded caller contract.
@@ -388,6 +426,41 @@ mod tests {
 
     /// Freeing more blocks than the cache has slots, or more bytes than its cap, evicts
     /// older blocks; the allocator keeps working and returns aligned blocks.
+    /// A request smaller than every cached block takes the head of the smallest one,
+    /// whose tail stays cached and serves a later request; with splitting off only a
+    /// block of up to 125% of the request is reused.
+    #[test]
+    fn a_large_cached_block_is_split_and_its_tail_reused() {
+        let _serial = serial();
+        let a = HugePageAlloc;
+        let big = Layout::from_size_align(24 << 20, 64).unwrap();
+        let small = Layout::from_size_align(8 << 20, 64).unwrap();
+        release_cache();
+        // SAFETY: every block is freed with its own layout; bytes written are in bounds.
+        unsafe {
+            let p = a.alloc(big);
+            p.write_bytes(1, big.size());
+            a.dealloc(p, big);
+            let head = a.alloc(small);
+            assert_eq!(head, p, "the head of the cached block");
+            let tail = a.alloc(small);
+            assert_eq!(tail as usize, p as usize + small.size(), "the cached tail");
+            assert!(core::slice::from_raw_parts(tail, small.size()).iter().all(|&b| b == 1));
+            head.write_bytes(2, small.size());
+            a.dealloc(head, small);
+            a.dealloc(tail, small);
+            release_cache();
+            set_split(false);
+            let p = a.alloc(big);
+            a.dealloc(p, big);
+            let q = a.alloc(small);
+            assert_ne!(q, p, "no reuse of a block more than 125% of the request");
+            a.dealloc(q, small);
+            set_split(true);
+        }
+        release_cache();
+    }
+
     #[test]
     fn cache_eviction_paths_keep_the_allocator_usable() {
         let _serial = serial();

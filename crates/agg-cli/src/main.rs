@@ -6,7 +6,8 @@ use std::process::ExitCode;
 
 /// Large tables are backed by transparent huge pages and freed ones are reused
 /// (`agg_piop::alloc`). `AGG_HUGEPAGE=0` turns the huge-page advice off,
-/// `AGG_ALLOC_CACHE=<GiB>` sets the cache cap (0: no cache) and
+/// `AGG_ALLOC_CACHE=<GiB>` sets the cache cap (0: no cache),
+/// `AGG_ALLOC_SPLIT=0` reuses only cached blocks of up to 125% of a request and
 /// `AGG_ALLOC_POISON=1` fills reused blocks with a pattern (a test mode).
 #[global_allocator]
 static ALLOC: agg_piop::alloc::HugePageAlloc = agg_piop::alloc::HugePageAlloc;
@@ -47,6 +48,9 @@ fn main() -> ExitCode {
     }
     if std::env::var_os("AGG_ALLOC_POISON").is_some_and(|v| v == "1") {
         agg_piop::alloc::set_poison(true);
+    }
+    if std::env::var_os("AGG_ALLOC_SPLIT").is_some_and(|v| v == "0") {
+        agg_piop::alloc::set_split(false);
     }
     if std::env::var_os("AGG_SIMD_REPORT").is_some_and(|v| v == "1") {
         for line in agg_cli::simd_report() {

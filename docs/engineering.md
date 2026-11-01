@@ -60,8 +60,13 @@ global allocator (`HugePageAlloc`) that handles blocks of at least 4 MiB directl
   `madvise(MADV_HUGEPAGE)`, and first-touch faults then take 2 MiB at a time.
 - Freed blocks are kept in a 64-slot cache, oldest first, with FIFO eviction when the slots
   or the byte cap are exhausted. The default cap is 6 GiB, and a block larger than the cap
-  is unmapped. A later uninitialised allocation takes the smallest cached block between the
-  requested size and 125% of it, trims it, and needs neither a fault nor an unmap.
+  is unmapped. A later uninitialised allocation takes the smallest cached block of at least
+  the requested size and needs no fault. A block with at least 4 MiB to spare is split: the
+  head is handed out and the tail stays cached as its own block, so whether a request hits
+  does not depend on the exact sizes freed before it (the prover's phases free tables of
+  sizes that change with every kernel change). A block with less to spare is trimmed.
+  `AGG_ALLOC_SPLIT=0` restores the earlier rule: only blocks of up to 125% of the request,
+  trimmed.
 - A zeroed allocation always takes a fresh mapping. Its zero pages are then faulted in by
   whichever threads first write them, in parallel; zeroing a cached block would be one
   serial `memset`. A grow uses `mremap` in place when the address space allows it and
@@ -70,13 +75,14 @@ global allocator (`HugePageAlloc`) that handles blocks of at least 4 MiB directl
   the bytes an allocation can observe. Non-Linux targets forward everything to the system
   allocator.
 
-The allocator is installed in `crates/agg-cli/src/main.rs`. `set_enabled`, `set_cache_bytes`
-and `set_poison` are the knobs behind the environment variables:
+The allocator is installed in `crates/agg-cli/src/main.rs`. `set_enabled`, `set_cache_bytes`,
+`set_split` and `set_poison` are the knobs behind the environment variables:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `AGG_HUGEPAGE` | on | `0` turns the huge-page advice off. |
 | `AGG_ALLOC_CACHE` | 6 GiB | Cap of the cache in GiB; `0` disables the cache and releases it. |
+| `AGG_ALLOC_SPLIT` | on | `0` reuses only cached blocks of up to 125% of a request. |
 | `AGG_ALLOC_POISON` | off | `1` fills every reused block with `0xA5` before returning it. |
 
 Poison mode is a test mode: it exposes a reader of uninitialised memory, including in
@@ -95,8 +101,8 @@ as uninitialised storage and written in parallel, so its pages are first touched
 writers. The reusable primitives are `uninit`, `fill_par`, `reuse` and `finish` in
 `crates/agg-piop/src/kernel/buf.rs`. `MainTables::encode_tiles`
 (`crates/agg-piop/src/source_tables.rs`) allocates the final columns once and gives each
-worker a disjoint tile of records; `build_nodes` (`crates/agg-piop/src/lookup.rs`) touches
-both lanes of a layer in parallel; `expand` and `attach_small_i16`
+worker a disjoint tile of records; `build_levels` (`crates/agg-piop/src/lookup.rs`) touches
+every layer it writes in parallel; `expand` and `attach_small_i16`
 (`vendor/akita/crates/akita-cpu-backend/src/sources/dense/`) fill the field plane and the
 signed-16 mirror in chunks of 32K cells on the caller's pool. Flock's
 `alloc_zeroed_vec` (`vendor/flock-core/src/lib.rs`) uses `alloc_zeroed`, whose zero pages are

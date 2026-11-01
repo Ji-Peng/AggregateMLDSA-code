@@ -104,6 +104,7 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_OPENING_THREADS` | threads of the pool that runs the opening's finish part; the prepare part runs on the PIOP pool; default one per physical core |
 | `AGG_HUGEPAGE` | `0`: turn the huge-page advice off |
 | `AGG_ALLOC_CACHE` | cap the cache of freed large blocks in GiB (default 6, `0` disables it) |
+| `AGG_ALLOC_SPLIT` | `0`: reuse only cached blocks of up to 125% of a request (default: split any larger block) |
 | `AGG_ALLOC_POISON` | `1`: fill reused blocks with `0xA5` (test mode for uninitialised reads) |
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
