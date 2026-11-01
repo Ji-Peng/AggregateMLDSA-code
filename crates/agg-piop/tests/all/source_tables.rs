@@ -34,7 +34,7 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
         assert_eq!(main.column(&manifest, column).value(padded), -i64::from(LOOKUP_SHIFT));
     }
     assert_eq!(main.column(&manifest, Column::U_LO).value(padded), -31_540);
-    for column in [Column::V_HI, Column::Z_HI, Column::U_HI, Column::W1Bit(0)] {
+    for column in [Column::V_HI, Column::Z_HI, Column::U_HI, Column::W1Bit(0, 0)] {
         assert_eq!(main.column(&manifest, column).value(padded), 0);
     }
     // The same tables from the derived values.
@@ -87,7 +87,7 @@ fn main_tables_encode_l16_and_reject_wrong_shapes_and_alphabets() {
     ));
     // A non-Boolean bit, a base-4 top digit outside [-2, 1], a base-6 digit outside [-3, 2],
     // a 16-bit column outside [-2^15, 2^15): the self-check names the group, column and cell.
-    let b3 = manifest.locate(Column::W1Bit(3)).1;
+    let b3 = manifest.locate(Column::W1Bit(3, 0)).1;
     let z_hi = manifest.locate(Column::Z_HI).1;
     let u_hi = manifest.locate(Column::U_HI).1;
     for (column, cell, value) in [(b3, 77, 2_i8), (z_hi, 5, 2), (u_hi, 6, 3), (u_hi, 7, -4)] {
@@ -226,7 +226,7 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
     assert_eq!((at(Column::U_LO), at(Column::U_HI)), (-31_540, 0));
     assert_eq!((at(Column::V_LO), at(Column::V_HI)), (-i64::from(LOOKUP_SHIFT), 0));
     // The H-exact and H-u tables share u, v and the bits cell for cell.
-    for column in [Column::U_LO, Column::U_HI, Column::V_LO, Column::V_HI, Column::W1Bit(4)] {
+    for column in [Column::U_LO, Column::U_HI, Column::V_LO, Column::V_HI, Column::W1Bit(4, 0)] {
         assert_eq!(
             main.column(&manifest, column).to_i64(),
             hu_main.column(&hu_manifest, column).to_i64(),
@@ -234,7 +234,7 @@ fn h_exact_main_tables_encode_the_exact_z_form() {
             column.name()
         );
     }
-    let mut values = Vec::new();
+    let mut values: Vec<RecordValues> = Vec::new();
     for (i, (record, signed)) in instance.records.iter().zip(&records).enumerate() {
         let w = derive(&record.key, &record.mu, &signed.sig).unwrap();
         let decoded = main.record_values(&manifest, i);

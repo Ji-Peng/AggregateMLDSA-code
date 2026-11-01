@@ -691,23 +691,23 @@ fn every_stage_tampering_is_rejected_end_to_end() {
         // vector no longer matches the projection of the public bits.
         expect(
             "flipped bit",
-            &tampered(&|m| *cell(&manifest, m, Column::W1Bit(0), x) ^= 1),
+            &tampered(&|m| *cell(&manifest, m, Column::W1Bit(0, 0), x) ^= 1),
             &|e| matches!(e, VerifyError::Keccak(0)),
         );
         // A non-Boolean bit (0 -> 2 keeps every parity): Booleanity in stage 1.
         let even = (0..1024)
             .map(|p| main_index(p % 256, p / 256, 7))
-            .find(|&y| *cell(&manifest, &mut honest.clone(), Column::W1Bit(1), y) == 0)
+            .find(|&y| *cell(&manifest, &mut honest.clone(), Column::W1Bit(1, 0), y) == 0)
             .unwrap();
         expect(
             "bit = 2",
-            &tampered(&|m| *cell(&manifest, m, Column::W1Bit(1), even) = 2),
+            &tampered(&|m| *cell(&manifest, m, Column::W1Bit(1, 0), even) = 2),
             &at_stage(1),
         );
         // w1' = 44 in the committed bits only: the projection.
         let w44 = tampered(&|m| {
             for (t, bit) in [0, 0, 1, 1, 0, 1].into_iter().enumerate() {
-                *cell(&manifest, m, Column::W1Bit(t as u8), x) = bit;
+                *cell(&manifest, m, Column::W1Bit(t as u8, 0), x) = bit;
             }
         });
         expect("w1' = 44", &w44, &|e| matches!(e, VerifyError::Keccak(0)));
@@ -867,7 +867,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
         };
         // Two positions of record 3 whose u can absorb -2 gamma_2 (w1' bit 0 flipped).
         let shifted = |x: usize| {
-            let delta = if read(&honest, Column::W1Bit(0), x) == 0 {
+            let delta = if read(&honest, Column::W1Bit(0, 0), x) == 0 {
                 1
             } else {
                 -1
@@ -883,7 +883,7 @@ fn committed_bits_other_than_the_public_ones_are_caught_by_the_bit_check() {
         assert_eq!(positions.len(), 2);
         let mut tampered = honest.clone();
         for &(x, u) in &positions {
-            *cell(&manifest, &mut tampered, Column::W1Bit(0), x) ^= 1;
+            *cell(&manifest, &mut tampered, Column::W1Bit(0, 0), x) ^= 1;
             let digits = U16_DIGITS.decompose(u);
             *tampered.wide_cell_mut(&manifest, Column::U_LO, x) = digits[0] as i32;
             *cell(&manifest, &mut tampered, Column::U_HI, x) = digits[1] as i8;

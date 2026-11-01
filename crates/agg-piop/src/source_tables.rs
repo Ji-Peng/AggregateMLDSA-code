@@ -41,21 +41,21 @@ use agg_bridge::{parity, Shape};
 use agg_simd::buf::AlignedVec;
 use agg_witness::bridge::{BridgeError, BridgeMatrices, M3};
 use agg_mldsa_simd::{Engine, HuCols};
-use agg_witness::derive::{derive_with_t, DeriveError};
+use agg_witness::derive::{derive_with_t, derive_with_t_for, DeriveError};
 use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
 use agg_witness::hfips::honest_coeff;
 use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
 use agg_witness::padding::{main_index, Geometry, GeometryError};
-use agg_witness::params::{GAMMA2, K, L, N, OMEGA, POSITIONS, W1_BITS};
+use agg_witness::params::{ParamSet, Set, Set44, GAMMA2, K, L, N, OMEGA, W1_BITS};
 use rayon::prelude::*;
 
 use crate::kernel::{Lane, Source};
 use crate::projection::ProjectionTables;
 use crate::lookup::{multiplicities, multiplicity_digits, LookupError, LookupStack, StackShape, Table};
 use crate::manifest::{
-    value_columns, Column, CommitmentManifest, DigitValue, FipsColumn, GroupDescriptor, GroupRole,
-    Relation, LOOKUP_SHIFT, STACK_DOMAINS,
+    value_columns, value_lane_columns, Column, CommitmentManifest, DigitValue, FipsColumn,
+    GroupDescriptor, GroupRole, Relation, SetShape, LOOKUP_SHIFT,
 };
 use std::mem::MaybeUninit;
 use agg_witness::digits::ValueForm;
@@ -294,20 +294,21 @@ pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Re
     Ok(())
 }
 
-/// The values of one record: `z, u, v` and the six bit lanes.
+/// The values of one record of parameter set `P`: `z, u, v` and `w_1'` (whose bits are the
+/// bit columns).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecordValues {
+pub struct RecordValues<P: ParamSet = Set44> {
     /// `z[s][j]`.
-    pub z: VecL,
+    pub z: P::VecL,
     /// `u[rho][j]`.
-    pub u: VecK,
+    pub u: P::VecK,
     /// `v[rho][j]`.
-    pub v: VecK,
+    pub v: P::VecK,
     /// `w_1'[rho][j]` (bit `t` is `b_t`).
-    pub w1: [[u8; N]; K],
+    pub w1: P::SmallK,
 }
 
-impl RecordValues {
+impl RecordValues<Set44> {
     /// The canonical all-zero witness of a padded row.
     #[must_use]
     pub const fn zero() -> Self {
@@ -316,6 +317,19 @@ impl RecordValues {
             u: [[0; N]; K],
             v: [[0; N]; K],
             w1: [[0; N]; K],
+        }
+    }
+}
+
+impl<P: ParamSet> RecordValues<P> {
+    /// The canonical all-zero witness of a padded row of any set.
+    #[must_use]
+    pub fn zeroed() -> Self {
+        Self {
+            z: P::zero_vec_l(),
+            u: P::zero_vec_k(),
+            v: P::zero_vec_k(),
+            w1: P::zero_small_k(),
         }
     }
 }
@@ -346,104 +360,156 @@ enum Slot {
 const MAX_DIGITS: usize = 8;
 
 /// The relation's encoder: the value forms of `z, u, v` (H-FIPS: `z, L, v`) with the slot of
-/// each digit, the slots of the bits and, under H-FIPS, of `s, delta, e` (resolved once per
-/// batch from the manifest).
+/// each digit in each polynomial lane, the slots of the bits and, under H-FIPS, of `s, delta,
+/// e` (resolved once per batch from the manifest). Row `rho` of a vector sits in lane
+/// `rho >> d_vec` at cells `256 (rho mod 2^d_vec) ..` of the record ([`SetShape::row_lane`]).
 struct Encoder {
-    values: [(ValueForm, Vec<Slot>, &'static str); 3],
-    bits: [usize; W1_BITS],
+    /// Per value: the form, `slots[lane][digit]` and the abort message.
+    values: [(ValueForm, Vec<Vec<Slot>>, &'static str); 3],
+    /// `bits[t][lane]`: the narrow slot of `b_t` in lane `lane`.
+    bits: Vec<Vec<usize>>,
     fips: Option<[usize; 3]>,
+    wide: usize,
     narrow: usize,
+    shape: SetShape,
+    w1_what: &'static str,
 }
 
 impl Encoder {
     fn new(manifest: &CommitmentManifest) -> Self {
+        let shape = manifest.shape();
         let slot = |column: Column| match manifest.locate(column) {
             (GroupRole::Main16, position) => Slot::Wide(position),
             (GroupRole::Main, position) => Slot::Narrow(position),
             (role, _) => panic!("{} is in {role:?}, not a main group", column.name()),
         };
-        let value = |value: DigitValue, what: &'static str| {
-            (value.layout(), value_columns(value).into_iter().map(slot).collect(), what)
+        let value = |value: DigitValue, lanes: usize, what: &'static str| {
+            let slots = (0..lanes as u8)
+                .map(|lane| value_lane_columns(value, lane).into_iter().map(slot).collect())
+                .collect();
+            (value.layout(), slots, what)
         };
         let z_range = match manifest.z_value() {
             DigitValue::Zx => "z outside [-130,993, 130,993]",
+            DigitValue::Zd => "z outside [-2^19, 2^19)",
             _ => "z outside [-2^17, 2^17)",
         };
         let narrow_slot = |column: Column| match slot(column) {
             Slot::Narrow(position) => position,
             Slot::Wide(_) => unreachable!("{} is narrow", column.name()),
         };
-        let u_what = if manifest.is_fips() {
-            "L outside [0, gamma_2)"
-        } else {
-            "u outside [-190,465, 190,465]"
+        let u_what = match manifest.u_slot_value() {
+            DigitValue::L => "L outside [0, gamma_2)",
+            DigitValue::Ud => "u outside [-523,777, 523,777]",
+            _ => "u outside [-190,465, 190,465]",
         };
         let values = [
-            value(manifest.z_value(), z_range),
-            value(manifest.u_slot_value(), u_what),
-            value(DigitValue::V, "v outside [-2^31, 2^31)"),
+            value(manifest.z_value(), shape.lanes_l, z_range),
+            value(manifest.u_slot_value(), shape.lanes_k, u_what),
+            value(DigitValue::V, shape.lanes_k, "v outside [-2^31, 2^31)"),
         ];
         assert!(values.iter().all(|(form, _, _)| form.len() <= MAX_DIGITS), "at most {MAX_DIGITS} digits");
         Self {
             values,
-            bits: std::array::from_fn(|t| narrow_slot(Column::W1Bit(t as u8))),
+            bits: (0..shape.w1_bits as u8)
+                .map(|t| (0..shape.lanes_k as u8).map(|lane| narrow_slot(Column::W1Bit(t, lane))).collect())
+                .collect(),
             fips: manifest
                 .is_fips()
                 .then(|| FipsColumn::ALL.map(|c| narrow_slot(Column::Fips(c)))),
+            wide: manifest.group(GroupRole::Main16).polynomial_count(),
             narrow: manifest.group(GroupRole::Main).polynomial_count(),
+            shape,
+            w1_what: if shape.w1_bits == 6 { "w1' above six bits" } else { "w1' above four bits" },
         }
+    }
+
+    /// Decompose `x` by value `value`'s form into its slots of lane `lane` at cell `pos`.
+    #[inline]
+    fn put(
+        &self,
+        value: usize,
+        lane: usize,
+        pos: usize,
+        x: i64,
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
+    ) -> Result<(), SourceTableError> {
+        let (form, slots, what) = &self.values[value];
+        let mut buffer = [0_i64; MAX_DIGITS];
+        let digits = &mut buffer[..form.len()];
+        form.decompose_into(x, digits);
+        if !form.in_alphabets(digits) {
+            return Err(SourceTableError::Encode(what));
+        }
+        for (&slot, &digit) in slots[lane].iter().zip(&*digits) {
+            match slot {
+                Slot::Wide(c) => {
+                    wide[c][pos].write(i32::try_from(digit).expect("16-bit digit"));
+                }
+                Slot::Narrow(c) => {
+                    narrow[c][pos].write(i8::try_from(digit).expect("small digit"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_values<P: ParamSet>(
+        &self,
+        values: &RecordValues<P>,
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
+    ) -> Result<i64, SourceTableError> {
+        self.encode(values.z.as_ref(), values.u.as_ref(), values.v.as_ref(), values.w1.as_ref(), wide, narrow)
     }
 
     fn encode(
         &self,
-        values: &RecordValues,
-        wide: &mut [&mut [std::mem::MaybeUninit<i32>]],
-        narrow: &mut [&mut [std::mem::MaybeUninit<i8>]],
+        z: &[[i64; N]],
+        u: &[[i64; N]],
+        v: &[[i64; N]],
+        w1: &[[u8; N]],
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
     ) -> Result<i64, SourceTableError> {
+        let shape = self.shape;
         let mut weight = 0_i64;
-        for row in 0..K {
+        for row in 0..shape.k.max(shape.l) {
+            let (lane, base) = shape.row_lane(row);
             for j in 0..N {
-                let pos = j + N * row;
+                let pos = base + j;
                 // H-FIPS: the coefficient's witness; its magnitude L takes the slot of u.
-                let middle = match self.fips {
-                    None => values.u[row][j],
-                    Some(slots) => {
-                        let c = fips_coefficient(values.u[row][j], i64::from(values.w1[row][j]))
-                            .ok_or(SourceTableError::Encode("w1' not reachable from w' by UseHint"))?;
-                        let cells = [(1 + c.sigma) / 2, c.delta, c.e];
-                        for (&slot, cell) in slots.iter().zip(cells) {
-                            narrow[slot][pos].write(cell as i8);
+                let middle = if row < shape.k {
+                    Some(match self.fips {
+                        None => u[row][j],
+                        Some(slots) => {
+                            let c = fips_coefficient(u[row][j], i64::from(w1[row][j]))
+                                .ok_or(SourceTableError::Encode("w1' not reachable from w' by UseHint"))?;
+                            let cells = [(1 + c.sigma) / 2, c.delta, c.e];
+                            for (&slot, cell) in slots.iter().zip(cells) {
+                                narrow[slot][pos].write(cell as i8);
+                            }
+                            weight += c.weight();
+                            c.l()
                         }
-                        weight += c.weight();
-                        c.l()
-                    }
+                    })
+                } else {
+                    None
                 };
-                // z is indexed by (j, s); u, v and the bits by (j, rho): both are j + 256 * row.
-                let inputs = [values.z[row][j], middle, values.v[row][j]];
-                for ((form, slots, what), x) in self.values.iter().zip(inputs) {
-                    let mut buffer = [0_i64; MAX_DIGITS];
-                    let digits = &mut buffer[..form.len()];
-                    form.decompose_into(x, digits);
-                    if !form.in_alphabets(digits) {
-                        return Err(SourceTableError::Encode(what));
-                    }
-                    for (&slot, &digit) in slots.iter().zip(&*digits) {
-                        match slot {
-                            Slot::Wide(c) => {
-                                wide[c][pos].write(i32::try_from(digit).expect("16-bit digit"));
-                            }
-                            Slot::Narrow(c) => {
-                                narrow[c][pos].write(i8::try_from(digit).expect("small digit"));
-                            }
-                        }
-                    }
+                // z is indexed by (j, s); u, v and the bits by (j, rho).
+                if row < shape.l {
+                    self.put(0, lane, pos, z[row][j], wide, narrow)?;
                 }
-                let w1 = values.w1[row][j];
-                if w1 >= 64 {
-                    return Err(SourceTableError::Encode("w1' above six bits"));
+                let Some(middle) = middle else { continue };
+                self.put(1, lane, pos, middle, wide, narrow)?;
+                self.put(2, lane, pos, v[row][j], wide, narrow)?;
+                let w1 = w1[row][j];
+                if usize::from(w1) >> shape.w1_bits != 0 {
+                    return Err(SourceTableError::Encode(self.w1_what));
                 }
-                for (t, &c) in self.bits.iter().enumerate() {
-                    narrow[c][pos].write(((w1 >> t) & 1) as i8);
+                for (t, slots) in self.bits.iter().enumerate() {
+                    narrow[slots[lane]][pos].write(((w1 >> t) & 1) as i8);
                 }
             }
         }
@@ -456,7 +522,7 @@ impl Encoder {
 }
 
 /// The final-column views of one record: the `G_main16` columns, then the `G_main4` columns
-/// (manifest order, `POSITIONS` cells each).
+/// (manifest order, [`CommitmentManifest::lane_cells`] cells each).
 type RecordViews<'a> = (Vec<&'a mut [MaybeUninit<i32>]>, Vec<&'a mut [MaybeUninit<i8>]>);
 
 /// Relation H-u's manifest slots in the column order of the engine's digit kernel:
@@ -476,7 +542,7 @@ impl HuSlots {
         };
         let narrow = [Column::Z_HI, Column::U_HI]
             .into_iter()
-            .chain((0..W1_BITS as u8).map(Column::W1Bit));
+            .chain((0..W1_BITS as u8).map(|t| Column::W1Bit(t, 0)));
         Self {
             wide: [Column::Z_LO, Column::U_LO, Column::V_LO, Column::V_HI].map(|c| at(c, GroupRole::Main16)),
             narrow: std::array::from_fn({
@@ -508,10 +574,14 @@ impl HuSlots {
 }
 
 /// Round-1 tables: `G_main16` (one stacked `i32` lane) and `G_main4` (`i8` columns), and
-/// under H-FIPS the hint slack of every record (committed in round 2, `G_2`).
+/// under H-FIPS the hint slack of every record (committed in round 2, `G_2`). Every
+/// polynomial holds [`CommitmentManifest::lane_cells`] cells per record: 1,024 for ML-DSA-44
+/// (all four rows of a vector), 256 for ML-DSA-65 and ML-DSA-87 (one row per lane).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MainTables {
     geom: Geometry,
+    set: Set,
+    lane_cells: usize,
     wide: AlignedVec<i32>,
     narrow: Vec<AlignedVec<i8>>,
     hint_slack: Vec<i64>,
@@ -520,20 +590,27 @@ pub struct MainTables {
 impl MainTables {
     /// Encodes the record values (live records in order; padded rows get the zero
     /// witness) and checks the tables against the manifest.
-    pub fn from_values(manifest: &CommitmentManifest, values: &[RecordValues]) -> Result<Self, SourceTableError> {
+    ///
+    /// # Panics
+    /// If the manifest is of another parameter set than `P`.
+    pub fn from_values<P: ParamSet>(
+        manifest: &CommitmentManifest,
+        values: &[RecordValues<P>],
+    ) -> Result<Self, SourceTableError> {
         Self::encode_records(manifest, values.len(), |i| Ok(values[i].clone()))
     }
 
     /// Encode record by record (live records from `record`, padded rows the zero witness).
-    fn encode_records(
+    fn encode_records<P: ParamSet>(
         manifest: &CommitmentManifest,
         count: usize,
-        record: impl Fn(usize) -> Result<RecordValues, SourceTableError> + Sync,
+        record: impl Fn(usize) -> Result<RecordValues<P>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
+        assert_eq!(manifest.set(), P::SET, "values of the manifest's parameter set");
         Self::encode_tiles(manifest, count, 1, |encoder, i, views| {
             let (wide, narrow) = &mut views[0];
-            let values = if i < count { record(i)? } else { RecordValues::zero() };
-            Ok(vec![encoder.encode(&values, wide, narrow)?])
+            let values = if i < count { record(i)? } else { RecordValues::zeroed() };
+            Ok(vec![encoder.encode_values(&values, wide, narrow)?])
         })
     }
 
@@ -553,18 +630,20 @@ impl MainTables {
         if geom.n != manifest.records() || geom.n_star != manifest.padded_records() {
             return Err(SourceTableError::Records { expected: manifest.records(), actual: geom.n });
         }
-        let cells = geom.main_len();
-        let mut wide = AlignedVec::<i32>::uninit(4 * cells);
+        let lane_cells = manifest.lane_cells();
+        let cells = geom.n_star * lane_cells;
+        let mut wide = AlignedVec::<i32>::uninit(encoder.wide * cells);
         let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| AlignedVec::<i8>::uninit(cells)).collect();
-        let mut views: Vec<RecordViews<'_>> =
-            (0..geom.n_star).map(|_| (Vec::with_capacity(4), Vec::with_capacity(encoder.narrow))).collect();
+        let mut views: Vec<RecordViews<'_>> = (0..geom.n_star)
+            .map(|_| (Vec::with_capacity(encoder.wide), Vec::with_capacity(encoder.narrow)))
+            .collect();
         for column in wide.chunks_exact_mut(cells) {
-            for (i, chunk) in column.chunks_exact_mut(POSITIONS).enumerate() {
+            for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
                 views[i].0.push(chunk);
             }
         }
         for column in &mut narrow {
-            for (i, chunk) in column.chunks_exact_mut(POSITIONS).enumerate() {
+            for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
                 views[i].1.push(chunk);
             }
         }
@@ -579,7 +658,7 @@ impl MainTables {
         let wide = unsafe { wide.assume_init() };
         let narrow = narrow.into_iter().map(|column| unsafe { column.assume_init() }).collect();
         let tables = Self {
-            geom, wide, narrow,
+            geom, set: manifest.set(), lane_cells, wide, narrow,
             hint_slack: if encoder.fips.is_some() { hint_slack } else { Vec::new() },
         };
         tables.validate(manifest)?;
@@ -601,6 +680,9 @@ impl MainTables {
     /// H-u the engine writes the digits of each row straight into the record's final
     /// column views, under H-exact and H-FIPS the generic encoder takes the values.
     /// Identical to [`MainTables::build_reference`].
+    ///
+    /// # Panics
+    /// If the manifest is not ML-DSA-44's ([`MainTables::build_for`] builds every set).
     #[doc(hidden)]
     pub fn build_with(
         engine: &Engine,
@@ -608,6 +690,7 @@ impl MainTables {
         instance: &PublicInstance,
         signatures: &[&[u8]],
     ) -> Result<Self, SourceTableError> {
+        assert_eq!(manifest.set(), Set::S44, "the engine path encodes ML-DSA-44");
         if signatures.len() != instance.records.len() {
             return Err(SourceTableError::Records {
                 expected: instance.records.len(), actual: signatures.len(),
@@ -625,7 +708,7 @@ impl MainTables {
             let mut slack = Vec::with_capacity(views.len());
             for (k, (wide, narrow)) in views.iter_mut().enumerate() {
                 let Some(w) = derived.get(k) else {
-                    slack.push(encoder.encode(&RecordValues::zero(), wide, narrow)?);
+                    slack.push(encoder.encode_values(&RecordValues::zero(), wide, narrow)?);
                     continue;
                 };
                 match &hu {
@@ -634,8 +717,8 @@ impl MainTables {
                         slack.push(OMEGA as i64);
                     }
                     None => {
-                        let values = RecordValues { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
-                        slack.push(encoder.encode(&values, wide, narrow)?);
+                        let values = RecordValues::<Set44> { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
+                        slack.push(encoder.encode_values(&values, wide, narrow)?);
                     }
                 }
             }
@@ -656,11 +739,49 @@ impl MainTables {
                 expected: instance.records.len(), actual: signatures.len(),
             });
         }
-        Self::encode_records(manifest, instance.records.len(), |i| {
+        Self::encode_records::<Set44>(manifest, instance.records.len(), |i| {
             let record = &instance.records[i];
             let witness = derive_with_t(&record.key, &record.mu, signatures[i], &record.c_tilde, &record.t)
                 .map_err(|e| SourceTableError::Derive(i, e))?;
             Ok(RecordValues { z: witness.z, u: witness.u, v: witness.v, w1: witness.w1 })
+        })
+    }
+
+    /// The tables of any parameter set from the legacy derivation (`derive_with_t_for`) and
+    /// the generic encoder, records in tiles of [`TILE`] in parallel. For ML-DSA-44 it equals
+    /// [`MainTables::build`], which runs the SIMD engine instead.
+    ///
+    /// # Panics
+    /// If the manifest is of another parameter set than `P`.
+    pub fn build_for<P: ParamSet>(
+        manifest: &CommitmentManifest,
+        instance: &PublicInstance<P>,
+        signatures: &[&[u8]],
+    ) -> Result<Self, SourceTableError> {
+        assert_eq!(manifest.set(), P::SET, "an instance of the manifest's parameter set");
+        if signatures.len() != instance.records.len() {
+            return Err(SourceTableError::Records {
+                expected: instance.records.len(), actual: signatures.len(),
+            });
+        }
+        let count = instance.records.len();
+        Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+            let mut slack = Vec::with_capacity(views.len());
+            for (k, (wide, narrow)) in views.iter_mut().enumerate() {
+                let i = first + k;
+                let values = match instance.records.get(i) {
+                    None => RecordValues::<P>::zeroed(),
+                    Some(record) => {
+                        let t: Vec<[i32; N]> = (0..P::K).map(|row| record.t[row]).collect();
+                        let witness =
+                            derive_with_t_for::<P>(&record.key, &record.mu, signatures[i], &record.c_tilde, &t)
+                                .map_err(|e| SourceTableError::Derive(i, e))?;
+                        RecordValues::<P> { z: witness.z, u: witness.u, v: witness.v, w1: witness.w1 }
+                    }
+                };
+                slack.push(encoder.encode_values(&values, wide, narrow)?);
+            }
+            Ok(slack)
         })
     }
 
@@ -671,10 +792,24 @@ impl MainTables {
         validate_group(manifest.group(GroupRole::Main), &narrow)
     }
 
-    /// Batch geometry.
+    /// Batch geometry: the record counts and `d_sig` of any set; its main-domain helpers
+    /// (`d_main`, `main_len`) are ML-DSA-44's, so other sets read
+    /// [`CommitmentManifest::d_main`] and [`MainTables::main_len`].
     #[must_use]
     pub const fn geometry(&self) -> Geometry {
         self.geom
+    }
+
+    /// The parameter set of the tables.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
+    }
+
+    /// Cells of one main-domain polynomial: `N* 2^(d_main - d_sig)`.
+    #[must_use]
+    pub const fn main_len(&self) -> usize {
+        self.geom.n_star * self.lane_cells
     }
 
     /// The H-FIPS hint slack `u_h = 80 - sum delta^2` per record (`N*` entries, padded rows
@@ -691,7 +826,8 @@ impl MainTables {
     }
 
     /// The stacked `G_main16` lane `Z_lo | U_lo | V_lo | V_hi` (`bz_lo` for `Z_lo` under
-    /// H-exact; `4 * 2^d_main` cells).
+    /// H-exact; `4 * 2^d_main` cells; for ML-DSA-65 and ML-DSA-87 every column is its lanes in
+    /// order, `l + 3k` polynomials).
     #[must_use]
     pub fn wide(&self) -> &[i32] {
         &self.wide
@@ -701,7 +837,7 @@ impl MainTables {
     #[must_use]
     pub fn wide_columns(&self) -> Vec<Cells<'_>> {
         self.wide
-            .chunks_exact(self.geom.main_len())
+            .chunks_exact(self.main_len())
             .map(Cells::Wide)
             .collect()
     }
@@ -719,7 +855,7 @@ impl MainTables {
         let (role, position) = manifest.locate(column);
         match role {
             GroupRole::Main16 => {
-                let cells = self.geom.main_len();
+                let cells = self.main_len();
                 Cells::Wide(&self.wide[position * cells..(position + 1) * cells])
             }
             GroupRole::Main => Cells::Narrow(&self.narrow[position]),
@@ -727,44 +863,99 @@ impl MainTables {
         }
     }
 
-    /// The six bit lanes `b_t`.
+    /// The six bit lanes `b_t` (ML-DSA-44).
     #[must_use]
     pub fn bit_lanes(&self, manifest: &CommitmentManifest) -> [&[i8]; W1_BITS] {
-        std::array::from_fn(|t| self.column(manifest, Column::W1Bit(t as u8)).narrow())
+        std::array::from_fn(|t| self.column(manifest, Column::W1Bit(t as u8, 0)).narrow())
+    }
+
+    /// The lanes of bit `b_t`, in lane order (one for ML-DSA-44).
+    #[must_use]
+    pub fn bit_columns(&self, manifest: &CommitmentManifest, t: usize) -> Vec<&[i8]> {
+        (0..manifest.shape().lanes_k as u8)
+            .map(|lane| self.column(manifest, Column::W1Bit(t as u8, lane)).narrow())
+            .collect()
+    }
+
+    /// The bridge inputs: per bit `t`, the bits of every record at position
+    /// `j + 256 rho + P_pad i` (`P_pad` the padded positions of a signature, the positions
+    /// `256 k ..P_pad` zero). For ML-DSA-44 these are the bit columns themselves.
+    #[must_use]
+    pub fn bridge_lanes(&self, manifest: &CommitmentManifest) -> Vec<Vec<i8>> {
+        let shape = manifest.shape();
+        let lane_cells = self.lane_cells;
+        (0..shape.w1_bits)
+            .map(|t| {
+                let columns = self.bit_columns(manifest, t);
+                let mut flat = vec![0_i8; shape.positions_pad * self.geom.n_star];
+                flat.par_chunks_mut(shape.positions_pad).enumerate().for_each(|(i, record)| {
+                    for (row, out) in record[..shape.positions].chunks_exact_mut(N).enumerate() {
+                        let (lane, base) = shape.row_lane(row);
+                        let start = i * lane_cells + base;
+                        out.copy_from_slice(&columns[lane][start..start + N]);
+                    }
+                });
+                flat
+            })
+            .collect()
+    }
+
+    /// The values `z, u, v` of one ML-DSA-44 record ([`MainTables::record_values_for`]).
+    #[must_use]
+    pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
+        self.record_values_for::<Set44>(manifest, i)
     }
 
     /// The values `z, u, v` of one record recomposed by the relation's value forms (any cell
     /// values); under H-FIPS `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` ([`fips_u`]).
+    ///
+    /// # Panics
+    /// If the manifest is of another parameter set than `P`.
     #[must_use]
-    pub fn record_values(&self, manifest: &CommitmentManifest, i: usize) -> (VecL, VecK, VecK) {
-        let columns = |value: DigitValue| -> Vec<Cells<'_>> {
-            value_columns(value).into_iter().map(|c| self.column(manifest, c)).collect()
-        };
-        let forms = [manifest.z_value(), manifest.u_slot_value(), DigitValue::V]
-            .map(|value| (value.layout(), columns(value)));
-        let compose = |k: usize, pos: usize| {
+    pub fn record_values_for<P: ParamSet>(
+        &self,
+        manifest: &CommitmentManifest,
+        i: usize,
+    ) -> (P::VecL, P::VecK, P::VecK) {
+        assert_eq!(manifest.set(), P::SET, "values of the manifest's parameter set");
+        let shape = manifest.shape();
+        let lanes = [shape.lanes_l, shape.lanes_k, shape.lanes_k];
+        let values = [manifest.z_value(), manifest.u_slot_value(), DigitValue::V];
+        let forms: Vec<(ValueForm, Vec<Vec<Cells<'_>>>)> = values
+            .iter()
+            .zip(lanes)
+            .map(|(&value, lanes)| {
+                let cells = (0..lanes as u8)
+                    .map(|lane| {
+                        value_lane_columns(value, lane).into_iter().map(|c| self.column(manifest, c)).collect()
+                    })
+                    .collect();
+                (value.layout(), cells)
+            })
+            .collect();
+        let compose = |k: usize, lane: usize, x: usize| {
             let (form, cells) = &forms[k];
-            let digits: Vec<i64> = cells.iter().map(|c| c.value(i * POSITIONS + pos)).collect();
+            let digits: Vec<i64> = cells[lane].iter().map(|c| c.value(x)).collect();
             form.compose(&digits)
         };
         let fips = manifest
             .is_fips()
             .then(|| FipsColumn::ALL.map(|c| self.column(manifest, Column::Fips(c))));
-        let mut z = [[0; N]; L];
-        let mut u = [[0; N]; K];
-        let mut v = [[0; N]; K];
-        for row in 0..K {
+        let (mut z, mut u, mut v) = (P::zero_vec_l(), P::zero_vec_k(), P::zero_vec_k());
+        for row in 0..shape.k.max(shape.l) {
+            let (lane, base) = shape.row_lane(row);
             for j in 0..N {
-                let pos = j + N * row;
-                z[row][j] = compose(0, pos);
-                u[row][j] = match &fips {
-                    None => compose(1, pos),
-                    Some([s, delta, e]) => {
-                        let x = i * POSITIONS + pos;
-                        fips_u(compose(1, pos), s.value(x), delta.value(x), e.value(x))
-                    }
-                };
-                v[row][j] = compose(2, pos);
+                let x = i * self.lane_cells + base + j;
+                if row < shape.l {
+                    z[row][j] = compose(0, lane, x);
+                }
+                if row < shape.k {
+                    u[row][j] = match &fips {
+                        None => compose(1, lane, x),
+                        Some([s, delta, e]) => fips_u(compose(1, lane, x), s.value(x), delta.value(x), e.value(x)),
+                    };
+                    v[row][j] = compose(2, lane, x);
+                }
             }
         }
         (z, u, v)
@@ -787,7 +978,8 @@ impl MainTables {
     pub fn wide_cell_mut(&mut self, manifest: &CommitmentManifest, column: Column, x: usize) -> &mut i32 {
         let (role, position) = manifest.locate(column);
         assert_eq!(role, GroupRole::Main16, "a G_main16 column");
-        &mut self.wide[position * self.geom.main_len() + x]
+        let cells = self.main_len();
+        &mut self.wide[position * cells + x]
     }
 }
 
@@ -888,13 +1080,18 @@ impl BridgeGroupTables {
         matrices: &BridgeMatrices,
         psi: &[u8],
     ) -> Result<Self, SourceTableError> {
-        let proj = ProjectionTables::build(
-            manifest,
-            main.column(manifest, Column::V_LO).wide(),
-            main.column(manifest, Column::V_HI).wide(),
-            psi,
-        )?;
-        let shape = Shape::PRODUCTION;
+        let lanes = 0..manifest.shape().lanes_k as u8;
+        let v_lo: Vec<&[i32]> = lanes.clone().map(|lane| main.column(manifest, Column::V_LO.in_lane(lane)).wide()).collect();
+        let v_hi: Vec<&[i32]> = lanes.map(|lane| main.column(manifest, Column::V_HI.in_lane(lane)).wide()).collect();
+        let proj = ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?;
+        let shape = Shape::production(manifest.set());
+        if manifest.set() != Set::S44 {
+            // Four bit lanes: the general parity path over the padded bridge inputs.
+            let inputs = main.bridge_lanes(manifest);
+            let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
+            let witness = parity::compute(&shape, &inputs, matrices).map_err(SourceTableError::Bridge)?;
+            return Self::from_witness(manifest, main, witness, Vec::new(), proj, psi);
+        }
         let bit_lanes = main.bit_lanes(manifest);
         let hint_slack = manifest
             .is_fips()
@@ -929,23 +1126,37 @@ impl BridgeGroupTables {
         }
         let witness = parity::compute(&shape, &bit_lanes, matrices)
             .map_err(SourceTableError::Bridge)?;
+        Self::from_witness(manifest, main, witness, hint_slack.into_iter().collect(), proj, psi)
+    }
+
+    /// The tables of a general-path parity witness: the carries stacked in their lookup
+    /// stacks' slots (`extra_level2` after the level-2 carries: H-FIPS's hint slack), the
+    /// level-1 parities cached when there are six lanes.
+    fn from_witness(
+        manifest: &CommitmentManifest,
+        main: &MainTables,
+        witness: parity::ParityWitness,
+        extra_level2: Vec<Vec<i64>>,
+        proj: ProjectionTables,
+        psi: &[u8],
+    ) -> Result<Self, SourceTableError> {
         let narrow_bits = |table: &Vec<i64>| -> Result<Vec<i8>, SourceTableError> {
             table
                 .iter()
                 .map(|&bit| i8::try_from(bit).map_err(|_| SourceTableError::Encode("parity")))
                 .collect()
         };
+        let lookup = manifest.lookup_shape();
+        let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
         let mut level2_columns = witness.kappa2.clone();
-        if let Some(hint_slack) = hint_slack {
-            level2_columns.push(hint_slack);
-        }
+        level2_columns.extend(extra_level2);
+        let parity1: Vec<Vec<i8>> = witness.y1.iter().map(narrow_bits).collect::<Result<_, _>>()?;
         let mut tables = Self {
-            parity1: Some(witness.y1.iter().map(narrow_bits).collect::<Result<Vec<_>, _>>()?
-                .try_into().expect("six lanes")),
-            level1: stack_carries(&witness.kappa1, 8)?,
+            parity1: <[Vec<i8>; W1_BITS]>::try_from(parity1).ok(),
+            level1: stack_carries(&witness.kappa1, slots(1))?,
             parities: witness.y2.iter().map(narrow_bits).collect::<Result<_, _>>()?,
-            level2: stack_carries(&level2_columns, 8)?,
-            level3: stack_carries(std::slice::from_ref(&witness.kappa3), 1)?,
+            level2: stack_carries(&level2_columns, slots(2))?,
+            level3: stack_carries(std::slice::from_ref(&witness.kappa3), slots(3))?,
             y: witness.y_bits(),
             proj,
             psi: psi.to_vec(),
@@ -998,13 +1209,14 @@ impl BridgeGroupTables {
             stacked.chunks_exact(cells).take(count).map(Cells::Wide).collect()
         }
         let cells = manifest.group(role).logical_cells();
+        let count = |level: usize| manifest.stack_columns(manifest.carry_stack(level)).len();
         match role {
-            GroupRole::Level1 => carries(&self.level1, cells, W1_BITS),
+            GroupRole::Level1 => carries(&self.level1, cells, count(1)),
             GroupRole::Level2 => self
                 .parities
                 .iter()
                 .map(|p| Cells::Narrow(p))
-                .chain(carries(&self.level2, cells, manifest.stack_columns(2).len()))
+                .chain(carries(&self.level2, cells, count(2)))
                 .collect(),
             GroupRole::Level3 => {
                 let zeros = manifest.group(role).polynomial_count() - 1;
@@ -1019,7 +1231,8 @@ impl BridgeGroupTables {
         }
     }
 
-    /// The stacked carry lane of level `1..=3` (lookup stack `level`).
+    /// The stacked carry lane of level `1..=3` (lookup stack
+    /// [`CommitmentManifest::carry_stack`]).
     #[must_use]
     pub fn carries(&self, level: usize) -> &[i32] {
         match level {
@@ -1116,9 +1329,9 @@ impl BridgeGroupTables {
     /// The carries `kappa^(level)` as integers (`kappa = K + 2^15`), per lane.
     #[must_use]
     pub fn carry_values(&self, manifest: &CommitmentManifest, level: usize) -> Vec<Vec<i64>> {
-        let role = STACK_DOMAINS[level];
+        let role = [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3][level - 1];
         let cells = manifest.group(role).logical_cells();
-        let count = if level == 3 { 1 } else { W1_BITS };
+        let count = if level == 3 { 1 } else { manifest.shape().w1_bits };
         self.carries(level)
             .chunks_exact(cells)
             .take(count)
@@ -1127,23 +1340,26 @@ impl BridgeGroupTables {
     }
 }
 
-/// The five lookup stacks of the batch (`docs/lookup.md`), borrowed from the
-/// tables: `[Z_lo | U_lo]` (the first half of the stacked `G_main16` lane), the stacked
-/// carries of levels 1 to 3 and `[K_0 | K_1]` on the projection domain.
+/// The lookup stacks of the batch (`docs/lookup.md`), borrowed from the tables: the
+/// main-domain stacks (consecutive runs of the stacked `G_main16` lane: `[Z_lo | U_lo]`, its
+/// first half, for ML-DSA-44; runs of 8, 2, 1 or 8, 4, 2, 1 of the `Z_lo, U_lo` lanes for
+/// ML-DSA-65 and ML-DSA-87), the stacked carries of levels 1 to 3 and `[K_0 | K_1]` on the
+/// projection domain.
 pub fn lookup_stacks<'a>(
     manifest: &CommitmentManifest,
     main: &'a MainTables,
     bridge: &'a BridgeGroupTables,
 ) -> Result<Vec<LookupStack<'a>>, LookupError> {
     let shape = manifest.lookup_shape();
-    let main_stack = &main.wide()[..shape.stacks[0].leaves()];
-    let lanes: [&[i32]; 5] = [
-        main_stack,
-        bridge.carries(1),
-        bridge.carries(2),
-        bridge.carries(3),
-        &bridge.projection().stacked,
-    ];
+    let mut lanes: Vec<&[i32]> = Vec::with_capacity(shape.stacks.len());
+    let mut start = 0;
+    for stack in &shape.stacks[..manifest.main_stacks()] {
+        debug_assert_eq!(stack.slots(), stack.columns, "main-domain stacks have no padding slots");
+        let end = start + stack.leaves();
+        lanes.push(&main.wide()[start..end]);
+        start = end;
+    }
+    lanes.extend([bridge.carries(1), bridge.carries(2), bridge.carries(3), &bridge.projection().stacked]);
     shape
         .stacks
         .iter()
@@ -1188,7 +1404,7 @@ impl<'a> SourceTables<'a> {
         value_columns(value).into_iter().map(|c| self.column(c)).collect()
     }
 
-    /// The five lookup stacks.
+    /// The lookup stacks.
     pub fn lookup_stacks(&self) -> Result<Vec<LookupStack<'a>>, LookupError> {
         lookup_stacks(self.manifest, self.main, self.bridge)
     }
@@ -1217,7 +1433,7 @@ mod hu_slot_tests {
             }
             let narrow: Vec<Column> = [Column::Z_HI, Column::U_HI]
                 .into_iter()
-                .chain((0..W1_BITS as u8).map(Column::W1Bit))
+                .chain((0..W1_BITS as u8).map(|t| Column::W1Bit(t, 0)))
                 .collect();
             for (&slot, &column) in slots.narrow.iter().zip(&narrow) {
                 assert_eq!(main.columns[slot], column);
@@ -1226,6 +1442,190 @@ mod hu_slot_tests {
             // Today's manifest order is the kernel's.
             assert_eq!(slots.wide, [0, 1, 2, 3]);
             assert_eq!(slots.narrow, std::array::from_fn(|k| k));
+        }
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use agg_witness::bridge::SparseMatrix;
+    use agg_witness::params::{Set65, Set87};
+    use jolt_field::Ring;
+
+    /// Five live records of `P` (eight with padding), their instance, signatures and tables.
+    fn batch<P: ParamSet>(seed: u64) -> (CommitmentManifest, Vec<agg_witness::gen::Record>, PublicInstance<P>, MainTables) {
+        let records = agg_witness::gen::records_for::<P>(seed, 5);
+        let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
+        let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
+        let manifest = CommitmentManifest::for_set(P::SET, 5, Relation::Hu).unwrap();
+        let main = MainTables::build_for::<P>(&manifest, &instance, &signatures).unwrap();
+        (manifest, records, instance, main)
+    }
+
+    fn main_tables_follow_the_lane_layout<P: ParamSet>() {
+        let (manifest, records, instance, main) = batch::<P>(0x65);
+        let shape = manifest.shape();
+        let (k, l) = (P::K, P::L);
+        let cells = 8 * 256;
+        assert_eq!((main.set(), main.main_len()), (P::SET, cells));
+        assert_eq!(main.wide().len(), (l + 3 * k) * cells);
+        assert_eq!(main.columns().len(), 2 * l + 2 * k + 4 * k);
+        // Padded records hold the digits of zero in every lane.
+        let padded = 6 * 256 + 17;
+        for lane in 0..k as u8 {
+            let value = |column: Column| main.column(&manifest, column.in_lane(lane)).value(padded);
+            assert_eq!(value(Column::lane_digit(DigitValue::Ud, 0, 0)), 32_257);
+            assert_eq!(value(Column::lane_digit(DigitValue::Ud, 1, 0)), 3);
+            assert_eq!(value(Column::lane_digit(DigitValue::Ud, 2, 0)), 0);
+            assert_eq!((value(Column::V_LO), value(Column::V_HI)), (-32_768, 0));
+            for t in 0..4 {
+                assert_eq!(value(Column::W1Bit(t, 0)), 0);
+            }
+        }
+        for lane in 0..l as u8 {
+            let value = |digit| main.column(&manifest, Column::lane_digit(DigitValue::Zd, digit, lane)).value(padded);
+            assert_eq!((value(0), value(1), value(2)), (-32_768, -4, 1));
+        }
+        // The cells recompose to the derived values, record by record and lane by lane.
+        let mut values = Vec::new();
+        for (i, (record, signed)) in instance.records.iter().zip(&records).enumerate() {
+            let w = agg_witness::derive::derive_for::<P>(&record.key, &record.mu, &signed.sig).unwrap();
+            let (z, u, v) = main.record_values_for::<P>(&manifest, i);
+            assert_eq!((&z, &u, &v), (&w.z, &w.u, &w.v), "record {i}");
+            for row in 0..k {
+                for j in [0, 99, 255] {
+                    let bits: u8 = (0..4)
+                        .map(|t| (main.column(&manifest, Column::W1Bit(t, row as u8)).value(i * 256 + j) as u8) << t)
+                        .sum();
+                    assert_eq!(bits, w.w1[row][j]);
+                }
+            }
+            values.push(RecordValues::<P> { z: w.z, u: w.u, v: w.v, w1: w.w1 });
+        }
+        assert_eq!(MainTables::from_values(&manifest, &values).unwrap(), main);
+        // u = +-523,777 and z in [-2^19, 2^19) encode; one past either edge is an honest abort.
+        for (u, ok) in [(523_777, true), (-523_777, true), (523_778, false), (-523_778, false)] {
+            let mut edge = values.clone();
+            edge[2].u[k - 1][9] = u;
+            let built = MainTables::from_values(&manifest, &edge);
+            assert_eq!(built.is_ok(), ok, "u = {u}");
+            if let Ok(tables) = built {
+                assert_eq!(tables.record_values_for::<P>(&manifest, 2).1[k - 1][9], u);
+            }
+        }
+        for (z, ok) in [(-(1 << 19), true), ((1 << 19) - 1, true), (1 << 19, false), (-(1 << 19) - 1, false)] {
+            let mut edge = values.clone();
+            edge[1].z[l - 1][3] = z;
+            let built = MainTables::from_values(&manifest, &edge);
+            assert_eq!(built.is_ok(), ok, "z = {z}");
+            if let Ok(tables) = built {
+                assert_eq!(tables.record_values_for::<P>(&manifest, 1).0[l - 1][3], z);
+            }
+        }
+        let mut wide_w1 = values.clone();
+        wide_w1[0].w1[0][0] = 16;
+        assert_eq!(MainTables::from_values(&manifest, &wide_w1), Err(SourceTableError::Encode("w1' above four bits")));
+        // A base-8 middle digit outside [-4, 3] fails the self-check at its lane's column.
+        let u_mid = manifest.locate(Column::lane_digit(DigitValue::Ud, 1, 2)).1;
+        let mut bad = main.clone();
+        bad.columns_mut()[u_mid][300] = 4;
+        assert_eq!(
+            bad.validate(&manifest).unwrap_err(),
+            SourceTableError::Alphabet { group: GroupRole::Main, column: u_mid, cell: 300, value: 4 }
+        );
+        // The bridge inputs put row rho of record i at j + 256 rho + P_pad i.
+        let inputs = main.bridge_lanes(&manifest);
+        assert_eq!(inputs.len(), 4);
+        for (t, input) in inputs.iter().enumerate() {
+            assert_eq!(input.len(), 8 * shape.positions_pad);
+            let columns = main.bit_columns(&manifest, t);
+            for (i, row, j) in [(0, 0, 0), (3, k - 1, 200), (4, 2, 255)] {
+                assert_eq!(input[i * shape.positions_pad + 256 * row + j], columns[row][i * 256 + j]);
+            }
+            assert!(input[shape.positions..shape.positions_pad].iter().all(|&b| b == 0));
+        }
+
+        // Round 2 under the four-lane shape: four carry lanes in four slots on D_1 and D_2.
+        let bridge_shape = Shape::production(P::SET);
+        let level = |t: usize| bridge_shape.level(t);
+        let matrices = BridgeMatrices {
+            m1: SparseMatrix::random_for_tests(1, level(1).rows, level(1).cols, level(1).k),
+            m2: SparseMatrix::random_for_tests(2, level(2).rows, level(2).cols, level(2).k),
+            m3: SparseMatrix::random_for_tests(3, level(3).rows, level(3).cols, level(3).k),
+        };
+        let psi = crate::projection::test_psi_for(P::SET, 9);
+        let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &psi).unwrap();
+        let counts: Vec<usize> = [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
+            .iter()
+            .map(|&role| bridge.group(&manifest, role).len())
+            .collect();
+        assert_eq!(counts, [4, 8, 8, 5, 7]);
+        assert_eq!(bridge.carries(1).len(), 4 * manifest.group(GroupRole::Level1).logical_cells());
+        assert_eq!(bridge.carry_values(&manifest, 2).len(), 4);
+        assert_eq!(bridge.public_y().len(), 1 << 12);
+        let witness = parity::compute(
+            &bridge_shape,
+            &inputs.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            &matrices,
+        )
+        .unwrap();
+        assert_eq!(bridge.carry_values(&manifest, 1), witness.kappa1);
+        assert_eq!(bridge.public_y(), witness.y_bits());
+        // The lookup stacks tile the looked-up lanes; m counts every leaf.
+        let shape = manifest.lookup_shape();
+        let stacks = lookup_stacks(&manifest, &main, &bridge).unwrap();
+        assert_eq!(stacks.len(), shape.stacks.len());
+        let leaves: usize = shape.stacks.iter().map(|s| s.leaves()).sum();
+        let main_leaves: usize = shape.stacks[..manifest.main_stacks()].iter().map(|s| s.leaves()).sum();
+        assert_eq!(main_leaves, (l + k) * cells);
+        let counted: i64 = bridge.multiplicity().iter().map(|&m| i64::from(m)).sum();
+        assert_eq!(counted, leaves as i64);
+        // The projection digits are those of the committed v under Psi.
+        let tables = SourceTables { manifest: &manifest, main: &main, bridge: &bridge };
+        assert_eq!(tables.group(GroupRole::Proj).len(), 5);
+        let (_, _, v) = main.record_values_for::<P>(&manifest, 3);
+        let row_bytes = shape_positions_bytes(&manifest);
+        let blocks = manifest.shape().proj_blocks;
+        let per_block = manifest.shape().positions / blocks;
+        let direct: i64 = (0..per_block)
+            .filter(|&pos| crate::projection::psi_bit_in(&psi, row_bytes, 7, pos))
+            .map(|pos| v[pos / 256][pos % 256])
+            .sum();
+        assert_eq!(bridge.projection().value(7 + 128 * blocks * 3), E::from_i64(direct));
+    }
+
+    fn shape_positions_bytes(manifest: &CommitmentManifest) -> usize {
+        manifest.shape().positions / 8
+    }
+
+    #[test]
+    fn ml_dsa_65_tables_follow_the_lane_layout() {
+        main_tables_follow_the_lane_layout::<Set65>();
+    }
+
+    #[test]
+    fn ml_dsa_87_tables_follow_the_lane_layout() {
+        main_tables_follow_the_lane_layout::<Set87>();
+    }
+
+    /// The generic path builds ML-DSA-44's tables byte for byte, and its bridge inputs are the
+    /// bit columns.
+    #[test]
+    fn the_generic_path_reproduces_ml_dsa_44() {
+        let records = agg_witness::gen::records(0x44, 5);
+        let instance = PublicInstance::from_records(&records).unwrap();
+        let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
+        for relation in Relation::ALL {
+            let manifest = CommitmentManifest::for_relation(5, relation).unwrap();
+            let fast = MainTables::build(&manifest, &instance, &signatures).unwrap();
+            assert_eq!(MainTables::build_for::<Set44>(&manifest, &instance, &signatures).unwrap(), fast);
+            let inputs = fast.bridge_lanes(&manifest);
+            let bits = fast.bit_lanes(&manifest);
+            assert_eq!(inputs.len(), W1_BITS);
+            for (input, bits) in inputs.iter().zip(bits) {
+                assert_eq!(input.as_slice(), bits);
+            }
         }
     }
 }

@@ -472,7 +472,7 @@ mod tests {
         let mut rng = SplitMix64::new(0x62);
         let r = point(&mut rng, geometry.d_main() as usize);
         let expected: [E; W1_BITS] = std::array::from_fn(|t| {
-            f.main.column(&f.manifest, Column::W1Bit(t as u8)).evaluate(&r)
+            f.main.column(&f.manifest, Column::W1Bit(t as u8, 0)).evaluate(&r)
         });
         assert_eq!(
             public_bit_evaluations(&geometry, bits.segments(), &r),

@@ -559,7 +559,7 @@ impl ParamSet for Set65 {
     const STEP_U: i64 = 0;
     const U_TOP_BASE: u32 = 8;
     const U_SLACK: i64 = 523_267;
-    const U_OFFSET: i64 = -294_401;
+    const U_OFFSET: i64 = -228_865;
     const SLACK_Z: i64 = 0;
     const Z_OFFSET: i64 = -229_376;
 
@@ -648,7 +648,7 @@ impl ParamSet for Set87 {
     const STEP_U: i64 = 0;
     const U_TOP_BASE: u32 = 8;
     const U_SLACK: i64 = 523_267;
-    const U_OFFSET: i64 = -294_401;
+    const U_OFFSET: i64 = -228_865;
     const SLACK_Z: i64 = 0;
     const Z_OFFSET: i64 = -229_376;
 
@@ -751,7 +751,7 @@ impl agg_mldsa_simd::ParamSet for Set65 {
     const U_TOP_BASE: u32 = 8;
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -294_401;
+    const U_OFFSET: i32 = -228_865;
     const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 48;
     const PK_BYTES: usize = 1952;
@@ -779,7 +779,7 @@ impl agg_mldsa_simd::ParamSet for Set87 {
     const U_TOP_BASE: u32 = 8;
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -294_401;
+    const U_OFFSET: i32 = -228_865;
     const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 64;
     const PK_BYTES: usize = 2592;
@@ -1048,12 +1048,12 @@ mod tests {
         assert_eq!(Set87::U_SLACK + (1 << 19), 2 * Set87::B_U + 1);
 
         // Reconstruction constants:
-        // u = U_lo + 2^16 * U_mid + 523_267 * a_u - 294_401
+        // u = U_lo + 2^16 * U_mid + 523_267 * a_u - 228_865
         // where U_lo = B_ulo - 2^15, U_mid = H_u - 4.
-        let u_const = -32_768i64 - 262_144 - Set65::B_U + (1 << 19);
-        assert_eq!(u_const, -294_401);
-        assert_eq!(Set65::U_OFFSET, -294_401);
-        assert_eq!(Set87::U_OFFSET, -294_401);
+        let u_const = 32_768i64 + 262_144 - Set65::B_U;
+        assert_eq!(u_const, -228_865);
+        assert_eq!(Set65::U_OFFSET, -228_865);
+        assert_eq!(Set87::U_OFFSET, -228_865);
 
         // z relaxed form:
         // z = Z_lo + 2^16 * Z_mid + 2^19 * a_z - 229_376

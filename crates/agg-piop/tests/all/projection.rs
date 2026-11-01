@@ -75,13 +75,13 @@ fn set_value(batch: &Batch, main: &mut MainTables, value: DigitValue, x: usize, 
 
 fn w1_at(batch: &Batch, main: &MainTables, x: usize) -> i64 {
     (0..W1_BITS)
-        .map(|t| main.column(&batch.manifest, Column::W1Bit(t as u8)).value(x) << t)
+        .map(|t| main.column(&batch.manifest, Column::W1Bit(t as u8, 0)).value(x) << t)
         .sum()
 }
 
 fn set_w1(batch: &Batch, main: &mut MainTables, x: usize, w1: i64) {
     for t in 0..W1_BITS {
-        let position = batch.manifest.locate(Column::W1Bit(t as u8)).1;
+        let position = batch.manifest.locate(Column::W1Bit(t as u8, 0)).1;
         main.columns_mut()[position][x] = ((w1 >> t) & 1) as i8;
     }
 }

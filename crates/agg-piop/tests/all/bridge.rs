@@ -269,7 +269,7 @@ fn bridge_tampering_is_rejected_at_stage_one() {
         let honest = BridgeGroupTables::build(&manifest, &main, &fixed.0, &agg_piop::projection::test_psi(1)).unwrap();
         let stale: BridgeTamper<'_> = &|_, tables| *tables = honest.clone();
         let mut flipped = main.clone();
-        let (_, position) = manifest.locate(Column::W1Bit(2));
+        let (_, position) = manifest.locate(Column::W1Bit(2, 0));
         flipped.columns_mut()[position][1000] ^= 1;
         assert_eq!(run(&flipped, Some(stale)), Some(1));
     });

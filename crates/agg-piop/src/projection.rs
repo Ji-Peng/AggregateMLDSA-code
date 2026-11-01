@@ -14,13 +14,23 @@
 //! Soundness (`docs/soundness.md`, the projection bound): `k in [-2^37, 2^37)` for every row certifies
 //! `|v|_c <= 2^38` except with probability `2^-128` over `Psi`, enough for the lifting
 //! bound.
+//!
+//! ML-DSA-65 and ML-DSA-87 have `P = 256 k` positions (1,536 and 2,048), `Psi in {0, 1}^(128
+//! x P)` (24 and 32 KiB, row `o` at bytes `P/8 o ..`), five digits
+//! (`manifest::K39_DIGITS`, `k in [-2^39, 2^39)`) and `g` row blocks (1 and 2): block `b`
+//! holds the positions of rows `rho in [b k/g, (b+1) k/g)`, and the outputs
+//! `k_{o,b,i} = sum_{pos in block b} Psi_o(pos) v(pos, i)` sit at cell `o + 128 (b + g i)` of
+//! `D_k = (o, b, i)`. The value `v(pos, i)` at `pos = j + 256 rho` is cell `j + 256 i` of
+//! lane `rho` of `V_lo`, `V_hi`.
 
 use aerie_falcon::protocol::algebra::{eq_evaluation, eq_table};
-use agg_witness::params::POSITIONS;
+use agg_witness::params::{Set, POSITIONS};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::manifest::{CommitmentManifest, GroupRole, K16_DIGITS, PROJ_BYTES, PROJ_ROWS, V16_DIGITS};
+use crate::manifest::{
+    CommitmentManifest, GroupRole, SetShape, K16_DIGITS, K39_DIGITS, PROJ_BYTES, PROJ_ROWS, V16_DIGITS,
+};
 use crate::source_tables::{Cells, SourceTableError};
 use crate::OpeningField as E;
 
@@ -34,6 +44,21 @@ pub const ROW_BYTES: usize = POSITIONS / 8;
 pub fn test_psi(seed: u64) -> Vec<u8> {
     let mut rng = agg_witness::gen::SplitMix64::new(seed);
     (0..PROJ_BYTES).map(|_| rng.next_u64() as u8).collect()
+}
+
+/// A pseudo-random `Psi` of parameter set `set` (`128 P / 8` bytes) from a seed; for
+/// ML-DSA-44 it is [`test_psi`].
+#[doc(hidden)]
+#[must_use]
+pub fn test_psi_for(set: Set, seed: u64) -> Vec<u8> {
+    let mut rng = agg_witness::gen::SplitMix64::new(seed);
+    (0..PROJ_ROWS * SetShape::of(set).positions / 8).map(|_| rng.next_u64() as u8).collect()
+}
+
+/// Bit `pos` of row `o` of a `Psi` with `row_bytes` bytes per row.
+#[must_use]
+pub fn psi_bit_in(psi: &[u8], row_bytes: usize, o: usize, pos: usize) -> bool {
+    (psi[o * row_bytes + pos / 8] >> (pos % 8)) & 1 == 1
 }
 
 /// Bit `pos` of row `o` of `Psi`.
@@ -57,13 +82,52 @@ pub fn outputs(psi: &[u8], records: usize, v: impl Fn(usize, usize) -> i64 + Syn
     agg_simd::mask::masked_row_sums(psi, records, PROJ_ROWS, ROW_BYTES, v)
 }
 
-/// The committed digits of the projection outputs: `K_0 | K_1` stacked (lookup stack 4,
-/// `2 * 2^d_k` cells) and `K_2 | K_3` (`2 * 2^d_k` cells), at cell `o + 128 i`.
+/// The outputs `k_{o,b,i} = sum_{pos in block b} Psi_o(pos) v(i, pos)` of `Psi in {0, 1}^(128
+/// x positions)` in `blocks` row blocks of `positions / blocks` consecutive positions, at
+/// index `o + 128 (b + blocks i)`; one block gives [`outputs`]'s layout.
+///
+/// # Panics
+/// If `psi` does not have `128 positions / 8` bytes or a block is not whole bytes.
+pub fn block_outputs(
+    psi: &[u8],
+    positions: usize,
+    blocks: usize,
+    records: usize,
+    v: impl Fn(usize, usize) -> i64 + Sync,
+) -> Vec<i64> {
+    let row_bytes = positions / 8;
+    assert_eq!(psi.len(), PROJ_ROWS * row_bytes, "Psi has 128 rows of {positions} bits");
+    if blocks == 1 {
+        return agg_simd::mask::masked_row_sums(psi, records, PROJ_ROWS, row_bytes, v);
+    }
+    assert_eq!(row_bytes % blocks, 0, "a row block is whole bytes");
+    let block_bytes = row_bytes / blocks;
+    let per_block: Vec<Vec<i64>> = (0..blocks)
+        .map(|b| {
+            let sub: Vec<u8> = psi
+                .chunks_exact(row_bytes)
+                .flat_map(|row| row[b * block_bytes..(b + 1) * block_bytes].iter().copied())
+                .collect();
+            let start = 8 * b * block_bytes;
+            agg_simd::mask::masked_row_sums(&sub, records, PROJ_ROWS, block_bytes, |i, pos| v(i, start + pos))
+        })
+        .collect();
+    let mut out = vec![0_i64; blocks * records * PROJ_ROWS];
+    out.par_chunks_mut(PROJ_ROWS).enumerate().for_each(|(cell, rows)| {
+        let (i, b) = (cell / blocks, cell % blocks);
+        rows.copy_from_slice(&per_block[b][i * PROJ_ROWS..(i + 1) * PROJ_ROWS]);
+    });
+    out
+}
+
+/// The committed digits of the projection outputs: `K_0 | K_1` stacked (the last lookup
+/// stack, `2 * 2^d_k` cells) and `K_2 | K_3` (`2 * 2^d_k` cells; ML-DSA-65 and ML-DSA-87 add
+/// `K_4`), at cell `o + 128 i` (`o + 128 (b + g i)` with row blocks).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionTables {
     /// `K_0` then `K_1` (stored balanced, looked up as `K + 2^15`).
     pub stacked: Vec<i32>,
-    /// `K_2` then `K_3` (`[-4, 3]` each, leaf and link).
+    /// `K_2` then `K_3` (`[-4, 3]` each, leaf and link), then `K_4` (`[-2, 1]`) for five digits.
     pub top: Vec<i8>,
 }
 
@@ -77,13 +141,19 @@ impl ProjectionTables {
     pub fn encode(manifest: &CommitmentManifest, k: &[i64]) -> Result<Self, SourceTableError> {
         let cells = manifest.group(GroupRole::Proj).logical_cells();
         assert_eq!(k.len(), cells, "one output per cell of D_k");
-        let (min, max) = K16_DIGITS.range();
+        let form = manifest.proj_digits();
+        let (min, max) = form.range();
+        // Outputs per record: 128 rows in each row block.
+        let per_record = cells / manifest.padded_records();
         if let Some(y) = k.iter().position(|&value| !(min..=max).contains(&value)) {
             return Err(SourceTableError::ProjectionRange {
-                record: y / PROJ_ROWS,
-                row: y % PROJ_ROWS,
+                record: y / per_record,
+                row: y % per_record,
                 value: k[y],
             });
+        }
+        if form.len() == K39_DIGITS.len() {
+            return Ok(Self::encode_five(cells, k));
         }
         let mut stacked = vec![0_i32; 2 * cells];
         let mut top = vec![0_i8; 2 * cells];
@@ -106,47 +176,101 @@ impl ProjectionTables {
         Ok(Self { stacked, top })
     }
 
+    /// The five digits of in-range outputs ([`K39_DIGITS`]).
+    fn encode_five(cells: usize, k: &[i64]) -> Self {
+        let mut stacked = vec![0_i32; 2 * cells];
+        let mut top = vec![0_i8; 3 * cells];
+        let (low, high) = stacked.split_at_mut(cells);
+        let (k2, rest) = top.split_at_mut(cells);
+        let (k3, k4) = rest.split_at_mut(cells);
+        low.par_iter_mut()
+            .zip(high.par_iter_mut())
+            .zip(k2.par_iter_mut())
+            .zip(k3.par_iter_mut())
+            .zip(k4.par_iter_mut())
+            .zip(k.par_iter())
+            .for_each(|(((((k0, k1), k2), k3), k4), &value)| {
+                let mut digits = [0_i64; 5];
+                K39_DIGITS.decompose_into(value, &mut digits);
+                debug_assert!(K39_DIGITS.in_alphabets(&digits), "k in range has in-alphabet digits");
+                *k0 = digits[0] as i32;
+                *k1 = digits[1] as i32;
+                *k2 = digits[2] as i8;
+                *k3 = digits[3] as i8;
+                *k4 = digits[4] as i8;
+            });
+        Self { stacked, top }
+    }
+
     /// The honest tables of the committed `v` digits: `v = V_lo + 2^16 V_hi + 2^15` per
-    /// cell, projected by `psi`.
+    /// cell, projected by `psi`; `v_lo`, `v_hi` hold the lanes of `V_lo`, `V_hi` (one for
+    /// ML-DSA-44).
     ///
     /// # Errors
     /// As [`Self::encode`].
+    ///
+    /// # Panics
+    /// If the lane counts or the length of `psi` are not the manifest's.
     pub fn build(
         manifest: &CommitmentManifest,
-        v_lo: &[i32],
-        v_hi: &[i32],
+        v_lo: &[&[i32]],
+        v_hi: &[&[i32]],
         psi: &[u8],
     ) -> Result<Self, SourceTableError> {
         let records = manifest.padded_records();
         let constant = V16_DIGITS.constant();
-        let k = outputs(psi, records, |i, pos| {
-            let x = i * POSITIONS + pos;
-            i64::from(v_lo[x]) + (i64::from(v_hi[x]) << 16) + constant
-        });
+        let shape = manifest.shape();
+        assert_eq!((v_lo.len(), v_hi.len()), (shape.lanes_k, shape.lanes_k), "one slice per lane");
+        let k = if shape.lanes_k == 1 && shape.proj_blocks == 1 {
+            let (v_lo, v_hi) = (v_lo[0], v_hi[0]);
+            outputs(psi, records, |i, pos| {
+                let x = i * POSITIONS + pos;
+                i64::from(v_lo[x]) + (i64::from(v_hi[x]) << 16) + constant
+            })
+        } else {
+            let lane_cells = manifest.lane_cells();
+            block_outputs(psi, shape.positions, shape.proj_blocks, records, |i, pos| {
+                let x = i * lane_cells + pos % lane_cells;
+                let lane = pos / lane_cells;
+                i64::from(v_lo[lane][x]) + (i64::from(v_hi[lane][x]) << 16) + constant
+            })
+        };
         Self::encode(manifest, &k)
     }
 
-    /// The four `G_k` polynomials in manifest order.
+    /// Cells of each digit polynomial.
+    fn cells(&self) -> usize {
+        self.stacked.len() / 2
+    }
+
+    /// The digit layout of the tables (four or five digits).
+    #[must_use]
+    pub fn digits(&self) -> agg_witness::digits::DigitLayout {
+        if self.top.len() == 2 * self.cells() { K16_DIGITS } else { K39_DIGITS }
+    }
+
+    /// The four (five) `G_k` polynomials in manifest order.
     #[must_use]
     pub fn columns(&self) -> Vec<Cells<'_>> {
-        let cells = self.stacked.len() / 2;
-        vec![
-            Cells::Wide(&self.stacked[..cells]),
-            Cells::Wide(&self.stacked[cells..]),
-            Cells::Narrow(&self.top[..cells]),
-            Cells::Narrow(&self.top[cells..]),
-        ]
+        let cells = self.cells();
+        vec![Cells::Wide(&self.stacked[..cells]), Cells::Wide(&self.stacked[cells..])]
+            .into_iter()
+            .chain(self.top.chunks_exact(cells).map(Cells::Narrow))
+            .collect()
     }
 
     /// The outputs recomposed from the digits (any cell values), as field elements.
     #[must_use]
     pub fn value(&self, y: usize) -> E {
-        let cells = self.stacked.len() / 2;
-        E::from_i64(i64::from(self.stacked[y]))
-            + E::from_i64(i64::from(self.stacked[cells + y]) << 16)
-            + E::from_i64(i64::from(self.top[y]) << 32)
-            + E::from_i64(i64::from(self.top[cells + y]) << 35)
-            + E::from_i64(K16_DIGITS.constant())
+        let cells = self.cells();
+        let low = E::from_i64(i64::from(self.stacked[y])) + E::from_i64(i64::from(self.stacked[cells + y]) << 16);
+        let form = self.digits();
+        let top = self
+            .top
+            .chunks_exact(cells)
+            .zip(&form.weights()[2..])
+            .fold(E::zero(), |acc, (column, &weight)| acc + E::from_i64(i64::from(column[y]) * weight));
+        low + top + E::from_i64(form.constant())
     }
 }
 
@@ -203,13 +327,14 @@ pub fn weight_at(manifest: &CommitmentManifest, psi: &[u8], r2: &[E], r3: &[E]) 
 #[must_use]
 pub fn claim(columns: &[Cells<'_>], r2: &[E], vars: usize) -> E {
     let point = &r2[r2.len() - vars..];
-    let weights = K16_DIGITS.weights();
+    let form = if columns.len() == K39_DIGITS.len() { K39_DIGITS } else { K16_DIGITS };
+    let weights = form.weights();
     columns
         .par_iter()
         .zip(weights.par_iter())
         .map(|(cells, &w)| cells.evaluate(point).mul_i64(w))
         .reduce(E::zero, |a, b| a + b)
-        + E::from_i64(K16_DIGITS.constant())
+        + E::from_i64(form.constant())
 }
 
 #[cfg(test)]
@@ -220,6 +345,85 @@ mod tests {
 
     fn random_psi(rng: &mut SplitMix64) -> Vec<u8> {
         (0..PROJ_BYTES).map(|_| rng.next_u64() as u8).collect()
+    }
+
+    /// ML-DSA-65 (one row block of 1,536 positions) and ML-DSA-87 (two blocks of 1,024): the
+    /// outputs of the lane tables are the direct inner products per block, at cell
+    /// `o + 128 (b + g i)`, and the five digits cover exactly `[-2^39, 2^39)`.
+    #[test]
+    fn lane_sets_project_per_row_block_with_five_digits() {
+        use crate::manifest::{Relation, PROJ_BOUND_39};
+        for set in [Set::S65, Set::S87] {
+            let shape = SetShape::of(set);
+            let manifest = CommitmentManifest::for_set(set, 5, Relation::Hu).unwrap();
+            let records = manifest.padded_records();
+            let (positions, blocks, lanes) = (shape.positions, shape.proj_blocks, shape.lanes_k);
+            let row_bytes = positions / 8;
+            let psi = test_psi_for(set, 21);
+            assert_eq!(psi.len(), manifest.proj_bytes());
+            let mut rng = SplitMix64::new(13);
+            // V_lo, V_hi lanes of the honest range |v| < 2^29 (cell j + 256 i of lane rho).
+            let cells = records * 256;
+            let v: Vec<Vec<i64>> = (0..lanes)
+                .map(|_| (0..cells).map(|_| (rng.next_u64() % (1 << 30)) as i64 - (1 << 29)).collect())
+                .collect();
+            let lo: Vec<Vec<i32>> = v.iter().map(|lane| lane.iter().map(|&x| V16_DIGITS.decompose(x)[0] as i32).collect()).collect();
+            let hi: Vec<Vec<i32>> = v.iter().map(|lane| lane.iter().map(|&x| V16_DIGITS.decompose(x)[1] as i32).collect()).collect();
+            let lo_refs: Vec<&[i32]> = lo.iter().map(Vec::as_slice).collect();
+            let hi_refs: Vec<&[i32]> = hi.iter().map(Vec::as_slice).collect();
+            let tables = ProjectionTables::build(&manifest, &lo_refs, &hi_refs, &psi).unwrap();
+            let d_k = manifest.group(GroupRole::Proj).logical_cells();
+            assert_eq!(d_k, PROJ_ROWS * blocks * records);
+            assert_eq!(tables.columns().len(), 5);
+            assert_eq!(tables.digits(), K39_DIGITS);
+            let per_block = positions / blocks;
+            for i in 0..records {
+                for b in 0..blocks {
+                    for o in [0, 1, 77, PROJ_ROWS - 1] {
+                        let direct: i64 = (b * per_block..(b + 1) * per_block)
+                            .filter(|&pos| psi_bit_in(&psi, row_bytes, o, pos))
+                            .map(|pos| v[pos / 256][i * 256 + pos % 256])
+                            .sum();
+                        let y = o + PROJ_ROWS * (b + blocks * i);
+                        assert_eq!(tables.value(y), E::from_i64(direct), "{set} i {i} b {b} o {o}");
+                    }
+                }
+            }
+            // The digits cover exactly [-2^39, 2^39); the error names record and row.
+            let bound = PROJ_BOUND_39;
+            let probes = [-bound, -bound + 1, -(1 << 38) - 3, -1, 0, 1, (1 << 35) + 7, bound - 1];
+            let mut k = vec![0_i64; d_k];
+            k[..probes.len()].copy_from_slice(&probes);
+            let encoded = ProjectionTables::encode(&manifest, &k).unwrap();
+            for (y, &value) in probes.iter().enumerate() {
+                assert_eq!(encoded.value(y), E::from_i64(value));
+                let digits: Vec<i64> = encoded.columns().iter().map(|c| c.value(y)).collect();
+                assert_eq!(K39_DIGITS.compose(&digits), value);
+                assert!(K39_DIGITS.in_alphabets(&digits));
+            }
+            let zero = probes.len();
+            let digits: Vec<i64> = encoded.columns().iter().map(|c| c.value(zero)).collect();
+            assert_eq!(digits, [-(1 << 15), -(1 << 15), -4, -4, 0]);
+            let per_record = PROJ_ROWS * blocks;
+            for outside in [bound, -bound - 1] {
+                k[per_record + 5] = outside;
+                assert_eq!(
+                    ProjectionTables::encode(&manifest, &k),
+                    Err(SourceTableError::ProjectionRange { record: 1, row: 5, value: outside })
+                );
+            }
+            // The claim of the five digits at a point is the outputs' extension.
+            let point = point(&mut rng, manifest.group(GroupRole::Proj).logical_vars);
+            let outputs: Vec<E> = (0..d_k).map(|y| tables.value(y)).collect();
+            assert_eq!(
+                claim(&tables.columns(), &point, point.len()),
+                aerie_falcon::protocol::algebra::evaluate_mle(&outputs, &point)
+            );
+        }
+        // One block reproduces `outputs`.
+        let psi = test_psi(3);
+        let v = |i: usize, pos: usize| (i * 7919 + pos * 31) as i64 % 1000 - 500;
+        assert_eq!(block_outputs(&psi, POSITIONS, 1, 3, v), outputs(&psi, 3, v));
     }
 
     #[test]

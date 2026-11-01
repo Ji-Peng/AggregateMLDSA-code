@@ -16,7 +16,7 @@ use agg_witness::bridge::{
     BridgeMatrices, SparseMatrix, J1, J2, J3, K1, K2, K3, M1, M2, M3, ROW_WEIGHT_MAX_12,
     ROW_WEIGHT_MAX_3, ZETA2_USED,
 };
-use agg_witness::params::W1_BITS;
+use agg_witness::params::{Set, W1_BITS};
 
 use crate::seed::Level;
 
@@ -124,6 +124,39 @@ impl Shape {
         lanes: W1_BITS,
         blocks1: 16,
     };
+
+    /// The production shape of ML-DSA-65 and ML-DSA-87: four bit lanes (`w1'` has four bits),
+    /// `P_pad = 2,048` input positions per signature, so a level-1 block holds 256
+    /// signatures and a segment 32 blocks (`J_2^used = 32 m_1 = 2^18`), and level 3 reads
+    /// `J_3 = 4 m_2 = 32,768` columns. Matrix sizes, column weights and caps are those of
+    /// [`Self::PRODUCTION`].
+    pub const PRODUCTION_W4: Shape = Shape {
+        name: "production-w4",
+        levels: [
+            Self::PRODUCTION.levels[0],
+            LevelShape {
+                used: 32 * M1,
+                ..Self::PRODUCTION.levels[1]
+            },
+            LevelShape {
+                cols: 4 * M2,
+                used: 4 * M2,
+                ..Self::PRODUCTION.levels[2]
+            },
+        ],
+        lanes: 4,
+        blocks1: 32,
+    };
+
+    /// The production shape of a parameter set: [`Self::PRODUCTION`] for ML-DSA-44,
+    /// [`Self::PRODUCTION_W4`] for ML-DSA-65 and ML-DSA-87.
+    #[must_use]
+    pub const fn production(set: Set) -> Shape {
+        match set {
+            Set::S44 => Self::PRODUCTION,
+            Set::S65 | Set::S87 => Self::PRODUCTION_W4,
+        }
+    }
 
     /// The toy shape (tests only): `L = 2^12` input bits, one
     /// lane, one segment, 16 output bits.
@@ -355,5 +388,39 @@ mod tests {
         let toy = Shape::TOY.domains(1 << 12);
         assert_eq!((toy.blocks1, toy.segments), (4, 1));
         assert_eq!((toy.d1_len, toy.d2_len, toy.d3_len), (256, 32, 16));
+    }
+}
+
+#[cfg(test)]
+mod lane_shape_tests {
+    use super::*;
+    use agg_witness::padding::Geometry;
+    use agg_witness::params::{ParamSet, Set44, Set65, Set87};
+
+    #[test]
+    fn four_lane_shape_follows_the_padded_positions() {
+        Shape::PRODUCTION_W4.validate().unwrap();
+        assert_eq!(Shape::production(Set::S44), Shape::PRODUCTION);
+        let w4 = Shape::production(Set::S65);
+        assert_eq!(w4, Shape::production(Set::S87));
+        assert_eq!(
+            w4.levels.map(|l| (l.cols, l.used, l.rows, l.k)),
+            [(1 << 19, 1 << 19, 1 << 13, 14), (1 << 19, 1 << 18, 1 << 13, 14), (32_768, 32_768, 4096, 18)]
+        );
+        assert_eq!((w4.lanes, w4.segment_input_bits()), (4, 1 << 24));
+        // A segment of 2^13 signatures of P_pad = 2,048 positions fills B_1 level-1 blocks.
+        assert_eq!(w4.segment_input_bits(), (1 << 13) * Set65::P_PAD);
+        assert_eq!(w4.levels[0].cols / Set65::P_PAD, Set65::B_1);
+        assert_eq!(Set87::P_PAD, Set65::P_PAD);
+        assert_eq!(Shape::PRODUCTION.segment_input_bits(), (1 << 13) * Set44::P_PAD);
+        for n in [1, 5, 255, 256, 300, 1024, 8192, 8193, 1 << 15] {
+            let geom = Geometry::<Set65>::new_for(n).unwrap();
+            let d = w4.domains(geom.n_star * Set65::P_PAD);
+            assert_eq!(d.d1_vars(), geom.d1() as usize, "N = {n}");
+            assert_eq!(d.d2_vars(), geom.d2() as usize);
+            assert_eq!(d.d3_vars(), geom.d3() as usize);
+            assert_eq!(d.blocks1, geom.blocks1());
+            assert_eq!(d.segments, geom.segments());
+        }
     }
 }

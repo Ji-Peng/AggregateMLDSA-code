@@ -164,7 +164,7 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const STEP_U: i32;
     /// Slack for u in digit-slack form (523,267 for 65/87; 0 for 44).
     const U_SLACK: i32;
-    /// Reconstruction offset for u in relation H-u (-190,465 for 44, -294,401 for 65/87).
+    /// Reconstruction offset for u in relation H-u (-190,465 for 44, -228,865 for 65/87).
     const U_OFFSET: i32;
     /// Reconstruction offset for z in relation H-u (0 for 44, -229,376 for 65/87).
     const Z_OFFSET: i32;
@@ -234,7 +234,7 @@ impl ParamSet for Set65 {
     const U_TOP_BASE: u32 = 8;
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -294_401;
+    const U_OFFSET: i32 = -228_865;
     const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 48;
     const PK_BYTES: usize = 1952;
@@ -266,7 +266,7 @@ impl ParamSet for Set87 {
     const U_TOP_BASE: u32 = 8;
     const STEP_U: i32 = 0;
     const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -294_401;
+    const U_OFFSET: i32 = -228_865;
     const Z_OFFSET: i32 = -229_376;
     const C_TILDE_BYTES: usize = 64;
     const PK_BYTES: usize = 2592;

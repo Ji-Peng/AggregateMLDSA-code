@@ -327,13 +327,13 @@ mod tests {
         assert_eq!(s3.column(&manifest, Column::K_2), s3.0[33]);
         assert_eq!(s3.column(&manifest, Column::K_3), s3.0[34]);
         assert_eq!(s3.column(&manifest, Column::Parity2(1)), s3.0[19]);
-        assert_eq!(s3.column(&manifest, Column::W1Bit(0)), s3.0[6]);
+        assert_eq!(s3.column(&manifest, Column::W1Bit(0, 0)), s3.0[6]);
         assert!(Stage3Claims::from_slice(&manifest, &s3.0[..34]).is_none());
         // H-exact: a_z is the last main-domain claim, every later group moves by one.
         let x3 = Stage3Claims::from_slice(&exact, &point(&mut rng, 36)).unwrap();
         assert_eq!(Stage3Claims::group_offset(&exact, GroupRole::Level2), 19);
         assert_eq!(x3.column(&exact, Column::A_Z), x3.0[12]);
-        assert_eq!(x3.column(&exact, Column::W1Bit(0)), x3.0[6]);
+        assert_eq!(x3.column(&exact, Column::W1Bit(0, 0)), x3.0[6]);
         assert!(Stage3Claims::from_slice(&exact, &x3.0[..34]).is_none());
         let digits = MultiplicityClaims([3, -2, 0, 1, 0, 0, 7].map(E::from_i64));
         assert_eq!(digits.compose(), E::from_i64(3 - 32 + 4096 + 7 * (1 << 24)));

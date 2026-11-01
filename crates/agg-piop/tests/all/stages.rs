@@ -129,7 +129,7 @@ fn check_honest(batch: &Batch, proof: &PiopProof) {
             proof.stage1.claims.y2[t],
             tables.column(Column::Parity2(t as u8)).evaluate(&r1_2)
         );
-        let bit = tables.column(Column::W1Bit(t as u8));
+        let bit = tables.column(Column::W1Bit(t as u8, 0));
         assert_eq!(proof.stage1.claims.b[t], bit.evaluate(&points.r1));
         assert_eq!(proof.stage2.claims.b[t], bit.evaluate(&points.r2));
     }
@@ -415,11 +415,11 @@ fn tampered_witnesses_fail_at_the_stated_stage() {
         case("z_hi", main, Some(3));
         // A flipped bit (round-2 tables rebuilt): w_1' changes, the ring identity fails.
         let mut main = batch.main.clone();
-        main.columns_mut()[narrow(Column::W1Bit(0))][x] ^= 1;
+        main.columns_mut()[narrow(Column::W1Bit(0, 0))][x] ^= 1;
         case("flipped bit", main, Some(3));
         // A non-Boolean bit and w_1' = 44: stage 1.
         let mut main = batch.main.clone();
-        let column = narrow(Column::W1Bit(1));
+        let column = narrow(Column::W1Bit(1, 0));
         let y = (0..1024)
             .map(|p| main_index(p % 256, p / 256, 7))
             .find(|&y| main.columns()[column][y] == 0)
@@ -428,7 +428,7 @@ fn tampered_witnesses_fail_at_the_stated_stage() {
         case("bit = 2", main, Some(1));
         let mut main = batch.main.clone();
         for (t, bit) in [0, 0, 1, 1, 0, 1].into_iter().enumerate() {
-            main.columns_mut()[narrow(Column::W1Bit(t as u8))][x] = bit;
+            main.columns_mut()[narrow(Column::W1Bit(t as u8, 0))][x] = bit;
         }
         case("w1' = 44", main, Some(1));
         // The honest tables pass.

@@ -636,7 +636,7 @@ fn run(
         geometry,
         commitments: &proof.flock_commitments,
         point: &stage3.point,
-        claims: std::array::from_fn(|t| stage3.claims.column(&manifest, Column::W1Bit(t as u8))),
+        claims: std::array::from_fn(|t| stage3.claims.column(&manifest, Column::W1Bit(t as u8, 0))),
     };
     if !keccak.check_bits(&bits) {
         return Err(VerifyError::Bits);

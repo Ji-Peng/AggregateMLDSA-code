@@ -238,7 +238,7 @@ impl MainValues {
             let digits: Vec<E> = value_columns(digit).into_iter().map(&value).collect();
             compose_digits(&digit.layout(), &digits)
         };
-        let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8)));
+        let bits: [E; W1_BITS] = std::array::from_fn(|t| value(Column::W1Bit(t as u8, 0)));
         let u = if manifest.is_fips() {
             value(Column::SIGN).mul_i64(GAMMA2) + compose(DigitValue::L) + E::from_i64(1 - GAMMA2)
                 - value(Column::DELTA).mul_i64(2 * GAMMA2)

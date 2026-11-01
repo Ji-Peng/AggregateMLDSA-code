@@ -116,7 +116,7 @@ fn single_cell_mutations_move_the_expected_entries() {
     assert!(moved.iter().all(|&y| y >> 10 == 4), "only record 4 changes");
     // A flipped bit breaks the level-1 identity of the stale round-2 tables.
     let mut main = batch.main.clone();
-    let (role, b1) = manifest.locate(Column::W1Bit(1));
+    let (role, b1) = manifest.locate(Column::W1Bit(1, 0));
     assert_eq!(role, GroupRole::Main);
     main.columns_mut()[b1][x] ^= 1;
     let stale = parity_witness(&batch, &main, &batch.bridge);

@@ -33,14 +33,25 @@
 //! `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e`; and the per-signature hint slack `u_h`
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
 //! variables are the signature index) in the free slot 6 of lookup stack 2.
+//!
+//! ML-DSA-65 and ML-DSA-87 (relation H-u only, [`SetShape`]): the vector index is a
+//! polynomial lane instead of two domain variables, so the main domain is `(j, i)` with
+//! `8 + d_sig` variables and every main-domain column is a family of `k` or `l` polynomials
+//! ([`Column::lane`]). `z` and `u` take digit-slack forms with a base-8 middle digit and a
+//! Boolean slack ([`DigitValue::Zd`], [`DigitValue::Ud`]), `w_1'` has four bits, the
+//! projection outputs five digits ([`K39_DIGITS`]), and the looked-up main columns split
+//! into stacks of 8, 2, 1 (8, 4, 2, 1) polynomials ([`main_stack_sizes`]).
 
 use agg_pcs_config::catalogs::{
     BatchLayout, Family, Group, Set, MULTIPLICITY_DIGITS, TABLE_VARS,
 };
 pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELATION_H_FIPS};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
-use agg_witness::digits::{Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK, Z_BIT_SLACK};
-use agg_witness::params::{B_U, STEP_U, U_TOP_BASE, W1_BITS};
+use agg_witness::digits::{
+    Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK, U_DIGIT_SLACK,
+    Z_BIT_SLACK, Z_DIGIT_SLACK,
+};
+use agg_witness::params::{ParamSet, B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
 use crate::lookup::{LookupShape, StackShape, Table};
 
@@ -113,6 +124,19 @@ pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
 pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
 /// The bound `B` of the projection outputs: `k in [-B, B)`.
 pub const PROJ_BOUND: i64 = 1 << 37;
+/// The projection outputs of ML-DSA-65 and ML-DSA-87: `k + 2^39 = k_0 + 2^16 k_1 + 2^32 k_2 +
+/// 2^35 k_3 + 2^38 k_4` (bases `2^16, 2^16, 8, 8, 4`, signed), so
+/// `k = K_0 + 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^38 K_4 + 2^37 + 2^34 + 2^31 + 2^15` over
+/// exactly `[-2^39, 2^39)`; `K_0, K_1` looked up in `T_16`, `K_2, K_3` leaves `leaf8`, `K_4` a
+/// leaf `leaf4`, each with a link. The honest outputs need `(P / g) B_v <= 2^39`, which holds
+/// for both sets with `g = 1` (ML-DSA-65) and `g = 2` row blocks (ML-DSA-87).
+pub const K39_DIGITS: DigitLayout = DigitLayout {
+    name: "k",
+    bases: &[1 << 16, 1 << 16, 8, 8, 4],
+    signed: true,
+};
+/// The bound `B` of the projection outputs of ML-DSA-65 and ML-DSA-87: `k in [-B, B)`.
+pub const PROJ_BOUND_39: i64 = 1 << 39;
 /// Relation H-FIPS: `L = L_lo + 29,696 L_hi` with `L_lo = S_lo + 2^15` looked up and the bit
 /// `L_hi`, so `L = S_lo + 29,696 L_hi + 2^15` over exactly `[0, gamma_2 - 1]`.
 pub const L16_SLACK: SlackLayout = L_SLACK;
@@ -143,6 +167,71 @@ pub const fn role_id(role: GroupRole) -> u8 {
     role.index() as u8
 }
 
+/// The dimensions of a parameter set that shape its committed columns.
+///
+/// The main domain is `(j, rho_hi, i)` with `d_vec` vector-index variables `rho_hi`; a
+/// `k`-vector column is a family of `lanes_k = k / 2^d_vec` polynomials (lane `rho_lo`), so
+/// row `rho` of a record sits in lane `rho >> d_vec` at cells `256 (rho mod 2^d_vec) + j`.
+/// ML-DSA-44 has `d_vec = 2` and one lane per column; ML-DSA-65 and ML-DSA-87 have `d_vec = 0`
+/// and one polynomial per row (`k` and `l` are not powers of two, so no dead cells are
+/// committed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SetShape {
+    /// Rows `k` of `A`.
+    pub k: usize,
+    /// Columns `l` of `A`.
+    pub l: usize,
+    /// Vector-index variables of the main domain.
+    pub d_vec: u32,
+    /// Polynomials of a `k`-vector column.
+    pub lanes_k: usize,
+    /// Polynomials of an `l`-vector column.
+    pub lanes_l: usize,
+    /// Bits of `w_1'` (the bit columns `b_t`, `t < w1_bits`).
+    pub w1_bits: usize,
+    /// Positions `P = 256 k` of one signature in the bridge and the projection.
+    pub positions: usize,
+    /// `P` rounded up to a power of two: the bridge's input positions per signature.
+    pub positions_pad: usize,
+    /// Row blocks `g` of the projection.
+    pub proj_blocks: usize,
+}
+
+impl SetShape {
+    /// The shape of `set`.
+    #[must_use]
+    pub const fn of(set: Set) -> Self {
+        agg_witness::dispatch_set!(set, |P| Self::of_params::<P>())
+    }
+
+    const fn of_params<P: ParamSet>() -> Self {
+        Self {
+            k: P::K,
+            l: P::L,
+            d_vec: P::D_VEC,
+            lanes_k: P::LANES_K,
+            lanes_l: P::LANES_L,
+            w1_bits: P::W1_BITS,
+            positions: P::P_POSITIONS,
+            positions_pad: P::P_PAD,
+            proj_blocks: P::PROJ_BLOCKS,
+        }
+    }
+
+    /// Cells of one main-domain polynomial per signature: `256 2^d_vec`.
+    #[must_use]
+    pub const fn lane_cells(self) -> usize {
+        256 << self.d_vec
+    }
+
+    /// The lane of row `row` of a vector and the offset of its 256 cells inside the lane's
+    /// cells of one signature.
+    #[must_use]
+    pub const fn row_lane(self, row: usize) -> (usize, usize) {
+        (row >> self.d_vec, (row & ((1 << self.d_vec) - 1)) * 256)
+    }
+}
+
 /// A value committed through its balanced digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DigitValue {
@@ -159,6 +248,17 @@ pub enum DigitValue {
     V,
     /// The projection outputs `k_{o,i} = <Psi_o, v_i>` on the projection domain `(o, i)`.
     K,
+    /// The response `z` of ML-DSA-65 and ML-DSA-87 (relation H-u, one polynomial per
+    /// vector entry `s`): `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` with `Z_lo` looked up,
+    /// `Z_mid` base 8 (leaf and link) and the Boolean `a_z`, so `z in [-2^19, 2^19)`.
+    Zd,
+    /// The UseHint residual `u` of ML-DSA-65 and ML-DSA-87: `u + B_u = B_ulo + 2^16 H_u +
+    /// 523,267 a_u` with `U_lo` looked up, `U_mid = H_u - 4` base 8 (leaf and link) and the
+    /// Boolean `a_u`, so `|u| <= B_u = 523,777` exactly.
+    Ud,
+    /// The projection outputs of ML-DSA-65 and ML-DSA-87 on `D_k = (o, b, i)`: five digits
+    /// ([`K39_DIGITS`]).
+    K5,
     /// Relation H-FIPS's hint slack `u_h = omega - sum delta^2` on `D_2` (looked up).
     HintSlack,
     /// Level-1 carry `kappa^(1)_t` (domain `D_1`).
@@ -181,6 +281,9 @@ impl DigitValue {
             Self::L => ValueForm::Slack(L16_SLACK),
             Self::V => ValueForm::Radix(V16_DIGITS),
             Self::K => ValueForm::Radix(K16_DIGITS),
+            Self::Zd => ValueForm::DigitSlack(Z_DIGIT_SLACK),
+            Self::Ud => ValueForm::DigitSlack(U_DIGIT_SLACK),
+            Self::K5 => ValueForm::Radix(K39_DIGITS),
             Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
                 ValueForm::Radix(CARRY16_DIGITS)
             }
@@ -191,10 +294,10 @@ impl DigitValue {
     #[must_use]
     pub const fn group(self, digit: u8) -> GroupRole {
         match self {
-            Self::Z | Self::Zx | Self::U | Self::L if digit == 0 => Group::Main16,
-            Self::Z | Self::Zx | Self::U | Self::L => Group::Main,
+            Self::Z | Self::Zx | Self::Zd | Self::U | Self::Ud | Self::L if digit == 0 => Group::Main16,
+            Self::Z | Self::Zx | Self::Zd | Self::U | Self::Ud | Self::L => Group::Main,
             Self::V => Group::Main16,
-            Self::K => Group::Proj,
+            Self::K | Self::K5 => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
             Self::Kappa2(_) | Self::HintSlack => Group::Level2,
             Self::Kappa3 => Group::Level3,
@@ -228,9 +331,13 @@ pub enum Column {
         value: DigitValue,
         /// Digit index.
         digit: u8,
+        /// The polynomial lane of a main-domain value ([`SetShape`]; 0 for ML-DSA-44 and
+        /// for every value off the main domain).
+        lane: u8,
     },
-    /// The w1Encode bit `b_t` (main domain).
-    W1Bit(u8),
+    /// The w1Encode bit `b_t` (main domain) in polynomial lane `lane` (`b_t^(rho)` of
+    /// ML-DSA-65 and ML-DSA-87; lane 0 for ML-DSA-44): `W1Bit(t, lane)`.
+    W1Bit(u8, u8),
     /// The level-2 parity `y^(2)_t` (domain `D_2`).
     Parity2(u8),
     /// Digit `k` of the multiplicity column `m` of `T_16` (`2^16` cells).
@@ -248,46 +355,55 @@ impl Column {
     pub const Z_LO: Self = Self::Digit {
         value: DigitValue::Z,
         digit: 0,
+        lane: 0,
     };
     /// `Z_hi`.
     pub const Z_HI: Self = Self::Digit {
         value: DigitValue::Z,
         digit: 1,
+        lane: 0,
     };
     /// `bz_lo` (H-exact `S_zlo`, the slot of `Z_lo`).
     pub const ZX_LO: Self = Self::Digit {
         value: DigitValue::Zx,
         digit: 0,
+        lane: 0,
     };
     /// `bz_hi` (H-exact `B_zhi`, a bit in the slot of `Z_hi`).
     pub const ZX_HI: Self = Self::Digit {
         value: DigitValue::Zx,
         digit: 1,
+        lane: 0,
     };
     /// `a_z` (H-exact slack bit, after the bits of `G_main4`).
     pub const A_Z: Self = Self::Digit {
         value: DigitValue::Zx,
         digit: 2,
+        lane: 0,
     };
     /// `U_lo`.
     pub const U_LO: Self = Self::Digit {
         value: DigitValue::U,
         digit: 0,
+        lane: 0,
     };
     /// `U_hi`.
     pub const U_HI: Self = Self::Digit {
         value: DigitValue::U,
         digit: 1,
+        lane: 0,
     };
     /// `l_lo` (H-FIPS `L_lo - 2^15`, the slot of `U_lo`).
     pub const L_LO: Self = Self::Digit {
         value: DigitValue::L,
         digit: 0,
+        lane: 0,
     };
     /// `l_hi` (H-FIPS `L_hi`, a bit in the slot of `U_hi`).
     pub const L_HI: Self = Self::Digit {
         value: DigitValue::L,
         digit: 1,
+        lane: 0,
     };
     /// H-FIPS's sign bit `s`.
     pub const SIGN: Self = Self::Fips(FipsColumn::Sign);
@@ -299,36 +415,43 @@ impl Column {
     pub const HINT_SLACK: Self = Self::Digit {
         value: DigitValue::HintSlack,
         digit: 0,
+        lane: 0,
     };
     /// `V_lo`.
     pub const V_LO: Self = Self::Digit {
         value: DigitValue::V,
         digit: 0,
+        lane: 0,
     };
     /// `V_hi`.
     pub const V_HI: Self = Self::Digit {
         value: DigitValue::V,
         digit: 1,
+        lane: 0,
     };
     /// `K_0` (projection outputs, looked up).
     pub const K_0: Self = Self::Digit {
         value: DigitValue::K,
         digit: 0,
+        lane: 0,
     };
     /// `K_1` (projection outputs, looked up).
     pub const K_1: Self = Self::Digit {
         value: DigitValue::K,
         digit: 1,
+        lane: 0,
     };
     /// `K_2` (projection outputs, base 8, leaf and link).
     pub const K_2: Self = Self::Digit {
         value: DigitValue::K,
         digit: 2,
+        lane: 0,
     };
     /// `K_3` (projection outputs, base 8, leaf and link).
     pub const K_3: Self = Self::Digit {
         value: DigitValue::K,
         digit: 3,
+        lane: 0,
     };
 
     /// The carry column `kappa^(l)_t` (`l = 1, 2`) or `kappa^(3)` (`l = 3`).
@@ -339,15 +462,41 @@ impl Column {
             2 => DigitValue::Kappa2(t),
             _ => DigitValue::Kappa3,
         };
-        Self::Digit { value, digit: 0 }
+        Self::Digit { value, digit: 0, lane: 0 }
+    }
+
+    /// Digit `digit` of `value` in lane `lane`.
+    #[must_use]
+    pub const fn lane_digit(value: DigitValue, digit: u8, lane: u8) -> Self {
+        Self::Digit { value, digit, lane }
+    }
+
+    /// The polynomial lane of the column (0 for a column with one lane).
+    #[must_use]
+    pub const fn lane(self) -> u8 {
+        match self {
+            Self::Digit { lane, .. } | Self::W1Bit(_, lane) => lane,
+            _ => 0,
+        }
+    }
+
+    /// The same digit or bit column in lane `lane` (other columns have one lane and are
+    /// returned unchanged).
+    #[must_use]
+    pub const fn in_lane(self, lane: u8) -> Self {
+        match self {
+            Self::Digit { value, digit, .. } => Self::Digit { value, digit, lane },
+            Self::W1Bit(t, _) => Self::W1Bit(t, lane),
+            other => other,
+        }
     }
 
     /// The honest alphabet (of the stored value).
     #[must_use]
     pub fn alphabet(self) -> Alphabet {
         match self {
-            Self::Digit { value, digit } => value.layout().alphabet(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) | Self::Zero(_) => Alphabet::Bool,
+            Self::Digit { value, digit, .. } => value.layout().alphabet(usize::from(digit)),
+            Self::W1Bit(..) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) | Self::Zero(_) => Alphabet::Bool,
             Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => Alphabet::Ternary,
             Self::Multiplicity(_) => Alphabet::Balanced(16),
         }
@@ -357,8 +506,8 @@ impl Column {
     #[must_use]
     pub fn base(self) -> Option<u32> {
         match self {
-            Self::Digit { value, digit } => value.layout().base(usize::from(digit)),
-            Self::W1Bit(_) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) | Self::Zero(_) => None,
+            Self::Digit { value, digit, .. } => value.layout().base(usize::from(digit)),
+            Self::W1Bit(..) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) | Self::Zero(_) => None,
         }
     }
 
@@ -377,7 +526,8 @@ impl Column {
     }
 
     /// True for a digit range-checked by a leaf and a link (`Z_hi` base 4, `U_hi` base 6,
-    /// the projection digits `K_2, K_3` base 8).
+    /// the projection digits `K_2, K_3` base 8; for ML-DSA-65 and ML-DSA-87 `Z_mid`, `U_mid`
+    /// base 8 and `K_4` base 4).
     #[must_use]
     pub fn is_leaf_digit(self) -> bool {
         matches!(self.base(), Some(4 | 6 | 8))
@@ -393,8 +543,8 @@ impl Column {
     #[must_use]
     pub const fn group(self) -> GroupRole {
         match self {
-            Self::Digit { value, digit } => value.group(digit),
-            Self::W1Bit(_) | Self::Fips(_) => Group::Main,
+            Self::Digit { value, digit, .. } => value.group(digit),
+            Self::W1Bit(..) | Self::Fips(_) => Group::Main,
             Self::Parity2(_) => Group::Level2,
             Self::Multiplicity(_) => Group::Mult,
             Self::Zero(_) => Group::Level3,
@@ -423,24 +573,35 @@ impl Column {
         matches!(self, Self::Digit { .. }) && self.alphabet() == Alphabet::Bool
     }
 
-    /// Column name (`z_lo`, `u_hi`, `bz_hi`, `a_z`, `b_0`, `kappa1_2`, `y2_0`, `m_4`, ...).
+    /// Column name (`z_lo`, `u_hi`, `bz_hi`, `a_z`, `b_0`, `kappa1_2`, `y2_0`, `m_4`, ...), with
+    /// the lane in brackets when it is not 0 (`u_mid[3]`, `b_2[5]`).
     #[must_use]
     pub fn name(self) -> String {
+        let name = self.lane_free_name();
+        match self.lane() {
+            0 => name,
+            lane => format!("{name}[{lane}]"),
+        }
+    }
+
+    fn lane_free_name(self) -> String {
         let half = |digit: u8| if digit == 0 { "lo" } else { "hi" };
         match self {
-            Self::Digit { value, digit } => match value {
+            Self::Digit { value, digit, .. } => match value {
                 DigitValue::Z => format!("z_{}", half(digit)),
                 DigitValue::Zx => ["bz_lo", "bz_hi", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::U => format!("u_{}", half(digit)),
                 DigitValue::L => format!("l_{}", half(digit)),
                 DigitValue::V => format!("v_{}", half(digit)),
-                DigitValue::K => format!("k_{digit}"),
+                DigitValue::K | DigitValue::K5 => format!("k_{digit}"),
+                DigitValue::Zd => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
+                DigitValue::Ud => ["u_lo", "u_mid", "a_u"][usize::from(digit)].to_owned(),
                 DigitValue::HintSlack => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
                 DigitValue::Kappa2(t) => format!("kappa2_{t}"),
                 DigitValue::Kappa3 => "kappa3".to_owned(),
             },
-            Self::W1Bit(t) => format!("b_{t}"),
+            Self::W1Bit(t, _) => format!("b_{t}"),
             Self::Parity2(t) => format!("y2_{t}"),
             Self::Multiplicity(k) => format!("m_{k}"),
             Self::Fips(FipsColumn::Sign) => "s".to_owned(),
@@ -450,7 +611,7 @@ impl Column {
         }
     }
 
-    /// Transcript code of the alphabet: the digit base of a leaf-checked digit (4, 6),
+    /// Transcript code of the alphabet: the digit base of a leaf-checked digit (4, 6, 8),
     /// [`LOOKUP_ALPHABET_CODE`] for a column looked up in `T_16`,
     /// [`MULTIPLICITY_ALPHABET_CODE`] for a multiplicity digit, [`TERNARY_ALPHABET_CODE`] for
     /// H-FIPS's `delta` and `e`, 0 for a Boolean.
@@ -486,11 +647,47 @@ pub const fn u_slot_value(relation: Relation) -> DigitValue {
     }
 }
 
-/// The committed columns of a value, in digit order.
+/// The value `z` of `relation` under `set` ([`z_value`] for ML-DSA-44, [`DigitValue::Zd`]
+/// otherwise).
+#[must_use]
+pub const fn z_value_for(set: Set, relation: Relation) -> DigitValue {
+    match set {
+        Set::S44 => z_value(relation),
+        Set::S65 | Set::S87 => DigitValue::Zd,
+    }
+}
+
+/// The value in the slots of `U_lo` under `set` ([`u_slot_value`] for ML-DSA-44,
+/// [`DigitValue::Ud`] otherwise).
+#[must_use]
+pub const fn u_slot_value_for(set: Set, relation: Relation) -> DigitValue {
+    match set {
+        Set::S44 => u_slot_value(relation),
+        Set::S65 | Set::S87 => DigitValue::Ud,
+    }
+}
+
+/// The projection outputs of `set`: [`DigitValue::K`] (four digits, `B = 2^37`) for
+/// ML-DSA-44, [`DigitValue::K5`] (five digits, `B = 2^39`) otherwise.
+#[must_use]
+pub const fn k_value(set: Set) -> DigitValue {
+    match set {
+        Set::S44 => DigitValue::K,
+        Set::S65 | Set::S87 => DigitValue::K5,
+    }
+}
+
+/// The committed columns of a value, in digit order (lane 0).
 #[must_use]
 pub fn value_columns(value: DigitValue) -> Vec<Column> {
+    value_lane_columns(value, 0)
+}
+
+/// The committed columns of a value in lane `lane`, in digit order.
+#[must_use]
+pub fn value_lane_columns(value: DigitValue, lane: u8) -> Vec<Column> {
     (0..value.layout().len() as u8)
-        .map(|digit| Column::Digit { value, digit })
+        .map(|digit| Column::Digit { value, digit, lane })
         .collect()
 }
 
@@ -508,7 +705,7 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
         Group::Main16 => vec![z[0], u[0], Column::V_LO, Column::V_HI],
         Group::Main => [z[1], u[1]]
             .into_iter()
-            .chain(lanes.map(Column::W1Bit))
+            .chain(lanes.map(|t| Column::W1Bit(t, 0)))
             .chain(z[2..].iter().copied())
             .chain(FipsColumn::ALL.into_iter().map(Column::Fips).filter(|_| fips))
             .collect(),
@@ -526,6 +723,58 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
         Group::Mult => (0..MULTIPLICITY_DIGITS as u8)
             .map(Column::Multiplicity)
             .collect(),
+    }
+}
+
+/// The canonical polynomial order of a group of `set` under `relation`: [`group_columns`] for
+/// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 (relation H-u only) every main-domain column is a
+/// family of lanes, in lane order inside the family:
+///
+/// * `G_main16`: `Z_lo^(s)`, `U_lo^(rho)`, `V_lo^(rho)`, `V_hi^(rho)`, so the looked-up
+///   columns `Z_lo, U_lo` are the first `l + k` polynomials of the stacked lane;
+/// * `G_main4`: `Z_mid^(s)`, `a_z^(s)`, `U_mid^(rho)`, `a_u^(rho)`, then the bits
+///   `b_t^(rho)` bit-major (`t` outer, `rho` inner);
+/// * `G_1`: `kappa^(1)_t`; `G_2`: `y^(2)_t`, `kappa^(2)_t`; `G_3`: `kappa^(3)` and zero
+///   polynomials up to `G_2`'s count; `G_k`: the five projection digits; `G_m` as for ML-DSA-44.
+///
+/// # Panics
+/// For ML-DSA-65 or ML-DSA-87 under a relation other than H-u.
+#[must_use]
+pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<Column> {
+    if set == Set::S44 {
+        return group_columns(role, relation);
+    }
+    assert_eq!(relation, Relation::Hu, "ML-DSA-65 and ML-DSA-87 support relation H-u only");
+    let shape = SetShape::of(set);
+    let family = |value: DigitValue, digit: u8, lanes: usize| {
+        (0..lanes as u8).map(move |lane| Column::Digit { value, digit, lane })
+    };
+    let (z, u) = (DigitValue::Zd, DigitValue::Ud);
+    let (lanes_k, lanes_l) = (shape.lanes_k, shape.lanes_l);
+    let bits = 0..shape.w1_bits as u8;
+    match role {
+        Group::Main16 => family(z, 0, lanes_l)
+            .chain(family(u, 0, lanes_k))
+            .chain(family(DigitValue::V, 0, lanes_k))
+            .chain(family(DigitValue::V, 1, lanes_k))
+            .collect(),
+        Group::Main => family(z, 1, lanes_l)
+            .chain(family(z, 2, lanes_l))
+            .chain(family(u, 1, lanes_k))
+            .chain(family(u, 2, lanes_k))
+            .chain(bits.flat_map(|t| (0..lanes_k as u8).map(move |lane| Column::W1Bit(t, lane))))
+            .collect(),
+        Group::Level1 => bits.map(|t| Column::carry(1, t)).collect(),
+        Group::Level2 => bits
+            .clone()
+            .map(Column::Parity2)
+            .chain(bits.map(|t| Column::carry(2, t)))
+            .collect(),
+        Group::Level3 => std::iter::once(Column::carry(3, 0))
+            .chain((1..Group::Level3.num_polynomials(set, relation) as u8).map(Column::Zero))
+            .collect(),
+        Group::Proj => value_columns(DigitValue::K5),
+        Group::Mult => (0..MULTIPLICITY_DIGITS as u8).map(Column::Multiplicity).collect(),
     }
 }
 
@@ -547,14 +796,14 @@ pub struct GroupDescriptor {
 }
 
 impl GroupDescriptor {
-    fn new(role: GroupRole, d_sig: usize, relation: Relation) -> Self {
+    fn new(role: GroupRole, set: Set, d_sig: usize, relation: Relation) -> Self {
         Self {
             role,
             round: role.round(),
             family: role.family(),
-            logical_vars: role.logical_vars(Set::S44, d_sig),
-            physical_vars: role.physical_vars(Set::S44, d_sig),
-            columns: group_columns(role, relation),
+            logical_vars: role.logical_vars(set, d_sig),
+            physical_vars: role.physical_vars(set, d_sig),
+            columns: group_columns_for(set, role, relation),
         }
     }
 
@@ -613,14 +862,66 @@ pub fn stack_columns(stack: usize, relation: Relation) -> Vec<Column> {
     }
 }
 
-/// The domain of each lookup stack: the main domain, `D_1`, `D_2`, `D_3` and the projection
-/// domain `D_k`.
+/// The domain of each lookup stack of ML-DSA-44: the main domain, `D_1`, `D_2`, `D_3` and the
+/// projection domain `D_k` ([`stack_domains`] for every set).
 pub const STACK_DOMAINS: [GroupRole; 5] =
     [Group::Main, Group::Level1, Group::Level2, Group::Level3, Group::Proj];
+
+/// The column counts of the main-domain lookup stacks: the `l + k` looked-up polynomials of
+/// `G_main16` (`Z_lo` and `U_lo` lanes, in group order) split by the binary decomposition of
+/// their count, largest stack first, so that no stack pads its slots to a power of two:
+/// `[2]` (ML-DSA-44), `[8, 2, 1]` (ML-DSA-65), `[8, 4, 2, 1]` (ML-DSA-87).
+#[must_use]
+pub fn main_stack_sizes(set: Set) -> Vec<usize> {
+    let shape = SetShape::of(set);
+    let count = shape.lanes_k + shape.lanes_l;
+    (0..usize::BITS).rev().map(|bit| count & (1 << bit)).filter(|&size| size != 0).collect()
+}
+
+/// The domain of each lookup stack of `set`: the main-domain stacks
+/// ([`main_stack_sizes`]), then `D_1`, `D_2`, `D_3` and `D_k`.
+#[must_use]
+pub fn stack_domains(set: Set) -> Vec<GroupRole> {
+    std::iter::repeat_n(Group::Main, main_stack_sizes(set).len())
+        .chain([Group::Level1, Group::Level2, Group::Level3, Group::Proj])
+        .collect()
+}
+
+/// The looked-up columns of lookup stack `stack` of `set`, in slot order: the main-domain
+/// stacks take consecutive runs of the looked-up `G_main16` polynomials, then the carries
+/// of levels 1 to 3 and `[K_0 | K_1]` ([`stack_columns`] for ML-DSA-44).
+///
+/// # Panics
+/// For a stack index beyond the set's stacks.
+#[must_use]
+pub fn stack_columns_for(set: Set, stack: usize, relation: Relation) -> Vec<Column> {
+    if set == Set::S44 {
+        return stack_columns(stack, relation);
+    }
+    let sizes = main_stack_sizes(set);
+    let bits = 0..SetShape::of(set).w1_bits as u8;
+    if stack < sizes.len() {
+        let start: usize = sizes[..stack].iter().sum();
+        return group_columns_for(set, Group::Main16, relation)
+            .into_iter()
+            .filter(|c| c.is_lookup())
+            .skip(start)
+            .take(sizes[stack])
+            .collect();
+    }
+    match stack - sizes.len() {
+        0 => bits.map(|t| Column::carry(1, t)).collect(),
+        1 => bits.map(|t| Column::carry(2, t)).collect(),
+        2 => vec![Column::carry(3, 0)],
+        3 => value_columns(DigitValue::K5)[..2].to_vec(),
+        _ => panic!("{} lookup stacks", sizes.len() + 4),
+    }
+}
 
 /// Complete public commitment manifest of one batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitmentManifest {
+    set: Set,
     records: usize,
     padded: usize,
     d_sig: usize,
@@ -636,18 +937,44 @@ impl CommitmentManifest {
         Self::for_relation(records, Relation::default())
     }
 
-    /// The manifest of a batch of `records` live records under `relation`.
+    /// The ML-DSA-44 manifest of a batch of `records` live records under `relation`.
     pub fn for_relation(records: usize, relation: Relation) -> Result<Self, PlanError> {
+        Self::for_set(Set::S44, records, relation)
+    }
+
+    /// The manifest of a batch of `records` live records of parameter set `set` under
+    /// `relation` (ML-DSA-65 and ML-DSA-87 have relation H-u only; another relation is
+    /// [`PlanError::NotInCatalog`]).
+    pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
-        let layout = BatchLayout::new(Set::S44, d_sig, relation).expect("d_sig within the wire range");
+        let layout = BatchLayout::new(set, d_sig, relation).ok_or(PlanError::NotInCatalog { d_sig, relation })?;
         Ok(Self {
+            set,
             records,
             padded,
             d_sig,
             relation,
-            groups: Group::ALL.map(|role| GroupDescriptor::new(role, d_sig, relation)),
+            groups: Group::ALL.map(|role| GroupDescriptor::new(role, set, d_sig, relation)),
             catalog_row: layout.row_name(),
         })
+    }
+
+    /// The parameter set.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
+    }
+
+    /// The dimensions of the parameter set.
+    #[must_use]
+    pub const fn shape(&self) -> SetShape {
+        SetShape::of(self.set)
+    }
+
+    /// Cells of one main-domain polynomial per signature (`2^(d_main - d_sig)`).
+    #[must_use]
+    pub const fn lane_cells(&self) -> usize {
+        1 << (self.d_main() - self.d_sig)
     }
 
     /// The relation the proof certifies.
@@ -674,7 +1001,7 @@ impl CommitmentManifest {
         self.d_sig
     }
 
-    /// `d_main = 10 + d_sig`.
+    /// `d_main = 8 + d_vec + d_sig` (`10 + d_sig` for ML-DSA-44).
     #[must_use]
     pub const fn d_main(&self) -> usize {
         self.groups[Group::Main.index()].logical_vars
@@ -721,16 +1048,46 @@ impl CommitmentManifest {
         (role, position)
     }
 
-    /// The value `z` of the relation ([`z_value`]).
+    /// The value `z` of the set and relation ([`z_value_for`]).
     #[must_use]
     pub const fn z_value(&self) -> DigitValue {
-        z_value(self.relation)
+        z_value_for(self.set, self.relation)
     }
 
-    /// The value in the slots of `U_lo, U_hi` ([`u_slot_value`]).
+    /// The value in the slots of `U_lo` ([`u_slot_value_for`]).
     #[must_use]
     pub const fn u_slot_value(&self) -> DigitValue {
-        u_slot_value(self.relation)
+        u_slot_value_for(self.set, self.relation)
+    }
+
+    /// The projection outputs ([`k_value`]).
+    #[must_use]
+    pub const fn k_value(&self) -> DigitValue {
+        k_value(self.set)
+    }
+
+    /// The digit layout of the projection outputs ([`K16_DIGITS`] or [`K39_DIGITS`]).
+    #[must_use]
+    pub const fn proj_digits(&self) -> DigitLayout {
+        match self.set {
+            Set::S44 => K16_DIGITS,
+            Set::S65 | Set::S87 => K39_DIGITS,
+        }
+    }
+
+    /// The bound `B` of the projection outputs (`k in [-B, B)`).
+    #[must_use]
+    pub const fn proj_bound(&self) -> i64 {
+        match self.set {
+            Set::S44 => PROJ_BOUND,
+            Set::S65 | Set::S87 => PROJ_BOUND_39,
+        }
+    }
+
+    /// Bytes of `Psi in {0, 1}^(128 x P)`: 16, 24 or 32 KiB.
+    #[must_use]
+    pub const fn proj_bytes(&self) -> usize {
+        PROJ_ROWS * self.shape().positions / 8
     }
 
     /// True under relation H-FIPS (the hint is part of the relation).
@@ -739,10 +1096,36 @@ impl CommitmentManifest {
         self.relation == Relation::HFips
     }
 
-    /// The looked-up columns of lookup stack `stack` ([`stack_columns`]).
+    /// The looked-up columns of lookup stack `stack` ([`stack_columns_for`]).
     #[must_use]
     pub fn stack_columns(&self, stack: usize) -> Vec<Column> {
-        stack_columns(stack, self.relation)
+        stack_columns_for(self.set, stack, self.relation)
+    }
+
+    /// The domain of every lookup stack ([`stack_domains`]).
+    #[must_use]
+    pub fn stack_domains(&self) -> Vec<GroupRole> {
+        stack_domains(self.set)
+    }
+
+    /// The number of main-domain lookup stacks (1 for ML-DSA-44, 3 for ML-DSA-65, 4 for
+    /// ML-DSA-87).
+    #[must_use]
+    pub fn main_stacks(&self) -> usize {
+        main_stack_sizes(self.set).len()
+    }
+
+    /// The lookup stack of the carries of level `level` (`1..=3`).
+    #[must_use]
+    pub fn carry_stack(&self, level: usize) -> usize {
+        assert!((1..=3).contains(&level), "levels 1 to 3");
+        self.main_stacks() + level - 1
+    }
+
+    /// The lookup stack `[K_0 | K_1]` of the projection digits (the last one).
+    #[must_use]
+    pub fn proj_stack(&self) -> usize {
+        self.main_stacks() + 3
     }
 
     /// The leaf-checked digits in the order of the leaf and link instances: `Z_hi` (base 4),
@@ -785,11 +1168,12 @@ impl CommitmentManifest {
     #[must_use]
     pub fn lookup_shape(&self) -> LookupShape {
         LookupShape {
-            stacks: STACK_DOMAINS
+            stacks: self
+                .stack_domains()
                 .iter()
                 .enumerate()
                 .map(|(stack, &domain)| StackShape {
-                    columns: stack_columns(stack, self.relation).len(),
+                    columns: self.stack_columns(stack).len(),
                     vars: self.domain_vars(domain),
                     table: 0,
                     shift: LOOKUP_SHIFT,
@@ -831,12 +1215,13 @@ impl CommitmentManifest {
                     && profile.num_polynomials() == group.polynomial_count()
             })
             && plan.relation() == self.relation
+            && plan.set() == self.set
             && plan.layout.row_name() == self.catalog_row
     }
 
     /// Canonical byte encoding of the manifest part of the instance record.
     ///
-    /// `LE16` wire version, parameter-set byte `0x44`, relation byte ([`Relation::id`],
+    /// `LE16` wire version, parameter-set byte (`0x44`, `0x65`, `0x87`), relation byte ([`Relation::id`],
     /// `0` = H-u, `1` = H-exact), `LE64` `N`, `LE64` `N*`, digit layout id (1 = the lookup
     /// layout), group count; per group: role, round, family (0 = width 4, 1 = width 16),
     /// logical and physical variable counts, polynomial count and one alphabet byte per
@@ -849,7 +1234,7 @@ impl CommitmentManifest {
     pub fn binding_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(160);
         bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
-        bytes.push(PARAMETER_SET);
+        bytes.push(self.set.id());
         bytes.push(self.relation.id());
         bytes.extend_from_slice(&(self.records as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.padded as u64).to_le_bytes());
@@ -866,8 +1251,9 @@ impl CommitmentManifest {
         }
         bytes.extend_from_slice(&(self.catalog_row.len() as u16).to_le_bytes());
         bytes.extend_from_slice(self.catalog_row.as_bytes());
-        // The bridge shape (J_t, m_t, k_t); this wire version admits the production shape only.
-        for level in &agg_bridge::Shape::PRODUCTION.levels {
+        // The bridge shape (J_t, m_t, k_t); this wire version admits the set's production
+        // shape only.
+        for level in &agg_bridge::Shape::production(self.set).levels {
             bytes.extend_from_slice(&(level.cols as u64).to_le_bytes());
             bytes.extend_from_slice(&(level.rows as u64).to_le_bytes());
             bytes.push(level.k as u8);
@@ -990,7 +1376,7 @@ mod tests {
         assert!(Column::ZX_LO.is_lookup() && !Column::ZX_HI.is_lookup());
         assert_eq!((Column::ZX_HI.base(), Column::A_Z.alphabet()), (None, Alphabet::Bool));
         assert_eq!((Column::ZX_HI.alphabet_code(), Column::A_Z.alphabet_code()), (0, 0));
-        assert!(Column::ZX_HI.is_bool_digit() && !Column::W1Bit(0).is_bool_digit());
+        assert!(Column::ZX_HI.is_bool_digit() && !Column::W1Bit(0, 0).is_bool_digit());
         // The lookup stacks keep their shapes: bz_lo takes the slot of z_lo.
         assert_eq!(manifest.stack_columns(0), [Column::ZX_LO, Column::U_LO]);
         assert_eq!(
@@ -1008,7 +1394,7 @@ mod tests {
         // b_t keep positions 2..7 of G_main4 under both relations.
         let hu = CommitmentManifest::for_batch(256).unwrap();
         for t in 0..W1_BITS as u8 {
-            assert_eq!(manifest.locate(Column::W1Bit(t)), hu.locate(Column::W1Bit(t)));
+            assert_eq!(manifest.locate(Column::W1Bit(t, 0)), hu.locate(Column::W1Bit(t, 0)));
         }
         // H-exact z: z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225 over exactly [-B_z, B_z].
         let form = DigitValue::Zx.layout();
@@ -1274,6 +1660,199 @@ mod tests {
             expected.len() + 7 * 6 + 54 + 2 + xrow + 3 * 17 + 3 + 1 + 5 * 7
         );
         assert_ne!(xbytes, bytes);
+    }
+
+    /// ML-DSA-65 and ML-DSA-87: one polynomial per vector entry, the group order of
+    /// `group_columns_for`, the five projection digits and the split main lookup stack.
+    #[test]
+    fn lane_sets_follow_the_lane_layout() {
+        // (set, polynomial counts, stage-3 claims, per-signature cells at 2^15, stacks,
+        // stack depths at 2^15, lookups L at 2^15).
+        let cases = [
+            (Set::S65, [23, 46, 4, 8, 8, 5, 7], 87, 18_458, vec![8, 2, 1, 4, 4, 1, 2], vec![26, 24, 23, 22, 17, 14, 23], 105_005_056),
+            (Set::S87, [31, 62, 4, 8, 8, 5, 7], 111, 25_242, vec![8, 4, 2, 1, 4, 4, 1, 2], vec![26, 25, 24, 23, 22, 17, 14, 24], 146_948_096),
+        ];
+        for (set, counts, claims, cells, stacks, depths, lookups) in cases {
+            let shape = SetShape::of(set);
+            assert_eq!((shape.d_vec, shape.lanes_k, shape.lanes_l, shape.w1_bits), (0, shape.k, shape.l, 4));
+            assert_eq!(shape.lane_cells(), 256);
+            assert_eq!(shape.row_lane(5), (5, 0));
+            let (k, l) = (shape.k, shape.l);
+            let manifest = CommitmentManifest::for_set(set, 256, Relation::Hu).unwrap();
+            assert_eq!(manifest.set(), set);
+            let got: Vec<usize> = manifest.groups().iter().map(GroupDescriptor::polynomial_count).collect();
+            assert_eq!(got, counts, "{set}");
+            assert_eq!(manifest.total_polynomials(), counts.iter().sum::<usize>());
+            assert_eq!(manifest.stage3_polynomials(), claims);
+            assert_eq!(manifest.d_main(), 8 + 8);
+            assert_eq!(manifest.lane_cells(), 256);
+            // Every group agrees with the catalog layout and every column with its group.
+            for group in manifest.groups() {
+                assert_eq!(group.logical_vars, group.role.logical_vars(set, 8));
+                assert_eq!(group.polynomial_count(), group.role.num_polynomials(set, Relation::Hu));
+                for (position, &column) in group.columns.iter().enumerate() {
+                    assert_eq!(manifest.locate(column), (group.role, position));
+                    assert_eq!(column.group(), group.role);
+                    let alphabet = column.alphabet();
+                    assert!(group.family.min_value() <= alphabet.min());
+                    assert!(alphabet.max() <= group.family.max_value());
+                    if column.is_lookup() {
+                        assert_eq!(group.family, PcsFamily::Width16);
+                    }
+                }
+            }
+            // G_main16: Z_lo lanes, U_lo lanes, V_lo lanes, V_hi lanes.
+            let main16 = &manifest.group(Group::Main16).columns;
+            assert_eq!(main16[0], Column::lane_digit(DigitValue::Zd, 0, 0));
+            assert_eq!(main16[l], Column::lane_digit(DigitValue::Ud, 0, 0));
+            assert_eq!(main16[l + k - 1].name(), format!("u_lo[{}]", k - 1));
+            assert_eq!(main16[l + k], Column::V_LO);
+            assert_eq!(main16[l + 2 * k], Column::V_HI);
+            assert_eq!(main16[l + 3 * k - 1], Column::V_HI.in_lane(k as u8 - 1));
+            // G_main4: Z_mid, a_z, U_mid, a_u lanes, then the bits bit-major.
+            let main4: Vec<String> = manifest.group(Group::Main).columns.iter().map(|c| c.name()).collect();
+            assert_eq!((main4[0].as_str(), main4[l].as_str(), main4[2 * l].as_str()), ("z_mid", "a_z", "u_mid"));
+            assert_eq!((main4[2 * l + k].as_str(), main4[2 * l + 2 * k].as_str()), ("a_u", "b_0"));
+            assert_eq!(manifest.locate(Column::W1Bit(3, 2)).1, 2 * l + 2 * k + 3 * k + 2);
+            assert_eq!(main4.len(), 2 * l + 2 * k + 4 * k);
+            // Alphabets and codes: base-8 middle digits, Boolean slacks, a base-4 K_4.
+            let z_mid = Column::lane_digit(DigitValue::Zd, 1, 2);
+            let a_u = Column::lane_digit(DigitValue::Ud, 2, 1);
+            let k4 = Column::lane_digit(DigitValue::K5, 4, 0);
+            assert_eq!((z_mid.alphabet(), z_mid.alphabet_code()), (Alphabet::Balanced(8), 8));
+            assert_eq!((a_u.alphabet(), a_u.alphabet_code()), (Alphabet::Bool, 0));
+            assert_eq!((k4.alphabet(), k4.alphabet_code()), (Alphabet::Balanced(4), 4));
+            assert!(Column::lane_digit(DigitValue::Zd, 0, 4).is_lookup());
+            assert!(z_mid.is_leaf_digit() && k4.is_leaf_digit() && a_u.is_bool_digit());
+            assert_eq!((z_mid.lane(), z_mid.in_lane(0).lane()), (2, 0));
+            let leaves: Vec<String> = manifest.leaf_digits().iter().map(|c| c.name()).collect();
+            assert_eq!(leaves.len(), l + k + 3);
+            assert_eq!(&leaves[l + k..], ["k_2", "k_3", "k_4"]);
+            assert_eq!(manifest.bool_digits().len(), l + k);
+            assert_eq!(manifest.group(Group::Proj).columns, value_columns(DigitValue::K5));
+            assert_eq!((manifest.z_value(), manifest.u_slot_value(), manifest.k_value()), (DigitValue::Zd, DigitValue::Ud, DigitValue::K5));
+            assert_eq!(manifest.proj_bytes(), 128 * 256 * k / 8);
+            assert_eq!(manifest.proj_bound(), 1 << 39);
+            // G_3: kappa^(3) and seven zero polynomials.
+            let level3 = &manifest.group(Group::Level3);
+            assert_eq!((level3.columns[0], level3.columns[7], level3.claimed_count()), (Column::carry(3, 0), Column::Zero(7), 1));
+            // Committed cells per signature at 2^15: 256 per main polynomial.
+            let full = CommitmentManifest::for_set(set, 1 << 15, Relation::Hu).unwrap();
+            let main_cells = (counts[0] + counts[1]) * 256;
+            assert_eq!(main_cells, if set == Set::S65 { 17_664 } else { 23_808 });
+            assert_eq!(full.total_logical_cells(), cells << 15, "{set}");
+            assert_eq!(full.catalog_row(), format!("mldsa-{}-p16-batch-32768-mult-final", set.name()));
+            // Lookup stacks: the main stack split 8, 2, 1 (8, 4, 2, 1); four carry lanes in four
+            // slots, so no stack pads.
+            assert_eq!(main_stack_sizes(set), stacks[..stacks.len() - 4]);
+            let shape = full.lookup_shape();
+            shape.validate().unwrap();
+            let columns: Vec<usize> = shape.stacks.iter().map(|s| s.columns).collect();
+            assert_eq!(columns, stacks);
+            assert!(shape.stacks.iter().all(|s| s.slots() == s.columns));
+            let got: Vec<usize> = shape.stacks.iter().map(|s| s.depth()).collect();
+            assert_eq!(got, depths);
+            assert_eq!(shape.lookups(0), lookups);
+            let mut seen = Vec::new();
+            for (stack, &domain) in full.stack_domains().iter().enumerate() {
+                for column in full.stack_columns(stack) {
+                    assert!(column.is_lookup(), "{}", column.name());
+                    assert_eq!(column.domain(), domain);
+                    seen.push(column);
+                }
+            }
+            let mut looked_up: Vec<Column> =
+                full.groups().iter().flat_map(|g| g.columns.clone()).filter(|c| c.is_lookup()).collect();
+            looked_up.sort_by_key(|c| full.locate(*c));
+            seen.sort_by_key(|c| full.locate(*c));
+            assert_eq!(seen, looked_up, "every looked-up column in exactly one stack");
+            assert_eq!(full.carry_stack(1), full.main_stacks());
+            assert_eq!(full.stack_columns(full.proj_stack()), value_columns(DigitValue::K5)[..2]);
+            // The binding bytes carry the set, the lane layout and the four-lane bridge shape.
+            let manifest = CommitmentManifest::for_set(set, 200, Relation::Hu).unwrap();
+            let bytes = manifest.binding_bytes();
+            assert_eq!(&bytes[..4], &[4, 0, set.id(), 0]);
+            let main16 = &bytes[4 + 16 + 2..];
+            assert_eq!(&main16[..6], &[0, 1, 1, 16, 16, counts[0] as u8]);
+            assert!(main16[6..6 + l + k].iter().all(|&c| c == LOOKUP_ALPHABET_CODE));
+            assert!(main16[6 + l + k..6 + counts[0]].iter().all(|&c| c == UNCHECKED_ALPHABET_CODE));
+            let row = manifest.catalog_row().len();
+            let polys: usize = counts.iter().sum();
+            assert_eq!(bytes.len(), 4 + 16 + 2 + 7 * 6 + polys + 2 + row + 3 * 17 + 3 + 1 + stacks.len() * 7);
+            let bridge = &bytes[4 + 16 + 2 + 7 * 6 + polys + 2 + row..][..3 * 17];
+            assert_eq!(&bridge[34..42], &32_768_u64.to_le_bytes());
+            assert_ne!(bytes, CommitmentManifest::for_batch(200).unwrap().binding_bytes());
+            assert!(manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::Hu).unwrap()));
+            assert!(!manifest.matches_plan(&WorkPlan::for_records(200, Relation::Hu).unwrap()));
+            for relation in [Relation::HExact, Relation::HFips] {
+                assert!(matches!(
+                    CommitmentManifest::for_set(set, 200, relation),
+                    Err(PlanError::NotInCatalog { d_sig: 8, .. })
+                ));
+            }
+        }
+        // ML-DSA-44 keeps one lane per column and its own stacks.
+        let shape = SetShape::of(Set::S44);
+        assert_eq!((shape.d_vec, shape.lanes_k, shape.lanes_l, shape.w1_bits, shape.lane_cells()), (2, 1, 1, 6, 1024));
+        assert_eq!(shape.row_lane(3), (0, 768));
+        assert_eq!(main_stack_sizes(Set::S44), [2]);
+        assert_eq!(stack_domains(Set::S44), STACK_DOMAINS);
+        assert_eq!(CommitmentManifest::for_set(Set::S44, 300, Relation::HExact).unwrap(), CommitmentManifest::for_relation(300, Relation::HExact).unwrap());
+    }
+
+    #[test]
+    fn lane_set_forms_cover_their_ranges() {
+        // z: [-2^19, 2^19), digits of zero (-2^15, -4, 1).
+        let z = DigitValue::Zd.layout();
+        assert_eq!(z.range(), (-(1 << 19), (1 << 19) - 1));
+        assert_eq!(z.decompose(0), vec![-(1 << 15), -4, 1]);
+        assert_eq!((z.weights(), z.constant()), (vec![1, 1 << 16, 1 << 19], -229_376));
+        // u: exactly [-523,777, 523,777], digits of zero (32,257, 3, 0).
+        let u = DigitValue::Ud.layout();
+        assert_eq!(u.range(), (-523_777, 523_777));
+        assert_eq!(u.decompose(0), vec![32_257, 3, 0]);
+        assert_eq!((u.weights(), u.constant()), (vec![1, 1 << 16, 523_267], -228_865));
+        for (form, inside, outside) in [
+            (z, [-(1 << 19), -1, 0, (1 << 19) - 1], [-(1 << 19) - 1, 1 << 19]),
+            (u, [-523_777, -1, 0, 523_777], [-523_778, 523_778]),
+        ] {
+            for x in inside {
+                let digits = form.decompose(x);
+                assert!(form.in_alphabets(&digits), "{x}");
+                assert_eq!(form.compose(&digits), x);
+            }
+            for x in outside {
+                assert!(!form.in_alphabets(&form.decompose(x)), "{x}");
+            }
+        }
+        // k: [-2^39, 2^39), digits of zero (-2^15, -2^15, -4, -4, 0).
+        assert_eq!(K39_DIGITS.range(), (-PROJ_BOUND_39, PROJ_BOUND_39 - 1));
+        assert_eq!(K39_DIGITS.constant(), (1 << 37) + (1 << 34) + (1 << 31) + (1 << 15));
+        assert_eq!(K39_DIGITS.decompose(0), vec![-(1 << 15), -(1 << 15), -4, -4, 0]);
+        assert_eq!(K39_DIGITS.weights(), vec![1, 1 << 16, 1 << 32, 1 << 35, 1 << 38]);
+        for x in [-PROJ_BOUND_39, -1, 0, PROJ_BOUND_39 - 1] {
+            assert!(K39_DIGITS.in_alphabets(&K39_DIGITS.decompose(x)));
+        }
+        for x in [-PROJ_BOUND_39 - 1, PROJ_BOUND_39] {
+            assert!(!K39_DIGITS.in_alphabets(&K39_DIGITS.decompose(x)));
+        }
+    }
+
+    /// The ML-DSA-44 binding bytes of every relation at a spread of batch sizes, pinned by
+    /// their SHA3-256 digest (the instance record must not move when other sets are added).
+    #[test]
+    fn ml_dsa_44_binding_bytes_are_pinned() {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        for relation in Relation::ALL {
+            for records in [1, 8, 9, 200, 256, 1000, 1024, 5000, 8192, 8193, 20_000, 1 << 15] {
+                let bytes = CommitmentManifest::for_relation(records, relation).unwrap().binding_bytes();
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(&bytes);
+            }
+        }
+        let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(digest, "fb66b352877d6b17fa8d2105ef1361816995311c8dbc46bf55ed1086b8abbc96");
     }
 
     #[test]

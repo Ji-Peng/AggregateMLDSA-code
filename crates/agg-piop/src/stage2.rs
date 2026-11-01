@@ -131,7 +131,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         domain: GroupRole::Main,
         eq: EqPoint::None,
         lanes: std::iter::once(LaneId::Weight(WeightId::Level1))
-            .chain(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8))))
+            .chain(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8, 0))))
             .collect(),
         instances: lanes
             .map(|t| InstanceSpec::new(gamma_def_y1(t), vec![Term::Product(vec![0, 1 + t])]))
@@ -227,7 +227,7 @@ fn prove_with(
     };
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {
-        b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8)))),
+        b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8, 0)))),
         squares: digits(manifest)
             .iter()
             .map(|digit| value(LaneId::DigitSquare(digit.column)))
@@ -284,7 +284,7 @@ pub fn verify(
     let geom = Geometry::new(manifest.records()).map_err(|e| StageError::Internal(format!("{e:?}")))?;
     let r1_1 = suffix(&stage1.point, manifest.group(GroupRole::Level1).logical_vars);
     check_terminal(&spec, manifest, points, &replay, |id| match id {
-        LaneId::Column(Column::W1Bit(t)) => proof.claims.b[usize::from(t)],
+        LaneId::Column(Column::W1Bit(t, 0)) => proof.claims.b[usize::from(t)],
         LaneId::Column(c) if FIPS_TERMINALS.contains(&c) && manifest.is_fips() => {
             proof.claims.fips[FIPS_TERMINALS.iter().position(|&f| f == c).expect("listed")]
         }

@@ -290,14 +290,14 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     let u_columns = value_columns(manifest.u_slot_value());
     let mut main_columns = vec![u_columns[0], Column::V_LO, Column::V_HI, z_columns[1], u_columns[1]];
     main_columns.extend(z_columns[2..].iter().copied());
-    main_columns.extend(lanes.clone().map(|t| Column::W1Bit(t as u8)));
+    main_columns.extend(lanes.clone().map(|t| Column::W1Bit(t as u8, 0)));
     if gammas.fips {
         main_columns.extend(FipsColumn::ALL.map(Column::Fips));
     }
     let position = |column: Column| main_columns.iter().position(|&c| c == column).expect("lane");
     let v_weights = V16_DIGITS.weights();
     let mut ring_b: Vec<(usize, i64)> = (0..W1_BITS)
-        .map(|t| (position(Column::W1Bit(t as u8)), -((2 * GAMMA2) << t)))
+        .map(|t| (position(Column::W1Bit(t as u8, 0)), -((2 * GAMMA2) << t)))
         .collect();
     ring_b.push((position(Column::V_LO), -(Q * v_weights[0])));
     ring_b.push((position(Column::V_HI), -(Q * v_weights[1])));
@@ -359,7 +359,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
             instances.push(InstanceSpec {
                 gamma: f45,
                 scale: E::from_i64(2 << t),
-                terms: vec![Term::Product(vec![wrap, position(Column::W1Bit(t as u8))])],
+                terms: vec![Term::Product(vec![wrap, position(Column::W1Bit(t as u8, 0))])],
             });
         }
         let top = 43;
@@ -379,7 +379,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
         }
     }
     instances.extend(lanes.clone().map(|t| {
-        InstanceSpec::new(gammas.b_r2(t), vec![Term::Product(vec![position(Column::W1Bit(t as u8))])])
+        InstanceSpec::new(gammas.b_r2(t), vec![Term::Product(vec![position(Column::W1Bit(t as u8, 0))])])
     }));
     groups.push(GroupSpec {
         domain: GroupRole::Main,
@@ -441,7 +441,7 @@ pub fn spec(manifest: &CommitmentManifest, weights: &[Vec<E>]) -> StageSpec {
     // Main domain, eq(r^(1)): b_t reductions from r^(1).
     let bits: Vec<LaneId> = lanes
         .clone()
-        .map(|t| LaneId::Column(Column::W1Bit(t as u8)))
+        .map(|t| LaneId::Column(Column::W1Bit(t as u8, 0)))
         .collect();
     groups.push(GroupSpec {
         domain: GroupRole::Main,
@@ -988,7 +988,7 @@ mod tests {
             assert_eq!(part(&values, gammas.fips_check(0)), s * (s - one), "F1");
             assert_eq!(part(&values, gammas.fips_check(1)), delta * (delta - two * s + one), "F2");
             let w1 = (0..W1_BITS).fold(E::zero(), |acc, t| {
-                acc + v(Column::W1Bit(t as u8)) * E::from_u64(1 << t)
+                acc + v(Column::W1Bit(t as u8, 0)) * E::from_u64(1 << t)
             });
             assert_eq!(part(&values, gammas.fips_check(2)), two * e * w1 + c43 * e * e - c43 * e, "F45");
             // The ring's affine part moves with the five H-FIPS lanes exactly as -u does.

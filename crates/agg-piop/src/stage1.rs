@@ -83,7 +83,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         let mut instances = Vec::new();
         match domain {
             GroupRole::Main => {
-                lane_ids.extend(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8))));
+                lane_ids.extend(lanes.clone().map(|t| LaneId::Column(Column::W1Bit(t as u8, 0))));
                 instances.extend(
                     lanes
                         .clone()
@@ -214,7 +214,7 @@ fn prove_with(
     let claims = Stage1Claims {
         y1: std::array::from_fn(|t| value(LaneId::Parity1(t as u8))),
         y2: std::array::from_fn(|t| value(LaneId::Column(Column::Parity2(t as u8)))),
-        b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8)))),
+        b: std::array::from_fn(|t| value(LaneId::Column(Column::W1Bit(t as u8, 0)))),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     Ok((
@@ -259,7 +259,7 @@ fn resolve(weights: &BridgeWeightsAt, claims: &Stage1Claims, id: LaneId) -> E {
     match id {
         LaneId::Parity1(t) => claims.y1[usize::from(t)],
         LaneId::Column(Column::Parity2(t)) => claims.y2[usize::from(t)],
-        LaneId::Column(Column::W1Bit(t)) => claims.b[usize::from(t)],
+        LaneId::Column(Column::W1Bit(t, 0)) => claims.b[usize::from(t)],
         LaneId::Weight(WeightId::Level2) => weights.level2,
         LaneId::Weight(WeightId::Level3(t)) => weights.level3[usize::from(t)],
         other => panic!("{other:?} is not a stage-1 lane"),

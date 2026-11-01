@@ -1061,13 +1061,13 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         // flipped bits) differs from the Flock side's M b', so the Flock part fails.
         run(
             "committed bit flipped",
-            &main(&|m, t| *cell(m, t, Column::W1Bit(0), main_index(17, 2, 5)) ^= 1),
+            &main(&|m, t| *cell(m, t, Column::W1Bit(0, 0), main_index(17, 2, 5)) ^= 1),
             &keccak,
         );
         // The same flip with the round-2 tables (and Y_sigma) of the honest bits: the Flock
         // part accepts and the F_p side fails at the stage-1 terminal.
         let flipped = |m: &CommitmentManifest, t: &mut MainTables| {
-            *cell(m, t, Column::W1Bit(0), main_index(17, 2, 5)) ^= 1;
+            *cell(m, t, Column::W1Bit(0, 0), main_index(17, 2, 5)) ^= 1;
         };
         let bytes = run(
             "committed bit flipped, stale round 2",
@@ -1089,16 +1089,16 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &main(&|m, t| {
                 let y = (0..1024)
                     .map(|p| main_index(p % 256, p / 256, 7))
-                    .find(|&y| *cell(m, t, Column::W1Bit(1), y) == 0)
+                    .find(|&y| *cell(m, t, Column::W1Bit(1, 0), y) == 0)
                     .expect("a zero bit");
-                *cell(m, t, Column::W1Bit(1), y) = 2;
+                *cell(m, t, Column::W1Bit(1, 0), y) = 2;
             }),
             &at_stage(1),
         );
         // w1' = 44 in the committed bits only: the bridge (Flock part) objects.
         let w44 = |m: &CommitmentManifest, t: &mut MainTables| {
             for (b, bit) in [0, 0, 1, 1, 0, 1].into_iter().enumerate() {
-                *cell(m, t, Column::W1Bit(b as u8), main_index(17, 2, 5)) = bit;
+                *cell(m, t, Column::W1Bit(b as u8, 0), main_index(17, 2, 5)) = bit;
             }
         };
         run(
