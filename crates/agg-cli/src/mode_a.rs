@@ -1440,6 +1440,46 @@ pub fn sponge_records(
         .collect()
 }
 
+/// [`sponge_records`] for any parameter set: the committed bits `b_t` read from the bridge
+/// inputs (`MainTables::bridge_lanes`, position `j + 256 rho + P_pad i`) and packed in
+/// `w1Encode` order, bit `256 W rho + W j + t` for `W`-bit coefficients (FIPS 204 Algorithms
+/// 16 and 28: `W = 4` for ML-DSA-65 and ML-DSA-87).
+///
+/// # Panics
+/// If the manifest is of another parameter set than `P`.
+#[must_use]
+pub fn sponge_records_for<P: agg_witness::params::ParamSet>(
+    instance: &PublicInstance<P>,
+    manifest: &CommitmentManifest,
+    main: &MainTables,
+) -> Vec<SpongeRecord<P>> {
+    assert_eq!(manifest.set(), P::SET, "tables of the instance's parameter set");
+    let lanes = main.bridge_lanes(manifest);
+    let width = P::W1_BITS;
+    instance
+        .records
+        .par_iter()
+        .enumerate()
+        .map(|(i, record)| {
+            let mut w1_encode = P::zero_w1_encode();
+            let bytes = w1_encode.as_mut();
+            for (t, lane) in lanes.iter().enumerate() {
+                let cells = &lane[i * P::P_PAD..i * P::P_PAD + P::P_POSITIONS];
+                for (p, &cell) in cells.iter().enumerate() {
+                    if cell & 1 == 1 {
+                        let q = 256 * width * (p / 256) + width * (p % 256) + t;
+                        bytes[q / 8] |= 1 << (q % 8);
+                    }
+                }
+            }
+            SpongeRecord {
+                mu: record.mu,
+                w1_encode,
+            }
+        })
+        .collect()
+}
+
 /// The mode-A aggregator (holds the sponge gate, built once).
 pub struct Aggregator {
     gate: ChainGate,
