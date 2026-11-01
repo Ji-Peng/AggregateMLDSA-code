@@ -1,10 +1,17 @@
 //! Negacyclic equality pullback. Coordinates remain in canonical planes.
-use crate::{K,buf::{AlignedVec,KPlanes},k::{Planes,PlanesMut},detect::{backend,Backend}};
-use jolt_field::{Ring,Fold,Zero};
+use crate::{F,K,buf::{AlignedVec,KPlanes},k::{Planes,PlanesMut},detect::{backend,Backend}};
+use jolt_field::{Ring,Zero};
 use rayon::prelude::*;
 pub type Matrix = [[[i32;256];4];4];
-pub struct Context { r:K, scalar:<K as Fold>::Ctx }
-impl Context {pub fn new(r:K)->Self {Self {r,scalar:K::precompute(r)}}}
+pub struct Context { r:K, matrix:[u64;4] }
+impl Context {
+ pub fn new(r:K)->Self {
+  // Multiplication by r in the basis (1, u): r d = (r0 d0 + (r u).c0 d1) + (r1 d0 + r0 d1) u.
+  let ru=r*K::new(F::from_u64(0),F::from_u64(1));
+  let c=|x:F|x.to_canonical_u64();
+  Self {r,matrix:[c(r.c0()),c(ru.c0()),c(r.c1()),c(r.c0())]}
+ }
+}
 /// Iterative recurrence on the already daggered polynomial. Final bit reversal
 /// restores the coefficient order of the recursive even/odd interleaving.
 pub fn kernel_into(a:Planes<'_>,contexts:&[Context],out:PlanesMut<'_>) {
@@ -17,21 +24,122 @@ unsafe fn kernel_raw(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u6
  #[cfg(target_arch="x86_64")]
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return vector(a,contexts,out0,out1);}}
- let mut current:[K;256]=std::array::from_fn(|i|crate::scalar::get(a,i));
- let mut next=[K::zero();256];
- for (level,c) in contexts.iter().enumerate() {
-  let size=256>>level;let half=size/2;
-  for base in (0..256).step_by(size) {for k in 0..half {
-   let a0=current[base+2*k];let a1=current[base+2*k+1];
-   let rotated=if k==0 {-current[base+size-1]} else {current[base+2*k-1]};
-   next[base+k]=K::fold_one(&c.scalar,a0,rotated);next[base+half+k]=K::fold_one(&c.scalar,a1,a0);
-  }}
-  std::mem::swap(&mut current,&mut next);
+ let mut x0=[0u64;256];let mut x1=[0u64;256];
+ x0.copy_from_slice(a.0);x1.copy_from_slice(a.1);
+ transform_scalar(&mut x0,&mut x1,contexts);
+ for i in 0..256 {let j=(i as u8).reverse_bits() as usize;
+  // SAFETY: the caller passes pointers valid for 256 writes each.
+  unsafe {out0.add(j).write(x0[i]);out1.add(j).write(x1[i]);}
  }
- for (i,x) in current.iter().enumerate() {let j=(i as u8).reverse_bits() as usize;
-  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
-  unsafe {out0.add(j).write(x.c0().to_canonical_u64());out1.add(j).write(x.c1().to_canonical_u64());}
+}
+/// `a - b` modulo `p` for canonical inputs, canonical: a borrow wrapped by `2^64 = p + 59`.
+#[inline(always)]
+fn sub_mod(a:u64,b:u64)->u64 {let (d,borrow)=a.overflowing_sub(b);d.wrapping_sub(59*u64::from(borrow))}
+/// `lo + 2^64 hi + 2^128 carry` modulo `p` (`carry <= 5`), canonical: `2^64 = 59` and
+/// `2^128 = 3481` modulo `p`; the first fold is below `2^71`, the second below `2^64 + 2^13`.
+#[inline(always)]
+fn reduce3(lo:u64,hi:u64,carry:u64)->u64 {
+ let t=u128::from(hi)*59+u128::from(lo)+u128::from(carry)*3481;
+ let (t_lo,t_hi)=(t as u64,(t>>64) as u64);
+ let (s,overflow)=t_lo.overflowing_add(t_hi*59);
+ let s=s.wrapping_add(u64::from(overflow)*59);
+ s.min(s.wrapping_sub(crate::P))
+}
+/// `m0 d0 + m1 d1 + e` modulo `p`, canonical. The high words of the two products (each
+/// below `2^64`) are folded by `2^64 = 59` first: `59 (h0 + h1)` plus the three low words is
+/// below `2^72`, and the second fold of its high word (below `2^8`) is below `2^64 + 2^14`.
+#[inline(always)]
+fn dot2_add(m0:u64,d0:u64,m1:u64,d1:u64,e:u64)->u64 {
+ let x=u128::from(m0)*u128::from(d0);
+ let y=u128::from(m1)*u128::from(d1);
+ let h=u128::from((x>>64) as u64)+u128::from((y>>64) as u64);
+ let t=h*59+u128::from(x as u64)+u128::from(y as u64)+u128::from(e);
+ let (t_lo,t_hi)=(t as u64,(t>>64) as u64);
+ let (s,overflow)=t_lo.overflowing_add(t_hi*59);
+ let s=s.wrapping_add(u64::from(overflow)*59);
+ s.min(s.wrapping_sub(crate::P))
+}
+/// `even + r (odd - even)` on canonical coordinate pairs, canonical (the value of `K::fold_one`).
+#[inline(always)]
+fn fold(m:&[u64;4],e0:u64,e1:u64,o0:u64,o1:u64)->(u64,u64) {
+ let (d0,d1)=(sub_mod(o0,e0),sub_mod(o1,e1));
+ (dot2_add(m[0],d0,m[1],d1,e0),dot2_add(m[2],d0,m[3],d1,e1))
+}
+/// One level of [`kernel_into`] from `x` into `y` for blocks of `size` coefficients.
+#[inline(always)]
+fn level_scalar(x0:&[u64;256],x1:&[u64;256],y0:&mut [u64;256],y1:&mut [u64;256],m:&[u64;4],size:usize) {
+ let half=size/2;
+ for base in (0..256).step_by(size) {
+  // k = 0 rotates the last coefficient of the block in with a sign.
+  let (e0,e1)=(x0[base],x1[base]);let (o0,o1)=(x0[base+1],x1[base+1]);
+  let (r0,r1)=(sub_mod(0,x0[base+size-1]),sub_mod(0,x1[base+size-1]));
+  (y0[base],y1[base])=fold(m,e0,e1,r0,r1);
+  (y0[base+half],y1[base+half])=fold(m,o0,o1,e0,e1);
+  for k in 1..half {
+   let (e0,e1)=(x0[base+2*k],x1[base+2*k]);let (o0,o1)=(x0[base+2*k+1],x1[base+2*k+1]);
+   let (r0,r1)=(x0[base+2*k-1],x1[base+2*k-1]);
+   (y0[base+k],y1[base+k])=fold(m,e0,e1,r0,r1);
+   (y0[base+half+k],y1[base+half+k])=fold(m,o0,o1,e0,e1);
+  }
  }
+}
+/// The eight levels of [`kernel_into`] in place on canonical planes, in scalar `u64`
+/// arithmetic with one reduction per output coordinate; the levels alternate between `x`
+/// and an L1 scratch pair, so the result (in bit-reversed order) lands back in `x`.
+fn transform_scalar(x0:&mut [u64;256],x1:&mut [u64;256],contexts:&[Context]) {
+ assert_eq!(contexts.len(),8);
+ let mut y0=[0u64;256];let mut y1=[0u64;256];
+ for pair in 0..4 {
+  level_scalar(x0,x1,&mut y0,&mut y1,&contexts[2*pair].matrix,256>>(2*pair));
+  level_scalar(&y0,&y1,x0,x1,&contexts[2*pair+1].matrix,128>>(2*pair));
+ }
+}
+/// The daggered combination `sum_rho w_rho A[rho][s]` of one column in scalar arithmetic:
+/// coefficient `j` reads `A[rho][s][-j mod 256]` with sign `-1` for `j > 0`. The shifted
+/// coefficient `+-a + 2^23` lies in `(0, 2^24]` (`|a| < 2^23`), so four products with a
+/// canonical weight sum below `2^90` in one `u128` per coordinate; `correction` is
+/// `2^23 sum_rho w_rho`, subtracted once.
+fn combine_dagger_scalar(a:&Matrix,s:usize,weights:&[[u64;2];4],correction:[u64;2],out:(&mut [u64;256],&mut [u64;256])) {
+ for j in 0..256 {
+  let k=(256-j)&255;
+  let mut acc=[0u128;2];
+  for rho in 0..4 {
+   let x=i64::from(a[rho][s][k]);
+   let v=(if j==0 {x} else {-x}+(1<<23)) as u64;
+   acc[0]+=u128::from(weights[rho][0])*u128::from(v);
+   acc[1]+=u128::from(weights[rho][1])*u128::from(v);
+  }
+  out.0[j]=sub_mod(reduce3(acc[0] as u64,(acc[0]>>64) as u64,0),correction[0]);
+  out.1[j]=sub_mod(reduce3(acc[1] as u64,(acc[1]>>64) as u64,0),correction[1]);
+ }
+}
+fn scalar_weights(weights:&[K;4])->([[u64;2];4],[u64;2]) {
+ let c=|x:K|[x.c0().to_canonical_u64(),x.c1().to_canonical_u64()];
+ let correction=weights.iter().copied().fold(K::zero(),|a,b|a+b)*K::from_u64(1<<23);
+ (weights.map(c),c(correction))
+}
+/// [`ring_weights`] as one row-major `K` table (`rows` entries, record `i` at
+/// `1024 i + 256 s + j`) for the tiers without IFMA: each record is combined, transformed and
+/// written once from L1-resident planes, in scalar arithmetic.
+pub fn ring_weight_rows(matrices:&[&Matrix],eq_sig:&[K],row:&[K],coef:&[K],rows:usize)->Vec<K> {
+ assert_eq!(row.len(),4);assert_eq!(coef.len(),8);assert_eq!(rows%1024,0);assert!(matrices.len()<=rows/1024);assert!(eq_sig.len()>=matrices.len());
+ let contexts:Vec<_>=coef.iter().copied().map(Context::new).collect();
+ let mut table=Box::<[K]>::new_uninit_slice(rows);
+ table.par_chunks_mut(1024).enumerate().for_each(|(i,out)| {
+  if i>=matrices.len() {for x in out.iter_mut() {x.write(K::zero());}return;}
+  let (weights,correction)=scalar_weights(&std::array::from_fn(|rho|eq_sig[i]*row[rho]));
+  let mut x0=[0u64;256];let mut x1=[0u64;256];
+  for (s,column) in out.chunks_exact_mut(256).enumerate() {
+   combine_dagger_scalar(matrices[i],s,&weights,correction,(&mut x0,&mut x1));
+   transform_scalar(&mut x0,&mut x1,&contexts);
+   for i in 0..256 {
+    let j=(i as u8).reverse_bits() as usize;
+    column[j].write(K::new(F::from_u64(x0[i]),F::from_u64(x1[i])));
+   }
+  }
+ });
+ // SAFETY: every chunk of 1,024 slots is written above, the padded records with zeros.
+ unsafe {table.assume_init()}.into_vec()
 }
 /// Build the table at its origin; each record writes its four columns once.
 pub fn ring_weights(matrices:&[&Matrix],eq_sig:&[K],row:&[K],coef:&[K],rows:usize)->KPlanes {
@@ -56,10 +164,9 @@ fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
  #[cfg(target_arch="x86_64")]
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return combine_vector(a,s,weights,out);}}
- for j in 0..256 {let k=if j==0 {0} else {256-j};let sign=if j==0 {1} else {-1};
-  let x=(0..4).fold(K::zero(),|sum,rho|sum+weights[rho]*K::from_i64(sign*i64::from(a[rho][s][k])));
-  out.0[j]=x.c0().to_canonical_u64();out.1[j]=x.c1().to_canonical_u64();
- }
+ let (w,correction)=scalar_weights(weights);
+ let (o0,o1):(&mut [u64;256],&mut [u64;256])=(out.0.try_into().expect("256 coefficients"),out.1.try_into().expect("256 coefficients"));
+ combine_dagger_scalar(a,s,&w,correction,(o0,o1));
 }
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]

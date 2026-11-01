@@ -25,8 +25,8 @@ use aerie_falcon::protocol::algebra::eq_table;
 use agg_bridge::{weights as bridge, Domains, Shape};
 use agg_witness::bridge::SparseMatrix;
 use agg_witness::padding::Geometry;
-use agg_witness::params::{D_COEF, D_POS, K, L, N, W1_BITS};
-use jolt_field::{Ring, Unreduced, Zero};
+use agg_witness::params::{D_COEF, D_POS, K, L, W1_BITS};
+use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::public_data::{eq_correlation, PublicData};
@@ -111,46 +111,24 @@ pub fn level3_weights_at(geom: &Geometry, m3: &SparseMatrix, p3: &[E], q: &[E]) 
 }
 
 /// The ring weight `w_A(j', s, i)` on the main domain in order `(j', s, i)` for the point
-/// `r2 = r^(2)`; zero on padded rows.
+/// `r2 = r^(2)`; zero on padded rows. Each record is combined, transformed and written once
+/// (`agg_simd::negacyclic::ring_weight_rows`), the row-layout counterpart of
+/// [`ring_weight_planes`].
 #[must_use]
-#[allow(unsafe_code)]
 pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
     let geom = public.geometry();
     assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
-    let coef = &r2[..D_COEF as usize];
-    let kernel = crate::public_data::NegacyclicKernel::new(coef);
     let row = eq_table(&r2[D_COEF as usize..D_POS as usize]);
     assert_eq!(row.len(), K, "two row coordinates");
     let eq_sig = eq_table(&r2[D_POS as usize..]);
-    let positions = 1_usize << D_POS;
-    // SAFETY: each record block is filled, including every padded record.
-    unsafe { crate::kernel::buf::fill_par(crate::kernel::buf::uninit(geom.main_len()), positions, |i, chunk| {
-            if i >= geom.n {
-                for slot in chunk { slot.write(E::zero()); }
-                return;
-            }
-            // The kernel is linear in its polynomial: scale the row weights by eq(sig, i)
-            // once, combine the integer rows of A with base-field products, and transform
-            // each column into the table without allocating.
-            let weights: [E; K] = std::array::from_fn(|rho| eq_sig[i] * row[rho]);
-            let a = public.a(i);
-            let mut combined = [E::zero(); N];
-            let mut scratch = [E::zero(); N];
-            let mut output = [E::zero(); N];
-            for (s, out) in chunk.chunks_exact_mut(N).take(L).enumerate() {
-                for (j, slot) in combined.iter_mut().enumerate() {
-                    // Four integer products, |a| < 2^23. Each split accumulator
-                    // slot is below 4 * 2^64; reduce once per coordinate.
-                    let mut sum = crate::kernel::Acc::zero();
-                    for rho in 0..K {
-                        crate::kernel::mad_int(&mut sum, weights[rho], i64::from(a[rho][s][j]));
-                    }
-                    *slot = E::reduce_product(sum);
-                }
-                kernel.apply_into(&combined, &mut output, &mut scratch);
-                for (slot, &value) in out.iter_mut().zip(&output) { slot.write(value); }
-            }
-        }) }
+    let matrices: Vec<_> = (0..geom.n).map(|i| public.a(i)).collect();
+    agg_simd::negacyclic::ring_weight_rows(
+        &matrices,
+        &eq_sig,
+        &row,
+        &r2[..D_COEF as usize],
+        geom.main_len(),
+    )
 }
 
 /// [`ring_weight_table`] as lane-major `K` planes, built by the negacyclic
@@ -207,6 +185,7 @@ pub fn ring_weight_at(public: &PublicData, r2: &[E], r3: &[E]) -> E {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agg_witness::params::N;
     use crate::test_support::{boolean_point, point};
     use aerie_falcon::protocol::algebra::evaluate_mle;
     use agg_witness::bridge::{BridgeMatrices, J1, M1, M2, M3, ZETA2_USED};

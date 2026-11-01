@@ -51,7 +51,9 @@ use jolt_field::{Field, Fold, One, Ring, Unreduced, Zero};
 use jolt_poly::UnivariatePoly;
 use rayon::prelude::*;
 
-pub(crate) use self::field::{dot3, fm, fm2, fmi, mad_int, residue, Acc};
+pub(crate) use self::field::{dot3, fm, fm2, fmi, residue, Acc};
+#[cfg(test)]
+pub(crate) use self::field::mad_int;
 pub use self::layer::{IntPairGroup, LayerGroup, LayerTree, LinearIntGroup, WeightIntGroup};
 pub use self::plane::{
     LayerGroup as PlaneLayerGroup, LayerTree as PlaneLayerTree, LeafGroup as PlaneLeafGroup,
