@@ -268,7 +268,8 @@ fn column_evaluation_and_mixed_folds_match_direct_sums() {
    let r=rk(&mut seed);
    let mut out:Vec<KPlanes>=(0..2).map(|_|KPlanes::from_fn(rows/2,|_|K::from_u64(0))).collect();
    let addresses:Vec<(usize,usize)>=out.iter_mut().map(|o| {let (a,b)=o.planes_mut();(a.as_mut_ptr() as usize,b.as_mut_ptr() as usize)}).collect();
-   let lanes=[MixedLane::Planes(planes.planes()),MixedLane::Ints(&g)];
+   let fill=|first:usize,cells:&mut [i64]| {for (i,c) in cells.iter_mut().enumerate() {*c=g(first+i);}};
+   let lanes=[MixedLane::Planes(planes.planes()),MixedLane::Ints(&fill)];
    unsafe {fold_mixed(r,&lanes,&addresses,0,rows/2);}
    for k in 0..rows/2 {
     assert_eq!(out[0].get(k),plane[2*k]+r*(plane[2*k+1]-plane[2*k]),"mixed plane row {k}");

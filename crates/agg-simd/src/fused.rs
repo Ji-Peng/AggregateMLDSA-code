@@ -825,8 +825,9 @@ use rayon::prelude::*;
 pub enum MixedLane<'a> {
     /// A `K` lane already held as planes.
     Planes(Planes<'a>),
-    /// An integer lane read cell by cell (`|value| < 2^62`).
-    Ints(&'a (dyn Fn(usize) -> i64 + Sync)),
+    /// An integer lane written block by block: `fill(first, cells)` writes the values of
+    /// cells `first .. first + cells.len()` (`|value| < 2^62`).
+    Ints(&'a (dyn Fn(usize, &mut [i64]) + Sync)),
 }
 
 /// Level-0 lanes computed block by block instead of being stored (the rows of a fraction
@@ -869,15 +870,18 @@ pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: u
         match lane {
             // SAFETY: the call is guarded by the backend check and the length assertions above.
             MixedLane::Planes(p) => unsafe { fold_rows(r, &[*p], &[o], row0, row1) },
-            MixedLane::Ints(g) => {
-                let mut lo = [0_i64; 64];
-                let mut hi = [0_i64; 64];
+            MixedLane::Ints(fill) => {
+                const CHUNK: usize = 256;
+                let mut cells = [0_i64; 2 * CHUNK];
+                let mut lo = [0_i64; CHUNK];
+                let mut hi = [0_i64; CHUNK];
                 let mut row = row0;
                 while row < row1 {
-                    let n = (row1 - row).min(64);
+                    let n = (row1 - row).min(CHUNK);
+                    fill(2 * row, &mut cells[..2 * n]);
                     for i in 0..n {
-                        lo[i] = g(2 * (row + i));
-                        hi[i] = g(2 * (row + i) + 1);
+                        lo[i] = cells[2 * i];
+                        hi[i] = cells[2 * i + 1];
                     }
                     // SAFETY: the call is guarded by the backend check and the length assertions above.
                     let c0 = unsafe { std::slice::from_raw_parts_mut((o.0 as *mut u64).add(row), n) };
@@ -1240,9 +1244,12 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                             &mut partial,
                         );
                         let s = e.second.get(block).copied().unwrap_or_else(|| K::from_u64(1));
+                        // Slots and components without terms have zero sums.
                         for (acc, p) in sums.iter_mut().zip(&partial) {
                             for c in 0..3 {
-                                acc[c] += s * p[c];
+                                if !p[c].is_zero() {
+                                    acc[c] += s * p[c];
+                                }
                             }
                         }
                         k = end;
