@@ -20,6 +20,26 @@ fn reference_verifier_accepts_random_signatures() {
 }
 
 #[test]
+fn reference_verifier_accepts_random_signatures_65() {
+    let records = common::mixed_records_for::<Set65>(1650, 128, 32);
+    assert_eq!(records.len(), 160);
+    records.par_iter().for_each(|r| {
+        assert!(gen::crate_verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
+        assert!(agg_witness::native::verify_for::<Set65>(&r.pk, &r.msg, &r.sig));
+    });
+}
+
+#[test]
+fn reference_verifier_accepts_random_signatures_87() {
+    let records = common::mixed_records_for::<Set87>(1870, 128, 32);
+    assert_eq!(records.len(), 160);
+    records.par_iter().for_each(|r| {
+        assert!(gen::crate_verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
+        assert!(agg_witness::native::verify_for::<Set87>(&r.pk, &r.msg, &r.sig));
+    });
+}
+
+#[test]
 fn reference_verifier_agrees_with_crate_on_mutations() {
     let records = gen::records(101, 128);
     let other = gen::record(102, 0);

@@ -13,11 +13,11 @@ use sha3::digest::{ExtendableOutput, Update, XofReader};
 /// A polynomial with signed integer coefficients.
 pub type Poly = [i64; N];
 /// A k-vector of polynomials (rows of A).
-pub type VecK = [Poly; K];
+pub type VecK<P = Set44> = <P as ParamSet>::VecK;
 /// An l-vector of polynomials (columns of A).
-pub type VecL = [Poly; L];
+pub type VecL<P = Set44> = <P as ParamSet>::VecL;
 /// Per-coefficient small values (hint bits, w1 values) for the k rows.
-pub type SmallK = [[u8; N]; K];
+pub type SmallK<P = Set44> = <P as ParamSet>::SmallK;
 
 // ---------------------------------------------------------------------------------------------
 // Modular helpers.
@@ -56,42 +56,67 @@ pub fn mod_pm(x: i64, alpha: i64) -> i64 {
 // Rounding (FIPS 204 Algorithms 36 to 40).
 // ---------------------------------------------------------------------------------------------
 
-/// Decompose(r) (Algorithm 36): (r1, r0) with r = r1 (2 gamma2) + r0 mod q.
-pub fn decompose(r: i64) -> (i64, i64) {
+/// Decompose(r) (Algorithm 36) for parameter set P: (r1, r0) with r = r1 (2 gamma2) + r0 mod q.
+pub fn decompose_for<P: ParamSet>(r: i64) -> (i64, i64) {
     let r_plus = mod_q(r);
-    let r0 = mod_pm(r_plus, 2 * GAMMA2);
+    let r0 = mod_pm(r_plus, 2 * P::GAMMA2);
     if r_plus - r0 == Q - 1 {
         (0, r0 - 1)
     } else {
-        ((r_plus - r0) / (2 * GAMMA2), r0)
+        ((r_plus - r0) / (2 * P::GAMMA2), r0)
     }
+}
+
+/// Decompose(r) (Algorithm 36): (r1, r0) with r = r1 (2 gamma2) + r0 mod q.
+pub fn decompose(r: i64) -> (i64, i64) {
+    decompose_for::<Set44>(r)
+}
+
+/// HighBits(r) (Algorithm 37) for parameter set P.
+pub fn high_bits_for<P: ParamSet>(r: i64) -> i64 {
+    decompose_for::<P>(r).0
 }
 
 /// HighBits(r) (Algorithm 37).
 pub fn high_bits(r: i64) -> i64 {
-    decompose(r).0
+    high_bits_for::<Set44>(r)
+}
+
+/// LowBits(r) (Algorithm 38) for parameter set P.
+pub fn low_bits_for<P: ParamSet>(r: i64) -> i64 {
+    decompose_for::<P>(r).1
 }
 
 /// LowBits(r) (Algorithm 38).
 pub fn low_bits(r: i64) -> i64 {
-    decompose(r).1
+    low_bits_for::<Set44>(r)
+}
+
+/// MakeHint(z, r) (Algorithm 39) for parameter set P.
+pub fn make_hint_for<P: ParamSet>(z: i64, r: i64) -> bool {
+    high_bits_for::<P>(r) != high_bits_for::<P>(r + z)
 }
 
 /// MakeHint(z, r) (Algorithm 39).
 pub fn make_hint(z: i64, r: i64) -> bool {
-    high_bits(r) != high_bits(r + z)
+    make_hint_for::<Set44>(z, r)
+}
+
+/// UseHint(h, r) (Algorithm 40) for parameter set P.
+pub fn use_hint_for<P: ParamSet>(h: bool, r: i64) -> i64 {
+    let (r1, r0) = decompose_for::<P>(r);
+    if h && r0 > 0 {
+        (r1 + 1).rem_euclid(P::M_W)
+    } else if h {
+        (r1 - 1).rem_euclid(P::M_W)
+    } else {
+        r1
+    }
 }
 
 /// UseHint(h, r) (Algorithm 40).
 pub fn use_hint(h: bool, r: i64) -> i64 {
-    let (r1, r0) = decompose(r);
-    if h && r0 > 0 {
-        (r1 + 1).rem_euclid(M_W)
-    } else if h {
-        (r1 - 1).rem_euclid(M_W)
-    } else {
-        r1
-    }
+    use_hint_for::<Set44>(h, r)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -168,31 +193,41 @@ pub fn bit_unpack(v: &[u8], a: i64, b: i64) -> Poly {
     w
 }
 
-/// HintBitPack(h) (Algorithm 20). Panics if the weight exceeds omega.
-pub fn hint_bit_pack(h: &SmallK) -> [u8; OMEGA + K] {
-    let mut y = [0u8; OMEGA + K];
+/// HintBitPack(h) (Algorithm 20) for parameter set P. Panics if the weight exceeds omega.
+pub fn hint_bit_pack_for<P: ParamSet>(h: &P::SmallK) -> Vec<u8> {
+    let mut y = vec![0u8; P::OMEGA + P::K];
     let mut index = 0usize;
-    for i in 0..K {
+    for i in 0..P::K {
         for j in 0..N {
             if h[i][j] != 0 {
-                assert!(index < OMEGA, "hint weight exceeds omega");
+                assert!(index < P::OMEGA, "hint weight exceeds omega");
                 y[index] = j as u8;
                 index += 1;
             }
         }
-        y[OMEGA + i] = index as u8;
+        y[P::OMEGA + i] = index as u8;
     }
     y
 }
 
-/// HintBitUnpack(y) (Algorithm 21); `None` is the FIPS symbol "bottom".
-pub fn hint_bit_unpack(y: &[u8]) -> Option<SmallK> {
-    assert_eq!(y.len(), OMEGA + K);
-    let mut h = [[0u8; N]; K];
+/// HintBitPack(h) (Algorithm 20). Panics if the weight exceeds omega.
+pub fn hint_bit_pack(h: &SmallK) -> [u8; OMEGA + K] {
+    let y = hint_bit_pack_for::<Set44>(h);
+    let mut out = [0u8; OMEGA + K];
+    out.copy_from_slice(&y);
+    out
+}
+
+/// HintBitUnpack(y) (Algorithm 21) for parameter set P; `None` is the FIPS symbol "bottom".
+pub fn hint_bit_unpack_for<P: ParamSet>(y: &[u8]) -> Option<P::SmallK> {
+    if y.len() != P::OMEGA + P::K {
+        return None;
+    }
+    let mut h = P::zero_small_k();
     let mut index = 0usize;
-    for i in 0..K {
-        let end = usize::from(y[OMEGA + i]);
-        if end < index || end > OMEGA {
+    for i in 0..P::K {
+        let end = usize::from(y[P::OMEGA + i]);
+        if end < index || end > P::OMEGA {
             return None;
         }
         let first = index;
@@ -204,127 +239,162 @@ pub fn hint_bit_unpack(y: &[u8]) -> Option<SmallK> {
             index += 1;
         }
     }
-    if y[index..OMEGA].iter().any(|&b| b != 0) {
+    if y[index..P::OMEGA].iter().any(|&b| b != 0) {
         return None;
     }
     Some(h)
 }
 
-/// Public key decoded by pkDecode (Algorithm 23).
+/// HintBitUnpack(y) (Algorithm 21); `None` is the FIPS symbol "bottom".
+pub fn hint_bit_unpack(y: &[u8]) -> Option<SmallK> {
+    hint_bit_unpack_for::<Set44>(y)
+}
+
+/// Public key decoded by pkDecode (Algorithm 23) for parameter set P.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicKey {
+pub struct PublicKey<P: ParamSet = Set44> {
     /// Seed rho of A.
     pub rho: [u8; 32],
     /// t1 with coefficients in [0, 2^10 - 1].
-    pub t1: [[u16; N]; K],
+    pub t1: P::T1,
 }
 
-/// pkDecode (Algorithm 23); `None` on a wrong length.
-pub fn pk_decode(pk: &[u8]) -> Option<PublicKey> {
-    if pk.len() != PK_BYTES {
+/// pkDecode (Algorithm 23) for parameter set P; `None` on a wrong length.
+pub fn pk_decode_for<P: ParamSet>(pk: &[u8]) -> Option<PublicKey<P>> {
+    if pk.len() != P::PK_BYTES {
         return None;
     }
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&pk[..32]);
-    let mut t1 = [[0u16; N]; K];
-    for (i, row) in t1.iter_mut().enumerate() {
-        let off = 32 + i * 32 * T1_BITS;
-        let w = simple_bit_unpack(&pk[off..off + 32 * T1_BITS], T1_BITS);
+    let mut t1 = P::zero_t1();
+    for i in 0..P::K {
+        let off = 32 + i * 32 * P::T1_BITS;
+        let w = simple_bit_unpack(&pk[off..off + 32 * P::T1_BITS], P::T1_BITS);
         for j in 0..N {
-            row[j] = w[j] as u16;
+            t1[i][j] = w[j] as u16;
         }
     }
     Some(PublicKey { rho, t1 })
 }
 
-/// pkEncode (Algorithm 22).
-pub fn pk_encode(pk: &PublicKey) -> Vec<u8> {
-    let mut out = Vec::with_capacity(PK_BYTES);
+/// pkDecode (Algorithm 23); `None` on a wrong length.
+pub fn pk_decode(pk: &[u8]) -> Option<PublicKey<Set44>> {
+    pk_decode_for::<Set44>(pk)
+}
+
+/// pkEncode (Algorithm 22) for parameter set P.
+pub fn pk_encode_for<P: ParamSet>(pk: &PublicKey<P>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(P::PK_BYTES);
     out.extend_from_slice(&pk.rho);
-    for row in &pk.t1 {
+    for i in 0..P::K {
         let mut w = [0u64; N];
         for j in 0..N {
-            w[j] = u64::from(row[j]);
+            w[j] = u64::from(pk.t1[i][j]);
         }
-        simple_bit_pack(&w, T1_BITS, &mut out);
+        simple_bit_pack(&w, P::T1_BITS, &mut out);
     }
     out
 }
 
-/// A decoded signature (c~, z, h) of sigDecode (Algorithm 27).
+/// pkEncode (Algorithm 22).
+pub fn pk_encode(pk: &PublicKey) -> Vec<u8> {
+    pk_encode_for::<Set44>(pk)
+}
+
+/// A decoded signature (c~, z, h) of sigDecode (Algorithm 27) for parameter set P.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DecodedSig {
+pub struct DecodedSig<P: ParamSet = Set44> {
     /// Commitment hash c~.
-    pub c_tilde: [u8; C_TILDE_BYTES],
+    pub c_tilde: P::CTilde,
     /// Response z with coefficients in [-gamma1 + 1, gamma1].
-    pub z: VecL,
+    pub z: P::VecL,
     /// Hint h (0/1 per coefficient).
-    pub h: SmallK,
+    pub h: P::SmallK,
 }
 
 /// Why a signature fails to decode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SigDecodeError {
-    /// Length differs from 2,420 bytes.
+    /// Length differs from standard signature length.
     WrongLength,
     /// HintBitUnpack returned bottom (Algorithm 8 line 3).
     MalformedHint,
 }
 
-/// sigDecode (Algorithm 27) with the hint check of Algorithm 8 line 3.
-pub fn sig_decode(sig: &[u8]) -> Result<DecodedSig, SigDecodeError> {
-    if sig.len() != SIG_BYTES {
+/// sigDecode (Algorithm 27) with the hint check of Algorithm 8 line 3 for parameter set P.
+pub fn sig_decode_for<P: ParamSet>(sig: &[u8]) -> Result<DecodedSig<P>, SigDecodeError> {
+    if sig.len() != P::SIG_BYTES {
         return Err(SigDecodeError::WrongLength);
     }
-    let mut c_tilde = [0u8; C_TILDE_BYTES];
-    c_tilde.copy_from_slice(&sig[..C_TILDE_BYTES]);
-    let mut z = [[0i64; N]; L];
-    for (i, zi) in z.iter_mut().enumerate() {
-        let off = C_TILDE_BYTES + i * 32 * Z_BITS;
-        *zi = bit_unpack(&sig[off..off + 32 * Z_BITS], GAMMA1 - 1, GAMMA1);
+    let c_tilde = P::c_tilde_from_slice(&sig[..P::C_TILDE_BYTES]);
+    let mut z = P::zero_vec_l();
+    for i in 0..P::L {
+        let off = P::C_TILDE_BYTES + i * 32 * P::Z_BITS;
+        z[i] = bit_unpack(&sig[off..off + 32 * P::Z_BITS], P::GAMMA1 - 1, P::GAMMA1);
     }
-    let off = C_TILDE_BYTES + L * 32 * Z_BITS;
-    let h = hint_bit_unpack(&sig[off..]).ok_or(SigDecodeError::MalformedHint)?;
+    let off = P::C_TILDE_BYTES + P::L * 32 * P::Z_BITS;
+    let h = hint_bit_unpack_for::<P>(&sig[off..]).ok_or(SigDecodeError::MalformedHint)?;
     Ok(DecodedSig { c_tilde, z, h })
+}
+
+/// sigDecode (Algorithm 27) with the hint check of Algorithm 8 line 3.
+pub fn sig_decode(sig: &[u8]) -> Result<DecodedSig<Set44>, SigDecodeError> {
+    sig_decode_for::<Set44>(sig)
+}
+
+/// sigEncode (Algorithm 26) for parameter set P. Panics if z leaves range or hint weight exceeds omega.
+pub fn sig_encode_for<P: ParamSet>(c_tilde: &P::CTilde, z: &P::VecL, h: &P::SmallK) -> Vec<u8> {
+    let mut out = Vec::with_capacity(P::SIG_BYTES);
+    out.extend_from_slice(c_tilde.as_ref());
+    for i in 0..P::L {
+        bit_pack(&z[i], P::GAMMA1 - 1, P::GAMMA1, &mut out);
+    }
+    out.extend_from_slice(&hint_bit_pack_for::<P>(h));
+    debug_assert_eq!(out.len(), P::SIG_BYTES);
+    out
 }
 
 /// sigEncode (Algorithm 26). Panics if z leaves [-gamma1 + 1, gamma1] or the hint weight exceeds omega.
 pub fn sig_encode(c_tilde: &[u8; C_TILDE_BYTES], z: &VecL, h: &SmallK) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SIG_BYTES);
-    out.extend_from_slice(c_tilde);
-    for zi in z {
-        bit_pack(zi, GAMMA1 - 1, GAMMA1, &mut out);
+    sig_encode_for::<Set44>(c_tilde, z, h)
+}
+
+/// w1Encode (Algorithm 28) for parameter set P.
+pub fn w1_encode_for<P: ParamSet>(w1: &P::SmallK) -> P::W1Encode {
+    let mut out = Vec::with_capacity(P::W1_ENCODE_BYTES);
+    for i in 0..P::K {
+        let mut w = [0u64; N];
+        for j in 0..N {
+            assert!(i64::from(w1[i][j]) < P::M_W, "w1 coefficient out of range");
+            w[j] = u64::from(w1[i][j]);
+        }
+        simple_bit_pack(&w, P::W1_BITS, &mut out);
     }
-    out.extend_from_slice(&hint_bit_pack(h));
-    debug_assert_eq!(out.len(), SIG_BYTES);
-    out
+    P::w1_encode_from_slice(&out)
 }
 
 /// w1Encode (Algorithm 28): SimpleBitPack(w1[i], 43) for each row, 768 bytes.
 pub fn w1_encode(w1: &SmallK) -> [u8; W1_ENCODE_BYTES] {
-    let mut out = Vec::with_capacity(W1_ENCODE_BYTES);
-    for row in w1 {
-        let mut w = [0u64; N];
+    w1_encode_for::<Set44>(w1)
+}
+
+/// Inverse of w1Encode for parameter set P.
+pub fn w1_decode_for<P: ParamSet>(bytes: &[u8]) -> P::SmallK {
+    assert_eq!(bytes.len(), P::W1_ENCODE_BYTES);
+    let mut w1 = P::zero_small_k();
+    for i in 0..P::K {
+        let off = i * 32 * P::W1_BITS;
+        let w = simple_bit_unpack(&bytes[off..off + 32 * P::W1_BITS], P::W1_BITS);
         for j in 0..N {
-            assert!(i64::from(row[j]) < M_W, "w1 coefficient out of [0, 44)");
-            w[j] = u64::from(row[j]);
+            w1[i][j] = w[j] as u8;
         }
-        simple_bit_pack(&w, W1_BITS, &mut out);
     }
-    out.try_into().expect("768 bytes")
+    w1
 }
 
 /// Inverse of w1Encode for any 768-byte string (values in [0, 64)).
 pub fn w1_decode(bytes: &[u8; W1_ENCODE_BYTES]) -> SmallK {
-    let mut w1 = [[0u8; N]; K];
-    for (i, row) in w1.iter_mut().enumerate() {
-        let off = i * 32 * W1_BITS;
-        let w = simple_bit_unpack(&bytes[off..off + 32 * W1_BITS], W1_BITS);
-        for j in 0..N {
-            row[j] = w[j] as u8;
-        }
-    }
-    w1
+    w1_decode_for::<Set44>(bytes)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -355,14 +425,22 @@ pub fn mu(tr: &[u8; TR_BYTES], msg: &[u8], ctx: &[u8]) -> [u8; TR_BYTES] {
     out
 }
 
+/// c~' = H(mu || w1Encode(w1), lambda/4) for parameter set P.
+pub fn commitment_hash_for<P: ParamSet>(
+    mu: &[u8; TR_BYTES],
+    w1_bytes: &[u8],
+) -> P::CTilde {
+    let mut out = P::zero_c_tilde();
+    shake256(&[mu, w1_bytes], out.as_mut());
+    out
+}
+
 /// c~' = H(mu || w1Encode(w1), lambda/4) (Algorithm 8 line 12).
 pub fn commitment_hash(
     mu: &[u8; TR_BYTES],
     w1_bytes: &[u8; W1_ENCODE_BYTES],
 ) -> [u8; C_TILDE_BYTES] {
-    let mut out = [0u8; C_TILDE_BYTES];
-    shake256(&[mu, w1_bytes], &mut out);
-    out
+    commitment_hash_for::<Set44>(mu, w1_bytes)
 }
 
 /// The challenge c = SampleInBall(c~) (Algorithm 29), as coefficients and as its tau positions.
@@ -374,8 +452,8 @@ pub struct Challenge {
     pub positions: Vec<u8>,
 }
 
-/// SampleInBall(c~) (Algorithm 29) with H = SHAKE256.
-pub fn sample_in_ball(c_tilde: &[u8]) -> Challenge {
+/// SampleInBall(c~) (Algorithm 29) for parameter set P with H = SHAKE256.
+pub fn sample_in_ball_for<P: ParamSet>(c_tilde: &[u8]) -> Challenge {
     let mut h = sha3::Shake256::default();
     h.update(c_tilde);
     let mut reader = h.finalize_xof();
@@ -383,7 +461,7 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> Challenge {
     reader.read(&mut s);
     let signs = u64::from_le_bytes(s);
     let mut c = [0i8; N];
-    for i in (N - TAU)..N {
+    for i in (N - P::TAU)..N {
         let mut j = [0u8; 1];
         reader.read(&mut j);
         while usize::from(j[0]) > i {
@@ -391,7 +469,7 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> Challenge {
         }
         let j = usize::from(j[0]);
         c[i] = c[j];
-        let bit = (signs >> (i + TAU - N)) & 1;
+        let bit = (signs >> (i + P::TAU - N)) & 1;
         c[j] = if bit == 1 { -1 } else { 1 };
     }
     let positions = (0..N).filter(|&k| c[k] != 0).map(|k| k as u8).collect();
@@ -401,38 +479,42 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> Challenge {
     }
 }
 
+/// SampleInBall(c~) (Algorithm 29) with H = SHAKE256.
+pub fn sample_in_ball(c_tilde: &[u8]) -> Challenge {
+    sample_in_ball_for::<Set44>(c_tilde)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Verification (Algorithms 3 and 8).
 // ---------------------------------------------------------------------------------------------
 
-/// Intermediate values of `ML-DSA.Verify_internal` (Algorithm 8).
+/// Intermediate values of `ML-DSA.Verify_internal` (Algorithm 8) for parameter set P.
 #[derive(Clone, Debug)]
-pub struct VerifyTrace {
+pub struct VerifyTrace<P: ParamSet = Set44> {
     /// Decoded signature.
-    pub sig: DecodedSig,
+    pub sig: DecodedSig<P>,
     /// mu.
     pub mu: [u8; TR_BYTES],
     /// c = SampleInBall(c~).
     pub c: Challenge,
     /// w'_Approx = NTT^{-1}(A_hat o NTT(z) - NTT(c) o NTT(t1 2^d)) in [0, q).
-    pub w_approx: VecK,
-    /// A_hat o NTT(z) in [0, q) (the NTT-domain residue of A z modulo q, which the
-    /// integer product of [`crate::crt::az_crt_with`] reuses).
-    pub az_hat: [[u64; N]; K],
+    pub w_approx: P::VecK,
+    /// A_hat o NTT(z) in [0, q) (the NTT-domain residue of A z modulo q).
+    pub az_hat: P::VecKU64,
     /// w1' = UseHint(h, w'_Approx).
-    pub w1: SmallK,
+    pub w1: P::SmallK,
     /// w1Encode(w1').
-    pub w1_bytes: [u8; W1_ENCODE_BYTES],
-    /// c~' = H(mu || w1Encode(w1'), 32).
-    pub c_tilde_prime: [u8; C_TILDE_BYTES],
+    pub w1_bytes: P::W1Encode,
+    /// c~' = H(mu || w1Encode(w1'), lambda/4).
+    pub c_tilde_prime: P::CTilde,
     /// [[ ||z||_inf < gamma1 - beta ]].
     pub z_norm_ok: bool,
     /// Final result of Algorithm 8.
     pub accept: bool,
 }
 
-/// ||z||_inf for a vector of polynomials.
-pub fn inf_norm<const R: usize>(v: &[Poly; R]) -> i64 {
+/// ||z||_inf for a slice of polynomials.
+pub fn inf_norm_slice(v: &[[i64; N]]) -> i64 {
     v.iter()
         .flat_map(|p| p.iter())
         .map(|x| x.abs())
@@ -440,28 +522,35 @@ pub fn inf_norm<const R: usize>(v: &[Poly; R]) -> i64 {
         .unwrap_or(0)
 }
 
-/// Algorithm 8 lines 2 to 13 on an expanded key and a precomputed mu.
-pub fn verify_internal_trace(
-    key: &ExpandedKey,
+/// ||z||_inf for a vector of polynomials.
+pub fn inf_norm<const R: usize>(v: &[Poly; R]) -> i64 {
+    inf_norm_slice(v)
+}
+
+/// Algorithm 8 lines 2 to 13 on an expanded key and a precomputed mu for parameter set P.
+pub fn verify_internal_trace_for<P: ParamSet>(
+    key: &ExpandedKey<P>,
     mu: &[u8; TR_BYTES],
     sig: &[u8],
-) -> Result<VerifyTrace, SigDecodeError> {
-    let sig = sig_decode(sig)?;
-    let c = sample_in_ball(&sig.c_tilde);
+) -> Result<VerifyTrace<P>, SigDecodeError> {
+    let sig = sig_decode_for::<P>(sig)?;
+    let c = sample_in_ball_for::<P>(sig.c_tilde.as_ref());
     let fips = NttPrime::fips();
-    let z_hat: Vec<[u64; N]> = sig.z.iter().map(|zi| fips.ntt_signed(zi)).collect();
+    let z_hat: Vec<[u64; N]> = (0..P::L).map(|s| fips.ntt_signed(&sig.z[s])).collect();
     let mut c_poly = [0i64; N];
     for j in 0..N {
         c_poly[j] = i64::from(c.coeffs[j]);
     }
     let c_hat = fips.ntt_signed(&c_poly);
-    let mut w_approx = [[0i64; N]; K];
-    let mut az_hat = [[0u64; N]; K];
-    let (a_hat, t1_2d_hat) = (key.a_hat(), key.t1_2d_hat());
-    for r in 0..K {
+    let mut w_approx = P::zero_vec_k();
+    let mut az_hat = P::zero_vec_k_u64();
+    let a_hat = key.a_hat();
+    let t1_2d_hat = key.t1_2d_hat();
+    for r in 0..P::K {
         let mut acc = [0u64; N];
-        for s in 0..L {
-            let prod = fips.pointwise(&a_hat[r][s], &z_hat[s]);
+        for s in 0..P::L {
+            let a_poly = P::get_ntt(&a_hat, r, s);
+            let prod = fips.pointwise(a_poly, &z_hat[s]);
             for j in 0..N {
                 acc[j] = fips.add_mod(acc[j], prod[j]);
             }
@@ -476,15 +565,15 @@ pub fn verify_internal_trace(
             w_approx[r][j] = w[j] as i64;
         }
     }
-    let mut w1 = [[0u8; N]; K];
-    for r in 0..K {
+    let mut w1 = P::zero_small_k();
+    for r in 0..P::K {
         for j in 0..N {
-            w1[r][j] = use_hint(sig.h[r][j] != 0, w_approx[r][j]) as u8;
+            w1[r][j] = use_hint_for::<P>(sig.h[r][j] != 0, w_approx[r][j]) as u8;
         }
     }
-    let w1_bytes = w1_encode(&w1);
-    let c_tilde_prime = commitment_hash(mu, &w1_bytes);
-    let z_norm_ok = inf_norm(&sig.z) < GAMMA1 - BETA;
+    let w1_bytes = w1_encode_for::<P>(&w1);
+    let c_tilde_prime = commitment_hash_for::<P>(mu, w1_bytes.as_ref());
+    let z_norm_ok = inf_norm_slice(sig.z.as_ref()) < P::GAMMA1 - P::BETA;
     let accept = z_norm_ok && c_tilde_prime == sig.c_tilde;
     Ok(VerifyTrace {
         sig,
@@ -500,24 +589,43 @@ pub fn verify_internal_trace(
     })
 }
 
-/// ML-DSA.Verify (Algorithm 3) with context `ctx`, using only this crate's arithmetic.
-pub fn verify_with_context(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
+/// Algorithm 8 lines 2 to 13 on an expanded key and a precomputed mu.
+pub fn verify_internal_trace(
+    key: &ExpandedKey,
+    mu: &[u8; TR_BYTES],
+    sig: &[u8],
+) -> Result<VerifyTrace<Set44>, SigDecodeError> {
+    verify_internal_trace_for::<Set44>(key, mu, sig)
+}
+
+/// ML-DSA.Verify (Algorithm 3) with context `ctx` for parameter set P.
+pub fn verify_with_context_for<P: ParamSet>(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
     if ctx.len() > 255 {
         return false;
     }
-    let Some(key) = ExpandedKey::from_bytes(pk) else {
+    let Some(key) = ExpandedKey::<P>::from_bytes_for(pk) else {
         return false;
     };
     let mu = mu(&key.tr, msg, ctx);
-    match verify_internal_trace(&key, &mu, sig) {
+    match verify_internal_trace_for::<P>(&key, &mu, sig) {
         Ok(t) => t.accept,
         Err(_) => false,
     }
 }
 
+/// ML-DSA.Verify (Algorithm 3) with context `ctx`, using only this crate's arithmetic.
+pub fn verify_with_context(pk: &[u8], msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
+    verify_with_context_for::<Set44>(pk, msg, ctx, sig)
+}
+
+/// ML-DSA.Verify in pure mode with empty context for parameter set P.
+pub fn verify_for<P: ParamSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    verify_with_context_for::<P>(pk, msg, &[], sig)
+}
+
 /// ML-DSA.Verify in pure mode with empty context (the aggregated statement).
 pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    verify_with_context(pk, msg, &[], sig)
+    verify_for::<Set44>(pk, msg, sig)
 }
 
 #[cfg(test)]
@@ -656,5 +764,88 @@ mod tests {
         let pk = pk_decode(&r.pk).unwrap();
         assert_eq!(pk_encode(&pk), r.pk);
         assert!(pk_decode(&r.pk[1..]).is_none());
+    }
+
+    #[test]
+    fn packing_roundtrips_65() {
+        let mut rng = SplitMix64::new(659);
+        let mut z = Set65::zero_vec_l();
+        for s in 0..Set65::L {
+            for x in z[s].iter_mut() {
+                *x = rng.below(2 * Set65::GAMMA1 as u64) as i64 - Set65::GAMMA1 + 1;
+            }
+        }
+        let mut h = Set65::zero_small_k();
+        for _ in 0..Set65::OMEGA {
+            h[rng.below(Set65::K as u64) as usize][rng.below(N as u64) as usize] = 1;
+        }
+        let mut ct = [0u8; 48];
+        rng.fill(&mut ct);
+        let bytes = sig_encode_for::<Set65>(&ct, &z, &h);
+        assert_eq!(bytes.len(), Set65::SIG_BYTES);
+        let d = sig_decode_for::<Set65>(&bytes).unwrap();
+        assert_eq!((d.c_tilde, d.z, d.h), (ct, z, h));
+        let mut w1 = Set65::zero_small_k();
+        for r in 0..Set65::K {
+            for x in w1[r].iter_mut() {
+                *x = rng.below(Set65::M_W as u64) as u8;
+            }
+        }
+        assert_eq!(w1_decode_for::<Set65>(&w1_encode_for::<Set65>(&w1)), w1);
+    }
+
+    #[test]
+    fn packing_roundtrips_87() {
+        let mut rng = SplitMix64::new(879);
+        let mut z = Set87::zero_vec_l();
+        for s in 0..Set87::L {
+            for x in z[s].iter_mut() {
+                *x = rng.below(2 * Set87::GAMMA1 as u64) as i64 - Set87::GAMMA1 + 1;
+            }
+        }
+        let mut h = Set87::zero_small_k();
+        for _ in 0..Set87::OMEGA {
+            h[rng.below(Set87::K as u64) as usize][rng.below(N as u64) as usize] = 1;
+        }
+        let mut ct = [0u8; 64];
+        rng.fill(&mut ct);
+        let bytes = sig_encode_for::<Set87>(&ct, &z, &h);
+        assert_eq!(bytes.len(), Set87::SIG_BYTES);
+        let d = sig_decode_for::<Set87>(&bytes).unwrap();
+        assert_eq!((d.c_tilde, d.z, d.h), (ct, z, h));
+        let mut w1 = Set87::zero_small_k();
+        for r in 0..Set87::K {
+            for x in w1[r].iter_mut() {
+                *x = rng.below(Set87::M_W as u64) as u8;
+            }
+        }
+        assert_eq!(w1_decode_for::<Set87>(&w1_encode_for::<Set87>(&w1)), w1);
+    }
+
+    #[test]
+    fn pk_encode_decode_roundtrip_65_and_87() {
+        let r65 = gen::record_for::<Set65>(6521, 0);
+        let pk65 = pk_decode_for::<Set65>(&r65.pk).unwrap();
+        assert_eq!(pk_encode_for::<Set65>(&pk65), r65.pk);
+
+        let r87 = gen::record_for::<Set87>(8721, 0);
+        let pk87 = pk_decode_for::<Set87>(&r87.pk).unwrap();
+        assert_eq!(pk_encode_for::<Set87>(&pk87), r87.pk);
+    }
+
+    #[test]
+    fn sample_in_ball_tau_65_and_87() {
+        let mut rng = SplitMix64::new(13);
+        let mut ct65 = [0u8; 48];
+        rng.fill(&mut ct65);
+        let c65 = sample_in_ball_for::<Set65>(&ct65);
+        assert_eq!(c65.positions.len(), Set65::TAU);
+        assert_eq!(c65.coeffs.iter().filter(|&&x| x != 0).count(), Set65::TAU);
+
+        let mut ct87 = [0u8; 64];
+        rng.fill(&mut ct87);
+        let c87 = sample_in_ball_for::<Set87>(&ct87);
+        assert_eq!(c87.positions.len(), Set87::TAU);
+        assert_eq!(c87.coeffs.iter().filter(|&&x| x != 0).count(), Set87::TAU);
     }
 }

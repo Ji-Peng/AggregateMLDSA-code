@@ -386,9 +386,108 @@ impl BitSlackLayout {
     }
 }
 
+/// Digit-slack form X = b + 2^j H + w a - offset with b in [0, 2^j) given by unsigned
+/// digits, a middle digit H in [0, mid_base) with balanced leaf alphabet [-mid_base/2, mid_base/2 - 1],
+/// and Boolean slack a in {0, 1}.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DigitSlackLayout {
+    /// Digits of b (unsigned, range [0, 2^j)).
+    pub low: DigitLayout,
+    /// Base of the middle digit.
+    pub mid_base: u32,
+    /// Weight of the Boolean slack a.
+    pub slack_weight: i64,
+    /// Offset subtracted at the end.
+    pub offset: i64,
+}
+
+impl DigitSlackLayout {
+    /// Number of committed digits (low digits, middle digit, and Boolean slack).
+    pub const fn len(&self) -> usize {
+        self.low.len() + 2
+    }
+
+    /// Always false.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The exact range [-offset, w + 2^j * mid_base - 1 - offset].
+    pub fn range(&self) -> (i64, i64) {
+        (
+            -self.offset,
+            self.slack_weight + self.low.product() * i64::from(self.mid_base) - 1 - self.offset,
+        )
+    }
+
+    /// Alphabet of committed digit k (low digits first, then middle digit, then Boolean slack).
+    pub fn alphabet(&self, k: usize) -> Alphabet {
+        if k < self.low.len() {
+            self.low.alphabet(k)
+        } else if k == self.low.len() {
+            Alphabet::Balanced(self.mid_base)
+        } else {
+            Alphabet::Bool
+        }
+    }
+
+    /// Weights of the committed digits in X = sum W_k Z_k + C_X.
+    pub fn weights(&self) -> Vec<i64> {
+        let mut w = self.low.weights();
+        w.push(self.low.product());
+        w.push(self.slack_weight);
+        w
+    }
+
+    /// C_X = C_b + 2^j * (mid_base / 2) - offset.
+    pub fn constant(&self) -> i64 {
+        self.low.constant() + self.low.product() * i64::from(self.mid_base / 2) - self.offset
+    }
+
+    /// Canonical digits: a = [y >= 2^j * mid_base], rest = y - w a, H = floor(rest / 2^j),
+    /// and b the remainder, with y = x + offset.
+    pub fn decompose(&self, x: i64) -> Vec<i64> {
+        let mut out = vec![0; self.len()];
+        self.decompose_into(x, &mut out);
+        out
+    }
+
+    /// [`Self::decompose`] into `out[..self.len()]` (no allocation).
+    pub fn decompose_into(&self, x: i64, out: &mut [i64]) {
+        let y = x + self.offset;
+        let threshold = self.low.product() * i64::from(self.mid_base);
+        let a = i64::from(y >= threshold);
+        let rest = y - self.slack_weight * a;
+        let lo_prod = self.low.product();
+        let mid = rest.div_euclid(lo_prod);
+        let m = self.low.len();
+        self.low.decompose_into(rest - lo_prod * mid, &mut out[..m]);
+        out[m] = mid - i64::from(self.mid_base / 2);
+        out[m + 1] = a;
+    }
+
+    /// X = sum W_k Z_k + C_X for any digit values.
+    pub fn compose(&self, digits: &[i64]) -> i64 {
+        assert_eq!(digits.len(), self.len());
+        let m = self.low.len();
+        self.low.compose(&digits[..m])
+            + self.low.product() * (digits[m] + i64::from(self.mid_base / 2))
+            + self.slack_weight * digits[m + 1]
+            - self.offset
+    }
+
+    /// True when every digit lies in its alphabet.
+    pub fn in_alphabets(&self, digits: &[i64]) -> bool {
+        digits
+            .iter()
+            .enumerate()
+            .all(|(k, &d)| self.alphabet(k).contains(d))
+    }
+}
+
 /// A value committed through digits: a mixed-radix layout, a step form, a bit-slack
-/// form or a slack form. The PIOP (`agg_piop::manifest::DigitValue::layout`) uses it to treat
-/// all alike: the value is always `sum W_k Z_k + C_X` over the committed digits.
+/// form, a digit-slack form or a slack form. The PIOP (`agg_piop::manifest::DigitValue::layout`)
+/// uses it to treat all alike: the value is always `sum W_k Z_k + C_X` over the committed digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueForm {
     /// Mixed-radix digits.
@@ -397,6 +496,8 @@ pub enum ValueForm {
     Step(StepLayout),
     /// Low digits plus two Boolean digits.
     BitSlack(BitSlackLayout),
+    /// Low digits, middle digit of base `mid_base`, plus Boolean slack.
+    DigitSlack(DigitSlackLayout),
     /// Low digits plus one Boolean slack (committed in that order: the low digits, then `a`;
     /// relation H-FIPS's `L = L_lo + 29,696 L_hi`, [`L_SLACK`]).
     Slack(SlackLayout),
@@ -409,6 +510,7 @@ impl ValueForm {
             Self::Radix(l) => l.len(),
             Self::Step(l) => l.len(),
             Self::BitSlack(l) => l.len(),
+            Self::DigitSlack(l) => l.len(),
             Self::Slack(l) => l.digits.len() + 1,
         }
     }
@@ -419,7 +521,7 @@ impl ValueForm {
     }
 
     /// Base of committed digit k (its balanced alphabet is [-b/2, b/2 - 1]); `None` for a
-    /// Boolean digit of a bit-slack form.
+    /// Boolean digit of a bit-slack or digit-slack form.
     pub fn base(&self, k: usize) -> Option<u32> {
         match self {
             Self::Radix(l) => Some(l.bases[k]),
@@ -427,6 +529,9 @@ impl ValueForm {
             Self::Step(l) => Some(l.top_base),
             Self::BitSlack(l) if k < l.low.len() => Some(l.low.bases[k]),
             Self::BitSlack(_) => None,
+            Self::DigitSlack(l) if k < l.low.len() => Some(l.low.bases[k]),
+            Self::DigitSlack(l) if k == l.low.len() => Some(l.mid_base),
+            Self::DigitSlack(_) => None,
             Self::Slack(l) if k < l.digits.len() => Some(l.digits.bases[k]),
             Self::Slack(_) => None,
         }
@@ -443,6 +548,7 @@ impl ValueForm {
             Self::Radix(l) => l.weights(),
             Self::Step(l) => l.weights(),
             Self::BitSlack(l) => l.weights(),
+            Self::DigitSlack(l) => l.weights(),
             Self::Slack(l) => {
                 let mut w = l.digits.weights();
                 w.push(l.slack_weight);
@@ -457,6 +563,7 @@ impl ValueForm {
             Self::Radix(l) => l.constant(),
             Self::Step(l) => l.constant(),
             Self::BitSlack(l) => l.constant(),
+            Self::DigitSlack(l) => l.constant(),
             Self::Slack(l) => l.digits.constant() - l.offset,
         }
     }
@@ -467,6 +574,7 @@ impl ValueForm {
             Self::Radix(l) => l.range(),
             Self::Step(l) => l.range(),
             Self::BitSlack(l) => l.range(),
+            Self::DigitSlack(l) => l.range(),
             Self::Slack(l) => l.range(),
         }
     }
@@ -488,6 +596,7 @@ impl ValueForm {
             Self::Radix(l) => l.decompose_into(x, out),
             Self::Step(l) => l.decompose_into(x, out),
             Self::BitSlack(l) => l.decompose_into(x, out),
+            Self::DigitSlack(l) => l.decompose_into(x, out),
             Self::Slack(l) => {
                 let m = l.digits.len();
                 out[m] = l.decompose_into(x, &mut out[..m]);
@@ -501,6 +610,7 @@ impl ValueForm {
             Self::Radix(l) => l.compose(digits),
             Self::Step(l) => l.compose(digits),
             Self::BitSlack(l) => l.compose(digits),
+            Self::DigitSlack(l) => l.compose(digits),
             Self::Slack(l) => {
                 assert_eq!(digits.len(), l.digits.len() + 1);
                 let m = l.digits.len();
@@ -515,6 +625,7 @@ impl ValueForm {
             Self::Radix(l) => l.in_alphabets(digits),
             Self::Step(l) => l.in_alphabets(digits),
             Self::BitSlack(l) => l.in_alphabets(digits),
+            Self::DigitSlack(l) => l.in_alphabets(digits),
             Self::Slack(l) => {
                 let m = l.digits.len();
                 digits.len() == m + 1
@@ -543,11 +654,45 @@ impl From<BitSlackLayout> for ValueForm {
     }
 }
 
+impl From<DigitSlackLayout> for ValueForm {
+    fn from(l: DigitSlackLayout) -> Self {
+        Self::DigitSlack(l)
+    }
+}
+
 impl From<SlackLayout> for ValueForm {
     fn from(l: SlackLayout) -> Self {
         Self::Slack(l)
     }
 }
+
+/// Exact digit-slack form of u for ML-DSA-65 and ML-DSA-87:
+/// u + B_u = B_ulo + 2^16 H_u + 523,267 a_u with B_ulo in [0, 2^16), H_u in [0, 8), a_u in {0, 1}.
+/// Stored U_lo = B_ulo - 2^15, U_mid = H_u - 4, a_u.
+pub const U_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
+    low: DigitLayout {
+        name: "u",
+        bases: &[1 << 16],
+        signed: false,
+    },
+    mid_base: 8,
+    slack_weight: 523_267,
+    offset: 523_777,
+};
+
+/// Relaxed digit-slack form of z for ML-DSA-65 and ML-DSA-87:
+/// z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z with z_lo in [0, 2^16), z_mid in [0, 8), a_z in {0, 1}.
+/// Stored Z_lo = z_lo - 2^15, Z_mid = z_mid - 4, a_z.
+pub const Z_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
+    low: DigitLayout {
+        name: "z",
+        bases: &[1 << 16],
+        signed: false,
+    },
+    mid_base: 8,
+    slack_weight: 1 << 19,
+    offset: 1 << 19,
+};
 
 /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` in `[0, gamma2 - 1]` with `L_lo` in
 /// `[0, 2^16)` (one unsigned base-`2^16` digit, stored `L_lo - 2^15`, looked up in `T_16`) and
@@ -883,6 +1028,116 @@ mod tests {
         for z in -8..8 {
             let p = p_of(z);
             assert!(q16_lo(p) == Some(0) || q16_hi(p) == Some(0));
+        }
+    }
+
+    #[test]
+    fn u_digit_slack_form_is_exact_at_the_boundaries() {
+        let form = ValueForm::from(U_DIGIT_SLACK);
+        assert_eq!(form.len(), 3);
+        assert_eq!(form.weights(), vec![1, 1 << 16, 523_267]);
+        assert_eq!(form.constant(), -228_865);
+        assert_eq!(form.range(), (-523_777, 523_777));
+        assert_eq!(
+            (0..3).map(|k| form.alphabet(k)).collect::<Vec<_>>(),
+            [Alphabet::Balanced(1 << 16), Alphabet::Balanced(8), Alphabet::Bool]
+        );
+        assert_eq!((form.base(0), form.base(1), form.base(2)), (Some(1 << 16), Some(8), None));
+
+        // Canonical digits of zero: (U_lo, U_mid, a_u) = (32,257, 3, 0)
+        assert_eq!(form.decompose(0), vec![32_257, 3, 0]);
+        assert_eq!(form.compose(&[32_257, 3, 0]), 0);
+
+        // Accepted boundaries: +-523,777
+        assert_eq!(form.decompose(523_777), vec![32_767, 3, 1]);
+        assert!(form.in_alphabets(&form.decompose(523_777)));
+        assert_eq!(form.compose(&form.decompose(523_777)), 523_777);
+
+        assert_eq!(form.decompose(-523_777), vec![-32_768, -4, 0]);
+        assert!(form.in_alphabets(&form.decompose(-523_777)));
+        assert_eq!(form.compose(&form.decompose(-523_777)), -523_777);
+
+        // Rejected boundaries: +-523,778
+        let d_pos = form.decompose(523_778);
+        assert_eq!(d_pos, vec![-32_768, 4, 1]);
+        assert!(!form.in_alphabets(&d_pos));
+        assert_eq!(form.compose(&d_pos), 523_778);
+
+        let d_neg = form.decompose(-523_778);
+        assert_eq!(d_neg, vec![32_767, -5, 0]);
+        assert!(!form.in_alphabets(&d_neg));
+        assert_eq!(form.compose(&d_neg), -523_778);
+
+        // Further out of range
+        for u in [523_779, -523_779, 600_000, -600_000, 1 << 20, -(1 << 20)] {
+            let d = form.decompose(u);
+            assert!(!form.in_alphabets(&d), "u = {u}");
+            assert_eq!(form.compose(&d), u);
+        }
+
+        // Stepped test across the whole valid range
+        let mut u = -523_777i64;
+        while u <= 523_777 {
+            let d = form.decompose(u);
+            assert!(form.in_alphabets(&d), "u = {u}");
+            assert_eq!(form.compose(&d), u);
+            u += 1007;
+        }
+    }
+
+    #[test]
+    fn z_digit_slack_form_is_exact_at_the_boundaries() {
+        let form = ValueForm::from(Z_DIGIT_SLACK);
+        assert_eq!(form.len(), 3);
+        assert_eq!(form.weights(), vec![1, 1 << 16, 1 << 19]);
+        assert_eq!(form.constant(), -229_376);
+        assert_eq!(form.range(), (-(1 << 19), (1 << 19) - 1));
+        assert_eq!(
+            (0..3).map(|k| form.alphabet(k)).collect::<Vec<_>>(),
+            [Alphabet::Balanced(1 << 16), Alphabet::Balanced(8), Alphabet::Bool]
+        );
+        assert_eq!((form.base(0), form.base(1), form.base(2)), (Some(1 << 16), Some(8), None));
+
+        // Canonical digits of zero: (Z_lo, Z_mid, a_z) = (-32,768, -4, 1)
+        assert_eq!(form.decompose(0), vec![-32_768, -4, 1]);
+        assert_eq!(form.compose(&[-32_768, -4, 1]), 0);
+
+        // Accepted boundaries: z = -2^19 and 2^19 - 1
+        let z_min = -(1i64 << 19);
+        let z_max = (1i64 << 19) - 1;
+        assert_eq!(form.decompose(z_min), vec![-32_768, -4, 0]);
+        assert!(form.in_alphabets(&form.decompose(z_min)));
+        assert_eq!(form.compose(&form.decompose(z_min)), z_min);
+
+        assert_eq!(form.decompose(z_max), vec![32_767, 3, 1]);
+        assert!(form.in_alphabets(&form.decompose(z_max)));
+        assert_eq!(form.compose(&form.decompose(z_max)), z_max);
+
+        // Rejected boundaries: -2^19 - 1 and 2^19
+        let d_low = form.decompose(z_min - 1);
+        assert_eq!(d_low, vec![32_767, -5, 0]);
+        assert!(!form.in_alphabets(&d_low));
+        assert_eq!(form.compose(&d_low), z_min - 1);
+
+        let d_high = form.decompose(z_max + 1);
+        assert_eq!(d_high, vec![-32_768, 4, 1]);
+        assert!(!form.in_alphabets(&d_high));
+        assert_eq!(form.compose(&d_high), z_max + 1);
+
+        // Further out of range
+        for z in [z_min - 100, z_max + 100, 1 << 21, -(1 << 21)] {
+            let d = form.decompose(z);
+            assert!(!form.in_alphabets(&d), "z = {z}");
+            assert_eq!(form.compose(&d), z);
+        }
+
+        // Stepped test across the whole valid range
+        let mut z = z_min;
+        while z <= z_max {
+            let d = form.decompose(z);
+            assert!(form.in_alphabets(&d), "z = {z}");
+            assert_eq!(form.compose(&d), z);
+            z += 1009;
         }
     }
 }

@@ -96,6 +96,9 @@ macro_rules! dispatch_set {
 
 pub use crate::dispatch_set;
 
+/// A polynomial with 256 signed integer coefficients.
+pub type Poly = [i64; 256];
+
 /// Compile-time parameter set specification for ML-DSA aggregation.
 pub trait ParamSet: Copy + Send + Sync + 'static {
     /// Numeric identifier (0x44, 0x65, 0x87).
@@ -271,6 +274,166 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const SLACK_Z: i64;
     /// Reconstruction offset for z in relation H-u (-229,376 for Set65/Set87; 0 for Set44).
     const Z_OFFSET: i64;
+
+    // -----------------------------------------------------------------------------------------
+    // Associated types and per-set vector/matrix storage.
+    // -----------------------------------------------------------------------------------------
+
+    /// Signer parameter set type in ml_dsa (MlDsa44, MlDsa65, MlDsa87).
+    type Signer: ml_dsa::MlDsaParams;
+
+    /// Vector of polynomials for the k rows.
+    type VecK: core::ops::Index<usize, Output = Poly>
+        + core::ops::IndexMut<usize, Output = Poly>
+        + AsRef<[Poly]>
+        + AsMut<[Poly]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// Vector of polynomials for the l columns.
+    type VecL: core::ops::Index<usize, Output = Poly>
+        + core::ops::IndexMut<usize, Output = Poly>
+        + AsRef<[Poly]>
+        + AsMut<[Poly]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// Small values per coefficient for the k rows (hints, w1).
+    type SmallK: core::ops::Index<usize, Output = [u8; 256]>
+        + core::ops::IndexMut<usize, Output = [u8; 256]>
+        + AsRef<[[u8; 256]]>
+        + AsMut<[[u8; 256]]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// t1 values per coefficient for the k rows.
+    type T1: core::ops::Index<usize, Output = [u16; 256]>
+        + core::ops::IndexMut<usize, Output = [u16; 256]>
+        + AsRef<[[u16; 256]]>
+        + AsMut<[[u16; 256]]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// Commitment hash c~ bytes (lambda / 4 bytes).
+    type CTilde: AsRef<[u8]>
+        + AsMut<[u8]>
+        + Clone
+        + Copy
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// w1Encode bytes (32 * k * w1_bits bytes).
+    type W1Encode: AsRef<[u8]>
+        + AsMut<[u8]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// k-vector of u64 coefficients (e.g. NTT domain residue modulo q).
+    type VecKU64: core::ops::Index<usize, Output = [u64; 256]>
+        + core::ops::IndexMut<usize, Output = [u64; 256]>
+        + AsRef<[[u64; 256]]>
+        + AsMut<[[u64; 256]]>
+        + Clone
+        + PartialEq
+        + Eq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static;
+
+    /// Matrix of NTT polynomials (k rows x l columns).
+    type MatrixNtt: core::fmt::Debug + Send + Sync + 'static;
+
+    /// Matrix of centered coefficient polynomials (k rows x l columns).
+    type MatrixCoeff: core::fmt::Debug + Send + Sync + 'static;
+
+    /// Block counts for ExpandA (k rows x l columns).
+    type ExpandBlocks: core::fmt::Debug + Send + Sync + 'static;
+
+    /// SIMD prepared matrices or unit for reference expansion.
+    type Prepared: Clone + core::fmt::Debug + Send + Sync + 'static;
+
+    /// Target type for Deref on TView.
+    type TTarget: core::ops::Index<usize, Output = [i32; 256]>
+        + core::ops::IndexMut<usize, Output = [i32; 256]>
+        + 'static;
+
+    /// Creates a zeroed k-vector of polynomials.
+    fn zero_vec_k() -> Self::VecK;
+    /// Creates a zeroed l-vector of polynomials.
+    fn zero_vec_l() -> Self::VecL;
+    /// Creates zeroed small values for the k rows.
+    fn zero_small_k() -> Self::SmallK;
+    /// Creates zeroed t1 values for the k rows.
+    fn zero_t1() -> Self::T1;
+    /// Creates zeroed commitment hash c~ bytes.
+    fn zero_c_tilde() -> Self::CTilde;
+    /// Creates zeroed w1Encode bytes.
+    fn zero_w1_encode() -> Self::W1Encode;
+    /// Creates zeroed k-vector of u64 coefficients.
+    fn zero_vec_k_u64() -> Self::VecKU64;
+    /// Creates a boxed zeroed matrix of NTT polynomials.
+    fn zero_matrix_ntt() -> Box<Self::MatrixNtt>;
+    /// Creates a boxed zeroed matrix of centered coefficient polynomials.
+    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff>;
+    /// Creates zeroed ExpandA block counts.
+    fn zero_expand_blocks() -> Self::ExpandBlocks;
+    /// Initializes prepared matrices for expansion.
+    fn make_prepared(rho: &[u8; 32]) -> Self::Prepared;
+    /// Expands an encoded public key for this parameter set.
+    fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>>;
+
+    /// Reads entry (r, s) of the NTT matrix.
+    fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256];
+    /// Mutably reads entry (r, s) of the NTT matrix.
+    fn get_ntt_mut(m: &mut Self::MatrixNtt, r: usize, s: usize) -> &mut [u64; 256];
+    /// Reads entry (r, s) of the coefficient matrix.
+    fn get_coeff(m: &Self::MatrixCoeff, r: usize, s: usize) -> &[i32; 256];
+    /// Mutably reads entry (r, s) of the coefficient matrix.
+    fn get_coeff_mut(m: &mut Self::MatrixCoeff, r: usize, s: usize) -> &mut [i32; 256];
+    /// Reads entry (r, s) of ExpandA block counts.
+    fn get_block(b: &Self::ExpandBlocks, r: usize, s: usize) -> usize;
+    /// Writes entry (r, s) of ExpandA block counts.
+    fn set_block(b: &mut Self::ExpandBlocks, r: usize, s: usize, val: usize);
+
+    /// Converts a slice of 256-coefficient rows into the TView target.
+    fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget;
+    /// Mutably converts a slice of 256-coefficient rows into the TView target.
+    fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget;
+
+    /// Decodes commitment hash c~ from the prefix of a slice.
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde;
+    /// Decodes w1Encode from the prefix of a slice.
+    fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode;
 }
 
 /// Zero-sized type selecting ML-DSA-44 parameters.
@@ -310,6 +473,56 @@ impl ParamSet for Set44 {
     const U_OFFSET: i64 = -190_465;
     const SLACK_Z: i64 = 130_915;
     const Z_OFFSET: i64 = 0;
+
+    type Signer = ml_dsa::MlDsa44;
+    type VecK = [Poly; 4];
+    type VecL = [Poly; 4];
+    type SmallK = [[u8; 256]; 4];
+    type T1 = [[u16; 256]; 4];
+    type CTilde = [u8; 32];
+    type W1Encode = [u8; 768];
+    type VecKU64 = [[u64; 256]; 4];
+    type MatrixNtt = [[[u64; 256]; 4]; 4];
+    type MatrixCoeff = [[[i32; 256]; 4]; 4];
+    type ExpandBlocks = [[usize; 4]; 4];
+    type Prepared = crate::expand::PreparedMatrices;
+    type TTarget = [[i32; 256]; 4];
+
+    fn zero_vec_k() -> Self::VecK { [[0; 256]; 4] }
+    fn zero_vec_l() -> Self::VecL { [[0; 256]; 4] }
+    fn zero_small_k() -> Self::SmallK { [[0; 256]; 4] }
+    fn zero_t1() -> Self::T1 { [[0; 256]; 4] }
+    fn zero_c_tilde() -> Self::CTilde { [0; 32] }
+    fn zero_w1_encode() -> Self::W1Encode { [0; 768] }
+    fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 4] }
+    fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 4]; 4]) }
+    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 4]; 4]) }
+    fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 4]; 4] }
+    fn make_prepared(rho: &[u8; 32]) -> Self::Prepared { crate::expand::make_prepared_44(rho) }
+    fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
+        crate::expand::ExpandedKey::<Set44>::many(&[pk]).pop().flatten()
+    }
+
+    fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
+    fn get_ntt_mut(m: &mut Self::MatrixNtt, r: usize, s: usize) -> &mut [u64; 256] { &mut m[r][s] }
+    fn get_coeff(m: &Self::MatrixCoeff, r: usize, s: usize) -> &[i32; 256] { &m[r][s] }
+    fn get_coeff_mut(m: &mut Self::MatrixCoeff, r: usize, s: usize) -> &mut [i32; 256] { &mut m[r][s] }
+    fn get_block(b: &Self::ExpandBlocks, r: usize, s: usize) -> usize { b[r][s] }
+    fn set_block(b: &mut Self::ExpandBlocks, r: usize, s: usize, val: usize) { b[r][s] = val; }
+
+    fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("4 rows") }
+    fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("4 rows") }
+
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
+        let mut ct = [0u8; 32];
+        ct.copy_from_slice(&slice[..32]);
+        ct
+    }
+    fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
+        let mut w = [0u8; 768];
+        w.copy_from_slice(&slice[..768]);
+        w
+    }
 }
 
 /// Zero-sized type selecting ML-DSA-65 parameters.
@@ -349,6 +562,56 @@ impl ParamSet for Set65 {
     const U_OFFSET: i64 = -294_401;
     const SLACK_Z: i64 = 0;
     const Z_OFFSET: i64 = -229_376;
+
+    type Signer = ml_dsa::MlDsa65;
+    type VecK = [Poly; 6];
+    type VecL = [Poly; 5];
+    type SmallK = [[u8; 256]; 6];
+    type T1 = [[u16; 256]; 6];
+    type CTilde = [u8; 48];
+    type W1Encode = [u8; 768];
+    type VecKU64 = [[u64; 256]; 6];
+    type MatrixNtt = [[[u64; 256]; 5]; 6];
+    type MatrixCoeff = [[[i32; 256]; 5]; 6];
+    type ExpandBlocks = [[usize; 5]; 6];
+    type Prepared = ();
+    type TTarget = [[i32; 256]; 6];
+
+    fn zero_vec_k() -> Self::VecK { [[0; 256]; 6] }
+    fn zero_vec_l() -> Self::VecL { [[0; 256]; 5] }
+    fn zero_small_k() -> Self::SmallK { [[0; 256]; 6] }
+    fn zero_t1() -> Self::T1 { [[0; 256]; 6] }
+    fn zero_c_tilde() -> Self::CTilde { [0; 48] }
+    fn zero_w1_encode() -> Self::W1Encode { [0; 768] }
+    fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 6] }
+    fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 5]; 6]) }
+    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 5]; 6]) }
+    fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 5]; 6] }
+    fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
+    fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
+        crate::expand::ExpandedKey::<Set65>::from_bytes_reference(pk)
+    }
+
+    fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
+    fn get_ntt_mut(m: &mut Self::MatrixNtt, r: usize, s: usize) -> &mut [u64; 256] { &mut m[r][s] }
+    fn get_coeff(m: &Self::MatrixCoeff, r: usize, s: usize) -> &[i32; 256] { &m[r][s] }
+    fn get_coeff_mut(m: &mut Self::MatrixCoeff, r: usize, s: usize) -> &mut [i32; 256] { &mut m[r][s] }
+    fn get_block(b: &Self::ExpandBlocks, r: usize, s: usize) -> usize { b[r][s] }
+    fn set_block(b: &mut Self::ExpandBlocks, r: usize, s: usize, val: usize) { b[r][s] = val; }
+
+    fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("6 rows") }
+    fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("6 rows") }
+
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
+        let mut ct = [0u8; 48];
+        ct.copy_from_slice(&slice[..48]);
+        ct
+    }
+    fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
+        let mut w = [0u8; 768];
+        w.copy_from_slice(&slice[..768]);
+        w
+    }
 }
 
 /// Zero-sized type selecting ML-DSA-87 parameters.
@@ -388,6 +651,56 @@ impl ParamSet for Set87 {
     const U_OFFSET: i64 = -294_401;
     const SLACK_Z: i64 = 0;
     const Z_OFFSET: i64 = -229_376;
+
+    type Signer = ml_dsa::MlDsa87;
+    type VecK = [Poly; 8];
+    type VecL = [Poly; 7];
+    type SmallK = [[u8; 256]; 8];
+    type T1 = [[u16; 256]; 8];
+    type CTilde = [u8; 64];
+    type W1Encode = [u8; 1024];
+    type VecKU64 = [[u64; 256]; 8];
+    type MatrixNtt = [[[u64; 256]; 7]; 8];
+    type MatrixCoeff = [[[i32; 256]; 7]; 8];
+    type ExpandBlocks = [[usize; 7]; 8];
+    type Prepared = ();
+    type TTarget = [[i32; 256]; 8];
+
+    fn zero_vec_k() -> Self::VecK { [[0; 256]; 8] }
+    fn zero_vec_l() -> Self::VecL { [[0; 256]; 7] }
+    fn zero_small_k() -> Self::SmallK { [[0; 256]; 8] }
+    fn zero_t1() -> Self::T1 { [[0; 256]; 8] }
+    fn zero_c_tilde() -> Self::CTilde { [0; 64] }
+    fn zero_w1_encode() -> Self::W1Encode { [0; 1024] }
+    fn zero_vec_k_u64() -> Self::VecKU64 { [[0; 256]; 8] }
+    fn zero_matrix_ntt() -> Box<Self::MatrixNtt> { Box::new([[[0; 256]; 7]; 8]) }
+    fn zero_matrix_coeff() -> Box<Self::MatrixCoeff> { Box::new([[[0; 256]; 7]; 8]) }
+    fn zero_expand_blocks() -> Self::ExpandBlocks { [[0; 7]; 8] }
+    fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
+    fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
+        crate::expand::ExpandedKey::<Set87>::from_bytes_reference(pk)
+    }
+
+    fn get_ntt(m: &Self::MatrixNtt, r: usize, s: usize) -> &[u64; 256] { &m[r][s] }
+    fn get_ntt_mut(m: &mut Self::MatrixNtt, r: usize, s: usize) -> &mut [u64; 256] { &mut m[r][s] }
+    fn get_coeff(m: &Self::MatrixCoeff, r: usize, s: usize) -> &[i32; 256] { &m[r][s] }
+    fn get_coeff_mut(m: &mut Self::MatrixCoeff, r: usize, s: usize) -> &mut [i32; 256] { &mut m[r][s] }
+    fn get_block(b: &Self::ExpandBlocks, r: usize, s: usize) -> usize { b[r][s] }
+    fn set_block(b: &mut Self::ExpandBlocks, r: usize, s: usize, val: usize) { b[r][s] = val; }
+
+    fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("8 rows") }
+    fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("8 rows") }
+
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
+        let mut ct = [0u8; 64];
+        ct.copy_from_slice(&slice[..64]);
+        ct
+    }
+    fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
+        let mut w = [0u8; 1024];
+        w.copy_from_slice(&slice[..1024]);
+        w
+    }
 }
 
 /// Module providing parameter set types and dispatch helpers.

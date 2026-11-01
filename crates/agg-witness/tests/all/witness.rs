@@ -76,6 +76,72 @@ fn derived_values_satisfy_relation_h() {
 }
 
 #[test]
+fn derived_values_satisfy_relation_h_65() {
+    let records = common::mixed_records_for::<Set65>(65210, 16, 4);
+    let inst = agg_witness::instance::PublicInstance::<Set65>::from_records_for(&records).unwrap();
+    let wits = common::witnesses_for::<Set65>(&inst, &records);
+    for (i, w) in wits.iter().enumerate() {
+        assert!(w.accepted);
+        assert!(agg_witness::native::inf_norm_slice(w.z.as_ref()) <= Set65::B_Z);
+        assert!(agg_witness::native::inf_norm_slice(w.u.as_ref()) <= Set65::B_U);
+        assert!(agg_witness::native::inf_norm_slice(w.v.as_ref()) <= Set65::B_V);
+        for r in 0..Set65::K {
+            for j in 0..N {
+                let w1 = i64::from(w.w1[r][j]);
+                assert!((0..Set65::M_W).contains(&w1));
+                assert_eq!(
+                    w.az[r][j] - w.t[r][j] - 2 * Set65::GAMMA2 * w1 - w.u[r][j] - Q * w.v[r][j],
+                    0
+                );
+                assert_eq!(w.w[r][j], ctr_q(w.az[r][j] - w.t[r][j]));
+                assert_eq!(w.u[r][j], ctr_q(w.w[r][j] - 2 * Set65::GAMMA2 * w1));
+                assert_eq!(agg_witness::native::use_hint_for::<Set65>(w.h[r][j] == 1, w.w[r][j]), w1);
+                assert_eq!(
+                    (0..Set65::W1_BITS).map(|t| i64::from(w.bit(t, j, r)) << t).sum::<i64>(),
+                    w1
+                );
+            }
+        }
+        let bytes = agg_witness::derive::reencode_h_for::<Set65>(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).expect("re-encodable");
+        assert_eq!(bytes, records[i].sig, "record {i}");
+        assert!(agg_witness::gen::crate_verify_for::<Set65>(&records[i].pk, &records[i].msg, &bytes));
+    }
+}
+
+#[test]
+fn derived_values_satisfy_relation_h_87() {
+    let records = common::mixed_records_for::<Set87>(87210, 16, 4);
+    let inst = agg_witness::instance::PublicInstance::<Set87>::from_records_for(&records).unwrap();
+    let wits = common::witnesses_for::<Set87>(&inst, &records);
+    for (i, w) in wits.iter().enumerate() {
+        assert!(w.accepted);
+        assert!(agg_witness::native::inf_norm_slice(w.z.as_ref()) <= Set87::B_Z);
+        assert!(agg_witness::native::inf_norm_slice(w.u.as_ref()) <= Set87::B_U);
+        assert!(agg_witness::native::inf_norm_slice(w.v.as_ref()) <= Set87::B_V);
+        for r in 0..Set87::K {
+            for j in 0..N {
+                let w1 = i64::from(w.w1[r][j]);
+                assert!((0..Set87::M_W).contains(&w1));
+                assert_eq!(
+                    w.az[r][j] - w.t[r][j] - 2 * Set87::GAMMA2 * w1 - w.u[r][j] - Q * w.v[r][j],
+                    0
+                );
+                assert_eq!(w.w[r][j], ctr_q(w.az[r][j] - w.t[r][j]));
+                assert_eq!(w.u[r][j], ctr_q(w.w[r][j] - 2 * Set87::GAMMA2 * w1));
+                assert_eq!(agg_witness::native::use_hint_for::<Set87>(w.h[r][j] == 1, w.w[r][j]), w1);
+                assert_eq!(
+                    (0..Set87::W1_BITS).map(|t| i64::from(w.bit(t, j, r)) << t).sum::<i64>(),
+                    w1
+                );
+            }
+        }
+        let bytes = agg_witness::derive::reencode_h_for::<Set87>(&inst.records[i].c_tilde, &w.z, &w.u, &w.w1).expect("re-encodable");
+        assert_eq!(bytes, records[i].sig, "record {i}");
+        assert!(agg_witness::gen::crate_verify_for::<Set87>(&records[i].pk, &records[i].msg, &bytes));
+    }
+}
+
+#[test]
 fn padded_rows_of_the_instance_have_zero_t() {
     let records = common::mixed_records(220, 5, 0);
     let inst = agg_witness::instance::PublicInstance::from_records(&records).unwrap();

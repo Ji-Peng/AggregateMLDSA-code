@@ -15,6 +15,7 @@ use crate::native::{pk_decode, Challenge, VecK};
 use crate::ntt::NttPrime;
 use crate::params::*;
 use agg_mldsa_simd::{Backend, Engine, ExpandedA, Poly32};
+use core::marker::PhantomData;
 use rayon::prelude::*;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 
@@ -60,23 +61,29 @@ pub fn rej_ntt_poly(seed: &[u8; 34]) -> ([u64; N], usize) {
     (a, squeezed.div_ceil(SHAKE128_RATE))
 }
 
-/// ExpandA(rho) (FIPS 204 Algorithm 32): A_hat[r][s] = RejNTTPoly(rho || s || r), and the
+/// ExpandA for parameter set P: A_hat[r][s] = RejNTTPoly(rho || s || r), and the
 /// SHAKE128 block count of each entry.
-pub fn expand_a(rho: &[u8; 32]) -> (Box<MatrixNtt>, [[usize; L]; K]) {
-    let mut a_hat = Box::new([[[0u64; N]; L]; K]);
-    let mut blocks = [[0usize; L]; K];
-    for r in 0..K {
-        for s in 0..L {
+pub fn expand_a_for<P: ParamSet>(rho: &[u8; 32]) -> (Box<P::MatrixNtt>, P::ExpandBlocks) {
+    let mut a_hat = P::zero_matrix_ntt();
+    let mut blocks = P::zero_expand_blocks();
+    for r in 0..P::K {
+        for s in 0..P::L {
             let mut seed = [0u8; 34];
             seed[..32].copy_from_slice(rho);
             seed[32] = s as u8;
             seed[33] = r as u8;
             let (poly, nb) = rej_ntt_poly(&seed);
-            a_hat[r][s] = poly;
-            blocks[r][s] = nb;
+            *P::get_ntt_mut(&mut a_hat, r, s) = poly;
+            P::set_block(&mut blocks, r, s, nb);
         }
     }
     (a_hat, blocks)
+}
+
+/// ExpandA(rho) (FIPS 204 Algorithm 32): A_hat[r][s] = RejNTTPoly(rho || s || r), and the
+/// SHAKE128 block count of each entry.
+pub fn expand_a(rho: &[u8; 32]) -> (Box<MatrixNtt>, [[usize; L]; K]) {
+    expand_a_for::<Set44>(rho)
 }
 
 /// Keys per expansion tile: one batch of ExpandA streams and tr digests at a time.
@@ -99,21 +106,22 @@ pub struct PreparedMatrices {
 
 /// Per-key precomputation of the verifier and the prover.
 #[derive(Clone, Debug)]
-pub struct ExpandedKey {
-    /// Encoded public key (1,312 bytes).
+pub struct ExpandedKey<P: ParamSet = Set44> {
+    /// Encoded public key.
     pub pk: Vec<u8>,
     /// Seed rho.
     pub rho: [u8; 32],
     /// t1 in [0, 1023].
-    pub t1: [[u16; N]; K],
+    pub t1: P::T1,
     /// tr = H(pk, 64).
     pub tr: [u8; TR_BYTES],
     /// SHAKE128 blocks used by each RejNTTPoly call.
-    pub expand_blocks: [[usize; L]; K],
+    pub expand_blocks: P::ExpandBlocks,
     /// A[r][s] = ctr_q(NTT^{-1}(A_hat[r][s])) in [-(q-1)/2, (q-1)/2].
-    pub a: Box<MatrixCoeff>,
+    pub a: Box<P::MatrixCoeff>,
     /// A_hat modulo q and NTT(A) modulo the transform prime, in backend order.
-    pub prepared: PreparedMatrices,
+    pub prepared: P::Prepared,
+    _marker: PhantomData<P>,
 }
 
 /// A zeroed boxed matrix built on the heap (no matrix-sized stack temporary).
@@ -127,7 +135,7 @@ fn boxed_matrix<T: Clone>(zero: T) -> Box<[[T; L]; K]> {
 
 /// Expands one tile of at most [`KEY_TILE`] encoded keys; `None` for a key of the wrong
 /// length.
-fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey>> {
+fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey<Set44>>> {
     let decoded: Vec<Option<_>> = pks.iter().map(|pk| pk_decode(pk)).collect();
     let live: Vec<usize> = (0..pks.len()).filter(|&i| decoded[i].is_some()).collect();
     let rhos: Vec<[u8; 32]> = live.iter().map(|&i| decoded[i].as_ref().expect("live").rho).collect();
@@ -136,7 +144,7 @@ fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey>> {
     let tr_inputs: Vec<[&[u8]; 4]> = live.iter().map(|&i| [pks[i], &[][..], &[], &[]]).collect();
     let mut trs = vec![0u8; live.len() * TR_BYTES];
     engine.shake256_many(&tr_inputs, TR_BYTES, &mut trs);
-    let mut out: Vec<Option<ExpandedKey>> = (0..pks.len()).map(|_| None).collect();
+    let mut out: Vec<Option<ExpandedKey<Set44>>> = (0..pks.len()).map(|_| None).collect();
     for ((&i, ex), tr) in live.iter().zip(&expanded).zip(trs.as_chunks::<TR_BYTES>().0) {
         let key = decoded[i].as_ref().expect("live");
         let mut a = boxed_matrix([0i32; N]);
@@ -152,12 +160,84 @@ fn expand_tile(engine: &Engine, pks: &[&[u8]]) -> Vec<Option<ExpandedKey>> {
             expand_blocks: ex.blocks.map(|row| row.map(usize::from)),
             a,
             prepared: PreparedMatrices { a_hat_q, a_hat_p2, backend: engine.backend() },
+            _marker: PhantomData,
         });
     }
     out
 }
 
-impl ExpandedKey {
+/// Prepares matrices for Set44 using the process-wide SIMD engine.
+pub fn make_prepared_44(rho: &[u8; 32]) -> PreparedMatrices {
+    let engine = agg_mldsa_simd::engine();
+    let mut expanded = vec![ExpandedA::zero(); 1];
+    engine.expand_a_many(&[*rho], &mut expanded);
+    let mut a = boxed_matrix([0i32; N]);
+    let mut a_hat_q = boxed_matrix(Poly32::zero());
+    let mut a_hat_p2 = boxed_matrix(Poly32::zero());
+    *a_hat_q = expanded[0].a_hat;
+    engine.prepare_matrices(&expanded[0].a_hat, &mut a, &mut a_hat_p2);
+    PreparedMatrices {
+        a_hat_q,
+        a_hat_p2,
+        backend: engine.backend(),
+    }
+}
+
+impl<P: ParamSet> ExpandedKey<P> {
+    /// Decodes and expands a public key for parameter set P.
+    pub fn from_bytes_for(pk: &[u8]) -> Option<Self> {
+        P::expand_key(pk)
+    }
+
+    /// Reference expansion from public key bytes.
+    pub fn from_bytes_reference(pk: &[u8]) -> Option<Self> {
+        let decoded = crate::native::pk_decode_for::<P>(pk)?;
+        let (a_hat, expand_blocks) = expand_a_for::<P>(&decoded.rho);
+        let fips = NttPrime::fips();
+        let mut a = P::zero_matrix_coeff();
+        for r in 0..P::K {
+            for s in 0..P::L {
+                let ntt_poly = P::get_ntt(&a_hat, r, s);
+                let coeffs = fips.intt(ntt_poly);
+                let row = P::get_coeff_mut(&mut a, r, s);
+                for j in 0..N {
+                    row[j] = crate::native::ctr_q(coeffs[j] as i64) as i32;
+                }
+            }
+        }
+        let mut tr = [0u8; TR_BYTES];
+        crate::native::shake256(&[pk], &mut tr);
+        let prepared = P::make_prepared(&decoded.rho);
+        Some(ExpandedKey {
+            pk: pk.to_vec(),
+            rho: decoded.rho,
+            t1: decoded.t1,
+            tr,
+            expand_blocks,
+            a,
+            prepared,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Recomputes A_hat in FIPS NTT order.
+    pub fn a_hat(&self) -> Box<P::MatrixNtt> {
+        let (a_hat, _) = expand_a_for::<P>(&self.rho);
+        a_hat
+    }
+
+    /// NTT(t1 2^d) mod q.
+    pub fn t1_2d_hat(&self) -> P::VecKU64 {
+        let fips = NttPrime::fips();
+        let mut out = P::zero_vec_k_u64();
+        for r in 0..P::K {
+            out[r] = fips.ntt_signed(&self.t1[r].map(|x| (i64::from(x)) << D));
+        }
+        out
+    }
+}
+
+impl ExpandedKey<Set44> {
     /// pkDecode plus the expansion; `None` on a wrong length.
     pub fn from_bytes(pk: &[u8]) -> Option<Self> {
         Self::many(&[pk]).pop().flatten()
@@ -177,30 +257,9 @@ impl ExpandedKey {
     }
 
     /// An engine reading [`ExpandedKey::prepared`] (the backend that built it).
-    ///
-    /// # Panics
-    /// Never on the machine that built the key.
     #[must_use]
     pub fn prepared_engine(&self) -> Engine {
         Engine::new(self.prepared.backend).expect("the backend that prepared the key")
-    }
-
-    /// A_hat = ExpandA(rho) in the FIPS 204 NTT order, in [0, q) (reference form, recomputed
-    /// from the prepared matrix).
-    #[must_use]
-    pub fn a_hat(&self) -> Box<MatrixNtt> {
-        let engine = self.prepared_engine();
-        let mut out = boxed_matrix([0u64; N]);
-        for (out_row, row) in out.iter_mut().zip(self.prepared.a_hat_q.iter()) {
-            for (dest, poly) in out_row.iter_mut().zip(row) {
-                let mut fips = *poly;
-                engine.order_to_fips(&mut fips);
-                for (d, &x) in dest.iter_mut().zip(fips.iter()) {
-                    *d = u64::try_from(x).expect("canonical residue");
-                }
-            }
-        }
-        out
     }
 
     /// NTT(A) modulo the legacy CRT prime [`crt::P2`] (reference form for [`crate::crt`],
@@ -216,35 +275,29 @@ impl ExpandedKey {
         }
         out
     }
+}
 
-    /// NTT(t1 2^d) mod q (native verifier, Algorithm 8 line 9), recomputed from t1.
-    #[must_use]
-    pub fn t1_2d_hat(&self) -> [[u64; N]; K] {
-        let fips = NttPrime::fips();
-        self.t1.map(|row| fips.ntt_signed(&row.map(|x| i64::from(x) << D)))
+/// T[rho] = 2^d (c * t1[rho]) over Z[X]/(X^256 + 1) for parameter set P.
+pub fn public_t_for<P: ParamSet>(c: &Challenge, t1: &P::T1) -> P::VecK {
+    let mut out = P::zero_vec_k();
+    let mut out_i32 = vec![[0i32; N]; P::K];
+    public_t_into_for::<P>(c, t1, &mut out_i32);
+    for r in 0..P::K {
+        for j in 0..N {
+            out[r][j] = i64::from(out_i32[r][j]);
+        }
     }
+    out
 }
 
-/// T[rho] = 2^d (c * t1[rho]) over Z[X]/(X^256 + 1), from the tau nonzero entries of c
-/// (k tau 256 signed additions, no reduction). |T| <= B_T < 2^29.
-pub fn public_t(c: &Challenge, t1: &[[u16; N]; K]) -> VecK {
-    let mut out = [[0i32; N]; K];
-    public_t_into(c, t1, &mut out);
-    out.map(|row| row.map(i64::from))
-}
-
-/// [`public_t`] in its stored width, written into `out` (overwritten). Every partial sum is
-/// a signed sum of at most tau values below 2^10, so |c * t1| <= tau (2^10 - 1) < 2^16
-/// before the shift and |T| < 2^29 after it: all of it fits `i32`.
-pub fn public_t_into(c: &Challenge, t1: &[[u16; N]; K], out: &mut [[i32; N]; K]) {
-    for r in 0..K {
+/// [`public_t_for`] in its stored width, written into `out` (overwritten).
+pub fn public_t_into_for<P: ParamSet>(c: &Challenge, t1: &P::T1, out: &mut [[i32; N]]) {
+    for r in 0..P::K {
         let row = &mut out[r];
         row.fill(0);
         for &pos in &c.positions {
             let p = usize::from(pos);
             let sign = i32::from(c.coeffs[p]);
-            // x^p t1: coefficients m < N - p land at p + m, the others wrap negated to
-            // m + p - N (two straight loops, which vectorize, instead of a branch per m).
             let (low, high) = t1[r].split_at(N - p);
             for (slot, &x) in row[p..].iter_mut().zip(low) {
                 *slot += sign * i32::from(x);
@@ -257,6 +310,19 @@ pub fn public_t_into(c: &Challenge, t1: &[[u16; N]; K], out: &mut [[i32; N]; K])
             *x <<= D;
         }
     }
+}
+
+/// T[rho] = 2^d (c * t1[rho]) over Z[X]/(X^256 + 1), from the tau nonzero entries of c
+/// (k tau 256 signed additions, no reduction). |T| <= B_T < 2^29.
+pub fn public_t(c: &Challenge, t1: &[[u16; N]; K]) -> VecK {
+    public_t_for::<Set44>(c, t1)
+}
+
+/// [`public_t`] in its stored width, written into `out` (overwritten). Every partial sum is
+/// a signed sum of at most tau values below 2^10, so |c * t1| <= tau (2^10 - 1) < 2^16
+/// before the shift and |T| < 2^29 after it: all of it fits `i32`.
+pub fn public_t_into(c: &Challenge, t1: &[[u16; N]; K], out: &mut [[i32; N]; K]) {
+    public_t_into_for::<Set44>(c, t1, out);
 }
 
 #[cfg(test)]
@@ -320,6 +386,82 @@ mod tests {
             for j in 0..N {
                 assert!(t[row][j].abs() <= B_T);
                 assert_eq!(mod_q(t[row][j]) as u64, prod[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_key_is_consistent_65() {
+        let r = gen::record_for::<Set65>(653, 1);
+        let key = ExpandedKey::<Set65>::from_bytes_for(&r.pk).unwrap();
+        let fips = NttPrime::fips();
+        for row in 0..Set65::K {
+            for s in 0..Set65::L {
+                assert_eq!(key.expand_blocks[row][s], 5);
+                let mut back = [0u64; N];
+                for j in 0..N {
+                    let c = i64::from(key.a[row][s][j]);
+                    assert!(c.abs() <= (Q - 1) / 2);
+                    back[j] = mod_q(c) as u64;
+                }
+                assert_eq!(fips.ntt(&back), key.a_hat()[row][s]);
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_key_is_consistent_87() {
+        let r = gen::record_for::<Set87>(873, 1);
+        let key = ExpandedKey::<Set87>::from_bytes_for(&r.pk).unwrap();
+        let fips = NttPrime::fips();
+        for row in 0..Set87::K {
+            for s in 0..Set87::L {
+                assert_eq!(key.expand_blocks[row][s], 5);
+                let mut back = [0u64; N];
+                for j in 0..N {
+                    let c = i64::from(key.a[row][s][j]);
+                    assert!(c.abs() <= (Q - 1) / 2);
+                    back[j] = mod_q(c) as u64;
+                }
+                assert_eq!(fips.ntt(&back), key.a_hat()[row][s]);
+            }
+        }
+    }
+
+    #[test]
+    fn public_t_matches_ntt_product_65_and_87() {
+        let r65 = gen::record_for::<Set65>(653, 2);
+        let key65 = ExpandedKey::<Set65>::from_bytes_for(&r65.pk).unwrap();
+        let c65 = crate::native::sample_in_ball_for::<Set65>(&r65.sig[..Set65::C_TILDE_BYTES]);
+        let t65 = public_t_for::<Set65>(&c65, &key65.t1);
+        let fips = NttPrime::fips();
+        let mut cp65 = [0i64; N];
+        for j in 0..N {
+            cp65[j] = i64::from(c65.coeffs[j]);
+        }
+        let c_hat65 = fips.ntt_signed(&cp65);
+        for row in 0..Set65::K {
+            let prod = fips.intt(&fips.pointwise(&c_hat65, &key65.t1_2d_hat()[row]));
+            for j in 0..N {
+                assert!(t65[row][j].abs() <= Set65::B_T);
+                assert_eq!(mod_q(t65[row][j]) as u64, prod[j]);
+            }
+        }
+
+        let r87 = gen::record_for::<Set87>(873, 2);
+        let key87 = ExpandedKey::<Set87>::from_bytes_for(&r87.pk).unwrap();
+        let c87 = crate::native::sample_in_ball_for::<Set87>(&r87.sig[..Set87::C_TILDE_BYTES]);
+        let t87 = public_t_for::<Set87>(&c87, &key87.t1);
+        let mut cp87 = [0i64; N];
+        for j in 0..N {
+            cp87[j] = i64::from(c87.coeffs[j]);
+        }
+        let c_hat87 = fips.ntt_signed(&cp87);
+        for row in 0..Set87::K {
+            let prod = fips.intt(&fips.pointwise(&c_hat87, &key87.t1_2d_hat()[row]));
+            for j in 0..N {
+                assert!(t87[row][j].abs() <= Set87::B_T);
+                assert_eq!(mod_q(t87[row][j]) as u64, prod[j]);
             }
         }
     }
