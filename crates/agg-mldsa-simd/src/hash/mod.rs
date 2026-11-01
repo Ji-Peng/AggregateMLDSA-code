@@ -2,22 +2,23 @@
 #[cfg(target_arch = "x86_64")]
 mod avx2;
 pub use crate::poly::ExpandedA;
-use crate::poly::{Block, Challenge39, Poly32, RejState};
+use crate::poly::{Block, Challenge, Poly32, RejState};
 use crate::{
     dispatch::Engine,
     keccak::{Sink, Xof, XofJob},
     ntt::{Form, Scale},
-    params::Prime,
+    params::{ParamSet, Prime},
 };
 
-struct ExpandSink<'a> {
-    engine: &'a Engine,
-    out: &'a mut [ExpandedA],
+struct ExpandSink<'a, P: ParamSet, const K: usize, const L: usize> {
+    engine: &'a Engine<P>,
+    out: &'a mut [ExpandedA<K, L>],
     state: Vec<RejState>,
 }
-impl Sink for ExpandSink<'_> {
+impl<P: ParamSet, const K: usize, const L: usize> Sink for ExpandSink<'_, P, K, L> {
     fn block(&mut self, job: usize, block: &Block, _: usize) -> bool {
-        let (key, r, s) = (job / 16, job % 16 / 4, job % 4);
+        let entries_per_key = K * L;
+        let (key, r, s) = (job / entries_per_key, (job % entries_per_key) / L, job % L);
         self.out[key].blocks[r][s] = self.out[key].blocks[r][s]
             .checked_add(1)
             .expect("ExpandA block counter overflow");
@@ -55,17 +56,17 @@ impl Default for BallState {
         }
     }
 }
-struct BallSink<'a> {
+struct BallSink<'a, const TAU: usize> {
     states: Vec<BallState>,
-    out: &'a mut [Challenge39],
+    out: &'a mut [Challenge<TAU>],
 }
-impl Sink for BallSink<'_> {
+impl<const TAU: usize> Sink for BallSink<'_, TAU> {
     fn block(&mut self, job: usize, block: &Block, rate: usize) -> bool {
         let st = &mut self.states[job];
         let mut offset = 0;
         if st.next == 0 {
             st.signs = u64::from_le_bytes(block.bytes[..8].try_into().unwrap());
-            st.next = 217;
+            st.next = 256 - TAU;
             offset = 8;
         }
         for &b in &block.bytes[offset..rate] {
@@ -94,24 +95,45 @@ impl Sink for BallSink<'_> {
         false
     }
 }
-impl Engine {
-    /// Expands seeds into sampled matrix entries and their consumed block counts.
-    pub fn expand_a_many(&self, rhos: &[[u8; 32]], out: &mut [ExpandedA]) {
+impl<P: ParamSet> Engine<P> {
+    /// Expands seeds into 4x4 matrix entries and block counts (ML-DSA-44).
+    pub fn expand_a_many(&self, rhos: &[[u8; 32]], out: &mut [ExpandedA<4, 4>]) {
+        self.expand_a_many_kl::<4, 4>(rhos, out);
+    }
+
+    /// Expands seeds into KxL matrix entries and block counts for any dimension.
+    pub fn expand_a_many_kl<const K: usize, const L: usize>(
+        &self,
+        rhos: &[[u8; 32]],
+        out: &mut [ExpandedA<K, L>],
+    ) {
         assert_eq!(rhos.len(), out.len());
         #[cfg(target_arch = "x86_64")]
-        if self.backend() == crate::dispatch::Backend::Avx2 {
-            for (rho, out) in rhos.iter().zip(out.iter_mut()) {
+        if K == 4 && L == 4 && self.backend() == crate::dispatch::Backend::Avx2 {
+            let out4: &mut [ExpandedA<4, 4>] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    out.as_mut_ptr() as *mut ExpandedA<4, 4>,
+                    out.len(),
+                )
+            };
+            for (rho, out_entry) in rhos.iter().zip(out4.iter_mut()) {
                 // SAFETY: an AVX2 engine exists only if AVX2 and POPCNT were detected.
-                unsafe { avx2::expand_a(rho, out) };
+                unsafe { avx2::expand_a(rho, out_entry) };
             }
             return;
         }
         // Bound scratch memory independently of the caller's batch size.
         for (rhos, out) in rhos.chunks(8).zip(out.chunks_mut(8)) {
-            let suffix: [[u8; 2]; 16] = std::array::from_fn(|i| [(i % 4) as u8, (i / 4) as u8]);
-            let mut jobs = Vec::with_capacity(16 * rhos.len());
+            let total_entries = K * L;
+            let mut suffixes = Vec::with_capacity(total_entries);
+            for r in 0..K {
+                for s in 0..L {
+                    suffixes.push([s as u8, r as u8]);
+                }
+            }
+            let mut jobs = Vec::with_capacity(total_entries * rhos.len());
             for rho in rhos {
-                for tail in &suffix {
+                for tail in &suffixes {
                     jobs.push(XofJob {
                         xof: Xof::Shake128,
                         input: [rho, tail, &[], &[]],
@@ -119,7 +141,7 @@ impl Engine {
                 }
             }
             for key in out.iter_mut() {
-                key.blocks = [[0; 4]; 4];
+                key.blocks = [[0; L]; K];
             }
             let state = (0..jobs.len()).map(|_| RejState::new()).collect();
             self.run_xof(
@@ -132,15 +154,26 @@ impl Engine {
             );
         }
     }
-    /// Prepares natural centered A and centered P2 transforms in backend order.
+
+    /// Prepares natural centered A and centered P2 transforms in backend order (4x4).
     pub fn prepare_matrices(
         &self,
         a_hat: &[[Poly32; 4]; 4],
         a: &mut [[[i32; 256]; 4]; 4],
         a_hat_p2: &mut [[Poly32; 4]; 4],
     ) {
-        for r in 0..4 {
-            for s in 0..4 {
+        self.prepare_matrices_kl::<4, 4>(a_hat, a, a_hat_p2);
+    }
+
+    /// Prepares natural centered A and centered P2 transforms in backend order for any dimension.
+    pub fn prepare_matrices_kl<const K: usize, const L: usize>(
+        &self,
+        a_hat: &[[Poly32; L]; K],
+        a: &mut [[[i32; 256]; L]; K],
+        a_hat_p2: &mut [[Poly32; L]; K],
+    ) {
+        for r in 0..K {
+            for s in 0..L {
                 let mut poly = a_hat[r][s];
                 self.intt(Prime::Q, &mut poly, Scale::Plain, Form::Centered);
                 a[r][s] = poly.0;
@@ -172,14 +205,18 @@ impl Engine {
         }
     }
     /// Samples sorted sparse challenges, preserving Fisher-Yates state across blocks.
-    pub fn sample_in_ball_many(&self, c_tildes: &[[u8; 32]], out: &mut [Challenge39]) {
+    pub fn sample_in_ball_many<const TAU: usize, T: AsRef<[u8]>>(
+        &self,
+        c_tildes: &[T],
+        out: &mut [Challenge<TAU>],
+    ) {
         assert_eq!(c_tildes.len(), out.len());
         for (seeds, out) in c_tildes.chunks(64).zip(out.chunks_mut(64)) {
             let jobs: Vec<_> = seeds
                 .iter()
                 .map(|seed| XofJob {
                     xof: Xof::Shake256,
-                    input: [seed, &[], &[], &[]],
+                    input: [seed.as_ref(), &[], &[], &[]],
                 })
                 .collect();
             let states = (0..seeds.len()).map(|_| BallState::default()).collect();
@@ -191,6 +228,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poly::Challenge39;
     #[test]
     fn ball_continues_after_rejections() {
         let mut out = [Challenge39::new()];

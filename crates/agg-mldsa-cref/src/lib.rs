@@ -39,6 +39,40 @@ pub mod ffi {
         pub fn pqcrystals_dilithium2_avx2_polyvec_matrix_expand(mat: *mut i32, rho: *const u8);
         pub fn pqcrystals_dilithium2_avx2_poly_challenge(c: *mut i32, seed: *const u8);
 
+        // --- pq-crystals Dilithium3 AVX2 ---
+        pub static pqcrystals_dilithium3_avx2_qdata: [i32; 624];
+        pub fn pqcrystals_dilithium3_avx2_ntt_avx(a: *mut i32, qdata: *const i32);
+        pub fn pqcrystals_dilithium3_avx2_invntt_avx(a: *mut i32, qdata: *const i32);
+        pub fn pqcrystals_dilithium3_avx2_nttunpack_avx(a: *mut i32);
+        pub fn pqcrystals_dilithium3_avx2_pointwise_avx(
+            c: *mut i32,
+            a: *const i32,
+            b: *const i32,
+            qdata: *const i32,
+        );
+        pub fn pqcrystals_dilithium3_avx2_polyz_unpack(r: *mut i32, a: *const u8);
+        pub fn pqcrystals_dilithium3_avx2_poly_chknorm(a: *const i32, b: i32) -> i32;
+        pub fn pqcrystals_dilithium3_avx2_polyw1_pack(r: *mut u8, a: *const i32);
+        pub fn pqcrystals_dilithium3_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
+        pub fn pqcrystals_dilithium3_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
+
+        // --- pq-crystals Dilithium5 AVX2 ---
+        pub static pqcrystals_dilithium5_avx2_qdata: [i32; 624];
+        pub fn pqcrystals_dilithium5_avx2_ntt_avx(a: *mut i32, qdata: *const i32);
+        pub fn pqcrystals_dilithium5_avx2_invntt_avx(a: *mut i32, qdata: *const i32);
+        pub fn pqcrystals_dilithium5_avx2_nttunpack_avx(a: *mut i32);
+        pub fn pqcrystals_dilithium5_avx2_pointwise_avx(
+            c: *mut i32,
+            a: *const i32,
+            b: *const i32,
+            qdata: *const i32,
+        );
+        pub fn pqcrystals_dilithium5_avx2_polyz_unpack(r: *mut i32, a: *const u8);
+        pub fn pqcrystals_dilithium5_avx2_poly_chknorm(a: *const i32, b: i32) -> i32;
+        pub fn pqcrystals_dilithium5_avx2_polyw1_pack(r: *mut u8, a: *const i32);
+        pub fn pqcrystals_dilithium5_avx2_poly_use_hint(b: *mut i32, a: *const i32, h: *const i32);
+        pub fn pqcrystals_dilithium5_avx2_poly_decompose(a1: *mut i32, a0: *mut i32, a: *const i32);
+
         pub fn pqcrystals_dilithium_fips202x4_avx2_f1600x4(s: *mut u64, rc: *const u64);
         pub fn pqcrystals_dilithium_fips202x4_avx2_shake128x4_absorb_once(
             state: *mut u64,
@@ -288,6 +322,118 @@ mod safe_wrappers {
                 a.as_ptr(),
             );
         }
+    }
+
+    /// Dilithium3 (ML-DSA-65) qdata constant table.
+    pub fn dilithium3_qdata() -> &'static [i32; 624] {
+        unsafe { &ffi::pqcrystals_dilithium3_avx2_qdata }
+    }
+
+    /// Dilithium3 (ML-DSA-65) forward NTT in AVX2 backend order.
+    pub fn dilithium3_ntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_ntt_avx(a.as_mut_ptr(), qdata.as_ptr());
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) inverse NTT.
+    pub fn dilithium3_invntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_invntt_avx(a.as_mut_ptr(), qdata.as_ptr());
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) unpacks 640 bytes into 256 signed coefficients z.
+    pub fn dilithium3_polyz_unpack(r: &mut [i32; 256], a: &[u8; 640]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) packs high bits w1 into 128 bytes.
+    pub fn dilithium3_polyw1_pack(r: &mut [u8; 128], a: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_polyw1_pack(r.as_mut_ptr(), a.as_ptr());
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) UseHint on one polynomial: b = UseHint(h, a).
+    pub fn dilithium3_poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) decomposes polynomial a into high bits a1 and low bits a0.
+    pub fn dilithium3_poly_decompose(a1: &mut [i32; 256], a0: &mut [i32; 256], a: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium3_avx2_poly_decompose(
+                a1.as_mut_ptr(),
+                a0.as_mut_ptr(),
+                a.as_ptr(),
+            );
+        }
+    }
+
+    /// Dilithium3 (ML-DSA-65) returns 1 if some coefficient has absolute value >= b.
+    pub fn dilithium3_poly_chknorm(a: &[i32; 256], b: i32) -> i32 {
+        unsafe { ffi::pqcrystals_dilithium3_avx2_poly_chknorm(a.as_ptr(), b) }
+    }
+
+    /// Dilithium5 (ML-DSA-87) qdata constant table.
+    pub fn dilithium5_qdata() -> &'static [i32; 624] {
+        unsafe { &ffi::pqcrystals_dilithium5_avx2_qdata }
+    }
+
+    /// Dilithium5 (ML-DSA-87) forward NTT in AVX2 backend order.
+    pub fn dilithium5_ntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_ntt_avx(a.as_mut_ptr(), qdata.as_ptr());
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) inverse NTT.
+    pub fn dilithium5_invntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_invntt_avx(a.as_mut_ptr(), qdata.as_ptr());
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) unpacks 640 bytes into 256 signed coefficients z.
+    pub fn dilithium5_polyz_unpack(r: &mut [i32; 256], a: &[u8; 640]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) packs high bits w1 into 128 bytes.
+    pub fn dilithium5_polyw1_pack(r: &mut [u8; 128], a: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_polyw1_pack(r.as_mut_ptr(), a.as_ptr());
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) UseHint on one polynomial: b = UseHint(h, a).
+    pub fn dilithium5_poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) decomposes polynomial a into high bits a1 and low bits a0.
+    pub fn dilithium5_poly_decompose(a1: &mut [i32; 256], a0: &mut [i32; 256], a: &[i32; 256]) {
+        unsafe {
+            ffi::pqcrystals_dilithium5_avx2_poly_decompose(
+                a1.as_mut_ptr(),
+                a0.as_mut_ptr(),
+                a.as_ptr(),
+            );
+        }
+    }
+
+    /// Dilithium5 (ML-DSA-87) returns 1 if some coefficient has absolute value >= b.
+    pub fn dilithium5_poly_chknorm(a: &[i32; 256], b: i32) -> i32 {
+        unsafe { ffi::pqcrystals_dilithium5_avx2_poly_chknorm(a.as_ptr(), b) }
     }
 
     /// Keccak-f1600 4-lane permutation.

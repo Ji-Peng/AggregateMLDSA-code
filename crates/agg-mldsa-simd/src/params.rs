@@ -39,16 +39,24 @@ pub const P2: i32 = 167_772_161;
 
 /// Centered CRT constant: q^-1 * 2^32 mod P2 = 158,916,606 = -8,855,555.
 pub const CRT_C: i32 = -8_855_555;
+/// Tertiary CRT prime P3 = 377,487,361 = 45 * 2^23 + 1 (29 bits, 2-adicity 23).
+pub const P3: i32 = 377_487_361;
+/// Centered CRT constant: q^-1 * 2^32 mod P3 = 35,430,533.
+pub const CRT_C_P3: i32 = 35_430_533;
+/// P2^-1 mod P3 = 75,497,474.
+pub const P2_INV_MOD_P3: i32 = 75_497_474;
 /// Multiplicative inverse of q mod 2^32.
 pub const QINV32: i32 = 58_728_449;
 
-/// Identifies the modulus prime (q or secondary CRT prime P2).
+/// Identifies the modulus prime (q, secondary CRT prime P2, or tertiary CRT prime P3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Prime {
     /// ML-DSA modulus q = 8,380,417.
     Q,
     /// CRT prime P2 = 167,772,161.
     P2,
+    /// CRT prime P3 = 377,487,361.
+    P3,
 }
 
 /// Precomputed Montgomery and NTT constants for a prime modulus.
@@ -88,12 +96,23 @@ pub const CONSTS_P2: PrimeConsts = PrimeConsts {
     inv_mont: 6_710_889,
 };
 
+/// Constants for prime P3 = 377,487,361.
+pub const CONSTS_P3: PrimeConsts = PrimeConsts {
+    p: 377_487_361,
+    pinv: -377_487_359,
+    mont: 142_606_325,
+    zeta: 69_218_873,
+    inv_plain: 16_777_216,
+    inv_mont: -48_281_099,
+};
+
 /// Returns the precomputed constants for the given prime modulus.
 #[inline(always)]
 pub const fn consts(prime: Prime) -> PrimeConsts {
     match prime {
         Prime::Q => CONSTS_Q,
         Prime::P2 => CONSTS_P2,
+        Prime::P3 => CONSTS_P3,
     }
 }
 
@@ -103,6 +122,156 @@ impl Prime {
     pub const fn consts(self) -> PrimeConsts {
         consts(self)
     }
+}
+
+/// Compile-time parameter set specification for ML-DSA aggregation SIMD kernels.
+pub trait ParamSet: Copy + Send + Sync + 'static {
+    /// Identifier: 0x44, 0x65, or 0x87.
+    const ID: u8;
+    /// Matrix rows k.
+    const K: usize;
+    /// Matrix columns l.
+    const L: usize;
+    /// Challenge tau.
+    const TAU: usize;
+    /// Secret key range eta.
+    const ETA: i32;
+    /// Commitment range gamma1.
+    const GAMMA1: i32;
+    /// Low-order rounding range gamma2.
+    const GAMMA2: i32;
+    /// Maximum ones in hint (omega).
+    const OMEGA: usize;
+    /// Collision strength lambda in bits.
+    const LAMBDA: usize;
+    /// Bits per packed z coefficient: 1 + bitlen(gamma1 - 1).
+    const Z_BITS: usize;
+    /// Bits per w1 coefficient.
+    const W1_BITS: usize;
+    /// Number of w1 values m_w = (q - 1) / (2 * gamma2).
+    const M_W: i32;
+    /// Residual bound: 2 * gamma2 + 1.
+    const B_U: i32;
+    /// Honest quotient bound B_v.
+    const B_V: i32;
+    /// Bound on |2^d * c * t1| over Z.
+    const B_T: i32;
+    /// Bound on |ve| = |e / q|.
+    const C_B_Q: u32;
+    /// Base of the top digit of u (6 for 44, 8 for 65/87).
+    const U_TOP_BASE: u32;
+    /// Step of the top digit of u for step layout (63,079 for 44; 0 for 65/87).
+    const STEP_U: i32;
+    /// Slack for u in digit-slack form (523,267 for 65/87; 0 for 44).
+    const U_SLACK: i32;
+    /// Reconstruction offset for u in relation H-u (-190,465 for 44, -294,401 for 65/87).
+    const U_OFFSET: i32;
+    /// Reconstruction offset for z in relation H-u (0 for 44, -229,376 for 65/87).
+    const Z_OFFSET: i32;
+    /// Bytes of commitment hash c~ (lambda / 4).
+    const C_TILDE_BYTES: usize;
+    /// Public key byte length.
+    const PK_BYTES: usize;
+    /// Signature byte length.
+    const SIG_BYTES: usize;
+    /// w1Encode bytes.
+    const W1_ENCODE_BYTES: usize;
+}
+
+/// Zero-sized type selecting ML-DSA-44 parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Set44;
+
+impl ParamSet for Set44 {
+    const ID: u8 = 0x44;
+    const K: usize = 4;
+    const L: usize = 4;
+    const TAU: usize = 39;
+    const ETA: i32 = 2;
+    const GAMMA1: i32 = 1 << 17;
+    const GAMMA2: i32 = (Q - 1) / 88;
+    const OMEGA: usize = 80;
+    const LAMBDA: usize = 128;
+    const Z_BITS: usize = 18;
+    const W1_BITS: usize = 6;
+    const M_W: i32 = 44;
+    const B_U: i32 = 190_465;
+    const B_V: i32 = 67_068_447;
+    const B_T: i32 = (1 << 13) * 39 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 41;
+    const U_TOP_BASE: u32 = 6;
+    const STEP_U: i32 = 63_079;
+    const U_SLACK: i32 = 0;
+    const U_OFFSET: i32 = -190_465;
+    const Z_OFFSET: i32 = 0;
+    const C_TILDE_BYTES: usize = 32;
+    const PK_BYTES: usize = 1312;
+    const SIG_BYTES: usize = 2420;
+    const W1_ENCODE_BYTES: usize = 768;
+}
+
+/// Zero-sized type selecting ML-DSA-65 parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Set65;
+
+impl ParamSet for Set65 {
+    const ID: u8 = 0x65;
+    const K: usize = 6;
+    const L: usize = 5;
+    const TAU: usize = 49;
+    const ETA: i32 = 4;
+    const GAMMA1: i32 = 1 << 19;
+    const GAMMA2: i32 = (Q - 1) / 32;
+    const OMEGA: usize = 55;
+    const LAMBDA: usize = 192;
+    const Z_BITS: usize = 20;
+    const W1_BITS: usize = 4;
+    const M_W: i32 = 16;
+    const B_U: i32 = 523_777;
+    const B_V: i32 = 335_418_249;
+    const B_T: i32 = (1 << 13) * 49 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 51;
+    const U_TOP_BASE: u32 = 8;
+    const STEP_U: i32 = 0;
+    const U_SLACK: i32 = 523_267;
+    const U_OFFSET: i32 = -294_401;
+    const Z_OFFSET: i32 = -229_376;
+    const C_TILDE_BYTES: usize = 48;
+    const PK_BYTES: usize = 1952;
+    const SIG_BYTES: usize = 3309;
+    const W1_ENCODE_BYTES: usize = 768;
+}
+
+/// Zero-sized type selecting ML-DSA-87 parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Set87;
+
+impl ParamSet for Set87 {
+    const ID: u8 = 0x87;
+    const K: usize = 8;
+    const L: usize = 7;
+    const TAU: usize = 60;
+    const ETA: i32 = 2;
+    const GAMMA1: i32 = 1 << 19;
+    const GAMMA2: i32 = (Q - 1) / 32;
+    const OMEGA: usize = 75;
+    const LAMBDA: usize = 256;
+    const Z_BITS: usize = 20;
+    const W1_BITS: usize = 4;
+    const M_W: i32 = 16;
+    const B_U: i32 = 523_777;
+    const B_V: i32 = 469_653_636;
+    const B_T: i32 = (1 << 13) * 60 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 62;
+    const U_TOP_BASE: u32 = 8;
+    const STEP_U: i32 = 0;
+    const U_SLACK: i32 = 523_267;
+    const U_OFFSET: i32 = -294_401;
+    const Z_OFFSET: i32 = -229_376;
+    const C_TILDE_BYTES: usize = 64;
+    const PK_BYTES: usize = 2592;
+    const SIG_BYTES: usize = 4627;
+    const W1_ENCODE_BYTES: usize = 1024;
 }
 
 #[cfg(test)]
@@ -215,6 +384,28 @@ mod tests {
         assert!(
             p2_headroom < (1u128 << 31),
             "P2 headroom failed: {p2_headroom} >= 2^31"
+        );
+
+        // Prime P3 checks
+        let cp3 = consts(Prime::P3);
+        assert_eq!(cp3.p, 377_487_361);
+        assert_eq!(
+            pow_mod(cp3.zeta as u128, 256, cp3.p as u128),
+            cp3.p as u128 - 1
+        );
+        assert_eq!((cp3.pinv as u32).wrapping_mul(cp3.p as u32), 1);
+        let p3_headroom: u128 = 5 * P3 as u128;
+        assert!(
+            p3_headroom < (1u128 << 31),
+            "P3 headroom failed: {p3_headroom} >= 2^31"
+        );
+
+        // CRT exactness bound for 65 and 87: q * P2 * P3 / 2 exceeds worst-case |A z|
+        let three_prime_capacity: u128 = (Q as u128 * P2 as u128 * P3 as u128) / 2;
+        let az_max_87: u128 = 7 * 256 * ((Q as u128 - 1) / 2) * (1u128 << 19);
+        assert!(
+            az_max_87 < three_prime_capacity,
+            "Three prime CRT capacity insufficient: {az_max_87} >= {three_prime_capacity}"
         );
     }
 }

@@ -3,10 +3,13 @@
 //! Rounding follows the CC0 pq-crystals Dilithium AVX2 rounding implementation.
 //! The sparse signed-window technique also appears in Hybrid-SHA-3's pspm.c.
 use super::{FinishError, FinishOut, FinishRow, HuCols};
-use crate::{params::*, poly::{Challenge39, Poly32}};
+use crate::{
+    params::*,
+    poly::{Challenge, Poly32},
+};
 use std::mem::MaybeUninit;
 use std::arch::x86_64::*;
-const _: () = assert!(GAMMA1 == 1 << 17);
+
 /// f32 value of (1/63079) * (1 + 2^-20).
 const HU_RECIP: f32 = 1.5853151e-5;
 type V = __m512i;
@@ -84,10 +87,29 @@ fn crt_mont(a: V) -> V {
     _mm512_mask_blend_epi32(0xAAAA, _mm512_srli_epi64::<32>(even), odd)
 }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, out: &mut [[i32;256];4]) {
-    for (t,dest) in t1.iter().zip(out) {
-        let mut window = [0i32;512];
-        for i in 0..256 { window[i] = -(t[i] as i32); window[i+256] = t[i] as i32; }
+pub(crate) unsafe fn sparse_ct<const K: usize, const TAU: usize>(
+    c: &Challenge<TAU>,
+    t1: &[[u16; 256]; K],
+    shift: u32,
+    out: &mut [[i32; 256]; K],
+) {
+    // SAFETY: AVX-512 target features are enabled on this function.
+    unsafe { sparse_ct_slice(c, t1, shift, out) }
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+pub(crate) unsafe fn sparse_ct_slice<const TAU: usize>(
+    c: &Challenge<TAU>,
+    t1: &[[u16; 256]],
+    shift: u32,
+    out: &mut [[i32; 256]],
+) {
+    for (t, dest) in t1.iter().zip(out.iter_mut()) {
+        let mut window = [0i32; 512];
+        for i in 0..256 {
+            window[i] = -(t[i] as i32);
+            window[i + 256] = t[i] as i32;
+        }
         for base in (0..256).step_by(256) {
             let mut a0 = splat(0);
             let mut a1 = splat(0);
@@ -105,59 +127,107 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
             let mut a13 = splat(0);
             let mut a14 = splat(0);
             let mut a15 = splat(0);
-            for (k,&pos) in c.pos.iter().enumerate() {
+            for (k, &pos) in c.pos.iter().enumerate() {
                 let start = 256 - pos as usize + base;
                 let sign = splat(-((c.neg >> k) as i32 & 1));
-                // Each partial sum has magnitude <= 39*1023 = 39897, safely in i32.
-                let v = load(window[start..start+16].try_into().unwrap());
-                a0 = add(a0, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+16..start+32].try_into().unwrap());
-                a1 = add(a1, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+32..start+48].try_into().unwrap());
-                a2 = add(a2, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+48..start+64].try_into().unwrap());
-                a3 = add(a3, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+64..start+80].try_into().unwrap());
-                a4 = add(a4, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+80..start+96].try_into().unwrap());
-                a5 = add(a5, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+96..start+112].try_into().unwrap());
-                a6 = add(a6, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+112..start+128].try_into().unwrap());
-                a7 = add(a7, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+128..start+144].try_into().unwrap());
-                a8 = add(a8, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+144..start+160].try_into().unwrap());
-                a9 = add(a9, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+160..start+176].try_into().unwrap());
-                a10 = add(a10, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+176..start+192].try_into().unwrap());
-                a11 = add(a11, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+192..start+208].try_into().unwrap());
-                a12 = add(a12, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+208..start+224].try_into().unwrap());
-                a13 = add(a13, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+224..start+240].try_into().unwrap());
-                a14 = add(a14, sub(_mm512_xor_si512(v,sign),sign));
-                let v = load(window[start+240..start+256].try_into().unwrap());
-                a15 = add(a15, sub(_mm512_xor_si512(v,sign),sign));
+                // Each partial sum has magnitude <= 60*1023 = 61380, safely in i32.
+                let v = load(window[start..start + 16].try_into().unwrap());
+                a0 = add(a0, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 16..start + 32].try_into().unwrap());
+                a1 = add(a1, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 32..start + 48].try_into().unwrap());
+                a2 = add(a2, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 48..start + 64].try_into().unwrap());
+                a3 = add(a3, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 64..start + 80].try_into().unwrap());
+                a4 = add(a4, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 80..start + 96].try_into().unwrap());
+                a5 = add(a5, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 96..start + 112].try_into().unwrap());
+                a6 = add(a6, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 112..start + 128].try_into().unwrap());
+                a7 = add(a7, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 128..start + 144].try_into().unwrap());
+                a8 = add(a8, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 144..start + 160].try_into().unwrap());
+                a9 = add(a9, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 160..start + 176].try_into().unwrap());
+                a10 = add(a10, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 176..start + 192].try_into().unwrap());
+                a11 = add(a11, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 192..start + 208].try_into().unwrap());
+                a12 = add(a12, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 208..start + 224].try_into().unwrap());
+                a13 = add(a13, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 224..start + 240].try_into().unwrap());
+                a14 = add(a14, sub(_mm512_xor_si512(v, sign), sign));
+                let v = load(window[start + 240..start + 256].try_into().unwrap());
+                a15 = add(a15, sub(_mm512_xor_si512(v, sign), sign));
             }
-            store((&mut dest[base..base+16]).try_into().unwrap(), _mm512_sllv_epi32(a0,splat(shift as i32)));
-            store((&mut dest[base+16..base+32]).try_into().unwrap(), _mm512_sllv_epi32(a1,splat(shift as i32)));
-            store((&mut dest[base+32..base+48]).try_into().unwrap(), _mm512_sllv_epi32(a2,splat(shift as i32)));
-            store((&mut dest[base+48..base+64]).try_into().unwrap(), _mm512_sllv_epi32(a3,splat(shift as i32)));
-            store((&mut dest[base+64..base+80]).try_into().unwrap(), _mm512_sllv_epi32(a4,splat(shift as i32)));
-            store((&mut dest[base+80..base+96]).try_into().unwrap(), _mm512_sllv_epi32(a5,splat(shift as i32)));
-            store((&mut dest[base+96..base+112]).try_into().unwrap(), _mm512_sllv_epi32(a6,splat(shift as i32)));
-            store((&mut dest[base+112..base+128]).try_into().unwrap(), _mm512_sllv_epi32(a7,splat(shift as i32)));
-            store((&mut dest[base+128..base+144]).try_into().unwrap(), _mm512_sllv_epi32(a8,splat(shift as i32)));
-            store((&mut dest[base+144..base+160]).try_into().unwrap(), _mm512_sllv_epi32(a9,splat(shift as i32)));
-            store((&mut dest[base+160..base+176]).try_into().unwrap(), _mm512_sllv_epi32(a10,splat(shift as i32)));
-            store((&mut dest[base+176..base+192]).try_into().unwrap(), _mm512_sllv_epi32(a11,splat(shift as i32)));
-            store((&mut dest[base+192..base+208]).try_into().unwrap(), _mm512_sllv_epi32(a12,splat(shift as i32)));
-            store((&mut dest[base+208..base+224]).try_into().unwrap(), _mm512_sllv_epi32(a13,splat(shift as i32)));
-            store((&mut dest[base+224..base+240]).try_into().unwrap(), _mm512_sllv_epi32(a14,splat(shift as i32)));
-            store((&mut dest[base+240..base+256]).try_into().unwrap(), _mm512_sllv_epi32(a15,splat(shift as i32)));
+            store(
+                (&mut dest[base..base + 16]).try_into().unwrap(),
+                _mm512_sllv_epi32(a0, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 16..base + 32]).try_into().unwrap(),
+                _mm512_sllv_epi32(a1, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 32..base + 48]).try_into().unwrap(),
+                _mm512_sllv_epi32(a2, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 48..base + 64]).try_into().unwrap(),
+                _mm512_sllv_epi32(a3, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 64..base + 80]).try_into().unwrap(),
+                _mm512_sllv_epi32(a4, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 80..base + 96]).try_into().unwrap(),
+                _mm512_sllv_epi32(a5, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 96..base + 112]).try_into().unwrap(),
+                _mm512_sllv_epi32(a6, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 112..base + 128]).try_into().unwrap(),
+                _mm512_sllv_epi32(a7, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 128..base + 144]).try_into().unwrap(),
+                _mm512_sllv_epi32(a8, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 144..base + 160]).try_into().unwrap(),
+                _mm512_sllv_epi32(a9, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 160..base + 176]).try_into().unwrap(),
+                _mm512_sllv_epi32(a10, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 176..base + 192]).try_into().unwrap(),
+                _mm512_sllv_epi32(a11, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 192..base + 208]).try_into().unwrap(),
+                _mm512_sllv_epi32(a12, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 208..base + 224]).try_into().unwrap(),
+                _mm512_sllv_epi32(a13, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 224..base + 240]).try_into().unwrap(),
+                _mm512_sllv_epi32(a14, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 240..base + 256]).try_into().unwrap(),
+                _mm512_sllv_epi32(a15, splat(shift as i32)),
+            );
         }
     }
 }
@@ -166,7 +236,36 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn times_alpha(a: V) -> V { _mm512_slli_epi32::<11>(_mm512_mullo_epi16(a,splat(93))) }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
+pub(crate) unsafe fn finish_row<P: ParamSet>(
+    row: FinishRow<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    if P::GAMMA2 == (Q - 1) / 88 {
+        // SAFETY: AVX-512 target features are enabled on this function.
+        unsafe { finish_row_44(row, out) }
+    } else {
+        super::scalar::finish_row::<P>(row, out)
+    }
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+pub(crate) unsafe fn finish_row_3p<P: ParamSet>(
+    row: super::FinishRow3P<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    super::scalar::finish_row_3p::<P>(row, out)
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+pub(crate) unsafe fn finish_row_exact<P: ParamSet>(
+    row: super::FinishRowExact<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    super::scalar::finish_row_exact::<P>(row, out)
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+unsafe fn finish_row_44(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
     let zero = splat(0);
     let hq = splat((Q-1)/2);
     let qv = splat(Q);
@@ -234,7 +333,17 @@ fn narrow64(a: &mut [MaybeUninit<i8>], v: __m512i) {
     unsafe { _mm512_storeu_si512(a.as_mut_ptr().cast(), v) }
 }
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-pub(crate) unsafe fn hu_columns(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
+pub(crate) unsafe fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
+    if P::GAMMA2 == (Q - 1) / 88 {
+        // SAFETY: AVX-512 target features are enabled on this function.
+        unsafe { hu_columns_44(z, out, cols) };
+    } else {
+        super::scalar::hu_columns::<P>(z, out, cols);
+    }
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+unsafe fn hu_columns_44(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
     for col in &cols.wide { assert_eq!(col.len(),256); }
     for col in &cols.narrow { assert_eq!(col.len(),256); }
     for i in (0..256).step_by(16) {

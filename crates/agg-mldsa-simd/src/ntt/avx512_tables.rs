@@ -1,7 +1,7 @@
 //! Parameter-derived twiddles for the register shuffle network. Every value is
 //! computed at compile time from the prime, its 512th root of unity and its
 //! Montgomery constants.
-use crate::params::{PrimeConsts, CONSTS_P2, CONSTS_Q};
+use crate::params::{PrimeConsts, CONSTS_P2, CONSTS_P3, CONSTS_Q};
 
 #[repr(C, align(64))]
 pub(super) struct Lanes(pub [i32; 16]);
@@ -165,6 +165,8 @@ const fn make(c: PrimeConsts) -> Tables {
 }
 pub(super) static Q: Tables = make(CONSTS_Q);
 pub(super) static P2: Tables = make(CONSTS_P2);
+#[allow(dead_code)]
+pub(super) static P3: Tables = make(CONSTS_P3);
 
 // Conservative integer bounds in natural coefficient order after each GS layer.
 // Each multiply uses |Mont(x*z)| <= ceil(|x*z|/2^32) + floor(p/2).

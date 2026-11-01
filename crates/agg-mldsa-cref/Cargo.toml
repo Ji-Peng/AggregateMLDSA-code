@@ -12,4 +12,5 @@ cc = { workspace = true }
 
 [dev-dependencies]
 agg-witness = { workspace = true }
+agg-mldsa-simd = { workspace = true }
 keccak = { workspace = true }

@@ -5,7 +5,7 @@ pub(crate) mod avx512;
 pub(crate) mod scalar;
 
 use crate::dispatch::{Backend, Engine};
-use crate::params::Prime;
+use crate::params::{ParamSet, Prime};
 use crate::poly::Poly32;
 
 /// Scale factor applied during inverse NTT.
@@ -26,7 +26,7 @@ pub enum Form {
     Centered,
 }
 
-impl Engine {
+impl<P: ParamSet> Engine<P> {
     /// Forward NTT: natural order with |a| <= 2^22 to backend order.
     pub fn ntt(&self, p: Prime, a: &mut Poly32) {
         match self.backend() {
@@ -57,19 +57,30 @@ impl Engine {
         }
     }
 
-    /// 4-vector inner product in NTT domain: out = sum(a[i] o b[i]) / R.
-    pub fn dot4(&self, p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+    /// L-vector inner product in NTT domain: out = sum(a[i] o b[i]) / R.
+    pub fn dot_l<const L: usize>(
+        &self,
+        p: Prime,
+        a: &[Poly32; L],
+        b: &[Poly32; L],
+        out: &mut Poly32,
+    ) {
         match self.backend() {
-            Backend::Scalar => scalar::dot4(p, a, b, out),
+            Backend::Scalar => scalar::dot_l(p, a, b, out),
             Backend::Avx2 => {
                 // SAFETY: The engine guarantees AVX2 and POPCNT features are available.
-                unsafe { avx2::dot4(p, a, b, out) }
+                unsafe { avx2::dot_l(p, a, b, out) }
             }
             Backend::Avx512 => {
                 // SAFETY: The engine guarantees AVX-512 features are available.
-                unsafe { avx512::dot4(p, a, b, out) }
+                unsafe { avx512::dot_l(p, a, b, out) }
             }
         }
+    }
+
+    /// 4-vector inner product in NTT domain: out = sum(a[i] o b[i]) / R.
+    pub fn dot4(&self, p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+        self.dot_l(p, a, b, out)
     }
 
     /// Reduces arbitrary i32 coefficients to canonical [0, p) or centered form.

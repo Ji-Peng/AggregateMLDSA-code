@@ -7,6 +7,7 @@ pub mod rounds;
 pub(crate) mod scalar;
 
 use crate::dispatch::{Backend, Engine};
+use crate::params::ParamSet;
 use crate::poly::Block;
 
 /// Extendable output function type.
@@ -46,7 +47,7 @@ pub trait Sink {
     fn block(&mut self, job: usize, block: &Block, rate: usize) -> bool;
 }
 
-impl Engine {
+impl<P: ParamSet> Engine<P> {
     /// Executes a batch of XOF jobs, delivering output blocks to `sink`.
     pub fn run_xof<S: Sink>(&self, jobs: &[XofJob<'_>], sink: &mut S) {
         match self.backend() {
@@ -65,7 +66,7 @@ impl Engine {
 
 pub use rounds::Words8;
 
-impl Engine {
+impl<P: ParamSet> Engine<P> {
     /// Rounds `first .. first + n` of Keccak-f[1600] on eight word-major states
     /// (`state[w][i]` is lane `w` of state `i`), `n = z.len() / 25`. Round `k`
     /// writes, for lane `l = x + 5 y` and `phi = pi o rho o theta` of its input

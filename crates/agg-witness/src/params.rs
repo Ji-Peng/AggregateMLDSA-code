@@ -703,6 +703,90 @@ impl ParamSet for Set87 {
     }
 }
 
+impl agg_mldsa_simd::ParamSet for Set44 {
+    const ID: u8 = 0x44;
+    const K: usize = 4;
+    const L: usize = 4;
+    const TAU: usize = 39;
+    const ETA: i32 = 2;
+    const GAMMA1: i32 = 1 << 17;
+    const GAMMA2: i32 = 95_232;
+    const OMEGA: usize = 80;
+    const LAMBDA: usize = 128;
+    const Z_BITS: usize = 18;
+    const W1_BITS: usize = 6;
+    const M_W: i32 = 44;
+    const B_U: i32 = 190_465;
+    const B_V: i32 = 67_068_447;
+    const B_T: i32 = (1 << 13) * 39 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 41;
+    const U_TOP_BASE: u32 = 6;
+    const STEP_U: i32 = 63_079;
+    const U_SLACK: i32 = 0;
+    const U_OFFSET: i32 = -190_465;
+    const Z_OFFSET: i32 = 0;
+    const C_TILDE_BYTES: usize = 32;
+    const PK_BYTES: usize = 1312;
+    const SIG_BYTES: usize = 2420;
+    const W1_ENCODE_BYTES: usize = 768;
+}
+
+impl agg_mldsa_simd::ParamSet for Set65 {
+    const ID: u8 = 0x65;
+    const K: usize = 6;
+    const L: usize = 5;
+    const TAU: usize = 49;
+    const ETA: i32 = 4;
+    const GAMMA1: i32 = 1 << 19;
+    const GAMMA2: i32 = 261_888;
+    const OMEGA: usize = 55;
+    const LAMBDA: usize = 192;
+    const Z_BITS: usize = 20;
+    const W1_BITS: usize = 4;
+    const M_W: i32 = 16;
+    const B_U: i32 = 523_777;
+    const B_V: i32 = 335_418_249;
+    const B_T: i32 = (1 << 13) * 49 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 51;
+    const U_TOP_BASE: u32 = 8;
+    const STEP_U: i32 = 0;
+    const U_SLACK: i32 = 523_267;
+    const U_OFFSET: i32 = -294_401;
+    const Z_OFFSET: i32 = -229_376;
+    const C_TILDE_BYTES: usize = 48;
+    const PK_BYTES: usize = 1952;
+    const SIG_BYTES: usize = 3309;
+    const W1_ENCODE_BYTES: usize = 768;
+}
+
+impl agg_mldsa_simd::ParamSet for Set87 {
+    const ID: u8 = 0x87;
+    const K: usize = 8;
+    const L: usize = 7;
+    const TAU: usize = 60;
+    const ETA: i32 = 2;
+    const GAMMA1: i32 = 1 << 19;
+    const GAMMA2: i32 = 261_888;
+    const OMEGA: usize = 75;
+    const LAMBDA: usize = 256;
+    const Z_BITS: usize = 20;
+    const W1_BITS: usize = 4;
+    const M_W: i32 = 16;
+    const B_U: i32 = 523_777;
+    const B_V: i32 = 469_653_636;
+    const B_T: i32 = (1 << 13) * 60 * ((1 << 10) - 1);
+    const C_B_Q: u32 = 62;
+    const U_TOP_BASE: u32 = 8;
+    const STEP_U: i32 = 0;
+    const U_SLACK: i32 = 523_267;
+    const U_OFFSET: i32 = -294_401;
+    const Z_OFFSET: i32 = -229_376;
+    const C_TILDE_BYTES: usize = 64;
+    const PK_BYTES: usize = 2592;
+    const SIG_BYTES: usize = 4627;
+    const W1_ENCODE_BYTES: usize = 1024;
+}
+
 /// Module providing parameter set types and dispatch helpers.
 pub mod set {
     pub use super::{dispatch_set, ParamSet, Set, Set44, Set65, Set87};

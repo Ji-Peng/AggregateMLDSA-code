@@ -107,6 +107,11 @@ pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
     match prime {
         Prime::Q => ntt_impl::<false>(a),
         Prime::P2 => ntt_impl::<true>(a),
+        Prime::P3 => {
+            super::scalar::ntt(prime, a);
+            // SAFETY: target features avx512f, bw, vl are enabled.
+            unsafe { order_from_fips(a) };
+        }
     }
 }
 
@@ -267,6 +272,12 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form) {
+    if prime == Prime::P3 {
+        // SAFETY: target features avx512f, bw, vl are enabled.
+        unsafe { order_to_fips(a) };
+        super::scalar::intt(prime, a, scale, form);
+        return;
+    }
     match (prime, scale, form) {
         (Prime::Q, Scale::Plain, Form::Canonical) => intt_impl::<false, false, false>(a),
         (Prime::Q, Scale::Plain, Form::Centered) => intt_impl::<false, false, true>(a),
@@ -276,6 +287,7 @@ pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form
         (Prime::P2, Scale::Plain, Form::Centered) => intt_impl::<true, false, true>(a),
         (Prime::P2, Scale::Mont, Form::Canonical) => intt_impl::<true, true, false>(a),
         (Prime::P2, Scale::Mont, Form::Centered) => intt_impl::<true, true, true>(a),
+        (Prime::P3, _, _) => unreachable!(),
     }
 }
 
@@ -494,17 +506,22 @@ fn finish<const CENTERED: bool>(x: __m512i, p: __m512i) -> __m512i {
 }
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
-pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+pub(crate) unsafe fn dot_l<const L: usize>(
+    prime: Prime,
+    a: &[Poly32; L],
+    b: &[Poly32; L],
+    out: &mut Poly32,
+) {
     let c = consts(prime);
     let p = _mm512_set1_epi32(c.p);
     let pinv = _mm512_set1_epi32(c.pinv);
     for reg in 0..16 {
         let mut e = _mm512_setzero_si512();
         let mut o = e;
-        for k in 0..4 {
+        for k in 0..L {
             let x = load(&a[k], reg);
             let y = load(&b[k], reg);
-            // Four unreduced signed products: q < 18.1q^2, P2 < 8.8P2^2 < 2^58.
+            // L unreduced signed products: for L<=7, products sum to < 2^59.
             e = _mm512_add_epi64(e, _mm512_mul_epi32(x, y));
             o = _mm512_add_epi64(
                 o,
@@ -517,13 +534,21 @@ pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &
         store(
             out,
             reg,
-            if prime == Prime::P2 {
+            if prime != Prime::Q {
                 finish::<true>(v, p)
             } else {
                 v
             },
         );
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
+#[allow(dead_code)]
+pub(crate) unsafe fn dot4(prime: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+    // SAFETY: AVX-512 target features are enabled on this function.
+    unsafe { dot_l::<4>(prime, a, b, out) }
 }
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
@@ -579,4 +604,4 @@ pub(crate) unsafe fn order_to_fips(a: &mut Poly32) {
 // These names remain resolvable on scalar-only targets; dispatch never selects
 // the AVX-512 backend there.
 #[cfg(not(target_arch = "x86_64"))]
-pub(crate) use super::scalar::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};
+pub(crate) use super::scalar::{dot4, dot_l, intt, ntt, order_from_fips, order_to_fips, reduce};

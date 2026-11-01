@@ -5,6 +5,6 @@ use super::{Form, Scale};
 #[path = "avx2_x86.rs"]
 mod implementation;
 #[cfg(not(target_arch = "x86_64"))]
-pub(crate) use super::scalar::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};
+pub(crate) use super::scalar::{dot_l, intt, ntt, order_from_fips, order_to_fips, reduce};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use implementation::{dot4, intt, ntt, order_from_fips, order_to_fips, reduce};
+pub(crate) use implementation::{dot_l, intt, ntt, order_from_fips, order_to_fips, reduce};

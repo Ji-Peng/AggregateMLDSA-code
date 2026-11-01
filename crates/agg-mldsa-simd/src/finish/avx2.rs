@@ -3,10 +3,13 @@
 //! Rounding follows the CC0 pq-crystals Dilithium AVX2 rounding implementation.
 //! The sparse signed-window technique also appears in Hybrid-SHA-3's pspm.c.
 use super::{FinishError, FinishOut, FinishRow, HuCols};
-use crate::{params::*, poly::{Challenge39, Poly32}};
+use crate::{
+    params::*,
+    poly::{Challenge, Poly32},
+};
 use std::mem::MaybeUninit;
 use std::arch::x86_64::*;
-const _: () = assert!(GAMMA1 == 1 << 17);
+
 /// f32 value of (1/63079) * (1 + 2^-20).
 const HU_RECIP: f32 = 1.5853151e-5;
 type V = __m256i;
@@ -71,10 +74,29 @@ fn bytes(a: &[u8; 8]) -> V {
 
 
 #[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, out: &mut [[i32;256];4]) {
-    for (t,dest) in t1.iter().zip(out) {
-        let mut window = [0i32;512];
-        for i in 0..256 { window[i] = -(t[i] as i32); window[i+256] = t[i] as i32; }
+pub(crate) unsafe fn sparse_ct<const K: usize, const TAU: usize>(
+    c: &Challenge<TAU>,
+    t1: &[[u16; 256]; K],
+    shift: u32,
+    out: &mut [[i32; 256]; K],
+) {
+    // SAFETY: AVX2 and POPCNT target features are enabled on this function.
+    unsafe { sparse_ct_slice(c, t1, shift, out) }
+}
+
+#[target_feature(enable = "avx2,popcnt")]
+pub(crate) unsafe fn sparse_ct_slice<const TAU: usize>(
+    c: &Challenge<TAU>,
+    t1: &[[u16; 256]],
+    shift: u32,
+    out: &mut [[i32; 256]],
+) {
+    for (t, dest) in t1.iter().zip(out.iter_mut()) {
+        let mut window = [0i32; 512];
+        for i in 0..256 {
+            window[i] = -(t[i] as i32);
+            window[i + 256] = t[i] as i32;
+        }
         for base in (0..256).step_by(64) {
             let mut a0 = splat(0);
             let mut a1 = splat(0);
@@ -84,35 +106,59 @@ pub(crate) unsafe fn sparse_ct(c: &Challenge39, t1: &[[u16;256];4], shift: u32, 
             let mut a5 = splat(0);
             let mut a6 = splat(0);
             let mut a7 = splat(0);
-            for (k,&pos) in c.pos.iter().enumerate() {
+            for (k, &pos) in c.pos.iter().enumerate() {
                 let start = 256 - pos as usize + base;
                 let sign = splat(-((c.neg >> k) as i32 & 1));
-                // Each partial sum has magnitude <= 39*1023 = 39897, safely in i32.
-                let v = load(window[start..start+8].try_into().unwrap());
-                a0 = add(a0, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+8..start+16].try_into().unwrap());
-                a1 = add(a1, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+16..start+24].try_into().unwrap());
-                a2 = add(a2, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+24..start+32].try_into().unwrap());
-                a3 = add(a3, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+32..start+40].try_into().unwrap());
-                a4 = add(a4, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+40..start+48].try_into().unwrap());
-                a5 = add(a5, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+48..start+56].try_into().unwrap());
-                a6 = add(a6, sub(_mm256_xor_si256(v,sign),sign));
-                let v = load(window[start+56..start+64].try_into().unwrap());
-                a7 = add(a7, sub(_mm256_xor_si256(v,sign),sign));
+                // Each partial sum has magnitude <= 60*1023 = 61380, safely in i32.
+                let v = load(window[start..start + 8].try_into().unwrap());
+                a0 = add(a0, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 8..start + 16].try_into().unwrap());
+                a1 = add(a1, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 16..start + 24].try_into().unwrap());
+                a2 = add(a2, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 24..start + 32].try_into().unwrap());
+                a3 = add(a3, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 32..start + 40].try_into().unwrap());
+                a4 = add(a4, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 40..start + 48].try_into().unwrap());
+                a5 = add(a5, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 48..start + 56].try_into().unwrap());
+                a6 = add(a6, sub(_mm256_xor_si256(v, sign), sign));
+                let v = load(window[start + 56..start + 64].try_into().unwrap());
+                a7 = add(a7, sub(_mm256_xor_si256(v, sign), sign));
             }
-            store((&mut dest[base..base+8]).try_into().unwrap(), _mm256_sllv_epi32(a0,splat(shift as i32)));
-            store((&mut dest[base+8..base+16]).try_into().unwrap(), _mm256_sllv_epi32(a1,splat(shift as i32)));
-            store((&mut dest[base+16..base+24]).try_into().unwrap(), _mm256_sllv_epi32(a2,splat(shift as i32)));
-            store((&mut dest[base+24..base+32]).try_into().unwrap(), _mm256_sllv_epi32(a3,splat(shift as i32)));
-            store((&mut dest[base+32..base+40]).try_into().unwrap(), _mm256_sllv_epi32(a4,splat(shift as i32)));
-            store((&mut dest[base+40..base+48]).try_into().unwrap(), _mm256_sllv_epi32(a5,splat(shift as i32)));
-            store((&mut dest[base+48..base+56]).try_into().unwrap(), _mm256_sllv_epi32(a6,splat(shift as i32)));
-            store((&mut dest[base+56..base+64]).try_into().unwrap(), _mm256_sllv_epi32(a7,splat(shift as i32)));
+            store(
+                (&mut dest[base..base + 8]).try_into().unwrap(),
+                _mm256_sllv_epi32(a0, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 8..base + 16]).try_into().unwrap(),
+                _mm256_sllv_epi32(a1, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 16..base + 24]).try_into().unwrap(),
+                _mm256_sllv_epi32(a2, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 24..base + 32]).try_into().unwrap(),
+                _mm256_sllv_epi32(a3, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 32..base + 40]).try_into().unwrap(),
+                _mm256_sllv_epi32(a4, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 40..base + 48]).try_into().unwrap(),
+                _mm256_sllv_epi32(a5, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 48..base + 56]).try_into().unwrap(),
+                _mm256_sllv_epi32(a6, splat(shift as i32)),
+            );
+            store(
+                (&mut dest[base + 56..base + 64]).try_into().unwrap(),
+                _mm256_sllv_epi32(a7, splat(shift as i32)),
+            );
         }
     }
 }
@@ -189,7 +235,36 @@ fn crt_k(xq: V, xp: V, c: V, c_pinv: V, p2: V, p2_half: V, q_half: V) -> V {
 }
 
 #[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn finish_row(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
+pub(crate) unsafe fn finish_row<P: ParamSet>(
+    row: FinishRow<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    if P::GAMMA2 == (Q - 1) / 88 {
+        // SAFETY: AVX2 and POPCNT target features are enabled on this function.
+        unsafe { finish_row_44(row, out) }
+    } else {
+        super::scalar::finish_row::<P>(row, out)
+    }
+}
+
+#[target_feature(enable = "avx2,popcnt")]
+pub(crate) unsafe fn finish_row_3p<P: ParamSet>(
+    row: super::FinishRow3P<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    super::scalar::finish_row_3p::<P>(row, out)
+}
+
+#[target_feature(enable = "avx2,popcnt")]
+pub(crate) unsafe fn finish_row_exact<P: ParamSet>(
+    row: super::FinishRowExact<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    super::scalar::finish_row_exact::<P>(row, out)
+}
+
+#[target_feature(enable = "avx2,popcnt")]
+unsafe fn finish_row_44(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
     // Four short passes through L1-resident rows instead of one loop: a fused
     // iteration is one ~75-cycle dependency chain, and the scheduler then holds
     // too few iterations to fill the ports (measured 25% slower). `r` holds
@@ -502,7 +577,17 @@ fn narrow32(a: &mut [MaybeUninit<i8>], v: V) {
     unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), v) }
 }
 #[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn hu_columns(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
+pub(crate) unsafe fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
+    if P::GAMMA2 == (Q - 1) / 88 {
+        // SAFETY: AVX2 and POPCNT target features are enabled on this function.
+        unsafe { hu_columns_44(z, out, cols) };
+    } else {
+        super::scalar::hu_columns::<P>(z, out, cols);
+    }
+}
+
+#[target_feature(enable = "avx2,popcnt")]
+unsafe fn hu_columns_44(z: &Poly32, out: &FinishOut, cols: HuCols<'_>) {
     for col in &cols.wide { assert_eq!(col.len(),256); }
     for col in &cols.narrow { assert_eq!(col.len(),256); }
     for i in (0..256).step_by(32) {

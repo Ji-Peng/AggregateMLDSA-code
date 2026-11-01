@@ -116,6 +116,58 @@ fn main() {
         ]);
     pq_build.compile("pqcrystals_dilithium2_avx2");
 
+    // 2b. Build pq-crystals dilithium3 avx2 static library (ML-DSA-65).
+    let mut pq3_build = cc::Build::new();
+    pq3_build
+        .opt_level(3)
+        .flag("-march=x86-64-v3")
+        .flag("-mtune=native")
+        .flag("-mavx2")
+        .flag("-mpopcnt")
+        .define("DILITHIUM_MODE", "3")
+        .include(&pq_avx2)
+        .include(&pq_ref)
+        .files([
+            pq_avx2.join("packing.c"),
+            pq_avx2.join("polyvec.c"),
+            pq_avx2.join("poly.c"),
+            pq_avx2.join("ntt.S"),
+            pq_avx2.join("invntt.S"),
+            pq_avx2.join("pointwise.S"),
+            pq_avx2.join("shuffle.S"),
+            pq_avx2.join("consts.c"),
+            pq_avx2.join("rejsample.c"),
+            pq_avx2.join("rounding.c"),
+            pq_avx2.join("symmetric-shake.c"),
+        ]);
+    pq3_build.compile("pqcrystals_dilithium3_avx2");
+
+    // 2c. Build pq-crystals dilithium5 avx2 static library (ML-DSA-87).
+    let mut pq5_build = cc::Build::new();
+    pq5_build
+        .opt_level(3)
+        .flag("-march=x86-64-v3")
+        .flag("-mtune=native")
+        .flag("-mavx2")
+        .flag("-mpopcnt")
+        .define("DILITHIUM_MODE", "5")
+        .include(&pq_avx2)
+        .include(&pq_ref)
+        .files([
+            pq_avx2.join("packing.c"),
+            pq_avx2.join("polyvec.c"),
+            pq_avx2.join("poly.c"),
+            pq_avx2.join("ntt.S"),
+            pq_avx2.join("invntt.S"),
+            pq_avx2.join("pointwise.S"),
+            pq_avx2.join("shuffle.S"),
+            pq_avx2.join("consts.c"),
+            pq_avx2.join("rejsample.c"),
+            pq_avx2.join("rounding.c"),
+            pq_avx2.join("symmetric-shake.c"),
+        ]);
+    pq5_build.compile("pqcrystals_dilithium5_avx2");
+
     // Restore the original XKCP theta schedule in the build copy. The pinned
     // Hybrid modification overwrites column parities before later uses.
     // Keep external checkouts untouched and reject unexpected source changes.

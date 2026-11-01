@@ -176,6 +176,7 @@ dependencies = [
 name = "agg-mldsa-cref"
 version = "0.1.0"
 dependencies = [
+ "agg-mldsa-simd",
  "agg-witness",
  "cc",
  "keccak 0.1.6",

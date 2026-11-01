@@ -152,21 +152,21 @@ impl Default for RejState {
     }
 }
 
-/// The sparse challenge c with tau = 39 nonzero coefficients.
+/// The sparse challenge c with tau nonzero coefficients (FIPS 204 Section 5.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Challenge39 {
-    /// Increasing positions of the 39 nonzero coefficients.
-    pub pos: [u8; 39],
+pub struct Challenge<const TAU: usize = 39> {
+    /// Increasing positions of the tau nonzero coefficients.
+    pub pos: [u8; TAU],
     /// Bit k indicates sign: 1 if c[pos[k]] = -1, 0 if +1.
     pub neg: u64,
 }
 
-impl Challenge39 {
+impl<const TAU: usize> Challenge<TAU> {
     /// Creates a zeroed challenge.
     #[inline(always)]
     pub const fn zero() -> Self {
         Self {
-            pos: [0; 39],
+            pos: [0; TAU],
             neg: 0,
         }
     }
@@ -178,12 +178,15 @@ impl Challenge39 {
     }
 }
 
-impl Default for Challenge39 {
+impl<const TAU: usize> Default for Challenge<TAU> {
     #[inline(always)]
     fn default() -> Self {
         Self::zero()
     }
 }
+
+/// The sparse challenge c with tau = 39 nonzero coefficients for ML-DSA-44.
+pub type Challenge39 = Challenge<39>;
 
 /// Output of finishing one row: w1 values and the u, v polynomials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,20 +226,20 @@ impl Default for FinishOut {
 
 /// Expanded matrix A in backend order and number of blocks consumed per entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExpandedA {
-    /// 4x4 matrix of polynomials in NTT backend order, in [0, q).
-    pub a_hat: [[Poly32; 4]; 4],
+pub struct ExpandedA<const K: usize = 4, const L: usize = 4> {
+    /// K x L matrix of polynomials in NTT backend order, in [0, q).
+    pub a_hat: [[Poly32; L]; K],
     /// Number of SHAKE128 blocks consumed per matrix entry.
-    pub blocks: [[u8; 4]; 4],
+    pub blocks: [[u8; L]; K],
 }
 
-impl ExpandedA {
+impl<const K: usize, const L: usize> ExpandedA<K, L> {
     /// Creates a zeroed ExpandedA instance.
     #[inline(always)]
     pub const fn zero() -> Self {
         Self {
-            a_hat: [[Poly32::zero(); 4]; 4],
-            blocks: [[0; 4]; 4],
+            a_hat: [[Poly32::zero(); L]; K],
+            blocks: [[0; L]; K],
         }
     }
 
@@ -247,7 +250,7 @@ impl ExpandedA {
     }
 }
 
-impl Default for ExpandedA {
+impl<const K: usize, const L: usize> Default for ExpandedA<K, L> {
     #[inline(always)]
     fn default() -> Self {
         Self::zero()
@@ -278,11 +281,24 @@ mod tests {
         assert_eq!(c.neg, 0);
         assert_eq!(c.pos[0], 0);
 
+        let c49 = Challenge::<49>::default();
+        assert_eq!(c49.pos.len(), 49);
+        let c60 = Challenge::<60>::default();
+        assert_eq!(c60.pos.len(), 60);
+
         let f = FinishOut::default();
         assert_eq!(f.w1[0], 0);
         assert_eq!(f.u[0], 0);
 
-        let exp = ExpandedA::default();
+        let exp = ExpandedA::<4, 4>::default();
         assert_eq!(exp.blocks[0][0], 0);
+
+        let exp65 = ExpandedA::<6, 5>::default();
+        assert_eq!(exp65.blocks.len(), 6);
+        assert_eq!(exp65.blocks[0].len(), 5);
+
+        let exp87 = ExpandedA::<8, 7>::default();
+        assert_eq!(exp87.blocks.len(), 8);
+        assert_eq!(exp87.blocks[0].len(), 7);
     }
 }

@@ -124,11 +124,15 @@ pub(super) static Q: Table = generate(Prime::Q, Scale::Mont);
 pub(super) static Q_PLAIN: Table = generate(Prime::Q, Scale::Plain);
 pub(super) static P2: Table = generate(Prime::P2, Scale::Mont);
 pub(super) static P2_PLAIN: Table = generate(Prime::P2, Scale::Plain);
+pub(super) static P3: Table = generate(Prime::P3, Scale::Mont);
+pub(super) static P3_PLAIN: Table = generate(Prime::P3, Scale::Plain);
 pub(super) fn table(p: Prime, s: Scale) -> &'static Table {
     match (p, s) {
         (Prime::Q, Scale::Mont) => &Q,
         (Prime::Q, Scale::Plain) => &Q_PLAIN,
         (Prime::P2, Scale::Mont) => &P2,
         (Prime::P2, Scale::Plain) => &P2_PLAIN,
+        (Prime::P3, Scale::Mont) => &P3,
+        (Prime::P3, Scale::Plain) => &P3_PLAIN,
     }
 }

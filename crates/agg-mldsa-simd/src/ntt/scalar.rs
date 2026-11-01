@@ -5,7 +5,7 @@
 //! callers normalize forward outputs before a standalone inverse round trip.
 use super::{Form, Scale};
 use crate::{
-    params::{Prime, PrimeConsts, CONSTS_P2, CONSTS_Q},
+    params::{Prime, PrimeConsts, CONSTS_P2, CONSTS_P3, CONSTS_Q},
     poly::Poly32,
 };
 
@@ -34,6 +34,7 @@ const fn twiddles(c: PrimeConsts) -> [(i32, i32); 256] {
 }
 const ZQ: [(i32, i32); 256] = twiddles(CONSTS_Q);
 const ZP: [(i32, i32); 256] = twiddles(CONSTS_P2);
+const ZP3: [(i32, i32); 256] = twiddles(CONSTS_P3);
 
 #[inline]
 pub(crate) fn mont(a: i64, c: PrimeConsts) -> i32 {
@@ -54,13 +55,17 @@ fn centered(x: i32, c: PrimeConsts) -> i32 {
 }
 pub(crate) fn ntt(p: Prime, a: &mut Poly32) {
     match p {
-        Prime::Q => forward::<false>(a),
-        Prime::P2 => forward::<true>(a),
+        Prime::Q => forward::<0>(a),
+        Prime::P2 => forward::<1>(a),
+        Prime::P3 => forward::<2>(a),
     }
 }
-fn forward<const SECOND: bool>(a: &mut Poly32) {
-    let c = if SECOND { CONSTS_P2 } else { CONSTS_Q };
-    let zs = if SECOND { &ZP } else { &ZQ };
+fn forward<const P_IDX: u8>(a: &mut Poly32) {
+    let (c, zs) = match P_IDX {
+        0 => (CONSTS_Q, &ZQ),
+        1 => (CONSTS_P2, &ZP),
+        _ => (CONSTS_P3, &ZP3),
+    };
     let mut k = 0;
     let mut len = 128;
     while len > 0 {
@@ -80,13 +85,17 @@ fn forward<const SECOND: bool>(a: &mut Poly32) {
 }
 pub(crate) fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
     match p {
-        Prime::Q => inverse::<false>(a, s, f),
-        Prime::P2 => inverse::<true>(a, s, f),
+        Prime::Q => inverse::<0>(a, s, f),
+        Prime::P2 => inverse::<1>(a, s, f),
+        Prime::P3 => inverse::<2>(a, s, f),
     }
 }
-fn inverse<const SECOND: bool>(a: &mut Poly32, s: Scale, f: Form) {
-    let c = if SECOND { CONSTS_P2 } else { CONSTS_Q };
-    let zs = if SECOND { &ZP } else { &ZQ };
+fn inverse<const P_IDX: u8>(a: &mut Poly32, s: Scale, f: Form) {
+    let (c, zs) = match P_IDX {
+        0 => (CONSTS_Q, &ZQ),
+        1 => (CONSTS_P2, &ZP),
+        _ => (CONSTS_P3, &ZP3),
+    };
     let mut k = 256;
     let mut len = 1;
     while len < 256 {
@@ -100,7 +109,7 @@ fn inverse<const SECOND: bool>(a: &mut Poly32, s: Scale, f: Form) {
                 // Centered P2 inputs give sums <= 8p through layer four.
                 *x = t + *y;
                 *y = mul(t - *y, z, c.p);
-                if SECOND && len == 8 {
+                if P_IDX != 0 && len == 8 {
                     // |sum| <= 8p becomes |r| < 0.626p. Four remaining
                     // doublings stay below 10.016p < 2^31; the difference
                     // outputs of this layer are already below 0.657p.
@@ -124,17 +133,21 @@ fn inverse<const SECOND: bool>(a: &mut Poly32, s: Scale, f: Form) {
         };
     }
 }
-pub(crate) fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+pub(crate) fn dot_l<const L: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
     let c = p.consts();
     for i in 0..256 {
-        // Canonical q / centered P2 matrix times lazy NTT(z): |sum| < 2^58.
+        // Canonical q / centered CRT prime matrix times lazy NTT(z): |sum| < 2^58.
         let mut sum = 0i64;
-        for j in 0..4 {
+        for j in 0..L {
             sum += a[j][i] as i64 * b[j][i] as i64;
         }
         let r = mont(sum, c);
-        out[i] = if p == Prime::P2 { centered(r, c) } else { r };
+        out[i] = if p != Prime::Q { centered(r, c) } else { r };
     }
+}
+#[allow(dead_code)]
+pub(crate) fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+    dot_l::<4>(p, a, b, out)
 }
 pub(crate) fn reduce(p: Prime, a: &mut Poly32, f: Form) {
     let c = p.consts();

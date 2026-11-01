@@ -13,9 +13,11 @@ pub mod params;
 pub mod poly;
 pub mod sample;
 
-pub use dispatch::{available, engine, parse_backend, Backend, Engine};
-pub use finish::{FinishError, FinishOut, FinishRow, HuCols};
+pub use dispatch::{available, engine, engine_for, parse_backend, Backend, Engine};
+pub use finish::{FinishError, FinishOut, FinishRow, FinishRow3P, FinishRowExact, HuCols};
 pub use keccak::{Sink, Xof, XofJob};
 pub use ntt::{Form, Scale};
-pub use params::{consts, Prime, PrimeConsts, CRT_C, QINV32};
-pub use poly::{Block, Challenge39, ExpandedA, Poly32, RejState};
+pub use params::{
+    consts, ParamSet, Prime, PrimeConsts, Set44, Set65, Set87, CRT_C, CRT_C_P3, P2, P3, Q, QINV32,
+};
+pub use poly::{Block, Challenge, Challenge39, ExpandedA, Poly32, RejState};

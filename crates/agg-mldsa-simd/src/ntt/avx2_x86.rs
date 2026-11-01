@@ -712,7 +712,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p == Prime::P2 {
+        let (v3, v4, v6, v8) = if p != Prime::Q {
             // At most 8p before reduction; less than 0.63p afterwards.
             let z = _mm256_set1_epi32(consts(p).mont);
             let qi = _mm256_set1_epi32(consts(p).pinv);
@@ -833,7 +833,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p == Prime::P2 {
+        let (v3, v4, v6, v8) = if p != Prime::Q {
             // At most 8p before reduction; less than 0.63p afterwards.
             let z = _mm256_set1_epi32(consts(p).mont);
             let qi = _mm256_set1_epi32(consts(p).pinv);
@@ -954,7 +954,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p == Prime::P2 {
+        let (v3, v4, v6, v8) = if p != Prime::Q {
             // At most 8p before reduction; less than 0.63p afterwards.
             let z = _mm256_set1_epi32(consts(p).mont);
             let qi = _mm256_set1_epi32(consts(p).pinv);
@@ -1075,7 +1075,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p == Prime::P2 {
+        let (v3, v4, v6, v8) = if p != Prime::Q {
             // At most 8p before reduction; less than 0.63p afterwards.
             let z = _mm256_set1_epi32(consts(p).mont);
             let qi = _mm256_set1_epi32(consts(p).pinv);
@@ -1550,18 +1550,8 @@ pub(crate) unsafe fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
     inverse(p, tables::table(p, s), a, f);
 }
 #[target_feature(enable = "avx2,popcnt")]
-#[cfg(any(test, not(target_os = "linux")))]
-unsafe fn dot4_intrinsics(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    if p == Prime::Q {
-        dot_inner::<false>(a, b, out);
-    } else {
-        dot_inner::<true>(a, b, out);
-    }
-}
-#[target_feature(enable = "avx2,popcnt")]
-#[cfg(any(test, not(target_os = "linux")))]
-fn dot_inner<const SECOND: bool>(a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    let c = consts(if SECOND { Prime::P2 } else { Prime::Q });
+fn dot_inner_l<const L: usize, const SECOND: bool>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
+    let c = consts(p);
     let pv = _mm256_set1_epi32(c.p);
     let qi = _mm256_set1_epi32(c.pinv);
     for block in (0..256).step_by(16) {
@@ -1569,10 +1559,9 @@ fn dot_inner<const SECOND: bool>(a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Pol
             let j = block + 8 * lane;
             let mut e = _mm256_setzero_si256();
             let mut o = e;
-            for k in 0..4 {
+            for k in 0..L {
                 let av = load(a[k].0[j..j + 8].try_into().unwrap());
                 let bv = load(b[k].0[j..j + 8].try_into().unwrap());
-                // Four products total less than 19q^2 or 8.8P2^2 (<2^58), so i64 sums cannot overflow.
                 e = _mm256_add_epi64(e, _mm256_mul_epi32(av, bv));
                 o = _mm256_add_epi64(
                     o,
@@ -1598,6 +1587,32 @@ fn dot_inner<const SECOND: bool>(a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Pol
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
+#[cfg(any(test, not(target_os = "linux")))]
+unsafe fn dot4_intrinsics(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+    if p == Prime::Q {
+        dot_inner_l::<4, false>(p, a, b, out);
+    } else {
+        dot_inner_l::<4, true>(p, a, b, out);
+    }
+}
+#[target_feature(enable = "avx2,popcnt")]
+pub(crate) unsafe fn dot_l<const L: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
+    #[cfg(target_os = "linux")]
+    if L == 4 && p != Prime::P3 {
+        // SAFETY: L == 4 ensures the slice has length 4.
+        let a4: &[Poly32; 4] = unsafe { &*(a.as_ptr() as *const [Poly32; 4]) };
+        let b4: &[Poly32; 4] = unsafe { &*(b.as_ptr() as *const [Poly32; 4]) };
+        // SAFETY: dispatch proved AVX2/POPCNT; all typed arrays are aligned and complete.
+        unsafe { dot4(p, a4, b4, out) };
+        return;
+    }
+    if p == Prime::Q {
+        dot_inner_l::<L, false>(p, a, b, out);
+    } else {
+        dot_inner_l::<L, true>(p, a, b, out);
+    }
+}
+#[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn reduce(p: Prime, a: &mut Poly32, f: Form) {
     let c = consts(p);
     let pv = _mm256_set1_epi32(c.p);
@@ -1605,6 +1620,7 @@ pub(crate) unsafe fn reduce(p: Prime, a: &mut Poly32, f: Form) {
     let recip = match p {
         Prime::Q => 513,
         Prime::P2 => 26,
+        Prime::P3 => 11,
     };
     let rv = _mm256_set1_epi32(recip);
     for chunk in a.0.chunks_exact_mut(8) {

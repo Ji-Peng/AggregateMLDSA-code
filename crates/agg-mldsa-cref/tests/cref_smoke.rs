@@ -386,4 +386,127 @@ mod smoke_tests {
             );
         }
     }
+
+    #[test]
+    fn test_c_polyw1_pack_matches_witness_modes_3_and_5() {
+        assert!(available());
+        let mut rng = SplitMix64::new(0x1122_3344);
+        let mut poly_i32 = Align64([0i32; 256]);
+        let mut w1_u8 = [0u8; 256];
+
+        for i in 0..256 {
+            // w1 coefficients for modes 3 and 5 are in [0, 16)
+            let val = (rng.next_u64() % 16) as u8;
+            w1_u8[i] = val;
+            poly_i32.0[i] = val as i32;
+        }
+
+        // Mode 3
+        let mut c_packed3 = [0u8; 128];
+        dilithium3_polyw1_pack(&mut c_packed3, &poly_i32.0);
+        let mut rust_packed3 = [0u8; 128];
+        let small_k = [w1_u8];
+        let e65 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set65>();
+        e65.pack_w1(&small_k, &mut rust_packed3);
+        assert_eq!(&c_packed3[..], &rust_packed3[..]);
+
+        // Mode 5
+        let mut c_packed5 = [0u8; 128];
+        dilithium5_polyw1_pack(&mut c_packed5, &poly_i32.0);
+        let mut rust_packed5 = [0u8; 128];
+        let e87 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set87>();
+        e87.pack_w1(&small_k, &mut rust_packed5);
+        assert_eq!(&c_packed5[..], &rust_packed5[..]);
+    }
+
+    #[test]
+    fn test_c_polyz_unpack_matches_simd_modes_3_and_5() {
+        assert!(available());
+        let mut rng = SplitMix64::new(0x5566_7788);
+        let mut z_bytes = [0u8; 640];
+        for b in z_bytes.iter_mut() {
+            *b = rng.next_u64() as u8;
+        }
+
+        // Mode 3
+        let mut c_unpacked3 = Align64([0i32; 256]);
+        dilithium3_polyz_unpack(&mut c_unpacked3.0, &z_bytes);
+        let mut rust_unpacked3 = [agg_mldsa_simd::Poly32::zero()];
+        let e65 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set65>();
+        e65.unpack_z(&z_bytes, &mut rust_unpacked3);
+        assert_eq!(&c_unpacked3.0[..], &rust_unpacked3[0].0[..]);
+
+        // Mode 5
+        let mut c_unpacked5 = Align64([0i32; 256]);
+        dilithium5_polyz_unpack(&mut c_unpacked5.0, &z_bytes);
+        let mut rust_unpacked5 = [agg_mldsa_simd::Poly32::zero()];
+        let e87 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set87>();
+        e87.unpack_z(&z_bytes, &mut rust_unpacked5);
+        assert_eq!(&c_unpacked5.0[..], &rust_unpacked5[0].0[..]);
+    }
+
+    #[test]
+    fn test_c_poly_use_hint_and_decompose_modes_3_and_5() {
+        assert!(available());
+        let mut rng = SplitMix64::new(0x99aa_bbcc);
+        let mut a = Align64([0i32; 256]);
+        let mut h = Align64([0i32; 256]);
+        for i in 0..256 {
+            a.0[i] = (rng.next_u64() % (Q as u64)) as i32;
+            h.0[i] = (rng.next_u64() & 1) as i32;
+        }
+
+        let mut b3 = Align64([0i32; 256]);
+        dilithium3_poly_use_hint(&mut b3.0, &a.0, &h.0);
+        let mut a1_3 = Align64([0i32; 256]);
+        let mut a0_3 = Align64([0i32; 256]);
+        dilithium3_poly_decompose(&mut a1_3.0, &mut a0_3.0, &a.0);
+
+        let mut b5 = Align64([0i32; 256]);
+        dilithium5_poly_use_hint(&mut b5.0, &a.0, &h.0);
+        let mut a1_5 = Align64([0i32; 256]);
+        let mut a0_5 = Align64([0i32; 256]);
+        dilithium5_poly_decompose(&mut a1_5.0, &mut a0_5.0, &a.0);
+
+        // Decompose and UseHint for gamma2 = (q-1)/32 must agree between modes 3 and 5
+        assert_eq!(&b3.0[..], &b5.0[..]);
+        assert_eq!(&a1_3.0[..], &a1_5.0[..]);
+        assert_eq!(&a0_3.0[..], &a0_5.0[..]);
+
+        // High bits must be in [0, 16)
+        for &w in &b3.0 {
+            assert!(w >= 0 && w < 16);
+        }
+    }
+
+    #[test]
+    fn test_c_ntt_invntt_roundtrip_modes_3_and_5() {
+        assert!(available());
+        let mut rng = SplitMix64::new(0xddee_ff00);
+        let mut a = Align64([0i32; 256]);
+        let mut orig = [0i32; 256];
+        for i in 0..256 {
+            orig[i] = (rng.next_u64() % (Q as u64)) as i32;
+            a.0[i] = orig[i];
+        }
+
+        dilithium3_ntt_avx(&mut a.0, dilithium3_qdata());
+        dilithium3_invntt_avx(&mut a.0, dilithium3_qdata());
+
+        let r = ((1u128 << 32) % (Q as u128)) as i64;
+        for i in 0..256 {
+            let expected = ((orig[i] as i64 * r) % Q).rem_euclid(Q);
+            let got = (a.0[i] as i64).rem_euclid(Q);
+            assert_eq!(got, expected, "Mode 3 mismatch at {i}");
+        }
+
+        let mut a5 = Align64(orig);
+        dilithium5_ntt_avx(&mut a5.0, dilithium5_qdata());
+        dilithium5_invntt_avx(&mut a5.0, dilithium5_qdata());
+        for i in 0..256 {
+            let expected = ((orig[i] as i64 * r) % Q).rem_euclid(Q);
+            let got = (a5.0[i] as i64).rem_euclid(Q);
+            assert_eq!(got, expected, "Mode 5 mismatch at {i}");
+        }
+    }
 }

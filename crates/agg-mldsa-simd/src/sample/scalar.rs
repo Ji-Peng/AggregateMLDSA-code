@@ -49,3 +49,35 @@ pub(crate) fn pack_w1(w1: &[[u8; 256]; 4], out: &mut [u8; 768]) {
         }
     }
 }
+
+pub(crate) fn unpack_z_20(z: &[u8], out: &mut [Poly32]) -> u32 {
+    let mut max = 0u32;
+    let gamma1 = 1i32 << 19;
+    assert_eq!(z.len(), out.len() * 640);
+    for (poly, bytes) in out.iter_mut().zip(z.as_chunks::<640>().0.iter()) {
+        for (coeffs, b) in poly
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(bytes.as_chunks::<5>().0.iter())
+        {
+            let c0 = (b[0] as u32) | ((b[1] as u32) << 8) | (((b[2] & 0x0f) as u32) << 16);
+            let c1 = ((b[2] >> 4) as u32) | ((b[3] as u32) << 4) | ((b[4] as u32) << 12);
+            let z0 = gamma1 - c0 as i32;
+            let z1 = gamma1 - c1 as i32;
+            coeffs[0] = z0;
+            coeffs[1] = z1;
+            max = max.max(z0.unsigned_abs()).max(z1.unsigned_abs());
+        }
+    }
+    max
+}
+
+pub(crate) fn pack_w1_4(w1: &[[u8; 256]], out: &mut [u8]) {
+    assert_eq!(out.len(), w1.len() * 128);
+    for (row, bytes) in w1.iter().zip(out.as_chunks_mut::<128>().0.iter_mut()) {
+        for (pair, b) in row.as_chunks::<2>().0.iter().zip(bytes.iter_mut()) {
+            *b = (pair[0] & 0x0f) | ((pair[1] & 0x0f) << 4);
+        }
+    }
+}

@@ -6,6 +6,7 @@
 use std::sync::OnceLock;
 
 use crate::isa::{self, IsaLevel};
+use crate::params::{ParamSet, Set44};
 
 /// Available implementation backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -18,22 +19,33 @@ pub enum Backend {
     Avx512,
 }
 
-/// Execution engine holding feature detection proofs.
+/// Execution engine holding feature detection proofs for parameter set P.
 ///
 /// Holding an `Engine` guarantees that the corresponding hardware features
 /// are available on the current machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Engine {
+pub struct Engine<P: ParamSet = Set44> {
     backend: Backend,
     vbmi: bool,
+    _marker: core::marker::PhantomData<P>,
 }
 
-impl Engine {
-    /// Creates a new engine instance for the requested backend.
+impl Engine<Set44> {
+    /// Creates a new engine instance for ML-DSA-44.
     ///
     /// Returns `None` when the hardware lacks the backend's features or when
     /// `AGG_ISA` caps the process below it.
-    pub fn new(b: Backend) -> Option<Engine> {
+    pub fn new(b: Backend) -> Option<Engine<Set44>> {
+        Self::new_for(b)
+    }
+}
+
+impl<P: ParamSet> Engine<P> {
+    /// Creates a new engine instance for the requested backend and parameter set P.
+    ///
+    /// Returns `None` when the hardware lacks the backend's features or when
+    /// `AGG_ISA` caps the process below it.
+    pub fn new_for(b: Backend) -> Option<Engine<P>> {
         if !cap_allows(b) {
             return None;
         }
@@ -41,11 +53,12 @@ impl Engine {
     }
 
     /// The backend the hardware supports, ignoring `AGG_ISA`.
-    fn hardware(b: Backend) -> Option<Engine> {
+    fn hardware(b: Backend) -> Option<Engine<P>> {
         match b {
             Backend::Scalar => Some(Engine {
                 backend: Backend::Scalar,
                 vbmi: false,
+                _marker: core::marker::PhantomData,
             }),
             #[cfg(target_arch = "x86_64")]
             Backend::Avx2 => {
@@ -53,6 +66,7 @@ impl Engine {
                     Some(Engine {
                         backend: Backend::Avx2,
                         vbmi: false,
+                        _marker: core::marker::PhantomData,
                     })
                 } else {
                     None
@@ -70,6 +84,7 @@ impl Engine {
                     Some(Engine {
                         backend: Backend::Avx512,
                         vbmi,
+                        _marker: core::marker::PhantomData,
                     })
                 } else {
                     None
@@ -90,6 +105,16 @@ impl Engine {
     #[inline(always)]
     pub fn has_vbmi(&self) -> bool {
         self.vbmi
+    }
+
+    /// Rebinds this execution engine to a different parameter set without re-probing hardware.
+    #[inline(always)]
+    pub fn for_set<P2: ParamSet>(&self) -> Engine<P2> {
+        Engine {
+            backend: self.backend,
+            vbmi: self.vbmi,
+            _marker: core::marker::PhantomData,
+        }
     }
 }
 
@@ -115,10 +140,10 @@ fn cap_backend() -> Backend {
 fn detected_backend() -> Backend {
     #[cfg(target_arch = "x86_64")]
     {
-        if Engine::hardware(Backend::Avx512).is_some() {
+        if Engine::<Set44>::hardware(Backend::Avx512).is_some() {
             return Backend::Avx512;
         }
-        if Engine::hardware(Backend::Avx2).is_some() {
+        if Engine::<Set44>::hardware(Backend::Avx2).is_some() {
             return Backend::Avx2;
         }
     }
@@ -127,7 +152,7 @@ fn detected_backend() -> Backend {
 
 /// Checks whether a given backend is supported on the current CPU.
 pub fn available(b: Backend) -> bool {
-    Engine::new(b).is_some()
+    Engine::<Set44>::new(b).is_some()
 }
 
 /// Parses a backend name from a string.
@@ -165,6 +190,11 @@ pub fn engine() -> &'static Engine {
             );
         })
     })
+}
+
+/// Returns an execution engine bound to parameter set P.
+pub fn engine_for<P: ParamSet>() -> Engine<P> {
+    engine().for_set::<P>()
 }
 
 /// One line describing the backend and the detected extension this crate uses.
