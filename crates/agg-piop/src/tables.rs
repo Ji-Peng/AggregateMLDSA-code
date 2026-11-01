@@ -92,6 +92,8 @@ pub struct ProverTables<'a> {
     pub wa_planes: Option<agg_simd::buf::KPlanes>,
     /// The projection weight `W` on the main domain (after `r^(2)`).
     pub wp: Option<Vec<E>>,
+    /// `W` as coordinate planes (plane layout), in place of `wp`.
+    pub wp_planes: Option<agg_simd::buf::KPlanes>,
 }
 
 impl<'a> ProverTables<'a> {
@@ -120,6 +122,7 @@ impl<'a> ProverTables<'a> {
             wa: None,
             wa_planes: None,
             wp: None,
+            wp_planes: None,
         }
     }
 
@@ -137,6 +140,7 @@ impl<'a> ProverTables<'a> {
             wa: None,
             wa_planes: None,
             wp: None,
+            wp_planes: None,
         }
     }
 
@@ -181,7 +185,13 @@ impl<'a> ProverTables<'a> {
 
     /// Build the projection weight `W` from `Psi` and `r^(2)`.
     pub fn set_projection(&mut self, psi: &[u8], r2: &[E]) {
-        self.wp = Some(crate::projection::weight_table(self.tables.manifest, psi, r2));
+        if crate::kernel::layout() == crate::kernel::Layout::Plane {
+            self.wp_planes = Some(crate::projection::weight_planes(self.tables.manifest, psi, r2));
+            self.wp = None;
+        } else {
+            self.wp = Some(crate::projection::weight_table(self.tables.manifest, psi, r2));
+            self.wp_planes = None;
+        }
     }
 
     /// The lane of a table.
@@ -212,9 +222,10 @@ impl<'a> ProverTables<'a> {
                     None => Lane::Source(Source::Field(self.wa.as_deref().expect("w_A after r^(2)"))),
                 }
             }
-            LaneId::Weight(WeightId::Proj) => {
-                Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)")))
-            }
+            LaneId::Weight(WeightId::Proj) => match &self.wp_planes {
+                Some(planes) => Lane::Source(Source::Planes(planes)),
+                None => Lane::Source(Source::Field(self.wp.as_deref().expect("W after r^(2)"))),
+            },
         }
     }
 }
