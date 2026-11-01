@@ -7,6 +7,7 @@
 //! of `pack_z_lincheck`. Rows `[n, 2^nu)` are dummy and identically zero in `z`, `a`, `b`.
 
 use agg_mldsa_simd::{keccak::Words8, Engine};
+use agg_witness::params::ParamSet;
 use flock_core::alloc_zeroed_vec;
 use flock_field::F128;
 use rayon::prelude::*;
@@ -78,12 +79,8 @@ pub fn pack_ab(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> (Vec<F128>,
         "slot buffer length"
     );
     #[cfg(target_arch = "x86_64")]
-    if crate::simd::avx512() && gen8::is_sponge(gate) {
-        return gen8::pack_ab(gate, nu, n, z);
-    }
-    #[cfg(target_arch = "x86_64")]
-    if crate::simd::avx2() && gen8::is_sponge(gate) {
-        return gen8x2::pack_ab(gate, nu, n, z);
+    if let Some(ab) = pack_ab_8way(gate, nu, n, z) {
+        return ab;
     }
     // Per row: gather the row's words, apply the row maps, scatter (pack_slot's batches).
     let packed = pack_slot(gate, nu, n, |j, zz, a, b| {
@@ -94,6 +91,33 @@ pub fn pack_ab(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> (Vec<F128>,
         gate.apply_ab(zz, a, b);
     });
     packed.ab.expect("pack_slot builds a, b")
+}
+
+/// [`pack_ab`] on the 8-way kernels: AVX-512 first, then AVX2, for a sponge gate of any
+/// parameter set; `None` when neither applies.
+#[cfg(target_arch = "x86_64")]
+fn pack_ab_8way(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> Option<(Vec<F128>, Vec<F128>)> {
+    use agg_witness::params::Set;
+    use gen8::{Geo, Geo44, Geo65, Geo87};
+    let set = gen8::sponge_set(gate)?;
+    let (avx512, avx2) = (crate::simd::avx512(), crate::simd::avx2());
+    macro_rules! run {
+        ($g:ty) => {{
+            const IN_Q: usize = <$g as Geo>::IN_Q;
+            if avx512 {
+                Some(gen8::pack_ab::<$g, IN_Q>(gate, nu, n, z))
+            } else if avx2 {
+                Some(gen8x2::pack_ab::<$g, IN_Q>(gate, nu, n, z))
+            } else {
+                None
+            }
+        }};
+    }
+    match set {
+        Set::S44 => run!(Geo44),
+        Set::S65 => run!(Geo65),
+        Set::S87 => run!(Geo87),
+    }
 }
 
 /// The byte stripe of `flock_core::lincheck::pack_z_lincheck` of a BatchMajor slot buffer:
@@ -123,9 +147,11 @@ pub fn lincheck_stripe(z: &[F128], k_log: usize, nu: usize) -> Vec<u8> {
     stripe
 }
 
+/// Where the 8-way sponge generator writes each record's lane-major input bits (the chain's
 /// copy of the w1Encode bits, `crate::tied::TiedPart::honest_parts`): record `g` is position
-/// `i = g mod 2^d` of segment `sigma = g >> d`, and its lane `t` is the 16 words at
-/// `sigma seg_words + (lane_len t + 1024 i) / 64`.
+/// `i = g mod 2^d` of segment `sigma = g >> d`, and its lane `t` is the `256 k / 64` live
+/// words at `sigma seg_words + (lane_len t + P_pad i) / 64` (the padded positions are left
+/// as they are, zero).
 pub struct LaneBits<'a> {
     pub bits: &'a mut [u64],
     pub seg_words: usize,
@@ -133,8 +159,8 @@ pub struct LaneBits<'a> {
     pub d: u32,
 }
 
-/// The honest slot buffers of the SHAKE256 sponge gate (`crate::sponge::sponge_gate`) for
-/// `records`, eight records per zmm (lane-sliced Keccak, `crate::simd::keccak8`), and the
+/// The honest slot buffers of the SHAKE256 sponge gate of `P` (`crate::sponge::sponge_gate_for`)
+/// for `records`, eight records per zmm (lane-sliced Keccak, `crate::simd::keccak8`), and the
 /// lane-major input bits when `lane_bits` is given. Every buffer is byte-identical to
 /// [`pack_slot`] with [`ChainGate::instance_rows`] on [`SpongeRecord::input_bits`] (the
 /// oracle). Runs the AVX-512 kernels (`crate::simd::avx512`) or else the AVX2 ones
@@ -145,21 +171,37 @@ pub struct LaneBits<'a> {
 /// If `gate` is not the sponge gate, `records.len() > 2^nu`, `nu < 3`, or `lane_bits` is too
 /// short for the records.
 #[must_use]
-pub fn sponge_slot(
+pub fn sponge_slot<P: ParamSet>(
     gate: &ChainGate,
     nu: usize,
-    records: &[SpongeRecord],
+    records: &[SpongeRecord<P>],
     lane_bits: Option<LaneBits<'_>>,
 ) -> Option<SlotBuffers> {
     #[cfg(target_arch = "x86_64")]
     {
-        if crate::simd::avx512() {
-            return Some(gen8::sponge_slot(gate, nu, records, lane_bits));
+        use agg_witness::params::Set;
+        use gen8::{Geo, Geo44, Geo65, Geo87};
+        let (avx512, avx2) = (crate::simd::avx512(), crate::simd::avx2());
+        // One monomorphised kernel per parameter set; the set is a constant of `P`.
+        macro_rules! run {
+            ($g:ty) => {{
+                const IN_Q: usize = <$g as Geo>::IN_Q;
+                const MSG_Q: usize = <$g as Geo>::MSG_Q;
+                let recs = gen8::records::<P, $g>(records);
+                if avx512 {
+                    Some(gen8::sponge_slot::<$g, IN_Q, MSG_Q>(gate, nu, recs, lane_bits))
+                } else if avx2 {
+                    Some(gen8x2::sponge_slot::<$g, IN_Q, MSG_Q>(gate, nu, recs, lane_bits))
+                } else {
+                    None
+                }
+            }};
         }
-        if crate::simd::avx2() {
-            return Some(gen8x2::sponge_slot(gate, nu, records, lane_bits));
+        match P::SET {
+            Set::S44 => run!(Geo44),
+            Set::S65 => run!(Geo65),
+            Set::S87 => run!(Geo87),
         }
-        None
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -168,14 +210,17 @@ pub fn sponge_slot(
     }
 }
 
-/// The 8-way sponge witness generator. Per batch of eight records (one rayon task): the
-/// committed w1Encode words are extracted with BMI2 `pext` (stride-6 masks) and the
-/// absorbed message lanes loaded as they are, both into qword planes (qword `r` = record
-/// `8 g + r`); the seven permutations run on [`State8`](crate::simd::keccak8::State8) and
+/// The 8-way sponge witness generator, one monomorphised instance per parameter set
+/// ([`gen8::Geo`]). Per batch of eight records (one rayon task): the committed lane words of
+/// w1Encode are extracted with BMI2 `pext` (stride-6 masks for six-bit coefficients, nibble
+/// masks for four-bit ones) and the absorbed message lanes loaded as they are, both into qword planes (qword `r` = record
+/// `8 g + r`); the permutations run on [`State8`](crate::simd::keccak8::State8) and
 /// every round's chi lanes are stored as soon as they exist: word column `c` of the eight
 /// records is the 128-byte run `z[(c << nu) + 8 g ..][..8]`, built from a lo and a hi
 /// plane by two `vpermt2q`. The tail batch (fewer than eight records) uses masked stores,
-/// so dummy rows stay zero. [`pack_ab`] recomputes the row values from the committed `z`
+/// so dummy rows stay zero. Lane words that hold only padded positions (ML-DSA-65: words
+/// 12..15 of each lane) are not stored: no input sits there, `z` is zero and the gate pins
+/// them. [`pack_ab`] recomputes the row values from the committed `z`
 /// the same way (eight rows per task, the committed chi words driving the state).
 #[cfg(target_arch = "x86_64")]
 #[allow(unsafe_code)]
@@ -190,27 +235,105 @@ mod gen8 {
     use flock_field::F128;
     use rayon::prelude::*;
 
+    use agg_witness::params::{ParamSet, Set, Set44, Set65, Set87};
+
     use super::{LaneBits, SlotBuffers};
     use crate::gate::ChainGate;
     use crate::keccak::N_LANES;
     use crate::simd::keccak8::{absorb8, phi8, round8, zero8};
-    use crate::sponge::{
-        SpongeRecord, CHI_WORD_BASE, CONST_WORD, CTILDE_WORD_BASE, MU_BYTES, MU_WORD_BASE,
-        N_PERMS, RATE_BYTES, W1_BYTES,
-    };
+    use crate::sponge::{SpongeLayout, SpongeRecord, MU_BYTES, RATE_BYTES};
 
-    /// Committed w1Encode qwords (6,144 bits in `(t, j, rho)` column order).
-    pub(super) const W1_Q: usize = W1_BYTES / 8;
-    /// Committed input qwords: w1Encode then mu (words 0..51).
-    pub(super) const IN_Q: usize = W1_Q + MU_BYTES / 8;
-    /// Message qwords `mu || w1Encode` (the padding is added as constants).
-    pub(super) const MSG_Q: usize = (MU_BYTES + W1_BYTES) / 8;
     /// Rate lanes per permutation.
     pub(super) const RATE_Q: usize = RATE_BYTES / 8;
     /// Rounds per permutation.
     pub(super) const ROUNDS: usize = 24;
-    /// First chi qword of a record (`GateLayout::t_base`).
-    pub(super) const T_BASE: usize = 2 * CHI_WORD_BASE;
+
+    /// The block geometry of one parameter set's sponge gate ([`SpongeLayout`]) as
+    /// constants, so that each set's kernels are a separate monomorphised instance with no
+    /// run-time layout branch. Qword `u` of a record's committed block is bits `64 u ..`.
+    pub(crate) trait Geo: 'static {
+        /// The parameter set of the records.
+        type P: ParamSet;
+        /// The sponge layout.
+        const L: SpongeLayout;
+        /// Bit lanes (bits per w1 coefficient).
+        const LANES: usize = Self::L.lanes;
+        /// Padded positions per lane, `P_pad`.
+        const P_PAD: usize = Self::L.positions_pad;
+        /// Committed qwords per lane, padded positions included.
+        const LANE_Q: usize = Self::L.positions_pad / 64;
+        /// Qwords per lane that hold live positions (`256 k / 64`).
+        const LIVE_Q: usize = Self::L.positions() / 64;
+        /// Qwords of w1Encode.
+        const W1_Q: usize = Self::L.w1_bytes / 8;
+        /// Committed input qwords: the lanes (padded) then mu.
+        const IN_Q: usize = Self::LANES * Self::LANE_Q + MU_BYTES / 8;
+        /// Message qwords `mu || w1Encode` (the padding is added as constants).
+        const MSG_Q: usize = (MU_BYTES + Self::L.w1_bytes) / 8;
+        /// Word column of the first `c~` word.
+        const CT_WORD: usize = Self::L.ctilde_word_base;
+        /// `c~` words (two state lanes each).
+        const CT_WORDS: usize = Self::L.ctilde_bytes / 16;
+        /// Word column of the constant one.
+        const CONST_WORD: usize = Self::L.const_word;
+        /// First chi qword of a record (`GateLayout::t_base`).
+        const T_BASE: usize = 2 * Self::L.chi_word_base;
+        /// Permutations per sponge.
+        const N_PERMS: usize = Self::L.n_perms;
+        /// Committed lanes of the last round of the last permutation (the lanes `c~` reads).
+        const LAST_LANES: usize = Self::L.ctilde_bytes / 8;
+    }
+
+    /// ML-DSA-44: six lanes of 16 qwords, seven permutations, 256-bit `c~`.
+    pub(crate) struct Geo44;
+    impl Geo for Geo44 {
+        type P = Set44;
+        const L: SpongeLayout = SpongeLayout::S44;
+    }
+    /// ML-DSA-65: four lanes of 32 qwords (24 live), seven permutations, 384-bit `c~`.
+    pub(crate) struct Geo65;
+    impl Geo for Geo65 {
+        type P = Set65;
+        const L: SpongeLayout = SpongeLayout::S65;
+    }
+    /// ML-DSA-87: four lanes of 32 qwords, nine permutations, 512-bit `c~`.
+    pub(crate) struct Geo87;
+    impl Geo for Geo87 {
+        type P = Set87;
+        const L: SpongeLayout = SpongeLayout::S87;
+    }
+
+    /// `records` as records of `G`'s parameter set.
+    ///
+    /// # Panics
+    /// If `P` is another parameter set than `G::P`.
+    #[allow(unsafe_code)]
+    pub(super) fn records<P: ParamSet, G: Geo>(records: &[SpongeRecord<P>]) -> &[SpongeRecord<G::P>] {
+        assert!(
+            std::any::TypeId::of::<P>() == std::any::TypeId::of::<G::P>(),
+            "records of the kernel's parameter set"
+        );
+        // SAFETY: `P` is `G::P`, so both slices have the same element type.
+        unsafe { &*(std::ptr::from_ref(records) as *const [SpongeRecord<G::P>]) }
+    }
+
+    /// Whether committed word column `c < IN_Q / 2` is an input word: mu, or a lane word with
+    /// a live position. Always true for ML-DSA-44 and ML-DSA-87 (a constant per instance).
+    #[inline(always)]
+    pub(super) const fn input_word<G: Geo>(c: usize) -> bool {
+        2 * c >= G::LANES * G::LANE_Q || (2 * c) % G::LANE_Q < G::LIVE_Q
+    }
+
+    /// The parameter set whose 8-way kernels implement `gate`, if any.
+    pub(super) fn sponge_set(gate: &ChainGate) -> Option<Set> {
+        let layout = SpongeLayout::of_gate(gate)?;
+        let ok = match layout.set {
+            Set::S44 => is_sponge::<Geo44>(gate),
+            Set::S65 => is_sponge::<Geo65>(gate),
+            Set::S87 => is_sponge::<Geo87>(gate),
+        };
+        ok.then_some(layout.set)
+    }
 
     /// `pext` masks: committed qword `16 t + 4 rho + jq` holds stream bits `1536 rho + 384 jq
     /// + 6 b + t` (`b < 64`, `crate::sponge::w1_column`), i.e. the bits `== t (mod 6)` of the
@@ -256,44 +379,36 @@ mod gen8 {
     // SAFETY: the tasks write disjoint regions (struct docs); the buffers outlive the scope.
     unsafe impl Sync for Out {}
 
-    pub(super) fn sponge_slot(
+    pub(super) fn sponge_slot<G: Geo, const IN_Q: usize, const MSG_Q: usize>(
         gate: &ChainGate,
         nu: usize,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<G::P>],
         lane_bits: Option<LaneBits<'_>>,
     ) -> SlotBuffers {
         // SAFETY: `crate::simd::avx512` checked the features; batch `g` writes inside
         // the buffers (rows `8 g + r < n <= 2^nu`, lane bits bounded above) and disjointly
         // from the other batches (`Out`).
-        sponge_slot_with(gate, nu, records, lane_bits, |recs, g, out| unsafe {
-            batch(recs, g, out)
+        sponge_slot_with::<G, _>(gate, nu, records, lane_bits, |recs, g, out| unsafe {
+            batch::<G, IN_Q, MSG_Q>(recs, g, out)
         })
     }
 
     /// The buffers, checks and batch loop of [`sponge_slot`] around a batch kernel
     /// `kernel(recs, g, out)` that writes rows `8 g .. 8 g + recs.len()` of `z` and the
     /// records' lane-bit runs (shared by the AVX-512 and AVX2 generators).
-    pub(super) fn sponge_slot_with<K>(
+    pub(super) fn sponge_slot_with<G: Geo, K>(
         gate: &ChainGate,
         nu: usize,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<G::P>],
         lane_bits: Option<LaneBits<'_>>,
         kernel: K,
     ) -> SlotBuffers
     where
-        K: Fn(&[SpongeRecord], usize, &Out) + Sync,
+        K: Fn(&[SpongeRecord<G::P>], usize, &Out) + Sync,
     {
         let lay = gate.layout();
-        let spec = gate.spec();
         assert!(
-            lay.k_log == 19
-                && lay.t_base == T_BASE
-                && lay.const_col == 128 * CONST_WORD
-                && lay.output_base == 128 * CTILDE_WORD_BASE
-                && lay.field_base == [0, 128 * MU_WORD_BASE]
-                && spec.n_rounds == ROUNDS
-                && spec.n_perms() == N_PERMS
-                && lay.useful_bits == 64 * (T_BASE + (N_PERMS * ROUNDS - 1) * N_LANES + 4),
+            is_sponge::<G>(gate),
             "the 8-way generator implements the sponge gate only"
         );
         let n = records.len();
@@ -304,11 +419,13 @@ mod gen8 {
         let mut z: Vec<F128> = alloc_zeroed_vec(len);
         let (bits, seg_words, lane_len, d) = match lane_bits {
             Some(lb) => {
-                assert!(lb.lane_len.is_multiple_of(64) && lb.lane_len >= 1024 << lb.d);
+                assert!(lb.lane_len.is_multiple_of(64) && lb.lane_len >= G::P_PAD << lb.d);
                 if n > 0 {
                     let g = n - 1;
                     let (sigma, i) = (g >> lb.d, g & ((1 << lb.d) - 1));
-                    let end = sigma * lb.seg_words + (5 * lb.lane_len + 1024 * i) / 64 + 16;
+                    let end = sigma * lb.seg_words
+                        + ((G::LANES - 1) * lb.lane_len + G::P_PAD * i) / 64
+                        + G::LIVE_Q;
                     assert!(end <= lb.bits.len(), "lane bits too short");
                 }
                 (lb.bits.as_mut_ptr(), lb.seg_words, lb.lane_len, lb.d)
@@ -360,11 +477,11 @@ mod gen8 {
         u64::from_le_bytes(b[..8].try_into().expect("8 bytes"))
     }
 
-    /// The 96 committed w1Encode qwords of one record (`SpongeRecord::input_bits` words
-    /// `0..96`), 36 `pext` per 48-byte chunk.
+    /// The 96 committed w1Encode qwords of one ML-DSA-44 record (`SpongeRecord::input_bits`
+    /// words `0..96`), 36 `pext` per 48-byte chunk.
     #[inline]
     #[target_feature(enable = "bmi2")]
-    pub(super) fn w1_columns(w1: &[u8; W1_BYTES], out: &mut [u64]) {
+    fn w1_columns(w1: &[u8; crate::sponge::W1_BYTES], out: &mut [u64]) {
         for rho in 0..4 {
             for jq in 0..4 {
                 let base = 192 * rho + 48 * jq;
@@ -377,6 +494,39 @@ mod gen8 {
                     out[16 * t + 4 * rho + jq] = v;
                 }
             }
+        }
+    }
+
+    /// Four-bit coefficients: committed qword `LANE_Q t + p` holds bit `t` of coefficients
+    /// `64 p .. 64 p + 64` (stream order, one coefficient per lane position), gathered from
+    /// the four LE qwords `4 p .. 4 p + 4` of w1Encode (16 nibbles each) by `pext` with the
+    /// nibble mask of bit `t`. The padded qwords `LIVE_Q .. LANE_Q` of a lane are not written.
+    #[inline]
+    #[target_feature(enable = "bmi2")]
+    fn nibble_columns<G: Geo>(w1: &[u8], out: &mut [u64]) {
+        const NIB: u64 = 0x1111_1111_1111_1111;
+        debug_assert!(w1.len() == 8 * G::W1_Q && G::W1_Q == 4 * G::LIVE_Q);
+        for p in 0..G::LIVE_Q {
+            let x: [u64; 4] = core::array::from_fn(|k| le64(&w1[32 * p + 8 * k..]));
+            for t in 0..4 {
+                let m = NIB << t;
+                out[G::LANE_Q * t + p] = _pext_u64(x[0], m)
+                    | _pext_u64(x[1], m) << 16
+                    | _pext_u64(x[2], m) << 32
+                    | _pext_u64(x[3], m) << 48;
+            }
+        }
+    }
+
+    /// The committed lane qwords of one record (`out[..LANES LANE_Q]`): stride-6 masks for
+    /// ML-DSA-44, nibble masks for ML-DSA-65 and ML-DSA-87 (a constant choice per instance).
+    #[inline]
+    #[target_feature(enable = "bmi2")]
+    pub(super) fn columns<G: Geo>(w1: &[u8], out: &mut [u64]) {
+        if G::LANES == 6 {
+            w1_columns(w1.try_into().expect("ML-DSA-44 w1Encode"), out);
+        } else {
+            nibble_columns::<G>(w1, out);
         }
     }
 
@@ -440,9 +590,56 @@ mod gen8 {
         }
     }
 
+    /// One record's committed input qwords (`q`, zero on entry: the lanes then mu) and its
+    /// message qwords into plane `r` of `msg`, and its lane-major input bits when `o` asks
+    /// for them (record `8 g + r`).
+    #[inline(always)]
+    pub(super) unsafe fn load_record<G: Geo, const IN_Q: usize, const MSG_Q: usize>(
+        rec: &SpongeRecord<G::P>,
+        q: &mut [u64; IN_Q],
+        msg: &mut [[u64; 8]; MSG_Q],
+        r: usize,
+        g: usize,
+        o: &Out,
+    ) {
+        let w1: &[u8] = rec.w1_encode.as_ref();
+        let in_mu = G::LANES * G::LANE_Q;
+        // SAFETY: the callers enable BMI2 (x86-64-v3 baseline).
+        unsafe { columns::<G>(w1, &mut q[..in_mu]) };
+        for i in 0..MU_BYTES / 8 {
+            q[in_mu + i] = le64(&rec.mu[8 * i..]);
+            msg[i][r] = q[in_mu + i];
+        }
+        for i in 0..G::W1_Q {
+            msg[MU_BYTES / 8 + i][r] = le64(&w1[8 * i..]);
+        }
+        if !o.bits.is_null() {
+            let gr = 8 * g + r;
+            let (sigma, i) = (gr >> o.d, gr & ((1 << o.d) - 1));
+            for t in 0..G::LANES {
+                let dst = sigma * o.seg_words + (o.lane_len * t + G::P_PAD * i) / 64;
+                // SAFETY: bounded by the assert in `sponge_slot_with` (records are in
+                // order, the last one has the largest offset); runs of distinct records
+                // are disjoint.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        q.as_ptr().add(G::LANE_Q * t),
+                        o.bits.add(dst),
+                        G::LIVE_Q,
+                    );
+                }
+            }
+        }
+    }
+
     /// One batch of `1..=8` records (`recs`, rows `8 g ..`).
     #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,gfni,bmi2")]
-    unsafe fn batch(recs: &[SpongeRecord], g: usize, o: &Out) {
+    unsafe fn batch<G: Geo, const IN_Q: usize, const MSG_Q: usize>(
+        recs: &[SpongeRecord<G::P>],
+        g: usize,
+        o: &Out,
+    ) {
+        const { assert!(IN_Q == G::IN_Q && MSG_Q == G::MSG_Q) };
         let cnt = recs.len();
         debug_assert!((1..=8).contains(&cnt));
         // Planes: committed qwords `[u][r]`, message qwords `[q][r]`.
@@ -450,29 +647,10 @@ mod gen8 {
         let mut msg = [[0u64; 8]; MSG_Q];
         for (r, rec) in recs.iter().enumerate() {
             let mut q = [0u64; IN_Q];
-            w1_columns(&rec.w1_encode, &mut q[..W1_Q]);
-            for i in 0..MU_BYTES / 8 {
-                q[W1_Q + i] = le64(&rec.mu[8 * i..]);
-                msg[i][r] = q[W1_Q + i];
-            }
-            for i in 0..W1_Q {
-                msg[MU_BYTES / 8 + i][r] = le64(&rec.w1_encode[8 * i..]);
-            }
+            // SAFETY: BMI2 is enabled here; `o` as for the batch.
+            unsafe { load_record::<G, IN_Q, MSG_Q>(rec, &mut q, &mut msg, r, g, o) };
             for u in 0..IN_Q {
                 cols[u][r] = q[u];
-            }
-            if !o.bits.is_null() {
-                let gr = 8 * g + r;
-                let (sigma, i) = (gr >> o.d, gr & ((1 << o.d) - 1));
-                for t in 0..6 {
-                    let dst = sigma * o.seg_words + (o.lane_len * t + 1024 * i) / 64;
-                    // SAFETY: bounded by the assert in `sponge_slot` (records are in order,
-                    // the last one has the largest offset); runs of distinct records are
-                    // disjoint.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(q.as_ptr().add(16 * t), o.bits.add(dst), 16);
-                    }
-                }
             }
         }
         let row0 = 8 * g;
@@ -489,15 +667,17 @@ mod gen8 {
         let zero = _mm512_setzero_si512();
         // SAFETY (all stores below): inside the batch's rows of `z` (`Emit`).
         unsafe {
-            // Input words: w1Encode (0..47) and mu (48..51).
+            // Input words: the lanes (ML-DSA-44: w1Encode 0..47) and mu (44: 48..51).
             for c in 0..IN_Q / 2 {
-                em.word(em.z, c, ld(&cols[2 * c]), ld(&cols[2 * c + 1]));
+                if input_word::<G>(c) {
+                    em.word(em.z, c, ld(&cols[2 * c]), ld(&cols[2 * c + 1]));
+                }
             }
             // The permutations; chi qword u = T_BASE + (24 m + r) 25 + L, a word per pair.
             let mut s = zero8();
             let mut pend = zero;
-            let mut u = T_BASE;
-            for m in 0..N_PERMS {
+            let mut u = G::T_BASE;
+            for m in 0..G::N_PERMS {
                 let mut block = [zero; RATE_Q];
                 for (l, p) in block.iter_mut().enumerate() {
                     let q = RATE_Q * m + l;
@@ -505,7 +685,7 @@ mod gen8 {
                         *p = ld(&msg[q]);
                     }
                 }
-                if m == N_PERMS - 1 {
+                if m == G::N_PERMS - 1 {
                     // SHAKE256 padding: 0x1F after the message, 0x80 at the end of the rate.
                     let first = MSG_Q - RATE_Q * m;
                     block[first] = _mm512_set1_epi64(0x1f);
@@ -514,7 +694,12 @@ mod gen8 {
                 absorb8(&mut s, &block);
                 for r in 0..ROUNDS {
                     let t = round8(&mut s, r);
-                    for l in 0..if m == N_PERMS - 1 && r == ROUNDS - 1 { 4 } else { N_LANES } {
+                    let lanes = if m == G::N_PERMS - 1 && r == ROUNDS - 1 {
+                        G::LAST_LANES
+                    } else {
+                        N_LANES
+                    };
+                    for l in 0..lanes {
                         if u % 2 == 0 {
                             pend = t[l];
                         } else {
@@ -527,34 +712,46 @@ mod gen8 {
             if u % 2 != 0 {
                 em.word(em.z, u / 2, pend, zero);
             }
-            // c~ = the low 256 bits of the final state (words 52, 53).
-            for w in 0..2 {
-                em.word(em.z, CTILDE_WORD_BASE + w, s[2 * w], s[2 * w + 1]);
+            // c~ = the low `CT_WORDS` words of the final state (ML-DSA-44: words 52, 53).
+            for w in 0..G::CT_WORDS {
+                em.word(em.z, G::CT_WORD + w, s[2 * w], s[2 * w + 1]);
             }
-            // The constant column (bit 0 of word 54).
-            em.word(em.z, CONST_WORD, _mm512_set1_epi64(1), zero);
+            // The constant column (bit 0 of the word; ML-DSA-44: word 54).
+            em.word(em.z, G::CONST_WORD, _mm512_set1_epi64(1), zero);
         }
     }
 
-    /// Whether `gate` is the sponge gate the 8-way kernels implement.
-    pub(super) fn is_sponge(gate: &ChainGate) -> bool {
+    /// Whether `gate` is the sponge gate of `G` the 8-way kernels implement: the input
+    /// fields and absorptions of [`SpongeLayout`], the output words, the constant and the
+    /// chi words where `G` puts them.
+    pub(super) fn is_sponge<G: Geo>(gate: &ChainGate) -> bool {
         let lay = gate.layout();
         let spec = gate.spec();
+        let mut field_base = Vec::new();
+        let mut col = 0;
+        for f in G::L.input_fields() {
+            field_base.push(col);
+            col += f.cols;
+        }
         lay.k_log == 19
-            && lay.t_base == T_BASE
-            && lay.const_col == 128 * CONST_WORD
-            && lay.output_base == 128 * CTILDE_WORD_BASE
-            && lay.field_base == [0, 128 * MU_WORD_BASE]
+            && 2 * G::L.mu_word_base == G::LANES * G::LANE_Q
+            && lay.t_base == G::T_BASE
+            && lay.const_col == 128 * G::CONST_WORD
+            && lay.output_base == 128 * G::CT_WORD
+            && lay.field_base == field_base
+            && spec.input_fields == G::L.input_fields()
+            && spec.absorbs == crate::sponge::absorb_map_for(&G::L)
             && spec.n_rounds == ROUNDS
-            && spec.n_perms() == N_PERMS
-            && spec.n_inputs() == 64 * IN_Q
+            && spec.n_perms() == G::N_PERMS
+            && spec.n_inputs() == 64 * (G::LANES * G::LIVE_Q + MU_BYTES / 8)
             && spec
                 .outputs
                 .iter()
                 .enumerate()
                 .all(|(j, &o)| usize::from(o) == j)
-            && spec.outputs.len() == 64 * 4
-            && lay.useful_bits == 64 * (T_BASE + (N_PERMS * ROUNDS - 1) * N_LANES + 4)
+            && spec.outputs.len() == 64 * G::LAST_LANES
+            && lay.useful_bits
+                == 64 * (G::T_BASE + (G::N_PERMS * ROUNDS - 1) * N_LANES + G::LAST_LANES)
     }
 
     /// One absorption step of [`pack_ab`]: `s[dst] ^= shift(plane[src] & mask)`, every
@@ -585,7 +782,7 @@ mod gen8 {
     /// `state = phi ^ t` with the COMMITTED chi word `t`, `state[0] ^= RC & one`; input rows
     /// `a = z`, `b = one`, output rows `a` = final state, `b = one`, the constant row
     /// `a = b = const bit`. Rows past `n` stay zero.
-    pub(super) fn pack_ab(
+    pub(super) fn pack_ab<G: Geo, const IN_Q: usize>(
         gate: &ChainGate,
         nu: usize,
         n: usize,
@@ -593,15 +790,15 @@ mod gen8 {
     ) -> (Vec<F128>, Vec<F128>) {
         // SAFETY: `crate::simd::avx512` checked by the caller; rows 8 g .. 8 g + cnt of
         // `z`, `a`, `b` lie inside the buffers and belong to this task only.
-        pack_ab_with(gate, nu, n, z, |g, cnt, runs, one_masks, out| unsafe {
-            ab_batch(z, nu, g, cnt, runs, one_masks, out)
+        pack_ab_with::<G, _>(gate, nu, n, z, |g, cnt, runs, one_masks, out| unsafe {
+            ab_batch::<G, IN_Q>(z, nu, g, cnt, runs, one_masks, out)
         })
     }
 
     /// The absorption plan, buffers and task loop of [`pack_ab`] around a kernel
     /// `kernel(g, cnt, runs, one_masks, out)` that writes rows `8 g .. 8 g + cnt` of `a`
     /// and `b` (shared by the AVX-512 and AVX2 generators).
-    pub(super) fn pack_ab_with<K>(
+    pub(super) fn pack_ab_with<G: Geo, K>(
         gate: &ChainGate,
         nu: usize,
         n: usize,
@@ -612,13 +809,18 @@ mod gen8 {
         K: Fn(usize, usize, &[Vec<AbsorbRun>], &[[u64; N_LANES]], &AbOut) + Sync,
     {
         assert!(
-            is_sponge(gate),
+            is_sponge::<G>(gate),
             "the 8-way kernels implement the sponge gate only"
         );
         let lay = gate.layout();
+        // The kernel's input rows are the whole input words (`input_word`): every input
+        // column lies in one, and there are as many inputs as columns in them.
         assert!(
-            (0..64 * IN_Q).all(|i| lay.input_col(i) == i),
-            "sponge inputs occupy columns 0..6656"
+            (0..gate.spec().n_inputs()).all(|i| {
+                let col = lay.input_col(i);
+                col < 64 * G::IN_Q && input_word::<G>(col / 128)
+            }),
+            "sponge inputs occupy the input words"
         );
         let (cols, ones) = gate.absorb_lists();
         // Absorption runs per permutation, grouped by (state qword, input qword, shift).
@@ -627,7 +829,7 @@ mod gen8 {
             .map(|list| {
                 let mut out: Vec<AbsorbRun> = Vec::new();
                 for &(st, col) in list {
-                    assert!(col < 64 * IN_Q, "absorbed column inside the inputs");
+                    assert!(col < 64 * G::IN_Q, "absorbed column inside the inputs");
                     let (dst, src) = (st / 64, col / 64);
                     let shift = (st % 64) as i32 - (col % 64) as i32;
                     match out
@@ -676,7 +878,7 @@ mod gen8 {
 
     /// Rows `8 g .. 8 g + cnt` of [`pack_ab`].
     #[target_feature(enable = "avx512f,avx512bw")]
-    unsafe fn ab_batch(
+    unsafe fn ab_batch<G: Geo, const IN_Q: usize>(
         z: &[F128],
         nu: usize,
         g: usize,
@@ -716,25 +918,29 @@ mod gen8 {
                 cnt,
             )
         };
+        const { assert!(IN_Q == G::IN_Q) };
         let zero = _mm512_setzero_si512();
-        let (const_lo, _) = planes(CONST_WORD);
+        let (const_lo, _) = planes(G::CONST_WORD);
         let bit = _mm512_and_si512(const_lo, _mm512_set1_epi64(1));
         // one = all ones where the committed constant bit is 1.
         let one = _mm512_sub_epi64(zero, bit);
         let mut inp = [zero; IN_Q];
         // SAFETY (all stores below): inside the task's rows of `a`, `b` (`Emit`).
         unsafe {
+            // Input rows (no row, so a = b = 0, at the padded lane words).
             for c in 0..IN_Q / 2 {
-                let (lo, hi) = planes(c);
-                inp[2 * c] = lo;
-                inp[2 * c + 1] = hi;
-                em.word(em.a, c, lo, hi);
-                em.word(em.b, c, one, one);
+                if input_word::<G>(c) {
+                    let (lo, hi) = planes(c);
+                    inp[2 * c] = lo;
+                    inp[2 * c + 1] = hi;
+                    em.word(em.a, c, lo, hi);
+                    em.word(em.b, c, one, one);
+                }
             }
             let mut s = zero8();
             let mut pend = (zero, zero);
             let mut tw = (zero, zero);
-            let mut u = T_BASE;
+            let mut u = G::T_BASE;
             for (m, (runs_m, ones_m)) in runs.iter().zip(one_masks).enumerate() {
                 for r in runs_m {
                     let v = _mm512_and_si512(inp[r.src], _mm512_set1_epi64(r.mask as i64));
@@ -758,7 +964,7 @@ mod gen8 {
                     for y in 0..5 {
                         for x in 0..5 {
                             let l = crate::keccak::lane(x, y);
-                            if m == N_PERMS - 1 && r == ROUNDS - 1 && l >= 4 {
+                            if m == G::N_PERMS - 1 && r == ROUNDS - 1 && l >= G::LAST_LANES {
                                 continue;
                             }
                             let ra = _mm512_xor_si512(bl[crate::keccak::lane((x + 1) % 5, y)], one);
@@ -793,14 +999,14 @@ mod gen8 {
                 em.word(em.a, u / 2, pend.0, zero);
                 em.word(em.b, u / 2, pend.1, zero);
             }
-            // Output rows: a = the final state's low 256 bits, b = one.
-            for w in 0..2 {
-                em.word(em.a, CTILDE_WORD_BASE + w, s[2 * w], s[2 * w + 1]);
-                em.word(em.b, CTILDE_WORD_BASE + w, one, one);
+            // Output rows: a = the final state's low `c~` bits, b = one.
+            for w in 0..G::CT_WORDS {
+                em.word(em.a, G::CT_WORD + w, s[2 * w], s[2 * w + 1]);
+                em.word(em.b, G::CT_WORD + w, one, one);
             }
             // The constant row: a = b = the committed constant bit.
-            em.word(em.a, CONST_WORD, bit, zero);
-            em.word(em.b, CONST_WORD, bit, zero);
+            em.word(em.a, G::CONST_WORD, bit, zero);
+            em.word(em.b, G::CONST_WORD, bit, zero);
         }
     }
 }
@@ -822,13 +1028,11 @@ mod gen8x2 {
 
     use flock_field::F128;
 
-    use super::gen8::{
-        self, le64, w1_columns, AbOut, AbsorbRun, Out, IN_Q, MSG_Q, RATE_Q, ROUNDS, T_BASE, W1_Q,
-    };
+    use super::gen8::{self, input_word, load_record, AbOut, AbsorbRun, Geo, Out, RATE_Q, ROUNDS};
     use super::{LaneBits, SlotBuffers};
     use crate::gate::ChainGate;
     use crate::keccak::{lane, N_LANES, RHO_OFFSETS, ROUND_CONSTANTS};
-    use crate::sponge::{SpongeRecord, CONST_WORD, CTILDE_WORD_BASE, MU_BYTES, N_PERMS};
+    use crate::sponge::SpongeRecord;
 
     /// Eight qwords (qword `r` = record or row `8 g + r`) in two ymm registers.
     #[derive(Clone, Copy)]
@@ -1064,21 +1268,21 @@ mod gen8x2 {
     }
 
     /// The AVX2 form of `gen8::sponge_slot` (same buffers).
-    pub(super) fn sponge_slot(
+    pub(super) fn sponge_slot<G: Geo, const IN_Q: usize, const MSG_Q: usize>(
         gate: &ChainGate,
         nu: usize,
-        records: &[SpongeRecord],
+        records: &[SpongeRecord<G::P>],
         lane_bits: Option<LaneBits<'_>>,
     ) -> SlotBuffers {
         // SAFETY: `crate::simd::avx2` checked the features; batch `g` writes inside the
         // buffers and disjointly from the other batches (`Out`).
-        gen8::sponge_slot_with(gate, nu, records, lane_bits, |recs, g, out| unsafe {
-            batch(recs, g, out)
+        gen8::sponge_slot_with::<G, _>(gate, nu, records, lane_bits, |recs, g, out| unsafe {
+            batch::<G, IN_Q, MSG_Q>(recs, g, out)
         })
     }
 
     /// The AVX2 form of `gen8::pack_ab` (same buffers).
-    pub(super) fn pack_ab(
+    pub(super) fn pack_ab<G: Geo, const IN_Q: usize>(
         gate: &ChainGate,
         nu: usize,
         n: usize,
@@ -1086,42 +1290,29 @@ mod gen8x2 {
     ) -> (Vec<F128>, Vec<F128>) {
         // SAFETY: `crate::simd::avx2` checked by the caller; rows 8 g .. 8 g + cnt of `z`,
         // `a`, `b` lie inside the buffers and belong to this task only.
-        gen8::pack_ab_with(gate, nu, n, z, |g, cnt, runs, one_masks, out| unsafe {
-            ab_batch(z, nu, g, cnt, runs, one_masks, out)
+        gen8::pack_ab_with::<G, _>(gate, nu, n, z, |g, cnt, runs, one_masks, out| unsafe {
+            ab_batch::<G, IN_Q>(z, nu, g, cnt, runs, one_masks, out)
         })
     }
 
     /// One batch of `1..=8` records (`recs`, rows `8 g ..`), as `gen8::batch`.
     #[target_feature(enable = "avx2,bmi2")]
-    unsafe fn batch(recs: &[SpongeRecord], g: usize, o: &Out) {
+    unsafe fn batch<G: Geo, const IN_Q: usize, const MSG_Q: usize>(
+        recs: &[SpongeRecord<G::P>],
+        g: usize,
+        o: &Out,
+    ) {
+        const { assert!(IN_Q == G::IN_Q && MSG_Q == G::MSG_Q) };
         let cnt = recs.len();
         debug_assert!((1..=8).contains(&cnt));
         let mut cols = [[0u64; 8]; IN_Q];
         let mut msg = [[0u64; 8]; MSG_Q];
         for (r, rec) in recs.iter().enumerate() {
             let mut q = [0u64; IN_Q];
-            w1_columns(&rec.w1_encode, &mut q[..W1_Q]);
-            for i in 0..MU_BYTES / 8 {
-                q[W1_Q + i] = le64(&rec.mu[8 * i..]);
-                msg[i][r] = q[W1_Q + i];
-            }
-            for i in 0..W1_Q {
-                msg[MU_BYTES / 8 + i][r] = le64(&rec.w1_encode[8 * i..]);
-            }
+            // SAFETY: BMI2 is enabled here; `o` as for the batch.
+            unsafe { load_record::<G, IN_Q, MSG_Q>(rec, &mut q, &mut msg, r, g, o) };
             for u in 0..IN_Q {
                 cols[u][r] = q[u];
-            }
-            if !o.bits.is_null() {
-                let gr = 8 * g + r;
-                let (sigma, i) = (gr >> o.d, gr & ((1 << o.d) - 1));
-                for t in 0..6 {
-                    let dst = sigma * o.seg_words + (o.lane_len * t + 1024 * i) / 64;
-                    // SAFETY: bounded by the assert in `gen8::sponge_slot_with`; runs of
-                    // distinct records are disjoint.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(q.as_ptr().add(16 * t), o.bits.add(dst), 16);
-                    }
-                }
             }
         }
         let row0 = 8 * g;
@@ -1139,19 +1330,21 @@ mod gen8x2 {
         // SAFETY (all stores below): inside the batch's rows of `z` (`Emit`).
         unsafe {
             for c in 0..IN_Q / 2 {
-                em.word(em.z, c, V::load(&cols[2 * c]), V::load(&cols[2 * c + 1]));
+                if input_word::<G>(c) {
+                    em.word(em.z, c, V::load(&cols[2 * c]), V::load(&cols[2 * c + 1]));
+                }
             }
             let mut s: State = [zero; N_LANES];
             let mut pend = zero;
-            let mut u = T_BASE;
-            for m in 0..N_PERMS {
+            let mut u = G::T_BASE;
+            for m in 0..G::N_PERMS {
                 for l in 0..RATE_Q {
                     let q = RATE_Q * m + l;
                     if q < MSG_Q {
                         s[l] = s[l].xor(V::load(&msg[q]));
                     }
                 }
-                if m == N_PERMS - 1 {
+                if m == G::N_PERMS - 1 {
                     // SHAKE256 padding: 0x1F after the message, 0x80 at the end of the rate.
                     let first = MSG_Q - RATE_Q * m;
                     s[first] = s[first].xor(V::splat(0x1f));
@@ -1159,7 +1352,12 @@ mod gen8x2 {
                 }
                 for r in 0..ROUNDS {
                     let t = round(&mut s, r);
-                    for l in 0..if m == N_PERMS - 1 && r == ROUNDS - 1 { 4 } else { N_LANES } {
+                    let lanes = if m == G::N_PERMS - 1 && r == ROUNDS - 1 {
+                        G::LAST_LANES
+                    } else {
+                        N_LANES
+                    };
+                    for l in 0..lanes {
                         if u % 2 == 0 {
                             pend = t[l];
                         } else {
@@ -1172,16 +1370,16 @@ mod gen8x2 {
             if u % 2 != 0 {
                 em.word(em.z, u / 2, pend, zero);
             }
-            for w in 0..2 {
-                em.word(em.z, CTILDE_WORD_BASE + w, s[2 * w], s[2 * w + 1]);
+            for w in 0..G::CT_WORDS {
+                em.word(em.z, G::CT_WORD + w, s[2 * w], s[2 * w + 1]);
             }
-            em.word(em.z, CONST_WORD, V::splat(1), zero);
+            em.word(em.z, G::CONST_WORD, V::splat(1), zero);
         }
     }
 
     /// Rows `8 g .. 8 g + cnt` of [`pack_ab`], as `gen8::ab_batch`.
     #[target_feature(enable = "avx2")]
-    unsafe fn ab_batch(
+    unsafe fn ab_batch<G: Geo, const IN_Q: usize>(
         z: &[F128],
         nu: usize,
         g: usize,
@@ -1204,25 +1402,28 @@ mod gen8x2 {
                 cnt,
             )
         };
+        const { assert!(IN_Q == G::IN_Q) };
         let zero = V::zero();
         // SAFETY (all loads and stores below): inside the task's rows (`Emit`, `planes`).
         unsafe {
-            let (const_lo, _) = planes(zr, nu, CONST_WORD);
+            let (const_lo, _) = planes(zr, nu, G::CONST_WORD);
             let bit = const_lo.and(V::splat(1));
             // one = all ones where the committed constant bit is 1.
             let one = bit.neg();
             let mut inp = [zero; IN_Q];
             for c in 0..IN_Q / 2 {
-                let (lo, hi) = planes(zr, nu, c);
-                inp[2 * c] = lo;
-                inp[2 * c + 1] = hi;
-                em.word(em.a, c, lo, hi);
-                em.word(em.b, c, one, one);
+                if input_word::<G>(c) {
+                    let (lo, hi) = planes(zr, nu, c);
+                    inp[2 * c] = lo;
+                    inp[2 * c + 1] = hi;
+                    em.word(em.a, c, lo, hi);
+                    em.word(em.b, c, one, one);
+                }
             }
             let mut s: State = [zero; N_LANES];
             let mut pend = (zero, zero);
             let mut tw = (zero, zero);
-            let mut u = T_BASE;
+            let mut u = G::T_BASE;
             for (m, (runs_m, ones_m)) in runs.iter().zip(one_masks).enumerate() {
                 for r in runs_m {
                     let v = inp[r.src].and(V::splat(r.mask));
@@ -1243,7 +1444,7 @@ mod gen8x2 {
                     for y in 0..5 {
                         for x in 0..5 {
                             let l = lane(x, y);
-                            if m == N_PERMS - 1 && r == ROUNDS - 1 && l >= 4 {
+                            if m == G::N_PERMS - 1 && r == ROUNDS - 1 && l >= G::LAST_LANES {
                                 continue;
                             }
                             let ra = bl[lane((x + 1) % 5, y)].xor(one);
@@ -1272,12 +1473,12 @@ mod gen8x2 {
                 em.word(em.a, u / 2, pend.0, zero);
                 em.word(em.b, u / 2, pend.1, zero);
             }
-            for w in 0..2 {
-                em.word(em.a, CTILDE_WORD_BASE + w, s[2 * w], s[2 * w + 1]);
-                em.word(em.b, CTILDE_WORD_BASE + w, one, one);
+            for w in 0..G::CT_WORDS {
+                em.word(em.a, G::CT_WORD + w, s[2 * w], s[2 * w + 1]);
+                em.word(em.b, G::CT_WORD + w, one, one);
             }
-            em.word(em.a, CONST_WORD, bit, zero);
-            em.word(em.b, CONST_WORD, bit, zero);
+            em.word(em.a, G::CONST_WORD, bit, zero);
+            em.word(em.b, G::CONST_WORD, bit, zero);
         }
     }
 }
@@ -1580,52 +1781,121 @@ mod tests {
     use flock_core::lincheck::pack_z_lincheck;
     use flock_core::test_rng::Rng;
 
-    /// The delta-swap transpose equals the bit-by-bit definition.
-    /// The AVX2 generator's `z` and row values equal the portable oracle's on honest records
-    /// (counts that are not multiples of eight), and its row values equal the AVX-512
-    /// kernel's on a tampered `z` where the CPU has AVX-512.
+    /// The 8-way generators of every parameter set equal the portable oracle (`pack_slot`
+    /// over `instance_rows` of `input_bits`) on honest records, counts that are not
+    /// multiples of eight: `z`, the lane-major input bits and the row values of the AVX2
+    /// kernels, and of the AVX-512 kernels where the CPU has them; on a tampered `z` (padded
+    /// lane words included) the row values of both kernels equal the per-row
+    /// `ChainGate::apply_ab`.
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn avx2_generator_matches_reference() {
+    fn eight_way_generators_match_reference() {
+        use gen8::{Geo, Geo44, Geo65, Geo87};
         use std::arch::is_x86_feature_detected as has;
         if !(has!("avx2") && has!("bmi2")) {
-            eprintln!("no AVX2 on this CPU: AVX2 generator not exercised");
+            eprintln!("no AVX2 on this CPU: 8-way generators not exercised");
             return;
         }
-        let gate = crate::sponge::sponge_gate();
-        let mut rng = Rng::new(0xA2);
-        for n in [1usize, 5, 13, 64, 300] {
-            let recs: Vec<SpongeRecord> = (0..n)
-                .map(|_| SpongeRecord {
-                    mu: core::array::from_fn(|_| rng.next_u32() as u8),
-                    w1_encode: core::array::from_fn(|_| rng.next_u32() as u8),
-                })
-                .collect();
-            let nu = n.next_power_of_two().max(8).trailing_zeros() as usize;
-            let inputs: Vec<Vec<u64>> = recs.iter().map(SpongeRecord::input_bits).collect();
-            let want = pack_slot(&gate, nu, n, |j, z, a, b| {
-                gate.instance_rows(&inputs[j], z, a, b);
-            });
-            let got = gen8x2::sponge_slot(&gate, nu, &recs, None);
-            assert!(got.z.as_slice() == want.z.as_slice(), "z, n = {n}");
-            let (a, b) = gen8x2::pack_ab(&gate, nu, n, &got.z);
-            let (want_a, want_b) = want.ab.as_ref().expect("packed a, b");
-            assert!(&a == want_a && &b == want_b, "a, b, n = {n}");
-            if crate::simd::detected() {
-                let mut z = std::sync::Arc::unwrap_or_clone(got.z);
-                for _ in 0..64 {
-                    let i = rng.next_u64() as usize % z.len();
-                    z[i].lo ^= rng.next_u64();
+        fn per_row(gate: &ChainGate, nu: usize, n: usize, z: &[F128]) -> (Vec<F128>, Vec<F128>) {
+            let packed = pack_slot(gate, nu, n, |j, zz, a, b| {
+                for (u, w) in zz.iter_mut().enumerate() {
+                    let word = z[((u / 2) << nu) + j];
+                    *w = if u % 2 == 0 { word.lo } else { word.hi };
                 }
-                let ab = gen8x2::pack_ab(&gate, nu, n, &z);
-                assert!(
-                    ab == gen8::pack_ab(&gate, nu, n, &z),
-                    "tampered a, b, n = {n}"
-                );
+                gate.apply_ab(zz, a, b);
+            });
+            packed.ab.expect("pack_slot builds a, b")
+        }
+        fn check<G: Geo, const IN_Q: usize, const MSG_Q: usize>(seed: u64) {
+            let layout = G::L;
+            let gate = crate::sponge::sponge_gate_for(layout.set);
+            assert_eq!(gen8::sponge_set(&gate), Some(layout.set));
+            let mut rng = Rng::new(seed);
+            for n in [1usize, 5, 13, 64, 300] {
+                let recs: Vec<SpongeRecord<G::P>> = (0..n)
+                    .map(|_| {
+                        let mut w1 = <G::P as ParamSet>::zero_w1_encode();
+                        w1.as_mut().iter_mut().for_each(|b| *b = rng.next_u32() as u8);
+                        SpongeRecord {
+                            mu: core::array::from_fn(|_| rng.next_u32() as u8),
+                            w1_encode: w1,
+                        }
+                    })
+                    .collect();
+                let nu = n.next_power_of_two().max(8).trailing_zeros() as usize;
+                let inputs: Vec<Vec<u64>> = recs.iter().map(SpongeRecord::input_bits).collect();
+                let want = pack_slot(&gate, nu, n, |j, z, a, b| {
+                    gate.instance_rows(&inputs[j], z, a, b);
+                });
+                let (want_a, want_b) = want.ab.as_ref().expect("packed a, b");
+                // Lane-major bits of a span of two segments of 2^d records, as
+                // `TiedPart::honest_parts` lays them out (padded positions zero).
+                let d = n.next_power_of_two().trailing_zeros().saturating_sub(1);
+                let lane_len = G::P_PAD << d;
+                let seg_words = G::LANES * lane_len / 64;
+                let mut want_bits = vec![0u64; 2 * seg_words];
+                for (g, inp) in inputs.iter().enumerate() {
+                    let (sigma, i) = (g >> d, g & ((1 << d) - 1));
+                    for t in 0..G::LANES {
+                        let src = G::LIVE_Q * t;
+                        let dst = sigma * seg_words + (lane_len * t + G::P_PAD * i) / 64;
+                        want_bits[dst..dst + G::LIVE_Q].copy_from_slice(&inp[src..src + G::LIVE_Q]);
+                    }
+                }
+                type Kernel<G> = fn(&ChainGate, usize, &[SpongeRecord<<G as Geo>::P>], Option<LaneBits<'_>>) -> SlotBuffers;
+                type AbKernel = fn(&ChainGate, usize, usize, &[F128]) -> (Vec<F128>, Vec<F128>);
+                let mut kernels: Vec<(&str, Kernel<G>, AbKernel)> = vec![(
+                    "avx2",
+                    gen8x2::sponge_slot::<G, IN_Q, MSG_Q>,
+                    gen8x2::pack_ab::<G, IN_Q>,
+                )];
+                if crate::simd::detected() {
+                    kernels.push((
+                        "avx512",
+                        gen8::sponge_slot::<G, IN_Q, MSG_Q>,
+                        gen8::pack_ab::<G, IN_Q>,
+                    ));
+                }
+                let tag = |k: &str, what: &str| format!("{} {k} {what}, n = {n}", layout.set.name());
+                let mut z_any = None;
+                for &(k, slot, ab) in &kernels {
+                    let mut bits = vec![0u64; 2 * seg_words];
+                    let lb = LaneBits {
+                        bits: &mut bits,
+                        seg_words,
+                        lane_len,
+                        d,
+                    };
+                    let got = slot(&gate, nu, &recs, Some(lb));
+                    assert!(got.z.as_slice() == want.z.as_slice(), "{}", tag(k, "z"));
+                    assert!(bits == want_bits, "{}", tag(k, "lane bits"));
+                    let (a, b) = ab(&gate, nu, n, &got.z);
+                    assert!(&a == want_a && &b == want_b, "{}", tag(k, "a, b"));
+                    z_any = Some(got.z);
+                }
+                // Tampered z: random bits anywhere in the used columns, the padded lane
+                // words and the constant included.
+                let mut z = std::sync::Arc::unwrap_or_clone(z_any.expect("a kernel ran"));
+                let used = gate.layout().useful_bits.div_ceil(128) << nu;
+                for _ in 0..64 {
+                    let i = rng.next_u64() as usize % used;
+                    z[i].lo ^= rng.next_u64();
+                    z[i].hi ^= rng.next_u64();
+                }
+                let pad = (G::LIVE_Q / 2) << nu;
+                z[pad] = F128::new(rng.next_u64(), 1);
+                let want_ab = per_row(&gate, nu, n, &z);
+                for &(k, _, ab) in &kernels {
+                    assert!(ab(&gate, nu, n, &z) == want_ab, "{}", tag(k, "tampered a, b"));
+                }
             }
         }
+        check::<Geo44, { Geo44::IN_Q }, { Geo44::MSG_Q }>(0xA2);
+        check::<Geo65, { Geo65::IN_Q }, { Geo65::MSG_Q }>(0xA3);
+        check::<Geo87, { Geo87::IN_Q }, { Geo87::MSG_Q }>(0xA4);
     }
 
+    /// The delta-swap transpose equals the bit-by-bit definition.
     #[test]
     fn transpose_matches_bitwise() {
         let mut rng = Rng::new(17);

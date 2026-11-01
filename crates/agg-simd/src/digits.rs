@@ -737,44 +737,41 @@ pub fn accumulate_six_lanes_strip(
 }
 
 /// Pack 4 Boolean `i8` columns of equal length into one nibble per byte
-/// (`four_bits[i] = sum_t b_t[i] << t`), eight cells per `u64` step (a byte in `{0, 1}` shifted
-/// by at most 3 stays in its byte). Returns `None` if any entry is outside `{0, 1}`.
+/// (`four_bits[i] = sum_t b_t[i] << t`), in parallel chunks of [`pack_four_bits_into`].
+/// Returns `None` if any entry is outside `{0, 1}`.
 pub fn pack_four_bits(lanes: &[&[i8]; 4]) -> Option<Vec<u8>> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const NOT_BITS: u64 = 0xFEFE_FEFE_FEFE_FEFE;
+    const CHUNK: usize = 1 << 16;
     let len = lanes[0].len();
     assert!(lanes.iter().all(|l| l.len() == len));
     let ok = AtomicBool::new(true);
-    let out = crate::buf::fill_vec_par_chunks(len, 1 << 16, |chunk_idx, dst: &mut [u8]| {
-        let start = chunk_idx * (1 << 16);
-        let word = |t: usize, at: usize| {
-            let bytes: [u8; 8] = std::array::from_fn(|b| lanes[t][at + b] as u8);
-            u64::from_le_bytes(bytes)
-        };
-        let full = dst.len() / 8 * 8;
-        let mut bad = 0_u64;
-        for (k, out) in dst[..full].chunks_exact_mut(8).enumerate() {
-            let at = start + 8 * k;
-            let (b0, b1, b2, b3) = (word(0, at), word(1, at), word(2, at), word(3, at));
-            bad |= (b0 | b1 | b2 | b3) & NOT_BITS;
-            out.copy_from_slice(&(b0 | (b1 << 1) | (b2 << 2) | (b3 << 3)).to_le_bytes());
-        }
-        for (offset, slot) in dst.iter_mut().enumerate().skip(full) {
-            let idx = start + offset;
-            let mut byte = 0u8;
-            for (t, lane) in lanes.iter().enumerate() {
-                let b = lane[idx] as u8;
-                bad |= u64::from(b & 0xFE);
-                byte |= (b & 1) << t;
-            }
-            *slot = byte;
-        }
-        if bad != 0 {
+    let out = crate::buf::fill_vec_par_chunks(len, CHUNK, |chunk_idx, dst: &mut [u8]| {
+        let start = chunk_idx * CHUNK;
+        let src: [&[i8]; 4] = std::array::from_fn(|t| &lanes[t][start..start + dst.len()]);
+        if !pack_four_bits_into(src, dst) {
             ok.store(false, Ordering::Relaxed);
         }
     });
     ok.into_inner().then_some(out)
+}
+
+/// `dst[i] = sum_t (b_t[i] & 1) << t` for four `i8` lanes of `dst.len()` cells; returns
+/// whether every entry is in `{0, 1}` (an `i8` of -1 reads as `0xFF` and is caught). The
+/// lanes are sliced to `dst.len()` first, so the loop has no bounds checks and
+/// auto-vectorises (32 cells per AVX2 operation on the x86-64-v3 baseline, the same code on
+/// every `AGG_ISA` tier).
+#[inline]
+pub fn pack_four_bits_into(lanes: [&[i8]; 4], dst: &mut [u8]) -> bool {
+    let n = dst.len();
+    let (l0, l1, l2, l3) = (&lanes[0][..n], &lanes[1][..n], &lanes[2][..n], &lanes[3][..n]);
+    let mut bad = 0u8;
+    for i in 0..n {
+        let (b0, b1, b2, b3) = (l0[i] as u8, l1[i] as u8, l2[i] as u8, l3[i] as u8);
+        bad |= (b0 | b1 | b2 | b3) & 0xFE;
+        dst[i] = (b0 & 1) | (b1 & 1) << 1 | (b2 & 1) << 2 | (b3 & 1) << 3;
+    }
+    bad == 0
 }
 
 /// Lookup table mapping a nibble `b & 0xF` to four 16-bit lane increments at bit offsets
@@ -914,6 +911,11 @@ mod tests {
             let mut bad = lanes;
             bad[2] = &tampered;
             assert!(pack_four_bits(&bad).is_none());
+            // The slice kernel flags the non-bit and keeps its low bit.
+            let mut dst = vec![0u8; len];
+            assert!(!pack_four_bits_into(bad, &mut dst));
+            assert_eq!(dst[bad_at], packed[bad_at] & !4);
+            assert!(pack_four_bits_into(lanes, &mut dst) && dst == packed);
         }
         // Two rows per column: rows (c mod 7, (c + 3) mod 7).
         let k = 2;
