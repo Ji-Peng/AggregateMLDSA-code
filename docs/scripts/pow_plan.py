@@ -77,14 +77,16 @@ P_PAD_BITS = 10  # log2 of the padded positions P_pad of one record on the bridg
 # vectors count the instances of crates/agg-piop/src/stage{1,2,3}.rs gamma_count (65 and 87:
 # one Booleanity check per bit and lane, k ring instances, l + k links and Booleanity
 # checks). The bridge constants of 65/87 (four chain lanes, 256 records per level-1 block,
-# P_pad = 2^11) set the tied-part rounds of mode A.
+# P_pad = 2^11) set the tied-part rounds of mode A; the sponge's public region (mu, c~, the
+# constant) spans 8 words for 44 and 65 and 16 words for 87 (c~ of 64 bytes), so the tie
+# site's public claim has 3 or 4 word coordinates beyond the nu_s rows.
 SETS = {
     "44": {"d_pos": 10, "main_stacks": (2,), "carry_slots": 8, "d1_shift": 9, "dk_rows": 7,
-           "degrees": (4, 5, 3), "gammas": None, "lane_vars": 3, "block_log": 9, "p_pad_bits": 10},
+           "degrees": (4, 5, 3), "gammas": None, "lane_vars": 3, "block_log": 9, "p_pad_bits": 10, "public_vars": 3},
     "65": {"d_pos": 8, "main_stacks": (8, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 7,
-           "degrees": (3, 5, 3), "gammas": (37, 18, 105), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11},
+           "degrees": (3, 5, 3), "gammas": (37, 18, 105), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 3},
     "87": {"d_pos": 8, "main_stacks": (8, 4, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 8,
-           "degrees": (3, 5, 3), "gammas": (45, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11},
+           "degrees": (3, 5, 3), "gammas": (45, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 4},
 }
 SET = SETS["44"]
 PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
@@ -213,11 +215,12 @@ def tie_terms(d: int, span_log: int, nu_s: int, profile: str) -> dict:
     """Work sites of one tied part, version 5 (docs/parity-chain.md, docs/soundness.md).
 
     The sponge commitment is bound only to its Johnson list of L_s codewords when the tie
-    challenger draws, so every numerator carries L_s: the public claim L_s (nu_s + 3), eq_Y
+    challenger draws, so every numerator carries L_s: the public claim L_s (nu_s + c) with c
+    the public region's word coordinates (3, or 4 for ML-DSA-87), eq_Y
     L_s (log2 m_3 + span_log), each degree-2 round 2 L_s.
     """
     ls = list_size(L0_RATE[profile])
-    tie = ls * (nu_s + 3)
+    tie = ls * (nu_s + SET["public_vars"])
     eq = ls * (OUT_VARS + span_log)
     rnd = 2 * ls
     rounds = chain_rounds(d, span_log)
@@ -381,7 +384,7 @@ def print_summary(args) -> None:
             print(f"       {label:<31} 2^{math.log2(e):.2f}, g = {grind_bits(e.numerator, e.denominator)}")
     print()
     print("== Sites of one tied part, version 5 (GF(2^128), docs/parity-chain.md 8), full parts n = 2^d S ==")
-    print("profile  d   S  nu_s  list  tie=L(nu_s+3)  g   eq=L(12+s)  g_eq  round=2L  g_rd  rounds  nonce bytes  work(sum 2^g)")
+    print("profile  d   S  nu_s  list  tie=L(nu_s+c)   g   eq=L(12+s)  g_eq  round=2L  g_rd  rounds  nonce bytes  work(sum 2^g)")
     for prof in ("fast", "slim", "slim8"):
         for d in range(3, 14):
             for S in (1, 2, 4):
@@ -464,7 +467,7 @@ def print_details(d_sig: int) -> None:
     ties = tie_parts(geo, "slim", True, 1 << d_sig)
     idx = 0
     for p, t in enumerate(ties):
-        print(f"{idx:<4} tie          {p:>2}  0   {t['nu_s'] + 3:<6}  {t['tie']}/2^128  {t['g']:>2}  {t['w']:>2}")
+        print(f"{idx:<4} tie          {p:>2}  0   {t['nu_s'] + SET['public_vars']:<6}  {t['tie']}/2^128  {t['g']:>2}  {t['w']:>2}")
         print(f"{idx + 1:<4} chain.eq     {p:>2}  0   {OUT_VARS + t['span_log']:<6}  {t['eq']}/2^128  {t['g_eq']:>2}  {width(t['g_eq']):>2}")
         idx += 2
         for k in range(t["rounds"]):

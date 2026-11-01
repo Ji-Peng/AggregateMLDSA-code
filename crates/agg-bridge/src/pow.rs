@@ -82,27 +82,28 @@ pub struct TieGeometry {
     pub d: usize,
     /// `ceil(log2 S)` for a span of `S` segments (0 for one segment).
     pub span_log: usize,
-    /// `log2` of the level-1 blocks per lane (`max(0, d - 9)`).
+    /// `log2` of the level-1 blocks per lane (`max(0, d - log2 B_1)`: `B_1 = 2^19 / P_pad`
+    /// records per level-1 block, 512 for ML-DSA-44 and 256 for ML-DSA-65 and ML-DSA-87).
     pub blocks_log: usize,
     /// Row capacity `log2` of the sponge instance.
     pub nu_s: usize,
+    /// Word coordinates of the sponge's public region (`log2` of its width in words): 3 for
+    /// ML-DSA-44 and ML-DSA-65, 4 for ML-DSA-87 (mu, a 64-byte `c~` and the constant).
+    pub public_vars: usize,
 }
 
 /// `log2 m_3`: the output-row coordinates of `eq_Y`.
 const OUT_VARS: usize = agg_witness::bridge::M3.trailing_zeros() as usize;
-/// `log2` of the record positions of a production level-1 block (`2^19 / 1024`).
-const BLOCK_RECORDS_LOG2: usize = 9;
-/// `log2 J_1` (the in-block position bits of a full level-1 block).
-const ZETA_VARS: usize = agg_witness::bridge::J1.trailing_zeros() as usize;
-/// Lane coordinates of the chain (`ceil(log2 6)`: lanes 6, 7 carry weight zero).
-const LANE_VARS: usize = 3;
-
+/// `log2` of the chain's input bits per record: `P_pad` positions times the padded lanes
+/// `2^lb`, `1024 x 8` for ML-DSA-44 (six lanes, two of weight zero) and `2048 x 4` for
+/// ML-DSA-65 and ML-DSA-87, the same `2^13` for every parameter set.
+const RECORD_CHAIN_VARS: usize = 13;
 /// The assigned numerator of the tie site (over `2^128`) with list size `list` for the
-/// sponge commitment: `L (nu_s + 3)`, the public claim's free coordinates (tied-part proof
-/// version 5).
+/// sponge commitment: `L (nu_s + c)`, the public claim's free coordinates (`c` =
+/// [`TieGeometry::public_vars`]; tied-part proof version 5).
 #[must_use]
 pub fn tie_numerator(list: u64, geo: &TieGeometry) -> u64 {
-    list * (geo.nu_s as u64 + 3)
+    list * (geo.nu_s + geo.public_vars) as u64
 }
 
 /// The tie site's difficulty: [`grind_bits_f128`] of [`tie_numerator`].
@@ -125,13 +126,14 @@ pub const fn round_numerator(list: u64) -> u64 {
     2 * list
 }
 
-/// Rounds of the parity chain of a production part: `min(10 + d, 19)` in-block positions,
-/// `max(0, d - 9)` block coordinates, 3 lane coordinates and `span_log` segment coordinates,
-/// that is `13 + d + span_log`.
+/// Rounds of the parity chain of a production part: the in-block positions (`log2 P_pad + d`
+/// up to `log2 J_1 = 19`), the `blocks_log` block coordinates above them, the lane
+/// coordinates and `span_log` segment coordinates. The in-block positions and the block
+/// coordinates together are the `log2 P_pad + d` position bits of the part's lane, so for
+/// every parameter set the count is `13 + d + span_log`.
 #[must_use]
 pub fn chain_rounds(geo: &TieGeometry) -> usize {
-    let zeta = (10 + geo.d.min(BLOCK_RECORDS_LOG2)).min(ZETA_VARS);
-    zeta + geo.blocks_log + LANE_VARS + geo.span_log
+    RECORD_CHAIN_VARS + geo.d + geo.span_log
 }
 
 /// The work of one tied part (tied-part proof version 5): the tie site, the `eq_Y` site and
@@ -204,6 +206,7 @@ mod tests {
             span_log: 2,
             blocks_log: 4,
             nu_s: 15,
+            public_vars: 3,
         };
         assert_eq!(tie_numerator(1, &four), 18);
         assert_eq!(
@@ -230,6 +233,7 @@ mod tests {
             span_log: 0,
             blocks_log: 4,
             nu_s: 13,
+            public_vars: 3,
         };
         assert_eq!(chain_rounds(&one), 26);
         assert_eq!(
@@ -260,6 +264,7 @@ mod tests {
             span_log: 0,
             blocks_log: 0,
             nu_s: 4,
+            public_vars: 3,
         };
         assert_eq!(chain_rounds(&small), 16);
         assert_eq!(tie_numerator(50, &small), 350);

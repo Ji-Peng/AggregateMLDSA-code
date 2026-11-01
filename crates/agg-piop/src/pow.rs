@@ -363,6 +363,7 @@ mod tests {
             span_log,
             blocks_log: d.saturating_sub(9),
             nu_s: nu_s(n_log),
+            public_vars: 3,
         };
         let list = list_size(rate_log);
         if segments == 1 || span {

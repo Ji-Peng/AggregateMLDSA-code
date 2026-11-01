@@ -1086,8 +1086,34 @@ impl BridgeGroupTables {
         let proj = ProjectionTables::build(manifest, &v_lo, &v_hi, psi)?;
         let shape = Shape::production(manifest.set());
         if manifest.set() != Set::S44 {
-            // Four bit lanes: the general parity path over the padded bridge inputs.
+            // Four bit lanes over the padded bridge inputs: the packed path, or the general
+            // one for inputs that are not bits.
             let inputs = main.bridge_lanes(manifest);
+            let lookup = manifest.lookup_shape();
+            let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
+            if let Ok(four) = <&[Vec<i8>; 4]>::try_from(inputs.as_slice()) {
+                let views: [&[i8]; 4] = std::array::from_fn(|t| four[t].as_slice());
+                let direct = parity::compute_direct_four(&shape, &views, matrices, LOOKUP_SHIFT, [slots(1), slots(2)])
+                    .map_err(SourceTableError::Bridge)?;
+                if let Some(direct) = direct {
+                    let mut tables = Self {
+                        parity1: Some(direct.y1),
+                        level1: direct.level1_carries,
+                        parities: direct.y2,
+                        level2: direct.level2_carries,
+                        level3: direct.level3_carries,
+                        y: direct.y,
+                        proj,
+                        psi: psi.to_vec(),
+                        zeros: vec![0; manifest.group(GroupRole::Level3).logical_cells()],
+                        multiplicity: Vec::new(),
+                        digits: Vec::new(),
+                    };
+                    tables.recount(manifest, main)?;
+                    tables.validate(manifest)?;
+                    return Ok(tables);
+                }
+            }
             let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
             let witness = parity::compute(&shape, &inputs, matrices).map_err(SourceTableError::Bridge)?;
             return Self::from_witness(manifest, main, witness, Vec::new(), proj, psi);
@@ -1556,6 +1582,26 @@ mod lane_tests {
         };
         let psi = crate::projection::test_psi_for(P::SET, 9);
         let bridge = BridgeGroupTables::build(&manifest, &main, &matrices, &psi).unwrap();
+        // The packed four-lane path (taken: the lookup stacks have four slots or more) builds
+        // the general path's tables.
+        let views: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
+        let lookup = manifest.lookup_shape();
+        let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
+        let four: [&[i8]; 4] = std::array::from_fn(|t| views[t]);
+        assert!(parity::compute_direct_four(&bridge_shape, &four, &matrices, LOOKUP_SHIFT, [slots(1), slots(2)])
+            .unwrap()
+            .is_some());
+        let general = BridgeGroupTables::from_witness(
+            &manifest,
+            &main,
+            parity::compute(&bridge_shape, &views, &matrices).unwrap(),
+            Vec::new(),
+            bridge.proj.clone(),
+            &psi,
+        )
+        .unwrap();
+        assert_eq!(bridge, general);
+        assert_eq!(bridge.parity1_cached(), general.parity1_cached());
         let counts: Vec<usize> = [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
             .iter()
             .map(|&role| bridge.group(&manifest, role).len())

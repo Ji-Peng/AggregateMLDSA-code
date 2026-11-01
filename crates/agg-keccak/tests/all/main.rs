@@ -2,4 +2,5 @@
 
 mod proofs;
 mod tied;
+mod tied_sets;
 mod witness;
