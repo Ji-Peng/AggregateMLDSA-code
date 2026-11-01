@@ -506,3 +506,14 @@ the portable scalar loop. `block_stats_x86.rs::round_term_avx2` / `round_term_pc
 the same body over `simd::ghash2` / `ghash1` (two-lane and one-lane GF(2^128) multiply,
 lane-wise deferred reduction), selected by `simd::ghash_width()`; the folded parts and the
 message are field-identical. Test: `pcs::block_stats_x86::tests::narrow_round_term_kernels_match_portable`.
+
+## 14. Prover-only: eight-lane AVX2 leaf hashing of interleaved Ligerito rows
+
+`merkle.rs::GroupLeafHasher::hash_interleaved` returned to one `hash_leaf` per row whenever
+the sixteen-lane AVX-512 BLAKE3 path was unavailable, so its two-batch `absorb8` AVX2 branch
+never ran. On the AVX2 tier every 16-lane Ligerito row was hashed alone: the fused leaf
+hashing inside the level-1 encode (`ntt/additive_ntt_f128/blocked.rs`, 2^21 leaves of
+256 B at 32K) and the leaves of the level 1-5 Merkle trees (`merkle_tree`). The early
+return now requires that neither path is available. The chaining values are unchanged
+(`merkle::tests::hash_interleaved_matches_hash_leaf`, every SIMD mask). At 32K the AVX2
+tier's level 1-5 Merkle time was 57 ms against 17 on AVX-512F (M0 trace).

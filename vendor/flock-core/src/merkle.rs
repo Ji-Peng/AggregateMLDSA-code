@@ -186,9 +186,12 @@ impl GroupLeafHasher {
     }
 
     /// Hash native interleaved rows without rearranging lane groups in memory.
+    ///
+    /// Batches of sixteen rows run the sixteen-lane AVX-512 compression or two
+    /// eight-lane AVX2 ones; without either, every row is one `hash_leaf`.
     pub fn hash_interleaved(&self, rows: &[F128], out: &mut [Hash]) {
         assert_eq!(rows.len(), out.len() * self.lanes);
-        if !blake3_groups::x16_available() {
+        if !blake3_groups::x16_available() && !blake3_groups::x8_available() {
             for (row, hash) in rows.chunks_exact(self.lanes).zip(out) {
                 // SAFETY: F128 is sixteen initialized bytes with the canonical leaf layout.
                 let bytes = unsafe { std::slice::from_raw_parts(row.as_ptr().cast::<u8>(), row.len() * 16) };
@@ -695,6 +698,37 @@ mod tests {
                         }
                         let mut out = vec![[0u8; 32]; positions];
                         hasher.finish(&state, &mut out);
+                        out
+                    });
+                    assert!(got == want, "lanes={lanes} positions={positions} mask={mask:#x}");
+                }
+            }
+        }
+    }
+
+    /// Hashing interleaved rows gives `hash_leaf` of each row under every SIMD
+    /// mask (sixteen-row batches on the AVX-512 and AVX2 paths, partial batches).
+    #[test]
+    fn hash_interleaved_matches_hash_leaf() {
+        let mut rng = Rng::new(0x1A7E);
+        for &lanes in &[4usize, 13, 16, 34] {
+            for &positions in &[16usize, 37, 64] {
+                let rows = rng.f128_vec(lanes * positions);
+                let want: Vec<Hash> = rows
+                    .chunks(lanes)
+                    .map(|row| {
+                        let bytes: Vec<u8> = row
+                            .iter()
+                            .flat_map(|w| [w.lo.to_le_bytes(), w.hi.to_le_bytes()].concat())
+                            .collect();
+                        hash_leaf(&bytes, HashKind::Blake3)
+                    })
+                    .collect();
+                let hasher = GroupLeafHasher::new(lanes, HashKind::Blake3).expect("one chunk");
+                for mask in test_masks() {
+                    let got = with_mask(mask, || {
+                        let mut out = vec![[0u8; 32]; positions];
+                        hasher.hash_interleaved(&rows, &mut out);
                         out
                     });
                     assert!(got == want, "lanes={lanes} positions={positions} mask={mask:#x}");
