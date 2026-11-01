@@ -8,9 +8,13 @@
 mod common;
 
 use agg_mldsa_simd::dispatch::{Backend, Engine};
-use agg_mldsa_simd::params::{BETA, GAMMA1, Q};
+use agg_mldsa_simd::params::Q;
+#[cfg(cref)]
+use agg_mldsa_simd::params::{BETA, GAMMA1};
 use agg_mldsa_simd::poly::{self, Block, Poly32, RejState};
-use agg_mldsa_simd::{ExpandedA, Sink, XofJob};
+use agg_mldsa_simd::{Sink, XofJob};
+#[cfg(cref)]
+use agg_mldsa_simd::ExpandedA;
 use std::hint::black_box;
 #[allow(dead_code)]
 #[path = "../src/keccak/avx2.rs"]
@@ -217,7 +221,9 @@ unsafe fn bench_vbmi_step<const COMPRESS_STORE: bool>(block: &Block, st: &mut Re
 }
 
 /// Counts down a fixed number of blocks per job.
+#[cfg(cref)]
 struct CountSink([u8; 16]);
+#[cfg(cref)]
 impl Sink for CountSink {
     fn block(&mut self, job: usize, _: &Block, _: usize) -> bool {
         self.0[job] -= 1;
