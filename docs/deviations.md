@@ -939,6 +939,9 @@ Code (`agg_piop::{transcript, prover, verifier, wire}`, `agg_cli::{mode_a, wire}
 K25 removes the join's absorption of the proof items; the prover schedule, the share items
 and the record digest `rec` above stay.
 
+Superseded by K25: the parts' stages are plain stages of the segment of `sd`, before `X`, and no
+decoder runs (docs/soundness.md 12). The paragraph below records K22's original analysis.
+
 Soundness: docs/soundness.md Section 12 (intro, 12.1, 12.2, the proof of Lemma 12.3, 12.3,
 12.4, Corollary 12.5, 12.7 item 9): the tied parts' stages move from the segment of `sd` to
 the segment of `X`, after the stage-3 rounds; the checkpoint test at `X` becomes `R_PIOP and
