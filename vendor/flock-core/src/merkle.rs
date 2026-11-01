@@ -5,10 +5,10 @@ pub use flock_merkle::hash_count;
 pub use flock_merkle::{
     Blake3MerkleHash, Hash, HashKind, MerkleHash, Sha256MerkleHash, cap_depth, cap_layer,
     hash_leaf, hash_leaves_serial, hash_pair, hash_parents_serial, merkle_proof,
-    merkle_proof_capped, merkle_root, merkle_root_with, merkle_tree,
-    merkle_tree_from_prehashed_level, merkle_tree_sequential, merkle_tree_sequential_with,
-    merkle_tree_with, verify_merkle_proof, verify_merkle_proof_capped,
-    verify_merkle_proof_capped_with, verify_merkle_proof_with,
+    merkle_proof_capped, merkle_root, merkle_root_with, merkle_tree_from_prehashed_level,
+    merkle_tree_sequential, merkle_tree_sequential_with, merkle_tree_with,
+    verify_merkle_proof, verify_merkle_proof_capped, verify_merkle_proof_capped_with,
+    verify_merkle_proof_with,
 };
 
 use core::{mem::size_of, slice::from_raw_parts};
@@ -20,6 +20,37 @@ use crate::ntt::additive_ntt_f128::LANES_PER_GROUP;
 
 /// Leaves per rayon task (as upstream's batched leaf path).
 const LEAF_GROUP: usize = 1024;
+
+/// The full Merkle tree of `data` split into `num_leaves` equal leaves under `kind`;
+/// identical to `flock_merkle::merkle_tree`.
+///
+/// BLAKE3 leaves of sixteen `F128` (the Ligerito ladder's 256-byte rows) are hashed
+/// sixteen at a time by [`GroupLeafHasher`]; every other leaf shape keeps the upstream
+/// path, which hashes leaves one at a time unless their length is a whole number of
+/// 64-byte blocks.
+pub fn merkle_tree(data: &[u8], num_leaves: usize, kind: HashKind) -> Vec<Hash> {
+    const LANES: usize = 16;
+    const LEAF: usize = LANES * size_of::<F128>();
+    if kind == HashKind::Blake3
+        && num_leaves > 0
+        && data.len() == num_leaves * LEAF
+        && data.as_ptr() as usize % size_of::<F128>() == 0
+    {
+        let leaf = GroupLeafHasher::new(LANES, kind).expect("sixteen lanes of the row layout");
+        let rows: &[F128] =
+            // SAFETY: the length is a multiple of `F128` and the pointer is aligned above;
+            // every byte is initialized by the caller.
+            unsafe { from_raw_parts(data.as_ptr().cast::<F128>(), data.len() / size_of::<F128>()) };
+        // `vec!` of zero arrays takes the calloc path: lazy zero pages, no fill pass.
+        let mut tree: Vec<Hash> = vec![[0u8; 32]; 2 * num_leaves - 1];
+        tree[..num_leaves]
+            .par_chunks_mut(LEAF_GROUP)
+            .zip(rows.par_chunks(LEAF_GROUP * LANES))
+            .for_each(|(out, leaves)| leaf.hash_interleaved(leaves, out));
+        return merkle_tree_from_prehashed_level(tree, num_leaves, kind, 0);
+    }
+    flock_merkle::merkle_tree(data, num_leaves, kind)
+}
 
 /// The Merkle tree whose leaf `p` is row `p` (the `lanes` words of position `p`, `16
 /// lanes` bytes) of a lane-blocked codeword (`AdditiveNttF128::encode_lane_blocked`:
