@@ -426,7 +426,7 @@ pub fn prove_stage_drawn<'a>(
     for (g, group) in spec.groups.iter().enumerate() {
         let build = std::time::Instant::now();
         let mut lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
-        let instances: Vec<GroupInstance> = group
+        let mut instances: Vec<GroupInstance> = group
             .instances
             .iter()
             .map(|instance| GroupInstance {
@@ -492,6 +492,24 @@ pub fn prove_stage_drawn<'a>(
                 owner.push(g);
                 build_times[g] = build.elapsed().as_secs_f64();
                 continue;
+            }
+        }
+        // The sets with polynomial lanes: the lanes read only linearly fold into one field
+        // lane, so that the generic group carries the remaining lanes only.
+        if manifest.has_lanes() {
+            if let Some(point) = eq_point.as_deref().filter(|p| p.len() == rounds && rounds > 0) {
+                match FoldedGroup::new(lanes, instances, point, rounds, spec.degree) {
+                    Ok(folded) => {
+                        groups.push(StageGroup::Folded(folded?));
+                        owner.push(g);
+                        build_times[g] = build.elapsed().as_secs_f64();
+                        continue;
+                    }
+                    Err((back, back_instances)) => {
+                        lanes = back;
+                        instances = back_instances;
+                    }
+                }
             }
         }
         let (instances, linear) =
@@ -647,6 +665,8 @@ enum StageGroup<'a> {
     LaneSplit(LaneSplitGroup<'a>),
     /// A weight kept as two factors ([`RankOneGroup`]).
     RankOne(RankOneGroup<'a>),
+    /// An equality group with its linear-only lanes folded into one lane ([`FoldedGroup`]).
+    Folded(FoldedGroup<'a>),
 }
 
 impl StageGroup<'_> {
@@ -661,6 +681,7 @@ impl StageGroup<'_> {
             Self::Split(g) => g.set_arena(arena),
             Self::LaneSplit(g) => g.set_arena(arena),
             Self::RankOne(g) => g.set_arena(arena),
+            Self::Folded(g) => g.group.set_arena(arena),
         }
     }
 
@@ -672,6 +693,7 @@ impl StageGroup<'_> {
             Self::Split(g) => g.round_message(round),
             Self::LaneSplit(g) => g.round_message(round),
             Self::RankOne(g) => g.round_message(round),
+            Self::Folded(g) => g.group.round_message(round),
         }
     }
 
@@ -683,6 +705,7 @@ impl StageGroup<'_> {
             Self::Split(g) => g.bind(round, challenge),
             Self::LaneSplit(g) => g.bind(round, challenge),
             Self::RankOne(g) => g.bind(round, challenge),
+            Self::Folded(g) => g.bind(round, challenge),
         }
     }
 
@@ -694,6 +717,7 @@ impl StageGroup<'_> {
             Self::Split(g) => g.claim(),
             Self::LaneSplit(g) => g.claim(),
             Self::RankOne(g) => g.claim(),
+            Self::Folded(g) => g.group.claim(),
         }
     }
 
@@ -705,7 +729,7 @@ impl StageGroup<'_> {
             // The verifier checks them independently through `level1_weight_at`, and the
             // equivalence test in `split_weight` pins the messages, claim and terminals
             // against the materialized generic group.
-            Self::Split(_) | Self::LaneSplit(_) | Self::RankOne(_) => true,
+            Self::Split(_) | Self::LaneSplit(_) | Self::RankOne(_) | Self::Folded(_) => true,
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
         }
@@ -719,6 +743,7 @@ impl StageGroup<'_> {
             Self::Split(g) => Some(g.terminal_values()),
             Self::LaneSplit(g) => Some(g.terminal_values()),
             Self::RankOne(g) => Some(g.terminal_values()),
+            Self::Folded(g) => Some(g.terminal_values()),
         }
     }
 
@@ -739,7 +764,8 @@ impl StageGroup<'_> {
             | Self::Extra(LinearGroup::Row(_))
             | Self::Split(_)
             | Self::LaneSplit(_)
-            | Self::RankOne(_) => {}
+            | Self::RankOne(_)
+            | Self::Folded(_) => {}
         }
     }
 }
@@ -964,6 +990,214 @@ fn weight_group<'a>(
     }
     WeightIntGroup::new(&sources, *weight, &coefficients, *constant, instance.gamma, rounds)
         .map(WeightGroup::Row)
+}
+
+/// A lane of a [`FoldedGroup`]'s spec group.
+enum FoldedLane<'a> {
+    /// Lane `index` of the generic group.
+    Kept(usize),
+    /// A linear-only lane, evaluated at the bound point at the end.
+    Dropped(Source<'a>),
+}
+
+/// An equality group on the full main domain (the sets with polynomial lanes) whose lanes
+/// read only by single-lane products or unweighted affine sums are folded into one field lane
+/// `g = sum_l c_l f_l` with their batched coefficients: the generic group carries the other
+/// lanes and `g` (one product term), and the folded lanes' values come from their multilinear
+/// evaluation at the bound point (prover only). The round polynomial is the same polynomial,
+/// so the messages equal the unfolded group's.
+struct FoldedGroup<'a> {
+    group: Group<'a>,
+    lanes: Vec<FoldedLane<'a>>,
+    challenges: Vec<E>,
+}
+
+/// Cells per task of the pass that materializes `g`.
+const FOLD_CHUNK: usize = 1 << 12;
+
+/// The term with every lane index `l` replaced by `index[l]`.
+fn remap_term(term: Term, index: &[usize]) -> Term {
+    match term {
+        Term::Product(read) => Term::Product(read.into_iter().map(|l| index[l]).collect()),
+        Term::Bool(l) => Term::Bool(index[l]),
+        Term::Link(l) => Term::Link(index[l]),
+        Term::Leaf(l, poly) => Term::Leaf(index[l], poly),
+        Term::RangeW1(lanes) => Term::RangeW1(lanes.map(|l| index[l])),
+        Term::Affine { weight, lanes, constant } => Term::Affine {
+            weight: weight.map(|l| index[l]),
+            lanes: lanes.into_iter().map(|(l, c)| (index[l], c)).collect(),
+            constant,
+        },
+        Term::Monomials(monomials) => Term::Monomials(
+            monomials.into_iter().map(|(c, m)| (c, m.into_iter().map(|l| index[l]).collect())).collect(),
+        ),
+    }
+}
+
+impl<'a> FoldedGroup<'a> {
+    /// The folded group, or the inputs back when fewer than two lanes are linear-only.
+    #[allow(clippy::type_complexity)]
+    fn new(
+        lanes: Vec<Lane<'a>>,
+        instances: Vec<GroupInstance>,
+        point: &[E],
+        rounds: usize,
+        degree: usize,
+    ) -> Result<Result<Self, StageError>, (Vec<Lane<'a>>, Vec<GroupInstance>)> {
+        let rows = 1_usize << rounds;
+        let mut candidate: Vec<bool> = lanes
+            .iter()
+            .map(|lane| {
+                let narrow = |v: &i64| i32::try_from(*v).is_ok();
+                match lane {
+                    Lane::Source(source @ Source::Ints(_)) => source.len() == rows,
+                    Lane::Source(source @ Source::Bytes { map, .. }) => source.len() == rows && map.iter().all(narrow),
+                    _ => false,
+                }
+            })
+            .collect();
+        for instance in &instances {
+            for term in &instance.terms {
+                match term {
+                    Term::Product(read) if read.len() == 1 => {}
+                    Term::Affine { weight: None, .. } => {}
+                    other => {
+                        for l in other.lanes() {
+                            candidate[l] = false;
+                        }
+                    }
+                }
+            }
+        }
+        if candidate.iter().filter(|&&c| c).count() < 2 {
+            return Err((lanes, instances));
+        }
+        // The batched coefficient of every folded lane; the folded parts leave the terms.
+        let mut coefficients = vec![E::zero(); lanes.len()];
+        let mut instances: Vec<GroupInstance> = instances
+            .into_iter()
+            .map(|instance| {
+                let gamma = instance.gamma;
+                let terms = instance
+                    .terms
+                    .into_iter()
+                    .filter_map(|term| match term {
+                        Term::Product(read) if read.len() == 1 && candidate[read[0]] => {
+                            coefficients[read[0]] += gamma;
+                            None
+                        }
+                        Term::Affine { weight: None, lanes: affine, constant } => {
+                            let kept: Vec<(usize, i64)> = affine
+                                .into_iter()
+                                .filter(|&(l, c)| {
+                                    if candidate[l] {
+                                        coefficients[l] += gamma.mul_i64(c);
+                                    }
+                                    !candidate[l]
+                                })
+                                .collect();
+                            (!kept.is_empty() || constant != 0).then_some(Term::Affine {
+                                weight: None,
+                                lanes: kept,
+                                constant,
+                            })
+                        }
+                        other => Some(other),
+                    })
+                    .collect();
+                GroupInstance { gamma, terms }
+            })
+            .collect();
+        let folded: Vec<(Source<'a>, [u64; 2])> = lanes
+            .iter()
+            .zip(&candidate)
+            .zip(&coefficients)
+            .filter(|((_, &c), _)| c)
+            .map(|((lane, _), coefficient)| match lane {
+                Lane::Source(source) => {
+                    (*source, [coefficient.c0().to_canonical_u64(), coefficient.c1().to_canonical_u64()])
+                }
+                Lane::Folded(_) => unreachable!("candidates are sources"),
+            })
+            .collect();
+        // g(x) per coordinate: canonical coefficients (< 2^64) times cells (|f| <= 2^31) are
+        // below 2^95 in magnitude; fewer than 2^30 lanes sum inside an i128, reduced once.
+        let mut g = vec![E::zero(); rows];
+        g.par_chunks_mut(FOLD_CHUNK).enumerate().for_each(|(chunk, out)| {
+            let first = chunk * FOLD_CHUNK;
+            let n = out.len();
+            let mut acc = vec![[0_i128; 2]; n];
+            let mut cells = vec![0_i64; n];
+            for (source, [c0, c1]) in &folded {
+                match source {
+                    Source::Ints(column) => {
+                        for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
+                            *x = i64::from(v);
+                        }
+                    }
+                    Source::Bytes { cells: column, map } => {
+                        for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
+                            *x = map[v as u8 as usize];
+                        }
+                    }
+                    _ => unreachable!("integer lanes only"),
+                }
+                let (c0, c1) = (i128::from(*c0), i128::from(*c1));
+                for (a, &x) in acc.iter_mut().zip(&cells) {
+                    let x = i128::from(x);
+                    a[0] += c0 * x;
+                    a[1] += c1 * x;
+                }
+            }
+            for (slot, [a0, a1]) in out.iter_mut().zip(acc) {
+                *slot = E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1));
+            }
+        });
+        let mut index = vec![usize::MAX; lanes.len()];
+        let mut kept_lanes = Vec::new();
+        let mut map = Vec::with_capacity(lanes.len());
+        for (l, lane) in lanes.into_iter().enumerate() {
+            if candidate[l] {
+                let Lane::Source(source) = lane else { unreachable!("candidates are sources") };
+                map.push(FoldedLane::Dropped(source));
+            } else {
+                index[l] = kept_lanes.len();
+                map.push(FoldedLane::Kept(kept_lanes.len()));
+                kept_lanes.push(lane);
+            }
+        }
+        for instance in &mut instances {
+            instance.terms = std::mem::take(&mut instance.terms).into_iter().map(|t| remap_term(t, &index)).collect();
+        }
+        let g_lane = kept_lanes.len();
+        kept_lanes.push(Lane::Folded(g));
+        instances.push(GroupInstance { gamma: E::one(), terms: vec![Term::Product(vec![g_lane])] });
+        Ok(Group::new(kept_lanes, instances, Some(point), rounds, degree)
+            .map_err(StageError::Internal)
+            .map(|group| Self { group, lanes: map, challenges: Vec::new() }))
+    }
+
+    fn bind(&mut self, round: usize, challenge: E) {
+        self.challenges.push(challenge);
+        self.group.bind(round, challenge);
+    }
+
+    /// The values of the spec group's lanes at the bound point.
+    fn terminal_values(&self) -> Vec<E> {
+        let kept = self.group.terminal_values();
+        let (first, second) = agg_simd::eval::split_eq_tables(&self.challenges);
+        self.lanes
+            .par_iter()
+            .map(|lane| match lane {
+                FoldedLane::Kept(i) => kept[*i],
+                FoldedLane::Dropped(Source::Ints(cells)) => agg_simd::eval::column_at(cells, &first, &second),
+                FoldedLane::Dropped(Source::Bytes { cells, map }) => {
+                    agg_simd::eval::column_at(&agg_simd::eval::Mapped { cells, map }, &first, &second)
+                }
+                FoldedLane::Dropped(_) => unreachable!("integer lanes only"),
+            })
+            .collect()
+    }
 }
 
 /// Split the linear terms on integer lanes off an equality group on the full domain: a
