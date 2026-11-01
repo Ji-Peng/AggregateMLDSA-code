@@ -313,13 +313,6 @@ impl TiedCommitted {
         &self.commitment
     }
 
-    /// The committed slot buffer when the row values `a`, `b` are not built yet, for a
-    /// worker that builds them beside the PIOP ([`TiedPart::prove_with_prepared_rows`]).
-    #[must_use]
-    pub fn row_witness(&self) -> Option<std::sync::Arc<Vec<F128>>> {
-        self.sponge.ab.is_none().then(|| std::sync::Arc::clone(&self.sponge.z))
-    }
-
     /// The published `c~_i`.
     #[must_use]
     pub fn c_tilde(&self) -> &[[u8; CTILDE_BYTES]] {
@@ -1034,20 +1027,6 @@ impl<'g> TiedPart<'g> {
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
     ) -> Result<KeccakProof, KeccakError> {
-        self.prove_with_prepared_rows(committed, _sd, matrices, ys, fs, None)
-    }
-
-    /// [`Self::prove_with_final_vectors`] with the row values `a`, `b` built beside the
-    /// PIOP, sent by the worker started in `KeccakSide::prepare_fork`.
-    pub fn prove_with_prepared_rows(
-        &self,
-        committed: TiedCommitted,
-        _sd: [u8; 32],
-        matrices: &BridgeMatrices,
-        ys: Vec<Vec<u8>>,
-        fs: &[u8; 32],
-        rows: Option<crate::witness::RowReceiver>,
-    ) -> Result<KeccakProof, KeccakError> {
         assert_eq!(committed.n, self.n, "committed part of another shape");
         assert_eq!(ys.len(), self.segments, "one final vector per segment");
         let m3 = self.segment().output_bits();
@@ -1110,17 +1089,10 @@ impl<'g> TiedPart<'g> {
         let sponge_start = std::time::Instant::now();
         let mut sch = self.sponge_challenger(fs, &public, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
-        // The row values a = A z, b = B z are consumed by the zerocheck. Wait for the
-        // fork's builder here, or build them on the caller's pool if none was started.
+        // The row values a = A z, b = B z are consumed by the zerocheck; build them here
+        // when the 8-way generator left them out.
         let mut sponge = sponge;
-        if sponge.ab.is_none() {
-            // A dropped sender (no builder was started) falls back to the local build.
-            if let Some(ab) = rows.and_then(|rows| rows.recv().ok()) {
-                sponge.ab = Some(ab);
-            } else {
-                sponge.ensure_ab(self.gate, nu_s, self.n);
-            }
-        }
+        sponge.ensure_ab(self.gate, nu_s, self.n);
         let (sponge_proof, cap) = self.sponge.prove(
             vec![sponge],
             &gate,

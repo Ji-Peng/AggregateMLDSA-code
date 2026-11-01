@@ -18,9 +18,6 @@ use crate::sponge::SpongeRecord;
 /// Instances whose rows are generated together before scattering.
 const BATCH: usize = 1024;
 
-/// Receiver for rows built from a committed sponge witness.
-pub type RowReceiver = std::sync::mpsc::Receiver<(Vec<F128>, Vec<F128>)>;
-
 /// One slot's prover buffers: the committed `z` and, when already built, the row values
 /// `a = A z`, `b = B z` (all BatchMajor). The 8-way sponge generator leaves `ab` empty;
 /// [`Self::ensure_ab`] fills it from `z` where the proof needs it.
