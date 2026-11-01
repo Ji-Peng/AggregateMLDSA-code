@@ -462,3 +462,113 @@ fn fused_pass_short_first_tables_match_direct_sums() {
         }
     }
 }
+
+/// The evaluation over term shapes whose slots or components are skipped or shortcut: slots
+/// without terms, a single linear term (weighted, multiplied without a reduction), several
+/// linear terms only, products only, squares, and lanes read only linearly, at the worst-case
+/// operands and with item counts that leave a scalar tail.
+#[test]
+fn eval_kernel_term_shapes_match_direct_sums() {
+    use agg_simd::{buf::KPlanes, fused::{eval_items, Terms}};
+    let mut seed = 20261101;
+    let worst = |s: &mut u64| {
+        if random(s) % 2 == 0 { K::new(F::from_u64(P - 1), F::from_u64(P - 1)) }
+        else { K::new(F::from_u64(random(s)), F::from_u64(random(s))) }
+    };
+    // (linear, products, slots)
+    type Shape = (&'static [(usize, usize)], &'static [(usize, usize, usize)], usize);
+    let shapes: [Shape; 6] = [
+        (&[(0, 4)], &[], 5),
+        (&[(0, 1), (1, 1), (2, 1)], &[], 3),
+        (&[], &[(0, 3, 0), (1, 2, 0), (2, 3, 1), (4, 7, 2), (5, 6, 2), (6, 7, 3)], 4),
+        (&[(0, 0), (1, 1), (2, 3), (3, 3), (4, 3), (5, 3), (6, 3), (7, 3)], &[(8, 9, 0), (9, 10, 2)], 5),
+        (&[(0, 0), (1, 2)], &[(1, 1, 2), (0, 2, 4), (2, 2, 4)], 6),
+        (&[(3, 1)], &[(0, 1, 0)], 2),
+    ];
+    let width = 11_usize;
+    for (linear, products, slots) in shapes {
+        for &items in &[1_usize, 4, 9, 64, 515] {
+            let rows = 2 * items;
+            let tables: Vec<Vec<K>> = (0..width).map(|_| (0..rows).map(|_| worst(&mut seed)).collect()).collect();
+            let planes: Vec<KPlanes> = tables.iter().map(|t| KPlanes::from_fn(rows, |i| t[i])).collect();
+            let lanes: Vec<(&[u64], &[u64])> = planes.iter().map(|p| p.planes()).collect();
+            let terms = Terms { linear, products, slots };
+            let weights: Vec<K> = (0..items).map(|_| worst(&mut seed)).collect();
+            let wp = KPlanes::from_fn(items, |i| weights[i]);
+            for weighted in [false, true] {
+                for full in [false, true] {
+                    let mut got = vec![[K::from_u64(0); 3]; slots];
+                    eval_items(&lanes, terms, weighted.then(|| wp.planes()), 0, items, full, &mut got);
+                    let mut expected = vec![[K::from_u64(0); 3]; slots];
+                    for k in 0..items {
+                        let w = if weighted { weights[k] } else { K::from_u64(1) };
+                        let a = |l: usize| tables[l][2 * k];
+                        let b = |l: usize| tables[l][2 * k + 1];
+                        for &(l, s) in linear {
+                            expected[s][0] += w * a(l);
+                            if full {
+                                expected[s][1] += w * b(l);
+                            }
+                        }
+                        for &(i, j, s) in products {
+                            expected[s][0] += w * a(i) * a(j);
+                            expected[s][2] += w * (b(i) - a(i)) * (b(j) - a(j));
+                            if full {
+                                expected[s][1] += w * b(i) * b(j);
+                            }
+                        }
+                    }
+                    assert_eq!(got, expected, "linear={linear:?} products={products:?} items={items} weighted={weighted} full={full}");
+                }
+            }
+        }
+    }
+}
+
+/// The combined pattern fill with weight rows that are zero (the linear group pads its
+/// coefficients to four lanes), and the fraction-tree bottoms at the extreme leaves, where
+/// the shifted `e1` multipliers reach the ends of their range.
+#[test]
+fn padded_fills_and_extreme_bottoms_match_direct_sums() {
+    use agg_simd::{buf::KPlanes, lookup::bottoms, pattern::{fill_combined, Columns}};
+    let mut seed = 77;
+    let rk = |s: &mut u64| K::new(F::from_u64(random(s)), F::from_u64(random(s)));
+    let rows = 4 * 515;
+    let cols: Vec<Vec<i32>> = (0..2).map(|_| (0..rows).map(|_| (random(&mut seed) % (1 << 17)) as i32 - (1 << 16)).collect()).collect();
+    let columns = Columns { lanes: vec![&cols[0], &cols[1]] };
+    for zero_rows in [[false, false, true, true], [true, false, true, true], [false, true, false, true]] {
+        let weights: Vec<[K; 4]> = (0..4).map(|l| std::array::from_fn(|_| if zero_rows[l] { K::from_u64(0) } else { rk(&mut seed) })).collect();
+        let mut out = KPlanes::from_fn(rows / 4, |_| K::from_u64(0));
+        let address = { let (a, b) = out.planes_mut(); (a.as_mut_ptr() as usize, b.as_mut_ptr() as usize) };
+        unsafe { fill_combined(&columns, &weights, address, 0, rows / 4) };
+        for row in 0..rows / 4 {
+            let mut e = K::from_u64(0);
+            for a in 0..4 {
+                for l in 0..2 {
+                    e += weights[l][a] * K::from_i64(cols[l][4 * row + a] as i64);
+                }
+            }
+            assert_eq!(out.get(row), e, "combined row {row} zero rows {zero_rows:?}");
+        }
+    }
+    let n = 4096 + 9;
+    for pattern in 0..4 {
+        let leaves: Vec<i32> = (0..4 * n)
+            .map(|i| match pattern {
+                0 => 32768,
+                1 => -32768,
+                2 => if (i / n) % 2 == 0 { 32768 } else { -32768 },
+                _ => if random(&mut seed) % 2 == 0 { 32768 } else { -32768 },
+            })
+            .collect();
+        let powers: Vec<[K; 4]> = (0..2).map(|_| { let x = rk(&mut seed); let x2 = x * x; [x, x2, x2 * x, x2 * x2] }).collect();
+        for (layer, powers) in bottoms(&leaves, 0, &powers).iter().zip(&powers) {
+            let x = powers[0];
+            for i in 0..n {
+                let q: Vec<K> = (0..4).map(|j| x - K::from_i64(i64::from(leaves[i + j * n]))).collect();
+                assert_eq!(layer.q.get(i), q[0] * q[1] * q[2] * q[3], "q pattern {pattern} i={i}");
+                assert_eq!(layer.p.get(i), (q[0] + q[2]) * q[1] * q[3] + (q[1] + q[3]) * q[0] * q[2], "p pattern {pattern} i={i}");
+            }
+        }
+    }
+}

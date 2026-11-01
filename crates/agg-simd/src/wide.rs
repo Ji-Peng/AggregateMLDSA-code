@@ -50,6 +50,9 @@ pub trait Simd: Copy + Send + Sync + 'static {
     /// `a + b` with a carry out of 64 bits folded back as `+ 59`. The caller guarantees that
     /// a carrying sum wraps to below `2^64 - 59`.
     unsafe fn add_fold(a: Self::V, b: Self::V) -> Self::V;
+    /// [`Self::add_fold`] for a second operand below 2^63 (any first operand: a carrying sum
+    /// wraps to below the second operand).
+    unsafe fn add_fold_small(a: Self::V, small: Self::V) -> Self::V;
     /// The canonical residue of a signed `i64` lane (`k + p` when `k < 0`).
     unsafe fn residue(k: Self::V) -> Self::V;
     /// Rows `2k` and `2k + 1` of `2 LANES` consecutive rows (`x0` the first `LANES`).
@@ -171,6 +174,12 @@ impl Simd for W8 {
     }
     #[inline]
     #[target_feature(enable = "avx512f")]
+    unsafe fn add_fold_small(a: __m512i, small: __m512i) -> __m512i {
+        // SAFETY: AVX-512F is enabled.
+        unsafe { Self::add_fold(a, small) }
+    }
+    #[inline]
+    #[target_feature(enable = "avx512f")]
     unsafe fn residue(k: __m512i) -> __m512i {
         let negative = _mm512_cmplt_epi64_mask(k, _mm512_setzero_si512());
         _mm512_mask_add_epi64(k, negative, k, _mm512_set1_epi64(crate::P as i64))
@@ -236,6 +245,13 @@ impl Simd for W8 {
 const SIGN: i64 = i64::MIN;
 
 impl W4 {
+    /// `b` in the lanes where bit 63 of `m` is set, else `a` (the blend reads the sign bit
+    /// only, so `m` needs no full-lane mask).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn select(a: __m256i, b: __m256i, m: __m256i) -> __m256i {
+        _mm256_castpd_si256(_mm256_blendv_pd(_mm256_castsi256_pd(a), _mm256_castsi256_pd(b), _mm256_castsi256_pd(m)))
+    }
     /// All-ones lanes where `a < b` as unsigned integers.
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -318,20 +334,25 @@ impl Simd for W4 {
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn canon(x: __m256i) -> __m256i {
-        // x >= p exactly when x > p - 1; then x - p = x + 59 (mod 2^64).
-        let s = _mm256_set1_epi64x(SIGN);
-        let big = _mm256_cmpgt_epi64(_mm256_xor_si256(x, s), _mm256_set1_epi64x(((crate::P - 1) as i64) ^ SIGN));
-        _mm256_add_epi64(x, _mm256_and_si256(big, _mm256_set1_epi64x(59)))
+        // x >= p exactly when t = x + 59 carries out of 64 bits, and then t = x - p. Adding 59
+        // carries only from x >= 2^63 to t < 59, so bit 63 of x AND NOT t is the carry.
+        let t = _mm256_add_epi64(x, _mm256_set1_epi64x(59));
+        // SAFETY: AVX2 is enabled.
+        unsafe { Self::select(x, t, _mm256_andnot_si256(t, x)) }
     }
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn add_mod(a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: AVX2 is enabled.
-        unsafe {
-            // a + b - p = a - (p - b): exact when a >= p - b, else add p back.
-            let nb = _mm256_sub_epi64(_mm256_set1_epi64x(crate::P as i64), b);
-            let t = _mm256_sub_epi64(a, nb);
-            let borrow = Self::ltu(a, nb);
+        {
+            // a + b - p = a - (p - b): exact when a >= p - b, else add p back. With the sign
+            // bits flipped (x ^ 2^63 = x + 2^63 mod 2^64) the unsigned order is the signed one:
+            // (p - b) ^ 2^63 = (p ^ 2^63) - b, and the difference of two flipped values is
+            // the difference of the values.
+            let a_flipped = _mm256_xor_si256(a, _mm256_set1_epi64x(SIGN));
+            let nb_flipped = _mm256_sub_epi64(_mm256_set1_epi64x((crate::P as i64) ^ SIGN), b);
+            let t = _mm256_sub_epi64(a_flipped, nb_flipped);
+            let borrow = _mm256_cmpgt_epi64(nb_flipped, a_flipped);
             _mm256_add_epi64(t, _mm256_and_si256(borrow, _mm256_set1_epi64x(crate::P as i64)))
         }
     }
@@ -353,6 +374,16 @@ impl Simd for W4 {
             let s = _mm256_add_epi64(a, b);
             _mm256_add_epi64(s, _mm256_and_si256(Self::ltu(s, a), _mm256_set1_epi64x(59)))
         }
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn add_fold_small(a: __m256i, small: __m256i) -> __m256i {
+        // With small < 2^63 the sum carries only from a >= 2^63, to a sum below 2^63: bit 63
+        // of a AND NOT s is the carry.
+        let s = _mm256_add_epi64(a, small);
+        let t = _mm256_add_epi64(s, _mm256_set1_epi64x(59));
+        // SAFETY: AVX2 is enabled.
+        unsafe { Self::select(s, t, _mm256_andnot_si256(s, a)) }
     }
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -436,20 +467,55 @@ pub(crate) struct S<V> {
     pub h: V,
 }
 
-/// Lazy sum `d0 + 2^32 d1 + 2^64 d2 + 2^96 d3` of unsigned `u64` limbs. One [`mac`] of two
-/// values below 2^64 adds below 2^32 to `d0` and `d3` and below `3 * 2^32` to `d1` and `d2`;
-/// [`red`] needs `d0, d1 < 2^62` and `d2, d3 < 2^56`, so an accumulator takes up to
-/// [`MAC_LIMIT`] products between reductions.
+/// Lazy sum of 32 x 32-bit partial products, by weight class. A class whose terms are below
+/// 2^64 is kept as two sums: `w*`, the terms added in full and wrapping mod 2^64, and `h*`,
+/// the exact sum of their high halves. The exact sum of the low halves is then
+/// `w - 2^32 h mod 2^64` (it is below 2^64), so a term costs one add to `w` and a shift and
+/// an add to `h`, where splitting it costs two masks and two adds.
+///
+/// The classes: `w0` (weight 2^0) with `h1`; `w1` (weight 2^32) with `h2`; `w2` (weight
+/// 2^64) with `h3`. The value is `L0 + 2^32 (L1 + h1) + 2^64 (L2 + h2) + 2^96 h3` with
+/// `Lk = wk - 2^32 h(k + 1) mod 2^64` ([`Acc::limbs`]). One [`mac`] of two values below 2^64
+/// adds below `2^32` to `L0, h1, L2, h3` and below `2 * 2^32` to `L1, h2`; [`red`] needs the
+/// limbs `L0 < 2^62`, `L1 + h1 < 2^62`, `L2 + h2 < 2^56`, `h3 < 2^56`, so an accumulator
+/// takes up to [`MAC_LIMIT`] products between reductions.
 #[derive(Clone, Copy)]
 pub(crate) struct Acc<V> {
+    pub w0: V,
+    pub h1: V,
+    pub w1: V,
+    pub h2: V,
+    pub w2: V,
+    pub h3: V,
+}
+
+/// Products an accumulator may take before [`red`]: `3 * 2^32 * 2^22 < 2^56`.
+pub(crate) const MAC_LIMIT: usize = 1 << 22;
+
+/// Unsigned limbs `d0 + 2^32 d1 + 2^64 d2 + 2^96 d3` (the input of [`red4`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Limbs<V> {
     pub d0: V,
     pub d1: V,
     pub d2: V,
     pub d3: V,
 }
 
-/// Products an accumulator may take before [`red`]: `3 * 2^32 * 2^22 < 2^56`.
-pub(crate) const MAC_LIMIT: usize = 1 << 22;
+impl<V: Copy> Acc<V> {
+    /// The limbs of the accumulated value (exact: each low-half sum is below 2^64).
+    #[inline(always)]
+    unsafe fn limbs<B: Simd<V = V>>(self) -> Limbs<V> {
+        // SAFETY: the caller guarantees the backend's features.
+        unsafe {
+            Limbs {
+                d0: B::sub(self.w0, B::shl32(self.h1)),
+                d1: B::add(B::sub(self.w1, B::shl32(self.h2)), self.h1),
+                d2: B::add(B::sub(self.w2, B::shl32(self.h3)), self.h2),
+                d3: self.h3,
+            }
+        }
+    }
+}
 
 #[inline(always)]
 pub(crate) unsafe fn split<B: Simd>(x: B::V) -> S<B::V> {
@@ -468,7 +534,7 @@ pub(crate) unsafe fn acc0<B: Simd>() -> Acc<B::V> {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
         let z = zero::<B>();
-        Acc { d0: z, d1: z, d2: z, d3: z }
+        Acc { w0: z, h1: z, w1: z, h2: z, w2: z, h3: z }
     }
 }
 
@@ -477,30 +543,31 @@ pub(crate) unsafe fn acc0<B: Simd>() -> Acc<B::V> {
 pub(crate) unsafe fn mac<B: Simd>(acc: &mut Acc<B::V>, a: S<B::V>, b: S<B::V>) {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
-        let m = B::splat(LOW32);
         let ll = B::mul32(a.l, b.l);
         let lh = B::mul32(a.l, b.h);
         let hl = B::mul32(a.h, b.l);
         let hh = B::mul32(a.h, b.h);
-        acc.d0 = B::add(acc.d0, B::and(ll, m));
-        acc.d1 = B::add(acc.d1, B::add(B::shr32(ll), B::add(B::and(lh, m), B::and(hl, m))));
-        acc.d2 = B::add(acc.d2, B::add(B::add(B::shr32(lh), B::shr32(hl)), B::and(hh, m)));
-        acc.d3 = B::add(acc.d3, B::shr32(hh));
+        acc.w0 = B::add(acc.w0, ll);
+        acc.h1 = B::add(acc.h1, B::shr32(ll));
+        acc.w1 = B::add(acc.w1, B::add(lh, hl));
+        acc.h2 = B::add(acc.h2, B::add(B::shr32(lh), B::shr32(hl)));
+        acc.w2 = B::add(acc.w2, hh);
+        acc.h3 = B::add(acc.h3, B::shr32(hh));
     }
 }
 
-/// `acc += w k` for a value `w < 2^64` and `k < 2^32` (two partials): `d0` and `d2` gain
-/// below 2^32, `d1` below `2 * 2^32`, within the gains of one [`mac`].
+/// `acc += w k` for a value `w < 2^64` and `k < 2^32` (two partials): `L0`, `h1`, `L1`, `h2`
+/// gain below 2^32, within the gains of one [`mac`].
 #[inline(always)]
 pub(crate) unsafe fn mac32<B: Simd>(acc: &mut Acc<B::V>, w: S<B::V>, k: B::V) {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
-        let m = B::splat(LOW32);
         let lo = B::mul32(w.l, k);
         let hi = B::mul32(w.h, k);
-        acc.d0 = B::add(acc.d0, B::and(lo, m));
-        acc.d1 = B::add(acc.d1, B::add(B::shr32(lo), B::and(hi, m)));
-        acc.d2 = B::add(acc.d2, B::shr32(hi));
+        acc.w0 = B::add(acc.w0, lo);
+        acc.h1 = B::add(acc.h1, B::shr32(lo));
+        acc.w1 = B::add(acc.w1, hi);
+        acc.h2 = B::add(acc.h2, B::shr32(hi));
     }
 }
 
@@ -508,28 +575,46 @@ pub(crate) unsafe fn mac32<B: Simd>(acc: &mut Acc<B::V>, w: S<B::V>, k: B::V) {
 /// [`mac32`]; the caller subtracts `2^31` times the weight sum once.
 pub(crate) const I32_SHIFT: u64 = 1 << 31;
 
-/// `acc += x` for a value below 2^64 (`d0`, `d1` gain below 2^32).
+/// `acc += x` for a value below 2^64 (`L0` and `h1` gain below 2^32).
 #[inline(always)]
 pub(crate) unsafe fn lift<B: Simd>(acc: &mut Acc<B::V>, x: B::V) {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
-        acc.d0 = B::add(acc.d0, B::and(x, B::splat(LOW32)));
-        acc.d1 = B::add(acc.d1, B::shr32(x));
+        acc.w0 = B::add(acc.w0, x);
+        acc.h1 = B::add(acc.h1, B::shr32(x));
     }
 }
 
-/// Limb-wise sum (the limb bounds add).
+/// Component-wise sum (the limb bounds add; the wrapping sums stay exact mod 2^64).
 #[inline(always)]
 pub(crate) unsafe fn add_acc<B: Simd>(a: Acc<B::V>, b: Acc<B::V>) -> Acc<B::V> {
     // SAFETY: the caller guarantees the backend's features.
-    unsafe { Acc { d0: B::add(a.d0, b.d0), d1: B::add(a.d1, b.d1), d2: B::add(a.d2, b.d2), d3: B::add(a.d3, b.d3) } }
+    unsafe {
+        Acc {
+            w0: B::add(a.w0, b.w0),
+            h1: B::add(a.h1, b.h1),
+            w1: B::add(a.w1, b.w1),
+            h2: B::add(a.h2, b.h2),
+            w2: B::add(a.w2, b.w2),
+            h3: B::add(a.h3, b.h3),
+        }
+    }
 }
 
-/// `2 a` limb-wise (the limb bounds double).
+/// `2 a` component-wise (the limb bounds double).
 #[inline(always)]
 pub(crate) unsafe fn dbl_acc<B: Simd>(a: Acc<B::V>) -> Acc<B::V> {
     // SAFETY: the caller guarantees the backend's features.
-    unsafe { Acc { d0: B::shl1(a.d0), d1: B::shl1(a.d1), d2: B::shl1(a.d2), d3: B::shl1(a.d3) } }
+    unsafe {
+        Acc {
+            w0: B::shl1(a.w0),
+            h1: B::shl1(a.h1),
+            w1: B::shl1(a.w1),
+            h2: B::shl1(a.h2),
+            w2: B::shl1(a.w2),
+            h3: B::shl1(a.h3),
+        }
+    }
 }
 
 /// `59 x` for `x < 2^58`, as `64 x - 4 x - x`.
@@ -539,9 +624,10 @@ unsafe fn mul59<B: Simd>(x: B::V) -> B::V {
     unsafe { B::sub(B::sub(B::shl6(x), B::shl2(x)), x) }
 }
 
-/// The canonical value of an accumulator with `d0, d1 < 2^62` and `d2, d3 < 2^56`.
+/// A value below 2^64 congruent to limbs with `d0, d1 < 2^62` and `d2, d3 < 2^56` (not
+/// necessarily canonical: a multiplier operand needs no more).
 #[inline(always)]
-pub(crate) unsafe fn red<B: Simd>(acc: Acc<B::V>) -> B::V {
+pub(crate) unsafe fn red4_lazy<B: Simd>(acc: Limbs<B::V>) -> B::V {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
         // 2^64 = 59 and 2^96 = 59 * 2^32: value = e0 + 2^32 e1 with e0, e1 < 2^63.
@@ -553,31 +639,106 @@ pub(crate) unsafe fn red<B: Simd>(acc: Acc<B::V>) -> B::V {
         // value = e0 + 2^32 (e1 mod 2^32) + 2^64 (e1 >> 32), and e1 >> 32 < 2^31 + 1, so its
         // fold is one 32-bit product: g < 2^32 + 59 * 2^32 < 2^38.
         let g = B::add(e0, B::mul32(B::shr32(e1), B::splat(59)));
-        // A carry out of g + 2^32 (e1 mod 2^32) wraps to below g < 2^38; fold it as 59.
-        B::canon(B::add_fold(g, B::shl32(e1)))
+        // A carry out of 2^32 (e1 mod 2^32) + g wraps to below g < 2^38; fold it as 59.
+        B::add_fold_small(B::shl32(e1), g)
     }
+}
+
+/// The canonical value of limbs with `d0, d1 < 2^62` and `d2, d3 < 2^56`.
+#[inline(always)]
+pub(crate) unsafe fn red4<B: Simd>(acc: Limbs<B::V>) -> B::V {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { B::canon(red4_lazy::<B>(acc)) }
+}
+
+/// The canonical value of an accumulator within the bounds of [`Acc`].
+#[inline(always)]
+pub(crate) unsafe fn red<B: Simd>(acc: Acc<B::V>) -> B::V {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { red4::<B>(acc.limbs::<B>()) }
+}
+
+/// [`red`] without the final canonical step: a value below 2^64 for a multiplier operand.
+#[inline(always)]
+pub(crate) unsafe fn red_lazy<B: Simd>(acc: Acc<B::V>) -> B::V {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { red4_lazy::<B>(acc.limbs::<B>()) }
+}
+
+/// The limbs of one product `a b` of values below 2^64: `d0, d3 < 2^32`, `d1, d2 < 3 * 2^32`.
+/// A single product splits its partials directly (no wrapping sums to undo).
+#[inline(always)]
+unsafe fn product<B: Simd>(a: S<B::V>, b: S<B::V>) -> Limbs<B::V> {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe {
+        let m = B::splat(LOW32);
+        let ll = B::mul32(a.l, b.l);
+        let lh = B::mul32(a.l, b.h);
+        let hl = B::mul32(a.h, b.l);
+        let hh = B::mul32(a.h, b.h);
+        Limbs {
+            d0: B::and(ll, m),
+            d1: B::add(B::shr32(ll), B::add(B::and(lh, m), B::and(hl, m))),
+            d2: B::add(B::add(B::shr32(lh), B::shr32(hl)), B::and(hh, m)),
+            d3: B::shr32(hh),
+        }
+    }
+}
+
+/// The limbs of `a b + c d` for values below 2^64 (the bounds of two [`product`]s add).
+#[inline(always)]
+unsafe fn product2<B: Simd>(a: S<B::V>, b: S<B::V>, c: S<B::V>, d: S<B::V>) -> Limbs<B::V> {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe {
+        let x = product::<B>(a, b);
+        let y = product::<B>(c, d);
+        Limbs { d0: B::add(x.d0, y.d0), d1: B::add(x.d1, y.d1), d2: B::add(x.d2, y.d2), d3: B::add(x.d3, y.d3) }
+    }
+}
+
+/// `x` added to limbs: `d0` and `d1` gain below 2^32.
+#[inline(always)]
+unsafe fn lift_limbs<B: Simd>(l: Limbs<B::V>, x: B::V) -> Limbs<B::V> {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { Limbs { d0: B::add(l.d0, B::and(x, B::splat(LOW32))), d1: B::add(l.d1, B::shr32(x)), ..l } }
+}
+
+/// `e + r (o - e)` lane-wise in `K` for canonical lanes (canonical out): the canonical
+/// difference, two products per coordinate with `e` added to their limbs (`d0, d3 < 3 *
+/// 2^32`, `d1, d2 < 7 * 2^32`), one reduction per coordinate.
+#[inline(always)]
+pub(crate) unsafe fn kfold<B: Simd>(e: (B::V, B::V), o: (B::V, B::V), r: KS<B::V>) -> (B::V, B::V) {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe {
+        let d = (B::sub_mod(o.0, e.0), B::sub_mod(o.1, e.1));
+        let (x0, x1) = (split::<B>(d.0), split::<B>(d.1));
+        (
+            red4::<B>(lift_limbs::<B>(product2::<B>(x0, r.c0, x1, r.c1x2), e.0)),
+            red4::<B>(lift_limbs::<B>(product2::<B>(x0, r.c1, x1, r.c0), e.1)),
+        )
+    }
+}
+
+/// `l + d r` for canonical lanes `l`, `d` and a split `r` (canonical out): one product with
+/// `l` added to its limbs, one reduction.
+#[inline(always)]
+pub(crate) unsafe fn mul_add<B: Simd>(l: B::V, d: B::V, r: S<B::V>) -> B::V {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { red4::<B>(lift_limbs::<B>(product::<B>(split::<B>(d), r), l)) }
 }
 
 /// `a b` for canonical lanes.
 #[inline(always)]
 pub(crate) unsafe fn mul<B: Simd>(a: B::V, b: B::V) -> B::V {
     // SAFETY: the caller guarantees the backend's features.
-    unsafe {
-        let mut c = acc0::<B>();
-        mac::<B>(&mut c, split::<B>(a), split::<B>(b));
-        red::<B>(c)
-    }
+    unsafe { red4::<B>(product::<B>(split::<B>(a), split::<B>(b))) }
 }
 
 /// `a b` for a canonical lane and a split operand.
 #[inline(always)]
 pub(crate) unsafe fn mul_s<B: Simd>(a: B::V, b: S<B::V>) -> B::V {
     // SAFETY: the caller guarantees the backend's features.
-    unsafe {
-        let mut c = acc0::<B>();
-        mac::<B>(&mut c, split::<B>(a), b);
-        red::<B>(c)
-    }
+    unsafe { red4::<B>(product::<B>(split::<B>(a), b)) }
 }
 
 /// A `K` operand split for repeated products: both coordinates and twice the second (the
@@ -630,26 +791,22 @@ pub(crate) unsafe fn redk<B: Simd>(acc: (Acc<B::V>, Acc<B::V>)) -> (B::V, B::V) 
     unsafe { (red::<B>(acc.0), red::<B>(acc.1)) }
 }
 
-/// `a b` lane-wise in `K` (canonical in, canonical out).
-#[inline(always)]
-pub(crate) unsafe fn kmul<B: Simd>(a: (B::V, B::V), b: (B::V, B::V)) -> (B::V, B::V) {
-    // SAFETY: the caller guarantees the backend's features.
-    unsafe {
-        let mut c = acck::<B>();
-        kmac::<B>(&mut c, (split::<B>(a.0), split::<B>(a.1)), split_k::<B>(b));
-        redk::<B>(c)
-    }
-}
-
-/// `a b` lane-wise in `K` with a pre-split second operand.
+/// `a b` lane-wise in `K` with a pre-split second operand (canonical out): each coordinate
+/// is two products split directly and one reduction.
 #[inline(always)]
 pub(crate) unsafe fn kmul_s<B: Simd>(a: (B::V, B::V), b: KS<B::V>) -> (B::V, B::V) {
     // SAFETY: the caller guarantees the backend's features.
     unsafe {
-        let mut c = acck::<B>();
-        kmac::<B>(&mut c, (split::<B>(a.0), split::<B>(a.1)), b);
-        redk::<B>(c)
+        let (x0, x1) = (split::<B>(a.0), split::<B>(a.1));
+        (red4::<B>(product2::<B>(x0, b.c0, x1, b.c1x2)), red4::<B>(product2::<B>(x0, b.c1, x1, b.c0)))
     }
+}
+
+/// `a b` lane-wise in `K` (canonical in, canonical out).
+#[inline(always)]
+pub(crate) unsafe fn kmul<B: Simd>(a: (B::V, B::V), b: (B::V, B::V)) -> (B::V, B::V) {
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe { kmul_s::<B>(a, split_k::<B>(b)) }
 }
 
 #[inline(always)]
@@ -765,10 +922,12 @@ mod tests {
             let limb = |s: &mut u64, bits: u32| if round % 2 == 0 { (1 << bits) - 1 - (random(s) % 3) } else { random(s) >> (64 - bits) };
             let lanes: Vec<[u64; 4]> = (0..l).map(|_| [limb(&mut seed, 62), limb(&mut seed, 62), limb(&mut seed, 56), limb(&mut seed, 56)]).collect();
             let get = |k: usize| unsafe { B::load(lanes.iter().map(|d| d[k]).collect::<Vec<_>>().as_ptr()) };
-            let acc = Acc { d0: get(0), d1: get(1), d2: get(2), d3: get(3) };
-            let got = unsafe { B::lanes(red::<B>(acc)) };
+            let limbs = Limbs { d0: get(0), d1: get(1), d2: get(2), d3: get(3) };
+            let got = unsafe { B::lanes(red4::<B>(limbs)) };
+            let lazy = unsafe { B::lanes(red4_lazy::<B>(limbs)) };
             for (j, d) in lanes.iter().enumerate() {
                 assert_eq!(got[j], exact(*d), "red lane {j} limbs {d:?}");
+                assert_eq!(lazy[j] % P, exact(*d), "lazy red lane {j} limbs {d:?}");
             }
         }
         // Products, K products, canonical sums and differences, residues.

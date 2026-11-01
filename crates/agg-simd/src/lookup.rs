@@ -287,26 +287,35 @@ unsafe fn parent_wide<B:crate::wide::Simd>(a:[*const u64;4],b:[*const u64;4],out
 crate::wide::entry_points!(parent_wide => parent_w8, parent_w4; (a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize)->usize);
 
 /// [`bottom_vector`] on a backend without IFMA. The ESPs are exact `i64` lanes from signed
-/// 32-bit products (`|v| <= 2^15`: `|s| <= 2^16`, `|m| <= 2^30`); every ESP term is read as its
-/// canonical residue: `q = x^4 - x^3 e1 + x^2 e2 - x e3 + e4`, `p = 4 x^3 - 3 x^2 e1 + 2 x e2 - e3`.
+/// 32-bit products (`|v| <= 2^15`: `|s| <= 2^16`, `|m| <= 2^30`, `|e1| <= 2^17`,
+/// `|e2| < 2^33`, `|e3| <= 2^47`, `|e4| <= 2^60`) in
+/// `q = x^4 - x^3 e1 + x^2 e2 - x e3 + e4`, `p = 4 x^3 - 3 x^2 e1 + 2 x e2 - e3`.
+/// The `e1` multipliers are shifted into `[0, 2^32)` (two partials each, the shift undone in
+/// the constant term); `e2` and `e3` are read as canonical residues (full products); the
+/// constant terms and the `e4`, `-e3` summands are added to the accumulators before the one
+/// reduction per coordinate.
 #[cfg(target_arch="x86_64")]
 #[inline(always)]
 unsafe fn bottom_wide<B:crate::wide::Simd>(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize) {
  use crate::wide::*;
  let n=stacked.len()/4;let stop=start+(end-start)/B::LANES*B::LANES;
- // The split powers and the constant terms of every context, built once per range.
- struct Split<V> {x3:(S<V>,S<V>),x2:(S<V>,S<V>),x:(S<V>,S<V>),x4:(V,V),x3x4:(V,V)}
+ // The split powers and the constant terms of every context, built once per range:
+ // `q0 = x^4 - 2^31 x^3`, `p0 = 4 x^3 - 2^31 x^2` (the shifts of the `e1` multipliers).
+ struct Split<V> {x3:(S<V>,S<V>),x2:(S<V>,S<V>),x:(S<V>,S<V>),q0:(V,V),p0:(V,V)}
  // SAFETY: the caller guarantees the backend's features, the leaves of every node in
  // `start..end` and writable rows `start - offset .. end - offset`.
  unsafe {
   // A function, not a closure: closures do not inherit the entry point's target features.
   #[inline(always)]
   unsafe fn sk<B:crate::wide::Simd>(x:K)->(S<B::V>,S<B::V>) {unsafe {let v=bck::<B>(x);(split::<B>(v.0),split::<B>(v.1))}}
+  let shift=K::from_u64(I32_SHIFT);
   let mut split_contexts:Vec<Split<B::V>>=Vec::with_capacity(contexts.len());
   for ctx in contexts {let [x,x2,x3,x4]=ctx.powers;
-   split_contexts.push(Split{x3:sk::<B>(x3),x2:sk::<B>(x2),x:sk::<B>(x),x4:bck::<B>(x4),x3x4:bck::<B>(x3*K::from_u64(4))});
+   split_contexts.push(Split{x3:sk::<B>(x3),x2:sk::<B>(x2),x:sk::<B>(x),
+    q0:bck::<B>(x4-shift*x3),p0:bck::<B>(x3*K::from_u64(4)-shift*x2)});
   }
   let c=B::splat(center as i64 as u64);
+  let s=B::splat(I32_SHIFT);
   for i in (start..stop).step_by(B::LANES) {
    let mut v=[zero::<B>();4];
    for j in 0..4 {
@@ -320,17 +329,23 @@ unsafe fn bottom_wide<B:crate::wide::Simd>(stacked:&[i32],center:i32,contexts:&[
    let e1=B::add(sa,sb);let e2=B::add(B::add(ma,mb),B::mul32s(sa,sb));
    let e3=B::add(B::mul32s(sa,mb),B::mul32s(sb,ma));let e4=B::mul32s(ma,mb);
    let z=zero::<B>();
-   let ne1=split::<B>(B::residue(B::sub(z,e1)));
-   let pe1=split::<B>(B::residue(B::sub(z,B::add(B::add(e1,e1),e1))));
+   // 2^31 - e1 and 2^31 - 3 e1 lie in [0, 2^32).
+   let ne1=B::sub(s,e1);let pe1=B::sub(s,B::add(B::add(e1,e1),e1));
    let e2s=split::<B>(B::residue(e2));let e2x2=split::<B>(B::residue(B::add(e2,e2)));
    let ne3=B::residue(B::sub(z,e3));let ne3s=split::<B>(ne3);let e4=B::residue(e4);
    for (ctx,o) in split_contexts.iter().zip(out) {
+    // q: one shifted product, two full products and three lifts per real coordinate
+    // (two lifts imaginary); p: one shifted, one full, two lifts (one imaginary). Far below
+    // the accumulator bounds.
     let mut q=acck::<B>();
-    kmac_base::<B>(&mut q,ctx.x3,ne1);kmac_base::<B>(&mut q,ctx.x2,e2s);kmac_base::<B>(&mut q,ctx.x,ne3s);
+    mac32::<B>(&mut q.0,ctx.x3.0,ne1);mac32::<B>(&mut q.1,ctx.x3.1,ne1);
+    kmac_base::<B>(&mut q,ctx.x2,e2s);kmac_base::<B>(&mut q,ctx.x,ne3s);
+    lift::<B>(&mut q.0,ctx.q0.0);lift::<B>(&mut q.0,e4);lift::<B>(&mut q.1,ctx.q0.1);
     let mut p=acck::<B>();
-    kmac_base::<B>(&mut p,ctx.x2,pe1);kmac_base::<B>(&mut p,ctx.x,e2x2);
-    let q=addk::<B>(redk::<B>(q),ctx.x4);let q=(B::add_mod(q.0,e4),q.1);
-    let p=addk::<B>(redk::<B>(p),ctx.x3x4);let p=(B::add_mod(p.0,ne3),p.1);
+    mac32::<B>(&mut p.0,ctx.x2.0,pe1);mac32::<B>(&mut p.1,ctx.x2.1,pe1);
+    kmac_base::<B>(&mut p,ctx.x,e2x2);
+    lift::<B>(&mut p.0,ctx.p0.0);lift::<B>(&mut p.0,ne3);lift::<B>(&mut p.1,ctx.p0.1);
+    let (q,p)=(redk::<B>(q),redk::<B>(p));
     B::store((o[0] as *mut u64).add(i-offset),p.0);B::store((o[1] as *mut u64).add(i-offset),p.1);
     B::store((o[2] as *mut u64).add(i-offset),q.0);B::store((o[3] as *mut u64).add(i-offset),q.1);
    }
