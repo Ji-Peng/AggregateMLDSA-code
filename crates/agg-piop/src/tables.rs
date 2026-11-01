@@ -17,9 +17,9 @@ use crate::range::square_map;
 use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
 use crate::virtual_polys::parity1_tables_for;
-use crate::split_weight::SplitWeight;
+use crate::split_weight::{LaneSplitWeight, Level1Split, SplitWeight};
 use crate::weights::{
-    level1_lane_tables, level1_weight_split, level1_weight_table, level2_weight_table, level2_weight_table_for,
+    level1_lane_split, level1_lane_tables, level1_weight_split, level1_weight_table, level2_weight_table, level2_weight_table_for,
     level3_weight_tables, level3_weight_tables_for, ring_weight_planes, ring_weight_table,
 };
 use crate::OpeningField as E;
@@ -88,6 +88,9 @@ pub struct ProverTables<'a> {
     pub w1_lanes: Vec<Vec<E>>,
     /// `w_1` as its two factors instead of the table (`AGG_W1_SPLIT=0` builds the table).
     pub w1_split: Option<SplitWeight>,
+    /// `w_1^(rho)` as their factors instead of `w1_lanes` (the sets with lanes;
+    /// `AGG_W1_SPLIT=0` builds the tables).
+    pub w1_lane_split: Option<LaneSplitWeight>,
     /// `w_2` on `D_1` (after `tau`).
     pub w2: Option<Vec<E>>,
     /// `w_{3,t}` on `D_2` (after `tau`).
@@ -127,6 +130,7 @@ impl<'a> ProverTables<'a> {
             w1: None,
             w1_lanes: Vec::new(),
             w1_split: None,
+            w1_lane_split: None,
             w2: None,
             w3: None,
             wa: None,
@@ -169,15 +173,23 @@ impl<'a> ProverTables<'a> {
     pub fn set_r1(&mut self, matrices: &BridgeMatrices, r1: &[E]) {
         self.w2 = None;
         self.w3 = None;
+        let split_on = std::env::var_os("AGG_W1_SPLIT").is_none_or(|v| v != "0");
         if self.has_lanes() {
             let manifest = self.tables.manifest;
             let r1_1 = &r1[r1.len() - manifest.domain_vars(crate::manifest::GroupRole::Level1)..];
-            self.w1_lanes = level1_lane_tables(manifest, &matrices.m1, r1_1);
+            self.w1_lane_split = split_on
+                .then(|| level1_lane_split(manifest, &matrices.m1, r1_1))
+                .flatten()
+                .filter(LaneSplitWeight::usable);
+            self.w1_lanes = if self.w1_lane_split.is_some() {
+                Vec::new()
+            } else {
+                level1_lane_tables(manifest, &matrices.m1, r1_1)
+            };
             return;
         }
         let geom = self.tables.main.geometry();
         let r1_1 = &r1[r1.len() - geom.d1() as usize..];
-        let split_on = std::env::var_os("AGG_W1_SPLIT").is_none_or(|v| v != "0");
         let split = split_on.then(|| level1_weight_split(&geom, &matrices.m1, r1_1)).filter(SplitWeight::usable);
         if split.is_some() {
             self.w1 = None;
@@ -192,6 +204,7 @@ impl<'a> ProverTables<'a> {
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
         self.w1_split = None;
+        self.w1_lane_split = None;
         self.w1_lanes = Vec::new();
         if crate::kernel::layout() == crate::kernel::Layout::Plane {
             self.wa_planes = Some(ring_weight_planes(public, r2));
@@ -207,6 +220,7 @@ impl<'a> ProverTables<'a> {
     pub fn drop_level1(&mut self) {
         self.w1 = None;
         self.w1_split = None;
+        self.w1_lane_split = None;
         self.w1_lanes = Vec::new();
     }
 
@@ -226,6 +240,16 @@ impl<'a> ProverTables<'a> {
         }
     }
 
+    /// The level-1 weights as their factors, when they are kept that way.
+    #[must_use]
+    pub fn level1_split(&self) -> Option<Level1Split<'_>> {
+        match (&self.w1_split, &self.w1_lane_split) {
+            (Some(split), _) => Some(Level1Split::Table(split)),
+            (None, Some(split)) => Some(Level1Split::Lanes(split)),
+            (None, None) => None,
+        }
+    }
+
     /// The lane of a table.
     #[must_use]
     pub fn lane(&self, id: LaneId) -> Lane<'_> {
@@ -234,9 +258,12 @@ impl<'a> ProverTables<'a> {
             LaneId::Column(c) => column(c).lane(),
             LaneId::DigitSquare(c) => Lane::mapped(column(c).narrow(), square_map()),
             LaneId::Parity1(t) => self.parity1.lane(usize::from(t)),
-            LaneId::Weight(WeightId::Level1(lane)) if self.has_lanes() => {
-                Lane::Source(Source::Field(&self.w1_lanes[usize::from(lane)]))
-            }
+            LaneId::Weight(WeightId::Level1(lane)) if self.has_lanes() => match self.w1_lanes.get(usize::from(lane)) {
+                Some(table) => Lane::Source(Source::Field(table)),
+                // The stage takes the factors; the tables only back the fallback.
+                None if self.w1_lane_split.is_some() => Lane::Folded(Vec::new()),
+                None => panic!("w_1^(rho) after r^(1)"),
+            },
             LaneId::Weight(WeightId::Level1(_)) => {
                 match (&self.w1, &self.w1_split) {
                     (Some(table), _) => Lane::Source(Source::Field(table)),

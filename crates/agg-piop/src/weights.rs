@@ -183,6 +183,39 @@ pub fn level1_lane_tables(manifest: &CommitmentManifest, m1: &SparseMatrix, p1: 
         .collect()
 }
 
+/// [`level1_lane_tables`] as their factors: `w_1^(rho)(x) = c_rho[x mod 2^z] eq_blocks[x >> z]`
+/// with `z = zeta_1 - (log2 P_pad - log2 lane cells)` in-block variables of a lane, and
+/// `c_rho[y] = c_1[input position of (y, rho)]`. A lane's cell `x` maps to the input
+/// position `x mod 2^lane_vars + 2^lane_vars rho + P_pad (x >> lane_vars)`, whose in-block
+/// part is the low `z` bits of `x` spread around the lane bits and whose block is `x >> z`.
+/// `None` when a block is smaller than one signature's padded positions (`zeta_1` below
+/// `log2 P_pad`), where the cells of a lane do not split that way.
+#[must_use]
+pub fn level1_lane_split(
+    manifest: &CommitmentManifest,
+    m1: &SparseMatrix,
+    p1: &[E],
+) -> Option<crate::split_weight::LaneSplitWeight> {
+    let (shape, domains) = bridge_view(manifest);
+    let (c1, zeta_vars, blocks) = bridge::level1_split(&shape, &domains, m1, p1);
+    let lane_vars = manifest.lane_cells().trailing_zeros() as usize;
+    let pad_vars = manifest.shape().positions_pad.trailing_zeros() as usize;
+    let z = zeta_vars.checked_sub(pad_vars - lane_vars).filter(|&z| z >= lane_vars)?;
+    let c = (0..manifest.shape().lanes_k)
+        .map(|lane| {
+            (0..1_usize << z)
+                .map(|y| c1.get(input_position(y, lane, lane_vars, pad_vars)).copied().unwrap_or_else(E::zero))
+                .collect()
+        })
+        .collect();
+    Some(crate::split_weight::LaneSplitWeight {
+        c,
+        zeta_vars: z,
+        blocks,
+        len: 1 << manifest.d_main(),
+    })
+}
+
 /// `w_1^(rho)(r)` at a main-domain point `r` for every polynomial lane `rho`
 /// ([`level1_lane_tables`]): one pass over `c_1` sums `eq(r_j, j) eq(r_i, i_low) c_1` per
 /// value of the lane bits of the input position, and the block factor is shared.

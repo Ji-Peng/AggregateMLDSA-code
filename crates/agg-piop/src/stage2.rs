@@ -248,9 +248,9 @@ fn prove_with(
     let spec = spec(manifest);
     let claims = claimed_sums(manifest, &stage1.claims, &kappa1);
     let run = if check {
-        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.w1_split.as_ref(), transcript, true)?
+        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.level1_split(), transcript, true)?
     } else {
-        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.w1_split.as_ref(), transcript, false)?
+        prove_stage_split(&spec, manifest, points, &claims, |id| tables.lane(id), tables.level1_split(), transcript, false)?
     };
     let value = |id| run.value(&spec, id);
     let claims = Stage2Claims {
