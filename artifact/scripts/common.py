@@ -29,9 +29,8 @@ AERIE_TOOLCHAIN = "1.95.0"
 def load_toml(path):
     with open(path, "rb") as f:
         data = f.read()
-    if hasattr(_toml, "loads") and not hasattr(_toml, "load"):
-        return _toml.loads(data.decode("utf-8"))
-    return _toml.load(path)
+    # tomllib (Python 3.11+) and the bundled fallback both accept a string.
+    return _toml.loads(data.decode("utf-8"))
 
 
 def load_configs():
