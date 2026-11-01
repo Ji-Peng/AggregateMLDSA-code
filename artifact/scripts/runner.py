@@ -308,12 +308,17 @@ class Runner:
         env["AGG_GIT_REV"] = self.code_commit
         return env
 
-    def invoke_ours(self, name, allocation, n, relation, extra, warmup, reps, trace=False):
+    def invoke_ours(
+        self, name, allocation, n, relation, extra, warmup, reps, trace=False, params="44"
+    ):
         spec = self.configs["rows"][name]
         binary = BIN / spec["binary"]
         out = self.result_dir / "raw" / "parts"
         out.mkdir(exist_ok=True)
-        tag = f"{name}-{allocation['cpuset'].replace(',', '_')}-{n}-{relation}-{time.time_ns()}"
+        tag = (
+            f"{name}-{allocation['cpuset'].replace(',', '_')}-{n}-{relation}-p{params}"
+            f"-{time.time_ns()}"
+        )
         json_path = out / f"{tag}.json"
         log_path = self.result_dir / "logs" / f"{tag}.log"
         env = self.env_for(name, allocation, extra)
@@ -330,6 +335,8 @@ class Runner:
             str(reps),
             "--relation",
             relation,
+            "--params",
+            params,
             "--json",
             str(json_path),
         ]
@@ -379,12 +386,15 @@ class Runner:
     def run_ours_cell(self, group, rows, requested, actual, allocation, note, n, relation, reps, warmup):
         tag = group["tag"]
         trace = bool(group.get("traced"))
+        # The ML-DSA parameter set of the group (`params = "65"`; default 44).
+        params = str(group.get("params", "44"))
         chunks = process_chunks(reps, self.process_count(group, reps))
         cells = {}
         for name in rows:
             cell = self.base_cell(
                 "ours", name, tag, requested, actual, allocation, note, n, relation
             )
+            cell["params"] = params
             cell["warmup"] = warmup
             cell["reps"] = reps
             cell["protocol"] = "warm"
@@ -399,7 +409,15 @@ class Runner:
             for r in range(len(chunks)):
                 for name in rotate(rows, r):
                     part = self.invoke_ours(
-                        name, allocation, n, relation, None, warmup, chunks[r], trace=trace
+                        name,
+                        allocation,
+                        n,
+                        relation,
+                        None,
+                        warmup,
+                        chunks[r],
+                        trace=trace,
+                        params=params,
                     )
                     cell = cells[name]
                     cell["times_ms"].extend(part["prove_ms"])

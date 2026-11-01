@@ -71,6 +71,28 @@ the others are covered (`agg_cli::wire`, span byte 0), and the verifier checks t
 last segment. Batches of at most `2^13` records (every local batch) have one segment and are
 unchanged by it.
 
+Parameter sets (`AggregatorConfig::set`, `AggregateVerifier::for_set`; default ML-DSA-44):
+ML-DSA-65 and ML-DSA-87 aggregates run the same steps with relation H-u only (another
+relation is `AggregateError::Relation`). The aggregator dispatches once on the set
+(`Aggregator::aggregate_with`): ML-DSA-44 keeps its path (`PublicInstance::new`,
+`prover::main_tables`, `PublicData`, `prover::prove_with_tables_using`); the other sets run
+`PublicInstance::<P>::new_for`, `prover::main_tables_for`, `mode_a::sponge_records_for`,
+`FlockProver::<P>` over the set's sponge gate (`agg_keccak::sponge::sponge_gate_for`) and
+`prover::prove_lanes_with_tables_using` with `LanePublicData` (the bridge matrices of
+`agg_bridge::Shape::production(set)`, `BridgeDerivation::matrices_for`; the Akita plan of the
+set's catalog rows, `WorkPlan::for_set`). `c~_i` is the first `lambda/4` signature bytes (32,
+48, 64). Lane-set batches hold 17 to `2^15` records (`prover::LANE_MIN_RECORDS`: the main
+domain has `8 + d_sig` variables and the stages read the 13-variable level-1 and level-2
+bridge domains as its suffixes, so `N* >= 32`); the aggregator refuses fewer
+(`AggregateError::Count`) and the verifier rejects them (`VerifyError::RecordCount`). The
+verifier takes the set from its caller, never from the header (an aggregate of another set
+is `VerifyError::ParamSet`), runs `verifier::verify_lanes_timed` for 65 and 87, and builds
+the lane public data from `(pk, M, c~)` (`LanePublicData::prepare`), with expanded keys
+from a `LaneKeyCache` when given (`AggregateVerifier::verify_with` and `KeyCacheMut`). The
+Keccak side reads `c~` as concatenated bytes of the set's width (`SegmentContext::c_tilde`).
+The hooks that build the Flock witness from ML-DSA-44 records (`tamper_flock_records`,
+`flock_witness`, `stale_bridge`) are ML-DSA-44 only.
+
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
 Flock witness per part, and stale round-2 tables (the honest bits' parities and `Y_sigma`
@@ -83,15 +105,15 @@ over tampered round-1 bits).
 | keys | `"AGGKEYS1" \|\| count LE32 \|\| (seed[32] \|\| LE32 len \|\| pk)*` (test keys: holds the `KeyGen` seeds) |
 | records | `"AGGRECS1" \|\| count LE32 \|\| (LE32 len \|\| pk, LE32 len \|\| M, LE32 len \|\| signature)*` |
 | aggregate | the wire bytes of `agg_piop::wire` (mode-A items of `agg_cli::wire`) |
-| key cache | `"AGGKCACH" \|\| version \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A as LE32)*`, entries checked on load |
+| key cache | `"AGGKCACH" \|\| 2 \|\| set id (0x44, 0x65, 0x87) \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A[k][l][256] as LE32)*`, entries checked on load; version 1 files (no set byte) hold ML-DSA-44 keys and still load |
 
 ```sh
 A=target/release/agg
-taskset -c 0,1,3-15 $A keygen-batch --count 16 --seed 1 --out keys.bin
-taskset -c 0,1,3-15 $A sign-batch --keys keys.bin --count 256 --seed 1 --out records.bin
-taskset -c 0,1,3-15 $A aggregate --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
-taskset -c 0,1,3-15 $A verify --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact|h-fips]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
+taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --out keys.bin
+taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 --out records.bin
+taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
+taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact|h-fips]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
 ```
 
 Environment knobs (all optional; none changes the proof bytes):
@@ -121,6 +143,15 @@ inside the fork-join wall, and so is the finish unless `AGG_LATE_JOIN=0`.
 
 The vendored Flock core's remaining `FLOCK_*` knobs are described in
 `vendor/flock-core/PATCH.md` and `docs/perf.md`.
+
+`--params` selects the ML-DSA parameter set of every command (`44`, `65` or `87`, also
+`ML-DSA-65`; default `44`). The key, record and aggregate files carry no set byte of their
+own (the aggregate's header names its set, the verifier does not trust it): a command
+refuses key or record files whose public keys have another set's length, naming the
+`--params` they fit (exit status 2), `verify` rejects an aggregate whose header names
+another set, and `--cache` holds one set's keys (a file of another set is refused). The
+`bench` header and its JSON (`"params"`) name the set. ML-DSA-65 and ML-DSA-87 take
+relation `h-u` only and at least 17 records.
 
 `--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
 `h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
@@ -156,7 +187,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 
 ## 3. Tests
 
-`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,cli}.rs`):
+`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,mode_a_sets,cli}.rs`):
 
 - unit: part tiling of every segment (also with an all-padded trailing segment), part seeds
   and span seeds, an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the
@@ -194,7 +225,15 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 - invalid signatures refused by the aggregator: `c~`, `z` and hint bits, another message,
   wrong lengths;
 - the binary: `keygen-batch`, `sign-batch`, `aggregate`, `verify` (uncached, with a new and
-  a filled cache file, on other messages), usage errors, `bench`.
+  a filled cache file, on other messages), usage errors, `bench`;
+- ML-DSA-65 and ML-DSA-87 (`mode_a_sets.rs`): the transcript-level round trip at 1K (no
+  opening), and the full driver at 256 records: deterministic bytes, the `c~` list, the
+  uncached verifier and a cold and a warm `LaneKeyCache`, rejection by a verifier of the
+  other set and of ML-DSA-44, a rewritten set nibble, another `c~`, another message, an
+  opening byte, H-exact refused, and tampered `G_main16` and `G_main4` cells; the lane key
+  cache file (unit); through the binary (`cli.rs`, 20 records): `--params` on every
+  command, the per-set cache file (new, filled, an ML-DSA-44 file refused), a flipped byte,
+  16 records refused, records of the other set and H-exact refused.
 
 ## 4. Local measurements
 
@@ -210,6 +249,17 @@ workers: single noisy runs, not benchmarks):
 
 Every other part is equal (lookup 21,344 B, Flock proofs 398,518 B). The PIOP bytes agree
 with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claims).
+
+ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, the artifact gate records: keys seed 42,
+records seed 43, `agg aggregate --params P`, all 16 CPUs of the WSL box with turbo and HT
+on; single runs, not benchmarks). The aggregates are byte-identical under
+`AGG_ISA=avx512ifma|avx512|avx2|scalar` and with `RAYON_NUM_THREADS=1` and 16
+(`artifact/expected/hashes.json`):
+
+| Set | Aggregate | `c~` list | Flock proofs | Lookup | PIOP rounds and claims | Akita opening | Prove | Verify uncached / cold cache / warm cache |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 65 | 448,765 B (438.2 B/sig) | 49,152 B | 299,918 B | 26,832 B | 5,904 B | 61,033 B | 1.5-2.0 s | 281 / 270 / 173 ms |
+| 87 | 489,195 B (477.7 B/sig) | 65,536 B | 319,438 B | 29,424 B | 6,608 B | 62,262 B | 1.8-2.2 s | 345 / 349 / 185 ms |
 
 The `Work nonces` column is the measurement at revision `f526097`; the current schedule adds
 the one-bit `proj.psi` nonce, one more byte in the packed stream (`docs/soundness.md` 10).

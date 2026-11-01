@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Correctness gates at N=1024 for every kernel tier."""
+"""Correctness gates at N=1024 for every kernel tier and every ML-DSA parameter set.
+
+Per set (`--params`, default 44,65,87): the aggregates of every tier must be byte-identical
+and equal to `expected/hashes.json` (keyed by set), every tier's verifier must accept, a
+flipped byte must be rejected, and the aggregate must not depend on the thread count
+(RAYON_NUM_THREADS=1 against the pinned allocation's count).
+"""
 
 import argparse
 import os
@@ -70,23 +76,42 @@ def available_rows(configs, flags):
     return rows
 
 
-def make_records(binary, data_dir, env):
-    keys = data_dir / "gates-keys-1024.bin"
-    records = data_dir / "gates-records-1024.bin"
+PARAMS = ("44", "65", "87")
+# The records of the reference aggregates: 1,024 keys from seed 42, records signed with seed 43.
+KEY_SEED = "42"
+RECORD_SEED = "43"
+
+
+def make_records(binary, data_dir, env, params):
+    keys = data_dir / f"gates-keys-{params}-1024.bin"
+    records = data_dir / f"gates-records-{params}-1024.bin"
     if records.exists():
         return records
     data_dir.mkdir(parents=True, exist_ok=True)
     for cmd in [
-        [str(binary), "keygen-batch", "--count", "1024", "--seed", "1", "--out", str(keys)],
+        [
+            str(binary),
+            "keygen-batch",
+            "--params",
+            params,
+            "--count",
+            "1024",
+            "--seed",
+            KEY_SEED,
+            "--out",
+            str(keys),
+        ],
         [
             str(binary),
             "sign-batch",
+            "--params",
+            params,
             "--keys",
             str(keys),
             "--count",
             "1024",
             "--seed",
-            "1",
+            RECORD_SEED,
             "--out",
             str(records),
         ],
@@ -122,7 +147,7 @@ def check_reports(configs, rows):
     return reports
 
 
-def aggregate_all(configs, rows, prefix, allocation, records, out_dir):
+def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params):
     results = {}
     for name, spec in configs["rows"].items():
         if not rows[name]["available"]:
@@ -139,12 +164,14 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir):
         env["RAYON_NUM_THREADS"] = str(allocation["threads"])
         env["OMP_NUM_THREADS"] = str(allocation["threads"])
         env["AGG_GIT_REV"] = pinned_commit() or git_rev(REPO)
-        out = out_dir / f"gates-{name}.bin"
+        out = out_dir / f"gates-{params}-{name}.bin"
         proc = sh(
             prefix
             + [
                 str(binary),
                 "aggregate",
+                "--params",
+                params,
                 "--records",
                 str(records),
                 "--relation",
@@ -155,7 +182,7 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir):
             env,
         )
         if proc.returncode != 0:
-            raise SystemExit(f"{name}: aggregate failed: {proc.stderr[-2000:]}")
+            raise SystemExit(f"{name}, ML-DSA-{params}: aggregate failed: {proc.stderr[-2000:]}")
         results[name] = {
             "available": True,
             "binary": spec["binary"],
@@ -166,7 +193,7 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir):
     return results
 
 
-def verify_all(configs, rows, prefix, allocation, records, out_dir, results):
+def verify_all(configs, rows, prefix, allocation, records, results, params):
     verdicts = {}
     for name, spec in configs["rows"].items():
         if not results[name].get("available"):
@@ -181,6 +208,8 @@ def verify_all(configs, rows, prefix, allocation, records, out_dir, results):
             + [
                 str(binary),
                 "verify",
+                "--params",
+                params,
                 "--records",
                 str(records),
                 "--aggregate",
@@ -192,16 +221,54 @@ def verify_all(configs, rows, prefix, allocation, records, out_dir, results):
     return verdicts
 
 
-def negative_check(configs, rows, prefix, allocation, records, out_dir):
+def first_tier(rows):
     order = ["ifma", "avx512", "avx2", "scalar"]
-    name = next(
+    return next(
         (candidate for candidate in order if rows.get(candidate, {}).get("available")),
         None,
     )
+
+
+def threads_check(configs, rows, prefix, allocation, records, out_dir, params, results):
+    """The aggregate of the first available tier on one thread equals the pinned run's."""
+    name = first_tier(rows)
+    if name is None or allocation["threads"] == 1:
+        return None
+    spec = configs["rows"][name]
+    env = {}
+    env.update(spec.get("env", {}))
+    env["RAYON_NUM_THREADS"] = "1"
+    env["OMP_NUM_THREADS"] = "1"
+    out = out_dir / f"gates-{params}-{name}-t1.bin"
+    proc = sh(
+        prefix
+        + [
+            str(BIN / spec["binary"]),
+            "aggregate",
+            "--params",
+            params,
+            "--records",
+            str(records),
+            "--out",
+            str(out),
+        ],
+        env,
+    )
+    if proc.returncode != 0:
+        return {"tier": name, "ok": False, "error": (proc.stderr or "")[-2000:]}
+    return {
+        "tier": name,
+        "threads": [1, allocation["threads"]],
+        "ok": sha256_file(out) == results[name]["sha256"],
+    }
+
+
+def negative_check(configs, rows, prefix, allocation, records, out_dir, params):
+    name = first_tier(rows)
     if name is None:
         return False, None
-    sample = out_dir / f"gates-{name}.bin"
-    broken = out_dir / "gates-broken.bin"
+    sample = out_dir / f"gates-{params}-{name}.bin"
+    broken = out_dir / f"gates-{params}-broken.bin"
     data = bytearray(sample.read_bytes())
     data[len(data) // 2] ^= 1
     broken.write_bytes(data)
@@ -215,6 +282,8 @@ def negative_check(configs, rows, prefix, allocation, records, out_dir):
         + [
             str(binary),
             "verify",
+            "--params",
+            params,
             "--records",
             str(records),
             "--aggregate",
@@ -290,6 +359,44 @@ def sde_check(configs, rows, timeout=1800):
     }
 
 
+NOTE = (
+    "Generated by ./run.sh gates --write-expected, keyed by ML-DSA parameter set. "
+    "Every configuration must reproduce these bytes."
+)
+NATVER_BINARIES = {"44": "natver", "65": "natver65", "87": "natver87"}
+
+
+def expected_for(expected, params):
+    """The expected 1K H-u entry of a set (a file without set keys holds ML-DSA-44's)."""
+    aggregates = expected.get("aggregates", {}) if expected else {}
+    if params in aggregates:
+        return aggregates[params].get("1024", {}).get("h-u")
+    if params == "44":
+        return aggregates.get("1024", {}).get("h-u")
+    return None
+
+
+def natver_check(params, allocation, result_dir):
+    """The pq-crystals AVX2 batch verifier of the set accepts its own 1K dataset."""
+    natver = BIN / NATVER_BINARIES[params]
+    if not natver.exists():
+        return None
+    out = result_dir / "gates" / f"natver-{params}-1024.json"
+    proc = sh(
+        [str(natver), "1024", "--warmup", "1", "--reps", "2", "--seed", "1", "--json", str(out)],
+        {
+            "OMP_NUM_THREADS": str(allocation["threads"]),
+            "OMP_PROC_BIND": "close",
+            "OMP_PLACES": "threads",
+        },
+    )
+    if proc.returncode == 0 and out.exists():
+        native = read_json(out)
+        native["ok"] = native["rejected_uncached"] == 0 and native["rejected_cached"] == 0
+        return native
+    return {"ok": False, "error": (proc.stderr or "")[-2000:]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", help="results directory")
@@ -297,12 +404,21 @@ def main():
     parser.add_argument("--reference", help="compare the aggregate to this file")
     parser.add_argument("--with-baselines", action="store_true")
     parser.add_argument(
+        "--params",
+        default=",".join(PARAMS),
+        type=lambda v: [p.strip() for p in v.split(",") if p.strip()],
+        help="comma-separated ML-DSA parameter sets (default 44,65,87)",
+    )
+    parser.add_argument(
         "--sde",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="run the optional Intel SDE check when sde64 is installed",
     )
     args = parser.parse_args()
+    unknown = [params for params in args.params if params not in PARAMS]
+    if unknown or not args.params:
+        parser.error(f"--params: a comma-separated subset of {','.join(PARAMS)}, not {unknown}")
     result_dir = new_result_dir() if not args.results else Path(args.results)
     result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "data").mkdir(exist_ok=True)
@@ -318,80 +434,58 @@ def main():
         raise SystemExit(f"{binary} is missing; run ./run.sh build")
 
     reports = check_reports(configs, rows)
-    records = make_records(binary, result_dir / "data", env)
     out_dir = result_dir / "gates"
     out_dir.mkdir(exist_ok=True)
-    aggregates = aggregate_all(configs, rows, prefix, allocation, records, out_dir)
-    verdicts = verify_all(
-        configs, rows, prefix, allocation, records, out_dir, aggregates
-    )
-    negative, negative_tier = negative_check(
-        configs, rows, prefix, allocation, records, out_dir
-    )
     sde = sde_check(configs, rows) if args.sde else {
         "available": False,
         "reason": "disabled with --no-sde",
     }
-
     expected_path = EXPECTED / "hashes.json"
     expected = read_json(expected_path) if expected_path.exists() else {}
-    expected_entry = (
-        expected.get("aggregates", {}).get("1024", {}).get("h-u") if expected else None
-    )
-    hashes = {
-        name: entry["sha256"] for name, entry in aggregates.items() if entry.get("available")
-    }
-    sizes = {
-        name: entry["bytes"] for name, entry in aggregates.items() if entry.get("available")
-    }
-    identical = len(set(hashes.values())) <= 1 and len(set(sizes.values())) <= 1
-    expected_ok = expected_entry is None or all(
-        entry["sha256"] == expected_entry.get("sha256")
-        and entry["bytes"] == expected_entry.get("bytes")
-        for entry in aggregates.values()
-        if entry.get("available")
-    )
-    reference = None
-    if args.reference:
-        ref = Path(args.reference)
-        reference = {
-            "path": str(ref),
-            "bytes": ref.stat().st_size,
-            "sha256": sha256_file(ref),
-            "matches": ref.stat().st_size in sizes.values()
-            and sha256_file(ref) in hashes.values(),
-        }
 
-    native = None
-    natver = BIN / "natver"
-    if natver.exists():
-        out = result_dir / "gates" / "natver-1024.json"
-        proc = sh(
-            [
-                str(natver),
-                "1024",
-                "--warmup",
-                "1",
-                "--reps",
-                "2",
-                "--seed",
-                "1",
-                "--json",
-                str(out),
-            ],
-            {
-                "OMP_NUM_THREADS": str(allocation["threads"]),
-                "OMP_PROC_BIND": "close",
-                "OMP_PLACES": "threads",
-            },
+    per_set = {}
+    for params in args.params:
+        records = make_records(binary, result_dir / "data", env, params)
+        aggregates = aggregate_all(configs, rows, prefix, allocation, records, out_dir, params)
+        verdicts = verify_all(configs, rows, prefix, allocation, records, aggregates, params)
+        negative, negative_tier = negative_check(
+            configs, rows, prefix, allocation, records, out_dir, params
         )
-        if proc.returncode == 0 and out.exists():
-            native = read_json(out)
-            native["ok"] = (
-                native["rejected_uncached"] == 0 and native["rejected_cached"] == 0
-            )
-        else:
-            native = {"ok": False, "error": (proc.stderr or "")[-2000:]}
+        threads = threads_check(
+            configs, rows, prefix, allocation, records, out_dir, params, aggregates
+        )
+        expected_entry = expected_for(expected, params)
+        available = [entry for entry in aggregates.values() if entry.get("available")]
+        hashes = {entry["sha256"] for entry in available}
+        sizes = {entry["bytes"] for entry in available}
+        identical = len(hashes) <= 1 and len(sizes) <= 1
+        expected_ok = expected_entry is None or all(
+            entry["sha256"] == expected_entry.get("sha256")
+            and entry["bytes"] == expected_entry.get("bytes")
+            for entry in available
+        )
+        reference = None
+        if args.reference and params == args.params[0]:
+            ref = Path(args.reference)
+            reference = {
+                "path": str(ref),
+                "bytes": ref.stat().st_size,
+                "sha256": sha256_file(ref),
+                "matches": ref.stat().st_size in sizes and sha256_file(ref) in hashes,
+            }
+        native = natver_check(params, allocation, result_dir)
+        per_set[params] = {
+            "aggregates": aggregates,
+            "verify": verdicts,
+            "negative_rejected": negative,
+            "negative_tier": negative_tier,
+            "threads": threads,
+            "all_configurations_identical": identical,
+            "expected": expected_entry,
+            "expected_ok": expected_ok,
+            "reference": reference,
+            "native": native,
+        }
 
     aerie = None
     aerie_bin = BIN / "aerie-falcon-bench"
@@ -413,52 +507,93 @@ def main():
         "cpuset": allocation["cpuset"],
         "tiers": [name for name, entry in rows.items() if entry["available"]],
         "simd_reports": reports,
-        "aggregates": aggregates,
-        "verify": verdicts,
-        "negative_rejected": negative,
-        "negative_tier": negative_tier,
-        "all_configurations_identical": identical,
-        "expected": expected_entry,
-        "expected_ok": expected_ok,
-        "reference": reference,
+        "params": per_set,
         "sde": sde,
-        "native": native,
         "aerie": aerie,
         "machine_warnings": state.get("warnings", []),
     }
     write_json(result_dir / "gates.json", report)
 
     if args.write_expected:
-        first = next(entry for entry in aggregates.values() if entry.get("available"))
-        document = {
-            "commit": pinned_commit(),
-            "relation": "h-u",
-            "aggregates": {
-                "1024": {"h-u": {"bytes": first["bytes"], "sha256": first["sha256"]}}
-            },
-            "per_configuration": {
-                name: {"bytes": entry["bytes"], "sha256": entry["sha256"]}
-                for name, entry in aggregates.items()
+        # Keep the entries of the sets not run; a file without set keys holds ML-DSA-44's.
+        document = dict(expected)
+        if "1024" in document.get("aggregates", {}):
+            document["aggregates"] = {"44": document["aggregates"]}
+            document["per_configuration"] = {"44": document.get("per_configuration", {})}
+        document["commit"] = pinned_commit()
+        document["relation"] = "h-u"
+        document["records"] = (
+            f"keygen-batch --params P --count 1024 --seed {KEY_SEED}; "
+            f"sign-batch --params P --count 1024 --seed {RECORD_SEED}"
+        )
+        document.setdefault("aggregates", {})
+        document.setdefault("per_configuration", {})
+        for params, result in per_set.items():
+            available = {
+                name: entry
+                for name, entry in result["aggregates"].items()
                 if entry.get("available")
-            },
-            "note": (
-                "Generated from the pinned commit by ./run.sh gates --write-expected. "
-                "Every configuration must reproduce these bytes."
-            ),
-        }
+            }
+            first = next(iter(available.values()))
+            document["aggregates"][params] = {
+                "1024": {"h-u": {"bytes": first["bytes"], "sha256": first["sha256"]}}
+            }
+            document["per_configuration"][params] = {
+                name: {"bytes": entry["bytes"], "sha256": entry["sha256"]}
+                for name, entry in available.items()
+            }
+        document["note"] = NOTE
         write_json(expected_path, document)
         print(f"wrote {expected_path}")
 
-    print("gates at N = 1024, H-u")
-    for name, entry in aggregates.items():
-        if entry.get("available"):
-            suffix = " (gate only)" if configs["rows"][name].get("gates_only") else ""
+    ok = True
+    for params, result in per_set.items():
+        print(f"gates at N = 1024, H-u, ML-DSA-{params}")
+        for name, entry in result["aggregates"].items():
+            if entry.get("available"):
+                suffix = " (gate only)" if configs["rows"][name].get("gates_only") else ""
+                verdict = "accept" if result["verify"].get(name) else "REJECT"
+                print(
+                    f"  {name:<7} {entry['bytes']} B  {entry['sha256']}  "
+                    f"verify={verdict}{suffix}"
+                )
+            else:
+                print(f"  {name:<7} n/a ({entry.get('reason')})")
+        negative = result["negative_rejected"]
+        print(
+            f"  negative check: {'rejected as expected' if negative else 'FAILED'} "
+            f"({result['negative_tier']})"
+        )
+        threads = result["threads"]
+        if threads:
             print(
-                f"  {name:<7} {entry['bytes']} B  {entry['sha256']}  "
-                f"verify={'accept' if verdicts.get(name) else 'REJECT'}{suffix}"
+                f"  threads {threads.get('threads')}: "
+                f"{'identical' if threads['ok'] else 'DIFFER'} ({threads['tier']})"
             )
-        else:
-            print(f"  {name:<7} n/a ({entry.get('reason')})")
+        print(f"  all configurations identical: {result['all_configurations_identical']}")
+        entry = result["expected"]
+        print(f"  expected file: {entry if entry else 'not present'}")
+        reference = result["reference"]
+        if reference:
+            print(
+                f"  reference {reference['path']}: {reference['bytes']} B "
+                f"{reference['sha256']} match={reference['matches']}"
+            )
+        native = result["native"]
+        if native:
+            print(
+                f"  natver: rejected {native.get('rejected_uncached')} uncached / "
+                f"{native.get('rejected_cached')} cached"
+            )
+        ok = ok and (
+            result["all_configurations_identical"]
+            and all(result["verify"].values())
+            and negative
+            and result["expected_ok"]
+            and (threads is None or threads["ok"])
+            and (native is None or native.get("ok"))
+            and (reference is None or reference["matches"])
+        )
     for name, entry in reports.items():
         if entry.get("available"):
             summary = entry["summary"]
@@ -466,14 +601,6 @@ def main():
                 f"  report {name:<7} cap={summary['cap']} "
                 f"mldsa={summary['mldsa_backend']} aerie={summary['aerie_backend']}"
             )
-    print(f"  negative check: {'rejected as expected' if negative else 'FAILED'} ({negative_tier})")
-    print(f"  all configurations identical: {identical}")
-    print(f"  expected file: {expected_entry if expected_entry else 'not present'}")
-    if reference:
-        print(
-            f"  reference {reference['path']}: {reference['bytes']} B "
-            f"{reference['sha256']} match={reference['matches']}"
-        )
     if sde.get("available"):
         parts = []
         for tier, run_result in sde["runs"].items():
@@ -487,25 +614,11 @@ def main():
         print("  sde: " + ", ".join(parts))
     else:
         print(f"  sde: skipped ({sde.get('reason')})")
-    if native:
-        print(
-            f"  natver: rejected {native.get('rejected_uncached')} uncached / "
-            f"{native.get('rejected_cached')} cached"
-        )
 
     sde_ok = not sde.get("available") or all(
         run_result.get("ok") for run_result in sde.get("runs", {}).values()
     )
-    ok = (
-        identical
-        and all(verdicts.values())
-        and negative
-        and expected_ok
-        and sde_ok
-        and (native is None or native.get("ok"))
-        and (reference is None or reference["matches"])
-        and (aerie is None or aerie["ok"])
-    )
+    ok = ok and sde_ok and (aerie is None or aerie["ok"])
     print("gates: PASS" if ok else "gates: FAIL")
     return 0 if ok else 1
 

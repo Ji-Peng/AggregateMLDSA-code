@@ -246,13 +246,20 @@ def build_aerie(offline, capped):
     return result
 
 
+# The natural verifier per ML-DSA parameter set (artifact/natver/Makefile).
+NATVER_BINARIES = {"44": "natver", "65": "natver65", "87": "natver87"}
+
+
 def build_natver():
     natver = ARTIFACT / "natver"
     run(["make", "-j", "6"], cwd=natver)
     BIN.mkdir(parents=True, exist_ok=True)
-    dst = BIN / "natver"
-    shutil.copy2(natver / "natver", dst)
-    return {"path": str(dst), "sha256": sha256_file(dst)}
+    built = {}
+    for params, name in NATVER_BINARIES.items():
+        dst = BIN / name
+        shutil.copy2(natver / name, dst)
+        built[params] = {"path": str(dst), "sha256": sha256_file(dst)}
+    return built
 
 
 def main():
@@ -282,9 +289,12 @@ def main():
     reports = collect_reports(configs)
 
     natver = build_natver()
-    natver_counts = objdump_counts(Path(natver["path"]))
-    if natver_counts["total"]:
-        raise SystemExit(f"natver contains AVX-512 instructions: {natver_counts}")
+    natver_counts = {}
+    for params, entry in natver.items():
+        counts = objdump_counts(Path(entry["path"]))
+        if counts["total"]:
+            raise SystemExit(f"natver ({params}) contains AVX-512 instructions: {counts}")
+        natver_counts[params] = counts
 
     aerie = None
     if not args.skip_aerie:
@@ -313,7 +323,9 @@ def main():
         "simd_reports": reports,
         "aerie": aerie,
         "natural_verifier": natver,
-        "avx512_checks": {"natver": {**natver_counts, "hard_failure": True}},
+        "avx512_checks": {
+            "natver": {params: {**counts, "hard_failure": True} for params, counts in natver_counts.items()}
+        },
         "warnings": warnings,
     }
     write_json(BUILD / "build.json", result)

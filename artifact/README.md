@@ -16,8 +16,8 @@ not an aggregate.
 cd artifact
 ./run.sh check            # tools, CPU features, sources, binaries
 ./run.sh fetch            # clone Aerie and pq-crystals/dilithium; verify SHAs
-./run.sh build            # the release binary, Aerie, natver
-./run.sh gates            # byte identity, acceptance, self-reports at 1K
+./run.sh build            # the release binary, Aerie, natver (ML-DSA-44, 65, 87)
+./run.sh gates            # byte identity, acceptance, self-reports at 1K, per set
 ./run.sh quick --smoke    # about five minutes of measurements after the build
 ./run.sh tables           # write paper-tables/*.tex
 ```
@@ -59,7 +59,7 @@ the same pin for commands started inside this directory.
 | `check` | tool and feature probe | seconds |
 | `fetch` | two git clones and `cargo fetch` | 2--10 min, network |
 | `build` | one release build of ours, Aerie's bench, natver | 5--20 min; the first build is the long one |
-| `gates` | 1K aggregates in every tier, verification, negative check, self-reports | 2--5 min |
+| `gates` | per parameter set (`--params 44,65,87`): 1K aggregates in every tier and on one thread, verification, negative check, natver; self-reports | 5--10 min |
 | `quick --smoke` | three tiers at 1K, one thread, Aerie (Falcon-512/1024) and native at 1K, 1+1 runs | 5--15 min after the build |
 | `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie (Falcon-512/1024) and native at 1K, 1+3 runs | 20--40 min after the build |
 | `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+5 warm runs | about 1 h after the build |
@@ -162,9 +162,10 @@ Everything lands in `artifact/results/<host>-<timestamp>/`:
   The probe only reads; it never writes sysfs.
 - `cpusets.json`: the three allocations, their CPU lists and L3 domains.
 - `build.json`: the release flags, binary hashes, the run-time self-report of
-  every tier, and the four AVX-512 counts for `natver`.
-- `gates.json`: the 1K aggregate hashes, verify verdicts, the negative check,
-  the self-reports and the SDE result.
+  every tier, and the four AVX-512 counts for each `natver` binary.
+- `gates.json`: per parameter set, the 1K aggregate hashes, verify verdicts,
+  the negative check and the one-thread check; the self-reports and the SDE
+  result.
 - `raw/<run-id>.json`: one cell, with every timed run and the selected
   kernels.
 - `summary.csv`: one row per cell with the statistics and flags.
@@ -191,8 +192,9 @@ decimal.
   are only comparable within one machine; the tier ratios are the portable
   part of the result.
 - Record generation is outside every timed region. It is deterministic
-  (seed 1) and the 1K aggregate bytes are checked against
-  `expected/hashes.json`.
+  (seed 1; the gates use keys from seed 42 and records from seed 43) and the
+  1K aggregate bytes of every parameter set are checked against
+  `expected/hashes.json`, keyed by set.
 
 ## Troubleshooting
 

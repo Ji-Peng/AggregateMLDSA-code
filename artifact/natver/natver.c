@@ -1,6 +1,7 @@
 /*
- * Batch verification throughput of the pq-crystals ML-DSA-44 AVX2
- * implementation, with OpenMP over signatures.
+ * Batch verification throughput of the pq-crystals ML-DSA AVX2
+ * implementation, with OpenMP over signatures. The parameter set is fixed at
+ * build time by DILITHIUM_MODE (2, 3, 5: ML-DSA-44, 65, 87; see Makefile).
  *
  * The dataset is deterministic (seeded SHAKE256 randomness). Verification is
  * measured twice: through the library's public crypto_sign_verify, which
@@ -32,6 +33,15 @@
 #include "natver.h"
 
 #define MLEN 64
+
+/* The ML-DSA parameter set of DILITHIUM_MODE. */
+#if DILITHIUM_MODE == 2
+#define NATVER_PARAMS "44"
+#elif DILITHIUM_MODE == 3
+#define NATVER_PARAMS "65"
+#elif DILITHIUM_MODE == 5
+#define NATVER_PARAMS "87"
+#endif
 
 typedef struct {
   polyvecl mat[K];
@@ -319,6 +329,7 @@ int main(int argc, char **argv) {
     }
     fprintf(f, "{\n");
     fprintf(f, "  \"tool\": \"natver\",\n");
+    fprintf(f, "  \"params\": \"%s\",\n", NATVER_PARAMS);
     fprintf(f, "  \"n\": %zu,\n", n);
     fprintf(f, "  \"threads\": %d,\n", omp_get_max_threads());
     fprintf(f, "  \"seed\": %llu,\n", (unsigned long long)seed);
