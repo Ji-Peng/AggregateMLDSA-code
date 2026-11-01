@@ -464,19 +464,21 @@ impl LanePublicData {
         let lambda = eq_correlation(coef2, coef3);
         let (eq2, eq3) = (eq_table(sig2), eq_table(sig3));
         let (k, l) = (self.k, self.l);
+        // The integer dots run on the SIMD kernel against `Lambda` held as planes.
+        let lambda_planes = agg_simd::buf::KPlanes::from_fn(N, |j| lambda[j]);
         let per_key: Vec<Vec<E>> = self
             .keys
             .par_iter()
             .map(|key| {
+                let mut ints = [0_i64; N];
                 (0..l)
                     .map(|s| {
                         (0..k).fold(E::zero(), |acc, rho| {
                             let row = &key.a[(rho * l + s) * N..(rho * l + s + 1) * N];
-                            let dot = row
-                                .iter()
-                                .zip(&lambda)
-                                .fold(E::zero(), |d, (&entry, &w)| d + w.mul_i64(i64::from(entry)));
-                            acc + gammas[rho] * dot
+                            for (x, &entry) in ints.iter_mut().zip(row) {
+                                *x = i64::from(entry);
+                            }
+                            acc + gammas[rho] * agg_simd::dot::k_int_dot(lambda_planes.planes(), &ints)
                         })
                     })
                     .collect()

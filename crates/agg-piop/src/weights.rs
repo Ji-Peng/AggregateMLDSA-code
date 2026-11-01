@@ -228,13 +228,34 @@ pub fn level1_lane_weights_at(manifest: &CommitmentManifest, m1: &SparseMatrix, 
     let eq_pos = eq_table(&r[..lane_vars]);
     let eq_low = eq_table(&r[lane_vars..lane_vars + low_sig]);
     let block = bridge::eq_evaluation(&p1[shape.level(1).rows_log2() as usize..], &r[lane_vars + low_sig..]);
-    let mut per_lane = vec![E::zero(); 1 << lane_bits];
-    for (y, &c) in c1.iter().enumerate() {
-        let pos = y & ((1 << lane_vars) - 1);
-        let lane = (y >> lane_vars) & ((1 << lane_bits) - 1);
-        let low = y >> pad_vars;
-        per_lane[lane] += c * eq_pos[pos] * eq_low[low];
-    }
+    // One pass over c_1 in parallel chunks of whole lane blocks, each summing its own
+    // per-lane partials; the partials add in chunk order.
+    const CHUNK: usize = 1 << 14;
+    let lanes = 1_usize << lane_bits;
+    let per_lane = c1
+        .par_chunks(CHUNK)
+        .enumerate()
+        .map(|(chunk, cells)| {
+            let mut part = vec![E::zero(); lanes];
+            for (k, &c) in cells.iter().enumerate() {
+                let y = chunk * CHUNK + k;
+                let pos = y & ((1 << lane_vars) - 1);
+                let lane = (y >> lane_vars) & (lanes - 1);
+                let low = y >> pad_vars;
+                part[lane] += c * eq_pos[pos] * eq_low[low];
+            }
+            part
+        })
+        .reduce(
+            || vec![E::zero(); lanes],
+            |mut a, b| {
+                for (x, y) in a.iter_mut().zip(b) {
+                    *x += y;
+                }
+                a
+            },
+        );
+    let mut per_lane = per_lane;
     per_lane.truncate(manifest.shape().lanes_k);
     per_lane.into_iter().map(|v| v * block).collect()
 }
