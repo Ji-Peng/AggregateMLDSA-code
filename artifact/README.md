@@ -62,7 +62,7 @@ the same pin for commands started inside this directory.
 | `gates` | 1K aggregates in every tier, verification, negative check, self-reports | 2--5 min |
 | `quick --smoke` | three tiers at 1K, one thread, Aerie and native at 1K, 1+1 runs | 5--15 min after the build |
 | `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie and native at 1K, 1+3 runs | 20--40 min after the build |
-| `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+10 warm runs | about 1 h after the build |
+| `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+5 warm runs | about 1 h after the build |
 
 `full` writes about 125 MB of raw JSON at 32K. Its longest cells are 1T
 proving. The full matrix took 51 minutes on one EPYC 9355 node (`xcni`) after

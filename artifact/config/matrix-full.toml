@@ -13,8 +13,8 @@ allocations = ["16C32T", "8C16T"]
 sizes = [32768]
 relation = "h-u"
 warmup = 1
-reps = 10
-processes = 2
+reps = 5
+processes = 1
 
 [[runs]]
 kind = "ours"
@@ -105,7 +105,7 @@ tag = "aerie"
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [8192, 32768]
 warmup = 1
-reps = 10
+reps = 5
 
 [[runs]]
 kind = "aerie"
@@ -114,7 +114,7 @@ backend = "avx2"
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [8192, 32768]
 warmup = 1
-reps = 10
+reps = 5
 
 [[runs]]
 kind = "native"
@@ -122,4 +122,4 @@ tag = "native"
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
 warmup = 1
-reps = 10
+reps = 5
