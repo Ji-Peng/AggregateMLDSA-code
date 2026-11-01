@@ -241,23 +241,22 @@ impl<P: ParamSet> PublicInstance<P> {
         }
         let key_of = |i: usize| Arc::clone(keys[slot[i]].as_ref().expect("checked above"));
 
-        let mut mus = vec![[0u8; TR_BYTES]; inputs.len()];
-        let mut challenges = Vec::with_capacity(inputs.len());
+        // `mu`, `c = SampleInBall(c~)` and `T = 2^d (c t1)` per record, in parallel; `T` goes
+        // straight into the flat buffer (fresh zeroed pages, first touched by the writers).
+        let (mus, challenges): (Vec<[u8; TR_BYTES]>, Vec<_>) = inputs
+            .par_iter()
+            .zip(&slot)
+            .map(|((_, msg, ct), &k)| {
+                let key = keys[k].as_deref().expect("checked above");
+                (crate::native::mu(&key.tr, msg, &[]), crate::native::sample_in_ball_for::<P>(ct.as_ref()))
+            })
+            .unzip();
         let mut t = vec![0_i32; inputs.len() * P::K * N];
-
-        for (i, (_, msg, ct)) in inputs.iter().enumerate() {
-            let key = key_of(i);
-            mus[i] = crate::native::mu(&key.tr, msg, &[]);
-            let c = crate::native::sample_in_ball_for::<P>(ct.as_ref());
-            challenges.push(c);
-        }
-
-        let (records_t, _) = t.as_chunks_mut::<N>();
-        for (i, c) in challenges.iter().enumerate() {
-            let key = key_of(i);
-            let chunk = &mut records_t[i * P::K..(i + 1) * P::K];
-            crate::expand::public_t_into_for::<P>(c, &key.t1, chunk);
-        }
+        t.par_chunks_mut(P::K * N).zip(&challenges).zip(&slot).for_each(|((out, c), &k)| {
+            let key = keys[k].as_deref().expect("checked above");
+            let (rows, _) = out.as_chunks_mut::<N>();
+            crate::expand::public_t_into_for::<P>(c, &key.t1, rows);
+        });
 
         let t = Arc::new(t);
         let records = mus
