@@ -497,3 +497,12 @@ beside the PIOP. `FLOCK_ZC_TIMING` prints `rounds 2+3 lookahead (message only)` 
 `round2-5 packed (lookahead)` on this route. `FLOCK_ZC_TAIL_LA=0` selects the one-round
 route for rounds 2+; the proof is byte-identical. Ignored micro-benchmark:
 `zerocheck::tests::sparse_lookahead_bench` (single thread, both routes).
+
+## 13. Prover-only: block rounds of the merged opening at the 256-bit and 128-bit widths
+
+`pcs.rs::block_round_all` (the `k - 1` block rounds of the block-first phase) ran its fold
+and message with the AVX-512 kernel `block_stats_x86::round_term` only; the AVX2 tier took
+the portable scalar loop. `block_stats_x86.rs::round_term_avx2` / `round_term_pclmul` are
+the same body over `simd::ghash2` / `ghash1` (two-lane and one-lane GF(2^128) multiply,
+lane-wise deferred reduction), selected by `simd::ghash_width()`; the folded parts and the
+message are field-identical. Test: `pcs::block_stats_x86::tests::narrow_round_term_kernels_match_portable`.

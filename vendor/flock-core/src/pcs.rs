@@ -1713,28 +1713,35 @@ fn block_round_all(
     let n_e = tw / 2;
     debug_assert!(cur <= n_e && cur.is_power_of_two());
     #[cfg(target_arch = "x86_64")]
-    let simd = crate::simd::ghash_width() == crate::simd::GhashWidth::Avx512;
-    #[cfg(not(target_arch = "x86_64"))]
-    let simd = false;
+    let width = crate::simd::ghash_width();
     arena
         .par_chunks_mut(tw)
         .map(|term| {
             let (a, s) = term.split_at_mut(n_e);
             let (a, s) = (&mut a[..cur], &mut s[..cur]);
+            // SAFETY (each arm): the width's features were checked at run time
+            // (AVX-512 implies sse4.1 on every AVX-512 CPU); equal lengths, a
+            // power of two at least four vectors long.
             #[cfg(target_arch = "x86_64")]
-            if simd && cur >= 16 {
-                // SAFETY: the AVX-512 tier was checked at run time (it implies
-                // sse4.1 on every AVX-512 CPU); equal lengths, a multiple of 16.
-                return unsafe { block_stats_x86::round_term(a, s, r, msg) };
+            match width {
+                crate::simd::GhashWidth::Avx512 if cur >= 16 => {
+                    return unsafe { block_stats_x86::round_term(a, s, r, msg) };
+                }
+                crate::simd::GhashWidth::Vpclmul256 if cur >= 8 => {
+                    return unsafe { block_stats_x86::round_term_avx2(a, s, r, msg) };
+                }
+                crate::simd::GhashWidth::Pclmul if cur >= 4 => {
+                    return unsafe { block_stats_x86::round_term_pclmul(a, s, r, msg) };
+                }
+                _ => {}
             }
-            let _ = simd;
             block_round_term_portable(a, s, r, msg)
         })
         .reduce(|| (F128::ZERO, F128::ZERO), |x, y| (x.0 + y.0, x.1 + y.1))
 }
 
 /// Portable [`block_round_all`] on one term.
-fn block_round_term_portable(
+pub(crate) fn block_round_term_portable(
     a: &mut [F128],
     s: &mut [F128],
     r: Option<F128>,

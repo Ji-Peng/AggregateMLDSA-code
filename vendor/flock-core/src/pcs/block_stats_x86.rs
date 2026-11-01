@@ -404,6 +404,84 @@ pub(super) unsafe fn round_term(
     (g1.fold().reduce(), gi.fold().reduce())
 }
 
+/// [`round_term`] at the 256-bit and 128-bit GF(2^128) widths: the same
+/// folds and message sums (deferred reduction lane-wise, reduced once per
+/// term), so the returned pair and the folded parts are field-identical.
+macro_rules! round_term_lanes {
+    ($name:ident, $lanes:ident, $feat:literal) => {
+        /// # Safety
+        /// The CPU has the features of this width; `a` and `s` have equal
+        /// lengths, a multiple of `4 * LANES`.
+        #[target_feature(enable = $feat)]
+        pub(super) unsafe fn $name(
+            a: &mut [F128],
+            s: &mut [F128],
+            r: Option<F128>,
+            msg: bool,
+        ) -> (F128, F128) {
+            use crate::simd::$lanes;
+            const N: usize = $lanes::LANES;
+            let len = a.len();
+            debug_assert!(len == s.len() && len.is_multiple_of(4 * N));
+            // SAFETY: every index below stays under `len` for both parts.
+            unsafe {
+                let mut g1 = $lanes::wide_zero();
+                let mut gi = $lanes::wide_zero();
+                match r {
+                    None => {
+                        if msg {
+                            for i in (0..len).step_by(2 * N) {
+                                let (ea, oa) = $lanes::even_odd(
+                                    $lanes::loadu(a.as_ptr().add(i)),
+                                    $lanes::loadu(a.as_ptr().add(i + N)),
+                                );
+                                let (es, os) = $lanes::even_odd(
+                                    $lanes::loadu(s.as_ptr().add(i)),
+                                    $lanes::loadu(s.as_ptr().add(i + N)),
+                                );
+                                $lanes::wide_acc(&mut g1, oa, os);
+                                $lanes::wide_acc(&mut gi, $lanes::xor(ea, oa), $lanes::xor(es, os));
+                            }
+                        }
+                    }
+                    Some(r) => {
+                        let rv = $lanes::splat(r);
+                        for i in (0..len).step_by(4 * N) {
+                            // In place: outputs [i/2, i/2 + 2N) are written
+                            // after inputs [i, i + 4N) are read.
+                            let mut out = [$lanes::zero(); 4];
+                            for (k, x) in [a.as_ptr(), s.as_ptr()].into_iter().enumerate() {
+                                for h in 0..2 {
+                                    let p = x.add(i + 2 * N * h);
+                                    let (e, o) = $lanes::even_odd($lanes::loadu(p), $lanes::loadu(p.add(N)));
+                                    out[2 * k + h] = $lanes::xor(e, $lanes::mul(rv, $lanes::xor(e, o)));
+                                }
+                            }
+                            $lanes::storeu(a.as_mut_ptr().add(i / 2), out[0]);
+                            $lanes::storeu(a.as_mut_ptr().add(i / 2 + N), out[1]);
+                            $lanes::storeu(s.as_mut_ptr().add(i / 2), out[2]);
+                            $lanes::storeu(s.as_mut_ptr().add(i / 2 + N), out[3]);
+                            if msg {
+                                let (ea, oa) = $lanes::even_odd(out[0], out[1]);
+                                let (es, os) = $lanes::even_odd(out[2], out[3]);
+                                $lanes::wide_acc(&mut g1, oa, os);
+                                $lanes::wide_acc(&mut gi, $lanes::xor(ea, oa), $lanes::xor(es, os));
+                            }
+                        }
+                    }
+                }
+                if !msg {
+                    return (F128::ZERO, F128::ZERO);
+                }
+                ($lanes::wide_fold(g1).reduce(), $lanes::wide_fold(gi).reduce())
+            }
+        }
+    };
+}
+
+round_term_lanes!(round_term_avx2, ghash2, "avx2,vpclmulqdq");
+round_term_lanes!(round_term_pclmul, ghash1, "pclmulqdq,sse4.1");
+
 /// `sum_r q[r] * eq[r]` (equal lengths).
 ///
 /// # Safety
@@ -667,6 +745,38 @@ mod tests {
                     (x + *a1 * *s1, y + (*a0 + *a1) * (*s0 + *s1))
                 });
             assert_eq!((g1, gi), (want1, wanti), "fused message len={len}");
+        }
+    }
+
+    /// The 256-bit and 128-bit block-round kernels fold and sum exactly as the
+    /// portable term round (message only, fold only, fused fold and message).
+    #[test]
+    fn narrow_round_term_kernels_match_portable() {
+        use super::{round_term_avx2, round_term_pclmul};
+        let mut rng = Rng::new(0xB10F);
+        for len in [4usize, 8, 16, 64, 256] {
+            let a0 = rng.f128_vec(len);
+            let s0 = rng.f128_vec(len);
+            let r = rng.f128();
+            for (rr, msg) in [(None, true), (Some(r), false), (Some(r), true)] {
+                let (mut a, mut s) = (a0.clone(), s0.clone());
+                let want = crate::pcs::block_round_term_portable(&mut a, &mut s, rr, msg);
+                let n = if rr.is_some() { len / 2 } else { len };
+                if simd::has(simd::VPCLMUL256) && len >= 8 {
+                    let (mut x, mut y) = (a0.clone(), s0.clone());
+                    // SAFETY: features checked; equal lengths, a multiple of 8.
+                    let got = unsafe { round_term_avx2(&mut x, &mut y, rr, msg) };
+                    assert_eq!(got, want, "avx2 len={len} r={} msg={msg}", rr.is_some());
+                    assert_eq!((&x[..n], &y[..n]), (&a[..n], &s[..n]), "avx2 fold len={len}");
+                }
+                if simd::has(simd::AVX2) {
+                    let (mut x, mut y) = (a0.clone(), s0.clone());
+                    // SAFETY: features checked; equal lengths, a multiple of 4.
+                    let got = unsafe { round_term_pclmul(&mut x, &mut y, rr, msg) };
+                    assert_eq!(got, want, "pclmul len={len} r={} msg={msg}", rr.is_some());
+                    assert_eq!((&x[..n], &y[..n]), (&a[..n], &s[..n]), "pclmul fold len={len}");
+                }
+            }
         }
     }
 
