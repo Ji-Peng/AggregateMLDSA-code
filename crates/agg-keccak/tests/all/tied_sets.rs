@@ -151,3 +151,24 @@ fn tied_proofs_are_bound_to_the_parameter_set() {
         .verify(&mu, &ct, &commitment, sd, &mats, &out.final_vectors, &[2; 32], &out.proof)
         .is_err());
 }
+
+/// Witness time of one full segment per set (2^13 records): ML-DSA-44 on the 8-way
+/// generator, ML-DSA-65 and ML-DSA-87 on the grouped engine path.
+#[test]
+#[ignore = "measurement; run with --release --ignored --nocapture"]
+fn tied_witness_times_per_set() {
+    fn time<P: ParamSet>() {
+        let gate = sponge_gate_for(P::SET);
+        let n = 1 << 13;
+        let part = TiedPart::new_part(&gate, n, 13, 0, Profile::Fast);
+        let mut rng = Rng::new(1);
+        let records: Vec<SpongeRecord<P>> = (0..n).map(|_| random_record(&mut rng)).collect();
+        let _ = part.honest_parts(&records);
+        let t = std::time::Instant::now();
+        let _ = part.honest_parts(&records);
+        eprintln!("{} witness of 2^13 records: {:.1?}", P::NAME, t.elapsed());
+    }
+    time::<agg_witness::params::Set44>();
+    time::<Set65>();
+    time::<Set87>();
+}
