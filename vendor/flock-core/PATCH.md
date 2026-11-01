@@ -526,3 +526,7 @@ AVX-512 and a plain copy otherwise, so the AVX2 tier paid a read-for-ownership o
 codeword (512 MiB for the level-1 Ligerito commit at 32K). Below AVX-512 it now uses the
 16-byte SSE2 streaming stores of `lane_blocked.rs::stream_copy`, with the store fence on
 every x86-64 CPU. The codeword is unchanged.
+
+Correction to section 12: at 32K the packed-row passes cover about 70M live rows per table
+(the round-3 output of the one-round route), so rounds 2+ move about 18 GB on the one-round
+route and about 9 GB on the lookahead route (est.); the halving stands.
