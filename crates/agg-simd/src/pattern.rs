@@ -800,7 +800,7 @@ struct WideAccs<V> {
     products: [[(crate::wide::Acc<V>, crate::wide::Acc<V>); 16]; 4],
 }
 
-/// Reduce the used accumulators of `acc` into `sums` (block-local `K` sums) and clear them.
+/// Reduce the used accumulators of `acc` into `sums` (running `K` sums) and clear them.
 /// A function, not a closure: closures do not inherit the entry point's target features.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]

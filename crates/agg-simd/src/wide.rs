@@ -361,18 +361,15 @@ impl Simd for W4 {
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn add_mod(a: __m256i, b: __m256i) -> __m256i {
-        // SAFETY: AVX2 is enabled.
-        {
-            // a + b - p = a - (p - b): exact when a >= p - b, else add p back. With the sign
-            // bits flipped (x ^ 2^63 = x + 2^63 mod 2^64) the unsigned order is the signed one:
-            // (p - b) ^ 2^63 = (p ^ 2^63) - b, and the difference of two flipped values is
-            // the difference of the values.
-            let a_flipped = _mm256_xor_si256(a, _mm256_set1_epi64x(SIGN));
-            let nb_flipped = _mm256_sub_epi64(_mm256_set1_epi64x((crate::P as i64) ^ SIGN), b);
-            let t = _mm256_sub_epi64(a_flipped, nb_flipped);
-            let borrow = _mm256_cmpgt_epi64(nb_flipped, a_flipped);
-            _mm256_add_epi64(t, _mm256_and_si256(borrow, _mm256_set1_epi64x(crate::P as i64)))
-        }
+        // a + b - p = a - (p - b): exact when a >= p - b, else add p back. With the sign
+        // bits flipped (x ^ 2^63 = x + 2^63 mod 2^64) the unsigned order is the signed one:
+        // (p - b) ^ 2^63 = (p ^ 2^63) - b, and the difference of two flipped values is
+        // the difference of the values.
+        let a_flipped = _mm256_xor_si256(a, _mm256_set1_epi64x(SIGN));
+        let nb_flipped = _mm256_sub_epi64(_mm256_set1_epi64x((crate::P as i64) ^ SIGN), b);
+        let t = _mm256_sub_epi64(a_flipped, nb_flipped);
+        let borrow = _mm256_cmpgt_epi64(nb_flipped, a_flipped);
+        _mm256_add_epi64(t, _mm256_and_si256(borrow, _mm256_set1_epi64x(crate::P as i64)))
     }
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -928,10 +925,26 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// Canonical values with the edge cases of the 32-bit halves and of p.
+    /// Canonical values with the edge cases of the 32-bit halves, of p and of the sign bit (the
+    /// AVX2 canonical step and add mod p decide by bit 63).
     fn values(n: usize, seed: &mut u64) -> Vec<u64> {
-        const EDGES: [u64; 10] =
-            [0, 1, 58, 59, 0xffff_ffff, 1 << 32, (1 << 32) + 1, P - 1, P - 2, P - (1 << 32)];
+        const EDGES: [u64; 15] = [
+            0,
+            1,
+            58,
+            59,
+            0xffff_ffff,
+            1 << 32,
+            (1 << 32) + 1,
+            P - 1,
+            P - 2,
+            P - (1 << 32),
+            (1 << 63) - 59,
+            (1 << 63) - 1,
+            1 << 63,
+            (1 << 63) + 1,
+            (1 << 63) + 58,
+        ];
         (0..n).map(|i| if i % 3 == 0 { EDGES[(i / 3) % EDGES.len()] } else { random(seed) % P }).collect()
     }
 
