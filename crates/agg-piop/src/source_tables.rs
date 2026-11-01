@@ -374,6 +374,9 @@ struct Encoder {
     narrow: usize,
     shape: SetShape,
     w1_what: &'static str,
+    /// Per value: the shift form and the alphabet bounds of each digit, when every value has
+    /// one (the lane path of [`Encoder::encode_lane_rows`]).
+    shift: Option<[(ShiftForm, Vec<(i64, i64)>); 3]>,
 }
 
 impl Encoder {
@@ -422,7 +425,26 @@ impl Encoder {
             narrow: manifest.group(GroupRole::Main).polynomial_count(),
             shape,
             w1_what: if shape.w1_bits == 6 { "w1' above six bits" } else { "w1' above four bits" },
+            shift: None,
         }
+        .with_shift_forms(manifest)
+    }
+
+    /// Resolve the shift forms (the sets with polynomial lanes without H-FIPS, whose rows are
+    /// whole lanes).
+    fn with_shift_forms(mut self, manifest: &CommitmentManifest) -> Self {
+        if !manifest.has_lanes() || self.fips.is_some() || self.shape.d_vec != 0 {
+            return self;
+        }
+        let forms: Option<Vec<_>> = self
+            .values
+            .iter()
+            .map(|(form, _, _)| {
+                ShiftForm::of(form).map(|f| (f, (0..form.len()).map(|k| (form.alphabet(k).min(), form.alphabet(k).max())).collect()))
+            })
+            .collect();
+        self.shift = forms.and_then(|f| f.try_into().ok());
+        self
     }
 
     /// Decompose `x` by value `value`'s form into its slots of lane `lane` at cell `pos`.
@@ -519,6 +541,139 @@ impl Encoder {
             return Err(SourceTableError::Encode("hint weight above omega"));
         }
         Ok(hint_slack)
+    }
+}
+
+/// A value form whose bases are powers of two, decomposed with shifts and masks (the forms of
+/// relation H-u for the sets with polynomial lanes): the digits equal the form's
+/// `decompose_into`, and `bounds` are the form's alphabets.
+#[derive(Clone, Copy, Debug)]
+enum ShiftForm {
+    /// `ValueForm::DigitSlack` with one unsigned low digit of base `2^low_bits`.
+    DigitSlack { low_bits: u32, mid_half: i64, threshold: i64, slack_weight: i64, offset: i64 },
+    /// `ValueForm::Radix` with digits of base `2^bits`.
+    Radix { bits: u32, digits: usize, shift: i64 },
+}
+
+impl ShiftForm {
+    /// The shift form of `form`, if its bases allow one.
+    fn of(form: &ValueForm) -> Option<Self> {
+        match form {
+            ValueForm::DigitSlack(l)
+                if l.low.len() == 1 && !l.low.signed && l.low.bases[0].is_power_of_two() && l.mid_base % 2 == 0 =>
+            {
+                Some(Self::DigitSlack {
+                    low_bits: l.low.bases[0].trailing_zeros(),
+                    mid_half: i64::from(l.mid_base / 2),
+                    threshold: l.low.product() * i64::from(l.mid_base),
+                    slack_weight: l.slack_weight,
+                    offset: l.offset,
+                })
+            }
+            ValueForm::Radix(l) if !l.is_empty() && l.bases.iter().all(|&b| b == l.bases[0] && b.is_power_of_two()) => {
+                Some(Self::Radix {
+                    bits: l.bases[0].trailing_zeros(),
+                    digits: l.len(),
+                    shift: if l.signed { l.product() / 2 } else { 0 },
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The digits of `x` into `out[..len]`: `DigitSlack` as `y = x + offset`, `a = [y >=
+    /// threshold]`, `rest = y - w a`, `mid = floor(rest / 2^j)`, the low digit `rest mod 2^j`
+    /// stored balanced; `Radix` as `y = x + shift` peeled base `2^j` from the bottom, the top
+    /// digit taking the excess. Floor division by `2^j` is the arithmetic shift.
+    #[inline(always)]
+    fn decompose(self, x: i64, out: &mut [i64; MAX_DIGITS]) {
+        match self {
+            Self::DigitSlack { low_bits, mid_half, threshold, slack_weight, offset } => {
+                let y = x + offset;
+                let a = i64::from(y >= threshold);
+                let rest = y - slack_weight * a;
+                let mid = rest >> low_bits;
+                out[0] = (rest & ((1 << low_bits) - 1)) - (1 << (low_bits - 1));
+                out[1] = mid - mid_half;
+                out[2] = a;
+            }
+            Self::Radix { bits, digits, shift } => {
+                let half = 1_i64 << (bits - 1);
+                let mut y = x + shift;
+                for slot in out.iter_mut().take(digits - 1) {
+                    *slot = (y & ((1 << bits) - 1)) - half;
+                    y >>= bits;
+                }
+                out[digits - 1] = y - half;
+            }
+        }
+    }
+}
+
+impl Encoder {
+    /// [`Encoder::encode`] for the engine witness of a set with polynomial lanes (`z` per
+    /// column, `(w1', u, v)` per row), with the shift forms; `None` when the encoder has none.
+    /// The cells and errors are [`Encoder::encode`]'s.
+    fn encode_lane_rows(
+        &self,
+        z: &[agg_mldsa_simd::Poly32],
+        rows: &[agg_mldsa_simd::FinishOut],
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
+    ) -> Option<Result<i64, SourceTableError>> {
+        let shift = self.shift.as_ref()?;
+        Some(self.encode_lane_cells(shift, z, rows, wide, narrow))
+    }
+
+    fn encode_lane_cells(
+        &self,
+        shift: &[(ShiftForm, Vec<(i64, i64)>); 3],
+        z: &[agg_mldsa_simd::Poly32],
+        rows: &[agg_mldsa_simd::FinishOut],
+        wide: &mut [&mut [MaybeUninit<i32>]],
+        narrow: &mut [&mut [MaybeUninit<i8>]],
+    ) -> Result<i64, SourceTableError> {
+        let mut put = |value: usize, lane: usize, cells: &[i32; N]| -> Result<(), SourceTableError> {
+            let (form, bounds) = &shift[value];
+            let (_, slots, what) = &self.values[value];
+            let mut digits = [0_i64; MAX_DIGITS];
+            for (pos, &x) in cells.iter().enumerate() {
+                form.decompose(i64::from(x), &mut digits);
+                if digits.iter().zip(bounds).any(|(&d, &(min, max))| d < min || d > max) {
+                    return Err(SourceTableError::Encode(what));
+                }
+                for (&slot, &digit) in slots[lane].iter().zip(&digits) {
+                    match slot {
+                        // Alphabet-checked digits: 16-bit wide, small narrow.
+                        Slot::Wide(c) => {
+                            wide[c][pos].write(digit as i32);
+                        }
+                        Slot::Narrow(c) => {
+                            narrow[c][pos].write(digit as i8);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        for (s, poly) in z.iter().enumerate() {
+            put(0, s, &poly.0)?;
+        }
+        for (rho, row) in rows.iter().enumerate() {
+            put(1, rho, &row.u.0)?;
+            put(2, rho, &row.v.0)?;
+        }
+        for (rho, row) in rows.iter().enumerate() {
+            if row.w1.iter().any(|&w| usize::from(w) >> self.shape.w1_bits != 0) {
+                return Err(SourceTableError::Encode(self.w1_what));
+            }
+            for (t, slots) in self.bits.iter().enumerate() {
+                for (cell, &w) in narrow[slots[rho]].iter_mut().zip(&row.w1) {
+                    cell.write(((w >> t) & 1) as i8);
+                }
+            }
+        }
+        Ok(OMEGA as i64)
     }
 }
 
@@ -837,6 +992,12 @@ impl MainTables {
                 .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
             let mut slack = Vec::with_capacity(views.len());
             for (k, (wide, narrow)) in views.iter_mut().enumerate() {
+                if let Some(w) = derived.get(k) {
+                    if let Some(encoded) = encoder.encode_lane_rows(&w.z, &w.rows, wide, narrow) {
+                        slack.push(encoded?);
+                        continue;
+                    }
+                }
                 let values = match derived.get(k) {
                     None => RecordValues::<P>::zeroed(),
                     Some(w) => {
@@ -1561,6 +1722,39 @@ mod lane_tests {
     use agg_witness::bridge::SparseMatrix;
     use agg_witness::params::{Set65, Set87};
     use jolt_field::Ring;
+
+    /// The shift forms decompose as the forms do, at the alphabet edges and beyond.
+    #[test]
+    fn shift_forms_match_the_value_forms() {
+        for set in [Set::S65, Set::S87] {
+            let manifest = CommitmentManifest::for_set(set, 64, Relation::Hu).unwrap();
+            let encoder = Encoder::new(&manifest);
+            let shift = encoder.shift.as_ref().expect("shift forms for the lane sets");
+            for ((form, _, _), (fast, bounds)) in encoder.values.iter().zip(shift) {
+                let (lo, hi) = (-(1_i64 << 31), (1_i64 << 31) - 1);
+                let mut probes: Vec<i64> = vec![lo, hi, 0, -1, 1];
+                for edge in [1_i64 << 15, 1 << 16, 1 << 19, 523_267, 523_777, 190_465, 1 << 30] {
+                    for d in -2..=2 {
+                        probes.extend([edge + d, -edge + d]);
+                    }
+                }
+                let mut x = 0x9e37_79b9_i64;
+                for _ in 0..4096 {
+                    x = (x * 6_364_136_223_846_793 + 1) % (1 << 33);
+                    probes.push(x - (1 << 32) / 2);
+                }
+                for x in probes {
+                    let mut want = [0_i64; MAX_DIGITS];
+                    form.decompose_into(x, &mut want[..form.len()]);
+                    let mut got = [0_i64; MAX_DIGITS];
+                    fast.decompose(x, &mut got);
+                    assert_eq!(got[..form.len()], want[..form.len()], "{set:?} x = {x}");
+                    let inside = got.iter().zip(bounds).all(|(&d, &(min, max))| min <= d && d <= max);
+                    assert_eq!(inside, form.in_alphabets(&want[..form.len()]), "{set:?} x = {x}");
+                }
+            }
+        }
+    }
 
     /// Five live records of `P` (eight with padding), their instance, signatures and tables.
     fn batch<P: ParamSet>(seed: u64) -> (CommitmentManifest, Vec<agg_witness::gen::Record>, PublicInstance<P>, MainTables) {
