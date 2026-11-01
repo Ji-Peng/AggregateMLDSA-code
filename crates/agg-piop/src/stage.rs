@@ -427,7 +427,7 @@ pub fn prove_stage_drawn<'a>(
     for (g, group) in spec.groups.iter().enumerate() {
         let build = std::time::Instant::now();
         let mut lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
-        let mut instances: Vec<GroupInstance> = group
+        let instances: Vec<GroupInstance> = group
             .instances
             .iter()
             .map(|instance| GroupInstance {
@@ -725,11 +725,12 @@ impl StageGroup<'_> {
     fn consistent(&self) -> bool {
         match self {
             Self::Generic(_) => true,
-            // The split group keeps its factors rather than the materialized `w_1` lane, so
-            // the prover cannot recompute the terminal values without undoing the split.
-            // The verifier checks them independently through `level1_weight_at`, and the
-            // equivalence test in `split_weight` pins the messages, claim and terminals
-            // against the materialized generic group.
+            // These groups keep factored weights or folded lanes rather than the materialized
+            // lanes, so the prover cannot recompute the terminal values without undoing them.
+            // The verifier evaluates every weight itself (`level1_weight_at`,
+            // `level1_lane_weights_at`, `lane_weights_at`, `ring_weights_at`), and the
+            // equivalence tests pin the messages, claims and terminals against the
+            // materialized generic group.
             Self::Split(_) | Self::LaneSplit(_) | Self::RankOne(_) | Self::Folded(_) => true,
             Self::Pending => unreachable!("a built group"),
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),

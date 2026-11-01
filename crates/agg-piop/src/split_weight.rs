@@ -766,7 +766,8 @@ impl<'a> RankOneGroup<'a> {
             || !z.is_power_of_two()
             || !h.is_power_of_two()
             || z * h != 1 << rounds
-            || constant.abs() > 1 << 40
+            || affine.len() > 1 << 10
+            || constant.unsigned_abs() > 1 << 40
         {
             return None;
         }
@@ -786,13 +787,18 @@ impl<'a> RankOneGroup<'a> {
         // Coefficients by lane; the weight lane carries none.
         let mut combination: Vec<(Source<'a>, i64)> = Vec::new();
         for &(l, c) in affine {
-            if l == weight_lane || l >= lanes.len() || c.abs() > 1 << 20 {
+            if l == weight_lane || l >= lanes.len() || c.unsigned_abs() > 1 << 20 {
                 return None;
             }
             let Lane::Source(source) = &lanes[l] else { return None };
+            if matches!(source, Source::Bytes { map, .. } if map.iter().any(|v| v.unsigned_abs() > 1 << 31)) {
+                return None;
+            }
             combination.push((*source, c));
         }
-        // D[lo] = sum_hi high[hi] g(lo, hi): |g| < 2^53, one reduced product per cell.
+        // D[lo] = sum_hi high[hi] g(lo, hi): with at most 2^10 terms, coefficients of at most
+        // 2^20, cells of at most 2^31 (an `i32`, or a byte-map entry checked above) and a
+        // constant of at most 2^40, |g| <= 2^61 + 2^40 < 2^62; one reduced product per cell.
         let d = (0..h)
             .into_par_iter()
             .step_by(RANK_ONE_CHUNK)

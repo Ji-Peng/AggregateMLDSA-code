@@ -731,7 +731,6 @@ impl RingInputs<'_> {
     }
 }
 
-/// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
 /// The lane ring weights `w_A^(s)` of the sets with polynomial lanes, in the layout of the
 /// stage kernels.
 enum RingWeights {
@@ -754,6 +753,7 @@ impl RingWeights {
     }
 }
 
+/// Prove stage 3. `points` holds `tau, r^(1), r^(2)` and the lookup stack points;
 /// `tables` holds `w_A` (ML-DSA-44) and `W`; `ring` the ring inputs, which the caller may
 /// compute before the join because they depend only on `r^(2)` and public data.
 #[allow(clippy::too_many_arguments)]

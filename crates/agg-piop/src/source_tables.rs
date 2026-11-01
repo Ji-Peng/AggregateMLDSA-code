@@ -560,7 +560,7 @@ impl ShiftForm {
     fn of(form: &ValueForm) -> Option<Self> {
         match form {
             ValueForm::DigitSlack(l)
-                if l.low.len() == 1 && !l.low.signed && l.low.bases[0].is_power_of_two() && l.mid_base % 2 == 0 =>
+                if l.low.len() == 1 && !l.low.signed && l.low.bases[0].is_power_of_two() && l.low.bases[0] > 1 && l.mid_base % 2 == 0 =>
             {
                 Some(Self::DigitSlack {
                     low_bits: l.low.bases[0].trailing_zeros(),
@@ -570,7 +570,7 @@ impl ShiftForm {
                     offset: l.offset,
                 })
             }
-            ValueForm::Radix(l) if !l.is_empty() && l.bases.iter().all(|&b| b == l.bases[0] && b.is_power_of_two()) => {
+            ValueForm::Radix(l) if !l.is_empty() && l.bases.iter().all(|&b| b == l.bases[0] && b.is_power_of_two() && b > 1) => {
                 Some(Self::Radix {
                     bits: l.bases[0].trailing_zeros(),
                     digits: l.len(),
