@@ -24,7 +24,7 @@ fn measure(mut f: impl FnMut(), n: usize) -> f64 {
     samples[2]
 }
 #[test]
-#[ignore = "kernel timing benchmark; run with: cargo test --release -p agg-simd --test timing -- --ignored --nocapture"]
+#[ignore = "kernel timing benchmark; run with: cargo test --release -p agg-simd --test all timing:: -- --ignored --nocapture"]
 #[cfg(target_arch = "x86_64")]
 fn timing() {
     println!(
@@ -124,7 +124,7 @@ fn timing() {
 /// selects (run once per tier, `AGG_ISA=scalar` for the portable reference): ticks per item
 /// (an output row or a leaf quartet), single thread.
 #[test]
-#[ignore = "kernel timing benchmark; run with: AGG_ISA=<tier> cargo test --release -p agg-simd --test timing engine -- --ignored --nocapture"]
+#[ignore = "kernel timing benchmark; run with: AGG_ISA=<tier> cargo test --release -p agg-simd --test all timing::engine -- --ignored --nocapture"]
 #[cfg(target_arch = "x86_64")]
 fn engine_timing() {
     use agg_simd::{
@@ -192,7 +192,7 @@ fn engine_timing() {
 /// shapes of the prover's large passes, on the backend `AGG_ISA` selects: ticks per output
 /// row, single thread (`RAYON_NUM_THREADS=1`).
 #[test]
-#[ignore = "pass timing benchmark; run with: RAYON_NUM_THREADS=1 AGG_ISA=<tier> cargo test --release -p agg-simd --test timing passes -- --ignored --nocapture"]
+#[ignore = "pass timing benchmark; run with: RAYON_NUM_THREADS=1 AGG_ISA=<tier> cargo test --release -p agg-simd --test all timing::passes -- --ignored --nocapture"]
 #[cfg(target_arch = "x86_64")]
 fn passes_timing() {
     use agg_simd::{

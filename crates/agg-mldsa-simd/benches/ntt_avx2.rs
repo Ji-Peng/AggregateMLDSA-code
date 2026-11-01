@@ -1,3 +1,5 @@
+// Every comparison needs the C reference (`AGG_CREF_SRC`); without it the helpers are unused.
+#![cfg_attr(not(cref), allow(dead_code, unused_imports))]
 mod common;
 use agg_mldsa_simd::{
     dispatch::{Backend, Engine},

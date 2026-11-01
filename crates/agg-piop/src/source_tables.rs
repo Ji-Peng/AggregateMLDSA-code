@@ -46,7 +46,7 @@ use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
 use agg_witness::hfips::honest_coeff;
 use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
-use agg_witness::padding::{main_index, Geometry, GeometryError};
+use agg_witness::padding::{Geometry, GeometryError};
 use agg_witness::params::{ParamSet, Set, Set44, GAMMA2, K, L, N, OMEGA, W1_BITS};
 use rayon::prelude::*;
 
@@ -1044,12 +1044,6 @@ pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
     GAMMA2 * s + l + 1 - GAMMA2 - 2 * GAMMA2 * delta - e
 }
 
-/// `x = j + 256 rho + 1024 i` (re-exported for tests and tools).
-#[must_use]
-pub fn main_cell(j: usize, rho: usize, i: usize) -> usize {
-    main_index(j, rho, i)
-}
-
 /// H-FIPS's hint slack as a `D_2` table (`docs/h-exact.md`): `u_h(i)` at index
 /// `i 2^(d_2 - d_sig)` (the low `d_2 - d_sig` variables of `D_2` are position variables when
 /// `d_sig < 13`), zero elsewhere.
@@ -1496,12 +1490,6 @@ impl<'a> SourceTables<'a> {
     /// The lookup stacks.
     pub fn lookup_stacks(&self) -> Result<Vec<LookupStack<'a>>, LookupError> {
         lookup_stacks(self.manifest, self.main, self.bridge)
-    }
-
-    /// The looked-up columns of stack `stack`, in slot order.
-    #[must_use]
-    pub fn stack_cells(&self, stack: usize) -> Vec<Cells<'a>> {
-        self.manifest.stack_columns(stack).into_iter().map(|c| self.column(c)).collect()
     }
 }
 

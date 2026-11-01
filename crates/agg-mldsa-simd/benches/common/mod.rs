@@ -2,7 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::hint::black_box;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -72,18 +71,6 @@ pub fn measure_kernel<F: FnMut()>(mut f: F) -> TimingStats {
         min: trials[0],
         max: trials[NUM_TRIALS - 1],
     }
-}
-
-/// Measures empty call overhead in TSC ticks.
-#[inline(never)]
-fn empty_call() {
-    black_box(());
-}
-
-/// Verifies that the TSC measurement harness overhead is within bounds (<= 40 ticks).
-pub fn harness_empty_call_ticks() -> f64 {
-    let stats = measure_kernel(empty_call);
-    stats.median
 }
 
 /// Prints system information: CPU model, rustc version, and gcc version.

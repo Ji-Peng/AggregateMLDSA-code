@@ -82,16 +82,6 @@ pub fn high_bits(r: i64) -> i64 {
     high_bits_for::<Set44>(r)
 }
 
-/// LowBits(r) (Algorithm 38) for parameter set P.
-pub fn low_bits_for<P: ParamSet>(r: i64) -> i64 {
-    decompose_for::<P>(r).1
-}
-
-/// LowBits(r) (Algorithm 38).
-pub fn low_bits(r: i64) -> i64 {
-    low_bits_for::<Set44>(r)
-}
-
 /// MakeHint(z, r) (Algorithm 39) for parameter set P.
 pub fn make_hint_for<P: ParamSet>(z: i64, r: i64) -> bool {
     high_bits_for::<P>(r) != high_bits_for::<P>(r + z)
@@ -208,14 +198,6 @@ pub fn hint_bit_pack_for<P: ParamSet>(h: &P::SmallK) -> Vec<u8> {
         y[P::OMEGA + i] = index as u8;
     }
     y
-}
-
-/// HintBitPack(h) (Algorithm 20). Panics if the weight exceeds omega.
-pub fn hint_bit_pack(h: &SmallK) -> [u8; OMEGA + K] {
-    let y = hint_bit_pack_for::<Set44>(h);
-    let mut out = [0u8; OMEGA + K];
-    out.copy_from_slice(&y);
-    out
 }
 
 /// HintBitUnpack(y) (Algorithm 21) for parameter set P; `None` is the FIPS symbol "bottom".

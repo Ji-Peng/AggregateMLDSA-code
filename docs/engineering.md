@@ -153,7 +153,7 @@ remove the AVX2 instructions that the compiler may emit outside the dispatched p
 The kernels use four interleaved blocks of eight F_p elements, 7 IFMA multiply-adds for the
 product and 2 for the fold by 59, and schoolbook products with two lazy reductions for K.
 Dots accumulate unreduced radix-2^51 limbs and flush every 1,024 F_p or 512 K products.
-Their scalar fallbacks are the oracle: `crates/agg-simd/tests/differential.rs` compares every
+Their scalar fallbacks are the oracle: `crates/agg-simd/tests/all/differential.rs` compares every
 kernel with the scalar path at the flush boundaries, at the tail, and on worst-case values,
 and the proofs are byte-identical whichever path runs.
 
