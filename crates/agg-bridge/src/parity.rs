@@ -483,10 +483,33 @@ pub fn compute_direct_four(
     let Some(four_bits) = agg_simd::digits::pack_four_bits(lanes) else {
         return Ok(None);
     };
-    let domains = shape.domains(lanes[0].len());
+    compute_direct_four_packed(shape, &four_bits, matrices, lookup_shift, slots)
+}
+
+/// [`compute_direct_four`] on the bridge inputs already packed as nibbles (`four_bits[i] =
+/// sum_t b_t[i] << t`, every lane a bit); `Ok(None)` if the shape is not a four-lane shape
+/// whose level-1 and level-2 caps fit the packed fields.
+pub fn compute_direct_four_packed(
+    shape: &Shape,
+    four_bits: &[u8],
+    matrices: &BridgeMatrices,
+    lookup_shift: i32,
+    slots: [usize; 2],
+) -> Result<Option<DirectLaneTables>, BridgeError> {
+    if !shape.matches(matrices) {
+        return Err(BridgeError::Shape);
+    }
+    if !shape.row_weights_ok(matrices) {
+        return Err(BridgeError::RowWeight);
+    }
+    if shape.lanes != 4 || shape.levels[..2].iter().any(|l| l.weight_cap >= 1 << 16) || slots.iter().any(|&s| s < 4) {
+        return Ok(None);
+    }
+    debug_assert!(four_bits.iter().all(|&b| b < 16), "nibbles");
+    let domains = shape.domains(four_bits.len());
     let (l1, l2, l3) = (shape.level(1), shape.level(2), shape.level(3));
     let (y1, level1_carries) =
-        accumulate_level_four(&four_bits, &matrices.m1, domains.blocks1, l1.cols, l1.rows, lookup_shift, slots[0]);
+        accumulate_level_four(four_bits, &matrices.m1, domains.blocks1, l1.cols, l1.rows, lookup_shift, slots[0]);
     let y1_refs: [&[i8]; 4] = std::array::from_fn(|t| y1[t].as_slice());
     let four_d1 = agg_simd::digits::pack_four_bits(&y1_refs).expect("y1 parities are bits");
     let (y2, level2_carries) =
