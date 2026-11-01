@@ -360,22 +360,38 @@ impl Base {
 }
 unsafe fn stream_copy(dst: *mut F128, src: &[F128]) {
     #[cfg(target_arch = "x86_64")]
-    if crate::simd::has(crate::simd::AVX512F) {
-        // SAFETY: forwarded contract.
-        unsafe { x86::stream_copy(dst, src) };
-        return;
+    {
+        if crate::simd::has(crate::simd::AVX512F) {
+            // SAFETY: forwarded contract.
+            unsafe { x86::stream_copy(dst, src) };
+            return;
+        }
+        // Below AVX-512: 16-byte streaming stores (SSE2, every x86-64 CPU), so
+        // the codeword written here costs no read-for-ownership either.
+        use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_stream_si128};
+        for (i, v) in src.iter().enumerate() {
+            // SAFETY: element i of both lies inside the ranges of the contract;
+            // F128 is 16 bytes and 16-byte aligned.
+            unsafe {
+                let x = _mm_loadu_si128(core::ptr::from_ref(v).cast::<__m128i>());
+                _mm_stream_si128(dst.add(i).cast::<__m128i>(), x);
+            }
+        }
     }
+    #[cfg(not(target_arch = "x86_64"))]
     // SAFETY: forwarded contract.
-    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len())
+    };
 }
 
 /// Order this thread's streaming stores before later reads.
 fn sfence() {
     #[cfg(target_arch = "x86_64")]
-    if crate::simd::has(crate::simd::AVX512F) {
-        // SAFETY: plain fence.
-        unsafe { core::arch::x86_64::_mm_sfence() };
-    }
+    // SAFETY: a plain store fence (SSE, every x86-64 CPU).
+    unsafe {
+        core::arch::x86_64::_mm_sfence()
+    };
 }
 
 #[cfg(target_arch = "x86_64")]

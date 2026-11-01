@@ -517,3 +517,12 @@ hashing inside the level-1 encode (`ntt/additive_ntt_f128/blocked.rs`, 2^21 leav
 return now requires that neither path is available. The chaining values are unchanged
 (`merkle::tests::hash_interleaved_matches_hash_leaf`, every SIMD mask). At 32K the AVX2
 tier's level 1-5 Merkle time was 57 ms against 17 on AVX-512F (M0 trace).
+
+## 15. Prover-only: streaming stores in the blocked encoder below AVX-512
+
+`ntt/additive_ntt_f128/blocked.rs::stream_copy` (pass 1 of `encode_blocked`, which writes
+every codeword tile once and reads it back only in pass 2) used 64-byte streaming stores on
+AVX-512 and a plain copy otherwise, so the AVX2 tier paid a read-for-ownership of the whole
+codeword (512 MiB for the level-1 Ligerito commit at 32K). Below AVX-512 it now uses the
+16-byte SSE2 streaming stores of `lane_blocked.rs::stream_copy`, with the store fence on
+every x86-64 CPU. The codeword is unchanged.
