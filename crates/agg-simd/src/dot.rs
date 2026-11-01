@@ -20,6 +20,12 @@ pub fn fp_dot(a: &[u64], b: &[u64]) -> u64 {
             return fp_vector(a, b);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if a.len() >= 64 {
+        if let Some(x) = crate::wide::dispatch!(fp_w8(a, b), fp_w4(a, b)) {
+            return x;
+        }
+    }
     scalar::fp_dot(a, b)
 }
 pub fn k_dot(a: Planes<'_>, b: Planes<'_>) -> K {
@@ -31,6 +37,12 @@ pub fn k_dot(a: Planes<'_>, b: Planes<'_>) -> K {
             return k_vector(a, b);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if a.0.len() >= 64 {
+        if let Some(x) = crate::wide::dispatch!(k_w8(a, b), k_w4(a, b)) {
+            return x;
+        }
+    }
     scalar::k_dot(a, b)
 }
 pub fn k_base_dot(a: Planes<'_>, b: &[u64]) -> K {
@@ -40,6 +52,12 @@ pub fn k_base_dot(a: Planes<'_>, b: &[u64]) -> K {
         // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return base_vector(a, b);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if b.len() >= 64 {
+        if let Some(x) = crate::wide::dispatch!(base_w8(a, b), base_w4(a, b)) {
+            return x;
         }
     }
     scalar::k_base_dot(a, b)
@@ -54,6 +72,14 @@ pub fn k_int_dot_parts(a: Planes<'_>, b: &[i64]) -> (K, K) {
         // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return int_vector(a, b.as_ptr().cast(), b.len(), 1 << 51);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if b.len() >= 64 {
+        if let Some((dot, sum)) = crate::wide::dispatch!(int_w8(a, b), int_w4(a, b)) {
+            // The shifted form `sum w (k + 2^51)` and its correction `-2^51 sum w`.
+            let shift = K::from_u64(1 << 51);
+            return (dot + sum * shift, -sum * shift);
         }
     }
     let mut shifted = K::from_u64(0);
@@ -85,6 +111,17 @@ pub fn k_int2_dot(a: Planes<'_>, lo: &[u64], hi: &[i64]) -> K {
             let (l, _) = int_vector(a, lo.as_ptr(), lo.len(), 0);
             let (h, c) = int_vector(a, hi.as_ptr().cast(), hi.len(), 1 << 51);
             return l + (h + c) * K::from_u64(1 << 52);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if lo.len() >= 64 {
+        // `lo < 2^52` is canonical, so both limbs are signed-integer dots.
+        // SAFETY: `u64` and `i64` share size and alignment; every `lo < 2^52` reads unchanged.
+        let lo: &[i64] = unsafe { std::slice::from_raw_parts(lo.as_ptr().cast(), lo.len()) };
+        if let Some(((l, _), (h, _))) =
+            crate::wide::dispatch!((int_w8(a, lo), int_w8(a, hi)), (int_w4(a, lo), int_w4(a, hi)))
+        {
+            return l + h * K::from_u64(1 << 52);
         }
     }
     scalar::k_int2_dot(a, lo, hi)
@@ -246,6 +283,8 @@ pub fn weight_round(w:Planes<'_>,g:&[i64])->[K;3] {
  #[cfg(target_arch="x86_64")]
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  if g.len()>=64 && backend()==Backend::Avx512 {unsafe {return weight_vector(w,g);}}
+ #[cfg(target_arch="x86_64")]
+ if g.len()>=64 {if let Some(x)=crate::wide::dispatch!(weight_w8(w,g),weight_w4(w,g)) {return x;}}
  let mut out=[K::from_u64(0);3];
  for i in (0..g.len()).step_by(2) {let a=scalar::get(w,i);let b=scalar::get(w,i+1);let ga=K::from_i64(g[i]);let gb=K::from_i64(g[i+1]);out[0]+=a*ga;out[1]+=b*gb;out[2]+=(b-a)*(gb-ga);}
  out
@@ -281,3 +320,178 @@ unsafe fn weight_vector(w:Planes<'_>,g:&[i64])->[K;3] {unsafe {
  if n<g.len() {let tail=weight_round((&w.0[n..],&w.1[n..]),&g[n..]);for i in 0..3 {out[i]+=tail[i];}}
  out
 }}
+
+/// Products per accumulator between reductions in the dots below (two products per
+/// coordinate accumulator and step at most, so `2 * CHUNK <= MAC_LIMIT`).
+#[cfg(target_arch = "x86_64")]
+const CHUNK: usize = crate::wide::MAC_LIMIT / 2;
+
+/// [`CHUNK`] for the tests that cross it.
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) const fn wide_chunk() -> usize {
+    CHUNK
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn fp_wide<B: crate::wide::Simd>(a: &[u64], b: &[u64]) -> u64 {
+    use crate::wide::*;
+    let l = B::LANES;
+    let n = a.len() / l * l;
+    // SAFETY: the caller guarantees the backend's features; every index is below `n`.
+    unsafe {
+        let mut sum = zero::<B>();
+        for start in (0..n).step_by(CHUNK * l) {
+            let end = (start + CHUNK * l).min(n);
+            let mut c = acc0::<B>();
+            for i in (start..end).step_by(l) {
+                mac::<B>(&mut c, split::<B>(B::load(a.as_ptr().add(i))), split::<B>(B::load(b.as_ptr().add(i))));
+            }
+            sum = B::add_mod(sum, red::<B>(c));
+        }
+        (F::from_u64(hsum::<B>(sum)) + F::from_u64(scalar::fp_dot(&a[n..], &b[n..]))).to_canonical_u64()
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(fp_wide => fp_w8, fp_w4; (a: &[u64], b: &[u64]) -> u64);
+
+/// `ac`, `bd` and `ad + bc` in three accumulators; the real part `ac + 2 bd` is formed by
+/// doubling the `bd` limbs at the reduction (bounds: `bd` takes one product per step and
+/// `ad + bc` two, below [`MAC_LIMIT`](crate::wide::MAC_LIMIT) per chunk).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn k_wide<B: crate::wide::Simd>(a: Planes<'_>, b: Planes<'_>) -> K {
+    use crate::wide::*;
+    let l = B::LANES;
+    let n = a.0.len() / l * l;
+    // SAFETY: the caller guarantees the backend's features; every index is below `n`.
+    unsafe {
+        let mut re = zero::<B>();
+        let mut im = zero::<B>();
+        for start in (0..n).step_by(CHUNK * l) {
+            let end = (start + CHUNK * l).min(n);
+            let (mut ac, mut bd, mut ab) = (acc0::<B>(), acc0::<B>(), acc0::<B>());
+            for i in (start..end).step_by(l) {
+                let (x0, x1) = (split::<B>(B::load(a.0.as_ptr().add(i))), split::<B>(B::load(a.1.as_ptr().add(i))));
+                let (y0, y1) = (split::<B>(B::load(b.0.as_ptr().add(i))), split::<B>(B::load(b.1.as_ptr().add(i))));
+                mac::<B>(&mut ac, x0, y0);
+                mac::<B>(&mut bd, x1, y1);
+                mac::<B>(&mut ab, x0, y1);
+                mac::<B>(&mut ab, x1, y0);
+            }
+            // ac < CHUNK and 2 bd < 2 CHUNK products of limb gain: the sum stays below MAC_LIMIT.
+            re = B::add_mod(re, red::<B>(add_acc::<B>(ac, dbl_acc::<B>(bd))));
+            im = B::add_mod(im, red::<B>(ab));
+        }
+        hsum_k::<B>((re, im)) + scalar::k_dot((&a.0[n..], &a.1[n..]), (&b.0[n..], &b.1[n..]))
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(k_wide => k_w8, k_w4; (a: Planes<'_>, b: Planes<'_>) -> K);
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn base_wide<B: crate::wide::Simd>(a: Planes<'_>, b: &[u64]) -> K {
+    use crate::wide::*;
+    let l = B::LANES;
+    let n = b.len() / l * l;
+    // SAFETY: the caller guarantees the backend's features; every index is below `n`.
+    unsafe {
+        let mut sum = (zero::<B>(), zero::<B>());
+        for start in (0..n).step_by(CHUNK * l) {
+            let end = (start + CHUNK * l).min(n);
+            let mut c = acck::<B>();
+            for i in (start..end).step_by(l) {
+                let x = (split::<B>(B::load(a.0.as_ptr().add(i))), split::<B>(B::load(a.1.as_ptr().add(i))));
+                kmac_base::<B>(&mut c, x, split::<B>(B::load(b.as_ptr().add(i))));
+            }
+            sum = addk::<B>(sum, redk::<B>(c));
+        }
+        hsum_k::<B>(sum) + scalar::k_base_dot((&a.0[n..], &a.1[n..]), &b[n..])
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(base_wide => base_w8, base_w4; (a: Planes<'_>, b: &[u64]) -> K);
+
+/// `(sum w k, sum w)` over signed integers `k` (any `i64`), each read as its canonical residue.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn int_wide<B: crate::wide::Simd>(a: Planes<'_>, b: &[i64]) -> (K, K) {
+    use crate::wide::*;
+    let l = B::LANES;
+    let n = b.len() / l * l;
+    // SAFETY: the caller guarantees the backend's features; every index is below `n`.
+    unsafe {
+        let mut dot = (zero::<B>(), zero::<B>());
+        let mut sum = (zero::<B>(), zero::<B>());
+        for start in (0..n).step_by(CHUNK * l) {
+            let end = (start + CHUNK * l).min(n);
+            let mut c = acck::<B>();
+            let mut w = acck::<B>();
+            for i in (start..end).step_by(l) {
+                let (x0, x1) = (B::load(a.0.as_ptr().add(i)), B::load(a.1.as_ptr().add(i)));
+                let k = B::residue(B::load(b.as_ptr().add(i).cast()));
+                kmac_base::<B>(&mut c, (split::<B>(x0), split::<B>(x1)), split::<B>(k));
+                lift::<B>(&mut w.0, x0);
+                lift::<B>(&mut w.1, x1);
+            }
+            dot = addk::<B>(dot, redk::<B>(c));
+            sum = addk::<B>(sum, redk::<B>(w));
+        }
+        let mut dot = hsum_k::<B>(dot);
+        let mut sum = hsum_k::<B>(sum);
+        for i in n..b.len() {
+            let w = scalar::get(a, i);
+            dot += w * K::from_i64(b[i]);
+            sum += w;
+        }
+        (dot, sum)
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(int_wide => int_w8, int_w4; (a: Planes<'_>, b: &[i64]) -> (K, K));
+
+/// The three round coefficients of [`weight_round`]: the even and odd rows deinterleaved from
+/// `2 LANES` consecutive rows, the signed integers read as canonical residues.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn weight_wide<B: crate::wide::Simd>(w: Planes<'_>, g: &[i64]) -> [K; 3] {
+    use crate::wide::*;
+    let l = B::LANES;
+    let n = g.len() / (2 * l) * (2 * l);
+    // SAFETY: the caller guarantees the backend's features; every index is below `n`.
+    unsafe {
+        let mut sums = [(zero::<B>(), zero::<B>()); 3];
+        for start in (0..n).step_by(CHUNK * 2 * l) {
+            let end = (start + CHUNK * 2 * l).min(n);
+            let mut c = [acck::<B>(); 3];
+            for i in (start..end).step_by(2 * l) {
+                let (e0, o0) = B::deinterleave(B::load(w.0.as_ptr().add(i)), B::load(w.0.as_ptr().add(i + l)));
+                let (e1, o1) = B::deinterleave(B::load(w.1.as_ptr().add(i)), B::load(w.1.as_ptr().add(i + l)));
+                let (ge, go) = B::deinterleave(B::load(g.as_ptr().add(i).cast()), B::load(g.as_ptr().add(i + l).cast()));
+                let (ge, go) = (B::residue(ge), B::residue(go));
+                kmac_base::<B>(&mut c[0], (split::<B>(e0), split::<B>(e1)), split::<B>(ge));
+                kmac_base::<B>(&mut c[1], (split::<B>(o0), split::<B>(o1)), split::<B>(go));
+                let d = (split::<B>(B::sub_mod(o0, e0)), split::<B>(B::sub_mod(o1, e1)));
+                kmac_base::<B>(&mut c[2], d, split::<B>(B::sub_mod(go, ge)));
+            }
+            for t in 0..3 {
+                sums[t] = addk::<B>(sums[t], redk::<B>(c[t]));
+            }
+        }
+        // A loop, not a closure: closures do not inherit the entry point's target features.
+        let mut out = [K::from_u64(0); 3];
+        for t in 0..3 {
+            out[t] = hsum_k::<B>(sums[t]);
+        }
+        if n < g.len() {
+            let tail = weight_round((&w.0[n..], &w.1[n..]), &g[n..]);
+            for t in 0..3 {
+                out[t] += tail[t];
+            }
+        }
+        out
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(weight_wide => weight_w8, weight_w4; (w: Planes<'_>, g: &[i64]) -> [K; 3]);

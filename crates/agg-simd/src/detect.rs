@@ -2,8 +2,9 @@
 //!
 //! `AGG_ISA` is the process-wide instruction-set cap shared by every backend
 //! of the prover; `AGG_SIMD` names a backend below that cap. The IFMA kernels
-//! need the full `avx512ifma` level, so `AGG_ISA=avx512` (or lower) selects
-//! the portable kernels here even on a CPU that has IFMA.
+//! need the full `avx512ifma` level; `AGG_ISA=avx512` selects the AVX-512F
+//! kernels without IFMA and `AGG_ISA=avx2` the AVX2 kernels, even on a CPU
+//! that has IFMA. `AGG_SIMD=portable` turns every vector kernel off.
 
 use std::sync::OnceLock;
 
@@ -12,8 +13,12 @@ use std::sync::OnceLock;
 pub enum Backend {
     /// Portable arithmetic.
     Portable,
-    /// AVX-512 IFMA.
+    /// AVX-512 IFMA (the `avx512ifma` tier).
     Avx512,
+    /// AVX-512F without IFMA: eight lanes of 32 x 32-bit partial products (the `avx512` tier).
+    Avx512F,
+    /// AVX2: four lanes of 32 x 32-bit partial products (the `avx2` tier).
+    Avx2,
 }
 
 /// Instruction-set levels of `AGG_ISA`, ordered upwards.
@@ -111,6 +116,41 @@ pub fn avx2() -> bool {
     })
 }
 
+/// Whether the CPU has AVX-512F (the kernels of [`Backend::Avx512F`] use nothing else).
+pub fn avx512f_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the CPU has AVX2.
+pub fn avx2_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// The best backend without IFMA below the cap, or the portable one.
+fn below_ifma() -> Backend {
+    if cap() >= IsaLevel::Avx512 && avx512f_available() {
+        Backend::Avx512F
+    } else if cap() >= IsaLevel::Avx2 && avx2_available() {
+        Backend::Avx2
+    } else {
+        Backend::Portable
+    }
+}
+
 /// The backend this process may use.
 pub fn backend() -> Backend {
     static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -127,14 +167,14 @@ pub fn backend() -> Backend {
                 if allowed {
                     Backend::Avx512
                 } else {
-                    Backend::Portable
+                    below_ifma()
                 }
             }
             Err(std::env::VarError::NotPresent) => {
                 if allowed {
                     Backend::Avx512
                 } else {
-                    Backend::Portable
+                    below_ifma()
                 }
             }
             _ => panic!("AGG_SIMD must be portable or avx512"),

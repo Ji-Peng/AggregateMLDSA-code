@@ -24,6 +24,8 @@ unsafe fn kernel_raw(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u6
  #[cfg(target_arch="x86_64")]
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return vector(a,contexts,out0,out1);}}
+ #[cfg(target_arch="x86_64")]
+ if let Some(())=crate::wide::dispatch!(kernel_w8(a,contexts,out0,out1),kernel_w4(a,contexts,out0,out1)) {return;}
  let mut x0=[0u64;256];let mut x1=[0u64;256];
  x0.copy_from_slice(a.0);x1.copy_from_slice(a.1);
  transform_scalar(&mut x0,&mut x1,contexts);
@@ -164,6 +166,9 @@ fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
  #[cfg(target_arch="x86_64")]
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  if backend()==Backend::Avx512 {unsafe {return combine_vector(a,s,weights,out);}}
+ #[cfg(target_arch="x86_64")]
+ {let (o0,o1)=(out.0.as_mut_ptr(),out.1.as_mut_ptr());
+  if let Some(())=crate::wide::dispatch!(combine_w8(a,s,weights,o0,o1),combine_w4(a,s,weights,o0,o1)) {return;}}
  let (w,correction)=scalar_weights(weights);
  let (o0,o1):(&mut [u64;256],&mut [u64;256])=(out.0.try_into().expect("256 coefficients"),out.1.try_into().expect("256 coefficients"));
  combine_dagger_scalar(a,s,&w,correction,(o0,o1));
@@ -223,3 +228,81 @@ unsafe fn vector(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {
  }
  for i in 0..256 {let j=(i as u8).reverse_bits() as usize;out0.add(j).write(*input0.add(i));out1.add(j).write(*input1.add(i));}
 }}
+
+/// [`combine_dagger`] on a backend without IFMA: the daggered coefficients (`|A| < 2^23`) are
+/// staged once as integers, shifted into `[0, 2^32)` and multiplied by the split weights.
+#[cfg(target_arch="x86_64")]
+#[inline(always)]
+unsafe fn combine_wide<B:crate::wide::Simd>(a:&Matrix,s:usize,weights:&[K;4],o0:*mut u64,o1:*mut u64) {
+ use crate::wide::*;
+ let mut dagger=[[0_u64;256];4];
+ for rho in 0..4 {for j in 0..256 {
+  let k=if j==0 {0} else {256-j};let sign=if j==0 {1} else {-1};
+  dagger[rho][j]=(sign*i64::from(a[rho][s][k])+I32_SHIFT as i64) as u64;
+ }}
+ let correction=weights.iter().copied().fold(K::zero(),|x,y|x+y)*K::from_u64(I32_SHIFT);
+ // SAFETY: the caller guarantees the backend's features and 256 writable words per plane.
+ unsafe {
+  let mut w=[(split::<B>(zero::<B>()),split::<B>(zero::<B>()));4];
+  for rho in 0..4 {let x=bck::<B>(weights[rho]);w[rho]=(split::<B>(x.0),split::<B>(x.1));}
+  let correction=bck::<B>(correction);
+  for j in (0..256).step_by(B::LANES) {
+   let mut acc=acck::<B>();
+   for rho in 0..4 {let k=B::load(dagger[rho].as_ptr().add(j));mac32::<B>(&mut acc.0,w[rho].0,k);mac32::<B>(&mut acc.1,w[rho].1,k);}
+   let v=subk::<B>(redk::<B>(acc),correction);
+   B::store(o0.add(j),v.0);B::store(o1.add(j),v.1);
+  }
+ }
+}
+#[cfg(target_arch="x86_64")]
+crate::wide::entry_points!(combine_wide => combine_w8, combine_w4; (a:&Matrix,s:usize,weights:&[K;4],o0:*mut u64,o1:*mut u64));
+
+/// [`kernel_raw`] on a backend without IFMA. Levels whose half block holds at least `LANES`
+/// pairs run on vectors: the even and odd inputs are deinterleaved from consecutive rows, the
+/// rotated inputs are the odd rows one pair back (the first pair of a block reads the negated
+/// last row); lower levels run on scalars. Both outputs of a level are contiguous.
+#[cfg(target_arch="x86_64")]
+#[inline(always)]
+unsafe fn kernel_wide<B:crate::wide::Simd>(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {
+ use crate::wide::*;
+ let l=B::LANES;
+ let mut cur=[[0_u64;256];2];
+ let mut next=[[0_u64;256];2];
+ cur[0].copy_from_slice(&a.0[..256]);cur[1].copy_from_slice(&a.1[..256]);
+ // SAFETY: the caller guarantees the backend's features and 256 writable words per plane;
+ // every vector index stays inside its 256-word block.
+ unsafe {
+  for (level,c) in contexts.iter().enumerate() {
+   let size=256>>level;let half=size/2;
+   if half>=l {
+    let rs=split_k::<B>(bck::<B>(c.r));
+    for base in (0..256).step_by(size) {for k in (0..half).step_by(l) {
+     let (a0,b0)=B::deinterleave(B::load(cur[0].as_ptr().add(base+2*k)),B::load(cur[0].as_ptr().add(base+2*k+l)));
+     let (a1,b1)=B::deinterleave(B::load(cur[1].as_ptr().add(base+2*k)),B::load(cur[1].as_ptr().add(base+2*k+l)));
+     let (t0,t1)=if k==0 {
+      // The odd rows one pair back, the first lane wrapped to the negated last row.
+      let mut r=[[0_u64;8];2];
+      for p in 0..2 {
+       r[p][0]=if cur[p][base+size-1]==0 {0} else {crate::P-cur[p][base+size-1]};
+       for j in 1..l {r[p][j]=cur[p][base+2*j-1];}
+      }
+      (B::load(r[0].as_ptr()),B::load(r[1].as_ptr()))
+     } else {
+      (B::deinterleave(B::load(cur[0].as_ptr().add(base+2*k-2)),B::load(cur[0].as_ptr().add(base+2*k-2+l))).1,B::deinterleave(B::load(cur[1].as_ptr().add(base+2*k-2)),B::load(cur[1].as_ptr().add(base+2*k-2+l))).1)
+     };
+     let even=addk::<B>((a0,a1),kmul_s::<B>(subk::<B>((t0,t1),(a0,a1)),rs));
+     let odd=addk::<B>((b0,b1),kmul_s::<B>(subk::<B>((a0,a1),(b0,b1)),rs));
+     B::store(next[0].as_mut_ptr().add(base+k),even.0);B::store(next[1].as_mut_ptr().add(base+k),even.1);
+     B::store(next[0].as_mut_ptr().add(base+half+k),odd.0);B::store(next[1].as_mut_ptr().add(base+half+k),odd.1);
+    }}
+   } else {
+    let [n0,n1]=&mut next;
+    level_scalar(&cur[0],&cur[1],n0,n1,&c.matrix,size);
+   }
+   std::mem::swap(&mut cur,&mut next);
+  }
+  for i in 0..256 {let j=(i as u8).reverse_bits() as usize;out0.add(j).write(cur[0][i]);out1.add(j).write(cur[1][i]);}
+ }
+}
+#[cfg(target_arch="x86_64")]
+crate::wide::entry_points!(kernel_wide => kernel_w8, kernel_w4; (a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64));

@@ -13,6 +13,14 @@ pub fn k_fold(r: K, a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
             return vector(r, a, b, out);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if a.0.len() >= 64 {
+        let n = a.0.len();
+        let (o0, o1) = (out.0.as_mut_ptr(), out.1.as_mut_ptr());
+        if let Some(()) = crate::wide::dispatch!(k_w8(r, a, b, o0, o1, n), k_w4(r, a, b, o0, o1, n)) {
+            return;
+        }
+    }
     scalar::k_fold(r, a, b, out);
 }
 pub fn int_fold(r: K, lo: &[i64], hi: &[i64], out: PlanesMut<'_>) {
@@ -26,8 +34,73 @@ pub fn int_fold(r: K, lo: &[i64], hi: &[i64], out: PlanesMut<'_>) {
             return int_vector(r, lo, hi, out);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if lo.len() >= 64 {
+        let (o0, o1) = (out.0.as_mut_ptr(), out.1.as_mut_ptr());
+        if let Some(()) = crate::wide::dispatch!(int_w8(r, lo, hi, o0, o1), int_w4(r, lo, hi, o0, o1)) {
+            return;
+        }
+    }
     scalar::int_fold(r, lo, hi, out);
 }
+
+/// `a + r (b - a)` lane-wise; `o0`, `o1` address `n` writable words each.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn k_wide<B: crate::wide::Simd>(r: K, a: Planes<'_>, b: Planes<'_>, o0: *mut u64, o1: *mut u64, n: usize) {
+    use crate::wide::*;
+    let stop = n / B::LANES * B::LANES;
+    // SAFETY: the caller guarantees the backend's features; every index is below `stop`.
+    unsafe {
+        let rs = split_k::<B>(bck::<B>(r));
+        for i in (0..stop).step_by(B::LANES) {
+            let x = loadk::<B>(a, i);
+            // Canonical difference, one reduced product, canonical sum.
+            let d = subk::<B>(loadk::<B>(b, i), x);
+            let (re, im) = addk::<B>(x, kmul_s::<B>(d, rs));
+            B::store(o0.add(i), re);
+            B::store(o1.add(i), im);
+        }
+        scalar::k_fold(
+            r,
+            (&a.0[stop..], &a.1[stop..]),
+            (&b.0[stop..], &b.1[stop..]),
+            (std::slice::from_raw_parts_mut(o0.add(stop), n - stop), std::slice::from_raw_parts_mut(o1.add(stop), n - stop)),
+        );
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(k_wide => k_w8, k_w4; (r: K, a: Planes<'_>, b: Planes<'_>, o0: *mut u64, o1: *mut u64, n: usize));
+
+/// `l + r (h - l)` for signed integers read as canonical residues: the real part is
+/// `l + r0 d`, the imaginary part `r1 d`.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn int_wide<B: crate::wide::Simd>(r: K, lower: &[i64], upper: &[i64], o0: *mut u64, o1: *mut u64) {
+    use crate::wide::*;
+    let n = lower.len();
+    let stop = n / B::LANES * B::LANES;
+    // SAFETY: the caller guarantees the backend's features; every index is below `stop`.
+    unsafe {
+        let (r0, r1) = bck::<B>(r);
+        let (r0, r1) = (split::<B>(r0), split::<B>(r1));
+        for i in (0..stop).step_by(B::LANES) {
+            let l = B::residue(B::load(lower.as_ptr().add(i).cast()));
+            let h = B::residue(B::load(upper.as_ptr().add(i).cast()));
+            let d = B::sub_mod(h, l);
+            B::store(o0.add(i), B::add_mod(l, mul_s::<B>(d, r0)));
+            B::store(o1.add(i), mul_s::<B>(d, r1));
+        }
+        scalar::int_fold(
+            r,
+            &lower[stop..],
+            &upper[stop..],
+            (std::slice::from_raw_parts_mut(o0.add(stop), n - stop), std::slice::from_raw_parts_mut(o1.add(stop), n - stop)),
+        );
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(int_wide => int_w8, int_w4; (r: K, lower: &[i64], upper: &[i64], o0: *mut u64, o1: *mut u64));
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn vector(r: K, a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {

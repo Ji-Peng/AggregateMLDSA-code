@@ -15,6 +15,8 @@ pub mod fp;
 pub mod k;
 #[cfg(target_arch = "x86_64")]
 mod x86;
+#[doc(hidden)]
+pub mod wide;
 pub mod negacyclic;
 pub mod lookup;
 pub mod fused;

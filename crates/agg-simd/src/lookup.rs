@@ -20,8 +20,14 @@ impl RawLayer {
  // SAFETY: the call is guarded by the backend check and the length assertions above.
  unsafe fn finish(self)->Layer {unsafe {Layer{p:KPlanes{buf:self.p.assume_init(),rows:self.rows},q:KPlanes{buf:self.q.assume_init(),rows:self.rows}}}}
 }
+/// The vector kernel a tree pass runs.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum Path {Scalar,Ifma,W8,W4}
+impl Path {
+ fn of_backend()->Self {match backend() {Backend::Avx512=>Self::Ifma,Backend::Avx512F=>Self::W8,Backend::Avx2=>Self::W4,Backend::Portable=>Self::Scalar}}
+}
 /// The powers of one challenge and the constants of the shifted bottom kernel.
-struct BottomContext {powers:[K;4],qconst:K,pconst:K}
+pub(crate) struct BottomContext {powers:[K;4],qconst:K,pconst:K}
 fn contexts(powers:&[[K;4]])->Vec<BottomContext> {
  powers.iter().map(|&powers| {
     let [x,x2,x3,x4]=powers;
@@ -34,7 +40,7 @@ pub fn bottoms(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
  let mut raw:Vec<_>=powers.iter().map(|_|RawLayer::new(n)).collect();
  let addresses:Vec<_>=raw.iter_mut().map(RawLayer::addresses).collect();
  let contexts=contexts(powers);
- let simd=n>=4096 && backend()==Backend::Avx512;
+ let simd=if n>=4096 {Path::of_backend()} else {Path::Scalar};
  (0..n.div_ceil(1024)).into_par_iter().for_each(|block| {
   let start=block*1024;let end=(start+1024).min(n);
   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
@@ -49,11 +55,18 @@ pub fn bottoms(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
 /// Every output address must hold `end - offset` writable `u64` rows, disjoint from other
 /// writers of the same rows.
 #[allow(clippy::too_many_arguments)]
-unsafe fn bottom_range(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize,simd:bool) {
+unsafe fn bottom_range(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize,simd:Path) {
  debug_assert!(offset<=start && end<=stacked.len()/4);
  #[cfg(target_arch="x86_64")]
- // SAFETY: the call is guarded by the backend check and the length assertions above.
- if simd && end-start>=8 {unsafe {bottom_vector(stacked,center,contexts,out,start,end,offset);}return;}
+ if end-start>=8 {match simd {
+  // SAFETY: the call is guarded by the backend check and the length assertions above.
+  Path::Ifma=>{unsafe {bottom_vector(stacked,center,contexts,out,start,end,offset);}return;}
+  // SAFETY: the backend check guarantees AVX-512F; the assertions above cover the reads.
+  Path::W8=>{unsafe {bottom_w8(stacked,center,contexts,out,start,end,offset);}return;}
+  // SAFETY: the backend check guarantees AVX2; the assertions above cover the reads.
+  Path::W4=>{unsafe {bottom_w4(stacked,center,contexts,out,start,end,offset);}return;}
+  Path::Scalar=>{}
+ }}
  let _=simd;
  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
  unsafe {bottom_scalar(stacked,center,contexts,out,start,end,offset);}
@@ -83,7 +96,7 @@ pub fn bottom_parents(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
  let mut raw:Vec<_>=powers.iter().map(|_|RawLayer::new(n)).collect();
  let addresses:Vec<_>=raw.iter_mut().map(RawLayer::addresses).collect();
  let contexts=contexts(powers);
- let simd=backend()==Backend::Avx512;
+ let simd=Path::of_backend();
  const BLOCK:usize=1024;
  (0..n.div_ceil(BLOCK)).into_par_iter().for_each(|block| {
   let start=block*BLOCK;let end=(start+BLOCK).min(n);let len=end-start;
@@ -125,7 +138,7 @@ impl crate::fused::RowSource for UpperRows<'_> {
  fn rows(&self)->usize {self.stacked.len()/8}
  unsafe fn fill(&self,row0:usize,row1:usize,out:&[crate::fused::OutLane]) {
   assert_eq!(out.len(),self.width());
-  let half=self.rows();let simd=backend()==Backend::Avx512;
+  let half=self.rows();let simd=Path::of_backend();
   let low:Vec<[usize;4]>=(0..self.trees()).map(|t|[out[4*t].0,out[4*t].1,out[4*t+2].0,out[4*t+2].1]).collect();
   let high:Vec<[usize;4]>=(0..self.trees()).map(|t|[out[4*t+1].0,out[4*t+1].1,out[4*t+3].0,out[4*t+3].1]).collect();
   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
@@ -143,7 +156,8 @@ unsafe fn write_node(out:[usize;4],i:usize,p:K,q:K) {unsafe {
 /// Parents use two unreduced K products for p and one for q.
 pub fn parent(child:&Layer)->Layer {
  let n=child.len()/2;assert_eq!(child.len(),2*n);assert_eq!(child.q.rows,child.p.rows);
- if n<4096 || backend()!=Backend::Avx512 {return Layer::from_fn(n,|i| {
+ let simd=Path::of_backend();
+ if n<4096 || simd==Path::Scalar {return Layer::from_fn(n,|i| {
   let p0=child.p.get(i);let p1=child.p.get(i+n);let q0=child.q.get(i);let q1=child.q.get(i+n);(p0*q1+p1*q0,q0*q1)
  });}
  let mut raw=RawLayer::new(n);let addresses=raw.addresses();
@@ -153,7 +167,7 @@ pub fn parent(child:&Layer)->Layer {
   let a=[p0[start..].as_ptr(),p1[start..].as_ptr(),q0[start..].as_ptr(),q1[start..].as_ptr()];
   let b=[p0[start+n..].as_ptr(),p1[start+n..].as_ptr(),q0[start+n..].as_ptr(),q1[start+n..].as_ptr()];
   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
-  unsafe {parent_span(a,b,addresses,start,end-start,true);}
+  unsafe {parent_span(a,b,addresses,start,end-start,simd);}
  });
  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
  unsafe {raw.finish()}
@@ -165,11 +179,16 @@ pub fn parent(child:&Layer)->Layer {
 /// The child planes must hold `len` readable rows; `out` rows `start .. start + len` must be
 /// writable and not written by another task.
 // SAFETY: the call is guarded by the backend check and the length assertions above.
-unsafe fn parent_span(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize,simd:bool) {unsafe {
+unsafe fn parent_span(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize,simd:Path) {unsafe {
  let get=|c:[*const u64;4],k:usize,i:usize| K::new(crate::F::from_u64(*c[k].add(i)),crate::F::from_u64(*c[k+1].add(i)));
  let mut head=0;
  #[cfg(target_arch="x86_64")]
- if simd && len>=8 {parent_vector(a,b,out,start,len);head=len/8*8;}
+ if len>=8 {match simd {
+  Path::Ifma=>{parent_vector(a,b,out,start,len);head=len/8*8;}
+  Path::W8=>{head=parent_w8(a,b,out,start,len);}
+  Path::W4=>{head=parent_w4(a,b,out,start,len);}
+  Path::Scalar=>{}
+ }}
  let _=simd;
  for i in head..len {let (pa,qa)=(get(a,0,i),get(a,2,i));let (pb,qb)=(get(b,0,i),get(b,2,i));write_node(out,start+i,pa*qb+pb*qa,qa*qb);}
 }}
@@ -238,3 +257,86 @@ unsafe fn mac_shifted(acc:&mut crate::x86::A3,w:crate::x86::V,k:crate::x86::V) {
  use crate::x86::*;let a=split52(w);let k=add(k,bc(1<<51));
  acc.a=lo(acc.a,a.l,k);acc.b=hi(acc.b,a.l,k);acc.b=lo(acc.b,a.h,k);acc.c=hi(acc.c,a.h,k);
 }}
+
+/// Parents of `len / LANES * LANES` nodes on a backend without IFMA (returns that count):
+/// `p = p_a q_b + p_b q_a` from four unreduced products per coordinate, `q = q_a q_b`.
+#[cfg(target_arch="x86_64")]
+#[inline(always)]
+unsafe fn parent_wide<B:crate::wide::Simd>(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize)->usize {
+ use crate::wide::*;
+ let stop=len/B::LANES*B::LANES;
+ // SAFETY: the caller guarantees the backend's features, `len` readable child rows and
+ // writable parent rows `start..start + len`.
+ unsafe {
+  for i in (0..stop).step_by(B::LANES) {
+   let pa=(split::<B>(B::load(a[0].add(i))),split::<B>(B::load(a[1].add(i))));
+   let pb=(split::<B>(B::load(b[0].add(i))),split::<B>(B::load(b[1].add(i))));
+   let qa=split_k::<B>((B::load(a[2].add(i)),B::load(a[3].add(i))));
+   let qb=split_k::<B>((B::load(b[2].add(i)),B::load(b[3].add(i))));
+   // Two K products per parent numerator (four products per coordinate), reduced once.
+   let mut p=acck::<B>();kmac::<B>(&mut p,pa,qb);kmac::<B>(&mut p,pb,qa);
+   let mut q=acck::<B>();kmac::<B>(&mut q,(qa.c0,qa.c1),qb);
+   let (p,q)=(redk::<B>(p),redk::<B>(q));
+   B::store((out[0] as *mut u64).add(start+i),p.0);B::store((out[1] as *mut u64).add(start+i),p.1);
+   B::store((out[2] as *mut u64).add(start+i),q.0);B::store((out[3] as *mut u64).add(start+i),q.1);
+  }
+ }
+ stop
+}
+#[cfg(target_arch="x86_64")]
+crate::wide::entry_points!(parent_wide => parent_w8, parent_w4; (a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize)->usize);
+
+/// [`bottom_vector`] on a backend without IFMA. The ESPs are exact `i64` lanes from signed
+/// 32-bit products (`|v| <= 2^15`: `|s| <= 2^16`, `|m| <= 2^30`); every ESP term is read as its
+/// canonical residue: `q = x^4 - x^3 e1 + x^2 e2 - x e3 + e4`, `p = 4 x^3 - 3 x^2 e1 + 2 x e2 - e3`.
+#[cfg(target_arch="x86_64")]
+#[inline(always)]
+unsafe fn bottom_wide<B:crate::wide::Simd>(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize) {
+ use crate::wide::*;
+ let n=stacked.len()/4;let stop=start+(end-start)/B::LANES*B::LANES;
+ // The split powers and the constant terms of every context, built once per range.
+ struct Split<V> {x3:(S<V>,S<V>),x2:(S<V>,S<V>),x:(S<V>,S<V>),x4:(V,V),x3x4:(V,V)}
+ // SAFETY: the caller guarantees the backend's features, the leaves of every node in
+ // `start..end` and writable rows `start - offset .. end - offset`.
+ unsafe {
+  // A function, not a closure: closures do not inherit the entry point's target features.
+  #[inline(always)]
+  unsafe fn sk<B:crate::wide::Simd>(x:K)->(S<B::V>,S<B::V>) {unsafe {let v=bck::<B>(x);(split::<B>(v.0),split::<B>(v.1))}}
+  let mut split_contexts:Vec<Split<B::V>>=Vec::with_capacity(contexts.len());
+  for ctx in contexts {let [x,x2,x3,x4]=ctx.powers;
+   split_contexts.push(Split{x3:sk::<B>(x3),x2:sk::<B>(x2),x:sk::<B>(x),x4:bck::<B>(x4),x3x4:bck::<B>(x3*K::from_u64(4))});
+  }
+  let c=B::splat(center as i64 as u64);
+  for i in (start..stop).step_by(B::LANES) {
+   let mut v=[zero::<B>();4];
+   for j in 0..4 {
+    v[j]=B::sub(B::load_i32(stacked.as_ptr().add(i+j*n)),c);
+    // |v| <= 2^15 exactly when v + 2^15 lies in [0, 2^16] as an unsigned lane.
+    assert!(!B::any_above(B::add(v[j],B::splat(1<<15)),1<<16),"recentered lookup leaf");
+   }
+   let (a,b,cc,d)=(v[0],v[1],v[2],v[3]);
+   let sa=B::add(a,cc);let sb=B::add(b,d);
+   let ma=B::mul32s(a,cc);let mb=B::mul32s(b,d);
+   let e1=B::add(sa,sb);let e2=B::add(B::add(ma,mb),B::mul32s(sa,sb));
+   let e3=B::add(B::mul32s(sa,mb),B::mul32s(sb,ma));let e4=B::mul32s(ma,mb);
+   let z=zero::<B>();
+   let ne1=split::<B>(B::residue(B::sub(z,e1)));
+   let pe1=split::<B>(B::residue(B::sub(z,B::add(B::add(e1,e1),e1))));
+   let e2s=split::<B>(B::residue(e2));let e2x2=split::<B>(B::residue(B::add(e2,e2)));
+   let ne3=B::residue(B::sub(z,e3));let ne3s=split::<B>(ne3);let e4=B::residue(e4);
+   for (ctx,o) in split_contexts.iter().zip(out) {
+    let mut q=acck::<B>();
+    kmac_base::<B>(&mut q,ctx.x3,ne1);kmac_base::<B>(&mut q,ctx.x2,e2s);kmac_base::<B>(&mut q,ctx.x,ne3s);
+    let mut p=acck::<B>();
+    kmac_base::<B>(&mut p,ctx.x2,pe1);kmac_base::<B>(&mut p,ctx.x,e2x2);
+    let q=addk::<B>(redk::<B>(q),ctx.x4);let q=(B::add_mod(q.0,e4),q.1);
+    let p=addk::<B>(redk::<B>(p),ctx.x3x4);let p=(B::add_mod(p.0,ne3),p.1);
+    B::store((o[0] as *mut u64).add(i-offset),p.0);B::store((o[1] as *mut u64).add(i-offset),p.1);
+    B::store((o[2] as *mut u64).add(i-offset),q.0);B::store((o[3] as *mut u64).add(i-offset),q.1);
+   }
+  }
+  bottom_scalar(stacked,center,contexts,out,stop,end,offset);
+ }
+}
+#[cfg(target_arch="x86_64")]
+crate::wide::entry_points!(bottom_wide => bottom_w8, bottom_w4; (stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize));

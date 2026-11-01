@@ -131,8 +131,10 @@ canonical `u64` storage: `&[F]` is read as `&[u64]`, and limbs are split in regi
 reduction) implement the kernels; `fused.rs` provides the fold-and-evaluate forms used by
 the sum-check groups. `detect.rs` selects the backend once per process from the CPU,
 under the process-wide `AGG_ISA` cap: `avx512ifma` (or unset on an IFMA CPU) takes the
-IFMA kernels, and `avx512`, `avx2` or `scalar` take the portable kernels.
-`AGG_SIMD=portable|avx512` names a backend below that cap. The other run-time kernels of
+IFMA kernels, `avx512` the AVX-512F kernels without IFMA, `avx2` the AVX2 kernels, and
+`scalar` the portable kernels. `AGG_SIMD=portable` turns every vector kernel of this crate
+off (the A/B switch for the non-IFMA kernels); `AGG_SIMD=avx512` names the IFMA backend and
+runs at the cap. The other run-time kernels of
 the unified build follow the same cap: `crates/agg-mldsa-simd` (scalar/AVX2/AVX-512),
 `crates/agg-keccak/src/simd` (8-way Keccak-f), `vendor/flock-field/src/f128_slice/rounds.rs`,
 the vendored Flock kernels and the Akita decompose-fold, window-gather and NTT kernels.
@@ -164,7 +166,20 @@ Single-core, L1/L2-resident costs on Zen 5 are:
 | F_p^2 dot | 1.25 cycles/term | 4.8-5.9x |
 
 Streaming beyond L3 the gain falls to about 1.0x (est.), because memory traffic decides
-there. Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the
+there.
+
+The tiers without IFMA use the same slice API and the same fused, pattern, fraction-tree and
+negacyclic kernels, written once over the lane trait of `crates/agg-simd/src/wide.rs` and
+instantiated for eight AVX-512F lanes and four AVX2 lanes. A 64 x 64-bit product is four
+`vpmuludq` partials of the 32-bit halves; partials are summed unreduced in four radix-2^32
+limbs and reduced with 2^64 = 59 (mod p), so one accumulator takes 2^22 products between
+reductions. Integer cells are read as canonical residues, or, when they fit 32 bits,
+shifted into `[0, 2^32)` and multiplied with two partials. The generic bodies are
+`#[inline(always)]` and take no closures: a closure does not inherit the entry point's
+target features, and its primitives would not inline. Single-thread costs on the local
+i7-11700K (TSC ticks, direction only, 16K elements): F_p multiply 2.3 (AVX-512F) and 3.3
+(AVX2) against 7.6-10.4 scalar and 1.9 IFMA; F_p^2 multiply 7.3 and 10.6 against 25 scalar
+and 4.8 IFMA; F_p^2 dot 4.3 and 5.7 against 29 scalar and 2.0 IFMA. Measured on a Zen 5 node (EPYC 9355), 32K signatures, 16 cores / 32 threads, the
 `AGG_ISA=avx512ifma` tier is about 0.2 s faster at 16C32T and about 1.1 s at 8C16T than
 `AGG_ISA=avx2` (2.76 s against 2.98 s, and 4.43 s against 5.50 s).
 
@@ -187,8 +202,9 @@ quarters of the stacked column.
 `AGG_PIOP_LAYOUT=plane|row` selects the layout independently of `AGG_ISA`; it defaults to
 `plane` when the IFMA backend is selected and `row` otherwise. The row-major dedicated
 groups in `crates/agg-piop/src/kernel/layer.rs` fold four rows into two and accumulate
-`q(0)` and `q_2` in one read. They win on the AVX2 and AVX-512 non-IFMA tiers, and both
-layouts send the same round messages.
+`q(0)` and `q_2` in one read. They won on the AVX2 and AVX-512 non-IFMA tiers while those
+tiers ran the plane kernels on scalar arithmetic; with the AVX-512F and AVX2 kernels the
+plane layout is to be re-measured there. Both layouts send the same round messages.
 
 Before a lane is dense it stays a small integer. A committed `i8` column is coded when its
 cells fall into at most 16 classes under the maps of the lanes that read it (8 for a digit

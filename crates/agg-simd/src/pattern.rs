@@ -79,6 +79,14 @@ pub trait Leaves: Sync {
     /// Requires AVX-512F/DQ/BW/VL/IFMA.
     #[cfg(target_arch = "x86_64")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4];
+    /// [`Self::values8`] for the `B::LANES` cells `4 (row + l) + a` of a backend without
+    /// IFMA. Every lane value lies in `[-2^31, 2^31)`.
+    ///
+    /// # Safety
+    /// Requires the backend's CPU features.
+    #[cfg(target_arch = "x86_64")]
+    #[doc(hidden)]
+    unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4];
 }
 
 /// The stack bottom: `v_0, v_1`.
@@ -113,6 +121,15 @@ impl Leaves for Bottom<'_> {
                 out[1][a] = strided4_i32(v1, a as i32);
             }
             out
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4] {
+        // SAFETY: the caller guarantees the backend's features and `4 LANES` cells from row.
+        unsafe {
+            let z = crate::wide::zero::<B>();
+            [B::strided4_i32(self.v0.as_ptr().add(4 * row)), B::strided4_i32(self.v1.as_ptr().add(4 * row)), [z; 4], [z; 4]]
         }
     }
 }
@@ -161,6 +178,30 @@ impl Leaves for Symmetric<'_> {
             out
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4] {
+        // SAFETY: the caller guarantees the backend's features and the cells of the quarters.
+        unsafe {
+            let q = self.stacked.len() / 4;
+            let c = B::splat(i64::from(self.center) as u64);
+            let x0 = B::strided4_i32(self.stacked.as_ptr().add(4 * row));
+            let x1 = B::strided4_i32(self.stacked.as_ptr().add(4 * row + q));
+            let x2 = B::strided4_i32(self.stacked.as_ptr().add(4 * row + 2 * q));
+            let x3 = B::strided4_i32(self.stacked.as_ptr().add(4 * row + 3 * q));
+            let z = crate::wide::zero::<B>();
+            let mut out = [[z; 4]; 4];
+            for a in 0..4 {
+                let (a0, b0, a1, b1) = (B::sub(x0[a], c), B::sub(x2[a], c), B::sub(x1[a], c), B::sub(x3[a], c));
+                // |a|, |b| <= 2^15: sums below 2^17, products below 2^31, exact as i32 products.
+                out[0][a] = B::add(a0, b0);
+                out[1][a] = B::add(a1, b1);
+                out[2][a] = B::mul32s(a0, b0);
+                out[3][a] = B::mul32s(a1, b1);
+            }
+            out
+        }
+    }
 }
 
 /// The prefix sums of `leaves` with the weights `first`, `second` (`4 |first| |second|`
@@ -175,6 +216,18 @@ pub fn prefix_sums<L: Leaves>(leaves: &L, first: &[K], second: &[K]) -> PrefixSu
             let planes = crate::buf::KPlanes::from_fn(first.len(), |i| first[i]);
             // SAFETY: the call is guarded by the backend check and the length assertions above.
             return unsafe { sums_vector(leaves, planes.planes(), second, range) };
+        }
+        #[cfg(target_arch = "x86_64")]
+        if first.len() >= 8 {
+            let planes = crate::buf::KPlanes::from_fn(first.len(), |i| first[i]);
+            let first = planes.planes();
+            let range = range.clone();
+            if let Some(sums) = crate::wide::dispatch!(
+                sums_w8(leaves, first, second, range.clone()),
+                sums_w4(leaves, first, second, range.clone())
+            ) {
+                return sums;
+            }
         }
         sums_scalar(leaves, first, second, range)
     };
@@ -245,6 +298,12 @@ pub unsafe fn fill_rows<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0:
             return fill_vector(leaves, e, out, row0, row1);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if row1 - row0 >= 8 {
+        if let Some(()) = crate::wide::dispatch!(fill_w8(leaves, e, out, row0, row1), fill_w4(leaves, e, out, row0, row1)) {
+            return;
+        }
+    }
     // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { fill_scalar(leaves, e, out, row0, row1) }
 }
@@ -276,6 +335,15 @@ pub unsafe fn fill_combined<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutL
         // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return fill_combined_vector(leaves, weights, out, row0, row1);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if row1 - row0 >= 8 {
+        if let Some(()) = crate::wide::dispatch!(
+            combined_w8(leaves, weights, out, row0, row1),
+            combined_w4(leaves, weights, out, row0, row1)
+        ) {
+            return;
         }
     }
     // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
@@ -364,6 +432,19 @@ impl Leaves for Columns<'_> {
             out
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4] {
+        // SAFETY: the caller guarantees the backend's features and `4 LANES` cells from row.
+        unsafe {
+            let z = crate::wide::zero::<B>();
+            let mut out = [[z; 4]; 4];
+            for (l, lane) in self.lanes.iter().enumerate() {
+                out[l] = B::strided4_i32(lane.as_ptr().add(4 * row));
+            }
+            out
+        }
+    }
 }
 
 /// [`Columns`] over `i8` cells (committed digit columns read through the identity map).
@@ -394,6 +475,19 @@ impl Leaves for ByteColumns<'_> {
                 for a in 0..4 {
                     out[l][a] = strided4_i8(lane.as_ptr().add(4 * row), a as i32);
                 }
+            }
+            out
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4] {
+        // SAFETY: the caller guarantees the backend's features and `4 LANES` cells from row.
+        unsafe {
+            let z = crate::wide::zero::<B>();
+            let mut out = [[z; 4]; 4];
+            for (l, lane) in self.lanes.iter().enumerate() {
+                out[l] = B::strided4_i8(lane.as_ptr().add(4 * row));
             }
             out
         }
@@ -584,3 +678,200 @@ unsafe fn fill_vector<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: u
         fill_scalar(leaves, e, out, stop, row1);
     }
 }
+
+/// Entry points over a generic leaf shape (the instantiation macro of `wide` takes no
+/// generics).
+macro_rules! leaf_entry_points {
+    ($body:ident => $avx512:ident, $avx2:ident; ($($arg:ident : $ty:ty),*) $(-> $ret:ty)?) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        unsafe fn $avx512<L: Leaves>($($arg: $ty),*) $(-> $ret)? {
+            // SAFETY: the caller guarantees AVX-512F and the body's preconditions.
+            unsafe { $body::<crate::wide::W8, L>($($arg),*) }
+        }
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2")]
+        unsafe fn $avx2<L: Leaves>($($arg: $ty),*) $(-> $ret)? {
+            // SAFETY: the caller guarantees AVX2 and the body's preconditions.
+            unsafe { $body::<crate::wide::W4, L>($($arg),*) }
+        }
+    };
+}
+
+/// [`fill_rows`] on a backend without IFMA: four one-limb terms per output, each lane value
+/// shifted into `[0, 2^32)` and the shift undone with the sum of the pattern weights.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn fill_wide<B: crate::wide::Simd, L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize) {
+    use crate::wide::*;
+    let stop = row0 + (row1 - row0) / B::LANES * B::LANES;
+    // SAFETY: the caller guarantees the backend's features and `row1` writable rows per lane.
+    unsafe {
+        let mut weights = [(split::<B>(zero::<B>()), split::<B>(zero::<B>())); 4];
+        for a in 0..4 {
+            let w = bck::<B>(e[a]);
+            weights[a] = (split::<B>(w.0), split::<B>(w.1));
+        }
+        let correction = bck::<B>(K::from_u64(I32_SHIFT) * e.iter().fold(K::zero(), |s, &x| s + x));
+        let shift = B::splat(I32_SHIFT);
+        for row in (row0..stop).step_by(B::LANES) {
+            let cells = leaves.values_wide::<B>(row);
+            for (l, &o) in out.iter().enumerate() {
+                let mut acc = acck::<B>();
+                for a in 0..4 {
+                    let k = B::add(cells[l][a], shift);
+                    mac32::<B>(&mut acc.0, weights[a].0, k);
+                    mac32::<B>(&mut acc.1, weights[a].1, k);
+                }
+                let v = subk::<B>(redk::<B>(acc), correction);
+                B::store((o.0 as *mut u64).add(row), v.0);
+                B::store((o.1 as *mut u64).add(row), v.1);
+            }
+        }
+        fill_scalar(leaves, e, out, stop, row1);
+    }
+}
+leaf_entry_points!(fill_wide => fill_w8, fill_w4; (leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize));
+
+/// [`fill_combined`] on a backend without IFMA (at most sixteen one-limb terms per output).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn combined_wide<B: crate::wide::Simd, L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize) {
+    use crate::wide::*;
+    let stop = row0 + (row1 - row0) / B::LANES * B::LANES;
+    // SAFETY: the caller guarantees the backend's features and `row1` writable rows.
+    unsafe {
+        let mut split_weights = [[(split::<B>(zero::<B>()), split::<B>(zero::<B>())); 4]; 4];
+        for (l, w) in weights.iter().enumerate() {
+            for a in 0..4 {
+                let x = bck::<B>(w[a]);
+                split_weights[l][a] = (split::<B>(x.0), split::<B>(x.1));
+            }
+        }
+        let total = weights.iter().flatten().fold(K::zero(), |s, &x| s + x);
+        let correction = bck::<B>(K::from_u64(I32_SHIFT) * total);
+        let shift = B::splat(I32_SHIFT);
+        for row in (row0..stop).step_by(B::LANES) {
+            let cells = leaves.values_wide::<B>(row);
+            let mut acc = acck::<B>();
+            for l in 0..weights.len() {
+                for a in 0..4 {
+                    let k = B::add(cells[l][a], shift);
+                    mac32::<B>(&mut acc.0, split_weights[l][a].0, k);
+                    mac32::<B>(&mut acc.1, split_weights[l][a].1, k);
+                }
+            }
+            let v = subk::<B>(redk::<B>(acc), correction);
+            B::store((out.0 as *mut u64).add(row), v.0);
+            B::store((out.1 as *mut u64).add(row), v.1);
+        }
+        fill_combined_scalar(leaves, weights, out, stop, row1);
+    }
+}
+leaf_entry_points!(combined_wide => combined_w8, combined_w4; (leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize));
+
+/// The unreduced sums of one block on a backend without IFMA.
+#[cfg(target_arch = "x86_64")]
+struct WideAccs<V> {
+    total: (crate::wide::Acc<V>, crate::wide::Acc<V>),
+    linear: [[(crate::wide::Acc<V>, crate::wide::Acc<V>); 4]; 4],
+    products: [[(crate::wide::Acc<V>, crate::wide::Acc<V>); 16]; 4],
+}
+
+/// Reduce the used accumulators of `acc` into `sums` (block-local `K` sums) and clear them.
+/// A function, not a closure: closures do not inherit the entry point's target features.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn wide_drain<B: crate::wide::Simd>(acc: &mut WideAccs<B::V>, sums: &mut PrefixSums, nl: usize, np: usize) {
+    use crate::wide::*;
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe {
+        sums.total += hsum_k::<B>(redk::<B>(acc.total));
+        acc.total = acck::<B>();
+        for form in 0..nl {
+            for a in 0..4 {
+                sums.linear[form][a] += hsum_k::<B>(redk::<B>(acc.linear[form][a]));
+                acc.linear[form][a] = acck::<B>();
+            }
+        }
+        for form in 0..np {
+            for ab in 0..16 {
+                sums.products[form][ab] += hsum_k::<B>(redk::<B>(acc.products[form][ab]));
+                acc.products[form][ab] = acck::<B>();
+            }
+        }
+    }
+}
+
+/// [`prefix_sums`] on a backend without IFMA: every integer form (linear forms below 2^32 in
+/// magnitude, products below 2^62) is read as its canonical residue and multiplied by the
+/// weight in full; the block's sums are scaled by `second[block]` after the reduction.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn sums_wide<B: crate::wide::Simd, L: Leaves>(
+    leaves: &L,
+    first: (&[u64], &[u64]),
+    second: &[K],
+    blocks: std::ops::Range<usize>,
+) -> PrefixSums {
+    use crate::wide::*;
+    let f = first.0.len();
+    let (nl, np) = (L::LINEAR.len(), L::PRODUCTS.len());
+    let mut out = PrefixSums::zero(nl, np);
+    // One product per coordinate and step for every accumulator.
+    let flush_steps = MAC_LIMIT;
+    // SAFETY: the caller guarantees the backend's features; `first` covers `f` rows and the
+    // leaves `4 f |second|` cells.
+    unsafe {
+        let z = acck::<B>();
+        let mut acc = WideAccs { total: z, linear: [[z; 4]; 4], products: [[z; 16]; 4] };
+        for block in blocks {
+            let mut sums = PrefixSums::zero(nl, np);
+            let mut steps = 0_usize;
+            for i in (0..f).step_by(B::LANES) {
+                let row = block * f + i;
+                let (w0, w1) = loadk::<B>(first, i);
+                let w = (split::<B>(w0), split::<B>(w1));
+                lift::<B>(&mut acc.total.0, w0);
+                lift::<B>(&mut acc.total.1, w1);
+                let cells = leaves.values_wide::<B>(row);
+                for (form, lanes) in L::LINEAR.iter().enumerate() {
+                    for a in 0..4 {
+                        let mut k = zero::<B>();
+                        for &l in lanes.iter() {
+                            k = B::add(k, cells[l][a]);
+                        }
+                        kmac_base::<B>(&mut acc.linear[form][a], w, split::<B>(B::residue(k)));
+                    }
+                }
+                for (form, &(pairs, _)) in L::PRODUCTS.iter().enumerate() {
+                    for a in 0..4 {
+                        for b in 0..4 {
+                            let mut k = zero::<B>();
+                            for &(l, m) in pairs.iter() {
+                                k = B::add(k, B::mul32s(cells[l][a], cells[m][b]));
+                            }
+                            kmac_base::<B>(&mut acc.products[form][4 * a + b], w, split::<B>(B::residue(k)));
+                        }
+                    }
+                }
+                steps += 1;
+                if steps == flush_steps {
+                    steps = 0;
+                    wide_drain::<B>(&mut acc, &mut sums, nl, np);
+                }
+            }
+            wide_drain::<B>(&mut acc, &mut sums, nl, np);
+            let s = second[block];
+            out.total += sums.total * s;
+            for (o, x) in out.linear.iter_mut().flatten().zip(sums.linear.iter().flatten()) {
+                *o += *x * s;
+            }
+            for (o, x) in out.products.iter_mut().flatten().zip(sums.products.iter().flatten()) {
+                *o += *x * s;
+            }
+        }
+    }
+    out
+}
+leaf_entry_points!(sums_wide => sums_w8, sums_w4; (leaves: &L, first: (&[u64], &[u64]), second: &[K], blocks: std::ops::Range<usize>) -> PrefixSums);

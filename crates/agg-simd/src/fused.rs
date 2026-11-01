@@ -54,9 +54,42 @@ pub unsafe fn fold_rows(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize
             return fold_vector(r, lanes, out, row0, row1);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    if row1 - row0 >= 8 {
+        if let Some(()) = crate::wide::dispatch!(fold_w8(r, lanes, out, row0, row1), fold_w4(r, lanes, out, row0, row1)) {
+            return;
+        }
+    }
     // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
     unsafe { fold_scalar(r, lanes, out, row0, row1) }
 }
+
+/// [`fold_rows`] on the backends without IFMA: one reduced `K` product per row.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn fold_wide<B: crate::wide::Simd>(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
+    use crate::wide::*;
+    let l = B::LANES;
+    let stop = row0 + (row1 - row0) / l * l;
+    // SAFETY: the caller guarantees the backend's features, `2 row1` readable rows per input
+    // lane and `row1` writable rows per output lane.
+    unsafe {
+        let rs = split_k::<B>(bck::<B>(r));
+        for (lane, &o) in lanes.iter().zip(out) {
+            for row in (row0..stop).step_by(l) {
+                let (e0, o0) = B::deinterleave(B::load(lane.0.as_ptr().add(2 * row)), B::load(lane.0.as_ptr().add(2 * row + l)));
+                let (e1, o1) = B::deinterleave(B::load(lane.1.as_ptr().add(2 * row)), B::load(lane.1.as_ptr().add(2 * row + l)));
+                // Canonical difference, one reduced product, canonical sum.
+                let folded = addk::<B>((e0, e1), kmul_s::<B>(subk::<B>((o0, o1), (e0, e1)), rs));
+                B::store((o.0 as *mut u64).add(row), folded.0);
+                B::store((o.1 as *mut u64).add(row), folded.1);
+            }
+        }
+        fold_scalar(r, lanes, out, stop, row1);
+    }
+}
+#[cfg(target_arch = "x86_64")]
+crate::wide::entry_points!(fold_wide => fold_w8, fold_w4; (r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize));
 
 unsafe fn fold_scalar(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
     for (lane, &o) in lanes.iter().zip(out) {
@@ -129,6 +162,42 @@ struct EvalScratch {
     wbd: Vec<[crate::x86::A5; 3]>,
     wsum: Vec<[crate::x86::A5; 3]>,
     running: Vec<[(crate::x86::V, crate::x86::V); 3]>,
+    /// The scratch of the AVX-512F kernel (empty on other backends).
+    w8: WideScratch<std::arch::x86_64::__m512i>,
+    /// The scratch of the AVX2 kernel (empty on other backends).
+    w4: WideScratch<std::arch::x86_64::__m256i>,
+}
+
+/// The scratch of the evaluation on a backend without IFMA: the split lanes of the current
+/// step, one unreduced accumulator pair per slot and component, and the reduced running sums.
+#[cfg(target_arch = "x86_64")]
+struct WideScratch<V> {
+    even: Vec<crate::wide::KS<V>>,
+    odd: Vec<crate::wide::KS<V>>,
+    diff: Vec<crate::wide::KS<V>>,
+    acc: Vec<[(crate::wide::Acc<V>, crate::wide::Acc<V>); 3]>,
+    running: Vec<[(V, V); 3]>,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl<V: Copy> WideScratch<V> {
+    fn empty() -> Self {
+        Self { even: Vec::new(), odd: Vec::new(), diff: Vec::new(), acc: Vec::new(), running: Vec::new() }
+    }
+
+    /// # Safety
+    /// `V` must be a SIMD integer vector (every bit pattern, the zero one included, is valid).
+    unsafe fn zeros(width: usize, slots: usize) -> Self {
+        // SAFETY: the all-zero bit pattern is a valid vector of every lane type.
+        let (ks, acc, v) = unsafe { (std::mem::zeroed(), std::mem::zeroed(), std::mem::zeroed()) };
+        Self {
+            even: vec![ks; width],
+            odd: vec![ks; width],
+            diff: vec![ks; width],
+            acc: vec![[acc; 3]; slots],
+            running: vec![[(v, v); 3]; slots],
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -138,7 +207,16 @@ impl EvalScratch {
             // SAFETY: the backend check guarantees the AVX-512 features of the initialisers.
             return unsafe { Self::zeros(width, slots) };
         }
+        let (w8, w4) = match backend() {
+            // SAFETY: both are integer vector types.
+            Backend::Avx512F => (unsafe { WideScratch::zeros(width, slots) }, WideScratch::empty()),
+            // SAFETY: both are integer vector types.
+            Backend::Avx2 => (WideScratch::empty(), unsafe { WideScratch::zeros(width, slots) }),
+            _ => (WideScratch::empty(), WideScratch::empty()),
+        };
         Self {
+            w8,
+            w4,
             even: Vec::new(),
             odd: Vec::new(),
             diff: Vec::new(),
@@ -164,6 +242,8 @@ impl EvalScratch {
                 wbd: vec![[a5(); 3]; slots],
                 wsum: vec![[a5(); 3]; slots],
                 running: vec![[(z(), z()); 3]; slots],
+                w8: WideScratch::empty(),
+                w4: WideScratch::empty(),
             }
         }
     }
@@ -233,6 +313,16 @@ fn eval_items_with(
         // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
         unsafe {
             return eval_vector(lanes, terms, order, scratch, weights, k0, k1, full, out);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if k1 - k0 >= 8 {
+        match backend() {
+            // SAFETY: the backend check guarantees AVX-512F; the assertions above cover the reads.
+            Backend::Avx512F => return unsafe { eval_w8(lanes, terms, order, &mut scratch.w8, weights, k0, k1, full, out) },
+            // SAFETY: the backend check guarantees AVX2; the assertions above cover the reads.
+            Backend::Avx2 => return unsafe { eval_w4(lanes, terms, order, &mut scratch.w4, weights, k0, k1, full, out) },
+            _ => {}
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -334,7 +424,7 @@ unsafe fn eval_vector(
         debug_assert_eq!(scratch.inner.len(), slots);
         let stop = k0 + (k1 - k0) / 8 * 8;
         let SlotOrder { lin_off, lin_order, pro_off, pro_order } = order;
-        let EvalScratch { even, odd, diff, inner, wac, wbd, wsum, running } = scratch;
+        let EvalScratch { even, odd, diff, inner, wac, wbd, wsum, running, .. } = scratch;
         let has_products = !terms.products.is_empty();
         let weighted = weights.is_some();
         // Reset the accumulators this call reads; the lane limbs are written before they are
@@ -475,6 +565,201 @@ unsafe fn eval_vector(
         if stop < k1 {
             let tail = weights.map(|w| (&w.0[stop - k0..], &w.1[stop - k0..]));
             eval_scalar(lanes, terms, tail, stop, k1, full, out);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn eval_w8(
+    lanes: &[Planes<'_>],
+    terms: Terms<'_>,
+    order: &SlotOrder,
+    scratch: &mut WideScratch<std::arch::x86_64::__m512i>,
+    weights: Option<Planes<'_>>,
+    k0: usize,
+    k1: usize,
+    full: bool,
+    out: &mut [[K; 3]],
+) {
+    // SAFETY: AVX-512F is enabled; the caller checked the reads.
+    unsafe { eval_wide::<crate::wide::W8>(lanes, terms, order, scratch, weights, k0, k1, full, out) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn eval_w4(
+    lanes: &[Planes<'_>],
+    terms: Terms<'_>,
+    order: &SlotOrder,
+    scratch: &mut WideScratch<std::arch::x86_64::__m256i>,
+    weights: Option<Planes<'_>>,
+    k0: usize,
+    k1: usize,
+    full: bool,
+    out: &mut [[K; 3]],
+) {
+    // SAFETY: AVX2 is enabled; the caller checked the reads.
+    unsafe { eval_wide::<crate::wide::W4>(lanes, terms, order, scratch, weights, k0, k1, full, out) }
+}
+
+/// [`eval_items`] on the backends without IFMA, step by step over `LANES` items. Per slot the
+/// value on the pair is summed unreduced; without weights it is added to the slot's
+/// accumulator as it stands, with weights it is reduced once and multiplied by the weight.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+#[allow(clippy::too_many_lines)]
+unsafe fn eval_wide<B: crate::wide::Simd>(
+    lanes: &[Planes<'_>],
+    terms: Terms<'_>,
+    order: &SlotOrder,
+    scratch: &mut WideScratch<B::V>,
+    weights: Option<Planes<'_>>,
+    k0: usize,
+    k1: usize,
+    full: bool,
+    out: &mut [[K; 3]],
+) {
+    use crate::wide::*;
+    // SAFETY: the caller guarantees the backend's features and that every lane holds the rows
+    // `2 k0 .. 2 k1` and the weights `k1 - k0` rows.
+    unsafe {
+        let l = B::LANES;
+        let width = lanes.len();
+        let slots = terms.slots;
+        debug_assert_eq!(scratch.even.len(), width);
+        debug_assert_eq!(scratch.acc.len(), slots);
+        let stop = k0 + (k1 - k0) / l * l;
+        let SlotOrder { lin_off, lin_order, pro_off, pro_order } = order;
+        let WideScratch { even, odd, diff, acc, running } = scratch;
+        let has_products = !terms.products.is_empty();
+        let weighted = weights.is_some();
+        // Mac units a slot's accumulator takes per step: one per linear term (a lift) and two
+        // per product and coordinate unweighted, two per coordinate weighted (one reduced
+        // value times the weight). Reduce before the units reach the accumulator's limit.
+        let units = if weighted {
+            2
+        } else {
+            (0..slots).map(|s| (lin_off[s + 1] - lin_off[s]) + 2 * (pro_off[s + 1] - pro_off[s])).max().unwrap_or(0).max(1)
+        };
+        let flush_steps = (MAC_LIMIT / units).max(1);
+        let zk = (zero::<B>(), zero::<B>());
+        running[..slots].fill([zk; 3]);
+        acc[..slots].fill([acck::<B>(); 3]);
+        let mut steps = 0_usize;
+        for k in (k0..stop).step_by(l) {
+            for li in 0..width {
+                let (c0, c1) = lanes[li];
+                let (e0, o0) = B::deinterleave(B::load(c0.as_ptr().add(2 * k)), B::load(c0.as_ptr().add(2 * k + l)));
+                let (e1, o1) = B::deinterleave(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
+                // Products read the doubled second coordinate; linear terms read the values.
+                if has_products {
+                    even[li] = split_k::<B>((e0, e1));
+                    if full {
+                        odd[li] = split_k::<B>((o0, o1));
+                    }
+                    diff[li] = split_k::<B>(subk::<B>((o0, o1), (e0, e1)));
+                } else {
+                    even[li].c0.l = e0;
+                    even[li].c1.l = e1;
+                    odd[li].c0.l = o0;
+                    odd[li].c1.l = o1;
+                }
+            }
+            let w = match weights {
+                Some(w) => Some(split_k::<B>(loadk::<B>(w, k - k0))),
+                None => None,
+            };
+            for s in 0..slots {
+                let mut value = [acck::<B>(); 3];
+                for &index in &lin_order[lin_off[s]..lin_off[s + 1]] {
+                    let (li, _) = terms.linear[index as usize];
+                    lift::<B>(&mut value[0].0, even[li].c0.l);
+                    lift::<B>(&mut value[0].1, even[li].c1.l);
+                    if full {
+                        lift::<B>(&mut value[1].0, odd[li].c0.l);
+                        lift::<B>(&mut value[1].1, odd[li].c1.l);
+                    }
+                }
+                for &index in &pro_order[pro_off[s]..pro_off[s + 1]] {
+                    let (i, j, _) = terms.products[index as usize];
+                    if i == j {
+                        // x^2: re += a^2 + 2 b^2, im += 2ab (three products).
+                        for (c, x) in [(0, even[i]), (2, diff[i]), (1, odd[i])] {
+                            if c == 1 && !full {
+                                continue;
+                            }
+                            mac::<B>(&mut value[c].0, x.c0, x.c0);
+                            mac::<B>(&mut value[c].0, x.c1, x.c1x2);
+                            mac::<B>(&mut value[c].1, x.c0, x.c1x2);
+                        }
+                    } else {
+                        kmac::<B>(&mut value[0], (even[i].c0, even[i].c1), even[j]);
+                        kmac::<B>(&mut value[2], (diff[i].c0, diff[i].c1), diff[j]);
+                        if full {
+                            kmac::<B>(&mut value[1], (odd[i].c0, odd[i].c1), odd[j]);
+                        }
+                    }
+                }
+                for c in 0..3 {
+                    if c == 1 && !full {
+                        continue;
+                    }
+                    match w {
+                        Some(ws) => {
+                            // A canonical value before the multiply by the weight.
+                            let (vr, vi) = redk::<B>(value[c]);
+                            kmac::<B>(&mut acc[s][c], (split::<B>(vr), split::<B>(vi)), ws);
+                        }
+                        None => {
+                            acc[s][c].0 = add_acc::<B>(acc[s][c].0, value[c].0);
+                            acc[s][c].1 = add_acc::<B>(acc[s][c].1, value[c].1);
+                        }
+                    }
+                }
+            }
+            steps += 1;
+            if steps == flush_steps {
+                steps = 0;
+                wide_flush::<B>(&mut acc[..slots], &mut running[..slots], full);
+            }
+        }
+        wide_flush::<B>(&mut acc[..slots], &mut running[..slots], full);
+        for s in 0..slots {
+            for c in 0..3 {
+                if c == 1 && !full {
+                    continue;
+                }
+                out[s][c] += hsum_k::<B>(running[s][c]);
+            }
+        }
+        if stop < k1 {
+            let tail = weights.map(|w| (&w.0[stop - k0..], &w.1[stop - k0..]));
+            eval_scalar(lanes, terms, tail, stop, k1, full, out);
+        }
+    }
+}
+
+/// Reduce the slot accumulators into the running sums (a function, not a closure: closures
+/// do not inherit the entry point's target features).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn wide_flush<B: crate::wide::Simd>(
+    sums: &mut [[(crate::wide::Acc<B::V>, crate::wide::Acc<B::V>); 3]],
+    running: &mut [[(B::V, B::V); 3]],
+    full: bool,
+) {
+    use crate::wide::*;
+    // SAFETY: the caller guarantees the backend's features.
+    unsafe {
+        for (a, r) in sums.iter_mut().zip(running.iter_mut()) {
+            for c in 0..3 {
+                if c == 1 && !full {
+                    continue;
+                }
+                r[c] = addk::<B>(r[c], redk::<B>(a[c]));
+                a[c] = acck::<B>();
+            }
         }
     }
 }
