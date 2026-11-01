@@ -531,3 +531,7 @@ large frees, so the different allocation pattern of v5 leaves more freed heap re
 the lookup allocates. Whether this carries to 32K (25.8 GiB baseline) is for the cloud run;
 a fixed mmap threshold (or `mallopt` at start-up) also lowered v4's own peak by about 370 MiB
 at 8,192 and is a prover-only memory lever to measure there (its time cost is unmeasured).
+
+## ML-DSA-65 and ML-DSA-87 sponge layouts
+
+Word indices below follow `crates/agg-keccak/src/sponge.rs`. ML-DSA-65 uses seven permutations: w1 occupies 48 words, with rows 6–7 of each lane committed as zero; mu begins at word 64, c~ occupies words 68–70, the constant is word 71, and chi begins at word 72. ML-DSA-87 uses nine permutations: w1 occupies 64 words, mu begins at word 64, c~ occupies words 68–71, the constant is word 72, and chi begins at word 80. Its public region has 16 words.
