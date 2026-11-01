@@ -1042,9 +1042,9 @@ impl<'g> TiedPart<'g> {
     /// tests pass wrong ones) under the matrices of `sd`, seeded by `fs` (the part's Flock
     /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (its live lanes) and,
     /// for ML-DSA-44, the sponge's word columns 48..63 (lanes 6, 7), the claimed bit value,
-    /// then the sponge
-    /// instance's Flock proof with the public claim and the bit claim (opening the commitment-phase
-    /// commitment). `sd` is bound through `fs` (the Flock seed step follows the bridge-seed step).
+    /// then the sponge instance's Flock proof with the public claim and the bit claim
+    /// (opening the commitment-phase commitment). `sd` is bound through `fs` (the Flock seed
+    /// step follows the bridge-seed step).
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`

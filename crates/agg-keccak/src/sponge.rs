@@ -1,6 +1,10 @@
 //! SHAKE256 sponge circuit for `c~ = H(mu || w1Encode(w1'))`.
 //!
-//! One gate instance per signature: seven chained chi-only Keccak-f[1600]
+//! The text below describes the ML-DSA-44 layout; [`SpongeLayout`] gives the block layout of
+//! every parameter set (ML-DSA-65 and ML-DSA-87: four bit lanes of `P_pad = 2,048` positions,
+//! 384- and 512-bit `c~`, seven and nine permutations, the public region at word 64).
+//!
+//! ML-DSA-44: one gate instance per signature, seven chained chi-only Keccak-f[1600]
 //! permutations (rate 136 bytes, capacity 512 bits, initial state zero):
 //!
 //! | Permutation | Absorbed block (136 bytes) |
@@ -25,7 +29,7 @@
 //! word 55 is zero and the chi words start at word 56, so words 48..56 are the
 //! public region (mu, `c~`, the constant, zero). The tied part (`crate::tied`)
 //! ties the public region to the public words and the w1Encode bits to the parity
-//! chain by evaluation claims; the word constants below name the layout.
+//! chain by evaluation claims; the word constants below name the ML-DSA-44 layout.
 
 use agg_witness::params::{ParamSet, Set, Set44, Set65, Set87};
 use flock_field::F128;
