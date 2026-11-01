@@ -91,8 +91,8 @@ longer scans the 8 B/cell plane.
 `opaque/plans.rs`, `arithmetic/commitment.rs` and `arithmetic/exact_i16.rs`:
 `CoeffBlocks` carries the per-block signed-16 mirrors; a 16-bit single-digit
 commit takes `dense_commit_i16_mirror_rows`, which feeds the mirror blocks to the
-same exact-i16 `mat_vec_i16` kernel (the portable CRT NTT on this build, the
-IFMA52 specialization on the IFMA line) and zero-pads a ragged last block. Both
+same exact-i16 `mat_vec_i16` kernel (the portable CRT NTT, or the
+IFMA52 specialization when the `avx512ifma` tier is selected at run time) and zero-pads a ragged last block. Both
 paths request the same A transform key. With a primed i8 cache the source
 advertises `PredecomposedDigits` first, so the commit reads 32 MiB per column
 instead of the 256 MiB field plane. The new unit test

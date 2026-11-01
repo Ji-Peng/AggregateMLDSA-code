@@ -8,8 +8,11 @@ vendored changes are recorded in `vendor/akita/PATCH.md` and
 `vendor/flock-core/PATCH.md`.
 
 Unless a different condition is stated, timings refer to relation H-u, 32K signatures,
-median of five cold runs, and the reference run takes 2.76 s on the AVX-512IFMA build and
-2.98 s on the general build, at 49.2 B/sig. The phrase "measured on a Zen 5 node (EPYC 9355),
+median of five cold runs, at 49.2 B/sig. The reference run was taken on the two builds that
+run-time ISA dispatch has since replaced: 2.76 s on the AVX-512IFMA build and 2.98 s on the
+general build (PCLMULQDQ baseline, no IFMA kernels). The single release build measures
+2.71-2.73 s at the `avx512ifma` tier and 2.88-2.91 s at the `avx2` tier on the same node
+class. The phrase "measured on a Zen 5 node (EPYC 9355),
 32K signatures, 16 cores / 32 threads" identifies that run. Numbers from another machine,
 another size or another thread count carry that condition with them; estimates are marked
 as estimates.
@@ -99,7 +102,7 @@ signed-16 mirror in chunks of 32K cells on the caller's pool. Flock's
 `alloc_zeroed_vec` (`vendor/flock-core/src/lib.rs`) uses `alloc_zeroed`, whose zero pages are
 likewise faulted in by the parallel writers rather than memset by one thread.
 
-Buffers from the stage-3 pool (`Pool::take`, IFMA line) are handed out as uninitialised
+Buffers from the stage-3 pool (`Pool::take`) are handed out as uninitialised
 storage: every caller writes the rows it later reads, and `AGG_ALLOC_POISON=1` fills fresh
 blocks with a pattern so the byte-identity gate checks that contract.
 
@@ -248,13 +251,13 @@ The vendored `flock-core` carries the following prover changes; all are describe
 `vendor/flock-core/PATCH.md`. The round polynomials are unique, so the routes below
 compute the same field elements and leave the proof bytes unchanged.
 
-- **`a, b` rows on the PIOP pool.** On the `ifma` line the sponge witness generator writes
-  `z` only. `KeccakSide::prepare_fork` (`crates/agg-piop/src/prover.rs`) returns a closure
-  that the PIOP pool runs at fork start; it calls `pack_ab`
-  (`crates/agg-keccak/src/witness.rs`) to build `a = A z` and `b = B z` eight rows per
-  task, and hands them to the proof through a channel (`FlockProver::prepare_fork`,
-  `crates/agg-cli/src/mode_a.rs`). The default build builds them in the tied-part witness
-  pass (`pack_slot_groups`).
+- **Lazy `a, b` rows.** On the AVX-512 tiers the 8-way sponge witness generator
+  (`sponge_slot`, `crates/agg-keccak/src/witness.rs`) writes `z` only, and
+  `SlotBuffers::ensure_ab` builds `a = A z` and `b = B z` with `pack_ab` just before the
+  sponge proof (`crates/agg-keccak/src/tied.rs`). Building them on the PIOP pool at fork
+  start was measured longer: the row job occupies a PIOP worker and lengthens the fork wall
+  by about 30 ms at 8C16T. Without AVX-512 the tied-part witness pass (`pack_slot_groups`)
+  builds all three rows.
 - **Round-23 pruning.** `GateLayout::new` and `round_lanes`
   (`crates/agg-keccak/src/gate.rs`) commit only the lanes of the last round that hold an
   output bit. For the SHAKE256 sponge that is four of 25 lanes, so the other chi AND bits
@@ -331,7 +334,7 @@ and the dispatch:
   combination.
 - `scripts/simd-ab.sh` builds `origin/main` as a baseline and compares a 1K aggregate of
   the working tree under scalar, AVX2 and AVX-512 and one and sixteen threads with `cmp`.
-  Cross-build equality at 32K (general against IFMA) is checked the same way, and the
+  Cross-tier equality at 32K (`AGG_ISA=avx2` against `avx512ifma`) is checked the same way, and the
   32K gates run with `AGG_ALLOC_POISON=1` so a reader of a reused block is caught.
 
 `agg bench` measures cold runs. `cold_start` in `crates/agg-cli/src/commands.rs` waits for

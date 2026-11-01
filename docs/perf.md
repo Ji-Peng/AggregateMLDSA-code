@@ -730,12 +730,13 @@ and H-exact/H-FIPS at 256 records. It verifies uncached, fills a fresh cache, ve
 hit, and compares aggregate and cache bytes across every available engine at 1/16 threads:
 
 ```sh
-CARGO_BUILD_JOBS=3 RUSTFLAGS='-C target-feature=+pclmulqdq' \
+CARGO_BUILD_JOBS=3 \
   cargo test --release -p agg-cli --test all simd_backends -- --ignored
 ```
 
 Kernel gates (`cargo bench -p agg-mldsa-simd --bench <name> -- --gate` with
-`RUSTFLAGS='--cfg cref'` and `AGG_CREF_SRC` holding `dilithium/` and `Hybrid-SHA-3/`, one pinned
+`RUSTFLAGS='-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq --cfg cref'` (an exported
+RUSTFLAGS replaces the flags of `.cargo/config.toml`, so it repeats them) and `AGG_CREF_SRC` holding `dilithium/` and `Hybrid-SHA-3/`, one pinned
 core) compare each kernel with its C original: pass at a ratio of at most 1.00, a ratio in
 (1.00, 1.03] reruns and decides on the pooled ratio. The C references are built for the ISA of the
 backend they are compared with (`x86-64-v3` for AVX2, `x86-64-v4` for AVX-512). Rows where the
