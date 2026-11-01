@@ -26,7 +26,6 @@ TABLES = ARTIFACT / "paper-tables"
 RUST_TOOLCHAIN = "1.99.1"
 AERIE_TOOLCHAIN = "1.95.0"
 
-
 def load_toml(path):
     with open(path, "rb") as f:
         data = f.read()
@@ -41,6 +40,14 @@ def load_configs():
 
 def load_matrix(mode):
     return load_toml(CONFIG / f"matrix-{mode}.toml")
+
+
+def pinned_commit():
+    """The in-repo source commit named by `sources.lock`."""
+    for source in load_toml(ARTIFACT / "sources.lock").get("source", []):
+        if source.get("in_repo"):
+            return source["commit"]
+    return ""
 
 
 def run(cmd, *, env=None, cwd=None, check=True, capture=True, quiet=False):
@@ -91,6 +98,19 @@ def cpu_flags():
     except OSError:
         pass
     return flags
+
+
+def supported_tiers(flags=None):
+    """The reported tiers this CPU can run, from `ifma` down to `avx2`."""
+    flags = set(cpu_flags() if flags is None else flags)
+    tiers = []
+    if {"avx512f", "avx512dq", "avx512bw", "avx512vl", "avx512ifma"} <= flags:
+        tiers.append("ifma")
+    if "avx512f" in flags:
+        tiers.append("avx512")
+    if {"avx2", "pclmulqdq"} <= flags:
+        tiers.append("avx2")
+    return tiers
 
 
 def cpu_model():

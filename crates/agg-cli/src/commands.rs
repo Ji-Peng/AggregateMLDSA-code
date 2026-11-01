@@ -680,6 +680,12 @@ fn write_bench_json(
         "    \"mldsa_backend\": {},",
         json_string(mldsa_backend_name())
     );
+    let _ = writeln!(out, "    \"AGG_ISA\": {},", json_env("AGG_ISA"));
+    let _ = writeln!(
+        out,
+        "    \"AGG_PIOP_LAYOUT\": {},",
+        json_env("AGG_PIOP_LAYOUT")
+    );
     let _ = writeln!(out, "    \"AGG_SIMD\": {},", json_env("AGG_SIMD"));
     let _ = writeln!(
         out,

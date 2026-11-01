@@ -9,7 +9,7 @@
 name = "ours"
 url = "https://github.com/Ji-Peng/AggregateMLDSA-code"
 archive_url = "PLACEHOLDER (anonymous archive URL and DOI to be filled at submission)"
-commit = "ad45ef7391ca355c153bca47a4fc94415292903e"
+commit = "7b9c67a1311ce62af9e6e5d5aff0e9ed80d92cec"
 license = "MIT OR Apache-2.0"
 role = "prover, verifier"
 in_repo = true

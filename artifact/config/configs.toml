@@ -1,65 +1,54 @@
-# Kernel configurations and build flags.
+# Kernel tiers and build flags.
 #
-# Every knob lives here and nowhere else. A build that does not declare a knob
-# ignores it; the run records the environment it set, and the tables show what
-# the binary reported.
+# One release build serves every tier. The baseline is fixed by the
+# repository's `.cargo/config.toml` (x86-64-v3 plus PCLMULQDQ), and each tier
+# below is a run-time cap of that one binary through `AGG_ISA`. No tier has
+# its own compile flags. A build that does not declare a knob ignores it; the
+# run records the environment it set, and the tables show what the binary
+# reported.
 
 [build]
 toolchain = "1.99.1"
 aerie_toolchain = "1.95.0"
 jobs = 6
-# The release build every row starts from. Row-specific flags extend this.
-base_rustflags = "-C target-feature=+pclmulqdq"
 package = "agg-cli"
 bin = "agg"
 
-[build.binaries.agg-v3]
-rustflags = "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
-features = []
-avx512_check = false
-description = "x86-64-v3 baseline with CLMUL; run-time dispatch picks AVX-512 and IFMA when present."
-
-[build.binaries.agg-noavx512]
-rustflags = "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq,-avx512f"
-features = ["no-avx512"]
-requires_feature = "no-avx512"
-avx512_check = true
-description = "v3 without AVX-512 code; falls back to the v3 binary when the feature is absent."
-
-[build.binaries.agg-v1]
-rustflags = "-C target-feature=+pclmulqdq,-avx512f"
-features = ["no-avx512"]
-requires_feature = "no-avx512"
-avx512_check = true
-description = "x86-64-v1 with CLMUL and no AVX-512; falls back to the v3 binary when the feature is absent."
+[build.binaries.agg]
+description = "The single release build; the baseline lives in .cargo/config.toml."
 
 [rows.ifma]
-binary = "agg-v3"
+binary = "agg"
 label = "IFMA"
-requires = ["pclmulqdq", "avx2", "avx512f", "avx512ifma"]
+requires = ["pclmulqdq", "avx2", "avx512f", "avx512dq", "avx512bw", "avx512vl", "avx512ifma"]
+# Unset AGG_ISA leaves the choice to feature detection, which selects the IFMA
+# kernels on a CPU that has them.
 env = {}
 note = "Every detected kernel, including the IFMA field and NTT kernels."
 
 [rows.avx512]
-binary = "agg-v3"
+binary = "agg"
 label = "AVX-512"
 requires = ["pclmulqdq", "avx2", "avx512f"]
-env = { AGG_SIMD = "portable" }
+env = { AGG_ISA = "avx512" }
 note = "AVX-512 everywhere except the IFMA field and NTT kernels."
 
 [rows.avx2]
-binary = "agg-noavx512"
+binary = "agg"
 label = "AVX2"
-requires = ["pclmulqdq", "avx2", "popcnt"]
-env = { AGG_SIMD = "portable", AGG_MLDSA_SIMD = "avx2", FLOCK_SIMD = "portable" }
-note = "No AVX-512 instruction; GFNI off; AVX2 ML-DSA kernels."
+requires = ["pclmulqdq", "avx2"]
+env = { AGG_ISA = "avx2" }
+note = "No AVX-512 instruction; the x86-64-v3 baseline."
 
 [rows.scalar]
-binary = "agg-v1"
+binary = "agg"
 label = "scalar"
-requires = ["pclmulqdq"]
-env = { AGG_SIMD = "portable", AGG_MLDSA_SIMD = "scalar", FLOCK_SIMD = "portable", AKITA_SCALAR_NTT = "1" }
-note = "Scalar everywhere except the CLMUL GF(2^128) multiply."
+requires = ["pclmulqdq", "avx2"]
+env = { AGG_ISA = "scalar" }
+note = "Portable kernels only; a correctness check, not a reported tier."
+# The paper reports the three tiers above. The scalar cap stays available for
+# `run.sh gates` as a lower-bound correctness check.
+gates_only = true
 
 [topology]
 # Tried in this order when a row asks for an allocation the machine lacks.

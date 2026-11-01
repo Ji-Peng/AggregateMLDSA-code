@@ -26,6 +26,7 @@ from common import (  # noqa: E402
     cpu_model,
     hostname,
     output,
+    supported_tiers,
     utc_stamp,
     write_json,
 )
@@ -216,6 +217,7 @@ def probe():
         "container": container_state(),
         "toolchains": tool_versions(),
         "flags": sorted(cpu_flags()),
+        "tiers": supported_tiers(),
     }
     state["warnings"] = build_warnings(state)
     return state
@@ -233,6 +235,10 @@ def check():
             problems.append(f"missing tool: {tool}")
     if "pclmulqdq" not in flags:
         problems.append("CPU lacks pclmulqdq: the prover requires CLMUL")
+    if "avx2" not in flags:
+        problems.append(
+            "CPU lacks avx2: the release binary is built for x86-64-v3 and does not start"
+        )
     if sys.version_info < (3, 11):
         notes.append("Python older than 3.11: using the bundled TOML fallback")
     for tool in ["taskset", "numactl", "/usr/bin/time", "shellcheck", "docker"]:
@@ -245,7 +251,7 @@ def check():
     ]:
         if not path.exists():
             problems.append(f"missing source: {name} at {path}")
-    for name in ["agg-v3", "agg-noavx512", "agg-v1"]:
+    for name in ["agg"]:
         if not (BIN / name).exists():
             notes.append(f"binary not built yet: {BIN / name}")
     for name in ["aerie-falcon-bench", "natver"]:
@@ -260,9 +266,11 @@ def check():
         "  features       "
         + " ".join(
             f"{f}={'yes' if f in flags else 'no'}"
-            for f in ["pclmulqdq", "avx2", "avx512f", "avx512ifma", "gfni"]
+            for f in ["pclmulqdq", "avx2", "avx512f", "avx512bw", "avx512vl", "avx512ifma", "gfni"]
         )
     )
+    tiers = supported_tiers(flags)
+    print("  tiers          " + (" ".join(tiers) if tiers else "none"))
     print(f"  Python         {sys.version.split()[0]}")
     for note in notes:
         print(f"  note           {note}")

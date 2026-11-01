@@ -31,6 +31,7 @@ from common import (  # noqa: E402
     write_json,
 )
 from stats import describe, flags as cell_flags  # noqa: E402
+from simd_report import capture, failures, summarise  # noqa: E402
 
 
 def sh(cmd, env, cwd=None, timeout=None):
@@ -162,6 +163,7 @@ class Runner:
         self.code_commit = git_rev(REPO)
         self.cells = []
         self.skipped = []
+        self.reports = {}
         self.machine = self.load_machine()
         self.topo = self.load_topology()
         self.topo["_numactl"] = self.machine.get("numactl_H", "")
@@ -210,6 +212,8 @@ class Runner:
             spec = self.configs["rows"].get(name)
             if spec is None:
                 raise SystemExit(f"unknown configuration {name}")
+            if spec.get("gates_only"):
+                continue
             missing = [flag for flag in spec.get("requires", []) if flag not in self.flags]
             if missing:
                 self.skipped.append(
@@ -224,6 +228,18 @@ class Runner:
             binary = BIN / spec["binary"]
             if not binary.exists():
                 raise SystemExit(f"{binary} is missing; run ./run.sh build")
+            if name not in self.reports:
+                report, _ = capture(binary, spec.get("env", {}))
+                problems = failures(report, name)
+                self.reports[name] = {
+                    "summary": summarise(report),
+                    "failures": problems,
+                }
+                if problems:
+                    raise SystemExit(
+                        f"{name}: the self-report does not match the tier: "
+                        + "; ".join(problems)
+                    )
             selected.append(name)
         return selected
 
@@ -417,6 +433,7 @@ class Runner:
             "aggregate_sha256": None,
             "accepted": True,
             "kernels": {},
+            "simd_report": self.reports.get(config),
             "freq_mhz": {},
             "foreign_busy": None,
             "loadavg": None,
@@ -614,7 +631,7 @@ class Runner:
     def ensure_records(self, n):
         records = self.result_dir / "data" / f"records-{n}.bin"
         keys = self.result_dir / "data" / f"keys-{n}.bin"
-        binary = BIN / "agg-v3"
+        binary = BIN / "agg"
         if not records.exists():
             env = self.env_for("ifma", self.topo["configs"]["all"], None)
             proc = sh(

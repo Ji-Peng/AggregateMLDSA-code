@@ -4,7 +4,7 @@
 # usage: run_ours.sh CONFIG ALLOCATION N [REPS]
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-config=${1:?configuration: ifma, avx512, avx2 or scalar}
+config=${1:?tier: ifma, avx512 or avx2}
 allocation=${2:?allocation: 16C32T, 8C16T or 1T}
 n=${3:?batch size}
 reps=${4:-3}

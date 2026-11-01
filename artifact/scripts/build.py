@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Build every binary of the package and run the static AVX-512 checks."""
+"""Build the one release binary, Aerie's baseline and natver.
+
+Every tier of ours is a run-time cap of the same binary, so only the C
+baseline gets a static AVX-512 check: our binary legitimately contains all
+the AVX-512 and IFMA kernels. The instruction set each tier selects is
+checked at run time instead (`AGG_SIMD_REPORT=1`, see `simd_report.py`).
+"""
 
 import argparse
-import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -20,14 +24,18 @@ from common import (  # noqa: E402
     REPO,
     RUST_TOOLCHAIN,
     VENDOR,
+    cpu_flags,
     git_rev,
     load_configs,
+    load_toml,
     output,
+    pinned_commit,
     run,
     sha256_file,
     utc_stamp,
     write_json,
 )
+from simd_report import capture, failures, summarise  # noqa: E402
 
 AVX512_PATTERNS = {
     "zmm": re.compile(r"%zmm[0-9]+"),
@@ -50,87 +58,81 @@ def objdump_counts(path):
     return counts
 
 
-def features():
-    env = {"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}
-    proc = run(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+def release_flags():
+    """The baseline the repository compiles with, read from `.cargo/config.toml`."""
+    path = REPO / ".cargo" / "config.toml"
+    if not path.exists():
+        return {"path": str(path), "rustflags": [], "present": False}
+    data = load_toml(path)
+    flags = data.get("build", {}).get("rustflags", [])
+    return {
+        "path": str(path),
+        "rustflags": flags,
+        "present": True,
+        "sha256": sha256_file(path),
+    }
+
+
+def build_ours(offline):
+    configs = load_configs()
+    build_cfg = configs["build"]
+    name = build_cfg["bin"]
+    target = BUILD / "target-agg"
+    cmd = [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        build_cfg["package"],
+    ]
+    if offline:
+        cmd.append("--offline")
+    print("building agg with the baseline in .cargo/config.toml")
+    run(
+        cmd,
         cwd=REPO,
-        env=env,
-        check=False,
+        env={
+            "RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN,
+            "CARGO_TARGET_DIR": str(target),
+            "CARGO_BUILD_JOBS": str(build_cfg.get("jobs", 6)),
+        },
     )
-    if proc.returncode != 0:
-        proc = run(
-            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-            cwd=REPO,
-            env=env,
-            check=False,
-        )
-    if proc.returncode != 0:
-        return set(), proc.stderr
-    data = json.loads(proc.stdout)
-    for package in data.get("packages", []):
-        if package.get("name") == "agg-cli":
-            return set(package.get("features", {})), None
-    return set(), "agg-cli not found in cargo metadata"
-
-
-def build_ours(binaries, declared, offline):
-    built = {}
-    aliases = {}
-    env = {"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}
-    for name, spec in binaries.items():
-        required = spec.get("requires_feature")
-        if required and required not in declared:
-            aliases[name] = "agg-v3"
-            print(f"{name}: feature {required} is not declared; using agg-v3")
-            continue
-        target = BUILD / f"target-{name}"
-        cmd = [
-            "cargo",
-            "build",
-            "--release",
-            "--locked",
-            "-p",
-            "agg-cli",
-        ]
-        if offline:
-            cmd.append("--offline")
-        feats = spec.get("features") or []
-        if feats:
-            cmd += ["--features", ",".join(feats)]
-        print(f"building {name}: {spec['rustflags']}")
-        run(
-            cmd,
-            cwd=REPO,
-            env={
-                **env,
-                "RUSTFLAGS": spec["rustflags"],
-                "CARGO_TARGET_DIR": str(target),
-                "CARGO_BUILD_JOBS": str(spec.get("jobs", 6)),
-            },
-        )
-        src = target / "release" / "agg"
-        dst = BIN / name
-        BIN.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        built[name] = {
+    src = target / "release" / build_cfg["bin"]
+    dst = BIN / build_cfg["bin"]
+    BIN.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return {
+        name: {
             "path": str(dst),
             "sha256": sha256_file(dst),
-            "rustflags": spec["rustflags"],
-            "features": feats,
             "target_dir": str(target),
+            "release_flags": release_flags(),
         }
-    for alias, base in aliases.items():
-        dst = BIN / alias
-        # Keep the alias in step with a rebuilt base binary.
-        shutil.copy2(BIN / base, dst)
-        built[alias] = {
-            "path": str(dst),
-            "sha256": sha256_file(dst),
-            "alias_of": base,
-            "feature_missing": "no-avx512",
+    }
+
+
+def collect_reports(configs):
+    """The self-report of every tier this CPU can run."""
+    flags = cpu_flags()
+    reports = {}
+    for name, spec in configs["rows"].items():
+        missing = [flag for flag in spec.get("requires", []) if flag not in flags]
+        if missing:
+            reports[name] = {
+                "available": False,
+                "reason": "CPU lacks " + ", ".join(missing),
+            }
+            continue
+        report, proc = capture(BIN / spec["binary"], spec.get("env", {}))
+        problems = failures(report, name)
+        reports[name] = {
+            "available": True,
+            "returncode": proc.returncode,
+            "summary": summarise(report),
+            "failures": problems,
         }
-    return built
+    return reports
 
 
 def find_bench(target):
@@ -163,81 +165,80 @@ def build_aerie(offline, capped):
     ]
     if offline:
         cmd.append("--offline")
-    run(
-        cmd,
-        cwd=aerie,
-        env={
-            "RUSTUP_TOOLCHAIN": AERIE_TOOLCHAIN,
-            "RUSTFLAGS": "",
-            "CARGO_TARGET_DIR": str(target),
-        },
-    )
-    BIN.mkdir(parents=True, exist_ok=True)
-    plain = BIN / "aerie-falcon-bench"
-    shutil.copy2(find_bench(target), plain)
-    result = {
-        "path": str(plain),
-        "sha256": sha256_file(plain),
-        "capped": False,
-        "avx512_counts": objdump_counts(plain),
-        "note": "Aerie dispatches at run time; its binary contains AVX-512 code even when capped.",
+    env = {
+        "RUSTUP_TOOLCHAIN": AERIE_TOOLCHAIN,
+        "CARGO_TARGET_DIR": str(target),
+        "CARGO_BUILD_JOBS": str(6),
     }
-    if capped:
-        target_capped = BUILD / "target-aerie-capped"
-        env = {
-            "RUSTUP_TOOLCHAIN": AERIE_TOOLCHAIN,
-            "RUSTFLAGS": "",
-            "CARGO_TARGET_DIR": str(target_capped),
-        }
-        base = [
-            "cargo",
-            "build",
-            "--release",
-            "--locked",
-            "-p",
-            "aerie-bench",
-            "--bench",
-            "falcon",
-        ]
+    print("building Aerie's Falcon-512 baseline")
+    run(cmd, cwd=aerie, env=env)
+    dst = BIN / "aerie-falcon-bench"
+    shutil.copy2(find_bench(target), dst)
+    result = {
+        "path": str(dst),
+        "sha256": sha256_file(dst),
+        "target_dir": str(target),
+    }
+    if not capped:
+        return result
+
+    # The AVX2-capped baseline needs Aerie's run-time backend override. Use
+    # the feature when the pinned tree has it; otherwise apply the small
+    # patch in patches/ and revert it afterwards.
+    target_capped = BUILD / "target-aerie-capped"
+    base = [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "aerie-bench",
+        "--bench",
+        "falcon",
+    ]
+    if offline:
+        base.append("--offline")
+    env_capped = {**env, "CARGO_TARGET_DIR": str(target_capped)}
+    proc = run(
+        base
+        + [
+            "--features",
+            "falcon-bench,aerie-simd/backend-override,"
+            "aerie-keccak/backend-override",
+        ],
+        cwd=aerie,
+        env=env_capped,
+        check=False,
+    )
+    patched = False
+    if proc.returncode != 0:
+        print("aerie-simd/backend-override is not selectable; applying the cap patch")
+        patch = ARTIFACT / "patches" / "aerie-simd-cap.patch"
+        applied = run(["git", "apply", str(patch)], cwd=aerie, check=False)
+        if applied.returncode != 0:
+            result["capped_error"] = (applied.stderr or "").strip()[-2000:]
+            return result
+        patched = True
         proc = run(
-            base
-            + [
-                "--features",
-                "falcon-bench,aerie-simd/backend-override,aerie-keccak/backend-override",
-            ],
+            base + ["--features", "falcon-bench"],
             cwd=aerie,
-            env=env,
+            env=env_capped,
             check=False,
         )
-        patched = False
-        if proc.returncode != 0:
-            print("aerie-simd/backend-override is not selectable; applying the cap patch")
-            patch = ARTIFACT / "patches" / "aerie-simd-cap.patch"
-            applied = run(["git", "apply", str(patch)], cwd=aerie, check=False)
-            if applied.returncode != 0:
-                result["capped_error"] = (applied.stderr or "").strip()[-2000:]
-            else:
-                patched = True
-                proc = run(
-                    base + ["--features", "falcon-bench"],
-                    cwd=aerie,
-                    env=env,
-                    check=False,
-                )
-                run(["git", "apply", "-R", str(patch)], cwd=aerie, check=False)
-        if proc.returncode == 0:
-            capped_bin = BIN / "aerie-falcon-bench-avx2"
-            shutil.copy2(find_bench(target_capped), capped_bin)
-            result["capped"] = {
-                "path": str(capped_bin),
-                "sha256": sha256_file(capped_bin),
-                "env": "AERIE_SIMD_BACKEND=avx2 AERIE_KECCAK_BACKEND=avx2",
-                "patch": "patches/aerie-simd-cap.patch" if patched else None,
-                "avx512_counts": objdump_counts(capped_bin),
-                "note": "The cap is a run-time ceiling; the binary still contains AVX-512 code.",
-            }
-        else:
-            result["capped_error"] = (proc.stderr or "").strip()[-2000:]
+        run(["git", "apply", "-R", str(patch)], cwd=aerie, check=False)
+    if proc.returncode == 0:
+        capped_bin = BIN / "aerie-falcon-bench-avx2"
+        shutil.copy2(find_bench(target_capped), capped_bin)
+        result["capped"] = {
+            "path": str(capped_bin),
+            "sha256": sha256_file(capped_bin),
+            "env": "AERIE_SIMD_BACKEND=avx2 AERIE_KECCAK_BACKEND=avx2",
+            "patch": "patches/aerie-simd-cap.patch" if patched else None,
+            "avx512_counts": objdump_counts(capped_bin),
+            "note": "The cap is a run-time ceiling; the binary still contains AVX-512 code.",
+        }
+    else:
+        result["capped_error"] = (proc.stderr or "").strip()[-2000:]
     return result
 
 
@@ -263,39 +264,21 @@ def main():
     args = parser.parse_args()
     offline = args.offline or os.environ.get("AGG_OFFLINE") == "1"
     configs = load_configs()
-    build_cfg = configs["build"]
+    # The release baseline is `.cargo/config.toml`. A RUSTFLAGS in the
+    # environment would override it silently, so drop it and say so.
+    inherited = [
+        name
+        for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS")
+        if os.environ.pop(name, None) is not None
+    ]
+    if inherited:
+        print("ignoring inherited " + ", ".join(inherited) + "; using .cargo/config.toml")
 
-    declared, error = features()
-    if error:
-        print(f"warning: cargo metadata: {error}", file=sys.stderr)
-    feature_present = "no-avx512" in declared
-    binaries = {}
-    for name, spec in build_cfg["binaries"].items():
-        binaries[name] = {**spec, "jobs": build_cfg.get("jobs", 6)}
-    built = build_ours(binaries, declared, offline)
-
-    checks = {}
-    warnings = []
-    for name, entry in built.items():
-        spec = build_cfg["binaries"][name]
-        if not spec.get("avx512_check"):
-            continue
-        counts = objdump_counts(Path(entry["path"]))
-        hard = "alias_of" not in entry
-        checks[name] = {**counts, "hard_failure": hard}
-        if counts["total"] and hard:
-            raise SystemExit(
-                f"{name}: AVX-512 instructions in a no-avx512 build: {counts}"
-            )
-        if counts["total"]:
-            warnings.append(
-                f"{name}: built without the no-avx512 feature; "
-                f"{counts['total']} AVX-512-looking lines recorded, not a failure"
-            )
+    built = build_ours(offline)
+    reports = collect_reports(configs)
 
     natver = build_natver()
     natver_counts = objdump_counts(Path(natver["path"]))
-    checks["natver"] = {**natver_counts, "hard_failure": True}
     if natver_counts["total"]:
         raise SystemExit(f"natver contains AVX-512 instructions: {natver_counts}")
 
@@ -303,9 +286,17 @@ def main():
     if not args.skip_aerie:
         aerie = build_aerie(offline, args.with_aerie_capped)
 
+    warnings = []
+    for name, entry in reports.items():
+        if entry.get("available") and entry.get("failures"):
+            warnings.append(
+                f"{name}: self-report mismatch: " + "; ".join(entry["failures"])
+            )
+
     result = {
         "timestamp_utc": utc_stamp(),
         "commit": git_rev(REPO),
+        "source_commit": pinned_commit(),
         "toolchains": {
             "rustc": output(["rustc", "-V"], env={"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}),
             "cargo": output(["cargo", "-V"], env={"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}),
@@ -314,21 +305,24 @@ def main():
             ),
             "gcc": output(["gcc", "--version"]).splitlines()[0],
         },
-        "no_avx512_feature": feature_present,
-        "declared_features": sorted(declared),
         "binaries": built,
+        "simd_reports": reports,
         "aerie": aerie,
         "natural_verifier": natver,
-        "avx512_checks": checks,
+        "avx512_checks": {"natver": {**natver_counts, "hard_failure": True}},
         "warnings": warnings,
     }
     write_json(BUILD / "build.json", result)
     print("build: OK")
-    if not feature_present:
-        print(
-            "warning: the workspace does not declare the no-avx512 feature; "
-            "the avx2 and scalar rows use the agg-v3 binary"
-        )
+    for name, entry in reports.items():
+        if entry.get("available"):
+            print(
+                f"  {name:<7} cap={entry['summary']['cap']} "
+                f"mldsa={entry['summary']['mldsa_backend']} "
+                f"aerie={entry['summary']['aerie_backend']}"
+            )
+        else:
+            print(f"  {name:<7} n/a ({entry['reason']})")
     for warning in warnings:
         print(f"warning: {warning}")
     return 0

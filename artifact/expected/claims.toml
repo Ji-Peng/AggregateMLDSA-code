@@ -13,25 +13,25 @@ tolerance = "exact (the aggregate is a deterministic byte string)"
 
 [[claim]]
 id = "C2"
-statement = "Every kernel configuration and thread count produces the same aggregate; verification accepts it."
+statement = "Every reported tier, and the scalar gate, produces the same aggregate; verification accepts it."
 table = "tab-e2e.tex"
 cell = "all rows: identical bytes and accept"
 command = "./run.sh gates"
-expected = "one sha256 for all four configurations, verify exit status 0"
+expected = "one sha256 for all three tiers and the scalar gate, verify exit status 0"
 tolerance = "exact"
 
 [[claim]]
 id = "C3"
 statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's medians."
 table = "tab-e2e.tex"
-cell = "IFMA / AVX2 prove and verify"
+cell = "IFMA / AVX-512 / AVX2 prove and verify"
 command = "./run.sh full"
-expected = "paper medians (2.60 s and 2.88 s at 32K on 16C32T)"
+expected = "paper medians (2.6 s IFMA, 2.8 s AVX-512, 2.8-2.9 s AVX2 at 32K on 16C32T)"
 tolerance = "+-10% on the same CPU class; other microarchitectures differ"
 
 [[claim]]
 id = "C4"
-statement = "The ISA ladder has the paper's order: IFMA <= AVX-512 <= AVX2 <= scalar."
+statement = "The ISA ladder has the paper's order: IFMA <= AVX-512 <= AVX2."
 table = "tab-ablation.tex"
 cell = "ISA ladder rows"
 command = "./run.sh quick --smoke"

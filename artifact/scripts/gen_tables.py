@@ -3,29 +3,28 @@
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
-    EXPECTED,
     TABLES,
-    load_toml,
     median,
     read_json,
     result_dir,
     utc_stamp,
-    write_json,
 )
 from stats import describe  # noqa: E402
 
-ORDER = ["ifma", "avx512", "avx2", "scalar"]
-MACRO = {"ifma": "Ifma", "avx512": "AvxVn", "avx2": "AvxTwo", "scalar": "Scalar"}
-LABEL = {"ifma": "IFMA", "avx512": "AVX-512", "avx2": "AVX2", "scalar": "scalar"}
+# The paper reports these three tiers on one machine. The scalar cap is a
+# gates-only check and does not appear in a table.
+ORDER = ["ifma", "avx512", "avx2"]
+MACRO = {"ifma": "Ifma", "avx512": "AvxVn", "avx2": "AvxTwo"}
+LABEL = {"ifma": "IFMA", "avx512": "AVX-512", "avx2": "AVX2"}
 RELATION = {"h-u": "$\\Relu$", "h-exact": "$\\Relex$", "h-fips": "$\\Relfips$"}
 ALLOC_ORDER = ["16C32T", "8C16T", "1T", "all"]
+NA = "n/a"
 
 
 def preferred_allocation(cells):
@@ -40,7 +39,7 @@ def load_cells(directory):
     for path in sorted((directory / "raw").glob("*.json")):
         try:
             cell = read_json(path)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             continue
         if cell.get("times_ms") or cell.get("verify_uncached_ms"):
             cells.append(cell)
@@ -48,12 +47,13 @@ def load_cells(directory):
 
 
 def skipped_configs(directory):
+    """Tiers the CPU cannot run, with a short reason."""
     path = directory / "skipped.json"
     if not path.exists():
         return {}
     try:
         entries = read_json(path)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return {}
     result = {}
     for entry in entries:
@@ -71,17 +71,6 @@ def skipped_configs(directory):
     return result
 
 
-def by_key(cells, system="ours"):
-    table = {}
-    for cell in cells:
-        if cell.get("system") != system:
-            continue
-        key = (cell["tag"], cell["config"], cell["allocation"], cell["n"], cell["relation"])
-        if key not in table or cell.get("reps", 0) > table[key].get("reps", 0):
-            table[key] = cell
-    return table
-
-
 def headline_cells(cells):
     ours = [c for c in cells if c.get("system") == "ours"]
     tagged = [
@@ -94,7 +83,12 @@ def headline_cells(cells):
         and not c.get("tag", "").endswith("1t")
     ]
     if not tagged:
-        tagged = [c for c in ours if str(c.get("tag", "")).startswith("quick-ours") and not c.get("tag", "").endswith("1t")]
+        tagged = [
+            c
+            for c in ours
+            if str(c.get("tag", "")).startswith("quick-ours")
+            and not c.get("tag", "").endswith("1t")
+        ]
     if not tagged:
         tagged = ours
     return tagged
@@ -153,37 +147,42 @@ def e2e_table(cells, directory, commit, machine, skipped):
     data = [c for c in data if c["n"] == n]
     relations = []
     for c in data:
-        if c["relation"] not in relations and c["relation"] in ("h-u", "h-exact", "h-fips"):
+        if c["relation"] not in relations and c["relation"] in RELATION:
             relations.append(c["relation"])
-    allocs = [a for a in ALLOC_ORDER if any(c["allocation"] == a for c in data) and a != "all"]
+    allocs = [a for a in ALLOC_ORDER if a != "all" and any(c["allocation"] == a for c in data)]
     if not allocs:
         allocs = ["8C16T"]
     verify_alloc = "16C32T" if "16C32T" in allocs else allocs[0]
-    lookup = {
-        (c["config"], c["allocation"], c["relation"]): c for c in data
-    }
+    lookup = {(c["config"], c["allocation"], c["relation"]): c for c in data}
     cols = "Q[l] Q[l] " + " ".join("X[r]" for _ in allocs) + " X[1.3,r]"
     out = header(directory, commit, machine)
     out += table_begin(
         "tab:ae-e2e",
-        f"Mode~A at $N={f'{n:,}'.replace(',', '{,}')}$, medians of the measured runs (measured on {machine}).",
-        "Prove in seconds. Verify on " + verify_alloc + ", uncached / cached keys, in ms. "
-        "Values are medians; the appendix gives the full ranges.",
+        f"Mode~A at $N={f'{n:,}'.replace(',', '{,}')}$, medians of the measured runs "
+        f"(measured on {machine}).",
+        "Prove in seconds. Verify on " + verify_alloc
+        + ", uncached / cached keys, in ms. "
+        "Values are medians; the appendix gives the full ranges. "
+        "n/a: the CPU does not support the tier.",
         cols,
         1,
     )
     out += "Build & Rel. & " + " & ".join(allocs) + " & Verify \\\\\n"
     for config in ORDER:
-        for relation in relations:
-            row = [LABEL.get(config, config), RELATION.get(relation, relation)]
-            any_value = False
+        present = [relation for relation in relations
+                   if any(lookup.get((config, allocation, relation)) for allocation in allocs)]
+        if not present:
+            if config in skipped:
+                row = [LABEL[config], RELATION["h-u"]]
+                row += [NA] * len(allocs)
+                row.append(NA)
+                out += " & ".join(row) + " \\\\\n"
+            continue
+        for relation in present:
+            row = [LABEL[config], RELATION[relation]]
             for allocation in allocs:
                 cell = lookup.get((config, allocation, relation))
-                if cell and cell.get("times_ms"):
-                    row.append(fmt_seconds(median(cell["times_ms"])))
-                    any_value = True
-                else:
-                    row.append("--")
+                row.append(fmt_seconds(median(cell["times_ms"])) if cell and cell.get("times_ms") else "--")
             cell = lookup.get((config, verify_alloc, relation))
             if cell and cell.get("verify_uncached_ms"):
                 row.append(
@@ -191,16 +190,8 @@ def e2e_table(cells, directory, commit, machine, skipped):
                     + " / "
                     + (fmt_ms(median(cell["verify_cached_ms"])) if cell.get("verify_cached_ms") else "--")
                 )
-                any_value = True
             else:
                 row.append("--")
-            if any_value:
-                out += " & ".join(row) + " \\\\\n"
-    for config in ORDER:
-        if config in skipped and not any(c["config"] == config for c in data):
-            row = [LABEL.get(config, config), "$\\Relu$"]
-            row += [skipped[config]] + ["--"] * (len(allocs) - 1)
-            row.append("--")
             out += " & ".join(row) + " \\\\\n"
     out += "\\end{talltblr}\n\\end{table}\n"
     return out
@@ -208,40 +199,44 @@ def e2e_table(cells, directory, commit, machine, skipped):
 
 def ablation_table(cells, directory, commit, machine, skipped):
     data = headline_cells(cells)
-    abl = [c for c in cells if c.get("system") == "ours" and "ablation" in str(c.get("tag", ""))]
+    abl = [
+        c for c in cells
+        if c.get("system") == "ours" and "ablation" in str(c.get("tag", ""))
+    ]
     if not data and not abl:
         return "% no ablation data\n"
     out = header(directory, commit, machine)
     out += table_begin(
         "tab:ae-ablation",
-        "ISA ladder and control ablations" + (f" (measured on {machine})." if machine else "."),
-        "Prove in ms; in parentheses the change against the defaults of the same series. "
-        "Cells without data are omitted.",
-        "X[2.6,l] X[1,r] X[1,r] X[1,r] X[1,r]",
+        "ISA ladder and control ablations"
+        + (f" (measured on {machine})." if machine else "."),
+        "Prove in ms; in parentheses the change against the defaults of the same "
+        "series. Cells without data are omitted. "
+        "n/a: the CPU does not support the tier.",
+        "X[2.6,l] X[1,r] X[1,r] X[1,r]",
     )
     out += "Setting & " + " & ".join(LABEL[c] for c in ORDER) + " \\\\\n"
-    # ISA ladder from the headline cells.
     if data:
         n = max(c["n"] for c in data)
         allocation = preferred_allocation(data)
         for config in ORDER:
             matches = [
                 c for c in data
-                if c["config"] == config and c["n"] == n and c["allocation"] == allocation
+                if c["config"] == config and c["n"] == n
+                and c["allocation"] == allocation
                 and c["relation"] == "h-u" and c.get("times_ms")
             ]
             if matches:
                 value = f"{median(matches[0]['times_ms']):.0f}"
-                row = [f"{LABEL.get(config, config)} (ISA ladder)"]
-                row += [value if c == config else "--" for c in ORDER]
+                row = [f"{LABEL[config]} (ISA ladder)"]
+                row += [value if candidate == config else "--" for candidate in ORDER]
                 out += " & ".join(row) + " \\\\\n"
             elif config in skipped:
-                row = [f"{LABEL.get(config, config)} (ISA ladder)"]
-                row += [skipped[config] if c == config else "--" for c in ORDER]
+                row = [f"{LABEL[config]} (ISA ladder)"]
+                row += [NA if candidate == config else "--" for candidate in ORDER]
                 out += " & ".join(row) + " \\\\\n"
-    # Knob ablations, with the defaults of the same series.
     defaults = {}
-    for config in ("ifma", "avx2"):
+    for config in ORDER:
         matches = [
             c for c in abl
             if c["config"] == config and c.get("arm") == "defaults" and c.get("times_ms")
@@ -273,29 +268,34 @@ def ablation_table(cells, directory, commit, machine, skipped):
     return out
 
 
-def scaling_table(cells, directory, commit, machine):
+def scaling_table(cells, directory, commit, machine, skipped):
     ours = [
         c for c in cells
         if c.get("system") == "ours" and c["relation"] == "h-u" and c.get("times_ms")
-        and ("scaling" in str(c.get("tag", "")) or "headline" in str(c.get("tag", "")) or "quick-ours" in str(c.get("tag", "")))
+        and (
+            "scaling" in str(c.get("tag", ""))
+            or "headline" in str(c.get("tag", ""))
+            or "quick-ours" in str(c.get("tag", ""))
+        )
     ]
     if not ours:
         return "% no scaling data\n"
     sizes = sorted({c["n"] for c in ours})
-    configs = [c for c in ORDER if any(x["config"] == c for x in ours)]
     allocation = preferred_allocation(ours)
     out = header(directory, commit, machine)
     out += table_begin(
         "tab:ae-scaling",
         f"Scaling of mode~A under $\\Relu$ (measured on {machine}).",
-        "Prove in seconds on " + allocation + "; B/sig is the aggregate size per signature.",
-        "Q[r] " + " ".join("Q[r]" for _ in configs) + " Q[r]",
+        "Prove in seconds on " + allocation
+        + "; B/sig is the aggregate size per signature. "
+        "n/a: the CPU does not support the tier.",
+        "Q[r] " + " ".join("Q[r]" for _ in ORDER) + " Q[r]",
     )
-    out += "$N$ & " + " & ".join(LABEL.get(c, c) for c in configs) + " & B/sig \\\\\n"
+    out += "$N$ & " + " & ".join(LABEL[c] for c in ORDER) + " & B/sig \\\\\n"
     for n in sizes:
         row = [f"$2^{{{n.bit_length() - 1}}}$" if n & (n - 1) == 0 else f"{n:,}"]
         bps = "--"
-        for config in configs:
+        for config in ORDER:
             matches = [
                 c for c in ours
                 if c["config"] == config and c["n"] == n and c["allocation"] == allocation
@@ -304,7 +304,7 @@ def scaling_table(cells, directory, commit, machine):
                 row.append(fmt_seconds(median(matches[0]["times_ms"])))
                 bps = fmt_bytes_per_sig(matches[0])
             else:
-                row.append("--")
+                row.append(NA if config in skipped else "--")
         row.append(bps)
         out += " & ".join(row) + " \\\\\n"
     out += "\\end{talltblr}\n\\end{table}\n"
@@ -340,7 +340,7 @@ def bytes_table(cells, directory, commit, machine):
     return out
 
 
-def baselines_table(cells, directory, commit, machine):
+def baselines_table(cells, directory, commit, machine, skipped):
     candidates = [
         c for c in cells
         if c.get("system") == "ours" and c["relation"] == "h-u" and c.get("times_ms")
@@ -351,6 +351,7 @@ def baselines_table(cells, directory, commit, machine):
         if key not in ours_by_key or cell.get("reps", 0) > ours_by_key[key].get("reps", 0):
             ours_by_key[key] = cell
     ours = list(ours_by_key.values())
+
     def dedup(items, key):
         chosen = {}
         for item in items:
@@ -373,7 +374,8 @@ def baselines_table(cells, directory, commit, machine):
     out += table_begin(
         "tab:ae-baselines",
         f"Baselines (measured on {machine}).",
-        "Prove in s; verify in ms, uncached / cached keys. --: not measured.",
+        "Prove in s; verify in ms, uncached / cached keys. "
+        "n/a: the CPU does not support the tier. --: not measured.",
         "X[2.3,l] X[1.2,l] X[1,r] X[1.5,r] X[1,r]",
     )
     out += "System & Alloc. & Prove & Verify & B/sig \\\\\n"
@@ -405,12 +407,14 @@ def baselines_table(cells, directory, commit, machine):
                 if c["config"] == config and c["allocation"] == allocation
             ]
             if not matches:
+                if config in skipped:
+                    out += f"ours, {LABEL[config]} & {allocation} & {NA} & {NA} & {NA} \\\\\n"
                 continue
             cell = matches[0]
             verify = fmt_ms(median(cell["verify_uncached_ms"])) if cell.get("verify_uncached_ms") else "--"
             cached = fmt_ms(median(cell["verify_cached_ms"])) if cell.get("verify_cached_ms") else "--"
             out += (
-                f"ours, {LABEL.get(config, config)} & {allocation} & "
+                f"ours, {LABEL[config]} & {allocation} & "
                 f"{fmt_seconds(median(cell['times_ms']))} & {verify} / {cached} & "
                 f"{fmt_bytes_per_sig(cell)} \\\\\n"
             )
@@ -442,13 +446,13 @@ def numbers(cells, directory, commit, machine):
         if cell.get("aggregate_bytes"):
             values[f"BytesPerSig{MACRO[config]}"] = fmt_bytes_per_sig(cell)
             values["AggregateBytes"] = f"{cell['aggregate_bytes']:,}".replace(",", "{,}")
-    if "ProveIfma" in values and "ProveAvxTwo" in values:
+    if "ProveIfma" in values:
         try:
-            values["GainIfmaOverAvxTwo"] = f"{float(values['ProveAvxTwo']) / float(values['ProveIfma']):.1f}"
-            values["GainIfmaOverScalar"] = (
-                f"{float(values['ProveScalar']) / float(values['ProveIfma']):.1f}"
-                if "ProveScalar" in values else None
-            )
+            prove = float(values["ProveIfma"])
+            for config in ("avx512", "avx2"):
+                name = f"Prove{MACRO[config]}"
+                if name in values:
+                    values[f"GainIfmaOver{MACRO[config]}"] = f"{float(values[name]) / prove:.1f}"
         except ValueError:
             pass
     for name, value in values.items():
@@ -504,9 +508,9 @@ def main():
     outputs = {
         "tab-e2e.tex": e2e_table(cells, directory, commit, machine, skipped),
         "tab-ablation.tex": ablation_table(cells, directory, commit, machine, skipped),
-        "tab-scaling.tex": scaling_table(cells, directory, commit, machine),
+        "tab-scaling.tex": scaling_table(cells, directory, commit, machine, skipped),
         "tab-bytes.tex": bytes_table(cells, directory, commit, machine),
-        "tab-baselines.tex": baselines_table(cells, directory, commit, machine),
+        "tab-baselines.tex": baselines_table(cells, directory, commit, machine, skipped),
         "numbers.tex": numbers(cells, directory, commit, machine),
     }
     for name, text in outputs.items():

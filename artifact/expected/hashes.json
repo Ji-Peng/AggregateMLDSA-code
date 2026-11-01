@@ -1,30 +1,30 @@
 {
-  "commit": "ad45ef7391ca355c153bca47a4fc94415292903e",
+  "commit": "7b9c67a1311ce62af9e6e5d5aff0e9ed80d92cec",
   "relation": "h-u",
   "aggregates": {
     "1024": {
       "h-u": {
-        "bytes": 426895,
-        "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+        "bytes": 427198,
+        "sha256": "ece8268c2c54e3c9ee810848005747badf56d6f29de199223652f4662c5361c5"
       }
     }
   },
   "per_configuration": {
     "ifma": {
-      "bytes": 426895,
-      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+      "bytes": 427198,
+      "sha256": "ece8268c2c54e3c9ee810848005747badf56d6f29de199223652f4662c5361c5"
     },
     "avx512": {
-      "bytes": 426895,
-      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+      "bytes": 427198,
+      "sha256": "ece8268c2c54e3c9ee810848005747badf56d6f29de199223652f4662c5361c5"
     },
     "avx2": {
-      "bytes": 426895,
-      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+      "bytes": 427198,
+      "sha256": "ece8268c2c54e3c9ee810848005747badf56d6f29de199223652f4662c5361c5"
     },
     "scalar": {
-      "bytes": 426895,
-      "sha256": "13b46511e05e77812161e2ab34ba488d145184bde3f114c592fc3c2d81ec02ca"
+      "bytes": 427198,
+      "sha256": "ece8268c2c54e3c9ee810848005747badf56d6f29de199223652f4662c5361c5"
     }
   },
   "note": "Generated from the pinned commit by ./run.sh gates --write-expected. Every configuration must reproduce these bytes."

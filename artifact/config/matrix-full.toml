@@ -7,7 +7,7 @@ mode = "full"
 [[runs]]
 kind = "ours"
 tag = "headline"
-configs = ["ifma", "avx512", "avx2", "scalar"]
+configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
 relation = "h-u"
@@ -17,7 +17,7 @@ reps = 10
 [[runs]]
 kind = "ours"
 tag = "headline-1t"
-configs = ["ifma", "avx2", "scalar"]
+configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [32768]
 relation = "h-u"
@@ -58,7 +58,7 @@ arms = [
   { tag = "no-alloc-cache", env = { AGG_ALLOC_CACHE = "0" } },
   { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
   { tag = "stage-branch-main-pool", env = { AGG_PIOP_S_THREADS = "0" } },
-  { tag = "gfni", env = { FLOCK_SIMD = "gfni" } },
+  { tag = "piop-row", env = { AGG_PIOP_LAYOUT = "row" } },
 ]
 
 [[runs]]

@@ -3,7 +3,7 @@
 #
 #   ./run.sh check    report missing tools, sources and binaries
 #   ./run.sh fetch    clone and verify the pinned sources
-#   ./run.sh build    build ours, Aerie and natver; run the static checks
+#   ./run.sh build    build the release binary, Aerie and natver
 #   ./run.sh gates    byte identity, acceptance and the negative check at 1K
 #   ./run.sh quick    small matrix; add --smoke for N=1024 and 1+1 runs
 #   ./run.sh full     the experiment matrix of the evaluation
@@ -18,7 +18,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -42,7 +42,8 @@ case "$mode" in
     exec python3 scripts/gates.py "$@"
     ;;
   quick | full)
-    exec python3 scripts/runner.py "$mode" "$@"
+    python3 scripts/runner.py "$mode" "$@" || exit 1
+    exec python3 scripts/gen_tables.py
     ;;
   tables)
     exec python3 scripts/gen_tables.py "$@"
