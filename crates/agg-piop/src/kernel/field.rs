@@ -13,7 +13,7 @@ pub(crate) type Acc = <E as Unreduced>::Product;
 /// `p = 2^64 - 59`.
 const P: u64 = 0_u64.wrapping_sub(59);
 
-/// `carry * 2^128 + hi * 2^64 + lo` modulo `p` (`carry <= 2`), canonical. `2^64 = 59` and
+/// `carry * 2^128 + hi * 2^64 + lo` modulo `p` (`carry <= 5`), canonical. `2^64 = 59` and
 /// `2^128 = 3481` modulo `p`; the first fold is below `2^71`, the second below `2^64 + 2^13`.
 #[inline(always)]
 fn reduce3(lo: u64, hi: u64, carry: u64) -> u64 {
@@ -52,6 +52,66 @@ pub(crate) fn fm(lhs: E, rhs: E) -> E {
             u64::from(carry2),
         )),
     )
+}
+
+/// `a b + c d` in `K` from eight `64 x 64` products and one reduction per coordinate
+/// (against two for [`fm`] twice plus an addition); equal to `a * b + c * d` (test
+/// `fast_product_matches_the_field_product`).
+#[inline(always)]
+pub(crate) fn fm2(a: E, b: E, c: E, d: E) -> E {
+    let wide = |x: E, y: E| {
+        let (x0, x1) = (u128::from(x.c0().to_canonical_u64()), u128::from(x.c1().to_canonical_u64()));
+        let (y0, y1) = (u128::from(y.c0().to_canonical_u64()), u128::from(y.c1().to_canonical_u64()));
+        (x0 * y0, x1 * y1, x0 * y1, x1 * y0)
+    };
+    let (ac, bd, ad, bc) = wide(a, b);
+    let (ac2, bd2, ad2, bc2) = wide(c, d);
+    // Real part: ac + 2 bd + ac' + 2 bd', six terms below 2^128 each, so the carry out of
+    // the low 128 bits is at most 5. Imaginary part: four terms, carry at most 3.
+    let mut carry_real = 0_u64;
+    let mut real = 0_u128;
+    for term in [ac, bd, bd, ac2, bd2, bd2] {
+        let (sum, overflow) = real.overflowing_add(term);
+        real = sum;
+        carry_real += u64::from(overflow);
+    }
+    let mut carry_imaginary = 0_u64;
+    let mut imaginary = 0_u128;
+    for term in [ad, bc, ad2, bc2] {
+        let (sum, overflow) = imaginary.overflowing_add(term);
+        imaginary = sum;
+        carry_imaginary += u64::from(overflow);
+    }
+    E::new(
+        F::from_u64(reduce3(real as u64, (real >> 64) as u64, carry_real)),
+        F::from_u64(reduce3(imaginary as u64, (imaginary >> 64) as u64, carry_imaginary)),
+    )
+}
+
+/// The canonical residue of a signed integer `|k| < p` (branch free).
+#[inline(always)]
+pub(crate) fn residue(k: i64) -> u64 {
+    (k as u64).wrapping_add(((k >> 63) as u64) & P)
+}
+
+/// `w_0 k_0 + w_1 k_1 + w_2 k_2 + a` for canonical residues `k_t < p` and an addend `a =
+/// (a_0, a_1)` of two coordinates below `2^66`: three `64 x 64` products per coordinate and
+/// one reduction each (four terms below `2^128`, so the carry out of 128 bits is at most 3).
+#[inline(always)]
+pub(crate) fn dot3(w: [E; 3], k: [u64; 3], a: [u128; 2]) -> E {
+    debug_assert!(a[0] < 1 << 66 && a[1] < 1 << 66);
+    let coordinate = |c: usize| {
+        let mut sum = a[c];
+        let mut carry = 0_u64;
+        for (w, &k) in w.iter().zip(&k) {
+            let x = if c == 0 { w.c0() } else { w.c1() }.to_canonical_u64();
+            let (next, overflow) = sum.overflowing_add(u128::from(x) * u128::from(k));
+            sum = next;
+            carry += u64::from(overflow);
+        }
+        F::from_u64(reduce3(sum as u64, (sum >> 64) as u64, carry))
+    };
+    E::new(coordinate(0), coordinate(1))
 }
 
 /// `x k` for a signed integer `|k| < p`: `k` is taken modulo `p` as a `u64` (branch free:
@@ -319,6 +379,9 @@ mod tests {
                         let lhs = E::new(F::from_u64(a), F::from_u64(b));
                         let rhs = E::new(F::from_u64(c), F::from_u64(d));
                         assert_eq!(fm(lhs, rhs), lhs * rhs);
+                        // All-maximal coordinates reach the largest carries of `fm2`.
+                        assert_eq!(fm2(lhs, rhs, lhs, rhs), lhs * rhs + lhs * rhs);
+                        assert_eq!(fm2(lhs, rhs, rhs, lhs), lhs * rhs + rhs * lhs);
                     }
                 }
             }
@@ -329,6 +392,19 @@ mod tests {
             let b = field(&mut rng);
             assert_eq!(fm(a, b), a * b);
             assert_eq!(fm(a, a), a * a);
+            let (c, d) = (field(&mut rng), field(&mut rng));
+            assert_eq!(fm2(a, b, c, d), a * b + c * d);
+            let k = [rng.next_u64() % P, rng.next_u64() % P, P - 1];
+            let addend = [rng.next_u64() % P, P - 1];
+            let expected = a * E::from_u64(k[0]) + b * E::from_u64(k[1]) + c * E::from_u64(k[2])
+                + E::new(F::from_u64(addend[0]), F::from_u64(addend[1]));
+            assert_eq!(dot3([a, b, c], k, addend.map(u128::from)), expected);
+            let big = [u128::from(P - 1) * 3, u128::from(P - 1) + 5];
+            let expected = a * E::from_u64(P - 1) + b * E::from_u64(P - 1) + c * E::from_u64(P - 1)
+                + E::new(F::from_u64(P - 1) * F::from_u64(3), F::from_u64(P - 1) + F::from_u64(5));
+            assert_eq!(dot3([a, b, c], [P - 1; 3], big), expected);
+            let i = (rng.next_u64() >> 2) as i64 - (1 << 61);
+            assert_eq!(E::from_u64(residue(i)), E::from_i64(i));
         }
     }
 

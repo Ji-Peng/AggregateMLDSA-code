@@ -684,6 +684,7 @@ impl Layer {
     }
 }
 
+#[cfg(test)]
 #[allow(unsafe_code)]
 fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Layer {
     if half < PARALLEL_NODES {
@@ -710,6 +711,7 @@ fn build_nodes(half: usize, node: impl Fn(usize) -> (E, E) + Sync + Send) -> Lay
 }
 
 /// The parent layer: `p = p_0 q_1 + p_1 q_0`, `q = q_0 q_1` (3 `K`-multiplications per node).
+#[cfg(test)]
 fn parent(child: &Layer) -> Layer {
     let half = child.len() / 2;
     let (p0, p1) = child.p.split_at(half);
@@ -723,6 +725,7 @@ fn parent(child: &Layer) -> Layer {
 
 /// The layer above the leaves `(1, X - g)` of a stacked lane: `p = (X - g_0) + (X - g_1)`,
 /// `q = (X - g_0)(X - g_1)` (`x` is the challenge minus the stack's storage shift).
+#[cfg(test)]
 fn stack_bottom(stacked: &[i32], x: E) -> Layer {
     let half = stacked.len() / 2;
     build_nodes(half, |y| {
@@ -733,6 +736,7 @@ fn stack_bottom(stacked: &[i32], x: E) -> Layer {
 }
 
 /// The layer above the leaves `(m(t), X - t)` of a table: `p = m_0 (X - t_1) + m_1 (X - t_0)`.
+#[cfg(test)]
 fn table_bottom(m: &[i32], x: E) -> Layer {
     let half = m.len() / 2;
     build_nodes(half, |y| {
@@ -740,6 +744,274 @@ fn table_bottom(m: &[i32], x: E) -> Layer {
         let b = x - E::from_u64((y + half) as u64);
         (b.mul_i64(i64::from(m[y])) + a.mul_i64(i64::from(m[y + half])), a * b)
     })
+}
+
+/// Bottom nodes per tree that one task of [`build_levels`] evaluates: its scratch (32-byte
+/// nodes of at most four trees) stays in L2, and every output run is a few KiB long.
+const LEVEL_BLOCK: usize = 1 << 11;
+/// Layers built from one read of their bottom layer: each pass reads its bottom once and
+/// writes the next three layers, so a stored layer is read again only every third layer.
+const LEVELS: usize = 3;
+
+/// Raw pointers to the two lanes of a layer under construction.
+#[derive(Clone, Copy)]
+struct RawLanes {
+    p: *mut E,
+    q: *mut E,
+}
+
+// SAFETY: the tasks of `build_levels` write disjoint node indices through these pointers,
+// and the buffers outlive the parallel region.
+#[allow(unsafe_code)]
+unsafe impl Send for RawLanes {}
+// SAFETY: as above; the pointers are never read through.
+#[allow(unsafe_code)]
+unsafe impl Sync for RawLanes {}
+
+/// A raw pointer to an integer lane under construction (disjoint writes, as [`RawLanes`]).
+#[derive(Clone, Copy)]
+struct RawInts(*mut i32);
+
+// SAFETY: every index is written by exactly one task, and the lane outlives the region.
+#[allow(unsafe_code)]
+unsafe impl Send for RawInts {}
+// SAFETY: as above; the pointer is never read through.
+#[allow(unsafe_code)]
+unsafe impl Sync for RawInts {}
+
+/// The parent `(p_0 q_1 + p_1 q_0, q_0 q_1)` of two sibling nodes.
+#[inline(always)]
+fn combine((p0, q0): (E, E), (p1, q1): (E, E)) -> (E, E) {
+    (crate::kernel::fm2(p0, q1, p1, q0), fm(q0, q1))
+}
+
+/// Layers `1 ..= levels` above a bottom layer of `bottom` nodes, for `trees` trees at once,
+/// from one evaluation of every bottom node. Node `z` of the top layer (`top = bottom >>
+/// levels` nodes) covers the bottom nodes `z + j top`, `j < 2^levels`, and the nodes
+/// `z + j top`, `j < 2^(levels - l)`, of layer `l` above the bottom (the children of node
+/// `y` of a layer of `n` nodes are `y` and `y + n`), so a task owns one interval of top
+/// nodes, evaluates its bottom nodes into scratch and reduces them level by level in cache.
+/// `node(y, out)` writes bottom node `y` of every tree into `out`; it is called once per `y`.
+/// Returns per tree the bottom layer (when `store`), then layers `1 ..= levels`.
+#[allow(unsafe_code)]
+fn build_levels(
+    bottom: usize,
+    levels: usize,
+    trees: usize,
+    store: bool,
+    node: impl Fn(usize, &mut [(E, E)]) + Sync,
+) -> Vec<Vec<Layer>> {
+    assert!(bottom.is_power_of_two() && levels <= bottom.trailing_zeros() as usize);
+    assert!((1..=MAX_CHALLENGES).contains(&trees), "trees per pass");
+    let top = bottom >> levels;
+    let fan = 1_usize << levels;
+    let first = usize::from(!store);
+    let mut buffers: Vec<Vec<_>> = (0..trees)
+        .map(|_| {
+            (first..=levels)
+                .map(|l| (crate::kernel::buf::uninit::<E>(bottom >> l), crate::kernel::buf::uninit::<E>(bottom >> l)))
+                .collect()
+        })
+        .collect();
+    let raw: Vec<Vec<RawLanes>> = buffers
+        .iter_mut()
+        .map(|layers: &mut Vec<(Box<[std::mem::MaybeUninit<E>]>, Box<[std::mem::MaybeUninit<E>]>)>| {
+            layers.iter_mut().map(|(p, q)| RawLanes { p: p.as_mut_ptr().cast(), q: q.as_mut_ptr().cast() }).collect()
+        })
+        .collect();
+    let block = (LEVEL_BLOCK >> levels).clamp(1, top);
+    let tasks = top.div_ceil(block);
+    // Scratch slot of bottom run `j`, tree `t`, offset `i`.
+    let at = move |j: usize, t: usize, i: usize| (j * trees + t) * block + i;
+    let run = |scratch: &mut Box<[std::mem::MaybeUninit<(E, E)>]>, task: usize| {
+        let start = task * block;
+        let len = block.min(top - start);
+        let mut values = [(E::zero(), E::zero()); MAX_CHALLENGES];
+        for j in 0..fan {
+            for i in 0..len {
+                let y = start + i + j * top;
+                node(y, &mut values[..trees]);
+                for (t, &value) in values[..trees].iter().enumerate() {
+                    scratch[at(j, t, i)].write(value);
+                    if store {
+                        // SAFETY: `y < bottom` (`start + i < top`, `j < fan`) and the
+                        // decomposition `y = z + j top` gives every bottom node one task.
+                        unsafe {
+                            raw[t][0].p.add(y).write(value.0);
+                            raw[t][0].q.add(y).write(value.1);
+                        }
+                    }
+                }
+            }
+        }
+        for l in 1..=levels {
+            let width = fan >> l;
+            for j in 0..width {
+                for (t, lanes) in raw.iter().enumerate() {
+                    let out = lanes[l - first];
+                    for i in 0..len {
+                        // SAFETY: both slots were written above (bottom runs or the previous
+                        // level of this task) before this read.
+                        let (a, b) = unsafe { (scratch[at(j, t, i)].assume_init(), scratch[at(j + width, t, i)].assume_init()) };
+                        let value = combine(a, b);
+                        scratch[at(j, t, i)].write(value);
+                        let y = start + i + j * top;
+                        // SAFETY: `y < bottom >> l` (`j < 2^(levels - l)`) and node `y` of
+                        // layer `l` belongs to the task owning top node `start + i`.
+                        unsafe {
+                            out.p.add(y).write(value.0);
+                            out.q.add(y).write(value.1);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    // The scratch is written before it is read, so it is never zero-filled.
+    let scratch = || crate::kernel::buf::uninit::<(E, E)>(fan * trees * block);
+    if bottom >= PARALLEL_NODES && tasks > 1 {
+        (0..tasks).into_par_iter().for_each_init(scratch, run);
+    } else {
+        let mut buffer = scratch();
+        for task in 0..tasks {
+            run(&mut buffer, task);
+        }
+    }
+    drop(raw);
+    buffers
+        .into_iter()
+        .map(|layers| {
+            layers
+                .into_iter()
+                // SAFETY: every node of every output layer was written exactly once above.
+                .map(|(p, q)| unsafe { Layer { p: p.assume_init().into_vec(), q: q.assume_init().into_vec() } })
+                .collect()
+        })
+        .collect()
+}
+
+/// The stored layers `0 ..= low` of `trees` trees of `depth` layers that share their layer
+/// `low` evaluator `node` (see [`build_levels`]); the layers below `low` are not stored.
+/// Layer `low` is evaluated once, and each pass above reads one stored layer and writes up
+/// to [`LEVELS`] layers.
+fn build_trees(depth: usize, low: usize, trees: usize, node: impl Fn(usize, &mut [(E, E)]) + Sync) -> Vec<FractionTree> {
+    assert!(low < depth);
+    let mut layers: Vec<Vec<Layer>> = (0..trees).map(|_| vec![Layer::default(); depth]).collect();
+    let levels = LEVELS.min(low);
+    for (tree, built) in layers.iter_mut().zip(build_levels(1 << low, levels, trees, true, node)) {
+        for (i, layer) in built.into_iter().enumerate() {
+            tree[low - i] = layer;
+        }
+    }
+    let mut k = low - levels;
+    while k > 0 {
+        let levels = LEVELS.min(k);
+        let built = {
+            let sources: Vec<&Layer> = layers.iter().map(|tree| &tree[k]).collect();
+            build_levels(1 << k, levels, trees, false, |y, out| {
+                for (slot, source) in out.iter_mut().zip(&sources) {
+                    *slot = (source.p[y], source.q[y]);
+                }
+            })
+        };
+        for (tree, built) in layers.iter_mut().zip(built) {
+            for (i, layer) in built.into_iter().enumerate() {
+                tree[k - 1 - i] = layer;
+            }
+        }
+        k -= levels;
+    }
+    layers.into_iter().map(|layers| FractionTree { layers }).collect()
+}
+
+/// The trees of a stack without the integer path, one per `x` (the challenges minus the
+/// stack's storage shift): layer `depth - 1` above the leaves `(1, X - g)` holds `p = (X -
+/// g_0) + (X - g_1)`, `q = (X - g_0)(X - g_1)`.
+fn stack_trees(stacked: &[i32], xs: &[E]) -> Vec<FractionTree> {
+    let half = stacked.len() / 2;
+    let depth = stacked.len().trailing_zeros() as usize;
+    build_trees(depth, depth - 1, xs.len(), |y, out| {
+        let (g0, g1) = (E::from_i64(i64::from(stacked[y])), E::from_i64(i64::from(stacked[y + half])));
+        for (slot, &x) in out.iter_mut().zip(xs) {
+            let (a, b) = (x - g0, x - g1);
+            *slot = (a + b, fm(a, b));
+        }
+    })
+}
+
+/// The trees of a table, one per challenge: layer `width - 1` above the leaves `(m(t), X -
+/// t)` holds `p = m_0 (X - t_1) + m_1 (X - t_0)`, `q = (X - t_0)(X - t_1)`.
+fn table_trees(m: &[i32], xs: &[E]) -> Vec<FractionTree> {
+    let half = m.len() / 2;
+    let depth = m.len().trailing_zeros() as usize;
+    build_trees(depth, depth - 1, xs.len(), |y, out| {
+        for (slot, &x) in out.iter_mut().zip(xs) {
+            let a = x - E::from_u64(y as u64);
+            let b = x - E::from_u64((y + half) as u64);
+            *slot = (b.mul_i64(i64::from(m[y])) + a.mul_i64(i64::from(m[y + half])), a * b);
+        }
+    })
+}
+
+/// The trees of an integer-path stack of centre `center`, one per `x` (`X - shift -
+/// center`), and its [`SymLanes`], from one pass over the leaves. Layer `depth - 2` is
+/// the lowest stored layer: node `z` has the leaves `v(z + j 2^(depth-2)) - c`, `j < 4`;
+/// with their elementary symmetric polynomials `e_1 .. e_4` (exact in `i64` within
+/// [`SYM_SPREAD`]), `q = X'^4 - e_1 X'^3 + e_2 X'^2 - e_3 X' + e_4` and `p = dq/dX' =
+/// 4 X'^3 - 3 e_1 X'^2 + 2 e_2 X' - e_3`, the values of two levels of the leaf layer and
+/// its parent. The same leaves give the integer lanes of session `depth - 1`, which are
+/// written in the same pass.
+#[allow(unsafe_code)]
+fn sym_trees(stacked: &[i32], center: i32, xs: &[E]) -> (Vec<FractionTree>, SymLanes) {
+    let depth = stacked.len().trailing_zeros() as usize;
+    let quarter = stacked.len() / 4;
+    let powers: Vec<[E; 4]> = xs
+        .iter()
+        .map(|&x| {
+            let x2 = x * x;
+            let x3 = x2 * x;
+            [x, x2, x3, x3 * x]
+        })
+        .collect();
+    let mut lanes: [_; 4] = std::array::from_fn(|_| crate::kernel::buf::uninit::<i32>(quarter));
+    let raw = lanes.each_mut().map(|lane| RawInts(lane.as_mut_ptr().cast()));
+    let trees = build_trees(depth, depth - 2, xs.len(), |z, out| {
+        let v = |j: usize| i64::from(stacked[z + j * quarter]) - i64::from(center);
+        // Children A = (v0, v2), B = (v1, v3) of layer depth - 1.
+        let (sa, ma) = (v(0) + v(2), v(0) * v(2));
+        let (sb, mb) = (v(1) + v(3), v(1) * v(3));
+        // The integer lanes S_0, S_1, M_0, M_1 of node z: |S| <= 2^16 and |M| <= 2^30
+        // within the spread, so the casts are exact.
+        // SAFETY: `z < quarter` and `build_trees` evaluates every node of layer
+        // `depth - 2` exactly once.
+        unsafe {
+            raw[0].0.add(z).write(sa as i32);
+            raw[1].0.add(z).write(sb as i32);
+            raw[2].0.add(z).write(ma as i32);
+            raw[3].0.add(z).write(mb as i32);
+        }
+        let e1 = sa + sb;
+        let e2 = ma + mb + sa * sb;
+        let e3 = sa * mb + sb * ma;
+        let e4 = ma * mb;
+        // |e1| <= 2^17, |e2| <= 2^32 + 2^31, |e3| <= 2^47, |e4| <= 2^60: every multiple
+        // below is far below p, so its residue is exact; shared by every challenge.
+        let res = crate::kernel::residue;
+        let qk = [res(-e1), res(e2), res(-e3)];
+        let pk = [4, res(-3 * e1), res(2 * e2)];
+        let (e4, ne3) = (res(e4), res(-e3));
+        for (slot, &[x, x2, x3, x4]) in out.iter_mut().zip(&powers) {
+            // q = x^4 + e_4 + (x^3, x^2, x) . (-e_1, e_2, -e_3) and p = -e_3 + (x^3, x^2,
+            // x) . (4, -3 e_1, 2 e_2); the addends are below 2^65.
+            let x4 = [u128::from(x4.c0().to_canonical_u64()) + u128::from(e4), u128::from(x4.c1().to_canonical_u64())];
+            let q = crate::kernel::dot3([x3, x2, x], qk, x4);
+            let p = crate::kernel::dot3([x3, x2, x], pk, [u128::from(ne3), 0]);
+            *slot = (p, q);
+        }
+    });
+    // SAFETY: every node `z < quarter` wrote its four lane cells above.
+    let lanes = lanes.map(|lane| unsafe { lane.assume_init().into_vec() });
+    (trees, SymLanes { lanes })
 }
 
 /// The largest spread `max - min` of a stack's stored values for which it runs the integer
@@ -757,50 +1029,29 @@ const SYM_SPREAD: i64 = 1 << 16;
 /// challenge, and the layer `depth - 1` is never stored (the trees start at layer
 /// `depth - 2`, built from four leaves per node).
 struct SymLanes {
-    /// The centre `c` subtracted from every stored value.
-    center: i32,
-    /// `S_0, S_1, M_0, M_1`, each of `2^(depth - 2)` cells.
+    /// `S_0, S_1, M_0, M_1`, each of `2^(depth - 2)` cells, recentred by the centre `c`.
     lanes: [Vec<i32>; 4],
 }
 
 impl SymLanes {
-    /// `None` when the stack is shallower than 3 or its values spread over more than
-    /// [`SYM_SPREAD`] (only a dishonest witness; it then takes the stored-layer path).
-    #[allow(unsafe_code)]
-    fn of(stacked: &[i32]) -> Option<Self> {
+    /// The centre of a stack's integer path (the middle of its value range; the lanes are
+    /// written with its trees, [`sym_trees`]). `None` when the stack is shallower than 3 or
+    /// its values spread over more than [`SYM_SPREAD`] (only a dishonest witness; it then
+    /// takes the stored-layer path).
+    fn center(stacked: &[i32]) -> Option<i32> {
         let depth = stacked.len().trailing_zeros() as usize;
         if depth < 3 {
             return None;
         }
         let (min, max) = stacked
             .par_iter()
+            .with_min_len(1 << 16)
             .fold(|| (i32::MAX, i32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)))
             .reduce(|| (i32::MAX, i32::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)));
         if i64::from(max) - i64::from(min) > SYM_SPREAD {
             return None;
         }
-        let center = i32::try_from((i64::from(min) + i64::from(max)) / 2).expect("between two i32");
-        let quarter = stacked.len() / 4;
-        let mut lanes: [_; 4] = std::array::from_fn(|_| crate::kernel::buf::uninit::<i32>(quarter));
-        let [s0, s1, m0, m1] = &mut lanes;
-        const BLOCK: usize = 1024;
-        s0.par_chunks_mut(BLOCK).zip(s1.par_chunks_mut(BLOCK))
-            .zip(m0.par_chunks_mut(BLOCK)).zip(m1.par_chunks_mut(BLOCK))
-            .enumerate().for_each(|(block, (((s0, s1), m0), m1))| {
-                for i in 0..s0.len() {
-                    let y = block * BLOCK + i;
-                    let a = stacked[y] - center;
-                    let b = stacked[y + quarter] - center;
-                    let c = stacked[y + 2 * quarter] - center;
-                    let d = stacked[y + 3 * quarter] - center;
-                    s0[i].write(a + c);
-                    s1[i].write(b + d);
-                    m0[i].write(a * c);
-                    m1[i].write(b * d);
-                }
-            });
-        // SAFETY: the four equal-length output lanes were completely initialized above.
-        Some(Self { center, lanes: lanes.map(|lane| unsafe { lane.assume_init().into_vec() }) })
+        Some(i32::try_from((i64::from(min) + i64::from(max)) / 2).expect("between two i32"))
     }
 
     /// The coefficients `[c, c_s, c_m, c_k, c_mm]` of the group of four lanes (`S_0 = 0,
@@ -865,6 +1116,7 @@ impl SymLanes {
 /// [`SYM_SPREAD`]), `q = X'^4 - e_1 X'^3 + e_2 X'^2 - e_3 X' + e_4` and `p = dq/dX' =
 /// 4 X'^3 - 3 e_1 X'^2 + 2 e_2 X' - e_3` (`X' = X - shift - c`), the same values as two
 /// levels of [`stack_bottom`] and [`parent`].
+#[cfg(test)]
 #[allow(unsafe_code)]
 fn stack_upper_bottoms(stacked: &[i32], center: i32, xs: &[E]) -> Vec<Layer> {
     let quarter = stacked.len() / 4;
@@ -949,6 +1201,7 @@ struct FractionTree {
 }
 
 impl FractionTree {
+    #[cfg(test)]
     fn from_bottom(bottom: Layer) -> Self {
         let depth = bottom.len().trailing_zeros() as usize + 1;
         let mut layers = vec![Layer::default(); depth];
@@ -961,6 +1214,7 @@ impl FractionTree {
 
     /// A tree of `depth` layers whose stored bottom is `bottom` (layer `log2 |bottom|`,
     /// above the leaves by more than one layer): the layers below it are not stored.
+    #[cfg(test)]
     fn from_upper(bottom: Layer, depth: usize) -> Self {
         let top = bottom.len().trailing_zeros() as usize;
         let mut layers = vec![Layer::default(); depth];
@@ -1378,41 +1632,51 @@ fn prove_with(
     let xs = fs.challenges(LookupSite::X, challenges)?;
 
     let build = Instant::now();
-    // The integer path of session `depth - 1` per stack (prover only, `SymLanes`).
-    let sym: Vec<Option<SymLanes>> = if dedicated {
-        stacks.iter().map(|stack| SymLanes::of(&stack.stacked)).collect()
+    // The centre of the integer path of session `depth - 1` per stack (prover only).
+    let centers: Vec<Option<i32>> = if dedicated {
+        stacks.iter().map(|stack| SymLanes::center(&stack.stacked)).collect()
     } else {
         stacks.iter().map(|_| None).collect()
     };
     let shifted = |j: usize, x: usize| xs[x] - E::from_i64(i64::from(stacks[j].shape.shift));
     // `X - shift - c` for an integer-path stack of centre `c`.
-    let centred = |j: usize, x: usize| {
-        shifted(j, x) - E::from_i64(i64::from(sym[j].as_ref().map_or(0, |lanes| lanes.center)))
-    };
-    // Layer `depth - 2` of every challenge in one pass over the leaves of a stack.
-    let mut uppers: Vec<Vec<Layer>> = (0..stacks.len())
-        .map(|j| {
-            if let Some(lanes) = &sym[j] {
-                let xs_j: Vec<E> = (0..challenges).map(|x| centred(j, x)).collect();
-                stack_upper_bottoms(&stacks[j].stacked, lanes.center, &xs_j)
+    let centred = |j: usize, x: usize| shifted(j, x) - E::from_i64(i64::from(centers[j].unwrap_or(0)));
+    // The trees of every stack and table, all challenges of one stack or table in the same
+    // passes; the stacks and tables are built concurrently, so the small trees' serial top
+    // layers overlap the main stack's passes.
+    let (sym, mut built): (Vec<Option<SymLanes>>, Vec<Vec<FractionTree>>) = (0..shape.per_challenge())
+        .into_par_iter()
+        .map(|local| {
+            if local < stacks.len() {
+                let stacked = &stacks[local].stacked;
+                match centers[local] {
+                    Some(center) => {
+                        let xs_j: Vec<E> = (0..challenges).map(|x| centred(local, x)).collect();
+                        let (trees, lanes) = sym_trees(stacked, center, &xs_j);
+                        (Some(lanes), trees)
+                    }
+                    None => {
+                        let xs_j: Vec<E> = (0..challenges).map(|x| shifted(local, x)).collect();
+                        (None, stack_trees(stacked, &xs_j))
+                    }
+                }
             } else {
-                Vec::new()
+                (None, table_trees(&multiplicities[local - stacks.len()], &xs))
             }
         })
-        .collect();
+        .unzip();
+    let sym: Vec<Option<SymLanes>> = sym.into_iter().take(stacks.len()).collect();
     let mut trees: Vec<FractionTree> = (0..shape.tree_count())
         .map(|id| {
             let (x, kind) = shape.tree(id);
-            match kind {
-                TreeKind::Stack(j) if sym[j].is_some() => {
-                    FractionTree::from_upper(std::mem::take(&mut uppers[j][x]), stacks[j].shape.depth())
-                }
-                TreeKind::Stack(j) => FractionTree::from_bottom(stack_bottom(&stacks[j].stacked, shifted(j, x))),
-                TreeKind::Table(t) => FractionTree::from_bottom(table_bottom(&multiplicities[t], xs[x])),
-            }
+            let local = match kind {
+                TreeKind::Stack(j) => j,
+                TreeKind::Table(t) => stacks.len() + t,
+            };
+            std::mem::take(&mut built[local][x])
         })
         .collect();
-    drop(uppers);
+    drop(built);
     let mut stats = ProveStats {
         trees: build.elapsed().as_secs_f64(),
         layer_bytes: trees.iter().map(FractionTree::bytes).sum(),
@@ -2018,6 +2282,49 @@ mod tests {
             acc + (x - E::from_u64(t as u64)).inverse().expect("nonzero").mul_i64(i64::from(mt))
         });
         assert_eq!(p * q.inverse().expect("nonzero"), direct);
+    }
+
+    /// The multi-level tree passes give the layers of the layer-by-layer build, and the
+    /// integer-path pass the lanes of session `depth - 1`.
+    #[test]
+    fn layered_tree_build_matches_the_layer_by_layer_build() {
+        let same = |fast: &FractionTree, reference: &FractionTree| {
+            assert_eq!(fast.layers.len(), reference.layers.len());
+            for (a, b) in fast.layers.iter().zip(&reference.layers) {
+                assert_eq!(a.p, b.p);
+                assert_eq!(a.q, b.q);
+            }
+        };
+        let mut rng = SplitMix64::new(77);
+        for depth in [2, 3, 4, 5, 7, 12, 15] {
+            let values = column(&mut rng, depth, 1 << 16);
+            let m: Vec<i32> = column(&mut rng, depth, 1 << 20);
+            for count in 1..=3 {
+                let xs: Vec<E> = (0..count).map(|_| crate::test_support::field(&mut rng)).collect();
+                for (tree, &x) in stack_trees(&values, &xs).iter().zip(&xs) {
+                    same(tree, &FractionTree::from_bottom(stack_bottom(&values, x)));
+                }
+                for (tree, &x) in table_trees(&m, &xs).iter().zip(&xs) {
+                    same(tree, &FractionTree::from_bottom(table_bottom(&m, x)));
+                }
+                let Some(center) = SymLanes::center(&values) else {
+                    assert!(depth < 3);
+                    continue;
+                };
+                let (trees, lanes) = sym_trees(&values, center, &xs);
+                for (tree, upper) in trees.iter().zip(stack_upper_bottoms(&values, center, &xs)) {
+                    same(tree, &FractionTree::from_upper(upper, depth));
+                }
+                let quarter = values.len() / 4;
+                for y in 0..quarter {
+                    let v = |j: usize| values[y + j * quarter] - center;
+                    assert_eq!(
+                        [lanes.lanes[0][y], lanes.lanes[1][y], lanes.lanes[2][y], lanes.lanes[3][y]],
+                        [v(0) + v(2), v(1) + v(3), v(0) * v(2), v(1) * v(3)]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
