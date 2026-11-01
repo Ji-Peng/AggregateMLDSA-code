@@ -258,3 +258,7 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 3. Matrices are derived once and shared, not regenerated per use (one Keccak-f per column would cost 1 s per pass on one core).
 4. The verifier's GF(2) cost is one evaluation of the chain's weight $`\widetilde W(r)`$ (about $`10^7`$ additions, `docs/parity-chain.md` Section 5); no composite is folded. Remaining candidate if needed: a smaller $`k_1`$ (12: $`2^{-136.5}`$ per level, 14% fewer nonzeros).
 5. Derivation cost 0.94 s single-threaded (P4) and $`J_2=2^{19}`$ padding: candidates for wire version 1 (Section 3), not adopted.
+
+## ML-DSA-65 and ML-DSA-87 bridge geometry
+
+For these sets the four w1 bit lanes use four-field parity packing (`crates/agg-bridge/src/parity.rs`). The number of positions per signature is `P = 256k`: 1,536 for 65 and 2,048 for 87. Both use `P_pad = 2,048`, `J_1 = 2^19`, and 256 signatures per level-1 block. Its in-block index is `j + 256 rho + P_pad (i mod 256)`. The padded positions for 65 are zero. `Shape::production(set)` selects this four-lane shape.
