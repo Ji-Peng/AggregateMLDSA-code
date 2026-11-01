@@ -1,10 +1,10 @@
-# AggregateMLDSA protocol (ML-DSA-44, mode A, relation H-u)
+# AggregateMLDSA protocol (ML-DSA-44, 65 and 87, mode A, relation H-u)
 
 ## Scope
 
 | Field | Value |
 | --- | --- |
-| Applies to | homogeneous ML-DSA-44 aggregates, mode A (public $`\tilde c_i`$), relation H-u ($`z`$ relaxed, $`u`$ exact), wire version 4 (unfrozen; tied-part proof version 5, the virtual parity chain of `docs/parity-chain.md`, deviation K21; the fork-join transcript, the Flock proofs at a join after stage 3, deviation K22; the forked PIOP transcript, deviation K23; the `{0,1}` projection of the quotient $`v`$, deviation K24; lookup layout L16, `docs/lookup.md`; the proof-of-work schedule of `docs/soundness.md`) |
+| Applies to | homogeneous ML-DSA-44, 65 or 87 aggregates, mode A (public $`\tilde c_i`$), relation H-u ($`z`$ relaxed, $`u`$ exact), wire version 4 (unfrozen; tied-part proof version 5, the virtual parity chain of `docs/parity-chain.md`, deviation K21; the fork-join transcript, the Flock proofs at a join after stage 3, deviation K22; the forked PIOP transcript, deviation K23; the `{0,1}` projection of the quotient $`v`$, deviation K24; lookup layout L16, `docs/lookup.md`; the proof-of-work schedule of `docs/soundness.md`) |
 | Base system | Aerie `49b6c21` (Akita pin `e023b6a`), Flock HEAD `83f963e` circuit language, retired Keccak encoder `c2d0c24` as reference |
 | Variants | H-exact (relation byte 1, Appendix A, `docs/h-exact.md` step B; implemented, deviation L9) and H-FIPS (relation byte 2, Appendix A, `docs/h-exact.md` Section 10; implemented, deviation L10) |
 
@@ -12,7 +12,7 @@ The uppercase terms MUST, MUST NOT, SHOULD and MAY are normative as in BCP 14. A
 
 ## 1. Notation and parameters
 
-ML-DSA-44 parameters (FIPS 204, Table 1): $`q=8{,}380{,}417`$, $`n=256`$, $`(k,\ell)=(4,4)`$, $`d=13`$, $`\tau=39`$, $`\lambda=128`$, $`\gamma_1=2^{17}`$, $`\gamma_2=(q-1)/88=95{,}232`$, $`\eta=2`$, $`\beta=\tau\eta=78`$, $`\omega=80`$. Derived constants:
+ML-DSA-44 parameters (FIPS 204, Table 1): $`q=8{,}380{,}417`$, $`n=256`$, $`(k,\ell)=(4,4)`$, $`d=13`$, $`\tau=39`$, $`\lambda=128`$, $`\gamma_1=2^{17}`$, $`\gamma_2=(q-1)/88=95{,}232`$, $`\eta=2`$, $`\beta=\tau\eta=78`$, $`\omega=80`$. Derived constants (recomputed for all sets by [`param_sets.py`](scripts/param_sets.py)):
 
 | Symbol | Value | Meaning |
 | --- | ---: | --- |
@@ -405,7 +405,7 @@ Backend: Spongefish `Blake2b512` as in Aerie 10.1, tag `agg-mldsa/v1/piop/blake2
 
 | # | Event | Payload |
 | --- | ---: | --- |
-| 0 | instance | wire version LE16 (4), parameter-set byte 0x44, relation byte (0 = H-u, 1 = H-exact, 2 = H-FIPS), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (2, Section 4.3), the seven group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
+| 0 | instance | wire version LE16 (4), parameter-set byte 0x44, 0x65 or 0x87, relation byte (0 = H-u, 1 = H-exact, 2 = H-FIPS), $`N`$, $`N^\star`$ LE64, public-record digest (Section 2), digit layout id (2, Section 4.3), the seven group descriptors (with their widths) and the grouped catalog row id, Flock profile id, bridge parameters $`(J_t,m_t,k_t)`$, the lookup layout (challenges, table width, stacks); then (wire version 2) the 32-byte digest of the proof-of-work plan (`docs/soundness.md` 6.4) |
 | 1 | absorb | round-1 Akita commitments $`G_{\rm main16}`$, $`G_{\rm main4}`$ (native encoding) |
 | 2 | absorb | $`S`$ Flock commitments (Ligerito roots), segment order |
 | 3 | challenge | $`\mathsf{sd}`$: 32 bytes, no field sampling; then, as its own site `proj/psi`, the 21 raw bytes of the label `agg-mldsa/v1/proj/psi` (one public message, no length frame, so that $`\Psi`$ is squeezed at its own sponge input and not as a continuation of $`\mathsf{sd}`$) and $`\Psi`$: 16,384 bytes (512 blocks of 32), no field sampling, one bit of work with an 8-bit nonce (Section 6, K24) |
@@ -592,3 +592,18 @@ The default relation is H-u (Section 3.1). The second result, H-exact, is implem
 ## Appendix C. Lookup range layout L16 (adopted)
 
 Layout in Sections 4.1 and 4.3, the lookup in Section 7.0, the stages in Sections 7.3 to 7.5, events in Section 10, the ledger in Section 12.1 (two independent challenges), extraction in Section 12.2. Design, soundness, the comparison of remedies for the identity term, costs and the module: `docs/lookup.md`; departures: `docs/deviations.md` L1 to L7 and D2.
+
+## ML-DSA-65 and ML-DSA-87 parameters
+
+The preceding numerical examples and layouts describe ML-DSA-44. The following specifications apply to H-u for ML-DSA-65 and ML-DSA-87; H-exact and H-FIPS are supported for 44 only.
+
+| Set | k, l | tau | beta | omega | gamma1 | gamma2 | w1 bits | pk / signature / c~ bytes | zeta' |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: |
+| 65 | 6, 5 | 49 | 196 | 55 | 2^19 | 261,888 | 4 | 1,952 / 3,309 / 48 | 724,481 |
+| 87 | 8, 7 | 60 | 120 | 75 | 2^19 | 261,888 | 4 | 2,592 / 4,627 / 64 | 769,537 |
+
+For both sets, `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z`, and `u + 523,777 = u_lo + 2^16 u_mid + 523,267 a_u`. The low digits lie in `[0, 2^16)`, the middle digits in `[0, 8)`, and the slack digits are Boolean. Thus z lies in `[-2^19, 2^19)` and u in `[-523,777, 523,777]`. The low digits are stored shifted by `-2^15` and the middle digits by `-4`.
+
+The vector index selects a polynomial lane, with `D_VEC = 0` and main domain `d_main = 8 + d_sig`. The z columns have l lanes; u, v and each of the four w1 bit columns have k lanes. The seven manifest group polynomial counts in order main16, main4, level1, level2, level3, projection, multiplicity are `(23, 46, 4, 8, 8, 5, 7)` for 65 and `(31, 62, 4, 8, 8, 5, 7)` for 87. At `N = 2^15` these commit 18,458 and 25,242 cells per signature respectively.
+
+Let `d1 = 13 + max(0, d_sig - 8)`, `d2 = 13 + max(0, d_sig - 13)`, `d3 = 12 + max(0, d_sig - 13)`, and `dk = 7 + log2(g) + d_sig`, where g is 1 for 65 and 2 for 87. Lookup stack domains are `[d_main+3, d_main+1, d_main, d1+2, d2+2, d3, dk+1]` for 65 and `[d_main+3, d_main+2, d_main+1, d_main, d1+2, d2+2, d3, dk+1]` for 87. See `crates/agg-piop/src/manifest.rs`.
