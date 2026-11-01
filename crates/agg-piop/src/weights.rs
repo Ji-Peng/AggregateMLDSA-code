@@ -153,6 +153,25 @@ pub fn ring_weight_table(public: &PublicData, r2: &[E]) -> Vec<E> {
         }) }
 }
 
+/// [`ring_weight_table`] as lane-major `K` planes, built by the negacyclic
+/// kernel: the plane layout reads the table column by column, so producing the
+/// planes directly avoids the row-major pass and its copy.
+#[must_use]
+pub fn ring_weight_planes(public: &PublicData, r2: &[E]) -> agg_simd::buf::KPlanes {
+    let geom = public.geometry();
+    assert_eq!(r2.len(), geom.d_main() as usize, "a main-domain point");
+    let row = eq_table(&r2[D_COEF as usize..D_POS as usize]);
+    let eq_sig = eq_table(&r2[D_POS as usize..]);
+    let matrices: Vec<_> = (0..geom.n).map(|i| public.a(i)).collect();
+    agg_simd::negacyclic::ring_weights(
+        &matrices,
+        &eq_sig,
+        &row,
+        &r2[..D_COEF as usize],
+        geom.main_len(),
+    )
+}
+
 /// `w_A(r3)` at the stage-3 point for the ring weight of `r2`: `k l 256`
 /// multiply-adds per live record, streamed over the expanded keys.
 #[must_use]
@@ -357,6 +376,12 @@ mod tests {
         // The verifier's streamed evaluation is the extension of the table.
         let r3 = point(&mut rng, d_main);
         assert_eq!(ring_weight_at(&public, &r2, &r3), evaluate_mle(&table, &r3));
+        // The plane table is the same field elements in the plane layout.
+        let planes = ring_weight_planes(&public, &r2);
+        assert_eq!(planes.len(), geom.main_len());
+        for (i, &want) in table.iter().enumerate() {
+            assert_eq!(planes.get(i), want, "w_A plane at {i}");
+        }
         let _ = suffix(&r3, 2);
     }
 fn ring_weight_table_reference(public: &PublicData, r2: &[E]) -> Vec<E> {

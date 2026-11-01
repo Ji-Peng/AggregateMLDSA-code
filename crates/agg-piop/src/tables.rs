@@ -19,7 +19,10 @@ use crate::source_tables::SourceTables;
 use crate::stage::{LaneId, WeightId};
 use crate::virtual_polys::parity1_tables;
 use crate::split_weight::SplitWeight;
-use crate::weights::{level1_weight_split, level1_weight_table, level2_weight_table, level3_weight_tables, ring_weight_table};
+use crate::weights::{
+    level1_weight_split, level1_weight_table, level2_weight_table, level3_weight_tables,
+    ring_weight_planes, ring_weight_table,
+};
 use crate::OpeningField as E;
 
 /// The level-1 parities `y^(1)_t` on `D_1`.
@@ -167,12 +170,11 @@ impl<'a> ProverTables<'a> {
     pub fn set_r2(&mut self, public: &PublicData, r2: &[E]) {
         self.w1 = None;
         self.w1_split = None;
-        let table = ring_weight_table(public, r2);
         if crate::kernel::layout() == crate::kernel::Layout::Plane {
-            self.wa_planes = Some(agg_simd::buf::KPlanes::from_fn(table.len(), |i| table[i]));
+            self.wa_planes = Some(ring_weight_planes(public, r2));
             self.wa = None;
         } else {
-            self.wa = Some(table);
+            self.wa = Some(ring_weight_table(public, r2));
             self.wa_planes = None;
         }
     }
