@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 
+use agg_pcs_config::catalogs::Set;
 use agg_pcs_config::preset::{AggFp64SignedWidth16, AggFp64SignedWidth4, BaseField, OpeningField};
 use akita_challenges::{
     fold_challenge_sample_label, Challenges, FoldChallengeDrawDomain, FoldDraw,
@@ -504,9 +505,10 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     let (c4, m4, g4) = audit_catalog("width4", rows_of(w4.catalog()), w4.catalog().len());
     let (c16, m16, g16) = audit_catalog("width16", rows_of(w16.catalog()), w16.catalog().len());
     assert!(m4 >= 128.0 && m16 >= 128.0);
-    // The 39 grouped rows (seven root groups, one per N* = 2^3 .. 2^15 and relation: H-u,
-    // H-exact, H-FIPS) are in the width-4 catalog (the family of the final group G_m).
-    assert_eq!((g4, g16), (39, 0));
+    // The 61 grouped rows (seven root groups: 39 for ML-DSA-44 across H-u, H-exact, H-FIPS;
+    // 11 for ML-DSA-65 and 11 for ML-DSA-87 under H-u, where d_sig 3..5 share physical groups)
+    // are in the width-4 catalog (the family of the final group G_m).
+    assert_eq!((g4, g16), (61, 0));
     // The families that occur (`docs/soundness.md`).
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
@@ -601,8 +603,65 @@ fn grouped_rows_by_batch_size() {
             want.push((relation, d_sig, draws, min_bits));
         }
     }
+    for (set, expected) in [(Set::S65, &EXPECTED_65), (Set::S87, &EXPECTED_87)] {
+        for &(d_sig, draws, min_bits) in expected {
+            let plan = WorkPlan::for_set(set, 1 << d_sig, Relation::Hu).expect("work plan");
+            let row = catalog
+                .resolve_key(&plan.schedule_key())
+                .expect("grouped row");
+            let (claims, schedule) = rows_of_one(row.profiles(), row.schedule());
+            let row_sites = sites(&schedule, &claims);
+            let min = row_sites
+                .iter()
+                .map(|s| s.bits)
+                .fold(f64::INFINITY, f64::min);
+            eprintln!(
+                "{set:?} d_sig {d_sig:>2}: {} draws, min {min:.4} bits",
+                row_sites.len()
+            );
+            assert!(row_sites.iter().all(|s| s.at_least_128));
+            got.push((Relation::Hu, d_sig, row_sites.len(), (min * 1e4).floor() / 1e4));
+            want.push((Relation::Hu, d_sig, draws, min_bits));
+        }
+    }
     assert_eq!(got, want);
 }
+
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-65 grouped rows
+/// (`mldsa-65-p16-batch-<N*>-mult-final`).
+const EXPECTED_65: [(usize, usize, f64); 13] = [
+    (3, 12, 128.0881),
+    (4, 12, 128.0881),
+    (5, 12, 128.0881),
+    (6, 12, 128.0881),
+    (7, 12, 128.0881),
+    (8, 12, 128.0881),
+    (9, 12, 128.0881),
+    (10, 12, 128.0881),
+    (11, 13, 128.0881),
+    (12, 13, 128.0881),
+    (13, 13, 128.0881),
+    (14, 13, 128.5633),
+    (15, 13, 128.0881),
+];
+
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-87 grouped rows
+/// (`mldsa-87-p16-batch-<N*>-mult-final`).
+const EXPECTED_87: [(usize, usize, f64); 13] = [
+    (3, 12, 128.0881),
+    (4, 12, 128.0881),
+    (5, 12, 128.0881),
+    (6, 12, 128.0881),
+    (7, 12, 128.0881),
+    (8, 12, 128.0881),
+    (9, 12, 128.0881),
+    (10, 12, 128.0881),
+    (11, 13, 128.0881),
+    (12, 13, 128.0881),
+    (13, 13, 128.0881),
+    (14, 13, 128.5633),
+    (15, 13, 128.0881),
+];
 
 /// (d_sig, draws, minimum accepted support in bits) of the H-FIPS grouped rows
 /// (`mldsa-44-p16f-batch-<N*>-mult-final`), one entry per checked-in batch size.

@@ -531,7 +531,9 @@ impl BatchLayout {
     pub fn in_catalog(&self) -> bool {
         match self.set {
             Set::S44 => self.relation.catalog_d_sigs().contains(&self.d_sig),
-            Set::S65 | Set::S87 => false,
+            Set::S65 | Set::S87 => {
+                self.relation == Relation::Hu && CATALOG_D_SIG.contains(&self.d_sig)
+            }
         }
     }
 }
@@ -556,10 +558,14 @@ pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
     }
 }
 
-/// Every checked-in batch layout: currently the 39 ML-DSA-44 layouts across all relations.
+/// Every checked-in batch layout: the 39 ML-DSA-44 layouts across all relations,
+/// and the 13 ML-DSA-65 and 13 ML-DSA-87 layouts under relation H-u.
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
-    catalog_batches_for_set(Set::S44)
+    let mut batches = catalog_batches_for_set(Set::S44);
+    batches.extend(catalog_batches_for_set(Set::S65));
+    batches.extend(catalog_batches_for_set(Set::S87));
+    batches
 }
 
 /// Every distinct scalar (precommitted-producer) layout of `family` needed by `batches`,
@@ -736,9 +742,13 @@ mod tests {
         }
         assert_eq!(
             catalog_batches().len(),
-            CATALOG_D_SIG.len() + CATALOG_D_SIG_H_EXACT.len() + CATALOG_D_SIG_H_FIPS.len()
+            CATALOG_D_SIG.len()
+                + CATALOG_D_SIG_H_EXACT.len()
+                + CATALOG_D_SIG_H_FIPS.len()
+                + catalog_batches_for_set(Set::S65).len()
+                + catalog_batches_for_set(Set::S87).len()
         );
-        assert_eq!(catalog_batches().len(), 39);
+        assert_eq!(catalog_batches().len(), 65);
         assert_eq!(catalog_batches_for_set(Set::S65).len(), 13);
         assert_eq!(catalog_batches_for_set(Set::S87).len(), 13);
     }

@@ -41,7 +41,7 @@
 //! planner workers (default 3; the search is memory bound).
 
 use agg_pcs_config::catalogs::{
-    catalog_batches, scalar_layouts, BatchLayout, Family, Relation, Set,
+    catalog_batches, catalog_batches_for_set, scalar_layouts, BatchLayout, Family, Relation, Set,
 };
 use agg_pcs_config::preset::{
     AggFp64SignedWidth16 as W16, AggFp64SignedWidth4 as Cfg, WIDTH16_FAMILY, WIDTH4_FAMILY,
@@ -421,7 +421,15 @@ fn save(family: Family, rows: &Rows) {
 #[ignore = "offline incremental catalog update; rewrites src/schedules/"]
 fn update_catalog_rows() {
     let requested = requested_batches();
-    let mut keep = catalog_batches();
+    let replace = std::env::var("AGG_CATALOG_REPLACE").map_or(false, |v| v == "1" || v == "true");
+    let mut keep = Vec::new();
+    for set in Set::ALL {
+        for layout in catalog_batches_for_set(set) {
+            if !keep.contains(&layout) {
+                keep.push(layout);
+            }
+        }
+    }
     for layout in &requested {
         if !keep.contains(layout) {
             keep.push(*layout);
@@ -432,7 +440,9 @@ fn update_catalog_rows() {
         if let Some(on_disk) = on_disk_rows(family) {
             seed_scalar_preplans(family, &on_disk);
             for row in on_disk {
-                if row_is_requested(family, &row.0, &keep) {
+                if replace && row_is_requested(family, &row.0, &requested) {
+                    eprintln!("replacing {family:?} row: final {:?}", row.0.final_group.group);
+                } else if row_is_requested(family, &row.0, &keep) {
                     slot.push(row);
                 } else {
                     eprintln!("pruned {family:?} row: final {:?}", row.0.final_group.group);
@@ -613,7 +623,7 @@ fn requested_keys() -> (Vec<ScheduleLookupKey>, Vec<ScheduleLookupKey>) {
         .map(ScheduleLookupKey::single)
         .collect();
     for layout in batches {
-        keys4.push(ScheduleLookupKey {
+        let key = ScheduleLookupKey {
             final_group: layout.final_group(),
             precommitteds: layout
                 .precommitted_groups()
@@ -623,7 +633,10 @@ fn requested_keys() -> (Vec<ScheduleLookupKey>, Vec<ScheduleLookupKey>) {
                         .expect("scalar producer row")
                 })
                 .collect(),
-        });
+        };
+        if !keys4.contains(&key) {
+            keys4.push(key);
+        }
     }
     (keys4, keys16)
 }
@@ -696,8 +709,18 @@ fn checked_in_catalog_holds_exactly_the_requested_rows() {
     check_catalog(Cfg::catalog().expect("width-4 catalog"), Family::Width4, &keys4);
     check_catalog(W16::catalog().expect("width-16 catalog"), Family::Width16, &keys16);
     let batches = catalog_batches();
-    let grouped = &keys4[keys4.len() - batches.len()..];
-    for (layout, key) in batches.iter().zip(grouped) {
+    for layout in &batches {
+        let key = ScheduleLookupKey {
+            final_group: layout.final_group(),
+            precommitteds: layout
+                .precommitted_groups()
+                .into_iter()
+                .map(|(group, shape)| {
+                    agg_pcs_config::work_plan::commitment_profile(group.family(), shape)
+                        .expect("scalar producer row")
+                })
+                .collect(),
+        };
         for ((group, _), profile) in layout.precommitted_groups().into_iter().zip(&key.precommitteds)
         {
             let digits = (profile.inner.digits.log_basis, profile.inner.digits.num_digits);

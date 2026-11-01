@@ -236,21 +236,23 @@ mod tests {
     #[cfg(feature = "schedules")]
     #[test]
     fn plans_exist_for_every_catalog_size() {
-        for layout in crate::catalogs::catalog_batches_for_set(Set::S44) {
-            let (d_sig, relation) = (layout.d_sig, layout.relation);
-            for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
-                let plan = WorkPlan::for_records(records, relation).expect("catalog plan");
-                assert_eq!((plan.d_sig(), plan.relation()), (d_sig, relation));
-                assert_eq!(plan.set(), Set::S44);
-                for group in Group::ALL {
-                    assert_eq!(plan.profile(group).group, group.layout(Set::S44, d_sig, relation));
-                    assert_eq!(plan.num_polynomials(group), group.num_polynomials(Set::S44, relation));
-                    assert_eq!(
-                        plan.logical_vars(group) + plan.pad_vars(group),
-                        plan.physical_vars(group)
-                    );
+        for set in Set::ALL {
+            for layout in crate::catalogs::catalog_batches_for_set(set) {
+                let (d_sig, relation) = (layout.d_sig, layout.relation);
+                for records in [(1 << d_sig) / 2 + 1, 1 << d_sig] {
+                    let plan = WorkPlan::for_set(set, records, relation).expect("catalog plan");
+                    assert_eq!((plan.d_sig(), plan.relation()), (d_sig, relation));
+                    assert_eq!(plan.set(), set);
+                    for group in Group::ALL {
+                        assert_eq!(plan.profile(group).group, group.layout(set, d_sig, relation));
+                        assert_eq!(plan.num_polynomials(group), group.num_polynomials(set, relation));
+                        assert_eq!(
+                            plan.logical_vars(group) + plan.pad_vars(group),
+                            plan.physical_vars(group)
+                        );
+                    }
+                    assert_eq!(plan.segments(), 1 << d_sig.saturating_sub(13));
                 }
-                assert_eq!(plan.segments(), 1 << d_sig.saturating_sub(13));
             }
         }
         // Every padded size of the wire version has rows.

@@ -6,15 +6,15 @@
 //! Akita change.
 #![cfg(feature = "schedules")]
 
-use agg_pcs_config::catalogs::{Group, Relation, CATALOG_D_SIG};
+use agg_pcs_config::catalogs::{Group, Relation, Set, CATALOG_D_SIG};
 use agg_pcs_config::preset::AggFp64SignedWidth4;
 use agg_pcs_config::work_plan::WorkPlan;
 use akita_config::derive_transcript_grinding_plan;
 use akita_params::{GrindingPlan, GrindingQueryKind, OpeningClaimsLayout};
 
-/// The plan of the grouped row of `N* = 2^d_sig` for the opening of its seven groups.
-fn row_plan(d_sig: usize, relation: Relation) -> GrindingPlan {
-    let plan = WorkPlan::for_records(1 << d_sig, relation).expect("work plan");
+/// The plan of the grouped row of `set` at `N* = 2^d_sig` for the opening of its seven groups.
+fn row_plan_for_set(set: Set, d_sig: usize, relation: Relation) -> GrindingPlan {
+    let plan = WorkPlan::for_set(set, 1 << d_sig, relation).expect("work plan");
     let row = AggFp64SignedWidth4::catalog()
         .expect("catalog")
         .resolve_key(&plan.schedule_key())
@@ -32,6 +32,11 @@ fn row_plan(d_sig: usize, relation: Relation) -> GrindingPlan {
         .expect("opening layout");
     derive_transcript_grinding_plan::<AggFp64SignedWidth4>(row.schedule(), &layout)
         .expect("grinding plan")
+}
+
+/// The plan of the grouped row of `N* = 2^d_sig` for the opening of its seven groups.
+fn row_plan(d_sig: usize, relation: Relation) -> GrindingPlan {
+    row_plan_for_set(Set::S44, d_sig, relation)
 }
 
 /// (protected sites, sum g, max g, sum 2^g) of the proof-of-work runs with work, and the
@@ -238,4 +243,123 @@ const PINNED_H_EXACT: &[&str] = &[
     "a812cae0ca65d3d8054184068290bc6495e09db717b15352065bddb6a7284255",
     "d1720056835235f087f1a20fa4921cba15aecd01c9232b075299ea98e79e660b",
     "a9a5c092d719dc1df17d47e76910fbe8d46db6a6f8ffc0db1c994953e2affe4c",
+];
+
+/// The Akita plans of the 13 ML-DSA-65 grouped rows (`mldsa-65-p16-batch-<N*>-mult-final`,
+/// relation H-u): verified well-formed with 7 bits of nonce slack and pinned digests.
+#[test]
+fn akita_plans_of_the_mldsa_65_rows_are_pinned() {
+    let mut digests = Vec::new();
+    let mut summaries = Vec::new();
+    for (d_sig, _sites, _sum, _max, _work, _bits) in S65_TABLE {
+        let plan = row_plan_for_set(Set::S65, d_sig, Relation::Hu);
+        let digest = hex(&plan.digest().expect("digest"));
+        let got = summary(&plan);
+        eprintln!("ML-DSA-65 d_sig {d_sig:>2}: {got:?} digest {digest}");
+        assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
+            && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
+        assert_ne!(digest, PINNED[d_sig - 3], "ML-DSA-65 and ML-DSA-44 rows differ");
+        summaries.push(got);
+        digests.push(digest);
+    }
+    let expected_summaries: Vec<_> = S65_TABLE.iter().map(|&(_, a, b, c, d, e)| (a, b, c, d, e)).collect();
+    assert_eq!(summaries, expected_summaries);
+    assert_eq!(
+        PINNED_S65,
+        digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice()
+    );
+}
+
+/// The Akita plans of the 13 ML-DSA-87 grouped rows (`mldsa-87-p16-batch-<N*>-mult-final`,
+/// relation H-u): verified well-formed with 7 bits of nonce slack and pinned digests.
+#[test]
+fn akita_plans_of_the_mldsa_87_rows_are_pinned() {
+    let mut digests = Vec::new();
+    let mut summaries = Vec::new();
+    for (d_sig, _sites, _sum, _max, _work, _bits) in S87_TABLE {
+        let plan = row_plan_for_set(Set::S87, d_sig, Relation::Hu);
+        let digest = hex(&plan.digest().expect("digest"));
+        let got = summary(&plan);
+        eprintln!("ML-DSA-87 d_sig {d_sig:>2}: {got:?} digest {digest}");
+        assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
+            && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
+        assert_ne!(digest, PINNED[d_sig - 3], "ML-DSA-87 and ML-DSA-44 rows differ");
+        assert_ne!(digest, PINNED_S65[d_sig - 3], "ML-DSA-87 and ML-DSA-65 rows differ");
+        summaries.push(got);
+        digests.push(digest);
+    }
+    let expected_summaries: Vec<_> = S87_TABLE.iter().map(|&(_, a, b, c, d, e)| (a, b, c, d, e)).collect();
+    assert_eq!(summaries, expected_summaries);
+    assert_eq!(
+        PINNED_S87,
+        digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice()
+    );
+}
+
+/// (d_sig, PoW sites, sum g, max g, sum 2^g, nonce bits) of the ML-DSA-65 rows under relation H-u.
+const S65_TABLE: [(usize, u64, u64, u8, u64, u64); 13] = [
+    (3, 406, 979, 10, 4_416, 3_893),
+    (4, 406, 979, 10, 4_416, 3_893),
+    (5, 406, 979, 10, 4_416, 3_893),
+    (6, 406, 979, 10, 4_416, 3_893),
+    (7, 388, 967, 10, 5_196, 3_755),
+    (8, 388, 967, 10, 5_196, 3_755),
+    (9, 388, 966, 10, 4_684, 3_754),
+    (10, 388, 965, 10, 4_428, 3_753),
+    (11, 452, 1_120, 10, 5_296, 4_368),
+    (12, 455, 1_131, 12, 9_920, 4_400),
+    (13, 457, 1_133, 12, 8_140, 4_416),
+    (14, 459, 1_138, 12, 9_936, 4_435),
+    (15, 461, 1_140, 12, 8_156, 4_451),
+];
+
+/// The plan digests of the 13 ML-DSA-65 grouped rows at the pinned Akita revision.
+const PINNED_S65: &[&str] = &[
+    "9938bb7375a3d8effb6c763cb5464d561e626d390c634ae9b1ad7d56500401a8",
+    "9938bb7375a3d8effb6c763cb5464d561e626d390c634ae9b1ad7d56500401a8",
+    "9938bb7375a3d8effb6c763cb5464d561e626d390c634ae9b1ad7d56500401a8",
+    "9938bb7375a3d8effb6c763cb5464d561e626d390c634ae9b1ad7d56500401a8",
+    "f044b32e8f8de264a6d7362521b3570b844321b3420f883bbae0da19d33f738e",
+    "3a5cf417569d3b6878c456b2db2bde8ea560b93f968af531c6b256ef3f41737f",
+    "49838b5c1a2d80fc664dcb13db6784e903b7b0bb389f90f96003f5778e81fcc2",
+    "2472f8a767652a253bca23948c56e4d12b91f1243bec5a5625393ece771af788",
+    "96aee222e091a016c145baea167d53e29dd5cfb984cbcd81b492923ead1feb6d",
+    "3045c1782e00606e866e2b56bffba4b1574523923010117fe38cb23d7aaa6b29",
+    "e79f39ad2499e006767187a600c2716c3449cf4d348e74956146ce90c7bd6d70",
+    "3fcbaf4b03cb19242acfd8f8e6474e0661a143a9fd5f024f2cfbff253730705e",
+    "578c40b1d47e6b6c0a322339584bb2179bd6acbe4fe34e9309ddd80848ed735a",
+];
+
+/// (d_sig, PoW sites, sum g, max g, sum 2^g, nonce bits) of the ML-DSA-87 rows under relation H-u.
+const S87_TABLE: [(usize, u64, u64, u8, u64, u64); 13] = [
+    (3, 388, 967, 10, 5_196, 3_755),
+    (4, 388, 967, 10, 5_196, 3_755),
+    (5, 388, 967, 10, 5_196, 3_755),
+    (6, 388, 966, 10, 4_684, 3_754),
+    (7, 388, 966, 10, 4_684, 3_754),
+    (8, 388, 966, 10, 4_684, 3_754),
+    (9, 430, 1052, 10, 4_860, 4_134),
+    (10, 430, 1051, 10, 4_604, 4_133),
+    (11, 452, 1_121, 12, 8_112, 4_369),
+    (12, 457, 1_134, 12, 8_396, 4_417),
+    (13, 459, 1_138, 12, 9_936, 4_435),
+    (14, 461, 1_143, 12, 9_948, 4_454),
+    (15, 461, 1_140, 12, 8_156, 4_451),
+];
+
+/// The plan digests of the 13 ML-DSA-87 grouped rows at the pinned Akita revision.
+const PINNED_S87: &[&str] = &[
+    "ea906f436336d6953ff82bbb1497b326bba95853069dfc67f385e5a174da17a3",
+    "ea906f436336d6953ff82bbb1497b326bba95853069dfc67f385e5a174da17a3",
+    "ea906f436336d6953ff82bbb1497b326bba95853069dfc67f385e5a174da17a3",
+    "59ad7b990b48deaa9fef9be68b6a8d0cebc149ef483024fa3d1019f08b5e3a18",
+    "3692bc922c18a2e79ccf4eaf7db171042e3dafa305def556e61c0194d830bdee",
+    "b9ae43f5a428889acb7c517d20a20c764acf38951218a6e518cce2c638dc42b6",
+    "8b7c172cb6e23bcc614367687468e1dbf3ac185919e49c2af110a705056a4b17",
+    "7acd5f8e63812c1e76612b570ab08ec47c400ad32d07196ee695a7a74162cfa9",
+    "f33d456a897853c35c3cb93b5b248234b130c590251f4b16967fe7900abc6d52",
+    "de0f26f294616cac7e410da782c53c65c3509e192a9b66be9877b49ccbc4377c",
+    "7ed11d214544a1894cd8c8fe76c5c5f27a95835e527d54fa717258a10e8a367a",
+    "652a11077cb98b4c3922078ba0e0245f2d29a56521811f45a30f38d9e0ea0f6d",
+    "437c6eba5e56883bb03c08f7145a5649aaf8cc2eae24322803529c8a8a7ef104",
 ];
