@@ -1351,7 +1351,7 @@ pub struct Aggregate {
 impl Aggregate {
     /// The `c~_i` list.
     #[must_use]
-    pub fn c_tilde(&self) -> &[[u8; C_TILDE_BYTES]] {
+    pub fn c_tilde(&self) -> &[Vec<u8>] {
         &self.proof.c_tilde
     }
 }

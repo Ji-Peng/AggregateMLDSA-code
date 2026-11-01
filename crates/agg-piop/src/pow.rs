@@ -489,6 +489,61 @@ mod tests {
     }
 
     #[test]
+    fn ml_dsa_65_and_87_plans_reproduce_the_script() {
+        use crate::manifest::Relation;
+        use crate::transcript::{stage_degrees, stage_gammas};
+        use agg_witness::params::Set;
+        // Stage batching vectors, degrees and gamma difficulties per set: 65 has 37, 18 and
+        // 105 coefficients (g = 6, 5, 7), 87 has 45, 22 and 132 (g = 6, 5, 8); stage 1 has
+        // degree 3 (no six-bit range identity).
+        for (set, gammas, bits) in [(Set::S65, [37, 18, 105], [6, 5, 7]), (Set::S87, [45, 22, 132], [6, 5, 8])] {
+            for d_sig in [3, 10, 15] {
+                let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::Hu).unwrap();
+                assert_eq!(stage_gammas(&manifest), gammas, "{set:?}");
+                assert_eq!(stage_degrees(&manifest), [3, 5, 3], "{set:?}");
+                let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+                let found: Vec<u8> =
+                    plan.sites().iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect();
+                assert_eq!(found, bits, "{set:?}");
+                let rounds = |stage: u16| {
+                    plan.sites().iter().filter(|s| s.class == SiteClass::StageRound && s.i == stage).map(|s| s.bits).collect::<Vec<_>>()
+                };
+                assert_eq!(rounds(1), vec![2; 8 + d_sig]);
+                assert_eq!(rounds(2), vec![3; 8 + d_sig]);
+                assert_eq!(rounds(3), vec![2; 8 + d_sig]);
+            }
+        }
+        // Totals of the PIOP part (sites, nonces, bits, sum 2^g) and the mode-B plan digests of
+        // `python3 -I docs/scripts/pow_plan.py --set 65|87`.
+        let cases: [(Set, usize, [usize; 3], u64, &str); 8] = [
+            (Set::S65, 3, [190, 189, 1761], 1690, "ce924fd9a54603b63cf3e8a7ceaf3d3069e46f563905ed51e4b3a2f18dd646cb"),
+            (Set::S65, 10, [311, 310, 2867], 2356, "31e84bb3059489c0b602c994cc160c5f1a65f0929fa95b75aebb4bdb5aa3f615"),
+            (Set::S65, 13, [392, 391, 3605], 2770, "97bd51e15625058d3394d7f4f1b8c1fd9c6e71b502aa61cf46133f161b4ea17d"),
+            (Set::S65, 15, [451, 450, 4144], 3130, "6ff0953b57dc7ae20278bbd237748359282b934c8fe3afd0435e8bebcd264b99"),
+            (Set::S87, 3, [190, 189, 1763], 1850, "7882abb9737aefba3a1d46b4086c64ef11bab5d4d4b946655867be9cc0ecb294"),
+            (Set::S87, 10, [311, 310, 2873], 2604, "c536004aeb714eeb94640005f78e35d2f0923598f4cb5b4ca8c412dea5a0d4de"),
+            (Set::S87, 13, [392, 391, 3611], 3018, "f7778510c5fb270548319628fa87f0f84d40f329b3fc9927d02cd75a98ee53d1"),
+            (Set::S87, 15, [451, 450, 4149], 3346, "b4385bc4888c55d57ae7166cf75b1f51d27d3f9bc5b5767f036e2bbe866acb57"),
+        ];
+        for (set, d_sig, [sites, nonces, bits], work, want) in cases {
+            let manifest = CommitmentManifest::for_set(set, 1 << d_sig, Relation::Hu).unwrap();
+            let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+            assert_eq!(plan.sites().len(), sites, "{set:?} 2^{d_sig}");
+            assert_eq!(plan.sites().iter().filter(|s| s.bits > 0).count(), nonces);
+            assert_eq!(plan.work_bits(), bits);
+            assert_eq!(plan.expected_work(), work);
+            assert_eq!(hex(&plan.digest()), want, "{set:?} 2^{d_sig}");
+            assert!(plan.sites().iter().all(|s| s.bits <= 8));
+        }
+        // The 1K plans: 359 (65) and 360 (87) nonce bytes.
+        for (set, bytes) in [(Set::S65, 359), (Set::S87, 360)] {
+            let manifest = CommitmentManifest::for_set(set, 1 << 10, Relation::Hu).unwrap();
+            let plan = PowPlan::new(&manifest, FlockProfile::PublicBits, &KeccakPlan::default());
+            assert_eq!(plan.work_bits().div_ceil(8), bytes);
+        }
+    }
+
+    #[test]
     fn h_exact_plans_reproduce_docs_h_exact_section_3_7() {
         use crate::manifest::Relation;
         // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g). With the projection of v the

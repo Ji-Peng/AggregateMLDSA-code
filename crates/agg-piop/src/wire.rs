@@ -1,15 +1,18 @@
-//! Proof wire format (wire version 4): header (version, flags = relation byte, `N`), the
-//! `32N` bytes of `c~_i`, then the payloads of the commitments, the final vectors and the
+//! Proof wire format (wire version 4): header (version, flags, `N`), the `|c~| N` bytes of
+//! `c~_i` (32, 48 or 64 bytes each), then the payloads of the commitments, the final vectors and the
 //! Keccak side's share items, the lookup, the sum-check stages and the join
 //! (the Keccak side's proof items, after stage 3) in transcript order, the packed PIOP nonce
 //! stream (`docs/soundness.md`, its exact length a function of `N`), then the Akita opening.
 //! Variable-length items carry a `LE32` length; field elements use the canonical atom
 //! encoding of the transcript; the round and session counts follow from `N`, the stage-2 and
-//! stage-3 claim counts from the relation (`docs/h-exact.md`). The parser reads the relation
-//! from the header; a verifier MUST compare it with the relation it expects before using the
-//! proof.
+//! stage-3 claim counts from the relation (`docs/h-exact.md`). The flags byte holds the
+//! relation id in its low nibble and the parameter set in its high nibble (0 = ML-DSA-44,
+//! 1 = ML-DSA-65, 2 = ML-DSA-87), so an ML-DSA-44 header is unchanged. The parser reads the
+//! relation and the set from the header; a verifier MUST compare both with the ones it
+//! expects before using the proof.
 
-use agg_witness::params::C_TILDE_BYTES;
+use agg_witness::dispatch_set;
+use agg_witness::params::{ParamSet, Set};
 
 use crate::claims::{
     Kappa1Claims, MultiplicityClaims, PreStageClaims, Stage1Claims, Stage2Claims, Stage3Claims,
@@ -29,7 +32,7 @@ use crate::OpeningField as E;
 pub enum WireError {
     /// Unknown wire version.
     Version(u16),
-    /// Unknown feature flags (relation byte).
+    /// Unknown feature flags (relation and parameter-set nibbles).
     Flags(u8),
     /// `N` outside `1..=2^15`.
     Records(u64),
@@ -54,12 +57,14 @@ impl std::error::Error for WireError {}
 /// The aggregate proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggregateProof {
-    /// The relation the proof claims (the header's flags byte).
+    /// The parameter set the proof claims (the high nibble of the header's flags byte).
+    pub set: Set,
+    /// The relation the proof claims (the low nibble of the header's flags byte).
     pub relation: Relation,
     /// Live records `N`.
     pub records: usize,
-    /// `c~_i` per live record.
-    pub c_tilde: Vec<[u8; C_TILDE_BYTES]>,
+    /// `c~_i` per live record ([`c_tilde_bytes`] each).
+    pub c_tilde: Vec<Vec<u8>>,
     /// The round-1 Akita commitment of `G_main16`.
     pub main16_commitment: Vec<u8>,
     /// The round-1 Akita commitment of `G_main4`.
@@ -91,6 +96,39 @@ pub struct AggregateProof {
     pub work: Vec<u8>,
     /// The Akita opening.
     pub opening: Vec<u8>,
+}
+
+/// The high nibble of the flags byte for `set`.
+#[must_use]
+pub const fn set_nibble(set: Set) -> u8 {
+    match set {
+        Set::S44 => 0,
+        Set::S65 => 1,
+        Set::S87 => 2,
+    }
+}
+
+/// The set of a flags nibble ([`set_nibble`]).
+#[must_use]
+pub const fn set_of_nibble(nibble: u8) -> Option<Set> {
+    match nibble {
+        0 => Some(Set::S44),
+        1 => Some(Set::S65),
+        2 => Some(Set::S87),
+        _ => None,
+    }
+}
+
+/// The header's flags byte: relation id in the low nibble, [`set_nibble`] in the high one.
+#[must_use]
+pub const fn flags(set: Set, relation: Relation) -> u8 {
+    set_nibble(set) << 4 | relation.id()
+}
+
+/// Bytes of one `c~` of `set` (`lambda / 4`: 32, 48 or 64).
+#[must_use]
+pub const fn c_tilde_bytes(set: Set) -> usize {
+    dispatch_set!(set, |P| P::C_TILDE_BYTES)
 }
 
 struct Writer(Vec<u8>);
@@ -154,9 +192,11 @@ impl AggregateProof {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer(Vec::new());
         w.bytes(&WIRE_VERSION.to_le_bytes());
-        w.bytes(&[self.relation.id()]);
+        w.bytes(&[flags(self.set, self.relation)]);
         w.bytes(&(self.records as u64).to_le_bytes());
+        let width = c_tilde_bytes(self.set);
         for c in &self.c_tilde {
+            assert_eq!(c.len(), width, "c~ of the proof's parameter set");
             w.bytes(c);
         }
         w.framed(&self.main16_commitment);
@@ -208,17 +248,23 @@ impl AggregateProof {
             return Err(WireError::Version(version));
         }
         let flags = r.array::<1>()?[0];
-        let relation = Relation::from_id(flags).ok_or(WireError::Flags(flags))?;
+        let relation = Relation::from_id(flags & 0x0F).ok_or(WireError::Flags(flags))?;
+        let set = set_of_nibble(flags >> 4).ok_or(WireError::Flags(flags))?;
+        if set != Set::S44 && relation != Relation::Hu {
+            // ML-DSA-65 and ML-DSA-87 have relation H-u only.
+            return Err(WireError::Flags(flags));
+        }
         let records = u64::from_le_bytes(r.array()?);
         let manifest = usize::try_from(records)
             .ok()
-            .and_then(|n| CommitmentManifest::for_relation(n, relation).ok())
+            .and_then(|n| CommitmentManifest::for_set(set, n, relation).ok())
             .ok_or(WireError::Records(records))?;
         let records = manifest.records();
         let segments = manifest.segments();
         let rounds = manifest.d_main();
+        let width = c_tilde_bytes(set);
         let c_tilde = (0..records)
-            .map(|_| r.array::<C_TILDE_BYTES>())
+            .map(|_| r.take(width).map(<[u8]>::to_vec))
             .collect::<Result<Vec<_>, _>>()?;
         let main16_commitment = r.framed()?;
         let main_commitment = r.framed()?;
@@ -269,6 +315,7 @@ impl AggregateProof {
             return Err(WireError::Trailing);
         }
         Ok(Self {
+            set,
             relation,
             records,
             c_tilde,
@@ -362,7 +409,7 @@ impl AggregateProof {
         let framed = |items: &[Vec<u8>]| items.iter().map(|item| 4 + item.len()).sum::<usize>();
         ProofSize {
             header: 2 + 1 + 8,
-            c_tilde: C_TILDE_BYTES * self.c_tilde.len(),
+            c_tilde: c_tilde_bytes(self.set) * self.c_tilde.len(),
             akita_commitments: 8
                 + self.main16_commitment.len()
                 + self.main_commitment.len()
@@ -418,7 +465,6 @@ pub fn unpack_final_vector(packed: &[u8; FINAL_VECTOR_BYTES]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::test_support::point;
-    use crate::transcript::STAGE_DEGREES;
     use agg_witness::gen::SplitMix64;
 
     fn sample_lookup(shape: &LookupShape, rng: &mut SplitMix64) -> LookupProof {
@@ -443,16 +489,22 @@ mod tests {
     }
 
     fn sample_proof_of(relation: Relation, records: usize, rng: &mut SplitMix64) -> AggregateProof {
-        let manifest = CommitmentManifest::for_relation(records, relation).unwrap();
+        sample_proof_in(Set::S44, relation, records, rng)
+    }
+
+    fn sample_proof_in(set: Set, relation: Relation, records: usize, rng: &mut SplitMix64) -> AggregateProof {
+        let manifest = CommitmentManifest::for_set(set, records, relation).unwrap();
+        let degrees = stage_degrees(&manifest);
         let rounds = manifest.d_main();
         let segments = manifest.segments();
         let rounds_of = |degree: usize, rng: &mut SplitMix64| {
             (0..rounds).map(|_| point(rng, degree)).collect::<Vec<_>>()
         };
         AggregateProof {
+            set,
             relation,
             records,
-            c_tilde: (0..records).map(|i| [i as u8; 32]).collect(),
+            c_tilde: (0..records).map(|i| vec![i as u8; c_tilde_bytes(set)]).collect(),
             main16_commitment: vec![1, 2],
             main_commitment: vec![1, 2, 3],
             flock_commitments: vec![vec![4; 10]; segments],
@@ -462,20 +514,21 @@ mod tests {
             flock_proofs: vec![vec![3; 5]; segments],
             lookup: sample_lookup(&manifest.lookup_shape(), rng),
             multiplicities: MultiplicityClaims::from_slice(&point(rng, MultiplicityClaims::LEN)).unwrap(),
-            prestage: PreStageClaims::from_slice(&point(rng, PreStageClaims::LEN)).unwrap(),
+            prestage: PreStageClaims::from_slice_for(&manifest, &point(rng, PreStageClaims::len(&manifest)))
+                .unwrap(),
             stage1: Stage1Proof {
-                rounds: rounds_of(4, rng),
-                claims: Stage1Claims::from_slice(&point(rng, Stage1Claims::LEN)).unwrap(),
+                rounds: rounds_of(degrees[0], rng),
+                claims: Stage1Claims::from_slice_for(&manifest, &point(rng, Stage1Claims::len(&manifest))).unwrap(),
             },
             stage2: Stage2Proof {
-                kappa1: Kappa1Claims::from_slice(&point(rng, Kappa1Claims::LEN)).unwrap(),
-                rounds: rounds_of(STAGE_DEGREES[1], rng),
+                kappa1: Kappa1Claims::from_slice_for(&manifest, &point(rng, Kappa1Claims::len(&manifest))).unwrap(),
+                rounds: rounds_of(degrees[1], rng),
                 claims: Stage2Claims::from_slice(&manifest, &point(rng, Stage2Claims::len(&manifest)))
                     .unwrap(),
                 projection: point(rng, 1)[0],
             },
             stage3: Stage3Proof {
-                rounds: rounds_of(3, rng),
+                rounds: rounds_of(degrees[2], rng),
                 claims: Stage3Claims(point(rng, Stage3Claims::len(&manifest))),
             },
             work: (0..work_bytes(&manifest)).map(|i| i as u8).collect(),
@@ -602,6 +655,46 @@ mod tests {
         }
         // At 2^15 the stage messages and claims take 6,208 bytes (25 rounds).
         assert_eq!(16 * (13 + 18 + 6 + 10 + 1 + 40 + 12 * 25), 6_208);
+    }
+
+    #[test]
+    fn ml_dsa_65_and_87_headers_carry_the_set_and_the_wider_c_tilde() {
+        let mut rng = SplitMix64::new(80);
+        for (set, nibble, width) in [(Set::S65, 0x10_u8, 48), (Set::S87, 0x20, 64)] {
+            for records in [1, 100, 1000] {
+                let proof = sample_proof_in(set, Relation::Hu, records, &mut rng);
+                let bytes = proof.to_bytes();
+                assert_eq!(bytes[2], nibble, "{set:?}");
+                let parsed = AggregateProof::from_bytes(&bytes).unwrap();
+                assert_eq!(parsed, proof);
+                assert_eq!((parsed.set, parsed.c_tilde[0].len()), (set, width));
+                let size = proof.size();
+                assert_eq!(size.total(), bytes.len());
+                assert_eq!(size.c_tilde, width * records);
+                let manifest = CommitmentManifest::for_set(set, records, Relation::Hu).unwrap();
+                assert_eq!(size.work, work_bytes(&manifest));
+                assert_eq!(proof.stage1.rounds[0].len(), 3);
+                // A rewritten set nibble changes every shape that follows, so the parse fails
+                // or yields another proof.
+                for other in [0x00_u8, 0x10, 0x20] {
+                    if other == nibble {
+                        continue;
+                    }
+                    let mut rewritten = bytes.clone();
+                    rewritten[2] = other;
+                    if let Ok(parsed) = AggregateProof::from_bytes(&rewritten) {
+                        assert_ne!(parsed, proof);
+                    }
+                }
+                // Unknown set nibbles and the H-exact and H-FIPS relations are refused.
+                for bad in [0x30_u8, 0xF0, nibble | 1, nibble | 2] {
+                    let mut flags = bytes.clone();
+                    flags[2] = bad;
+                    assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(bad)));
+                }
+                assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
+            }
+        }
     }
 
     #[test]

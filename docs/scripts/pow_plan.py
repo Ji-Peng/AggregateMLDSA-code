@@ -7,6 +7,8 @@ Run (isolated mode, standard library only):
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
     python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md)
     python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md)
+    python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65 (H-u only)
+    python3 -I docs/scripts/pow_plan.py --set 87 --details 15
 
 What it computes, with exact integer arithmetic:
 
@@ -62,6 +64,29 @@ D_SEG_MAX = 13
 OUT_VARS = 12  # log2 m_3, the output-row coordinates of eq_Y
 ZETA_VARS = 19  # log2 J_1
 LANE_VARS = 3  # ceil(log2 6): the chain's eight lanes
+BLOCK_RECORDS_LOG2 = 9  # records per level-1 block of the bridge
+P_PAD_BITS = 10  # log2 of the padded positions P_pad of one record on the bridge input
+
+# Parameter sets (FIPS 204 ML-DSA-44, -65, -87). The main domain is (j, rho, i) for 44
+# (d_main = 10 + d_sig) and (j, i) with polynomial lanes for 65 and 87 (d_main = 8 + d_sig).
+# The main-domain lookup stacks hold the l + k looked-up Z_lo/U_lo polynomials split by the
+# binary decomposition of l + k (44: one stack [Z_lo | U_lo] of two columns); the level-1 and
+# level-2 carry stacks have one column per w1 bit (6 in 8 slots for 44, 4 for 65/87); the
+# projection domain D_k has 128 rows per record and block (87: two row blocks).
+# Stage 1 has degree 4 with the six-bit range identity of 44 and 3 otherwise; the batching
+# vectors count the instances of crates/agg-piop/src/stage{1,2,3}.rs gamma_count (65 and 87:
+# one Booleanity check per bit and lane, k ring instances, l + k links and Booleanity
+# checks). The bridge constants of 65/87 (four chain lanes, 256 records per level-1 block,
+# P_pad = 2^11) set the tied-part rounds of mode A.
+SETS = {
+    "44": {"d_pos": 10, "main_stacks": (2,), "carry_slots": 8, "d1_shift": 9, "dk_rows": 7,
+           "degrees": (4, 5, 3), "gammas": None, "lane_vars": 3, "block_log": 9, "p_pad_bits": 10},
+    "65": {"d_pos": 8, "main_stacks": (8, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 7,
+           "degrees": (3, 5, 3), "gammas": (37, 18, 105), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11},
+    "87": {"d_pos": 8, "main_stacks": (8, 4, 2, 1), "carry_slots": 4, "d1_shift": 8, "dk_rows": 8,
+           "degrees": (3, 5, 3), "gammas": (45, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11},
+}
+SET = SETS["44"]
 PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
 # Level-0 Ligerito rate exponent r (rho = 2^-r) per profile; eta = 0.02 at level 0 in every
 # shipped and derived config (vendor/flock-core/configs/ligerito/m*_{fast,slim,slim8}.toml).
@@ -127,15 +152,19 @@ def capacity_log(n: int, k_log: int = SPONGE_K_LOG) -> int:
 
 
 def geometry(d_sig: int) -> dict:
-    d_main = 10 + d_sig
-    d1 = 13 + max(0, d_sig - 9)
+    d_main = SET["d_pos"] + d_sig
+    d1 = 13 + max(0, d_sig - SET["d1_shift"])
     d2 = 13 + max(0, d_sig - 13)
     d3 = 12 + max(0, d_sig - 13)
-    d_k = 7 + d_sig  # the projection domain (o, i): 128 rows times N*
-    # [Z_lo | U_lo], kappa^(1) and kappa^(2) in 8 slots, kappa^(3), [K_0 | K_1].
-    stacks = [d_main + 1, d1 + 3, d2 + 3, d3, d_k + 1]
+    d_k = SET["dk_rows"] + d_sig  # the projection domain (o, i): 128 rows (times blocks) times N*
+    slots = SET["carry_slots"]
+    # The main-domain stacks, kappa^(1) and kappa^(2) (one column per bit in `slots` slots),
+    # kappa^(3), [K_0 | K_1].
+    main = [d_main + (c - 1).bit_length() for c in SET["main_stacks"]]
+    stacks = main + [d1 + (slots - 1).bit_length(), d2 + (slots - 1).bit_length(), d3, d_k + 1]
     trees = (stacks + [16]) * CHALLENGES
-    lookups = 2 * 2**d_main + 8 * 2**d1 + 8 * 2**d2 + 2**d3 + 2 * 2**d_k
+    lookups = (sum(SET["main_stacks"]) * 2**d_main + slots * 2**d1 + slots * 2**d2 + 2**d3
+               + 2 * 2**d_k)
     return {
         "d_sig": d_sig,
         "d_main": d_main,
@@ -176,7 +205,8 @@ def piop_sites(geo: dict) -> list:
 
 def chain_rounds(d: int, span_log: int) -> int:
     """Rounds of the parity chain of a production part (agg_bridge::pow::chain_rounds)."""
-    return min(10 + min(d, 9), ZETA_VARS) + max(0, d - 9) + LANE_VARS + span_log
+    block = SET["block_log"]
+    return min(SET["p_pad_bits"] + min(d, block), ZETA_VARS) + max(0, d - block) + SET["lane_vars"] + span_log
 
 
 def tie_terms(d: int, span_log: int, nu_s: int, profile: str) -> dict:
@@ -298,7 +328,7 @@ def fmt_e(cls, nu, num) -> str:
 
 
 def print_summary(args) -> None:
-    print(f"== Relation {args.relation}: STAGE_DEGREES = {STAGE_DEGREES}, STAGE_GAMMAS = {STAGE_GAMMAS} ==")
+    print(f"== ML-DSA-{args.set}, relation {args.relation}: STAGE_DEGREES = {STAGE_DEGREES}, STAGE_GAMMAS = {STAGE_GAMMAS} ==")
     print()
     print("== PIOP sites per N* (mode A and mode B; registry order) ==")
     print("d_sig  N*      d_main  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)")
@@ -313,15 +343,17 @@ def print_summary(args) -> None:
             f"{d_sig:>5}  {1 << d_sig:>6}  {geo['d_main']:>6}  {geo['D']:>2}  {geo['L']:>11}  {x_log2:>12.1f}  {len(sites):>5}  {s['nonces']:>6}  {s['bits']:>4}  {s['bytes']:>5}  {s['work']:>13}  {s['work'] * PREVIEW_NS / 1e6:>6.2f}  2^{s['max_weight_log2']:.2f}  {s['union_nu']}/|K| = 2^{math.log2(Fraction(s['union_nu'], K)):.1f}"
         )
     print()
-    print("== PIOP site classes at N* = 2^15 (d_main = 25, D = 26) ==")
-    print("class         count  nu      e_t               g   nonce bits")
     geo = geometry(15)
+    print(f"== PIOP site classes at N* = 2^15 (d_main = {geo['d_main']}, D = {geo['D']}) ==")
+    print("class         count  nu      e_t               g   nonce bits")
     for (cls, nu, num, g), count in class_table(piop_sites(geo)):
         label = "byte" if cls == "proj.psi" else ("joint" if cls == "lookup.x" else str(nu))
         print(f"{cls:<12}  {count:>5}  {label:<6}  {fmt_e(cls, nu, num):<16}  {g:>2}  {width(g):>3}")
     print()
+    # The spec 12.1 ledger counted the instances of ML-DSA-44; other sets print the
+    # round-by-round sums only.
     print("== Old ledger (spec 12.1, union bound per instance) vs round-by-round numerators, before work ==")
-    for d_sig in (10, 13, 15):
+    for d_sig in (10, 13, 15) if args.set == "44" else ():
         geo = geometry(d_sig)
         dm, D = geo["d_main"], geo["D"]
         gkr = 3 * D * (D - 1) // 2 + 2 * (D - 1) + 1
@@ -513,15 +545,47 @@ def self_check() -> None:
             assert (a["bits"], a["work"]) == (b["bits"], b["work"]), (d_sig, a, b)
 
 
+def configure(set_name: str, relation: str) -> None:
+    """Select the parameter set and the relation (65 and 87 have relation H-u only)."""
+    global SET, STAGE_DEGREES, STAGE_GAMMAS
+    SET = SETS[set_name]
+    STAGE_DEGREES = SET["degrees"]
+    if SET["gammas"] is None:
+        STAGE_GAMMAS = RELATION_GAMMAS[relation]
+    else:
+        assert relation == "h-u", "ML-DSA-65 and ML-DSA-87 have relation H-u only"
+        STAGE_GAMMAS = SET["gammas"]
+
+
+def self_check_sets() -> None:
+    """The per-set plans of ML-DSA-65 and ML-DSA-87 (pinned in crates/agg-piop/src/pow.rs)."""
+    try:
+        configure("65", "h-u")
+        g = geometry(15)
+        assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
+        assert sorted(set(g["trees"]), reverse=True) == [26, 24, 23, 22, 17, 16, 14], g["trees"]
+        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 7]
+        assert chain_rounds(13, 0) == 19 + 5 + 2
+        configure("87", "h-u")
+        g = geometry(15)
+        assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
+        assert sorted(set(g["trees"]), reverse=True) == [26, 25, 24, 23, 22, 17, 16, 14], g["trees"]
+        assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 8]
+    finally:
+        configure("44", "h-u")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--details", type=int, metavar="D_SIG", help="print every site of N* = 2^D_SIG")
     parser.add_argument("--relation", choices=sorted(RELATION_GAMMAS), default="h-u",
                         help="the relation whose stage batching vectors to use (default h-u)")
+    parser.add_argument("--set", choices=sorted(SETS), default="44",
+                        help="the ML-DSA parameter set (default 44)")
     args = parser.parse_args()
     self_check()
-    global STAGE_GAMMAS
-    STAGE_GAMMAS = RELATION_GAMMAS[args.relation]
+    self_check_sets()
+    configure(args.set, args.relation)
     if args.details is not None:
         print_details(args.details)
     else:

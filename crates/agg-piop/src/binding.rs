@@ -8,6 +8,7 @@
 //! profile id and the 32-byte proof-of-work plan digest
 //! ([`crate::pow::PowPlan::digest`], `docs/soundness.md`).
 
+#[cfg(test)]
 use agg_witness::params::C_TILDE_BYTES;
 use rayon::prelude::*;
 
@@ -60,12 +61,13 @@ impl FlockProfile {
 }
 
 /// The canonical record stream `X`, written in parallel: the record offsets are a prefix sum
-/// of the record lengths, and every record is copied into its own disjoint slice.
+/// of the record lengths, and every record is copied into its own disjoint slice. `c~` has
+/// the width of the parameter set (32, 48 or 64 bytes).
 #[must_use]
-pub fn record_stream(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<u8> {
+pub fn record_stream<C: AsRef<[u8]> + Sync>(records: &[(&[u8], &[u8], C)]) -> Vec<u8> {
     let sizes: Vec<usize> = records
         .iter()
-        .map(|(pk, msg, _)| pk.len() + 8 + msg.len() + C_TILDE_BYTES)
+        .map(|(pk, msg, c_tilde)| pk.len() + 8 + msg.len() + c_tilde.as_ref().len())
         .collect();
     let mut stream = vec![0_u8; 8 + sizes.iter().sum::<usize>()];
     let (count, mut rest) = stream.split_at_mut(8);
@@ -86,7 +88,7 @@ pub fn record_stream(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<u8>
             len_part.copy_from_slice(&(msg.len() as u64).to_le_bytes());
             let (msg_part, c_part) = slot.split_at_mut(msg.len());
             msg_part.copy_from_slice(msg);
-            c_part.copy_from_slice(c_tilde);
+            c_part.copy_from_slice(c_tilde.as_ref());
         });
     stream
 }
@@ -107,7 +109,7 @@ fn record_stream_serial(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> Vec<
 
 /// The 32-byte public-record digest.
 #[must_use]
-pub fn public_records_binding(records: &[(&[u8], &[u8], [u8; C_TILDE_BYTES])]) -> [u8; 32] {
+pub fn public_records_binding<C: AsRef<[u8]> + Sync>(records: &[(&[u8], &[u8], C)]) -> [u8; 32] {
     let stream = record_stream(records);
     let leaves: Vec<Vec<u8>> = stream
         .par_chunks(BINDING_BLOCK_BYTES)
