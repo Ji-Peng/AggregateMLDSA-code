@@ -23,6 +23,4 @@ pub mod fused;
 pub mod mask;
 pub mod pattern;
 pub mod eval;
-pub mod ntt;
-pub mod keccak;
 pub mod digits;

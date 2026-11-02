@@ -7,6 +7,5 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-aerie-keccak.workspace = true
 jolt-field.workspace = true
 rayon.workspace = true

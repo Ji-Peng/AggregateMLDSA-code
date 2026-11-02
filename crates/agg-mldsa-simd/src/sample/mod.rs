@@ -45,11 +45,6 @@ impl<P: ParamSet> Engine<P> {
         }
     }
 
-    /// Decodes 4 polynomials of response vector z from 2,304 packed bytes (ML-DSA-44).
-    pub fn unpack_z_44(&self, z: &[u8; 2304], out: &mut [Poly32; 4]) -> u32 {
-        self.unpack_z(z, out)
-    }
-
     /// Encodes polynomials of high bits w1 into packed bytes (w1Encode).
     pub fn pack_w1(&self, w1: &[[u8; 256]], out: &mut [u8]) {
         if P::W1_BITS == 6 && w1.len() == 4 && out.len() == 768 {
@@ -65,8 +60,4 @@ impl<P: ParamSet> Engine<P> {
         }
     }
 
-    /// Encodes 4 polynomials of high bits w1 into 768 bytes (ML-DSA-44).
-    pub fn pack_w1_44(&self, w1: &[[u8; 256]; 4], out: &mut [u8; 768]) {
-        self.pack_w1(w1, out);
-    }
 }
