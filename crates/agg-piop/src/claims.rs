@@ -250,14 +250,11 @@ impl Stage2Claims {
         bit_columns(manifest).len() + manifest.leaf_digits().len() + Self::fips_len(manifest)
     }
 
-    /// H-FIPS claims (2 under H-FIPS, else 0).
+    /// H-FIPS claims (`2 LANES_K` under H-FIPS: 2 for ML-DSA-44, 12 and 16 for ML-DSA-65 and
+    /// ML-DSA-87; else 0).
     #[must_use]
     pub fn fips_len(manifest: &CommitmentManifest) -> usize {
-        if manifest.is_fips() {
-            crate::stage2::FIPS_TERMINALS.len()
-        } else {
-            0
-        }
+        crate::stage2::fips_terminals(manifest).len()
     }
 
     /// Wire order.

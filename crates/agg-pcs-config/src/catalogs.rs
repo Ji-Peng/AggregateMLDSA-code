@@ -139,11 +139,10 @@ impl Relation {
         }
     }
 
-    /// True when `set` defines this relation: every relation for ML-DSA-44; H-u and H-exact
-    /// for ML-DSA-65 and ML-DSA-87.
+    /// True when `set` defines this relation (every set defines every relation).
     #[must_use]
     pub const fn is_available(self, set: Set) -> bool {
-        matches!((set, self), (Set::S44, _) | (_, Self::Hu | Self::HExact))
+        matches!((set, self), (Set::S44 | Set::S65 | Set::S87, _))
     }
 
     /// The batch sizes whose rows of this relation are checked in.
@@ -319,18 +318,30 @@ impl Group {
             },
             Set::S65 => match self {
                 Self::Main16 => 5 + 3 * 6,
-                Self::Main => 5 + 5 + 6 + 6 + 4 * 6,
+                Self::Main => match relation {
+                    Relation::Hu | Relation::HExact => 5 + 5 + 6 + 6 + 4 * 6,
+                    Relation::HFips => 5 + 5 + 6 + 6 + 4 * 6 + 3 * 6,
+                },
                 Self::Level1 => 4,
-                Self::Level2 => 4 + 4,
+                Self::Level2 => match relation {
+                    Relation::Hu | Relation::HExact => 4 + 4,
+                    Relation::HFips => 4 + 4 + 1,
+                },
                 Self::Level3 => Self::Level2.num_polynomials(set, relation),
                 Self::Proj => 5,
                 Self::Mult => MULTIPLICITY_DIGITS,
             },
             Set::S87 => match self {
                 Self::Main16 => 7 + 3 * 8,
-                Self::Main => 7 + 7 + 8 + 8 + 4 * 8,
+                Self::Main => match relation {
+                    Relation::Hu | Relation::HExact => 7 + 7 + 8 + 8 + 4 * 8,
+                    Relation::HFips => 7 + 7 + 8 + 8 + 4 * 8 + 3 * 8,
+                },
                 Self::Level1 => 4,
-                Self::Level2 => 4 + 4,
+                Self::Level2 => match relation {
+                    Relation::Hu | Relation::HExact => 4 + 4,
+                    Relation::HFips => 4 + 4 + 1,
+                },
                 Self::Level3 => Self::Level2.num_polynomials(set, relation),
                 Self::Proj => 5,
                 Self::Mult => MULTIPLICITY_DIGITS,
@@ -526,8 +537,8 @@ pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
 }
 
 /// Every checked-in batch layout: the 39 ML-DSA-44 layouts across all relations, and the
-/// 26 ML-DSA-65 and 26 ML-DSA-87 layouts under relations H-u and H-exact (whose layouts are
-/// equal, so they share their catalog rows).
+/// 39 ML-DSA-65 and 39 ML-DSA-87 layouts (H-u and H-exact have equal layouts, so they share
+/// their catalog rows).
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
     let mut batches = catalog_batches_for_set(Set::S44);
@@ -678,8 +689,13 @@ mod tests {
         );
         assert!(BatchLayout::new(Set::S44, 2, Relation::Hu).is_none());
         assert!(BatchLayout::new(Set::S44, 16, Relation::HExact).is_none());
-        assert!(BatchLayout::new(Set::S87, 8, Relation::HFips).is_none());
-        assert!(BatchLayout::new(Set::S65, 8, Relation::HFips).is_none());
+        // H-FIPS of ML-DSA-65 and ML-DSA-87: G_main4 gains three columns per row lane, G_2 and
+        // G_3 the hint slack.
+        assert_eq!(
+            BatchLayout::new(Set::S65, 8, Relation::HFips).unwrap().groups.map(|g| (g.num_vars(), g.num_polynomials())),
+            [(16, 23), (16, 64), (13, 4), (13, 9), (13, 9), (15, 5), (16, 7)]
+        );
+        assert_eq!(BatchLayout::new(Set::S87, 15, Relation::HFips).unwrap().total_polynomials(), 151);
         // H-exact of ML-DSA-65 and ML-DSA-87: the layout of H-u (only the slack weight of
         // the z form changes), so it resolves to H-u's catalog rows under its own name.
         for set in [Set::S65, Set::S87] {
@@ -725,9 +741,9 @@ mod tests {
                 + catalog_batches_for_set(Set::S65).len()
                 + catalog_batches_for_set(Set::S87).len()
         );
-        assert_eq!(catalog_batches().len(), 91);
-        assert_eq!(catalog_batches_for_set(Set::S65).len(), 26);
-        assert_eq!(catalog_batches_for_set(Set::S87).len(), 26);
+        assert_eq!(catalog_batches().len(), 117);
+        assert_eq!(catalog_batches_for_set(Set::S65).len(), 39);
+        assert_eq!(catalog_batches_for_set(Set::S87).len(), 39);
     }
 
     #[test]

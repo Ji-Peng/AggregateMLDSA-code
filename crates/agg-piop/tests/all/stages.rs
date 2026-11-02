@@ -597,6 +597,130 @@ fn ml_dsa_87_h_exact_piop_round_trip_on_256_signatures() {
     on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(Relation::HExact, 0x87e));
 }
 
+/// Relation H-FIPS with polynomial lanes (ML-DSA-65, ML-DSA-87) at 256 signatures: the honest
+/// claims equal the extensions of the tables (including stage 2's `delta^(rho)`, `e^(rho)` at
+/// `r^(2)`), every committed coefficient satisfies the H-FIPS checks with the set's top value
+/// `m_w - 1 = 15`, and each tampering is rejected at the place of the check it breaks (with
+/// honest round-2 tables, so the hint slack follows the tampered `delta`).
+fn lane_fips_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
+    use agg_piop::manifest::FipsColumn;
+    use agg_witness::hfips::l_form_for;
+
+    let batch = LaneBatch::build_as::<P>(Relation::HFips, seed, 200, 56);
+    let manifest = &batch.manifest;
+    assert_eq!(manifest.u_slot_value(), DigitValue::Ld);
+    let (proof, _) = batch.prove(batch.tables(), false).expect("honest prover");
+    assert_eq!(proof.stage2.claims.fips.len(), 2 * P::K);
+    check_honest(&batch, &proof);
+    let (points, _, _) = batch.verify(batch.bridge.public_y(), &proof).expect("verifies");
+    let tables = batch.tables();
+    for (k, column) in agg_piop::stage2::fips_terminals(manifest).into_iter().enumerate() {
+        assert_eq!(proof.stage2.claims.fips[k], tables.column(column).evaluate(&points.r2), "{}", column.name());
+    }
+
+    // Pointwise: the H-FIPS checks, the recomposed u equals the engine's honest u, and the
+    // hint weight of each record is at most omega.
+    let lane_cells = manifest.lane_cells();
+    let cells = |main: &MainTables, column: Column, x: usize| main.column(manifest, column).value(x);
+    let l_value = DigitValue::Ld;
+    let form = l_form_for::<P>();
+    for rho in 0..P::K as u8 {
+        for x in 0..manifest.padded_records() * lane_cells {
+            let [s, delta, e] = FipsColumn::ALL.map(|c| cells(&batch.main, Column::Fips(c, rho), x));
+            let w1: i64 = (0..4).map(|t| cells(&batch.main, Column::W1Bit(t, rho), x) << t).sum();
+            assert_eq!(s * (s - 1), 0);
+            assert_eq!(delta * (delta - 2 * s + 1), 0);
+            assert_eq!(e * (e - 1) * (e - delta), 0);
+            assert_eq!(2 * e * w1 + 15 * e * e - 15 * e, 0, "F_w1 at ({rho}, {x})");
+            let digits: Vec<i64> = (0..3).map(|d| cells(&batch.main, Column::lane_digit(l_value, d, rho), x)).collect();
+            assert!(form.in_alphabets(&digits));
+        }
+    }
+    let derived = LaneBatch::build_as::<P>(Relation::Hu, seed, 200, 56);
+    for i in [0, 7, 255] {
+        let (_, u_fips, _) = batch.main.record_values_for::<P>(manifest, i);
+        let (_, u_hu, _) = derived.main.record_values_for::<P>(&derived.manifest, i);
+        assert_eq!(u_fips, u_hu, "record {i}");
+    }
+    assert!(batch.main.hint_slack().iter().all(|&h| (0..=P::OMEGA as i64).contains(&h)));
+
+    // Tamperings.
+    let narrow = |column: Column| manifest.locate(column).1;
+    let case = |label: &str, main: MainTables, expected: Option<usize>| {
+        let bridge = rebuilt(&batch, &main);
+        assert_eq!(rejecting_place(&batch, &main, &bridge), expected, "{label}");
+    };
+    case("honest", batch.main.clone(), None);
+    let x = 17 + lane_cells * 5;
+    let set = |column: Column, x: usize, value: i8| {
+        let mut main = batch.main.clone();
+        main.columns_mut()[narrow(column)][x] = value;
+        main
+    };
+    // s = 2 (F_s; the ring moves too): stage 3.
+    case("s = 2", set(Column::Fips(FipsColumn::Sign, 2), x, 2), Some(3));
+    // delta = -sigma (F_delta; the ring moves too): stage 3.
+    let s = cells(&batch.main, Column::Fips(FipsColumn::Sign, 3), x);
+    case("delta = -sigma", set(Column::Fips(FipsColumn::Delta, 3), x, (1 - 2 * s) as i8), Some(3));
+    // e = -1 at delta = 0 with L moved down by one to keep u: only F_e (stage 2) or, with w1'
+    // != 15, F_w1 as well, and stage 2 comes first.
+    let rho = 1_u8;
+    let lo = Column::lane_digit(l_value, 0, rho);
+    let find = |pred: &dyn Fn(usize) -> bool| (0..200 * lane_cells).find(|&y| pred(y)).expect("a position");
+    let y = find(&|y| {
+        cells(&batch.main, Column::Fips(FipsColumn::Delta, rho), y) == 0
+            && cells(&batch.main, Column::Fips(FipsColumn::Wrap, rho), y) == 0
+            && cells(&batch.main, lo, y) > -i64::from(LOOKUP_SHIFT)
+            && cells(&batch.main, lo, y) < i64::from(LOOKUP_SHIFT) - 1
+            && (0..4).map(|t| cells(&batch.main, Column::W1Bit(t, rho), y) << t).sum::<i64>() != 0
+    });
+    let mut main = set(Column::Fips(FipsColumn::Wrap, rho), y, -1);
+    *main.wide_cell_mut(manifest, lo, y) -= 1;
+    case("e = -1 at delta = 0", main, Some(2));
+    // e = 1 at w1' != 0 with delta = 0 and L moved up by one: F_e holds, only F_w1: stage 3.
+    let mut main = set(Column::Fips(FipsColumn::Wrap, rho), y, 1);
+    *main.wide_cell_mut(manifest, lo, y) += 1;
+    case("e = 1 at w1' != 0", main, Some(3));
+    // l_mid = 2 with (a_l, l_lo) moved so that L is unchanged: (0, 1, lo) -> (2, 0, lo - 256)
+    // (2^17 - 130,816 = 256): only bool[l_mid] (stage 3).
+    let (mid, slack) = (Column::lane_digit(l_value, 1, rho), Column::lane_digit(l_value, 2, rho));
+    let y = find(&|y| {
+        cells(&batch.main, mid, y) == 0
+            && cells(&batch.main, slack, y) == 1
+            && cells(&batch.main, lo, y) >= -i64::from(LOOKUP_SHIFT) + 256
+    });
+    let mut main = set(mid, y, 2);
+    main.columns_mut()[narrow(slack)][y] = 0;
+    *main.wide_cell_mut(manifest, lo, y) -= 256;
+    case("l_mid = 2 keeping L", main, Some(3));
+    // l_lo = 2^15 (stored): the lookup.
+    let mut main = batch.main.clone();
+    *main.wide_cell_mut(manifest, lo, x) = LOOKUP_SHIFT;
+    let bridge = lenient(&batch, &main, batch.bridge.clone());
+    assert_eq!(rejecting_place(&batch, &main, &bridge), Some(0), "l_lo = 2^15");
+    // A dropped hint: delta -> 0 where delta != 0 (u moves by 2 gamma_2, the hint weight by
+    // one): the ring and weight identities, stage 3.
+    let delta = Column::Fips(FipsColumn::Delta, 4);
+    let y = find(&|y| cells(&batch.main, delta, y) != 0 && cells(&batch.main, Column::Fips(FipsColumn::Wrap, 4), y) == 0);
+    case("dropped hint", set(delta, y, 0), Some(3));
+    // The hint slack of one record moved by one (round 2 only): F_omega, stage 3.
+    for change in [1, -1] {
+        let mut main = batch.main.clone();
+        main.hint_slack_mut()[9] += change;
+        case(&format!("u_h {change:+}"), main, Some(3));
+    }
+}
+
+#[test]
+fn ml_dsa_65_h_fips_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_fips_round_trip::<agg_witness::params::Set65>(0x65f));
+}
+
+#[test]
+fn ml_dsa_87_h_fips_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_fips_round_trip::<agg_witness::params::Set87>(0x87f));
+}
+
 /// The PIOP part of ML-DSA-65 and ML-DSA-87 on a transcript that starts from the real
 /// instance record (the manifest, the digest of the `(pk, M, c~)` records with the set's
 /// `c~` width, Flock profile 0 and the set's proof-of-work plan): the prover searches the
@@ -695,6 +819,7 @@ fn ml_dsa_65_piop_round_trip_on_the_instance_record_at_256_and_1k() {
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x650, 200, 56);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x651, 900, 124);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HExact, 0x652, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HFips, 0x653, 200, 56);
     });
 }
 
@@ -704,5 +829,6 @@ fn ml_dsa_87_piop_round_trip_on_the_instance_record_at_256_and_1k() {
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x870, 200, 56);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x871, 900, 124);
         lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HExact, 0x872, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HFips, 0x873, 200, 56);
     });
 }

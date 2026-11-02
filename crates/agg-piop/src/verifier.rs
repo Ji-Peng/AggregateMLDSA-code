@@ -473,7 +473,7 @@ pub fn verify_timed(
 }
 
 /// [`verify_timed`] for an aggregate of a parameter set with polynomial lanes (ML-DSA-65 or
-/// ML-DSA-87; relations H-u and H-exact): `set` is the caller's, never read from the proof (a proof
+/// ML-DSA-87; every relation): `set` is the caller's, never read from the proof (a proof
 /// whose header names another set is rejected before the instance record). With `cache`
 /// (of `set`), keys found there are not expanded again and new expansions are added.
 ///

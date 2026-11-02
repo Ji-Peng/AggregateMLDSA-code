@@ -44,7 +44,7 @@ use agg_mldsa_simd::{Engine, HuCols};
 use agg_witness::derive::{derive_with_t, derive_with_t_for, DeriveError};
 use agg_witness::fast::{derive_tile_with, FastWitness, TILE};
 use agg_witness::fast_lanes::LaneWitness;
-use agg_witness::hfips::honest_coeff;
+use agg_witness::hfips::{coefficient_of, honest_coeff};
 use agg_witness::instance::{PublicInstance, PublicRecord};
 use agg_witness::native::{high_bits, mod_q, use_hint, VecK, VecL};
 use agg_witness::padding::{Geometry, GeometryError};
@@ -369,7 +369,8 @@ struct Encoder {
     values: [(ValueForm, Vec<Vec<Slot>>, &'static str); 3],
     /// `bits[t][lane]`: the narrow slot of `b_t` in lane `lane`.
     bits: Vec<Vec<usize>>,
-    fips: Option<[usize; 3]>,
+    /// Under H-FIPS, the narrow slots of `s, delta, e` per row lane.
+    fips: Option<Vec<[usize; 3]>>,
     wide: usize,
     narrow: usize,
     shape: SetShape,
@@ -419,9 +420,11 @@ impl Encoder {
             bits: (0..shape.w1_bits as u8)
                 .map(|t| (0..shape.lanes_k as u8).map(|lane| narrow_slot(Column::W1Bit(t, lane))).collect())
                 .collect(),
-            fips: manifest
-                .is_fips()
-                .then(|| FipsColumn::ALL.map(|c| narrow_slot(Column::Fips(c)))),
+            fips: manifest.is_fips().then(|| {
+                (0..shape.lanes_k as u8)
+                    .map(|lane| FipsColumn::ALL.map(|c| narrow_slot(Column::Fips(c, lane))))
+                    .collect()
+            }),
             wide: manifest.group(GroupRole::Main16).polynomial_count(),
             narrow: manifest.group(GroupRole::Main).polynomial_count(),
             shape,
@@ -485,10 +488,10 @@ impl Encoder {
         wide: &mut [&mut [MaybeUninit<i32>]],
         narrow: &mut [&mut [MaybeUninit<i8>]],
     ) -> Result<i64, SourceTableError> {
-        self.encode(values.z.as_ref(), values.u.as_ref(), values.v.as_ref(), values.w1.as_ref(), wide, narrow)
+        self.encode::<P>(values.z.as_ref(), values.u.as_ref(), values.v.as_ref(), values.w1.as_ref(), wide, narrow)
     }
 
-    fn encode(
+    fn encode<P: ParamSet>(
         &self,
         z: &[[i64; N]],
         u: &[[i64; N]],
@@ -505,17 +508,23 @@ impl Encoder {
                 let pos = base + j;
                 // H-FIPS: the coefficient's witness; its magnitude L takes the slot of u.
                 let middle = if row < shape.k {
-                    Some(match self.fips {
+                    Some(match &self.fips {
                         None => u[row][j],
                         Some(slots) => {
-                            let c = fips_coefficient(u[row][j], i64::from(w1[row][j]))
-                                .ok_or(SourceTableError::Encode("w1' not reachable from w' by UseHint"))?;
-                            let cells = [(1 + c.sigma) / 2, c.delta, c.e];
-                            for (&slot, cell) in slots.iter().zip(cells) {
+                            let unreachable = SourceTableError::Encode("w1' not reachable from w' by UseHint");
+                            let (u, w1) = (u[row][j], i64::from(w1[row][j]));
+                            let (l, sigma, delta, e) = if P::SET == Set::S44 {
+                                let c = fips_coefficient(u, w1).ok_or(unreachable)?;
+                                (c.l(), c.sigma, c.delta, c.e)
+                            } else {
+                                let c = coefficient_of::<P>(u, w1).ok_or(unreachable)?;
+                                (c.l, c.sigma, c.delta, c.e)
+                            };
+                            for (&slot, cell) in slots[lane].iter().zip([(1 + sigma) / 2, delta, e]) {
                                 narrow[slot][pos].write(cell as i8);
                             }
-                            weight += c.weight();
-                            c.l()
+                            weight += delta * delta;
+                            l
                         }
                     })
                 } else {
@@ -537,7 +546,7 @@ impl Encoder {
                 }
             }
         }
-        let hint_slack = OMEGA as i64 - weight;
+        let hint_slack = P::OMEGA as i64 - weight;
         if hint_slack < 0 {
             return Err(SourceTableError::Encode("hint weight above omega"));
         }
@@ -1186,9 +1195,11 @@ impl MainTables {
             let digits: Vec<i64> = cells[lane].iter().map(|c| c.value(x)).collect();
             form.compose(&digits)
         };
-        let fips = manifest
-            .is_fips()
-            .then(|| FipsColumn::ALL.map(|c| self.column(manifest, Column::Fips(c))));
+        let fips: Option<Vec<[Cells<'_>; 3]>> = manifest.is_fips().then(|| {
+            (0..shape.lanes_k as u8)
+                .map(|lane| FipsColumn::ALL.map(|c| self.column(manifest, Column::Fips(c, lane))))
+                .collect()
+        });
         let (mut z, mut u, mut v) = (P::zero_vec_l(), P::zero_vec_k(), P::zero_vec_k());
         for row in 0..shape.k.max(shape.l) {
             let (lane, base) = shape.row_lane(row);
@@ -1200,7 +1211,10 @@ impl MainTables {
                 if row < shape.k {
                     u[row][j] = match &fips {
                         None => compose(1, lane, x),
-                        Some([s, delta, e]) => fips_u(compose(1, lane, x), s.value(x), delta.value(x), e.value(x)),
+                        Some(lanes) => {
+                            let [s, delta, e] = &lanes[lane];
+                            fips_u_with(P::GAMMA2, compose(1, lane, x), s.value(x), delta.value(x), e.value(x))
+                        }
                     };
                     v[row][j] = compose(2, lane, x);
                 }
@@ -1235,7 +1249,13 @@ impl MainTables {
 /// `s = (1 + sigma)/2`, `delta` and `e`, any integers.
 #[must_use]
 pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
-    GAMMA2 * s + l + 1 - GAMMA2 - 2 * GAMMA2 * delta - e
+    fips_u_with(GAMMA2, l, s, delta, e)
+}
+
+/// [`fips_u`] with the `gamma_2` of any parameter set.
+#[must_use]
+pub const fn fips_u_with(gamma2: i64, l: i64, s: i64, delta: i64, e: i64) -> i64 {
+    gamma2 * s + l + 1 - gamma2 - 2 * gamma2 * delta - e
 }
 
 /// H-FIPS's hint slack as a `D_2` table: `u_h(i)` at index
@@ -1333,10 +1353,13 @@ impl BridgeGroupTables {
             // bits.
             let lookup = manifest.lookup_shape();
             let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
-            // The packed path writes the level-3 carries as one slot: H-u only (no hint
-            // slack beside them).
+            // The packed path writes the level-3 carries as one slot and the level-2 carries
+            // without H-FIPS's hint slack beside them, so H-FIPS takes the general path.
             assert_eq!(slots(3), 1, "the level-3 carries of a four-lane set fill one slot");
-            if let Some((nibbles, true)) = main.bridge_nibble_source(manifest).map(|src| src.all()) {
+            let packed = (!manifest.is_fips())
+                .then(|| main.bridge_nibble_source(manifest).map(|src| src.all()))
+                .flatten();
+            if let Some((nibbles, true)) = packed {
                 let direct = parity::compute_direct_four_packed(
                     &shape,
                     &nibbles,
@@ -1367,7 +1390,9 @@ impl BridgeGroupTables {
             let inputs = main.bridge_lanes(manifest);
             let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
             let witness = parity::compute(&shape, &inputs, matrices).map_err(SourceTableError::Bridge)?;
-            return Self::from_witness(manifest, main, witness, Vec::new(), proj, psi);
+            // H-FIPS: the hint slack in the slot after the four level-2 carries.
+            let hint_slack = manifest.is_fips().then(|| hint_slack_table(manifest, main.hint_slack()));
+            return Self::from_witness(manifest, main, witness, hint_slack.into_iter().collect(), proj, psi);
         }
         let bit_lanes = main.bit_lanes(manifest);
         let hint_slack = manifest

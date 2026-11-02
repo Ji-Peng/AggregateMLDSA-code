@@ -191,7 +191,7 @@ fn ml_dsa_87_end_to_end_without_the_opening_at_1k() {
 /// PIOP, Akita opening, wire bytes) and `AggregateVerifier` from `(pk, M)` only, uncached
 /// and with a warm `LaneKeyCache`; then tampered witnesses and aggregates are rejected.
 fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
-    use agg_cli::mode_a::{AggregateError, AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut};
+    use agg_cli::mode_a::{AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut};
     use agg_piop::verifier::VerifyError;
 
     let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n / 4);
@@ -263,8 +263,26 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     let mut relabelled = exact.bytes.clone();
     relabelled[2] &= 0xF0;
     assert!(!verifier.verify(&statements, &relabelled, None).accepted());
-    let fips = Aggregator::new(AggregatorConfig { relation: Relation::HFips, ..config }).aggregate(&signed);
-    assert!(matches!(fips, Err(AggregateError::Relation(set, Relation::HFips)) if set == P::SET));
+    // H-FIPS: its own layout (the hint columns), accepted under H-FIPS only.
+    let fips = Aggregator::new(AggregatorConfig { relation: Relation::HFips, ..config })
+        .aggregate(&signed)
+        .expect("H-FIPS aggregate");
+    assert_eq!(fips.bytes[2] & 0x0F, Relation::HFips.id());
+    let fips_verifier = AggregateVerifier::for_set(P::SET).relation(Relation::HFips);
+    let report = fips_verifier.verify(&statements, &fips.bytes, None);
+    assert!(report.accepted(), "{report}");
+    let crossed = exact_verifier.verify(&statements, &fips.bytes, None);
+    assert!(matches!(crossed.report.outcome, Err(VerifyError::Relation { .. })), "{crossed}");
+    let mut relabelled = fips.bytes.clone();
+    relabelled[2] = (relabelled[2] & 0xF0) | Relation::HExact.id();
+    assert!(!exact_verifier.verify(&statements, &relabelled, None).accepted());
+    eprintln!(
+        "{} H-FIPS at {n}: {} B (H-u {} B, H-exact {} B)",
+        P::NAME,
+        fips.bytes.len(),
+        aggregate.bytes.len(),
+        exact.bytes.len()
+    );
 
     // Tampered witnesses (the prover's self-checks off): a G_main16 cell and a G_main4 cell.
     let wide = |_: &CommitmentManifest, t: &mut MainTables| {

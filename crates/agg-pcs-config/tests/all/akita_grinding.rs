@@ -187,6 +187,25 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
     assert_eq!(PINNED_H_FIPS, digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice());
 }
 
+/// The Akita plans of the 26 ML-DSA-65 and ML-DSA-87 H-FIPS grouped rows
+/// (`mldsa-<set>-p16f-batch-<N*>-mult-final`): well-formed with 7 bits of nonce slack, distinct
+/// from the H-u rows of the same set (H-exact shares H-u's rows: its layout is H-u's).
+#[test]
+fn akita_plans_of_the_lane_h_fips_rows_are_well_formed() {
+    for (set, pinned_hu) in [(Set::S65, PINNED_S65), (Set::S87, PINNED_S87)] {
+        for d_sig in 3..=15 {
+            let plan = row_plan_for_set(set, d_sig, Relation::HFips);
+            let digest = hex(&plan.digest().expect("digest"));
+            eprintln!("{set:?} H-FIPS d_sig {d_sig:>2}: {:?} digest {digest}", summary(&plan));
+            assert!(plan.runs().iter().all(|r| r.grind_bits() <= 25
+                && (r.grind_bits() == 0 || r.nonce_bits() == r.grind_bits() + 7)));
+            assert_ne!(digest, pinned_hu[d_sig - 3], "{set:?} H-FIPS and H-u rows differ");
+            let exact = hex(&row_plan_for_set(set, d_sig, Relation::HExact).digest().expect("digest"));
+            assert_eq!(exact, pinned_hu[d_sig - 3], "{set:?} H-exact resolves to the H-u row");
+        }
+    }
+}
+
 /// The plan digests of the 13 H-FIPS grouped rows at the pinned Akita revision.
 const PINNED_H_FIPS: &[&str] = &[
     "1646240bee27d2e09219fb5187fa7207e8da8b5e27c80040ce9fb6e2be75ac99",

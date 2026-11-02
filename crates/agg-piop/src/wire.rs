@@ -251,7 +251,7 @@ impl AggregateProof {
         let relation = Relation::from_id(flags & 0x0F).ok_or(WireError::Flags(flags))?;
         let set = set_of_nibble(flags >> 4).ok_or(WireError::Flags(flags))?;
         if !relation.is_available(set) {
-            // ML-DSA-65 and ML-DSA-87 have relations H-u and H-exact only.
+            // A relation the set does not define.
             return Err(WireError::Flags(flags));
         }
         let records = u64::from_le_bytes(r.array()?);
@@ -686,8 +686,8 @@ mod tests {
                         assert_ne!(parsed, proof);
                     }
                 }
-                // Unknown set nibbles, the H-FIPS relation and unknown relations are refused.
-                for bad in [0x30_u8, 0xF0, nibble | 2, nibble | 3] {
+                // Unknown set nibbles and unknown relations are refused.
+                for bad in [0x30_u8, 0xF0, nibble | 3, nibble | 0xF] {
                     let mut flags = bytes.clone();
                     flags[2] = bad;
                     assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(bad)));

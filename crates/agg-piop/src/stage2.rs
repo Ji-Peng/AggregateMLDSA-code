@@ -21,7 +21,10 @@
 //! `F_e = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
 //! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
-//! stage 3.
+//! stage 3. With polynomial lanes (ML-DSA-65, ML-DSA-87) H-FIPS's leaves are those of H-u
+//! without `leaf8[U_mid^(rho)]` (the magnitude `L` has a looked-up low digit and two bits),
+//! and `F_e` is one instance per row lane `rho` after them, with the terminal claims
+//! `delta^(rho)(r^(2))` then `e^(rho)(r^(2))`.
 use agg_witness::bridge::BridgeMatrices;
 use agg_witness::padding::Geometry;
 use agg_witness::params::W1_BITS;
@@ -29,7 +32,7 @@ use jolt_field::Zero;
 
 use crate::claims::{bit_columns, Kappa1Claims, Stage1Claims, Stage2Claims};
 use crate::kernel::{LeafPoly, Term};
-use crate::manifest::{Column, CommitmentManifest, GroupRole};
+use crate::manifest::{Column, CommitmentManifest, FipsColumn, GroupRole};
 use crate::range::{digits, Digit};
 use crate::stage::{
     check_terminal, prove_stage_split, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
@@ -45,14 +48,25 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 2;
 /// Message degree (`leaf8[K_2]`: the `eq` factor times `Q_8(P_Z)`).
 pub const DEGREE: usize = 5;
-/// H-FIPS instances of stage 2 (`F_e`).
+/// H-FIPS instances of stage 2 of ML-DSA-44 (`F_e`; one per row lane in general,
+/// [`fips_instances`]).
 pub const FIPS_INSTANCES: usize = 1;
+
+/// H-FIPS instances of stage 2: `F_e` per row lane (0 outside H-FIPS).
+#[must_use]
+pub fn fips_instances(manifest: &CommitmentManifest) -> usize {
+    if manifest.is_fips() {
+        manifest.shape().lanes_k
+    } else {
+        0
+    }
+}
 
 /// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
 /// and `K_3` in each); 18 and 22 for ML-DSA-65 and ML-DSA-87.
 #[must_use]
 pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
-    bits(manifest) + manifest.leaf_digits().len() + if manifest.is_fips() { FIPS_INSTANCES } else { 0 }
+    bits(manifest) + manifest.leaf_digits().len() + fips_instances(manifest)
 }
 
 /// Bits of `w_1'` (the `def_y1` instances).
@@ -60,20 +74,43 @@ fn bits(manifest: &CommitmentManifest) -> usize {
     manifest.shape().w1_bits
 }
 
-/// Gamma index of H-FIPS's `F_e`.
+/// Gamma index of H-FIPS's `F_e` (of row lane 0).
 #[must_use]
 pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
     bits(manifest) + manifest.leaf_digits().len()
 }
 
-/// The H-FIPS terminal lanes of stage 2 beyond the bits, in wire order: `delta`, `e` at
-/// `r^(2)`.
+/// Gamma index of H-FIPS's `F_e` of row lane `rho`.
+#[must_use]
+pub fn gamma_fips_lane(manifest: &CommitmentManifest, rho: usize) -> usize {
+    gamma_fips(manifest) + rho
+}
+
+/// The H-FIPS terminal lanes of stage 2 of ML-DSA-44 beyond the bits, in wire order:
+/// `delta`, `e` at `r^(2)` ([`fips_terminals`] for every set).
 pub const FIPS_TERMINALS: [Column; 2] = [Column::DELTA, Column::WRAP];
+
+/// The H-FIPS terminal lanes of stage 2 beyond the bits, in wire order: `delta^(rho)` for every
+/// row lane, then `e^(rho)` (empty outside H-FIPS).
+#[must_use]
+pub fn fips_terminals(manifest: &CommitmentManifest) -> Vec<Column> {
+    if !manifest.is_fips() {
+        return Vec::new();
+    }
+    let mut lanes = manifest.fips_lanes(FipsColumn::Delta);
+    lanes.extend(manifest.fips_lanes(FipsColumn::Wrap));
+    lanes
+}
 
 /// `F_e = e (e - 1)(e - delta) = e^3 - e^2 - e^2 delta + e delta` in the lanes `[delta, e]`.
 #[must_use]
 pub fn fips_edge_term() -> Term {
-    let (delta, e) = (0, 1);
+    fips_edge_term_at(0, 1)
+}
+
+/// [`fips_edge_term`] with `delta` and `e` in the group lanes `delta`, `e`.
+#[must_use]
+pub fn fips_edge_term_at(delta: usize, e: usize) -> Term {
     Term::Monomials(vec![
         (1, vec![e, e, e]),
         (-1, vec![e, e]),
@@ -184,12 +221,15 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         });
     }
     if manifest.is_fips() {
-        // F_e on the main domain at r^(1).
+        // F_e on the main domain at r^(1), one instance per row lane.
+        let lanes = manifest.shape().lanes_k;
         groups.push(GroupSpec {
             domain: GroupRole::Main,
             eq: EqPoint::R1,
-            lanes: FIPS_TERMINALS.iter().map(|&c| LaneId::Column(c)).collect(),
-            instances: vec![InstanceSpec::new(gamma_fips(manifest), vec![fips_edge_term()])],
+            lanes: fips_terminals(manifest).into_iter().map(LaneId::Column).collect(),
+            instances: (0..lanes)
+                .map(|rho| InstanceSpec::new(gamma_fips_lane(manifest, rho), vec![fips_edge_term_at(rho, lanes + rho)]))
+                .collect(),
         });
     }
     StageSpec {
@@ -259,11 +299,7 @@ fn prove_with(
             .iter()
             .map(|digit| value(LaneId::DigitSquare(digit.column)))
             .collect(),
-        fips: if manifest.is_fips() {
-            FIPS_TERMINALS.iter().map(|&c| value(LaneId::Column(c))).collect()
-        } else {
-            Vec::new()
-        },
+        fips: fips_terminals(manifest).into_iter().map(|c| value(LaneId::Column(c))).collect(),
     };
     transcript.absorb_extensions(&terminal_site(STAGE), &claims.to_vec())?;
     let projection = crate::projection::claim(
@@ -305,8 +341,8 @@ pub fn verify(
     let claims = claimed_sums(manifest, &stage1.claims, &proof.kappa1);
     let replay = replay_stage(&spec, manifest, &claims, &proof.rounds, transcript)?;
     let all = digits(manifest);
-    let fips = if manifest.is_fips() { FIPS_TERMINALS.len() } else { 0 };
-    if proof.claims.squares.len() != all.len() || proof.claims.fips.len() != fips {
+    let fips = fips_terminals(manifest);
+    if proof.claims.squares.len() != all.len() || proof.claims.fips.len() != fips.len() {
         return Err(StageError::Shape("stage 2 claims".into()));
     }
     transcript.absorb_extensions(&terminal_site(STAGE), &proof.claims.to_vec())?;
@@ -321,9 +357,7 @@ pub fn verify(
     let lanes = manifest.shape().lanes_k;
     check_terminal(&spec, manifest, points, &replay, |id| match id {
         LaneId::Column(Column::W1Bit(t, lane)) => proof.claims.b[usize::from(t) * lanes + usize::from(lane)],
-        LaneId::Column(c) if FIPS_TERMINALS.contains(&c) && manifest.is_fips() => {
-            proof.claims.fips[FIPS_TERMINALS.iter().position(|&f| f == c).expect("listed")]
-        }
+        LaneId::Column(c) if fips.contains(&c) => proof.claims.fips[fips.iter().position(|&f| f == c).expect("listed")],
         LaneId::DigitSquare(c) => {
             let k = all.iter().position(|d| d.column == c).expect("a digit");
             proof.claims.squares[k]

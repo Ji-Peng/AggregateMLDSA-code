@@ -505,10 +505,11 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     let (c4, m4, g4) = audit_catalog("width4", rows_of(w4.catalog()), w4.catalog().len());
     let (c16, m16, g16) = audit_catalog("width16", rows_of(w16.catalog()), w16.catalog().len());
     assert!(m4 >= 128.0 && m16 >= 128.0);
-    // The 61 grouped rows (seven root groups: 39 for ML-DSA-44 across H-u, H-exact, H-FIPS;
-    // 11 for ML-DSA-65 and 11 for ML-DSA-87 under H-u, where d_sig 3..5 share physical groups)
-    // are in the width-4 catalog (the family of the final group G_m).
-    assert_eq!((g4, g16), (61, 0));
+    // The 83 grouped rows (seven root groups: 39 for ML-DSA-44 across H-u, H-exact, H-FIPS;
+    // 22 for ML-DSA-65 and 22 for ML-DSA-87 under H-u and H-FIPS, where d_sig 3..5 share
+    // physical groups and H-exact shares the H-u rows) are in the width-4 catalog (the family
+    // of the final group G_m).
+    assert_eq!((g4, g16), (83, 0));
     // The families that occur.
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();

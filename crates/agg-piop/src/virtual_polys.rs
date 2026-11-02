@@ -159,7 +159,7 @@ pub fn u_table(manifest: &CommitmentManifest, main: &MainTables) -> Vec<i64> {
     if !manifest.is_fips() {
         return composed;
     }
-    let [s, delta, e] = FipsColumn::ALL.map(|c| main.column(manifest, Column::Fips(c)));
+    let [s, delta, e] = FipsColumn::ALL.map(|c| main.column(manifest, Column::Fips(c, 0)));
     composed
         .par_iter()
         .enumerate()

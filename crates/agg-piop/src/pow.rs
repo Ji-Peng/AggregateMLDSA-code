@@ -626,6 +626,51 @@ mod tests {
     }
 
     #[test]
+    fn lane_h_fips_plans_follow_the_longer_stage_three_vector() {
+        use crate::manifest::Relation;
+        use crate::transcript::{stage_degrees, stage_gammas};
+        use agg_pcs_config::catalogs::Set;
+        // H-FIPS of ML-DSA-65 and ML-DSA-87: stage 2 trades leaf8[U_mid^(rho)] for F_e^(rho)
+        // (same length), stage 3 gains 5 k + 1 coefficients (bool[l_mid^(rho)], F_s, F_delta,
+        // F_w1 per row, F_omega, the reductions of delta^(rho), e^(rho); minus link[U_mid^(rho)]):
+        // 136 (g = 8, one bit more than H-u's 105) and 173 (g = 8, as H-u's 132). Every other
+        // site is H-u's; the lookup keeps its sites (L grows by three padding slots of D_2).
+        for (set, gammas, bits) in [(Set::S65, [37, 18, 136], [6, 5, 8]), (Set::S87, [45, 22, 173], [6, 5, 8])] {
+            for d_sig in [3, 10, 13, 15] {
+                let manifest = |relation| CommitmentManifest::for_set(set, 1 << d_sig, relation).unwrap();
+                let fips = manifest(Relation::HFips);
+                assert_eq!(stage_gammas(&fips), gammas, "{set:?}");
+                assert_eq!(stage_degrees(&fips), [3, 5, 3], "{set:?}");
+                let plan = PowPlan::new(&fips, FlockProfile::PublicBits, &KeccakPlan::default());
+                let hu = PowPlan::new(&manifest(Relation::Hu), FlockProfile::PublicBits, &KeccakPlan::default());
+                let gamma = |p: &PowPlan| -> Vec<u8> {
+                    p.sites().iter().filter(|s| s.class == SiteClass::StageGamma).map(|s| s.bits).collect()
+                };
+                assert_eq!(gamma(&plan), bits, "{set:?}");
+                assert_eq!(plan.sites().len(), hu.sites().len());
+                // Only batching sites differ, by one bit each: gamma^(3) of ML-DSA-65 and the
+                // lookup's stack-batching site, whose vector grows with the padded level-2 stack.
+                let differ: Vec<_> = plan.sites().iter().zip(hu.sites()).filter(|(a, b)| a != b).collect();
+                for (a, b) in &differ {
+                    assert!(matches!(a.class, SiteClass::StageGamma | SiteClass::LookupGamma), "{a:?}");
+                    assert_eq!((a.class, a.i, a.j, a.bits), (b.class, b.i, b.j, b.bits + 1), "{set:?} 2^{d_sig}");
+                }
+                let stage = differ.iter().filter(|(a, _)| a.class == SiteClass::StageGamma).count();
+                assert_eq!(stage, usize::from(set == Set::S65), "{set:?} 2^{d_sig}");
+                assert_eq!(plan.work_bits(), hu.work_bits() + differ.len(), "{set:?} 2^{d_sig}");
+                assert_eq!(plan.digest() == hu.digest(), differ.is_empty(), "{set:?} 2^{d_sig}");
+                eprintln!(
+                    "{set:?} H-FIPS 2^{d_sig}: sites {}, bits {}, bytes {}, work {}",
+                    plan.sites().len(),
+                    plan.work_bits(),
+                    plan.work_bits().div_ceil(8),
+                    plan.expected_work()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn lane_h_exact_plans_equal_lane_h_u_plans() {
         use crate::manifest::Relation;
         use agg_pcs_config::catalogs::Set;

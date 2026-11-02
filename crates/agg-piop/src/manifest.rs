@@ -34,13 +34,15 @@
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
 //! variables are the signature index) in the free slot 6 of lookup stack 2.
 //!
-//! ML-DSA-65 and ML-DSA-87 (relations H-u and H-exact, [`SetShape`]): the vector index is a
+//! ML-DSA-65 and ML-DSA-87 (every relation, [`SetShape`]): the vector index is a
 //! polynomial lane instead of two domain variables, so the main domain is `(j, i)` with
 //! `8 + d_sig` variables and every main-domain column is a family of `k` or `l` polynomials
 //! ([`Column::lane`]). `z` and `u` take digit-slack forms with a base-8 middle digit and a
 //! Boolean slack ([`DigitValue::Zd`], [`DigitValue::Ud`]); H-exact changes only the slack
 //! weight and the offset of `z` ([`DigitValue::Zdx`]: `|z| <= B_z` exactly, the same columns,
-//! alphabets and Akita layout as H-u), `w_1'` has four bits, the
+//! alphabets and Akita layout as H-u); H-FIPS takes H-exact's `z`, the magnitude
+//! [`DigitValue::Ld`] in the slots of `u` and the columns `s, delta, e` per row lane, with the
+//! hint slack `u_h` in `G_2` and in a fifth slot of the level-2 lookup stack. `w_1'` has four bits, the
 //! projection outputs five digits ([`K39_DIGITS`]), and the looked-up main columns split
 //! into stacks of 8, 2, 1 (8, 4, 2, 1) polynomials ([`main_stack_sizes`]).
 
@@ -51,7 +53,7 @@ pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELA
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
 use agg_witness::digits::{
     z_digit_slack_exact, Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK,
-    U_DIGIT_SLACK, Z_BIT_SLACK, Z_DIGIT_SLACK,
+    L_BIT_SLACK, U_DIGIT_SLACK, Z_BIT_SLACK, Z_DIGIT_SLACK,
 };
 use agg_witness::params::{ParamSet, B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
@@ -265,6 +267,11 @@ pub enum DigitValue {
     /// The projection outputs of ML-DSA-65 and ML-DSA-87 on `D_k = (o, b, i)`: five digits
     /// ([`K39_DIGITS`]).
     K5,
+    /// Relation H-FIPS's magnitude `L` of ML-DSA-65 and ML-DSA-87 (one polynomial per row
+    /// `rho`): `L = L_lo + 2^16 L_mid + 130,816 a_L` with `l_lo` looked up (the slot of `U_lo`)
+    /// and the bits `l_mid`, `a_l` (the slots of `U_mid`, `a_u`), so `L in [0, gamma_2 - 1]`
+    /// exactly (`agg_witness::digits::L_BIT_SLACK`).
+    Ld,
     /// Relation H-FIPS's hint slack `u_h = omega - sum delta^2` on `D_2` (looked up).
     HintSlack,
     /// Level-1 carry `kappa^(1)_t` (domain `D_1`).
@@ -289,6 +296,7 @@ impl DigitValue {
             Self::K => ValueForm::Radix(K16_DIGITS),
             Self::Zd => ValueForm::DigitSlack(Z_DIGIT_SLACK),
             Self::Zdx(set) => ValueForm::DigitSlack(z_digit_slack_exact(agg_witness::dispatch_set!(set, |P| P::B_Z))),
+            Self::Ld => ValueForm::BitSlack(L_BIT_SLACK),
             Self::Ud => ValueForm::DigitSlack(U_DIGIT_SLACK),
             Self::K5 => ValueForm::Radix(K39_DIGITS),
             Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
@@ -301,10 +309,10 @@ impl DigitValue {
     #[must_use]
     pub const fn group(self, digit: u8) -> GroupRole {
         match self {
-            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L if digit == 0 => {
+            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld if digit == 0 => {
                 Group::Main16
             }
-            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L => Group::Main,
+            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L | Self::Ld => Group::Main,
             Self::V => Group::Main16,
             Self::K | Self::K5 => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
@@ -351,8 +359,9 @@ pub enum Column {
     Parity2(u8),
     /// Digit `k` of the multiplicity column `m` of `T_16` (`2^16` cells).
     Multiplicity(u8),
-    /// A per-coefficient column of relation H-FIPS (main domain, `G_main4`).
-    Fips(FipsColumn),
+    /// A per-coefficient column of relation H-FIPS (main domain, `G_main4`) in polynomial
+    /// lane `lane` (row `rho` of ML-DSA-65 and ML-DSA-87; lane 0 for ML-DSA-44): `Fips(column, lane)`.
+    Fips(FipsColumn, u8),
     /// A zero polynomial of `G_3` (`k >= 1`), committed so that `G_3` has `G_2`'s Akita
     /// layout (`agg_pcs_config::catalogs::Group::physical_vars`); no stage reads it and its
     /// opening claim is zero.
@@ -415,11 +424,11 @@ impl Column {
         lane: 0,
     };
     /// H-FIPS's sign bit `s`.
-    pub const SIGN: Self = Self::Fips(FipsColumn::Sign);
+    pub const SIGN: Self = Self::Fips(FipsColumn::Sign, 0);
     /// H-FIPS's `delta`.
-    pub const DELTA: Self = Self::Fips(FipsColumn::Delta);
+    pub const DELTA: Self = Self::Fips(FipsColumn::Delta, 0);
     /// H-FIPS's `e`.
-    pub const WRAP: Self = Self::Fips(FipsColumn::Wrap);
+    pub const WRAP: Self = Self::Fips(FipsColumn::Wrap, 0);
     /// H-FIPS's hint slack `u_h` (stored `u_h - 2^15`, on `D_2`).
     pub const HINT_SLACK: Self = Self::Digit {
         value: DigitValue::HintSlack,
@@ -484,7 +493,7 @@ impl Column {
     #[must_use]
     pub const fn lane(self) -> u8 {
         match self {
-            Self::Digit { lane, .. } | Self::W1Bit(_, lane) => lane,
+            Self::Digit { lane, .. } | Self::W1Bit(_, lane) | Self::Fips(_, lane) => lane,
             _ => 0,
         }
     }
@@ -496,6 +505,7 @@ impl Column {
         match self {
             Self::Digit { value, digit, .. } => Self::Digit { value, digit, lane },
             Self::W1Bit(t, _) => Self::W1Bit(t, lane),
+            Self::Fips(column, _) => Self::Fips(column, lane),
             other => other,
         }
     }
@@ -505,8 +515,8 @@ impl Column {
     pub fn alphabet(self) -> Alphabet {
         match self {
             Self::Digit { value, digit, .. } => value.layout().alphabet(usize::from(digit)),
-            Self::W1Bit(..) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign) | Self::Zero(_) => Alphabet::Bool,
-            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => Alphabet::Ternary,
+            Self::W1Bit(..) | Self::Parity2(_) | Self::Fips(FipsColumn::Sign, _) | Self::Zero(_) => Alphabet::Bool,
+            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap, _) => Alphabet::Ternary,
             Self::Multiplicity(_) => Alphabet::Balanced(16),
         }
     }
@@ -516,7 +526,7 @@ impl Column {
     pub fn base(self) -> Option<u32> {
         match self {
             Self::Digit { value, digit, .. } => value.layout().base(usize::from(digit)),
-            Self::W1Bit(..) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(_) | Self::Zero(_) => None,
+            Self::W1Bit(..) | Self::Parity2(_) | Self::Multiplicity(_) | Self::Fips(..) | Self::Zero(_) => None,
         }
     }
 
@@ -553,7 +563,7 @@ impl Column {
     pub const fn group(self) -> GroupRole {
         match self {
             Self::Digit { value, digit, .. } => value.group(digit),
-            Self::W1Bit(..) | Self::Fips(_) => Group::Main,
+            Self::W1Bit(..) | Self::Fips(..) => Group::Main,
             Self::Parity2(_) => Group::Level2,
             Self::Multiplicity(_) => Group::Mult,
             Self::Zero(_) => Group::Level3,
@@ -605,6 +615,7 @@ impl Column {
                 DigitValue::K | DigitValue::K5 => format!("k_{digit}"),
                 DigitValue::Zd | DigitValue::Zdx(_) => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::Ud => ["u_lo", "u_mid", "a_u"][usize::from(digit)].to_owned(),
+                DigitValue::Ld => ["l_lo", "l_mid", "a_l"][usize::from(digit)].to_owned(),
                 DigitValue::HintSlack => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
                 DigitValue::Kappa2(t) => format!("kappa2_{t}"),
@@ -613,9 +624,9 @@ impl Column {
             Self::W1Bit(t, _) => format!("b_{t}"),
             Self::Parity2(t) => format!("y2_{t}"),
             Self::Multiplicity(k) => format!("m_{k}"),
-            Self::Fips(FipsColumn::Sign) => "s".to_owned(),
-            Self::Fips(FipsColumn::Delta) => "delta".to_owned(),
-            Self::Fips(FipsColumn::Wrap) => "e".to_owned(),
+            Self::Fips(FipsColumn::Sign, _) => "s".to_owned(),
+            Self::Fips(FipsColumn::Delta, _) => "delta".to_owned(),
+            Self::Fips(FipsColumn::Wrap, _) => "e".to_owned(),
             Self::Zero(k) => format!("zero_{k}"),
         }
     }
@@ -629,7 +640,7 @@ impl Column {
         match self {
             Self::Multiplicity(_) => MULTIPLICITY_ALPHABET_CODE,
             Self::Zero(_) => ZERO_ALPHABET_CODE,
-            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap) => TERNARY_ALPHABET_CODE,
+            Self::Fips(FipsColumn::Delta | FipsColumn::Wrap, _) => TERNARY_ALPHABET_CODE,
             column if column.is_unchecked() => UNCHECKED_ALPHABET_CODE,
             column if column.is_lookup() => LOOKUP_ALPHABET_CODE,
             column => column.base().map_or(0, |base| base as u8),
@@ -671,9 +682,10 @@ pub const fn z_value_for(set: Set, relation: Relation) -> DigitValue {
 /// [`DigitValue::Ud`] otherwise).
 #[must_use]
 pub const fn u_slot_value_for(set: Set, relation: Relation) -> DigitValue {
-    match set {
-        Set::S44 => u_slot_value(relation),
-        Set::S65 | Set::S87 => DigitValue::Ud,
+    match (set, relation) {
+        (Set::S44, _) => u_slot_value(relation),
+        (Set::S65 | Set::S87, Relation::HFips) => DigitValue::Ld,
+        (Set::S65 | Set::S87, _) => DigitValue::Ud,
     }
 }
 
@@ -717,7 +729,7 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
             .into_iter()
             .chain(lanes.map(|t| Column::W1Bit(t, 0)))
             .chain(z[2..].iter().copied())
-            .chain(FipsColumn::ALL.into_iter().map(Column::Fips).filter(|_| fips))
+            .chain(FipsColumn::ALL.into_iter().map(|c| Column::Fips(c, 0)).filter(|_| fips))
             .collect(),
         Group::Level1 => lanes.map(|t| Column::carry(1, t)).collect(),
         Group::Level2 => lanes
@@ -737,8 +749,10 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
 }
 
 /// The canonical polynomial order of a group of `set` under `relation`: [`group_columns`] for
-/// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 (relations H-u and H-exact, whose orders are
-/// equal) every main-domain column is a family of lanes, in lane order inside the family:
+/// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 every main-domain column is a family of lanes, in
+/// lane order inside the family (H-exact has H-u's order; H-FIPS puts `L_lo, L_mid, a_L` in the
+/// slots of `U_lo, U_mid, a_u`, appends `s^(rho)`, then `delta^(rho)`, then `e^(rho)` to
+/// `G_main4` and `u_h` to `G_2`):
 ///
 /// * `G_main16`: `Z_lo^(s)`, `U_lo^(rho)`, `V_lo^(rho)`, `V_hi^(rho)`, so the looked-up
 ///   columns `Z_lo, U_lo` are the first `l + k` polynomials of the stacked lane;
@@ -760,9 +774,14 @@ pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<C
     let family = |value: DigitValue, digit: u8, lanes: usize| {
         (0..lanes as u8).map(move |lane| Column::Digit { value, digit, lane })
     };
-    let (z, u) = (z_value_for(set, relation), DigitValue::Ud);
+    let (z, u) = (z_value_for(set, relation), u_slot_value_for(set, relation));
     let (lanes_k, lanes_l) = (shape.lanes_k, shape.lanes_l);
     let bits = 0..shape.w1_bits as u8;
+    let fips = relation == Relation::HFips;
+    let fips_columns = FipsColumn::ALL
+        .into_iter()
+        .filter(|_| fips)
+        .flat_map(move |c| (0..lanes_k as u8).map(move |lane| Column::Fips(c, lane)));
     match role {
         Group::Main16 => family(z, 0, lanes_l)
             .chain(family(u, 0, lanes_k))
@@ -774,12 +793,14 @@ pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<C
             .chain(family(u, 1, lanes_k))
             .chain(family(u, 2, lanes_k))
             .chain(bits.flat_map(|t| (0..lanes_k as u8).map(move |lane| Column::W1Bit(t, lane))))
+            .chain(fips_columns)
             .collect(),
         Group::Level1 => bits.map(|t| Column::carry(1, t)).collect(),
         Group::Level2 => bits
             .clone()
             .map(Column::Parity2)
             .chain(bits.map(|t| Column::carry(2, t)))
+            .chain(std::iter::once(Column::HINT_SLACK).filter(|_| fips))
             .collect(),
         Group::Level3 => std::iter::once(Column::carry(3, 0))
             .chain((1..Group::Level3.num_polynomials(set, relation) as u8).map(Column::Zero))
@@ -922,7 +943,10 @@ pub fn stack_columns_for(set: Set, stack: usize, relation: Relation) -> Vec<Colu
     }
     match stack - sizes.len() {
         0 => bits.map(|t| Column::carry(1, t)).collect(),
-        1 => bits.map(|t| Column::carry(2, t)).collect(),
+        1 => bits
+            .map(|t| Column::carry(2, t))
+            .chain(std::iter::once(Column::HINT_SLACK).filter(|_| relation == Relation::HFips))
+            .collect(),
         2 => vec![Column::carry(3, 0)],
         3 => value_columns(DigitValue::K5)[..2].to_vec(),
         _ => panic!("{} lookup stacks", sizes.len() + 4),
@@ -954,8 +978,7 @@ impl CommitmentManifest {
     }
 
     /// The manifest of a batch of `records` live records of parameter set `set` under
-    /// `relation` (ML-DSA-65 and ML-DSA-87 have relations H-u and H-exact; H-FIPS is
-    /// [`PlanError::NotInCatalog`]).
+    /// `relation`.
     pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
         let layout = BatchLayout::new(set, d_sig, relation).ok_or(PlanError::NotInCatalog { d_sig, relation })?;
@@ -1118,6 +1141,25 @@ impl CommitmentManifest {
     #[must_use]
     pub fn is_fips(&self) -> bool {
         self.relation == Relation::HFips
+    }
+
+    /// `omega` of the parameter set (the right side of H-FIPS's hint-weight identity).
+    #[must_use]
+    pub const fn omega(&self) -> usize {
+        agg_witness::dispatch_set!(self.set, |P| P::OMEGA)
+    }
+
+    /// `m_w - 1` of the parameter set (the top value of `w_1'`, the target of H-FIPS's `e = -1`
+    /// wrap): 43 for ML-DSA-44, 15 for ML-DSA-65 and ML-DSA-87.
+    #[must_use]
+    pub const fn w1_top(&self) -> i64 {
+        agg_witness::dispatch_set!(self.set, |P| P::M_W - 1)
+    }
+
+    /// The H-FIPS column `column` of every row lane (one for ML-DSA-44).
+    #[must_use]
+    pub fn fips_lanes(&self, column: FipsColumn) -> Vec<Column> {
+        (0..self.shape().lanes_k as u8).map(|lane| Column::Fips(column, lane)).collect()
     }
 
     /// The looked-up columns of lookup stack `stack` ([`stack_columns_for`]).
@@ -1808,10 +1850,17 @@ mod tests {
             assert_ne!(bytes, CommitmentManifest::for_batch(200).unwrap().binding_bytes());
             assert!(manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::Hu).unwrap()));
             assert!(!manifest.matches_plan(&WorkPlan::for_records(200, Relation::Hu).unwrap()));
-            assert!(matches!(
-                CommitmentManifest::for_set(set, 200, Relation::HFips),
-                Err(PlanError::NotInCatalog { d_sig: 8, .. })
-            ));
+            // H-FIPS: the magnitude L and three columns per row lane, the hint slack in G_2 and
+            // in a fifth slot of the level-2 lookup stack.
+            let fips = CommitmentManifest::for_set(set, 200, Relation::HFips).unwrap();
+            let (k, l) = (fips.shape().lanes_k, fips.shape().lanes_l);
+            assert_eq!(fips.u_slot_value(), DigitValue::Ld);
+            assert_eq!(fips.group(Group::Main).polynomial_count(), 2 * l + 9 * k);
+            assert_eq!(fips.group(Group::Level2).polynomial_count(), 9);
+            assert_eq!(fips.stack_columns(fips.carry_stack(2)).len(), 5);
+            assert_eq!(fips.bool_digits().len(), l + 2 * k);
+            assert_eq!(fips.leaf_digits().len(), l + 3);
+            assert_eq!(fips.catalog_row(), format!("mldsa-{}-p16f-batch-256-mult-final", set.name()));
             // H-exact: H-u's columns, alphabets and Akita layout (only the slack weight of the
             // z form differs), its own relation byte and catalog row name.
             let exact = CommitmentManifest::for_set(set, 200, Relation::HExact).unwrap();
