@@ -286,3 +286,12 @@ The H-u catalog has 13 batch rows per set, with names `mldsa-65-p16-batch-<N*>-m
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 65 | 23 | 46 | 4 | 8 | 8 | 5 | 7 | 101 |
 | 87 | 31 | 62 | 4 | 8 | 8 | 5 | 7 | 125 |
+| 65 H-FIPS | 23 | 64 | 4 | 9 | 9 | 5 | 7 | 121 |
+| 87 H-FIPS | 31 | 86 | 4 | 9 | 9 | 5 | 7 | 151 |
+
+H-exact has H-u's layouts, so its batches (row names `p16x`) resolve to the H-u rows; no row of
+its own is checked in. H-FIPS (`p16f`) adds per set 13 grouped rows (11 distinct, `d_sig` 3 to 5
+share their physical groups), the width-4 scalar rows of `G_main4` at `(13..23, 64)` and
+`(13..23, 86)`, and the width-16 rows of `G_2` at `(13|14|15, 9)` (shared by both sets), planned
+with `AGG_CATALOG_RELATION=h-fips update_catalog_rows` (4 workers on this box; the 32K grouped
+rows take about 1,000 s each, the others 2 to 4 minutes per batch size).

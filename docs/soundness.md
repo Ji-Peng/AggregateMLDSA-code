@@ -1070,7 +1070,7 @@ grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 5
 
 ### 10.3 ML-DSA-65 and ML-DSA-87 (`python3 -I docs/scripts/pow_plan.py --set 65|87`)
 
-The lane sets (relations H-u and H-exact) follow the same per-site rule (`2^-128` per site after work,
+The lane sets (every relation) follow the same per-site rule (`2^-128` per site after work,
 Aerie's convention). Their registry differs from ML-DSA-44's in four places: `d_main = 8 +
 d_sig`; the lookup has seven (65) or eight (87) stacks: the `l + k` looked-up `Z_lo`/`U_lo`
 lanes split as `[8, 2, 1]` or `[8, 4, 2, 1]`, the carries of levels 1 and 2 with four columns
@@ -1108,6 +1108,19 @@ name, as for ML-DSA-44 (10.1). Extraction: the lookup gives `z_lo in [0, 2^16)`,
 link `z_mid in [0, 8)`, the Booleanity check `a_z in {0, 1}`, so `z in [-B_z, B_z]` exactly
 (`agg_witness::digits` test `exact_z_digit_slack_forms_cover_exactly_the_fips_bound`, all
 `2^20` digit tuples).
+
+Relation H-FIPS of the lane sets (`docs/h-exact.md` 11.2) has the H-FIPS checks of 10.2 per row
+lane (`F_e^(rho)` in stage 2 at `r^(1)`; `F_s^(rho)`, `F_delta^(rho)`, `F_w1^(rho)` with
+`m_w - 1 = 15`, the Booleanity of `l_mid^(rho)`, `a_l^(rho)` and one `F_omega` over all lanes in
+stage 3 at `r^(2)`) and batching vectors of 37, 18, 136 (65) and 45, 22, 173 (87)
+coefficients. The checks add no site (identities tested at a point of the preceding stage,
+3.4); `gamma^(3)` grinds 8 bits for both sets (65: one more than H-u), and the lookup's level-2
+stack, padded from 4 to 8 slots for `u_h`, lengthens one batching vector (one more bit where its
+length crosses a power of two). Every other site is H-u's; the pinned test
+`agg_piop::pow::tests::lane_h_fips_plans_follow_the_longer_stage_three_vector` checks that only
+batching sites differ, by one bit each. Extraction is 10.2's per row: the exhaustive lemma for
+`gamma_2 = (q - 1)/32` (`docs/h-exact.md` 11.2) turns the round-1 values of every live record
+into a FIPS 204 signature with `wt(h*) <= sum delta^2 <= omega` (55 or 75).
 
 ## 11. Open questions
 

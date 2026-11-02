@@ -595,7 +595,7 @@ Layout in Sections 4.1 and 4.3, the lookup in Section 7.0, the stages in Section
 
 ## ML-DSA-65 and ML-DSA-87 parameters
 
-The preceding numerical examples and layouts describe ML-DSA-44. The following specifications apply to H-u and H-exact for ML-DSA-65 and ML-DSA-87; H-FIPS is supported for 44 only.
+The preceding numerical examples and layouts describe ML-DSA-44. The following specifications apply to every relation of ML-DSA-65 and ML-DSA-87 (H-FIPS: `docs/h-exact.md` 11.2).
 
 | Set | k, l | tau | beta | omega | gamma1 | gamma2 | w1 bits | pk / signature / c~ bytes | zeta' |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: |

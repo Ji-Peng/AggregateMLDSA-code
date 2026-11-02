@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Applies to | ML-DSA-44, lookup layout L16, modes A and B; relations H-u (byte 0, deviation L8, Section 8), H-exact (byte 1, deviation L9, Section 9) and H-FIPS (byte 2, deviation L10, Section 10) |
+| Applies to | ML-DSA-44 (ML-DSA-65 and ML-DSA-87: Section 11), lookup layout L16, modes A and B; relations H-u (byte 0, deviation L8, Section 8), H-exact (byte 1, deviation L9, Section 9) and H-FIPS (byte 2, deviation L10, Section 10) |
 | Replaces | spec Appendix A, paragraph "H-exact" |
 
 The uppercase terms MUST, SHOULD and MAY are normative as in BCP 14. Numbers not marked
@@ -1074,6 +1074,91 @@ tuples). The canonical decomposition is H-u's rule (`a_z = [z + B_z >= 2^19]`).
   mode-A driver at 256 under H-exact with crossed verifiers, and the binary round trip. All
   four `AGG_ISA` tiers give the same 1K aggregates (65: `a0635d36...`, 87: `21f6699e...`), and
   the H-u aggregates of every set keep the bytes of `artifact/expected/hashes.json`.
+
+### 11.2 H-FIPS (relation byte 2), as implemented
+
+**Decompose and UseHint for `gamma2 = (q - 1)/32`.** `q - 1 = 32 gamma2 = 16 (2 gamma2)`, so
+Decompose (Algorithm 36) returns `r1 in [0, 16)` and takes its wrap (line 3) exactly when
+`r+ in [q - gamma2, q - 1]`, as for ML-DSA-44 with 44 replaced by 16. Reading the wrap as
+`r1 = 16`, `r0' = r+ - (q - 1) in (-gamma2, 0]`, every wrap of `w1'` (UseHint's `(r1 +- 1) mod
+16`, Algorithm 40 lines 3, 4, and the Decompose wrap) moves `u` by one, so the witness of 10.1
+carries over with `m - 1 = 15` in place of 43:
+
+```text
+s = (1 + sigma)/2,  r0 = gamma2 s + L + 1 - gamma2,  u = r0 - 2 gamma2 delta - e,  L in [0, gamma2)
+F_s = s (s - 1)   F_delta = delta (delta - 2 s + 1)   F_e = e (e - 1)(e - delta)
+F_w1 = 2 e w1' + 15 e^2 - 15 e                         F_omega: sum_coefficients delta^2 + u_h = omega
+```
+
+The honest rule is the table of 10.2 with 43 replaced by 15 (`agg_witness::hfips::honest_coeff_of`).
+`w1'` has four bits, so `w1' in [0, 16)` needs no range identity.
+
+**Exhaustive checks** (numpy over all pairs, and the `agg_witness::hfips` unit tests
+`every_lane_witness_is_sound`, `lane_honest_rule_is_complete_with_weight_h`): 69 admissible
+`(w1', sigma, delta, e)` times 261,888 values of `L`, 18,070,272 witnesses: `|u| <= B_u`,
+`UseHint(h*, w') = w1'` and `h* <= delta^2` for `w' = 2 gamma2 w1' + u mod q`,
+`h* = [HighBits(w') != w1']`, 0 violations. Over all 16,760,834 pairs `(w', h)`: the honest
+witness satisfies every check with `delta^2 = h` and `u = ctr_q(w' - 2 gamma2 w1')`, and the
+least `delta^2` over all witnesses of `(w1', u)` is `h` (0 failures), so an honest signature has
+`sum delta^2 = wt(h) <= omega`. `F_w1` is equivalent to `e (e + 1) w1' = 0` and
+`e (e - 1)(w1' - 15) = 0` under `F_s, F_delta, F_e` (checked for all 16 values of `w1'`). The
+generic witness of ML-DSA-44 equals 10.2's (`generic_witness_of_ml_dsa_44_equals_the_fixed_one`).
+
+**The magnitude `L`.** `gamma2 = 261,888 = 2^17 + 130,816`; a single small digit does not work
+(`(c - 1) A + 2^16 = gamma2` with `A <= 2^16` needs `c = 5`, an odd alphabet without a leaf, or
+`c >= 9`). H-FIPS uses H-exact's bit-slack form of ML-DSA-44's `z`:
+`L = L_lo + 2^16 L_mid + 130,816 a_L` (`agg_witness::digits::L_BIT_SLACK`), `L_lo` looked up in
+the slot of `U_lo`, the bits `L_mid`, `a_L` in the slots of `U_mid`, `a_u`; the blocks
+`[0, 2^17)` and `[130,816, gamma2)` cover `[0, gamma2 - 1]` exactly. `z` is H-exact's (11.1).
+
+**Columns.** Per row lane `rho`: `l_lo^(rho)` (`G_main16`), `l_mid^(rho)`, `a_l^(rho)` and, after
+the bits, `s^(rho)` for every lane, then `delta^(rho)`, then `e^(rho)` (`G_main4`); `u_h` is the
+ninth `G_2` polynomial and the fifth column of the level-2 lookup stack (8 slots, 3 padding).
+`G_main4` has `2 l + 9 k` polynomials (64 for 65, 86 for 87; H-u 46, 62), `G_2` and `G_3` 9;
+catalog rows `mldsa-<set>-p16f-batch-<N*>-mult-final` (26 grouped rows, 22 width-4 scalar rows of
+`G_main4` and 3 width-16 rows of `G_2` at `(13|14|15, 9)`, generated with
+`AGG_CATALOG_RELATION=h-fips update_catalog_rows`).
+
+**Instances.** Stage 2: `def_y1[t]`, the leaves of H-u without `leaf8[U_mid^(rho)]`, then
+`F_e^(rho)` per lane (degree 4 with `eq` at `r^(1)`): 18 and 22 coefficients, as H-u. Terminal
+claims add `delta^(rho)(r^(2))` for every lane, then `e^(rho)(r^(2))`. Stage 3: the `k` ring
+instances with `-u^(rho)` affine in `l^(rho)`, `s^(rho)`, `delta^(rho)`, `e^(rho)`, the links of
+`Z_mid^(s)` and of the projection digits, the Booleanity of `a_z^(s)`, `l_mid^(rho)`,
+`a_l^(rho)`, then `F_s^(rho)` for every lane, `F_delta^(rho)`, `F_w1^(rho)`, one `F_omega` (one
+part per lane of `delta` on the main domain and `u_h` on `D_2`, at `(1/2, ..., r^(2)_sig)`,
+claim `omega` = 55 or 75), the reductions, the reductions of stage 2's `delta^(rho)`,
+`e^(rho)`, the stacks and the projection identity: 136 coefficients for 65, 173 for 87.
+For ML-DSA-44 every index equals Section 10.7's.
+
+**Proof of work.** `gamma^(3)` grinds `bit_length(136) = 8` bits for 65 (H-u: 7) and
+`bit_length(173) = 8` for 87 (as H-u). The level-2 stack's eight slots lengthen one lookup
+batching vector, which grinds one bit more where its length crosses a power of two (65 at
+`N* = 2^3`). Every other site is H-u's, and the new zero-checks add no site, by the argument of
+10.6 item 4 per lane (`pow::tests::lane_h_fips_plans_follow_the_longer_stage_three_vector`:
+only batching sites differ, by one bit each). Totals of the PIOP part (mode B digests' plan):
+
+| Set | `N*` | sites | bits | bytes | `sum 2^g` | H-u bits / `sum 2^g` |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 65 | `2^3` | 190 | 1,763 | 221 | 1,826 | 1,761 / 1,690 |
+| 65 | `2^10` | 311 | 2,868 | 359 | 2,484 | 2,867 / 2,356 |
+| 65 | `2^15` | 451 | 4,145 | 519 | 3,258 | 4,144 / 3,130 |
+| 87 | `2^3` | 190 | 1,764 | 221 | 1,858 | 1,763 / 1,850 |
+| 87 | `2^10` | 311 | 2,874 | 360 | 2,636 | 2,873 / 2,604 |
+| 87 | `2^15` | 451 | 4,149 | 519 | 3,346 | 4,149 / 3,346 |
+
+**Tests.** `agg-witness` `hfips` unit tests (above); `agg-piop` `tests/all/stages.rs`
+`ml_dsa_{65,87}_h_fips_piop_round_trip_on_256_signatures` (every claim equal to its table's
+extension, the pointwise checks, the recomposed `u` equal to H-u's, and tamperings rejected at
+their place: `s = 2`, `delta = -sigma`, a dropped hint, `e = 1` at `w1' != 0` with `L` moved to
+keep `u`, `l_mid = 2` keeping `L`, `u_h +- 1` in stage 3; `e = -1` at `delta = 0` keeping `u`
+in stage 2; `l_lo = 2^15` in the lookup) and the instance-record round trip at 256;
+`agg-pcs-config` the catalog, fold-support and Akita-plan checks of the new rows; `agg-cli` the
+mode-A driver at 256 and the binary round trip with crossed relations. Measured sizes (mode A,
+default profile): 256 records 417,840 B (65; H-u 417,317 B) and 464,119 B (87; H-u 463,476 B);
+1,024 records 450,534 B (65; H-u 448,765 B) and 489,943 B (87; H-u 489,195 B), identical on all
+four `AGG_ISA` tiers. Not yet done: the synthetic weight-`omega` records with the corner
+coefficient `w' = q - gamma2, h = 0` (ML-DSA-44's `gen::hint_corner_record`), the mode-B path
+(44 only) and timings.
 
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 
