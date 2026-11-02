@@ -1031,6 +1031,50 @@ Prover RSS at `2^15` (estimate). The local delta grows linearly with `N` (+0.34 
 `u_h` all scale with `N`. Scaling by 2 gives about +1.3 to +1.4 GiB at 32K, about +5% over H-u's 25.8 GiB on the cloud. This holds if the
 mode-A peak at 32K falls while the H-FIPS tables are live. The cloud run should measure it.
 
+## 11. ML-DSA-65 and ML-DSA-87
+
+FIPS 204 Table 1: `gamma1 = 2^19`, `gamma2 = (q - 1)/32 = 261,888`, `beta = 196` (65) and
+`120` (87), `omega = 55` and `75`, `(k, l) = (6, 5)` and `(8, 7)`. `w1'` has four bits
+(`m_w = 16`), so neither relation needs a range identity for it.
+
+### 11.1 H-exact (relation byte 1), as implemented
+
+H-u of the lane sets already proves `|u| <= B_u = 2 gamma2 + 1 = 523,777` exactly and
+`zeta' = zeta` (724,481 and 769,537; `2^19` is below both), so H-exact adds only the literal
+line-13 bound `|z| <= B_z = gamma1 - beta - 1` = 524,091 (65), 524,167 (87). The z form keeps
+H-u's three columns and changes the slack weight and the offset:
+
+```text
+z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z,   z_lo in [0, 2^16), z_mid in [0, 8), a_z in {0, 1}
+slack weight 523,895 (65), 524,047 (87); stored Z_lo = z_lo - 2^15, Z_mid = z_mid - 4, a_z
+```
+
+The blocks `[0, 2^19)` (`a_z = 0`) and `[2 B_z + 1 - 2^19, 2 B_z]` (`a_z = 1`) cover
+`[0, 2 B_z]` without a gap because the slack weight is below `2^19`; nothing outside is
+reachable (`agg_witness::digits::z_digit_slack_exact`, test
+`exact_z_digit_slack_forms_cover_exactly_the_fips_bound`: all `2^20` in-alphabet digit
+tuples). The canonical decomposition is H-u's rule (`a_z = [z + B_z >= 2^19]`).
+
+* **Columns, catalogs, plan.** `DigitValue::Zdx(set)` has the columns, alphabets and Akita
+  layout of `DigitValue::Zd`, so the 26 batch layouts (13 per set) equal H-u's and resolve to
+  H-u's checked-in rows (the catalog is keyed by layout; no new rows). The row name in event 0
+  is `mldsa-<set>-p16x-batch-<N*>-mult-final`, byte 3 is 1, and the proof header's flags byte is
+  `0x11` (65) or `0x21` (87). Stage instances, degrees, batching lengths (37, 18, 105 and
+  45, 22, 132) and the proof-of-work plan and digest are H-u's
+  (`pow::tests::lane_h_exact_plans_equal_lane_h_u_plans`); only the constants of the affine `z`
+  in the ring identity differ. Proof bytes equal H-u's up to the Akita opening
+  (1K, measured: 448,712 B against 448,765 B for 65; 489,195 B for both relations for 87).
+* **Verifier policy.** As for ML-DSA-44 (1.3): the relation is the caller's, and a proof of
+  the other relation is rejected before event 0.
+* **Tests.** `agg-piop` `tests/all/stages.rs`: the lane round trip at 256 signatures with its
+  tamperings under H-exact for both sets, and the instance-record round trip at 256;
+  `tests/all/h_exact.rs`: synthetic statements (the public `T` moved by `A (z' - z)` over the
+  integers) with `z = +-B_z` accepted and `z = +-(B_z + 1)` rejected by the lookup, the leaf or
+  the Booleanity zero-check alone, and the same values accepted under H-u. `agg-cli`: the full
+  mode-A driver at 256 under H-exact with crossed verifiers, and the binary round trip. All
+  four `AGG_ISA` tiers give the same 1K aggregates (65: `a0635d36...`, 87: `21f6699e...`), and
+  the H-u aggregates of every set keep the bytes of `artifact/expected/hashes.json`.
+
 ## Appendix X. Spec Appendix A's `u` form (two small columns), for comparison
 
 `u = 118,787 a_u + 2^16 B_uhi + B_ulo - 190,465` with `a_u in {0, 1}`, `B_uhi in [0, 4)`

@@ -1070,7 +1070,7 @@ grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 5
 
 ### 10.3 ML-DSA-65 and ML-DSA-87 (`python3 -I docs/scripts/pow_plan.py --set 65|87`)
 
-The lane sets (relation H-u only) follow the same per-site rule (`2^-128` per site after work,
+The lane sets (relations H-u and H-exact) follow the same per-site rule (`2^-128` per site after work,
 Aerie's convention). Their registry differs from ML-DSA-44's in four places: `d_main = 8 +
 d_sig`; the lookup has seven (65) or eight (87) stacks: the `l + k` looked-up `Z_lo`/`U_lo`
 lanes split as `[8, 2, 1]` or `[8, 4, 2, 1]`, the carries of levels 1 and 2 with four columns
@@ -1098,6 +1098,16 @@ The mode-A digests the script prints for 65 and 87 assume the bridge of the lane
 chain lanes, 256 records per level-1 block, `P_pad = 2^11`, so a full part has
 `19 + max(0, d - 8) + 2 + log2 S` chain rounds); they are pinned once `agg_bridge::pow` takes
 the set's shape.
+
+Relation H-exact of the lane sets (`docs/h-exact.md` Section 11) has H-u's instances, degrees
+and batching lengths: only the slack weight and the offset of the affine `z` change, which
+enter the ring identity as constants. Every site, difficulty and the plan digest are H-u's
+(`agg_piop::pow::tests::lane_h_exact_plans_equal_lane_h_u_plans`, profiles PublicBits and Slim
+at `N* = 2^3, 2^10, 2^13, 2^15`); the relation is bound by event 0's relation byte and row
+name, as for ML-DSA-44 (10.1). Extraction: the lookup gives `z_lo in [0, 2^16)`, the leaf and
+link `z_mid in [0, 8)`, the Booleanity check `a_z in {0, 1}`, so `z in [-B_z, B_z]` exactly
+(`agg_witness::digits` test `exact_z_digit_slack_forms_cover_exactly_the_fips_bound`, all
+`2^20` digit tuples).
 
 ## 11. Open questions
 

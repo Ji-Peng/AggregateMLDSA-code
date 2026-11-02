@@ -595,7 +595,7 @@ Layout in Sections 4.1 and 4.3, the lookup in Section 7.0, the stages in Section
 
 ## ML-DSA-65 and ML-DSA-87 parameters
 
-The preceding numerical examples and layouts describe ML-DSA-44. The following specifications apply to H-u for ML-DSA-65 and ML-DSA-87; H-exact and H-FIPS are supported for 44 only.
+The preceding numerical examples and layouts describe ML-DSA-44. The following specifications apply to H-u and H-exact for ML-DSA-65 and ML-DSA-87; H-FIPS is supported for 44 only.
 
 | Set | k, l | tau | beta | omega | gamma1 | gamma2 | w1 bits | pk / signature / c~ bytes | zeta' |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: |
@@ -603,6 +603,8 @@ The preceding numerical examples and layouts describe ML-DSA-44. The following s
 | 87 | 8, 7 | 60 | 120 | 75 | 2^19 | 261,888 | 4 | 2,592 / 4,627 / 64 | 769,537 |
 
 For both sets, `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z`, and `u + 523,777 = u_lo + 2^16 u_mid + 523,267 a_u`. The low digits lie in `[0, 2^16)`, the middle digits in `[0, 8)`, and the slack digits are Boolean. Thus z lies in `[-2^19, 2^19)` and u in `[-523,777, 523,777]`. The low digits are stored shifted by `-2^15` and the middle digits by `-4`.
+
+H-exact (relation byte 1) keeps these columns, alphabets, range checks and counts and changes only the z form: `z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z` with `B_z = gamma1 - beta - 1` = 524,091 (65) and 524,167 (87), slack weights 523,895 and 524,047. The blocks `[0, 2^19)` and `[2 B_z + 1 - 2^19, 2 B_z]` cover `[0, 2 B_z]` without a gap, so `|z| <= B_z` exactly (the FIPS 204 line-13 bound). The Akita layout, the catalog rows (resolved by layout; row names `mldsa-<set>-p16x-batch-<N*>-mult-final`), the stage instances and the proof-of-work plan are H-u's; event 0 binds the relation byte and the row name. `zeta' = zeta` already holds for H-u, so H-exact adds only the literal z bound, at no committed cost.
 
 The vector index selects a polynomial lane, with `D_VEC = 0` and main domain `d_main = 8 + d_sig`. The z columns have l lanes; u, v and each of the four w1 bit columns have k lanes. The seven manifest group polynomial counts in order main16, main4, level1, level2, level3, projection, multiplicity are `(23, 46, 4, 8, 8, 5, 7)` for 65 and `(31, 62, 4, 8, 8, 5, 7)` for 87. At `N = 2^15` these commit 18,458 and 25,242 cells per signature respectively.
 

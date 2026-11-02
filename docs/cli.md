@@ -72,8 +72,8 @@ last segment. Batches of at most `2^13` records (every local batch) have one seg
 unchanged by it.
 
 Parameter sets (`AggregatorConfig::set`, `AggregateVerifier::for_set`; default ML-DSA-44):
-ML-DSA-65 and ML-DSA-87 aggregates run the same steps with relation H-u only (another
-relation is `AggregateError::Relation`). The aggregator dispatches once on the set
+ML-DSA-65 and ML-DSA-87 aggregates run the same steps with relations H-u and H-exact (H-FIPS
+is `AggregateError::Relation`). The aggregator dispatches once on the set
 (`Aggregator::aggregate_with`): ML-DSA-44 keeps its path (`PublicInstance::new`,
 `prover::main_tables`, `PublicData`, `prover::prove_with_tables_using`); the other sets run
 `PublicInstance::<P>::new_for`, `prover::main_tables_for`, `mode_a::sponge_records_for`,
