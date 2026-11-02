@@ -2463,8 +2463,11 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
     }
 
     let _t = Instant::now();
-    for _ in 0..ood_count(1) {
-        let z = challenger.sample_f128_vec(current_split_dim);
+    // Draw every out-of-domain point of the level before the prover answers any of them, so the
+    // points form one verifier message and the pair-collision bound applies to the joint draw.
+    let ood_points: Vec<Vec<F128>> =
+        (0..ood_count(1)).map(|_| challenger.sample_f128_vec(current_split_dim)).collect();
+    for z in ood_points {
         let (msg, y) = sumcheck.introduce_ood_with_eval(build_eq_scaled_parallel(&z, F128::ONE));
         challenger.observe_f128(y);
         ood_values.push(y);
@@ -2691,8 +2694,12 @@ pub(super) fn recursive_prover_with_basis_impl<Ch: Challenger>(
         }
 
         let _t = Instant::now();
-        for _ in 0..ood_count(next_level) {
-            let z = challenger.sample_f128_vec(current_split_dim);
+        // Draw every out-of-domain point of the level before the prover answers any of them, so the
+        // points form one verifier message and the pair-collision bound applies to the joint draw.
+        let ood_points: Vec<Vec<F128>> = (0..ood_count(next_level))
+            .map(|_| challenger.sample_f128_vec(current_split_dim))
+            .collect();
+        for z in ood_points {
             let (msg, y) =
                 sumcheck.introduce_ood_with_eval(build_eq_scaled_parallel(&z, F128::ONE));
             challenger.observe_f128(y);
@@ -2974,8 +2981,11 @@ where
         return false;
     };
     challenger.observe_bytes(cap_1.as_flattened());
-    for _ in 0..ood_count(1) {
-        let point = challenger.sample_f128_vec(current_split_dim);
+    // Draw every out-of-domain point of the level before the prover answers any of them, so the
+    // points form one verifier message and the pair-collision bound applies to the joint draw.
+    let ood_points: Vec<Vec<F128>> =
+        (0..ood_count(1)).map(|_| challenger.sample_f128_vec(current_split_dim)).collect();
+    for point in ood_points {
         let Some(&y) = proof.ood_values.get(ood_index) else {
             return false;
         };
@@ -3247,8 +3257,12 @@ where
         };
         cap_index += 1;
         challenger.observe_bytes(cap.as_flattened());
-        for _ in 0..ood_count(level + 1) {
-            let point = challenger.sample_f128_vec(current_split_dim);
+        // Draw every out-of-domain point of the level before the prover answers any of them, so the
+        // points form one verifier message and the pair-collision bound applies to the joint draw.
+        let ood_points: Vec<Vec<F128>> = (0..ood_count(level + 1))
+            .map(|_| challenger.sample_f128_vec(current_split_dim))
+            .collect();
+        for point in ood_points {
             let Some(&y) = proof.ood_values.get(ood_index) else {
                 return false;
             };

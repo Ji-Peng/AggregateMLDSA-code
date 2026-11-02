@@ -530,3 +530,12 @@ every x86-64 CPU. The codeword is unchanged.
 Correction to section 12: at 32K the packed-row passes cover about 70M live rows per table
 (the round-3 output of the one-round route), so rounds 2+ move about 18 GB on the one-round
 route and about 9 GB on the lookahead route (est.); the halving stands.
+
+## 16. Transcript: joint out-of-domain draw at the recursive Ligerito levels
+
+`pcs/ligerito/extension.rs`, prover and verifier, levels 1 and up: all `ood_samples[k]` points of
+a level are squeezed before the prover sends the first evaluation, instead of one point per
+answer. Upstream draws the second point after the first answer and its claim-batch nonce, so a
+prover can resample it; the pair-collision bound that the two points are meant to give holds only
+for a joint draw. Level 0 is unchanged (one point, and its list is tracked element by element).
+No run-time or size cost; proofs no longer verify with upstream.
