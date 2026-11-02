@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Correctness gate for the unified build: 1K ML-DSA-44 aggregates under H-u and H-exact
 # must verify, a tampered aggregate must be rejected, and a 3-record batch must verify
-# under H-u and H-FIPS; for ML-DSA-65 and ML-DSA-87 (H-u only) the 1K aggregate must
-# verify, a tampered one must be rejected, and a 20-record batch must verify (lane-set
-# batches hold at least 17 records). Reports bytes per signature. Proof-byte identity
+# under H-u and H-FIPS; for ML-DSA-65 and ML-DSA-87 the 1K aggregates under H-u and H-exact
+# must verify, a tampered one must be rejected, and a 20-record batch must verify under H-u
+# and H-FIPS (lane-set batches hold at least 17 records). Reports bytes per signature. Proof-byte identity
 # against a reference is checked separately (artifact/run.sh gates, keyed by set).
 # Usage: gate.sh            build + 1K round trips + tamper checks for GATE_PARAMS
 #                           (default "44 65 87")
@@ -27,8 +27,7 @@ for p in ${GATE_PARAMS:-44 65 87}; do
         "$A" keygen-batch --params "$p" --count 1024 --seed 7 --out "$O/keys1k$tag.bin" > /dev/null
         "$A" sign-batch --params "$p" --keys "$O/keys1k$tag.bin" --count 1024 --seed 7 --out "$rec" > /dev/null
     fi
-    relations=$([[ "$p" == 44 ]] && echo "h-u h-exact" || echo "h-u")
-    for rel in $relations; do
+    for rel in h-u h-exact; do
         out="$O/agg1k$tag.$rel.bin"
         "$A" aggregate --params "$p" --records "$rec" --out "$out" --relation "$rel"
         "$A" verify --params "$p" --records "$rec" --aggregate "$out" --relation "$rel" > /dev/null
@@ -57,9 +56,11 @@ PY
         # The smallest lane-set batch class (17 to 32 records: d_main = 13).
         "$A" keygen-batch --params "$p" --count 4 --seed 11 --out "$O/keys4$tag.bin" > /dev/null
         "$A" sign-batch --params "$p" --keys "$O/keys4$tag.bin" --count 20 --seed 11 --out "$O/rec20$tag.bin" > /dev/null
-        "$A" aggregate --params "$p" --records "$O/rec20$tag.bin" --out "$O/agg20$tag.bin" > /dev/null
-        "$A" verify --params "$p" --records "$O/rec20$tag.bin" --aggregate "$O/agg20$tag.bin" > /dev/null
-        echo "GATE ML-DSA-$p verify h-u N=20 $(stat -c %s "$O/agg20$tag.bin") B"
+        for rel in h-u h-fips; do
+            "$A" aggregate --params "$p" --records "$O/rec20$tag.bin" --out "$O/agg20$tag.$rel.bin" --relation "$rel" > /dev/null
+            "$A" verify --params "$p" --records "$O/rec20$tag.bin" --aggregate "$O/agg20$tag.$rel.bin" --relation "$rel" > /dev/null
+            echo "GATE ML-DSA-$p verify $rel N=20 $(stat -c %s "$O/agg20$tag.$rel.bin") B"
+        done
     fi
 done
 if [[ "${1:-}" == time ]]; then
