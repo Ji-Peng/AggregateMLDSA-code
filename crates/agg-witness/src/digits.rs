@@ -733,6 +733,25 @@ pub const L_SLACK: SlackLayout = SlackLayout {
     offset: 0,
 };
 
+/// Relation H-FIPS's magnitude `L` of ML-DSA-65 and ML-DSA-87 in `[0, gamma2 - 1]`
+/// (`gamma2 = 261,888 = 2^17 + 130,816`): `L = L_lo + 2^16 L_mid + 130,816 a_L` with `L_lo` in
+/// `[0, 2^16)` (stored `L_lo - 2^15`, looked up in `T_16`) and the bits `L_mid`, `a_L`. The
+/// blocks `[0, 2^17)` and `[130,816, gamma2)` cover `[0, gamma2 - 1]` without a gap. No single
+/// small digit works: `(c - 1) A + 2^16 = gamma2` with `A <= 2^16` needs `c = 5` (an odd
+/// alphabet, no leaf) or `c >= 9`.
+pub const L_BIT_SLACK: BitSlackLayout = BitSlackLayout {
+    low: DigitLayout {
+        name: "l",
+        bases: &[1 << 16],
+        signed: false,
+    },
+    slack_weight: 130_816,
+    offset: 0,
+};
+
+const _: () = assert!(L_BIT_SLACK.slack_weight + (1 << 17) == Set65::GAMMA2);
+const _: () = assert!(Set65::GAMMA2 == Set87::GAMMA2);
+
 /// z in relation H-exact with a 16-bit low part: z = B_zlo + 2^16 B_zhi + 130,915 a_z - B_z
 /// with B_zlo in [0, 2^16) (one unsigned base-2^16 digit, stored B_zlo - 2^15), B_zhi, a_z in
 /// {0, 1}; exact range [-B_z, B_z] since 130,915 + 2^17 = 2 B_z + 1.

@@ -41,7 +41,9 @@ use crate::derive::{reencode_h, ReencodeError, SigWitness};
 use crate::digits::{ValueForm, Z_BIT_SLACK};
 use crate::instance::{PublicInstance, PublicRecord};
 use crate::keccak::{sponge_trace, w1_bit_index};
-use crate::native::{decompose, high_bits, mod_q, use_hint, SmallK, VecK, VecL};
+use crate::native::{
+    decompose, decompose_for, high_bits, high_bits_for, mod_q, use_hint, use_hint_for, SmallK, VecK, VecL,
+};
 use crate::padding::main_index;
 use crate::params::*;
 
@@ -482,6 +484,139 @@ pub fn check_batch(inst: &PublicInstance, records: &[HFipsRecord]) -> CheckRepor
     rep
 }
 
+// ---------------------------------------------------------------------------------------------
+// Every parameter set: the coefficient witness over `gamma2` and `m = (q - 1) / (2 gamma2)`.
+// ---------------------------------------------------------------------------------------------
+
+/// The per-coefficient H-FIPS witness of parameter set `P`, with the magnitude `L` as one
+/// integer (its digits are the set's form, [`l_form_for`]). The constraints are those of
+/// ML-DSA-44 with `gamma2` and the top value `m - 1` of the set:
+///
+/// ```text
+/// s = (1 + sigma)/2,  r0 = gamma2 s + L + 1 - gamma2,  u = r0 - 2 gamma2 delta - e,  L in [0, gamma2)
+/// F_s     = s (s - 1)                       F_delta = delta (delta - 2 s + 1)
+/// F_e     = e (e - 1)(e - delta)            F_w1    = 2 e w1' + (m - 1) e^2 - (m - 1) e
+/// ```
+///
+/// `F_w1` is `e (e + 1) w1' = 0` and `e (e - 1)(w1' - (m - 1)) = 0` together once `F_s`,
+/// `F_delta`, `F_e` give `e in {-1, 0, 1}` (it is `2 w1'` at `e = 1` and `2 (m - 1) - 2 w1'` at
+/// `e = -1`, small integers). For `gamma2 = (q - 1)/32` (ML-DSA-65, ML-DSA-87; `m = 16`) the
+/// Decompose wrap of FIPS 204 Algorithm 36 line 3 is read as `r1 = 16` with
+/// `r0' = r+ - (q - 1)`, and each wrap moves `u` by one because `16 (2 gamma2) = q - 1`, as
+/// `44 (2 gamma2) = q - 1` for ML-DSA-44. Soundness and weight-aware completeness are checked
+/// exhaustively per set (unit tests `every_lane_witness_is_sound`,
+/// `lane_honest_rule_is_complete_with_weight_h`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CoeffOf {
+    /// `L in [0, gamma2)`.
+    pub l: i64,
+    /// `sigma in {-1, 1}` (`sigma = 1` iff `r0 > 0`).
+    pub sigma: i64,
+    /// `delta in {0, sigma}`.
+    pub delta: i64,
+    /// `e in {-1, 0, 1}`.
+    pub e: i64,
+}
+
+impl CoeffOf {
+    /// The sign bit `s = (1 + sigma)/2`.
+    pub fn s(&self) -> i64 {
+        (1 + self.sigma).div_euclid(2)
+    }
+
+    /// `r0 = gamma2 s + L + 1 - gamma2`.
+    pub fn r0<P: ParamSet>(&self) -> i64 {
+        P::GAMMA2 * self.s() + self.l + 1 - P::GAMMA2
+    }
+
+    /// `u = r0 - 2 gamma2 delta - e`.
+    pub fn u<P: ParamSet>(&self) -> i64 {
+        self.r0::<P>() - 2 * P::GAMMA2 * self.delta - self.e
+    }
+
+    /// The contribution `delta^2` to the hint-weight identity.
+    pub fn weight(&self) -> i64 {
+        self.delta * self.delta
+    }
+
+    /// `F_s, F_delta, F_e, F_w1` (the committed sign bit `s` stands for `sigma`).
+    pub fn zero_checks<P: ParamSet>(&self, w1: i64) -> [i128; 4] {
+        let (s, d, e, w1) = (
+            i128::from(self.s()),
+            i128::from(self.delta),
+            i128::from(self.e),
+            i128::from(w1),
+        );
+        let top = i128::from(P::M_W - 1);
+        [
+            s * (s - 1),
+            d * (d - 2 * s + 1),
+            e * (e - 1) * (e - d),
+            2 * e * w1 + top * e * e - top * e,
+        ]
+    }
+
+    /// True when `sigma = +-1`, `L in [0, gamma2)` and the four zero-checks vanish.
+    pub fn is_valid<P: ParamSet>(&self, w1: i64) -> bool {
+        self.sigma.abs() == 1
+            && (0..P::GAMMA2).contains(&self.l)
+            && self.zero_checks::<P>(w1).iter().all(|&c| c == 0)
+    }
+
+    /// The witness of a padded row (`w' = 0`, `h = 0`): Decompose(0) = (0, 0), so `sigma = -1`,
+    /// `L = gamma2 - 1`, `delta = e = 0`.
+    pub fn padded<P: ParamSet>() -> Self {
+        Self {
+            l: P::GAMMA2 - 1,
+            sigma: -1,
+            delta: 0,
+            e: 0,
+        }
+    }
+}
+
+/// The canonical (honest) witness of an accepted coefficient of set `P` ([`honest_coeff`]'s
+/// rule with the set's `gamma2` and `m`): `w'` (any representative) and the hint bit `h`, with
+/// `w1' = UseHint(h, w')`. It has `delta^2 = h` and `u = ctr_q(w' - 2 gamma2 w1')`.
+pub fn honest_coeff_of<P: ParamSet>(w: i64, h: bool) -> CoeffOf {
+    let (q, g2, top) = (P::Q, P::GAMMA2, P::M_W - 1);
+    let wq = mod_q(w);
+    let hv = i64::from(h);
+    let (sigma, l, delta, e) = if wq >= q - g2 {
+        (-1, wq - (q - g2), -hv, 1 - hv)
+    } else {
+        let (r1, r0) = decompose_for::<P>(wq);
+        let sigma = if r0 > 0 { 1 } else { -1 };
+        let l = (r0 - 1).rem_euclid(g2);
+        let wraps = (sigma == 1 && r1 == top) || (sigma == -1 && r1 == 0);
+        (sigma, l, hv * sigma, if h && wraps { sigma } else { 0 })
+    };
+    CoeffOf { l, sigma, delta, e }
+}
+
+/// The H-FIPS witness of one coefficient of set `P` from `(u, w1')`: `w' = 2 gamma2 w1' + u mod
+/// q`, `h* = [HighBits(w') != w1']` and [`honest_coeff_of`]; `None` when `w1'` is not reachable
+/// from `w'` by any hint bit or the form's `u` differs.
+pub fn coefficient_of<P: ParamSet>(u: i64, w1: i64) -> Option<CoeffOf> {
+    let wq = mod_q(2 * P::GAMMA2 * w1 + u);
+    let hint = high_bits_for::<P>(wq) != w1;
+    if use_hint_for::<P>(hint, wq) != w1 {
+        return None;
+    }
+    let c = honest_coeff_of::<P>(wq, hint);
+    (c.u::<P>() == u).then_some(c)
+}
+
+/// The value form of the magnitude `L` of set `P`: ML-DSA-44 `L = L_lo + 29,696 L_hi`
+/// ([`crate::digits::L_SLACK`]); ML-DSA-65 and ML-DSA-87 `L = L_lo + 2^16 L_mid + 130,816 a_L`
+/// ([`crate::digits::L_BIT_SLACK`], two bits because `gamma2 = 2^17 + 130,816`).
+pub fn l_form_for<P: ParamSet>() -> ValueForm {
+    match P::SET {
+        Set::S44 => ValueForm::Slack(crate::digits::L_SLACK),
+        Set::S65 | Set::S87 => ValueForm::BitSlack(crate::digits::L_BIT_SLACK),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +753,125 @@ mod tests {
             assert_eq!(lo + L_STEP * hi, l);
         }
         assert_eq!(Coeff::split_l(GAMMA2 - 1), (TABLE - 1, 1));
+    }
+
+    /// The admissible `(w1', sigma, delta, e)` of set `P`: the zero-checks vanish.
+    fn lane_combos<P: ParamSet>() -> Vec<(i64, i64, i64, i64)> {
+        let mut out = Vec::new();
+        for w1 in 0..P::M_W {
+            for sigma in [-1, 1] {
+                for delta in -1..=1 {
+                    for e in -1..=1 {
+                        let c = CoeffOf { l: 0, sigma, delta, e };
+                        if c.zero_checks::<P>(w1).iter().all(|&z| z == 0) {
+                            out.push((w1, sigma, delta, e));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn lane_soundness<P: ParamSet>() -> usize {
+        let mut count = 0;
+        for (w1, sigma, delta, e) in lane_combos::<P>() {
+            for l in 0..P::GAMMA2 {
+                let c = CoeffOf { l, sigma, delta, e };
+                let u = c.u::<P>();
+                assert!(u.abs() <= P::B_U, "{c:?}");
+                let w = mod_q(2 * P::GAMMA2 * w1 + u);
+                let h = high_bits_for::<P>(w) != w1;
+                assert_eq!(use_hint_for::<P>(h, w), w1, "{c:?} w1 {w1}");
+                assert!(i64::from(h) <= c.weight(), "{c:?} w1 {w1}");
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn every_lane_witness_is_sound() {
+        // 69 admissible (w1', sigma, delta, e) for m = 16, times gamma2 = 261,888 values of L.
+        assert_eq!(lane_combos::<Set65>().len(), 69);
+        assert_eq!(lane_soundness::<Set65>(), 69 * 261_888);
+        // ML-DSA-87 has the same gamma2 and m.
+        assert_eq!(lane_combos::<Set87>(), lane_combos::<Set65>());
+        // ML-DSA-44 under the generic witness: the 181 combinations of the fixed-set module.
+        assert_eq!(lane_combos::<Set44>().len(), 181);
+    }
+
+    #[test]
+    fn lane_honest_rule_is_complete_with_weight_h() {
+        // For every (w', h): the honest witness is admissible, has delta^2 = h and the H-u value
+        // u = ctr_q(w' - 2 gamma2 w1'), and coefficient_of finds it from (u, w1') alone.
+        let combos = lane_combos::<Set65>();
+        for h in [false, true] {
+            for w in 0..Q {
+                let w1 = use_hint_for::<Set65>(h, w);
+                let c = honest_coeff_of::<Set65>(w, h);
+                assert!(c.is_valid::<Set65>(w1), "w' {w} h {h} {c:?}");
+                assert_eq!(c.weight(), i64::from(h));
+                let u = centered(w - 2 * Set65::GAMMA2 * w1);
+                assert_eq!(c.u::<Set65>(), u, "w' {w} h {h}");
+                assert_eq!(coefficient_of::<Set65>(u, w1), Some(c), "w' {w} h {h}");
+            }
+        }
+        // The least weight over all witnesses of (w1', u) equals h on every honest pair.
+        let width = (2 * Set65::B_U + 1) as usize;
+        let at = |w1: i64, u: i64| w1 as usize * width + (u + Set65::B_U) as usize;
+        let mut least = vec![2_i8; Set65::M_W as usize * width];
+        for &(w1, sigma, delta, e) in &combos {
+            for l in 0..Set65::GAMMA2 {
+                let c = CoeffOf { l, sigma, delta, e };
+                let cell = &mut least[at(w1, c.u::<Set65>())];
+                *cell = (*cell).min(c.weight() as i8);
+            }
+        }
+        for h in [false, true] {
+            for w in 0..Q {
+                let w1 = use_hint_for::<Set65>(h, w);
+                let u = centered(w - 2 * Set65::GAMMA2 * w1);
+                assert_eq!(i64::from(least[at(w1, u)]), i64::from(h), "w' {w} h {h}");
+            }
+        }
+    }
+
+    #[test]
+    fn generic_witness_of_ml_dsa_44_equals_the_fixed_one() {
+        for h in [false, true] {
+            for w in (0..Q).step_by(13).chain([Q - GAMMA2, Q - 1, 0]) {
+                let fixed = honest_coeff(w, h);
+                let generic = honest_coeff_of::<Set44>(w, h);
+                assert_eq!(
+                    (fixed.l(), fixed.sigma, fixed.delta, fixed.e),
+                    (generic.l, generic.sigma, generic.delta, generic.e)
+                );
+                assert_eq!(fixed.u(), generic.u::<Set44>());
+            }
+        }
+    }
+
+    #[test]
+    fn lane_l_form_covers_the_range() {
+        let form = l_form_for::<Set65>();
+        assert_eq!(form.range(), (0, Set65::GAMMA2 - 1));
+        for l in (0..Set65::GAMMA2).step_by(5).chain([Set65::GAMMA2 - 1, 1 << 17, 130_816]) {
+            let d = form.decompose(l);
+            assert!(form.in_alphabets(&d), "L {l}");
+            assert_eq!(form.compose(&d), l);
+        }
+        for l in [-1, Set65::GAMMA2] {
+            assert!(!form.in_alphabets(&form.decompose(l)), "L {l}");
+        }
+    }
+
+    fn centered(x: i64) -> i64 {
+        let r = x.rem_euclid(Q);
+        if r > (Q - 1) / 2 {
+            r - Q
+        } else {
+            r
+        }
     }
 }
