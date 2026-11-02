@@ -34,11 +34,13 @@
 //! ([`DigitValue::HintSlack`]), a thirteenth `G_2` polynomial on `D_2` (whose last `d_sig`
 //! variables are the signature index) in the free slot 6 of lookup stack 2.
 //!
-//! ML-DSA-65 and ML-DSA-87 (relation H-u only, [`SetShape`]): the vector index is a
+//! ML-DSA-65 and ML-DSA-87 (relations H-u and H-exact, [`SetShape`]): the vector index is a
 //! polynomial lane instead of two domain variables, so the main domain is `(j, i)` with
 //! `8 + d_sig` variables and every main-domain column is a family of `k` or `l` polynomials
 //! ([`Column::lane`]). `z` and `u` take digit-slack forms with a base-8 middle digit and a
-//! Boolean slack ([`DigitValue::Zd`], [`DigitValue::Ud`]), `w_1'` has four bits, the
+//! Boolean slack ([`DigitValue::Zd`], [`DigitValue::Ud`]); H-exact changes only the slack
+//! weight and the offset of `z` ([`DigitValue::Zdx`]: `|z| <= B_z` exactly, the same columns,
+//! alphabets and Akita layout as H-u), `w_1'` has four bits, the
 //! projection outputs five digits ([`K39_DIGITS`]), and the looked-up main columns split
 //! into stacks of 8, 2, 1 (8, 4, 2, 1) polynomials ([`main_stack_sizes`]).
 
@@ -48,8 +50,8 @@ use agg_pcs_config::catalogs::{
 pub use agg_pcs_config::catalogs::{Relation, RELATION_HU, RELATION_H_EXACT, RELATION_H_FIPS};
 use agg_pcs_config::work_plan::{padded_size, PlanError, WorkPlan};
 use agg_witness::digits::{
-    Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK, U_DIGIT_SLACK,
-    Z_BIT_SLACK, Z_DIGIT_SLACK,
+    z_digit_slack_exact, Alphabet, BitSlackLayout, DigitLayout, SlackLayout, StepLayout, ValueForm, L_SLACK,
+    U_DIGIT_SLACK, Z_BIT_SLACK, Z_DIGIT_SLACK,
 };
 use agg_witness::params::{ParamSet, B_U, STEP_U, U_TOP_BASE, W1_BITS};
 
@@ -251,6 +253,11 @@ pub enum DigitValue {
     /// vector entry `s`): `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` with `Z_lo` looked up,
     /// `Z_mid` base 8 (leaf and link) and the Boolean `a_z`, so `z in [-2^19, 2^19)`.
     Zd,
+    /// The response `z` of ML-DSA-65 and ML-DSA-87 under relation H-exact: the columns and
+    /// alphabets of [`DigitValue::Zd`] with the slack weight `2 B_z + 1 - 2^19`, `z + B_z =
+    /// z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z`, so `|z| <= B_z = gamma_1 - beta - 1` exactly
+    /// (`agg_witness::digits::z_digit_slack_exact`).
+    Zdx(Set),
     /// The UseHint residual `u` of ML-DSA-65 and ML-DSA-87: `u + B_u = B_ulo + 2^16 H_u +
     /// 523,267 a_u` with `U_lo` looked up, `U_mid = H_u - 4` base 8 (leaf and link) and the
     /// Boolean `a_u`, so `|u| <= B_u = 523,777` exactly.
@@ -281,6 +288,7 @@ impl DigitValue {
             Self::V => ValueForm::Radix(V16_DIGITS),
             Self::K => ValueForm::Radix(K16_DIGITS),
             Self::Zd => ValueForm::DigitSlack(Z_DIGIT_SLACK),
+            Self::Zdx(set) => ValueForm::DigitSlack(z_digit_slack_exact(agg_witness::dispatch_set!(set, |P| P::B_Z))),
             Self::Ud => ValueForm::DigitSlack(U_DIGIT_SLACK),
             Self::K5 => ValueForm::Radix(K39_DIGITS),
             Self::Kappa1(_) | Self::Kappa2(_) | Self::Kappa3 | Self::HintSlack => {
@@ -293,8 +301,10 @@ impl DigitValue {
     #[must_use]
     pub const fn group(self, digit: u8) -> GroupRole {
         match self {
-            Self::Z | Self::Zx | Self::Zd | Self::U | Self::Ud | Self::L if digit == 0 => Group::Main16,
-            Self::Z | Self::Zx | Self::Zd | Self::U | Self::Ud | Self::L => Group::Main,
+            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L if digit == 0 => {
+                Group::Main16
+            }
+            Self::Z | Self::Zx | Self::Zd | Self::Zdx(_) | Self::U | Self::Ud | Self::L => Group::Main,
             Self::V => Group::Main16,
             Self::K | Self::K5 => Group::Proj,
             Self::Kappa1(_) => Group::Level1,
@@ -593,7 +603,7 @@ impl Column {
                 DigitValue::L => format!("l_{}", half(digit)),
                 DigitValue::V => format!("v_{}", half(digit)),
                 DigitValue::K | DigitValue::K5 => format!("k_{digit}"),
-                DigitValue::Zd => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
+                DigitValue::Zd | DigitValue::Zdx(_) => ["z_lo", "z_mid", "a_z"][usize::from(digit)].to_owned(),
                 DigitValue::Ud => ["u_lo", "u_mid", "a_u"][usize::from(digit)].to_owned(),
                 DigitValue::HintSlack => "u_h".to_owned(),
                 DigitValue::Kappa1(t) => format!("kappa1_{t}"),
@@ -646,13 +656,14 @@ pub const fn u_slot_value(relation: Relation) -> DigitValue {
     }
 }
 
-/// The value `z` of `relation` under `set` ([`z_value`] for ML-DSA-44, [`DigitValue::Zd`]
-/// otherwise).
+/// The value `z` of `relation` under `set` ([`z_value`] for ML-DSA-44; for ML-DSA-65 and
+/// ML-DSA-87 [`DigitValue::Zd`] under H-u and [`DigitValue::Zdx`] under H-exact).
 #[must_use]
 pub const fn z_value_for(set: Set, relation: Relation) -> DigitValue {
-    match set {
-        Set::S44 => z_value(relation),
-        Set::S65 | Set::S87 => DigitValue::Zd,
+    match (set, relation) {
+        (Set::S44, _) => z_value(relation),
+        (Set::S65 | Set::S87, Relation::Hu) => DigitValue::Zd,
+        (Set::S65 | Set::S87, _) => DigitValue::Zdx(set),
     }
 }
 
@@ -726,8 +737,8 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
 }
 
 /// The canonical polynomial order of a group of `set` under `relation`: [`group_columns`] for
-/// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 (relation H-u only) every main-domain column is a
-/// family of lanes, in lane order inside the family:
+/// ML-DSA-44; for ML-DSA-65 and ML-DSA-87 (relations H-u and H-exact, whose orders are
+/// equal) every main-domain column is a family of lanes, in lane order inside the family:
 ///
 /// * `G_main16`: `Z_lo^(s)`, `U_lo^(rho)`, `V_lo^(rho)`, `V_hi^(rho)`, so the looked-up
 ///   columns `Z_lo, U_lo` are the first `l + k` polynomials of the stacked lane;
@@ -737,18 +748,19 @@ pub fn group_columns(role: GroupRole, relation: Relation) -> Vec<Column> {
 ///   polynomials up to `G_2`'s count; `G_k`: the five projection digits; `G_m` as for ML-DSA-44.
 ///
 /// # Panics
-/// For ML-DSA-65 or ML-DSA-87 under a relation other than H-u.
+/// For ML-DSA-65 or ML-DSA-87 under a relation the set does not define
+/// ([`Relation::is_available`]).
 #[must_use]
 pub fn group_columns_for(set: Set, role: GroupRole, relation: Relation) -> Vec<Column> {
     if set == Set::S44 {
         return group_columns(role, relation);
     }
-    assert_eq!(relation, Relation::Hu, "ML-DSA-65 and ML-DSA-87 support relation H-u only");
+    assert!(relation.is_available(set), "relation {relation} is not available for ML-DSA-{}", set.name());
     let shape = SetShape::of(set);
     let family = |value: DigitValue, digit: u8, lanes: usize| {
         (0..lanes as u8).map(move |lane| Column::Digit { value, digit, lane })
     };
-    let (z, u) = (DigitValue::Zd, DigitValue::Ud);
+    let (z, u) = (z_value_for(set, relation), DigitValue::Ud);
     let (lanes_k, lanes_l) = (shape.lanes_k, shape.lanes_l);
     let bits = 0..shape.w1_bits as u8;
     match role {
@@ -942,7 +954,7 @@ impl CommitmentManifest {
     }
 
     /// The manifest of a batch of `records` live records of parameter set `set` under
-    /// `relation` (ML-DSA-65 and ML-DSA-87 have relation H-u only; another relation is
+    /// `relation` (ML-DSA-65 and ML-DSA-87 have relations H-u and H-exact; H-FIPS is
     /// [`PlanError::NotInCatalog`]).
     pub fn for_set(set: Set, records: usize, relation: Relation) -> Result<Self, PlanError> {
         let (padded, d_sig) = padded_size(records)?;
@@ -1796,12 +1808,23 @@ mod tests {
             assert_ne!(bytes, CommitmentManifest::for_batch(200).unwrap().binding_bytes());
             assert!(manifest.matches_plan(&WorkPlan::for_set(set, 200, Relation::Hu).unwrap()));
             assert!(!manifest.matches_plan(&WorkPlan::for_records(200, Relation::Hu).unwrap()));
-            for relation in [Relation::HExact, Relation::HFips] {
-                assert!(matches!(
-                    CommitmentManifest::for_set(set, 200, relation),
-                    Err(PlanError::NotInCatalog { d_sig: 8, .. })
-                ));
+            assert!(matches!(
+                CommitmentManifest::for_set(set, 200, Relation::HFips),
+                Err(PlanError::NotInCatalog { d_sig: 8, .. })
+            ));
+            // H-exact: H-u's columns, alphabets and Akita layout (only the slack weight of the
+            // z form differs), its own relation byte and catalog row name.
+            let exact = CommitmentManifest::for_set(set, 200, Relation::HExact).unwrap();
+            assert_eq!(exact.z_value(), DigitValue::Zdx(set));
+            for (a, b) in exact.groups().iter().zip(manifest.groups()) {
+                let codes = |g: &GroupDescriptor| g.columns.iter().map(|c| c.alphabet_code()).collect::<Vec<_>>();
+                assert_eq!((a.physical_vars, codes(a)), (b.physical_vars, codes(b)));
             }
+            assert!(exact.matches_plan(&WorkPlan::for_set(set, 200, Relation::HExact).unwrap()));
+            assert_eq!(exact.catalog_row(), format!("mldsa-{}-p16x-batch-256-mult-final", set.name()));
+            let exact_bytes = exact.binding_bytes();
+            assert_eq!(&exact_bytes[..4], &[4, 0, set.id(), RELATION_H_EXACT]);
+            assert_eq!(exact_bytes.len(), bytes.len() + 1, "the row name gains the x");
         }
         // ML-DSA-44 keeps one lane per column and its own stacks.
         let shape = SetShape::of(Set::S44);

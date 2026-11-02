@@ -36,7 +36,8 @@
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
 //! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 55 coefficients.
 //!
-//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relation H-u): the main domain has no row
+//! Polynomial lanes (ML-DSA-65, ML-DSA-87; relations H-u and H-exact, which differ only in
+//! the constants of the affine `z`): the main domain has no row
 //! coordinate, so the ring identity is `k` instances `ring[rho]` (`0..k`), each with the
 //! claimed sum `T~_rho(r^(2))` and the summand `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)^(rho)`;
 //! their `A z` parts are one unbatched part per lane `s` of `z`, `w_A^(s) z^(s)`, whose weight

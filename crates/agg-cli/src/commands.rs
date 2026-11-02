@@ -47,7 +47,8 @@ commands:
       segments. Relation R = h-u (default: z in [-2^17, 2^17), |u| <= 190,465), h-exact
       (the FIPS 204 bounds |z| <= 130,993, |u| <= 190,465) or h-fips (also the hint:
       the extracted (c~, z, h) is a FIPS 204 signature). ML-DSA-65 and ML-DSA-87 have
-      relation h-u only.
+      relations h-u (z in [-2^19, 2^19), |u| <= 523,777) and h-exact (|z| <= 524,091
+      resp. 524,167, |u| <= 523,777).
   verify --records RECORDS --aggregate AGGREGATE [--params 44|65|87] [--cache CACHE]
          [--flock-profile P] [--relation R]
       Verify the aggregate for the records' (pk, M) (signatures are ignored), under the

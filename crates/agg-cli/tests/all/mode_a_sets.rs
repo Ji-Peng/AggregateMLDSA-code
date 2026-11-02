@@ -246,9 +246,25 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     let last = flipped.len() - 100;
     flipped[last] ^= 1;
     assert!(!verifier.verify(&statements, &flipped, None).accepted());
-    // H-exact is refused for the set.
-    let exact = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..config }).aggregate(&signed);
-    assert!(matches!(exact, Err(AggregateError::Relation(set, Relation::HExact)) if set == P::SET));
+    // H-exact: H-u's layout and size, its own relation byte; each relation's verifier
+    // rejects the other's aggregate. H-FIPS is refused for the set.
+    let exact = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..config })
+        .aggregate(&signed)
+        .expect("H-exact aggregate");
+    assert_eq!(exact.proof.relation, Relation::HExact);
+    assert_eq!(exact.bytes[2] & 0x0F, Relation::HExact.id());
+    let exact_verifier = AggregateVerifier::for_set(P::SET).relation(Relation::HExact);
+    let report = exact_verifier.verify(&statements, &exact.bytes, None);
+    assert!(report.accepted(), "{report}");
+    let crossed = exact_verifier.verify(&statements, &aggregate.bytes, None);
+    assert!(matches!(crossed.report.outcome, Err(VerifyError::Relation { .. })), "{crossed}");
+    let crossed = verifier.verify(&statements, &exact.bytes, None);
+    assert!(matches!(crossed.report.outcome, Err(VerifyError::Relation { .. })), "{crossed}");
+    let mut relabelled = exact.bytes.clone();
+    relabelled[2] &= 0xF0;
+    assert!(!verifier.verify(&statements, &relabelled, None).accepted());
+    let fips = Aggregator::new(AggregatorConfig { relation: Relation::HFips, ..config }).aggregate(&signed);
+    assert!(matches!(fips, Err(AggregateError::Relation(set, Relation::HFips)) if set == P::SET));
 
     // Tampered witnesses (the prover's self-checks off): a G_main16 cell and a G_main4 cell.
     let wide = |_: &CommitmentManifest, t: &mut MainTables| {

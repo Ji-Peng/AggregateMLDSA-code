@@ -14,11 +14,14 @@ use agg_piop::stage::{suffix, StageError};
 use agg_piop::verifier::VerifyError;
 use agg_piop::virtual_polys::{residual_table, w1_table};
 use agg_piop::OpeningField as E;
-use agg_witness::crt::az_integer;
+use agg_piop::lane_public::LanePublicData;
+use agg_witness::crt::{az_integer, az_integer_for};
+use agg_witness::instance::PublicInstance;
+use agg_witness::params::ParamSet;
 use agg_witness::digits::{leaf_vanishes, p_of};
 use agg_witness::padding::main_index;
 use agg_witness::params::{B_U, B_Z, N};
-use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch};
+use crate::common::{lenient_multiplicities, prove_tables, verify_tables, Batch, LaneBatch, PiopBatch};
 use jolt_field::{Ring, Zero};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
@@ -289,4 +292,132 @@ fn h_exact_value_boundaries_with_synthetic_statements() {
             assert_eq!(u_case(-B_U - 1, &U16_DIGITS.decompose(-B_U - 1)), Some(0));
         }
     });
+}
+
+/// [`rejecting_place`] for a batch with polynomial lanes (ML-DSA-65, ML-DSA-87).
+fn lane_rejecting_place(batch: &LaneBatch, main: &MainTables) -> Option<usize> {
+    let manifest = &batch.manifest;
+    let mut bridge = BridgeGroupTables::build(manifest, main, &batch.matrices, batch.bridge.psi())
+        .unwrap_or_else(|_| batch.bridge.clone());
+    let m = lenient_multiplicities(SourceTables { manifest, main, bridge: &bridge });
+    bridge.set_multiplicity(m);
+    let tables = SourceTables { manifest, main, bridge: &bridge };
+    let (proof, _) = batch.prove(tables, true).expect("the unchecked prover runs");
+    match batch.verify(bridge.public_y(), &proof) {
+        Ok(_) => None,
+        Err(error) => {
+            let place = rejection(&error);
+            assert!(place.is_some(), "unexpected rejection {error:?}");
+            place
+        }
+    }
+}
+
+/// A synthetic statement with polynomial lanes: `z[s][j]` of record `i` set to `value` with
+/// the committed digits `digits`, and `T_i` moved by `A (z' - z)` over the integers, so that
+/// the ring identity still holds and only the range mechanism can reject the value.
+fn lane_synthetic<P: ParamSet>(
+    batch: &LaneBatch,
+    (i, s, j): (usize, usize, usize),
+    value: i64,
+    digits: &[i64],
+) -> (LaneBatch, MainTables) {
+    let manifest = &batch.manifest;
+    let (z, _, _) = batch.main.record_values_for::<P>(manifest, i);
+    let mut moved = z.clone();
+    moved.as_mut()[s][j] = value;
+    let mut instance = PublicInstance::<P>::from_records_for(&batch.records).expect("instance");
+    let key = instance.records[i].key.clone();
+    let (before, after) = (az_integer_for::<P>(&key, &z), az_integer_for::<P>(&key, &moved));
+    for rho in 0..P::K {
+        for k in 0..N {
+            let t = &mut (*instance.records[i].t)[rho][k];
+            *t += i32::try_from(after[rho][k] - before[rho][k]).expect("T stays an i32");
+        }
+    }
+    let mut main = batch.main.clone();
+    let x = i * manifest.lane_cells() + j;
+    for (digit, &d) in digits.iter().enumerate() {
+        let column = Column::lane_digit(manifest.z_value(), digit as u8, s as u8);
+        match manifest.locate(column) {
+            (GroupRole::Main16, _) => *main.wide_cell_mut(manifest, column, x) = d as i32,
+            (GroupRole::Main, position) => main.columns_mut()[position][x] = d as i8,
+            other => panic!("{other:?}"),
+        }
+    }
+    let synthetic = LaneBatch {
+        records: batch.records.clone(),
+        manifest: manifest.clone(),
+        main: batch.main.clone(),
+        matrices: batch.matrices.clone(),
+        bridge: batch.bridge.clone(),
+        public: LanePublicData::from_instance(&instance),
+    };
+    (synthetic, main)
+}
+
+/// A live coefficient `(i, s, j)` whose honest `z` is within 50 of `target` (so `T` moves by
+/// at most `51 q` per coefficient and stays an `i32`).
+fn lane_z_near<P: ParamSet>(batch: &LaneBatch, target: i64) -> (usize, usize, usize) {
+    for i in 0..batch.manifest.records() {
+        let (z, _, _) = batch.main.record_values_for::<P>(&batch.manifest, i);
+        for s in 0..P::L {
+            for j in 0..N {
+                if (z.as_ref()[s][j] - target).abs() <= 50 {
+                    return (i, s, j);
+                }
+            }
+        }
+    }
+    panic!("no z near {target}");
+}
+
+/// ML-DSA-65 and ML-DSA-87 under H-exact: `z = +-B_z` is accepted and `z = +-(B_z + 1)` is
+/// rejected by the lookup, the base-8 leaf or the Booleanity zero-check, whichever digit
+/// leaves its alphabet; H-u (`z in [-2^19, 2^19)`) accepts `z = +-(B_z + 1)`.
+fn lane_z_boundaries<P: ParamSet>(seed: u64) {
+    let exact = LaneBatch::build_as::<P>(Relation::HExact, seed, 200, 56);
+    let hu = LaneBatch::build_as::<P>(Relation::Hu, seed, 200, 56);
+    assert_eq!(exact.manifest.z_value(), DigitValue::Zdx(P::SET));
+    let b_z = P::B_Z;
+    let form = exact.manifest.z_value().layout();
+    assert_eq!(form.range(), (-b_z, b_z));
+    let case = |batch: &LaneBatch, target: i64, z: i64, digits: &[i64]| {
+        assert_eq!(batch.manifest.z_value().layout().compose(digits), z, "digits of {z}");
+        let at = lane_z_near::<P>(batch, target);
+        let (synthetic, main) = lane_synthetic::<P>(batch, at, z, digits);
+        lane_rejecting_place(&synthetic, &main)
+    };
+    for z in [b_z, -b_z] {
+        assert_eq!(case(&exact, z, z, &form.decompose(z)), None, "z = {z}");
+    }
+    // z = B_z + 1: the canonical digits (middle digit 4, outside [-4, 3]) are rejected by its
+    // leaf, a low digit of 2^15 by the lookup, and a slack digit of 2 (with the low and middle
+    // digits in range) by the Booleanity zero-check alone.
+    let slack = form.weights()[2];
+    assert_eq!(form.decompose(b_z + 1), vec![-32_768, 4, 1]);
+    assert_eq!(case(&exact, b_z, b_z + 1, &[-32_768, 4, 1]), Some(2));
+    assert_eq!(case(&exact, b_z, b_z + 1, &[32_768, 3, 1]), Some(0));
+    let rest = 2 * b_z + 1 - 2 * slack;
+    assert!((0..1 << 16).contains(&rest));
+    assert_eq!(case(&exact, b_z, b_z + 1, &[rest - 32_768, -4, 2]), Some(3));
+    // z = -B_z - 1: the leaf (middle digit -5) or the lookup (low digit -2^15 - 1).
+    assert_eq!(form.decompose(-b_z - 1), vec![32_767, -5, 0]);
+    assert_eq!(case(&exact, -b_z, -b_z - 1, &[32_767, -5, 0]), Some(2));
+    assert_eq!(case(&exact, -b_z, -b_z - 1, &[-32_769, -4, 0]), Some(0));
+    // H-u proves only z in [-2^19, 2^19): the same z = +-(B_z + 1) are accepted there.
+    let relaxed = hu.manifest.z_value().layout();
+    for (target, z) in [(b_z, b_z + 1), (-b_z, -b_z - 1)] {
+        assert_eq!(case(&hu, target, z, &relaxed.decompose(z)), None, "H-u z = {z}");
+    }
+}
+
+#[test]
+fn ml_dsa_65_h_exact_z_boundaries_with_synthetic_statements() {
+    on_large_stack(|| lane_z_boundaries::<agg_witness::params::Set65>(0x65b));
+}
+
+#[test]
+fn ml_dsa_87_h_exact_z_boundaries_with_synthetic_statements() {
+    on_large_stack(|| lane_z_boundaries::<agg_witness::params::Set87>(0x87b));
 }

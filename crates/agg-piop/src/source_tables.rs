@@ -396,6 +396,7 @@ impl Encoder {
         let z_range = match manifest.z_value() {
             DigitValue::Zx => "z outside [-130,993, 130,993]",
             DigitValue::Zd => "z outside [-2^19, 2^19)",
+            DigitValue::Zdx(_) => "z outside [-B_z, B_z]",
             _ => "z outside [-2^17, 2^17)",
         };
         let narrow_slot = |column: Column| match slot(column) {

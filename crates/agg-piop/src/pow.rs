@@ -626,6 +626,34 @@ mod tests {
     }
 
     #[test]
+    fn lane_h_exact_plans_equal_lane_h_u_plans() {
+        use crate::manifest::Relation;
+        use agg_pcs_config::catalogs::Set;
+        // ML-DSA-65 and ML-DSA-87: H-exact has H-u's instances, degrees and batching lengths
+        // (only the slack weight of the z form differs), so every site and the plan digest are
+        // H-u's; the relation is bound by event 0's manifest bytes.
+        for set in [Set::S65, Set::S87] {
+            for d_sig in [3, 10, 13, 15] {
+                for profile in [FlockProfile::PublicBits, FlockProfile::Slim] {
+                    let keccak = match profile {
+                        FlockProfile::Slim => mode_a(d_sig, 2, true),
+                        _ => KeccakPlan::default(),
+                    };
+                    let plan = |relation| {
+                        let manifest = CommitmentManifest::for_set(set, 1 << d_sig, relation).unwrap();
+                        PowPlan::new(&manifest, profile, &keccak)
+                    };
+                    let (exact, hu) = (plan(Relation::HExact), plan(Relation::Hu));
+                    assert_eq!(exact.sites(), hu.sites(), "{set:?} 2^{d_sig} {profile:?}");
+                    assert_eq!(exact.digest(), hu.digest(), "{set:?} 2^{d_sig} {profile:?}");
+                }
+            }
+            let manifest = |relation| CommitmentManifest::for_set(set, 1 << 15, relation).unwrap();
+            assert_ne!(manifest(Relation::HExact).binding_bytes(), manifest(Relation::Hu).binding_bytes());
+        }
+    }
+
+    #[test]
     fn plan_digest_depends_on_profile_span_and_ties() {
         let manifest = CommitmentManifest::for_batch(1000).unwrap();
         let work = PartWork {

@@ -288,10 +288,19 @@ fn ml_dsa_65_and_87_through_the_binary() {
         assert!(out.contains(&format!("--params {params}")), "{out}");
         let (code, out) = agg(&["aggregate", "--records", s(&recs), "--out", s(&bad)]);
         assert_eq!(code, 2, "{out}");
-        let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&bad), "--relation", "h-exact"]);
+        let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&bad), "--relation", "h-fips"]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("H-u only"), "{out}");
+        assert!(out.contains("H-u and H-exact only"), "{out}");
         let (code, out) = verify(&["--aggregate", s(&aggregate), "--relation", "h-exact"]);
+        assert_ne!(code, 0, "{out}");
+        // H-exact through the binary: accepted under h-exact, rejected under h-u.
+        let exact = file(&format!("exact{params}.bin"));
+        let (code, out) = run(&["aggregate", "--records", s(&recs), "--out", s(&exact), "--relation", "h-exact"]);
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = verify(&["--aggregate", s(&exact), "--relation", "h-exact"]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains(": accept"), "{out}");
+        let (code, out) = verify(&["--aggregate", s(&exact)]);
         assert_ne!(code, 0, "{out}");
         // An (empty) ML-DSA-44 cache file.
         let cross = file("cache44.bin");

@@ -139,6 +139,13 @@ impl Relation {
         }
     }
 
+    /// True when `set` defines this relation: every relation for ML-DSA-44; H-u and H-exact
+    /// for ML-DSA-65 and ML-DSA-87.
+    #[must_use]
+    pub const fn is_available(self, set: Set) -> bool {
+        matches!((set, self), (Set::S44, _) | (_, Self::Hu | Self::HExact))
+    }
+
     /// The batch sizes whose rows of this relation are checked in.
     #[must_use]
     pub const fn catalog_d_sigs(self) -> &'static [usize] {
@@ -280,13 +287,13 @@ impl Group {
     /// 12 parities and carries on Level 2 (13 under H-FIPS); Level 3 matches Level 2;
     /// 4 projection digits and 7 multiplicity digits.
     ///
-    /// For ML-DSA-65 (relation H-u): 23 on width-16 main domain (5 for z_lo, 6 each for
+    /// For ML-DSA-65 (relations H-u and H-exact): 23 on width-16 main domain (5 for z_lo, 6 each for
     /// u_lo, v_lo, v_hi); 46 on width-4 main domain (5 each for z_mid and a_z, 6 each for
     /// u_mid and a_u, 24 for 4 bit planes across 6 lanes); 4 carries on Level 1;
     /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
     /// 7 multiplicity digits.
     ///
-    /// For ML-DSA-87 (relation H-u): 31 on width-16 main domain (7 for z_lo, 8 each for
+    /// For ML-DSA-87 (relations H-u and H-exact): 31 on width-16 main domain (7 for z_lo, 8 each for
     /// u_lo, v_lo, v_hi); 62 on width-4 main domain (7 each for z_mid and a_z, 8 each for
     /// u_mid and a_u, 32 for 4 bit planes across 8 lanes); 4 carries on Level 1;
     /// 8 parities and carries on Level 2; Level 3 matches Level 2; 5 projection digits;
@@ -425,10 +432,10 @@ pub struct BatchLayout {
 
 impl BatchLayout {
     /// The layout for `set` at `d_sig` under `relation`; `None` outside `[MIN_D_SIG, MAX_D_SIG]`
-    /// or if the relation is unsupported for `set` (ML-DSA-65 and 87 support H-u only).
+    /// or if `set` does not define the relation ([`Relation::is_available`]).
     #[must_use]
     pub fn new(set: Set, d_sig: usize, relation: Relation) -> Option<Self> {
-        if !matches!(set, Set::S44) && relation != Relation::Hu {
+        if !relation.is_available(set) {
             return None;
         }
         (MIN_D_SIG..=MAX_D_SIG).contains(&d_sig).then(|| Self {
@@ -499,37 +506,28 @@ impl BatchLayout {
     /// Whether this batch size has checked-in catalog rows for its set and relation.
     #[must_use]
     pub fn in_catalog(&self) -> bool {
-        match self.set {
-            Set::S44 => self.relation.catalog_d_sigs().contains(&self.d_sig),
-            Set::S65 | Set::S87 => {
-                self.relation == Relation::Hu && CATALOG_D_SIG.contains(&self.d_sig)
-            }
-        }
+        self.relation.is_available(self.set) && self.relation.catalog_d_sigs().contains(&self.d_sig)
     }
 }
 
 /// Every batch layout for a given parameter set whose catalog rows can be resolved.
 #[must_use]
 pub fn catalog_batches_for_set(set: Set) -> Vec<BatchLayout> {
-    match set {
-        Set::S44 => Relation::ALL
-            .iter()
-            .flat_map(|&relation| {
-                relation
-                    .catalog_d_sigs()
-                    .iter()
-                    .filter_map(move |&d_sig| BatchLayout::new(Set::S44, d_sig, relation))
-            })
-            .collect(),
-        Set::S65 | Set::S87 => CATALOG_D_SIG
-            .iter()
-            .filter_map(|&d_sig| BatchLayout::new(set, d_sig, Relation::Hu))
-            .collect(),
-    }
+    Relation::ALL
+        .iter()
+        .filter(|relation| relation.is_available(set))
+        .flat_map(|&relation| {
+            relation
+                .catalog_d_sigs()
+                .iter()
+                .filter_map(move |&d_sig| BatchLayout::new(set, d_sig, relation))
+        })
+        .collect()
 }
 
-/// Every checked-in batch layout: the 39 ML-DSA-44 layouts across all relations,
-/// and the 13 ML-DSA-65 and 13 ML-DSA-87 layouts under relation H-u.
+/// Every checked-in batch layout: the 39 ML-DSA-44 layouts across all relations, and the
+/// 26 ML-DSA-65 and 26 ML-DSA-87 layouts under relations H-u and H-exact (whose layouts are
+/// equal, so they share their catalog rows).
 #[must_use]
 pub fn catalog_batches() -> Vec<BatchLayout> {
     let mut batches = catalog_batches_for_set(Set::S44);
@@ -624,12 +622,8 @@ mod tests {
         assert_eq!(Group::Level3.physical_vars(Set::S44, 13), 13);
         assert_eq!(Group::Level3.physical_vars(Set::S44, 15), 15);
         for set in Set::ALL {
-            let rels: &[Relation] = match set {
-                Set::S44 => &Relation::ALL,
-                Set::S65 | Set::S87 => &[Relation::Hu],
-            };
             for d_sig in MIN_D_SIG..=MAX_D_SIG {
-                for &relation in rels {
+                for relation in Relation::ALL.into_iter().filter(|r| r.is_available(set)) {
                     assert_eq!(Group::Level3.layout(set, d_sig, relation), Group::Level2.layout(set, d_sig, relation));
                 }
             }
@@ -684,8 +678,21 @@ mod tests {
         );
         assert!(BatchLayout::new(Set::S44, 2, Relation::Hu).is_none());
         assert!(BatchLayout::new(Set::S44, 16, Relation::HExact).is_none());
-        assert!(BatchLayout::new(Set::S65, 8, Relation::HExact).is_none());
         assert!(BatchLayout::new(Set::S87, 8, Relation::HFips).is_none());
+        assert!(BatchLayout::new(Set::S65, 8, Relation::HFips).is_none());
+        // H-exact of ML-DSA-65 and ML-DSA-87: the layout of H-u (only the slack weight of
+        // the z form changes), so it resolves to H-u's catalog rows under its own name.
+        for set in [Set::S65, Set::S87] {
+            for d_sig in MIN_D_SIG..=MAX_D_SIG {
+                let exact = BatchLayout::new(set, d_sig, Relation::HExact).unwrap();
+                assert_eq!(exact.groups, BatchLayout::new(set, d_sig, Relation::Hu).unwrap().groups);
+                assert!(exact.in_catalog());
+            }
+        }
+        assert_eq!(
+            BatchLayout::new(Set::S65, 10, Relation::HExact).unwrap().row_name(),
+            "mldsa-65-p16x-batch-1024-mult-final"
+        );
         let layout = BatchLayout::new(Set::S44, 10, Relation::Hu).unwrap();
         assert_eq!(layout.total_polynomials(), 53);
         assert_eq!(layout.max_physical_vars(), 20);
@@ -718,9 +725,9 @@ mod tests {
                 + catalog_batches_for_set(Set::S65).len()
                 + catalog_batches_for_set(Set::S87).len()
         );
-        assert_eq!(catalog_batches().len(), 65);
-        assert_eq!(catalog_batches_for_set(Set::S65).len(), 13);
-        assert_eq!(catalog_batches_for_set(Set::S87).len(), 13);
+        assert_eq!(catalog_batches().len(), 91);
+        assert_eq!(catalog_batches_for_set(Set::S65).len(), 26);
+        assert_eq!(catalog_batches_for_set(Set::S87).len(), 26);
     }
 
     #[test]

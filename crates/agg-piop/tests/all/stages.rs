@@ -8,7 +8,7 @@ use crate::common;
 
 use aerie_falcon::protocol::algebra::{evaluate_mle, lift_table};
 use agg_piop::lookup::LookupError;
-use agg_piop::manifest::{Column, DigitValue, GroupRole, LOOKUP_SHIFT};
+use agg_piop::manifest::{Column, DigitValue, GroupRole, Relation, LOOKUP_SHIFT};
 use agg_piop::prover::PiopProof;
 use agg_piop::source_tables::{BridgeGroupTables, MainTables, SourceTables};
 use agg_piop::stage::{suffix, StageError};
@@ -477,8 +477,8 @@ fn padded_batch_of_ten_records_round_trips() {
 /// ML-DSA-65 and ML-DSA-87 (polynomial lanes) at 256 signatures: the honest claims equal the
 /// extensions of the tables; a changed message or claim is rejected at its stage, and
 /// tampered witnesses at the stage that checks them (with honest round-2 tables).
-fn lane_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
-    let batch = LaneBatch::build::<P>(seed, 200, 56);
+fn lane_round_trip<P: agg_witness::params::ParamSet>(relation: Relation, seed: u64) {
+    let batch = LaneBatch::build_as::<P>(relation, seed, 200, 56);
     let manifest = &batch.manifest;
     assert_eq!(manifest.padded_records(), 256);
     let (proof, run) = batch.prove(batch.tables(), false).expect("honest prover");
@@ -514,7 +514,7 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
         assert_eq!(rejecting_place(&batch, &main, &bridge), expected, "{label}");
     };
     let narrow = |column: Column| manifest.locate(column).1;
-    let (z, u) = (DigitValue::Zd, DigitValue::Ud);
+    let (z, u) = (manifest.z_value(), DigitValue::Ud);
     // A 16-bit column changed inside the table: the ring identity (stage 3).
     for column in [
         Column::lane_digit(z, 0, 3),
@@ -579,12 +579,22 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(seed: u64) {
 
 #[test]
 fn ml_dsa_65_piop_round_trip_on_256_signatures() {
-    on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(0x65));
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(Relation::Hu, 0x65));
 }
 
 #[test]
 fn ml_dsa_87_piop_round_trip_on_256_signatures() {
-    on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(0x87));
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(Relation::Hu, 0x87));
+}
+
+#[test]
+fn ml_dsa_65_h_exact_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set65>(Relation::HExact, 0x65e));
+}
+
+#[test]
+fn ml_dsa_87_h_exact_piop_round_trip_on_256_signatures() {
+    on_large_stack(|| lane_round_trip::<agg_witness::params::Set87>(Relation::HExact, 0x87e));
 }
 
 /// The PIOP part of ML-DSA-65 and ML-DSA-87 on a transcript that starts from the real
@@ -593,8 +603,12 @@ fn ml_dsa_87_piop_round_trip_on_256_signatures() {
 /// nonces, the verifier replays them and builds its public data from `(pk, M, c~)` with an
 /// expanded-key cache. Both reach the same PCS session; a changed nonce or a changed `c~` is
 /// caught.
-fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(seed: u64, n_own: usize, n_shared: usize)
-where
+fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
+    relation: Relation,
+    seed: u64,
+    n_own: usize,
+    n_shared: usize,
+) where
     P::CTilde: Sync,
 {
     use agg_piop::binding::{instance_record, public_records_binding, FlockProfile};
@@ -604,7 +618,7 @@ where
     use agg_piop::verifier::{verify_piop_lanes, VerifyTimings};
     use common::transcript_on_record;
 
-    let batch = LaneBatch::build::<P>(seed, n_own, n_shared);
+    let batch = LaneBatch::build_as::<P>(relation, seed, n_own, n_shared);
     let manifest = &batch.manifest;
     let inputs: Vec<(&[u8], &[u8], P::CTilde)> = batch
         .records
@@ -678,15 +692,17 @@ where
 #[test]
 fn ml_dsa_65_piop_round_trip_on_the_instance_record_at_256_and_1k() {
     on_large_stack(|| {
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(0x650, 200, 56);
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(0x651, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x650, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::Hu, 0x651, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set65>(Relation::HExact, 0x652, 200, 56);
     });
 }
 
 #[test]
 fn ml_dsa_87_piop_round_trip_on_the_instance_record_at_256_and_1k() {
     on_large_stack(|| {
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(0x870, 200, 56);
-        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(0x871, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x870, 200, 56);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::Hu, 0x871, 900, 124);
+        lane_round_trip_on_the_instance_record::<agg_witness::params::Set87>(Relation::HExact, 0x872, 200, 56);
     });
 }

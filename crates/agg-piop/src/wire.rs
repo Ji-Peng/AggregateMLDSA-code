@@ -250,8 +250,8 @@ impl AggregateProof {
         let flags = r.array::<1>()?[0];
         let relation = Relation::from_id(flags & 0x0F).ok_or(WireError::Flags(flags))?;
         let set = set_of_nibble(flags >> 4).ok_or(WireError::Flags(flags))?;
-        if set != Set::S44 && relation != Relation::Hu {
-            // ML-DSA-65 and ML-DSA-87 have relation H-u only.
+        if !relation.is_available(set) {
+            // ML-DSA-65 and ML-DSA-87 have relations H-u and H-exact only.
             return Err(WireError::Flags(flags));
         }
         let records = u64::from_le_bytes(r.array()?);
@@ -686,13 +686,19 @@ mod tests {
                         assert_ne!(parsed, proof);
                     }
                 }
-                // Unknown set nibbles and the H-exact and H-FIPS relations are refused.
-                for bad in [0x30_u8, 0xF0, nibble | 1, nibble | 2] {
+                // Unknown set nibbles, the H-FIPS relation and unknown relations are refused.
+                for bad in [0x30_u8, 0xF0, nibble | 2, nibble | 3] {
                     let mut flags = bytes.clone();
                     flags[2] = bad;
                     assert_eq!(AggregateProof::from_bytes(&flags), Err(WireError::Flags(bad)));
                 }
                 assert_eq!(AggregateProof::from_bytes(&bytes[..bytes.len() - 1]), Err(WireError::Truncated));
+                // H-exact: the relation in the low nibble, the shapes of H-u.
+                let exact = sample_proof_in(set, Relation::HExact, records, &mut rng);
+                let exact_bytes = exact.to_bytes();
+                assert_eq!(exact_bytes[2], nibble | 1);
+                assert_eq!(exact_bytes.len(), bytes.len());
+                assert_eq!(AggregateProof::from_bytes(&exact_bytes).unwrap(), exact);
             }
         }
     }

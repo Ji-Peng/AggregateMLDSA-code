@@ -1194,7 +1194,7 @@ pub struct AggregatorConfig {
     /// are whole segments (module docs; default on).
     pub span: bool,
     /// The relation to prove (default H-u). The Keccak side
-    /// does not depend on it. ML-DSA-65 and ML-DSA-87 have H-u only.
+    /// does not depend on it. ML-DSA-65 and ML-DSA-87 have H-u and H-exact.
     pub relation: Relation,
     /// The parameter set of the records (default ML-DSA-44; bound in the instance record
     /// and the proof header).
@@ -1246,7 +1246,8 @@ pub enum AggregateError {
     Prove(ProveError),
     /// The configured Flock profile is not a mode-A profile.
     Profile(FlockProfile),
-    /// The relation is not defined for the parameter set (ML-DSA-65 and ML-DSA-87: H-u only).
+    /// The relation is not defined for the parameter set (ML-DSA-65 and ML-DSA-87: H-u and
+    /// H-exact only).
     Relation(Set, Relation),
 }
 
@@ -1264,7 +1265,7 @@ impl std::fmt::Display for AggregateError {
             Self::Profile(p) => write!(f, "Flock profile {p:?} is not a mode-A profile"),
             Self::Relation(set, relation) => write!(
                 f,
-                "relation {relation} is not available for ML-DSA-{} (H-u only)",
+                "relation {relation} is not available for ML-DSA-{} (H-u and H-exact only)",
                 set.name()
             ),
         }
@@ -1700,7 +1701,7 @@ impl Aggregator {
             return Err(AggregateError::Profile(profile));
         }
         let relation = self.config.relation;
-        if relation != Relation::Hu {
+        if !relation.is_available(P::SET) {
             return Err(AggregateError::Relation(P::SET, relation));
         }
         // The Akita setup and the lane public data on their own thread, as for ML-DSA-44.

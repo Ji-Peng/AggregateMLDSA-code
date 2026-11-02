@@ -281,12 +281,18 @@ pub struct LaneBatch {
 }
 
 impl LaneBatch {
-    /// `n_own` records with their own keys and `n_shared` over three shared keys.
+    /// `n_own` records with their own keys and `n_shared` over three shared keys (relation
+    /// H-u).
     pub fn build<P: ParamSet>(seed: u64, n_own: usize, n_shared: usize) -> Self {
+        Self::build_as::<P>(Relation::Hu, seed, n_own, n_shared)
+    }
+
+    /// [`LaneBatch::build`] under `relation`.
+    pub fn build_as<P: ParamSet>(relation: Relation, seed: u64, n_own: usize, n_shared: usize) -> Self {
         let mut records = gen::records_for::<P>(seed, n_own);
         records.extend(gen::records_shared_keys_for::<P>(seed + 1, n_shared, 3));
         let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
-        let manifest = CommitmentManifest::for_set(P::SET, records.len(), Relation::Hu).expect("manifest");
+        let manifest = CommitmentManifest::for_set(P::SET, records.len(), relation).expect("manifest");
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
         let main = MainTables::build_for::<P>(&manifest, &instance, &signatures).expect("round 1 tables");
         let matrices = bridge_matrices_for(&manifest, seed);
