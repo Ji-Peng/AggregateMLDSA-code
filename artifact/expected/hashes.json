@@ -1,5 +1,5 @@
 {
-  "commit": "1c5516d",
+  "commit": "738fa5b",
   "relation": "h-u",
   "records": "keygen-batch --params P --count 1024 --seed 42; sign-batch --params P --count 1024 --seed 43",
   "aggregates": {
@@ -7,7 +7,7 @@
       "1024": {
         "h-u": {
           "bytes": 427196,
-          "sha256": "e835d80abc740529d0a614dc991658ab7866a4555ddc9f2a3c071c2965eeaa15"
+          "sha256": "45d783e495d0c7ab726bd4486a7e3eebfc40e35b8462ba56f143ab2ac51dbe06"
         }
       }
     },
@@ -15,7 +15,7 @@
       "1024": {
         "h-u": {
           "bytes": 448765,
-          "sha256": "468c8537dfb2ca4c6f448d8a0538c1682eb5c275cc0f5171434384c657a13027"
+          "sha256": "50d2dcbbf02635c167b6f9ec5b5fe66c47f600947216e332447cd24dbac19444"
         }
       }
     },
@@ -23,7 +23,7 @@
       "1024": {
         "h-u": {
           "bytes": 489195,
-          "sha256": "de846538e4b0bc322cf47507b971d294d6a8eeb3793c9b704482cdd87c1a61be"
+          "sha256": "3e2019d9c6d660a59cfb7a21d9c570008fd94b8fcd68c0e187b3b9160da24a9e"
         }
       }
     }
