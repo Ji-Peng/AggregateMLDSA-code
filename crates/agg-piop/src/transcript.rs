@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(gammas, [5, 4, 6]);
         assert_eq!(exact_registry.work_bits(), 2270);
         assert_eq!(work_bytes(&exact), 284);
-        // H-FIPS: gamma^(2) has 9 coefficients (def_y1, leaf8[K_2], leaf8[K_3] and F3, g = 4),
+        // H-FIPS: gamma^(2) has 9 coefficients (def_y1, leaf8[K_2], leaf8[K_3] and F_e, g = 4),
         // gamma^(3) 56 (g = 6); stage-2 terminals add delta and e, stage 3 opens 40 claims.
         let fips = CommitmentManifest::for_relation(100, crate::manifest::Relation::HFips).unwrap();
         assert_eq!(stage_gammas(&fips), [26, 9, 56]);

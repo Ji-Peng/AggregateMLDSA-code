@@ -232,7 +232,7 @@ fn eq_instances(rng: &mut SplitMix64) -> Vec<GroupInstance> {
             }],
         ),
         instance(rng, vec![Term::Product(vec![1])]),
-        // H-FIPS's F3 shape: powers of one lane, a two-lane and a three-lane product, and a
+        // H-FIPS's F_e shape: powers of one lane, a two-lane and a three-lane product, and a
         // constant, expanded by the plan into polynomial, bilinear and generic pieces.
         instance(
             rng,

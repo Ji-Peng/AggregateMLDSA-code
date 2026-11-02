@@ -18,7 +18,7 @@
 //!
 //! Relation H-FIPS has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
 //! leaves and adds one instance after them (gamma 8): the degree-3 zero-check
-//! `F3 = e (e - 1)(e - delta)` at `r^(1)`
+//! `F_e = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and
 //! `e(r^(2))`, reduced in stage 3. Every other H-FIPS check has degree at most 2 and sits in
 //! stage 3.
@@ -45,7 +45,7 @@ use crate::OpeningField as E;
 pub const STAGE: usize = 2;
 /// Message degree (`leaf8[K_2]`: the `eq` factor times `Q_8(P_Z)`).
 pub const DEGREE: usize = 5;
-/// H-FIPS instances of stage 2 (`F3`).
+/// H-FIPS instances of stage 2 (`F_e`).
 pub const FIPS_INSTANCES: usize = 1;
 
 /// Batching coefficients: 10 under H-u, 9 under H-exact and H-FIPS (the leaves of `K_2`
@@ -60,7 +60,7 @@ fn bits(manifest: &CommitmentManifest) -> usize {
     manifest.shape().w1_bits
 }
 
-/// Gamma index of H-FIPS's `F3`.
+/// Gamma index of H-FIPS's `F_e`.
 #[must_use]
 pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
     bits(manifest) + manifest.leaf_digits().len()
@@ -70,7 +70,7 @@ pub fn gamma_fips(manifest: &CommitmentManifest) -> usize {
 /// `r^(2)`.
 pub const FIPS_TERMINALS: [Column; 2] = [Column::DELTA, Column::WRAP];
 
-/// `F3 = e (e - 1)(e - delta) = e^3 - e^2 - e^2 delta + e delta` in the lanes `[delta, e]`.
+/// `F_e = e (e - 1)(e - delta) = e^3 - e^2 - e^2 delta + e delta` in the lanes `[delta, e]`.
 #[must_use]
 pub fn fips_edge_term() -> Term {
     let (delta, e) = (0, 1);
@@ -184,7 +184,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
         });
     }
     if manifest.is_fips() {
-        // F3 on the main domain at r^(1).
+        // F_e on the main domain at r^(1).
         groups.push(GroupSpec {
             domain: GroupRole::Main,
             eq: EqPoint::R1,
@@ -201,7 +201,7 @@ pub fn spec(manifest: &CommitmentManifest) -> StageSpec {
 }
 
 /// The claimed sums in gamma order: the level-1 sum for `def_y1`, zero for the leaves and
-/// H-FIPS's `F3`.
+/// H-FIPS's `F_e`.
 #[must_use]
 pub fn claimed_sums(manifest: &CommitmentManifest, stage1: &Stage1Claims, kappa1: &Kappa1Claims) -> Vec<E> {
     let mut claims = vec![E::zero(); gamma_count(manifest)];
@@ -374,7 +374,7 @@ mod tests {
         spec.validate().unwrap();
         assert_eq!(gamma_count(&manifest), 9);
         // def_y1, the leaves of K_2, K_3 on the projection domain (H-FIPS has no
-        // main-domain leaf digit) and F3 at r^(1).
+        // main-domain leaf digit) and F_e at r^(1).
         assert_eq!(spec.groups.len(), 3);
         assert_eq!(spec.groups[1].lanes, vec![LaneId::DigitSquare(Column::K_2), LaneId::DigitSquare(Column::K_3)]);
         assert_eq!(spec.groups[1].instances[0].gamma, 6);
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(f3.instances[0].gamma, 8);
         assert_eq!(f3.instances[0].terms, vec![fips_edge_term()]);
         assert!(fips_edge_term().degree() + 1 <= DEGREE);
-        // F3 vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
+        // F_e vanishes exactly on e in {0, 1, delta} for delta in {-1, 0, 1}.
         for delta in -1_i64..=1 {
             for e in -3_i64..=3 {
                 let values = [E::from_i64(delta), E::from_i64(e)];

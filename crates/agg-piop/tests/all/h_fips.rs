@@ -131,23 +131,23 @@ fn check_pointwise(batch: &Batch) {
     let w1 = w1_table(&main.bit_lanes(manifest));
     for x in 0..manifest.padded_records() * POSITIONS {
         let [s, delta, e, l_lo, l_hi] = cells(manifest, main, x);
-        assert_eq!(s * (s - 1), 0, "F1 at {x}");
-        assert_eq!(delta * (delta - (2 * s - 1)), 0, "F2 at {x}");
-        assert_eq!(e * (e - 1) * (e - delta), 0, "F3 at {x}");
-        assert_eq!(e * (e + 1) * w1[x], 0, "F4 at {x}");
-        assert_eq!(e * (e - 1) * (w1[x] - 43), 0, "F5 at {x}");
-        assert_eq!(2 * e * w1[x] + 43 * e * e - 43 * e, 0, "F45 at {x}");
-        assert_eq!(l_hi * (l_hi - 1), 0, "F6 at {x}");
+        assert_eq!(s * (s - 1), 0, "F_s at {x}");
+        assert_eq!(delta * (delta - (2 * s - 1)), 0, "F_delta at {x}");
+        assert_eq!(e * (e - 1) * (e - delta), 0, "F_e at {x}");
+        assert_eq!(e * (e + 1) * w1[x], 0, "e (e + 1) w1' at {x}");
+        assert_eq!(e * (e - 1) * (w1[x] - 43), 0, "e (e - 1)(w1' - 43) at {x}");
+        assert_eq!(2 * e * w1[x] + 43 * e * e - 43 * e, 0, "F_w1 at {x}");
+        assert_eq!(l_hi * (l_hi - 1), 0, "bool[l_hi] at {x}");
         assert!((0..1 << 16).contains(&(l_lo + i64::from(LOOKUP_SHIFT))), "L_lo at {x}");
     }
-    // F7 per signature, padded ones included (u_h = 80 there).
+    // F_omega per signature, padded ones included (u_h = 80 there).
     let slack = main.hint_slack();
     assert_eq!(slack.len(), manifest.padded_records());
     for i in 0..manifest.padded_records() {
         let weight: i64 = (0..POSITIONS)
             .map(|p| main.column(manifest, Column::DELTA).value(i * POSITIONS + p).pow(2))
             .sum();
-        assert_eq!(weight + slack[i], OMEGA as i64, "F7 of signature {i}");
+        assert_eq!(weight + slack[i], OMEGA as i64, "F_omega of signature {i}");
         if i >= manifest.records() {
             assert_eq!(slack[i], OMEGA as i64);
         }
@@ -280,38 +280,38 @@ fn h_fips_tamperings_fail_at_the_stated_place() {
             assert_eq!(u_of(f(before)), u_of(before), "the tamper keeps u at {x}");
         };
         let plain = find(&batch, |c, w| c[1] == 0 && c[2] == 0 && w != 0 && w != 43 && c[0] == 1);
-        // F1: s = 2 (stage 3; the ring moves too).
+        // F_s: s = 2 (stage 3; the ring moves too).
         assert_eq!(tampered(plain, &|c| [2, c[1], c[2], c[3], c[4]]), Some(3), "s = 2");
-        // F2: delta = -sigma = -1 at s = 1 (stage 3; the ring and the weight move too).
+        // F_delta: delta = -sigma = -1 at s = 1 (stage 3; the ring and the weight move too).
         assert_eq!(tampered(plain, &|c| [c[0], -1, c[2], c[3], c[4]]), Some(3), "delta = -sigma");
-        // F3: e = -1 at delta = 0 with L - 1 (u = gamma_2 s + L + 1 - gamma_2 - e) keeping u:
-        // only F3 (stage 2) and F45 (stage 3) see it; stage 2 comes first.
-        let f3 = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
-        let f3_at = find(&batch, |c, w| {
+        // F_e: e = -1 at delta = 0 with L - 1 (u = gamma_2 s + L + 1 - gamma_2 - e) keeping u:
+        // only F_e (stage 2) and F_w1 (stage 3) see it; stage 2 comes first.
+        let e_neg = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
+        let e_neg_at = find(&batch, |c, w| {
             c[0] == 1 && c[1] == 0 && c[2] == 0 && c[4] == 0 && c[3] >= 1 - i64::from(LOOKUP_SHIFT) && w != 0 && w != 43
         });
-        keeps_u(f3_at, &f3);
-        assert_eq!(tampered(f3_at, &f3), Some(2), "e = -1 at delta = 0");
-        // F4: e = 1 at w1' != 0 with L + 1 keeping u: F3 holds (e = 1), only F45 sees it.
-        let f4 = |c: [i64; 5]| [c[0], c[1], 1, c[3] + 1, c[4]];
-        let f4_at = find(&batch, |c, w| {
+        keeps_u(e_neg_at, &e_neg);
+        assert_eq!(tampered(e_neg_at, &e_neg), Some(2), "e = -1 at delta = 0");
+        // The edge w1' = 0: e = 1 at w1' != 0 with L + 1 keeping u: F_e holds (e = 1), only F_w1 sees it.
+        let e_one = |c: [i64; 5]| [c[0], c[1], 1, c[3] + 1, c[4]];
+        let e_one_at = find(&batch, |c, w| {
             c[0] == 1 && c[1] == 0 && c[2] == 0 && c[4] == 0 && c[3] + 1 < i64::from(LOOKUP_SHIFT) && w != 0
         });
-        keeps_u(f4_at, &f4);
-        assert_eq!(tampered(f4_at, &f4), Some(3), "e = 1 at w1' != 0 (F45 alone)");
-        // F5: e = -1 at delta = -1 and w1' != 43 with L - 1 keeping u: F3 holds (e = delta),
-        // only F45 sees it.
-        let f5 = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
-        let f5_at = find(&batch, |c, w| {
+        keeps_u(e_one_at, &e_one);
+        assert_eq!(tampered(e_one_at, &e_one), Some(3), "e = 1 at w1' != 0 (F_w1 alone)");
+        // The edge w1' = 43: e = -1 at delta = -1 and w1' != 43 with L - 1 keeping u: F_e holds (e = delta),
+        // only F_w1 sees it.
+        let e_minus_one = |c: [i64; 5]| [c[0], c[1], -1, c[3] - 1, c[4]];
+        let e_minus_one_at = find(&batch, |c, w| {
             c[0] == 0 && c[1] == -1 && c[2] == 0 && c[3] >= 1 - i64::from(LOOKUP_SHIFT) && w != 43
         });
-        keeps_u(f5_at, &f5);
-        assert_eq!(tampered(f5_at, &f5), Some(3), "e = -1 at w1' != 43 (F45 alone)");
-        // F6: l_hi = -1 with l_lo + 29,696 keeps L and u: only bool[l_hi].
-        let f6 = |c: [i64; 5]| [c[0], c[1], c[2], c[3] + L_STEP, -1];
-        let f6_at = find(&batch, |c, _| c[4] == 0 && c[3] + L_STEP < i64::from(LOOKUP_SHIFT));
-        keeps_u(f6_at, &f6);
-        assert_eq!(tampered(f6_at, &f6), Some(3), "l_hi = -1");
+        keeps_u(e_minus_one_at, &e_minus_one);
+        assert_eq!(tampered(e_minus_one_at, &e_minus_one), Some(3), "e = -1 at w1' != 43 (F_w1 alone)");
+        // bool[l_hi]: l_hi = -1 with l_lo + 29,696 keeps L and u: only bool[l_hi].
+        let l_hi_neg = |c: [i64; 5]| [c[0], c[1], c[2], c[3] + L_STEP, -1];
+        let l_hi_neg_at = find(&batch, |c, _| c[4] == 0 && c[3] + L_STEP < i64::from(LOOKUP_SHIFT));
+        keeps_u(l_hi_neg_at, &l_hi_neg);
+        assert_eq!(tampered(l_hi_neg_at, &l_hi_neg), Some(3), "l_hi = -1");
         // The other split of an L in the overlap is a valid witness.
         let split = |c: [i64; 5]| [c[0], c[1], c[2], c[3] - L_STEP, 1];
         let split_at = find(&batch, |c, _| c[4] == 0 && c[3] - L_STEP >= -i64::from(LOOKUP_SHIFT));
@@ -323,7 +323,7 @@ fn h_fips_tamperings_fail_at_the_stated_place() {
             Some(0),
             "l_lo = 2^16"
         );
-        // F7: u_h + 1 (stage 3), u_h - 1 (stage 3), and a dropped hint (delta -> 0, u_h + 1:
+        // F_omega: u_h + 1 (stage 3), u_h - 1 (stage 3), and a dropped hint (delta -> 0, u_h + 1:
         // the ring moves, stage 3).
         for delta in [1_i64, -1] {
             let mut main = batch.main.clone();
