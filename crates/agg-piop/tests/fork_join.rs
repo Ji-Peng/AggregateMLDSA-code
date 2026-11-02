@@ -1,4 +1,4 @@
-//! The fork-join transcript (`docs/soundness.md`): the transcript never absorbs the Keccak
+//! The fork-join transcript: the transcript never absorbs the Keccak
 //! side's proof items, so no PIOP challenge, no PCS session digest and no Akita challenge
 //! depends on them; the side's challengers receive the digest of the final-vector record,
 //! and the side's verifier is the only check on the items. The share items are absorbed at

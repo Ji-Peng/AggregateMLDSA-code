@@ -1,10 +1,10 @@
-//! Group layouts (16-bit lookup digits, `docs/lookup.md`) and the
+//! Group layouts (16-bit lookup digits) and the
 //! generated fold-schedule catalogs.
 //!
 //! The seven witness groups, in wire and catalog order, are `G_main16` and `G_main4`
 //! (round 1) and `G_1`, `G_2`, `G_3`, `G_k`, `G_m` (round 2); `G_m` (the multiplicity
 //! digits of the lookup table `T_16`) is Akita's final group and the others are precommitted
-//! groups. `G_k` holds the digits of the projection outputs of `v` (`docs/spec.md`, the projection definition).
+//! groups. `G_k` holds the digits of the projection outputs of `v`.
 //! Two presets share one batch: the width-16 family (`G_main16`, `G_1`, `G_2`, `G_3`, `G_k`) and
 //! the width-4 family (`G_main4`, `G_m`). Akita freezes the source bound into each group's
 //! own profile, so a precommitted group of either family enters the final family's grouped
@@ -16,14 +16,14 @@
 //! precommitted layout in its own family's catalog, whose root profile is the producer
 //! profile of that group.
 //!
-//! The relation (`docs/h-exact.md`) changes the polynomial count of `G_main4`
+//! The relation changes the polynomial count of `G_main4`
 //! (8 for H-u, 9 for H-exact, whose extra Boolean column `a_z` is the slack of the exact `z`
 //! form, 12 for H-FIPS, which adds the sign bit, `delta` and `e`) and of `G_2` (13 for
 //! H-FIPS: the hint slack `u_h` on `D_2`), so every layout,
 //! row name and catalog key is a function of `(d_sig, relation)`. [`CATALOG_D_SIG`] lists the
 //! H-u batch sizes, [`CATALOG_D_SIG_H_EXACT`] the H-exact and [`CATALOG_D_SIG_H_FIPS`] the
 //! H-FIPS ones whose rows are checked in ([`catalog_batches`] lists all);
-//! `tests/all/schedule_catalog_regen.rs` regenerates them (`docs/pcs-config.md`).
+//! `tests/all/schedule_catalog_regen.rs` regenerates them.
 
 use akita_params::PolynomialGroupLayout;
 
@@ -47,7 +47,7 @@ pub const TABLE_VARS: usize = 16;
 pub const MULTIPLICITY_DIGITS: usize = 7;
 /// Groups of one batch.
 pub const GROUP_COUNT: usize = 7;
-/// Rows of the `{0,1}` projection of `v` (`docs/spec.md`, the projection definition), log2: `128 = 2^7`.
+/// Rows of the `{0,1}` projection of `v`, log2: `128 = 2^7`.
 pub const PROJ_ROW_VARS: usize = 7;
 
 /// Batch sizes (`d_sig`) whose relation-H-u catalog rows are generated and checked in:
@@ -62,12 +62,12 @@ pub const CATALOG_D_SIG_H_FIPS: &[usize] = &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
 
 /// Relation byte of H-u: the proof header's flags byte and byte 3 of the instance-record bytes.
 pub const RELATION_HU: u8 = 0;
-/// Relation byte of H-exact (`docs/h-exact.md`).
+/// Relation byte of H-exact.
 pub const RELATION_H_EXACT: u8 = 1;
-/// Relation byte of H-FIPS (`docs/h-exact.md`).
+/// Relation byte of H-FIPS.
 pub const RELATION_H_FIPS: u8 = 2;
 
-/// The relation a proof certifies (`docs/h-exact.md`). Its id is bound twice: as
+/// The relation a proof certifies. Its id is bound twice: as
 /// the proof header's flags byte and in the instance-record manifest bytes; it selects the layout of
 /// `G_main4` and hence the catalog rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -78,7 +78,7 @@ pub enum Relation {
     /// H-exact: the FIPS 204 bounds `|z| <= 130,993` and `|u| <= 190,465`, both exact.
     HExact,
     /// H-FIPS: H-exact's bounds and the hint: the extracted `(c~, z, h)` is a FIPS 204
-    /// signature (`docs/h-exact.md`).
+    /// signature.
     HFips,
 }
 

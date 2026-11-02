@@ -1,6 +1,5 @@
 //! Stage 1: bridge Booleanity and levels 2 and 3, w1Encode Booleanity and, for ML-DSA-44,
-//! the bit-range identity. The lookup into `T_16` proves the other ranges
-//! (`docs/lookup.md`).
+//! the bit-range identity. The lookup into `T_16` proves the other ranges.
 //!
 //! `gamma^(1)` order with `w` bits of `w_1'` (6 for ML-DSA-44, 4 otherwise) and `k_L`
 //! polynomial lanes per bit (1 for ML-DSA-44, `k` otherwise): `bool_y1[t]` (`0..w`),
@@ -324,7 +323,7 @@ fn prove_with(
 }
 
 /// The verifier's bridge weights at the stage-1 terminal `r^(1)`: `w_2(r^(1)_1)` for the
-/// point `tau_2` and `w_{3,t}(r^(1)_2)` for `tau_3` (`docs/bridge.md`), each one
+/// point `tau_2` and `w_{3,t}(r^(1)_2)` for `tau_3`, each one
 /// `c_t` build and one sparse contraction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeWeightsAt {

@@ -5,7 +5,7 @@
 //! Point conventions (least significant coordinate first): a main-domain point `r` splits
 //! as `(r[..8], r[8..10], r[10..]) = (coef, row or column, sig)`; the suffix of length
 //! `d_1` splits as `(rho_1: 13, beta = (i_mid, sigma))`, of length `d_2` as `(rho_2: 13,
-//! sigma)`, of length `d_3` as `(rho_3: 12, sigma)` (`docs/witness.md`).
+//! sigma)`, of length `d_3` as `(rho_3: 12, sigma)`.
 //!
 //! Bridge weight of level `t` at a point `pi` on `D_t`: `eq(pi_beta, beta) c_t(zeta)` with
 //! `c_t(zeta) = sum_rho M_t[rho, zeta] eq(pi_rho, rho)`, one `J_t`-entry vector per level

@@ -1,4 +1,4 @@
-//! Relation H-exact (`docs/h-exact.md`) at the PIOP level (the lookup and the three
+//! Relation H-exact at the PIOP level (the lookup and the three
 //! stages, no commitments): an honest round trip, the pointwise identities on the Boolean
 //! domain, instance tamperings rejected at the stated place, and synthetic
 //! statements at the value boundaries `z = +-130,994` and `u = +-190,466` whose public `T`

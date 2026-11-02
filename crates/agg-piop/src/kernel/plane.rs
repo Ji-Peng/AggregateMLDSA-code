@@ -1,5 +1,5 @@
-//! Dedicated sum-check groups of the LogUp-GKR sessions on lane-major `K` planes
-//! (`docs/lookup.md`, `docs/piop.md`). Prover only.
+//! Dedicated sum-check groups of the LogUp-GKR sessions on lane-major `K` planes.
+//! Prover only.
 //!
 //! The round polynomial is unique, so any exact computation of it gives the messages of
 //! the generic [`super::Group`] byte for byte. A group's summand is a bilinear form with

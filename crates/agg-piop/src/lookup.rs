@@ -1,5 +1,5 @@
-//! Lookup-based range argument (`docs/lookup.md`): `LogUp` (Haboeck, ePrint 2022/1530) with
-//! the GKR fractional sum-check of Papini and Haboeck (ePrint 2023/1284) over `F_p`,
+//! Lookup-based range argument: `LogUp` (Haboeck) with
+//! the GKR fractional sum-check of Papini and Haboeck over `F_p`,
 //! challenges in `K = F_{p^2}`.
 //!
 //! A *stack* is a list of committed digit columns of one domain that are looked up in one
@@ -22,7 +22,7 @@
 //! point of `K^depth`, an Akita opening claim in the integrated protocol (here checked by
 //! the caller). One rational identity is proven per table: tables are never merged by
 //! integer offsets, because a committed value is an arbitrary `F_p` element and an offset
-//! tag does not stop a column from matching another table's entries (`docs/lookup.md`).
+//! tag does not stop a column from matching another table's entries.
 //!
 //! Every sum-check runs on [`crate::kernel::Group`] through its public constructors only:
 //! layer lanes are `Source::Field` halves of the stored layers, leaf lanes are
@@ -608,7 +608,7 @@ impl LookupShape {
 // Fiat-Shamir.
 // ---------------------------------------------------------------------------------------
 
-/// The events of a lookup in transcript order (`docs/piop.md`).
+/// The events of a lookup in transcript order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LookupSite {
     /// The challenges `X_1 .. X_c` (one vector challenge).
@@ -1926,7 +1926,7 @@ fn prove_with(
             table_claims[t] = Some((rho.clone(), line(leaf[0], leaf[1], mu)));
         }
         point = rho;
-        // Layer `s` is no longer read: unmapped on a detached thread, off the PIOP branch's
+        // Layer `s` is not read again: unmapped on a detached thread, off the PIOP branch's
         // critical path.
         let done: Vec<Layer> = trees
             .iter_mut()
@@ -2162,8 +2162,8 @@ mod tests {
             .collect()
     }
 
-    /// The main-domain stack `[z_lo | u_lo]` with honest-looking values (the encoder of
-    /// `docs/lookup.md`: `z + 2^17`; relation H-u's `B_ulo = u + 190,465 - 63,079 H_u`).
+    /// The main-domain stack `[z_lo | u_lo]` with honest-looking values (the lookup
+    /// encoder: `z + 2^17`; relation H-u's `B_ulo = u + 190,465 - 63,079 H_u`).
     fn main_stack(rng: &mut SplitMix64, vars: usize) -> LookupStack<'static> {
         let cells = 1 << vars;
         let mut columns: Vec<Vec<i32>> = (0..2).map(|_| Vec::with_capacity(cells)).collect();
@@ -2554,7 +2554,7 @@ mod tests {
         });
     }
 
-    /// The cost of a work nonce at the challenge site of `X` (`docs/lookup.md`): Akita's
+    /// The cost of a work nonce at the challenge site of `X`: Akita's
     /// `preview_grinding_predicate` per candidate (clone the Blake2b512 sponge, absorb the
     /// 4-byte nonce, squeeze 32 bytes), serial as in Akita's `search_grinding_nonce`, and
     /// on 7 threads.

@@ -291,7 +291,7 @@ pub const HINT_ZERO: (usize, usize) = (2, 101);
 
 /// A synthetic but genuine FIPS 204 signature of hint weight exactly 80 with a coefficient
 /// `w' = q - gamma2, h = 0` at [`HINT_CORNER`] and `w' = 0, h = 1` at [`HINT_ZERO`] (relation
-/// H-FIPS, `docs/h-exact.md`). The public key has `t1 = 0` (a well-formed
+/// H-FIPS). The public key has `t1 = 0` (a well-formed
 /// 1,312-byte key; pkDecode, FIPS 204 Algorithm 23, accepts any bytes), so Algorithm 8 computes
 /// `w'_Approx = A z` independently of `c` (line 9): `z` is drawn uniform in `[-B_z, B_z]` and two
 /// of its coefficients are moved (a 2x2 solve modulo `q`) so that `A z` hits both targets, then

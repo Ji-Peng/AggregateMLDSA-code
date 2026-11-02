@@ -1,4 +1,4 @@
-//! Public bridge weights (`docs/bridge.md`), generic over the shape and
+//! Public bridge weights, generic over the shape and
 //! the field (any `jolt_field::Ring`; the PIOP instantiates them with its opening field).
 //!
 //! For level `t` at a point `pi = (pi_rho, pi_beta)` of `D_t` the summation weight of the

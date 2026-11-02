@@ -1,4 +1,4 @@
-//! ML-DSA-44 witness generation for the aggregation PIOP (`docs/spec.md`).
+//! ML-DSA-44 witness generation for the aggregation PIOP.
 //!
 //! Pipeline: `instance::PublicInstance` (verifier precomputation) -> `derive::derive`
 //! (per-signature witness: z, u, v, w1' and the bits); `fast` is the batched derivation of the
@@ -8,7 +8,6 @@
 //! bridge, `digits` the value forms the PIOP commits. `hfips` holds relation H-FIPS (relation
 //! byte 2): its per-coefficient witness, derivation, integer checker (failures reported
 //! through `check`) and the extraction of a FIPS 204 signature.
-//! Bounds enforced are listed in docs/witness.md.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
 #![allow(clippy::needless_range_loop)]

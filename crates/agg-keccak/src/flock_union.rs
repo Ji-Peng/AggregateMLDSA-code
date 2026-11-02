@@ -1,10 +1,9 @@
-//! Boolean Flock union proofs with the caller's evaluation claims (docs/keccak.md,
-//! docs/bridge.md).
+//! Boolean Flock union proofs with the caller's evaluation claims.
 //!
 //! Flock ties committed words to each other and to public words only through its
 //! wiring argument, whose cost is one cell-slot (one gather claim, 16 proof bytes, one
 //! `2^nu`-cell column) per schema word of a type: for a one-row type that is one claim per
-//! copied word (docs/keccak.md). The tied part ([`crate::tied`]) needs a
+//! copied word. The tied part ([`crate::tied`]) needs a
 //! different tie, `z_hat(point) = value` claims on the committed polynomial at points of the
 //! caller's choosing. Flock's merged opening already carries such claims
 //! ([`PackedDirectClaim`], the intake of the wiring's gather claims and of the element
@@ -85,8 +84,8 @@ fn x_full(point: &QuirkyPoint) -> Vec<F128> {
     v
 }
 
-/// A ring-switched claim of the caller on the committed BIT polynomial
-/// (`docs/parity-chain.md`): `z_bit(point) = value` where the point's in-word bits
+/// A ring-switched claim of the caller on the committed BIT polynomial:
+/// `z_bit(point) = value` where the point's in-word bits
 /// 0..5 are the multilinear skip coordinates `skip` (Flock's `SkipPoint::Eq`) and `x_full`
 /// is in-word bit 6 followed by the `M - 7` word-address coordinates (rows low, as a
 /// packed-direct point). Unlike a packed-direct claim it goes through Flock's ring switch

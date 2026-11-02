@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the workspace tests on CPUs 0,1,3-15 (CPU 2 is reserved), then the lib
 # tests of the vendored flock-core, which the workspace excludes (Cargo.toml `exclude`) and
-# whose patched verifier the Keccak side depends on (vendor/flock-core/PATCH.md).
+# whose patched verifier the Keccak side depends on.
 # Usage: scripts/test.sh [extra cargo test args...]   e.g. scripts/test.sh --release -p agg-witness
 # The vendored lib tests run in their own target directory ($FLOCK_CORE_TARGET_DIR, default
 # target/flock-core), with --release if the arguments contain it; they are skipped when the

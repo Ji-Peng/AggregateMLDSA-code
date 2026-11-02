@@ -1,9 +1,9 @@
 //! The aggregate prover: commitment rounds, bridge seed, Keccak side, the lookup into
-//! `T_16`, the three stages and the Akita opening in transcript order (`docs/lookup.md`).
+//! `T_16`, the three stages and the Akita opening in transcript order.
 //! [`prove_piop`] is the PIOP part after the commitments (lookup, pre-stage claims, stages
 //! 1 to 3), shared with the stage tests.
 //!
-//! Fork-join (`docs/perf.md`): the final-vector step absorbs the final vectors and the Keccak side's
+//! Fork-join: the final-vector step absorbs the final vectors and the Keccak side's
 //! share items only; the transcript never absorbs the Flock proofs. No PIOP or Akita
 //! challenge depends on them, so after the final-vector step the prover runs
 //! [`KeccakSide::prove`] on its own rayon pool ([`flock_pool_threads`]) while the PIOP
@@ -15,7 +15,7 @@
 //! `agg_bridge::seed`) and [`KeccakSide`] produces the Flock commitments and sub-proofs
 //! (`agg-keccak`; `mode_b::PublicBits` in mode B). The stand-ins `FixedMatrices` (matrices
 //! that ignore the seed) and `NoKeccak` (Flock profile 0) exist only in unit tests and with
-//! the `test-hooks` feature (`docs/deviations.md`).
+//! the `test-hooks` feature.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -103,7 +103,7 @@ impl BridgeDerivation for SeededMatrices {
 /// Fixed matrices whatever the seed (test stand-in: unit tests and the `test-hooks`
 /// feature only). The prover knows them before it commits `G_main`, so the bridge's
 /// soundness bound does not hold; mode A refuses them, mode B stays sound through its direct
-/// bit check (`docs/deviations.md`).
+/// bit check.
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct FixedMatrices(pub BridgeMatrices);
 
@@ -116,8 +116,7 @@ impl BridgeDerivation for FixedMatrices {
 
 /// The Keccak argument's contributions (the commitment phase, the final-vector step and the proof items).
 pub trait KeccakSide {
-    /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites,
-    /// `docs/soundness.md`), a function of the public batch geometry, needed
+    /// The Keccak side's part of the proof-of-work plan (its tied parts' tie sites), a function of the public batch geometry, needed
     /// before the instance record. The default (no tied parts) fits a side without Flock sub-proofs.
     fn plan(&self, _segments: usize) -> KeccakPlan {
         KeccakPlan::default()
@@ -155,8 +154,7 @@ pub trait KeccakSide {
     /// `fs_sigma` (the Flock seed step), `final_vectors` the `Y_sigma` and `record` the digest of the
     /// final-vector record ([`crate::transcript::flock_record_digest`]: the final vectors and the
     /// share items), which the side MUST bind into every challenger of its sub-proofs, so
-    /// that their challenge addresses encode the input of the lookup challenge `X`
-    /// (`docs/soundness.md`).
+    /// that their challenge addresses encode the input of the lookup challenge `X`.
     ///
     /// # Errors
     /// [`ProveError::Keccak`] if a sub-proof cannot be made (an exhausted proof-of-work
@@ -375,8 +373,8 @@ pub fn max_flock_threads() -> usize {
 }
 
 /// With `AGG_PHASE_STAMPS` set, print `phase-stamp <name> <unix time in ns>` on stderr when
-/// a prover step ends, so that an external CPU sampler can be aligned with the steps
-/// (`docs/perf.md`). Prover diagnostics only; off by default, no effect on the proof.
+/// a prover step ends, so that an external CPU sampler can be aligned with the steps.
+/// Prover diagnostics only; off by default, no effect on the proof.
 pub fn phase_stamp(name: &str) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("AGG_PHASE_STAMPS").is_some()) {
@@ -591,7 +589,7 @@ pub struct ProverInputs<'a, P: ParamSet = Set44> {
     pub records: &'a [(&'a [u8], &'a [u8], P::CTilde)],
     /// The signatures, in order.
     pub signatures: &'a [&'a [u8]],
-    /// The relation to prove (`docs/h-exact.md`): H-u, H-exact or H-FIPS.
+    /// The relation to prove: H-u, H-exact or H-FIPS.
     pub relation: Relation,
 }
 

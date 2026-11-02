@@ -1,7 +1,7 @@
 //! Coded columns: an `i8` column whose cells fall into at most 16 classes under the maps
 //! of the lanes reading it, the pair codes of its cells (one byte per pair), the pattern
 //! spaces of pairs and quartets, and the pattern-mass accumulation of the compact rounds
-//! (Aerie's `CodedSource`, `chunked_bucket_sums`; `docs/piop.md`).
+//! (Aerie's `CodedSource`, `chunked_bucket_sums`).
 
 use jolt_field::Zero;
 use rayon::prelude::*;
@@ -264,8 +264,8 @@ pub(super) fn masses(
     // the wider table instead of one pass over the items). Every other segment is split into
     // item ranges in proportion to its share of the item work (one code read per column and
     // one table update per item), and a task owns one segment over one range: a table is
-    // replicated only over its own segment's ranges, and a joint segment of several columns
-    // no longer runs on one thread while the pool idles. The item weights are computed once
+    // replicated only over its own segment's ranges, so a joint segment of several columns
+    // does not run on one thread while the pool idles. The item weights are computed once
     // for all tasks.
     let parents = marginal_parents(segments, &widths, items);
     let cost: Vec<usize> = segments

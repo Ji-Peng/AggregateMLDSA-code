@@ -1,8 +1,8 @@
-//! The tied part (docs/parity-chain.md): the sponge
+//! The tied part: the sponge
 //! instance with the virtual parity chain (one sum-check from the public final vectors to a
 //! bit-level claim on the sponge commitment). Round trips at 5 records (padded positions, `d
 //! = 3`), 64 (`d = 6`), 256 (`d = 8`), 512 (`d = 9`, one full level-1 block) and 1,024 (`d =
-//! 10`, two level-1 blocks per lane), spans, the tampering cases of docs/parity-chain.md
+//! 10`, two level-1 blocks per lane), spans, the tampering cases of the parity chain
 //! with their error names, the precomputed commitment, and a segment split into parts whose
 //! shares XOR to the segment's `Y`. The bridge seed is
 //! derived from the Flock commitments, so the sponge witnesses and the part's bits are
@@ -933,7 +933,7 @@ fn tied_part_profiles_bytes_and_times() {
 /// proof of work at `AGG_GRIND_BITS` (default `16,20,22,24`) bits with Flock's challenger
 /// (the fused BLAKE3 PoW and squeeze its Ligerito levels use, parallel on the rayon pool),
 /// median of `AGG_TIED_REPS` (default 5) grinds from distinct transcript states, for the
-/// grinding-versus-queries trade of docs/keccak.md.
+/// grinding-versus-queries trade.
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn ligerito_query_grinding_cost() {

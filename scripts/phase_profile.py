@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-step wall time and CPU busy share of stamped proves (docs/perf.md).
+"""Per-step wall time and CPU busy share of stamped proves.
 usage: phase_profile.py RUN [RUN ...]  where RUN.cpu is scripts/cpusample.py output and RUN.err
 the stderr of `AGG_PHASE_STAMPS=1 agg aggregate`; prints the median over the runs."""
 import sys, statistics as S

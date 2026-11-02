@@ -1,12 +1,12 @@
 //! Stage 3 (degree 3): the ring identity with `(A z)` pulled back through the public
 //! matrices, the range links, the Booleanity zero-checks of H-exact's bit digits, the
-//! evaluation reductions to `r^(3)`, the five lookup-stack reductions (`docs/lookup.md`) and
-//! the two sides of the projection identity of `v` (`projection`, `docs/spec.md`, the projection definition).
+//! evaluation reductions to `r^(3)`, the five lookup-stack reductions and
+//! the two sides of the projection identity of `v` (`projection`).
 //!
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
 //! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3, `link[K_3]` 4;
 //! H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
-//! 3, `bool[a_z]` 4; claim 0, `docs/h-exact.md`), then the reductions: `b_t` from `r^(1)`
+//! 3, `bool[a_z]` 4; claim 0), then the reductions: `b_t` from `r^(1)`
 //! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
 //! `j = 0..5`: `sum_x eq(pi_j, x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >= cols}
@@ -24,7 +24,7 @@
 //! (H-u) or `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` (H-exact), `u = U_lo + 63,079
 //! U_hi + 31,540`, `v = V_lo + 2^16 V_hi + 2^15`.
 //!
-//! Relation H-FIPS (`docs/h-exact.md`): `link[K_2]`, `link[K_3]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
+//! Relation H-FIPS: `link[K_2]`, `link[K_3]`, `bool` for `bz_hi`, `l_hi`, `a_z`, then
 //! four H-FIPS checks after the bools ([`Gammas::fips_check`]): `F1 = s (s - 1)`,
 //! `F2 = delta (delta - 2 s + 1)` (`delta (delta - sigma)` with `sigma = 2 s - 1`),
 //! `F45 = 2 e w_1' + 43 e^2 - 43 e` (equivalent to `e (e + 1) w_1' = 0` and
@@ -1110,7 +1110,7 @@ mod tests {
         }
     }
 
-    /// The H-FIPS checks of stage 3 evaluate to their polynomials (`docs/h-exact.md`) at
+    /// The H-FIPS checks of stage 3 evaluate to their polynomials at
     /// random field values, so each zero-check is tested on its own: the tamper tests of
     /// `tests/all/h_fips.rs` for `F1` (`s = 2`) and `F2` (`delta = -sigma`) also move the ring
     /// identity, and an in-range `L` cannot isolate `F2`. Also pins the ring's H-FIPS slice to

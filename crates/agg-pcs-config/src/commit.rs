@@ -1,5 +1,4 @@
-//! Two-round commit driver and the batched opening of the seven groups
-//! (`docs/spec.md`).
+//! Two-round commit driver and the batched opening of the seven groups.
 //!
 //! Round 1 commits `G_main16` and `G_main4` before the bridge seed; round 2 commits
 //! `G_1`, `G_2`, `G_3` and, last, the final group `G_m` against the precommitted profiles

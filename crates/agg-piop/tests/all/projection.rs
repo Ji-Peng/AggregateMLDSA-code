@@ -1,4 +1,4 @@
-//! The `{0, 1}` projection of `v` (`docs/spec.md` and `docs/soundness.md`, the projection
+//! The `{0, 1}` projection of `v` (the projection
 //! definition and bound):
 //! the real attack on an unbounded quotient, the range and binding of the outputs `k`, the
 //! shared claim, the digits of `v` that are no longer range-checked, and the honest abort.

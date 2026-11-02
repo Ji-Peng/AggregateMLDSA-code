@@ -1,5 +1,4 @@
-//! Akita commitment presets and catalogs for the seven witness groups
-//! (`docs/spec.md`, `docs/pcs-config.md`).
+//! Akita commitment presets and catalogs for the seven witness groups.
 
 pub mod catalogs;
 pub mod commit;

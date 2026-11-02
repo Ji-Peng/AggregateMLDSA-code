@@ -10,7 +10,7 @@
 //! `K`. The ordered registry rejects a missing, extra or out-of-order event before it
 //! reaches the sponge. Prover and verifier run the same state machine.
 //!
-//! Forked transcript (`docs/spec.md`, the forked transcript): after the final-vector step the sponge is cloned into
+//! Forked transcript: after the final-vector step the sponge is cloned into
 //! branch L (the lookup) and branch S (`tau`, the pre-stage claims,
 //! stages 1 and 2). Each branch first absorbs its own label ([`FORK_LOOKUP_SITE`],
 //! [`FORK_STAGES_SITE`]), so the two clones diverge before their first challenge. The join
@@ -19,7 +19,7 @@
 //! the verifier recomputes both. The packed nonce stream keeps registry order: the trunk's
 //! nonces through the final-vector step, then L's, then S's, then the trunk's after the join.
 //!
-//! Grinding (`docs/soundness.md`): every protected event
+//! Grinding: every protected event
 //! with difficulty `g > 0` is preceded by a work nonce `v < 2^(g + 7)`, absorbed as the
 //! public message `LE32(v)`; the 32-byte predicate squeezed next must have its low `g` bits
 //! zero (Akita's `grinding_predicate_accepts`), and the challenge is squeezed after it from
@@ -89,7 +89,7 @@ pub const FINAL_VECTOR_BYTES: usize =
 pub const INSTANCE_SITE: &str = "agg-mldsa/v1/instance";
 pub const FLOCK_COMMIT_SITE: &str = "agg-mldsa/v1/commit/flock";
 pub const BRIDGE_SEED_SITE: &str = "agg-mldsa/v1/bridge/seed";
-/// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v` (`docs/spec.md`, the projection definition): one
+/// The projection matrix `Psi in {0, 1}^(128 x 1024)` of `v`: one
 /// challenge event after the bridge seed and before the round-2 commitments, whose answer is
 /// `Psi` itself ([`PROJ_ATOMS`] blocks of 32 bytes, 16 KiB, no field sampling).
 /// [`Transcript::challenge_psi`] absorbs the 21 raw bytes of this site name first, so that
@@ -266,7 +266,7 @@ struct RegistryEvent {
     kind: u8,
     atoms: usize,
     size: PayloadSize,
-    /// The protected site of a field-challenge event (`docs/soundness.md`).
+    /// The protected site of a field-challenge event.
     work: Option<WorkSite>,
 }
 
@@ -491,7 +491,7 @@ pub fn cshake256(customization: &[u8], data: &[u8], out_len: usize) -> Vec<u8> {
 /// the `S` share items framed as absorbed (`LE64(len) || bytes`), cSHAKE256 with
 /// customization [`FLOCK_RECORD_CUSTOMIZATION`]. The Keccak side binds it into every tied
 /// part's challengers (mode A: through the part and span seeds), so that every Flock
-/// challenge address encodes the input of the lookup challenge `X` (`docs/soundness.md`).
+/// challenge address encodes the input of the lookup challenge `X`.
 #[must_use]
 pub fn flock_record_digest(final_vectors: &[[u8; FINAL_VECTOR_BYTES]], shares: &[Vec<u8>]) -> [u8; 32] {
     let mut data = Vec::with_capacity(8 + FINAL_VECTOR_BYTES * final_vectors.len());
@@ -610,7 +610,7 @@ fn preview(sponge: &TranscriptSponge, nonce: u32) -> (TranscriptSponge, [u8; GRI
     (sponge, predicate)
 }
 
-/// Bytes of the packed PIOP nonce stream of `manifest` (`docs/soundness.md`).
+/// Bytes of the packed PIOP nonce stream of `manifest`.
 #[must_use]
 pub fn work_bytes(manifest: &CommitmentManifest) -> usize {
     Registry::new(manifest).work_bits().div_ceil(8)
@@ -675,7 +675,7 @@ impl Transcript {
         }
     }
 
-    /// The work of site `site` at registry event `index` (`docs/soundness.md`).
+    /// The work of site `site` at registry event `index`.
     fn grind(&mut self, index: usize, site: WorkSite) -> Result<(), TranscriptError> {
         let Some(bits) = NonZeroU8::new(site.bits) else {
             return Ok(());
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn registry_difficulties_follow_the_soundness_doc() {
-        // The difficulties of `docs/soundness.md` at N = 100 (N* = 128): d_main = 17.
+        // The pinned difficulties at N = 100 (N* = 128): d_main = 17.
         let registry = Registry::new(&manifest());
         let sites: Vec<WorkSite> = registry.work_sites().collect();
         assert_eq!(sites.len(), 245);

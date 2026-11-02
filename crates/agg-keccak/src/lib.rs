@@ -1,6 +1,5 @@
-//! Keccak argument for the witness-dependent SHAKE256 call of ML-DSA verification
-//! (`docs/spec.md`). Built on Flock.
-//! Design, costs and measurements: `docs/keccak.md`.
+//! Keccak argument for the witness-dependent SHAKE256 call of ML-DSA verification.
+//! Built on Flock.
 //!
 //! - [`keccak`]: Keccak-f[1600] on lanes, `phi = pi o rho o theta` and its transpose.
 //! - [`gate`]: the chi-only gate (chains of permutations with absorptions), its rows,
@@ -11,7 +10,7 @@
 //! - [`flock_union`]: boolean Flock union proofs (one or more types) with the caller's
 //!   evaluation claims (packed-direct and ring-switched bit claims) and precomputed
 //!   commitments.
-//! - [`tied`]: the tied part (docs/parity-chain.md): the sponge instance and
+//! - [`tied`]: the tied part: the sponge instance and
 //!   the virtual parity chain whose bit claim its opening proves, the mode-A Flock argument of
 //!   one part.
 

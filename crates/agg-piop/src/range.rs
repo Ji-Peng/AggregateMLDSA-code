@@ -2,7 +2,7 @@
 //! map of the virtual table `P_Z = Z (Z + 1)` and the order of the leaf and link instances
 //! of `Z_hi` (base 4), `U_hi` (base 6, relation H-u) and the projection digits `K_2`, `K_3`
 //! (base 8). Every other range is the lookup into `T_16`
-//! (`lookup`, `docs/lookup.md`).
+//! (`lookup`).
 //!
 //! The map is exact over the integers for every `i8` cell, so the lifted table equals the
 //! polynomial of the lifted digit; the leaf predicates are the [`crate::kernel::LeafPoly`]s

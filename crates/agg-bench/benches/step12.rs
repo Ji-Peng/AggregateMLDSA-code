@@ -1,5 +1,5 @@
-//! Benchmark for Step 1 (PublicInstance), Step 2 (MainTables::build for H-u),
-//! and streamed verifier (StreamedPublic::prepare + pass).
+//! Benchmark of `PublicInstance::new`, `MainTables::build` for H-u
+//! and the streamed verifier (StreamedPublic::prepare + pass).
 
 use std::time::Duration;
 

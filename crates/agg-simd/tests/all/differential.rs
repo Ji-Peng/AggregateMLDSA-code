@@ -577,7 +577,7 @@ fn padded_fills_and_extreme_bottoms_match_direct_sums() {
 fn lane_ring_weights_match_the_four_row_table_and_each_other() {
  use agg_simd::negacyclic::{lane_ring_weight_planes,lane_ring_weight_rows,ring_weights,Matrix};
  let mut seed=2027;
- let mut rk=|s:&mut u64|K::new(F::from_u64(random(s)%P),F::from_u64(random(s)%P));
+ let rk=|s:&mut u64|K::new(F::from_u64(random(s)%P),F::from_u64(random(s)%P));
  // Three records, the last with extreme coefficients, and one padded record.
  let (records,rows)=(3,4*256);
  for k in [4_usize,6,8] {

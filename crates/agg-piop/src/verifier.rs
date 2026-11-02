@@ -27,7 +27,7 @@
 //! `Fast`, `Slim`, `Slim8`) without the seed-derived matrices (the bridge's soundness bound
 //! needs `M_t` sampled after `G_main` and the Flock commitments are fixed); and profile 0
 //! (no Keccak argument, `c~_i` not tied to the bits) outside unit tests and the
-//! `test-hooks` feature (`docs/deviations.md`).
+//! `test-hooks` feature.
 
 use std::time::{Duration, Instant};
 
@@ -68,8 +68,7 @@ pub struct SegmentContext<'a> {
     pub commitment: &'a [u8],
     /// The challenger seed `fs_sigma` (the Flock seed step).
     pub seed: &'a [u8; 32],
-    /// The bridge seed `sd`, whose matrices define the parity chain's weight
-    /// (`docs/bridge.md`, `docs/parity-chain.md`).
+    /// The bridge seed `sd`, whose matrices define the parity chain's weight.
     pub bridge_seed: &'a [u8; 32],
     /// `mu_i` of the segment's live records.
     pub mu: &'a [[u8; TR_BYTES]],
@@ -107,7 +106,7 @@ pub trait KeccakVerifier {
     /// with a different requested profile.
     fn profile(&self) -> FlockProfile;
 
-    /// The Keccak side's part of the proof-of-work plan (`docs/soundness.md`)
+    /// The Keccak side's part of the proof-of-work plan
     /// from the batch geometry and the `S` commitment-phase items (the tied parts' geometry), before
     /// the instance record; `None` refuses the items. The default (no tied parts) fits a side without
     /// Flock sub-proofs.

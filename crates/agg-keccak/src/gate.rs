@@ -169,7 +169,7 @@ impl GateLayout {
         // The chi words start at the next 8-word (1,024-bit) boundary after the constant,
         // so the non-chi columns `[0, 64 t_base)` are whole 8-word blocks and a gate's
         // inputs, outputs and constant can be addressed as aligned word subcubes (the
-        // tied part's evaluation claims, `crate::tied`, docs/keccak.md).
+        // tied part's evaluation claims, `crate::tied`).
         let chi_col = (const_col / 128 + 1).next_multiple_of(8) * 128;
         let t_base = chi_col / 64;
         // The final state is read only by the output rows, so the last round's AND
@@ -1500,8 +1500,7 @@ pub(crate) mod tests {
 
     /// Nonzeros of `A_0` and `B_0` after substituting the implicit states
     /// (what a materialized sparse lowering would store), by GF(2) support
-    /// propagation over the useful columns. Documentation numbers for
-    /// `docs/keccak.md`; run with `--ignored --nocapture`.
+    /// propagation over the useful columns. Run with `--ignored --nocapture`.
     fn flattened_nonzeros(gate: &ChainGate) -> (usize, usize) {
         let lay = gate.layout();
         let spec = gate.spec();

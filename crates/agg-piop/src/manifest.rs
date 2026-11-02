@@ -1,4 +1,4 @@
-//! Exact commitment manifest of one batch (the instance record; `docs/lookup.md`).
+//! Exact commitment manifest of one batch (the instance record).
 //!
 //! Mirrors `aerie-falcon/src/protocol/manifest.rs`: the manifest fixes the canonical wire
 //! order, the commitment round, the preset family, the logical and physical domain of every
@@ -12,20 +12,20 @@
 //! Akita's final group, so PCS execution follows wire order. The alphabets listed here are
 //! the honest producer's; the ranges are proven inside the PIOP (the lookup into `T_16`, the
 //! base-4 and base-6 leaves), never by Akita. `V_lo, V_hi` have no range check: the
-//! projection bounds `v` through `k` (`docs/spec.md`, the projection definition).
+//! projection bounds `v` through `k`.
 //!
-//! Relation H-u (the default, `docs/h-exact.md`): `z` relaxed to `[-2^17, 2^17)`, `u`
+//! Relation H-u (the default): `z` relaxed to `[-2^17, 2^17)`, `u`
 //! exact, `u = B_ulo + 63,079 H_u - 190,465` with `B_ulo` the looked-up `U_lo + 2^15` and
 //! `H_u = U_hi + 3` a six-valued digit, so `|u| <= B_u = 190,465`.
 //!
-//! Relation H-exact (relation byte 1, `docs/h-exact.md`): `u` as in H-u and `z` exact,
+//! Relation H-exact (relation byte 1): `u` as in H-u and `z` exact,
 //! `z = B_zlo + 2^16 B_zhi + 130,915 a_z - 130,993` with `B_zlo = S_zlo + 2^15` looked up (the
 //! slot of `Z_lo`) and `B_zhi`, `a_z` Boolean (`B_zhi` in the slot of `Z_hi`, `a_z` appended
 //! to `G_main4` after the bits), so `|z| <= B_z = 130,993`. The value `z` of H-exact is
 //! [`DigitValue::Zx`] with the columns `bz_lo`, `bz_hi`, `a_z`; the Booleanity of `bz_hi`
 //! and `a_z` is proven by two zero-checks at `r^(2)` in stage 3.
 //!
-//! Relation H-FIPS (relation byte 2, `docs/h-exact.md`): `z` as in H-exact, and in
+//! Relation H-FIPS (relation byte 2): `z` as in H-exact, and in
 //! place of `u`'s digits the per-coefficient witness of `agg_witness::hfips`: the magnitude
 //! `L = L_lo + 29,696 L_hi` ([`DigitValue::L`]: `l_lo` looked up in the slot of `U_lo`, the
 //! bit `l_hi` in the slot of `U_hi`), the sign bit `s = (1 + sigma)/2`, `delta` and `e`
@@ -66,14 +66,14 @@ pub type PcsFamily = Family;
 pub const WIRE_VERSION: u16 = 4;
 /// Identifier of the digit layout: 2 is the lookup layout with the projected quotient
 /// (ranges by the lookup into `T_16`; `v` bounded through the digits of its projection
-/// outputs `k`, `docs/spec.md`, the projection definition). Layout 1 (`V_lo`, `V_hi` looked up) is retired.
+/// outputs `k`).
 pub const DIGIT_LAYOUT_ID: u8 = 2;
 /// Number of committed groups.
 pub const GROUP_COUNT: usize = agg_pcs_config::catalogs::GROUP_COUNT;
-/// Independent lookup challenges `X_1, X_2` (`docs/lookup.md`).
+/// Independent lookup challenges `X_1, X_2`.
 pub const LOOKUP_CHALLENGES: usize = 2;
 /// The balanced storage shift of every looked-up column: the looked-up value is
-/// `f = stored + 2^15` (`docs/lookup.md`).
+/// `f = stored + 2^15`.
 pub const LOOKUP_SHIFT: i32 = 1 << 15;
 
 /// `z + 2^17 = z_lo + 2^16 z_hi` (bases `2^16, 4`, signed): `z = Z_lo + 2^16 Z_hi + 2^15`.
@@ -82,8 +82,8 @@ pub const Z16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16, 4],
     signed: true,
 };
-/// Relation H-exact: `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` over exactly `[-B_z, B_z]`
-/// (`docs/h-exact.md`): `S_zlo = B_zlo - 2^15` looked up, `B_zhi, a_z` bits.
+/// Relation H-exact: `z = S_zlo + 2^16 B_zhi + 130,915 a_z - 98,225` over exactly `[-B_z, B_z]`:
+/// `S_zlo = B_zlo - 2^15` looked up, `B_zhi, a_z` bits.
 pub const ZX16_DIGITS: BitSlackLayout = Z_BIT_SLACK;
 /// `B_ulo = U_lo + 2^15` in `[0, 2^16)` (base `2^16`, unsigned).
 pub const ULO16_DIGITS: DigitLayout = DigitLayout {
@@ -116,7 +116,7 @@ pub const K16_DIGITS: DigitLayout = DigitLayout {
     bases: &[1 << 16, 1 << 16, 8, 8],
     signed: true,
 };
-/// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)` (`docs/spec.md`, the projection definition).
+/// Rows of the projection matrix `Psi in {0, 1}^(128 x 1024)`.
 pub const PROJ_ROWS: usize = 1 << agg_pcs_config::catalogs::PROJ_ROW_VARS;
 /// Bytes of `Psi`, squeezed as the answer of the site `proj/psi` (16 KiB).
 pub const PROJ_BYTES: usize = PROJ_ROWS * agg_witness::params::POSITIONS / 8;
@@ -304,8 +304,8 @@ impl DigitValue {
     }
 }
 
-/// The three per-coefficient columns of relation H-FIPS that are not digits of a value
-/// (`docs/h-exact.md`): in `G_main4` after `a_z`, in this order.
+/// The three per-coefficient columns of relation H-FIPS that are not digits of a value:
+/// in `G_main4` after `a_z`, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FipsColumn {
     /// The sign bit `s = (1 + sigma)/2` in `{0, 1}` (`sigma = 1` iff `r0 > 0`).
@@ -690,7 +690,7 @@ pub fn value_lane_columns(value: DigitValue, lane: u8) -> Vec<Column> {
         .collect()
 }
 
-/// The canonical polynomial order of a group under `relation` (`docs/h-exact.md`): H-exact
+/// The canonical polynomial order of a group under `relation`: H-exact
 /// puts `bz_lo, bz_hi` in the slots of `Z_lo, Z_hi` and appends `a_z` to `G_main4`; H-FIPS
 /// also puts `l_lo, l_hi` in the slots of `U_lo, U_hi`, appends `s, delta, e` to `G_main4`
 /// and `u_h` to `G_2`.
@@ -838,7 +838,7 @@ impl GroupDescriptor {
     }
 }
 
-/// The looked-up columns of one lookup stack (`docs/lookup.md`), in slot order
+/// The looked-up columns of one lookup stack, in slot order
 /// (H-FIPS puts `u_h` in slot 6 of stack 2): `[Z_lo | U_lo]` (the first two `G_main16`
 /// columns, so the stack is the first half of the stacked lane), the carries of levels 1 to
 /// 3, and `[K_0 | K_1]` on the projection domain.
@@ -1173,7 +1173,7 @@ impl CommitmentManifest {
             .sum()
     }
 
-    /// The public shape of the lookup (`docs/lookup.md`): the five stacks
+    /// The public shape of the lookup: the five stacks
     /// `[Z_lo | U_lo]` on the main domain, `kappa^(1)` (6 columns in 8 slots) on `D_1`,
     /// `kappa^(2)` on `D_2`, `kappa^(3)` on `D_3`, `[K_0 | K_1]` on `D_k`, one table `T_16`, two
     /// challenges.

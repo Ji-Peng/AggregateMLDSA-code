@@ -1,4 +1,4 @@
-//! The GF(2) side of the bridge for one segment (`docs/bridge.md`): the forward
+//! The GF(2) side of the bridge for one segment: the forward
 //! composite `Y = M_3 M_2 M_1 b'` and, for tests, its transpose `M_1^T M_2^T M_3^T v` over
 //! `GF(2^128)`.
 //!

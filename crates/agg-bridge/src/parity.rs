@@ -1,4 +1,4 @@
-//! Fp parity tables (`docs/bridge.md`), generic over [`Shape`].
+//! Fp parity tables, generic over [`Shape`].
 //!
 //! Per lane and level the prover proves over the integers
 //! `sum_zeta M_t[rho, zeta] v^(t-1)(zeta) = y^(t)(rho) + 2 kappa^(t)(rho)` with

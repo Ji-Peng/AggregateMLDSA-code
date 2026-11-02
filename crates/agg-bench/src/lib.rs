@@ -1,5 +1,5 @@
-//! Benchmark harness: prover, verifier (cached and uncached) and memory
-//! (`docs/spec.md`). Local runs stay at <= 1K signatures and run on
+//! Benchmark harness: prover, verifier (cached and uncached) and memory.
+//! Local runs stay at <= 1K signatures and run on
 //! CPUs 0,1,3-15 (never CPU 2); 32K runs go to the cloud machine.
 
 pub mod harness;

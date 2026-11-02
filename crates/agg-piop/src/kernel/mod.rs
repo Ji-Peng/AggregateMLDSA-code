@@ -14,7 +14,7 @@
 //! Instances on a smaller domain than the stage are inactive in the leading rounds, where
 //! the message is the constant `claim / 2`, and are lifted by `2^-inactive` (Aerie).
 //!
-//! Round schedule (`docs/piop.md`; every path computes the same round
+//! Round schedule (every path computes the same round
 //! polynomials, so the proof bytes do not depend on it):
 //!
 //! - The terms are compiled into a [`plan::Plan`]: one polynomial per lane, bilinear
@@ -401,7 +401,7 @@ pub enum Term {
     },
     /// `sum_k c_k prod_{l in m_k} v_l`: a polynomial with integer coefficients, each monomial
     /// a list of lanes (with repetition; an empty list is a constant). Relation H-FIPS's
-    /// wrap constraints (`docs/h-exact.md`); evaluated on the generic path.
+    /// wrap constraints; evaluated on the generic path.
     Monomials(Vec<(i64, Vec<usize>)>),
 }
 

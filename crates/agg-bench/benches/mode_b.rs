@@ -20,7 +20,7 @@
 //! times include the derivation (verifier step `matrices`). Times are medians over the timed
 //! runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
 //! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds). `AGG_RELATION=h-exact`
-//! proves and verifies relation H-exact (default `h-u`, `docs/h-exact.md`); the relation is
+//! proves and verifies relation H-exact (default `h-u`); the relation is
 //! printed in the header and in every row.
 
 use std::io::{Read, Write};

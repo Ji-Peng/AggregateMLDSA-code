@@ -332,7 +332,7 @@ impl Stage3Claims {
 }
 
 /// The seven claims `m_k(pi_m)` on the digits of the multiplicity column at the table
-/// tree's final point (`docs/lookup.md`): the verifier checks
+/// tree's final point: the verifier checks
 /// `sum_k 16^k m_k(pi_m) = m(pi_m)` against the lookup's claim; the Akita opening of `G_m`
 /// authenticates them.
 #[derive(Clone, Debug, PartialEq, Eq)]

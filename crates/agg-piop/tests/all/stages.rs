@@ -1,7 +1,7 @@
 //! The PIOP part (the lookup into `T_16` and the three sum-check stages)
 //! on real batches of ML-DSA-44, ML-DSA-65 and ML-DSA-87 signatures: honest round trips whose claims equal the
 //! extensions of the committed and virtual tables, and tampered witnesses and proofs
-//! rejected at the stated place (`docs/lookup.md`).
+//! rejected at the stated place.
 #![allow(clippy::needless_range_loop)]
 
 use crate::common;

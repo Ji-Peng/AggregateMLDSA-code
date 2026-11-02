@@ -1,5 +1,4 @@
-//! The proof-of-work plan of a proof and the packed PIOP nonce stream
-//! (`docs/soundness.md`).
+//! The proof-of-work plan of a proof and the packed PIOP nonce stream.
 //!
 //! The plan is the ordered list of the proof's protected challenge sites: the sites of every
 //! tied part of the Keccak side ([`KeccakPlan`], in segment and part order: the tie site, the
@@ -26,7 +25,7 @@ use crate::transcript::Registry;
 /// Domain label of the plan digest.
 pub const PLAN_LABEL: &[u8] = b"agg-mldsa/v2/pow-plan";
 
-/// Class of a protected site (`docs/soundness.md`; the id is its wire byte).
+/// Class of a protected site (the id is its wire byte).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum SiteClass {
@@ -384,7 +383,7 @@ mod tests {
 
     #[test]
     fn plan_digests_reproduce_the_soundness_doc_vectors() {
-        // The vectors of `docs/soundness.md` (python3 -I docs/scripts/pow_plan.py).
+        // The vectors printed by `python3 -I docs/scripts/pow_plan.py`.
         let cases: [(usize, FlockProfile, Option<bool>, &str); 10] = [
             (
                 3,
@@ -570,7 +569,7 @@ mod tests {
                 .unwrap();
             assert_eq!((gamma2.bits, gamma2.nonce_bits()), (4, 11));
         }
-        // The anchors of `docs/soundness.md`, the pinned anchors (mode B = PublicBits; Slim, span on); the
+        // The pinned anchors (mode B = PublicBits; Slim, span on); the
         // H-u plan is the same.
         for (d_sig, profile, want) in [
             (3, FlockProfile::PublicBits, "c2c88a319a289cce20146a0e8fb87d8203bb9f02a2b0743974290ef94c229ce5"),

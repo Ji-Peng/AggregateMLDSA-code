@@ -1,7 +1,7 @@
 //! AVX-512 NTT for q and P2 (F/BW/VL instructions only).
 //!
 //! The transforms reimplement the register schedule published with
-//! Hybrid-SHA-3 (github.com/xurq5953, `ntt_so_avx512` / `intt_so_avx512`):
+//! the Hybrid-SHA-3 C code (`ntt_so_avx512` / `intt_so_avx512`):
 //! the whole polynomial stays in sixteen ZMM registers, layers 0-3 are
 //! butterflies between registers, layers 4-7 butterflies inside registers
 //! after lane exchanges, and the forward output keeps that schedule's

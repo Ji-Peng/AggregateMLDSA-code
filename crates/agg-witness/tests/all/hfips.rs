@@ -1,6 +1,6 @@
 //! Relation H-FIPS (relation byte 2) on the witness side: derivation from accepted signatures,
 //! the integer checker, the extraction of a FIPS 204 signature, and a synthetic signature of hint
-//! weight exactly 80 with a coefficient `w' = q - gamma2, h = 0` (`docs/h-exact.md`).
+//! weight exactly 80 with a coefficient `w' = q - gamma2, h = 0`.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
 #![allow(clippy::needless_range_loop)]

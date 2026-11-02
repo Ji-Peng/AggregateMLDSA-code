@@ -1,4 +1,4 @@
-//! The final public vector `Y` (`docs/bridge.md`).
+//! The final public vector `Y`.
 //!
 //! `Y_sigma` is `m_3` bits per segment (4,096 in production, 512 bytes), bit `rho_3` at byte
 //! `rho_3 >> 3`, bit position `rho_3 mod 8` (least significant first). The

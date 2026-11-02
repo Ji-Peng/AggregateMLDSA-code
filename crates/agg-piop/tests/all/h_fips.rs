@@ -1,4 +1,4 @@
-//! Relation H-FIPS (`docs/h-exact.md`) at the PIOP level (the lookup and the
+//! Relation H-FIPS at the PIOP level (the lookup and the
 //! three stages, no commitments): honest round trips (random records, and the synthetic
 //! weight-80 records with the coefficient `w' = q - gamma2, h = 0` of
 //! `agg_witness::gen::hint_corner_record`), the pointwise identities on the Boolean domain,

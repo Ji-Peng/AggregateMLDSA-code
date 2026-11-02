@@ -3,7 +3,7 @@
 //! argument, and the PIOP proves the ring identity and the ranges for committed bits tied to
 //! the public ones.
 //!
-//! The public bits take the place of the Keccak side in the transcript (`docs/deviations.md`):
+//! The public bits take the place of the Keccak side in the transcript:
 //! the commitment-phase item of segment `sigma` is the concatenation of `w1Encode(w_1'_i)`
 //! (768 bytes, FIPS 204 Algorithm 28) of the segment's live records in record order, so
 //! the bits are bound before the bridge seed `sd`, as the Flock commitment would be; the
@@ -28,7 +28,7 @@
 //! derivation of prover and verifier builds) ties the committed bits to the public ones up
 //! to `2^-144.6`; check 5 does so on its own, up to `d_main / |K|`, because the
 //! public bits are absorbed before `r^(3)` is sampled, whatever the [`BridgeDerivation`]
-//! (the test stand-in `FixedMatrices` included, `docs/deviations.md`).
+//! (the test stand-in `FixedMatrices` included).
 
 use std::time::Instant;
 

@@ -4,9 +4,9 @@
 //! 16-KiB-leaf cSHAKE256 tree: leaf `i` is `cSHAKE256(block_i, 32)` under
 //! `agg-mldsa/v1/record-leaf`, the root `cSHAKE256(LE64(blocks) || leaves, 32)` under
 //! `agg-mldsa/v1/public-records-binding`. The instance record is the manifest binding
-//! bytes (`docs/piop.md`) followed by this digest, the Flock
+//! bytes followed by this digest, the Flock
 //! profile id and the 32-byte proof-of-work plan digest
-//! ([`crate::pow::PowPlan::digest`], `docs/soundness.md`).
+//! ([`crate::pow::PowPlan::digest`]).
 
 #[cfg(test)]
 use agg_witness::params::C_TILDE_BYTES;

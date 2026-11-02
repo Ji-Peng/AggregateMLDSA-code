@@ -1,5 +1,5 @@
-//! Akita's transcript proof-of-work plan for every grouped catalog row
-//! (`docs/soundness.md`): the pinned Akita revision derives the only
+//! Akita's transcript proof-of-work plan for every grouped catalog row:
+//! the pinned Akita revision derives the only
 //! accepted plan from the row's schedule and the opening layout and binds its digest into
 //! the instance descriptor, on both the prover and the verifier side. This test pins the
 //! plan of each row (sites, difficulties, digest) as a regression guard against a catalog or
@@ -104,7 +104,7 @@ fn akita_plans_of_the_grouped_rows_are_pinned() {
         digests.push(hex(&digest));
     }
     assert_eq!(got, want);
-    // The first plan-digest bytes reported in `docs/soundness.md`.
+    // The pinned first plan-digest bytes.
     assert!(digests[0].starts_with("88f7a3a6"), "{}", digests[0]);
     assert!(digests[12].starts_with("a0119a5e"), "{}", digests[12]);
     assert_eq!(

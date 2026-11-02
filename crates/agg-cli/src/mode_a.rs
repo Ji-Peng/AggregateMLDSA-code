@@ -19,7 +19,7 @@
 //! [`MAX_PARTS_LOG2`]); each part with live records is one tied part (`agg_keccak::tied`,
 //! tied-part proof version 5): a Flock sponge instance of its records whose opening also proves
 //! the bit claim of the virtual parity chain, a sum-check that reduces the part's share
-//! `Y_{sigma, s} = M^{(sigma)} b'_s` to that claim (`docs/parity-chain.md`). The shares XOR to
+//! `Y_{sigma, s} = M^{(sigma)} b'_s` to that claim. The shares XOR to
 //! `Y_sigma` (the last share is implied), which the F_p side proves for the committed bits `b`.
 //! The commitment-phase item carries one cap per part (the sponge instance's), the share item the
 //! shares, the join's item one proof per part ([`crate::wire`]). Part `s` seeds its Flock
@@ -86,10 +86,10 @@ use crate::wire::{SegmentCommitments, SegmentProofs, SegmentShares};
 /// The default Flock profile of mode A (the instance record; [`AggregatorConfig::profile`]): Ligerito
 /// `Fast`, the measured best at 32K (2.97 s on the general build, 2.76 s on the IFMA build
 /// at 16C32T for 49.2 B/sig); `Slim` saves 36% of the Flock bytes for 3% more prover time
-/// at 2,048 records (`docs/keccak.md`).
+/// at 2,048 records.
 pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
 /// The Flock profiles of mode A: Ligerito `Fast`, `Slim` and `Slim8`, all 128 bits
-/// work-normalized in Flock's accounting (`docs/keccak.md`).
+/// work-normalized in Flock's accounting.
 pub const MODE_A_PROFILES: [FlockProfile; 3] =
     [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8];
 /// The mode-A Flock profiles accepted by a default verifier: Ligerito `Fast` and `Slim`.
@@ -115,12 +115,12 @@ fn ligerito_of(profile: FlockProfile) -> Profile {
 /// Default `log2` of the record positions per Flock part. A part of `2^d` records costs a
 /// sponge instance of `2^(d + 19)` bits; the whole segment (`d = 13`) is the target on the
 /// cloud machine, and every local batch (at most 2,048 records) is one part under this
-/// default (`docs/cli.md`).
+/// default.
 pub const DEFAULT_PART_LOG2: u32 = 13;
 /// Smallest admitted part (`2^3` records, the smallest segment).
 pub const MIN_PART_LOG2: u32 = 3;
-/// `log2` of the most tied parts one segment may hold: at most two, so `d_part >= d_seg - 1`
-/// (`docs/soundness.md`). Each part's sponge commitment is bound only to its Johnson list
+/// `log2` of the most tied parts one segment may hold: at most two, so `d_part >= d_seg - 1`.
+/// Each part's sponge commitment is bound only to its Johnson list
 /// when `sd` is drawn, so `sd`'s bad set is a union over the product of the segment's `P`
 /// lists, `L^P theta`; `P <= 2` keeps it below `2^-128` for every mode-A profile.
 pub const MAX_PARTS_LOG2: u32 = 1;
@@ -145,7 +145,7 @@ const Y_BITS: usize = 4096;
 /// to the digest `record` of the final-vector record (`agg_piop::transcript::flock_record_digest`):
 /// `SHA3-256(label || fs || LE64(part) || record)`. Both challengers of the part (tie and
 /// sponge) absorb it first, so every Flock challenge address encodes the input of the
-/// lookup challenge `X` (`docs/soundness.md`).
+/// lookup challenge `X`.
 #[must_use]
 pub fn part_seed(fs: &[u8; 32], part: usize, record: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -185,7 +185,7 @@ fn spans_with_floor(geometry: &Geometry, part_log2: u32, span: bool, floor: u32)
         && SegmentParts::plan_with_floor(geometry, 0, part_log2, floor).d_part == geometry.d_seg()
 }
 
-/// The Keccak side's part of the proof-of-work plan of a mode-A batch (`docs/soundness.md`):
+/// The Keccak side's part of the proof-of-work plan of a mode-A batch:
 /// one tie site for a span (`S` = the segments), else one per part with live records
 /// of every segment in order (`S` = 1), each with the difficulty of its public geometry
 /// ([`TiedPart::plan_work`]: the tie site, the `eq_Y` site and the parity-chain rounds).
@@ -1193,7 +1193,7 @@ pub struct AggregatorConfig {
     /// Prove a batch of more than one segment as one span over all segments when the parts
     /// are whole segments (module docs; default on).
     pub span: bool,
-    /// The relation to prove (`docs/h-exact.md`; default H-u). The Keccak side
+    /// The relation to prove (default H-u). The Keccak side
     /// does not depend on it. ML-DSA-65 and ML-DSA-87 have H-u only.
     pub relation: Relation,
     /// The parameter set of the records (default ML-DSA-44; bound in the instance record
@@ -2494,7 +2494,7 @@ mod tests {
 
     #[test]
     fn plan_digests_reproduce_the_soundness_doc_vectors() {
-        // docs/soundness.md (python3 -I docs/scripts/pow_plan.py), N = N*, default
+        // The vectors of `python3 -I docs/scripts/pow_plan.py`, N = N*, default
         // part size: the plan of the code's own Keccak side and PIOP registry.
         use agg_piop::pow::PowPlan;
         let gate = sponge_gate();

@@ -1,4 +1,4 @@
-//! Proof-of-work arithmetic of the 128-bit schedule (`docs/soundness.md`), shared by the PIOP
+//! Proof-of-work arithmetic of the 128-bit schedule, shared by the PIOP
 //! plan (`agg-piop`) and the tie site of a tied part (`agg-keccak`).
 //!
 //! A site with assigned bound `e` gets the difficulty `g = min{g >= 0 : 2^128 e <= 2^g}`
@@ -6,7 +6,7 @@
 //! `g > 0` (none when `g = 0`). [`grind_bits_k`] is the rule for the PIOP field
 //! `K = F_{p^2}`, `p = 2^64 - 59` (so even `1/|K|` needs one bit, `p^2 < 2^128`);
 //! [`grind_bits_f128`] the rule for `GF(2^128)` (so `1/2^128` needs none). The sites of a
-//! tied part (tied-part proof version 5, `docs/parity-chain.md`: the tie site of
+//! tied part (tied-part proof version 5: the tie site of
 //! the public claim, the `eq_Y` site and one site per parity-chain round) carry the
 //! Johnson-list size of the sponge commitment ([`list_size`], [`part_work`]).
 
@@ -75,7 +75,7 @@ pub fn list_size(rate_log: u32) -> u64 {
     (625_u64 << rate_log).isqrt()
 }
 
-/// The public geometry of one tied part that its tie bound depends on (`docs/soundness.md`).
+/// The public geometry of one tied part that its tie bound depends on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TieGeometry {
     /// `log2` of the record positions per segment of the part.
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn tie_bounds_match_the_soundness_doc() {
-        // The script output of docs/soundness.md, tied-part proof version 5.
+        // The pinned list sizes, tied-part proof version 5.
         assert_eq!([1, 2, 3].map(list_size), [35, 50, 70]);
         let four = TieGeometry {
             d: 13,

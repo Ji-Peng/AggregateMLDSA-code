@@ -1,4 +1,4 @@
-//! Prover-side scheduling helpers (`docs/perf.md`): take the
+//! Prover-side scheduling helpers: take the
 //! one-vCPU windows (single-threaded unmaps of buffers of several GiB, the serial
 //! public-data copy) off the prover's critical path. Nothing here changes an output.
 

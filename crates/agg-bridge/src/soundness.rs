@@ -1,8 +1,8 @@
-//! Soundness constants of the bridge (`docs/bridge.md`).
+//! Soundness constants of the bridge.
 //!
 //! For a nonzero difference `delta = b XOR b'` fixed before the seed, the three seeded levels
-//! all miss it with probability at most `sum_t 1 / binom(m_t, k_t)` (derivation in
-//! `docs/bridge.md`), independent of `J_t`, the row weights and the number of blocks.
+//! all miss it with probability at most `sum_t 1 / binom(m_t, k_t)` (a union bound over
+//! the levels), independent of `J_t`, the row weights and the number of blocks.
 //! Production: `2^-145.64 + 2^-145.64 + 2^-163.44 = 2^-144.64`; toy: `2^-10.75`.
 
 use crate::shape::{LevelShape, Shape};

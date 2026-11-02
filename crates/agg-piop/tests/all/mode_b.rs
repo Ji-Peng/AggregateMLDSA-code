@@ -282,7 +282,7 @@ fn mode_b_round_trip_at_256_signatures_and_corrupted_aggregates_are_rejected() {
             VerifyError::Opening(_)
         ));
 
-        // Work nonces (`docs/soundness.md`): a changed nonce at one site of
+        // Work nonces: a changed nonce at one site of
         // every class is rejected (the prover's nonce is the smallest passing one, so a
         // smaller one fails the predicate; from 0 the next one changes the challenge).
         let manifest = CommitmentManifest::for_batch(256).unwrap();
@@ -420,7 +420,7 @@ fn mode_b_round_trip_at_64_signatures() {
     });
 }
 
-/// Relation H-exact (`docs/h-exact.md`, protocol level): honest round trips at
+/// Relation H-exact (protocol level): honest round trips at
 /// 1, 64 and 256 records; the verifier takes the relation from its caller, so an H-exact
 /// proof verified as H-u and an H-u proof verified as H-exact are rejected before the instance record,
 /// a rewritten relation byte fails, and an unknown relation byte is malformed.
@@ -499,7 +499,7 @@ fn mode_b_h_exact_round_trips_and_the_relation_is_the_callers() {
     });
 }
 
-/// Relation H-FIPS (`docs/h-exact.md`, protocol level): honest round trips at
+/// Relation H-FIPS (protocol level): honest round trips at
 /// 1, 64 and 256 records (the 256-record batch includes the synthetic weight-80 records with
 /// the coefficient `w' = q - gamma2, h = 0`), the claim counts, and cross-relation
 /// verification: an H-FIPS proof verified as H-u or H-exact and an H-exact proof verified as

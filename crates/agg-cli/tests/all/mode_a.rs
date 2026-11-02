@@ -360,7 +360,7 @@ fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     });
 }
 
-/// Relation H-FIPS (`docs/h-exact.md`) in mode A at 64 records (Slim, one Flock
+/// Relation H-FIPS in mode A at 64 records (Slim, one Flock
 /// part) and 256 records (two parts); the cross-relation verifier rejects before the instance record.
 #[test]
 #[cfg_attr(
@@ -698,7 +698,7 @@ fn corrupted_aggregates_are_rejected() {
             Some((0, SegmentRejection::Item(ItemError::Truncated)))
         ));
 
-        // The tie work and binding (tied-part proof version 5, docs/soundness.md): part 1's tie
+        // The tie work and binding (tied-part proof version 5): part 1's tie
         // nonce one below the honest (smallest passing) one, or of 17 bits (Slim at d = 4 with
         // 4 records: nu_s = 3, tie numerator 50 x 6 = 300, 9 bits of work, a nonce of at most
         // 16 bits), fails the predicate; a version-4 proof is refused.
@@ -960,7 +960,7 @@ fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggreg
     });
 }
 
-/// More than two tied parts in a segment (docs/soundness.md): an honest prover that
+/// More than two tied parts in a segment: an honest prover that
 /// splits 20 records (d_seg = 5) into parts of 8 (three parts) builds an aggregate that every
 /// verifier refuses, because `sd`'s bad set would be a union over three Johnson lists.
 #[test]

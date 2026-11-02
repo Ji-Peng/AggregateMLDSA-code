@@ -1,5 +1,4 @@
-//! Dedicated sum-check groups of the LogUp-GKR sessions and of stage 3 (`docs/lookup.md`,
-//! `docs/piop.md`). Prover only.
+//! Dedicated sum-check groups of the LogUp-GKR sessions and of stage 3. Prover only.
 //!
 //! The polynomial of a round is unique, so any exact computation of it gives the messages
 //! of the generic [`super::Group`] byte for byte. These groups compute it from fewer

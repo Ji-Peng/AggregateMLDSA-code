@@ -2,7 +2,7 @@
 //! single-lane polynomials, bilinear products, weighted sums `w (sum c_l v_l + c)` and
 //! residual generic terms, in a source phase (unscaled lanes, the first active round) and
 //! a folded phase (lanes scaled at their first fold), and their evaluation in coefficient
-//! form at `v_l = a_l + X d_l` (`docs/piop.md`).
+//! form at `v_l = a_l + X d_l`.
 
 use jolt_field::{Field, One, Ring, Unreduced, Zero};
 

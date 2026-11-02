@@ -4,7 +4,7 @@
 //!
 //! `gamma^(2)` order: `def_y1[t]` (0..6), then one leaf per leaf-checked digit: H-u has
 //! `leaf4[Z_hi]` (6), `leaf6[U_hi]` (7) and `leaf8[K_2]`, `leaf8[K_3]` (8, 9), H-exact
-//! `leaf6[U_hi]` (6) and `leaf8[K_2]`, `leaf8[K_3]` (7, 8) (`docs/h-exact.md`). `K_2, K_3`
+//! `leaf6[U_hi]` (6) and `leaf8[K_2]`, `leaf8[K_3]` (7, 8). `K_2, K_3`
 //! are the top digits of the projection outputs of `v` (`projection`); their leaves are on the
 //! projection domain at the suffix of `r^(1)`. After
 //! the terminal claims the prover sends the shared claim `c` of the projection identity.
@@ -16,7 +16,7 @@
 //! lanes in manifest order: `leaf8[Z_mid^(s)]` (`l`), `leaf8[U_mid^(rho)]` (`k`), then
 //! `leaf8[K_2]`, `leaf8[K_3]`, `leaf4[K_4]` on the projection domain (18 and 22 instances).
 //!
-//! Relation H-FIPS (`docs/h-exact.md`) has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
+//! Relation H-FIPS has `leaf8[K_2]`, `leaf8[K_3]` (gamma 6, 7) as its
 //! leaves and adds one instance after them (gamma 8): the degree-3 zero-check
 //! `F3 = e (e - 1)(e - delta)` at `r^(1)`
 //! (degree 4 with `eq`; stage 3 has degree 3). Its terminal claims add `delta(r^(2))` and

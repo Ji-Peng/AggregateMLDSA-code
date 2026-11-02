@@ -9,7 +9,7 @@
 //! `BalancedSignedDigit`, and exactly one balanced base-16 inner digit. It is
 //! a separate type only because Akita keys a generated schedule catalog by the
 //! configuration type and its family name, and our group layouts are not in
-//! Aerie's catalog (see `docs/deviations.md`).
+//! Aerie's catalog.
 //!
 //! Akita enforces the declared interval at commitment admission only. It is
 //! not a range proof (Akita); every range in the protocol is
@@ -131,15 +131,14 @@ impl CommitmentConfig for AggFp64SignedWidth4 {
 
 /// Signed commit bound of the width-16 preset, in bits (`[-2^15, 2^15 - 1]`).
 pub const WIDTH16_LOG_COMMIT_BOUND: u32 = 16;
-/// Inner (A/source) log-basis range of the width-16 preset (see `docs/pcs-config.md`;
-/// the planner's choice within it is recorded per catalog row).
+/// Inner (A/source) log-basis range of the width-16 preset (the planner's choice within it is recorded per catalog row).
 pub const WIDTH16_INNER_BASIS_RANGE: (u32, u32) = (16, 16);
 /// Schedule family name of the width-16 preset.
 pub const WIDTH16_FAMILY: &str = "agg_mldsa_fp64_signed_width16";
 
 /// Fp64 preset for signed width-16 sources in `[-2^15, 2^15 - 1]`, with its own catalog:
 /// the balanced 16-bit lookup columns `Z_lo, U_lo, V_lo, V_hi`, the carries and the
-/// level-2 parities (`docs/lookup.md`). Every parameter except the commit bound,
+/// level-2 parities. Every parameter except the commit bound,
 /// the inner-basis range and the family name is the width-4 preset's.
 ///
 /// Like the width-4 preset, the bound is enforced at commitment admission only; the
@@ -364,7 +363,7 @@ mod tests {
 
     /// The width-16 preset differs from the width-4 one in the commit bound, the inner
     /// range and the family only, and its certified interval is exactly the balanced
-    /// 16-bit interval of the lookup columns (`docs/lookup.md`).
+    /// 16-bit interval of the lookup columns.
     #[test]
     fn width16_preset_certifies_the_balanced_sixteen_bit_interval() {
         let (w4, w16) = (

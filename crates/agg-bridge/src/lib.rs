@@ -1,5 +1,4 @@
-//! Parity bridge between the Fp-committed bits b and the GF(2) Keccak argument
-//! (`docs/bridge.md`).
+//! Parity bridge between the Fp-committed bits b and the GF(2) Keccak argument.
 //!
 //! Shared by both sides and generic over the [`shape::Shape`] (production, and the toy shape
 //! of the tests):
@@ -13,7 +12,7 @@
 //! * [`gf2_walker`]: the GF(2) side, the forward composite `M_3 M_2 M_1 b'` of a segment;
 //! * [`parity_chain`]: the GF(2) side as one sum-check over the committed bits;
 //! * [`soundness`]: `sum_t 1 / binom(m_t, k_t)` and the grinding margin;
-//! * [`pow`]: the proof-of-work difficulties of the 128-bit schedule (`docs/soundness.md`);
+//! * [`pow`]: the proof-of-work difficulties of the 128-bit schedule;
 //!
 //! `agg-piop` uses these modules for the production shape; `agg-witness::bridge` keeps its own
 //! production-only computation as an independent reference.

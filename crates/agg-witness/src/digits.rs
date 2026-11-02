@@ -199,7 +199,7 @@ impl SlackLayout {
 }
 
 /// Step form X = step H + b - offset with one top digit H in [0, c) and b in [0, 2^j) given by
-/// unsigned digits (relation H-u, `docs/h-exact.md`). It covers [-offset, step (c - 1) +
+/// unsigned digits (relation H-u). It covers [-offset, step (c - 1) +
 /// 2^j - 1 - offset] without gap when step <= 2^j. Committed digits: the low digits of b, then
 /// the top digit stored balanced, D = H - c/2 in the base-c alphabet [-c/2, c/2 - 1].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,7 +291,7 @@ impl StepLayout {
 }
 
 /// Bit-slack form X = b + 2^j B_hi + w a - offset with b in [0, 2^j) given by unsigned
-/// digits and two Boolean digits B_hi, a (relation H-exact, `docs/h-exact.md`). With
+/// digits and two Boolean digits B_hi, a (relation H-exact). With
 /// w <= 2^(j+1) the four blocks [0, 2^j), [2^j, 2^(j+1)), [w, w + 2^j), [w + 2^j, w + 2^(j+1))
 /// cover [0, w + 2^(j+1) - 1] without gap. Committed digits: the low digits of b, then B_hi,
 /// then a, both stored as bits.
@@ -696,7 +696,7 @@ pub const Z_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
 
 /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` in `[0, gamma2 - 1]` with `L_lo` in
 /// `[0, 2^16)` (one unsigned base-`2^16` digit, stored `L_lo - 2^15`, looked up in `T_16`) and
-/// the bit `L_hi`: `29,696 + 2^16 = gamma2` (`docs/h-exact.md`). As a
+/// the bit `L_hi`: `29,696 + 2^16 = gamma2`. As a
 /// [`ValueForm`]: `L = S_lo + 29,696 L_hi + 2^15`.
 pub const L_SLACK: SlackLayout = SlackLayout {
     slack_weight: crate::hfips::L_STEP,
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn z_bit_slack_form_is_exact_at_the_fips_bound() {
-        // docs/h-exact.md: z = S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225.
+        // The H-exact slack form: z = S_zlo + 65,536 B_zhi + 130,915 a_z - 98,225.
         let form = ValueForm::from(Z_BIT_SLACK);
         assert_eq!(form.len(), 3);
         assert_eq!(form.weights(), vec![1, 1 << 16, SLACK_Z]);
@@ -956,7 +956,7 @@ mod tests {
             // a_z = [z >= 79] (the rule a = [x + offset >= 2^j]).
             assert_eq!(d[2], i64::from(z >= 79), "z = {z}");
         }
-        // Edges and padding of docs/h-exact.md, as (S_zlo, B_zhi, a_z).
+        // Edges and padding, as (S_zlo, B_zhi, a_z).
         assert_eq!(form.decompose(B_Z), vec![32_767, 1, 1]);
         assert_eq!(form.decompose(-B_Z), vec![-32_768, 0, 0]);
         assert_eq!(form.decompose(0), vec![32_689, 1, 0]);

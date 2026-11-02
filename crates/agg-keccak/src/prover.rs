@@ -99,7 +99,7 @@ impl Profile {
     }
 
     /// `floor(L_max)`, the Johnson-list size of a level-0 Ligerito commitment
-    /// (`docs/soundness.md`; the Flock paper's Johnson bound at `eta = 0.02`): 35, 50, 70 for
+    /// (the Flock paper's Johnson bound at `eta = 0.02`): 35, 50, 70 for
     /// `Fast`, `Slim`, `Slim8` (rates 1/2, 1/4, 1/8); 1 for the unique-decoding `Secure`.
     #[must_use]
     pub fn list_size(self) -> u64 {
@@ -147,7 +147,7 @@ pub enum KeccakError {
     /// not match the other instance's or the verifier's table.
     Tie(&'static str),
     /// The prover's proof-of-work search exhausted its allowance of `2^(g + 7)` candidates
-    /// (probability below `2^-184.6` per site, docs/soundness.md).
+    /// (probability below `2^-184.6` per site).
     Work(&'static str),
 }
 
@@ -790,8 +790,7 @@ mod tests {
     use crate::{gate::ChainSpec, keccak};
     use flock_core::test_rng::Rng;
 
-    /// The vendored Flock core's outer sites carry the level-0 Johnson list
-    /// (vendor/flock-core/PATCH.md, docs/soundness.md).
+    /// The vendored Flock core's outer sites carry the level-0 Johnson list.
     #[test]
     fn flock_outer_sites_carry_the_level0_list() {
         use flock_core::{
@@ -813,7 +812,7 @@ mod tests {
             }
             assert!(seen >= 10, "{profile:?}: {seen} configs");
         }
-        // docs/soundness.md, Fast / Slim / Slim8.
+        // The pinned per-challenge grinding of Fast / Slim / Slim8.
         let z = ZerocheckGrinding::per_challenge_128_listed;
         assert_eq!([36, 50, 71].map(|l| z(l).multilinear_round_bits()), [Some(7), Some(7), Some(8)]);
         assert_eq!([36, 50, 71].map(|l| z(l).skip_bits()), [Some(13), Some(13), Some(14)]);

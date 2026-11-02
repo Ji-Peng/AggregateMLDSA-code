@@ -76,13 +76,12 @@ pub enum EqPoint {
     R1,
     /// `r^(2)`.
     R2,
-    /// The low coordinates of the final point of lookup stack `j` (`docs/lookup.md`),
+    /// The low coordinates of the final point of lookup stack `j`,
     /// on the stack's domain.
     Lookup(usize),
     /// `(1/2, ..., 1/2, r^(2)_sig)` on the domain: the signature coordinates of `r^(2)` (its
     /// last `d_sig`) and `1/2` on the others, so that `eq` is `2^-(vars - d_sig)
-    /// eq(r^(2)_sig, i)` at every cell of signature `i` (H-FIPS's hint-weight identity,
-    /// `docs/h-exact.md`).
+    /// eq(r^(2)_sig, i)` at every cell of signature `i` (H-FIPS's hint-weight identity).
     HalfR2,
 }
 

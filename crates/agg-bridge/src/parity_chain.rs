@@ -1,4 +1,4 @@
-//! The virtual parity chain (`docs/parity-chain.md`): the GF(2) side of the
+//! The virtual parity chain: the GF(2) side of the
 //! bridge as one degree-2 sum-check over the committed bits, without the bridge union.
 //!
 //! In characteristic 2 the composite `M = M_3 M_2 M_1` is `GF(2^128)`-linear, so for a random

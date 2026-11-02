@@ -1,4 +1,4 @@
-//! The forked PIOP transcript (`docs/spec.md`, the forked transcript): after the final-vector step branch L (the
+//! The forked PIOP transcript: after the final-vector step branch L (the
 //! lookup) and branch S (`tau` through stage 2) run on two clones of the sponge, and the
 //! join absorbs their digests, L's then S's, before stage 3. The prover's schedules (the
 //! branches side by side off a pool, inside a pool by `rayon::join`, on a one-thread pool,

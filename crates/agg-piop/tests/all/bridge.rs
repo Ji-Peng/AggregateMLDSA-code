@@ -1,4 +1,4 @@
-//! The Fp side of the parity bridge inside the 256-signature prover run (`docs/bridge.md`):
+//! The Fp side of the parity bridge inside the 256-signature prover run:
 //! matrices derived from the transcript's `sd` by the shared
 //! `agg_bridge::seed` on both sides, the honest round-2 tables against the independent
 //! `agg-witness` reference and the GF(2) side, the verifier's bridge weights against the

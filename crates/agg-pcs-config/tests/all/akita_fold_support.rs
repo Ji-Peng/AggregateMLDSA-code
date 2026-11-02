@@ -1,4 +1,4 @@
-//! The fold-support hypothesis of `docs/soundness.md`, discharged: every sparse fold
+//! The fold-support hypothesis of the Akita soundness bound, discharged: every sparse fold
 //! challenge of every row of both generated catalogs (the 26 grouped width-4 rows of
 //! relations H-u and H-exact, the width-4 scalar rows of `G_main4` and the width-16 scalar
 //! rows of `G_main16`, `G_1`, `G_2`, `G_3`) is drawn from a family whose accepted support,
@@ -509,7 +509,7 @@ fn every_fold_challenge_family_has_128_bits_of_accepted_support() {
     // 11 for ML-DSA-65 and 11 for ML-DSA-87 under H-u, where d_sig 3..5 share physical groups)
     // are in the width-4 catalog (the family of the final group G_m).
     assert_eq!((g4, g16), (61, 0));
-    // The families that occur (`docs/soundness.md`).
+    // The families that occur.
     let families = |c: &Census| -> Vec<(usize, usize, usize, Option<usize>)> {
         let mut v: Vec<_> = c.keys().map(|&(_, d, a, b, r)| (d, a, b, r)).collect();
         v.sort_unstable();

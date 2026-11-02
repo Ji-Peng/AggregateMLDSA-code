@@ -2,10 +2,10 @@
 //! `c~_i` (32, 48 or 64 bytes each), then the payloads of the commitments, the final vectors and the
 //! Keccak side's share items, the lookup, the sum-check stages and the join
 //! (the Keccak side's proof items, after stage 3) in transcript order, the packed PIOP nonce
-//! stream (`docs/soundness.md`, its exact length a function of `N`), then the Akita opening.
+//! stream (its exact length a function of `N`), then the Akita opening.
 //! Variable-length items carry a `LE32` length; field elements use the canonical atom
 //! encoding of the transcript; the round and session counts follow from `N`, the stage-2 and
-//! stage-3 claim counts from the relation (`docs/h-exact.md`). The flags byte holds the
+//! stage-3 claim counts from the relation. The flags byte holds the
 //! relation id in its low nibble and the parameter set in its high nibble (0 = ML-DSA-44,
 //! 1 = ML-DSA-65, 2 = ML-DSA-87), so an ML-DSA-44 header is unchanged. The parser reads the
 //! relation and the set from the header; a verifier MUST compare both with the ones it
@@ -92,7 +92,7 @@ pub struct AggregateProof {
     pub stage2: Stage2Proof,
     /// Stage 3.
     pub stage3: Stage3Proof,
-    /// The packed PIOP work nonces in plan order (`docs/soundness.md`).
+    /// The packed PIOP work nonces in plan order.
     pub work: Vec<u8>,
     /// The Akita opening.
     pub opening: Vec<u8>,

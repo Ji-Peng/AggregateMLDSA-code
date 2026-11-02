@@ -8,7 +8,7 @@
 //! and per product form `A[a, b] = sum_hi w L_i(a, hi) L_j(b, hi)`, index `4a + b`. Only raw
 //! integer lane values are multiplied, exactly in `i64`.
 //!
-//! Two leaf shapes (`docs/lookup.md`): the stack *bottom* with the lanes `v_0, v_1` (the two
+//! Two leaf shapes: the stack *bottom* with the lanes `v_0, v_1` (the two
 //! halves of the stacked column; linear form `v_0 + v_1`, product form `v_0 v_1`) and the
 //! *symmetric* layer above it with `S_c = a_c + b_c`, `M_c = a_c b_c` of the centred leaves
 //! `a_c = v(y + c q) - centre`, `b_c = v(y + c q + 2q) - centre`, `q` a quarter of the column

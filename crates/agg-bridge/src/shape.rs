@@ -1,4 +1,4 @@
-//! Bridge shapes (`docs/bridge.md`): three levels `(J_t, m_t, k_t)`, the lanes and
+//! Bridge shapes: three levels `(J_t, m_t, k_t)`, the lanes and
 //! the number `B_1` of level-1 blocks per lane and segment, with the row-weight caps `W_t`.
 //!
 //! Level `t` maps every block of `J_t` input positions to `m_t` outputs with one matrix

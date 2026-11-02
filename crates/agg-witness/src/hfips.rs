@@ -1,4 +1,4 @@
-//! Relation H-FIPS (relation byte 2; `docs/h-exact.md`): the
+//! Relation H-FIPS (relation byte 2): the
 //! exact FIPS 204 verification relation, hint included.
 //!
 //! Per coefficient of `w'` the witness is `(L_lo, L_hi, sigma, delta, e)` with

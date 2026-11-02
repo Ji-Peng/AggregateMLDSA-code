@@ -8,8 +8,7 @@
 //! Only reduced-round instances are lowered this way: the DSL builder stores
 //! the normalized support of every XOR node eagerly, and with implicit states
 //! those supports grow towards half of all committed columns (measured below),
-//! so the 24-round gate is out of reach of the DSL lowering. See
-//! `docs/deviations.md`.
+//! so the 24-round gate is out of reach of the DSL lowering.
 
 use flock_core::circuit::boolean::CircuitBuilder;
 use flock_core::circuit::boolean::{

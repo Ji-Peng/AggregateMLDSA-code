@@ -1,4 +1,4 @@
-//! Sum-check PIOP for the ML-DSA-44 aggregation relation H (`docs/spec.md`).
+//! Sum-check PIOP for the ML-DSA-44 aggregation relation H.
 //!
 //! Aerie's projection, stage and transcript machinery is reached through
 //! `aerie_prover` with its `internals` feature (re-exported below).
@@ -15,7 +15,7 @@
 //! public weight tables, [`transcript`] the Spongefish stream and event registry,
 //! [`wire`] the proof bytes, [`prover`] and [`verifier`] the drivers, [`public_stream`]
 //! the verifier's streamed public data. [`mode_b`] is the Keccak-free aggregate
-//! (`prove_mode_b`, `verify_mode_b`). `docs/piop.md` has the stage table.
+//! (`prove_mode_b`, `verify_mode_b`).
 
 #[allow(unsafe_code)]
 pub mod alloc;
@@ -64,7 +64,7 @@ pub const fn avx512_enabled() -> bool {
 /// Whether the unsound test stand-ins are compiled in (unit tests, or the `test-hooks`
 /// feature): `prover::FixedMatrices`, `prover::NoKeccak`, `verifier::NoKeccakVerifier`,
 /// and verification under Flock profile 0. A prover, verifier or benchmark build has
-/// `false` (`docs/deviations.md`).
+/// `false`.
 #[must_use]
 pub const fn test_hooks_enabled() -> bool {
     cfg!(any(test, feature = "test-hooks"))

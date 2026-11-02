@@ -1,4 +1,4 @@
-//! Batch-level committed source tables (`docs/lookup.md`).
+//! Batch-level committed source tables.
 //!
 //! Mirrors `aerie-prover/src/protocol/source_tables.rs`: one holder per commitment round,
 //! built from the derived witnesses and checked against the [`CommitmentManifest`]:
@@ -11,7 +11,7 @@
 //!   `u + 190,465 = B_ulo + 63,079 H_u` (`H_u = min(floor((u + 190,465) / 63,079), 5)`) stored
 //!   as `U_lo = B_ulo - 2^15`, `U_hi = H_u - 3`. Padded rows carry the digits of zero
 //!   (`Z_lo = V_lo = -2^15`, `U_lo = -31,540`, the rest 0). Under relation H-exact `z` is
-//!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`, `docs/h-exact.md`)
+//!   `z + 130,993 = B_zlo + 2^16 B_zhi + 130,915 a_z` (`a_z = [z >= 79]`)
 //!   stored as `bz_lo = B_zlo - 2^15` (the slot of `Z_lo`), the bit `bz_hi` (the slot of
 //!   `Z_hi`) and the bit `a_z` (the ninth `G_main4` column); the digits of zero are
 //!   `(bz_lo, bz_hi, a_z) = (32,689, 1, 0)`. Under relation H-FIPS `z` is H-exact's, and
@@ -335,7 +335,7 @@ impl<P: ParamSet> RecordValues<P> {
     }
 }
 
-/// The H-FIPS witness of one coefficient from `(u, w_1')` (`docs/h-exact.md`):
+/// The H-FIPS witness of one coefficient from `(u, w_1')`:
 /// `w' = 2 gamma_2 w_1' + u mod q`, `h* = [HighBits(w') != w_1']`, the canonical
 /// `honest_coeff(w', h*)`; `None` when `w_1'` is not reachable from `w'` by any hint bit or
 /// the form's `u` differs (an input outside the honest relation).
@@ -1231,13 +1231,13 @@ impl MainTables {
 }
 
 /// H-FIPS's `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` from `L`, the sign bit
-/// `s = (1 + sigma)/2`, `delta` and `e` (`docs/h-exact.md`), any integers.
+/// `s = (1 + sigma)/2`, `delta` and `e`, any integers.
 #[must_use]
 pub const fn fips_u(l: i64, s: i64, delta: i64, e: i64) -> i64 {
     GAMMA2 * s + l + 1 - GAMMA2 - 2 * GAMMA2 * delta - e
 }
 
-/// H-FIPS's hint slack as a `D_2` table (`docs/h-exact.md`): `u_h(i)` at index
+/// H-FIPS's hint slack as a `D_2` table: `u_h(i)` at index
 /// `i 2^(d_2 - d_sig)` (the low `d_2 - d_sig` variables of `D_2` are position variables when
 /// `d_sig < 13`), zero elsewhere.
 ///
@@ -1616,7 +1616,7 @@ impl BridgeGroupTables {
     }
 }
 
-/// The lookup stacks of the batch (`docs/lookup.md`), borrowed from the tables: the
+/// The lookup stacks of the batch, borrowed from the tables: the
 /// main-domain stacks (consecutive runs of the stacked `G_main16` lane: `[Z_lo | U_lo]`, its
 /// first half, for ML-DSA-44; runs of 8, 2, 1 or 8, 4, 2, 1 of the `Z_lo, U_lo` lanes for
 /// ML-DSA-65 and ML-DSA-87), the stacked carries of levels 1 to 3 and `[K_0 | K_1]` on the

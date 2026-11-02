@@ -1,4 +1,4 @@
-//! The `{0, 1}` projection of the ring quotient `v` (`docs/spec.md`, the projection definition).
+//! The `{0, 1}` projection of the ring quotient `v`.
 //!
 //! After the bridge seed the verifier draws `Psi in {0, 1}^(128 x 1024)` directly as the
 //! answer of the site `proj/psi` (16 KiB of the PIOP duplex; row `o`, position `pos` is bit
@@ -11,7 +11,7 @@
 //! `sum_x W(x) v(x) = c = sum_y eq(r', y) k(y)` with `r'` the `D_k` suffix of `r^(2)` and the
 //! rank-one weight `W(pos, i) = P(pos) eq(r'_sig, i)`, `P(pos) = sum_o eq(r'_o, o) Psi_o(pos)`.
 //!
-//! Soundness (`docs/soundness.md`, the projection bound): `k in [-2^37, 2^37)` for every row certifies
+//! Soundness (the projection bound): `k in [-2^37, 2^37)` for every row certifies
 //! `|v|_c <= 2^38` except with probability `2^-128` over `Psi`, enough for the lifting
 //! bound.
 //!
@@ -133,8 +133,8 @@ pub struct ProjectionTables {
 
 impl ProjectionTables {
     /// The honest digits of the outputs `k` (record-major, `PROJ_ROWS` per record); the
-    /// prover aborts when some `k` leaves `[-2^37, 2^37)` (completeness only:
-    /// `docs/spec.md`, the projection definition) and names the first such record.
+    /// prover aborts when some `k` leaves `[-2^37, 2^37)` (a completeness
+    /// condition, not a soundness one) and names the first such record.
     ///
     /// # Errors
     /// [`SourceTableError::ProjectionRange`] for an output outside the range.

@@ -1,6 +1,6 @@
-//! The tied part (`docs/parity-chain.md`): the Flock argument of one part of a segment (or
+//! The tied part: the Flock argument of one part of a segment (or
 //! of a span of segments) as ONE Flock instance, the sponge instance (the `n` live records'
-//! SHAKE256 gates, docs/keccak.md), and the virtual parity chain
+//! SHAKE256 gates), and the virtual parity chain
 //! ([`agg_bridge::parity_chain`]): a degree-2 sum-check that reduces the public final vectors
 //! `Y_sigma = M_3 M_2 M_1 b'_sigma` to one bit-level evaluation of the sponge commitment,
 //! which the sponge instance's Flock opening proves as a third ring-switched claim
@@ -22,7 +22,7 @@
 //! its proof of work): the public claim's point `(rho_r, rho_c)`; `eq_Y = (r_o, r_y)`; one
 //! challenge per chain round after absorbing its message `(q(1), q(inf))`; then it absorbs
 //! the claimed bit value `v` and squeezes a 32-byte tie binding, which the sponge challenger
-//! absorbs before Flock binds its statement (docs/soundness.md). The verifier recomputes
+//! absorbs before Flock binds its statement. The verifier recomputes
 //! the claim `<eq_Y, Y>`, replays the rounds, checks the last claim against its own weight
 //! `W~(r)` times `eq(r_rec[nu_s..], 0) v`, and Flock's opening proves `v` and the public value.
 //!
@@ -32,7 +32,7 @@
 //! segment `sigma` is row `2^d sigma + i`), and the chain covers `2^span_log >= S` segments,
 //! the final vectors of the segments `S..2^span_log` being zero.
 //!
-//! Work (docs/soundness.md): the sponge commitment is bound only to its Johnson list
+//! Work: the sponge commitment is bound only to its Johnson list
 //! when these challenges are drawn, so the tie site carries `L_s (nu_s + c)` (`c` the public
 //! region's word coordinates: 3, or 4 for ML-DSA-87), the `eq_Y` site
 //! `L_s (log2 m_3 + span_log)` and every round `2 L_s` ([`agg_bridge::pow::part_work`]); the
@@ -200,7 +200,7 @@ pub enum TieWork {
 
 /// The prover's nonce if it lies below the allowance `limit = 2^(g + 7)`: Flock's `grind_pow`
 /// returns the smallest passing nonce, so a larger one means that the first `2^(g + 7)`
-/// candidates all failed (docs/soundness.md).
+/// candidates all failed.
 fn nonce_within(nonce: u64, limit: u64) -> Result<u32, KeccakError> {
     const EXHAUSTED: &str = "tie nonce search exhausted its 2^(g + 7) candidates";
     if nonce >= limit {
@@ -571,7 +571,7 @@ impl<'g> TiedPart<'g> {
         }
     }
 
-    /// The part's work (`docs/soundness.md`).
+    /// The part's work.
     #[must_use]
     pub fn work(&self) -> PartWork {
         part_work(self.profile.list_size(), &self.tie_geometry())
@@ -1048,7 +1048,7 @@ impl<'g> TiedPart<'g> {
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
-    /// candidates (probability below `2^-184.6` per site, docs/soundness.md).
+    /// candidates (probability below `2^-184.6` per site).
     ///
     /// # Panics
     /// If `committed` belongs to another part shape, `ys` has the wrong shape, or Flock
@@ -1405,7 +1405,7 @@ mod tests {
     use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
 
-    /// An exhausted nonce search is an error, not a panic (docs/soundness.md): the
+    /// An exhausted nonce search is an error, not a panic: the
     /// smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one is
     /// kept.
     #[test]
@@ -1870,7 +1870,7 @@ mod tests {
 
     #[test]
     fn work_follows_the_profile_lists() {
-        // docs/soundness.md: tie L_s (nu_s + 3), eq_Y
+        // The per-site work: tie L_s (nu_s + 3), eq_Y
         // L_s (12 + span_log), rounds 2 L_s.
         let gate = sponge_gate();
         let profiles = [Profile::Fast, Profile::Slim, Profile::Slim8];

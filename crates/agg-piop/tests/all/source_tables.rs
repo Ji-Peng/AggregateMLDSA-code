@@ -203,7 +203,7 @@ fn committer_rejects_malformed_tables_before_akita() {
     ));
 }
 
-/// Relation H-exact (`docs/h-exact.md`): the encoder writes `bz_lo` into the slot
+/// Relation H-exact: the encoder writes `bz_lo` into the slot
 /// of `Z_lo`, the bits `bz_hi`, `a_z` into `G_main4` (nine columns), the canonical digits
 /// of zero on padded rows, and refuses `|z| > 130,993`; the values decoded from the H-exact
 /// tables equal the derived ones and the H-u tables' values, and the slack bit is
