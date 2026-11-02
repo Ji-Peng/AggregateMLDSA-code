@@ -29,13 +29,14 @@ use std::sync::Arc;
 use aerie_falcon::protocol::algebra::eq_table;
 use agg_witness::expand::ExpandedKey;
 use agg_witness::instance::{InstanceError, PublicInstance};
-use agg_witness::native::{mu, sample_in_ball_for, Challenge};
+use agg_witness::native::{sample_in_ball_for, Challenge};
 use agg_witness::padding::Geometry;
 use agg_witness::params::{ParamSet, Set, N, TR_BYTES};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
 use crate::public_data::eq_correlation;
+use crate::public_stream::distinct_keys;
 use crate::OpeningField as E;
 
 /// Variables of the coefficient index `j`.
@@ -204,44 +205,49 @@ impl LanePublicData {
         if let Some(cache) = cache.as_ref() {
             assert_eq!(cache.set, P::SET, "a cache of the batch's parameter set");
         }
-        let mut distinct: Vec<&[u8]> = Vec::new();
-        let mut first_record = Vec::new();
-        let mut index: HashMap<&[u8], usize> = HashMap::new();
-        let key_of: Vec<usize> = inputs
-            .iter()
-            .enumerate()
-            .map(|(i, &(pk, _, _))| {
-                *index.entry(pk).or_insert_with(|| {
-                    distinct.push(pk);
-                    first_record.push(i);
-                    distinct.len() - 1
-                })
-            })
+        let (distinct, key_of) = distinct_keys(inputs);
+        let first_record: Vec<usize> = distinct.iter().map(|(_, records)| records[0]).collect();
+        let cached: Vec<Option<Arc<LaneKey>>> = distinct
+            .par_iter()
+            .map(|&(pk, _)| cache.as_ref().and_then(|c| c.get(pk)))
             .collect();
-        let cached: Vec<Option<Arc<LaneKey>>> =
-            distinct.iter().map(|&pk| cache.as_ref().and_then(|c| c.get(pk))).collect();
-        let expanded = cached.iter().filter(|hit| hit.is_none()).count();
+        let fresh: Vec<bool> = cached.iter().map(Option::is_none).collect();
+        let expanded = fresh.iter().filter(|&&f| f).count();
         let keys = distinct
             .par_iter()
             .zip(cached)
             .zip(&first_record)
-            .map(|((pk, hit), &record)| match hit {
+            .map(|((&(pk, _), hit), &record)| match hit {
                 Some(key) => Ok(key),
                 None => ExpandedKey::<P>::from_bytes_for(pk)
                     .map(|key| Arc::new(LaneKey::from_expanded(&key)))
                     .ok_or(InstanceError::PublicKey(record)),
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Only fresh expansions enter the cache; a hit is already there.
         if let Some(cache) = cache.as_mut() {
-            for key in &keys {
+            for (key, _) in keys.iter().zip(&fresh).filter(|(_, &f)| f) {
                 cache.insert(Arc::clone(key));
             }
         }
+        // `mu = H(tr || 0 || 0 || M)` (pure mode, empty context), 64 records per multi-lane call.
+        let engine = agg_mldsa_simd::engine();
         let (mu, challenges): (Vec<[u8; TR_BYTES]>, Vec<Challenge>) = inputs
-            .par_iter()
-            .zip(key_of.par_iter())
-            .map(|(&(_, msg, ref c_tilde), &key)| {
-                (mu(&keys[key].tr, msg, &[]), sample_in_ball_for::<P>(c_tilde.as_ref()))
+            .par_chunks(64)
+            .zip(key_of.par_chunks(64))
+            .flat_map_iter(|(input_tile, key_tile)| {
+                let count = input_tile.len();
+                let mut mu_inputs = [[&[][..]; 4]; 64];
+                for (slot, (&(_, msg, _), &key)) in mu_inputs.iter_mut().zip(input_tile.iter().zip(key_tile)) {
+                    *slot = [&keys[key].tr[..], &[0u8, 0u8], &[], msg];
+                }
+                let mut mu_out = [0u8; 64 * TR_BYTES];
+                engine.shake256_many(&mu_inputs[..count], TR_BYTES, &mut mu_out[..count * TR_BYTES]);
+                (0..count).map(move |j| {
+                    let mut mu = [0u8; TR_BYTES];
+                    mu.copy_from_slice(&mu_out[j * TR_BYTES..(j + 1) * TR_BYTES]);
+                    (mu, sample_in_ball_for::<P>(input_tile[j].2.as_ref()))
+                })
             })
             .unzip();
         Ok(Self {

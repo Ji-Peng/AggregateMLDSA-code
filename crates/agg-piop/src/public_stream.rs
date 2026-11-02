@@ -136,7 +136,7 @@ pub struct StreamedPublic {
 }
 
 /// The distinct keys with their records, and the key index of every record.
-type DistinctKeys<'a> = (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>);
+pub(crate) type DistinctKeys<'a> = (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>);
 
 /// Groups the records by their full encoded public key: the distinct keys in order of first
 /// appearance, each with its records in increasing order, and the key index of every record.
@@ -148,7 +148,7 @@ type DistinctKeys<'a> = (Vec<(&'a [u8], Vec<usize>)>, Vec<usize>);
 /// collisions; a collision only costs a byte comparison), a parallel sort of the record
 /// indices by (hash, key bytes, index), one linear scan for the runs of equal keys and a sort
 /// of the runs by their first record.
-fn distinct_keys<'a>(inputs: &[(&'a [u8], &[u8], [u8; C_TILDE_BYTES])]) -> DistinctKeys<'a> {
+pub(crate) fn distinct_keys<'a, C: Sync>(inputs: &[(&'a [u8], &[u8], C)]) -> DistinctKeys<'a> {
     let state = RandomState::new();
     let hashes: Vec<u64> = inputs
         .par_iter()
