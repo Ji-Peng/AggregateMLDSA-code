@@ -1072,7 +1072,7 @@ tuples). The canonical decomposition is H-u's rule (`a_z = [z + B_z >= 2^19]`).
   integers) with `z = +-B_z` accepted and `z = +-(B_z + 1)` rejected by the lookup, the leaf or
   the Booleanity zero-check alone, and the same values accepted under H-u. `agg-cli`: the full
   mode-A driver at 256 under H-exact with crossed verifiers, and the binary round trip. All
-  four `AGG_ISA` tiers give the same 1K aggregates (65: `a0635d36...`, 87: `21f6699e...`), and
+  four `AGG_ISA` tiers give the same 1K aggregates (65: `25ef0267...`, 87: `805772d9...`, at `ae63935`), and
   the H-u aggregates of every set keep the bytes of `artifact/expected/hashes.json`.
 
 ### 11.2 H-FIPS (relation byte 2), as implemented
@@ -1156,7 +1156,7 @@ in stage 2; `l_lo = 2^15` in the lookup) and the instance-record round trip at 2
 mode-A driver at 256 and the binary round trip with crossed relations. Measured sizes (mode A,
 default profile): 256 records 417,840 B (65; H-u 417,317 B) and 464,119 B (87; H-u 463,476 B);
 1,024 records 450,534 B (65; H-u 448,765 B) and 489,943 B (87; H-u 489,195 B), identical on all
-four `AGG_ISA` tiers. Not yet done: the synthetic weight-`omega` records with the corner
+four `AGG_ISA` tiers (sha256 `c0d7a615...` and `d71fc19f...` at `ae63935`). Not yet done: the synthetic weight-`omega` records with the corner
 coefficient `w' = q - gamma2, h = 0` (ML-DSA-44's `gen::hint_corner_record`), the mode-B path
 (44 only) and timings.
 
