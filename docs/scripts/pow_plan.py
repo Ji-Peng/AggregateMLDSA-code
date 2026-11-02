@@ -7,7 +7,8 @@ Run (isolated mode, standard library only):
     python3 -I docs/scripts/pow_plan.py --details 15 # every site of N* = 2^15, default config
     python3 -I docs/scripts/pow_plan.py --relation h-exact  # relation H-exact (docs/h-exact.md)
     python3 -I docs/scripts/pow_plan.py --relation h-fips   # relation H-FIPS (docs/h-exact.md)
-    python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65 (H-u only)
+    python3 -I docs/scripts/pow_plan.py --set 65            # ML-DSA-65
+    python3 -I docs/scripts/pow_plan.py --set 65 --relation h-fips
     python3 -I docs/scripts/pow_plan.py --set 87 --details 15
 
 What it computes, with exact integer arithmetic:
@@ -89,6 +90,13 @@ SETS = {
            "degrees": (3, 5, 3), "gammas": (45, 22, 132), "lane_vars": 2, "block_log": 8, "p_pad_bits": 11, "public_vars": 4},
 }
 SET = SETS["44"]
+# H-FIPS of ML-DSA-65 and ML-DSA-87: stage 2 trades leaf8[U_mid] for F_e per row lane (same length),
+# stage 3 gains 5 k + 1 coefficients (Booleanity of l_mid, F_s, F_delta, F_w1 per row, F_omega, the
+# reductions of delta and e; minus link[U_mid]). The hint slack u_h is a fifth column of the
+# level-2 carry stack, padded from 4 to 8 slots. H-exact keeps H-u's columns and counts.
+LANE_FIPS = {"65": {"gammas": (37, 18, 136), "carry2_slots": 8},
+             "87": {"gammas": (45, 22, 173), "carry2_slots": 8}}
+CARRY2_SLOTS = None  # level-2 carry-stack slots when they differ from SET["carry_slots"]
 PROFILE_ID = {"fast": 1, "slim": 4, "slim8": 5, "modeB": 3}
 # Level-0 Ligerito rate exponent r (rho = 2^-r) per profile; eta = 0.02 at level 0 in every
 # shipped and derived config (vendor/flock-core/configs/ligerito/m*_{fast,slim,slim8}.toml).
@@ -160,12 +168,13 @@ def geometry(d_sig: int) -> dict:
     d3 = 12 + max(0, d_sig - 13)
     d_k = SET["dk_rows"] + d_sig  # the projection domain (o, i): 128 rows (times blocks) times N*
     slots = SET["carry_slots"]
+    slots2 = CARRY2_SLOTS or slots
     # The main-domain stacks, kappa^(1) and kappa^(2) (one column per bit in `slots` slots),
     # kappa^(3), [K_0 | K_1].
     main = [d_main + (c - 1).bit_length() for c in SET["main_stacks"]]
-    stacks = main + [d1 + (slots - 1).bit_length(), d2 + (slots - 1).bit_length(), d3, d_k + 1]
+    stacks = main + [d1 + (slots - 1).bit_length(), d2 + (slots2 - 1).bit_length(), d3, d_k + 1]
     trees = (stacks + [16]) * CHALLENGES
-    lookups = (sum(SET["main_stacks"]) * 2**d_main + slots * 2**d1 + slots * 2**d2 + 2**d3
+    lookups = (sum(SET["main_stacks"]) * 2**d_main + slots * 2**d1 + slots2 * 2**d2 + 2**d3
                + 2 * 2**d_k)
     return {
         "d_sig": d_sig,
@@ -549,14 +558,17 @@ def self_check() -> None:
 
 
 def configure(set_name: str, relation: str) -> None:
-    """Select the parameter set and the relation (65 and 87 have relation H-u only)."""
-    global SET, STAGE_DEGREES, STAGE_GAMMAS
+    """Select the parameter set and the relation."""
+    global SET, STAGE_DEGREES, STAGE_GAMMAS, CARRY2_SLOTS
     SET = SETS[set_name]
     STAGE_DEGREES = SET["degrees"]
+    CARRY2_SLOTS = None
     if SET["gammas"] is None:
         STAGE_GAMMAS = RELATION_GAMMAS[relation]
+    elif relation == "h-fips":
+        STAGE_GAMMAS = LANE_FIPS[set_name]["gammas"]
+        CARRY2_SLOTS = LANE_FIPS[set_name]["carry2_slots"]
     else:
-        assert relation == "h-u", "ML-DSA-65 and ML-DSA-87 have relation H-u only"
         STAGE_GAMMAS = SET["gammas"]
 
 
@@ -574,6 +586,23 @@ def self_check_sets() -> None:
         assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
         assert sorted(set(g["trees"]), reverse=True) == [26, 25, 24, 23, 22, 17, 16, 14], g["trees"]
         assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 8]
+        # H-FIPS (pinned in crates/agg-piop/src/pow.rs, docs/h-exact.md 11.2): the same sites as
+        # H-u; only gamma^(3) of 65 and one lookup batching site grind one more bit.
+        for name, want in (("65", {3: (190, 1763), 10: (311, 2868), 15: (451, 4145)}),
+                           ("87", {3: (190, 1764), 10: (311, 2874), 15: (451, 4149)})):
+            for d_sig, (n_sites, n_bits) in want.items():
+                configure(name, "h-u")
+                hu = piop_sites(geometry(d_sig))
+                configure(name, "h-fips")
+                hf = piop_sites(geometry(d_sig))
+                total = summarize(hf)["bits"]
+                assert (len(hf), total) == (n_sites, n_bits), (name, d_sig, len(hf), total)
+                assert len(hu) == len(hf)
+                for a, b in zip(hf, hu):
+                    assert a[:3] == b[:3], (a, b)
+                    ga, gb = site_bits(a[0], a[4], a[5]), site_bits(b[0], b[4], b[5])
+                    if ga != gb:  # the lookup's X site keeps g = 0 although L grows
+                        assert a[0] in ("stage.gamma", "lookup.gamma") and ga == gb + 1, (a, b)
     finally:
         configure("44", "h-u")
 
