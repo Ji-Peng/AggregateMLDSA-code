@@ -208,7 +208,8 @@ fn run_verifier(options: &Options, n: usize) {
 /// The prover process: generates the batch, proves, hands the proof to a verifier process.
 fn run_prover(options: &Options, n: usize) {
     let (batch, generation) = timed(|| batch(options, n));
-    let instance = PublicInstance::from_records(&batch.records).expect("instance");
+    // Mode A times the instance inside its prove; it is printed here so the two compare.
+    let (instance, instance_time) = timed(|| PublicInstance::from_records(&batch.records).expect("instance"));
     let inputs = batch.inputs();
     let signatures = batch.signatures();
     let bridge = bridge();
@@ -260,9 +261,10 @@ fn run_prover(options: &Options, n: usize) {
         options.reps, options.warmup, steps[median_run]
     );
     println!(
-        "  prove (s): median {:.3}, min {:.3}",
+        "  prove (s): median {:.3}, min {:.3}; public instance (once, before the runs) {:.3}",
         median_duration(&times).unwrap_or_default().as_secs_f64(),
-        times.iter().min().copied().unwrap_or_default().as_secs_f64()
+        times.iter().min().copied().unwrap_or_default().as_secs_f64(),
+        instance_time.as_secs_f64()
     );
     println!(
         "  aggregate {} B = header {} + c~ {} + public bits {} + Akita commitments {} + final vectors {} \
