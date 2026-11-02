@@ -9,7 +9,7 @@
 //! proven range the top digit absorbs the excess and leaves its alphabet, which is exactly what
 //! the leaf checks detect.
 
-use crate::params::{B_Z, SLACK_Z};
+use crate::params::{ParamSet, Set65, Set87, B_Z, SLACK_Z};
 
 /// Alphabet of a committed column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -694,6 +694,31 @@ pub const Z_DIGIT_SLACK: DigitSlackLayout = DigitSlackLayout {
     offset: 1 << 19,
 };
 
+/// Exact digit-slack form of z for ML-DSA-65 and ML-DSA-87 (relation H-exact) with bound
+/// `b_z = gamma1 - beta - 1`: z + b_z = z_lo + 2^16 z_mid + (2 b_z + 1 - 2^19) a_z with z_lo in
+/// [0, 2^16), z_mid in [0, 8), a_z in {0, 1}. The two blocks [0, 2^19) and
+/// [2 b_z + 1 - 2^19, 2 b_z] cover [0, 2 b_z] without a gap (the slack weight is below 2^19), so
+/// the range is exactly [-b_z, b_z]. Stored Z_lo = z_lo - 2^15, Z_mid = z_mid - 4, a_z: the
+/// columns, alphabets and leaves of the relaxed form [`Z_DIGIT_SLACK`].
+pub const fn z_digit_slack_exact(b_z: i64) -> DigitSlackLayout {
+    assert!(2 * b_z + 1 > 1 << 19 && 2 * b_z + 1 - (1 << 19) <= 1 << 19);
+    DigitSlackLayout {
+        low: DigitLayout {
+            name: "z",
+            bases: &[1 << 16],
+            signed: false,
+        },
+        mid_base: 8,
+        slack_weight: 2 * b_z + 1 - (1 << 19),
+        offset: b_z,
+    }
+}
+
+/// [`z_digit_slack_exact`] of ML-DSA-65: `|z| <= 524,091`, slack weight 523,895.
+pub const Z_DIGIT_SLACK_EXACT_65: DigitSlackLayout = z_digit_slack_exact(Set65::B_Z);
+/// [`z_digit_slack_exact`] of ML-DSA-87: `|z| <= 524,167`, slack weight 524,047.
+pub const Z_DIGIT_SLACK_EXACT_87: DigitSlackLayout = z_digit_slack_exact(Set87::B_Z);
+
 /// Relation H-FIPS's magnitude `L = L_lo + 29,696 L_hi` in `[0, gamma2 - 1]` with `L_lo` in
 /// `[0, 2^16)` (one unsigned base-`2^16` digit, stored `L_lo - 2^15`, looked up in `T_16`) and
 /// the bit `L_hi`: `29,696 + 2^16 = gamma2`. As a
@@ -1138,6 +1163,42 @@ mod tests {
             assert!(form.in_alphabets(&d), "z = {z}");
             assert_eq!(form.compose(&d), z);
             z += 1009;
+        }
+    }
+
+    #[test]
+    fn exact_z_digit_slack_forms_cover_exactly_the_fips_bound() {
+        for (form, b_z, slack) in [
+            (Z_DIGIT_SLACK_EXACT_65, 524_091_i64, 523_895_i64),
+            (Z_DIGIT_SLACK_EXACT_87, 524_167, 524_047),
+        ] {
+            let value = ValueForm::from(form);
+            assert_eq!(value.weights(), vec![1, 1 << 16, slack]);
+            assert_eq!(value.range(), (-b_z, b_z));
+            assert_eq!(value.constant(), (1 << 15) + (4 << 16) - b_z);
+            // Every in-alphabet digit tuple: the reachable set is exactly [-b_z, b_z].
+            let mut hit = vec![false; (2 * b_z + 1) as usize];
+            for lo in -(1_i64 << 15)..(1 << 15) {
+                for mid in -4..4 {
+                    for a in 0..2 {
+                        let z = value.compose(&[lo, mid, a]);
+                        assert!((-b_z..=b_z).contains(&z), "z = {z}");
+                        hit[(z + b_z) as usize] = true;
+                    }
+                }
+            }
+            assert!(hit.iter().all(|&h| h));
+            // Canonical digits round-trip in range and leave an alphabet just outside.
+            for z in (-b_z..=b_z).step_by(97).chain([-b_z, b_z, 0, -1, 1]) {
+                let d = value.decompose(z);
+                assert!(value.in_alphabets(&d), "z = {z}");
+                assert_eq!(value.compose(&d), z);
+            }
+            for z in [-b_z - 1, b_z + 1, -(1 << 19), 1 << 19] {
+                let d = value.decompose(z);
+                assert!(!value.in_alphabets(&d), "z = {z}");
+                assert_eq!(value.compose(&d), z);
+            }
         }
     }
 }
