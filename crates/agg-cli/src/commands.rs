@@ -84,6 +84,8 @@ environment:
                         default the rayon pool; PIOP + Flock capped at the logical CPUs).
   AGG_PIOP_FORK=0       run the transcript branches one after the other (the proof is the
                         same).
+  AGG_LATE_JOIN=0       run the Akita opening's finish after the Flock proofs join instead
+                        of beside them (default 1; the proof is the same).
   AGG_OPENING_THREADS=K threads of the pool that runs the Akita opening (aggregate, bench;
                         default one per physical core, at most the rayon pool; 0 or at least
                         the rayon pool: the rayon pool itself).
@@ -91,6 +93,8 @@ environment:
                         the same).
   AGG_ALLOC_CACHE=GiB   cap the cache of freed large blocks (default 6; 0 disables it).
   AGG_ALLOC_POISON=1    fill reused blocks with 0xA5 (a test mode for uninitialised reads).
+  AGG_ALLOC_SPLIT=0     reuse only cached blocks of up to 125% of a request (default: split
+                        any larger block).
   AGG_W1_SPLIT=0        build the level-1 weight table instead of its two factors (memory and
                         time only; the proof is the same).
   AGG_PHASE_STAMPS      (any value) print a line phase-stamp <step> <unix ns> on stderr at the
@@ -98,9 +102,12 @@ environment:
   AGG_ISA=LEVEL         cap every run-time SIMD detector: avx512ifma, avx512, avx2 (x86-64-v3
                         plus PCLMULQDQ) or scalar; unset detects. A cap only lowers a level,
                         and the proof is the same at every level.
-  AGG_PIOP_LAYOUT=KIND  sum-check table layout: plane or row. Unset selects plane exactly
-                        when the IFMA backend is selected, row otherwise; the proof is the
-                        same either way.
+  AGG_SIMD=KIND         portable turns the agg-simd field kernels off (A/B switch); avx512
+                        names the IFMA backend (requires IFMA hardware; runs at the AGG_ISA
+                        cap); the proof is the same.
+  AGG_PIOP_LAYOUT=KIND  sum-check table layout: plane or row. Unset selects plane on every
+                        vector backend (avx512ifma, avx512, avx2) and row on portable/scalar;
+                        the proof is the same either way.
   AGG_SIMD_REPORT=1     print, before the command, the level each crate selected (diagnostics).";
 
 /// A subcommand.
@@ -653,6 +660,25 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// The `agg-simd` backend selected for this process, named by its `AGG_ISA` tier.
+fn simd_backend_name() -> &'static str {
+    use agg_simd::detect::{backend, Backend};
+    match backend() {
+        Backend::Avx512 => "avx512ifma",
+        Backend::Avx512F => "avx512",
+        Backend::Avx2 => "avx2",
+        Backend::Portable => "portable",
+    }
+}
+
+/// The layout of the PIOP sum-check tables selected for this process.
+fn piop_layout_name() -> &'static str {
+    match agg_piop::kernel::layout() {
+        agg_piop::kernel::Layout::Plane => "plane",
+        agg_piop::kernel::Layout::Row => "row",
+    }
+}
+
 /// The ML-DSA engine selected for this process.
 fn mldsa_backend_name() -> &'static str {
     let engine = agg_mldsa_simd::engine();
@@ -763,13 +789,13 @@ fn write_bench_json(
     let _ = writeln!(out, "  \"kernels\": {{");
     let _ = writeln!(
         out,
-        "    \"avx512_feature\": {},",
-        agg_piop::avx512_enabled()
+        "    \"agg_simd_backend\": {},",
+        json_string(simd_backend_name())
     );
     let _ = writeln!(
         out,
-        "    \"keccak_avx512_feature\": {},",
-        agg_keccak::avx512_enabled()
+        "    \"piop_layout\": {},",
+        json_string(piop_layout_name())
     );
     let _ = writeln!(
         out,
@@ -885,11 +911,12 @@ fn bench(mut opts: Options) -> Result<Status, Box<dyn std::error::Error>> {
     let protocol = format!("median of {reps}, {warmup} warmup");
     let mldsa_backend = mldsa_backend_name();
     println!(
-        "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, avx512 feature {}, aerie backend {}, mldsa backend {}",
+        "agg bench: ML-DSA-{}, N = {count}, {} keys, part_log2 {part_log2}, Flock profile {profile:?}, span {span}, relation {relation}, warmup {warmup}, reps {reps}, revision {}, agg-simd backend {}, piop layout {}, aerie backend {}, mldsa backend {}",
         set.name(),
         n_keys.min(count),
         git_revision().unwrap_or_else(|| "unknown (set AGG_GIT_REV)".into()),
-        agg_piop::avx512_enabled(),
+        simd_backend_name(),
+        piop_layout_name(),
         agg_piop::aerie_simd_backend(),
         mldsa_backend
     );

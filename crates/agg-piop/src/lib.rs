@@ -1,9 +1,9 @@
-//! Sum-check PIOP for the ML-DSA-44 aggregation relation H.
+//! Sum-check PIOP for the ML-DSA aggregation relations (ML-DSA-44, -65 and -87).
 //!
 //! Aerie's projection, stage and transcript machinery is reached through
 //! `aerie_prover` with its `internals` feature (re-exported below).
 //!
-//! Prover-side tables and commitments: [`manifest`] fixes the four
+//! Prover-side tables and commitments: [`manifest`] fixes the seven
 //! Akita groups, [`source_tables`] materializes them from `agg-witness` batches, [`pcs`]
 //! commits them through `agg-pcs-config` and opens them in one batch, [`public_data`] holds
 //! the verifier's precomputation and the negacyclic `eq` helpers, and [`virtual_polys`] the

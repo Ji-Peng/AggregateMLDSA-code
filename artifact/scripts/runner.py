@@ -17,15 +17,14 @@ from common import (  # noqa: E402
     ARTIFACT,
     BIN,
     BUILD,
-    REPO,
+    PARAM_SETS,
     TABLES,
+    built_revision,
     cpu_flags,
-    git_rev,
     load_configs,
     load_matrix,
     median,
     new_result_dir,
-    pinned_commit,
     read_json,
     run,
     utc_stamp,
@@ -168,9 +167,9 @@ class Runner:
         (self.result_dir / "raw").mkdir(exist_ok=True)
         (self.result_dir / "logs").mkdir(exist_ok=True)
         (self.result_dir / "data").mkdir(exist_ok=True)
-        # The archive build has no .git, so prefer the pin in sources.lock and
-        # fall back to the tree revision in a development checkout.
-        self.code_commit = pinned_commit() or git_rev(REPO)
+        # The revision build.py stamped into the binary: git HEAD (with -dirty) in
+        # a checkout, the pin in sources.lock only for an archive without .git.
+        self.code_commit = built_revision()
         self.cells = []
         self.skipped = []
         self.reports = {}
@@ -386,15 +385,13 @@ class Runner:
     def run_ours_cell(self, group, rows, requested, actual, allocation, note, n, relation, reps, warmup):
         tag = group["tag"]
         trace = bool(group.get("traced"))
-        # The ML-DSA parameter set of the group (`params = "65"`; default 44).
-        params = str(group.get("params", "44"))
+        params = group_params(group)
         chunks = process_chunks(reps, self.process_count(group, reps))
         cells = {}
         for name in rows:
             cell = self.base_cell(
-                "ours", name, tag, requested, actual, allocation, note, n, relation
+                "ours", name, tag, requested, actual, allocation, note, n, relation, params
             )
-            cell["params"] = params
             cell["warmup"] = warmup
             cell["reps"] = reps
             cell["protocol"] = "warm"
@@ -449,18 +446,21 @@ class Runner:
             cell["loadavg"] = self.load_before_after(before)
             self.finish_cell(cell)
             self.cells.append(cell)
-        self.check_hashes(cells, tag, n, relation)
+        self.check_hashes(cells, f"{tag} ML-DSA-{params}", n, relation)
 
     def load_before_after(self, before):
         return {"start": self.machine.get("loadavg"), "end": list(os.getloadavg())}
 
-    def base_cell(self, system, config, tag, requested, actual, allocation, note, n, relation):
+    def base_cell(
+        self, system, config, tag, requested, actual, allocation, note, n, relation, params
+    ):
         spec = self.configs["rows"].get(config, {})
         binary = BIN / spec.get("binary", "")
         alloc_tag = actual if requested == actual else f"{requested}-to-{actual}"
         return {
-            "run_id": f"{tag}-{config}-{alloc_tag}-n{n}-{relation}",
+            "run_id": f"{tag}-{config}-{alloc_tag}-n{n}-{relation}-p{params}",
             "system": system,
+            "params": params,
             "tag": tag,
             "config": config,
             "label": spec.get("label", config),
@@ -621,14 +621,20 @@ class Runner:
         self.cells.append(cell)
 
     def run_native_group(self, group, rows, sizes, reps, warmup):
-        binary = BIN / "natver"
+        params = group_params(group)
+        binary = BIN / PARAM_SETS[params]["natver"]
         if not binary.exists():
             raise SystemExit(f"{binary} is missing; run ./run.sh build")
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
             for n in sizes:
-                out = self.result_dir / "raw" / "parts" / f"native-{actual}-{n}-{time.time_ns()}.json"
+                out = (
+                    self.result_dir
+                    / "raw"
+                    / "parts"
+                    / f"native-p{params}-{actual}-{n}-{time.time_ns()}.json"
+                )
                 out.parent.mkdir(exist_ok=True)
                 env = {
                     "OMP_NUM_THREADS": str(allocation["threads"]),
@@ -650,15 +656,17 @@ class Runner:
                 proc = sh(cmd, env)
                 if proc.returncode != 0 or not out.exists():
                     raise SystemExit(
-                        f"natver failed at N={n}: {(proc.stderr or '')[-2000:]}"
+                        f"natver (ML-DSA-{params}) failed at N={n}: "
+                        f"{(proc.stderr or '')[-2000:]}"
                     )
                 data = read_json(out)
                 cell = {
-                    "run_id": f"{group['tag']}-native-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}",
+                    "run_id": f"{group['tag']}-native-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}-p{params}",
                     "system": "native",
+                    "params": params,
                     "tag": group["tag"],
                     "config": "native",
-                    "label": "pq-crystals ML-DSA-44 AVX2",
+                    "label": f"pq-crystals ML-DSA-{params} AVX2",
                     "threads": allocation["threads"],
                     "allocation": actual,
                     "allocation_requested": requested,
@@ -692,14 +700,25 @@ class Runner:
                 self.finish_cell(cell)
                 self.cells.append(cell)
 
-    def ensure_records(self, n):
-        records = self.result_dir / "data" / f"records-{n}.bin"
-        keys = self.result_dir / "data" / f"keys-{n}.bin"
+    def ensure_records(self, n, params):
+        records = self.result_dir / "data" / f"records-p{params}-{n}.bin"
+        keys = self.result_dir / "data" / f"keys-p{params}-{n}.bin"
         binary = BIN / "agg"
         if not records.exists():
             env = self.env_for("ifma", self.topo["configs"]["all"], None)
             proc = sh(
-                [str(binary), "keygen-batch", "--count", str(n), "--seed", "1", "--out", str(keys)],
+                [
+                    str(binary),
+                    "keygen-batch",
+                    "--params",
+                    params,
+                    "--count",
+                    str(n),
+                    "--seed",
+                    "1",
+                    "--out",
+                    str(keys),
+                ],
                 env,
             )
             if proc.returncode != 0:
@@ -708,6 +727,8 @@ class Runner:
                 [
                     str(binary),
                     "sign-batch",
+                    "--params",
+                    params,
                     "--keys",
                     str(keys),
                     "--count",
@@ -728,7 +749,7 @@ class Runner:
             group, ["8C16T"]
         ):
             for n in sizes:
-                records = self.ensure_records(n)
+                records = self.ensure_records(n, group_params(group))
                 for name in rows:
                     if group.get("mode") == "aggregate":
                         self.fresh_aggregate(group, name, requested, actual, allocation, note, n, records, reps)
@@ -745,14 +766,26 @@ class Runner:
         return proc, int(rss.group(1)) if rss else None, seconds
 
     def fresh_aggregate(self, group, name, requested, actual, allocation, note, n, records, reps, record=True):
+        params = group_params(group)
         binary = BIN / self.configs["rows"][name]["binary"]
-        out = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}.bin"
+        out = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
         env = self.env_for(name, allocation, None)
         peaks, walls, hashes = [], [], set()
         for i in range(reps):
-            log = self.result_dir / "logs" / f"{group['tag']}-{name}-{actual}-{n}-{i}.log"
+            log = self.result_dir / "logs" / f"{group['tag']}-{name}-{actual}-{n}-p{params}-{i}.log"
             proc, rss, seconds = self.time_v(
-                [str(binary), "aggregate", "--records", str(records), "--relation", "h-u", "--out", str(out)],
+                [
+                    str(binary),
+                    "aggregate",
+                    "--params",
+                    params,
+                    "--records",
+                    str(records),
+                    "--relation",
+                    "h-u",
+                    "--out",
+                    str(out),
+                ],
                 env,
                 log,
             )
@@ -762,8 +795,9 @@ class Runner:
             walls.append(seconds * 1000 if seconds else None)
             hashes.add(sha256(out))
         cell = {
-            "run_id": f"{group['tag']}-{name}-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}",
+            "run_id": f"{group['tag']}-{name}-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}-p{params}",
             "system": "ours",
+            "params": params,
             "tag": group["tag"],
             "config": name,
             "label": self.configs["rows"][name].get("label", name),
@@ -798,20 +832,34 @@ class Runner:
             self.cells.append(cell)
 
     def fresh_verify(self, group, name, requested, actual, allocation, note, n, records, reps):
+        params = group_params(group)
         binary = BIN / self.configs["rows"][name]["binary"]
-        aggregate = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}.bin"
+        aggregate = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
         if not aggregate.exists():
             self.fresh_aggregate(
                 group, name, requested, actual, allocation, note, n, records, 1, record=False
             )
         env = self.env_for(name, allocation, None)
-        cache = self.result_dir / "data" / f"cache-{name}-{actual}-{n}.bin"
+        cache = self.result_dir / "data" / f"cache-{name}-{actual}-{n}-p{params}.bin"
         results = {}
         for mode in ["uncached", "cached"]:
             peaks, walls = [], []
             for i in range(reps):
-                log = self.result_dir / "logs" / f"{group['tag']}-{mode}-{name}-{actual}-{n}-{i}.log"
-                cmd = [str(binary), "verify", "--records", str(records), "--aggregate", str(aggregate)]
+                log = (
+                    self.result_dir
+                    / "logs"
+                    / f"{group['tag']}-{mode}-{name}-{actual}-{n}-p{params}-{i}.log"
+                )
+                cmd = [
+                    str(binary),
+                    "verify",
+                    "--params",
+                    params,
+                    "--records",
+                    str(records),
+                    "--aggregate",
+                    str(aggregate),
+                ]
                 if mode == "cached":
                     cmd += ["--cache", str(cache)]
                 proc, rss, seconds = self.time_v(cmd, env, log)
@@ -824,8 +872,9 @@ class Runner:
                 "times": [w for w in walls if w],
             }
         cell = {
-            "run_id": f"{group['tag']}-{name}-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}",
+            "run_id": f"{group['tag']}-{name}-{actual if requested == actual else f'{requested}-to-{actual}'}-n{n}-p{params}",
             "system": "ours",
+            "params": params,
             "tag": group["tag"],
             "config": name,
             "label": self.configs["rows"][name].get("label", name),
@@ -860,6 +909,7 @@ class Runner:
         self.cells.append(cell)
 
     def run_ablations(self, group, rows, sizes, relation, reps, warmup):
+        params = group_params(group)
         arms = group["arms"]
         chunks = process_chunks(reps, self.process_count(group, reps))
         for requested, actual, allocation, note in self.allocation_plan(
@@ -871,7 +921,16 @@ class Runner:
                 for name, arm in pairs:
                     key = (name, arm["tag"])
                     cell = self.base_cell(
-                        "ours", name, f"{group['tag']}-{arm['tag']}", requested, actual, allocation, note, n, relation
+                        "ours",
+                        name,
+                        f"{group['tag']}-{arm['tag']}",
+                        requested,
+                        actual,
+                        allocation,
+                        note,
+                        n,
+                        relation,
+                        params,
                     )
                     cell["arm"] = arm["tag"]
                     cell["warmup"] = warmup
@@ -893,6 +952,7 @@ class Runner:
                                 arm.get("env"),
                                 warmup,
                                 chunks[r],
+                                params=params,
                             )
                             cell = cells[(name, arm["tag"])]
                             cell["times_ms"].extend(part["prove_ms"])
@@ -941,6 +1001,7 @@ class Runner:
                     "system": cell["system"],
                     "config": cell["config"],
                     "tag": cell["tag"],
+                    "params": cell.get("params", ""),
                     "allocation": cell["allocation"],
                     "threads": cell["threads"],
                     "n": cell["n"],
@@ -1055,6 +1116,14 @@ class Runner:
                 raise SystemExit(f"unknown run kind {kind}")
         self.summary()
         print(f"results: {self.result_dir}")
+
+
+def group_params(group):
+    """The ML-DSA parameter set of a matrix group (`params = "65"`; default 44)."""
+    params = str(group.get("params", "44"))
+    if params not in PARAM_SETS:
+        raise SystemExit(f"group {group.get('tag')}: unknown params {params}")
+    return params
 
 
 def parse_aerie(stdout, n):

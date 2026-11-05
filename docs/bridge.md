@@ -7,7 +7,7 @@
 | Code | `crates/agg-bridge` (`shape`, `seed`, `parity`, `weights`, `final_vector`, `gf2_walker`, `parity_chain`, `soundness`; generic over `Shape`), `crates/agg-witness/src/bridge.rs` (geometry, honest witness), `crates/agg-keccak/src/tied.rs`, `flock_union.rs` (the mode-A Flock side: the sponge instance and the virtual parity chain, Sections 5a, 5c, 5d) |
 | Counts | exact numbers are products of the shape constants and exact binomials (`math.comb`); every number marked "estimate" is unmeasured |
 
-Problem. The 6,144 w1Encode bits of every signature are committed twice: as the Boolean columns $`b_0..b_5`$ of $`G_{\rm main}`$ (Akita, $`\mathbb F_p`$) and as the `Input` words of the sponge gate (Flock, GF(2)). The bridge proves $`b=b'`$ with a chain of three seeded sparse parity maps $`M_1,M_2,M_3`$: both sides prove $`Y_\sigma=M_3M_2M_1(\cdot)`$ for the same public 4,096-bit vector per segment, the $`\mathbb F_p`$ side over the integers with committed carries, the Flock side as one sum-check over the committed bits (the virtual parity chain, Section 5d, `docs/parity-chain.md`). Soundness rests only on column independence (Section 7), not on code distance.
+Problem. The 6,144 w1Encode bits of every signature are committed twice: as the Boolean columns $`b_0..b_5`$ of $`G_{\rm main}`$ (Akita, $`\mathbb F_p`$) and as the `Input` words of the sponge gate (Flock, GF(2)). The bridge proves $`b=b'`$ with a chain of three seeded sparse parity maps $`M_1,M_2,M_3`$: both sides prove $`Y_\sigma=M_3M_2M_1(\cdot)`$ for the same public 4,096-bit vector per segment, the $`\mathbb F_p`$ side over the integers with committed carries, the Flock side as one sum-check over the committed bits (the virtual parity chain, Section 5d, `docs/parity-chain.md`). Soundness rests only on column independence (Section 7), not on code distance. Sections 1 to 9 give the ML-DSA-44 values unless stated; the ML-DSA-65 and ML-DSA-87 values are in the last section.
 
 ## 1. Shapes and notation
 
@@ -16,9 +16,10 @@ A **bridge shape** is three levels $`(J_t,m_t,k_t)`$, $`t=1,2,3`$, with $`J_t`$ 
 | Shape | Level 1 $`(J,m,k)`$ | Level 2 | Level 3 | lanes, $`B_1`$ | Output | Carry caps $`W_t`$, ranges |
 | --- | --- | --- | --- | --- | ---: | --- |
 | production (`Shape::PRODUCTION`, spec Section 1) | $`(2^{19},2^{13},14)`$ | $`(2^{19}$, used $`2^{17};\ 2^{13},14)`$ | $`(49{,}152,4{,}096,18)`$ | 6, 16 | 4,096 bits per segment | 2,047, 2,047, 511; $`[0,1023],[0,1023],[0,255]`$ |
+| production, ML-DSA-65/87 (`Shape::PRODUCTION_W4`) | $`(2^{19},2^{13},14)`$ | $`(2^{19}$, used $`2^{18};\ 2^{13},14)`$ | $`(32{,}768,4{,}096,18)`$ | 4, 32 | 4,096 bits per segment | as production |
 | toy (`Shape::TOY`, tests only) | $`(2^{10},2^{6},4)`$ | $`(2^{8},2^{5},4)`$ | $`(32,16,4)`$ | 1, 4 | 16 bits | 127, 63, 31; $`[0,63],[0,31],[0,15]`$ |
 
-The toy shape has $`L=B_1J_1=2^{12}`$ input bits, one lane and one segment; its per-level errors $`1/\binom{m_t}{k_t}`$ are $`2^{-19.3},2^{-15.1},2^{-10.8}`$ (sum $`2^{-10.75}`$), which is why it is a correctness instrument only. `agg-bridge` MUST implement parities, carries, weights and the GF(2) walker generically over `Shape`; `agg-witness::bridge` and `agg-piop` MAY hard-code the production constants. Event 0 binds $`(J_t,m_t,k_t)`$ (spec Section 10, deviation P1) and the verifier MUST reject any shape other than the production one in wire version 0; the toy shape is reachable only through the `test-hooks` feature of `agg-piop` (deviation P4) and the unit tests of `agg-bridge` and `agg-keccak`.
+The toy shape has $`L=B_1J_1=2^{12}`$ input bits, one lane and one segment; its per-level errors $`1/\binom{m_t}{k_t}`$ are $`2^{-19.3},2^{-15.1},2^{-10.8}`$ (sum $`2^{-10.75}`$), which is why it is a correctness instrument only. `agg-bridge` MUST implement parities, carries, weights and the GF(2) walker generically over `Shape`; `agg-witness::bridge` and `agg-piop` MAY hard-code the production constants. Event 0 binds $`(J_t,m_t,k_t)`$ (spec Section 10, deviation P1) and the verifier MUST reject any shape other than the set's production one in wire version 4; the toy shape is reachable only through the `test-hooks` feature of `agg-piop` (deviation P4) and the unit tests of `agg-bridge` and `agg-keccak`.
 
 Indices (least significant first, spec Section 1): main index $`x=j+256\rho+1024i`$, lane $`t<6`$ is the polynomial $`b_t`$; $`i=i_{\rm lo}+2^9i_{\rm mid}+2^{13}\sigma`$. Output row of level $`t`$ is $`\rho_t`$; the output domains are $`D_1=(\rho_1,i_{\rm mid},\sigma)`$, $`D_2=(\rho_2,\sigma)`$, $`D_3=(\rho_3,\sigma)`$.
 
@@ -41,7 +42,7 @@ Alignment. The Akita main domain of lane $`t`$ at $`N^\star=2^{d_{\rm sig}}`$ re
 
 ## 3. Seed and matrix sampling
 
-**Transcript position** (spec Section 10, `docs/piop.md` Section 9). $`\mathsf{sd}`$ is the 32-byte squeeze of event 3 (`agg-mldsa/v1/bridge/seed`). Before it the transcript has absorbed event 0 (wire version, $`N,N^\star`$, the public-record digest over all $`(\mathsf{pk}_i,M_i,\tilde c_i)`$, the group descriptors and $`(J_t,m_t,k_t)`$), event 1 (the round-1 Akita commitments of $`G_{\rm main16}`$ and $`G_{\rm main4}`$, which contain $`b_0..b_5`$) and event 2 (the $`S`$ Flock commitments, each the Ligerito level-0 cap of the sub-batch whose witness contains $`b'`$, deviation K7). Hence $`\delta=b\oplus b'`$ is fixed by binding commitments before $`\mathsf{sd}`$ exists. Everything seed-dependent comes later: the round-2 groups (the three bridge levels and the lookup multiplicities, event 4), the Flock challenger seeds $`\mathsf{fs}_\sigma`$ (event 5), $`Y_\sigma`$ and the share items (event 6) and the Flock proofs (at the join after stage 3, deviation K22). The Flock side binds $`\mathsf{sd}`$ through $`\mathsf{fs}_\sigma`$ and through the digest of the final vectors, which the tie challenger absorbs (`docs/parity-chain.md`).
+**Transcript position** (spec Section 10, `docs/piop.md` Section 9). $`\mathsf{sd}`$ is the 32-byte squeeze of event 3 (`agg-mldsa/v1/bridge/seed`). Before it the transcript has absorbed event 0 (wire version, $`N,N^\star`$, the public-record digest over all $`(\mathsf{pk}_i,M_i,\tilde c_i)`$, the group descriptors and $`(J_t,m_t,k_t)`$), event 1 (the round-1 Akita commitments of $`G_{\rm main16}`$ and $`G_{\rm main4}`$, which contain $`b_0..b_5`$) and event 2 (the $`S`$ Flock commitments, each the Ligerito level-0 cap of the sub-batch whose witness contains $`b'`$, deviation K7). Hence $`\delta=b\oplus b'`$ is fixed by binding commitments before $`\mathsf{sd}`$ exists. Everything seed-dependent comes later: the round-2 groups (the three bridge levels and the lookup multiplicities, event 4), the Flock challenger seeds $`\mathsf{fs}_\sigma`$ (event 5), $`Y_\sigma`$ and the share items (event 6) and the Flock proofs (sent at the join after stage 3 and never absorbed, deviations K22, K25). The Flock side binds $`\mathsf{sd}`$ through $`\mathsf{fs}_\sigma`$ and through the digest of the final vectors, which the tie challenger absorbs (`docs/parity-chain.md`).
 
 **Derivation** (`agg_bridge::seed`, normative as implemented and known-answer tested). Column $`\zeta`$ of $`M_t`$ is read from $`\mathrm{cSHAKE256}(\mathsf{sd}\Vert\mathrm{LE64}(t)\Vert\mathrm{LE64}(\zeta),\cdot,N=\varepsilon,S=\texttt{agg-mldsa/v1/bridge})`$ with $`t\in\{1,2,3\}`$ the level number: take 16-bit little-endian words, keep the low $`\log_2m_t`$ bits (13, 13, 12), skip a value already drawn for this column, stop after $`k_t`$ distinct rows, stored in draw order. This is column-regular ($`|S_\zeta|=k_t`$ exactly), rejection-free on the row value (power-of-two $`m_t`$, a mask, no modular bias) and exactly uniform over $`k_t`$-subsets (the distinct values of an i.i.d. uniform stream form a uniform ordered $`k`$-tuple); the only skipped words are exact repeats, $`k(k-1)/2m\approx0.011`$ per column in expectation. The XOF is squeezed in 64-byte chunks (32 words); the word stream does not depend on the chunking. Both sides, and every segment, use the same three matrices; nothing is transmitted. Representation: `SparseMatrix` (column-major, `cols * k` row indices of `u32`), 62 MB for the production shape, derived once per proof or verification and shared by the $`\mathbb F_p`$ tables, the weights and the Flock walker.
 
@@ -118,13 +119,15 @@ rows and 0 on dummy rows (Flock's count-derived constant pin requires exactly th
 dummy rows are zero by Flock's witness contract.
 
 **Parts and shares.** Part `s` holds the segment's live records `[2^d s, 2^d (s + 1))`; its
-Flock seed is `SHA3-256(len || "agg-mldsa/v1/flock-part-seed" || fs_sigma || LE64(s))`, and
+Flock seed is `SHA3-256(len || "agg-mldsa/v1/flock-part-seed" || fs_sigma || LE64(s) || rec)`,
+with `rec` the cSHAKE256 digest of the event-6 record (spec Section 10), and
 the tie-geometry digest covers the part index (deviation K10). Its chain proves the share
 `Y_{sigma, s} = M^{(sigma)} b'_s`; the shares of a segment's parts XOR to `Y_sigma`, so the
 bound (9.3) of Section 7 is unchanged.
 
-**Wire.** The event-2 item of a part is `tied::TiedCommitment` (the sponge cap); the event-6
-proof is the version-5 bytes of `docs/parity-chain.md` Section 7.
+**Wire.** The event-2 item of a part is `tied::TiedCommitment` (the sponge cap); its Flock
+proof item, sent at the join and never absorbed, is the version-5 bytes of
+`docs/parity-chain.md` Section 7.
 
 ## 5c. Spans: one tied part over several segments
 
@@ -148,7 +151,7 @@ challenge.
 
 **Replay.** The tie-geometry digest covers `S` and `span_log`, the proof header `S`. The
 span's Flock seed in mode A is `SHA3-256(len || "agg-mldsa/v1/flock-span-seed" || LE64(S) ||
-fs_0 || .. || fs_{S-1})`, a function of event 5 that differs from every part seed.
+fs_0 || .. || fs_{S-1} || rec)`, a function of events 5 and 6 that differs from every part seed.
 
 **Costs.** A span's sponge instance is the per-segment instances stacked: the same rows and
 committed words in total, one commitment and one opening instead of `S` of each; the
@@ -186,8 +189,8 @@ the row factor of a short sponge) as a third ring-switched claim on the bit poly
 digest before `eq_Y`. If $`Mb'\ne Y`$ for every element of the sponge's Johnson list, then
 $`\langle\mathrm{eq}_Y,Mb'\rangle=\langle\mathrm{eq}_Y,Y\rangle`$ with probability at most
 $`L_s(12+\mathrm{span\_log})/2^{128}`$, each round at most $`2L_s/2^{128}`$, and a false final
-claim makes the bit claim false for every list element, which Flock's opening rejects under
-assumption (F). The bound (9.3) of Section 7 is unchanged. Work: `docs/soundness.md` 3.6.
+claim makes the bit claim false for every list element, which Flock's opening rejects (its
+knowledge soundness, `docs/soundness.md` Section 7). The bound (9.3) of Section 7 is unchanged. Work: `docs/soundness.md` 3.6.
 
 **Tests.** `agg-bridge` (`parity_chain`): against a brute-force product sum-check on dense
 tables (toy shapes with 1, 3, 6 lanes, part offsets, spans), every message, the final value
@@ -241,7 +244,7 @@ Level 1, integer sums per block and row: block 0 $`(3,3,1,1)`$, block 1 $`(2,1,1
 
 ## 9. Test plan
 
-All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch sizes stay at or below 1K signatures and $`2^{14}`$ permutations. Existing tests are listed in `docs/witness.md` Section 9, `docs/piop.md` Section 13 and `docs/keccak.md` Section 5; the bridge-specific ones, present or required, are listed below. Module names are those of the `agg-bridge` skeletons (`seed`, `parity`, `gf2_walker`, `soundness`); the function names are required of them.
+All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch sizes stay at or below 1K signatures and $`2^{14}`$ permutations. Existing tests are listed in `docs/witness.md` Section 7, `docs/piop.md` Section 13 and `docs/keccak.md` Section 5; the bridge-specific ones, present or required, are listed below. Module names are those of the `agg-bridge` skeletons (`seed`, `parity`, `gf2_walker`, `soundness`); the function names are required of them.
 
 1. **Seed and matrices** (`agg-bridge::seed`, present): determinism; distinct streams per seed, level and column; column weight exactly $`k_t`$ and no repeated row; the reading rule including a skipped repeat; the known answer for column 0 of each level at $`\mathsf{sd}=0^{32}`$ (cross-checked against an independent cSHAKE256); row-weight caps on derived matrices.
 2. **Toy instance, both sides against a direct computation** (`agg-bridge`; (a), (c) and the forward walk of (b) present in `tests/all/toy.rs`): `Shape::TOY`, $`L=2^{12}`$ bits drawn from a seeded PRNG, matrices from `derive_matrices` generalized to the toy levels. (a) $`\mathbb F_p`$ side: `parity::sums`, parities and carries per level against a dense $`\{0,1\}`$ matrix product computed with `i64` arithmetic; every carry within its range; the three identities (9.2) at every Boolean point; `weights::c_t` at ten random $`K`$ points against $`M_t^{\mathsf T}\mathrm{eq}(\pi_\rho,\cdot)`$ formed densely, and the verifier's terminal formula against the full inner product $`\sum_xw_t(x)v(x)`$ reduced to the multilinear extension. (b) GF(2) side: `gf2_walker::composite` (the forward XOR walk) against the dense composite $`M_3M_2M_1`$ (16 rows by 4,096 columns) and its transpose applied to a random $`\mathbb F_{2^{128}}`$ vector. (c) Agreement: the $`\mathbb F_p`$ parities reduced modulo 2 equal the GF(2) outputs at every level and $`Y`$ agrees.
@@ -262,3 +265,5 @@ All commands run as `taskset -c 0,1,3-15 cargo test --release -p <crate>`; batch
 ## ML-DSA-65 and ML-DSA-87 bridge geometry
 
 For these sets the four w1 bit lanes use four-field parity packing (`crates/agg-bridge/src/parity.rs`). The number of positions per signature is `P = 256k`: 1,536 for 65 and 2,048 for 87. Both use `P_pad = 2,048`, `J_1 = 2^19`, and 256 signatures per level-1 block. Its in-block index is `j + 256 rho + P_pad (i mod 256)`. The padded positions for 65 are zero. `Shape::production(set)` selects this four-lane shape.
+
+The shape is `Shape::PRODUCTION_W4` (`crates/agg-bridge/src/shape.rs`): four lanes, `B_1 = 32` level-1 blocks per lane and segment, level 2 reads `J_2^used = 2^18` columns, level 3 takes `J_3 = 4 m_2 = 32,768` inputs with in-block index `t + 4 rho_2`; `(m_t, k_t)` and the carry caps are ML-DSA-44's, so the bound of Section 7 is the same `2^-144.64`. On the Flock side bit `b_t(j, rho, i)` is input column `c = j + 256 rho + 2,048 i_seg + 2^24 t`, and lane `t` of a record is the sixteen sponge words `16 t + w` (`crates/agg-keccak/src/sponge.rs`, `SpongeLayout`); the public region follows the lanes at words `[64, 72)` (65: mu, `c~` at 68, the constant at 71) or `[64, 80)` (87: the constant at 72), so the public claim has `nu_s + 3` (65) or `nu_s + 4` (87) free coordinates and the tie site's numerator is `L_s (nu_s + 3)` or `L_s (nu_s + 4)` (`agg_bridge::pow::TieGeometry::public_vars`).

@@ -7,6 +7,7 @@ mod bridge;
 mod commit_open;
 mod h_exact;
 mod h_fips;
+mod h_fips_lanes;
 mod mode_b;
 mod projection;
 mod simd;

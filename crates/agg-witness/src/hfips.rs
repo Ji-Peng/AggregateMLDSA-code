@@ -36,11 +36,11 @@
 //! by the proven hash identity. [`HFipsRecord::extract_signature`] does it.
 
 use crate::check::{CheckReport, Identity};
-use crate::crt::az_integer;
-use crate::derive::{reencode_h, ReencodeError, SigWitness};
-use crate::digits::{ValueForm, Z_BIT_SLACK};
+use crate::crt::{az_integer, az_integer_for};
+use crate::derive::{reencode_h, reencode_h_for, ReencodeError, SigWitness};
+use crate::digits::{Alphabet, ValueForm, Z_BIT_SLACK};
 use crate::instance::{PublicInstance, PublicRecord};
-use crate::keccak::{sponge_trace, w1_bit_index};
+use crate::keccak::{sponge_trace, sponge_trace_for, w1_bit_index, w1_bit_index_for};
 use crate::native::{
     decompose, decompose_for, high_bits, high_bits_for, mod_q, use_hint, use_hint_for, SmallK, VecK, VecL,
 };
@@ -615,6 +615,350 @@ pub fn l_form_for<P: ParamSet>() -> ValueForm {
         Set::S44 => ValueForm::Slack(crate::digits::L_SLACK),
         Set::S65 | Set::S87 => ValueForm::BitSlack(crate::digits::L_BIT_SLACK),
     }
+}
+
+/// The value form of `z` of set `P` under relation H-FIPS, which commits `z` as relation H-exact
+/// does: ML-DSA-44 [`Z_BIT_SLACK`]; ML-DSA-65 and ML-DSA-87
+/// [`crate::digits::z_digit_slack_exact`] with the set's `B_z`. Its range is exactly
+/// `[-B_z, B_z]`.
+pub fn z_form_for<P: ParamSet>() -> ValueForm {
+    match P::SET {
+        Set::S44 => ValueForm::BitSlack(Z_BIT_SLACK),
+        Set::S65 | Set::S87 => ValueForm::DigitSlack(crate::digits::z_digit_slack_exact(P::B_Z)),
+    }
+}
+
+/// Report index of coefficient `j` of row `rho` of record `i` in [`check_record_for`]:
+/// `(i k + rho) 256 + j` (rows are polynomial lanes for ML-DSA-65 and ML-DSA-87, so the
+/// ML-DSA-44 main index does not apply).
+fn report_index<P: ParamSet>(j: usize, rho: usize, i: usize) -> usize {
+    (i * P::K + rho) * N + j
+}
+
+/// The committed values of one record of set `P` under relation H-FIPS, as integers before the
+/// PIOP's storage shifts: [`HFipsRecord`] for every parameter set, with the magnitude `L` as one
+/// integer ([`CoeffOf`]) and `z` by [`z_form_for`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HFipsRecordOf<P: ParamSet> {
+    /// The digits of [`z_form_for`] per coefficient: `z[s][j]` has the digits
+    /// `z_digits[(s 256 + j) d ..][..d]`, `d` the form's length.
+    pub z_digits: Vec<i64>,
+    /// The per-coefficient witness, `coeffs[rho][j]` (k rows).
+    pub coeffs: Vec<[CoeffOf; N]>,
+    /// The quotient `v` of the ring identity (as in relation H-u).
+    pub v: P::VecK,
+    /// The w1Encode bits, `bits[t][rho][j]` for `t < W1_BITS`.
+    pub bits: Vec<Vec<[i64; N]>>,
+    /// The hint slack `u_h = omega - sum delta^2`.
+    pub u_h: i64,
+}
+
+impl<P: ParamSet> HFipsRecordOf<P> {
+    /// The digits of `z[s][j]`.
+    pub fn z_digit(&self, s: usize, j: usize) -> &[i64] {
+        let d = z_form_for::<P>().len();
+        &self.z_digits[(s * N + j) * d..][..d]
+    }
+
+    /// The canonical witness of an accepted signature (from [`crate::derive::derive_for`]).
+    pub fn from_witness(w: &SigWitness<P>) -> Result<Self, HFipsError> {
+        let form = z_form_for::<P>();
+        let mut z_digits = Vec::with_capacity(P::L * N * form.len());
+        for s in 0..P::L {
+            for j in 0..N {
+                let d = form.decompose(w.z[s][j]);
+                if !form.in_alphabets(&d) {
+                    return Err(HFipsError::Invariant("|z| > B_z"));
+                }
+                z_digits.extend_from_slice(&d);
+            }
+        }
+        let mut coeffs = vec![[CoeffOf::default(); N]; P::K];
+        let mut bits = vec![vec![[0i64; N]; P::K]; P::W1_BITS];
+        let mut weight = 0i64;
+        for rho in 0..P::K {
+            for j in 0..N {
+                let h = w.h[rho][j] != 0;
+                let w1 = i64::from(w.w1[rho][j]);
+                let c = honest_coeff_of::<P>(w.w[rho][j], h);
+                if use_hint_for::<P>(h, w.w[rho][j]) != w1 {
+                    return Err(HFipsError::Invariant("w1' != UseHint(h, w')"));
+                }
+                if c.u::<P>() != w.u[rho][j] {
+                    return Err(HFipsError::Invariant("u of the H-FIPS form != ctr_q(w' - 2 gamma2 w1')"));
+                }
+                if !c.is_valid::<P>(w1) {
+                    return Err(HFipsError::Invariant("honest coefficient violates a constraint"));
+                }
+                if c.weight() != i64::from(h) {
+                    return Err(HFipsError::Invariant("delta^2 != h"));
+                }
+                weight += c.weight();
+                coeffs[rho][j] = c;
+                for (t, plane) in bits.iter_mut().enumerate() {
+                    plane[rho][j] = (w1 >> t) & 1;
+                }
+            }
+        }
+        if weight > P::OMEGA as i64 {
+            return Err(HFipsError::HintWeight);
+        }
+        Ok(Self {
+            z_digits,
+            coeffs,
+            v: w.v.clone(),
+            bits,
+            u_h: P::OMEGA as i64 - weight,
+        })
+    }
+
+    /// The canonical encoding of the all-zero witness of a padded row: `z = 0`, `w' = 0` with
+    /// `h = 0` ([`CoeffOf::padded`]), `v = 0`, bits 0, `u_h = omega`.
+    pub fn padded() -> Self {
+        let zd = z_form_for::<P>().decompose(0);
+        Self {
+            z_digits: zd.repeat(P::L * N),
+            coeffs: vec![[CoeffOf::padded::<P>(); N]; P::K],
+            v: P::zero_vec_k(),
+            bits: vec![vec![[0; N]; P::K]; P::W1_BITS],
+            u_h: P::OMEGA as i64,
+        }
+    }
+
+    /// `z` from its digits.
+    pub fn z(&self) -> P::VecL {
+        let form = z_form_for::<P>();
+        let d = form.len();
+        let mut z = P::zero_vec_l();
+        for s in 0..P::L {
+            for j in 0..N {
+                z[s][j] = form.compose(&self.z_digits[(s * N + j) * d..][..d]);
+            }
+        }
+        z
+    }
+
+    /// `u` of the H-FIPS form at every coefficient.
+    pub fn u(&self) -> P::VecK {
+        let mut u = P::zero_vec_k();
+        for rho in 0..P::K {
+            for j in 0..N {
+                u[rho][j] = self.coeffs[rho][j].u::<P>();
+            }
+        }
+        u
+    }
+
+    /// `w1' = sum_t 2^t b_t` (any bit values).
+    pub fn w1(&self) -> P::VecK {
+        let mut w1 = P::zero_vec_k();
+        for rho in 0..P::K {
+            for j in 0..N {
+                w1[rho][j] = self.bits.iter().enumerate().map(|(t, b)| b[rho][j] << t).sum();
+            }
+        }
+        w1
+    }
+
+    /// `sum_p delta_p^2`.
+    pub fn hint_weight(&self) -> i64 {
+        self.coeffs.iter().flatten().map(CoeffOf::weight).sum()
+    }
+
+    /// The extracted hint `h*_p = [HighBits(w'_p) != w1'_p]` with `w' = 2 gamma2 w1' + u mod q`.
+    pub fn extracted_hint(&self) -> P::SmallK {
+        let (u, w1) = (self.u(), self.w1());
+        let mut h = P::zero_small_k();
+        for rho in 0..P::K {
+            for j in 0..N {
+                let wp = mod_q(2 * P::GAMMA2 * w1[rho][j] + u[rho][j]);
+                h[rho][j] = u8::from(high_bits_for::<P>(wp) != w1[rho][j]);
+            }
+        }
+        h
+    }
+
+    /// The extracted FIPS 204 signature `(c~, z, h*)`, sigEncode (Algorithm 26) with the
+    /// canonical HintBitPack (Algorithm 20); `reencode_h_for` re-checks reachability and the
+    /// weight.
+    pub fn extract_signature(&self, c_tilde: &P::CTilde) -> Result<Vec<u8>, ReencodeError> {
+        let w1 = self.w1();
+        let mut w1s = P::zero_small_k();
+        for rho in 0..P::K {
+            for j in 0..N {
+                let x = w1[rho][j];
+                if !(0..P::M_W).contains(&x) {
+                    return Err(ReencodeError::Domain);
+                }
+                w1s[rho][j] = x as u8;
+            }
+        }
+        reencode_h_for::<P>(c_tilde, &self.z(), &self.u(), &w1s)
+    }
+}
+
+/// [`check_record`] for every parameter set: the digits of `z` in their alphabets (Booleans as
+/// [`Identity::BoolSlack`], the others as [`Identity::Range16`]), the bits `b_t` and
+/// `w1' < m` (`range_w1`, vacuous when `m = 2^W1_BITS`), `sigma^2 = 1`, `L in [0, gamma2)`,
+/// `delta (delta - sigma)`, `e (e - 1)(e - delta)`, `e (e + 1) w1'`, `e (e - 1)(w1' - (m - 1))`,
+/// the encoding range of `v`, the hint-weight identity with `u_h in [0, 2^16)`, the ring
+/// identity and, for a live record, the hash identity. Failures are indexed by
+/// `(i k + rho) 256 + j` per coefficient and by `i` per record; a record whose vectors do not
+/// have the set's lengths fails [`Identity::Shape`] and is not checked further.
+pub fn check_record_for<P: ParamSet>(
+    rep: &mut CheckReport,
+    public: Option<&PublicRecord<P>>,
+    rec: &HFipsRecordOf<P>,
+    i: usize,
+) {
+    let form = z_form_for::<P>();
+    let digits = form.len();
+    let shaped = rec.z_digits.len() == P::L * N * digits
+        && rec.coeffs.len() == P::K
+        && rec.bits.len() == P::W1_BITS
+        && rec.bits.iter().all(|plane| plane.len() == P::K);
+    if !shaped {
+        rep.fail(
+            Identity::Shape,
+            "record",
+            i,
+            format!(
+                "{} z digits, {} coefficient rows, {} bit planes",
+                rec.z_digits.len(),
+                rec.coeffs.len(),
+                rec.bits.len()
+            ),
+        );
+        return;
+    }
+    for s in 0..P::L {
+        for j in 0..N {
+            let z_digits = &rec.z_digits[(s * N + j) * digits..][..digits];
+            for (k, &d) in z_digits.iter().enumerate() {
+                let alphabet = form.alphabet(k);
+                if !alphabet.contains(d) {
+                    let id = if alphabet == Alphabet::Bool { Identity::BoolSlack } else { Identity::Range16 };
+                    rep.fail(id, &format!("z digit {k}"), report_index::<P>(j, s, i), format!("value {d}"));
+                }
+            }
+        }
+    }
+    let w1 = rec.w1();
+    let top = P::M_W - 1;
+    let mut weight = 0i64;
+    for rho in 0..P::K {
+        for j in 0..N {
+            let x = report_index::<P>(j, rho, i);
+            for (t, plane) in rec.bits.iter().enumerate() {
+                let b = plane[rho][j];
+                if b * (b - 1) != 0 {
+                    rep.fail(Identity::BoolB, &format!("b_{t}"), x, format!("value {b}"));
+                }
+            }
+            if w1[rho][j] >= P::M_W {
+                rep.fail(Identity::RangeW1, "b", x, format!("w1' = {}", w1[rho][j]));
+            }
+            let c = rec.coeffs[rho][j];
+            if !(0..P::GAMMA2).contains(&c.l) {
+                rep.fail(Identity::Range16, "l", x, format!("L = {}", c.l));
+            }
+            let (s, d, e, w) = (
+                i128::from(c.sigma),
+                i128::from(c.delta),
+                i128::from(c.e),
+                i128::from(w1[rho][j]),
+            );
+            let checks = [
+                (s * s - 1, Identity::SignSquare, "sigma"),
+                (d * (d - s), Identity::DeltaSign, "delta"),
+                (e * (e - 1) * (e - d), Identity::EdgeE, "e"),
+                (e * (e + 1) * w, Identity::WrapLow, "e_wrap0"),
+                (e * (e - 1) * (w - i128::from(top)), Identity::WrapHigh, "e_wrap_top"),
+            ];
+            for (value, id, name) in checks {
+                if value != 0 {
+                    rep.fail(id, name, x, format!("{c:?}, w1' = {}", w1[rho][j]));
+                }
+            }
+            let v = rec.v[rho][j];
+            if !(-P::V_HALF_RANGE..P::V_HALF_RANGE).contains(&v) {
+                rep.fail(Identity::Range16, "v", x, format!("v = {v} outside [-2^31, 2^31)"));
+            }
+            weight += c.weight();
+        }
+    }
+    if !(0..TABLE).contains(&rec.u_h) {
+        rep.fail(Identity::Range16, "u_h", i, format!("u_h = {}", rec.u_h));
+    }
+    if weight + rec.u_h != P::OMEGA as i64 {
+        rep.fail(Identity::HintWeight, "u_h", i, format!("sum delta^2 = {weight}, u_h = {}", rec.u_h));
+    }
+    // Ring identity with the H-FIPS u; A = T = 0 on padded rows.
+    let z = rec.z();
+    let az = public.map(|p| az_integer_for::<P>(&p.key, &z));
+    for rho in 0..P::K {
+        for j in 0..N {
+            let (azv, t) = match (&az, public) {
+                (Some(a), Some(p)) => (a[rho][j], i128::from(p.t[rho][j])),
+                _ => (0, 0),
+            };
+            let delta = azv
+                - t
+                - i128::from(2 * P::GAMMA2 * w1[rho][j])
+                - i128::from(rec.coeffs[rho][j].u::<P>())
+                - i128::from(P::Q) * i128::from(rec.v[rho][j]);
+            if delta != 0 {
+                rep.fail(
+                    Identity::Ring,
+                    "ring",
+                    report_index::<P>(j, rho, i),
+                    format!("Delta = {delta} (record {i})"),
+                );
+            }
+        }
+    }
+    if let Some(p) = public {
+        let mut bytes = vec![0u8; P::W1_ENCODE_BYTES];
+        for rho in 0..P::K {
+            for j in 0..N {
+                for (t, plane) in rec.bits.iter().enumerate() {
+                    let k = w1_bit_index_for::<P>(t, j, rho);
+                    bytes[k / 8] |= ((plane[rho][j] & 1) as u8) << (k % 8);
+                }
+            }
+        }
+        if sponge_trace_for::<P>(&p.mu, &bytes).c_tilde != p.c_tilde {
+            rep.fail(
+                Identity::CommitmentHash,
+                "c_tilde",
+                i,
+                "SHAKE256(mu || w1Encode(w1')) != c~".into(),
+            );
+        }
+    }
+}
+
+/// [`check_batch`] for every parameter set: [`check_record_for`] on `records[i]` for every live
+/// `i`, then on the canonical padded rows up to `N*` (with `A = T = 0`).
+pub fn check_batch_for<P: ParamSet>(inst: &PublicInstance<P>, records: &[HFipsRecordOf<P>]) -> CheckReport {
+    let mut rep = CheckReport::default();
+    if records.len() != inst.records.len() {
+        rep.fail(
+            Identity::Shape,
+            "records",
+            0,
+            format!("{} records for {} live ones", records.len(), inst.records.len()),
+        );
+        return rep;
+    }
+    for (i, (p, r)) in inst.records.iter().zip(records).enumerate() {
+        check_record_for::<P>(&mut rep, Some(p), r, i);
+    }
+    let padded = HFipsRecordOf::<P>::padded();
+    for i in inst.records.len()..inst.geom.n_star {
+        check_record_for::<P>(&mut rep, None, &padded, i);
+    }
+    rep
 }
 
 #[cfg(test)]

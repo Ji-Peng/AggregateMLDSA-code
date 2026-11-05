@@ -147,12 +147,13 @@ impl DigitLayout {
             + self.constant()
     }
 
-    /// True when every digit lies in its alphabet.
+    /// True when `digits` has one entry per digit and every digit lies in its alphabet.
     pub fn in_alphabets(&self, digits: &[i64]) -> bool {
-        digits
-            .iter()
-            .enumerate()
-            .all(|(k, &d)| self.alphabet(k).contains(d))
+        digits.len() == self.len()
+            && digits
+                .iter()
+                .enumerate()
+                .all(|(k, &d)| self.alphabet(k).contains(d))
     }
 }
 
@@ -281,12 +282,13 @@ impl StepLayout {
             - self.offset
     }
 
-    /// True when every digit lies in its alphabet.
+    /// True when `digits` has one entry per digit and every digit lies in its alphabet.
     pub fn in_alphabets(&self, digits: &[i64]) -> bool {
-        digits
-            .iter()
-            .enumerate()
-            .all(|(k, &d)| self.alphabet(k).contains(d))
+        digits.len() == self.len()
+            && digits
+                .iter()
+                .enumerate()
+                .all(|(k, &d)| self.alphabet(k).contains(d))
     }
 }
 
@@ -377,12 +379,13 @@ impl BitSlackLayout {
             - self.offset
     }
 
-    /// True when every digit lies in its alphabet.
+    /// True when `digits` has one entry per digit and every digit lies in its alphabet.
     pub fn in_alphabets(&self, digits: &[i64]) -> bool {
-        digits
-            .iter()
-            .enumerate()
-            .all(|(k, &d)| self.alphabet(k).contains(d))
+        digits.len() == self.len()
+            && digits
+                .iter()
+                .enumerate()
+                .all(|(k, &d)| self.alphabet(k).contains(d))
     }
 }
 
@@ -476,12 +479,13 @@ impl DigitSlackLayout {
             - self.offset
     }
 
-    /// True when every digit lies in its alphabet.
+    /// True when `digits` has one entry per digit and every digit lies in its alphabet.
     pub fn in_alphabets(&self, digits: &[i64]) -> bool {
-        digits
-            .iter()
-            .enumerate()
-            .all(|(k, &d)| self.alphabet(k).contains(d))
+        digits.len() == self.len()
+            && digits
+                .iter()
+                .enumerate()
+                .all(|(k, &d)| self.alphabet(k).contains(d))
     }
 }
 
@@ -619,7 +623,7 @@ impl ValueForm {
         }
     }
 
-    /// True when every digit lies in its alphabet.
+    /// True when `digits` has one entry per digit and every digit lies in its alphabet.
     pub fn in_alphabets(&self, digits: &[i64]) -> bool {
         match self {
             Self::Radix(l) => l.in_alphabets(digits),
@@ -1219,5 +1223,35 @@ mod tests {
                 assert_eq!(value.compose(&d), z);
             }
         }
+    }
+
+    #[test]
+    fn in_alphabets_requires_one_entry_per_digit() {
+        let forms = [
+            ValueForm::from(SIGNED),
+            ValueForm::from(U_STEP16),
+            ValueForm::from(Z_BIT_SLACK),
+            ValueForm::from(U_DIGIT_SLACK),
+            ValueForm::from(L_SLACK),
+        ];
+        for form in forms {
+            let exact = form.decompose(0);
+            assert_eq!(exact.len(), form.len());
+            assert!(form.in_alphabets(&exact));
+            assert!(!form.in_alphabets(&[]));
+            assert!(!form.in_alphabets(&exact[..exact.len() - 1]));
+            let mut long = exact.clone();
+            long.push(0);
+            assert!(!form.in_alphabets(&long));
+        }
+        // The layouts themselves, outside the ValueForm wrapper.
+        let d = SIGNED.decompose(0);
+        assert!(SIGNED.in_alphabets(&d) && !SIGNED.in_alphabets(&d[..1]) && !SIGNED.in_alphabets(&[]));
+        let d = U_STEP16.decompose(0);
+        assert!(U_STEP16.in_alphabets(&d) && !U_STEP16.in_alphabets(&d[1..]));
+        let d = Z_BIT_SLACK.decompose(0);
+        assert!(Z_BIT_SLACK.in_alphabets(&d) && !Z_BIT_SLACK.in_alphabets(&[d.clone(), vec![0]].concat()));
+        let d = U_DIGIT_SLACK.decompose(0);
+        assert!(U_DIGIT_SLACK.in_alphabets(&d) && !U_DIGIT_SLACK.in_alphabets(&d[..d.len() - 1]));
     }
 }

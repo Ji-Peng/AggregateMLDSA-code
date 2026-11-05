@@ -5,7 +5,7 @@
 | Scope | tied-part proof version 5 (deviation K21): the GF(2) side of a tied part |
 | Related | `docs/bridge.md` Sections 4, 5a, 5c, 5d, 10.4; `docs/keccak.md` Sections 9 and 12 |
 | Code | `crates/agg-bridge/src/parity_chain.rs` (the sum-check, generic over `Shape`), `crates/agg-keccak/src/tied.rs` (transcript, proof bytes), `crates/agg-keccak/src/flock_union.rs` (extra ring-switched claims), `vendor/flock-core` (`SkipPoint::Eq`) |
-| Numbers | "est." marks an estimate; sizes are exact products of the shape constants |
+| Numbers | "est." marks an estimate; sizes are exact products of the shape constants; Sections 2 to 12 give ML-DSA-44's values, Section 13 those of ML-DSA-65 and ML-DSA-87 |
 
 ## 1. Idea
 
@@ -235,3 +235,22 @@ Numbers in `docs/keccak.md` 12.7 (measured). Against the estimates of Sections 7
   verifier's peak goes down; the prover's rises by about 7% with glibc's default allocator
   but by under 1% with a fixed mmap threshold, so the rise is heap retention after the
   Flock part, not live data.
+
+## 13. ML-DSA-65 and ML-DSA-87
+
+The shape is `Shape::PRODUCTION_W4` (`docs/bridge.md`, last section): four bit lanes of
+`P_pad = 2,048` positions `p = j + 256 rho`, so `lb = 2` and no junk lane. Lane `t` of a
+record is the sixteen sponge words `16 t + w` (`w = p >> 7`), the word columns `[0, 64)` as
+for ML-DSA-44; for ML-DSA-65 the positions `1,536..2,048` (rows 6 and 7) are columns the
+sponge gate pins to zero, as the F_p side's inputs are zero there. The in-block position is
+`zeta = p + 2,048 i_lo` with eight record bits `i_lo` (256 records per level-1 block), so
+`Z = 19`, `B = d - 8` (5 for a full segment) and `R = 13 + d + span_log`, the same count as
+for ML-DSA-44 (`agg_bridge::pow::chain_rounds`). Level 3 reads `v2[t + 4 rho_2]`
+(`18 x 32,768`). In the final claim the position takes 11 coordinates (7 in-word bits, then
+4 word bits), so the record coordinates start at `r_zeta[11]` and the columns are
+`(r_zeta[7..11], r_t[0], r_t[1], 0, ..)`. The public region follows the lanes (words
+`[64, 72)` for ML-DSA-65, `[64, 80)` for ML-DSA-87), so `rho_c` has 3 or 4 coordinates and the
+tie site's numerator is `L_s (nu_s + 3)` or `L_s (nu_s + 4)`
+(`agg_bridge::pow::TieGeometry::public_vars`). Tests: `tied::tests::four_lane_bit_claims_are_the_chain_input_on_the_sponge`
+(both sets: the four-lane chain input and its bit claim agree with the sponge's words, the
+padded positions are zero, and the honest final vectors equal the F_p side's).

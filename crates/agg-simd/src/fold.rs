@@ -8,7 +8,8 @@ pub fn k_fold(r: K, a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
     check(a, b, &out);
     #[cfg(target_arch = "x86_64")]
     if a.0.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return vector(r, a, b, out);
         }
@@ -29,7 +30,8 @@ pub fn int_fold(r: K, lo: &[i64], hi: &[i64], out: PlanesMut<'_>) {
     assert_eq!(lo.len(), out.1.len());
     #[cfg(target_arch = "x86_64")]
     if lo.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return int_vector(r, lo, hi, out);
         }
@@ -101,7 +103,9 @@ crate::wide::entry_points!(int_wide => int_w8, int_w4; (r: K, lower: &[i64], upp
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn vector(r: K, a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `check` asserts that all six planes hold `a.0.len()` words, and every vector access
+    // ends at or below `n <= a.0.len()`.
     unsafe {
         use crate::x86::*;
         let r0 = bc(r.c0().to_canonical_u64());
@@ -128,7 +132,9 @@ unsafe fn vector(r: K, a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn int_vector(r: K, lower: &[i64], upper: &[i64], out: PlanesMut<'_>) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `int_fold` asserts that `upper` and both output planes hold `lower.len()` words, and
+    // every vector access ends at or below `n <= lower.len()`.
     unsafe {
         use crate::x86::*;
         use std::arch::x86_64::*;

@@ -30,8 +30,8 @@ fn parse_env_usize(key: &str, default: usize) -> usize {
 }
 
 fn main() {
-    let n = parse_env_usize("STEP12_N", 4096);
-    let n_keys = parse_env_usize("STEP12_KEYS", 4096);
+    let n = parse_env_usize("STEP12_N", 1024);
+    let n_keys = parse_env_usize("STEP12_KEYS", 1024);
     let reps = parse_env_usize("STEP12_REPS", 2);
 
     let backend = agg_mldsa_simd::engine().backend();

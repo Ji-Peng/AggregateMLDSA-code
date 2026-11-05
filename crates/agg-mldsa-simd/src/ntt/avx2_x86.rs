@@ -41,7 +41,8 @@ let vl = _mm256_sub_epi32(vl, v13);
 (vl,vh)
 }};}
 // Inverse lazy sums and differences have |out| <= |low|+|high|.
-// q stays below 256q; P2 reduces fourth-layer sums before further doubling.
+// q stays below 256q; P2 reduces fourth-layer sums before further doubling,
+// P3 its third- and fifth-layer sums (see `reduce_sums`).
 macro_rules! backward {($l:expr,$h:expr,$zl:expr,$zlo:expr,$zh:expr,$zho:expr,$p:expr)=>{{
 let (vl,vh,vzl,vzlo,vzh,vzho,p)=($l,$h,$zl,$zlo,$zh,$zho,$p);
 let v12 = _mm256_sub_epi32(vh, vl);
@@ -690,6 +691,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
         let (v7, v11) = backward!(v7, v11, v1, v3, v2, v15, v0);
+        // P3 third-layer sums (<= 4p) are reduced; see `reduce_sums`.
+        let (v4, v5, v6, v7) = reduce_sums(p == Prime::P3, p, v0, v4, v5, v6, v7);
         let v3 = _mm256_shuffle_epi32::<0xA0>(v5);
         let v3 = _mm256_blend_epi32::<0xAA>(v4, v3);
         let v4 = _mm256_srli_epi64::<32>(v4);
@@ -712,19 +715,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p != Prime::Q {
-            // At most 8p before reduction; less than 0.63p afterwards.
-            let z = _mm256_set1_epi32(consts(p).mont);
-            let qi = _mm256_set1_epi32(consts(p).pinv);
-            (
-                mont(v3, z, v0, qi),
-                mont(v4, z, v0, qi),
-                mont(v6, z, v0, qi),
-                mont(v8, z, v0, qi),
-            )
-        } else {
-            (v3, v4, v6, v8)
-        };
+        // P2 fourth-layer sums: at most 8p before, below 0.63p after.
+        let (v3, v4, v6, v8) = reduce_sums(p == Prime::P2, p, v0, v3, v4, v6, v8);
         let v10 = _mm256_unpacklo_epi64(v3, v4);
         let v4 = _mm256_unpackhi_epi64(v3, v4);
         let v3 = _mm256_unpacklo_epi64(v6, v8);
@@ -739,6 +731,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
         let (v5, v11) = backward!(v5, v11, v1, v1, v2, v2, v0);
+        let (v10, v3, v6, v5) = reduce_sums(p == Prime::P3, p, v0, v10, v3, v6, v5);
         let v9 = _mm256_permute2x128_si256::<0x20>(v10, v3);
         let v3 = _mm256_permute2x128_si256::<0x31>(v10, v3);
         let v10 = _mm256_permute2x128_si256::<0x20>(v6, v5);
@@ -811,6 +804,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
         let (v7, v11) = backward!(v7, v11, v1, v3, v2, v15, v0);
+        // P3 third-layer sums (<= 4p) are reduced; see `reduce_sums`.
+        let (v4, v5, v6, v7) = reduce_sums(p == Prime::P3, p, v0, v4, v5, v6, v7);
         let v3 = _mm256_shuffle_epi32::<0xA0>(v5);
         let v3 = _mm256_blend_epi32::<0xAA>(v4, v3);
         let v4 = _mm256_srli_epi64::<32>(v4);
@@ -833,19 +828,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p != Prime::Q {
-            // At most 8p before reduction; less than 0.63p afterwards.
-            let z = _mm256_set1_epi32(consts(p).mont);
-            let qi = _mm256_set1_epi32(consts(p).pinv);
-            (
-                mont(v3, z, v0, qi),
-                mont(v4, z, v0, qi),
-                mont(v6, z, v0, qi),
-                mont(v8, z, v0, qi),
-            )
-        } else {
-            (v3, v4, v6, v8)
-        };
+        // P2 fourth-layer sums: at most 8p before, below 0.63p after.
+        let (v3, v4, v6, v8) = reduce_sums(p == Prime::P2, p, v0, v3, v4, v6, v8);
         let v10 = _mm256_unpacklo_epi64(v3, v4);
         let v4 = _mm256_unpackhi_epi64(v3, v4);
         let v3 = _mm256_unpacklo_epi64(v6, v8);
@@ -860,6 +844,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
         let (v5, v11) = backward!(v5, v11, v1, v1, v2, v2, v0);
+        let (v10, v3, v6, v5) = reduce_sums(p == Prime::P3, p, v0, v10, v3, v6, v5);
         let v9 = _mm256_permute2x128_si256::<0x20>(v10, v3);
         let v3 = _mm256_permute2x128_si256::<0x31>(v10, v3);
         let v10 = _mm256_permute2x128_si256::<0x20>(v6, v5);
@@ -932,6 +917,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
         let (v7, v11) = backward!(v7, v11, v1, v3, v2, v15, v0);
+        // P3 third-layer sums (<= 4p) are reduced; see `reduce_sums`.
+        let (v4, v5, v6, v7) = reduce_sums(p == Prime::P3, p, v0, v4, v5, v6, v7);
         let v3 = _mm256_shuffle_epi32::<0xA0>(v5);
         let v3 = _mm256_blend_epi32::<0xAA>(v4, v3);
         let v4 = _mm256_srli_epi64::<32>(v4);
@@ -954,19 +941,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p != Prime::Q {
-            // At most 8p before reduction; less than 0.63p afterwards.
-            let z = _mm256_set1_epi32(consts(p).mont);
-            let qi = _mm256_set1_epi32(consts(p).pinv);
-            (
-                mont(v3, z, v0, qi),
-                mont(v4, z, v0, qi),
-                mont(v6, z, v0, qi),
-                mont(v8, z, v0, qi),
-            )
-        } else {
-            (v3, v4, v6, v8)
-        };
+        // P2 fourth-layer sums: at most 8p before, below 0.63p after.
+        let (v3, v4, v6, v8) = reduce_sums(p == Prime::P2, p, v0, v3, v4, v6, v8);
         let v10 = _mm256_unpacklo_epi64(v3, v4);
         let v4 = _mm256_unpackhi_epi64(v3, v4);
         let v3 = _mm256_unpacklo_epi64(v6, v8);
@@ -981,6 +957,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
         let (v5, v11) = backward!(v5, v11, v1, v1, v2, v2, v0);
+        let (v10, v3, v6, v5) = reduce_sums(p == Prime::P3, p, v0, v10, v3, v6, v5);
         let v9 = _mm256_permute2x128_si256::<0x20>(v10, v3);
         let v3 = _mm256_permute2x128_si256::<0x31>(v10, v3);
         let v10 = _mm256_permute2x128_si256::<0x20>(v6, v5);
@@ -1053,6 +1030,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v5, v9) = backward!(v5, v9, v1, v3, v2, v15, v0);
         let (v6, v10) = backward!(v6, v10, v1, v3, v2, v15, v0);
         let (v7, v11) = backward!(v7, v11, v1, v3, v2, v15, v0);
+        // P3 third-layer sums (<= 4p) are reduced; see `reduce_sums`.
+        let (v4, v5, v6, v7) = reduce_sums(p == Prime::P3, p, v0, v4, v5, v6, v7);
         let v3 = _mm256_shuffle_epi32::<0xA0>(v5);
         let v3 = _mm256_blend_epi32::<0xAA>(v4, v3);
         let v4 = _mm256_srli_epi64::<32>(v4);
@@ -1075,19 +1054,8 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v4, v7) = backward!(v4, v7, v1, v1, v2, v2, v0);
         let (v6, v9) = backward!(v6, v9, v1, v1, v2, v2, v0);
         let (v8, v11) = backward!(v8, v11, v1, v1, v2, v2, v0);
-        let (v3, v4, v6, v8) = if p != Prime::Q {
-            // At most 8p before reduction; less than 0.63p afterwards.
-            let z = _mm256_set1_epi32(consts(p).mont);
-            let qi = _mm256_set1_epi32(consts(p).pinv);
-            (
-                mont(v3, z, v0, qi),
-                mont(v4, z, v0, qi),
-                mont(v6, z, v0, qi),
-                mont(v8, z, v0, qi),
-            )
-        } else {
-            (v3, v4, v6, v8)
-        };
+        // P2 fourth-layer sums: at most 8p before, below 0.63p after.
+        let (v3, v4, v6, v8) = reduce_sums(p == Prime::P2, p, v0, v3, v4, v6, v8);
         let v10 = _mm256_unpacklo_epi64(v3, v4);
         let v4 = _mm256_unpackhi_epi64(v3, v4);
         let v3 = _mm256_unpacklo_epi64(v6, v8);
@@ -1102,6 +1070,7 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         let (v3, v8) = backward!(v3, v8, v1, v1, v2, v2, v0);
         let (v6, v7) = backward!(v6, v7, v1, v1, v2, v2, v0);
         let (v5, v11) = backward!(v5, v11, v1, v1, v2, v2, v0);
+        let (v10, v3, v6, v5) = reduce_sums(p == Prime::P3, p, v0, v10, v3, v6, v5);
         let v9 = _mm256_permute2x128_si256::<0x20>(v10, v3);
         let v3 = _mm256_permute2x128_si256::<0x31>(v10, v3);
         let v10 = _mm256_permute2x128_si256::<0x20>(v6, v5);
@@ -1498,6 +1467,31 @@ fn inverse(p: Prime, t: &tables::Table, a: &mut Poly32, form: Form) {
         );
     }
 }
+/// Montgomery-multiplies four registers of inverse sums by R mod p when `on`,
+/// which keeps each residue and leaves |r| < |x| (R mod p)/2^32 + p/2.
+///
+/// P2 reduces its fourth-layer sums (|x| <= 8p, then below 0.63p). For P3,
+/// 8p exceeds 2^31, so it reduces its third-layer sums (|x| <= 4p) and its
+/// fifth-layer sums (|x| < 2.56p), each to below 0.67p; every other P3 sum
+/// stays below 4.68p < 2^31 (5.69p), as `schedule_bounds` checks.
+#[inline]
+#[target_feature(enable = "avx2,popcnt")]
+fn reduce_sums(
+    on: bool,
+    p: Prime,
+    v0: __m256i,
+    a: __m256i,
+    b: __m256i,
+    c: __m256i,
+    d: __m256i,
+) -> (__m256i, __m256i, __m256i, __m256i) {
+    if !on {
+        return (a, b, c, d);
+    }
+    let z = _mm256_set1_epi32(consts(p).mont);
+    let qi = _mm256_set1_epi32(consts(p).pinv);
+    (mont(a, z, v0, qi), mont(b, z, v0, qi), mont(c, z, v0, qi), mont(d, z, v0, qi))
+}
 /// Inverse twiddles of the eight-word group at reference word `w`, read
 /// pre-shuffled: the qword-reversed group, or (`odd`) its odd words duplicated.
 #[inline]
@@ -1521,8 +1515,8 @@ fn mont(a: __m256i, z: __m256i, p: __m256i, qi: __m256i) -> __m256i {
 #[inline]
 #[target_feature(enable = "avx2,popcnt")]
 fn finish(x: __m256i, p: __m256i, f: Form) -> __m256i {
-    // Input in (-p,p): the inverse final multiply gives below 0.74q resp. 0.61P2,
-    // the rounded-reciprocal reduction below 0.751p. A negative x is a huge
+    // Input in (-p,p): the inverse final multiply gives below 0.74q, 0.61P2 resp.
+    // 0.71P3, the rounded-reciprocal reduction below 0.751p. A negative x is a huge
     // unsigned value while x + p is in [0,p), so the unsigned minimum is canonical.
     let x = _mm256_min_epu32(x, _mm256_add_epi32(x, p));
     if f == Form::Canonical {
@@ -1550,7 +1544,10 @@ pub(crate) unsafe fn intt(p: Prime, a: &mut Poly32, s: Scale, f: Form) {
     inverse(p, tables::table(p, s), a, f);
 }
 #[target_feature(enable = "avx2,popcnt")]
-fn dot_inner_l<const L: usize, const SECOND: bool>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
+/// `CENTER` conditional +-p passes center the Montgomery output: none for q,
+/// one for P2 (|x| < 1.08p for L <= 7), two for P3 (|x| < 1.9p for L <= 7,
+/// beyond the 1.5p one pass can center).
+fn dot_inner_l<const L: usize, const CENTER: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
     let c = consts(p);
     let pv = _mm256_set1_epi32(c.p);
     let qi = _mm256_set1_epi32(c.pinv);
@@ -1559,6 +1556,8 @@ fn dot_inner_l<const L: usize, const SECOND: bool>(p: Prime, a: &[Poly32; L], b:
             let j = block + 8 * lane;
             let mut e = _mm256_setzero_si256();
             let mut o = e;
+            // Centered P2/P3 (canonical q) matrix times lazy NTT(z), L <= 7:
+            // the 64-bit sums stay below 2^61.
             for k in 0..L {
                 let av = load(a[k].0[j..j + 8].try_into().unwrap());
                 let bv = load(b[k].0[j..j + 8].try_into().unwrap());
@@ -1570,18 +1569,16 @@ fn dot_inner_l<const L: usize, const SECOND: bool>(p: Prime, a: &[Poly32; L], b:
             }
             let e = _mm256_sub_epi64(e, _mm256_mul_epi32(_mm256_mul_epi32(e, qi), pv));
             let o = _mm256_sub_epi64(o, _mm256_mul_epi32(_mm256_mul_epi32(o, qi), pv));
-            let x = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(e), o);
-            let x = if SECOND {
-                _mm256_add_epi32(
+            let mut x = _mm256_blend_epi32::<0xAA>(_mm256_srli_epi64::<32>(e), o);
+            for _ in 0..CENTER {
+                x = _mm256_add_epi32(
                     _mm256_sub_epi32(
                         x,
                         _mm256_and_si256(_mm256_cmpgt_epi32(x, _mm256_set1_epi32(c.p / 2)), pv),
                     ),
                     _mm256_and_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(-c.p / 2), x), pv),
-                )
-            } else {
-                x
-            };
+                );
+            }
             store((&mut out.0[j..j + 8]).try_into().unwrap(), x);
         }
     }
@@ -1589,27 +1586,29 @@ fn dot_inner_l<const L: usize, const SECOND: bool>(p: Prime, a: &[Poly32; L], b:
 #[target_feature(enable = "avx2,popcnt")]
 #[cfg(any(test, not(target_os = "linux")))]
 unsafe fn dot4_intrinsics(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
-    if p == Prime::Q {
-        dot_inner_l::<4, false>(p, a, b, out);
-    } else {
-        dot_inner_l::<4, true>(p, a, b, out);
+    match p {
+        Prime::Q => dot_inner_l::<4, 0>(p, a, b, out),
+        Prime::P2 => dot_inner_l::<4, 1>(p, a, b, out),
+        Prime::P3 => dot_inner_l::<4, 2>(p, a, b, out),
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn dot_l<const L: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
     #[cfg(target_os = "linux")]
-    if L == 4 && p != Prime::P3 {
-        // SAFETY: L == 4 ensures the slice has length 4.
+    if L == 4 {
+        // SAFETY: with L == 4, `[Poly32; L]` and `[Poly32; 4]` are the same type
+        // layout, and the references keep the borrows of `a` and `b`.
         let a4: &[Poly32; 4] = unsafe { &*(a.as_ptr() as *const [Poly32; 4]) };
+        // SAFETY: as for `a4`.
         let b4: &[Poly32; 4] = unsafe { &*(b.as_ptr() as *const [Poly32; 4]) };
-        // SAFETY: dispatch proved AVX2/POPCNT; all typed arrays are aligned and complete.
+        // SAFETY: the caller proved AVX2/POPCNT; the typed arrays are aligned and complete.
         unsafe { dot4(p, a4, b4, out) };
         return;
     }
-    if p == Prime::Q {
-        dot_inner_l::<L, false>(p, a, b, out);
-    } else {
-        dot_inner_l::<L, true>(p, a, b, out);
+    match p {
+        Prime::Q => dot_inner_l::<L, 0>(p, a, b, out),
+        Prime::P2 => dot_inner_l::<L, 1>(p, a, b, out),
+        Prime::P3 => dot_inner_l::<L, 2>(p, a, b, out),
     }
 }
 #[target_feature(enable = "avx2,popcnt")]
@@ -1728,6 +1727,12 @@ pub(crate) unsafe fn ntt(p: Prime, a: &mut Poly32) {
 }
 #[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn dot4(p: Prime, a: &[Poly32; 4], b: &[Poly32; 4], out: &mut Poly32) {
+    // The assembly centers its output once; P3 needs two passes.
+    #[cfg(target_os = "linux")]
+    if p == Prime::P3 {
+        dot_inner_l::<4, 2>(p, a, b, out);
+        return;
+    }
     // SAFETY: dispatch proved AVX2/POPCNT; all typed arrays are aligned and
     // complete, and the SysV assembly reads only inside them.
     #[cfg(target_os = "linux")]
@@ -1769,7 +1774,7 @@ mod tests {
             eprintln!("Skipping: AVX2/POPCNT unavailable");
             return;
         }
-        for p in [Prime::Q, Prime::P2] {
+        for p in [Prime::Q, Prime::P2, Prime::P3] {
             for case in 0..12 {
                 let input = Poly32(std::array::from_fn(|i| {
                     ((i * 773 + case * 5137) % 8388609) as i32 - 4194304

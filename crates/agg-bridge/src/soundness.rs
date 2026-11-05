@@ -47,7 +47,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_are_those_of_docs_bridge_section_7() {
+    fn level_and_bridge_errors_of_the_production_and_toy_shapes() {
         let p = Shape::PRODUCTION.levels.map(|l| level_error_log2(&l));
         assert!(
             close(p[0], -145.64) && close(p[1], -145.64) && close(p[2], -163.44),

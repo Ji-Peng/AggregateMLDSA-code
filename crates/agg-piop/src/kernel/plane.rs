@@ -20,7 +20,7 @@
 //!   first fold writes `w` and `g` as a width-2 table. The integer lanes' terminal values
 //!   come from the multilinear evaluation of their columns at the bound point
 //!   (`agg_simd::eval::column_at`), so they are never carried as `K` lanes.
-//! - [`LinearIntGroup`] (stage 3's lookup-stack and bit reductions): up to four integer columns read
+//! - [`LinearIntGroup`] (stage 3's lookup-stack reductions): up to four `i32` columns read
 //!   linearly with `K` coefficients. The prefix pass sums each column by pattern; the round-2
 //!   pass materialises the single combined lane `g = sum_l c_l f_l(rho_0, rho_1, .)`.
 //!
@@ -41,7 +41,7 @@ use agg_simd::eval::{column_at, split_eq_tables, Mapped};
 use agg_simd::fused::{self, Eval, Fill, MixedLane, RowSource, Terms};
 use agg_simd::lookup::UpperRows;
 use agg_simd::k::Planes;
-use agg_simd::pattern::{self, Bottom, ByteColumns, Columns, Leaves, PrefixSums, Symmetric};
+use agg_simd::pattern::{self, Bottom, Columns, Leaves, PrefixSums, Symmetric};
 
 use super::{compress, evaluate_compressed};
 use crate::OpeningField as E;
@@ -1141,22 +1141,15 @@ impl<L: Leaves> PlaneSource for LinearSource<L> {
 }
 
 /// `sum_x eq(point, x) sum_l c_l f_l(x)` over up to four integer columns `f_l` (`i32` cells
-/// with `|f_l| < 2^31`, or `i8` cells read through the identity map): rounds 0 and 1 from the
-/// pattern sums of the columns, then the single combined lane `g = sum_l c_l f_l`. The group
-/// yields no terminal lane values (the caller reads the lanes' values from another group at
-/// the same point).
-pub struct LinearIntGroup<'a>(LinearEngine<'a>);
-
-/// The engine over `i32` columns or over `i8` columns.
-enum LinearEngine<'a> {
-    Ints(Engine<LinearSource<Columns<'a>>>),
-    Bytes(Engine<LinearSource<ByteColumns<'a>>>),
-}
+/// with `|f_l| < 2^31`): rounds 0 and 1 from the pattern sums of the columns, then the single
+/// combined lane `g = sum_l c_l f_l`. The group yields no terminal lane values (the caller
+/// reads the lanes' values from another group at the same point). Byte lanes stay on the
+/// generic kernel's coded path.
+pub struct LinearIntGroup<'a>(Engine<LinearSource<Columns<'a>>>);
 
 impl<'a> LinearIntGroup<'a> {
-    /// `None` without lanes, with more than four, with a lane that is not an `i32` column
-    /// or an identity-mapped `i8` column, with lanes of mixed kinds, with lanes of other
-    /// lengths than `2^eq_point.len()`, or with fewer than 2 variables.
+    /// `None` without lanes, with more than four, with a lane that is not an `i32` column,
+    /// with lanes of other lengths than `2^eq_point.len()`, or with fewer than 2 variables.
     #[must_use]
     pub fn new(lanes: Vec<super::Source<'a>>, coefficients: Vec<E>, eq_point: &[E], pool: &mut Pool) -> Option<Self> {
         let vars = eq_point.len();
@@ -1164,47 +1157,29 @@ impl<'a> LinearIntGroup<'a> {
         if lanes.is_empty() || lanes.len() > 4 || lanes.len() != coefficients.len() || vars < PREFIX {
             return None;
         }
-        let mut ints = Vec::with_capacity(4);
-        let mut bytes = Vec::with_capacity(4);
-        for lane in &lanes {
-            match lane {
-                super::Source::Ints(cells) if cells.len() == rows => ints.push(*cells),
-                super::Source::Bytes { cells, map } if cells.len() == rows && **map == super::IDENTITY_MAP => {
-                    bytes.push(*cells);
-                }
-                _ => return None,
-            }
-        }
-        if !ints.is_empty() && !bytes.is_empty() {
-            return None;
-        }
+        let ints = lanes
+            .iter()
+            .map(|lane| match lane {
+                super::Source::Ints(cells) if cells.len() == rows => Some(*cells),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
         let mut slots = coefficients;
         slots.resize(4, E::zero());
         slots.push(E::one());
-        fn source<L: Leaves>(columns: L, vars: usize, slots: Vec<E>) -> LinearSource<L> {
-            LinearSource {
-                columns,
-                vars,
-                slots,
-                lin_forms: vec![0, 1, 2, 3],
-            }
-        }
-        if bytes.is_empty() {
-            Engine::new(source(Columns { lanes: ints }, vars, slots), Some(eq_point), vars, pool)
-                .map(|e| Self(LinearEngine::Ints(e)))
-        } else {
-            Engine::new(source(ByteColumns { lanes: bytes }, vars, slots), Some(eq_point), vars, pool)
-                .map(|e| Self(LinearEngine::Bytes(e)))
-        }
+        let source = LinearSource {
+            columns: Columns { lanes: ints },
+            vars,
+            slots,
+            lin_forms: vec![0, 1, 2, 3],
+        };
+        Engine::new(source, Some(eq_point), vars, pool).map(Self)
     }
 
     /// The current claim.
     #[must_use]
     pub fn claim(&self) -> E {
-        match &self.0 {
-            LinearEngine::Ints(e) => e.claim,
-            LinearEngine::Bytes(e) => e.claim,
-        }
+        self.0.claim
     }
 
     /// The compressed message of `round`.
@@ -1212,10 +1187,7 @@ impl<'a> LinearIntGroup<'a> {
     /// # Panics
     /// When rounds are called out of order.
     pub fn round_message(&mut self, round: usize) -> Vec<E> {
-        match &mut self.0 {
-            LinearEngine::Ints(e) => e.round_message(round),
-            LinearEngine::Bytes(e) => e.round_message(round),
-        }
+        self.0.round_message(round)
     }
 
     /// Bind the round's variable to `challenge`.
@@ -1223,26 +1195,17 @@ impl<'a> LinearIntGroup<'a> {
     /// # Panics
     /// When rounds are called out of order.
     pub fn bind(&mut self, round: usize, challenge: E) {
-        match &mut self.0 {
-            LinearEngine::Ints(e) => e.bind(round, challenge),
-            LinearEngine::Bytes(e) => e.bind(round, challenge),
-        }
+        self.0.bind(round, challenge);
     }
 
     /// The self-check of [`LayerGroup::terminal_consistent`].
     #[must_use]
     pub fn terminal_consistent(&self) -> bool {
-        match &self.0 {
-            LinearEngine::Ints(e) => e.terminal_consistent(),
-            LinearEngine::Bytes(e) => e.terminal_consistent(),
-        }
+        self.0.terminal_consistent()
     }
 
     /// Return the table buffers to the pool.
     pub fn recycle(self, pool: &mut Pool) {
-        match self.0 {
-            LinearEngine::Ints(e) => e.recycle(pool),
-            LinearEngine::Bytes(e) => e.recycle(pool),
-        }
+        self.0.recycle(pool);
     }
 }

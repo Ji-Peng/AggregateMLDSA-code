@@ -242,7 +242,7 @@ const RECT_MIN_ROWS_LOG: usize = 11;
 /// lincheck stripe) and at least `MIN_DENSE_M - k_log` (smallest Ligerito
 /// config). A full-height stack (`n = 2^nu`) makes Flock's merged opening take
 /// its block-first transport, whose cost is about `128^2` field operations per
-/// used chunk-column (2,155 for the sponge gate) regardless of `n`; below
+/// used chunk-column (2,146 for the ML-DSA-44 sponge gate) regardless of `n`; below
 /// `2^11` rows that fixed cost exceeds the dense path's, so `nu` is raised by
 /// one. A function of `n` only, so prover and verifier agree.
 #[must_use]

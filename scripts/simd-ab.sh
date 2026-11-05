@@ -6,7 +6,7 @@ cd "$ROOT"
 # Both builds take their flags from `.cargo/config.toml`; an exported RUSTFLAGS
 # would replace them.
 export CARGO_BUILD_JOBS=3
-unset RUSTFLAGS
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
 unset RAYON_NUM_THREADS AGG_MLDSA_SIMD
 MAIN_WT="$ROOT/target/main-wt"
 export LOG_DIR="$ROOT/target/simd-ab-logs"
@@ -48,12 +48,14 @@ if [[ "$flags" == *' avx2 '* && "$flags" == *' popcnt '* ]]; then
     fi
 fi
 export AB_BACKENDS="${BACKENDS[*]}"
-# Every runtime gate shares the benchmark lock and CPU affinity.
+# Every runtime gate shares the benchmark lock and runs on CPUs 0,1,3-15 (CPU 2 is
+# reserved on this machine).
+CPUS=0,1,3-15
 gate() {
     if command -v flock >/dev/null; then
-        flock "$LOCK" taskset -c 3 "$@"
+        flock "$LOCK" taskset -c "$CPUS" "$@"
     else
-        taskset -c 3 "$@"
+        taskset -c "$CPUS" "$@"
     fi
 }
 gate "$CURRENT_BIN" keygen-batch --count 64 --seed 42 --out "$TMP_DIR/keys.bin"
@@ -66,10 +68,11 @@ for b in "${BACKENDS[@]}"; do
         echo "IDENTICAL main/$b threads=$threads" | tee -a "$LOG_DIR/equality.log"
     done
 done
-for keys in 4096 16; do
-    gate env AGG_GIT_REV="$BASE_REV" "$MAIN_BIN" bench --count 4096 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/main_${keys}.log" 2>&1
+# Local runs stay at 1K records; larger batches belong on the cluster (printed below).
+for keys in 1024 16; do
+    gate env AGG_GIT_REV="$BASE_REV" "$MAIN_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/main_${keys}.log" 2>&1
     for b in "${BACKENDS[@]}"; do
-        gate env AGG_GIT_REV="$(git rev-parse HEAD)" AGG_MLDSA_SIMD="$b" "$CURRENT_BIN" bench --count 4096 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/${b}_${keys}.log" 2>&1
+        gate env AGG_GIT_REV="$(git rev-parse HEAD)" AGG_MLDSA_SIMD="$b" "$CURRENT_BIN" bench --count 1024 --keys "$keys" --warmup 1 --reps 2 --relation h-u > "$LOG_DIR/${b}_${keys}.log" 2>&1
     done
 done
 python3 - <<'PY' | tee "$LOG_DIR/table.md"
@@ -87,8 +90,8 @@ metrics = [
     ('public_data', r'public_data'), ('public_t', r'public_t'), ('public_a', r'public_a'),
     ('prover RSS MiB', r'prover peak RSS'), ('verifier RSS MiB', r'verifier peak RSS'),
 ]
-for keys in (4096, 16):
-    print(f'\nLocal direction only: N=4096, K={keys}, H-u, CPU 3, default threads. Times in ms.')
+for keys in (1024, 16):
+    print(f'\nLocal direction only: N=1024, K={keys}, H-u, CPUs 0,1,3-15, default threads. Times in ms.')
     print('| Metric | ' + ' | '.join(backends) + ' |')
     print('|---|' + '---:|' * len(backends))
     texts = [(root / f'{b}_{keys}.log').read_text() for b in backends]
@@ -118,7 +121,7 @@ for keys in (4096, 16):
             cells.append(f'{values[0] / values[i]:.2f}x' if values[i] else 'N/A')
         print('| ' + backend + ' | ' + ' | '.join(cells) + ' |')
 PY
-printf '%s\n' "Cluster only (do not run locally; an idle xcni node, each supported backend):"
+printf '%s\n' "Cluster only (do not run locally; an idle Zen 5 node, each supported backend):"
 for b in "${BACKENDS[@]}"; do
     for keys in 32768 16; do
         printf "RAYON_NUM_THREADS=16 AGG_MLDSA_SIMD=%s cargo run --release -p agg-cli --bin agg -- bench --count 32768 --keys %s --warmup 1 --reps 5 --relation h-u\n" "$b" "$keys"

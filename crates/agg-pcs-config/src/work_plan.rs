@@ -203,7 +203,8 @@ impl WorkPlan {
         }
     }
 
-    /// Akita setup sized for this batch (largest group, all 38 or 39 polynomials). The final
+    /// Akita setup sized for this batch (largest group, every committed polynomial: 53 to 59
+    /// for ML-DSA-44, 101 to 121 for ML-DSA-65, 125 to 151 for ML-DSA-87). The final
     /// family's catalog carries every precommitted profile of its grouped rows, so its
     /// requirements cover the width-16 commits too (Akita's mixed-bound batches).
     pub fn setup_requirements(&self) -> Result<SetupRequirements<BaseField>, AkitaError> {

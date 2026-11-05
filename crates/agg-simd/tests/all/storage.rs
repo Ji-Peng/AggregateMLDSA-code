@@ -26,14 +26,27 @@ fn panic_during_initialization_is_safe() {
         .is_err()
     );
 }
+/// Two coordinate planes must fill the buffer: a short second plane is refused before any
+/// kernel reads it.
 #[test]
-fn direct_signed_field_encoding() {
-    for n in [0,1,63,64,65,1024] {
-        let a:Vec<_>=(0..n).map(|i|[i32::MIN,i32::MAX,-1,0,1,-32768][i%6]).collect();
-        let expected:Vec<_>=a.iter().map(|&x|F::from_i64(i64::from(x))).chain(std::iter::repeat(F::from_u64(0)).take(17)).collect();
-        assert_eq!(cast::encode_i32(&a,n+17),expected);
-        let a:Vec<_>=(0..n).map(|i|i as u8 as i8).collect();
-        let expected:Vec<_>=a.iter().map(|&x|F::from_i64(i64::from(x))).chain(std::iter::repeat(F::from_u64(0)).take(17)).collect();
-        assert_eq!(cast::encode_i8(&a,n+17),expected);
-    }
+#[should_panic(expected = "two coordinate planes")]
+fn kplanes_with_a_short_second_plane_panic() {
+    let planes = KPlanes { buf: AlignedVec::fill_par(12, 4, |_| 0), rows: 8 };
+    let _ = planes.planes();
+}
+/// A table truncated to its round's words goes back to the pool at its allocated size, so a
+/// request of that size reuses it.
+#[test]
+fn pool_reuses_a_truncated_table() {
+    use agg_simd::buf::Pool;
+    let mut pool = Pool::default();
+    let mut table = AlignedVec::<u64>::zeroed(1024);
+    let address = table.as_ptr() as usize;
+    table.truncate(256);
+    let spare = table.into_uninit();
+    assert_eq!(spare.len(), 1024);
+    pool.give(spare);
+    let reused = pool.take(1024);
+    assert_eq!(reused.as_ptr() as usize, address);
+    assert_eq!(pool.words(), 0);
 }

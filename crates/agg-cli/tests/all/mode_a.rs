@@ -978,8 +978,11 @@ fn three_parts_in_a_segment_are_refused() {
         let aggregate = Aggregator::new(AggregatorConfig::with_part_log2(3))
             .aggregate_with(&signed(&records), &hooks)
             .expect("aggregate");
-        let items = SegmentCommitments::from_bytes(&aggregate.proof.flock_commitments[0]).unwrap();
-        assert_eq!((items.d_part, items.commitments.len()), (3, 3));
+        // The item names d_part = 3 and three parts; its parser refuses more parts than any
+        // admissible segment has.
+        let item = &aggregate.proof.flock_commitments[0];
+        assert_eq!((item[2], u32::from_le_bytes(item[4..8].try_into().unwrap())), (3, 3));
+        assert_eq!(SegmentCommitments::from_bytes(item), Err(ItemError::Truncated));
         let report = AggregateVerifier::new().verify(&statements(&records), &aggregate.bytes, None);
         expect_rejected("three parts in segment 0", &report, |e| matches!(e, VerifyError::Plan));
         assert!(report.parts.is_empty(), "no Flock part was run");

@@ -30,10 +30,17 @@ pub type OutLane = (usize, usize);
 pub const MAX_LANES: usize = 64;
 /// Most coefficient slots of a summand.
 pub const MAX_SLOTS: usize = 32;
+/// Most terms (linear and product together) of one slot. The IFMA evaluation sums a slot's
+/// terms on one pair of rows in one unreduced accumulator: each term adds below `2^53` to
+/// its low limb and below `6 * 2^52` to its middle limb, so 512 terms keep them below `2^62`
+/// and `3 * 2^62`.
+pub const MAX_SLOT_TERMS: usize = 512;
 
+/// # Safety
+/// Both planes of `out` must hold a writable row `row`.
 #[inline]
 unsafe fn write(out: OutLane, row: usize, x: K) {
-    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+    // SAFETY: the caller guarantees row `row` of both planes is writable.
     unsafe {
         (out.0 as *mut u64).add(row).write(x.c0().to_canonical_u64());
         (out.1 as *mut u64).add(row).write(x.c1().to_canonical_u64());
@@ -45,11 +52,21 @@ unsafe fn write(out: OutLane, row: usize, x: K) {
 ///
 /// # Safety
 /// Every output address must hold `row1` writable `u64` rows not aliased by `lanes`.
+///
+/// # Panics
+/// When the lane counts differ, `row0 > row1`, or an input plane holds fewer than `2 row1`
+/// rows (the vector kernels read them through raw pointers).
 pub unsafe fn fold_rows(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
     assert_eq!(lanes.len(), out.len());
+    assert!(row0 <= row1);
+    assert!(
+        lanes.iter().all(|lane| lane.0.len() >= 2 * row1 && lane.1.len() >= 2 * row1),
+        "input lanes cover the folded rows"
+    );
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active; the inputs hold `2 row1` rows (asserted) and the
+        // caller guarantees `row1` writable output rows.
         unsafe {
             return fold_vector(r, lanes, out, row0, row1);
         }
@@ -60,7 +77,8 @@ pub unsafe fn fold_rows(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize
             return;
         }
     }
-    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+    // SAFETY: the caller guarantees `row1` writable output rows; the inputs are read through
+    // checked indexing.
     unsafe { fold_scalar(r, lanes, out, row0, row1) }
 }
 
@@ -91,12 +109,14 @@ unsafe fn fold_wide<B: crate::wide::Simd>(r: K, lanes: &[Planes<'_>], out: &[Out
 #[cfg(target_arch = "x86_64")]
 crate::wide::entry_points!(fold_wide => fold_w8, fold_w4; (r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize));
 
+/// # Safety
+/// Every output address must hold `row1` writable `u64` rows.
 unsafe fn fold_scalar(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
     for (lane, &o) in lanes.iter().zip(out) {
         for row in row0..row1 {
             let a = scalar::get(*lane, 2 * row);
             let b = scalar::get(*lane, 2 * row + 1);
-            // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+            // SAFETY: `row < row1` and the caller guarantees `row1` writable output rows.
             unsafe { write(o, row, a + r * (b - a)) };
         }
     }
@@ -119,6 +139,8 @@ struct SlotOrder {
 }
 
 impl SlotOrder {
+    /// # Panics
+    /// When a slot holds more than [`MAX_SLOT_TERMS`] terms.
     fn new(terms: Terms<'_>) -> Self {
         let slots = terms.slots;
         let mut lin_off = vec![0_usize; slots + 1];
@@ -151,6 +173,10 @@ impl SlotOrder {
                 next[s] += 1;
             }
         }
+        assert!(
+            (0..slots).all(|s| lin_off[s + 1] - lin_off[s] + pro_off[s + 1] - pro_off[s] <= MAX_SLOT_TERMS),
+            "at most MAX_SLOT_TERMS terms per slot"
+        );
         let (mut in_product, mut doubled) = (0_u64, 0_u64);
         for &(i, j, _) in terms.products {
             in_product |= (1 << i) | (1 << j);
@@ -331,7 +357,8 @@ fn eval_items_with(
     }
     #[cfg(target_arch = "x86_64")]
     if k1 - k0 >= 8 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active, and the assertions above cover every raw read
+        // (lane rows `2 k0 .. 2 k1`, weights `k1 - k0`, term indices).
         unsafe {
             return eval_vector(lanes, terms, order, scratch, weights, k0, k1, full, out);
         }
@@ -402,7 +429,10 @@ fn eval_scalar(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fold_vector(r: K, lanes: &[Planes<'_>], out: &[OutLane], row0: usize, row1: usize) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `fold_rows` asserts that every input plane holds `2 row1` words, so the loads at
+    // `2 row .. 2 row + 16` with `row + 8 <= stop <= row1` stay inside; the caller of
+    // `fold_rows` guarantees `row1` writable rows at every output address.
     unsafe {
         use crate::x86::*;
         let rk = bck(r);
@@ -436,7 +466,10 @@ unsafe fn eval_vector(
     full: bool,
     out: &mut [[K; 3]],
 ) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `eval_items_with` asserts that every lane holds `2 k1` words per plane and the
+    // weights `k1 - k0`, so the loads at `2 k .. 2 k + 16` and `k - k0` with
+    // `k + 8 <= stop <= k1` stay inside; scratch and term indices are bounds-checked.
     unsafe {
         use crate::x86::*;
         let width = lanes.len();
@@ -485,8 +518,9 @@ unsafe fn eval_vector(
                     continue;
                 }
                 let products_in_slot = order.has_products(s);
-                // The slot's value on the pair. Its accumulator lives for one step, so the
-                // `mac7` and `lift52` bounds of a single term apply without a flush.
+                // The slot's value on the pair. Its accumulator lives for one step and takes
+                // at most `MAX_SLOT_TERMS` terms (checked by `SlotOrder::new`), within the
+                // 512-term bound of `kmac7` and `lift52`, so it needs no flush.
                 let mut value = [a3k(); 3];
                 for &index in &lin_order[lin_off[s]..lin_off[s + 1]] {
                     let (l, _) = terms.linear[index as usize];
@@ -870,11 +904,15 @@ pub enum Fill<'a, L: Leaves> {
 ///
 /// # Safety
 /// Every output address must hold `row1` writable `u64` rows.
+///
+/// # Panics
+/// As [`fold_rows`] for a plane lane holding fewer than `2 row1` rows.
 pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: usize, row1: usize) {
     assert_eq!(lanes.len(), out.len());
     for (lane, &o) in lanes.iter().zip(out) {
         match lane {
-            // SAFETY: the call is guarded by the backend check and the length assertions above.
+            // SAFETY: the caller guarantees `row1` writable rows at `o`; `fold_rows` checks
+            // the input rows.
             MixedLane::Planes(p) => unsafe { fold_rows(r, &[*p], &[o], row0, row1) },
             MixedLane::Ints(fill) => {
                 const CHUNK: usize = 256;
@@ -889,9 +927,10 @@ pub unsafe fn fold_mixed(r: K, lanes: &[MixedLane<'_>], out: &[OutLane], row0: u
                         lo[i] = cells[2 * i];
                         hi[i] = cells[2 * i + 1];
                     }
-                    // SAFETY: the call is guarded by the backend check and the length assertions above.
+                    // SAFETY: `row + n <= row1`, and the caller guarantees `row1` writable rows
+                    // of this lane's planes, which no other view borrows.
                     let c0 = unsafe { std::slice::from_raw_parts_mut((o.0 as *mut u64).add(row), n) };
-                    // SAFETY: the call is guarded by the backend check and the length assertions above.
+                    // SAFETY: as above, for the second plane.
                     let c1 = unsafe { std::slice::from_raw_parts_mut((o.1 as *mut u64).add(row), n) };
                     crate::fold::int_fold(r, &lo[..n], &hi[..n], (c0, c1));
                     row += n;
@@ -1103,11 +1142,14 @@ unsafe fn fused_pass_uninit<L: Leaves>(
             let mut local: Vec<Planes<'_>> = Vec::new();
             if let Some((r, source)) = computed {
                 let rows = scale * (block_end - block_start);
-                // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+                // SAFETY: every scratch lane holds `block_in >= rows` rows per plane, owned by
+                // this task.
                 unsafe { source.fill(scale * block_start, scale * block_end, &scratch_lanes) };
                 local = scratch_lanes
                     .iter()
-                    // SAFETY: the call is guarded by the backend check and the length assertions above.
+                    // SAFETY: the source has just written rows `0..rows` of every scratch plane
+                    // (each holds `block_in >= rows` words); nothing writes them while the views
+                    // live.
                     .map(|&(c0, c1)| unsafe {
                         (
                             std::slice::from_raw_parts(c0 as *const u64, rows),
@@ -1119,20 +1161,23 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                     // Output rows from `block_start` on: the addresses stay inside the table.
                     let shifted: Vec<OutLane> =
                         addresses.iter().map(|&(c0, c1)| (c0 + 8 * block_start, c1 + 8 * block_start)).collect();
-                    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+                    // SAFETY: the shifted addresses hold rows `0..block_end - block_start` inside
+                    // the table (`block_end <= rows_out`), written by this task only.
                     unsafe { fold_rows(r, &local, &shifted, 0, block_end - block_start) };
                 }
             }
             match &fill {
-                // SAFETY: the call is guarded by the backend check and the length assertions above.
+                // SAFETY (all four fills): every output lane addresses `rows_out >= block_end`
+                // rows of the table (the buffer size is asserted above), and this task alone
+                // writes rows `block_start..block_end`; the fills check their inputs.
                 Some(Fill::Fold(r, lanes)) => unsafe { fold_rows(*r, lanes, &addresses, block_start, block_end) },
-                // SAFETY: the call is guarded by the backend check and the length assertions above.
+                // SAFETY: as above.
                 Some(Fill::Mixed(r, lanes)) => unsafe { fold_mixed(*r, lanes, &addresses, block_start, block_end) },
-                // SAFETY: the call is guarded by the backend check and the length assertions above.
+                // SAFETY: as above.
                 Some(Fill::Pattern(e, leaves)) => unsafe {
                     crate::pattern::fill_rows(*leaves, *e, &addresses, block_start, block_end);
                 },
-                // SAFETY: the call is guarded by the backend check and the length assertions above.
+                // SAFETY: as above.
                 Some(Fill::PatternCombined(weights, leaves)) => unsafe {
                     crate::pattern::fill_combined(*leaves, weights, addresses[0], block_start, block_end);
                 },
@@ -1150,7 +1195,8 @@ unsafe fn fused_pass_uninit<L: Leaves>(
                         // multiples of 512 rows).
                         let rows = block_end - block_start;
                         written.clear();
-                        // SAFETY: the call is guarded by the backend check and the length assertions above.
+                        // SAFETY: rows `block_start..block_end` lie inside the table, were written
+                        // by the fill above, and no task writes them while the views live.
                         written.extend(addresses.iter().map(|&(c0, c1)| unsafe {
                             (
                                 std::slice::from_raw_parts((c0 as *const u64).add(block_start), rows),

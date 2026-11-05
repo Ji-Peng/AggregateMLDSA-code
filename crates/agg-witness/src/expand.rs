@@ -292,7 +292,7 @@ impl ExpandedKey<Set44> {
         tiles.into_iter().flatten().collect()
     }
 
-    /// NTT(A) modulo the legacy CRT prime [`crt::P2`] (reference form for [`crate::crt`],
+    /// NTT(A) modulo the legacy CRT prime [`crt::CRT_P31`] (reference form for [`crate::crt`],
     /// recomputed from A).
     #[must_use]
     pub fn a_hat_p2_reference(&self) -> Box<MatrixNtt> {

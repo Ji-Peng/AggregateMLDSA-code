@@ -2,9 +2,10 @@
 # carry-less multiplication. The baseline is a hard requirement: the binary
 # does not start on a CPU without AVX2. AVX-512F, IFMA and the remaining
 # instruction sets are selected at run time from the CPU, capped by
-# `AGG_ISA`. Do not add `target-cpu=native` (it breaks rustc 1.99) or a
-# global `x86-64-v4` target: the latter changes Akita's window-gather layout
-# and fails the prover self-check.
+# `AGG_ISA`. Do not add `target-cpu=native`, `znver5` or a global
+# `x86-64-v4` target: the compiler would then auto-vectorise portable code with
+# AVX-512, and the `AGG_ISA=avx2` tier would no longer be free of AVX-512
+# instructions.
 [build]
 rustflags = [
     "-C", "target-cpu=x86-64-v3",

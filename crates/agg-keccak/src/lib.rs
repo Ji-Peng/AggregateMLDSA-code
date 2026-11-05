@@ -33,12 +33,6 @@ pub use flock_core;
 pub use flock_field;
 pub use flock_prover;
 
-/// Whether this build was compiled with the opt-in `avx512` feature.
-#[must_use]
-pub const fn avx512_enabled() -> bool {
-    cfg!(feature = "avx512")
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

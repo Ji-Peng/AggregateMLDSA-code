@@ -41,6 +41,7 @@ than to one tree.
   two-lane statistics and the portable message loop; the terms and messages
   are identical.
 - **Plane PIOP layout.** `AGG_PIOP_LAYOUT=plane|row` selects the sum-check
-  table layout independently of `AGG_ISA`; `plane` is the default only with the
-  IFMA backend. Both layouts send identical messages.
+  table layout independently of `AGG_ISA`; unset selects `plane` on every vector
+  backend (avx512ifma, avx512, avx2) and `row` on the portable (scalar) backend.
+  Both layouts send identical messages.
   The linear reduction groups follow the selected layout as well.

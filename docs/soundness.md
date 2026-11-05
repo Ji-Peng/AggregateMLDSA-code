@@ -2,8 +2,8 @@
 
 | Field | Value |
 | --- | --- |
-| Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
-| Applies to | mode A and mode B, ML-DSA-44, relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16 with the projection of `v` (K24); PIOP wire version 4 (the parity chain's sites in the plan; the late join of K25; the forked PIOP transcript of K23) and tied-part proof version 5 |
+| Implemented in | PIOP wire version 4 (`agg_piop::pow`, `agg_piop::transcript`), tied-part proof version 5 (`agg_keccak::tied`, deviations K20, K21, `docs/parity-chain.md`), the list-aware Flock outer sites (`vendor/flock-core/PATCH.md` Section 5, deviation K19) and the joint out-of-domain draw of each recursive Ligerito level (Section 16), the Akita plan pinned (`agg-pcs-config/tests/all/akita_grinding.rs`) |
+| Applies to | mode A and mode B, ML-DSA-44 (ML-DSA-65 and ML-DSA-87: Sections 10.3 and 13; every other number is ML-DSA-44's), relations H-u (the default, `docs/h-exact.md` step A), H-exact (relation byte 1, step B; Section 10.1) and H-FIPS (relation byte 2, `docs/h-exact.md` Section 10; Section 10.2), lookup layout L16 with the projection of `v` (K24); PIOP wire version 4 (the parity chain's sites in the plan; the late join of K25; the forked PIOP transcript of K23) and tied-part proof version 5 |
 | Base | code `a30ed97`; Aerie `49b6c21`; Akita `e023b6a46143f7b23199ccecb2684192baf7b640`; Flock `83f963e` with the vendored `flock-core` (K12, K18) |
 | Script | `docs/scripts/pow_plan.py` (run with `python3 -I`); its output summary is Section 10; `docs/scripts/fold_support.py` (Section 4.6) |
 | Replaces | the per-instance union bound (Section 5); resolves deviation P3 |
@@ -17,7 +17,7 @@ the pinned code; estimates are marked.
 1. **PIOP sites.** At `N* = 2^15` the transcript draws 456 field challenges in `K`
    (`|K| = p^2`, `p = 2^64 - 59`): the lookup vector `X = (X_1, X_2)`, 26 merges `mu_s`,
    25 GKR batching vectors, 325 GKR rounds of degree 3, `tau`, `gamma^(1..3)` and
-   `3 x 25` stage rounds of degrees 4, 4, 3 (every relation). With the assigned bounds of Section 3 every
+   `3 x 25` stage rounds of degrees 4, 5, 3 (every relation). With the assigned bounds of Section 3 every
    field site except `X` needs work: 455 nonces of 8 to 13 bits, 4,195 bits of the packed
    stream. The byte site `proj.psi` precedes them (deviation K24): its answer is the
    projection matrix `Psi` itself (16 KiB), its bad set has mass at most `2^-128` exactly
@@ -39,34 +39,38 @@ the pinned code; estimates are marked.
    catalogs already run it: 461 protected sites at `2^15`, targets up to 12 bits
    (ring-switch `alpha`, loss 4,095), plan digest bound in Akita's instance descriptor.
    Nothing needs to be turned on.
-4. **Flock.** Flock's strict `Fast`/`Slim` level is not a query-only claim: every outer
-   challenge (zerocheck, lincheck, ring switch, transport batch, merged sum-check) has a
-   per-challenge nonce and every Ligerito component is validated strictly above 128 bits.
-   **But** the outer challenges are drawn before the level-0 two-point binding, and the
+4. **Flock.** Flock's strict `Fast`/`Slim` level was not a query-only claim: every outer
+   challenge (zerocheck, lincheck, ring switch, transport batch, merged sum-check) had a
+   per-challenge nonce and every Ligerito component was validated strictly above 128 bits,
+   **but** the outer challenges are drawn before the level-0 two-point binding, and the
    Flock paper's own accounting (Appendix A "Security", Remark 11) multiplies each of them
-   by the list size `L_max`; the vendored schedule charges `L_max` only at the transport
-   claim batch. Under that accounting the outer sites reach 122.4 to 123.9 bits (`Fast`,
-   `Slim`) and 121.9 to 122.9 bits (`Slim8`), and `Slim8`'s transport claim batch reaches
-   127.86 bits. Minimal fix: list-aware nonce widths at those sites in the vendored core
-   (Section 4.3). This changes the Flock verifier, so the K12 patch would no longer be
-   prover-only.
+   by the list size `L_max`, while upstream charged `L_max` only at the transport claim
+   batch. Under that accounting the outer sites reached 122.4 to 123.9 bits (`Fast`,
+   `Slim`) and 121.9 to 122.9 bits (`Slim8`), and `Slim8`'s transport claim batch 127.86
+   bits. The vendored core now has list-aware nonce widths at those sites (Section 4.3,
+   deviation K19), which changed the Flock verifier, and draws the out-of-domain points of
+   each recursive Ligerito level jointly, before the prover answers any of them
+   (`vendor/flock-core/PATCH.md` Section 16).
 5. **Binding gap in the tied part.** The instance challengers of a tied part must absorb
    the data the tie points are derived from, because Flock's packed-direct claims absorb
    values only and assume transcript-derived points. Tied-part proof version 5 binds a tie
    digest into the one (sponge) challenger, after the chain's rounds and its bit value
    (Section 4.5).
 6. **Tighter accounting.** Round-by-round (first false claim, Aerie Lemma C.1) gives the
-   union-bound ledger `1,329/|K| = 2^-117.6` at `2^15` instead of the per-instance
-   `3,429/|K| = 2^-116.3`: reductions, zero-checks and linear identities ride on the stage
+   union-bound ledger `1,354/|K| = 2^-117.6` at `2^15` instead of the per-instance
+   `3,454/|K| = 2^-116.2`: reductions, zero-checks and linear identities ride on the stage
    sum-checks and on one `tau` site (Section 5). With the schedule every address weighs
    at most `2^-128`, and the theorem of Section 7 follows Aerie Eq. (18).
 7. **Composition (Section 12) and fold supports (4.6).** The theorem's two hypotheses are
    settled: every fold-challenge family of both catalogs has at least `2^128.0881` accepted
    challenges (H1, test `akita_fold_support.rs`), and the composition with the Flock
-   commitments is proved (H2) with checkpoints at `sd` and `X`, no second extractor, under
-   two stated assumptions: Flock's documented round-by-round analysis (F) and the
-   correctness of the Keccak circuit (K) (the bridge has no Flock circuit:
-   its GF(2) side is a sum-check whose weight the verifier evaluates).
+   commitments is proved (H2) with checkpoints at `sd` and `X`, no second extractor. Its two
+   ingredients are proved as well: Flock's round-by-round analysis (F) follows from Dao,
+   Kominers and Thaler's list agreement theorem (ePrint 2026/2056, Theorem 4.4) for the
+   `Fast` profile with the joint out-of-domain draw, and the correctness of the Keccak
+   circuit (K) is the sponge-exactness lemma (the bridge has no Flock circuit: its GF(2)
+   side is a sum-check whose weight the verifier evaluates). `Slim` falls 0.2 bits short on
+   the 15 outer zero-check rounds (12.7).
 8. **Unforgeability (Section 12.8).** Signing queries asked only in rewound runs are
    handled by lazy forwarding to a SUF-CMA challenger of the
    relaxed scheme (Lemmas 12.6, 12.7) and a three-case SUF-CMA lemma (12.8): SelfTargetMSIS
@@ -140,9 +144,9 @@ sub-proofs and therefore no tied-part site):
 | fork | PIOP (K23) | none; the sponge is cloned into branch L (event 7) and branch S (events 8 to 11), each absorbing its own label |
 | 7 | PIOP, branch L | `X` (vector of 2); `mu_1`; per session `s = 2..D`: `gamma_s` (vector), `s - 1` rounds, `mu_s` |
 | 8, 9 | PIOP, branch S | `tau` (vector of `d_main`) |
-| 10, 11 | PIOP, branch S | `gamma^(1)` (26), 25 stage-1 rounds; `gamma^(2)` (9), stage-2 rounds (each stage `d_main` rounds); then the absorbed projection claim `c` |
+| 10, 11 | PIOP, branch S | `gamma^(1)` (26), 25 stage-1 rounds; `gamma^(2)` (10; 9 under H-exact and H-FIPS), stage-2 rounds (each stage `d_main` rounds); then the absorbed projection claim `c` |
 | branch join | PIOP (K23) | none; the trunk absorbs the 32-byte digests of L and S, in this order |
-| 12 | PIOP | `gamma^(3)` (48), `d_main` stage-3 rounds |
+| 12 | PIOP | `gamma^(3)` (49; 50 under H-exact, 56 under H-FIPS), `d_main` stage-3 rounds |
 | join | no PIOP absorption (K25); inside each tied part (own oracles, seeded by the part or span seed, which binds `fs_sigma` and the event-6 record digest `rec`; the prover runs them concurrently with events 7 to 13): on the tie challenger the **tie site**, the **`eq_Y` site** and the **chain rounds** (version 5), then the sponge instance's Flock sites (zerocheck, lincheck, opening with the bit claim) |
 | 13 | PIOP export, then Akita | PCS session digest (no site); Akita's own sites under its plan (Section 3.7) |
 
@@ -307,7 +311,9 @@ Session `s` reduces the layer-`(s - 1)` claims of every active tree to layer `s`
   at most 1/2. The bits `Psi_o(x_0)` are independent across `o`, which gives `2^-R` for
   record `i*`; that record alone bounds the batch, so no union over records enters. With
   `R = 128`, `B = 2^37` the certified bound is `|v|_c <= 2^38`, below the `(p/2 - 2^50)/q ~
-  2^40` that (6.1) needs (2 bits of margin). The bound is tight: `v = (v_0, 0, ..., 0)` with
+  2^40` that (6.1) needs (2 bits of margin for ML-DSA-44; ML-DSA-65 and ML-DSA-87 take `B =
+  2^39`, certify `|v|_c <= 2^40` and keep a lift margin factor of only 1.0007 and 1.0006,
+  `param_sets.py`, spec's final section). The bound is tight: `v = (v_0, 0, ..., 0)` with
   `|v_0|_c > 2B` passes a row iff its bit is 0. Rows over `{-1, 0, 1}` pass with probability
   up to 2/3 per row (219 rows for `2^-128`); rows over `[-2, 2]` admit `v(x_0)` near `p/2`.
 
@@ -517,6 +523,19 @@ checked by `agg_keccak::prover::tests::flock_outer_sites_carry_the_level0_list`.
 multipoint batch and rounds get the same factor; the AG-basis skip points (not on our path)
 keep upstream's bits. Raising the finding upstream is still open.
 
+Joint out-of-domain draw (`vendor/flock-core/PATCH.md` Section 16). Upstream draws the two
+out-of-domain points of a recursive Ligerito level one after the other, with the prover's
+answer and a nonce in between, so the second point is a fresh site whose bad set depends on
+the first; without a binding the next level's list must be charged at every query site,
+which leaves the query sites of levels 0 to 5 6.0 to 8.9 bits short at `2^15` (`Fast`). The
+vendored core draws the points of each level `>= 1` by consecutive squeezes before the
+prover answers any of them, so their answers are sampled jointly, form one stage, and at
+most one listed codeword survives them (pair-collision mass `2^-235.8` to `2^-229.1`,
+`Fast`). Proofs with this change do not verify with upstream. The zero-check's 15 outer
+rounds also carry the constant-column contract term, `3 L_J` per round in place of `2 L_J`:
+`Fast` stays within its 7 bits (`2^-128.3`), `Slim` does not (`150/2^135 = 2^-127.8`,
+Section 12.7).
+
 ### 4.4 Flock: `Slim8`'s transport claim batch
 
 `OpeningGrinding::per_challenge_128` fixes `claim_batch_bits = 6` for every profile, on
@@ -607,11 +626,10 @@ Akita's exact checkers (`scripts/operator_norm/d64/check_cert.py`, `d128/check_c
 The certified count of the threshold-13 family is `ceil(N_raw p0) =
 502822610611069237129947393810277364817` (`cert_d128_w31_gamma13.json`, `p0 = 0.48027`), the
 value of Aerie C.3. Akita's other certified family, `D = 64`, `(31, 11)`, threshold 18
-(`2^128.0624`), does not occur in our catalogs. Per grouped row (both relations): 11 draws at
-`d_sig = 3` to 11, 12 at 12 to 15. Under H-u the smallest support is `2^128.0881` at `d_sig =
-3` to 14 (a root group or level 1 drawing the `D = 64` packing family) and `2^128.5633` at
-`d_sig = 15`; under H-exact it is `2^128.0881` at every `d_sig` from 3 to 15 (the `2^15` row's
-level 1 draws the `D = 64` packing family). The width-4 draw counts above cover both
+(`2^128.0624`), does not occur in our catalogs. Per ML-DSA-44 grouped row (H-u and H-exact
+alike, `grouped_rows_by_batch_size`): 12 draws at `d_sig = 3` to 10, 13 at 11 to 15. The
+smallest support is `2^128.0881` at every `d_sig` except 11 (a root group or level 1 drawing
+the `D = 64` packing family) and `2^128.5633` at `d_sig = 11`. The width-4 draw counts above cover both
 relations' rows.
 
 **Result.** H1 holds for every row of both catalogs. The smallest accepted support is
@@ -665,10 +683,10 @@ the tie sites the bad sets are those of Section 12.4, built on Sections 3.5 and 
 
 Before work, the round-by-round union bound (sum of `nu_t/|F_t|`, which is also the
 interactive soundness error of the PIOP, plus the `X` term `2^-203.5`, the `sd` term (`<=
-2^-131.4`) and the `proj.psi` term `2^-128`) is `(11 d_main + d_main + 3 + GKR)/|K|` (the
-stage degrees sum to 11 in H-u):
-`914/|K| = 2^-118.2` at `2^10`, `1,154/|K| = 2^-117.8` at `2^13`, `1,329/|K| = 2^-117.6`
-at `2^15`, against the per-instance ledger's `2,594`, `3,086`, `3,429` over `|K|`. This is still not
+2^-131.4`) and the `proj.psi` term `2^-128`) is `(12 d_main + d_main + 3 + GKR)/|K|` (the
+stage degrees sum to 12, every relation):
+`934/|K| = 2^-118.1` at `2^10`, `1,177/|K| = 2^-117.8` at `2^13`, `1,354/|K| = 2^-117.6`
+at `2^15`, against the per-instance ledger's `2,614`, `3,109`, `3,454` over `|K|`. This is still not
 128 bits; the schedule makes every site `<= 2^-128` per address, which is the statement of
 Section 7.
 
@@ -780,18 +798,19 @@ evaluations.
 
 ## 7. Theorem (128-bit knowledge soundness, classical ROM)
 
-**Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` or `Slim` with the fix of
-4.3 (or `Slim8` with 4.3 and 4.4), tied-part proof version 5 (3.6, 4.5), PIOP wire version 4
+**Theorem.** Fix `N <= 2^15`, mode A with Flock profile `Fast` with the fix of 4.3, tied-part proof version 5 (3.6, 4.5), PIOP wire version 4
 (relation H-u, H-exact or H-FIPS, the caller's relation, bound by byte 3 of event 0 and checked
 by the verifier before event 0) with the plan of Section 6 (Section 10.1 for H-exact, 10.2 for
 H-FIPS), at most two tied parts per segment (3.5), and Akita's plan for the selected catalog
-row. Its two hypotheses
+row. (`Slim` meets every bound except the 15 outer zero-check rounds, which reach `2^-127.8`
+per query once the constant-column contract term is charged, 12.7 item 1; `Slim8`, with 4.3
+and 4.4, has not been rechecked against that term.) Its two hypotheses
 are settled:
 
 * **(H1, discharged in 4.6)** every fold group of every row of both catalogs draws its
   sparse fold challenges from a family whose accepted support is at least `2^128` after
   rejection (smallest `2^128.0881`; test `agg-pcs-config/tests/all/akita_fold_support.rs`);
-* **(H2, proved in Section 12 under (F) and (K))** the composition of Akita's extractor with
+* **(H2, proved in Section 12)** the composition of Akita's extractor with
   the Flock commitments: no second extractor is needed (the extractor returns Akita's
   round-1 sources; the Ligerito words are fixed straight-line by the Merkle expansion and
   enter the round-by-round bits through their Johnson lists), with a checkpoint at `sd`
@@ -800,11 +819,15 @@ are settled:
   `2^15` (`tau`, `gamma^(1)`, 25 stage-1 rounds, `gamma^(2)`, 25 stage-2 rounds); it has had
   internal review only (12.7 item 3).
 
-The theorem is conditional on the assumptions of Section 12.5: **(F)** Flock's documented
-round-by-round analysis of its instances (per-site bounds as validated by its configs, the
-list factor at the outer sites by K19, its work composition, its ring-switched claims with the
-multilinear skip basis of K21) and **(K)** the correctness of the sponge circuit. The paper MUST state (F) and (K) as assumptions and
-MUST NOT claim the theorem without them. For every
+The two statements of Section 12.5 that the proof uses are proved, not assumed: **(F)**
+Flock's round-by-round analysis of its instances (per-site bounds as validated by its
+configs, the list factor at the outer sites by K19, its work composition, its ring-switched
+claims with the multilinear skip basis of K21) follows from the list mutual correlated
+agreement of Reed-Solomon codes up to the Johnson bound, a theorem of Dao, Kominers and
+Thaler (ePrint 2026/2056, Theorem 4.4), with the joint out-of-domain draw of each recursive
+Ligerito level (`vendor/flock-core/PATCH.md` Section 16, 4.3) and the random-oracle model of
+Flock's challenger; **(K)**, the correctness of the sponge circuit, is the sponge-exactness
+lemma (its constant column pinned by Flock's lincheck, so it applies through (F)). For every
 prover `P` making at most `Q` oracle queries (all oracles of Section 12.1, every nonce probe
 included) there is an extractor of expected cost at most `(Q_wrap + 2) 4 Tree0_ck(sch) T_run`
 (Section 12.6). Here `T_run` bounds one run of `P` and the verifier with the extractor's
@@ -822,7 +845,12 @@ where `R_f` is the number of field sites of the PIOP and of Akita read by the ve
 (457 + 461 at `2^15`, the byte site `proj.psi` and the 456 field challenges, plus the seeds
 and the tied parts' sites), `R_coord` Akita's sparse fold coordinates read by
 the verifier, `R_F` the Flock sites read by the verifier (the sponge instance of every tied
-part, outer and Ligerito, queries included), `eps_bind, eps_pk, eps_dig` the hashed-entry terms of Aerie
+part, outer and Ligerito, queries included; `m_bool + 4 dense_m + 11L + k_0 - 9` per
+instance for `m_bool` zero-check and `dense_m` dense Flock variables, `L` Ligerito levels and
+`k_0` level-0 folds, the two out-of-domain points of a recursive level counted one squeeze
+each: `5m + 11L - 3` when `m_bool = dense_m = m` and `k_0 = 6`, so 244 at `2^15` (`m = 34`,
+`L = 7`) and 223 at `2^13` (`m = 32`, `L = 6`), and 197 at `2^10` (`m_bool = 30`,
+`dense_m = 29`, `L = k_0 = 5`), the same for all three sets), `eps_bind, eps_pk, eps_dig` the hashed-entry terms of Aerie
 Definition 5.8 (instance digest, public-record digest, PCS session digest, Flock part and
 span seeds, the event-6 record digest `rec` that they bind (K22), final-vector digests, tie
 bindings, Flock statement digests, the BLAKE3 chaining of Flock's challenger), `eps_fs` the
@@ -841,31 +869,30 @@ relation), Akita's opening suffix (Proposition 10.44) after the root fold, and L
 the tied parts' own challengers, which precede `X` with addresses that omit it, for the
 sites of branch S (K23) and for the fold coordinates, whose addresses omit the parts (K25). (3) Item (vii) of Akita Definition 10.16: the bridge seed
 with the sponge lists and the tied parts' sites (tie, `eq_Y`, chain rounds) with the list
-factor and Flock's per-site bounds under (F) on the segment of `sd` (12.4), with Lemma 12.4
+factor and Flock's per-site bounds by (F) on the segment of `sd` (12.4), with Lemma 12.4
 for the seed; Lemma S and the evaluation batch on the segment of `X` (12.3). (4) Every address weighs at most `2^-128` (Section 3,
 the script's assertion `max weight <= 2^-128`; `sd` at most `2^-131.38`; `proj.psi`
 `2^-129` by Lemma P and its one-bit grind (K24), below the field sites; the largest PIOP
 plan weight is `2^-128.0931` (`tau`, `15/(16|K|)`) at `N* = 32` and `2^-128.36` at `2^15`;
 so every PIOP site is at most `2^-128.09`; the heaviest quantified site is the tied-part
 tie site, `2^-128.034` under `Slim` (`nu_s = 7`) and `2^-128.063` under `Fast`; Akita's
-fold-coordinate weight is `2^-128.0881` (4.6); Flock with 4.3/4.4
-under (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
+fold-coordinate weight is `2^-128.0881` (4.6); Flock with 4.3
+by (F); Akita by its plan and by the accepted sparse-challenge supports of 4.6), so
 Akita Theorem 10.17 with Aerie Eq. (18) gives `rho (Q + R_f + R_coord + R_F)` with `rho <=
-2^-128`, and no site sits at exactly `2^-128` except where (F) is the bound. (5) The witness map returns the round-1 tables, which satisfy the caller's relation by the
+2^-128`, and no site sits at exactly `2^-128` except where Flock's validated per-site bound is. (5) The witness map returns the round-1 tables, which satisfy the caller's relation by the
 test at `sd` (spec 12.2: lookup, leaves, the Booleanity zero-checks of `B_zhi` and `a_z`
 under H-exact, the projection bound on `v` through Lemma P, the bridge with `b = b'`).
 
-*What is not proved here* (Section 12.7): assumption (F), which the Flock paper presents
-as a sketch; assumption (K); Lemma 12.3 extends Akita's Theorem 10.17, now carries PIOP
-stages 1 and 2 as well (branch S, K23), has had internal review only and should be checked
-by a reviewer of Akita's proof; `R_F` is not counted exactly;
+*Open points* (Section 12.7): `Slim`'s outer zero-check rounds (above); Lemma 12.3 extends
+Akita's Theorem 10.17, now carries PIOP stages 1 and 2 as well (branch S, K23), has had
+internal review only and should be checked by a reviewer of Akita's proof;
 Akita's Module-SIS estimates exclude the extractor's run count and the cost of one run as in
 Aerie, although the Module-SIS algorithms built from the collisions inherit `T_run` (12.6).
 As in Aerie, the term
 `(R_f + R_coord + R_F) 2^-128` is not negligible at `Q = 0` (about `2^-117` to `2^-118`,
 estimate); the claim is 128 bits per query, Aerie's notion.
 
-*Mode B* (public bits, no Flock): Corollary 12.5 gives the same statement without (F).
+*Mode B* (public bits, no Flock): Corollary 12.5 gives the same statement without Flock's sites.
 
 ## 8. Costs at `N = 2^15` (profile `Slim`, span on)
 
@@ -902,7 +929,7 @@ Span off at `2^15`: four tied parts of 26 rounds each, `526 + 4 x 112 = 974` B i
 
 (Relation H-exact: Section 10.1.)
 
-Relation H-u (stage degrees 4, 4, 3; batching vectors 26, 9, 48). The relation is bound by
+Relation H-u (stage degrees 4, 5, 3; batching vectors 26, 10, 49). The relation is bound by
 the event-0 manifest bytes (`G_main4` alphabet code 6 for `U_hi`), not by the plan; with the
 projection of `v` (K24) the plans of H-u, H-exact and H-FIPS are equal at every size.
 
@@ -911,19 +938,19 @@ sum before work):
 
 ```text
 d_sig  N*      d_main  D   L            X-site log2   sites  nonces  bits  bytes  work(sum 2^g)  est.ms  max weight  ledger(before work)
-    3       8      13  16       153600        -220.5    196     195  1818    228           1350    0.98  2^-128.30  550/|K| = 2^-118.9
-    4      16      14  16       172032        -220.3    199     198  1848    231           1386    1.00  2^-128.19  562/|K| = 2^-118.9
-    5      32      15  16       208896        -219.9    202     201  1878    235           1422    1.03  2^-128.09  574/|K| = 2^-118.8
-    6      64      16  17       282624        -219.2    223     222  2070    259           1532    1.11  2^-128.42  636/|K| = 2^-118.7
-    7     128      17  18       430080        -218.2    245     244  2270    284           1630    1.18  2^-128.42  701/|K| = 2^-118.5
-    8     256      18  19       724992        -216.8    268     267  2479    310           1732    1.25  2^-128.42  769/|K| = 2^-118.4
-    9     512      19  20      1314816        -215.2    292     291  2698    338           1846    1.34  2^-128.42  840/|K| = 2^-118.3
-   10    1024      20  21      2560000        -213.4    317     316  2926    366           1964    1.42  2^-128.42  914/|K| = 2^-118.2
-   11    2048      21  22      5050368        -211.4    343     342  3163    396           2086    1.51  2^-128.42  991/|K| = 2^-118.0
-   12    4096      22  23     10031104        -209.5    370     369  3409    427           2212    1.60  2^-128.42  1071/|K| = 2^-117.9
-   13    8192      23  24     19992576        -207.5    398     397  3664    458           2342    1.70  2^-128.42  1154/|K| = 2^-117.8
-   14   16384      24  25     39985152        -205.5    427     426  3929    492           2492    1.80  2^-128.42  1240/|K| = 2^-117.7
-   15   32768      25  26     79970304        -203.5    457     456  4203    526           2646    1.92  2^-128.36  1329/|K| = 2^-117.6
+    3       8      13  16       153600        -220.5    196     195  1818    228           1350    0.98  2^-128.30  563/|K| = 2^-118.9
+    4      16      14  16       172032        -220.3    199     198  1848    231           1386    1.00  2^-128.19  576/|K| = 2^-118.8
+    5      32      15  16       208896        -219.9    202     201  1878    235           1422    1.03  2^-128.09  589/|K| = 2^-118.8
+    6      64      16  17       282624        -219.2    223     222  2070    259           1532    1.11  2^-128.42  652/|K| = 2^-118.7
+    7     128      17  18       430080        -218.2    245     244  2270    284           1630    1.18  2^-128.42  718/|K| = 2^-118.5
+    8     256      18  19       724992        -216.8    268     267  2479    310           1732    1.25  2^-128.42  787/|K| = 2^-118.4
+    9     512      19  20      1314816        -215.2    292     291  2698    338           1846    1.34  2^-128.42  859/|K| = 2^-118.3
+   10    1024      20  21      2560000        -213.4    317     316  2926    366           1964    1.42  2^-128.42  934/|K| = 2^-118.1
+   11    2048      21  22      5050368        -211.4    343     342  3163    396           2086    1.51  2^-128.42  1012/|K| = 2^-118.0
+   12    4096      22  23     10031104        -209.5    370     369  3409    427           2212    1.60  2^-128.42  1093/|K| = 2^-117.9
+   13    8192      23  24     19992576        -207.5    398     397  3664    458           2342    1.70  2^-128.42  1177/|K| = 2^-117.8
+   14   16384      24  25     39985152        -205.5    427     426  3929    492           2492    1.80  2^-128.42  1264/|K| = 2^-117.7
+   15   32768      25  26     79970304        -203.5    457     456  4203    526           2646    1.92  2^-128.36  1354/|K| = 2^-117.6
 ```
 
 Sites of one tied part, version 5, full parts (`n = 2^d S`), selected rows (the script prints
@@ -960,7 +987,7 @@ Seed `sd` with the sponge lists (Section 3.5, `Fast / Slim / Slim8`): span on `2
 2^-139.00 / 2^-138.51`; span off at four segments `2^-137.51 / 2^-137.00 / 2^-136.51`; two
 parts in each of four segments `2^-132.38 / 2^-131.35 / 2^-130.38`; all `g = 0` (three
 parts in one segment, refused by mode A, would give `2^-127.71` under `Slim`). Per-instance ledger vs
-round-by-round at `2^15`: `3,429/|K| = 2^-116.3` vs `1,329/|K| = 2^-117.6` (stages 275,
+round-by-round at `2^15`: `3,454/|K| = 2^-116.2` vs `1,354/|K| = 2^-117.6` (stages 300,
 `tau` 25, gammas 3, GKR 1,026). Honest failure per site `< 2^-184.6`, per proof
 `< 2^-174.5` (1,158 capped searches: PIOP, 240 tied-part, 461 Akita; with the Flock sites of
 the canonical nonce width `< 2^-171.5`, Section 6.5).
@@ -1009,10 +1036,10 @@ the `G_main4` descriptor); equal digests are benign, as for Akita's rows of `d_s
 
 ```text
 d_sig  N*      sites  nonces  bits  bytes  work(sum 2^g)  ledger(before work)
-    3       8    196     195  1818    228           1350  550/|K| = 2^-118.9
-   10    1024    317     316  2926    366           1964  914/|K| = 2^-118.2
-   13    8192    398     397  3664    458           2342  1154/|K| = 2^-117.8
-   15   32768    457     456  4203    526           2646  1329/|K| = 2^-117.6
+    3       8    196     195  1818    228           1350  563/|K| = 2^-118.9
+   10    1024    317     316  2926    366           1964  934/|K| = 2^-118.1
+   13    8192    398     397  3664    458           2342  1177/|K| = 2^-117.8
+   15   32768    457     456  4203    526           2646  1354/|K| = 2^-117.6
 ```
 
 The largest PIOP site weight is H-u's (`2^-128.09` at `N* = 32`, `2^-128.36` at `2^15`,
@@ -1020,9 +1047,9 @@ The largest PIOP site weight is H-u's (`2^-128.09` at `N* = 32`, `2^-128.36` at 
 `N* = 32`, so every PIOP site is at most `2^-128.09`. The heaviest quantified site is the
 tied-part tie site, `2^-128.034` under `Slim` (`nu_s = 7`) and `2^-128.063` under `Fast`;
 Akita's fold coordinate weighs `2^-128.0881` (4.6). No site sits at exactly `2^-128`
-except where (F) is the bound.
+except where Flock's validated per-site bound is.
 Plan digests (`N = N*`, default part size; pinned by
-`agg_piop::pow::tests::h_exact_plans_reproduce_docs_h_exact_section_3_7`, which also checks
+`agg_piop::pow::tests::h_exact_plans_match_the_documented_plans`, which also checks
 that H-u's equal them): those of Section 10.
 
 The theorem of Section 7 holds verbatim for H-exact with "relation H-u" replaced by
@@ -1047,7 +1074,7 @@ before `X`, `tau` and the stages; 3.4), `F3` is pending during the stage-1 round
 `sum_i eq(r^(2)_sig, i) G(i) = 0` is multilinear in `r^(2)_sig`; its `1/2` coordinates only
 sum over positions and carry no randomness). `bit_length(9) = 4` and `bit_length(56) =
 bit_length(50) = 6`, so every difficulty, the stream (4,203 bits, 526 bytes, 2,646 units of
-work at `2^15`), the round-by-round ledger (`1,329/|K| = 2^-117.6` at `2^15`) and the plan
+work at `2^15`), the round-by-round ledger (`1,354/|K| = 2^-117.6` at `2^15`) and the plan
 digest are H-exact's (and H-u's) (`agg_piop::pow::tests::h_fips_plans_equal_h_exact_plans`; the
 `pow_plan.py` self-check). Equal digests are benign, as for Akita's rows of `d_sig` 3 and 4
 (4.1): the relation is bound by the manifest bytes of the same event 0 (byte 3, the `G_main4`
@@ -1065,8 +1092,8 @@ into a FIPS 204 signature (10.4). The extracted signature is a function of the r
 alone (`u_h` only certifies the weight), so the checkpoint argument of Section 12 (round-1
 tables fixed before the first fork) applies unchanged. The theorem of Section 7 holds verbatim
 for H-FIPS with "relation H-u" replaced by "relation H-FIPS" and Akita's plan of the H-FIPS
-grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 58 Akita polynomials
-(39 claimed at `r^(3)`, 12 zero polynomials of `G_3`, 7 at `pi_m`) in place of 52.
+grouped row (`agg-pcs-config` `tests/all/akita_grinding.rs`, `PINNED_H_FIPS`); 59 Akita polynomials
+(40 claimed at `r^(3)`, 12 zero polynomials of `G_3`, 7 at `pi_m`) in place of 53.
 
 ### 10.3 ML-DSA-65 and ML-DSA-87 (`python3 -I docs/scripts/pow_plan.py --set 65|87`)
 
@@ -1094,10 +1121,10 @@ stage-3 instance. Totals of the PIOP part and the mode-B digests
 | 87 | `2^13` | 392 | 391 | 3,611 | 452 | 3,018 | `f7778510...` |
 | 87 | `2^15` | 451 | 450 | 4,149 | 519 | 3,346 | `b4385bc4...` |
 
-The mode-A digests the script prints for 65 and 87 assume the bridge of the lane sets (four
-chain lanes, 256 records per level-1 block, `P_pad = 2^11`, so a full part has
-`19 + max(0, d - 8) + 2 + log2 S` chain rounds); they are pinned once `agg_bridge::pow` takes
-the set's shape.
+The mode-A digests the script prints for 65 and 87 use the bridge of the lane sets (four
+chain lanes, 256 records per level-1 block, `P_pad = 2^11`; a full part has `13 + d +
+span_log` chain rounds, as for ML-DSA-44, `agg_bridge::pow::chain_rounds`); they are pinned by
+`agg_cli::mode_a::tests::plan_digests_of_65_and_87_reproduce_the_script`.
 
 Relation H-exact of the lane sets (`docs/h-exact.md` Section 11) has H-u's instances, degrees
 and batching lengths: only the slack weight and the offset of the affine `z` change, which
@@ -1136,15 +1163,14 @@ into a FIPS 204 signature with `wt(h*) <= sum delta^2 <= omega` (55 or 75).
 3. **Composition proof (written, Section 12).** No second extractor is needed; the proof
    uses checkpoints at `sd` and `X`, the Merkle and branch-digest expansions (Lemmas 12.2,
    12.1b) and Lemma 12.3 for the parallel Flock transcripts and for branch S of the forked
-   PIOP transcript (K23: 53 core PIOP sites at `2^15`, `tau` through the stage-2 rounds). It
-   rests on assumptions (F) (Flock's round-by-round analysis, a sketch
-   in the Flock paper) and (K) (circuit correctness), and Lemma 12.3 extends Akita's Theorem
-   10.17 and has had internal review only; these three items remain for the review and the
-   paper.
-4. **`R_F`** (Flock sites read by the verifier) is not counted exactly here; it enters only
-   the `Q = 0` term.
+   PIOP transcript (K23: 53 core PIOP sites at `2^15`, `tau` through the stage-2 rounds). Its
+   Flock statement (F) follows from Dao-Kominers-Thaler (ePrint 2026/2056, Theorem 4.4) and
+   its circuit statement (K) is the sponge-exactness lemma (12.5); Lemma 12.3 extends Akita's
+   Theorem 10.17 and has had internal review only, which remains for the review.
+4. **`R_F`** (Flock sites read by the verifier) is the structural count of Section 7 per
+   sponge instance (197 / 223 / 244 at `2^10` / `2^13` / `2^15`); it enters only the `Q = 0` term.
 5. **Mode B** uses the same PIOP plan with profile id 3 and no tied-part site; its Keccak side is
-   the public bits, so no Flock term. Its soundness statement is Corollary 12.5 (no (F),
+   the public bits, so no Flock term. Its soundness statement is Corollary 12.5 (no Flock sites,
    `sd` at most `theta' = 2^-143.64` per charged segment).
 
 ## 12. Composition proof (hypothesis H2)
@@ -1295,7 +1321,7 @@ have the stated probabilities.
 | per tied part `p`, after event 6 and before `X`, in segment and part order: the tie site, the `eq_Y` site and the `R` chain rounds (tie challenger); the sponge instance's Flock sites | `H_F` | `N` |
 | `X` (event 7) | `H_P` | `H`: checkpoint `l_2` |
 | the PIOP sites after `X` (Section 3.1), through the stage-3 rounds: in linear order the rest of branch L, branch S, then stage 3 after the branch join (K23) | `H_P` | `N` |
-| Akita's evaluation batch of the 52 claims (53 under H-exact, 58 under H-FIPS, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after stage 3 and the PCS session digest | `H_A` | `N` |
+| Akita's evaluation batch of the 53 claims (54 under H-exact, 59 under H-FIPS, the zero claims of `G_3`'s zero polynomials included; the only Akita site before the root fold, `GrindingSite::EvaluationBatch { level: 0 }`), after stage 3 and the PCS session digest | `H_A` | `N` |
 | the opening suffix from the root fold challenge (Akita Proposition 10.44): fold challenges, ring-switch `alpha` of every nonterminal level, the rest | `H_A` | `E` (indexed), `H`, `N` |
 
 The segment of `l_1` runs from `sd` to the last stage before `X`: `sd`, `proj.psi`, `fs` and
@@ -1344,8 +1370,9 @@ and answer read by `Comb_r`, by the checks of stages `r` and later, and by the m
 `Good`, `Coll` of every checkpoint at or after `r`; a stage it omits is a plain stage of an
 earlier segment, and `Comb_r` returns the prefix of its first child; (iii) at a checkpoint
 `l` the test and `D(xi_l; .)` depend on `xi_l` through its address `a_l` only, and `Coll_l`
-applies to certificates with equal addresses; (iv) at a plain stage `j`, `Bad_j(xi; w)`
-depends on `xi` through its address only; (v) the extraction stages satisfy Lemma 10.14's
+applies to certificates with equal addresses; (iv) at every checkpoint or plain stage `j`
+(Claim 1's stage `j >= l` may be the checkpoint `l` itself, e.g. `sd` with its own bad set),
+`Bad_j(xi; w)` depends on `xi` through its address only; (v) the extraction stages satisfy Lemma 10.14's
 conditional-answer sampling hypothesis. Then Theorem 10.17 holds, each queried address of
 stage `j` weighing `eps_j`, for the extractor that reruns a failed checkpoint with a fresh
 table on the addresses that encode its address and keeps an attempt with the same address.
@@ -1402,7 +1429,7 @@ Lemma 12.1b to the bound (12.6).
   answer lies in `Bad_t`.
 * Masses and the work schedule: each site keeps its bad set, its `nu_t` and its assigned
   bound, and therefore its difficulty `g_t`; the 457 PIOP sites, the ledger
-  (`1,329/|K|` before grinding at `2^15`) and the per-address weight `<= 2^-128` of every
+  (`1,354/|K|` before grinding at `2^15`) and the per-address weight `<= 2^-128` of every
   site are those of the linear transcript. The nonce stream lists the sites in the same
   order (L, S, stage 3), so the plan of Section 6.4 and its digest do not change.
 * Branch L keeps complete-prefix addresses (it precedes S). Stage 3 and everything after
@@ -1488,9 +1515,9 @@ claim is false, with the pending claims of Lemma S (Section 5), starting from `R
 xi_X)` at `X`. Item (vii)(a) holds by definition: `Good_{l_2}` is the conjunction of exactly these
 claims at `xi_X`. Item (vii)(b): Lemma S for the PIOP sites (for branch S with its projected
 addresses, 12.2); at Akita's evaluation batch a false claim `v_k != f_k(z_k)` makes the batched
-equation false outside one hyperplane of the 52, 53 or 58 independent coefficients (H-u,
-H-exact or H-FIPS; mass `1/|K|`, Akita Remark 10.43; assigned `52/|K|`, `53/|K|` or `58/|K|`;
-the bit lengths of 52, 53 and 58 are all 6, so `g = 6` for every relation; a zero polynomial's
+equation false outside one hyperplane of the 53, 54 or 59 independent coefficients (H-u,
+H-exact or H-FIPS; mass `1/|K|`, Akita Remark 10.43; assigned `53/|K|`, `54/|K|` or `59/|K|`;
+the bit lengths of 53, 54 and 59 are all 6, so `g = 6` for every relation; a zero polynomial's
 claim zero is a claim like any other). Item (vii)(c): the tied parts' claims belong to the segment of `sd` (12.4), so at `xi_f`
 the only pending claim is the root row `sum_k eta_k v_k = sum_k eta_k f_k(z_k)` (Akita
 (202)), which a certificate's weak opening satisfies (Proposition 10.44, witness step), as in
@@ -1508,7 +1535,7 @@ Lambda(C_s^p)` (decoded to a witness):
 
 * `Spg_p(z)`: the sponge registry's rows and Flock's witness contract hold (dummy rows zero,
   the constant pin); `Pub_p(z)`: the public region equals the verifier's table `(mu_i, c~_i,
-  1, 0)` on live rows. By assumption (K) of 12.5, `Spg_p(z) and Pub_p(z)` give `c~_i =
+  1, 0)` on live rows. By (K) of 12.5, `Spg_p(z) and Pub_p(z)` give `c~_i =
   SHAKE256(mu_i || w1Encode(b'_i(z)))` for every live record `i` of `p`, `b'(z)` the input bits;
 * `Chn_p(z)`: `M^(sigma) b'_{p,sigma}(z) = Y^_{p,sigma}` for every segment `sigma` of `p`, with
   `Y^_p` the part's final-vector table (its share, or the `S` vectors of a span, zero for the
@@ -1672,8 +1699,11 @@ including those that depend on `H_X`.
 
 ### 12.5 What is assumed (exactly)
 
+The Module-SIS terms, (R) and (A) are assumed; (F) and (K) below are the Flock and circuit
+statements the proof uses, both now proved (their proofs are cited in the items).
+
 * **(F) Flock's documented analysis, per list element.** For each instance of the vendored
-  `flock-core` under `Fast`, `Slim` (or `Slim8`) with K19, in `Pi`, with level-0 word `C`:
+  `flock-core` under `Fast` with K19 and the joint out-of-domain draw, in `Pi`, with level-0 word `C`:
   (i) there is, for every codeword `z in Lambda(C)` and every instance-local input, a bit "`z`
   fails" (a pending claim of the instance is false for `z`), which at the instance's first
   site is set iff `z` violates the registry rows or the witness contract, and which a
@@ -1686,7 +1716,8 @@ including those that depend on `H_X`.
   with `2^-g_t eps_t <= 2^-128`, such that outside `B_t` every failing codeword still fails at
   the next input, and no prover message unsets the bit:
   the outer sites with the level-0 list factor (Flock Appendix A, "Security", as patched by
-  K19), the Ligerito sites (MCA, two-point OOD binding, claim and consistency batches, fold
+  K19; the zero-check's outer rounds also charge the constant-column contract term, 4.3),
+  the Ligerito sites (MCA, the jointly drawn OOD points of each recursive level, claim and consistency batches, fold
   sum-checks, recursive commitments, query consistency with 16-bit query work) as validated by
   `LigeritoSecurityConfig::validate` for the shipped configs (Flock Appendix C.3, Section 4.2);
   (iii) if the instance's verifier accepts, some codeword of `Lambda(C)` does not fail at the
@@ -1694,13 +1725,23 @@ including those that depend on `H_X`.
   nonce absorbed and the challenge squeezed) meets Proposition 10.3: distinct contexts give
   distinct, independent predicate/challenge outputs. This is Flock's own 128-bit claim in the
   per-element form that its union bounds over the list prove (Flock Appendix C.3 states the
-  invariant for every list element and multiplies each step by `L_max`); the Flock paper
-  presents the analysis as a sketch, and we do not re-derive it.
+  invariant for every list element and multiplies each step by `L_max`). The Flock paper
+  presents the analysis as a sketch; it is now proved: every step reduces to list mutual
+  correlated agreement of Reed-Solomon codes up to the Johnson bound, which Dao, Kominers and
+  Thaler prove over any field and evaluation set (ePrint 2026/2056, Theorem 4.4), plus
+  Schwartz-Zippel, sum-check round-by-round soundness and the random-oracle model of the
+  challenger (the paper's Lemma "Flock round by round" and its appendix proof). The proof
+  needs the joint draw of `vendor/flock-core/PATCH.md` Section 16; it covers `Fast`, and
+  `Slim` misses the bound by 0.2 bits on the 15 outer zero-check rounds (12.7).
 * **(K) Circuit correctness.** Every assignment satisfying the sponge gate's rows (`docs/
   keccak.md` Sections 1, 2: each committed chi output is forced by its own row, round 23 of
   the last permutation commits only the four lanes that `c~` reads, the linear layers, the
-  absorption and the chain are XOR expressions) computes SHAKE256 on its input bits. A property
-  of a fixed circuit, established by construction and by the crates' tests, not proved here.
+  absorption and the chain are XOR expressions) computes SHAKE256 on its input bits,
+  provided its constant column equals one, which only Flock's lincheck pins (so (K) applies
+  through (F)). Proved by the sponge-exactness lemma: an induction over the rounds of each
+  permutation in which an honest state entering a round forces every committed AND bit
+  through the chi rows (the paper's Lemma "Sponge circuit exactness"); the crates' tests
+  check the same rows.
   In tied-part proof version 5 the GF(2) side of the bridge has no circuit: `Chn_p` is an
   identity of fixed vectors and the chain's weight `W~(r)` is the verifier's own evaluation
   (tested against dense evaluations, `agg_bridge::parity_chain`).
@@ -1714,7 +1755,7 @@ including those that depend on `H_X`.
   (iii); the rows pass Akita's schedule audit when the catalogs load, the tree-size condition
   is not tabulated here, see 12.7), and Theorem 10.17, here with Lemma 12.3.
 
-Discharged in this repository: the PIOP round-by-round bad sets (Lemma S), the `sd`, tied-part
+Discharged in this repository or by the cited proofs: (F) and (K), the PIOP round-by-round bad sets (Lemma S), the `sd`, tied-part
 (tie, `eq_Y`, chain rounds) and evaluation-batch bad sets above, the work schedule (Sections 3, 6, 10), the fold-challenge
 supports (4.6), Lemmas 12.1 to 12.4.
 
@@ -1734,8 +1775,8 @@ eps_hash + eps_fs + eps_br + eps_merkle + delta_X + E[ sum_{a in Addr} eps(a) ] 
 with `E[sum eps(a)] <= rho (Q + R_f + R_coord + R_F)` (Aerie Eq. (18)) and `rho = max eps(a)
 <= 2^-128`: PIOP sites `<= 2^-128.09` (Sections 10 and 10.1, max weight, every relation),
 `proj.psi` `2^-129` (Lemma P and one bit of work, K24), tied-part sites (tie, `eq_Y`, chain rounds) `<= 2^-128` (3.6; the tie site is the heaviest quantified site, `2^-128.034` under `Slim` and `2^-128.063` under `Fast`), `sd <=
-2^-131.38`, `fs` 0, Flock sites `<= 2^-128` under (F), Akita field sites by its plan, fold
-coordinates `<= 2^-128.088` (4.6). No site sits at exactly `2^-128` except where (F) is the bound. `eps_hash` covers the hashed entries of 12.1 item 1;
+2^-131.38`, `fs` 0, Flock sites `<= 2^-128` by (F) (`Fast`), Akita field sites by its plan, fold
+coordinates `<= 2^-128.088` (4.6). No site sits at exactly `2^-128` except where Flock's validated per-site bound is. `eps_hash` covers the hashed entries of 12.1 item 1;
 the branch digests `d_L`, `d_S` of K23 are not among them and enter through `eps_br <= 5
 Q_P^2 / 2^257 + Q_P / 2^191` (Lemma 12.1b). This is the bound of Section 7.
 
@@ -1754,7 +1795,7 @@ tests. The Module-SIS algorithms `B_I` inherit `T_run` (Akita Lemma 10.20, Remar
 the `w1Encode` strings of each segment's live records are the event-2 items, absorbed before
 `sd`; the event-6 share items and the Flock proof items are empty), PIOP wire version 4 with the plan of Section 6
 (profile id 3, no tied-part site) and Akita's plan for the selected row. Then the statement of
-Section 7 holds for mode B without assumption (F) and without the terms `eps_fs`,
+Section 7 holds for mode B without (F) and without the terms `eps_fs`,
 `eps_merkle` and `R_F`, with the same extractor bound otherwise. *Proof.* The structure of
 12.2 with the same checkpoints at `sd` and `X`, and no tied-part or Flock sites (items 2 and 3 of
 12.1 are void, and `Good_{l_2}` is `R_PIOP` alone: there is no `C4_p`). The public bits `b'` are fixed before `sd`, so the "lists" have one
@@ -1770,19 +1811,19 @@ fails, and `D(xi_X; sigma_1) = 1` with no site in between (`fs` has no bad set).
 of `X` is 12.3 unchanged; the bit check `b_t(r^(3)) = b'_t(r^(3))` after stage 3 (P9) is an
 additional verifier check and is not used in this bound (the seeded matrices bind on their
 own; the check is P9's matrix-independent second binding).
-Assumption (K) is not needed (SHAKE256 is computed natively). Every address weighs at most
+(K) is not needed (SHAKE256 is computed natively). Every address weighs at most
 `2^-128` (PIOP sites as in Section 10, `proj.psi` `2^-129` as in 12.4, `sd` at most
 `2^-143.64`, Akita by its plan and 4.6), so the bound of 12.6 holds with `R_F = 0`. The
 `proj.psi` stage of 12.4 is unchanged in mode B, since `v` is committed in round 1 there too.
 
 ### 12.7 What is not proved here
 
-1. Assumption (F): the round-by-round soundness of list-decoded Ligerito with Flock's merged
-   opening and packed-direct claims, with the per-site errors that Flock's configs validate.
-   The Flock paper sketches it (Appendices A and C.3); a complete proof is not available to us.
-   The paper MUST present the theorem as conditional on (F).
-2. Assumption (K), the correctness of the sponge circuit (the only fixed circuit of the
-   Keccak side).
+1. `Slim`'s outer zero-check rounds. With the constant-column contract term each of the 15
+   outer rounds has mass `3 L_J` against `bits_for(2 list) = 7` work bits: `Fast` meets
+   `2^-128` (`2^-128.3`), `Slim` (`L_J = 50`) reaches `150/2^135 = 2^-127.8`. The theorem of
+   Section 7 is stated for `Fast`; `Slim` stays opt-in and is not covered until those rounds
+   get one more bit. (F) itself, formerly assumed here, is proved (12.5).
+2. (K), formerly assumed here, is the sponge-exactness lemma (12.5).
 3. Lemma 12.3 extends Akita's Theorem 10.17; its proof above modifies Claims 1 and 2 of
    Akita Appendix E.2 and SHOULD be checked by a reviewer of Akita's proof. It has had
    internal review only. Since deviation K23 it carries the PIOP core as
@@ -1792,7 +1833,9 @@ Assumption (K) is not needed (SHAKE256 is computed natively). Every address weig
    Lemma 12.3 as a new extension of Akita Theorem 10.17. Since deviation K25 its condition
    (ii) also lets the fold coordinates omit the parts' stages; that step SHOULD be read
    beside invariant (2) of Akita Appendix E.2.
-4. `R_F` is not counted exactly (open 4); the `Q = 0` term stays about `2^-117` (estimate).
+4. `R_F` is the count of Section 7 (244 at `2^15`): a recording of the verifier's squeezes
+   gives it at up to 1,024 records (197), and the formula that fits those runs gives 223 and
+   244 at `2^13` and `2^15`, not a trace at those sizes; the `Q = 0` term stays about `2^-117`.
 5. The extractor's run count `(Q_wrap + 2) 4 Tree0_ck(sch)` is not tabulated per row (Aerie
    C.4 tabulates its `K`); it bounds the running time only, not the error. Nor is the cost
    `T_run` of one run (12.6).
@@ -1915,13 +1958,18 @@ adversary `B'` against `Sigma_H` there are reductions with
 
 ```text
 Adv^SUF-CMA_{Sigma_H}(B') <= Adv^MLWE + Adv^SelfTargetMSIS_{zeta'} + eps_sim
-                             + Adv^coll_{SHAKE256/256} + Adv^MSIS_{[A | I], 380,930},
+                             + Adv^coll_{SHAKE256/256} + Adv^coll(mu) + Adv^MSIS_{[A | I], 380,930},
 ```
 
 where `zeta' = 350,209` (spec (3.5), both relations), `eps_sim` collects the simulation
-terms of the CMA-to-NMA step (below) and `Adv^coll_{SHAKE256/256} <= q_H^2 / 2^257` in the
-ROM; the Module-SIS instance is `[A | I]` over `Z_q`, `256 k = 1,024` rows, `256 (k + l) =
-2,048` columns, `l_inf` bound 380,930.
+terms of the CMA-to-NMA step (below), `Adv^coll_{SHAKE256/256} <= q_H^2 / 2^257` in the
+ROM, and `Adv^coll(mu)` is a collision of the 512-bit `mu` at Algorithm 7 line 6 (case (i));
+the Module-SIS instance is `[A | I]` over `Z_q`, `256 k = 1,024` rows, `256 (k + l) =
+2,048` columns, `l_inf` bound 380,930. These are ML-DSA-44's values. ML-DSA-65 and ML-DSA-87
+have `zeta' = zeta` = 724,481 and 769,537 (H-u's relaxed `z` bound `2^19` stays below it),
+`B_u = 523,777`, a 48- and 64-byte `c~` (collision term `q_H^2 / 2^385` and `q_H^2 / 2^513`),
+and the instance `[A | I]` with `256 k` rows, `256 (k + l)` columns and `l_inf` bound
+`max(2^19 + B_z, 2 B_u)` = 1,048,379 and 1,048,455.
 
 *Proof.* Let `(M*, sigma*)` win, `sigma* = (c~*, z*, w1'*, u*, v*)`, and let `S` be the
 answers on `M*`. One of three cases holds.
@@ -1957,7 +2005,7 @@ answers on `M*`. One of three cases holds.
 Under H-exact every bound is the honest one or smaller, so the same instance applies.
 
 **Theorem 12.9 (aggregate unforgeability, classical ROM).** Under the hypotheses of the
-theorem of Section 7 (mode A, assumptions (F) and (K)), for every aggregate adversary `A`
+theorem of Section 7 (mode A, `Fast`, with (F) and (K) of 12.5), for every aggregate adversary `A`
 in the chosen-key game of spec 12.3 that makes `Q` proof-oracle queries and `Q_S` signing
 queries, there is a SUF-CMA adversary `B` against `Sigma_H` whose running time and
 signing-query count are those of the extractor (at most `(Q_wrap + 2) 4 Tree0_ck(sch)`

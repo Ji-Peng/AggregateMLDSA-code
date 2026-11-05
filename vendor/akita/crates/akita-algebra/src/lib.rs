@@ -28,11 +28,12 @@ pub mod split_eq;
 pub fn simd_report() -> String {
     let cap = isa::cap();
     format!(
-        "akita-algebra: cap={} ({}) crt-ntt-ifma={} crt-ntt-avx512={}",
+        "akita-algebra: cap={} ({}) crt-ntt-ifma={} crt-ntt-avx512={} avx2={}",
         cap.name(),
         isa::requested().unwrap_or("detected"),
         isa::ifma(),
         isa::avx512(),
+        isa::avx2(),
     )
 }
 

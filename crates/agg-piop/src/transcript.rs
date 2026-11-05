@@ -60,8 +60,8 @@ pub fn stage_degrees(manifest: &CommitmentManifest) -> [usize; 3] {
     [crate::stage1::degree(manifest), crate::stage2::DEGREE, crate::stage3::DEGREE]
 }
 
-/// Batching coefficients per stage: `(26, 9, 48)` under H-u, `(26, 8, 49)` under H-exact,
-/// `(26, 8, 55)` under H-FIPS.
+/// Batching coefficients per stage; for ML-DSA-44 `(26, 10, 49)` under H-u, `(26, 9, 50)`
+/// under H-exact and `(26, 9, 56)` under H-FIPS (the other sets: the stage `gamma_count`s).
 #[must_use]
 pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -71,7 +71,8 @@ pub fn stage_gammas(manifest: &CommitmentManifest) -> [usize; 3] {
     ]
 }
 
-/// Terminal claims per stage: `(18, 9, 34)` under H-u, `(18, 8, 35)` under H-exact.
+/// Terminal claims per stage; for ML-DSA-44 `(18, 10, 35)` under H-u, `(18, 9, 36)` under
+/// H-exact and `(18, 10, 40)` under H-FIPS (the other sets: the claim vectors' `len`).
 #[must_use]
 pub fn stage_terminals(manifest: &CommitmentManifest) -> [usize; 3] {
     [
@@ -986,7 +987,8 @@ mod tests {
     }
 
     /// The events before the lookup: instance, two round-1 commitments, Flock commitments,
-    /// seed, four round-2 commitments, Flock seeds, final vectors, Flock shares.
+    /// seed, the projection site and its answer, five round-2 commitments, Flock seeds, final
+    /// vectors, Flock shares.
     const LEADING: usize = 15;
 
     fn lookup_events(manifest: &CommitmentManifest) -> usize {

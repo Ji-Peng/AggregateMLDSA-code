@@ -34,7 +34,7 @@ pub enum WireError {
     Version(u16),
     /// Unknown feature flags (relation and parameter-set nibbles).
     Flags(u8),
-    /// `N` outside `1..=2^15`.
+    /// `N` outside `1..=2^15`, or below `prover::LANE_MIN_RECORDS` for ML-DSA-65 and ML-DSA-87.
     Records(u64),
     /// The buffer ended early or a length prefix is out of range.
     Truncated,
@@ -257,6 +257,8 @@ impl AggregateProof {
         let records = u64::from_le_bytes(r.array()?);
         let manifest = usize::try_from(records)
             .ok()
+            // Sets with polynomial lanes need a main domain that covers the bridge domains.
+            .filter(|&n| set == Set::S44 || n >= crate::prover::LANE_MIN_RECORDS)
             .and_then(|n| CommitmentManifest::for_set(set, n, relation).ok())
             .ok_or(WireError::Records(records))?;
         let records = manifest.records();
@@ -365,7 +367,7 @@ impl AggregateProof {
 pub struct ProofSize {
     /// Version, flags, `N`.
     pub header: usize,
-    /// The `32 N` bytes of `c~_i`.
+    /// The bytes of `c~_i`: 32, 48 or 64 per record (ML-DSA-44, -65, -87).
     pub c_tilde: usize,
     /// The seven Akita commitments.
     pub akita_commitments: usize,
@@ -574,7 +576,7 @@ mod tests {
             assert!(size.work >= 227);
             // Relation byte: 0 (H-u), 1 (H-exact), 2 (H-FIPS); 3 and above are unknown. The
             // parser reads the relation from the header (H-u and H-exact proofs have equally
-            // many stage claims, 9 + 34 = 8 + 35, so a rewritten flag may still parse; the
+            // many stage claims, 10 + 35 = 9 + 36, so a rewritten flag may still parse; the
             // verifier compares it with the relation it expects).
             assert_eq!(bytes[2], 0);
             for (flag, relation) in [(1_u8, Relation::HExact), (2, Relation::HFips)] {
@@ -661,7 +663,7 @@ mod tests {
     fn ml_dsa_65_and_87_headers_carry_the_set_and_the_wider_c_tilde() {
         let mut rng = SplitMix64::new(80);
         for (set, nibble, width) in [(Set::S65, 0x10_u8, 48), (Set::S87, 0x20, 64)] {
-            for records in [1, 100, 1000] {
+            for records in [17, 100, 1000] {
                 let proof = sample_proof_in(set, Relation::Hu, records, &mut rng);
                 let bytes = proof.to_bytes();
                 assert_eq!(bytes[2], nibble, "{set:?}");
@@ -699,6 +701,10 @@ mod tests {
                 assert_eq!(exact_bytes[2], nibble | 1);
                 assert_eq!(exact_bytes.len(), bytes.len());
                 assert_eq!(AggregateProof::from_bytes(&exact_bytes).unwrap(), exact);
+                // Below 17 records the header is refused.
+                let mut small = bytes.clone();
+                small[3..11].copy_from_slice(&16_u64.to_le_bytes());
+                assert_eq!(AggregateProof::from_bytes(&small), Err(WireError::Records(16)));
             }
         }
     }

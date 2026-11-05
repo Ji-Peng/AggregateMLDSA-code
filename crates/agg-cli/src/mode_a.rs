@@ -1468,13 +1468,17 @@ struct RecordingMatrices(Mutex<Option<Arc<BridgeMatrices>>>);
 
 impl BridgeDerivation for RecordingMatrices {
     fn matrices(&self, seed: &[u8; 32]) -> std::borrow::Cow<'_, BridgeMatrices> {
-        let m = agg_bridge::seed::derive_matrices(seed);
-        *self.0.lock().expect("matrices") = Some(Arc::new(m.clone()));
-        std::borrow::Cow::Owned(m)
+        self.matrices_for(Set::S44, seed)
     }
 
     fn seed_derived(&self) -> bool {
         true
+    }
+
+    fn matrices_for(&self, set: Set, seed: &[u8; 32]) -> std::borrow::Cow<'_, BridgeMatrices> {
+        let m = agg_bridge::seed::derive_matrices_for(&agg_bridge::Shape::production(set), seed);
+        *self.0.lock().expect("matrices") = Some(Arc::new(m.clone()));
+        std::borrow::Cow::Owned(m)
     }
 }
 
@@ -1676,7 +1680,7 @@ impl Aggregator {
     /// [`Self::aggregate_with`] for a parameter set with polynomial lanes (ML-DSA-65,
     /// ML-DSA-87): the same steps on the set's instance, tables, sponge records and lane
     /// public data. The hooks that build the Flock witness from ML-DSA-44 records
-    /// (`tamper_flock_records`, `flock_witness`, `stale_bridge`) are not available.
+    /// (`tamper_flock_records`, `flock_witness`) are not available.
     fn aggregate_lanes<P: ParamSet>(
         &self,
         records: &[SignedRecord<'_>],
@@ -1686,7 +1690,7 @@ impl Aggregator {
         P::CTilde: Sync,
     {
         assert!(
-            hooks.tamper_flock_records.is_none() && hooks.flock_witness.is_none() && !hooks.stale_bridge,
+            hooks.tamper_flock_records.is_none() && hooks.flock_witness.is_none(),
             "the Flock-record hooks are ML-DSA-44 only"
         );
         let start = Instant::now();
@@ -1769,25 +1773,48 @@ impl Aggregator {
             Some(floor) => side.part_floor(floor),
             None => side,
         };
+        // The round-2 tables of the honest bits under the transcript's matrices, as for
+        // ML-DSA-44.
+        let recording = RecordingMatrices::default();
+        let stale = |manifest: &CommitmentManifest, tables: &mut BridgeGroupTables| {
+            let matrices = recording.0.lock().expect("matrices").clone();
+            let psi = tables.psi().to_vec();
+            *tables = BridgeGroupTables::build(manifest, &honest, &matrices.expect("derived"), &psi)
+                .expect("honest round-2 tables");
+        };
         let prove_hooks = ProveHooks {
-            unchecked: hooks.tamper_main.is_some() || hooks.tamper_bridge.is_some(),
-            tamper_bridge: hooks.tamper_bridge,
+            unchecked: hooks.tamper_main.is_some() || hooks.tamper_bridge.is_some() || hooks.stale_bridge,
+            tamper_bridge: if hooks.stale_bridge { Some(&stale) } else { hooks.tamper_bridge },
             swap_join: false,
         };
         let (committer, public) = early_setup
             .and_then(|handle| handle.join().ok())
             .unwrap_or((None, None));
-        let output = prove_lanes_with_tables_using(
-            committer,
-            public,
-            &prover_inputs,
-            &manifest,
-            main,
-            &SeededMatrices,
-            &side,
-            profile,
-            &prove_hooks,
-        )?;
+        let output = if hooks.stale_bridge {
+            prove_lanes_with_tables_using(
+                committer,
+                public,
+                &prover_inputs,
+                &manifest,
+                main,
+                &recording,
+                &side,
+                profile,
+                &prove_hooks,
+            )?
+        } else {
+            prove_lanes_with_tables_using(
+                committer,
+                public,
+                &prover_inputs,
+                &manifest,
+                main,
+                &SeededMatrices,
+                &side,
+                profile,
+                &prove_hooks,
+            )?
+        };
         Ok(self.finish(start, n, instance_time, tables_time, flock_time, output, side.log()))
     }
 
@@ -1952,8 +1979,9 @@ pub struct VerifyCostReport {
     pub profile: FlockProfile,
     /// The relation the aggregate was verified under (the verifier's, never the proof's).
     pub relation: Relation,
-    /// Reading the profile from the aggregate's commitment-phase items (a parse of the aggregate,
-    /// outside the PIOP verifier's steps; zero when the profile was given).
+    /// Reading the profile from the aggregate's commitment-phase items (a scan of the header,
+    /// the `c~` list and those items, outside the PIOP verifier's steps; zero when the profile
+    /// was given).
     pub profile_probe: Duration,
     /// Per Flock part (in verification order; a rejected run stops at the failing part).
     pub parts: Vec<PartVerifyLog>,
@@ -1974,10 +2002,10 @@ impl VerifyCostReport {
         self.report.accepted()
     }
 
-    /// Total verification time.
+    /// Total verification time, the profile probe included.
     #[must_use]
     pub fn total(&self) -> Duration {
-        self.report.timings.total
+        self.report.timings.total + self.profile_probe
     }
 }
 
@@ -2078,6 +2106,43 @@ impl Default for AggregateVerifier {
     }
 }
 
+/// The Flock profile id named by the commitment-phase items of `aggregate`, read in place
+/// without parsing the whole aggregate: the header (`u16` version, flags, `u64` `N`), the
+/// `c~_i`, the two framed round-1 commitments, the `LE32` item count, then the framed items
+/// up to the first that parses ([`crate::wire::flock_profile`]). `None` when the bytes end
+/// early or the header names no known set; the full parse in the verifier rejects such
+/// aggregates.
+fn probe_profile_id(aggregate: &[u8]) -> Option<u8> {
+    fn take<'a>(bytes: &'a [u8], at: &mut usize, len: usize) -> Option<&'a [u8]> {
+        let end = at.checked_add(len)?;
+        let out = bytes.get(*at..end)?;
+        *at = end;
+        Some(out)
+    }
+    fn le32(bytes: &[u8], at: &mut usize) -> Option<usize> {
+        let word = take(bytes, at, 4)?;
+        usize::try_from(u32::from_le_bytes(word.try_into().ok()?)).ok()
+    }
+    let at = &mut 0_usize;
+    take(aggregate, at, 2)?;
+    let set = agg_piop::wire::set_of_nibble(take(aggregate, at, 1)?[0] >> 4)?;
+    let records = u64::from_le_bytes(take(aggregate, at, 8)?.try_into().ok()?);
+    let c_tilde = usize::try_from(records).ok()?.checked_mul(agg_piop::wire::c_tilde_bytes(set))?;
+    take(aggregate, at, c_tilde)?;
+    for _ in 0..2 {
+        let len = le32(aggregate, at)?;
+        take(aggregate, at, len)?;
+    }
+    let count = le32(aggregate, at)?;
+    for _ in 0..count {
+        let len = le32(aggregate, at)?;
+        if let Ok(item) = crate::wire::SegmentCommitments::from_bytes(take(aggregate, at, len)?) {
+            return Some(item.profile);
+        }
+    }
+    None
+}
+
 impl AggregateVerifier {
     /// A verifier.
     #[must_use]
@@ -2130,9 +2195,7 @@ impl AggregateVerifier {
         if let Some(p) = self.require {
             return p;
         }
-        AggregateProof::from_bytes(aggregate)
-            .ok()
-            .and_then(|proof| crate::wire::flock_profile(&proof.flock_commitments))
+        probe_profile_id(aggregate)
             .and_then(FlockProfile::from_id)
             .filter(|profile| profile.is_mode_a())
             .unwrap_or(FLOCK_PROFILE)

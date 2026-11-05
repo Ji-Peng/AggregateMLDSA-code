@@ -1,7 +1,5 @@
 //! Runtime-dispatched arithmetic for the fixed Solinas field and its quadratic extension.
 #![deny(unsafe_op_in_unsafe_fn)]
-pub mod bits;
-pub mod alloc;
 pub mod buf;
 pub mod cast;
 pub mod detect;

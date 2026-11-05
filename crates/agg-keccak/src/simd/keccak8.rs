@@ -87,32 +87,6 @@ pub fn round8(s: &mut State8, r: usize) -> State8 {
     t
 }
 
-/// [`round8`] that also returns the honest row values of the chi rows: `a[x, y] =
-/// b[x + 1, y] ^ 1` and `b[x, y] = b[x + 2, y]` (the constant column is 1), as
-/// [`crate::gate::ChainGate::apply_ab`] computes them from honest committed bits.
-#[inline]
-#[target_feature(enable = "avx512f")]
-pub fn round8_ab(s: &mut State8, r: usize) -> (State8, State8, State8) {
-    let b = phi8(s);
-    let ones = _mm512_set1_epi64(-1);
-    let mut t = [_mm512_setzero_si512(); N_LANES];
-    let mut ra = [_mm512_setzero_si512(); N_LANES];
-    let mut rb = [_mm512_setzero_si512(); N_LANES];
-    for y in 0..5 {
-        for x in 0..5 {
-            let l = lane(x, y);
-            let b1 = b[lane((x + 1) % 5, y)];
-            let b2 = b[lane((x + 2) % 5, y)];
-            t[l] = _mm512_andnot_si512(b1, b2);
-            ra[l] = _mm512_xor_si512(b1, ones);
-            rb[l] = b2;
-            s[l] = _mm512_xor_si512(b[l], t[l]);
-        }
-    }
-    s[0] = _mm512_xor_si512(s[0], _mm512_set1_epi64(ROUND_CONSTANTS[r] as i64));
-    (t, ra, rb)
-}
-
 /// XOR the first `planes.len()` lanes of eight absorbed blocks into the states.
 #[inline]
 #[target_feature(enable = "avx512f")]
@@ -155,8 +129,8 @@ mod tests {
         out
     }
 
-    /// All 24 rounds and their chi outputs (and the a, b rows) equal the scalar round on
-    /// each of eight random states.
+    /// All 24 rounds and their chi outputs equal the scalar round on each of eight random
+    /// states.
     #[test]
     fn round8_matches_scalar_round() {
         if !crate::simd::detected() {
@@ -168,52 +142,12 @@ mod tests {
             let mut states: [Lanes; 8] =
                 core::array::from_fn(|_| core::array::from_fn(|_| rng.next_u64()));
             let mut v = load(&states);
-            let mut v2 = v;
             for r in 0..keccak::N_ROUNDS {
                 let want: [Lanes; 8] = core::array::from_fn(|i| keccak::round(&mut states[i], r));
                 // SAFETY: AVX-512 F detected above.
-                let (t, (t2, ra, rb)) = unsafe { (round8(&mut v, r), round8_ab(&mut v2, r)) };
+                let t = unsafe { round8(&mut v, r) };
                 assert_eq!(store(&t), want, "chi outputs, round {r}");
-                assert_eq!(store(&t2), want, "chi outputs of round8_ab, round {r}");
                 assert_eq!(store(&v), states, "state after round {r}");
-                assert_eq!(store(&v2), states, "round8_ab state after round {r}");
-                // a ^ 1 = b[x + 1], b = b[x + 2], and t = !b[x + 1] & b[x + 2] = a & b.
-                let (sa, sb) = (store(&ra), store(&rb));
-                for i in 0..8 {
-                    for l in 0..N_LANES {
-                        assert_eq!(sa[i][l] & sb[i][l], want[i][l], "a & b = t");
-                    }
-                }
-            }
-        }
-    }
-
-    /// The a, b rows of [`round8_ab`] equal `ChainGate::apply_ab`'s chi rows.
-    #[test]
-    fn round8_ab_rows_match_phi() {
-        if !crate::simd::detected() {
-            return;
-        }
-        let mut rng = Rng::new(0xAB);
-        let mut states: [Lanes; 8] =
-            core::array::from_fn(|_| core::array::from_fn(|_| rng.next_u64()));
-        let mut v = load(&states);
-        for r in 0..3 {
-            let bl: [Lanes; 8] = core::array::from_fn(|i| keccak::phi(&states[i]));
-            for i in 0..8 {
-                keccak::round(&mut states[i], r);
-            }
-            // SAFETY: AVX-512 F detected above.
-            let (_, ra, rb) = unsafe { round8_ab(&mut v, r) };
-            let (sa, sb) = (store(&ra), store(&rb));
-            for i in 0..8 {
-                for y in 0..5 {
-                    for x in 0..5 {
-                        let l = keccak::lane(x, y);
-                        assert_eq!(sa[i][l], !bl[i][keccak::lane((x + 1) % 5, y)]);
-                        assert_eq!(sb[i][l], bl[i][keccak::lane((x + 2) % 5, y)]);
-                    }
-                }
             }
         }
     }

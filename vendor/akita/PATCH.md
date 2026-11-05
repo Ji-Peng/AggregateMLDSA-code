@@ -276,6 +276,9 @@ that representation selection stays lazy. `crates/agg-piop` adds
 `tests/lazy_field_plane.rs`, which proves a default aggregate at 64 records and
 asserts that the process-wide counter of lazily installed planes does not move.
 
+## 7. Lazy canonical field planes: remaining readers and effect
+
+Section 6 installs only the signed mirror and expands the canonical plane on first use.
 The readers that still build the plane on demand are:
 
 - `opaque/owned.rs` `SourceCoefficients::source_coefficients`, reached by EOR
@@ -379,8 +382,8 @@ each of them selected. ML-DSA-65 commits its level-1 carries `(20, 4)` in a
 2048-dimensional inner ring (ML-DSA-44's `(19, 6)` uses 512), so its product at
 `d_d = 256` is `4 * 3 * 4 * 2 * 4 = 384` and the planner returned
 `UnsupportedSchedule` for `mldsa-65-p16-batch-32768-mult-final`; ML-DSA-87 has the
-same class structure. 512 is the smallest power of two above 384 and above the 512
-that five classes with inner rings `(2048, 2048, 2048, 512, 2048)` would reach at
+same class structure. 512 is the smallest power of two that is at least 384 and at
+least the 512 that five classes with inner rings `(2048, 2048, 2048, 512, 2048)` would reach at
 `d_d = 256` (the level-2 group `(15, 8)` never exceeds 512).
 
 For the checked-in ML-DSA-44 rows nothing changes: they are not re-planned, and the
@@ -388,4 +391,4 @@ catalog bytes and the aggregate are unchanged. If a 44 row were re-planned, the 
 rows whose product at `d_d` of 64 or 128 is 360 (`2^11` signatures under H-u and
 H-exact, `2^12` under H-FIPS) would now also search those openings; the rows at 540 to
 900 would not. Planner time grows with the product; the ML-DSA-65 row at `2^15`
-signatures is reported in `~/agy_out/ps/akb-report.md`.
+signatures planned in 67 s on an idle local machine, against 173 s for the ML-DSA-44 row.

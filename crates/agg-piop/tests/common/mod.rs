@@ -291,6 +291,11 @@ impl LaneBatch {
     pub fn build_as<P: ParamSet>(relation: Relation, seed: u64, n_own: usize, n_shared: usize) -> Self {
         let mut records = gen::records_for::<P>(seed, n_own);
         records.extend(gen::records_shared_keys_for::<P>(seed + 1, n_shared, 3));
+        Self::from_records::<P>(relation, records, seed)
+    }
+
+    /// The batch of the given records of `P` under `relation` (bridge matrices from `seed`).
+    pub fn from_records<P: ParamSet>(relation: Relation, records: Vec<Record>, seed: u64) -> Self {
         let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
         let manifest = CommitmentManifest::for_set(P::SET, records.len(), relation).expect("manifest");
         let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();

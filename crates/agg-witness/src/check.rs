@@ -1,4 +1,5 @@
-//! Failure reports of the integer checker of relation H-FIPS (`crate::hfips::check_batch`).
+//! Failure reports of the integer checker of relation H-FIPS (`crate::hfips::check_batch`,
+//! `crate::hfips::check_batch_for`).
 //!
 //! The checker evaluates every identity of the relation pointwise on the Boolean domain over
 //! the integers and records each failing cell here: the identity, the column or group, the
@@ -13,11 +14,11 @@ pub enum Identity {
     Shape,
     /// `bool_b`: b_t (b_t - 1) = 0.
     BoolB,
-    /// `range_w1`: b5 (b4 + b3 b2) = 0.
+    /// `range_w1`: w1' < m (b5 (b4 + b3 b2) = 0 for ML-DSA-44).
     RangeW1,
     /// `ring`: Delta = 0 at every position.
     Ring,
-    /// Commitment hash: c~ = SHAKE256(mu || w1Encode(w1'), 32).
+    /// Commitment hash: c~ = SHAKE256(mu || w1Encode(w1'), lambda/4).
     CommitmentHash,
     /// Booleans B_zhi, a_z and L_hi.
     BoolSlack,
@@ -25,7 +26,8 @@ pub enum Identity {
     SignSquare,
     /// sum delta^2 + u_h = omega.
     HintWeight,
-    /// A looked-up value (L_lo, B_zlo, u_h, the two halves of v) outside its table.
+    /// A looked-up value (L_lo, B_zlo, u_h, the two halves of v) outside its table, or another
+    /// non-Boolean digit or magnitude outside its range.
     Range16,
     /// delta (delta - sigma) = 0.
     DeltaSign,
@@ -33,7 +35,7 @@ pub enum Identity {
     EdgeE,
     /// e (e + 1) w1' = 0 (e = 1 only at w1' = 0).
     WrapLow,
-    /// e (e - 1)(w1' - 43) = 0 (e = -1 only at w1' = 43).
+    /// e (e - 1)(w1' - (m - 1)) = 0 (e = -1 only at w1' = m - 1, 43 for ML-DSA-44).
     WrapHigh,
 }
 

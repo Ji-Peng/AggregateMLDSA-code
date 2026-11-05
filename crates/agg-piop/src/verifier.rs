@@ -9,7 +9,7 @@
 //! | --- | --- |
 //! | `parse` | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
 //! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
-//! | `transcript` | the six commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
+//! | `transcript` | the seven Akita commitments and the Flock commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
 //! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks); the transcript never absorbs the proof items |
 //! | `lookup` | the lookup into `T_16` (two challenges, the fraction-tree sessions) and the multiplicity-digit claims |
@@ -19,7 +19,7 @@
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check |
 //! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
-//! | `opening` | the batched Akita opening of the 53 claims (H-u) |
+//! | `opening` | the batched Akita opening of every committed polynomial (53 claims for ML-DSA-44 under H-u) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
 //! refuses one under which an accepted proof would not establish the relation: a
@@ -172,7 +172,7 @@ impl std::fmt::Display for ConfigurationError {
             ),
             Self::UnseededMatrices(profile) => write!(
                 f,
-                "Flock profile {profile:?} (mode A) needs the seed-derived matrices of spec 9.1"
+                "Flock profile {profile:?} (mode A) needs the matrices derived from the bridge seed"
             ),
             Self::NoKeccakArgument => write!(
                 f,
@@ -247,7 +247,8 @@ pub enum VerifyError {
         /// The proof header's parameter set.
         found: Set,
     },
-    /// The record list does not match the proof's `N`.
+    /// The record list does not match the proof's `N`, a `c~` has the wrong length, or `N` is
+    /// below the minimum batch of a set with polynomial lanes.
     RecordCount,
     /// A public key failed to decode.
     PublicKey(usize),
@@ -290,7 +291,7 @@ impl std::fmt::Display for VerifyError {
             Self::ParamSet { expected, found } => {
                 write!(f, "the proof is for ML-DSA-{found}, the verifier expects ML-DSA-{expected}")
             }
-            Self::RecordCount => write!(f, "record count differs from the proof"),
+            Self::RecordCount => write!(f, "record count differs from the proof or is below the set's minimum batch"),
             Self::PublicKey(i) => write!(f, "public key {i} is malformed"),
             Self::Commitment(g) => write!(f, "{g:?}: commitment bytes are malformed"),
             Self::Transcript(e) => write!(f, "transcript: {e}"),
@@ -536,6 +537,10 @@ fn prepare_lanes<P: ParamSet>(
 where
     P::CTilde: Sync,
 {
+    // `c_tilde_from_slice` zero-pads a short slice, so a wrong width must be refused here.
+    if c_tilde.len() != records.len() || c_tilde.iter().any(|c| c.len() != P::C_TILDE_BYTES) {
+        return Err(VerifyError::RecordCount);
+    }
     let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
         .iter()
         .zip(c_tilde)
@@ -595,7 +600,11 @@ fn run(
         });
     }
     let n = proof.records;
-    if records.len() != n || proof.c_tilde.len() != n {
+    let width = crate::wire::c_tilde_bytes(set);
+    // The parser reads exactly `width` bytes of c~ per record. Checking it here as well keeps
+    // the record binding (which zero-pads a short c~) and the slicing by `width` below from
+    // depending on the parser.
+    if records.len() != n || proof.c_tilde.len() != n || proof.c_tilde.iter().any(|c| c.len() != width) {
         return Err(VerifyError::RecordCount);
     }
     if set != Set::S44 && n < crate::prover::LANE_MIN_RECORDS {
@@ -615,7 +624,7 @@ fn run(
             let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
                 .c_tilde
                 .iter()
-                .map(|c| c.as_slice().try_into().expect("the parser reads 32 bytes per ML-DSA-44 record"))
+                .map(|c| c.as_slice().try_into().expect("checked above: 32 bytes per ML-DSA-44 record"))
                 .collect();
             let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
                 .iter()
@@ -643,7 +652,6 @@ fn run(
             (Public::Lanes(public), geometry, digest, mu)
         }
     };
-    let width = crate::wire::c_tilde_bytes(set);
     timings.public_data = clock.lap();
 
     // The transcript through the final-vector step; the instance record binds the proof-of-work plan, derived from the public
@@ -887,6 +895,16 @@ fn verify_piop_with(
     timings: &mut VerifyTimings,
     public_pass: impl FnOnce(&[E], &[E], &[E]) -> (Vec<E>, Vec<E>),
 ) -> PiopVerified {
+    // A lane-set manifest below the minimum batch has a main domain shorter than the bridge
+    // domains whose points the stages take as suffixes of the main-domain points.
+    if manifest.set() != Set::S44 && manifest.records() < crate::prover::LANE_MIN_RECORDS {
+        let now = Instant::now();
+        return PiopVerified {
+            outcome: Err(VerifyError::RecordCount),
+            stage3_start: now,
+            stage3_end: now,
+        };
+    }
     let mut clock = Lap(Instant::now());
     let mut stage3_start = clock.0;
     let outcome = (|| {

@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn h_exact_plans_reproduce_docs_h_exact_section_3_7() {
+    fn h_exact_plans_match_the_documented_plans() {
         use crate::manifest::Relation;
         // Totals: (d_sig, sites, nonces, bits, bytes, sum 2^g). With the projection of v the
         // stage-2 gamma site has 9 coefficients under H-exact (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and 10
@@ -594,8 +594,8 @@ mod tests {
     #[test]
     fn h_fips_plans_equal_h_exact_plans() {
         use crate::manifest::Relation;
-        // H-FIPS's stage batching vectors (26, 8, 55) give the same
-        // difficulties as H-exact's (26, 8, 49): bit_length(55) = bit_length(49) = 6. The plan,
+        // H-FIPS's stage batching vectors (26, 9, 56) give the same
+        // difficulties as H-exact's (26, 9, 50): bit_length(56) = bit_length(50) = 6. The plan,
         // its stream and its digest are H-exact's; the relation is bound by the instance record's
         // manifest bytes (relation byte, G_main4 and G_2 descriptors, catalog row).
         for d_sig in [3, 10, 13, 15] {

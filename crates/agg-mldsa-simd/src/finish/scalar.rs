@@ -43,7 +43,8 @@ pub(crate) fn sparse_ct_slice<const TAU: usize>(
 
 #[inline]
 fn freeze(x: i32) -> i32 {
-    // |x| < 2^28.4; rounded reduction leaves (-q,q).
+    // |x| < q + B_T: 2^28.33 (ML-DSA-44), 2^28.65 (65), 2^28.93 (87). The rounded
+    // quotient by 2^23 leaves (-q,q) for any |x| < 2^31 - 2^22.
     let t = (x + (1 << 22)) >> 23;
     let r = x - t * Q;
     r + ((r >> 31) & Q)
@@ -96,7 +97,7 @@ fn use_hint_32(r: i32, h: u8) -> i32 {
 #[inline]
 fn finish_row_from_k<P: ParamSet>(
     xq: &Poly32,
-    k_coeffs: &[i32; 256],
+    k_coeffs: &[i64; 256],
     t: &[i32; 256],
     h: &[u8; 256],
     out: &mut FinishOut,
@@ -123,22 +124,24 @@ fn finish_row_from_k<P: ParamSet>(
         if ve.unsigned_abs() > P::C_B_Q {
             return Err(FinishError::Quotient);
         }
-        let v = k + ve;
+        // The CRT quotient k is wide; v is formed and bounded in i64 and narrowed
+        // only after |v| <= B_v < 2^31 holds, so no wrong k can wrap into range.
+        let v = k + i64::from(ve);
         if u.unsigned_abs() > P::B_U as u32 {
             return Err(FinishError::UBound);
         }
-        if v.unsigned_abs() > P::B_V as u32 {
+        if v.unsigned_abs() > P::B_V as u64 {
             return Err(FinishError::VBound);
         }
         out.w1[i] = w as u8;
         out.u[i] = u;
-        out.v[i] = v;
+        out.v[i] = v as i32;
     }
     Ok(())
 }
 
 pub(crate) fn finish_row<P: ParamSet>(row: FinishRow<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
-    let mut k_coeffs = [0i32; 256];
+    let mut k_coeffs = [0i64; 256];
     for i in 0..256 {
         let xq = row.xq[i];
         let mut k = mont((row.xp[i] - xq) as i64 * CRT_C as i64, CONSTS_P2);
@@ -146,16 +149,22 @@ pub(crate) fn finish_row<P: ParamSet>(row: FinishRow<'_>, out: &mut FinishOut) -
         if k > (P2 - 1) / 2 || (k == (P2 - 1) / 2 && xq > (Q - 1) / 2) {
             k -= P2;
         }
-        k_coeffs[i] = k;
+        k_coeffs[i] = i64::from(k);
     }
     finish_row_from_k::<P>(row.xq, &k_coeffs, row.t, row.h, out)
+}
+
+/// Largest |k| = |(A z - xq) / q| of an honest row: |A z| <= l 256 ((q-1)/2) gamma1
+/// and 0 <= xq < q. A larger CRT quotient comes from a wrong residue.
+const fn k_bound<P: ParamSet>() -> i64 {
+    (P::L as i64 * 256 * ((Q as i64 - 1) / 2) * P::GAMMA1 as i64 + Q as i64) / Q as i64
 }
 
 pub(crate) fn finish_row_3p<P: ParamSet>(
     row: FinishRow3P<'_>,
     out: &mut FinishOut,
 ) -> Result<(), FinishError> {
-    let mut k_coeffs = [0i32; 256];
+    let mut k_coeffs = [0i64; 256];
     let p2 = P2 as i64;
     let p3 = P3 as i64;
     for i in 0..256 {
@@ -173,7 +182,13 @@ pub(crate) fn finish_row_3p<P: ParamSet>(
         if k > m / 2 {
             k -= m;
         }
-        k_coeffs[i] = k as i32;
+        // Reject before any narrowing: a residue that is wrong modulo P2 or P3
+        // gives a k spread over |k| <= P2 P3 / 2 (about 2^54.8), almost always far
+        // above the honest bound (below 2^28.81).
+        if k.abs() > k_bound::<P>() {
+            return Err(FinishError::VBound);
+        }
+        k_coeffs[i] = k;
     }
     finish_row_from_k::<P>(row.xq, &k_coeffs, row.t, row.h, out)
 }
@@ -182,11 +197,14 @@ pub(crate) fn finish_row_exact<P: ParamSet>(
     row: FinishRowExact<'_>,
     out: &mut FinishOut,
 ) -> Result<(), FinishError> {
-    let mut k_coeffs = [0i32; 256];
+    let mut k_coeffs = [0i64; 256];
     let q = Q as i128;
     for i in 0..256 {
         let k = (row.az[i] - row.xq[i] as i128) / q;
-        k_coeffs[i] = k as i32;
+        if k.abs() > i128::from(k_bound::<P>()) {
+            return Err(FinishError::VBound);
+        }
+        k_coeffs[i] = k as i64;
     }
     finish_row_from_k::<P>(row.xq, &k_coeffs, row.t, row.h, out)
 }

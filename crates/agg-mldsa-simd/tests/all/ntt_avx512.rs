@@ -45,7 +45,7 @@ fn oracle(prime: Prime, a: &Poly32) -> Poly32 {
 fn forward_and_roundtrips() {
     let Some(e) = engine() else { return };
     let mut rng = SplitMix64::new(0x512);
-    for prime in [Prime::Q, Prime::P2] {
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
         let p = consts(prime).p;
         for case in 0..300 {
             let mut a = Poly32::zero();
@@ -88,7 +88,7 @@ fn forward_and_roundtrips() {
 fn orders_and_full_i32_reduction() {
     let Some(e) = engine() else { return };
     let mut rng = SplitMix64::new(33);
-    for prime in [Prime::Q, Prime::P2] {
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
         for _ in 0..32 {
             let a = Poly32(core::array::from_fn(|i| match i {
                 0 => i32::MIN,
@@ -117,7 +117,7 @@ fn orders_and_full_i32_reduction() {
 fn dot4_schoolbook() {
     let Some(e) = engine() else { return };
     let mut rng = SplitMix64::new(44);
-    for prime in [Prime::Q, Prime::P2] {
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
         for _ in 0..4 {
             let c = consts(prime);
             let a: [Poly32; 4] = core::array::from_fn(|_| {
@@ -194,15 +194,15 @@ fn extreme(trial: usize, i: usize, bound: i32, rng: &mut SplitMix64) -> i32 {
         _ => ((r >> 3) % (2 * bound as u64 + 1)) as i32 - bound,
     }
 }
-// Exact agreement with the scalar backend in natural order, for both primes,
-// both scales and both forms, at the edges of the documented input domains:
-// |a| <= 2^22 forward, |x| < q and |x| <= (P2-1)/2 inverse.
+// Exact agreement with the scalar backend in natural order, for all three
+// primes, both scales and both forms, at the edges of the documented input
+// domains: |a| <= 2^22 forward, |x| < q and |x| <= (p-1)/2 inverse.
 #[test]
 fn transforms_match_scalar_at_bounds() {
     let Some(e) = engine() else { return };
     let s = Engine::new(Backend::Scalar).unwrap();
     let mut rng = SplitMix64::new(0x5ca1a7);
-    for prime in [Prime::Q, Prime::P2] {
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
         let p = consts(prime).p;
         let bound = if prime == Prime::Q { p - 1 } else { p / 2 };
         for trial in 0..256 {
@@ -270,7 +270,7 @@ fn c_reference() {
 fn arbitrary_inverse_inputs() {
     let Some(e) = engine() else { return };
     let mut rng = SplitMix64::new(256);
-    for prime in [Prime::Q, Prime::P2] {
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
         let p = consts(prime).p;
         for trial in 0..64 {
             let bound = if prime == Prime::Q { p - 1 } else { p / 2 };
@@ -303,32 +303,39 @@ fn arbitrary_inverse_inputs() {
 #[test]
 fn dot4_accumulator_limits() {
     let Some(e) = engine() else { return };
-    for prime in [Prime::Q, Prime::P2] {
-        let c = consts(prime);
-        let p = c.p as i64;
-        let a_bound = if prime == Prime::Q { p - 1 } else { p / 2 };
-        let b_bound = if prime == Prime::Q {
-            452 * p / 100
-        } else {
-            44 * p / 10
-        };
-        for sa in [-1i64, 1] {
-            for sb in [-1i64, 1] {
-                if prime == Prime::Q && sa < 0 {
-                    continue;
-                }
-                let a = [Poly32([(sa * a_bound) as i32; 256]); 4];
-                let b = [Poly32([(sb * b_bound) as i32; 256]); 4];
-                let product = 4 * sa * a_bound * sb * b_bound;
-                let t = (product as i32).wrapping_mul(c.pinv) as i64;
-                let mut expected = (product - t * p) >> 32;
-                if prime == Prime::P2 {
-                    expected = (expected + p / 2).rem_euclid(p) - p / 2;
-                }
-                let mut out = Poly32::zero();
-                e.dot4(prime, &a, &b, &mut out);
-                assert!(out.iter().all(|&x| x as i64 == expected));
+    for prime in [Prime::Q, Prime::P2, Prime::P3] {
+        dot_accumulator_limits::<4>(&e, prime);
+        dot_accumulator_limits::<7>(&e, prime);
+    }
+}
+/// Constant inputs at the contract bounds (b at the forward envelope), all of
+/// one sign: for P3 and L = 7 the Montgomery output reaches 1.9p, which needs
+/// two centering passes.
+fn dot_accumulator_limits<const L: usize>(e: &Engine, prime: Prime) {
+    let c = consts(prime);
+    let p = c.p as i64;
+    let a_bound = if prime == Prime::Q { p - 1 } else { p / 2 };
+    let b_bound = match prime {
+        Prime::Q => 452 * p / 100,
+        Prime::P2 => 44 * p / 10,
+        Prime::P3 => 454 * p / 100,
+    };
+    for sa in [-1i64, 1] {
+        for sb in [-1i64, 1] {
+            if prime == Prime::Q && sa < 0 {
+                continue;
             }
+            let a = [Poly32([(sa * a_bound) as i32; 256]); L];
+            let b = [Poly32([(sb * b_bound) as i32; 256]); L];
+            let product = L as i64 * sa * a_bound * sb * b_bound;
+            let t = (product as i32).wrapping_mul(c.pinv) as i64;
+            let mut expected = (product - t * p) >> 32;
+            if prime != Prime::Q {
+                expected = (expected + p / 2).rem_euclid(p) - p / 2;
+            }
+            let mut out = Poly32::zero();
+            e.dot_l::<L>(prime, &a, &b, &mut out);
+            assert!(out.iter().all(|&x| x as i64 == expected), "{prime:?} L = {L}");
         }
     }
 }

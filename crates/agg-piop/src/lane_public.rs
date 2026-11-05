@@ -11,11 +11,12 @@
 //! w_A^(s)(j', i) = eq(r^(2)_sig, i) K_{A~_{i,s}, r^(2)_coef}[j'],   A~_{i,s} = sum_rho gamma_rho A_i[rho, s].
 //! ```
 //!
-//! The kernel `K_{a, r}` is linear in `a`, so each distinct key is transformed once per
-//! column `s` and every record of that key scales the kernel by `eq(r^(2)_sig, i)`; the
-//! verifier's `w_A^(s)(r^(3))` is `sum_i eq(r^(2)_sig, i) eq(r^(3)_sig, i) <A~_{i,s}, Lambda>`
-//! with the correlation `Lambda` of `(r^(2)_coef, r^(3)_coef)`, one dot product per key,
-//! row and column. Padded records carry zero weight and `T = 0`.
+//! The kernel `K_{a, r}` is linear in `a`, so the prover combines the rows of each record
+//! with `eq(r^(2)_sig, i) gamma_rho` and transforms that combination once per record and
+//! column `s`. The verifier's `w_A^(s)(r^(3))` is
+//! `sum_i eq(r^(2)_sig, i) eq(r^(3)_sig, i) <A~_{i,s}, Lambda>` with the correlation `Lambda`
+//! of `(r^(2)_coef, r^(3)_coef)`, one dot product per key, row and column. Padded records
+//! carry zero weight and `T = 0`.
 //!
 //! The prover builds the data from its instance ([`LanePublicData::from_instance`], `T`
 //! stored). The verifier builds it from the `(pk, M, c~)` triples

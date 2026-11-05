@@ -17,12 +17,17 @@ impl Context {
 pub fn kernel_into(a:Planes<'_>,contexts:&[Context],out:PlanesMut<'_>) {
  assert_eq!(a.0.len(),256);assert_eq!(a.1.len(),256);assert_eq!(contexts.len(),8);
  assert_eq!(out.0.len(),256);assert_eq!(out.1.len(),256);
- // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+ // SAFETY: the inputs and outputs hold 256 words each and there are eight contexts
+ // (asserted above).
  unsafe {kernel_raw(a,contexts,out.0.as_mut_ptr(),out.1.as_mut_ptr());}
 }
+/// # Safety
+/// `a` holds 256 words per plane, `contexts` has eight entries, and `out0`, `out1` are each
+/// valid for 256 writes not aliased by `a`.
 unsafe fn kernel_raw(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {
  #[cfg(target_arch="x86_64")]
- // SAFETY: the call is guarded by the backend check and the length assertions above.
+ // SAFETY: the IFMA backend is active, and the caller guarantees the sizes `vector` reads
+ // and writes.
  if backend()==Backend::Avx512 {unsafe {return vector(a,contexts,out0,out1);}}
  #[cfg(target_arch="x86_64")]
  if let Some(())=crate::wide::dispatch!(kernel_w8(a,contexts,out0,out1),kernel_w4(a,contexts,out0,out1)) {return;}
@@ -155,16 +160,19 @@ pub fn ring_weights(matrices:&[&Matrix],eq_sig:&[K],row:&[K],coef:&[K],rows:usiz
   for s in 0..4 {
    let mut a0=[0u64;256];let mut a1=[0u64;256];
    combine_dagger(matrices[i],s,&weights,(&mut a0,&mut a1));
-   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+   // SAFETY: `a0`, `a1` hold 256 words, `coef` gives eight contexts (asserted), and the
+   // output chunk holds 1,024 words per plane, so `s 256 .. s 256 + 256` is in bounds.
    unsafe {kernel_raw((&a0,&a1),&contexts,out0.as_mut_ptr().add(s*256).cast(),out1.as_mut_ptr().add(s*256).cast());}
   }
  });
- // SAFETY: the call is guarded by the backend check and the length assertions above.
+ // SAFETY: every chunk of 1,024 rows of both planes is written above: four kernels of
+ // 256 words for a record, zeros past the records.
  KPlanes{buf:unsafe {raw.assume_init()},rows}
 }
 fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
+ assert!(out.0.len()==256 && out.1.len()==256,"256 coefficients");
  #[cfg(target_arch="x86_64")]
- // SAFETY: the call is guarded by the backend check and the length assertions above.
+ // SAFETY: the IFMA backend is active, and both output planes hold 256 words (asserted).
  if backend()==Backend::Avx512 {unsafe {return combine_vector(a,s,weights,out);}}
  #[cfg(target_arch="x86_64")]
  {let (o0,o1)=(out.0.as_mut_ptr(),out.1.as_mut_ptr());
@@ -175,7 +183,8 @@ fn combine_dagger(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {
 }
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// Requires the IFMA features and 256 words in each plane of `out`.
 unsafe fn combine_vector(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let lanes=_mm512_set_epi64(7,6,5,4,3,2,1,0);
@@ -200,7 +209,8 @@ unsafe fn combine_vector(a:&Matrix,s:usize,weights:&[K;4],out:PlanesMut<'_>) {un
 }}
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// Requires the IFMA features and the sizes of [`kernel_raw`].
 unsafe fn vector(a:Planes<'_>,contexts:&[Context],out0:*mut u64,out1:*mut u64) {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let mut x0=[0u64;256];let mut x1=[0u64;256];let mut y0=[0u64;256];let mut y1=[0u64;256];

@@ -718,10 +718,11 @@ of the Aerie field backend and the compile-time `avx512` feature. Aggregate and 
 bytes are unchanged across engines.
 
 Run `scripts/simd-ab.sh` for the local comparison against a detached `main` checkout under
-`target/main-wt`. It builds both binaries with `-C target-feature=+pclmulqdq`, compares 1K
-H-u aggregates at one and sixteen threads, then measures 4K records over 4096 and 16 keys
-with one warmup and two repetitions. Runtime gates use the shared benchmark lock and CPU 3;
-the thread count is left at its default. Logs, revisions and the table are retained under
+`target/main-wt`. Both binaries take their flags from `.cargo/config.toml` (the script unsets
+`RUSTFLAGS`). It compares 1K H-u aggregates under every ML-DSA engine at one and sixteen
+threads, then measures 1,024 records over 1,024 and 16 keys with one warmup and two
+repetitions. Runtime gates use the shared benchmark lock and CPUs 0,1,3-15; the thread count
+is left at its default. Logs, revisions and the table are retained under
 `target/simd-ab-logs`. Ratios above 1.05 are flagged for review, including RSS. These shared-host
 measurements indicate local direction only; they do not replace the 32K cloud measurements.
 

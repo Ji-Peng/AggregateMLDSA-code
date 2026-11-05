@@ -1,6 +1,6 @@
 # PIOP (`agg-piop`): tables, commitments, sum-check stages, transcript and wire format
 
-The range mechanism is the lookup into `T_16` (lookup layout L16, digit layout id 1, wire
+The range mechanism is the lookup into `T_16` (lookup layout L16, digit layout id 2, wire
 version 4): `docs/lookup.md` has the argument, the soundness and the remedies for the
 identity term; `docs/deviations.md` P1 to P12, L1 to L10 and D2 the departures from the spec;
 `docs/spec.md` Sections 4, 7, 10 to 12 the normative text. The relations are H-u (relation
@@ -84,14 +84,14 @@ hint slack per record is kept in `MainTables` for round 2 (`hint_slack_table`).
 | Field | Encoding |
 | --- | --- |
 | wire version | `u16` = 4 |
-| parameter set | `u8` = `0x44` |
+| parameter set | `u8` = `0x44`, `0x65` or `0x87` |
 | relation byte | `u8` (0 H-u, 1 H-exact, 2 H-FIPS) |
 | `N`, `N*` | `u64`, `u64` |
-| digit layout id | `u8` = 1 (the lookup layout) |
-| group count | `u8` = 6 |
-| per group, wire order | role `u8`, round `u8`, family `u8` (0 = width 4, 1 = width 16), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet code per polynomial: the base of a leaf digit (4, 6), `0x90` for a looked-up column, `0x50` for a multiplicity digit, `0x23` for H-FIPS's `delta` and `e`, 0 for a Boolean |
-| catalog row id | `u16` length, ASCII (`mldsa-44-l16-batch-<N*>-mult-final`, `l16x` under H-exact, `l16f` under H-FIPS) |
-| bridge parameters | for levels 1..3: `J_t` `u64`, `m_t` `u64`, `k_t` `u8` |
+| digit layout id | `u8` = 2 (`DIGIT_LAYOUT_ID`: the lookup layout with the projection digits) |
+| group count | `u8` = 7 (every set) |
+| per group, wire order | role `u8`, round `u8`, family `u8` (0 = width 4, 1 = width 16), logical vars `u8`, physical vars `u8`, polynomial count `u8`, then one alphabet code per polynomial: the base of a leaf digit (4, 6, 8), `0x90` for a looked-up column, `0x10` for a 16-bit column no range check reads (`V_lo`, `V_hi`), `0x08` for a zero polynomial of `G_3`, `0x50` for a multiplicity digit, `0x23` for H-FIPS's `delta` and `e`, 0 for a Boolean |
+| catalog row id | `u16` length, ASCII (`mldsa-<set>-p16-batch-<N*>-mult-final`, `p16x` under H-exact, `p16f` under H-FIPS) |
+| bridge parameters | for levels 1..3 of the set's production shape: `J_t` `u64`, `m_t` `u64`, `k_t` `u8` |
 | lookup layout | challenges `u8` (2), table count `u8` and widths `u8` (16), stack count `u8`, per stack column count `u8`, variables `u8`, table `u8`, shift `i32` |
 
 The instance record of event 0 (`binding::instance_record`) is these bytes followed by the
@@ -152,7 +152,7 @@ materializations: `w1_table`, `compose_table`, `u_table`, `residual_table` (diag
 
 Every stage is one batched ordinary sum-check of `d_main` rounds (Aerie 10.3): a round
 message is the degree-`d` round polynomial without its linear coefficient (`d` elements;
-`d = 4, 4, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
+`d = 4, 5, 3`), recovered by the verifier from `g(0) + g(1) = claim`. Instances on a smaller
 domain `D_t` (always a suffix of the main variables, spec 7.1) are inactive in the
 leading `d_main - d_t` rounds, where their message is the constant `claim / 2`, and are
 lifted by `2^-(d_main - d_t)` at the terminal.
@@ -281,7 +281,7 @@ A self-check compares the final claim with `eq` times the summand at the termina
   3's `w_A` group).
 - A full-domain equality group whose lanes are all integer tables read only by single-lane
   products, each lane also read by a generic group of the stage, runs on `LinearIntGroup`
-  (stage 3: the reduction of the main lookup stack, four 16-bit columns).
+  (stage 3: the reduction of the main lookup stack, two 16-bit columns).
 - `split_linear`: in any other full-domain equality group, the single-lane products and
   unweighted affine terms on integer lanes read nowhere else move to one `LinearIntGroup` at
   the same point; the lanes stay in the generic group, unread, so it still folds them and
@@ -350,21 +350,23 @@ the zero polynomials and the multiplicity digits at `pi_m`. The verifier evaluat
 The relation (`manifest::Relation`) is a field of the manifest and selects, through it,
 everything below; the verifier takes it from its caller (`verifier::verify(..., relation,
 ...)`, `VerifyError::Relation` on a header mismatch). Columns: Section 2. Stage 2:
-`def_y1[t]` (0..6), `leaf6[U_hi]` (6); `gamma^(2) in K^7`, degree 4, terminal 7. Stage 3:
-`ring` (0, the `w_A` group reads `bz_lo, bz_hi, a_z` with weights `1, 2^16, 130,915` and
-constant `-98,225`), `link[U_hi]` (1), `bool[bz_hi]` (2), `bool[a_z]` (3) (`Term::Bool` in
-the main `eq(r2)` group, claim 0), then the reductions from 4 (`stage3::Gammas`);
-`gamma^(3) in K^45`, terminal 32. Registry: stage 2 (7, rounds of 4, 7), stage 3 (45,
-rounds of 3, 32); the proof-of-work plan follows (stage-2 batching `g = 3`).
+`def_y1[t]` (0..6), `leaf6[U_hi]` (6), `leaf8[K_2]`, `leaf8[K_3]` (7, 8); `gamma^(2) in
+K^9`, degree 5, terminal 9. Stage 3: `ring` (0, the `w_A` group reads `bz_lo, bz_hi, a_z`
+with weights `1, 2^16, 130,915` and constant `-98,225`), `link[U_hi]`, `link[K_2]`,
+`link[K_3]` (1..3), `bool[bz_hi]`, `bool[a_z]` (4, 5) (`Term::Bool` in the main `eq(r2)`
+group, claim 0), then the reductions from 6 (`stage3::Gammas`); `gamma^(3) in K^50`,
+terminal 36. Registry: stage 2 (9, rounds of 5, 9), stage 3 (50, rounds of 3, 36); the
+proof-of-work plan is H-u's.
 
 ### 7.4 Relation H-FIPS (`docs/h-exact.md` Section 10)
 
 Relation byte 2 (`Relation::HFips`); columns and values: Section 2. Stage 2: `def_y1[t]`
-(0..6), `F3 = e (e - 1)(e - delta)` (6, `Term::Monomials`, main `eq(r^(1))` group);
-`gamma^(2) in K^7`, terminal 8 (`b_t`, `delta`, `e`). Stage 3: `ring` (0), `bool[bz_hi]`,
-`bool[l_hi]`, `bool[a_z]` (1..3), `F1 = s (s - 1)`, `F2`, `F45`, `F7` (4..7), 37 reductions
-(8..44), `delta`, `e` from `r^(2)` (45, 46), the stacks (47..50); `gamma^(3) in K^51`,
-terminal 36. `F7` lives in two groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The
+(0..6), `leaf8[K_2]`, `leaf8[K_3]` (6, 7), `F3 = e (e - 1)(e - delta)` (8, `Term::Monomials`,
+main `eq(r^(1))` group); `gamma^(2) in K^9`, terminal 10 (`b_t`, the leaves of `K_2, K_3`,
+`delta`, `e`). Stage 3: `ring` (0), `link[K_2]`, `link[K_3]` (1, 2), `bool[bz_hi]`,
+`bool[l_hi]`, `bool[a_z]` (3..5), `F1 = s (s - 1)`, `F2`, `F45`, `F7` (6..9), 37 reductions
+(10..46), `delta`, `e` from `r^(2)` (47, 48), the five stacks (49..53), `proj_v`, `proj_k`
+(54, 55); `gamma^(3) in K^56`, terminal 40. `F7` lives in two groups at `EqPoint::HalfR2` (main `delta^2`, `D_2` `u_h`). The
 proof-of-work plan equals H-exact's.
 
 ## 8. Weight tables (`weights`)
@@ -438,8 +440,9 @@ export carry no work. The plan (`pow::PowPlan`: the Keccak side's tied-part site
 
 ## 10. Wire format (`wire::AggregateProof`)
 
-`LE16` version 4 (`manifest::WIRE_VERSION`), `u8` relation byte (0 = H-u, 1 = H-exact,
-2 = H-FIPS), `LE64 N`; `32 N` bytes `c~`; the `G_main16` and `G_main4` commitments framed
+`LE16` version 4 (`manifest::WIRE_VERSION`), `u8` flags byte (low nibble the relation:
+0 = H-u, 1 = H-exact, 2 = H-FIPS; high nibble the set: 0 = ML-DSA-44, 1 = 65, 2 = 87),
+`LE64 N`; `|c~| N` bytes `c~` (`|c~|` = 32, 48, 64); the `G_main16` and `G_main4` commitments framed
 (`LE32` length); event 2: `LE32 S` then `S` framed items; event 4: five framed items; event
 6: `512 S` bytes then `S` framed share items (deviation K22); the lookup (layer-1 values,
 then per session the rounds, the terminals and the leaves) and the 7 digit claims; events 9
@@ -491,7 +494,7 @@ provers and may change the honest round-2 tables before they are committed.
 | `public_data` | 2 | `StreamedPublic::prepare`: `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest |
 | `transcript` | 3 | events 0 to 6: commitments parsed (coefficient counts from the plan) and absorbed, `sd`, `fs_sigma`, final vectors and share items |
 | `matrices` | 3 | `BridgeDerivation::matrices(sd)`; `SeededMatrices` derives them as in spec 9.1 (`agg_bridge::seed`) |
-| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, share item, the event-6 record digest, proof item, matrices; deviation P11); the proof items are absorbed at the join |
+| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, share item, the event-6 record digest, proof item, matrices; deviation P11); the proof items are never absorbed (K25): their challengers are seeded from `fs_sigma` and the record digest, and the PCS session does not bind them |
 | `lookup` | 4 | the lookup (event 7) and the multiplicity-digit claims |
 | `prestage` | 4 | `tau`, pre-stage claims, `Y(tau_3)` |
 | `stage1`, `stage2` | 5, 6 | rounds and terminal checks; `w_2, w_3` at `r^(1)`, `w_1` at `r^(2)` (bridge weights, Section 8), the leaf predicates |
@@ -499,7 +502,7 @@ provers and may change the honest round-2 tables before they are committed.
 | `public_t`, `public_a` | 6 | `StreamedPublic::pass`: `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded and inverse-NTT'd, or cached; `Lambda` products) |
 | `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added, the links and the stack reductions |
 | `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B |
-| `opening` | 7 | the batched Akita opening of the 52 claims (H-u) at the six group points |
+| `opening` | 7 | the batched Akita opening of the 53 claims (ML-DSA-44, H-u: 35 stage-3 claims, 11 zero polynomials of `G_3`, 7 multiplicity digits) at the seven group points |
 
 A rejected run stops at its failing step (later timings stay zero); a trailing segment that
 holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
@@ -643,9 +646,10 @@ the 1,024-signature round trip is ignored in debug builds):
   full prover (`FixedMatrices`, unchecked stages): a flipped final-vector bit, a flipped
   level-2 parity, a level-1 and a level-3 carry moved inside `T_16`, and a flipped committed
   bit under the stale round-2 tables are each rejected at the stage-1 terminal.
-- `tests/fork_join.rs`: the Flock proofs are absorbed at the join (no PIOP challenge depends
-  on them, the PCS session binds them, the side's challengers receive the event-6 record
-  digest), and both prover schedules give the same proof.
+- `tests/fork_join.rs`: the transcript never absorbs the Flock proof items (no PIOP
+  challenge, no PCS session digest and no Akita challenge depends on them; the side's
+  challengers receive the event-6 record digest), the share items are absorbed before `X`,
+  and the three prover schedules give the same proof.
 - `tests/single_thread.rs`: a prover and verifier run with a one-thread rayon pool, from a
   plain thread and from a pool worker.
 - `tests/all/projection.rs` (deviation K24): the unbounded-quotient attack (`Delta = 0` in
@@ -678,3 +682,25 @@ Parts of other crates that the prover's speed depends on:
   verifier) on the bare Keccak-f[1600] from the precomputed cSHAKE256 prefix state, one
   permutation per column; equal to the cSHAKE256 path (test
   `keccak_columns_match_the_cshake_columns`).
+
+## 15. ML-DSA-65 and ML-DSA-87 (lane PIOP)
+
+Sections 2 to 14 give ML-DSA-44's values; `docs/spec.md` "ML-DSA-65 and ML-DSA-87
+parameters" is the normative text for the other sets. `manifest::SetShape` holds the set's
+shape: `k`, `l`, `d_vec = 0` (one polynomial lane per row of a vector column, so
+`d_main = 8 + d_sig` and no dead cells), four bits of `w_1'`, `P = 256 k` positions padded to
+`P_pad = 2,048`, and the projection's row blocks `g` (1 for 65, 2 for 87). The seven groups
+hold `(23, 46, 4, 8, 8, 5, 7)` polynomials for 65 and `(31, 62, 4, 8, 8, 5, 7)` for 87 under
+H-u; the lookup has seven stacks for 65 and eight for 87. Event 0 binds the set byte (`0x65`,
+`0x87`) and the catalog row `mldsa-<set>-p16{,x,f}-batch-<N*>-mult-final`; the proof header
+carries the set in the high nibble of its flags byte (`wire::set_nibble`). Stage batching
+vectors under H-u: `(37, 18, 105)` for 65 and `(45, 22, 132)` for 87, stage degrees
+`(3, 5, 3)` (stage 1 has no six-bit range identity), gamma difficulties `(6, 5, 7)` and
+`(6, 5, 8)` (`pow.rs` test `ml_dsa_65_and_87_plans_reproduce_the_script`); H-exact keeps
+H-u's counts, H-FIPS has 136 and 173 stage-3 coefficients (`docs/h-exact.md` 11.2). A batch
+holds 17 to `2^15` records (`prover::LANE_MIN_RECORDS`: the stages read the 13-variable
+level-1 and level-2 bridge domains as suffixes of the main domain, so `N* >= 32`); the
+parser refuses a header of these sets with `N < 17` (`WireError::Records`), and
+`verify_piop_lanes` rejects a manifest of fewer records (`VerifyError::RecordCount`). Entry points: `prover::main_tables_for`,
+`prover::prove_lanes_with_tables_using` and `prove_piop_lanes`; `verifier::verify_lanes_timed`
+and `verify_piop_lanes`, with `lane_public::LanePublicData` for the public data.

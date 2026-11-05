@@ -254,7 +254,7 @@ def check():
     for name in ["agg"]:
         if not (BIN / name).exists():
             notes.append(f"binary not built yet: {BIN / name}")
-    for name in ["aerie-falcon-bench", "natver"]:
+    for name in ["aerie-falcon-bench", "natver", "natver65", "natver87"]:
         if not (BIN / name).exists():
             notes.append(f"binary not built yet: {BIN / name}")
 

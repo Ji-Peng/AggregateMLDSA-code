@@ -6,7 +6,7 @@
 //! `gamma^(3)` order ([`Gammas`], with `o = 1 + links + bools`): `ring` (0), one `link` per
 //! leaf-checked digit (H-u: `link[Z_hi]` 1, `link[U_hi]` 2, `link[K_2]` 3, `link[K_3]` 4;
 //! H-exact: `link[U_hi]` 1, `link[K_2]` 2, `link[K_3]` 3), one `bool` per Boolean value digit (H-exact: `bool[bz_hi]`
-//! 3, `bool[a_z]` 4; claim 0), then the reductions: `b_t` from `r^(1)`
+//! 4, `bool[a_z]` 5; claim 0), then the reductions: `b_t` from `r^(1)`
 //! (`o..o+6`), `b_t` from `r^(2)`, `y^(2)_t` from `tau_2`, `y^(2)_t` from `r^(1)_2`, `K^(2)_t`
 //! from `tau_2`, `K^(3)` from `tau_3`, `K^(1)_t` from `r^(1)_1`, the lookup stacks
 //! `j = 0..5`: `sum_x eq(pi_j, x) sum_c w_{j,c} f_c(x) = g_j(pi_j, pi_top) + 2^15 sum_{c >= cols}
@@ -15,8 +15,8 @@
 //! on the main domain (the weight lane `W`, no equality factor) and `sum_y eq(r', y) (K_0 +
 //! 2^16 K_1 + 2^32 K_2 + 2^35 K_3 + 2^34 + 2^31 + 2^15)(y)` on `D_k` at the `D_k` suffix
 //! `r'` of `r^(2)`, both
-//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. H-u has 48
-//! coefficients, H-exact 49.
+//! with the claim `c` sent after stage 2, so that `k` is bound to `v`. For ML-DSA-44, H-u has
+//! 49 coefficients and H-exact 50.
 //!
 //! The ring instance is one instance with two summands on two groups: `w_A z` (weight
 //! lane, no equality factor) and `-eq(r^(2), x)(2 gamma_2 w_1' + u + q v)` (equality
@@ -34,7 +34,7 @@
 //! with scale `2^(d_main - d_sig)`, `u_h = U + 2^15` on `D_2` with scale `2^(d_2 - d_sig)`);
 //! after the 37 reductions the reductions of stage 2's `delta(r^(2))`, `e(r^(2))`. The ring
 //! reads the affine `u = gamma_2 s + L + 1 - gamma_2 - 2 gamma_2 delta - e` with
-//! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 55 coefficients.
+//! `L = l_lo + 29,696 l_hi + 2^15`. H-FIPS has 56 coefficients (ML-DSA-44).
 //!
 //! Polynomial lanes (ML-DSA-65, ML-DSA-87; relations H-u and H-exact, which differ only in
 //! the constants of the affine `z`): the main domain has no row
@@ -162,8 +162,8 @@ impl Gammas {
         self.first_reduction() + 2 * self.bit_lanes
     }
 
-    /// Batching coefficients: 49 under H-u, 50 under H-exact, 56 under H-FIPS; 105 for
-    /// ML-DSA-65 and 132 for ML-DSA-87.
+    /// Batching coefficients: for ML-DSA-44 49 under H-u, 50 under H-exact, 56 under H-FIPS;
+    /// 105 for ML-DSA-65 and 132 for ML-DSA-87 (136 and 173 under H-FIPS).
     #[must_use]
     pub const fn count(self) -> usize {
         self.stack(self.stacks) + PROJ_INSTANCES
@@ -293,7 +293,8 @@ pub fn gamma_count(manifest: &CommitmentManifest) -> usize {
 pub struct Stage3Proof {
     /// Compressed degree-3 messages (3 elements each).
     pub rounds: Vec<Vec<E>>,
-    /// The opening claims at `r^(3)` and its suffixes (34 under H-u, 35 under H-exact).
+    /// The opening claims at `r^(3)` and its suffixes (for ML-DSA-44: 35 under H-u, 36 under
+    /// H-exact, 40 under H-FIPS; `Stage3Claims::len` in general).
     pub claims: Stage3Claims,
 }
 

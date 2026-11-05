@@ -23,9 +23,10 @@ Event 6 closes the part of the transcript that the Flock side depends on. The pr
 clones the sponge into branch L, which proves the lookup, and branch S, which draws `tau`
 and proves the pre-stage claims and stages 1 and 2. The join absorbs the two branch digests
 in order, and stage 3 runs on the trunk. The Flock proofs depend only on data absorbed up to
-event 6, so they run on their own pool beside the PIOP and are absorbed at the join. No PIOP
-challenge depends on them, and the transcript and the proof are identical with or without
-the fork.
+event 6, so they run on their own pool beside the PIOP. Their proof items are never
+absorbed: their challengers are seeded from the event-5 seeds `fs_sigma` and the event-6
+record digest `rec`, and the PCS session does not bind them. No PIOP challenge depends on
+them, and the transcript and the proof are identical with or without the fork.
 
 The schedule lives in `crates/agg-piop/src/prover.rs`: `prove` starts the fork,
 `fork_join` runs the Flock side on a fresh Rayon pool on an OS thread, and `run_branches`
@@ -99,11 +100,13 @@ by about 2 GiB. At 8C16T the gain is about 450 ms.
 
 No large table is zeroed by a serial pass. A table that is fully overwritten is allocated
 as uninitialised storage and written in parallel, so its pages are first touched by the
-writers. The reusable primitives are `uninit`, `fill_par`, `reuse` and `finish` in
-`crates/agg-piop/src/kernel/buf.rs`. `MainTables::encode_tiles`
+writers. The reusable primitives are `uninit`, `reuse` and `finish` in
+`crates/agg-piop/src/kernel/buf.rs` and `AlignedVec::fill_par` in
+`crates/agg-simd/src/buf.rs`. `MainTables::encode_tiles`
 (`crates/agg-piop/src/source_tables.rs`) allocates the final columns once and gives each
 worker a disjoint tile of records; `build_levels` (`crates/agg-piop/src/lookup.rs`) touches
-every layer it writes in parallel; `expand` and `attach_small_i16`
+every layer it writes in parallel; `expand_i8`/`expand_i16` (the lazy field plane, on
+first use) and `attach_small_i16`
 (`vendor/akita/crates/akita-cpu-backend/src/sources/dense/`) fill the field plane and the
 signed-16 mirror in chunks of 32K cells on the caller's pool. Flock's
 `alloc_zeroed_vec` (`vendor/flock-core/src/lib.rs`) uses `alloc_zeroed`, whose zero pages are
@@ -134,8 +137,8 @@ the sum-check groups. `detect.rs` selects the backend once per process from the 
 under the process-wide `AGG_ISA` cap: `avx512ifma` (or unset on an IFMA CPU) takes the
 IFMA kernels, `avx512` the AVX-512F kernels without IFMA, `avx2` the AVX2 kernels, and
 `scalar` the portable kernels. `AGG_SIMD=portable` turns every vector kernel of this crate
-off (the A/B switch for the non-IFMA kernels); `AGG_SIMD=avx512` names the IFMA backend and
-runs at the cap. The other run-time kernels of
+off (the A/B switch for the non-IFMA kernels); `AGG_SIMD=avx512` names the IFMA backend,
+requires IFMA hardware and runs at the cap. The other run-time kernels of
 the unified build follow the same cap: `crates/agg-mldsa-simd` (scalar/AVX2/AVX-512),
 `crates/agg-keccak/src/simd` (8-way Keccak-f), `vendor/flock-field/src/f128_slice/rounds.rs`,
 the vendored Flock kernels and the Akita decompose-fold, window-gather and NTT kernels.
@@ -230,9 +233,10 @@ change, so this section quotes no separate saving for it.
 
 ## 6. Vendored Akita prover changes
 
-`vendor/akita` is a verbatim copy of the pinned Akita revision with five prover-only
-changes; arithmetic, wire format and verifier are untouched. The record is
-`vendor/akita/PATCH.md`.
+`vendor/akita` is a pruned copy of the pinned Akita revision with the ten changes of
+`vendor/akita/PATCH.md` (Sections 1 to 10; Section 0 lists the pruned trees): prover
+kernels, the `AGG_ISA` cap and a planner search bound. Arithmetic, wire format and verifier
+checks are untouched. The prover changes that matter for time and memory are:
 
 - **Setup-thread warm-up.** `CpuBackend::prewarm_commit`
   (`vendor/akita/crates/akita-cpu-backend/src/arithmetic/controls.rs`) builds the executor
@@ -278,8 +282,10 @@ across the `AGG_ISA=avx2` and `avx512ifma` tiers with reused blocks poisoned.
 ## 7. Flock changes
 
 The vendored `flock-core` carries the following prover changes; all are described in
-`vendor/flock-core/PATCH.md`. The round polynomials are unique, so the routes below
-compute the same field elements and leave the proof bytes unchanged.
+`vendor/flock-core/PATCH.md`, whose Sections 5, 6, 7 and 16 are the verifier-visible
+changes (list-aware outer work, nonce width, eq skip basis, joint out-of-domain draw). The
+round polynomials are unique, so the routes below compute the same field elements and leave
+the proof bytes unchanged.
 
 - **Lazy `a, b` rows.** On the AVX-512 tiers the 8-way sponge witness generator
   (`sponge_slot`, `crates/agg-keccak/src/witness.rs`) writes `z` only, and
@@ -339,7 +345,10 @@ Each polynomial is transformed under two primes: the ML-DSA prime `q = 8,380,417
 `derive_one` (`crates/agg-witness/src/fast.rs`) transforms `z` under both primes, takes
 `dot4` against the prepared key under both, inverse-transforms both and combines the
 residues by centered CRT. The pair is exact because
-`|A z| <= l 256 (q - 1)/2 gamma_1 < q P2 / 2` for every decodable `z`. The row then
+`|A z| <= l 256 (q - 1)/2 gamma_1 < q P2 / 2` for every decodable ML-DSA-44 `z`. For
+ML-DSA-65 and ML-DSA-87 (`gamma_1 = 2^19`, `l` = 5, 7) the bound exceeds `q P2 / 2`, so
+`crates/agg-witness/src/fast_lanes.rs` adds the third prime `P3 = 377,487,361 = 45 * 2^23 + 1`
+and finishes with `finish_row_3p` (`|A z| < 2^52 < q P2 P3 / 2`). The row then
 finishes without division: centered CRT, UseHint on `A z - T` modulo `q`, and the exact
 quotient `v` with its bounds. A record that fails any step falls back to the reference
 derivation (`crates/agg-witness/src/derive.rs`), so its error and its accepted witness are
@@ -363,7 +372,8 @@ and the dispatch:
   H-FIPS at 256 records, and compares the aggregate and the key-cache bytes across every
   combination.
 - `scripts/simd-ab.sh` builds `origin/main` as a baseline and compares a 1K aggregate of
-  the working tree under scalar, AVX2 and AVX-512 and one and sixteen threads with `cmp`.
+  the working tree under scalar, AVX2 and AVX-512 and one and sixteen threads with `cmp`,
+  then benches 1K records over 1,024 and 16 keys on CPUs 0,1,3-15.
   Cross-tier equality at 32K (`AGG_ISA=avx2` against `avx512ifma`) is checked the same way, and the
   32K gates run with `AGG_ALLOC_POISON=1` so a reader of a reused block is caught.
 

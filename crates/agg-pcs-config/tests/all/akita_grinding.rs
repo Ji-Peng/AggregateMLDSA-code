@@ -189,10 +189,16 @@ fn akita_plans_of_the_h_fips_rows_are_well_formed() {
 
 /// The Akita plans of the 26 ML-DSA-65 and ML-DSA-87 H-FIPS grouped rows
 /// (`mldsa-<set>-p16f-batch-<N*>-mult-final`): well-formed with 7 bits of nonce slack, distinct
-/// from the H-u rows of the same set (H-exact shares H-u's rows: its layout is H-u's).
+/// from the H-u rows of the same set (H-exact shares H-u's rows: its layout is H-u's), and
+/// pinned digests.
 #[test]
-fn akita_plans_of_the_lane_h_fips_rows_are_well_formed() {
-    for (set, pinned_hu) in [(Set::S65, PINNED_S65), (Set::S87, PINNED_S87)] {
+fn akita_plans_of_the_lane_h_fips_rows_are_pinned() {
+    let lanes = [
+        (Set::S65, PINNED_S65, PINNED_S65_H_FIPS),
+        (Set::S87, PINNED_S87, PINNED_S87_H_FIPS),
+    ];
+    for (set, pinned_hu, pinned_fips) in lanes {
+        let mut digests = Vec::new();
         for d_sig in 3..=15 {
             let plan = row_plan_for_set(set, d_sig, Relation::HFips);
             let digest = hex(&plan.digest().expect("digest"));
@@ -202,9 +208,45 @@ fn akita_plans_of_the_lane_h_fips_rows_are_well_formed() {
             assert_ne!(digest, pinned_hu[d_sig - 3], "{set:?} H-FIPS and H-u rows differ");
             let exact = hex(&row_plan_for_set(set, d_sig, Relation::HExact).digest().expect("digest"));
             assert_eq!(exact, pinned_hu[d_sig - 3], "{set:?} H-exact resolves to the H-u row");
+            digests.push(digest);
         }
+        assert_eq!(pinned_fips, digests.iter().map(String::as_str).collect::<Vec<_>>().as_slice());
     }
 }
+
+/// The plan digests of the 13 ML-DSA-65 H-FIPS grouped rows at the pinned Akita revision.
+const PINNED_S65_H_FIPS: &[&str] = &[
+    "d4d605c390b532bfcf7ab35204f5caaa2103ca00f7a7fd3a9c030a094bd0b366",
+    "d4d605c390b532bfcf7ab35204f5caaa2103ca00f7a7fd3a9c030a094bd0b366",
+    "d4d605c390b532bfcf7ab35204f5caaa2103ca00f7a7fd3a9c030a094bd0b366",
+    "d4d605c390b532bfcf7ab35204f5caaa2103ca00f7a7fd3a9c030a094bd0b366",
+    "1962dcca712f2a4f2956c679e24bac1f2c9bb9601512db724220f640aabaf2cb",
+    "f70bd456de5ed73cbbf8918f1c7f7f738520012916c7021735edc91f9dca981d",
+    "f9ca24f779f7f4308815f79e69ec47004f44fccb593f44bf295129b0ed5acf16",
+    "258b4d7ead23ea39b60b678c86e964d613782fcb0d0b4eef673284c12d69a310",
+    "6aead81f499b5138c42546debd2f64f7a55317e620626a760c03d4d8ec6b6f74",
+    "c017bec9ff973e3ebf700d89a6e0c600ee91fe6c944341451bc7a51c20568996",
+    "8e394db18114de57fb203767628d5e16860696802b8f7d3cbd643d16e5c33f78",
+    "58bf5585fcdbba025a84213861cdf63fc065161912b887c8d9cfb817ea736094",
+    "f51a2f71a1da538b50a29e8b6ad7e5d87f0519c2fcc0dcce435d3b349d1d48a9",
+];
+
+/// The plan digests of the 13 ML-DSA-87 H-FIPS grouped rows at the pinned Akita revision.
+const PINNED_S87_H_FIPS: &[&str] = &[
+    "9ea826d1ec3d39796a27bc8206d9c1e72415fabd9a5b23f7fb6c64168f1ad493",
+    "9ea826d1ec3d39796a27bc8206d9c1e72415fabd9a5b23f7fb6c64168f1ad493",
+    "9ea826d1ec3d39796a27bc8206d9c1e72415fabd9a5b23f7fb6c64168f1ad493",
+    "c2029015fcb845e60b029a40582785a00bb7219f16a6b558257e5cfa21f618c6",
+    "27a908f3f845cdf25b19124100db216c9acda1004ebbd35ec6d49b3397f00413",
+    "b407ff07d7701329d7c3bca14d6406f3810fd8db06264a98aed806f4e990196a",
+    "6f5e256efd1320640a9b802a91f6e7817d7a266ea563552c3452b1bbbb07ce5b",
+    "5f992a9d55568a98ac7863986ce09899b255cdb4b57ac13f77affaa79e823a4e",
+    "92f534f74ce1c14abf47fad299fa2db1e8f538363d52639c2edaa408d34771a2",
+    "8c2f5688abdc19730afd7a88ede543fc68fa3e5aaeb64bee6a62645d34557c39",
+    "b2cfae9d2612d37727fea3baabb961b7602b54617d312aa7ebb6fc3bf4b38610",
+    "e6d2cbdb9837a8f5c7c904e6ed1e8718e380c8dd8ced4faf8eea18a9797f7e08",
+    "fa7638c4fe207250afe9ea743150389b69fd66164ff23ab47175fbf3c6faf98e",
+];
 
 /// The plan digests of the 13 H-FIPS grouped rows at the pinned Akita revision.
 const PINNED_H_FIPS: &[&str] = &[

@@ -49,6 +49,48 @@ def pinned_commit():
     return ""
 
 
+def source_revision():
+    """The revision the binaries are built from.
+
+    In a git checkout this is `HEAD`, with `-dirty` when the tree has changes,
+    because the pin in `sources.lock` lags behind development commits. Only an
+    archive without `.git` falls back to the pin.
+    """
+    if (REPO / ".git").exists():
+        head = git_rev(REPO)
+        if head:
+            return head + ("-dirty" if git_dirty(REPO) else "")
+    return pinned_commit()
+
+
+def built_revision():
+    """The revision `build.py` stamped into the binaries, or the current one if unknown."""
+    path = BUILD / "build.json"
+    if path.exists():
+        try:
+            commit = json.loads(path.read_text(encoding="utf-8")).get("commit")
+        except (OSError, ValueError):
+            commit = None
+        if commit:
+            return commit
+    return source_revision()
+
+
+# Per-set constants of FIPS 204 (Tables 1 and 2): NIST security category,
+# signature bytes, bytes of the commitment hash c~ (lambda/4), and the natural
+# verifier binary that artifact/natver/Makefile builds for the set.
+PARAM_SETS = {
+    "44": {"category": 2, "sig_bytes": 2420, "ctilde_bytes": 32, "natver": "natver"},
+    "65": {"category": 3, "sig_bytes": 3309, "ctilde_bytes": 48, "natver": "natver65"},
+    "87": {"category": 5, "sig_bytes": 4627, "ctilde_bytes": 64, "natver": "natver87"},
+}
+
+
+def cell_params(cell):
+    """The ML-DSA parameter set of a result cell (cells written before the key are ML-DSA-44)."""
+    return str(cell.get("params") or "44")
+
+
 def run(cmd, *, env=None, cwd=None, check=True, capture=True, quiet=False):
     """Run a command with an optional environment overlay."""
     full_env = os.environ.copy()
@@ -158,13 +200,15 @@ def result_dir(path=None):
         if latest.is_file():
             directory = RESULTS / latest.read_text(encoding="utf-8").strip()
         else:
-            directory = RESULTS / f"{hostname()}-{utc_stamp()}"
+            directory = RESULTS / utc_stamp()
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
 def new_result_dir():
-    directory = RESULTS / f"{hostname()}-{utc_stamp()}"
+    # Named by the UTC time only: the directory name is copied into the
+    # generated tables, which must not carry the host name.
+    directory = RESULTS / utc_stamp()
     directory.mkdir(parents=True, exist_ok=True)
     RESULTS.mkdir(parents=True, exist_ok=True)
     (RESULTS / "LATEST").write_text(directory.name + "\n", encoding="utf-8")

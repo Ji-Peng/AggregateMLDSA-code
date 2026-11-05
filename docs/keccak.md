@@ -35,8 +35,8 @@ the last permutation commits only the lanes `0 .. L` that hold an output bit,
 `ChainGate::round_lanes`): its other `25 - L` lanes have no column and no row, and the
 walker, the row evaluator and the witness writers skip them. Round 22 cannot be pruned:
 every bit of `B_23` depends, through the theta column parities, on all of `state_23`. The
-removed AND bits are unconstrained variables that nothing reads, so (K) holds by
-construction. The Keccak-f gate outputs all 1,600 bits (`L = 25`, nothing pruned); the
+removed AND bits are unconstrained variables that nothing reads, so the sponge circuit stays
+exact by construction (the sponge-exactness lemma, `docs/soundness.md`). The Keccak-f gate outputs all 1,600 bits (`L = 25`, nothing pruned); the
 sponge outputs `c~`, lanes `(0..3, 0)`, so `L = 4` and round 23 of P7 commits 256 of its
 1,600 AND bits.
 
@@ -227,10 +227,9 @@ taskset -c 0,1,3-15 cargo test --release -p agg-keccak --lib print_gate_costs --
 Observations:
 
 - Flock's GF(2^128) multiplication is compile-time dispatched
-  (`target_feature = "pclmulqdq"`); the default build falls back to software
-  multiplication and is about 100 times slower end to end. Every x86-64 CPU since 2010
-  has PCLMULQDQ; enabling `+pclmulqdq` in the default build is a project decision
-  (the default build must not rely on SIMD).
+  (`target_feature = "pclmulqdq"`); a build without it falls back to software
+  multiplication and is about 100 times slower end to end. The release build enables
+  PCLMULQDQ (`.cargo/config.toml`: the x86-64-v3 baseline plus `+pclmulqdq`).
 - Proof size is almost flat in `n` (313 KiB at 8,190 permutations, Fast); the spec's
   estimate of about 500 KiB per 2^16-permutation segment is consistent with it.
 - Full segments (2^13 records, 57,344 permutations, 2.3e9 committed bits) are for
@@ -273,8 +272,9 @@ claims, not by Flock's word copies.
   `reattach(sponge, bits, records, commitment, data)`, `final_vectors` and
   `final_vectors_of_bits` (one share per segment, computed at event 6 from the kept input bits,
   deviation K22), `prove` and `prove_with_final_vectors(committed, sd, matrices, ys, fs)`
-  (after event 6, absorbed at the join after stage 3: the tie, the chain, then the sponge
-  instance with its public claim and the bit claim), and `verify(mu, c~, commitment, sd,
+  (after event 6, sent at the join after stage 3 and never absorbed: the tie, the chain,
+  then the sponge instance with its public claim and the bit claim; the challengers are
+  seeded from `fs_sigma` and the event-6 record digest `rec`, deviation K25), and `verify(mu, c~, commitment, sd,
   matrices, ys, fs, proof)`: Flock's verification, the public value against its table of
   `(mu_i, c~_i, 1, 0)`, and the chain's rounds and last claim against the verifier's own
   weight. Proof bytes (version 5): `docs/parity-chain.md` Section 7. The sponge challenger
@@ -399,7 +399,8 @@ post-K17 it predicts 775,046 B against ~766.8 KB).
 
 - **(1) `Slim`**: measured above, 36% fewer Flock bytes than `Fast` at 2,048 records (30% fewer
   aggregate bytes) for 3% more prover time (119 ms: commit time 1.23x in mode A, 1.36x in the
-  standalone tied part), the same verifier time and twice the kept commit data. Adopted as the default.
+  standalone tied part), the same verifier time and twice the kept commit data. Was the default until 2026-10-31;
+  `Fast` is the default now (12.6).
 - **(3) Query PoW and the rate.** Raising the query PoW from 16 to 20 / 22 / 24 bits removes
   about 3.5 / 5 / 7% of the queries per level (each bit is one bit of the work-normalized query
   term): estimated 13 / 20 / 27 KB less per 2,048-record `Slim` part (3 to 6%) and 16 / 24 /

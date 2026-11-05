@@ -2,8 +2,9 @@
 //! items and the join).
 //!
 //! The aggregate itself is `agg_piop::wire::AggregateProof`: header (version, flags, `N`),
-//! the `32 N` bytes of `c~_i`, then the payloads of the commitments, the final vectors, the lookup and the sum-check stages, the join and
-//! the Akita opening. In mode A the commitment-phase item, the share item and the join's proof
+//! the `c~_i` (`lambda/4` bytes each: 32, 48 or 64 for ML-DSA-44, 65 and 87), then the
+//! payloads of the commitments, the final vectors, the lookup and the sum-check stages, the
+//! join and the Akita opening. In mode A the commitment-phase item, the share item and the join's proof
 //! item of segment `sigma` are the byte strings defined here, because a segment's Flock
 //! argument is split into parts of `2^{d_part}` records (sub-batches), each with its own Flock
 //! commitment and proof:
@@ -38,6 +39,8 @@
 //! differs from the verifier's is rejected ([`ItemError::Profile`]).
 
 use agg_piop::transcript::FINAL_VECTOR_BYTES;
+
+use crate::mode_a::MAX_PARTS_LOG2;
 
 /// Version byte of the segment items (4: the commitment-phase item names the Flock profile, so mode A
 /// runs `Fast`, `Slim` or `Slim8`, and the span of its part; the shares and the proofs are
@@ -156,7 +159,8 @@ impl SegmentCommitments {
     /// Parse.
     ///
     /// # Errors
-    /// On a malformed item (the part count is checked by the caller).
+    /// On a malformed item, including a part count above `2^MAX_PARTS_LOG2` (whether the count
+    /// matches the segment's plan is checked by the caller).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ItemError> {
         let mut r = Reader { bytes, at: 0 };
         let version = r.take(1)?[0];
@@ -167,8 +171,9 @@ impl SegmentCommitments {
         let d_part = u32::from(r.take(1)?[0]);
         let span = r.take(1)?[0];
         let parts = r.u32()?;
-        // Each part needs at least its 4-byte length: refuse absurd counts before allocating.
-        if parts > bytes.len() / 4 {
+        // No admissible segment has more than `2^MAX_PARTS_LOG2` parts: refuse larger counts
+        // before allocating one buffer per part.
+        if parts > 1 << MAX_PARTS_LOG2 || parts > bytes.len() / 4 {
             return Err(ItemError::Truncated);
         }
         let commitments = (0..parts)
@@ -187,7 +192,8 @@ impl SegmentCommitments {
 /// The Flock profile id named by the commitment-phase items of an aggregate (`items` are the `S`
 /// items of `agg_piop::wire::AggregateProof::flock_commitments`): the profile of the first
 /// item that parses, or `None` when none does (the verifier then rejects the aggregate under
-/// its default profile).
+/// its default profile). The verifier reads the same profile in place from the aggregate bytes,
+/// without parsing the whole aggregate (`crate::mode_a`'s profile probe follows this rule).
 #[must_use]
 pub fn flock_profile(items: &[Vec<u8>]) -> Option<u8> {
     items
@@ -270,10 +276,10 @@ mod tests {
             profile: 4,
             d_part: 10,
             span: 1,
-            commitments: vec![vec![1; 40], vec![], vec![2, 3]],
+            commitments: vec![vec![1; 40], vec![2, 3]],
         };
         let bytes = c.to_bytes();
-        assert_eq!(bytes.len(), 4 + 4 + 3 * 4 + 42);
+        assert_eq!(bytes.len(), 4 + 4 + 2 * 4 + 42);
         assert_eq!(&bytes[..4], &[ITEM_VERSION, 4, 10, 1]);
         assert_eq!(flock_profile(&[vec![9], bytes.clone()]), Some(4));
         assert_eq!(flock_profile(&[vec![9]]), None);
@@ -293,6 +299,15 @@ mod tests {
         assert_eq!(
             SegmentCommitments::from_bytes(&version),
             Err(ItemError::Version(9))
+        );
+        // More parts than any admissible segment has, even when the bytes would hold them.
+        let three = SegmentCommitments {
+            commitments: vec![vec![1; 40], vec![], vec![2, 3]],
+            ..c.clone()
+        };
+        assert_eq!(
+            SegmentCommitments::from_bytes(&three.to_bytes()),
+            Err(ItemError::Truncated)
         );
         let mut huge = bytes;
         huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());

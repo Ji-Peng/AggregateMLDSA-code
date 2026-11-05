@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Correctness gate for the unified build: 1K ML-DSA-44 aggregates under H-u and H-exact
-# must verify, a tampered aggregate must be rejected, and a 3-record batch must verify
-# under H-u and H-FIPS; for ML-DSA-65 and ML-DSA-87 the 1K aggregates under H-u and H-exact
-# must verify, a tampered one must be rejected, and a 20-record batch must verify under H-u
-# and H-FIPS (lane-set batches hold at least 17 records). Reports bytes per signature. Proof-byte identity
-# against a reference is checked separately (artifact/run.sh gates, keyed by set).
+# Correctness gate for the unified build: for every set, the 1K aggregates under H-u,
+# H-exact and H-FIPS must verify and a tampered one must be rejected; a small batch must
+# verify under H-u and H-FIPS (3 records for ML-DSA-44; 20 for ML-DSA-65 and ML-DSA-87,
+# whose lane-set batches hold at least 17 records). Reports bytes per signature. Proof-byte
+# identity against the pinned digests is checked separately (artifact/run.sh gates, keyed by
+# set and relation).
 # Usage: gate.sh            build + 1K round trips + tamper checks for GATE_PARAMS
 #                           (default "44 65 87")
 #        gate.sh time N     also time `agg bench --count N --warmup 1 --reps 2` (N <= 4096 here)
@@ -13,10 +13,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 O="${GATE_DIR:-$ROOT/target/gate}"
 mkdir -p "$O"
 cd "$ROOT"
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
+# The toolchain comes from rust-toolchain.toml and the flags from .cargo/config.toml;
+# an exported RUSTFLAGS would replace the latter.
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/gate}"
-echo "RUSTFLAGS=$RUSTFLAGS"
+echo "rustflags (.cargo/config.toml): $(tr -d '\n' < .cargo/config.toml | sed -n 's/.*rustflags = \[\([^]]*\)\].*/\1/p' | tr -s ' ')"
 cargo build --release -p agg-cli
 A="$CARGO_TARGET_DIR/release/agg"
 for p in ${GATE_PARAMS:-44 65 87}; do
@@ -27,7 +28,7 @@ for p in ${GATE_PARAMS:-44 65 87}; do
         "$A" keygen-batch --params "$p" --count 1024 --seed 7 --out "$O/keys1k$tag.bin" > /dev/null
         "$A" sign-batch --params "$p" --keys "$O/keys1k$tag.bin" --count 1024 --seed 7 --out "$rec" > /dev/null
     fi
-    for rel in h-u h-exact; do
+    for rel in h-u h-exact h-fips; do
         out="$O/agg1k$tag.$rel.bin"
         "$A" aggregate --params "$p" --records "$rec" --out "$out" --relation "$rel"
         "$A" verify --params "$p" --records "$rec" --aggregate "$out" --relation "$rel" > /dev/null

@@ -4,4 +4,5 @@ mod cli;
 mod isa_cap;
 mod mode_a;
 mod mode_a_sets;
+mod robustness;
 mod simd_backends;

@@ -956,6 +956,9 @@ mod tests {
         (x(d[0]) + two32 * x(d[1]) + two64 * x(d[2]) + two64 * two32 * x(d[3])).to_canonical_u64()
     }
 
+    /// # Safety
+    /// The CPU must have the backend's features. Every unsafe block below only loads from
+    /// buffers of at least `LANES` words past the offset it reads.
     unsafe fn check_backend<B: Simd>() {
         let mut seed = 0x5eed;
         let l = B::LANES;

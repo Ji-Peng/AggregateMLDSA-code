@@ -13,7 +13,8 @@ mod avx512 {
         start: usize,
         out: &mut [u8],
     ) -> bool {
-        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+        // SAFETY: the enclosing function enables AVX-512BW; the caller checked it at run time and
+        // every lane holds at least `start + out.len()` bytes.
         unsafe {
             let one = _mm512_set1_epi8(1);
             let len = out.len();

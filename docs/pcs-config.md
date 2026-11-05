@@ -2,9 +2,10 @@
 
 Akita commitment presets, generated fold-schedule catalogs, work plan and two-round
 commit driver for the seven witness groups of spec Section 4.1 (lookup layout L16 with the
-projection of `v`, `docs/lookup.md`, deviation K24; H-u rows `mldsa-44-p16-*`, H-exact rows
-`mldsa-44-p16x-*`, H-FIPS rows `mldsa-44-p16f-*`; the `l16*` rows of Section 4 below are the
-six-group layout before K24). Akita and Aerie pins as in `README.md` (Akita
+projection of `v`, `docs/lookup.md`, deviation K24; H-u rows `mldsa-<set>-p16-*`, H-exact
+rows `mldsa-<set>-p16x-*`, H-FIPS rows `mldsa-<set>-p16f-*`; Section 3 and the planning runs
+of Section 4 that name `l16*` rows describe the six-group layout before K24, which 4.1
+amends). Akita and Aerie pins as in `README.md` (Akita
 `e023b6a`, the revision Aerie `49b6c21` pins, with the `dev-protocol` feature the
 catalogs are priced for).
 
@@ -88,6 +89,10 @@ the base-16 layout; deviation L3).
 
 ## 3. Group layouts
 
+The table below is ML-DSA-44's six-group base layout; 4.1 adds `G_k` and gives `G_3` the
+layout of `G_2` (seven groups: `G_3` then holds 12 polynomials and `G_k` 4, 53 in total under
+H-u). The other sets: the last section.
+
 Physical layouts `(num_vars, num_polynomials)` in wire and catalog order; `G_m` is the
 final group, the others are precommitted. Logical domains below `2^13` cells are
 zero-extended with trailing pad variables and opened at the zero-padded point. Both main
@@ -114,8 +119,10 @@ table point.
 All thirteen batch sizes of the wire version, `N* = 2^3` to `2^15`, are ready for the three
 relations (`CATALOG_D_SIG` for H-u, `CATALOG_D_SIG_H_EXACT` for H-exact,
 `CATALOG_D_SIG_H_FIPS` for H-FIPS; rows are keyed by `(d_sig, relation)`,
-`catalogs::catalog_batches`); none is pending. Two artifacts (width 16: 235,809 B with 26
-rows; width 4: 1,047,316 B with 78 rows; the H-FIPS rows are listed at the end of this section):
+`catalogs::catalog_batches`); none is pending. Two artifacts hold the rows of all three
+parameter sets (width 16: 610,544 B with 65 rows; width 4: 2,275,269 B with 166 rows). The
+ML-DSA-44 rows are described below, its H-FIPS rows at the end of this section and the
+ML-DSA-65 and ML-DSA-87 rows in the last section:
 
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width16.aks`:
   25 scalar producer rows, `G_main16` at 13..=25 variables, `G_1` at 13..=19, `G_2` at
@@ -124,9 +131,9 @@ rows; width 4: 1,047,316 B with 78 rows; the H-FIPS rows are listed at the end o
 - `crates/agg-pcs-config/src/schedules/agg_mldsa_fp64_signed_width4.aks`: per relation 13
   scalar producer rows (`G_main4` at 13..=25
   variables with 8 polynomials for H-u, 9 for H-exact) and 13 grouped rows, one per batch
-  size, named `mldsa-44-l16-batch-<N*>-mult-final` (H-u) and
-  `mldsa-44-l16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
-  five precommitted profiles in wire order (two families). The width-16 rows are shared:
+  size, named `mldsa-44-p16-batch-<N*>-mult-final` (H-u) and
+  `mldsa-44-p16x-batch-<N*>-mult-final` (H-exact), each keyed by `G_m = (16, 7)` and the
+  six precommitted profiles in wire order (two families). The width-16 rows are shared:
   H-exact changes only `G_main4` (`docs/h-exact.md` 2.2).
 
 Every width-4 group uses one balanced base-16 inner digit and every width-16 group one
@@ -134,7 +141,7 @@ balanced base-`2^16` digit; no row needs a setup prefix (checked by
 `checked_in_catalog_holds_exactly_the_requested_rows`, which also re-encodes both artifacts
 byte for byte).
 
-Planning run (`update_catalog_rows`, one process for all sizes in the order 8, 10, 3, 6, 9,
+Planning run of the six-group rows before K24 (`update_catalog_rows`, one process for all sizes in the order 8, 10, 3, 6, 9,
 11, 5, 4, 7, 12, 13, 14, 15, 3 scalar workers, `taskset -c 0,1,3-15`, a shared machine). Wall
 time per size
 (scalar rows not yet planned, then the grouped row); the proof and setup figures are the
@@ -181,11 +188,11 @@ H-FIPS rows (`update_catalog_rows` with `AGG_CATALOG_RELATION=h-fips` and
 `AGG_CATALOG_D_SIG=3,...,15`, 3 scalar workers, `taskset -c 0,1,3-15`): 1,105.6 s (18
 minutes, measured) for 13 width-4 scalar rows (`G_main4` at `(13..25, 12)`: `bz_hi`, `l_hi`,
 six bits, `a_z`, `s`, `delta`, `e`), 3 width-16 scalar rows (`G_2` at `(13|14|15, 13)`: the
-hint slack `u_h` is its thirteenth polynomial, deviation L10) and 13 grouped rows
-`mldsa-44-l16f-batch-<N*>-mult-final`. The planner's opening estimates equal H-u's except at
+hint slack `u_h` is its thirteenth polynomial, deviation L10) and 13 grouped rows (then
+named `l16f`; re-planned as `mldsa-44-p16f-batch-<N*>-mult-final` in 4.1). The planner's opening estimates equal H-u's except at
 `2^15` (65,398 B against 65,282 B, estimate); setups grow (3,390,464 field elements at `2^15`).
 Every H-FIPS grouped row keeps at least `2^128.0881` of accepted fold support (`2^128.5633` at
-`d_sig` 13 and 15; `tests/all/akita_fold_support.rs`), and the grinding plans are pinned in
+`d_sig` 14; `tests/all/akita_fold_support.rs`), and the grinding plans are pinned in
 `tests/all/akita_grinding.rs` (`PINNED_H_FIPS`, all distinct from the H-u and H-exact rows').
 
 ### 4.1 The seven-group layout of deviation K24 (projection of `v`)
@@ -231,7 +238,7 @@ verifies with profiles and selection taken from the work plan, never from the pr
 
 The PIOP prover drives these calls through `agg_piop::pcs::TableCommitter` (`docs/piop.md`
 Section 3): it commits `G_main16` and `G_main4` concurrently (round 1, itself concurrent
-with the Keccak side's commitments), `G_1`, `G_2`, `G_3`, `G_m` concurrently (round 2), and
+with the Keccak side's commitments), `G_1`, `G_2`, `G_3`, `G_k`, `G_m` concurrently (round 2), and
 opens with the claims it already holds (the stage-3 terminal values and the multiplicity
 digit claims).
 
@@ -256,7 +263,8 @@ feature off, off CPU 2:
 
 ```sh
 # plan only missing rows of one or more batch sizes (keeps the others, of both relations;
-# saves after each row); AGG_CATALOG_RELATION = h-u, h-exact or all (default)
+# saves after each row); AGG_CATALOG_RELATION = h-u, h-exact, h-fips or all (default),
+# AGG_CATALOG_SET = 44, 65, 87 or all (default)
 AGG_CATALOG_D_SIG=15 AGG_CATALOG_RELATION=h-exact taskset -c 0,1,3-15 cargo test \
     -p agg-pcs-config --release --no-default-features --test all \
     -- --ignored --exact schedule_catalog_regen::update_catalog_rows --nocapture

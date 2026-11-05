@@ -407,23 +407,31 @@ pub fn multiplicities(stacks: &[LookupStack<'_>], tables: &[Table]) -> Result<Ve
 /// (the `LogUp` identity holds for any `m in F_p`); the digits only let the honest values fit
 /// the width-4 preset.
 ///
-/// # Panics
-/// If a multiplicity is negative or above `7 (16^7 - 1) / 15`.
-#[must_use]
-pub fn multiplicity_digits(m: &[i32]) -> Vec<Vec<i8>> {
+/// # Errors
+/// [`LookupError::Shape`] if a multiplicity is negative or above
+/// [`MULTIPLICITY_CAPACITY`]` = 7 (16^7 - 1) / 15`.
+pub fn multiplicity_digits(m: &[i32]) -> Result<Vec<Vec<i8>>, LookupError> {
     let mut digits = vec![vec![0_i8; m.len()]; MULTIPLICITY_DIGITS];
     for (index, &value) in m.iter().enumerate() {
+        if !(0..=MULTIPLICITY_CAPACITY).contains(&i64::from(value)) {
+            return Err(LookupError::Shape(format!(
+                "multiplicity {value} at entry {index} is not a count of at most seven balanced base-16 digits"
+            )));
+        }
         let mut rest = i64::from(value);
-        assert!(rest >= 0, "a multiplicity is a count");
         for column in &mut digits {
             let digit = (rest + 8).rem_euclid(16) - 8;
             column[index] = i8::try_from(digit).expect("balanced digit");
             rest = (rest - digit) / 16;
         }
-        assert_eq!(rest, 0, "multiplicity {value} exceeds seven balanced base-16 digits");
+        debug_assert_eq!(rest, 0, "a count up to the capacity has seven balanced digits");
     }
-    digits
+    Ok(digits)
 }
+
+/// The largest count that [`multiplicity_digits`] encodes: seven balanced base-16 digits of
+/// at most 7 each, `7 (16^7 - 1) / 15 = 125,269,879`.
+pub const MULTIPLICITY_CAPACITY: i64 = 7 * ((1 << 28) - 1) / 15;
 
 /// `sum_k 16^k d_k` (the inverse of [`multiplicity_digits`]).
 #[must_use]
@@ -2331,12 +2339,17 @@ mod tests {
 
     #[test]
     fn multiplicity_digits_round_trip() {
+        assert_eq!(MULTIPLICITY_CAPACITY, 125_269_879);
         let m = vec![0, 1, 7, 8, 15, 16, 255, 100_663_296, 125_269_879];
-        let digits = multiplicity_digits(&m);
+        let digits = multiplicity_digits(&m).unwrap();
         assert_eq!(digits.len(), MULTIPLICITY_DIGITS);
         assert!(digits.iter().flatten().all(|&d| (-8..=7).contains(&d)));
         let composed = compose_multiplicity(&digits);
         assert_eq!(composed, m.iter().map(|&v| i64::from(v)).collect::<Vec<_>>());
+        // One above the capacity and a negative count are refused, not truncated.
+        for bad in [125_269_880, -1] {
+            assert!(matches!(multiplicity_digits(&[3, bad]), Err(LookupError::Shape(_))));
+        }
     }
 
     #[test]

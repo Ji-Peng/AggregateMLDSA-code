@@ -17,7 +17,7 @@ fn engine() -> Engine {
 fn transforms_match_oracle_and_roundtrip() {
     let e = engine();
     let mut rng = SplitMix64::new(42);
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         let c = p.consts();
         let oracle = oracle_ntt_prime(p);
         for case in 0..280 {
@@ -52,13 +52,45 @@ fn transforms_match_oracle_and_roundtrip() {
         let expected = poly32_to_u64(&a, c.p);
         e.reduce(p, &mut a, Form::Canonical);
         assert_eq!(a.0.map(|x| x as u64), expected);
+        // Inverse inputs at the contract bound (q - 1, or (p-1)/2 for the CRT
+        // primes): constant, alternating and single-coefficient patterns give the
+        // largest lazy sums of every layer.
+        let max = if p == Prime::Q { c.p - 1 } else { c.p / 2 };
+        for pattern in 0..259 {
+            let input = Poly32(std::array::from_fn(|i| match pattern {
+                0 => max,
+                1 => -max,
+                2 => {
+                    if i % 2 == 0 {
+                        max
+                    } else {
+                        -max
+                    }
+                }
+                _ => {
+                    if i == pattern - 3 {
+                        max
+                    } else {
+                        0
+                    }
+                }
+            }));
+            let expected = oracle.intt(&poly32_to_u64(&input, c.p));
+            for scale in [Scale::Plain, Scale::Mont] {
+                let mut got = input;
+                e.intt(p, &mut got, scale, Form::Canonical);
+                let factor: u64 = if scale == Scale::Plain { 1 } else { (1u64 << 32) % c.p as u64 };
+                let want = expected.map(|x| x * factor % c.p as u64);
+                assert_eq!(poly32_to_u64(&got, c.p), want, "{p:?} {scale:?} pattern {pattern}");
+            }
+        }
     }
 }
 
 #[test]
 fn dot_products_match_schoolbook() {
     let e = engine();
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         for case in 0..260 {
             let a: [Poly32; 4] = std::array::from_fn(|r| {
                 Poly32(std::array::from_fn(|i| {

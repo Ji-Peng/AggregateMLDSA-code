@@ -123,11 +123,17 @@ fn main() {
     let batch = prover.batch(n);
     let cost = prover.gate().cost();
     println!(
-        "agg-keccak sponge bench: records={n} permutations={} profile={profile:?} threads={} pclmulqdq={} avx512_feature={}",
+        "agg-keccak sponge bench: records={n} permutations={} profile={profile:?} threads={} pclmulqdq={} witness_simd={}",
         N_PERMS * n,
         rayon::current_num_threads(),
         cfg!(target_feature = "pclmulqdq"),
-        agg_keccak::avx512_enabled()
+        if agg_keccak::simd::avx512() {
+            "avx512"
+        } else if agg_keccak::simd::avx2() {
+            "avx2"
+        } else {
+            "portable"
+        }
     );
     println!(
         "gate: k_log={} committed_bits/record={} chi_bits/record={} nu={} m_total={} dense_m={}",

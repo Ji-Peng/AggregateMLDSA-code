@@ -9,14 +9,11 @@
 //!
 //! - [`keccak8`]: Keccak-f[1600] rounds on eight lane-sliced states (`[__m512i; 25]`,
 //!   qword `r` of every vector is instance `r`).
-//! - [`transpose`]: 8 x 64 bit-matrix transpose of one zmm (`vpermb` + `vgf2p8affineqb`).
 
 #![allow(unsafe_code)]
 
 #[cfg(target_arch = "x86_64")]
 pub mod keccak8;
-#[cfg(target_arch = "x86_64")]
-pub mod transpose;
 
 use std::sync::OnceLock;
 

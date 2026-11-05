@@ -102,7 +102,7 @@ pub mod ffi {
             in6: *const u8,
             in7: *const u8,
             inlen: std::ffi::c_int,
-        ) -> std::ffi::c_int;
+        );
         pub fn hyb512_XURQ_AVX512_shake128x8_squeezeblocks(
             state: *mut u64,
             out0: *mut u8,
@@ -132,6 +132,32 @@ pub use safe_wrappers::*;
 mod safe_wrappers {
     use super::ffi;
 
+    /// Vector alignment of the pq-crystals AVX2 polynomial, table and state types.
+    const AVX2: usize = 32;
+    /// Vector alignment of the Hybrid-SHA-3 AVX-512 polynomial and state types.
+    const AVX512: usize = 64;
+
+    /// The C kernels read and write these arguments with aligned vector loads and
+    /// stores; a misaligned array would fault (or be undefined behaviour), so the
+    /// safe wrappers check the alignment first.
+    #[track_caller]
+    fn aligned<T>(p: *const T, align: usize) {
+        assert!(
+            (p as usize).is_multiple_of(align),
+            "C reference arguments must be {align}-byte aligned"
+        );
+    }
+
+    /// Bytes the AVX2 z unpacker reads for gamma1 = 2^17: one 32-byte load per 8
+    /// coefficients at a stride of 18 bytes, so 14 bytes past the 576 packed ones.
+    pub const POLYZ_UNPACK_READ_17: usize = 18 * 31 + 32;
+    /// Bytes the AVX2 z unpacker reads for gamma1 = 2^19: 32-byte loads at a stride
+    /// of 20 bytes, so 12 bytes past the 640 packed ones.
+    pub const POLYZ_UNPACK_READ_19: usize = 20 * 31 + 32;
+    /// Bytes the AVX2 w1 packer writes for gamma2 = (q-1)/88: one 32-byte store per
+    /// 32 coefficients at a stride of 24 bytes, so 8 bytes past the 192 packed ones.
+    pub const POLYW1_PACK_WRITE_88: usize = 24 * 7 + 32;
+
     /// Returns a reference to pq-crystals Dilithium2 AVX2 `qdata` constant table.
     pub fn qdata() -> &'static [i32; 624] {
         unsafe { &ffi::pqcrystals_dilithium2_avx2_qdata }
@@ -139,6 +165,8 @@ mod safe_wrappers {
 
     /// Forward NTT in AVX2 backend order.
     pub fn ntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_ntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
@@ -146,6 +174,8 @@ mod safe_wrappers {
 
     /// Inverse NTT (tomont semantics: result is scaled by 2^32 mod q).
     pub fn invntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_invntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
@@ -153,6 +183,7 @@ mod safe_wrappers {
 
     /// Permutes coefficients from FIPS order to AVX2 order.
     pub fn nttunpack_avx(a: &mut [i32; 256]) {
+        aligned(a.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_nttunpack_avx(a.as_mut_ptr());
         }
@@ -163,8 +194,11 @@ mod safe_wrappers {
         unsafe { ffi::pqcrystals_dilithium2_avx2_rej_uniform_avx(r.as_mut_ptr(), buf.as_ptr()) }
     }
 
-    /// Unpacks 576 bytes into 256 signed coefficients z.
-    pub fn polyz_unpack(r: &mut [i32; 256], a: &[u8; 576]) {
+    /// Unpacks the first 576 bytes of `a` into 256 signed coefficients z. The C
+    /// kernel reads [`POLYZ_UNPACK_READ_17`] bytes, so `a` must be that long.
+    pub fn polyz_unpack(r: &mut [i32; 256], a: &[u8]) {
+        aligned(r.as_ptr(), AVX2);
+        assert!(a.len() >= POLYZ_UNPACK_READ_17, "z input needs the unpacker's read slack");
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -172,11 +206,16 @@ mod safe_wrappers {
 
     /// Returns 1 if some coefficient has absolute value at least `b`, else 0.
     pub fn poly_chknorm(a: &[i32; 256], b: i32) -> i32 {
+        aligned(a.as_ptr(), AVX2);
         unsafe { ffi::pqcrystals_dilithium2_avx2_poly_chknorm(a.as_ptr(), b) }
     }
 
-    /// Packs high bits w1 into 192 bytes.
-    pub fn polyw1_pack(r: &mut [u8; 192], a: &[i32; 256]) {
+    /// Packs high bits w1 into the first 192 bytes of `r`. The C kernel writes
+    /// [`POLYW1_PACK_WRITE_88`] bytes (the 8 past the packed ones are clobbered), so
+    /// `r` must be that long.
+    pub fn polyw1_pack(r: &mut [u8], a: &[i32; 256]) {
+        aligned(a.as_ptr(), AVX2);
+        assert!(r.len() >= POLYW1_PACK_WRITE_88, "w1 output needs the packer's write slack");
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_polyw1_pack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -184,6 +223,9 @@ mod safe_wrappers {
 
     /// UseHint on one polynomial: b = UseHint(h, a).
     pub fn poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
+        aligned(b.as_ptr(), AVX2);
+        aligned(a.as_ptr(), AVX2);
+        aligned(h.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
         }
@@ -196,6 +238,8 @@ mod safe_wrappers {
 
     /// Dilithium3 (ML-DSA-65) forward NTT in AVX2 backend order.
     pub fn dilithium3_ntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_ntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
@@ -203,13 +247,19 @@ mod safe_wrappers {
 
     /// Dilithium3 (ML-DSA-65) inverse NTT.
     pub fn dilithium3_invntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_invntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
     }
 
-    /// Dilithium3 (ML-DSA-65) unpacks 640 bytes into 256 signed coefficients z.
-    pub fn dilithium3_polyz_unpack(r: &mut [i32; 256], a: &[u8; 640]) {
+    /// Dilithium3 (ML-DSA-65) unpacks the first 640 bytes of `a` into 256 signed
+    /// coefficients z. The C kernel reads [`POLYZ_UNPACK_READ_19`] bytes, so `a` must be
+    /// that long.
+    pub fn dilithium3_polyz_unpack(r: &mut [i32; 256], a: &[u8]) {
+        aligned(r.as_ptr(), AVX2);
+        assert!(a.len() >= POLYZ_UNPACK_READ_19, "z input needs the unpacker's read slack");
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -217,6 +267,7 @@ mod safe_wrappers {
 
     /// Dilithium3 (ML-DSA-65) packs high bits w1 into 128 bytes.
     pub fn dilithium3_polyw1_pack(r: &mut [u8; 128], a: &[i32; 256]) {
+        aligned(a.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_polyw1_pack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -224,6 +275,9 @@ mod safe_wrappers {
 
     /// Dilithium3 (ML-DSA-65) UseHint on one polynomial: b = UseHint(h, a).
     pub fn dilithium3_poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
+        aligned(b.as_ptr(), AVX2);
+        aligned(a.as_ptr(), AVX2);
+        aligned(h.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
         }
@@ -231,6 +285,9 @@ mod safe_wrappers {
 
     /// Dilithium3 (ML-DSA-65) decomposes polynomial a into high bits a1 and low bits a0.
     pub fn dilithium3_poly_decompose(a1: &mut [i32; 256], a0: &mut [i32; 256], a: &[i32; 256]) {
+        aligned(a1.as_ptr(), AVX2);
+        aligned(a0.as_ptr(), AVX2);
+        aligned(a.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium3_avx2_poly_decompose(
                 a1.as_mut_ptr(),
@@ -247,6 +304,8 @@ mod safe_wrappers {
 
     /// Dilithium5 (ML-DSA-87) forward NTT in AVX2 backend order.
     pub fn dilithium5_ntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_ntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
@@ -254,13 +313,19 @@ mod safe_wrappers {
 
     /// Dilithium5 (ML-DSA-87) inverse NTT.
     pub fn dilithium5_invntt_avx(a: &mut [i32; 256], qdata: &[i32; 624]) {
+        aligned(a.as_ptr(), AVX2);
+        aligned(qdata.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_invntt_avx(a.as_mut_ptr(), qdata.as_ptr());
         }
     }
 
-    /// Dilithium5 (ML-DSA-87) unpacks 640 bytes into 256 signed coefficients z.
-    pub fn dilithium5_polyz_unpack(r: &mut [i32; 256], a: &[u8; 640]) {
+    /// Dilithium5 (ML-DSA-87) unpacks the first 640 bytes of `a` into 256 signed
+    /// coefficients z. The C kernel reads [`POLYZ_UNPACK_READ_19`] bytes, so `a` must be
+    /// that long.
+    pub fn dilithium5_polyz_unpack(r: &mut [i32; 256], a: &[u8]) {
+        aligned(r.as_ptr(), AVX2);
+        assert!(a.len() >= POLYZ_UNPACK_READ_19, "z input needs the unpacker's read slack");
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_polyz_unpack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -268,6 +333,7 @@ mod safe_wrappers {
 
     /// Dilithium5 (ML-DSA-87) packs high bits w1 into 128 bytes.
     pub fn dilithium5_polyw1_pack(r: &mut [u8; 128], a: &[i32; 256]) {
+        aligned(a.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_polyw1_pack(r.as_mut_ptr(), a.as_ptr());
         }
@@ -275,6 +341,9 @@ mod safe_wrappers {
 
     /// Dilithium5 (ML-DSA-87) UseHint on one polynomial: b = UseHint(h, a).
     pub fn dilithium5_poly_use_hint(b: &mut [i32; 256], a: &[i32; 256], h: &[i32; 256]) {
+        aligned(b.as_ptr(), AVX2);
+        aligned(a.as_ptr(), AVX2);
+        aligned(h.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_poly_use_hint(b.as_mut_ptr(), a.as_ptr(), h.as_ptr());
         }
@@ -282,6 +351,9 @@ mod safe_wrappers {
 
     /// Dilithium5 (ML-DSA-87) decomposes polynomial a into high bits a1 and low bits a0.
     pub fn dilithium5_poly_decompose(a1: &mut [i32; 256], a0: &mut [i32; 256], a: &[i32; 256]) {
+        aligned(a1.as_ptr(), AVX2);
+        aligned(a0.as_ptr(), AVX2);
+        aligned(a.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium5_avx2_poly_decompose(
                 a1.as_mut_ptr(),
@@ -293,6 +365,7 @@ mod safe_wrappers {
 
     /// Keccak-f1600 4-lane permutation.
     pub fn f1600x4(s: &mut [u64; 100]) {
+        aligned(s.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium_fips202x4_avx2_f1600x4(
                 s.as_mut_ptr(),
@@ -343,6 +416,7 @@ mod safe_wrappers {
         in2: &[u8],
         in3: &[u8],
     ) {
+        aligned(state.as_ptr(), AVX2);
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
@@ -376,6 +450,7 @@ mod safe_wrappers {
         in2: &[u8],
         in3: &[u8],
     ) {
+        aligned(state.as_ptr(), AVX2);
         debug_assert_eq!(in0.len(), in1.len());
         debug_assert_eq!(in0.len(), in2.len());
         debug_assert_eq!(in0.len(), in3.len());
@@ -398,6 +473,7 @@ mod safe_wrappers {
         nblocks: usize,
         state: &mut [u64; 100],
     ) {
+        aligned(state.as_ptr(), AVX2);
         assert_eq!(out0.len(), nblocks * 168);
         assert_eq!(out1.len(), nblocks * 168);
         assert_eq!(out2.len(), nblocks * 168);
@@ -422,6 +498,7 @@ mod safe_wrappers {
         in2: &[u8],
         in3: &[u8],
     ) {
+        aligned(state.as_ptr(), AVX2);
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
@@ -455,6 +532,7 @@ mod safe_wrappers {
         in2: &[u8],
         in3: &[u8],
     ) {
+        aligned(state.as_ptr(), AVX2);
         debug_assert_eq!(in0.len(), in1.len());
         debug_assert_eq!(in0.len(), in2.len());
         debug_assert_eq!(in0.len(), in3.len());
@@ -477,6 +555,7 @@ mod safe_wrappers {
         nblocks: usize,
         state: &mut [u64; 100],
     ) {
+        aligned(state.as_ptr(), AVX2);
         assert_eq!(out0.len(), nblocks * 136);
         assert_eq!(out1.len(), nblocks * 136);
         assert_eq!(out2.len(), nblocks * 136);
@@ -495,6 +574,7 @@ mod safe_wrappers {
 
     /// ExpandA in Dilithium2 AVX2: expands 4x4 matrix of polynomials.
     pub fn polyvec_matrix_expand(mat: &mut [[[i32; 256]; 4]; 4], rho: &[u8; 32]) {
+        aligned(mat.as_ptr(), AVX2);
         unsafe {
             ffi::pqcrystals_dilithium2_avx2_polyvec_matrix_expand(
                 mat.as_mut_ptr() as *mut i32,
@@ -507,6 +587,7 @@ mod safe_wrappers {
 
     /// Coefficient shuffle from natural/FIPS order to AVX-512 NTT input order.
     pub fn shuffle(a: &mut [i32; 256]) {
+        aligned(a.as_ptr(), AVX512);
         unsafe {
             ffi::hyb512_shuffle(a.as_mut_ptr());
         }
@@ -514,6 +595,7 @@ mod safe_wrappers {
 
     /// Keccak-f1600 8-lane permutation (XURQ AVX-512).
     pub fn xurq_keccak8x_permute(state: &mut [u64; 200]) {
+        aligned(state.as_ptr(), AVX512);
         unsafe {
             ffi::hyb512_XURQ_keccak8x_permute(state.as_mut_ptr());
         }
@@ -521,6 +603,7 @@ mod safe_wrappers {
 
     /// Keccak-f1600 8-lane permutation 24 rounds (XKCP AVX-512).
     pub fn keccak_p1600_times8_permute_all_24rounds(state: &mut [u64; 200]) {
+        aligned(state.as_ptr(), AVX512);
         unsafe {
             ffi::hyb512_KeccakP1600times8_PermuteAll_24rounds(state.as_mut_ptr());
         }
@@ -542,6 +625,7 @@ mod safe_wrappers {
         in6: &[u8],
         in7: &[u8],
     ) {
+        aligned(state.as_ptr(), AVX512);
         assert_eq!(in0.len(), in1.len());
         assert_eq!(in0.len(), in2.len());
         assert_eq!(in0.len(), in3.len());
@@ -579,6 +663,7 @@ mod safe_wrappers {
         out7: &mut [u8],
         nblocks: usize,
     ) {
+        aligned(state.as_ptr(), AVX512);
         assert_eq!(out0.len(), nblocks * 168);
         assert_eq!(out1.len(), nblocks * 168);
         assert_eq!(out2.len(), nblocks * 168);
@@ -610,9 +695,9 @@ mod safe_wrappers {
 
     /// ExpandA with shuffled output order in AVX-512.
     pub fn expand_a_shuffled(mat: &mut [[[i32; 256]; 4]; 4], rho: &[u8; 32]) {
+        aligned(mat.as_ptr(), AVX512);
         unsafe {
             ffi::hyb512_ExpandA_shuffled(mat.as_mut_ptr() as *mut i32, rho.as_ptr());
         }
     }
-
 }

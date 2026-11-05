@@ -479,7 +479,8 @@ impl BatchLayout {
     }
 
     /// Total committed polynomials (53 for H-u, 54 for H-exact, 59 for H-FIPS under ML-DSA-44;
-    /// 101 for ML-DSA-65; 125 for ML-DSA-87).
+    /// 101 for H-u and H-exact, 121 for H-FIPS under ML-DSA-65; 125 for H-u and H-exact, 151
+    /// for H-FIPS under ML-DSA-87).
     #[must_use]
     pub fn total_polynomials(&self) -> usize {
         self.groups
@@ -499,7 +500,7 @@ impl BatchLayout {
     }
 
     /// Catalog row name of the grouped row (`p16` for H-u, `p16x` for H-exact, `p16f` for
-    /// H-FIPS: the L16 lookup with the projected `v`).
+    /// H-FIPS: the lookup into `T_16` with the projected `v`).
     #[must_use]
     pub fn row_name(&self) -> String {
         let layout = match self.relation {
@@ -586,7 +587,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn group_shapes_match_spec_section_4() {
+    fn group_shapes_match_the_committed_layout() {
         let counts = |set, relation| Group::ALL.map(|group| group.num_polynomials(set, relation));
         assert_eq!(counts(Set::S44, Relation::Hu), [4, 8, 6, 12, 12, 4, 7]);
         assert_eq!(counts(Set::S44, Relation::HExact), [4, 9, 6, 12, 12, 4, 7]);
@@ -598,6 +599,9 @@ mod tests {
         assert_eq!(total(Set::S44, Relation::HFips), 59);
         assert_eq!(total(Set::S65, Relation::Hu), 101);
         assert_eq!(total(Set::S87, Relation::Hu), 125);
+        for (set, hu, fips) in [(Set::S65, 101, 121), (Set::S87, 125, 151)] {
+            assert_eq!((total(set, Relation::HExact), total(set, Relation::HFips)), (hu, fips));
+        }
         for relation in Relation::ALL {
             assert_eq!(Relation::from_id(relation.id()), Some(relation));
             assert_eq!(Relation::parse(relation.flag()), Some(relation));

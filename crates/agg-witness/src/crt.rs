@@ -2,9 +2,11 @@
 //!
 //! The ring identity is over the integers, so the prover needs (A z) in Z[X]/(X^256 + 1)
 //! with A centered. With |A| <= (q-1)/2 and |z| <= 2^20 every coefficient of A z
-//! is below l 256 (q-1)/2 2^20 < 2^52.1 < M/2 for M = q P2 (about 2^53.9), so the product is
+//! is below l 256 (q-1)/2 2^20, which is 2^52.0 for l = 4, 2^52.32 for l = 5 and 2^52.81 for
+//! l = 7, all below M/2 = 2^52.9 for M = q CRT_P31 (about 2^53.9). The product is therefore
 //! recovered exactly from its residues modulo q (FIPS NTT with the key's A_hat) and modulo
-//! P2 = 15 2^27 + 1 (NTT with a 512th root of unity), by CRT with the centered representative.
+//! CRT_P31 = 15 2^27 + 1 (NTT with a 512th root of unity), by CRT with the centered
+//! representative. CRT_P31 is not the 28-bit transform prime `P2` of `agg_mldsa_simd`.
 
 use crate::expand::ExpandedKey;
 use crate::native::{Poly, VecK, VecL};
@@ -12,28 +14,33 @@ use crate::ntt::{pow_mod, NttPrime};
 use crate::params::{ParamSet, Set44, K, L, N, Q};
 use std::sync::OnceLock;
 
-/// Second CRT prime P2 = 15 2^27 + 1 (31 bits, 2-adicity 27).
-pub const P2: u64 = 2_013_265_921;
-/// Generator of the multiplicative group modulo P2.
-pub const P2_GENERATOR: u64 = 31;
+/// Second CRT prime CRT_P31 = 15 2^27 + 1 (31 bits, 2-adicity 27).
+pub const CRT_P31: u64 = 2_013_265_921;
+/// Generator of the multiplicative group modulo CRT_P31.
+pub const CRT_P31_GENERATOR: u64 = 31;
 /// Largest |z| for which the CRT product is exact.
 pub const Z_CRT_MAX: i64 = 1 << 20;
 
-/// The NTT tables for P2 with zeta = 31^((P2 - 1)/512).
+/// The NTT tables for CRT_P31 with zeta = 31^((CRT_P31 - 1)/512).
 pub fn prime2() -> &'static NttPrime {
     static P: OnceLock<NttPrime> = OnceLock::new();
-    P.get_or_init(|| NttPrime::new(P2, pow_mod(P2_GENERATOR, (P2 - 1) / 512, P2)))
+    P.get_or_init(|| {
+        NttPrime::new(
+            CRT_P31,
+            pow_mod(CRT_P31_GENERATOR, (CRT_P31 - 1) / 512, CRT_P31),
+        )
+    })
 }
 
-/// CRT: the integer x in (-M/2, M/2] with x = x1 mod q and x = x2 mod P2, M = q P2.
+/// CRT: the integer x in (-M/2, M/2] with x = x1 mod q and x = x2 mod CRT_P31, M = q CRT_P31.
 #[inline]
 pub fn crt_centered(x1: u64, x2: u64) -> i64 {
     let q = Q as u64;
     static Q_INV: OnceLock<u64> = OnceLock::new();
-    let q_inv = *Q_INV.get_or_init(|| pow_mod(q % P2, P2 - 2, P2));
-    let diff = (x2 + P2 - x1 % P2) % P2;
-    let k = (diff as u128 * q_inv as u128 % P2 as u128) as u64;
-    let m = q as i128 * P2 as i128;
+    let q_inv = *Q_INV.get_or_init(|| pow_mod(q % CRT_P31, CRT_P31 - 2, CRT_P31));
+    let diff = (x2 + CRT_P31 - x1 % CRT_P31) % CRT_P31;
+    let k = (diff as u128 * q_inv as u128 % CRT_P31 as u128) as u64;
+    let m = q as i128 * CRT_P31 as i128;
     let mut x = x1 as i128 + q as i128 * k as i128;
     if x > m / 2 {
         x -= m;
@@ -97,7 +104,7 @@ pub fn az_crt_with_for<P: ParamSet>(key: &ExpandedKey<P>, z: &P::VecL, az_hat: &
 
 /// [`az_crt`] with the residue modulo q already in the NTT domain: `az_hat = A_hat o
 /// NTT(z)` in [0, q) (as [`crate::native::verify_internal_trace`] computes it), so only the
-/// product modulo P2 is computed here. Requires |z|_inf <= 2^20.
+/// product modulo CRT_P31 is computed here. Requires |z|_inf <= 2^20.
 pub fn az_crt_with(key: &ExpandedKey, z: &VecL, az_hat: &[[u64; N]; K]) -> VecK {
     az_crt_with_for::<Set44>(key, z, az_hat)
 }
@@ -224,30 +231,30 @@ mod tests {
     #[test]
     fn prime2_tables() {
         let p = prime2();
-        assert_eq!(P2, 15 * (1 << 27) + 1);
+        assert_eq!(CRT_P31, 15 * (1 << 27) + 1);
         assert_eq!(
-            pow_mod(P2_GENERATOR, (P2 - 1) / 2, P2),
-            P2 - 1,
+            pow_mod(CRT_P31_GENERATOR, (CRT_P31 - 1) / 2, CRT_P31),
+            CRT_P31 - 1,
             "31 is a non-residue"
         );
         assert_eq!(
-            pow_mod(p.zetas[1], 2, P2),
-            P2 - 1,
+            pow_mod(p.zetas[1], 2, CRT_P31),
+            CRT_P31 - 1,
             "zetas[1] = zeta^128 is a 4th root of unity"
         );
         // Exactness margin: l 256 (q-1)/2 2^20 < M/2 for all parameter sets.
         for l in [Set44::L, Set65::L, Set87::L] {
             let bound = (l * N) as i128 * ((Q - 1) / 2) as i128 * Z_CRT_MAX as i128;
-            assert!(bound < (Q as i128 * P2 as i128) / 2);
+            assert!(bound < (Q as i128 * CRT_P31 as i128) / 2);
         }
     }
 
     #[test]
     fn crt_centered_recovers_signed_values() {
-        let m = Q as i128 * P2 as i128;
+        let m = Q as i128 * CRT_P31 as i128;
         for x in [0i128, 1, -1, 123_456_789_012, -(m / 2) + 1, m / 2] {
             let x1 = x.rem_euclid(Q as i128) as u64;
-            let x2 = x.rem_euclid(P2 as i128) as u64;
+            let x2 = x.rem_euclid(CRT_P31 as i128) as u64;
             assert_eq!(crt_centered(x1, x2) as i128, x);
         }
     }

@@ -52,7 +52,8 @@ transcript binds it at event 0 (K15).
 
 Flock parts (K10, K11): segment `sigma` is split into parts of `2^{d_part}` record positions,
 `d_part = clamp(part_log2, max(3, d_seg - 1), d_seg)` (at most two parts per segment,
-`docs/soundness.md` 3.5), `part_log2` from `AggregatorConfig` (default
+`docs/soundness.md` 3.5; a segment commitment item naming more than `2^MAX_PARTS_LOG2 = 2`
+parts fails to parse, `ItemError::Truncated`, and the verifier reports `VerifyError::Plan`), `part_log2` from `AggregatorConfig` (default
 `DEFAULT_PART_LOG2 = 13`: the whole segment is one part). Each part
 is a tied part (`agg_keccak::tied`, proof version 5): a Flock sponge instance of its records
 and the virtual parity chain of its share (`docs/parity-chain.md`, `docs/keccak.md` 12.7): the sponge cap at
@@ -90,7 +91,7 @@ the lane public data from `(pk, M, c~)` (`LanePublicData::prepare`), with expand
 from a `LaneKeyCache` when given (`AggregateVerifier::verify_with` and `KeyCacheMut`). The
 Keccak side reads `c~` as concatenated bytes of the set's width (`SegmentContext::c_tilde`).
 The hooks that build the Flock witness from ML-DSA-44 records (`tamper_flock_records`,
-`flock_witness`, `stale_bridge`) are ML-DSA-44 only.
+`flock_witness`) are ML-DSA-44 only; `stale_bridge` runs for every set.
 
 Test hooks (`#[doc(hidden)]`, `AggregateHooks`): tampered round-1 or round-2 tables, the
 Flock side's records taken from the tampered tables, tampered Flock records, a custom
@@ -104,7 +105,7 @@ over tampered round-1 bits).
 | keys | `"AGGKEYS1" \|\| count LE32 \|\| (seed[32] \|\| LE32 len \|\| pk)*` (test keys: holds the `KeyGen` seeds) |
 | records | `"AGGRECS1" \|\| count LE32 \|\| (LE32 len \|\| pk, LE32 len \|\| M, LE32 len \|\| signature)*` |
 | aggregate | the wire bytes of `agg_piop::wire` (mode-A items of `agg_cli::wire`) |
-| key cache | `"AGGKCACH" \|\| 2 \|\| set id (0x44, 0x65, 0x87) \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A[k][l][256] as LE32)*`, entries checked on load; version 1 files (no set byte) hold ML-DSA-44 keys and still load |
+| key cache | `"AGGKCACH" \|\| 2 \|\| set id (0x44, 0x65, 0x87) \|\| count LE32 \|\| (SHA3-256(pk) \|\| pk \|\| tr \|\| A[k][l][256] as LE32)*`; on load an entry must have the hash `SHA3-256(pk)`, a decodable `pk`, `tr = H(pk, 64)` and every word of `A` in `[-(q-1)/2, (q-1)/2]` (else `CacheError::Entry`); `A` is not re-derived from `rho`, so the file is trusted local state; version 1 files (no set byte) hold ML-DSA-44 keys and still load |
 
 ```sh
 A=target/release/agg
@@ -112,7 +113,7 @@ taskset -c 0,1,3-15 $A keygen-batch [--params 44|65|87] --count 16 --seed 1 --ou
 taskset -c 0,1,3-15 $A sign-batch [--params 44|65|87] --keys keys.bin --count 256 --seed 1 --out records.bin
 taskset -c 0,1,3-15 $A aggregate [--params 44|65|87] --records records.bin --out aggregate.bin [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
 taskset -c 0,1,3-15 $A verify [--params 44|65|87] --records records.bin --aggregate aggregate.bin [--cache keys.cache] [--flock-profile fast|slim|slim8] [--relation h-u|h-exact|h-fips]
-AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips]
+AGG_GIT_REV=$(git rev-parse HEAD) taskset -c 0,1,3-15 $A bench [--params 44|65|87] --count 256 [--keys K] [--seed S] [--warmup 1] [--reps 5] [--part-log2 9] [--flock-profile fast|slim|slim8] [--flock-span on|off] [--relation h-u|h-exact|h-fips] [--json PATH]
 ```
 
 Environment knobs (all optional; none changes the proof bytes):
@@ -132,7 +133,9 @@ Environment knobs (all optional; none changes the proof bytes):
 | `AGG_W1_SPLIT` | `0`: build the level-1 weight table instead of its two factors |
 | `AGG_PHASE_STAMPS` | any value: print a `phase-stamp` line per prover step on stderr |
 | `AGG_PIOP_LAYOUT` | `plane` or `row`: the PIOP table layout; default `plane` with a vector `agg-simd` backend (IFMA, AVX-512F, AVX2), `row` on the portable one |
-| `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`) |
+| `AGG_SIMD` | `portable`: turn the `agg-simd` field kernels off (A/B switch; the layout default becomes `row`); `avx512`: name the IFMA backend (requires IFMA hardware, runs at the `AGG_ISA` cap) |
+| `AGG_ISA` | `avx512ifma`, `avx512`, `avx2` or `scalar`: cap every run-time SIMD detector (`agg-simd`, Flock, Akita, ML-DSA kernels); unset detects (README "SIMD policy") |
+| `AGG_SIMD_REPORT` | `1`: print, before the command, the level each crate selected |
 
 The opening is split at the transcript session: `AGG_OPENING_THREADS` sizes only the
 transcript-bound finish, while the prepare part (registry, commitment admission,
@@ -149,17 +152,23 @@ own (the aggregate's header names its set, the verifier does not trust it): a co
 refuses key or record files whose public keys have another set's length, naming the
 `--params` they fit (exit status 2), `verify` rejects an aggregate whose header names
 another set, and `--cache` holds one set's keys (a file of another set is refused). The
-`bench` header and its JSON (`"params"`) name the set. ML-DSA-65 and ML-DSA-87 take
-relation `h-u` only and at least 17 records.
+`bench` header and its JSON (`"params"`) name the set. The header and the JSON `"kernels"`
+object also name the `agg-simd` backend (`agg_simd_backend`: `avx512ifma`, `avx512`, `avx2`
+or `portable`), the PIOP layout (`piop_layout`: `plane` or `row`), the Aerie and ML-DSA
+backends and the SIMD environment knobs. ML-DSA-65 and ML-DSA-87 take
+every relation and at least 17 records.
 
-`--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1 and Appendix A):
-`h-u` (default, relation byte 0: `z in [-2^17, 2^17)`, `|u| <= 190,465`) or `h-exact`
-(relation byte 1: the FIPS 204 bounds `|z| <= 130,993`, `|u| <= 190,465`, one more
-committed column). `aggregate` and `bench` prove the chosen relation
+`--relation` selects the relation (`docs/h-exact.md`, spec Section 3.1, Appendix A and
+"ML-DSA-65 and ML-DSA-87 parameters"): `h-u` (default, relation byte 0: ML-DSA-44
+`z in [-2^17, 2^17)`, `|u| <= 190,465`; ML-DSA-65/87 `z in [-2^19, 2^19)`,
+`|u| <= 523,777`), `h-exact` (relation byte 1: also the FIPS 204 bound
+`|z| <= gamma1 - beta - 1`, that is 130,993, 524,091 or 524,167; one more committed column
+for ML-DSA-44, none for 65/87) or `h-fips` (relation byte 2: also the hint, so the
+extracted `(c~, z, h)` is a FIPS 204 signature; `docs/h-exact.md` 10 and 11.2). `aggregate` and `bench` prove the chosen relation
 (`AggregatorConfig::relation`); `verify` verifies under the chosen relation
 (`AggregateVerifier::relation`) and rejects an aggregate whose header names another one
-("the proof claims relation H-exact, the verifier expects H-u"), so verifying an H-exact
-aggregate needs `--relation h-exact`. The prover and verifier reports and the `bench`
+("the proof claims relation H-exact, the verifier expects H-u"), so verifying an aggregate
+needs the `--relation` it was made with. The prover and verifier reports and the `bench`
 header print the relation. The Keccak side does not depend on it.
 
 `--flock-profile` selects the Ligerito profile of the Flock parts (`fast`: rate 1/2, `slim`:
@@ -186,7 +195,7 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
 
 ## 3. Tests
 
-`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,mode_a_sets,cli}.rs`):
+`taskset -c 0,1,3-15 cargo test --release -p agg-cli` (unit tests and `tests/all/{mode_a,mode_a_sets,robustness,cli,simd_backends,isa_cap}.rs`):
 
 - unit: part tiling of every segment (also with an all-padded trailing segment), part seeds
   and span seeds, an empty segment (no part, `Y_sigma = 0`, malformed items rejected), the
@@ -229,10 +238,21 @@ CPU 2 after `crypto_bench off`; the numbers below are not benchmarks.
   opening), and the full driver at 256 records: deterministic bytes, the `c~` list, the
   uncached verifier and a cold and a warm `LaneKeyCache`, rejection by a verifier of the
   other set and of ML-DSA-44, a rewritten set nibble, another `c~`, another message, an
-  opening byte, H-exact refused, and tampered `G_main16` and `G_main4` cells; the lane key
-  cache file (unit); through the binary (`cli.rs`, 20 records): `--params` on every
-  command, the per-set cache file (new, filled, an ML-DSA-44 file refused), a flipped byte,
-  16 records refused, records of the other set and H-exact refused.
+  opening byte, H-exact and H-FIPS round trips with each crossed relation rejected
+  (`VerifyError::Relation`, also a relabelled relation byte), tampered `G_main16` and
+  `G_main4` cells, and a committed bit flipped under stale round-2 tables (the Flock part
+  accepts, stage 1 rejects); the lane key cache file (unit); through the binary (`cli.rs`, 20
+  records): `--params` on every command, the per-set cache file (new, filled, an ML-DSA-44
+  file refused), a flipped byte, 16 records refused, records of the other set refused, and
+  `--relation h-exact` and `h-fips` aggregates accepted under their own relation and
+  rejected under another;
+- attacker-controlled bytes (`robustness.rs`): honest 64-record aggregates of ML-DSA-44 and
+  ML-DSA-65 cut at every multiple of 97 bytes and flipped once in each region of the
+  aggregate; every variant is rejected without a panic. The span path above one segment
+  (8,193 records of ML-DSA-44 and 65: one tied part, accepted; a flipped proof byte
+  rejected) is `#[ignore]` and runs with `--ignored span_path` on the benchmark machine;
+- the SIMD tiers (`simd_backends.rs`, `docs/engineering.md` Section 9) and the `AGG_ISA` cap
+  of every kernel family (`isa_cap.rs`, through `AGG_SIMD_REPORT=1`).
 
 ## 4. Local measurements
 
@@ -252,7 +272,8 @@ with `16 (81 + 11 d_main)` at `d_main = 20` for both relations (9 + 1 + 34 claim
 ML-DSA-65 and ML-DSA-87 at 1K (revision `1c5516d`, all 16 CPUs of the WSL box with turbo
 and HT on; not benchmarks). Sizes: the artifact gate records (keys seed 42, records seed
 43, `agg aggregate --params P`), byte-identical under `AGG_ISA=avx512ifma|avx512|avx2|scalar`
-and with `RAYON_NUM_THREADS=1` and 16 (`artifact/expected/hashes.json`). Times: in-process
+and with `RAYON_NUM_THREADS=1` and 16 (H-u; `artifact/expected/hashes.json` pins the 1K
+digest of every set and relation). Times: in-process
 medians of `agg bench --params P --count 1024 --warmup 1 --reps 2` (1,024 keys; verify with
 uncached and with cached keys):
 

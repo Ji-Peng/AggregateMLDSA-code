@@ -1,6 +1,6 @@
 //! Relation H-FIPS (relation byte 2) on the witness side: derivation from accepted signatures,
 //! the integer checker, the extraction of a FIPS 204 signature, and a synthetic signature of hint
-//! weight exactly 80 with a coefficient `w' = q - gamma2, h = 0`.
+//! weight exactly omega with a coefficient `w' = q - gamma2, h = 0`, for every parameter set.
 
 // Index loops mirror the FIPS 204 pseudocode and index several arrays at once.
 #![allow(clippy::needless_range_loop)]
@@ -8,9 +8,11 @@
 use crate::common;
 
 use agg_witness::check::{CheckReport, Identity};
-use agg_witness::derive::derive;
+use agg_witness::derive::{derive, derive_for};
 use agg_witness::gen;
-use agg_witness::hfips::{check_batch, honest_coeff, Coeff, HFipsRecord, L_STEP};
+use agg_witness::hfips::{
+    check_batch, check_batch_for, honest_coeff, z_form_for, Coeff, CoeffOf, HFipsRecord, HFipsRecordOf, L_STEP,
+};
 use agg_witness::instance::PublicInstance;
 use agg_witness::native::{self, mod_q, SmallK};
 use agg_witness::params::*;
@@ -281,4 +283,119 @@ fn padded_rows_satisfy_the_relation() {
     assert_eq!(p.u(), [[0; N]; K]);
     assert_eq!(p.u_h, OMEGA as i64);
     assert_eq!(p.z_digits[0][0], [32_689, 1, 0]);
+}
+
+/// The synthetic weight-omega record of set `P` (`gen::hint_corner_record_for`): a genuine
+/// signature that both verifiers accept, its generic H-FIPS witness passes the generic checker,
+/// and extraction returns the signature byte for byte.
+fn corner_record_round_trip<P: ParamSet>(seed: u64) -> (PublicInstance<P>, HFipsRecordOf<P>) {
+    let r = gen::hint_corner_record_for::<P>(seed);
+    assert_eq!((r.pk.len(), r.sig.len()), (P::PK_BYTES, P::SIG_BYTES));
+    assert!(native::verify_for::<P>(&r.pk, &r.msg, &r.sig));
+    assert!(gen::crate_verify_for::<P>(&r.pk, &r.msg, &r.sig));
+    let inst = PublicInstance::<P>::from_records_for(std::slice::from_ref(&r)).unwrap();
+    let p = &inst.records[0];
+    let w = derive_for::<P>(&p.key, &p.mu, &r.sig).expect("the synthetic signature is accepted");
+    let rec = HFipsRecordOf::<P>::from_witness(&w).unwrap();
+    assert_eq!(rec.hint_weight(), P::OMEGA as i64);
+    assert_eq!(rec.u_h, 0);
+    // The corner w' = q - gamma2, h = 0 (L = 0, e = 1) and the wrap w' = 0, h = 1 to m - 1.
+    let (c, z) = (gen::HINT_CORNER, gen::HINT_ZERO);
+    assert_eq!(rec.coeffs[c.0][c.1], CoeffOf { l: 0, sigma: -1, delta: 0, e: 1 });
+    assert_eq!(rec.coeffs[z.0][z.1], CoeffOf { l: P::GAMMA2 - 1, sigma: -1, delta: -1, e: -1 });
+    assert_eq!(rec.w1()[z.0][z.1], P::M_W - 1);
+    let rep = check_batch_for::<P>(&inst, std::slice::from_ref(&rec));
+    assert!(rep.is_ok(), "{:?}", rep.failures);
+    assert_eq!(rec.extract_signature(&p.c_tilde).unwrap(), r.sig);
+    assert_eq!(rec.extracted_hint(), w.h);
+    (inst, rec)
+}
+
+#[test]
+fn generic_checker_accepts_the_corner_records_of_every_set() {
+    corner_record_round_trip::<Set65>(1);
+    corner_record_round_trip::<Set87>(1);
+    // ML-DSA-44: the generic witness and the fixed one agree on the same record.
+    let (_, generic) = corner_record_round_trip::<Set44>(1);
+    let (_, fixed) = derive_synthetic(&synthetic());
+    assert_eq!(generic.hint_weight(), fixed.hint_weight());
+    assert_eq!(generic.u(), fixed.u());
+    assert_eq!(generic.z(), fixed.z());
+    assert_eq!(generic.v, fixed.v);
+}
+
+/// The comparison above derives both sides from one record, so the ML-DSA-44 corner record
+/// is pinned on its own: SHA3-256 of its public key and signature, as the ML-DSA-44-only
+/// generator produced them before the generator became generic.
+#[test]
+fn ml_dsa_44_corner_record_keeps_its_bytes() {
+    use sha3::{Digest, Sha3_256};
+    let hex = |b: &[u8]| -> String { Sha3_256::digest(b).iter().map(|x| format!("{x:02x}")).collect() };
+    let r = gen::hint_corner_record(1);
+    assert_eq!(hex(&r.pk), "82e2a316f311b985095c3805aa645e1adfc9f65034b2700fe4e51a31cd341cbd");
+    assert_eq!(hex(&r.sig), "edf78a7e95d9b5aedb94e7df14b6ae9c50fdcf380b4878fc35770ba2de35df04");
+}
+
+#[test]
+fn generic_checker_rejects_tampered_witnesses() {
+    for set in [Set::S65, Set::S87] {
+        dispatch_set!(set, |P| {
+            let (inst, rec) = corner_record_round_trip::<P>(2);
+            let run = |f: &dyn Fn(&mut HFipsRecordOf<P>)| -> Vec<Identity> {
+                let mut t = rec.clone();
+                f(&mut t);
+                failed(&check_batch_for::<P>(&inst, std::slice::from_ref(&t)))
+            };
+            let w1 = rec.w1();
+            let plain = (0..P::K)
+                .flat_map(|r| (0..N).map(move |j| (r, j)))
+                .find(|&(r, j)| {
+                    let c = rec.coeffs[r][j];
+                    c.delta == 0 && c.e == 0 && w1[r][j] != 0 && w1[r][j] != P::M_W - 1
+                })
+                .expect("a plain coefficient");
+            let ids = run(&|t| t.coeffs[plain.0][plain.1].sigma = 0);
+            assert!(ids.contains(&Identity::SignSquare), "{ids:?}");
+            let ids = run(&|t| t.coeffs[plain.0][plain.1].e = 1);
+            assert!(ids.contains(&Identity::WrapLow), "{ids:?}");
+            let ids = run(&|t| t.coeffs[plain.0][plain.1].l = P::GAMMA2);
+            assert!(ids.contains(&Identity::Range16), "{ids:?}");
+            let ids = run(&|t| t.u_h += 1);
+            assert_eq!(ids, vec![Identity::HintWeight]);
+            let ids = run(&|t| t.bits[0][plain.0][plain.1] ^= 1);
+            assert!(ids.contains(&Identity::Ring) && ids.contains(&Identity::CommitmentHash), "{ids:?}");
+            // The Boolean slack digit of z (the last digit of the H-exact form) set to 2.
+            let ids = run(&|t| {
+                let d = z_form_for::<P>().len();
+                t.z_digits[d - 1] = 2;
+            });
+            assert!(ids.contains(&Identity::BoolSlack), "{ids:?}");
+            // A record of the wrong shape fails the shape check instead of panicking.
+            let ids = run(&|t| {
+                t.z_digits.pop();
+            });
+            assert_eq!(ids, vec![Identity::Shape]);
+            let ids = run(&|t| {
+                t.bits[0].pop();
+            });
+            assert_eq!(ids, vec![Identity::Shape]);
+        });
+    }
+}
+
+#[test]
+fn generic_padded_rows_satisfy_the_relation() {
+    let recs = gen::records_for::<Set65>(0x4F1F7, 3);
+    let inst = PublicInstance::<Set65>::from_records_for(&recs).unwrap();
+    assert!(inst.geom.n_star > recs.len());
+    let hf: Vec<HFipsRecordOf<Set65>> = common::witnesses_for(&inst, &recs)
+        .iter()
+        .map(|w| HFipsRecordOf::from_witness(w).expect("H-FIPS witness"))
+        .collect();
+    let rep = check_batch_for(&inst, &hf);
+    assert!(rep.is_ok(), "{:?}", rep.failures);
+    let p = HFipsRecordOf::<Set65>::padded();
+    assert_eq!(p.z(), Set65::zero_vec_l());
+    assert_eq!(p.u(), Set65::zero_vec_k());
+    assert_eq!(p.u_h, Set65::OMEGA as i64);
 }

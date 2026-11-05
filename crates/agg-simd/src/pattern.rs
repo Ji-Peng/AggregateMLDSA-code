@@ -68,7 +68,8 @@ pub trait Leaves: Sync {
     /// Product forms: the lane pairs summed, and whether the sum needs two limbs
     /// (`|value| >= 2^51`).
     const PRODUCTS: &'static [(&'static [(usize, usize)], bool)];
-    /// Cells of the shape.
+    /// Cells of the shape. The vector readers below read only cells below this count, so an
+    /// implementation checks here that every stored lane holds that many cells.
     fn rows(&self) -> usize;
     /// The lane values of cell `y`.
     fn values(&self, y: usize) -> [i64; 4];
@@ -76,14 +77,14 @@ pub trait Leaves: Sync {
     /// indexed `[lane][pattern a]`.
     ///
     /// # Safety
-    /// Requires AVX-512F/DQ/BW/VL/IFMA.
+    /// Requires AVX-512F/DQ/BW/VL/IFMA and `4 (row + 8) <= self.rows()`.
     #[cfg(target_arch = "x86_64")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4];
     /// [`Self::values8`] for the `B::LANES` cells `4 (row + l) + a` of a backend without
     /// IFMA. Every lane value lies in `[-2^31, 2^31)`.
     ///
     /// # Safety
-    /// Requires the backend's CPU features.
+    /// Requires the backend's CPU features and `4 (row + B::LANES) <= self.rows()`.
     #[cfg(target_arch = "x86_64")]
     #[doc(hidden)]
     unsafe fn values_wide<B: crate::wide::Simd>(&self, row: usize) -> [[B::V; 4]; 4];
@@ -99,7 +100,10 @@ impl Leaves for Bottom<'_> {
     const LANES: usize = 2;
     const LINEAR: &'static [&'static [usize]] = &[&[0, 1]];
     const PRODUCTS: &'static [(&'static [(usize, usize)], bool)] = &[(&[(0, 1)], false)];
+    /// # Panics
+    /// When the two halves differ in length.
     fn rows(&self) -> usize {
+        assert_eq!(self.v0.len(), self.v1.len(), "the two halves of the column");
         self.v0.len()
     }
     #[inline(always)]
@@ -110,7 +114,8 @@ impl Leaves for Bottom<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
-        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+        // SAFETY: the caller guarantees the IFMA features and cells `4 row .. 4 row + 32` below
+        // `rows()`, which both halves hold.
         unsafe {
             use crate::x86::*;
             let v0 = self.v0.as_ptr().add(4 * row);
@@ -159,7 +164,8 @@ impl Leaves for Symmetric<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
-        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+        // SAFETY: the caller guarantees the IFMA features and cells `4 row .. 4 row + 32` below
+        // `rows() = q`, so every quarter `j q + ..` stays inside `stacked`.
         unsafe {
             use crate::x86::*;
             use std::arch::x86_64::*;
@@ -214,7 +220,8 @@ pub fn prefix_sums<L: Leaves>(leaves: &L, first: &[K], second: &[K]) -> PrefixSu
         #[cfg(target_arch = "x86_64")]
         if first.len() >= 8 && backend() == Backend::Avx512 {
             let planes = crate::buf::KPlanes::from_fn(first.len(), |i| first[i]);
-            // SAFETY: the call is guarded by the backend check and the length assertions above.
+            // SAFETY: the IFMA backend is active, and the leaves hold `4 |first| |second|`
+            // cells (asserted above), every cell of the blocks in `range`.
             return unsafe { sums_vector(leaves, planes.planes(), second, range) };
         }
         #[cfg(target_arch = "x86_64")]
@@ -289,11 +296,17 @@ fn sums_scalar<L: Leaves>(leaves: &L, first: &[K], second: &[K], blocks: std::op
 ///
 /// # Safety
 /// Every output address must hold `row1` writable `u64` rows.
+///
+/// # Panics
+/// When `out` does not have one address per lane, `row0 > row1`, or the leaves hold fewer
+/// than `4 row1` cells.
 pub unsafe fn fill_rows<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize) {
     assert_eq!(out.len(), L::LANES);
+    assert!(row0 <= row1 && 4 * row1 <= leaves.rows(), "leaves cover the rows");
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active, the leaves hold `4 row1` cells (asserted) and
+        // the caller guarantees `row1` writable output rows.
         unsafe {
             return fill_vector(leaves, e, out, row0, row1);
         }
@@ -304,16 +317,18 @@ pub unsafe fn fill_rows<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0:
             return;
         }
     }
-    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+    // SAFETY: the caller guarantees `row1` writable output rows.
     unsafe { fill_scalar(leaves, e, out, row0, row1) }
 }
 
+/// # Safety
+/// Every output address must hold `row1` writable `u64` rows.
 unsafe fn fill_scalar<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize) {
     for hi in row0..row1 {
         let cells: [[i64; 4]; 4] = std::array::from_fn(|a| leaves.values(4 * hi + a));
         for (l, &o) in out.iter().enumerate() {
             let value = (0..4).fold(K::zero(), |acc, a| acc + e[a] * K::from_i64(cells[a][l]));
-            // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+            // SAFETY: `hi < row1`, and the caller guarantees `row1` writable rows.
             unsafe {
                 (o.0 as *mut u64).add(hi).write(value.c0().to_canonical_u64());
                 (o.1 as *mut u64).add(hi).write(value.c1().to_canonical_u64());
@@ -328,11 +343,17 @@ unsafe fn fill_scalar<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: u
 ///
 /// # Safety
 /// The output address must hold `row1` writable `u64` rows.
+///
+/// # Panics
+/// When `weights` does not have one entry per lane, `row0 > row1`, or the leaves hold fewer
+/// than `4 row1` cells.
 pub unsafe fn fill_combined<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize) {
     assert_eq!(weights.len(), L::LANES);
+    assert!(row0 <= row1 && 4 * row1 <= leaves.rows(), "leaves cover the rows");
     #[cfg(target_arch = "x86_64")]
     if row1 - row0 >= 8 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active, the leaves hold `4 row1` cells (asserted) and
+        // the caller guarantees `row1` writable output rows.
         unsafe {
             return fill_combined_vector(leaves, weights, out, row0, row1);
         }
@@ -346,10 +367,12 @@ pub unsafe fn fill_combined<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutL
             return;
         }
     }
-    // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+    // SAFETY: the caller guarantees `row1` writable output rows.
     unsafe { fill_combined_scalar(leaves, weights, out, row0, row1) }
 }
 
+/// # Safety
+/// The output address must hold `row1` writable `u64` rows.
 unsafe fn fill_combined_scalar<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize) {
     for row in row0..row1 {
         let mut value = K::zero();
@@ -359,7 +382,7 @@ unsafe fn fill_combined_scalar<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
                 value += w[a] * K::from_i64(cells[l]);
             }
         }
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: `row < row1`, and the caller guarantees `row1` writable rows.
         unsafe {
             (out.0 as *mut u64).add(row).write(value.c0().to_canonical_u64());
             (out.1 as *mut u64).add(row).write(value.c1().to_canonical_u64());
@@ -370,7 +393,10 @@ unsafe fn fill_combined_scalar<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: O
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fill_combined_vector<L: Leaves>(leaves: &L, weights: &[[K; 4]], out: OutLane, row0: usize, row1: usize) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `fill_combined` asserts `4 row1 <= leaves.rows()`, so `values8(row)` with
+    // `row + 8 <= stop <= row1` reads inside the leaves; its caller guarantees `row1`
+    // writable rows at `out`.
     unsafe {
         use crate::x86::*;
         let stop = row0 + (row1 - row0) / 8 * 8;
@@ -416,8 +442,10 @@ impl Leaves for Columns<'_> {
     const LANES: usize = 4;
     const LINEAR: &'static [&'static [usize]] = &[&[0], &[1], &[2], &[3]];
     const PRODUCTS: &'static [(&'static [(usize, usize)], bool)] = &[];
+    /// # Panics
+    /// Unless there are one to four lanes of equal length.
     fn rows(&self) -> usize {
-        self.lanes[0].len()
+        columns_rows(&self.lanes)
     }
     #[inline(always)]
     fn values(&self, y: usize) -> [i64; 4] {
@@ -427,7 +455,8 @@ impl Leaves for Columns<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
-        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+        // SAFETY: the caller guarantees the IFMA features and cells `4 row .. 4 row + 32` below
+        // `rows()`, which every lane holds (at most four lanes, checked there).
         unsafe {
             use crate::x86::*;
             let mut out = [[z(); 4]; 4];
@@ -454,6 +483,14 @@ impl Leaves for Columns<'_> {
     }
 }
 
+/// The cells of one to four lanes of equal length.
+fn columns_rows<T>(lanes: &[&[T]]) -> usize {
+    assert!((1..=4).contains(&lanes.len()), "one to four column lanes");
+    let rows = lanes[0].len();
+    assert!(lanes.iter().all(|lane| lane.len() == rows), "column lanes of equal length");
+    rows
+}
+
 /// [`Columns`] over `i8` cells (committed digit columns read through the identity map).
 pub struct ByteColumns<'a> {
     pub lanes: Vec<&'a [i8]>,
@@ -463,8 +500,10 @@ impl Leaves for ByteColumns<'_> {
     const LANES: usize = 4;
     const LINEAR: &'static [&'static [usize]] = &[&[0], &[1], &[2], &[3]];
     const PRODUCTS: &'static [(&'static [(usize, usize)], bool)] = &[];
+    /// # Panics
+    /// Unless there are one to four lanes of equal length.
     fn rows(&self) -> usize {
-        self.lanes[0].len()
+        columns_rows(&self.lanes)
     }
     #[inline(always)]
     fn values(&self, y: usize) -> [i64; 4] {
@@ -474,7 +513,8 @@ impl Leaves for ByteColumns<'_> {
     #[inline]
     #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
     unsafe fn values8(&self, row: usize) -> [[std::arch::x86_64::__m512i; 4]; 4] {
-        // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+        // SAFETY: the caller guarantees the IFMA features and cells `4 row .. 4 row + 32` below
+        // `rows()`, which every lane holds (at most four lanes, checked there).
         unsafe {
             use crate::x86::*;
             let mut out = [[z(); 4]; 4];
@@ -525,7 +565,10 @@ unsafe fn sums_vector<L: Leaves>(
     second: &[K],
     blocks: std::ops::Range<usize>,
 ) -> PrefixSums {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `first` holds `f` words per plane (`f` a power of two of at least 8), and
+    // `prefix_sums` asserts `leaves.rows() == 4 f |second|`, so `values8(block f + i)` with
+    // `i + 8 <= f` and `block < |second|` reads inside the leaves.
     unsafe {
         use crate::x86::*;
         use std::arch::x86_64::*;
@@ -658,7 +701,10 @@ unsafe fn sums_vector<L: Leaves>(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn fill_vector<L: Leaves>(leaves: &L, e: [K; 4], out: &[OutLane], row0: usize, row1: usize) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `fill_rows` asserts `4 row1 <= leaves.rows()`, so `values8(row)` with
+    // `row + 8 <= stop <= row1` reads inside the leaves; its caller guarantees `row1`
+    // writable rows at every output address.
     unsafe {
         use crate::x86::*;
         let stop = row0 + (row1 - row0) / 8 * 8;

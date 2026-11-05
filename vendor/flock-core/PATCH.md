@@ -1,6 +1,7 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Nine changes; `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
+Sixteen changes; sections 5, 6, 7 and 16 are verifier-visible, so proofs do not verify with
+upstream. `Cargo.toml` inlines the workspace-inherited fields and points the sibling Flock
 crates at the pinned git revision. Everything else is a verbatim copy of `crates/flock-core`
 at that revision (`src/`, `configs/`).
 
@@ -19,12 +20,12 @@ whenever the stack averages fewer than `BAKE_MIN_HEIGHT = 64` live rows per used
 
 Prover-only and exact: `x ↦ φ(eq_col[c]·x)` is F₂-linear, so the baked byte decomposition
 and the direct evaluation compute the same `W` bit for bit; the proof bytes, the transcript
-and the verifier are unchanged, and proofs made with this copy verify with upstream Flock.
+and the verifier are unchanged; on its own, this change keeps upstream verification.
 
 Addition (agg-mldsa): a ring-switched claim's column whose factor `eq_col[c]` is zero
 contributes the zero map, so it is neither baked (`bake` returns early) nor swept (the
 segment sweep skips it, writing zeros if the claim is the first). The bit claim of the
-parity chain addresses 64 of the sponge's 2,156 used word columns. Exact for the same
+parity chain addresses 64 of the sponge's 2,146 used word columns (ML-DSA-44). Exact for the same
 reason; `W` is unchanged.
 
 ## 2. A Ligerito parameter set: `LigeritoProfile::Slim8`
@@ -534,8 +535,8 @@ route and about 9 GB on the lookahead route (est.); the halving stands.
 ## 16. Transcript: joint out-of-domain draw at the recursive Ligerito levels
 
 `pcs/ligerito/extension.rs`, prover and verifier, levels 1 and up: all `ood_samples[k]` points of
-a level are squeezed before the prover sends the first evaluation, instead of one point per
-answer. Upstream draws the second point after the first answer and its claim-batch nonce, so a
+a level are drawn by consecutive squeezes, with no prover message between them, before the
+prover sends the first evaluation, instead of one point per answer. Upstream draws the second point after the first answer and its claim-batch nonce, so a
 prover can resample it; the pair-collision bound that the two points are meant to give holds only
 for a joint draw. Level 0 is unchanged (one point, and its list is tracked element by element).
 No run-time or size cost; proofs no longer verify with upstream.

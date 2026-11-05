@@ -1288,14 +1288,15 @@ impl CommitmentManifest {
     /// Canonical byte encoding of the manifest part of the instance record.
     ///
     /// `LE16` wire version, parameter-set byte (`0x44`, `0x65`, `0x87`), relation byte ([`Relation::id`],
-    /// `0` = H-u, `1` = H-exact), `LE64` `N`, `LE64` `N*`, digit layout id (1 = the lookup
-    /// layout), group count; per group: role, round, family (0 = width 4, 1 = width 16),
-    /// logical and physical variable counts, polynomial count and one alphabet byte per
-    /// polynomial ([`Column::alphabet_code`]); the catalog row id (`LE16` length, ASCII);
-    /// the bridge parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`, `LE64`, `U8`); the
-    /// lookup layout (challenge count, table width, and per stack the column count,
-    /// variables and storage shift, `U8, U8, U8, U8, LE32`). The public-record digest and
-    /// the Flock profile id complete the instance record elsewhere.
+    /// `0` = H-u, `1` = H-exact, `2` = H-FIPS), `LE64` `N`, `LE64` `N*`, digit layout id
+    /// ([`DIGIT_LAYOUT_ID`] = 2, the lookup layout with the projected quotient), group count;
+    /// per group: role, round, family (0 = width 4, 1 = width 16), logical and physical
+    /// variable counts, polynomial count and one alphabet byte per polynomial
+    /// ([`Column::alphabet_code`]); the catalog row id (`LE16` length, ASCII); the bridge
+    /// parameters `(J_t, m_t, k_t)` of levels 1 to 3 (`LE64`, `LE64`, `U8`); the lookup layout:
+    /// challenge count, table count, one width byte per table, stack count, and per stack the
+    /// column count, variables, table and storage shift (`U8, U8, U8, LE32`). The
+    /// public-record digest and the Flock profile id complete the instance record elsewhere.
     #[must_use]
     pub fn binding_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(160);
@@ -1344,7 +1345,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn group_shapes_and_digit_counts_match_spec_section_4() {
+    fn group_shapes_and_digit_counts_match_the_committed_layout() {
         let manifest = CommitmentManifest::for_batch(256).unwrap();
         let counts: Vec<usize> = manifest
             .groups()
@@ -1411,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn h_exact_groups_follow_docs_h_exact_section_2() {
+    fn h_exact_groups_follow_the_h_exact_layout() {
         let manifest = CommitmentManifest::for_relation(256, Relation::HExact).unwrap();
         let counts: Vec<usize> = manifest
             .groups()
@@ -1469,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn h_fips_groups_follow_docs_h_exact_section_10() {
+    fn h_fips_groups_follow_the_h_fips_layout() {
         let manifest = CommitmentManifest::for_relation(256, Relation::HFips).unwrap();
         assert!(manifest.is_fips());
         let counts: Vec<usize> = manifest
@@ -1710,7 +1711,7 @@ mod tests {
             bytes
         );
         // H-exact: relation byte 1, G_main4 at 9 polynomials
-        // with codes [0, 6, 0, 0, 0, 0, 0, 0, 0], G_main16 unchanged, the l16x row.
+        // with codes [0, 6, 0, 0, 0, 0, 0, 0, 0], G_main16 unchanged, the p16x row.
         let exact = CommitmentManifest::for_relation(200, Relation::HExact).unwrap();
         let xbytes = exact.binding_bytes();
         let mut xexpected = expected.clone();
@@ -1882,6 +1883,43 @@ mod tests {
         assert_eq!(main_stack_sizes(Set::S44), [2]);
         assert_eq!(stack_domains(Set::S44), STACK_DOMAINS);
         assert_eq!(CommitmentManifest::for_set(Set::S44, 300, Relation::HExact).unwrap(), CommitmentManifest::for_relation(300, Relation::HExact).unwrap());
+    }
+
+    /// The seven balanced base-16 multiplicity digits hold the largest honest count of one
+    /// `T_16` entry for every set and relation. The worst batch has `N = 2^14 + 1` records
+    /// (`N* = 2^15`, so almost half the records are padding). Counted as if they all hit one
+    /// entry: the public padding slots of every stack, every cell of the bridge-domain and
+    /// projection stacks (carries and `K_0, K_1` cluster near zero), and the main-domain cells
+    /// of the padding records. The live main-domain cells hold the low 16-bit digits of `z`
+    /// and `u`, which honest signatures spread over `2^16` values, so they are left out.
+    #[test]
+    fn multiplicity_digits_hold_the_largest_honest_count() {
+        use crate::lookup::MULTIPLICITY_CAPACITY;
+        let records = (1 << 14) + 1;
+        for set in [Set::S44, Set::S65, Set::S87] {
+            for relation in [Relation::Hu, Relation::HExact, Relation::HFips] {
+                if !relation.is_available(set) {
+                    continue;
+                }
+                let manifest = CommitmentManifest::for_set(set, records, relation).unwrap();
+                let (padded, live) = (manifest.padded_records(), manifest.records());
+                let shape = manifest.lookup_shape();
+                let mut bound = 0_usize;
+                for (stack, domain) in shape.stacks.iter().zip(manifest.stack_domains()) {
+                    let cells = 1_usize << stack.vars;
+                    bound += (stack.slots() - stack.columns) * cells;
+                    bound += if domain == Group::Main {
+                        stack.columns * cells / padded * (padded - live)
+                    } else {
+                        stack.columns * cells
+                    };
+                }
+                assert!(
+                    i64::try_from(bound).unwrap() < MULTIPLICITY_CAPACITY,
+                    "ML-DSA-{set} {relation}: {bound} cells may share one entry"
+                );
+            }
+        }
     }
 
     #[test]

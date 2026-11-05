@@ -71,13 +71,15 @@ pub(crate) unsafe fn hi(c: V, a: V, b: V) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn load(p: *const u64) -> V {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the enclosing function enables AVX-512F, which the caller checked at run time,
+    // and the caller guarantees eight readable words at `p` (unaligned access is allowed).
     unsafe { _mm512_loadu_si512(p.cast()) }
 }
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn store(p: *mut u64, x: V) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the enclosing function enables AVX-512F, which the caller checked at run time,
+    // and the caller guarantees eight writable words at `p` (unaligned access is allowed).
     unsafe { _mm512_storeu_si512(p.cast(), x) }
 }
 #[inline]
@@ -458,7 +460,8 @@ pub(crate) unsafe fn mulk(a: (V, V), b: (V, V)) -> (V, V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn loadk(planes: (&[u64], &[u64]), i: usize) -> (V, V) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the enclosing function enables AVX-512F, which the caller checked at run time,
+    // and the caller guarantees that both planes hold at least `i + 8` words.
     unsafe { (load(planes.0.as_ptr().add(i)), load(planes.1.as_ptr().add(i))) }
 }
 /// Eight `i8` lanes at stride four (`pattern + 4 l`, `l = 0..8`) of thirty-two consecutive
@@ -466,7 +469,8 @@ pub(crate) unsafe fn loadk(planes: (&[u64], &[u64]), i: usize) -> (V, V) {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn strided4_i8(cells: *const i8, pattern: i32) -> V {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the enclosing function enables AVX-512F, which the caller checked at run time,
+    // and the caller guarantees 32 readable bytes at `cells`.
     unsafe {
         // Each 32-bit word holds the four patterns of one cell quartet; the pattern's byte is
         // moved to the top of its 64-bit lane and sign-extended by an arithmetic shift.
@@ -480,7 +484,8 @@ pub(crate) unsafe fn strided4_i8(cells: *const i8, pattern: i32) -> V {
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 pub(crate) unsafe fn strided4_i32(cells: *const i32, pattern: i32) -> V {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the enclosing function enables AVX-512F, which the caller checked at run time,
+    // and the caller guarantees 32 readable `i32` cells at `cells`.
     unsafe {
         let x0 = _mm512_loadu_si512(cells.cast());
         let x1 = _mm512_loadu_si512(cells.add(16).cast());

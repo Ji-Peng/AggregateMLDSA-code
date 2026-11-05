@@ -21,12 +21,23 @@ pub fn median(samples: &mut [f64]) -> Option<f64> {
     })
 }
 
-/// Build description printed with every benchmark result.
+/// Build description printed with every benchmark result: the `agg-simd` backend (named by
+/// its `AGG_ISA` tier), the PIOP table layout and the Aerie SIMD backend.
 #[must_use]
 pub fn build_info() -> String {
+    use agg_simd::detect::{backend, Backend};
+    let simd = match backend() {
+        Backend::Avx512 => "avx512ifma",
+        Backend::Avx512F => "avx512",
+        Backend::Avx2 => "avx2",
+        Backend::Portable => "portable",
+    };
+    let layout = match agg_piop::kernel::layout() {
+        agg_piop::kernel::Layout::Plane => "plane",
+        agg_piop::kernel::Layout::Row => "row",
+    };
     format!(
-        "avx512_feature={} aerie_simd_backend={}",
-        agg_piop::avx512_enabled(),
+        "agg_simd_backend={simd} piop_layout={layout} aerie_simd_backend={}",
         agg_piop::aerie_simd_backend()
     )
 }
@@ -40,6 +51,7 @@ mod tests {
         assert_eq!(median(&mut [3.0, 1.0, 2.0]), Some(2.0));
         assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), Some(2.5));
         assert_eq!(median(&mut []), None);
+        assert!(build_info().contains("piop_layout="));
         assert!(build_info().contains("aerie_simd_backend="));
     }
 }

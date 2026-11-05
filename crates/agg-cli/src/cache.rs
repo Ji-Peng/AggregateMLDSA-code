@@ -10,10 +10,11 @@
 //! with the `pk`, `k` and `l` of the set (FIPS 204 Tables 1 and 2). Version 1 files (no set
 //! byte, ML-DSA-44 keys) are still read.
 //!
-//! On load every entry is checked: the hash must be `SHA3-256(pk)` and `pk` must decode;
-//! `t1` is recomputed by `pkDecode` (unpacking only). A corrupted cache can only make the
-//! verifier reject (its `A` and `tr` enter the checks as public data), never accept a false
-//! statement for the keys given; still, a cache file is trusted local state, like a key store.
+//! On load every entry is checked: the hash must be `SHA3-256(pk)`, `pk` must decode, `tr`
+//! must equal `H(pk, 64)` and every word of `A` must lie in `[-(q-1)/2, (q-1)/2]`; `t1` is
+//! recomputed by `pkDecode` (unpacking only). `A` itself is not re-derived from `rho`, since
+//! re-expanding it would defeat the cache: the cache file is trusted local state, like a key
+//! store, and a planted `A` breaks soundness for that key.
 //! In memory the entries live in `agg_piop::public_data::KeyCache` (ML-DSA-44) or
 //! `agg_piop::lane_public::LaneKeyCache` (ML-DSA-65 and ML-DSA-87).
 
@@ -23,8 +24,8 @@ use std::sync::Arc;
 use agg_piop::lane_public::{LaneKey, LaneKeyCache};
 use agg_piop::public_data::{KeyCache, VerifierKey};
 use agg_witness::expand::MatrixCoeff;
-use agg_witness::native::{pk_decode, pk_decode_for};
-use agg_witness::params::{dispatch_set, ParamSet, Set, K, L, N, PK_BYTES, TR_BYTES};
+use agg_witness::native::{pk_decode, pk_decode_for, shake256};
+use agg_witness::params::{dispatch_set, ParamSet, Set, K, L, N, PK_BYTES, Q, TR_BYTES};
 use sha3::{Digest, Sha3_256};
 
 use crate::mode_a::KeyCacheMut;
@@ -163,7 +164,8 @@ pub enum CacheError {
     Header,
     /// Wrong length.
     Length,
-    /// Entry `i` has a hash other than `SHA3-256(pk)` or an undecodable key.
+    /// Entry `i` has a hash other than `SHA3-256(pk)`, an undecodable key, a `tr` other
+    /// than `H(pk, 64)` or a word of `A` outside the centered range.
     Entry(usize),
     /// The file holds keys of another parameter set than the one asked for.
     Set {
@@ -195,6 +197,18 @@ fn words(bytes: &[u8]) -> impl Iterator<Item = i32> + '_ {
     bytes.as_chunks::<4>().0.iter().map(|w| i32::from_le_bytes(*w))
 }
 
+/// Check the parts of an entry that are cheap to recompute: `tr = H(pk, 64)` and the
+/// centered range `|w| <= (q-1)/2` of every word of `A`.
+fn check_entry(pk: &[u8], tr: &[u8], a_bytes: &[u8], i: usize) -> Result<(), CacheError> {
+    let mut expected = [0u8; TR_BYTES];
+    shake256(&[pk], &mut expected);
+    let half = ((Q - 1) / 2) as i32;
+    if tr != expected || words(a_bytes).any(|w| !(-half..=half).contains(&w)) {
+        return Err(CacheError::Entry(i));
+    }
+    Ok(())
+}
+
 /// The ML-DSA-44 entries of a body.
 fn rows_from(body: &[u8]) -> Result<KeyCache, CacheError> {
     let mut cache = KeyCache::default();
@@ -206,6 +220,7 @@ fn rows_from(body: &[u8]) -> Result<KeyCache, CacheError> {
             return Err(CacheError::Entry(i));
         }
         let decoded = pk_decode(pk).ok_or(CacheError::Entry(i))?;
+        check_entry(pk, tr, a_bytes, i)?;
         let mut a: Box<MatrixCoeff> = Box::new([[[0_i32; N]; L]; K]);
         for (c, word) in a.iter_mut().flatten().flatten().zip(words(a_bytes)) {
             *c = word;
@@ -231,6 +246,7 @@ fn lanes_from<P: ParamSet>(body: &[u8]) -> Result<LaneKeyCache, CacheError> {
             return Err(CacheError::Entry(i));
         }
         let decoded = pk_decode_for::<P>(pk).ok_or(CacheError::Entry(i))?;
+        check_entry(pk, tr, a_bytes, i)?;
         cache.insert(Arc::new(LaneKey {
             set: P::SET,
             pk: pk.to_vec(),
@@ -339,6 +355,14 @@ mod tests {
         let mut bad_pk = bytes.clone();
         bad_pk[14 + ENTRY_BYTES + 40] ^= 1;
         assert_eq!(from_bytes(&bad_pk).unwrap_err(), CacheError::Entry(1));
+        // A planted `tr` or an out-of-range word of `A` is rejected too.
+        let a_at = 14 + 32 + PK_BYTES + TR_BYTES;
+        let mut bad_tr = bytes.clone();
+        bad_tr[a_at - 1] ^= 1;
+        assert_eq!(from_bytes(&bad_tr).unwrap_err(), CacheError::Entry(0));
+        let mut bad_a = bytes.clone();
+        bad_a[a_at..a_at + 4].copy_from_slice(&(((Q - 1) / 2 + 1) as i32).to_le_bytes());
+        assert_eq!(from_bytes(&bad_a).unwrap_err(), CacheError::Entry(0));
         assert_eq!(
             from_bytes(&bytes[..bytes.len() - 1]).unwrap_err(),
             CacheError::Length
@@ -376,6 +400,10 @@ mod tests {
         let mut bad_pk = bytes.clone();
         bad_pk[14 + 40] ^= 1;
         assert_eq!(from_bytes(&bad_pk).unwrap_err(), CacheError::Entry(0));
+        let a_at = 14 + 32 + Set65::PK_BYTES + TR_BYTES;
+        let mut bad_a = bytes.clone();
+        bad_a[a_at..a_at + 4].copy_from_slice(&(-((Q - 1) / 2) as i32 - 1).to_le_bytes());
+        assert_eq!(from_bytes(&bad_a).unwrap_err(), CacheError::Entry(0));
         let empty = to_bytes(&KeyStore::new(Set::S87));
         assert_eq!(from_bytes(&empty).unwrap().set(), Set::S87);
     }

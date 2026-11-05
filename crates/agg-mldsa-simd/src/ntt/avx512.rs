@@ -1,4 +1,5 @@
-//! AVX-512 NTT for q and P2 (F/BW/VL instructions only).
+//! AVX-512 NTT for q and P2 (F/BW/VL instructions only); P3 transforms run the
+//! scalar code, and the dot product covers all three primes.
 //!
 //! The transforms reimplement the register schedule published with
 //! the Hybrid-SHA-3 C code (`ntt_so_avx512` / `intt_so_avx512`):
@@ -490,7 +491,8 @@ fn intt_impl<const SECOND: bool, const MONT: bool, const CENTERED: bool>(a: &mut
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 fn finish<const CENTERED: bool>(x: __m512i, p: __m512i) -> __m512i {
-    // Input lies in (-p, p); at most one correction reaches the requested range.
+    // Input lies in (-1.5p, 1.5p) for the centered form and in (-p, p) for the
+    // canonical one; at most one correction reaches the requested range.
     if CENTERED {
         let h = _mm512_srli_epi32::<1>(p);
         let x = _mm512_mask_add_epi32(
@@ -521,7 +523,8 @@ pub(crate) unsafe fn dot_l<const L: usize>(
         for k in 0..L {
             let x = load(&a[k], reg);
             let y = load(&b[k], reg);
-            // L unreduced signed products: for L<=7, products sum to < 2^59.
+            // L unreduced signed products of a centered (canonical for q) matrix and
+            // a lazy NTT(z), L <= 7: below 2^58.6 for P2 and 2^61 for P3.
             e = _mm512_add_epi64(e, _mm512_mul_epi32(x, y));
             o = _mm512_add_epi64(
                 o,
@@ -531,15 +534,13 @@ pub(crate) unsafe fn dot_l<const L: usize>(
         e = _mm512_sub_epi64(e, _mm512_mul_epi32(_mm512_mul_epi32(e, pinv), p));
         o = _mm512_sub_epi64(o, _mm512_mul_epi32(_mm512_mul_epi32(o, pinv), p));
         let v = _mm512_mask_blend_epi32(0xaaaa, _mm512_srli_epi64::<32>(e), o);
-        store(
-            out,
-            reg,
-            if prime != Prime::Q {
-                finish::<true>(v, p)
-            } else {
-                v
-            },
-        );
+        // |v| < 1.08p for P2 needs one centering pass; |v| < 1.9p for P3 needs two.
+        let v = match prime {
+            Prime::Q => v,
+            Prime::P2 => finish::<true>(v, p),
+            Prime::P3 => finish::<true>(finish::<true>(v, p), p),
+        };
+        store(out, reg, v);
     }
 }
 

@@ -10,7 +10,7 @@
 # one of their shapes).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+# The toolchain comes from rust-toolchain.toml.
 
 release=()
 vendored=1

@@ -1,8 +1,8 @@
 //! Signed Montgomery NTT in FIPS 204 order, following pq-crystals Dilithium.
 //!
 //! Forward inputs have magnitude at most 2^22. Inverse inputs have magnitude
-//! below q for the primary prime and at most (P2-1)/2 for the CRT prime;
-//! callers normalize forward outputs before a standalone inverse round trip.
+//! below q for the primary prime and at most (p-1)/2 for the CRT primes P2 and
+//! P3; callers normalize forward outputs before a standalone inverse round trip.
 use super::{Form, Scale};
 use crate::{
     params::{Prime, PrimeConsts, CONSTS_P2, CONSTS_P3, CONSTS_Q},
@@ -107,12 +107,17 @@ fn inverse<const P_IDX: u8>(a: &mut Poly32, s: Scale, f: Form) {
                 let t = *x;
                 // q input |x| < q gives sums below 256q < 2^31.
                 // Centered P2 inputs give sums <= 8p through layer four.
+                // Centered P3 inputs would reach 8p > 2^31 there, so P3
+                // reduces its sums twice, at len = 4 and len = 16.
                 *x = t + *y;
                 *y = mul(t - *y, z, c.p);
-                if P_IDX != 0 && len == 8 {
-                    // |sum| <= 8p becomes |r| < 0.626p. Four remaining
+                if (P_IDX == 1 && len == 8) || (P_IDX == 2 && (len == 4 || len == 16)) {
+                    // P2: |sum| <= 8p becomes |r| < 0.626p. Four remaining
                     // doublings stay below 10.016p < 2^31; the difference
                     // outputs of this layer are already below 0.657p.
+                    // P3: |sum| <= 4p at len = 4 and < 2.56p at len = 16
+                    // become |r| < 0.67p; every later sum stays below
+                    // 4.68p < 2^31 (5.69p).
                     *x = mont(*x as i64 * c.mont as i64, c);
                 }
             }
@@ -136,7 +141,9 @@ fn inverse<const P_IDX: u8>(a: &mut Poly32, s: Scale, f: Form) {
 pub(crate) fn dot_l<const L: usize>(p: Prime, a: &[Poly32; L], b: &[Poly32; L], out: &mut Poly32) {
     let c = p.consts();
     for i in 0..256 {
-        // Canonical q / centered CRT prime matrix times lazy NTT(z): |sum| < 2^58.
+        // Canonical q / centered CRT prime matrix times lazy NTT(z), L <= 7:
+        // |sum| < 2^58.6 for P2 and < 2^61 for P3. The Montgomery output then
+        // lies below 1.9p, and the centering accepts any i32.
         let mut sum = 0i64;
         for j in 0..L {
             sum += a[j][i] as i64 * b[j][i] as i64;

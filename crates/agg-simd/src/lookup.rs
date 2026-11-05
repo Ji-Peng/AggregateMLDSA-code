@@ -15,10 +15,17 @@ impl Layer {
 struct RawLayer {p:AlignedVec<std::mem::MaybeUninit<u64>>,q:AlignedVec<std::mem::MaybeUninit<u64>>,rows:usize}
 impl RawLayer {
  fn new(rows:usize)->Self {Self{p:AlignedVec::<u64>::uninit(rows.checked_mul(2).expect("tree size")),q:AlignedVec::<u64>::uninit(rows*2),rows}}
- // SAFETY: the call is guarded by the backend check and the length assertions above.
- fn addresses(&mut self)->[usize;4] {let p=self.p.as_mut_ptr();let q=self.q.as_mut_ptr();unsafe {[p as usize,p.add(self.rows) as usize,q as usize,q.add(self.rows) as usize]}}
- // SAFETY: the call is guarded by the backend check and the length assertions above.
- unsafe fn finish(self)->Layer {unsafe {Layer{p:KPlanes{buf:self.p.assume_init(),rows:self.rows},q:KPlanes{buf:self.q.assume_init(),rows:self.rows}}}}
+ fn addresses(&mut self)->[usize;4] {
+  let p=self.p.as_mut_ptr();let q=self.q.as_mut_ptr();
+  // SAFETY: each buffer holds `2 rows` words, so `rows` past its start is in bounds.
+  unsafe {[p as usize,p.add(self.rows) as usize,q as usize,q.add(self.rows) as usize]}
+ }
+ /// # Safety
+ /// Every word of both buffers must have been written.
+ unsafe fn finish(self)->Layer {
+  // SAFETY: the caller guarantees that every word of both buffers was written.
+  unsafe {Layer{p:KPlanes{buf:self.p.assume_init(),rows:self.rows},q:KPlanes{buf:self.q.assume_init(),rows:self.rows}}}
+ }
 }
 /// The vector kernel a tree pass runs.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -43,9 +50,11 @@ pub fn bottoms(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
  let simd=if n>=4096 {Path::of_backend()} else {Path::Scalar};
  (0..n.div_ceil(1024)).into_par_iter().for_each(|block| {
   let start=block*1024;let end=(start+1024).min(n);
-  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+  // SAFETY: every layer holds `n >= end` rows per plane, and this block alone writes rows
+  // `start..end`.
   unsafe {bottom_range(stacked,center,&contexts,&addresses,start,end,0,simd);}
  });
+ // SAFETY: the blocks cover rows `0..n` of every plane of every layer.
  raw.into_iter().map(|x|unsafe {x.finish()}).collect()
 }
 /// Nodes `start..end` of layer `depth - 2` for every context: node `i` goes to row
@@ -53,13 +62,15 @@ pub fn bottoms(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
 ///
 /// # Safety
 /// Every output address must hold `end - offset` writable `u64` rows, disjoint from other
-/// writers of the same rows.
+/// writers of the same rows. The vector kernels need `simd`'s CPU features.
 #[allow(clippy::too_many_arguments)]
 unsafe fn bottom_range(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize,simd:Path) {
- debug_assert!(offset<=start && end<=stacked.len()/4);
+ // The vector kernels read leaves `i + j n` for `i < end` through raw pointers.
+ assert!(offset<=start && start<=end && end<=stacked.len()/4,"leaves cover the nodes");
  #[cfg(target_arch="x86_64")]
  if end-start>=8 {match simd {
-  // SAFETY: the call is guarded by the backend check and the length assertions above.
+  // SAFETY: `Path::Ifma` comes from the IFMA backend; the leaves cover the nodes (asserted)
+  // and the caller guarantees the output rows.
   Path::Ifma=>{unsafe {bottom_vector(stacked,center,contexts,out,start,end,offset);}return;}
   // SAFETY: the backend check guarantees AVX-512F; the assertions above cover the reads.
   Path::W8=>{unsafe {bottom_w8(stacked,center,contexts,out,start,end,offset);}return;}
@@ -68,7 +79,7 @@ unsafe fn bottom_range(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&
   Path::Scalar=>{}
  }}
  let _=simd;
- // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+ // SAFETY: the caller guarantees the output rows.
  unsafe {bottom_scalar(stacked,center,contexts,out,start,end,offset);}
 }
 /// The ESPs `e_1..e_4` of the four recentred leaves of node `i` (`|v| <= 2^15`, exact).
@@ -78,12 +89,14 @@ fn esps(stacked:&[i32],center:i32,i:usize)->[i64;4] {
  let (sa,ma)=(v(0)+v(2),v(0)*v(2));let (sb,mb)=(v(1)+v(3),v(1)*v(3));
  [sa+sb,ma+mb+sa*sb,sa*mb+sb*ma,ma*mb]
 }
+/// # Safety
+/// Every output address must hold `end - offset` writable `u64` rows.
 unsafe fn bottom_scalar(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize) {
  for i in start..end {let [e1,e2,e3,e4]=esps(stacked,center,i);
   for (ctx,o) in contexts.iter().zip(out) {let [x,x2,x3,x4]=ctx.powers;
    let q=x4-x3*K::from_i64(e1)+x2*K::from_i64(e2)-x*K::from_i64(e3)+K::from_i64(e4);
    let p=x3*K::from_u64(4)-x2*K::from_i64(3*e1)+x*K::from_i64(2*e2)-K::from_i64(e3);
-   // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+   // SAFETY: `i - offset < end - offset`, rows the caller guarantees writable.
    unsafe {write_node(*o,i-offset,p,q);}
   }
  }
@@ -106,7 +119,8 @@ pub fn bottom_parents(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
   let plane=|t:usize,k:usize| base+8*((8*t+k)*len);
   let left:Vec<[usize;4]>=(0..contexts.len()).map(|t|[plane(t,0),plane(t,1),plane(t,2),plane(t,3)]).collect();
   let right:Vec<[usize;4]>=(0..contexts.len()).map(|t|[plane(t,4),plane(t,5),plane(t,6),plane(t,7)]).collect();
-  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+  // SAFETY: `simd` is the active backend's path; the scratch planes hold `len` rows each
+  // and the layer rows `start..end` belong to this block alone.
   unsafe {
    bottom_range(stacked,center,&contexts,&left,start,end,start,simd);
    bottom_range(stacked,center,&contexts,&right,start+n,end+n,start+n,simd);
@@ -117,7 +131,7 @@ pub fn bottom_parents(stacked:&[i32],center:i32,powers:&[[K;4]])->Vec<Layer> {
   }
   drop(scratch);
  });
- // SAFETY: the call is guarded by the backend check and the length assertions above.
+ // SAFETY: the blocks cover rows `0..n` of every plane of every layer.
  raw.into_iter().map(|x|unsafe {x.finish()}).collect()
 }
 /// The layer `depth - 2` of a stack as the level-0 rows of its session's layer group,
@@ -141,14 +155,16 @@ impl crate::fused::RowSource for UpperRows<'_> {
   let half=self.rows();let simd=Path::of_backend();
   let low:Vec<[usize;4]>=(0..self.trees()).map(|t|[out[4*t].0,out[4*t].1,out[4*t+2].0,out[4*t+2].1]).collect();
   let high:Vec<[usize;4]>=(0..self.trees()).map(|t|[out[4*t+1].0,out[4*t+1].1,out[4*t+3].0,out[4*t+3].1]).collect();
-  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+  // SAFETY: `simd` is the active backend's path, and the caller guarantees `row1 - row0`
+  // writable rows at every output address.
   unsafe {
    bottom_range(self.stacked,self.center,&self.contexts,&low,row0,row1,row0,simd);
    bottom_range(self.stacked,self.center,&self.contexts,&high,row0+half,row1+half,row0+half,simd);
   }
  }
 }
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// Row `i` of the four planes at `out` must be writable.
 unsafe fn write_node(out:[usize;4],i:usize,p:K,q:K) {unsafe {
  (out[0] as *mut u64).add(i).write(p.c0().to_canonical_u64());(out[1] as *mut u64).add(i).write(p.c1().to_canonical_u64());
  (out[2] as *mut u64).add(i).write(q.c0().to_canonical_u64());(out[3] as *mut u64).add(i).write(q.c1().to_canonical_u64());
@@ -166,10 +182,11 @@ pub fn parent(child:&Layer)->Layer {
   let (start,end)=(block*1024,((block+1)*1024).min(n));
   let a=[p0[start..].as_ptr(),p1[start..].as_ptr(),q0[start..].as_ptr(),q1[start..].as_ptr()];
   let b=[p0[start+n..].as_ptr(),p1[start+n..].as_ptr(),q0[start+n..].as_ptr(),q1[start+n..].as_ptr()];
-  // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+  // SAFETY: `planes()` checked that each child plane holds `2 n` rows, so both children
+  // have rows `start .. end` readable; the parent rows `start..end` belong to this block.
   unsafe {parent_span(a,b,addresses,start,end-start,simd);}
  });
- // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+ // SAFETY: the blocks cover rows `0..n` of both planes of both outputs.
  unsafe {raw.finish()}
 }
 /// `len` parents of the children `a`, `b` (planes `[p.c0, p.c1, q.c0, q.c1]` from their
@@ -177,8 +194,7 @@ pub fn parent(child:&Layer)->Layer {
 ///
 /// # Safety
 /// The child planes must hold `len` readable rows; `out` rows `start .. start + len` must be
-/// writable and not written by another task.
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// writable and not written by another task; the CPU must have `simd`'s features.
 unsafe fn parent_span(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize,simd:Path) {unsafe {
  let get=|c:[*const u64;4],k:usize,i:usize| K::new(crate::F::from_u64(*c[k].add(i)),crate::F::from_u64(*c[k+1].add(i)));
  let mut head=0;
@@ -194,7 +210,8 @@ unsafe fn parent_span(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usiz
 }}
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// As [`parent_span`], with the IFMA features.
 unsafe fn parent_vector(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:usize,len:usize) {unsafe {
  use crate::x86::*;
  for i in (0..len/8*8).step_by(8) {
@@ -212,7 +229,8 @@ unsafe fn parent_vector(a:[*const u64;4],b:[*const u64;4],out:[usize;4],start:us
 }}
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// As [`bottom_range`], with the IFMA features.
 unsafe fn bottom_vector(stacked:&[i32],center:i32,contexts:&[BottomContext],out:&[[usize;4]],start:usize,end:usize,offset:usize) {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let n=stacked.len()/4;let stop=start+(end-start)/8*8;
@@ -252,7 +270,8 @@ unsafe fn bottom_vector(stacked:&[i32],center:i32,contexts:&[BottomContext],out:
 #[cfg(target_arch="x86_64")]
 #[inline]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// Requires the IFMA features (registers only).
 unsafe fn mac_shifted(acc:&mut crate::x86::A3,w:crate::x86::V,k:crate::x86::V) {unsafe {
  use crate::x86::*;let a=split52(w);let k=add(k,bc(1<<51));
  acc.a=lo(acc.a,a.l,k);acc.b=hi(acc.b,a.l,k);acc.b=lo(acc.b,a.h,k);acc.c=hi(acc.c,a.h,k);

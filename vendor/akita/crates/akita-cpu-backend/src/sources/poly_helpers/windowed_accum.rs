@@ -485,7 +485,8 @@ mod x86 {
     ///
     /// `challenge` must hold the table `WindowedChallenge::new::<D>` built,
     /// and the caller must have checked AVX2 support.
-    #[inline(always)]
+    #[inline]
+    #[target_feature(enable = "avx2")]
     pub(super) unsafe fn accumulate<const D: usize>(
         digit_plane: &[i8; D],
         challenge: &WindowedChallenge,

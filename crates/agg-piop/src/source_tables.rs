@@ -188,12 +188,26 @@ impl<'a> Cells<'a> {
         }
     }
 
-    /// The multilinear extension at `point` (least significant variable first).
+    /// The multilinear extension at `point` (least significant variable first): integer dots
+    /// against the split equality tables of `point` (`agg_simd::eval::column_at`, parallel
+    /// over blocks for large columns).
+    ///
+    /// # Panics
+    /// If the column does not have `2^|point|` cells.
     #[must_use]
     pub fn evaluate(&self, point: &[E]) -> E {
-        match self {
-            Self::Narrow(cells) => agg_pcs_config::commit::evaluate_signed_table(cells, point),
-            Self::Wide(cells) => agg_pcs_config::commit::evaluate_signed_table(cells, point),
+        assert_eq!(self.len(), 1 << point.len(), "table length must be 2^|point|");
+        let (first, second) = agg_simd::eval::split_eq_tables(point);
+        match *self {
+            Self::Narrow(cells) => agg_simd::eval::column_at(
+                &agg_simd::eval::Mapped {
+                    cells,
+                    map: &crate::kernel::IDENTITY_MAP,
+                },
+                &first,
+                &second,
+            ),
+            Self::Wide(cells) => agg_simd::eval::column_at(&cells, &first, &second),
         }
     }
 
@@ -1472,13 +1486,16 @@ impl BridgeGroupTables {
     }
 
     /// Recompute the multiplicities `m` and their digits from the current cells of both
-    /// rounds (`lookup::multiplicities`); an out-of-table cell is an honest abort.
+    /// rounds (`lookup::multiplicities`); an out-of-table cell, or a count above the seven
+    /// digits' capacity (`lookup::MULTIPLICITY_CAPACITY`), is an honest abort.
     pub fn recount(&mut self, manifest: &CommitmentManifest, main: &MainTables) -> Result<(), SourceTableError> {
         let m = {
             let stacks = lookup_stacks(manifest, main, self).map_err(SourceTableError::Lookup)?;
             multiplicities(&stacks, &[Table::T16]).map_err(SourceTableError::Lookup)?
         };
-        self.set_multiplicity(m.into_iter().next().expect("one table"));
+        let m = m.into_iter().next().expect("one table");
+        self.digits = multiplicity_digits(&m).map_err(SourceTableError::Lookup)?;
+        self.multiplicity = m;
         Ok(())
     }
 
@@ -1488,7 +1505,7 @@ impl BridgeGroupTables {
     /// If a count does not fit seven balanced base-16 digits.
     #[doc(hidden)]
     pub fn set_multiplicity(&mut self, m: Vec<i32>) {
-        self.digits = multiplicity_digits(&m);
+        self.digits = multiplicity_digits(&m).expect("a count within seven balanced base-16 digits");
         self.multiplicity = m;
     }
 

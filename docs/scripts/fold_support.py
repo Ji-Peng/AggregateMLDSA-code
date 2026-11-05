@@ -5,9 +5,10 @@ Run (isolated mode, standard library only):
 
     python3 -I docs/scripts/fold_support.py [AKITA_CHECKOUT]
 
-AKITA_CHECKOUT defaults to the cargo git checkout of the pinned revision,
-~/.cargo/git/checkouts/akita-*/e023b6a. The script reads only the two operator-norm
-certificates (JSON) of that tree; it does not run code from it.
+The script reads only the two operator-norm certificates (JSON) of Akita revision e023b6a;
+it does not run code from Akita. Without an argument it reads the copies in
+docs/scripts/akita-certs/ (Akita is MIT/Apache-2.0 licensed); with AKITA_CHECKOUT it reads
+them from that tree. Either way each file must match the SHA-256 pinned below.
 
 What it computes, exactly (integers and fractions):
 
@@ -27,7 +28,7 @@ e023b6a).
 
 from __future__ import annotations
 
-import glob
+import hashlib
 import json
 import math
 import os
@@ -50,10 +51,19 @@ FAMILIES = [
 ]
 
 CERTIFICATES = [
-    # (file, D, a, b, runtime threshold, rounding margin)
-    ("scripts/operator_norm/d128/cert_d128_w31_gamma13.json", 128, 31, 0, 13, 351),
-    ("scripts/operator_norm/d64/cert_d64_a31_b11_gamma18.json", 64, 31, 11, 18, 600),
+    # (file in the Akita tree, SHA-256, D, a, b, runtime threshold, rounding margin)
+    (
+        "scripts/operator_norm/d128/cert_d128_w31_gamma13.json",
+        "e9f255359549bf3b7726eb5b71e80b6d8aae29160832ed06f920194fa34d41f7",
+        128, 31, 0, 13, 351,
+    ),
+    (
+        "scripts/operator_norm/d64/cert_d64_a31_b11_gamma18.json",
+        "cd967cd643a21f89543b5340d54830837ce73beb4c91bb154baf6e5942e9e230",
+        64, 31, 11, 18, 600,
+    ),
 ]
+VENDORED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "akita-certs")
 
 
 def family_size(d: int, a: int, b: int) -> int:
@@ -66,14 +76,11 @@ def log2(x: int | Fraction) -> float:
     return math.log2(x.numerator) - math.log2(x.denominator)
 
 
-def akita_root(argv: list[str]) -> str:
+def certificate_path(argv: list[str], rel: str) -> str:
+    """The certificate in the given Akita checkout, else the vendored copy."""
     if len(argv) > 1:
-        return argv[1]
-    pattern = os.path.expanduser(f"~/.cargo/git/checkouts/akita-*/{REVISION}")
-    hits = sorted(glob.glob(pattern))
-    if not hits:
-        sys.exit(f"no Akita checkout matches {pattern}; pass the path")
-    return hits[0]
+        return os.path.join(argv[1], rel)
+    return os.path.join(VENDORED, os.path.basename(rel))
 
 
 def main() -> None:
@@ -86,11 +93,13 @@ def main() -> None:
     assert family_size(64, 30, 10) < 2**TARGET
     assert family_size(128, 30, 0) < 2**TARGET
 
-    root = akita_root(sys.argv)
-    print(f"\ncertified operator-norm floors ({root})")
-    for rel, d, a, b, thr, margin in CERTIFICATES:
-        with open(os.path.join(root, rel), encoding="ascii") as fh:
-            cert = json.load(fh)
+    source = sys.argv[1] if len(sys.argv) > 1 else "vendored copies, docs/scripts/akita-certs"
+    print(f"\ncertified operator-norm floors (Akita {REVISION}, {source})")
+    for rel, digest, d, a, b, thr, margin in CERTIFICATES:
+        with open(certificate_path(sys.argv, rel), "rb") as fh:
+            raw = fh.read()
+        assert hashlib.sha256(raw).hexdigest() == digest, f"{rel} differs from Akita {REVISION}"
+        cert = json.loads(raw.decode("ascii"))
         p = cert["params"]
         fp = cert["fixed_point_containment"]
         assert (p["d"], p["a_mag1"], p["b_mag2"]) == (d, a, b), rel

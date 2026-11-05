@@ -211,4 +211,4 @@ print("H-FIPS corner (q - gamma2, h = 0): sigma, L, delta, e =", -1, (q-g2)-(q-g
 # F4 and F5 merge into F45 = 2 e w1' + 43 e^2 - 43 e once e in {-1, 0, 1} (the PIOP's form).
 ok=all(((e*(e+1)*w==0) and (e*(e-1)*(w-43)==0))==(2*e*w+43*e*e-43*e==0) for e in (-1,0,1) for w in range(64))
 print("H-FIPS F45 equivalent to F4 and F5 for e in {-1,0,1}, w1' in [0,64):", ok)
-print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+513.5, "(H-u 12,288+512 = 12,800; 16 main columns, bridge, multiplicities, projection digits and G_3's 11 zeros 512, plus 0.5 for G_3's twelfth zero polynomial and 1 for u_h)")
+print("H-FIPS u_h and weight: u_h = omega - sum delta^2 in [0, 80] subset of [0, 2^16); committed elements/sig at 2^15:", 16*1024+640+0.5+1, "(H-u 12,288+640 = 12,928, where 640 = bridge levels 96+12+0.5, G_3's 11 zero polynomials 5.5, projection digits 512 and multiplicities 14; H-FIPS has 16 main columns and adds 0.5 for G_3's twelfth zero polynomial and 1 for u_h)")

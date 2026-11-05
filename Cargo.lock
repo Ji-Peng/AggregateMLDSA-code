@@ -118,6 +118,7 @@ dependencies = [
  "agg-keccak",
  "agg-mldsa-simd",
  "agg-piop",
+ "agg-simd",
  "agg-witness",
 ]
 

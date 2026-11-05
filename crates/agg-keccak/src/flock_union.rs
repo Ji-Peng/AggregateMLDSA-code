@@ -66,9 +66,9 @@ use crate::{
 };
 
 /// The three packed buffers of a slot as the byte strings Flock's zerocheck reads
-/// (`a`, `b`, `c = z` for `C = I`), without a copy. The only `unsafe` of this crate: `F128`
-/// is `#[repr(C, align(16))] { lo: u64, hi: u64 }`, 16 bytes without padding, so a slice of
-/// `n` words is exactly `16 n` initialized bytes; the view borrows the slice.
+/// (`a`, `b`, `c = z` for `C = I`), without a copy. `F128` is
+/// `#[repr(C, align(16))] { lo: u64, hi: u64 }`, 16 bytes without padding, so a slice of `n`
+/// words is exactly `16 n` initialized bytes; the view borrows the slice.
 #[allow(unsafe_code)]
 fn as_bytes(v: &[F128]) -> &[u8] {
     // SAFETY: see above; the pointer and the length cover exactly the slice's memory, which

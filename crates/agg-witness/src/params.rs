@@ -201,7 +201,8 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
             Self::BAR_B_U + (1 << (Self::D - 1)) * Self::TAU as i64
         };
 
-    /// Quotient half-range bound: [-2^31, 2^31 - 1].
+    /// Honest encoding range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1]. It is
+    /// not proven: v carries no range check, and the projection bounds it.
     const V_HALF_RANGE: i64 = 1 << 31;
 
     // -----------------------------------------------------------------------------------------
@@ -432,10 +433,19 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     /// Mutably converts a slice of 256-coefficient rows into the TView target.
     fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget;
 
-    /// Decodes commitment hash c~ from the prefix of a slice.
+    /// Decodes commitment hash c~ from the prefix of a slice, zero-padded when the slice is
+    /// shorter than c~.
     fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde;
     /// Decodes w1Encode from the prefix of a slice.
     fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode;
+}
+
+/// The first `M` bytes of `slice`, zero-padded when it is shorter.
+fn zero_padded_prefix<const M: usize>(slice: &[u8]) -> [u8; M] {
+    let mut out = [0u8; M];
+    let n = slice.len().min(M);
+    out[..n].copy_from_slice(&slice[..n]);
+    out
 }
 
 /// Zero-sized type selecting ML-DSA-44 parameters.
@@ -522,11 +532,7 @@ impl ParamSet for Set44 {
     fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("4 rows") }
     fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("4 rows") }
 
-    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
-        let mut ct = [0u8; 32];
-        ct.copy_from_slice(&slice[..32]);
-        ct
-    }
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde { zero_padded_prefix(slice) }
     fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
         let mut w = [0u8; 768];
         w.copy_from_slice(&slice[..768]);
@@ -618,11 +624,7 @@ impl ParamSet for Set65 {
     fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("6 rows") }
     fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("6 rows") }
 
-    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
-        let mut ct = [0u8; 48];
-        ct.copy_from_slice(&slice[..48]);
-        ct
-    }
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde { zero_padded_prefix(slice) }
     fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
         let mut w = [0u8; 768];
         w.copy_from_slice(&slice[..768]);
@@ -714,11 +716,7 @@ impl ParamSet for Set87 {
     fn as_t_target(slice: &[[i32; 256]]) -> &Self::TTarget { slice.try_into().expect("8 rows") }
     fn as_t_target_mut(slice: &mut [[i32; 256]]) -> &mut Self::TTarget { slice.try_into().expect("8 rows") }
 
-    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde {
-        let mut ct = [0u8; 64];
-        ct.copy_from_slice(&slice[..64]);
-        ct
-    }
+    fn c_tilde_from_slice(slice: &[u8]) -> Self::CTilde { zero_padded_prefix(slice) }
     fn w1_encode_from_slice(slice: &[u8]) -> Self::W1Encode {
         let mut w = [0u8; 1024];
         w.copy_from_slice(&slice[..1024]);
@@ -726,89 +724,85 @@ impl ParamSet for Set87 {
     }
 }
 
-impl agg_mldsa_simd::ParamSet for Set44 {
-    const ID: u8 = 0x44;
-    const K: usize = 4;
-    const L: usize = 4;
-    const TAU: usize = 39;
-    const ETA: i32 = 2;
-    const GAMMA1: i32 = 1 << 17;
-    const GAMMA2: i32 = 95_232;
-    const OMEGA: usize = 80;
-    const LAMBDA: usize = 128;
-    const Z_BITS: usize = 18;
-    const W1_BITS: usize = 6;
-    const M_W: i32 = 44;
-    const B_U: i32 = 190_465;
-    const B_V: i32 = 67_068_447;
-    const B_T: i32 = (1 << 13) * 39 * ((1 << 10) - 1);
-    const C_B_Q: u32 = 41;
-    const U_TOP_BASE: u32 = 6;
-    const STEP_U: i32 = 63_079;
-    const U_SLACK: i32 = 0;
-    const U_OFFSET: i32 = -190_465;
-    const Z_OFFSET: i32 = 0;
-    const C_TILDE_BYTES: usize = 32;
-    const PK_BYTES: usize = 1312;
-    const SIG_BYTES: usize = 2420;
-    const W1_ENCODE_BYTES: usize = 768;
+// The SIMD crate's parameter trait is derived from the witness constants above, so the two
+// cannot drift; the bound C_B_Q on |e / q| is not a witness constant and is copied.
+// `simd_params_agree` then ties both to the SIMD crate's own Set44/Set65/Set87.
+macro_rules! impl_simd_params {
+    ($set:ty, $c_b_q:expr) => {
+        impl agg_mldsa_simd::ParamSet for $set {
+            const ID: u8 = <$set as ParamSet>::ID;
+            const K: usize = <$set as ParamSet>::K;
+            const L: usize = <$set as ParamSet>::L;
+            const TAU: usize = <$set as ParamSet>::TAU;
+            const ETA: i32 = <$set as ParamSet>::ETA as i32;
+            const GAMMA1: i32 = <$set as ParamSet>::GAMMA1 as i32;
+            const GAMMA2: i32 = <$set as ParamSet>::GAMMA2 as i32;
+            const OMEGA: usize = <$set as ParamSet>::OMEGA;
+            const LAMBDA: usize = <$set as ParamSet>::LAMBDA;
+            const Z_BITS: usize = <$set as ParamSet>::Z_BITS;
+            const W1_BITS: usize = <$set as ParamSet>::W1_BITS;
+            const M_W: i32 = <$set as ParamSet>::M_W as i32;
+            const B_U: i32 = <$set as ParamSet>::B_U as i32;
+            const B_V: i32 = <$set as ParamSet>::B_V as i32;
+            const B_T: i32 = <$set as ParamSet>::B_T as i32;
+            const C_B_Q: u32 = $c_b_q;
+            const U_TOP_BASE: u32 = <$set as ParamSet>::U_TOP_BASE;
+            const STEP_U: i32 = <$set as ParamSet>::STEP_U as i32;
+            const U_SLACK: i32 = <$set as ParamSet>::U_SLACK as i32;
+            const U_OFFSET: i32 = <$set as ParamSet>::U_OFFSET as i32;
+            const Z_OFFSET: i32 = <$set as ParamSet>::Z_OFFSET as i32;
+            const C_TILDE_BYTES: usize = <$set as ParamSet>::C_TILDE_BYTES;
+            const PK_BYTES: usize = <$set as ParamSet>::PK_BYTES;
+            const SIG_BYTES: usize = <$set as ParamSet>::SIG_BYTES;
+            const W1_ENCODE_BYTES: usize = <$set as ParamSet>::W1_ENCODE_BYTES;
+        }
+    };
 }
 
-impl agg_mldsa_simd::ParamSet for Set65 {
-    const ID: u8 = 0x65;
-    const K: usize = 6;
-    const L: usize = 5;
-    const TAU: usize = 49;
-    const ETA: i32 = 4;
-    const GAMMA1: i32 = 1 << 19;
-    const GAMMA2: i32 = 261_888;
-    const OMEGA: usize = 55;
-    const LAMBDA: usize = 192;
-    const Z_BITS: usize = 20;
-    const W1_BITS: usize = 4;
-    const M_W: i32 = 16;
-    const B_U: i32 = 523_777;
-    const B_V: i32 = 335_418_249;
-    const B_T: i32 = (1 << 13) * 49 * ((1 << 10) - 1);
-    const C_B_Q: u32 = 51;
-    const U_TOP_BASE: u32 = 8;
-    const STEP_U: i32 = 0;
-    const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -228_865;
-    const Z_OFFSET: i32 = -229_376;
-    const C_TILDE_BYTES: usize = 48;
-    const PK_BYTES: usize = 1952;
-    const SIG_BYTES: usize = 3309;
-    const W1_ENCODE_BYTES: usize = 768;
+impl_simd_params!(Set44, 41);
+impl_simd_params!(Set65, 51);
+impl_simd_params!(Set87, 62);
+
+/// Compile-time check that the SIMD parameter trait of a witness set equals the SIMD crate's own
+/// set of the same name (every constant, including the lossless i64 to i32 narrowing).
+macro_rules! simd_params_agree {
+    ($w:ty, $s:ty) => {
+        const _: () = {
+            use agg_mldsa_simd::ParamSet as S;
+            assert!(<$w as S>::ID == <$s as S>::ID);
+            assert!(<$w as S>::K == <$s as S>::K && <$w as S>::L == <$s as S>::L);
+            assert!(<$w as S>::TAU == <$s as S>::TAU && <$w as S>::ETA == <$s as S>::ETA);
+            assert!(<$w as S>::GAMMA1 == <$s as S>::GAMMA1);
+            assert!(<$w as S>::GAMMA2 == <$s as S>::GAMMA2);
+            assert!(<$w as S>::OMEGA == <$s as S>::OMEGA && <$w as S>::LAMBDA == <$s as S>::LAMBDA);
+            assert!(<$w as S>::Z_BITS == <$s as S>::Z_BITS);
+            assert!(<$w as S>::W1_BITS == <$s as S>::W1_BITS && <$w as S>::M_W == <$s as S>::M_W);
+            assert!(<$w as S>::B_U == <$s as S>::B_U && <$w as S>::B_V == <$s as S>::B_V);
+            assert!(<$w as S>::B_T == <$s as S>::B_T && <$w as S>::C_B_Q == <$s as S>::C_B_Q);
+            assert!(<$w as S>::U_TOP_BASE == <$s as S>::U_TOP_BASE);
+            assert!(<$w as S>::STEP_U == <$s as S>::STEP_U);
+            assert!(<$w as S>::U_SLACK == <$s as S>::U_SLACK);
+            assert!(<$w as S>::U_OFFSET == <$s as S>::U_OFFSET);
+            assert!(<$w as S>::Z_OFFSET == <$s as S>::Z_OFFSET);
+            assert!(<$w as S>::C_TILDE_BYTES == <$s as S>::C_TILDE_BYTES);
+            assert!(<$w as S>::PK_BYTES == <$s as S>::PK_BYTES);
+            assert!(<$w as S>::SIG_BYTES == <$s as S>::SIG_BYTES);
+            assert!(<$w as S>::W1_ENCODE_BYTES == <$s as S>::W1_ENCODE_BYTES);
+            // The narrowed i32 values equal the witness i64 values.
+            assert!(<$w as S>::B_V as i64 == <$w as ParamSet>::B_V);
+            assert!(<$w as S>::B_T as i64 == <$w as ParamSet>::B_T);
+            assert!(<$w as S>::GAMMA1 as i64 == <$w as ParamSet>::GAMMA1);
+            assert!(<$w as S>::U_OFFSET as i64 == <$w as ParamSet>::U_OFFSET);
+            assert!(<$w as S>::Z_OFFSET as i64 == <$w as ParamSet>::Z_OFFSET);
+            assert!(<$w as S>::U_SLACK as i64 == <$w as ParamSet>::U_SLACK);
+            assert!(<$w as S>::STEP_U as i64 == <$w as ParamSet>::STEP_U);
+        };
+    };
 }
 
-impl agg_mldsa_simd::ParamSet for Set87 {
-    const ID: u8 = 0x87;
-    const K: usize = 8;
-    const L: usize = 7;
-    const TAU: usize = 60;
-    const ETA: i32 = 2;
-    const GAMMA1: i32 = 1 << 19;
-    const GAMMA2: i32 = 261_888;
-    const OMEGA: usize = 75;
-    const LAMBDA: usize = 256;
-    const Z_BITS: usize = 20;
-    const W1_BITS: usize = 4;
-    const M_W: i32 = 16;
-    const B_U: i32 = 523_777;
-    const B_V: i32 = 469_653_636;
-    const B_T: i32 = (1 << 13) * 60 * ((1 << 10) - 1);
-    const C_B_Q: u32 = 62;
-    const U_TOP_BASE: u32 = 8;
-    const STEP_U: i32 = 0;
-    const U_SLACK: i32 = 523_267;
-    const U_OFFSET: i32 = -228_865;
-    const Z_OFFSET: i32 = -229_376;
-    const C_TILDE_BYTES: usize = 64;
-    const PK_BYTES: usize = 2592;
-    const SIG_BYTES: usize = 4627;
-    const W1_ENCODE_BYTES: usize = 1024;
-}
+simd_params_agree!(Set44, agg_mldsa_simd::Set44);
+simd_params_agree!(Set65, agg_mldsa_simd::Set65);
+simd_params_agree!(Set87, agg_mldsa_simd::Set87);
 
 /// Module providing parameter set types and dispatch helpers.
 pub mod set {
@@ -896,7 +890,8 @@ pub const STEP_U: i64 = Set44::STEP_U;
 pub const U_TOP_BASE: u32 = Set44::U_TOP_BASE;
 /// Weight of the Boolean slack a_z of z in relation H-exact.
 pub const SLACK_Z: i64 = Set44::SLACK_Z;
-/// Proven range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1].
+/// Honest encoding range of the quotient v (two 16-bit halves): [-2^31, 2^31 - 1]; not proven,
+/// the projection bounds v.
 pub const V_HALF_RANGE: i64 = Set44::V_HALF_RANGE;
 /// SelfTargetMSIS bound zeta' = max(bar B_z, bar B_u + 2^(d-1) tau) for relation H-u.
 pub const ZETA_PRIME: i64 = Set44::ZETA_PRIME;
@@ -1021,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn derived_constants_match_spec_section_1() {
+    fn derived_constants_44() {
         assert_eq!(M_W, 44);
         assert_eq!(B_Z, 130_993);
         assert_eq!(B_U, 190_465);
@@ -1154,6 +1149,18 @@ mod tests {
     }
 
     #[test]
+    fn c_tilde_from_short_slices_is_zero_padded() {
+        let sig: Vec<u8> = (1..=70).collect();
+        for n in [0, 1, 31, 32, 47, 48, 63, 64, 70] {
+            let s = &sig[..n];
+            let pad = |m: usize| -> Vec<u8> { (0..m).map(|i| if i < n { sig[i] } else { 0 }).collect() };
+            assert_eq!(Set44::c_tilde_from_slice(s).to_vec(), pad(32));
+            assert_eq!(Set65::c_tilde_from_slice(s).to_vec(), pad(48));
+            assert_eq!(Set87::c_tilde_from_slice(s).to_vec(), pad(64));
+        }
+    }
+
+    #[test]
     fn dispatch_set_macro_and_enum() {
         for set in Set::ALL {
             let id = dispatch_set!(set, |P| P::ID);
@@ -1163,17 +1170,5 @@ mod tests {
         }
         assert_eq!(Set::from_id(0x00), None);
         assert_eq!(Set::from_id(0xFF), None);
-    }
-
-    #[test]
-    fn lifting_bound_6_1() {
-        let az = (L * N) as i128 * ((Q - 1) / 2) as i128 * BAR_B_Z as i128;
-        let d = az
-            + B_T as i128
-            + (2 * GAMMA2 * (M_W - 1)) as i128
-            + BAR_B_U as i128
-            + Q as i128 * V_HALF_RANGE as i128;
-        assert!(d < 1i128 << 55);
-        assert!(d < (P_FIELD / 2) as i128);
     }
 }

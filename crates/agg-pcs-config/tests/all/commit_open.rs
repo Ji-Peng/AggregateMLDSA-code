@@ -84,7 +84,7 @@ fn two_round_commit_and_batched_opening_at_1024_with_padding() {
 
 #[test]
 fn h_exact_commit_and_batched_opening_at_256_and_1024() {
-    // G_main4 at 9 polynomials (H-exact), the l16x grouped rows.
+    // G_main4 at 9 polynomials (H-exact), the p16x grouped rows.
     on_large_stack(|| {
         commit_and_open(1 << 8, Relation::HExact);
         commit_and_open(1000, Relation::HExact);
@@ -93,7 +93,7 @@ fn h_exact_commit_and_batched_opening_at_256_and_1024() {
 
 #[test]
 fn h_fips_commit_and_batched_opening_at_256_and_1024() {
-    // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the l16f grouped rows.
+    // G_main4 at 12 polynomials and G_2 at 13 (H-FIPS), the p16f grouped rows.
     on_large_stack(|| {
         commit_and_open(1 << 8, Relation::HFips);
         commit_and_open(1000, Relation::HFips);

@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn block_layout_of_section_8() {
+    fn sponge_blocks_lay_out_mu_w1_and_padding() {
         let mu = [0xAAu8; TR_BYTES];
         let mut w1 = [0u8; W1_ENCODE_BYTES];
         for (i, b) in w1.iter_mut().enumerate() {

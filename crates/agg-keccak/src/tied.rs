@@ -1043,8 +1043,10 @@ impl<'g> TiedPart<'g> {
     /// seed): the tie site, `eq_Y`, the parity chain over the part's bits (its live lanes) and,
     /// for ML-DSA-44, the sponge's word columns 48..63 (lanes 6, 7), the claimed bit value,
     /// then the sponge instance's Flock proof with the public claim and the bit claim
-    /// (opening the commitment-phase commitment). `sd` is bound through `fs` (the Flock seed
-    /// step follows the bridge-seed step).
+    /// (opening the commitment-phase commitment). `matrices` must be
+    /// `derive_matrices_for(shape, sd)` for the part's shape: the proof reads only `matrices`
+    /// (debug builds check the first column of each level against `sd`), and `sd` is bound
+    /// through `fs` (the Flock seed step follows the bridge-seed step).
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
@@ -1056,12 +1058,25 @@ impl<'g> TiedPart<'g> {
     pub fn prove_with_final_vectors(
         &self,
         committed: TiedCommitted,
-        _sd: [u8; 32],
+        sd: [u8; 32],
         matrices: &BridgeMatrices,
         ys: Vec<Vec<u8>>,
         fs: &[u8; 32],
     ) -> Result<KeccakProof, KeccakError> {
         assert_eq!(committed.n, self.n, "committed part of another shape");
+        debug_assert!(
+            self.segment()
+                .shape
+                .levels
+                .iter()
+                .zip([&matrices.m1, &matrices.m2, &matrices.m3])
+                .all(|(level, m)| {
+                    let level = level.seed_level();
+                    let column = agg_bridge::seed::derive_column(&sd, &level, 0);
+                    m.entries.get(..level.k) == Some(&column[..])
+                }),
+            "bridge matrices not derived from the bridge seed"
+        );
         assert_eq!(ys.len(), self.segments, "one final vector per segment");
         let m3 = self.segment().output_bits();
         assert!(
@@ -1300,7 +1315,9 @@ impl<'g> TiedPart<'g> {
 
     /// Verify a part proof against `(mu_i, c~_i)` of the span's records, the commitment-phase
     /// commitment, the bridge seed and its matrices, the final vectors `ys` (one per segment
-    /// of the span) and the part's Flock seed `fs`.
+    /// of the span) and the part's Flock seed `fs`. Only the shape of `matrices` is checked
+    /// here: the caller passes `derive_matrices_for(shape, sd)`, and `sd` is bound through
+    /// `fs` (the Flock seed step follows the bridge-seed step).
     ///
     /// # Errors
     /// On a malformed statement, proof or commitment, a Flock rejection, a rejected nonce, or

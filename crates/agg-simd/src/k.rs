@@ -17,7 +17,8 @@ pub fn k_mul(a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
     check(a, b, &out);
     #[cfg(target_arch = "x86_64")]
     if a.0.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return vector(a, b, out);
         }
@@ -61,7 +62,9 @@ crate::wide::entry_points!(mul_wide => mul_w8, mul_w4; (a: Planes<'_>, b: Planes
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn vector(a: Planes<'_>, b: Planes<'_>, out: PlanesMut<'_>) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `check` asserts that all six planes hold `a.0.len()` words, and every vector access
+    // ends at or below `n <= a.0.len()`.
     unsafe {
         use crate::x86::*;
         let n = a.0.len() / 8 * 8;

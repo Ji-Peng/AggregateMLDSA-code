@@ -1171,37 +1171,45 @@ impl<'a> FoldedGroup<'a> {
             .collect();
         // g(x) per coordinate: canonical coefficients (< 2^64) times cells (|f| <= 2^31) are
         // below 2^95 in magnitude; fewer than 2^30 lanes sum inside an i128, reduced once.
-        let mut g = vec![E::zero(); rows];
-        g.par_chunks_mut(FOLD_CHUNK).enumerate().for_each(|(chunk, out)| {
-            let first = chunk * FOLD_CHUNK;
-            let n = out.len();
-            let mut acc = vec![[0_i128; 2]; n];
-            let mut cells = vec![0_i64; n];
-            for (source, [c0, c1]) in &folded {
-                match source {
-                    Source::Ints(column) => {
-                        for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
-                            *x = i64::from(v);
+        // Every slot is written by the parallel pass below (first touch there, no zero fill).
+        let mut g = crate::kernel::buf::uninit::<E>(rows);
+        g.par_chunks_mut(FOLD_CHUNK).enumerate().for_each_init(
+            || (Vec::new(), Vec::new()),
+            |(acc, cells), (chunk, out)| {
+                let first = chunk * FOLD_CHUNK;
+                let n = out.len();
+                acc.clear();
+                acc.resize(n, [0_i128; 2]);
+                cells.resize(n, 0_i64);
+                for (source, [c0, c1]) in &folded {
+                    match source {
+                        Source::Ints(column) => {
+                            for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
+                                *x = i64::from(v);
+                            }
                         }
-                    }
-                    Source::Bytes { cells: column, map } => {
-                        for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
-                            *x = map[v as u8 as usize];
+                        Source::Bytes { cells: column, map } => {
+                            for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
+                                *x = map[v as u8 as usize];
+                            }
                         }
+                        _ => unreachable!("integer lanes only"),
                     }
-                    _ => unreachable!("integer lanes only"),
+                    let (c0, c1) = (i128::from(*c0), i128::from(*c1));
+                    for (a, &x) in acc.iter_mut().zip(cells.iter()) {
+                        let x = i128::from(x);
+                        a[0] += c0 * x;
+                        a[1] += c1 * x;
+                    }
                 }
-                let (c0, c1) = (i128::from(*c0), i128::from(*c1));
-                for (a, &x) in acc.iter_mut().zip(&cells) {
-                    let x = i128::from(x);
-                    a[0] += c0 * x;
-                    a[1] += c1 * x;
+                for (slot, &[a0, a1]) in out.iter_mut().zip(acc.iter()) {
+                    slot.write(E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1)));
                 }
-            }
-            for (slot, [a0, a1]) in out.iter_mut().zip(acc) {
-                *slot = E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1));
-            }
-        });
+            },
+        );
+        // SAFETY: the chunks cover all `rows` slots and the pass wrote each one.
+        #[allow(unsafe_code)]
+        let g = unsafe { g.assume_init() }.into_vec();
         let mut index = vec![usize::MAX; lanes.len()];
         let mut kept_lanes = Vec::new();
         let mut map = Vec::with_capacity(lanes.len());

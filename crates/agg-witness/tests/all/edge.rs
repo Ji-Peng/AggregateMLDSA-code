@@ -4,7 +4,7 @@
 
 use crate::common;
 
-use agg_witness::derive::{derive, reencode_h, usehint_residual_max};
+use agg_witness::derive::{derive, reencode_h, usehint_residual_max, usehint_residual_max_for};
 use agg_witness::digits::{ValueForm, Z_BIT_SLACK};
 use agg_witness::gen::{self, crate_verify};
 use agg_witness::hfips::{check_batch, HFipsRecord};
@@ -16,6 +16,10 @@ use agg_witness::params::*;
 fn usehint_residual_lemma_is_exact() {
     // max over Z_q x {0, 1} of |ctr_q(r - 2 gamma2 UseHint(h, r))| is exactly B_u.
     assert_eq!(usehint_residual_max(), B_U);
+    // gamma2 = (q - 1)/32 (ML-DSA-65 and ML-DSA-87): B_u = 2 gamma2 + 1 = 523,777.
+    assert_eq!(usehint_residual_max_for::<Set65>(), 523_777);
+    assert_eq!(usehint_residual_max_for::<Set87>(), 523_777);
+    assert_eq!(Set65::B_U, 523_777);
 }
 
 fn edge_record(t: (u64, u64, u64)) -> gen::Record {

@@ -276,15 +276,12 @@ impl<P: ParamSet> PublicInstance<P> {
         Ok(Self { geom, records })
     }
 
-    /// Builds the instance from records with signatures for parameter set P.
+    /// Builds the instance from records with signatures for parameter set P. A signature
+    /// shorter than c~ gives a zero-padded c~ rather than a panic.
     pub fn from_records_for(records: &[crate::gen::Record]) -> Result<Self, InstanceError> {
         let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
             .iter()
-            .map(|r| {
-                let n = r.sig.len().min(P::C_TILDE_BYTES);
-                let ct = P::c_tilde_from_slice(&r.sig[..n]);
-                (r.pk.as_slice(), r.msg.as_slice(), ct)
-            })
+            .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
             .collect();
         Self::new_for(&inputs)
     }

@@ -215,7 +215,8 @@ fn c_load(c: &'static AlignedConst<[i32; 8]>) -> V {
 /// `k = ((xp - xq) q^-1) mod P2` centred as the CRT of `(xq, xp)` requires
 /// (see the scalar kernel): a signed Montgomery product by `CRT_C`, one
 /// conditional `+ P2`, then `- P2` iff `k > (P2-1)/2` or (`k = (P2-1)/2` and
-/// `xq > (q-1)/2`), computed as `k - [xq > (q-1)/2] > (P2-1)/2`.
+/// `xq > (q-1)/2`), computed as `k + [xq > (q-1)/2] > (P2-1)/2` (the compare
+/// mask is -1 where true, so subtracting it adds the indicator).
 #[inline]
 #[target_feature(enable = "avx2,popcnt")]
 fn crt_k(xq: V, xp: V, c: V, c_pinv: V, p2: V, p2_half: V, q_half: V) -> V {

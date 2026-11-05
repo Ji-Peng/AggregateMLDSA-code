@@ -2,7 +2,10 @@
 build/
 results/
 vendor/
-natver/build/
+paper-tables/
+natver/build*/
 natver/natver
+natver/natver65
+natver/natver87
 __pycache__/
 *.pyc

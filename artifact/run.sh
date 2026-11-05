@@ -9,6 +9,7 @@
 #   ./run.sh full     the experiment matrix of the evaluation
 #   ./run.sh tables   raw JSON -> LaTeX tables
 #   ./run.sh all      fetch, build, gates, quick (or full with --full), tables
+#   ./run.sh freeze   maintainers: re-pin hashes.json and sources.lock to HEAD
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -18,7 +19,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
 
 usage() {
-  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -47,6 +48,9 @@ case "$mode" in
     ;;
   tables)
     exec python3 scripts/gen_tables.py "$@"
+    ;;
+  freeze)
+    exec python3 scripts/freeze.py "$@"
     ;;
   all)
     run_mode=quick

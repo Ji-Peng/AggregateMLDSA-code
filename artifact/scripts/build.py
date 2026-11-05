@@ -25,13 +25,13 @@ from common import (  # noqa: E402
     RUST_TOOLCHAIN,
     VENDOR,
     cpu_flags,
-    git_rev,
     load_configs,
     load_toml,
     output,
     pinned_commit,
     run,
     sha256_file,
+    source_revision,
     utc_stamp,
     write_json,
 )
@@ -78,7 +78,7 @@ def build_ours(offline):
     build_cfg = configs["build"]
     name = build_cfg["bin"]
     target = BUILD / "target-agg"
-    rev = pinned_commit() or git_rev(REPO)
+    rev = source_revision()
     cmd = [
         "cargo",
         "build",
@@ -112,6 +112,7 @@ def build_ours(offline):
             "sha256": sha256_file(dst),
             "target_dir": str(target),
             "release_flags": release_flags(),
+            "revision": rev,
         }
     }
 
@@ -272,6 +273,11 @@ def main():
         help="also build Aerie with AERIE_SIMD_BACKEND (default: yes)",
     )
     parser.add_argument("--skip-aerie", action="store_true")
+    parser.add_argument(
+        "--skip-natver",
+        action="store_true",
+        help="do not build natver (it needs the fetched pq-crystals tree)",
+    )
     args = parser.parse_args()
     offline = args.offline or os.environ.get("AGG_OFFLINE") == "1"
     configs = load_configs()
@@ -288,7 +294,7 @@ def main():
     built = build_ours(offline)
     reports = collect_reports(configs)
 
-    natver = build_natver()
+    natver = {} if args.skip_natver else build_natver()
     natver_counts = {}
     for params, entry in natver.items():
         counts = objdump_counts(Path(entry["path"]))
@@ -309,7 +315,7 @@ def main():
 
     result = {
         "timestamp_utc": utc_stamp(),
-        "commit": git_rev(REPO) or pinned_commit(),
+        "commit": built[configs["build"]["bin"]]["revision"],
         "source_commit": pinned_commit(),
         "toolchains": {
             "rustc": output(["rustc", "-V"], env={"RUSTUP_TOOLCHAIN": RUST_TOOLCHAIN}),

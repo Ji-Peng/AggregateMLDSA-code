@@ -1,9 +1,9 @@
 # Patch against succinctlabs/flock 83f963e8ede6d9a85ec4762b0c018943b6f6542b
 
-Two changes; `Cargo.toml` inlines the workspace-inherited fields (package metadata, the
+Three changes; `Cargo.toml` inlines the workspace-inherited fields (package metadata, the
 `serde` dependency, the clippy lints) and allows dead code and unused imports (a path
 dependency shows warnings that Cargo hides for a git dependency). Everything else is a
-verbatim copy of `crates/flock-field/src` at that revision.
+verbatim copy of `crates/flock-field/src` at that revision, plus the new module of section 3.
 
 ## 1. Inline the x86 scalar GF(2^128) multiply (prover and verifier speed; agg-mldsa `docs/perf.md` Section 10)
 
@@ -41,7 +41,7 @@ functions.
 
 Exact: the same carry-less products and XORs compute the same field elements, so proofs,
 transcripts and the verifier are unchanged and interoperate with upstream Flock (aggregates
-byte-identical to main, perf.md Section 10). The default build (no `pclmulqdq`) does not
+byte-identical to main, perf.md Section 10). A build without `pclmulqdq` does not
 reach these functions and is unchanged. The crate's own tests pass under `+pclmulqdq`
 (`cargo test --release --manifest-path vendor/flock-field/Cargo.toml`: 29 passed).
 
@@ -66,3 +66,20 @@ i7-11700K, one core: butterfly 3.2 -> 1.7 ns, unreduced dot product 2.1 -> 1.0 n
 Exact: a canonical residue modulo `x^128 + x^7 + x^2 + x + 1` is unique, so every reduction
 route yields the same bits (test `xmm_forms_match_software`, including operands with the top
 bits set). Proofs and transcripts are unchanged (aggregates byte-identical to main).
+
+## 3. Sum-check round kernels for the parity chain (`src/f128_slice/rounds.rs`, prover speed)
+
+A new module, declared by `pub mod rounds;` in `src/f128_slice.rs`: the round message
+`(q(1), q(inf))` of a product of two `F128` tables over their lowest variable, and the fold
+of both tables by a challenge fused with the next round's message, for pair tables
+(`pair_message`, `fold_pairs_two_and_message`) and block tables `[block][row]`
+(`block_message`, `fold_blocks_two_and_message`, `fold_blocks_two`). The parity chain's
+prover (`crates/agg-bridge/src/parity_chain.rs`) calls them; Flock's own code does not.
+
+Every function is safe and has two paths: AVX-512 kernels (`avx512f` and `vpclmulqdq`,
+detected once at run time, allowed by the `AGG_ISA` cap and turned off by
+`FLOCK_SIMD=portable|off`) and portable loops. Messages accumulate unreduced 256-bit
+carry-less products and reduce once per call (exact: GF(2) addition has no carry), so both
+paths return the same bits (tests `pair_kernels_match_reference`,
+`block_kernels_match_reference`). Prover-only: proofs, transcripts and the verifier are
+unchanged.

@@ -131,7 +131,7 @@ label at construction; absorbing the seed first is equivalent.
 
 Not in the spec. `nu = max(ceil(log2 n), 3, 22 - k_log)`, plus one when `n = 2^nu < 2^11`:
 Flock needs `nu >= 3` and a dense stack of at least 2^22 bits, and a full-height stack
-selects its block-first opening, whose cost is fixed by the 2,155 used columns (about 0.5 s
+selects its block-first opening, whose cost is fixed by the 2,146 used columns (about 0.5 s
 with CLMUL at any `n`, 26 s without). A function of `n`, so prover and verifier agree;
 at a full 2^13-record segment the block-first path is kept.
 
@@ -238,7 +238,7 @@ polynomial (4 or 8 for a leaf-checked digit, `0x90` for a column looked up in `T
 `0x50` for a multiplicity digit, 0 for a Boolean), then one catalog row id, then
 `(J_t, m_t, k_t)`, then the lookup layout (challenge count, table widths, per stack the
 column count, variables, table and storage shift). Only the grouped row id
-(`mldsa-44-l16-batch-<N*>-mult-final`) is bound, not one id per group: Akita keys the
+(`mldsa-44-p16-batch-<N*>-mult-final`) is bound, not one id per group: Akita keys the
 precommitted groups' scalar rows by their layouts, which the per-group fields already bind,
 and the grouped row determines the final profile and the opening schedule. The public-record
 digest and the Flock profile id are added by the transcript stage.
@@ -831,7 +831,9 @@ sponge commitment is bound only to its Johnson list, so with `P` parts in a segm
 set is a union over `L^P` list tuples (`docs/soundness.md` 3.5): `L^2 theta <= 2^-132.4` is
 fine, `L^3 theta = 2^-127.7` (`Slim`) is not. The prover clamps `part_log2` into the admitted
 range, and the verifier refuses a smaller `d_part` while deriving the plan of event 0
-(`VerifyError::Plan`).
+(`VerifyError::Plan`). A segment commitment item that lists more than `2^MAX_PARTS_LOG2 = 2`
+parts already fails to parse (`ItemError::Truncated`, before one buffer per part is
+allocated); the verifier still reports such an aggregate as `VerifyError::Plan`.
 
 Exhausted tie search: if Flock's smallest passing tie nonce is `2^(g + 7)` or more
 (probability below `2^-184.6` per part), `TieChallenges::derive` returns
@@ -1134,7 +1136,9 @@ Code (`agg_cli::mode_a::{Aggregator, AggregateVerifier}`):
   `c_i = SampleInBall(c~_i)`, `T_i` and the `ExpandA` data (`agg_piop::verifier`, P10). The
   optional key cache is `agg_piop::public_data::KeyCache` in memory (a hash map keyed by the
   encoded key) and, on disk, `agg_cli::cache` (entries addressed by `SHA3-256(pk)`, holding
-  `pk`, `tr` and `A`; `t1` is re-decoded from `pk` on load). The spec's "cached" verifier
+  `pk`, `tr` and `A`; `t1` is re-decoded from `pk` on load). Loading rejects an entry whose
+  hash is not `SHA3-256(pk)`, whose key does not decode, whose `tr` is not `H(pk, 64)` or
+  whose `A` has a word outside `[-(q-1)/2, (q-1)/2]` (`CacheError::Entry`). The spec's "cached" verifier
   number of Section 11 is the run with every key in the cache.
 - Cost report: the PIOP verifier's 14 steps (`VerifyTimings`), per Flock part the context
   setup and verification time, and the keys expanded in the run.
@@ -1240,7 +1244,7 @@ estimated proof bytes.
 Code: `G_main16` (width 16), `G_main4` (width 4), `G_1`, `G_2` (parities and carries in one
 width-16 group), `G_3` (width 16), `G_m` (width 4) in this wire order; `G_m` is the final
 group (committed against the five precommitted profiles), so the grouped rows
-(`mldsa-44-l16-batch-<N*>-mult-final`) live in the width-4 catalog (D2). The multiplicity
+(`mldsa-44-p16-batch-<N*>-mult-final`) live in the width-4 catalog (D2). The multiplicity
 column is committed in round 2: it counts the carries, which exist only after the bridge
 seed. Both main groups are opened at `r^(3)`, `G_m` at the lookup's table point `pi_m`.
 
@@ -1320,7 +1324,7 @@ event 0) next to the default H-u, so one binary proves and verifies both results
   at the stage-2 batching site (`g = 3`), so the plan encoding needs no relation field; the
   H-exact digests differ from H-u's anyway (`docs/soundness.md` 10.1).
 * The catalogs are keyed by `(d_sig, relation)`: 13 scalar `G_main4` rows at `(13..25, 9)` and
-  13 grouped rows `mldsa-44-l16x-batch-<N*>-mult-final` in the width-4 artifact; H-u's rows
+  13 grouped rows `mldsa-44-p16x-batch-<N*>-mult-final` in the width-4 artifact; H-u's rows
   and the width-16 artifact are byte-identical (`docs/pcs-config.md`).
 * The verifier takes the relation from its caller (`verifier::verify(..., relation, ...)`,
   `AggregateVerifier::relation`, `agg verify --relation`) and rejects a header that names
@@ -1360,7 +1364,7 @@ signature domain" in "a seventh Akita group". Code (`docs/h-exact.md` 10.6, 10.7
   parts on the main domain and `D_2`). Stage vectors (26, 7, 51), terminals (18, 8, 36).
 * The proof-of-work plan equals H-exact's (`g` 5, 3, 6 at the stage gamma sites); the
   relation is bound by event 0's manifest bytes, so the plan encoding stays as it is.
-* Catalog rows `mldsa-44-l16f-batch-<N*>-mult-final` (13 grouped, 13 width-4 scalar at
+* Catalog rows `mldsa-44-p16f-batch-<N*>-mult-final` (13 grouped, 13 width-4 scalar at
   `(13..25, 12)`, 3 width-16 scalar for `G_2` at `(13|14|15, 13)`).
 
 Why: a dedicated `u_h` group would turn the fixed seven-group arrays of the PCS driver, the verifier

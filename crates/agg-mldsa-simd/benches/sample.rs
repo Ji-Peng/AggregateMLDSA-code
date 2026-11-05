@@ -92,8 +92,8 @@ fn run_rust_unpack_z(e: &Engine, z: &[u8; 2304], out: &mut [Poly32; 4]) {
 #[inline(never)]
 fn run_c_unpack_z(z_padded: &[u8; 2304 + 32], out: &mut [Poly32; 4]) {
     for i in 0..4 {
-        let chunk: &[u8; 576] = (&z_padded[i * 576..i * 576 + 576]).try_into().unwrap();
-        agg_mldsa_cref::polyz_unpack(&mut out[i].0, chunk);
+        // The C kernel reads 14 bytes past each 576-byte row; the padding covers the last.
+        agg_mldsa_cref::polyz_unpack(&mut out[i].0, &z_padded[i * 576..]);
         // The Rust kernel returns ||z||_inf in the same pass; C checks the bound separately.
         black_box(agg_mldsa_cref::poly_chknorm(&out[i].0, GAMMA1 - BETA));
     }
@@ -114,8 +114,9 @@ fn run_rust_pack_w1(e: &Engine, w1: &[[u8; 256]; 4], out: &mut [u8; 768]) {
 #[inline(never)]
 fn run_c_pack_w1(w1: &[Poly32; 4], out_padded: &mut [u8; 768 + 32]) {
     for i in 0..4 {
-        let chunk: &mut [u8; 192] = (&mut out_padded[i * 192..i * 192 + 192]).try_into().unwrap();
-        agg_mldsa_cref::polyw1_pack(chunk, &w1[i].0);
+        // The C kernel writes 8 bytes past each 192-byte row; the next row overwrites
+        // them, and the padding takes the last row's.
+        agg_mldsa_cref::polyw1_pack(&mut out_padded[i * 192..], &w1[i].0);
     }
     black_box(out_padded);
 }
@@ -231,6 +232,11 @@ impl Sink for CountSink {
     }
 }
 
+/// The C kernels read their state and polynomial arguments with aligned vector loads.
+#[cfg(cref)]
+#[repr(C, align(64))]
+struct Aligned64<T>(T);
+
 /// Per-step TSC ticks of one key's AVX2 ExpandA (16 polynomials, 20 four-way
 /// permutations), each step next to its pq-crystals counterpart.
 #[cfg(cref)]
@@ -274,7 +280,7 @@ fn expand_steps() {
     );
     let rho = [0x42u8; 32];
     let mut st = lanes::State([[0u64; 4]; 25]);
-    let mut cs = [0u64; 100];
+    let mut cs = Aligned64([0u64; 100]);
     pair(
         "20 permutations",
         &mut || {
@@ -285,12 +291,12 @@ fn expand_steps() {
         },
         &mut || {
             for _ in 0..20 {
-                agg_mldsa_cref::f1600x4(black_box(&mut cs));
+                agg_mldsa_cref::f1600x4(black_box(&mut cs.0));
             }
         },
     );
     let mut st = lanes::State([[0u64; 4]; 25]);
-    let mut cs = [0u64; 100];
+    let mut cs = Aligned64([0u64; 100]);
     let mut lane_bufs = [[0u8; 848]; 4];
     let mut buf = vec![[0u8; 840]; 4];
     pair(
@@ -309,7 +315,7 @@ fn expand_steps() {
                 let [b0, b1, b2, b3] = &mut buf[..] else {
                     unreachable!()
                 };
-                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs);
+                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs.0);
                 black_box(&buf);
             }
         },
@@ -337,12 +343,12 @@ fn expand_steps() {
         &mut || {
             for _ in 0..4 {
                 agg_mldsa_cref::shake128x4_absorb_once(
-                    &mut cs, &inputs[0], &inputs[1], &inputs[2], &inputs[3],
+                    &mut cs.0, &inputs[0], &inputs[1], &inputs[2], &inputs[3],
                 );
                 let [b0, b1, b2, b3] = &mut buf[..] else {
                     unreachable!()
                 };
-                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs);
+                agg_mldsa_cref::shake128x4_squeezeblocks(b0, b1, b2, b3, 5, &mut cs.0);
                 black_box(&buf);
             }
         },
@@ -385,7 +391,7 @@ fn expand_steps() {
         },
     );
     let mut out = ExpandedA::zero();
-    let mut mat = [[[0i32; 256]; 4]; 4];
+    let mut mat = Aligned64([[[0i32; 256]; 4]; 4]);
     pair(
         "complete ExpandA",
         &mut || {
@@ -396,8 +402,8 @@ fn expand_steps() {
             black_box(&out);
         },
         &mut || {
-            agg_mldsa_cref::polyvec_matrix_expand(black_box(&mut mat), &rho);
-            black_box(&mat);
+            agg_mldsa_cref::polyvec_matrix_expand(black_box(&mut mat.0), &rho);
+            black_box(&mat.0);
         },
     );
 }

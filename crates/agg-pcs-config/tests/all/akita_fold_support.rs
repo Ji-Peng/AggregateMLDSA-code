@@ -604,9 +604,15 @@ fn grouped_rows_by_batch_size() {
             want.push((relation, d_sig, draws, min_bits));
         }
     }
-    for (set, expected) in [(Set::S65, &EXPECTED_65), (Set::S87, &EXPECTED_87)] {
+    let lanes = [
+        (Set::S65, Relation::Hu, &EXPECTED_65),
+        (Set::S87, Relation::Hu, &EXPECTED_87),
+        (Set::S65, Relation::HFips, &EXPECTED_65_H_FIPS),
+        (Set::S87, Relation::HFips, &EXPECTED_87_H_FIPS),
+    ];
+    for (set, relation, expected) in lanes {
         for &(d_sig, draws, min_bits) in expected {
-            let plan = WorkPlan::for_set(set, 1 << d_sig, Relation::Hu).expect("work plan");
+            let plan = WorkPlan::for_set(set, 1 << d_sig, relation).expect("work plan");
             let row = catalog
                 .resolve_key(&plan.schedule_key())
                 .expect("grouped row");
@@ -617,12 +623,13 @@ fn grouped_rows_by_batch_size() {
                 .map(|s| s.bits)
                 .fold(f64::INFINITY, f64::min);
             eprintln!(
-                "{set:?} d_sig {d_sig:>2}: {} draws, min {min:.4} bits",
+                "{set:?} {} d_sig {d_sig:>2}: {} draws, min {min:.4} bits",
+                relation.name(),
                 row_sites.len()
             );
             assert!(row_sites.iter().all(|s| s.at_least_128));
-            got.push((Relation::Hu, d_sig, row_sites.len(), (min * 1e4).floor() / 1e4));
-            want.push((Relation::Hu, d_sig, draws, min_bits));
+            got.push((relation, d_sig, row_sites.len(), (min * 1e4).floor() / 1e4));
+            want.push((relation, d_sig, draws, min_bits));
         }
     }
     assert_eq!(got, want);
@@ -661,6 +668,42 @@ const EXPECTED_87: [(usize, usize, f64); 13] = [
     (12, 13, 128.0881),
     (13, 13, 128.0881),
     (14, 13, 128.5633),
+    (15, 13, 128.0881),
+];
+
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-65 H-FIPS grouped rows
+/// (`mldsa-65-p16f-batch-<N*>-mult-final`).
+const EXPECTED_65_H_FIPS: [(usize, usize, f64); 13] = [
+    (3, 12, 128.0881),
+    (4, 12, 128.0881),
+    (5, 12, 128.0881),
+    (6, 12, 128.0881),
+    (7, 12, 128.0881),
+    (8, 12, 128.0881),
+    (9, 12, 128.0881),
+    (10, 12, 128.0881),
+    (11, 13, 128.0881),
+    (12, 13, 128.5633),
+    (13, 13, 128.0881),
+    (14, 13, 128.5633),
+    (15, 13, 128.0881),
+];
+
+/// (d_sig, draws, minimum accepted support in bits) of the ML-DSA-87 H-FIPS grouped rows
+/// (`mldsa-87-p16f-batch-<N*>-mult-final`).
+const EXPECTED_87_H_FIPS: [(usize, usize, f64); 13] = [
+    (3, 12, 128.0881),
+    (4, 12, 128.0881),
+    (5, 12, 128.0881),
+    (6, 12, 128.0881),
+    (7, 12, 128.0881),
+    (8, 12, 128.0881),
+    (9, 12, 128.0881),
+    (10, 13, 128.0881),
+    (11, 13, 128.0881),
+    (12, 13, 128.0881),
+    (13, 13, 128.0881),
+    (14, 13, 128.0881),
     (15, 13, 128.0881),
 ];
 

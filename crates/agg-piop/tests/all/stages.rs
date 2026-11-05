@@ -485,6 +485,24 @@ fn lane_round_trip<P: agg_witness::params::ParamSet>(relation: Relation, seed: u
     assert_eq!(run.points.lookup.len(), manifest.lookup_shape().stacks.len());
     check_honest(&batch, &proof);
     let y = batch.bridge.public_y();
+    // A manifest below the minimum batch (17 records) is refused before any replay.
+    {
+        use agg_piop::manifest::CommitmentManifest;
+        use agg_piop::verifier::{verify_piop_lanes, VerifyTimings};
+        let small = CommitmentManifest::for_set(P::SET, 16, relation).expect("manifest");
+        let mut transcript = common::transcript_after_commitments(manifest);
+        let outcome = verify_piop_lanes(
+            &small,
+            &batch.matrices,
+            y,
+            &proof,
+            &mut transcript,
+            &mut VerifyTimings::default(),
+            |_, _, _| unreachable!("no public pass below the minimum batch"),
+        )
+        .outcome;
+        assert!(matches!(outcome, Err(VerifyError::RecordCount)));
+    }
     let rejected = |bad: &PiopProof| rejection(&batch.verify(y, bad).unwrap_err());
     let mut bad = proof.clone();
     bad.stage1.rounds[3][1] += E::from_u64(1);

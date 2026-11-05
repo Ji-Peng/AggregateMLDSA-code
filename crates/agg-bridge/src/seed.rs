@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn levels_are_those_of_spec_section_1() {
+    fn levels_have_the_production_shapes() {
         let shape = |l: &Level| (l.t, l.rows(), l.cols, l.k);
         assert_eq!(shape(&LEVELS[0]), (1, 1 << 13, 1 << 19, 14));
         assert_eq!(shape(&LEVELS[1]), (2, 1 << 13, 1 << 19, 14));

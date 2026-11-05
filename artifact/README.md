@@ -1,4 +1,4 @@
-# Artifact evaluation package: aggregating ML-DSA-44 signatures
+# Artifact evaluation package: aggregating ML-DSA signatures
 
 This directory rebuilds every measurement of the evaluation section from the
 pinned source tree on a plain x86-64 Linux machine. It does not need Slurm,
@@ -6,9 +6,10 @@ root, or network access after `./run.sh fetch`.
 
 The package builds one source tree **once** and measures proving, verification
 and aggregate size at batch sizes up to 32,768 in three run-time tiers. It also
-runs two baselines: Aerie v0.2.0 on Falcon-512 and Falcon-1024, and the pq-crystals ML-DSA-44
+runs two baselines: Aerie v0.2.0 on Falcon-512 and Falcon-1024, and the pq-crystals ML-DSA
 AVX2 implementation. The comparison baseline is a native batch verification,
-not an aggregate.
+not an aggregate. The timing matrices measure ML-DSA-44 (a matrix group selects
+another set with `params = "65"` or `"87"`); `gates` checks all three sets.
 
 ## Quick start
 
@@ -59,14 +60,14 @@ the same pin for commands started inside this directory.
 | `check` | tool and feature probe | seconds |
 | `fetch` | two git clones and `cargo fetch` | 2--10 min, network |
 | `build` | one release build of ours, Aerie's bench, natver | 5--20 min; the first build is the long one |
-| `gates` | per parameter set (`--params 44,65,87`): 1K aggregates in every tier and on one thread, verification, negative check, natver; self-reports | 5--10 min |
+| `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations h-u,h-exact,h-fips`): 1K aggregates in every tier, verification, negative check; per set the H-u aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
 | `quick --smoke` | three tiers at 1K, one thread, Aerie (Falcon-512/1024) and native at 1K, 1+1 runs | 5--15 min after the build |
 | `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie (Falcon-512/1024) and native at 1K, 1+3 runs | 20--40 min after the build |
 | `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+5 warm runs | about 1 h after the build |
 
 `full` writes about 125 MB of raw JSON at 32K. Its longest cells are 1T
-proving. The full matrix took 51 minutes on one EPYC 9355 node (`xcni`) after
-the build (2026-11-01).
+proving. The full matrix took 51 minutes on one EPYC 9355 node after the
+build (2026-11-01).
 
 ## What is measured
 
@@ -81,8 +82,9 @@ repeated here.
 | `avx2` | `avx2` | executes no AVX-512 instruction; the x86-64-v3 baseline |
 
 `AGG_PIOP_LAYOUT=plane|row` selects the sum-check table layout. Unset selects
-plane exactly when the IFMA backend is selected and row otherwise; the proof
-does not depend on the choice. The `full` matrix runs one `row` ablation.
+plane on every vector backend (avx512ifma, avx512, avx2) and row on the
+portable (scalar) backend; the proof does not depend on the choice. The
+`full` matrix runs one `row` ablation.
 
 The `scalar` cap (`AGG_ISA=scalar`) is not a reported tier. `./run.sh gates`
 runs it as an additional correctness check: its aggregate must match the three
@@ -107,19 +109,22 @@ mnemonics are counted in `build.json`).
 
 ### Expected times
 
-The following were measured on one AMD EPYC 9355 node (`xcni`, Zen 5) at
-N = 32,768 under H-u, one warm-up and three runs, unified `main`
-`7b9c67a`. Node-to-node spread is a few percent.
+The following prove medians were measured on one idle AMD EPYC 9355 node
+(Zen 5) at N = 32,768 under H-u for ML-DSA-44, one warm-up and five runs,
+unified `main` `41d7ef4`, the revision of the paper's numbers. Node-to-node
+spread is a few percent.
 
 | Tier | 16C32T | 8C16T |
 | --- | --- | --- |
-| `ifma` | 2.60--2.69 s | 4.21 s |
-| `avx512` | 2.77 s | not measured |
-| `avx2` | 2.84--2.94 s | 5.51 s |
+| `ifma` | 2.73 s | 4.14 s |
+| `avx512` | 2.78 s | 4.15 s |
+| `avx2` | 2.96 s | 4.51 s |
 
-The aggregate is 1,612,232 bytes at 32K, or 49.2 bytes per signature, in every
-tier. Absolute times on another microarchitecture differ; the tier order and
-the byte identity are the portable parts of the result.
+Verification with the IFMA tier on 16C32T took 106 ms with uncached keys and
+97 ms with cached keys. The aggregate is 1,612,250 bytes at 32K, or 49.2 bytes
+per signature, in every tier. Absolute times on another microarchitecture
+differ; the tier order and the byte identity are the portable parts of the
+result.
 
 Warm cells follow the paper protocol: one process per cell with
 `--warmup 1 --reps N`, split into two processes of about N/2 so that the
@@ -127,7 +132,7 @@ tiers still alternate (ablations use one process per cell and alternate the
 arms instead). Each process pays its own warm-up, and every timed run is read
 from its `--json` output.
 
-Every individual run is kept in `results/<host>-<timestamp>/raw/*.json`, and
+Every individual run is kept in `results/<timestamp>/raw/*.json`, and
 each cell records the JSON of every process that contributed to it.
 `summary.csv` has the median, minimum, maximum, the order-statistic interval
 of the median (97.9% for ten runs, 93.75% for five) and a `noisy` or
@@ -155,7 +160,9 @@ a `claims-measured.csv` with the values that were actually measured.
 
 ## Reading the output
 
-Everything lands in `artifact/results/<host>-<timestamp>/`:
+Everything lands in `artifact/results/<timestamp>/` (UTC; the host name is
+recorded in `machine.json`, not in the path, so the generated tables do not
+carry it):
 
 - `machine.json`: CPU model and flags, kernel, governor, boost, THP, memory,
   load, foreign processes, compiler versions, and the tiers the CPU supports.
@@ -163,13 +170,15 @@ Everything lands in `artifact/results/<host>-<timestamp>/`:
 - `cpusets.json`: the three allocations, their CPU lists and L3 domains.
 - `build.json`: the release flags, binary hashes, the run-time self-report of
   every tier, and the four AVX-512 counts for each `natver` binary.
-- `gates.json`: per parameter set, the 1K aggregate hashes, verify verdicts,
-  the negative check and the one-thread check; the self-reports and the SDE
-  result.
+- `gates.json`: per parameter set and relation, the 1K aggregate hashes,
+  verify verdicts and the negative check; per set, the one-thread check and
+  natver; the self-reports and the SDE result.
 - `raw/<run-id>.json`: one cell, with every timed run and the selected
   kernels.
-- `summary.csv`: one row per cell with the statistics and flags.
-- `paper-tables/` and `../../paper-tables/`: the generated LaTeX tables.
+- `summary.csv`: one row per cell (keyed by parameter set) with the statistics
+  and flags.
+- `paper-tables/` and `../../paper-tables/`: the generated LaTeX tables. They
+  are build outputs and are not tracked in the repository.
 
 The tables are complete `talltblr` environments with labels `tab:ae-*`, so
 they can be `\input` without clashing with the paper's current labels. The
@@ -193,8 +202,8 @@ decimal.
   part of the result.
 - Record generation is outside every timed region. It is deterministic
   (seed 1; the gates use keys from seed 42 and records from seed 43) and the
-  1K aggregate bytes of every parameter set are checked against
-  `expected/hashes.json`, keyed by set.
+  1K aggregate bytes of every parameter set and relation are checked against
+  `expected/hashes.json`, keyed by set and relation.
 
 ## Troubleshooting
 
@@ -204,7 +213,9 @@ decimal.
 - `gates` fails on `expected_ok`: the aggregate bytes changed with the code.
   This is expected after a protocol change. Re-pin them with
   `./run.sh gates --write-expected` only after confirming that the change is
-  intended.
+  intended. Maintainers pin the submission revision with `./run.sh freeze`,
+  which builds the binary, rewrites `expected/hashes.json` for every set and
+  relation and sets the in-repo commit of `sources.lock` to `HEAD`.
 - `gates` fails on a self-report: a dispatcher selected a kernel above
   `AGG_ISA`. The failing crate and flag are printed.
 - `./run.sh gates --reference FILE` compares an external reference aggregate.

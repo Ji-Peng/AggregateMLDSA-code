@@ -1,6 +1,7 @@
 #[cfg(cref)]
 mod smoke_tests {
     use agg_mldsa_cref::*;
+    use agg_mldsa_simd::{ParamSet, Poly32, Set65, Set87};
 
     const Q: i64 = 8_380_417;
 
@@ -115,13 +116,13 @@ mod smoke_tests {
             poly_i32.0[i] = val as i32;
         }
 
-        let mut c_packed = [0u8; 192];
+        let mut c_packed = [0u8; POLYW1_PACK_WRITE_88];
         polyw1_pack(&mut c_packed, &poly_i32.0);
 
         let small_k = [w1_row, [0u8; 256], [0u8; 256], [0u8; 256]];
         let ref_encoded = agg_witness::native::w1_encode(&small_k);
 
-        assert_eq!(&c_packed[..], &ref_encoded[..192]);
+        assert_eq!(&c_packed[..192], &ref_encoded[..192]);
     }
 
     #[inline(always)]
@@ -401,48 +402,58 @@ mod smoke_tests {
             poly_i32.0[i] = val as i32;
         }
 
+        // The engine encodes all k rows; put the random row first, zero the
+        // rest, and compare the first 128 bytes with the C single-row packer.
+        fn rust_first_row<P: ParamSet>(row: &[u8; 256]) -> Vec<u8> {
+            let mut w1 = vec![[0u8; 256]; P::K];
+            w1[0] = *row;
+            let mut out = vec![0u8; P::W1_ENCODE_BYTES];
+            agg_mldsa_simd::engine().for_set::<P>().pack_w1(&w1, &mut out);
+            out.truncate(128);
+            out
+        }
+
         // Mode 3
         let mut c_packed3 = [0u8; 128];
         dilithium3_polyw1_pack(&mut c_packed3, &poly_i32.0);
-        let mut rust_packed3 = [0u8; 128];
-        let small_k = [w1_u8];
-        let e65 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set65>();
-        e65.pack_w1(&small_k, &mut rust_packed3);
-        assert_eq!(&c_packed3[..], &rust_packed3[..]);
+        assert_eq!(&c_packed3[..], &rust_first_row::<Set65>(&w1_u8)[..]);
 
         // Mode 5
         let mut c_packed5 = [0u8; 128];
         dilithium5_polyw1_pack(&mut c_packed5, &poly_i32.0);
-        let mut rust_packed5 = [0u8; 128];
-        let e87 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set87>();
-        e87.pack_w1(&small_k, &mut rust_packed5);
-        assert_eq!(&c_packed5[..], &rust_packed5[..]);
+        assert_eq!(&c_packed5[..], &rust_first_row::<Set87>(&w1_u8)[..]);
     }
 
     #[test]
     fn test_c_polyz_unpack_matches_simd_modes_3_and_5() {
         assert!(available());
         let mut rng = SplitMix64::new(0x5566_7788);
-        let mut z_bytes = [0u8; 640];
-        for b in z_bytes.iter_mut() {
+        // The C unpacker reads past the 640 packed bytes; the slack stays zero.
+        let mut z_bytes = [0u8; POLYZ_UNPACK_READ_19];
+        for b in z_bytes[..640].iter_mut() {
             *b = rng.next_u64() as u8;
+        }
+        let chunk: &[u8; 640] = z_bytes[..640].try_into().unwrap();
+
+        // The engine decodes all l rows; put the random chunk first, zero the
+        // rest, and compare row 0 with the C single-row unpacker.
+        fn rust_first_row<P: ParamSet>(chunk: &[u8; 640]) -> Poly32 {
+            let mut z = vec![0u8; P::L * 640];
+            z[..640].copy_from_slice(chunk);
+            let mut out = vec![Poly32::zero(); P::L];
+            agg_mldsa_simd::engine().for_set::<P>().unpack_z(&z, &mut out);
+            out[0]
         }
 
         // Mode 3
         let mut c_unpacked3 = Align64([0i32; 256]);
         dilithium3_polyz_unpack(&mut c_unpacked3.0, &z_bytes);
-        let mut rust_unpacked3 = [agg_mldsa_simd::Poly32::zero()];
-        let e65 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set65>();
-        e65.unpack_z(&z_bytes, &mut rust_unpacked3);
-        assert_eq!(&c_unpacked3.0[..], &rust_unpacked3[0].0[..]);
+        assert_eq!(&c_unpacked3.0[..], &rust_first_row::<Set65>(chunk).0[..]);
 
         // Mode 5
         let mut c_unpacked5 = Align64([0i32; 256]);
         dilithium5_polyz_unpack(&mut c_unpacked5.0, &z_bytes);
-        let mut rust_unpacked5 = [agg_mldsa_simd::Poly32::zero()];
-        let e87 = agg_mldsa_simd::engine().for_set::<agg_mldsa_simd::Set87>();
-        e87.unpack_z(&z_bytes, &mut rust_unpacked5);
-        assert_eq!(&c_unpacked5.0[..], &rust_unpacked5[0].0[..]);
+        assert_eq!(&c_unpacked5.0[..], &rust_first_row::<Set87>(chunk).0[..]);
     }
 
     #[test]

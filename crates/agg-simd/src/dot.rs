@@ -15,7 +15,8 @@ pub fn fp_dot(a: &[u64], b: &[u64]) -> u64 {
     assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     if a.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return fp_vector(a, b);
         }
@@ -32,7 +33,8 @@ pub fn k_dot(a: Planes<'_>, b: Planes<'_>) -> K {
     check(a, b);
     #[cfg(target_arch = "x86_64")]
     if a.0.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return k_vector(a, b);
         }
@@ -49,7 +51,8 @@ pub fn k_base_dot(a: Planes<'_>, b: &[u64]) -> K {
     check(a, (b, b));
     #[cfg(target_arch = "x86_64")]
     if b.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return base_vector(a, b);
         }
@@ -69,7 +72,8 @@ pub fn k_int_dot_parts(a: Planes<'_>, b: &[i64]) -> (K, K) {
     assert!(b.iter().all(|&x| x > -(1i64 << 51) && x < (1i64 << 51)));
     #[cfg(target_arch = "x86_64")]
     if b.len() >= 64 && backend() == Backend::Avx512 {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             return int_vector(a, b.as_ptr().cast(), b.len(), 1 << 51);
         }
@@ -106,7 +110,8 @@ pub fn k_int2_dot(a: Planes<'_>, lo: &[u64], hi: &[i64]) -> K {
         && backend() == Backend::Avx512
         && hi.iter().all(|&x| x > -(1i64 << 51) && x < (1i64 << 51))
     {
-        // SAFETY: the caller checked the IFMA backend, and every slice or pointer is valid for the length asserted above.
+        // SAFETY: the IFMA backend is active (checked here), and the lengths asserted above bound
+        // every read and write.
         unsafe {
             let (l, _) = int_vector(a, lo.as_ptr(), lo.len(), 0);
             let (h, c) = int_vector(a, hi.as_ptr().cast(), hi.len(), 1 << 51);
@@ -129,7 +134,9 @@ pub fn k_int2_dot(a: Planes<'_>, lo: &[u64], hi: &[i64]) -> K {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn fp_vector(a: &[u64], b: &[u64]) -> u64 {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `fp_dot` asserts `b.len() == a.len()`, and every vector load ends at or below
+    // `end <= n <= a.len()` (the second chain loads only when `i + 8 < end`).
     unsafe {
         use crate::x86::*;
         let n = a.len() / 8 * 8;
@@ -167,7 +174,9 @@ unsafe fn fp_vector(a: &[u64], b: &[u64]) -> u64 {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn k_vector(a: Planes<'_>, b: Planes<'_>) -> K {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `check` asserts that all four planes hold `a.0.len()` words, and every vector load
+    // ends at or below `n <= a.0.len()`.
     unsafe {
         use crate::x86::*;
         let n = a.0.len() / 8 * 8;
@@ -199,7 +208,9 @@ unsafe fn k_vector(a: Planes<'_>, b: Planes<'_>) -> K {
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn base_vector(a: Planes<'_>, b: &[u64]) -> K {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // `k_base_dot` asserts that both planes of `a` hold `b.len()` words, and every vector
+    // load ends at or below `n <= b.len()`.
     unsafe {
         use crate::x86::*;
         let n = b.len() / 8 * 8;
@@ -226,7 +237,9 @@ unsafe fn base_vector(a: Planes<'_>, b: &[u64]) -> K {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
 unsafe fn int_vector(a: Planes<'_>, b: *const u64, len: usize, shift: u64) -> (K, K) {
-    // SAFETY: the enclosing function enables the CPU features its intrinsics need; callers checked those features at run time.
+    // SAFETY: the target features are enabled here and the caller checked them at run time.
+    // The callers assert that both planes of `a` hold `len` words and pass `b` from a slice
+    // of `len` words; every vector load ends at or below `n <= len`.
     unsafe {
         use crate::x86::*;
         let n = len / 8 * 8;
@@ -281,7 +294,8 @@ unsafe fn int_vector(a: Planes<'_>, b: *const u64, len: usize, shift: u64) -> (K
 pub fn weight_round(w:Planes<'_>,g:&[i64])->[K;3] {
  check(w,(w.0,w.1));assert_eq!(w.0.len(),g.len());assert_eq!(g.len()%2,0);
  #[cfg(target_arch="x86_64")]
- // SAFETY: the call is guarded by the backend check and the length assertions above.
+ // SAFETY: the IFMA backend is active, and the planes and `g` have equal even lengths
+ // (asserted above).
  if g.len()>=64 && backend()==Backend::Avx512 {unsafe {return weight_vector(w,g);}}
  #[cfg(target_arch="x86_64")]
  if g.len()>=64 {if let Some(x)=crate::wide::dispatch!(weight_w8(w,g),weight_w4(w,g)) {return x;}}
@@ -291,7 +305,8 @@ pub fn weight_round(w:Planes<'_>,g:&[i64])->[K;3] {
 }
 #[cfg(target_arch="x86_64")]
 #[target_feature(enable="avx512f,avx512dq,avx512bw,avx512vl,avx512ifma")]
-// SAFETY: the call is guarded by the backend check and the length assertions above.
+/// # Safety
+/// Requires the IFMA features, and both planes of `w` as long as `g`.
 unsafe fn weight_vector(w:Planes<'_>,g:&[i64])->[K;3] {unsafe {
  use crate::x86::*;use std::arch::x86_64::*;
  let idx=_mm512_set_epi64(14,12,10,8,6,4,2,0);let n=g.len()/16*16;let mut out=[K::from_u64(0);3];
@@ -326,6 +341,12 @@ unsafe fn weight_vector(w:Planes<'_>,g:&[i64])->[K;3] {unsafe {
 #[cfg(target_arch = "x86_64")]
 const CHUNK: usize = crate::wide::MAC_LIMIT / 2;
 
+/// Steps per chunk of [`k_wide`]: its real part `ac + 2 bd` is reduced as one accumulator
+/// that carries three products per step, so `3 * K_CHUNK <= MAC_LIMIT` keeps the `d2` limb
+/// below the `2^56` that [`red`](crate::wide::red) assumes.
+#[cfg(target_arch = "x86_64")]
+const K_CHUNK: usize = crate::wide::MAC_LIMIT / 3;
+
 /// [`CHUNK`] for the tests that cross it.
 #[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) const fn wide_chunk() -> usize {
@@ -356,8 +377,9 @@ unsafe fn fp_wide<B: crate::wide::Simd>(a: &[u64], b: &[u64]) -> u64 {
 crate::wide::entry_points!(fp_wide => fp_w8, fp_w4; (a: &[u64], b: &[u64]) -> u64);
 
 /// `ac`, `bd` and `ad + bc` in three accumulators; the real part `ac + 2 bd` is formed by
-/// doubling the `bd` limbs at the reduction (bounds: `bd` takes one product per step and
-/// `ad + bc` two, below [`MAC_LIMIT`](crate::wide::MAC_LIMIT) per chunk).
+/// doubling the `bd` limbs at the reduction (bounds per chunk of [`K_CHUNK`] steps: the real
+/// part carries three products per step and `ad + bc` two, at most
+/// [`MAC_LIMIT`](crate::wide::MAC_LIMIT) each).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn k_wide<B: crate::wide::Simd>(a: Planes<'_>, b: Planes<'_>) -> K {
@@ -368,8 +390,8 @@ unsafe fn k_wide<B: crate::wide::Simd>(a: Planes<'_>, b: Planes<'_>) -> K {
     unsafe {
         let mut re = zero::<B>();
         let mut im = zero::<B>();
-        for start in (0..n).step_by(CHUNK * l) {
-            let end = (start + CHUNK * l).min(n);
+        for start in (0..n).step_by(K_CHUNK * l) {
+            let end = (start + K_CHUNK * l).min(n);
             let (mut ac, mut bd, mut ab) = (acc0::<B>(), acc0::<B>(), acc0::<B>());
             for i in (start..end).step_by(l) {
                 let (x0, x1) = (split::<B>(B::load(a.0.as_ptr().add(i))), split::<B>(B::load(a.1.as_ptr().add(i))));
@@ -379,7 +401,7 @@ unsafe fn k_wide<B: crate::wide::Simd>(a: Planes<'_>, b: Planes<'_>) -> K {
                 mac::<B>(&mut ab, x0, y1);
                 mac::<B>(&mut ab, x1, y0);
             }
-            // ac < CHUNK and 2 bd < 2 CHUNK products of limb gain: the sum stays below MAC_LIMIT.
+            // ac takes K_CHUNK products and 2 bd the gain of 2 K_CHUNK: 3 K_CHUNK <= MAC_LIMIT.
             re = B::add_mod(re, red::<B>(add_acc::<B>(ac, dbl_acc::<B>(bd))));
             im = B::add_mod(im, red::<B>(ab));
         }

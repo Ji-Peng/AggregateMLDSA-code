@@ -4,11 +4,11 @@
 //! `i32` for the 16-bit lookup columns) until commitment, and each polynomial is
 //! materialized polynomial-major, zero-extended to the physical (PCS floor) length.
 //! Commitments go through `agg_pcs_config::commit::PcsProver` (round 1 `G_main16` and
-//! `G_main4`; round 2 `G_1`, `G_2`, `G_3`, then the final group `G_m`), each call
+//! `G_main4`; round 2 `G_1`, `G_2`, `G_3`, `G_k`, then the final group `G_m`), each call
 //! transcript-free and under its group's family; the caller absorbs
-//! [`GroupCommitment::serialized`] in event order. One batched opening covers the 38
-//! claims: 31 at the suffixes of `r^(3)` and the 7 multiplicity digits at the lookup's
-//! table point.
+//! [`GroupCommitment::serialized`] in event order. One batched opening covers the stage-3
+//! claims at the suffixes of `r^(3)` (35 for ML-DSA-44 under H-u), the 11 zero polynomials of
+//! `G_3` (claim zero) and the 7 multiplicity digits at the lookup's table point: 53 claims.
 
 use agg_pcs_config::commit::{
     CommitError, GroupClaim, GroupCommitment, PcsProver, PcsVerifier, PreparedOpening,

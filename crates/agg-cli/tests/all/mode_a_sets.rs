@@ -7,7 +7,8 @@
 //! of the transcript's Flock seed and final-vector record. The verifier builds its public
 //! data from `(pk, M, c~)` only. The full mode-A driver (`Aggregator`, `AggregateVerifier`:
 //! the Akita opening and the wire format) runs at the end, with tampered witnesses and
-//! aggregates. Run with `--release`.
+//! aggregates. Relation H-FIPS also runs on the synthetic records of hint weight exactly omega
+//! (`agg_witness::gen::hint_corner_record_for`). Run with `--release`.
 
 use agg_bridge::seed::derive_matrices_for;
 use agg_bridge::Shape;
@@ -192,7 +193,10 @@ fn ml_dsa_87_end_to_end_without_the_opening_at_1k() {
 /// and with a warm `LaneKeyCache`; then tampered witnesses and aggregates are rejected.
 fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     use agg_cli::mode_a::{AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig, KeyCacheMut};
+    use agg_piop::manifest::Column;
+    use agg_piop::stage::StageError;
     use agg_piop::verifier::VerifyError;
+    use agg_witness::padding::main_index_for;
 
     let records = agg_witness::gen::records_shared_keys_for::<P>(seed, n, n / 4);
     let signed: Vec<(&[u8], &[u8], &[u8])> =
@@ -247,7 +251,7 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
     flipped[last] ^= 1;
     assert!(!verifier.verify(&statements, &flipped, None).accepted());
     // H-exact: H-u's layout and size, its own relation byte; each relation's verifier
-    // rejects the other's aggregate. H-FIPS is refused for the set.
+    // rejects the other's aggregate.
     let exact = Aggregator::new(AggregatorConfig { relation: Relation::HExact, ..config })
         .aggregate(&signed)
         .expect("H-exact aggregate");
@@ -296,6 +300,21 @@ fn full_driver<P: ParamSet>(seed: u64, n: usize, other: Set) {
         let report = verifier.verify(&statements, &bad.bytes, None);
         assert!(!report.accepted(), "{name}: {report}");
     }
+    // A committed bit flipped with the round-2 tables (and Y) of the honest bits: the Flock
+    // part accepts, and stage 1 rejects a committed bit that disagrees with the bridge tables.
+    let flipped = |m: &CommitmentManifest, t: &mut MainTables| {
+        let (role, position) = m.locate(Column::W1Bit(0, 1));
+        assert_eq!(role, GroupRole::Main);
+        t.columns_mut()[position][main_index_for::<P>(17, 0, 5)] ^= 1;
+    };
+    let hooks = AggregateHooks { tamper_main: Some(&flipped), stale_bridge: true, ..AggregateHooks::default() };
+    let bad = aggregator.aggregate_with(&signed, &hooks).expect("stale round-2 aggregate");
+    let report = verifier.verify(&statements, &bad.bytes, None);
+    assert!(
+        matches!(report.report.outcome, Err(VerifyError::Stage(StageError::Terminal(1)))),
+        "committed bit flipped, stale round 2: {report}"
+    );
+    assert!(report.parts.iter().all(|p| p.accepted), "the Flock part accepts: {report}");
 }
 
 #[test]
@@ -308,4 +327,75 @@ fn ml_dsa_65_full_driver_with_the_opening() {
 #[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
 fn ml_dsa_87_full_driver_with_the_opening() {
     on_large_stack(|| full_driver::<Set87>(0x8711, 256, Set::S65));
+}
+
+/// Mode A under relation H-FIPS on 15 honest records and the weight-omega records of seeds 1 and
+/// 2 (17 records, the smallest lane batch). Each corner record has the coefficient
+/// `w' = q - gamma2, h = 0` and the `e = -1` wrap to `w1' = m - 1 = 15`. The integer checker
+/// accepts their H-FIPS witnesses, extraction returns the signatures byte for byte, the
+/// aggregate verifies, and a hint slack moved off zero is rejected by the weight identity.
+fn h_fips_corner_records<P: ParamSet>(seed: u64) {
+    use agg_cli::mode_a::{AggregateHooks, AggregateVerifier, Aggregator, AggregatorConfig};
+    use agg_piop::stage::StageError;
+    use agg_piop::verifier::VerifyError;
+    use agg_witness::derive::derive_for;
+    use agg_witness::gen::{self, HINT_ZERO};
+    use agg_witness::hfips::{check_batch_for, HFipsRecordOf};
+
+    let mut records = gen::records_for::<P>(seed, 15);
+    records.push(gen::hint_corner_record_for::<P>(1));
+    records.push(gen::hint_corner_record_for::<P>(2));
+    let instance = PublicInstance::<P>::from_records_for(&records).expect("instance");
+    let witnesses: Vec<HFipsRecordOf<P>> = instance
+        .records
+        .iter()
+        .zip(&records)
+        .map(|(p, r)| {
+            let w = derive_for::<P>(&p.key, &p.mu, &r.sig).expect("an accepted signature");
+            HFipsRecordOf::<P>::from_witness(&w).expect("H-FIPS witness")
+        })
+        .collect();
+    let rep = check_batch_for::<P>(&instance, &witnesses);
+    assert!(rep.is_ok(), "{:?}", rep.failures);
+    for i in [15, 16] {
+        let w = &witnesses[i];
+        assert_eq!(w.hint_weight(), P::OMEGA as i64, "record {i} has hint weight omega");
+        assert_eq!(w.u_h, 0);
+        assert_eq!(w.w1()[HINT_ZERO.0][HINT_ZERO.1], P::M_W - 1, "record {i}: the wrap lands on m - 1");
+        assert_eq!(w.extract_signature(&instance.records[i].c_tilde).expect("extract"), records[i].sig);
+    }
+
+    let signed: Vec<(&[u8], &[u8], &[u8])> =
+        records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice(), r.sig.as_slice())).collect();
+    let statements: Vec<(&[u8], &[u8])> = records.iter().map(|r| (r.pk.as_slice(), r.msg.as_slice())).collect();
+    let config = AggregatorConfig { set: P::SET, relation: Relation::HFips, ..AggregatorConfig::default() };
+    let aggregator = Aggregator::new(config);
+    let aggregate = aggregator.aggregate(&signed).expect("H-FIPS aggregate");
+    assert_eq!(aggregate.bytes[2] & 0x0F, Relation::HFips.id());
+    let verifier = AggregateVerifier::for_set(P::SET).relation(Relation::HFips);
+    let report = verifier.verify(&statements, &aggregate.bytes, None);
+    assert!(report.accepted(), "{report}");
+    eprintln!("{} H-FIPS with weight-omega records: {} B", P::NAME, aggregate.bytes.len());
+
+    // u_h = 1 on a weight-omega record claims weight omega - 1: stage 3 rejects it.
+    let slack = |_: &CommitmentManifest, t: &mut MainTables| t.hint_slack_mut()[16] += 1;
+    let hooks = AggregateHooks { tamper_main: Some(&slack), ..AggregateHooks::default() };
+    let bad = aggregator.aggregate_with(&signed, &hooks).expect("tampered aggregate");
+    let report = verifier.verify(&statements, &bad.bytes, None);
+    assert!(
+        matches!(report.report.outcome, Err(VerifyError::Stage(StageError::Terminal(3)))),
+        "u_h = 1: {report}"
+    );
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn ml_dsa_65_h_fips_weight_omega_records_in_mode_a() {
+    on_large_stack(|| h_fips_corner_records::<Set65>(0x65f));
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "Flock and Akita proofs; run with --release")]
+fn ml_dsa_87_h_fips_weight_omega_records_in_mode_a() {
+    on_large_stack(|| h_fips_corner_records::<Set87>(0x87f));
 }

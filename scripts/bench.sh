@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run benchmarks on CPUs 0,1,3-15 (local calibration only; CPU 2 is reserved
-# for another task, and large runs go to xcni / c4d).
+# for another task, and large runs go to the benchmark cluster).
 # Usage: scripts/bench.sh [extra cargo bench args...]
 #   The build takes its flags from `.cargo/config.toml` (x86-64-v3 plus
 #   PCLMULQDQ); higher ISA levels are selected at run time and capped by `AGG_ISA`.

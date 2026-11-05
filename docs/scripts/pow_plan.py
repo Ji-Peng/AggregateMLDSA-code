@@ -531,7 +531,7 @@ def self_check() -> None:
     assert [list_size(r) for r in (1, 2, 3)] == [35, 50, 70]
     # sponge rows (agg_keccak::prover::capacity_log).
     assert capacity_log(1 << 15) == 15 and capacity_log(1 << 10) == 11 and capacity_log(8) == 4
-    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 8 coefficients
+    # Relation H-exact (docs/h-exact.md): the stage-2 batching site has 9 coefficients
     # (leaf6[U_hi], leaf8[K_2], leaf8[K_3]) and H-u's 10, both g = 4; gamma^(3) keeps g = 6 (49, 50, 56 < 64).
     # So every difficulty, total and digest equals H-u's; the totals and the Slim/span-on and
     # mode-B digests at 2^15.
@@ -586,7 +586,7 @@ def self_check_sets() -> None:
         assert (g["d_main"], g["d"], g["D"]) == (23, (20, 15, 14), 26), g
         assert sorted(set(g["trees"]), reverse=True) == [26, 25, 24, 23, 22, 17, 16, 14], g["trees"]
         assert [grind_bits(n, K) for n in STAGE_GAMMAS] == [6, 5, 8]
-        # H-FIPS (pinned in crates/agg-piop/src/pow.rs, docs/h-exact.md 11.2): the same sites as
+        # H-FIPS (pinned in crates/agg-piop/src/pow.rs, docs/h-exact.md): the same sites as
         # H-u; only gamma^(3) of 65 and one lookup batching site grind one more bit.
         for name, want in (("65", {3: (190, 1763), 10: (311, 2868), 15: (451, 4145)}),
                            ("87", {3: (190, 1764), 10: (311, 2874), 15: (451, 4149)})):

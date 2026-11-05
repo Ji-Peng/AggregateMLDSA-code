@@ -110,6 +110,9 @@ impl<P: ParamSet> Engine<P> {
         assert_eq!(rhos.len(), out.len());
         #[cfg(target_arch = "x86_64")]
         if K == 4 && L == 4 && self.backend() == crate::dispatch::Backend::Avx2 {
+            // SAFETY: with K == 4 and L == 4, `ExpandedA<K, L>` is the type
+            // `ExpandedA<4, 4>`, so the pointer and length describe the same
+            // exclusively borrowed slice.
             let out4: &mut [ExpandedA<4, 4>] = unsafe {
                 core::slice::from_raw_parts_mut(
                     out.as_mut_ptr() as *mut ExpandedA<4, 4>,
@@ -210,6 +213,9 @@ impl<P: ParamSet> Engine<P> {
         c_tildes: &[T],
         out: &mut [Challenge<TAU>],
     ) {
+        // The sign bits come from one 64-bit word and `Challenge::neg` holds one bit
+        // per nonzero position (FIPS 204 Algorithm 29).
+        const { assert!(TAU >= 1 && TAU <= 64, "SampleInBall needs 1 <= tau <= 64") };
         assert_eq!(c_tildes.len(), out.len());
         for (seeds, out) in c_tildes.chunks(64).zip(out.chunks_mut(64)) {
             let jobs: Vec<_> = seeds

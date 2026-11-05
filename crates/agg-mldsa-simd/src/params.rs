@@ -1,4 +1,5 @@
-//! Parameters and constants for ML-DSA-44 and prime fields.
+//! ML-DSA parameters (top-level constants: ML-DSA-44; [`ParamSet`]: all three
+//! FIPS 204 sets) and the constants of the transform primes q, P2 and P3.
 
 /// Ring dimension n.
 pub const N: usize = 256;
@@ -158,6 +159,10 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     const B_T: i32;
     /// Bound on |ve| = |e / q|.
     const C_B_Q: u32;
+    // The five digit-layout constants below are not read by this crate's kernels
+    // (`hu_columns` writes the layouts with literals). They mirror the witness
+    // crate's parameter trait, which derives its implementation of this trait from
+    // its own constants and asserts at compile time that both tables agree.
     /// Base of the top digit of u (6 for 44, 8 for 65/87).
     const U_TOP_BASE: u32;
     /// Step of the top digit of u for step layout (63,079 for 44; 0 for 65/87).

@@ -1,4 +1,7 @@
-# Lookup-based range argument for the ML-DSA-44 aggregator
+# Lookup-based range argument for the ML-DSA aggregator
+
+Numbers, stacks and counts below are ML-DSA-44's unless stated; the stacks, projection digits
+and lift of ML-DSA-65 and ML-DSA-87 are in the final section of `docs/spec.md`.
 
 The lookup into `T_16` is the range mechanism of relation H in mode A and mode B: `crates/agg-piop/src/lookup.rs`
 runs inside the PIOP transcript (event 7), the seven Akita groups of Section 6 are committed
@@ -79,7 +82,9 @@ Two design rules, both forced by soundness:
    integers whenever `|v| < (p/2 - 2^50)/q ~ 2^40`. The projection certifies `|v|_c <= 2^38`,
    so `|Delta^Z| < 2^49 + 2^29 + 2^24 + 2^18 + 2^23 2^38 < 2^61.01 < p/2`; the
    outputs `k` (at most `2^36` for every valid key) fit two `T_16` digits and two
-   base-8 leaf digits in `[-2^37, 2^37)`.
+   base-8 leaf digits in `[-2^37, 2^37)`. ML-DSA-65 and ML-DSA-87 add a base-4 leaf digit
+   (`[-2^39, 2^39)`, `|v|_c <= 2^40`), and their lift holds with a margin factor of only
+   1.0007 and 1.0006 (`docs/spec.md`, final section).
    The carries need no exact range either (`docs/bridge.md` Section 4: any carry range
    below `(p - W_t)/2` is sound; `y + 2 kappa <= 1 + 2^17` keeps (9.2) an integer
    equation), so they are looked up in `T_16` directly and need no `T_10`, `T_8` tables
@@ -197,10 +202,10 @@ one challenge or `368/|K|` with two at `2^15`, in place of `26/|K|`; the total s
 below `2^-116`). The root check is exact; the merge at `mu_s` costs `1/|K|` per session
 because one false claim suffices to carry on.
 
-Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `11 d_main` (degrees
-4, 4, 3, set by `range_w1` in stage 1 and `leaf6[U_hi]` in stage 2), the zero-check point
-`tau` `d_main`, the three stage batching vectors 3: `303/|K|`; plus GKR `1,026/|K|`:
-`1,329/|K| = 2^-117.6` for every field term except the LogUp one.
+Ledger at `N = 2^15` (round by round, spec 12.1): stage sum-checks `12 d_main` (degrees
+4, 5, 3, set by `range_w1` in stage 1 and `leaf8[K_2]`, `leaf8[K_3]` in stage 2), the
+zero-check point `tau` `d_main`, the three stage batching vectors 3: `328/|K|`; plus GKR
+`1,026/|K|`: `1,354/|K| = 2^-117.6` for every field term except the LogUp one.
 
 **The LogUp term is the critical one** (`2^-101` at `2^15` with one challenge, above every
 other term). Decision: two independent challenges. Section 2.1 records the bounded search;
@@ -244,7 +249,7 @@ and (iii); (ii) is the cheapest of the three by the measurements of Section 4 an
 neither grinding for that term nor a kernel field change. This is not 128 bits for the
 lookup: its GKR sessions are `1,026/|K| ~ 2^-118.0` at `2^15` and each degree-3 round is
 `3/|K| ~ 2^-126.4`, above `2^-128`, so the lookup, like the other field terms
-(`1,329/|K| = 2^-117.6` in all), reaches `2^-128` per site only with grinding to Aerie's
+(`1,354/|K| = 2^-117.6` in all), reaches `2^-128` per site only with grinding to Aerie's
 schedule (`docs/soundness.md`: 2 bits per GKR round, a merge 1
 bit, a batching vector `bit_length(2 active)`; deviation P3). Implementation-level savings that keep the soundness of (ii),
 both implemented in Section 4.6: build both tree sets in one pass over the stacked lanes (the leaves are read
@@ -416,11 +421,20 @@ The construction, driven by the PIOP transcript:
 - `multiplicities(stacks, tables)`: parallel histogram per table of `stored + shift`,
   `OutOfTable` on an honest out-of-range cell; `multiplicity_digits` /
   `compose_multiplicity`: the seven balanced base-16 digits of `G_m` (capacity
-  `7 (16^7 - 1)/15 = 125,269,879`; at `2^15` the largest honest count is that of the entry 0
-  when every record is padding, `3 2^25 + 8 2^19 + 8 2^15 + 2^14 = 105,136,128`, 84% of the
-  capacity; only a batch in which over 84% of all cells share one value would need an
-  eighth digit, which honest signatures cannot produce because `z_lo, u_lo, v_lo` spread
-  over `2^16` values; the encoder asserts the capacity).
+  `7 (16^7 - 1)/15 = 125,269,879`). No count can exceed it for ML-DSA-44 and ML-DSA-65,
+  whose `L` at `2^15` (79,970,304 and 105,005,056) is below the capacity. ML-DSA-87 has
+  `L = 146,948,096` at `2^15`, so the bound is per value: the largest honest count is that
+  of the entry 0, which receives at most the padded cells (fewer than half of the records,
+  since `N* = next_pow2(N)`), the public stack slots and the live cells of value zero; the
+  worst case, `N = 2^14 + 1`, gives about 88.2 million (estimate), 1.42x below the capacity.
+  The test `manifest::tests::multiplicity_digits_hold_the_largest_honest_count` checks this
+  bound for every set and relation at `N = 2^14 + 1`. It is a typical-case bound, not a worst
+  case: it counts the public padding slots, every bridge-domain and projection cell and the
+  main-domain cells of the padding records, and leaves out the live main-domain cells,
+  assuming that honest signatures spread the low 16-bit digits of `z` and `u` over the `2^16`
+  entries. `multiplicity_digits` returns `LookupError::Shape` for a count above
+  `MULTIPLICITY_CAPACITY` (no panic), and `BridgeGroupTables::recount` turns that into an
+  honest abort of the prover.
 - `LookupShape` (public layout, `challenges` 1 to 4, `validate`, `max_depth`,
   `tree_count`, `session_counts(s)` for the registry and the wire parser, `lookups`,
   `identity_error_log2`, `proof_elements`); the integrated shape is

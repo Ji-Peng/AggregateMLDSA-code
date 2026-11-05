@@ -15,10 +15,7 @@ agg-witness = { workspace = true }
 agg-piop = { workspace = true }
 agg-keccak = { workspace = true }
 agg-mldsa-simd = { workspace = true }
-
-[[bench]]
-name = "skeleton"
-harness = false
+agg-simd = { workspace = true }
 
 # Mode-B prove/verify benchmark (criterion-free): see benches/mode_b.rs.
 [[bench]]

@@ -72,14 +72,21 @@ H-u step form takes H_u = min(floor((u + B_u) / 63,079), 5), B_ulo = u + B_u - 6
 the bit-slack form takes a_z = [z + B_z >= 2^17], then B_zhi and B_zlo from the rest. Outside
 the proven range the top digit absorbs the excess and leaves its alphabet.
 
-## 5. Bridge tables (G_1, G_2, G_3)
+## 5. Bridge carries and parities (ML-DSA-44)
 
 The matrices are inputs (`BridgeMatrices`; seed derivation is `agg-bridge`'s, Section 9.1;
 tests use `random_for_tests`). Index maps: zeta_1 = x mod 2^19, beta_1 = x >> 19, D_1 index
 rho_1 + 2^13 beta_1; zeta_2 = (D_1 index) mod 2^17, sigma = (D_1 index) >> 17, D_2 index
-rho_2 + 2^13 sigma; zeta_3 = t + 6 rho_2; D_3 index rho_3 + 2^12 sigma. Columns: G_1 =
-kappa1_{t,k} at 3 t + k (18); G_2 = y2_t at t, then kappa2_{t,k} at 6 + 3 t + k (24);
-G_3 = kappa3_0, kappa3_1. Y is public (D_3).
+rho_2 + 2^13 sigma; zeta_3 = t + 6 rho_2; D_3 index rho_3 + 2^12 sigma. `bridge::compute`
+returns per lane the level-1 parities and carries (`y1`, `kappa1`), the level-2 parities and
+carries (`y2`, `kappa2`) and the level-3 carry `kappa3`, each carry one integer in
+`[0, 1023]` (levels 1, 2) or `[0, 255]` (level 3). `agg-piop` commits them as spec 4.1's
+groups: `G_1` = `K^(1)_t = kappa1_t - 2^15` (6 polynomials), `G_2` = `y2_t`, then `K^(2)_t`
+(12), `G_3` = `K^(3)`, then the zero polynomials. `y1` is virtual on the F_p side and the
+GF(2) side never materializes a parity (the virtual parity chain, `docs/parity-chain.md`);
+`gf2_composite` is the reference for both. ML-DSA-65 and ML-DSA-87 (four lanes,
+zeta_3 = t + 4 rho_2) use `agg_bridge::parity`, generic over the shape (`docs/bridge.md`,
+last section).
 
 ## 6. Keccak sponge (Section 8)
 
@@ -88,7 +95,7 @@ after each Keccak-f[1600], and c~ (the low 256 bits of the P_7 output). Message 
 512 + 1536 rho + 6 j + t carries b_t(j, rho); it lands in permutation floor(bit / 1088)
 at state bit (bit mod 1088). Tests compare against `sha3::Shake256` and the signature c~.
 
-## 9. Tests
+## 7. Tests
 
 `cargo test -p agg-witness --release` (also passes in debug). Integration tests: `verify`
 (own verifier vs crate on 160 signatures and 1,024 mutations), `witness` (128 signatures: the
@@ -104,4 +111,4 @@ the ignored test `edge_search`.
 
 ## ML-DSA-65 and ML-DSA-87 witnesses
 
-The witness uses exact `(k, l)` dimensions `(6, 5)` and `(8, 7)` respectively, with per-polynomial lanes. Both use the H-u digit-slack forms in `docs/spec.md`, four w1 bits per coefficient, and 48-byte or 64-byte c~ respectively. The `ParamSet` constants and digit encoders in `crates/agg-witness/src/params.rs` and `digits.rs` define these layouts.
+The witness uses exact `(k, l)` dimensions `(6, 5)` and `(8, 7)` respectively, with per-polynomial lanes, four w1 bits per coefficient, and 48-byte or 64-byte c~ respectively. Under H-u both use the digit-slack forms of `docs/spec.md` ("ML-DSA-65 and ML-DSA-87 parameters"): `z + 2^19 = z_lo + 2^16 z_mid + 2^19 a_z` and `u + 523,777 = u_lo + 2^16 u_mid + 523,267 a_u`. H-exact changes only the z form, `z + B_z = z_lo + 2^16 z_mid + (2 B_z + 1 - 2^19) a_z` with `B_z` = 524,091 (65) and 524,167 (87). H-FIPS keeps H-exact's z and writes the hint magnitude as `L = L_lo + 2^16 L_mid + 130,816 a_L`, exactly `[0, gamma2 - 1]` (`digits::L_BIT_SLACK`), with the per-coefficient `(s, delta, e)` of `docs/h-exact.md` 11.2. The `ParamSet` constants and digit encoders in `crates/agg-witness/src/params.rs` and `digits.rs` define these layouts.

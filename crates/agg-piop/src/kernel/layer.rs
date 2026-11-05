@@ -178,7 +178,8 @@ fn weighted_int_sums_wide<const N: usize, const W: usize>(
             .map(run)
             .reduce(|| ([Acc::zero(); N], [Acc::zero(); W]), add)
     } else {
-        run(0)
+        // Serially every task (one below the parallel threshold, unless retuned).
+        (1..tasks).map(&run).fold(run(0), add)
     };
     (total.0.map(E::reduce_product), total.1.map(E::reduce_product))
 }
@@ -551,8 +552,14 @@ impl<S: Level0> Engine<S> {
                 .into_par_iter()
                 .map(|task| run(task, &mut []))
                 .reduce(|| [Acc::zero(); 3], add),
+            // Serially every task, on the same output chunks as the parallel path.
+            (false, true) if tasks > 1 => table
+                .chunks_mut(ITEM_CHUNK * 2 * width)
+                .enumerate()
+                .map(|(task, out)| run(task, out))
+                .fold([Acc::zero(); 3], add),
             (false, true) => run(0, &mut table),
-            (false, false) => run(0, &mut []),
+            (false, false) => (1..tasks).map(|task| run(task, &mut [])).fold(run(0, &mut []), add),
         };
         if !keep {
             // A round over the current table without a fold (never happens after the first
@@ -777,8 +784,14 @@ impl<S: Level0> Engine<S> {
                 .map(|(task, out)| run(task, out))
                 .reduce(|| [Acc::zero(); 9], add),
             (true, false) => (0..tasks).into_par_iter().map(|task| run(task, &mut [])).reduce(|| [Acc::zero(); 9], add),
+            // Serially every task, on the same output chunks as the parallel path.
+            (false, true) if tasks > 1 => table
+                .chunks_mut(quad_chunk * 4 * width)
+                .enumerate()
+                .map(|(task, out)| run(task, out))
+                .fold([Acc::zero(); 9], add),
             (false, true) => run(0, &mut table),
-            (false, false) => run(0, &mut []),
+            (false, false) => (1..tasks).map(|task| run(task, &mut [])).fold(run(0, &mut []), add),
         };
         if keep {
             if let Some(arena) = &self.arena {

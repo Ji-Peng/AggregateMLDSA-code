@@ -66,8 +66,9 @@ fn transformed<P: agg_mldsa_simd::ParamSet>(engine: &Engine<P>, prime: Prime, p:
     x
 }
 
-/// The engine of the P3 steps: the AVX2 engine under an AVX-512 one (whose P3 transforms are
-/// scalar), else `engine` itself.
+/// The engine of the P3 steps: the AVX2 engine under an AVX-512 one, else `engine` itself.
+/// Every backend is exact modulo P3; the AVX-512 backend runs its P3 transforms in scalar
+/// code, so the AVX2 engine is chosen there only because it is vectorised.
 fn p3_engine<P: agg_mldsa_simd::ParamSet>(engine: &Engine<P>) -> Engine<P> {
     match engine.backend() {
         agg_mldsa_simd::Backend::Avx512 => Engine::new_for(agg_mldsa_simd::Backend::Avx2).unwrap_or(*engine),
@@ -116,9 +117,10 @@ where
             x
         })
     };
-    // The AVX-512 backend transforms modulo P3 in scalar code; the AVX2 kernels of the same
-    // machine are vectorised, and every P3 step (transforms, dot, inverse) runs on them so
-    // that the coefficient order stays that one backend's.
+    // Scalar and AVX2 code are both exact modulo P3, and the AVX-512 backend runs its P3
+    // transforms in scalar code. The AVX2 engine is used there for speed only, and every P3
+    // step (transforms, dot, inverse) runs on that one engine so that the coefficient order
+    // stays that backend's.
     let p3 = p3_engine(engine);
     let z_p3: [Poly32; L] = std::array::from_fn(|s| {
         let mut x = z[s];
@@ -240,13 +242,13 @@ mod tests {
     use crate::params::{Set65, Set87};
 
     /// The engine path gives the legacy witness for honest records, and the legacy error for
-    /// a corrupted signature (every backend the host supports).
-    fn matches_the_legacy_derivation<P>()
+    /// a corrupted signature (every backend the host supports), on the records of `seed`.
+    fn matches_the_legacy_derivation<P>(seed: u64)
     where
         P: ParamSet + agg_mldsa_simd::ParamSet,
     {
-        let mut records = gen::records_for::<P>(61, 12);
-        records.extend(gen::records_shared_keys_for::<P>(62, 4, 2));
+        let mut records = gen::records_for::<P>(seed, 12);
+        records.extend(gen::records_shared_keys_for::<P>(seed.wrapping_add(1), 4, 2));
         let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
         let refs: Vec<&PublicRecord<P>> = instance.records.iter().collect();
         let sigs: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
@@ -287,13 +289,38 @@ mod tests {
         }
     }
 
+    /// A seed that changes on every run, printed so that a failure can be replayed by
+    /// passing it to [`matches_the_legacy_derivation`].
+    fn fresh_seed() -> u64 {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let seed = (ns as u64) ^ ((ns >> 64) as u64);
+        eprintln!("legacy-match seed: {seed:#x}");
+        seed
+    }
+
     #[test]
     fn ml_dsa_65_engine_path_matches_the_legacy_derivation() {
-        matches_the_legacy_derivation::<Set65>();
+        matches_the_legacy_derivation::<Set65>(61);
     }
 
     #[test]
     fn ml_dsa_87_engine_path_matches_the_legacy_derivation() {
-        matches_the_legacy_derivation::<Set87>();
+        matches_the_legacy_derivation::<Set87>(61);
+    }
+
+    #[test]
+    fn ml_dsa_65_engine_path_matches_the_legacy_derivation_on_fresh_seeds() {
+        for _ in 0..2 {
+            matches_the_legacy_derivation::<Set65>(fresh_seed());
+        }
+    }
+
+    #[test]
+    fn ml_dsa_87_engine_path_matches_the_legacy_derivation_on_fresh_seeds() {
+        for _ in 0..2 {
+            matches_the_legacy_derivation::<Set87>(fresh_seed());
+        }
     }
 }

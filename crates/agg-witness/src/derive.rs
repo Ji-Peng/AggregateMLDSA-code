@@ -203,7 +203,7 @@ fn derive_core_for<P: ParamSet>(
             return Err(DeriveError::Invariant("|u| > B_u (UseHint lemma)"));
         }
         if inf_norm_slice(v.as_ref()) > P::B_V {
-            return Err(DeriveError::Invariant("|v| > B_v (3.4')"));
+            return Err(DeriveError::Invariant("|v| > B_v (honest quotient bound)"));
         }
     }
     Ok(SigWitness {

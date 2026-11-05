@@ -41,7 +41,7 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
             std::mem::align_of::<T>().max(64),
         )
         .expect("allocation layout");
-        // SAFETY: the call is guarded by the backend check and the length assertions above.
+        // SAFETY: `layout` has nonzero size (at least one byte) and a power-of-two alignment.
         let raw = unsafe { alloc(layout) };
         let ptr = NonNull::new(raw.cast::<T>()).unwrap_or_else(|| handle_alloc_error(layout));
         // The guard owns raw storage even if an initializer panics; no uninitialized T is read.
@@ -51,7 +51,8 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
         }
         impl Drop for Guard {
             fn drop(&mut self) {
-                // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+                // SAFETY: the guard owns the allocation made with `layout` and is dropped at
+                // most once (it is forgotten after a successful fill).
                 unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
             }
         }
@@ -60,7 +61,8 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
             layout,
         };
         let slots =
-            // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+            // SAFETY: the allocation holds `len` slots of `T` (its size is `len * size_of::<T>()`
+            // or one byte when that is zero), and `MaybeUninit<T>` has `T`'s layout.
             unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().cast::<MaybeUninit<T>>(), len) };
         slots
             .par_chunks_mut(block_len)
@@ -77,19 +79,21 @@ impl<T: Copy + Send + Sync> AlignedVec<T> {
 impl<T: Copy> Deref for AlignedVec<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
-        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+        // SAFETY: `len` never exceeds the allocation's slot count, and every slot below `len`
+        // is initialized (the constructors and `assume_init` guarantee it).
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 impl<T: Copy> DerefMut for AlignedVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
-        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+        // SAFETY: as in `deref`; `&mut self` makes the view unique.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 impl<T: Copy> Drop for AlignedVec<T> {
     fn drop(&mut self) {
-        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+        // SAFETY: `ptr` was allocated with `layout`, and ownership moves out of a value only
+        // through `ManuallyDrop` or `mem::forget`, so the block is freed exactly once.
         unsafe { dealloc(self.ptr.as_ptr().cast(), self.layout) }
     }
 }
@@ -149,10 +153,21 @@ impl KPlanes {
             rows,
         }
     }
+    /// The two coordinate planes, `rows` words each.
+    ///
+    /// # Panics
+    /// When the buffer does not hold exactly two planes of `rows` words: the vector kernels
+    /// read whole planes through raw pointers, so a short second plane must not get through.
     pub fn planes(&self) -> (&[u64], &[u64]) {
+        assert_eq!(self.buf.len(), 2 * self.rows, "two coordinate planes of `rows` words");
         self.buf.split_at(self.rows)
     }
+    /// [`Self::planes`], writable.
+    ///
+    /// # Panics
+    /// As [`Self::planes`].
     pub fn planes_mut(&mut self) -> (&mut [u64], &mut [u64]) {
+        assert_eq!(self.buf.len(), 2 * self.rows, "two coordinate planes of `rows` words");
         self.buf.split_at_mut(self.rows)
     }
     pub fn get(&self, i: usize) -> crate::K {
@@ -164,25 +179,6 @@ impl KPlanes {
         )
     }
 }
-/// Reusable ping-pong space. Growth happens explicitly, outside arithmetic rounds.
-pub struct Arena {
-    pub a: AlignedVec<u64>,
-    pub b: AlignedVec<u64>,
-}
-impl Arena {
-    pub fn new(len: usize) -> Self {
-        Self {
-            a: AlignedVec::fill_par(len, 1024, |_| 0),
-            b: AlignedVec::fill_par(len, 1024, |_| 0),
-        }
-    }
-    pub fn grow(&mut self, len: usize) {
-        if self.a.len() < len {
-            *self = Self::new(len);
-        }
-    }
-}
-
 impl<T: Copy + PartialEq> PartialEq for AlignedVec<T> {
     fn eq(&self, rhs: &Self) -> bool {
         **self == **rhs
@@ -203,7 +199,7 @@ impl<T: Copy> AlignedVec<T> {
             std::mem::align_of::<T>().max(64),
         )
         .expect("allocation layout");
-        // SAFETY: the call is guarded by the backend check and the length assertions above.
+        // SAFETY: `layout` has nonzero size (at least one byte) and a power-of-two alignment.
         let p = NonNull::new(unsafe { alloc(layout) }.cast())
             .unwrap_or_else(|| handle_alloc_error(layout));
         AlignedVec {
@@ -230,13 +226,17 @@ impl<T: Copy> AlignedVec<MaybeUninit<T>> {
     }
 }
 impl<T: Copy> AlignedVec<T> {
-    /// Relabel the initialized slots as possibly uninitialized. Every word keeps its value,
-    /// and the allocation and deallocation layouts are unchanged.
+    /// Relabel the slots as possibly uninitialized, at the allocation's full capacity: a
+    /// buffer truncated to one table's words returns to a [`Pool`] at the size it was
+    /// allocated with, so a later request of that size can reuse it. Every word keeps its
+    /// value, and the allocation and deallocation layouts are unchanged.
     pub fn into_uninit(self) -> AlignedVec<MaybeUninit<T>> {
         let this = std::mem::ManuallyDrop::new(self);
         AlignedVec {
             ptr: this.ptr.cast(),
-            len: this.len,
+            // Slots past the truncated length may be uninitialized, which `MaybeUninit`
+            // permits. A zero-length allocation has a one-byte layout and so zero slots.
+            len: this.layout.size() / std::mem::size_of::<T>(),
             layout: this.layout,
         }
     }
@@ -251,7 +251,8 @@ impl KPlanes {
         p0.par_chunks_mut(1024).zip(p1.par_chunks_mut(1024)).zip(q0.par_chunks_mut(1024).zip(q1.par_chunks_mut(1024))).enumerate().for_each(|(block,((p0,p1),(q0,q1)))| {
             for i in 0..p0.len() {let (a,b)=f(block*1024+i);p0[i].write(a.c0().to_canonical_u64());p1[i].write(a.c1().to_canonical_u64());q0[i].write(b.c0().to_canonical_u64());q1[i].write(b.c1().to_canonical_u64());}
         });
-        // SAFETY: the pointer and layout come from the same allocation and are released or reallocated exactly once.
+        // SAFETY: the parallel loop writes both coordinates of both outputs for every row
+        // `0..rows`, which is every slot of `p` and `q`.
         unsafe {(Self{buf:p.assume_init(),rows},Self{buf:q.assume_init(),rows})}
     }
 }

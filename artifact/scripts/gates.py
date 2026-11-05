@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Correctness gates at N=1024 for every kernel tier and every ML-DSA parameter set.
+"""Correctness gates at N=1024 for every kernel tier, ML-DSA parameter set and relation.
 
-Per set (`--params`, default 44,65,87): the aggregates of every tier must be byte-identical
-and equal to `expected/hashes.json` (keyed by set), every tier's verifier must accept, a
-flipped byte must be rejected, and the aggregate must not depend on the thread count
-(RAYON_NUM_THREADS=1 against the pinned allocation's count).
+Per set (`--params`, default 44,65,87) and relation (`--relations`, default
+h-u,h-exact,h-fips): the aggregates of every tier must be byte-identical and equal to
+`expected/hashes.json` (keyed by set and relation), every tier's verifier must accept,
+and a flipped byte must be rejected. Per set, the H-u aggregate must not depend on the
+thread count (RAYON_NUM_THREADS=1 against the pinned allocation's count).
 """
 
 import argparse
@@ -21,9 +22,8 @@ from common import (  # noqa: E402
     ARTIFACT,
     BIN,
     EXPECTED,
-    REPO,
+    built_revision,
     cpu_flags,
-    git_rev,
     load_configs,
     new_result_dir,
     pinned_commit,
@@ -77,6 +77,7 @@ def available_rows(configs, flags):
 
 
 PARAMS = ("44", "65", "87")
+RELATIONS = ("h-u", "h-exact", "h-fips")
 # The records of the reference aggregates: 1,024 keys from seed 42, records signed with seed 43.
 KEY_SEED = "42"
 RECORD_SEED = "43"
@@ -147,7 +148,7 @@ def check_reports(configs, rows):
     return reports
 
 
-def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params):
+def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params, relation, revision):
     results = {}
     for name, spec in configs["rows"].items():
         if not rows[name]["available"]:
@@ -163,8 +164,8 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params):
         env.update(spec.get("env", {}))
         env["RAYON_NUM_THREADS"] = str(allocation["threads"])
         env["OMP_NUM_THREADS"] = str(allocation["threads"])
-        env["AGG_GIT_REV"] = pinned_commit() or git_rev(REPO)
-        out = out_dir / f"gates-{params}-{name}.bin"
+        env["AGG_GIT_REV"] = revision
+        out = out_dir / f"gates-{params}-{relation}-{name}.bin"
         proc = sh(
             prefix
             + [
@@ -175,14 +176,16 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params):
                 "--records",
                 str(records),
                 "--relation",
-                "h-u",
+                relation,
                 "--out",
                 str(out),
             ],
             env,
         )
         if proc.returncode != 0:
-            raise SystemExit(f"{name}, ML-DSA-{params}: aggregate failed: {proc.stderr[-2000:]}")
+            raise SystemExit(
+                f"{name}, ML-DSA-{params}, {relation}: aggregate failed: {proc.stderr[-2000:]}"
+            )
         results[name] = {
             "available": True,
             "binary": spec["binary"],
@@ -193,7 +196,7 @@ def aggregate_all(configs, rows, prefix, allocation, records, out_dir, params):
     return results
 
 
-def verify_all(configs, rows, prefix, allocation, records, results, params):
+def verify_all(configs, rows, prefix, allocation, records, results, params, relation):
     verdicts = {}
     for name, spec in configs["rows"].items():
         if not results[name].get("available"):
@@ -214,6 +217,8 @@ def verify_all(configs, rows, prefix, allocation, records, results, params):
                 str(records),
                 "--aggregate",
                 results[name]["path"],
+                "--relation",
+                relation,
             ],
             env,
         )
@@ -230,7 +235,7 @@ def first_tier(rows):
 
 
 def threads_check(configs, rows, prefix, allocation, records, out_dir, params, results):
-    """The aggregate of the first available tier on one thread equals the pinned run's."""
+    """The H-u aggregate of the first available tier on one thread equals the pinned run's."""
     name = first_tier(rows)
     if name is None or allocation["threads"] == 1:
         return None
@@ -249,6 +254,8 @@ def threads_check(configs, rows, prefix, allocation, records, out_dir, params, r
             params,
             "--records",
             str(records),
+            "--relation",
+            "h-u",
             "--out",
             str(out),
         ],
@@ -263,12 +270,12 @@ def threads_check(configs, rows, prefix, allocation, records, out_dir, params, r
     }
 
 
-def negative_check(configs, rows, prefix, allocation, records, out_dir, params):
+def negative_check(configs, rows, prefix, allocation, records, out_dir, params, relation):
     name = first_tier(rows)
     if name is None:
         return False, None
-    sample = out_dir / f"gates-{params}-{name}.bin"
-    broken = out_dir / f"gates-{params}-broken.bin"
+    sample = out_dir / f"gates-{params}-{relation}-{name}.bin"
+    broken = out_dir / f"gates-{params}-{relation}-broken.bin"
     data = bytearray(sample.read_bytes())
     data[len(data) // 2] ^= 1
     broken.write_bytes(data)
@@ -288,6 +295,8 @@ def negative_check(configs, rows, prefix, allocation, records, out_dir, params):
             str(records),
             "--aggregate",
             str(broken),
+            "--relation",
+            relation,
         ],
         env,
     )
@@ -360,19 +369,19 @@ def sde_check(configs, rows, timeout=1800):
 
 
 NOTE = (
-    "Generated by ./run.sh gates --write-expected, keyed by ML-DSA parameter set. "
-    "Every configuration must reproduce these bytes."
+    "Generated by ./run.sh gates --write-expected, keyed by ML-DSA parameter set, "
+    "batch size and relation. Every tier must reproduce these bytes."
 )
 NATVER_BINARIES = {"44": "natver", "65": "natver65", "87": "natver87"}
 
 
-def expected_for(expected, params):
-    """The expected 1K H-u entry of a set (a file without set keys holds ML-DSA-44's)."""
+def expected_for(expected, params, relation):
+    """The expected 1K entry of a set and relation (a file without set keys holds ML-DSA-44's)."""
     aggregates = expected.get("aggregates", {}) if expected else {}
     if params in aggregates:
-        return aggregates[params].get("1024", {}).get("h-u")
+        return aggregates[params].get("1024", {}).get(relation)
     if params == "44":
-        return aggregates.get("1024", {}).get("h-u")
+        return aggregates.get("1024", {}).get(relation)
     return None
 
 
@@ -410,6 +419,12 @@ def main():
         help="comma-separated ML-DSA parameter sets (default 44,65,87)",
     )
     parser.add_argument(
+        "--relations",
+        default=",".join(RELATIONS),
+        type=lambda v: [r.strip() for r in v.split(",") if r.strip()],
+        help="comma-separated relations (default h-u,h-exact,h-fips)",
+    )
+    parser.add_argument(
         "--sde",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -419,6 +434,11 @@ def main():
     unknown = [params for params in args.params if params not in PARAMS]
     if unknown or not args.params:
         parser.error(f"--params: a comma-separated subset of {','.join(PARAMS)}, not {unknown}")
+    unknown = [relation for relation in args.relations if relation not in RELATIONS]
+    if unknown or not args.relations:
+        parser.error(
+            f"--relations: a comma-separated subset of {','.join(RELATIONS)}, not {unknown}"
+        )
     result_dir = new_result_dir() if not args.results else Path(args.results)
     result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "data").mkdir(exist_ok=True)
@@ -443,47 +463,67 @@ def main():
     expected_path = EXPECTED / "hashes.json"
     expected = read_json(expected_path) if expected_path.exists() else {}
 
+    revision = built_revision()
     per_set = {}
     for params in args.params:
         records = make_records(binary, result_dir / "data", env, params)
-        aggregates = aggregate_all(configs, rows, prefix, allocation, records, out_dir, params)
-        verdicts = verify_all(configs, rows, prefix, allocation, records, aggregates, params)
-        negative, negative_tier = negative_check(
-            configs, rows, prefix, allocation, records, out_dir, params
-        )
-        threads = threads_check(
-            configs, rows, prefix, allocation, records, out_dir, params, aggregates
-        )
-        expected_entry = expected_for(expected, params)
-        available = [entry for entry in aggregates.values() if entry.get("available")]
-        hashes = {entry["sha256"] for entry in available}
-        sizes = {entry["bytes"] for entry in available}
-        identical = len(hashes) <= 1 and len(sizes) <= 1
-        expected_ok = expected_entry is None or all(
-            entry["sha256"] == expected_entry.get("sha256")
-            and entry["bytes"] == expected_entry.get("bytes")
-            for entry in available
-        )
-        reference = None
-        if args.reference and params == args.params[0]:
-            ref = Path(args.reference)
-            reference = {
-                "path": str(ref),
-                "bytes": ref.stat().st_size,
-                "sha256": sha256_file(ref),
-                "matches": ref.stat().st_size in sizes and sha256_file(ref) in hashes,
+        per_relation = {}
+        for relation in args.relations:
+            aggregates = aggregate_all(
+                configs, rows, prefix, allocation, records, out_dir, params, relation, revision
+            )
+            verdicts = verify_all(
+                configs, rows, prefix, allocation, records, aggregates, params, relation
+            )
+            negative, negative_tier = negative_check(
+                configs, rows, prefix, allocation, records, out_dir, params, relation
+            )
+            expected_entry = expected_for(expected, params, relation)
+            available = [entry for entry in aggregates.values() if entry.get("available")]
+            hashes = {entry["sha256"] for entry in available}
+            sizes = {entry["bytes"] for entry in available}
+            identical = len(hashes) <= 1 and len(sizes) <= 1
+            # --write-expected re-pins the bytes, so the previous pin does not gate the run.
+            expected_ok = args.write_expected or expected_entry is None or all(
+                entry["sha256"] == expected_entry.get("sha256")
+                and entry["bytes"] == expected_entry.get("bytes")
+                for entry in available
+            )
+            reference = None
+            if args.reference and params == args.params[0] and relation == args.relations[0]:
+                ref = Path(args.reference)
+                reference = {
+                    "path": str(ref),
+                    "bytes": ref.stat().st_size,
+                    "sha256": sha256_file(ref),
+                    "matches": ref.stat().st_size in sizes and sha256_file(ref) in hashes,
+                }
+            per_relation[relation] = {
+                "aggregates": aggregates,
+                "verify": verdicts,
+                "negative_rejected": negative,
+                "negative_tier": negative_tier,
+                "all_configurations_identical": identical,
+                "expected": expected_entry,
+                "expected_ok": expected_ok,
+                "reference": reference,
             }
+        threads = None
+        if "h-u" in per_relation:
+            threads = threads_check(
+                configs,
+                rows,
+                prefix,
+                allocation,
+                records,
+                out_dir,
+                params,
+                per_relation["h-u"]["aggregates"],
+            )
         native = natver_check(params, allocation, result_dir)
         per_set[params] = {
-            "aggregates": aggregates,
-            "verify": verdicts,
-            "negative_rejected": negative,
-            "negative_tier": negative_tier,
+            "relations": per_relation,
             "threads": threads,
-            "all_configurations_identical": identical,
-            "expected": expected_entry,
-            "expected_ok": expected_ok,
-            "reference": reference,
             "native": native,
         }
 
@@ -498,11 +538,11 @@ def main():
 
     report = {
         "timestamp_utc": utc_stamp(),
-        "commit": git_rev(REPO),
+        "commit": revision,
         "source_commit": pinned_commit(),
         "machine": state.get("cpu_model"),
         "n": 1024,
-        "relation": "h-u",
+        "relations": args.relations,
         "threads": allocation["threads"],
         "cpuset": allocation["cpuset"],
         "tiers": [name for name, entry in rows.items() if entry["available"]],
@@ -515,85 +555,85 @@ def main():
     write_json(result_dir / "gates.json", report)
 
     if args.write_expected:
-        # Keep the entries of the sets not run; a file without set keys holds ML-DSA-44's.
+        # Keep the entries of the sets and relations not run; a file without set keys
+        # holds ML-DSA-44's. Every tier must match the one entry per set and relation,
+        # so per-tier copies are not stored.
         document = dict(expected)
         if "1024" in document.get("aggregates", {}):
             document["aggregates"] = {"44": document["aggregates"]}
-            document["per_configuration"] = {"44": document.get("per_configuration", {})}
-        document["commit"] = pinned_commit()
-        document["relation"] = "h-u"
+        document.pop("per_configuration", None)
+        document.pop("relation", None)
+        document["commit"] = revision
         document["records"] = (
             f"keygen-batch --params P --count 1024 --seed {KEY_SEED}; "
             f"sign-batch --params P --count 1024 --seed {RECORD_SEED}"
         )
         document.setdefault("aggregates", {})
-        document.setdefault("per_configuration", {})
         for params, result in per_set.items():
-            available = {
-                name: entry
-                for name, entry in result["aggregates"].items()
-                if entry.get("available")
-            }
-            first = next(iter(available.values()))
-            document["aggregates"][params] = {
-                "1024": {"h-u": {"bytes": first["bytes"], "sha256": first["sha256"]}}
-            }
-            document["per_configuration"][params] = {
-                name: {"bytes": entry["bytes"], "sha256": entry["sha256"]}
-                for name, entry in available.items()
-            }
+            entries = document["aggregates"].setdefault(params, {}).setdefault("1024", {})
+            for relation, outcome in result["relations"].items():
+                available = [
+                    entry for entry in outcome["aggregates"].values() if entry.get("available")
+                ]
+                if not outcome["all_configurations_identical"]:
+                    raise SystemExit(
+                        f"ML-DSA-{params}, {relation}: the tiers disagree; not writing "
+                        f"{expected_path}"
+                    )
+                first = available[0]
+                entries[relation] = {"bytes": first["bytes"], "sha256": first["sha256"]}
         document["note"] = NOTE
         write_json(expected_path, document)
         print(f"wrote {expected_path}")
 
     ok = True
     for params, result in per_set.items():
-        print(f"gates at N = 1024, H-u, ML-DSA-{params}")
-        for name, entry in result["aggregates"].items():
-            if entry.get("available"):
-                suffix = " (gate only)" if configs["rows"][name].get("gates_only") else ""
-                verdict = "accept" if result["verify"].get(name) else "REJECT"
+        for relation, outcome in result["relations"].items():
+            print(f"gates at N = 1024, ML-DSA-{params}, {relation}")
+            for name, entry in outcome["aggregates"].items():
+                if entry.get("available"):
+                    suffix = " (gate only)" if configs["rows"][name].get("gates_only") else ""
+                    verdict = "accept" if outcome["verify"].get(name) else "REJECT"
+                    print(
+                        f"  {name:<7} {entry['bytes']} B  {entry['sha256']}  "
+                        f"verify={verdict}{suffix}"
+                    )
+                else:
+                    print(f"  {name:<7} n/a ({entry.get('reason')})")
+            negative = outcome["negative_rejected"]
+            print(
+                f"  negative check: {'rejected as expected' if negative else 'FAILED'} "
+                f"({outcome['negative_tier']})"
+            )
+            print(f"  all configurations identical: {outcome['all_configurations_identical']}")
+            entry = outcome["expected"]
+            print(f"  expected file: {entry if entry else 'not present'}")
+            reference = outcome["reference"]
+            if reference:
                 print(
-                    f"  {name:<7} {entry['bytes']} B  {entry['sha256']}  "
-                    f"verify={verdict}{suffix}"
+                    f"  reference {reference['path']}: {reference['bytes']} B "
+                    f"{reference['sha256']} match={reference['matches']}"
                 )
-            else:
-                print(f"  {name:<7} n/a ({entry.get('reason')})")
-        negative = result["negative_rejected"]
-        print(
-            f"  negative check: {'rejected as expected' if negative else 'FAILED'} "
-            f"({result['negative_tier']})"
-        )
+            ok = ok and (
+                outcome["all_configurations_identical"]
+                and all(outcome["verify"].values())
+                and negative
+                and outcome["expected_ok"]
+                and (reference is None or reference["matches"])
+            )
         threads = result["threads"]
         if threads:
             print(
-                f"  threads {threads.get('threads')}: "
-                f"{'identical' if threads['ok'] else 'DIFFER'} ({threads['tier']})"
-            )
-        print(f"  all configurations identical: {result['all_configurations_identical']}")
-        entry = result["expected"]
-        print(f"  expected file: {entry if entry else 'not present'}")
-        reference = result["reference"]
-        if reference:
-            print(
-                f"  reference {reference['path']}: {reference['bytes']} B "
-                f"{reference['sha256']} match={reference['matches']}"
+                f"  ML-DSA-{params} threads {threads.get('threads')}: "
+                f"{'identical' if threads['ok'] else 'DIFFER'} ({threads['tier']}, h-u)"
             )
         native = result["native"]
         if native:
             print(
-                f"  natver: rejected {native.get('rejected_uncached')} uncached / "
+                f"  ML-DSA-{params} natver: rejected {native.get('rejected_uncached')} uncached / "
                 f"{native.get('rejected_cached')} cached"
             )
-        ok = ok and (
-            result["all_configurations_identical"]
-            and all(result["verify"].values())
-            and negative
-            and result["expected_ok"]
-            and (threads is None or threads["ok"])
-            and (native is None or native.get("ok"))
-            and (reference is None or reference["matches"])
-        )
+        ok = ok and (threads is None or threads["ok"]) and (native is None or native.get("ok"))
     for name, entry in reports.items():
         if entry.get("available"):
             summary = entry["summary"]

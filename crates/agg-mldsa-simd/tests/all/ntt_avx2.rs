@@ -18,7 +18,7 @@ fn engine() -> Option<Engine> {
 fn forward_and_roundtrips() {
     let Some(e) = engine() else { return };
     let mut rng = common::SplitMix64::new(42);
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         let c = consts(p);
         let oracle = common::oracle_ntt_prime(p);
         for case in 0..292 {
@@ -92,7 +92,7 @@ fn dot_schoolbook_and_orders() {
     }
     e.order_to_fips(&mut labels2);
     assert_eq!(labels, labels2);
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         let c = consts(p);
         for _ in 0..8 {
             let a: [Poly32; 4] = std::array::from_fn(|_| {
@@ -166,7 +166,7 @@ fn dot_schoolbook_and_orders() {
 fn reduction_full_i32() {
     let Some(e) = engine() else { return };
     let mut rng = common::SplitMix64::new(99);
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         for _ in 0..64 {
             let mut a = Poly32(std::array::from_fn(|i| match i {
                 0 => i32::MIN,
@@ -209,7 +209,7 @@ fn schedule_bounds() {
     // Absolute-value envelopes in natural butterfly coordinates; the register
     // shuffles only permute these positions. Every twiddle magnitude is read
     // from the table the kernels load. Use ceiling division throughout.
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         let c = consts(p);
         let modulus = c.p as i64;
         let oracle = common::oracle_ntt_prime(p);
@@ -255,7 +255,7 @@ fn schedule_bounds() {
             max_forward as f64 / modulus as f64
         );
         assert!(max_forward < (1i64 << 31));
-        // Inverse input: |x| < q for q (dot4 output), |x| <= (P2-1)/2 for P2.
+        // Inverse input: |x| < q for q (dot4 output), |x| <= (p-1)/2 for P2 and P3.
         bound = [if p == Prime::Q {
             modulus - 1
         } else {
@@ -274,10 +274,17 @@ fn schedule_bounds() {
                     max_inverse = max_inverse.max(sum);
                     bound[j] = sum;
                     bound[j + len] = red(sum, tw[k]);
-                    if p == Prime::P2 && layer == 3 {
-                        // Sum outputs are reduced by a Montgomery multiply with R mod p.
+                    // Sum outputs are reduced by a Montgomery multiply with R mod p:
+                    // P2 after the fourth layer, P3 after the third and the fifth.
+                    let reduced = match p {
+                        Prime::Q => false,
+                        Prime::P2 => layer == 3,
+                        Prime::P3 => layer == 2 || layer == 4,
+                    };
+                    if reduced {
                         bound[j] = red(bound[j], c.mont as i64);
-                        assert!(bound[j] < 63 * modulus / 100);
+                        let limit = if p == Prime::P2 { 63 } else { 67 };
+                        assert!(bound[j] < limit * modulus / 100, "{p:?} layer {layer}");
                     }
                 }
             }
@@ -322,7 +329,7 @@ fn schedule_bounds() {
 #[test]
 fn inverse_extreme_inputs() {
     let Some(e) = engine() else { return };
-    for p in [Prime::Q, Prime::P2] {
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
         let c = consts(p);
         let oracle = common::oracle_ntt_prime(p);
         let max = if p == Prime::Q { c.p - 1 } else { c.p / 2 };
@@ -361,74 +368,80 @@ fn inverse_extreme_inputs() {
 
 #[test]
 fn dot_extreme_inputs() {
-    // Largest P2 products the contract allows: centered a at +-(P2-1)/2 and b
-    // at the forward envelope, all four products of one sign or alternating.
+    // Largest products the contract allows: centered a at +-(p-1)/2 (canonical
+    // q - 1 for q) and b at the forward envelope, L = 4 and the widest L = 7,
+    // all products of one sign or in sign patterns. For P3 and L = 7 the
+    // Montgomery output reaches 1.9p, past what one centering pass covers.
     let Some(e) = engine() else { return };
     let s = Engine::new(Backend::Scalar).unwrap();
-    for p in [Prime::Q, Prime::P2] {
-        let c = consts(p);
-        let (amax, bmax) = if p == Prime::Q {
-            (c.p - 1, 37_829_663)
-        } else {
-            (c.p / 2, 711_838_595)
-        };
-        for pattern in 0..6 {
-            let sign = |i: usize, k: usize| -> i32 {
-                match pattern {
-                    0 => 1,
-                    1 => -1,
-                    2 => {
-                        if i % 2 == 0 {
-                            1
-                        } else {
-                            -1
-                        }
-                    }
-                    3 => {
-                        if k % 2 == 0 {
-                            1
-                        } else {
-                            -1
-                        }
-                    }
-                    4 => {
-                        if (i / 8) % 2 == 0 {
-                            1
-                        } else {
-                            -1
-                        }
-                    }
-                    _ => {
-                        if i % 3 == 0 {
-                            -1
-                        } else {
-                            1
-                        }
+    for p in [Prime::Q, Prime::P2, Prime::P3] {
+        dot_extreme::<4>(&e, &s, p);
+        dot_extreme::<7>(&e, &s, p);
+    }
+}
+fn dot_extreme<const L: usize>(e: &Engine, s: &Engine, p: Prime) {
+    let c = consts(p);
+    let (amax, bmax) = match p {
+        Prime::Q => (c.p - 1, 37_829_663),
+        Prime::P2 => (c.p / 2, 711_838_595),
+        Prime::P3 => (c.p / 2, 1_715_632_360),
+    };
+    for pattern in 0..6 {
+        let sign = |i: usize, k: usize| -> i32 {
+            match pattern {
+                0 => 1,
+                1 => -1,
+                2 => {
+                    if i % 2 == 0 {
+                        1
+                    } else {
+                        -1
                     }
                 }
-            };
-            let a: [Poly32; 4] = std::array::from_fn(|k| {
-                Poly32(std::array::from_fn(|i| {
-                    if p == Prime::Q {
-                        amax
+                3 => {
+                    if k % 2 == 0 {
+                        1
                     } else {
-                        sign(i, k) * amax
+                        -1
                     }
-                }))
-            });
-            let b: [Poly32; 4] =
-                std::array::from_fn(|k| Poly32(std::array::from_fn(|i| sign(i, k) * bmax)));
-            let mut got = Poly32::zero();
-            let mut want = Poly32::zero();
-            e.dot4(p, &a, &b, &mut got);
-            s.dot4(p, &a, &b, &mut want);
-            common::assert_poly_eq_mod_p(&got, &want, c.p);
-            if p == Prime::P2 {
-                check_range(&got, c.p, Form::Centered);
-                assert_eq!(got, want, "pattern {pattern}");
-            } else {
-                assert!(got.0.iter().all(|x| x.abs() < c.p));
+                }
+                4 => {
+                    if (i / 8) % 2 == 0 {
+                        1
+                    } else {
+                        -1
+                    }
+                }
+                _ => {
+                    if i % 3 == 0 {
+                        -1
+                    } else {
+                        1
+                    }
+                }
             }
+        };
+        let a: [Poly32; L] = std::array::from_fn(|k| {
+            Poly32(std::array::from_fn(|i| {
+                if p == Prime::Q {
+                    amax
+                } else {
+                    sign(i, k) * amax
+                }
+            }))
+        });
+        let b: [Poly32; L] =
+            std::array::from_fn(|k| Poly32(std::array::from_fn(|i| sign(i, k) * bmax)));
+        let mut got = Poly32::zero();
+        let mut want = Poly32::zero();
+        e.dot_l::<L>(p, &a, &b, &mut got);
+        s.dot_l::<L>(p, &a, &b, &mut want);
+        common::assert_poly_eq_mod_p(&got, &want, c.p);
+        if p == Prime::Q {
+            assert!(got.0.iter().all(|x| x.abs() < c.p));
+        } else {
+            check_range(&got, c.p, Form::Centered);
+            assert_eq!(got, want, "{p:?} L = {L} pattern {pattern}");
         }
     }
 }
