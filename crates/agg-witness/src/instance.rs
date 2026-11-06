@@ -127,23 +127,25 @@ pub fn challenge_from_sparse_tau<const TAU: usize>(c: &agg_mldsa_simd::Challenge
     }
 }
 
-/// SampleInBall of a tile of seeds and `T = 2^d (c t1)` of each record (`k 256` cells per
-/// record in `t`) on `engine`, with `tau = TAU` (`P::TAU`).
+/// SampleInBall of a tile of seeds (`seeds.len() <= RECORD_TILE`) and `T = 2^d (c t1)` of
+/// each record (`k 256` cells per record in `t`) on `engine`, with `tau = TAU` (`P::TAU`).
 fn public_tile<P: ParamSet, const TAU: usize>(
     engine: &Engine,
     seeds: &[&[u8]],
     keys: &[&ExpandedKey<P>],
-    challenges: &mut [Challenge],
     t: &mut [i32],
-) {
+) -> Vec<Challenge> {
     assert_eq!(P::TAU, TAU, "the challenge weight of the parameter set");
-    let mut sparse = vec![agg_mldsa_simd::Challenge::<TAU>::zero(); seeds.len()];
-    engine.sample_in_ball_many(seeds, &mut sparse);
-    for (((c, sparse), key), out) in challenges.iter_mut().zip(&sparse).zip(keys).zip(t.chunks_exact_mut(P::K * N)) {
-        *c = challenge_from_sparse_tau(sparse);
+    let mut sparse = [agg_mldsa_simd::Challenge::<TAU>::zero(); RECORD_TILE];
+    let sparse = &mut sparse[..seeds.len()];
+    engine.sample_in_ball_many(seeds, sparse);
+    let mut challenges = Vec::with_capacity(seeds.len());
+    for ((sparse, key), out) in sparse.iter().zip(keys).zip(t.chunks_exact_mut(P::K * N)) {
+        challenges.push(challenge_from_sparse_tau(sparse));
         let (rows, _) = out.as_chunks_mut::<N>();
         engine.sparse_ct_slice(sparse, key.t1.as_ref(), D as u32, rows);
     }
+    challenges
 }
 
 impl PublicInstance<Set44> {
@@ -269,17 +271,15 @@ impl<P: ParamSet> PublicInstance<P> {
 
         // `mu`, `c = SampleInBall(c~)` and `T = 2^d (c t1)` per tile of records on the SIMD
         // engine (as for ML-DSA-44); `T` goes straight into the flat buffer (fresh zeroed
-        // pages, first touched by the writers).
+        // pages, first touched by the writers) and each tile returns its own `(mus, c)` chunk
+        // so the calling thread does not allocate and fault a batch-wide `Challenge` vector.
         let engine = agg_mldsa_simd::engine();
-        let mut mus = vec![[0u8; TR_BYTES]; inputs.len()];
-        let mut challenges = vec![Challenge { coeffs: [0; N], positions: Vec::new() }; inputs.len()];
         let mut t = vec![0_i32; inputs.len() * P::K * N];
-        mus.par_chunks_mut(RECORD_TILE)
-            .zip(challenges.par_chunks_mut(RECORD_TILE))
-            .zip(t.par_chunks_mut(RECORD_TILE * P::K * N))
+        let tiles: Vec<([[u8; TR_BYTES]; RECORD_TILE], Vec<Challenge>)> = t
+            .par_chunks_mut(RECORD_TILE * P::K * N)
             .zip(inputs.par_chunks(RECORD_TILE))
             .enumerate()
-            .for_each(|(n, (((mus, challenges), t), tile))| {
+            .map(|(n, (t, tile))| {
                 let first = n * RECORD_TILE;
                 let tile_keys: Vec<&ExpandedKey<P>> =
                     (first..first + tile.len()).map(|i| keys[slot[i]].as_deref().expect("checked above")).collect();
@@ -288,38 +288,53 @@ impl<P: ParamSet> PublicInstance<P> {
                     .zip(tile)
                     .map(|(key, (_, msg, _))| [&key.tr[..], &[0u8, 0u8][..], &[][..], *msg])
                     .collect();
-                engine.shake256_many(&mu_inputs, TR_BYTES, mus.as_flattened_mut());
+                let mut mus = [[0u8; TR_BYTES]; RECORD_TILE];
+                engine.shake256_many(&mu_inputs, TR_BYTES, mus[..tile.len()].as_flattened_mut());
                 let seeds: Vec<&[u8]> = tile.iter().map(|(_, _, c)| c.as_ref()).collect();
-                let t_rows = |c: &Challenge, key: &ExpandedKey<P>, out: &mut [i32]| {
-                    let (rows, _) = out.as_chunks_mut::<N>();
-                    crate::expand::public_t_into_for::<P>(c, &key.t1, rows);
+                let challenges = match P::TAU {
+                    39 => public_tile::<P, 39>(engine, &seeds, &tile_keys, t),
+                    49 => public_tile::<P, 49>(engine, &seeds, &tile_keys, t),
+                    60 => public_tile::<P, 60>(engine, &seeds, &tile_keys, t),
+                    _ => seeds
+                        .iter()
+                        .zip(&tile_keys)
+                        .zip(t.chunks_exact_mut(P::K * N))
+                        .map(|((seed, key), out)| {
+                            let c = crate::native::sample_in_ball_for::<P>(seed);
+                            let (rows, _) = out.as_chunks_mut::<N>();
+                            crate::expand::public_t_into_for::<P>(&c, &key.t1, rows);
+                            c
+                        })
+                        .collect(),
                 };
-                match P::TAU {
-                    39 => public_tile::<P, 39>(engine, &seeds, &tile_keys, challenges, t),
-                    49 => public_tile::<P, 49>(engine, &seeds, &tile_keys, challenges, t),
-                    60 => public_tile::<P, 60>(engine, &seeds, &tile_keys, challenges, t),
-                    _ => {
-                        for (((c, seed), key), out) in challenges.iter_mut().zip(&seeds).zip(&tile_keys).zip(t.chunks_exact_mut(P::K * N)) {
-                            *c = crate::native::sample_in_ball_for::<P>(seed);
-                            t_rows(c, key, out);
-                        }
-                    }
-                }
-            });
+                (mus, challenges)
+            })
+            .collect();
 
         let t = Arc::new(t);
-        let records = mus
+        let records = tiles
             .into_par_iter()
-            .zip(challenges)
-            .zip(inputs)
+            .zip(inputs.par_chunks(RECORD_TILE))
             .enumerate()
-            .map(|(i, ((mu, c), (_, msg, c_tilde)))| PublicRecord {
-                key: key_of(i),
-                msg: msg.to_vec(),
-                c_tilde: *c_tilde,
-                mu,
-                c,
-                t: TView::new(Arc::clone(&t), i),
+            .flat_map_iter(|(n, ((mus, challenges), tile))| {
+                let first = n * RECORD_TILE;
+                let t = &t;
+                challenges
+                    .into_iter()
+                    .zip(mus)
+                    .zip(tile)
+                    .enumerate()
+                    .map(move |(k, ((c, mu), (_, msg, c_tilde)))| {
+                        let i = first + k;
+                        PublicRecord {
+                            key: key_of(i),
+                            msg: msg.to_vec(),
+                            c_tilde: *c_tilde,
+                            mu,
+                            c,
+                            t: TView::new(Arc::clone(t), i),
+                        }
+                    })
             })
             .collect();
         Ok(Self { geom, records })

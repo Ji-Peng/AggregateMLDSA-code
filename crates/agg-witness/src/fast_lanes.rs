@@ -111,7 +111,7 @@ where
     let (z_p2, z_p3) = (z_hat(Prime::P2), z_hat(Prime::P3));
     let key = &record.key;
     let t = &*record.t;
-    let mut w1 = vec![[0u8; N]; k];
+    let mut w1 = [[0u8; N]; 8];
     for r in 0..k {
         let a: [Poly32; L] = std::array::from_fn(|s| Poly32(*<P as ParamSet>::get_coeff(&key.a, r, s)));
         // The Mont inverse scale cancels the dot's 1/R, so the canonical outputs are
@@ -135,7 +135,7 @@ where
         }
         w1[r] = out.rows[r].w1;
     }
-    engine.pack_w1(&w1, w1_bytes);
+    engine.pack_w1(&w1[..k], w1_bytes);
     true
 }
 
@@ -162,6 +162,8 @@ where
         l => panic!("no lane derivation for {l} columns"),
     };
     let digest_bytes = <P as ParamSet>::C_TILDE_BYTES;
+    let w1_encode_bytes = <P as ParamSet>::W1_ENCODE_BYTES;
+    assert!(w1_encode_bytes <= 1024 && digest_bytes <= 64);
     for (tile, ((records, sigs), out)) in records
         .chunks(TILE)
         .zip(sigs.chunks(TILE))
@@ -169,17 +171,18 @@ where
         .enumerate()
     {
         let mut ok = [false; TILE];
-        let mut w1_bytes = vec![vec![0u8; <P as ParamSet>::W1_ENCODE_BYTES]; records.len()];
+        let mut w1_bytes = [[0u8; 1024]; TILE];
         for i in 0..records.len() {
-            ok[i] = one(engine, records[i], sigs[i], &mut out[i], &mut w1_bytes[i]);
+            ok[i] = one(engine, records[i], sigs[i], &mut out[i], &mut w1_bytes[i][..w1_encode_bytes]);
         }
         let live: Vec<usize> = (0..records.len()).filter(|&i| ok[i]).collect();
         let inputs: Vec<[&[u8]; 4]> = live
             .iter()
-            .map(|&i| [&records[i].mu[..], &w1_bytes[i][..], &[][..], &[][..]])
+            .map(|&i| [&records[i].mu[..], &w1_bytes[i][..w1_encode_bytes], &[][..], &[][..]])
             .collect();
-        let mut digests = vec![0u8; live.len() * digest_bytes];
-        engine.shake256_many(&inputs, digest_bytes, &mut digests);
+        let mut digests = [0u8; TILE * 64];
+        let digests = &mut digests[..live.len() * digest_bytes];
+        engine.shake256_many(&inputs, digest_bytes, digests);
         for (&i, digest) in live.iter().zip(digests.chunks_exact(digest_bytes)) {
             ok[i] = digest == records[i].c_tilde.as_ref();
         }
