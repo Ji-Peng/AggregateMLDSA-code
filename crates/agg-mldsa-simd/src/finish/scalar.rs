@@ -41,7 +41,7 @@ pub(crate) fn sparse_ct_slice<const TAU: usize>(
     }
 }
 
-#[inline]
+#[inline(always)]
 fn freeze(x: i32) -> i32 {
     // |x| < q + B_T: 2^28.33 (ML-DSA-44), 2^28.65 (65), 2^28.93 (87). The rounded
     // quotient by 2^23 leaves (-q,q) for any |x| < 2^31 - 2^22.
@@ -167,13 +167,14 @@ const P2_INV_MONT_P3: i32 = (((P2_INV_MOD_P3 as i64) << 32) % P3 as i64) as i32;
 /// vectorises. A row with any out-of-bound value is finished again by the reference, which
 /// returns its error, so the result is the reference's (on an error the outputs are
 /// unspecified, as for every finish).
+#[inline(always)]
 pub(crate) fn finish_row_3p<P: ParamSet>(
     row: FinishRow3P<'_>,
     out: &mut FinishOut,
 ) -> Result<(), FinishError> {
     let (p2, p3) = (i64::from(P2), i64::from(P3));
     let (m, kb) = (p2 * p3, k_bound::<P>());
-    let mut k = [0_i32; 256];
+    let mut k = [std::mem::MaybeUninit::<i32>::uninit(); 256];
     let mut bad = false;
     for i in 0..256 {
         let xq = row.xq[i];
@@ -192,9 +193,11 @@ pub(crate) fn finish_row_3p<P: ParamSet>(
         let kk = if kk > m / 2 { kk - m } else { kk };
         bad |= kk.abs() > kb;
         // |kk| <= k_bound < 2^29 whenever the row is accepted.
-        k[i] = kk as i32;
+        k[i].write(kk as i32);
     }
-    if bad || !finish_from_k::<P>(&row.xq.0, &k, row.t, row.h, out) {
+    // SAFETY: the loop above initialized all 256 entries of `k`.
+    let k = unsafe { &*(k.as_ptr().cast::<[i32; 256]>()) };
+    if bad || !finish_from_k::<P>(&row.xq.0, k, row.t, row.h, out) {
         return finish_row_3p_reference::<P>(row, out);
     }
     Ok(())
@@ -206,7 +209,7 @@ pub(crate) fn finish_row_3p<P: ParamSet>(
 #[inline(always)]
 fn finish_from_k<P: ParamSet>(xq: &[i32; 256], k: &[i32; 256], t: &[i32; 256], h: &[u8; 256], out: &mut FinishOut) -> bool {
     let alpha = 2 * P::GAMMA2;
-    let mut w = [0_i32; 256];
+    let mut w = [std::mem::MaybeUninit::<i32>::uninit(); 256];
     let mut out_of_bounds = 0_u32;
     for i in 0..256 {
         let xqi = xq[i];
@@ -235,11 +238,13 @@ fn finish_from_k<P: ParamSet>(xq: &[i32; 256], k: &[i32; 256], t: &[i32; 256], h
         out_of_bounds |= u32::from(ve.unsigned_abs() > P::C_B_Q)
             | u32::from(u.unsigned_abs() > P::B_U as u32)
             | u32::from(v.unsigned_abs() > P::B_V as u32);
-        w[i] = wi;
+        w[i].write(wi);
         out.u[i] = u;
         out.v[i] = v;
     }
-    for (dst, &wi) in out.w1.iter_mut().zip(&w) {
+    // SAFETY: the loop above initialized all 256 entries of `w`.
+    let w = unsafe { &*(w.as_ptr().cast::<[i32; 256]>()) };
+    for (dst, &wi) in out.w1.iter_mut().zip(w) {
         *dst = wi as u8;
     }
     out_of_bounds == 0
@@ -250,6 +255,7 @@ fn finish_from_k<P: ParamSet>(xq: &[i32; 256], k: &[i32; 256], t: &[i32; 256], h
 /// `[-k_bound, k_bound]` (the three-prime bound), and `xq = A z mod q`, `k` follow from the
 /// CRT value: `xq` from its parts modulo q, `k = (A z - xq) q^-1 mod 2^32` (exact, `|k| <
 /// 2^31`). The result equals [`finish_row_3p_reference`] on the residues of the same A z.
+#[inline(always)]
 pub(crate) fn finish_row_2p<P: ParamSet>(
     row: FinishRow2P<'_>,
     out: &mut FinishOut,
@@ -257,8 +263,8 @@ pub(crate) fn finish_row_2p<P: ParamSet>(
     let (p2, p3, q) = (i64::from(P2), i64::from(P3), i64::from(Q));
     let (m, kb) = (p2 * p3, k_bound::<P>());
     let (lo, hi) = (-kb * q, (kb + 1) * q);
-    let mut xq = [0_i32; 256];
-    let mut k = [0_i32; 256];
+    let mut xq = [std::mem::MaybeUninit::<i32>::uninit(); 256];
+    let mut k = [std::mem::MaybeUninit::<i32>::uninit(); 256];
     let mut out_of_range = 0_u32;
     for i in 0..256 {
         let (x2, x3) = (row.xp2[i], row.xp3[i]);
@@ -275,17 +281,20 @@ pub(crate) fn finish_row_2p<P: ParamSet>(
         // (-2q, P2 + q), inside freeze's input range.
         let s = x2 + mont(i64::from(factor) * i64::from(P2_MONT_Q), CONSTS_Q) - (M_MOD_Q & wrap as i32);
         let r = freeze(s);
-        xq[i] = r;
+        xq[i].write(r);
         // A z - xq = k q exactly with |k| <= k_bound < 2^31 when accepted.
-        k[i] = (az as i32).wrapping_sub(r).wrapping_mul(QINV32);
+        k[i].write((az as i32).wrapping_sub(r).wrapping_mul(QINV32));
     }
     if out_of_range != 0 {
         // The three-prime finish checks every k before any other bound.
         return Err(FinishError::VBound);
     }
-    if !finish_from_k::<P>(&xq, &k, row.t, row.h, out) {
+    // SAFETY: the loop above initialized all 256 entries of `xq` and `k`.
+    let xq = unsafe { &*(xq.as_ptr().cast::<[i32; 256]>()) };
+    let k = unsafe { &*(k.as_ptr().cast::<[i32; 256]>()) };
+    if !finish_from_k::<P>(xq, k, row.t, row.h, out) {
         let k_coeffs = k.map(i64::from);
-        return finish_row_from_k::<P>(&Poly32(xq), &k_coeffs, row.t, row.h, out);
+        return finish_row_from_k::<P>(&Poly32(*xq), &k_coeffs, row.t, row.h, out);
     }
     Ok(())
 }

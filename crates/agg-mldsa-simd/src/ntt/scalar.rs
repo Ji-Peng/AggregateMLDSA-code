@@ -36,7 +36,7 @@ const ZQ: [(i32, i32); 256] = twiddles(CONSTS_Q);
 const ZP: [(i32, i32); 256] = twiddles(CONSTS_P2);
 const ZP3: [(i32, i32); 256] = twiddles(CONSTS_P3);
 
-#[inline]
+#[inline(always)]
 pub(crate) fn mont(a: i64, c: PrimeConsts) -> i32 {
     let t = (a as i32).wrapping_mul(c.pinv);
     ((a >> 32) - ((t as i64 * c.p as i64) >> 32)) as i32
