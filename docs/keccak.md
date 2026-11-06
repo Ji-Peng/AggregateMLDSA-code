@@ -3,8 +3,8 @@
 `crates/agg-keccak` proves, for a batch of signatures, the witness-dependent hash of
 ML-DSA verification, `c~_i = SHAKE256(mu_i || w1Encode(w1'_i), 32)`, with Flock HEAD
 (`succinctlabs/flock` `83f963e`, vendored `flock-core`, K12) and its Ligerito PCS. Deviations
-from the spec are listed in `docs/deviations.md` (the K entries). Sections 1 to 6 describe
-the sponge gate and the standalone sponge proof, Section 9 the tied part that mode A uses,
+from the spec are listed in `docs/deviations.md` (the K entries). Sections 1 to 3 describe
+the sponge gate, Section 9 the tied part that mode A uses,
 Section 12 the Flock bytes: the mode-A profile (`Fast` by default, or `Slim`), spans over all
 segments, the level-0 cap, the options measured or estimated, and (12.7) tied-part proof
 version 5, the virtual parity chain.
@@ -108,51 +108,21 @@ up to 2^19 is never committed. Per signature the spec counts 6,144 + 7 * 38,400 
 bits; the gate prunes 1,344 of round 23 of P7 and adds 512 (`mu`), 256 (`c~`) and the
 constant (K1).
 
-## 4. Flock integration and API
+## 4. Shared parameters
 
-Module `prover`. `GateBatch` proves `n` instances of a gate in one union-circuit proof:
+Module `prover` keeps the parameters that the tied part (Section 9) uses:
 
-- Registry: the one gate type, capacity `2^nu`,
-  `nu = max(ceil(log2 n), 3, 22 - k_log)`, plus one when `n = 2^nu < 2^11` (the full-height
-  stack would select Flock's block-first opening, whose cost is about `128^2` field
-  operations per used column, 2,146 columns here, independent of `n`). Dummy rows
-  `[n, 2^nu)` are identically zero; Flock's count-derived constant-pin target accepts them.
-- Circuit: per live instance `j` and schema word `w`, one wire class
-  `{cell(w, j), public word 6 j + w}` (sponge: 4 `mu` words, then 2 `c~` words).
-- Commit, then prove (spec Section 8 driver, Section 10 events 2 to 6; deviation K7):
-  `GateBatch::commit(buffers)` / `commit_inputs(inputs) -> CommittedBatch` computes Flock's
-  commitment before any seed exists; its `commitment()` is the event-2 payload.
-  `prove_committed(committed, public, fs)` runs Flock's prover with `fs = fs_sigma` and
-  asserts that Flock commits to the same cap (Flock 83f963e recommits internally; it has no
-  entry that takes a precomputed commitment). The tied part of the mode-A driver does not go
-  through Flock's prover entry and opens the event-2 commitment without recommitting (K14,
-  Section 9); this standalone path still commits twice. `verify(public, commitment, proof, fs)` hands
-  the event-2 commitment, with the verifier's own PCS parameters, to Flock's verifier.
-  `prove`/`prove_buffers` return `(commitment, proof)` in one call for callers whose seed
-  does not depend on the commitment (tests, benches).
-- Fiat-Shamir: `FsChallenger::new("agg-mldsa/v1/keccak")`, absorb the 32-byte seed `fs`
-  (spec event 5) and the gate digest, then `prove_fast_ligerito_union_circuit` binds
-  registry, counts, commitment, circuit digest and public words.
-- PCS: Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding), `Slim` (rate 1/4), or
-  `Slim8` (rate 1/8, K18), `Profile::{Fast, Secure, Slim, Slim8}` with header bytes 0, 1, 3, 4
-  (2 is unassigned); Flock's documented accounting: `Fast`, `Slim` and `Slim8` 128
-  bits work-normalized with 16-bit query proof of work, `Secure` 120 bits. Bytes and times on a
-  tied part: Section 12; mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
+- Capacity (`capacity_log`): `2^nu` rows, `nu = max(ceil(log2 n), 3, 22 - k_log)`, plus one
+  when `n = 2^nu < 2^11` (the full-height stack would select Flock's block-first opening,
+  whose cost is about `128^2` field operations per used column, 2,146 columns here,
+  independent of `n`). Dummy rows `[n, 2^nu)` are identically zero.
+- Profiles (`Profile`): Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding),
+  `Slim` (rate 1/4) and `Slim8` (rate 1/8, K18), with header bytes (`Profile::id`) 0, 1, 3
+  and 4; 2 is unassigned. Mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
 - Commitment bytes (`KeccakCommitment::as_bytes`): the Ligerito level-0 Merkle cap, `2^c`
   nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; Fast: 128 nodes, 4,096 bytes;
   Slim and Slim8: 64 nodes, 2,048 bytes), the bytes Flock's `bind_statement` absorbs.
-- Proof bytes (format version 2): `AGGKCK`, version, profile id, `n` (LE32), then bincode
-  of `R1csProofCircuitMerged`; the commitment is not repeated.
-
-`SpongeProver` (sponge front end): `commit_batch(records) -> SpongeCommitted` (commitment,
-statement words and published `c~`), `prove_committed(committed, fs)`,
-`verify_batch(mu, c~, commitment, proof, fs)`, and `prove_batch(records, fs) ->
-SpongeSubProof { commitment, proof, c_tilde }` in one call. `commit_all(records)` splits
-into sub-batches of `KeccakParams::records_per_proof()` records, the largest power of two
-`n` with `7 n <= target_permutations`, and `prove_all(committed, seeds)` takes one seed
-per sub-batch; the default target 2^16 gives 2^13 records (57,344 permutations), the PIOP's
-segment. A single sub-batch may hold any `n` up to that (the bench proves 1,170 records,
-8,190 permutations, in one proof).
+- Transcript domain of the sponge instance's challenger: `agg-mldsa/v1/keccak` (`DOMAIN`).
 
 ## 5. Tests
 
@@ -170,71 +140,13 @@ segment. A single sub-batch may hold any `n` up to that (the bench proves 1,170 
   committed `c~` words are the digest, the absorb map covers the rate and the padding.
 - `witness`: the packed slot equals Flock's canonical `pack_z_lincheck` and BatchMajor
   layout, dummy rows zero.
-- `tests/all/proofs.rs` (`--release`): Keccak-f gate round trip at 64 permutations with a wrong
-  output word and a wrong seed rejected; sponge round trips at 64 and 256 signatures with a
-  wrong `c~` bit, a wrong `mu` bit and a flipped proof byte rejected; a flipped w1Encode bit
-  with the stale chi witness rejected; a flipped w1Encode bit with a consistent witness
-  (different `c~`) against the original `c~` rejected; the `Secure` profile; the
-  commit-then-prove order: two sub-batches committed, seeds derived from a transcript of
-  the commitments, each proof accepted only with its absorbed commitment (a flipped cap
-  bit, another witness's commitment, the other sub-batch's commitment and seeds from a
-  different event-2 payload rejected; wrong-length commitments `Malformed`, not a panic).
-- `prover` (unit, `--release`): `GateBatch::commit` equals the commitment Flock's own
-  prover binds for 5, 64, 100 and 2,048 permutations (identity and gathered compaction,
-  lane-major and plain commit); `prove_committed` panics on an altered recorded
-  commitment and on a batch of another shape.
+- `tied` (unit and `tests/all/tied.rs`, `tests/all/tied_sets.rs`): Section 9.
 
-## 6. Measurements
+## 6. Standalone proof history
 
-Bench `benches/keccak_sponge.rs` (harness-free; `AGG_KECCAK_N`, `AGG_KECCAK_PROFILE`,
-`AGG_KECCAK_WARMUP` (default 1), `AGG_KECCAK_REPS` (default 5)): random `(mu, w1Encode)` records, one proof,
-medians of 5 timed repetitions after 1 discarded warmup run.
-"prove" includes witness generation and packing; peak heap is Flock's counting allocator
-(the `PeakAlloc` of Flock's `blake3_proof`/`sha2_proof` benches) over one prove; VmHWM is
-the process peak RSS. Machine: i7-11700K, 7 threads (`taskset -c 0,1,3-15`), turbo and
-hyper-threading off, shared with other jobs (load average 5 to 8 during the runs, so
-times are upper bounds).
-
-| Build | Profile | Records (permutations) | Prove | Verify | Peak heap | VmHWM | Proof |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| default (no CLMUL) | Fast | 1,170 (8,190) | 89.3 s | 1,253 ms | 1,050 MiB | 1,347 MiB | 320,591 B (313.1 KiB) |
-| `avx512` + `pclmulqdq` | Fast | 1,170 (8,190) | 0.92 s (8,892 perm/s) | 12.7 ms | 1,002 MiB (125 KiB/perm) | 1,381 MiB | 320,591 B (313.1 KiB) |
-| `avx512` + `pclmulqdq` | Secure | 1,170 (8,190) | 0.93 s | 13.4 ms | 1,034 MiB | 1,251 MiB | 577,455 B (563.9 KiB) |
-| `avx512` + `pclmulqdq` | Fast | 256 (1,792) | 0.53 s | 14.9 ms | 612 MiB | 1,021 MiB | 316,687 B |
-| `avx512` + `pclmulqdq` | Fast | 64 (448) | 0.30 s | 11.4 ms | 545 MiB | 811 MiB | 288,439 B |
-
-Witness generation and packing take 0.05 s at 1,170 records.
-
-The rows above do not include the commit-then-prove split (K7), which adds one Ligerito
-commit per sub-proof. With the split (same machine and threads, 3 repetitions at 1,170
-records, Fast, not a CPU-2 benchmark): `avx512` + `pclmulqdq` build, commit 0.046 s, prove
-including witness and
-both commits 0.94 s, verify 13.0 ms, peak heap 990 MiB, proof 316,446 B plus a 4,096 B
-commitment; default build, commit 42.0 s of 120.8 s.
-
-Commands:
-
-```sh
-taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge
-AGG_KECCAK_PROFILE=secure taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge
-# CLMUL/AVX-512 build (as scripts/bench.sh AVX512=1):
-RUSTFLAGS="-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq" CARGO_TARGET_DIR=target/avx512 \
-  taskset -c 0,1,3-15 cargo bench -p agg-keccak --features avx512 --bench keccak_sponge
-taskset -c 0,1,3-15 cargo test --release -p agg-keccak
-taskset -c 0,1,3-15 cargo test --release -p agg-keccak --lib print_gate_costs -- --ignored --nocapture
-```
-
-Observations:
-
-- Flock's GF(2^128) multiplication is compile-time dispatched
-  (`target_feature = "pclmulqdq"`); a build without it falls back to software
-  multiplication and is about 100 times slower end to end. The release build enables
-  PCLMULQDQ (`.cargo/config.toml`: the x86-64-v3 baseline plus `+pclmulqdq`).
-- Proof size is almost flat in `n` (313 KiB at 8,190 permutations, Fast); the spec's
-  estimate of about 500 KiB per 2^16-permutation segment is consistent with it.
-- Full segments (2^13 records, 57,344 permutations, 2.3e9 committed bits) are for
-  the cloud machine; extrapolation from the table, not measured: about 7 s with CLMUL
-  and 7 GB peak.
+The standalone `GateBatch` and `SpongeProver`, their proof format, the `keccak_sponge`
+bench and its measurements were removed after code revision `8176911`; see that revision.
+Mode A uses only the tied part.
 
 ## 9. The tied part (docs/bridge.md Sections 5a, 5c, 5d; deviations K11, K14, K16, K21)
 
@@ -279,8 +191,10 @@ claims, not by Flock's word copies.
   `(mu_i, c~_i, 1, 0)`, and the chain's rounds and last claim against the verifier's own
   weight. Proof bytes (version 5): `docs/parity-chain.md` Section 7. The sponge challenger
   absorbs `fs`, its label `agg-keccak/v5/tied-sponge`, the gate digest, a digest of the
-  statement words, a digest of the tie geometry and the 32-byte tie binding (label
-  `agg-keccak/v4/tie-binding`), then Flock's statement binding.
+  tie geometry and the 32-byte tie binding (label
+  `agg-keccak/v4/tie-binding`), then Flock's statement binding. The seed binds the ordered
+  public records via event 0 (`docs/soundness.md` Section 4.5); callers of `TiedPart`
+  outside mode A (tests) must provide the same binding.
 
 Memory: the sponge commit data of every part is kept from event 2 until its proof (K14), and
 a batch of exactly one tied part keeps its whole committed witness until the join (lever W1,

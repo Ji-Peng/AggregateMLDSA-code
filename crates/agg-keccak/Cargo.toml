@@ -27,13 +27,5 @@ bincode = "1.3"
 [dev-dependencies]
 keccak = "0.1.6"
 
-# The bench target installs Flock's counting allocator (a `GlobalAlloc`, which
-# needs `unsafe`) and opts in with a file-level allow; library code stays
-# unsafe-free under `deny` except for one audited byte view in `flock_union`
-# (the zerocheck's input, as Flock's own prover builds it), allowed at the item.
-[[bench]]
-name = "keccak_sponge"
-harness = false
-
 [lints.rust]
 unsafe_code = "deny"

@@ -88,8 +88,10 @@ the opening). The type is the sponge gate (docs/keccak.md Section 2), `k_log = 1
 live rows of `2^nu_s`, `nu_s = capacity_log(n, 19)`, so the address space is `M_s = nu_s +
 19`. The opening carries the two class claims, the packed-direct public claim `v_pub` and
 the ring-switched bit claim of the chain (Section 5d). Nothing is wired: there is no circuit,
-no wiring argument and no public segment. The statement words `(mu_i, c~_i)` are bound by a
-digest in the challenger and proven by `v_pub`.
+no wiring argument and no public segment. The statement words `(mu_i, c~_i)` are bound
+through the part or span seed (`fs_sigma` follows event 0, whose record digest covers the
+records; the part index and `rec` enter through the part or span seed) and proven by
+`v_pub`.
 
 **Regions.** Flock commits a slot BatchMajor: word column `c` of row `j` is the padded word
 `(c << nu) + j`, and an evaluation claim is on the multilinear extension of the padded word
