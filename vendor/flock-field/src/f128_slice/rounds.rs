@@ -158,7 +158,7 @@ mod portable {
 }
 
 #[cfg(target_arch = "x86_64")]
-mod x86 {
+pub(super) mod x86 {
     use core::arch::x86_64::{
         __m128i, __m512i, _mm_extract_epi64, _mm_set_epi64x, _mm_xor_si128, _mm512_broadcast_i32x4,
         _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32, _mm512_loadu_si512, _mm512_permutex2var_epi64,
@@ -170,7 +170,7 @@ mod x86 {
 
     /// Whether the AVX-512 kernels run (`avx512f` and `vpclmulqdq`, detected
     /// once, and allowed by `AGG_ISA` and `FLOCK_SIMD`).
-    pub(super) fn enabled() -> bool {
+    pub(in crate::f128_slice) fn enabled() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| {
             let flock_capped = matches!(

@@ -354,7 +354,6 @@ pub unsafe fn ghash_mul_unreduced_x86(a: F128, b: F128) -> F256Unreduced {
 // -----------------------------------------------------------------------
 
 /// Per-lane reduction-poly low word: each 128-bit lane = {lo: 0x87, hi: 0}.
-#[cfg(all(target_feature = "avx512f", target_feature = "vpclmulqdq"))]
 #[inline]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
 unsafe fn ghash_poly_x4() -> __m512i {
@@ -365,7 +364,6 @@ unsafe fn ghash_poly_x4() -> __m512i {
 /// Mirrors one stage of `ghash_mul_binius`'s recursive reduction:
 /// `t0 ^= (t1 << 64)` then `t0 ^= t1.hi · 0x87` (clmul imm `0x01` = hi qword
 /// of `t1` × lo qword of `poly`).
-#[cfg(all(target_feature = "avx512f", target_feature = "vpclmulqdq"))]
 #[inline]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
 unsafe fn gf2_128_reduce_x4(mut t0: __m512i, t1: __m512i) -> __m512i {
@@ -383,9 +381,7 @@ unsafe fn gf2_128_reduce_x4(mut t0: __m512i, t1: __m512i) -> __m512i {
 /// applying `ghash_mul_binius` to each lane.
 ///
 /// # Safety
-/// Caller must ensure `avx512f` + `vpclmulqdq` are available (statically
-/// satisfied by the cfg gate and target-feature attribute).
-#[cfg(all(target_feature = "avx512f", target_feature = "vpclmulqdq"))]
+/// Caller must ensure `avx512f` + `vpclmulqdq` are available.
 #[inline]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
 pub unsafe fn ghash_mul_x4(x: __m512i, y: __m512i) -> __m512i {

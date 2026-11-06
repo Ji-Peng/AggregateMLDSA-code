@@ -5,52 +5,20 @@ pub mod rounds;
 use crate::F128;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use crate::f128_slice::aarch64::fold_pairs as fold_pairs_aarch64;
-#[cfg(any(
-    test,
-    not(any(
-        all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "vpclmulqdq"
-        ),
-        all(target_arch = "aarch64", target_feature = "aes")
-    ))
-))]
 use crate::f128_slice::portable::fold_pairs as fold_pairs_portable;
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+#[cfg(target_arch = "x86_64")]
 use crate::f128_slice::x86_64::fold_pairs as fold_pairs_x86_64;
 
-#[cfg(any(
-    test,
-    not(any(
-        all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "vpclmulqdq"
-        ),
-        all(target_arch = "aarch64", target_feature = "aes")
-    ))
-))]
 mod portable;
-
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 mod aarch64;
-
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "vpclmulqdq"
-))]
+#[cfg(target_arch = "x86_64")]
 mod x86_64;
 
 /// Fold adjacent pairs from `src` into `dst`, starting at pair `base`.
 ///
 /// Computes `dst[t] = src[2j] * (1 + r) + src[2j + 1] * r`, where
-/// `j = base + t`. Architecture selection is resolved at compile time.
+/// `j = base + t`. The x86 kernel is selected at run time when the CPU and ISA cap allow it.
 #[inline]
 pub fn fold_pairs(src: &[F128], base: usize, dst: &mut [F128], r: F128) {
     assert!(
@@ -58,32 +26,21 @@ pub fn fold_pairs(src: &[F128], base: usize, dst: &mut [F128], r: F128) {
         "fold source must contain both elements for every destination pair"
     );
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx512f",
-        target_feature = "vpclmulqdq"
-    ))]
-    // SAFETY: the cfg gate guarantees the required target features and the
-    // bounds check above guarantees both source elements for every output.
-    unsafe {
-        fold_pairs_x86_64(src, base, dst, r);
+    #[cfg(target_arch = "x86_64")]
+    if rounds::x86::enabled() {
+        // SAFETY: runtime feature detection and the bounds check above passed.
+        unsafe { fold_pairs_x86_64(src, base, dst, r) };
+        return;
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
-    // SAFETY: the cfg gate guarantees PMULL support through the aes feature;
-    // the bounds check above guarantees both source elements for every output.
-    unsafe {
-        fold_pairs_aarch64(src, base, dst, r);
+    {
+        // SAFETY: the target enables PMULL and the bounds check above passed.
+        unsafe { fold_pairs_aarch64(src, base, dst, r) };
+        return;
     }
 
-    #[cfg(not(any(
-        all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "vpclmulqdq"
-        ),
-        all(target_arch = "aarch64", target_feature = "aes")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "aes")))]
     fold_pairs_portable(src, base, dst, r);
 }
 

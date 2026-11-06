@@ -3661,8 +3661,8 @@ fn fold_and_msg_lsb(f: &[F128], b: &[F128], r: F128) -> (Vec<F128>, Vec<F128>, S
             let len = fc.len();
             let mut u0 = F256Unreduced::ZERO;
             let mut u2 = F256Unreduced::ZERO;
-            // Fold this slice via the arch-dispatched slice kernel (AVX-512 on
-            // x86, NEON on aarch64), then pair up the just-folded values for
+            // Fold this slice via the architecture-selected slice kernel, then pair
+            // up the just-folded values for
             // the msg. `src[2j]·(1+r) + src[2j+1]·r = v0 + (v0+v1)·r` exactly
             // in GF(2^128), so the kernel choice cannot change the bits.
             fold_pairs(f, base, fc, r);

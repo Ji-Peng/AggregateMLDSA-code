@@ -83,3 +83,7 @@ carry-less products and reduce once per call (exact: GF(2) addition has no carry
 paths return the same bits (tests `pair_kernels_match_reference`,
 `block_kernels_match_reference`). Prover-only: proofs, transcripts and the verifier are
 unchanged.
+
+`f128_slice::fold_pairs` also selects its four-lane VPCLMULQDQ kernel at
+run time using the same CPU detection, `AGG_ISA` cap and `FLOCK_SIMD` override.
+The portable and vector paths compute the same field elements.
