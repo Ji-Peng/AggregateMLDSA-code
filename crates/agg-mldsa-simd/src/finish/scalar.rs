@@ -160,7 +160,90 @@ const fn k_bound<P: ParamSet>() -> i64 {
     (P::L as i64 * 256 * ((Q as i64 - 1) / 2) * P::GAMMA1 as i64 + Q as i64) / Q as i64
 }
 
+/// `2^32 P2^-1 mod P3`: a Montgomery product by it is a product by `P2^-1 mod P3`.
+const P2_INV_MONT_P3: i32 = (((P2_INV_MOD_P3 as i64) << 32) % P3 as i64) as i32;
+
+/// [`finish_row_3p_reference`] in two branch-free passes over the row that the compiler
+/// vectorises. A row with any out-of-bound value is finished again by the reference, which
+/// returns its error, so the result is the reference's (on an error the outputs are
+/// unspecified, as for every finish).
 pub(crate) fn finish_row_3p<P: ParamSet>(
+    row: FinishRow3P<'_>,
+    out: &mut FinishOut,
+) -> Result<(), FinishError> {
+    let (p2, p3) = (i64::from(P2), i64::from(P3));
+    let (m, kb) = (p2 * p3, k_bound::<P>());
+    let mut k = [0_i32; 256];
+    let mut bad = false;
+    for i in 0..256 {
+        let xq = row.xq[i];
+        // k2 = (xp2 - xq) / q mod P2 and k3 likewise, each in [0, P).
+        let k2 = mont(i64::from(row.xp2[i] - xq) * i64::from(CRT_C), CONSTS_P2);
+        let k2 = k2 + ((k2 >> 31) & P2);
+        let k3 = mont(i64::from(row.xp3[i] - xq) * i64::from(CRT_C_P3), CONSTS_P3);
+        let k3 = k3 + ((k3 >> 31) & P3);
+        // Garner: diff = (k3 - k2) mod P3 from (-P2, P3) with one correction, the factor
+        // diff / P2 mod P3 as a Montgomery product (|diff * c| < 2^58, result in (-P3, P3)).
+        let diff = k3 - k2;
+        let diff = diff + ((diff >> 31) & P3);
+        let factor = mont(i64::from(diff) * i64::from(P2_INV_MONT_P3), CONSTS_P3);
+        let factor = factor + ((factor >> 31) & P3);
+        let kk = i64::from(k2) + p2 * i64::from(factor);
+        let kk = if kk > m / 2 { kk - m } else { kk };
+        bad |= kk.abs() > kb;
+        // |kk| <= k_bound < 2^29 whenever the row is accepted.
+        k[i] = kk as i32;
+    }
+    if bad {
+        return finish_row_3p_reference::<P>(row, out);
+    }
+    let alpha = 2 * P::GAMMA2;
+    let mut w = [0_i32; 256];
+    let mut out_of_bounds = 0_u32;
+    for i in 0..256 {
+        let xqi = row.xq[i];
+        let r = freeze(xqi - row.t[i]);
+        let wi = if P::GAMMA2 == (Q - 1) / 88 {
+            use_hint_88(r, row.h[i])
+        } else {
+            // use_hint_32 without branches: with a hint, hi + 1 for lo > 0, else hi - 1
+            // (`((lo - 1) >> 31) | 1`), modulo 16.
+            let mut hi = (r + 127) >> 7;
+            hi = (hi * 1025 + (1 << 21)) >> 22;
+            hi &= 15;
+            let lo = r - hi * alpha;
+            let lo = lo - ((((Q - 1) / 2 - lo) >> 31) & Q);
+            let step = ((lo - 1) >> 31) | 1;
+            let hint = -i32::from(row.h[i] != 0);
+            (hi + (step & hint)) & 15
+        };
+        let u = r - alpha * wi;
+        let u = u - (((((Q - 1) / 2) - u) >> 31) & Q);
+        let u = u + (((u + (Q - 1) / 2) >> 31) & Q);
+        let e = xqi - row.t[i] - alpha * wi - u;
+        let ve = e.wrapping_mul(QINV32);
+        // With |ve| <= C_B_Q the sum is exact; otherwise the reference runs.
+        let v = k[i].wrapping_add(ve);
+        out_of_bounds |= u32::from(ve.unsigned_abs() > P::C_B_Q)
+            | u32::from(u.unsigned_abs() > P::B_U as u32)
+            | u32::from(v.unsigned_abs() > P::B_V as u32);
+        w[i] = wi;
+        out.u[i] = u;
+        out.v[i] = v;
+    }
+    for (dst, &wi) in out.w1.iter_mut().zip(&w) {
+        *dst = wi as u8;
+    }
+    bad |= out_of_bounds != 0;
+    if bad {
+        return finish_row_3p_reference::<P>(row, out);
+    }
+    Ok(())
+}
+
+/// The coefficient-by-coefficient three-prime finish: CRT of `k` modulo `P2 P3`, then
+/// [`finish_row_from_k`]; the first failing coefficient decides the error.
+pub(crate) fn finish_row_3p_reference<P: ParamSet>(
     row: FinishRow3P<'_>,
     out: &mut FinishOut,
 ) -> Result<(), FinishError> {
@@ -267,5 +350,62 @@ pub(crate) fn hu_columns<P: ParamSet>(z: &Poly32, out: &FinishOut, cols: HuCols<
                 cols.narrow[t + 4][i].write(((out.w1[i] >> t) & 1) as i8);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small deterministic generator.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 11
+        }
+        fn range(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i64
+        }
+    }
+
+    /// The row residues of the integers `az`.
+    fn residues(az: &[i64; 256]) -> (Poly32, Poly32, Poly32) {
+        let m = |p: i32| Poly32(std::array::from_fn(|i| az[i].rem_euclid(i64::from(p)) as i32));
+        (m(Q), m(P2), m(P3))
+    }
+
+    /// The two-pass finish agrees with the reference on honest rows and on rows with a
+    /// corrupted residue, a large `T` or a flipped hint.
+    fn matches_the_reference<P: ParamSet>(seed: u64) {
+        let mut rng = Rng(seed);
+        let kb = k_bound::<P>() * i64::from(Q);
+        for case in 0..400 {
+            let scale = [kb, kb / 4, kb / 64, 2 * kb][case % 4];
+            let az: [i64; 256] = std::array::from_fn(|_| rng.range(-scale, scale));
+            let (mut xq, mut xp2, mut xp3) = residues(&az);
+            let tb = if case % 7 == 0 { 1 << 30 } else { 1 << 28 };
+            let t: [i32; 256] = std::array::from_fn(|_| rng.range(-tb, tb) as i32);
+            let h: [u8; 256] = std::array::from_fn(|_| u8::from(rng.next() % 9 == 0));
+            match case % 5 {
+                1 => xp2[(rng.next() % 256) as usize] ^= 1 << (rng.next() % 20),
+                2 => xp3[(rng.next() % 256) as usize] ^= 1 << (rng.next() % 20),
+                3 => xq[(rng.next() % 256) as usize] = (rng.next() % Q as u64) as i32,
+                _ => {}
+            }
+            let row = FinishRow3P { xq: &xq, xp2: &xp2, xp3: &xp3, t: &t, h: &h };
+            let (mut got, mut want) = (FinishOut::zero(), FinishOut::zero());
+            let (r_got, r_want) = (finish_row_3p::<P>(row, &mut got), finish_row_3p_reference::<P>(row, &mut want));
+            assert_eq!(r_got, r_want, "case {case}");
+            if r_want.is_ok() {
+                assert_eq!(got, want, "case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_pass_finish_matches_the_reference() {
+        matches_the_reference::<Set65>(65);
+        matches_the_reference::<Set87>(87);
     }
 }
