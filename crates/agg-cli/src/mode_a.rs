@@ -2034,8 +2034,8 @@ impl std::fmt::Display for VerifyCostReport {
             ms(self.profile_probe)
         )?;
         let labels = [
-            ("parse", "parse, manifest, PCS verifier"),
-            ("public_data", "pkDecode, tr, mu, SampleInBall"),
+            ("parse", "parse, manifest"),
+            ("public_data", "pkDecode, tr, mu, SampleInBall, PCS"),
             ("transcript", "events 0-6 replay"),
             ("matrices", "bridge matrices from sd"),
             ("keccak", "Flock parts (beside the PIOP)"),

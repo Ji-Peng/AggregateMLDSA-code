@@ -9,8 +9,8 @@
 //!
 //! | Step | Work |
 //! | --- | --- |
-//! | `parse` | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
-//! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
+//! | `parse` | wire parse (shape from `N`), manifest |
+//! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding beside them; the PCS verifier from the plan's seed beside both |
 //! | `transcript` | the seven Akita commitments and the Flock commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
 //! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks); the transcript never absorbs the proof items |
@@ -349,9 +349,9 @@ pub struct VerifiedAggregate {
 /// timed whatever the PIOP's outcome).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VerifyTimings {
-    /// Wire parse, manifest, PCS verifier.
+    /// Wire parse, manifest.
     pub parse: Duration,
-    /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding.
+    /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding; the PCS verifier.
     pub public_data: Duration,
     /// The transcript through the final-vector step without the matrices.
     pub transcript: Duration,
@@ -550,11 +550,66 @@ where
         .zip(c_tilde)
         .map(|(&(pk, msg), c)| (pk, msg, P::c_tilde_from_slice(c)))
         .collect();
-    let public = LaneStreamedPublic::prepare::<P>(&inputs, cache).map_err(|e| match e {
+    // The record binding reads the triples only: it is hashed beside the key preparation.
+    let (public, digest) = rayon::join(
+        || LaneStreamedPublic::prepare::<P>(&inputs, cache),
+        || public_records_binding(&inputs),
+    );
+    let public = public.map_err(|e| match e {
         InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
         InstanceError::Geometry(_) => VerifyError::RecordCount,
     })?;
-    Ok((public, public_records_binding(&inputs)))
+    Ok((public, digest))
+}
+
+/// What the public-data step returns: the public data with its key cache, the Keccak side's
+/// geometry, the record digest and `mu` per live record.
+type Prepared<'a, 'c> = (Public<'a, 'c>, Geometry, [u8; 32], Vec<[u8; TR_BYTES]>);
+
+/// The light public data of the batch and the record binding (the `public_data` step).
+fn prepare_public<'a, 'c>(
+    set: Set,
+    n: usize,
+    records: &[(&'a [u8], &[u8])],
+    c_tilde: &[Vec<u8>],
+    keys: Keys<'c>,
+) -> Result<Prepared<'a, 'c>, VerifyError> {
+    Ok(match keys {
+        Keys::Rows(cache) => {
+            let c_tilde: Vec<[u8; C_TILDE_BYTES]> = c_tilde
+                .iter()
+                .map(|c| c.as_slice().try_into().expect("checked above: 32 bytes per ML-DSA-44 record"))
+                .collect();
+            let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
+                .iter()
+                .zip(&c_tilde)
+                .map(|(&(pk, msg), &c)| (pk, msg, c))
+                .collect();
+            // The record binding reads the triples only: it is hashed beside the key preparation.
+            let (public, digest) = rayon::join(
+                || StreamedPublic::prepare(&inputs, cache.as_deref()),
+                || public_records_binding(&inputs),
+            );
+            let public = public.map_err(|e| match e {
+                InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
+                InstanceError::Geometry(_) => VerifyError::RecordCount,
+            })?;
+            let geometry = public.geometry();
+            let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
+            (Public::Rows(public, cache), geometry, digest, mu)
+        }
+        Keys::Lanes(cache) => {
+            let (public, digest) = match set {
+                Set::S65 => prepare_lanes::<Set65>(records, c_tilde, cache.as_deref())?,
+                Set::S87 => prepare_lanes::<Set87>(records, c_tilde, cache.as_deref())?,
+                Set::S44 => unreachable!("ML-DSA-44 is verified on its rows"),
+            };
+            // The Keccak side's geometry depends on the record count only.
+            let geometry = Geometry::new(n).map_err(|_| VerifyError::RecordCount)?;
+            let mu = public.mu().to_vec();
+            (Public::Lanes(public, cache), geometry, digest, mu)
+        }
+    })
 }
 
 /// A running clock for step timings.
@@ -617,45 +672,18 @@ fn run(
     let manifest = CommitmentManifest::for_set(set, n, relation)
         .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
     let segments = manifest.segments();
-    let pcs = verifier_for(&manifest).map_err(VerifyError::Opening)?;
-    let plan = pcs.plan();
     timings.parse = clock.lap();
 
-    // Light public data and the record binding.
+    // Light public data and the record binding, beside the PCS verifier's setup (which
+    // depends on the manifest only); a setup error is reported first, as when it ran first.
     let c_tilde: Vec<u8> = proof.c_tilde.concat();
-    let (public, geometry, digest, mu) = match keys {
-        Keys::Rows(cache) => {
-            let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
-                .c_tilde
-                .iter()
-                .map(|c| c.as_slice().try_into().expect("checked above: 32 bytes per ML-DSA-44 record"))
-                .collect();
-            let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
-                .iter()
-                .zip(&c_tilde)
-                .map(|(&(pk, msg), &c)| (pk, msg, c))
-                .collect();
-            let public = StreamedPublic::prepare(&inputs, cache.as_deref()).map_err(|e| match e {
-                InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
-                InstanceError::Geometry(_) => VerifyError::RecordCount,
-            })?;
-            let geometry = public.geometry();
-            let digest = public_records_binding(&inputs);
-            let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
-            (Public::Rows(public, cache), geometry, digest, mu)
-        }
-        Keys::Lanes(cache) => {
-            let (public, digest) = match set {
-                Set::S65 => prepare_lanes::<Set65>(records, &proof.c_tilde, cache.as_deref())?,
-                Set::S87 => prepare_lanes::<Set87>(records, &proof.c_tilde, cache.as_deref())?,
-                Set::S44 => unreachable!("ML-DSA-44 is verified on its rows"),
-            };
-            // The Keccak side's geometry depends on the record count only.
-            let geometry = Geometry::new(n).map_err(|_| VerifyError::RecordCount)?;
-            let mu = public.mu().to_vec();
-            (Public::Lanes(public, cache), geometry, digest, mu)
-        }
-    };
+    let (pcs, prepared) = rayon::join(
+        || verifier_for(&manifest),
+        || prepare_public(set, n, records, &proof.c_tilde, keys),
+    );
+    let pcs = pcs.map_err(VerifyError::Opening)?;
+    let plan = pcs.plan();
+    let (public, geometry, digest, mu) = prepared?;
     timings.public_data = clock.lap();
 
     // The transcript through the final-vector step; the instance record binds the proof-of-work plan, derived from the public
