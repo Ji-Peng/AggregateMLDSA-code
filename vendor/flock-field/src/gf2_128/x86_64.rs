@@ -1,7 +1,7 @@
 use core::arch::x86_64::{
     __m128i, __m512i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_set_epi64x,
-    _mm_slli_si128, _mm_unpackhi_epi64, _mm_xor_si128, _mm512_bslli_epi128, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32,
-    _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_xor_si512,
+    _mm_slli_si128, _mm_unpackhi_epi64, _mm_xor_si128, _mm512_clmulepi64_epi128, _mm512_extracti32x4_epi32,
+    _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_unpacklo_epi64, _mm512_xor_si512,
 };
 
 use core::arch::x86_64::{_mm_set_epi64x as set2, _mm_srli_si128};
@@ -370,7 +370,9 @@ unsafe fn gf2_128_reduce_x4(mut t0: __m512i, t1: __m512i) -> __m512i {
     // SAFETY: caller carries avx512f+vpclmulqdq.
     unsafe {
         let poly = ghash_poly_x4();
-        t0 = _mm512_xor_si512(t0, _mm512_bslli_epi128::<8>(t1));
+        // `t1 << 64` per 128-bit lane: {0, t1.lo}. The AVX-512F unpack keeps the
+        // shift inline; the byte shift is AVX512BW and would be an out-of-line call.
+        t0 = _mm512_xor_si512(t0, _mm512_unpacklo_epi64(_mm512_setzero_si512(), t1));
         t0 = _mm512_xor_si512(t0, _mm512_clmulepi64_epi128::<0x01>(t1, poly));
         t0
     }
