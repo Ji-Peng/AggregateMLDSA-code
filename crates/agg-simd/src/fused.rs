@@ -199,7 +199,10 @@ impl SlotOrder {
 }
 
 /// The vector kernel's scratch, allocated once per task: the lane limbs of the current step
-/// and the per-slot accumulators. It is empty unless the AVX-512 backend is active.
+/// and the per-slot accumulators. It is empty unless the AVX-512 backend is active. The
+/// unweighted accumulators (`inner`) and the weighted ones (`wac`, `wbd`, `wsum`) are
+/// allocated by the first call that reads them: a task's calls are usually all weighted, and
+/// at 151 slots the unused kind would cost 174 KB or more of initialisation per task.
 #[cfg(target_arch = "x86_64")]
 struct EvalScratch {
     even: Vec<(crate::x86::L52, crate::x86::L52)>,
@@ -285,10 +288,10 @@ impl EvalScratch {
                 even: vec![(split52(z()), split52(z())); width],
                 odd: vec![(split52(z()), split52(z())); width],
                 diff: vec![(split52(z()), split52(z())); width],
-                inner: vec![[a3k(); 3]; slots],
-                wac: vec![[a5(); 3]; slots],
-                wbd: vec![[a5(); 3]; slots],
-                wsum: vec![[a5(); 3]; slots],
+                inner: Vec::new(),
+                wac: Vec::new(),
+                wbd: Vec::new(),
+                wsum: Vec::new(),
                 running: vec![[(z(), z()); 3]; slots],
                 w8: WideScratch::empty(),
                 w4: WideScratch::empty(),
@@ -476,7 +479,7 @@ unsafe fn eval_vector(
         let width = lanes.len();
         let slots = terms.slots;
         debug_assert_eq!(scratch.even.len(), width);
-        debug_assert_eq!(scratch.inner.len(), slots);
+        debug_assert_eq!(scratch.running.len(), slots);
         let stop = k0 + (k1 - k0) / 8 * 8;
         let SlotOrder { lin_off, lin_order, pro_off, pro_order, in_product, .. } = order;
         let EvalScratch { even, odd, diff, inner, wac, wbd, wsum, running, .. } = scratch;
@@ -485,9 +488,17 @@ unsafe fn eval_vector(
         // read on every step.
         running.fill([(z(), z()); 3]);
         if weighted {
-            wac.fill([a5(); 3]);
-            wbd.fill([a5(); 3]);
-            wsum.fill([a5(); 3]);
+            if wac.is_empty() {
+                *wac = vec![[a5(); 3]; slots];
+                *wbd = vec![[a5(); 3]; slots];
+                *wsum = vec![[a5(); 3]; slots];
+            } else {
+                wac.fill([a5(); 3]);
+                wbd.fill([a5(); 3]);
+                wsum.fill([a5(); 3]);
+            }
+        } else if inner.is_empty() {
+            *inner = vec![[a3k(); 3]; slots];
         } else {
             inner.fill([a3k(); 3]);
         }

@@ -294,10 +294,15 @@ A self-check compares the final claim with `eq` times the summand at the termina
   integer and byte lanes into one field lane `g = sum_l c_l f_l` (`FoldedGroup`, byte lanes
   through per-byte tables of `c_l map[byte]`); a kept integer lane whose every term reads it
   alone (squares, Booleanity, links, leaf polynomials) moves its batched linear coefficient
-  into `g` as well, so its pieces keep only the higher powers. Stage 3's `eq(r^(2))` group
+  into `g` as well. The lane's original linear term stays, and a cancelling single-lane
+  instance `-c1 f_l` is added; the plan merges the two per-lane linear coefficients to an
+  exact zero, so the lane's pieces keep only the higher powers. (A plan that stopped merging
+  per-lane coefficients would bring back two slots per lane.) Stage 3's `eq(r^(2))` group
   then needs one coefficient slot per kept lane, and its dense rounds run on the fused plane
   tail (at most 128 lanes and 192 slots, `agg_simd::fused`; H-FIPS reaches 151 slots at
-  ML-DSA-87).
+  ML-DSA-87). `AGG_TAIL_MAX_SLOTS` and `AGG_TAIL_MAX_LANES` lower these caps (for A/B runs;
+  a group over a cap runs the row-major dense rounds, with the same messages), and
+  `AGG_STAGE_TRACE` prints, per group, whether its tail is on with its lane and slot counts.
 - A projection weight kept as its two factors (`RankOneGroup`) folds only the combination
   `g = V_lo + 2^16 V_hi + 2^15` by the low challenges (one integer dot per high row) for the
   high rounds.

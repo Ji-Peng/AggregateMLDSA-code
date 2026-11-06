@@ -719,6 +719,8 @@ pub struct Group<'a> {
     tail_terms: Option<TailTerms>,
     /// The dense rounds on lane-major planes (plane layout only).
     tail: Option<Tail>,
+    /// The coefficient slots of the plane tail, when the group runs on it (for traces).
+    tail_slots: Option<usize>,
     arena: Option<SharedArena>,
     challenges: Vec<E>,
     /// Quartet masses of the bucketed segments (the two-round prefix), kept for level 1.
@@ -1010,6 +1012,7 @@ impl<'a> Group<'a> {
             dense: Vec::new(),
             dense_stride: 0,
             dense_rows: 0,
+            tail_slots: tail_terms.as_ref().map(TailTerms::slot_count),
             tail_terms,
             tail: None,
             arena: None,
@@ -1059,6 +1062,11 @@ impl<'a> Group<'a> {
         let zero = vec![E::zero(); values.len()];
         let out = self.plan.source.evaluate(values, &zero, self.coefficient_count(), false);
         out[0] + self.plan.constant
+    }
+
+    /// The lane count and, when the dense rounds run on the plane tail, its slot count.
+    pub fn tail_shape(&self) -> (usize, Option<usize>) {
+        (self.sources.len(), self.tail_slots)
     }
 
     /// The current gamma-weighted claim.

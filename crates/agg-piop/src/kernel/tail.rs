@@ -22,6 +22,19 @@ use crate::OpeningField as E;
 /// Each product is one `kmac7` of a limb below `6 · 2^52`, and the exact bound is 682.
 const MAX_PRODUCTS_PER_SLOT: usize = 682;
 
+/// The lane and slot caps of the plane tail: the fused kernels' limits, lowered by
+/// `AGG_TAIL_MAX_LANES` and `AGG_TAIL_MAX_SLOTS` (an A/B switch: a group over a cap runs the
+/// row-major dense rounds, whose messages are the same).
+fn caps() -> (usize, usize) {
+    static CAPS: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *CAPS.get_or_init(|| {
+        let cap = |name: &str, limit: usize| {
+            std::env::var(name).ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(limit, |v| v.min(limit))
+        };
+        (cap("AGG_TAIL_MAX_LANES", MAX_LANES), cap("AGG_TAIL_MAX_SLOTS", MAX_SLOTS))
+    })
+}
+
 /// The dense pieces of a group as the term lists of the fused kernels.
 pub(super) struct TailTerms {
     linear: Vec<(usize, usize)>,
@@ -33,11 +46,18 @@ pub(super) struct TailTerms {
 }
 
 impl TailTerms {
+    /// The coefficient slots of the summand.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+impl TailTerms {
     /// The term lists of `pieces` over `lanes` lanes, or `None` when a piece is not at most
     /// quadratic (or is a residual generic term), or when the lanes or distinct coefficients
     /// exceed the kernels' limits.
     pub fn compile(pieces: &Pieces, lanes: usize) -> Option<Self> {
-        if lanes > MAX_LANES || !pieces.generic.is_empty() {
+        if lanes > caps().0 || !pieces.generic.is_empty() {
             return None;
         }
         let mut terms = Self {
@@ -74,7 +94,7 @@ impl TailTerms {
         if let Some(slot) = self.slots.iter().position(|&s| s == c) {
             return Some(slot);
         }
-        (self.slots.len() < MAX_SLOTS).then(|| {
+        (self.slots.len() < caps().1).then(|| {
             self.slots.push(c);
             self.products_per_slot.push(0);
             self.slots.len() - 1

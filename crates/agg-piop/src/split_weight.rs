@@ -1103,6 +1103,59 @@ mod tests {
         }
     }
 
+    /// Wide combinations take the fallback paths: high rows whose cells reach 2^51 (the
+    /// reduced products of both the low-factor pass and the high build), rows between 2^40
+    /// and 2^51 (reduced in the low-factor pass, the integer dot in the high build) and narrow
+    /// rows, mixed inside one task, with low factors wide enough for the vector dot.
+    #[test]
+    fn rank_one_wide_rows_match_the_generic_group() {
+        let mut rng = SplitMix64::new(131);
+        for (z, h) in [(6_usize, 2_usize), (7, 3)] {
+            let len = 1_usize << (z + h);
+            let low: Vec<E> = (0..1_usize << z).map(|_| field(&mut rng)).collect();
+            let high: Vec<E> = (0..1_usize << h).map(|_| field(&mut rng)).collect();
+            let weight = RankOneWeight { low: &low, high: &high };
+            let row_len = 1_usize << z;
+            let v_lo: Vec<i32> = (0..len)
+                .map(|i| {
+                    let (row, lo) = (i / row_len, i % row_len);
+                    match row % 3 {
+                        // Near +-2^31: with the coefficient 2^20, |g| reaches 2^51.
+                        0 if lo == 0 => i32::MIN,
+                        0 => (rng.next_u64() as u32) as i32,
+                        // Up to 2^25: |g| between 2^40 and 2^51.
+                        1 => (rng.next_u64() % (1 << 26)) as i32 - (1 << 25),
+                        _ => (rng.next_u64() % (1 << 16)) as i32 - (1 << 15),
+                    }
+                })
+                .collect();
+            let v_hi: Vec<i8> = (0..len).map(|_| (rng.next_u64() % 9) as i8 - 4).collect();
+            let lanes = vec![
+                Lane::Folded(Vec::new()),
+                Lane::Source(Source::Ints(&v_lo)),
+                Lane::Source(Source::Bytes { cells: &v_hi, map: &IDENTITY_MAP }),
+            ];
+            let instances = vec![GroupInstance {
+                gamma: field(&mut rng),
+                terms: vec![Term::Affine { weight: Some(0), lanes: vec![(1, 1 << 20), (2, -(1 << 20))], constant: -(1 << 40) }],
+            }];
+            let degree = 3;
+            let mut want_lanes = lanes.clone();
+            want_lanes[0] = Lane::Folded(weight.materialize());
+            let mut want = Group::new(want_lanes, instances.clone(), None, z + h, degree).unwrap();
+            let mut got = RankOneGroup::new(weight, 0, &lanes, &instances, z + h, degree).expect("applies");
+            assert_eq!(got.claim(), want.claim());
+            for round in 0..z + h {
+                assert_eq!(got.round_message(round), want.round_message(round), "z={z} h={h} round {round}");
+                let r = field(&mut rng);
+                got.bind(round, r);
+                want.bind(round, r);
+            }
+            assert_eq!(got.claim(), want.claim());
+            assert_eq!(got.terminal_values(&[true; 3]), want.terminal_values());
+        }
+    }
+
     /// A non-0/1 cell sends the lane set to the generic kernel.
     #[test]
     fn non_boolean_cells_are_refused() {

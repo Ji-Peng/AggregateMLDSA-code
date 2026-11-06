@@ -595,16 +595,27 @@ pub fn prove_stage_drawn<'a>(
             fresh >> 20,
             reused >> 20
         );
+        // The dense-round path of each spec group's generic kernel (kernel lanes, tail slots).
+        let mut kernels = vec![String::new(); spec.groups.len()];
+        for (built, &g) in groups.iter().zip(&owner) {
+            if let Some((lanes, slots)) = built.kernel_shape() {
+                kernels[g] = match slots {
+                    Some(slots) => format!(", tail on ({lanes} lanes, {slots} slots)"),
+                    None => format!(", tail off ({lanes} lanes)"),
+                };
+            }
+        }
         for (g, group) in spec.groups.iter().enumerate() {
             eprintln!(
-                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms",
+                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms{}",
                 group.domain,
                 group.eq,
                 group.lanes.len(),
                 group.instances.len(),
                 build_times[g] * 1e3,
                 group_times[g].0 * 1e3,
-                group_times[g].1 * 1e3
+                group_times[g].1 * 1e3,
+                kernels[g]
             );
         }
         let per_round: Vec<String> = round_times.iter().map(|t| format!("{:.0}", t * 1e3)).collect();
@@ -645,7 +656,7 @@ pub fn prove_stage_drawn<'a>(
         })
         .collect();
     let own: Vec<Option<Vec<E>>> = groups
-        .par_iter_mut()
+        .par_iter()
         .zip(&needed)
         .map(|(group, needed)| group.terminal_values(needed))
         .collect();
@@ -768,6 +779,16 @@ impl StageGroup<'_> {
             Self::Pending => unreachable!("a built group"),
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
+        }
+    }
+
+    /// For a group on the generic kernel: its lane count and, when its dense rounds run on
+    /// the plane tail, the tail's slot count.
+    fn kernel_shape(&self) -> Option<(usize, Option<usize>)> {
+        match self {
+            Self::Generic(g) => Some(g.tail_shape()),
+            Self::Folded(g) => Some(g.group.tail_shape()),
+            _ => None,
         }
     }
 
@@ -1105,8 +1126,10 @@ struct FoldedGroup<'a> {
     challenges: Vec<E>,
 }
 
-/// Cells per task of the pass that materializes `g`.
-const FOLD_CHUNK: usize = 1 << 12;
+/// Cells per task of the pass that materializes `g`. Each folded lane reads and writes the
+/// task's accumulator (32 B per cell), so 1,024 cells keep it at 32 KiB, inside the L1 data
+/// cache.
+const FOLD_CHUNK: usize = 1 << 10;
 
 /// The term with every lane index `l` replaced by `index[l]`.
 fn remap_term(term: Term, index: &[usize]) -> Term {
@@ -1195,8 +1218,7 @@ fn fold_combination(folded: &[(Source<'_>, [u64; 2])], rows: usize) -> Vec<E> {
 /// Per lane of a [`FoldedGroup`]: the batched linear coefficient of a kept integer lane whose
 /// every term reads it alone (zero for the other lanes), the part [`FoldedGroup::new`] moves
 /// into `g`.
-fn linear_parts(lanes: &[Lane<'_>], instances: &[GroupInstance], candidate: &[bool]) -> Vec<E> {
-    let rows = lanes.first().map_or(0, Lane::len);
+fn linear_parts(lanes: &[Lane<'_>], instances: &[GroupInstance], candidate: &[bool], rows: usize) -> Vec<E> {
     let mut eligible: Vec<bool> = lanes
         .iter()
         .zip(candidate)
@@ -1281,9 +1303,11 @@ impl<'a> FoldedGroup<'a> {
         }
         // A kept integer lane read only by terms in itself alone (squares, Booleanity and
         // link checks, leaf polynomials, linear parts) also moves the linear part of its
-        // polynomial into `g`: its pieces keep only the higher powers, so the dense rounds
-        // need one coefficient slot per such lane instead of two.
-        let linear_parts = linear_parts(&lanes, &instances, &candidate);
+        // polynomial into `g`. Its original linear term stays, and a cancelling single-lane
+        // product `-c1 f_l` is added; the plan merges the two per-lane coefficients to an
+        // exact zero, so the dense rounds need one coefficient slot per such lane instead of
+        // two. A plan that stopped merging per-lane coefficients would bring back both slots.
+        let linear_parts = linear_parts(&lanes, &instances, &candidate, rows);
         // The batched coefficient of every folded lane; the folded parts leave the terms.
         let mut coefficients = vec![E::zero(); lanes.len()];
         let mut instances: Vec<GroupInstance> = instances
