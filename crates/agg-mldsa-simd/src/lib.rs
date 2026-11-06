@@ -14,7 +14,7 @@ pub mod poly;
 pub mod sample;
 
 pub use dispatch::{available, engine, engine_for, parse_backend, Backend, Engine};
-pub use finish::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRow3P, FinishRowExact, HuCols};
+pub use finish::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRowExact, HuCols};
 pub use keccak::{Sink, Xof, XofJob};
 pub use ntt::{Form, Scale};
 pub use params::{

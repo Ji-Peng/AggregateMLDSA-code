@@ -1172,8 +1172,9 @@ impl MainTables {
     /// [`MainTables::build`] on `engine`: records in tiles of [`TILE`] through the batched
     /// derivation of [`derive_tile_with`] (its errors are the legacy derivation's); under
     /// H-u the engine writes the digits of each row straight into the record's final
-    /// column views, under H-exact and H-FIPS the generic encoder takes the values.
-    /// Identical to [`MainTables::build_reference`].
+    /// column views, under H-exact and H-FIPS the shift-form encoder (`encode_rows`) writes
+    /// the columns (falling back to the generic encoder on error). Identical to
+    /// [`MainTables::build_reference`].
     ///
     /// # Panics
     /// If the manifest is not ML-DSA-44's ([`MainTables::build_for`] builds every set).
@@ -1248,9 +1249,11 @@ impl MainTables {
         })
     }
 
-    /// The tables of any parameter set from the legacy derivation (`derive_with_t_for`) and
-    /// the generic encoder, records in tiles of [`TILE`] in parallel. For ML-DSA-44 it equals
-    /// [`MainTables::build`], which runs the SIMD engine instead.
+    /// The tables of any parameter set, records in tiles of [`TILE`] in parallel: ML-DSA-65
+    /// and ML-DSA-87 derive each tile on the SIMD engine (`derive_lane_tile`) and encode
+    /// with the shift forms (`encode_rows`, falling back to the generic encoder on error),
+    /// while ML-DSA-44 runs the legacy derivation (`derive_with_t_for`) and the generic
+    /// encoder to equal [`MainTables::build`].
     ///
     /// # Panics
     /// If the manifest is of another parameter set than `P`.

@@ -249,14 +249,6 @@ pub(crate) unsafe fn finish_row<P: ParamSet>(
 }
 
 #[target_feature(enable = "avx2,popcnt")]
-pub(crate) unsafe fn finish_row_3p<P: ParamSet>(
-    row: super::FinishRow3P<'_>,
-    out: &mut FinishOut,
-) -> Result<(), FinishError> {
-    super::scalar::finish_row_3p::<P>(row, out)
-}
-
-#[target_feature(enable = "avx2,popcnt")]
 pub(crate) unsafe fn finish_row_2p<P: ParamSet>(
     row: super::FinishRow2P<'_>,
     out: &mut FinishOut,

@@ -23,21 +23,6 @@ pub struct FinishRow<'a> {
     pub h: &'a [u8; 256],
 }
 
-/// Three-prime input views for finishing one polynomial row with |A z| <= 2^51.8.
-#[derive(Clone, Copy, Debug)]
-pub struct FinishRow3P<'a> {
-    /// Inverse NTT output modulo q.
-    pub xq: &'a Poly32,
-    /// Inverse NTT output modulo P2.
-    pub xp2: &'a Poly32,
-    /// Inverse NTT output modulo P3.
-    pub xp3: &'a Poly32,
-    /// Shifted public key polynomial t.
-    pub t: &'a [i32; 256],
-    /// Hint bits (0 or 1).
-    pub h: &'a [u8; 256],
-}
-
 /// Two-prime input views for finishing one polynomial row with `|A z| < P2 P3 / 2`: the
 /// residue modulo q is derived from the CRT value.
 #[derive(Clone, Copy, Debug)]
@@ -142,24 +127,9 @@ impl<P: ParamSet> Engine<P> {
         }
     }
 
-    /// Reconstructs A*z over Z via 3-prime CRT for |A z| <= 2^51.8, computes w1 via UseHint, checks quotient divisibility and bounds.
-    pub fn finish_row_3p(&self, row: FinishRow3P<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
-        match self.backend() {
-            Backend::Scalar => scalar::finish_row_3p::<P>(row, out),
-            Backend::Avx2 => {
-                // SAFETY: The engine guarantees AVX2 and POPCNT features are available.
-                unsafe { avx2::finish_row_3p::<P>(row, out) }
-            }
-            Backend::Avx512 => {
-                // SAFETY: The engine guarantees AVX-512 features are available.
-                unsafe { avx512::finish_row_3p::<P>(row, out) }
-            }
-        }
-    }
-
-    /// [`Engine::finish_row_3p`] from the residues modulo P2 and P3 alone: A z by CRT
-    /// modulo `P2 P3` (exact for |A z| < 2^54.8), its residue modulo q from that value.
-    /// Same outputs and errors as `finish_row_3p` on the residues of the same A z.
+    /// Reconstructs A*z over Z from its residues modulo P2 and P3 by CRT modulo `P2 P3`
+    /// (exact for `|A z| < 2^54.8`), derives its residue modulo q from that value, computes
+    /// w1 via UseHint, and checks quotient divisibility and bounds.
     pub fn finish_row_2p(&self, row: FinishRow2P<'_>, out: &mut FinishOut) -> Result<(), FinishError> {
         match self.backend() {
             Backend::Scalar => scalar::finish_row_2p::<P>(row, out),

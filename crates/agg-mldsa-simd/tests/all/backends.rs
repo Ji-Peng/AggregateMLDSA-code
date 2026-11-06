@@ -433,20 +433,19 @@ fn every_api_matches_scalar() {
                 assert_eq!(out65_s, out65_e);
             }
 
-            let row3p = FinishRow3P {
-                xq: &xq,
+            let row2p = FinishRow2P {
                 xp2: &xp,
                 xp3: &xp3,
                 t: &t,
                 h: &h,
             };
-            let mut out3p_s = FinishOut::new();
-            let mut out3p_e = FinishOut::new();
-            let res3p_s = scalar65.finish_row_3p(row3p, &mut out3p_s);
-            let res3p_e = engine65.finish_row_3p(row3p, &mut out3p_e);
-            assert_eq!(res3p_s, res3p_e);
-            if res3p_s.is_ok() {
-                assert_eq!(out3p_s, out3p_e);
+            let mut out2p_s = FinishOut::new();
+            let mut out2p_e = FinishOut::new();
+            let res2p_s = scalar65.finish_row_2p(row2p, &mut out2p_s);
+            let res2p_e = engine65.finish_row_2p(row2p, &mut out2p_e);
+            assert_eq!(res2p_s, res2p_e);
+            if res2p_s.is_ok() {
+                assert_eq!(out2p_s, out2p_e);
             }
 
             let row_exact = FinishRowExact {

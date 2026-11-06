@@ -1,5 +1,5 @@
 //! Integer CRT finishing, sparse negacyclic products, and H-u digits.
-use super::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRow3P, FinishRowExact, HuCols};
+use super::{FinishError, FinishOut, FinishRow, FinishRow2P, FinishRowExact, HuCols};
 use crate::ntt::scalar::mont;
 use crate::{
     params::*,
@@ -163,47 +163,7 @@ const fn k_bound<P: ParamSet>() -> i64 {
 /// `2^32 P2^-1 mod P3`: a Montgomery product by it is a product by `P2^-1 mod P3`.
 const P2_INV_MONT_P3: i32 = (((P2_INV_MOD_P3 as i64) << 32) % P3 as i64) as i32;
 
-/// [`finish_row_3p_reference`] in two branch-free passes over the row that the compiler
-/// vectorises. A row with any out-of-bound value is finished again by the reference, which
-/// returns its error, so the result is the reference's (on an error the outputs are
-/// unspecified, as for every finish).
-#[inline(always)]
-pub(crate) fn finish_row_3p<P: ParamSet>(
-    row: FinishRow3P<'_>,
-    out: &mut FinishOut,
-) -> Result<(), FinishError> {
-    let (p2, p3) = (i64::from(P2), i64::from(P3));
-    let (m, kb) = (p2 * p3, k_bound::<P>());
-    let mut k = [std::mem::MaybeUninit::<i32>::uninit(); 256];
-    let mut bad = false;
-    for i in 0..256 {
-        let xq = row.xq[i];
-        // k2 = (xp2 - xq) / q mod P2 and k3 likewise, each in [0, P).
-        let k2 = mont(i64::from(row.xp2[i] - xq) * i64::from(CRT_C), CONSTS_P2);
-        let k2 = k2 + ((k2 >> 31) & P2);
-        let k3 = mont(i64::from(row.xp3[i] - xq) * i64::from(CRT_C_P3), CONSTS_P3);
-        let k3 = k3 + ((k3 >> 31) & P3);
-        // Garner: diff = (k3 - k2) mod P3 from (-P2, P3) with one correction, the factor
-        // diff / P2 mod P3 as a Montgomery product (|diff * c| < 2^58, result in (-P3, P3)).
-        let diff = k3 - k2;
-        let diff = diff + ((diff >> 31) & P3);
-        let factor = mont(i64::from(diff) * i64::from(P2_INV_MONT_P3), CONSTS_P3);
-        let factor = factor + ((factor >> 31) & P3);
-        let kk = i64::from(k2) + p2 * i64::from(factor);
-        let kk = if kk > m / 2 { kk - m } else { kk };
-        bad |= kk.abs() > kb;
-        // |kk| <= k_bound < 2^29 whenever the row is accepted.
-        k[i].write(kk as i32);
-    }
-    // SAFETY: the loop above initialized all 256 entries of `k`.
-    let k = unsafe { &*(k.as_ptr().cast::<[i32; 256]>()) };
-    if bad || !finish_from_k::<P>(&row.xq.0, k, row.t, row.h, out) {
-        return finish_row_3p_reference::<P>(row, out);
-    }
-    Ok(())
-}
-
-/// The second pass of the vectorised finishes: UseHint on `xq - t`, `u`, `v = k + ve` and
+/// The second pass of the vectorised finish: UseHint on `xq - t`, `u`, `v = k + ve` and
 /// `w1'` into `out`; false when a bound fails (`|ve| > C_B_Q`, `|u| > B_u`, `|v| > B_v`).
 /// `k` is the CRT quotient `(A z - xq) / q`, `|k| <= k_bound`.
 #[inline(always)]
@@ -250,11 +210,13 @@ fn finish_from_k<P: ParamSet>(xq: &[i32; 256], k: &[i32; 256], t: &[i32; 256], h
     out_of_bounds == 0
 }
 
-/// [`finish_row_3p`] from the residues modulo P2 and P3: Garner's CRT gives A z modulo
-/// `P2 P3` (centered), the row is accepted only where the quotient `k = floor(A z / q)` is in
-/// `[-k_bound, k_bound]` (the three-prime bound), and `xq = A z mod q`, `k` follow from the
-/// CRT value: `xq` from its parts modulo q, `k = (A z - xq) q^-1 mod 2^32` (exact, `|k| <
-/// 2^31`). The result equals [`finish_row_3p_reference`] on the residues of the same A z.
+/// Finishes a row from the residues modulo P2 and P3 in two branch-free passes that the
+/// compiler vectorises: Garner's CRT gives A z modulo `P2 P3` (centered), the row is
+/// accepted only where the quotient `k = floor(A z / q)` is in `[-k_bound, k_bound]` (the
+/// three-prime bound), and `xq = A z mod q`, `k` follow from the CRT value (`xq` from its
+/// parts modulo q, `k = (A z - xq) q^-1 mod 2^32`, exact with `|k| < 2^31`). A row that
+/// fails a second-pass bound is finished again by [`finish_row_from_k`], which returns the
+/// first failing coefficient's error.
 #[inline(always)]
 pub(crate) fn finish_row_2p<P: ParamSet>(
     row: FinishRow2P<'_>,
@@ -303,41 +265,6 @@ pub(crate) fn finish_row_2p<P: ParamSet>(
 const P2_MONT_Q: i32 = (((P2 as i64) << 32) % Q as i64) as i32;
 /// `P2 P3 mod q`.
 const M_MOD_Q: i32 = ((P2 as i64 * P3 as i64) % Q as i64) as i32;
-
-/// The coefficient-by-coefficient three-prime finish: CRT of `k` modulo `P2 P3`, then
-/// [`finish_row_from_k`]; the first failing coefficient decides the error.
-pub(crate) fn finish_row_3p_reference<P: ParamSet>(
-    row: FinishRow3P<'_>,
-    out: &mut FinishOut,
-) -> Result<(), FinishError> {
-    let mut k_coeffs = [0i64; 256];
-    let p2 = P2 as i64;
-    let p3 = P3 as i64;
-    for i in 0..256 {
-        let xq = row.xq[i];
-        let mut k2 = mont((row.xp2[i] - xq) as i64 * CRT_C as i64, CONSTS_P2);
-        k2 += (k2 >> 31) & P2;
-        let mut k3 = mont((row.xp3[i] - xq) as i64 * CRT_C_P3 as i64, CONSTS_P3);
-        k3 += (k3 >> 31) & P3;
-
-        // Chinese Remainder Theorem combination of k mod P2 and k mod P3:
-        let diff = (k3 as i64 - k2 as i64).rem_euclid(p3);
-        let factor = (diff * P2_INV_MOD_P3 as i64).rem_euclid(p3);
-        let mut k = k2 as i64 + p2 * factor;
-        let m = p2 * p3;
-        if k > m / 2 {
-            k -= m;
-        }
-        // Reject before any narrowing: a residue that is wrong modulo P2 or P3
-        // gives a k spread over |k| <= P2 P3 / 2 (about 2^54.8), almost always far
-        // above the honest bound (below 2^28.81).
-        if k.abs() > k_bound::<P>() {
-            return Err(FinishError::VBound);
-        }
-        k_coeffs[i] = k;
-    }
-    finish_row_from_k::<P>(row.xq, &k_coeffs, row.t, row.h, out)
-}
 
 pub(crate) fn finish_row_exact<P: ParamSet>(
     row: FinishRowExact<'_>,
@@ -438,35 +365,38 @@ mod tests {
         (m(Q), m(P2), m(P3))
     }
 
-    /// The two-pass finish agrees with the reference on honest rows and on rows with a
-    /// corrupted residue, a large `T` or a flipped hint.
-    fn matches_the_reference<P: ParamSet>(seed: u64) {
-        let mut rng = Rng(seed);
-        let kb = k_bound::<P>() * i64::from(Q);
-        let mut accepted = 0;
-        for case in 0..400 {
-            let scale = [kb, kb / 4, kb / 64, 2 * kb][case % 4];
-            let az: [i64; 256] = std::array::from_fn(|_| rng.range(-scale, scale));
-            let (mut xq, mut xp2, mut xp3) = residues(&az);
-            let tb = if case % 7 == 0 { 1 << 30 } else { 1 << 28 };
-            let t: [i32; 256] = std::array::from_fn(|_| rng.range(-tb, tb) as i32);
-            let h: [u8; 256] = std::array::from_fn(|_| u8::from(rng.next() % 9 == 0));
-            match case % 5 {
-                1 => xp2[(rng.next() % 256) as usize] ^= 1 << (rng.next() % 20),
-                2 => xp3[(rng.next() % 256) as usize] ^= 1 << (rng.next() % 20),
-                3 => xq[(rng.next() % 256) as usize] = (rng.next() % Q as u64) as i32,
-                _ => {}
+    /// The coefficient-by-coefficient three-prime finish: CRT of `k` modulo `P2 P3`, then
+    /// [`finish_row_from_k`]; the first failing coefficient decides the error.
+    fn finish_row_3p_reference<P: ParamSet>(
+        xq: &Poly32,
+        xp2: &Poly32,
+        xp3: &Poly32,
+        t: &[i32; 256],
+        h: &[u8; 256],
+        out: &mut FinishOut,
+    ) -> Result<(), FinishError> {
+        let mut k_coeffs = [0i64; 256];
+        let p2 = P2 as i64;
+        let p3 = P3 as i64;
+        for i in 0..256 {
+            let xqi = xq[i];
+            let mut k2 = mont((xp2[i] - xqi) as i64 * CRT_C as i64, CONSTS_P2);
+            k2 += (k2 >> 31) & P2;
+            let mut k3 = mont((xp3[i] - xqi) as i64 * CRT_C_P3 as i64, CONSTS_P3);
+            k3 += (k3 >> 31) & P3;
+            let diff = (k3 as i64 - k2 as i64).rem_euclid(p3);
+            let factor = (diff * P2_INV_MOD_P3 as i64).rem_euclid(p3);
+            let mut k = k2 as i64 + p2 * factor;
+            let m = p2 * p3;
+            if k > m / 2 {
+                k -= m;
             }
-            let row = FinishRow3P { xq: &xq, xp2: &xp2, xp3: &xp3, t: &t, h: &h };
-            let (mut got, mut want) = (FinishOut::zero(), FinishOut::zero());
-            let (r_got, r_want) = (finish_row_3p::<P>(row, &mut got), finish_row_3p_reference::<P>(row, &mut want));
-            assert_eq!(r_got, r_want, "case {case}");
-            accepted += usize::from(r_want.is_ok());
-            if r_want.is_ok() {
-                assert_eq!(got, want, "case {case}");
+            if k.abs() > k_bound::<P>() {
+                return Err(FinishError::VBound);
             }
+            k_coeffs[i] = k;
         }
-        assert!((40..360).contains(&accepted), "{accepted} of 400 rows accepted");
+        finish_row_from_k::<P>(xq, &k_coeffs, t, h, out)
     }
 
     /// The two-prime finish agrees with the three-prime reference on the residues of the
@@ -489,7 +419,7 @@ mod tests {
             let h: [u8; 256] = std::array::from_fn(|_| u8::from(rng.next() % 9 == 0));
             let (mut got, mut want) = (FinishOut::zero(), FinishOut::zero());
             let r_got = finish_row_2p::<P>(FinishRow2P { xp2: &xp2, xp3: &xp3, t: &t, h: &h }, &mut got);
-            let r_want = finish_row_3p_reference::<P>(FinishRow3P { xq: &xq, xp2: &xp2, xp3: &xp3, t: &t, h: &h }, &mut want);
+            let r_want = finish_row_3p_reference::<P>(&xq, &xp2, &xp3, &t, &h, &mut want);
             assert_eq!(r_got, r_want, "case {case}");
             accepted += usize::from(r_want.is_ok());
             if r_want.is_ok() {
@@ -503,11 +433,5 @@ mod tests {
     fn two_prime_finish_matches_the_reference() {
         two_prime_matches_the_reference::<Set65>(650);
         two_prime_matches_the_reference::<Set87>(870);
-    }
-
-    #[test]
-    fn two_pass_finish_matches_the_reference() {
-        matches_the_reference::<Set65>(65);
-        matches_the_reference::<Set87>(87);
     }
 }
