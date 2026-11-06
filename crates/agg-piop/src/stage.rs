@@ -502,16 +502,22 @@ pub fn prove_stage_drawn<'a>(
             owner.push(g);
             continue;
         }
-        let (instances, linear) =
-            split_linear(&lanes, instances, eq_point.as_deref(), rounds, &mut pool);
-        groups.push(StageGroup::Generic(
-            Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
-        ));
+        // A full-domain equality group whose linear-only integer lanes moved to a linear group
+        // keeps the other lanes; the moved lanes' terminal values are evaluated at the end.
+        let group = match split_linear(lanes, instances, eq_point.as_deref(), rounds, &mut pool) {
+            Split::Kept(lanes, instances) => StageGroup::Generic(
+                Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
+            ),
+            Split::Dropped { lanes, instances, map, linear } => {
+                let group =
+                    Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?;
+                groups.push(StageGroup::Folded(FoldedGroup { group, lanes: map, challenges: Vec::new() }));
+                owner.push(g);
+                StageGroup::Extra(linear)
+            }
+        };
+        groups.push(group);
         owner.push(g);
-        if let Some(linear) = linear {
-            groups.push(StageGroup::Extra(linear));
-            owner.push(g);
-        }
         build_times[g] = build.elapsed().as_secs_f64();
     }
     for (slot, spec_group, group, elapsed) in build_deferred(deferred, rounds, spec.degree) {
@@ -589,16 +595,27 @@ pub fn prove_stage_drawn<'a>(
             fresh >> 20,
             reused >> 20
         );
+        // The dense-round path of each spec group's generic kernel (kernel lanes, tail slots).
+        let mut kernels = vec![String::new(); spec.groups.len()];
+        for (built, &g) in groups.iter().zip(&owner) {
+            if let Some((lanes, slots)) = built.kernel_shape() {
+                kernels[g] = match slots {
+                    Some(slots) => format!(", tail on ({lanes} lanes, {slots} slots)"),
+                    None => format!(", tail off ({lanes} lanes)"),
+                };
+            }
+        }
         for (g, group) in spec.groups.iter().enumerate() {
             eprintln!(
-                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms",
+                "  group {g:2} {:?} eq {:?}: {:3} lanes, {:3} instances, build {:6.1} ms, message {:8.1} ms, bind {:8.1} ms{}",
                 group.domain,
                 group.eq,
                 group.lanes.len(),
                 group.instances.len(),
                 build_times[g] * 1e3,
                 group_times[g].0 * 1e3,
-                group_times[g].1 * 1e3
+                group_times[g].1 * 1e3,
+                kernels[g]
             );
         }
         let per_round: Vec<String> = round_times.iter().map(|t| format!("{:.0}", t * 1e3)).collect();
@@ -610,29 +627,56 @@ pub fn prove_stage_drawn<'a>(
     }
     // The extra linear groups split off a generic group carry no lanes of their own.
     groups.retain(|g| !matches!(g, StageGroup::Extra(_)));
-    let mut lane_values: Vec<Option<Vec<E>>> = groups.iter().map(StageGroup::terminal_values).collect();
-    // A linear group's lanes are read by another group at the same point (`linear_group`).
-    for g in 0..groups.len() {
-        if lane_values[g].is_some() {
-            continue;
-        }
-        let values = spec.groups[g]
-            .lanes
-            .iter()
-            .map(|&id| {
-                spec.groups
-                    .iter()
-                    .zip(&lane_values)
-                    .find_map(|(other, values)| {
-                        let position = other.lanes.iter().position(|&l| l == id)?;
-                        values.as_ref().map(|v| v[position])
-                    })
-                    .expect("a linear group's lane is read by a generic group")
-            })
-            .collect();
-        lane_values[g] = Some(values);
+    let terminal_clock = std::time::Instant::now();
+    // Every lane is evaluated once, by the first group that reads it and yields terminal
+    // values (a linear group yields none); the other groups reading it copy that value, the
+    // same multilinear evaluation at the same point.
+    let mut first_reader: std::collections::HashMap<LaneId, (usize, usize)> = std::collections::HashMap::new();
+    let needed: Vec<Vec<bool>> = spec
+        .groups
+        .iter()
+        .zip(&groups)
+        .enumerate()
+        .map(|(g, (group, built))| {
+            let yields = built.yields_values();
+            group
+                .lanes
+                .iter()
+                .enumerate()
+                .map(|(position, &id)| {
+                    yields && {
+                        let first = !first_reader.contains_key(&id);
+                        if first {
+                            first_reader.insert(id, (g, position));
+                        }
+                        first
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let own: Vec<Option<Vec<E>>> = groups
+        .par_iter()
+        .zip(&needed)
+        .map(|(group, needed)| group.terminal_values(needed))
+        .collect();
+    let lane_values: Vec<Vec<E>> = spec
+        .groups
+        .iter()
+        .map(|group| {
+            group
+                .lanes
+                .iter()
+                .map(|id| {
+                    let &(g, position) = first_reader.get(id).expect("every lane is read by a group that yields values");
+                    own[g].as_ref().expect("the first reader yields values")[position]
+                })
+                .collect()
+        })
+        .collect();
+    if trace {
+        eprintln!("  terminal values {:.1} ms", terminal_clock.elapsed().as_secs_f64() * 1e3);
     }
-    let lane_values = lane_values.into_iter().map(|v| v.expect("filled")).collect();
     for group in groups {
         group.recycle(&mut pool);
     }
@@ -659,7 +703,8 @@ enum StageGroup<'a> {
     LaneSplit(LaneSplitGroup<'a>),
     /// A weight kept as two factors ([`RankOneGroup`]).
     RankOne(RankOneGroup<'a>),
-    /// An equality group with its linear-only lanes folded into one lane ([`FoldedGroup`]).
+    /// An equality group with its linear-only lanes folded into one lane, or moved to a
+    /// linear group ([`split_linear`]) ([`FoldedGroup`]).
     Folded(FoldedGroup<'a>),
     /// The slot of a group that [`build_deferred`] builds after the loop.
     Pending,
@@ -737,15 +782,34 @@ impl StageGroup<'_> {
         }
     }
 
-    fn terminal_values(&self) -> Option<Vec<E>> {
+    /// For a group on the generic kernel: its lane count and, when its dense rounds run on
+    /// the plane tail, the tail's slot count.
+    fn kernel_shape(&self) -> Option<(usize, Option<usize>)> {
+        match self {
+            Self::Generic(g) => Some(g.tail_shape()),
+            Self::Folded(g) => Some(g.group.tail_shape()),
+            _ => None,
+        }
+    }
+
+    /// True when the group yields terminal values (a linear group reads lanes whose values
+    /// another group supplies).
+    fn yields_values(&self) -> bool {
+        !matches!(self, Self::Linear(_) | Self::Extra(_))
+    }
+
+    /// The terminal values of the group's lanes; the lanes with `needed[l]` false may hold any
+    /// value (their value comes from another group), so a group skips their evaluation where
+    /// it costs a pass over a column.
+    fn terminal_values(&self, needed: &[bool]) -> Option<Vec<E>> {
         match self {
             Self::Generic(g) => Some(g.terminal_values()),
             Self::Linear(_) | Self::Extra(_) => None,
-            Self::Weight(g) => Some(g.terminal_values()),
+            Self::Weight(g) => Some(g.terminal_values(needed)),
             Self::Split(g) => Some(g.terminal_values()),
             Self::LaneSplit(g) => Some(g.terminal_values()),
-            Self::RankOne(g) => Some(g.terminal_values()),
-            Self::Folded(g) => Some(g.terminal_values()),
+            Self::RankOne(g) => Some(g.terminal_values(needed)),
+            Self::Folded(g) => Some(g.terminal_values(needed)),
             Self::Pending => unreachable!("a built group"),
         }
     }
@@ -881,10 +945,10 @@ impl WeightGroup<'_> {
         }
     }
 
-    fn terminal_values(&self) -> Vec<E> {
+    fn terminal_values(&self, needed: &[bool]) -> Vec<E> {
         match self {
             Self::Row(g) => g.terminal_values(),
-            Self::Plane(g) => g.terminal_values(),
+            Self::Plane(g) => g.terminal_values_of(needed),
         }
     }
 
@@ -1054,15 +1118,18 @@ enum FoldedLane<'a> {
 /// `g = sum_l c_l f_l` with their batched coefficients: the generic group carries the other
 /// lanes and `g` (one product term), and the folded lanes' values come from their multilinear
 /// evaluation at the bound point (prover only). The round polynomial is the same polynomial,
-/// so the messages equal the unfolded group's.
+/// so the messages equal the unfolded group's. [`split_linear`] builds the same structure
+/// without `g`: the dropped lanes' terms then sit in a separate linear group.
 struct FoldedGroup<'a> {
     group: Group<'a>,
     lanes: Vec<FoldedLane<'a>>,
     challenges: Vec<E>,
 }
 
-/// Cells per task of the pass that materializes `g`.
-const FOLD_CHUNK: usize = 1 << 12;
+/// Cells per task of the pass that materializes `g`. Each folded lane reads and writes the
+/// task's accumulator (32 B per cell), so 1,024 cells keep it at 32 KiB, inside the L1 data
+/// cache.
+const FOLD_CHUNK: usize = 1 << 10;
 
 /// The term with every lane index `l` replaced by `index[l]`.
 fn remap_term(term: Term, index: &[usize]) -> Term {
@@ -1081,6 +1148,119 @@ fn remap_term(term: Term, index: &[usize]) -> Term {
             monomials.into_iter().map(|(c, m)| (c, m.into_iter().map(|l| index[l]).collect())).collect(),
         ),
     }
+}
+
+/// A lane of the combination `g` of [`fold_combination`].
+enum Folding<'a> {
+    /// An `i32` column with the canonical coordinates of its coefficient.
+    Ints(&'a [i32], [i128; 2]),
+    /// A byte column with the canonical coordinates of `c map[byte]` for every byte.
+    Bytes(&'a [i8], Box<[[u64; 2]; 256]>),
+}
+
+/// `g = sum_l c_l f_l` over `rows` cells for integer or byte lanes `f_l` with coefficients
+/// `c_l` given by their canonical coordinates. Per coordinate every lane adds below 2^95 in
+/// magnitude (a canonical coefficient below 2^64 times an `i32` cell, or a canonical table
+/// entry below 2^64), so fewer than 2^30 lanes sum exactly inside an `i128`, reduced once per
+/// cell. A byte lane adds its table entry at the cell's byte instead of multiplying. Every
+/// cell is written by the parallel pass (first touch there, no zero fill).
+fn fold_combination(folded: &[(Source<'_>, [u64; 2])], rows: usize) -> Vec<E> {
+    let lanes: Vec<Folding<'_>> = folded
+        .iter()
+        .map(|(source, [c0, c1])| match source {
+            Source::Ints(column) => Folding::Ints(column, [i128::from(*c0), i128::from(*c1)]),
+            Source::Bytes { cells, map } => {
+                let c = E::new(agg_simd::F::from_u64(*c0), agg_simd::F::from_u64(*c1));
+                Folding::Bytes(
+                    cells,
+                    Box::new(std::array::from_fn(|byte| {
+                        let x = c.mul_i64(map[byte]);
+                        [x.c0().to_canonical_u64(), x.c1().to_canonical_u64()]
+                    })),
+                )
+            }
+            _ => unreachable!("integer lanes only"),
+        })
+        .collect();
+    let mut g = crate::kernel::buf::uninit::<E>(rows);
+    g.par_chunks_mut(FOLD_CHUNK).enumerate().for_each_init(Vec::new, |acc, (chunk, out)| {
+        let first = chunk * FOLD_CHUNK;
+        let n = out.len();
+        acc.clear();
+        acc.resize(n, [0_i128; 2]);
+        for lane in &lanes {
+            match lane {
+                Folding::Ints(column, [c0, c1]) => {
+                    for (a, &v) in acc.iter_mut().zip(&column[first..first + n]) {
+                        let x = i128::from(v);
+                        a[0] += c0 * x;
+                        a[1] += c1 * x;
+                    }
+                }
+                Folding::Bytes(column, table) => {
+                    for (a, &v) in acc.iter_mut().zip(&column[first..first + n]) {
+                        let [t0, t1] = table[v as u8 as usize];
+                        a[0] += i128::from(t0);
+                        a[1] += i128::from(t1);
+                    }
+                }
+            }
+        }
+        for (slot, &[a0, a1]) in out.iter_mut().zip(acc.iter()) {
+            slot.write(E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1)));
+        }
+    });
+    // SAFETY: the chunks cover all `rows` slots and the pass wrote each one.
+    #[allow(unsafe_code)]
+    unsafe { g.assume_init() }.into_vec()
+}
+
+/// Per lane of a [`FoldedGroup`]: the batched linear coefficient of a kept integer lane whose
+/// every term reads it alone (zero for the other lanes), the part [`FoldedGroup::new`] moves
+/// into `g`.
+fn linear_parts(lanes: &[Lane<'_>], instances: &[GroupInstance], candidate: &[bool], rows: usize) -> Vec<E> {
+    let mut eligible: Vec<bool> = lanes
+        .iter()
+        .zip(candidate)
+        .map(|(lane, &c)| {
+            !c && match lane {
+                Lane::Source(source @ Source::Ints(_)) => source.len() == rows,
+                Lane::Source(source @ Source::Bytes { map, .. }) => {
+                    source.len() == rows && map.iter().all(|v| i32::try_from(*v).is_ok())
+                }
+                _ => false,
+            }
+        })
+        .collect();
+    let mut parts = vec![E::zero(); lanes.len()];
+    for instance in instances {
+        let gamma = instance.gamma;
+        for term in &instance.terms {
+            match term {
+                Term::Product(read) if read.len() == 1 => parts[read[0]] += gamma,
+                Term::Product(read) if read.len() == 2 && read[0] == read[1] => {}
+                Term::Bool(l) => parts[*l] -= gamma,
+                Term::Link(l) => parts[*l] += gamma,
+                Term::Leaf(l, poly) => parts[*l] += gamma.mul_i64(poly.coefficients()[1]),
+                Term::Affine { weight: None, lanes: affine, .. } => {
+                    for &(l, c) in affine {
+                        parts[l] += gamma.mul_i64(c);
+                    }
+                }
+                other => {
+                    for l in other.lanes() {
+                        eligible[l] = false;
+                    }
+                }
+            }
+        }
+    }
+    for (part, eligible) in parts.iter_mut().zip(eligible) {
+        if !eligible {
+            *part = E::zero();
+        }
+    }
+    parts
 }
 
 impl<'a> FoldedGroup<'a> {
@@ -1121,6 +1301,13 @@ impl<'a> FoldedGroup<'a> {
         if candidate.iter().filter(|&&c| c).count() < 2 {
             return Err((lanes, instances));
         }
+        // A kept integer lane read only by terms in itself alone (squares, Booleanity and
+        // link checks, leaf polynomials, linear parts) also moves the linear part of its
+        // polynomial into `g`. Its original linear term stays, and a cancelling single-lane
+        // product `-c1 f_l` is added; the plan merges the two per-lane coefficients to an
+        // exact zero, so the dense rounds need one coefficient slot per such lane instead of
+        // two. A plan that stopped merging per-lane coefficients would bring back both slots.
+        let linear_parts = linear_parts(&lanes, &instances, &candidate, rows);
         // The batched coefficient of every folded lane; the folded parts leave the terms.
         let mut coefficients = vec![E::zero(); lanes.len()];
         let mut instances: Vec<GroupInstance> = instances
@@ -1157,11 +1344,19 @@ impl<'a> FoldedGroup<'a> {
                 GroupInstance { gamma, terms }
             })
             .collect();
+        for (l, &c1) in linear_parts.iter().enumerate() {
+            if !c1.is_zero() {
+                coefficients[l] += c1;
+                instances.push(GroupInstance { gamma: -c1, terms: vec![Term::Product(vec![l])] });
+            }
+        }
         let folded: Vec<(Source<'a>, [u64; 2])> = lanes
             .iter()
             .zip(&candidate)
             .zip(&coefficients)
-            .filter(|((_, &c), _)| c)
+            .enumerate()
+            .filter(|(l, ((_, &c), _))| c || !linear_parts[*l].is_zero())
+            .map(|(_, x)| x)
             .map(|((lane, _), coefficient)| match lane {
                 Lane::Source(source) => {
                     (*source, [coefficient.c0().to_canonical_u64(), coefficient.c1().to_canonical_u64()])
@@ -1169,47 +1364,7 @@ impl<'a> FoldedGroup<'a> {
                 Lane::Folded(_) => unreachable!("candidates are sources"),
             })
             .collect();
-        // g(x) per coordinate: canonical coefficients (< 2^64) times cells (|f| <= 2^31) are
-        // below 2^95 in magnitude; fewer than 2^30 lanes sum inside an i128, reduced once.
-        // Every slot is written by the parallel pass below (first touch there, no zero fill).
-        let mut g = crate::kernel::buf::uninit::<E>(rows);
-        g.par_chunks_mut(FOLD_CHUNK).enumerate().for_each_init(
-            || (Vec::new(), Vec::new()),
-            |(acc, cells), (chunk, out)| {
-                let first = chunk * FOLD_CHUNK;
-                let n = out.len();
-                acc.clear();
-                acc.resize(n, [0_i128; 2]);
-                cells.resize(n, 0_i64);
-                for (source, [c0, c1]) in &folded {
-                    match source {
-                        Source::Ints(column) => {
-                            for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
-                                *x = i64::from(v);
-                            }
-                        }
-                        Source::Bytes { cells: column, map } => {
-                            for (x, &v) in cells.iter_mut().zip(&column[first..first + n]) {
-                                *x = map[v as u8 as usize];
-                            }
-                        }
-                        _ => unreachable!("integer lanes only"),
-                    }
-                    let (c0, c1) = (i128::from(*c0), i128::from(*c1));
-                    for (a, &x) in acc.iter_mut().zip(cells.iter()) {
-                        let x = i128::from(x);
-                        a[0] += c0 * x;
-                        a[1] += c1 * x;
-                    }
-                }
-                for (slot, &[a0, a1]) in out.iter_mut().zip(acc.iter()) {
-                    slot.write(E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1)));
-                }
-            },
-        );
-        // SAFETY: the chunks cover all `rows` slots and the pass wrote each one.
-        #[allow(unsafe_code)]
-        let g = unsafe { g.assume_init() }.into_vec();
+        let g = fold_combination(&folded, rows);
         let mut index = vec![usize::MAX; lanes.len()];
         let mut kept_lanes = Vec::new();
         let mut map = Vec::with_capacity(lanes.len());
@@ -1239,14 +1394,17 @@ impl<'a> FoldedGroup<'a> {
         self.group.bind(round, challenge);
     }
 
-    /// The values of the spec group's lanes at the bound point.
-    fn terminal_values(&self) -> Vec<E> {
+    /// The values of the spec group's lanes at the bound point (zero for a dropped lane that
+    /// is not `needed`).
+    fn terminal_values(&self, needed: &[bool]) -> Vec<E> {
         let kept = self.group.terminal_values();
         let (first, second) = agg_simd::eval::split_eq_tables(&self.challenges);
         self.lanes
             .par_iter()
-            .map(|lane| match lane {
+            .zip(needed)
+            .map(|(lane, &needed)| match lane {
                 FoldedLane::Kept(i) => kept[*i],
+                FoldedLane::Dropped(_) if !needed => E::zero(),
                 FoldedLane::Dropped(Source::Ints(cells)) => agg_simd::eval::column_at(cells, &first, &second),
                 FoldedLane::Dropped(Source::Bytes { cells, map }) => {
                     agg_simd::eval::column_at(&agg_simd::eval::Mapped { cells, map }, &first, &second)
@@ -1257,20 +1415,35 @@ impl<'a> FoldedGroup<'a> {
     }
 }
 
+/// The outcome of [`split_linear`].
+enum Split<'a> {
+    /// No lane moved: the group's lanes and instances unchanged.
+    Kept(Vec<Lane<'a>>, Vec<GroupInstance>),
+    /// The linear-only integer lanes moved to `linear`; `lanes` and `instances` are the
+    /// generic group without them, `map` places the spec group's lanes.
+    Dropped {
+        lanes: Vec<Lane<'a>>,
+        instances: Vec<GroupInstance>,
+        map: Vec<FoldedLane<'a>>,
+        linear: LinearGroup<'a>,
+    },
+}
+
 /// Split the linear terms on integer lanes off an equality group on the full domain: a
 /// lane that is an `Ints` table and read only by single-lane products or unweighted affine
-/// sums moves its terms (with their coefficients) to one [`LinearIntGroup`]; the lane stays
-/// in the generic group, unread, so that the group still folds it and yields its terminal
-/// value (prover only; the sum of the two groups' messages is the original group's).
+/// sums moves its terms (with their coefficients) to one [`LinearIntGroup`] and leaves the
+/// generic group, so the generic group neither folds nor carries it; its terminal value is
+/// its multilinear evaluation at the bound point (prover only; the sum of the two groups'
+/// messages is the original group's).
 fn split_linear<'a>(
-    lanes: &[Lane<'a>],
+    lanes: Vec<Lane<'a>>,
     instances: Vec<GroupInstance>,
     eq_point: Option<&[E]>,
     rounds: usize,
     pool: &mut agg_simd::buf::Pool,
-) -> (Vec<GroupInstance>, Option<LinearGroup<'a>>) {
+) -> Split<'a> {
     let Some(point) = eq_point.filter(|p| p.len() == rounds && rounds > 0) else {
-        return (instances, None);
+        return Split::Kept(lanes, instances);
     };
     // Lanes read anywhere outside a linear position are not candidates.
     let mut candidate: Vec<bool> = lanes
@@ -1290,8 +1463,22 @@ fn split_linear<'a>(
             }
         }
     }
-    if !candidate.iter().any(|&c| c) {
-        return (instances, None);
+    // The generic group keeps at least one lane.
+    if !candidate.iter().any(|&c| c) || candidate.iter().all(|&c| c) {
+        return Split::Kept(lanes, instances);
+    }
+    let cells: Vec<Source<'a>> = lanes
+        .iter()
+        .zip(&candidate)
+        .filter(|(_, &c)| c)
+        .map(|(lane, _)| match lane {
+            Lane::Source(source @ Source::Ints(_)) => *source,
+            _ => unreachable!("candidates are integer lanes"),
+        })
+        .collect();
+    if cells.iter().any(|source| source.len() != 1 << rounds) {
+        // `Group::new` reports the wrong length.
+        return Split::Kept(lanes, instances);
     }
     let mut coefficients = vec![E::zero(); lanes.len()];
     let instances: Vec<GroupInstance> = instances
@@ -1332,24 +1519,36 @@ fn split_linear<'a>(
             GroupInstance { gamma, terms }
         })
         .collect();
-    let (cells, coefficients): (Vec<Source<'a>>, Vec<E>) = lanes
-        .iter()
-        .zip(coefficients)
-        .zip(&candidate)
-        .filter(|(_, &c)| c)
-        .map(|((lane, coefficient), _)| match lane {
-            Lane::Source(source @ Source::Ints(_)) => (*source, coefficient),
-            _ => unreachable!("candidates are integer lanes"),
-        })
-        .unzip();
+    let coefficients: Vec<E> = coefficients.into_iter().zip(&candidate).filter(|(_, &c)| c).map(|(e, _)| e).collect();
     let linear = if layout() == Layout::Plane {
         plane_linear(&cells, &coefficients, point, pool)
     } else {
         None
     };
-    let linear = linear.or_else(|| LinearIntGroup::new(cells, coefficients, point).map(LinearGroup::Row));
-    // `new` refuses only lanes of the wrong length, which `Group::new` then reports.
-    (instances, linear)
+    let Some(linear) = linear.or_else(|| LinearIntGroup::new(cells, coefficients, point).map(LinearGroup::Row)) else {
+        unreachable!("integer lanes of the full domain");
+    };
+    let mut index = vec![usize::MAX; lanes.len()];
+    let mut kept_lanes = Vec::new();
+    let mut map = Vec::with_capacity(lanes.len());
+    for (l, lane) in lanes.into_iter().enumerate() {
+        if candidate[l] {
+            let Lane::Source(source) = lane else { unreachable!("candidates are sources") };
+            map.push(FoldedLane::Dropped(source));
+        } else {
+            index[l] = kept_lanes.len();
+            map.push(FoldedLane::Kept(kept_lanes.len()));
+            kept_lanes.push(lane);
+        }
+    }
+    let instances = instances
+        .into_iter()
+        .map(|instance| GroupInstance {
+            gamma: instance.gamma,
+            terms: instance.terms.into_iter().map(|t| remap_term(t, &index)).collect(),
+        })
+        .collect();
+    Split::Dropped { lanes: kept_lanes, instances, map, linear }
 }
 
 /// True when a group spec has the shape [`linear_group`] may take (single-lane products
@@ -1449,6 +1648,78 @@ mod tests {
     use super::*;
     use crate::test_support::{field, point};
     use agg_witness::gen::SplitMix64;
+
+    /// A folded group (linear-only lanes in `g`, the linear parts of the squared, Boolean and
+    /// link lanes moved into `g`) and a split group (linear-only integer lanes in a linear
+    /// group) give the generic group's messages, claim and terminal values.
+    #[test]
+    fn folded_and_split_groups_match_the_generic_group() {
+        let mut rng = SplitMix64::new(29);
+        let vars = 9;
+        let len = 1_usize << vars;
+        let ints: Vec<Vec<i32>> =
+            (0..3).map(|_| (0..len).map(|_| (rng.next_u64() % (1 << 16)) as i32 - (1 << 15)).collect()).collect();
+        let bits: Vec<Vec<i8>> = (0..3).map(|_| (0..len).map(|_| (rng.next_u64() & 1) as i8).collect()).collect();
+        let digits: Vec<i8> = (0..len).map(|_| (rng.next_u64() % 9) as i8 - 4).collect();
+        let mut lanes: Vec<Lane<'_>> = ints.iter().map(|c| Lane::Source(Source::Ints(c))).collect();
+        lanes.extend(bits.iter().map(|c| Lane::column(c)));
+        lanes.push(Lane::column(&digits));
+        // Lanes 0, 1 (integers) and 3 (a bit) are linear only; lane 2 is squared, lane 4 is
+        // Boolean, lane 5 a bit read linearly and by its Booleanity check, lane 6 a link.
+        let instances: Vec<GroupInstance> = vec![
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Affine { weight: None, lanes: vec![(0, 3), (1, -7), (3, 2), (6, 5)], constant: 11 }] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![2, 2]), Term::Product(vec![2])] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Bool(4)] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Bool(5)] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![5])] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Link(6)] },
+            GroupInstance { gamma: field(&mut rng), terms: vec![Term::Product(vec![1])] },
+        ];
+        let eq_point = point(&mut rng, vars);
+        let degree = 3;
+        let mut want = Group::new(lanes.clone(), instances.clone(), Some(&eq_point), vars, degree).unwrap();
+        let mut folded = match FoldedGroup::new(lanes.clone(), instances.clone(), &eq_point, vars, degree) {
+            Ok(group) => group.unwrap(),
+            Err(_) => panic!("the group folds"),
+        };
+        let mut pool = agg_simd::buf::Pool::default();
+        let Split::Dropped { lanes: kept, instances: rest, map, mut linear } =
+            split_linear(lanes, instances, Some(&eq_point), vars, &mut pool)
+        else {
+            panic!("the integer lanes split off")
+        };
+        let mut split = FoldedGroup {
+            group: Group::new(kept, rest, Some(&eq_point), vars, degree).unwrap(),
+            lanes: map,
+            challenges: Vec::new(),
+        };
+        assert_eq!(folded.group.claim(), want.claim());
+        assert_eq!(split.group.claim() + linear.claim(), want.claim());
+        for round in 0..vars {
+            let message = want.round_message(round);
+            assert_eq!(folded.group.round_message(round), message, "folded, round {round}");
+            let parts: Vec<E> = split
+                .group
+                .round_message(round)
+                .into_iter()
+                .zip(linear.round_message(round))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(parts, message, "split, round {round}");
+            let r = field(&mut rng);
+            want.bind(round, r);
+            folded.bind(round, r);
+            split.bind(round, r);
+            linear.bind(round, r);
+        }
+        let want = want.terminal_values();
+        assert_eq!(folded.terminal_values(&[true; 7]), want);
+        assert_eq!(split.terminal_values(&[true; 7]), want);
+        // A dropped lane another group evaluates reads zero; kept lanes always come back.
+        let mut partial = want.clone();
+        partial[0] = E::zero();
+        assert_eq!(split.terminal_values(&[false, true, true, true, true, true, true]), partial);
+    }
 
     /// Eight integer columns (the main lookup stack of ML-DSA-65 and ML-DSA-87) in two plane
     /// groups of four give the messages, claim and binding of the row group over all eight.

@@ -868,18 +868,6 @@ impl<'a> LeafGroup<'a> {
 // Stage 3: a field weight times an integer combination, without an equality factor.
 // ---------------------------------------------------------------------------------------
 
-/// The multilinear evaluation of an integer or byte lane at `point` (low variable first).
-fn int_lane_at(lane: &super::Source<'_>, point: &[E]) -> E {
-    let (first, second) = split_eq_tables(point);
-    match lane {
-        super::Source::Ints(cells) => column_at(cells, &first, &second),
-        super::Source::Bytes { cells, map } => column_at(&Mapped { cells, map }, &first, &second),
-        super::Source::Field(_) | super::Source::Planes(_) | super::Source::PlaneSlice(_) => {
-            unreachable!("integer lanes only")
-        }
-    }
-}
-
 struct WeightSource<'a> {
     /// The weight planes.
     weight: Planes<'a>,
@@ -953,7 +941,31 @@ impl<'a> PlaneSource for WeightSource<'a> {
         })
     }
     fn terminal(&self, row: &[E], point: &[E]) -> Vec<E> {
-        let mut out: Vec<E> = self.lanes.iter().map(|lane| int_lane_at(lane, point)).collect();
+        self.terminal_of(row, point, None)
+    }
+}
+
+impl WeightSource<'_> {
+    /// [`PlaneSource::terminal`], evaluating only the integer lanes with `needed[l]` (in group
+    /// lane order) when given; the others read zero.
+    fn terminal_of(&self, row: &[E], point: &[E], needed: Option<&[bool]>) -> Vec<E> {
+        let (first, second) = split_eq_tables(point);
+        let mut out: Vec<E> = self
+            .lanes
+            .iter()
+            .enumerate()
+            .map(|(i, lane)| {
+                let l = if i < self.weight_lane { i } else { i + 1 };
+                if needed.is_some_and(|needed| !needed[l]) {
+                    return E::zero();
+                }
+                match lane {
+                    super::Source::Ints(cells) => column_at(cells, &first, &second),
+                    super::Source::Bytes { cells, map } => column_at(&Mapped { cells, map }, &first, &second),
+                    _ => unreachable!("integer lanes only"),
+                }
+            })
+            .collect();
         out.insert(self.weight_lane, row[0]);
         out
     }
@@ -1071,6 +1083,16 @@ impl<'a> WeightIntGroup<'a> {
     #[must_use]
     pub fn terminal_values(&self) -> Vec<E> {
         self.0.terminal_values()
+    }
+
+    /// [`Self::terminal_values`] with only the integer lanes of `needed[l]` (group lane
+    /// order) evaluated; the others read zero.
+    ///
+    /// # Panics
+    /// Before every round is bound.
+    #[must_use]
+    pub fn terminal_values_of(&self, needed: &[bool]) -> Vec<E> {
+        self.0.source.terminal_of(&self.0.terminal_row(), &self.0.rho, Some(needed))
     }
 
     /// The self-check of [`LayerGroup::terminal_consistent`].
