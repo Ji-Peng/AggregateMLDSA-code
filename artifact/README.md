@@ -1,15 +1,21 @@
-# Artifact evaluation package: aggregating ML-DSA signatures
+# Artifact evaluation package: aggregating ML-DSA-44, ML-DSA-65 and ML-DSA-87 signatures
 
-This directory rebuilds every measurement of the evaluation section from the
-pinned source tree on a plain x86-64 Linux machine. It does not need Slurm,
-root, or network access after `./run.sh fetch`.
+This directory rebuilds every measurement and table of the evaluation section
+from the pinned source tree on a plain x86-64 Linux machine. It does not need
+Slurm, root, or network access after `./run.sh fetch`.
 
-The package builds one source tree **once** and measures proving, verification
-and aggregate size at batch sizes up to 32,768 in three run-time tiers. It also
-runs two baselines: Aerie v0.2.0 on Falcon-512 and Falcon-1024, and the pq-crystals ML-DSA
-AVX2 implementation. The comparison baseline is a native batch verification,
-not an aggregate. The timing matrices measure ML-DSA-44 (a matrix group selects
-another set with `params = "65"` or `"87"`); `gates` checks all three sets.
+The package builds one source tree **once** and measures proving, verification,
+peak resident set size and aggregate byte composition across all three FIPS 204
+parameter sets (**ML-DSA-44**, **ML-DSA-65** and **ML-DSA-87**), all three
+relations (**H-u**, **H-exact** and **H-FIPS**) and three run-time ISA tiers
+(`ifma`, `avx512`, `avx2`) at batch sizes up to 32,768. It also runs the
+mode-B public-bits aggregate (`agg-bench --bench mode_b`), the control and
+scheduling ablations (including `AGG_LATE_JOIN=0` and `AGG_FLOCK_THREADS=0`),
+the traced timeline run (`AGG_STAGE_TRACE`, `AGG_SCHED_TRACE`,
+`AGG_TIED_TRACE`, `PCS_TRACE`, `LINCHECK_TRACE`, `FLOCK_ZC_TIMING`,
+`AGG_PHASE_STAMPS`), and two external baselines: Aerie v0.2.0 on Falcon-512
+and Falcon-1024, and the pq-crystals ML-DSA AVX2 batch verifier (`natver`,
+`natver65`, `natver87`) for all three parameter sets.
 
 ## Quick start
 
@@ -17,15 +23,17 @@ another set with `params = "65"` or `"87"`); `gates` checks all three sets.
 cd artifact
 ./run.sh check            # tools, CPU features, sources, binaries
 ./run.sh fetch            # clone Aerie and pq-crystals/dilithium; verify SHAs
-./run.sh build            # the release binary, Aerie, natver (ML-DSA-44, 65, 87)
+./run.sh build            # release agg, mode_b, Aerie, natver (ML-DSA-44, 65, 87)
 ./run.sh gates            # byte identity, acceptance, self-reports at 1K, per set
+./run.sh quick --dry-run  # print the planned command lines without running them
 ./run.sh quick --smoke    # about five minutes of measurements after the build
-./run.sh tables           # write paper-tables/*.tex
+./run.sh tables           # write results/LATEST/paper-tables/*.tex
 ```
 
 `./run.sh all` runs `fetch`, `build`, `gates`, `quick` and `tables` in that
 order. Add `--smoke` for the smallest run and `--full` to use the full matrix
-instead of `quick`.
+instead of `quick`. Pass `--dry-run` (or `-n`) to `quick` or `full` to inspect
+the planned command lines without executing them.
 
 ## Hardware and software
 
@@ -37,13 +45,14 @@ instead of `quick`.
   CPU cannot run is `n/a` in the tables and recorded in `skipped.json`.
 - 16 hardware threads are enough for `quick`; 16 cores with SMT are
   recommended for `full`. The 8C16T rows need eight cores.
-- RAM: 16 GiB for `quick` (4K signatures), 32 GiB minimum for the 32K cells
-  and 64 GiB recommended. The 32K prover peaks around 19.5 GiB on the
-  reference machine. The script refuses a 32K cell when `MemAvailable` is
+- RAM: 16 GiB for `quick` (up to 4K signatures), 32 GiB minimum for the 32K
+  cells and 64 GiB recommended. On the reference machine, the 32K prover peaks
+  at 15.7 GiB for ML-DSA-44, 17.2 GiB for ML-DSA-65 and 23.2 GiB for
+  ML-DSA-87 (`VmHWM`). The script refuses a 32K cell when `MemAvailable` is
   below 28 GiB and records the reason in `skipped.json`.
-- Disk: about 20 GB during a full run (one cargo target directory for ours,
-  Aerie's target, the cloned sources and the results). `quick` needs about
-  10 GB.
+- Disk: about 20 GB during a full run (one cargo target directory for `agg`
+  and `mode_b`, Aerie's target, the cloned sources and the results). `quick`
+  needs about 10 GB.
 - bash, python3 (standard library; `tomllib` on 3.11+, a bundled fallback on
   older versions), a C compiler, `make`, `objdump`, `taskset`, rustup with
   Rust 1.99.1, and Rust 1.95.0 for Aerie. `numactl`, `/usr/bin/time`,
@@ -59,15 +68,35 @@ the same pin for commands started inside this directory.
 | --- | --- | --- |
 | `check` | tool and feature probe | seconds |
 | `fetch` | two git clones and `cargo fetch` | 2--10 min, network |
-| `build` | one release build of ours, Aerie's bench, natver | 5--20 min; the first build is the long one |
+| `build` | one release build of `agg` and `mode_b`, Aerie's bench, `natver{,65,87}` | 5--20 min; the first build is the long one |
 | `gates` | per parameter set (`--params 44,65,87`) and relation (`--relations h-u,h-exact,h-fips`): 1K aggregates in every tier, verification, negative check; per set the H-u aggregate on one thread and natver; self-reports | about 5--10 min per relation (estimate) |
-| `quick --smoke` | three tiers at 1K, one thread, Aerie (Falcon-512/1024) and native at 1K, 1+1 runs | 5--15 min after the build |
-| `quick` | 1K and 4K, three tiers, eight cores and one thread, Aerie (Falcon-512/1024) and native at 1K, 1+3 runs | 20--40 min after the build |
-| `full` | the evaluation matrix: 32K headline, 1T, relations, scaling, ablations, memory, baselines, 1+5 warm runs | about 1 h after the build |
+| `quick --smoke` | touches every run kind (`ours`, `mode_b`, `ablations`, `fresh`, `aerie`, `native`) and all three parameter sets at 1K, 1+1 runs | about 5 min after the build (estimate) |
+| `quick` | 1K and 4K (ML-DSA-44) plus 1K (ML-DSA-65, -87), three tiers, 8C16T and 1T, mode B, traced ablations, fresh memory, Aerie (Falcon-512/1024) and native (44/65/87) at 1K | 20--40 min after the build (estimate) |
+| `full` | the complete evaluation matrix for ML-DSA-44, -65 and -87: 32K headline on 16C32T, 8C16T and 1T; relations (H-u, H-exact, H-FIPS); scaling; mode-B public bits; ablations (`AGG_LATE_JOIN=0`, `AGG_FLOCK_THREADS=0`, etc.) and traced timeline; fresh memory; Aerie and native (44/65/87) baselines, 1+5 warm runs | about 1.8--2 h (~110 min, estimate) after the build |
 
-`full` writes about 125 MB of raw JSON at 32K. Its longest cells are 1T
-proving. The full matrix took 51 minutes on one EPYC 9355 node after the
-build (2026-11-01).
+### Estimated full-run time breakdown
+
+Derived from the paper's per-run times on one 16-core EPYC 9355 (Zen 5) node
+(all figures below are estimates):
+
+- **Headline 32K on 16C32T and 8C16T** (`headline`, `headline-65`,
+  `headline-87`, 3 tiers, 1 warmup + 5 runs): about **9 min** (estimate).
+- **Headline 32K on 1T** (`headline-1t`, `headline-1t-65`, `headline-1t-87`,
+  3 tiers, 2 processes = 7 prover runs per tier at 29--53 s each): about
+  **43 min** (estimate; the longest part of `full`).
+- **Relations at 32K** (`relations`, `relations-65`, `relations-87`, H-u,
+  H-exact and H-FIPS across 3 tiers): about **18 min** (estimate).
+- **Scaling** (`scaling` at $2^{10}\text{--}2^{15}$ for 44; `scaling-65` and
+  `scaling-87` at $2^{10}, 2^{13}, 2^{15}$): about **20 min** (estimate).
+- **Mode B, control ablations, traced timeline and fresh memory** (`mode-b`,
+  `ablation` with 7 arms including `AGG_LATE_JOIN=0`, `timeline` with traces,
+  `prover-memory`, `verifier-memory` at 32K for 44): about **10 min**
+  (estimate).
+- **Aerie and native baselines** (`aerie`, `aerie-avx2`, `aerie-1024`,
+  `aerie-1024-avx2` at 8K and 32K; `native`, `native-65`, `native-87` at 32K):
+  about **10 min** (estimate).
+
+Total: **about 110 minutes (~1.8--2 hours, estimate)** after the build.
 
 ## What is measured
 
@@ -81,10 +110,27 @@ repeated here.
 | `avx512` | `avx512` | AVX-512 everywhere except the IFMA field and NTT kernels |
 | `avx2` | `avx2` | executes no AVX-512 instruction; the x86-64-v3 baseline |
 
+### Ablation and mode-B arms
+
+- **Mode B (`kind = "mode_b"`, `agg-bench --bench mode_b`)**: publishes
+  $\mathsf{w1Encode}(w_1')$ in the clear and proves no Keccak hash (ML-DSA-44,
+  803.1 B/sig at 32K). Built into `artifact/build/bin/mode_b` by `./run.sh build`
+  and run at $N=32{,}768$ with `--warmup 1 --reps 5`.
+- **Traced timeline (`tag = "timeline"`, `traced = true`)**: runs `defaults`
+  and `flock-serial` (`AGG_FLOCK_THREADS=0`, Flock after the PIOP) with
+  `AGG_STAGE_TRACE=1`, `AGG_SCHED_TRACE=1`, `AGG_TIED_TRACE=1`, `PCS_TRACE=1`,
+  `LINCHECK_TRACE=1`, `FLOCK_ZC_TIMING=1` and `AGG_PHASE_STAMPS=1`, feeding the
+  `Flock after the PIOP` row and traced note of `tab:ablation`.
+- **Control ablations (`tag = "ablation"`)**: alternates seven arms on 16C32T
+  at 32K: `defaults`, `no-hugepage` (`AGG_HUGEPAGE=0`), `no-alloc-cache`
+  (`AGG_ALLOC_CACHE=0`), `flock-serial` (`AGG_FLOCK_THREADS=0`), `late-join`
+  (`AGG_LATE_JOIN=0`, running the Akita opening's finish after the Flock proofs
+  join instead of beside them), `stage-branch-main-pool`
+  (`AGG_PIOP_S_THREADS=0`), and `piop-row` (`AGG_PIOP_LAYOUT=row`).
+
 `AGG_PIOP_LAYOUT=plane|row` selects the sum-check table layout. Unset selects
 plane on every vector backend (avx512ifma, avx512, avx2) and row on the
-portable (scalar) backend; the proof does not depend on the choice. The
-`full` matrix runs one `row` ablation.
+portable (scalar) backend; the proof does not depend on the choice.
 
 The `scalar` cap (`AGG_ISA=scalar`) is not a reported tier. `./run.sh gates`
 runs it as an additional correctness check: its aggregate must match the three
@@ -103,34 +149,43 @@ nothing. The package uses two run-time checks instead:
    N = 256: `-hsw` (Haswell: AVX2, no AVX-512) for `avx2` and `-skx`
    (Skylake-X: AVX-512 without IFMA) for `avx512`. `--no-sde` skips it.
 
-The static `objdump` check remains for the C baseline `natver`, which must
-contain no AVX-512 instruction (`zmm`, opmask, high registers and EVEX-only
-mnemonics are counted in `build.json`).
+The static `objdump` check remains for the C baselines (`natver`, `natver65`,
+`natver87`), which must contain no AVX-512 instruction (`zmm`, opmask, high
+registers and EVEX-only mnemonics are counted in `build.json`).
 
 ### Expected times
 
-The following prove medians were measured on one idle AMD EPYC 9355 node
-(Zen 5) at N = 32,768 under H-u for ML-DSA-44, one warm-up and five runs,
-unified `main` `41d7ef4`, the revision of the paper's numbers. Node-to-node
-spread is a few percent.
+The following medians were measured on an idle AMD EPYC 9355 node (Zen 5) at
+$N = 32{,}768$ under H-u, one warm-up and five runs (`tab:prove`,
+`tab:scaling`, `tab:bytes`, `tab:baselines`). Node-to-node spread is a few
+percent.
 
-| Tier | 16C32T | 8C16T |
-| --- | --- | --- |
-| `ifma` | 2.73 s | 4.14 s |
-| `avx512` | 2.78 s | 4.15 s |
-| `avx2` | 2.96 s | 4.51 s |
+| Set | Tier | 16C32T prove | 8C16T prove | 1T prove | 16C32T verify (unc. / cached) | 1T verify (unc. / cached) | Aggregate (B/sig) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 44 | `ifma` | 2.73 s | 4.14 s | 29.28 s | 106 / 97 ms | 864 / 665 ms | 1,612,250 B (49.2) |
+| 44 | `avx512` | 2.78 s | 4.15 s | 29.56 s | -- | -- | 1,612,250 B (49.2) |
+| 44 | `avx2` | 2.96 s | 4.51 s | 34.42 s | -- | -- | 1,612,250 B (49.2) |
+| 65 | `ifma` | 3.19 s | 4.68 s | 34.22 s | 172 / 125 ms | 1,819 / 1,215 ms | 2,142,860 B (65.4) |
+| 65 | `avx512` | 3.25 s | 4.81 s | 34.57 s | -- | -- | 2,142,860 B (65.4) |
+| 65 | `avx2` | 3.47 s | 5.24 s | 40.21 s | -- | -- | 2,142,860 B (65.4) |
+| 87 | `ifma` | 4.16 s | 6.07 s | 44.85 s | 222 / 152 ms | 2,515 / 1,641 ms | 2,710,100 B (82.7) |
+| 87 | `avx512` | 4.15 s | 6.08 s | 45.02 s | -- | -- | 2,710,100 B (82.7) |
+| 87 | `avx2` | 4.50 s | 6.71 s | 53.01 s | -- | -- | 2,710,100 B (82.7) |
 
-Verification with the IFMA tier on 16C32T took 106 ms with uncached keys and
-97 ms with cached keys. The aggregate is 1,612,250 bytes at 32K, or 49.2 bytes
-per signature, in every tier. Absolute times on another microarchitecture
-differ; the tier order and the byte identity are the portable parts of the
-result.
+On 16C32T with IFMA, H-exact is within 1.8% of H-u across all three sets, and
+H-FIPS adds 13.2% (44), 20.1% (65) and 16.4% (87). In `tab:ablation` (ML-DSA-44,
+32K, 16C32T, IFMA), the untraced full aggregate takes 2.74 s (106 ms verify,
+49.2 B/sig), the traced serial-Flock run takes 3.08 s against 2.77 s for the
+traced default (+0.31 s), and the mode-B public-bits aggregate takes 2.29 s
+(163 ms verify, 26,317,556 B = 803.1 B/sig). Absolute times on another
+microarchitecture differ; the tier order and the byte identity are the portable
+parts of the result.
 
 Warm cells follow the paper protocol: one process per cell with
-`--warmup 1 --reps N`, split into two processes of about N/2 so that the
-tiers still alternate (ablations use one process per cell and alternate the
-arms instead). Each process pays its own warm-up, and every timed run is read
-from its `--json` output.
+`--warmup 1 --reps N`, split into `processes` chunks so that the tiers
+alternate (ablations use one process per cell and alternate the arms instead).
+Each process pays its own warm-up, and every timed run is read from its
+`--json` output.
 
 Every individual run is kept in `results/<timestamp>/raw/*.json`, and
 each cell records the JSON of every process that contributed to it.
@@ -149,11 +204,11 @@ its actual core and thread count. Commands are pinned with `taskset` and with
 
 | Claim | Where to look | Command |
 | --- | --- | --- |
-| C1: the aggregate takes 49.2 B per signature at 32K | `tab-bytes.tex`, row `2^15` | `quick`, or `full` for 32K |
+| C1: the aggregate takes 49.2, 65.4 and 82.7 B per signature at 32K for ML-DSA-44, -65 and -87 | `tab-bytes.tex`, row `total` | `./run.sh full` |
 | C2: every tier and the scalar gate give the same aggregate and verification accepts | `gates.json`, `all_configurations_identical` and `verify` | `./run.sh gates` |
-| C3: prove and verify times on a Zen 5 machine are within 10% of the paper | `tab-e2e.tex` | `./run.sh full` |
-| C4: the tier ladder is ordered IFMA, AVX-512, AVX2 | `tab-ablation.tex`, ISA ladder rows | `./run.sh quick --smoke` |
-| C5: ours against Aerie and native verification | `tab-baselines.tex` | `quick` |
+| C3: prove and verify times on a Zen 5 machine are within 10% of the paper across all three sets | `tab-prove.tex`, `tab-scaling.tex` | `./run.sh full` |
+| C4: the tier ladder is ordered IFMA, AVX-512F, AVX2 and the GF(2) ablation matches | `tab-prove.tex`, `tab-ablation.tex` | `./run.sh quick --smoke` |
+| C5: ours against Aerie and native verification for ML-DSA-44, -65 and -87 | `tab-baselines.tex` | `./run.sh quick` |
 
 `expected/claims.toml` carries the same table, and each results directory gets
 a `claims-measured.csv` with the values that were actually measured.
@@ -168,24 +223,34 @@ carry it):
   load, foreign processes, compiler versions, and the tiers the CPU supports.
   The probe only reads; it never writes sysfs.
 - `cpusets.json`: the three allocations, their CPU lists and L3 domains.
-- `build.json`: the release flags, binary hashes, the run-time self-report of
-  every tier, and the four AVX-512 counts for each `natver` binary.
+- `build.json`: the release flags, binary hashes (`agg` and `mode_b`), the
+  run-time self-report of every tier, and the four AVX-512 counts for each
+  `natver` binary.
 - `gates.json`: per parameter set and relation, the 1K aggregate hashes,
   verify verdicts and the negative check; per set, the one-thread check and
   natver; the self-reports and the SDE result.
-- `raw/<run-id>.json`: one cell, with every timed run and the selected
-  kernels.
+- `raw/<run-id>.json`: one cell, with every timed run, the aggregate byte
+  breakdown and the selected kernels.
 - `summary.csv`: one row per cell (keyed by parameter set) with the statistics
   and flags.
-- `paper-tables/` and `../../paper-tables/`: the generated LaTeX tables. They
-  are build outputs and are not tracked in the repository.
-
-The tables are complete `talltblr` environments with labels `tab:ae-*`, so
-they can be `\input` without clashing with the paper's current labels. The
-generator also writes `numbers.tex` with one macro per in-text number and
-rounds seconds to two decimals, milliseconds to integers (one decimal below
-100 ms for baselines), bytes per signature to one decimal and ratios to one
-decimal.
+- `paper-tables/`: the generated LaTeX tables for the results directory (also
+  copied to `artifact/paper-tables/`, which is ignored by git):
+  - `tab-prove.tex` (`\label{tab:prove}`): 32K prover time across sets (44, 65,
+    87), tiers (IFMA, AVX-512F, AVX2) and allocations (16C32T, 8C16T, 1T).
+  - `tab-ablation.tex` (`\label{tab:ablation}`): GF(2)-side ablation (`full
+    aggregate`, `Flock after the PIOP`, `public bits` mode B) and control
+    ablations (including `AGG_LATE_JOIN=0`).
+  - `tab-scaling.tex` (`\label{tab:scaling}`): batch-size scaling ($2^{10}$,
+    $2^{13}$, $2^{15}$) with B/sig, prove, uncached/cached verify and peak RSS
+    in GiB for 44, 65 and 87.
+  - `tab-bytes.tex` (`\label{tab:bytes}`): aggregate byte composition per
+    signature across components for 44, 65 and 87.
+  - `tab-baselines.tex` (`\label{tab:baselines}`): native AVX2 verification
+    (44, 65, 87), Aerie (Falcon-512, Falcon-1024) and ours (44, 65, 87) on
+    16C32T and 1T.
+  - `tab-relations.tex` (`\label{tab:relations}`): H-u, H-exact and H-FIPS
+    prover times, overheads, verify times and aggregate bytes for 44, 65 and 87.
+  - `numbers.tex`: `\newcommand` macros for in-text figures.
 
 ## Known variance sources
 
@@ -209,7 +274,8 @@ decimal.
 
 - `check` says the CPU lacks AVX2: the release binary is built for
   x86-64-v3 and cannot run. There is no scalar-only build.
-- `check` says a binary is missing: run `./run.sh build`.
+- `check` notes that a source is not fetched or a binary is not built yet: run
+  `./run.sh fetch` and `./run.sh build`.
 - `gates` fails on `expected_ok`: the aggregate bytes changed with the code.
   This is expected after a protocol change. Re-pin them with
   `./run.sh gates --write-expected` only after confirming that the change is

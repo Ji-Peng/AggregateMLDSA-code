@@ -44,6 +44,11 @@ case "$mode" in
     ;;
   quick | full)
     python3 scripts/runner.py "$mode" "$@" || exit 1
+    for arg in "$@"; do
+      case "$arg" in
+        --dry-run | -n) exit 0 ;;
+      esac
+    done
     exec python3 scripts/gen_tables.py
     ;;
   tables)

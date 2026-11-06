@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Turn raw measurement JSON into LaTeX tables and in-text macros."""
+"""Turn raw measurement JSON into the paper's LaTeX tables and in-text macros."""
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -17,40 +18,51 @@ from common import (  # noqa: E402
     result_dir,
     utc_stamp,
 )
+from runner import parse_size_breakdown  # noqa: E402
 from stats import describe  # noqa: E402
 
 # The paper reports these three tiers on one machine. The scalar cap is a
 # gates-only check and does not appear in a table.
 ORDER = ["ifma", "avx512", "avx2"]
 MACRO = {"ifma": "Ifma", "avx512": "AvxVn", "avx2": "AvxTwo"}
-LABEL = {"ifma": "IFMA", "avx512": "AVX-512", "avx2": "AVX2"}
+SET_MACRO = {"44": "FortyFour", "65": "SixtyFive", "87": "EightySeven"}
+LABEL = {"ifma": "IFMA", "avx512": "AVX-512F", "avx2": "AVX2"}
 RELATION = {"h-u": "$\\Relu$", "h-exact": "$\\Relex$", "h-fips": "$\\Relfips$"}
+RELATION_ORDER = ["h-u", "h-exact", "h-fips"]
 ALLOC_ORDER = ["16C32T", "8C16T", "1T", "all"]
 NA = "n/a"
+
+ABLATION_LABELS = {
+    "late-join": "late join (\\texttt{AGG\\_LATE\\_JOIN=0})",
+    "no-hugepage": "no huge-page advice (\\texttt{AGG\\_HUGEPAGE=0})",
+    "no-alloc-cache": "no allocator cache (\\texttt{AGG\\_ALLOC\\_CACHE=0})",
+    "stage-branch-main-pool": "stage branch on main pool (\\texttt{AGG\\_PIOP\\_S\\_THREADS=0})",
+    "piop-row": "row layout (\\texttt{AGG\\_PIOP\\_LAYOUT=row})",
+    "flock-serial": "Flock after the PIOP, untraced (\\texttt{AGG\\_FLOCK\\_THREADS=0})",
+}
 
 
 def param_sets(cells):
     """The ML-DSA parameter sets present in `cells`, in FIPS 204 order."""
-    present = {cell_params(c) for c in cells}
-    return [params for params in PARAM_SETS if params in present]
-
-
-def main_set(cells):
-    """The set the single-set tables and macros report: ML-DSA-44 when measured."""
-    sets = param_sets(cells)
-    return "44" if "44" in sets or not sets else sets[0]
-
-
-def with_set(label, params, sets):
-    """A row label, qualified by the parameter set when several sets are present."""
-    return f"{label}, ML-DSA-{params}" if len(sets) > 1 else label
+    present = {cell_params(c) for c in cells if c.get("system") in ("ours", "native")}
+    return [params for params in PARAM_SETS if params in present] or list(PARAM_SETS)
 
 
 def preferred_allocation(cells):
     for allocation in ALLOC_ORDER:
-        if allocation != "all" and any(c["allocation"] == allocation for c in cells):
+        if allocation not in ("all", "1T") and any(c.get("allocation") == allocation for c in cells):
             return allocation
-    return cells[0]["allocation"]
+    for allocation in ALLOC_ORDER:
+        if allocation != "all" and any(c.get("allocation") == allocation for c in cells):
+            return allocation
+    return cells[0]["allocation"] if cells else "16C32T"
+
+
+def preferred_tier(cells):
+    for config in ORDER:
+        if any(c.get("config") == config for c in cells):
+            return config
+    return "ifma"
 
 
 def load_cells(directory):
@@ -60,7 +72,7 @@ def load_cells(directory):
             cell = read_json(path)
         except (OSError, ValueError):
             continue
-        if cell.get("times_ms") or cell.get("verify_uncached_ms"):
+        if cell.get("times_ms") or cell.get("verify_uncached_ms") or cell.get("aggregate_bytes"):
             cells.append(cell)
     return cells
 
@@ -90,45 +102,118 @@ def skipped_configs(directory):
     return result
 
 
-def headline_cells(cells):
-    ours = [c for c in cells if c.get("system") == "ours"]
-    tagged = [
+def is_standard_ours(cell):
+    """True for standard Mode-A benchmark cells (not fresh-process, traced or non-default ablation)."""
+    if cell.get("system") != "ours":
+        return False
+    if cell.get("fresh_process") or cell.get("traced"):
+        return False
+    arm = cell.get("arm")
+    if arm and arm != "defaults":
+        return False
+    return True
+
+
+def cell_priority(cell, prefer_tag="headline"):
+    tag = str(cell.get("tag", ""))
+    is_1t_tag = "1t" in tag
+    if prefer_tag == "headline":
+        if tag.startswith("headline") and not is_1t_tag:
+            score = 5
+        elif tag.startswith("headline"):
+            score = 4
+        elif tag.startswith("quick-ours") and not is_1t_tag:
+            score = 3
+        elif tag.startswith("scaling"):
+            score = 2
+        elif tag.startswith("relations"):
+            score = 1
+        else:
+            score = 0
+    elif prefer_tag == "scaling":
+        if tag.startswith("scaling"):
+            score = 5
+        elif tag.startswith("headline") and not is_1t_tag:
+            score = 4
+        elif tag.startswith("quick-ours") and not is_1t_tag:
+            score = 3
+        elif tag.startswith("relations"):
+            score = 1
+        else:
+            score = 0
+    elif prefer_tag == "relations":
+        if tag.startswith("relations"):
+            score = 5
+        elif tag.startswith("headline") and not is_1t_tag:
+            score = 4
+        elif tag.startswith("quick-ours") and not is_1t_tag:
+            score = 3
+        elif tag.startswith("scaling"):
+            score = 2
+        else:
+            score = 0
+    else:
+        score = 1 if tag.startswith(prefer_tag) else 0
+    return (
+        score,
+        1 if cell.get("size_breakdown") else 0,
+        1 if cell.get("peak_rss_kib") else 0,
+        1 if cell.get("allocation") == "16C32T" else 0,
+        1 if cell.get("config") == "ifma" else 0,
+        cell.get("reps", 0),
+    )
+
+
+def pick_ours_cell(cells, *, params, config, allocation, n, relation="h-u", prefer_tag="headline"):
+    matches = [
         c
-        for c in ours
-        if (
-            str(c.get("tag", "")).startswith("headline")
-            or str(c.get("tag", "")) == "relations"
-        )
-        and not c.get("tag", "").endswith("1t")
+        for c in cells
+        if is_standard_ours(c)
+        and cell_params(c) == params
+        and c.get("config") == config
+        and c.get("n") == n
+        and c.get("relation") == relation
+        and c.get("allocation") == allocation
     ]
-    if not tagged:
-        tagged = [
-            c
-            for c in ours
-            if str(c.get("tag", "")).startswith("quick-ours")
-            and not c.get("tag", "").endswith("1t")
-        ]
-    if not tagged:
-        tagged = ours
-    return tagged
+    if not matches:
+        return None
+    return max(matches, key=lambda c: cell_priority(c, prefer_tag=prefer_tag))
+
+
+def fmt_n_tex(n):
+    return f"{n:,}".replace(",", "{,}")
+
+
+def fmt_pow2_or_n(n):
+    if n > 0 and (n & (n - 1)) == 0:
+        return f"$2^{{{n.bit_length() - 1}}}$"
+    return fmt_n_tex(n)
 
 
 def fmt_seconds(ms):
+    if ms is None:
+        return "--"
     return f"{ms / 1000:.2f}"
 
 
-def fmt_ms(ms):
+def fmt_ms(ms, allow_decimal=False):
     if ms is None:
         return "--"
-    if ms < 100:
+    if allow_decimal and ms < 100:
         return f"{ms:.1f}"
-    return f"{ms:.0f}"
+    return f"{int(round(ms)):,}".replace(",", "{,}")
 
 
 def fmt_bytes_per_sig(cell):
-    if not cell.get("aggregate_bytes"):
+    if not cell or not cell.get("aggregate_bytes") or not cell.get("n"):
         return "--"
     return f"{cell['aggregate_bytes'] / cell['n']:.1f}"
+
+
+def fmt_gib(kib):
+    if not kib:
+        return "--"
+    return f"{kib / (1024.0 * 1024.0):.1f}"
 
 
 def header(directory, commit, machine):
@@ -141,7 +226,11 @@ def header(directory, commit, machine):
     )
 
 
-def table_begin(label, caption, note, colspec, header_rows=1):
+def table_begin(label, caption, note, colspec, header_rows=1, extra_hlines=None):
+    hline_block = f"  hline{{1,{header_rows + 1},Z}} = {{1pt}},\n"
+    if extra_hlines:
+        rows_str = ",".join(str(r) for r in extra_hlines)
+        hline_block += f"  hline{{{rows_str}}} = {{0.5pt}},\n"
     return (
         "\\begin{table}[t]\n\\centering\n"
         "\\begin{talltblr}[\n"
@@ -153,234 +242,477 @@ def table_begin(label, caption, note, colspec, header_rows=1):
         "  colsep = 4pt,\n"
         f"  row{{1{(',' + str(header_rows)) if header_rows > 1 else ''}}} = {{font=\\bfseries}},\n"
         "  rows = {valign=m},\n"
-        f"  hline{{1,{header_rows + 1},Z}} = {{1pt}},\n"
+        f"{hline_block}"
         "}\n"
     )
 
 
-def e2e_table(cells, directory, commit, machine, skipped):
-    data = headline_cells(cells)
-    if not data:
-        return "% no headline data\n"
-    n = max(c["n"] for c in data)
-    data = [c for c in data if c["n"] == n]
-    relations = []
-    for c in data:
-        if c["relation"] not in relations and c["relation"] in RELATION:
-            relations.append(c["relation"])
-    allocs = [a for a in ALLOC_ORDER if a != "all" and any(c["allocation"] == a for c in data)]
-    if not allocs:
-        allocs = ["8C16T"]
-    verify_alloc = "16C32T" if "16C32T" in allocs else allocs[0]
-    sets = param_sets(data)
-    lookup = {(c["config"], c["allocation"], c["relation"], cell_params(c)): c for c in data}
-    cols = "Q[l] Q[l] " + " ".join("X[r]" for _ in allocs) + " X[1.3,r]"
+def prove_table(cells, directory, commit, machine, skipped):
+    """Generate `tab-prove.tex` (`\\label{tab:prove}`): prover time by set, tier and allocation."""
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    if not standard:
+        return "% no prover data\n"
+    n = max(c["n"] for c in standard)
+    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
+    allocs = ["16C32T", "8C16T", "1T"]
+    extra_hlines = [2 + 3 * i for i in range(1, len(sets))]
     out = header(directory, commit, machine)
     out += table_begin(
-        "tab:ae-e2e",
-        f"Mode~A at $N={f'{n:,}'.replace(',', '{,}')}$, medians of the measured runs "
-        f"(measured on {machine}).",
-        "Prove in seconds. Verify on " + verify_alloc
-        + ", uncached / cached keys, in ms. "
-        "Values are medians; the appendix gives the full ranges. "
-        "n/a: the CPU does not support the tier.",
-        cols,
-        1,
+        "tab:prove",
+        f"Prover time at $N={fmt_n_tex(n)}$ in seconds.",
+        "$\\Relu$; medians of the measured runs. The aggregate bytes do not depend on the tier or the allocation.",
+        "Q[l] X[l] X[r] X[r] X[r]",
+        header_rows=1,
+        extra_hlines=extra_hlines,
     )
-    out += "Build & Rel. & " + " & ".join(allocs) + " & Verify \\\\\n"
+    out += "Set & Tier & " + " & ".join(allocs) + " \\\\\n"
     for params in sets:
-        for config in ORDER:
-            label = with_set(LABEL[config], params, sets)
-            present = [
-                relation
-                for relation in relations
-                if any(lookup.get((config, allocation, relation, params)) for allocation in allocs)
-            ]
-            if not present:
-                if config in skipped:
-                    row = [label, RELATION["h-u"]]
-                    row += [NA] * len(allocs)
+        for idx, config in enumerate(ORDER):
+            set_col = f"\\SetCell[r=3]{{l}} {params}" if idx == 0 else ""
+            row = [set_col, LABEL[config]]
+            for allocation in allocs:
+                cell = pick_ours_cell(
+                    standard,
+                    params=params,
+                    config=config,
+                    allocation=allocation,
+                    n=n,
+                    relation="h-u",
+                    prefer_tag="headline",
+                )
+                if cell and cell.get("times_ms"):
+                    row.append(fmt_seconds(median(cell["times_ms"])))
+                elif config in skipped:
                     row.append(NA)
-                    out += " & ".join(row) + " \\\\\n"
-                continue
-            for relation in present:
-                row = [label, RELATION[relation]]
-                for allocation in allocs:
-                    cell = lookup.get((config, allocation, relation, params))
-                    row.append(
-                        fmt_seconds(median(cell["times_ms"]))
-                        if cell and cell.get("times_ms")
-                        else "--"
-                    )
-                cell = lookup.get((config, verify_alloc, relation, params))
-                if cell and cell.get("verify_uncached_ms"):
-                    row.append(
-                        fmt_ms(median(cell["verify_uncached_ms"]))
-                        + " / "
-                        + (
-                            fmt_ms(median(cell["verify_cached_ms"]))
-                            if cell.get("verify_cached_ms")
-                            else "--"
-                        )
-                    )
                 else:
                     row.append("--")
-                out += " & ".join(row) + " \\\\\n"
-    out += "\\end{talltblr}\n\\end{table}\n"
-    return out
-
-
-def ablation_table(cells, directory, commit, machine, skipped):
-    ours = [c for c in cells if c.get("system") == "ours"]
-    params = main_set(ours)
-    data = [c for c in headline_cells(cells) if cell_params(c) == params]
-    abl = [
-        c for c in ours
-        if "ablation" in str(c.get("tag", "")) and cell_params(c) == params
-    ]
-    if not data and not abl:
-        return "% no ablation data\n"
-    out = header(directory, commit, machine)
-    out += table_begin(
-        "tab:ae-ablation",
-        f"ISA ladder and control ablations, ML-DSA-{params}"
-        + (f" (measured on {machine})." if machine else "."),
-        "Prove in ms; in parentheses the change against the defaults of the same "
-        "series. Cells without data are omitted. "
-        "n/a: the CPU does not support the tier.",
-        "X[2.6,l] X[1,r] X[1,r] X[1,r]",
-    )
-    out += "Setting & " + " & ".join(LABEL[c] for c in ORDER) + " \\\\\n"
-    if data:
-        n = max(c["n"] for c in data)
-        allocation = preferred_allocation(data)
-        for config in ORDER:
-            matches = [
-                c for c in data
-                if c["config"] == config and c["n"] == n
-                and c["allocation"] == allocation
-                and c["relation"] == "h-u" and c.get("times_ms")
-            ]
-            if matches:
-                value = f"{median(matches[0]['times_ms']):.0f}"
-                row = [f"{LABEL[config]} (ISA ladder)"]
-                row += [value if candidate == config else "--" for candidate in ORDER]
-                out += " & ".join(row) + " \\\\\n"
-            elif config in skipped:
-                row = [f"{LABEL[config]} (ISA ladder)"]
-                row += [NA if candidate == config else "--" for candidate in ORDER]
-                out += " & ".join(row) + " \\\\\n"
-    defaults = {}
-    for config in ORDER:
-        matches = [
-            c for c in abl
-            if c["config"] == config and c.get("arm") == "defaults" and c.get("times_ms")
-        ]
-        if matches:
-            defaults[config] = median(matches[0]["times_ms"])
-    arms = sorted(
-        {
-            c.get("arm")
-            for c in abl
-            if c.get("arm") and c.get("arm") != "defaults"
-        }
-    )
-    for arm in arms:
-        row = [arm.replace("-", " ")]
-        for config in ORDER:
-            matches = [
-                c for c in abl
-                if c["config"] == config and c.get("arm") == arm and c.get("times_ms")
-            ]
-            if matches:
-                value = median(matches[0]["times_ms"])
-                delta = value - defaults.get(config, value)
-                row.append(f"{value:.0f} ({delta:+.0f})")
-            else:
-                row.append("--")
-        out += " & ".join(row) + " \\\\\n"
-    out += "\\end{talltblr}\n\\end{table}\n"
-    return out
-
-
-def scaling_table(cells, directory, commit, machine, skipped):
-    ours = [
-        c for c in cells
-        if c.get("system") == "ours" and c["relation"] == "h-u" and c.get("times_ms")
-        and (
-            "scaling" in str(c.get("tag", ""))
-            or "headline" in str(c.get("tag", ""))
-            or "quick-ours" in str(c.get("tag", ""))
-        )
-    ]
-    if not ours:
-        return "% no scaling data\n"
-    sizes = sorted({c["n"] for c in ours})
-    sets = param_sets(ours)
-    allocation = preferred_allocation(ours)
-    out = header(directory, commit, machine)
-    out += table_begin(
-        "tab:ae-scaling",
-        f"Scaling of mode~A under $\\Relu$ (measured on {machine}).",
-        "Prove in seconds on " + allocation
-        + "; B/sig is the aggregate size per signature. "
-        "n/a: the CPU does not support the tier.",
-        "Q[r] " + " ".join("Q[r]" for _ in ORDER) + " Q[r]",
-    )
-    out += "$N$ & " + " & ".join(LABEL[c] for c in ORDER) + " & B/sig \\\\\n"
-    for params in sets:
-        for n in sizes:
-            size = f"$2^{{{n.bit_length() - 1}}}$" if n & (n - 1) == 0 else f"{n:,}"
-            row = [with_set(size, params, sets)]
-            bps = "--"
-            for config in ORDER:
-                matches = [
-                    c for c in ours
-                    if c["config"] == config and c["n"] == n
-                    and c["allocation"] == allocation and cell_params(c) == params
-                ]
-                if matches:
-                    row.append(fmt_seconds(median(matches[0]["times_ms"])))
-                    bps = fmt_bytes_per_sig(matches[0])
-                else:
-                    row.append(NA if config in skipped else "--")
-            row.append(bps)
             out += " & ".join(row) + " \\\\\n"
     out += "\\end{talltblr}\n\\end{table}\n"
     return out
 
 
-def bytes_table(cells, directory, commit, machine):
-    ours = [
-        c for c in cells
-        if c.get("system") == "ours" and c["relation"] == "h-u" and c.get("aggregate_bytes")
-    ]
-    if not ours:
-        return "% no byte data\n"
-    sizes = sorted({c["n"] for c in ours})
-    sets = param_sets(ours)
-    hashes = ", ".join(
-        f"{PARAM_SETS[params]['ctilde_bytes']} (ML-DSA-{params})" for params in sets
-    ) if len(sets) > 1 else str(PARAM_SETS[sets[0]]["ctilde_bytes"])
+def relations_table(cells, directory, commit, machine, skipped):
+    """Generate `tab-relations.tex` (`\\label{tab:relations}`): H-u, H-exact and H-FIPS across sets."""
+    standard = [c for c in cells if is_standard_ours(c) and c.get("times_ms")]
+    if not standard:
+        return "% no relation data\n"
+    n = max(c["n"] for c in standard)
+    at_n = [c for c in standard if c["n"] == n]
+    alloc = preferred_allocation(at_n)
+    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in at_n)] or list(PARAM_SETS)
+    extra_hlines = [2 + 3 * i for i in range(1, len(sets))]
     out = header(directory, commit, machine)
     out += table_begin(
-        "tab:ae-bytes",
-        "Aggregate size under $\\Relu$" + (f" (measured on {machine})." if machine else "."),
-        f"Bytes and bytes per signature. The public hashes $\\tilde{{c}}$ take {hashes} bytes "
-        "per signature.",
-        "Q[r] Q[r] Q[r]",
+        "tab:relations",
+        f"Relations $\\Relu$, $\\Relex$ and $\\Relfips$ at $N={fmt_n_tex(n)}$ on {alloc}.",
+        "Prove in seconds (change against $\\Relu$ in parentheses); verify in ms on IFMA, uncached / cached keys.",
+        "Q[l] Q[l] X[r] X[r] X[r] X[1.1,r] X[1.2,r]",
+        header_rows=1,
+        extra_hlines=extra_hlines,
     )
-    out += "$N$ & bytes & B/sig \\\\\n"
+    out += "Set & Rel. & " + " & ".join(LABEL[c] for c in ORDER) + " & Verify & Bytes \\\\\n"
     for params in sets:
-        for n in sizes:
-            matches = [c for c in ours if c["n"] == n and cell_params(c) == params]
-            if not matches:
-                continue
-            cell = matches[0]
-            out += (
-                f"{with_set(f'{n:,}', params, sets)} & {cell['aggregate_bytes']:,} & "
-                f"{fmt_bytes_per_sig(cell)} \\\\\n"
+        hu_cells = {
+            config: pick_ours_cell(
+                at_n,
+                params=params,
+                config=config,
+                allocation=alloc,
+                n=n,
+                relation="h-u",
+                prefer_tag="relations",
             )
+            for config in ORDER
+        }
+        for idx, relation in enumerate(RELATION_ORDER):
+            set_col = f"\\SetCell[r=3]{{l}} {params}" if idx == 0 else ""
+            row = [set_col, RELATION[relation]]
+            verify_str = "--"
+            bytes_str = "--"
+            for config in ORDER:
+                cell = pick_ours_cell(
+                    at_n,
+                    params=params,
+                    config=config,
+                    allocation=alloc,
+                    n=n,
+                    relation=relation,
+                    prefer_tag="relations",
+                )
+                if cell and cell.get("times_ms"):
+                    med = median(cell["times_ms"])
+                    val = fmt_seconds(med)
+                    hu = hu_cells.get(config)
+                    if relation != "h-u" and hu and hu.get("times_ms"):
+                        hu_med = median(hu["times_ms"])
+                        if hu_med > 0:
+                            pct = (med - hu_med) / hu_med * 100.0
+                            val += f" ({pct:+.1f}\\%)"
+                    row.append(val)
+                    if verify_str == "--" and cell.get("verify_uncached_ms"):
+                        unc = fmt_ms(median(cell["verify_uncached_ms"]))
+                        cac = (
+                            fmt_ms(median(cell["verify_cached_ms"]))
+                            if cell.get("verify_cached_ms")
+                            else "--"
+                        )
+                        verify_str = f"{unc} / {cac}"
+                    if bytes_str == "--" and cell.get("aggregate_bytes"):
+                        b = cell["aggregate_bytes"]
+                        bytes_str = fmt_n_tex(b)
+                        hu_b = hu["aggregate_bytes"] if hu and hu.get("aggregate_bytes") else None
+                        if relation != "h-u" and hu_b is not None:
+                            diff = b - hu_b
+                            bytes_str += f" ({diff:+d})"
+                elif config in skipped:
+                    row.append(NA)
+                else:
+                    row.append("--")
+            row.append(verify_str)
+            row.append(bytes_str)
+            out += " & ".join(row) + " \\\\\n"
+    out += "\\end{talltblr}\n\\end{table}\n"
+    return out
+
+
+def ablation_table(cells, directory, commit, machine, skipped):
+    """Generate `tab-ablation.tex` (`\\label{tab:ablation}`): GF(2)-side and control ablations."""
+    ours_44 = [c for c in cells if c.get("system") == "ours" and cell_params(c) == "44"]
+    mode_b = [c for c in cells if c.get("system") == "mode_b" and cell_params(c) == "44"]
+    if not ours_44 and not mode_b:
+        return "% no ablation data\n"
+    all_44 = ours_44 + mode_b
+    n = max(c["n"] for c in all_44)
+    at_n = [c for c in all_44 if c["n"] == n]
+    alloc = preferred_allocation(at_n)
+    tier = preferred_tier(at_n)
+
+    # 1. Full aggregate (untraced default): prefer ablation defaults arm, then headline.
+    abl_defaults = [
+        c
+        for c in ours_44
+        if c["n"] == n
+        and c.get("config") == tier
+        and c.get("allocation") == alloc
+        and not c.get("traced")
+        and c.get("arm") == "defaults"
+        and c.get("times_ms")
+    ]
+    full_cell = (
+        abl_defaults[0]
+        if abl_defaults
+        else pick_ours_cell(
+            ours_44, params="44", config=tier, allocation=alloc, n=n, relation="h-u", prefer_tag="headline"
+        )
+    )
+
+    # 2. Traced default and traced Flock-after-the-PIOP (`timeline`).
+    traced_defaults = [
+        c
+        for c in ours_44
+        if c["n"] == n
+        and c.get("config") == tier
+        and c.get("allocation") == alloc
+        and c.get("traced")
+        and c.get("arm") in (None, "defaults")
+        and c.get("times_ms")
+    ]
+    traced_serial = [
+        c
+        for c in ours_44
+        if c["n"] == n
+        and c.get("config") == tier
+        and c.get("allocation") == alloc
+        and c.get("traced")
+        and c.get("arm") == "flock-serial"
+        and c.get("times_ms")
+    ]
+    untraced_serial = [
+        c
+        for c in ours_44
+        if c["n"] == n
+        and c.get("config") == tier
+        and c.get("allocation") == alloc
+        and not c.get("traced")
+        and c.get("arm") == "flock-serial"
+        and c.get("times_ms")
+    ]
+    serial_cell = traced_serial[0] if traced_serial else (untraced_serial[0] if untraced_serial else None)
+
+    # 3. Public bits (mode B).
+    mode_b_matches = [
+        c
+        for c in mode_b
+        if c["n"] == n and c.get("config") == tier and c.get("allocation") == alloc and c.get("times_ms")
+    ]
+    if not mode_b_matches:
+        mode_b_matches = [c for c in mode_b if c["n"] == n and c.get("times_ms")]
+    mode_b_cell = mode_b_matches[0] if mode_b_matches else None
+
+    # Additional control ablation arms (untraced).
+    extra_arms = []
+    for arm_key, arm_label in ABLATION_LABELS.items():
+        if arm_key == "flock-serial" and not traced_serial:
+            continue
+        matches = [
+            c
+            for c in ours_44
+            if c["n"] == n
+            and c.get("config") == tier
+            and c.get("allocation") == alloc
+            and not c.get("traced")
+            and c.get("arm") == arm_key
+            and c.get("times_ms")
+        ]
+        if matches:
+            extra_arms.append((arm_label, matches[0]))
+
+    traced_note = "Flock after the PIOP: traced run"
+    if traced_defaults:
+        traced_s = fmt_seconds(median(traced_defaults[0]["times_ms"]))
+        traced_note += f" (full aggregate traced: {traced_s}\\,s)"
+    traced_note += "."
+
+    extra_hlines = [5] if extra_arms else None
+    out = header(directory, commit, machine)
+    out += table_begin(
+        "tab:ablation",
+        "Ablation of the $\\GFt$ side for ML-DSA-44.",
+        f"$N={fmt_n_tex(n)}$, {LABEL[tier]}, {alloc}, one job. Prove in s, verify in ms, keys not cached. "
+        f"{traced_note} Public bits: with the public instance.",
+        "X[2.6,l] X[r] X[r] X[r]",
+        header_rows=1,
+        extra_hlines=extra_hlines,
+    )
+    out += "Variant & Prove & Verify & B/sig \\\\\n"
+
+    if full_cell and full_cell.get("times_ms"):
+        ver = fmt_ms(median(full_cell["verify_uncached_ms"])) if full_cell.get("verify_uncached_ms") else "--"
+        out += (
+            f"full aggregate & {fmt_seconds(median(full_cell['times_ms']))} & "
+            f"{ver} & {fmt_bytes_per_sig(full_cell)} \\\\\n"
+        )
+    else:
+        out += "full aggregate & -- & -- & -- \\\\\n"
+
+    if serial_cell and serial_cell.get("times_ms"):
+        bps = fmt_bytes_per_sig(serial_cell)
+        if bps == "--" and full_cell:
+            bps = fmt_bytes_per_sig(full_cell)
+        out += f"Flock after the PIOP & {fmt_seconds(median(serial_cell['times_ms']))} & -- & {bps} \\\\\n"
+    else:
+        out += "Flock after the PIOP & -- & -- & -- \\\\\n"
+
+    if mode_b_cell and mode_b_cell.get("times_ms"):
+        ver = (
+            fmt_ms(median(mode_b_cell["verify_uncached_ms"]))
+            if mode_b_cell.get("verify_uncached_ms")
+            else "--"
+        )
+        out += (
+            f"public bits & {fmt_seconds(median(mode_b_cell['times_ms']))} & "
+            f"{ver} & {fmt_bytes_per_sig(mode_b_cell)} \\\\\n"
+        )
+    else:
+        out += "public bits & -- & -- & -- \\\\\n"
+
+    for arm_label, cell in extra_arms:
+        ver = fmt_ms(median(cell["verify_uncached_ms"])) if cell.get("verify_uncached_ms") else "--"
+        out += (
+            f"{arm_label} & {fmt_seconds(median(cell['times_ms']))} & "
+            f"{ver} & {fmt_bytes_per_sig(cell)} \\\\\n"
+        )
+
+    out += "\\end{talltblr}\n\\end{table}\n"
+    return out
+
+
+def scaling_table(cells, directory, commit, machine, skipped):
+    """Generate `tab-scaling.tex` (`\\label{tab:scaling}`): scaling with the batch size across sets."""
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    if not standard:
+        return "% no scaling data\n"
+    alloc = preferred_allocation(standard)
+    tier = preferred_tier(standard)
+    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
+    paper_sizes = [1024, 8192, 32768]
+
+    set_rows = []
+    for params in sets:
+        available_sizes = sorted(
+            {
+                c["n"]
+                for c in standard
+                if cell_params(c) == params and c.get("config") == tier and c.get("allocation") == alloc
+            }
+        )
+        if set(paper_sizes) <= set(available_sizes):
+            chosen_sizes = paper_sizes
+        elif available_sizes:
+            chosen_sizes = available_sizes
+        else:
+            chosen_sizes = sorted({c["n"] for c in standard})
+        set_rows.append((params, chosen_sizes))
+
+    extra_hlines = []
+    row_cursor = 2
+    for idx, (_, chosen_sizes) in enumerate(set_rows):
+        row_cursor += len(chosen_sizes)
+        if idx + 1 < len(set_rows):
+            extra_hlines.append(row_cursor)
+
+    out = header(directory, commit, machine)
+    out += table_begin(
+        "tab:scaling",
+        "Scaling with the batch size.",
+        f"{LABEL[tier]} tier on {alloc}. Prove in seconds; verify in ms, uncached / cached keys; peak in GiB.",
+        "Q[l] Q[r] X[r] X[r] X[1.3,r] X[r]",
+        header_rows=1,
+        extra_hlines=extra_hlines,
+    )
+    out += "Set & $N$ & B/sig & Prove & Verify & Peak \\\\\n"
+    for params, chosen_sizes in set_rows:
+        nrows = len(chosen_sizes)
+        for idx, n in enumerate(chosen_sizes):
+            set_col = f"\\SetCell[r={nrows}]{{l}} {params}" if idx == 0 else ""
+            cell = pick_ours_cell(
+                standard,
+                params=params,
+                config=tier,
+                allocation=alloc,
+                n=n,
+                relation="h-u",
+                prefer_tag="scaling",
+            )
+            if cell:
+                bps = fmt_bytes_per_sig(cell)
+                prove = fmt_seconds(median(cell["times_ms"])) if cell.get("times_ms") else "--"
+                if cell.get("verify_uncached_ms"):
+                    unc = fmt_ms(median(cell["verify_uncached_ms"]))
+                    cac = (
+                        fmt_ms(median(cell["verify_cached_ms"]))
+                        if cell.get("verify_cached_ms")
+                        else "--"
+                    )
+                    verify = f"{unc} / {cac}"
+                else:
+                    verify = "--"
+                peak = fmt_gib(cell.get("peak_rss_kib"))
+            else:
+                bps = prove = verify = peak = "--"
+            out += f"{set_col} & {fmt_pow2_or_n(n)} & {bps} & {prove} & {verify} & {peak} \\\\\n"
+    out += "\\end{talltblr}\n\\end{table}\n"
+    return out
+
+
+def extract_breakdown(cell, directory):
+    """Return the component byte dict for `cell` (from the cell JSON or its log file)."""
+    if not cell:
+        return None
+    if cell.get("size_breakdown"):
+        return cell["size_breakdown"]
+    for proc_entry in cell.get("processes", []):
+        log_path = proc_entry.get("log")
+        if log_path and Path(log_path).exists():
+            parsed = parse_size_breakdown(Path(log_path).read_text(encoding="utf-8"))
+            if parsed:
+                return parsed
+    logs_dir = directory / "logs"
+    if logs_dir.exists():
+        params = cell_params(cell)
+        n = cell.get("n")
+        relation = cell.get("relation", "h-u")
+        pattern = f"*-{n}-{relation}-p{params}-*.log"
+        for log_file in sorted(logs_dir.glob(pattern)):
+            try:
+                parsed = parse_size_breakdown(log_file.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if parsed:
+                return parsed
+    return None
+
+
+def bytes_table(cells, directory, commit, machine):
+    """Generate `tab-bytes.tex` (`\\label{tab:bytes}`): composition of the aggregate across sets."""
+    standard = [
+        c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("aggregate_bytes")
+    ]
+    if not standard:
+        return "% no byte data\n"
+    n = max(c["n"] for c in standard)
+    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard)] or list(PARAM_SETS)
+    chosen = {}
+    breakdowns = {}
+    for params in sets:
+        matches = [c for c in standard if cell_params(c) == params and c["n"] == n]
+        if not matches:
+            matches = [c for c in standard if cell_params(c) == params]
+        if matches:
+            cell = max(matches, key=lambda c: cell_priority(c, prefer_tag="headline"))
+            chosen[params] = cell
+            bd = extract_breakdown(cell, directory)
+            if not bd:
+                for candidate in sorted(
+                    matches, key=lambda c: cell_priority(c, prefer_tag="headline"), reverse=True
+                ):
+                    bd = extract_breakdown(candidate, directory)
+                    if bd:
+                        break
+            breakdowns[params] = bd
+
+    out = header(directory, commit, machine)
+    colspec = "X[2.4,l] " + " ".join("X[r]" for _ in sets)
+    out += table_begin(
+        "tab:bytes",
+        f"Composition of the aggregate at $N={fmt_n_tex(n)}$.",
+        "Bytes per signature. Commitments: Akita and Flock; other: bridge images, nonces, header.",
+        colspec,
+        header_rows=1,
+        extra_hlines=[9],
+    )
+    out += "Component & " + " & ".join(sets) + " \\\\\n"
+
+    def comp_val(params, fn):
+        cell = chosen.get(params)
+        bd = breakdowns.get(params)
+        if not cell or not cell.get("n"):
+            return "--"
+        val = fn(cell, bd)
+        if val is None:
+            return "--"
+        return f"{val / cell['n']:.1f}"
+
+    components = [
+        (
+            "hashes $\\ct_i$",
+            lambda cell, bd: bd["c_tilde"]
+            if bd and "c_tilde" in bd
+            else PARAM_SETS[cell_params(cell)]["ctilde_bytes"] * cell["n"],
+        ),
+        ("Flock proof", lambda cell, bd: bd.get("flock_proofs") if bd else None),
+        ("Akita opening", lambda cell, bd: bd.get("opening") if bd else None),
+        ("lookup", lambda cell, bd: bd.get("lookup") if bd else None),
+        ("PIOP rounds and claims", lambda cell, bd: bd.get("piop") if bd else None),
+        (
+            "commitments",
+            lambda cell, bd: (bd["akita_commitments"] + bd["flock_commitments"])
+            if bd and "akita_commitments" in bd and "flock_commitments" in bd
+            else None,
+        ),
+        (
+            "other",
+            lambda cell, bd: (bd["final_vectors"] + bd["work"] + bd["header"])
+            if bd and "final_vectors" in bd and "work" in bd and "header" in bd
+            else None,
+        ),
+        ("total", lambda cell, bd: cell.get("aggregate_bytes")),
+    ]
+
+    for label, fn in components:
+        row = [label] + [comp_val(params, fn) for params in sets]
+        out += " & ".join(row) + " \\\\\n"
+
     out += "\\end{talltblr}\n\\end{table}\n"
     return out
 
@@ -404,155 +736,223 @@ def falcon_category(deg):
     return "1" if deg == 512 else ("5" if deg == 1024 else str(deg))
 
 
+def is_aerie_avx2(cell):
+    return (
+        "avx2" in str(cell.get("tag", "")).lower()
+        or cell.get("knobs", {}).get("AERIE_SIMD_BACKEND") == "avx2"
+    )
+
+
 def baselines_table(cells, directory, commit, machine, skipped):
-    candidates = [
-        c for c in cells
-        if c.get("system") == "ours" and c["relation"] == "h-u" and c.get("times_ms")
-    ]
-    ours_by_key = {}
-    for cell in candidates:
-        key = (cell["config"], cell["allocation"], cell_params(cell))
-        if key not in ours_by_key or cell.get("reps", 0) > ours_by_key[key].get("reps", 0):
-            ours_by_key[key] = cell
-    ours = list(ours_by_key.values())
-
-    def dedup(items, key):
-        chosen = {}
-        for item in items:
-            k = key(item)
-            if k not in chosen or item.get("reps", 0) > chosen[k].get("reps", 0):
-                chosen[k] = item
-        return list(chosen.values())
-
-    aerie = dedup(
-        [c for c in cells if c.get("system") == "aerie"],
-        lambda c: (c.get("tag"), falcon_degree(c), c["allocation"], c["n"]),
-    )
-    native = dedup(
-        [c for c in cells if c.get("system") == "native"],
-        lambda c: (c["allocation"], c["n"], cell_params(c)),
-    )
-    sets = param_sets(ours + native)
-    if not ours and not aerie and not native:
+    """Generate `tab-baselines.tex` (`\\label{tab:baselines}`): native, Aerie and ours at 16C32T and 1T."""
+    standard = [c for c in cells if is_standard_ours(c) and c.get("relation") == "h-u" and c.get("times_ms")]
+    aerie = [c for c in cells if c.get("system") == "aerie"]
+    native = [c for c in cells if c.get("system") == "native"]
+    if not standard and not aerie and not native:
         return "% no baseline data\n"
+
+    all_cells = standard + aerie + native
+    n = max(c["n"] for c in all_cells)
+    par_alloc = "16C32T" if any(c.get("allocation") == "16C32T" for c in all_cells) else "8C16T"
+    tier = preferred_tier(standard)
+    sets = [p for p in PARAM_SETS if any(cell_params(c) == p for c in standard + native)] or list(PARAM_SETS)
+
+    def pick_native(params, alloc):
+        matches = [
+            c
+            for c in native
+            if cell_params(c) == params and c.get("allocation") == alloc and c.get("n") == n
+        ]
+        if not matches:
+            matches = [c for c in native if cell_params(c) == params and c.get("allocation") == alloc]
+        return max(matches, key=lambda c: c.get("reps", 0)) if matches else None
+
+    def pick_aerie(deg, alloc, avx2=False):
+        matches = [
+            c
+            for c in aerie
+            if falcon_degree(c) == deg
+            and is_aerie_avx2(c) == avx2
+            and c.get("allocation") == alloc
+            and c.get("n") == n
+        ]
+        if not matches:
+            matches = [
+                c
+                for c in aerie
+                if falcon_degree(c) == deg and is_aerie_avx2(c) == avx2 and c.get("allocation") == alloc
+            ]
+        return max(matches, key=lambda c: c.get("reps", 0)) if matches else None
+
+    aerie_variants = [(512, False), (1024, False)]
+    for deg in (512, 1024):
+        if any(falcon_degree(c) == deg and is_aerie_avx2(c) for c in aerie):
+            aerie_variants.append((deg, True))
+
+    native_end = 3 + len(sets)
+    aerie_end = native_end + len(aerie_variants)
     out = header(directory, commit, machine)
     out += table_begin(
-        "tab:ae-baselines",
-        f"Baselines (measured on {machine}).",
-        "Prove in s; verify in ms, uncached / cached keys. "
-        "Cat.: NIST security category. "
-        "n/a: the CPU does not support the tier. --: not measured.",
-        "X[2.3,l] X[0.7,c] X[1.2,l] X[1,r] X[1.5,r] X[1,r]",
+        "tab:baselines",
+        f"Baselines at $N={fmt_n_tex(n)}$.",
+        "Cat.: NIST category. Verify without cached keys. "
+        "Native: AVX2 reference code, parallel over signatures. "
+        "Aerie: Falcon-512/1024, prove without setup, bytes with salts. Keys and messages excluded.",
+        "X[1.9,l] Q[c] X[1.2,r] X[1.15,r] X[1.25,r] X[1.1,r] X[1.1,r]",
+        header_rows=2,
+        extra_hlines=[native_end, aerie_end],
     )
-    out += "System & Cat. & Alloc. & Prove & Verify & B/sig \\\\\n"
-    allocs = [a for a in ALLOC_ORDER if a != "all"]
-    for allocation in allocs:
-        for cell in native:
-            if cell["allocation"] != allocation:
-                continue
-            native_verify = fmt_ms(median(cell["verify_uncached_ms"]))
-            if cell.get("verify_cached_ms"):
-                native_verify += " / " + fmt_ms(median(cell["verify_cached_ms"]))
-            params = cell_params(cell)
-            constants = PARAM_SETS[params]
-            out += (
-                f"{with_set('native, AVX2', params, sets)} & {constants['category']} & "
-                f"{allocation} & -- & {native_verify} & {constants['sig_bytes']} \\\\\n"
-            )
-        aerie_cells = [c for c in aerie if c["allocation"] == allocation]
-        aerie_sorted = sorted(
-            aerie_cells,
-            key=lambda c: (
-                falcon_degree(c),
-                1 if "avx2" in str(c.get("tag", "")).lower() or c.get("knobs", {}).get("AERIE_SIMD_BACKEND") == "avx2" else 0,
-            ),
+    out += (
+        "\\SetCell[r=2]{l} System & \\SetCell[r=2]{c} Cat. & "
+        "\\SetCell[c=2]{c} Prove (s) & & \\SetCell[c=2]{c} Verify (ms) & & "
+        "\\SetCell[r=2]{r} B/sig \\\\\n"
+    )
+    out += f" & & {par_alloc} & 1T & {par_alloc} & 1T & \\\\\n"
+
+    for params in sets:
+        constants = PARAM_SETS[params]
+        c_par = pick_native(params, par_alloc)
+        c_1t = pick_native(params, "1T")
+        v_par = fmt_ms(median(c_par["verify_uncached_ms"])) if c_par and c_par.get("verify_uncached_ms") else "--"
+        v_1t = fmt_ms(median(c_1t["verify_uncached_ms"])) if c_1t and c_1t.get("verify_uncached_ms") else "--"
+        sig_b = fmt_n_tex(constants["sig_bytes"])
+        out += f"native {params} & {constants['category']} & -- & -- & {v_par} & {v_1t} & {sig_b} \\\\\n"
+
+    for deg, avx2 in aerie_variants:
+        cat = falcon_category(deg)
+        suffix = " (AVX2)" if avx2 else ""
+        c_par = pick_aerie(deg, par_alloc, avx2=avx2)
+        c_1t = pick_aerie(deg, "1T", avx2=avx2)
+        p_par = fmt_seconds(median(c_par["times_ms"])) if c_par and c_par.get("times_ms") else "--"
+        p_1t = fmt_seconds(median(c_1t["times_ms"])) if c_1t and c_1t.get("times_ms") else "--"
+        v_par = (
+            fmt_ms(median(c_par["verify_uncached_ms"]), allow_decimal=True)
+            if c_par and c_par.get("verify_uncached_ms")
+            else "--"
         )
-        has_512 = any(falcon_degree(c) == 512 for c in aerie_cells)
-        has_1024 = any(falcon_degree(c) == 1024 for c in aerie_cells)
+        v_1t_samples = (
+            (c_1t.get("verify_single_ms") or c_1t.get("verify_uncached_ms")) if c_1t else None
+        )
+        v_1t = fmt_ms(median(v_1t_samples), allow_decimal=True) if v_1t_samples else "--"
+        ref = c_par or c_1t
+        bps = f"{ref['aggregate_bytes'] / ref['n']:.1f}" if ref and ref.get("aggregate_bytes") else "--"
+        out += f"Aerie-{deg}{suffix} & {cat} & {p_par} & {p_1t} & {v_par} & {v_1t} & {bps} \\\\\n"
 
-        if aerie_cells and not has_512:
-            out += f"Aerie, Falcon-512 & 1 & {allocation} & -- & -- & -- \\\\\n"
+    for params in sets:
+        constants = PARAM_SETS[params]
+        c_par = pick_ours_cell(
+            standard, params=params, config=tier, allocation=par_alloc, n=n, relation="h-u", prefer_tag="headline"
+        )
+        c_1t = pick_ours_cell(
+            standard, params=params, config=tier, allocation="1T", n=n, relation="h-u", prefer_tag="headline"
+        )
+        p_par = fmt_seconds(median(c_par["times_ms"])) if c_par and c_par.get("times_ms") else "--"
+        p_1t = fmt_seconds(median(c_1t["times_ms"])) if c_1t and c_1t.get("times_ms") else "--"
+        v_par = fmt_ms(median(c_par["verify_uncached_ms"])) if c_par and c_par.get("verify_uncached_ms") else "--"
+        v_1t = fmt_ms(median(c_1t["verify_uncached_ms"])) if c_1t and c_1t.get("verify_uncached_ms") else "--"
+        ref = c_par or c_1t
+        bps = fmt_bytes_per_sig(ref)
+        out += f"ours, {params} & {constants['category']} & {p_par} & {p_1t} & {v_par} & {v_1t} & {bps} \\\\\n"
 
-        for cell in aerie_sorted:
-            verify = median(cell["verify_uncached_ms"]) if cell.get("verify_uncached_ms") else None
-            deg = falcon_degree(cell)
-            cat = falcon_category(deg)
-            is_avx2 = "avx2" in str(cell.get("tag", "")).lower() or cell.get("knobs", {}).get("AERIE_SIMD_BACKEND") == "avx2"
-            avx2_suffix = " (AVX2)" if is_avx2 else ""
-            label = f"Aerie, Falcon-{deg}{avx2_suffix}"
-            out += (
-                f"{label} & {cat} & {allocation} & {fmt_seconds(median(cell['times_ms']))} & "
-                f"{fmt_ms(verify)} & "
-                f"{(cell['aggregate_bytes'] / cell['n']):.1f} \\\\\n"
-            )
-
-        if aerie_cells and not has_1024:
-            out += f"Aerie, Falcon-1024 & 5 & {allocation} & -- & -- & -- \\\\\n"
-
-        for params in sets or ["44"]:
-            category = PARAM_SETS[params]["category"]
-            for config in ORDER:
-                label = with_set(f"ours, {LABEL[config]}", params, sets)
-                matches = [
-                    c for c in ours
-                    if c["config"] == config and c["allocation"] == allocation
-                    and cell_params(c) == params
-                ]
-                if not matches:
-                    if config in skipped:
-                        out += (
-                            f"{label} & {category} & {allocation} & {NA} & {NA} & {NA} "
-                            "\\\\\n"
-                        )
-                    continue
-                cell = matches[0]
-                verify = fmt_ms(median(cell["verify_uncached_ms"])) if cell.get("verify_uncached_ms") else "--"
-                cached = fmt_ms(median(cell["verify_cached_ms"])) if cell.get("verify_cached_ms") else "--"
-                out += (
-                    f"{label} & {category} & {allocation} & "
-                    f"{fmt_seconds(median(cell['times_ms']))} & {verify} / {cached} & "
-                    f"{fmt_bytes_per_sig(cell)} \\\\\n"
-                )
     out += "\\end{talltblr}\n\\end{table}\n"
     return out
 
 
 def numbers(cells, directory, commit, machine):
-    data = [c for c in headline_cells(cells) if c["relation"] == "h-u" and c.get("times_ms")]
-    # The macros carry no set in their names, so they report one set.
-    params = main_set(data)
-    data = [c for c in data if cell_params(c) == params]
+    """Generate `numbers.tex` with macros for all sets, relations and mode B."""
+    standard = [c for c in cells if is_standard_ours(c) and c.get("times_ms")]
     lines = [header(directory, commit, machine)]
-    if not data:
+    if not standard:
         return "".join(lines) + "% no headline data\n"
-    n = max(c["n"] for c in data)
-    data = [c for c in data if c["n"] == n]
-    allocation = preferred_allocation(data)
+    n = max(c["n"] for c in standard)
+    at_n = [c for c in standard if c["n"] == n]
+    alloc = preferred_allocation(at_n)
     values = {}
-    for config in ORDER:
-        matches = [
-            c for c in data if c["config"] == config and c["allocation"] == allocation
-        ]
-        if not matches:
-            continue
-        cell = matches[0]
-        values[f"Prove{MACRO[config]}"] = fmt_seconds(median(cell["times_ms"]))
-        if cell.get("verify_uncached_ms"):
-            values[f"Verify{MACRO[config]}Uncached"] = fmt_ms(median(cell["verify_uncached_ms"]))
-        if cell.get("verify_cached_ms"):
-            values[f"Verify{MACRO[config]}Cached"] = fmt_ms(median(cell["verify_cached_ms"]))
-        if cell.get("aggregate_bytes"):
-            values[f"BytesPerSig{MACRO[config]}"] = fmt_bytes_per_sig(cell)
-            values["AggregateBytes"] = f"{cell['aggregate_bytes']:,}".replace(",", "{,}")
+
+    for params, set_suffix in SET_MACRO.items():
+        for config in ORDER:
+            cell = pick_ours_cell(
+                at_n,
+                params=params,
+                config=config,
+                allocation=alloc,
+                n=n,
+                relation="h-u",
+                prefer_tag="headline",
+            )
+            if not cell:
+                continue
+            m_tier = MACRO[config]
+            prove_s = fmt_seconds(median(cell["times_ms"]))
+            values[f"Prove{m_tier}{set_suffix}"] = prove_s
+            if params == "44":
+                values[f"Prove{m_tier}"] = prove_s
+            if cell.get("verify_uncached_ms"):
+                unc = fmt_ms(median(cell["verify_uncached_ms"]))
+                values[f"Verify{m_tier}Uncached{set_suffix}"] = unc
+                if params == "44":
+                    values[f"Verify{m_tier}Uncached"] = unc
+            if cell.get("verify_cached_ms"):
+                cac = fmt_ms(median(cell["verify_cached_ms"]))
+                values[f"Verify{m_tier}Cached{set_suffix}"] = cac
+                if params == "44":
+                    values[f"Verify{m_tier}Cached"] = cac
+            if cell.get("aggregate_bytes"):
+                bps = fmt_bytes_per_sig(cell)
+                agg_b = fmt_n_tex(cell["aggregate_bytes"])
+                values[f"BytesPerSig{m_tier}{set_suffix}"] = bps
+                values[f"AggregateBytes{set_suffix}"] = agg_b
+                if params == "44":
+                    values[f"BytesPerSig{m_tier}"] = bps
+                    values["AggregateBytes"] = agg_b
+
+        # Relation overheads on IFMA for each set.
+        hu_cell = pick_ours_cell(
+            at_n,
+            params=params,
+            config="ifma",
+            allocation=alloc,
+            n=n,
+            relation="h-u",
+            prefer_tag="relations",
+        )
+        if hu_cell and hu_cell.get("times_ms"):
+            hu_ms = median(hu_cell["times_ms"])
+            for rel, rel_macro in (("h-exact", "RelExact"), ("h-fips", "RelFips")):
+                rel_cell = pick_ours_cell(
+                    at_n,
+                    params=params,
+                    config="ifma",
+                    allocation=alloc,
+                    n=n,
+                    relation=rel,
+                    prefer_tag="relations",
+                )
+                if rel_cell and rel_cell.get("times_ms") and hu_ms > 0:
+                    pct = (median(rel_cell["times_ms"]) - hu_ms) / hu_ms * 100.0
+                    values[f"{rel_macro}OverheadIfma{set_suffix}"] = f"{pct:+.1f}\\%"
+
     if "ProveIfma" in values:
         try:
             prove = float(values["ProveIfma"])
             for config in ("avx512", "avx2"):
                 name = f"Prove{MACRO[config]}"
-                if name in values:
-                    values[f"GainIfmaOver{MACRO[config]}"] = f"{float(values[name]) / prove:.1f}"
+                if name in values and prove > 0:
+                    values[f"GainIfmaOver{MACRO[config]}"] = f"{float(values[name]) / prove:.2f}"
         except ValueError:
             pass
+
+    mode_b = [c for c in cells if c.get("system") == "mode_b" and c.get("times_ms")]
+    if mode_b:
+        mb_n = max(c["n"] for c in mode_b)
+        mb_cells = [c for c in mode_b if c["n"] == mb_n]
+        mb_cell = next((c for c in mb_cells if c.get("config") == "ifma"), mb_cells[0])
+        values["ProveModeB"] = fmt_seconds(median(mb_cell["times_ms"]))
+        if mb_cell.get("verify_uncached_ms"):
+            values["VerifyModeBUncached"] = fmt_ms(median(mb_cell["verify_uncached_ms"]))
+        if mb_cell.get("aggregate_bytes"):
+            values["BytesPerSigModeB"] = fmt_bytes_per_sig(mb_cell)
+
     for name, value in values.items():
         if value:
             lines.append(f"\\newcommand{{\\{name}}}{{{value}}}\n")
@@ -562,7 +962,7 @@ def numbers(cells, directory, commit, machine):
 def claims_csv(cells, directory):
     rows = []
     for cell in cells:
-        if cell.get("system") != "ours":
+        if cell.get("system") not in ("ours", "mode_b", "native", "aerie"):
             continue
         prove = describe(cell.get("times_ms") or [])
         uncached = describe(cell.get("verify_uncached_ms") or [])
@@ -570,7 +970,8 @@ def claims_csv(cells, directory):
         rows.append(
             {
                 "run_id": cell["run_id"],
-                "params": cell_params(cell),
+                "system": cell.get("system", ""),
+                "params": cell_params(cell) if cell.get("system") != "aerie" else "",
                 "config": cell["config"],
                 "allocation": cell["allocation"],
                 "n": cell["n"],
@@ -578,6 +979,7 @@ def claims_csv(cells, directory):
                 "prove_median_ms": prove["median"] if prove else "",
                 "verify_uncached_median_ms": uncached["median"] if uncached else "",
                 "verify_cached_median_ms": cached["median"] if cached else "",
+                "peak_rss_kib": cell.get("peak_rss_kib", ""),
                 "aggregate_bytes": cell.get("aggregate_bytes", ""),
                 "aggregate_sha256": cell.get("aggregate_sha256", ""),
             }
@@ -594,6 +996,7 @@ def claims_csv(cells, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", help="results directory (default: LATEST)")
+    parser.add_argument("--out", help="output directory for generated tables (default: <results>/paper-tables)")
     args = parser.parse_args()
     directory = result_dir(args.results)
     cells = load_cells(directory)
@@ -603,23 +1006,25 @@ def main():
         "unknown",
     )
     machine = next((c.get("machine") for c in cells if c.get("machine")), "unknown")
-    TABLES.mkdir(parents=True, exist_ok=True)
     outputs = {
-        "tab-e2e.tex": e2e_table(cells, directory, commit, machine, skipped),
+        "tab-prove.tex": prove_table(cells, directory, commit, machine, skipped),
         "tab-ablation.tex": ablation_table(cells, directory, commit, machine, skipped),
         "tab-scaling.tex": scaling_table(cells, directory, commit, machine, skipped),
         "tab-bytes.tex": bytes_table(cells, directory, commit, machine),
         "tab-baselines.tex": baselines_table(cells, directory, commit, machine, skipped),
+        "tab-relations.tex": relations_table(cells, directory, commit, machine, skipped),
         "numbers.tex": numbers(cells, directory, commit, machine),
     }
+    out_dir = Path(args.out) if args.out else (directory / "paper-tables")
+    out_dir.mkdir(parents=True, exist_ok=True)
     for name, text in outputs.items():
-        (TABLES / name).write_text(text, encoding="utf-8")
-    copy = directory / "paper-tables"
-    copy.mkdir(exist_ok=True)
-    for name, text in outputs.items():
-        (copy / name).write_text(text, encoding="utf-8")
+        (out_dir / name).write_text(text, encoding="utf-8")
+    if not args.out:
+        TABLES.mkdir(parents=True, exist_ok=True)
+        for name, text in outputs.items():
+            (TABLES / name).write_text(text, encoding="utf-8")
     claims_csv(cells, directory)
-    print(f"tables: {TABLES}")
+    print(f"tables: {out_dir}")
     for name in outputs:
         print(f"  {name}")
     return 0

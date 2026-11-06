@@ -18,6 +18,7 @@ from common import (  # noqa: E402
     BIN,
     BUILD,
     PARAM_SETS,
+    RESULTS,
     TABLES,
     built_revision,
     cpu_flags,
@@ -33,6 +34,30 @@ from common import (  # noqa: E402
 from stats import describe, flags as cell_flags  # noqa: E402
 from simd_report import capture, failures, summarise  # noqa: E402
 
+TRACE_ENV = {
+    "AGG_PHASE_STAMPS": "1",
+    "AGG_STAGE_TRACE": "1",
+    "AGG_SCHED_TRACE": "1",
+    "AGG_TIED_TRACE": "1",
+    "PCS_TRACE": "1",
+    "LINCHECK_TRACE": "1",
+    "FLOCK_ZC_TIMING": "1",
+}
+
+SIZE_KEYS = {
+    "header": "header",
+    "c~ list": "c_tilde",
+    "Akita commitments": "akita_commitments",
+    "Flock commitments": "flock_commitments",
+    "final vectors": "final_vectors",
+    "Flock proofs and shares": "flock_proofs",
+    "lookup (T_16)": "lookup",
+    "PIOP rounds and claims": "piop",
+    "PIOP work nonces": "work",
+    "Akita opening": "opening",
+    "total": "total",
+}
+
 
 def sh(cmd, env, cwd=None, timeout=None):
     full_env = os.environ.copy()
@@ -46,6 +71,33 @@ def sh(cmd, env, cwd=None, timeout=None):
         timeout=timeout,
     )
     return proc
+
+
+def format_dry_cmd(cmd, env):
+    shown_keys = (
+        "AGG_ISA",
+        "AGG_PIOP_LAYOUT",
+        "AGG_HUGEPAGE",
+        "AGG_ALLOC_CACHE",
+        "AGG_FLOCK_THREADS",
+        "AGG_LATE_JOIN",
+        "AGG_PIOP_S_THREADS",
+        "AGG_STAGE_TRACE",
+        "AGG_SCHED_TRACE",
+        "AGG_TIED_TRACE",
+        "PCS_TRACE",
+        "LINCHECK_TRACE",
+        "FLOCK_ZC_TIMING",
+        "AGG_PHASE_STAMPS",
+        "AGG_RELATION",
+        "AERIE_SIMD_BACKEND",
+        "AERIE_KECCAK_BACKEND",
+        "RAYON_NUM_THREADS",
+        "OMP_NUM_THREADS",
+    )
+    env_parts = [f"{k}={env[k]}" for k in shown_keys if k in env and env[k] is not None]
+    cmd_parts = [str(c) for c in cmd]
+    return " ".join(env_parts + cmd_parts)
 
 
 def rotate(items, r):
@@ -102,6 +154,8 @@ def start_sampler(result_dir, allocation):
 
 
 def stop_sampler(proc):
+    if proc is None:
+        return
     proc.send_signal(signal.SIGTERM)
     try:
         proc.wait(timeout=5)
@@ -159,20 +213,28 @@ def shutil_which(tool):
 class Runner:
     def __init__(self, args):
         self.args = args
+        self.dry_run = bool(getattr(args, "dry_run", False))
+        self.planned_cmds = 0
         self.configs = load_configs()
         self.matrix = load_matrix(args.mode)
         self.flags = cpu_flags()
-        self.result_dir = new_result_dir() if not args.results else Path(args.results)
-        self.result_dir.mkdir(parents=True, exist_ok=True)
-        (self.result_dir / "raw").mkdir(exist_ok=True)
-        (self.result_dir / "logs").mkdir(exist_ok=True)
-        (self.result_dir / "data").mkdir(exist_ok=True)
         # The revision build.py stamped into the binary: git HEAD (with -dirty) in
         # a checkout, the pin in sources.lock only for an archive without .git.
         self.code_commit = built_revision()
         self.cells = []
         self.skipped = []
         self.reports = {}
+        if self.dry_run:
+            self.result_dir = Path(args.results) if args.results else (RESULTS / "dry-run")
+            self.machine = self.load_machine_in_memory()
+            self.topo = self.load_topology_in_memory()
+            self.topo["_numactl"] = self.machine.get("numactl_H", "")
+            return
+        self.result_dir = new_result_dir() if not args.results else Path(args.results)
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        (self.result_dir / "raw").mkdir(exist_ok=True)
+        (self.result_dir / "logs").mkdir(exist_ok=True)
+        (self.result_dir / "data").mkdir(exist_ok=True)
         self.machine = self.load_machine()
         self.topo = self.load_topology()
         self.topo["_numactl"] = self.machine.get("numactl_H", "")
@@ -191,11 +253,30 @@ class Runner:
         for warning in warnings:
             print(f"warning: {warning}")
 
+    def load_machine_in_memory(self):
+        import probe as probe_mod
+        return probe_mod.probe()
+
+    def load_topology_in_memory(self):
+        import topo as topo_mod
+        online, core_list, domains, smt, numa_nodes, node_of_cpu = topo_mod.topology()
+        avoid_cpu0 = self.configs.get("topology", {}).get("avoid_cpu0", True)
+        configs = topo_mod.choose(
+            online, core_list, domains, smt, numa_nodes, node_of_cpu, avoid_cpu0
+        )
+        return {
+            "cpu_model": self.machine.get("cpu_model"),
+            "online_cpus": online,
+            "smt": smt,
+            "numa_nodes": numa_nodes,
+            "configs": configs,
+        }
+
     def load_machine(self):
         path = self.result_dir / "machine.json"
         if path.exists():
             return read_json(path)
-        proc = run(
+        run(
             ["python3", ARTIFACT / "scripts" / "probe.py", "--out", path],
             check=False,
             quiet=True,
@@ -236,8 +317,9 @@ class Runner:
                 continue
             binary = BIN / spec["binary"]
             if not binary.exists():
-                raise SystemExit(f"{binary} is missing; run ./run.sh build")
-            if name not in self.reports:
+                if not self.dry_run:
+                    raise SystemExit(f"{binary} is missing; run ./run.sh build")
+            elif name not in self.reports and not self.dry_run:
                 report, _ = capture(binary, spec.get("env", {}))
                 problems = failures(report, name)
                 self.reports[name] = {
@@ -289,7 +371,8 @@ class Runner:
                         "reason": f"same CPU set as {actual}",
                     }
                 )
-                print(f"skip allocation {name}: same CPU set as {actual}")
+                if not self.dry_run:
+                    print(f"skip allocation {name}: same CPU set as {actual}")
                 continue
             used.add(allocation["cpuset"])
             plan.append((name, actual, allocation, note))
@@ -307,13 +390,16 @@ class Runner:
         env["AGG_GIT_REV"] = self.code_commit
         return env
 
+    def record_dry(self, cmd, env):
+        self.planned_cmds += 1
+        print(f"  [dry-run] {format_dry_cmd(cmd, env)}")
+
     def invoke_ours(
         self, name, allocation, n, relation, extra, warmup, reps, trace=False, params="44"
     ):
         spec = self.configs["rows"][name]
         binary = BIN / spec["binary"]
         out = self.result_dir / "raw" / "parts"
-        out.mkdir(exist_ok=True)
         tag = (
             f"{name}-{allocation['cpuset'].replace(',', '_')}-{n}-{relation}-p{params}"
             f"-{time.time_ns()}"
@@ -322,7 +408,7 @@ class Runner:
         log_path = self.result_dir / "logs" / f"{tag}.log"
         env = self.env_for(name, allocation, extra)
         if trace:
-            env["AGG_PHASE_STAMPS"] = "1"
+            env.update(TRACE_ENV)
         cmd = pin_prefix(self.topo, allocation) + [
             str(binary),
             "bench",
@@ -339,16 +425,21 @@ class Runner:
             "--json",
             str(json_path),
         ]
+        if self.dry_run:
+            self.record_dry(cmd, env)
+            return None
+        out.mkdir(exist_ok=True)
         proc = sh(cmd, env)
         log_path.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
         if proc.returncode != 0:
             raise SystemExit(
-                f"bench failed for {name} at N={n}: rc={proc.returncode}\n"
+                f"bench failed for {name} (ML-DSA-{params}) at N={n}: rc={proc.returncode}\n"
                 + (proc.stderr or "")[-4000:]
             )
         if not json_path.exists():
             raise SystemExit(f"bench wrote no JSON for {name} at N={n}")
         part = read_json(json_path)
+        part["size_breakdown"] = parse_size_breakdown(proc.stdout or "")
         part["_cmd"] = " ".join(str(c) for c in cmd)
         part["_env"] = {k: v for k, v in env.items() if k not in ("PATH",)}
         part["_json"] = str(json_path)
@@ -363,7 +454,7 @@ class Runner:
         )
         return max(1, min(int(requested), int(reps)))
 
-    def run_ours_group(self, group, rows, sizes, relations, reps, warmup):
+    def run_ours_group(self, group, rows, sizes, relations, reps, warmup, params):
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
@@ -380,13 +471,31 @@ class Runner:
                         relation,
                         reps,
                         warmup,
+                        params,
                     )
 
-    def run_ours_cell(self, group, rows, requested, actual, allocation, note, n, relation, reps, warmup):
+    def run_ours_cell(
+        self, group, rows, requested, actual, allocation, note, n, relation, reps, warmup, params
+    ):
         tag = group["tag"]
         trace = bool(group.get("traced"))
-        params = group_params(group)
+        extra_env = group.get("env")
         chunks = process_chunks(reps, self.process_count(group, reps))
+        if self.dry_run:
+            for r in range(len(chunks)):
+                for name in rotate(rows, r):
+                    self.invoke_ours(
+                        name,
+                        allocation,
+                        n,
+                        relation,
+                        extra_env,
+                        warmup,
+                        chunks[r],
+                        trace=trace,
+                        params=params,
+                    )
+            return
         cells = {}
         for name in rows:
             cell = self.base_cell(
@@ -395,6 +504,7 @@ class Runner:
             cell["warmup"] = warmup
             cell["reps"] = reps
             cell["protocol"] = "warm"
+            cell["traced"] = trace
             cell["process_count"] = len(chunks)
             cells[name] = cell
         before = read_stat()
@@ -410,7 +520,7 @@ class Runner:
                         allocation,
                         n,
                         relation,
-                        None,
+                        extra_env,
                         warmup,
                         chunks[r],
                         trace=trace,
@@ -424,6 +534,7 @@ class Runner:
                     cell["processes"].append(
                         {
                             "json": part["_json"],
+                            "log": part["_log"],
                             "warmup": warmup,
                             "reps": chunks[r],
                             "prove_ms": part["prove_ms"],
@@ -431,6 +542,8 @@ class Runner:
                     )
                     cell["aggregate_bytes"] = part["aggregate_bytes"]
                     cell["aggregate_sha256"] = part["aggregate_sha256"]
+                    if part.get("size_breakdown"):
+                        cell["size_breakdown"] = part["size_breakdown"]
                     cell["kernels"] = part["kernels"]
                     peak = part.get("prove_peak_kib")
                     if peak:
@@ -478,6 +591,7 @@ class Runner:
             "warmup": 0,
             "reps": 0,
             "protocol": None,
+            "traced": False,
             "process_count": 0,
             "processes": [],
             "times_ms": [],
@@ -486,6 +600,7 @@ class Runner:
             "peak_rss_kib": None,
             "aggregate_bytes": None,
             "aggregate_sha256": None,
+            "size_breakdown": None,
             "accepted": True,
             "kernels": {},
             "simd_report": self.reports.get(config),
@@ -522,6 +637,116 @@ class Runner:
                 f"{sizes} {hashes}"
             )
 
+    def run_mode_b_group(self, group, rows, sizes, reps, warmup, params):
+        if params != "44":
+            raise SystemExit(f"group {group.get('tag')}: mode_b supports ML-DSA-44 only, not {params}")
+        binary = BIN / "mode_b"
+        if not self.dry_run and not binary.exists():
+            raise SystemExit(f"{binary} is missing; run ./run.sh build")
+        relation = group.get("relation", "h-u")
+        for requested, actual, allocation, note in self.allocation_plan(
+            group, ["8C16T"]
+        ):
+            for n in sizes:
+                for name in rows:
+                    self.run_mode_b_cell(
+                        group,
+                        binary,
+                        name,
+                        requested,
+                        actual,
+                        allocation,
+                        note,
+                        n,
+                        relation,
+                        reps,
+                        warmup,
+                        params,
+                    )
+
+    def run_mode_b_cell(
+        self, group, binary, name, requested, actual, allocation, note, n, relation, reps, warmup, params
+    ):
+        alloc_tag = actual if requested == actual else f"{requested}-to-{actual}"
+        run_id = f"{group['tag']}-{name}-{alloc_tag}-n{n}-{relation}-p{params}"
+        proof_dir = self.result_dir / "data"
+        env = self.env_for(
+            name,
+            allocation,
+            {
+                "AGG_RELATION": relation,
+                "AGG_PROOF_OUT": str(proof_dir),
+            },
+        )
+        cmd = pin_prefix(self.topo, allocation) + [
+            str(binary),
+            str(n),
+            "--warmup",
+            str(warmup),
+            "--reps",
+            str(reps),
+        ]
+        if self.dry_run:
+            self.record_dry(cmd, env)
+            return
+        proof_dir.mkdir(exist_ok=True)
+        before = read_stat()
+        sampler, freq_path = start_sampler(self.result_dir, allocation)
+        started = utc_stamp()
+        try:
+            proc = sh(cmd, env)
+        finally:
+            stop_sampler(sampler)
+        after = read_stat()
+        log_path = self.result_dir / "logs" / f"{run_id}.log"
+        log_path.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+        if proc.returncode != 0:
+            raise SystemExit(
+                f"mode_b failed for {name} at N={n}: rc={proc.returncode}\n"
+                + (proc.stderr or "")[-4000:]
+            )
+        row = parse_mode_b(proc.stdout or "", n)
+        if row is None:
+            raise SystemExit(
+                f"mode_b printed no result row for {name} at N={n}:\n"
+                + (proc.stdout or "")[-2000:]
+            )
+        proof_file = proof_dir / f"mode_b-{n}.bin"
+        spec = self.configs["rows"].get(name, {})
+        cell = self.base_cell(
+            "mode_b", name, group["tag"], requested, actual, allocation, note, n, relation, params
+        )
+        cell["run_id"] = run_id
+        cell["label"] = f"mode B ({spec.get('label', name)})"
+        cell["binary"] = "mode_b"
+        cell["binary_sha256"] = sha256(binary) if binary.exists() else None
+        cell["warmup"] = warmup
+        cell["reps"] = reps
+        cell["protocol"] = "warm"
+        cell["times_ms"] = [row["prove_ms"]]
+        cell["verify_uncached_ms"] = [row["verify_uncached_ms"]]
+        cell["verify_cached_ms"] = [row["verify_cached_ms"]]
+        cell["peak_rss_kib"] = row["prover_peak_kib"]
+        cell["aggregate_bytes"] = row["proof_bytes"]
+        cell["public_bits_bytes"] = row["public_bits_bytes"]
+        cell["without_bits_bytes"] = row["without_bits_bytes"]
+        cell["aggregate_sha256"] = sha256(proof_file) if proof_file.exists() else None
+        cell["processes"] = [
+            {
+                "log": str(log_path),
+                "warmup": warmup,
+                "reps": reps,
+                "prove_ms": [row["prove_ms"]],
+            }
+        ]
+        cell["start_utc"] = started
+        cell["end_utc"] = utc_stamp()
+        cell["freq_mhz"] = frequency(freq_path, set(allocation["cpus"]))
+        cell["foreign_busy"] = foreign_fraction(before, after, set(allocation["cpus"]))
+        cell["loadavg"] = self.load_before_after(before)
+        self.finish_cell(cell)
+        self.cells.append(cell)
+
     def run_aerie_group(self, group, rows, sizes, reps, warmup):
         backend = group.get("backend", self.args.aerie_backend)
         degree = (
@@ -532,11 +757,11 @@ class Runner:
         binary = BIN / "aerie-falcon-bench"
         if backend == "avx2":
             binary = BIN / "aerie-falcon-bench-avx2"
-            if not binary.exists():
+            if not self.dry_run and not binary.exists():
                 raise SystemExit(
                     "the AVX2-capped Aerie binary is missing; rerun ./run.sh build"
                 )
-        if not binary.exists():
+        if not self.dry_run and not binary.exists():
             raise SystemExit(f"{binary} is missing; run ./run.sh build")
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
@@ -560,6 +785,9 @@ class Runner:
         cmd = pin_prefix(self.topo, allocation) + [str(binary), "--bench", str(n)]
         if degree != 512:
             cmd.append(f"--degree={degree}")
+        if self.dry_run:
+            self.record_dry(cmd, env)
+            return
         # One fixture run, then the timed runs.
         for _ in range(max(warmup, 0)):
             proc = sh(cmd, env)
@@ -620,10 +848,9 @@ class Runner:
         self.finish_cell(cell)
         self.cells.append(cell)
 
-    def run_native_group(self, group, rows, sizes, reps, warmup):
-        params = group_params(group)
+    def run_native_group(self, group, rows, sizes, reps, warmup, params):
         binary = BIN / PARAM_SETS[params]["natver"]
-        if not binary.exists():
+        if not self.dry_run and not binary.exists():
             raise SystemExit(f"{binary} is missing; run ./run.sh build")
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
@@ -635,7 +862,6 @@ class Runner:
                     / "parts"
                     / f"native-p{params}-{actual}-{n}-{time.time_ns()}.json"
                 )
-                out.parent.mkdir(exist_ok=True)
                 env = {
                     "OMP_NUM_THREADS": str(allocation["threads"]),
                     "OMP_PROC_BIND": "close",
@@ -653,6 +879,10 @@ class Runner:
                     "--json",
                     str(out),
                 ]
+                if self.dry_run:
+                    self.record_dry(cmd, env)
+                    continue
+                out.parent.mkdir(exist_ok=True)
                 proc = sh(cmd, env)
                 if proc.returncode != 0 or not out.exists():
                     raise SystemExit(
@@ -704,57 +934,59 @@ class Runner:
         records = self.result_dir / "data" / f"records-p{params}-{n}.bin"
         keys = self.result_dir / "data" / f"keys-p{params}-{n}.bin"
         binary = BIN / "agg"
+        env = self.env_for("ifma", self.topo["configs"]["all"], None)
+        keygen_cmd = [
+            str(binary),
+            "keygen-batch",
+            "--params",
+            params,
+            "--count",
+            str(n),
+            "--seed",
+            "1",
+            "--out",
+            str(keys),
+        ]
+        sign_cmd = [
+            str(binary),
+            "sign-batch",
+            "--params",
+            params,
+            "--keys",
+            str(keys),
+            "--count",
+            str(n),
+            "--seed",
+            "1",
+            "--out",
+            str(records),
+        ]
+        if self.dry_run:
+            return records
         if not records.exists():
-            env = self.env_for("ifma", self.topo["configs"]["all"], None)
-            proc = sh(
-                [
-                    str(binary),
-                    "keygen-batch",
-                    "--params",
-                    params,
-                    "--count",
-                    str(n),
-                    "--seed",
-                    "1",
-                    "--out",
-                    str(keys),
-                ],
-                env,
-            )
+            proc = sh(keygen_cmd, env)
             if proc.returncode != 0:
                 raise SystemExit("keygen-batch failed")
-            proc = sh(
-                [
-                    str(binary),
-                    "sign-batch",
-                    "--params",
-                    params,
-                    "--keys",
-                    str(keys),
-                    "--count",
-                    str(n),
-                    "--seed",
-                    "1",
-                    "--out",
-                    str(records),
-                ],
-                env,
-            )
+            proc = sh(sign_cmd, env)
             if proc.returncode != 0:
                 raise SystemExit("sign-batch failed")
         return records
 
-    def run_fresh_group(self, group, rows, sizes, reps):
+    def run_fresh_group(self, group, rows, sizes, reps, params):
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
             for n in sizes:
-                records = self.ensure_records(n, group_params(group))
+                records = self.ensure_records(n, params)
                 for name in rows:
                     if group.get("mode") == "aggregate":
-                        self.fresh_aggregate(group, name, requested, actual, allocation, note, n, records, reps)
+                        self.fresh_aggregate(
+                            group, name, requested, actual, allocation, note, n, records, reps, params
+                        )
                     else:
-                        self.fresh_verify(group, name, requested, actual, allocation, note, n, records, reps)
+                        self.fresh_verify(
+                            group, name, requested, actual, allocation, note, n, records, reps, params
+                        )
 
     def time_v(self, cmd, env, log):
         time_file = log.with_suffix(".time")
@@ -765,30 +997,32 @@ class Runner:
         seconds = parse_elapsed(wall.group(1)) if wall else None
         return proc, int(rss.group(1)) if rss else None, seconds
 
-    def fresh_aggregate(self, group, name, requested, actual, allocation, note, n, records, reps, record=True):
-        params = group_params(group)
+    def fresh_aggregate(
+        self, group, name, requested, actual, allocation, note, n, records, reps, params, record=True
+    ):
+        relation = group.get("relation", "h-u")
         binary = BIN / self.configs["rows"][name]["binary"]
         out = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
         env = self.env_for(name, allocation, None)
+        cmd = pin_prefix(self.topo, allocation) + [
+            str(binary),
+            "aggregate",
+            "--params",
+            params,
+            "--records",
+            str(records),
+            "--relation",
+            relation,
+            "--out",
+            str(out),
+        ]
+        if self.dry_run:
+            self.record_dry(["/usr/bin/time", "-v"] + cmd, env)
+            return
         peaks, walls, hashes = [], [], set()
         for i in range(reps):
             log = self.result_dir / "logs" / f"{group['tag']}-{name}-{actual}-{n}-p{params}-{i}.log"
-            proc, rss, seconds = self.time_v(
-                [
-                    str(binary),
-                    "aggregate",
-                    "--params",
-                    params,
-                    "--records",
-                    str(records),
-                    "--relation",
-                    "h-u",
-                    "--out",
-                    str(out),
-                ],
-                env,
-                log,
-            )
+            proc, rss, seconds = self.time_v(cmd, env, log)
             if proc.returncode != 0:
                 raise SystemExit(f"fresh aggregate failed: {(proc.stderr or '')[-2000:]}")
             peaks.append(rss)
@@ -808,7 +1042,7 @@ class Runner:
             "cpuset": allocation["cpuset"],
             "numa_node": allocation["numa_node"],
             "n": n,
-            "relation": "h-u",
+            "relation": relation,
             "knobs": self.configs["rows"][name].get("env", {}),
             "warmup": 0,
             "reps": reps,
@@ -831,16 +1065,36 @@ class Runner:
             self.finish_cell(cell)
             self.cells.append(cell)
 
-    def fresh_verify(self, group, name, requested, actual, allocation, note, n, records, reps):
-        params = group_params(group)
+    def fresh_verify(
+        self, group, name, requested, actual, allocation, note, n, records, reps, params
+    ):
+        relation = group.get("relation", "h-u")
         binary = BIN / self.configs["rows"][name]["binary"]
         aggregate = self.result_dir / "data" / f"fresh-{name}-{actual}-{n}-p{params}.bin"
-        if not aggregate.exists():
-            self.fresh_aggregate(
-                group, name, requested, actual, allocation, note, n, records, 1, record=False
-            )
         env = self.env_for(name, allocation, None)
         cache = self.result_dir / "data" / f"cache-{name}-{actual}-{n}-p{params}.bin"
+        if self.dry_run:
+            for mode in ["uncached", "cached"]:
+                cmd = pin_prefix(self.topo, allocation) + [
+                    str(binary),
+                    "verify",
+                    "--params",
+                    params,
+                    "--records",
+                    str(records),
+                    "--aggregate",
+                    str(aggregate),
+                    "--relation",
+                    relation,
+                ]
+                if mode == "cached":
+                    cmd += ["--cache", str(cache)]
+                self.record_dry(["/usr/bin/time", "-v"] + cmd, env)
+            return
+        if not aggregate.exists():
+            self.fresh_aggregate(
+                group, name, requested, actual, allocation, note, n, records, 1, params, record=False
+            )
         results = {}
         for mode in ["uncached", "cached"]:
             peaks, walls = [], []
@@ -850,7 +1104,7 @@ class Runner:
                     / "logs"
                     / f"{group['tag']}-{mode}-{name}-{actual}-{n}-p{params}-{i}.log"
                 )
-                cmd = [
+                cmd = pin_prefix(self.topo, allocation) + [
                     str(binary),
                     "verify",
                     "--params",
@@ -859,6 +1113,8 @@ class Runner:
                     str(records),
                     "--aggregate",
                     str(aggregate),
+                    "--relation",
+                    relation,
                 ]
                 if mode == "cached":
                     cmd += ["--cache", str(cache)]
@@ -885,7 +1141,7 @@ class Runner:
             "cpuset": allocation["cpuset"],
             "numa_node": allocation["numa_node"],
             "n": n,
-            "relation": "h-u",
+            "relation": relation,
             "knobs": self.configs["rows"][name].get("env", {}),
             "warmup": 0,
             "reps": reps,
@@ -908,15 +1164,30 @@ class Runner:
         self.finish_cell(cell)
         self.cells.append(cell)
 
-    def run_ablations(self, group, rows, sizes, relation, reps, warmup):
-        params = group_params(group)
+    def run_ablations(self, group, rows, sizes, relation, reps, warmup, params):
         arms = group["arms"]
+        trace = bool(group.get("traced"))
         chunks = process_chunks(reps, self.process_count(group, reps))
         for requested, actual, allocation, note in self.allocation_plan(
             group, ["8C16T"]
         ):
             for n in sizes:
                 pairs = [(name, arm) for name in rows for arm in arms]
+                if self.dry_run:
+                    for r in range(len(chunks)):
+                        for name, arm in rotate(pairs, r):
+                            self.invoke_ours(
+                                name,
+                                allocation,
+                                n,
+                                relation,
+                                arm.get("env"),
+                                warmup,
+                                chunks[r],
+                                trace=trace,
+                                params=params,
+                            )
+                    continue
                 cells = {}
                 for name, arm in pairs:
                     key = (name, arm["tag"])
@@ -933,9 +1204,11 @@ class Runner:
                         params,
                     )
                     cell["arm"] = arm["tag"]
+                    cell["knobs"] = {**cell.get("knobs", {}), **(arm.get("env") or {})}
                     cell["warmup"] = warmup
                     cell["reps"] = reps
                     cell["protocol"] = "warm"
+                    cell["traced"] = trace
                     cell["process_count"] = len(chunks)
                     cells[key] = cell
                 before = read_stat()
@@ -952,6 +1225,7 @@ class Runner:
                                 arm.get("env"),
                                 warmup,
                                 chunks[r],
+                                trace=trace,
                                 params=params,
                             )
                             cell = cells[(name, arm["tag"])]
@@ -962,6 +1236,7 @@ class Runner:
                             cell["processes"].append(
                                 {
                                     "json": part["_json"],
+                                    "log": part["_log"],
                                     "warmup": warmup,
                                     "reps": chunks[r],
                                     "prove_ms": part["prove_ms"],
@@ -969,6 +1244,8 @@ class Runner:
                             )
                             cell["aggregate_bytes"] = part["aggregate_bytes"]
                             cell["aggregate_sha256"] = part["aggregate_sha256"]
+                            if part.get("size_breakdown"):
+                                cell["size_breakdown"] = part["size_breakdown"]
                             cell["kernels"] = part["kernels"]
                             peak = part.get("prove_peak_kib")
                             if peak:
@@ -1034,6 +1311,8 @@ class Runner:
 
     def memory_filter(self, tag, sizes):
         """Drop batch sizes whose recorded prover peak does not fit with headroom."""
+        if self.dry_run:
+            return sizes
         available = (self.machine.get("memory") or {}).get("available_bytes")
         if not available:
             return sizes
@@ -1070,11 +1349,14 @@ class Runner:
                 if int(group.get("degree", 512)) != self.args.aerie_degree:
                     continue
             kind = group["kind"]
-            rows = self.rows(group.get("configs")) if kind != "native" else []
+            params_list = group_params_list(group, self.args.params)
+            if kind != "aerie" and not params_list:
+                continue
+            rows = self.rows(group.get("configs")) if kind not in ("native", "aerie") else []
             group_sizes = sizes or group.get("sizes") or [1024]
             if self.args.smoke:
                 group_sizes = [s for s in group_sizes if s <= 1024] or [1024]
-            if kind in ("ours", "ablations", "fresh"):
+            if kind in ("ours", "ablations", "fresh", "mode_b"):
                 group_sizes = self.memory_filter(tag, group_sizes)
                 if not group_sizes:
                     print(f"skip {tag}: no batch size fits in memory")
@@ -1090,30 +1372,48 @@ class Runner:
                 reps = 1
                 warmup = 1
                 processes = 1
-            print(
-                f"== {tag} ({kind}) sizes={group_sizes} reps={reps} "
-                f"warmup={warmup} processes={processes}"
-            )
-            if kind == "ours":
-                relations = group.get("relations") or [group.get("relation", "h-u")]
-                self.run_ours_group(group, rows, group_sizes, relations, reps, warmup)
-            elif kind == "ablations":
-                self.run_ablations(
-                    group,
-                    rows,
-                    group_sizes,
-                    group.get("relation", "h-u"),
-                    reps,
-                    warmup,
+            if kind == "aerie":
+                print(
+                    f"== {tag} ({kind}) sizes={group_sizes} reps={reps} "
+                    f"warmup={warmup} processes=1"
                 )
-            elif kind == "aerie":
                 self.run_aerie_group(group, rows, group_sizes, reps, warmup)
-            elif kind == "native":
-                self.run_native_group(group, rows, group_sizes, reps, warmup)
-            elif kind == "fresh":
-                self.run_fresh_group(group, rows, group_sizes, reps)
-            else:
-                raise SystemExit(f"unknown run kind {kind}")
+                continue
+            for params in params_list:
+                print(
+                    f"== {tag} ({kind}, ML-DSA-{params}) sizes={group_sizes} reps={reps} "
+                    f"warmup={warmup} processes={processes}"
+                )
+                if kind == "ours":
+                    relations = group.get("relations") or [group.get("relation", "h-u")]
+                    self.run_ours_group(
+                        group, rows, group_sizes, relations, reps, warmup, params
+                    )
+                elif kind == "ablations":
+                    self.run_ablations(
+                        group,
+                        rows,
+                        group_sizes,
+                        group.get("relation", "h-u"),
+                        reps,
+                        warmup,
+                        params,
+                    )
+                elif kind == "mode_b":
+                    self.run_mode_b_group(
+                        group, rows, group_sizes, reps, warmup, params
+                    )
+                elif kind == "native":
+                    self.run_native_group(
+                        group, rows, group_sizes, reps, warmup, params
+                    )
+                elif kind == "fresh":
+                    self.run_fresh_group(group, rows, group_sizes, reps, params)
+                else:
+                    raise SystemExit(f"unknown run kind {kind}")
+        if self.dry_run:
+            print(f"dry-run: {self.planned_cmds} commands planned")
+            return
         self.summary()
         print(f"results: {self.result_dir}")
 
@@ -1124,6 +1424,75 @@ def group_params(group):
     if params not in PARAM_SETS:
         raise SystemExit(f"group {group.get('tag')}: unknown params {params}")
     return params
+
+
+def group_params_list(group, filter_params=None):
+    """Parameter sets for a matrix group (a single set or a list), filtered by `--params`."""
+    raw = group.get("params", "44")
+    items = [str(p) for p in raw] if isinstance(raw, list) else [str(raw)]
+    for params in items:
+        if params not in PARAM_SETS:
+            raise SystemExit(f"group {group.get('tag')}: unknown params {params}")
+    if filter_params:
+        items = [params for params in items if params in filter_params]
+    return items
+
+
+def parse_size_breakdown(stdout):
+    """Parse the component byte counts printed by `agg bench`."""
+    breakdown = {}
+    for line in (stdout or "").splitlines():
+        match = re.match(r"^\s+(.+?)\s+(\d+)\s+B\s+[\d.]+\s+B/sig\s*$", line)
+        if match:
+            key = SIZE_KEYS.get(match.group(1).strip())
+            if key:
+                breakdown[key] = int(match.group(2))
+    return breakdown or None
+
+
+def parse_mode_b(stdout, n):
+    """Parse the output of `agg-bench --bench mode_b` for batch size `n`."""
+    for line in (stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("RESULT "):
+            fields = {}
+            for item in stripped[len("RESULT "):].split():
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    fields[k] = v
+            try:
+                if int(fields.get("n", -1)) != n:
+                    continue
+                return {
+                    "prove_ms": float(fields["prove_s"]) * 1000.0,
+                    "verify_uncached_ms": float(fields["verify_uncached_ms"]),
+                    "verify_cached_ms": float(fields["verify_cached_ms"]),
+                    "prover_peak_kib": int(round(float(fields["prover_peak_mib"]) * 1024.0)),
+                    "proof_bytes": int(fields["proof_bytes"]),
+                    "public_bits_bytes": int(fields["public_bits_bytes"]),
+                    "without_bits_bytes": int(fields["without_bits_bytes"]),
+                }
+            except (KeyError, ValueError):
+                continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            parts = [p.strip() for p in stripped.split("|")]
+            if len(parts) < 13:
+                continue
+            try:
+                if int(parts[2]) != n:
+                    continue
+                return {
+                    "prove_ms": float(parts[3]) * 1000.0,
+                    "verify_uncached_ms": float(parts[4]),
+                    "verify_cached_ms": float(parts[5]),
+                    "prover_peak_kib": int(round(float(parts[6]) * 1024.0)),
+                    "proof_bytes": int(parts[10]),
+                    "public_bits_bytes": int(parts[11]),
+                    "without_bits_bytes": int(parts[12]),
+                }
+            except ValueError:
+                continue
+    return None
 
 
 def parse_aerie(stdout, n):
@@ -1171,8 +1540,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["quick", "full"])
     parser.add_argument("--smoke", action="store_true", help="N=1024 and 1+1 runs")
+    parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="print the planned command lines without executing them",
+    )
     parser.add_argument("--results")
     parser.add_argument("--only", help="run only groups whose tag contains this")
+    parser.add_argument("--params", help="comma-separated ML-DSA parameter sets (44,65,87)")
     parser.add_argument("--configs")
     parser.add_argument("--allocations")
     parser.add_argument("--sizes")
@@ -1191,6 +1567,8 @@ def main():
         help="override Aerie Falcon degree (512 or 1024)",
     )
     args = parser.parse_args()
+    if args.params:
+        args.params = [p.strip() for p in args.params.split(",") if p.strip()]
     if args.configs:
         args.configs = [c.strip() for c in args.configs.split(",") if c.strip()]
     if args.sizes:

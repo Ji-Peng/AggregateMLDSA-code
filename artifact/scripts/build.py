@@ -106,15 +106,47 @@ def build_ours(offline):
     dst = BIN / build_cfg["bin"]
     BIN.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    return {
+    flags = release_flags()
+    built = {
         name: {
             "path": str(dst),
             "sha256": sha256_file(dst),
             "target_dir": str(target),
-            "release_flags": release_flags(),
+            "release_flags": flags,
             "revision": rev,
         }
     }
+    bench_pkg = build_cfg.get("bench_package", "agg-bench")
+    bench_name = build_cfg.get("bench", "mode_b")
+    bench_cmd = [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        bench_pkg,
+        "--bench",
+        bench_name,
+    ]
+    if offline:
+        bench_cmd.append("--offline")
+    print(f"building {bench_name} with the baseline in .cargo/config.toml")
+    run(
+        bench_cmd,
+        cwd=REPO,
+        env=env,
+    )
+    bench_src = find_bench(target, f"{bench_name}-")
+    bench_dst = BIN / bench_name
+    shutil.copy2(bench_src, bench_dst)
+    built[bench_name] = {
+        "path": str(bench_dst),
+        "sha256": sha256_file(bench_dst),
+        "target_dir": str(target),
+        "release_flags": flags,
+        "revision": rev,
+    }
+    return built
 
 
 def collect_reports(configs):
@@ -140,14 +172,14 @@ def collect_reports(configs):
     return reports
 
 
-def find_bench(target):
+def find_bench(target, prefix="falcon-"):
     candidates = [
         path
-        for path in (target / "release" / "deps").glob("falcon-*")
+        for path in (target / "release" / "deps").glob(f"{prefix}*")
         if path.is_file() and os.access(path, os.X_OK) and not path.name.endswith(".d")
     ]
     if not candidates:
-        raise SystemExit(f"aerie-bench binary not found under {target}")
+        raise SystemExit(f"{prefix} bench binary not found under {target}")
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 

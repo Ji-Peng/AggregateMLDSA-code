@@ -4,17 +4,17 @@
 
 [[claim]]
 id = "C1"
-statement = "The aggregate takes 49.2 bytes per signature at 32,768 signatures."
+statement = "The aggregate takes 49.2, 65.4 and 82.7 bytes per signature at 32,768 signatures for ML-DSA-44, -65 and -87."
 table = "tab-bytes.tex"
-cell = "N = 2^15, B/sig"
-command = "./run.sh quick   (then read artifact/paper-tables/tab-bytes.tex)"
-expected = "49.2 B/sig"
+cell = "total row, columns 44 / 65 / 87"
+command = "./run.sh full   (then read results/LATEST/paper-tables/tab-bytes.tex)"
+expected = "49.2, 65.4 and 82.7 B/sig"
 tolerance = "exact (the aggregate is a deterministic byte string)"
 
 [[claim]]
 id = "C2"
 statement = "Every reported tier, and the scalar gate, produces the same aggregate for each set and relation; verification accepts it."
-table = "tab-e2e.tex"
+table = "tab-prove.tex"
 cell = "all rows: identical bytes and accept"
 command = "./run.sh gates"
 expected = "one sha256 for all three tiers and the scalar gate, verify exit status 0"
@@ -22,25 +22,25 @@ tolerance = "exact"
 
 [[claim]]
 id = "C3"
-statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's medians."
-table = "tab-e2e.tex"
-cell = "IFMA / AVX-512 / AVX2 prove and verify"
+statement = "Prove and verify times on a 16-core Zen 5 machine match the paper's medians across ML-DSA-44, -65 and -87."
+table = "tab-prove.tex"
+cell = "IFMA / AVX-512F / AVX2 prove times; tab-scaling.tex verify times"
 command = "./run.sh full"
-expected = "paper medians (2.73 s IFMA, 2.78 s AVX-512, 2.96 s AVX2 at 32K on 16C32T, ML-DSA-44)"
+expected = "paper medians on 16C32T at 32K (IFMA / AVX-512F / AVX2: 2.73 / 2.78 / 2.96 s for 44, 3.19 / 3.25 / 3.47 s for 65, 4.16 / 4.15 / 4.50 s for 87)"
 tolerance = "+-10% on the same CPU class; other microarchitectures differ"
 
 [[claim]]
 id = "C4"
-statement = "The ISA ladder has the paper's order: IFMA <= AVX-512 <= AVX2."
-table = "tab-ablation.tex"
-cell = "ISA ladder rows"
+statement = "The ISA ladder has the paper's order (IFMA <= AVX-512F <= AVX2) and the GF(2)-side ablation matches tab:ablation."
+table = "tab-prove.tex"
+cell = "tier rows in tab-prove.tex and variants in tab-ablation.tex"
 command = "./run.sh quick --smoke"
-expected = "nondecreasing prove time down the ladder"
+expected = "nondecreasing prove time down the tier ladder; public-bits aggregate ~803.1 B/sig at 32K"
 tolerance = "order and +-15% on an AVX-512IFMA CPU"
 
 [[claim]]
 id = "C5"
-statement = "Our prover and verifier compare with Aerie and with native ML-DSA verification as reported."
+statement = "Our prover and verifier compare with Aerie and with native ML-DSA-44, -65 and -87 verification as reported."
 table = "tab-baselines.tex"
 cell = "Aerie and native rows against ours"
 command = "./run.sh quick"
