@@ -104,7 +104,9 @@ is cSHAKE256 of `LE64(blocks) || leaves` under `agg-mldsa/v1/public-records-bind
 ## 3. Commit flow
 
 1. `MainTables::build(manifest, instance, sigs)` (strict derivation) or `from_values`; both
-   check shape and honest alphabets (encoder self-check, not a soundness check).
+   check shape and honest alphabets (encoder self-check, not a soundness check). The
+   encoders check each digit against its alphabet as they write it, so the self-check
+   rescans the alphabets only after ML-DSA-44's H-u digit kernel, which writes unchecked.
 2. `TableCommitter::new(manifest)`: work plan from the catalog, `manifest.matches_plan`,
    seed-derived Akita setup. `commit_round1` commits `G_main16` and `G_main4` concurrently
    (event 1); `pcs::overlap` runs the pair on the calling thread while the Keccak side's
