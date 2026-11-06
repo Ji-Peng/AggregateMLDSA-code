@@ -176,8 +176,9 @@ rate 1/4, `slim8`: rate 1/8, the derived parameter set of K18; all 128 bits work
 Flock's accounting, with the level-0 list priced at the outer sites (K19) and at the tie
 (K20); default `fast`, `agg_cli::mode_a::FLOCK_PROFILE`, `docs/keccak.md` Section
 12); `verify` reads the profile from the aggregate unless `--flock-profile` pins one. A profile
-outside the default set (`fast`, `slim`) is rejected with a message naming
-`--flock-profile slim8`, not verified under another profile. `--flock-span off` proves every
+other than the default `fast` is rejected with a message naming `--flock-profile`, not
+verified under another profile: `slim` and `slim8` are opt-in, since `slim`'s 15 outer
+zero-check rounds reach only `2^-127.8` (`docs/soundness.md` Section 4.3). `--flock-span off` proves every
 segment on its own (K10 parts) instead of one span over all segments (K16).
 
 `verify` reads only `(pk, M)` from the record file and exits with status 0 on accept, 1 on

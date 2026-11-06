@@ -208,22 +208,22 @@ fn round_trip_as(
     );
 
     let statements = statements(&records);
-    if profile == FlockProfile::Slim8 {
-        // A default verifier only accepts Fast and Slim; Slim8 requires opt-in via require().
+    if profile != FlockProfile::Fast {
+        // A default verifier only accepts Fast; Slim and Slim8 require opt-in via require().
         let default_verifier = AggregateVerifier::new().relation(relation);
         let rejected = default_verifier.verify(&statements, &aggregate.bytes, None);
-        assert!(!rejected.accepted(), "default verifier must reject Slim8 without opt-in");
+        assert!(!rejected.accepted(), "default verifier must reject a non-Fast profile without opt-in");
         assert!(matches!(
             rejected.report.outcome,
-            Err(VerifyError::ProfileNotAccepted(FlockProfile::Slim8))
+            Err(VerifyError::ProfileNotAccepted(p)) if p == profile
         ));
-        assert_eq!(rejected.profile, FlockProfile::Slim8, "the profile read from the aggregate");
-        assert!(rejected.rejection.is_none(), "no Flock part run on rejected Slim8");
-        assert!(rejected.parts.is_empty(), "no Flock part run on rejected Slim8");
+        assert_eq!(rejected.profile, profile, "the profile read from the aggregate");
+        assert!(rejected.rejection.is_none(), "no Flock part run on a rejected profile");
+        assert!(rejected.parts.is_empty(), "no Flock part run on a rejected profile");
     }
 
-    let verifier = if profile == FlockProfile::Slim8 {
-        AggregateVerifier::new().require(FlockProfile::Slim8)
+    let verifier = if profile != FlockProfile::Fast {
+        AggregateVerifier::new().require(profile)
     } else {
         AggregateVerifier::new()
     }

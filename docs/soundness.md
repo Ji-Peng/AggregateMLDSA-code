@@ -542,7 +542,7 @@ Section 12.7).
 the premise "`log2 L < 6` in every embedded strict profile". `Slim8` (our K18, level-0
 rate 1/8) has `log2 L_max = 6.14`, and its own Ligerito level-0 claim batch already uses 7
 bits (`m*_slim8.toml`). The transport batch is short by 0.14 bits. Fix: 7 bits for
-`Slim8` (subsumed by 4.3). `Slim8` is opt-in, not the default.
+`Slim8` (subsumed by 4.3). `Slim` and `Slim8` are opt-in: a default verifier accepts `Fast` only.
 
 ### 4.5 The tied part: points not bound into the instance challengers (finding)
 

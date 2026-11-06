@@ -92,10 +92,11 @@ pub const FLOCK_PROFILE: FlockProfile = FlockProfile::Fast;
 /// work-normalized in Flock's accounting.
 pub const MODE_A_PROFILES: [FlockProfile; 3] =
     [FlockProfile::Fast, FlockProfile::Slim, FlockProfile::Slim8];
-/// The mode-A Flock profiles accepted by a default verifier: Ligerito `Fast` and `Slim`.
-/// `Slim8` is opt-in via [`AggregateVerifier::require`] or `--flock-profile slim8`.
-pub const DEFAULT_ACCEPTED_PROFILES: [FlockProfile; 2] =
-    [FlockProfile::Fast, FlockProfile::Slim];
+/// The mode-A Flock profiles accepted by a default verifier: Ligerito `Fast` only, the one
+/// profile whose every site meets 2^-128. `Slim` (its 15 outer zero-check rounds reach
+/// 2^-127.8 once the constant-column term is charged) and `Slim8` are opt-in via
+/// [`AggregateVerifier::require`] or `--flock-profile`.
+pub const DEFAULT_ACCEPTED_PROFILES: [FlockProfile; 1] = [FlockProfile::Fast];
 
 /// The Ligerito profile of the Flock sub-proofs of a mode-A Flock profile.
 #[must_use]
@@ -2080,9 +2081,9 @@ impl std::fmt::Display for VerifyCostReport {
 
 /// The mode-A verifier (holds the sponge gate, built once). It verifies an aggregate under
 /// the Flock profile named by its commitment-phase items when that is a default-accepted mode-A profile
-/// ([`DEFAULT_ACCEPTED_PROFILES`]: `Fast` or `Slim`; the transcript binds the profile at
+/// ([`DEFAULT_ACCEPTED_PROFILES`]: `Fast`; the transcript binds the profile at
 /// the instance record, so the items cannot name another one than the prover bound), or under the profile
-/// fixed by [`Self::require`] (which also admits `Slim8`).
+/// fixed by [`Self::require`] (which also admits `Slim` and `Slim8`).
 pub struct AggregateVerifier {
     gate: ChainGate,
     require: Option<FlockProfile>,
