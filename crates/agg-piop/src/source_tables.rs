@@ -244,11 +244,12 @@ impl<'a> Cells<'a> {
 static DERIVE_NS: AtomicU64 = AtomicU64::new(0);
 static ENCODE_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Add the time since `since` to `counter`; the current instant.
-fn add_elapsed(counter: &AtomicU64, since: Instant) -> Instant {
+/// Add the time since `since` to `counter` when tracing; the current instant.
+fn add_elapsed(counter: &AtomicU64, since: Option<Instant>) -> Option<Instant> {
+    let since = since?;
     let now = Instant::now();
     counter.fetch_add(u64::try_from((now - since).as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
-    now
+    Some(now)
 }
 
 /// Cells per task of the alphabet scan in [`validate_group`].
@@ -1054,7 +1055,7 @@ impl MainTables {
         record: impl Fn(usize) -> Result<RecordValues<P>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
         assert_eq!(manifest.set(), P::SET, "values of the manifest's parameter set");
-        Self::encode_tiles(manifest, count, 1, true, |encoder, i, views| {
+        Self::encode_tiles(manifest, count, 1, true, |encoder, i, views, _| {
             let (wide, narrow) = &mut views[0];
             let values = if i < count { record(i)? } else { RecordValues::zeroed() };
             Ok(vec![encoder.encode_values(&values, wide, narrow)?])
@@ -1062,7 +1063,7 @@ impl MainTables {
     }
 
     /// Allocate final columns and give each worker the disjoint views of a tile of `tile`
-    /// consecutive records (the last tile may be shorter); `fill(encoder, first, views)`
+    /// consecutive records (the last tile may be shorter); `fill(encoder, first, views, trace)`
     /// writes every cell of records `first..first + views.len()` (live and padded) and
     /// returns their hint slacks. `checked` says that `fill` checks every cell it writes
     /// against its digit's alphabet (or writes a cell whose alphabet holds it by
@@ -1075,9 +1076,10 @@ impl MainTables {
         count: usize,
         tile: usize,
         checked: bool,
-        fill: impl Fn(&Encoder, usize, &mut [RecordViews<'_>]) -> Result<Vec<i64>, SourceTableError> + Sync,
+        fill: impl Fn(&Encoder, usize, &mut [RecordViews<'_>], bool) -> Result<Vec<i64>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
-        let start = Instant::now();
+        let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+        let start = trace.then(Instant::now);
         let encoder = Encoder::new(manifest);
         let geom = Geometry::new(count).map_err(SourceTableError::Geometry)?;
         if geom.n != manifest.records() || geom.n_star != manifest.padded_records() {
@@ -1104,9 +1106,12 @@ impl MainTables {
                 tile_views[t].1.push(chunk);
             }
         }
-        let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
-        let (derive0, encode0) = (DERIVE_NS.load(Ordering::Relaxed), ENCODE_NS.load(Ordering::Relaxed));
-        let filling = Instant::now();
+        let (derive0, encode0) = if trace {
+            (DERIVE_NS.load(Ordering::Relaxed), ENCODE_NS.load(Ordering::Relaxed))
+        } else {
+            (0, 0)
+        };
+        let filling = trace.then(Instant::now);
         let tiles = tile_views
             .into_par_iter()
             .enumerate()
@@ -1125,10 +1130,10 @@ impl MainTables {
                         views[i].1.push(chunk);
                     }
                 }
-                fill(&encoder, t * tile, &mut views)
+                fill(&encoder, t * tile, &mut views, trace)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let filled = Instant::now();
+        let filled = trace.then(Instant::now);
         let hint_slack: Vec<i64> = tiles.into_iter().flatten().collect();
         // SAFETY: successful encoding writes every digit, bit and FIPS cell of every
         // record, including padding. On error the MaybeUninit allocations just drop.
@@ -1140,7 +1145,7 @@ impl MainTables {
         };
         let scan = !(checked && encoder.alphabets_match(manifest));
         tables.check(manifest, scan)?;
-        if trace {
+        if let (Some(start), Some(filling), Some(filled)) = (start, filling, filled) {
             let ms = |ns: u64| ns as f64 / 1e6;
             eprintln!(
                 "main tables: set-up {:.1} ms, derive and encode {:.1} ms (thread sums: derive {:.1} ms, encode {:.1} ms), self-check {:.1} ms (alphabet scan {scan})",
@@ -1188,11 +1193,11 @@ impl MainTables {
         let count = instance.records.len();
         let hu = (manifest.relation() == Relation::Hu).then(|| HuSlots::new(manifest));
         // The digit kernel of relation H-u writes its cells unchecked.
-        Self::encode_tiles(manifest, count, TILE, hu.is_none(), |encoder, first, views| {
+        Self::encode_tiles(manifest, count, TILE, hu.is_none(), |encoder, first, views, trace| {
             // Live records of the tile; a tile past the last record is all padding.
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord> = instance.records[live.clone()].iter().collect();
-            let clock = Instant::now();
+            let clock = trace.then(Instant::now);
             let mut derived = vec![FastWitness::zero(); live.len()];
             derive_tile_with(engine, &records, &signatures[live], &mut derived)
                 .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
@@ -1262,7 +1267,7 @@ impl MainTables {
         }
         let count = instance.records.len();
         if P::SET == Set::S44 {
-            return Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views| {
+            return Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views, _| {
                 let mut slack = Vec::with_capacity(views.len());
                 for (k, (wide, narrow)) in views.iter_mut().enumerate() {
                     let i = first + k;
@@ -1283,10 +1288,10 @@ impl MainTables {
         }
         // The sets with polynomial lanes derive each tile on the SIMD engine
         // (`agg_witness::fast_lanes`; its errors are the legacy derivation's).
-        Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views| {
+        Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views, trace| {
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord<P>> = instance.records[live.clone()].iter().collect();
-            let clock = Instant::now();
+            let clock = trace.then(Instant::now);
             let mut derived = vec![LaneWitness::zero::<P>(); live.len()];
             P::derive_lane_tile(&records, &signatures[live], &mut derived)
                 .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
