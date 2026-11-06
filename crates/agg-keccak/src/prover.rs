@@ -14,6 +14,7 @@ use std::fmt;
 pub const DOMAIN: &[u8] = b"agg-mldsa/v1/keccak";
 /// Bytes of one Merkle cap node.
 pub(crate) const CAP_NODE_BYTES: usize = 32;
+/// Upper bound on a decoded proof payload (Flock's own bundle limit).
 const MAX_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Fixed-width little-endian bincode, bounded, no trailing bytes.
@@ -180,13 +181,11 @@ pub fn capacity_log(n: usize, k_log: usize) -> usize {
     nu
 }
 
-/// Public words of one sponge record: `mu` (4 words) then `c~` (`c~` bytes / 16 words: 2, 3
-/// or 4).
-#[must_use]
-pub fn sponge_public_words(mu: &[u8; MU_BYTES], c_tilde: &[u8]) -> Vec<F128> {
-    let mut w = sponge::bytes_to_words(mu);
-    w.extend(sponge::bytes_to_words(c_tilde));
-    w
+/// Append the public words of one sponge record to `out`: `mu` (4 words) then `c~` (`c~`
+/// bytes / 16 words: 2, 3 or 4).
+pub fn sponge_public_words(out: &mut Vec<F128>, mu: &[u8; MU_BYTES], c_tilde: &[u8]) {
+    sponge::extend_words(out, mu);
+    sponge::extend_words(out, c_tilde);
 }
 
 #[cfg(test)]

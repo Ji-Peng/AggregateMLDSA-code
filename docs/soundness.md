@@ -547,9 +547,9 @@ bits (`m*_slim8.toml`). The transport batch is short by 0.14 bits. Fix: 7 bits f
 ### 4.5 The tied part: points not bound into the instance challengers (finding)
 
 `TieChallenges::derive` absorbs `fs`, `d`, `nu_s`, `log2 blocks`, `span_log`, the
-final-vector digest, the sponge cap and the union cap. The version-3 sponge instance's challenger
-(`TiedPart::sponge_challenger`) absorbed `fs`, its label, the gate digest, the public
-digest and the tie-geometry digest, then Flock bound its own cap; it never sees the
+final-vector digest, the sponge cap and the union cap. The sponge instance's challenger
+(`TiedPart::sponge_challenger`) absorbs `fs`, its label, the gate digest, the public
+digest and the tie-geometry digest, then Flock binds its own cap; it never sees the
 union's cap or the final-vector digest. The union's challenger absorbs neither the
 final-vector digest nor (except through `fs`) the sponge cap. Flock's merged opening
 absorbs packed-direct claim values only, "the points are transcript-derived and
@@ -572,14 +572,19 @@ the chain rounds, absorbs the claimed bit value `v` and then squeezes the tie di
 the sponge challenger absorbs before `bind_statement`. Both claim points of the sponge
 opening (the public region's and the chain's bit point) and the value `v` are thereby fixed
 before any Flock challenge of the instance.
-The sponge challenger no longer separately hashes the public words. The event-0
-public-record digest binds their ordered source records (including `c~`), and `mu` is
-derived from those records. Event 5's `fs_sigma`, and hence the part or span seed,
-binds event 0 before either the tie or Flock challenges. Thus changing a public word
-changes the seed except with the existing hash-binding failure probability; the
-verifier also checks the public evaluation against its own words. Standalone callers
-must supply an `fs` derived from a transcript binding those ordered records. This
-removes no soundness site and adds no new failure term.
+
+The version-5 sponge challenger absorbs no digest of the public words. They are bound
+through the seed: the event-0 record digest covers `LE64(N) || (pk || LE64(|M|) || M ||
+c~)*` in order, and the relation byte is in the same event, so every `mu_i` is a function
+of bound data. Event 5's `fs_sigma` follows event 0, and the part seed
+`SHA3(label || fs_sigma || LE64(part) || rec)` (or the span seed, which binds all its
+segment seeds) is the `fs` that both the tie challenger and the sponge challenger absorb
+first. Changing a public word therefore changes `fs` except with the hash-binding failure
+probability already counted for event 0. The tie challenger never absorbed a public
+digest, and its challenge `rho_c` (the public region's point) already relies on this
+binding. The verifier checks the opened `v_pub` against its own words. This removes no
+soundness site and adds no failure term. Callers of `TiedPart` outside mode A (tests) must
+derive `fs` from a transcript that binds the ordered public records.
 
 ### 4.6 Akita: accepted support of the sparse fold challenges (hypothesis H1, discharged)
 

@@ -5,14 +5,17 @@ pub mod rounds;
 use crate::F128;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 use crate::f128_slice::aarch64::fold_pairs as fold_pairs_aarch64;
+#[cfg(any(test, not(all(target_arch = "aarch64", target_feature = "aes"))))]
 use crate::f128_slice::portable::fold_pairs as fold_pairs_portable;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
 use crate::f128_slice::x86_64::fold_pairs as fold_pairs_x86_64;
 
+#[cfg(any(test, not(all(target_arch = "aarch64", target_feature = "aes"))))]
 mod portable;
 #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
 mod aarch64;
-#[cfg(target_arch = "x86_64")]
+// The kernel uses the CLMUL product of `gf2_128::x86_64`, compiled only with PCLMULQDQ.
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
 mod x86_64;
 
 /// Fold adjacent pairs from `src` into `dst`, starting at pair `base`.
@@ -26,7 +29,7 @@ pub fn fold_pairs(src: &[F128], base: usize, dst: &mut [F128], r: F128) {
         "fold source must contain both elements for every destination pair"
     );
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
     if rounds::x86::enabled() {
         // SAFETY: runtime feature detection and the bounds check above passed.
         unsafe { fold_pairs_x86_64(src, base, dst, r) };

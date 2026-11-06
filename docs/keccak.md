@@ -108,10 +108,45 @@ up to 2^19 is never committed. Per signature the spec counts 6,144 + 7 * 38,400 
 bits; the gate prunes 1,344 of round 23 of P7 and adds 512 (`mu`), 256 (`c~`) and the
 constant (K1).
 
-## 4–6. Standalone proof history
+## 4. Shared parameters
 
-The former standalone GateBatch and SpongeProver implementation, tests, benchmarks,
-and measurements are available in git history. Mode A uses the tied part described below.
+Module `prover` keeps the parameters that the tied part (Section 9) uses:
+
+- Capacity (`capacity_log`): `2^nu` rows, `nu = max(ceil(log2 n), 3, 22 - k_log)`, plus one
+  when `n = 2^nu < 2^11` (the full-height stack would select Flock's block-first opening,
+  whose cost is about `128^2` field operations per used column, 2,146 columns here,
+  independent of `n`). Dummy rows `[n, 2^nu)` are identically zero.
+- Profiles (`Profile`): Ligerito `Fast` (rate 1/2), `Secure` (rate 1/2, unique decoding),
+  `Slim` (rate 1/4) and `Slim8` (rate 1/8, K18), with header bytes (`Profile::id`) 0, 1, 3
+  and 4; 2 is unassigned. Mode A binds `Fast`, `Slim` or `Slim8` (K15, K18, Section 12).
+- Commitment bytes (`KeccakCommitment::as_bytes`): the Ligerito level-0 Merkle cap, `2^c`
+  nodes of 32 bytes (`c = PcsParams::level_zero_cap_depth`; Fast: 128 nodes, 4,096 bytes;
+  Slim and Slim8: 64 nodes, 2,048 bytes), the bytes Flock's `bind_statement` absorbs.
+- Transcript domain of the sponge instance's challenger: `agg-mldsa/v1/keccak` (`DOMAIN`).
+
+## 5. Tests
+
+- `keccak`: Keccak-f against the `keccak` crate (RustCrypto, used by `sha3`), `phi^T`
+  adjoint to `phi`.
+- `gate`: rows of the permutation gate on random states satisfy `a & b = z` and give
+  Keccak-f (against the `keccak` crate); the walker is the transpose of the row evaluator
+  for the full 24-round permutation and sponge gates (random committed vectors); the walker
+  equals Flock's `SparseMatrixCircuit` fold on explicitly built matrices (2 rounds).
+- `dsl_ref`: the same relation authored in Flock HEAD's Boolean DSL (virtual `xor`,
+  `define_and`, `define_linear`) for 3 rounds of Keccak-f and a 2-permutation chain: our
+  witness, row values and lincheck fold equal Flock's walk adapter and sparse lowering
+  position by position.
+- `sponge`: the gate's output equals `sha3::Shake256` for random `(mu, w1Encode)`, the
+  committed `c~` words are the digest, the absorb map covers the rate and the padding.
+- `witness`: the packed slot equals Flock's canonical `pack_z_lincheck` and BatchMajor
+  layout, dummy rows zero.
+- `tied` (unit and `tests/all/tied.rs`, `tests/all/tied_sets.rs`): Section 9.
+
+## 6. Standalone proof history
+
+The standalone `GateBatch` and `SpongeProver`, their proof format, the `keccak_sponge`
+bench and its measurements were removed after code revision `8176911`; see that revision.
+Mode A uses only the tied part.
 
 ## 9. The tied part (docs/bridge.md Sections 5a, 5c, 5d; deviations K11, K14, K16, K21)
 
@@ -158,7 +193,8 @@ claims, not by Flock's word copies.
   absorbs `fs`, its label `agg-keccak/v5/tied-sponge`, the gate digest, a digest of the
   tie geometry and the 32-byte tie binding (label
   `agg-keccak/v4/tie-binding`), then Flock's statement binding. The seed binds the ordered
-  public records via event 0; standalone callers must provide the same binding.
+  public records via event 0 (`docs/soundness.md` Section 4.5); callers of `TiedPart`
+  outside mode A (tests) must provide the same binding.
 
 Memory: the sponge commit data of every part is kept from event 2 until its proof (K14), and
 a batch of exactly one tied part keeps its whole committed witness until the join (lever W1,

@@ -301,7 +301,6 @@ pub struct TiedCommitted {
     sponge: SlotBuffers,
     sponge_data: Option<CommitData>,
     bits: Vec<u64>,
-    public: Vec<F128>,
     /// The records' `c~`, concatenated.
     c_tilde: Vec<u8>,
     commitment: TiedCommitment,
@@ -890,14 +889,16 @@ impl<'g> TiedPart<'g> {
         (sponge, bits)
     }
 
-    fn statement<P: ParamSet>(records: &[SpongeRecord<P>]) -> (Vec<F128>, Vec<u8>) {
-        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
-        let public = records
-            .iter()
-            .zip(c_tilde.chunks_exact(P::C_TILDE_BYTES))
-            .flat_map(|(r, c)| sponge_public_words(&r.mu, c))
-            .collect();
-        (public, c_tilde)
+    /// The public words `[mu_i, c~_i]` of the records, in record order.
+    fn public_words<'a>(
+        &self,
+        records: impl ExactSizeIterator<Item = (&'a [u8; MU_BYTES], &'a [u8])>,
+    ) -> Vec<F128> {
+        let mut public = Vec::with_capacity((4 + self.layout.ctilde_bytes / 16) * records.len());
+        for (mu, c) in records {
+            sponge_public_words(&mut public, mu, c);
+        }
+        public
     }
 
     /// Commit to given witnesses (tests commit tampered ones): the sponge buffers and the
@@ -921,7 +922,7 @@ impl<'g> TiedPart<'g> {
         trace("commit: start", &start);
         let data = self.sponge.commit_data(&[&sponge.z]);
         trace("sponge committed", &start);
-        let (public, c_tilde) = Self::statement(records);
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         TiedCommitted {
             n: self.n,
             commitment: TiedCommitment {
@@ -930,7 +931,6 @@ impl<'g> TiedPart<'g> {
             sponge,
             sponge_data: Some(data),
             bits,
-            public,
             c_tilde,
         }
     }
@@ -973,13 +973,12 @@ impl<'g> TiedPart<'g> {
                 "commit data of another commitment"
             );
         }
-        let (public, c_tilde) = Self::statement(records);
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         TiedCommitted {
             n: self.n,
             sponge,
             sponge_data: data,
             bits,
-            public,
             c_tilde,
             commitment,
         }
@@ -1077,7 +1076,6 @@ impl<'g> TiedPart<'g> {
             sponge,
             sponge_data,
             bits,
-            public: _public,
             commitment: absorbed,
             ..
         } = committed;
@@ -1344,11 +1342,7 @@ impl<'g> TiedPart<'g> {
         }
         let start = std::time::Instant::now();
         let parts = self.decode_parts(proof)?;
-        let public: Vec<F128> = mu
-            .iter()
-            .zip(c_tilde)
-            .flat_map(|(m, c)| sponge_public_words(m, c))
-            .collect();
+        let public = self.public_words(mu.iter().zip(c_tilde.iter().map(|c| &c[..])));
         let work = self.work();
         let nu_s = self.sponge.nu();
         let mut ch = self.tie_start(fs, &Self::y_digest(ys), &commitment.sponge);
@@ -1411,6 +1405,17 @@ mod tests {
     use agg_bridge::seed::derive_matrices_for;
     use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
+
+    /// The verifier's public words of `records`, with `c~` computed natively.
+    fn public_of<P: ParamSet>(part: &TiedPart, records: &[SpongeRecord<P>]) -> Vec<F128> {
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
+        part.public_words(
+            records
+                .iter()
+                .map(|r| &r.mu)
+                .zip(c_tilde.chunks_exact(P::C_TILDE_BYTES)),
+        )
+    }
 
     /// An exhausted nonce search is an error, not a panic: the
     /// smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one is
@@ -1482,7 +1487,7 @@ mod tests {
             }
             // The six lanes of the chain input are the bits, lanes 6, 7 the public and chi
             // words of the records.
-            let (public, _) = TiedPart::statement(&records);
+            let public = public_of(&part, &records);
             let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
             let rho_c: Vec<F128> = (0..3).map(|_| rand_f(&mut rng)).collect();
             let p = part.public_point(&rho_r, &rho_c);
@@ -1557,7 +1562,7 @@ mod tests {
                     "n {n}, d {d}, index {index}, segments {segments}"
                 );
             }
-            let (public, _) = TiedPart::statement(&records);
+            let public = public_of(&part, &records);
             let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
             let rho_c: Vec<F128> = (0..lay.public_words_log2).map(|_| rand_f(&mut rng)).collect();
             let p = part.public_point(&rho_r, &rho_c);
@@ -1754,7 +1759,6 @@ mod tests {
             sponge,
             sponge_data,
             bits,
-            public: _public,
             commitment: absorbed,
             ..
         } = committed;
