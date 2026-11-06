@@ -547,9 +547,9 @@ bits (`m*_slim8.toml`). The transport batch is short by 0.14 bits. Fix: 7 bits f
 ### 4.5 The tied part: points not bound into the instance challengers (finding)
 
 `TieChallenges::derive` absorbs `fs`, `d`, `nu_s`, `log2 blocks`, `span_log`, the
-final-vector digest, the sponge cap and the union cap. The sponge instance's challenger
-(`TiedPart::sponge_challenger`) absorbs `fs`, its label, the gate digest, the public
-digest and the tie-geometry digest, then Flock binds its own cap; it never sees the
+final-vector digest, the sponge cap and the union cap. The version-3 sponge instance's challenger
+(`TiedPart::sponge_challenger`) absorbed `fs`, its label, the gate digest, the public
+digest and the tie-geometry digest, then Flock bound its own cap; it never sees the
 union's cap or the final-vector digest. The union's challenger absorbs neither the
 final-vector digest nor (except through `fs`) the sponge cap. Flock's merged opening
 absorbs packed-direct claim values only, "the points are transcript-derived and
@@ -572,6 +572,14 @@ the chain rounds, absorbs the claimed bit value `v` and then squeezes the tie di
 the sponge challenger absorbs before `bind_statement`. Both claim points of the sponge
 opening (the public region's and the chain's bit point) and the value `v` are thereby fixed
 before any Flock challenge of the instance.
+The sponge challenger no longer separately hashes the public words. The event-0
+public-record digest binds their ordered source records (including `c~`), and `mu` is
+derived from those records. Event 5's `fs_sigma`, and hence the part or span seed,
+binds event 0 before either the tie or Flock challenges. Thus changing a public word
+changes the seed except with the existing hash-binding failure probability; the
+verifier also checks the public evaluation against its own words. Standalone callers
+must supply an `fs` derived from a transcript binding those ordered records. This
+removes no soundness site and adds no new failure term.
 
 ### 4.6 Akita: accepted support of the sparse fold challenges (hypothesis H1, discharged)
 

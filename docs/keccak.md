@@ -279,8 +279,9 @@ claims, not by Flock's word copies.
   `(mu_i, c~_i, 1, 0)`, and the chain's rounds and last claim against the verifier's own
   weight. Proof bytes (version 5): `docs/parity-chain.md` Section 7. The sponge challenger
   absorbs `fs`, its label `agg-keccak/v5/tied-sponge`, the gate digest, a digest of the
-  statement words, a digest of the tie geometry and the 32-byte tie binding (label
-  `agg-keccak/v4/tie-binding`), then Flock's statement binding.
+  tie geometry and the 32-byte tie binding (label
+  `agg-keccak/v4/tie-binding`), then Flock's statement binding. The seed binds the ordered
+  public records via event 0; standalone callers must provide the same binding.
 
 Memory: the sponge commit data of every part is kept from event 2 until its proof (K14), and
 a batch of exactly one tied part keeps its whole committed witness until the join (lever W1,

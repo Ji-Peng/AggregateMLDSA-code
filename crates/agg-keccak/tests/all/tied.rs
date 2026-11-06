@@ -302,8 +302,7 @@ fn tied_round_trip(n: usize, rng_seed: u64, tamper: Tamper) {
         ctx.verify_with(&run, mu, c, &commitment, [0xA5; 32], &run.ys, &fs),
         Err(KeccakError::Tie("parity chain"))
     ));
-    // A wrong c~ or mu changes the public digest the sponge challenger absorbs, so Flock's
-    // transcript already rejects (the public claim would, too).
+    // A wrong c~ or mu fails the verifier's public claim, even with a fixed test seed.
     let mut bad_c = c.clone();
     bad_c[n - 1][0] ^= 1;
     assert!(ctx

@@ -56,8 +56,7 @@ fn round_trip<P: ParamSet, const C: usize>(n: usize, d: u32, segments: usize, se
     let mut bad = out.final_vectors.clone();
     bad[0][100] ^= 1;
     assert!(verify(&bad, &c_tilde, &out.proof).is_err(), "flipped Y bit");
-    // A wrong c~ of the last record changes the public digest the sponge challenger
-    // absorbs: Flock's transcript rejects.
+    // A wrong c~ of the last record fails the verifier's public claim.
     let mut wrong = c_tilde.clone();
     wrong[n - 1][C - 1] ^= 0x10;
     assert!(verify(&out.final_vectors, &wrong, &out.proof).is_err(), "wrong c~");

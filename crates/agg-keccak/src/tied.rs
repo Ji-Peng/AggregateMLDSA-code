@@ -712,24 +712,11 @@ impl<'g> TiedPart<'g> {
         ch
     }
 
-    /// Digest of the sponge statement: `n` and the words `[mu_i, c~_i]`.
-    fn public_digest(public: &[F128]) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(b"agg-keccak/v1/tied-public");
-        h.update((public.len() as u64).to_le_bytes());
-        for w in public {
-            h.update(w.lo.to_le_bytes());
-            h.update(w.hi.to_le_bytes());
-        }
-        h.finalize().into()
-    }
-
-    fn sponge_challenger(&self, fs: &[u8; 32], public: &[F128], binding: &[u8; 32]) -> FsChallenger {
+    fn sponge_challenger(&self, fs: &[u8; 32], binding: &[u8; 32]) -> FsChallenger {
         let mut ch = FsChallenger::new(DOMAIN);
         ch.observe_bytes(fs);
         ch.observe_label(SPONGE_LABEL);
         ch.observe_bytes(&self.gate.digest());
-        ch.observe_bytes(&Self::public_digest(public));
         ch.observe_bytes(&self.tie_digest());
         ch.observe_label(TIE_BINDING_LABEL);
         put_framed(&mut ch, binding);
@@ -1046,7 +1033,9 @@ impl<'g> TiedPart<'g> {
     /// (opening the commitment-phase commitment). `matrices` must be
     /// `derive_matrices_for(shape, sd)` for the part's shape: the proof reads only `matrices`
     /// (debug builds check the first column of each level against `sd`), and `sd` is bound
-    /// through `fs` (the Flock seed step follows the bridge-seed step).
+    /// through `fs` (the Flock seed step follows the bridge-seed step). The caller must
+    /// derive `fs` from a transcript binding the ordered public records, including `mu`
+    /// and `c~`, before any Flock challenge is sampled.
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
@@ -1088,7 +1077,7 @@ impl<'g> TiedPart<'g> {
             sponge,
             sponge_data,
             bits,
-            public,
+            public: _public,
             commitment: absorbed,
             ..
         } = committed;
@@ -1136,7 +1125,7 @@ impl<'g> TiedPart<'g> {
         let binding = squeeze_binding(&mut ch);
         trace("bit value", &start);
         let sponge_start = std::time::Instant::now();
-        let mut sch = self.sponge_challenger(fs, &public, &binding);
+        let mut sch = self.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         // The row values a = A z, b = B z are consumed by the zerocheck; build them here
         // when the 8-way generator left them out.
@@ -1317,7 +1306,8 @@ impl<'g> TiedPart<'g> {
     /// commitment, the bridge seed and its matrices, the final vectors `ys` (one per segment
     /// of the span) and the part's Flock seed `fs`. Only the shape of `matrices` is checked
     /// here: the caller passes `derive_matrices_for(shape, sd)`, and `sd` is bound through
-    /// `fs` (the Flock seed step follows the bridge-seed step).
+    /// `fs` (the Flock seed step follows the bridge-seed step). The caller must derive
+    /// `fs` from a transcript binding the ordered public records, including `mu` and `c~`.
     ///
     /// # Errors
     /// On a malformed statement, proof or commitment, a Flock rejection, a rejected nonce, or
@@ -1395,7 +1385,7 @@ impl<'g> TiedPart<'g> {
         ch.observe_f128(parts.value);
         let binding = squeeze_binding(&mut ch);
         trace("verify: parity chain", &start);
-        let mut sch = self.sponge_challenger(fs, &public, &binding);
+        let mut sch = self.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         let v = self.sponge.verify(
             &gate,
@@ -1795,7 +1785,7 @@ mod tests {
         let value = chain.value * part.row_factor(&chain.point).inv();
         ch.observe_f128(value);
         let binding = squeeze_binding(&mut ch);
-        let mut sch = part.sponge_challenger(fs, &public, &binding);
+        let mut sch = part.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [part.gate];
         let mut sponge = sponge;
         sponge.ensure_ab(part.gate, nu_s, part.n);
