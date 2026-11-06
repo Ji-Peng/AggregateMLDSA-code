@@ -201,7 +201,10 @@ fn round_trip_as(
     assert_eq!(items.commitments.len(), parts);
     assert_eq!(items.profile, profile as u8);
     assert_eq!(aggregate.report.profile, profile);
-    assert_eq!((aggregate.report.relation, aggregate.proof.relation), (relation, relation));
+    assert_eq!(
+        (aggregate.report.relation, aggregate.proof.relation),
+        (relation, relation)
+    );
     assert_eq!(
         items.d_part,
         part_log2.min(n.next_power_of_two().max(8).trailing_zeros())
@@ -212,14 +215,26 @@ fn round_trip_as(
         // A default verifier only accepts Fast; Slim and Slim8 require opt-in via require().
         let default_verifier = AggregateVerifier::new().relation(relation);
         let rejected = default_verifier.verify(&statements, &aggregate.bytes, None);
-        assert!(!rejected.accepted(), "default verifier must reject a non-Fast profile without opt-in");
+        assert!(
+            !rejected.accepted(),
+            "default verifier must reject a non-Fast profile without opt-in"
+        );
         assert!(matches!(
             rejected.report.outcome,
             Err(VerifyError::ProfileNotAccepted(p)) if p == profile
         ));
-        assert_eq!(rejected.profile, profile, "the profile read from the aggregate");
-        assert!(rejected.rejection.is_none(), "no Flock part run on a rejected profile");
-        assert!(rejected.parts.is_empty(), "no Flock part run on a rejected profile");
+        assert_eq!(
+            rejected.profile, profile,
+            "the profile read from the aggregate"
+        );
+        assert!(
+            rejected.rejection.is_none(),
+            "no Flock part run on a rejected profile"
+        );
+        assert!(
+            rejected.parts.is_empty(),
+            "no Flock part run on a rejected profile"
+        );
     }
 
     let verifier = if profile != FlockProfile::Fast {
@@ -230,7 +245,10 @@ fn round_trip_as(
     .relation(relation);
     let uncached = verifier.verify(&statements, &aggregate.bytes, None);
     eprintln!("{uncached}");
-    assert_eq!(uncached.profile, profile, "the profile read from the aggregate");
+    assert_eq!(
+        uncached.profile, profile,
+        "the profile read from the aggregate"
+    );
     assert_eq!(uncached.relation, relation);
     let verified = uncached.report.outcome.as_ref().expect("honest aggregate");
     let distinct = {
@@ -260,8 +278,9 @@ fn round_trip_as(
         0
     );
     // The persisted cache (keyed by SHA3-256(pk)) gives the same cached path.
-    let mut reloaded = cache::from_bytes(&cache::to_bytes(&cache::KeyStore::Rows(key_cache.clone())))
-        .expect("cache file");
+    let mut reloaded =
+        cache::from_bytes(&cache::to_bytes(&cache::KeyStore::Rows(key_cache.clone())))
+            .expect("cache file");
     let from_file = verifier.verify_with(&statements, &aggregate.bytes, reloaded.as_mut());
     assert_eq!(
         from_file
@@ -281,12 +300,16 @@ fn round_trip_as(
     // Pinned verifiers: the aggregate's own profile accepts, the other one rejects at the
     // profile byte of the commitment-phase item (before any Flock work).
     let pinned = AggregateVerifier::new().require(profile).relation(relation);
-    assert!(pinned.verify(&statements, &aggregate.bytes, None).accepted());
+    assert!(pinned
+        .verify(&statements, &aggregate.bytes, None)
+        .accepted());
     let other_relation = match relation {
         Relation::Hu => Relation::HExact,
         Relation::HExact | Relation::HFips => Relation::Hu,
     };
-    let crossed = pinned.relation(other_relation).verify(&statements, &aggregate.bytes, None);
+    let crossed = pinned
+        .relation(other_relation)
+        .verify(&statements, &aggregate.bytes, None);
     assert!(
         matches!(rejected(&crossed), VerifyError::Relation { expected, found } if *expected == other_relation && *found == relation),
         "{crossed}"
@@ -303,24 +326,38 @@ fn round_trip_as(
         ProfileRejection::Item => {
             expect_rejected("verifier pinned to the other profile", &wrong, |e| {
                 keccak(e)
-                    || matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+                    || matches!(
+                        e,
+                        VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+                    )
             });
             if let Some((0, SegmentRejection::Item(ItemError::Profile(p)))) = wrong.rejection {
                 assert_eq!(p, profile as u8, "the item names another profile: {wrong}");
             } else {
                 assert!(
-                    matches!(rejected(&wrong), VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })),
+                    matches!(
+                        rejected(&wrong),
+                        VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+                    ),
                     "the work nonce or the item rejects: {wrong}"
                 );
             }
         }
         ProfileRejection::Work => {
             expect_rejected("verifier pinned to the other profile", &wrong, |e| {
-                matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
-                    || keccak(e)
+                matches!(
+                    e,
+                    VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+                ) || keccak(e)
             });
-            if matches!(rejected(&wrong), VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })) {
-                assert!(wrong.rejection.is_none(), "the transcript fails before the item is examined");
+            if matches!(
+                rejected(&wrong),
+                VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+            ) {
+                assert!(
+                    wrong.rejection.is_none(),
+                    "the transcript fails before the item is examined"
+                );
             }
         }
     }
@@ -334,7 +371,15 @@ fn round_trip_as(
 )]
 fn round_trip_at_64_signatures() {
     on_large_stack(|| {
-        round_trip(48, 16, 0xa064, DEFAULT_PART_LOG2, 1, FlockProfile::Fast, ProfileRejection::Item)
+        round_trip(
+            48,
+            16,
+            0xa064,
+            DEFAULT_PART_LOG2,
+            1,
+            FlockProfile::Fast,
+            ProfileRejection::Item,
+        )
     });
 }
 
@@ -345,7 +390,15 @@ fn round_trip_at_64_signatures() {
 )]
 fn round_trip_at_64_signatures_slim() {
     on_large_stack(|| {
-        round_trip(48, 16, 0xb064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim, ProfileRejection::Item)
+        round_trip(
+            48,
+            16,
+            0xb064,
+            DEFAULT_PART_LOG2,
+            1,
+            FlockProfile::Slim,
+            ProfileRejection::Item,
+        )
     });
 }
 
@@ -356,7 +409,15 @@ fn round_trip_at_64_signatures_slim() {
 )]
 fn round_trip_at_256_signatures_in_two_flock_parts_slim() {
     on_large_stack(|| {
-        round_trip(200, 56, 0xb256, 7, 2, FlockProfile::Slim, ProfileRejection::Work)
+        round_trip(
+            200,
+            56,
+            0xb256,
+            7,
+            2,
+            FlockProfile::Slim,
+            ProfileRejection::Work,
+        )
     });
 }
 
@@ -429,7 +490,15 @@ fn h_exact_round_trips_at_64_and_256_signatures_slim() {
 )]
 fn round_trip_at_64_signatures_slim8() {
     on_large_stack(|| {
-        round_trip(48, 16, 0xc064, DEFAULT_PART_LOG2, 1, FlockProfile::Slim8, ProfileRejection::Item)
+        round_trip(
+            48,
+            16,
+            0xc064,
+            DEFAULT_PART_LOG2,
+            1,
+            FlockProfile::Slim8,
+            ProfileRejection::Item,
+        )
     });
 }
 
@@ -557,10 +626,18 @@ fn keys_sharing_rho_verify_only_against_their_own_t1() {
         let (other_sk, other) = gen::keypair_with_rho(&gen::key_seed(0x5a, 1), &rho);
         let mut records = gen::records(0x5b, 4);
         for i in 0..8_u64 {
-            let (sk, pk) = if i % 2 == 0 { (&victim_sk, &victim) } else { (&other_sk, &other) };
+            let (sk, pk) = if i % 2 == 0 {
+                (&victim_sk, &victim)
+            } else {
+                (&other_sk, &other)
+            };
             let msg = gen::message(0x5c, i);
             let sig = gen::sign(sk, &msg, None);
-            records.push(Record { pk: pk.clone(), msg, sig });
+            records.push(Record {
+                pk: pk.clone(),
+                msg,
+                sig,
+            });
         }
         let aggregate = Aggregator::new(AggregatorConfig::default())
             .aggregate(&signed(&records))
@@ -588,7 +665,10 @@ fn keys_sharing_rho_verify_only_against_their_own_t1() {
             for cache in [None, Some(full.clone())] {
                 let mut cache = cache;
                 let report = verifier.verify(&swapped, &aggregate.bytes, cache.as_mut());
-                assert!(!report.accepted(), "record {record} under the other key: {report}");
+                assert!(
+                    !report.accepted(),
+                    "record {record} under the other key: {report}"
+                );
             }
         }
     });
@@ -617,8 +697,12 @@ fn corrupted_aggregates_are_rejected() {
         assert_eq!(honest_report.parts.len(), 2);
         let verify = |proof: &AggregateProof| verifier.verify(&public, &proof.to_bytes(), None);
         let part = |k: usize| move |r: &VerifyCostReport| matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == k);
-        let psi_work =
-            |e: &VerifyError| matches!(e, VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }));
+        let psi_work = |e: &VerifyError| {
+            matches!(
+                e,
+                VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT })
+            )
+        };
 
         // The c~ list: bound by the record digest and the Flock statement.
         let mut p = honest.clone();
@@ -651,17 +735,31 @@ fn corrupted_aggregates_are_rejected() {
         let p = with_items(&honest, |c, _| c.commitments[1][7] ^= 0x20);
         expect_rejected("byte of part 1's commitment", &verify(&p), keccak);
 
-        // The segment items' structure. The profile byte: another mode-A profile makes the
-        // verifier run under it, against the profile bound in the instance record; an unknown id is refused.
+        // The segment items' structure. The profile byte: another mode-A profile is refused by a
+        // default verifier (it accepts Fast only), and a verifier pinned to the item's profile runs
+        // under it, against the profile bound in the instance record; an unknown id is refused.
         let p = with_items(&honest, |c, _| c.profile = other(FLOCK_PROFILE) as u8);
-        expect_rejected("profile byte of the item", &verify(&p), psi_work);
+        expect_rejected(
+            "profile byte of the item",
+            &verify(&p),
+            |e| matches!(e, VerifyError::ProfileNotAccepted(q) if *q == other(FLOCK_PROFILE)),
+        );
+        let pinned = AggregateVerifier::new().require(other(FLOCK_PROFILE));
+        expect_rejected(
+            "profile byte of the item, pinned",
+            &pinned.verify(&public, &p.to_bytes(), None),
+            psi_work,
+        );
         let p = with_items(&honest, |c, _| c.profile = FlockProfile::PublicBits as u8);
         let r = verify(&p);
         expect_rejected("profile byte 3 (mode B)", &r, |e| psi_work(e) || keccak(e));
         if let Some((0, SegmentRejection::Item(ItemError::Profile(p)))) = r.rejection {
             assert_eq!(p, 3);
         } else {
-            assert!(psi_work(rejected(&r)), "the work nonce or the item rejects: {r}");
+            assert!(
+                psi_work(rejected(&r)),
+                "the work nonce or the item rejects: {r}"
+            );
         }
         let p = with_items(&honest, |c, _| c.d_part = 5);
         let r = verify(&p);
@@ -669,14 +767,21 @@ fn corrupted_aggregates_are_rejected() {
         // projection site's work nonce may reject before the item's part count.
         expect_rejected("part size 2^5", &r, |e| psi_work(e) || keccak(e));
         if psi_work(rejected(&r)) {
-            assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+            assert!(
+                r.rejection.is_none(),
+                "the transcript fails before the item is examined"
+            );
         }
         // An inadmissible part size (below 2^2, or below d_seg - 1 = 4: more than two parts)
         // is refused while the instance record's plan is derived.
         let p = with_items(&honest, |c, _| c.d_part = 2);
-        expect_rejected("part size 2^2", &verify(&p), |e| matches!(e, VerifyError::Plan));
+        expect_rejected("part size 2^2", &verify(&p), |e| {
+            matches!(e, VerifyError::Plan)
+        });
         let p = with_items(&honest, |c, _| c.d_part = 3);
-        expect_rejected("part size 2^3", &verify(&p), |e| matches!(e, VerifyError::Plan));
+        expect_rejected("part size 2^3", &verify(&p), |e| {
+            matches!(e, VerifyError::Plan)
+        });
         let p = with_all_items(&honest, |c, s, p| {
             c.commitments.pop();
             p.proofs.pop();
@@ -687,7 +792,10 @@ fn corrupted_aggregates_are_rejected() {
         // work nonce may reject before the item's part count.
         expect_rejected("last part dropped", &r, |e| psi_work(e) || keccak(e));
         if psi_work(rejected(&r)) {
-            assert!(r.rejection.is_none(), "the transcript fails before the item is examined");
+            assert!(
+                r.rejection.is_none(),
+                "the transcript fails before the item is examined"
+            );
         }
         let mut p = honest.clone();
         p.flock_proofs[0].truncate(100);
@@ -703,23 +811,27 @@ fn corrupted_aggregates_are_rejected() {
         // 4 records: nu_s = 3, tie numerator 50 x 6 = 300, 9 bits of work, a nonce of at most
         // 16 bits), fails the predicate; a version-4 proof is refused.
         let nonce_of = |bytes: &[u8]| {
-            u32::from_le_bytes(bytes[tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].try_into().unwrap())
+            u32::from_le_bytes(
+                bytes[tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            )
         };
         let set_nonce = |v: u32| {
             with_items(&honest, move |_, p| {
-                p.proofs[1][tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4].copy_from_slice(&v.to_le_bytes());
+                p.proofs[1][tied::NONCE_OFFSET..tied::NONCE_OFFSET + 4]
+                    .copy_from_slice(&v.to_le_bytes());
             })
         };
         let honest_nonce = {
             let c = SegmentCommitments::from_bytes(&honest.flock_commitments[0]).unwrap();
-            let p = SegmentProofs::from_bytes(&honest.flock_proofs[0], c.commitments.len()).unwrap();
+            let p =
+                SegmentProofs::from_bytes(&honest.flock_proofs[0], c.commitments.len()).unwrap();
             assert_eq!(p.proofs[1][6], tied::VERSION);
             nonce_of(&p.proofs[1])
         };
         assert!(honest_nonce < 1 << 16);
-        let tie_rejected = |r: &VerifyCostReport| {
-            matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("tie nonce"))
-        };
+        let tie_rejected = |r: &VerifyCostReport| matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("tie nonce"));
         if honest_nonce > 0 {
             let r = verify(&set_nonce(honest_nonce - 1));
             expect_rejected("tie nonce below the honest one", &r, keccak);
@@ -730,7 +842,9 @@ fn corrupted_aggregates_are_rejected() {
         assert!(tie_rejected(&r));
         let r = verify(&with_items(&honest, |_, p| p.proofs[1][6] = 4));
         expect_rejected("tied-part proof version 4", &r, keccak);
-        assert!(matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("version")));
+        assert!(
+            matches!(&r.rejection, Some((0, SegmentRejection::Part(1, why))) if why.contains("version"))
+        );
         // The PIOP work nonces: a changed byte of the stream is rejected.
         let mut p = honest.clone();
         p.work[0] ^= 0x01;
@@ -750,7 +864,9 @@ fn corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             other_plan.outcome,
-            Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+            Err(VerifyError::Transcript(TranscriptError::Work {
+                index: PSI_EVENT
+            }))
         ));
 
         // PIOP and opening.
@@ -759,7 +875,9 @@ fn corrupted_aggregates_are_rejected() {
         expect_rejected("pre-stage claim", &verify(&p), at_stage_or_work(1));
         let mut p = honest.clone();
         p.lookup.sessions[4].rounds[2][0] = p.lookup.sessions[4].rounds[2][1];
-        expect_rejected("lookup round", &verify(&p), |e| matches!(e, VerifyError::Lookup(_)));
+        expect_rejected("lookup round", &verify(&p), |e| {
+            matches!(e, VerifyError::Lookup(_))
+        });
         let mut p = honest.clone();
         p.stage1.rounds[2][0] = p.stage1.rounds[2][1];
         expect_rejected("stage-1 round", &verify(&p), at_stage_or_work(1));
@@ -867,7 +985,9 @@ fn corrupted_aggregates_are_rejected() {
         );
         assert!(matches!(
             mode_b.outcome,
-            Err(VerifyError::Transcript(TranscriptError::Work { index: PSI_EVENT }))
+            Err(VerifyError::Transcript(TranscriptError::Work {
+                index: PSI_EVENT
+            }))
         ));
         // The honest aggregate still verifies after all this.
         assert!(verifier.verify(&public, &bytes, None).accepted());
@@ -904,7 +1024,10 @@ fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggreg
             let a = aggregator.aggregate(&signed(&ra)).expect("aggregate a");
             let b = aggregator.aggregate(&signed(&rb)).expect("aggregate b");
             if std::env::var_os("AGG_FLOCK_THREADS").is_none() {
-                assert_eq!(a.report.timings.flock_threads > 0, rayon::current_num_threads() > 1);
+                assert_eq!(
+                    a.report.timings.flock_threads > 0,
+                    rayon::current_num_threads() > 1
+                );
             }
             let public = statements(&ra);
             let verifier = AggregateVerifier::new().relation(relation);
@@ -928,16 +1051,28 @@ fn flock_proofs_are_checked_by_the_flock_verifier_and_cannot_move_between_aggreg
             });
             let r = verifier.verify(&public, &tampered.to_bytes(), None);
             expect_rejected("tampered Flock proof", &r, keccak);
-            assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == parts - 1));
+            assert!(
+                matches!(r.rejection, Some((0, SegmentRejection::Part(p, _))) if p == parts - 1)
+            );
             let r = lenient(&tampered);
-            assert!(r.outcome.is_ok(), "the opening does not bind the items: {:?}", r.outcome);
-            assert!(r.timings.stage3_rounds > std::time::Duration::ZERO, "the PIOP ran");
+            assert!(
+                r.outcome.is_ok(),
+                "the opening does not bind the items: {:?}",
+                r.outcome
+            );
+            assert!(
+                r.timings.stage3_rounds > std::time::Duration::ZERO,
+                "the PIOP ran"
+            );
             // b's Flock proof item in a (same geometry, other records and transcript).
             let mut moved = a.proof.clone();
             moved.flock_proofs = b.proof.flock_proofs.clone();
             let r = verifier.verify(&public, &moved.to_bytes(), None);
             expect_rejected("Flock proof item of another aggregate", &r, keccak);
-            assert!(matches!(r.rejection, Some((0, SegmentRejection::Part(0, _)))));
+            assert!(matches!(
+                r.rejection,
+                Some((0, SegmentRejection::Part(0, _)))
+            ));
             let r = lenient(&moved);
             assert!(r.outcome.is_ok(), "{:?}", r.outcome);
             // With two parts, b's shares as well: the final-vector step changes, so the record digest in
@@ -981,10 +1116,18 @@ fn three_parts_in_a_segment_are_refused() {
         // The item names d_part = 3 and three parts; its parser refuses more parts than any
         // admissible segment has.
         let item = &aggregate.proof.flock_commitments[0];
-        assert_eq!((item[2], u32::from_le_bytes(item[4..8].try_into().unwrap())), (3, 3));
-        assert_eq!(SegmentCommitments::from_bytes(item), Err(ItemError::Truncated));
+        assert_eq!(
+            (item[2], u32::from_le_bytes(item[4..8].try_into().unwrap())),
+            (3, 3)
+        );
+        assert_eq!(
+            SegmentCommitments::from_bytes(item),
+            Err(ItemError::Truncated)
+        );
         let report = AggregateVerifier::new().verify(&statements(&records), &aggregate.bytes, None);
-        expect_rejected("three parts in segment 0", &report, |e| matches!(e, VerifyError::Plan));
+        expect_rejected("three parts in segment 0", &report, |e| {
+            matches!(e, VerifyError::Plan)
+        });
         assert!(report.parts.is_empty(), "no Flock part was run");
     });
 }
@@ -1153,7 +1296,9 @@ fn tampered_witnesses_are_rejected_end_to_end() {
         // directly in the Akita backend (a cell that fits `i16` cannot reach it here).
         assert!(
             matches!(error, AggregateError::Prove(ProveError::Pcs(_)))
-                && error.to_string().contains("does not fit a signed 16-bit digit"),
+                && error
+                    .to_string()
+                    .contains("does not fit a signed 16-bit digit"),
             "{error}"
         );
         // Base-4 and base-6 digits outside their alphabets: the leaves of stage 2 (U_hi = -4
@@ -1181,7 +1326,11 @@ fn tampered_witnesses_are_rejected_end_to_end() {
             &bridge(&|_, b| {
                 let carries = b.carries_mut(1);
                 let old = carries[3];
-                let new = if old < (1 << 15) - 1 { old + 1 } else { old - 1 };
+                let new = if old < (1 << 15) - 1 {
+                    old + 1
+                } else {
+                    old - 1
+                };
                 carries[3] = new;
                 // The carry stays in T_16 and the multiplicities follow it, so only the
                 // bridge identities object.
