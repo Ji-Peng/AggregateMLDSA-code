@@ -504,7 +504,12 @@ impl Encoder {
             .values
             .iter()
             .map(|(form, _, _)| {
-                ShiftForm::of(form).map(|f| (f, (0..form.len()).map(|k| (form.alphabet(k).min(), form.alphabet(k).max())).collect()))
+                ShiftForm::of(form).map(|f| {
+                    let bounds = (0..form.len())
+                        .map(|k| (form.alphabet(k).min() as i32, form.alphabet(k).max() as i32))
+                        .collect();
+                    (f, bounds)
+                })
             })
             .collect();
         self.shift = forms.and_then(|f| f.try_into().ok());
@@ -614,28 +619,30 @@ impl Encoder {
     }
 }
 
-/// A value form decomposed with shifts, masks and compares instead of the generic
+/// A value form decomposed with 32-bit shifts, masks and compares instead of the generic
 /// divisions of `ValueForm::decompose_into`: every form of the main tables with one low digit
-/// of base `2^low_bits` (and radix forms with power-of-two bases). For every input the digits
-/// equal `decompose_into`'s; the caller checks them against `bounds`, the form's alphabets.
+/// of base `2^low_bits` (and radix forms with power-of-two bases). On `[-2^29, 2^29]` (and
+/// all of `i32` for `Radix`) the digits equal `decompose_into`'s, and outside that range an
+/// out-of-alphabet digit still fails `bounds`, the form's alphabets.
 #[derive(Clone, Copy, Debug)]
 enum ShiftForm {
     /// `ValueForm::DigitSlack`: `y = x + offset`, `a = [y >= threshold]`, `rest = y - w a`,
     /// `mid = floor(rest / 2^j)`, the low digit `rest mod 2^j` stored balanced.
-    DigitSlack { low_bits: u32, mid_half: i64, threshold: i64, slack_weight: i64, offset: i64 },
+    DigitSlack { low_bits: u32, mid_half: i32, threshold: i32, slack_weight: i32, offset: i32 },
     /// `ValueForm::BitSlack`: `y = x + offset`, `a = [y >= 2^(j+1)]`, `rest = y - w a`,
     /// `hi = clamp(floor(rest / 2^j), 0, 1)`, the low digit `rest - 2^j hi` stored balanced.
-    BitSlack { low_bits: u32, slack_weight: i64, offset: i64 },
+    BitSlack { low_bits: u32, slack_weight: i32, offset: i32 },
     /// `ValueForm::Slack`: `y = x + offset`, `a = [y >= 2^j]`, the low digit `y - w a` stored
     /// balanced, then `a`.
-    Slack { low_bits: u32, slack_weight: i64, offset: i64 },
+    Slack { low_bits: u32, slack_weight: i32, offset: i32 },
     /// `ValueForm::Step`: `y = x + offset`, `h = clamp(floor(y / step), 0, c - 1)` (the count
     /// of the multiples `t step <= y` for `0 < t < c`), the low digit `y - step h` stored
     /// balanced, then `h - c/2`.
-    Step { low_bits: u32, step: i64, top_base: i64, offset: i64 },
+    Step { low_bits: u32, step: i32, top_base: i32, offset: i32 },
     /// `ValueForm::Radix` with two or three power-of-two bases: `y = x + shift` peeled from the
-    /// bottom, the top digit taking the excess.
-    Radix { bits: [u32; 3], digits: usize, shift: i64 },
+    /// bottom, the top digit taking the excess (`shift = B / 2` for signed forms adds `b_top / 2`
+    /// to the top quotient, which cancels `-b_top / 2` and leaves `x >> low_bits`).
+    Radix { bits: [u32; 3], digits: usize, signed: bool },
 }
 
 /// The most digits of a value of the main tables.
@@ -651,24 +658,24 @@ impl ShiftForm {
             {
                 Some(Self::DigitSlack {
                     low_bits: l.low.bases[0].trailing_zeros(),
-                    mid_half: i64::from(l.mid_base / 2),
-                    threshold: l.low.product() * i64::from(l.mid_base),
-                    slack_weight: l.slack_weight,
-                    offset: l.offset,
+                    mid_half: (l.mid_base / 2) as i32,
+                    threshold: i32::try_from(l.low.product() * i64::from(l.mid_base)).ok()?,
+                    slack_weight: i32::try_from(l.slack_weight).ok()?,
+                    offset: i32::try_from(l.offset).ok()?,
                 })
             }
             ValueForm::BitSlack(l) if l.low.len() == 1 && !l.low.signed && pow2(l.low.bases[0]) => {
                 Some(Self::BitSlack {
                     low_bits: l.low.bases[0].trailing_zeros(),
-                    slack_weight: l.slack_weight,
-                    offset: l.offset,
+                    slack_weight: i32::try_from(l.slack_weight).ok()?,
+                    offset: i32::try_from(l.offset).ok()?,
                 })
             }
             ValueForm::Slack(l) if l.digits.len() == 1 && !l.digits.signed && pow2(l.digits.bases[0]) => {
                 Some(Self::Slack {
                     low_bits: l.digits.bases[0].trailing_zeros(),
-                    slack_weight: l.slack_weight,
-                    offset: l.offset,
+                    slack_weight: i32::try_from(l.slack_weight).ok()?,
+                    offset: i32::try_from(l.offset).ok()?,
                 })
             }
             ValueForm::Step(l)
@@ -676,9 +683,9 @@ impl ShiftForm {
             {
                 Some(Self::Step {
                     low_bits: l.low.bases[0].trailing_zeros(),
-                    step: l.step,
-                    top_base: i64::from(l.top_base),
-                    offset: l.offset,
+                    step: i32::try_from(l.step).ok()?,
+                    top_base: l.top_base as i32,
+                    offset: i32::try_from(l.offset).ok()?,
                 })
             }
             ValueForm::Radix(l) if (2..=SHIFT_DIGITS).contains(&l.len()) && l.bases.iter().all(|&b| pow2(b)) => {
@@ -686,24 +693,24 @@ impl ShiftForm {
                 for (dst, &b) in bits.iter_mut().zip(l.bases) {
                     *dst = b.trailing_zeros();
                 }
-                Some(Self::Radix { bits, digits: l.len(), shift: if l.signed { l.product() / 2 } else { 0 } })
+                Some(Self::Radix { bits, digits: l.len(), signed: l.signed })
             }
             _ => None,
         }
     }
 
     /// The digits of the 256 values `xs` into `out[k]` (digit `k`); the forms are written as
-    /// branch-free loops over the coefficients so that they vectorise.
+    /// branch-free `i32` loops over the coefficients so that they vectorise 8-wide on AVX2.
     #[inline(always)]
-    fn decompose_poly(self, xs: &[i32; N], out: &mut [[i64; N]; SHIFT_DIGITS]) {
+    fn decompose_poly(self, xs: &[i32; N], out: &mut [[i32; N]; SHIFT_DIGITS]) {
         let [d0, d1, d2] = out;
         match self {
             Self::DigitSlack { low_bits, mid_half, threshold, slack_weight, offset } => {
-                let mask = (1_i64 << low_bits) - 1;
-                let half = 1_i64 << (low_bits - 1);
+                let mask = (1_i32 << low_bits) - 1;
+                let half = 1_i32 << (low_bits - 1);
                 for j in 0..N {
-                    let y = i64::from(xs[j]) + offset;
-                    let a = i64::from(y >= threshold);
+                    let y = xs[j].clamp(-(1 << 29), 1 << 29) + offset;
+                    let a = i32::from(y >= threshold);
                     let rest = y - slack_weight * a;
                     d0[j] = (rest & mask) - half;
                     d1[j] = (rest >> low_bits) - mid_half;
@@ -711,11 +718,11 @@ impl ShiftForm {
                 }
             }
             Self::BitSlack { low_bits, slack_weight, offset } => {
-                let lo = 1_i64 << low_bits;
+                let lo = 1_i32 << low_bits;
                 let half = lo >> 1;
                 for j in 0..N {
-                    let y = i64::from(xs[j]) + offset;
-                    let a = i64::from(y >= 2 * lo);
+                    let y = xs[j].clamp(-(1 << 29), 1 << 29) + offset;
+                    let a = i32::from(y >= 2 * lo);
                     let rest = y - slack_weight * a;
                     let hi = (rest >> low_bits).clamp(0, 1);
                     d0[j] = rest - lo * hi - half;
@@ -724,41 +731,46 @@ impl ShiftForm {
                 }
             }
             Self::Slack { low_bits, slack_weight, offset } => {
-                let lo = 1_i64 << low_bits;
+                let lo = 1_i32 << low_bits;
                 let half = lo >> 1;
                 for j in 0..N {
-                    let y = i64::from(xs[j]) + offset;
-                    let a = i64::from(y >= lo);
+                    let y = xs[j].clamp(-(1 << 29), 1 << 29) + offset;
+                    let a = i32::from(y >= lo);
                     d0[j] = y - slack_weight * a - half;
                     d1[j] = a;
                 }
             }
             Self::Step { low_bits, step, top_base, offset } => {
-                let half = 1_i64 << (low_bits - 1);
-                for j in 0..N {
-                    let y = i64::from(xs[j]) + offset;
-                    let mut h = 0;
-                    for t in 1..top_base {
-                        h += i64::from(y >= t * step);
+                let half = 1_i32 << (low_bits - 1);
+                d1.fill(-(top_base / 2));
+                for t in 1..top_base {
+                    let threshold = t * step - offset;
+                    for j in 0..N {
+                        d1[j] += i32::from(xs[j] >= threshold);
                     }
+                }
+                for j in 0..N {
+                    let y = xs[j].clamp(-(1 << 29), 1 << 29) + offset;
+                    let h = d1[j] + top_base / 2;
                     d0[j] = y - step * h - half;
-                    d1[j] = h - top_base / 2;
                 }
             }
-            Self::Radix { bits, digits, shift } => {
-                let digit = |y: i64, b: u32| (y & ((1 << b) - 1)) - (1 << (b - 1));
+            Self::Radix { bits, digits, signed } => {
+                let digit = |x: i32, b: u32| (x & ((1 << b) - 1)) - (1 << (b - 1));
                 if digits == 2 {
+                    let top_bias = if signed { 0 } else { 1_i32 << (bits[1] - 1) };
                     for j in 0..N {
-                        let y = i64::from(xs[j]) + shift;
-                        d0[j] = digit(y, bits[0]);
-                        d1[j] = (y >> bits[0]) - (1 << (bits[1] - 1));
+                        let x = xs[j];
+                        d0[j] = digit(x, bits[0]);
+                        d1[j] = (x >> bits[0]) - top_bias;
                     }
                 } else {
+                    let top_bias = if signed { 0 } else { 1_i32 << (bits[2] - 1) };
                     for j in 0..N {
-                        let y = i64::from(xs[j]) + shift;
-                        d0[j] = digit(y, bits[0]);
-                        d1[j] = digit(y >> bits[0], bits[1]);
-                        d2[j] = (y >> (bits[0] + bits[1])) - (1 << (bits[2] - 1));
+                        let x = xs[j];
+                        d0[j] = digit(x, bits[0]);
+                        d1[j] = digit(x >> bits[0], bits[1]);
+                        d2[j] = (x >> (bits[0] + bits[1])) - top_bias;
                     }
                 }
             }
@@ -827,13 +839,13 @@ fn fips_cell<P: ParamSet>(u: i32, w1: u8) -> (bool, i32, i32, i32, i32) {
 
 /// True when every entry of `digits` lies in `[min, max]` (a min/max fold that vectorises).
 #[inline(always)]
-fn digits_in(digits: &[i64; N], (min, max): (i64, i64)) -> bool {
-    let (lo, hi) = digits.iter().fold((i64::MAX, i64::MIN), |(lo, hi), &d| (lo.min(d), hi.max(d)));
+fn digits_in(digits: &[i32; N], (min, max): (i32, i32)) -> bool {
+    let (lo, hi) = digits.iter().fold((i32::MAX, i32::MIN), |(lo, hi), &d| (lo.min(d), hi.max(d)));
     min <= lo && hi <= max
 }
 
 /// The fast form of one committed value: its shift form and the alphabet of each digit.
-type FastValue = (ShiftForm, Vec<(i64, i64)>);
+type FastValue = (ShiftForm, Vec<(i32, i32)>);
 
 impl Encoder {
     /// [`Encoder::encode`] on the engine witness (`z` per column, `(w1', u, v)` per row) with
@@ -849,7 +861,7 @@ impl Encoder {
     ) -> Option<i64> {
         let fast = self.shift.as_ref()?;
         let shape = self.shape;
-        let mut digits = [[0_i64; N]; SHIFT_DIGITS];
+        let mut digits = [[0_i32; N]; SHIFT_DIGITS];
         let mut put = |value: usize, lane: usize, base: usize, xs: &[i32; N], wide: &mut [&mut [MaybeUninit<i32>]], narrow: &mut [&mut [MaybeUninit<i8>]]| -> bool {
             let (form, bounds) = &fast[value];
             form.decompose_poly(xs, &mut digits);
@@ -861,7 +873,7 @@ impl Encoder {
                     // Alphabet-checked digits: 16-bit wide, small narrow.
                     Slot::Wide(c) => {
                         for (cell, &x) in wide[c][base..base + N].iter_mut().zip(d) {
-                            cell.write(x as i32);
+                            cell.write(x);
                         }
                     }
                     Slot::Narrow(c) => {
@@ -2075,15 +2087,17 @@ mod lane_tests {
                     probes.resize(probes.len().next_multiple_of(N), 0);
                     for chunk in probes.chunks_exact(N) {
                         let xs: &[i32; N] = chunk.try_into().unwrap();
-                        let mut got = [[0_i64; N]; SHIFT_DIGITS];
+                        let mut got = [[0_i32; N]; SHIFT_DIGITS];
                         fast.decompose_poly(xs, &mut got);
                         for (j, &x) in xs.iter().enumerate() {
                             let mut want = [0_i64; MAX_DIGITS];
                             form.decompose_into(i64::from(x), &mut want[..form.len()]);
-                            let got: Vec<i64> = got[..form.len()].iter().map(|d| d[j]).collect();
-                            assert_eq!(got[..], want[..form.len()], "{set:?} {relation:?} x = {x}");
-                            let inside = got.iter().zip(bounds).all(|(&d, &(min, max))| min <= d && d <= max);
+                            let got_j: Vec<i64> = got[..form.len()].iter().map(|d| i64::from(d[j])).collect();
+                            let inside = got[..form.len()].iter().zip(bounds).all(|(d, &(min, max))| min <= d[j] && d[j] <= max);
                             assert_eq!(inside, form.in_alphabets(&want[..form.len()]), "{set:?} {relation:?} x = {x}");
+                            if (-(1 << 29)..=1 << 29).contains(&x) || inside {
+                                assert_eq!(got_j[..], want[..form.len()], "{set:?} {relation:?} x = {x}");
+                            }
                         }
                     }
                 }
