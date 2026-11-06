@@ -59,6 +59,8 @@ use crate::manifest::{
     GroupDescriptor, GroupRole, Relation, SetShape, LOOKUP_SHIFT,
 };
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use agg_witness::digits::ValueForm;
 use crate::OpeningField as E;
 
@@ -236,6 +238,19 @@ impl<'a> Cells<'a> {
     }
 }
 
+/// Thread-summed nanoseconds of the witness derivation and of the encoding in the
+/// [`MainTables`] builds, printed per build under `AGG_STAGE_TRACE` (builds that run at
+/// the same time share them).
+static DERIVE_NS: AtomicU64 = AtomicU64::new(0);
+static ENCODE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Add the time since `since` to `counter`; the current instant.
+fn add_elapsed(counter: &AtomicU64, since: Instant) -> Instant {
+    let now = Instant::now();
+    counter.fetch_add(u64::try_from((now - since).as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+    now
+}
+
 /// Cells per task of the alphabet scan in [`validate_group`].
 const VALIDATE_CHUNK: usize = 1 << 16;
 
@@ -257,6 +272,11 @@ fn chunk_in_range(cells: &Cells<'_>, range: std::ops::Range<usize>, min: i64, ma
 /// column-by-column, cell-by-cell walk meets first; the scan itself runs over all
 /// (column, chunk) pairs at once, so the pool is not drained after every column.
 pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Result<(), SourceTableError> {
+    check_group(descriptor, columns, true)
+}
+
+/// [`validate_group`]; `scan = false` keeps the shape checks and skips the alphabet scan.
+fn check_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>], scan: bool) -> Result<(), SourceTableError> {
     let group = descriptor.role;
     if columns.len() != descriptor.polynomial_count() {
         return Err(SourceTableError::ColumnCount {
@@ -269,12 +289,13 @@ pub fn validate_group(descriptor: &GroupDescriptor, columns: &[Cells<'_>]) -> Re
     // The walk stops at the first column of the wrong length; only the columns before it
     // are scanned.
     let checked = columns.iter().position(|cells| cells.len() != expected).unwrap_or(columns.len());
-    let bounds: Vec<(i64, i64)> = descriptor.columns[..checked]
+    let scanned = if scan { checked } else { 0 };
+    let bounds: Vec<(i64, i64)> = descriptor.columns[..scanned]
         .iter()
         .map(|column| (column.alphabet().min(), column.alphabet().max()))
         .collect();
     let chunks = expected.div_ceil(VALIDATE_CHUNK);
-    let bad_column = (0..checked * chunks)
+    let bad_column = (0..scanned * chunks)
         .into_par_iter()
         .filter(|&task| {
             let (position, chunk) = (task / chunks, task % chunks);
@@ -390,8 +411,8 @@ struct Encoder {
     shape: SetShape,
     w1_what: &'static str,
     /// Per value: the shift form and the alphabet bounds of each digit, when every value has
-    /// one (the lane path of [`Encoder::encode_lane_rows`]).
-    shift: Option<[(ShiftForm, Vec<(i64, i64)>); 3]>,
+    /// one (the path of [`Encoder::encode_rows`]).
+    shift: Option<[FastValue; 3]>,
 }
 
 impl Encoder {
@@ -445,15 +466,40 @@ impl Encoder {
             w1_what: if shape.w1_bits == 6 { "w1' above six bits" } else { "w1' above four bits" },
             shift: None,
         }
-        .with_shift_forms(manifest)
+        .with_shift_forms()
     }
 
-    /// Resolve the shift forms (the sets with polynomial lanes without H-FIPS, whose rows are
-    /// whole lanes).
-    fn with_shift_forms(mut self, manifest: &CommitmentManifest) -> Self {
-        if !manifest.has_lanes() || self.fips.is_some() || self.shape.d_vec != 0 {
-            return self;
-        }
+    /// Whether every slot the encoder writes has, in the manifest, the alphabet the encoder
+    /// checks it against: the digit alphabets of the three value forms, `{0, 1}` for the
+    /// bits of `w_1'` and the H-FIPS sign, `{-1, 0, 1}` for `delta` and `e`.
+    fn alphabets_match(&self, manifest: &CommitmentManifest) -> bool {
+        let bounds = |role: GroupRole, position: usize| {
+            let alphabet = manifest.group(role).columns[position].alphabet();
+            (alphabet.min(), alphabet.max())
+        };
+        let slot_bounds = |slot: Slot| match slot {
+            Slot::Wide(c) => bounds(GroupRole::Main16, c),
+            Slot::Narrow(c) => bounds(GroupRole::Main, c),
+        };
+        let values = self.values.iter().all(|(form, slots, _)| {
+            slots.iter().all(|lane| {
+                lane.len() == form.len()
+                    && lane.iter().enumerate().all(|(k, &slot)| {
+                        slot_bounds(slot) == (form.alphabet(k).min(), form.alphabet(k).max())
+                    })
+            })
+        });
+        let bits = self.bits.iter().flatten().all(|&c| bounds(GroupRole::Main, c) == (0, 1));
+        let fips = self.fips.iter().flatten().all(|&[s, delta, e]| {
+            bounds(GroupRole::Main, s) == (0, 1)
+                && bounds(GroupRole::Main, delta) == (-1, 1)
+                && bounds(GroupRole::Main, e) == (-1, 1)
+        });
+        values && bits && fips
+    }
+
+    /// Resolve the shift forms of the three values (every set and relation has them).
+    fn with_shift_forms(mut self) -> Self {
         let forms: Option<Vec<_>> = self
             .values
             .iter()
@@ -568,23 +614,40 @@ impl Encoder {
     }
 }
 
-/// A value form whose bases are powers of two, decomposed with shifts and masks (the forms of
-/// relation H-u for the sets with polynomial lanes): the digits equal the form's
-/// `decompose_into`, and `bounds` are the form's alphabets.
+/// A value form decomposed with shifts, masks and compares instead of the generic
+/// divisions of `ValueForm::decompose_into`: every form of the main tables with one low digit
+/// of base `2^low_bits` (and radix forms with power-of-two bases). For every input the digits
+/// equal `decompose_into`'s; the caller checks them against `bounds`, the form's alphabets.
 #[derive(Clone, Copy, Debug)]
 enum ShiftForm {
-    /// `ValueForm::DigitSlack` with one unsigned low digit of base `2^low_bits`.
+    /// `ValueForm::DigitSlack`: `y = x + offset`, `a = [y >= threshold]`, `rest = y - w a`,
+    /// `mid = floor(rest / 2^j)`, the low digit `rest mod 2^j` stored balanced.
     DigitSlack { low_bits: u32, mid_half: i64, threshold: i64, slack_weight: i64, offset: i64 },
-    /// `ValueForm::Radix` with digits of base `2^bits`.
-    Radix { bits: u32, digits: usize, shift: i64 },
+    /// `ValueForm::BitSlack`: `y = x + offset`, `a = [y >= 2^(j+1)]`, `rest = y - w a`,
+    /// `hi = clamp(floor(rest / 2^j), 0, 1)`, the low digit `rest - 2^j hi` stored balanced.
+    BitSlack { low_bits: u32, slack_weight: i64, offset: i64 },
+    /// `ValueForm::Slack`: `y = x + offset`, `a = [y >= 2^j]`, the low digit `y - w a` stored
+    /// balanced, then `a`.
+    Slack { low_bits: u32, slack_weight: i64, offset: i64 },
+    /// `ValueForm::Step`: `y = x + offset`, `h = clamp(floor(y / step), 0, c - 1)` (the count
+    /// of the multiples `t step <= y` for `0 < t < c`), the low digit `y - step h` stored
+    /// balanced, then `h - c/2`.
+    Step { low_bits: u32, step: i64, top_base: i64, offset: i64 },
+    /// `ValueForm::Radix` with two or three power-of-two bases: `y = x + shift` peeled from the
+    /// bottom, the top digit taking the excess.
+    Radix { bits: [u32; 3], digits: usize, shift: i64 },
 }
+
+/// The most digits of a value of the main tables.
+const SHIFT_DIGITS: usize = 3;
 
 impl ShiftForm {
     /// The shift form of `form`, if its bases allow one.
     fn of(form: &ValueForm) -> Option<Self> {
+        let pow2 = |b: u32| b > 1 && b.is_power_of_two();
         match form {
             ValueForm::DigitSlack(l)
-                if l.low.len() == 1 && !l.low.signed && l.low.bases[0].is_power_of_two() && l.low.bases[0] > 1 && l.mid_base % 2 == 0 =>
+                if l.low.len() == 1 && !l.low.signed && pow2(l.low.bases[0]) && l.mid_base % 2 == 0 =>
             {
                 Some(Self::DigitSlack {
                     low_bits: l.low.bases[0].trailing_zeros(),
@@ -594,110 +657,261 @@ impl ShiftForm {
                     offset: l.offset,
                 })
             }
-            ValueForm::Radix(l) if !l.is_empty() && l.bases.iter().all(|&b| b == l.bases[0] && b.is_power_of_two() && b > 1) => {
-                Some(Self::Radix {
-                    bits: l.bases[0].trailing_zeros(),
-                    digits: l.len(),
-                    shift: if l.signed { l.product() / 2 } else { 0 },
+            ValueForm::BitSlack(l) if l.low.len() == 1 && !l.low.signed && pow2(l.low.bases[0]) => {
+                Some(Self::BitSlack {
+                    low_bits: l.low.bases[0].trailing_zeros(),
+                    slack_weight: l.slack_weight,
+                    offset: l.offset,
                 })
+            }
+            ValueForm::Slack(l) if l.digits.len() == 1 && !l.digits.signed && pow2(l.digits.bases[0]) => {
+                Some(Self::Slack {
+                    low_bits: l.digits.bases[0].trailing_zeros(),
+                    slack_weight: l.slack_weight,
+                    offset: l.offset,
+                })
+            }
+            ValueForm::Step(l)
+                if l.low.len() == 1 && !l.low.signed && pow2(l.low.bases[0]) && l.step > 0 && (2..=16).contains(&l.top_base) =>
+            {
+                Some(Self::Step {
+                    low_bits: l.low.bases[0].trailing_zeros(),
+                    step: l.step,
+                    top_base: i64::from(l.top_base),
+                    offset: l.offset,
+                })
+            }
+            ValueForm::Radix(l) if (2..=SHIFT_DIGITS).contains(&l.len()) && l.bases.iter().all(|&b| pow2(b)) => {
+                let mut bits = [0; SHIFT_DIGITS];
+                for (dst, &b) in bits.iter_mut().zip(l.bases) {
+                    *dst = b.trailing_zeros();
+                }
+                Some(Self::Radix { bits, digits: l.len(), shift: if l.signed { l.product() / 2 } else { 0 } })
             }
             _ => None,
         }
     }
 
-    /// The digits of `x` into `out[..len]`: `DigitSlack` as `y = x + offset`, `a = [y >=
-    /// threshold]`, `rest = y - w a`, `mid = floor(rest / 2^j)`, the low digit `rest mod 2^j`
-    /// stored balanced; `Radix` as `y = x + shift` peeled base `2^j` from the bottom, the top
-    /// digit taking the excess. Floor division by `2^j` is the arithmetic shift.
+    /// The digits of the 256 values `xs` into `out[k]` (digit `k`); the forms are written as
+    /// branch-free loops over the coefficients so that they vectorise.
     #[inline(always)]
-    fn decompose(self, x: i64, out: &mut [i64; MAX_DIGITS]) {
+    fn decompose_poly(self, xs: &[i32; N], out: &mut [[i64; N]; SHIFT_DIGITS]) {
+        let [d0, d1, d2] = out;
         match self {
             Self::DigitSlack { low_bits, mid_half, threshold, slack_weight, offset } => {
-                let y = x + offset;
-                let a = i64::from(y >= threshold);
-                let rest = y - slack_weight * a;
-                let mid = rest >> low_bits;
-                out[0] = (rest & ((1 << low_bits) - 1)) - (1 << (low_bits - 1));
-                out[1] = mid - mid_half;
-                out[2] = a;
+                let mask = (1_i64 << low_bits) - 1;
+                let half = 1_i64 << (low_bits - 1);
+                for j in 0..N {
+                    let y = i64::from(xs[j]) + offset;
+                    let a = i64::from(y >= threshold);
+                    let rest = y - slack_weight * a;
+                    d0[j] = (rest & mask) - half;
+                    d1[j] = (rest >> low_bits) - mid_half;
+                    d2[j] = a;
+                }
+            }
+            Self::BitSlack { low_bits, slack_weight, offset } => {
+                let lo = 1_i64 << low_bits;
+                let half = lo >> 1;
+                for j in 0..N {
+                    let y = i64::from(xs[j]) + offset;
+                    let a = i64::from(y >= 2 * lo);
+                    let rest = y - slack_weight * a;
+                    let hi = (rest >> low_bits).clamp(0, 1);
+                    d0[j] = rest - lo * hi - half;
+                    d1[j] = hi;
+                    d2[j] = a;
+                }
+            }
+            Self::Slack { low_bits, slack_weight, offset } => {
+                let lo = 1_i64 << low_bits;
+                let half = lo >> 1;
+                for j in 0..N {
+                    let y = i64::from(xs[j]) + offset;
+                    let a = i64::from(y >= lo);
+                    d0[j] = y - slack_weight * a - half;
+                    d1[j] = a;
+                }
+            }
+            Self::Step { low_bits, step, top_base, offset } => {
+                let half = 1_i64 << (low_bits - 1);
+                for j in 0..N {
+                    let y = i64::from(xs[j]) + offset;
+                    let mut h = 0;
+                    for t in 1..top_base {
+                        h += i64::from(y >= t * step);
+                    }
+                    d0[j] = y - step * h - half;
+                    d1[j] = h - top_base / 2;
+                }
             }
             Self::Radix { bits, digits, shift } => {
-                let half = 1_i64 << (bits - 1);
-                let mut y = x + shift;
-                for slot in out.iter_mut().take(digits - 1) {
-                    *slot = (y & ((1 << bits) - 1)) - half;
-                    y >>= bits;
+                let digit = |y: i64, b: u32| (y & ((1 << b) - 1)) - (1 << (b - 1));
+                if digits == 2 {
+                    for j in 0..N {
+                        let y = i64::from(xs[j]) + shift;
+                        d0[j] = digit(y, bits[0]);
+                        d1[j] = (y >> bits[0]) - (1 << (bits[1] - 1));
+                    }
+                } else {
+                    for j in 0..N {
+                        let y = i64::from(xs[j]) + shift;
+                        d0[j] = digit(y, bits[0]);
+                        d1[j] = digit(y >> bits[0], bits[1]);
+                        d2[j] = (y >> (bits[0] + bits[1])) - (1 << (bits[2] - 1));
+                    }
                 }
-                out[digits - 1] = y - half;
             }
         }
     }
 }
 
-impl Encoder {
-    /// [`Encoder::encode`] for the engine witness of a set with polynomial lanes (`z` per
-    /// column, `(w1', u, v)` per row), with the shift forms; `None` when the encoder has none.
-    /// The cells and errors are [`Encoder::encode`]'s.
-    fn encode_lane_rows(
-        &self,
-        z: &[agg_mldsa_simd::Poly32],
-        rows: &[agg_mldsa_simd::FinishOut],
-        wide: &mut [&mut [MaybeUninit<i32>]],
-        narrow: &mut [&mut [MaybeUninit<i8>]],
-    ) -> Option<Result<i64, SourceTableError>> {
-        let shift = self.shift.as_ref()?;
-        Some(self.encode_lane_cells(shift, z, rows, wide, narrow))
+/// The H-FIPS witness of one row from `(u, w_1')`, [`fips_coefficient`] (ML-DSA-44) or
+/// [`coefficient_of`] (the other sets) per coefficient, as branch-free arithmetic over the
+/// row that the compiler vectorises: the magnitudes `L` into `l`, `(s, delta, e)` into
+/// `cells`, and the row's `sum delta^2`. `None` when a coefficient lies outside
+/// `|u| <= B_u`, `w_1' < m_w` (where the two agree; checked exhaustively in the tests) or has
+/// no witness.
+#[inline(always)]
+fn fips_row<P: ParamSet>(u: &[i32; N], w1: &[u8; N], l: &mut [i32; N], cells: &mut [[i8; N]; 3]) -> Option<i64> {
+    let mut bad = false;
+    let mut weight = 0_i32;
+    let [s_cells, delta_cells, e_cells] = cells;
+    for j in 0..N {
+        let (ok, lj, s, delta, e) = fips_cell::<P>(u[j], w1[j]);
+        bad |= !ok;
+        l[j] = lj;
+        s_cells[j] = s as i8;
+        delta_cells[j] = delta as i8;
+        e_cells[j] = e as i8;
+        weight += delta * delta;
     }
+    (!bad).then_some(i64::from(weight))
+}
 
-    fn encode_lane_cells(
+/// One coefficient of [`fips_row`]: whether it is accepted, then `(L, s, delta, e)`.
+#[inline(always)]
+fn fips_cell<P: ParamSet>(u: i32, w1: u8) -> (bool, i32, i32, i32, i32) {
+    let (q, g2, m) = (P::Q as i32, P::GAMMA2 as i32, P::M_W as i32);
+    let alpha = 2 * g2;
+    let w1 = i32::from(w1);
+    let mut ok = u.unsigned_abs() <= P::B_U as u32 && w1 < m;
+    // w' = 2 gamma2 w1' + u mod q from (-q, 2q) inside the checked domain.
+    let x = alpha.wrapping_mul(w1).wrapping_add(u);
+    let x = x + ((x >> 31) & q);
+    let wq = x - (((q - 1 - x) >> 31) & q);
+    // Decompose(w'): r0 = w' mod+- 2 gamma2 in (-gamma2, gamma2], r1 = (w' - r0) / (2 gamma2),
+    // and (0, r0 - 1) when w' - r0 = q - 1.
+    let r1 = ((wq + g2 - 1) as u32 / alpha as u32) as i32;
+    let r0 = wq.wrapping_sub(alpha.wrapping_mul(r1));
+    let corner = alpha.wrapping_mul(r1) == q - 1;
+    let (r1, r0) = if corner { (0, r0 - 1) } else { (r1, r0) };
+    // h* = [HighBits(w') != w1'], and UseHint(h*, w') must give w1' back.
+    let hint = r1 != w1;
+    let moved = if r0 > 0 { r1 + 1 } else { r1 - 1 };
+    let moved = if moved == m { 0 } else if moved < 0 { m - 1 } else { moved };
+    ok &= (if hint { moved } else { r1 }) == w1;
+    // The honest witness of (w', h*).
+    let hv = i32::from(hint);
+    let big = wq >= q - g2;
+    let sigma = if big || r0 <= 0 { -1 } else { 1 };
+    let l = if big { wq - (q - g2) } else { (r0 - 1) + (((r0 - 1) >> 31) & g2) };
+    let delta = if big { -hv } else { hv * sigma };
+    let wraps = (sigma == 1 && r1 == m - 1) || (sigma == -1 && r1 == 0);
+    let e = if big { 1 - hv } else if hint && wraps { sigma } else { 0 };
+    let s = (1 + sigma) >> 1;
+    // The witness must give u back: r0 = gamma2 s + L + 1 - gamma2, u = r0 - 2 gamma2 delta - e.
+    ok &= (g2 * s + l + 1 - g2).wrapping_sub(alpha.wrapping_mul(delta)) - e == u;
+    (ok, l, s, delta, e)
+}
+
+/// True when every entry of `digits` lies in `[min, max]` (a min/max fold that vectorises).
+#[inline(always)]
+fn digits_in(digits: &[i64; N], (min, max): (i64, i64)) -> bool {
+    let (lo, hi) = digits.iter().fold((i64::MAX, i64::MIN), |(lo, hi), &d| (lo.min(d), hi.max(d)));
+    min <= lo && hi <= max
+}
+
+/// The fast form of one committed value: its shift form and the alphabet of each digit.
+type FastValue = (ShiftForm, Vec<(i64, i64)>);
+
+impl Encoder {
+    /// [`Encoder::encode`] on the engine witness (`z` per column, `(w1', u, v)` per row) with
+    /// the shift forms: the same cells and hint slack, or `None` when the encoder has no
+    /// shift forms or any check fails. The caller then runs [`Encoder::encode`], which
+    /// rewrites every cell of the record and returns its error.
+    fn encode_rows<P: ParamSet>(
         &self,
-        shift: &[(ShiftForm, Vec<(i64, i64)>); 3],
         z: &[agg_mldsa_simd::Poly32],
         rows: &[agg_mldsa_simd::FinishOut],
         wide: &mut [&mut [MaybeUninit<i32>]],
         narrow: &mut [&mut [MaybeUninit<i8>]],
-    ) -> Result<i64, SourceTableError> {
-        let mut put = |value: usize, lane: usize, cells: &[i32; N]| -> Result<(), SourceTableError> {
-            let (form, bounds) = &shift[value];
-            let (_, slots, what) = &self.values[value];
-            let mut digits = [0_i64; MAX_DIGITS];
-            for (pos, &x) in cells.iter().enumerate() {
-                form.decompose(i64::from(x), &mut digits);
-                if digits.iter().zip(bounds).any(|(&d, &(min, max))| d < min || d > max) {
-                    return Err(SourceTableError::Encode(what));
-                }
-                for (&slot, &digit) in slots[lane].iter().zip(&digits) {
-                    match slot {
-                        // Alphabet-checked digits: 16-bit wide, small narrow.
-                        Slot::Wide(c) => {
-                            wide[c][pos].write(digit as i32);
+    ) -> Option<i64> {
+        let fast = self.shift.as_ref()?;
+        let shape = self.shape;
+        let mut digits = [[0_i64; N]; SHIFT_DIGITS];
+        let mut put = |value: usize, lane: usize, base: usize, xs: &[i32; N], wide: &mut [&mut [MaybeUninit<i32>]], narrow: &mut [&mut [MaybeUninit<i8>]]| -> bool {
+            let (form, bounds) = &fast[value];
+            form.decompose_poly(xs, &mut digits);
+            if !digits.iter().zip(bounds).all(|(d, &b)| digits_in(d, b)) {
+                return false;
+            }
+            for (&slot, d) in self.values[value].1[lane].iter().zip(&digits) {
+                match slot {
+                    // Alphabet-checked digits: 16-bit wide, small narrow.
+                    Slot::Wide(c) => {
+                        for (cell, &x) in wide[c][base..base + N].iter_mut().zip(d) {
+                            cell.write(x as i32);
                         }
-                        Slot::Narrow(c) => {
-                            narrow[c][pos].write(digit as i8);
+                    }
+                    Slot::Narrow(c) => {
+                        for (cell, &x) in narrow[c][base..base + N].iter_mut().zip(d) {
+                            cell.write(x as i8);
                         }
                     }
                 }
             }
-            Ok(())
+            true
         };
-        for (s, poly) in z.iter().enumerate() {
-            put(0, s, &poly.0)?;
-        }
-        for (rho, row) in rows.iter().enumerate() {
-            put(1, rho, &row.u.0)?;
-            put(2, rho, &row.v.0)?;
-        }
-        for (rho, row) in rows.iter().enumerate() {
-            if row.w1.iter().any(|&w| usize::from(w) >> self.shape.w1_bits != 0) {
-                return Err(SourceTableError::Encode(self.w1_what));
+        let mut weight = 0_i64;
+        let mut middle = [0_i32; N];
+        for row in 0..shape.k.max(shape.l) {
+            let (lane, base) = shape.row_lane(row);
+            if row < shape.l && !put(0, lane, base, &z[row].0, wide, narrow) {
+                return None;
+            }
+            if row >= shape.k {
+                continue;
+            }
+            let out = &rows[row];
+            let u = match &self.fips {
+                None => &out.u.0,
+                Some(slots) => {
+                    // H-FIPS: the coefficient's witness; its magnitude L takes the slot of u.
+                    let mut cells = [[0_i8; N]; 3];
+                    weight += fips_row::<P>(&out.u.0, &out.w1, &mut middle, &mut cells)?;
+                    for (&slot, cells) in slots[lane].iter().zip(&cells) {
+                        for (cell, &x) in narrow[slot][base..base + N].iter_mut().zip(cells) {
+                            cell.write(x);
+                        }
+                    }
+                    &middle
+                }
+            };
+            if !put(1, lane, base, u, wide, narrow) || !put(2, lane, base, &out.v.0, wide, narrow) {
+                return None;
+            }
+            if out.w1.iter().any(|&w| usize::from(w) >> shape.w1_bits != 0) {
+                return None;
             }
             for (t, slots) in self.bits.iter().enumerate() {
-                for (cell, &w) in narrow[slots[rho]].iter_mut().zip(&row.w1) {
+                for (cell, &w) in narrow[slots[lane]][base..base + N].iter_mut().zip(&out.w1) {
                     cell.write(((w >> t) & 1) as i8);
                 }
             }
         }
-        Ok(OMEGA as i64)
+        let hint_slack = P::OMEGA as i64 - weight;
+        (hint_slack >= 0).then_some(hint_slack)
     }
 }
 
@@ -828,7 +1042,7 @@ impl MainTables {
         record: impl Fn(usize) -> Result<RecordValues<P>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
         assert_eq!(manifest.set(), P::SET, "values of the manifest's parameter set");
-        Self::encode_tiles(manifest, count, 1, |encoder, i, views| {
+        Self::encode_tiles(manifest, count, 1, true, |encoder, i, views| {
             let (wide, narrow) = &mut views[0];
             let values = if i < count { record(i)? } else { RecordValues::zeroed() };
             Ok(vec![encoder.encode_values(&values, wide, narrow)?])
@@ -838,14 +1052,20 @@ impl MainTables {
     /// Allocate final columns and give each worker the disjoint views of a tile of `tile`
     /// consecutive records (the last tile may be shorter); `fill(encoder, first, views)`
     /// writes every cell of records `first..first + views.len()` (live and padded) and
-    /// returns their hint slacks.
+    /// returns their hint slacks. `checked` says that `fill` checks every cell it writes
+    /// against its digit's alphabet (or writes a cell whose alphabet holds it by
+    /// construction: a bit of `w_1'`, an H-FIPS sign, `delta` or `e`); the alphabet scan of
+    /// the self-check is then skipped once the encoder's alphabets are found to be the
+    /// manifest's.
     #[allow(unsafe_code)]
     fn encode_tiles(
         manifest: &CommitmentManifest,
         count: usize,
         tile: usize,
+        checked: bool,
         fill: impl Fn(&Encoder, usize, &mut [RecordViews<'_>]) -> Result<Vec<i64>, SourceTableError> + Sync,
     ) -> Result<Self, SourceTableError> {
+        let start = Instant::now();
         let encoder = Encoder::new(manifest);
         let geom = Geometry::new(count).map_err(SourceTableError::Geometry)?;
         if geom.n != manifest.records() || geom.n_star != manifest.padded_records() {
@@ -868,11 +1088,15 @@ impl MainTables {
                 views[i].1.push(chunk);
             }
         }
+        let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
+        let (derive0, encode0) = (DERIVE_NS.load(Ordering::Relaxed), ENCODE_NS.load(Ordering::Relaxed));
+        let filling = Instant::now();
         let tiles = views
             .par_chunks_mut(tile)
             .enumerate()
             .map(|(t, views)| fill(&encoder, t * tile, views))
             .collect::<Result<Vec<_>, _>>()?;
+        let filled = Instant::now();
         let hint_slack: Vec<i64> = tiles.into_iter().flatten().collect();
         // SAFETY: successful encoding writes every digit, bit and FIPS cell of every
         // record, including padding. On error the MaybeUninit allocations just drop.
@@ -882,7 +1106,19 @@ impl MainTables {
             geom, set: manifest.set(), lane_cells, wide, narrow,
             hint_slack: if encoder.fips.is_some() { hint_slack } else { Vec::new() },
         };
-        tables.validate(manifest)?;
+        let scan = !(checked && encoder.alphabets_match(manifest));
+        tables.check(manifest, scan)?;
+        if trace {
+            let ms = |ns: u64| ns as f64 / 1e6;
+            eprintln!(
+                "main tables: set-up {:.1} ms, derive and encode {:.1} ms (thread sums: derive {:.1} ms, encode {:.1} ms), self-check {:.1} ms (alphabet scan {scan})",
+                (filling - start).as_secs_f64() * 1e3,
+                (filled - filling).as_secs_f64() * 1e3,
+                ms(DERIVE_NS.load(Ordering::Relaxed).wrapping_sub(derive0)),
+                ms(ENCODE_NS.load(Ordering::Relaxed).wrapping_sub(encode0)),
+                filled.elapsed().as_secs_f64() * 1e3,
+            );
+        }
         Ok(tables)
     }
 
@@ -919,13 +1155,16 @@ impl MainTables {
         }
         let count = instance.records.len();
         let hu = (manifest.relation() == Relation::Hu).then(|| HuSlots::new(manifest));
-        Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+        // The digit kernel of relation H-u writes its cells unchecked.
+        Self::encode_tiles(manifest, count, TILE, hu.is_none(), |encoder, first, views| {
             // Live records of the tile; a tile past the last record is all padding.
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord> = instance.records[live.clone()].iter().collect();
+            let clock = Instant::now();
             let mut derived = vec![FastWitness::zero(); live.len()];
             derive_tile_with(engine, &records, &signatures[live], &mut derived)
                 .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
+            let clock = add_elapsed(&DERIVE_NS, clock);
             let mut slack = Vec::with_capacity(views.len());
             for (k, (wide, narrow)) in views.iter_mut().enumerate() {
                 let Some(w) = derived.get(k) else {
@@ -937,12 +1176,16 @@ impl MainTables {
                         slots.write(engine, w, wide, narrow);
                         slack.push(OMEGA as i64);
                     }
-                    None => {
-                        let values = RecordValues::<Set44> { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
-                        slack.push(encoder.encode_values(&values, wide, narrow)?);
-                    }
+                    None => match encoder.encode_rows::<Set44>(&w.z, &w.rows, wide, narrow) {
+                        Some(encoded) => slack.push(encoded),
+                        None => {
+                            let values = RecordValues::<Set44> { z: w.z_wide(), u: w.u_wide(), v: w.v_wide(), w1: w.w1() };
+                            slack.push(encoder.encode_values(&values, wide, narrow)?);
+                        }
+                    },
                 }
             }
+            add_elapsed(&ENCODE_NS, clock);
             Ok(slack)
         })
     }
@@ -987,7 +1230,7 @@ impl MainTables {
         }
         let count = instance.records.len();
         if P::SET == Set::S44 {
-            return Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+            return Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views| {
                 let mut slack = Vec::with_capacity(views.len());
                 for (k, (wide, narrow)) in views.iter_mut().enumerate() {
                     let i = first + k;
@@ -1008,17 +1251,19 @@ impl MainTables {
         }
         // The sets with polynomial lanes derive each tile on the SIMD engine
         // (`agg_witness::fast_lanes`; its errors are the legacy derivation's).
-        Self::encode_tiles(manifest, count, TILE, |encoder, first, views| {
+        Self::encode_tiles(manifest, count, TILE, true, |encoder, first, views| {
             let live = first.min(count)..(first + views.len()).min(count);
             let records: Vec<&PublicRecord<P>> = instance.records[live.clone()].iter().collect();
+            let clock = Instant::now();
             let mut derived = vec![LaneWitness::zero::<P>(); live.len()];
             P::derive_lane_tile(&records, &signatures[live], &mut derived)
                 .map_err(|(i, e)| SourceTableError::Derive(first + i, e))?;
+            let clock = add_elapsed(&DERIVE_NS, clock);
             let mut slack = Vec::with_capacity(views.len());
             for (k, (wide, narrow)) in views.iter_mut().enumerate() {
                 if let Some(w) = derived.get(k) {
-                    if let Some(encoded) = encoder.encode_lane_rows(&w.z, &w.rows, wide, narrow) {
-                        slack.push(encoded?);
+                    if let Some(encoded) = encoder.encode_rows::<P>(&w.z, &w.rows, wide, narrow) {
+                        slack.push(encoded);
                         continue;
                     }
                 }
@@ -1039,15 +1284,21 @@ impl MainTables {
                 };
                 slack.push(encoder.encode_values(&values, wide, narrow)?);
             }
+            add_elapsed(&ENCODE_NS, clock);
             Ok(slack)
         })
     }
 
     /// The shape and alphabet self-check of both groups.
     pub fn validate(&self, manifest: &CommitmentManifest) -> Result<(), SourceTableError> {
-        validate_group(manifest.group(GroupRole::Main16), &self.wide_columns())?;
+        self.check(manifest, true)
+    }
+
+    /// [`MainTables::validate`]; `scan = false` keeps the shape checks only.
+    fn check(&self, manifest: &CommitmentManifest, scan: bool) -> Result<(), SourceTableError> {
+        check_group(manifest.group(GroupRole::Main16), &self.wide_columns(), scan)?;
         let narrow: Vec<Cells<'_>> = self.narrow.iter().map(|c| Cells::Narrow(c)).collect();
-        validate_group(manifest.group(GroupRole::Main), &narrow)
+        check_group(manifest.group(GroupRole::Main), &narrow, scan)
     }
 
     /// Batch geometry: the record counts and `d_sig` of any set; its main-domain helpers
@@ -1769,34 +2020,93 @@ mod lane_tests {
     /// The shift forms decompose as the forms do, at the alphabet edges and beyond.
     #[test]
     fn shift_forms_match_the_value_forms() {
-        for set in [Set::S65, Set::S87] {
-            let manifest = CommitmentManifest::for_set(set, 64, Relation::Hu).unwrap();
-            let encoder = Encoder::new(&manifest);
-            let shift = encoder.shift.as_ref().expect("shift forms for the lane sets");
-            for ((form, _, _), (fast, bounds)) in encoder.values.iter().zip(shift) {
-                let (lo, hi) = (-(1_i64 << 31), (1_i64 << 31) - 1);
-                let mut probes: Vec<i64> = vec![lo, hi, 0, -1, 1];
-                for edge in [1_i64 << 15, 1 << 16, 1 << 19, 523_267, 523_777, 190_465, 1 << 30] {
-                    for d in -2..=2 {
-                        probes.extend([edge + d, -edge + d]);
+        for set in [Set::S44, Set::S65, Set::S87] {
+            for relation in [Relation::Hu, Relation::HExact, Relation::HFips] {
+                let n = if set == Set::S44 { 16 } else { 64 };
+                let manifest = CommitmentManifest::for_set(set, n, relation).unwrap();
+                let encoder = Encoder::new(&manifest);
+                let shift = encoder.shift.as_ref().expect("shift forms for every set and relation");
+                for ((form, _, _), (fast, bounds)) in encoder.values.iter().zip(shift) {
+                    let mut probes: Vec<i32> = vec![i32::MIN, i32::MAX, 0, -1, 1];
+                    let edges = [1_i32 << 15, 1 << 16, 1 << 17, 1 << 19, 29_696, 63_079, 95_232, 98_225, 130_816,
+                        130_915, 130_993, 190_465, 261_888, 523_267, 523_777, 524_091, 1 << 30];
+                    for edge in edges {
+                        for t in 0..8 {
+                            for d in -2..=2 {
+                                probes.extend([edge.wrapping_mul(t).wrapping_add(d), edge.wrapping_mul(-t).wrapping_add(d)]);
+                            }
+                        }
                     }
-                }
-                let mut x = 0x9e37_79b9_i64;
-                for _ in 0..4096 {
-                    x = (x * 6_364_136_223_846_793 + 1) % (1 << 33);
-                    probes.push(x - (1 << 32) / 2);
-                }
-                for x in probes {
-                    let mut want = [0_i64; MAX_DIGITS];
-                    form.decompose_into(x, &mut want[..form.len()]);
-                    let mut got = [0_i64; MAX_DIGITS];
-                    fast.decompose(x, &mut got);
-                    assert_eq!(got[..form.len()], want[..form.len()], "{set:?} x = {x}");
-                    let inside = got.iter().zip(bounds).all(|(&d, &(min, max))| min <= d && d <= max);
-                    assert_eq!(inside, form.in_alphabets(&want[..form.len()]), "{set:?} x = {x}");
+                    let mut x = 0x9e37_79b9_i64;
+                    for _ in 0..4096 {
+                        x = (x * 6_364_136_223_846_793 + 1) % (1 << 33);
+                        probes.push((x - (1 << 32) / 2) as i32);
+                        probes.push(((x % (1 << 21)) - (1 << 20)) as i32);
+                    }
+                    probes.resize(probes.len().next_multiple_of(N), 0);
+                    for chunk in probes.chunks_exact(N) {
+                        let xs: &[i32; N] = chunk.try_into().unwrap();
+                        let mut got = [[0_i64; N]; SHIFT_DIGITS];
+                        fast.decompose_poly(xs, &mut got);
+                        for (j, &x) in xs.iter().enumerate() {
+                            let mut want = [0_i64; MAX_DIGITS];
+                            form.decompose_into(i64::from(x), &mut want[..form.len()]);
+                            let got: Vec<i64> = got[..form.len()].iter().map(|d| d[j]).collect();
+                            assert_eq!(got[..], want[..form.len()], "{set:?} {relation:?} x = {x}");
+                            let inside = got.iter().zip(bounds).all(|(&d, &(min, max))| min <= d && d <= max);
+                            assert_eq!(inside, form.in_alphabets(&want[..form.len()]), "{set:?} {relation:?} x = {x}");
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// The row form of the H-FIPS witness agrees with the per-coefficient one on every
+    /// `(u, w_1')` with `|u| <= B_u + 2` and `w_1' < 2^w1_bits`: it accepts exactly the
+    /// coefficients with `|u| <= B_u`, `w_1' < m_w` that have a witness, with that witness.
+    fn fips_row_matches_the_coefficients<P: ParamSet>() {
+        let b_u = P::B_U as i32;
+        let mut accepted = Vec::new();
+        for w1 in 0..1_u8 << P::W1_BITS {
+            for u in -b_u - 2..=b_u + 2 {
+                let (uj, wj) = (i64::from(u), i64::from(w1));
+                let want = if uj.abs() > P::B_U || wj >= P::M_W {
+                    None
+                } else if P::SET == Set::S44 {
+                    fips_coefficient(uj, wj).map(|c| (c.l(), (1 + c.sigma) / 2, c.delta, c.e))
+                } else {
+                    coefficient_of::<P>(uj, wj).map(|c| (c.l, (1 + c.sigma) / 2, c.delta, c.e))
+                };
+                let (ok, l, s, delta, e) = fips_cell::<P>(u, w1);
+                let got = ok.then_some((i64::from(l), i64::from(s), i64::from(delta), i64::from(e)));
+                assert_eq!(got, want, "{:?} u = {u} w1 = {w1}", P::SET);
+                if ok {
+                    accepted.push((u, w1, got.unwrap()));
+                }
+            }
+        }
+        // The row form on accepted coefficients, and with one rejected coefficient.
+        for chunk in accepted.chunks_exact(N).step_by(97) {
+            let u: [i32; N] = std::array::from_fn(|j| chunk[j].0);
+            let mut w1: [u8; N] = std::array::from_fn(|j| chunk[j].1);
+            let (mut l, mut cells) = ([0_i32; N], [[0_i8; N]; 3]);
+            let weight = fips_row::<P>(&u, &w1, &mut l, &mut cells).expect("accepted coefficients");
+            assert_eq!(weight, chunk.iter().map(|c| c.2 .2 * c.2 .2).sum::<i64>());
+            for (j, c) in chunk.iter().enumerate() {
+                let cell = (i64::from(l[j]), i64::from(cells[0][j]), i64::from(cells[1][j]), i64::from(cells[2][j]));
+                assert_eq!(cell, c.2);
+            }
+            w1[N / 2] = P::M_W as u8;
+            assert_eq!(fips_row::<P>(&u, &w1, &mut l, &mut cells), None);
+        }
+    }
+
+    #[test]
+    fn fips_rows_match_the_coefficients() {
+        fips_row_matches_the_coefficients::<Set44>();
+        fips_row_matches_the_coefficients::<agg_witness::params::Set65>();
+        fips_row_matches_the_coefficients::<agg_witness::params::Set87>();
     }
 
     /// Five live records of `P` (eight with padding), their instance, signatures and tables.
