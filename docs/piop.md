@@ -284,10 +284,27 @@ A self-check compares the final claim with `eq` times the summand at the termina
   (stage 3: the reduction of the main lookup stack, two 16-bit columns).
 - `split_linear`: in any other full-domain equality group, the single-lane products and
   unweighted affine terms on integer lanes read nowhere else move to one `LinearIntGroup` at
-  the same point; the lanes stay in the generic group, unread, so it still folds them and
-  yields their terminal values (stage 3's `eq(r^(2))` group: the ring identity's terms on
-  `U_lo, V_lo, V_hi`). The two groups' messages sum to the original group's.
+  the same point, and the lanes leave the generic group (it neither folds nor carries them);
+  their terminal values are their multilinear evaluations at the bound point
+  (`agg_simd::eval::column_at`) (stage 3's `eq(r^(2))` group of ML-DSA-44: the ring
+  identity's terms on `U_lo, V_lo, V_hi`). The two groups' messages sum to the original
+  group's.
 - Byte lanes stay on the generic coded path (the six bits of stage 3's `eq(r^(1))` group).
+- With polynomial lanes (ML-DSA-65/87) a full-domain equality group folds its linear-only
+  integer and byte lanes into one field lane `g = sum_l c_l f_l` (`FoldedGroup`, byte lanes
+  through per-byte tables of `c_l map[byte]`); a kept integer lane whose every term reads it
+  alone (squares, Booleanity, links, leaf polynomials) moves its batched linear coefficient
+  into `g` as well, so its pieces keep only the higher powers. Stage 3's `eq(r^(2))` group
+  then needs one coefficient slot per kept lane, and its dense rounds run on the fused plane
+  tail (at most 128 lanes and 192 slots, `agg_simd::fused`; H-FIPS reaches 151 slots at
+  ML-DSA-87).
+- A projection weight kept as its two factors (`RankOneGroup`) folds only the combination
+  `g = V_lo + 2^16 V_hi + 2^15` by the low challenges (one integer dot per high row) for the
+  high rounds.
+- Terminal values: every lane is evaluated once, by the first group of the stage that reads
+  it and yields values; later readers copy that value (it is the same multilinear evaluation
+  at the same point), so a lane already held by an earlier group is not evaluated again from
+  its column.
 
 ## 7. Lookup and stage tables
 
