@@ -2233,6 +2233,29 @@ mod lane_tests {
         let mut wide_w1 = values.clone();
         wide_w1[0].w1[0][0] = 16;
         assert_eq!(MainTables::from_values(&manifest, &wide_w1), Err(SourceTableError::Encode("w1' above four bits")));
+        // `encode_rows` rejects out-of-range inputs with `None` so the caller falls back to
+        // `encode_values` for the exact legacy error.
+        let signatures: Vec<&[u8]> = records.iter().map(|r| r.sig.as_slice()).collect();
+        let encoder_hu = Encoder::new(&manifest);
+        let mut base_lane = LaneWitness::zero::<P>();
+        P::derive_lane_tile(&[&instance.records[0]], &[signatures[0]], std::slice::from_mut(&mut base_lane)).unwrap();
+        let check_row_reject = |encoder: &Encoder, w: &LaneWitness| -> Option<i64> {
+            let mut w_buf = vec![MaybeUninit::uninit(); encoder.wide * 256];
+            let mut n_buf = vec![MaybeUninit::uninit(); encoder.narrow * 256];
+            let mut w_views: Vec<&mut [MaybeUninit<i32>]> = w_buf.chunks_exact_mut(256).collect();
+            let mut n_views: Vec<&mut [MaybeUninit<i8>]> = n_buf.chunks_exact_mut(256).collect();
+            encoder.encode_rows::<P>(&w.z, &w.rows, &mut w_views, &mut n_views)
+        };
+        assert_eq!(check_row_reject(&encoder_hu, &base_lane), Some(P::OMEGA as i64));
+        let mut bad_z = base_lane.clone();
+        bad_z.z[0][0] = 1 << 19;
+        assert_eq!(check_row_reject(&encoder_hu, &bad_z), None);
+        let mut bad_u = base_lane.clone();
+        bad_u.rows[0].u[0] = 523_778;
+        assert_eq!(check_row_reject(&encoder_hu, &bad_u), None);
+        let mut bad_w1 = base_lane.clone();
+        bad_w1.rows[0].w1[0] = 16;
+        assert_eq!(check_row_reject(&encoder_hu, &bad_w1), None);
         // A base-8 middle digit outside [-4, 3] fails the self-check at its lane's column.
         let u_mid = manifest.locate(Column::lane_digit(DigitValue::Ud, 1, 2)).1;
         let mut bad = main.clone();
@@ -2301,6 +2324,39 @@ mod lane_tests {
         .unwrap();
         assert_eq!(bridge, general);
         assert_eq!(bridge.parity1_cached(), general.parity1_cached());
+        // Under H-FIPS, `encode_rows` matches `from_values`, `BridgeGroupTables::build`
+        // (packed path with `u_h` in level-2 slot 4) matches `from_witness`, and an
+        // out-of-range `u_h` or hint weight above `omega` falls back to the legacy error.
+        let manifest_fips = CommitmentManifest::for_set(P::SET, 5, Relation::HFips).unwrap();
+        let main_fips = MainTables::build_for::<P>(&manifest_fips, &instance, &signatures).unwrap();
+        assert_eq!(MainTables::from_values(&manifest_fips, &values).unwrap(), main_fips);
+        let bridge_fips = BridgeGroupTables::build(&manifest_fips, &main_fips, &matrices, &psi).unwrap();
+        let inputs_fips = main_fips.bridge_lanes(&manifest_fips);
+        let views_fips: Vec<&[i8]> = inputs_fips.iter().map(Vec::as_slice).collect();
+        let general_fips = BridgeGroupTables::from_witness(
+            &manifest_fips,
+            &main_fips,
+            parity::compute(&bridge_shape, &views_fips, &matrices).unwrap(),
+            vec![hint_slack_table(&manifest_fips, main_fips.hint_slack())],
+            bridge_fips.proj.clone(),
+            &psi,
+        )
+        .unwrap();
+        assert_eq!(bridge_fips, general_fips);
+        assert_eq!(bridge_fips.parity1_cached(), general_fips.parity1_cached());
+        let mut bad_slack = main_fips.clone();
+        bad_slack.hint_slack[0] = 1 << 16;
+        assert_eq!(
+            BridgeGroupTables::build(&manifest_fips, &bad_slack, &matrices, &psi).unwrap_err(),
+            SourceTableError::Encode("carry outside [0, 2^16)"),
+        );
+        let encoder_fips = Encoder::new(&manifest_fips);
+        let mut heavy = base_lane.clone();
+        for c in 0..=P::OMEGA {
+            heavy.rows[c / N].u[c % N] = -(2 * P::GAMMA2 as i32) + 1;
+            heavy.rows[c / N].w1[c % N] = 1;
+        }
+        assert_eq!(check_row_reject(&encoder_fips, &heavy), None);
         let counts: Vec<usize> = [GroupRole::Level1, GroupRole::Level2, GroupRole::Level3, GroupRole::Proj, GroupRole::Mult]
             .iter()
             .map(|&role| bridge.group(&manifest, role).len())

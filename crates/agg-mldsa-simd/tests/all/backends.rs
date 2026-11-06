@@ -447,6 +447,14 @@ fn every_api_matches_scalar() {
             if res2p_s.is_ok() {
                 assert_eq!(out2p_s, out2p_e);
             }
+            let mut out2p87_s = FinishOut::new();
+            let mut out2p87_e = FinishOut::new();
+            let res2p87_s = scalar87.finish_row_2p(row2p, &mut out2p87_s);
+            let res2p87_e = engine87.finish_row_2p(row2p, &mut out2p87_e);
+            assert_eq!(res2p87_s, res2p87_e);
+            if res2p87_s.is_ok() {
+                assert_eq!(out2p87_s, out2p87_e);
+            }
 
             let row_exact = FinishRowExact {
                 az: &az,

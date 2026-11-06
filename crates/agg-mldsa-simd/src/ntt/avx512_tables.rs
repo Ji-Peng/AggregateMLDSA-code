@@ -335,7 +335,7 @@ mod tests {
     fn shared_qword_twiddles() {
         // The butterflies feed the even-dword twiddle to both lanes of a qword
         // in every layer but the last, so those layers must agree per qword.
-        for t in [&Q, &P2] {
+        for t in [&Q, &P2, &P3] {
             for table in [&t.z, &t.zi, &t.iz, &t.izi] {
                 for v in &table[..56] {
                     assert!((0..16).step_by(2).all(|l| v.0[l] == v.0[l + 1]));
