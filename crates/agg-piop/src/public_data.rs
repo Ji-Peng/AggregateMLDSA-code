@@ -467,7 +467,10 @@ impl PublicData {
     }
 
     /// `T(r) = sum_x eq(r, x) T(x)` at a main-domain point `r = (r_coef, r_row, r_sig)`,
-    /// streamed over the live records (`k 256` multiply-adds per record).
+    /// streamed over the live records. An instance's `T_i = 2^d (c_i t1_i)` is a multiple of
+    /// `2^d`, so each record's `k 256`-term dot runs on `T_i / 2^d` (`|c_i t1_i| < 2^16`,
+    /// [`SplitWeights::dot`]) and is scaled once; a record whose `T_i` is not (a synthetic
+    /// statement) is summed exactly.
     #[must_use]
     pub fn t_evaluation(&self, point: &[E]) -> E {
         assert_eq!(
@@ -476,20 +479,24 @@ impl PublicData {
             "main-domain point"
         );
         let (position, signature) = point.split_at(D_POS as usize);
-        let eq_position = eq_table(position);
+        let eq_position = SplitWeights::new(&eq_table(position));
         let eq_signature = eq_table(signature);
+        let (scale, low) = (E::from_u64(1 << D), (1_i32 << D) - 1);
         self.t
             .par_iter()
             .enumerate()
             .map(|(i, t)| {
-                let inner = t
-                    .iter()
-                    .flatten()
-                    .zip(&eq_position)
-                    .fold(E::zero(), |sum, (&value, &weight)| {
-                        sum + weight.mul_i64(i64::from(value))
-                    });
-                eq_signature[i] * inner
+                let mut ct = [0_i32; K * N];
+                let mut bits = 0;
+                for (x, &v) in ct.iter_mut().zip(t.iter().flatten()) {
+                    *x = v >> D;
+                    bits |= v;
+                }
+                if bits & low == 0 {
+                    eq_signature[i] * scale * eq_position.dot::<16>(&ct)
+                } else {
+                    eq_signature[i] * eq_position.dot::<16>(t.as_flattened())
+                }
             })
             .reduce(E::zero, |left, right| left + right)
     }

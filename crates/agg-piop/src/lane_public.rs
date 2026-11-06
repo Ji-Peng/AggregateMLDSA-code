@@ -19,24 +19,27 @@
 //! carry zero weight and `T = 0`.
 //!
 //! The prover builds the data from its instance ([`LanePublicData::from_instance`], `T`
-//! stored). The verifier builds it from the `(pk, M, c~)` triples
-//! ([`LanePublicData::prepare`]): keys are expanded once per distinct `pk` (or taken from a
-//! [`LaneKeyCache`]), and `T` is not stored: [`LanePublicData::t_evaluations`] recomputes
-//! `T_i = 2^d (c_i * t1_i)` per record from the sparse challenge in its one pass.
+//! stored). The verifier builds [`LaneStreamedPublic`] from the `(pk, M, c~)` triples: keys
+//! are decoded once per distinct `pk` (or taken from a [`LaneKeyCache`]), `T` is not stored
+//! (each record's `c_i * t1_i` is recomputed from the sparse challenge in the one pass of
+//! [`LaneStreamedPublic::t_evaluations`]), and `A` of an uncached key is expanded inside the
+//! pass of [`LaneStreamedPublic::ring_weights_at`], eight keys at a time, so that it never
+//! leaves the core's caches (it is kept only to fill a cache).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use aerie_falcon::protocol::algebra::eq_table;
+use agg_mldsa_simd::{ExpandedA, Form, Scale};
 use agg_witness::expand::ExpandedKey;
 use agg_witness::instance::{InstanceError, PublicInstance};
-use agg_witness::native::{sample_in_ball_for, Challenge};
+use agg_witness::native::pk_decode_for;
 use agg_witness::padding::Geometry;
-use agg_witness::params::{ParamSet, Set, N, TR_BYTES};
+use agg_witness::params::{ParamSet, Set, Set44, Set65, Set87, N, TR_BYTES};
 use jolt_field::{Ring, Zero};
 use rayon::prelude::*;
 
-use crate::public_data::eq_correlation;
+use crate::public_data::{eq_correlation, SplitWeights};
 use crate::public_stream::distinct_keys;
 use crate::OpeningField as E;
 
@@ -134,17 +137,7 @@ impl LaneKeyCache {
     }
 }
 
-/// `T` of the live records: stored (the prover's instance), or recomputed from the sparse
-/// challenges in each pass (the verifier).
-#[derive(Clone, Debug)]
-enum LaneT {
-    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`.
-    Stored(Vec<i32>),
-    /// `c_i = SampleInBall(c~_i)` of every live record.
-    Streamed(Vec<Challenge>),
-}
-
-/// The public data of a batch of a parameter set with polynomial lanes.
+/// The prover's public data of a batch of a parameter set with polynomial lanes.
 #[derive(Clone, Debug)]
 pub struct LanePublicData {
     set: Set,
@@ -157,113 +150,55 @@ pub struct LanePublicData {
     key_of: Vec<usize>,
     /// `mu_i` of every live record.
     mu: Vec<[u8; TR_BYTES]>,
-    /// `T` of every live record.
-    t: LaneT,
-    /// Keys expanded while building (the rest came from the cache).
-    expanded: usize,
+    /// `T_i[rho][j]` of every live record, flat `(i, rho, j)`.
+    t: Vec<i32>,
 }
 
-/// `out[rho] = 2^d (c * t1[rho])` over `Z[X]/(X^256 + 1)` (`agg_witness::expand::public_t_into_for`).
-fn t_rows_into(c: &Challenge, t1: &[[u16; N]], d: u32, out: &mut [[i32; N]]) {
-    for (row, t1_row) in out.iter_mut().zip(t1) {
-        row.fill(0);
-        for &pos in &c.positions {
-            let p = usize::from(pos);
-            let sign = i32::from(c.coeffs[p]);
-            let (low, high) = t1_row.split_at(N - p);
-            for (slot, &x) in row[p..].iter_mut().zip(low) {
-                *slot += sign * i32::from(x);
-            }
-            for (slot, &x) in row[..p].iter_mut().zip(high) {
-                *slot -= sign * i32::from(x);
-            }
-        }
-        for x in row.iter_mut() {
-            *x <<= d;
-        }
-    }
+/// `T~_rho = sum_i eq_sig[i] <T_i[rho], eq_coef>` for every row `rho`. `rows(i, out)` writes
+/// the rows of `T_i` divided by `2^d` and returns true (16-bit values, `|c_i t1_i| <= tau
+/// (2^10 - 1) < 2^16`), or writes `T_i` itself and returns false (a row that is not a
+/// multiple of `2^d`, which [`SplitWeights::dot`] sums on its exact path).
+fn t_evaluations_by(
+    records: usize,
+    k: usize,
+    d: u32,
+    point: (&[E], &[E]),
+    rows: impl Fn(usize, &mut [[i32; N]]) -> bool + Sync,
+) -> Vec<E> {
+    let (coef, sig) = point;
+    let eq_coef = SplitWeights::new(&eq_table(coef));
+    let eq_sig = eq_table(sig);
+    let scale = E::from_u64(1 << d);
+    (0..records)
+        .into_par_iter()
+        .with_min_len(64)
+        .fold(
+            || (vec![E::zero(); k], [[0_i32; N]; MAX_ROWS]),
+            |(mut acc, mut scratch), i| {
+                let scratch_rows = &mut scratch[..k];
+                let weight = if rows(i, scratch_rows) { eq_sig[i] * scale } else { eq_sig[i] };
+                for (slot, row) in acc.iter_mut().zip(scratch_rows.iter()) {
+                    *slot += weight * eq_coef.dot::<16>(row);
+                }
+                (acc, scratch)
+            },
+        )
+        .map(|(acc, _)| acc)
+        .reduce(
+            || vec![E::zero(); k],
+            |mut acc, part| {
+                for (a, p) in acc.iter_mut().zip(part) {
+                    *a += p;
+                }
+                acc
+            },
+        )
 }
+
+/// The most rows `k` of a parameter set (ML-DSA-87).
+const MAX_ROWS: usize = 8;
 
 impl LanePublicData {
-    /// The verifier's data from `(pk, M, c~)` triples (pure mode, empty context): keys
-    /// expanded once per distinct `pk`, or taken from `cache` (new expansions are added to
-    /// it); `mu` and `SampleInBall(c~)` per record; `T` recomputed in each pass.
-    ///
-    /// # Errors
-    /// On a batch size outside `1..=2^15` or a public key of the wrong length (the first
-    /// such record).
-    ///
-    /// # Panics
-    /// If `cache` holds another parameter set.
-    pub fn prepare<P: ParamSet>(
-        inputs: &[(&[u8], &[u8], P::CTilde)],
-        mut cache: Option<&mut LaneKeyCache>,
-    ) -> Result<Self, InstanceError>
-    where
-        P::CTilde: Sync,
-    {
-        let geom = Geometry::<P>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
-        if let Some(cache) = cache.as_ref() {
-            assert_eq!(cache.set, P::SET, "a cache of the batch's parameter set");
-        }
-        let (distinct, key_of) = distinct_keys(inputs);
-        let first_record: Vec<usize> = distinct.iter().map(|(_, records)| records[0]).collect();
-        let cached: Vec<Option<Arc<LaneKey>>> = distinct
-            .par_iter()
-            .map(|&(pk, _)| cache.as_ref().and_then(|c| c.get(pk)))
-            .collect();
-        let fresh: Vec<bool> = cached.iter().map(Option::is_none).collect();
-        let expanded = fresh.iter().filter(|&&f| f).count();
-        let keys = distinct
-            .par_iter()
-            .zip(cached)
-            .zip(&first_record)
-            .map(|((&(pk, _), hit), &record)| match hit {
-                Some(key) => Ok(key),
-                None => ExpandedKey::<P>::from_bytes_for(pk)
-                    .map(|key| Arc::new(LaneKey::from_expanded(&key)))
-                    .ok_or(InstanceError::PublicKey(record)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Only fresh expansions enter the cache; a hit is already there.
-        if let Some(cache) = cache.as_mut() {
-            for (key, _) in keys.iter().zip(&fresh).filter(|(_, &f)| f) {
-                cache.insert(Arc::clone(key));
-            }
-        }
-        // `mu = H(tr || 0 || 0 || M)` (pure mode, empty context), 64 records per multi-lane call.
-        let engine = agg_mldsa_simd::engine();
-        let (mu, challenges): (Vec<[u8; TR_BYTES]>, Vec<Challenge>) = inputs
-            .par_chunks(64)
-            .zip(key_of.par_chunks(64))
-            .flat_map_iter(|(input_tile, key_tile)| {
-                let count = input_tile.len();
-                let mut mu_inputs = [[&[][..]; 4]; 64];
-                for (slot, (&(_, msg, _), &key)) in mu_inputs.iter_mut().zip(input_tile.iter().zip(key_tile)) {
-                    *slot = [&keys[key].tr[..], &[0u8, 0u8], &[], msg];
-                }
-                let mut mu_out = [0u8; 64 * TR_BYTES];
-                engine.shake256_many(&mu_inputs[..count], TR_BYTES, &mut mu_out[..count * TR_BYTES]);
-                (0..count).map(move |j| {
-                    let mut mu = [0u8; TR_BYTES];
-                    mu.copy_from_slice(&mu_out[j * TR_BYTES..(j + 1) * TR_BYTES]);
-                    (mu, sample_in_ball_for::<P>(input_tile[j].2.as_ref()))
-                })
-            })
-            .unzip();
-        Ok(Self {
-            set: P::SET,
-            k: P::K,
-            l: P::L,
-            padded: geom.n_star,
-            keys,
-            key_of,
-            mu,
-            t: LaneT::Streamed(challenges),
-            expanded,
-        })
-    }
-
     /// The data of the prover's instance (keys shared by `Arc` identity).
     #[must_use]
     pub fn from_instance<P: ParamSet>(instance: &PublicInstance<P>) -> Self {
@@ -299,8 +234,7 @@ impl LanePublicData {
             keys,
             key_of,
             mu: instance.records.iter().map(|r| r.mu).collect(),
-            t: LaneT::Stored(t),
-            expanded: 0,
+            t,
         }
     }
 
@@ -320,13 +254,6 @@ impl LanePublicData {
     #[must_use]
     pub fn mu(&self) -> &[[u8; TR_BYTES]] {
         &self.mu
-    }
-
-    /// Keys expanded while building (the rest came from the cache; 0 for the prover's
-    /// instance, whose keys were expanded with it).
-    #[must_use]
-    pub const fn expanded_keys(&self) -> usize {
-        self.expanded
     }
 
     /// Distinct keys.
@@ -360,24 +287,10 @@ impl LanePublicData {
         &key.a[(rho * self.l + s) * N..(rho * self.l + s + 1) * N]
     }
 
-    /// `f(T_i)` for live record `i`, `T_i` given as one row per `rho` (stored, or
-    /// recomputed into a scratch buffer).
-    fn with_t_rows<R>(&self, i: usize, f: impl FnOnce(&[[i32; N]]) -> R) -> R {
-        match &self.t {
-            LaneT::Stored(t) => f(t[i * self.k * N..(i + 1) * self.k * N].as_chunks::<N>().0),
-            LaneT::Streamed(challenges) => {
-                let mut rows = vec![[0_i32; N]; self.k];
-                let d = agg_witness::dispatch_set!(self.set, |P| P::D);
-                t_rows_into(&challenges[i], &self.keys[self.key_of[i]].t1, d, &mut rows);
-                f(&rows)
-            }
-        }
-    }
-
-    /// `T_i` of live record `i`, one row per `rho` (stored or recomputed).
+    /// `T_i` of live record `i`, one row per `rho`.
     #[must_use]
-    pub fn t_rows(&self, i: usize) -> Vec<[i32; N]> {
-        self.with_t_rows(i, <[[i32; N]]>::to_vec)
+    pub fn t_rows(&self, i: usize) -> &[[i32; N]] {
+        self.t[i * self.k * N..(i + 1) * self.k * N].as_chunks::<N>().0
     }
 
     /// The point split `(r_coef, r_sig)` of a main-domain point `(j, i)`.
@@ -390,36 +303,28 @@ impl LanePublicData {
         point.split_at(COEF_VARS)
     }
 
-    /// `T~_rho(r) = sum_{(j, i)} eq(r, (j, i)) T_i[rho][j]` for every row `rho`.
+    /// `T~_rho(r) = sum_{(j, i)} eq(r, (j, i)) T_i[rho][j]` for every row `rho`. An
+    /// instance's `T_i = 2^d (c_i t1_i)` (`agg_witness::expand::public_t_into_for`) is a
+    /// multiple of `2^d`, so each row's dot runs on `T_i / 2^d` (16 bits) and is scaled once
+    /// per record; a record whose `T_i` is not (a synthetic statement) is summed exactly.
     #[must_use]
     pub fn t_evaluations(&self, point: &[E]) -> Vec<E> {
-        let (coef, sig) = self.split(point);
-        let (eq_coef, eq_sig) = (eq_table(coef), eq_table(sig));
-        let k = self.k;
-        (0..self.records())
-            .into_par_iter()
-            .map(|i| {
-                self.with_t_rows(i, |rows| {
-                    rows.iter()
-                        .map(|row| {
-                            let inner = row
-                                .iter()
-                                .zip(&eq_coef)
-                                .fold(E::zero(), |acc, (&value, &w)| acc + w.mul_i64(i64::from(value)));
-                            eq_sig[i] * inner
-                        })
-                        .collect::<Vec<E>>()
-                })
-            })
-            .reduce(
-                || vec![E::zero(); k],
-                |mut acc, part| {
-                    for (a, p) in acc.iter_mut().zip(part) {
-                        *a += p;
-                    }
-                    acc
-                },
-            )
+        let d = agg_witness::dispatch_set!(self.set, |P| P::D);
+        let low = (1_i32 << d) - 1;
+        t_evaluations_by(self.records(), self.k, d, self.split(point), |i, out| {
+            let t = self.t_rows(i);
+            let mut bits = 0;
+            for (dst, src) in out.iter_mut().zip(t) {
+                for (x, &v) in dst.iter_mut().zip(src) {
+                    *x = v >> d;
+                    bits |= v;
+                }
+            }
+            if bits & low != 0 {
+                out.copy_from_slice(t);
+            }
+            bits & low == 0
+        })
     }
 
     /// The matrix of live record `i`, flat in `(rho, s, j)` order.
@@ -502,6 +407,388 @@ impl LanePublicData {
     }
 }
 
+/// A distinct key of a verified batch: from the cache (expanded), or decoded from its `pk`
+/// here and expanded in the pass.
+#[derive(Clone, Debug)]
+enum StreamKey<'a> {
+    Cached(Arc<LaneKey>),
+    Fresh(FreshKey<'a>),
+}
+
+/// A key decoded by the verifier (`rho` is the first 32 bytes of `pk`).
+#[derive(Clone, Debug)]
+struct FreshKey<'a> {
+    pk: &'a [u8],
+    tr: [u8; TR_BYTES],
+    t1: Box<[[u16; N]]>,
+}
+
+impl StreamKey<'_> {
+    fn tr(&self) -> &[u8; TR_BYTES] {
+        match self {
+            Self::Cached(key) => &key.tr,
+            Self::Fresh(key) => &key.tr,
+        }
+    }
+
+    fn t1(&self) -> &[[u16; N]] {
+        match self {
+            Self::Cached(key) => &key.t1,
+            Self::Fresh(key) => &key.t1,
+        }
+    }
+}
+
+/// `c = SampleInBall(c~)` of one record: the first `tau` entries of `pos` are the increasing
+/// positions of the nonzero coefficients, bit `m` of `neg` is set when `c[pos[m]] = -1`
+/// (the form of `agg_mldsa_simd::Challenge`, for any `tau <= 64`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SparseChallenge {
+    pos: [u8; 64],
+    neg: u64,
+}
+
+impl SparseChallenge {
+    const ZERO: Self = Self { pos: [0; 64], neg: 0 };
+
+    fn widen<const TAU: usize>(c: &agg_mldsa_simd::Challenge<TAU>) -> Self {
+        let mut pos = [0; 64];
+        pos[..TAU].copy_from_slice(&c.pos);
+        Self { pos, neg: c.neg }
+    }
+
+    fn narrow<const TAU: usize>(&self) -> agg_mldsa_simd::Challenge<TAU> {
+        agg_mldsa_simd::Challenge {
+            pos: self.pos[..TAU].try_into().expect("tau positions"),
+            neg: self.neg,
+        }
+    }
+}
+
+const _: () = assert!(Set44::TAU == 39 && Set65::TAU == 49 && Set87::TAU == 60);
+
+/// `SampleInBall` of up to 64 seeds of `set` (`agg_mldsa_simd::Engine::sample_in_ball_many`).
+fn sample_in_ball_tile(engine: &agg_mldsa_simd::Engine, set: Set, seeds: &[&[u8]], out: &mut [SparseChallenge]) {
+    fn run<const TAU: usize>(engine: &agg_mldsa_simd::Engine, seeds: &[&[u8]], out: &mut [SparseChallenge]) {
+        let mut tile = [agg_mldsa_simd::Challenge::<TAU>::zero(); 64];
+        let tile = &mut tile[..seeds.len()];
+        engine.sample_in_ball_many(seeds, tile);
+        for (slot, c) in out.iter_mut().zip(tile.iter()) {
+            *slot = SparseChallenge::widen(c);
+        }
+    }
+    match set {
+        Set::S44 => run::<39>(engine, seeds, out),
+        Set::S65 => run::<49>(engine, seeds, out),
+        Set::S87 => run::<60>(engine, seeds, out),
+    }
+}
+
+/// The verifier's public data of a batch of a parameter set with polynomial lanes, from the
+/// `(pk, M, c~)` triples (module docs): the distinct keys (cached, or decoded with `tr`),
+/// `mu` and the sparse `c` of every record. Fresh keys borrow their `pk` from the triples.
+#[derive(Clone, Debug)]
+pub struct LaneStreamedPublic<'a> {
+    set: Set,
+    k: usize,
+    l: usize,
+    padded: usize,
+    /// Every distinct key.
+    keys: Vec<StreamKey<'a>>,
+    /// The key of every live record.
+    key_of: Vec<usize>,
+    /// `mu_i` of every live record.
+    mu: Vec<[u8; TR_BYTES]>,
+    /// `c_i` of every live record.
+    challenges: Vec<SparseChallenge>,
+}
+
+impl<'a> LaneStreamedPublic<'a> {
+    /// The verifier's data from `(pk, M, c~)` triples (pure mode, empty context): per distinct
+    /// `pk` its `cache` entry, or `pkDecode` and `tr = H(pk)` (eight keys per multi-lane
+    /// call); per record `mu = H(tr || 0 || 0 || M)` and `SampleInBall(c~)` (64 records per
+    /// call).
+    ///
+    /// # Errors
+    /// On a batch size outside `1..=2^15` or a public key of the wrong length (a record
+    /// signed under it).
+    ///
+    /// # Panics
+    /// If `cache` holds another parameter set.
+    pub fn prepare<P: ParamSet>(
+        inputs: &[(&'a [u8], &[u8], P::CTilde)],
+        cache: Option<&LaneKeyCache>,
+    ) -> Result<Self, InstanceError>
+    where
+        P::CTilde: Sync,
+    {
+        let geom = Geometry::<P>::new_for(inputs.len()).map_err(InstanceError::Geometry)?;
+        if let Some(cache) = cache {
+            assert_eq!(cache.set, P::SET, "a cache of the batch's parameter set");
+        }
+        let engine = agg_mldsa_simd::engine();
+        let (distinct, key_of) = distinct_keys(inputs);
+        let keys: Vec<StreamKey<'a>> = distinct
+            .par_chunks(8)
+            .map(|tile| -> Result<Vec<StreamKey<'a>>, InstanceError> {
+                let mut keys = Vec::with_capacity(tile.len());
+                let mut fresh = Vec::with_capacity(tile.len());
+                for (pk, records) in tile {
+                    let key = match cache.and_then(|c| c.get(pk)) {
+                        // The length check keeps the error of pkDecode for any cache content.
+                        Some(cached) if pk.len() == P::PK_BYTES => StreamKey::Cached(cached),
+                        _ => {
+                            let decoded = pk_decode_for::<P>(pk).ok_or(InstanceError::PublicKey(records[0]))?;
+                            fresh.push(keys.len());
+                            StreamKey::Fresh(FreshKey {
+                                pk,
+                                tr: [0; TR_BYTES],
+                                t1: (0..P::K).map(|rho| decoded.t1[rho]).collect(),
+                            })
+                        }
+                    };
+                    keys.push(key);
+                }
+                if !fresh.is_empty() {
+                    let inputs: Vec<[&[u8]; 4]> = fresh
+                        .iter()
+                        .map(|&at| match &keys[at] {
+                            StreamKey::Fresh(key) => [key.pk, &[], &[], &[]],
+                            StreamKey::Cached(_) => unreachable!("a fresh key"),
+                        })
+                        .collect();
+                    let mut digests = [0_u8; 8 * TR_BYTES];
+                    let digests = &mut digests[..fresh.len() * TR_BYTES];
+                    engine.shake256_many(&inputs, TR_BYTES, digests);
+                    for (&at, digest) in fresh.iter().zip(digests.chunks_exact(TR_BYTES)) {
+                        if let StreamKey::Fresh(key) = &mut keys[at] {
+                            key.tr.copy_from_slice(digest);
+                        }
+                    }
+                }
+                Ok(keys)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut mu = vec![[0_u8; TR_BYTES]; inputs.len()];
+        let mut challenges = vec![SparseChallenge::ZERO; inputs.len()];
+        mu.par_chunks_mut(64)
+            .zip(challenges.par_chunks_mut(64))
+            .zip(inputs.par_chunks(64).zip(key_of.par_chunks(64)))
+            .for_each(|((mu, challenges), (tile, key_tile))| {
+                let mu_inputs: Vec<[&[u8]; 4]> = tile
+                    .iter()
+                    .zip(key_tile)
+                    .map(|(&(_, msg, _), &key)| [&keys[key].tr()[..], &[0_u8, 0_u8][..], &[][..], msg])
+                    .collect();
+                engine.shake256_many(&mu_inputs, TR_BYTES, mu.as_flattened_mut());
+                let seeds: Vec<&[u8]> = tile.iter().map(|(_, _, c)| c.as_ref()).collect();
+                sample_in_ball_tile(engine, P::SET, &seeds, challenges);
+            });
+        Ok(Self {
+            set: P::SET,
+            k: P::K,
+            l: P::L,
+            padded: geom.n_star,
+            keys,
+            key_of,
+            mu,
+            challenges,
+        })
+    }
+
+    /// The parameter set.
+    #[must_use]
+    pub const fn set(&self) -> Set {
+        self.set
+    }
+
+    /// `mu_i` of every live record.
+    #[must_use]
+    pub fn mu(&self) -> &[[u8; TR_BYTES]] {
+        &self.mu
+    }
+
+    /// Live records `N`.
+    #[must_use]
+    pub fn records(&self) -> usize {
+        self.key_of.len()
+    }
+
+    /// Distinct keys not found in the cache (expanded by [`Self::ring_weights_at`]).
+    #[must_use]
+    pub fn expanded_keys(&self) -> usize {
+        self.keys.iter().filter(|key| matches!(key, StreamKey::Fresh(_))).count()
+    }
+
+    /// `c_i t1_i` of live record `i`, one row per `rho`, into `out`.
+    fn ct_rows(&self, engine: &agg_mldsa_simd::Engine, i: usize, out: &mut [[i32; N]]) {
+        let (c, t1) = (&self.challenges[i], self.keys[self.key_of[i]].t1());
+        match self.set {
+            Set::S44 => engine.sparse_ct_slice(&c.narrow::<39>(), t1, 0, out),
+            Set::S65 => engine.sparse_ct_slice(&c.narrow::<49>(), t1, 0, out),
+            Set::S87 => engine.sparse_ct_slice(&c.narrow::<60>(), t1, 0, out),
+        }
+    }
+
+    /// `T_i` of live record `i`, one row per `rho` (recomputed).
+    #[must_use]
+    pub fn t_rows(&self, i: usize) -> Vec<[i32; N]> {
+        let mut rows = vec![[0_i32; N]; self.k];
+        self.ct_rows(agg_mldsa_simd::engine(), i, &mut rows);
+        let d = agg_witness::dispatch_set!(self.set, |P| P::D);
+        rows.iter_mut().flatten().for_each(|x| *x <<= d);
+        rows
+    }
+
+    /// The point split `(r_coef, r_sig)` of a main-domain point `(j, i)`.
+    fn split<'p>(&self, point: &'p [E]) -> (&'p [E], &'p [E]) {
+        assert_eq!(
+            point.len(),
+            COEF_VARS + self.padded.trailing_zeros() as usize,
+            "a main-domain point (j, i)"
+        );
+        point.split_at(COEF_VARS)
+    }
+
+    /// `T~_rho(r)` for every row `rho` ([`LanePublicData::t_evaluations`]), with `c_i t1_i`
+    /// recomputed per record on the SIMD engine.
+    #[must_use]
+    pub fn t_evaluations(&self, point: &[E]) -> Vec<E> {
+        let engine = agg_mldsa_simd::engine();
+        let d = agg_witness::dispatch_set!(self.set, |P| P::D);
+        t_evaluations_by(self.records(), self.k, d, self.split(point), |i, out| {
+            self.ct_rows(engine, i, out);
+            true
+        })
+    }
+
+    /// `w_A^(s)(r3)` for every column `s` ([`LanePublicData::ring_weights_at`]): one dot
+    /// product with `Lambda` per key, row and column, then one product per record and
+    /// column. Uncached keys are expanded here in tiles of eight (`ExpandA`, inverse NTTs);
+    /// with `cache` their expansions are added to it.
+    ///
+    /// # Panics
+    /// If `gammas` does not have `k` entries, a point is not a main-domain point, or `cache`
+    /// holds another parameter set.
+    #[must_use]
+    pub fn ring_weights_at(&self, r2: &[E], r3: &[E], gammas: &[E], mut cache: Option<&mut LaneKeyCache>) -> Vec<E> {
+        assert_eq!(gammas.len(), self.k, "one coefficient per row");
+        if let Some(cache) = cache.as_ref() {
+            assert_eq!(cache.set, self.set, "a cache of the batch's parameter set");
+        }
+        let (coef2, sig2) = self.split(r2);
+        let (coef3, sig3) = self.split(r3);
+        let lambda = eq_correlation(coef2, coef3);
+        let (eq2, eq3) = (eq_table(sig2), eq_table(sig3));
+        let lambda_planes = agg_simd::buf::KPlanes::from_fn(N, |j| lambda[j]);
+        let keep = cache.is_some();
+        let tiles: Vec<(Vec<E>, Vec<Arc<LaneKey>>)> = match self.set {
+            Set::S65 => self.key_weights::<6, 5>(&lambda_planes, gammas, keep),
+            Set::S87 => self.key_weights::<8, 7>(&lambda_planes, gammas, keep),
+            Set::S44 => self.key_weights::<4, 4>(&lambda_planes, gammas, keep),
+        };
+        let mut per_key = Vec::with_capacity(self.keys.len() * self.l);
+        for (weights, fresh) in tiles {
+            per_key.extend(weights);
+            if let Some(cache) = cache.as_deref_mut() {
+                for key in fresh {
+                    cache.insert(key);
+                }
+            }
+        }
+        let l = self.l;
+        let mut out = vec![E::zero(); l];
+        for (i, &key) in self.key_of.iter().enumerate() {
+            let weight = eq2[i] * eq3[i];
+            for (slot, &value) in out.iter_mut().zip(&per_key[key * l..(key + 1) * l]) {
+                *slot += weight * value;
+            }
+        }
+        out
+    }
+
+    /// Per tile of eight keys: `sum_rho gamma_rho <A[rho][s], Lambda>` for every key and
+    /// column `s` (key-major), and with `keep` the expansions of the tile's uncached keys.
+    fn key_weights<const K: usize, const L: usize>(
+        &self,
+        lambda: &agg_simd::buf::KPlanes,
+        gammas: &[E],
+        keep: bool,
+    ) -> Vec<(Vec<E>, Vec<Arc<LaneKey>>)> {
+        assert_eq!((K, L), (self.k, self.l), "the set's matrix dimensions");
+        let engine = agg_mldsa_simd::engine();
+        // `A` entries are centered mod q (`|A| < 2^22`), within the kernel's `2^51` bound.
+        let dot = |row: &[i32], ints: &mut [i64; N]| -> E {
+            for (x, &entry) in ints.iter_mut().zip(row) {
+                *x = i64::from(entry);
+            }
+            agg_simd::dot::k_int_dot(lambda.planes(), ints)
+        };
+        self.keys
+            .par_chunks(8)
+            .map_init(
+                || vec![ExpandedA::<K, L>::zero(); 8],
+                |expanded, tile| {
+                    let rhos: Vec<[u8; 32]> = tile
+                        .iter()
+                        .filter_map(|key| match key {
+                            StreamKey::Fresh(key) => Some(key.pk[..32].try_into().expect("rho")),
+                            StreamKey::Cached(_) => None,
+                        })
+                        .collect();
+                    let expanded = &mut expanded[..rhos.len()];
+                    if !rhos.is_empty() {
+                        engine.expand_a_many_kl::<K, L>(&rhos, expanded);
+                    }
+                    let mut expanded = expanded.iter_mut();
+                    let mut ints = [0_i64; N];
+                    let mut weights = Vec::with_capacity(tile.len() * L);
+                    let mut fresh_keys = Vec::new();
+                    for key in tile {
+                        match key {
+                            StreamKey::Cached(key) => {
+                                for s in 0..L {
+                                    weights.push((0..K).fold(E::zero(), |acc, rho| {
+                                        acc + gammas[rho] * dot(&key.a[(rho * L + s) * N..(rho * L + s + 1) * N], &mut ints)
+                                    }));
+                                }
+                            }
+                            StreamKey::Fresh(fresh) => {
+                                let a = &mut expanded.next().expect("one expansion per fresh key").a_hat;
+                                for poly in a.iter_mut().flatten() {
+                                    engine.intt(agg_mldsa_simd::Prime::Q, poly, Scale::Plain, Form::Centered);
+                                }
+                                for s in 0..L {
+                                    weights.push((0..K).fold(E::zero(), |acc, rho| {
+                                        acc + gammas[rho] * dot(&a[rho][s].0, &mut ints)
+                                    }));
+                                }
+                                if keep {
+                                    let mut flat = Vec::with_capacity(K * L * N);
+                                    for poly in a.iter().flatten() {
+                                        flat.extend_from_slice(&poly.0);
+                                    }
+                                    fresh_keys.push(Arc::new(LaneKey {
+                                        set: self.set,
+                                        pk: fresh.pk.to_vec(),
+                                        tr: fresh.tr,
+                                        t1: fresh.t1.to_vec(),
+                                        a: flat,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                    (weights, fresh_keys)
+                },
+            )
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,8 +862,8 @@ mod tests {
         }
     }
 
-    /// The verifier's data from `(pk, M, c~)` equals the prover's: the same keys, `mu`, `T`
-    /// rows and public evaluations, with and without a warm cache.
+    /// The verifier's data from `(pk, M, c~)` equals the prover's: the same `mu`, `T` rows,
+    /// public evaluations and (in a cache) keys, uncached and with a cold and a warm cache.
     fn prepared_data_equals_the_instance_data<P: ParamSet>()
     where
         P::CTilde: Sync,
@@ -589,32 +876,34 @@ mod tests {
             .iter()
             .map(|r| (r.pk.as_slice(), r.msg.as_slice(), P::c_tilde_from_slice(&r.sig)))
             .collect();
-        let mut cache = LaneKeyCache::new(P::SET);
-        let cold = LanePublicData::prepare::<P>(&inputs, Some(&mut cache)).unwrap();
-        assert_eq!((cold.expanded_keys(), cache.len()), (6, 6));
-        let warm = LanePublicData::prepare::<P>(&inputs, Some(&mut cache)).unwrap();
-        assert_eq!(warm.expanded_keys(), 0);
         let mut rng = SplitMix64::new(93);
         let vars = COEF_VARS + prover.padded_records().trailing_zeros() as usize;
         let (r2, r3, gammas) = (point(&mut rng, vars), point(&mut rng, vars), point(&mut rng, P::K));
-        for verifier in [&cold, &warm] {
+        let expected = (prover.t_evaluations(&r2), prover.ring_weights_at(&r2, &r3, &gammas));
+        // Uncached, then a cold cache (filled by the pass), then the warm cache.
+        let mut cache = LaneKeyCache::new(P::SET);
+        for (round, use_cache) in [(0, false), (1, true), (2, true)] {
+            let verifier = LaneStreamedPublic::prepare::<P>(&inputs, use_cache.then_some(&cache)).unwrap();
             assert_eq!(verifier.set(), P::SET);
+            assert_eq!(verifier.expanded_keys(), if round == 2 { 0 } else { 6 }, "round {round}");
             assert_eq!(verifier.mu(), prover.mu());
-            assert_eq!(verifier.keys().len(), prover.keys().len());
-            for (a, b) in verifier.keys().iter().zip(prover.keys()) {
-                assert_eq!(**a, **b);
-            }
             for i in 0..records.len() {
                 assert_eq!(verifier.t_rows(i), prover.t_rows(i), "record {i}");
             }
-            assert_eq!(verifier.t_evaluations(&r2), prover.t_evaluations(&r2));
-            assert_eq!(verifier.ring_weights_at(&r2, &r3, &gammas), prover.ring_weights_at(&r2, &r3, &gammas));
+            let t = verifier.t_evaluations(&r2);
+            let w = verifier.ring_weights_at(&r2, &r3, &gammas, use_cache.then_some(&mut cache));
+            assert_eq!((t, w), expected, "round {round}");
+            assert_eq!(cache.len(), if round == 0 { 0 } else { 6 }, "round {round}");
+        }
+        // The cached expansions are the prover's keys.
+        for key in prover.keys() {
+            assert_eq!(*cache.get(&key.pk).expect("cached"), **key);
         }
         // A key of the wrong length is refused at its first record.
         let mut bad = inputs.clone();
         let short = &records[3].pk[..10];
         bad[3].0 = short;
-        assert_eq!(LanePublicData::prepare::<P>(&bad, None).err(), Some(InstanceError::PublicKey(3)));
+        assert_eq!(LaneStreamedPublic::prepare::<P>(&bad, None).err(), Some(InstanceError::PublicKey(3)));
     }
 
     #[test]

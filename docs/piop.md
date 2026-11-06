@@ -703,4 +703,4 @@ level-1 and level-2 bridge domains as suffixes of the main domain, so `N* >= 32`
 parser refuses a header of these sets with `N < 17` (`WireError::Records`), and
 `verify_piop_lanes` rejects a manifest of fewer records (`VerifyError::RecordCount`). Entry points: `prover::main_tables_for`,
 `prover::prove_lanes_with_tables_using` and `prove_piop_lanes`; `verifier::verify_lanes_timed`
-and `verify_piop_lanes`, with `lane_public::LanePublicData` for the public data.
+and `verify_piop_lanes`, with `lane_public::LanePublicData` for the prover's public data and `lane_public::LaneStreamedPublic` for the verifier's.
