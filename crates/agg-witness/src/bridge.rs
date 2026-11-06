@@ -79,8 +79,13 @@ impl SparseMatrix {
 
     /// Row weights.
     pub fn row_weights(&self) -> Vec<u32> {
+        self.row_weights_of(self.cols)
+    }
+
+    /// Row weights over the first `cols` columns.
+    pub fn row_weights_of(&self, cols: usize) -> Vec<u32> {
         let mut w = vec![0u32; self.rows];
-        for &r in &self.entries {
+        for &r in &self.entries[..cols * self.k] {
             w[r as usize] += 1;
         }
         w
@@ -129,18 +134,22 @@ impl BridgeMatrices {
         }
     }
 
-    /// True when the shapes are the production ones.
+    /// True when the shapes are the production ones. `M_2` may hold its used columns only
+    /// (`ZETA2_USED` of `J2`, as the seed derivation produces it) or all of them.
     pub fn has_spec_shapes(&self) -> bool {
         let s = |m: &SparseMatrix| (m.rows, m.cols, m.k);
-        s(&self.m1) == (M1, J1, K1) && s(&self.m2) == (M2, J2, K2) && s(&self.m3) == (M3, J3, K3)
+        s(&self.m1) == (M1, J1, K1)
+            && (self.m2.rows, self.m2.k) == (M2, K2)
+            && (self.m2.cols == ZETA2_USED || self.m2.cols == J2)
+            && s(&self.m3) == (M3, J3, K3)
     }
 
-    /// Honest-prover abort condition: a row weight above the cap.
+    /// Honest-prover abort condition: a row weight over the used columns above the cap.
     pub fn row_weights_ok(&self) -> bool {
-        let max = |m: &SparseMatrix| m.row_weights().into_iter().max().unwrap_or(0);
-        max(&self.m1) <= ROW_WEIGHT_MAX_12
-            && max(&self.m2) <= ROW_WEIGHT_MAX_12
-            && max(&self.m3) <= ROW_WEIGHT_MAX_3
+        let max = |w: Vec<u32>| w.into_iter().max().unwrap_or(0);
+        max(self.m1.row_weights()) <= ROW_WEIGHT_MAX_12
+            && max(self.m2.row_weights_of(ZETA2_USED)) <= ROW_WEIGHT_MAX_12
+            && max(self.m3.row_weights()) <= ROW_WEIGHT_MAX_3
     }
 }
 

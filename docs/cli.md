@@ -87,7 +87,7 @@ bridge domains as its suffixes, so `N* >= 32`); the aggregator refuses fewer
 (`AggregateError::Count`) and the verifier rejects them (`VerifyError::RecordCount`). The
 verifier takes the set from its caller, never from the header (an aggregate of another set
 is `VerifyError::ParamSet`), runs `verifier::verify_lanes_timed` for 65 and 87, and builds
-the lane public data from `(pk, M, c~)` (`LanePublicData::prepare`), with expanded keys
+the lane public data from `(pk, M, c~)` (`LaneStreamedPublic::prepare`; `A` of an uncached key is expanded inside the public pass), with expanded keys
 from a `LaneKeyCache` when given (`AggregateVerifier::verify_with` and `KeyCacheMut`). The
 Keccak side reads `c~` as concatenated bytes of the set's width (`SegmentContext::c_tilde`).
 The hooks that build the Flock witness from ML-DSA-44 records (`tamper_flock_records`,

@@ -289,14 +289,13 @@ events 2, 3, 5 and 6 are always present with `S` atoms.
   only). Choices the spec leaves open: the `LE64(t)` of the hash input is the level number
   `t = 1, 2, 3`; a column's rows are stored in the order drawn; the XOF is read in 64-byte
   chunks (the word stream is the same). A known-answer test (column 0 of each level for
-  `sd = 0^32`) was cross-checked against an independent pure-Python cSHAKE256. Cost: the
-  2 x 2^19 + 49,152 columns take one Keccak-f each after a shared prefix state, and the
-  matrices take 62 MB in each of prover and verifier. Measured on this machine (release,
-  one test process, not a benchmark): median 150 ms over 7 derivations on 7
-  threads (134 to 215 ms), 0.94 s on one thread. This is a fixed verifier cost (step
+  `sd = 0^32`) was cross-checked against an independent pure-Python cSHAKE256. Cost: only
+  the used columns are derived (`2^19 + 2^17 + 49,152` for ML-DSA-44; level 2's columns
+  from `J_2^used` on are never read), one Keccak-f each after a shared prefix state, eight
+  columns per multi-way permutation (`agg_mldsa_simd::Engine::keccak_f8`), and the
+  matrices take 40 MB in each of prover and verifier. This is a fixed verifier cost (step
   `matrices`) that the estimates of spec Section 11 do not list; at small `N` it dominates
-  mode-B verification. Reducing it needs a spec change (fewer XOF calls per column), not
-  made here.
+  mode-B verification.
 - Test stand-ins: `prover::FixedMatrices` (caller-supplied matrices whatever the seed),
   `prover::NoKeccak` and `verifier::NoKeccakVerifier` (empty Flock items, Flock profile 0)
   exist only in unit tests and with the crate feature `test-hooks`, which the integration

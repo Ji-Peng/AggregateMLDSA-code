@@ -126,6 +126,7 @@ dependencies = [
 name = "agg-bridge"
 version = "0.1.0"
 dependencies = [
+ "agg-mldsa-simd",
  "agg-simd",
  "agg-witness",
  "flock-core",

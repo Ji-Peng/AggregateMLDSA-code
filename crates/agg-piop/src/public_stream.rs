@@ -107,9 +107,17 @@ pub struct StreamRecord {
     pub mu: [u8; TR_BYTES],
     /// `c~` from the aggregate.
     pub c_tilde: [u8; C_TILDE_BYTES],
-    challenge: Challenge,
-    /// The same challenge in the packed form of the engine kernels.
+    /// `c = SampleInBall(c~)` in the packed form of the engine kernels (no heap part, so the
+    /// records are one allocation to build and to free).
     packed: Challenge39,
+}
+
+impl StreamRecord {
+    /// `c = SampleInBall(c~)`.
+    #[must_use]
+    pub fn challenge(&self) -> Challenge {
+        challenge_from_c39(&self.packed)
+    }
 }
 
 /// What the public pass returns.
@@ -319,12 +327,10 @@ impl StreamedPublic {
                 (0..count).map(move |j| {
                     let mut mu = [0u8; TR_BYTES];
                     mu.copy_from_slice(&mu_out[j * TR_BYTES..(j + 1) * TR_BYTES]);
-                    let challenge = challenge_from_c39(&c39_out[j]);
                     StreamRecord {
                         key: key_tile[j],
                         mu,
                         c_tilde: input_tile[j].2,
-                        challenge,
                         packed: c39_out[j],
                     }
                 })
@@ -360,7 +366,7 @@ impl StreamedPublic {
     #[must_use]
     pub fn t(&self, i: usize) -> Box<crate::public_data::PublicT> {
         let record = &self.records[i];
-        Box::new(sparse_t(&record.challenge, self.keys[record.key].t1()))
+        Box::new(sparse_t(&record.challenge(), self.keys[record.key].t1()))
     }
 
     /// `T(r^(2))` and `w_A(r^(3))` in one streamed pass (module docs). New
@@ -832,7 +838,7 @@ mod tests {
                 assert_eq!(key.pk(), own.as_slice());
                 assert_eq!(key.is_cached(), cache.is_some() && *own == victim);
                 assert_eq!(*public.t(i), *stored.t(i));
-                assert_ne!(*public.t(i), sparse_t(&record.challenge, foreign));
+                assert_ne!(*public.t(i), sparse_t(&record.challenge(), foreign));
                 assert_eq!(record.mu, instance.records[i].mu);
             }
         }
@@ -955,7 +961,7 @@ mod tests {
             .par_iter()
             .enumerate()
             .map(|(i, r)| {
-                let ct = base_sparse_ct(&r.challenge, s.keys[r.key].t1());
+                let ct = base_sparse_ct(&r.challenge(), s.keys[r.key].t1());
                 eq_sig2[i] * eq_pos2.dot::<16>(ct.as_flattened())
             })
             .reduce(E::zero, |a, b| a + b);
@@ -984,7 +990,7 @@ mod tests {
             .enumerate()
             .map(|(i, r)| {
                 let ct = match e {
-                    None => crate::public_data::sparse_ct(&r.challenge, s.keys[r.key].t1()),
+                    None => crate::public_data::sparse_ct(&r.challenge(), s.keys[r.key].t1()),
                     Some(e) => {
                         let mut ct = [[0_i32; N]; K];
                         e.sparse_ct(&r.packed, s.keys[r.key].t1(), 0, &mut ct);

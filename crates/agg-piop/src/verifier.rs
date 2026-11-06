@@ -1,14 +1,18 @@
 //! The aggregate verifier: parse, precompute the light public data, replay the transcript,
 //! run the Keccak side's checks, verify the three stages with the public weights, stream the
 //! public matrices once, and verify the Akita opening. Every step is timed
-//! ([`VerifyTimings`]); [`verify_timed`] returns the outcome with the timings.
+//! ([`VerifyTimings`]); [`verify_timed`] returns the outcome with the timings. The `keccak`
+//! step runs beside the steps from `lookup` to `opening` (it needs only the matrices and the
+//! final-vector step), so the step times overlap and their sum exceeds the total. A Keccak-side
+//! rejection is still reported first, but only after the PIOP side has finished: rejecting a
+//! proof costs about as much as accepting one.
 //!
 //! Steps:
 //!
 //! | Step | Work |
 //! | --- | --- |
-//! | `parse` | wire parse (shape from `N`), manifest, PCS verifier from the plan's seed |
-//! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding |
+//! | `parse` | wire parse (shape from `N`), manifest |
+//! | `public_data` | `pkDecode`, `tr` per key, `mu`, `SampleInBall` per record ([`StreamedPublic`]); record binding beside them; the PCS verifier from the plan's seed beside both |
 //! | `transcript` | the seven Akita commitments and the Flock commitments parsed and absorbed, `sd`, `fs_sigma`, `Y_sigma` and the share items |
 //! | `matrices` | `M_1, M_2, M_3` from `sd` ([`BridgeDerivation`]; [`SeededMatrices`](crate::prover::SeededMatrices) in mode A) |
 //! | `keccak` | per segment [`KeccakVerifier::verify`] (Flock sub-proof, or mode B's public-bit checks); the transcript never absorbs the proof items |
@@ -18,7 +22,7 @@
 //! | `stage3_rounds` | stage-3 rounds and terminal claims, ring claim deferred |
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check |
-//! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits) |
+//! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits); the public data is freed beside this step and the opening (`rayon::join`) |
 //! | `opening` | the batched Akita opening of every committed polynomial (53 claims for ML-DSA-44 under H-u) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and
@@ -45,7 +49,7 @@ use crate::opening::{opening_claims, parse_commitment};
 use crate::pcs::{verifier_for, PcsError};
 use crate::pow::{KeccakPlan, PowPlan};
 use crate::prover::{BridgeDerivation, PiopProof};
-use crate::lane_public::{LaneKeyCache, LanePublicData};
+use crate::lane_public::{LaneKeyCache, LaneStreamedPublic};
 use crate::public_data::KeyCache;
 use crate::public_stream::StreamedPublic;
 use crate::stage::{suffix, Points, StageError};
@@ -100,8 +104,8 @@ pub struct BitsContext<'a> {
     pub claims: [E; W1_BITS],
 }
 
-/// The Keccak argument's verifier side.
-pub trait KeccakVerifier {
+/// The Keccak argument's verifier side (shared with the PIOP side, which runs beside it).
+pub trait KeccakVerifier: Sync {
     /// The Flock profile this side verifies (bound in the instance record). [`verify`] refuses to run
     /// with a different requested profile.
     fn profile(&self) -> FlockProfile;
@@ -116,8 +120,9 @@ pub trait KeccakVerifier {
 
     /// Verify segment `sigma`: the sub-proof (which the transcript never absorbs) against its
     /// commitment, challenger seed, public inputs, final vector, share item and the final-vector
-    /// record digest. The verifier calls it right after replaying the final-vector step: the outcome does
-    /// not depend on the PIOP, and an early check gives a precise rejection.
+    /// record digest. The verifier calls it for `sigma = 0, 1, ...` in order, right after
+    /// replaying the final-vector step and beside the PIOP: the outcome does not depend on the
+    /// PIOP, and a rejection here is reported before any rejection by the PIOP.
     fn verify(&self, segment: &SegmentContext<'_>) -> bool;
 
     /// An optional check of the committed bits at `r^(3)`; the Flock side has none.
@@ -342,12 +347,13 @@ pub struct VerifiedAggregate {
 }
 
 /// Wall time of each verifier step (module table). A rejected run stops at the failing
-/// step; later steps stay zero.
+/// step; later steps stay zero (the `keccak` step, which runs beside the PIOP steps, is
+/// timed whatever the PIOP's outcome).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VerifyTimings {
-    /// Wire parse, manifest, PCS verifier.
+    /// Wire parse, manifest.
     pub parse: Duration,
-    /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding.
+    /// `pkDecode`, `tr`, `mu`, `SampleInBall`; record binding; the PCS verifier.
     pub public_data: Duration,
     /// The transcript through the final-vector step without the matrices.
     pub transcript: Duration,
@@ -521,19 +527,19 @@ enum Keys<'c> {
 }
 
 /// The public data of the verified batch.
-enum Public<'c> {
+enum Public<'a, 'c> {
     /// ML-DSA-44: the streamed rows and the key cache the public pass fills.
     Rows(StreamedPublic, Option<&'c mut KeyCache>),
-    /// A set with polynomial lanes (keys already expanded or taken from the cache).
-    Lanes(LanePublicData),
+    /// A set with polynomial lanes and the key cache the public pass fills.
+    Lanes(LaneStreamedPublic<'a>, Option<&'c mut LaneKeyCache>),
 }
 
 /// The lane public data of `(pk_i, M_i, c~_i)` and the record digest.
-fn prepare_lanes<P: ParamSet>(
-    records: &[(&[u8], &[u8])],
+fn prepare_lanes<'a, P: ParamSet>(
+    records: &[(&'a [u8], &[u8])],
     c_tilde: &[Vec<u8>],
-    cache: Option<&mut LaneKeyCache>,
-) -> Result<(LanePublicData, [u8; 32]), VerifyError>
+    cache: Option<&LaneKeyCache>,
+) -> Result<(LaneStreamedPublic<'a>, [u8; 32]), VerifyError>
 where
     P::CTilde: Sync,
 {
@@ -541,16 +547,71 @@ where
     if c_tilde.len() != records.len() || c_tilde.iter().any(|c| c.len() != P::C_TILDE_BYTES) {
         return Err(VerifyError::RecordCount);
     }
-    let inputs: Vec<(&[u8], &[u8], P::CTilde)> = records
+    let inputs: Vec<(&'a [u8], &[u8], P::CTilde)> = records
         .iter()
         .zip(c_tilde)
         .map(|(&(pk, msg), c)| (pk, msg, P::c_tilde_from_slice(c)))
         .collect();
-    let public = LanePublicData::prepare::<P>(&inputs, cache).map_err(|e| match e {
+    // The record binding reads the triples only: it is hashed beside the key preparation.
+    let (public, digest) = rayon::join(
+        || LaneStreamedPublic::prepare::<P>(&inputs, cache),
+        || public_records_binding(&inputs),
+    );
+    let public = public.map_err(|e| match e {
         InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
         InstanceError::Geometry(_) => VerifyError::RecordCount,
     })?;
-    Ok((public, public_records_binding(&inputs)))
+    Ok((public, digest))
+}
+
+/// What the public-data step returns: the public data with its key cache, the Keccak side's
+/// geometry, the record digest and `mu` per live record.
+type Prepared<'a, 'c> = (Public<'a, 'c>, Geometry, [u8; 32], Vec<[u8; TR_BYTES]>);
+
+/// The light public data of the batch and the record binding (the `public_data` step).
+fn prepare_public<'a, 'c>(
+    set: Set,
+    n: usize,
+    records: &[(&'a [u8], &[u8])],
+    c_tilde: &[Vec<u8>],
+    keys: Keys<'c>,
+) -> Result<Prepared<'a, 'c>, VerifyError> {
+    Ok(match keys {
+        Keys::Rows(cache) => {
+            let c_tilde: Vec<[u8; C_TILDE_BYTES]> = c_tilde
+                .iter()
+                .map(|c| c.as_slice().try_into().expect("checked above: 32 bytes per ML-DSA-44 record"))
+                .collect();
+            let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
+                .iter()
+                .zip(&c_tilde)
+                .map(|(&(pk, msg), &c)| (pk, msg, c))
+                .collect();
+            // The record binding reads the triples only: it is hashed beside the key preparation.
+            let (public, digest) = rayon::join(
+                || StreamedPublic::prepare(&inputs, cache.as_deref()),
+                || public_records_binding(&inputs),
+            );
+            let public = public.map_err(|e| match e {
+                InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
+                InstanceError::Geometry(_) => VerifyError::RecordCount,
+            })?;
+            let geometry = public.geometry();
+            let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
+            (Public::Rows(public, cache), geometry, digest, mu)
+        }
+        Keys::Lanes(cache) => {
+            let (public, digest) = match set {
+                Set::S65 => prepare_lanes::<Set65>(records, c_tilde, cache.as_deref())?,
+                Set::S87 => prepare_lanes::<Set87>(records, c_tilde, cache.as_deref())?,
+                Set::S44 => unreachable!("ML-DSA-44 is verified on its rows"),
+            };
+            // The Keccak side's geometry depends on the record count only.
+            let geometry = Geometry::new(n).map_err(|_| VerifyError::RecordCount)?;
+            let mu = public.mu().to_vec();
+            (Public::Lanes(public, cache), geometry, digest, mu)
+        }
+    })
 }
 
 /// A running clock for step timings.
@@ -613,45 +674,18 @@ fn run(
     let manifest = CommitmentManifest::for_set(set, n, relation)
         .map_err(|e| VerifyError::Opening(PcsError::Plan(e)))?;
     let segments = manifest.segments();
-    let pcs = verifier_for(&manifest).map_err(VerifyError::Opening)?;
-    let plan = pcs.plan();
     timings.parse = clock.lap();
 
-    // Light public data and the record binding.
+    // Light public data and the record binding, beside the PCS verifier's setup (which
+    // depends on the manifest only); a setup error is reported first, as when it ran first.
     let c_tilde: Vec<u8> = proof.c_tilde.concat();
-    let (public, geometry, digest, mu) = match keys {
-        Keys::Rows(cache) => {
-            let c_tilde: Vec<[u8; C_TILDE_BYTES]> = proof
-                .c_tilde
-                .iter()
-                .map(|c| c.as_slice().try_into().expect("checked above: 32 bytes per ML-DSA-44 record"))
-                .collect();
-            let inputs: Vec<(&[u8], &[u8], [u8; C_TILDE_BYTES])> = records
-                .iter()
-                .zip(&c_tilde)
-                .map(|(&(pk, msg), &c)| (pk, msg, c))
-                .collect();
-            let public = StreamedPublic::prepare(&inputs, cache.as_deref()).map_err(|e| match e {
-                InstanceError::PublicKey(i) => VerifyError::PublicKey(i),
-                InstanceError::Geometry(_) => VerifyError::RecordCount,
-            })?;
-            let geometry = public.geometry();
-            let digest = public_records_binding(&inputs);
-            let mu: Vec<[u8; TR_BYTES]> = public.records().iter().map(|r| r.mu).collect();
-            (Public::Rows(public, cache), geometry, digest, mu)
-        }
-        Keys::Lanes(cache) => {
-            let (public, digest) = match set {
-                Set::S65 => prepare_lanes::<Set65>(records, &proof.c_tilde, cache)?,
-                Set::S87 => prepare_lanes::<Set87>(records, &proof.c_tilde, cache)?,
-                Set::S44 => unreachable!("ML-DSA-44 is verified on its rows"),
-            };
-            // The Keccak side's geometry depends on the record count only.
-            let geometry = Geometry::new(n).map_err(|_| VerifyError::RecordCount)?;
-            let mu = public.mu().to_vec();
-            (Public::Lanes(public), geometry, digest, mu)
-        }
-    };
+    let (pcs, prepared) = rayon::join(
+        || verifier_for(&manifest),
+        || prepare_public(set, n, records, &proof.c_tilde, keys),
+    );
+    let pcs = pcs.map_err(VerifyError::Opening)?;
+    let plan = pcs.plan();
+    let (public, geometry, digest, mu) = prepared?;
     timings.public_data = clock.lap();
 
     // The transcript through the final-vector step; the instance record binds the proof-of-work plan, derived from the public
@@ -704,126 +738,148 @@ fn run(
     let final_bits: Vec<Vec<u8>> = proof.final_vectors.iter().map(unpack_final_vector).collect();
     let y_table: Vec<u8> = final_bits.concat();
     timings.transcript += clock.lap();
-    // The Keccak side per segment, on the final-vector step and the proof items (its outcome
-    // does not depend on the PIOP's challenges, so it is checked first).
-    for (sigma, bits) in final_bits.iter().enumerate() {
-        // A trailing segment may hold padded records only (`2^13 sigma >= N`).
-        let first = (sigma << 13).min(n);
-        let live = first..first + geometry.live_in_segment(sigma);
-        let segment = SegmentContext {
-            sigma,
-            geometry,
-            commitment: &proof.flock_commitments[sigma],
-            seed: &flock_seeds[sigma],
-            bridge_seed: &bridge_seed,
-            mu: &mu[live.clone()],
-            c_tilde: &c_tilde[live.start * width..live.end * width],
-            final_vector: bits,
-            shares: &proof.flock_shares[sigma],
-            record: &flock_record,
-            proof: &proof.flock_proofs[sigma],
-            matrices: &matrices,
-        };
-        if !keccak.verify(&segment) {
-            return Err(VerifyError::Keccak(sigma));
-        }
-    }
-    timings.keccak = clock.lap();
 
-    // The lookup, tau, the pre-stage claims and the stages; the public pass
-    // runs inside stage 3 once r^(3) is known.
-    let piop = PiopProof {
-        lookup: proof.lookup.clone(),
-        multiplicities: proof.multiplicities.clone(),
-        prestage: proof.prestage.clone(),
-        stage1: proof.stage1.clone(),
-        stage2: proof.stage2.clone(),
-        stage3: proof.stage3.clone(),
+    // The Keccak side per segment, on the final-vector step and the proof items, runs beside
+    // the PIOP: its outcome does not depend on the PIOP's challenges and its proof items are
+    // never absorbed. A rejection by the Keccak side takes precedence over one by the PIOP, as
+    // if the Keccak side were checked first.
+    let keccak_side = || -> (Result<(), VerifyError>, Duration) {
+        let started = Instant::now();
+        for (sigma, bits) in final_bits.iter().enumerate() {
+            // A trailing segment may hold padded records only (`2^13 sigma >= N`).
+            let first = (sigma << 13).min(n);
+            let live = first..first + geometry.live_in_segment(sigma);
+            let segment = SegmentContext {
+                sigma,
+                geometry,
+                commitment: &proof.flock_commitments[sigma],
+                seed: &flock_seeds[sigma],
+                bridge_seed: &bridge_seed,
+                mu: &mu[live.clone()],
+                c_tilde: &c_tilde[live.start * width..live.end * width],
+                final_vector: bits,
+                shares: &proof.flock_shares[sigma],
+                record: &flock_record,
+                proof: &proof.flock_proofs[sigma],
+                matrices: &matrices,
+            };
+            if !keccak.verify(&segment) {
+                return (Err(VerifyError::Keccak(sigma)), started.elapsed());
+            }
+        }
+        (Ok(()), started.elapsed())
     };
-    // The public pass: its window and (T time, A time, keys expanded in this run).
-    let mut pass_window = None;
-    let mut pass_result: Option<(Duration, Duration, usize)> = None;
-    let verified = match public {
-        Public::Rows(public, cache) => verify_piop(
-            &manifest,
-            &matrices,
-            &y_table,
-            &piop,
-            &mut transcript,
-            timings,
-            |r2, r3| {
-                let started = Instant::now();
-                let pass = public.pass(r2, r3, cache);
-                pass_window = Some((started, Instant::now()));
-                pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
-                (pass.t_at_r2, pass.ring_weight)
-            },
-        ),
-        Public::Lanes(public) => verify_piop_lanes(
-            &manifest,
-            &matrices,
-            &y_table,
-            &piop,
-            &mut transcript,
-            timings,
-            |r2, r3, gammas| {
-                let started = Instant::now();
-                let t = public.t_evaluations(r2);
-                let middle = Instant::now();
-                let w = public.ring_weights_at(r2, r3, gammas);
-                let finished = Instant::now();
-                pass_window = Some((started, finished));
-                pass_result = Some((middle - started, finished - middle, public.expanded_keys()));
-                (t, w)
-            },
-        ),
-    };
-    clock.0 = verified.stage3_end;
-    match (pass_window, pass_result) {
-        (Some((started, finished)), Some((t_time, a_time, _))) => {
-            timings.stage3_rounds = started - verified.stage3_start;
-            timings.public_t = t_time;
-            timings.public_a = a_time;
-            timings.stage3_terminal = verified.stage3_end - finished;
-        }
-        _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
-    }
-    let (_, stage3, pi_m) = verified.outcome?;
-    let expanded_keys = pass_result.map_or(0, |pass| pass.2);
-
-    // The Flock proofs, checked above by the Keccak side's verifier, are not absorbed: no
-    // PIOP or Akita challenge depends on them, and their own challengers bind them.
-
-    // The Keccak side's check of the committed bits at r^(3) (mode B, ML-DSA-44 only).
-    if set == Set::S44 {
-        let bits = BitsContext {
-            geometry,
-            commitments: &proof.flock_commitments,
-            point: &stage3.point,
-            claims: std::array::from_fn(|t| stage3.claims.column(&manifest, Column::W1Bit(t as u8, 0))),
+    let piop_side = |timings: &mut VerifyTimings| -> Result<(usize, [u8; 32]), VerifyError> {
+        let mut public = public;
+        let mut clock = Lap(Instant::now());
+        // The lookup, tau, the pre-stage claims and the stages; the public pass
+        // runs inside stage 3 once r^(3) is known.
+        let piop = PiopProof {
+            lookup: proof.lookup.clone(),
+            multiplicities: proof.multiplicities.clone(),
+            prestage: proof.prestage.clone(),
+            stage1: proof.stage1.clone(),
+            stage2: proof.stage2.clone(),
+            stage3: proof.stage3.clone(),
         };
-        if !keccak.check_bits(&bits) {
-            return Err(VerifyError::Bits);
+        // The public pass: its window and (T time, A time, keys expanded in this run).
+        let mut pass_window = None;
+        let mut pass_result: Option<(Duration, Duration, usize)> = None;
+        let verified = match &mut public {
+            Public::Rows(public, cache) => verify_piop(
+                &manifest,
+                &matrices,
+                &y_table,
+                &piop,
+                &mut transcript,
+                timings,
+                |r2, r3| {
+                    let started = Instant::now();
+                    let pass = public.pass(r2, r3, cache.as_deref_mut());
+                    pass_window = Some((started, Instant::now()));
+                    pass_result = Some((pass.t_time, pass.a_time, pass.expanded));
+                    (pass.t_at_r2, pass.ring_weight)
+                },
+            ),
+            Public::Lanes(public, cache) => verify_piop_lanes(
+                &manifest,
+                &matrices,
+                &y_table,
+                &piop,
+                &mut transcript,
+                timings,
+                |r2, r3, gammas| {
+                    let started = Instant::now();
+                    let t = public.t_evaluations(r2);
+                    let middle = Instant::now();
+                    let w = public.ring_weights_at(r2, r3, gammas, cache.as_deref_mut());
+                    let finished = Instant::now();
+                    pass_window = Some((started, finished));
+                    pass_result = Some((middle - started, finished - middle, public.expanded_keys()));
+                    (t, w)
+                },
+            ),
+        };
+        clock.0 = verified.stage3_end;
+        match (pass_window, pass_result) {
+            (Some((started, finished)), Some((t_time, a_time, _))) => {
+                timings.stage3_rounds = started - verified.stage3_start;
+                timings.public_t = t_time;
+                timings.public_a = a_time;
+                timings.stage3_terminal = verified.stage3_end - finished;
+            }
+            _ => timings.stage3_rounds = verified.stage3_end - verified.stage3_start,
         }
-    }
-    timings.bits = clock.lap();
+        let expanded_keys = pass_result.map_or(0, |pass| pass.2);
+        // The public data is not read again: it is freed beside the rest of the checks.
+        let (checked, ()) = rayon::join(
+            || -> Result<[u8; 32], VerifyError> {
+                let (_, stage3, pi_m) = verified.outcome?;
+                // The Flock proofs, checked by the Keccak side's verifier, are not absorbed: no
+                // PIOP or Akita challenge depends on them, and their own challengers bind them.
 
-    // The opening.
-    let session = transcript.pcs_session()?;
-    transcript.ensure_complete()?;
-    let claims: [GroupClaim; GROUP_COUNT] = opening_claims(
-        &manifest,
-        &stage3.point,
-        &stage3.claims,
-        &pi_m,
-        &proof.multiplicities,
-    )
-    .map_err(VerifyError::Opening)?;
-    let commitments: [Commitment<BaseField>; GROUP_COUNT] =
-        commitments.try_into().expect("seven commitments");
-    pcs.verify(&commitments, &claims, &proof.opening, &session)
-        .map_err(|e| VerifyError::Opening(PcsError::Commit(e)))?;
-    timings.opening = clock.lap();
+                // The Keccak side's check of the committed bits at r^(3) (mode B, ML-DSA-44 only).
+                if set == Set::S44 {
+                    let bits = BitsContext {
+                        geometry,
+                        commitments: &proof.flock_commitments,
+                        point: &stage3.point,
+                        claims: std::array::from_fn(|t| {
+                            stage3.claims.column(&manifest, Column::W1Bit(t as u8, 0))
+                        }),
+                    };
+                    if !keccak.check_bits(&bits) {
+                        return Err(VerifyError::Bits);
+                    }
+                }
+                timings.bits = clock.lap();
+
+                // The opening.
+                let session = transcript.pcs_session()?;
+                transcript.ensure_complete()?;
+                let claims: [GroupClaim; GROUP_COUNT] = opening_claims(
+                    &manifest,
+                    &stage3.point,
+                    &stage3.claims,
+                    &pi_m,
+                    &proof.multiplicities,
+                )
+                .map_err(VerifyError::Opening)?;
+                let commitments: [Commitment<BaseField>; GROUP_COUNT] =
+                    commitments.try_into().expect("seven commitments");
+                pcs.verify(&commitments, &claims, &proof.opening, &session)
+                    .map_err(|e| VerifyError::Opening(PcsError::Commit(e)))?;
+                timings.opening = clock.lap();
+                Ok(session)
+            },
+            move || drop(public),
+        );
+        checked.map(|session| (expanded_keys, session))
+    };
+    let ((keccak_outcome, keccak_time), piop_outcome) = rayon::join(keccak_side, || piop_side(timings));
+    timings.keccak = keccak_time;
+    keccak_outcome?;
+    let (expanded_keys, session) = piop_outcome?;
     Ok(VerifiedAggregate {
         records: n,
         bridge_seed,
@@ -870,8 +926,8 @@ pub fn verify_piop(
 /// [`verify_piop`] for a parameter set with polynomial lanes (ML-DSA-65, ML-DSA-87):
 /// `public_pass(r^(2), r^(3), gamma_rows)` returns `T~_rho(r^(2))` per row and
 /// `w_A^(s)(r^(3))` per lane of `z` for the ring coefficients `gamma_rows`
-/// (`lane_public::LanePublicData::{t_evaluations, ring_weights_at}` on the data that
-/// `LanePublicData::prepare` builds from the `(pk, M, c~)` triples).
+/// (`lane_public::LaneStreamedPublic::{t_evaluations, ring_weights_at}` on the data that
+/// `LaneStreamedPublic::prepare` builds from the `(pk, M, c~)` triples).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_piop_lanes(
     manifest: &CommitmentManifest,

@@ -6,7 +6,15 @@
 //! `e_t` bits of each word, skip a row already chosen for the column, and stop after `k_t`
 //! distinct rows. Rows are stored in the order drawn. Prover and verifier both derive the
 //! matrices from the transcript's `sd`; neither transmits them.
+//!
+//! A column depends on `(sd, t, zeta)` only, so a matrix may hold a prefix of its columns:
+//! [`derive_matrices_for`] derives the `J_t^used` columns of each level that the bridge reads
+//! (level 2 of the production shapes uses `2^17` or `2^18` of its `2^19` columns) and every
+//! derived column equals the one of the full matrix. Columns are hashed eight at a time on
+//! the process-wide SIMD engine (`agg_mldsa_simd::Engine::keccak_f8`), with the same output on
+//! every backend.
 
+use agg_mldsa_simd::Engine;
 use agg_witness::bridge::{BridgeMatrices, SparseMatrix, M1, M2, M3};
 use rayon::prelude::*;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -122,26 +130,71 @@ impl ColumnHasher {
         block[RATE - 1] ^= 0x80;
         let mut state = self.prefix;
         absorb(&mut state, &block);
-        let mask = (1_u32 << level.rows_log2) - 1;
         let mut filled = 0;
         while filled < out.len() {
             keccak::f1600(&mut state);
-            let mut bytes = [0_u8; RATE];
-            for (chunk, lane) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&state) {
-                *chunk = lane.to_le_bytes();
+            filled = read_rows(level, |w| state[w], filled, out);
+        }
+    }
+
+    /// Columns `first .. first + out.len() / k_t` (at most eight) of `level` into `out`, one
+    /// column of `k_t` rows after another: the eight first permutations run in lockstep on
+    /// `engine`, and a column that needs a second output block (fewer than `k_t` distinct
+    /// rows among its first 68 words) is finished by [`Self::column_into`].
+    pub fn columns8_into(
+        &self,
+        engine: &Engine,
+        sd: &[u8; SEED_BYTES],
+        level: &Level,
+        first: usize,
+        out: &mut [u32],
+    ) {
+        let k = level.k;
+        assert!(k > 0 && out.len().is_multiple_of(k) && out.len() <= 8 * k, "up to eight whole columns");
+        assert!(k <= level.rows(), "column weight above the row count");
+        // The padded input block of each column (`column_input` then cSHAKE's `0x04 .. 0x80`):
+        // lanes 0-3 hold `sd`, lane 4 `t`, lane 5 `zeta`, lane 6 the `0x04` byte and lane 16
+        // the final `0x80` byte. Unused states hash columns past the end and are discarded.
+        let mut state: [[u64; 8]; 25] = std::array::from_fn(|w| [self.prefix[w]; 8]);
+        for (w, chunk) in sd.as_chunks::<8>().0.iter().enumerate() {
+            let lane = u64::from_le_bytes(*chunk);
+            state[w].iter_mut().for_each(|x| *x ^= lane);
+        }
+        state[4].iter_mut().for_each(|x| *x ^= level.t);
+        for (i, x) in state[5].iter_mut().enumerate() {
+            *x ^= (first + i) as u64;
+        }
+        state[6].iter_mut().for_each(|x| *x ^= 0x04);
+        state[16].iter_mut().for_each(|x| *x ^= 0x80 << 56);
+        engine.keccak_f8(&mut state);
+        for (i, column) in out.chunks_exact_mut(k).enumerate() {
+            if read_rows(level, |w| state[w][i], 0, column) < k {
+                self.column_into(sd, level, first + i, column);
             }
-            for word in bytes.as_chunks::<2>().0 {
-                let row = u32::from(u16::from_le_bytes(*word)) & mask;
-                if !out[..filled].contains(&row) {
-                    out[filled] = row;
-                    filled += 1;
-                    if filled == out.len() {
-                        break;
-                    }
+        }
+    }
+}
+
+/// Append to `out[..filled]` the distinct rows read from one output block (lanes `0 .. 17`
+/// of a state, given by `lane`): 16-bit little-endian words masked to `e_t` bits, a row
+/// already in the column skipped, stopping at `k_t` rows. Returns the new fill.
+#[inline]
+fn read_rows(level: &Level, lane: impl Fn(usize) -> u64, mut filled: usize, out: &mut [u32]) -> usize {
+    let mask = (1_u32 << level.rows_log2) - 1;
+    for w in 0..RATE / 8 {
+        let lane = lane(w);
+        for q in 0..4 {
+            let row = ((lane >> (16 * q)) as u32) & mask;
+            if !out[..filled].contains(&row) {
+                out[filled] = row;
+                filled += 1;
+                if filled == out.len() {
+                    return filled;
                 }
             }
         }
     }
+    filled
 }
 
 /// XOR a rate block into the state (little-endian lanes).
@@ -192,20 +245,34 @@ pub fn derive_column(sd: &[u8; SEED_BYTES], level: &Level, zeta: usize) -> Vec<u
     out
 }
 
-/// `M_t` of `sd` (columns derived in parallel).
+/// `M_t` of `sd`, every column (derived in parallel).
 #[must_use]
 pub fn derive_matrix(sd: &[u8; SEED_BYTES], level: &Level) -> SparseMatrix {
+    derive_columns(sd, level, level.cols)
+}
+
+/// The first `cols` columns of `M_t` of `sd` (a `m_t x cols` matrix whose columns are those
+/// of [`derive_matrix`]), eight columns per permutation batch, in parallel.
+///
+/// # Panics
+/// If `cols` exceeds the level's column count.
+#[must_use]
+pub fn derive_columns(sd: &[u8; SEED_BYTES], level: &Level, cols: usize) -> SparseMatrix {
+    assert!(cols <= level.cols, "columns within the level");
     let hasher = ColumnHasher::new();
-    let mut entries = vec![0_u32; level.cols * level.k];
+    let engine = agg_mldsa_simd::engine();
+    let k = level.k;
+    // Every entry is written below.
+    let mut entries = vec![0_u32; cols * k];
     entries
-        .par_chunks_mut(level.k)
+        .par_chunks_mut(8 * k)
         .enumerate()
-        .with_min_len(1 << 10)
-        .for_each(|(zeta, column)| hasher.column_into(sd, level, zeta, column));
+        .with_min_len(1 << 7)
+        .for_each(|(batch, columns)| hasher.columns8_into(engine, sd, level, 8 * batch, columns));
     SparseMatrix {
         rows: level.rows(),
-        cols: level.cols,
-        k: level.k,
+        cols,
+        k,
         entries,
     }
 }
@@ -216,17 +283,16 @@ pub fn derive_matrices(sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
     derive_matrices_for(&Shape::PRODUCTION, sd)
 }
 
-/// `M_1, M_2, M_3` of `sd` for any shape (the toy shape in tests). Every column of every
-/// level is derived, including the unused level-2 columns of the production shape, so the
-/// production matrices are exactly those of the derivation rule.
+/// `M_1, M_2, M_3` of `sd` for any shape (the toy shape in tests): the used columns
+/// `zeta < J_t^used` of each level, the only ones the bridge reads (module docs). Level 2 of
+/// the production shapes thus holds `2^17` (ML-DSA-44) or `2^18` (ML-DSA-65, ML-DSA-87) of
+/// its `2^19` columns.
 #[must_use]
 pub fn derive_matrices_for(shape: &Shape, sd: &[u8; SEED_BYTES]) -> BridgeMatrices {
-    let [l1, l2, l3] = shape.levels.map(|level| level.seed_level());
-    BridgeMatrices {
-        m1: derive_matrix(sd, &l1),
-        m2: derive_matrix(sd, &l2),
-        m3: derive_matrix(sd, &l3),
-    }
+    let [m1, m2, m3] = shape
+        .levels
+        .map(|level| derive_columns(sd, &level.seed_level(), level.used));
+    BridgeMatrices { m1, m2, m3 }
 }
 
 #[cfg(test)]
@@ -266,6 +332,42 @@ mod tests {
                 assert_eq!(fast, slow, "tiny level, column {zeta}");
             }
         }
+    }
+
+    #[test]
+    fn eight_way_columns_match_single_columns_on_every_backend() {
+        let hasher = ColumnHasher::new();
+        let tiny = Level {
+            t: 9,
+            rows_log2: 7,
+            cols: 64,
+            k: 100,
+        };
+        let backends = [
+            agg_mldsa_simd::Backend::Scalar,
+            agg_mldsa_simd::Backend::Avx2,
+            agg_mldsa_simd::Backend::Avx512,
+        ];
+        for engine in backends.into_iter().filter_map(Engine::new) {
+            for (s, sd) in [[0_u8; SEED_BYTES], std::array::from_fn(|i| (7 * i) as u8)].iter().enumerate() {
+                // Whole and partial batches, and a level whose columns all need a second block.
+                for (level, first, count) in [(&LEVELS[0], 0, 8), (&LEVELS[1], 4096, 8), (&LEVELS[2], 49_144, 8), (&LEVELS[2], 16, 3), (&tiny, 8, 8)] {
+                    let mut fast = vec![0; count * level.k];
+                    hasher.columns8_into(&engine, sd, level, first, &mut fast);
+                    for (i, column) in fast.chunks_exact(level.k).enumerate() {
+                        let mut slow = vec![0; level.k];
+                        hasher.column_into(sd, level, first + i, &mut slow);
+                        assert_eq!(column, slow.as_slice(), "{:?}, seed {s}, level {}, column {}", engine.backend(), level.t, first + i);
+                    }
+                }
+            }
+        }
+        // A prefix of the columns is the prefix of the full matrix.
+        let sd = seed(0x33);
+        let full = derive_matrix(&sd, &LEVELS[2]);
+        let prefix = derive_columns(&sd, &LEVELS[2], 1000);
+        assert_eq!(prefix.cols, 1000);
+        assert_eq!(prefix.entries, full.entries[..1000 * LEVELS[2].k]);
     }
 
     /// The reading rule written out independently: a fresh cSHAKE256 per
@@ -314,6 +416,8 @@ mod tests {
         let matrices = derive_matrices(&seed(7));
         assert!(matrices.has_spec_shapes());
         assert!(matrices.row_weights_ok());
+        // Level 2 holds the used columns only.
+        assert_eq!(matrices.m2.cols, agg_witness::bridge::ZETA2_USED);
         for m in [&matrices.m1, &matrices.m2, &matrices.m3] {
             // The validated constructor rejects an out-of-range or repeated row.
             let _ = SparseMatrix::new(m.rows, m.cols, m.k, m.entries.clone());
