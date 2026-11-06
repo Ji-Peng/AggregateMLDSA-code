@@ -833,19 +833,28 @@ impl<'a> Group<'a> {
                     lane_key[l] = Some(index);
                 }
             }
-            for key in 0..keys.len() {
-                let members: Vec<usize> = (0..lanes.len()).filter(|&l| lane_key[l] == Some(key)).collect();
-                let Lane::Source(Source::Bytes { cells, .. }) = lanes[members[0]] else {
-                    unreachable!("a byte lane")
-                };
-                let maps: Vec<&[i64; 256]> = members
-                    .iter()
-                    .map(|&l| match lanes[l] {
-                        Lane::Source(Source::Bytes { map, .. }) => map,
-                        _ => unreachable!("a byte lane"),
-                    })
-                    .collect();
-                if let Some(column) = code_column(cells, &maps) {
+            // The columns are coded side by side (each pass is parallel inside as well); the
+            // results are placed in key order, so the column indices do not depend on it.
+            let coded: Vec<(Vec<usize>, Option<Column>)> = (0..keys.len())
+                .into_par_iter()
+                .map(|key| {
+                    let members: Vec<usize> = (0..lanes.len()).filter(|&l| lane_key[l] == Some(key)).collect();
+                    let Lane::Source(Source::Bytes { cells, .. }) = lanes[members[0]] else {
+                        unreachable!("a byte lane")
+                    };
+                    let maps: Vec<&[i64; 256]> = members
+                        .iter()
+                        .map(|&l| match lanes[l] {
+                            Lane::Source(Source::Bytes { map, .. }) => map,
+                            _ => unreachable!("a byte lane"),
+                        })
+                        .collect();
+                    let column = code_column(cells, &maps);
+                    (members, column)
+                })
+                .collect();
+            for (members, column) in coded {
+                if let Some(column) = column {
                     columns.push(column);
                     for &l in &members {
                         lane_column[l] = Some(columns.len() - 1);

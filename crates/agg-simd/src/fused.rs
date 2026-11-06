@@ -26,10 +26,11 @@ pub struct Terms<'a> {
 /// is the `u64` at `address_c + 8 i`. Tasks write disjoint row ranges of the same planes.
 pub type OutLane = (usize, usize);
 
-/// Most lanes a table may hold (the stack staging of the vector kernels).
-pub const MAX_LANES: usize = 64;
-/// Most coefficient slots of a summand.
-pub const MAX_SLOTS: usize = 32;
+/// Most lanes a table may hold (the lane masks of the evaluation kernels).
+pub const MAX_LANES: usize = 128;
+/// Most coefficient slots of a summand (the stage-3 main group under H-FIPS of ML-DSA-87
+/// takes 151).
+pub const MAX_SLOTS: usize = 192;
 /// Most terms (linear and product together) of one slot. The IFMA evaluation sums a slot's
 /// terms on one pair of rows in one unreduced accumulator: each term adds below `2^53` to
 /// its low limb and below `6 * 2^52` to its middle limb, so 512 terms keep them below `2^62`
@@ -132,10 +133,10 @@ struct SlotOrder {
     pro_off: Vec<usize>,
     pro_order: Vec<u32>,
     /// Bit `l`: lane `l` is a factor of a product (its row difference is read).
-    in_product: u64,
+    in_product: u128,
     /// Bit `l`: lane `l` is the second factor of a product or squared (its doubled second
     /// coordinate is read).
-    doubled: u64,
+    doubled: u128,
 }
 
 impl SlotOrder {
@@ -177,7 +178,7 @@ impl SlotOrder {
             (0..slots).all(|s| lin_off[s + 1] - lin_off[s] + pro_off[s + 1] - pro_off[s] <= MAX_SLOT_TERMS),
             "at most MAX_SLOT_TERMS terms per slot"
         );
-        let (mut in_product, mut doubled) = (0_u64, 0_u64);
+        let (mut in_product, mut doubled) = (0_u128, 0_u128);
         for &(i, j, _) in terms.products {
             in_product |= (1 << i) | (1 << j);
             doubled |= 1 << j;
@@ -477,9 +478,8 @@ unsafe fn eval_vector(
         debug_assert_eq!(scratch.even.len(), width);
         debug_assert_eq!(scratch.inner.len(), slots);
         let stop = k0 + (k1 - k0) / 8 * 8;
-        let SlotOrder { lin_off, lin_order, pro_off, pro_order, .. } = order;
+        let SlotOrder { lin_off, lin_order, pro_off, pro_order, in_product, .. } = order;
         let EvalScratch { even, odd, diff, inner, wac, wbd, wsum, running, .. } = scratch;
-        let has_products = !terms.products.is_empty();
         let weighted = weights.is_some();
         // Reset the accumulators this call reads; the lane limbs are written before they are
         // read on every step.
@@ -501,7 +501,8 @@ unsafe fn eval_vector(
                 if full {
                     odd[l] = splitk((o0, o1));
                 }
-                if has_products {
+                // Only the factors of a product read the difference.
+                if in_product & (1_u128 << l) != 0 {
                     // Canonical difference: limbs below 2^52 and 2^12.
                     diff[l] = splitk((sub_mod(o0, e0), sub_mod(o1, e1)));
                 }
@@ -717,7 +718,7 @@ unsafe fn eval_wide<B: crate::wide::Simd>(
                 let (e1, o1) = B::deinterleave_any(B::load(c1.as_ptr().add(2 * k)), B::load(c1.as_ptr().add(2 * k + l)));
                 // Every term reads the split coordinates; only the second factor of a product
                 // reads the doubled second coordinate, and only products read the difference.
-                let bit = 1_u64 << li;
+                let bit = 1_u128 << li;
                 let x2 = doubled & bit != 0;
                 even[li].c0 = split::<B>(e0);
                 even[li].c1 = split::<B>(e1);
