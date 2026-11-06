@@ -228,7 +228,7 @@ with F4.
 | P3 | Start the Flock records + event-2 build/commit beside the rest of `MainTables::build` (compute `w1'` first) | 0.3-0.5 s | yes | Section 5 |
 | P4 | Stage 3: coded 16-bit lanes for the four `Ints` columns (`Main eq Lookup(0)`) and cheaper `w_A` weights | 0.2-0.4 s | yes | 245 ms + 153 ms of 1,021 ms at 8K |
 | P5 | Challenge-independent PIOP precompute during the Flock prove | 0.1-0.3 s | yes | Section 5 |
-| P6 | Multi-way (AVX-512 x8) Keccak for the bridge matrices from `sd` (`agg_bridge::seed::derive_column_into`, runtime dispatch) | ~0.1 s prover (also ~0.1-0.2 s off the verifier's `matrices` step) | yes | software `keccak_p` dominates events 3-5 and the verifier's 165-203 ms `matrices` at 1K |
+| P6 | Multi-way (AVX-512 x8) Keccak for the bridge matrices from `sd` (implemented: `ColumnHasher::columns8_into` on `Engine::keccak_f8`, used columns only) | ~0.1 s prover (also ~0.1-0.2 s off the verifier's `matrices` step) | yes | software `keccak_p` dominates events 3-5 and the verifier's 165-203 ms `matrices` at 1K |
 | P7 | Akita opening (0.74 s, 3.0x scaling, serial tail with `_int_free`) | <= 0.2 s | yes (Akita-internal; upstream) | Section 3 |
 
 Ranking for the 12 s target: F1 >> F2 > P1 (if a wire bump is acceptable) > P2 > F3 ~ P2b ~
