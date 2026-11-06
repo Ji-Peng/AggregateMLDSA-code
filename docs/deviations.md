@@ -139,7 +139,7 @@ at a full 2^13-record segment the block-first path is kept.
 
 Spec Section 8: the bridge slot copies "every live record's 48 w1Encode words".
 
-Code: the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) keeps the IO schema
+Historical implementation (now removed): the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) kept the IO schema
 `mu`, `c~` and its digests. The bridged segment registered the sponge type with the 48
 w1Encode words added as `In` schema words after `mu` and wired them to the bridge slot's
 words, `48 n` wire classes of two `In` cells each (docs/bridge.md Section 2); that code was
@@ -152,7 +152,7 @@ and `fs_sigma` (event 5, the Flock challenger's seed) are drawn, and event 6 abs
 Flock proof byte strings; the Section 8 driver commits the union witness and hands the
 commitment to the PIOP before it receives `sd` and `fs_sigma`.
 
-Code (`agg_keccak::prover`):
+Historical standalone implementation (now removed):
 
 - `GateBatch::commit` (`SpongeProver::commit_batch`, `commit_all`) computes the
   commitment before any seed exists and returns a `CommittedBatch` that owns the slot
@@ -183,8 +183,8 @@ Section 6). The slot buffers of all `S` sub-batches stay in memory from event 2 
 commit needs a Flock entry that takes the commitment and its `ProverData`.
 
 For the tied part of the mode-A driver K14 applies instead: the commitment is computed once and
-its prover data kept from event 2 to event 6; the paragraphs above remain true of the
-standalone sponge path (`GateBatch`, `SpongeProver`).
+its prover data kept from event 2 to event 6; the standalone sponge path described above
+has been removed.
 
 ## K8. `Y_sigma` as a coefficient of the bridge rows, not a committed word (spec Section 8)
 
@@ -289,14 +289,13 @@ events 2, 3, 5 and 6 are always present with `S` atoms.
   only). Choices the spec leaves open: the `LE64(t)` of the hash input is the level number
   `t = 1, 2, 3`; a column's rows are stored in the order drawn; the XOF is read in 64-byte
   chunks (the word stream is the same). A known-answer test (column 0 of each level for
-  `sd = 0^32`) was cross-checked against an independent pure-Python cSHAKE256. Cost: the
-  2 x 2^19 + 49,152 columns take one Keccak-f each after a shared prefix state, and the
-  matrices take 62 MB in each of prover and verifier. Measured on this machine (release,
-  one test process, not a benchmark): median 150 ms over 7 derivations on 7
-  threads (134 to 215 ms), 0.94 s on one thread. This is a fixed verifier cost (step
+  `sd = 0^32`) was cross-checked against an independent pure-Python cSHAKE256. Cost: only
+  the used columns are derived (`2^19 + 2^17 + 49,152` for ML-DSA-44; level 2's columns
+  from `J_2^used` on are never read), one Keccak-f each after a shared prefix state, eight
+  columns per multi-way permutation (`agg_mldsa_simd::Engine::keccak_f8`), and the
+  matrices take 40 MB in each of prover and verifier. This is a fixed verifier cost (step
   `matrices`) that the estimates of spec Section 11 do not list; at small `N` it dominates
-  mode-B verification. Reducing it needs a spec change (fewer XOF calls per column), not
-  made here.
+  mode-B verification.
 - Test stand-ins: `prover::FixedMatrices` (caller-supplied matrices whatever the seed),
   `prover::NoKeccak` and `verifier::NoKeccakVerifier` (empty Flock items, Flock profile 0)
   exist only in unit tests and with the crate feature `test-hooks`, which the integration
@@ -649,7 +648,7 @@ deterministic, so the data is what the prover would recompute; tests show byte-i
 proofs with and without it). `TiedCommitted` keeps the sponge instance's data;
 `agg_cli::mode_a` keeps it per part from event 2 to event 6, while the witness buffers are
 still dropped after event 2 and rebuilt at event 6 (with lever W1, below, only in a batch of
-more than one part). The standalone sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
+more than one part). The former standalone sponge path (`prover::GateBatch`) went through Flock's own prover and committed twice; it has since been removed.
 
 Cost (measured locally): the kept data is the sponge instance's codeword and Merkle
 tree, 19 / 52 / 84 / 152 MiB at 256 / 512 / 1,024 / 2,048 records with `Fast` (twice that

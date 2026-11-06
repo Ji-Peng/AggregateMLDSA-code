@@ -13,9 +13,14 @@ aerie_toolchain = "1.95.0"
 jobs = 6
 package = "agg-cli"
 bin = "agg"
+bench_package = "agg-bench"
+bench = "mode_b"
 
 [build.binaries.agg]
 description = "The single release build; the baseline lives in .cargo/config.toml."
+
+[build.binaries.mode_b]
+description = "The mode-B public-bits benchmark (agg-bench --bench mode_b)."
 
 [rows.ifma]
 binary = "agg"

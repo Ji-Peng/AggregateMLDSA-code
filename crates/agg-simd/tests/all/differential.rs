@@ -335,8 +335,9 @@ fn eval_kernel_matches_scalar_reference() {
         if random(s) % 2 == 0 { K::new(F::from_u64(P - 1), F::from_u64(P - 1)) }
         else { K::new(F::from_u64(random(s)), F::from_u64(random(s))) }
     };
-    let width = 12_usize;
-    for &items in &[1_usize, 2, 4, 8, 9, 64, 4097] {
+    // A width above 64 lanes exercises the high half of the lane masks.
+    for (width, item_counts) in [(12_usize, &[1_usize, 2, 4, 8, 9, 64, 4097][..]), (100, &[9, 64][..])] {
+    for &items in item_counts {
         let rows = 2 * items;
         for &slots in &[1_usize, 2, MAX_SLOTS] {
             let mut tables: Vec<Vec<K>> = Vec::new();
@@ -392,10 +393,11 @@ fn eval_kernel_matches_scalar_reference() {
                         }
                     }
                     assert_eq!(got, expected,
-                        "items={items} slots={slots} weighted={weighted} full={full}");
+                        "width={width} items={items} slots={slots} weighted={weighted} full={full}");
                 }
             }
         }
+    }
     }
 }
 /// The split equality weights `first[k mod |first|] second[k / |first|]` are applied per

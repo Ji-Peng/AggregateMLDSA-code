@@ -12,6 +12,9 @@ use crate::OpeningField as E;
 /// Largest class count of a coded column (one nibble per cell, one byte per pair).
 pub(super) const MAX_CLASSES: usize = 16;
 
+/// Pairs per task of the parallel pass that codes a column.
+const PAIR_CHUNK: usize = 1 << 14;
+
 /// A coded column.
 #[derive(Clone, Debug)]
 pub(super) struct Column {
@@ -91,7 +94,18 @@ pub(super) fn code_column(cells: &[i8], maps: &[&[i64; 256]]) -> Option<Column> 
         (class_of[pair[0] as u8 as usize] as usize * classes + class_of[pair[1] as u8 as usize] as usize) as u8
     };
     let pairs = if cells.len() >= 1 << 16 {
-        cells.par_chunks_exact(2).map(encode).collect()
+        // The code of every pair of bytes in one table (64 KiB, cache resident), indexed by
+        // the two cells read as one little-endian `u16`; parallel chunks write the codes.
+        let table: Vec<u8> = (0..1_usize << 16).map(|v| encode(&[v as u8 as i8, (v >> 8) as u8 as i8])).collect();
+        let mut pairs = super::buf::uninit::<u8>(cells.len() / 2);
+        pairs.par_chunks_mut(PAIR_CHUNK).zip(cells.par_chunks(2 * PAIR_CHUNK)).for_each(|(out, cells)| {
+            for (slot, pair) in out.iter_mut().zip(cells.chunks_exact(2)) {
+                slot.write(table[usize::from(pair[0] as u8) | usize::from(pair[1] as u8) << 8]);
+            }
+        });
+        // SAFETY: the chunks cover every pair and the pass wrote each code.
+        #[allow(unsafe_code)]
+        unsafe { pairs.assume_init() }.into_vec()
     } else {
         cells.chunks_exact(2).map(encode).collect()
     };

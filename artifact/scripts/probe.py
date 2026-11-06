@@ -245,16 +245,18 @@ def check():
         if shutil.which(tool) is None:
             notes.append(f"optional tool missing: {tool}")
     for name, path in [
-        ("aerie", VENDOR / "aerie"),
-        ("dilithium", VENDOR / "dilithium"),
+        ("workspace Cargo.toml", ARTIFACT.parent / "Cargo.toml"),
         ("natver source", ARTIFACT / "natver" / "natver.c"),
     ]:
         if not path.exists():
             problems.append(f"missing source: {name} at {path}")
-    for name in ["agg"]:
-        if not (BIN / name).exists():
-            notes.append(f"binary not built yet: {BIN / name}")
-    for name in ["aerie-falcon-bench", "natver", "natver65", "natver87"]:
+    for name, path in [
+        ("aerie", VENDOR / "aerie"),
+        ("dilithium", VENDOR / "dilithium"),
+    ]:
+        if not path.exists():
+            notes.append(f"source not fetched yet: {name} at {path} (run ./run.sh fetch)")
+    for name in ["agg", "mode_b", "aerie-falcon-bench", "natver", "natver65", "natver87"]:
         if not (BIN / name).exists():
             notes.append(f"binary not built yet: {BIN / name}")
 

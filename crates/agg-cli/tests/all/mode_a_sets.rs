@@ -17,7 +17,7 @@ use agg_keccak::prover::{KeccakError, Profile};
 use agg_keccak::sponge::sponge_gate_for;
 use agg_keccak::tied::TiedPart;
 use agg_piop::binding::{instance_record, public_records_binding, FlockProfile};
-use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
+use agg_piop::lane_public::{LaneKeyCache, LanePublicData, LaneStreamedPublic};
 use agg_piop::manifest::{CommitmentManifest, GroupRole, Relation};
 use agg_witness::params::Set;
 use agg_piop::pow::PowPlan;
@@ -125,7 +125,7 @@ where
 
     // The verifier: (pk, M, c~), the record, the nonce stream, the commitment and the proofs.
     let mut cache = LaneKeyCache::new(P::SET);
-    let lane_data = LanePublicData::prepare::<P>(&inputs, Some(&mut cache)).expect("public data");
+    let lane_data = LaneStreamedPublic::prepare::<P>(&inputs, Some(&cache)).expect("public data");
     let mut v = Transcript::replay(&manifest, &record, &work).expect("verifier transcript");
     let vprefix = to_psi(&mut v, &commitment.to_bytes());
     assert_eq!(vprefix.sd, prefix.sd);
@@ -133,7 +133,7 @@ where
     let vfs = to_stages(&mut v, &y);
     let mut timings = VerifyTimings::default();
     verify_piop_lanes(&manifest, &vmatrices, &y, &proof, &mut v, &mut timings, |r2, r3, gammas| {
-        (lane_data.t_evaluations(r2), lane_data.ring_weights_at(r2, r3, gammas))
+        (lane_data.t_evaluations(r2), lane_data.ring_weights_at(r2, r3, gammas, Some(&mut cache)))
     })
     .outcome
     .expect("PIOP verifies");

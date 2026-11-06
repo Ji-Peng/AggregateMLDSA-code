@@ -731,7 +731,11 @@ pub struct RankOneGroup<'a> {
     weight_lane: usize,
     /// The other lanes in group order.
     lanes: Vec<Source<'a>>,
-    instance: GroupInstance,
+    /// The integer combination `g = sum_l c_l f_l + c` of the instance's affine term.
+    combination: Vec<(Source<'a>, i64)>,
+    constant: i64,
+    /// The batching coefficient of the instance.
+    gamma: E,
     high_factor: Vec<E>,
     zeta_vars: usize,
     degree: usize,
@@ -798,20 +802,38 @@ impl<'a> RankOneGroup<'a> {
         }
         // D[lo] = sum_hi high[hi] g(lo, hi): with at most 2^10 terms, coefficients of at most
         // 2^20, cells of at most 2^31 (an `i32`, or a byte-map entry checked above) and a
-        // constant of at most 2^40, |g| <= 2^61 + 2^40 < 2^62; one reduced product per cell.
+        // constant of at most 2^40, |g| <= 2^61 + 2^40 < 2^62. A row of the high factor whose
+        // cells stay below 2^40 (the projection's digits give |g| < 2^33) adds the products of
+        // the canonical coordinates (below 2^64) and the cells unreduced: below 2^104 each, so
+        // the `RANK_ONE_CHUNK` rows of a task sum inside an `i128`, reduced once per task.
+        // A wider row adds reduced products.
         let d = (0..h)
             .into_par_iter()
             .step_by(RANK_ONE_CHUNK)
             .map(|first| {
                 let mut part = vec![E::zero(); z];
+                let mut acc = vec![[0_i128; 2]; z];
+                let mut g = vec![0_i64; z];
                 for hi in first..(first + RANK_ONE_CHUNK).min(h) {
                     let factor = weight.high[hi];
-                    for (lo, slot) in part.iter_mut().enumerate() {
-                        let g = affine_at(&combination, *constant, (hi * z) | lo);
-                        if g != 0 {
-                            *slot += factor.mul_i64(g);
+                    for (lo, x) in g.iter_mut().enumerate() {
+                        *x = affine_at(&combination, *constant, (hi * z) | lo);
+                    }
+                    if g.iter().all(|x| x.unsigned_abs() < 1 << 40) {
+                        let c0 = i128::from(factor.c0().to_canonical_u64());
+                        let c1 = i128::from(factor.c1().to_canonical_u64());
+                        for (a, &x) in acc.iter_mut().zip(&g) {
+                            a[0] += c0 * i128::from(x);
+                            a[1] += c1 * i128::from(x);
+                        }
+                    } else {
+                        for (slot, &x) in part.iter_mut().zip(&g) {
+                            *slot += factor.mul_i64(x);
                         }
                     }
+                }
+                for (slot, &[a0, a1]) in part.iter_mut().zip(&acc) {
+                    *slot += E::new(agg_simd::F::from_i128(a0), agg_simd::F::from_i128(a1));
                 }
                 part
             })
@@ -837,7 +859,9 @@ impl<'a> RankOneGroup<'a> {
             high: None,
             weight_lane,
             lanes: others,
-            instance: instance.clone(),
+            combination,
+            constant: *constant,
+            gamma: instance.gamma,
             high_factor: weight.high.to_vec(),
             zeta_vars: z.trailing_zeros() as usize,
             degree,
@@ -879,46 +903,67 @@ impl<'a> RankOneGroup<'a> {
         }
     }
 
-    /// The lane values at the bound point, in group lane order.
+    /// The lane values at the bound point, in group lane order: the weight's from the high
+    /// rounds, an integer lane's from its multilinear evaluation at the bound point when
+    /// `needed[l]` (zero otherwise; the high rounds carry only the combination `g`).
     #[must_use]
-    pub fn terminal_values(&self) -> Vec<E> {
-        self.high.as_ref().expect("all rounds bound").terminal_values()
+    pub fn terminal_values(&self, needed: &[bool]) -> Vec<E> {
+        let high = self.high.as_ref().expect("all rounds bound").terminal_values();
+        let mut tables = None;
+        let mut others = self.lanes.iter();
+        (0..=self.lanes.len())
+            .map(|l| {
+                if l == self.weight_lane {
+                    return high[0];
+                }
+                let lane = others.next().expect("one source per lane");
+                if !needed[l] {
+                    return E::zero();
+                }
+                let (first, second) =
+                    tables.get_or_insert_with(|| agg_simd::eval::split_eq_tables(&self.challenges));
+                match lane {
+                    Source::Ints(cells) => agg_simd::eval::column_at(cells, first, second),
+                    Source::Bytes { cells, map } => {
+                        agg_simd::eval::column_at(&agg_simd::eval::Mapped { cells, map }, first, second)
+                    }
+                    _ => unreachable!("integer lanes only"),
+                }
+            })
+            .collect()
     }
 
-    /// The high rounds: the weight `low(r_low) high` and every other lane folded by the low
-    /// challenges, `F_l[hi] = sum_lo eq(r_low, lo) f_l(lo, hi)`.
+    /// The high rounds: the weight `low(r_low) high` and the combination `g` folded by the
+    /// low challenges, `G[hi] = sum_lo eq(r_low, lo) g(lo, hi)` (the fold is linear, so the
+    /// summand `w g` of the high rounds is the instance's), one integer dot per high row.
     fn build_high(&mut self) {
         let z = 1_usize << self.zeta_vars;
         let c_at = self.low.terminal_values()[0];
         let eq = eq_table(&self.challenges[..self.zeta_vars]);
+        let planes = agg_simd::buf::KPlanes::from_fn(z, |lo| eq[lo]);
         let h = self.high_factor.len();
-        let folded: Vec<Vec<E>> = self
-            .lanes
-            .iter()
-            .map(|lane| {
-                (0..h)
-                    .into_par_iter()
-                    .map(|hi| {
-                        let single = [(*lane, 1_i64)];
-                        eq.iter().enumerate().fold(E::zero(), |acc, (lo, &e)| {
-                            let f = affine_at(&single, 0, (hi * z) | lo);
-                            if f == 0 { acc } else { acc + e.mul_i64(f) }
-                        })
-                    })
-                    .collect()
-            })
+        let (combination, constant) = (&self.combination, self.constant);
+        let folded: Vec<E> = (0..h)
+            .into_par_iter()
+            .map_init(
+                || vec![0_i64; z],
+                |g, hi| {
+                    for (lo, x) in g.iter_mut().enumerate() {
+                        *x = affine_at(combination, constant, (hi * z) | lo);
+                    }
+                    // The integer dot takes cells below 2^51 in magnitude; a wider row (not
+                    // produced by the projection's digits) is summed with reduced products.
+                    if g.iter().all(|&x| x.unsigned_abs() < 1 << 51) {
+                        agg_simd::dot::k_int_dot(planes.planes(), g)
+                    } else {
+                        eq.iter().zip(g.iter()).fold(E::zero(), |acc, (&e, &x)| acc + e.mul_i64(x))
+                    }
+                },
+            )
             .collect();
-        let mut folded = folded.into_iter();
-        let lanes: Vec<Lane<'a>> = (0..=self.lanes.len())
-            .map(|l| {
-                if l == self.weight_lane {
-                    Lane::Folded(self.high_factor.iter().map(|&b| c_at * b).collect())
-                } else {
-                    Lane::Folded(folded.next().expect("one folded table per lane"))
-                }
-            })
-            .collect();
-        let mut high = Group::new(lanes, vec![self.instance.clone()], None, h.trailing_zeros() as usize, self.degree)
+        let lanes = vec![Lane::Folded(self.high_factor.iter().map(|&b| c_at * b).collect()), Lane::Folded(folded)];
+        let instance = GroupInstance { gamma: self.gamma, terms: vec![Term::Product(vec![0, 1])] };
+        let mut high = Group::new(lanes, vec![instance], None, h.trailing_zeros() as usize, self.degree)
             .expect("high rounds of a valid rank-one group");
         if let Some(arena) = &self.arena {
             high.set_arena(arena);
@@ -1051,7 +1096,63 @@ mod tests {
                 want.bind(round, r);
             }
             assert_eq!(got.claim(), want.claim());
-            assert_eq!(got.terminal_values(), want.terminal_values());
+            let want = want.terminal_values();
+            assert_eq!(got.terminal_values(&[true; 3]), want);
+            // A lane another group evaluates is skipped; the weight always comes back.
+            assert_eq!(got.terminal_values(&[true, false, true]), vec![want[0], E::zero(), want[2]]);
+        }
+    }
+
+    /// Wide combinations take the fallback paths: high rows whose cells reach 2^51 (the
+    /// reduced products of both the low-factor pass and the high build), rows between 2^40
+    /// and 2^51 (reduced in the low-factor pass, the integer dot in the high build) and narrow
+    /// rows, mixed inside one task, with low factors wide enough for the vector dot.
+    #[test]
+    fn rank_one_wide_rows_match_the_generic_group() {
+        let mut rng = SplitMix64::new(131);
+        for (z, h) in [(6_usize, 2_usize), (7, 3)] {
+            let len = 1_usize << (z + h);
+            let low: Vec<E> = (0..1_usize << z).map(|_| field(&mut rng)).collect();
+            let high: Vec<E> = (0..1_usize << h).map(|_| field(&mut rng)).collect();
+            let weight = RankOneWeight { low: &low, high: &high };
+            let row_len = 1_usize << z;
+            let v_lo: Vec<i32> = (0..len)
+                .map(|i| {
+                    let (row, lo) = (i / row_len, i % row_len);
+                    match row % 3 {
+                        // Near +-2^31: with the coefficient 2^20, |g| reaches 2^51.
+                        0 if lo == 0 => i32::MIN,
+                        0 => (rng.next_u64() as u32) as i32,
+                        // Up to 2^25: |g| between 2^40 and 2^51.
+                        1 => (rng.next_u64() % (1 << 26)) as i32 - (1 << 25),
+                        _ => (rng.next_u64() % (1 << 16)) as i32 - (1 << 15),
+                    }
+                })
+                .collect();
+            let v_hi: Vec<i8> = (0..len).map(|_| (rng.next_u64() % 9) as i8 - 4).collect();
+            let lanes = vec![
+                Lane::Folded(Vec::new()),
+                Lane::Source(Source::Ints(&v_lo)),
+                Lane::Source(Source::Bytes { cells: &v_hi, map: &IDENTITY_MAP }),
+            ];
+            let instances = vec![GroupInstance {
+                gamma: field(&mut rng),
+                terms: vec![Term::Affine { weight: Some(0), lanes: vec![(1, 1 << 20), (2, -(1 << 20))], constant: -(1 << 40) }],
+            }];
+            let degree = 3;
+            let mut want_lanes = lanes.clone();
+            want_lanes[0] = Lane::Folded(weight.materialize());
+            let mut want = Group::new(want_lanes, instances.clone(), None, z + h, degree).unwrap();
+            let mut got = RankOneGroup::new(weight, 0, &lanes, &instances, z + h, degree).expect("applies");
+            assert_eq!(got.claim(), want.claim());
+            for round in 0..z + h {
+                assert_eq!(got.round_message(round), want.round_message(round), "z={z} h={h} round {round}");
+                let r = field(&mut rng);
+                got.bind(round, r);
+                want.bind(round, r);
+            }
+            assert_eq!(got.claim(), want.claim());
+            assert_eq!(got.terminal_values(&[true; 3]), want.terminal_values());
         }
     }
 

@@ -1,13 +1,40 @@
 # Full mode: the experiment matrix of the evaluation, without a scheduler.
 # Cells run with --warmup 1 --reps N, split into `processes` chunks that
 # are launched round-robin across tiers. The runs below are executed in the order
-# the paper reports them.
+# the paper reports them, covering ML-DSA-44, ML-DSA-65 and ML-DSA-87.
 
 mode = "full"
+
+# Headline prover and verifier rows (tab:prove, tab:baselines, tab:bytes).
 
 [[runs]]
 kind = "ours"
 tag = "headline"
+params = "44"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+processes = 1
+
+[[runs]]
+kind = "ours"
+tag = "headline-65"
+params = "65"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+processes = 1
+
+[[runs]]
+kind = "ours"
+tag = "headline-87"
+params = "87"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [32768]
@@ -19,6 +46,7 @@ processes = 1
 [[runs]]
 kind = "ours"
 tag = "headline-1t"
+params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [32768]
@@ -29,19 +57,73 @@ processes = 2
 
 [[runs]]
 kind = "ours"
-tag = "relations"
-configs = ["ifma", "avx2"]
-allocations = ["16C32T", "8C16T"]
+tag = "headline-1t-65"
+params = "65"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["1T"]
 sizes = [32768]
-relations = ["h-exact", "h-fips"]
+relation = "h-u"
 warmup = 1
 reps = 5
 processes = 2
 
 [[runs]]
 kind = "ours"
+tag = "headline-1t-87"
+params = "87"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["1T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+processes = 2
+
+# Relations (H-u, H-exact, H-FIPS) across all three parameter sets (tab:relations).
+
+[[runs]]
+kind = "ours"
+tag = "relations"
+params = "44"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [32768]
+relations = ["h-u", "h-exact", "h-fips"]
+warmup = 1
+reps = 5
+processes = 2
+
+[[runs]]
+kind = "ours"
+tag = "relations-65"
+params = "65"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relations = ["h-u", "h-exact", "h-fips"]
+warmup = 1
+reps = 5
+processes = 2
+
+[[runs]]
+kind = "ours"
+tag = "relations-87"
+params = "87"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relations = ["h-u", "h-exact", "h-fips"]
+warmup = 1
+reps = 5
+processes = 2
+
+# Batch-size scaling (tab:scaling).
+
+[[runs]]
+kind = "ours"
 tag = "scaling"
-configs = ["ifma", "avx2"]
+params = "44"
+configs = ["ifma", "avx512", "avx2"]
 allocations = ["16C32T", "8C16T"]
 sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 relation = "h-u"
@@ -50,8 +132,46 @@ reps = 5
 processes = 2
 
 [[runs]]
+kind = "ours"
+tag = "scaling-65"
+params = "65"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [1024, 8192, 32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+processes = 2
+
+[[runs]]
+kind = "ours"
+tag = "scaling-87"
+params = "87"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["16C32T", "8C16T"]
+sizes = [1024, 8192, 32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+processes = 2
+
+# Ablations, traced timeline and mode-B public-bits aggregate (tab:ablation).
+
+[[runs]]
+kind = "mode_b"
+tag = "mode-b"
+params = "44"
+configs = ["ifma", "avx2"]
+allocations = ["16C32T"]
+sizes = [32768]
+relation = "h-u"
+warmup = 1
+reps = 5
+
+[[runs]]
 kind = "ablations"
 tag = "ablation"
+params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
@@ -64,24 +184,34 @@ arms = [
   { tag = "no-hugepage", env = { AGG_HUGEPAGE = "0" } },
   { tag = "no-alloc-cache", env = { AGG_ALLOC_CACHE = "0" } },
   { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
+  { tag = "late-join", env = { AGG_LATE_JOIN = "0" } },
   { tag = "stage-branch-main-pool", env = { AGG_PIOP_S_THREADS = "0" } },
   { tag = "piop-row", env = { AGG_PIOP_LAYOUT = "row" } },
 ]
 
 [[runs]]
-kind = "ours"
+kind = "ablations"
 tag = "timeline"
+params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T"]
 sizes = [32768]
 relation = "h-u"
 warmup = 1
 reps = 1
+processes = 1
 traced = true
+arms = [
+  { tag = "defaults", env = {} },
+  { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
+]
+
+# Fresh-process peak RSS measurements.
 
 [[runs]]
 kind = "fresh"
 tag = "prover-memory"
+params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
@@ -92,12 +222,15 @@ mode = "aggregate"
 [[runs]]
 kind = "fresh"
 tag = "verifier-memory"
+params = "44"
 configs = ["ifma", "avx2"]
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
 relation = "h-u"
 reps = 5
 mode = "verify"
+
+# Baselines: Aerie (Falcon-512 and Falcon-1024) and native verification (tab:baselines).
 
 [[runs]]
 kind = "aerie"
@@ -140,6 +273,25 @@ reps = 5
 [[runs]]
 kind = "native"
 tag = "native"
+params = "44"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [32768]
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "native"
+tag = "native-65"
+params = "65"
+allocations = ["16C32T", "8C16T", "1T"]
+sizes = [32768]
+warmup = 1
+reps = 5
+
+[[runs]]
+kind = "native"
+tag = "native-87"
+params = "87"
 allocations = ["16C32T", "8C16T", "1T"]
 sizes = [32768]
 warmup = 1

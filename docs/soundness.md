@@ -573,6 +573,19 @@ the sponge challenger absorbs before `bind_statement`. Both claim points of the 
 opening (the public region's and the chain's bit point) and the value `v` are thereby fixed
 before any Flock challenge of the instance.
 
+The version-5 sponge challenger absorbs no digest of the public words. They are bound
+through the seed: the event-0 record digest covers `LE64(N) || (pk || LE64(|M|) || M ||
+c~)*` in order, and the relation byte is in the same event, so every `mu_i` is a function
+of bound data. Event 5's `fs_sigma` follows event 0, and the part seed
+`SHA3(label || fs_sigma || LE64(part) || rec)` (or the span seed, which binds all its
+segment seeds) is the `fs` that both the tie challenger and the sponge challenger absorb
+first. Changing a public word therefore changes `fs` except with the hash-binding failure
+probability already counted for event 0. The tie challenger never absorbed a public
+digest, and its challenge `rho_c` (the public region's point) already relies on this
+binding. The verifier checks the opened `v_pub` against its own words. This removes no
+soundness site and adds no failure term. Callers of `TiedPart` outside mode A (tests) must
+derive `fs` from a transcript that binds the ordered public records.
+
 ### 4.6 Akita: accepted support of the sparse fold challenges (hypothesis H1, discharged)
 
 **Requirement.** A fold coordinate of group `g` at level `h` is an indexed address of weight

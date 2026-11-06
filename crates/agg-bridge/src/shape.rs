@@ -61,10 +61,13 @@ impl LevelShape {
         }
     }
 
-    /// True when `m` has the rows, columns and column weight of this level.
+    /// True when `m` has the rows and column weight of this level and holds at least its used
+    /// columns and at most all of them (`agg_bridge::seed` derives the used ones only).
     #[must_use]
     pub fn matches(&self, m: &SparseMatrix) -> bool {
-        (m.rows, m.cols, m.k) == (self.rows, self.cols, self.k) && m.entries.len() == m.cols * m.k
+        (m.rows, m.k) == (self.rows, self.k)
+            && (self.used..=self.cols).contains(&m.cols)
+            && m.entries.len() == m.cols * m.k
     }
 
     /// Row weights over the used columns.

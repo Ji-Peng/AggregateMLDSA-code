@@ -105,7 +105,6 @@ scripts/test.sh                 # = taskset -c 0,1,3-15 cargo test --workspace, 
 scripts/test.sh --release       # for heavy tests
 scripts/bench.sh                # local calibration benches (agg-bench)
 scripts/bench.sh --bench mode_b -- 256 512 1024 [--warmup 1] [--reps 5]   # mode-B prove/verify/RSS/size (crates/agg-bench/benches/mode_b.rs)
-AGG_KECCAK_WARMUP=1 AGG_KECCAK_REPS=5 taskset -c 0,1,3-15 cargo bench -p agg-keccak --bench keccak_sponge   # Keccak sponge proof
 ./target/release/agg            # mode-A tool: keygen-batch, sign-batch, aggregate, verify, bench (docs/cli.md)
 ./target/release/agg bench --count 1024 [--warmup 1] [--reps 5]   # mode A: median of 5 after 1 warmup
 ```

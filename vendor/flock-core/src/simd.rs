@@ -262,8 +262,8 @@ pub(crate) fn report() -> String {
 pub(crate) mod x86 {
     use core::arch::x86_64::{
         __m128i, __m512i, _mm_extract_epi64, _mm_xor_si128,
-        _mm512_bslli_epi128, _mm512_clmulepi64_epi128,
-        _mm512_extracti32x4_epi32, _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_storeu_si512, _mm512_xor_si512,
+        _mm512_clmulepi64_epi128,
+        _mm512_extracti32x4_epi32, _mm512_loadu_si512, _mm512_set_epi64, _mm512_setzero_si512, _mm512_storeu_si512, _mm512_unpacklo_epi64, _mm512_xor_si512,
     };
 
     use crate::field::{F128, F256Unreduced};
@@ -278,9 +278,9 @@ pub(crate) mod x86 {
     #[target_feature(enable = "avx512f,vpclmulqdq")]
     fn gf2_128_reduce_x4(mut t0: __m512i, t1: __m512i) -> __m512i {
         let poly = ghash_poly_x4();
-        // SAFETY: avx512f is enabled for this function (the intrinsic is still
-        // declared unsafe).
-        t0 = _mm512_xor_si512(t0, unsafe { _mm512_bslli_epi128::<8>(t1) });
+        // `t1 << 64` per 128-bit lane: {0, t1.lo}. The AVX-512F unpack keeps the
+        // shift inline; the byte shift is AVX512BW and would be an out-of-line call.
+        t0 = _mm512_xor_si512(t0, _mm512_unpacklo_epi64(_mm512_setzero_si512(), t1));
         _mm512_xor_si512(t0, _mm512_clmulepi64_epi128::<0x01>(t1, poly))
     }
 

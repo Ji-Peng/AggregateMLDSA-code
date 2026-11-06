@@ -1,6 +1,6 @@
 # Quick mode: small batches, the configurations the CPU supports, one core
-# complex with SMT (or the largest available), and one thread at 1K. Cells
-# split their runs into `processes` chunks.
+# complex with SMT (or the largest available), and one thread at 1K. Touches
+# every run kind once so a ~5 minute smoke run exercises the full pipeline.
 
 mode = "quick"
 warmup = 1
@@ -9,6 +9,7 @@ reps = 3
 [[runs]]
 kind = "ours"
 tag = "quick-ours"
+params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["8C16T"]
 sizes = [1024, 4096]
@@ -17,12 +18,77 @@ processes = 2
 
 [[runs]]
 kind = "ours"
+tag = "quick-ours-65"
+params = "65"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["8C16T"]
+sizes = [1024]
+relation = "h-u"
+warmup = 1
+reps = 2
+processes = 1
+
+[[runs]]
+kind = "ours"
+tag = "quick-ours-87"
+params = "87"
+configs = ["ifma", "avx512", "avx2"]
+allocations = ["8C16T"]
+sizes = [1024]
+relation = "h-u"
+warmup = 1
+reps = 2
+processes = 1
+
+[[runs]]
+kind = "ours"
 tag = "quick-ours-1t"
+params = "44"
 configs = ["ifma", "avx512", "avx2"]
 allocations = ["1T"]
 sizes = [1024]
 relation = "h-u"
 processes = 2
+
+[[runs]]
+kind = "mode_b"
+tag = "quick-mode-b"
+params = "44"
+configs = ["ifma", "avx2"]
+allocations = ["8C16T"]
+sizes = [1024]
+relation = "h-u"
+warmup = 1
+reps = 2
+
+[[runs]]
+kind = "ablations"
+tag = "quick-ablation"
+params = "44"
+configs = ["ifma", "avx2"]
+allocations = ["8C16T"]
+sizes = [1024]
+relation = "h-u"
+warmup = 1
+reps = 1
+processes = 1
+traced = true
+arms = [
+  { tag = "defaults", env = {} },
+  { tag = "flock-serial", env = { AGG_FLOCK_THREADS = "0" } },
+  { tag = "late-join", env = { AGG_LATE_JOIN = "0" } },
+]
+
+[[runs]]
+kind = "fresh"
+tag = "quick-fresh"
+params = "44"
+configs = ["ifma"]
+allocations = ["8C16T"]
+sizes = [1024]
+relation = "h-u"
+reps = 1
+mode = "aggregate"
 
 [[runs]]
 kind = "aerie"
@@ -45,6 +111,25 @@ reps = 2
 [[runs]]
 kind = "native"
 tag = "quick-native"
+params = "44"
+allocations = ["8C16T", "1T"]
+sizes = [1024]
+warmup = 1
+reps = 2
+
+[[runs]]
+kind = "native"
+tag = "quick-native-65"
+params = "65"
+allocations = ["8C16T", "1T"]
+sizes = [1024]
+warmup = 1
+reps = 2
+
+[[runs]]
+kind = "native"
+tag = "quick-native-87"
+params = "87"
 allocations = ["8C16T", "1T"]
 sizes = [1024]
 warmup = 1

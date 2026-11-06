@@ -187,12 +187,12 @@ enum Role {
     Leaves,
 }
 
+/// Trees of one dedicated layer group: two slots and four lanes per tree (sixteen trees, 64
+/// lanes, within the fused kernel's limits).
+const LAYER_GROUP_TREES: usize = 16;
+
 /// A prover group on planes, or the generic kernel when the shape does not fit.
 #[allow(clippy::large_enum_variant)]
-/// Trees of one dedicated layer group: two slots and four lanes per tree within the fused
-/// kernel's limits.
-const LAYER_GROUP_TREES: usize = agg_simd::fused::MAX_SLOTS / 2;
-
 enum SessionGroup<'a> {
     Generic(Group<'a>),
     Layer(PlaneLayerGroup<'a>),

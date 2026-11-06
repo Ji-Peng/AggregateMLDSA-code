@@ -754,7 +754,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
     P::CTilde: Sync,
 {
     use agg_piop::binding::{instance_record, public_records_binding, FlockProfile};
-    use agg_piop::lane_public::{LaneKeyCache, LanePublicData};
+    use agg_piop::lane_public::{LaneKeyCache, LaneStreamedPublic};
     use agg_piop::pow::{KeccakPlan, PowPlan};
     use agg_piop::prover::prove_piop_lanes;
     use agg_piop::verifier::{verify_piop_lanes, VerifyTimings};
@@ -791,7 +791,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
     // The verifier: the public data from (pk, M, c~), cold and then warm cache.
     let mut cache = LaneKeyCache::new(P::SET);
     let verify = |record: &[u8], work: &[u8], cache: &mut LaneKeyCache| -> Result<[u8; 32], String> {
-        let public = LanePublicData::prepare::<P>(&inputs, Some(cache)).map_err(|e| format!("{e:?}"))?;
+        let public = LaneStreamedPublic::prepare::<P>(&inputs, Some(&*cache)).map_err(|e| format!("{e:?}"))?;
         let (mut transcript, _) = transcript_on_record(manifest, record, Some(work)).map_err(|e| format!("{e:?}"))?;
         let mut timings = VerifyTimings::default();
         let (_, stage3, _) = verify_piop_lanes(
@@ -801,7 +801,7 @@ fn lane_round_trip_on_the_instance_record<P: agg_witness::params::ParamSet>(
             &proof,
             &mut transcript,
             &mut timings,
-            |r2, r3, gammas| (public.t_evaluations(r2), public.ring_weights_at(r2, r3, gammas)),
+            |r2, r3, gammas| (public.t_evaluations(r2), public.ring_weights_at(r2, r3, gammas, Some(&mut *cache))),
         )
         .outcome
         .map_err(|e| format!("{e:?}"))?;

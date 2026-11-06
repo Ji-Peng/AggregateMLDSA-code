@@ -301,7 +301,6 @@ pub struct TiedCommitted {
     sponge: SlotBuffers,
     sponge_data: Option<CommitData>,
     bits: Vec<u64>,
-    public: Vec<F128>,
     /// The records' `c~`, concatenated.
     c_tilde: Vec<u8>,
     commitment: TiedCommitment,
@@ -712,24 +711,11 @@ impl<'g> TiedPart<'g> {
         ch
     }
 
-    /// Digest of the sponge statement: `n` and the words `[mu_i, c~_i]`.
-    fn public_digest(public: &[F128]) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(b"agg-keccak/v1/tied-public");
-        h.update((public.len() as u64).to_le_bytes());
-        for w in public {
-            h.update(w.lo.to_le_bytes());
-            h.update(w.hi.to_le_bytes());
-        }
-        h.finalize().into()
-    }
-
-    fn sponge_challenger(&self, fs: &[u8; 32], public: &[F128], binding: &[u8; 32]) -> FsChallenger {
+    fn sponge_challenger(&self, fs: &[u8; 32], binding: &[u8; 32]) -> FsChallenger {
         let mut ch = FsChallenger::new(DOMAIN);
         ch.observe_bytes(fs);
         ch.observe_label(SPONGE_LABEL);
         ch.observe_bytes(&self.gate.digest());
-        ch.observe_bytes(&Self::public_digest(public));
         ch.observe_bytes(&self.tie_digest());
         ch.observe_label(TIE_BINDING_LABEL);
         put_framed(&mut ch, binding);
@@ -903,14 +889,16 @@ impl<'g> TiedPart<'g> {
         (sponge, bits)
     }
 
-    fn statement<P: ParamSet>(records: &[SpongeRecord<P>]) -> (Vec<F128>, Vec<u8>) {
-        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
-        let public = records
-            .iter()
-            .zip(c_tilde.chunks_exact(P::C_TILDE_BYTES))
-            .flat_map(|(r, c)| sponge_public_words(&r.mu, c))
-            .collect();
-        (public, c_tilde)
+    /// The public words `[mu_i, c~_i]` of the records, in record order.
+    fn public_words<'a>(
+        &self,
+        records: impl ExactSizeIterator<Item = (&'a [u8; MU_BYTES], &'a [u8])>,
+    ) -> Vec<F128> {
+        let mut public = Vec::with_capacity((4 + self.layout.ctilde_bytes / 16) * records.len());
+        for (mu, c) in records {
+            sponge_public_words(&mut public, mu, c);
+        }
+        public
     }
 
     /// Commit to given witnesses (tests commit tampered ones): the sponge buffers and the
@@ -934,7 +922,7 @@ impl<'g> TiedPart<'g> {
         trace("commit: start", &start);
         let data = self.sponge.commit_data(&[&sponge.z]);
         trace("sponge committed", &start);
-        let (public, c_tilde) = Self::statement(records);
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         TiedCommitted {
             n: self.n,
             commitment: TiedCommitment {
@@ -943,7 +931,6 @@ impl<'g> TiedPart<'g> {
             sponge,
             sponge_data: Some(data),
             bits,
-            public,
             c_tilde,
         }
     }
@@ -986,13 +973,12 @@ impl<'g> TiedPart<'g> {
                 "commit data of another commitment"
             );
         }
-        let (public, c_tilde) = Self::statement(records);
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
         TiedCommitted {
             n: self.n,
             sponge,
             sponge_data: data,
             bits,
-            public,
             c_tilde,
             commitment,
         }
@@ -1046,7 +1032,9 @@ impl<'g> TiedPart<'g> {
     /// (opening the commitment-phase commitment). `matrices` must be
     /// `derive_matrices_for(shape, sd)` for the part's shape: the proof reads only `matrices`
     /// (debug builds check the first column of each level against `sd`), and `sd` is bound
-    /// through `fs` (the Flock seed step follows the bridge-seed step).
+    /// through `fs` (the Flock seed step follows the bridge-seed step). The caller must
+    /// derive `fs` from a transcript binding the ordered public records, including `mu`
+    /// and `c~`, before any Flock challenge is sampled.
     ///
     /// # Errors
     /// [`KeccakError::Work`] if a nonce search exhausts its allowance of `2^(g + 7)`
@@ -1088,7 +1076,6 @@ impl<'g> TiedPart<'g> {
             sponge,
             sponge_data,
             bits,
-            public,
             commitment: absorbed,
             ..
         } = committed;
@@ -1136,7 +1123,7 @@ impl<'g> TiedPart<'g> {
         let binding = squeeze_binding(&mut ch);
         trace("bit value", &start);
         let sponge_start = std::time::Instant::now();
-        let mut sch = self.sponge_challenger(fs, &public, &binding);
+        let mut sch = self.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         // The row values a = A z, b = B z are consumed by the zerocheck; build them here
         // when the 8-way generator left them out.
@@ -1317,7 +1304,8 @@ impl<'g> TiedPart<'g> {
     /// commitment, the bridge seed and its matrices, the final vectors `ys` (one per segment
     /// of the span) and the part's Flock seed `fs`. Only the shape of `matrices` is checked
     /// here: the caller passes `derive_matrices_for(shape, sd)`, and `sd` is bound through
-    /// `fs` (the Flock seed step follows the bridge-seed step).
+    /// `fs` (the Flock seed step follows the bridge-seed step). The caller must derive
+    /// `fs` from a transcript binding the ordered public records, including `mu` and `c~`.
     ///
     /// # Errors
     /// On a malformed statement, proof or commitment, a Flock rejection, a rejected nonce, or
@@ -1354,11 +1342,7 @@ impl<'g> TiedPart<'g> {
         }
         let start = std::time::Instant::now();
         let parts = self.decode_parts(proof)?;
-        let public: Vec<F128> = mu
-            .iter()
-            .zip(c_tilde)
-            .flat_map(|(m, c)| sponge_public_words(m, c))
-            .collect();
+        let public = self.public_words(mu.iter().zip(c_tilde.iter().map(|c| &c[..])));
         let work = self.work();
         let nu_s = self.sponge.nu();
         let mut ch = self.tie_start(fs, &Self::y_digest(ys), &commitment.sponge);
@@ -1395,7 +1379,7 @@ impl<'g> TiedPart<'g> {
         ch.observe_f128(parts.value);
         let binding = squeeze_binding(&mut ch);
         trace("verify: parity chain", &start);
-        let mut sch = self.sponge_challenger(fs, &public, &binding);
+        let mut sch = self.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [self.gate];
         let v = self.sponge.verify(
             &gate,
@@ -1421,6 +1405,17 @@ mod tests {
     use agg_bridge::seed::derive_matrices_for;
     use agg_bridge::shape::Shape;
     use flock_core::test_rng::Rng;
+
+    /// The verifier's public words of `records`, with `c~` computed natively.
+    fn public_of<P: ParamSet>(part: &TiedPart, records: &[SpongeRecord<P>]) -> Vec<F128> {
+        let c_tilde = c_tildes(agg_mldsa_simd::engine(), records);
+        part.public_words(
+            records
+                .iter()
+                .map(|r| &r.mu)
+                .zip(c_tilde.chunks_exact(P::C_TILDE_BYTES)),
+        )
+    }
 
     /// An exhausted nonce search is an error, not a panic: the
     /// smallest passing nonce at or above `2^(g + 7)` is refused, the largest admitted one is
@@ -1492,7 +1487,7 @@ mod tests {
             }
             // The six lanes of the chain input are the bits, lanes 6, 7 the public and chi
             // words of the records.
-            let (public, _) = TiedPart::statement(&records);
+            let public = public_of(&part, &records);
             let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
             let rho_c: Vec<F128> = (0..3).map(|_| rand_f(&mut rng)).collect();
             let p = part.public_point(&rho_r, &rho_c);
@@ -1567,7 +1562,7 @@ mod tests {
                     "n {n}, d {d}, index {index}, segments {segments}"
                 );
             }
-            let (public, _) = TiedPart::statement(&records);
+            let public = public_of(&part, &records);
             let rho_r: Vec<F128> = (0..part.nu()).map(|_| rand_f(&mut rng)).collect();
             let rho_c: Vec<F128> = (0..lay.public_words_log2).map(|_| rand_f(&mut rng)).collect();
             let p = part.public_point(&rho_r, &rho_c);
@@ -1764,7 +1759,6 @@ mod tests {
             sponge,
             sponge_data,
             bits,
-            public,
             commitment: absorbed,
             ..
         } = committed;
@@ -1795,7 +1789,7 @@ mod tests {
         let value = chain.value * part.row_factor(&chain.point).inv();
         ch.observe_f128(value);
         let binding = squeeze_binding(&mut ch);
-        let mut sch = part.sponge_challenger(fs, &public, &binding);
+        let mut sch = part.sponge_challenger(fs, &binding);
         let gate: [&dyn LincheckCircuit; 1] = [part.gate];
         let mut sponge = sponge;
         sponge.ensure_ab(part.gate, nu_s, part.n);

@@ -286,10 +286,32 @@ A self-check compares the final claim with `eq` times the summand at the termina
   (stage 3: the reduction of the main lookup stack, two 16-bit columns).
 - `split_linear`: in any other full-domain equality group, the single-lane products and
   unweighted affine terms on integer lanes read nowhere else move to one `LinearIntGroup` at
-  the same point; the lanes stay in the generic group, unread, so it still folds them and
-  yields their terminal values (stage 3's `eq(r^(2))` group: the ring identity's terms on
-  `U_lo, V_lo, V_hi`). The two groups' messages sum to the original group's.
+  the same point, and the lanes leave the generic group (it neither folds nor carries them);
+  their terminal values are their multilinear evaluations at the bound point
+  (`agg_simd::eval::column_at`) (stage 3's `eq(r^(2))` group of ML-DSA-44: the ring
+  identity's terms on `U_lo, V_lo, V_hi`). The two groups' messages sum to the original
+  group's.
 - Byte lanes stay on the generic coded path (the six bits of stage 3's `eq(r^(1))` group).
+- With polynomial lanes (ML-DSA-65/87) a full-domain equality group folds its linear-only
+  integer and byte lanes into one field lane `g = sum_l c_l f_l` (`FoldedGroup`, byte lanes
+  through per-byte tables of `c_l map[byte]`); a kept integer lane whose every term reads it
+  alone (squares, Booleanity, links, leaf polynomials) moves its batched linear coefficient
+  into `g` as well. The lane's original linear term stays, and a cancelling single-lane
+  instance `-c1 f_l` is added; the plan merges the two per-lane linear coefficients to an
+  exact zero, so the lane's pieces keep only the higher powers. (A plan that stopped merging
+  per-lane coefficients would bring back two slots per lane.) Stage 3's `eq(r^(2))` group
+  then needs one coefficient slot per kept lane, and its dense rounds run on the fused plane
+  tail (at most 128 lanes and 192 slots, `agg_simd::fused`; H-FIPS reaches 151 slots at
+  ML-DSA-87). `AGG_TAIL_MAX_SLOTS` and `AGG_TAIL_MAX_LANES` lower these caps (for A/B runs;
+  a group over a cap runs the row-major dense rounds, with the same messages), and
+  `AGG_STAGE_TRACE` prints, per group, whether its tail is on with its lane and slot counts.
+- A projection weight kept as its two factors (`RankOneGroup`) folds only the combination
+  `g = V_lo + 2^16 V_hi + 2^15` by the low challenges (one integer dot per high row) for the
+  high rounds.
+- Terminal values: every lane is evaluated once, by the first group of the stage that reads
+  it and yields values; later readers copy that value (it is the same multilinear evaluation
+  at the same point), so a lane already held by an earlier group is not evaluated again from
+  its column.
 
 ## 7. Lookup and stage tables
 
@@ -492,21 +514,21 @@ provers and may change the honest round-2 tables before they are committed.
 
 | Timing | Spec 11 | Work |
 | --- | --- | --- |
-| `parse` | 1 | wire parse (all shapes from `N` and the relation), the header's relation against the caller's, manifest, PCS verifier from the plan's setup seed |
-| `public_data` | 2 | `StreamedPublic::prepare`: `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest |
+| `parse` | 1 | wire parse (all shapes from `N` and the relation), the header's relation against the caller's, manifest |
+| `public_data` | 1, 2 | `StreamedPublic::prepare` (`LaneStreamedPublic::prepare` for 65/87): `pkDecode`, `tr` per distinct key (cached keys reuse theirs), `mu`, `SampleInBall`; the record digest beside it; the PCS verifier from the plan's setup seed beside both (it depends on the manifest only) |
 | `transcript` | 3 | events 0 to 6: commitments parsed (coefficient counts from the plan) and absorbed, `sd`, `fs_sigma`, final vectors and share items |
 | `matrices` | 3 | `BridgeDerivation::matrices(sd)`; `SeededMatrices` derives them as in spec 9.1 (`agg_bridge::seed`) |
-| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, share item, the event-6 record digest, proof item, matrices; deviation P11); the proof items are never absorbed (K25): their challengers are seeded from `fs_sigma` and the record digest, and the PCS session does not bind them |
+| `keccak` | 3 | `KeccakVerifier::verify` per segment (`SegmentContext`: commitment item, `fs_sigma`, `sd`, `mu_i`, `c~_i`, `Y_sigma`, share item, the event-6 record digest, proof item, matrices; deviation P11); the proof items are never absorbed (K25): their challengers are seeded from `fs_sigma` and the record digest, and the PCS session does not bind them. Event 0 binds the ordered public records through `fs_sigma`; the sponge challenger does not hash the public words again. It runs beside the steps `lookup` to `opening` (rayon::join), and its rejection is reported first |
 | `lookup` | 4 | the lookup (event 7) and the multiplicity-digit claims |
 | `prestage` | 4 | `tau`, pre-stage claims, `Y(tau_3)` |
 | `stage1`, `stage2` | 5, 6 | rounds and terminal checks; `w_2, w_3` at `r^(1)`, `w_1` at `r^(2)` (bridge weights, Section 8), the leaf predicates |
 | `stage3_rounds` | 6 | `stage3::verify_streamed`: gamma, rounds, terminal claims, with the ring claim `T(r^(2))` deferred (deviation P10) |
-| `public_t`, `public_a` | 6 | `StreamedPublic::pass`: `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded and inverse-NTT'd, or cached; `Lambda` products) |
+| `public_t`, `public_a` | 6 | `StreamedPublic::pass` (`LaneStreamedPublic::{t_evaluations, ring_weights_at}`): `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded in tiles of eight keys and inverse-NTT'd, or cached; `Lambda` products) |
 | `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added, the links and the stack reductions |
-| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B |
+| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B; the public data is freed beside it and the opening (`rayon::join`) |
 | `opening` | 7 | the batched Akita opening of the 53 claims (ML-DSA-44, H-u: 35 stage-3 claims, 11 zero polynomials of `G_3`, 7 multiplicity digits) at the seven group points |
 
-A rejected run stops at its failing step (later timings stay zero); a trailing segment that
+A rejected run stops at its failing step (later timings stay zero, except `keccak`, which runs beside the PIOP steps; with it the step times sum to more than the total); a trailing segment that
 holds padded records only (`N` between `2^14` and `3 2^13`) has an empty record range.
 Before step `parse` the verifier refuses an unsound configuration
 (`verifier::check_configuration`, `VerifyError::Configuration`): a `KeccakVerifier` whose
@@ -705,4 +727,4 @@ level-1 and level-2 bridge domains as suffixes of the main domain, so `N* >= 32`
 parser refuses a header of these sets with `N < 17` (`WireError::Records`), and
 `verify_piop_lanes` rejects a manifest of fewer records (`VerifyError::RecordCount`). Entry points: `prover::main_tables_for`,
 `prover::prove_lanes_with_tables_using` and `prove_piop_lanes`; `verifier::verify_lanes_timed`
-and `verify_piop_lanes`, with `lane_public::LanePublicData` for the public data.
+and `verify_piop_lanes`, with `lane_public::LanePublicData` for the prover's public data and `lane_public::LaneStreamedPublic` for the verifier's.

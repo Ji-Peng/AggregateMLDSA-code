@@ -454,15 +454,19 @@ pub fn sponge_gate_for(set: Set) -> ChainGate {
 /// Little-endian 128-bit words of a byte string whose length is a multiple of 16.
 #[must_use]
 pub fn bytes_to_words(bytes: &[u8]) -> Vec<F128> {
+    let mut out = Vec::with_capacity(bytes.len() / 16);
+    extend_words(&mut out, bytes);
+    out
+}
+
+/// Append the words of `bytes` to `out`, as [`bytes_to_words`].
+pub fn extend_words(out: &mut Vec<F128>, bytes: &[u8]) {
     assert!(bytes.len().is_multiple_of(16));
-    bytes
-        .chunks(16)
-        .map(|c| {
-            let lo = u64::from_le_bytes(c[..8].try_into().expect("8 bytes"));
-            let hi = u64::from_le_bytes(c[8..].try_into().expect("8 bytes"));
-            F128::new(lo, hi)
-        })
-        .collect()
+    out.extend(bytes.chunks_exact(16).map(|c| {
+        let lo = u64::from_le_bytes(c[..8].try_into().expect("8 bytes"));
+        let hi = u64::from_le_bytes(c[8..].try_into().expect("8 bytes"));
+        F128::new(lo, hi)
+    }));
 }
 
 #[cfg(test)]

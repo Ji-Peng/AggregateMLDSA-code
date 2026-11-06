@@ -15,10 +15,11 @@
 //!
 //! Every size runs in its own prover process, which hands the proof to its own verifier
 //! process over a pipe, so each peak RSS belongs to one role. Records: `N - S` under their
-//! own keys and `S` (default `N / 32`) under three shared keys; the bridge matrices are
+//! own keys and `S` (default 0, as in `agg bench`) under three shared keys; the bridge matrices are
 //! derived from the bridge seed (`SeededMatrices`), so prover and verifier
-//! times include the derivation (verifier step `matrices`). Times are medians over the timed
-//! runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
+//! times include the derivation (verifier step `matrices`). As in `agg bench`, every prover run
+//! builds the public instance (key expansion, `mu`, `c`, `T`) inside its timed span and starts
+//! with the allocation caches released. Times are medians over the timed runs. With `AGG_PROOF_OUT=<dir>` the prover child writes the aggregate of its last run
 //! to `<dir>/mode_b-<N>.bin` (byte-identity checks across builds). `AGG_RELATION=h-exact`
 //! proves and verifies relation H-exact (default `h-u`); the relation is
 //! printed in the header and in every row.
@@ -87,7 +88,7 @@ fn parse_options() -> Options {
 
 impl Options {
     fn shared_for(&self, n: usize) -> usize {
-        self.shared.unwrap_or(n / 32).min(n)
+        self.shared.unwrap_or(0).min(n)
     }
 
     fn child_args(&self, n: usize) -> Vec<String> {
@@ -208,8 +209,6 @@ fn run_verifier(options: &Options, n: usize) {
 /// The prover process: generates the batch, proves, hands the proof to a verifier process.
 fn run_prover(options: &Options, n: usize) {
     let (batch, generation) = timed(|| batch(options, n));
-    // Mode A times the instance inside its prove; it is printed here so the two compare.
-    let (instance, instance_time) = timed(|| PublicInstance::from_records(&batch.records).expect("instance"));
     let inputs = batch.inputs();
     let signatures = batch.signatures();
     let bridge = bridge();
@@ -218,7 +217,13 @@ fn run_prover(options: &Options, n: usize) {
     let mut times = Vec::new();
     let mut steps = Vec::new();
     let mut last = None;
+    let mut instance_times = Vec::new();
     for run in 0..options.warmup + options.reps {
+        // Like `agg bench`: no cached blocks from the previous run, and the instance built inside
+        // the timed span (mode A builds it inside its prove).
+        agg_piop::alloc::release_cache();
+        let (instance, instance_time) =
+            timed(|| PublicInstance::from_records(&batch.records).expect("instance"));
         let output = prove_mode_b(
             &ProverInputs {
                 instance: &instance,
@@ -230,7 +235,8 @@ fn run_prover(options: &Options, n: usize) {
         )
         .expect("prove");
         if run >= options.warmup {
-            times.push(output.timings.total);
+            times.push(instance_time + output.timings.total);
+            instance_times.push(instance_time);
             steps.push(output.timings.to_string());
         }
         last = Some(output);
@@ -261,10 +267,10 @@ fn run_prover(options: &Options, n: usize) {
         options.reps, options.warmup, steps[median_run]
     );
     println!(
-        "  prove (s): median {:.3}, min {:.3}; public instance (once, before the runs) {:.3}",
+        "  prove (s, public instance included): median {:.3}, min {:.3}; public instance of the median run {:.3}",
         median_duration(&times).unwrap_or_default().as_secs_f64(),
         times.iter().min().copied().unwrap_or_default().as_secs_f64(),
-        instance_time.as_secs_f64()
+        instance_times[median_run].as_secs_f64()
     );
     println!(
         "  aggregate {} B = header {} + c~ {} + public bits {} + Akita commitments {} + final vectors {} \
