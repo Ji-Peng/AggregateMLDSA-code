@@ -1,5 +1,5 @@
-//! AVX-512 NTT for q and P2 (F/BW/VL instructions only); P3 transforms run the
-//! scalar code, and the dot product covers all three primes.
+//! AVX-512 NTT for q and P2 (F/BW/VL instructions only), the forward transform for P3;
+//! the P3 inverse runs the AVX2 code, and the dot product covers all three primes.
 //!
 //! The transforms reimplement the register schedule published with
 //! the Hybrid-SHA-3 C code (`ntt_so_avx512` / `intt_so_avx512`):
@@ -106,25 +106,25 @@ macro_rules! exchange {
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn ntt(prime: Prime, a: &mut Poly32) {
     match prime {
-        Prime::Q => ntt_impl::<false>(a),
-        Prime::P2 => ntt_impl::<true>(a),
-        Prime::P3 => {
-            super::scalar::ntt(prime, a);
-            // SAFETY: target features avx512f, bw, vl are enabled.
-            unsafe { order_from_fips(a) };
-        }
+        Prime::Q => ntt_impl::<0>(a),
+        Prime::P2 => ntt_impl::<1>(a),
+        Prime::P3 => ntt_impl::<2>(a),
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 #[inline(never)]
-fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
-    let prime = if SECOND { Prime::P2 } else { Prime::Q };
-    let t = opaque(if SECOND { &tables::P2 } else { &tables::Q });
+fn ntt_impl<const PRIME: u8>(a: &mut Poly32) {
+    let (prime, t) = match PRIME {
+        0 => (Prime::Q, opaque(&tables::Q)),
+        1 => (Prime::P2, opaque(&tables::P2)),
+        _ => (Prime::P3, opaque(&tables::P3)),
+    };
     let p = _mm512_set1_epi32(consts(prime).p);
-    // Lazy CT sums: starting at 2^22, every layer adds at most
-    // p/2 + |z*x|/2^32; generated bounds give |x|<4.52q or |x|<4.25P2 < 2^31.
+    // Lazy CT sums: starting at 2^22, every layer adds at most p/2 + |z*x|/2^32; the
+    // generated bounds (`forward_bounds` in the tables' tests) give |x| < 4.52q, 4.25P2 or
+    // 4.55P3, all below 2^31.
     macro_rules! bf {
         ($a:ident, $b:ident, $i:expr) => {{
             let (z, zi) = (lanes(&t.z[$i]), lanes(&t.zi[$i]));
@@ -274,9 +274,14 @@ fn ntt_impl<const SECOND: bool>(a: &mut Poly32) {
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,popcnt")]
 pub(crate) unsafe fn intt(prime: Prime, a: &mut Poly32, scale: Scale, form: Form) {
     if prime == Prime::P3 {
-        // SAFETY: target features avx512f, bw, vl are enabled.
-        unsafe { order_to_fips(a) };
-        super::scalar::intt(prime, a, scale, form);
+        // The AVX2 inverse transform, from its own coefficient order (the AVX-512
+        // inverse transform's lazy bounds are not proven for P3).
+        // SAFETY: target features avx512f, bw, vl and avx2 are enabled.
+        unsafe {
+            order_to_fips(a);
+            super::avx2::order_from_fips(a);
+            super::avx2::intt(prime, a, scale, form);
+        }
         return;
     }
     match (prime, scale, form) {

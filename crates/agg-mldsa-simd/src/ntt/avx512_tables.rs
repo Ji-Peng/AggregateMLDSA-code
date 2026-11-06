@@ -165,7 +165,6 @@ const fn make(c: PrimeConsts) -> Tables {
 }
 pub(super) static Q: Tables = make(CONSTS_Q);
 pub(super) static P2: Tables = make(CONSTS_P2);
-#[allow(dead_code)]
 pub(super) static P3: Tables = make(CONSTS_P3);
 
 // Conservative integer bounds in natural coefficient order after each GS layer.
@@ -232,7 +231,7 @@ mod tests {
     use super::*;
     #[test]
     fn forward_bounds() {
-        for c in [CONSTS_Q, CONSTS_P2] {
+        for c in [CONSTS_Q, CONSTS_P2, CONSTS_P3] {
             let p = c.p as i64;
             let mut bounds = [1i64 << 22; 256];
             for stage in 0..8 {
@@ -252,7 +251,11 @@ mod tests {
                     }
                 }
             }
-            let hundredths = if c.p == CONSTS_Q.p { 452 } else { 425 };
+            let hundredths = match c.p {
+                p if p == CONSTS_Q.p => 452,
+                p if p == CONSTS_P2.p => 425,
+                _ => 455,
+            };
             assert!(bounds.into_iter().all(|b| b * 100 < hundredths * p));
         }
     }

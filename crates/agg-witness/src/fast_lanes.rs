@@ -3,11 +3,12 @@
 //!
 //! For a record and its signature, in tiles of [`TILE`] records: decode z (with its norm)
 //! and the hint, reuse the instance's `T = 2^d (c t1)` when the signature's c~ is the
-//! record's, and compute A z over Z from its residues modulo q and the two transform primes
-//! `P2`, `P3` of `agg_mldsa_simd`: `|A z| <= l 256 (q - 1)/2 gamma1 < 2^52` exceeds
-//! `q P2 / 2`, but not `q P2 P3 / 2`. The matrix is transformed per record from its centered
-//! coefficients (`ExpandedKey::a`), three transforms per entry. Each row finishes without
-//! division (`finish_row_3p`: centered CRT, UseHint on `A z - T` modulo q, the residual u
+//! record's, and compute A z over Z from its residues modulo the two transform primes `P2`,
+//! `P3` of `agg_mldsa_simd`: `|A z| <= l 256 (q - 1)/2 gamma1 < 2^52` is below
+//! `P2 P3 / 2 ~ 2^54.8`, so the CRT value is A z itself and its residue modulo q needs no
+//! transform of its own. The matrix is transformed per record from its centered
+//! coefficients (`ExpandedKey::a`), two transforms per entry. Each row finishes without
+//! division (`finish_row_2p`: centered CRT, UseHint on `A z - T` modulo q, the residual u
 //! and the exact quotient v, with their bounds), w1' is packed, and one batch of SHAKE256
 //! digests per tile recomputes c~' = H(mu || w1Encode(w1')).
 //!
@@ -19,7 +20,7 @@ use crate::derive::{derive_with_t_for, DeriveError};
 use crate::instance::PublicRecord;
 use crate::native::hint_bit_unpack_for;
 use crate::params::{ParamSet, N};
-use agg_mldsa_simd::{Engine, FinishOut, FinishRow3P, Form, Poly32, Prime, Scale};
+use agg_mldsa_simd::{Engine, FinishOut, FinishRow2P, Form, Poly32, Prime, Scale};
 
 /// Records per derivation tile (one batch of commitment digests).
 pub const TILE: usize = 8;
@@ -66,16 +67,6 @@ fn transformed<P: agg_mldsa_simd::ParamSet>(engine: &Engine<P>, prime: Prime, p:
     x
 }
 
-/// The engine of the P3 steps: the AVX2 engine under an AVX-512 one, else `engine` itself.
-/// Every backend is exact modulo P3; the AVX-512 backend runs its P3 transforms in scalar
-/// code, so the AVX2 engine is chosen there only because it is vectorised.
-fn p3_engine<P: agg_mldsa_simd::ParamSet>(engine: &Engine<P>) -> Engine<P> {
-    match engine.backend() {
-        agg_mldsa_simd::Backend::Avx512 => Engine::new_for(agg_mldsa_simd::Backend::Avx2).unwrap_or(*engine),
-        _ => *engine,
-    }
-}
-
 /// Everything up to the commitment hash for one record, with `L` the columns of `P`;
 /// `false` sends the record to the legacy derivation.
 fn derive_one<P, const L: usize>(
@@ -107,8 +98,8 @@ where
         return false;
     };
     // |z| <= gamma1 = 2^19 and |A| <= (q - 1)/2 lie inside the forward transforms' input
-    // range |a| <= 2^22; z stays unreduced, the matrix canonical modulo q and centered
-    // modulo the transform primes, as the four-column path reads them.
+    // range |a| <= 2^22; z stays unreduced and the matrix is centered modulo each transform
+    // prime, as the four-column path reads them.
     let z: [Poly32; L] = std::array::from_fn(|s| out.z[s]);
     let z_hat = |prime: Prime| -> [Poly32; L] {
         std::array::from_fn(|s| {
@@ -117,17 +108,7 @@ where
             x
         })
     };
-    // Scalar and AVX2 code are both exact modulo P3, and the AVX-512 backend runs its P3
-    // transforms in scalar code. The AVX2 engine is used there for speed only, and every P3
-    // step (transforms, dot, inverse) runs on that one engine so that the coefficient order
-    // stays that backend's.
-    let p3 = p3_engine(engine);
-    let z_p3: [Poly32; L] = std::array::from_fn(|s| {
-        let mut x = z[s];
-        p3.ntt(Prime::P3, &mut x);
-        x
-    });
-    let (z_q, z_p2) = (z_hat(Prime::Q), z_hat(Prime::P2));
+    let (z_p2, z_p3) = (z_hat(Prime::P2), z_hat(Prime::P3));
     let key = &record.key;
     let t = &*record.t;
     let mut w1 = vec![[0u8; N]; k];
@@ -135,24 +116,21 @@ where
         let a: [Poly32; L] = std::array::from_fn(|s| Poly32(*<P as ParamSet>::get_coeff(&key.a, r, s)));
         // The Mont inverse scale cancels the dot's 1/R, so the canonical outputs are
         // (A z)_r modulo each prime.
-        let row = |engine: &Engine<P>, prime: Prime, form: Form, z_hat: &[Poly32; L]| {
-            let a_hat: [Poly32; L] = std::array::from_fn(|s| transformed(engine, prime, &a[s], form));
+        let row = |prime: Prime, z_hat: &[Poly32; L]| {
+            let a_hat: [Poly32; L] = std::array::from_fn(|s| transformed(engine, prime, &a[s], Form::Centered));
             let mut x = Poly32::zero();
             engine.dot_l::<L>(prime, &a_hat, z_hat, &mut x);
             engine.intt(prime, &mut x, Scale::Mont, Form::Canonical);
             x
         };
-        let x_q = row(engine, Prime::Q, Form::Canonical, &z_q);
-        let x_p2 = row(engine, Prime::P2, Form::Centered, &z_p2);
-        let x_p3 = row(&p3, Prime::P3, Form::Centered, &z_p3);
-        let finish = FinishRow3P {
-            xq: &x_q,
+        let (x_p2, x_p3) = (row(Prime::P2, &z_p2), row(Prime::P3, &z_p3));
+        let finish = FinishRow2P {
             xp2: &x_p2,
             xp3: &x_p3,
             t: &t[r],
             h: &h[r],
         };
-        if engine.finish_row_3p(finish, &mut out.rows[r]).is_err() {
+        if engine.finish_row_2p(finish, &mut out.rows[r]).is_err() {
             return false;
         }
         w1[r] = out.rows[r].w1;

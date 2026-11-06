@@ -347,9 +347,13 @@ Each polynomial is transformed under two primes: the ML-DSA prime `q = 8,380,417
 residues by centered CRT. The pair is exact because
 `|A z| <= l 256 (q - 1)/2 gamma_1 < q P2 / 2` for every decodable ML-DSA-44 `z`. For
 ML-DSA-65 and ML-DSA-87 (`gamma_1 = 2^19`, `l` = 5, 7) the bound exceeds `q P2 / 2`, so
-`crates/agg-witness/src/fast_lanes.rs` adds the third prime `P3 = 377,487,361 = 45 * 2^23 + 1`
-and finishes with `finish_row_3p` (`|A z| < 2^52 < q P2 P3 / 2`). The row then
-finishes without division: centered CRT, UseHint on `A z - T` modulo `q`, and the exact
+`crates/agg-witness/src/fast_lanes.rs` transforms under `P2` and the third prime
+`P3 = 377,487,361 = 45 * 2^23 + 1` instead of `q` and `P2`, and finishes with `finish_row_2p`:
+`|A z| < 2^52 < P2 P3 / 2`, so the centered CRT value is `A z` itself, and its residue modulo
+`q` and the quotient `k = (A z - xq) / q` follow from it without a transform modulo `q` (one
+third fewer transforms of the matrix). The AVX-512 backend runs the `P3` forward transform in
+its own kernel (lazy bound `4.55 P3 < 2^31`, checked by the tables' `forward_bounds` test) and
+the `P3` inverse in the AVX2 kernel after a reordering. The row then finishes without division: centered CRT, UseHint on `A z - T` modulo `q`, and the exact
 quotient `v` with its bounds. A record that fails any step falls back to the reference
 derivation (`crates/agg-witness/src/derive.rs`), so its error and its accepted witness are
 exactly the reference ones. The reference CRT path with the 31-bit prime
