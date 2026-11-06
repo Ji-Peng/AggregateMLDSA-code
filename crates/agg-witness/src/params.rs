@@ -403,6 +403,11 @@ pub trait ParamSet: Copy + Send + Sync + 'static {
     fn make_prepared(rho: &[u8; 32]) -> Self::Prepared;
     /// Expands an encoded public key for this parameter set.
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>>;
+    /// [`ParamSet::expand_key`] of each key of a batch (the sets with polynomial lanes hash
+    /// and expand the batch together on the SIMD engine).
+    fn expand_keys(pks: &[&[u8]]) -> Vec<Option<crate::expand::ExpandedKey<Self>>> {
+        pks.iter().map(|pk| Self::expand_key(pk)).collect()
+    }
     /// Strict witness derivation of a tile of records on the process-wide SIMD engine
     /// ([`crate::fast_lanes::derive_tile`]; ML-DSA-44, whose tables run [`crate::fast`],
     /// takes the legacy derivation here).
@@ -514,6 +519,9 @@ impl ParamSet for Set44 {
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
         crate::expand::ExpandedKey::<Set44>::many(&[pk]).pop().flatten()
     }
+    fn expand_keys(pks: &[&[u8]]) -> Vec<Option<crate::expand::ExpandedKey<Self>>> {
+        crate::expand::ExpandedKey::<Set44>::many(pks)
+    }
     fn derive_lane_tile(
         records: &[&crate::instance::PublicRecord<Self>],
         sigs: &[&[u8]],
@@ -606,6 +614,9 @@ impl ParamSet for Set65 {
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
         crate::expand::expand_key_engine::<Set65, 6, 5>(pk)
     }
+    fn expand_keys(pks: &[&[u8]]) -> Vec<Option<crate::expand::ExpandedKey<Self>>> {
+        crate::expand::expand_keys_engine::<Set65, 6, 5>(pks)
+    }
     fn derive_lane_tile(
         records: &[&crate::instance::PublicRecord<Self>],
         sigs: &[&[u8]],
@@ -697,6 +708,9 @@ impl ParamSet for Set87 {
     fn make_prepared(_rho: &[u8; 32]) -> Self::Prepared { () }
     fn expand_key(pk: &[u8]) -> Option<crate::expand::ExpandedKey<Self>> {
         crate::expand::expand_key_engine::<Set87, 8, 7>(pk)
+    }
+    fn expand_keys(pks: &[&[u8]]) -> Vec<Option<crate::expand::ExpandedKey<Self>>> {
+        crate::expand::expand_keys_engine::<Set87, 8, 7>(pks)
     }
     fn derive_lane_tile(
         records: &[&crate::instance::PublicRecord<Self>],

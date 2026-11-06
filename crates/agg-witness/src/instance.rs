@@ -112,6 +112,11 @@ pub const RECORD_TILE: usize = 64;
 /// The challenge of [`crate::native::sample_in_ball`] from its sparse form.
 #[must_use]
 pub fn challenge_from_sparse(c: &Challenge39) -> Challenge {
+    challenge_from_sparse_tau(c)
+}
+
+/// [`challenge_from_sparse`] for any `tau`.
+pub fn challenge_from_sparse_tau<const TAU: usize>(c: &agg_mldsa_simd::Challenge<TAU>) -> Challenge {
     let mut coeffs = [0i8; N];
     for (k, &pos) in c.pos.iter().enumerate() {
         coeffs[usize::from(pos)] = if (c.neg >> k) & 1 == 1 { -1 } else { 1 };
@@ -119,6 +124,25 @@ pub fn challenge_from_sparse(c: &Challenge39) -> Challenge {
     Challenge {
         coeffs,
         positions: c.pos.to_vec(),
+    }
+}
+
+/// SampleInBall of a tile of seeds and `T = 2^d (c t1)` of each record (`k 256` cells per
+/// record in `t`) on `engine`, with `tau = TAU` (`P::TAU`).
+fn public_tile<P: ParamSet, const TAU: usize>(
+    engine: &Engine,
+    seeds: &[&[u8]],
+    keys: &[&ExpandedKey<P>],
+    challenges: &mut [Challenge],
+    t: &mut [i32],
+) {
+    assert_eq!(P::TAU, TAU, "the challenge weight of the parameter set");
+    let mut sparse = vec![agg_mldsa_simd::Challenge::<TAU>::zero(); seeds.len()];
+    engine.sample_in_ball_many(seeds, &mut sparse);
+    for (((c, sparse), key), out) in challenges.iter_mut().zip(&sparse).zip(keys).zip(t.chunks_exact_mut(P::K * N)) {
+        *c = challenge_from_sparse_tau(sparse);
+        let (rows, _) = out.as_chunks_mut::<N>();
+        engine.sparse_ct_slice(sparse, key.t1.as_ref(), D as u32, rows);
     }
 }
 
@@ -232,31 +256,56 @@ impl<P: ParamSet> PublicInstance<P> {
                 })
             })
             .collect();
+        // Keys in batches of eight: one batch of SHAKE256 streams for their `tr` and one of
+        // SHAKE128 streams for their matrices.
         let keys: Vec<Option<Arc<ExpandedKey<P>>>> = distinct
-            .par_iter()
-            .map(|pk| ExpandedKey::<P>::from_bytes_for(pk).map(Arc::new))
+            .par_chunks(crate::expand::KEY_TILE)
+            .flat_map_iter(|pks| P::expand_keys(pks).into_iter().map(|key| key.map(Arc::new)))
             .collect();
         if let Some(i) = slot.iter().position(|&k| keys[k].is_none()) {
             return Err(InstanceError::PublicKey(i));
         }
         let key_of = |i: usize| Arc::clone(keys[slot[i]].as_ref().expect("checked above"));
 
-        // `mu`, `c = SampleInBall(c~)` and `T = 2^d (c t1)` per record, in parallel; `T` goes
-        // straight into the flat buffer (fresh zeroed pages, first touched by the writers).
-        let (mus, challenges): (Vec<[u8; TR_BYTES]>, Vec<_>) = inputs
-            .par_iter()
-            .zip(&slot)
-            .map(|((_, msg, ct), &k)| {
-                let key = keys[k].as_deref().expect("checked above");
-                (crate::native::mu(&key.tr, msg, &[]), crate::native::sample_in_ball_for::<P>(ct.as_ref()))
-            })
-            .unzip();
+        // `mu`, `c = SampleInBall(c~)` and `T = 2^d (c t1)` per tile of records on the SIMD
+        // engine (as for ML-DSA-44); `T` goes straight into the flat buffer (fresh zeroed
+        // pages, first touched by the writers).
+        let engine = agg_mldsa_simd::engine();
+        let mut mus = vec![[0u8; TR_BYTES]; inputs.len()];
+        let mut challenges = vec![Challenge { coeffs: [0; N], positions: Vec::new() }; inputs.len()];
         let mut t = vec![0_i32; inputs.len() * P::K * N];
-        t.par_chunks_mut(P::K * N).zip(&challenges).zip(&slot).for_each(|((out, c), &k)| {
-            let key = keys[k].as_deref().expect("checked above");
-            let (rows, _) = out.as_chunks_mut::<N>();
-            crate::expand::public_t_into_for::<P>(c, &key.t1, rows);
-        });
+        mus.par_chunks_mut(RECORD_TILE)
+            .zip(challenges.par_chunks_mut(RECORD_TILE))
+            .zip(t.par_chunks_mut(RECORD_TILE * P::K * N))
+            .zip(inputs.par_chunks(RECORD_TILE))
+            .enumerate()
+            .for_each(|(n, (((mus, challenges), t), tile))| {
+                let first = n * RECORD_TILE;
+                let tile_keys: Vec<&ExpandedKey<P>> =
+                    (first..first + tile.len()).map(|i| keys[slot[i]].as_deref().expect("checked above")).collect();
+                let mu_inputs: Vec<[&[u8]; 4]> = tile_keys
+                    .iter()
+                    .zip(tile)
+                    .map(|(key, (_, msg, _))| [&key.tr[..], &[0u8, 0u8][..], &[][..], *msg])
+                    .collect();
+                engine.shake256_many(&mu_inputs, TR_BYTES, mus.as_flattened_mut());
+                let seeds: Vec<&[u8]> = tile.iter().map(|(_, _, c)| c.as_ref()).collect();
+                let t_rows = |c: &Challenge, key: &ExpandedKey<P>, out: &mut [i32]| {
+                    let (rows, _) = out.as_chunks_mut::<N>();
+                    crate::expand::public_t_into_for::<P>(c, &key.t1, rows);
+                };
+                match P::TAU {
+                    39 => public_tile::<P, 39>(engine, &seeds, &tile_keys, challenges, t),
+                    49 => public_tile::<P, 49>(engine, &seeds, &tile_keys, challenges, t),
+                    60 => public_tile::<P, 60>(engine, &seeds, &tile_keys, challenges, t),
+                    _ => {
+                        for (((c, seed), key), out) in challenges.iter_mut().zip(&seeds).zip(&tile_keys).zip(t.chunks_exact_mut(P::K * N)) {
+                            *c = crate::native::sample_in_ball_for::<P>(seed);
+                            t_rows(c, key, out);
+                        }
+                    }
+                }
+            });
 
         let t = Arc::new(t);
         let records = mus
@@ -312,5 +361,36 @@ impl<P: ParamSet> PublicInstance<P> {
     pub fn t_table(&self) -> Vec<i64> {
         assert_eq!(P::LANES_K, 1, "one main-domain table per polynomial lane");
         self.t_lane_tables().pop().expect("one lane")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::params::{Set65, Set87};
+
+    /// The batched `mu`, SampleInBall and `T` of every record equal the per-record scalar
+    /// functions (FIPS 204 Algorithms 8 and 29), on fresh and shared keys.
+    fn matches_the_scalar_values<P: ParamSet>(seed: u64) {
+        let mut records = crate::gen::records_for::<P>(seed, 70);
+        records.extend(crate::gen::records_shared_keys_for::<P>(seed + 1, 9, 3));
+        let instance = PublicInstance::<P>::from_records_for(&records).unwrap();
+        for (r, rec) in instance.records.iter().zip(&records) {
+            assert_eq!(r.mu, crate::native::mu(&r.key.tr, &rec.msg, &[]));
+            let c = crate::native::sample_in_ball_for::<P>(&rec.sig[..P::C_TILDE_BYTES]);
+            assert_eq!(r.c, c);
+            let mut t = vec![[0_i32; N]; P::K];
+            crate::expand::public_t_into_for::<P>(&c, &r.key.t1, &mut t);
+            for (row, want) in t.iter().enumerate() {
+                assert_eq!(&r.t[row], want);
+            }
+        }
+    }
+
+    #[test]
+    fn batched_public_values_match_the_scalar_ones() {
+        matches_the_scalar_values::<Set44>(3);
+        matches_the_scalar_values::<Set65>(5);
+        matches_the_scalar_values::<Set87>(7);
     }
 }

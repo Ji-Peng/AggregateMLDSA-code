@@ -219,6 +219,49 @@ where
     })
 }
 
+/// [`expand_key_engine`] of a batch of keys: `tr = H(pk)` of every key as one batch of
+/// SHAKE256 streams and `ExpandA` of every decodable key as one batch of SHAKE128 streams;
+/// each result equals [`expand_key_engine`]'s.
+pub fn expand_keys_engine<P, const K2: usize, const L2: usize>(pks: &[&[u8]]) -> Vec<Option<ExpandedKey<P>>>
+where
+    P: ParamSet + agg_mldsa_simd::ParamSet,
+{
+    let engine = agg_mldsa_simd::engine_for::<P>();
+    let mut decoded: Vec<_> = pks.iter().map(|pk| crate::native::pk_decode_for::<P>(pk)).collect();
+    let live: Vec<usize> = (0..pks.len()).filter(|&i| decoded[i].is_some()).collect();
+    let mut trs = vec![[0u8; TR_BYTES]; live.len()];
+    let inputs: Vec<[&[u8]; 4]> = live.iter().map(|&i| [pks[i], &[][..], &[][..], &[][..]]).collect();
+    engine.shake256_many(&inputs, TR_BYTES, trs.as_flattened_mut());
+    let rhos: Vec<[u8; 32]> = live.iter().map(|&i| decoded[i].as_ref().expect("live").rho).collect();
+    let mut expanded = vec![ExpandedA::<K2, L2>::zero(); live.len()];
+    engine.expand_a_many_kl::<K2, L2>(&rhos, &mut expanded);
+    let mut out: Vec<Option<ExpandedKey<P>>> = (0..pks.len()).map(|_| None).collect();
+    for ((&i, ex), tr) in live.iter().zip(&expanded).zip(trs) {
+        let decoded = decoded[i].take().expect("live");
+        let mut a = P::zero_matrix_coeff();
+        let mut expand_blocks = P::zero_expand_blocks();
+        for r in 0..K2 {
+            for s in 0..L2 {
+                let mut poly = ex.a_hat[r][s];
+                engine.intt(agg_mldsa_simd::Prime::Q, &mut poly, agg_mldsa_simd::Scale::Plain, agg_mldsa_simd::Form::Centered);
+                *P::get_coeff_mut(&mut a, r, s) = poly.0;
+                P::set_block(&mut expand_blocks, r, s, usize::from(ex.blocks[r][s]));
+            }
+        }
+        out[i] = Some(ExpandedKey {
+            pk: pks[i].to_vec(),
+            rho: decoded.rho,
+            t1: decoded.t1,
+            tr,
+            expand_blocks,
+            a,
+            prepared: <P as ParamSet>::make_prepared(&decoded.rho),
+            _marker: PhantomData,
+        });
+    }
+    out
+}
+
 impl<P: ParamSet> ExpandedKey<P> {
     /// Decodes and expands a public key for parameter set P.
     pub fn from_bytes_for(pk: &[u8]) -> Option<Self> {
@@ -461,6 +504,40 @@ mod tests {
                 assert_eq!(fips.ntt(&back), key.a_hat()[row][s]);
             }
         }
+    }
+
+    /// The batched expansion gives each key's own expansion, and `None` for a key that
+    /// does not decode.
+    fn batched_keys_match<P: ParamSet>(seed: u64) {
+        let records = crate::gen::records_for::<P>(seed, 11);
+        let mut pks: Vec<&[u8]> = records.iter().map(|r| r.pk.as_slice()).collect();
+        let short = &records[0].pk[..P::PK_BYTES - 1];
+        pks.insert(4, short);
+        let batch = P::expand_keys(&pks);
+        assert_eq!(batch.len(), pks.len());
+        for (i, (pk, key)) in pks.iter().zip(&batch).enumerate() {
+            match (key, P::expand_key(pk)) {
+                (None, None) => {}
+                (Some(got), Some(want)) => {
+                    assert!(got.pk == want.pk && got.rho == want.rho && got.t1 == want.t1 && got.tr == want.tr, "key {i}");
+                    for r in 0..P::K {
+                        for s in 0..P::L {
+                            assert_eq!(P::get_coeff(&got.a, r, s), P::get_coeff(&want.a, r, s), "key {i}");
+                            assert_eq!(P::get_block(&got.expand_blocks, r, s), P::get_block(&want.expand_blocks, r, s));
+                        }
+                    }
+                }
+                _ => panic!("key {i}: batched and single expansions disagree on decoding"),
+            }
+        }
+        assert!(batch[4].is_none());
+    }
+
+    #[test]
+    fn batched_keys_match_single_keys() {
+        batched_keys_match::<Set44>(19);
+        batched_keys_match::<Set65>(21);
+        batched_keys_match::<Set87>(23);
     }
 
     #[test]
