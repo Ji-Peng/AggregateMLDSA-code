@@ -1618,12 +1618,15 @@ impl BridgeGroupTables {
             // bits.
             let lookup = manifest.lookup_shape();
             let slots = |level: usize| lookup.stacks[manifest.carry_stack(level)].slots();
-            // The packed path writes the level-3 carries as one slot and the level-2 carries
-            // without H-FIPS's hint slack beside them, so H-FIPS takes the general path.
+            // The packed path writes the level-3 carries as one slot and the four level-2
+            // carries in the first slots of their stack; H-FIPS's hint slack takes the slot
+            // after them, as on the general path.
             assert_eq!(slots(3), 1, "the level-3 carries of a four-lane set fill one slot");
-            let packed = (!manifest.is_fips())
-                .then(|| main.bridge_nibble_source(manifest).map(|src| src.all()))
-                .flatten();
+            let hint_slack = manifest.is_fips().then(|| hint_slack_table(manifest, main.hint_slack()));
+            let slack_fits = hint_slack.as_ref().is_none_or(|slack| {
+                slots(2) > 4 && slack.iter().all(|&u| (0..1 << 16).contains(&u))
+            });
+            let packed = slack_fits.then(|| main.bridge_nibble_source(manifest).map(|src| src.all())).flatten();
             if let Some((nibbles, true)) = packed {
                 let direct = parity::compute_direct_four_packed(
                     &shape,
@@ -1633,7 +1636,14 @@ impl BridgeGroupTables {
                     [slots(1), slots(2)],
                 )
                 .map_err(SourceTableError::Bridge)?;
-                if let Some(direct) = direct {
+                if let Some(mut direct) = direct {
+                    if let Some(slack) = &hint_slack {
+                        let cells = direct.level2_carries.len() / slots(2);
+                        assert_eq!(slack.len(), cells, "the hint slack fills one level-2 slot");
+                        for (dst, &u) in direct.level2_carries[4 * cells..5 * cells].iter_mut().zip(slack) {
+                            *dst = u as i32 - LOOKUP_SHIFT;
+                        }
+                    }
                     let mut tables = Self {
                         parity1: Some(direct.y1),
                         level1: direct.level1_carries,
@@ -1656,7 +1666,6 @@ impl BridgeGroupTables {
             let inputs: Vec<&[i8]> = inputs.iter().map(Vec::as_slice).collect();
             let witness = parity::compute(&shape, &inputs, matrices).map_err(SourceTableError::Bridge)?;
             // H-FIPS: the hint slack in the slot after the four level-2 carries.
-            let hint_slack = manifest.is_fips().then(|| hint_slack_table(manifest, main.hint_slack()));
             return Self::from_witness(manifest, main, witness, hint_slack.into_iter().collect(), proj, psi);
         }
         let bit_lanes = main.bit_lanes(manifest);
