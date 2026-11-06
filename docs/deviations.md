@@ -139,7 +139,7 @@ at a full 2^13-record segment the block-first path is kept.
 
 Spec Section 8: the bridge slot copies "every live record's 48 w1Encode words".
 
-Code: the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) keeps the IO schema
+Historical implementation (now removed): the plain sponge sub-proof (`prover::SpongeProver`, `GateBatch`) kept the IO schema
 `mu`, `c~` and its digests. The bridged segment registered the sponge type with the 48
 w1Encode words added as `In` schema words after `mu` and wired them to the bridge slot's
 words, `48 n` wire classes of two `In` cells each (docs/bridge.md Section 2); that code was
@@ -152,7 +152,7 @@ and `fs_sigma` (event 5, the Flock challenger's seed) are drawn, and event 6 abs
 Flock proof byte strings; the Section 8 driver commits the union witness and hands the
 commitment to the PIOP before it receives `sd` and `fs_sigma`.
 
-Code (`agg_keccak::prover`):
+Historical standalone implementation (now removed):
 
 - `GateBatch::commit` (`SpongeProver::commit_batch`, `commit_all`) computes the
   commitment before any seed exists and returns a `CommittedBatch` that owns the slot
@@ -183,8 +183,8 @@ Section 6). The slot buffers of all `S` sub-batches stay in memory from event 2 
 commit needs a Flock entry that takes the commitment and its `ProverData`.
 
 For the tied part of the mode-A driver K14 applies instead: the commitment is computed once and
-its prover data kept from event 2 to event 6; the paragraphs above remain true of the
-standalone sponge path (`GateBatch`, `SpongeProver`).
+its prover data kept from event 2 to event 6; the standalone sponge path described above
+has been removed.
 
 ## K8. `Y_sigma` as a coefficient of the bridge rows, not a committed word (spec Section 8)
 
@@ -649,7 +649,7 @@ deterministic, so the data is what the prover would recompute; tests show byte-i
 proofs with and without it). `TiedCommitted` keeps the sponge instance's data;
 `agg_cli::mode_a` keeps it per part from event 2 to event 6, while the witness buffers are
 still dropped after event 2 and rebuilt at event 6 (with lever W1, below, only in a batch of
-more than one part). The standalone sponge path (`prover::GateBatch`) still goes through Flock's own prover and commits twice.
+more than one part). The former standalone sponge path (`prover::GateBatch`) went through Flock's own prover and committed twice; it has since been removed.
 
 Cost (measured locally): the kept data is the sponge instance's codeword and Merkle
 tree, 19 / 52 / 84 / 152 MiB at 256 / 512 / 1,024 / 2,048 records with `Fast` (twice that

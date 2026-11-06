@@ -1754,7 +1754,7 @@ mod tests {
             sponge,
             sponge_data,
             bits,
-            public,
+            public: _public,
             commitment: absorbed,
             ..
         } = committed;

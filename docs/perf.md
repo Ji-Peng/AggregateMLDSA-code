@@ -42,7 +42,7 @@ Builds (all `RUSTUP_TOOLCHAIN=stable`, `CARGO_BUILD_JOBS=4`):
 | --- | --- | --- |
 | `target/clmul` | `-C target-feature=+pclmulqdq` | the baseline (as `scripts/bench.sh CLMUL=1`) |
 | `target/prof-gfni` | `+pclmulqdq,+gfni` | A/B of Flock's GFNI (SSE) zerocheck kernel in full mode A |
-| `target/prof-v4` | `-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq,+gfni,+avx512vbmi` | Keccak-only bench (`agg-keccak --bench keccak_sponge`, no `avx512` feature) to measure Flock's AVX-512 kernels; mode A cannot run in this build (Akita self-check) |
+| `target/prof-v4` | `-C target-cpu=x86-64-v4 -C target-feature=+vpclmulqdq,+pclmulqdq,+gfni,+avx512vbmi` | Former Keccak-only bench (now removed) measured Flock's AVX-512 kernels; mode A cannot run in this build (Akita self-check) |
 | scratch `gfbench` | soft / `+pclmulqdq` / `+pclmulqdq,+avx512f,+vpclmulqdq` | GF(2^128) multiply microbench on `flock-field` 83f963e |
 
 
