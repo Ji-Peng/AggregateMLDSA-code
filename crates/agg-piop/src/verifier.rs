@@ -3,7 +3,9 @@
 //! public matrices once, and verify the Akita opening. Every step is timed
 //! ([`VerifyTimings`]); [`verify_timed`] returns the outcome with the timings. The `keccak`
 //! step runs beside the steps from `lookup` to `opening` (it needs only the matrices and the
-//! final-vector step), so the step times overlap and their sum exceeds the total.
+//! final-vector step), so the step times overlap and their sum exceeds the total. A Keccak-side
+//! rejection is still reported first, but only after the PIOP side has finished: rejecting a
+//! proof costs about as much as accepting one.
 //!
 //! Steps:
 //!
@@ -20,7 +22,7 @@
 //! | `stage3_rounds` | stage-3 rounds and terminal claims, ring claim deferred |
 //! | `public_pass` | one pass over the records and keys: `T(r^(2))`, `w_A(r^(3))` ([`StreamedPublic::pass`]) |
 //! | `stage3_terminal` | the batched stage-3 terminal check |
-//! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits); the public data is freed on another worker beside this step and the opening |
+//! | `bits` | [`KeccakVerifier::check_bits`] (mode B: committed bits against the public bits); the public data is freed beside this step and the opening (`rayon::join`) |
 //! | `opening` | the batched Akita opening of every committed polynomial (53 claims for ML-DSA-44 under H-u) |
 //!
 //! Before parsing the verifier checks its own configuration ([`check_configuration`]) and

@@ -501,7 +501,7 @@ provers and may change the honest round-2 tables before they are committed.
 | `stage3_rounds` | 6 | `stage3::verify_streamed`: gamma, rounds, terminal claims, with the ring claim `T(r^(2))` deferred (deviation P10) |
 | `public_t`, `public_a` | 6 | `StreamedPublic::pass` (`LaneStreamedPublic::{t_evaluations, ring_weights_at}`): `T(r^(2))` over the records (`T_i` recomputed from the sparse `c_i`), `w_A(r^(3))` over the distinct keys (`A` expanded in tiles of eight keys and inverse-NTT'd, or cached; `Lambda` products) |
 | `stage3_terminal` | 7 | the batched stage-3 terminal with `gamma_ring T(r^(2)) prod_k r^(3)_k` added, the links and the stack reductions |
-| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B; the public data is freed on another worker beside it and the opening |
+| `bits` | 7 | `KeccakVerifier::check_bits` (`BitsContext`: event-2 items, `r^(3)`, the six claims `b_t(r^(3))`); a no-op except in mode B; the public data is freed beside it and the opening (`rayon::join`) |
 | `opening` | 7 | the batched Akita opening of the 53 claims (ML-DSA-44, H-u: 35 stage-3 claims, 11 zero polynomials of `G_3`, 7 multiplicity digits) at the seven group points |
 
 A rejected run stops at its failing step (later timings stay zero, except `keccak`, which runs beside the PIOP steps; with it the step times sum to more than the total); a trailing segment that

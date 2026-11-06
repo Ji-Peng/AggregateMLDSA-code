@@ -169,27 +169,53 @@ fn t_evaluations_by(
     let eq_coef = SplitWeights::new(&eq_table(coef));
     let eq_sig = eq_table(sig);
     let scale = E::from_u64(1 << d);
-    (0..records)
+    // Per chunk of 64 records: rows given divided by `2^d` go to `scaled`, exact rows to
+    // `plain`; the chunk's scratch rows live in its own stack frame.
+    let sums = (0..records.div_ceil(64))
         .into_par_iter()
-        .with_min_len(64)
-        .fold(
-            || (vec![E::zero(); k], [[0_i32; N]; MAX_ROWS]),
-            |(mut acc, mut scratch), i| {
-                let scratch_rows = &mut scratch[..k];
-                let weight = if rows(i, scratch_rows) { eq_sig[i] * scale } else { eq_sig[i] };
+        .map(|chunk| {
+            let mut scratch = [[0_i32; N]; MAX_ROWS];
+            let scratch_rows = &mut scratch[..k];
+            let (mut scaled, mut plain) = (vec![E::zero(); k], vec![E::zero(); k]);
+            for i in chunk * 64..(chunk * 64 + 64).min(records) {
+                let acc = if rows(i, scratch_rows) { &mut scaled } else { &mut plain };
                 for (slot, row) in acc.iter_mut().zip(scratch_rows.iter()) {
-                    *slot += weight * eq_coef.dot::<16>(row);
+                    *slot += eq_sig[i] * eq_coef.dot::<16>(row);
                 }
-                (acc, scratch)
-            },
-        )
-        .map(|(acc, _)| acc)
+            }
+            (scaled, plain)
+        })
         .reduce(
-            || vec![E::zero(); k],
-            |mut acc, part| {
-                for (a, p) in acc.iter_mut().zip(part) {
-                    *a += p;
+            || (vec![E::zero(); k], vec![E::zero(); k]),
+            |(mut scaled, mut plain), (s, p)| {
+                scaled.iter_mut().zip(s).for_each(|(a, b)| *a += b);
+                plain.iter_mut().zip(p).for_each(|(a, b)| *a += b);
+                (scaled, plain)
+            },
+        );
+    sums.0.into_iter().zip(sums.1).map(|(scaled, plain)| scale * scaled + plain).collect()
+}
+
+/// `sum_i eq2[i] eq3[i] per_key(key_of[i])`: one weight per record against its key's `l`
+/// values, reduced over chunks of records in parallel.
+fn sum_over_records<'k>(key_of: &[usize], eq2: &[E], eq3: &[E], l: usize, per_key: impl Fn(usize) -> &'k [E] + Sync) -> Vec<E> {
+    key_of
+        .par_chunks(1024)
+        .enumerate()
+        .map(|(chunk, keys)| {
+            let mut out = vec![E::zero(); l];
+            for (i, &key) in (chunk * 1024..).zip(keys) {
+                let weight = eq2[i] * eq3[i];
+                for (slot, &value) in out.iter_mut().zip(per_key(key)) {
+                    *slot += weight * value;
                 }
+            }
+            out
+        })
+        .reduce(
+            || vec![E::zero(); l],
+            |mut acc, part| {
+                acc.iter_mut().zip(part).for_each(|(a, b)| *a += b);
                 acc
             },
         )
@@ -396,14 +422,7 @@ impl LanePublicData {
                     .collect()
             })
             .collect();
-        let mut out = vec![E::zero(); l];
-        for (i, &key) in self.key_of.iter().enumerate() {
-            let weight = eq2[i] * eq3[i];
-            for (slot, &value) in out.iter_mut().zip(&per_key[key]) {
-                *slot += weight * value;
-            }
-        }
-        out
+        sum_over_records(&self.key_of, &eq2, &eq3, l, |key| &per_key[key])
     }
 }
 
@@ -439,42 +458,33 @@ impl StreamKey<'_> {
     }
 }
 
-/// `c = SampleInBall(c~)` of one record: the first `tau` entries of `pos` are the increasing
-/// positions of the nonzero coefficients, bit `m` of `neg` is set when `c[pos[m]] = -1`
-/// (the form of `agg_mldsa_simd::Challenge`, for any `tau <= 64`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SparseChallenge {
-    pos: [u8; 64],
-    neg: u64,
-}
-
-impl SparseChallenge {
-    const ZERO: Self = Self { pos: [0; 64], neg: 0 };
-
-    fn widen<const TAU: usize>(c: &agg_mldsa_simd::Challenge<TAU>) -> Self {
-        let mut pos = [0; 64];
-        pos[..TAU].copy_from_slice(&c.pos);
-        Self { pos, neg: c.neg }
-    }
-
-    fn narrow<const TAU: usize>(&self) -> agg_mldsa_simd::Challenge<TAU> {
-        agg_mldsa_simd::Challenge {
-            pos: self.pos[..TAU].try_into().expect("tau positions"),
-            neg: self.neg,
-        }
+/// `c = SampleInBall(c~)` of one record in sparse form: the first `tau` entries of `pos` are
+/// the increasing positions of the nonzero coefficients, bit `m` of `neg` is set when
+/// `c[pos[m]] = -1` (the form of `agg_mldsa_simd::Challenge`, for any `tau <= 64`).
+fn narrow<const TAU: usize>(pos: &[u8; 64], neg: u64) -> agg_mldsa_simd::Challenge<TAU> {
+    agg_mldsa_simd::Challenge {
+        pos: pos[..TAU].try_into().expect("tau positions"),
+        neg,
     }
 }
 
 const _: () = assert!(Set44::TAU == 39 && Set65::TAU == 49 && Set87::TAU == 60);
 
-/// `SampleInBall` of up to 64 seeds of `set` (`agg_mldsa_simd::Engine::sample_in_ball_many`).
-fn sample_in_ball_tile(engine: &agg_mldsa_simd::Engine, set: Set, seeds: &[&[u8]], out: &mut [SparseChallenge]) {
-    fn run<const TAU: usize>(engine: &agg_mldsa_simd::Engine, seeds: &[&[u8]], out: &mut [SparseChallenge]) {
+/// `SampleInBall` of up to 64 seeds of `set` (`agg_mldsa_simd::Engine::sample_in_ball_many`),
+/// as positions and sign masks ([`narrow`]).
+fn sample_in_ball_tile(
+    engine: &agg_mldsa_simd::Engine,
+    set: Set,
+    seeds: &[&[u8]],
+    out: (&mut [[u8; 64]], &mut [u64]),
+) {
+    fn run<const TAU: usize>(engine: &agg_mldsa_simd::Engine, seeds: &[&[u8]], out: (&mut [[u8; 64]], &mut [u64])) {
         let mut tile = [agg_mldsa_simd::Challenge::<TAU>::zero(); 64];
         let tile = &mut tile[..seeds.len()];
         engine.sample_in_ball_many(seeds, tile);
-        for (slot, c) in out.iter_mut().zip(tile.iter()) {
-            *slot = SparseChallenge::widen(c);
+        for ((pos, neg), c) in out.0.iter_mut().zip(out.1.iter_mut()).zip(tile.iter()) {
+            pos[..TAU].copy_from_slice(&c.pos);
+            *neg = c.neg;
         }
     }
     match set {
@@ -499,8 +509,10 @@ pub struct LaneStreamedPublic<'a> {
     key_of: Vec<usize>,
     /// `mu_i` of every live record.
     mu: Vec<[u8; TR_BYTES]>,
-    /// `c_i` of every live record.
-    challenges: Vec<SparseChallenge>,
+    /// `c_i` of every live record: its positions and its sign mask ([`narrow`]), kept apart
+    /// so that both vectors start as zero pages and are first touched by the parallel writer.
+    positions: Vec<[u8; 64]>,
+    negs: Vec<u64>,
 }
 
 impl<'a> LaneStreamedPublic<'a> {
@@ -573,11 +585,14 @@ impl<'a> LaneStreamedPublic<'a> {
             .flatten()
             .collect();
         let mut mu = vec![[0_u8; TR_BYTES]; inputs.len()];
-        let mut challenges = vec![SparseChallenge::ZERO; inputs.len()];
-        mu.par_chunks_mut(64)
-            .zip(challenges.par_chunks_mut(64))
+        let mut positions = vec![[0_u8; 64]; inputs.len()];
+        let mut negs = vec![0_u64; inputs.len()];
+        positions
+            .par_chunks_mut(64)
+            .zip(negs.par_chunks_mut(64))
+            .zip(mu.par_chunks_mut(64))
             .zip(inputs.par_chunks(64).zip(key_of.par_chunks(64)))
-            .for_each(|((mu, challenges), (tile, key_tile))| {
+            .for_each(|(((positions, negs), mu), (tile, key_tile))| {
                 let mu_inputs: Vec<[&[u8]; 4]> = tile
                     .iter()
                     .zip(key_tile)
@@ -585,7 +600,7 @@ impl<'a> LaneStreamedPublic<'a> {
                     .collect();
                 engine.shake256_many(&mu_inputs, TR_BYTES, mu.as_flattened_mut());
                 let seeds: Vec<&[u8]> = tile.iter().map(|(_, _, c)| c.as_ref()).collect();
-                sample_in_ball_tile(engine, P::SET, &seeds, challenges);
+                sample_in_ball_tile(engine, P::SET, &seeds, (positions, negs));
             });
         Ok(Self {
             set: P::SET,
@@ -595,7 +610,8 @@ impl<'a> LaneStreamedPublic<'a> {
             keys,
             key_of,
             mu,
-            challenges,
+            positions,
+            negs,
         })
     }
 
@@ -625,11 +641,11 @@ impl<'a> LaneStreamedPublic<'a> {
 
     /// `c_i t1_i` of live record `i`, one row per `rho`, into `out`.
     fn ct_rows(&self, engine: &agg_mldsa_simd::Engine, i: usize, out: &mut [[i32; N]]) {
-        let (c, t1) = (&self.challenges[i], self.keys[self.key_of[i]].t1());
+        let (pos, neg, t1) = (&self.positions[i], self.negs[i], self.keys[self.key_of[i]].t1());
         match self.set {
-            Set::S44 => engine.sparse_ct_slice(&c.narrow::<39>(), t1, 0, out),
-            Set::S65 => engine.sparse_ct_slice(&c.narrow::<49>(), t1, 0, out),
-            Set::S87 => engine.sparse_ct_slice(&c.narrow::<60>(), t1, 0, out),
+            Set::S44 => engine.sparse_ct_slice(&narrow::<39>(pos, neg), t1, 0, out),
+            Set::S65 => engine.sparse_ct_slice(&narrow::<49>(pos, neg), t1, 0, out),
+            Set::S87 => engine.sparse_ct_slice(&narrow::<60>(pos, neg), t1, 0, out),
         }
     }
 
@@ -700,14 +716,7 @@ impl<'a> LaneStreamedPublic<'a> {
             }
         }
         let l = self.l;
-        let mut out = vec![E::zero(); l];
-        for (i, &key) in self.key_of.iter().enumerate() {
-            let weight = eq2[i] * eq3[i];
-            for (slot, &value) in out.iter_mut().zip(&per_key[key * l..(key + 1) * l]) {
-                *slot += weight * value;
-            }
-        }
-        out
+        sum_over_records(&self.key_of, &eq2, &eq3, l, |key| &per_key[key * l..(key + 1) * l])
     }
 
     /// Per tile of eight keys: `sum_rho gamma_rho <A[rho][s], Lambda>` for every key and
@@ -729,6 +738,8 @@ impl<'a> LaneStreamedPublic<'a> {
         };
         self.keys
             .par_chunks(8)
+            // `map_init` runs once per job: eight tiles per job bound the scratch fills.
+            .with_min_len(8)
             .map_init(
                 || vec![ExpandedA::<K, L>::zero(); 8],
                 |expanded, tile| {
