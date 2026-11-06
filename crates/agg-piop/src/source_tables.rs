@@ -1075,26 +1075,46 @@ impl MainTables {
         let cells = geom.n_star * lane_cells;
         let mut wide = AlignedVec::<i32>::uninit(encoder.wide * cells);
         let mut narrow: Vec<_> = (0..encoder.narrow).map(|_| AlignedVec::<i8>::uninit(cells)).collect();
-        let mut views: Vec<RecordViews<'_>> = (0..geom.n_star)
+        // The columns are cut per tile here and per record inside the tile's task: a
+        // record-major list of every record's views would cost one push per column and
+        // record on this thread.
+        let tile_cells = tile * lane_cells;
+        let mut tile_views: Vec<RecordViews<'_>> = (0..geom.n_star.div_ceil(tile))
             .map(|_| (Vec::with_capacity(encoder.wide), Vec::with_capacity(encoder.narrow)))
             .collect();
         for column in wide.chunks_exact_mut(cells) {
-            for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
-                views[i].0.push(chunk);
+            for (t, chunk) in column.chunks_mut(tile_cells).enumerate() {
+                tile_views[t].0.push(chunk);
             }
         }
         for column in &mut narrow {
-            for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
-                views[i].1.push(chunk);
+            for (t, chunk) in column.chunks_mut(tile_cells).enumerate() {
+                tile_views[t].1.push(chunk);
             }
         }
         let trace = std::env::var_os("AGG_STAGE_TRACE").is_some();
         let (derive0, encode0) = (DERIVE_NS.load(Ordering::Relaxed), ENCODE_NS.load(Ordering::Relaxed));
         let filling = Instant::now();
-        let tiles = views
-            .par_chunks_mut(tile)
+        let tiles = tile_views
+            .into_par_iter()
             .enumerate()
-            .map(|(t, views)| fill(&encoder, t * tile, views))
+            .map(|(t, (wide, narrow))| {
+                let records = (geom.n_star - t * tile).min(tile);
+                let mut views: Vec<RecordViews<'_>> = (0..records)
+                    .map(|_| (Vec::with_capacity(encoder.wide), Vec::with_capacity(encoder.narrow)))
+                    .collect();
+                for column in wide {
+                    for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
+                        views[i].0.push(chunk);
+                    }
+                }
+                for column in narrow {
+                    for (i, chunk) in column.chunks_exact_mut(lane_cells).enumerate() {
+                        views[i].1.push(chunk);
+                    }
+                }
+                fill(&encoder, t * tile, &mut views)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let filled = Instant::now();
         let hint_slack: Vec<i64> = tiles.into_iter().flatten().collect();
