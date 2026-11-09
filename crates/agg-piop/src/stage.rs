@@ -435,7 +435,24 @@ pub fn prove_stage<'a>(
     resolve: impl Fn(LaneId) -> Lane<'a>,
     transcript: &mut Transcript,
 ) -> Result<StageRun, StageError> {
-    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, true)
+    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, true, false)
+}
+
+/// [`prove_stage`] (or, without `check`, its unchecked variant) whose Keccak groups, with
+/// `defer_keccak`, keep their bit lanes in lookup tables one fold longer
+/// ([`Group::defer_coded`]): the same proof with half the memory of their first dense tables.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_stage_deferring<'a>(
+    spec: &StageSpec,
+    manifest: &CommitmentManifest,
+    points: &Points,
+    claims: &[E],
+    resolve: impl Fn(LaneId) -> Lane<'a>,
+    transcript: &mut Transcript,
+    check: bool,
+    defer_keccak: bool,
+) -> Result<StageRun, StageError> {
+    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, check, defer_keccak)
 }
 
 /// [`prove_stage`] without the prover's claim self-check.
@@ -448,7 +465,7 @@ pub fn prove_stage_unchecked<'a>(
     resolve: impl Fn(LaneId) -> Lane<'a>,
     transcript: &mut Transcript,
 ) -> Result<StageRun, StageError> {
-    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, false)
+    prove_stage_with(spec, manifest, points, claims, resolve, None, transcript, false, false)
 }
 
 /// The groups of a round run concurrently while the main domain has at least this many
@@ -469,7 +486,7 @@ pub fn prove_stage_split<'a>(
     transcript: &mut Transcript,
     check: bool,
 ) -> Result<StageRun, StageError> {
-    prove_stage_with(spec, manifest, points, claims, resolve, split, transcript, check)
+    prove_stage_with(spec, manifest, points, claims, resolve, split, transcript, check, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,9 +499,10 @@ fn prove_stage_with<'a>(
     split: Option<Level1Split<'_>>,
     transcript: &mut Transcript,
     check: bool,
+    defer_keccak: bool,
 ) -> Result<StageRun, StageError> {
     let gammas = draw_gammas(spec, claims, transcript)?;
-    prove_stage_drawn(spec, manifest, points, claims, gammas, resolve, split, None, transcript, check)
+    prove_stage_core(spec, manifest, points, claims, gammas, resolve, split, None, transcript, check, defer_keccak)
 }
 
 /// Validate a stage's table and claims and draw its batching coefficients `gamma` (the
@@ -512,6 +530,23 @@ pub fn prove_stage_drawn<'a>(
     rank_one: Option<&dyn Fn(LaneId) -> Option<RankOneWeight<'a>>>,
     transcript: &mut Transcript,
     check: bool,
+) -> Result<StageRun, StageError> {
+    prove_stage_core(spec, manifest, points, claims, gammas, resolve, split, rank_one, transcript, check, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_stage_core<'a>(
+    spec: &StageSpec,
+    manifest: &CommitmentManifest,
+    points: &Points,
+    claims: &[E],
+    gammas: Vec<E>,
+    resolve: impl Fn(LaneId) -> Lane<'a>,
+    split: Option<Level1Split<'_>>,
+    rank_one: Option<&dyn Fn(LaneId) -> Option<RankOneWeight<'a>>>,
+    transcript: &mut Transcript,
+    check: bool,
+    defer_keccak: bool,
 ) -> Result<StageRun, StageError> {
     let rounds = manifest.d_stage();
     // Buffers of the plane groups of this stage.
@@ -636,6 +671,16 @@ pub fn prove_stage_drawn<'a>(
     for (slot, spec_group, group, elapsed) in build_deferred(deferred, rounds, spec.degree) {
         groups[slot] = group?;
         build_times[spec_group] = elapsed;
+    }
+    if defer_keccak {
+        for (group, &g) in groups.iter_mut().zip(&owner) {
+            if matches!(spec.groups[g].domain, GroupRole::KeccakA(_) | GroupRole::KeccakC | GroupRole::KeccakCPrime) {
+                match group {
+                    StageGroup::Generic(group) | StageGroup::Folded(FoldedGroup { group, .. }) => group.defer_coded(true),
+                    _ => {}
+                }
+            }
+        }
     }
     let arena = crate::kernel::TableArena::shared();
     for group in &mut groups { group.set_arena(&arena); }

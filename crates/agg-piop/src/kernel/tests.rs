@@ -1343,3 +1343,83 @@ fn bits_source_dedicated_groups_match_bytes() {
         assert_eq!(drive!(&mut bits), drive!(&mut bytes), "linear group, {vars} vars");
     }
 }
+
+/// Deferring the dense table of a group with bit lanes (octet tables at bind 2, the dense
+/// table at bind 3) gives the round polynomials, claims and terminal values of the group
+/// without it: bit lanes of every rotation and slot shift, a digit column and a field lane
+/// (both folded into tables at bind 2), degree 4, full and slot-masked equality factors,
+/// under the strategies that reach level 2 on quartet tables.
+#[test]
+fn keccak_defer_matches_dense() {
+    let mut rng = SplitMix64::new(0xDEF3);
+    for vars in [10_usize, 11, 13] {
+        let n = 1 << (vars - 6);
+        let words: Vec<Vec<u64>> = (0..3).map(|_| (0..n).map(|_| rng.next_u64()).collect()).collect();
+        let ones = vec![!0_u64; n];
+        let digit = digits(&mut rng, 1 << vars);
+        let weight = point(&mut rng, 1 << vars);
+        let tau = point(&mut rng, vars);
+        let lanes = vec![
+            Lane::bits(BitCells::new(&words[0], 0, SlotShift::None)),
+            Lane::bits(BitCells::new(&words[1], 13, SlotShift::Zero)),
+            Lane::bits(BitCells::new(&words[2], 63, SlotShift::Prev(&words[1]))),
+            Lane::bits(BitCells::new(&words[0], 1, SlotShift::None)),
+            Lane::bits(BitCells::new(&ones, 7, SlotShift::Zero)),
+            Lane::column(&digit),
+            Lane::Source(Source::Field(&weight)),
+        ];
+        let instances = vec![
+            instance(&mut rng, vec![Term::Bool(0), Term::Bool(2)]),
+            instance(&mut rng, vec![Term::Product(vec![0, 1, 2])]),
+            instance(&mut rng, vec![Term::Product(vec![1, 6])]),
+            instance(&mut rng, vec![Term::Monomials(vec![(1, vec![0, 0, 1]), (-2, vec![2, 3]), (3, vec![3, 3, 3]), (1, vec![])])]),
+            instance(&mut rng, vec![Term::Affine { weight: None, lanes: vec![(0, 5), (1, -3), (3, 7), (4, 2), (5, 9)], constant: 2 }]),
+            instance(&mut rng, vec![Term::Product(vec![4, 2]), Term::Product(vec![5, 0, 3])]),
+        ];
+        let degree = 4;
+        let strategies = [
+            ("auto", AUTO),
+            ("coded, per item", Policy { buckets: false, ..AUTO }),
+            ("quartet tables, no Taylor", Policy { quartet_lut: Choice::Force, taylor: false, ..AUTO }),
+            ("without the claim recovery", Policy { recover: false, quartet_lut: Choice::Force, ..AUTO }),
+        ];
+        let rounds_list = if vars == 10 { vec![vars, vars + 2] } else { vec![vars] };
+        for rounds in rounds_list {
+            let challenges = point(&mut rng, rounds);
+            // A masked equality factor needs a record variable besides the 10 of a record.
+            let masks: Vec<Option<u16>> = if vars > 10 && rounds == vars { vec![None, Some(0x00FF), Some(0x5A3C)] } else { vec![None] };
+            for mask in masks {
+                for (name, policy) in strategies {
+                    // With and without the plane tail (which writes its first table at bind 3
+                    // anyway and ignores the option).
+                    for tail in [true, false] {
+                        let drive = |defer: bool| {
+                            let mut group = Group::with_policy_masked(lanes.clone(), instances.clone(), Some(&tau), mask, rounds, degree, policy).unwrap();
+                            if !tail {
+                                group.tail_terms = None;
+                                group.tail_slots = None;
+                            }
+                            group.defer_coded(defer);
+                            let inactive = group.inactive_rounds();
+                            let (mut messages, mut claims) = (Vec::new(), Vec::new());
+                            for (round, &r) in challenges.iter().enumerate() {
+                                messages.push(group.round_message(round));
+                                group.bind(round, r);
+                                claims.push(group.claim());
+                                if round == inactive + 2 {
+                                    // Level 3 runs on octet tables exactly when deferring off the plane tail.
+                                    let octets = group.states.iter().any(|s| matches!(s, State::Octet(_)));
+                                    let expect = defer && group.tail_fold.is_none();
+                                    assert_eq!((octets, group.deferred), (expect, expect), "{name}, mask {mask:?}");
+                                    assert!(tail || expect == defer);
+                                }
+                            }
+                            (messages, claims, group.terminal_values())
+                        };
+                        assert_eq!(drive(true), drive(false), "{vars} vars, {rounds} rounds, mask {mask:?}, {name}, tail {tail}");
+                    }
+                }
+            }
+        }
+    }
+}

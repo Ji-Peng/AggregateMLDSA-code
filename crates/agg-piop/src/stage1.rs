@@ -27,7 +27,7 @@ use crate::keccak_fp::virtuals::{c_tilde_mle_at_lanes, mu_mle_at_lanes};
 use crate::kernel::Term;
 use crate::manifest::{Column, CommitmentManifest, GroupRole, HashField};
 use crate::stage::{
-    check_terminal, prove_stage, prove_stage_unchecked, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
+    check_terminal, prove_stage_deferring, replay_stage, suffix, EqPoint, GroupSpec, InstanceSpec, LaneId,
     Points, StageError, StageSpec, WeightId,
 };
 use crate::tables::ProverTables;
@@ -425,6 +425,28 @@ pub fn prove_unchecked(
     prove_with(manifest, tables, points, prestage, y_at_tau3, transcript, false)
 }
 
+/// Whether the Keccak groups keep their bit lanes in lookup tables one fold longer, so that
+/// their first dense tables hold a sixteenth of the domain instead of an eighth (the proof is
+/// the same): `AGG_KECCAK_DEFER=1|0`; unset, on when the batch has more than `2^31` Keccak
+/// cells (8K signatures and up), where those tables dominate the prover's memory. The
+/// variable is read once.
+fn keccak_defer(manifest: &CommitmentManifest) -> bool {
+    static KNOB: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if manifest.hash_field() != HashField::Fp {
+        return false;
+    }
+    let knob = *KNOB.get_or_init(|| match std::env::var("AGG_KECCAK_DEFER").ok().as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some("0") => Some(false),
+        Some("1") => Some(true),
+        Some(other) => panic!("invalid AGG_KECCAK_DEFER '{other}': expected 0 or 1"),
+    });
+    knob.unwrap_or_else(|| {
+        let cells = KeccakLayout::for_set(manifest.set()).num_polys() << manifest.group(GroupRole::KeccakA(0)).logical_vars;
+        cells > 1 << 31
+    })
+}
+
 fn prove_with(
     manifest: &CommitmentManifest,
     tables: &ProverTables<'_>,
@@ -436,11 +458,8 @@ fn prove_with(
 ) -> Result<(Stage1Proof, Stage1Output), StageError> {
     let spec = spec(manifest);
     let claims = claimed_sums(manifest, prestage, y_at_tau3);
-    let run = if check {
-        prove_stage(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
-    } else {
-        prove_stage_unchecked(&spec, manifest, points, &claims, |id| tables.lane(id), transcript)?
-    };
+    let defer = keccak_defer(manifest);
+    let run = prove_stage_deferring(&spec, manifest, points, &claims, |id| tables.lane(id), transcript, check, defer)?;
     let value = |id| run.value(&spec, id);
     let bits = 0..manifest.shape().w1_bits as u8;
     let (y1, y2) = match manifest.hash_field() {

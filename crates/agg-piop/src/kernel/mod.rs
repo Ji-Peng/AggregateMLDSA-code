@@ -32,6 +32,8 @@
 //!   lookup tables (with Taylor tables of their polynomials) when the quartet space is at
 //!   most 4,096, else the pair table with the second challenge; bind 2 materializes every
 //!   lane in one row-major `K` table at an eighth of the domain; later rounds are dense.
+//!   With [`Group::defer_coded`], bind 2 folds the quartet tables of bit columns into octet
+//!   tables instead and bind 3 writes the dense table at a sixteenth of the domain.
 
 #[allow(unsafe_code)]
 pub(crate) mod buf;
@@ -126,6 +128,9 @@ const BINOMIAL: [[i64; 6]; 6] = [
 ];
 /// Largest quartet space of a quartet lookup table (64 KiB per lane).
 const MAX_QUARTET_LUT: usize = 1 << 12;
+/// Largest octet space of an octet lookup table (4 KiB per lane): a column of at most two
+/// classes (four pair patterns).
+const MAX_OCTET_LUT: usize = 1 << 8;
 
 /// A read-only integer or field table, the state of a lane before its first fold.
 #[derive(Clone, Copy, Debug)]
@@ -800,6 +805,9 @@ enum State {
     /// A coded lane after two folds without a quartet table: the pair table and the
     /// second challenge.
     PairFold(Vec<E>, E),
+    /// A coded lane after three folds (deferred dense table): cell `k` is
+    /// `lut[octet(pairs[4k..4k + 4])]`, the quartet table folded by the third challenge.
+    Octet(Vec<E>),
     /// An uncoded lane after at least one fold (scaled), until the dense table.
     Table(Vec<E>),
     /// A column of the dense table.
@@ -812,7 +820,15 @@ enum Reader<'r> {
     Pair { pairs: &'r [u8], lut: &'r [E] },
     Quartet { pairs: &'r [u8], lut: &'r [E], space: usize },
     PairFold { pairs: &'r [u8], lut: &'r [E], r: E },
+    Octet { pairs: &'r [u8], lut: &'r [E], space: usize },
     Table(&'r [E]),
+}
+
+/// The octet pattern of four pair codes `p` (pair space `space`): the index of the octet
+/// table built from a quartet table as `even * space^2 + odd`.
+#[inline(always)]
+fn octet_index(p: &[u8], space: usize) -> usize {
+    ((p[0] as usize * space + p[1] as usize) * space + p[2] as usize) * space + p[3] as usize
 }
 
 impl Reader<'_> {
@@ -828,6 +844,7 @@ impl Reader<'_> {
                 let even = lut[pairs[2 * cell] as usize];
                 even + fm(r, lut[pairs[2 * cell + 1] as usize] - even)
             }
+            Self::Octet { pairs, lut, space } => lut[octet_index(&pairs[4 * cell..4 * cell + 4], space)],
             Self::Table(table) => table[cell],
         }
     }
@@ -848,6 +865,10 @@ impl Reader<'_> {
                 let p = &pairs[4 * k..4 * k + 4];
                 let (e0, e1) = (lut[p[0] as usize], lut[p[2] as usize]);
                 (e0 + fm(r, lut[p[1] as usize] - e0), e1 + fm(r, lut[p[3] as usize] - e1))
+            }
+            Self::Octet { pairs, lut, space } => {
+                let p = &pairs[8 * k..8 * k + 8];
+                (lut[octet_index(&p[..4], space)], lut[octet_index(&p[4..], space)])
             }
             Self::Table(table) => (table[2 * k], table[2 * k + 1]),
         }
@@ -1247,6 +1268,12 @@ pub struct Group<'a> {
     tail: Option<Tail>,
     /// The coefficient slots of the plane tail, when the group runs on it (for traces).
     tail_slots: Option<usize>,
+    /// Keep the coded lanes of at most two classes in octet tables through level 3 and
+    /// write the dense table at bind 3 ([`Self::defer_coded`]).
+    defer_coded: bool,
+    /// Level 3 runs on octet tables (and folded tables of the other lanes): bind 3 writes
+    /// the dense table.
+    deferred: bool,
     arena: Option<SharedArena>,
     challenges: Vec<E>,
     /// Quartet masses of the bucketed segments (the two-round prefix), kept for level 1.
@@ -1577,6 +1604,8 @@ impl<'a> Group<'a> {
             dense_rows: 0,
             tail_slots: tail_terms.as_ref().map(TailTerms::slot_count),
             tail_terms,
+            defer_coded: false,
+            deferred: false,
             tail_fold: None,
             tail: None,
             arena: None,
@@ -1626,6 +1655,17 @@ impl<'a> Group<'a> {
         let zero = vec![E::zero(); values.len()];
         let out = self.plan.source.evaluate(values, &zero, self.coefficient_count(), false);
         out[0] + self.plan.constant
+    }
+
+    /// Keep the coded lanes of at most two classes (bit columns) in lookup tables one level
+    /// longer: bind 2 folds their quartet tables into octet tables (at most 256 entries per
+    /// lane, read through four pair codes per cell), the other lanes into `K` tables at an
+    /// eighth of the domain, level 3 is evaluated per item from them, and bind 3 writes the
+    /// dense table at a sixteenth of the domain (half the size of the table bind 2 would
+    /// write). The round polynomials are the same. A group on the plane tail already writes
+    /// its first table at bind 3 and ignores the option. Set before bind 2.
+    pub fn defer_coded(&mut self, on: bool) {
+        self.defer_coded = on;
     }
 
     /// The lane count and, when the dense rounds run on the plane tail, its slot count.
@@ -1708,6 +1748,13 @@ impl<'a> Group<'a> {
             1 => self.level1(upper),
             _ if on_planes => self.plane_round(),
             2 => self.level2(upper),
+            3 if self.deferred => {
+                let mut q = self.per_item(&self.plan.folded, upper);
+                if !upper {
+                    q[0] += self.constant_term();
+                }
+                q
+            }
             _ => {
                 let mut q = match self.cached_next.take() {
                     Some(q) => q,
@@ -2083,6 +2130,11 @@ impl<'a> Group<'a> {
                 lut,
                 r: *r,
             },
+            State::Octet(lut) => Reader::Octet {
+                pairs: pairs(),
+                lut,
+                space: self.columns[self.lane_column[l].expect("coded")].pair_space(),
+            },
             State::Table(table) => Reader::Table(table),
             other => unreachable!("no reader for {other:?}"),
         }
@@ -2416,6 +2468,7 @@ impl<'a> Group<'a> {
             0 => self.bind_first(challenge),
             1 => self.bind_second(challenge),
             2 => self.bind_third(challenge),
+            3 if self.deferred => self.materialize(challenge),
             3 if self.tail_terms.is_some() => self.build_tail(challenge),
             _ => match &mut self.tail {
                 Some(tail) => {
@@ -2539,13 +2592,10 @@ impl<'a> Group<'a> {
 
     /// Bind 2: every lane into the dense lane-major table at an eighth of the domain, and
     /// the item sums of the first dense round on every block as it is written (a plane-tail
-    /// group only records the challenge; [`Self::build_tail`] writes its first table).
-    #[allow(unsafe_code)]
+    /// group only records the challenge; [`Self::build_tail`] writes its first table; a
+    /// deferring group builds octet tables, [`Self::defer_coded`]).
     fn bind_third(&mut self, challenge: E) {
         self.taylor.clear();
-        let context = E::precompute(challenge);
-        let lanes = self.sources.len();
-        let rows = 1 << (self.local_vars - 3);
         if self.tail_terms.is_some() {
             // The plane path keeps the compact states one more round: the level-3 rows are
             // the level-2 values folded by this challenge as they are read, and bind 3
@@ -2553,13 +2603,59 @@ impl<'a> Group<'a> {
             self.tail_fold = Some(challenge);
             return;
         }
+        let octet_lane = |state: &State| matches!(state, State::Quartet(lut) if lut.len() * lut.len() <= MAX_OCTET_LUT);
+        if self.defer_coded && self.local_vars >= 4 && self.states.iter().any(octet_lane) {
+            let context = E::precompute(challenge);
+            let rows = 1_usize << (self.local_vars - 3);
+            let states: Vec<State> = (0..self.sources.len())
+                .into_par_iter()
+                .map(|l| match &self.states[l] {
+                    State::Quartet(lut) if octet_lane(&self.states[l]) => {
+                        let mut octet = Vec::with_capacity(lut.len() * lut.len());
+                        for &even in lut {
+                            for &odd in lut {
+                                octet.push(fold(&context, even, odd));
+                            }
+                        }
+                        State::Octet(octet)
+                    }
+                    _ => {
+                        let reader = self.reader(l);
+                        let cell = |k: usize| {
+                            let (even, odd) = reader.item(k);
+                            fold(&context, even, odd)
+                        };
+                        State::Table(if rows >= MIN_PARALLEL_ITEMS {
+                            (0..rows).into_par_iter().map(cell).collect()
+                        } else {
+                            (0..rows).map(cell).collect()
+                        })
+                    }
+                })
+                .collect();
+            self.states = states;
+            self.deferred = true;
+            return;
+        }
+        self.materialize(challenge);
+    }
+
+    /// Every lane folded by `challenge` into the dense lane-major table (at the current
+    /// level: an eighth of the domain after bind 2, a sixteenth after a deferred bind 3), and
+    /// the item sums of the next round on every block as it is written.
+    #[allow(unsafe_code)]
+    fn materialize(&mut self, challenge: E) {
+        self.deferred = false;
+        let context = E::precompute(challenge);
+        let lanes = self.sources.len();
+        let rows = 1 << (self.local_vars - self.level());
         self.dense_stride = rows;
         self.dense_rows = rows;
         let readers: Vec<Reader<'_>> = (0..lanes).map(|l| self.reader(l)).collect();
         let shifts = &self.plan.shifts;
-        // The next round exists when the table has pairs; its constant coefficient comes
-        // from the claim when recoverable.
-        let evaluate = rows >= 2;
+        // The next round exists when the table has pairs (a masked slot round reads the
+        // table itself); its constant coefficient comes from the claim when recoverable.
+        let evaluate = rows >= 2 && self.eq.as_ref().is_none_or(|eq| !eq.is_masked_slot_round());
         let upper = evaluate && self.recovery().is_some();
         let eval = self.dense_evaluator(upper);
         let width = eval.width;
