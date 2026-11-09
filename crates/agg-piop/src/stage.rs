@@ -416,114 +416,54 @@ pub fn prove_stage_drawn<'a>(
     check: bool,
 ) -> Result<StageRun, StageError> {
     let rounds = manifest.d_main();
-    // Buffers of the plane groups of this stage.
-    let mut pool = agg_simd::buf::Pool::default();
+    // The lanes, coefficients and equality point of every spec group, gathered in order (all
+    // three are views or small vectors). Construction reads no transcript state, so the groups
+    // are then built side by side (each parallel inside) and placed back in spec order: the
+    // serial builds of the large groups would otherwise each leave most of the pool idle.
+    let build_clock = std::time::Instant::now();
+    let prepared: Vec<Prepared<'a>> = spec
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(g, group)| {
+            let lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
+            let instances: Vec<GroupInstance> = group
+                .instances
+                .iter()
+                .map(|instance| GroupInstance {
+                    gamma: instance.coefficient(&gammas),
+                    terms: instance.terms.clone(),
+                })
+                .collect();
+            let eq_point = points.eq_point(group.eq, manifest, group.domain);
+            let factored = rank_one
+                .and_then(|rank_one| group.lanes.iter().enumerate().find_map(|(l, &id)| rank_one(id).map(|w| (l, w))));
+            Prepared { g, lanes, instances, eq_point, factored }
+        })
+        .collect();
+    let has_lanes = manifest.has_lanes();
+    let built: Vec<(usize, Result<Vec<StageGroup<'a>>, StageError>, f64)> = prepared
+        .into_par_iter()
+        .map(|prepared| {
+            let start = std::time::Instant::now();
+            let g = prepared.g;
+            let built = build_group(spec, prepared, split, has_lanes, rounds);
+            (g, built, start.elapsed().as_secs_f64())
+        })
+        .collect();
     let mut groups = Vec::with_capacity(spec.groups.len());
-    // The spec group of every prover group, and the construction time per spec group.
+    // The spec group of every prover group, and the construction time per spec group (the
+    // builds overlap, so the times sum to more than the build phase).
     let mut owner = Vec::with_capacity(spec.groups.len());
     let mut build_times = vec![0_f64; spec.groups.len()];
-    let mut deferred: Vec<Deferred<'a>> = Vec::new();
-    for (g, group) in spec.groups.iter().enumerate() {
-        let build = std::time::Instant::now();
-        let mut lanes: Vec<Lane<'a>> = group.lanes.iter().map(|&id| resolve(id)).collect();
-        let instances: Vec<GroupInstance> = group
-            .instances
-            .iter()
-            .map(|instance| GroupInstance {
-                gamma: instance.coefficient(&gammas),
-                terms: instance.terms.clone(),
-            })
-            .collect();
-        let eq_point = points.eq_point(group.eq, manifest, group.domain);
-        if let (Some(split), Some(&LaneId::Weight(WeightId::Level1(0)))) = (split, group.lanes.first()) {
-            if group.domain == GroupRole::Main && eq_point.is_none() {
-                let grouped = match split {
-                    Level1Split::Table(split) => {
-                        SplitGroup::new(split, &lanes[1..], &instances, spec.degree).map(StageGroup::Split)
-                    }
-                    Level1Split::Lanes(split) => {
-                        LaneSplitGroup::new(split, &lanes[split.c.len()..], &instances, spec.degree)
-                            .map(StageGroup::LaneSplit)
-                    }
-                };
-                if let Some(grouped) = grouped {
-                    groups.push(grouped);
-                    owner.push(g);
-                    build_times[g] = build.elapsed().as_secs_f64();
-                    continue;
-                }
-            }
-            // The generic kernel needs the tables the placeholder lanes stand for.
-            match split {
-                Level1Split::Table(split) => lanes[0] = Lane::Folded(split.materialize()),
-                Level1Split::Lanes(split) => {
-                    for (rho, lane) in lanes.iter_mut().take(split.c.len()).enumerate() {
-                        *lane = Lane::Folded(split.materialize(rho));
-                    }
-                }
-            }
-        }
-        // A weight kept as two factors: the rank-one group, else its materialized table.
-        if let Some(rank_one) = rank_one {
-            let factored = group.lanes.iter().enumerate().find_map(|(l, &id)| rank_one(id).map(|w| (l, w)));
-            if let Some((l, weight)) = factored {
-                if eq_point.is_none() {
-                    if let Some(grouped) = RankOneGroup::new(weight, l, &lanes, &instances, rounds, spec.degree) {
-                        groups.push(StageGroup::RankOne(grouped));
-                        owner.push(g);
-                        build_times[g] = build.elapsed().as_secs_f64();
-                        continue;
-                    }
-                }
-                lanes[l] = Lane::Folded(weight.materialize());
-            }
-        }
-        if let Some(linear) =
-            linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds, &mut pool)
-        {
-            groups.push(StageGroup::Linear(linear));
+    for (g, built, elapsed) in built {
+        for group in built? {
+            groups.push(group);
             owner.push(g);
-            build_times[g] = build.elapsed().as_secs_f64();
-            continue;
         }
-        if eq_point.is_none() {
-            if let Some(weighted) = weight_group(&lanes, &instances, rounds, &mut pool) {
-                groups.push(StageGroup::Weight(weighted));
-                owner.push(g);
-                build_times[g] = build.elapsed().as_secs_f64();
-                continue;
-            }
-        }
-        // The sets with polynomial lanes: the generic groups are built after the loop, side
-        // by side ([`build_deferred`]); their slots hold a placeholder until then.
-        if manifest.has_lanes() {
-            deferred.push(Deferred { slot: groups.len(), spec_group: g, lanes, instances, eq_point, start: build });
-            groups.push(StageGroup::Pending);
-            owner.push(g);
-            continue;
-        }
-        // A full-domain equality group whose linear-only integer lanes moved to a linear group
-        // keeps the other lanes; the moved lanes' terminal values are evaluated at the end.
-        let group = match split_linear(lanes, instances, eq_point.as_deref(), rounds, &mut pool) {
-            Split::Kept(lanes, instances) => StageGroup::Generic(
-                Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?,
-            ),
-            Split::Dropped { lanes, instances, map, linear } => {
-                let group =
-                    Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)?;
-                groups.push(StageGroup::Folded(FoldedGroup { group, lanes: map, challenges: Vec::new() }));
-                owner.push(g);
-                StageGroup::Extra(linear)
-            }
-        };
-        groups.push(group);
-        owner.push(g);
-        build_times[g] = build.elapsed().as_secs_f64();
+        build_times[g] = elapsed;
     }
-    for (slot, spec_group, group, elapsed) in build_deferred(deferred, rounds, spec.degree) {
-        groups[slot] = group?;
-        build_times[spec_group] = elapsed;
-    }
+    let build_wall = build_clock.elapsed().as_secs_f64();
     let arena = crate::kernel::TableArena::shared();
     for group in &mut groups { group.set_arena(&arena); }
     let mut claim = gamma_weighted_claim(&gammas, claims);
@@ -620,6 +560,7 @@ pub fn prove_stage_drawn<'a>(
         }
         let per_round: Vec<String> = round_times.iter().map(|t| format!("{:.0}", t * 1e3)).collect();
         eprintln!("  rounds (ms): {}", per_round.join(" "));
+        eprintln!("  group builds {:.1} ms (side by side)", build_wall * 1e3);
     }
     let group_claims = groups.iter().fold(E::zero(), |acc, g| acc + g.claim());
     if check && (group_claims != claim || groups.iter().any(|g| !g.consistent())) {
@@ -677,6 +618,7 @@ pub fn prove_stage_drawn<'a>(
     if trace {
         eprintln!("  terminal values {:.1} ms", terminal_clock.elapsed().as_secs_f64() * 1e3);
     }
+    let mut pool = agg_simd::buf::Pool::default();
     for group in groups {
         group.recycle(&mut pool);
     }
@@ -706,8 +648,6 @@ enum StageGroup<'a> {
     /// An equality group with its linear-only lanes folded into one lane, or moved to a
     /// linear group ([`split_linear`]) ([`FoldedGroup`]).
     Folded(FoldedGroup<'a>),
-    /// The slot of a group that [`build_deferred`] builds after the loop.
-    Pending,
 }
 
 impl StageGroup<'_> {
@@ -723,7 +663,6 @@ impl StageGroup<'_> {
             Self::LaneSplit(g) => g.set_arena(arena),
             Self::RankOne(g) => g.set_arena(arena),
             Self::Folded(g) => g.group.set_arena(arena),
-            Self::Pending => unreachable!("a built group"),
         }
     }
 
@@ -736,7 +675,6 @@ impl StageGroup<'_> {
             Self::LaneSplit(g) => g.round_message(round),
             Self::RankOne(g) => g.round_message(round),
             Self::Folded(g) => g.group.round_message(round),
-            Self::Pending => unreachable!("a built group"),
         }
     }
 
@@ -749,7 +687,6 @@ impl StageGroup<'_> {
             Self::LaneSplit(g) => g.bind(round, challenge),
             Self::RankOne(g) => g.bind(round, challenge),
             Self::Folded(g) => g.bind(round, challenge),
-            Self::Pending => unreachable!("a built group"),
         }
     }
 
@@ -762,7 +699,6 @@ impl StageGroup<'_> {
             Self::LaneSplit(g) => g.claim(),
             Self::RankOne(g) => g.claim(),
             Self::Folded(g) => g.group.claim(),
-            Self::Pending => unreachable!("a built group"),
         }
     }
 
@@ -776,7 +712,6 @@ impl StageGroup<'_> {
             // equivalence tests pin the messages, claims and terminals against the
             // materialized generic group.
             Self::Split(_) | Self::LaneSplit(_) | Self::RankOne(_) | Self::Folded(_) => true,
-            Self::Pending => unreachable!("a built group"),
             Self::Linear(g) | Self::Extra(g) => g.terminal_consistent(),
             Self::Weight(g) => g.terminal_consistent(),
         }
@@ -810,7 +745,6 @@ impl StageGroup<'_> {
             Self::LaneSplit(g) => Some(g.terminal_values()),
             Self::RankOne(g) => Some(g.terminal_values(needed)),
             Self::Folded(g) => Some(g.terminal_values(needed)),
-            Self::Pending => unreachable!("a built group"),
         }
     }
 
@@ -832,8 +766,7 @@ impl StageGroup<'_> {
             | Self::Split(_)
             | Self::LaneSplit(_)
             | Self::RankOne(_)
-            | Self::Folded(_)
-            | Self::Pending => {}
+            | Self::Folded(_) => {}
         }
     }
 }
@@ -1060,49 +993,100 @@ fn weight_group<'a>(
         .map(WeightGroup::Row)
 }
 
-/// A generic group of a set with polynomial lanes whose construction waits for the end of
-/// the build loop.
-struct Deferred<'a> {
-    /// Its slot among the prover groups.
-    slot: usize,
-    /// Its spec group.
-    spec_group: usize,
+/// A spec group's inputs to [`build_group`].
+struct Prepared<'a> {
+    /// The spec group.
+    g: usize,
     lanes: Vec<Lane<'a>>,
     instances: Vec<GroupInstance>,
     eq_point: Option<Vec<E>>,
-    /// When its spec group's build began.
-    start: std::time::Instant,
+    /// The first lane that is a weight kept as two factors, with its factors.
+    factored: Option<(usize, RankOneWeight<'a>)>,
 }
 
-/// Build the deferred groups concurrently (each parallel inside): a full-domain equality
-/// group with linear-only lanes as a [`FoldedGroup`], every other as a generic [`Group`].
-/// Construction reads no transcript state, so the order does not matter; each result returns
-/// to its slot with its build time.
-#[allow(clippy::type_complexity)]
-fn build_deferred<'a>(
-    deferred: Vec<Deferred<'a>>,
+/// The prover groups of one spec group, in order: one group, or a generic group followed by
+/// the linear group split off it ([`split_linear`]). Each path is parallel inside; the groups
+/// of a stage are built concurrently, each with its own buffer pool (the stage's pool holds
+/// no spare buffers before its rounds, so every buffer is a fresh one either way).
+fn build_group<'a>(
+    spec: &StageSpec,
+    prepared: Prepared<'a>,
+    split: Option<Level1Split<'_>>,
+    has_lanes: bool,
     rounds: usize,
-    degree: usize,
-) -> Vec<(usize, usize, Result<StageGroup<'a>, StageError>, f64)> {
-    deferred
-        .into_par_iter()
-        .map(|d| {
-            let Deferred { slot, spec_group, lanes, instances, eq_point, start } = d;
-            let generic = |lanes, instances| {
-                Group::new(lanes, instances, eq_point.as_deref(), rounds, degree)
-                    .map(StageGroup::Generic)
-                    .map_err(StageError::Internal)
+) -> Result<Vec<StageGroup<'a>>, StageError> {
+    let Prepared { g, mut lanes, instances, eq_point, factored } = prepared;
+    let group = &spec.groups[g];
+    let mut pool = agg_simd::buf::Pool::default();
+    if let (Some(split), Some(&LaneId::Weight(WeightId::Level1(0)))) = (split, group.lanes.first()) {
+        if group.domain == GroupRole::Main && eq_point.is_none() {
+            let grouped = match split {
+                Level1Split::Table(split) => {
+                    SplitGroup::new(split, &lanes[1..], &instances, spec.degree).map(StageGroup::Split)
+                }
+                Level1Split::Lanes(split) => {
+                    LaneSplitGroup::new(split, &lanes[split.c.len()..], &instances, spec.degree)
+                        .map(StageGroup::LaneSplit)
+                }
             };
-            let group = match eq_point.as_deref().filter(|p| p.len() == rounds && rounds > 0) {
-                Some(point) => match FoldedGroup::new(lanes, instances, point, rounds, degree) {
-                    Ok(folded) => folded.map(StageGroup::Folded),
-                    Err((lanes, instances)) => generic(lanes, instances),
-                },
-                None => generic(lanes, instances),
-            };
-            (slot, spec_group, group, start.elapsed().as_secs_f64())
-        })
-        .collect()
+            if let Some(grouped) = grouped {
+                return Ok(vec![grouped]);
+            }
+        }
+        // The generic kernel needs the tables the placeholder lanes stand for.
+        match split {
+            Level1Split::Table(split) => lanes[0] = Lane::Folded(split.materialize()),
+            Level1Split::Lanes(split) => {
+                for (rho, lane) in lanes.iter_mut().take(split.c.len()).enumerate() {
+                    *lane = Lane::Folded(split.materialize(rho));
+                }
+            }
+        }
+    }
+    // A weight kept as two factors: the rank-one group, else its materialized table.
+    if let Some((l, weight)) = factored {
+        if eq_point.is_none() {
+            if let Some(grouped) = RankOneGroup::new(weight, l, &lanes, &instances, rounds, spec.degree) {
+                return Ok(vec![StageGroup::RankOne(grouped)]);
+            }
+        }
+        lanes[l] = Lane::Folded(weight.materialize());
+    }
+    if let Some(linear) = linear_group(spec, g, &lanes, &instances, eq_point.as_deref(), rounds, &mut pool) {
+        return Ok(vec![StageGroup::Linear(linear)]);
+    }
+    if eq_point.is_none() {
+        if let Some(weighted) = weight_group(&lanes, &instances, rounds, &mut pool) {
+            return Ok(vec![StageGroup::Weight(weighted)]);
+        }
+    }
+    let generic = |lanes, instances| {
+        Group::new(lanes, instances, eq_point.as_deref(), rounds, spec.degree).map_err(StageError::Internal)
+    };
+    // The sets with polynomial lanes: a full-domain equality group with linear-only lanes as
+    // a [`FoldedGroup`], every other as a generic [`Group`].
+    if has_lanes {
+        let group = match eq_point.as_deref().filter(|p| p.len() == rounds && rounds > 0) {
+            Some(point) => match FoldedGroup::new(lanes, instances, point, rounds, spec.degree) {
+                Ok(folded) => StageGroup::Folded(folded?),
+                Err((lanes, instances)) => StageGroup::Generic(generic(lanes, instances)?),
+            },
+            None => StageGroup::Generic(generic(lanes, instances)?),
+        };
+        return Ok(vec![group]);
+    }
+    // A full-domain equality group whose linear-only integer lanes moved to a linear group
+    // keeps the other lanes; the moved lanes' terminal values are evaluated at the end.
+    Ok(match split_linear(lanes, instances, eq_point.as_deref(), rounds, &mut pool) {
+        Split::Kept(lanes, instances) => vec![StageGroup::Generic(generic(lanes, instances)?)],
+        Split::Dropped { lanes, instances, map, linear } => {
+            let group = generic(lanes, instances)?;
+            vec![
+                StageGroup::Folded(FoldedGroup { group, lanes: map, challenges: Vec::new() }),
+                StageGroup::Extra(linear),
+            ]
+        }
+    })
 }
 
 /// A lane of a [`FoldedGroup`]'s spec group.
